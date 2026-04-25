@@ -1,0 +1,229 @@
+:root {
+    color-scheme: light dark;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html {
+    height: 100%;
+}
+
+body {
+    margin: 0 auto;
+    min-width: 260px;
+    max-width: 280px;
+    width: 100%;
+    min-height: 100%;
+    min-height: -webkit-fill-available;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: center;
+    padding: max(12px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right))
+        max(14px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 13px;
+    line-height: 1.45;
+    color: #1a1a1a;
+    background: #fafafa;
+}
+
+@media (prefers-color-scheme: dark) {
+    body {
+        color: #f2f2f2;
+        background: #1c1c1e;
+    }
+}
+
+.popup {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    min-width: 0;
+}
+
+.popup-brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 10px;
+}
+
+.popup-brand-mark {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    flex-shrink: 0;
+}
+
+.popup-brand-name {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+}
+
+.popup-status {
+    margin: 0 0 8px;
+    font-size: 12px;
+    font-weight: 700;
+    color: #0d7a5f;
+}
+
+/* signed_out = link step (neutral/info), not a failure */
+.popup-status[data-state="signed_out"] {
+    color: #1565c0;
+}
+
+.popup-status[data-state="upgrade_required"],
+.popup-status[data-state="reconnect_required"] {
+    color: #9c6b00;
+}
+
+.popup-status[data-state="error"] {
+    color: #b3261e;
+}
+
+.popup-lead {
+    margin: 0 0 12px;
+    color: #555;
+}
+
+.popup-pro-settings {
+    margin: 0 0 12px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.popup-pro-settings.hidden {
+    display: none;
+}
+
+.popup-pro-heading {
+    margin: 0 0 8px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #666;
+}
+
+.popup-switch-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.popup-switch-row:last-of-type {
+    margin-bottom: 0;
+}
+
+.popup-switch-row input {
+    flex-shrink: 0;
+    width: 18px;
+    height: 18px;
+    accent-color: #0d7a5f;
+    cursor: pointer;
+}
+
+@media (prefers-color-scheme: dark) {
+    .popup-pro-settings {
+        border-top-color: rgba(255, 255, 255, 0.12);
+    }
+
+    .popup-pro-heading {
+        color: #9a9a9a;
+    }
+
+    .popup-lead {
+        color: #a8a8a8;
+    }
+
+    .popup-status {
+        color: #8ee1c2;
+    }
+
+    .popup-status[data-state="signed_out"] {
+        color: #90caf9;
+    }
+
+    .popup-status[data-state="upgrade_required"],
+    .popup-status[data-state="reconnect_required"] {
+        color: #ffd08a;
+    }
+
+    .popup-status[data-state="error"] {
+        color: #ff9c95;
+    }
+
+    .popup-import {
+        color: #8ee1c2;
+        border-color: #8ee1c2;
+    }
+
+    .popup-import:hover:not(:disabled) {
+        background: rgba(142, 225, 194, 0.1);
+    }
+}
+
+.popup-import {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    padding: 8px 12px;
+    margin-bottom: 8px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    text-align: center;
+    cursor: pointer;
+    color: #0d7a5f;
+    background: transparent;
+    border: 1.5px solid #0d7a5f;
+}
+
+.popup-import:hover:not(:disabled) {
+    background: rgba(13, 122, 95, 0.08);
+}
+
+.popup-import:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
+.popup-import:focus-visible {
+    outline: 2px solid #0d7a5f;
+    outline-offset: 2px;
+}
+
+.popup-cta {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    text-align: center;
+    text-decoration: none;
+    color: #fff;
+    background: #0d7a5f;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.popup-cta:hover {
+    filter: brightness(1.06);
+}
+
+.popup-cta:focus-visible {
+    outline: 2px solid #0d7a5f;
+    outline-offset: 2px;
+}

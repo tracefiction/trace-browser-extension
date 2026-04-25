@@ -1,0 +1,10 @@
+{
+    "extension_name": {
+        "message": "Trace",
+        "description": "The display name for the extension."
+    },
+    "extension_description": {
+        "message": "Import AO3 and FanFiction.net metadata into Trace and sync reading progress.",
+        "description": "Description of what the extension does."
+    }
+}

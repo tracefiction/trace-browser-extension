@@ -1,0 +1,124 @@
+{
+  "manifest_version": 3,
+  "default_locale": "en",
+  "name": "Trace",
+  "description": "Track fanfiction reading: import AO3/FFN metadata into Trace and sync progress.",
+  "version": "0.2.3",
+  "action": {
+    "default_title": "Trace",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "images/icon-16.png",
+      "32": "images/icon-32.png",
+      "48": "images/icon-48.png"
+    }
+  },
+  "permissions": [
+    "alarms",
+    "tabs",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://archiveofourown.org/*",
+    "https://*.archiveofourown.org/*",
+    "https://archiveofourown.gay/*",
+    "https://*.archiveofourown.gay/*",
+    "https://archive.transformativeworks.org/*",
+    "https://ao3.org/*",
+    "https://*.ao3.org/*",
+    "https://www.fanfiction.net/*",
+    "https://m.fanfiction.net/*",
+    "https://tracefiction.com/*",
+    "https://www.tracefiction.com/*"
+  ],
+  "icons": {
+    "16": "images/icon-16.png",
+    "32": "images/icon-32.png",
+    "48": "images/icon-48.png",
+    "96": "images/icon-96.png",
+    "128": "images/icon-128.png",
+    "256": "images/icon-256.png",
+    "512": "images/icon-512.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://archiveofourown.org/*",
+        "https://*.archiveofourown.org/*",
+        "https://archiveofourown.gay/*",
+        "https://*.archiveofourown.gay/*",
+        "https://archive.transformativeworks.org/*",
+        "https://ao3.org/*",
+        "https://*.ao3.org/*",
+        "https://www.fanfiction.net/*",
+        "https://m.fanfiction.net/*"
+      ],
+      "js": [
+        "collector.js",
+        "library-overlay-keys.js",
+        "library-overlay.js"
+      ],
+      "run_at": "document_end",
+      "exclude_matches": [
+        "https://archiveofourown.org/users/login*",
+        "https://*.archiveofourown.org/users/login*",
+        "https://archiveofourown.org/users/sign_up*",
+        "https://*.archiveofourown.org/users/sign_up*",
+        "https://archiveofourown.org/users/password*",
+        "https://*.archiveofourown.org/users/password*",
+        "https://archiveofourown.org/users/auth/*",
+        "https://*.archiveofourown.org/users/auth/*",
+        "https://archiveofourown.org/users/logout*",
+        "https://*.archiveofourown.org/users/logout*",
+        "https://archiveofourown.gay/users/login*",
+        "https://*.archiveofourown.gay/users/login*",
+        "https://archiveofourown.gay/users/sign_up*",
+        "https://*.archiveofourown.gay/users/sign_up*",
+        "https://archiveofourown.gay/users/password*",
+        "https://*.archiveofourown.gay/users/password*",
+        "https://archiveofourown.gay/users/auth/*",
+        "https://*.archiveofourown.gay/users/auth/*",
+        "https://archiveofourown.gay/users/logout*",
+        "https://*.archiveofourown.gay/users/logout*",
+        "https://archive.transformativeworks.org/users/login*",
+        "https://archive.transformativeworks.org/users/sign_up*",
+        "https://archive.transformativeworks.org/users/password*",
+        "https://archive.transformativeworks.org/users/auth/*",
+        "https://archive.transformativeworks.org/users/logout*",
+        "https://ao3.org/users/login*",
+        "https://*.ao3.org/users/login*",
+        "https://ao3.org/users/sign_up*",
+        "https://*.ao3.org/users/sign_up*",
+        "https://ao3.org/users/password*",
+        "https://*.ao3.org/users/password*",
+        "https://ao3.org/users/auth/*",
+        "https://*.ao3.org/users/auth/*",
+        "https://ao3.org/users/logout*",
+        "https://*.ao3.org/users/logout*",
+        "https://www.fanfiction.net/login.php*",
+        "https://www.fanfiction.net/signup.php*",
+        "https://www.fanfiction.net/account/login*",
+        "https://www.fanfiction.net/account/signup*",
+        "https://www.fanfiction.net/auth/*",
+        "https://m.fanfiction.net/login.php*",
+        "https://m.fanfiction.net/signup.php*",
+        "https://m.fanfiction.net/account/login*",
+        "https://m.fanfiction.net/account/signup*",
+        "https://m.fanfiction.net/auth/*"
+      ]
+    },
+    {
+      "matches": [
+        "https://tracefiction.com/*",
+        "https://www.tracefiction.com/*"
+      ],
+      "js": [
+        "sync.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
