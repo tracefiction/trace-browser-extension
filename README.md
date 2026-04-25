@@ -119,6 +119,16 @@ Safari: open `Trace.xcodeproj` in Xcode, select your own Apple signing team loca
 - Security and reporting: `SECURITY.md`
 - Firefox source package notes: `README.mozilla.md`
 
+## Reporting issues
+
+This repository is published for transparency. The following are welcome via [GitHub Issues](https://github.com/tracefiction/trace-browser-extension/issues):
+
+- **AO3 or FanFiction.net page changes** that broke import, library overlay, or progress tracking. Use the "AO3/FFN page broke" issue template — it asks for the site, page URL pattern, and what failed.
+- **Bug reports** for the extension's behavior in any supported browser. Use the "Bug report" template.
+- **Security or privacy concerns**: please follow `SECURITY.md` rather than filing a public issue.
+
+We do **not** currently accept feature pull requests. The PolyForm Noncommercial License is intended for inspection and personal use; accepting outside contributions complicates the licensing terms. Bug-fix PRs that come with a clear issue and a small surface area may be considered case by case — please open an issue first to discuss.
+
 ## License
 
 This repository is source-available under the PolyForm Noncommercial License 1.0.0.
