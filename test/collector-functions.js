@@ -32,14 +32,16 @@ function createChromeMock() {
     runtime: {
       onMessage: { addListener() {} },
       sendMessage() {},
+      lastError: null,
     },
   };
 }
 
 /**
  * @param {import("jsdom").JSDOM} dom
+ * @param {{ chrome?: any }} [options]
  */
-function createCollectorBindings(dom) {
+function createCollectorBindings(dom, options = {}) {
   const { window } = dom;
   const globalScope = {
     console,
@@ -48,7 +50,7 @@ function createCollectorBindings(dom) {
     window,
     self: window,
     globalThis: null,
-    chrome: createChromeMock(),
+    chrome: options.chrome || createChromeMock(),
     browser: undefined,
     setTimeout: window.setTimeout.bind(window),
     clearTimeout: window.clearTimeout.bind(window),
@@ -69,6 +71,11 @@ function createCollectorBindings(dom) {
     storyMetadataFingerprint: globalScope.storyMetadataFingerprint,
     shouldBroadcastMetadata: globalScope.shouldBroadcastMetadata,
     rememberMetadataBroadcast: globalScope.rememberMetadataBroadcast,
+    shouldSkipRecentAutoTrack: globalScope.shouldSkipRecentAutoTrack,
+    rememberRecentAutoTrack: globalScope.rememberRecentAutoTrack,
+    forgetRecentAutoTrack: globalScope.forgetRecentAutoTrack,
+    sendAutoTrackForStory: globalScope.sendAutoTrackForStory,
+    applyConfirmedOverlayUpdateForStory: globalScope.applyConfirmedOverlayUpdateForStory,
     quickAddStatusDisplay: globalScope.quickAddStatusDisplay,
     collectFFNStory: globalScope.collectFFNStory,
     collectFFNListings: globalScope.collectFFNListings,

@@ -568,7 +568,7 @@ test("TRACE_QUICK_ADD returns ok and refreshes overlay on success", async () => 
   );
 
   assert.equal(msgResponse.ok, true);
-  assert.equal(msgResponse.data.entry_id, "e1");
+  assert.deepEqual(Object.keys(msgResponse), ["ok"]);
   assert.equal(h.store.traceAuthState.state, "connected");
   assert.ok(h.store.traceAuthState.lastQuickAddAt);
   assert.deepEqual(plainJson(h.badgeTextCalls.at(-1)), { text: "OK", tabId: 77 });
@@ -617,4 +617,230 @@ test("TRACE_QUICK_ADD without token returns not_authenticated", async () => {
 
   assert.equal(response.ok, false);
   assert.equal(response.error, "not_authenticated");
+});
+
+// =======================================================
+// Auto-track dispatch (TRACE_AUTO_TRACK ack contract)
+// =======================================================
+//
+// The collector waits for an acknowledged response before flipping the
+// story-page pill to READING. These tests pin the ack shape per failure
+// mode so a future regression that returns a misleading ok:true (or drops
+// the response entirely) shows up here.
+
+test("TRACE_AUTO_TRACK without a token responds not_authenticated", async () => {
+  const h = createBackgroundHarness();
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_AUTO_TRACK",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: { t: "Story", u: "https://archiveofourown.org/works/200" },
+      },
+    },
+    { tab: { id: 110 }, frameId: 0, documentLifecycle: "active" },
+  );
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, "not_authenticated");
+});
+
+test("TRACE_AUTO_TRACK from a subframe responds ignored_sender", async () => {
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-at-1" },
+  });
+  h.hooks.setBearerToken("token-at-1");
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_AUTO_TRACK",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: { t: "Story", u: "https://archiveofourown.org/works/201" },
+      },
+    },
+    { tab: { id: 111 }, frameId: 7 },
+  );
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, "ignored_sender");
+  // No fetch should have happened for an ignored sender.
+  const trackCalls = h.fetchCalls.filter((call) =>
+    /\/api\/extension\/track$/.test(String(call.url)),
+  );
+  assert.equal(trackCalls.length, 0);
+});
+
+test("TRACE_AUTO_TRACK with auto-track disabled responds auto_track_disabled", async () => {
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-at-2",
+      prefAutoTrackEnabled: false,
+    },
+  });
+  h.hooks.setBearerToken("token-at-2");
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_AUTO_TRACK",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: { t: "Story", u: "https://archiveofourown.org/works/202" },
+      },
+    },
+    { tab: { id: 112 }, frameId: 0, documentLifecycle: "active" },
+  );
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, "auto_track_disabled");
+  const trackCalls = h.fetchCalls.filter((call) =>
+    /\/api\/extension\/track$/.test(String(call.url)),
+  );
+  assert.equal(trackCalls.length, 0);
+});
+
+test("TRACE_AUTO_TRACK responds ok:true only after the server write returns 2xx", async () => {
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-at-3" },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/extension/track")) {
+        return createResponse({ json: { success: true, data: { story_id: "s-1" } } });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: { success: true, data: { entries: {}, syncVersion: "v-at" } },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.hooks.setBearerToken("token-at-3");
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_AUTO_TRACK",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: { t: "Story", u: "https://archiveofourown.org/works/203" },
+      },
+    },
+    { tab: { id: 113 }, frameId: 0, documentLifecycle: "active" },
+  );
+
+  assert.equal(response.ok, true);
+  // The collector only inspects response.ok; do not start leaking server
+  // payload fields into the ack without a documented consumer.
+  assert.deepEqual(Object.keys(response), ["ok"]);
+});
+
+test("TRACE_AUTO_TRACK responds auth_expired on 401", async () => {
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-at-4" },
+    fetchImpl: async () => createResponse({ ok: false, status: 401 }),
+  });
+  h.hooks.setBearerToken("token-at-4");
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_AUTO_TRACK",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: { t: "Story", u: "https://archiveofourown.org/works/204" },
+      },
+    },
+    { tab: { id: 114 }, frameId: 0, documentLifecycle: "active" },
+  );
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, "auth_expired");
+});
+
+test("TRACE_AUTO_TRACK responds free_limit_reached on 402", async () => {
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-at-5" },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/extension/track")) {
+        return createResponse({ ok: false, status: 402 });
+      }
+      return createResponse({ json: { success: true, data: { entries: {} } } });
+    },
+  });
+  h.hooks.setBearerToken("token-at-5");
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_AUTO_TRACK",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: { t: "Story", u: "https://archiveofourown.org/works/205" },
+      },
+    },
+    { tab: { id: 115 }, frameId: 0, documentLifecycle: "active" },
+  );
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, "free_limit_reached");
+});
+
+test("TRACE_AUTO_TRACK responds http_<status> on other non-2xx", async () => {
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-at-6" },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/extension/track")) {
+        return createResponse({ ok: false, status: 503 });
+      }
+      return createResponse({ json: { success: true, data: { entries: {} } } });
+    },
+  });
+  h.hooks.setBearerToken("token-at-6");
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_AUTO_TRACK",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: { t: "Story", u: "https://archiveofourown.org/works/206" },
+      },
+    },
+    { tab: { id: 116 }, frameId: 0, documentLifecycle: "active" },
+  );
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, "http_503");
+});
+
+test("TRACE_AUTO_TRACK responds network_error when fetch throws", async () => {
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-at-7" },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/extension/track")) {
+        throw new Error("offline");
+      }
+      return createResponse({ json: { success: true, data: { entries: {} } } });
+    },
+  });
+  h.hooks.setBearerToken("token-at-7");
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_AUTO_TRACK",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: { t: "Story", u: "https://archiveofourown.org/works/207" },
+      },
+    },
+    { tab: { id: 117 }, frameId: 0, documentLifecycle: "active" },
+  );
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, "network_error");
 });

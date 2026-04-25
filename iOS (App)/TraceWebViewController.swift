@@ -250,7 +250,8 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             decisionHandler(.allow)
             return
         }
-        if shouldOpenInAuthenticationSession(url) {
+        if shouldOpenInAuthenticationSession(url),
+           (navigationAction.targetFrame?.isMainFrame ?? true) {
             decisionHandler(.cancel)
             startAuthenticationSession(startURL: url)
             return

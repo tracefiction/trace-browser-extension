@@ -350,6 +350,144 @@ test("shouldBroadcastMetadata allows rebroadcast when story-level metadata chang
   assert.equal(shouldBroadcastMetadata(updated), true);
 });
 
+function createAutoTrackCollectorHarness(response, options = {}) {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://archiveofourown.org/works/28534965",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  const store = {
+    authToken: "test-token",
+    libraryOverlayCache: { entries: {}, syncVersion: "v0" },
+  };
+  const sentMessages = [];
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      lastError: null,
+      sendMessage(message, cb) {
+        sentMessages.push(message);
+        if (options.lastError) {
+          chrome.runtime.lastError = { message: options.lastError };
+          cb();
+          chrome.runtime.lastError = null;
+          return;
+        }
+        cb(response);
+      },
+    },
+    storage: {
+      local: {
+        get(keys, cb) {
+          const list = Array.isArray(keys) ? keys : [keys];
+          const out = {};
+          for (const key of list) {
+            if (Object.prototype.hasOwnProperty.call(store, key)) {
+              out[key] = store[key];
+            }
+          }
+          cb(out);
+        },
+        set(value, cb) {
+          Object.assign(store, value || {});
+          if (options.runStorageSetCallback && typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+  const bindings = createCollectorBindings(dom, { chrome });
+  return { dom, store, sentMessages, bindings };
+}
+
+test("sendAutoTrackForStory clears dedupe marker on failed acknowledgements", () => {
+  const failures = [
+    undefined,
+    { ok: false, error: "auth_expired" },
+    { ok: false, error: "free_limit_reached" },
+    { ok: false, error: "http_503" },
+    { ok: false, error: "network_error" },
+    { ok: false, error: "auto_track_disabled" },
+  ];
+  const item = {
+    src: "ao3",
+    ctx: "story",
+    u: "https://archiveofourown.org/works/28534965",
+    t: "Redivider",
+    chn: 3,
+    cht: 17,
+  };
+
+  for (const response of failures) {
+    const { dom, store, sentMessages, bindings } =
+      createAutoTrackCollectorHarness(response);
+    bindings.sendAutoTrackForStory(item);
+
+    assert.equal(sentMessages.length, 1);
+    assert.equal(dom.window.sessionStorage.getItem("trace:auto-track:last"), null);
+    assert.deepEqual(plainJson(store.libraryOverlayCache.entries), {});
+  }
+});
+
+test("sendAutoTrackForStory clears dedupe marker when runtime messaging fails", () => {
+  const item = {
+    src: "ao3",
+    ctx: "story",
+    u: "https://archiveofourown.org/works/28534965",
+    t: "Redivider",
+    chn: 3,
+    cht: 17,
+  };
+  const { dom, store, sentMessages, bindings } =
+    createAutoTrackCollectorHarness(undefined, { lastError: "message port closed" });
+
+  bindings.sendAutoTrackForStory(item);
+
+  assert.equal(sentMessages.length, 1);
+  assert.equal(dom.window.sessionStorage.getItem("trace:auto-track:last"), null);
+  assert.deepEqual(plainJson(store.libraryOverlayCache.entries), {});
+});
+
+test("sendAutoTrackForStory keeps dedupe marker for ignored senders", () => {
+  const item = {
+    src: "ao3",
+    ctx: "story",
+    u: "https://archiveofourown.org/works/28534965",
+    t: "Redivider",
+    chn: 3,
+    cht: 17,
+  };
+  const { dom, store, bindings } = createAutoTrackCollectorHarness({
+    ok: false,
+    error: "ignored_sender",
+  });
+
+  bindings.sendAutoTrackForStory(item);
+
+  assert.notEqual(dom.window.sessionStorage.getItem("trace:auto-track:last"), null);
+  assert.deepEqual(plainJson(store.libraryOverlayCache.entries), {});
+});
+
+test("sendAutoTrackForStory updates overlay cache only after confirmed ack", () => {
+  const item = {
+    src: "ao3",
+    ctx: "story",
+    u: "https://archiveofourown.org/works/28534965",
+    t: "Redivider",
+    chn: 3,
+    cht: 17,
+  };
+  const { dom, store, bindings } = createAutoTrackCollectorHarness({ ok: true });
+
+  bindings.sendAutoTrackForStory(item);
+
+  assert.notEqual(dom.window.sessionStorage.getItem("trace:auto-track:last"), null);
+  assert.deepEqual(plainJson(store.libraryOverlayCache.entries["ao3:28534965"]), {
+    status: "READING",
+    chapters: { current: 3, total: 17 },
+  });
+});
+
 test("detectAo3CurrentChapterNumber prefers the visible chapter heading text", () => {
   const html = `<!doctype html><html><body>
     <div id="chapters">
@@ -672,7 +810,7 @@ test("FFN mobile story renders quick-add button for signed-in users", () => {
 
   const btn = dom.window.document.querySelector("[data-trace-quick-add]");
   assert.ok(btn, "expected quick-add button on FFN mobile story page");
-  assert.match(btn.textContent || "", /\+ ADD TO TRACE|READING|PLANNING/i);
+  assert.match(btn.textContent || "", /\+ ADD TO TRACE/i);
 });
 
 test("collectFFNStoryMobile (ffn_story_mobile.html)", () => {

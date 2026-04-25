@@ -407,7 +407,50 @@ function rememberRecentAutoTrack(item) {
   }
 }
 
-function optimisticallyUpdateOverlayForStory(item) {
+function forgetRecentAutoTrack(item) {
+  try {
+    if (!window.sessionStorage) return;
+    var raw = window.sessionStorage.getItem(AUTO_TRACK_DEDUPE_KEY);
+    if (!raw) return;
+    var parsed = JSON.parse(raw);
+    if (!parsed || parsed.key !== autoTrackFingerprint(item)) return;
+    window.sessionStorage.removeItem(AUTO_TRACK_DEDUPE_KEY);
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+function sendAutoTrackForStory(validStory) {
+  rememberRecentAutoTrack(validStory);
+  ext.runtime.sendMessage(
+    {
+      type: "TRACE_AUTO_TRACK",
+      payload: {
+        s: validStory.src,
+        at: new Date().toISOString(),
+        item: validStory,
+      },
+    },
+    function (response) {
+      if (ext.runtime.lastError) {
+        forgetRecentAutoTrack(validStory);
+        return;
+      }
+      if (!response || response.ok !== true) {
+        // ignored_sender means the background never attempted a write
+        // (subframe / prerender). Re-sending on the next dwell tick would
+        // hit the same check, so keep the dedupe marker to avoid churn.
+        if (!response || response.error !== "ignored_sender") {
+          forgetRecentAutoTrack(validStory);
+        }
+        return;
+      }
+      applyConfirmedOverlayUpdateForStory(validStory);
+    },
+  );
+}
+
+function applyConfirmedOverlayUpdateForStory(item) {
   var workKey = overlayWorkKeyFromItem(item);
   if (!workKey) return;
 
@@ -1808,16 +1851,7 @@ function startDwellTimer(attempt) {
         if (shouldSkipRecentAutoTrack(validStory)) {
           return;
         }
-        rememberRecentAutoTrack(validStory);
-        optimisticallyUpdateOverlayForStory(validStory);
-        ext.runtime.sendMessage({
-          type: "TRACE_AUTO_TRACK",
-          payload: {
-            s: validStory.src,
-            at: new Date().toISOString(),
-            item: validStory,
-          },
-        });
+        sendAutoTrackForStory(validStory);
         return;
       }
       if (prefRes.prefAutoTrackEnabled === false) {
@@ -1826,16 +1860,7 @@ function startDwellTimer(attempt) {
       if (shouldSkipRecentAutoTrack(validStory)) {
         return;
       }
-      rememberRecentAutoTrack(validStory);
-      optimisticallyUpdateOverlayForStory(validStory);
-      ext.runtime.sendMessage({
-        type: "TRACE_AUTO_TRACK",
-        payload: {
-          s: validStory.src,
-          at: new Date().toISOString(),
-          item: validStory,
-        },
-      });
+      sendAutoTrackForStory(validStory);
     },
   );
 }

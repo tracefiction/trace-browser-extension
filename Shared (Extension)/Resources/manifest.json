@@ -3,7 +3,7 @@
   "default_locale": "en",
   "name": "Trace",
   "description": "Track fanfiction reading: import AO3/FFN metadata into Trace and sync progress.",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "action": {
     "default_title": "Trace",
     "default_popup": "popup.html",
@@ -29,7 +29,8 @@
     "https://www.fanfiction.net/*",
     "https://m.fanfiction.net/*",
     "https://tracefiction.com/*",
-    "https://www.tracefiction.com/*"
+    "https://www.tracefiction.com/*",
+    "https://api.tracefiction.com/*"
   ],
   "icons": {
     "16": "images/icon-16.png",

@@ -4,7 +4,7 @@
 // It never receives AO3/FFN passwords or cookies; URLs are injected by `npm run build`.
 const ext = typeof browser !== "undefined" ? browser : chrome;
 
-const TRACE_API_BASE = "https://tracefiction.com";
+const TRACE_API_BASE = "https://api.tracefiction.com";
 const TRACE_WEB_ORIGIN = "https://tracefiction.com";
 
 const API_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/track`;
@@ -448,8 +448,8 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // B. Auto-track request from collector.js
   // -------------------------------------------------
   if (msg.type === "TRACE_AUTO_TRACK") {
-    handleAutoTrack(msg.payload, sender);
-    return false;
+    handleAutoTrack(msg.payload, sender, sendResponse);
+    return true;
   }
 
   // -------------------------------------------------
@@ -584,16 +584,18 @@ async function handleImportTrigger(sendResponse) {
 // 3. AUTOMATIC TRACKING
 // =======================================================
 
-function handleAutoTrack(payload, sender) {
+function handleAutoTrack(payload, sender, sendResponse) {
   if (!bearerToken) {
     setReconnectState("Open Trace in Safari to link your session, then automatic sync will work.", {
       lastTrackAttemptAt: new Date().toISOString(),
     });
     setBadge(sender?.tab?.id, "LOG", "#9C6B00");
+    if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
     return;
   }
 
   if (shouldIgnoreSenderForAutoTrack(sender)) {
+    if (sendResponse) sendResponse({ ok: false, error: "ignored_sender" });
     return;
   }
 
@@ -601,13 +603,26 @@ function handleAutoTrack(payload, sender) {
     [PREF_AUTO_TRACK_KEY],
     (prefRes) => {
       if (ext.runtime.lastError) {
-        void executeAutoTrack(payload, sender);
+        void executeAutoTrack(payload, sender)
+          .then((result) => {
+            if (sendResponse) sendResponse(result);
+          })
+          .catch((error) => {
+            if (sendResponse) sendResponse({ ok: false, error: String(error?.message || error) });
+          });
         return;
       }
       if (prefRes[PREF_AUTO_TRACK_KEY] === false) {
+        if (sendResponse) sendResponse({ ok: false, error: "auto_track_disabled" });
         return;
       }
-      void executeAutoTrack(payload, sender);
+      void executeAutoTrack(payload, sender)
+        .then((result) => {
+          if (sendResponse) sendResponse(result);
+        })
+        .catch((error) => {
+          if (sendResponse) sendResponse({ ok: false, error: String(error?.message || error) });
+        });
     },
   );
 }
@@ -633,6 +648,7 @@ async function executeAutoTrack(payload, sender) {
           lastHttpStatus: response.status,
         });
         setBadge(sender?.tab?.id, "LOG", "#9C6B00");
+        return { ok: false, error: "auth_expired" };
       } else if (response.status === 402) {
         await refreshLibraryOverlay();
         setUpgradeState(
@@ -643,6 +659,7 @@ async function executeAutoTrack(payload, sender) {
           },
         );
         setBadge(sender?.tab?.id, "FULL", "#735B1A");
+        return { ok: false, error: "free_limit_reached" };
       } else {
         await refreshLibraryOverlay();
         setConnectedWithSyncWarning(
@@ -653,6 +670,7 @@ async function executeAutoTrack(payload, sender) {
           },
         );
         setBadge(sender?.tab?.id, "!", "#9C6B00");
+        return { ok: false, error: "http_" + response.status };
       }
     } else {
       setConnectedState({
@@ -662,6 +680,7 @@ async function executeAutoTrack(payload, sender) {
       await signalLibraryInvalidated("track");
       setBadge(sender?.tab?.id, "OK", "#0D7A5F");
       setTimeout(() => clearBadge(sender?.tab?.id), 2000);
+      return { ok: true };
     }
   } catch (error) {
     console.error("[Trace] Network error:", error);
@@ -673,6 +692,7 @@ async function executeAutoTrack(payload, sender) {
       },
     );
     setBadge(sender?.tab?.id, "!", "#9C6B00");
+    return { ok: false, error: "network_error" };
   }
 }
 
@@ -736,13 +756,12 @@ async function handleQuickAdd(payload, sender, sendResponse) {
     });
 
     if (response.ok) {
-      const json = await response.json();
       setConnectedState({ lastQuickAddAt: new Date().toISOString() });
       setBadge(sender?.tab?.id, "OK", "#0D7A5F");
       setTimeout(() => clearBadge(sender?.tab?.id), 2000);
       await refreshLibraryOverlay();
       await signalLibraryInvalidated("quick_add");
-      if (sendResponse) sendResponse({ ok: true, data: json.data });
+      if (sendResponse) sendResponse({ ok: true });
     } else if (response.status === 401) {
       clearToken();
       setReconnectState("Your Trace session expired. Open Trace and sign in again.");
