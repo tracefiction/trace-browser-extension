@@ -11,7 +11,9 @@
     "zip:chrome": "node scripts/zip-store.mjs chrome",
     "zip:firefox": "node scripts/zip-store.mjs firefox",
     "package:amo-source": "bash scripts/package-amo-source.sh",
-    "test": "node --test test/collector.test.js test/library-overlay.test.js test/library-overlay-runtime.test.js test/library-overlay-site-hint.test.js test/background-runtime.test.js test/popup.test.js test/sync.test.js"
+    "test": "node --test test/collector.test.js test/library-overlay.test.js test/library-overlay-runtime.test.js test/library-overlay-site-hint.test.js test/background-runtime.test.js test/popup.test.js test/sync.test.js",
+    "agent:lint": "node scripts/agent-checks.mjs",
+    "agent:check": "npm run agent:lint && npm test && npm run build"
   },
   "engines": {
     "node": ">=18"
