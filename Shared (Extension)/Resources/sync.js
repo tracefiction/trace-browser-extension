@@ -4,6 +4,35 @@
 // Does not run on AO3/FFN and does not receive AO3/FFN credentials or cookies.
 const ext = typeof browser !== "undefined" ? browser : chrome;
 
+function isTransientRuntimeMessageError(error) {
+  const parts = [
+    typeof error === "string" ? error : "",
+    error && error.message,
+    error && typeof error.toString === "function" ? error.toString() : "",
+    ext && ext.runtime && ext.runtime.lastError && ext.runtime.lastError.message,
+  ];
+  const message = parts.filter(Boolean).join("\n");
+  return /tab not found|receiving end does not exist|extension context invalidated|message port closed/i.test(
+    message,
+  );
+}
+
+function reportRuntimeMessageError(label, error) {
+  if (isTransientRuntimeMessageError(error)) return;
+  console.error(label, error);
+}
+
+function sendRuntimeMessage(message, errorLabel) {
+  try {
+    const maybePromise = ext.runtime.sendMessage(message);
+    if (maybePromise && typeof maybePromise.catch === "function") {
+      maybePromise.catch((error) => reportRuntimeMessageError(errorLabel, error));
+    }
+  } catch (error) {
+    reportRuntimeMessageError(errorLabel, error);
+  }
+}
+
 window.addEventListener("message", (event) => {
   // Do not require `event.source === window`. Safari Web Extension content scripts
   // can see a different `window` identity than `MessageEvent.source` for same-tab
@@ -13,14 +42,13 @@ window.addEventListener("message", (event) => {
 
   const token = typeof event.data.token === "string" ? event.data.token : null;
 
-  try {
-    ext.runtime.sendMessage({
+  sendRuntimeMessage(
+    {
       type: "TRACE_AUTH_UPDATE",
       token,
-    });
-  } catch (error) {
-    console.error("[Trace Sync] Failed to update auth state", error);
-  }
+    },
+    "[Trace Sync] Failed to update auth state",
+  );
 });
 
 try {

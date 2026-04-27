@@ -21,7 +21,10 @@ function plainJson(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function createSyncHarness(origin = "https://tracefiction.com") {
+function createSyncHarness(
+  origin = "https://tracefiction.com",
+  { sendMessageImpl } = {},
+) {
   const js = fs.readFileSync(SYNC_JS_PATH, "utf8");
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url: origin,
@@ -30,6 +33,7 @@ function createSyncHarness(origin = "https://tracefiction.com") {
   });
   const messages = [];
   const postedMessages = [];
+  const consoleErrors = [];
   const originalPostMessage = dom.window.postMessage.bind(dom.window);
   dom.window.postMessage = (data, targetOrigin, transfer) => {
     postedMessages.push({ data, targetOrigin });
@@ -37,13 +41,19 @@ function createSyncHarness(origin = "https://tracefiction.com") {
   };
   let onRuntimeMessage = null;
   const context = {
-    console,
+    console: {
+      ...console,
+      error(...args) {
+        consoleErrors.push(args);
+      },
+    },
     window: dom.window,
     document: dom.window.document,
     self: dom.window,
     chrome: {
       runtime: {
         sendMessage(message) {
+          if (sendMessageImpl) return sendMessageImpl(message);
           messages.push(message);
         },
         onMessage: {
@@ -63,6 +73,7 @@ function createSyncHarness(origin = "https://tracefiction.com") {
     window: dom.window,
     messages,
     postedMessages,
+    consoleErrors,
     emitRuntimeMessage(message, sender = {}, sendResponse = () => {}) {
       onRuntimeMessage?.(message, sender, sendResponse);
     },
@@ -97,6 +108,65 @@ test("sync ignores unrelated or cross-origin messages", () => {
   h.window.postMessage({ type: "OTHER_EVENT", token: "abc123" }, "https://tracefiction.com");
 
   assert.deepEqual(h.messages, []);
+});
+
+test("sync suppresses transient Safari stale-tab sendMessage errors", async () => {
+  const h = createSyncHarness("https://tracefiction.com", {
+    sendMessageImpl() {
+      throw new Error("Invalid call to runtime.sendMessage(). Tab not found.");
+    },
+  });
+
+  h.window.dispatchEvent(
+    new h.window.MessageEvent("message", {
+      data: { type: "TRACE_FICTION_TOKEN", token: "abc123" },
+      origin: "https://tracefiction.com",
+      source: h.window,
+    }),
+  );
+  await flush();
+
+  assert.deepEqual(h.consoleErrors, []);
+});
+
+test("sync suppresses transient async runtime sendMessage rejections", async () => {
+  const h = createSyncHarness("https://tracefiction.com", {
+    sendMessageImpl() {
+      return Promise.reject(new Error("Extension context invalidated."));
+    },
+  });
+
+  h.window.dispatchEvent(
+    new h.window.MessageEvent("message", {
+      data: { type: "TRACE_FICTION_TOKEN", token: "abc123" },
+      origin: "https://tracefiction.com",
+      source: h.window,
+    }),
+  );
+  await flush();
+
+  assert.deepEqual(h.consoleErrors, []);
+});
+
+test("sync still reports unexpected runtime sendMessage failures", async () => {
+  const h = createSyncHarness("https://tracefiction.com", {
+    sendMessageImpl() {
+      throw new Error("permission denied");
+    },
+  });
+
+  h.window.dispatchEvent(
+    new h.window.MessageEvent("message", {
+      data: { type: "TRACE_FICTION_TOKEN", token: "abc123" },
+      origin: "https://tracefiction.com",
+      source: h.window,
+    }),
+  );
+  await flush();
+
+  assert.equal(h.consoleErrors.length, 1);
+  assert.equal(h.consoleErrors[0][0], "[Trace Sync] Failed to update auth state");
+  assert.match(h.consoleErrors[0][1].message, /permission denied/);
 });
 
 test("sync forwards library invalidation runtime messages into the page", async () => {
