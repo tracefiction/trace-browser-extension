@@ -3,7 +3,7 @@
   "default_locale": "en",
   "name": "Trace",
   "description": "Track fanfiction reading: import AO3/FFN metadata into Trace and sync progress.",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "action": {
     "default_title": "Trace",
     "default_popup": "popup.html",
