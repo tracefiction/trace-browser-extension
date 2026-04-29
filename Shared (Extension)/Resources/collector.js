@@ -479,11 +479,19 @@ function applyConfirmedOverlayUpdateForStory(item) {
           ? existing.chapters.total
           : null;
 
-    // Match server extension auto-track: only PLANNING → READING; keep PAUSED etc.
+    var startedStoryPage =
+      item.ctx === "story" &&
+      typeof item.chn === "number" &&
+      Number.isFinite(item.chn) &&
+      item.chn > 1;
+
+    // Match server extension auto-track: chapter 1 remains planning; chapter 2+
+    // only promotes PLANNING → READING and preserves paused/dropped/completed.
     var prevStatus =
       typeof existing.status === "string" ? existing.status : null;
-    var nextStatus =
-      prevStatus === "PLANNING" ? "READING" : prevStatus || "READING";
+    var nextStatus = startedStoryPage
+      ? prevStatus === "PLANNING" ? "READING" : prevStatus || "READING"
+      : prevStatus || "PLANNING";
 
     var next = Object.assign({}, existing, {
       status: nextStatus,
@@ -1693,7 +1701,7 @@ function collect() {
 }
 
 function quickAddStatusLabel(status) {
-  var labels = { READING: "Reading", COMPLETED: "Completed", PAUSED: "Paused", DROPPED: "Dropped", PLANNING: "Plan to Read" };
+  var labels = { READING: "Reading", COMPLETED: "Completed", PAUSED: "Paused", DROPPED: "Dropped", PLANNING: "Planning" };
   return labels[status] || status;
 }
 
@@ -2108,7 +2116,23 @@ function renderQuickAddButton(workKey) {
                 btn.textContent = "ADDED \u2713";
                 btn.disabled = true;
                 setTimeout(function () {
-                  applyQuickAddLibraryState(btn, { status: "READING" });
+                  var item = payload.item || {};
+                  var startedStoryPage =
+                    item.ctx === "story" &&
+                    typeof item.chn === "number" &&
+                    Number.isFinite(item.chn) &&
+                    item.chn > 1;
+                  var next = { status: startedStoryPage ? "READING" : "PLANNING" };
+                  if (startedStoryPage) {
+                    next.chapters = {
+                      current: item.chn,
+                      total:
+                        typeof item.cht === "number" && Number.isFinite(item.cht)
+                          ? item.cht
+                          : null,
+                    };
+                  }
+                  applyQuickAddLibraryState(btn, next);
                 }, 1500);
               } else if (response.error === "free_limit_reached") {
                 btn.style.cssText = traceChipCss(TRACE_THEMES.full);

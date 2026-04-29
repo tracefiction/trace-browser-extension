@@ -813,6 +813,258 @@ test("FFN mobile story renders quick-add button for signed-in users", () => {
   assert.match(btn.textContent || "", /\+ ADD TO TRACE/i);
 });
 
+test("FFN mobile story quick-add shows planning after chapter-one success", () => {
+  const dom = domFromFixture(
+    "ffn_story_mobile.html",
+    "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter"
+  );
+  const collectorSrc = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "Shared (Extension)",
+      "Resources",
+      "collector.js",
+    ),
+    "utf8",
+  );
+
+  const sent = [];
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(msg, cb) {
+        sent.push(msg);
+        if (typeof cb === "function") cb({ ok: true });
+      },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb({
+            authToken: "test-token",
+            libraryOverlayCache: { entries: {} },
+          });
+        },
+        set(_value, cb) {
+          if (typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  dom.window.setTimeout = (fn) => {
+    fn();
+    return 1;
+  };
+  dom.window.chrome = chrome;
+  dom.window.browser = chrome;
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+
+  const btn = dom.window.document.querySelector("[data-trace-quick-add]");
+  assert.ok(btn, "expected quick-add button on FFN mobile story page");
+  btn.click();
+
+  assert.equal(sent[0].payload.item.chn, 1);
+  assert.match(btn.textContent || "", /PLANNING/i);
+});
+
+test("FFN mobile story quick-add shows reading progress after later-chapter success", () => {
+  const dom = domFromFixture(
+    "ffn_story_mobile.html",
+    "https://m.fanfiction.net/s/7038840/2/A-Chance-Encounter"
+  );
+  const collectorSrc = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "Shared (Extension)",
+      "Resources",
+      "collector.js",
+    ),
+    "utf8",
+  );
+
+  const sent = [];
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(msg, cb) {
+        sent.push(msg);
+        if (typeof cb === "function") cb({ ok: true });
+      },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb({
+            authToken: "test-token",
+            libraryOverlayCache: { entries: {} },
+          });
+        },
+        set(_value, cb) {
+          if (typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  dom.window.setTimeout = (fn) => {
+    fn();
+    return 1;
+  };
+  dom.window.chrome = chrome;
+  dom.window.browser = chrome;
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+
+  const btn = dom.window.document.querySelector("[data-trace-quick-add]");
+  assert.ok(btn, "expected quick-add button on FFN mobile story page");
+  btn.click();
+
+  assert.equal(sent[0].payload.item.chn, 2);
+  assert.match(btn.textContent || "", /READING.*2\/28/i);
+});
+
+test("auto-track optimistic cache keeps chapter-one stories as planning", () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://tracefiction.test/",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  const collectorSrc = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "Shared (Extension)",
+      "Resources",
+      "collector.js",
+    ),
+    "utf8",
+  );
+
+  const store = {
+    authToken: "test-token",
+    libraryOverlayCache: { entries: {} },
+  };
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(_msg, cb) {
+        cb({ ok: true });
+      },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb(store);
+        },
+        set(value, cb) {
+          Object.assign(store, value);
+          if (typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  dom.window.chrome = chrome;
+  dom.window.browser = chrome;
+  dom.window.eval(
+    collectorSrc + "\nwindow.__traceTestHooks = { sendAutoTrackForStory };",
+  );
+
+  dom.window.__traceTestHooks.sendAutoTrackForStory({
+    src: "ao3",
+    ctx: "story",
+    u: "https://archiveofourown.org/works/123",
+    t: "Chapter One",
+    chn: 1,
+    cht: 10,
+  });
+
+  assert.equal(store.libraryOverlayCache.entries["ao3:123"].status, "PLANNING");
+});
+
+test("auto-track optimistic cache promotes planning only after later chapters", () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://tracefiction.test/",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  const collectorSrc = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "Shared (Extension)",
+      "Resources",
+      "collector.js",
+    ),
+    "utf8",
+  );
+
+  const store = {
+    authToken: "test-token",
+    libraryOverlayCache: {
+      entries: {
+        "ao3:124": { status: "PLANNING", chapters: { current: 0, total: 10 } },
+      },
+    },
+  };
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(_msg, cb) {
+        cb({ ok: true });
+      },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb(store);
+        },
+        set(value, cb) {
+          Object.assign(store, value);
+          if (typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  dom.window.chrome = chrome;
+  dom.window.browser = chrome;
+  dom.window.eval(
+    collectorSrc + "\nwindow.__traceTestHooks = { sendAutoTrackForStory };",
+  );
+
+  dom.window.__traceTestHooks.sendAutoTrackForStory({
+    src: "ao3",
+    ctx: "story",
+    u: "https://archiveofourown.org/works/124",
+    t: "Chapter Two",
+    chn: 2,
+    cht: 10,
+  });
+
+  assert.equal(store.libraryOverlayCache.entries["ao3:124"].status, "READING");
+  assert.deepEqual(
+    plainJson(store.libraryOverlayCache.entries["ao3:124"].chapters),
+    { current: 2, total: 10 },
+  );
+});
+
 test("collectFFNStoryMobile (ffn_story_mobile.html)", () => {
   const dom = domFromFixture(
     "ffn_story_mobile.html",
