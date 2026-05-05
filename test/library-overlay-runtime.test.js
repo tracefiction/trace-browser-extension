@@ -771,6 +771,54 @@ test("library-overlay renders hidden-only workPreferences collapsed without stat
   assert.equal(wrap.querySelector("button[data-trace-quick-add]"), null);
 });
 
+test("library-overlay hides FFN desktop byline text when collapsing hidden rows", async () => {
+  const messages = [];
+  const window = await renderOverlayListing({
+    url: "https://www.fanfiction.net/book/Harry-Potter/",
+    html:
+      "<!doctype html><html><body><div class='z-list'><a class='stitle' href='/s/12345/1/Hidden-FFN-Work'>Hidden FFN Work</a> by <a href='/u/456/author'>Author</a><div class='z-indent'>Summary</div><div class='xgray'>Rated: Fiction T - English - Chapters: 4</div></div></body></html>",
+    cache: {
+      entries: {},
+      workPreferences: {
+        "ffn:12345": { browsePreference: { hidden: true } },
+      },
+      syncVersion: "v-ffn-hidden-byline",
+    },
+    sendMessage(msg, cb) {
+      messages.push(msg);
+      if (typeof cb === "function") cb({ ok: true, key: msg.payload.key, hidden: msg.payload.hidden });
+    },
+  });
+
+  const row = window.document.querySelector(".z-list");
+  const wrap = row.querySelector("[data-trace-library-overlay-wrap]");
+  assert.ok(wrap);
+  assert.equal(row.getAttribute("data-trace-row-hidden"), "1");
+  assert.match(wrap.textContent || "", /Hidden by Trace\s*Undo/i);
+  assert.equal(
+    Array.from(row.childNodes).some(
+      (node) => node.nodeType === window.Node.TEXT_NODE && /\S/.test(node.nodeValue || ""),
+    ),
+    false,
+  );
+  assert.equal(row.querySelector("[data-trace-row-hidden-text]")?.textContent, " by ");
+
+  wrap.querySelector("button[data-trace-hidden-action='undo']").click();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1))), {
+    type: "TRACE_SET_HIDDEN_WORK",
+    payload: { key: "ffn:12345", hidden: false },
+  });
+  assert.equal(row.getAttribute("data-trace-row-hidden"), null);
+  assert.equal(row.querySelector("[data-trace-row-hidden-text]"), null);
+  assert.equal(
+    Array.from(row.childNodes).some(
+      (node) => node.nodeType === window.Node.TEXT_NODE && node.nodeValue === " by ",
+    ),
+    true,
+  );
+});
+
 test("library-overlay restores hidden host rows when auth and cache clear", async () => {
   const window = await renderOverlayListing({
     html:
