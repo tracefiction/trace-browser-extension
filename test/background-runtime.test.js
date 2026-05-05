@@ -209,6 +209,10 @@ globalThis.__testHooks = {
   handleImportTrigger,
   handleMetadataBroadcast,
   handleQuickAdd,
+  handleSetHiddenWork,
+  handleSetReaderStatus,
+  patchOverlayHiddenPreference,
+  patchOverlayReaderStatus,
   shouldIgnoreSenderForAutoTrack,
   setBearerToken(value) { bearerToken = value; },
   getBearerToken() { return bearerToken; }
@@ -568,7 +572,7 @@ test("TRACE_QUICK_ADD returns ok and refreshes overlay on success", async () => 
   );
 
   assert.equal(msgResponse.ok, true);
-  assert.deepEqual(Object.keys(msgResponse), ["ok"]);
+  assert.equal(msgResponse.entryId, "e1");
   assert.equal(h.store.traceAuthState.state, "connected");
   assert.ok(h.store.traceAuthState.lastQuickAddAt);
   assert.deepEqual(plainJson(h.badgeTextCalls.at(-1)), { text: "OK", tabId: 77 });
@@ -617,6 +621,286 @@ test("TRACE_QUICK_ADD without token returns not_authenticated", async () => {
 
   assert.equal(response.ok, false);
   assert.equal(response.error, "not_authenticated");
+});
+
+// =======================================================
+// Reader status choices (TRACE_SET_READER_STATUS)
+// =======================================================
+
+test("TRACE_SET_READER_STATUS patches library entry status and overlay cache", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000123";
+  const sentMessages = [];
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-status-1",
+      libraryOverlayCache: {
+        entries: {
+          "ao3:123": {
+            entryId,
+            status: "PLANNING",
+            readerStatus: "PLANNING",
+            chapters: { current: 0, total: 17 },
+          },
+        },
+        syncVersion: "v-before",
+      },
+    },
+    activeTabs: [{ id: 90, url: "https://tracefiction.com/library" }],
+    sendMessageImpl: async (tabId, msg) => {
+      sentMessages.push({ tabId, msg });
+      return { ok: true };
+    },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith(`/api/library/${entryId}`)) {
+        assert.equal(init.method, "PATCH");
+        assert.equal(init.headers.Authorization, "Bearer token-status-1");
+        assert.deepEqual(JSON.parse(init.body), {
+          status: "READING",
+          progress: { unit: "CHAPTER", value: 1, total: 17 },
+        });
+        return createResponse({ json: { data: { entry_id: entryId } } });
+      }
+      if (String(url).endsWith("/api/account/me")) {
+        return createResponse({ json: { pro: false } });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.hooks.setBearerToken("token-status-1");
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_SET_READER_STATUS",
+      payload: {
+        entryId,
+        status: "READING",
+        progress: { unit: "CHAPTER", value: 1, total: 17 },
+      },
+    },
+    { tab: { id: 90 } },
+  );
+
+  assert.equal(response.ok, true);
+  assert.equal(response.entryId, entryId);
+  assert.equal(response.status, "READING");
+  assert.equal(response.workKey, "ao3:123");
+  assert.equal(h.store.libraryOverlayCache.entries["ao3:123"].status, "READING");
+  assert.equal(h.store.libraryOverlayCache.entries["ao3:123"].readerStatus, "READING");
+  assert.deepEqual(plainJson(h.store.libraryOverlayCache.entries["ao3:123"].chapters), { current: 1, total: 17 });
+  assert.match(h.store.libraryOverlayCache.syncVersion, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(sentMessages.at(-1).msg.type, "TRACE_LIBRARY_INVALIDATED");
+  assert.equal(sentMessages.at(-1).msg.reason, "reader_status");
+});
+
+test("TRACE_SET_READER_STATUS handles validation and auth failures", async () => {
+  const noToken = createBackgroundHarness();
+  const notAuthenticated = await noToken.dispatchMessage({
+    type: "TRACE_SET_READER_STATUS",
+    payload: { entryId: "00000000-0000-4000-8000-000000000123", status: "READING" },
+  });
+  assert.equal(notAuthenticated.ok, false);
+  assert.equal(notAuthenticated.error, "not_authenticated");
+
+  const invalid = createBackgroundHarness({ storageState: { authToken: "token-status-2" } });
+  invalid.hooks.setBearerToken("token-status-2");
+  const invalidResponse = await invalid.dispatchMessage({
+    type: "TRACE_SET_READER_STATUS",
+    payload: { entryId: "not-a-uuid", status: "DROPPED" },
+  });
+  assert.equal(invalidResponse.ok, false);
+  assert.equal(invalidResponse.error, "invalid_request");
+
+  const expired = createBackgroundHarness({
+    storageState: { authToken: "token-status-3" },
+    fetchImpl: async (url) => {
+      if (String(url).includes("/api/library/")) {
+        return createResponse({ ok: false, status: 401 });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  expired.hooks.setBearerToken("token-status-3");
+  const expiredResponse = await expired.dispatchMessage({
+    type: "TRACE_SET_READER_STATUS",
+    payload: { entryId: "00000000-0000-4000-8000-000000000123", status: "COMPLETED" },
+  });
+  assert.equal(expiredResponse.ok, false);
+  assert.equal(expiredResponse.error, "auth_expired");
+  assert.equal(expired.hooks.getBearerToken(), null);
+  assert.equal(expired.store.traceAuthState.state, "reconnect_required");
+  assert.equal(expired.store.traceAuthState.helpUrl, "https://tracefiction.com/");
+});
+
+// =======================================================
+// Hidden work preferences (TRACE_SET_HIDDEN_WORK)
+// =======================================================
+
+test("TRACE_SET_HIDDEN_WORK posts hidden preference and patches overlay cache", async () => {
+  const sentMessages = [];
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-hide-1",
+      libraryOverlayCache: {
+        entries: {
+          "ao3:123": {
+            status: "READING",
+            chapters: { current: 3, total: 17 },
+          },
+        },
+        syncVersion: "v-before",
+      },
+    },
+    activeTabs: [{ id: 91, url: "https://tracefiction.com/library" }],
+    sendMessageImpl: async (tabId, msg) => {
+      sentMessages.push({ tabId, msg });
+      return { ok: true };
+    },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/api/extension/work-preferences")) {
+        assert.equal(init.method, "POST");
+        assert.equal(init.headers.Authorization, "Bearer token-hide-1");
+        assert.deepEqual(JSON.parse(init.body), { key: "ao3:123", hidden: true });
+        return createResponse({
+          json: {
+            success: true,
+            data: {
+              key: "ao3:123",
+              browsePreference: { hidden: true },
+            },
+          },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.hooks.setBearerToken("token-hide-1");
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_SET_HIDDEN_WORK",
+      payload: { key: "ao3:123", hidden: true },
+    },
+    { tab: { id: 88 } },
+  );
+
+  assert.deepEqual(plainJson(response), {
+    ok: true,
+    key: "ao3:123",
+    hidden: true,
+  });
+  assert.equal(
+    h.store.libraryOverlayCache.entries["ao3:123"].browsePreference.hidden,
+    true,
+  );
+  assert.equal(
+    h.store.libraryOverlayCache.workPreferences["ao3:123"].browsePreference.hidden,
+    true,
+  );
+  assert.deepEqual(plainJson(h.badgeTextCalls.at(-1)), { text: "HID", tabId: 88 });
+  assert.equal(sentMessages.at(-1).msg.type, "TRACE_LIBRARY_INVALIDATED");
+  assert.equal(sentMessages.at(-1).msg.reason, "work_preference");
+});
+
+test("TRACE_SET_HIDDEN_WORK clears hidden preference from overlay cache", async () => {
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-hide-2",
+      libraryOverlayCache: {
+        entries: {
+          "ffn:456": {
+            status: "READING",
+            browsePreference: { hidden: true },
+          },
+        },
+        workPreferences: {
+          "ffn:456": { browsePreference: { hidden: true } },
+        },
+        syncVersion: "v-before",
+      },
+    },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/api/extension/work-preferences")) {
+        assert.deepEqual(JSON.parse(init.body), { key: "ffn:456", hidden: false });
+        return createResponse({ json: { success: true } });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.hooks.setBearerToken("token-hide-2");
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_SET_HIDDEN_WORK",
+    payload: { key: "ffn:456", hidden: false },
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.hidden, false);
+  assert.equal(h.store.libraryOverlayCache.entries["ffn:456"].browsePreference, undefined);
+  assert.equal(h.store.libraryOverlayCache.workPreferences["ffn:456"], undefined);
+});
+
+test("TRACE_SET_HIDDEN_WORK handles auth, validation, and rate-limit failures", async () => {
+  const noAuth = createBackgroundHarness();
+  assert.deepEqual(
+    plainJson(
+      await noAuth.dispatchMessage({
+        type: "TRACE_SET_HIDDEN_WORK",
+        payload: { key: "ao3:123", hidden: true },
+      }),
+    ),
+    { ok: false, error: "not_authenticated" },
+  );
+
+  const invalid = createBackgroundHarness({ storageState: { authToken: "token-hide-3" } });
+  invalid.hooks.setBearerToken("token-hide-3");
+  assert.deepEqual(
+    plainJson(
+      await invalid.dispatchMessage({
+        type: "TRACE_SET_HIDDEN_WORK",
+        payload: { key: "bad-key", hidden: true },
+      }),
+    ),
+    { ok: false, error: "invalid_request" },
+  );
+
+  const rateLimited = createBackgroundHarness({
+    storageState: { authToken: "token-hide-4" },
+    fetchImpl: async () => createResponse({ ok: false, status: 429 }),
+  });
+  rateLimited.hooks.setBearerToken("token-hide-4");
+  const rateResponse = await rateLimited.dispatchMessage({
+    type: "TRACE_SET_HIDDEN_WORK",
+    payload: { key: "ao3:123", hidden: true },
+  });
+  assert.equal(rateResponse.ok, false);
+  assert.equal(rateResponse.error, "rate_limited");
+  assert.equal(rateLimited.store.traceAuthState.lastHttpStatus, 429);
+
+  const expired = createBackgroundHarness({
+    storageState: { authToken: "token-hide-5" },
+    fetchImpl: async () => createResponse({ ok: false, status: 401 }),
+  });
+  expired.hooks.setBearerToken("token-hide-5");
+  const expiredResponse = await expired.dispatchMessage({
+    type: "TRACE_SET_HIDDEN_WORK",
+    payload: { key: "ao3:123", hidden: true },
+  });
+  assert.equal(expiredResponse.ok, false);
+  assert.equal(expiredResponse.error, "auth_expired");
+  assert.equal(expired.hooks.getBearerToken(), null);
+
+  const capped = createBackgroundHarness({
+    storageState: { authToken: "token-hide-6" },
+    fetchImpl: async () => createResponse({ ok: false, status: 402 }),
+  });
+  capped.hooks.setBearerToken("token-hide-6");
+  const cappedResponse = await capped.dispatchMessage({
+    type: "TRACE_SET_HIDDEN_WORK",
+    payload: { key: "ao3:123", hidden: true },
+  });
+  assert.equal(cappedResponse.ok, false);
+  assert.equal(cappedResponse.error, "free_limit_reached");
+  assert.equal(capped.store.traceAuthState.state, "upgrade_required");
 });
 
 // =======================================================

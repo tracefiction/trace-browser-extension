@@ -10,7 +10,7 @@ The code here covers the Trace browser extension plus the iOS/macOS Safari Web E
 - The extension does not request browser cookie permission.
 - Content scripts run only on supported AO3/FFN pages and Trace pages listed in the manifest.
 - Obvious AO3/FFN login/signup/auth pages are excluded in the manifest.
-- Collection and overlay scripts also disable themselves at runtime on pages with password fields.
+- Collection and overlay scripts also disable themselves at runtime on login/signup/password pages and pages with unknown password forms. AO3's known header login form can appear on normal story/listing pages; Trace ignores only that header form so supported reading pages still work.
 - Network requests go through the extension background worker to Trace API endpoints.
 
 If anything claiming to be Trace asks for your AO3 or FanFiction.net password, it is not legitimate.
@@ -36,9 +36,12 @@ Trace may send this data to the Trace API when you import, quick-add, auto-track
 - fandoms/tags and related story metadata
 - chapter and word counts
 - reading-progress metadata
+- reader-status updates you explicitly choose in the Trace overlay, such as Planning, Reading, Paused, Completed, or Dropped
+- hidden-work browsing preferences you explicitly choose in the Trace overlay, keyed by the supported AO3/FFN work id
 - your Trace auth token for authenticated Trace API requests
 
 The metadata-improvement preference is separate from automatic progress tracking and can be turned off in the extension popup.
+Hidden-work preferences affect Trace browsing overlays only; they are separate from reader status and do not hide or change the source site itself.
 
 ## What Trace Does Not Send
 
@@ -74,6 +77,13 @@ Use Node 18 or newer.
 ```bash
 npm install
 npm test
+```
+
+Visual fixture screenshots use Playwright Chromium. After a fresh install, run:
+
+```bash
+npm run visual:install-browsers
+npm run visual:screenshots
 ```
 
 For a local extension build, copy `.env.example` to `.env` and set:

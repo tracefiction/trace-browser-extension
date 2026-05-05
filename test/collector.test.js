@@ -763,7 +763,7 @@ test("collectFFNStory mobile (ffn_story_mobile.html) — delegates to collectFFN
   assert.deepEqual(plainJson(item.rels), ["Harry P./Daphne G."]);
 });
 
-test("FFN mobile story renders quick-add button for signed-in users", () => {
+test("FFN mobile story Add saves immediately without opening the sheet", () => {
   const dom = domFromFixture(
     "ffn_story_mobile.html",
     "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter"
@@ -779,10 +779,15 @@ test("FFN mobile story renders quick-add button for signed-in users", () => {
     "utf8",
   );
 
+  const sent = [];
+  let pendingCallback;
   const chrome = {
     runtime: {
       onMessage: { addListener() {} },
-      sendMessage() {},
+      sendMessage(msg, cb) {
+        sent.push(msg);
+        pendingCallback = cb;
+      },
       lastError: null,
     },
     storage: {
@@ -790,6 +795,7 @@ test("FFN mobile story renders quick-add button for signed-in users", () => {
         get(_keys, cb) {
           cb({
             authToken: "test-token",
+            prefAutoTrackEnabled: false,
             libraryOverlayCache: { entries: {} },
           });
         },
@@ -808,9 +814,370 @@ test("FFN mobile story renders quick-add button for signed-in users", () => {
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
 
-  const btn = dom.window.document.querySelector("[data-trace-quick-add]");
-  assert.ok(btn, "expected quick-add button on FFN mobile story page");
-  assert.match(btn.textContent || "", /\+ ADD TO TRACE/i);
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle, "expected Trace handle on FFN mobile story page");
+  assert.match(handle.textContent || "", /^\+ ADD$/);
+  assert.doesNotMatch(handle.textContent || "", /Trace/i);
+  const sentBeforeClick = sent.length;
+  handle.click();
+
+  const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+  assert.ok(sheet, "expected Trace story sheet");
+  assert.notEqual(sheet.getAttribute("aria-hidden"), "false");
+  assert.equal(handle.disabled, true);
+  assert.match(handle.textContent || "", /ADDING\.\.\./);
+  handle.click();
+  assert.equal(sent.length, sentBeforeClick + 1);
+  assert.equal(sent.at(-1).type, "TRACE_QUICK_ADD");
+  assert.equal(sent.at(-1).payload.item.src, "ffn");
+  pendingCallback({ ok: true });
+});
+
+function createStoryAutoTrackPendingHarness(options = {}) {
+  const dom = domFromFixture(
+    "ffn_story_mobile.html",
+    options.url || "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter",
+  );
+  Object.defineProperty(dom.window.document, "visibilityState", {
+    value: "visible",
+    configurable: true,
+  });
+  Object.defineProperty(dom.window.document, "hidden", {
+    value: false,
+    configurable: true,
+  });
+  dom.window.document.hasFocus = () => true;
+
+  const collectorSrc = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "Shared (Extension)",
+      "Resources",
+      "collector.js",
+    ),
+    "utf8",
+  );
+
+  const store = Object.assign(
+    {
+      authToken: "test-token",
+      libraryOverlayCache: { entries: {} },
+    },
+    options.store || {},
+  );
+  const sent = [];
+  let autoTrackCallback;
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(msg, cb) {
+        sent.push(msg);
+        if (msg.type === "TRACE_AUTO_TRACK") {
+          autoTrackCallback = cb;
+          if (!options.holdAutoTrack && typeof cb === "function") {
+            cb(options.autoTrackResponse || { ok: true });
+          }
+          return;
+        }
+        if (msg.type === "TRACE_QUICK_ADD" && typeof cb === "function") {
+          cb(options.quickAddResponse || { ok: true });
+        }
+      },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(keys, cb) {
+          const list = Array.isArray(keys) ? keys : [keys];
+          const out = {};
+          for (const key of list) {
+            if (Object.prototype.hasOwnProperty.call(store, key)) {
+              out[key] = store[key];
+            }
+          }
+          cb(out);
+        },
+        set(value, cb) {
+          Object.assign(store, value || {});
+          if (typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  dom.window.chrome = chrome;
+  dom.window.browser = chrome;
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+
+  return {
+    dom,
+    sent,
+    store,
+    autoTrackCallback(response) {
+      autoTrackCallback(response);
+    },
+  };
+}
+
+test("story page unknown work shows pending while auto-track is in flight and ignores manual add", () => {
+  const { dom, sent } = createStoryAutoTrackPendingHarness({
+    holdAutoTrack: true,
+  });
+
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle, "expected Trace story handle");
+  assert.equal(handle.disabled, true);
+  assert.match(handle.textContent || "", /ADDING\.\.\./);
+
+  const sentBeforeClick = sent.length;
+  handle.click();
+  assert.equal(sent.length, sentBeforeClick);
+  assert.equal(
+    sent.filter((msg) => msg.type === "TRACE_QUICK_ADD").length,
+    0,
+    "manual quick-add must not fire while auto-track is pending",
+  );
+});
+
+test("story page auto-track success updates the pending handle to Reading progress", () => {
+  const { dom, autoTrackCallback } = createStoryAutoTrackPendingHarness({
+    holdAutoTrack: true,
+    url: "https://m.fanfiction.net/s/7038840/2/A-Chance-Encounter",
+  });
+
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.match(handle.textContent || "", /ADDING\.\.\./);
+
+  autoTrackCallback({ ok: true });
+
+  assert.equal(handle.disabled, false);
+  assert.match(handle.textContent || "", /Reading.*2\/28/i);
+});
+
+test("story page auto-track failure uses existing compact error states", () => {
+  const cases = [
+    { response: { ok: false, error: "free_limit_reached" }, expected: /Full/i, disabled: true },
+    { response: { ok: false, error: "auth_expired" }, expected: /Sign in/i, disabled: true },
+    { response: { ok: false, error: "http_503" }, expected: /ERROR/i, disabled: false },
+  ];
+
+  for (const item of cases) {
+    const { dom, autoTrackCallback } = createStoryAutoTrackPendingHarness({
+      holdAutoTrack: true,
+    });
+    const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+    assert.match(handle.textContent || "", /ADDING\.\.\./);
+
+    autoTrackCallback(item.response);
+
+    assert.match(handle.textContent || "", item.expected);
+    assert.equal(handle.disabled, item.disabled);
+  }
+});
+
+test("AO3 story places compact Trace handle centered below title and byline", () => {
+  const dom = new JSDOM(
+    "<!doctype html><html><body><h2 class='title heading'>Demo AO3 Work</h2><h3 class='byline heading'><a rel='author' href='/users/demo/pseuds/demo'>demo</a></h3><dl class='work meta group'><dt class='chapters'>Chapters:</dt><dd class='chapters'>1/1</dd></dl></body></html>",
+    {
+      url: "https://archiveofourown.org/works/12345",
+      contentType: "text/html",
+      runScripts: "outside-only",
+    },
+  );
+  const collectorSrc = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "Shared (Extension)",
+      "Resources",
+      "collector.js",
+    ),
+    "utf8",
+  );
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(_msg, cb) {
+        if (typeof cb === "function") cb({ ok: true });
+      },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb({
+            authToken: "test-token",
+            prefAutoTrackEnabled: false,
+            libraryOverlayCache: { entries: {} },
+          });
+        },
+        set(_value, cb) {
+          if (typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  dom.window.chrome = chrome;
+  dom.window.browser = chrome;
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+
+  const byline = dom.window.document.querySelector("h3.byline.heading");
+  const wrap = dom.window.document.querySelector("[data-trace-quick-add-wrap]");
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+
+  assert.ok(wrap);
+  assert.equal(byline.nextElementSibling, wrap);
+  assert.match(wrap.getAttribute("style") || "", /justify-content:\s*center/i);
+  assert.ok(sheet);
+  assert.equal(sheet.parentElement, dom.window.document.documentElement);
+  assert.equal(sheet.getAttribute("data-trace-story-sheet-placement"), "popover");
+  assert.match(sheet.getAttribute("style") || "", /position:\s*fixed/i);
+  assert.match(sheet.getAttribute("style") || "", /top:/i);
+  assert.match(sheet.getAttribute("style") || "", /left:/i);
+  assert.match(sheet.getAttribute("style") || "", /bottom:\s*auto/i);
+  assert.match(handle.textContent || "", /^\+ ADD$/);
+  assert.doesNotMatch(handle.textContent || "", /Trace/i);
+});
+
+test("mobile story keeps Trace sheet as fixed bottom sheet", () => {
+  const dom = domFromFixture(
+    "ffn_story_mobile.html",
+    "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter",
+  );
+  dom.window.matchMedia = (query) => ({
+    matches: String(query).includes("max-width: 640px"),
+    media: String(query),
+    onchange: null,
+    addListener() {},
+    removeListener() {},
+    addEventListener() {},
+    removeEventListener() {},
+    dispatchEvent() {
+      return false;
+    },
+  });
+  const collectorSrc = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "Shared (Extension)",
+      "Resources",
+      "collector.js",
+    ),
+    "utf8",
+  );
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(_msg, cb) {
+        if (typeof cb === "function") cb({ ok: true });
+      },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb({
+            authToken: "test-token",
+            prefAutoTrackEnabled: false,
+            libraryOverlayCache: { entries: {} },
+          });
+        },
+        set(_value, cb) {
+          if (typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  dom.window.chrome = chrome;
+  dom.window.browser = chrome;
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+
+  const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+  assert.ok(sheet);
+  assert.equal(sheet.parentElement, dom.window.document.documentElement);
+  assert.equal(sheet.getAttribute("data-trace-story-sheet-placement"), "bottom");
+  assert.match(sheet.getAttribute("style") || "", /position:\s*fixed/i);
+  assert.match(sheet.getAttribute("style") || "", /bottom:/i);
+  assert.doesNotMatch(sheet.getAttribute("style") || "", /width:\s*100%/i);
+});
+
+test("FFN desktop story places compact Trace handle after profile header", () => {
+  const dom = new JSDOM(
+    "<!doctype html><html><body><div id='profile_top'><b class='xcontrast_txt'>Demo FFN Work</b> by <a href='/u/1/demo'>demo</a><div class='xcontrast_txt'>A long enough story summary for Trace collection to ignore title-only nodes.</div><span class='xgray xcontrast_txt'>Rated: Fiction T - English - Chapters: 3 - Words: 12,345</span></div></body></html>",
+    {
+      url: "https://www.fanfiction.net/s/67890/1/Demo-FFN-Work",
+      contentType: "text/html",
+      runScripts: "outside-only",
+    },
+  );
+  const collectorSrc = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "Shared (Extension)",
+      "Resources",
+      "collector.js",
+    ),
+    "utf8",
+  );
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(_msg, cb) {
+        if (typeof cb === "function") cb({ ok: true });
+      },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb({
+            authToken: "test-token",
+            prefAutoTrackEnabled: false,
+            libraryOverlayCache: { entries: {} },
+          });
+        },
+        set(_value, cb) {
+          if (typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  dom.window.chrome = chrome;
+  dom.window.browser = chrome;
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+
+  const profileTop = dom.window.document.querySelector("#profile_top");
+  const wrap = dom.window.document.querySelector("[data-trace-quick-add-wrap]");
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+
+  assert.ok(wrap);
+  assert.equal(profileTop.nextElementSibling, wrap);
+  assert.equal(profileTop.querySelector("[data-trace-story-handle]"), null);
+  assert.match(handle.textContent || "", /^\+ ADD$/);
+  assert.doesNotMatch(handle.textContent || "", /Trace/i);
 });
 
 test("FFN mobile story quick-add shows planning after chapter-one success", () => {
@@ -844,6 +1211,7 @@ test("FFN mobile story quick-add shows planning after chapter-one success", () =
         get(_keys, cb) {
           cb({
             authToken: "test-token",
+            prefAutoTrackEnabled: false,
             libraryOverlayCache: { entries: {} },
           });
         },
@@ -866,12 +1234,13 @@ test("FFN mobile story quick-add shows planning after chapter-one success", () =
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
 
-  const btn = dom.window.document.querySelector("[data-trace-quick-add]");
-  assert.ok(btn, "expected quick-add button on FFN mobile story page");
-  btn.click();
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle, "expected quick-add handle on FFN mobile story page");
+  handle.click();
 
   assert.equal(sent[0].payload.item.chn, 1);
-  assert.match(btn.textContent || "", /PLANNING/i);
+  assert.match(handle.textContent || "", /Planning/i);
+  assert.equal(dom.window.document.querySelector("[data-trace-status-choice]"), null);
 });
 
 test("FFN mobile story quick-add shows reading progress after later-chapter success", () => {
@@ -905,6 +1274,7 @@ test("FFN mobile story quick-add shows reading progress after later-chapter succ
         get(_keys, cb) {
           cb({
             authToken: "test-token",
+            prefAutoTrackEnabled: false,
             libraryOverlayCache: { entries: {} },
           });
         },
@@ -927,12 +1297,625 @@ test("FFN mobile story quick-add shows reading progress after later-chapter succ
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
 
-  const btn = dom.window.document.querySelector("[data-trace-quick-add]");
-  assert.ok(btn, "expected quick-add button on FFN mobile story page");
-  btn.click();
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle, "expected quick-add handle on FFN mobile story page");
+  handle.click();
 
   assert.equal(sent[0].payload.item.chn, 2);
-  assert.match(btn.textContent || "", /READING.*2\/28/i);
+  assert.match(handle.textContent || "", /Reading.*2\/28/i);
+});
+
+test("FFN mobile story quick-add shows optional post-add status choices when entryId exists", () => {
+  const entryId = "00000000-0000-4000-8000-000000000321";
+  const choices = [
+    { label: "Planning", status: "PLANNING", expected: /Planning/i },
+    { label: "Reading", status: "READING", expected: /Reading/i },
+    { label: "Paused", status: "PAUSED", expected: /Paused/i },
+    { label: "Completed", status: "COMPLETED", expected: /Completed/i },
+    { label: "Dropped", status: "DROPPED", expected: /Dropped/i },
+  ];
+
+  for (const choice of choices) {
+    const dom = domFromFixture(
+      "ffn_story_mobile.html",
+      "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter"
+    );
+    const collectorSrc = fs.readFileSync(
+      path.join(
+        __dirname,
+        "..",
+        "Shared (Extension)",
+        "Resources",
+        "collector.js",
+      ),
+      "utf8",
+    );
+
+    const sent = [];
+    const chrome = {
+      runtime: {
+        onMessage: { addListener() {} },
+        sendMessage(msg, cb) {
+          sent.push(msg);
+          if (msg.type === "TRACE_QUICK_ADD" && typeof cb === "function") {
+            cb({ ok: true, entryId });
+          } else if (msg.type === "TRACE_SET_READER_STATUS" && typeof cb === "function") {
+            cb({ ok: true, entryId, status: msg.payload.status });
+          }
+        },
+        lastError: null,
+      },
+      storage: {
+        local: {
+          get(_keys, cb) {
+            cb({
+              authToken: "test-token",
+              prefAutoTrackEnabled: false,
+              libraryOverlayCache: { entries: {} },
+            });
+          },
+          set(_value, cb) {
+            if (typeof cb === "function") cb();
+          },
+        },
+        onChanged: { addListener() {} },
+      },
+    };
+
+    dom.window.setTimeout = (fn) => {
+      fn();
+      return 1;
+    };
+    dom.window.chrome = chrome;
+    dom.window.browser = chrome;
+    dom.window.eval(collectorSrc);
+    dom.window.document.dispatchEvent(
+      new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+    );
+
+    const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+    handle.click();
+    handle.click();
+
+    const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+    assert.match(sheet.textContent || "", /Reader status/i);
+    assert.deepEqual(
+      Array.from(sheet.querySelectorAll("[data-trace-status-choice]")).map((button) => button.textContent),
+      ["Planning", "Reading", "Paused", "Completed", "Dropped"],
+    );
+    const choiceBtn = sheet.querySelector(
+      `[data-trace-status-choice='${choice.status}']`,
+    );
+    assert.ok(choiceBtn, `expected ${choice.label} status choice`);
+    choiceBtn.click();
+
+    assert.equal(sent.at(-1).type, "TRACE_SET_READER_STATUS");
+    assert.deepEqual(plainJson(sent.at(-1).payload), { entryId, status: choice.status });
+    assert.match(sheet.textContent || "", choice.expected);
+  }
+});
+
+test("story sheet shows status editing for cached entries with entryId and hides it without entryId", () => {
+  const collectorSrc = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "Shared (Extension)",
+      "Resources",
+      "collector.js",
+    ),
+    "utf8",
+  );
+  const entryId = "00000000-0000-4000-8000-000000703884";
+
+  for (const includeEntryId of [true, false]) {
+    const dom = domFromFixture(
+      "ffn_story_mobile.html",
+      "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter"
+    );
+    const sent = [];
+    const entry = {
+      status: "READING",
+      readerStatus: "READING",
+      chapters: { current: 3, total: 28 },
+    };
+    if (includeEntryId) entry.entryId = entryId;
+
+    const chrome = {
+      runtime: {
+        onMessage: { addListener() {} },
+        sendMessage(msg, cb) {
+          sent.push(msg);
+          if (msg.type === "TRACE_SET_READER_STATUS" && typeof cb === "function") {
+            cb({ ok: true, entryId, status: msg.payload.status });
+          }
+        },
+        lastError: null,
+      },
+      storage: {
+        local: {
+          get(_keys, cb) {
+            cb({
+              authToken: "test-token",
+              libraryOverlayCache: {
+                entries: {
+                  "ffn:7038840": entry,
+                },
+              },
+            });
+          },
+          set(_value, cb) {
+            if (typeof cb === "function") cb();
+          },
+        },
+        onChanged: { addListener() {} },
+      },
+    };
+
+    dom.window.chrome = chrome;
+    dom.window.browser = chrome;
+    dom.window.eval(collectorSrc);
+    dom.window.document.dispatchEvent(
+      new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+    );
+
+    const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+    assert.ok(handle);
+    assert.doesNotMatch(handle.getAttribute("style") || "", /inset 2px 0 0/i);
+    handle.getBoundingClientRect = () => ({
+      left: 120,
+      top: 100,
+      right: 200,
+      bottom: 140,
+      width: 80,
+      height: 40,
+    });
+    handle.click();
+
+    const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+    assert.equal(sheet.getAttribute("aria-hidden"), "false");
+    assert.match(sheet.getAttribute("style") || "", /top:\s*148px/i);
+    handle.click();
+    assert.equal(sheet.getAttribute("aria-hidden"), "true");
+    handle.click();
+    assert.equal(sheet.getAttribute("aria-hidden"), "false");
+    const header = sheet.querySelector("[data-trace-management-header]");
+    assert.ok(header);
+    assert.doesNotMatch(header.textContent || "", /\bTrace\b/i);
+    const choices = sheet.querySelector("[data-trace-status-choices]");
+    if (!includeEntryId) {
+      assert.equal(choices, null);
+      continue;
+    }
+
+    assert.ok(choices);
+    const selected = choices.querySelector("[data-trace-status-selected='1']");
+    assert.ok(selected);
+    assert.equal(selected.getAttribute("data-trace-status-choice"), "READING");
+    assert.equal(selected.getAttribute("aria-pressed"), "true");
+    assert.equal(sheet.querySelector("button[data-trace-quick-add]"), null);
+    assert.deepEqual(
+      Array.from(choices.querySelectorAll("[data-trace-status-choice]")).map((button) => button.textContent),
+      ["Planning", "Reading", "Paused", "Completed", "Dropped"],
+    );
+    const completed = choices.querySelector("[data-trace-status-choice='COMPLETED']");
+    assert.ok(completed);
+    completed.click();
+    assert.deepEqual(plainJson(sent.at(-1)), {
+      type: "TRACE_SET_READER_STATUS",
+      payload: { entryId, status: "COMPLETED" },
+    });
+  }
+});
+
+test("story sheet Planning to Reading sends chapter progress 1 and displays 1/? for unknown total", () => {
+  const collectorSrc = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "Shared (Extension)",
+      "Resources",
+      "collector.js",
+    ),
+    "utf8",
+  );
+  const entryId = "00000000-0000-4000-8000-000000703885";
+  const sent = [];
+  const dom = domFromFixture(
+    "ffn_story_mobile.html",
+    "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter"
+  );
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(msg, cb) {
+        sent.push(msg);
+        if (msg.type === "TRACE_SET_READER_STATUS" && typeof cb === "function") {
+          cb({ ok: true, entryId, status: msg.payload.status });
+        }
+      },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb({
+            authToken: "test-token",
+            libraryOverlayCache: {
+              entries: {
+                "ffn:7038840": {
+                  entryId,
+                  status: "PLANNING",
+                  readerStatus: "PLANNING",
+                  chapters: { current: 0, total: null },
+                },
+              },
+            },
+          });
+        },
+        set(_value, cb) {
+          if (typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  dom.window.chrome = chrome;
+  dom.window.browser = chrome;
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  handle.click();
+  const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+  const reading = sheet.querySelector("[data-trace-status-choice='READING']");
+  assert.ok(reading);
+  reading.click();
+
+  assert.deepEqual(plainJson(sent.at(-1)), {
+    type: "TRACE_SET_READER_STATUS",
+    payload: {
+      entryId,
+      status: "READING",
+      progress: { unit: "CHAPTER", value: 1, total: null },
+    },
+  });
+  assert.match(handle.textContent || "", /Reading\s*·\s*1\/\?/i);
+  assert.doesNotMatch(handle.textContent || "", /Reading\s*·\s*0\/\?/i);
+});
+
+test("FFN mobile story post-add status mutation failure keeps saved state", () => {
+  const entryId = "00000000-0000-4000-8000-000000000322";
+  const dom = domFromFixture(
+    "ffn_story_mobile.html",
+    "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter"
+  );
+  const collectorSrc = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "Shared (Extension)",
+      "Resources",
+      "collector.js",
+    ),
+    "utf8",
+  );
+
+  const sent = [];
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(msg, cb) {
+        sent.push(msg);
+        if (msg.type === "TRACE_QUICK_ADD" && typeof cb === "function") {
+          cb({ ok: true, entryId });
+        } else if (msg.type === "TRACE_SET_READER_STATUS" && typeof cb === "function") {
+          cb({ ok: false, error: "http_500" });
+        }
+      },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb({
+            authToken: "test-token",
+            prefAutoTrackEnabled: false,
+            libraryOverlayCache: { entries: {} },
+          });
+        },
+        set(_value, cb) {
+          if (typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  dom.window.setTimeout = (fn) => {
+    fn();
+    return 1;
+  };
+  dom.window.chrome = chrome;
+  dom.window.browser = chrome;
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  handle.click();
+  handle.click();
+  const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+  const reading = sheet.querySelector("[data-trace-status-choice='READING']");
+  assert.ok(reading);
+  reading.click();
+
+  assert.equal(sent.at(-1).type, "TRACE_SET_READER_STATUS");
+  assert.match(sheet.textContent || "", /Planning/i);
+  assert.match(sheet.textContent || "", /Could not update. Try again./i);
+});
+
+test("FFN mobile story sheet shows known status, progress, private context, and marks", () => {
+  const dom = domFromFixture(
+    "ffn_story_mobile.html",
+    "https://m.fanfiction.net/s/7038840/3/A-Chance-Encounter"
+  );
+  const collectorSrc = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "Shared (Extension)",
+      "Resources",
+      "collector.js",
+    ),
+    "utf8",
+  );
+
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage() {},
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb({
+            authToken: "test-token",
+            libraryOverlayCache: {
+              entries: {
+                "ffn:7038840": {
+                  entryId: "00000000-0000-4000-8000-000000703884",
+                  status: "READING",
+                  readerStatus: "READING",
+                  chapters: { current: 3, total: 28 },
+                  browsePreference: { hidden: true },
+                  privateContext: { hasNotes: true, tagCount: 2 },
+                  workMark: { kind: "abandoned" },
+                },
+              },
+            },
+          });
+        },
+        set(_value, cb) {
+          if (typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  dom.window.chrome = chrome;
+  dom.window.browser = chrome;
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle);
+  assert.match(handle.textContent || "", /Hidden/i);
+  handle.click();
+
+  const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+  assert.match(sheet.textContent || "", /Hidden/i);
+  assert.match(sheet.textContent || "", /3\/28/);
+  assert.match(sheet.textContent || "", /Reading/i);
+  assert.match(sheet.textContent || "", /Saved\s*·\s*Edit notes in Trace/i);
+  assert.match(sheet.textContent || "", /2 saved\s*·\s*Open in Trace/i);
+  assert.match(sheet.textContent || "", /Marked abandoned/i);
+  assert.match(sheet.textContent || "", /Browsing preference/i);
+  assert.equal(
+    sheet.querySelector("[data-trace-open-trace]").getAttribute("href"),
+    "https://tracefiction.com/?panel=details&entryId=00000000-0000-4000-8000-000000703884",
+  );
+});
+
+test("FFN mobile story sheet hides mutation controls with stale token when auth is not connected", () => {
+  const collectorSrc = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "Shared (Extension)",
+      "Resources",
+      "collector.js",
+    ),
+    "utf8",
+  );
+
+  for (const authStateName of ["signed_out", "reconnect_required"]) {
+    const dom = domFromFixture(
+      "ffn_story_mobile.html",
+      "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter"
+    );
+    const chrome = {
+      runtime: {
+        onMessage: { addListener() {} },
+        sendMessage() {},
+        lastError: null,
+      },
+      storage: {
+        local: {
+          get(_keys, cb) {
+            cb({
+              authToken: "stale-token",
+              traceAuthState: {
+                state: authStateName,
+                helpUrl: "https://tracefiction.com/apps",
+              },
+              libraryOverlayCache: {
+                entries: {
+                  "ffn:7038840": {
+                    entryId: "00000000-0000-4000-8000-000000703884",
+                    status: "READING",
+                    readerStatus: "READING",
+                    chapters: { current: 3, total: 28 },
+                  },
+                },
+              },
+            });
+          },
+          set(_value, cb) {
+            if (typeof cb === "function") cb();
+          },
+        },
+        onChanged: { addListener() {} },
+      },
+    };
+
+    dom.window.chrome = chrome;
+    dom.window.browser = chrome;
+    dom.window.eval(collectorSrc);
+    dom.window.document.dispatchEvent(
+      new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+    );
+
+    const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+    assert.ok(handle);
+    handle.click();
+    const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+    assert.match(sheet.textContent || "", /(?:Connect|Reconnect) Trace/i);
+    assert.equal(sheet.querySelector("[data-trace-quick-add]"), null);
+    assert.equal(sheet.querySelector("[data-trace-status-choices]"), null);
+    assert.match(sheet.querySelector("[data-trace-open-trace]").textContent || "", /OPEN TRACE/i);
+  }
+});
+
+test("FFN mobile story sheet quick-add preserves free-limit and error states", () => {
+  const responses = [
+    { response: { ok: false, error: "free_limit_reached" }, text: /Full/i },
+    { response: { ok: false, error: "http_500" }, text: /ERROR/i },
+    { response: { ok: false, error: "auth_expired" }, text: /Sign in/i },
+  ];
+
+  for (const item of responses) {
+    const dom = domFromFixture(
+      "ffn_story_mobile.html",
+      "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter"
+    );
+    const collectorSrc = fs.readFileSync(
+      path.join(
+        __dirname,
+        "..",
+        "Shared (Extension)",
+        "Resources",
+        "collector.js",
+      ),
+      "utf8",
+    );
+
+    const chrome = {
+      runtime: {
+        onMessage: { addListener() {} },
+        sendMessage(_msg, cb) {
+          if (typeof cb === "function") cb(item.response);
+        },
+        lastError: null,
+      },
+      storage: {
+        local: {
+          get(_keys, cb) {
+            cb({
+              authToken: "test-token",
+              libraryOverlayCache: { entries: {} },
+            });
+          },
+          set(_value, cb) {
+            if (typeof cb === "function") cb();
+          },
+        },
+        onChanged: { addListener() {} },
+      },
+    };
+
+    dom.window.setTimeout = () => 1;
+    dom.window.chrome = chrome;
+    dom.window.browser = chrome;
+    dom.window.eval(collectorSrc);
+    dom.window.document.dispatchEvent(
+      new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+    );
+
+    const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+    handle.click();
+    assert.match(handle.textContent || "", item.text);
+  }
+});
+
+test("collector story Trace sheet is not rendered on password pages", () => {
+  const dom = new JSDOM(
+    "<!doctype html><html><body><input type='password'><div id='content'><b>Private</b></div></body></html>",
+    {
+      url: "https://m.fanfiction.net/login.php",
+      contentType: "text/html",
+      runScripts: "outside-only",
+    },
+  );
+  const collectorSrc = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "Shared (Extension)",
+      "Resources",
+      "collector.js",
+    ),
+    "utf8",
+  );
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage() {},
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb({
+            authToken: "test-token",
+            libraryOverlayCache: { entries: {} },
+          });
+        },
+        set(_value, cb) {
+          if (typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  dom.window.chrome = chrome;
+  dom.window.browser = chrome;
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+
+  assert.equal(dom.window.document.querySelector("[data-trace-story-handle]"), null);
+  assert.equal(dom.window.document.querySelector("[data-trace-story-sheet]"), null);
 });
 
 test("auto-track optimistic cache keeps chapter-one stories as planning", () => {

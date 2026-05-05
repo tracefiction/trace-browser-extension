@@ -4,6 +4,8 @@ const PREF_AUTO_TRACK_KEY = "prefAutoTrackEnabled";
 const PREF_LIBRARY_INLAY_KEY = "prefLibraryInlayEnabled";
 const PREF_METADATA_IMPROVE_KEY = "prefMetadataImproveEnabled";
 const TRACE_USER_PRO_KEY = "traceUserPro";
+const TRACE_HOME_URL = "https://tracefiction.com/";
+const TRACE_IOS_SETUP_URL = "https://tracefiction.com/apps#safari-ios-setup";
 
 const isLikelyIosExtensionUi = (() => {
   try {
@@ -16,12 +18,30 @@ const isLikelyIosExtensionUi = (() => {
 const fallbackStatus = {
   state: "signed_out",
   message: isLikelyIosExtensionUi
-    ? "Open tracefiction.com in Safari and sign in with your Trace account, then try again. If you are already signed in there, Safari may still be blocking the extension: tap aA or … → Manage Extensions → Trace, and Allow on tracefiction.com, archiveofourown.org, and fanfiction.net when each site asks."
+    ? "Open tracefiction.com in Safari, sign in, then allow Trace on Trace, AO3, and FFN when Safari asks."
     : "Open Trace and sign in once to connect the extension. Then refresh an AO3 or FFN tab to see your library status and keep progress synced.",
   helpUrl: isLikelyIosExtensionUi
-    ? "https://tracefiction.com/apps#safari-ios-setup"
-    : "https://tracefiction.com/apps",
+    ? TRACE_IOS_SETUP_URL
+    : TRACE_HOME_URL,
 };
+
+function usefulTraceUrl(rawUrl) {
+  try {
+    const URLCtor = typeof URL !== "undefined" ? URL : window.URL;
+    const url = new URLCtor(rawUrl || TRACE_HOME_URL, TRACE_HOME_URL);
+    if (url.pathname === "/apps" && url.hash === "#safari-ios-setup") {
+      return url.href;
+    }
+    if (url.pathname === "/apps" || url.pathname === "/apps/") {
+      url.pathname = "/";
+      url.search = "";
+      url.hash = "";
+    }
+    return url.href;
+  } catch {
+    return TRACE_HOME_URL;
+  }
+}
 
 function statusHeading(state) {
   switch (state) {
@@ -62,19 +82,31 @@ function renderStatus(status) {
   const statusEl = document.getElementById("popup-status");
   const leadEl = document.getElementById("popup-lead");
   const ctaEl = document.getElementById("popup-cta");
+  const eyebrowEl = document.querySelector(".popup-eyebrow");
   const st = next.state || fallbackStatus.state;
+  document.body.dataset.tracePopupState = st;
 
   if (statusEl) {
     statusEl.dataset.state = st;
     statusEl.textContent = statusHeading(st);
   }
 
+  if (eyebrowEl) {
+    eyebrowEl.hidden = st === "connected";
+  }
+
   if (leadEl) {
-    leadEl.textContent = next.message || fallbackStatus.message;
+    if (st === "connected") {
+      leadEl.hidden = true;
+      leadEl.textContent = "";
+    } else {
+      leadEl.hidden = false;
+      leadEl.textContent = next.message || fallbackStatus.message;
+    }
   }
 
   if (ctaEl && next.helpUrl) {
-    ctaEl.href = next.helpUrl;
+    ctaEl.href = usefulTraceUrl(next.helpUrl);
     ctaEl.textContent = ctaLabel(st);
   }
 }

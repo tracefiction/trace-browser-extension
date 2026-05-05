@@ -14,11 +14,13 @@ The extension requests access to supported AO3 and FanFiction.net pages so it ca
 
 The extension does not request browser cookie permission. It does not need AO3 or FanFiction.net credentials.
 
-Content scripts are excluded from obvious AO3/FFN login and signup paths where the manifest supports it, and collection/overlay logic also disables itself at runtime on pages that contain password fields.
+Content scripts are excluded from obvious AO3/FFN login and signup paths where the manifest supports it, and collection/overlay logic also disables itself at runtime on login/signup/password pages and pages that contain unknown password fields. AO3's known header login form can appear on normal story/listing pages; Trace ignores only that header form so supported reading pages still work.
 
 ## Data Sent to Trace
 
-Trace may send story URL, title, author, fandoms/tags, chapter and word counts, reading-progress metadata, and your Trace auth token for Trace API requests.
+Trace may send story URL, title, author, fandoms/tags, chapter and word counts, reading-progress metadata, reader-status changes you explicitly choose in Trace UI, hidden-work browsing preferences you explicitly choose in Trace UI, and your Trace auth token for Trace API requests.
+
+Hidden-work preferences are keyed by supported AO3/FFN work id and affect Trace browsing overlays only. They are separate from library reader status and do not hide or change the source site itself.
 
 Trace does not send AO3/FFN passwords, browser cookies, private messages, drafts, comments, account settings, or full page HTML.
 

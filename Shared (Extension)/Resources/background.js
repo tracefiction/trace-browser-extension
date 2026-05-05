@@ -10,9 +10,11 @@ const TRACE_WEB_ORIGIN = "https://tracefiction.com";
 const API_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/track`;
 const METADATA_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/metadata`;
 const LIBRARY_OVERLAY_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/library-overlay`;
+const WORK_PREFERENCES_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/work-preferences`;
+const LIBRARY_ENTRY_ENDPOINT_BASE = `${TRACE_API_BASE.replace(/\/$/, "")}/api/library`;
 const ACCOUNT_ME_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/account/me`;
 const IMPORT_BASE = `${TRACE_WEB_ORIGIN.replace(/\/$/, "")}/import`;
-const APPS_URL = `${TRACE_WEB_ORIGIN.replace(/\/$/, "")}/apps`;
+const TRACE_HOME_URL = `${TRACE_WEB_ORIGIN.replace(/\/$/, "")}/`;
 const AUTH_TOKEN_KEY = "authToken";
 const AUTH_STATE_KEY = "traceAuthState";
 const OVERLAY_STORAGE_KEY = "libraryOverlayCache";
@@ -67,7 +69,7 @@ function setConnectedState(extra = {}) {
   persistAuthState({
     state: "connected",
     message: "Extension connected to your Trace account.",
-    helpUrl: APPS_URL,
+    helpUrl: TRACE_HOME_URL,
     ...extra,
   });
 }
@@ -77,7 +79,7 @@ function setSignedOutState(extra = {}) {
     state: "signed_out",
     message:
       "Open Trace in Safari once to link the extension. Already signed in? Open any Trace page and we’ll connect automatically.",
-    helpUrl: APPS_URL,
+    helpUrl: TRACE_HOME_URL,
     ...extra,
   });
 }
@@ -86,7 +88,7 @@ function setReconnectState(message, extra = {}) {
   persistAuthState({
     state: "reconnect_required",
     message,
-    helpUrl: APPS_URL,
+    helpUrl: TRACE_HOME_URL,
     ...extra,
   });
 }
@@ -95,7 +97,7 @@ function setErrorState(message, extra = {}) {
   persistAuthState({
     state: "error",
     message,
-    helpUrl: APPS_URL,
+    helpUrl: TRACE_HOME_URL,
     ...extra,
   });
 }
@@ -104,7 +106,7 @@ function setUpgradeState(message, extra = {}) {
   persistAuthState({
     state: "upgrade_required",
     message,
-    helpUrl: APPS_URL,
+    helpUrl: TRACE_HOME_URL,
     ...extra,
   });
 }
@@ -114,7 +116,7 @@ function setConnectedWithSyncWarning(message, extra = {}) {
   persistAuthState({
     state: "connected",
     message,
-    helpUrl: APPS_URL,
+    helpUrl: TRACE_HOME_URL,
     ...extra,
   });
 }
@@ -522,6 +524,22 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     handleQuickAdd(msg.payload, sender, sendResponse);
     return true; // async response
   }
+
+  // -------------------------------------------------
+  // H. Hidden work preference from listing overlay
+  // -------------------------------------------------
+  if (msg.type === "TRACE_SET_HIDDEN_WORK") {
+    handleSetHiddenWork(msg.payload, sender, sendResponse);
+    return true; // async response
+  }
+
+  // -------------------------------------------------
+  // I. Reader status update from story sheet
+  // -------------------------------------------------
+  if (msg.type === "TRACE_SET_READER_STATUS") {
+    handleSetReaderStatus(msg.payload, sender, sendResponse);
+    return true; // async response
+  }
 });
 
 // =======================================================
@@ -756,12 +774,21 @@ async function handleQuickAdd(payload, sender, sendResponse) {
     });
 
     if (response.ok) {
+      const json = await response.json().catch(() => null);
+      const entryId =
+        json && json.data && typeof json.data.entry_id === "string"
+          ? json.data.entry_id
+          : null;
       setConnectedState({ lastQuickAddAt: new Date().toISOString() });
       setBadge(sender?.tab?.id, "OK", "#0D7A5F");
       setTimeout(() => clearBadge(sender?.tab?.id), 2000);
       await refreshLibraryOverlay();
       await signalLibraryInvalidated("quick_add");
-      if (sendResponse) sendResponse({ ok: true });
+      if (sendResponse) {
+        const payload = { ok: true };
+        if (entryId) payload.entryId = entryId;
+        sendResponse(payload);
+      }
     } else if (response.status === 401) {
       clearToken();
       setReconnectState("Your Trace session expired. Open Trace and sign in again.");
@@ -778,7 +805,288 @@ async function handleQuickAdd(payload, sender, sendResponse) {
 }
 
 // =======================================================
-// 6. LIBRARY OVERLAY CACHE (periodic refresh)
+// 6. WORK PREFERENCES (listing overlay hide/unhide)
+// =======================================================
+
+function isValidExternalWorkKey(key) {
+  return /^(?:ao3|ffn):\d+$/.test(String(key || ""));
+}
+
+function isValidUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
+}
+
+function isStorySheetReaderStatus(status) {
+  return (
+    status === "PLANNING" ||
+    status === "READING" ||
+    status === "PAUSED" ||
+    status === "COMPLETED" ||
+    status === "DROPPED"
+  );
+}
+
+function patchOverlayHiddenPreference(key, hidden) {
+  return new Promise((resolve) => {
+    try {
+      ext.storage.local.get([OVERLAY_STORAGE_KEY], (res) => {
+        if (ext.runtime.lastError) {
+          resolve();
+          return;
+        }
+
+        const prev =
+          res && res[OVERLAY_STORAGE_KEY] && typeof res[OVERLAY_STORAGE_KEY] === "object"
+            ? res[OVERLAY_STORAGE_KEY]
+            : {};
+        const entries =
+          prev.entries && typeof prev.entries === "object"
+            ? { ...prev.entries }
+            : {};
+        const workPreferences =
+          prev.workPreferences && typeof prev.workPreferences === "object"
+            ? { ...prev.workPreferences }
+            : {};
+
+        const existingEntry = entries[key];
+        if (existingEntry && typeof existingEntry === "object") {
+          const nextEntry = { ...existingEntry };
+          if (hidden) {
+            nextEntry.browsePreference = {
+              ...(existingEntry.browsePreference || {}),
+              hidden: true,
+            };
+          } else if (nextEntry.browsePreference) {
+            nextEntry.browsePreference = { ...nextEntry.browsePreference };
+            delete nextEntry.browsePreference.hidden;
+            if (Object.keys(nextEntry.browsePreference).length === 0) {
+              delete nextEntry.browsePreference;
+            }
+          }
+          entries[key] = nextEntry;
+        }
+
+        if (hidden) {
+          workPreferences[key] = { browsePreference: { hidden: true } };
+        } else {
+          delete workPreferences[key];
+        }
+
+        ext.storage.local.set(
+          {
+            [OVERLAY_STORAGE_KEY]: {
+              ...prev,
+              entries,
+              workPreferences,
+              syncVersion: new Date().toISOString(),
+            },
+          },
+          () => resolve(),
+        );
+      });
+    } catch (_) {
+      resolve();
+    }
+  });
+}
+
+async function handleSetHiddenWork(payload, sender, sendResponse) {
+  if (!bearerToken) {
+    if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
+    return;
+  }
+
+  const key = payload && typeof payload.key === "string" ? payload.key.trim() : "";
+  const hidden = payload && payload.hidden === true;
+  if (!isValidExternalWorkKey(key) || typeof payload?.hidden !== "boolean") {
+    if (sendResponse) sendResponse({ ok: false, error: "invalid_request" });
+    return;
+  }
+
+  try {
+    const response = await fetch(WORK_PREFERENCES_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${bearerToken}`,
+      },
+      body: JSON.stringify({ key, hidden }),
+    });
+
+    if (response.ok) {
+      setConnectedState({ lastWorkPreferenceAt: new Date().toISOString() });
+      setBadge(sender?.tab?.id, hidden ? "HID" : "OK", hidden ? "#5B5142" : "#0D7A5F");
+      setTimeout(() => clearBadge(sender?.tab?.id), 2000);
+      await patchOverlayHiddenPreference(key, hidden);
+      await signalLibraryInvalidated("work_preference");
+      if (sendResponse) sendResponse({ ok: true, key, hidden });
+    } else if (response.status === 401) {
+      clearToken();
+      setReconnectState("Your Trace session expired. Open Trace and sign in again.");
+      if (sendResponse) sendResponse({ ok: false, error: "auth_expired" });
+    } else if (response.status === 402) {
+      setUpgradeState(
+        "You've reached the free library limit. Upgrade to Pro for unlimited stories.",
+        { lastHttpStatus: response.status },
+      );
+      if (sendResponse) sendResponse({ ok: false, error: "free_limit_reached" });
+    } else if (response.status === 429) {
+      setConnectedWithSyncWarning(
+        "Trace is rate limiting preference changes. Try again in a few minutes.",
+        { lastHttpStatus: response.status },
+      );
+      if (sendResponse) sendResponse({ ok: false, error: "rate_limited" });
+    } else {
+      if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
+    }
+  } catch (e) {
+    console.error("[Trace] Work preference error:", e);
+    if (sendResponse) sendResponse({ ok: false, error: "network_error" });
+  }
+}
+
+// =======================================================
+// 7. READER STATUS (story sheet post-add choices)
+// =======================================================
+
+function normalizeReaderProgress(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  if (raw.unit !== "CHAPTER") return null;
+  const value = Number(raw.value);
+  if (!Number.isFinite(value) || value < 0) return null;
+  const progress = { unit: "CHAPTER", value: Math.trunc(value) };
+  if (raw.total === null || raw.total === undefined) {
+    progress.total = null;
+  } else {
+    const total = Number(raw.total);
+    if (!Number.isFinite(total) || total < 0) return null;
+    progress.total = Math.trunc(total);
+  }
+  return progress;
+}
+
+function chaptersFromReaderProgress(progress) {
+  if (!progress || progress.unit !== "CHAPTER") return null;
+  return {
+    current: progress.value,
+    total: progress.total == null ? null : progress.total,
+  };
+}
+
+function patchOverlayReaderStatus(entryId, status, progress) {
+  return new Promise((resolve) => {
+    try {
+      ext.storage.local.get([OVERLAY_STORAGE_KEY], (res) => {
+        if (ext.runtime.lastError) {
+          resolve(null);
+          return;
+        }
+
+        const prev =
+          res && res[OVERLAY_STORAGE_KEY] && typeof res[OVERLAY_STORAGE_KEY] === "object"
+            ? res[OVERLAY_STORAGE_KEY]
+            : {};
+        const entries =
+          prev.entries && typeof prev.entries === "object"
+            ? { ...prev.entries }
+            : {};
+        let patchedKey = null;
+
+        for (const [key, rawEntry] of Object.entries(entries)) {
+          if (!rawEntry || typeof rawEntry !== "object") continue;
+          if (rawEntry.entryId !== entryId) continue;
+          entries[key] = {
+            ...rawEntry,
+            status,
+            readerStatus: status,
+            ...(chaptersFromReaderProgress(progress)
+              ? { chapters: chaptersFromReaderProgress(progress) }
+              : {}),
+          };
+          patchedKey = key;
+          break;
+        }
+
+        if (!patchedKey) {
+          resolve(null);
+          return;
+        }
+
+        ext.storage.local.set(
+          {
+            [OVERLAY_STORAGE_KEY]: {
+              ...prev,
+              entries,
+              syncVersion: new Date().toISOString(),
+            },
+          },
+          () => resolve(patchedKey),
+        );
+      });
+    } catch (_) {
+      resolve(null);
+    }
+  });
+}
+
+async function handleSetReaderStatus(payload, sender, sendResponse) {
+  if (!bearerToken) {
+    if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
+    return;
+  }
+
+  const entryId = payload && typeof payload.entryId === "string" ? payload.entryId.trim() : "";
+  const status = payload && typeof payload.status === "string" ? payload.status.trim().toUpperCase() : "";
+  const progress = normalizeReaderProgress(payload && payload.progress);
+  if (!isValidUuid(entryId) || !isStorySheetReaderStatus(status) || ((payload && payload.progress) && !progress)) {
+    if (sendResponse) sendResponse({ ok: false, error: "invalid_request" });
+    return;
+  }
+
+  try {
+    const response = await fetch(`${LIBRARY_ENTRY_ENDPOINT_BASE}/${encodeURIComponent(entryId)}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${bearerToken}`,
+      },
+      body: JSON.stringify(progress ? { status, progress } : { status }),
+    });
+
+    if (response.ok) {
+      setConnectedState({ lastReaderStatusAt: new Date().toISOString() });
+      setBadge(sender?.tab?.id, "OK", "#0D7A5F");
+      setTimeout(() => clearBadge(sender?.tab?.id), 2000);
+      const workKey = await patchOverlayReaderStatus(entryId, status, progress);
+      await signalLibraryInvalidated("reader_status");
+      if (sendResponse) sendResponse({ ok: true, entryId, status, workKey });
+    } else if (response.status === 401) {
+      clearToken();
+      setReconnectState("Your Trace session expired. Open Trace and sign in again.");
+      if (sendResponse) sendResponse({ ok: false, error: "auth_expired" });
+    } else if (response.status === 402) {
+      setUpgradeState(
+        "You've reached the free library limit. Upgrade to Pro for unlimited stories.",
+        { lastHttpStatus: response.status },
+      );
+      if (sendResponse) sendResponse({ ok: false, error: "free_limit_reached" });
+    } else if (response.status === 429) {
+      setConnectedWithSyncWarning(
+        "Trace is rate limiting library updates. Try again in a few minutes.",
+        { lastHttpStatus: response.status },
+      );
+      if (sendResponse) sendResponse({ ok: false, error: "rate_limited" });
+    } else {
+      if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
+    }
+  } catch (e) {
+    console.error("[Trace] Reader status error:", e);
+    if (sendResponse) sendResponse({ ok: false, error: "network_error" });
+  }
+}
+
+// =======================================================
+// 8. LIBRARY OVERLAY CACHE (periodic refresh)
 // =======================================================
 
 try {

@@ -173,10 +173,9 @@ test("popup renders signed-out fallback and updates to connected on storage chan
   );
 
   assert.equal(h.document.getElementById("popup-status").textContent, "Connected");
-  assert.equal(
-    h.document.getElementById("popup-lead").textContent,
-    "Extension connected to your Trace account.",
-  );
+  assert.equal(h.document.querySelector(".popup-eyebrow").hidden, true);
+  assert.equal(h.document.getElementById("popup-lead").hidden, true);
+  assert.equal(h.document.getElementById("popup-lead").textContent, "");
   assert.equal(
     h.document.getElementById("popup-cta").textContent,
     "Extension help & FAQ",
@@ -200,9 +199,9 @@ test("popup signed-out lead on iPhone user agent mentions Safari website permiss
   const lead = h.document.getElementById("popup-lead").textContent;
   assert.match(lead, /sign in/i);
   assert.match(lead, /tracefiction\.com/i);
-  assert.match(lead, /Manage Extensions/i);
-  assert.match(lead, /archiveofourown\.org/i);
-  assert.match(lead, /fanfiction\.net/i);
+  assert.match(lead, /allow Trace/i);
+  assert.match(lead, /AO3/i);
+  assert.match(lead, /FFN/i);
   assert.equal(
     h.document.getElementById("popup-cta").getAttribute("href"),
     "https://tracefiction.com/apps#safari-ios-setup",

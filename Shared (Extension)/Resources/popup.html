@@ -8,20 +8,23 @@
 </head>
 <body>
     <main class="popup">
-        <div class="popup-brand">
+        <header class="popup-brand">
             <img class="popup-brand-mark" src="images/trace-mark.svg" alt="" width="32" height="32" />
             <span class="popup-brand-name">trace</span>
-        </div>
-        <p id="popup-status" class="popup-status" role="status">Checking Trace connection…</p>
-        <p id="popup-lead" class="popup-lead">
-            Open Trace and sign in once to connect the extension. Then refresh an AO3 or FFN tab to see your library status and keep progress synced.
-        </p>
+        </header>
+        <section class="popup-sheet" aria-labelledby="popup-status">
+            <p class="popup-eyebrow">Extension lens</p>
+            <p id="popup-status" class="popup-status" role="status">Checking Trace connection…</p>
+            <p id="popup-lead" class="popup-lead">
+                Open Trace and sign in once to connect the extension. Then refresh an AO3 or FFN tab to see your library status and keep progress synced.
+            </p>
+        </section>
         <section
             id="popup-pro-settings"
             class="popup-pro-settings hidden"
             aria-labelledby="popup-pro-heading"
         >
-            <h2 id="popup-pro-heading" class="popup-pro-heading">Trace Pro</h2>
+            <h2 id="popup-pro-heading" class="popup-pro-heading">Extension behavior</h2>
             <label class="popup-switch-row" for="pref-auto-track">
                 <span>Automatic tracking</span>
                 <input type="checkbox" id="pref-auto-track" />
@@ -35,18 +38,20 @@
                 <input type="checkbox" id="pref-metadata-improve" />
             </label>
         </section>
-        <button id="popup-import" class="popup-import" type="button">
-            Import from this page
-        </button>
-        <a
-            id="popup-cta"
-            class="popup-cta"
-            href="https://tracefiction.com/apps"
-            target="_blank"
-            rel="noopener noreferrer"
-        >
-            Open Trace to connect
-        </a>
+        <div class="popup-actions">
+            <button id="popup-import" class="popup-import" type="button">
+                Import from this page
+            </button>
+            <a
+                id="popup-cta"
+                class="popup-cta"
+                href="https://tracefiction.com/"
+                target="_blank"
+                rel="noopener noreferrer"
+            >
+                Open Trace to connect
+            </a>
+        </div>
     </main>
 </body>
 </html>

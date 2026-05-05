@@ -4,11 +4,33 @@
 // Does not read cookies or credentials, and disables collection on pages with password fields.
 const ext = globalThis.browser ?? globalThis.chrome;
 
+function traceIsCredentialPageUrl() {
+  var path = String(location && location.pathname ? location.pathname : "").toLowerCase();
+  var host = String(location && location.hostname ? location.hostname : "").toLowerCase();
+  if (host.indexOf("archiveofourown.org") >= 0) {
+    return /\/users\/(?:login|signup|password)/.test(path);
+  }
+  if (host.indexOf("fanfiction.net") >= 0) {
+    return /(?:^|\/)(?:m\/)?(?:login|signup)(?:\.php)?(?:\/|$)/.test(path);
+  }
+  return false;
+}
+
+function traceIsKnownHeaderPasswordField(input) {
+  var form = input && input.closest ? input.closest("form") : null;
+  if (!form) return false;
+  var id = String(form.id || "");
+  var action = String(form.getAttribute("action") || "");
+  return id === "new_user_session_small" && action.indexOf("/users/login") >= 0;
+}
+
 function tracePageHasPasswordField(root) {
+  if (traceIsCredentialPageUrl()) return true;
   try {
     const inputs = (root || document).querySelectorAll("input");
     for (const input of inputs) {
       if (String(input && input.type ? input.type : "").toLowerCase() === "password") {
+        if (traceIsKnownHeaderPasswordField(input)) continue;
         return true;
       }
     }
@@ -20,6 +42,12 @@ function tracePageHasPasswordField(root) {
 
 function shouldDisableTraceContentScript() {
   return tracePageHasPasswordField(document);
+}
+
+function authStateAllowsActions(authState, hasAuth) {
+  if (!hasAuth) return false;
+  var state = authState && authState.state ? authState.state : "connected";
+  return state !== "signed_out" && state !== "reconnect_required";
 }
 
 function txt(el) {
@@ -244,6 +272,14 @@ var AUTO_TRACK_READY_RETRY_MS = 150;
 var AUTO_TRACK_READY_MAX_ATTEMPTS = 12;
 var OVERLAY_CACHE_KEY = "libraryOverlayCache";
 var optimisticStoryPageEntries = Object.create(null);
+var storyQuickAddUiReady = false;
+var TRACE_READER_STATUS_CHOICES = [
+  "PLANNING",
+  "READING",
+  "PAUSED",
+  "COMPLETED",
+  "DROPPED",
+];
 
 function count(s) {
   // Handles: "12,148" -> 12148, "127k+" -> 127000, "1.2m" -> 1200000
@@ -271,10 +307,88 @@ function overlayWorkKeyFromItem(item) {
   return null;
 }
 
-function normalizeOverlayEntry(entry) {
-  if (!entry) return {};
-  if (typeof entry === "string") return { status: entry };
-  return Object.assign({}, entry);
+function normalizeOverlayPreference(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  if (raw.browsePreference && typeof raw.browsePreference === "object") {
+    return { hidden: raw.browsePreference.hidden === true };
+  }
+  if (raw.hidden === true) return { hidden: true };
+  return null;
+}
+
+function normalizeOverlayChapters(raw) {
+  if (!raw || typeof raw !== "object") return undefined;
+  if (typeof raw.current !== "number" || !Number.isFinite(raw.current)) {
+    return undefined;
+  }
+  var total =
+    raw.total === null || raw.total === undefined ? null : Number(raw.total);
+  return {
+    current: raw.current,
+    total: total !== null && Number.isFinite(total) ? total : null,
+  };
+}
+
+function normalizeOverlayWorkMark(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  var kind = typeof raw.kind === "string" ? raw.kind : null;
+  if (kind !== "abandoned" && kind !== "hiatus") return null;
+  var mark = { kind: kind };
+  if (raw.challenge && typeof raw.challenge === "object") {
+    var challengeKind =
+      typeof raw.challenge.kind === "string" ? raw.challenge.kind : null;
+    if (
+      challengeKind === "source-updated" ||
+      challengeKind === "chapter-count-changed"
+    ) {
+      mark.challenge = { kind: challengeKind };
+      var chapterDelta = Number(raw.challenge.chapterDelta);
+      if (Number.isFinite(chapterDelta) && chapterDelta > 0) {
+        mark.challenge.chapterDelta = Math.trunc(chapterDelta);
+      }
+    }
+  }
+  return mark;
+}
+
+function normalizeOverlayPrivateContext(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  var hasNotes = raw.hasNotes === true;
+  var tagCount = Number(raw.tagCount);
+  if (!Number.isFinite(tagCount) || tagCount < 0) tagCount = 0;
+  tagCount = Math.trunc(tagCount);
+  if (!hasNotes && tagCount === 0) return null;
+  return { hasNotes: hasNotes, tagCount: tagCount };
+}
+
+function normalizeOverlayEntry(entry, preferenceRaw) {
+  var preference = normalizeOverlayPreference(preferenceRaw);
+  if (!entry) {
+    return preference && preference.hidden
+      ? { status: null, readerStatus: null, hidden: true }
+      : {};
+  }
+  if (typeof entry === "string") {
+    return {
+      status: entry,
+      readerStatus: entry,
+      hidden: preference && preference.hidden === true,
+    };
+  }
+  var entryPreference = normalizeOverlayPreference(entry);
+  var status = typeof entry.status === "string" ? entry.status : null;
+  var readerStatus =
+    typeof entry.readerStatus === "string" ? entry.readerStatus : status;
+  return Object.assign({}, entry, {
+    status: status,
+    readerStatus: readerStatus,
+    chapters: normalizeOverlayChapters(entry.chapters),
+    hidden:
+      (entryPreference && entryPreference.hidden === true) ||
+      (preference && preference.hidden === true),
+    workMark: normalizeOverlayWorkMark(entry.workMark),
+    privateContext: normalizeOverlayPrivateContext(entry.privateContext),
+  });
 }
 
 function autoTrackFingerprint(item) {
@@ -422,6 +536,7 @@ function forgetRecentAutoTrack(item) {
 
 function sendAutoTrackForStory(validStory) {
   rememberRecentAutoTrack(validStory);
+  updateAutoTrackPendingForStory(validStory);
   ext.runtime.sendMessage(
     {
       type: "TRACE_AUTO_TRACK",
@@ -434,6 +549,7 @@ function sendAutoTrackForStory(validStory) {
     function (response) {
       if (ext.runtime.lastError) {
         forgetRecentAutoTrack(validStory);
+        updateAutoTrackFailureForStory(validStory, "network_error");
         return;
       }
       if (!response || response.ok !== true) {
@@ -443,6 +559,7 @@ function sendAutoTrackForStory(validStory) {
         if (!response || response.error !== "ignored_sender") {
           forgetRecentAutoTrack(validStory);
         }
+        updateAutoTrackFailureForStory(validStory, response && response.error);
         return;
       }
       applyConfirmedOverlayUpdateForStory(validStory);
@@ -510,15 +627,48 @@ function applyConfirmedOverlayUpdateForStory(item) {
     }, function () {
       if (ext.runtime.lastError) return;
       if (getWorkKeyFromUrl() === workKey) {
-        var btn = document.querySelector("[" + QUICK_ADD_ATTR + "]");
-        if (btn) {
-          applyQuickAddLibraryState(btn, next);
-        } else {
-          renderQuickAddButton(workKey);
-        }
+        renderQuickAddButton(workKey);
       }
     });
   });
+}
+
+function rerenderStoryHandleForWorkKey(workKey) {
+  if (!storyQuickAddUiReady) return;
+  if (!workKey || getWorkKeyFromUrl() !== workKey) return;
+  renderQuickAddButton(workKey);
+}
+
+function optimisticStoryEntryHasLibraryState(entry) {
+  return !!(entry && (entry.readerStatus || entry.status || entry.hidden));
+}
+
+function updateAutoTrackPendingForStory(item) {
+  var workKey = overlayWorkKeyFromItem(item);
+  if (!workKey) return;
+  var prev = optimisticStoryPageEntries[workKey] || {};
+  if (optimisticStoryEntryHasLibraryState(prev)) return;
+  optimisticStoryPageEntries[workKey] = Object.assign({}, prev, {
+    __traceAutoTrackPending: true,
+  });
+  rerenderStoryHandleForWorkKey(workKey);
+}
+
+function updateAutoTrackFailureForStory(item, error) {
+  var workKey = overlayWorkKeyFromItem(item);
+  if (!workKey) return;
+  var prev = optimisticStoryPageEntries[workKey] || {};
+  if (optimisticStoryEntryHasLibraryState(prev)) return;
+  if (error === "ignored_sender") {
+    delete optimisticStoryPageEntries[workKey];
+    rerenderStoryHandleForWorkKey(workKey);
+    return;
+  }
+  optimisticStoryPageEntries[workKey] = Object.assign({}, prev, {
+    __traceAutoTrackPending: false,
+    __traceAutoTrackError: error || "network_error",
+  });
+  rerenderStoryHandleForWorkKey(workKey);
 }
 
 function isAO3() {
@@ -1705,19 +1855,58 @@ function quickAddStatusLabel(status) {
   return labels[status] || status;
 }
 
+function displayChaptersForStatus(status, chapters) {
+  if (!chapters || typeof chapters.current !== "number") return chapters;
+  if (status === "READING" && chapters.current <= 0) {
+    return {
+      current: 1,
+      total: chapters.total == null ? null : chapters.total,
+    };
+  }
+  return chapters;
+}
+
 function quickAddStatusDisplay(info) {
-  var status = info && typeof info.status === "string" ? info.status : null;
+  var status =
+    info && typeof info.readerStatus === "string"
+      ? info.readerStatus
+      : info && typeof info.status === "string"
+        ? info.status
+        : null;
   var label = quickAddStatusLabel(status);
   if (!label) label = "In Library";
   if (
     status !== "PLANNING" &&
-    info.chapters &&
-    typeof info.chapters.current === "number"
+    displayChaptersForStatus(status, info && info.chapters) &&
+    typeof displayChaptersForStatus(status, info && info.chapters).current === "number"
   ) {
-    var total = info.chapters.total;
-    label += " \u00b7 " + info.chapters.current + "/" + (total == null ? "?" : total);
+    var chapters = displayChaptersForStatus(status, info && info.chapters);
+    var total = chapters.total;
+    label += " \u00b7 " + chapters.current + "/" + (total == null ? "?" : total);
   }
   return String(label).toUpperCase();
+}
+
+function storyInlineStatusDisplay(info) {
+  var status =
+    info && typeof info.readerStatus === "string"
+      ? info.readerStatus
+      : info && typeof info.status === "string"
+        ? info.status
+        : null;
+  var label = quickAddStatusLabel(status);
+  if (!label) label = "Saved";
+  if (
+    status !== "PLANNING" &&
+    info &&
+    displayChaptersForStatus(status, info && info.chapters) &&
+    typeof displayChaptersForStatus(status, info && info.chapters).current === "number"
+  ) {
+    var chapters = displayChaptersForStatus(status, info && info.chapters);
+    var total = chapters.total;
+    label += " \u00b7 " + chapters.current + "/" + (total == null ? "?" : total);
+  }
+  return label;
 }
 
 function shouldDelayAutoTrackUntilVisible() {
@@ -1898,43 +2087,133 @@ if (!shouldDisableTraceContentScript()) {
 
 var QUICK_ADD_ATTR = "data-trace-quick-add";
 var QUICK_ADD_WRAP_ATTR = "data-trace-quick-add-wrap";
+var TRACE_STORY_HANDLE_ATTR = "data-trace-story-handle";
+var TRACE_STORY_SHEET_ATTR = "data-trace-story-sheet";
+var TRACE_STORY_SHEET_CLOSE_ATTR = "data-trace-story-sheet-close";
+var TRACE_STATUS_CHOICE_ATTR = "data-trace-status-choice";
+var TRACE_STATUS_CHOICE_ERROR_ATTR = "data-trace-status-choice-error";
 
-// Trace chip styles — matches library-overlay.js badge design
-var TRACE_FONT = "700 10px/1 Manrope,system-ui,-apple-system,'Segoe UI',sans-serif";
+var TRACE_UI = {
+  font: "Manrope,system-ui,-apple-system,'Segoe UI',sans-serif",
+  paper: "#fffdf8",
+  paperRaised: "#fbf7ee",
+  paperSoft: "#f6f1e7",
+  ink: "#1f2933",
+  muted: "#647067",
+  subtle: "#8a8171",
+  border: "rgba(65,72,70,0.16)",
+  borderStrong: "rgba(65,72,70,0.24)",
+  forest: "#2d4b43",
+  forestOn: "#c8eadf",
+  gold: "#f7e6b6",
+  goldOn: "#594402",
+  rust: "#9a3412",
+  danger: "#ba1a1a",
+  radiusXs: "7px",
+  radiusSm: "8px",
+  radiusMd: "10px",
+  shadowLow: "0 1px 2px rgba(28,28,23,0.08)",
+  shadowSheet: "0 18px 48px rgba(28,28,23,0.24)",
+};
+
+// Local Trace extension UI tokens; keep this independent from the web app bundle.
+var TRACE_FONT = "700 10px/1 " + TRACE_UI.font;
 var TRACE_CHIP_BASE = [
   "display:inline-flex",
   "align-items:center",
   "justify-content:center",
   "box-sizing:border-box",
-  "padding:5px 12px",
-  "min-height:24px",
-  "border-radius:8px",
+  "padding:5px 10px",
+  "min-height:28px",
+  "border-radius:" + TRACE_UI.radiusSm,
   "font:" + TRACE_FONT,
-  "letter-spacing:0.06em",
+  "letter-spacing:0.04em",
   "text-transform:uppercase",
   "white-space:nowrap",
 ].join(";");
 
 var TRACE_THEMES = {
-  add:     { bg: "transparent", fg: "#64748b", border: "rgba(100,116,139,0.35)", hover: "#f1f5f9" },
-  adding:  { bg: "#f1f5f9",     fg: "#94a3b8", border: "rgba(148,163,184,0.3)" },
-  status:  { bg: "#fddc8e",     fg: "#594402", border: "rgba(89,68,2,0.2)" },
-  added:   { bg: "#2d4b43",     fg: "#c8eadf", border: "rgba(22,52,45,0.35)" },
+  add:     { bg: TRACE_UI.forest, fg: TRACE_UI.forestOn, border: "rgba(22,52,45,0.35)", hover: "#385d52" },
+  adding:  { bg: TRACE_UI.paperSoft, fg: TRACE_UI.subtle, border: "rgba(148,163,184,0.3)" },
+  status:  { bg: TRACE_UI.gold, fg: TRACE_UI.goldOn, border: "rgba(89,68,2,0.2)" },
+  added:   { bg: TRACE_UI.forest, fg: TRACE_UI.forestOn, border: "rgba(22,52,45,0.35)" },
   error:   { bg: "#fef2f2",     fg: "#dc2626", border: "rgba(220,38,38,0.25)" },
-  full:    { bg: "#fffbeb",     fg: "#b45309", border: "rgba(180,83,9,0.25)" },
+  full:    { bg: "#fff7df",     fg: "#b45309", border: "rgba(180,83,9,0.25)" },
+  hidden:  { bg: "#eee7da",     fg: "#5b5142", border: "rgba(91,81,66,0.28)" },
+  muted:   { bg: "#edf2ef",     fg: "#41504c", border: "rgba(65,80,76,0.18)" },
+  mark:    { bg: "#f0e9dc",     fg: "#6f4d1f", border: "rgba(111,77,31,0.24)" },
 };
 
 // Status themes reuse library-overlay badge palette
 var TRACE_STATUS_THEMES = {
-  READING:   { bg: "#fddc8e", fg: "#594402", border: "rgba(89,68,2,0.2)" },
-  PLANNING:  { bg: "#ebe8df", fg: "#414846", border: "rgba(65,72,70,0.16)" },
+  READING:   { bg: TRACE_UI.gold, fg: TRACE_UI.goldOn, border: "rgba(89,68,2,0.2)" },
+  PLANNING:  { bg: TRACE_UI.paperSoft, fg: "#414846", border: TRACE_UI.border },
   PAUSED:    { bg: "#7c2d12", fg: "#ffffff", border: "rgba(124,45,18,0.5)" },
-  COMPLETED: { bg: "#2d4b43", fg: "#c8eadf", border: "rgba(22,52,45,0.35)" },
+  COMPLETED: { bg: TRACE_UI.forest, fg: TRACE_UI.forestOn, border: "rgba(22,52,45,0.35)" },
   DROPPED:   { bg: "#efe4e4", fg: "#ba1a1a", border: "rgba(186,26,26,0.22)" },
+};
+
+var TRACE_INLINE_THEMES = {
+  add: { bg: "rgba(45,75,67,0.08)", fg: TRACE_UI.forest, border: "rgba(45,75,67,0.22)", accent: TRACE_UI.forest },
+  muted: { bg: "rgba(65,80,76,0.045)", fg: "#41504c", border: "rgba(65,80,76,0.14)", accent: "#647067" },
+  hidden: { bg: "rgba(91,81,66,0.055)", fg: "#5b5142", border: "rgba(91,81,66,0.16)", accent: "#8a8171" },
+  saving: { bg: "rgba(65,80,76,0.045)", fg: TRACE_UI.subtle, border: "rgba(65,80,76,0.14)", accent: TRACE_UI.subtle },
+  error: { bg: "rgba(254,242,242,0.72)", fg: "#dc2626", border: "rgba(220,38,38,0.2)", accent: "#dc2626" },
+  READING: { bg: "rgba(241,213,138,0.16)", fg: TRACE_UI.goldOn, border: "rgba(89,68,2,0.16)", accent: "#b88a16" },
+  PLANNING: { bg: "rgba(65,72,70,0.035)", fg: "#414846", border: "rgba(65,72,70,0.14)", accent: "#7d857c" },
+  PAUSED: { bg: "rgba(124,45,18,0.07)", fg: "#7c2d12", border: "rgba(124,45,18,0.18)", accent: "#9a3412" },
+  COMPLETED: { bg: "rgba(45,75,67,0.07)", fg: TRACE_UI.forest, border: "rgba(45,75,67,0.18)", accent: TRACE_UI.forest },
+  DROPPED: { bg: "rgba(186,26,26,0.055)", fg: "#9f1d1d", border: "rgba(186,26,26,0.16)", accent: "#ba1a1a" },
 };
 
 function traceChipCss(theme) {
   return TRACE_CHIP_BASE + ";background:" + theme.bg + ";color:" + theme.fg + ";border:1px solid " + theme.border;
+}
+
+function traceActionCss(theme) {
+  return traceChipCss(theme) + ";min-height:42px;padding:0 14px;font:800 11px/1 " + TRACE_UI.font + ";cursor:pointer;box-shadow:" + TRACE_UI.shadowLow + ";transition:background-color 120ms ease,border-color 120ms ease,color 120ms ease,box-shadow 120ms ease";
+}
+
+function isCompactTraceInline() {
+  try {
+    return !!(
+      window.matchMedia &&
+      window.matchMedia("(max-width: 640px)").matches
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+function isMobileStorySheet() {
+  try {
+    return !!(
+      window.matchMedia &&
+      window.matchMedia("(max-width: 640px)").matches
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+function traceInlineHandleCss(theme) {
+  return [
+    "display:inline-flex",
+    "align-items:center",
+    "justify-content:center",
+    "box-sizing:border-box",
+    "min-height:" + (isCompactTraceInline() ? "28px" : "22px"),
+    "padding:" + (isCompactTraceInline() ? "0 10px" : "0 8px"),
+    "border-radius:" + TRACE_UI.radiusXs,
+    "border:1px solid " + theme.border,
+    "background:" + theme.bg,
+    "color:" + theme.fg,
+    "font:" + (isCompactTraceInline() ? "800 10px/1 " : "700 11px/1 ") + TRACE_UI.font,
+    "letter-spacing:0",
+    "text-transform:none",
+    "white-space:nowrap",
+    "cursor:pointer",
+  ].join(";");
 }
 
 function getWorkKeyFromUrl() {
@@ -1957,41 +2236,430 @@ function findQuickAddAnchor() {
   if (isFFN()) {
     if (isFFNMobile()) {
       var mobileHeader = one(document, "#content > div[align='center']");
-      if (mobileHeader) {
-        return (
-          one(mobileHeader, "a[href*='/u/']") ||
-          one(mobileHeader, "b") ||
-          mobileHeader
-        );
-      }
+      if (mobileHeader) return mobileHeader;
       return (
-        one(document, "#content a[href*='/u/']") ||
-        one(document, "#content b")
+        one(document, "#content .xcontrast_txt") ||
+        one(document, "#content")
       );
     }
-    var authorLink = one(document, '#profile_top a[href*="/u/"]');
-    return authorLink || one(document, "#profile_top b");
+    return one(document, "#profile_top") || one(document, "#content_wrapper_inner");
   }
   return null;
 }
 
+function storyTraceOpenUrl(authState, entry) {
+  var fallback = "https://tracefiction.com/";
+  var raw = authState && authState.helpUrl ? authState.helpUrl : fallback;
+  try {
+    var url = new URL(raw, fallback);
+    if (url.pathname === "/apps" || url.pathname === "/apps/") {
+      url.pathname = "/";
+      url.search = "";
+      url.hash = "";
+    }
+    var entryId = entry && typeof entry.entryId === "string" ? entry.entryId.trim() : "";
+    if (entryId) {
+      url.pathname = "/";
+      url.search = "";
+      url.hash = "";
+      url.searchParams.set("panel", "details");
+      url.searchParams.set("entryId", entryId);
+    }
+    return url.href;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function entryStatus(entry) {
+  return entry && (entry.readerStatus || entry.status) ? entry.readerStatus || entry.status : null;
+}
+
+function progressDisplay(entry) {
+  var status = entryStatus(entry);
+  var chapters = displayChaptersForStatus(status, entry && entry.chapters);
+  if (!chapters || typeof chapters.current !== "number") return null;
+  return chapters.current + "/" + (chapters.total == null ? "?" : chapters.total);
+}
+
+function workMarkDisplay(entry) {
+  if (!entry || !entry.workMark) return null;
+  if (entry.workMark.kind === "abandoned") return "Marked abandoned";
+  if (entry.workMark.kind === "hiatus") return "Marked hiatus";
+  return null;
+}
+
+function storyHeadline(view) {
+  if (!view.hasAuth) {
+    if (view.authState && view.authState.state === "reconnect_required") return "Reconnect Trace";
+    if (view.authState && view.authState.state === "error") return "Trace unavailable";
+    return "Connect Trace";
+  }
+  if (view.entry && view.entry.__traceStatusPending) return "Saving...";
+  if (view.entry && view.entry.__traceStatusError) return "Update failed";
+  if (view.entry && view.entry.hidden) return "Hidden";
+  if (view.entry && view.entry.workMark && view.entry.workMark.challenge) return "Review mark";
+  var mark = workMarkDisplay(view.entry);
+  if (mark) return mark;
+  var status = entryStatus(view.entry);
+  if (status) return quickAddStatusLabel(status);
+  return "Not in Trace";
+}
+
+function storyCaption(view) {
+  if (!view.hasAuth) {
+    if (view.authState && view.authState.state === "reconnect_required") {
+      return "Your session needs a refresh.";
+    }
+    if (view.authState && view.authState.state === "error") {
+      return "Last sync failed. Source reading stays usable.";
+    }
+    return "Sign in to show your library lens here.";
+  }
+  if (view.entry && view.entry.__traceStatusPending) {
+    return view.entry.__traceStatusTarget
+      ? "Saving " + quickAddStatusLabel(view.entry.__traceStatusTarget)
+      : "Saving reader status";
+  }
+  if (view.entry && view.entry.__traceStatusError) return view.entry.__traceStatusError;
+  if (!entryStatus(view.entry) && !(view.entry && view.entry.hidden)) {
+    return "One tap saves this to your Trace library.";
+  }
+  if (view.entry && view.entry.hidden) return "Hidden from browsing";
+  if (
+    view.entry &&
+    view.entry.workMark &&
+    view.entry.workMark.challenge &&
+    typeof view.entry.workMark.challenge.chapterDelta === "number"
+  ) {
+    return "+" + view.entry.workMark.challenge.chapterDelta + " chapters since your mark.";
+  }
+  var progress = progressDisplay(view.entry);
+  if (progress) return "Chapter " + progress;
+  return "In your library";
+}
+
+function handleDisplay(view) {
+  if (!view.hasAuth) return "Connect";
+  if (view.entry && view.entry.__traceAutoTrackPending) return "ADDING...";
+  if (view.entry && view.entry.__traceAutoTrackError === "free_limit_reached") return "Full";
+  if (
+    view.entry &&
+    (view.entry.__traceAutoTrackError === "auth_expired" ||
+      view.entry.__traceAutoTrackError === "not_authenticated")
+  ) {
+    return "Sign in";
+  }
+  if (view.entry && view.entry.__traceAutoTrackError) return "ERROR";
+  if (view.entry && view.entry.__traceStatusPending) return "Saving...";
+  if (view.entry && view.entry.__traceStatusError) return "Update failed";
+  if (view.entry && view.entry.hidden) return "Hidden";
+  var status = entryStatus(view.entry);
+  if (status) return storyInlineStatusDisplay(view.entry);
+  return "+ ADD";
+}
+
+function autoTrackHandleDisabled(entry) {
+  if (!entry) return false;
+  if (entry.__traceAutoTrackPending) return true;
+  return (
+    entry.__traceAutoTrackError === "free_limit_reached" ||
+    entry.__traceAutoTrackError === "auth_expired" ||
+    entry.__traceAutoTrackError === "not_authenticated"
+  );
+}
+
+function applySheetVisibility(sheet, open) {
+  if (!sheet) return;
+  if (
+    open &&
+    sheet.getAttribute("data-trace-story-sheet-placement") === "popover"
+  ) {
+    positionDesktopStorySheet(
+      sheet,
+      document.querySelector("[" + TRACE_STORY_HANDLE_ATTR + "]"),
+    );
+  }
+  sheet.style.display = open ? "block" : "none";
+  sheet.setAttribute("aria-hidden", open ? "false" : "true");
+  sheet.setAttribute("data-trace-open", open ? "1" : "0");
+}
+
+function storySheetCss(mobile) {
+  var base = [
+    "z-index:2147483646",
+    "box-sizing:border-box",
+    "max-height:" + (mobile ? "min(70vh,460px)" : "min(68vh,520px)"),
+    "overflow:auto",
+    "overscroll-behavior:contain",
+    "padding:12px",
+    "border-radius:14px",
+    "border:1px solid " + TRACE_UI.borderStrong,
+    "background:" + TRACE_UI.paper,
+    "color:" + TRACE_UI.ink,
+    "box-shadow:" + TRACE_UI.shadowSheet,
+    "font:500 13px/1.4 " + TRACE_UI.font,
+  ];
+  if (mobile) {
+    return [
+      "position:fixed",
+      "left:10px",
+      "right:10px",
+      "bottom:calc(10px + env(safe-area-inset-bottom,0px))",
+      "margin:0 auto",
+      "max-width:none",
+    ].concat(base).join(";");
+  }
+  return [
+    "position:fixed",
+    "margin:0",
+    "max-width:430px",
+    "text-align:left",
+  ].concat(base).join(";");
+}
+
+function positionDesktopStorySheet(sheet, handle) {
+  if (!sheet || !handle || !handle.getBoundingClientRect) return;
+  var rect = handle.getBoundingClientRect();
+  var viewportWidth = Math.max(
+    320,
+    window.innerWidth || document.documentElement.clientWidth || 430,
+  );
+  var panelWidth = Math.min(430, Math.max(280, viewportWidth - 20));
+  var left = rect.left + rect.width / 2 - panelWidth / 2;
+  left = Math.max(10, Math.min(left, viewportWidth - panelWidth - 10));
+  var top = Math.max(10, rect.bottom + 8);
+
+  sheet.style.width = panelWidth + "px";
+  sheet.style.left = left + "px";
+  sheet.style.top = top + "px";
+  sheet.style.right = "auto";
+  sheet.style.bottom = "auto";
+}
+
+function placeStorySheet(sheet, wrap, handle) {
+  if (!sheet) return;
+  var mobile = isMobileStorySheet();
+  var parent = document.documentElement;
+  if (parent && sheet.parentElement !== parent) {
+    parent.appendChild(sheet);
+  }
+  sheet.style.cssText = storySheetCss(mobile);
+  if (!mobile) positionDesktopStorySheet(sheet, handle);
+  sheet.setAttribute("data-trace-story-sheet-placement", mobile ? "bottom" : "popover");
+}
+
+function sheetRowEl(label, value, emphasis) {
+  var row = document.createElement("div");
+  row.setAttribute("data-trace-story-sheet-row", label);
+  row.style.cssText = [
+    "display:flex",
+    "align-items:center",
+    "justify-content:space-between",
+    "gap:12px",
+    "box-sizing:border-box",
+    "min-height:44px",
+    "padding:8px 10px",
+    "border-radius:" + TRACE_UI.radiusSm,
+    "border:1px solid " + (emphasis ? "rgba(154,52,18,0.24)" : TRACE_UI.border),
+    "background:" + (emphasis ? "#fff7ed" : TRACE_UI.paperRaised),
+  ].join(";");
+  var labelEl = document.createElement("span");
+  labelEl.textContent = label;
+  labelEl.style.cssText = "font:800 9px/1 " + TRACE_UI.font + ";letter-spacing:0.06em;text-transform:uppercase;color:" + TRACE_UI.muted;
+  var valueEl = document.createElement("span");
+  valueEl.textContent = value;
+  valueEl.style.cssText = "font:700 12px/1.25 " + TRACE_UI.font + ";color:" + TRACE_UI.ink + ";text-align:right";
+  row.appendChild(labelEl);
+  row.appendChild(valueEl);
+  return row;
+}
+
+function readerStatusChoiceLabel(status) {
+  return quickAddStatusLabel(status);
+}
+
+function readerStatusChoiceErrorCopy(error) {
+  if (error === "auth_expired" || error === "not_authenticated") {
+    return "Reconnect Trace, then try again.";
+  }
+  if (error === "rate_limited") return "Trace is rate limiting updates. Try again soon.";
+  if (error === "free_limit_reached") return "Library limit reached.";
+  return "Could not update. Try again.";
+}
+
+function readerStatusProgressPatch(entry, nextStatus) {
+  var currentStatus = entryStatus(entry);
+  var chapters = entry && entry.chapters;
+  if (
+    nextStatus !== "READING" ||
+    currentStatus !== "PLANNING" ||
+    !chapters ||
+    typeof chapters.current !== "number" ||
+    chapters.current > 0
+  ) {
+    return null;
+  }
+  var total = chapters.total == null ? null : chapters.total;
+  return {
+    progress: { unit: "CHAPTER", value: 1, total: total },
+    chapters: { current: 1, total: total },
+  };
+}
+
+function updateOptimisticReaderStatus(workKey, status, chapters) {
+  var prev = optimisticStoryPageEntries[workKey] || {};
+  var next = Object.assign({}, prev, {
+    status: status,
+    readerStatus: status,
+    statusChoicesAvailable: true,
+  });
+  if (chapters) next.chapters = chapters;
+  delete next.__traceStatusPending;
+  delete next.__traceStatusTarget;
+  delete next.__traceStatusError;
+  optimisticStoryPageEntries[workKey] = next;
+}
+
+function snapshotStoryEntry(entry) {
+  return Object.assign({}, entry || {}, {
+    chapters: entry && entry.chapters
+      ? {
+          current: entry.chapters.current,
+          total: entry.chapters.total,
+        }
+      : undefined,
+  });
+}
+
+function updateOptimisticReaderStatusPending(workKey, entry, status) {
+  var next = snapshotStoryEntry(entry);
+  next.__traceStatusPending = true;
+  next.__traceStatusTarget = status;
+  delete next.__traceStatusError;
+  optimisticStoryPageEntries[workKey] = next;
+}
+
+function updateOptimisticReaderStatusError(workKey, entry, error) {
+  var next = snapshotStoryEntry(entry);
+  delete next.__traceStatusPending;
+  delete next.__traceStatusTarget;
+  next.__traceStatusError = error || "update_failed";
+  optimisticStoryPageEntries[workKey] = next;
+}
+
+function bindReaderStatusChoice(btn, workKey, entry, status, errorEl) {
+  btn.addEventListener("click", function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    var entryId = entry && entry.entryId;
+    if (!entryId) return;
+    var statusPatch = readerStatusProgressPatch(entry, status);
+    var previousEntry = snapshotStoryEntry(entry);
+    var sheet = document.querySelector("[" + TRACE_STORY_SHEET_ATTR + "]");
+    if (sheet) applySheetVisibility(sheet, false);
+    if (errorEl) errorEl.textContent = "";
+    updateOptimisticReaderStatusPending(workKey, entry, status);
+    renderQuickAddButton(workKey);
+
+    ext.runtime.sendMessage(
+      {
+        type: "TRACE_SET_READER_STATUS",
+        payload: Object.assign(
+          { entryId: entryId, status: status },
+          statusPatch && statusPatch.progress ? { progress: statusPatch.progress } : {},
+        ),
+      },
+      function (response) {
+        if (ext.runtime.lastError || !response || !response.ok) {
+          updateOptimisticReaderStatusError(workKey, previousEntry, readerStatusChoiceErrorCopy(response && response.error));
+          renderQuickAddButton(workKey);
+          return;
+        }
+        updateOptimisticReaderStatus(workKey, status, statusPatch && statusPatch.chapters);
+        renderQuickAddButton(workKey);
+      },
+    );
+  });
+}
+
+function appendReaderStatusChoices(actions, view, workKey) {
+  var entry = view.entry || {};
+  if (!view.hasAuth) return;
+  if (!entry.entryId) return;
+
+  var wrap = document.createElement("div");
+  wrap.setAttribute("data-trace-status-choices", "1");
+  wrap.style.cssText = "flex:1 0 100%;display:grid;gap:8px;margin-top:2px";
+
+  var label = document.createElement("div");
+  label.textContent = "Reader status";
+  label.style.cssText = "font:800 9px/1 " + TRACE_UI.font + ";letter-spacing:0.07em;text-transform:uppercase;color:" + TRACE_UI.muted;
+  wrap.appendChild(label);
+
+  var row = document.createElement("div");
+  row.style.cssText = "display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:6px";
+  var error = document.createElement("div");
+  error.setAttribute(TRACE_STATUS_CHOICE_ERROR_ATTR, "1");
+  error.style.cssText = "min-height:16px;color:#b42318;font:700 11px/1.25 " + TRACE_UI.font;
+
+  TRACE_READER_STATUS_CHOICES.forEach(function (status) {
+    var choice = document.createElement("button");
+    choice.type = "button";
+    choice.setAttribute(TRACE_STATUS_CHOICE_ATTR, status);
+    if (entryStatus(entry) === status) {
+      choice.setAttribute("data-trace-status-selected", "1");
+      choice.setAttribute("aria-pressed", "true");
+    } else {
+      choice.setAttribute("aria-pressed", "false");
+    }
+    choice.textContent = readerStatusChoiceLabel(status);
+    choice.style.cssText = traceActionCss(
+      entryStatus(entry) === status ? TRACE_THEMES.status : TRACE_THEMES.add,
+    ) + ";padding:0 8px";
+    bindReaderStatusChoice(choice, workKey, entry, status, error);
+    row.appendChild(choice);
+  });
+  wrap.appendChild(row);
+  wrap.appendChild(error);
+  actions.appendChild(wrap);
+}
+
 function ensureQuickAddElements(workKey, anchor) {
   var wrap = document.querySelector("[" + QUICK_ADD_WRAP_ATTR + "]");
-  var btn = document.querySelector("[" + QUICK_ADD_ATTR + "]");
+  var handle = document.querySelector("[" + TRACE_STORY_HANDLE_ATTR + "]");
+  var sheet = document.querySelector("[" + TRACE_STORY_SHEET_ATTR + "]");
 
   if (!wrap) {
     wrap = document.createElement("div");
     wrap.setAttribute(QUICK_ADD_WRAP_ATTR, workKey);
-    wrap.style.cssText = "margin:8px 0 6px 0;";
+  }
+  wrap.style.cssText = [
+    "display:flex",
+    "flex-direction:column",
+    "align-items:center",
+    "justify-content:center",
+    "box-sizing:border-box",
+    "clear:both",
+    "margin:" + (isAO3() ? "4px auto 8px auto" : "6px 0 8px 0"),
+    "min-height:26px",
+    "text-align:center",
+  ].join(";");
+
+  if (!handle) {
+    handle = document.createElement("button");
+    handle.setAttribute(TRACE_STORY_HANDLE_ATTR, workKey);
+    handle.type = "button";
+    wrap.appendChild(handle);
+  } else if (handle.parentElement !== wrap) {
+    wrap.appendChild(handle);
   }
 
-  if (!btn) {
-    btn = document.createElement("button");
-    btn.setAttribute(QUICK_ADD_ATTR, workKey);
-    btn.type = "button";
-    wrap.appendChild(btn);
-  } else if (btn.parentElement !== wrap) {
-    wrap.appendChild(btn);
+  if (!sheet) {
+    sheet = document.createElement("aside");
+    sheet.setAttribute(TRACE_STORY_SHEET_ATTR, workKey);
+    sheet.setAttribute("role", "dialog");
+    sheet.setAttribute("aria-label", "Trace story sheet");
   }
 
   if (!wrap.isConnected) {
@@ -2001,8 +2669,9 @@ function ensureQuickAddElements(workKey, anchor) {
       if (anchor.parentNode) anchor.parentNode.appendChild(wrap);
     }
   }
+  placeStorySheet(sheet, wrap, handle);
 
-  return { wrap: wrap, btn: btn };
+  return { wrap: wrap, handle: handle, sheet: sheet };
 }
 
 function removeQuickAddElements() {
@@ -2010,21 +2679,218 @@ function removeQuickAddElements() {
   if (wrap) {
     wrap.remove();
   }
+  var sheet = document.querySelector("[" + TRACE_STORY_SHEET_ATTR + "]");
+  if (sheet) {
+    sheet.remove();
+  }
 }
 
 function applyQuickAddLibraryState(btn, info) {
-  var statusTheme = TRACE_STATUS_THEMES[info.status] || TRACE_STATUS_THEMES.READING;
-  btn.style.cssText = traceChipCss(statusTheme);
+  var status = entryStatus(info) || "READING";
+  var statusTheme = TRACE_STATUS_THEMES[status] || TRACE_STATUS_THEMES.READING;
+  btn.style.cssText = traceActionCss(statusTheme);
   btn.textContent = quickAddStatusDisplay(info);
   btn.title = "This story is in your Trace library";
   btn.disabled = true;
 }
 
-function applyQuickAddActionState(btn, addTheme) {
-  btn.style.cssText = traceChipCss(addTheme) + ";cursor:pointer";
-  btn.textContent = "+ ADD TO TRACE";
+function applyQuickAddActionState(btn, addTheme, compact) {
+  btn.style.cssText = traceActionCss(addTheme);
+  btn.textContent = compact ? "+ ADD" : "ADD TO TRACE";
   btn.title = "Add this story to your Trace library";
   btn.disabled = false;
+}
+
+function sendQuickAddAction(btn, workKey, addTheme, compact) {
+  var collected = collect();
+  if (!collected.items.length) return;
+
+  var payload = {
+    s: collected.source,
+    at: new Date().toISOString(),
+    item: collected.items[0],
+  };
+
+  btn.style.cssText = traceActionCss(TRACE_THEMES.adding) + ";cursor:wait";
+  btn.textContent = "ADDING...";
+  btn.disabled = true;
+
+  ext.runtime.sendMessage(
+    { type: "TRACE_QUICK_ADD", payload: payload },
+    function (response) {
+      if (ext.runtime.lastError || !response) {
+        btn.style.cssText = traceActionCss(TRACE_THEMES.error) + ";cursor:pointer";
+        btn.textContent = "ERROR";
+        btn.disabled = false;
+        setTimeout(function () {
+          applyQuickAddActionState(btn, addTheme, compact);
+        }, 2500);
+        return;
+      }
+
+      if (response.ok) {
+        btn.style.cssText = traceActionCss(TRACE_THEMES.added);
+        btn.textContent = compact ? "Saved" : "ADDED \u2713";
+        btn.disabled = true;
+        setTimeout(function () {
+          var item = payload.item || {};
+          var startedStoryPage =
+            item.ctx === "story" &&
+            typeof item.chn === "number" &&
+            Number.isFinite(item.chn) &&
+            item.chn > 1;
+          var next = { status: startedStoryPage ? "READING" : "PLANNING", readerStatus: startedStoryPage ? "READING" : "PLANNING" };
+          if (response.entryId) {
+            next.entryId = response.entryId;
+            next.statusChoicesAvailable = true;
+          }
+          if (startedStoryPage) {
+            next.chapters = {
+              current: item.chn,
+              total:
+                typeof item.cht === "number" && Number.isFinite(item.cht)
+                  ? item.cht
+                  : null,
+            };
+          }
+          optimisticStoryPageEntries[workKey] = next;
+          renderQuickAddButton(workKey);
+        }, compact ? 450 : 1500);
+      } else if (response.error === "free_limit_reached") {
+        btn.style.cssText = traceActionCss(TRACE_THEMES.full);
+        btn.textContent = compact ? "Full" : "LIBRARY FULL";
+        btn.title = "Free library limit reached \u2014 upgrade for unlimited";
+        btn.disabled = true;
+      } else if (response.error === "auth_expired") {
+        btn.style.cssText = traceActionCss(TRACE_THEMES.error);
+        btn.textContent = compact ? "Sign in" : "SESSION EXPIRED";
+        btn.disabled = true;
+      } else {
+        btn.style.cssText = traceActionCss(TRACE_THEMES.error) + ";cursor:pointer";
+        btn.textContent = "ERROR";
+        btn.disabled = false;
+        setTimeout(function () {
+          applyQuickAddActionState(btn, addTheme, compact);
+        }, 2500);
+      }
+    },
+  );
+}
+
+function bindQuickAddAction(btn, workKey, addTheme, compact) {
+  btn.addEventListener("mouseenter", function () {
+    if (!btn.disabled) btn.style.background = addTheme.hover;
+  });
+  btn.addEventListener("mouseleave", function () {
+    if (!btn.disabled) btn.style.background = addTheme.bg;
+  });
+
+  btn.addEventListener("click", function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (btn.disabled) return;
+    sendQuickAddAction(btn, workKey, addTheme, compact);
+  });
+}
+
+function clearElement(el) {
+  while (el.firstChild) el.removeChild(el.firstChild);
+}
+
+function renderStorySheet(sheet, view, workKey) {
+  var wasOpen = sheet.getAttribute("data-trace-open") === "1";
+  clearElement(sheet);
+
+  var close = document.createElement("button");
+  close.setAttribute(TRACE_STORY_SHEET_CLOSE_ATTR, "1");
+  close.setAttribute("aria-label", "Close Trace sheet");
+  close.type = "button";
+  close.textContent = "\u00d7";
+  close.style.cssText = "position:absolute;right:12px;top:10px;width:32px;height:32px;border:0;border-radius:999px;background:transparent;color:" + TRACE_UI.muted + ";font:800 18px/1 system-ui,-apple-system,'Segoe UI',sans-serif;cursor:pointer";
+  close.addEventListener("click", function () {
+    applySheetVisibility(sheet, false);
+  });
+  sheet.appendChild(close);
+
+  var heading = document.createElement("div");
+  heading.setAttribute("data-trace-management-header", "1");
+  heading.style.cssText = "display:block;padding-right:34px";
+  var headText = document.createElement("div");
+  headText.style.cssText = "min-width:0";
+  var title = document.createElement("div");
+  title.textContent = storyHeadline(view);
+  title.style.cssText = "font:800 18px/1.15 " + TRACE_UI.font + ";color:" + TRACE_UI.ink;
+  var caption = document.createElement("div");
+  caption.textContent = storyCaption(view);
+  caption.style.cssText = "margin-top:4px;color:" + TRACE_UI.muted + ";font:600 12px/1.35 " + TRACE_UI.font;
+  headText.appendChild(title);
+  headText.appendChild(caption);
+  heading.appendChild(headText);
+  sheet.appendChild(heading);
+
+  var status = entryStatus(view.entry);
+  var progress = progressDisplay(view.entry);
+  var position = document.createElement("section");
+  position.style.cssText = "margin-top:12px;border:1px solid rgba(89,68,2,0.2);background:#fff8e8;border-radius:" + TRACE_UI.radiusSm + ";padding:10px";
+  var positionLabel = document.createElement("div");
+  positionLabel.textContent = "Reading position";
+  positionLabel.style.cssText = "font:800 9px/1 " + TRACE_UI.font + ";letter-spacing:0.08em;text-transform:uppercase;color:#7c6b41";
+  var positionValue = document.createElement("div");
+  positionValue.textContent = progress || "Not started";
+  positionValue.style.cssText = "margin-top:8px;font:800 22px/1 " + TRACE_UI.font + ";color:#2f2b1f";
+  var positionStatus = document.createElement("div");
+  positionStatus.textContent = status ? quickAddStatusLabel(status) : "No reader status";
+  positionStatus.style.cssText = "margin-top:4px;font:700 12px/1.2 " + TRACE_UI.font + ";color:#655f50";
+  position.appendChild(positionLabel);
+  position.appendChild(positionValue);
+  position.appendChild(positionStatus);
+  sheet.appendChild(position);
+
+  var rows = document.createElement("div");
+  rows.style.cssText = "display:grid;gap:8px;margin-top:12px";
+  var privateContext = view.entry && view.entry.privateContext;
+  if (privateContext && privateContext.hasNotes) {
+    rows.appendChild(sheetRowEl("Private note", "Saved \u00b7 Edit notes in Trace", false));
+  }
+  if (privateContext && privateContext.tagCount) {
+    rows.appendChild(
+      sheetRowEl(
+        "Private tags",
+        privateContext.tagCount + " saved \u00b7 Open in Trace",
+        false,
+      ),
+    );
+  }
+  var mark = workMarkDisplay(view.entry);
+  if (mark) rows.appendChild(sheetRowEl("Work mark", mark, true));
+  if (view.entry && view.entry.hidden) {
+    rows.appendChild(sheetRowEl("Browsing preference", "Hidden from future listings", true));
+  }
+  if (rows.childNodes.length > 0) sheet.appendChild(rows);
+
+  var actions = document.createElement("div");
+  actions.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;padding-top:12px;border-top:1px solid " + TRACE_UI.border;
+  if (view.hasAuth && !status && !(view.entry && view.entry.hidden)) {
+    var addBtn = document.createElement("button");
+    addBtn.setAttribute(QUICK_ADD_ATTR, workKey);
+    addBtn.type = "button";
+    applyQuickAddActionState(addBtn, TRACE_THEMES.add, false);
+    bindQuickAddAction(addBtn, workKey, TRACE_THEMES.add, false);
+    actions.appendChild(addBtn);
+  }
+  appendReaderStatusChoices(actions, view, workKey);
+
+  var open = document.createElement("a");
+  open.setAttribute("data-trace-open-trace", "1");
+  open.href = storyTraceOpenUrl(view.authState, view.entry);
+  open.target = "_blank";
+  open.rel = "noopener noreferrer";
+  open.textContent = view.hasAuth ? "OPEN IN TRACE" : "OPEN TRACE";
+  open.style.cssText = traceActionCss(TRACE_THEMES.muted) + ";text-decoration:none";
+  actions.appendChild(open);
+  sheet.appendChild(actions);
+
+  applySheetVisibility(sheet, wasOpen);
 }
 
 function renderQuickAddButton(workKey) {
@@ -2034,23 +2900,23 @@ function renderQuickAddButton(workKey) {
     return;
   }
 
-  ext.storage.local.get([OVERLAY_CACHE_KEY, "authToken"], function (res) {
+  ext.storage.local.get([OVERLAY_CACHE_KEY, "authToken", "traceAuthState"], function (res) {
     if (ext.runtime.lastError) return;
-    if (!res.authToken) {
-      removeQuickAddElements();
-      return;
-    }
 
     var cache = res[OVERLAY_CACHE_KEY];
     var entries = cache && cache.entries;
+    var workPreferences = cache && cache.workPreferences;
     var entry = entries && entries[workKey];
+    var preference = workPreferences && workPreferences[workKey];
     var optimisticEntry = optimisticStoryPageEntries[workKey];
     var els = ensureQuickAddElements(workKey, anchor);
-    var btn = els.btn;
+    var handle = els.handle;
+    var sheet = els.sheet;
+    var authState = res.traceAuthState || { state: res.authToken ? "connected" : "signed_out" };
+    var info = normalizeOverlayEntry(entry, preference);
 
     if (entry || optimisticEntry) {
-      var info = typeof entry === "string" ? { status: entry } : entry;
-      if (!info && optimisticEntry) {
+      if (!entry && optimisticEntry) {
         info = optimisticEntry;
       } else if (
         info &&
@@ -2066,96 +2932,64 @@ function renderQuickAddButton(workKey) {
           info = optimisticEntry;
         }
       }
-      applyQuickAddLibraryState(btn, info);
-    } else {
-      var addTheme = TRACE_THEMES.add;
-      applyQuickAddActionState(btn, addTheme);
-
-      if (!btn.__traceQuickAddBound) {
-        btn.__traceQuickAddBound = true;
-
-        btn.addEventListener("mouseenter", function () {
-          if (!btn.disabled) btn.style.background = addTheme.hover;
-        });
-        btn.addEventListener("mouseleave", function () {
-          if (!btn.disabled) btn.style.background = addTheme.bg;
-        });
-
-        btn.addEventListener("click", function (e) {
-          e.preventDefault();
-          e.stopPropagation();
-
-          var collected = collect();
-          if (!collected.items.length) return;
-
-          var payload = {
-            s: collected.source,
-            at: new Date().toISOString(),
-            item: collected.items[0],
-          };
-
-          btn.style.cssText = traceChipCss(TRACE_THEMES.adding) + ";cursor:wait";
-          btn.textContent = "\u2026";
-          btn.disabled = true;
-
-          ext.runtime.sendMessage(
-            { type: "TRACE_QUICK_ADD", payload: payload },
-            function (response) {
-              if (ext.runtime.lastError || !response) {
-                btn.style.cssText = traceChipCss(TRACE_THEMES.error) + ";cursor:pointer";
-                btn.textContent = "ERROR";
-                btn.disabled = false;
-                setTimeout(function () {
-                  applyQuickAddActionState(btn, addTheme);
-                }, 2500);
-                return;
-              }
-
-              if (response.ok) {
-                btn.style.cssText = traceChipCss(TRACE_THEMES.added);
-                btn.textContent = "ADDED \u2713";
-                btn.disabled = true;
-                setTimeout(function () {
-                  var item = payload.item || {};
-                  var startedStoryPage =
-                    item.ctx === "story" &&
-                    typeof item.chn === "number" &&
-                    Number.isFinite(item.chn) &&
-                    item.chn > 1;
-                  var next = { status: startedStoryPage ? "READING" : "PLANNING" };
-                  if (startedStoryPage) {
-                    next.chapters = {
-                      current: item.chn,
-                      total:
-                        typeof item.cht === "number" && Number.isFinite(item.cht)
-                          ? item.cht
-                          : null,
-                    };
-                  }
-                  applyQuickAddLibraryState(btn, next);
-                }, 1500);
-              } else if (response.error === "free_limit_reached") {
-                btn.style.cssText = traceChipCss(TRACE_THEMES.full);
-                btn.textContent = "LIBRARY FULL";
-                btn.title = "Free library limit reached \u2014 upgrade for unlimited";
-                btn.disabled = true;
-              } else if (response.error === "auth_expired") {
-                btn.style.cssText = traceChipCss(TRACE_THEMES.error);
-                btn.textContent = "SESSION EXPIRED";
-                btn.disabled = true;
-              } else {
-                btn.style.cssText = traceChipCss(TRACE_THEMES.error) + ";cursor:pointer";
-                btn.textContent = "ERROR";
-                btn.disabled = false;
-                setTimeout(function () {
-                  applyQuickAddActionState(btn, addTheme);
-                }, 2500);
-              }
-            },
-          );
+      if (info && optimisticEntry && optimisticEntry.statusChoicesAvailable) {
+        info = Object.assign({}, info, optimisticEntry, {
+          chapters: optimisticEntry.chapters || info.chapters,
+          entryId: optimisticEntry.entryId || info.entryId,
         });
       }
     }
+
+    var view = {
+      hasAuth: authStateAllowsActions(authState, !!res.authToken),
+      authState: authState,
+      entry: info,
+    };
+
+    var handleTheme =
+      info && info.__traceAutoTrackPending
+        ? TRACE_INLINE_THEMES.saving
+        : info && info.__traceAutoTrackError === "free_limit_reached"
+          ? TRACE_THEMES.full
+          : info && info.__traceAutoTrackError
+            ? TRACE_INLINE_THEMES.error
+            : info && info.__traceStatusPending
+        ? TRACE_INLINE_THEMES.saving
+        : info && info.__traceStatusError
+          ? TRACE_INLINE_THEMES.error
+          : info && info.hidden
+        ? TRACE_INLINE_THEMES.hidden
+        : entryStatus(info)
+          ? TRACE_INLINE_THEMES[entryStatus(info)] || TRACE_INLINE_THEMES.muted
+          : view.hasAuth
+            ? TRACE_INLINE_THEMES.add
+            : TRACE_INLINE_THEMES.muted;
+    handle.style.cssText = traceInlineHandleCss(handleTheme);
+    handle.textContent = handleDisplay(view);
+    handle.title = "Open Trace story sheet";
+    handle.disabled = autoTrackHandleDisabled(info);
+    if (!handle.__traceStoryHandleBound) {
+      handle.__traceStoryHandleBound = true;
+      handle.addEventListener("click", function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (handle.disabled) return;
+        if (typeof handle.__traceStoryHandleAction === "function") {
+          handle.__traceStoryHandleAction();
+        }
+      });
+    }
+    handle.__traceStoryHandleAction = function () {
+      if (info && info.__traceAutoTrackPending) return;
+      if (view.hasAuth && !entryStatus(info) && !(info && info.hidden)) {
+        applySheetVisibility(sheet, false);
+        sendQuickAddAction(handle, workKey, TRACE_THEMES.add, true);
+        return;
+      }
+      applySheetVisibility(sheet, sheet.getAttribute("data-trace-open") !== "1");
+    };
+
+    renderStorySheet(sheet, view, workKey);
   });
 }
 
@@ -2163,13 +2997,25 @@ function initQuickAdd() {
   if (shouldDisableTraceContentScript()) return;
   var workKey = getWorkKeyFromUrl();
   if (!workKey) return;
+  storyQuickAddUiReady = true;
   renderQuickAddButton(workKey);
 
   try {
     ext.storage.onChanged.addListener(function (changes, area) {
       if (area !== "local") return;
-      if (!changes[OVERLAY_CACHE_KEY]) return;
+      if (!changes[OVERLAY_CACHE_KEY] && !changes.authToken && !changes.traceAuthState) return;
       renderQuickAddButton(workKey);
+    });
+  } catch (_) {
+    /* ignore */
+  }
+
+  try {
+    window.addEventListener("focus", function () {
+      renderQuickAddButton(workKey);
+    });
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) renderQuickAddButton(workKey);
     });
   } catch (_) {
     /* ignore */
