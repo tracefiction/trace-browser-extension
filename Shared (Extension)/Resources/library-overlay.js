@@ -234,7 +234,7 @@
     PLANNING: "Planning",
     READING: "Reading",
     PAUSED: "Paused",
-    COMPLETED: "Completed",
+    COMPLETED: "Finished",
     DROPPED: "Dropped",
   };
   const MANAGEMENT_STATUS_CHOICES = [

@@ -529,7 +529,7 @@ test("library-overlay opened surface shows status editing only when entryId exis
   assert.doesNotMatch(progressRow.textContent || "", /Reading\s*·\s*3\/17/i);
   assert.deepEqual(
     Array.from(choices.querySelectorAll("[data-trace-status-choice]")).map((button) => button.textContent),
-    ["Planning", "Reading", "Paused", "Completed", "Dropped"],
+    ["Planning", "Reading", "Paused", "Finished", "Dropped"],
   );
   const completed = choices.querySelector("[data-trace-status-choice='COMPLETED']");
   assert.ok(completed);
@@ -539,7 +539,7 @@ test("library-overlay opened surface shows status editing only when entryId exis
     payload: { entryId, status: "COMPLETED" },
   });
   assert.equal(withEntryId.document.querySelector("[data-trace-action-surface]"), null);
-  assert.match(withEntryId.document.querySelector("[data-trace-library-overlay-wrap]").textContent || "", /Completed/i);
+  assert.match(withEntryId.document.querySelector("[data-trace-library-overlay-wrap]").textContent || "", /Finished/i);
 
   const withoutEntryId = await renderOverlayListing({
     html:
@@ -767,7 +767,7 @@ test("library-overlay renders hidden-only workPreferences collapsed without stat
   assert.ok(wrap);
   assert.equal(row.getAttribute("data-trace-row-hidden"), "1");
   assert.match(wrap.textContent || "", /Hidden by Trace\s*Undo/i);
-  assert.doesNotMatch(wrap.textContent || "", /Reading|Planning|Paused|Completed|Dropped/);
+  assert.doesNotMatch(wrap.textContent || "", /Reading|Planning|Paused|Finished|Dropped/);
   assert.equal(wrap.querySelector("button[data-trace-quick-add]"), null);
 });
 

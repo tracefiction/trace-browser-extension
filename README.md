@@ -36,7 +36,7 @@ Trace may send this data to the Trace API when you import, quick-add, auto-track
 - fandoms/tags and related story metadata
 - chapter and word counts
 - reading-progress metadata
-- reader-status updates you explicitly choose in the Trace overlay, such as Planning, Reading, Paused, Completed, or Dropped
+- reader-status updates you explicitly choose in the Trace overlay, such as Planning, Reading, Paused, Finished, or Dropped
 - hidden-work browsing preferences you explicitly choose in the Trace overlay, keyed by the supported AO3/FFN work id
 - your Trace auth token for authenticated Trace API requests
 

@@ -144,7 +144,7 @@ Use a normal desktop viewport on an AO3 works listing.
     Hide/Unhide, Open in Trace.
 
 - Status changes:
-  - Change status through `Planning`, `Reading`, `Paused`, `Completed`,
+  - Change status through `Planning`, `Reading`, `Paused`, `Finished`,
     `Dropped`.
   - Hard-refresh after each or at the end.
   - Pass: latest status persists and no `Reading | 0/N` display appears.

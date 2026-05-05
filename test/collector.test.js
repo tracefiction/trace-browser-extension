@@ -1311,7 +1311,7 @@ test("FFN mobile story quick-add shows optional post-add status choices when ent
     { label: "Planning", status: "PLANNING", expected: /Planning/i },
     { label: "Reading", status: "READING", expected: /Reading/i },
     { label: "Paused", status: "PAUSED", expected: /Paused/i },
-    { label: "Completed", status: "COMPLETED", expected: /Completed/i },
+    { label: "Finished", status: "COMPLETED", expected: /Finished/i },
     { label: "Dropped", status: "DROPPED", expected: /Dropped/i },
   ];
 
@@ -1381,7 +1381,7 @@ test("FFN mobile story quick-add shows optional post-add status choices when ent
     assert.match(sheet.textContent || "", /Reader status/i);
     assert.deepEqual(
       Array.from(sheet.querySelectorAll("[data-trace-status-choice]")).map((button) => button.textContent),
-      ["Planning", "Reading", "Paused", "Completed", "Dropped"],
+      ["Planning", "Reading", "Paused", "Finished", "Dropped"],
     );
     const choiceBtn = sheet.querySelector(
       `[data-trace-status-choice='${choice.status}']`,
@@ -1496,7 +1496,7 @@ test("story sheet shows status editing for cached entries with entryId and hides
     assert.equal(sheet.querySelector("button[data-trace-quick-add]"), null);
     assert.deepEqual(
       Array.from(choices.querySelectorAll("[data-trace-status-choice]")).map((button) => button.textContent),
-      ["Planning", "Reading", "Paused", "Completed", "Dropped"],
+      ["Planning", "Reading", "Paused", "Finished", "Dropped"],
     );
     const completed = choices.querySelector("[data-trace-status-choice='COMPLETED']");
     assert.ok(completed);

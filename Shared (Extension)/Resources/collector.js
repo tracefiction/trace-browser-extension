@@ -1851,7 +1851,7 @@ function collect() {
 }
 
 function quickAddStatusLabel(status) {
-  var labels = { READING: "Reading", COMPLETED: "Completed", PAUSED: "Paused", DROPPED: "Dropped", PLANNING: "Planning" };
+  var labels = { READING: "Reading", COMPLETED: "Finished", PAUSED: "Paused", DROPPED: "Dropped", PLANNING: "Planning" };
   return labels[status] || status;
 }
 
