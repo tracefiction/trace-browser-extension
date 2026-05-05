@@ -1767,6 +1767,13 @@
     return null;
   }
 
+  function removeExistingTraceWrapsInRow(row) {
+    if (!row || !row.querySelectorAll) return;
+    row.querySelectorAll("[" + WRAP_ATTR + "]").forEach(function (el) {
+      el.remove();
+    });
+  }
+
   function restoreListingRow(row) {
     if (!row || row.getAttribute("data-trace-row-hidden") !== "1") return;
     var originalStyle = row.getAttribute("data-trace-row-original-style");
@@ -2141,6 +2148,7 @@
   function decorate(entries, workPreferences, showQuickAdd) {
     const anchors = document.querySelectorAll('a[href*="/works/"], a[href*="/s/"]');
     const decoratedKeys = new Set();
+    const decoratedRows = new WeakSet();
     for (const a of anchors) {
       if (a.hasAttribute(ATTR)) continue;
       const href = a.getAttribute("href");
@@ -2155,7 +2163,6 @@
       if (!info) continue;
       if (!isDecoratableWorkLink(absUrl, info)) continue;
       if (decoratedKeys.has(info.key)) continue;
-      decoratedKeys.add(info.key);
 
       const entry = normalizeOverlayEntry(
         entries[info.key],
@@ -2164,6 +2171,12 @@
 
       var placement = listingPlacementForAnchor(info, a);
       var listingRow = listingRowForAnchor(info.platform, a);
+      if (listingRow) {
+        if (decoratedRows.has(listingRow)) continue;
+        decoratedRows.add(listingRow);
+        removeExistingTraceWrapsInRow(listingRow);
+      }
+      decoratedKeys.add(info.key);
       if (entry && entry.hidden && listingRow) {
         placement = {
           kind: "hidden-placeholder",

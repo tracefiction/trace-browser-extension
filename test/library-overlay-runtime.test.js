@@ -850,6 +850,21 @@ test("library-overlay unknown signed-in works show Add and Hide inline", async (
   assert.equal(wrap.querySelector("[data-trace-library-lens]"), null);
 });
 
+test("library-overlay decorates each AO3 blurb once when the row contains extra work links", async () => {
+  const window = await renderOverlayListing({
+    html:
+      "<!doctype html><html><body><ol><li id='work_77777' class='work blurb group'><div class='header module'><h4 class='heading'><a href='/works/77777'>Unknown Work</a> by <a rel='author' href='/users/a/pseuds/a'>Author</a></h4><p class='datetime'>04 May 2026</p></div><blockquote class='summary'>Mentions <a href='/works/88888'>another AO3 work</a> in the summary.</blockquote></li></ol></body></html>",
+    cache: { entries: {}, syncVersion: "v-ao3-extra-work-link" },
+  });
+
+  const row = window.document.querySelector("#work_77777");
+  const wraps = row.querySelectorAll("[data-trace-library-overlay-wrap]");
+  assert.equal(wraps.length, 1);
+  assert.equal(wraps[0].getAttribute("data-trace-placement"), "ao3-action-row");
+  assert.equal(wraps[0].querySelectorAll("button[data-trace-quick-add]").length, 1);
+  assert.equal(wraps[0].querySelectorAll("button[data-trace-hidden-action='hide']").length, 1);
+});
+
 test("library-overlay AO3 desktop unknown works use action row without touching the date", async () => {
   const window = await renderOverlayListing({
     html:
