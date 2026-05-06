@@ -1174,7 +1174,7 @@ test("library-overlay quick add immediately shows pending and ignores duplicate 
   assert.match(button.textContent || "", /PLANNING/i);
 });
 
-test("library-overlay known works expose hide without changing reader status", async () => {
+test("library-overlay known works expose hide without changing reading status", async () => {
   const messages = [];
   const window = await renderOverlayListing({
     html:

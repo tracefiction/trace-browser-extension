@@ -1,6 +1,6 @@
 # Trace Browser Extension Source
 
-This repository is public for transparency. Trace reads fanfiction story metadata so readers can import stories and sync reading progress, and users should be able to verify the boundary themselves: metadata and progress, not AO3/FanFiction.net logins, cookies, private account pages, or full page HTML.
+This repository is public for transparency. Trace reads fanfiction story metadata so readers can import stories, sync reading progress, and see their Trace library status while browsing. Users should be able to verify the boundary themselves: metadata, reading-status choices, progress, and explicit browsing preferences — not AO3/FanFiction.net logins, cookies, private account pages, or full page HTML.
 
 The code here covers the Trace browser extension plus the iOS/macOS Safari Web Extension wrapper.
 
@@ -25,7 +25,7 @@ On supported AO3 and FanFiction.net story/listing pages, Trace reads visible sto
 - chapter and word counts
 - current chapter / reading-progress metadata
 
-Trace uses this to import a story, update reading progress, and show whether stories are already in your Trace library.
+Trace uses this to import a story, update reading progress, show whether stories are already in your Trace library, let you change reading status from supported overlay surfaces, and hide works from Trace's browsing overlay when you explicitly choose to.
 
 ## What Trace Sends
 
@@ -36,12 +36,12 @@ Trace may send this data to the Trace API when you import, quick-add, auto-track
 - fandoms/tags and related story metadata
 - chapter and word counts
 - reading-progress metadata
-- reader-status updates you explicitly choose in the Trace overlay, such as Planning, Reading, Paused, Finished, or Dropped
+- reading-status updates you explicitly choose in the Trace overlay, such as Planning, Reading, Paused, Finished, or Dropped
 - hidden-work browsing preferences you explicitly choose in the Trace overlay, keyed by the supported AO3/FFN work id
 - your Trace auth token for authenticated Trace API requests
 
 The metadata-improvement preference is separate from automatic progress tracking and can be turned off in the extension popup.
-Hidden-work preferences affect Trace browsing overlays only; they are separate from reader status and do not hide or change the source site itself.
+Hidden-work preferences affect Trace browsing overlays only; they are separate from reading status and do not hide or change the source site itself.
 
 ## What Trace Does Not Send
 
@@ -128,6 +128,7 @@ Safari: open `Trace.xcodeproj` in Xcode, select your own Apple signing team loca
 
 - Security and reporting: `SECURITY.md`
 - Firefox source package notes: `README.mozilla.md`
+- Store listing and release copy: `docs/store-listings.md`
 
 ## Reporting issues
 

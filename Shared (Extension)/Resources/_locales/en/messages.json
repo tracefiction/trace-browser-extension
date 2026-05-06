@@ -4,7 +4,7 @@
         "description": "The display name for the extension."
     },
     "extension_description": {
-        "message": "Import AO3 and FanFiction.net metadata into Trace and sync reading progress.",
+        "message": "Save AO3 and FanFiction.net stories to Trace, sync progress, and see library status while browsing.",
         "description": "Description of what the extension does."
     }
 }

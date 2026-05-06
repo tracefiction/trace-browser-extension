@@ -534,7 +534,7 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   // -------------------------------------------------
-  // I. Reader status update from story sheet
+  // I. Reading status update from story sheet
   // -------------------------------------------------
   if (msg.type === "TRACE_SET_READER_STATUS") {
     handleSetReaderStatus(msg.payload, sender, sendResponse);
@@ -1080,7 +1080,7 @@ async function handleSetReaderStatus(payload, sender, sendResponse) {
       if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
     }
   } catch (e) {
-    console.error("[Trace] Reader status error:", e);
+    console.error("[Trace] Reading status error:", e);
     if (sendResponse) sendResponse({ ok: false, error: "network_error" });
   }
 }

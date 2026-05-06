@@ -624,7 +624,7 @@ test("TRACE_QUICK_ADD without token returns not_authenticated", async () => {
 });
 
 // =======================================================
-// Reader status choices (TRACE_SET_READER_STATUS)
+// Reading status choices (TRACE_SET_READER_STATUS)
 // =======================================================
 
 test("TRACE_SET_READER_STATUS patches library entry status and overlay cache", async () => {

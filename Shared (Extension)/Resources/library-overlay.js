@@ -1147,7 +1147,7 @@
     if (entry.__traceStatusPending) {
       return entry.__traceStatusTarget
         ? "Saving " + statusChoiceLabel(entry.__traceStatusTarget)
-        : "Saving reader status";
+        : "Saving reading status";
     }
     if (entry.__traceStatusError) return "Tap to retry";
     if (entry.hidden) return "Hidden from browsing";
@@ -1444,7 +1444,7 @@
     wrap.setAttribute("data-trace-status-choices", "1");
     wrap.style.cssText = "display:grid;gap:7px;margin-top:2px";
     var label = document.createElement("div");
-    label.textContent = "Reader status";
+    label.textContent = "Reading status";
     label.style.cssText = "font:800 9px/1 " + TRACE_UI.font + ";letter-spacing:0.07em;text-transform:uppercase;color:" + TRACE_UI.muted;
     var row = document.createElement("div");
     row.style.cssText = "display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:6px";

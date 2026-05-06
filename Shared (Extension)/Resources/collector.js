@@ -2319,7 +2319,7 @@ function storyCaption(view) {
   if (view.entry && view.entry.__traceStatusPending) {
     return view.entry.__traceStatusTarget
       ? "Saving " + quickAddStatusLabel(view.entry.__traceStatusTarget)
-      : "Saving reader status";
+      : "Saving reading status";
   }
   if (view.entry && view.entry.__traceStatusError) return view.entry.__traceStatusError;
   if (!entryStatus(view.entry) && !(view.entry && view.entry.hidden)) {
@@ -2593,7 +2593,7 @@ function appendReaderStatusChoices(actions, view, workKey) {
   wrap.style.cssText = "flex:1 0 100%;display:grid;gap:8px;margin-top:2px";
 
   var label = document.createElement("div");
-  label.textContent = "Reader status";
+  label.textContent = "Reading status";
   label.style.cssText = "font:800 9px/1 " + TRACE_UI.font + ";letter-spacing:0.07em;text-transform:uppercase;color:" + TRACE_UI.muted;
   wrap.appendChild(label);
 
@@ -2839,7 +2839,7 @@ function renderStorySheet(sheet, view, workKey) {
   positionValue.textContent = progress || "Not started";
   positionValue.style.cssText = "margin-top:8px;font:800 22px/1 " + TRACE_UI.font + ";color:#2f2b1f";
   var positionStatus = document.createElement("div");
-  positionStatus.textContent = status ? quickAddStatusLabel(status) : "No reader status";
+  positionStatus.textContent = status ? quickAddStatusLabel(status) : "No reading status";
   positionStatus.style.cssText = "margin-top:4px;font:700 12px/1.2 " + TRACE_UI.font + ";color:#655f50";
   position.appendChild(positionLabel);
   position.appendChild(positionValue);

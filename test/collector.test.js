@@ -1378,7 +1378,7 @@ test("FFN mobile story quick-add shows optional post-add status choices when ent
     handle.click();
 
     const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
-    assert.match(sheet.textContent || "", /Reader status/i);
+    assert.match(sheet.textContent || "", /Reading status/i);
     assert.deepEqual(
       Array.from(sheet.querySelectorAll("[data-trace-status-choice]")).map((button) => button.textContent),
       ["Planning", "Reading", "Paused", "Finished", "Dropped"],

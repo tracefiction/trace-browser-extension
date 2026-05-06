@@ -80,7 +80,7 @@ Hide depends on the production API accepting:
 This endpoint must be live before release QA can pass. Hide must not require a
 library entry.
 
-Reader status mutation depends on:
+Reading status mutation depends on:
 
 - `PATCH /api/library/:entryId`
 - Status values: `PLANNING`, `READING`, `PAUSED`, `COMPLETED`, `DROPPED`
@@ -140,7 +140,7 @@ Use a normal desktop viewport on an AO3 works listing.
   - Click the known work lens.
   - Pass: surface opens near the lens, is not clipped, and has no green TRACE
     bubble.
-  - Verify visible actions: reader status choices, progress display,
+  - Verify visible actions: reading status choices, progress display,
     Hide/Unhide, Open in Trace.
 
 - Status changes:
