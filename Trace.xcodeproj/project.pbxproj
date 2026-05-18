@@ -117,42 +117,6 @@
 			);
 			target = BA3EBDA92F04965D00BA150A /* Trace Extension (macOS) */;
 		};
-		BA3EBDE12F04965D00BA150A /* Exceptions for "Shared (Extension)" folder in "Trace Extension (iOS)" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Resources/_locales,
-				Resources/background.js,
-				Resources/collector.js,
-				Resources/images,
-				"Resources/library-overlay-keys.js",
-				"Resources/library-overlay.js",
-				Resources/manifest.json,
-				Resources/popup.css,
-				Resources/popup.html,
-				Resources/popup.js,
-				Resources/sync.js,
-				SafariWebExtensionHandler.swift,
-			);
-			target = BA3EBD9F2F04965D00BA150A /* Trace Extension (iOS) */;
-		};
-		BA3EBDE22F04965D00BA150A /* Exceptions for "Shared (Extension)" folder in "Trace Extension (macOS)" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Resources/_locales,
-				Resources/background.js,
-				Resources/collector.js,
-				Resources/images,
-				"Resources/library-overlay-keys.js",
-				"Resources/library-overlay.js",
-				Resources/manifest.json,
-				Resources/popup.css,
-				Resources/popup.html,
-				Resources/popup.js,
-				Resources/sync.js,
-				SafariWebExtensionHandler.swift,
-			);
-			target = BA3EBDA92F04965D00BA150A /* Trace Extension (macOS) */;
-		};
 		BA3EC0072F04965D00BA1600 /* Exceptions for "TraceWidget" folder in "TraceWidget" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -174,10 +138,6 @@
 		};
 		BA3EBD742F04965D00BA150A /* Shared (Extension) */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				BA3EBDE12F04965D00BA150A /* Exceptions for "Shared (Extension)" folder in "Trace Extension (iOS)" target */,
-				BA3EBDE22F04965D00BA150A /* Exceptions for "Shared (Extension)" folder in "Trace Extension (macOS)" target */,
-			);
 			explicitFolders = (
 				Resources/_locales,
 				Resources/images,
@@ -357,6 +317,7 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
+				BA3EBD742F04965D00BA150A /* Shared (Extension) */,
 				BA3EBDA42F04965D00BA150A /* iOS (Extension) */,
 			);
 			name = "Trace Extension (iOS)";
@@ -379,6 +340,7 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
+				BA3EBD742F04965D00BA150A /* Shared (Extension) */,
 				BA3EBDAE2F04965D00BA150A /* macOS (Extension) */,
 			);
 			name = "Trace Extension (macOS)";
@@ -654,7 +616,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.3.0;
+				MARKETING_VERSION = 0.3.1;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -702,7 +664,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.3.0;
+				MARKETING_VERSION = 0.3.1;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
