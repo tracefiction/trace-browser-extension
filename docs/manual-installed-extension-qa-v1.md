@@ -263,10 +263,21 @@ Use both `www.fanfiction.net` and `m.fanfiction.net` listing pages.
   - Pass: no Trace overlay, Add, Hide, lens, story handle, or sheet appears.
 
 - Extension popup:
-  - Connected account: shows connected state and current toggles.
-  - Signed out: shows connection guidance.
+  - Signed out: tells the user to open/sign in to Trace in the same browser,
+    then return to an AO3/FFN story page. It must not imply AO3/FFN
+    credentials are needed.
+  - Connected, no local first-save signal, not on a supported archive page:
+    points to AO3 and FFN as the next step instead of generic help.
+  - Connected, no local first-save signal, on a supported AO3/FFN story page:
+    makes `+ ADD` or page import the obvious first-story action.
+  - Connected after a successful quick add/track or account library count:
+    shows compact connected state, current toggles, and the Library/import path
+    where applicable.
   - Reconnect/error: shows recovery/error state.
-  - Pass: popup state matches auth state and controls are not misleading.
+  - iOS Safari popup help, where shown: names both enabling the Safari
+    extension and allowing it on Trace, AO3, and FFN.
+  - Pass: popup state matches auth/page context and controls are not
+    misleading.
 
 ## Screenshots To Capture
 

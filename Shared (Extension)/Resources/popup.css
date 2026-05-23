@@ -87,7 +87,7 @@ body {
     padding: 10px 11px;
 }
 
-body[data-trace-popup-state="connected"] .popup-sheet,
+body[data-trace-popup-state="connected_saved"] .popup-sheet,
 .popup-sheet:has(.popup-lead[hidden]) {
     display: flex;
     align-items: center;
@@ -119,7 +119,7 @@ body[data-trace-popup-state="connected"] .popup-sheet,
     color: var(--trace-forest);
 }
 
-body[data-trace-popup-state="connected"] .popup-status,
+body[data-trace-popup-state="connected_saved"] .popup-status,
 .popup-sheet:has(.popup-lead[hidden]) .popup-status {
     display: inline-flex;
     align-items: center;
@@ -133,7 +133,7 @@ body[data-trace-popup-state="connected"] .popup-status,
     color: var(--trace-muted);
 }
 
-body[data-trace-popup-state="connected"] .popup-status::before,
+body[data-trace-popup-state="connected_saved"] .popup-status::before,
 .popup-sheet:has(.popup-lead[hidden]) .popup-status::before {
     content: "";
     width: 6px;
@@ -245,7 +245,8 @@ body[data-trace-popup-state="connected"] .popup-status::before,
 }
 
 .popup-import,
-.popup-cta {
+.popup-cta,
+.popup-archive-link {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -261,6 +262,18 @@ body[data-trace-popup-state="connected"] .popup-status::before,
     text-decoration: none;
     text-transform: uppercase;
     white-space: nowrap;
+}
+
+.popup-import[hidden],
+.popup-cta[hidden],
+.popup-archive-links[hidden] {
+    display: none;
+}
+
+.popup-archive-links {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
 }
 
 @media (max-height: 430px) {
@@ -316,7 +329,8 @@ body[data-trace-popup-state="connected"] .popup-status::before,
     }
 
     .popup-import,
-    .popup-cta {
+    .popup-cta,
+    .popup-archive-link {
         min-height: 30px;
         padding: 0 8px;
         font-size: 10px;
@@ -348,12 +362,20 @@ body[data-trace-popup-state="connected"] .popup-status::before,
     cursor: pointer;
 }
 
+.popup-cta[data-emphasis="primary"],
+.popup-archive-link {
+    color: var(--trace-forest);
+    background: var(--trace-forest-on);
+    border: 1px solid rgba(200, 234, 223, 0.62);
+}
+
 .popup-cta:hover {
     filter: brightness(1.06);
 }
 
 .popup-import:focus-visible,
 .popup-cta:focus-visible,
+.popup-archive-link:focus-visible,
 .popup-switch-row input:focus-visible {
     outline: 2px solid var(--trace-forest);
     outline-offset: 2px;

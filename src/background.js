@@ -20,6 +20,8 @@ const AUTH_STATE_KEY = "traceAuthState";
 const OVERLAY_STORAGE_KEY = "libraryOverlayCache";
 const LIBRARY_INVALIDATED_MESSAGE = "TRACE_LIBRARY_INVALIDATED";
 const OPTIMISTIC_CHAPTER_FLOORS_MS = 20_000;
+const TRACE_FIRST_SAVE_SEEN_KEY = "traceFirstSaveSeen";
+const TRACE_LIBRARY_COUNT_KEY = "traceLibraryCount";
 // OVERLAY_PRO_KEY removed — overlay is available to all users
 const TRACE_USER_PRO_KEY = "traceUserPro";
 const PREF_AUTO_TRACK_KEY = "prefAutoTrackEnabled";
@@ -27,6 +29,7 @@ const PREF_LIBRARY_INLAY_KEY = "prefLibraryInlayEnabled";
 const PREF_METADATA_IMPROVE_KEY = "prefMetadataImproveEnabled";
 const AO3_STORY_URL_RE =
   /^https:\/\/(?:[^/]+\.)?(?:archiveofourown\.org|archiveofourown\.gay|archive\.transformativeworks\.org|ao3\.org)\/works\/\d+(?:\/chapters\/\d+)?(?:[?#].*)?$/i;
+const FFN_STORY_PATH_RE = /^\/s\/\d+(?:\/\d+)?(?:\/.*)?$/i;
 
 // 1. Token Management
 let bearerToken = null;
@@ -78,7 +81,7 @@ function setSignedOutState(extra = {}) {
   persistAuthState({
     state: "signed_out",
     message:
-      "Open Trace in Safari once to link the extension. Already signed in? Open any Trace page and we’ll connect automatically.",
+      "Open Trace in this browser and sign in. Already signed in? Open any Trace page and we’ll connect automatically.",
     helpUrl: TRACE_HOME_URL,
     ...extra,
   });
@@ -129,7 +132,17 @@ function clearToken() {
       AUTH_TOKEN_KEY,
       TRACE_USER_PRO_KEY,
       OVERLAY_STORAGE_KEY,
+      TRACE_FIRST_SAVE_SEEN_KEY,
+      TRACE_LIBRARY_COUNT_KEY,
     ]);
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+function markFirstSaveSeen() {
+  try {
+    ext.storage.local.set({ [TRACE_FIRST_SAVE_SEEN_KEY]: true });
   } catch (_) {
     /* ignore */
   }
@@ -226,6 +239,17 @@ function readOverlayEntryForItem(item) {
 }
 
 /** Best-effort Pro flag for gating Pro-only prefs (synced from GET /api/account/me). */
+function accountStoragePatch(json) {
+  const patch = {};
+  if (json && typeof json.pro === "boolean") {
+    patch[TRACE_USER_PRO_KEY] = json.pro;
+  }
+  if (json && typeof json.library_count === "number" && Number.isFinite(json.library_count)) {
+    patch[TRACE_LIBRARY_COUNT_KEY] = Math.max(0, Math.trunc(json.library_count));
+  }
+  return patch;
+}
+
 function refreshTraceUserPro() {
   if (!bearerToken) return;
   fetch(ACCOUNT_ME_ENDPOINT, {
@@ -233,8 +257,9 @@ function refreshTraceUserPro() {
   })
     .then((r) => (r.ok ? r.json() : null))
     .then((j) => {
-      if (j && typeof j.pro === "boolean") {
-        ext.storage.local.set({ [TRACE_USER_PRO_KEY]: j.pro });
+      const patch = accountStoragePatch(j);
+      if (Object.keys(patch).length > 0) {
+        ext.storage.local.set(patch);
       }
     })
     .catch(() => {});
@@ -251,8 +276,9 @@ function fetchTraceUserProPromise() {
     })
       .then((r) => (r.ok ? r.json() : null))
       .then((j) => {
-        if (j && typeof j.pro === "boolean") {
-          ext.storage.local.set({ [TRACE_USER_PRO_KEY]: j.pro }, () => resolve());
+        const patch = accountStoragePatch(j);
+        if (Object.keys(patch).length > 0) {
+          ext.storage.local.set(patch, () => resolve());
         } else {
           resolve();
         }
@@ -373,6 +399,80 @@ function isAo3StoryUrl(url) {
   return AO3_STORY_URL_RE.test(String(url || ""));
 }
 
+function isAo3Host(hostname) {
+  const host = String(hostname || "").toLowerCase();
+  return (
+    host === "archiveofourown.org" ||
+    host.endsWith(".archiveofourown.org") ||
+    host === "archiveofourown.gay" ||
+    host.endsWith(".archiveofourown.gay") ||
+    host === "archive.transformativeworks.org" ||
+    host === "ao3.org" ||
+    host.endsWith(".ao3.org")
+  );
+}
+
+function isFfnHost(hostname) {
+  return /(^|\.)fanfiction\.net$/i.test(String(hostname || ""));
+}
+
+function isAo3CredentialPath(pathname) {
+  return /^\/users\/(?:login|sign_up|password|auth\/|logout)/i.test(String(pathname || ""));
+}
+
+function isFfnCredentialPath(pathname) {
+  return /^\/(?:login\.php|signup\.php|account\/(?:login|signup)|auth\/)/i.test(String(pathname || ""));
+}
+
+function classifyActiveTabUrl(rawUrl) {
+  if (!rawUrl) return { kind: "unknown" };
+  let url;
+  try {
+    url = new URL(String(rawUrl));
+  } catch (_) {
+    return { kind: "unsupported" };
+  }
+
+  if (isTraceWebUrl(url.href)) return { kind: "trace" };
+
+  if (isAo3Host(url.hostname)) {
+    if (isAo3CredentialPath(url.pathname)) {
+      return { kind: "blocked_archive", site: "ao3", canImport: false };
+    }
+    return {
+      kind: /^\/works\/\d+(?:\/chapters\/\d+)?\/?$/i.test(url.pathname)
+        ? "supported_story"
+        : "supported_archive",
+      site: "ao3",
+      canImport: true,
+    };
+  }
+
+  if (isFfnHost(url.hostname)) {
+    if (isFfnCredentialPath(url.pathname)) {
+      return { kind: "blocked_archive", site: "ffn", canImport: false };
+    }
+    return {
+      kind: FFN_STORY_PATH_RE.test(url.pathname)
+        ? "supported_story"
+        : "supported_archive",
+      site: "ffn",
+      canImport: true,
+    };
+  }
+
+  return { kind: "unsupported" };
+}
+
+async function getActiveTabContext() {
+  try {
+    const [tab] = await ext.tabs.query({ active: true, currentWindow: true });
+    return classifyActiveTabUrl(tab && tab.url);
+  } catch (_) {
+    return { kind: "unknown" };
+  }
+}
+
 function pingAo3TabForAutoTrack(tabId) {
   if (!tabId || !ext.tabs?.sendMessage) return;
   setTimeout(() => {
@@ -462,14 +562,25 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       await fetchTraceUserProPromise();
       ext.storage.local.get(
         [
+          AUTH_STATE_KEY,
+          TRACE_FIRST_SAVE_SEEN_KEY,
+          TRACE_LIBRARY_COUNT_KEY,
           PREF_AUTO_TRACK_KEY,
           PREF_LIBRARY_INLAY_KEY,
           PREF_METADATA_IMPROVE_KEY,
           TRACE_USER_PRO_KEY,
         ],
-        (r) => {
+        async (r) => {
+          const activeTab = await getActiveTabContext();
           if (sendResponse) {
             sendResponse({
+              authState: r[AUTH_STATE_KEY] || null,
+              firstSaveSeen: r[TRACE_FIRST_SAVE_SEEN_KEY] === true,
+              libraryCount:
+                typeof r[TRACE_LIBRARY_COUNT_KEY] === "number"
+                  ? r[TRACE_LIBRARY_COUNT_KEY]
+                  : null,
+              activeTab,
               pro: r[TRACE_USER_PRO_KEY] === true,
               autoTrackEnabled: r[PREF_AUTO_TRACK_KEY] !== false,
               libraryInlayEnabled: r[PREF_LIBRARY_INLAY_KEY] !== false,
@@ -604,7 +715,7 @@ async function handleImportTrigger(sendResponse) {
 
 function handleAutoTrack(payload, sender, sendResponse) {
   if (!bearerToken) {
-    setReconnectState("Open Trace in Safari to link your session, then automatic sync will work.", {
+    setReconnectState("Open Trace in this browser and sign in, then automatic sync will work.", {
       lastTrackAttemptAt: new Date().toISOString(),
     });
     setBadge(sender?.tab?.id, "LOG", "#9C6B00");
@@ -691,7 +802,9 @@ async function executeAutoTrack(payload, sender) {
         return { ok: false, error: "http_" + response.status };
       }
     } else {
+      markFirstSaveSeen();
       setConnectedState({
+        firstSaveSeen: true,
         lastTrackSuccessAt: new Date().toISOString(),
       });
       await refreshLibraryOverlay();
@@ -779,7 +892,11 @@ async function handleQuickAdd(payload, sender, sendResponse) {
         json && json.data && typeof json.data.entry_id === "string"
           ? json.data.entry_id
           : null;
-      setConnectedState({ lastQuickAddAt: new Date().toISOString() });
+      markFirstSaveSeen();
+      setConnectedState({
+        firstSaveSeen: true,
+        lastQuickAddAt: new Date().toISOString(),
+      });
       setBadge(sender?.tab?.id, "OK", "#0D7A5F");
       setTimeout(() => clearBadge(sender?.tab?.id), 2000);
       await refreshLibraryOverlay();
@@ -1054,7 +1171,11 @@ async function handleSetReaderStatus(payload, sender, sendResponse) {
     });
 
     if (response.ok) {
-      setConnectedState({ lastReaderStatusAt: new Date().toISOString() });
+      markFirstSaveSeen();
+      setConnectedState({
+        firstSaveSeen: true,
+        lastReaderStatusAt: new Date().toISOString(),
+      });
       setBadge(sender?.tab?.id, "OK", "#0D7A5F");
       setTimeout(() => clearBadge(sender?.tab?.id), 2000);
       const workKey = await patchOverlayReaderStatus(entryId, status, progress);

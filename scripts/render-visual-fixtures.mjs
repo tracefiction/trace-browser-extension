@@ -168,11 +168,16 @@ function makeStorageData(authState = connectedAuthState(), cacheVariant = "defau
   return {
     authToken: connected ? "visual-token" : null,
     traceAuthState: authState,
+    traceFirstSaveSeen: connected,
+    traceLibraryCount: connected ? 1 : 0,
+    traceActiveTab: connected
+      ? { kind: "supported_story", site: "ao3", canImport: true }
+      : { kind: "unsupported" },
     libraryOverlayCache: makeOverlayCache(cacheVariant),
     prefAutoTrackEnabled: true,
     prefLibraryInlayEnabled: true,
     prefMetadataImproveEnabled: true,
-    traceUserPro: true,
+    traceUserPro: connected,
   };
 }
 
@@ -182,6 +187,10 @@ function extensionMockSource(storageData) {
       const storageData = ${JSON.stringify(storageData)};
       const storageListeners = [];
       const popupState = {
+        authState: storageData.traceAuthState,
+        firstSaveSeen: storageData.traceFirstSaveSeen === true,
+        libraryCount: typeof storageData.traceLibraryCount === "number" ? storageData.traceLibraryCount : null,
+        activeTab: storageData.traceActiveTab || { kind: "unknown" },
         pro: storageData.traceUserPro === true,
         autoTrackEnabled: storageData.prefAutoTrackEnabled !== false,
         libraryInlayEnabled: storageData.prefLibraryInlayEnabled !== false,
@@ -443,7 +452,12 @@ async function renderPopupScreenshot(browser, definition, assets, manifest) {
   }
   const messages = [];
   page.on("pageerror", (error) => messages.push({ type: "pageerror", text: error.message }));
-  await page.addInitScript(extensionMockSource(makeStorageData(definition.authState)));
+  await page.addInitScript(
+    extensionMockSource({
+      ...makeStorageData(definition.authState),
+      ...(definition.storageData || {}),
+    }),
+  );
   await installPopupRoutes(page, assets.popupHtml, assets.popupCss, assets.popupJs, assets.markSvg);
   await page.goto("https://trace-extension.local/popup.html", { waitUntil: "domcontentloaded" });
   await page.waitForSelector("#popup-status", { timeout: 10000 });
@@ -709,11 +723,22 @@ async function main() {
         colorScheme: "dark",
       },
       {
+        name: "Extension popup first run on story",
+        file: "popup-first-run-story.png",
+        authState: connectedAuthState(),
+        storageData: {
+          traceFirstSaveSeen: false,
+          traceLibraryCount: 0,
+          traceActiveTab: { kind: "supported_story", site: "ao3", canImport: true },
+        },
+        colorScheme: "dark",
+      },
+      {
         name: "Extension popup signed out",
         file: "popup-signed-out.png",
         authState: {
           state: "signed_out",
-          message: "Open Trace and sign in once to connect the extension.",
+          message: "Open Trace in this browser and sign in. Then return to an AO3 or FFN story page to save your first story.",
           helpUrl: "https://tracefiction.com/apps",
         },
         colorScheme: "dark",

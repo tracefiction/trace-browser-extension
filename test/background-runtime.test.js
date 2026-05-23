@@ -275,6 +275,8 @@ test("TRACE_AUTH_UPDATE with blank token clears session and marks signed out", a
     storageState: {
       authToken: "token-1",
       traceUserPro: true,
+      traceFirstSaveSeen: true,
+      traceLibraryCount: 9,
       libraryOverlayCache: { entries: { "ao3:1": "READING" } },
     },
   });
@@ -287,9 +289,50 @@ test("TRACE_AUTH_UPDATE with blank token clears session and marks signed out", a
   assert.deepEqual(plainJson(response), { success: true, state: "signed_out" });
   assert.equal(h.store.authToken, undefined);
   assert.equal(h.store.traceUserPro, undefined);
+  assert.equal(h.store.traceFirstSaveSeen, undefined);
+  assert.equal(h.store.traceLibraryCount, undefined);
   assert.equal(h.store.libraryOverlayCache, undefined);
   assert.equal(h.store.traceAuthState.state, "signed_out");
   assert.deepEqual(plainJson(h.badgeTextCalls.at(-1)), { text: "", tabId: 22 });
+});
+
+test("TRACE_POPUP_GET_STATE includes local activation and active tab context", async () => {
+  const connected = {
+    state: "connected",
+    message: "Connected",
+    helpUrl: "https://tracefiction.com/",
+  };
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-popup",
+      traceAuthState: connected,
+      traceFirstSaveSeen: false,
+    },
+    activeTabs: [
+      { id: 23, url: "https://archiveofourown.org/works/12345/chapters/67890" },
+    ],
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) {
+        return createResponse({ json: { pro: true, library_count: 0 } });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.hooks.setBearerToken("token-popup");
+
+  const response = await h.dispatchMessage({ type: "TRACE_POPUP_GET_STATE" });
+
+  assert.equal(response.pro, true);
+  assert.equal(response.firstSaveSeen, false);
+  assert.equal(response.libraryCount, 0);
+  assert.deepEqual(plainJson(response.activeTab), {
+    kind: "supported_story",
+    site: "ao3",
+    canImport: true,
+  });
+  assert.equal(response.autoTrackEnabled, true);
+  assert.equal(response.libraryInlayEnabled, true);
+  assert.equal(response.metadataImproveEnabled, true);
 });
 
 test("AO3 tab completion pings the collector to schedule auto-track", async () => {
@@ -480,6 +523,8 @@ test("executeAutoTrack success refreshes overlay cache immediately", async () =>
   );
 
   assert.equal(h.store.traceAuthState.state, "connected");
+  assert.equal(h.store.traceAuthState.firstSaveSeen, true);
+  assert.equal(h.store.traceFirstSaveSeen, true);
   assert.equal(h.store.libraryOverlayCache.syncVersion, "v-track");
   assert.deepEqual(plainJson(h.badgeTextCalls.at(-1)), { text: "OK", tabId: 67 });
   assert.equal(sentMessages.length, 1);
@@ -574,6 +619,8 @@ test("TRACE_QUICK_ADD returns ok and refreshes overlay on success", async () => 
   assert.equal(msgResponse.ok, true);
   assert.equal(msgResponse.entryId, "e1");
   assert.equal(h.store.traceAuthState.state, "connected");
+  assert.equal(h.store.traceAuthState.firstSaveSeen, true);
+  assert.equal(h.store.traceFirstSaveSeen, true);
   assert.ok(h.store.traceAuthState.lastQuickAddAt);
   assert.deepEqual(plainJson(h.badgeTextCalls.at(-1)), { text: "OK", tabId: 77 });
   assert.equal(sentMessages.length >= 1, true);
