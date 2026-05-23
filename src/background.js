@@ -19,6 +19,7 @@ const AUTH_TOKEN_KEY = "authToken";
 const AUTH_STATE_KEY = "traceAuthState";
 const OVERLAY_STORAGE_KEY = "libraryOverlayCache";
 const LIBRARY_INVALIDATED_MESSAGE = "TRACE_LIBRARY_INVALIDATED";
+const EXTENSION_STATUS_QUERY_MESSAGE = "TRACE_EXTENSION_STATUS_QUERY";
 const OPTIMISTIC_CHAPTER_FLOORS_MS = 20_000;
 const TRACE_FIRST_SAVE_SEEN_KEY = "traceFirstSaveSeen";
 const TRACE_LIBRARY_COUNT_KEY = "traceLibraryCount";
@@ -138,6 +139,88 @@ function clearToken() {
   } catch (_) {
     /* ignore */
   }
+}
+
+function detectBrowserKind() {
+  try {
+    const url =
+      ext.runtime && typeof ext.runtime.getURL === "function"
+        ? ext.runtime.getURL("")
+        : "";
+    if (/^chrome-extension:\/\//i.test(url)) return "chrome";
+    if (/^moz-extension:\/\//i.test(url)) return "firefox";
+    if (/^safari-web-extension:\/\//i.test(url)) return "safari";
+  } catch (_) {
+    /* ignore */
+  }
+  return "unknown";
+}
+
+function normalizeStatusAuthState(rawState, hasToken) {
+  if (rawState === "connected") return "connected";
+  if (rawState === "signed_out") return "signed_out";
+  if (rawState === "reconnect_required") return "reconnect_required";
+  if (rawState === "error") return "error";
+  if (hasToken) return "connected";
+  return "signed_out";
+}
+
+function toEpochMillis(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function hasFirstSaveSignal(authState, firstSaveSeen) {
+  return (
+    firstSaveSeen === true ||
+    authState?.firstSaveSeen === true ||
+    Boolean(authState?.lastQuickAddAt) ||
+    Boolean(authState?.lastTrackSuccessAt) ||
+    Boolean(authState?.lastReaderStatusAt)
+  );
+}
+
+function safeUnknownExtensionStatus() {
+  return {
+    installed: true,
+    connected: false,
+    authState: "unknown",
+    browserKind: detectBrowserKind(),
+  };
+}
+
+function buildExtensionStatus(snapshot = {}) {
+  const authState =
+    snapshot[AUTH_STATE_KEY] && typeof snapshot[AUTH_STATE_KEY] === "object"
+      ? snapshot[AUTH_STATE_KEY]
+      : null;
+  const storedToken =
+    typeof snapshot[AUTH_TOKEN_KEY] === "string"
+      ? snapshot[AUTH_TOKEN_KEY].trim()
+      : "";
+  const hasToken = Boolean(storedToken || bearerToken);
+  const normalizedAuthState = normalizeStatusAuthState(authState?.state, hasToken);
+  const status = {
+    installed: true,
+    connected: normalizedAuthState === "connected",
+    authState: normalizedAuthState,
+    firstSaveSeen: hasFirstSaveSignal(
+      authState,
+      snapshot[TRACE_FIRST_SAVE_SEEN_KEY] === true,
+    ),
+    browserKind: detectBrowserKind(),
+  };
+  const lastTokenSyncAt = toEpochMillis(authState?.lastTokenSyncAt);
+  if (lastTokenSyncAt != null) {
+    status.lastTokenSyncAt = lastTokenSyncAt;
+  }
+  return status;
 }
 
 function markFirstSaveSeen() {
@@ -544,6 +627,30 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     if (sendResponse) sendResponse({ success: true, state: "connected" });
     return;
+  }
+
+  // -------------------------------------------------
+  // A2. Trace-origin extension status handshake
+  // -------------------------------------------------
+  if (msg.type === EXTENSION_STATUS_QUERY_MESSAGE) {
+    const nonce = typeof msg.nonce === "string" ? msg.nonce : "";
+    if (!nonce.trim()) return false;
+
+    try {
+      ext.storage.local.get(
+        [AUTH_TOKEN_KEY, AUTH_STATE_KEY, TRACE_FIRST_SAVE_SEEN_KEY],
+        (res) => {
+          if (ext.runtime.lastError) {
+            if (sendResponse) sendResponse(safeUnknownExtensionStatus());
+            return;
+          }
+          if (sendResponse) sendResponse(buildExtensionStatus(res || {}));
+        },
+      );
+    } catch (_) {
+      if (sendResponse) sendResponse(safeUnknownExtensionStatus());
+    }
+    return true;
   }
 
   // -------------------------------------------------

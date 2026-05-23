@@ -335,6 +335,111 @@ test("TRACE_POPUP_GET_STATE includes local activation and active tab context", a
   assert.equal(response.metadataImproveEnabled, true);
 });
 
+test("TRACE_EXTENSION_STATUS_QUERY returns connected state without private fields", async () => {
+  const h = createBackgroundHarness();
+  h.hooks.setBearerToken("token-status-handshake");
+  h.store.authToken = "token-status-handshake";
+  h.store.traceAuthState = {
+    state: "connected",
+    message: "Extension connected to your Trace account.",
+    helpUrl: "https://tracefiction.com/",
+    lastTokenSyncAt: "2026-05-01T12:00:00.000Z",
+    firstSaveSeen: true,
+    userId: "user-should-not-leak",
+  };
+  h.store.traceFirstSaveSeen = true;
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_EXTENSION_STATUS_QUERY",
+    nonce: "nonce-connected",
+  });
+
+  assert.deepEqual(plainJson(response), {
+    installed: true,
+    connected: true,
+    authState: "connected",
+    firstSaveSeen: true,
+    browserKind: "unknown",
+    lastTokenSyncAt: Date.parse("2026-05-01T12:00:00.000Z"),
+  });
+  assert.equal(Object.prototype.hasOwnProperty.call(response, "authToken"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(response, "token"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(response, "userId"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(response, "message"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(response, "helpUrl"), false);
+});
+
+test("TRACE_EXTENSION_STATUS_QUERY returns signed-out state", async () => {
+  const h = createBackgroundHarness();
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_EXTENSION_STATUS_QUERY",
+    nonce: "nonce-signed-out",
+  });
+
+  assert.deepEqual(plainJson(response), {
+    installed: true,
+    connected: false,
+    authState: "signed_out",
+    firstSaveSeen: false,
+    browserKind: "unknown",
+  });
+});
+
+test("TRACE_EXTENSION_STATUS_QUERY returns reconnect and error states", async () => {
+  const reconnect = createBackgroundHarness();
+  reconnect.store.traceAuthState = {
+    state: "reconnect_required",
+    message: "Open Trace and sign in again.",
+    lastHttpStatus: 401,
+  };
+  const reconnectResponse = await reconnect.dispatchMessage({
+    type: "TRACE_EXTENSION_STATUS_QUERY",
+    nonce: "nonce-reconnect",
+  });
+  assert.deepEqual(plainJson(reconnectResponse), {
+    installed: true,
+    connected: false,
+    authState: "reconnect_required",
+    firstSaveSeen: false,
+    browserKind: "unknown",
+  });
+
+  const errored = createBackgroundHarness();
+  errored.store.traceAuthState = {
+    state: "error",
+    message: "Trace could not load extension storage.",
+  };
+  const errorResponse = await errored.dispatchMessage({
+    type: "TRACE_EXTENSION_STATUS_QUERY",
+    nonce: "nonce-error",
+  });
+  assert.deepEqual(plainJson(errorResponse), {
+    installed: true,
+    connected: false,
+    authState: "error",
+    firstSaveSeen: false,
+    browserKind: "unknown",
+  });
+});
+
+test("TRACE_EXTENSION_STATUS_QUERY ignores missing or invalid nonces", async () => {
+  const h = createBackgroundHarness();
+
+  assert.equal(
+    await h.dispatchMessage({ type: "TRACE_EXTENSION_STATUS_QUERY" }),
+    undefined,
+  );
+  assert.equal(
+    await h.dispatchMessage({ type: "TRACE_EXTENSION_STATUS_QUERY", nonce: "" }),
+    undefined,
+  );
+  assert.equal(
+    await h.dispatchMessage({ type: "TRACE_EXTENSION_STATUS_QUERY", nonce: "   " }),
+    undefined,
+  );
+});
+
 test("AO3 tab completion pings the collector to schedule auto-track", async () => {
   const sentMessages = [];
   const h = createBackgroundHarness({

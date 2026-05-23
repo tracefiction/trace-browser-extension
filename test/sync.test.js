@@ -52,9 +52,10 @@ function createSyncHarness(
     self: dom.window,
     chrome: {
       runtime: {
-        sendMessage(message) {
-          if (sendMessageImpl) return sendMessageImpl(message);
+        sendMessage(message, callback) {
           messages.push(message);
+          if (sendMessageImpl) return sendMessageImpl(message, callback);
+          if (typeof callback === "function") callback(undefined);
         },
         onMessage: {
           addListener(fn) {
@@ -146,6 +147,126 @@ test("sync suppresses transient async runtime sendMessage rejections", async () 
   await flush();
 
   assert.deepEqual(h.consoleErrors, []);
+});
+
+test("sync answers same-origin extension status requests with sanitized state", async () => {
+  const h = createSyncHarness("https://tracefiction.com", {
+    sendMessageImpl(message, callback) {
+      callback?.({
+        installed: true,
+        connected: true,
+        authState: "connected",
+        lastTokenSyncAt: Date.parse("2026-05-01T12:00:00.000Z"),
+        firstSaveSeen: true,
+        browserKind: "chrome",
+        authToken: "token-should-not-leak",
+        userId: "user-should-not-leak",
+        url: "https://archiveofourown.org/works/1",
+        privateTags: ["private"],
+        rating: "private",
+        notes: "private note",
+        collectionData: { id: "collection-1" },
+        storyData: { title: "should not leak" },
+      });
+    },
+  });
+
+  h.window.dispatchEvent(
+    new h.window.MessageEvent("message", {
+      data: { type: "TRACE_EXTENSION_STATUS_REQUEST", nonce: "nonce-1" },
+      origin: "https://tracefiction.com",
+      source: h.window,
+    }),
+  );
+  await flush();
+
+  assert.deepEqual(plainJson(h.messages), [
+    { type: "TRACE_EXTENSION_STATUS_QUERY", nonce: "nonce-1" },
+  ]);
+  assert.deepEqual(plainJson(h.postedMessages), [
+    {
+      data: {
+        type: "TRACE_EXTENSION_STATUS_RESPONSE",
+        nonce: "nonce-1",
+        state: {
+          installed: true,
+          connected: true,
+          authState: "connected",
+          lastTokenSyncAt: Date.parse("2026-05-01T12:00:00.000Z"),
+          firstSaveSeen: true,
+          browserKind: "chrome",
+        },
+      },
+      targetOrigin: "https://tracefiction.com",
+    },
+  ]);
+});
+
+test("sync ignores status requests without a non-empty nonce", async () => {
+  const h = createSyncHarness();
+  for (const nonce of [undefined, "", "   "]) {
+    h.window.dispatchEvent(
+      new h.window.MessageEvent("message", {
+        data: { type: "TRACE_EXTENSION_STATUS_REQUEST", nonce },
+        origin: "https://tracefiction.com",
+        source: h.window,
+      }),
+    );
+  }
+  await flush();
+
+  assert.deepEqual(h.messages, []);
+  assert.deepEqual(h.postedMessages, []);
+});
+
+test("sync ignores cross-origin status requests", async () => {
+  const h = createSyncHarness();
+  h.window.dispatchEvent(
+    new h.window.MessageEvent("message", {
+      data: { type: "TRACE_EXTENSION_STATUS_REQUEST", nonce: "nonce-2" },
+      origin: "https://evil.example",
+      source: h.window,
+    }),
+  );
+  await flush();
+
+  assert.deepEqual(h.messages, []);
+  assert.deepEqual(h.postedMessages, []);
+});
+
+test("sync returns safe unknown state when background status messaging fails", async () => {
+  const h = createSyncHarness("https://tracefiction.com", {
+    sendMessageImpl() {
+      throw new Error("permission denied");
+    },
+  });
+
+  h.window.dispatchEvent(
+    new h.window.MessageEvent("message", {
+      data: { type: "TRACE_EXTENSION_STATUS_REQUEST", nonce: "nonce-3" },
+      origin: "https://tracefiction.com",
+      source: h.window,
+    }),
+  );
+  await flush();
+
+  assert.deepEqual(plainJson(h.messages), [
+    { type: "TRACE_EXTENSION_STATUS_QUERY", nonce: "nonce-3" },
+  ]);
+  assert.deepEqual(plainJson(h.postedMessages), [
+    {
+      data: {
+        type: "TRACE_EXTENSION_STATUS_RESPONSE",
+        nonce: "nonce-3",
+        state: {
+          installed: true,
+          connected: false,
+          authState: "unknown",
+        },
+      },
+      targetOrigin: "https://tracefiction.com",
+    },
+  ]);
 });
 
 test("sync still reports unexpected runtime sendMessage failures", async () => {
