@@ -369,6 +369,84 @@ test("TRACE_EXTENSION_STATUS_QUERY returns connected state without private field
   assert.equal(Object.prototype.hasOwnProperty.call(response, "helpUrl"), false);
 });
 
+test("TRACE_EXTENSION_STATUS_QUERY returns only coarse archive readiness fields", async () => {
+  const h = createBackgroundHarness();
+  h.hooks.setBearerToken("token-status-handshake");
+  h.store.authToken = "token-status-handshake";
+  h.store.traceAuthState = {
+    state: "connected",
+    message: "Extension connected to your Trace account.",
+  };
+  h.store.traceArchiveReadiness = {
+    lastArchiveSeenAt: Date.parse("2026-05-01T12:00:00.000Z"),
+    lastArchiveHostKind: "ao3",
+    lastArchiveActionAt: Date.parse("2026-05-01T12:01:00.000Z"),
+    lastArchiveActionKind: "quick_add",
+    lastArchiveErrorAt: Date.now(),
+    lastArchiveErrorKind: "parser",
+    url: "https://archiveofourown.org/works/123",
+    title: "must not leak",
+    sourceId: "ao3:123",
+    notes: "must not leak",
+    rawError: "selector .private failed",
+  };
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_EXTENSION_STATUS_QUERY",
+    nonce: "nonce-archive",
+  });
+
+  assert.deepEqual(plainJson(response), {
+    installed: true,
+    connected: true,
+    authState: "connected",
+    firstSaveSeen: false,
+    browserKind: "unknown",
+    lastArchiveSeenAt: Date.parse("2026-05-01T12:00:00.000Z"),
+    lastArchiveHostKind: "ao3",
+    lastArchiveActionAt: Date.parse("2026-05-01T12:01:00.000Z"),
+    lastArchiveActionKind: "quick_add",
+    lastArchiveErrorKind: "parser",
+  });
+  assert.equal(Object.prototype.hasOwnProperty.call(response, "url"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(response, "title"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(response, "sourceId"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(response, "notes"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(response, "rawError"), false);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(response, "lastArchiveErrorAt"),
+    false,
+  );
+});
+
+test("TRACE_EXTENSION_STATUS_QUERY ignores invalid archive readiness fields", async () => {
+  const h = createBackgroundHarness();
+  h.hooks.setBearerToken("token-status-handshake");
+  h.store.authToken = "token-status-handshake";
+  h.store.traceAuthState = { state: "connected" };
+  h.store.traceArchiveReadiness = {
+    lastArchiveSeenAt: "not-a-date",
+    lastArchiveHostKind: "archiveofourown.org",
+    lastArchiveActionAt: Number.NaN,
+    lastArchiveActionKind: "story_title",
+    lastArchiveErrorAt: Date.now(),
+    lastArchiveErrorKind: "raw_selector_failure",
+  };
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_EXTENSION_STATUS_QUERY",
+    nonce: "nonce-invalid-archive",
+  });
+
+  assert.deepEqual(plainJson(response), {
+    installed: true,
+    connected: true,
+    authState: "connected",
+    firstSaveSeen: false,
+    browserKind: "unknown",
+  });
+});
+
 test("TRACE_EXTENSION_STATUS_QUERY returns signed-out state", async () => {
   const h = createBackgroundHarness();
 

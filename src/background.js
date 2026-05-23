@@ -20,7 +20,9 @@ const AUTH_STATE_KEY = "traceAuthState";
 const OVERLAY_STORAGE_KEY = "libraryOverlayCache";
 const LIBRARY_INVALIDATED_MESSAGE = "TRACE_LIBRARY_INVALIDATED";
 const EXTENSION_STATUS_QUERY_MESSAGE = "TRACE_EXTENSION_STATUS_QUERY";
+const ARCHIVE_READINESS_KEY = "traceArchiveReadiness";
 const OPTIMISTIC_CHAPTER_FLOORS_MS = 20_000;
+const ARCHIVE_READINESS_ERROR_RECENT_MS = 24 * 60 * 60 * 1_000;
 const TRACE_FIRST_SAVE_SEEN_KEY = "traceFirstSaveSeen";
 const TRACE_LIBRARY_COUNT_KEY = "traceLibraryCount";
 // OVERLAY_PRO_KEY removed — overlay is available to all users
@@ -176,6 +178,201 @@ function toEpochMillis(value) {
   return null;
 }
 
+function normalizeArchiveHostKind(value) {
+  if (value === "ao3" || value === "ffn" || value === "unknown") {
+    return value;
+  }
+  return null;
+}
+
+function normalizeArchiveActionKind(value) {
+  if (
+    value === "track" ||
+    value === "quick_add" ||
+    value === "import" ||
+    value === "metadata" ||
+    value === "unknown"
+  ) {
+    return value;
+  }
+  return null;
+}
+
+function normalizeArchiveErrorKind(value) {
+  if (
+    value === "permission" ||
+    value === "unsupported_page" ||
+    value === "auth" ||
+    value === "parser" ||
+    value === "network" ||
+    value === "unknown"
+  ) {
+    return value;
+  }
+  return null;
+}
+
+function archiveHostKindFromPayload(payload) {
+  const source =
+    payload && typeof payload.s === "string"
+      ? payload.s
+      : payload?.item && typeof payload.item.src === "string"
+        ? payload.item.src
+        : Array.isArray(payload?.items) && typeof payload.items[0]?.src === "string"
+          ? payload.items[0].src
+          : "";
+  if (source === "ao3" || source === "ffn") return source;
+  return "unknown";
+}
+
+function archiveHostKindFromTabContext(tabContext) {
+  const site = tabContext && typeof tabContext.site === "string" ? tabContext.site : "";
+  if (site === "ao3" || site === "ffn") return site;
+  return "unknown";
+}
+
+function tabContextLooksLikeArchive(tabContext) {
+  return (
+    tabContext?.kind === "supported_story" ||
+    tabContext?.kind === "supported_archive" ||
+    tabContext?.kind === "blocked_archive"
+  );
+}
+
+function sanitizeArchiveReadiness(raw) {
+  if (!raw || typeof raw !== "object") return {};
+  const out = {};
+  const lastArchiveSeenAt = toEpochMillis(raw.lastArchiveSeenAt);
+  const lastArchiveHostKind = normalizeArchiveHostKind(raw.lastArchiveHostKind);
+  const lastArchiveActionAt = toEpochMillis(raw.lastArchiveActionAt);
+  const lastArchiveActionKind = normalizeArchiveActionKind(
+    raw.lastArchiveActionKind,
+  );
+  const lastArchiveErrorAt = toEpochMillis(raw.lastArchiveErrorAt);
+  const lastArchiveErrorKind = normalizeArchiveErrorKind(raw.lastArchiveErrorKind);
+
+  if (lastArchiveSeenAt != null) {
+    out.lastArchiveSeenAt = lastArchiveSeenAt;
+  }
+  if (lastArchiveHostKind) {
+    out.lastArchiveHostKind = lastArchiveHostKind;
+  }
+  if (lastArchiveActionAt != null) {
+    out.lastArchiveActionAt = lastArchiveActionAt;
+  }
+  if (lastArchiveActionKind) {
+    out.lastArchiveActionKind = lastArchiveActionKind;
+  }
+  if (
+    lastArchiveErrorKind &&
+    lastArchiveErrorAt != null &&
+    Date.now() - lastArchiveErrorAt <= ARCHIVE_READINESS_ERROR_RECENT_MS
+  ) {
+    out.lastArchiveErrorKind = lastArchiveErrorKind;
+  }
+
+  return out;
+}
+
+function archiveReadinessFromLegacyAuthState(authState) {
+  if (!authState || typeof authState !== "object") return {};
+  const quickAddAt = toEpochMillis(authState.lastQuickAddAt);
+  const trackAt = toEpochMillis(authState.lastTrackSuccessAt);
+  if (quickAddAt == null && trackAt == null) return {};
+
+  if (quickAddAt != null && (trackAt == null || quickAddAt >= trackAt)) {
+    return {
+      lastArchiveActionAt: quickAddAt,
+      lastArchiveActionKind: "quick_add",
+    };
+  }
+
+  return {
+    lastArchiveActionAt: trackAt,
+    lastArchiveActionKind: "track",
+  };
+}
+
+function applyArchiveReadiness(status, archiveReadiness, authState) {
+  const legacy = archiveReadinessFromLegacyAuthState(authState);
+  const merged = { ...legacy, ...archiveReadiness };
+
+  if (typeof merged.lastArchiveSeenAt === "number") {
+    status.lastArchiveSeenAt = merged.lastArchiveSeenAt;
+  }
+  if (normalizeArchiveHostKind(merged.lastArchiveHostKind)) {
+    status.lastArchiveHostKind = merged.lastArchiveHostKind;
+  }
+  if (typeof merged.lastArchiveActionAt === "number") {
+    status.lastArchiveActionAt = merged.lastArchiveActionAt;
+  }
+  if (normalizeArchiveActionKind(merged.lastArchiveActionKind)) {
+    status.lastArchiveActionKind = merged.lastArchiveActionKind;
+  }
+  if (normalizeArchiveErrorKind(merged.lastArchiveErrorKind)) {
+    status.lastArchiveErrorKind = merged.lastArchiveErrorKind;
+  }
+}
+
+function recordArchiveReadiness(event = {}) {
+  const now = Date.now();
+  const hostKind = normalizeArchiveHostKind(event.hostKind) || "unknown";
+  const actionKind = normalizeArchiveActionKind(event.actionKind);
+  const errorKind = normalizeArchiveErrorKind(event.errorKind);
+  const patch = {};
+
+  if (event.seen !== false) {
+    patch.lastArchiveSeenAt = now;
+    patch.lastArchiveHostKind = hostKind;
+  }
+  if (actionKind) {
+    patch.lastArchiveActionAt = now;
+    patch.lastArchiveActionKind = actionKind;
+    patch.lastArchiveErrorKind = null;
+    patch.lastArchiveErrorAt = null;
+  }
+  if (errorKind) {
+    patch.lastArchiveErrorKind = errorKind;
+    patch.lastArchiveErrorAt = now;
+  }
+  if (Object.keys(patch).length === 0) return;
+
+  try {
+    ext.storage.local.get([ARCHIVE_READINESS_KEY], (res) => {
+      if (ext.runtime.lastError) return;
+      const prev =
+        res && res[ARCHIVE_READINESS_KEY] && typeof res[ARCHIVE_READINESS_KEY] === "object"
+          ? res[ARCHIVE_READINESS_KEY]
+          : {};
+      const next = { ...prev };
+      for (const [key, value] of Object.entries(patch)) {
+        if (value == null) {
+          delete next[key];
+        } else {
+          next[key] = value;
+        }
+      }
+      ext.storage.local.set({ [ARCHIVE_READINESS_KEY]: next });
+    });
+  } catch (_) {
+    /* best-effort local readiness only */
+  }
+}
+
+function recordArchiveActionFromPayload(payload, actionKind) {
+  recordArchiveReadiness({
+    hostKind: archiveHostKindFromPayload(payload),
+    actionKind,
+  });
+}
+
+function recordArchiveIssueFromPayload(payload, errorKind) {
+  recordArchiveReadiness({
+    hostKind: archiveHostKindFromPayload(payload),
+    errorKind,
+  });
+}
+
 function hasFirstSaveSignal(authState, firstSaveSeen) {
   return (
     firstSaveSeen === true ||
@@ -220,6 +417,11 @@ function buildExtensionStatus(snapshot = {}) {
   if (lastTokenSyncAt != null) {
     status.lastTokenSyncAt = lastTokenSyncAt;
   }
+  applyArchiveReadiness(
+    status,
+    sanitizeArchiveReadiness(snapshot[ARCHIVE_READINESS_KEY]),
+    authState,
+  );
   return status;
 }
 
@@ -638,7 +840,12 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     try {
       ext.storage.local.get(
-        [AUTH_TOKEN_KEY, AUTH_STATE_KEY, TRACE_FIRST_SAVE_SEEN_KEY],
+        [
+          AUTH_TOKEN_KEY,
+          AUTH_STATE_KEY,
+          TRACE_FIRST_SAVE_SEEN_KEY,
+          ARCHIVE_READINESS_KEY,
+        ],
         (res) => {
           if (ext.runtime.lastError) {
             if (sendResponse) sendResponse(safeUnknownExtensionStatus());
@@ -788,8 +995,10 @@ function toBase64Json(obj) {
 }
 
 async function handleImportTrigger(sendResponse) {
+  let activeTabContext = null;
   try {
     const [tab] = await ext.tabs.query({ active: true, currentWindow: true });
+    activeTabContext = classifyActiveTabUrl(tab && tab.url);
     if (!tab?.id) {
       if (sendResponse) sendResponse({ ok: false, error: "no_active_tab" });
       return;
@@ -798,6 +1007,15 @@ async function handleImportTrigger(sendResponse) {
     const res = await ext.tabs.sendMessage(tab.id, { type: "TRACE_COLLECT" });
     if (!res?.ok || !res.payload) {
       setBadge(tab.id, "ERR", "#B3261E");
+      recordArchiveReadiness({
+        hostKind: archiveHostKindFromTabContext(activeTabContext),
+        errorKind:
+          res?.error === "page_contains_password_field"
+            ? "unsupported_page"
+            : tabContextLooksLikeArchive(activeTabContext)
+              ? "parser"
+              : "unsupported_page",
+      });
       if (sendResponse) sendResponse({ ok: false, error: res?.error || "collect_failed" });
       return;
     }
@@ -805,12 +1023,32 @@ async function handleImportTrigger(sendResponse) {
     const b64 = toBase64Json(res.payload);
     const url = `${IMPORT_BASE}#U${encodeURIComponent(b64)}`;
     await ext.tabs.create({ url });
+    if (Array.isArray(res.payload.items) && res.payload.items.length > 0) {
+      recordArchiveActionFromPayload(res.payload, "import");
+    } else {
+      recordArchiveReadiness({
+        hostKind: archiveHostKindFromTabContext(activeTabContext),
+        errorKind: "unsupported_page",
+      });
+    }
     if (sendResponse) sendResponse({ ok: true });
   } catch (e) {
     if (isMissingTabReceiverError(e)) {
       console.debug("[Trace] Import skipped (no collector on this tab)");
+      recordArchiveReadiness({
+        hostKind: archiveHostKindFromTabContext(activeTabContext),
+        errorKind: tabContextLooksLikeArchive(activeTabContext)
+          ? "permission"
+          : "unsupported_page",
+      });
     } else {
       console.error("[Trace] Import trigger failed:", e);
+      recordArchiveReadiness({
+        hostKind: archiveHostKindFromTabContext(activeTabContext),
+        errorKind: tabContextLooksLikeArchive(activeTabContext)
+          ? "unknown"
+          : "unsupported_page",
+      });
     }
     if (sendResponse) sendResponse({ ok: false, error: String(e?.message || e) });
   }
@@ -822,6 +1060,7 @@ async function handleImportTrigger(sendResponse) {
 
 function handleAutoTrack(payload, sender, sendResponse) {
   if (!bearerToken) {
+    recordArchiveIssueFromPayload(payload, "auth");
     setSignedOutState({
       message: "Open Trace in this browser and sign in, then automatic sync will work.",
       lastTrackAttemptAt: new Date().toISOString(),
@@ -879,6 +1118,7 @@ async function executeAutoTrack(payload, sender) {
 
     if (!response.ok) {
       if (response.status === 401) {
+        recordArchiveIssueFromPayload(payload, "auth");
         clearToken();
         setReconnectState("Your Trace session expired. Open Trace and sign in again.", {
           lastTrackAttemptAt: new Date().toISOString(),
@@ -898,6 +1138,10 @@ async function executeAutoTrack(payload, sender) {
         setBadge(sender?.tab?.id, "FULL", "#735B1A");
         return { ok: false, error: "free_limit_reached" };
       } else {
+        recordArchiveIssueFromPayload(
+          payload,
+          response.status === 400 ? "parser" : "network",
+        );
         await refreshLibraryOverlay();
         setConnectedWithSyncWarning(
           `Automatic sync didn’t go through (${response.status}). Manual import from this menu still works.`,
@@ -910,6 +1154,7 @@ async function executeAutoTrack(payload, sender) {
         return { ok: false, error: "http_" + response.status };
       }
     } else {
+      recordArchiveActionFromPayload(payload, "track");
       markFirstSaveSeen();
       setConnectedState({
         firstSaveSeen: true,
@@ -923,6 +1168,7 @@ async function executeAutoTrack(payload, sender) {
     }
   } catch (error) {
     console.error("[Trace] Network error:", error);
+    recordArchiveIssueFromPayload(payload, "network");
     await refreshLibraryOverlay();
     setConnectedWithSyncWarning(
       "Couldn’t reach Trace for automatic sync. Manual import still works — try again later for sync.",
@@ -964,13 +1210,21 @@ async function handleMetadataBroadcast(payload, sender) {
     });
 
     if (response.status === 401) {
+      recordArchiveIssueFromPayload(payload, "auth");
       clearToken();
       setReconnectState("Your Trace session expired. Open Trace and sign in again.");
     } else if (response.ok) {
+      recordArchiveActionFromPayload(payload, "metadata");
       await signalLibraryInvalidated("metadata");
+    } else {
+      recordArchiveIssueFromPayload(
+        payload,
+        response.status === 400 ? "parser" : "network",
+      );
     }
   } catch (error) {
     console.error("[Trace] Metadata broadcast error:", error);
+    recordArchiveIssueFromPayload(payload, "network");
   }
 }
 
@@ -980,6 +1234,7 @@ async function handleMetadataBroadcast(payload, sender) {
 
 async function handleQuickAdd(payload, sender, sendResponse) {
   if (!bearerToken) {
+    recordArchiveIssueFromPayload(payload, "auth");
     if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
     return;
   }
@@ -995,6 +1250,7 @@ async function handleQuickAdd(payload, sender, sendResponse) {
     });
 
     if (response.ok) {
+      recordArchiveActionFromPayload(payload, "quick_add");
       const json = await response.json().catch(() => null);
       const entryId =
         json && json.data && typeof json.data.entry_id === "string"
@@ -1015,16 +1271,22 @@ async function handleQuickAdd(payload, sender, sendResponse) {
         sendResponse(payload);
       }
     } else if (response.status === 401) {
+      recordArchiveIssueFromPayload(payload, "auth");
       clearToken();
       setReconnectState("Your Trace session expired. Open Trace and sign in again.");
       if (sendResponse) sendResponse({ ok: false, error: "auth_expired" });
     } else if (response.status === 402) {
       if (sendResponse) sendResponse({ ok: false, error: "free_limit_reached" });
     } else {
+      recordArchiveIssueFromPayload(
+        payload,
+        response.status === 400 ? "parser" : "network",
+      );
       if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
     }
   } catch (e) {
     console.error("[Trace] Quick-add error:", e);
+    recordArchiveIssueFromPayload(payload, "network");
     if (sendResponse) sendResponse({ ok: false, error: String(e?.message || e) });
   }
 }

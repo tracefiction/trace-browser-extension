@@ -159,12 +159,18 @@ test("sync answers same-origin extension status requests with sanitized state", 
         lastTokenSyncAt: Date.parse("2026-05-01T12:00:00.000Z"),
         firstSaveSeen: true,
         browserKind: "chrome",
+        lastArchiveSeenAt: Date.parse("2026-05-01T12:01:00.987Z"),
+        lastArchiveHostKind: "ao3",
+        lastArchiveActionAt: Date.parse("2026-05-01T12:02:00.987Z"),
+        lastArchiveActionKind: "quick_add",
+        lastArchiveErrorKind: "permission",
         authToken: "token-should-not-leak",
         userId: "user-should-not-leak",
         url: "https://archiveofourown.org/works/1",
         privateTags: ["private"],
         rating: "private",
         notes: "private note",
+        rawError: "raw parser error",
         collectionData: { id: "collection-1" },
         storyData: { title: "should not leak" },
       });
@@ -195,6 +201,52 @@ test("sync answers same-origin extension status requests with sanitized state", 
           lastTokenSyncAt: Date.parse("2026-05-01T12:00:00.000Z"),
           firstSaveSeen: true,
           browserKind: "chrome",
+          lastArchiveSeenAt: Date.parse("2026-05-01T12:01:00.987Z"),
+          lastArchiveHostKind: "ao3",
+          lastArchiveActionAt: Date.parse("2026-05-01T12:02:00.987Z"),
+          lastArchiveActionKind: "quick_add",
+          lastArchiveErrorKind: "permission",
+        },
+      },
+      targetOrigin: "https://tracefiction.com",
+    },
+  ]);
+});
+
+test("sync drops invalid archive readiness values without failing status", async () => {
+  const h = createSyncHarness("https://tracefiction.com", {
+    sendMessageImpl(message, callback) {
+      callback?.({
+        installed: true,
+        connected: true,
+        authState: "connected",
+        lastArchiveSeenAt: "2026-05-01T12:01:00.987Z",
+        lastArchiveHostKind: "archiveofourown.org",
+        lastArchiveActionAt: Number.NaN,
+        lastArchiveActionKind: "story_title",
+        lastArchiveErrorKind: "raw_selector_failure",
+      });
+    },
+  });
+
+  h.window.dispatchEvent(
+    new h.window.MessageEvent("message", {
+      data: { type: "TRACE_EXTENSION_STATUS_REQUEST", nonce: "nonce-invalid" },
+      origin: "https://tracefiction.com",
+      source: h.window,
+    }),
+  );
+  await flush();
+
+  assert.deepEqual(plainJson(h.postedMessages), [
+    {
+      data: {
+        type: "TRACE_EXTENSION_STATUS_RESPONSE",
+        nonce: "nonce-invalid",
+        state: {
+          installed: true,
+          connected: true,
+          authState: "connected",
         },
       },
       targetOrigin: "https://tracefiction.com",

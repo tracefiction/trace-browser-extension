@@ -14,6 +14,22 @@ const STATUS_AUTH_STATES = new Set([
   "unknown",
 ]);
 const BROWSER_KINDS = new Set(["chrome", "firefox", "safari", "unknown"]);
+const ARCHIVE_HOST_KINDS = new Set(["ao3", "ffn", "unknown"]);
+const ARCHIVE_ACTION_KINDS = new Set([
+  "track",
+  "quick_add",
+  "import",
+  "metadata",
+  "unknown",
+]);
+const ARCHIVE_ERROR_KINDS = new Set([
+  "permission",
+  "unsupported_page",
+  "auth",
+  "parser",
+  "network",
+  "unknown",
+]);
 
 function isTransientRuntimeMessageError(error) {
   const parts = [
@@ -75,6 +91,27 @@ function sanitizeStatusState(raw) {
   }
   if (BROWSER_KINDS.has(input.browserKind)) {
     state.browserKind = input.browserKind;
+  }
+  if (
+    typeof input.lastArchiveSeenAt === "number" &&
+    Number.isFinite(input.lastArchiveSeenAt)
+  ) {
+    state.lastArchiveSeenAt = Math.trunc(input.lastArchiveSeenAt);
+  }
+  if (ARCHIVE_HOST_KINDS.has(input.lastArchiveHostKind)) {
+    state.lastArchiveHostKind = input.lastArchiveHostKind;
+  }
+  if (
+    typeof input.lastArchiveActionAt === "number" &&
+    Number.isFinite(input.lastArchiveActionAt)
+  ) {
+    state.lastArchiveActionAt = Math.trunc(input.lastArchiveActionAt);
+  }
+  if (ARCHIVE_ACTION_KINDS.has(input.lastArchiveActionKind)) {
+    state.lastArchiveActionKind = input.lastArchiveActionKind;
+  }
+  if (ARCHIVE_ERROR_KINDS.has(input.lastArchiveErrorKind)) {
+    state.lastArchiveErrorKind = input.lastArchiveErrorKind;
   }
   return state;
 }
