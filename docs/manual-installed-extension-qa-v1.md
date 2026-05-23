@@ -42,6 +42,16 @@ Chrome or Edge:
    button in `chrome://extensions`.
 6. Reload every AO3/FFN tab under test.
 
+For Google Chrome Stable QA, use the `chrome://extensions` UI path above as
+the source of truth. Chrome `148.0.7778.179` ignored command-line unpacked
+extension loading during D3e QA with:
+`--load-extension is not allowed in Google Chrome, ignoring.` A recorded
+extension path in the profile's `Secure Preferences` is not proof that the
+runtime is active. Confirm the Trace card appears on `chrome://extensions` and
+that either `Inspect views service worker` is listed or
+`chrome-extension://<extension-id>/popup.html` opens the Trace popup. Use
+Chrome for Testing or Chromium if a repeatable command-line harness is needed.
+
 Safari:
 
 1. Open `Trace.xcodeproj`.
