@@ -178,6 +178,8 @@ test("popup renders signed-out fallback with a direct Trace sign-in CTA", async 
     h.document.getElementById("popup-lead").textContent,
     /return to an AO3 or FFN story page/i,
   );
+  assert.equal(h.document.querySelector(".popup-eyebrow").hidden, true);
+  assert.doesNotMatch(h.document.body.textContent, /Extension lens/i);
   assert.equal(h.document.getElementById("popup-import").hidden, true);
   assert.equal(
     h.document.getElementById("popup-pro-settings").classList.contains("hidden"),
@@ -288,7 +290,8 @@ test("popup switches to compact connected state after a local first-save signal"
   );
 
   assert.equal(h.document.getElementById("popup-status").textContent, "Connected");
-  assert.equal(h.document.querySelector(".popup-eyebrow").hidden, false);
+  assert.equal(h.document.querySelector(".popup-eyebrow").hidden, true);
+  assert.doesNotMatch(h.document.body.textContent, /Extension lens/i);
   assert.equal(h.document.getElementById("popup-lead").hidden, true);
   assert.equal(h.document.getElementById("popup-lead").textContent, "");
   assert.equal(h.document.getElementById("popup-import").textContent, "Import this story");
@@ -473,6 +476,7 @@ test("popup shows pro controls and persists toggle changes", async () => {
   const metadata = h.document.getElementById("pref-metadata-improve");
 
   assert.equal(section.classList.contains("hidden"), false);
+  assert.doesNotMatch(section.textContent, /Extension behavior/i);
   assert.equal(auto.checked, false);
   assert.equal(inlay.checked, true);
   assert.equal(metadata.checked, true);

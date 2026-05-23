@@ -180,7 +180,7 @@ function buildPopupUi(model) {
     return {
       visualState: auth,
       statusState: auth,
-      eyebrow: "Extension lens",
+      eyebrow: "",
       heading: recoveryHeading(auth),
       lead: recoveryLead(auth, authState.message),
       leadHidden: false,
@@ -284,7 +284,7 @@ function buildPopupUi(model) {
   return {
     visualState: "connected_saved",
     statusState: "connected",
-    eyebrow: "Extension lens",
+    eyebrow: "",
     heading: "Connected",
     lead: "",
     leadHidden: true,
@@ -320,8 +320,8 @@ function renderStatus(patch) {
   }
 
   if (eyebrowEl) {
-    eyebrowEl.hidden = false;
-    eyebrowEl.textContent = ui.eyebrow;
+    eyebrowEl.hidden = !ui.eyebrow;
+    eyebrowEl.textContent = ui.eyebrow || "";
   }
 
   if (leadEl) {

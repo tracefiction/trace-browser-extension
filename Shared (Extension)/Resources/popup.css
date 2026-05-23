@@ -99,8 +99,7 @@ body[data-trace-popup-state="connected_saved"] .popup-sheet,
     box-shadow: none;
 }
 
-.popup-eyebrow,
-.popup-pro-heading {
+.popup-eyebrow {
     margin: 0;
     font-size: 9px;
     font-weight: 800;
@@ -175,11 +174,6 @@ body[data-trace-popup-state="connected_saved"] .popup-status::before,
 
 .popup-pro-settings.hidden {
     display: none;
-}
-
-.popup-pro-heading {
-    margin: 0 2px 6px;
-    padding-left: 0;
 }
 
 .popup-switch-row {
