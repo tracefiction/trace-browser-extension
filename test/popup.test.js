@@ -344,7 +344,44 @@ test("popup signed-out lead on iPhone user agent mentions Safari website permiss
   const lead = h.document.getElementById("popup-lead").textContent;
   assert.match(lead, /sign in/i);
   assert.match(lead, /tracefiction\.com/i);
-  assert.match(lead, /allow it on Trace/i);
+  assert.match(lead, /enable Trace in Extensions/i);
+  assert.match(lead, /allow it on tracefiction\.com/i);
+  assert.match(lead, /AO3/i);
+  assert.match(lead, /FFN/i);
+  assert.match(lead, /\+ ADD or import/i);
+  assert.equal(
+    h.document.getElementById("popup-cta").textContent,
+    "Safari setup help",
+  );
+  assert.equal(
+    h.document.getElementById("popup-cta").getAttribute("href"),
+    "https://tracefiction.com/apps#safari-ios-setup",
+  );
+});
+
+test("popup reconnect guidance on iPhone links to Safari setup help", async () => {
+  const h = createPopupHarness({
+    storageState: {
+      traceAuthState: {
+        state: "reconnect_required",
+        message: "Open Trace to sign in again.",
+        helpUrl: "https://tracefiction.com/",
+      },
+    },
+    popupState: {
+      pro: false,
+      autoTrackEnabled: true,
+      libraryInlayEnabled: true,
+      metadataImproveEnabled: true,
+    },
+    userAgent:
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+  });
+  await flush();
+
+  const lead = h.document.getElementById("popup-lead").textContent;
+  assert.match(lead, /Open Trace to sign in again/i);
+  assert.match(lead, /allow it on tracefiction\.com/i);
   assert.match(lead, /AO3/i);
   assert.match(lead, /FFN/i);
   assert.equal(
@@ -355,6 +392,35 @@ test("popup signed-out lead on iPhone user agent mentions Safari website permiss
     h.document.getElementById("popup-cta").getAttribute("href"),
     "https://tracefiction.com/apps#safari-ios-setup",
   );
+});
+
+test("popup first-run state on iPhone explains archive site permission before saving", async () => {
+  const connected = {
+    state: "connected",
+    message: "Connected",
+    helpUrl: "https://tracefiction.com/apps",
+  };
+  const h = createPopupHarness({
+    storageState: { traceAuthState: connected },
+    popupState: {
+      pro: false,
+      autoTrackEnabled: true,
+      libraryInlayEnabled: true,
+      metadataImproveEnabled: true,
+      authState: connected,
+      firstSaveSeen: false,
+      libraryCount: 0,
+      activeTab: { kind: "unsupported" },
+    },
+    userAgent:
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+  });
+  await flush();
+
+  const lead = h.document.getElementById("popup-lead").textContent;
+  assert.match(lead, /allow Trace on AO3 and FFN/i);
+  assert.match(lead, /supported story page/i);
+  assert.match(lead, /\+ ADD or import/i);
 });
 
 test("popup shows reconnect guidance with a direct recovery CTA", async () => {

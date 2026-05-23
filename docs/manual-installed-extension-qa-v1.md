@@ -47,10 +47,14 @@ Safari:
 1. Open `Trace.xcodeproj`.
 2. Select the macOS or iOS app target and a local signing team.
 3. Build and run the app target.
-4. Enable the Trace extension in Safari Settings -> Extensions.
-5. After code changes, rebuild/rerun the app target, then disable/enable the
+4. Enable the Trace extension in Safari Settings -> Extensions. On iOS, use
+   Settings -> Apps -> Safari -> Extensions when available, or Settings ->
+   Safari -> Extensions on older versions.
+5. On iOS Safari, allow Trace on tracefiction.com, archiveofourown.org, and
+   fanfiction.net when prompted.
+6. After code changes, rebuild/rerun the app target, then disable/enable the
    Safari extension if Safari keeps an old copy.
-6. Reload every AO3/FFN tab under test.
+7. Reload every AO3/FFN tab under test.
 
 ### Page Refresh
 

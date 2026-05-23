@@ -1,8 +1,8 @@
 # iOS WKWebView Shell
 
-The iOS app target includes a small `WKWebView` shell that loads Trace and embeds the Safari Web Extension. The shell exists so the same Trace web experience can be distributed as an iOS app while keeping the browser-extension source inspectable in this repository
+The iOS app target includes a small `WKWebView` shell that loads Trace and embeds the Safari Web Extension. The shell exists so the same Trace web experience can be distributed as an iOS app while keeping the browser-extension source inspectable in this repository.
 
-I'd like to eventually build a more native iOS app but honestly it's quite a lot of work lol. It's on the list of things I want to do in the future though!
+The long-term product direction may include a more native iOS app, but this shell is the current supported iOS distribution path.
 
 ## What This Shell Does
 
@@ -11,6 +11,17 @@ I'd like to eventually build a more native iOS app but honestly it's quite a lot
 - Handles the `traceauth://callback` URL scheme and returns the OAuth result to the web view.
 - Opens external non-Trace links outside the shell.
 - Uses `ASWebAuthenticationSession` for OAuth flows instead of completing OAuth inside an embedded web view.
+
+## Safari Extension Setup
+
+Installing the iOS app does not automatically enable the Safari extension or grant site access. User-facing help should keep the setup path explicit:
+
+1. Enable Trace in Safari Extensions. Current iOS versions commonly show this under Settings > Apps > Safari > Extensions; older versions may show Settings > Safari > Extensions.
+2. In Safari, allow Trace on tracefiction.com, archiveofourown.org, and fanfiction.net when prompted.
+3. Sign in to Trace in Safari, then return to a supported AO3 or FanFiction.net story page.
+4. Use `+ ADD` on the page or import from the Trace extension popup.
+
+Do not claim the app or web page can detect every installation or site-permission state. Safari controls those permissions, and Trace should present the setup steps as user actions rather than detected readiness.
 
 ## What To Inspect
 

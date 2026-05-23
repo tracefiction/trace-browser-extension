@@ -446,7 +446,9 @@ async function renderPopupScreenshot(browser, definition, assets, manifest) {
   console.error(`Rendering ${definition.name} from popup.html`);
   const viewport = definition.viewport || { width: 291, height: 420 };
   const deviceScaleFactor = definition.deviceScaleFactor || 2;
-  const page = await browser.newPage({ viewport, deviceScaleFactor });
+  const pageOptions = { viewport, deviceScaleFactor };
+  if (definition.userAgent) pageOptions.userAgent = definition.userAgent;
+  const page = await browser.newPage(pageOptions);
   if (definition.colorScheme) {
     await page.emulateMedia({ colorScheme: definition.colorScheme });
   }
@@ -741,6 +743,19 @@ async function main() {
           message: "Open Trace in this browser and sign in. Then return to an AO3 or FFN story page to save your first story.",
           helpUrl: "https://tracefiction.com/apps",
         },
+        colorScheme: "dark",
+      },
+      {
+        name: "Extension popup iOS signed out",
+        file: "popup-ios-signed-out.png",
+        authState: {
+          state: "signed_out",
+          message: "Open Trace in Safari and sign in.",
+          helpUrl: "https://tracefiction.com/apps#safari-ios-setup",
+        },
+        viewport: { width: 320, height: 520 },
+        userAgent:
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
         colorScheme: "dark",
       },
       {

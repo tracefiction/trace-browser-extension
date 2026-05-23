@@ -10,6 +10,10 @@ const TRACE_HOME_URL = "https://tracefiction.com/";
 const TRACE_IOS_SETUP_URL = "https://tracefiction.com/apps#safari-ios-setup";
 const AO3_WORKS_URL = "https://archiveofourown.org/works";
 const FFN_HOME_URL = "https://www.fanfiction.net/";
+const IOS_SIGN_IN_GUIDANCE =
+  "In Safari, enable Trace in Extensions, allow it on tracefiction.com, AO3, and FFN, then sign in on tracefiction.com. Return to a supported story page to use + ADD or import.";
+const IOS_PERMISSION_GUIDANCE =
+  "If Safari still blocks Trace, enable the extension and allow it on tracefiction.com, AO3, and FFN. Then refresh the supported story page and use + ADD or import.";
 
 const isLikelyIosExtensionUi = (() => {
   try {
@@ -22,7 +26,7 @@ const isLikelyIosExtensionUi = (() => {
 const fallbackStatus = {
   state: "signed_out",
   message: isLikelyIosExtensionUi
-    ? "Open tracefiction.com in Safari and sign in. If it still does not connect, enable Trace in Safari Extensions and allow it on Trace, AO3, and FFN."
+    ? IOS_SIGN_IN_GUIDANCE
     : "Open Trace in this browser and sign in. Then return to an AO3 or FFN story page to save your first story.",
   helpUrl: isLikelyIosExtensionUi
     ? TRACE_IOS_SETUP_URL
@@ -77,6 +81,14 @@ function recoveryHeading(state) {
 }
 
 function recoveryCtaLabel(state) {
+  if (
+    isLikelyIosExtensionUi &&
+    (state === "signed_out" ||
+      state === "reconnect_required" ||
+      state === "error")
+  ) {
+    return "Safari setup help";
+  }
   switch (state) {
     case "upgrade_required":
       return "Open Trace to upgrade";
@@ -89,6 +101,29 @@ function recoveryCtaLabel(state) {
     default:
       return "Open Trace";
   }
+}
+
+function recoveryLead(auth, message) {
+  if (!isLikelyIosExtensionUi) return message || fallbackStatus.message;
+  if (auth === "signed_out") return IOS_SIGN_IN_GUIDANCE;
+  if (auth === "reconnect_required" || auth === "error") {
+    return message
+      ? `${message} ${IOS_PERMISSION_GUIDANCE}`
+      : IOS_PERMISSION_GUIDANCE;
+  }
+  return message || fallbackStatus.message;
+}
+
+function recoveryCtaUrl(auth, helpUrl) {
+  if (
+    isLikelyIosExtensionUi &&
+    (auth === "signed_out" ||
+      auth === "reconnect_required" ||
+      auth === "error")
+  ) {
+    return TRACE_IOS_SETUP_URL;
+  }
+  return helpUrl || fallbackStatus.helpUrl;
 }
 
 function activeTabSiteName(activeTab) {
@@ -116,27 +151,42 @@ function connectedImportLabel(activeTab) {
   return "Import from this page";
 }
 
+function firstRunStoryLead(site) {
+  const base = `Use + ADD on this ${site} page, or import it into Trace.`;
+  return isLikelyIosExtensionUi
+    ? `${base} If + ADD is missing in Safari, allow Trace for this site and refresh.`
+    : base;
+}
+
+function firstRunArchiveLead(site) {
+  const base = `Import this ${site} page, then save one story in Trace.`;
+  return isLikelyIosExtensionUi
+    ? `${base} If Safari prompts, allow Trace for this site.`
+    : base;
+}
+
+function firstRunOpenArchiveLead() {
+  return isLikelyIosExtensionUi
+    ? "In Safari, allow Trace on AO3 and FFN, then open a supported story page and use + ADD or import from this popup."
+    : "Open a supported story page, then use + ADD or import from this popup.";
+}
+
 function buildPopupUi(model) {
   const authState = model.authState || fallbackStatus;
   const auth = authState.state || fallbackStatus.state;
   const activeTab = model.activeTab || { kind: "unknown" };
 
   if (auth !== "connected") {
-    const signedOut = auth === "signed_out";
     return {
       visualState: auth,
       statusState: auth,
       eyebrow: "Extension lens",
       heading: recoveryHeading(auth),
-      lead: signedOut && isLikelyIosExtensionUi
-        ? fallbackStatus.message
-        : authState.message || fallbackStatus.message,
+      lead: recoveryLead(auth, authState.message),
       leadHidden: false,
       ctaHidden: false,
       ctaLabel: recoveryCtaLabel(auth),
-      ctaUrl: signedOut && isLikelyIosExtensionUi
-        ? TRACE_IOS_SETUP_URL
-        : authState.helpUrl || fallbackStatus.helpUrl,
+      ctaUrl: recoveryCtaUrl(auth, authState.helpUrl),
       ctaEmphasis: "primary",
       archiveLinksHidden: true,
       importHidden: true,
@@ -155,7 +205,7 @@ function buildPopupUi(model) {
         statusState: "connected",
         eyebrow: "First story",
         heading: "Save this story",
-        lead: `Use + ADD on this ${site} page, or import it into Trace.`,
+        lead: firstRunStoryLead(site),
         leadHidden: false,
         ctaHidden: false,
         ctaLabel: "Open Library",
@@ -175,7 +225,7 @@ function buildPopupUi(model) {
         statusState: "connected",
         eyebrow: "First story",
         heading: "Import this page",
-        lead: `Import this ${site} page, then save one story in Trace.`,
+        lead: firstRunArchiveLead(site),
         leadHidden: false,
         ctaHidden: false,
         ctaLabel: "Open Library",
@@ -212,7 +262,7 @@ function buildPopupUi(model) {
       statusState: "connected",
       eyebrow: "First story",
       heading: "Open AO3 or FFN",
-      lead: "Open a supported story page, then use + ADD or import from this popup.",
+      lead: firstRunOpenArchiveLead(),
       leadHidden: false,
       ctaHidden: true,
       ctaLabel: "Open Library",
