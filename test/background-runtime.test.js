@@ -386,7 +386,7 @@ test("TRACE_POPUP_OPEN heals stale error state when token still exists", async (
   assert.equal(h.store.traceUserPro, true);
 });
 
-test("handleAutoTrack without a token moves popup state to reconnect required", () => {
+test("handleAutoTrack without a token keeps first-install popup state signed out", () => {
   const h = createBackgroundHarness();
 
   h.hooks.handleAutoTrack(
@@ -394,7 +394,7 @@ test("handleAutoTrack without a token moves popup state to reconnect required", 
     { tab: { id: 33 } },
   );
 
-  assert.equal(h.store.traceAuthState.state, "reconnect_required");
+  assert.equal(h.store.traceAuthState.state, "signed_out");
   assert.match(h.store.traceAuthState.message, /automatic sync will work/i);
   assert.deepEqual(plainJson(h.badgeTextCalls.at(-1)), { text: "LOG", tabId: 33 });
 });

@@ -715,7 +715,8 @@ async function handleImportTrigger(sendResponse) {
 
 function handleAutoTrack(payload, sender, sendResponse) {
   if (!bearerToken) {
-    setReconnectState("Open Trace in this browser and sign in, then automatic sync will work.", {
+    setSignedOutState({
+      message: "Open Trace in this browser and sign in, then automatic sync will work.",
       lastTrackAttemptAt: new Date().toISOString(),
     });
     setBadge(sender?.tab?.id, "LOG", "#9C6B00");
