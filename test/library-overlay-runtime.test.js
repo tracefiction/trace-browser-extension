@@ -484,6 +484,92 @@ test("library-overlay prefers readerStatus and entryId-era optional fields", asy
   assert.match(surface.textContent || "", /2 saved\s*·\s*Open in Trace/i);
 });
 
+test("library-overlay renders COMPLETED reader status as Finished", async () => {
+  const window = await renderOverlayListing({
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/22334'>Finished Work</a></h4></li></ol></body></html>",
+    cache: {
+      entries: {
+        "ao3:22334": {
+          status: "COMPLETED",
+          readerStatus: "COMPLETED",
+          chapters: { current: 12, total: 12 },
+        },
+      },
+      syncVersion: "v-finished",
+    },
+  });
+
+  const wrap = window.document.querySelector("[data-trace-library-overlay-wrap]");
+  assert.ok(wrap);
+  assert.match(wrap.textContent || "", /Finished\s*·\s*12\/12/);
+  assert.doesNotMatch(wrap.textContent || "", /Completed/);
+  const { surface } = openTraceLens(window);
+  assert.match(surface.textContent || "", /Finished/);
+  assert.doesNotMatch(surface.textContent || "", /Completed/);
+});
+
+test("library-overlay renders optional WIP new-chapter context when present", async () => {
+  const window = await renderOverlayListing({
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/33345'>New Chapters Work</a></h4></li></ol></body></html>",
+    cache: {
+      entries: {
+        "ao3:33345": {
+          status: "READING",
+          readerStatus: "READING",
+          chapters: { current: 4, total: 8 },
+          workStatus: "wip",
+          catchupState: "BEHIND",
+          newChapterCount: 2,
+        },
+      },
+      syncVersion: "v-new-context",
+    },
+  });
+
+  const wrap = window.document.querySelector("[data-trace-library-overlay-wrap]");
+  assert.ok(wrap);
+  assert.match(wrap.textContent || "", /\+2 new chapters/i);
+  assert.doesNotMatch(wrap.textContent || "", /Finished/i);
+  const lens = window.document.querySelector("[data-trace-library-lens]");
+  assert.equal(lens.getAttribute("data-trace-new-chapters"), "1");
+  assert.equal(lens.getAttribute("data-trace-work-status"), "wip");
+
+  const { surface } = openTraceLens(window);
+  const workRow = surface.querySelector("[data-trace-action-row='Work status']");
+  const catchupRow = surface.querySelector("[data-trace-action-row='Catch-up']");
+  assert.ok(workRow);
+  assert.ok(catchupRow);
+  assert.match(workRow.textContent || "", /Work status\s*Work in progress/i);
+  assert.match(catchupRow.textContent || "", /Catch-up\s*\+2 new chapters/i);
+});
+
+test("library-overlay keeps legacy fallback when optional work fields are missing", async () => {
+  const window = await renderOverlayListing({
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/44456'>Legacy Work</a></h4></li></ol></body></html>",
+    cache: {
+      entries: {
+        "ao3:44456": {
+          status: "READING",
+          readerStatus: "READING",
+          chapters: { current: 2, total: 9 },
+        },
+      },
+      syncVersion: "v-legacy-fallback",
+    },
+  });
+
+  const wrap = window.document.querySelector("[data-trace-library-overlay-wrap]");
+  assert.ok(wrap);
+  assert.match(wrap.textContent || "", /Reading\s*·\s*2\/9/);
+  assert.doesNotMatch(wrap.textContent || "", /new chapters|Work in progress/i);
+  const { surface } = openTraceLens(window);
+  assert.equal(surface.querySelector("[data-trace-action-row='Work status']"), null);
+  assert.equal(surface.querySelector("[data-trace-action-row='Catch-up']"), null);
+});
+
 test("library-overlay opened surface shows status editing only when entryId exists", async () => {
   const entryId = "00000000-0000-4000-8000-000000012345";
   const messages = [];

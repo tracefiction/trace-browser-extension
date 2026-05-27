@@ -906,6 +906,36 @@
     return { hasNotes: hasNotes, tagCount: tagCount };
   }
 
+  function normalizeWorkStatus(raw) {
+    if (typeof raw !== "string") return undefined;
+    var normalized = raw.trim().toLowerCase();
+    if (
+      normalized === "complete" ||
+      normalized === "wip" ||
+      normalized === "abandoned" ||
+      normalized === "unknown"
+    ) {
+      return normalized;
+    }
+    return undefined;
+  }
+
+  function normalizeCatchupState(raw) {
+    if (typeof raw !== "string") return undefined;
+    var normalized = raw.trim().toUpperCase();
+    if (normalized === "UP" || normalized === "BEHIND" || normalized === "UNKNOWN") {
+      return normalized;
+    }
+    return undefined;
+  }
+
+  function normalizeNewChapterCount(raw) {
+    if (raw === undefined || raw === null) return undefined;
+    var count = Number(raw);
+    if (!Number.isFinite(count) || count < 0) return undefined;
+    return Math.trunc(count);
+  }
+
   /**
    * Legacy cache: plain status string.
    * Current contract: entries[key] carries library state; workPreferences[key]
@@ -943,6 +973,9 @@
         hidden: hidden,
         workMark: normalizeWorkMark(raw.workMark),
         privateContext: normalizePrivateContext(raw.privateContext),
+        workStatus: normalizeWorkStatus(raw.workStatus),
+        catchupState: normalizeCatchupState(raw.catchupState),
+        newChapterCount: normalizeNewChapterCount(raw.newChapterCount),
         __traceStatusPending: raw.__traceStatusPending === true,
         __traceStatusTarget: typeof raw.__traceStatusTarget === "string" ? raw.__traceStatusTarget : undefined,
         __traceStatusError: raw.__traceStatusError || undefined,
@@ -1137,6 +1170,8 @@
     if (entry.__traceStatusError) return "Update failed";
     if (entry.hidden) return "Hidden";
     if (entry.workMark && entry.workMark.challenge) return "Review mark";
+    var newChapters = newChaptersDisplay(entry, false);
+    if (newChapters) return newChapters;
     var display = statusDisplay(entry);
     if (display) return display;
     return "Saved";
@@ -1158,6 +1193,15 @@
       }
       return "Needs review";
     }
+    var newChapters = newChaptersDisplay(entry, false);
+    if (newChapters) {
+      var parts = [];
+      var statusLabel = statusOnlyDisplay(entry);
+      var workLabel = workStatusLabel(entry.workStatus);
+      if (statusLabel) parts.push(statusLabel);
+      if (workLabel) parts.push(workLabel);
+      return parts.length ? parts.join(" \u00b7 ") : "New chapters available";
+    }
     if (entry.workMark) return workMarkLabel(entry.workMark);
     if (entry.privateContext && (entry.privateContext.hasNotes || entry.privateContext.tagCount > 0)) {
       return "Private context saved";
@@ -1171,6 +1215,36 @@
 
   function statusChoiceLabel(status) {
     return LABEL[status] || status;
+  }
+
+  function workStatusLabel(workStatus) {
+    if (workStatus === "complete") return "Complete work";
+    if (workStatus === "wip") return "Work in progress";
+    if (workStatus === "abandoned") return "Abandoned work";
+    return null;
+  }
+
+  function newChaptersDisplay(entry, compact) {
+    if (!entry || entry.catchupState !== "BEHIND") return null;
+    var count = entry.newChapterCount;
+    if (typeof count === "number" && Number.isFinite(count)) {
+      if (count <= 0) return null;
+      if (compact) return "+" + String(count) + " new";
+      return (
+        "+" +
+        String(count) +
+        " new " +
+        (count === 1 ? "chapter" : "chapters")
+      );
+    }
+    return compact ? "New" : "New chapters";
+  }
+
+  function catchupLabel(entry) {
+    var newChapters = newChaptersDisplay(entry, false);
+    if (newChapters) return newChapters;
+    if (entry && entry.catchupState === "UP") return "Caught up";
+    return null;
   }
 
   function readerStatusProgressPatch(entry, nextStatus) {
@@ -1210,6 +1284,14 @@
         fg: CHALLENGE_THEME.fg,
         border: "rgba(154, 52, 18, 0.18)",
         accent: CHALLENGE_THEME.fg,
+      };
+    }
+    if (newChaptersDisplay(entry, false)) {
+      return {
+        bg: "rgba(232, 244, 242, 0.72)",
+        fg: UPDATED_THEME.fg,
+        border: "rgba(11, 79, 108, 0.2)",
+        accent: UPDATED_THEME.fg,
       };
     }
     var status = entryStatusValue(entry);
@@ -1277,6 +1359,17 @@
     if (entry.readerStatus || entry.status) {
       wrap.appendChild(badgeEl(entry));
     }
+    var newChapterText = newChaptersDisplay(entry, true);
+    if (newChapterText) {
+      wrap.appendChild(
+        smallBadgeEl(
+          newChapterText,
+          UPDATED_THEME,
+          "New chapters available for this Trace library entry",
+          "data-trace-new-chapters",
+        ),
+      );
+    }
     var markLabelText = workMarkLabel(entry.workMark);
     if (markLabelText) {
       wrap.appendChild(
@@ -1306,6 +1399,20 @@
           challengeTitle,
           "data-trace-work-mark-challenge",
         ),
+      );
+    }
+  }
+
+  function appendWorkCatchupRows(surface, entry) {
+    if (!entry) return;
+    var workLabel = workStatusLabel(entry.workStatus);
+    if (workLabel) {
+      surface.appendChild(surfaceRowEl("Work status", workLabel, true));
+    }
+    var catchup = catchupLabel(entry);
+    if (catchup) {
+      surface.appendChild(
+        surfaceRowEl("Catch-up", catchup, entry.catchupState === "BEHIND"),
       );
     }
   }
@@ -1559,6 +1666,7 @@
         ),
       );
     }
+    appendWorkCatchupRows(surface, entry);
     var markLabelText = workMarkLabel(entry && entry.workMark);
     if (markLabelText) surface.appendChild(surfaceRowEl("Work mark", markLabelText, true));
     if (entry && entry.workMark && entry.workMark.challenge) {
@@ -1603,6 +1711,8 @@
     if (entry && entry.__traceStatusError) btn.setAttribute("data-trace-status-error", "1");
     if (entry && entry.hidden) btn.setAttribute("data-trace-browse-hidden", "1");
     if (entry && entry.workMark) btn.setAttribute("data-trace-work-mark", "1");
+    if (entry && entry.workStatus) btn.setAttribute("data-trace-work-status", entry.workStatus);
+    if (newChaptersDisplay(entry, false)) btn.setAttribute("data-trace-new-chapters", "1");
     if (entry && entry.workMark && entry.workMark.challenge) {
       btn.setAttribute("data-trace-work-mark-challenge", "1");
     }
