@@ -569,6 +569,40 @@ test("TRACE_POPUP_OPEN heals stale error state when token still exists", async (
   assert.equal(h.store.traceUserPro, true);
 });
 
+test("TRACE_OPEN_TRACE_URL opens validated Trace URLs in a browser tab", async () => {
+  const h = createBackgroundHarness({
+    webOrigin: "http://localhost:5173",
+  });
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_OPEN_TRACE_URL",
+    payload: {
+      url: "http://localhost:5173/?panel=details&entryId=00000000-0000-4000-8000-000000000123",
+    },
+  });
+
+  assert.deepEqual(plainJson(response), { ok: true });
+  assert.deepEqual(plainJson(h.createdTabs), [
+    {
+      url: "http://localhost:5173/?panel=details&entryId=00000000-0000-4000-8000-000000000123",
+    },
+  ]);
+});
+
+test("TRACE_OPEN_TRACE_URL rejects non-Trace URLs", async () => {
+  const h = createBackgroundHarness({
+    webOrigin: "https://tracefiction.com",
+  });
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_OPEN_TRACE_URL",
+    payload: { url: "https://example.com/?panel=details" },
+  });
+
+  assert.deepEqual(plainJson(response), { ok: false, error: "invalid_trace_url" });
+  assert.deepEqual(plainJson(h.createdTabs), []);
+});
+
 test("handleAutoTrack without a token keeps first-install popup state signed out", () => {
   const h = createBackgroundHarness();
 

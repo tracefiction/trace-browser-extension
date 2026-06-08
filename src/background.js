@@ -636,6 +636,39 @@ function isTraceWebUrl(url) {
   return String(url) === origin || String(url).startsWith(origin + "/");
 }
 
+function normalizeTraceWebOpenUrl(rawUrl) {
+  if (typeof rawUrl !== "string" || !rawUrl.trim()) return null;
+  try {
+    const configuredOrigin = new URL(TRACE_WEB_ORIGIN).origin;
+    const url = new URL(rawUrl, configuredOrigin);
+    const allowedOrigins = new Set([
+      configuredOrigin,
+      "https://tracefiction.com",
+      "https://www.tracefiction.com",
+    ]);
+    if (!allowedOrigins.has(url.origin)) return null;
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    return url.href;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function handleOpenTraceUrl(payload, sendResponse) {
+  const url = normalizeTraceWebOpenUrl(payload?.url);
+  if (!url) {
+    if (sendResponse) sendResponse({ ok: false, error: "invalid_trace_url" });
+    return;
+  }
+  try {
+    await ext.tabs.create({ url });
+    if (sendResponse) sendResponse({ ok: true });
+  } catch (error) {
+    console.warn("[Trace] Failed to open Trace tab:", error);
+    if (sendResponse) sendResponse({ ok: false, error: "open_failed" });
+  }
+}
+
 /** Match patterns for `tabs.query({ url })` so we do not enumerate unrelated tabs (Chrome review / privacy). */
 function traceWebTabQueryPatterns() {
   const origin = TRACE_WEB_ORIGIN.replace(/\/$/, "");
@@ -912,6 +945,14 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // -------------------------------------------------
   if (msg.type === "TRACE_IMPORT_TRIGGER") {
     handleImportTrigger(sendResponse);
+    return true;
+  }
+
+  // -------------------------------------------------
+  // C2. Open Trace from content scripts in a browser tab
+  // -------------------------------------------------
+  if (msg.type === "TRACE_OPEN_TRACE_URL") {
+    handleOpenTraceUrl(msg.payload, sendResponse);
     return true;
   }
 

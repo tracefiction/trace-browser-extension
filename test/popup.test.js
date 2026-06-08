@@ -187,6 +187,72 @@ test("popup renders signed-out fallback with a direct Trace sign-in CTA", async 
   );
 });
 
+test("popup connection indicator reflects D1 state labels", async () => {
+  const cases = [
+    {
+      name: "signed out",
+      authState: { state: "signed_out" },
+      firstSaveSeen: false,
+      expectedState: "off",
+      expectedLabel: "Not linked",
+    },
+    {
+      name: "reconnect",
+      authState: { state: "reconnect_required" },
+      firstSaveSeen: false,
+      expectedState: "warn",
+      expectedLabel: "Reconnect",
+    },
+    {
+      name: "error",
+      authState: { state: "error" },
+      firstSaveSeen: false,
+      expectedState: "error",
+      expectedLabel: "Issue",
+    },
+    {
+      name: "upgrade",
+      authState: { state: "upgrade_required" },
+      firstSaveSeen: false,
+      expectedState: "warn",
+      expectedLabel: "Upgrade",
+    },
+    {
+      name: "connected",
+      authState: { state: "connected" },
+      firstSaveSeen: true,
+      expectedState: "connected",
+      expectedLabel: "Connected",
+    },
+  ];
+
+  for (const item of cases) {
+    const h = createPopupHarness({
+      storageState: { traceAuthState: item.authState },
+      popupState: {
+        pro: false,
+        autoTrackEnabled: true,
+        libraryInlayEnabled: true,
+        metadataImproveEnabled: true,
+        authState: item.authState,
+        firstSaveSeen: item.firstSaveSeen,
+        libraryCount: item.firstSaveSeen ? 1 : 0,
+        activeTab: { kind: "unsupported" },
+      },
+    });
+    await flush();
+
+    const connection = h.document.getElementById("popup-connection");
+    assert.equal(connection.dataset.state, item.expectedState, item.name);
+    assert.equal(
+      connection.querySelector(".popup-connection-label").textContent,
+      item.expectedLabel,
+      item.name,
+    );
+    assert.ok(connection.querySelector(".popup-connection-dot[aria-hidden='true']"), item.name);
+  }
+});
+
 test("popup connected first-run state points unsupported tabs to AO3 and FFN", async () => {
   const h = createPopupHarness({
     storageState: {
@@ -217,7 +283,7 @@ test("popup connected first-run state points unsupported tabs to AO3 and FFN", a
     h.document.getElementById("popup-status").textContent,
     "Open AO3 or FFN",
   );
-  assert.match(h.document.getElementById("popup-lead").textContent, /\+ ADD/i);
+  assert.match(h.document.getElementById("popup-lead").textContent, /Add to Trace/i);
   assert.equal(h.document.getElementById("popup-import").hidden, true);
   assert.equal(h.document.getElementById("popup-archive-links").hidden, false);
   assert.equal(
@@ -256,7 +322,7 @@ test("popup connected first-run story page makes import the primary action", asy
     h.document.getElementById("popup-status").textContent,
     "Save this story",
   );
-  assert.match(h.document.getElementById("popup-lead").textContent, /Use \+ ADD/i);
+  assert.match(h.document.getElementById("popup-lead").textContent, /Use Add to Trace/i);
   assert.equal(h.document.getElementById("popup-import").hidden, false);
   assert.equal(h.document.getElementById("popup-import").disabled, false);
   assert.equal(h.document.getElementById("popup-import").textContent, "Import this story");
@@ -351,7 +417,7 @@ test("popup signed-out lead on iPhone user agent mentions Safari website permiss
   assert.match(lead, /allow it on tracefiction\.com/i);
   assert.match(lead, /AO3/i);
   assert.match(lead, /FFN/i);
-  assert.match(lead, /\+ ADD or import/i);
+  assert.match(lead, /Add to Trace or import/i);
   assert.equal(
     h.document.getElementById("popup-cta").textContent,
     "Safari setup help",
@@ -423,7 +489,7 @@ test("popup first-run state on iPhone explains archive site permission before sa
   const lead = h.document.getElementById("popup-lead").textContent;
   assert.match(lead, /allow Trace on AO3 and FFN/i);
   assert.match(lead, /supported story page/i);
-  assert.match(lead, /\+ ADD or import/i);
+  assert.match(lead, /Add to Trace or import/i);
 });
 
 test("popup shows reconnect guidance with a direct recovery CTA", async () => {

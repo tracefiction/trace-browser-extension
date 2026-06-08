@@ -11,9 +11,9 @@ const TRACE_IOS_SETUP_URL = "https://tracefiction.com/apps#safari-ios-setup";
 const AO3_WORKS_URL = "https://archiveofourown.org/works";
 const FFN_HOME_URL = "https://www.fanfiction.net/";
 const IOS_SIGN_IN_GUIDANCE =
-  "In Safari, enable Trace in Extensions, allow it on tracefiction.com, AO3, and FFN, then sign in on tracefiction.com. Return to a supported story page to use + ADD or import.";
+  "In Safari, enable Trace in Extensions, allow it on tracefiction.com, AO3, and FFN, then sign in on tracefiction.com. Return to a supported story page to use Add to Trace or import.";
 const IOS_PERMISSION_GUIDANCE =
-  "If Safari still blocks Trace, enable the extension and allow it on tracefiction.com, AO3, and FFN. Then refresh the supported story page and use + ADD or import.";
+  "If Safari still blocks Trace, enable the extension and allow it on tracefiction.com, AO3, and FFN. Then refresh the supported story page and use Add to Trace or import.";
 
 const isLikelyIosExtensionUi = (() => {
   try {
@@ -152,9 +152,9 @@ function connectedImportLabel(activeTab) {
 }
 
 function firstRunStoryLead(site) {
-  const base = `Use + ADD on this ${site} page, or import it into Trace.`;
+  const base = `Use Add to Trace on this ${site} page, or import it into Trace.`;
   return isLikelyIosExtensionUi
-    ? `${base} If + ADD is missing in Safari, allow Trace for this site and refresh.`
+    ? `${base} If Add to Trace is missing in Safari, allow Trace for this site and refresh.`
     : base;
 }
 
@@ -167,8 +167,8 @@ function firstRunArchiveLead(site) {
 
 function firstRunOpenArchiveLead() {
   return isLikelyIosExtensionUi
-    ? "In Safari, allow Trace on AO3 and FFN, then open a supported story page and use + ADD or import from this popup."
-    : "Open a supported story page, then use + ADD or import from this popup.";
+    ? "In Safari, allow Trace on AO3 and FFN, then open a supported story page and use Add to Trace or import from this popup."
+    : "Open a supported story page, then use Add to Trace or import from this popup.";
 }
 
 function buildPopupUi(model) {
@@ -177,9 +177,21 @@ function buildPopupUi(model) {
   const activeTab = model.activeTab || { kind: "unknown" };
 
   if (auth !== "connected") {
+    const connectionState =
+      auth === "error" ? "error" : auth === "signed_out" ? "off" : "warn";
+    const connectionLabel =
+      auth === "error"
+        ? "Issue"
+        : auth === "reconnect_required"
+          ? "Reconnect"
+          : auth === "upgrade_required"
+            ? "Upgrade"
+            : "Not linked";
     return {
       visualState: auth,
       statusState: auth,
+      connectionState,
+      connectionLabel,
       eyebrow: "",
       heading: recoveryHeading(auth),
       lead: recoveryLead(auth, authState.message),
@@ -203,6 +215,8 @@ function buildPopupUi(model) {
       return {
         visualState: "connected_first_run",
         statusState: "connected",
+        connectionState: "connected",
+        connectionLabel: "Connected",
         eyebrow: "First story",
         heading: "Save this story",
         lead: firstRunStoryLead(site),
@@ -223,6 +237,8 @@ function buildPopupUi(model) {
       return {
         visualState: "connected_first_run",
         statusState: "connected",
+        connectionState: "connected",
+        connectionLabel: "Connected",
         eyebrow: "First story",
         heading: "Import this page",
         lead: firstRunArchiveLead(site),
@@ -242,6 +258,8 @@ function buildPopupUi(model) {
       return {
         visualState: "connected_first_run",
         statusState: "connected",
+        connectionState: "connected",
+        connectionLabel: "Connected",
         eyebrow: "First story",
         heading: "Open a story page",
         lead: "Trace saves from supported AO3/FFN story and listing pages, not sign-in pages.",
@@ -260,6 +278,8 @@ function buildPopupUi(model) {
     return {
       visualState: "connected_first_run",
       statusState: "connected",
+      connectionState: "connected",
+      connectionLabel: "Connected",
       eyebrow: "First story",
       heading: "Open AO3 or FFN",
       lead: firstRunOpenArchiveLead(),
@@ -284,6 +304,8 @@ function buildPopupUi(model) {
   return {
     visualState: "connected_saved",
     statusState: "connected",
+    connectionState: "connected",
+    connectionLabel: "Connected",
     eyebrow: "",
     heading: "Connected",
     lead: "",
@@ -311,12 +333,19 @@ function renderStatus(patch) {
   const importEl = document.getElementById("popup-import");
   const archiveLinksEl = document.getElementById("popup-archive-links");
   const settingsEl = document.getElementById("popup-pro-settings");
+  const connectionEl = document.getElementById("popup-connection");
   const eyebrowEl = document.querySelector(".popup-eyebrow");
   document.body.dataset.tracePopupState = ui.visualState;
 
   if (statusEl) {
     statusEl.dataset.state = ui.statusState;
     statusEl.textContent = ui.heading;
+  }
+
+  if (connectionEl) {
+    connectionEl.dataset.state = ui.connectionState || "off";
+    const labelEl = connectionEl.querySelector(".popup-connection-label");
+    if (labelEl) labelEl.textContent = ui.connectionLabel || "Not linked";
   }
 
   if (eyebrowEl) {

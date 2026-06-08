@@ -816,8 +816,10 @@ test("FFN mobile story Add saves immediately without opening the sheet", () => {
 
   const handle = dom.window.document.querySelector("[data-trace-story-handle]");
   assert.ok(handle, "expected Trace handle on FFN mobile story page");
-  assert.match(handle.textContent || "", /^\+ ADD$/);
-  assert.doesNotMatch(handle.textContent || "", /Trace/i);
+  assert.equal(handle.textContent || "", "+ Add to Trace");
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "add");
+  assert.match(handle.getAttribute("style") || "", /display:\s*inline-flex/i);
+  assert.match(handle.getAttribute("style") || "", /background:\s*transparent/i);
   const sentBeforeClick = sent.length;
   handle.click();
 
@@ -825,7 +827,15 @@ test("FFN mobile story Add saves immediately without opening the sheet", () => {
   assert.ok(sheet, "expected Trace story sheet");
   assert.notEqual(sheet.getAttribute("aria-hidden"), "false");
   assert.equal(handle.disabled, true);
-  assert.match(handle.textContent || "", /ADDING\.\.\./);
+  assert.match(handle.textContent || "", /Adding\.\.\./);
+  const spinnerSvg = handle.querySelector("svg");
+  assert.ok(spinnerSvg, "expected pending story handle to render a spinner icon");
+  assert.ok(spinnerSvg.querySelector("circle"), "expected spinner to include a centered ring");
+  const spinnerAnimation = spinnerSvg.getElementsByTagName("animateTransform")[0];
+  assert.ok(spinnerAnimation, "expected spinner to animate");
+  assert.equal(spinnerAnimation.parentElement.tagName.toLowerCase(), "g");
+  assert.equal(spinnerAnimation.getAttribute("from"), "0 7 7");
+  assert.equal(spinnerAnimation.getAttribute("to"), "360 7 7");
   handle.click();
   assert.equal(sent.length, sentBeforeClick + 1);
   assert.equal(sent.at(-1).type, "TRACE_QUICK_ADD");
@@ -932,7 +942,7 @@ test("story page unknown work shows pending while auto-track is in flight and ig
   const handle = dom.window.document.querySelector("[data-trace-story-handle]");
   assert.ok(handle, "expected Trace story handle");
   assert.equal(handle.disabled, true);
-  assert.match(handle.textContent || "", /ADDING\.\.\./);
+  assert.match(handle.textContent || "", /Adding\.\.\./);
 
   const sentBeforeClick = sent.length;
   handle.click();
@@ -951,7 +961,7 @@ test("story page auto-track success updates the pending handle to Reading progre
   });
 
   const handle = dom.window.document.querySelector("[data-trace-story-handle]");
-  assert.match(handle.textContent || "", /ADDING\.\.\./);
+  assert.match(handle.textContent || "", /Adding\.\.\./);
 
   autoTrackCallback({ ok: true });
 
@@ -971,7 +981,7 @@ test("story page auto-track failure uses existing compact error states", () => {
       holdAutoTrack: true,
     });
     const handle = dom.window.document.querySelector("[data-trace-story-handle]");
-    assert.match(handle.textContent || "", /ADDING\.\.\./);
+    assert.match(handle.textContent || "", /Adding\.\.\./);
 
     autoTrackCallback(item.response);
 
@@ -1046,8 +1056,8 @@ test("AO3 story places compact Trace handle centered below title and byline", ()
   assert.match(sheet.getAttribute("style") || "", /top:/i);
   assert.match(sheet.getAttribute("style") || "", /left:/i);
   assert.match(sheet.getAttribute("style") || "", /bottom:\s*auto/i);
-  assert.match(handle.textContent || "", /^\+ ADD$/);
-  assert.doesNotMatch(handle.textContent || "", /Trace/i);
+  assert.equal(handle.textContent || "", "+ Add to Trace");
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "add");
 });
 
 test("mobile story keeps Trace sheet as fixed bottom sheet", () => {
@@ -1091,7 +1101,16 @@ test("mobile story keeps Trace sheet as fixed bottom sheet", () => {
           cb({
             authToken: "test-token",
             prefAutoTrackEnabled: false,
-            libraryOverlayCache: { entries: {} },
+            libraryOverlayCache: {
+              entries: {
+                "ffn:7038840": {
+                  entryId: "entry-mobile-bottom-sheet",
+                  status: "READING",
+                  readerStatus: "READING",
+                  chapters: { current: 1, total: 28 },
+                },
+              },
+            },
           });
         },
         set(_value, cb) {
@@ -1115,7 +1134,24 @@ test("mobile story keeps Trace sheet as fixed bottom sheet", () => {
   assert.equal(sheet.getAttribute("data-trace-story-sheet-placement"), "bottom");
   assert.match(sheet.getAttribute("style") || "", /position:\s*fixed/i);
   assert.match(sheet.getAttribute("style") || "", /bottom:/i);
+  assert.match(sheet.getAttribute("style") || "", /max-height:\s*calc\(100dvh - 8px\)/i);
+  assert.doesNotMatch(sheet.getAttribute("style") || "", /max-height:\s*min\(70vh,\s*460px\)/i);
   assert.doesNotMatch(sheet.getAttribute("style") || "", /width:\s*100%/i);
+
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle);
+  handle.click();
+  assert.equal(sheet.getAttribute("aria-hidden"), "false");
+  assert.equal(dom.window.document.body.style.overflow, "hidden");
+  const grabber = sheet.querySelector("[data-trace-bottom-sheet-grabber]");
+  assert.ok(grabber, "expected bottom sheet grabber");
+  assert.match(grabber.getAttribute("style") || "", /height:\s*28px/i);
+  assert.match(grabber.getAttribute("style") || "", /cursor:\s*grab/i);
+  grabber.dispatchEvent(new dom.window.MouseEvent("pointerdown", { bubbles: true, clientY: 100 }));
+  grabber.dispatchEvent(new dom.window.MouseEvent("pointermove", { bubbles: true, clientY: 172 }));
+  grabber.dispatchEvent(new dom.window.MouseEvent("pointerup", { bubbles: true, clientY: 172 }));
+  assert.equal(sheet.getAttribute("aria-hidden"), "true");
+  assert.equal(dom.window.document.body.style.overflow, "");
 });
 
 test("FFN desktop story places compact Trace handle after profile header", () => {
@@ -1176,8 +1212,8 @@ test("FFN desktop story places compact Trace handle after profile header", () =>
   assert.ok(wrap);
   assert.equal(profileTop.nextElementSibling, wrap);
   assert.equal(profileTop.querySelector("[data-trace-story-handle]"), null);
-  assert.match(handle.textContent || "", /^\+ ADD$/);
-  assert.doesNotMatch(handle.textContent || "", /Trace/i);
+  assert.equal(handle.textContent || "", "+ Add to Trace");
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "add");
 });
 
 test("FFN mobile story quick-add shows planning after chapter-one success", () => {
@@ -1308,10 +1344,10 @@ test("FFN mobile story quick-add shows reading progress after later-chapter succ
 test("FFN mobile story quick-add shows optional post-add status choices when entryId exists", () => {
   const entryId = "00000000-0000-4000-8000-000000000321";
   const choices = [
-    { label: "Planning", status: "PLANNING", expected: /Planning/i },
+    { label: "Plan", status: "PLANNING", expected: /Plan/i },
     { label: "Reading", status: "READING", expected: /Reading/i },
     { label: "Paused", status: "PAUSED", expected: /Paused/i },
-    { label: "Finished", status: "COMPLETED", expected: /Finished/i },
+    { label: "Done", status: "COMPLETED", expected: /Done/i },
     { label: "Dropped", status: "DROPPED", expected: /Dropped/i },
   ];
 
@@ -1381,7 +1417,7 @@ test("FFN mobile story quick-add shows optional post-add status choices when ent
     assert.match(sheet.textContent || "", /Reading status/i);
     assert.deepEqual(
       Array.from(sheet.querySelectorAll("[data-trace-status-choice]")).map((button) => button.textContent),
-      ["Planning", "Reading", "Paused", "Finished", "Dropped"],
+      ["Plan", "Reading", "Paused", "Done", "Dropped"],
     );
     const choiceBtn = sheet.querySelector(
       `[data-trace-status-choice='${choice.status}']`,
@@ -1474,6 +1510,8 @@ test("story sheet shows status editing for cached entries with entryId and hides
 
     const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
     assert.equal(sheet.getAttribute("aria-hidden"), "false");
+    assert.match(sheet.className || "", /\bx\b/);
+    assert.match(sheet.className || "", /\bx-sheet\b/);
     assert.match(sheet.getAttribute("style") || "", /top:\s*148px/i);
     handle.click();
     assert.equal(sheet.getAttribute("aria-hidden"), "true");
@@ -1481,7 +1519,10 @@ test("story sheet shows status editing for cached entries with entryId and hides
     assert.equal(sheet.getAttribute("aria-hidden"), "false");
     const header = sheet.querySelector("[data-trace-management-header]");
     assert.ok(header);
+    assert.match(header.className || "", /\bx-sheet-head\b/);
     assert.doesNotMatch(header.textContent || "", /\bTrace\b/i);
+    assert.ok(sheet.querySelector(".x-sheet-body"));
+    assert.ok(sheet.querySelector(".x-sheet-foot"));
     const choices = sheet.querySelector("[data-trace-status-choices]");
     if (!includeEntryId) {
       assert.equal(choices, null);
@@ -1489,14 +1530,22 @@ test("story sheet shows status editing for cached entries with entryId and hides
     }
 
     assert.ok(choices);
+    assert.ok(choices.querySelector(".x-sheet-label"));
+    assert.ok(choices.querySelector(".x-seg"));
     const selected = choices.querySelector("[data-trace-status-selected='1']");
     assert.ok(selected);
     assert.equal(selected.getAttribute("data-trace-status-choice"), "READING");
     assert.equal(selected.getAttribute("aria-pressed"), "true");
+    assert.match(selected.className || "", /\bon\b/);
     assert.equal(sheet.querySelector("button[data-trace-quick-add]"), null);
+    const hideBtn = sheet.querySelector("button[data-trace-hidden-action='hide']");
+    assert.ok(hideBtn);
+    assert.doesNotMatch(hideBtn.className || "", /\bicon-only\b/);
+    assert.match(hideBtn.textContent || "", /Hide/i);
+    assert.equal(hideBtn.getAttribute("aria-label"), "Hide this work");
     assert.deepEqual(
       Array.from(choices.querySelectorAll("[data-trace-status-choice]")).map((button) => button.textContent),
-      ["Planning", "Reading", "Paused", "Finished", "Dropped"],
+      ["Plan", "Reading", "Paused", "Done", "Dropped"],
     );
     const completed = choices.querySelector("[data-trace-status-choice='COMPLETED']");
     assert.ok(completed);
@@ -1506,6 +1555,77 @@ test("story sheet shows status editing for cached entries with entryId and hides
       payload: { entryId, status: "COMPLETED" },
     });
   }
+});
+
+test("story sheet selected status choice uses status-specific D1 tint", () => {
+  const dom = domFromFixture(
+    "ffn_story_mobile.html",
+    "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter"
+  );
+  const collectorSrc = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "Shared (Extension)",
+      "Resources",
+      "collector.js",
+    ),
+    "utf8",
+  );
+
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage() {},
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb({
+            authToken: "test-token",
+            libraryOverlayCache: {
+              entries: {
+                "ffn:7038840": {
+                  entryId: "00000000-0000-4000-8000-000000703884",
+                  status: "PAUSED",
+                  readerStatus: "PAUSED",
+                  chapters: { current: 3, total: 28 },
+                },
+              },
+            },
+          });
+        },
+        set(_value, cb) {
+          if (typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  dom.window.chrome = chrome;
+  dom.window.browser = chrome;
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle);
+  handle.click();
+
+  const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+  const selected = sheet.querySelector("[data-trace-status-selected='1']");
+  assert.equal(selected.getAttribute("data-trace-status-choice"), "PAUSED");
+  assert.match(
+    selected.getAttribute("style") || "",
+    /background:\s*rgba\(154,\s*149,\s*131,\s*0\.12\)/,
+  );
+  assert.doesNotMatch(
+    selected.getAttribute("style") || "",
+    /background:\s*rgba\(138,\s*110,\s*42,\s*0\.10\)/,
+  );
 });
 
 test("story sheet Planning to Reading sends chapter progress 1 and displays 1/? for unknown total", () => {
@@ -1583,8 +1703,74 @@ test("story sheet Planning to Reading sends chapter progress 1 and displays 1/? 
       progress: { unit: "CHAPTER", value: 1, total: null },
     },
   });
-  assert.match(handle.textContent || "", /Reading\s*·\s*1\/\?/i);
-  assert.doesNotMatch(handle.textContent || "", /Reading\s*·\s*0\/\?/i);
+  assert.match(handle.textContent || "", /Reading\s*1\/\?/i);
+  assert.doesNotMatch(handle.textContent || "", /·/i);
+  assert.doesNotMatch(handle.textContent || "", /Reading\s*0\/\?/i);
+});
+
+test("story sheet position block shows unknown total without chapter stepper controls", () => {
+  const collectorSrc = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "Shared (Extension)",
+      "Resources",
+      "collector.js",
+    ),
+    "utf8",
+  );
+  const dom = domFromFixture(
+    "ffn_story_mobile.html",
+    "https://m.fanfiction.net/s/7038840/3/A-Chance-Encounter"
+  );
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage() {},
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb({
+            authToken: "test-token",
+            libraryOverlayCache: {
+              entries: {
+                "ffn:7038840": {
+                  entryId: "00000000-0000-4000-8000-000000703884",
+                  status: "READING",
+                  readerStatus: "READING",
+                  chapters: { current: 3, total: null },
+                },
+              },
+            },
+          });
+        },
+        set(_value, cb) {
+          if (typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  dom.window.chrome = chrome;
+  dom.window.browser = chrome;
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  handle.click();
+  const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+  const position = sheet.querySelector("[data-trace-story-position]");
+  assert.ok(position);
+  assert.match(position.className || "", /\bx-pos\b/);
+  assert.match(position.textContent || "", /Ch 3\s*\/\s*\?/);
+  assert.equal(position.querySelector(".bar"), null);
+  assert.equal(position.querySelector(".step"), null);
+  assert.doesNotMatch(sheet.textContent || "", /(?:chapter|Set to current)/i);
 });
 
 test("FFN mobile story post-add status mutation failure keeps saved state", () => {
@@ -1655,11 +1841,11 @@ test("FFN mobile story post-add status mutation failure keeps saved state", () =
   reading.click();
 
   assert.equal(sent.at(-1).type, "TRACE_SET_READER_STATUS");
-  assert.match(sheet.textContent || "", /Planning/i);
+  assert.match(sheet.textContent || "", /Plan/i);
   assert.match(sheet.textContent || "", /Could not update. Try again./i);
 });
 
-test("FFN mobile story sheet shows known status, progress, private context, and marks", () => {
+test("FFN mobile story sheet shows known status, progress, private context, and hidden state", () => {
   const dom = domFromFixture(
     "ffn_story_mobile.html",
     "https://m.fanfiction.net/s/7038840/3/A-Chance-Encounter"
@@ -1694,7 +1880,12 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
                   readerStatus: "READING",
                   chapters: { current: 3, total: 28 },
                   browsePreference: { hidden: true },
-                  privateContext: { hasNotes: true, tagCount: 2 },
+                  privateContext: {
+                    hasNotes: true,
+                    tagCount: 4,
+                    notePreview: "  My actual private note\nfor this story.  ",
+                    tags: ["comfort", "reread", "favorite", "long"],
+                  },
                   workMark: { kind: "abandoned" },
                 },
               },
@@ -1722,17 +1913,136 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
   handle.click();
 
   const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+  assert.ok(sheet.querySelector(".x-sheet-head"));
+  assert.ok(sheet.querySelector(".x-sheet-body"));
+  assert.ok(sheet.querySelector(".x-seg"));
+  assert.ok(sheet.querySelector(".x-pos"));
+  assert.ok(sheet.querySelector(".x-meta"));
+  assert.ok(sheet.querySelector(".x-sheet-foot"));
   assert.match(sheet.textContent || "", /Hidden/i);
-  assert.match(sheet.textContent || "", /3\/28/);
+  assert.match(sheet.textContent || "", /Ch 3\s*\/\s*28/);
+  assert.match(sheet.textContent || "", /11%/);
+  assert.ok(sheet.querySelector(".x-pos .bar i"));
+  assert.equal(sheet.querySelector(".x-pos .step"), null);
   assert.match(sheet.textContent || "", /Reading/i);
-  assert.match(sheet.textContent || "", /Saved\s*·\s*Edit notes in Trace/i);
-  assert.match(sheet.textContent || "", /2 saved\s*·\s*Open in Trace/i);
-  assert.match(sheet.textContent || "", /Marked abandoned/i);
-  assert.match(sheet.textContent || "", /Browsing preference/i);
+  assert.match(sheet.textContent || "", /My actual private note for this story\./i);
+  assert.doesNotMatch(sheet.textContent || "", /Private note saved\s*·\s*edit in Trace/i);
+  assert.ok(sheet.querySelector(".x-meta-row .note"));
+  assert.match(sheet.textContent || "", /comfort/i);
+  assert.match(sheet.textContent || "", /reread/i);
+  assert.match(sheet.textContent || "", /favorite/i);
+  assert.match(sheet.textContent || "", /\+1/i);
+  assert.doesNotMatch(sheet.textContent || "", /long/i);
+  assert.doesNotMatch(sheet.textContent || "", /4 private tags/i);
+  const privateTagRow = Array.from(sheet.querySelectorAll(".x-meta-row")).find((row) =>
+    /comfort/i.test(row.textContent || ""),
+  );
+  assert.ok(privateTagRow);
+  assert.equal(privateTagRow.querySelectorAll(".x-utag").length, 4);
+  for (const tag of privateTagRow.querySelectorAll(".x-utag")) {
+    assert.match(tag.getAttribute("style") || "", /border-radius:\s*999px/i);
+    assert.match(tag.getAttribute("style") || "", /background:\s*(?:#d8e3d5|rgb\(216,\s*227,\s*213\))/i);
+    assert.match(tag.getAttribute("style") || "", /padding:\s*5px 14px/i);
+    assert.match(tag.getAttribute("style") || "", /max-width:\s*150px/i);
+    assert.match(tag.getAttribute("style") || "", /text-overflow:\s*ellipsis/i);
+  }
+  assert.doesNotMatch(sheet.textContent || "", /Marked abandoned/i);
+  assert.match(sheet.textContent || "", /Hidden from future listings/i);
+  const undoBtn = sheet.querySelector("button[data-trace-hidden-action='undo']");
+  assert.ok(undoBtn);
+  assert.equal(undoBtn.textContent || "", "Unhide");
+  assert.doesNotMatch(undoBtn.className || "", /\bicon-only\b/);
   assert.equal(
     sheet.querySelector("[data-trace-open-trace]").getAttribute("href"),
     "https://tracefiction.com/?panel=details&entryId=00000000-0000-4000-8000-000000703884",
   );
+});
+
+test("FFN mobile story sheet hidden preference auth failures become connect actions", () => {
+  const cases = [
+    { error: "auth_expired", label: /Sign in/i },
+    { error: "not_authenticated", label: /Connect/i },
+  ];
+  const collectorSrc = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "Shared (Extension)",
+      "Resources",
+      "collector.js",
+    ),
+    "utf8",
+  );
+
+  for (const item of cases) {
+    const dom = domFromFixture(
+      "ffn_story_mobile.html",
+      "https://m.fanfiction.net/s/7038840/3/A-Chance-Encounter",
+    );
+    const sent = [];
+    const chrome = {
+      runtime: {
+        onMessage: { addListener() {} },
+        sendMessage(msg, cb) {
+          sent.push(msg);
+          if (msg.type === "TRACE_SET_HIDDEN_WORK" && typeof cb === "function") {
+            cb({ ok: false, error: item.error });
+          }
+        },
+        lastError: null,
+      },
+      storage: {
+        local: {
+          get(_keys, cb) {
+            cb({
+              authToken: "test-token",
+              libraryOverlayCache: {
+                entries: {
+                  "ffn:7038840": {
+                    entryId: "00000000-0000-4000-8000-000000703884",
+                    status: "READING",
+                    readerStatus: "READING",
+                    chapters: { current: 3, total: 28 },
+                  },
+                },
+              },
+            });
+          },
+          set(_value, cb) {
+            if (typeof cb === "function") cb();
+          },
+        },
+        onChanged: { addListener() {} },
+      },
+    };
+
+    dom.window.setTimeout = () => 1;
+    dom.window.chrome = chrome;
+    dom.window.browser = chrome;
+    dom.window.eval(collectorSrc);
+    dom.window.document.dispatchEvent(
+      new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+    );
+
+    const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+    handle.click();
+    const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+    const hiddenBtn = sheet.querySelector("button[data-trace-hidden-action='hide']");
+    assert.ok(hiddenBtn);
+
+    hiddenBtn.click();
+
+    assert.equal(sent.at(-1).type, "TRACE_SET_HIDDEN_WORK");
+    assert.deepEqual(plainJson(sent.at(-1).payload), {
+      key: "ffn:7038840",
+      hidden: true,
+    });
+    assert.match(hiddenBtn.textContent || "", item.label);
+    assert.doesNotMatch(hiddenBtn.textContent || "", /Error/i);
+    assert.equal(hiddenBtn.getAttribute("data-trace-connect-action"), "1");
+    assert.equal(hiddenBtn.getAttribute("data-trace-connect-error"), item.error);
+    assert.equal(hiddenBtn.disabled, false);
+  }
 });
 
 test("FFN mobile story sheet hides mutation controls with stale token when auth is not connected", () => {

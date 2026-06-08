@@ -50,6 +50,27 @@
     }
   }
 
+  function openTraceUrlInBrowserTab(url) {
+    if (!url) return;
+    try {
+      ext.runtime.sendMessage({
+        type: "TRACE_OPEN_TRACE_URL",
+        payload: { url: url },
+      });
+    } catch {
+      /* The background worker handles Trace tab creation when available. */
+    }
+  }
+
+  function bindTraceOpenLink(link) {
+    if (!link) return;
+    link.addEventListener("click", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      openTraceUrlInBrowserTab(link.href);
+    });
+  }
+
   function authStateAllowsActions(authState, hasAuth) {
     if (!hasAuth) return false;
     var state = authState && authState.state ? authState.state : "connected";
@@ -116,6 +137,32 @@
     shadowLow: "0 1px 2px rgba(28,28,23,0.08)",
     shadowPopover: "0 18px 44px rgba(28,28,23,0.22)",
   };
+  const TRACE_D1 = {
+    font: "Geist,ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif",
+    mono: "'Geist Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",
+    paper: "#f3efe4",
+    paper2: "#ebe6d7",
+    card: "#f7f3e9",
+    card2: "#ede8d8",
+    ink: "#1c2722",
+    ink2: "#3a4339",
+    ink3: "#6e6a5b",
+    ink4: "#9a9583",
+    ink5: "#c4bea8",
+    line: "rgba(28,39,34,0.10)",
+    lineStrong: "rgba(28,39,34,0.18)",
+    forest: "#1f4d3f",
+    forestDeep: "#133029",
+    rust: "#b54a30",
+    honey: "#8a6e2a",
+    forestSoft: "#d8e3d5",
+    honeySoft: "#ebdcab",
+    forestLine: "rgba(31,77,63,0.35)",
+    mutedLine: "rgba(110,106,91,0.3)",
+    rustLine: "rgba(181,74,48,0.36)",
+    honeyLine: "rgba(138,110,42,0.35)",
+  };
+  const PRIVATE_TAG_DISPLAY_LIMIT = 3;
 
   /** Local extension UI tones, aligned to the current Trace archive palette. */
   const STATUS_THEME = {
@@ -158,18 +205,6 @@
     border: "rgba(91, 81, 66, 0.28)",
   };
 
-  const MARK_THEME = {
-    bg: "#f0e9dc",
-    fg: "#6f4d1f",
-    border: "rgba(111, 77, 31, 0.24)",
-  };
-
-  const CHALLENGE_THEME = {
-    bg: "#fff7ed",
-    fg: "#9a3412",
-    border: "rgba(154, 52, 18, 0.26)",
-  };
-
   const CONTEXT_THEME = {
     bg: "#edf2ef",
     fg: "#41504c",
@@ -207,6 +242,21 @@
       border: "rgba(186, 26, 26, 0.16)",
       accent: "#ba1a1a",
     },
+  };
+
+  const D1_STATUS_ACCENT = {
+    READING: TRACE_D1.honey,
+    PLANNING: TRACE_D1.ink3,
+    PAUSED: TRACE_D1.ink4,
+    COMPLETED: TRACE_D1.forest,
+    DROPPED: TRACE_D1.rust,
+  };
+  const D1_STATUS_SOFT = {
+    READING: "rgba(138,110,42,0.10)",
+    PLANNING: "rgba(110,106,91,0.10)",
+    PAUSED: "rgba(154,149,131,0.12)",
+    COMPLETED: "rgba(31,77,63,0.10)",
+    DROPPED: "rgba(181,74,48,0.10)",
   };
 
   const INLINE_HIDDEN_THEME = {
@@ -321,40 +371,214 @@
   }
 
   function preferenceActionStyle(theme) {
-    return (
-      actionChipStyle(theme) +
-      ";cursor:pointer" +
-      ";box-shadow:none" +
-      ";transition:background-color 120ms ease,border-color 120ms ease,color 120ms ease,box-shadow 120ms ease"
-    );
+    return d1TextActionStyle(theme);
   }
 
   function preferenceButtonStyle(btn, theme) {
     if (btn && btn.getAttribute("data-trace-surface-action") === "1") {
-      return surfaceButtonStyle(theme, false) + ";cursor:pointer";
+      return surfaceGhostButtonStyle(theme) + ";cursor:pointer";
     }
-    return preferenceActionStyle(theme);
+    return d1PreferenceStyle(btn, theme);
+  }
+
+  function d1TextActionStyle(theme, borderStyle) {
+    var color = theme && theme.fg ? theme.fg : TRACE_D1.forest;
+    var line = theme && theme.border ? theme.border : TRACE_D1.forestLine;
+    return [
+      "display:inline-flex",
+      "align-items:center",
+      "gap:5px",
+      "box-sizing:border-box",
+      "max-width:min(240px,100%)",
+      "padding:2px 0",
+      "border:0",
+      "border-bottom:1px " + (borderStyle || "solid") + " " + line,
+      "border-radius:0",
+      "background:transparent",
+      "color:" + color,
+      "box-shadow:none",
+      "font:500 12.5px/1.3 " + TRACE_D1.font,
+      "letter-spacing:0",
+      "text-transform:none",
+      "text-decoration:none",
+      "white-space:nowrap",
+      "cursor:pointer",
+      "vertical-align:middle",
+    ].join(";");
+  }
+
+  function d1ActionTheme(kind) {
+    if (kind === "hide") {
+      return { fg: TRACE_D1.ink3, border: TRACE_D1.mutedLine };
+    }
+    if (kind === "busy") {
+      return { fg: TRACE_D1.ink4, border: TRACE_D1.mutedLine };
+    }
+    if (kind === "error") {
+      return { fg: TRACE_D1.rust, border: TRACE_D1.rustLine };
+    }
+    if (kind === "full") {
+      return { fg: TRACE_D1.honey, border: TRACE_D1.honeyLine };
+    }
+    if (kind === "saved") {
+      return { fg: TRACE_D1.forest, border: TRACE_D1.forestLine };
+    }
+    return { fg: TRACE_D1.forest, border: TRACE_D1.forestLine };
+  }
+
+  function d1QuickAddStyle(kind) {
+    return d1TextActionStyle(d1ActionTheme(kind), kind === "busy" ? "dashed" : "solid");
+  }
+
+  function d1PreferenceStyle(btn, theme) {
+    var action = btn && btn.getAttribute ? btn.getAttribute("data-trace-hidden-action") : "";
+    if (theme === ADDING_THEME) return d1TextActionStyle(d1ActionTheme("busy"), "dashed");
+    if (theme === ERROR_THEME) return d1TextActionStyle(d1ActionTheme("error"));
+    if (theme === FULL_THEME) return d1TextActionStyle(d1ActionTheme("full"));
+    if (action === "undo") return d1TextActionStyle(d1ActionTheme("saved"));
+    return d1TextActionStyle(d1ActionTheme("hide"));
+  }
+
+  function traceIconEl(kind) {
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 14 14");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.style.cssText = "width:12px;height:12px;flex:0 0 auto";
+    if (kind === "plus") {
+      svg.setAttribute("stroke-width", "1.7");
+      var v = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      v.setAttribute("d", "M7 2v10M2 7h10");
+      svg.appendChild(v);
+      return svg;
+    }
+    if (kind === "eyeoff") {
+      svg.setAttribute("stroke-width", "1.4");
+      var a = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      a.setAttribute("d", "M1 7s2.2-4 6-4c1 0 1.9.3 2.7.6M13 7s-2.2 4-6 4c-1 0-1.9-.3-2.7-.6M2 2l10 10");
+      svg.appendChild(a);
+      return svg;
+    }
+    if (kind === "note") {
+      svg.setAttribute("stroke-width", "1.4");
+      var n = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      n.setAttribute("d", "M4 2.5h5L12 5.5v6H4zM9 2.5v3h3M5.8 8h4.4M5.8 10h3.2");
+      svg.appendChild(n);
+      return svg;
+    }
+    if (kind === "tag") {
+      svg.setAttribute("stroke-width", "1.4");
+      var t = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      t.setAttribute("d", "M2.5 3.5v3.7c0 .4.1.7.4 1l4.2 4.2a1.2 1.2 0 0 0 1.8 0l3.5-3.5a1.2 1.2 0 0 0 0-1.8L8.2 2.9a1.4 1.4 0 0 0-1-.4H3.5a1 1 0 0 0-1 1Z");
+      svg.appendChild(t);
+      var c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      c.setAttribute("cx", "5.3");
+      c.setAttribute("cy", "5.3");
+      c.setAttribute("r", "0.7");
+      svg.appendChild(c);
+      return svg;
+    }
+    if (kind === "open") {
+      svg.setAttribute("stroke-width", "1.5");
+      var o = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      o.setAttribute("d", "M5.5 3h5.5v5.5M11 3 4 10M3 6.5V12h5.5");
+      svg.appendChild(o);
+      return svg;
+    }
+    svg.setAttribute("stroke-width", "1.5");
+    var g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    var track = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    track.setAttribute("cx", "7");
+    track.setAttribute("cy", "7");
+    track.setAttribute("r", "4.9");
+    track.setAttribute("opacity", "0.22");
+    g.appendChild(track);
+    var p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    p.setAttribute("d", "M7 2.1a4.9 4.9 0 0 1 4.6 3.1");
+    p.setAttribute("opacity", "0.95");
+    g.appendChild(p);
+    var spin = document.createElementNS("http://www.w3.org/2000/svg", "animateTransform");
+    spin.setAttribute("attributeName", "transform");
+    spin.setAttribute("type", "rotate");
+    spin.setAttribute("from", "0 7 7");
+    spin.setAttribute("to", "360 7 7");
+    spin.setAttribute("dur", "0.8s");
+    spin.setAttribute("repeatCount", "indefinite");
+    g.appendChild(spin);
+    svg.appendChild(g);
+    return svg;
+  }
+
+  function setButtonInlineContent(btn, icon, text) {
+    removeWrapChildren(btn);
+    if (icon) btn.appendChild(traceIconEl(icon));
+    btn.appendChild(document.createTextNode(text));
+  }
+
+  function setInlineStatusContent(btn, status) {
+    removeWrapChildren(btn);
+    var dot = document.createElement("span");
+    dot.setAttribute("aria-hidden", "true");
+    dot.style.cssText = [
+      "width:7px",
+      "height:7px",
+      "border-radius:999px",
+      "background:" + (D1_STATUS_ACCENT[status] || TRACE_D1.ink3),
+      "flex:0 0 auto",
+    ].join(";");
+    var label = document.createElement("span");
+    label.textContent = statusChoiceLabel(status);
+    label.style.cssText = "color:" + TRACE_D1.ink2;
+    btn.appendChild(dot);
+    btn.appendChild(label);
   }
 
   function surfaceButtonStyle(theme, filled) {
     var bg = filled ? theme.bg : "transparent";
+    var color = filled ? theme.fg : theme.fg;
     return [
       "display:inline-flex",
       "align-items:center",
       "justify-content:center",
+      "gap:8px",
       "box-sizing:border-box",
-      "min-height:40px",
-      "padding:0 12px",
-      "border-radius:" + TRACE_UI.radiusSm,
+      "min-height:38px",
+      "padding:0 13px",
+      "border-radius:9px",
       "border:1px solid " + theme.border,
       "background:" + bg,
-      "color:" + theme.fg,
-      "font:800 10px/1 " + TRACE_UI.font,
-      "letter-spacing:0.04em",
-      "text-transform:uppercase",
+      "color:" + color,
+      "font:600 12.5px/1 " + TRACE_D1.font,
+      "letter-spacing:0",
+      "text-transform:none",
       "text-decoration:none",
       "white-space:nowrap",
       "cursor:pointer",
+    ].join(";");
+  }
+
+  function surfacePrimaryButtonStyle() {
+    return surfaceButtonStyle(
+      { bg: TRACE_D1.forestDeep, fg: TRACE_D1.paper, border: TRACE_D1.forestDeep },
+      true,
+    );
+  }
+
+  function surfaceGhostButtonStyle(theme) {
+    var t = theme || { fg: TRACE_D1.ink2, border: TRACE_D1.lineStrong };
+    return surfaceButtonStyle(
+      { bg: "transparent", fg: t.fg || TRACE_D1.ink2, border: t.border || TRACE_D1.lineStrong },
+      false,
+    );
+  }
+
+  function surfaceIconButtonStyle(theme) {
+    return [
+      surfaceGhostButtonStyle(theme),
+      "flex:0 0 auto",
+      "width:44px",
+      "padding:12px 0",
     ].join(";");
   }
 
@@ -456,14 +680,15 @@
         "right:16px",
         "bottom:16px",
         "z-index:2147483647",
-        "width:min(320px,calc(100vw - 32px))",
-        "padding:12px 14px 12px 14px",
+        "box-sizing:border-box",
+        "width:min(340px,calc(100vw - 32px))",
+        "padding:16px",
         "border-radius:14px",
-        "background:#fffaf0",
-        "color:#422006",
-        "border:1px solid rgba(180,83,9,0.2)",
-        "box-shadow:0 14px 34px rgba(28,28,23,0.18)",
-        "font:500 13px/1.45 Manrope,system-ui,-apple-system,'Segoe UI',sans-serif",
+        "background:" + TRACE_D1.card,
+        "color:" + TRACE_D1.ink,
+        "border:1px solid " + TRACE_D1.lineStrong,
+        "box-shadow:0 18px 44px rgba(28,28,23,0.22)",
+        "font:500 13px/1.45 " + TRACE_D1.font,
       ].join(";");
 
       var closeBtn = document.createElement("button");
@@ -475,11 +700,11 @@
         "right:8px",
         "width:28px",
         "height:28px",
-        "border:0",
-        "border-radius:999px",
-        "background:transparent",
-        "color:#8b5e34",
-        "font:700 16px/1 system-ui,-apple-system,'Segoe UI',sans-serif",
+        "border:1px solid " + TRACE_D1.line,
+        "border-radius:8px",
+        "background:" + TRACE_D1.card2,
+        "color:" + TRACE_D1.ink3,
+        "font:600 16px/1 " + TRACE_D1.font,
         "cursor:pointer",
       ].join(";");
       closeBtn.textContent = "×";
@@ -490,11 +715,20 @@
 
       var headingEl = document.createElement("div");
       headingEl.setAttribute("data-trace-connect-notice-heading", "1");
-      headingEl.style.cssText = "margin:0 28px 4px 0;font:800 12px/1.2 Manrope,system-ui,-apple-system,'Segoe UI',sans-serif;letter-spacing:0.06em;text-transform:uppercase;color:#9a3412;";
+      headingEl.style.cssText = [
+        "margin:0 32px 8px 0",
+        "font:500 20px/1.15 Fraunces,Georgia,'Times New Roman',serif",
+        "letter-spacing:0",
+        "color:" + TRACE_D1.ink,
+      ].join(";");
 
       var messageEl = document.createElement("div");
       messageEl.setAttribute("data-trace-connect-notice-message", "1");
-      messageEl.style.cssText = "margin:0 0 10px 0;";
+      messageEl.style.cssText = [
+        "margin:0 0 14px 0",
+        "color:" + TRACE_D1.ink3,
+        "font:400 13px/1.5 " + TRACE_D1.font,
+      ].join(";");
 
       var cta = document.createElement("a");
       cta.setAttribute("data-trace-connect-notice-cta", "1");
@@ -502,15 +736,18 @@
         "display:inline-flex",
         "align-items:center",
         "justify-content:center",
-        "min-height:34px",
-        "padding:0 12px",
-        "border-radius:10px",
-        "background:#8a4b15",
-        "color:#fffdf8",
+        "box-sizing:border-box",
+        "width:100%",
+        "min-height:42px",
+        "padding:10px 14px",
+        "border-radius:11px",
+        "background:" + TRACE_D1.forestDeep,
+        "color:" + TRACE_D1.paper,
+        "border:1px solid " + TRACE_D1.forestDeep,
         "text-decoration:none",
-        "font:800 11px/1 Manrope,system-ui,-apple-system,'Segoe UI',sans-serif",
-        "letter-spacing:0.05em",
-        "text-transform:uppercase",
+        "font:600 13.5px/1.15 " + TRACE_D1.font,
+        "letter-spacing:0",
+        "text-transform:none",
       ].join(";");
       cta.target = "_blank";
       cta.rel = "noopener noreferrer";
@@ -523,6 +760,8 @@
     }
 
     existing.querySelector("[data-trace-connect-notice-heading]").textContent = heading;
+    existing.querySelector("[data-trace-connect-notice-heading]").style.color =
+      state === "error" ? TRACE_D1.rust : state === "reconnect_required" ? TRACE_D1.honey : TRACE_D1.ink;
     existing.querySelector("[data-trace-connect-notice-message]").textContent = message;
     var ctaEl = existing.querySelector("[data-trace-connect-notice-cta]");
     ctaEl.href = helpUrl;
@@ -898,12 +1137,40 @@
 
   function normalizePrivateContext(raw) {
     if (!raw || typeof raw !== "object") return null;
-    var hasNotes = raw.hasNotes === true;
+    var notePreview =
+      typeof raw.notePreview === "string"
+        ? raw.notePreview.replace(/\s+/g, " ").trim()
+        : "";
+    if (notePreview.length > 180) {
+      notePreview = notePreview.slice(0, 177).trimEnd() + "...";
+    }
+    var tags = [];
+    if (Array.isArray(raw.tags)) {
+      var seen = new Set();
+      raw.tags.forEach(function (value) {
+        if (tags.length >= 5) return;
+        if (typeof value !== "string") return;
+        var tag = value.replace(/\s+/g, " ").trim();
+        if (!tag) return;
+        if (tag.length > 100) tag = tag.slice(0, 100).trimEnd();
+        var key = tag.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        tags.push(tag);
+      });
+    }
+    var hasNotes = raw.hasNotes === true || notePreview.length > 0;
     var tagCount = Number(raw.tagCount);
     if (!Number.isFinite(tagCount) || tagCount < 0) tagCount = 0;
     tagCount = Math.trunc(tagCount);
-    if (!hasNotes && tagCount === 0) return null;
-    return { hasNotes: hasNotes, tagCount: tagCount };
+    if (tagCount === 0 && tags.length > 0) tagCount = tags.length;
+    if (!hasNotes && tagCount === 0 && tags.length === 0) return null;
+    return {
+      hasNotes: hasNotes,
+      tagCount: tagCount,
+      notePreview: notePreview || undefined,
+      tags: tags.length ? tags : undefined,
+    };
   }
 
   function normalizeWorkStatus(raw) {
@@ -1169,11 +1436,10 @@
     if (entry.__traceStatusPending) return "Saving...";
     if (entry.__traceStatusError) return "Update failed";
     if (entry.hidden) return "Hidden";
-    if (entry.workMark && entry.workMark.challenge) return "Review mark";
-    var newChapters = newChaptersDisplay(entry, false);
-    if (newChapters) return newChapters;
     var display = statusDisplay(entry);
     if (display) return display;
+    var newChapters = newChaptersDisplay(entry, false);
+    if (newChapters) return newChapters;
     return "Saved";
   }
 
@@ -1186,23 +1452,13 @@
     }
     if (entry.__traceStatusError) return "Tap to retry";
     if (entry.hidden) return "Hidden from browsing";
-    if (entry.workMark && entry.workMark.challenge) {
-      var challenge = entry.workMark.challenge;
-      if (typeof challenge.chapterDelta === "number" && challenge.chapterDelta > 0) {
-        return "+" + challenge.chapterDelta + " chapters since mark";
-      }
-      return "Needs review";
-    }
     var newChapters = newChaptersDisplay(entry, false);
     if (newChapters) {
       var parts = [];
       var statusLabel = statusOnlyDisplay(entry);
-      var workLabel = workStatusLabel(entry.workStatus);
       if (statusLabel) parts.push(statusLabel);
-      if (workLabel) parts.push(workLabel);
       return parts.length ? parts.join(" \u00b7 ") : "New chapters available";
     }
-    if (entry.workMark) return workMarkLabel(entry.workMark);
     if (entry.privateContext && (entry.privateContext.hasNotes || entry.privateContext.tagCount > 0)) {
       return "Private context saved";
     }
@@ -1215,6 +1471,12 @@
 
   function statusChoiceLabel(status) {
     return LABEL[status] || status;
+  }
+
+  function statusControlChoiceLabel(status) {
+    if (status === "PLANNING") return "Plan";
+    if (status === "COMPLETED") return "Done";
+    return statusChoiceLabel(status);
   }
 
   function workStatusLabel(workStatus) {
@@ -1278,24 +1540,36 @@
       };
     }
     if (entry.hidden) return INLINE_HIDDEN_THEME;
-    if (entry.workMark && entry.workMark.challenge) {
-      return {
-        bg: "rgba(255, 247, 237, 0.58)",
-        fg: CHALLENGE_THEME.fg,
-        border: "rgba(154, 52, 18, 0.18)",
-        accent: CHALLENGE_THEME.fg,
-      };
-    }
-    if (newChaptersDisplay(entry, false)) {
-      return {
-        bg: "rgba(232, 244, 242, 0.72)",
-        fg: UPDATED_THEME.fg,
-        border: "rgba(11, 79, 108, 0.2)",
-        accent: UPDATED_THEME.fg,
-      };
-    }
     var status = entryStatusValue(entry);
     return (status && INLINE_STATUS_THEME[status]) || INLINE_CONTEXT_THEME;
+  }
+
+  function lensDotColor(entry, theme) {
+    if (entry && entry.__traceStatusError) return TRACE_D1.rust;
+    if (entry && entry.__traceStatusPending) return TRACE_D1.ink4;
+    var status = entryStatusValue(entry);
+    if (status && D1_STATUS_ACCENT[status]) return D1_STATUS_ACCENT[status];
+    return theme && theme.accent ? theme.accent : TRACE_D1.ink3;
+  }
+
+  function lensLabelText(entry) {
+    if (!entry) return "Trace";
+    if (entry.__traceStatusPending) return "Saving...";
+    if (entry.__traceStatusError) return "Update failed";
+    if (entry.hidden) return "Hidden";
+    var status = statusOnlyDisplay(entry);
+    if (status) return status;
+    var newChapters = newChaptersDisplay(entry, false);
+    if (newChapters) return newChapters;
+    return "Saved";
+  }
+
+  function lensProgressText(entry) {
+    var status = entryStatusValue(entry);
+    if (!status || status === "PLANNING") return "";
+    var chapters = chaptersForStatusDisplay(status, entry && entry.chapters);
+    if (!chapters || typeof chapters.current !== "number") return "";
+    return chapters.current + "/" + (chapters.total == null ? "?" : chapters.total);
   }
 
   function badgeEl(entry) {
@@ -1330,21 +1604,6 @@
     return span;
   }
 
-  function workMarkLabel(mark) {
-    if (!mark) return null;
-    if (mark.kind === "abandoned") return "Abandoned";
-    if (mark.kind === "hiatus") return "Hiatus";
-    return null;
-  }
-
-  function challengeLabel(challenge) {
-    if (!challenge) return null;
-    if (typeof challenge.chapterDelta === "number" && challenge.chapterDelta > 0) {
-      return "+" + String(challenge.chapterDelta);
-    }
-    return "Review";
-  }
-
   function appendEntryBadges(wrap, entry) {
     if (entry.hidden) {
       wrap.appendChild(
@@ -1370,45 +1629,10 @@
         ),
       );
     }
-    var markLabelText = workMarkLabel(entry.workMark);
-    if (markLabelText) {
-      wrap.appendChild(
-        smallBadgeEl(
-          markLabelText,
-          MARK_THEME,
-          "Trace work mark: " + markLabelText.toLowerCase(),
-          "data-trace-work-mark",
-        ),
-      );
-    }
-    var challengeText = challengeLabel(entry.workMark && entry.workMark.challenge);
-    if (challengeText) {
-      var challengeTitle = "Trace work mark needs review";
-      if (
-        entry.workMark.challenge.kind === "chapter-count-changed" &&
-        typeof entry.workMark.challenge.chapterDelta === "number"
-      ) {
-        challengeTitle =
-          String(entry.workMark.challenge.chapterDelta) +
-          " chapter(s) published since your Trace mark";
-      }
-      wrap.appendChild(
-        smallBadgeEl(
-          challengeText,
-          CHALLENGE_THEME,
-          challengeTitle,
-          "data-trace-work-mark-challenge",
-        ),
-      );
-    }
   }
 
   function appendWorkCatchupRows(surface, entry) {
     if (!entry) return;
-    var workLabel = workStatusLabel(entry.workStatus);
-    if (workLabel) {
-      surface.appendChild(surfaceRowEl("Work status", workLabel, true));
-    }
     var catchup = catchupLabel(entry);
     if (catchup) {
       surface.appendChild(
@@ -1420,8 +1644,123 @@
   function closeListingActionSurface() {
     var existing = document.querySelector("[" + ACTION_SURFACE_ATTR + "]");
     if (existing) existing.remove();
+    unlockListingBottomSheetPageScroll();
     document.removeEventListener("click", outsideSurfaceClick, true);
     document.removeEventListener("keydown", surfaceKeydown, true);
+  }
+
+  var listingBottomSheetScrollLock = null;
+
+  function lockListingBottomSheetPageScroll() {
+    if (listingBottomSheetScrollLock) return;
+    var html = document.documentElement;
+    var body = document.body;
+    listingBottomSheetScrollLock = {
+      htmlOverflow: html ? html.style.overflow : "",
+      htmlOverscroll: html ? html.style.overscrollBehavior : "",
+      bodyOverflow: body ? body.style.overflow : "",
+      bodyOverscroll: body ? body.style.overscrollBehavior : "",
+    };
+    if (html) {
+      html.style.overflow = "hidden";
+      html.style.overscrollBehavior = "none";
+    }
+    if (body) {
+      body.style.overflow = "hidden";
+      body.style.overscrollBehavior = "none";
+    }
+  }
+
+  function unlockListingBottomSheetPageScroll() {
+    if (!listingBottomSheetScrollLock) return;
+    var html = document.documentElement;
+    var body = document.body;
+    if (html) {
+      html.style.overflow = listingBottomSheetScrollLock.htmlOverflow;
+      html.style.overscrollBehavior = listingBottomSheetScrollLock.htmlOverscroll;
+    }
+    if (body) {
+      body.style.overflow = listingBottomSheetScrollLock.bodyOverflow;
+      body.style.overscrollBehavior = listingBottomSheetScrollLock.bodyOverscroll;
+    }
+    listingBottomSheetScrollLock = null;
+  }
+
+  function createBottomSheetGrabber(color) {
+    var zone = document.createElement("div");
+    zone.setAttribute("data-trace-bottom-sheet-grabber", "1");
+    zone.setAttribute("aria-hidden", "true");
+    zone.style.cssText = [
+      "display:flex",
+      "align-items:center",
+      "justify-content:center",
+      "height:28px",
+      "margin:0",
+      "touch-action:none",
+      "cursor:grab",
+      "user-select:none",
+    ].join(";");
+    var bar = document.createElement("span");
+    bar.style.cssText = "display:block;width:38px;height:4px;border-radius:999px;background:" + color;
+    zone.appendChild(bar);
+    return zone;
+  }
+
+  function bindBottomSheetDragClose(surface, handle, closeFn) {
+    if (!surface || !handle || !closeFn) return;
+    var startY = 0;
+    var dragging = false;
+    function pointerY(e) {
+      if (e && e.touches && e.touches.length) return e.touches[0].clientY;
+      if (e && e.changedTouches && e.changedTouches.length) return e.changedTouches[0].clientY;
+      return e && typeof e.clientY === "number" ? e.clientY : 0;
+    }
+    function resetDrag() {
+      dragging = false;
+      surface.style.transition = "";
+      surface.style.transform = "";
+    }
+    function start(e) {
+      dragging = true;
+      startY = pointerY(e);
+      if (e && e.cancelable) e.preventDefault();
+      if (e && e.stopPropagation) e.stopPropagation();
+      surface.style.transition = "none";
+      if (handle.setPointerCapture && e && e.pointerId != null) {
+        try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+      }
+    }
+    function move(e) {
+      if (!dragging) return;
+      var delta = Math.max(0, pointerY(e) - startY);
+      if (e && e.cancelable) e.preventDefault();
+      if (e && e.stopPropagation) e.stopPropagation();
+      surface.style.transform = "translateY(" + delta + "px)";
+    }
+    function end(e) {
+      if (!dragging) return;
+      if (e && e.cancelable) e.preventDefault();
+      if (e && e.stopPropagation) e.stopPropagation();
+      var delta = Math.max(0, pointerY(e) - startY);
+      if (delta >= 56) {
+        resetDrag();
+        closeFn();
+        return;
+      }
+      surface.style.transition = "transform 160ms ease";
+      surface.style.transform = "translateY(0)";
+      window.setTimeout(resetDrag, 180);
+    }
+    handle.style.cursor = "grab";
+    handle.style.touchAction = "none";
+    handle.addEventListener("pointerdown", start);
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", end);
+    handle.addEventListener("pointercancel", resetDrag);
+    handle.addEventListener("touchstart", start, { passive: false });
+    handle.addEventListener("touchmove", move, { passive: false });
+    handle.addEventListener("touchend", end);
+    handle.addEventListener("touchcancel", resetDrag);
   }
 
   function outsideSurfaceClick(e) {
@@ -1449,44 +1788,167 @@
       "align-items:center",
       "justify-content:space-between",
       "gap:12px",
-      "min-height:38px",
-      "padding:8px 9px",
-      "border-radius:" + TRACE_UI.radiusSm,
-      "border:1px solid " + (emphasis ? CHALLENGE_THEME.border : TRACE_UI.border),
-      "background:" + (emphasis ? CHALLENGE_THEME.bg : TRACE_UI.paperRaised),
+      "min-height:32px",
+      "padding:8px 0",
+      "border-top:1px solid " + TRACE_D1.line,
+      "background:transparent",
     ].join(";");
     var labelEl = document.createElement("span");
     labelEl.textContent = label;
-    labelEl.style.cssText = "font:800 9px/1 " + TRACE_UI.font + ";letter-spacing:0.06em;text-transform:uppercase;color:" + TRACE_UI.muted;
+    labelEl.style.cssText = "font:500 9px/1 " + TRACE_D1.mono + ";letter-spacing:0.18em;text-transform:uppercase;color:" + TRACE_D1.ink4;
     var valueEl = document.createElement("span");
     valueEl.textContent = value;
-    valueEl.style.cssText = "font:700 12px/1.25 " + TRACE_UI.font + ";color:" + TRACE_UI.ink + ";text-align:right";
+    valueEl.style.cssText = "font:600 12.5px/1.3 " + TRACE_D1.font + ";color:" + (emphasis ? TRACE_D1.rust : TRACE_D1.ink2) + ";text-align:right";
     row.appendChild(labelEl);
     row.appendChild(valueEl);
     return row;
   }
 
+  function surfaceMetaRow(iconKind, child, label) {
+    var row = document.createElement("div");
+    row.className = "x-meta-row";
+    if (label) row.setAttribute("data-trace-action-meta", label);
+    row.style.cssText = "display:flex;gap:11px;align-items:flex-start";
+    var icon = document.createElement("span");
+    icon.className = "ic";
+    icon.setAttribute("aria-hidden", "true");
+    icon.style.cssText = "width:16px;height:16px;color:" + TRACE_D1.ink4 + ";flex-shrink:0;margin-top:1px";
+    icon.appendChild(traceIconEl(iconKind));
+    row.appendChild(icon);
+    row.appendChild(child);
+    return row;
+  }
+
+  function surfaceListingMeta(platform, anchor) {
+    var item = scrapeListingItem(platform, anchor);
+    if (!item) return { title: "", author: "" };
+    return {
+      title: item.t || "",
+      author: item.a || "",
+    };
+  }
+
+  function surfacePositionBlock(entry) {
+    var status = entryStatusValue(entry);
+    var chapters = chaptersForStatusDisplay(status, entry && entry.chapters);
+    if (!chapters || typeof chapters.current !== "number") return null;
+    var percent = null;
+    if (typeof chapters.total === "number" && chapters.total > 0) {
+      percent = Math.max(0, Math.min(100, Math.round((chapters.current / chapters.total) * 100)));
+    }
+
+    var position = document.createElement("section");
+    position.className = "x-pos";
+    position.setAttribute("data-trace-action-position", "1");
+    position.style.cssText = "background:#f1d8c8;border:1px solid rgba(181,74,48,0.24);border-radius:12px;padding:13px 14px";
+
+    var top = document.createElement("div");
+    top.className = "top";
+    top.style.cssText = "display:flex;align-items:baseline;justify-content:space-between;gap:10px";
+    var value = document.createElement("span");
+    value.className = "chap";
+    value.style.cssText = "font:500 22px/1 'Fraunces',Georgia,serif;color:" + TRACE_D1.ink;
+    var big = document.createElement("span");
+    big.className = "big";
+    big.textContent = "Ch " + chapters.current;
+    var small = document.createElement("span");
+    small.className = "sm";
+    small.textContent = " / " + (chapters.total == null ? "?" : chapters.total);
+    small.style.cssText = "font-size:15px;color:" + TRACE_D1.ink4;
+    value.appendChild(big);
+    value.appendChild(small);
+    top.appendChild(value);
+
+    var side = document.createElement("span");
+    side.className = "pct";
+    side.style.cssText = "font:500 10.5px/1.2 " + TRACE_D1.mono + ";color:" + TRACE_D1.ink3 + ";text-align:right";
+    var catchup = catchupLabel(entry);
+    side.textContent = catchup || (percent == null ? "" : percent + "%");
+    if (side.textContent) top.appendChild(side);
+    position.appendChild(top);
+
+    if (percent != null) {
+      var bar = document.createElement("div");
+      bar.className = "bar";
+      bar.style.cssText = "height:5px;border-radius:999px;background:rgba(28,39,34,0.12);overflow:hidden;margin:10px 0 0";
+      var fill = document.createElement("i");
+      fill.setAttribute("aria-hidden", "true");
+      fill.style.cssText = "display:block;height:100%;border-radius:999px;background:" + TRACE_D1.rust + ";width:" + percent + "%";
+      bar.appendChild(fill);
+      position.appendChild(bar);
+    }
+    return position;
+  }
+
+  function surfaceNoteText(text) {
+    var note = document.createElement("span");
+    note.className = "note";
+    note.textContent = text;
+    note.style.cssText = "display:block;flex:1;min-width:0;text-align:left;font:italic 13.5px/1.45 'Fraunces',Georgia,serif;color:" + TRACE_D1.ink2;
+    return note;
+  }
+
+  function surfaceTagPill(text, collectionTone) {
+    var tag = document.createElement("span");
+    tag.className = collectionTone ? "x-utag coll" : "x-utag";
+    tag.textContent = text;
+    if (text && String(text).length > 24) tag.title = text;
+    tag.style.cssText = [
+      "display:inline-block",
+      "box-sizing:border-box",
+      "max-width:150px",
+      "overflow:hidden",
+      "text-overflow:ellipsis",
+      "vertical-align:middle",
+      "border-radius:999px",
+      "padding:3px 10px",
+      "font:500 11.5px/1.15 " + TRACE_D1.font,
+      "white-space:nowrap",
+      "background:" + (collectionTone ? TRACE_D1.honeySoft : TRACE_D1.forestSoft),
+      "color:" + (collectionTone ? TRACE_D1.honey : TRACE_D1.forest),
+    ].join(";");
+    return tag;
+  }
+
+  function visiblePrivateTags(context) {
+    if (!context || !context.tags || !context.tags.length) return [];
+    return context.tags.slice(0, PRIVATE_TAG_DISPLAY_LIMIT);
+  }
+
   function appendPrivateContextRows(surface, entry) {
     var context = entry && entry.privateContext;
     if (!context || (!context.hasNotes && !context.tagCount)) return;
-    surface.appendChild(
-      surfaceRowEl(
+    var meta = document.createElement("div");
+    meta.className = "x-meta";
+    meta.style.cssText = "display:flex;flex-direction:column;gap:9px;padding-top:12px;border-top:1px solid " + TRACE_D1.line;
+    if (context.hasNotes) {
+      meta.appendChild(surfaceMetaRow(
+        "note",
+        surfaceNoteText(context.notePreview || "Private note saved \u00b7 edit in Trace"),
         "Private note",
-        context.hasNotes ? "Saved \u00b7 Edit notes in Trace" : "None",
-        false,
-      ),
-    );
-    if (context.tagCount > 0) {
-      surface.appendChild(
-        surfaceRowEl(
-          "Private tags",
-          context.tagCount === 1
-            ? "1 saved \u00b7 Open in Trace"
-            : context.tagCount + " saved \u00b7 Open in Trace",
-          false,
-        ),
-      );
+      ));
     }
+    if (context.tagCount > 0) {
+      var tags = document.createElement("span");
+      tags.className = "tags";
+      tags.style.cssText = "display:flex;flex:1;min-width:0;flex-wrap:wrap;gap:6px;text-align:left";
+      if (context.tags && context.tags.length) {
+        var visibleTags = visiblePrivateTags(context);
+        visibleTags.forEach(function (tag) {
+          tags.appendChild(surfaceTagPill(tag, false));
+        });
+        if (context.tagCount > visibleTags.length) {
+          tags.appendChild(surfaceTagPill("+" + (context.tagCount - visibleTags.length), false));
+        }
+      } else {
+        tags.appendChild(surfaceTagPill(
+          context.tagCount === 1 ? "1 private tag" : context.tagCount + " private tags",
+          false,
+        ));
+      }
+      meta.appendChild(surfaceMetaRow("tag", tags, "Private tags"));
+    }
+    if (meta.childNodes.length > 0) surface.appendChild(meta);
   }
 
   function bindStatusChoice(choice, entry, status, rerender) {
@@ -1544,32 +2006,68 @@
     });
   }
 
+  function statusChoiceStyle(status, selected) {
+    var accent = D1_STATUS_ACCENT[status] || TRACE_D1.forest;
+    var soft = D1_STATUS_SOFT[status] || "rgba(31,77,63,0.10)";
+    return [
+      "flex:1",
+      "display:flex",
+      "flex-direction:column",
+      "align-items:center",
+      "justify-content:center",
+      "gap:5px",
+      "box-sizing:border-box",
+      "min-width:0",
+      "min-height:50px",
+      "padding:8px 2px",
+      "overflow:visible",
+      "border-radius:8px",
+      "border:1px solid " + (selected ? accent : TRACE_D1.lineStrong),
+      "background:" + (selected ? soft : TRACE_D1.paper),
+      "color:" + (selected ? TRACE_D1.ink : TRACE_D1.ink3),
+      "font:500 11px/1 " + TRACE_D1.font,
+      "letter-spacing:0",
+      "text-transform:none",
+      "cursor:pointer",
+    ].join(";");
+  }
+
   function appendStatusControls(surface, entry, rerender, showActions) {
     if (!showActions) return;
     if (!entry || !entry.entryId) return;
     var wrap = document.createElement("div");
     wrap.setAttribute("data-trace-status-choices", "1");
-    wrap.style.cssText = "display:grid;gap:7px;margin-top:2px";
+    wrap.style.cssText = "display:grid;gap:8px;padding-top:12px;border-top:1px solid " + TRACE_D1.line;
     var label = document.createElement("div");
+    label.className = "x-sheet-label";
     label.textContent = "Reading status";
-    label.style.cssText = "font:800 9px/1 " + TRACE_UI.font + ";letter-spacing:0.07em;text-transform:uppercase;color:" + TRACE_UI.muted;
+    label.style.cssText = "font:500 9px/1 " + TRACE_D1.mono + ";letter-spacing:0.18em;text-transform:uppercase;color:" + TRACE_D1.ink4;
     var row = document.createElement("div");
-    row.style.cssText = "display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:6px";
+    row.className = "x-seg";
+    row.style.cssText = "display:flex;gap:5px";
     MANAGEMENT_STATUS_CHOICES.forEach(function (status) {
       var choice = document.createElement("button");
       choice.type = "button";
       choice.setAttribute("data-trace-status-choice", status);
-      if (entryStatusValue(entry) === status) {
+      var selected = entryStatusValue(entry) === status;
+      if (selected) {
         choice.setAttribute("data-trace-status-selected", "1");
         choice.setAttribute("aria-pressed", "true");
       } else {
         choice.setAttribute("aria-pressed", "false");
       }
-      choice.textContent = statusChoiceLabel(status);
-      choice.style.cssText = surfaceButtonStyle(
-        entryStatusValue(entry) === status ? STATUS_THEME[status] : CONTEXT_THEME,
-        entryStatusValue(entry) === status,
-      );
+      choice.style.cssText = statusChoiceStyle(status, selected);
+      var dot = document.createElement("span");
+      dot.setAttribute("aria-hidden", "true");
+      dot.style.cssText = [
+        "width:7px",
+        "height:7px",
+        "border-radius:999px",
+        "background:" + (selected ? D1_STATUS_ACCENT[status] || TRACE_D1.forest : TRACE_D1.ink5),
+        selected ? "box-shadow:0 0 0 3px " + (D1_STATUS_SOFT[status] || "rgba(31,77,63,0.10)") : "",
+      ].join(";");
+      choice.appendChild(dot);
+      choice.appendChild(document.createTextNode(statusControlChoiceLabel(status)));
       bindStatusChoice(choice, entry, status, rerender);
       row.appendChild(choice);
     });
@@ -1578,9 +2076,10 @@
     surface.appendChild(wrap);
   }
 
-  function renderListingActionSurface(trigger, entry, workKey, showActions, rerender) {
+  function renderListingActionSurface(trigger, entry, workKey, showActions, rerender, platform, anchor) {
     closeListingActionSurface();
     var surface = document.createElement("aside");
+    surface.className = "x x-sheet";
     surface.setAttribute(ACTION_SURFACE_ATTR, "1");
     surface.setAttribute("data-trace-action-surface-key", workKey);
     surface.setAttribute("role", "dialog");
@@ -1591,24 +2090,24 @@
       "position:fixed",
       "z-index:2147483647",
       "box-sizing:border-box",
-      "display:grid",
-      "gap:10px",
-      "width:" + (mobile ? "auto" : "min(320px,calc(100vw - 24px))"),
-      "max-width:" + (mobile ? "430px" : "320px"),
-      "padding:12px",
-      "border-radius:" + (mobile ? "14px 14px 10px 10px" : TRACE_UI.radiusMd),
-      "border:1px solid " + TRACE_UI.borderStrong,
-      "background:" + TRACE_UI.paper,
-      "color:" + TRACE_UI.ink,
-      "box-shadow:" + TRACE_UI.shadowPopover,
-      "font:500 13px/1.4 " + TRACE_UI.font,
+      "display:block",
+      "width:" + (mobile ? "100%" : "min(360px,calc(100vw - 24px))"),
+      "max-width:" + (mobile ? "430px" : "360px"),
+      "padding:0",
+      "border-radius:" + (mobile ? "20px 20px 0 0" : "16px"),
+      "border:1px solid " + TRACE_D1.lineStrong,
+      "background:" + TRACE_D1.card,
+      "color:" + TRACE_D1.ink,
+      "box-shadow:0 1px 0 rgba(255,250,230,0.4) inset, 0 28px 60px -20px rgba(20,14,0,0.42), 0 0 0 1px " + TRACE_D1.lineStrong,
+      "font:500 13px/1.4 " + TRACE_D1.font,
       "overflow:auto",
+      "-webkit-font-smoothing:antialiased",
     ];
     if (mobile) {
-      css.push("left:10px", "right:10px", "bottom:calc(10px + env(safe-area-inset-bottom,0px))", "margin:0 auto", "max-height:min(72vh,520px)");
+      css.push("left:0", "right:0", "bottom:0", "margin:0 auto", "max-height:min(72vh,520px)");
     } else {
       var rect = trigger.getBoundingClientRect();
-      var surfaceWidth = Math.min(320, Math.max(280, (window.innerWidth || 320) - 24));
+      var surfaceWidth = Math.min(360, Math.max(280, (window.innerWidth || 360) - 24));
       var viewportHeight = window.innerHeight || document.documentElement.clientHeight || 640;
       var top = rect.bottom + 8;
       top = Math.min(Math.max(8, top), Math.max(8, viewportHeight - 120));
@@ -1622,77 +2121,116 @@
     }
     surface.style.cssText = css.join(";");
 
+    if (mobile) {
+      lockListingBottomSheetPageScroll();
+      var grabber = createBottomSheetGrabber(TRACE_D1.ink5);
+      surface.appendChild(grabber);
+      bindBottomSheetDragClose(surface, grabber, closeListingActionSurface);
+    }
+
+    var header = document.createElement("div");
+    header.className = "x-sheet-head";
+    header.setAttribute("data-trace-management-header", "1");
+    header.style.cssText = [
+      "display:grid",
+      "grid-template-columns:1fr auto",
+      "gap:10px",
+      "align-items:start",
+      "padding:16px 16px 13px",
+      "border-bottom:1px solid " + TRACE_D1.line,
+    ].join(";");
+    var text = document.createElement("div");
+    text.style.cssText = "min-width:0";
+    var source = document.createElement("div");
+    source.className = "src";
+    var sourcePlatform = platform || String(workKey || "").split(":")[0];
+    var listingMeta = surfaceListingMeta(sourcePlatform, anchor);
+    source.textContent = sourcePlatform === "ffn" ? "FFN" : "AO3";
+    source.style.cssText = "font:500 9px/1 " + TRACE_D1.mono + ";letter-spacing:0.14em;text-transform:uppercase;color:" + TRACE_D1.rust;
+    var title = document.createElement("div");
+    title.className = "ti";
+    title.textContent = listingMeta.title || lensHeadline(entry);
+    title.style.cssText = "margin-top:3px;font:500 17px/1.2 'Fraunces',Georgia,serif;color:" + TRACE_D1.ink;
+    var caption = document.createElement("div");
+    caption.className = "au";
+    caption.textContent = listingMeta.author
+      ? (/^by\s+/i.test(listingMeta.author) ? listingMeta.author : "by " + listingMeta.author)
+      : lensCaption(entry);
+    caption.style.cssText = "margin-top:2px;color:" + TRACE_D1.ink3 + ";font:500 12px/1.35 " + TRACE_D1.font;
+    text.appendChild(source);
+    text.appendChild(title);
+    text.appendChild(caption);
+    header.appendChild(text);
     var close = document.createElement("button");
+    close.className = "x-close";
     close.setAttribute(ACTION_SURFACE_CLOSE_ATTR, "1");
     close.setAttribute("aria-label", "Close Trace actions");
     close.type = "button";
     close.textContent = "\u00d7";
-    close.style.cssText = "position:absolute;right:10px;top:8px;width:30px;height:30px;border:0;border-radius:999px;background:transparent;color:" + TRACE_UI.muted + ";font:800 18px/1 system-ui,-apple-system,'Segoe UI',sans-serif;cursor:pointer";
+    close.style.cssText = [
+      "display:inline-flex",
+      "align-items:center",
+      "justify-content:center",
+      "width:26px",
+      "height:26px",
+      "border-radius:7px",
+      "border:1px solid " + TRACE_D1.line,
+      "background:" + TRACE_D1.paper2,
+      "color:" + TRACE_D1.ink3,
+      "font:600 16px/1 system-ui,-apple-system,'Segoe UI',sans-serif",
+      "cursor:pointer",
+    ].join(";");
     close.addEventListener("click", function (e) {
       e.preventDefault();
       closeListingActionSurface();
     });
-    surface.appendChild(close);
-
-    if (mobile) {
-      var grabber = document.createElement("div");
-      grabber.style.cssText = "width:48px;height:4px;border-radius:999px;background:#d6d3cc;margin:0 auto";
-      surface.appendChild(grabber);
-    }
-
-    var header = document.createElement("div");
-    header.setAttribute("data-trace-management-header", "1");
-    header.style.cssText = "display:block;padding-right:34px";
-    var text = document.createElement("div");
-    text.style.cssText = "min-width:0";
-    var title = document.createElement("div");
-    title.textContent = statusOnlyDisplay(entry) || lensHeadline(entry);
-    title.style.cssText = "font:800 17px/1.15 " + TRACE_UI.font + ";color:" + TRACE_UI.ink;
-    var caption = document.createElement("div");
-    caption.textContent = lensCaption(entry);
-    caption.style.cssText = "margin-top:4px;color:" + TRACE_UI.muted + ";font:600 12px/1.35 " + TRACE_UI.font;
-    text.appendChild(title);
-    text.appendChild(caption);
-    header.appendChild(text);
+    header.appendChild(close);
     surface.appendChild(header);
 
+    var body = document.createElement("div");
+    body.className = "x-sheet-body";
+    body.setAttribute("data-trace-action-body", "1");
+    body.style.cssText = "display:flex;flex-direction:column;gap:14px;padding:14px 16px 16px";
     var status = entryStatusValue(entry);
-    if (status) {
-      surface.appendChild(
-        surfaceRowEl(
-          "Progress",
-          progressOnlyDisplay(entry),
-          false,
-        ),
-      );
+    appendStatusControls(body, entry, rerender, showActions);
+    if (status && (!showActions || !(entry && entry.entryId))) {
+      body.appendChild(surfaceRowEl("Reading status", statusChoiceLabel(status), false));
     }
-    appendWorkCatchupRows(surface, entry);
-    var markLabelText = workMarkLabel(entry && entry.workMark);
-    if (markLabelText) surface.appendChild(surfaceRowEl("Work mark", markLabelText, true));
-    if (entry && entry.workMark && entry.workMark.challenge) {
-      surface.appendChild(surfaceRowEl("Attention", challengeLabel(entry.workMark.challenge), true));
-    }
-    appendPrivateContextRows(surface, entry);
-    appendStatusControls(surface, entry, rerender, showActions);
+    var position = status ? surfacePositionBlock(entry) : null;
+    if (position) body.appendChild(position);
+    appendPrivateContextRows(body, entry);
+    surface.appendChild(body);
 
     var actions = document.createElement("div");
-    actions.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;padding-top:10px;border-top:1px solid " + TRACE_UI.border;
-    if (showActions) {
-      actions.appendChild(
-        preferenceBtnEl(workKey, entry && entry.hidden === true, function (nextHidden) {
-          entry.hidden = nextHidden;
-          closeListingActionSurface();
-          rerender();
-        }, true),
-      );
-    }
+    actions.className = "x-sheet-foot";
+    actions.style.cssText = "display:flex;gap:8px;padding:0 16px 16px";
     var open = document.createElement("a");
     open.href = traceEntryOpenUrl(entry);
+    open.className = "x-pbtn x-pbtn-primary";
     open.target = "_blank";
     open.rel = "noopener noreferrer";
-    open.textContent = "OPEN IN TRACE";
-    open.style.cssText = surfaceButtonStyle(CONTEXT_THEME, true);
+    open.appendChild(traceIconEl("open"));
+    open.appendChild(document.createTextNode("Open in Trace"));
+    open.style.cssText = surfacePrimaryButtonStyle() + ";flex:1";
+    bindTraceOpenLink(open);
     actions.appendChild(open);
+    if (showActions) {
+      var preference = preferenceBtnEl(workKey, entry && entry.hidden === true, function (nextHidden) {
+        entry.hidden = nextHidden;
+        closeListingActionSurface();
+        rerender();
+      }, true);
+      preference.className = "x-pbtn x-pbtn-ghost";
+      preference.style.cssText = surfaceGhostButtonStyle(entry && entry.hidden === true ? HIDDEN_THEME : HIDE_ACTION_THEME) + ";flex:0 0 auto;min-width:72px";
+      if (!(entry && entry.hidden === true)) {
+        removeWrapChildren(preference);
+        preference.setAttribute("aria-label", "Hide this work");
+        preference.appendChild(traceIconEl("eyeoff"));
+        preference.appendChild(document.createTextNode("Hide"));
+        preference.style.cssText = surfaceGhostButtonStyle(HIDE_ACTION_THEME) + ";flex:0 0 auto";
+      }
+      actions.appendChild(preference);
+    }
     surface.appendChild(actions);
 
     document.documentElement.appendChild(surface);
@@ -1702,7 +2240,7 @@
     }, 0);
   }
 
-  function lensEl(entry, workKey, showActions, rerender) {
+  function lensEl(entry, workKey, showActions, rerender, platform, anchor) {
     var theme = lensTheme(entry);
     var btn = document.createElement("button");
     btn.setAttribute(ATTR, "1");
@@ -1710,43 +2248,56 @@
     if (entry && entry.__traceStatusPending) btn.setAttribute("data-trace-status-saving", "1");
     if (entry && entry.__traceStatusError) btn.setAttribute("data-trace-status-error", "1");
     if (entry && entry.hidden) btn.setAttribute("data-trace-browse-hidden", "1");
-    if (entry && entry.workMark) btn.setAttribute("data-trace-work-mark", "1");
     if (entry && entry.workStatus) btn.setAttribute("data-trace-work-status", entry.workStatus);
     if (newChaptersDisplay(entry, false)) btn.setAttribute("data-trace-new-chapters", "1");
-    if (entry && entry.workMark && entry.workMark.challenge) {
-      btn.setAttribute("data-trace-work-mark-challenge", "1");
-    }
     btn.type = "button";
     btn.title = "Open Trace actions";
     btn.setAttribute("aria-label", "Open Trace actions: " + lensHeadline(entry));
     btn.style.cssText = [
       "display:inline-flex",
       "align-items:center",
-      "gap:6px",
+      "gap:7px",
       "box-sizing:border-box",
       "max-width:min(220px,100%)",
-      "min-height:" + (isCompactOverlayLayout() ? "28px" : "22px"),
-      "padding:" + (isCompactOverlayLayout() ? "3px 9px" : "2px 8px"),
-      "border-radius:" + TRACE_UI.radiusXs,
-      "border:1px solid " + theme.border,
-      "background:" + theme.bg,
-      "color:" + theme.fg,
+      "padding:2px 0",
+      "border:0",
+      "border-radius:0",
+      "background:transparent",
+      "color:" + TRACE_D1.ink2,
       "box-shadow:none",
-      "font:" + (isCompactOverlayLayout() ? "800 10px/1 " : "700 11px/1 ") + TRACE_UI.font,
+      "font:500 12.5px/1.3 " + TRACE_D1.font,
       "letter-spacing:0",
       "cursor:pointer",
       "vertical-align:middle",
     ].join(";");
+    var dot = document.createElement("span");
+    dot.setAttribute("aria-hidden", "true");
+    dot.style.cssText = [
+      "width:7px",
+      "height:7px",
+      "border-radius:999px",
+      "background:" + lensDotColor(entry, theme),
+      "flex:0 0 auto",
+    ].join(";");
+    btn.appendChild(dot);
     var label = document.createElement("span");
-    label.textContent = lensHeadline(entry);
-    label.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+    label.textContent = lensLabelText(entry);
+    label.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:" + TRACE_D1.ink2;
     btn.appendChild(label);
-    if (entry && entry.workMark && entry.workMark.challenge) {
-      var review = document.createElement("span");
-      review.textContent = challengeLabel(entry.workMark.challenge);
-      review.style.cssText = "flex:0 0 auto;border-left:1px solid " + theme.border + ";padding-left:7px;font:800 10px/1 " + TRACE_UI.font;
-      btn.appendChild(review);
+    var progress = lensProgressText(entry);
+    if (progress) {
+      var progressEl = document.createElement("span");
+      progressEl.textContent = progress;
+      progressEl.style.cssText = "flex:0 0 auto;font:500 11px/1.3 " + TRACE_D1.mono + ";color:" + TRACE_D1.ink3;
+      btn.appendChild(progressEl);
     }
+    btn.addEventListener("mouseenter", function () {
+      label.style.textDecoration = "underline";
+      label.style.textDecorationColor = TRACE_D1.ink4;
+    });
+    btn.addEventListener("mouseleave", function () {
+      label.style.textDecoration = "none";
+    });
     btn.addEventListener("click", function (e) {
       e.preventDefault();
       e.stopPropagation();
@@ -1758,14 +2309,18 @@
         closeListingActionSurface();
         return;
       }
-      renderListingActionSurface(btn, entry, workKey, showActions, rerender);
+      renderListingActionSurface(btn, entry, workKey, showActions, rerender, platform, anchor);
     });
     return btn;
   }
 
   function resetPreferenceBtn(btn, hidden) {
     btn.style.cssText = preferenceButtonStyle(btn, hidden ? HIDDEN_THEME : HIDE_ACTION_THEME);
-    btn.textContent = hidden ? "UNDO" : "HIDE";
+    if (btn && btn.getAttribute("data-trace-surface-action") === "1") {
+      btn.textContent = hidden ? "Unhide" : "Hide";
+    } else {
+      setButtonInlineContent(btn, hidden ? null : "eyeoff", hidden ? "Unhide" : "Hide");
+    }
     btn.title = hidden
       ? "Show this work in Trace browsing overlays"
       : "Hide this work in Trace browsing overlays";
@@ -1785,7 +2340,7 @@
       e.stopPropagation();
       if (btn.getAttribute("data-trace-connect-action") === "1") {
         setPreferenceCheckingAction(btn);
-        window.open(traceOpenUrl(), "_blank", "noopener,noreferrer");
+        openTraceUrlInBrowserTab(traceOpenUrl());
         scheduleRun(350);
         setTimeout(function () {
           if (btn.getAttribute("data-trace-connect-checking") === "1") {
@@ -1797,7 +2352,11 @@
 
       var nextHidden = !hidden;
       btn.style.cssText = preferenceButtonStyle(btn, ADDING_THEME) + ";cursor:wait";
-      btn.textContent = "\u2026";
+      if (btn.getAttribute("data-trace-surface-action") === "1") {
+        btn.textContent = "Saving...";
+      } else {
+        setButtonInlineContent(btn, "spin", "Saving...");
+      }
       btn.disabled = true;
 
       ext.runtime.sendMessage(
@@ -1808,7 +2367,7 @@
         function (response) {
           if (ext.runtime.lastError || !response) {
             btn.style.cssText = preferenceButtonStyle(btn, ERROR_THEME) + ";cursor:pointer";
-            btn.textContent = "ERROR";
+            btn.textContent = "Error";
             btn.disabled = false;
             setTimeout(function () {
               resetPreferenceBtn(btn, hidden);
@@ -1825,10 +2384,10 @@
           }
           if (response.error === "rate_limited") {
             btn.style.cssText = preferenceButtonStyle(btn, FULL_THEME) + ";cursor:pointer";
-            btn.textContent = "WAIT";
+            btn.textContent = "Wait";
           } else {
             btn.style.cssText = preferenceButtonStyle(btn, ERROR_THEME) + ";cursor:pointer";
-            btn.textContent = "ERROR";
+            btn.textContent = "Error";
           }
           btn.disabled = false;
           setTimeout(function () {
@@ -1844,7 +2403,7 @@
   function setPreferenceAuthAction(btn, error) {
     var expired = error === "auth_expired";
     btn.style.cssText = preferenceButtonStyle(btn, ERROR_THEME) + ";cursor:pointer";
-    btn.textContent = expired ? "SIGN IN" : "CONNECT";
+    btn.textContent = expired ? "Sign in" : "Connect";
     btn.title = expired ? "Open Trace to sign in again" : "Open Trace to connect the extension";
     btn.setAttribute("data-trace-connect-action", "1");
     btn.setAttribute("data-trace-connect-error", error || "not_authenticated");
@@ -1854,7 +2413,11 @@
 
   function setPreferenceCheckingAction(btn) {
     btn.style.cssText = preferenceButtonStyle(btn, ADDING_THEME) + ";cursor:wait";
-    btn.textContent = "CHECKING";
+    if (btn.getAttribute("data-trace-surface-action") === "1") {
+      btn.textContent = "Checking";
+    } else {
+      setButtonInlineContent(btn, "spin", "Checking");
+    }
     btn.title = "Checking Trace connection";
     btn.setAttribute("data-trace-connect-checking", "1");
     btn.disabled = true;
@@ -1954,42 +2517,42 @@
     box.style.cssText = [
       "display:inline-flex",
       "align-items:center",
-      "gap:6px",
+      "gap:9px",
       "box-sizing:border-box",
       "max-width:100%",
-      "min-height:24px",
-      "padding:3px 8px",
-      "border-radius:" + TRACE_UI.radiusXs,
-      "border:1px solid rgba(91,81,66,0.16)",
-      "background:rgba(91,81,66,0.055)",
-      "color:#5b5142",
-      "font:700 11px/1 " + TRACE_UI.font,
+      "padding:2px 0",
+      "border:0",
+      "background:transparent",
+      "color:" + TRACE_D1.ink4,
+      "font:500 12px/1.3 " + TRACE_D1.font,
       "letter-spacing:0",
       "white-space:nowrap",
     ].join(";");
     var label = document.createElement("span");
     label.textContent = "Hidden by Trace";
+    label.style.cssText = "font-weight:500;color:" + TRACE_D1.ink3;
     box.appendChild(label);
     if (!showActions) return box;
 
     var undo = document.createElement("button");
     undo.type = "button";
     undo.setAttribute("data-trace-hidden-action", "undo");
-    undo.textContent = "Undo";
+    undo.textContent = "Unhide";
     undo.style.cssText = [
       "border:0",
-      "border-left:1px solid rgba(91,81,66,0.18)",
+      "border-bottom:1px solid " + TRACE_D1.forestLine,
+      "border-radius:0",
       "background:transparent",
-      "color:#2d4b43",
-      "padding:0 0 0 7px",
-      "font:800 11px/1 " + TRACE_UI.font,
+      "color:" + TRACE_D1.forest,
+      "padding:2px 0",
+      "font:500 12px/1.3 " + TRACE_D1.font,
       "cursor:pointer",
     ].join(";");
     undo.addEventListener("click", function (e) {
       e.preventDefault();
       e.stopPropagation();
       undo.disabled = true;
-      undo.textContent = "\u2026";
+      undo.textContent = "...";
       ext.runtime.sendMessage(
         {
           type: "TRACE_SET_HIDDEN_WORK",
@@ -2035,7 +2598,7 @@
       wrap.appendChild(
         lensEl(entry, workKey, showActions, function () {
           renderOverlayState(wrap, entry, platform, anchor, workKey, showActions);
-        }),
+        }, platform, anchor),
       );
       return true;
     }
@@ -2060,20 +2623,18 @@
     btn.setAttribute(ATTR, "1");
     btn.setAttribute("data-trace-quick-add", workKey);
     btn.type = "button";
-    btn.textContent = "+ ADD";
+    setButtonInlineContent(btn, "plus", "Add to Trace");
     btn.title = "Add to your Trace library";
-    btn.style.cssText = actionChipStyle(ADD_THEME) + ";cursor:pointer";
+    btn.style.cssText = d1QuickAddStyle("add") + ";cursor:pointer";
 
     btn.addEventListener("mouseenter", function () {
       if (!btn.disabled) {
-        btn.style.background = ADD_THEME.hoverBg;
-        btn.style.boxShadow = "none";
+        btn.style.borderBottomColor = "rgba(31,77,63,0.55)";
       }
     });
     btn.addEventListener("mouseleave", function () {
       if (!btn.disabled) {
-        btn.style.background = ADD_THEME.bg;
-        btn.style.boxShadow = "0 1px 2px rgba(28,28,23,0.08)";
+        btn.style.borderBottomColor = TRACE_D1.forestLine;
       }
     });
 
@@ -2097,8 +2658,8 @@
       var item = scrapeListingItem(platform, anchor);
       if (!item) return;
 
-      btn.style.cssText = actionChipStyle(ADDING_THEME) + ";cursor:wait";
-      btn.textContent = "ADDING...";
+      btn.style.cssText = d1QuickAddStyle("busy") + ";cursor:wait";
+      setButtonInlineContent(btn, "spin", "Adding...");
       btn.disabled = true;
 
       var payload = { s: item.src, at: new Date().toISOString(), item: item };
@@ -2106,34 +2667,50 @@
         { type: "TRACE_QUICK_ADD", payload: payload },
         function (response) {
           if (ext.runtime.lastError || !response) {
-            btn.style.cssText = actionChipStyle(ERROR_THEME) + ";cursor:pointer";
-            btn.textContent = "ERROR";
+            btn.style.cssText = d1QuickAddStyle("error") + ";cursor:pointer";
+            btn.textContent = "Error";
             btn.disabled = false;
             setTimeout(function () {
-              btn.style.cssText = actionChipStyle(ADD_THEME) + ";cursor:pointer";
-              btn.textContent = "+ ADD";
+              btn.style.cssText = d1QuickAddStyle("add") + ";cursor:pointer";
+              setButtonInlineContent(btn, "plus", "Add to Trace");
             }, 2500);
             return;
           }
           if (response.ok) {
-            btn.style.cssText = actionChipStyle(ADDED_THEME);
-            btn.textContent = "PLANNING";
+            btn.style.cssText = [
+              "display:inline-flex",
+              "align-items:center",
+              "gap:7px",
+              "box-sizing:border-box",
+              "max-width:min(220px,100%)",
+              "padding:2px 0",
+              "border:0",
+              "border-radius:0",
+              "background:transparent",
+              "color:" + TRACE_D1.ink2,
+              "box-shadow:none",
+              "font:500 12.5px/1.3 " + TRACE_D1.font,
+              "letter-spacing:0",
+              "white-space:nowrap",
+              "vertical-align:middle",
+            ].join(";");
+            setInlineStatusContent(btn, "PLANNING");
             btn.title = "In your Trace library";
             btn.disabled = true;
           } else if (response.error === "free_limit_reached") {
-            btn.style.cssText = actionChipStyle(FULL_THEME);
-            btn.textContent = "FULL";
+            btn.style.cssText = d1QuickAddStyle("full");
+            btn.textContent = "Full";
             btn.title = "Free library limit reached \u2014 upgrade for unlimited";
             btn.disabled = true;
           } else if (response.error === "not_authenticated" || response.error === "auth_expired") {
             setQuickAddAuthAction(btn, response.error);
           } else {
-            btn.style.cssText = actionChipStyle(ERROR_THEME) + ";cursor:pointer";
-            btn.textContent = "ERROR";
+            btn.style.cssText = d1QuickAddStyle("error") + ";cursor:pointer";
+            btn.textContent = "Error";
             btn.disabled = false;
             setTimeout(function () {
-              btn.style.cssText = actionChipStyle(ADD_THEME) + ";cursor:pointer";
-              btn.textContent = "+ ADD";
+              btn.style.cssText = d1QuickAddStyle("add") + ";cursor:pointer";
+              setButtonInlineContent(btn, "plus", "Add to Trace");
             }, 2500);
           }
         },
@@ -2145,7 +2722,7 @@
 
   function setQuickAddAuthAction(btn, error) {
     var expired = error === "auth_expired";
-    btn.style.cssText = actionChipStyle(ERROR_THEME) + ";cursor:pointer";
+    btn.style.cssText = d1QuickAddStyle("error") + ";cursor:pointer";
     btn.textContent = expired ? "Sign in" : "Connect";
     btn.title = expired ? "Open Trace to sign in again" : "Open Trace to connect the extension";
     btn.setAttribute("data-trace-connect-action", "1");
@@ -2155,8 +2732,8 @@
   }
 
   function setQuickAddCheckingAction(btn) {
-    btn.style.cssText = actionChipStyle(ADDING_THEME) + ";cursor:wait";
-    btn.textContent = "Checking";
+    btn.style.cssText = d1QuickAddStyle("busy") + ";cursor:wait";
+    setButtonInlineContent(btn, "spin", "Checking");
     btn.title = "Checking Trace connection";
     btn.setAttribute("data-trace-connect-checking", "1");
     btn.disabled = true;
@@ -2323,7 +2900,7 @@
         "align-items:center",
         placement.justify,
         "flex-wrap:wrap",
-        "gap:6px",
+        "gap:14px",
         placement.margin,
         placement.clear || "",
         "vertical-align:middle",

@@ -3,6 +3,7 @@
 // Sends metadata/progress to background.js via extension messages for import, quick-add, and auto-track.
 // Does not read cookies or credentials, and disables collection on pages with password fields.
 const ext = globalThis.browser ?? globalThis.chrome;
+const PRIVATE_TAG_DISPLAY_LIMIT = 3;
 
 function traceIsCredentialPageUrl() {
   var path = String(location && location.pathname ? location.pathname : "").toLowerCase();
@@ -353,12 +354,40 @@ function normalizeOverlayWorkMark(raw) {
 
 function normalizeOverlayPrivateContext(raw) {
   if (!raw || typeof raw !== "object") return null;
-  var hasNotes = raw.hasNotes === true;
+  var notePreview =
+    typeof raw.notePreview === "string"
+      ? raw.notePreview.replace(/\s+/g, " ").trim()
+      : "";
+  if (notePreview.length > 180) {
+    notePreview = notePreview.slice(0, 177).trimEnd() + "...";
+  }
+  var tags = [];
+  if (Array.isArray(raw.tags)) {
+    var seen = new Set();
+    raw.tags.forEach(function (value) {
+      if (tags.length >= 5) return;
+      if (typeof value !== "string") return;
+      var tag = value.replace(/\s+/g, " ").trim();
+      if (!tag) return;
+      if (tag.length > 100) tag = tag.slice(0, 100).trimEnd();
+      var key = tag.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      tags.push(tag);
+    });
+  }
+  var hasNotes = raw.hasNotes === true || notePreview.length > 0;
   var tagCount = Number(raw.tagCount);
   if (!Number.isFinite(tagCount) || tagCount < 0) tagCount = 0;
   tagCount = Math.trunc(tagCount);
-  if (!hasNotes && tagCount === 0) return null;
-  return { hasNotes: hasNotes, tagCount: tagCount };
+  if (tagCount === 0 && tags.length > 0) tagCount = tags.length;
+  if (!hasNotes && tagCount === 0 && tags.length === 0) return null;
+  return {
+    hasNotes: hasNotes,
+    tagCount: tagCount,
+    notePreview: notePreview || undefined,
+    tags: tags.length ? tags : undefined,
+  };
 }
 
 function normalizeOverlayEntry(entry, preferenceRaw) {
@@ -1896,6 +1925,17 @@ function storyInlineStatusDisplay(info) {
         : null;
   var label = quickAddStatusLabel(status);
   if (!label) label = "Saved";
+  var progress = storyInlineProgressDisplay(info);
+  return progress ? label + " " + progress : label;
+}
+
+function storyInlineProgressDisplay(info) {
+  var status =
+    info && typeof info.readerStatus === "string"
+      ? info.readerStatus
+      : info && typeof info.status === "string"
+        ? info.status
+        : null;
   if (
     status !== "PLANNING" &&
     info &&
@@ -1904,9 +1944,9 @@ function storyInlineStatusDisplay(info) {
   ) {
     var chapters = displayChaptersForStatus(status, info && info.chapters);
     var total = chapters.total;
-    label += " \u00b7 " + chapters.current + "/" + (total == null ? "?" : total);
+    return chapters.current + "/" + (total == null ? "?" : total);
   }
-  return label;
+  return null;
 }
 
 function shouldDelayAutoTrackUntilVisible() {
@@ -2154,16 +2194,18 @@ var TRACE_STATUS_THEMES = {
 };
 
 var TRACE_INLINE_THEMES = {
-  add: { bg: "rgba(45,75,67,0.08)", fg: TRACE_UI.forest, border: "rgba(45,75,67,0.22)", accent: TRACE_UI.forest },
-  muted: { bg: "rgba(65,80,76,0.045)", fg: "#41504c", border: "rgba(65,80,76,0.14)", accent: "#647067" },
-  hidden: { bg: "rgba(91,81,66,0.055)", fg: "#5b5142", border: "rgba(91,81,66,0.16)", accent: "#8a8171" },
-  saving: { bg: "rgba(65,80,76,0.045)", fg: TRACE_UI.subtle, border: "rgba(65,80,76,0.14)", accent: TRACE_UI.subtle },
-  error: { bg: "rgba(254,242,242,0.72)", fg: "#dc2626", border: "rgba(220,38,38,0.2)", accent: "#dc2626" },
-  READING: { bg: "rgba(241,213,138,0.16)", fg: TRACE_UI.goldOn, border: "rgba(89,68,2,0.16)", accent: "#b88a16" },
-  PLANNING: { bg: "rgba(65,72,70,0.035)", fg: "#414846", border: "rgba(65,72,70,0.14)", accent: "#7d857c" },
-  PAUSED: { bg: "rgba(124,45,18,0.07)", fg: "#7c2d12", border: "rgba(124,45,18,0.18)", accent: "#9a3412" },
-  COMPLETED: { bg: "rgba(45,75,67,0.07)", fg: TRACE_UI.forest, border: "rgba(45,75,67,0.18)", accent: TRACE_UI.forest },
-  DROPPED: { bg: "rgba(186,26,26,0.055)", fg: "#9f1d1d", border: "rgba(186,26,26,0.16)", accent: "#ba1a1a" },
+  add: { fg: "#1f4d3f", label: "#1f4d3f", border: "rgba(31,77,63,0.35)", accent: "#1f4d3f", weight: 600 },
+  added: { fg: "#1f4d3f", label: "#1f4d3f", border: "transparent", accent: "#1f4d3f", weight: 500 },
+  muted: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: "#9a9583", weight: 500 },
+  hidden: { fg: "#6e6a5b", label: "#6e6a5b", border: "transparent", accent: "#9a9583", weight: 500 },
+  saving: { fg: "#6e6a5b", label: "#6e6a5b", border: "rgba(110,106,91,0.28)", accent: "#9a9583", weight: 500 },
+  error: { fg: "#b54a30", label: "#b54a30", border: "transparent", accent: "#b54a30", weight: 500 },
+  full: { fg: "#8a6e2a", label: "#8a6e2a", border: "transparent", accent: "#8a6e2a", weight: 500 },
+  READING: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: "#8a6e2a", weight: 500 },
+  PLANNING: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: "#6e6a5b", weight: 500 },
+  PAUSED: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: "#9a9583", weight: 500 },
+  COMPLETED: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: "#1f4d3f", weight: 500 },
+  DROPPED: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: "#b54a30", weight: 500 },
 };
 
 function traceChipCss(theme) {
@@ -2200,20 +2242,117 @@ function traceInlineHandleCss(theme) {
   return [
     "display:inline-flex",
     "align-items:center",
-    "justify-content:center",
+    "justify-content:flex-start",
+    "gap:8px",
     "box-sizing:border-box",
-    "min-height:" + (isCompactTraceInline() ? "28px" : "22px"),
-    "padding:" + (isCompactTraceInline() ? "0 10px" : "0 8px"),
-    "border-radius:" + TRACE_UI.radiusXs,
-    "border:1px solid " + theme.border,
-    "background:" + theme.bg,
+    "min-height:18px",
+    "padding:2px 0",
+    "border:0",
+    "border-radius:0",
+    "border-bottom:1px solid " + theme.border,
+    "background:transparent",
     "color:" + theme.fg,
-    "font:" + (isCompactTraceInline() ? "800 10px/1 " : "700 11px/1 ") + TRACE_UI.font,
+    "font:" + (theme.weight || 500) + " 13px/1.25 " + TRACE_UI.font,
     "letter-spacing:0",
     "text-transform:none",
     "white-space:nowrap",
     "cursor:pointer",
+    "appearance:none",
+    "-webkit-appearance:none",
+    "vertical-align:baseline",
   ].join(";");
+}
+
+function traceStoryHandleDotCss(theme) {
+  return [
+    "display:inline-block",
+    "width:8px",
+    "height:8px",
+    "border-radius:999px",
+    "background:" + theme.accent,
+    "flex:0 0 auto",
+  ].join(";");
+}
+
+function traceStoryHandleLabelCss(theme) {
+  return [
+    "display:inline-block",
+    "color:" + theme.label,
+    "font:inherit",
+    "line-height:1.25",
+  ].join(";");
+}
+
+function traceStoryHandleProgressCss() {
+  return [
+    "display:inline-block",
+    "color:#6e6a5b",
+    "font:500 11.5px/1.2 'Geist Mono',ui-monospace,monospace",
+  ].join(";");
+}
+
+function traceStoryHandleChevronCss() {
+  return [
+    "display:inline-flex",
+    "align-items:center",
+    "justify-content:center",
+    "width:11px",
+    "height:11px",
+    "color:#9a9583",
+    "flex:0 0 auto",
+  ].join(";");
+}
+
+function traceStoryHandleSpinnerCss(theme) {
+  return [
+    traceStoryHandleChevronCss(),
+    "color:" + theme.accent,
+  ].join(";");
+}
+
+function createTraceChevronSvg() {
+  var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.5");
+  svg.setAttribute("stroke-linecap", "round");
+  var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M2 4l4 4 4-4");
+  svg.appendChild(path);
+  svg.style.cssText = "display:block;width:11px;height:11px";
+  return svg;
+}
+
+function createTraceSpinnerSvg() {
+  var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 14 14");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.5");
+  svg.setAttribute("stroke-linecap", "round");
+  var group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+  var track = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  track.setAttribute("cx", "7");
+  track.setAttribute("cy", "7");
+  track.setAttribute("r", "4.9");
+  track.setAttribute("opacity", "0.22");
+  group.appendChild(track);
+  var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M7 2.1a4.9 4.9 0 0 1 4.6 3.1");
+  path.setAttribute("opacity", "0.95");
+  group.appendChild(path);
+  var spin = document.createElementNS("http://www.w3.org/2000/svg", "animateTransform");
+  spin.setAttribute("attributeName", "transform");
+  spin.setAttribute("type", "rotate");
+  spin.setAttribute("from", "0 7 7");
+  spin.setAttribute("to", "360 7 7");
+  spin.setAttribute("dur", "0.8s");
+  spin.setAttribute("repeatCount", "indefinite");
+  group.appendChild(spin);
+  svg.appendChild(group);
+  svg.style.cssText = "display:block;width:12px;height:12px";
+  return svg;
 }
 
 function getWorkKeyFromUrl() {
@@ -2271,6 +2410,27 @@ function storyTraceOpenUrl(authState, entry) {
   }
 }
 
+function openTraceUrlInBrowserTab(url) {
+  if (!url) return;
+  try {
+    ext.runtime.sendMessage({
+      type: "TRACE_OPEN_TRACE_URL",
+      payload: { url: url },
+    });
+  } catch (_) {
+    /* The background worker handles Trace tab creation when available. */
+  }
+}
+
+function bindTraceOpenLink(link) {
+  if (!link) return;
+  link.addEventListener("click", function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    openTraceUrlInBrowserTab(link.href);
+  });
+}
+
 function entryStatus(entry) {
   return entry && (entry.readerStatus || entry.status) ? entry.readerStatus || entry.status : null;
 }
@@ -2282,13 +2442,6 @@ function progressDisplay(entry) {
   return chapters.current + "/" + (chapters.total == null ? "?" : chapters.total);
 }
 
-function workMarkDisplay(entry) {
-  if (!entry || !entry.workMark) return null;
-  if (entry.workMark.kind === "abandoned") return "Marked abandoned";
-  if (entry.workMark.kind === "hiatus") return "Marked hiatus";
-  return null;
-}
-
 function storyHeadline(view) {
   if (!view.hasAuth) {
     if (view.authState && view.authState.state === "reconnect_required") return "Reconnect Trace";
@@ -2298,9 +2451,6 @@ function storyHeadline(view) {
   if (view.entry && view.entry.__traceStatusPending) return "Saving...";
   if (view.entry && view.entry.__traceStatusError) return "Update failed";
   if (view.entry && view.entry.hidden) return "Hidden";
-  if (view.entry && view.entry.workMark && view.entry.workMark.challenge) return "Review mark";
-  var mark = workMarkDisplay(view.entry);
-  if (mark) return mark;
   var status = entryStatus(view.entry);
   if (status) return quickAddStatusLabel(status);
   return "Not in Trace";
@@ -2326,22 +2476,18 @@ function storyCaption(view) {
     return "One tap saves this to your Trace library.";
   }
   if (view.entry && view.entry.hidden) return "Hidden from browsing";
-  if (
-    view.entry &&
-    view.entry.workMark &&
-    view.entry.workMark.challenge &&
-    typeof view.entry.workMark.challenge.chapterDelta === "number"
-  ) {
-    return "+" + view.entry.workMark.challenge.chapterDelta + " chapters since your mark.";
-  }
   var progress = progressDisplay(view.entry);
   if (progress) return "Chapter " + progress;
   return "In your library";
 }
 
 function handleDisplay(view) {
-  if (!view.hasAuth) return "Connect";
-  if (view.entry && view.entry.__traceAutoTrackPending) return "ADDING...";
+  if (!view.hasAuth) {
+    if (view.authState && view.authState.state === "reconnect_required") return "Reconnect Trace";
+    if (view.authState && view.authState.state === "error") return "Error";
+    return "Connect";
+  }
+  if (view.entry && view.entry.__traceAutoTrackPending) return "Adding...";
   if (view.entry && view.entry.__traceAutoTrackError === "free_limit_reached") return "Full";
   if (
     view.entry &&
@@ -2350,13 +2496,129 @@ function handleDisplay(view) {
   ) {
     return "Sign in";
   }
-  if (view.entry && view.entry.__traceAutoTrackError) return "ERROR";
+  if (view.entry && view.entry.__traceAutoTrackError) return "Error";
   if (view.entry && view.entry.__traceStatusPending) return "Saving...";
   if (view.entry && view.entry.__traceStatusError) return "Update failed";
   if (view.entry && view.entry.hidden) return "Hidden";
   var status = entryStatus(view.entry);
   if (status) return storyInlineStatusDisplay(view.entry);
-  return "+ ADD";
+  return "+ Add to Trace";
+}
+
+function storyHandlePresentation(view) {
+  var entry = view && view.entry;
+  if (!view || !view.hasAuth) {
+    var authTheme =
+      view && view.authState && view.authState.state === "error"
+        ? TRACE_INLINE_THEMES.error
+        : TRACE_INLINE_THEMES.muted;
+    return {
+      kind: "auth",
+      label: handleDisplay(view || {}),
+      theme: authTheme,
+      dot: false,
+      spinner: false,
+      status: null,
+      progress: null,
+    };
+  }
+  if (entry && entry.__traceAutoTrackPending) {
+    return {
+      kind: "adding",
+      label: "Adding...",
+      theme: TRACE_INLINE_THEMES.saving,
+      dot: false,
+      spinner: true,
+      status: null,
+      progress: null,
+    };
+  }
+  if (entry && entry.__traceAutoTrackError === "free_limit_reached") {
+    return { kind: "full", label: "Full", theme: TRACE_INLINE_THEMES.full, dot: true, spinner: false, status: null, progress: null };
+  }
+  if (
+    entry &&
+    (entry.__traceAutoTrackError === "auth_expired" ||
+      entry.__traceAutoTrackError === "not_authenticated")
+  ) {
+    return { kind: "auth-expired", label: "Sign in", theme: TRACE_INLINE_THEMES.error, dot: true, spinner: false, status: null, progress: null };
+  }
+  if (entry && entry.__traceAutoTrackError) {
+    return { kind: "error", label: "Error", theme: TRACE_INLINE_THEMES.error, dot: true, spinner: false, status: null, progress: null };
+  }
+  if (entry && entry.__traceStatusPending) {
+    return { kind: "saving", label: "Saving...", theme: TRACE_INLINE_THEMES.saving, dot: false, spinner: true, status: null, progress: null };
+  }
+  if (entry && entry.__traceStatusError) {
+    return { kind: "update-error", label: "Update failed", theme: TRACE_INLINE_THEMES.error, dot: true, spinner: false, status: null, progress: null };
+  }
+  if (entry && entry.hidden) {
+    return { kind: "hidden", label: "Hidden", theme: TRACE_INLINE_THEMES.hidden, dot: true, spinner: false, status: null, progress: null };
+  }
+  var status = entryStatus(entry);
+  if (status) {
+    return {
+      kind: "status",
+      label: quickAddStatusLabel(status) || "Saved",
+      theme: TRACE_INLINE_THEMES[status] || TRACE_INLINE_THEMES.muted,
+      dot: true,
+      spinner: false,
+      status: status,
+      progress: storyInlineProgressDisplay(entry),
+    };
+  }
+  return {
+    kind: "add",
+    label: "+ Add to Trace",
+    theme: TRACE_INLINE_THEMES.add,
+    dot: false,
+    spinner: false,
+    status: null,
+    progress: null,
+  };
+}
+
+function applyStoryInlineHandleState(handle, presentation) {
+  var theme = (presentation && presentation.theme) || TRACE_INLINE_THEMES.muted;
+  clearElement(handle);
+  handle.style.cssText = traceInlineHandleCss(theme);
+  handle.setAttribute("data-trace-story-handle-state", presentation && presentation.kind ? presentation.kind : "unknown");
+  if (presentation && presentation.status) {
+    handle.setAttribute("data-trace-story-status", presentation.status);
+  } else {
+    handle.removeAttribute("data-trace-story-status");
+  }
+
+  if (presentation && presentation.spinner) {
+    var spin = document.createElement("span");
+    spin.setAttribute("aria-hidden", "true");
+    spin.style.cssText = traceStoryHandleSpinnerCss(theme);
+    spin.appendChild(createTraceSpinnerSvg());
+    handle.appendChild(spin);
+  } else if (presentation && presentation.dot) {
+    var dot = document.createElement("span");
+    dot.setAttribute("aria-hidden", "true");
+    dot.style.cssText = traceStoryHandleDotCss(theme);
+    handle.appendChild(dot);
+  }
+
+  var label = document.createElement("span");
+  label.textContent = (presentation && presentation.label) || "";
+  label.style.cssText = traceStoryHandleLabelCss(theme);
+  handle.appendChild(label);
+
+  if (presentation && presentation.progress) {
+    var progress = document.createElement("span");
+    progress.textContent = presentation.progress;
+    progress.style.cssText = traceStoryHandleProgressCss();
+    handle.appendChild(progress);
+  }
+
+  var chev = document.createElement("span");
+  chev.setAttribute("aria-hidden", "true");
+  chev.style.cssText = traceStoryHandleChevronCss();
+  chev.appendChild(createTraceChevronSvg());
+  handle.appendChild(chev);
 }
 
 function autoTrackHandleDisabled(entry) {
@@ -2383,37 +2645,168 @@ function applySheetVisibility(sheet, open) {
   sheet.style.display = open ? "block" : "none";
   sheet.setAttribute("aria-hidden", open ? "false" : "true");
   sheet.setAttribute("data-trace-open", open ? "1" : "0");
+  if (open && sheet.getAttribute("data-trace-story-sheet-placement") === "bottom") {
+    lockStoryBottomSheetPageScroll();
+  } else {
+    unlockStoryBottomSheetPageScroll();
+  }
+}
+
+var storyBottomSheetScrollLock = null;
+
+function lockStoryBottomSheetPageScroll() {
+  if (storyBottomSheetScrollLock) return;
+  var html = document.documentElement;
+  var body = document.body;
+  storyBottomSheetScrollLock = {
+    htmlOverflow: html ? html.style.overflow : "",
+    htmlOverscroll: html ? html.style.overscrollBehavior : "",
+    bodyOverflow: body ? body.style.overflow : "",
+    bodyOverscroll: body ? body.style.overscrollBehavior : "",
+  };
+  if (html) {
+    html.style.overflow = "hidden";
+    html.style.overscrollBehavior = "none";
+  }
+  if (body) {
+    body.style.overflow = "hidden";
+    body.style.overscrollBehavior = "none";
+  }
+}
+
+function unlockStoryBottomSheetPageScroll() {
+  if (!storyBottomSheetScrollLock) return;
+  var html = document.documentElement;
+  var body = document.body;
+  if (html) {
+    html.style.overflow = storyBottomSheetScrollLock.htmlOverflow;
+    html.style.overscrollBehavior = storyBottomSheetScrollLock.htmlOverscroll;
+  }
+  if (body) {
+    body.style.overflow = storyBottomSheetScrollLock.bodyOverflow;
+    body.style.overscrollBehavior = storyBottomSheetScrollLock.bodyOverscroll;
+  }
+  storyBottomSheetScrollLock = null;
+}
+
+function createStoryBottomSheetGrabber() {
+  var zone = document.createElement("div");
+  zone.className = "grab";
+  zone.setAttribute("data-trace-bottom-sheet-grabber", "1");
+  zone.setAttribute("aria-hidden", "true");
+  zone.style.cssText = [
+    "display:flex",
+    "align-items:center",
+    "justify-content:center",
+    "height:28px",
+    "margin:0",
+    "touch-action:none",
+    "cursor:grab",
+    "user-select:none",
+  ].join(";");
+  var bar = document.createElement("span");
+  bar.style.cssText = "display:block;width:38px;height:4px;border-radius:999px;background:#c4bea8";
+  zone.appendChild(bar);
+  return zone;
+}
+
+function bindStoryBottomSheetDragClose(sheet, handle) {
+  if (!sheet || !handle) return;
+  var startY = 0;
+  var dragging = false;
+  var restingTransform = "translateX(-50%)";
+  function pointerY(e) {
+    if (e && e.touches && e.touches.length) return e.touches[0].clientY;
+    if (e && e.changedTouches && e.changedTouches.length) return e.changedTouches[0].clientY;
+    return e && typeof e.clientY === "number" ? e.clientY : 0;
+  }
+  function resetDrag() {
+    dragging = false;
+    sheet.style.transition = "";
+    sheet.style.transform = restingTransform;
+  }
+  function start(e) {
+    dragging = true;
+    startY = pointerY(e);
+    if (e && e.cancelable) e.preventDefault();
+    if (e && e.stopPropagation) e.stopPropagation();
+    sheet.style.transition = "none";
+    if (handle.setPointerCapture && e && e.pointerId != null) {
+      try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+    }
+  }
+  function move(e) {
+    if (!dragging) return;
+    var delta = Math.max(0, pointerY(e) - startY);
+    if (e && e.cancelable) e.preventDefault();
+    if (e && e.stopPropagation) e.stopPropagation();
+    sheet.style.transform = restingTransform + " translateY(" + delta + "px)";
+  }
+  function end(e) {
+    if (!dragging) return;
+    if (e && e.cancelable) e.preventDefault();
+    if (e && e.stopPropagation) e.stopPropagation();
+    var delta = Math.max(0, pointerY(e) - startY);
+    if (delta >= 56) {
+      resetDrag();
+      applySheetVisibility(sheet, false);
+      return;
+    }
+    sheet.style.transition = "transform 160ms ease";
+    sheet.style.transform = restingTransform + " translateY(0)";
+    window.setTimeout(resetDrag, 180);
+  }
+  handle.style.cursor = "grab";
+  handle.style.touchAction = "none";
+  handle.addEventListener("pointerdown", start);
+  handle.addEventListener("pointermove", move);
+  handle.addEventListener("pointerup", end);
+  handle.addEventListener("pointercancel", resetDrag);
+  handle.addEventListener("touchstart", start, { passive: false });
+  handle.addEventListener("touchmove", move, { passive: false });
+  handle.addEventListener("touchend", end);
+  handle.addEventListener("touchcancel", resetDrag);
 }
 
 function storySheetCss(mobile) {
+  var mobileWidth = Math.max(
+    320,
+    Math.min(500, (window.innerWidth || document.documentElement.clientWidth || 430) - 8),
+  );
   var base = [
     "z-index:2147483646",
     "box-sizing:border-box",
-    "max-height:" + (mobile ? "min(70vh,460px)" : "min(68vh,520px)"),
+    "max-height:" + (mobile ? "calc(100dvh - 8px)" : "min(68vh,520px)"),
     "overflow:auto",
     "overscroll-behavior:contain",
-    "padding:12px",
-    "border-radius:14px",
-    "border:1px solid " + TRACE_UI.borderStrong,
-    "background:" + TRACE_UI.paper,
-    "color:" + TRACE_UI.ink,
-    "box-shadow:" + TRACE_UI.shadowSheet,
+    "padding:0",
+    "border-radius:" + (mobile ? "20px 20px 0 0" : "16px"),
+    "border:1px solid rgba(28,39,34,0.18)",
+    "background:#f7f3e9",
+    "color:#1c2722",
+    "box-shadow:" + (mobile
+      ? "0 -18px 50px -16px rgba(20,14,0,0.4),0 0 0 1px rgba(28,39,34,0.10)"
+      : "0 1px 0 rgba(255,250,230,0.4) inset,0 28px 60px -20px rgba(20,14,0,0.42),0 0 0 1px rgba(28,39,34,0.10)"),
     "font:500 13px/1.4 " + TRACE_UI.font,
+    "-webkit-font-smoothing:antialiased",
   ];
   if (mobile) {
     return [
       "position:fixed",
-      "left:10px",
-      "right:10px",
-      "bottom:calc(10px + env(safe-area-inset-bottom,0px))",
+      "left:50%",
+      "right:auto",
+      "bottom:0",
+      "width:" + mobileWidth + "px",
+      "transform:translateX(-50%)",
       "margin:0 auto",
-      "max-width:none",
+      "max-width:calc(100vw - 8px)",
+      "padding-bottom:env(safe-area-inset-bottom,0px)",
     ].concat(base).join(";");
   }
   return [
     "position:fixed",
     "margin:0",
-    "max-width:430px",
+    "max-width:360px",
     "text-align:left",
   ].concat(base).join(";");
 }
@@ -2425,7 +2818,7 @@ function positionDesktopStorySheet(sheet, handle) {
     320,
     window.innerWidth || document.documentElement.clientWidth || 430,
   );
-  var panelWidth = Math.min(430, Math.max(280, viewportWidth - 20));
+  var panelWidth = Math.min(360, Math.max(280, viewportWidth - 20));
   var left = rect.left + rect.width / 2 - panelWidth / 2;
   left = Math.max(10, Math.min(left, viewportWidth - panelWidth - 10));
   var top = Math.max(10, rect.bottom + 8);
@@ -2449,6 +2842,182 @@ function placeStorySheet(sheet, wrap, handle) {
   sheet.setAttribute("data-trace-story-sheet-placement", mobile ? "bottom" : "popover");
 }
 
+function storySheetSourceLine() {
+  return (isAO3() ? "AO3" : "FFN");
+}
+
+function storySheetCurrentItem() {
+  try {
+    var collected = collect();
+    return collected && collected.items && collected.items[0] ? collected.items[0] : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function storySheetAuthorLine(item) {
+  if (!item || !item.a) return "";
+  return /^by\s+/i.test(String(item.a)) ? String(item.a) : "by " + item.a;
+}
+
+function storySheetLabelCss() {
+  return "font:500 9px/1 'Geist Mono',ui-monospace,monospace;letter-spacing:0.18em;text-transform:uppercase;color:#9a9583";
+}
+
+function storySheetSerifFont() {
+  return "'Fraunces',Georgia,'Times New Roman',serif";
+}
+
+function storySheetPrimaryButtonCss() {
+  return [
+    "display:inline-flex",
+    "align-items:center",
+    "justify-content:center",
+    "gap:8px",
+    "box-sizing:border-box",
+    "min-height:42px",
+    "padding:12px 16px",
+    "border-radius:11px",
+    "border:1px solid #133029",
+    "background:#133029",
+    "color:#f3efe4",
+    "font:600 13.5px/1 " + TRACE_UI.font,
+    "text-decoration:none",
+    "white-space:nowrap",
+    "cursor:pointer",
+  ].join(";");
+}
+
+function storySheetGhostButtonCss() {
+  return [
+    "display:inline-flex",
+    "align-items:center",
+    "justify-content:center",
+    "gap:8px",
+    "box-sizing:border-box",
+    "min-height:42px",
+    "padding:12px 14px",
+    "border-radius:11px",
+    "border:1px solid rgba(28,39,34,0.18)",
+    "background:transparent",
+    "color:#3a4339",
+    "font:600 13px/1 " + TRACE_UI.font,
+    "text-decoration:none",
+    "white-space:nowrap",
+    "cursor:pointer",
+  ].join(";");
+}
+
+function storySheetIconButtonCss() {
+  return [
+    storySheetGhostButtonCss(),
+    "flex:0 0 auto",
+    "width:44px",
+    "padding:12px 0",
+  ].join(";");
+}
+
+function storyStatusAccent(status) {
+  if (status === "READING") return "#8a6e2a";
+  if (status === "COMPLETED") return "#1f4d3f";
+  if (status === "DROPPED") return "#b54a30";
+  if (status === "PAUSED") return "#9a9583";
+  return "#6e6a5b";
+}
+
+function storyStatusSoft(status) {
+  if (status === "READING") return "rgba(138,110,42,0.10)";
+  if (status === "COMPLETED") return "rgba(31,77,63,0.10)";
+  if (status === "DROPPED") return "rgba(181,74,48,0.10)";
+  if (status === "PAUSED") return "rgba(154,149,131,0.12)";
+  return "rgba(110,106,91,0.10)";
+}
+
+function storySheetSvgIcon(kind) {
+  var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.6");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.style.cssText = "display:block;width:16px;height:16px";
+  var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  if (kind === "tag") {
+    path.setAttribute("d", "M2.5 3.5v4.2c0 .4.2.8.5 1.1l4.8 4.8a1.4 1.4 0 0 0 2 0l3.8-3.8a1.4 1.4 0 0 0 0-2L8.8 3a1.6 1.6 0 0 0-1.1-.5H3.5a1 1 0 0 0-1 1Z");
+    svg.appendChild(path);
+    var dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    dot.setAttribute("cx", "5.7");
+    dot.setAttribute("cy", "5.7");
+    dot.setAttribute("r", "0.8");
+    svg.appendChild(dot);
+    return svg;
+  }
+  if (kind === "eyeoff") {
+    path.setAttribute("d", "M2 2l12 12M6.4 6.4A2.3 2.3 0 0 0 9.6 9.6M4.8 4.3C3.5 5 2.5 6.2 1.8 8c1.2 3 3.3 4.5 6.2 4.5 1.1 0 2.1-.2 2.9-.7M8 3.5c2.9 0 5 1.5 6.2 4.5-.3.8-.8 1.5-1.3 2.1");
+    svg.appendChild(path);
+    return svg;
+  }
+  if (kind === "open") {
+    path.setAttribute("d", "M6 4h6v6M12 4 5 11M3.5 6.5v6h6");
+    svg.appendChild(path);
+    return svg;
+  }
+  path.setAttribute("d", "M4 2.5h5.5L12 5v8.5H4zM6 7h4M6 10h4");
+  svg.appendChild(path);
+  return svg;
+}
+
+function storySheetMetaRow(iconKind, child) {
+  var row = document.createElement("div");
+  row.className = "x-meta-row";
+  row.style.cssText = "display:flex;gap:11px;align-items:flex-start";
+  var icon = document.createElement("span");
+  icon.setAttribute("aria-hidden", "true");
+  icon.className = "ic";
+  icon.style.cssText = "width:16px;height:16px;color:#9a9583;flex-shrink:0;margin-top:1px";
+  icon.appendChild(storySheetSvgIcon(iconKind));
+  row.appendChild(icon);
+  row.appendChild(child);
+  return row;
+}
+
+function storySheetNoteText(text) {
+  var note = document.createElement("span");
+  note.className = "note";
+  note.textContent = text;
+  note.style.cssText = "display:block;flex:1;min-width:0;text-align:left;font:italic 15px/1.45 " + storySheetSerifFont() + ";color:#3a4339";
+  return note;
+}
+
+function storySheetTagPill(text, collectionTone) {
+  var tag = document.createElement("span");
+  tag.className = collectionTone ? "x-utag coll" : "x-utag";
+  tag.textContent = text;
+  if (text && String(text).length > 24) tag.title = text;
+  tag.style.cssText = [
+    "display:inline-flex",
+    "align-items:center",
+    "gap:5px",
+    "box-sizing:border-box",
+    "max-width:150px",
+    "overflow:hidden",
+    "text-overflow:ellipsis",
+    "border-radius:999px",
+    "padding:5px 14px",
+    "font:600 14px/1.15 " + TRACE_UI.font,
+    "white-space:nowrap",
+    "background:" + (collectionTone ? "#ebdcab" : "#d8e3d5"),
+    "color:" + (collectionTone ? "#8a6e2a" : "#1f4d3f"),
+  ].join(";");
+  return tag;
+}
+
+function visiblePrivateTags(context) {
+  if (!context || !context.tags || !context.tags.length) return [];
+  return context.tags.slice(0, PRIVATE_TAG_DISPLAY_LIMIT);
+}
+
 function sheetRowEl(label, value, emphasis) {
   var row = document.createElement("div");
   row.setAttribute("data-trace-story-sheet-row", label);
@@ -2458,24 +3027,25 @@ function sheetRowEl(label, value, emphasis) {
     "justify-content:space-between",
     "gap:12px",
     "box-sizing:border-box",
-    "min-height:44px",
-    "padding:8px 10px",
-    "border-radius:" + TRACE_UI.radiusSm,
-    "border:1px solid " + (emphasis ? "rgba(154,52,18,0.24)" : TRACE_UI.border),
-    "background:" + (emphasis ? "#fff7ed" : TRACE_UI.paperRaised),
+    "min-height:32px",
+    "padding:8px 0",
+    "border-top:1px solid rgba(28,39,34,0.10)",
+    "background:transparent",
   ].join(";");
   var labelEl = document.createElement("span");
   labelEl.textContent = label;
-  labelEl.style.cssText = "font:800 9px/1 " + TRACE_UI.font + ";letter-spacing:0.06em;text-transform:uppercase;color:" + TRACE_UI.muted;
+  labelEl.style.cssText = storySheetLabelCss();
   var valueEl = document.createElement("span");
   valueEl.textContent = value;
-  valueEl.style.cssText = "font:700 12px/1.25 " + TRACE_UI.font + ";color:" + TRACE_UI.ink + ";text-align:right";
+  valueEl.style.cssText = "font:600 12.5px/1.3 " + TRACE_UI.font + ";color:" + (emphasis ? "#b54a30" : "#3a4339") + ";text-align:right";
   row.appendChild(labelEl);
   row.appendChild(valueEl);
   return row;
 }
 
 function readerStatusChoiceLabel(status) {
+  if (status === "PLANNING") return "Plan";
+  if (status === "COMPLETED") return "Done";
   return quickAddStatusLabel(status);
 }
 
@@ -2590,33 +3160,68 @@ function appendReaderStatusChoices(actions, view, workKey) {
 
   var wrap = document.createElement("div");
   wrap.setAttribute("data-trace-status-choices", "1");
-  wrap.style.cssText = "flex:1 0 100%;display:grid;gap:8px;margin-top:2px";
+  wrap.style.cssText = "display:flex;flex-direction:column;gap:8px";
 
   var label = document.createElement("div");
+  label.className = "x-sheet-label";
   label.textContent = "Reading status";
-  label.style.cssText = "font:800 9px/1 " + TRACE_UI.font + ";letter-spacing:0.07em;text-transform:uppercase;color:" + TRACE_UI.muted;
+  label.style.cssText = storySheetLabelCss();
   wrap.appendChild(label);
 
   var row = document.createElement("div");
-  row.style.cssText = "display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:6px";
+  row.className = "x-seg";
+  row.style.cssText = "display:flex;gap:5px";
   var error = document.createElement("div");
   error.setAttribute(TRACE_STATUS_CHOICE_ERROR_ATTR, "1");
-  error.style.cssText = "min-height:16px;color:#b42318;font:700 11px/1.25 " + TRACE_UI.font;
+  error.style.cssText = "min-height:16px;color:#b54a30;font:600 11.5px/1.3 " + TRACE_UI.font;
 
   TRACE_READER_STATUS_CHOICES.forEach(function (status) {
     var choice = document.createElement("button");
     choice.type = "button";
     choice.setAttribute(TRACE_STATUS_CHOICE_ATTR, status);
+    var selected = entryStatus(entry) === status;
+    choice.className = selected ? "on" : "";
     if (entryStatus(entry) === status) {
       choice.setAttribute("data-trace-status-selected", "1");
       choice.setAttribute("aria-pressed", "true");
     } else {
       choice.setAttribute("aria-pressed", "false");
     }
-    choice.textContent = readerStatusChoiceLabel(status);
-    choice.style.cssText = traceActionCss(
-      entryStatus(entry) === status ? TRACE_THEMES.status : TRACE_THEMES.add,
-    ) + ";padding:0 8px";
+    choice.style.cssText = [
+      "flex:1",
+      "--sc:" + storyStatusAccent(status),
+      "box-sizing:border-box",
+      "min-width:0",
+      "min-height:48px",
+      "border:1px solid " + (selected ? storyStatusAccent(status) : "rgba(28,39,34,0.18)"),
+      "background:" + (selected ? storyStatusSoft(status) : "#f3efe4"),
+      "border-radius:8px",
+      "padding:8px 2px",
+      "overflow:visible",
+      "font:500 11px/1 " + TRACE_UI.font,
+      "color:" + (selected ? "#1c2722" : "#6e6a5b"),
+      "cursor:pointer",
+      "display:flex",
+      "flex-direction:column",
+      "align-items:center",
+      "justify-content:center",
+      "gap:5px",
+    ].join(";");
+    var dot = document.createElement("span");
+    dot.setAttribute("aria-hidden", "true");
+    dot.className = "d";
+    dot.style.cssText = [
+      "display:block",
+      "width:7px",
+      "height:7px",
+      "border-radius:999px",
+      "background:" + (selected ? storyStatusAccent(status) : "#c4bea8"),
+      "box-shadow:" + (selected ? "0 0 0 3px " + storyStatusSoft(status) : "none"),
+    ].join(";");
+    var text = document.createElement("span");
+    text.textContent = readerStatusChoiceLabel(status);
+    choice.appendChild(dot);
+    choice.appendChild(text);
     bindReaderStatusChoice(choice, workKey, entry, status, error);
     row.appendChild(choice);
   });
@@ -2696,7 +3301,7 @@ function applyQuickAddLibraryState(btn, info) {
 
 function applyQuickAddActionState(btn, addTheme, compact) {
   btn.style.cssText = traceActionCss(addTheme);
-  btn.textContent = compact ? "+ ADD" : "ADD TO TRACE";
+  btn.textContent = "Add to Trace";
   btn.title = "Add this story to your Trace library";
   btn.disabled = false;
 }
@@ -2711,26 +3316,56 @@ function sendQuickAddAction(btn, workKey, addTheme, compact) {
     item: collected.items[0],
   };
 
-  btn.style.cssText = traceActionCss(TRACE_THEMES.adding) + ";cursor:wait";
-  btn.textContent = "ADDING...";
+  if (compact) {
+    applyStoryInlineHandleState(btn, storyHandlePresentation({ hasAuth: true, entry: { __traceAutoTrackPending: true } }));
+    btn.style.cursor = "wait";
+  } else {
+    btn.style.cssText = traceActionCss(TRACE_THEMES.adding) + ";cursor:wait";
+    btn.textContent = "Adding...";
+  }
   btn.disabled = true;
 
   ext.runtime.sendMessage(
     { type: "TRACE_QUICK_ADD", payload: payload },
     function (response) {
       if (ext.runtime.lastError || !response) {
-        btn.style.cssText = traceActionCss(TRACE_THEMES.error) + ";cursor:pointer";
-        btn.textContent = "ERROR";
+        if (compact) {
+          applyStoryInlineHandleState(btn, {
+            kind: "error",
+            label: "Error",
+            theme: TRACE_INLINE_THEMES.error,
+            dot: true,
+            spinner: false,
+          });
+          btn.style.cursor = "pointer";
+        } else {
+          btn.style.cssText = traceActionCss(TRACE_THEMES.error) + ";cursor:pointer";
+          btn.textContent = "ERROR";
+        }
         btn.disabled = false;
         setTimeout(function () {
-          applyQuickAddActionState(btn, addTheme, compact);
+          if (compact) {
+            applyStoryInlineHandleState(btn, storyHandlePresentation({ hasAuth: true, entry: null }));
+          } else {
+            applyQuickAddActionState(btn, addTheme, compact);
+          }
         }, 2500);
         return;
       }
 
       if (response.ok) {
-        btn.style.cssText = traceActionCss(TRACE_THEMES.added);
-        btn.textContent = compact ? "Saved" : "ADDED \u2713";
+        if (compact) {
+          applyStoryInlineHandleState(btn, {
+            kind: "saved",
+            label: "Saved",
+            theme: TRACE_INLINE_THEMES.added,
+            dot: true,
+            spinner: false,
+          });
+        } else {
+          btn.style.cssText = traceActionCss(TRACE_THEMES.added);
+          btn.textContent = "ADDED \u2713";
+        }
         btn.disabled = true;
         setTimeout(function () {
           var item = payload.item || {};
@@ -2757,20 +3392,43 @@ function sendQuickAddAction(btn, workKey, addTheme, compact) {
           renderQuickAddButton(workKey);
         }, compact ? 450 : 1500);
       } else if (response.error === "free_limit_reached") {
-        btn.style.cssText = traceActionCss(TRACE_THEMES.full);
-        btn.textContent = compact ? "Full" : "LIBRARY FULL";
+        if (compact) {
+          applyStoryInlineHandleState(btn, storyHandlePresentation({ hasAuth: true, entry: { __traceAutoTrackError: "free_limit_reached" } }));
+        } else {
+          btn.style.cssText = traceActionCss(TRACE_THEMES.full);
+          btn.textContent = "Library full";
+        }
         btn.title = "Free library limit reached \u2014 upgrade for unlimited";
         btn.disabled = true;
       } else if (response.error === "auth_expired") {
-        btn.style.cssText = traceActionCss(TRACE_THEMES.error);
-        btn.textContent = compact ? "Sign in" : "SESSION EXPIRED";
+        if (compact) {
+          applyStoryInlineHandleState(btn, storyHandlePresentation({ hasAuth: true, entry: { __traceAutoTrackError: "auth_expired" } }));
+        } else {
+          btn.style.cssText = traceActionCss(TRACE_THEMES.error);
+          btn.textContent = "Sign in again";
+        }
         btn.disabled = true;
       } else {
-        btn.style.cssText = traceActionCss(TRACE_THEMES.error) + ";cursor:pointer";
-        btn.textContent = "ERROR";
+        if (compact) {
+          applyStoryInlineHandleState(btn, {
+            kind: "error",
+            label: "Error",
+            theme: TRACE_INLINE_THEMES.error,
+            dot: true,
+            spinner: false,
+          });
+          btn.style.cursor = "pointer";
+        } else {
+          btn.style.cssText = traceActionCss(TRACE_THEMES.error) + ";cursor:pointer";
+          btn.textContent = "Error";
+        }
         btn.disabled = false;
         setTimeout(function () {
-          applyQuickAddActionState(btn, addTheme, compact);
+          if (compact) {
+            applyStoryInlineHandleState(btn, storyHandlePresentation({ hasAuth: true, entry: null }));
+          } else {
+            applyQuickAddActionState(btn, addTheme, compact);
+          }
         }, 2500);
       }
     },
@@ -2793,101 +3451,343 @@ function bindQuickAddAction(btn, workKey, addTheme, compact) {
   });
 }
 
+function resetStoryHiddenPreferenceBtn(btn, hidden) {
+  clearElement(btn);
+  btn.className = "x-pbtn x-pbtn-ghost";
+  btn.style.cssText = storySheetGhostButtonCss() + ";flex:0 0 auto";
+  btn.title = hidden
+    ? "Show this work in Trace browsing overlays"
+    : "Hide this work in Trace browsing overlays";
+  if (hidden) {
+    btn.textContent = "Unhide";
+  } else {
+    btn.setAttribute("aria-label", "Hide this work");
+    btn.appendChild(storySheetSvgIcon("eyeoff"));
+    btn.appendChild(document.createTextNode("Hide"));
+  }
+  btn.disabled = false;
+  btn.setAttribute("data-trace-hidden-action", hidden ? "undo" : "hide");
+  btn.removeAttribute("data-trace-connect-action");
+  btn.removeAttribute("data-trace-connect-error");
+  btn.removeAttribute("data-trace-connect-checking");
+}
+
+function updateOptimisticStoryHiddenPreference(workKey, entry, hidden) {
+  var next = snapshotStoryEntry(entry);
+  next.hidden = hidden === true;
+  next.browsePreference = { hidden: hidden === true };
+  next.status = entry && typeof entry.status === "string" ? entry.status : next.status;
+  next.readerStatus = entry && typeof entry.readerStatus === "string" ? entry.readerStatus : next.readerStatus;
+  if (entry && entry.entryId) next.entryId = entry.entryId;
+  if (entry && entry.privateContext) next.privateContext = entry.privateContext;
+  if (entry && entry.workMark) next.workMark = entry.workMark;
+  optimisticStoryPageEntries[workKey] = next;
+}
+
+function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
+  var hidden = entry && entry.hidden === true;
+  btn.addEventListener("click", function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (btn.getAttribute("data-trace-connect-action") === "1") {
+      setStoryHiddenPreferenceCheckingAction(btn);
+      openTraceUrlInBrowserTab(storyTraceOpenUrl(null, entry));
+      setTimeout(function () {
+        if (btn.getAttribute("data-trace-connect-checking") === "1") {
+          setStoryHiddenPreferenceAuthAction(btn, btn.getAttribute("data-trace-connect-error") || "not_authenticated");
+        }
+      }, 3000);
+      return;
+    }
+
+    var nextHidden = !hidden;
+    btn.style.cssText = storySheetGhostButtonCss() + ";cursor:wait;color:#6e6a5b";
+    btn.textContent = "Saving...";
+    btn.disabled = true;
+    ext.runtime.sendMessage(
+      {
+        type: "TRACE_SET_HIDDEN_WORK",
+        payload: { key: workKey, hidden: nextHidden },
+      },
+      function (response) {
+        if (ext.runtime.lastError || !response) {
+          btn.style.cssText = storySheetGhostButtonCss() + ";cursor:pointer;color:#b54a30";
+          btn.textContent = "Error";
+          btn.disabled = false;
+          setTimeout(function () {
+            resetStoryHiddenPreferenceBtn(btn, hidden);
+          }, 2500);
+          return;
+        }
+        if (!response.ok) {
+          if (response.error === "auth_expired" || response.error === "not_authenticated") {
+            setStoryHiddenPreferenceAuthAction(btn, response.error);
+            return;
+          }
+          btn.style.cssText = storySheetGhostButtonCss() + ";cursor:pointer;color:#b54a30";
+          btn.textContent = response.error === "rate_limited" ? "Wait" : "Error";
+          btn.disabled = false;
+          setTimeout(function () {
+            resetStoryHiddenPreferenceBtn(btn, hidden);
+          }, 2500);
+          return;
+        }
+        updateOptimisticStoryHiddenPreference(workKey, entry, nextHidden);
+        renderQuickAddButton(workKey);
+      },
+    );
+  });
+}
+
+function setStoryHiddenPreferenceAuthAction(btn, error) {
+  var expired = error === "auth_expired";
+  btn.style.cssText = storySheetGhostButtonCss() + ";cursor:pointer;color:#b54a30";
+  btn.textContent = expired ? "Sign in" : "Connect";
+  btn.title = expired ? "Open Trace to sign in again" : "Open Trace to connect the extension";
+  btn.setAttribute("data-trace-connect-action", "1");
+  btn.setAttribute("data-trace-connect-error", error || "not_authenticated");
+  btn.removeAttribute("data-trace-connect-checking");
+  btn.disabled = false;
+}
+
+function setStoryHiddenPreferenceCheckingAction(btn) {
+  btn.style.cssText = storySheetGhostButtonCss() + ";cursor:wait;color:#6e6a5b";
+  btn.textContent = "Checking";
+  btn.title = "Checking Trace connection";
+  btn.setAttribute("data-trace-connect-checking", "1");
+  btn.disabled = true;
+}
+
 function clearElement(el) {
   while (el.firstChild) el.removeChild(el.firstChild);
 }
 
 function renderStorySheet(sheet, view, workKey) {
   var wasOpen = sheet.getAttribute("data-trace-open") === "1";
+  var placement = sheet.getAttribute("data-trace-story-sheet-placement");
+  var item = storySheetCurrentItem();
+  sheet.className = "x x-sheet" + (placement === "bottom" ? " is-bottom" : "");
   clearElement(sheet);
 
+  if (placement === "bottom") {
+    var grab = createStoryBottomSheetGrabber();
+    sheet.appendChild(grab);
+    bindStoryBottomSheetDragClose(sheet, grab);
+  }
+
+  var header = document.createElement("div");
+  header.className = "x-sheet-head";
+  header.setAttribute("data-trace-management-header", "1");
+  header.style.cssText = [
+    "display:grid",
+    "grid-template-columns:1fr auto",
+    "gap:10px",
+    "align-items:start",
+    "padding:16px 16px 13px",
+    "border-bottom:1px solid rgba(28,39,34,0.10)",
+  ].join(";");
+  var headText = document.createElement("div");
+  headText.style.cssText = "min-width:0";
+  var source = document.createElement("div");
+  source.className = "src";
+  source.textContent = storySheetSourceLine();
+  source.style.cssText = "font:500 9px/1 'Geist Mono',ui-monospace,monospace;letter-spacing:0.14em;text-transform:uppercase;color:#b54a30";
+  var title = document.createElement("div");
+  title.className = "ti";
+  title.textContent = (item && item.t) || storyHeadline(view);
+  title.style.cssText = "margin-top:3px;font:500 17px/1.2 " + storySheetSerifFont() + ";letter-spacing:0;color:#1c2722;overflow:hidden;text-overflow:ellipsis";
+  var author = document.createElement("div");
+  author.className = "au";
+  author.textContent = storySheetAuthorLine(item);
+  author.style.cssText = "margin-top:2px;font:500 12px/1.3 " + TRACE_UI.font + ";color:#6e6a5b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+  headText.appendChild(source);
+  headText.appendChild(title);
+  if (author.textContent) headText.appendChild(author);
   var close = document.createElement("button");
   close.setAttribute(TRACE_STORY_SHEET_CLOSE_ATTR, "1");
   close.setAttribute("aria-label", "Close Trace sheet");
+  close.className = "x-close";
   close.type = "button";
   close.textContent = "\u00d7";
-  close.style.cssText = "position:absolute;right:12px;top:10px;width:32px;height:32px;border:0;border-radius:999px;background:transparent;color:" + TRACE_UI.muted + ";font:800 18px/1 system-ui,-apple-system,'Segoe UI',sans-serif;cursor:pointer";
+  close.style.cssText = "width:26px;height:26px;border-radius:7px;border:1px solid rgba(28,39,34,0.10);background:#ebe6d7;color:#6e6a5b;font:600 16px/1 system-ui,-apple-system,'Segoe UI',sans-serif;cursor:pointer";
   close.addEventListener("click", function () {
     applySheetVisibility(sheet, false);
   });
-  sheet.appendChild(close);
-
-  var heading = document.createElement("div");
-  heading.setAttribute("data-trace-management-header", "1");
-  heading.style.cssText = "display:block;padding-right:34px";
-  var headText = document.createElement("div");
-  headText.style.cssText = "min-width:0";
-  var title = document.createElement("div");
-  title.textContent = storyHeadline(view);
-  title.style.cssText = "font:800 18px/1.15 " + TRACE_UI.font + ";color:" + TRACE_UI.ink;
-  var caption = document.createElement("div");
-  caption.textContent = storyCaption(view);
-  caption.style.cssText = "margin-top:4px;color:" + TRACE_UI.muted + ";font:600 12px/1.35 " + TRACE_UI.font;
-  headText.appendChild(title);
-  headText.appendChild(caption);
-  heading.appendChild(headText);
-  sheet.appendChild(heading);
+  header.appendChild(headText);
+  header.appendChild(close);
+  sheet.appendChild(header);
 
   var status = entryStatus(view.entry);
   var progress = progressDisplay(view.entry);
-  var position = document.createElement("section");
-  position.style.cssText = "margin-top:12px;border:1px solid rgba(89,68,2,0.2);background:#fff8e8;border-radius:" + TRACE_UI.radiusSm + ";padding:10px";
-  var positionLabel = document.createElement("div");
-  positionLabel.textContent = "Reading position";
-  positionLabel.style.cssText = "font:800 9px/1 " + TRACE_UI.font + ";letter-spacing:0.08em;text-transform:uppercase;color:#7c6b41";
-  var positionValue = document.createElement("div");
-  positionValue.textContent = progress || "Not started";
-  positionValue.style.cssText = "margin-top:8px;font:800 22px/1 " + TRACE_UI.font + ";color:#2f2b1f";
-  var positionStatus = document.createElement("div");
-  positionStatus.textContent = status ? quickAddStatusLabel(status) : "No reading status";
-  positionStatus.style.cssText = "margin-top:4px;font:700 12px/1.2 " + TRACE_UI.font + ";color:#655f50";
-  position.appendChild(positionLabel);
-  position.appendChild(positionValue);
-  position.appendChild(positionStatus);
-  sheet.appendChild(position);
+  if (!view.hasAuth) {
+    var connect = document.createElement("div");
+    connect.className = "x-sheet-connect";
+    connect.style.cssText = "padding:18px 16px;display:flex;flex-direction:column;gap:10px";
+    var connectTitle = document.createElement("h4");
+    connectTitle.textContent = storyHeadline(view);
+    connectTitle.style.cssText = "margin:0;font:500 18px/1.2 " + storySheetSerifFont() + ";color:#1c2722";
+    var connectCopy = document.createElement("p");
+    connectCopy.textContent = storyCaption(view);
+    connectCopy.style.cssText = "margin:0 0 4px;font:500 12.5px/1.5 " + TRACE_UI.font + ";color:#6e6a5b";
+    var connectOpen = document.createElement("a");
+    connectOpen.className = "x-pbtn x-pbtn-primary";
+    connectOpen.setAttribute("data-trace-open-trace", "1");
+    connectOpen.href = storyTraceOpenUrl(view.authState, view.entry);
+    connectOpen.target = "_blank";
+    connectOpen.rel = "noopener noreferrer";
+    connectOpen.textContent = "Open Trace";
+    connectOpen.style.cssText = storySheetPrimaryButtonCss();
+    bindTraceOpenLink(connectOpen);
+    connect.appendChild(connectTitle);
+    connect.appendChild(connectCopy);
+    connect.appendChild(connectOpen);
+    sheet.appendChild(connect);
+    applySheetVisibility(sheet, wasOpen);
+    return;
+  }
 
-  var rows = document.createElement("div");
-  rows.style.cssText = "display:grid;gap:8px;margin-top:12px";
+  var body = document.createElement("div");
+  body.className = "x-sheet-body";
+  body.style.cssText = "padding:14px 16px 16px;display:flex;flex-direction:column;gap:14px";
+  appendReaderStatusChoices(body, view, workKey);
+  if (view.entry && (view.entry.__traceStatusPending || view.entry.__traceStatusError || view.entry.__traceAutoTrackError)) {
+    var notice = document.createElement("div");
+    notice.style.cssText = "border-top:1px solid rgba(28,39,34,0.10);padding-top:12px";
+    var noticeLabel = document.createElement("div");
+    noticeLabel.textContent = storyHeadline(view);
+    noticeLabel.style.cssText = "font:600 12.5px/1.3 " + TRACE_UI.font + ";color:" + (view.entry.__traceStatusError || view.entry.__traceAutoTrackError ? "#b54a30" : "#3a4339");
+    var noticeCopy = document.createElement("div");
+    noticeCopy.textContent = storyCaption(view);
+    noticeCopy.style.cssText = "margin-top:3px;font:500 12px/1.4 " + TRACE_UI.font + ";color:#6e6a5b";
+    notice.appendChild(noticeLabel);
+    notice.appendChild(noticeCopy);
+    body.appendChild(notice);
+  }
+
+  var position = document.createElement("section");
+  position.className = "x-pos";
+  position.setAttribute("data-trace-story-position", "1");
+  position.style.cssText = "background:#f1d8c8;border:1px solid rgba(181,74,48,0.24);border-radius:12px;padding:13px 14px";
+  var chapters = displayChaptersForStatus(status, view.entry && view.entry.chapters);
+  var positionPercent = null;
+  if (
+    chapters &&
+    typeof chapters.current === "number" &&
+    typeof chapters.total === "number" &&
+    chapters.total > 0
+  ) {
+    positionPercent = Math.max(0, Math.min(100, Math.round((chapters.current / chapters.total) * 100)));
+  }
+  var positionTop = document.createElement("div");
+  positionTop.className = "top";
+  positionTop.style.cssText = "display:flex;align-items:baseline;justify-content:space-between;gap:10px";
+  var positionValue = document.createElement("span");
+  positionValue.className = "chap";
+  positionValue.style.cssText = "font:500 22px/1 " + storySheetSerifFont() + ";letter-spacing:0;color:#1c2722";
+  var positionSmall = document.createElement("span");
+  positionSmall.className = "sm";
+  positionSmall.style.cssText = "font-size:15px;color:#9a9583";
+  var positionStatus = document.createElement("span");
+  positionStatus.className = "pct";
+  positionStatus.style.cssText = "font:500 10.5px/1.2 'Geist Mono',ui-monospace,monospace;color:#6e6a5b;text-align:right";
+  if (chapters && typeof chapters.current === "number") {
+    var positionBig = document.createElement("span");
+    positionBig.className = "big";
+    positionBig.textContent = "Ch " + chapters.current;
+    positionValue.appendChild(positionBig);
+    positionValue.appendChild(document.createTextNode(" "));
+    positionSmall.textContent = "/ " + (chapters.total == null ? "?" : chapters.total);
+    positionValue.appendChild(positionSmall);
+  } else {
+    positionValue.textContent = progress || "Not started";
+  }
+  positionStatus.textContent = positionPercent == null ? "" : positionPercent + "%";
+  positionTop.appendChild(positionValue);
+  if (positionStatus.textContent) positionTop.appendChild(positionStatus);
+  position.appendChild(positionTop);
+  if (positionPercent != null) {
+    var bar = document.createElement("div");
+    bar.className = "bar";
+    bar.style.cssText = "height:5px;border-radius:999px;background:rgba(28,39,34,0.12);overflow:hidden;margin:10px 0 0";
+    var fill = document.createElement("i");
+    fill.setAttribute("aria-hidden", "true");
+    fill.style.cssText = "display:block;height:100%;border-radius:999px;background:#b54a30;width:" + positionPercent + "%";
+    bar.appendChild(fill);
+    position.appendChild(bar);
+  }
+  body.appendChild(position);
+
+  var meta = document.createElement("div");
+  meta.className = "x-meta";
+  meta.style.cssText = "display:flex;flex-direction:column;gap:12px";
   var privateContext = view.entry && view.entry.privateContext;
   if (privateContext && privateContext.hasNotes) {
-    rows.appendChild(sheetRowEl("Private note", "Saved \u00b7 Edit notes in Trace", false));
+    meta.appendChild(storySheetMetaRow(
+      "note",
+      storySheetNoteText(privateContext.notePreview || "Private note saved \u00b7 edit in Trace"),
+    ));
   }
   if (privateContext && privateContext.tagCount) {
-    rows.appendChild(
-      sheetRowEl(
-        "Private tags",
-        privateContext.tagCount + " saved \u00b7 Open in Trace",
+    var tags = document.createElement("span");
+    tags.style.cssText = "display:flex;flex:1;min-width:0;flex-wrap:wrap;gap:8px;text-align:left";
+    if (privateContext.tags && privateContext.tags.length) {
+      var visibleTags = visiblePrivateTags(privateContext);
+      visibleTags.forEach(function (tag) {
+        tags.appendChild(storySheetTagPill(tag, false));
+      });
+      if (privateContext.tagCount > visibleTags.length) {
+        tags.appendChild(storySheetTagPill("+" + (privateContext.tagCount - visibleTags.length), false));
+      }
+    } else {
+      tags.appendChild(storySheetTagPill(
+        privateContext.tagCount === 1 ? "1 private tag" : privateContext.tagCount + " private tags",
         false,
-      ),
-    );
+      ));
+    }
+    meta.appendChild(storySheetMetaRow("tag", tags));
   }
-  var mark = workMarkDisplay(view.entry);
-  if (mark) rows.appendChild(sheetRowEl("Work mark", mark, true));
   if (view.entry && view.entry.hidden) {
-    rows.appendChild(sheetRowEl("Browsing preference", "Hidden from future listings", true));
+    meta.appendChild(storySheetMetaRow("eyeoff", storySheetNoteText("Hidden from future listings")));
   }
-  if (rows.childNodes.length > 0) sheet.appendChild(rows);
+  if (meta.childNodes.length > 0) body.appendChild(meta);
+  sheet.appendChild(body);
 
   var actions = document.createElement("div");
-  actions.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;padding-top:12px;border-top:1px solid " + TRACE_UI.border;
-  if (view.hasAuth && !status && !(view.entry && view.entry.hidden)) {
-    var addBtn = document.createElement("button");
-    addBtn.setAttribute(QUICK_ADD_ATTR, workKey);
-    addBtn.type = "button";
-    applyQuickAddActionState(addBtn, TRACE_THEMES.add, false);
-    bindQuickAddAction(addBtn, workKey, TRACE_THEMES.add, false);
-    actions.appendChild(addBtn);
-  }
-  appendReaderStatusChoices(actions, view, workKey);
-
+  actions.className = "x-sheet-foot";
+  actions.style.cssText = "display:flex;gap:8px;padding:0 16px 16px";
   var open = document.createElement("a");
+  open.className = "x-pbtn x-pbtn-primary";
   open.setAttribute("data-trace-open-trace", "1");
   open.href = storyTraceOpenUrl(view.authState, view.entry);
   open.target = "_blank";
   open.rel = "noopener noreferrer";
-  open.textContent = view.hasAuth ? "OPEN IN TRACE" : "OPEN TRACE";
-  open.style.cssText = traceActionCss(TRACE_THEMES.muted) + ";text-decoration:none";
+  open.appendChild(storySheetSvgIcon("open"));
+  open.appendChild(document.createTextNode("Open in Trace"));
+  open.style.cssText = storySheetPrimaryButtonCss() + ";flex:1";
+  bindTraceOpenLink(open);
   actions.appendChild(open);
+
+  if (view.hasAuth && !status && !(view.entry && view.entry.hidden)) {
+    var addBtn = document.createElement("button");
+    addBtn.className = "x-pbtn x-pbtn-ghost";
+    addBtn.setAttribute(QUICK_ADD_ATTR, workKey);
+    addBtn.type = "button";
+    addBtn.textContent = "Add";
+    addBtn.title = "Add this story to your Trace library";
+    addBtn.style.cssText = storySheetGhostButtonCss() + ";flex:0 0 auto";
+    addBtn.addEventListener("click", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (addBtn.disabled) return;
+      sendQuickAddAction(addBtn, workKey, TRACE_THEMES.add, false);
+    });
+    actions.appendChild(addBtn);
+  }
+  var hiddenBtn = document.createElement("button");
+  hiddenBtn.type = "button";
+  resetStoryHiddenPreferenceBtn(hiddenBtn, view.entry && view.entry.hidden === true);
+  bindStoryHiddenPreferenceAction(hiddenBtn, workKey, view.entry || {});
+  actions.appendChild(hiddenBtn);
   sheet.appendChild(actions);
 
   applySheetVisibility(sheet, wasOpen);
@@ -2946,26 +3846,7 @@ function renderQuickAddButton(workKey) {
       entry: info,
     };
 
-    var handleTheme =
-      info && info.__traceAutoTrackPending
-        ? TRACE_INLINE_THEMES.saving
-        : info && info.__traceAutoTrackError === "free_limit_reached"
-          ? TRACE_THEMES.full
-          : info && info.__traceAutoTrackError
-            ? TRACE_INLINE_THEMES.error
-            : info && info.__traceStatusPending
-        ? TRACE_INLINE_THEMES.saving
-        : info && info.__traceStatusError
-          ? TRACE_INLINE_THEMES.error
-          : info && info.hidden
-        ? TRACE_INLINE_THEMES.hidden
-        : entryStatus(info)
-          ? TRACE_INLINE_THEMES[entryStatus(info)] || TRACE_INLINE_THEMES.muted
-          : view.hasAuth
-            ? TRACE_INLINE_THEMES.add
-            : TRACE_INLINE_THEMES.muted;
-    handle.style.cssText = traceInlineHandleCss(handleTheme);
-    handle.textContent = handleDisplay(view);
+    applyStoryInlineHandleState(handle, storyHandlePresentation(view));
     handle.title = "Open Trace story sheet";
     handle.disabled = autoTrackHandleDisabled(info);
     if (!handle.__traceStoryHandleBound) {
