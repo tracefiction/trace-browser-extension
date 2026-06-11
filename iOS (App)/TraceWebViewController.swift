@@ -319,6 +319,12 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             return
         }
         if isMainFrame {
+            if shouldOpenOutsideTraceShell(url) {
+                activeTraceNavigationURL = nil
+                decisionHandler(.cancel)
+                UIApplication.shared.open(url, options: [:], completionHandler: nil)
+                return
+            }
             if traceAppHostsMatch(url) {
                 activeTraceNavigationURL = url
                 lastIntendedTraceURL = url
@@ -398,7 +404,9 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             return nil
         }
         if url.scheme == "http" || url.scheme == "https" {
-            if traceAppHostsMatch(url) {
+            if shouldOpenOutsideTraceShell(url) {
+                UIApplication.shared.open(url, options: [:], completionHandler: nil)
+            } else if traceAppHostsMatch(url) {
                 webView.load(navigationAction.request)
             } else {
                 UIApplication.shared.open(url, options: [:], completionHandler: nil)
@@ -414,6 +422,14 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             return true
         }
         return false
+    }
+
+    private func shouldOpenOutsideTraceShell(_ url: URL) -> Bool {
+        guard traceAppHostsMatch(url) else { return false }
+        let scheme = url.scheme?.lowercased()
+        guard scheme == "http" || scheme == "https" else { return false }
+        let path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+        return path == "setup" || path == "apps"
     }
 
     private func shouldOpenInAuthenticationSession(_ url: URL) -> Bool {
