@@ -9,6 +9,7 @@ const TRACE_WEB_ORIGIN = "__TRACE_WEB_ORIGIN__";
 
 const API_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/track`;
 const METADATA_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/metadata`;
+const LIBRARY_METADATA_REFRESH_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/library/metadata-refresh`;
 const LIBRARY_OVERLAY_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/library-overlay`;
 const WORK_PREFERENCES_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/work-preferences`;
 const LIBRARY_ENTRY_ENDPOINT_BASE = `${TRACE_API_BASE.replace(/\/$/, "")}/api/library`;
@@ -213,14 +214,16 @@ function normalizeArchiveErrorKind(value) {
 }
 
 function archiveHostKindFromPayload(payload) {
-  const source =
-    payload && typeof payload.s === "string"
-      ? payload.s
-      : payload?.item && typeof payload.item.src === "string"
-        ? payload.item.src
-        : Array.isArray(payload?.items) && typeof payload.items[0]?.src === "string"
-          ? payload.items[0].src
-          : "";
+  let source = "";
+  if (payload && typeof payload.s === "string") {
+    source = payload.s;
+  } else if (payload?.item && typeof payload.item.src === "string") {
+    source = payload.item.src;
+  } else if (Array.isArray(payload?.items) && typeof payload.items[0]?.src === "string") {
+    source = payload.items[0].src;
+  } else if (Array.isArray(payload?.items) && typeof payload.items[0]?.source === "string") {
+    source = payload.items[0].source;
+  }
   if (source === "ao3" || source === "ffn") return source;
   return "unknown";
 }
@@ -983,6 +986,11 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
 
+  if (msg.type === "TRACE_LIBRARY_METADATA_REFRESH") {
+    handleLibraryMetadataRefresh(msg.payload, sender);
+    return false;
+  }
+
   // -------------------------------------------------
   // G. Quick-add from inline button on story pages
   // -------------------------------------------------
@@ -1265,6 +1273,59 @@ async function handleMetadataBroadcast(payload, sender) {
     }
   } catch (error) {
     console.error("[Trace] Metadata broadcast error:", error);
+    recordArchiveIssueFromPayload(payload, "network");
+  }
+}
+
+async function handleLibraryMetadataRefresh(payload, sender) {
+  if (!bearerToken) return;
+
+  const shouldBroadcast = await new Promise((resolve) => {
+    ext.storage.local.get([PREF_METADATA_IMPROVE_KEY], (prefRes) => {
+      if (ext.runtime.lastError) {
+        resolve(true);
+        return;
+      }
+      resolve(prefRes[PREF_METADATA_IMPROVE_KEY] !== false);
+    });
+  });
+  if (!shouldBroadcast) return;
+
+  try {
+    const response = await fetch(LIBRARY_METADATA_REFRESH_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${bearerToken}`,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (response.status === 401) {
+      recordArchiveIssueFromPayload(payload, "auth");
+      clearToken();
+      setReconnectState("Your Trace session expired. Open Trace and sign in again.");
+      return;
+    }
+    if (!response.ok) {
+      recordArchiveIssueFromPayload(
+        payload,
+        response.status === 400 ? "parser" : "network",
+      );
+      return;
+    }
+
+    const json = await response.json().catch(() => null);
+    const updated =
+      json && json.data && typeof json.data.updated === "number"
+        ? json.data.updated
+        : 0;
+    if (updated > 0) {
+      recordArchiveActionFromPayload(payload, "metadata");
+      await signalLibraryInvalidated("metadata");
+    }
+  } catch (error) {
+    console.error("[Trace] Library metadata refresh error:", error);
     recordArchiveIssueFromPayload(payload, "network");
   }
 }

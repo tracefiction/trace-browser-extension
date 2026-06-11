@@ -648,6 +648,37 @@ test("collectFFNStory desktop: fandom fallback strips decorated title pattern", 
   assert.deepEqual(plainJson(item.fms), ["Star Wars"]);
 });
 
+test("collectFFNStory desktop strips Trace controls from story summary", () => {
+  const html = `<!doctype html><html><body>
+    <div id="profile_top">
+      <b class="xcontrast_txt">Button Spillover</b>
+      <a href="/u/1/tester">tester</a>
+      <div class="xcontrast_txt">
+        This is the actual FanFiction.net story description and it should remain clean.
+        <button data-trace-story-handle="1">Add to Trace</button>
+        <button data-trace-hidden-action="hide">Hide</button>
+      </div>
+      <span class="xgray xcontrast_txt">
+        Rated: Fiction T - English - Adventure - Chapters: 5 - Words: 12,345
+      </span>
+    </div>
+  </body></html>`;
+  const dom = new JSDOM(html, {
+    url: "https://www.fanfiction.net/s/1234567/1/Button-Spillover",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  const { collectFFNStory } = createCollectorBindings(dom);
+  const item = collectFFNStory();
+
+  assert.equal(
+    item.sm,
+    "This is the actual FanFiction.net story description and it should remain clean."
+  );
+  assert.ok(!item.sm.includes("Add to Trace"));
+  assert.ok(!item.sm.includes("Hide"));
+});
+
 test("collectFFNListings desktop (ffn_listing.html): Prince of Slytherin row", () => {
   const dom = domFromFixture(
     "ffn_listing.html",
@@ -699,6 +730,157 @@ test("collectFFNListings desktop (ffn_listing.html): Harry Crow pairing in gray 
   assert.ok(row);
   assert.deepEqual(plainJson(row.chars), ["Harry P.", "Hermione G."]);
   assert.deepEqual(plainJson(row.rels), ["Harry P./Hermione G."]);
+});
+
+test("collectFFNListings desktop strips Trace controls from row summary", () => {
+  const html = `<!doctype html><html><body>
+    <div id="content_wrapper_inner">
+      <div class="z-list zhover zpointer">
+        <a class="stitle" href="/s/7654321/1/Button-Spillover">Button Spillover</a>
+        by <a href="/u/1/tester">tester</a>
+        <div class="z-indent">
+          This is the real listing description that should be imported without controls.
+          <span data-trace-quick-add-wrap="1"><button data-trace-quick-add="ffn:7654321">Add to Trace</button></span>
+          <button data-trace-hidden-action="hide">Hide</button>
+          <div class="z-padtop2 xgray">Rated: Fiction T - English - Adventure - Words: 12,345</div>
+        </div>
+      </div>
+    </div>
+  </body></html>`;
+  const dom = new JSDOM(html, {
+    url: "https://www.fanfiction.net/book/Example/",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  const { collectFFNListings } = createCollectorBindings(dom);
+  const [item] = collectFFNListings();
+
+  assert.equal(
+    item.sm,
+    "This is the real listing description that should be imported without controls."
+  );
+  assert.ok(!item.sm.includes("Add to Trace"));
+  assert.ok(!item.sm.includes("Hide"));
+});
+
+test("collectTrackedListingMetadataRefreshItems keeps only tracked FFN listing rows", () => {
+  const html = `<!doctype html><html><body>
+    <div id="content_wrapper_inner">
+      <div class="z-list zhover zpointer">
+        <a class="stitle" href="/s/7654321/1/Tracked-Story">Tracked Story</a>
+        by <a href="/u/1/tester">tester</a>
+        <div class="z-indent">
+          The listing summary that should enrich an existing library entry.
+          <div class="z-padtop2 xgray">
+            Rated: Fiction T - English - Adventure - Chapters: 7 - Words: 12,345 - Updated: Jan 2 - Published: Jan 1 - [Harry P., Hermione G.] - Complete
+          </div>
+        </div>
+      </div>
+      <div class="z-list zhover zpointer">
+        <a class="stitle" href="/s/1111111/1/Untracked-Story">Untracked Story</a>
+        by <a href="/u/2/other">other</a>
+        <div class="z-indent">
+          This untracked listing row must not be submitted.
+          <div class="z-padtop2 xgray">Rated: Fiction K - English - Words: 999</div>
+        </div>
+      </div>
+    </div>
+  </body></html>`;
+  const dom = new JSDOM(html, {
+    url: "https://www.fanfiction.net/book/Example/",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  const { collectTrackedListingMetadataRefreshItems } = createCollectorBindings(dom);
+
+  const items = collectTrackedListingMetadataRefreshItems({
+    "ffn:7654321": { status: "READING" },
+  });
+
+  assert.equal(items.length, 1);
+  assert.deepEqual(plainJson(items[0]), {
+    source: "ffn",
+    sourceStoryId: "7654321",
+    url: "https://www.fanfiction.net/s/7654321/1/Tracked-Story",
+    title: "Tracked Story",
+    author: "tester",
+    summary: "The listing summary that should enrich an existing library entry.",
+    chapters: 7,
+    words: 12345,
+    status: "complete",
+    updatedAt: "Jan 2",
+    publishedAt: "Jan 1",
+    rating: "T",
+    language: "English",
+    characters: ["Harry P.", "Hermione G."],
+    relationships: ["Harry P./Hermione G."],
+    genre: "Adventure",
+  });
+});
+
+test("sendListingMetadataRefreshForTrackedItems dedupes repeated listing submissions", () => {
+  const html = `<!doctype html><html><body>
+    <div id="content_wrapper_inner">
+      <div class="z-list zhover zpointer">
+        <a class="stitle" href="/s/7654321/1/Tracked-Story">Tracked Story</a>
+        by <a href="/u/1/tester">tester</a>
+        <div class="z-indent">
+          The listing summary that should be sent once per page fingerprint.
+          <div class="z-padtop2 xgray">Rated: Fiction T - English - Words: 12,345</div>
+        </div>
+      </div>
+    </div>
+  </body></html>`;
+  const dom = new JSDOM(html, {
+    url: "https://www.fanfiction.net/book/Example/",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  const sentMessages = [];
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(message) {
+        sentMessages.push(message);
+      },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb({
+            authToken: "test-token",
+            libraryOverlayCache: {
+              entries: {
+                "ffn:7654321": { status: "READING" },
+              },
+            },
+          });
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+  const { sendListingMetadataRefreshForTrackedItems } = createCollectorBindings(dom, { chrome });
+
+  sendListingMetadataRefreshForTrackedItems(0);
+  sendListingMetadataRefreshForTrackedItems(0);
+
+  assert.equal(sentMessages.length, 1);
+  assert.equal(sentMessages[0].type, "TRACE_LIBRARY_METADATA_REFRESH");
+  assert.deepEqual(plainJson(sentMessages[0].payload.items), [
+    {
+      source: "ffn",
+      sourceStoryId: "7654321",
+      url: "https://www.fanfiction.net/s/7654321/1/Tracked-Story",
+      title: "Tracked Story",
+      author: "tester",
+      summary: "The listing summary that should be sent once per page fingerprint.",
+      words: 12345,
+      rating: "T",
+      language: "English",
+    },
+  ]);
 });
 
 test("parseFFNMeta: listing row — characters after Published", () => {

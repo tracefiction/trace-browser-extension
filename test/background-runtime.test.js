@@ -208,6 +208,7 @@ globalThis.__testHooks = {
   executeAutoTrack,
   handleImportTrigger,
   handleMetadataBroadcast,
+  handleLibraryMetadataRefresh,
   handleQuickAdd,
   handleSetHiddenWork,
   handleSetReaderStatus,
@@ -788,6 +789,95 @@ test("handleMetadataBroadcast respects disabled metadata improvement pref", asyn
     /\/api\/extension\/metadata$/.test(String(call.url)),
   );
   assert.equal(metadataCalls.length, 0);
+});
+
+test("handleLibraryMetadataRefresh posts tracked listing metadata and invalidates on update", async () => {
+  const sentMessages = [];
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-refresh-1" },
+    activeTabs: [{ id: 91, url: "https://tracefiction.com/library" }],
+    sendMessageImpl: async (tabId, msg) => {
+      sentMessages.push({ tabId, msg });
+      return { ok: true };
+    },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/api/extension/library/metadata-refresh")) {
+        assert.equal(init.method, "POST");
+        assert.equal(init.headers.Authorization, "Bearer token-refresh-1");
+        assert.deepEqual(JSON.parse(init.body), {
+          items: [
+            {
+              source: "ffn",
+              sourceStoryId: "7654321",
+              summary: "Listing summary",
+            },
+          ],
+        });
+        return createResponse({
+          json: {
+            success: true,
+            data: { updated: 1, ignored: 0 },
+          },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.hooks.setBearerToken("token-refresh-1");
+
+  await h.hooks.handleLibraryMetadataRefresh(
+    {
+      items: [
+        {
+          source: "ffn",
+          sourceStoryId: "7654321",
+          summary: "Listing summary",
+        },
+      ],
+    },
+    { tab: { id: 91 } },
+  );
+
+  const refreshCalls = h.fetchCalls.filter((call) =>
+    /\/api\/extension\/library\/metadata-refresh$/.test(String(call.url)),
+  );
+  assert.equal(refreshCalls.length, 1);
+  await flush();
+  assert.equal(h.store.traceArchiveReadiness.lastArchiveHostKind, "ffn");
+  assert.equal(h.store.traceArchiveReadiness.lastArchiveActionKind, "metadata");
+  assert.equal(sentMessages.length, 1);
+  assert.equal(sentMessages[0].tabId, 91);
+  assert.equal(sentMessages[0].msg.type, "TRACE_LIBRARY_INVALIDATED");
+  assert.equal(sentMessages[0].msg.reason, "metadata");
+});
+
+test("handleLibraryMetadataRefresh respects disabled metadata improvement pref", async () => {
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-refresh-2",
+      prefMetadataImproveEnabled: false,
+    },
+    fetchImpl: async () => createResponse({ json: { success: true } }),
+  });
+  h.hooks.setBearerToken("token-refresh-2");
+
+  await h.hooks.handleLibraryMetadataRefresh(
+    {
+      items: [
+        {
+          source: "ffn",
+          sourceStoryId: "7654321",
+          summary: "Listing summary",
+        },
+      ],
+    },
+    { tab: { id: 92 } },
+  );
+
+  const refreshCalls = h.fetchCalls.filter((call) =>
+    /\/api\/extension\/library\/metadata-refresh$/.test(String(call.url)),
+  );
+  assert.equal(refreshCalls.length, 0);
 });
 
 // =======================================================

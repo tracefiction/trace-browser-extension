@@ -54,6 +54,31 @@ function authStateAllowsActions(authState, hasAuth) {
 function txt(el) {
   return el ? (el.textContent || "").trim() : null;
 }
+function stripTraceUiFromClone(el) {
+  if (!el || !el.cloneNode) return null;
+  const clone = el.cloneNode(true);
+  for (const node of qsa(
+    clone,
+    [
+      "[data-trace-quick-add]",
+      "[data-trace-quick-add-wrap]",
+      "[data-trace-story-handle]",
+      "[data-trace-story-sheet]",
+      "[data-trace-status-choices]",
+      "[data-trace-hidden-action]",
+      "[data-trace-management-header]",
+      "[data-trace-open-trace]",
+      "[data-trace-bottom-sheet-grabber]"
+    ].join(",")
+  )) {
+    node.remove();
+  }
+  return clone;
+}
+function txtWithoutTraceUi(el) {
+  const clone = stripTraceUiFromClone(el);
+  return clone ? (clone.textContent || "").trim() : txt(el);
+}
 function qsa(root, sel) {
   return Array.from((root || document).querySelectorAll(sel));
 }
@@ -269,6 +294,9 @@ function ffnImportChapters(currentChapter, totalChapters) {
 var AUTO_TRACK_DEDUPE_KEY = "trace:auto-track:last";
 var AUTO_TRACK_DEDUPE_WINDOW_MS = 90 * 1000;
 var METADATA_BROADCAST_DEDUPE_KEY = "trace:metadata-broadcast:last";
+var LISTING_METADATA_REFRESH_DEDUPE_KEY = "trace:listing-metadata-refresh:last";
+var LISTING_METADATA_REFRESH_RETRY_MS = 500;
+var LISTING_METADATA_REFRESH_MAX_ATTEMPTS = 6;
 var AUTO_TRACK_READY_RETRY_MS = 150;
 var AUTO_TRACK_READY_MAX_ATTEMPTS = 12;
 var OVERLAY_CACHE_KEY = "libraryOverlayCache";
@@ -519,6 +547,161 @@ function rememberMetadataBroadcast(item) {
   } catch (_) {
     /* ignore */
   }
+}
+
+function sourceStoryIdFromItem(item) {
+  var workKey = overlayWorkKeyFromItem(item);
+  if (!workKey) return null;
+  var parts = workKey.split(":");
+  return parts.length === 2 ? parts[1] : null;
+}
+
+function listingMetadataRefreshItemFromImportItem(item) {
+  var sourceStoryId = sourceStoryIdFromItem(item);
+  if (!sourceStoryId || item.src !== "ffn") return null;
+  return {
+    source: "ffn",
+    sourceStoryId: sourceStoryId,
+    url: item.u || undefined,
+    title: item.t || undefined,
+    author: item.a || undefined,
+    summary: item.sm || undefined,
+    chapters:
+      typeof item.cht === "number" && Number.isFinite(item.cht)
+        ? item.cht
+        : undefined,
+    words:
+      typeof item.w === "number" && Number.isFinite(item.w)
+        ? item.w
+        : undefined,
+    status: item.cmp || undefined,
+    updatedAt: item.upd || undefined,
+    publishedAt: item.pub || undefined,
+    rating: item.r || undefined,
+    language: item.l || undefined,
+    fandoms: Array.isArray(item.fms) && item.fms.length ? item.fms : undefined,
+    characters:
+      Array.isArray(item.chars) && item.chars.length ? item.chars : undefined,
+    relationships:
+      Array.isArray(item.ra) && item.ra.length
+        ? item.ra
+        : Array.isArray(item.rels) && item.rels.length
+          ? item.rels
+          : undefined,
+    genre: item.gen || undefined,
+  };
+}
+
+function listingMetadataRefreshFingerprint(items) {
+  return JSON.stringify(
+    (items || []).map(function (item) {
+      return {
+        source: item.source,
+        sourceStoryId: item.sourceStoryId,
+        url: item.url || null,
+        title: item.title || null,
+        author: item.author || null,
+        summary: item.summary || null,
+        chapters:
+          typeof item.chapters === "number" && Number.isFinite(item.chapters)
+            ? item.chapters
+            : null,
+        words:
+          typeof item.words === "number" && Number.isFinite(item.words)
+            ? item.words
+            : null,
+        status: item.status || null,
+        updatedAt: item.updatedAt || null,
+        publishedAt: item.publishedAt || null,
+        rating: item.rating || null,
+        language: item.language || null,
+        fandoms: Array.isArray(item.fandoms) ? item.fandoms.slice().sort() : [],
+        characters: Array.isArray(item.characters)
+          ? item.characters.slice().sort()
+          : [],
+        relationships: Array.isArray(item.relationships)
+          ? item.relationships.slice().sort()
+          : [],
+        genre: item.genre || null,
+      };
+    }),
+  );
+}
+
+function shouldSendListingMetadataRefresh(items) {
+  try {
+    if (!window.sessionStorage) return true;
+    var fingerprint = listingMetadataRefreshFingerprint(items);
+    var raw = window.sessionStorage.getItem(LISTING_METADATA_REFRESH_DEDUPE_KEY);
+    if (raw === fingerprint) return false;
+    window.sessionStorage.setItem(LISTING_METADATA_REFRESH_DEDUPE_KEY, fingerprint);
+    return true;
+  } catch (_) {
+    return true;
+  }
+}
+
+function collectTrackedListingMetadataRefreshItems(cacheEntries) {
+  if (!isFFN()) return [];
+  if (/\/s\/\d+(?:\/|$)/.test(location.pathname || "")) return [];
+  if (!cacheEntries || typeof cacheEntries !== "object") return [];
+
+  var rows = collectFFNListings();
+  if (!rows.length) return [];
+
+  var seen = Object.create(null);
+  var out = [];
+  for (var i = 0; i < rows.length; i += 1) {
+    var item = rows[i];
+    var workKey = overlayWorkKeyFromItem(item);
+    if (!workKey || !cacheEntries[workKey] || seen[workKey]) continue;
+    var refreshItem = listingMetadataRefreshItemFromImportItem(item);
+    if (!refreshItem) continue;
+    seen[workKey] = true;
+    out.push(refreshItem);
+  }
+  return out;
+}
+
+function sendListingMetadataRefreshForTrackedItems(attempt) {
+  var retryCount =
+    typeof attempt === "number" && Number.isFinite(attempt) ? attempt : 0;
+
+  try {
+    ext.storage.local.get(["authToken", OVERLAY_CACHE_KEY], function (res) {
+      if (ext.runtime.lastError || !res || !res.authToken) return;
+
+      var cache = res[OVERLAY_CACHE_KEY];
+      var entries = cache && cache.entries;
+      if (!entries || typeof entries !== "object") {
+        if (retryCount < LISTING_METADATA_REFRESH_MAX_ATTEMPTS) {
+          setTimeout(function () {
+            sendListingMetadataRefreshForTrackedItems(retryCount + 1);
+          }, LISTING_METADATA_REFRESH_RETRY_MS);
+        }
+        return;
+      }
+
+      var items = collectTrackedListingMetadataRefreshItems(entries);
+      if (!items.length || !shouldSendListingMetadataRefresh(items)) return;
+
+      ext.runtime.sendMessage({
+        type: "TRACE_LIBRARY_METADATA_REFRESH",
+        payload: { items: items },
+      });
+    });
+  } catch (_) {
+    /* best-effort passive enrichment */
+  }
+}
+
+function scheduleListingMetadataRefreshForCurrentPage() {
+  if (shouldDisableTraceContentScript()) return;
+  if (!isFFN()) return;
+  if (/\/s\/\d+(?:\/|$)/.test(location.pathname || "")) return;
+  setTimeout(function () {
+    sendListingMetadataRefreshForTrackedItems(0);
+  }, 250);
 }
 
 function shouldSkipRecentAutoTrack(item) {
@@ -1355,7 +1538,7 @@ function extractFFNDesktopStorySummary(profileTop, title) {
   let best = null;
   let bestLen = 0;
   for (const d of qsa(profileTop, "div.xcontrast_txt")) {
-    const s = txt(d);
+    const s = txtWithoutTraceUi(d);
     if (!s || s.length < 40) continue;
     if (tnorm && s === tnorm) continue;
     if (/^Rated:\s*/i.test(s)) continue;
@@ -1768,7 +1951,7 @@ function collectFFNStory() {
   const profileTop = one(document, "#profile_top");
   const summary =
     extractFFNDesktopStorySummary(profileTop, title) ||
-    txt(one(document, "#profile_top div.xcontrast_txt")) ||
+    txtWithoutTraceUi(one(document, "#profile_top div.xcontrast_txt")) ||
     null;
   const fandom = extractFFNFandom();
   const totalChapters = p.chn ?? null;
@@ -1811,7 +1994,7 @@ function collectFFNListings() {
   const containerOf = (a) => (a.closest && a.closest(".z-list")) || (a.parentElement && a.parentElement.closest && a.parentElement.closest(".z-list")) || a.parentElement || document;
   const summaryText = (node) => {
     if (!node) return null;
-    const n = node.cloneNode(true);
+    const n = stripTraceUiFromClone(node);
     const m = n.querySelector(".z-padtop2.xgray, .xgray.xcontrast_txt, .xgray");
     if (m) m.remove();
     return (n.textContent || "").trim() || null;
@@ -2111,13 +2294,16 @@ if (!shouldDisableTraceContentScript()) {
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", function () {
       scheduleAutoTrackForCurrentPage();
+      scheduleListingMetadataRefreshForCurrentPage();
     });
   } else {
     scheduleAutoTrackForCurrentPage();
+    scheduleListingMetadataRefreshForCurrentPage();
   }
 
   window.addEventListener("pageshow", function () {
     scheduleAutoTrackForCurrentPage();
+    scheduleListingMetadataRefreshForCurrentPage();
   });
 }
 
