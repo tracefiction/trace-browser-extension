@@ -105,7 +105,7 @@ For a release-style build, use HTTPS Trace origins:
 TRACE_API_BASE=https://api.tracefiction.com TRACE_WEB_ORIGIN=https://tracefiction.com npm run build:release
 ```
 
-`build:release` rejects missing, localhost, and non-HTTPS origins.
+`build:release` rejects missing, localhost, non-HTTPS, and non-production Trace origins.
 
 ## Load Locally
 

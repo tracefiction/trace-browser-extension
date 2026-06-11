@@ -77,7 +77,7 @@ private func statusLine(_ raw: String) -> String {
     case "READING": return "Reading"
     case "PLANNING": return "Planning"
     case "PAUSED": return "Paused"
-    case "COMPLETED": return "Completed"
+    case "COMPLETED": return "Finished"
     case "DROPPED": return "Dropped"
     default: return raw.isEmpty ? "" : raw.capitalized
     }

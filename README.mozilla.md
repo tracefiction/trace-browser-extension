@@ -42,10 +42,10 @@ Edit `.env` and set **HTTPS** production origins (no trailing slashes) to match 
 
 ```bash
 TRACE_API_BASE=https://api.tracefiction.com
-TRACE_WEB_ORIGIN=https://www.tracefiction.com
+TRACE_WEB_ORIGIN=https://tracefiction.com
 ```
 
-**`build:release` rejects `http://` and localhost** for these variables.
+**`build:release` rejects non-production, non-HTTPS, and localhost values** for these variables.
 
 ### 3. Run the release build (executes all extension build steps)
 

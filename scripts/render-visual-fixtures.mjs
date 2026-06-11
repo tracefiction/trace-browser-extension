@@ -87,7 +87,18 @@ function makeOverlayCache(variant = "default") {
         readerStatus: "READING",
         entryId: "00000000-0000-4000-8000-000000104927",
         chapters: { current: 17, total: 52 },
-        privateContext: { hasNotes: true, tagCount: 4 },
+        privateContext: {
+          hasNotes: true,
+          tagCount: 9,
+          notePreview: "Slow start but the Riddle arc is worth it - pick back up at the duel.",
+          tags: [
+            "comfort reread",
+            "favorite long private tag that should not own the sheet",
+            "good story",
+            "weekend",
+            "reread soon",
+          ],
+        },
         workMark: { kind: "hiatus", challenge: { kind: "chapter-count-changed", chapterDelta: 2 } },
       },
       "ao3:28534965": {
@@ -95,7 +106,18 @@ function makeOverlayCache(variant = "default") {
         readerStatus: "READING",
         entryId: "00000000-0000-4000-8000-000000285349",
         chapters: { current: 1, total: null },
-        privateContext: { hasNotes: true, tagCount: 3 },
+        privateContext: {
+          hasNotes: true,
+          tagCount: 8,
+          notePreview: "Slow start but the Riddle arc is worth it - pick back up at the duel.",
+          tags: [
+            "comfort reread",
+            "favorite long private tag that should not own the sheet",
+            "good story",
+            "weekend",
+            "reread soon",
+          ],
+        },
       },
       "ffn:10709411": {
         status: "READING",
@@ -109,7 +131,12 @@ function makeOverlayCache(variant = "default") {
         readerStatus: "READING",
         entryId: "00000000-0000-4000-8000-000000703884",
         chapters: { current: 3, total: 28 },
-        privateContext: { hasNotes: true, tagCount: 2 },
+        privateContext: {
+          hasNotes: true,
+          tagCount: 2,
+          notePreview: "great story!",
+          tags: ["favs", "good story"],
+        },
         workMark: { kind: "abandoned" },
       },
     },
@@ -143,6 +170,11 @@ function makeOverlayCache(variant = "default") {
       __traceStatusTarget: "READING",
     };
   }
+  if (variant === "story-free-limit") {
+    cache.entries["ao3:28534965"] = {
+      __traceAutoTrackError: "free_limit_reached",
+    };
+  }
   if (variant === "hidden-unknown") {
     cache.workPreferences["ao3:25010857"] = { browsePreference: { hidden: true } };
   }
@@ -168,11 +200,16 @@ function makeStorageData(authState = connectedAuthState(), cacheVariant = "defau
   return {
     authToken: connected ? "visual-token" : null,
     traceAuthState: authState,
+    traceFirstSaveSeen: connected,
+    traceLibraryCount: connected ? 1 : 0,
+    traceActiveTab: connected
+      ? { kind: "supported_story", site: "ao3", canImport: true }
+      : { kind: "unsupported" },
     libraryOverlayCache: makeOverlayCache(cacheVariant),
     prefAutoTrackEnabled: true,
     prefLibraryInlayEnabled: true,
     prefMetadataImproveEnabled: true,
-    traceUserPro: true,
+    traceUserPro: connected,
   };
 }
 
@@ -182,6 +219,10 @@ function extensionMockSource(storageData) {
       const storageData = ${JSON.stringify(storageData)};
       const storageListeners = [];
       const popupState = {
+        authState: storageData.traceAuthState,
+        firstSaveSeen: storageData.traceFirstSaveSeen === true,
+        libraryCount: typeof storageData.traceLibraryCount === "number" ? storageData.traceLibraryCount : null,
+        activeTab: storageData.traceActiveTab || { kind: "unknown" },
         pro: storageData.traceUserPro === true,
         autoTrackEnabled: storageData.prefAutoTrackEnabled !== false,
         libraryInlayEnabled: storageData.prefLibraryInlayEnabled !== false,
@@ -211,7 +252,9 @@ function extensionMockSource(storageData) {
           response = { ok: true, entryId: msg.payload && msg.payload.entryId, status: msg.payload && msg.payload.status };
         }
         if (msg && msg.type === "TRACE_QUICK_ADD") {
-          response = { ok: true, entryId: "00000000-0000-4000-8000-000000000999", status: "PLANNING" };
+          response = storageData.traceMockQuickAddError
+            ? { ok: false, error: storageData.traceMockQuickAddError }
+            : { ok: true, entryId: "00000000-0000-4000-8000-000000000999", status: "PLANNING" };
         }
         if (typeof cb === "function") setTimeout(() => cb(response), 0);
         return Promise.resolve(response);
@@ -362,7 +405,12 @@ async function renderFixtureScreenshot(browser, definition, scripts, manifest) {
   const page = await browser.newPage({ viewport: definition.viewport });
   const messages = [];
   page.on("pageerror", (error) => messages.push({ type: "pageerror", text: error.message }));
-  await page.addInitScript(extensionMockSource(makeStorageData(definition.authState || connectedAuthState(), definition.cacheVariant)));
+  await page.addInitScript(
+    extensionMockSource({
+      ...makeStorageData(definition.authState || connectedAuthState(), definition.cacheVariant),
+      ...(definition.storageData || {}),
+    }),
+  );
   await installFixtureRoutes(page, html, definition.url);
   await page.goto(definition.url, { waitUntil: "domcontentloaded" });
   await injectScripts(page, definition.contentScripts.map((name) => scripts[name]));
@@ -435,18 +483,25 @@ async function renderFixtureScreenshot(browser, definition, scripts, manifest) {
 
 async function renderPopupScreenshot(browser, definition, assets, manifest) {
   console.error(`Rendering ${definition.name} from popup.html`);
-  const viewport = definition.viewport || { width: 291, height: 420 };
+  const viewport = definition.viewport || { width: 360, height: 520 };
   const deviceScaleFactor = definition.deviceScaleFactor || 2;
-  const page = await browser.newPage({ viewport, deviceScaleFactor });
+  const pageOptions = { viewport, deviceScaleFactor };
+  if (definition.userAgent) pageOptions.userAgent = definition.userAgent;
+  const page = await browser.newPage(pageOptions);
   if (definition.colorScheme) {
     await page.emulateMedia({ colorScheme: definition.colorScheme });
   }
   const messages = [];
   page.on("pageerror", (error) => messages.push({ type: "pageerror", text: error.message }));
-  await page.addInitScript(extensionMockSource(makeStorageData(definition.authState)));
+  await page.addInitScript(
+    extensionMockSource({
+      ...makeStorageData(definition.authState),
+      ...(definition.storageData || {}),
+    }),
+  );
   await installPopupRoutes(page, assets.popupHtml, assets.popupCss, assets.popupJs, assets.markSvg);
   await page.goto("https://trace-extension.local/popup.html", { waitUntil: "domcontentloaded" });
-  await page.waitForSelector("#popup-status", { timeout: 10000 });
+  await page.waitForSelector("#popup-connection[data-state]", { timeout: 10000 });
   await page.waitForTimeout(250);
   const outputPath = path.join(outputRoot, definition.file);
   const clipHeight = await page.evaluate(() => {
@@ -572,6 +627,40 @@ async function main() {
         },
       },
       {
+        name: "AO3 listing signed-out connect notice",
+        file: "ao3-listing-signed-out-notice.png",
+        fixture: "ao3_listing.html",
+        url: "https://archiveofourown.org/works?tag_id=Harry+Potter",
+        viewport: { width: 900, height: 520 },
+        contentScripts: ["keys", "overlay"],
+        authState: {
+          state: "signed_out",
+          message: "Open Trace and sign in once to connect the extension. Then refresh this AO3 tab to restore sync.",
+          helpUrl: "https://tracefiction.com/apps",
+        },
+        waitFor: "[data-trace-connect-notice]",
+        focusForScreenshot: {
+          target: "[data-trace-connect-notice]",
+        },
+      },
+      {
+        name: "AO3 listing quick-add free limit",
+        file: "ao3-listing-quick-add-free-limit.png",
+        fixture: "ao3_listing.html",
+        url: "https://archiveofourown.org/works?tag_id=Harry+Potter",
+        viewport: { width: 900, height: 520 },
+        contentScripts: ["keys", "overlay"],
+        storageData: { traceMockQuickAddError: "free_limit_reached" },
+        waitFor: "#work_25010857 [data-trace-quick-add]",
+        scrollTo: "#work_25010857",
+        clickSelector: "#work_25010857 [data-trace-quick-add]",
+        clickWaitForText: "Full",
+        focusForScreenshot: {
+          target: "#work_25010857 [data-trace-library-overlay-wrap]",
+          closest: "li.work",
+        },
+      },
+      {
         name: "AO3 desktop unknown Add and Hide action row",
         file: "ao3-desktop-unknown-action-row.png",
         fixture: "ao3_listing_desktop_unknown_long.html",
@@ -621,6 +710,36 @@ async function main() {
         viewport: { width: 1440, height: 1000 },
         contentScripts: ["collector"],
         waitFor: "[data-trace-story-handle]",
+        scrollTo: "[data-trace-story-handle]",
+        scrollBlock: "start",
+      },
+      {
+        name: "AO3 story signed-out sheet",
+        file: "ao3-story-signed-out-sheet.png",
+        fixture: "ao3_story.html",
+        url: "https://archiveofourown.org/works/28534965/chapters/71063826",
+        viewport: { width: 1440, height: 1000 },
+        contentScripts: ["collector"],
+        authState: {
+          state: "signed_out",
+          message: "Open Trace and sign in once to connect the extension. Then refresh this AO3 tab to restore sync.",
+          helpUrl: "https://tracefiction.com/apps",
+        },
+        waitFor: "[data-trace-story-handle][data-trace-story-handle-state='auth']",
+        scrollTo: "[data-trace-story-handle]",
+        scrollBlock: "start",
+        openSelector: "[data-trace-story-handle]",
+        openWaitFor: "[data-trace-story-sheet][data-trace-open='1']",
+      },
+      {
+        name: "AO3 story free-limit handle",
+        file: "ao3-story-free-limit-handle.png",
+        fixture: "ao3_story.html",
+        url: "https://archiveofourown.org/works/28534965/chapters/71063826",
+        viewport: { width: 1440, height: 1000 },
+        contentScripts: ["collector"],
+        cacheVariant: "story-free-limit",
+        waitFor: "[data-trace-story-handle][data-trace-story-handle-state='full']",
         scrollTo: "[data-trace-story-handle]",
         scrollBlock: "start",
       },
@@ -709,13 +828,37 @@ async function main() {
         colorScheme: "dark",
       },
       {
+        name: "Extension popup first run on story",
+        file: "popup-first-run-story.png",
+        authState: connectedAuthState(),
+        storageData: {
+          traceFirstSaveSeen: false,
+          traceLibraryCount: 0,
+          traceActiveTab: { kind: "supported_story", site: "ao3", canImport: true },
+        },
+        colorScheme: "dark",
+      },
+      {
         name: "Extension popup signed out",
         file: "popup-signed-out.png",
         authState: {
           state: "signed_out",
-          message: "Open Trace and sign in once to connect the extension.",
+          message: "Open Trace in this browser and sign in. Then return to an AO3 or FFN story page to save your first story.",
           helpUrl: "https://tracefiction.com/apps",
         },
+        colorScheme: "dark",
+      },
+      {
+        name: "Extension popup iOS signed out",
+        file: "popup-ios-signed-out.png",
+        authState: {
+          state: "signed_out",
+          message: "Open Trace in Safari and sign in.",
+          helpUrl: "https://tracefiction.com/apps#safari-ios-setup",
+        },
+        viewport: { width: 360, height: 520 },
+        userAgent:
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
         colorScheme: "dark",
       },
       {

@@ -31,6 +31,7 @@ function createPopupHarness({
     autoTrackEnabled: true,
     libraryInlayEnabled: true,
     metadataImproveEnabled: true,
+    activeTab: { kind: "unsupported" },
   },
   importResponse = { ok: true },
   userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
@@ -136,12 +137,23 @@ function createPopupHarness({
       for (const item of pending) item.fn();
     },
     emitStorageChange(changes, area = "local") {
+      if (area === "local") {
+        for (const [key, change] of Object.entries(changes || {})) {
+          if (change && Object.prototype.hasOwnProperty.call(change, "newValue")) {
+            if (change.newValue === undefined) {
+              delete store[key];
+            } else {
+              store[key] = change.newValue;
+            }
+          }
+        }
+      }
       for (const fn of storageChangeListeners) fn(changes, area);
     },
   };
 }
 
-test("popup renders signed-out fallback and updates to connected on storage change", async () => {
+test("popup renders signed-out fallback with a direct Trace sign-in CTA", async () => {
   const h = createPopupHarness({
     storageState: {},
     popupState: {
@@ -149,6 +161,7 @@ test("popup renders signed-out fallback and updates to connected on storage chan
       autoTrackEnabled: true,
       libraryInlayEnabled: true,
       metadataImproveEnabled: true,
+      activeTab: { kind: "unsupported" },
     },
   });
   await flush();
@@ -159,26 +172,227 @@ test("popup renders signed-out fallback and updates to connected on storage chan
   );
   assert.equal(
     h.document.getElementById("popup-cta").textContent,
-    "Open Trace to connect",
+    "Open Trace to sign in",
   );
+  assert.match(
+    h.document.getElementById("popup-lead").textContent,
+    /return to an AO3 or FFN story page/i,
+  );
+  assert.equal(h.document.querySelector(".popup-eyebrow").hidden, true);
+  assert.doesNotMatch(h.document.body.textContent, /Extension lens/i);
+  assert.equal(h.document.getElementById("popup-import").hidden, true);
+  assert.equal(
+    h.document.getElementById("popup-pro-settings").classList.contains("hidden"),
+    true,
+  );
+});
 
-  const next = {
+test("popup connection indicator reflects D1 state labels", async () => {
+  const cases = [
+    {
+      name: "signed out",
+      authState: { state: "signed_out" },
+      firstSaveSeen: false,
+      expectedState: "off",
+      expectedLabel: "Not linked",
+    },
+    {
+      name: "reconnect",
+      authState: { state: "reconnect_required" },
+      firstSaveSeen: false,
+      expectedState: "warn",
+      expectedLabel: "Reconnect",
+    },
+    {
+      name: "error",
+      authState: { state: "error" },
+      firstSaveSeen: false,
+      expectedState: "error",
+      expectedLabel: "Issue",
+    },
+    {
+      name: "upgrade",
+      authState: { state: "upgrade_required" },
+      firstSaveSeen: false,
+      expectedState: "warn",
+      expectedLabel: "Upgrade",
+    },
+    {
+      name: "connected",
+      authState: { state: "connected" },
+      firstSaveSeen: true,
+      expectedState: "connected",
+      expectedLabel: "Connected",
+    },
+  ];
+
+  for (const item of cases) {
+    const h = createPopupHarness({
+      storageState: { traceAuthState: item.authState },
+      popupState: {
+        pro: false,
+        autoTrackEnabled: true,
+        libraryInlayEnabled: true,
+        metadataImproveEnabled: true,
+        authState: item.authState,
+        firstSaveSeen: item.firstSaveSeen,
+        libraryCount: item.firstSaveSeen ? 1 : 0,
+        activeTab: { kind: "unsupported" },
+      },
+    });
+    await flush();
+
+    const connection = h.document.getElementById("popup-connection");
+    assert.equal(connection.dataset.state, item.expectedState, item.name);
+    assert.equal(
+      connection.querySelector(".popup-connection-label").textContent,
+      item.expectedLabel,
+      item.name,
+    );
+    assert.ok(connection.querySelector(".popup-connection-dot[aria-hidden='true']"), item.name);
+  }
+});
+
+test("popup connected first-run state points unsupported tabs to AO3 and FFN", async () => {
+  const h = createPopupHarness({
+    storageState: {
+      traceAuthState: {
+        state: "connected",
+        message: "Connected",
+        helpUrl: "https://tracefiction.com/apps",
+      },
+    },
+    popupState: {
+      pro: false,
+      autoTrackEnabled: true,
+      libraryInlayEnabled: true,
+      metadataImproveEnabled: true,
+      authState: {
+        state: "connected",
+        message: "Connected",
+        helpUrl: "https://tracefiction.com/apps",
+      },
+      firstSaveSeen: false,
+      libraryCount: 0,
+      activeTab: { kind: "unsupported" },
+    },
+  });
+  await flush();
+
+  assert.equal(
+    h.document.getElementById("popup-status").textContent,
+    "Open AO3 or FFN",
+  );
+  assert.match(h.document.getElementById("popup-lead").textContent, /Add to Trace/i);
+  assert.equal(h.document.getElementById("popup-import").hidden, true);
+  assert.equal(h.document.getElementById("popup-archive-links").hidden, false);
+  assert.equal(
+    h.document.getElementById("popup-open-ao3").getAttribute("href"),
+    "https://archiveofourown.org/works",
+  );
+  assert.equal(
+    h.document.getElementById("popup-open-ffn").getAttribute("href"),
+    "https://www.fanfiction.net/",
+  );
+});
+
+test("popup connected first-run story page makes import the primary action", async () => {
+  const connected = {
+    state: "connected",
+    message: "Connected",
+    helpUrl: "https://tracefiction.com/apps",
+  };
+  const h = createPopupHarness({
+    storageState: { traceAuthState: connected },
+    popupState: {
+      pro: false,
+      autoTrackEnabled: true,
+      libraryInlayEnabled: true,
+      metadataImproveEnabled: true,
+      authState: connected,
+      firstSaveSeen: false,
+      libraryCount: 0,
+      activeTab: { kind: "supported_story", site: "ao3", canImport: true },
+    },
+  });
+  await flush();
+
+  assert.equal(h.document.querySelector(".popup-eyebrow").textContent, "First story");
+  assert.equal(
+    h.document.getElementById("popup-status").textContent,
+    "Save this story",
+  );
+  assert.match(h.document.getElementById("popup-lead").textContent, /Use Add to Trace/i);
+  assert.equal(h.document.getElementById("popup-import").hidden, false);
+  assert.equal(h.document.getElementById("popup-import").disabled, false);
+  assert.equal(h.document.getElementById("popup-import").textContent, "Import this story");
+  assert.equal(h.document.getElementById("popup-cta").textContent, "Open Library");
+});
+
+test("popup switches to compact connected state after a local first-save signal", async () => {
+  const connected = {
     state: "connected",
     message: "Extension connected to your Trace account.",
     helpUrl: "https://tracefiction.com/apps",
   };
+  const h = createPopupHarness({
+    storageState: { traceAuthState: connected },
+    popupState: {
+      pro: false,
+      autoTrackEnabled: true,
+      libraryInlayEnabled: true,
+      metadataImproveEnabled: true,
+      authState: connected,
+      firstSaveSeen: false,
+      libraryCount: 0,
+      activeTab: { kind: "supported_story", site: "ao3", canImport: true },
+    },
+  });
+  await flush();
+
   h.emitStorageChange(
-    { traceAuthState: { oldValue: null, newValue: next } },
+    { traceFirstSaveSeen: { oldValue: false, newValue: true } },
     "local",
   );
 
   assert.equal(h.document.getElementById("popup-status").textContent, "Connected");
   assert.equal(h.document.querySelector(".popup-eyebrow").hidden, true);
+  assert.doesNotMatch(h.document.body.textContent, /Extension lens/i);
   assert.equal(h.document.getElementById("popup-lead").hidden, true);
   assert.equal(h.document.getElementById("popup-lead").textContent, "");
+  assert.equal(h.document.getElementById("popup-import").textContent, "Import this story");
   assert.equal(
     h.document.getElementById("popup-cta").textContent,
-    "Extension help & FAQ",
+    "Open Library",
+  );
+});
+
+test("popup treats account library count as first-save completion", async () => {
+  const next = {
+    state: "connected",
+    message: "Extension connected to your Trace account.",
+    helpUrl: "https://tracefiction.com/apps",
+  };
+  const h = createPopupHarness({
+    storageState: { traceAuthState: next },
+    popupState: {
+      pro: false,
+      autoTrackEnabled: true,
+      libraryInlayEnabled: true,
+      metadataImproveEnabled: true,
+      authState: next,
+      firstSaveSeen: false,
+      libraryCount: 3,
+      activeTab: { kind: "unsupported" },
+    },
+  });
+  await flush();
+
+  assert.equal(h.document.getElementById("popup-status").textContent, "Connected");
+  assert.equal(h.document.getElementById("popup-lead").hidden, true);
+  assert.equal(
+    h.document.getElementById("popup-cta").textContent,
+    "Open Library",
   );
 });
 
@@ -199,13 +413,83 @@ test("popup signed-out lead on iPhone user agent mentions Safari website permiss
   const lead = h.document.getElementById("popup-lead").textContent;
   assert.match(lead, /sign in/i);
   assert.match(lead, /tracefiction\.com/i);
-  assert.match(lead, /allow Trace/i);
+  assert.match(lead, /enable Trace in Extensions/i);
+  assert.match(lead, /allow it on tracefiction\.com/i);
   assert.match(lead, /AO3/i);
   assert.match(lead, /FFN/i);
+  assert.match(lead, /Add to Trace or import/i);
+  assert.equal(
+    h.document.getElementById("popup-cta").textContent,
+    "Safari setup help",
+  );
   assert.equal(
     h.document.getElementById("popup-cta").getAttribute("href"),
     "https://tracefiction.com/apps#safari-ios-setup",
   );
+});
+
+test("popup reconnect guidance on iPhone links to Safari setup help", async () => {
+  const h = createPopupHarness({
+    storageState: {
+      traceAuthState: {
+        state: "reconnect_required",
+        message: "Open Trace to sign in again.",
+        helpUrl: "https://tracefiction.com/",
+      },
+    },
+    popupState: {
+      pro: false,
+      autoTrackEnabled: true,
+      libraryInlayEnabled: true,
+      metadataImproveEnabled: true,
+    },
+    userAgent:
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+  });
+  await flush();
+
+  const lead = h.document.getElementById("popup-lead").textContent;
+  assert.match(lead, /Open Trace to sign in again/i);
+  assert.match(lead, /allow it on tracefiction\.com/i);
+  assert.match(lead, /AO3/i);
+  assert.match(lead, /FFN/i);
+  assert.equal(
+    h.document.getElementById("popup-cta").textContent,
+    "Safari setup help",
+  );
+  assert.equal(
+    h.document.getElementById("popup-cta").getAttribute("href"),
+    "https://tracefiction.com/apps#safari-ios-setup",
+  );
+});
+
+test("popup first-run state on iPhone explains archive site permission before saving", async () => {
+  const connected = {
+    state: "connected",
+    message: "Connected",
+    helpUrl: "https://tracefiction.com/apps",
+  };
+  const h = createPopupHarness({
+    storageState: { traceAuthState: connected },
+    popupState: {
+      pro: false,
+      autoTrackEnabled: true,
+      libraryInlayEnabled: true,
+      metadataImproveEnabled: true,
+      authState: connected,
+      firstSaveSeen: false,
+      libraryCount: 0,
+      activeTab: { kind: "unsupported" },
+    },
+    userAgent:
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+  });
+  await flush();
+
+  const lead = h.document.getElementById("popup-lead").textContent;
+  assert.match(lead, /allow Trace on AO3 and FFN/i);
+  assert.match(lead, /supported story page/i);
+  assert.match(lead, /Add to Trace or import/i);
 });
 
 test("popup shows reconnect guidance with a direct recovery CTA", async () => {
@@ -229,18 +513,25 @@ test("popup shows reconnect guidance with a direct recovery CTA", async () => {
     h.document.getElementById("popup-cta").textContent,
     "Open Trace to reconnect",
   );
+  assert.equal(
+    h.document.getElementById("popup-pro-settings").classList.contains("hidden"),
+    true,
+  );
 });
 
 test("popup shows pro controls and persists toggle changes", async () => {
   const h = createPopupHarness({
     storageState: {
       traceAuthState: { state: "connected", message: "Connected", helpUrl: "https://tracefiction.com/apps" },
+      traceFirstSaveSeen: true,
     },
     popupState: {
       pro: true,
       autoTrackEnabled: false,
       libraryInlayEnabled: true,
       metadataImproveEnabled: true,
+      firstSaveSeen: true,
+      activeTab: { kind: "supported_story", site: "ao3", canImport: true },
     },
   });
   await flush();
@@ -251,6 +542,7 @@ test("popup shows pro controls and persists toggle changes", async () => {
   const metadata = h.document.getElementById("pref-metadata-improve");
 
   assert.equal(section.classList.contains("hidden"), false);
+  assert.doesNotMatch(section.textContent, /Extension behavior/i);
   assert.equal(auto.checked, false);
   assert.equal(inlay.checked, true);
   assert.equal(metadata.checked, true);
@@ -271,8 +563,17 @@ test("popup import failure re-enables the button and exposes the failure reason"
   const h = createPopupHarness({
     storageState: {
       traceAuthState: { state: "connected", message: "Connected", helpUrl: "https://tracefiction.com/apps" },
+      traceFirstSaveSeen: true,
     },
     importResponse: { ok: false, error: "collect_failed" },
+    popupState: {
+      pro: false,
+      autoTrackEnabled: true,
+      libraryInlayEnabled: true,
+      metadataImproveEnabled: true,
+      firstSaveSeen: true,
+      activeTab: { kind: "supported_story", site: "ao3", canImport: true },
+    },
   });
   await flush();
 
@@ -288,8 +589,17 @@ test("popup import success closes the popup after a short delay", async () => {
   const h = createPopupHarness({
     storageState: {
       traceAuthState: { state: "connected", message: "Connected", helpUrl: "https://tracefiction.com/apps" },
+      traceFirstSaveSeen: true,
     },
     importResponse: { ok: true },
+    popupState: {
+      pro: false,
+      autoTrackEnabled: true,
+      libraryInlayEnabled: true,
+      metadataImproveEnabled: true,
+      firstSaveSeen: true,
+      activeTab: { kind: "supported_story", site: "ao3", canImport: true },
+    },
   });
   await flush();
 

@@ -42,15 +42,29 @@ Chrome or Edge:
    button in `chrome://extensions`.
 6. Reload every AO3/FFN tab under test.
 
+For Google Chrome Stable QA, use the `chrome://extensions` UI path above as
+the source of truth. Chrome `148.0.7778.179` ignored command-line unpacked
+extension loading during D3e QA with:
+`--load-extension is not allowed in Google Chrome, ignoring.` A recorded
+extension path in the profile's `Secure Preferences` is not proof that the
+runtime is active. Confirm the Trace card appears on `chrome://extensions` and
+that either `Inspect views service worker` is listed or
+`chrome-extension://<extension-id>/popup.html` opens the Trace popup. Use
+Chrome for Testing or Chromium if a repeatable command-line harness is needed.
+
 Safari:
 
 1. Open `Trace.xcodeproj`.
 2. Select the macOS or iOS app target and a local signing team.
 3. Build and run the app target.
-4. Enable the Trace extension in Safari Settings -> Extensions.
-5. After code changes, rebuild/rerun the app target, then disable/enable the
+4. Enable the Trace extension in Safari Settings -> Extensions. On iOS, use
+   Settings -> Apps -> Safari -> Extensions when available, or Settings ->
+   Safari -> Extensions on older versions.
+5. On iOS Safari, allow Trace on tracefiction.com, archiveofourown.org, and
+   fanfiction.net when prompted.
+6. After code changes, rebuild/rerun the app target, then disable/enable the
    Safari extension if Safari keeps an old copy.
-6. Reload every AO3/FFN tab under test.
+7. Reload every AO3/FFN tab under test.
 
 ### Page Refresh
 
@@ -263,10 +277,21 @@ Use both `www.fanfiction.net` and `m.fanfiction.net` listing pages.
   - Pass: no Trace overlay, Add, Hide, lens, story handle, or sheet appears.
 
 - Extension popup:
-  - Connected account: shows connected state and current toggles.
-  - Signed out: shows connection guidance.
+  - Signed out: tells the user to open/sign in to Trace in the same browser,
+    then return to an AO3/FFN story page. It must not imply AO3/FFN
+    credentials are needed.
+  - Connected, no local first-save signal, not on a supported archive page:
+    points to AO3 and FFN as the next step instead of generic help.
+  - Connected, no local first-save signal, on a supported AO3/FFN story page:
+    makes `+ ADD` or page import the obvious first-story action.
+  - Connected after a successful quick add/track or account library count:
+    shows compact connected state, current toggles, and the Library/import path
+    where applicable.
   - Reconnect/error: shows recovery/error state.
-  - Pass: popup state matches auth state and controls are not misleading.
+  - iOS Safari popup help, where shown: names both enabling the Safari
+    extension and allowing it on Trace, AO3, and FFN.
+  - Pass: popup state matches auth/page context and controls are not
+    misleading.
 
 ## Screenshots To Capture
 

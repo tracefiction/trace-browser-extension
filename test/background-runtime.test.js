@@ -208,6 +208,7 @@ globalThis.__testHooks = {
   executeAutoTrack,
   handleImportTrigger,
   handleMetadataBroadcast,
+  handleLibraryMetadataRefresh,
   handleQuickAdd,
   handleSetHiddenWork,
   handleSetReaderStatus,
@@ -275,6 +276,8 @@ test("TRACE_AUTH_UPDATE with blank token clears session and marks signed out", a
     storageState: {
       authToken: "token-1",
       traceUserPro: true,
+      traceFirstSaveSeen: true,
+      traceLibraryCount: 9,
       libraryOverlayCache: { entries: { "ao3:1": "READING" } },
     },
   });
@@ -287,9 +290,233 @@ test("TRACE_AUTH_UPDATE with blank token clears session and marks signed out", a
   assert.deepEqual(plainJson(response), { success: true, state: "signed_out" });
   assert.equal(h.store.authToken, undefined);
   assert.equal(h.store.traceUserPro, undefined);
+  assert.equal(h.store.traceFirstSaveSeen, undefined);
+  assert.equal(h.store.traceLibraryCount, undefined);
   assert.equal(h.store.libraryOverlayCache, undefined);
   assert.equal(h.store.traceAuthState.state, "signed_out");
   assert.deepEqual(plainJson(h.badgeTextCalls.at(-1)), { text: "", tabId: 22 });
+});
+
+test("TRACE_POPUP_GET_STATE includes local activation and active tab context", async () => {
+  const connected = {
+    state: "connected",
+    message: "Connected",
+    helpUrl: "https://tracefiction.com/",
+  };
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-popup",
+      traceAuthState: connected,
+      traceFirstSaveSeen: false,
+    },
+    activeTabs: [
+      { id: 23, url: "https://archiveofourown.org/works/12345/chapters/67890" },
+    ],
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) {
+        return createResponse({ json: { pro: true, library_count: 0 } });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.hooks.setBearerToken("token-popup");
+
+  const response = await h.dispatchMessage({ type: "TRACE_POPUP_GET_STATE" });
+
+  assert.equal(response.pro, true);
+  assert.equal(response.firstSaveSeen, false);
+  assert.equal(response.libraryCount, 0);
+  assert.deepEqual(plainJson(response.activeTab), {
+    kind: "supported_story",
+    site: "ao3",
+    canImport: true,
+  });
+  assert.equal(response.autoTrackEnabled, true);
+  assert.equal(response.libraryInlayEnabled, true);
+  assert.equal(response.metadataImproveEnabled, true);
+});
+
+test("TRACE_EXTENSION_STATUS_QUERY returns connected state without private fields", async () => {
+  const h = createBackgroundHarness();
+  h.hooks.setBearerToken("token-status-handshake");
+  h.store.authToken = "token-status-handshake";
+  h.store.traceAuthState = {
+    state: "connected",
+    message: "Extension connected to your Trace account.",
+    helpUrl: "https://tracefiction.com/",
+    lastTokenSyncAt: "2026-05-01T12:00:00.000Z",
+    firstSaveSeen: true,
+    userId: "user-should-not-leak",
+  };
+  h.store.traceFirstSaveSeen = true;
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_EXTENSION_STATUS_QUERY",
+    nonce: "nonce-connected",
+  });
+
+  assert.deepEqual(plainJson(response), {
+    installed: true,
+    connected: true,
+    authState: "connected",
+    firstSaveSeen: true,
+    browserKind: "unknown",
+    lastTokenSyncAt: Date.parse("2026-05-01T12:00:00.000Z"),
+  });
+  assert.equal(Object.prototype.hasOwnProperty.call(response, "authToken"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(response, "token"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(response, "userId"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(response, "message"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(response, "helpUrl"), false);
+});
+
+test("TRACE_EXTENSION_STATUS_QUERY returns only coarse archive readiness fields", async () => {
+  const h = createBackgroundHarness();
+  h.hooks.setBearerToken("token-status-handshake");
+  h.store.authToken = "token-status-handshake";
+  h.store.traceAuthState = {
+    state: "connected",
+    message: "Extension connected to your Trace account.",
+  };
+  h.store.traceArchiveReadiness = {
+    lastArchiveSeenAt: Date.parse("2026-05-01T12:00:00.000Z"),
+    lastArchiveHostKind: "ao3",
+    lastArchiveActionAt: Date.parse("2026-05-01T12:01:00.000Z"),
+    lastArchiveActionKind: "quick_add",
+    lastArchiveErrorAt: Date.now(),
+    lastArchiveErrorKind: "parser",
+    url: "https://archiveofourown.org/works/123",
+    title: "must not leak",
+    sourceId: "ao3:123",
+    notes: "must not leak",
+    rawError: "selector .private failed",
+  };
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_EXTENSION_STATUS_QUERY",
+    nonce: "nonce-archive",
+  });
+
+  assert.deepEqual(plainJson(response), {
+    installed: true,
+    connected: true,
+    authState: "connected",
+    firstSaveSeen: false,
+    browserKind: "unknown",
+    lastArchiveSeenAt: Date.parse("2026-05-01T12:00:00.000Z"),
+    lastArchiveHostKind: "ao3",
+    lastArchiveActionAt: Date.parse("2026-05-01T12:01:00.000Z"),
+    lastArchiveActionKind: "quick_add",
+    lastArchiveErrorKind: "parser",
+  });
+  assert.equal(Object.prototype.hasOwnProperty.call(response, "url"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(response, "title"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(response, "sourceId"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(response, "notes"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(response, "rawError"), false);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(response, "lastArchiveErrorAt"),
+    false,
+  );
+});
+
+test("TRACE_EXTENSION_STATUS_QUERY ignores invalid archive readiness fields", async () => {
+  const h = createBackgroundHarness();
+  h.hooks.setBearerToken("token-status-handshake");
+  h.store.authToken = "token-status-handshake";
+  h.store.traceAuthState = { state: "connected" };
+  h.store.traceArchiveReadiness = {
+    lastArchiveSeenAt: "not-a-date",
+    lastArchiveHostKind: "archiveofourown.org",
+    lastArchiveActionAt: Number.NaN,
+    lastArchiveActionKind: "story_title",
+    lastArchiveErrorAt: Date.now(),
+    lastArchiveErrorKind: "raw_selector_failure",
+  };
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_EXTENSION_STATUS_QUERY",
+    nonce: "nonce-invalid-archive",
+  });
+
+  assert.deepEqual(plainJson(response), {
+    installed: true,
+    connected: true,
+    authState: "connected",
+    firstSaveSeen: false,
+    browserKind: "unknown",
+  });
+});
+
+test("TRACE_EXTENSION_STATUS_QUERY returns signed-out state", async () => {
+  const h = createBackgroundHarness();
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_EXTENSION_STATUS_QUERY",
+    nonce: "nonce-signed-out",
+  });
+
+  assert.deepEqual(plainJson(response), {
+    installed: true,
+    connected: false,
+    authState: "signed_out",
+    firstSaveSeen: false,
+    browserKind: "unknown",
+  });
+});
+
+test("TRACE_EXTENSION_STATUS_QUERY returns reconnect and error states", async () => {
+  const reconnect = createBackgroundHarness();
+  reconnect.store.traceAuthState = {
+    state: "reconnect_required",
+    message: "Open Trace and sign in again.",
+    lastHttpStatus: 401,
+  };
+  const reconnectResponse = await reconnect.dispatchMessage({
+    type: "TRACE_EXTENSION_STATUS_QUERY",
+    nonce: "nonce-reconnect",
+  });
+  assert.deepEqual(plainJson(reconnectResponse), {
+    installed: true,
+    connected: false,
+    authState: "reconnect_required",
+    firstSaveSeen: false,
+    browserKind: "unknown",
+  });
+
+  const errored = createBackgroundHarness();
+  errored.store.traceAuthState = {
+    state: "error",
+    message: "Trace could not load extension storage.",
+  };
+  const errorResponse = await errored.dispatchMessage({
+    type: "TRACE_EXTENSION_STATUS_QUERY",
+    nonce: "nonce-error",
+  });
+  assert.deepEqual(plainJson(errorResponse), {
+    installed: true,
+    connected: false,
+    authState: "error",
+    firstSaveSeen: false,
+    browserKind: "unknown",
+  });
+});
+
+test("TRACE_EXTENSION_STATUS_QUERY ignores missing or invalid nonces", async () => {
+  const h = createBackgroundHarness();
+
+  assert.equal(
+    await h.dispatchMessage({ type: "TRACE_EXTENSION_STATUS_QUERY" }),
+    undefined,
+  );
+  assert.equal(
+    await h.dispatchMessage({ type: "TRACE_EXTENSION_STATUS_QUERY", nonce: "" }),
+    undefined,
+  );
+  assert.equal(
+    await h.dispatchMessage({ type: "TRACE_EXTENSION_STATUS_QUERY", nonce: "   " }),
+    undefined,
+  );
 });
 
 test("AO3 tab completion pings the collector to schedule auto-track", async () => {
@@ -343,7 +570,41 @@ test("TRACE_POPUP_OPEN heals stale error state when token still exists", async (
   assert.equal(h.store.traceUserPro, true);
 });
 
-test("handleAutoTrack without a token moves popup state to reconnect required", () => {
+test("TRACE_OPEN_TRACE_URL opens validated Trace URLs in a browser tab", async () => {
+  const h = createBackgroundHarness({
+    webOrigin: "http://localhost:5173",
+  });
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_OPEN_TRACE_URL",
+    payload: {
+      url: "http://localhost:5173/?panel=details&entryId=00000000-0000-4000-8000-000000000123",
+    },
+  });
+
+  assert.deepEqual(plainJson(response), { ok: true });
+  assert.deepEqual(plainJson(h.createdTabs), [
+    {
+      url: "http://localhost:5173/?panel=details&entryId=00000000-0000-4000-8000-000000000123",
+    },
+  ]);
+});
+
+test("TRACE_OPEN_TRACE_URL rejects non-Trace URLs", async () => {
+  const h = createBackgroundHarness({
+    webOrigin: "https://tracefiction.com",
+  });
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_OPEN_TRACE_URL",
+    payload: { url: "https://example.com/?panel=details" },
+  });
+
+  assert.deepEqual(plainJson(response), { ok: false, error: "invalid_trace_url" });
+  assert.deepEqual(plainJson(h.createdTabs), []);
+});
+
+test("handleAutoTrack without a token keeps first-install popup state signed out", () => {
   const h = createBackgroundHarness();
 
   h.hooks.handleAutoTrack(
@@ -351,7 +612,7 @@ test("handleAutoTrack without a token moves popup state to reconnect required", 
     { tab: { id: 33 } },
   );
 
-  assert.equal(h.store.traceAuthState.state, "reconnect_required");
+  assert.equal(h.store.traceAuthState.state, "signed_out");
   assert.match(h.store.traceAuthState.message, /automatic sync will work/i);
   assert.deepEqual(plainJson(h.badgeTextCalls.at(-1)), { text: "LOG", tabId: 33 });
 });
@@ -480,6 +741,8 @@ test("executeAutoTrack success refreshes overlay cache immediately", async () =>
   );
 
   assert.equal(h.store.traceAuthState.state, "connected");
+  assert.equal(h.store.traceAuthState.firstSaveSeen, true);
+  assert.equal(h.store.traceFirstSaveSeen, true);
   assert.equal(h.store.libraryOverlayCache.syncVersion, "v-track");
   assert.deepEqual(plainJson(h.badgeTextCalls.at(-1)), { text: "OK", tabId: 67 });
   assert.equal(sentMessages.length, 1);
@@ -528,6 +791,95 @@ test("handleMetadataBroadcast respects disabled metadata improvement pref", asyn
   assert.equal(metadataCalls.length, 0);
 });
 
+test("handleLibraryMetadataRefresh posts tracked listing metadata and invalidates on update", async () => {
+  const sentMessages = [];
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-refresh-1" },
+    activeTabs: [{ id: 91, url: "https://tracefiction.com/library" }],
+    sendMessageImpl: async (tabId, msg) => {
+      sentMessages.push({ tabId, msg });
+      return { ok: true };
+    },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/api/extension/library/metadata-refresh")) {
+        assert.equal(init.method, "POST");
+        assert.equal(init.headers.Authorization, "Bearer token-refresh-1");
+        assert.deepEqual(JSON.parse(init.body), {
+          items: [
+            {
+              source: "ffn",
+              sourceStoryId: "7654321",
+              summary: "Listing summary",
+            },
+          ],
+        });
+        return createResponse({
+          json: {
+            success: true,
+            data: { updated: 1, ignored: 0 },
+          },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.hooks.setBearerToken("token-refresh-1");
+
+  await h.hooks.handleLibraryMetadataRefresh(
+    {
+      items: [
+        {
+          source: "ffn",
+          sourceStoryId: "7654321",
+          summary: "Listing summary",
+        },
+      ],
+    },
+    { tab: { id: 91 } },
+  );
+
+  const refreshCalls = h.fetchCalls.filter((call) =>
+    /\/api\/extension\/library\/metadata-refresh$/.test(String(call.url)),
+  );
+  assert.equal(refreshCalls.length, 1);
+  await flush();
+  assert.equal(h.store.traceArchiveReadiness.lastArchiveHostKind, "ffn");
+  assert.equal(h.store.traceArchiveReadiness.lastArchiveActionKind, "metadata");
+  assert.equal(sentMessages.length, 1);
+  assert.equal(sentMessages[0].tabId, 91);
+  assert.equal(sentMessages[0].msg.type, "TRACE_LIBRARY_INVALIDATED");
+  assert.equal(sentMessages[0].msg.reason, "metadata");
+});
+
+test("handleLibraryMetadataRefresh respects disabled metadata improvement pref", async () => {
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-refresh-2",
+      prefMetadataImproveEnabled: false,
+    },
+    fetchImpl: async () => createResponse({ json: { success: true } }),
+  });
+  h.hooks.setBearerToken("token-refresh-2");
+
+  await h.hooks.handleLibraryMetadataRefresh(
+    {
+      items: [
+        {
+          source: "ffn",
+          sourceStoryId: "7654321",
+          summary: "Listing summary",
+        },
+      ],
+    },
+    { tab: { id: 92 } },
+  );
+
+  const refreshCalls = h.fetchCalls.filter((call) =>
+    /\/api\/extension\/library\/metadata-refresh$/.test(String(call.url)),
+  );
+  assert.equal(refreshCalls.length, 0);
+});
+
 // =======================================================
 // Quick-add (TRACE_QUICK_ADD)
 // =======================================================
@@ -574,6 +926,8 @@ test("TRACE_QUICK_ADD returns ok and refreshes overlay on success", async () => 
   assert.equal(msgResponse.ok, true);
   assert.equal(msgResponse.entryId, "e1");
   assert.equal(h.store.traceAuthState.state, "connected");
+  assert.equal(h.store.traceAuthState.firstSaveSeen, true);
+  assert.equal(h.store.traceFirstSaveSeen, true);
   assert.ok(h.store.traceAuthState.lastQuickAddAt);
   assert.deepEqual(plainJson(h.badgeTextCalls.at(-1)), { text: "OK", tabId: 77 });
   assert.equal(sentMessages.length >= 1, true);

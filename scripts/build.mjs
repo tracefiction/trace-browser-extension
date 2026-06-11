@@ -143,12 +143,14 @@ const LOCAL_TRACE_API_MATCHES = [
   "http://localhost:3001/*",
   "http://127.0.0.1:3001/*",
 ];
+const RELEASE_TRACE_API_BASE = "https://api.tracefiction.com";
+const RELEASE_TRACE_WEB_ORIGIN = "https://tracefiction.com";
 
 function isLocalLike(value) {
   return /localhost|127\.0\.0\.1/i.test(value);
 }
 
-function assertReleaseUrl(name, value) {
+function assertReleaseUrl(name, value, expected) {
   if (!value) {
     throw new Error(`${name} must be set for release builds.`);
   }
@@ -157,6 +159,9 @@ function assertReleaseUrl(name, value) {
   }
   if (isLocalLike(value)) {
     throw new Error(`${name} cannot point at localhost for release builds. Received: ${value}`);
+  }
+  if (value !== expected) {
+    throw new Error(`${name} must be ${expected} for store/App Store release builds. Received: ${value}`);
   }
 }
 
@@ -186,8 +191,8 @@ const TRACE_WEB_ORIGIN = (
 ).replace(/\/$/, "");
 
 if (IS_RELEASE) {
-  assertReleaseUrl("TRACE_API_BASE", TRACE_API_BASE);
-  assertReleaseUrl("TRACE_WEB_ORIGIN", TRACE_WEB_ORIGIN);
+  assertReleaseUrl("TRACE_API_BASE", TRACE_API_BASE, RELEASE_TRACE_API_BASE);
+  assertReleaseUrl("TRACE_WEB_ORIGIN", TRACE_WEB_ORIGIN, RELEASE_TRACE_WEB_ORIGIN);
 } else if (isLocalLike(TRACE_API_BASE) || isLocalLike(TRACE_WEB_ORIGIN)) {
   console.warn(
     "[Trace build] Using local development origins. Use TRACE_BUILD_MODE=release for store/App Store artifacts.",

@@ -89,6 +89,8 @@ Trace for iOS now includes the updated Safari extension experience:
 - Hide works from Trace browsing overlays, with undo.
 - Use the refreshed extension popup for connection status, import, and behavior
   controls.
+- Clearer setup guidance for enabling the Safari extension and allowing it on
+  Trace, AO3, and FanFiction.net.
 
 This update also improves reconnect handling, mobile overlay placement, and
 extension feedback while saving.
@@ -102,9 +104,13 @@ status overlays. It does not request AO3/FFN credentials or browser cookies.
 
 To test:
 
-1. Install the app and enable the Safari extension in Settings -> Safari ->
-   Extensions.
-2. Sign in at tracefiction.com in Safari.
-3. Open the extension popup on tracefiction.com to connect the extension.
-4. Visit an AO3 or FanFiction.net story/listing page and refresh if needed.
-5. Use `+ ADD`, status controls, import, and hide/undo on supported pages.
+1. Install the app and enable the Safari extension in Settings -> Apps ->
+   Safari -> Extensions. On older iOS versions, this may appear as Settings ->
+   Safari -> Extensions.
+2. In Safari, allow Trace on tracefiction.com, archiveofourown.org, and
+   fanfiction.net when prompted.
+3. Sign in at tracefiction.com in Safari.
+4. Open the extension popup on tracefiction.com to connect the extension.
+5. Visit a supported AO3 or FanFiction.net story/listing page and refresh if
+   needed.
+6. Use `+ ADD`, status controls, import, and hide/undo on supported pages.

@@ -188,7 +188,7 @@ test("library-overlay reruns when listing links are inserted after initial rende
     "[data-trace-library-overlay-wrap]",
   );
   assert.equal(wraps.length, 1);
-  assert.match(wraps[0].textContent || "", /\+ ADD/);
+  assert.match(wraps[0].textContent || "", /Add to Trace/);
 });
 
 test("library-overlay renders legacy entry status shape", async () => {
@@ -474,14 +474,150 @@ test("library-overlay prefers readerStatus and entryId-era optional fields", asy
 
   const wrap = window.document.querySelector("[data-trace-library-overlay-wrap]");
   assert.ok(wrap);
-  assert.match(wrap.textContent || "", /Paused\s*·\s*3\/17/);
-  assert.doesNotMatch(wrap.textContent || "", /Reading\s*·/);
+  assert.match(wrap.textContent || "", /Paused\s*3\/17/);
+  assert.doesNotMatch(wrap.textContent || "", /Reading/);
   assert.doesNotMatch(wrap.textContent || "", /Private note|2 saved|tag/i);
-  assert.equal(wrap.querySelector("[aria-hidden='true']"), null);
+  assert.ok(wrap.querySelector("[aria-hidden='true']"));
   const { surface } = openTraceLens(window);
   assert.match(surface.textContent || "", /Private note/i);
-  assert.match(surface.textContent || "", /Edit notes in Trace/i);
-  assert.match(surface.textContent || "", /2 saved\s*·\s*Open in Trace/i);
+  assert.match(surface.textContent || "", /edit in Trace/i);
+  assert.match(surface.textContent || "", /2 private tags/i);
+});
+
+test("library-overlay renders display-safe private note preview and tag pills when provided", async () => {
+  const window = await renderOverlayListing({
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/12346'>Demo Work</a></h4></li></ol></body></html>",
+    cache: {
+      entries: {
+        "ao3:12346": {
+          status: "READING",
+          readerStatus: "READING",
+          entryId: "entry-456",
+          chapters: { current: 5, total: 20 },
+          privateContext: {
+            hasNotes: true,
+            tagCount: 6,
+            notePreview: "  actual note from Trace\nfor this work  ",
+            tags: ["comfort", "reread", "favorite private tag label that is too long", "longfic", "weekend"],
+          },
+        },
+      },
+      syncVersion: "v-private-context",
+    },
+  });
+
+  const wrap = window.document.querySelector("[data-trace-library-overlay-wrap]");
+  assert.ok(wrap);
+  assert.doesNotMatch(wrap.textContent || "", /actual note|comfort|reread/i);
+
+  const { surface } = openTraceLens(window);
+  assert.match(surface.textContent || "", /actual note from Trace for this work/i);
+  assert.doesNotMatch(surface.textContent || "", /Private note saved\s*·\s*edit in Trace/i);
+  assert.match(surface.textContent || "", /comfort/i);
+  assert.match(surface.textContent || "", /reread/i);
+  assert.match(surface.textContent || "", /favorite private tag label/i);
+  assert.doesNotMatch(surface.textContent || "", /longfic/i);
+  assert.doesNotMatch(surface.textContent || "", /weekend/i);
+  assert.match(surface.textContent || "", /\+3/);
+  assert.doesNotMatch(surface.textContent || "", /6 private tags/i);
+  const privateTags = Array.from(surface.querySelectorAll(".x-utag"));
+  assert.equal(privateTags.length, 4);
+  for (const tag of privateTags) {
+    assert.match(tag.getAttribute("style") || "", /border-radius:\s*999px/i);
+    assert.match(tag.getAttribute("style") || "", /background:\s*(?:#d8e3d5|rgb\(216,\s*227,\s*213\))/i);
+    assert.match(tag.getAttribute("style") || "", /padding:\s*3px 10px/i);
+    assert.match(tag.getAttribute("style") || "", /max-width:\s*150px/i);
+    assert.match(tag.getAttribute("style") || "", /text-overflow:\s*ellipsis/i);
+  }
+  assert.equal(privateTags[2].getAttribute("title"), "favorite private tag label that is too long");
+});
+
+test("library-overlay renders COMPLETED reader status as Finished", async () => {
+  const window = await renderOverlayListing({
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/22334'>Finished Work</a></h4></li></ol></body></html>",
+    cache: {
+      entries: {
+        "ao3:22334": {
+          status: "COMPLETED",
+          readerStatus: "COMPLETED",
+          chapters: { current: 12, total: 12 },
+        },
+      },
+      syncVersion: "v-finished",
+    },
+  });
+
+  const wrap = window.document.querySelector("[data-trace-library-overlay-wrap]");
+  assert.ok(wrap);
+  assert.match(wrap.textContent || "", /Finished\s*12\/12/);
+  assert.doesNotMatch(wrap.textContent || "", /Completed/);
+  const { surface } = openTraceLens(window);
+  assert.match(surface.textContent || "", /Finished/);
+  assert.doesNotMatch(surface.textContent || "", /Completed/);
+});
+
+test("library-overlay renders optional WIP new-chapter context when present", async () => {
+  const window = await renderOverlayListing({
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/33345'>New Chapters Work</a></h4></li></ol></body></html>",
+    cache: {
+      entries: {
+        "ao3:33345": {
+          status: "READING",
+          readerStatus: "READING",
+          chapters: { current: 4, total: 8 },
+          workStatus: "wip",
+          catchupState: "BEHIND",
+          newChapterCount: 2,
+        },
+      },
+      syncVersion: "v-new-context",
+    },
+  });
+
+  const wrap = window.document.querySelector("[data-trace-library-overlay-wrap]");
+  assert.ok(wrap);
+  assert.match(wrap.textContent || "", /Reading\s*4\/8/i);
+  assert.doesNotMatch(wrap.textContent || "", /\+2 new chapters/i);
+  assert.doesNotMatch(wrap.textContent || "", /Finished/i);
+  const lens = window.document.querySelector("[data-trace-library-lens]");
+  assert.equal(lens.getAttribute("data-trace-new-chapters"), "1");
+  assert.equal(lens.getAttribute("data-trace-work-status"), "wip");
+
+  const { surface } = openTraceLens(window);
+  const workRow = surface.querySelector("[data-trace-action-row='Work status']");
+  const position = surface.querySelector("[data-trace-action-position]");
+  assert.equal(workRow, null);
+  assert.ok(position);
+  assert.doesNotMatch(surface.textContent || "", /Work status|Work in progress/i);
+  assert.match(position.textContent || "", /\+2 new chapters/i);
+});
+
+test("library-overlay keeps legacy fallback when optional work fields are missing", async () => {
+  const window = await renderOverlayListing({
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/44456'>Legacy Work</a></h4></li></ol></body></html>",
+    cache: {
+      entries: {
+        "ao3:44456": {
+          status: "READING",
+          readerStatus: "READING",
+          chapters: { current: 2, total: 9 },
+        },
+      },
+      syncVersion: "v-legacy-fallback",
+    },
+  });
+
+  const wrap = window.document.querySelector("[data-trace-library-overlay-wrap]");
+  assert.ok(wrap);
+  assert.match(wrap.textContent || "", /Reading\s*2\/9/);
+  assert.doesNotMatch(wrap.textContent || "", /new chapters|Work in progress/i);
+  const { surface } = openTraceLens(window);
+  assert.equal(surface.querySelector("[data-trace-action-row='Work status']"), null);
+  assert.equal(surface.querySelector("[data-trace-action-row='Catch-up']"), null);
 });
 
 test("library-overlay opened surface shows status editing only when entryId exists", async () => {
@@ -523,13 +659,13 @@ test("library-overlay opened surface shows status editing only when entryId exis
   assert.ok(selected);
   assert.equal(selected.getAttribute("data-trace-status-choice"), "READING");
   assert.equal(selected.getAttribute("aria-pressed"), "true");
-  const progressRow = surface.querySelector("[data-trace-action-row='Progress']");
-  assert.ok(progressRow);
-  assert.match(progressRow.textContent || "", /3\/17/);
-  assert.doesNotMatch(progressRow.textContent || "", /Reading\s*·\s*3\/17/i);
+  const position = surface.querySelector("[data-trace-action-position]");
+  assert.ok(position);
+  assert.match(position.textContent || "", /Ch\s*3\s*\/\s*17/);
+  assert.doesNotMatch(position.textContent || "", /Reading\s*·\s*3\/17/i);
   assert.deepEqual(
     Array.from(choices.querySelectorAll("[data-trace-status-choice]")).map((button) => button.textContent),
-    ["Planning", "Reading", "Paused", "Finished", "Dropped"],
+    ["Plan", "Reading", "Paused", "Done", "Dropped"],
   );
   const completed = choices.querySelector("[data-trace-status-choice='COMPLETED']");
   assert.ok(completed);
@@ -559,6 +695,37 @@ test("library-overlay opened surface shows status editing only when entryId exis
   const readonlySurface = openTraceLens(withoutEntryId).surface;
   assert.equal(readonlySurface.querySelector("[data-trace-status-choices]"), null);
   assert.equal(readonlySurface.querySelector("a").getAttribute("href"), "https://tracefiction.com/");
+});
+
+test("library-overlay mobile action surface grabber drags down to close", async () => {
+  const window = await renderOverlayListing({
+    mobile: true,
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/77889'>Mobile Sheet Work</a></h4></li></ol></body></html>",
+    cache: {
+      entries: {
+        "ao3:77889": {
+          status: "READING",
+          readerStatus: "READING",
+          entryId: "entry-mobile-sheet",
+          chapters: { current: 4, total: 12 },
+        },
+      },
+      syncVersion: "v-mobile-sheet-drag",
+    },
+  });
+
+  const { surface } = openTraceLens(window);
+  assert.equal(window.document.body.style.overflow, "hidden");
+  const grabber = surface.querySelector("[data-trace-bottom-sheet-grabber]");
+  assert.ok(grabber, "expected mobile action surface grabber");
+  assert.match(grabber.getAttribute("style") || "", /height:\s*28px/i);
+  assert.match(grabber.getAttribute("style") || "", /cursor:\s*grab/i);
+  grabber.dispatchEvent(new window.MouseEvent("pointerdown", { bubbles: true, clientY: 100 }));
+  grabber.dispatchEvent(new window.MouseEvent("pointermove", { bubbles: true, clientY: 170 }));
+  grabber.dispatchEvent(new window.MouseEvent("pointerup", { bubbles: true, clientY: 170 }));
+  assert.equal(window.document.querySelector("[data-trace-action-surface]"), null);
+  assert.equal(window.document.body.style.overflow, "");
 });
 
 test("library-overlay lens click toggles same surface and switches to another lens", async () => {
@@ -632,7 +799,7 @@ test("library-overlay status selection closes surface immediately and shows inli
   await sleep(20);
   lens = window.document.querySelector("[data-trace-library-lens]");
   assert.equal(lens.getAttribute("data-trace-status-saving"), null);
-  assert.match(lens.textContent || "", /Reading\s*·\s*1\/12/i);
+  assert.match(lens.textContent || "", /Reading\s*1\/12/i);
   assert.doesNotMatch(lens.textContent || "", /0\/12/);
 });
 
@@ -672,8 +839,10 @@ test("library-overlay status failure restores previous state and exposes compact
   const retrySurface = window.document.querySelector("[data-trace-action-surface]");
   assert.ok(retrySurface);
   assert.match(retrySurface.textContent || "", /Paused/i);
-  assert.match(retrySurface.querySelector("[data-trace-action-row='Progress']").textContent || "", /3\/12/i);
-  assert.doesNotMatch(retrySurface.querySelector("[data-trace-action-row='Progress']").textContent || "", /Paused\s*·\s*3\/12/i);
+  const retryPosition = retrySurface.querySelector("[data-trace-action-position]");
+  assert.ok(retryPosition);
+  assert.match(retryPosition.textContent || "", /Ch\s*3\s*\/\s*12/i);
+  assert.doesNotMatch(retryPosition.textContent || "", /Paused\s*·\s*3\/12/i);
   assert.equal(
     retrySurface.querySelector("[data-trace-status-selected='1']").getAttribute("data-trace-status-choice"),
     "PAUSED",
@@ -717,8 +886,8 @@ test("library-overlay Planning to Reading sends chapter progress 1 and never dis
     },
   });
   const wrapText = window.document.querySelector("[data-trace-library-overlay-wrap]").textContent || "";
-  assert.match(wrapText, /Reading\s*·\s*1\/17/i);
-  assert.doesNotMatch(wrapText, /Reading\s*·\s*0\/17/i);
+  assert.match(wrapText, /Reading\s*1\/17/i);
+  assert.doesNotMatch(wrapText, /Reading\s*0\/17/i);
 });
 
 test("library-overlay collapses hidden library entries to a minimal placeholder", async () => {
@@ -743,10 +912,10 @@ test("library-overlay collapses hidden library entries to a minimal placeholder"
   assert.ok(wrap);
   assert.equal(wrap.getAttribute("data-trace-placement"), "hidden-placeholder");
   assert.equal(row.getAttribute("data-trace-row-hidden"), "1");
-  assert.match(wrap.textContent || "", /Hidden by Trace\s*Undo/i);
+  assert.match(wrap.textContent || "", /Hidden by Trace\s*Unhide/i);
   assert.equal(wrap.querySelector("[data-trace-hidden-placeholder]") !== null, true);
   assert.equal(row.querySelector("h4.heading").style.display, "none");
-  assert.doesNotMatch(wrap.textContent || "", /Reading\s*·\s*7\/\?/);
+  assert.doesNotMatch(wrap.textContent || "", /Reading\s*7\/\?/);
 });
 
 test("library-overlay renders hidden-only workPreferences collapsed without status", async () => {
@@ -766,7 +935,7 @@ test("library-overlay renders hidden-only workPreferences collapsed without stat
   const row = window.document.querySelector("li.work");
   assert.ok(wrap);
   assert.equal(row.getAttribute("data-trace-row-hidden"), "1");
-  assert.match(wrap.textContent || "", /Hidden by Trace\s*Undo/i);
+  assert.match(wrap.textContent || "", /Hidden by Trace\s*Unhide/i);
   assert.doesNotMatch(wrap.textContent || "", /Reading|Planning|Paused|Finished|Dropped/);
   assert.equal(wrap.querySelector("button[data-trace-quick-add]"), null);
 });
@@ -794,7 +963,7 @@ test("library-overlay hides FFN desktop byline text when collapsing hidden rows"
   const wrap = row.querySelector("[data-trace-library-overlay-wrap]");
   assert.ok(wrap);
   assert.equal(row.getAttribute("data-trace-row-hidden"), "1");
-  assert.match(wrap.textContent || "", /Hidden by Trace\s*Undo/i);
+  assert.match(wrap.textContent || "", /Hidden by Trace\s*Unhide/i);
   assert.equal(
     Array.from(row.childNodes).some(
       (node) => node.nodeType === window.Node.TEXT_NODE && /\S/.test(node.nodeValue || ""),
@@ -892,9 +1061,11 @@ test("library-overlay unknown signed-in works show Add and Hide inline", async (
   const hide = wrap.querySelector("button[data-trace-hidden-action='hide']");
   assert.ok(add);
   assert.ok(hide);
-  assert.match(add.getAttribute("style") || "", /min-height:\s*22px/i);
-  assert.match(hide.getAttribute("style") || "", /min-height:\s*22px/i);
-  assert.doesNotMatch(hide.getAttribute("style") || "", /min-height:\s*38px|42px/i);
+  assert.match(add.textContent || "", /Add to Trace/);
+  assert.match(hide.textContent || "", /Hide/);
+  assert.match(add.getAttribute("style") || "", /background:\s*transparent/i);
+  assert.match(hide.getAttribute("style") || "", /border-bottom:\s*1px solid/i);
+  assert.doesNotMatch(hide.getAttribute("style") || "", /border-radius:\s*(?:7px|8px|9px|10px)/i);
   assert.equal(wrap.querySelector("[data-trace-library-lens]"), null);
 });
 
@@ -942,8 +1113,10 @@ test("library-overlay AO3 desktop unknown works use action row without touching 
   const hide = wrap.querySelector("button[data-trace-hidden-action='hide']");
   assert.ok(add);
   assert.ok(hide);
-  assert.match(add.getAttribute("style") || "", /min-height:\s*22px/i);
-  assert.match(hide.getAttribute("style") || "", /min-height:\s*22px/i);
+  assert.match(add.textContent || "", /Add to Trace/);
+  assert.match(hide.textContent || "", /Hide/);
+  assert.match(add.getAttribute("style") || "", /background:\s*transparent/i);
+  assert.match(hide.getAttribute("style") || "", /border-bottom:\s*1px solid/i);
 });
 
 test("library-overlay unknown AO3 mobile works show Add and Hide in the action row", async () => {
@@ -970,9 +1143,11 @@ test("library-overlay unknown AO3 mobile works show Add and Hide in the action r
   const hide = wrap.querySelector("button[data-trace-hidden-action='hide']");
   assert.ok(add);
   assert.ok(hide);
-  assert.match(add.getAttribute("style") || "", /min-height:\s*28px/i);
-  assert.match(hide.getAttribute("style") || "", /min-height:\s*28px/i);
-  assert.doesNotMatch(hide.getAttribute("style") || "", /min-height:\s*38px|42px/i);
+  assert.match(add.textContent || "", /Add to Trace/);
+  assert.match(hide.textContent || "", /Hide/);
+  assert.match(add.getAttribute("style") || "", /background:\s*transparent/i);
+  assert.match(hide.getAttribute("style") || "", /border-bottom:\s*1px solid/i);
+  assert.doesNotMatch(hide.getAttribute("style") || "", /border-radius:\s*(?:7px|8px|9px|10px)/i);
 });
 
 test("library-overlay unknown FFN signed-in works show same-height Add and Hide inline", async () => {
@@ -990,9 +1165,11 @@ test("library-overlay unknown FFN signed-in works show same-height Add and Hide 
   const hide = wrap.querySelector("button[data-trace-hidden-action='hide']");
   assert.ok(add);
   assert.ok(hide);
-  assert.match(add.getAttribute("style") || "", /min-height:\s*22px/i);
-  assert.match(hide.getAttribute("style") || "", /min-height:\s*22px/i);
-  assert.doesNotMatch(hide.getAttribute("style") || "", /min-height:\s*38px|42px/i);
+  assert.match(add.textContent || "", /Add to Trace/);
+  assert.match(hide.textContent || "", /Hide/);
+  assert.match(add.getAttribute("style") || "", /background:\s*transparent/i);
+  assert.match(hide.getAttribute("style") || "", /border-bottom:\s*1px solid/i);
+  assert.doesNotMatch(hide.getAttribute("style") || "", /border-radius:\s*(?:7px|8px|9px|10px)/i);
 });
 
 test("library-overlay unknown Hide calls hidden endpoint and collapses the row", async () => {
@@ -1016,14 +1193,13 @@ test("library-overlay unknown Hide calls hidden endpoint and collapses the row",
     type: "TRACE_SET_HIDDEN_WORK",
     payload: { key: "ao3:77779", hidden: true },
   });
-  assert.match(wrap.textContent || "", /Hidden by Trace\s*Undo/i);
+  assert.match(wrap.textContent || "", /Hidden by Trace\s*Unhide/i);
   assert.equal(window.document.querySelector("li.work").getAttribute("data-trace-row-hidden"), "1");
   assert.equal(wrap.querySelector("button[data-trace-quick-add]"), null);
 });
 
 test("library-overlay Hide auth failure becomes a clickable Connect action", async () => {
   const messages = [];
-  const opened = [];
   const window = await renderOverlayListing({
     html:
       "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/77780'>Auth Work</a></h4></li></ol></body></html>",
@@ -1034,10 +1210,6 @@ test("library-overlay Hide auth failure becomes a clickable Connect action", asy
       if (typeof cb === "function") cb({ ok: false, error: "not_authenticated" });
     },
   });
-  window.open = function (url, target, features) {
-    opened.push({ url, target, features });
-    return null;
-  };
 
   const hide = window.document.querySelector("button[data-trace-hidden-action='hide']");
   assert.ok(hide);
@@ -1049,17 +1221,19 @@ test("library-overlay Hide auth failure becomes a clickable Connect action", asy
   assert.match(hide.textContent || "", /CONNECT/i);
 
   hide.click();
-  assert.deepEqual(opened.at(-1), {
-    url: "https://tracefiction.com/",
-    target: "_blank",
-    features: "noopener,noreferrer",
+  assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1))), {
+    type: "TRACE_OPEN_TRACE_URL",
+    payload: { url: "https://tracefiction.com/" },
   });
-  assert.equal(messages.length, 1, "connect click must not retry hidden endpoint");
+  assert.equal(
+    messages.filter((msg) => msg.type === "TRACE_SET_HIDDEN_WORK").length,
+    1,
+    "connect click must not retry hidden endpoint",
+  );
 });
 
 test("library-overlay Connect after auth failure checks and rerenders on focus when auth returns", async () => {
   const messages = [];
-  const opened = [];
   const window = await renderOverlayListing({
     html:
       "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/77782'>Reconnect Work</a></h4></li></ol></body></html>",
@@ -1070,10 +1244,6 @@ test("library-overlay Connect after auth failure checks and rerenders on focus w
       if (typeof cb === "function") cb({ ok: false, error: "not_authenticated" });
     },
   });
-  window.open = function (url, target, features) {
-    opened.push({ url, target, features });
-    return null;
-  };
 
   const hide = window.document.querySelector("button[data-trace-hidden-action='hide']");
   assert.ok(hide);
@@ -1081,10 +1251,9 @@ test("library-overlay Connect after auth failure checks and rerenders on focus w
   assert.equal(hide.getAttribute("data-trace-connect-action"), "1");
 
   hide.click();
-  assert.deepEqual(opened.at(-1), {
-    url: "https://tracefiction.com/",
-    target: "_blank",
-    features: "noopener,noreferrer",
+  assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1))), {
+    type: "TRACE_OPEN_TRACE_URL",
+    payload: { url: "https://tracefiction.com/" },
   });
   assert.equal(hide.disabled, true);
   assert.equal(hide.getAttribute("data-trace-connect-checking"), "1");
@@ -1139,7 +1308,10 @@ test("library-overlay Add saves in place without opening the management surface"
   button.click();
 
   assert.equal(messages.at(-1).type, "TRACE_QUICK_ADD");
-  assert.match(button.textContent || "", /PLANNING/i);
+  assert.match(button.textContent || "", /^Planning$/);
+  assert.match(button.getAttribute("style") || "", /gap:\s*7px/i);
+  assert.match(button.getAttribute("style") || "", /font:\s*500 12\.5px/i);
+  assert.match(button.querySelector("span[aria-hidden='true']").getAttribute("style") || "", /width:\s*7px/i);
   assert.equal(window.document.querySelector("[data-trace-action-surface]"), null);
 });
 
@@ -1160,18 +1332,27 @@ test("library-overlay quick add immediately shows pending and ignores duplicate 
     "[data-trace-library-overlay-wrap] button[data-trace-quick-add]",
   );
   assert.ok(button);
-  assert.match(button.textContent || "", /\+ ADD/);
+  assert.match(button.textContent || "", /Add to Trace/);
   button.click();
 
   assert.equal(messages.length, 1);
   assert.equal(messages[0].type, "TRACE_QUICK_ADD");
   assert.equal(button.disabled, true);
-  assert.match(button.textContent || "", /ADDING\.\.\./);
+  assert.match(button.textContent || "", /Adding\.\.\./);
+  const spinnerSvg = button.querySelector("svg");
+  assert.ok(spinnerSvg, "expected add button to render a spinner icon");
+  assert.ok(spinnerSvg.querySelector("circle"), "expected spinner to include a centered ring");
+  const spinnerAnimation = spinnerSvg.getElementsByTagName("animateTransform")[0];
+  assert.ok(spinnerAnimation, "expected spinner to animate");
+  assert.equal(spinnerAnimation.parentElement.tagName.toLowerCase(), "g");
+  assert.equal(spinnerAnimation.getAttribute("from"), "0 7 7");
+  assert.equal(spinnerAnimation.getAttribute("to"), "360 7 7");
   button.click();
   assert.equal(messages.length, 1);
 
   pendingCallback({ ok: true });
-  assert.match(button.textContent || "", /PLANNING/i);
+  assert.match(button.textContent || "", /^Planning$/);
+  assert.match(button.querySelector("span[aria-hidden='true']").getAttribute("style") || "", /border-radius:\s*999px/i);
 });
 
 test("library-overlay known works expose hide without changing reading status", async () => {
@@ -1197,12 +1378,13 @@ test("library-overlay known works expose hide without changing reading status", 
 
   const wrap = window.document.querySelector("[data-trace-library-overlay-wrap]");
   assert.ok(wrap);
-  assert.match(wrap.textContent || "", /Reading\s*·\s*5\/10/);
+  assert.match(wrap.textContent || "", /Reading\s*5\/10/);
   const { surface } = openTraceLens(window);
   const hide = surface.querySelector("button[data-trace-hidden-action='hide']");
   assert.ok(hide);
-  assert.match(hide.getAttribute("style") || "", /min-height:\s*40px/i);
-  assert.match(hide.getAttribute("style") || "", /padding:\s*0px 12px/i);
+  assert.match(hide.getAttribute("style") || "", /min-height:\s*38px/i);
+  assert.match(hide.getAttribute("style") || "", /background:\s*transparent/i);
+  assert.match(hide.textContent || "", /Hide/i);
 
   hide.click();
 
@@ -1210,7 +1392,7 @@ test("library-overlay known works expose hide without changing reading status", 
     type: "TRACE_SET_HIDDEN_WORK",
     payload: { key: "ao3:88888", hidden: true },
   });
-  assert.match(wrap.textContent || "", /Hidden by Trace\s*Undo/i);
+  assert.match(wrap.textContent || "", /Hidden by Trace\s*Unhide/i);
   assert.equal(window.document.querySelector("li.work").getAttribute("data-trace-row-hidden"), "1");
   assert.equal(window.document.querySelector("[data-trace-library-lens]"), null);
 });
@@ -1327,13 +1509,13 @@ test("library-overlay hide failure keeps existing badge and offers retry", async
 
   hide.click();
 
-  assert.match(wrap.textContent || "", /Reading\s*·\s*2\/9/);
+  assert.match(wrap.textContent || "", /Reading\s*2\/9/);
   assert.doesNotMatch(wrap.textContent || "", /Hidden/);
-  assert.match(hide.textContent || "", /ERROR/);
+  assert.match(hide.textContent || "", /Error/i);
   assert.equal(hide.disabled, false);
 });
 
-test("library-overlay renders abandoned marks from workMark", async () => {
+test("library-overlay keeps workMark hidden from listing UI", async () => {
   const window = await renderOverlayListing({
     html:
       "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/44444'>Marked Work</a></h4></li></ol></body></html>",
@@ -1352,12 +1534,13 @@ test("library-overlay renders abandoned marks from workMark", async () => {
   const wrap = window.document.querySelector("[data-trace-library-overlay-wrap]");
   assert.ok(wrap);
   assert.match(wrap.textContent || "", /Dropped/);
-  assert.ok(wrap.querySelector("[data-trace-work-mark]"));
+  assert.equal(wrap.querySelector("[data-trace-work-mark]"), null);
   const { surface } = openTraceLens(window);
-  assert.match(surface.textContent || "", /Abandoned/i);
+  assert.doesNotMatch(surface.textContent || "", /Abandoned/i);
+  assert.doesNotMatch(surface.textContent || "", /Work mark/i);
 });
 
-test("library-overlay renders challenge only from server-supplied workMark challenge", async () => {
+test("library-overlay keeps workMark challenges hidden from listing UI", async () => {
   const window = await renderOverlayListing({
     html:
       "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/55555'>Challenge Work</a></h4></li></ol></body></html>",
@@ -1378,10 +1561,12 @@ test("library-overlay renders challenge only from server-supplied workMark chall
 
   const wrap = window.document.querySelector("[data-trace-library-overlay-wrap]");
   assert.ok(wrap);
-  assert.match(wrap.textContent || "", /\+4/);
-  assert.ok(wrap.querySelector("[data-trace-work-mark-challenge]"));
+  assert.match(wrap.textContent || "", /Reading/);
+  assert.doesNotMatch(wrap.textContent || "", /\+4/);
+  assert.equal(wrap.querySelector("[data-trace-work-mark-challenge]"), null);
   const { surface } = openTraceLens(window);
-  assert.match(surface.textContent || "", /Attention/i);
+  assert.doesNotMatch(surface.textContent || "", /Attention/i);
+  assert.doesNotMatch(surface.textContent || "", /\+4/);
 });
 
 test("library-overlay quick-add still maps free-limit response to FULL", async () => {
@@ -1398,9 +1583,9 @@ test("library-overlay quick-add still maps free-limit response to FULL", async (
     "[data-trace-library-overlay-wrap] button[data-trace-quick-add]",
   );
   assert.ok(button);
-  assert.match(button.textContent || "", /\+ ADD/);
+  assert.match(button.textContent || "", /Add to Trace/);
   button.click();
-  assert.match(button.textContent || "", /FULL/);
+  assert.match(button.textContent || "", /Full/i);
   assert.equal(button.disabled, true);
 });
 
@@ -1509,7 +1694,7 @@ test("library-overlay decorates listing links even without overlay-keys global",
     "[data-trace-library-overlay-wrap]",
   );
   assert.equal(wraps.length, 1);
-  assert.match(wraps[0].textContent || "", /\+ ADD/);
+  assert.match(wraps[0].textContent || "", /Add to Trace/);
 });
 
 test("library-overlay FFN fallback quick-add includes mobile row summary text", async () => {
