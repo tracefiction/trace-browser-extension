@@ -1,12 +1,14 @@
 {
   "name": "trace-browser-extension",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "private": true,
   "description": "Trace browser extension source and iOS/macOS Safari wrapper",
   "scripts": {
     "icons": "node scripts/generate-extension-icons.mjs",
     "build": "node scripts/build.mjs",
     "build:release": "TRACE_BUILD_MODE=release node scripts/build.mjs",
+    "ios:build": "node scripts/ios-simulator-build.mjs",
+    "ios:screenshot:load-failure": "node scripts/ios-simulator-screenshot.mjs",
     "package:firefox": "npm run build:release && npm run zip:firefox",
     "zip:chrome": "node scripts/zip-store.mjs chrome",
     "zip:firefox": "node scripts/zip-store.mjs firefox",
@@ -16,7 +18,7 @@
     "visual:screenshots": "node scripts/render-visual-fixtures.mjs",
     "visual:popup": "node scripts/render-visual-fixtures.mjs --popup-only",
     "agent:lint": "node scripts/agent-checks.mjs",
-    "agent:check": "npm run agent:lint && npm test && npm run build"
+    "agent:check": "npm run agent:lint && npm test && npm run build:release && npm run agent:lint"
   },
   "engines": {
     "node": ">=18"
