@@ -34,6 +34,10 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     static let webShellUserAgentToken = "TraceFictionWebShell/1"
 
     private var webView: WKWebView!
+    private var traceLoadFailureView: UIView?
+    private var activeTraceNavigationURL: URL?
+    private var lastIntendedTraceURL: URL?
+    private var failedTraceURL: URL?
     private lazy var billingCoordinator = TraceBillingCoordinator(
         apiBaseURL: Self.billingAPIBaseURL
     ) { [weak self] in
@@ -44,10 +48,22 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     }
 
     private var authSession: ASWebAuthenticationSession?
+    private var activeAuthSessionID: UUID?
+    private weak var activeAuthRecoveryAlert: UIAlertController?
     private weak var activeBillingPaywall: UIViewController?
     private var suppressBillingPaywallDidDismissResult = false
 
     private var apnsTokenObserver: NSObjectProtocol?
+
+    private static let shellBackgroundColor = UIColor(
+        red: 245 / 255,
+        green: 241 / 255,
+        blue: 232 / 255,
+        alpha: 1
+    )
+    private static let shellTextColor = UIColor(red: 38 / 255, green: 32 / 255, blue: 26 / 255, alpha: 1)
+    private static let shellMutedTextColor = UIColor(red: 104 / 255, green: 95 / 255, blue: 83 / 255, alpha: 1)
+    private static let shellAccentColor = UIColor(red: 43 / 255, green: 91 / 255, blue: 78 / 255, alpha: 1)
 
     private enum TraceBillingFlowError: Error {
         case signInRequired
@@ -56,6 +72,12 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     private enum TraceBillingOperation: String {
         case showPaywall
         case restore
+        case manageSubscriptions
+    }
+
+    private enum TraceAuthRecoveryKind {
+        case cancelled
+        case failed
     }
 
     private struct TraceBillingResultPayload: Encodable {
@@ -76,6 +98,19 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             case pro
             case proExpiresAt = "pro_expires_at"
         }
+    }
+
+    private struct TracePushResultPayload: Encodable {
+        let type = "TRACE_PUSH_RESULT"
+        let status: String
+        let message: String?
+        let code: String?
+    }
+
+    private struct TraceAPNSTokenPayload: Encodable {
+        let type = "TRACE_APNS_TOKEN"
+        let token: String
+        let environment: String
     }
 
     private static var billingAPIBaseURL: URL {
@@ -149,7 +184,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 
         let container = UIView()
         // Matches archive `--bg-app` (#f5f1e8) for any frame before first paint; web paints full bleed.
-        container.backgroundColor = UIColor(red: 245 / 255, green: 241 / 255, blue: 232 / 255, alpha: 1)
+        container.backgroundColor = Self.shellBackgroundColor
         wv.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(wv)
         NSLayoutConstraint.activate([
@@ -158,6 +193,17 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             wv.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             wv.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
+
+        let failureView = makeTraceLoadFailureView()
+        failureView.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(failureView)
+        NSLayoutConstraint.activate([
+            failureView.topAnchor.constraint(equalTo: container.topAnchor),
+            failureView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            failureView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            failureView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        traceLoadFailureView = failureView
 
         view = container
     }
@@ -173,7 +219,18 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             guard let data = note.object as? Data else { return }
             self?.forwardApnsTokenToWeb(data)
         }
+#if DEBUG
+        if Self.shouldShowDebugLoadFailureView {
+            if let url = Self.defaultTraceURL() {
+                lastIntendedTraceURL = url
+                showTraceLoadFailureView(for: url)
+            }
+        } else {
+            loadDefaultOrigin()
+        }
+#else
         loadDefaultOrigin()
+#endif
         Self.writeWidgetSharedWebOrigin()
         WidgetCenter.shared.reloadAllTimelines()
     }
@@ -182,6 +239,9 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         if let o = apnsTokenObserver {
             NotificationCenter.default.removeObserver(o)
         }
+        webView?.configuration.userContentController.removeScriptMessageHandler(forName: "traceWidget")
+        webView?.configuration.userContentController.removeScriptMessageHandler(forName: "tracePush")
+        webView?.configuration.userContentController.removeScriptMessageHandler(forName: "traceBilling")
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -191,7 +251,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 
     /// Load a Trace web URL in the shell (e.g. notification deep link).
     func loadTraceURL(_ url: URL) {
-        webView.load(URLRequest(url: url))
+        loadTraceURLRequest(url)
     }
 
     static func findInKeyWindow() -> TraceWebViewController? {
@@ -205,29 +265,31 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 
     private static func findTraceWeb(in vc: UIViewController) -> TraceWebViewController? {
         if let t = vc as? TraceWebViewController { return t }
+        if let presented = vc.presentedViewController,
+           let found = findTraceWeb(in: presented) {
+            return found
+        }
         if let nav = vc as? UINavigationController, let top = nav.topViewController {
             return findTraceWeb(in: top)
         }
         if let tab = vc as? UITabBarController, let sel = tab.selectedViewController {
             return findTraceWeb(in: sel)
         }
+        for child in vc.children {
+            if let found = findTraceWeb(in: child) { return found }
+        }
         return nil
     }
 
     func loadDefaultOrigin() {
-        guard let base = URL(string: Self.webAppHTTPSOrigin),
-              var components = URLComponents(url: base, resolvingAgainstBaseURL: false)
-        else { return }
-        if components.path.isEmpty { components.path = "/" }
-        components.queryItems = [URLQueryItem(name: "trace_app", value: "1")]
-        guard let url = components.url else { return }
-        webView.load(URLRequest(url: url))
+        guard let url = Self.defaultTraceURL() else { return }
+        loadTraceURLRequest(url)
     }
 
     /// Handles Auth0-style callbacks routed to `traceauth://…` (cold start / universal links).
     func handleAuthCallback(url: URL) {
         guard let target = Self.rewriteTraceAuthURL(url) else { return }
-        webView.load(URLRequest(url: target))
+        loadTraceURLRequest(target)
     }
 
     /// Maps `traceauth://callback?…` → `{webAppHTTPSOrigin}/auth/callback?…`
@@ -250,13 +312,77 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             decisionHandler(.allow)
             return
         }
-        if shouldOpenInAuthenticationSession(url),
-           (navigationAction.targetFrame?.isMainFrame ?? true) {
+        let isMainFrame = navigationAction.targetFrame?.isMainFrame ?? true
+        if shouldOpenInAuthenticationSession(url), isMainFrame {
             decisionHandler(.cancel)
             startAuthenticationSession(startURL: url)
             return
         }
+        if isMainFrame {
+            if traceAppHostsMatch(url) {
+                activeTraceNavigationURL = url
+                lastIntendedTraceURL = url
+                hideTraceLoadFailureView()
+            } else if isExternalWebURL(url) {
+                activeTraceNavigationURL = nil
+                decisionHandler(.cancel)
+                UIApplication.shared.open(url, options: [:], completionHandler: nil)
+                return
+            } else {
+                activeTraceNavigationURL = nil
+            }
+        }
         decisionHandler(.allow)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationResponse: WKNavigationResponse,
+        decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
+    ) {
+        guard navigationResponse.isForMainFrame,
+              let url = navigationResponse.response.url,
+              traceAppHostsMatch(url)
+        else {
+            decisionHandler(.allow)
+            return
+        }
+
+        if let response = navigationResponse.response as? HTTPURLResponse,
+           (500...599).contains(response.statusCode) {
+            activeTraceNavigationURL = nil
+            lastIntendedTraceURL = url
+            showTraceLoadFailureView(for: url)
+            decisionHandler(.cancel)
+            return
+        }
+
+        lastIntendedTraceURL = url
+        decisionHandler(.allow)
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard let url = webView.url, traceAppHostsMatch(url) else { return }
+        activeTraceNavigationURL = nil
+        lastIntendedTraceURL = url
+        hideTraceLoadFailureView()
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        handleTraceNavigationFailure(error)
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        handleTraceNavigationFailure(error)
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        guard let url = webView.url ?? lastIntendedTraceURL,
+              traceAppHostsMatch(url)
+        else { return }
+        activeTraceNavigationURL = nil
+        lastIntendedTraceURL = url
+        showTraceLoadFailureView(for: url)
     }
 
     /// `target=_blank` — return `nil` and load externally or in this web view (no second WKWebView).
@@ -303,24 +429,48 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         return false
     }
 
+    private func isExternalWebURL(_ url: URL) -> Bool {
+        let scheme = url.scheme?.lowercased()
+        return scheme == "http" || scheme == "https"
+    }
+
     private func startAuthenticationSession(startURL: URL) {
         authSession?.cancel()
+        activeAuthRecoveryAlert?.dismiss(animated: false)
+        let sessionID = UUID()
+        activeAuthSessionID = sessionID
         let session = ASWebAuthenticationSession(
             url: startURL,
             callbackURLScheme: "traceauth"
         ) { [weak self] callbackURL, error in
             guard let self = self else { return }
+            guard self.activeAuthSessionID == sessionID else { return }
             self.authSession = nil
-            guard error == nil,
-                  let callbackURL = callbackURL,
+            self.activeAuthSessionID = nil
+
+            if let error {
+                self.handleAuthenticationSessionFailure(error, retryURL: startURL)
+                return
+            }
+
+            guard let callbackURL = callbackURL,
                   let httpsURL = Self.rewriteTraceAuthURL(callbackURL)
-            else { return }
-            self.webView.load(URLRequest(url: httpsURL))
+            else {
+                self.presentAuthRecoveryAlert(kind: .failed, retryURL: startURL)
+                return
+            }
+            DispatchQueue.main.async {
+                self.loadTraceURLRequest(httpsURL)
+            }
         }
         session.presentationContextProvider = self
         session.prefersEphemeralWebBrowserSession = false
         authSession = session
-        session.start()
+        if session.start() != true {
+            authSession = nil
+            activeAuthSessionID = nil
+            presentAuthRecoveryAlert(kind: .failed, retryURL: startURL)
+        }
     }
 
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
@@ -328,7 +478,271 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         return UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .flatMap(\.windows)
-            .first { $0.isKeyWindow }!
+            .first { $0.isKeyWindow } ??
+            ASPresentationAnchor()
+    }
+
+    private func handleAuthenticationSessionFailure(_ error: Error, retryURL: URL) {
+        let nsError = error as NSError
+        let isUserCancelled =
+            nsError.domain == ASWebAuthenticationSessionError.errorDomain &&
+            nsError.code == ASWebAuthenticationSessionError.Code.canceledLogin.rawValue
+        presentAuthRecoveryAlert(
+            kind: isUserCancelled ? .cancelled : .failed,
+            retryURL: retryURL
+        )
+    }
+
+    private func presentAuthRecoveryAlert(kind: TraceAuthRecoveryKind, retryURL: URL) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.activeAuthRecoveryAlert?.dismiss(animated: false)
+
+            let title: String
+            let message: String
+            switch kind {
+            case .cancelled:
+                title = "Sign-in cancelled"
+                message = "You can try again whenever you're ready."
+            case .failed:
+                title = "Sign-in didn't finish"
+                message = "Trace couldn't complete sign-in. Check your connection and try again."
+            }
+
+            let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+            alert.addAction(
+                UIAlertAction(title: "Try Again", style: .default) { [weak self] _ in
+                    self?.startAuthenticationSession(startURL: retryURL)
+                }
+            )
+            alert.addAction(UIAlertAction(title: "OK", style: .cancel))
+            self.activeAuthRecoveryAlert = alert
+            let presenter = self.presentedViewController ?? self
+            presenter.present(alert, animated: true)
+        }
+    }
+
+    private static func defaultTraceURL() -> URL? {
+        return traceURL(path: "/", queryItems: [URLQueryItem(name: "trace_app", value: "1")])
+    }
+
+    private static func supportURL() -> URL? {
+        return traceURL(path: "/support")
+    }
+
+#if DEBUG
+    private static var shouldShowDebugLoadFailureView: Bool {
+        return ProcessInfo.processInfo.arguments.contains("--trace-show-load-failure")
+    }
+#endif
+
+    private static func traceURL(path: String, queryItems: [URLQueryItem]? = nil) -> URL? {
+        guard var components = URLComponents(string: webAppHTTPSOrigin) else { return nil }
+        components.path = path.hasPrefix("/") ? path : "/\(path)"
+        components.queryItems = queryItems
+        return components.url
+    }
+
+    private func loadTraceURLRequest(_ url: URL) {
+        if traceAppHostsMatch(url) {
+            activeTraceNavigationURL = url
+            lastIntendedTraceURL = url
+            hideTraceLoadFailureView()
+        }
+        webView.load(URLRequest(url: url))
+    }
+
+    private func handleTraceNavigationFailure(_ error: Error) {
+        if shouldIgnoreNavigationFailure(error) {
+            return
+        }
+
+        let failedURL = failingURL(from: error)
+        let recoveryURL: URL?
+        if let activeTraceNavigationURL {
+            recoveryURL = activeTraceNavigationURL
+        } else if let failedURL, traceAppHostsMatch(failedURL) {
+            recoveryURL = failedURL
+        } else {
+            recoveryURL = nil
+        }
+
+        guard let recoveryURL, traceAppHostsMatch(recoveryURL) else { return }
+        activeTraceNavigationURL = nil
+        lastIntendedTraceURL = recoveryURL
+        showTraceLoadFailureView(for: recoveryURL)
+    }
+
+    private func shouldIgnoreNavigationFailure(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled {
+            return true
+        }
+        // WebKit reports policy-cancelled handoffs (including native auth/external opens) as code 102.
+        if nsError.domain == "WebKitErrorDomain", nsError.code == 102 {
+            return true
+        }
+        return false
+    }
+
+    private func failingURL(from error: Error) -> URL? {
+        let nsError = error as NSError
+        if let url = nsError.userInfo[NSURLErrorFailingURLErrorKey] as? URL {
+            return url
+        }
+        if let value = nsError.userInfo[NSURLErrorFailingURLStringErrorKey] as? String {
+            return URL(string: value)
+        }
+        if let url = nsError.userInfo["NSErrorFailingURLKey"] as? URL {
+            return url
+        }
+        if let value = nsError.userInfo["NSErrorFailingURLStringKey"] as? String {
+            return URL(string: value)
+        }
+        return nil
+    }
+
+    private func recoveryTargetURL() -> URL? {
+        if let url = traceRecoveryURL(failedTraceURL) { return url }
+        if let url = traceRecoveryURL(lastIntendedTraceURL) { return url }
+        if let url = traceRecoveryURL(webView.url) { return url }
+        return Self.defaultTraceURL()
+    }
+
+    private func traceRecoveryURL(_ url: URL?) -> URL? {
+        guard let url, traceAppHostsMatch(url) else { return nil }
+        return url
+    }
+
+    private func showTraceLoadFailureView(for url: URL) {
+        failedTraceURL = url
+        guard let traceLoadFailureView else { return }
+        traceLoadFailureView.isHidden = false
+        view.bringSubviewToFront(traceLoadFailureView)
+    }
+
+    private func hideTraceLoadFailureView() {
+        failedTraceURL = nil
+        traceLoadFailureView?.isHidden = true
+    }
+
+    private func makeTraceLoadFailureView() -> UIView {
+        let overlay = UIView()
+        overlay.backgroundColor = Self.shellBackgroundColor
+        overlay.isHidden = true
+        overlay.accessibilityIdentifier = "TraceLoadFailureView"
+
+        let brandLabel = UILabel()
+        brandLabel.text = "Trace"
+        brandLabel.textColor = Self.shellAccentColor
+        brandLabel.font = .systemFont(ofSize: 18, weight: .semibold)
+        brandLabel.textAlignment = .center
+
+        let titleLabel = UILabel()
+        titleLabel.text = "Trace is having trouble loading."
+        titleLabel.textColor = Self.shellTextColor
+        titleLabel.font = .systemFont(ofSize: 24, weight: .bold)
+        titleLabel.textAlignment = .center
+        titleLabel.numberOfLines = 0
+
+        let bodyLabel = UILabel()
+        bodyLabel.text = "Check your connection, then try again."
+        bodyLabel.textColor = Self.shellMutedTextColor
+        bodyLabel.font = .systemFont(ofSize: 16, weight: .regular)
+        bodyLabel.textAlignment = .center
+        bodyLabel.numberOfLines = 0
+
+        let copyStack = UIStackView(arrangedSubviews: [brandLabel, titleLabel, bodyLabel])
+        copyStack.axis = .vertical
+        copyStack.alignment = .fill
+        copyStack.spacing = 10
+
+        let retryButton = makeTraceLoadFailureButton(title: "Retry", prominence: .primary)
+        retryButton.addTarget(self, action: #selector(retryTraceLoad), for: .touchUpInside)
+
+        let safariButton = makeTraceLoadFailureButton(title: "Open in Safari", prominence: .secondary)
+        safariButton.addTarget(self, action: #selector(openFailedTraceURLInSafari), for: .touchUpInside)
+
+        let supportButton = makeTraceLoadFailureButton(title: "Support", prominence: .plain)
+        supportButton.addTarget(self, action: #selector(openTraceSupportInSafari), for: .touchUpInside)
+
+        let buttonStack = UIStackView(arrangedSubviews: [retryButton, safariButton, supportButton])
+        buttonStack.axis = .vertical
+        buttonStack.alignment = .fill
+        buttonStack.spacing = 12
+
+        let contentStack = UIStackView(arrangedSubviews: [copyStack, buttonStack])
+        contentStack.translatesAutoresizingMaskIntoConstraints = false
+        contentStack.axis = .vertical
+        contentStack.alignment = .fill
+        contentStack.spacing = 28
+        overlay.addSubview(contentStack)
+
+        let guide = overlay.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            contentStack.centerXAnchor.constraint(equalTo: guide.centerXAnchor),
+            contentStack.centerYAnchor.constraint(equalTo: guide.centerYAnchor),
+            contentStack.leadingAnchor.constraint(greaterThanOrEqualTo: guide.leadingAnchor, constant: 28),
+            contentStack.trailingAnchor.constraint(lessThanOrEqualTo: guide.trailingAnchor, constant: -28),
+            contentStack.topAnchor.constraint(greaterThanOrEqualTo: guide.topAnchor, constant: 32),
+            contentStack.bottomAnchor.constraint(lessThanOrEqualTo: guide.bottomAnchor, constant: -32),
+            contentStack.widthAnchor.constraint(lessThanOrEqualToConstant: 420),
+            retryButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 48),
+            safariButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 48),
+            supportButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
+        ])
+
+        return overlay
+    }
+
+    private enum TraceLoadFailureButtonProminence {
+        case primary
+        case secondary
+        case plain
+    }
+
+    private func makeTraceLoadFailureButton(
+        title: String,
+        prominence: TraceLoadFailureButtonProminence
+    ) -> UIButton {
+        let button = UIButton(type: .system)
+        var configuration: UIButton.Configuration
+        switch prominence {
+        case .primary:
+            configuration = .filled()
+            configuration.baseBackgroundColor = Self.shellAccentColor
+            configuration.baseForegroundColor = .white
+        case .secondary:
+            configuration = .tinted()
+            configuration.baseBackgroundColor = Self.shellAccentColor.withAlphaComponent(0.14)
+            configuration.baseForegroundColor = Self.shellAccentColor
+        case .plain:
+            configuration = .plain()
+            configuration.baseForegroundColor = Self.shellAccentColor
+        }
+        configuration.title = title
+        configuration.cornerStyle = .medium
+        configuration.contentInsets = NSDirectionalEdgeInsets(top: 12, leading: 18, bottom: 12, trailing: 18)
+        button.configuration = configuration
+        button.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+        button.titleLabel?.adjustsFontSizeToFitWidth = true
+        button.titleLabel?.minimumScaleFactor = 0.8
+        return button
+    }
+
+    @objc private func retryTraceLoad() {
+        guard let url = recoveryTargetURL() else { return }
+        loadTraceURLRequest(url)
+    }
+
+    @objc private func openFailedTraceURLInSafari() {
+        guard let url = recoveryTargetURL() else { return }
+        UIApplication.shared.open(url, options: [:], completionHandler: nil)
+    }
+
+    @objc private func openTraceSupportInSafari() {
+        guard let url = Self.supportURL() else { return }
+        UIApplication.shared.open(url, options: [:], completionHandler: nil)
     }
 
     // MARK: - Widget bridge (WKScriptMessageHandler)
@@ -374,12 +788,42 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
               (body["op"] as? String) == "requestPermissionAndRegister"
         else { return }
 
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { granted, _ in
-            guard granted else { return }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in
             DispatchQueue.main.async {
+                if error != nil {
+                    self.postPushResult(
+                        status: "error",
+                        message: "Trace couldn't ask for notification permission.",
+                        code: "permission_request_failed"
+                    )
+                    return
+                }
+
+                guard granted else {
+                    self.postPushResult(
+                        status: "denied",
+                        message: "Notifications are turned off for Trace.",
+                        code: "permission_denied"
+                    )
+                    return
+                }
+
+                self.postPushResult(
+                    status: "granted",
+                    message: "Notifications are allowed on this device.",
+                    code: nil
+                )
                 UIApplication.shared.registerForRemoteNotifications()
             }
         }
+    }
+
+    func handleRemoteNotificationRegistrationFailure(_: Error) {
+        postPushResult(
+            status: "error",
+            message: "Trace couldn't register this device for notifications.",
+            code: "apns_registration_failed"
+        )
     }
 
     private func forwardApnsTokenToWeb(_ data: Data) {
@@ -389,9 +833,29 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         #else
         let env = "production"
         #endif
-        let origin = Self.webAppHTTPSOrigin
-        let js = "window.postMessage({ type: 'TRACE_APNS_TOKEN', token: '\(hex)', environment: '\(env)' }, '\(origin)');"
+        postTraceWebMessage(TraceAPNSTokenPayload(token: hex, environment: env))
+    }
+
+    private func postTraceWebMessage<T: Encodable>(_ payload: T) {
+        guard let data = try? JSONEncoder().encode(payload),
+              let json = String(data: data, encoding: .utf8),
+              let originData = try? JSONEncoder().encode(Self.webAppHTTPSOrigin),
+              let originJson = String(data: originData, encoding: .utf8)
+        else { return }
+
+        let js = "window.postMessage(\(json), \(originJson));"
         webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    @MainActor
+    private func postPushResult(status: String, message: String?, code: String?) {
+        let payload = TracePushResultPayload(
+            status: status,
+            message: message,
+            code: code
+        )
+
+        postTraceWebMessage(payload)
     }
 
     private func handleTraceBillingMessage(_ message: WKScriptMessage) {
@@ -413,6 +877,8 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             presentTraceBillingPaywall()
         case .restore:
             restoreTraceBillingPurchases()
+        case .manageSubscriptions:
+            manageTraceBillingSubscriptions()
         }
     }
 
@@ -567,6 +1033,37 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     }
 
     @MainActor
+    private func manageTraceBillingSubscriptions() {
+        guard let scene = view.window?.windowScene else {
+            postBillingResult(
+                status: "error",
+                op: .manageSubscriptions,
+                message: "Unable to open Apple subscription settings.",
+                code: "scene_unavailable"
+            )
+            return
+        }
+
+        Task { [weak self] in
+            do {
+                try await AppStore.showManageSubscriptions(in: scene)
+                await MainActor.run {
+                    self?.postBillingResult(status: "success", op: .manageSubscriptions)
+                }
+            } catch {
+                await MainActor.run {
+                    self?.postBillingResult(
+                        status: "error",
+                        op: .manageSubscriptions,
+                        message: "Unable to open Apple subscription settings.",
+                        code: "manage_subscriptions_unavailable"
+                    )
+                }
+            }
+        }
+    }
+
+    @MainActor
     private func fetchTraceShellAccessToken() async throws -> String {
         do {
             let js = """
@@ -682,12 +1179,6 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             proExpiresAt: proExpiresAt
         )
 
-        guard let data = try? JSONEncoder().encode(payload),
-              let json = String(data: data, encoding: .utf8)
-        else { return }
-
-        let origin = Self.webAppHTTPSOrigin
-        let js = "window.postMessage(\(json), '\(origin)');"
-        webView.evaluateJavaScript(js, completionHandler: nil)
+        postTraceWebMessage(payload)
     }
 }

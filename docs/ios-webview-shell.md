@@ -7,8 +7,12 @@ The long-term product direction may include a more native iOS app, but this shel
 ## What This Shell Does
 
 - Loads the configured Trace web origin in a full-screen `WKWebView`.
+- Shows a native retry surface when the Trace main-frame web app load fails before the web UI can recover.
 - Marks the session as the native shell so the web app can show mobile-appropriate auth UI.
 - Handles the `traceauth://callback` URL scheme and returns the OAuth result to the web view.
+- Shows a native retry alert when the external OAuth session is cancelled or fails before returning to the web view.
+- Reports iOS notification permission results back to the web app so denial and setup failures have visible recovery copy.
+- Opens Apple's subscription management sheet for Apple-billed Trace Unlimited accounts.
 - Opens external non-Trace links outside the shell.
 - Uses `ASWebAuthenticationSession` for OAuth flows instead of completing OAuth inside an embedded web view.
 
@@ -30,3 +34,9 @@ Do not claim the app or web page can detect every installation or site-permissio
 - `Shared (Extension)/Resources/` - Safari Web Extension resources included in the app build.
 
 The generated web origin is written by `npm run build` / `npm run build:release`.
+
+## Agent Simulator Validation
+
+Use `npm run ios:build` for a signing-free generic iOS simulator build. Set `TRACE_IOS_DESTINATION` for a specific Xcode destination, or set `TRACE_IOS_SIMULATOR_NAME` and `TRACE_IOS_SIMULATOR_OS` to target a named simulator.
+
+Use `npm run ios:screenshot:load-failure` to build when needed, boot the simulator, launch Trace with the DEBUG-only `--trace-show-load-failure` argument, and write a native screenshot to `/private/tmp/trace-ios-load-failure.png`.

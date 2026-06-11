@@ -31,6 +31,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
 
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
         NSLog("[Trace] APNs registration failed: \(error.localizedDescription)")
+        DispatchQueue.main.async {
+            TraceWebViewController.findInKeyWindow()?.handleRemoteNotificationRegistrationFailure(error)
+        }
     }
 
     // MARK: - UNUserNotificationCenterDelegate
@@ -57,7 +60,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
 
         let base = TraceWebViewController.webAppHTTPSOrigin
         var parts = URLComponents(string: base + path)
-        parts?.queryItems = [URLQueryItem(name: "trace_app", value: "1")]
+        var queryItems = parts?.queryItems ?? []
+        queryItems.removeAll { $0.name == "trace_app" }
+        queryItems.append(URLQueryItem(name: "trace_app", value: "1"))
+        parts?.queryItems = queryItems
         guard let url = parts?.url else { return }
 
         DispatchQueue.main.async {
