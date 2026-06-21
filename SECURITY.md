@@ -18,9 +18,11 @@ Content scripts are excluded from obvious AO3/FFN login and signup paths where t
 
 ## Data Sent to Trace
 
-Trace may send story URL, title, author, fandoms/tags, chapter and word counts, reading-progress metadata, reading-status changes you explicitly choose in Trace UI, hidden-work browsing preferences you explicitly choose in Trace UI, and your Trace auth token for Trace API requests.
+Trace may send story URL, title, author, fandoms/tags, chapter and word counts, reading-progress metadata, reading-status changes you explicitly choose in Trace UI, hidden-work browsing preferences you explicitly choose in Trace UI, AO3 saved filter presets you explicitly create, and your Trace auth token for Trace API requests.
 
 Hidden-work preferences are keyed by supported AO3/FFN work id and affect Trace browsing overlays only. They are separate from library reading status and do not hide or change the source site itself.
+
+AO3 saved filters are stored in extension storage so the extension can reapply user-created AO3 filter query states. When you are signed in, they sync to your Trace account as normalized AO3 filter query parameters plus the preset name/scope. They do not include AO3 credentials, cookies, page HTML, or story text.
 
 Trace does not send AO3/FFN passwords, browser cookies, private messages, drafts, comments, account settings, or full page HTML.
 

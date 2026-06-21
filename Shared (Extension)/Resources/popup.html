@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="popup.css">
+    <script src="popup-config.js"></script>
     <script type="module" src="popup.js"></script>
 </head>
 <body>
@@ -22,6 +23,16 @@
             <p id="popup-lead" class="popup-lead">
                 Open Trace in this browser and sign in. Then return to an AO3 or FFN story page to save your first story.
             </p>
+        </section>
+        <section
+            id="popup-local-settings"
+            class="popup-local-settings"
+            aria-label="Local site preferences"
+        >
+            <label class="popup-switch-row" for="pref-ao3-saved-filters">
+                <span>Saved filters on AO3</span>
+                <input type="checkbox" id="pref-ao3-saved-filters" />
+            </label>
         </section>
         <section
             id="popup-pro-settings"

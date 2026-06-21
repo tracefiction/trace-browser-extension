@@ -193,7 +193,8 @@ body[data-trace-popup-state="connected_saved"] .popup-sheet {
     line-height: 1.55;
 }
 
-.popup-pro-settings {
+.popup-pro-settings,
+.popup-local-settings {
     display: flex;
     flex-direction: column;
     min-width: 0;

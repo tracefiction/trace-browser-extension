@@ -1203,6 +1203,13 @@
     return Math.trunc(count);
   }
 
+  function normalizeRating(raw) {
+    if (raw === undefined || raw === null) return undefined;
+    var rating = Number(raw);
+    if (!Number.isFinite(rating)) return undefined;
+    return Math.max(0, Math.min(5, Math.trunc(rating)));
+  }
+
   /**
    * Legacy cache: plain status string.
    * Current contract: entries[key] carries library state; workPreferences[key]
@@ -1243,6 +1250,7 @@
         workStatus: normalizeWorkStatus(raw.workStatus),
         catchupState: normalizeCatchupState(raw.catchupState),
         newChapterCount: normalizeNewChapterCount(raw.newChapterCount),
+        rating: normalizeRating(raw.rating),
         __traceStatusPending: raw.__traceStatusPending === true,
         __traceStatusTarget: typeof raw.__traceStatusTarget === "string" ? raw.__traceStatusTarget : undefined,
         __traceStatusError: raw.__traceStatusError || undefined,
@@ -1509,6 +1517,30 @@
     return null;
   }
 
+  function entryRatingValue(entry) {
+    var rating = Number(entry && entry.rating);
+    if (!Number.isFinite(rating)) return 0;
+    return Math.max(0, Math.min(5, Math.trunc(rating)));
+  }
+
+  function catchupProgressPatch(entry) {
+    if (!entry || entry.catchupState !== "BEHIND") return null;
+    var count = Number(entry.newChapterCount);
+    if (!Number.isFinite(count) || count <= 0) return null;
+    var chapters = entry.chapters;
+    if (!chapters || typeof chapters.current !== "number") return null;
+    var target = Math.trunc(chapters.current + count);
+    if (!Number.isFinite(target) || target < 0) return null;
+    var total =
+      typeof chapters.total === "number" && Number.isFinite(chapters.total)
+        ? Math.max(Math.trunc(chapters.total), target)
+        : target;
+    return {
+      progress: { unit: "CHAPTER", value: target, total: total },
+      chapters: { current: target, total: total },
+    };
+  }
+
   function readerStatusProgressPatch(entry, nextStatus) {
     var currentStatus = entryStatusValue(entry);
     var chapters = entry && entry.chapters;
@@ -1639,6 +1671,145 @@
         surfaceRowEl("Catch-up", catchup, entry.catchupState === "BEHIND"),
       );
     }
+  }
+
+  function ratingButtonStyle(active, disabled) {
+    return [
+      "appearance:none",
+      "display:inline-flex",
+      "align-items:center",
+      "justify-content:center",
+      "width:30px",
+      "height:30px",
+      "border:0",
+      "border-radius:7px",
+      "background:transparent",
+      "color:" + (active ? TRACE_D1.honey : TRACE_D1.ink5),
+      "font:600 20px/1 Georgia,serif",
+      "cursor:" + (disabled ? "wait" : "pointer"),
+      disabled ? "opacity:0.62" : "",
+    ].join(";");
+  }
+
+  function appendRatingControls(surface, entry) {
+    if (!entry || !entry.entryId) return;
+    var current = entryRatingValue(entry);
+    var wrap = document.createElement("div");
+    wrap.setAttribute("data-trace-rating-control", "1");
+    wrap.style.cssText = "display:grid;gap:8px;padding-top:12px;border-top:1px solid " + TRACE_D1.line;
+
+    var label = document.createElement("div");
+    label.className = "x-sheet-label";
+    label.textContent = "Your rating";
+    label.style.cssText = "font:500 9px/1 " + TRACE_D1.mono + ";letter-spacing:0.18em;text-transform:uppercase;color:" + TRACE_D1.ink4;
+    wrap.appendChild(label);
+
+    var row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:2px";
+    var message = document.createElement("span");
+    message.setAttribute("data-trace-rating-message", "1");
+    message.style.cssText = "margin-left:8px;font:600 11.5px/1.3 " + TRACE_D1.font + ";color:" + TRACE_D1.ink3;
+
+    function renderStars(disabled) {
+      removeWrapChildren(row);
+      for (var i = 1; i <= 5; i += 1) {
+        var star = document.createElement("button");
+        star.type = "button";
+        star.setAttribute("data-trace-rating-choice", String(i));
+        star.setAttribute("aria-label", current === i ? "Clear rating" : "Set rating to " + i);
+        star.textContent = i <= current ? "\u2605" : "\u2606";
+        star.style.cssText = ratingButtonStyle(i <= current, disabled);
+        star.disabled = disabled === true;
+        star.addEventListener("click", function (event) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (this.disabled) return;
+          var selected = Number(this.getAttribute("data-trace-rating-choice"));
+          if (!Number.isFinite(selected)) return;
+          var previous = current;
+          var nextRating = current === selected ? 0 : selected;
+          current = nextRating;
+          entry.rating = nextRating;
+          message.textContent = "Saving...";
+          renderStars(true);
+          ext.runtime.sendMessage(
+            {
+              type: "TRACE_PATCH_LIBRARY_ENTRY",
+              payload: { entryId: entry.entryId, patch: { rating: nextRating } },
+            },
+            function (response) {
+              if (ext.runtime.lastError || !response || !response.ok) {
+                current = previous;
+                entry.rating = previous;
+                message.textContent = "Could not save";
+                renderStars(false);
+                return;
+              }
+              current = nextRating;
+              entry.rating = nextRating;
+              message.textContent = nextRating > 0 ? "Saved" : "Cleared";
+              renderStars(false);
+            },
+          );
+        });
+        row.appendChild(star);
+      }
+      row.appendChild(message);
+    }
+
+    renderStars(false);
+    wrap.appendChild(row);
+    surface.appendChild(wrap);
+  }
+
+  function appendCatchupAction(surface, entry, rerender, refreshSurface) {
+    if (!entry || !entry.entryId) return;
+    var patch = catchupProgressPatch(entry);
+    if (!patch) return;
+    var wrap = document.createElement("div");
+    wrap.setAttribute("data-trace-catchup-action", "1");
+    wrap.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0 0;border-top:1px solid " + TRACE_D1.line;
+    var text = document.createElement("div");
+    text.style.cssText = "min-width:0";
+    var title = document.createElement("div");
+    title.textContent = "Catch up";
+    title.style.cssText = "font:600 12.5px/1.25 " + TRACE_D1.font + ";color:" + TRACE_D1.ink;
+    var copy = document.createElement("div");
+    copy.textContent = "Set progress to chapter " + patch.chapters.current + ".";
+    copy.style.cssText = "margin-top:2px;font:500 11.5px/1.35 " + TRACE_D1.font + ";color:" + TRACE_D1.ink3;
+    text.appendChild(title);
+    text.appendChild(copy);
+    var button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "Mark caught up";
+    button.style.cssText = surfaceGhostButtonStyle(UPDATED_THEME) + ";flex:0 0 auto";
+    button.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      button.disabled = true;
+      button.textContent = "Saving...";
+      ext.runtime.sendMessage(
+        {
+          type: "TRACE_PATCH_LIBRARY_ENTRY",
+          payload: { entryId: entry.entryId, patch: { progress: patch.progress } },
+        },
+        function (response) {
+          if (ext.runtime.lastError || !response || !response.ok) {
+            button.disabled = false;
+            button.textContent = "Retry";
+            return;
+          }
+          entry.chapters = patch.chapters;
+          entry.catchupState = "UP";
+          entry.newChapterCount = 0;
+          rerender();
+          if (typeof refreshSurface === "function") refreshSurface();
+        },
+      );
+    });
+    wrap.appendChild(text);
+    wrap.appendChild(button);
+    surface.appendChild(wrap);
   }
 
   function closeListingActionSurface() {
@@ -1951,7 +2122,7 @@
     if (meta.childNodes.length > 0) surface.appendChild(meta);
   }
 
-  function bindStatusChoice(choice, entry, status, rerender) {
+  function bindStatusChoice(choice, entry, status, rerender, refreshSurface) {
     choice.addEventListener("click", function (e) {
       e.preventDefault();
       e.stopPropagation();
@@ -1968,8 +2139,8 @@
       entry.__traceStatusPending = true;
       entry.__traceStatusTarget = status;
       delete entry.__traceStatusError;
-      closeListingActionSurface();
       rerender();
+      if (typeof refreshSurface === "function") refreshSurface();
       var payload = { entryId: entry.entryId, status: status };
       if (statusPatch && statusPatch.progress) payload.progress = statusPatch.progress;
       ext.runtime.sendMessage(
@@ -1990,6 +2161,7 @@
             delete entry.__traceStatusTarget;
             entry.__traceStatusError = response && response.error ? response.error : "update_failed";
             rerender();
+            if (typeof refreshSurface === "function") refreshSurface();
             return;
           }
           entry.status = status;
@@ -2001,6 +2173,7 @@
           delete entry.__traceStatusTarget;
           delete entry.__traceStatusError;
           rerender();
+          if (typeof refreshSurface === "function") refreshSurface();
         },
       );
     });
@@ -2032,7 +2205,7 @@
     ].join(";");
   }
 
-  function appendStatusControls(surface, entry, rerender, showActions) {
+  function appendStatusControls(surface, entry, rerender, showActions, refreshSurface) {
     if (!showActions) return;
     if (!entry || !entry.entryId) return;
     var wrap = document.createElement("div");
@@ -2068,7 +2241,7 @@
       ].join(";");
       choice.appendChild(dot);
       choice.appendChild(document.createTextNode(statusControlChoiceLabel(status)));
-      bindStatusChoice(choice, entry, status, rerender);
+      bindStatusChoice(choice, entry, status, rerender, refreshSurface);
       row.appendChild(choice);
     });
     wrap.appendChild(label);
@@ -2191,13 +2364,26 @@
     body.className = "x-sheet-body";
     body.setAttribute("data-trace-action-body", "1");
     body.style.cssText = "display:flex;flex-direction:column;gap:14px;padding:14px 16px 16px";
+    function refreshSurface() {
+      var latestTrigger = trigger;
+      var lenses = document.querySelectorAll("[" + LENS_ATTR + "]");
+      for (var i = 0; i < lenses.length; i += 1) {
+        if (lenses[i].getAttribute(LENS_ATTR) === workKey) {
+          latestTrigger = lenses[i];
+          break;
+        }
+      }
+      renderListingActionSurface(latestTrigger, entry, workKey, showActions, rerender, platform, anchor);
+    }
     var status = entryStatusValue(entry);
-    appendStatusControls(body, entry, rerender, showActions);
+    appendStatusControls(body, entry, rerender, showActions, refreshSurface);
     if (status && (!showActions || !(entry && entry.entryId))) {
       body.appendChild(surfaceRowEl("Reading status", statusChoiceLabel(status), false));
     }
     var position = status ? surfacePositionBlock(entry) : null;
     if (position) body.appendChild(position);
+    appendCatchupAction(body, entry, rerender, refreshSurface);
+    appendRatingControls(body, entry);
     appendPrivateContextRows(body, entry);
     surface.appendChild(body);
 
@@ -2739,6 +2925,22 @@
     btn.disabled = true;
   }
 
+  function currentOpenActionSurfaceKey() {
+    var surface = document.querySelector("[" + ACTION_SURFACE_ATTR + "]");
+    return surface ? surface.getAttribute("data-trace-action-surface-key") : null;
+  }
+
+  function reopenActionSurface(workKey) {
+    if (!workKey) return;
+    var lenses = document.querySelectorAll("[" + LENS_ATTR + "]");
+    for (var i = 0; i < lenses.length; i += 1) {
+      if (lenses[i].getAttribute(LENS_ATTR) === workKey) {
+        lenses[i].click();
+        return;
+      }
+    }
+  }
+
   function clearBadges() {
     try {
       closeListingActionSurface();
@@ -3017,6 +3219,7 @@
           var entries = (cache && cache.entries) || {};
           var workPreferences = (cache && cache.workPreferences) || {};
           var showQuickAdd = authStateAllowsActions(res && res.traceAuthState, hasAuth) && !isSingleWorkPage();
+          var openSurfaceKey = currentOpenActionSurfaceKey();
           clearBadges();
           if (
             Object.keys(entries).length === 0 &&
@@ -3026,6 +3229,7 @@
             return;
           }
           decorate(entries, workPreferences, showQuickAdd);
+          reopenActionSurface(openSurfaceKey);
         },
       );
     } catch {

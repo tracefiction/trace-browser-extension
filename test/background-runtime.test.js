@@ -212,8 +212,14 @@ globalThis.__testHooks = {
   handleQuickAdd,
   handleSetHiddenWork,
   handleSetReaderStatus,
+  handlePatchLibraryEntry,
+  syncAo3SavedFilters,
+  scheduleAo3SavedFiltersSync,
+  sanitizeAo3SavedFilterPresets,
+  sanitizeAo3DeletedSavedFilters,
   patchOverlayHiddenPreference,
   patchOverlayReaderStatus,
+  patchOverlayLibraryEntry,
   shouldIgnoreSenderForAutoTrack,
   setBearerToken(value) { bearerToken = value; },
   getBearerToken() { return bearerToken; }
@@ -297,6 +303,332 @@ test("TRACE_AUTH_UPDATE with blank token clears session and marks signed out", a
   assert.deepEqual(plainJson(h.badgeTextCalls.at(-1)), { text: "", tabId: 22 });
 });
 
+test("syncAo3SavedFilters uploads dirty local presets and stores server ids", async () => {
+  const h = createBackgroundHarness({
+    storageState: {
+      traceAo3SavedFiltersV1: [
+        {
+          id: "preset-a",
+          clientId: "preset-a",
+          name: "General audiences by kudos",
+          scope: "context",
+          contextKey: "tagId:Naruto",
+          contextLabel: "Naruto",
+          params: [
+            ["include_work_search[rating_ids][]", "10"],
+            ["work_search[sort_column]", "kudos_count"],
+          ],
+          summary: ["Include: General Audiences", "Sort: Kudos"],
+          createdAt: "2026-06-18T10:00:00.000Z",
+          updatedAt: "2026-06-18T10:00:00.000Z",
+          clientUpdatedAt: "2026-06-18T10:00:00.000Z",
+          dirty: true,
+        },
+      ],
+    },
+    fetchImpl: async (url, init) => {
+      assert.match(String(url), /\/api\/extension\/ao3-saved-filters\/sync$/);
+      const body = JSON.parse(init.body);
+      assert.equal(body.clientId.startsWith("device_"), true);
+      assert.equal(body.since, null);
+      assert.equal(body.upserts.length, 1);
+      assert.equal(body.upserts[0].clientId, "preset-a");
+      assert.equal(body.upserts[0].scope, "context");
+      assert.deepEqual(body.upserts[0].params, [
+        ["include_work_search[rating_ids][]", "10"],
+        ["work_search[sort_column]", "kudos_count"],
+      ]);
+      assert.deepEqual(body.deletes, []);
+      return createResponse({
+        json: {
+          success: true,
+          data: {
+            serverTime: "2026-06-18T10:00:01.000Z",
+            syncVersion: "2026-06-18T10:00:01.000Z",
+            presets: [
+              {
+                id: "00000000-0000-4000-8000-000000000001",
+                clientId: "preset-a",
+                name: "General audiences by kudos",
+                scope: "context",
+                contextKey: "tagId:Naruto",
+                contextLabel: "Naruto",
+                params: [
+                  ["include_work_search[rating_ids][]", "10"],
+                  ["work_search[sort_column]", "kudos_count"],
+                ],
+                summary: ["Include: General Audiences", "Sort: Kudos"],
+                createdAt: "2026-06-18T10:00:00.000Z",
+                updatedAt: "2026-06-18T10:00:01.000Z",
+                clientUpdatedAt: "2026-06-18T10:00:00.000Z",
+              },
+            ],
+            deleted: [],
+          },
+        },
+      });
+    },
+  });
+  h.hooks.setBearerToken("token-filters");
+
+  const result = await h.hooks.syncAo3SavedFilters();
+
+  assert.deepEqual(plainJson(result), {
+    ok: true,
+    syncVersion: "2026-06-18T10:00:01.000Z",
+  });
+  assert.equal(h.store.traceAo3SavedFiltersV1.length, 1);
+  assert.equal(
+    h.store.traceAo3SavedFiltersV1[0].serverId,
+    "00000000-0000-4000-8000-000000000001",
+  );
+  assert.equal(h.store.traceAo3SavedFiltersV1[0].dirty, false);
+  assert.equal(h.store.traceAo3SavedFiltersSyncV1.syncVersion, "2026-06-18T10:00:01.000Z");
+  assert.equal(h.store.traceAuthState.state, "connected");
+});
+
+test("syncAo3SavedFilters drains dirty local presets in bounded batches", async () => {
+  const dirtyPresets = Array.from({ length: 105 }, (_, index) => {
+    const num = index + 1;
+    return {
+      id: `preset-${num}`,
+      clientId: `preset-${num}`,
+      name: `Preset ${num}`,
+      scope: "global",
+      contextKey: "",
+      contextLabel: "",
+      params: [["work_search[sort_column]", "kudos_count"]],
+      summary: ["Sort: Kudos"],
+      createdAt: "2026-06-18T10:00:00.000Z",
+      updatedAt: "2026-06-18T10:00:00.000Z",
+      clientUpdatedAt: "2026-06-18T10:00:00.000Z",
+      dirty: true,
+    };
+  });
+  const seenBatches = [];
+  const h = createBackgroundHarness({
+    storageState: {
+      traceAo3SavedFiltersV1: dirtyPresets,
+    },
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      seenBatches.push(body.upserts.map((item) => item.clientId));
+      assert.ok(body.upserts.length <= 100);
+      assert.deepEqual(body.deletes, []);
+      const syncVersion =
+        seenBatches.length === 1
+          ? "2026-06-18T10:01:00.000Z"
+          : "2026-06-18T10:02:00.000Z";
+      return createResponse({
+        json: {
+          success: true,
+          data: {
+            serverTime: syncVersion,
+            syncVersion,
+            presets: body.upserts.map((preset, index) => ({
+              id: `00000000-0000-4000-8000-${String(seenBatches.length * 1000 + index).padStart(12, "0")}`,
+              clientId: preset.clientId,
+              name: preset.name,
+              scope: preset.scope,
+              contextKey: preset.contextKey,
+              contextLabel: preset.contextLabel,
+              params: preset.params,
+              summary: preset.summary,
+              createdAt: preset.createdAt,
+              updatedAt: syncVersion,
+              clientUpdatedAt: preset.clientUpdatedAt,
+            })),
+            deleted: [],
+          },
+        },
+      });
+    },
+  });
+  h.hooks.setBearerToken("token-filters");
+
+  const result = await h.hooks.syncAo3SavedFilters();
+
+  assert.deepEqual(plainJson(result), {
+    ok: true,
+    syncVersion: "2026-06-18T10:02:00.000Z",
+  });
+  assert.equal(seenBatches.length, 2);
+  assert.equal(seenBatches[0].length, 100);
+  assert.equal(seenBatches[1].length, 5);
+  assert.equal(h.store.traceAo3SavedFiltersV1.length, 105);
+  assert.equal(
+    h.store.traceAo3SavedFiltersV1.every((preset) => preset.dirty === false),
+    true,
+  );
+  assert.equal(
+    h.store.traceAo3SavedFiltersSyncV1.syncVersion,
+    "2026-06-18T10:02:00.000Z",
+  );
+});
+
+test("syncAo3SavedFilters keeps local presets when the server active cap is reached", async () => {
+  const h = createBackgroundHarness({
+    storageState: {
+      traceAo3SavedFiltersV1: [
+        {
+          id: "over-cap-local",
+          clientId: "over-cap-local",
+          name: "Over cap local",
+          scope: "global",
+          contextKey: "",
+          contextLabel: "",
+          params: [["work_search[sort_column]", "kudos_count"]],
+          summary: ["Sort: Kudos"],
+          createdAt: "2026-06-18T10:00:00.000Z",
+          updatedAt: "2026-06-18T10:00:00.000Z",
+          clientUpdatedAt: "2026-06-18T10:00:00.000Z",
+          dirty: true,
+        },
+      ],
+    },
+    fetchImpl: async () =>
+      createResponse({
+        ok: false,
+        status: 422,
+        json: {
+          error: "AO3 saved filter limit reached",
+          code: "AO3_SAVED_FILTER_LIMIT_REACHED",
+          limit: 250,
+          current: 250,
+          attempted: 251,
+        },
+      }),
+  });
+  h.hooks.setBearerToken("token-filters");
+
+  const result = await h.hooks.syncAo3SavedFilters();
+
+  assert.deepEqual(plainJson(result), {
+    ok: false,
+    error: "limit_reached",
+    limit: 250,
+  });
+  assert.equal(h.store.traceAo3SavedFiltersV1.length, 1);
+  assert.equal(h.store.traceAo3SavedFiltersV1[0].dirty, true);
+  assert.equal(h.store.traceAuthState.state, "connected");
+  assert.match(h.store.traceAuthState.message, /up to 250 AO3 saved filters/);
+});
+
+test("syncAo3SavedFilters pulls remote presets onto another device", async () => {
+  const h = createBackgroundHarness({
+    storageState: {
+      traceAo3SavedFiltersSyncV1: {
+        syncVersion: "2026-06-18T09:00:00.000Z",
+      },
+    },
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      assert.equal(body.since, "2026-06-18T09:00:00.000Z");
+      assert.deepEqual(body.upserts, []);
+      assert.deepEqual(body.deletes, []);
+      return createResponse({
+        json: {
+          success: true,
+          data: {
+            serverTime: "2026-06-18T10:02:00.000Z",
+            syncVersion: "2026-06-18T10:02:00.000Z",
+            presets: [
+              {
+                id: "00000000-0000-4000-8000-000000000002",
+                clientId: "remote-preset",
+                name: "Remote saved filter",
+                scope: "global",
+                contextKey: null,
+                contextLabel: null,
+                params: [["work_search[sort_column]", "updated_at"]],
+                summary: ["Sort: Date Updated"],
+                createdAt: "2026-06-18T10:01:00.000Z",
+                updatedAt: "2026-06-18T10:02:00.000Z",
+                clientUpdatedAt: "2026-06-18T10:01:00.000Z",
+              },
+            ],
+            deleted: [],
+          },
+        },
+      });
+    },
+  });
+  h.hooks.setBearerToken("token-filters");
+
+  await h.hooks.syncAo3SavedFilters();
+
+  assert.equal(h.store.traceAo3SavedFiltersV1.length, 1);
+  assert.equal(h.store.traceAo3SavedFiltersV1[0].id, "remote-preset");
+  assert.equal(h.store.traceAo3SavedFiltersV1[0].serverId, "00000000-0000-4000-8000-000000000002");
+  assert.equal(h.store.traceAo3SavedFiltersV1[0].scope, "global");
+});
+
+test("syncAo3SavedFilters sends delete tombstones and clears them after server ack", async () => {
+  const h = createBackgroundHarness({
+    storageState: {
+      traceAo3SavedFiltersDeletedV1: [
+        {
+          id: "preset-a",
+          clientId: "preset-a",
+          serverId: "00000000-0000-4000-8000-000000000003",
+          clientUpdatedAt: "2026-06-18T10:06:00.000Z",
+        },
+      ],
+      traceAo3SavedFiltersSyncV1: {
+        syncVersion: "2026-06-18T10:00:00.000Z",
+      },
+    },
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      assert.deepEqual(body.upserts, []);
+      assert.equal(body.deletes.length, 1);
+      assert.equal(body.deletes[0].id, "00000000-0000-4000-8000-000000000003");
+      assert.equal(body.deletes[0].clientId, "preset-a");
+      return createResponse({
+        json: {
+          success: true,
+          data: {
+            serverTime: "2026-06-18T10:06:01.000Z",
+            syncVersion: "2026-06-18T10:06:01.000Z",
+            presets: [],
+            deleted: [
+              {
+                id: "00000000-0000-4000-8000-000000000003",
+                clientId: "preset-a",
+                deletedAt: "2026-06-18T10:06:01.000Z",
+                updatedAt: "2026-06-18T10:06:01.000Z",
+                clientUpdatedAt: "2026-06-18T10:06:00.000Z",
+              },
+            ],
+          },
+        },
+      });
+    },
+  });
+  h.hooks.setBearerToken("token-filters");
+
+  await h.hooks.syncAo3SavedFilters();
+
+  assert.deepEqual(plainJson(h.store.traceAo3SavedFiltersV1), []);
+  assert.deepEqual(plainJson(h.store.traceAo3SavedFiltersDeletedV1), []);
+});
+
+test("TRACE_AO3_SAVED_FILTERS_SYNC_REQUEST queues only when signed in", async () => {
+  const h = createBackgroundHarness();
+
+  const signedOut = await h.dispatchMessage({
+    type: "TRACE_AO3_SAVED_FILTERS_SYNC_REQUEST",
+  });
+  assert.deepEqual(plainJson(signedOut), { ok: true, queued: false });
+
+  h.hooks.setBearerToken("token-filters");
+  const signedIn = await h.dispatchMessage({
+    type: "TRACE_AO3_SAVED_FILTERS_SYNC_REQUEST",
+  });
+  assert.deepEqual(plainJson(signedIn), { ok: true, queued: true });
+  assert.equal(h.timers.length, 1);
+});
+
 test("TRACE_POPUP_GET_STATE includes local activation and active tab context", async () => {
   const connected = {
     state: "connected",
@@ -308,6 +640,7 @@ test("TRACE_POPUP_GET_STATE includes local activation and active tab context", a
       authToken: "token-popup",
       traceAuthState: connected,
       traceFirstSaveSeen: false,
+      prefAo3SavedFiltersEnabled: false,
     },
     activeTabs: [
       { id: 23, url: "https://archiveofourown.org/works/12345/chapters/67890" },
@@ -333,6 +666,7 @@ test("TRACE_POPUP_GET_STATE includes local activation and active tab context", a
   });
   assert.equal(response.autoTrackEnabled, true);
   assert.equal(response.libraryInlayEnabled, true);
+  assert.equal(response.ao3SavedFiltersEnabled, false);
   assert.equal(response.metadataImproveEnabled, true);
 });
 
@@ -1255,6 +1589,130 @@ test("TRACE_SET_HIDDEN_WORK handles auth, validation, and rate-limit failures", 
   assert.equal(cappedResponse.ok, false);
   assert.equal(cappedResponse.error, "free_limit_reached");
   assert.equal(capped.store.traceAuthState.state, "upgrade_required");
+});
+
+test("TRACE_PATCH_LIBRARY_ENTRY patches rating and updates overlay cache", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000777";
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-patch-1",
+      libraryOverlayCache: {
+        entries: {
+          "ao3:777": {
+            entryId,
+            status: "READING",
+            readerStatus: "READING",
+            chapters: { current: 4, total: 8 },
+            rating: 0,
+          },
+        },
+        syncVersion: "v-before-rating",
+      },
+    },
+    fetchImpl: async (url, init) => {
+      assert.equal(
+        String(url),
+        `https://tracefiction.com/api/library/${entryId}`,
+      );
+      assert.equal(init.method, "PATCH");
+      assert.deepEqual(JSON.parse(init.body), { rating: 4 });
+      return createResponse({ json: { data: { entry_id: entryId } } });
+    },
+  });
+  h.hooks.setBearerToken("token-patch-1");
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_PATCH_LIBRARY_ENTRY",
+    payload: { entryId, patch: { rating: 4 } },
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.workKey, "ao3:777");
+  assert.deepEqual(plainJson(response.patch), { rating: 4 });
+  assert.equal(h.store.libraryOverlayCache.entries["ao3:777"].rating, 4);
+  assert.equal(h.store.traceAuthState.state, "connected");
+  assert.equal(h.store.traceFirstSaveSeen, true);
+});
+
+test("TRACE_PATCH_LIBRARY_ENTRY patches catch-up progress and clears new chapter state", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000778";
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-patch-2",
+      libraryOverlayCache: {
+        entries: {
+          "ao3:778": {
+            entryId,
+            status: "READING",
+            readerStatus: "READING",
+            chapters: { current: 4, total: 8 },
+            catchupState: "BEHIND",
+            newChapterCount: 2,
+          },
+        },
+        syncVersion: "v-before-catchup",
+      },
+    },
+    fetchImpl: async (_url, init) => {
+      assert.deepEqual(JSON.parse(init.body), {
+        progress: { unit: "CHAPTER", value: 6, total: 8 },
+      });
+      return createResponse({ json: { data: { entry_id: entryId } } });
+    },
+  });
+  h.hooks.setBearerToken("token-patch-2");
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_PATCH_LIBRARY_ENTRY",
+    payload: {
+      entryId,
+      patch: { progress: { unit: "CHAPTER", value: 6, total: 8 } },
+    },
+  });
+
+  assert.equal(response.ok, true);
+  const entry = h.store.libraryOverlayCache.entries["ao3:778"];
+  assert.deepEqual(plainJson(entry.chapters), { current: 6, total: 8 });
+  assert.equal(entry.catchupState, "UP");
+  assert.equal(entry.newChapterCount, 0);
+});
+
+test("TRACE_PATCH_LIBRARY_ENTRY validates auth, entry id, rating, and progress", async () => {
+  const noAuth = createBackgroundHarness();
+  assert.deepEqual(
+    plainJson(
+      await noAuth.dispatchMessage({
+        type: "TRACE_PATCH_LIBRARY_ENTRY",
+        payload: {
+          entryId: "00000000-0000-4000-8000-000000000779",
+          patch: { rating: 4 },
+        },
+      }),
+    ),
+    { ok: false, error: "not_authenticated" },
+  );
+
+  const invalid = createBackgroundHarness({ storageState: { authToken: "token-patch-3" } });
+  invalid.hooks.setBearerToken("token-patch-3");
+  for (const payload of [
+    { entryId: "bad-id", patch: { rating: 4 } },
+    { entryId: "00000000-0000-4000-8000-000000000779", patch: { rating: 6 } },
+    {
+      entryId: "00000000-0000-4000-8000-000000000779",
+      patch: { progress: { unit: "CHAPTER", value: -1, total: 8 } },
+    },
+    { entryId: "00000000-0000-4000-8000-000000000779", patch: {} },
+  ]) {
+    assert.deepEqual(
+      plainJson(
+        await invalid.dispatchMessage({
+          type: "TRACE_PATCH_LIBRARY_ENTRY",
+          payload,
+        }),
+      ),
+      { ok: false, error: "invalid_request" },
+    );
+  }
 });
 
 // =======================================================

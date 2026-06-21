@@ -3,7 +3,7 @@
   "default_locale": "en",
   "name": "Trace",
   "description": "Track fanfiction reading: import AO3/FFN metadata into Trace and sync progress.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "action": {
     "default_title": "Trace",
     "default_popup": "popup.html",
@@ -120,6 +120,58 @@
         "sync.js"
       ],
       "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://archiveofourown.org/*",
+        "https://*.archiveofourown.org/*",
+        "https://archiveofourown.gay/*",
+        "https://*.archiveofourown.gay/*",
+        "https://archive.transformativeworks.org/*",
+        "https://ao3.org/*",
+        "https://*.ao3.org/*"
+      ],
+      "js": [
+        "ao3-saved-filters.js"
+      ],
+      "run_at": "document_end",
+      "exclude_matches": [
+        "https://archiveofourown.org/users/login*",
+        "https://*.archiveofourown.org/users/login*",
+        "https://archiveofourown.org/users/sign_up*",
+        "https://*.archiveofourown.org/users/sign_up*",
+        "https://archiveofourown.org/users/password*",
+        "https://*.archiveofourown.org/users/password*",
+        "https://archiveofourown.org/users/auth/*",
+        "https://*.archiveofourown.org/users/auth/*",
+        "https://archiveofourown.org/users/logout*",
+        "https://*.archiveofourown.org/users/logout*",
+        "https://archiveofourown.gay/users/login*",
+        "https://*.archiveofourown.gay/users/login*",
+        "https://archiveofourown.gay/users/sign_up*",
+        "https://*.archiveofourown.gay/users/sign_up*",
+        "https://archiveofourown.gay/users/password*",
+        "https://*.archiveofourown.gay/users/password*",
+        "https://archiveofourown.gay/users/auth/*",
+        "https://*.archiveofourown.gay/users/auth/*",
+        "https://archiveofourown.gay/users/logout*",
+        "https://*.archiveofourown.gay/users/logout*",
+        "https://archive.transformativeworks.org/users/login*",
+        "https://archive.transformativeworks.org/users/sign_up*",
+        "https://archive.transformativeworks.org/users/password*",
+        "https://archive.transformativeworks.org/users/auth/*",
+        "https://archive.transformativeworks.org/users/logout*",
+        "https://ao3.org/users/login*",
+        "https://*.ao3.org/users/login*",
+        "https://ao3.org/users/sign_up*",
+        "https://*.ao3.org/users/sign_up*",
+        "https://ao3.org/users/password*",
+        "https://*.ao3.org/users/password*",
+        "https://ao3.org/users/auth/*",
+        "https://*.ao3.org/users/auth/*",
+        "https://ao3.org/users/logout*",
+        "https://*.ao3.org/users/logout*"
+      ]
     }
   ]
 }

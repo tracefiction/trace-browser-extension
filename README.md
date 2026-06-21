@@ -27,6 +27,9 @@ On supported AO3 and FanFiction.net story/listing pages, Trace reads visible sto
 
 Trace uses this to import a story, update reading progress, show whether stories are already in your Trace library, let you change reading status from supported overlay surfaces, and hide works from Trace's browsing overlay when you explicitly choose to.
 
+When you explicitly save an AO3 saved filter, Trace stores that AO3 filter query state in extension storage so it can reapply the filter later. If you are signed in to Trace, saved filters sync to your Trace account so they can appear on your other devices. Signed-out or offline saved filters remain local until a later signed-in sync.
+You can hide the saved filters surface from AO3 filter pages in the extension popup; this local preference does not delete saved presets.
+
 ## What Trace Sends
 
 Trace may send this data to the Trace API when you import, quick-add, auto-track, or help improve shared metadata:
@@ -38,10 +41,12 @@ Trace may send this data to the Trace API when you import, quick-add, auto-track
 - reading-progress metadata
 - reading-status updates you explicitly choose in the Trace overlay, such as Planning, Reading, Paused, Finished, or Dropped
 - hidden-work browsing preferences you explicitly choose in the Trace overlay, keyed by the supported AO3/FFN work id
+- AO3 saved filter presets you explicitly create, stored as normalized AO3 filter query parameters plus the preset name/scope
 - your Trace auth token for authenticated Trace API requests
 
 The metadata-improvement preference is separate from automatic progress tracking and can be turned off in the extension popup.
 Hidden-work preferences affect Trace browsing overlays only; they are separate from reading status and do not hide or change the source site itself.
+Saved AO3 filters sync only when you are signed in. They do not include AO3 credentials, cookies, page HTML, or story text.
 
 ## What Trace Does Not Send
 
@@ -68,7 +73,7 @@ Start with these files:
 
 For a tagged release, confirm `package.json` version matches the generated manifest version. Safari consumes checked-in files under `Shared (Extension)/Resources`; Chromium and Firefox packages are generated into `dist/`, which is intentionally not committed.
 
-`Shared (Extension)/Resources/background.js` is a committed build artifact generated from `src/background.js` by `npm run build` / `npm run build:release` (literal string substitution of `__TRACE_API_BASE__` and `__TRACE_WEB_ORIGIN__`). Safari requires it to be checked in. When auditing the extension, read `src/background.js` as the source of truth and confirm the two files agree for the release you are inspecting. `iOS (App)/TraceWebOrigin.generated.swift` is committed for the same reason — the iOS DEBUG `WKWebView` shell needs a compiled constant, and it is regenerated from the same `.env` values.
+`Shared (Extension)/Resources/background.js` is a committed build artifact generated from `src/background.js` by `npm run build` / `npm run build:release` (literal string substitution of `__TRACE_API_BASE__` and `__TRACE_WEB_ORIGIN__`). Safari requires it to be checked in. When auditing the extension, read `src/background.js` as the source of truth and confirm the two files agree for the release you are inspecting. `Shared (Extension)/Resources/popup-config.js` and `iOS (App)/TraceWebOrigin.generated.swift` are committed for the same reason — popup navigation and the iOS DEBUG `WKWebView` shell need compiled constants, and both are regenerated from the same `.env` values.
 
 ## Build And Test
 

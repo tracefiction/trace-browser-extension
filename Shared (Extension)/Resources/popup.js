@@ -2,18 +2,41 @@ const ext = typeof browser !== "undefined" ? browser : chrome;
 const STATUS_KEY = "traceAuthState";
 const PREF_AUTO_TRACK_KEY = "prefAutoTrackEnabled";
 const PREF_LIBRARY_INLAY_KEY = "prefLibraryInlayEnabled";
+const PREF_AO3_SAVED_FILTERS_KEY = "prefAo3SavedFiltersEnabled";
 const PREF_METADATA_IMPROVE_KEY = "prefMetadataImproveEnabled";
 const TRACE_USER_PRO_KEY = "traceUserPro";
 const TRACE_FIRST_SAVE_SEEN_KEY = "traceFirstSaveSeen";
 const TRACE_LIBRARY_COUNT_KEY = "traceLibraryCount";
-const TRACE_HOME_URL = "https://tracefiction.com/";
-const TRACE_IOS_SETUP_URL = "https://tracefiction.com/apps#safari-ios-setup";
+const DEFAULT_TRACE_WEB_ORIGIN = "https://tracefiction.com";
+const TRACE_WEB_ORIGIN = configuredTraceWebOrigin();
+const TRACE_HOME_URL = `${TRACE_WEB_ORIGIN}/`;
+const TRACE_IOS_SETUP_URL = `${DEFAULT_TRACE_WEB_ORIGIN}/apps#safari-ios-setup`;
 const AO3_WORKS_URL = "https://archiveofourown.org/works";
 const FFN_HOME_URL = "https://www.fanfiction.net/";
 const IOS_SIGN_IN_GUIDANCE =
   "In Safari, enable Trace in Extensions, allow it on tracefiction.com, AO3, and FFN, then sign in on tracefiction.com. Return to a supported story page to use Add to Trace or import.";
 const IOS_PERMISSION_GUIDANCE =
   "If Safari still blocks Trace, enable the extension and allow it on tracefiction.com, AO3, and FFN. Then refresh the supported story page and use Add to Trace or import.";
+
+function configuredTraceWebOrigin() {
+  const configured =
+    typeof globalThis !== "undefined" &&
+    typeof globalThis.TRACE_EXTENSION_WEB_ORIGIN === "string"
+      ? globalThis.TRACE_EXTENSION_WEB_ORIGIN.trim()
+      : "";
+  try {
+    const URLCtor =
+      typeof URL !== "undefined"
+        ? URL
+        : typeof window !== "undefined"
+          ? window.URL
+          : null;
+    if (!URLCtor) return DEFAULT_TRACE_WEB_ORIGIN;
+    return new URLCtor(configured || DEFAULT_TRACE_WEB_ORIGIN).origin;
+  } catch {
+    return DEFAULT_TRACE_WEB_ORIGIN;
+  }
+}
 
 const isLikelyIosExtensionUi = (() => {
   try {
@@ -381,6 +404,12 @@ function renderStatus(patch) {
   }
 }
 
+function applyLocalUi(ao3SavedFilters) {
+  const ao3SavedFiltersEl = document.getElementById("pref-ao3-saved-filters");
+  if (!ao3SavedFiltersEl) return;
+  ao3SavedFiltersEl.checked = ao3SavedFilters !== false;
+}
+
 function applyProUi(pro, autoTrack, libraryInlay, metadataImprove) {
   const section = document.getElementById("popup-pro-settings");
   const autoEl = document.getElementById("pref-auto-track");
@@ -407,6 +436,7 @@ function fetchPopupState() {
         typeof s.libraryCount === "number" ? s.libraryCount : undefined,
       activeTab: s.activeTab || undefined,
     });
+    applyLocalUi(s.ao3SavedFiltersEnabled);
     applyProUi(
       s.pro,
       s.autoTrackEnabled,
@@ -422,11 +452,13 @@ function applyProUiFromStorage() {
       TRACE_USER_PRO_KEY,
       PREF_AUTO_TRACK_KEY,
       PREF_LIBRARY_INLAY_KEY,
+      PREF_AO3_SAVED_FILTERS_KEY,
       PREF_METADATA_IMPROVE_KEY,
     ],
     (r) => {
       if (ext.runtime.lastError) return;
       const pro = r[TRACE_USER_PRO_KEY] === true;
+      applyLocalUi(r[PREF_AO3_SAVED_FILTERS_KEY] !== false);
       applyProUi(
         pro,
         r[PREF_AUTO_TRACK_KEY] !== false,
@@ -571,6 +603,7 @@ ext.storage.onChanged.addListener((changes, area) => {
     changes[TRACE_USER_PRO_KEY] ||
     changes[PREF_AUTO_TRACK_KEY] ||
     changes[PREF_LIBRARY_INLAY_KEY] ||
+    changes[PREF_AO3_SAVED_FILTERS_KEY] ||
     changes[PREF_METADATA_IMPROVE_KEY]
   ) {
     applyProUiFromStorage();
@@ -579,6 +612,7 @@ ext.storage.onChanged.addListener((changes, area) => {
 
 const autoTrackInput = document.getElementById("pref-auto-track");
 const libraryInlayInput = document.getElementById("pref-library-inlay");
+const ao3SavedFiltersInput = document.getElementById("pref-ao3-saved-filters");
 const metadataImproveInput = document.getElementById("pref-metadata-improve");
 if (autoTrackInput) {
   autoTrackInput.addEventListener("change", () => {
@@ -588,6 +622,13 @@ if (autoTrackInput) {
 if (libraryInlayInput) {
   libraryInlayInput.addEventListener("change", () => {
     ext.storage.local.set({ [PREF_LIBRARY_INLAY_KEY]: libraryInlayInput.checked });
+  });
+}
+if (ao3SavedFiltersInput) {
+  ao3SavedFiltersInput.addEventListener("change", () => {
+    ext.storage.local.set({
+      [PREF_AO3_SAVED_FILTERS_KEY]: ao3SavedFiltersInput.checked,
+    });
   });
 }
 if (metadataImproveInput) {
