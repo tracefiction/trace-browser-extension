@@ -13,6 +13,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
 const RES = path.join(ROOT, "Shared (Extension)", "Resources");
 const SRC_BG = path.join(ROOT, "src", "background.js");
+const XCODE_PROJECT = path.join(ROOT, "Trace.xcodeproj", "project.pbxproj");
 
 function loadEnvFile(p) {
   const out = {};
@@ -220,6 +221,23 @@ function firefoxCompatibleManifest(baseManifest) {
   };
 }
 
+function syncXcodeMarketingVersion(version) {
+  let project = fs.readFileSync(XCODE_PROJECT, "utf8");
+  let replacements = 0;
+  project = project.replace(
+    /MARKETING_VERSION = [^;]+;/g,
+    () => {
+      replacements += 1;
+      return `MARKETING_VERSION = ${version};`;
+    },
+  );
+  if (replacements === 0) {
+    throw new Error("Could not find MARKETING_VERSION in Trace.xcodeproj/project.pbxproj");
+  }
+  fs.writeFileSync(XCODE_PROJECT, project, "utf8");
+  console.log(`Set Xcode marketing version to ${version} (${replacements} build settings)`);
+}
+
 const TRACE_API_BASE = (
   env.TRACE_API_BASE ?? "http://localhost:3001"
 ).replace(/\/$/, "");
@@ -243,6 +261,7 @@ bg = bg
 
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
 const version = pkg.version ?? "0.0.0";
+syncXcodeMarketingVersion(version);
 
 const outBg = path.join(RES, "background.js");
 fs.writeFileSync(outBg, bg, "utf8");
