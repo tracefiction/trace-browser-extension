@@ -11,6 +11,7 @@ const SCRIPT_PATH = path.join(
   "Resources",
   "ao3-saved-filters.js",
 );
+const RESOURCE_DIR = path.dirname(SCRIPT_PATH);
 const MANIFEST_PATH = path.join(
   __dirname,
   "..",
@@ -179,6 +180,18 @@ test("manifest loads AO3 saved filters with existing archive content scripts", (
     !savedFiltersEntry.matches.some((pattern) => /fanfiction\.net/.test(pattern)),
     "saved filters should not inject on FFN hosts",
   );
+});
+
+test("packaged extension resources avoid AMO-flagged HTML sinks", () => {
+  const unsafeAssignments = [];
+  for (const file of fs.readdirSync(RESOURCE_DIR)) {
+    if (!file.endsWith(".js")) continue;
+    const text = fs.readFileSync(path.join(RESOURCE_DIR, file), "utf8");
+    if (/\.\s*(?:innerHTML|outerHTML)\s*=|insertAdjacentHTML\s*\(/.test(text)) {
+      unsafeAssignments.push(file);
+    }
+  }
+  assert.deepEqual(unsafeAssignments, []);
 });
 
 test("AO3 saved filters saves normalized current URL params locally", async () => {

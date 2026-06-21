@@ -851,7 +851,47 @@
     if (state.mode !== "save" || visiblePresets.length > 0) html += renderList(relation, visiblePresets);
     html += "</div>";
     html += "</div>";
-    state.root.innerHTML = html;
+    replaceRootWithUiMarkup(state.root, html);
+  }
+
+  function replaceRootWithUiMarkup(root, html) {
+    if (!root) return;
+    while (root.firstChild) root.removeChild(root.firstChild);
+    var parser = new DOMParser();
+    var doc = parser.parseFromString(
+      "<!doctype html><html><body>" + String(html || "") + "</body></html>",
+      "text/html",
+    );
+    sanitizeParsedUiMarkup(doc.body);
+    var fragment = document.createDocumentFragment();
+    while (doc.body.firstChild) {
+      fragment.appendChild(document.importNode(doc.body.firstChild, true));
+      doc.body.removeChild(doc.body.firstChild);
+    }
+    root.appendChild(fragment);
+  }
+
+  function sanitizeParsedUiMarkup(container) {
+    if (!container || !container.querySelectorAll) return;
+    var blocked = container.querySelectorAll("script, iframe, object, embed, link, meta");
+    for (var i = 0; i < blocked.length; i++) {
+      if (blocked[i].parentNode) blocked[i].parentNode.removeChild(blocked[i]);
+    }
+    var nodes = container.querySelectorAll("*");
+    for (var j = 0; j < nodes.length; j++) {
+      var attrs = Array.prototype.slice.call(nodes[j].attributes || []);
+      for (var k = 0; k < attrs.length; k++) {
+        var name = String(attrs[k].name || "").toLowerCase();
+        var value = String(attrs[k].value || "");
+        if (
+          name.indexOf("on") === 0 ||
+          name === "srcdoc" ||
+          ((name === "href" || name === "src" || name === "xlink:href") && /^\s*javascript:/i.test(value))
+        ) {
+          nodes[j].removeAttribute(attrs[k].name);
+        }
+      }
+    }
   }
 
   function canCollapsePanel(relation, presets) {
