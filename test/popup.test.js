@@ -30,11 +30,13 @@ function createPopupHarness({
     pro: false,
     autoTrackEnabled: true,
     libraryInlayEnabled: true,
+    ao3SavedFiltersEnabled: true,
     metadataImproveEnabled: true,
     activeTab: { kind: "unsupported" },
   },
   importResponse = { ok: true },
   userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+  traceWebOrigin,
 } = {}) {
   const html = fs.readFileSync(POPUP_HTML_PATH, "utf8");
   const js = fs.readFileSync(POPUP_JS_PATH, "utf8");
@@ -116,6 +118,9 @@ function createPopupHarness({
     },
     clearTimeout() {},
   };
+  if (traceWebOrigin !== undefined) {
+    context.TRACE_EXTENSION_WEB_ORIGIN = traceWebOrigin;
+  }
   context.globalThis = context;
   window.close = () => {
     closeCalled = true;
@@ -184,6 +189,31 @@ test("popup renders signed-out fallback with a direct Trace sign-in CTA", async 
   assert.equal(
     h.document.getElementById("popup-pro-settings").classList.contains("hidden"),
     true,
+  );
+  assert.equal(
+    h.document.getElementById("popup-local-settings").classList.contains("hidden"),
+    false,
+  );
+  assert.equal(h.document.getElementById("pref-ao3-saved-filters").checked, true);
+});
+
+test("popup signed-out CTA uses configured Trace web origin", async () => {
+  const h = createPopupHarness({
+    traceWebOrigin: "http://localhost:5173",
+    storageState: {},
+    popupState: {
+      pro: false,
+      autoTrackEnabled: true,
+      libraryInlayEnabled: true,
+      metadataImproveEnabled: true,
+      activeTab: { kind: "unsupported" },
+    },
+  });
+  await flush();
+
+  assert.equal(
+    h.document.getElementById("popup-cta").getAttribute("href"),
+    "http://localhost:5173/",
   );
 });
 
@@ -519,7 +549,7 @@ test("popup shows reconnect guidance with a direct recovery CTA", async () => {
   );
 });
 
-test("popup shows pro controls and persists toggle changes", async () => {
+test("popup shows local and connected controls and persists toggle changes", async () => {
   const h = createPopupHarness({
     storageState: {
       traceAuthState: { state: "connected", message: "Connected", helpUrl: "https://tracefiction.com/apps" },
@@ -529,6 +559,7 @@ test("popup shows pro controls and persists toggle changes", async () => {
       pro: true,
       autoTrackEnabled: false,
       libraryInlayEnabled: true,
+      ao3SavedFiltersEnabled: false,
       metadataImproveEnabled: true,
       firstSaveSeen: true,
       activeTab: { kind: "supported_story", site: "ao3", canImport: true },
@@ -537,25 +568,34 @@ test("popup shows pro controls and persists toggle changes", async () => {
   await flush();
 
   const section = h.document.getElementById("popup-pro-settings");
+  const localSection = h.document.getElementById("popup-local-settings");
   const auto = h.document.getElementById("pref-auto-track");
   const inlay = h.document.getElementById("pref-library-inlay");
+  const savedFilters = h.document.getElementById("pref-ao3-saved-filters");
   const metadata = h.document.getElementById("pref-metadata-improve");
 
   assert.equal(section.classList.contains("hidden"), false);
+  assert.equal(localSection.classList.contains("hidden"), false);
   assert.doesNotMatch(section.textContent, /Extension behavior/i);
+  assert.doesNotMatch(section.textContent, /Saved filters on AO3/i);
+  assert.match(localSection.textContent, /Saved filters on AO3/i);
   assert.equal(auto.checked, false);
   assert.equal(inlay.checked, true);
+  assert.equal(savedFilters.checked, false);
   assert.equal(metadata.checked, true);
 
   auto.checked = true;
   auto.dispatchEvent(new h.window.Event("change", { bubbles: true }));
   inlay.checked = false;
   inlay.dispatchEvent(new h.window.Event("change", { bubbles: true }));
+  savedFilters.checked = true;
+  savedFilters.dispatchEvent(new h.window.Event("change", { bubbles: true }));
   metadata.checked = false;
   metadata.dispatchEvent(new h.window.Event("change", { bubbles: true }));
 
   assert.equal(h.store.prefAutoTrackEnabled, true);
   assert.equal(h.store.prefLibraryInlayEnabled, false);
+  assert.equal(h.store.prefAo3SavedFiltersEnabled, true);
   assert.equal(h.store.prefMetadataImproveEnabled, false);
 });
 

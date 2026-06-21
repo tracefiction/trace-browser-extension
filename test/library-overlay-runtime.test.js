@@ -24,6 +24,10 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function plainJson(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
 function precedes(left, right) {
   if (!left || !right) return false;
   return Boolean(
@@ -559,21 +563,28 @@ test("library-overlay renders COMPLETED reader status as Finished", async () => 
 });
 
 test("library-overlay renders optional WIP new-chapter context when present", async () => {
+  const sent = [];
   const window = await renderOverlayListing({
     html:
       "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/33345'>New Chapters Work</a></h4></li></ol></body></html>",
     cache: {
       entries: {
         "ao3:33345": {
+          entryId: "00000000-0000-4000-8000-000000033345",
           status: "READING",
           readerStatus: "READING",
           chapters: { current: 4, total: 8 },
+          rating: 2,
           workStatus: "wip",
           catchupState: "BEHIND",
           newChapterCount: 2,
         },
       },
       syncVersion: "v-new-context",
+    },
+    sendMessage(msg, cb) {
+      sent.push(msg);
+      if (typeof cb === "function") cb({ ok: true });
     },
   });
 
@@ -593,6 +604,64 @@ test("library-overlay renders optional WIP new-chapter context when present", as
   assert.ok(position);
   assert.doesNotMatch(surface.textContent || "", /Work status|Work in progress/i);
   assert.match(position.textContent || "", /\+2 new chapters/i);
+
+  const ratingControl = surface.querySelector("[data-trace-rating-control]");
+  assert.ok(ratingControl);
+  assert.equal(
+    Array.from(ratingControl.querySelectorAll("[data-trace-rating-choice]"))
+      .map((button) => button.textContent)
+      .join(""),
+    "★★☆☆☆",
+  );
+  ratingControl.querySelector("[data-trace-rating-choice='4']").click();
+  assert.deepEqual(plainJson(sent.at(-1)), {
+    type: "TRACE_PATCH_LIBRARY_ENTRY",
+    payload: {
+      entryId: "00000000-0000-4000-8000-000000033345",
+      patch: { rating: 4 },
+    },
+  });
+  window.__traceSetStorage({
+    libraryOverlayCache: {
+      entries: {
+        "ao3:33345": {
+          entryId: "00000000-0000-4000-8000-000000033345",
+          status: "READING",
+          readerStatus: "READING",
+          chapters: { current: 4, total: 8 },
+          rating: 4,
+          workStatus: "wip",
+          catchupState: "BEHIND",
+          newChapterCount: 2,
+        },
+      },
+      syncVersion: "v-new-context-rating-saved",
+    },
+  });
+  await sleep(100);
+  const refreshedSurface = window.document.querySelector("[data-trace-action-surface]");
+  assert.ok(refreshedSurface, "rating storage refresh should keep the action surface open");
+  assert.equal(
+    Array.from(refreshedSurface.querySelectorAll("[data-trace-rating-choice]"))
+      .map((button) => button.textContent)
+      .join(""),
+    "★★★★☆",
+  );
+
+  const catchup = refreshedSurface.querySelector("[data-trace-catchup-action]");
+  assert.ok(catchup);
+  assert.match(catchup.textContent || "", /Set progress to chapter 6/i);
+  catchup.querySelector("button").click();
+  assert.deepEqual(plainJson(sent.at(-1)), {
+    type: "TRACE_PATCH_LIBRARY_ENTRY",
+    payload: {
+      entryId: "00000000-0000-4000-8000-000000033345",
+      patch: { progress: { unit: "CHAPTER", value: 6, total: 8 } },
+    },
+  });
+  const caughtUpSurface = window.document.querySelector("[data-trace-action-surface]");
+  assert.ok(caughtUpSurface);
+  assert.equal(caughtUpSurface.querySelector("[data-trace-catchup-action]"), null);
 });
 
 test("library-overlay keeps legacy fallback when optional work fields are missing", async () => {
@@ -674,7 +743,7 @@ test("library-overlay opened surface shows status editing only when entryId exis
     type: "TRACE_SET_READER_STATUS",
     payload: { entryId, status: "COMPLETED" },
   });
-  assert.equal(withEntryId.document.querySelector("[data-trace-action-surface]"), null);
+  assert.ok(withEntryId.document.querySelector("[data-trace-action-surface]"));
   assert.match(withEntryId.document.querySelector("[data-trace-library-overlay-wrap]").textContent || "", /Finished/i);
 
   const withoutEntryId = await renderOverlayListing({
@@ -764,7 +833,7 @@ test("library-overlay lens click toggles same surface and switches to another le
   assert.match(surface.textContent || "", /Paused/i);
 });
 
-test("library-overlay status selection closes surface immediately and shows inline saving", async () => {
+test("library-overlay status selection keeps surface open and shows inline saving", async () => {
   const entryId = "00000000-0000-4000-8000-000000012347";
   let pendingCallback = null;
   const window = await renderOverlayListing({
@@ -789,7 +858,7 @@ test("library-overlay status selection closes surface immediately and shows inli
   const { surface } = openTraceLens(window);
   surface.querySelector("[data-trace-status-choice='READING']").click();
 
-  assert.equal(window.document.querySelector("[data-trace-action-surface]"), null);
+  assert.ok(window.document.querySelector("[data-trace-action-surface]"));
   let lens = window.document.querySelector("[data-trace-library-lens]");
   assert.ok(lens);
   assert.equal(lens.getAttribute("data-trace-status-saving"), "1");
@@ -801,6 +870,9 @@ test("library-overlay status selection closes surface immediately and shows inli
   assert.equal(lens.getAttribute("data-trace-status-saving"), null);
   assert.match(lens.textContent || "", /Reading\s*1\/12/i);
   assert.doesNotMatch(lens.textContent || "", /0\/12/);
+  const updatedSurface = window.document.querySelector("[data-trace-action-surface]");
+  assert.ok(updatedSurface);
+  assert.match(updatedSurface.textContent || "", /Reading/i);
 });
 
 test("library-overlay status failure restores previous state and exposes compact error", async () => {
@@ -827,7 +899,7 @@ test("library-overlay status failure restores previous state and exposes compact
 
   const { surface } = openTraceLens(window);
   surface.querySelector("[data-trace-status-choice='COMPLETED']").click();
-  assert.equal(window.document.querySelector("[data-trace-action-surface]"), null);
+  assert.ok(window.document.querySelector("[data-trace-action-surface]"));
   assert.match(window.document.querySelector("[data-trace-library-lens]").textContent || "", /Saving/i);
 
   pendingCallback({ ok: false, error: "rate_limited" });
@@ -835,7 +907,6 @@ test("library-overlay status failure restores previous state and exposes compact
   const lens = window.document.querySelector("[data-trace-library-lens]");
   assert.equal(lens.getAttribute("data-trace-status-error"), "1");
   assert.match(lens.textContent || "", /Update failed/i);
-  lens.click();
   const retrySurface = window.document.querySelector("[data-trace-action-surface]");
   assert.ok(retrySurface);
   assert.match(retrySurface.textContent || "", /Paused/i);

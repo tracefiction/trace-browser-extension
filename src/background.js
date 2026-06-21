@@ -12,6 +12,7 @@ const METADATA_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/me
 const LIBRARY_METADATA_REFRESH_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/library/metadata-refresh`;
 const LIBRARY_OVERLAY_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/library-overlay`;
 const WORK_PREFERENCES_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/work-preferences`;
+const AO3_SAVED_FILTERS_SYNC_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/ao3-saved-filters/sync`;
 const LIBRARY_ENTRY_ENDPOINT_BASE = `${TRACE_API_BASE.replace(/\/$/, "")}/api/library`;
 const ACCOUNT_ME_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/account/me`;
 const IMPORT_BASE = `${TRACE_WEB_ORIGIN.replace(/\/$/, "")}/import`;
@@ -19,8 +20,13 @@ const TRACE_HOME_URL = `${TRACE_WEB_ORIGIN.replace(/\/$/, "")}/`;
 const AUTH_TOKEN_KEY = "authToken";
 const AUTH_STATE_KEY = "traceAuthState";
 const OVERLAY_STORAGE_KEY = "libraryOverlayCache";
+const AO3_SAVED_FILTERS_STORAGE_KEY = "traceAo3SavedFiltersV1";
+const AO3_SAVED_FILTERS_DELETED_KEY = "traceAo3SavedFiltersDeletedV1";
+const AO3_SAVED_FILTERS_SYNC_META_KEY = "traceAo3SavedFiltersSyncV1";
+const AO3_SAVED_FILTERS_CLIENT_ID_KEY = "traceAo3SavedFiltersClientIdV1";
 const LIBRARY_INVALIDATED_MESSAGE = "TRACE_LIBRARY_INVALIDATED";
 const EXTENSION_STATUS_QUERY_MESSAGE = "TRACE_EXTENSION_STATUS_QUERY";
+const AO3_SAVED_FILTERS_SYNC_REQUEST_MESSAGE = "TRACE_AO3_SAVED_FILTERS_SYNC_REQUEST";
 const ARCHIVE_READINESS_KEY = "traceArchiveReadiness";
 const OPTIMISTIC_CHAPTER_FLOORS_MS = 20_000;
 const ARCHIVE_READINESS_ERROR_RECENT_MS = 24 * 60 * 60 * 1_000;
@@ -30,14 +36,29 @@ const TRACE_LIBRARY_COUNT_KEY = "traceLibraryCount";
 const TRACE_USER_PRO_KEY = "traceUserPro";
 const PREF_AUTO_TRACK_KEY = "prefAutoTrackEnabled";
 const PREF_LIBRARY_INLAY_KEY = "prefLibraryInlayEnabled";
+const PREF_AO3_SAVED_FILTERS_KEY = "prefAo3SavedFiltersEnabled";
 const PREF_METADATA_IMPROVE_KEY = "prefMetadataImproveEnabled";
 const AO3_STORY_URL_RE =
   /^https:\/\/(?:[^/]+\.)?(?:archiveofourown\.org|archiveofourown\.gay|archive\.transformativeworks\.org|ao3\.org)\/works\/\d+(?:\/chapters\/\d+)?(?:[?#].*)?$/i;
 const FFN_STORY_PATH_RE = /^\/s\/\d+(?:\/\d+)?(?:\/.*)?$/i;
+const AO3_SAVED_FILTER_CLIENT_ID_RE = /^[A-Za-z0-9._:-]{1,80}$/;
+const AO3_SAVED_FILTER_PARAM_KEY_RE =
+  /^(?:work_search|include_work_search|exclude_work_search)\[[a-z0-9_]+\](?:\[\])?$/;
+const AO3_SAVED_FILTER_MAX_NAME_LENGTH = 96;
+const AO3_SAVED_FILTER_MAX_CONTEXT_KEY_LENGTH = 240;
+const AO3_SAVED_FILTER_MAX_CONTEXT_LABEL_LENGTH = 120;
+const AO3_SAVED_FILTER_MAX_SUMMARY_PARTS = 5;
+const AO3_SAVED_FILTER_MAX_SUMMARY_PART_LENGTH = 64;
+const AO3_SAVED_FILTER_MAX_PARAMS = 80;
+const AO3_SAVED_FILTER_ACTIVE_LIMIT = 250;
+const AO3_SAVED_FILTER_SYNC_BATCH_LIMIT = 100;
+const AO3_SAVED_FILTER_SYNC_MAX_ITERATIONS = 10;
 
 // 1. Token Management
 let bearerToken = null;
 const optimisticChapterFloors = new Map();
+let ao3SavedFiltersSyncTimer = null;
+let ao3SavedFiltersSyncInFlight = false;
 
 function shouldIgnoreSenderForAutoTrack(sender) {
   if (!sender || typeof sender !== "object") return false;
@@ -575,6 +596,464 @@ function fetchTraceUserProPromise() {
   });
 }
 
+function storageGetLocal(keys) {
+  return new Promise((resolve) => {
+    try {
+      ext.storage.local.get(keys, (res) => {
+        if (ext.runtime.lastError) {
+          resolve({});
+          return;
+        }
+        resolve(res || {});
+      });
+    } catch (_) {
+      resolve({});
+    }
+  });
+}
+
+function storageSetLocal(patch) {
+  return new Promise((resolve) => {
+    try {
+      ext.storage.local.set(patch, () => resolve());
+    } catch (_) {
+      resolve();
+    }
+  });
+}
+
+function makeAo3SavedFilterLocalId(prefix = "sf") {
+  try {
+    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") {
+      return globalThis.crypto.randomUUID();
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function isUsefulIsoDateTime(value) {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function boundedCleanText(value, maxLength) {
+  const cleaned = String(value || "").replace(/\s+/g, " ").trim();
+  return cleaned.slice(0, maxLength);
+}
+
+function validAo3SavedFilterClientId(value) {
+  const id = String(value || "").trim();
+  return AO3_SAVED_FILTER_CLIENT_ID_RE.test(id) ? id : "";
+}
+
+function sanitizeAo3SavedFilterPairs(raw) {
+  if (!Array.isArray(raw)) return [];
+  const pairs = [];
+  for (const pair of raw) {
+    if (!Array.isArray(pair) || pair.length < 2) continue;
+    const key = String(pair[0] || "").trim();
+    const value = String(pair[1] || "").trim();
+    if (!AO3_SAVED_FILTER_PARAM_KEY_RE.test(key) || !value) continue;
+    pairs.push([key, value.slice(0, 300)]);
+    if (pairs.length >= AO3_SAVED_FILTER_MAX_PARAMS) break;
+  }
+  pairs.sort((a, b) => {
+    if (a[0] < b[0]) return -1;
+    if (a[0] > b[0]) return 1;
+    if (a[1] < b[1]) return -1;
+    if (a[1] > b[1]) return 1;
+    return 0;
+  });
+  return pairs;
+}
+
+function sanitizeAo3SavedFilterSummary(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((part) =>
+      boundedCleanText(part, AO3_SAVED_FILTER_MAX_SUMMARY_PART_LENGTH),
+    )
+    .filter(Boolean)
+    .slice(0, AO3_SAVED_FILTER_MAX_SUMMARY_PARTS);
+}
+
+function sanitizeAo3SavedFilterPreset(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const params = sanitizeAo3SavedFilterPairs(raw.params);
+  if (params.length === 0) return null;
+  const fallbackId = makeAo3SavedFilterLocalId();
+  const id = String(raw.id || "").trim() || fallbackId;
+  const clientId =
+    validAo3SavedFilterClientId(raw.clientId) ||
+    validAo3SavedFilterClientId(id) ||
+    fallbackId;
+  const serverId = isValidUuid(raw.serverId) ? String(raw.serverId).trim() : "";
+  const now = new Date().toISOString();
+  const updatedAt = isUsefulIsoDateTime(raw.updatedAt) ? raw.updatedAt : now;
+  const clientUpdatedAt = isUsefulIsoDateTime(raw.clientUpdatedAt)
+    ? raw.clientUpdatedAt
+    : updatedAt;
+  const scope = raw.scope === "global" ? "global" : "context";
+  return {
+    id,
+    clientId,
+    serverId,
+    name: boundedCleanText(raw.name, AO3_SAVED_FILTER_MAX_NAME_LENGTH) || "AO3 filter",
+    params,
+    scope,
+    contextKey:
+      scope === "context"
+        ? boundedCleanText(raw.contextKey, AO3_SAVED_FILTER_MAX_CONTEXT_KEY_LENGTH)
+        : "",
+    contextLabel:
+      scope === "context"
+        ? boundedCleanText(raw.contextLabel, AO3_SAVED_FILTER_MAX_CONTEXT_LABEL_LENGTH)
+        : "",
+    summary: sanitizeAo3SavedFilterSummary(raw.summary),
+    createdAt: isUsefulIsoDateTime(raw.createdAt) ? raw.createdAt : now,
+    updatedAt,
+    clientUpdatedAt,
+    dirty: raw.dirty === true,
+  };
+}
+
+function sanitizeAo3SavedFilterPresets(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const item of raw) {
+    const preset = sanitizeAo3SavedFilterPreset(item);
+    if (!preset || seen.has(preset.clientId)) continue;
+    seen.add(preset.clientId);
+    out.push(preset);
+  }
+  return out;
+}
+
+function sanitizeAo3DeletedSavedFilter(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const clientId =
+    validAo3SavedFilterClientId(raw.clientId) ||
+    validAo3SavedFilterClientId(raw.id);
+  if (!clientId) return null;
+  const now = new Date().toISOString();
+  return {
+    id: String(raw.id || clientId).trim(),
+    clientId,
+    serverId: isValidUuid(raw.serverId) ? String(raw.serverId).trim() : "",
+    clientUpdatedAt: isUsefulIsoDateTime(raw.clientUpdatedAt)
+      ? raw.clientUpdatedAt
+      : now,
+  };
+}
+
+function sanitizeAo3DeletedSavedFilters(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const item of raw) {
+    const deleted = sanitizeAo3DeletedSavedFilter(item);
+    if (!deleted || seen.has(deleted.clientId)) continue;
+    seen.add(deleted.clientId);
+    out.push(deleted);
+  }
+  return out;
+}
+
+function sanitizeAo3SavedFilterSyncMeta(raw) {
+  if (!raw || typeof raw !== "object") return {};
+  const out = {};
+  if (isUsefulIsoDateTime(raw.syncVersion)) out.syncVersion = raw.syncVersion;
+  if (isUsefulIsoDateTime(raw.lastSyncedAt)) out.lastSyncedAt = raw.lastSyncedAt;
+  return out;
+}
+
+async function ensureAo3SavedFiltersClientId(snapshot) {
+  const existing = validAo3SavedFilterClientId(
+    snapshot && snapshot[AO3_SAVED_FILTERS_CLIENT_ID_KEY],
+  );
+  if (existing) return existing;
+  const clientId = makeAo3SavedFilterLocalId("device").slice(0, 80);
+  await storageSetLocal({ [AO3_SAVED_FILTERS_CLIENT_ID_KEY]: clientId });
+  return clientId;
+}
+
+function ao3SavedFilterNeedsSync(preset) {
+  return preset?.dirty === true || !isValidUuid(preset?.serverId);
+}
+
+function ao3SavedFilterUpsertPayload(preset) {
+  const body = {
+    clientId: preset.clientId,
+    name: preset.name,
+    scope: preset.scope === "global" ? "global" : "context",
+    contextKey: preset.scope === "context" ? preset.contextKey || null : null,
+    contextLabel: preset.scope === "context" ? preset.contextLabel || null : null,
+    params: preset.params,
+    summary: preset.summary,
+    createdAt: preset.createdAt,
+    clientUpdatedAt: preset.clientUpdatedAt,
+  };
+  if (isValidUuid(preset.serverId)) body.id = preset.serverId;
+  return body;
+}
+
+function ao3SavedFilterDeletePayload(deleted) {
+  const body = {
+    clientId: deleted.clientId,
+    clientUpdatedAt: deleted.clientUpdatedAt,
+  };
+  if (isValidUuid(deleted.serverId)) body.id = deleted.serverId;
+  return body;
+}
+
+function isLocalAo3SavedFilterNewer(local, remoteClientUpdatedAt) {
+  if (!local || local.dirty !== true) return false;
+  const localTime = Date.parse(local.clientUpdatedAt || "");
+  const remoteTime = Date.parse(remoteClientUpdatedAt || "");
+  return Number.isFinite(localTime) && Number.isFinite(remoteTime) && localTime > remoteTime;
+}
+
+function localPresetFromRemoteAo3SavedFilter(remote, existing) {
+  const id = existing?.id || remote.clientId || remote.id;
+  return {
+    id,
+    clientId: remote.clientId,
+    serverId: remote.id,
+    name: remote.name,
+    params: sanitizeAo3SavedFilterPairs(remote.params),
+    scope: remote.scope === "global" ? "global" : "context",
+    contextKey: remote.scope === "context" ? String(remote.contextKey || "") : "",
+    contextLabel: remote.scope === "context" ? String(remote.contextLabel || "") : "",
+    summary: sanitizeAo3SavedFilterSummary(remote.summary),
+    createdAt: remote.createdAt,
+    updatedAt: remote.updatedAt,
+    clientUpdatedAt: remote.clientUpdatedAt,
+    dirty: false,
+  };
+}
+
+function mergeAo3SavedFiltersAfterSync({
+  presets,
+  deleted,
+  activeMeta,
+  response,
+  sentDeleteClientIds,
+}) {
+  const byClientId = new Map();
+  const localIdByClientId = new Map();
+  for (const preset of presets) {
+    byClientId.set(preset.clientId, preset);
+    localIdByClientId.set(preset.clientId, preset.id);
+  }
+
+  const deletedByClientId = new Map();
+  for (const item of deleted) {
+    deletedByClientId.set(item.clientId, item);
+  }
+  for (const clientId of sentDeleteClientIds) {
+    deletedByClientId.delete(clientId);
+  }
+
+  for (const remote of Array.isArray(response?.presets) ? response.presets : []) {
+    const existing = byClientId.get(remote.clientId);
+    if (isLocalAo3SavedFilterNewer(existing, remote.clientUpdatedAt)) continue;
+    const next = localPresetFromRemoteAo3SavedFilter(remote, existing);
+    if (next.params.length === 0) continue;
+    byClientId.set(remote.clientId, next);
+    deletedByClientId.delete(remote.clientId);
+  }
+
+  for (const remote of Array.isArray(response?.deleted) ? response.deleted : []) {
+    const existing = byClientId.get(remote.clientId);
+    if (isLocalAo3SavedFilterNewer(existing, remote.clientUpdatedAt)) continue;
+    byClientId.delete(remote.clientId);
+    deletedByClientId.delete(remote.clientId);
+  }
+
+  const nextPresets = Array.from(byClientId.values()).sort((a, b) => {
+    const at = Date.parse(a.updatedAt || a.clientUpdatedAt || "") || 0;
+    const bt = Date.parse(b.updatedAt || b.clientUpdatedAt || "") || 0;
+    return at - bt;
+  });
+
+  let nextActiveMeta = activeMeta || null;
+  if (nextActiveMeta && nextActiveMeta.id) {
+    const stillActive = nextPresets.some((preset) => preset.id === nextActiveMeta.id);
+    if (!stillActive) {
+      const clientId = Array.from(localIdByClientId.entries()).find(
+        ([, localId]) => localId === nextActiveMeta.id,
+      )?.[0];
+      const replacement = clientId
+        ? nextPresets.find((preset) => preset.clientId === clientId)
+        : null;
+      nextActiveMeta = replacement
+        ? { ...nextActiveMeta, id: replacement.id }
+        : null;
+    }
+  }
+
+  return {
+    presets: nextPresets,
+    deleted: Array.from(deletedByClientId.values()),
+    activeMeta: nextActiveMeta,
+  };
+}
+
+function snapshotHasPendingAo3SavedFilterSync(snapshot) {
+  const presets = sanitizeAo3SavedFilterPresets(
+    snapshot && snapshot[AO3_SAVED_FILTERS_STORAGE_KEY],
+  );
+  const deleted = sanitizeAo3DeletedSavedFilters(
+    snapshot && snapshot[AO3_SAVED_FILTERS_DELETED_KEY],
+  );
+  return presets.some(ao3SavedFilterNeedsSync) || deleted.length > 0;
+}
+
+function scheduleAo3SavedFiltersSync(delayMs = 750) {
+  if (!bearerToken) return;
+  if (ao3SavedFiltersSyncTimer) clearTimeout(ao3SavedFiltersSyncTimer);
+  ao3SavedFiltersSyncTimer = setTimeout(() => {
+    ao3SavedFiltersSyncTimer = null;
+    void syncAo3SavedFilters();
+  }, delayMs);
+}
+
+async function syncAo3SavedFilters() {
+  if (!bearerToken) return { ok: false, error: "not_authenticated" };
+  if (ao3SavedFiltersSyncInFlight) return { ok: false, error: "sync_in_flight" };
+  ao3SavedFiltersSyncInFlight = true;
+
+  try {
+    let snapshot = await storageGetLocal([
+      AO3_SAVED_FILTERS_STORAGE_KEY,
+      AO3_SAVED_FILTERS_DELETED_KEY,
+      AO3_SAVED_FILTERS_SYNC_META_KEY,
+      AO3_SAVED_FILTERS_CLIENT_ID_KEY,
+      "traceAo3SavedFiltersActiveV1",
+    ]);
+    const clientId = await ensureAo3SavedFiltersClientId(snapshot);
+    let lastSyncVersion = null;
+    let didSync = false;
+    let hasMorePending = false;
+
+    for (let i = 0; i < AO3_SAVED_FILTER_SYNC_MAX_ITERATIONS; i += 1) {
+      const presets = sanitizeAo3SavedFilterPresets(
+        snapshot[AO3_SAVED_FILTERS_STORAGE_KEY],
+      );
+      const deleted = sanitizeAo3DeletedSavedFilters(
+        snapshot[AO3_SAVED_FILTERS_DELETED_KEY],
+      );
+      const syncMeta = sanitizeAo3SavedFilterSyncMeta(
+        snapshot[AO3_SAVED_FILTERS_SYNC_META_KEY],
+      );
+      const upserts = presets
+        .filter(ao3SavedFilterNeedsSync)
+        .map(ao3SavedFilterUpsertPayload);
+      const deletes = deleted.map(ao3SavedFilterDeletePayload);
+      const batchUpserts = upserts.slice(0, AO3_SAVED_FILTER_SYNC_BATCH_LIMIT);
+      const batchDeletes = deletes.slice(0, AO3_SAVED_FILTER_SYNC_BATCH_LIMIT);
+
+      if (didSync && batchUpserts.length === 0 && batchDeletes.length === 0) {
+        hasMorePending = false;
+        break;
+      }
+
+      const response = await fetch(AO3_SAVED_FILTERS_SYNC_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${bearerToken}`,
+        },
+        body: JSON.stringify({
+          clientId,
+          since: syncMeta.syncVersion || null,
+          upserts: batchUpserts,
+          deletes: batchDeletes,
+        }),
+      });
+
+      if (response.status === 401) {
+        clearToken();
+        setReconnectState("Your Trace session expired. Open Trace and sign in again.");
+        return { ok: false, error: "auth_expired" };
+      }
+      if (!response.ok) {
+        if (response.status === 429) {
+          setConnectedWithSyncWarning(
+            "Trace is rate limiting saved filter sync. Your filters are still saved locally.",
+            { lastHttpStatus: response.status },
+          );
+          return { ok: false, error: "rate_limited" };
+        }
+        if (response.status === 422) {
+          const body = await response.json().catch(() => null);
+          if (body?.code === "AO3_SAVED_FILTER_LIMIT_REACHED") {
+            const limit = Number(body.limit || AO3_SAVED_FILTER_ACTIVE_LIMIT);
+            setConnectedWithSyncWarning(
+              `Trace can sync up to ${limit} AO3 saved filters. Delete one before saving another.`,
+              { ao3SavedFilterLimit: limit, lastHttpStatus: response.status },
+            );
+            return {
+              ok: false,
+              error: "limit_reached",
+              limit,
+            };
+          }
+        }
+        return { ok: false, error: "http_" + response.status };
+      }
+
+      const json = await response.json().catch(() => null);
+      const data = json && json.data && typeof json.data === "object" ? json.data : null;
+      if (!data || !isUsefulIsoDateTime(data.syncVersion)) {
+        return { ok: false, error: "invalid_response" };
+      }
+
+      const merged = mergeAo3SavedFiltersAfterSync({
+        presets,
+        deleted,
+        activeMeta: snapshot.traceAo3SavedFiltersActiveV1 || null,
+        response: data,
+        sentDeleteClientIds: new Set(batchDeletes.map((item) => item.clientId)),
+      });
+      const patch = {
+        [AO3_SAVED_FILTERS_STORAGE_KEY]: merged.presets,
+        [AO3_SAVED_FILTERS_DELETED_KEY]: merged.deleted,
+        traceAo3SavedFiltersActiveV1: merged.activeMeta,
+        [AO3_SAVED_FILTERS_SYNC_META_KEY]: {
+          syncVersion: data.syncVersion,
+          lastSyncedAt: new Date().toISOString(),
+        },
+        [AO3_SAVED_FILTERS_CLIENT_ID_KEY]: clientId,
+      };
+      await storageSetLocal(patch);
+      snapshot = { ...snapshot, ...patch };
+      lastSyncVersion = data.syncVersion;
+      didSync = true;
+      hasMorePending =
+        upserts.length > batchUpserts.length ||
+        deletes.length > batchDeletes.length;
+      if (!hasMorePending) break;
+    }
+
+    if (!didSync) {
+      return { ok: false, error: "not_synced" };
+    }
+    setConnectedState({ lastAo3SavedFiltersSyncAt: new Date().toISOString() });
+    if (hasMorePending) scheduleAo3SavedFiltersSync(250);
+    const result = { ok: true, syncVersion: lastSyncVersion };
+    if (hasMorePending) result.partial = true;
+    return result;
+  } catch (error) {
+    console.warn("[Trace] AO3 saved filters sync failed:", error);
+    return { ok: false, error: "network_error" };
+  } finally {
+    ao3SavedFiltersSyncInFlight = false;
+  }
+}
+
 /** Cache AO3/FFN work id → library status for content-script overlay. */
 function refreshLibraryOverlay() {
   if (!bearerToken) return Promise.resolve();
@@ -817,6 +1296,7 @@ try {
       setConnectedState();
       refreshTraceUserPro();
       void refreshLibraryOverlay();
+      scheduleAo3SavedFiltersSync(1_000);
     } else {
       setSignedOutState();
     }
@@ -862,6 +1342,7 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     refreshTraceUserPro();
     void refreshLibraryOverlay();
+    scheduleAo3SavedFiltersSync(250);
 
     if (sendResponse) sendResponse({ success: true, state: "connected" });
     return;
@@ -917,6 +1398,7 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           TRACE_LIBRARY_COUNT_KEY,
           PREF_AUTO_TRACK_KEY,
           PREF_LIBRARY_INLAY_KEY,
+          PREF_AO3_SAVED_FILTERS_KEY,
           PREF_METADATA_IMPROVE_KEY,
           TRACE_USER_PRO_KEY,
         ],
@@ -934,6 +1416,7 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               pro: r[TRACE_USER_PRO_KEY] === true,
               autoTrackEnabled: r[PREF_AUTO_TRACK_KEY] !== false,
               libraryInlayEnabled: r[PREF_LIBRARY_INLAY_KEY] !== false,
+              ao3SavedFiltersEnabled: r[PREF_AO3_SAVED_FILTERS_KEY] !== false,
               metadataImproveEnabled: r[PREF_METADATA_IMPROVE_KEY] !== false,
             });
           }
@@ -969,6 +1452,7 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (token) {
         bearerToken = token;
         refreshTraceUserPro();
+        scheduleAo3SavedFiltersSync(500);
         if (prev?.state === "error") {
           setConnectedState();
         }
@@ -988,6 +1472,15 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === "TRACE_LIBRARY_METADATA_REFRESH") {
     handleLibraryMetadataRefresh(msg.payload, sender);
+    return false;
+  }
+
+  // -------------------------------------------------
+  // D2. AO3 saved filter local changes need background sync
+  // -------------------------------------------------
+  if (msg.type === AO3_SAVED_FILTERS_SYNC_REQUEST_MESSAGE) {
+    scheduleAo3SavedFiltersSync(150);
+    if (sendResponse) sendResponse({ ok: true, queued: Boolean(bearerToken) });
     return false;
   }
 
@@ -1012,6 +1505,14 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // -------------------------------------------------
   if (msg.type === "TRACE_SET_READER_STATUS") {
     handleSetReaderStatus(msg.payload, sender, sendResponse);
+    return true; // async response
+  }
+
+  // -------------------------------------------------
+  // J. Library entry patch from extension reader actions
+  // -------------------------------------------------
+  if (msg.type === "TRACE_PATCH_LIBRARY_ENTRY") {
+    handlePatchLibraryEntry(msg.payload, sender, sendResponse);
     return true; // async response
   }
 });
@@ -1562,6 +2063,34 @@ function chaptersFromReaderProgress(progress) {
   };
 }
 
+function normalizeLibraryEntryPatch(rawPatch) {
+  if (!rawPatch || typeof rawPatch !== "object") return null;
+  const patch = {};
+
+  if (Object.prototype.hasOwnProperty.call(rawPatch, "rating")) {
+    const rating = Number(rawPatch.rating);
+    if (!Number.isInteger(rating) || rating < 0 || rating > 5) return null;
+    patch.rating = rating;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(rawPatch, "progress")) {
+    const progress = normalizeReaderProgress(rawPatch.progress);
+    if (!progress) return null;
+    patch.progress = progress;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(rawPatch, "status")) {
+    const status =
+      typeof rawPatch.status === "string"
+        ? rawPatch.status.trim().toUpperCase()
+        : "";
+    if (!isStorySheetReaderStatus(status)) return null;
+    patch.status = status;
+  }
+
+  return Object.keys(patch).length > 0 ? patch : null;
+}
+
 function patchOverlayReaderStatus(entryId, status, progress) {
   return new Promise((resolve) => {
     try {
@@ -1616,6 +2145,152 @@ function patchOverlayReaderStatus(entryId, status, progress) {
       resolve(null);
     }
   });
+}
+
+function patchOverlayLibraryEntry(entryId, patch) {
+  return new Promise((resolve) => {
+    try {
+      ext.storage.local.get([OVERLAY_STORAGE_KEY], (res) => {
+        if (ext.runtime.lastError) {
+          resolve(null);
+          return;
+        }
+
+        const prev =
+          res && res[OVERLAY_STORAGE_KEY] && typeof res[OVERLAY_STORAGE_KEY] === "object"
+            ? res[OVERLAY_STORAGE_KEY]
+            : {};
+        const entries =
+          prev.entries && typeof prev.entries === "object"
+            ? { ...prev.entries }
+            : {};
+        let patchedKey = null;
+
+        for (const [key, rawEntry] of Object.entries(entries)) {
+          if (!rawEntry || typeof rawEntry !== "object") continue;
+          if (rawEntry.entryId !== entryId) continue;
+
+          const nextEntry = { ...rawEntry };
+          if (patch.status) {
+            nextEntry.status = patch.status;
+            nextEntry.readerStatus = patch.status;
+          }
+          if (patch.progress) {
+            const nextChapters = chaptersFromReaderProgress(patch.progress);
+            if (nextChapters) {
+              const previousCurrent =
+                rawEntry.chapters && typeof rawEntry.chapters.current === "number"
+                  ? rawEntry.chapters.current
+                  : null;
+              const previousNew =
+                typeof rawEntry.newChapterCount === "number" &&
+                Number.isFinite(rawEntry.newChapterCount)
+                  ? rawEntry.newChapterCount
+                  : null;
+              const inferredPublished =
+                previousCurrent == null || previousNew == null
+                  ? null
+                  : previousCurrent + previousNew;
+              nextEntry.chapters = nextChapters;
+              if (inferredPublished != null) {
+                const nextNewChapterCount = Math.max(
+                  0,
+                  inferredPublished - nextChapters.current,
+                );
+                nextEntry.newChapterCount = nextNewChapterCount;
+                nextEntry.catchupState =
+                  nextNewChapterCount > 0 ? "BEHIND" : "UP";
+              }
+            }
+          }
+          if (Object.prototype.hasOwnProperty.call(patch, "rating")) {
+            nextEntry.rating = patch.rating;
+          }
+
+          entries[key] = nextEntry;
+          patchedKey = key;
+          break;
+        }
+
+        if (!patchedKey) {
+          resolve(null);
+          return;
+        }
+
+        ext.storage.local.set(
+          {
+            [OVERLAY_STORAGE_KEY]: {
+              ...prev,
+              entries,
+              syncVersion: new Date().toISOString(),
+            },
+          },
+          () => resolve(patchedKey),
+        );
+      });
+    } catch (_) {
+      resolve(null);
+    }
+  });
+}
+
+async function handlePatchLibraryEntry(payload, sender, sendResponse) {
+  if (!bearerToken) {
+    if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
+    return;
+  }
+
+  const entryId = payload && typeof payload.entryId === "string" ? payload.entryId.trim() : "";
+  const patch = normalizeLibraryEntryPatch(payload && payload.patch);
+  if (!isValidUuid(entryId) || !patch) {
+    if (sendResponse) sendResponse({ ok: false, error: "invalid_request" });
+    return;
+  }
+
+  try {
+    const response = await fetch(`${LIBRARY_ENTRY_ENDPOINT_BASE}/${encodeURIComponent(entryId)}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${bearerToken}`,
+      },
+      body: JSON.stringify(patch),
+    });
+
+    if (response.ok) {
+      markFirstSaveSeen();
+      setConnectedState({
+        firstSaveSeen: true,
+        lastLibraryEntryPatchAt: new Date().toISOString(),
+      });
+      setBadge(sender?.tab?.id, "OK", "#0D7A5F");
+      setTimeout(() => clearBadge(sender?.tab?.id), 2000);
+      const workKey = await patchOverlayLibraryEntry(entryId, patch);
+      await signalLibraryInvalidated("library_entry_patch");
+      if (sendResponse) sendResponse({ ok: true, entryId, patch, workKey });
+    } else if (response.status === 401) {
+      clearToken();
+      setReconnectState("Your Trace session expired. Open Trace and sign in again.");
+      if (sendResponse) sendResponse({ ok: false, error: "auth_expired" });
+    } else if (response.status === 402) {
+      setUpgradeState(
+        "You've reached the free library limit. Upgrade to Pro for unlimited stories.",
+        { lastHttpStatus: response.status },
+      );
+      if (sendResponse) sendResponse({ ok: false, error: "free_limit_reached" });
+    } else if (response.status === 429) {
+      setConnectedWithSyncWarning(
+        "Trace is rate limiting library updates. Try again in a few minutes.",
+        { lastHttpStatus: response.status },
+      );
+      if (sendResponse) sendResponse({ ok: false, error: "rate_limited" });
+    } else {
+      if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
+    }
+  } catch (e) {
+    console.error("[Trace] Library entry patch error:", e);
+    if (sendResponse) sendResponse({ ok: false, error: "network_error" });
+  }
 }
 
 async function handleSetReaderStatus(payload, sender, sendResponse) {
@@ -1684,8 +2359,27 @@ async function handleSetReaderStatus(payload, sender, sendResponse) {
 
 try {
   ext.storage.onChanged.addListener((changes, area) => {
-    if (area !== "local" || !changes[PREF_LIBRARY_INLAY_KEY]) return;
-    void refreshLibraryOverlay();
+    if (area !== "local") return;
+    if (changes[PREF_LIBRARY_INLAY_KEY]) {
+      void refreshLibraryOverlay();
+    }
+    if (
+      changes[AO3_SAVED_FILTERS_STORAGE_KEY] ||
+      changes[AO3_SAVED_FILTERS_DELETED_KEY]
+    ) {
+      const snapshot = {};
+      if (changes[AO3_SAVED_FILTERS_STORAGE_KEY]) {
+        snapshot[AO3_SAVED_FILTERS_STORAGE_KEY] =
+          changes[AO3_SAVED_FILTERS_STORAGE_KEY].newValue;
+      }
+      if (changes[AO3_SAVED_FILTERS_DELETED_KEY]) {
+        snapshot[AO3_SAVED_FILTERS_DELETED_KEY] =
+          changes[AO3_SAVED_FILTERS_DELETED_KEY].newValue;
+      }
+      if (snapshotHasPendingAo3SavedFilterSync(snapshot)) {
+        scheduleAo3SavedFiltersSync(750);
+      }
+    }
   });
 } catch (_) {
   /* ignore */
@@ -1696,6 +2390,7 @@ try {
     ext.runtime.onInstalled.addListener(() => {
       try {
         ext.alarms.create("traceLibraryOverlay", { periodInMinutes: 30 });
+        ext.alarms.create("traceAo3SavedFiltersSync", { periodInMinutes: 30 });
       } catch (_) {
         /* ignore */
       }
@@ -1704,12 +2399,21 @@ try {
       if (alarm.name === "traceLibraryOverlay") {
         void refreshLibraryOverlay();
       }
+      if (alarm.name === "traceAo3SavedFiltersSync") {
+        void syncAo3SavedFilters();
+      }
     });
     try {
       ext.alarms.get("traceLibraryOverlay", (a) => {
         if (ext.runtime.lastError) return;
         if (!a) {
           ext.alarms.create("traceLibraryOverlay", { periodInMinutes: 30 });
+        }
+      });
+      ext.alarms.get("traceAo3SavedFiltersSync", (a) => {
+        if (ext.runtime.lastError) return;
+        if (!a) {
+          ext.alarms.create("traceAo3SavedFiltersSync", { periodInMinutes: 30 });
         }
       });
     } catch (_) {

@@ -3263,6 +3263,61 @@ function readerStatusProgressPatch(entry, nextStatus) {
   };
 }
 
+function storyEntryRatingValue(entry) {
+  var rating = Number(entry && entry.rating);
+  if (!Number.isFinite(rating)) return 0;
+  return Math.max(0, Math.min(5, Math.trunc(rating)));
+}
+
+function storyCatchupProgressPatch(entry) {
+  if (!entry || entry.catchupState !== "BEHIND") return null;
+  var count = Number(entry.newChapterCount);
+  if (!Number.isFinite(count) || count <= 0) return null;
+  var chapters = entry.chapters;
+  if (!chapters || typeof chapters.current !== "number") return null;
+  var target = Math.trunc(chapters.current + count);
+  if (!Number.isFinite(target) || target < 0) return null;
+  var total =
+    typeof chapters.total === "number" && Number.isFinite(chapters.total)
+      ? Math.max(Math.trunc(chapters.total), target)
+      : target;
+  return {
+    progress: { unit: "CHAPTER", value: target, total: total },
+    chapters: { current: target, total: total },
+  };
+}
+
+function storyRatingButtonStyle(active, disabled) {
+  return [
+    "appearance:none",
+    "display:inline-flex",
+    "align-items:center",
+    "justify-content:center",
+    "width:32px",
+    "height:32px",
+    "border:0",
+    "border-radius:7px",
+    "background:transparent",
+    "color:" + (active ? "#8a6e2a" : "#9a9583"),
+    "font:600 21px/1 Georgia,serif",
+    "cursor:" + (disabled ? "wait" : "pointer"),
+    disabled ? "opacity:0.62" : "",
+  ].join(";");
+}
+
+function applyOptimisticLibraryEntryPatch(workKey, entry, patch, nextChapters) {
+  var next = snapshotStoryEntry(entry);
+  if (Object.prototype.hasOwnProperty.call(patch, "rating")) {
+    next.rating = patch.rating;
+  }
+  if (nextChapters) {
+    next.chapters = nextChapters;
+    next.catchupState = "UP";
+    next.newChapterCount = 0;
+  }
+  optimisticStoryPageEntries[workKey] = next;
+}
+
 function updateOptimisticReaderStatus(workKey, status, chapters) {
   var prev = optimisticStoryPageEntries[workKey] || {};
   var next = Object.assign({}, prev, {
@@ -3312,8 +3367,6 @@ function bindReaderStatusChoice(btn, workKey, entry, status, errorEl) {
     if (!entryId) return;
     var statusPatch = readerStatusProgressPatch(entry, status);
     var previousEntry = snapshotStoryEntry(entry);
-    var sheet = document.querySelector("[" + TRACE_STORY_SHEET_ATTR + "]");
-    if (sheet) applySheetVisibility(sheet, false);
     if (errorEl) errorEl.textContent = "";
     updateOptimisticReaderStatusPending(workKey, entry, status);
     renderQuickAddButton(workKey);
@@ -3337,6 +3390,128 @@ function bindReaderStatusChoice(btn, workKey, entry, status, errorEl) {
       },
     );
   });
+}
+
+function appendStoryRatingControls(body, view, workKey) {
+  var entry = view.entry || {};
+  if (!view.hasAuth || !entry.entryId) return;
+  var current = storyEntryRatingValue(entry);
+  var wrap = document.createElement("div");
+  wrap.setAttribute("data-trace-rating-control", "1");
+  wrap.style.cssText = "display:flex;flex-direction:column;gap:8px;border-top:1px solid rgba(28,39,34,0.10);padding-top:12px";
+
+  var label = document.createElement("div");
+  label.className = "x-sheet-label";
+  label.textContent = "Your rating";
+  label.style.cssText = storySheetLabelCss();
+  wrap.appendChild(label);
+
+  var row = document.createElement("div");
+  row.style.cssText = "display:flex;align-items:center;gap:2px";
+  var message = document.createElement("span");
+  message.setAttribute("data-trace-rating-message", "1");
+  message.style.cssText = "margin-left:8px;font:600 11.5px/1.3 " + TRACE_UI.font + ";color:#6e6a5b";
+
+  function renderStars(disabled) {
+    clearElement(row);
+    for (var i = 1; i <= 5; i += 1) {
+      var star = document.createElement("button");
+      star.type = "button";
+      star.setAttribute("data-trace-rating-choice", String(i));
+      star.setAttribute("aria-label", current === i ? "Clear rating" : "Set rating to " + i);
+      star.textContent = i <= current ? "\u2605" : "\u2606";
+      star.style.cssText = storyRatingButtonStyle(i <= current, disabled);
+      star.disabled = disabled === true;
+      star.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (this.disabled) return;
+        var selected = Number(this.getAttribute("data-trace-rating-choice"));
+        if (!Number.isFinite(selected)) return;
+        var previous = current;
+        var nextRating = current === selected ? 0 : selected;
+        current = nextRating;
+        entry.rating = nextRating;
+        message.textContent = "Saving...";
+        renderStars(true);
+        ext.runtime.sendMessage(
+          {
+            type: "TRACE_PATCH_LIBRARY_ENTRY",
+            payload: { entryId: entry.entryId, patch: { rating: nextRating } },
+          },
+          function (response) {
+            if (ext.runtime.lastError || !response || !response.ok) {
+              current = previous;
+              entry.rating = previous;
+              message.textContent = "Could not save";
+              renderStars(false);
+              return;
+            }
+            current = nextRating;
+            applyOptimisticLibraryEntryPatch(workKey, entry, { rating: nextRating });
+            message.textContent = nextRating > 0 ? "Saved" : "Cleared";
+            renderStars(false);
+          },
+        );
+      });
+      row.appendChild(star);
+    }
+    row.appendChild(message);
+  }
+
+  renderStars(false);
+  wrap.appendChild(row);
+  body.appendChild(wrap);
+}
+
+function appendStoryCatchupAction(body, view, workKey) {
+  var entry = view.entry || {};
+  if (!view.hasAuth || !entry.entryId) return;
+  var patch = storyCatchupProgressPatch(entry);
+  if (!patch) return;
+  var wrap = document.createElement("div");
+  wrap.setAttribute("data-trace-catchup-action", "1");
+  wrap.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid rgba(28,39,34,0.10);padding-top:12px";
+  var text = document.createElement("div");
+  text.style.cssText = "min-width:0";
+  var title = document.createElement("div");
+  title.textContent = "Catch up";
+  title.style.cssText = "font:600 12.5px/1.25 " + TRACE_UI.font + ";color:#1c2722";
+  var copy = document.createElement("div");
+  copy.textContent = "Set progress to chapter " + patch.chapters.current + ".";
+  copy.style.cssText = "margin-top:2px;font:500 11.5px/1.35 " + TRACE_UI.font + ";color:#6e6a5b";
+  text.appendChild(title);
+  text.appendChild(copy);
+
+  var button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "Mark caught up";
+  button.style.cssText = storySheetGhostButtonCss() + ";flex:0 0 auto";
+  button.addEventListener("click", function (event) {
+    event.preventDefault();
+    event.stopPropagation();
+    button.disabled = true;
+    button.textContent = "Saving...";
+    ext.runtime.sendMessage(
+      {
+        type: "TRACE_PATCH_LIBRARY_ENTRY",
+        payload: { entryId: entry.entryId, patch: { progress: patch.progress } },
+      },
+      function (response) {
+        if (ext.runtime.lastError || !response || !response.ok) {
+          button.disabled = false;
+          button.textContent = "Retry";
+          return;
+        }
+        applyOptimisticLibraryEntryPatch(workKey, entry, { progress: patch.progress }, patch.chapters);
+        renderQuickAddButton(workKey);
+      },
+    );
+  });
+
+  wrap.appendChild(text);
+  wrap.appendChild(button);
+  body.appendChild(wrap);
 }
 
 function appendReaderStatusChoices(actions, view, workKey) {
@@ -3902,6 +4077,8 @@ function renderStorySheet(sheet, view, workKey) {
     position.appendChild(bar);
   }
   body.appendChild(position);
+  appendStoryCatchupAction(body, view, workKey);
+  appendStoryRatingControls(body, view, workKey);
 
   var meta = document.createElement("div");
   meta.className = "x-meta";

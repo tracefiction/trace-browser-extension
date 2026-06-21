@@ -1420,7 +1420,7 @@ test("FFN mobile story quick-add shows planning after chapter-one success", () =
       onMessage: { addListener() {} },
       sendMessage(msg, cb) {
         sent.push(msg);
-        if (typeof cb === "function") cb({ ok: true });
+        if (typeof cb === "function") cb({ ok: true, data: { entryId: "entry-1" } });
       },
       lastError: null,
     },
@@ -1609,6 +1609,8 @@ test("FFN mobile story quick-add shows optional post-add status choices when ent
 
     assert.equal(sent.at(-1).type, "TRACE_SET_READER_STATUS");
     assert.deepEqual(plainJson(sent.at(-1).payload), { entryId, status: choice.status });
+    assert.equal(sheet.getAttribute("data-trace-open"), "1");
+    assert.equal(sheet.getAttribute("aria-hidden"), "false");
     assert.match(sheet.textContent || "", choice.expected);
   }
 });
@@ -1886,6 +1888,8 @@ test("story sheet Planning to Reading sends chapter progress 1 and displays 1/? 
     },
   });
   assert.match(handle.textContent || "", /Reading\s*1\/\?/i);
+  assert.equal(sheet.getAttribute("data-trace-open"), "1");
+  assert.equal(sheet.getAttribute("aria-hidden"), "false");
   assert.doesNotMatch(handle.textContent || "", /·/i);
   assert.doesNotMatch(handle.textContent || "", /Reading\s*0\/\?/i);
 });
@@ -2023,6 +2027,8 @@ test("FFN mobile story post-add status mutation failure keeps saved state", () =
   reading.click();
 
   assert.equal(sent.at(-1).type, "TRACE_SET_READER_STATUS");
+  assert.equal(sheet.getAttribute("data-trace-open"), "1");
+  assert.equal(sheet.getAttribute("aria-hidden"), "false");
   assert.match(sheet.textContent || "", /Plan/i);
   assert.match(sheet.textContent || "", /Could not update. Try again./i);
 });
@@ -2043,10 +2049,14 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
     "utf8",
   );
 
+  const sent = [];
   const chrome = {
     runtime: {
       onMessage: { addListener() {} },
-      sendMessage() {},
+      sendMessage(msg, cb) {
+        sent.push(msg);
+        if (typeof cb === "function") cb({ ok: true });
+      },
       lastError: null,
     },
     storage: {
@@ -2061,6 +2071,9 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
                   status: "READING",
                   readerStatus: "READING",
                   chapters: { current: 3, total: 28 },
+                  rating: 3,
+                  catchupState: "BEHIND",
+                  newChapterCount: 2,
                   browsePreference: { hidden: true },
                   privateContext: {
                     hasNotes: true,
@@ -2104,6 +2117,7 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
   assert.match(sheet.textContent || "", /Hidden/i);
   assert.match(sheet.textContent || "", /Ch 3\s*\/\s*28/);
   assert.match(sheet.textContent || "", /11%/);
+  assert.match(sheet.textContent || "", /Set progress to chapter 5/i);
   assert.ok(sheet.querySelector(".x-pos .bar i"));
   assert.equal(sheet.querySelector(".x-pos .step"), null);
   assert.match(sheet.textContent || "", /Reading/i);
@@ -2134,6 +2148,34 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
   assert.ok(undoBtn);
   assert.equal(undoBtn.textContent || "", "Unhide");
   assert.doesNotMatch(undoBtn.className || "", /\bicon-only\b/);
+  const ratingControl = sheet.querySelector("[data-trace-rating-control]");
+  assert.ok(ratingControl);
+  assert.equal(
+    Array.from(ratingControl.querySelectorAll("[data-trace-rating-choice]"))
+      .map((button) => button.textContent)
+      .join(""),
+    "★★★☆☆",
+  );
+  ratingControl.querySelector("[data-trace-rating-choice='5']").click();
+  assert.deepEqual(plainJson(sent.at(-1)), {
+    type: "TRACE_PATCH_LIBRARY_ENTRY",
+    payload: {
+      entryId: "00000000-0000-4000-8000-000000703884",
+      patch: { rating: 5 },
+    },
+  });
+  const catchup = sheet.querySelector("[data-trace-catchup-action]");
+  assert.ok(catchup);
+  catchup.querySelector("button").click();
+  assert.deepEqual(plainJson(sent.at(-1)), {
+    type: "TRACE_PATCH_LIBRARY_ENTRY",
+    payload: {
+      entryId: "00000000-0000-4000-8000-000000703884",
+      patch: { progress: { unit: "CHAPTER", value: 5, total: 28 } },
+    },
+  });
+  assert.equal(sheet.getAttribute("data-trace-open"), "1");
+  assert.equal(sheet.getAttribute("aria-hidden"), "false");
   assert.equal(
     sheet.querySelector("[data-trace-open-trace]").getAttribute("href"),
     "https://tracefiction.com/?panel=details&entryId=00000000-0000-4000-8000-000000703884",
