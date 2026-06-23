@@ -295,11 +295,15 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     /// Maps `traceauth://callback?…` → `{webAppHTTPSOrigin}/auth/callback?…`
     static func rewriteTraceAuthURL(_ url: URL) -> URL? {
         guard url.scheme?.lowercased() == "traceauth" else { return url }
-        var parts = URLComponents()
-        parts.scheme = "https"
-        parts.host = URL(string: Self.webAppHTTPSOrigin)?.host ?? "tracefiction.com"
+        guard var parts = URLComponents(string: Self.webAppHTTPSOrigin) else { return nil }
+        let callbackParts = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        var queryItems = callbackParts?.queryItems ?? []
+        queryItems.removeAll { $0.name == "trace_app" }
+        queryItems.append(URLQueryItem(name: "trace_app", value: "1"))
+
         parts.path = "/auth/callback"
-        parts.query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.query
+        parts.queryItems = queryItems
+        parts.fragment = callbackParts?.fragment
         return parts.url
     }
 
