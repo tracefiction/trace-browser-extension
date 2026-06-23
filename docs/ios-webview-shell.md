@@ -16,6 +16,11 @@ The long-term product direction may include a more native iOS app, but this shel
 - Opens external non-Trace links outside the shell.
 - Uses `ASWebAuthenticationSession` for OAuth flows instead of completing OAuth inside an embedded web view.
 
+OAuth callbacks are rewritten back to the configured Trace web origin at
+`/auth/callback`, preserving the origin scheme/port for DEBUG builds and adding
+`trace_app=1` so the web app can reliably detect the native shell after a cold
+start callback.
+
 ## Safari Extension Setup
 
 Installing the iOS app does not automatically enable the Safari extension or grant site access. User-facing help should keep the setup path explicit:
