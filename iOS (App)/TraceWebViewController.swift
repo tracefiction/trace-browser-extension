@@ -298,9 +298,8 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         guard var parts = URLComponents(string: Self.webAppHTTPSOrigin) else { return nil }
         let callbackParts = URLComponents(url: url, resolvingAgainstBaseURL: false)
         var queryItems = callbackParts?.queryItems ?? []
-        if !queryItems.contains(where: { $0.name == "trace_app" }) {
-            queryItems.append(URLQueryItem(name: "trace_app", value: "1"))
-        }
+        queryItems.removeAll { $0.name == "trace_app" }
+        queryItems.append(URLQueryItem(name: "trace_app", value: "1"))
 
         parts.path = "/auth/callback"
         parts.queryItems = queryItems
