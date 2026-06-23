@@ -1,4 +1,4 @@
-# Extension Store Copy — 0.3.0
+# Extension Store Copy - 0.5.1
 
 Use this copy for Chrome Web Store, Firefox Add-ons, App Store Connect, and
 public release notes. Keep evergreen store descriptions separate from
@@ -44,20 +44,14 @@ FictionPress.
 
 ## What's New / Release Notes
 
-Trace extension 0.3.0 improves the AO3 and FanFiction.net browsing experience:
+Trace extension 0.5.1 is a reliability patch for iOS sign-in:
 
-- New compact on-page library lens for saved works, reading status, and chapter
-  progress.
-- One-click add from supported story and listing pages, with clearer saving and
-  error states.
-- Reading-status controls for Planning, Reading, Paused, Finished, and Dropped.
-- Hide and undo controls for works you do not want to keep seeing in Trace
-  browsing overlays.
-- Mobile-friendly story sheet for managing the current work without leaving the
-  archive page.
-- Refreshed extension popup with connection status, import, and extension
-  behavior controls.
-- Improved reconnect, sign-in, free-limit, and password-page handling.
+- Fixes an issue where the iOS wrapper could lose native-shell context while
+  returning from external OAuth sign-in.
+- Preserves the configured Trace web origin when rewriting iOS auth callbacks,
+  including local DEBUG scheme and port settings.
+- Keeps the existing browser extension permissions and supported site behavior
+  unchanged.
 
 Privacy boundary unchanged: Trace still reads story metadata and reading
 progress from supported pages, not AO3/FFN credentials, cookies, private account
@@ -66,8 +60,7 @@ pages, story text, or unrelated browsing history.
 ## Chrome / Firefox Submission Notes
 
 This release uses the same host permissions for supported Trace, AO3, and
-FanFiction.net pages. The new user-visible behavior is additive UI on supported
-pages:
+FanFiction.net pages. User-visible browsing behavior is unchanged:
 
 - `+ ADD` and reading-status controls send authenticated Trace API requests
   through the background worker.
@@ -78,22 +71,13 @@ pages:
 
 The extension does not request cookie permissions.
 
-## App Store Connect — iOS What's New
+## App Store Connect - iOS What's New
 
-Trace for iOS now includes the updated Safari extension experience:
+Trace for iOS 0.5.1 improves sign-in reliability:
 
-- See Trace library status and chapter progress while browsing AO3 and
-  FanFiction.net in Safari.
-- Add supported works from story and listing pages.
-- Change reading status from the extension overlay.
-- Hide works from Trace browsing overlays, with undo.
-- Use the refreshed extension popup for connection status, import, and behavior
-  controls.
-- Clearer setup guidance for enabling the Safari extension and allowing it on
-  Trace, AO3, and FanFiction.net.
-
-This update also improves reconnect handling, mobile overlay placement, and
-extension feedback while saving.
+- Fixes an issue where sign-in could fail to resume correctly after returning
+  from the browser.
+- Keeps Safari extension permissions and supported site behavior unchanged.
 
 ## App Review Notes
 
