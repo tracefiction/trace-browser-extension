@@ -6,6 +6,8 @@ const ext = typeof browser !== "undefined" ? browser : chrome;
 const STATUS_REQUEST_MESSAGE = "TRACE_EXTENSION_STATUS_REQUEST";
 const STATUS_QUERY_MESSAGE = "TRACE_EXTENSION_STATUS_QUERY";
 const STATUS_RESPONSE_MESSAGE = "TRACE_EXTENSION_STATUS_RESPONSE";
+const TOKEN_MESSAGE = "TRACE_FICTION_TOKEN";
+const TOKEN_REQUEST_MESSAGE = "TRACE_FICTION_TOKEN_REQUEST";
 const STATUS_AUTH_STATES = new Set([
   "connected",
   "signed_out",
@@ -58,6 +60,22 @@ function sendRuntimeMessage(message, errorLabel) {
   } catch (error) {
     reportRuntimeMessageError(errorLabel, error);
   }
+}
+
+function requestTraceToken(reason) {
+  window.postMessage(
+    {
+      type: TOKEN_REQUEST_MESSAGE,
+      reason,
+      at: Date.now(),
+    },
+    window.location.origin,
+  );
+}
+
+function requestTraceTokenIfVisible(reason) {
+  if (document.visibilityState === "hidden") return;
+  requestTraceToken(reason);
 }
 
 function safeStatusState() {
@@ -190,7 +208,7 @@ window.addEventListener("message", (event) => {
     void handleStatusRequest(event.data);
     return;
   }
-  if (event.data?.type !== "TRACE_FICTION_TOKEN") return;
+  if (event.data?.type !== TOKEN_MESSAGE) return;
 
   const token = typeof event.data.token === "string" ? event.data.token : null;
 
@@ -201,6 +219,17 @@ window.addEventListener("message", (event) => {
     },
     "[Trace Sync] Failed to update auth state",
   );
+});
+
+requestTraceTokenIfVisible("sync_ready");
+window.addEventListener("pageshow", () => {
+  requestTraceTokenIfVisible("pageshow");
+});
+window.addEventListener("focus", () => {
+  requestTraceTokenIfVisible("focus");
+});
+document.addEventListener("visibilitychange", () => {
+  requestTraceTokenIfVisible("visibilitychange");
 });
 
 try {

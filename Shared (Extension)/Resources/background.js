@@ -38,6 +38,7 @@ const PREF_AUTO_TRACK_KEY = "prefAutoTrackEnabled";
 const PREF_LIBRARY_INLAY_KEY = "prefLibraryInlayEnabled";
 const PREF_AO3_SAVED_FILTERS_KEY = "prefAo3SavedFiltersEnabled";
 const PREF_METADATA_IMPROVE_KEY = "prefMetadataImproveEnabled";
+const AUTH_STATE_VERIFICATION_VERSION = 1;
 const AO3_STORY_URL_RE =
   /^https:\/\/(?:[^/]+\.)?(?:archiveofourown\.org|archiveofourown\.gay|archive\.transformativeworks\.org|ao3\.org)\/works\/\d+(?:\/chapters\/\d+)?(?:[?#].*)?$/i;
 const FFN_STORY_PATH_RE = /^\/s\/\d+(?:\/\d+)?(?:\/.*)?$/i;
@@ -56,6 +57,8 @@ const AO3_SAVED_FILTER_SYNC_MAX_ITERATIONS = 10;
 
 // 1. Token Management
 let bearerToken = null;
+let verifiedBearerToken = null;
+let authVerificationSeq = 0;
 const optimisticChapterFloors = new Map();
 let ao3SavedFiltersSyncTimer = null;
 let ao3SavedFiltersSyncInFlight = false;
@@ -86,17 +89,68 @@ function clearBadge(tabId) {
 }
 
 function persistAuthState(nextState) {
-  const state = {
-    updatedAt: new Date().toISOString(),
-    ...nextState,
+  const write = (previousState = null) => {
+    const preserved =
+      nextState?.state === "connected"
+        ? preservedConnectedAuthStateFields(previousState)
+        : {};
+    const state = {
+      updatedAt: new Date().toISOString(),
+      ...preserved,
+      ...nextState,
+    };
+    ext.storage.local.set({ [AUTH_STATE_KEY]: state });
   };
-  ext.storage.local.set({ [AUTH_STATE_KEY]: state });
+
+  try {
+    ext.storage.local.get([AUTH_STATE_KEY], (res) => {
+      const previousState =
+        res?.[AUTH_STATE_KEY] && typeof res[AUTH_STATE_KEY] === "object"
+          ? res[AUTH_STATE_KEY]
+          : null;
+      write(previousState);
+    });
+  } catch (_) {
+    write();
+  }
+}
+
+function preservedConnectedAuthStateFields(previousState) {
+  if (!previousState || typeof previousState !== "object") return {};
+  const preserved = {};
+  if (previousState.firstSaveSeen === true) preserved.firstSaveSeen = true;
+  for (const key of [
+    "lastQuickAddAt",
+    "lastTrackSuccessAt",
+    "lastReaderStatusAt",
+    "lastWorkPreferenceAt",
+  ]) {
+    if (typeof previousState[key] === "string") preserved[key] = previousState[key];
+  }
+  return preserved;
 }
 
 function setConnectedState(extra = {}) {
   persistAuthState({
     state: "connected",
     message: "Extension connected to your Trace account.",
+    helpUrl: TRACE_HOME_URL,
+    ...extra,
+  });
+}
+
+function setVerifiedConnectedState(extra = {}) {
+  setConnectedState({
+    ...extra,
+    authVerificationVersion: AUTH_STATE_VERIFICATION_VERSION,
+    accountVerifiedAt: new Date().toISOString(),
+  });
+}
+
+function setCheckingState(extra = {}) {
+  persistAuthState({
+    state: "unknown",
+    message: "Checking your Trace account connection.",
     helpUrl: TRACE_HOME_URL,
     ...extra,
   });
@@ -150,7 +204,9 @@ function setConnectedWithSyncWarning(message, extra = {}) {
 }
 
 function clearToken() {
+  authVerificationSeq += 1;
   bearerToken = null;
+  verifiedBearerToken = null;
   optimisticChapterFloors.clear();
   try {
     ext.storage.local.remove([
@@ -180,12 +236,27 @@ function detectBrowserKind() {
   return "unknown";
 }
 
-function normalizeStatusAuthState(rawState, hasToken) {
-  if (rawState === "connected") return "connected";
+function hasCurrentSessionVerifiedToken(authState, token) {
+  return (
+    Boolean(token) &&
+    verifiedBearerToken === token &&
+    authState?.authVerificationVersion === AUTH_STATE_VERIFICATION_VERSION &&
+    toEpochMillis(authState?.accountVerifiedAt) != null
+  );
+}
+
+function normalizeStatusAuthState(authState, token) {
+  const rawState = authState?.state;
+  const hasToken = Boolean(token);
+  if (rawState === "connected" && hasCurrentSessionVerifiedToken(authState, token)) {
+    return "connected";
+  }
+  if (rawState === "connected" && hasToken) return "unknown";
   if (rawState === "signed_out") return "signed_out";
   if (rawState === "reconnect_required") return "reconnect_required";
   if (rawState === "error") return "error";
-  if (hasToken) return "connected";
+  if (rawState === "unknown") return "unknown";
+  if (hasToken) return "unknown";
   return "signed_out";
 }
 
@@ -425,8 +496,8 @@ function buildExtensionStatus(snapshot = {}) {
     typeof snapshot[AUTH_TOKEN_KEY] === "string"
       ? snapshot[AUTH_TOKEN_KEY].trim()
       : "";
-  const hasToken = Boolean(storedToken || bearerToken);
-  const normalizedAuthState = normalizeStatusAuthState(authState?.state, hasToken);
+  const tokenForStatus = storedToken || bearerToken || "";
+  const normalizedAuthState = normalizeStatusAuthState(authState, tokenForStatus);
   const status = {
     installed: true,
     connected: normalizedAuthState === "connected",
@@ -559,12 +630,146 @@ function accountStoragePatch(json) {
   return patch;
 }
 
+async function readResponseJson(response) {
+  if (!response || typeof response !== "object") return null;
+  try {
+    if (typeof response.clone === "function") {
+      return await response.clone().json();
+    }
+  } catch (_) {
+    /* fall through */
+  }
+  try {
+    if (typeof response.json === "function") {
+      return await response.json();
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  return null;
+}
+
+function responsePayloadCode(payload) {
+  return payload && typeof payload.code === "string" ? payload.code : null;
+}
+
+function authFailureExtra(extra = {}) {
+  const out = {
+    lastHttpStatus: extra.status,
+  };
+  if (extra.code) out.lastAuthErrorCode = extra.code;
+  if (extra.actionAtKey) out[extra.actionAtKey] = new Date().toISOString();
+  return out;
+}
+
+async function applyAuthFailureResponse(response, extra = {}) {
+  if (!response || (response.status !== 401 && response.status !== 409)) {
+    return null;
+  }
+
+  const payload = await readResponseJson(response);
+  const code = responsePayloadCode(payload);
+  if (response.status === 409 && code !== "ACCOUNT_BOOTSTRAP_REQUIRED") {
+    return null;
+  }
+
+  clearToken();
+
+  if (response.status === 409) {
+    setReconnectState(
+      "Open Trace to finish account setup before using the extension.",
+      authFailureExtra({ ...extra, status: response.status, code }),
+    );
+    return "account_bootstrap_required";
+  }
+
+  if (code === "ACCOUNT_DELETED_STALE_TOKEN") {
+    setReconnectState(
+      "This Trace session belongs to a deleted account. Open Trace and sign in again.",
+      authFailureExtra({ ...extra, status: response.status, code }),
+    );
+    return "account_deleted_stale_token";
+  }
+
+  setReconnectState(
+    "Your Trace session expired. Open Trace and sign in again.",
+    authFailureExtra({ ...extra, status: response.status, code }),
+  );
+  return "auth_expired";
+}
+
+async function verifyTraceAccountToken(token, extra = {}) {
+  const trimmed = typeof token === "string" ? token.trim() : "";
+  if (!trimmed) return { success: false, state: "signed_out" };
+
+  const verificationSeq = ++authVerificationSeq;
+  const lastTokenSyncAt = extra.lastTokenSyncAt || new Date().toISOString();
+  bearerToken = trimmed;
+  verifiedBearerToken = null;
+  ext.storage.local.set({ [AUTH_TOKEN_KEY]: trimmed });
+  setCheckingState({ lastTokenSyncAt });
+
+  try {
+    const response = await fetch(ACCOUNT_ME_ENDPOINT, {
+      headers: { Authorization: `Bearer ${trimmed}` },
+    });
+    if (verificationSeq !== authVerificationSeq || bearerToken !== trimmed) {
+      return { success: false, state: "unknown", stale: true };
+    }
+
+    if (response.ok) {
+      const json = await readResponseJson(response);
+      const patch = {
+        [AUTH_TOKEN_KEY]: trimmed,
+        ...accountStoragePatch(json),
+      };
+      ext.storage.local.set(patch);
+      verifiedBearerToken = trimmed;
+      setVerifiedConnectedState({ lastTokenSyncAt });
+      void refreshLibraryOverlay();
+      scheduleAo3SavedFiltersSync(250);
+      return { success: true, state: "connected" };
+    }
+
+    const authError = await applyAuthFailureResponse(response, {
+      actionAtKey: "lastTokenSyncAt",
+    });
+    if (authError) {
+      return { success: false, state: "reconnect_required", error: authError };
+    }
+
+    setErrorState(
+      "Trace could not verify your account. Try again shortly, or open Trace to reconnect.",
+      { lastHttpStatus: response.status, lastTokenSyncAt },
+    );
+    return {
+      success: false,
+      state: "error",
+      error: "account_check_failed",
+      status: response.status,
+    };
+  } catch (_) {
+    if (verificationSeq !== authVerificationSeq || bearerToken !== trimmed) {
+      return { success: false, state: "unknown", stale: true };
+    }
+    setErrorState(
+      "Trace could not reach the API to verify your account. Try again shortly.",
+      { lastTokenSyncAt },
+    );
+    return { success: false, state: "error", error: "network_error" };
+  }
+}
+
 function refreshTraceUserPro() {
   if (!bearerToken) return;
   fetch(ACCOUNT_ME_ENDPOINT, {
     headers: { Authorization: `Bearer ${bearerToken}` },
   })
-    .then((r) => (r.ok ? r.json() : null))
+    .then(async (r) => {
+      if (r.ok) return readResponseJson(r);
+      await applyAuthFailureResponse(r);
+      return null;
+    })
     .then((j) => {
       const patch = accountStoragePatch(j);
       if (Object.keys(patch).length > 0) {
@@ -583,7 +788,11 @@ function fetchTraceUserProPromise() {
     fetch(ACCOUNT_ME_ENDPOINT, {
       headers: { Authorization: `Bearer ${bearerToken}` },
     })
-      .then((r) => (r.ok ? r.json() : null))
+      .then(async (r) => {
+        if (r.ok) return readResponseJson(r);
+        await applyAuthFailureResponse(r);
+        return null;
+      })
       .then((j) => {
         const patch = accountStoragePatch(j);
         if (Object.keys(patch).length > 0) {
@@ -974,11 +1183,8 @@ async function syncAo3SavedFilters() {
         }),
       });
 
-      if (response.status === 401) {
-        clearToken();
-        setReconnectState("Your Trace session expired. Open Trace and sign in again.");
-        return { ok: false, error: "auth_expired" };
-      }
+      const authError = await applyAuthFailureResponse(response);
+      if (authError) return { ok: false, error: authError };
       if (!response.ok) {
         if (response.status === 429) {
           setConnectedWithSyncWarning(
@@ -1081,9 +1287,8 @@ async function fetchLibraryOverlayFromApi() {
         Authorization: `Bearer ${bearerToken}`,
       },
     });
-    if (response.status === 401) {
-      clearToken();
-      setReconnectState("Your Trace session expired. Open Trace and sign in again.");
+    const authError = await applyAuthFailureResponse(response);
+    if (authError) {
       return;
     }
     if (!response.ok) {
@@ -1290,13 +1495,17 @@ function pingAo3TabForAutoTrack(tabId) {
 }
 
 try {
-  ext.storage.local.get(AUTH_TOKEN_KEY, (res) => {
-    if (res?.authToken) {
-      bearerToken = res.authToken;
-      setConnectedState();
-      refreshTraceUserPro();
-      void refreshLibraryOverlay();
-      scheduleAo3SavedFiltersSync(1_000);
+  ext.storage.local.get([AUTH_TOKEN_KEY, AUTH_STATE_KEY], (res) => {
+    const storedToken =
+      typeof res?.authToken === "string" ? res.authToken.trim() : "";
+    if (storedToken) {
+      const storedState =
+        res[AUTH_STATE_KEY] && typeof res[AUTH_STATE_KEY] === "object"
+          ? res[AUTH_STATE_KEY]
+          : null;
+      void verifyTraceAccountToken(storedToken, {
+        lastTokenSyncAt: storedState?.lastTokenSyncAt || new Date().toISOString(),
+      });
     } else {
       setSignedOutState();
     }
@@ -1333,19 +1542,15 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return;
     }
 
-    bearerToken = token;
-    ext.storage.local.set({ [AUTH_TOKEN_KEY]: token });
-    setConnectedState({ lastTokenSyncAt: new Date().toISOString() });
-
     setBadge(sender?.tab?.id, "SYNC", "#2196F3");
     setTimeout(() => clearBadge(sender?.tab?.id), 2000);
 
-    refreshTraceUserPro();
-    void refreshLibraryOverlay();
-    scheduleAo3SavedFiltersSync(250);
-
-    if (sendResponse) sendResponse({ success: true, state: "connected" });
-    return;
+    void verifyTraceAccountToken(token, {
+      lastTokenSyncAt: new Date().toISOString(),
+    }).then((result) => {
+      if (sendResponse) sendResponse(result);
+    });
+    return true;
   }
 
   // -------------------------------------------------
@@ -1446,19 +1651,21 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // E. Popup opened — heal stale error state if token still present
   // -------------------------------------------------
   if (msg.type === "TRACE_POPUP_OPEN") {
-    ext.storage.local.get([AUTH_TOKEN_KEY, AUTH_STATE_KEY], (res) => {
+    void (async () => {
+      const res = await storageGetLocal([AUTH_TOKEN_KEY, AUTH_STATE_KEY]);
       const token = res?.[AUTH_TOKEN_KEY];
       const prev = res?.[AUTH_STATE_KEY];
       if (token) {
         bearerToken = token;
-        refreshTraceUserPro();
-        scheduleAo3SavedFiltersSync(500);
-        if (prev?.state === "error") {
-          setConnectedState();
+        if (prev?.state === "error" || prev?.state === "unknown") {
+          await verifyTraceAccountToken(token);
+        } else {
+          await fetchTraceUserProPromise();
         }
+        scheduleAo3SavedFiltersSync(500);
       }
       if (sendResponse) sendResponse({ ok: true });
-    });
+    })();
     return true;
   }
 
@@ -1667,15 +1874,13 @@ async function executeAutoTrack(payload, sender) {
     });
 
     if (!response.ok) {
-      if (response.status === 401) {
+      const authError = await applyAuthFailureResponse(response, {
+        actionAtKey: "lastTrackAttemptAt",
+      });
+      if (authError) {
         recordArchiveIssueFromPayload(payload, "auth");
-        clearToken();
-        setReconnectState("Your Trace session expired. Open Trace and sign in again.", {
-          lastTrackAttemptAt: new Date().toISOString(),
-          lastHttpStatus: response.status,
-        });
         setBadge(sender?.tab?.id, "LOG", "#9C6B00");
-        return { ok: false, error: "auth_expired" };
+        return { ok: false, error: authError };
       } else if (response.status === 402) {
         await refreshLibraryOverlay();
         setUpgradeState(
@@ -1759,10 +1964,9 @@ async function handleMetadataBroadcast(payload, sender) {
       body: JSON.stringify(payload),
     });
 
-    if (response.status === 401) {
+    const authError = await applyAuthFailureResponse(response);
+    if (authError) {
       recordArchiveIssueFromPayload(payload, "auth");
-      clearToken();
-      setReconnectState("Your Trace session expired. Open Trace and sign in again.");
     } else if (response.ok) {
       recordArchiveActionFromPayload(payload, "metadata");
       await signalLibraryInvalidated("metadata");
@@ -1802,10 +2006,9 @@ async function handleLibraryMetadataRefresh(payload, sender) {
       body: JSON.stringify(payload),
     });
 
-    if (response.status === 401) {
+    const authError = await applyAuthFailureResponse(response);
+    if (authError) {
       recordArchiveIssueFromPayload(payload, "auth");
-      clearToken();
-      setReconnectState("Your Trace session expired. Open Trace and sign in again.");
       return;
     }
     if (!response.ok) {
@@ -1873,19 +2076,22 @@ async function handleQuickAdd(payload, sender, sendResponse) {
         if (entryId) payload.entryId = entryId;
         sendResponse(payload);
       }
-    } else if (response.status === 401) {
-      recordArchiveIssueFromPayload(payload, "auth");
-      clearToken();
-      setReconnectState("Your Trace session expired. Open Trace and sign in again.");
-      if (sendResponse) sendResponse({ ok: false, error: "auth_expired" });
-    } else if (response.status === 402) {
-      if (sendResponse) sendResponse({ ok: false, error: "free_limit_reached" });
     } else {
-      recordArchiveIssueFromPayload(
-        payload,
-        response.status === 400 ? "parser" : "network",
-      );
-      if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
+      const authError = await applyAuthFailureResponse(response, {
+        actionAtKey: "lastQuickAddAt",
+      });
+      if (authError) {
+        recordArchiveIssueFromPayload(payload, "auth");
+        if (sendResponse) sendResponse({ ok: false, error: authError });
+      } else if (response.status === 402) {
+        if (sendResponse) sendResponse({ ok: false, error: "free_limit_reached" });
+      } else {
+        recordArchiveIssueFromPayload(
+          payload,
+          response.status === 400 ? "parser" : "network",
+        );
+        if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
+      }
     }
   } catch (e) {
     console.error("[Trace] Quick-add error:", e);
@@ -2010,24 +2216,27 @@ async function handleSetHiddenWork(payload, sender, sendResponse) {
       await patchOverlayHiddenPreference(key, hidden);
       await signalLibraryInvalidated("work_preference");
       if (sendResponse) sendResponse({ ok: true, key, hidden });
-    } else if (response.status === 401) {
-      clearToken();
-      setReconnectState("Your Trace session expired. Open Trace and sign in again.");
-      if (sendResponse) sendResponse({ ok: false, error: "auth_expired" });
-    } else if (response.status === 402) {
-      setUpgradeState(
-        "You've reached the free library limit. Upgrade to Pro for unlimited stories.",
-        { lastHttpStatus: response.status },
-      );
-      if (sendResponse) sendResponse({ ok: false, error: "free_limit_reached" });
-    } else if (response.status === 429) {
-      setConnectedWithSyncWarning(
-        "Trace is rate limiting preference changes. Try again in a few minutes.",
-        { lastHttpStatus: response.status },
-      );
-      if (sendResponse) sendResponse({ ok: false, error: "rate_limited" });
     } else {
-      if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
+      const authError = await applyAuthFailureResponse(response, {
+        actionAtKey: "lastWorkPreferenceAt",
+      });
+      if (authError) {
+        if (sendResponse) sendResponse({ ok: false, error: authError });
+      } else if (response.status === 402) {
+        setUpgradeState(
+          "You've reached the free library limit. Upgrade to Pro for unlimited stories.",
+          { lastHttpStatus: response.status },
+        );
+        if (sendResponse) sendResponse({ ok: false, error: "free_limit_reached" });
+      } else if (response.status === 429) {
+        setConnectedWithSyncWarning(
+          "Trace is rate limiting preference changes. Try again in a few minutes.",
+          { lastHttpStatus: response.status },
+        );
+        if (sendResponse) sendResponse({ ok: false, error: "rate_limited" });
+      } else {
+        if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
+      }
     }
   } catch (e) {
     console.error("[Trace] Work preference error:", e);
@@ -2268,24 +2477,27 @@ async function handlePatchLibraryEntry(payload, sender, sendResponse) {
       const workKey = await patchOverlayLibraryEntry(entryId, patch);
       await signalLibraryInvalidated("library_entry_patch");
       if (sendResponse) sendResponse({ ok: true, entryId, patch, workKey });
-    } else if (response.status === 401) {
-      clearToken();
-      setReconnectState("Your Trace session expired. Open Trace and sign in again.");
-      if (sendResponse) sendResponse({ ok: false, error: "auth_expired" });
-    } else if (response.status === 402) {
-      setUpgradeState(
-        "You've reached the free library limit. Upgrade to Pro for unlimited stories.",
-        { lastHttpStatus: response.status },
-      );
-      if (sendResponse) sendResponse({ ok: false, error: "free_limit_reached" });
-    } else if (response.status === 429) {
-      setConnectedWithSyncWarning(
-        "Trace is rate limiting library updates. Try again in a few minutes.",
-        { lastHttpStatus: response.status },
-      );
-      if (sendResponse) sendResponse({ ok: false, error: "rate_limited" });
     } else {
-      if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
+      const authError = await applyAuthFailureResponse(response, {
+        actionAtKey: "lastLibraryEntryPatchAt",
+      });
+      if (authError) {
+        if (sendResponse) sendResponse({ ok: false, error: authError });
+      } else if (response.status === 402) {
+        setUpgradeState(
+          "You've reached the free library limit. Upgrade to Pro for unlimited stories.",
+          { lastHttpStatus: response.status },
+        );
+        if (sendResponse) sendResponse({ ok: false, error: "free_limit_reached" });
+      } else if (response.status === 429) {
+        setConnectedWithSyncWarning(
+          "Trace is rate limiting library updates. Try again in a few minutes.",
+          { lastHttpStatus: response.status },
+        );
+        if (sendResponse) sendResponse({ ok: false, error: "rate_limited" });
+      } else {
+        if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
+      }
     }
   } catch (e) {
     console.error("[Trace] Library entry patch error:", e);
@@ -2328,24 +2540,27 @@ async function handleSetReaderStatus(payload, sender, sendResponse) {
       const workKey = await patchOverlayReaderStatus(entryId, status, progress);
       await signalLibraryInvalidated("reader_status");
       if (sendResponse) sendResponse({ ok: true, entryId, status, workKey });
-    } else if (response.status === 401) {
-      clearToken();
-      setReconnectState("Your Trace session expired. Open Trace and sign in again.");
-      if (sendResponse) sendResponse({ ok: false, error: "auth_expired" });
-    } else if (response.status === 402) {
-      setUpgradeState(
-        "You've reached the free library limit. Upgrade to Pro for unlimited stories.",
-        { lastHttpStatus: response.status },
-      );
-      if (sendResponse) sendResponse({ ok: false, error: "free_limit_reached" });
-    } else if (response.status === 429) {
-      setConnectedWithSyncWarning(
-        "Trace is rate limiting library updates. Try again in a few minutes.",
-        { lastHttpStatus: response.status },
-      );
-      if (sendResponse) sendResponse({ ok: false, error: "rate_limited" });
     } else {
-      if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
+      const authError = await applyAuthFailureResponse(response, {
+        actionAtKey: "lastReaderStatusAt",
+      });
+      if (authError) {
+        if (sendResponse) sendResponse({ ok: false, error: authError });
+      } else if (response.status === 402) {
+        setUpgradeState(
+          "You've reached the free library limit. Upgrade to Pro for unlimited stories.",
+          { lastHttpStatus: response.status },
+        );
+        if (sendResponse) sendResponse({ ok: false, error: "free_limit_reached" });
+      } else if (response.status === 429) {
+        setConnectedWithSyncWarning(
+          "Trace is rate limiting library updates. Try again in a few minutes.",
+          { lastHttpStatus: response.status },
+        );
+        if (sendResponse) sendResponse({ ok: false, error: "rate_limited" });
+      } else {
+        if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
+      }
     }
   } catch (e) {
     console.error("[Trace] Reading status error:", e);

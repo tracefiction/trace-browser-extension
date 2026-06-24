@@ -32,6 +32,16 @@ function createResponse({ ok = true, status = 200, json = {} } = {}) {
   };
 }
 
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 function createBackgroundHarness({
   apiBase = "https://tracefiction.com",
   webOrigin = "https://tracefiction.com",
@@ -222,6 +232,8 @@ globalThis.__testHooks = {
   patchOverlayLibraryEntry,
   shouldIgnoreSenderForAutoTrack,
   setBearerToken(value) { bearerToken = value; },
+  setVerifiedBearerToken(value) { verifiedBearerToken = value; },
+  getVerifiedBearerToken() { return verifiedBearerToken; },
   getBearerToken() { return bearerToken; }
 };
 `;
@@ -301,6 +313,151 @@ test("TRACE_AUTH_UPDATE with blank token clears session and marks signed out", a
   assert.equal(h.store.libraryOverlayCache, undefined);
   assert.equal(h.store.traceAuthState.state, "signed_out");
   assert.deepEqual(plainJson(h.badgeTextCalls.at(-1)), { text: "", tabId: 22 });
+});
+
+test("TRACE_AUTH_UPDATE verifies account before marking connected", async () => {
+  const h = createBackgroundHarness({
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) {
+        return createResponse({ json: { pro: true, library_count: 7 } });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: { success: true, data: { entries: {}, syncVersion: "v1" } },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+
+  const response = await h.dispatchMessage(
+    { type: "TRACE_AUTH_UPDATE", token: " verified-token " },
+    { tab: { id: 23 } },
+  );
+
+  assert.deepEqual(plainJson(response), { success: true, state: "connected" });
+  assert.equal(h.hooks.getBearerToken(), "verified-token");
+  assert.equal(h.hooks.getVerifiedBearerToken(), "verified-token");
+  assert.equal(h.store.authToken, "verified-token");
+  assert.equal(h.store.traceUserPro, true);
+  assert.equal(h.store.traceLibraryCount, 7);
+  assert.equal(h.store.traceAuthState.state, "connected");
+  assert.equal(h.store.traceAuthState.authVerificationVersion, 1);
+  assert.match(h.store.traceAuthState.accountVerifiedAt, /^\d{4}-/);
+  assert.match(h.store.traceAuthState.lastTokenSyncAt, /^\d{4}-/);
+});
+
+test("TRACE_AUTH_UPDATE handles bootstrap-required tokens without marking connected", async () => {
+  const h = createBackgroundHarness({
+    fetchImpl: async (url) => {
+      assert.ok(String(url).endsWith("/api/account/me"));
+      return createResponse({
+        ok: false,
+        status: 409,
+        json: { code: "ACCOUNT_BOOTSTRAP_REQUIRED" },
+      });
+    },
+  });
+
+  const response = await h.dispatchMessage(
+    { type: "TRACE_AUTH_UPDATE", token: "bootstrap-token" },
+    { tab: { id: 24 } },
+  );
+
+  assert.deepEqual(plainJson(response), {
+    success: false,
+    state: "reconnect_required",
+    error: "account_bootstrap_required",
+  });
+  assert.equal(h.hooks.getBearerToken(), null);
+  assert.equal(h.store.authToken, undefined);
+  assert.equal(h.store.traceAuthState.state, "reconnect_required");
+  assert.equal(h.store.traceAuthState.lastHttpStatus, 409);
+  assert.equal(h.store.traceAuthState.lastAuthErrorCode, "ACCOUNT_BOOTSTRAP_REQUIRED");
+});
+
+test("TRACE_AUTH_UPDATE keeps transient verification failures disconnected", async () => {
+  const h = createBackgroundHarness({
+    fetchImpl: async (url) => {
+      assert.ok(String(url).endsWith("/api/account/me"));
+      return createResponse({ ok: false, status: 500 });
+    },
+  });
+
+  const response = await h.dispatchMessage(
+    { type: "TRACE_AUTH_UPDATE", token: "network-token" },
+    { tab: { id: 25 } },
+  );
+
+  assert.deepEqual(plainJson(response), {
+    success: false,
+    state: "error",
+    error: "account_check_failed",
+    status: 500,
+  });
+  assert.equal(h.hooks.getBearerToken(), "network-token");
+  assert.equal(h.store.authToken, "network-token");
+  assert.equal(h.store.traceAuthState.state, "error");
+  assert.equal(h.store.traceAuthState.lastHttpStatus, 500);
+});
+
+test("startup re-verifies stored connected tokens before reporting connected", async () => {
+  const accountMe = createDeferred();
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "legacy-connected-token",
+      traceAuthState: {
+        state: "connected",
+        message: "Connected by old token receipt flow.",
+        lastTokenSyncAt: "2026-05-01T12:00:00.000Z",
+      },
+    },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) {
+        return accountMe.promise;
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: { success: true, data: { entries: {}, syncVersion: "v1" } },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+
+  assert.equal(h.store.traceAuthState.state, "unknown");
+  const beforeVerification = await h.dispatchMessage({
+    type: "TRACE_EXTENSION_STATUS_QUERY",
+    nonce: "nonce-before-startup-verification",
+  });
+  assert.deepEqual(plainJson(beforeVerification), {
+    installed: true,
+    connected: false,
+    authState: "unknown",
+    firstSaveSeen: false,
+    browserKind: "unknown",
+    lastTokenSyncAt: Date.parse("2026-05-01T12:00:00.000Z"),
+  });
+
+  accountMe.resolve(createResponse({ json: { pro: false, library_count: 3 } }));
+  await flush();
+  await flush();
+
+  const afterVerification = await h.dispatchMessage({
+    type: "TRACE_EXTENSION_STATUS_QUERY",
+    nonce: "nonce-after-startup-verification",
+  });
+  assert.deepEqual(plainJson(afterVerification), {
+    installed: true,
+    connected: true,
+    authState: "connected",
+    firstSaveSeen: false,
+    browserKind: "unknown",
+    lastTokenSyncAt: Date.parse("2026-05-01T12:00:00.000Z"),
+  });
+  assert.equal(h.hooks.getVerifiedBearerToken(), "legacy-connected-token");
+  assert.equal(h.store.traceAuthState.authVerificationVersion, 1);
+  assert.match(h.store.traceAuthState.accountVerifiedAt, /^\d{4}-/);
 });
 
 test("syncAo3SavedFilters uploads dirty local presets and stores server ids", async () => {
@@ -673,12 +830,15 @@ test("TRACE_POPUP_GET_STATE includes local activation and active tab context", a
 test("TRACE_EXTENSION_STATUS_QUERY returns connected state without private fields", async () => {
   const h = createBackgroundHarness();
   h.hooks.setBearerToken("token-status-handshake");
+  h.hooks.setVerifiedBearerToken("token-status-handshake");
   h.store.authToken = "token-status-handshake";
   h.store.traceAuthState = {
     state: "connected",
     message: "Extension connected to your Trace account.",
     helpUrl: "https://tracefiction.com/",
     lastTokenSyncAt: "2026-05-01T12:00:00.000Z",
+    authVerificationVersion: 1,
+    accountVerifiedAt: "2026-05-01T12:00:01.000Z",
     firstSaveSeen: true,
     userId: "user-should-not-leak",
   };
@@ -707,10 +867,13 @@ test("TRACE_EXTENSION_STATUS_QUERY returns connected state without private field
 test("TRACE_EXTENSION_STATUS_QUERY returns only coarse archive readiness fields", async () => {
   const h = createBackgroundHarness();
   h.hooks.setBearerToken("token-status-handshake");
+  h.hooks.setVerifiedBearerToken("token-status-handshake");
   h.store.authToken = "token-status-handshake";
   h.store.traceAuthState = {
     state: "connected",
     message: "Extension connected to your Trace account.",
+    authVerificationVersion: 1,
+    accountVerifiedAt: "2026-05-01T12:00:01.000Z",
   };
   h.store.traceArchiveReadiness = {
     lastArchiveSeenAt: Date.parse("2026-05-01T12:00:00.000Z"),
@@ -757,8 +920,13 @@ test("TRACE_EXTENSION_STATUS_QUERY returns only coarse archive readiness fields"
 test("TRACE_EXTENSION_STATUS_QUERY ignores invalid archive readiness fields", async () => {
   const h = createBackgroundHarness();
   h.hooks.setBearerToken("token-status-handshake");
+  h.hooks.setVerifiedBearerToken("token-status-handshake");
   h.store.authToken = "token-status-handshake";
-  h.store.traceAuthState = { state: "connected" };
+  h.store.traceAuthState = {
+    state: "connected",
+    authVerificationVersion: 1,
+    accountVerifiedAt: "2026-05-01T12:00:01.000Z",
+  };
   h.store.traceArchiveReadiness = {
     lastArchiveSeenAt: "not-a-date",
     lastArchiveHostKind: "archiveofourown.org",
@@ -779,6 +947,31 @@ test("TRACE_EXTENSION_STATUS_QUERY ignores invalid archive readiness fields", as
     authState: "connected",
     firstSaveSeen: false,
     browserKind: "unknown",
+  });
+});
+
+test("TRACE_EXTENSION_STATUS_QUERY does not trust legacy stored connected state", async () => {
+  const h = createBackgroundHarness();
+  h.hooks.setBearerToken("legacy-token");
+  h.store.authToken = "legacy-token";
+  h.store.traceAuthState = {
+    state: "connected",
+    message: "Connected by old token receipt flow.",
+    lastTokenSyncAt: "2026-05-01T12:00:00.000Z",
+  };
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_EXTENSION_STATUS_QUERY",
+    nonce: "nonce-legacy-connected",
+  });
+
+  assert.deepEqual(plainJson(response), {
+    installed: true,
+    connected: false,
+    authState: "unknown",
+    firstSaveSeen: false,
+    browserKind: "unknown",
+    lastTokenSyncAt: Date.parse("2026-05-01T12:00:00.000Z"),
   });
 });
 
@@ -1050,6 +1243,9 @@ test("executeAutoTrack success refreshes overlay cache immediately", async () =>
       return { ok: true };
     },
     fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) {
+        return createResponse({ json: { pro: false, library_count: 1 } });
+      }
       if (String(url).endsWith("/api/extension/track")) {
         return createResponse({ json: { success: true, data: { entry_id: "e-track", type: "updated" } } });
       }
@@ -1855,6 +2051,38 @@ test("TRACE_AUTO_TRACK responds auth_expired on 401", async () => {
 
   assert.equal(response.ok, false);
   assert.equal(response.error, "auth_expired");
+});
+
+test("TRACE_AUTO_TRACK responds account_bootstrap_required on 409", async () => {
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-at-bootstrap" },
+    fetchImpl: async () =>
+      createResponse({
+        ok: false,
+        status: 409,
+        json: { code: "ACCOUNT_BOOTSTRAP_REQUIRED" },
+      }),
+  });
+  h.hooks.setBearerToken("token-at-bootstrap");
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_AUTO_TRACK",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: { t: "Story", u: "https://archiveofourown.org/works/204" },
+      },
+    },
+    { tab: { id: 114 }, frameId: 0, documentLifecycle: "active" },
+  );
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, "account_bootstrap_required");
+  assert.equal(h.hooks.getBearerToken(), null);
+  assert.equal(h.store.authToken, undefined);
+  assert.equal(h.store.traceAuthState.state, "reconnect_required");
+  assert.equal(h.store.traceAuthState.lastAuthErrorCode, "ACCOUNT_BOOTSTRAP_REQUIRED");
 });
 
 test("TRACE_AUTO_TRACK responds free_limit_reached on 402", async () => {

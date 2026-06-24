@@ -21,6 +21,22 @@ function plainJson(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function tokenRequestMessages(h) {
+  return plainJson(
+    h.postedMessages.filter(
+      (item) => item?.data?.type === "TRACE_FICTION_TOKEN_REQUEST",
+    ),
+  );
+}
+
+function nonTokenRequestMessages(h) {
+  return plainJson(
+    h.postedMessages.filter(
+      (item) => item?.data?.type !== "TRACE_FICTION_TOKEN_REQUEST",
+    ),
+  );
+}
+
 function createSyncHarness(
   origin = "https://tracefiction.com",
   { sendMessageImpl } = {},
@@ -94,6 +110,36 @@ test("sync forwards same-origin TRACE_FICTION_TOKEN messages to background", asy
 
   assert.deepEqual(plainJson(h.messages), [
     { type: "TRACE_AUTH_UPDATE", token: "abc123" },
+  ]);
+});
+
+test("sync requests a Trace token when ready and on page lifecycle events", async () => {
+  const h = createSyncHarness();
+
+  assert.deepEqual(tokenRequestMessages(h), [
+    {
+      data: {
+        type: "TRACE_FICTION_TOKEN_REQUEST",
+        reason: "sync_ready",
+        at: h.postedMessages[0].data.at,
+      },
+      targetOrigin: "https://tracefiction.com",
+    },
+  ]);
+
+  h.postedMessages.length = 0;
+  h.window.dispatchEvent(new h.window.Event("pageshow"));
+  await flush();
+
+  assert.deepEqual(tokenRequestMessages(h), [
+    {
+      data: {
+        type: "TRACE_FICTION_TOKEN_REQUEST",
+        reason: "pageshow",
+        at: h.postedMessages[0].data.at,
+      },
+      targetOrigin: "https://tracefiction.com",
+    },
   ]);
 });
 
@@ -189,7 +235,7 @@ test("sync answers same-origin extension status requests with sanitized state", 
   assert.deepEqual(plainJson(h.messages), [
     { type: "TRACE_EXTENSION_STATUS_QUERY", nonce: "nonce-1" },
   ]);
-  assert.deepEqual(plainJson(h.postedMessages), [
+  assert.deepEqual(nonTokenRequestMessages(h), [
     {
       data: {
         type: "TRACE_EXTENSION_STATUS_RESPONSE",
@@ -238,7 +284,7 @@ test("sync drops invalid archive readiness values without failing status", async
   );
   await flush();
 
-  assert.deepEqual(plainJson(h.postedMessages), [
+  assert.deepEqual(nonTokenRequestMessages(h), [
     {
       data: {
         type: "TRACE_EXTENSION_STATUS_RESPONSE",
@@ -268,7 +314,7 @@ test("sync ignores status requests without a non-empty nonce", async () => {
   await flush();
 
   assert.deepEqual(h.messages, []);
-  assert.deepEqual(h.postedMessages, []);
+  assert.deepEqual(nonTokenRequestMessages(h), []);
 });
 
 test("sync ignores cross-origin status requests", async () => {
@@ -283,7 +329,7 @@ test("sync ignores cross-origin status requests", async () => {
   await flush();
 
   assert.deepEqual(h.messages, []);
-  assert.deepEqual(h.postedMessages, []);
+  assert.deepEqual(nonTokenRequestMessages(h), []);
 });
 
 test("sync returns safe unknown state when background status messaging fails", async () => {
@@ -305,7 +351,7 @@ test("sync returns safe unknown state when background status messaging fails", a
   assert.deepEqual(plainJson(h.messages), [
     { type: "TRACE_EXTENSION_STATUS_QUERY", nonce: "nonce-3" },
   ]);
-  assert.deepEqual(plainJson(h.postedMessages), [
+  assert.deepEqual(nonTokenRequestMessages(h), [
     {
       data: {
         type: "TRACE_EXTENSION_STATUS_RESPONSE",
@@ -352,7 +398,7 @@ test("sync forwards library invalidation runtime messages into the page", async 
   });
   await flush();
 
-  assert.deepEqual(plainJson(h.postedMessages), [
+  assert.deepEqual(nonTokenRequestMessages(h), [
     {
       data: {
         type: "TRACE_LIBRARY_INVALIDATED",
