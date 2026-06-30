@@ -178,6 +178,10 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         wv.scrollView.minimumZoomScale = 1.0
         wv.scrollView.maximumZoomScale = 1.0
         wv.scrollView.pinchGestureRecognizer?.isEnabled = false
+        // WKWebView is backed by a UIScrollView. Avoid deferring the first tap
+        // while the scroll view decides whether a touch is a scroll gesture.
+        wv.scrollView.delaysContentTouches = false
+        wv.scrollView.canCancelContentTouches = true
         wv.customUserAgent =
             "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Safari/604.1 \(Self.webShellUserAgentToken)"
         webView = wv
