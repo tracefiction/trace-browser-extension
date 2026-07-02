@@ -164,32 +164,58 @@
   };
   const PRIVATE_TAG_DISPLAY_LIMIT = 3;
 
+  const STATUS_TOKENS = {
+    SAVED:     { accent: "#5b7488", container: "#e4e9ed", onContainer: "#3a566b", border: "#bfccd6" },
+    READING:   { accent: "#bf8a1f", container: "#f4e6c2", onContainer: "#7c5400", border: "#e1c886" },
+    CAUGHT_UP: { accent: "#1f8a7d", container: "#d6ece6", onContainer: "#136257", border: "#a3d2c9" },
+    PAUSED:    { accent: "#a8623a", container: "#efddcd", onContainer: "#79401f", border: "#dcbe9f" },
+    FINISHED:  { accent: "#4a8157", container: "#dcecde", onContainer: "#33603f", border: "#aacdb0" },
+    DROPPED:   { accent: "#83707b", container: "#e8e0e3", onContainer: "#574852", border: "#cdbfc5" },
+  };
+  STATUS_TOKENS.PLANNING = STATUS_TOKENS.SAVED;
+  STATUS_TOKENS.COMPLETED = STATUS_TOKENS.FINISHED;
+
   /** Local extension UI tones, aligned to the current Trace archive palette. */
   const STATUS_THEME = {
     READING: {
-      bg: "#f7e6b6",
-      fg: TRACE_UI.goldOn,
-      border: "rgba(89, 68, 2, 0.2)",
+      bg: STATUS_TOKENS.READING.container,
+      fg: STATUS_TOKENS.READING.onContainer,
+      border: STATUS_TOKENS.READING.border,
     },
     PLANNING: {
-      bg: TRACE_UI.paperSoft,
-      fg: "#414846",
-      border: TRACE_UI.border,
+      bg: STATUS_TOKENS.PLANNING.container,
+      fg: STATUS_TOKENS.PLANNING.onContainer,
+      border: STATUS_TOKENS.PLANNING.border,
     },
     PAUSED: {
-      bg: "#7c2d12",
-      fg: "#ffffff",
-      border: "rgba(124, 45, 18, 0.5)",
+      bg: STATUS_TOKENS.PAUSED.container,
+      fg: STATUS_TOKENS.PAUSED.onContainer,
+      border: STATUS_TOKENS.PAUSED.border,
     },
     COMPLETED: {
-      bg: TRACE_UI.forest,
-      fg: TRACE_UI.forestOn,
-      border: "rgba(22, 52, 45, 0.35)",
+      bg: STATUS_TOKENS.COMPLETED.container,
+      fg: STATUS_TOKENS.COMPLETED.onContainer,
+      border: STATUS_TOKENS.COMPLETED.border,
     },
     DROPPED: {
-      bg: "#efe4e4",
-      fg: "#ba1a1a",
-      border: "rgba(186, 26, 26, 0.22)",
+      bg: STATUS_TOKENS.DROPPED.container,
+      fg: STATUS_TOKENS.DROPPED.onContainer,
+      border: STATUS_TOKENS.DROPPED.border,
+    },
+    SAVED: {
+      bg: STATUS_TOKENS.SAVED.container,
+      fg: STATUS_TOKENS.SAVED.onContainer,
+      border: STATUS_TOKENS.SAVED.border,
+    },
+    CAUGHT_UP: {
+      bg: STATUS_TOKENS.CAUGHT_UP.container,
+      fg: STATUS_TOKENS.CAUGHT_UP.onContainer,
+      border: STATUS_TOKENS.CAUGHT_UP.border,
+    },
+    FINISHED: {
+      bg: STATUS_TOKENS.FINISHED.container,
+      fg: STATUS_TOKENS.FINISHED.onContainer,
+      border: STATUS_TOKENS.FINISHED.border,
     },
   };
 
@@ -213,50 +239,74 @@
 
   const INLINE_STATUS_THEME = {
     READING: {
-      bg: "rgba(241, 213, 138, 0.16)",
-      fg: TRACE_UI.goldOn,
-      border: "rgba(89, 68, 2, 0.16)",
-      accent: "#b88a16",
+      bg: STATUS_TOKENS.READING.container,
+      fg: STATUS_TOKENS.READING.onContainer,
+      border: STATUS_TOKENS.READING.border,
+      accent: STATUS_TOKENS.READING.accent,
     },
     PLANNING: {
-      bg: "rgba(65, 72, 70, 0.035)",
-      fg: "#414846",
-      border: "rgba(65, 72, 70, 0.14)",
-      accent: "#7d857c",
+      bg: STATUS_TOKENS.PLANNING.container,
+      fg: STATUS_TOKENS.PLANNING.onContainer,
+      border: STATUS_TOKENS.PLANNING.border,
+      accent: STATUS_TOKENS.PLANNING.accent,
     },
     PAUSED: {
-      bg: "rgba(124, 45, 18, 0.07)",
-      fg: "#7c2d12",
-      border: "rgba(124, 45, 18, 0.18)",
-      accent: "#9a3412",
+      bg: STATUS_TOKENS.PAUSED.container,
+      fg: STATUS_TOKENS.PAUSED.onContainer,
+      border: STATUS_TOKENS.PAUSED.border,
+      accent: STATUS_TOKENS.PAUSED.accent,
     },
     COMPLETED: {
-      bg: "rgba(45, 75, 67, 0.07)",
-      fg: TRACE_UI.forest,
-      border: "rgba(45, 75, 67, 0.18)",
-      accent: TRACE_UI.forest,
+      bg: STATUS_TOKENS.COMPLETED.container,
+      fg: STATUS_TOKENS.COMPLETED.onContainer,
+      border: STATUS_TOKENS.COMPLETED.border,
+      accent: STATUS_TOKENS.COMPLETED.accent,
     },
     DROPPED: {
-      bg: "rgba(186, 26, 26, 0.055)",
-      fg: "#9f1d1d",
-      border: "rgba(186, 26, 26, 0.16)",
-      accent: "#ba1a1a",
+      bg: STATUS_TOKENS.DROPPED.container,
+      fg: STATUS_TOKENS.DROPPED.onContainer,
+      border: STATUS_TOKENS.DROPPED.border,
+      accent: STATUS_TOKENS.DROPPED.accent,
+    },
+    SAVED: {
+      bg: STATUS_TOKENS.SAVED.container,
+      fg: STATUS_TOKENS.SAVED.onContainer,
+      border: STATUS_TOKENS.SAVED.border,
+      accent: STATUS_TOKENS.SAVED.accent,
+    },
+    CAUGHT_UP: {
+      bg: STATUS_TOKENS.CAUGHT_UP.container,
+      fg: STATUS_TOKENS.CAUGHT_UP.onContainer,
+      border: STATUS_TOKENS.CAUGHT_UP.border,
+      accent: STATUS_TOKENS.CAUGHT_UP.accent,
+    },
+    FINISHED: {
+      bg: STATUS_TOKENS.FINISHED.container,
+      fg: STATUS_TOKENS.FINISHED.onContainer,
+      border: STATUS_TOKENS.FINISHED.border,
+      accent: STATUS_TOKENS.FINISHED.accent,
     },
   };
 
   const D1_STATUS_ACCENT = {
-    READING: TRACE_D1.honey,
-    PLANNING: TRACE_D1.ink3,
-    PAUSED: TRACE_D1.ink4,
-    COMPLETED: TRACE_D1.forest,
-    DROPPED: TRACE_D1.rust,
+    READING: STATUS_TOKENS.READING.accent,
+    PLANNING: STATUS_TOKENS.PLANNING.accent,
+    PAUSED: STATUS_TOKENS.PAUSED.accent,
+    COMPLETED: STATUS_TOKENS.COMPLETED.accent,
+    DROPPED: STATUS_TOKENS.DROPPED.accent,
+    SAVED: STATUS_TOKENS.SAVED.accent,
+    CAUGHT_UP: STATUS_TOKENS.CAUGHT_UP.accent,
+    FINISHED: STATUS_TOKENS.FINISHED.accent,
   };
   const D1_STATUS_SOFT = {
-    READING: "rgba(138,110,42,0.10)",
-    PLANNING: "rgba(110,106,91,0.10)",
-    PAUSED: "rgba(154,149,131,0.12)",
-    COMPLETED: "rgba(31,77,63,0.10)",
-    DROPPED: "rgba(181,74,48,0.10)",
+    READING: STATUS_TOKENS.READING.container,
+    PLANNING: STATUS_TOKENS.PLANNING.container,
+    PAUSED: STATUS_TOKENS.PAUSED.container,
+    COMPLETED: STATUS_TOKENS.COMPLETED.container,
+    DROPPED: STATUS_TOKENS.DROPPED.container,
+    SAVED: STATUS_TOKENS.SAVED.container,
+    CAUGHT_UP: STATUS_TOKENS.CAUGHT_UP.container,
+    FINISHED: STATUS_TOKENS.FINISHED.container,
   };
 
   const INLINE_HIDDEN_THEME = {
@@ -2180,8 +2230,8 @@
   }
 
   function statusChoiceStyle(status, selected) {
-    var accent = D1_STATUS_ACCENT[status] || TRACE_D1.forest;
-    var soft = D1_STATUS_SOFT[status] || "rgba(31,77,63,0.10)";
+    var accent = D1_STATUS_ACCENT[status] || STATUS_TOKENS.READING.accent;
+    var soft = D1_STATUS_SOFT[status] || STATUS_TOKENS.READING.container;
     return [
       "flex:1",
       "display:flex",
@@ -2236,8 +2286,8 @@
         "width:7px",
         "height:7px",
         "border-radius:999px",
-        "background:" + (selected ? D1_STATUS_ACCENT[status] || TRACE_D1.forest : TRACE_D1.ink5),
-        selected ? "box-shadow:0 0 0 3px " + (D1_STATUS_SOFT[status] || "rgba(31,77,63,0.10)") : "",
+        "background:" + (selected ? D1_STATUS_ACCENT[status] || STATUS_TOKENS.READING.accent : TRACE_D1.ink5),
+        selected ? "box-shadow:0 0 0 3px " + (D1_STATUS_SOFT[status] || STATUS_TOKENS.READING.container) : "",
       ].join(";");
       choice.appendChild(dot);
       choice.appendChild(document.createTextNode(statusControlChoiceLabel(status)));

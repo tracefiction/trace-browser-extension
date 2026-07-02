@@ -68,7 +68,9 @@ function stripTraceUiFromClone(el) {
       "[data-trace-hidden-action]",
       "[data-trace-management-header]",
       "[data-trace-open-trace]",
-      "[data-trace-bottom-sheet-grabber]"
+      "[data-trace-bottom-sheet-grabber]",
+      "[data-trace-finish-qualify]",
+      "[data-trace-finish-toast]"
     ].join(",")
   )) {
     node.remove();
@@ -110,9 +112,13 @@ function ao3ImportChapters(chp) {
 function extractAo3ChapterNumber(text) {
   const normalized = String(text || "").trim();
   if (!normalized) return null;
+  const leadingOrdinal = normalized.match(/^(\d+)\s*[.: -]/);
+  if (leadingOrdinal) {
+    const n = Number(leadingOrdinal[1]);
+    return Number.isFinite(n) && n >= 1 ? n : null;
+  }
   const match =
-    normalized.match(/\bchapter\s+(\d+)\b/i) ||
-    normalized.match(/^(\d+)\s*[.: -]/);
+    normalized.match(/\bchapter\s+(\d+)\b/i);
   if (!match) return null;
   const n = Number(match[1]);
   return Number.isFinite(n) && n >= 1 ? n : null;
@@ -243,6 +249,20 @@ function detectAo3CurrentChapterNumber() {
 
   return 1;
 }
+
+function currentAo3ChapterUrl(workId) {
+  try {
+    const url = new URL(location.href);
+    const match = url.pathname.match(/^\/works\/(\d+)\/chapters\/(\d+)\/?$/);
+    if (!match || match[1] !== String(workId || "")) return null;
+    url.hash = "";
+    url.search = "";
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    return url.toString();
+  } catch (_) {
+    return null;
+  }
+}
 function dedup(arr) {
   const seen = new Set();
   const out = [];
@@ -303,12 +323,16 @@ var OVERLAY_CACHE_KEY = "libraryOverlayCache";
 var optimisticStoryPageEntries = Object.create(null);
 var storyQuickAddUiReady = false;
 var TRACE_READER_STATUS_CHOICES = [
-  "PLANNING",
+  "SAVED",
   "READING",
+  "CAUGHT_UP",
   "PAUSED",
-  "COMPLETED",
+  "FINISHED",
   "DROPPED",
 ];
+var FINISH_QUALIFY_DISMISS_KEY = "trace:finish-qualify:dismissed";
+var finishQualifyWatchState = Object.create(null);
+var finishQualifyBandState = Object.create(null);
 
 function count(s) {
   // Handles: "12,148" -> 12148, "127k+" -> 127000, "1.2m" -> 1200000
@@ -452,6 +476,7 @@ function autoTrackFingerprint(item) {
   return JSON.stringify({
     src: item && item.src ? item.src : null,
     url: item && item.u ? item.u : null,
+    chapterUrl: item && item.chu ? item.chu : null,
     chapter:
       item && typeof item.chn === "number" && Number.isFinite(item.chn)
         ? item.chn
@@ -774,12 +799,12 @@ function sendAutoTrackForStory(validStory) {
         updateAutoTrackFailureForStory(validStory, response && response.error);
         return;
       }
-      applyConfirmedOverlayUpdateForStory(validStory);
+      applyConfirmedOverlayUpdateForStory(validStory, response);
     },
   );
 }
 
-function applyConfirmedOverlayUpdateForStory(item) {
+function applyConfirmedOverlayUpdateForStory(item, response) {
   var workKey = overlayWorkKeyFromItem(item);
   if (!workKey) return;
 
@@ -815,16 +840,24 @@ function applyConfirmedOverlayUpdateForStory(item) {
       item.chn > 1;
 
     // Match server extension auto-track: chapter 1 remains planning; chapter 2+
-    // only promotes PLANNING → READING and preserves paused/dropped/completed.
-    var prevStatus =
-      typeof existing.status === "string" ? existing.status : null;
-    var nextStatus = startedStoryPage
-      ? prevStatus === "PLANNING" ? "READING" : prevStatus || "READING"
-      : prevStatus || "PLANNING";
+    // only promotes PLANNING -> READING and preserves paused/dropped/completed.
+    var prevStatus = canonicalReaderStatus(
+      existing.canonicalReaderStatus || existing.readerStatus || existing.status
+    );
+    var nextCanonicalStatus = startedStoryPage
+      ? prevStatus === "SAVED" ? "READING" : prevStatus || "READING"
+      : prevStatus || "SAVED";
+    var legacyStatus = legacyReaderStatus(nextCanonicalStatus);
 
     var next = Object.assign({}, existing, {
-      status: nextStatus,
+      status: legacyStatus,
+      readerStatus: legacyStatus,
+      canonicalReaderStatus: nextCanonicalStatus,
     });
+    if (response && typeof response.entryId === "string") {
+      next.entryId = response.entryId;
+      next.statusChoicesAvailable = true;
+    }
     if (typeof currentChapter === "number" && Number.isFinite(currentChapter)) {
       next.chapters = {
         current: currentChapter,
@@ -1352,7 +1385,7 @@ function collectAO3Work() {
     if (/Complete Work/i.test(t)) return "complete";
     if (/Work in Progress/i.test(t)) return "wip";
     if (typeof chp.t === "number" && chp.n === chp.t) return "complete";
-    if (chRaw) return "wip";
+    if (typeof chp.t === "number" && typeof chp.n === "number" && chp.n < chp.t) return "wip";
     return null;
   })();
 
@@ -1390,6 +1423,7 @@ function collectAO3Work() {
     src: "ao3",
     ctx: "story",
     u: `${location.origin}/works/${id}`,
+    chu: currentAo3ChapterUrl(id),
     t: title,
     a: author,
     r: rating,
@@ -2062,14 +2096,57 @@ function collect() {
   return { source: "ao3", items: [] };
 }
 
+function canonicalReaderStatus(status) {
+  if (
+    typeof status !== "string" &&
+    typeof status !== "number" &&
+    typeof status !== "boolean"
+  ) {
+    return null;
+  }
+  var raw = String(status).trim().toUpperCase();
+  if (!raw) return null;
+  if (raw === "PLANNING") return "SAVED";
+  if (raw === "COMPLETED") return "FINISHED";
+  if (
+    raw === "SAVED" ||
+    raw === "READING" ||
+    raw === "CAUGHT_UP" ||
+    raw === "PAUSED" ||
+    raw === "FINISHED" ||
+    raw === "DROPPED"
+  ) {
+    return raw;
+  }
+  return null;
+}
+
+function legacyReaderStatus(status) {
+  var canonical = canonicalReaderStatus(status);
+  if (canonical === "SAVED") return "PLANNING";
+  if (canonical === "CAUGHT_UP") return "READING";
+  if (canonical === "FINISHED") return "COMPLETED";
+  return canonical;
+}
+
 function quickAddStatusLabel(status) {
-  var labels = { READING: "Reading", COMPLETED: "Finished", PAUSED: "Paused", DROPPED: "Dropped", PLANNING: "Planning" };
-  return labels[status] || status;
+  var canonical = canonicalReaderStatus(status);
+  var labels = {
+    SAVED: "Saved",
+    READING: "Reading",
+    CAUGHT_UP: "Caught up",
+    PAUSED: "Paused",
+    FINISHED: "Finished",
+    DROPPED: "Dropped",
+  };
+  return labels[canonical] || status;
 }
 
 function displayChaptersForStatus(status, chapters) {
   if (!chapters || typeof chapters.current !== "number") return chapters;
-  if (status === "READING" && chapters.current <= 0) {
+  var canonical = canonicalReaderStatus(status);
+  if (canonical === "SAVED") return null;
+  if (canonical === "READING" && chapters.current <= 0) {
     return {
       current: 1,
       total: chapters.total == null ? null : chapters.total,
@@ -2088,7 +2165,7 @@ function quickAddStatusDisplay(info) {
   var label = quickAddStatusLabel(status);
   if (!label) label = "In Library";
   if (
-    status !== "PLANNING" &&
+    canonicalReaderStatus(status) !== "SAVED" &&
     displayChaptersForStatus(status, info && info.chapters) &&
     typeof displayChaptersForStatus(status, info && info.chapters).current === "number"
   ) {
@@ -2120,7 +2197,7 @@ function storyInlineProgressDisplay(info) {
         ? info.status
         : null;
   if (
-    status !== "PLANNING" &&
+    canonicalReaderStatus(status) !== "SAVED" &&
     info &&
     displayChaptersForStatus(status, info && info.chapters) &&
     typeof displayChaptersForStatus(status, info && info.chapters).current === "number"
@@ -2370,13 +2447,31 @@ var TRACE_THEMES = {
   mark:    { bg: "#f0e9dc",     fg: "#6f4d1f", border: "rgba(111,77,31,0.24)" },
 };
 
-// Status themes reuse library-overlay badge palette
+// App-aligned light archive status tokens from library-app.css.
+var TRACE_STATUS_TOKENS = {
+  SAVED:     { accent: "#5b7488", container: "#e4e9ed", onContainer: "#3a566b", border: "#bfccd6" },
+  READING:   { accent: "#bf8a1f", container: "#f4e6c2", onContainer: "#7c5400", border: "#e1c886" },
+  CAUGHT_UP: { accent: "#1f8a7d", container: "#d6ece6", onContainer: "#136257", border: "#a3d2c9" },
+  PAUSED:    { accent: "#a8623a", container: "#efddcd", onContainer: "#79401f", border: "#dcbe9f" },
+  FINISHED:  { accent: "#4a8157", container: "#dcecde", onContainer: "#33603f", border: "#aacdb0" },
+  DROPPED:   { accent: "#83707b", container: "#e8e0e3", onContainer: "#574852", border: "#cdbfc5" },
+};
+TRACE_STATUS_TOKENS.PLANNING = TRACE_STATUS_TOKENS.SAVED;
+TRACE_STATUS_TOKENS.COMPLETED = TRACE_STATUS_TOKENS.FINISHED;
+
+function traceStatusToken(status) {
+  return TRACE_STATUS_TOKENS[canonicalReaderStatus(status) || status] || TRACE_STATUS_TOKENS.READING;
+}
+
 var TRACE_STATUS_THEMES = {
-  READING:   { bg: TRACE_UI.gold, fg: TRACE_UI.goldOn, border: "rgba(89,68,2,0.2)" },
-  PLANNING:  { bg: TRACE_UI.paperSoft, fg: "#414846", border: TRACE_UI.border },
-  PAUSED:    { bg: "#7c2d12", fg: "#ffffff", border: "rgba(124,45,18,0.5)" },
-  COMPLETED: { bg: TRACE_UI.forest, fg: TRACE_UI.forestOn, border: "rgba(22,52,45,0.35)" },
-  DROPPED:   { bg: "#efe4e4", fg: "#ba1a1a", border: "rgba(186,26,26,0.22)" },
+  READING:   { bg: TRACE_STATUS_TOKENS.READING.container, fg: TRACE_STATUS_TOKENS.READING.onContainer, border: TRACE_STATUS_TOKENS.READING.border },
+  PLANNING:  { bg: TRACE_STATUS_TOKENS.PLANNING.container, fg: TRACE_STATUS_TOKENS.PLANNING.onContainer, border: TRACE_STATUS_TOKENS.PLANNING.border },
+  PAUSED:    { bg: TRACE_STATUS_TOKENS.PAUSED.container, fg: TRACE_STATUS_TOKENS.PAUSED.onContainer, border: TRACE_STATUS_TOKENS.PAUSED.border },
+  COMPLETED: { bg: TRACE_STATUS_TOKENS.COMPLETED.container, fg: TRACE_STATUS_TOKENS.COMPLETED.onContainer, border: TRACE_STATUS_TOKENS.COMPLETED.border },
+  DROPPED:   { bg: TRACE_STATUS_TOKENS.DROPPED.container, fg: TRACE_STATUS_TOKENS.DROPPED.onContainer, border: TRACE_STATUS_TOKENS.DROPPED.border },
+  SAVED:     { bg: TRACE_STATUS_TOKENS.SAVED.container, fg: TRACE_STATUS_TOKENS.SAVED.onContainer, border: TRACE_STATUS_TOKENS.SAVED.border },
+  CAUGHT_UP: { bg: TRACE_STATUS_TOKENS.CAUGHT_UP.container, fg: TRACE_STATUS_TOKENS.CAUGHT_UP.onContainer, border: TRACE_STATUS_TOKENS.CAUGHT_UP.border },
+  FINISHED:  { bg: TRACE_STATUS_TOKENS.FINISHED.container, fg: TRACE_STATUS_TOKENS.FINISHED.onContainer, border: TRACE_STATUS_TOKENS.FINISHED.border },
 };
 
 var TRACE_INLINE_THEMES = {
@@ -2387,11 +2482,14 @@ var TRACE_INLINE_THEMES = {
   saving: { fg: "#6e6a5b", label: "#6e6a5b", border: "rgba(110,106,91,0.28)", accent: "#9a9583", weight: 500 },
   error: { fg: "#b54a30", label: "#b54a30", border: "transparent", accent: "#b54a30", weight: 500 },
   full: { fg: "#8a6e2a", label: "#8a6e2a", border: "transparent", accent: "#8a6e2a", weight: 500 },
-  READING: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: "#8a6e2a", weight: 500 },
-  PLANNING: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: "#6e6a5b", weight: 500 },
-  PAUSED: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: "#9a9583", weight: 500 },
-  COMPLETED: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: "#1f4d3f", weight: 500 },
-  DROPPED: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: "#b54a30", weight: 500 },
+  READING: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: TRACE_STATUS_TOKENS.READING.accent, weight: 500 },
+  PLANNING: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: TRACE_STATUS_TOKENS.PLANNING.accent, weight: 500 },
+  PAUSED: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: TRACE_STATUS_TOKENS.PAUSED.accent, weight: 500 },
+  COMPLETED: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: TRACE_STATUS_TOKENS.COMPLETED.accent, weight: 500 },
+  DROPPED: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: TRACE_STATUS_TOKENS.DROPPED.accent, weight: 500 },
+  SAVED: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: TRACE_STATUS_TOKENS.SAVED.accent, weight: 500 },
+  CAUGHT_UP: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: TRACE_STATUS_TOKENS.CAUGHT_UP.accent, weight: 500 },
+  FINISHED: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: TRACE_STATUS_TOKENS.FINISHED.accent, weight: 500 },
 };
 
 function traceChipCss(theme) {
@@ -2618,7 +2716,12 @@ function bindTraceOpenLink(link) {
 }
 
 function entryStatus(entry) {
-  return entry && (entry.readerStatus || entry.status) ? entry.readerStatus || entry.status : null;
+  if (!entry) return null;
+  return (
+    canonicalReaderStatus(entry.canonicalReaderStatus) ||
+    canonicalReaderStatus(entry.readerStatus) ||
+    canonicalReaderStatus(entry.status)
+  );
 }
 
 function progressDisplay(entry) {
@@ -3104,19 +3207,11 @@ function storySheetIconButtonCss() {
 }
 
 function storyStatusAccent(status) {
-  if (status === "READING") return "#8a6e2a";
-  if (status === "COMPLETED") return "#1f4d3f";
-  if (status === "DROPPED") return "#b54a30";
-  if (status === "PAUSED") return "#9a9583";
-  return "#6e6a5b";
+  return traceStatusToken(status).accent;
 }
 
 function storyStatusSoft(status) {
-  if (status === "READING") return "rgba(138,110,42,0.10)";
-  if (status === "COMPLETED") return "rgba(31,77,63,0.10)";
-  if (status === "DROPPED") return "rgba(181,74,48,0.10)";
-  if (status === "PAUSED") return "rgba(154,149,131,0.12)";
-  return "rgba(110,106,91,0.10)";
+  return traceStatusToken(status).container;
 }
 
 function storySheetSvgIcon(kind) {
@@ -3230,8 +3325,6 @@ function sheetRowEl(label, value, emphasis) {
 }
 
 function readerStatusChoiceLabel(status) {
-  if (status === "PLANNING") return "Plan";
-  if (status === "COMPLETED") return "Done";
   return quickAddStatusLabel(status);
 }
 
@@ -3249,7 +3342,7 @@ function readerStatusProgressPatch(entry, nextStatus) {
   var chapters = entry && entry.chapters;
   if (
     nextStatus !== "READING" ||
-    currentStatus !== "PLANNING" ||
+    canonicalReaderStatus(currentStatus) !== "SAVED" ||
     !chapters ||
     typeof chapters.current !== "number" ||
     chapters.current > 0
@@ -3310,6 +3403,12 @@ function applyOptimisticLibraryEntryPatch(workKey, entry, patch, nextChapters) {
   if (Object.prototype.hasOwnProperty.call(patch, "rating")) {
     next.rating = patch.rating;
   }
+  if (patch.status) {
+    next.status = legacyReaderStatus(patch.status);
+    next.readerStatus = legacyReaderStatus(patch.status);
+    next.canonicalReaderStatus = canonicalReaderStatus(patch.status);
+    next.statusChoicesAvailable = true;
+  }
   if (nextChapters) {
     next.chapters = nextChapters;
     next.catchupState = "UP";
@@ -3321,8 +3420,9 @@ function applyOptimisticLibraryEntryPatch(workKey, entry, patch, nextChapters) {
 function updateOptimisticReaderStatus(workKey, status, chapters) {
   var prev = optimisticStoryPageEntries[workKey] || {};
   var next = Object.assign({}, prev, {
-    status: status,
-    readerStatus: status,
+    status: legacyReaderStatus(status),
+    readerStatus: legacyReaderStatus(status),
+    canonicalReaderStatus: canonicalReaderStatus(status),
     statusChoicesAvailable: true,
   });
   if (chapters) next.chapters = chapters;
@@ -3495,7 +3595,7 @@ function appendStoryCatchupAction(body, view, workKey) {
     ext.runtime.sendMessage(
       {
         type: "TRACE_PATCH_LIBRARY_ENTRY",
-        payload: { entryId: entry.entryId, patch: { progress: patch.progress } },
+        payload: { entryId: entry.entryId, patch: { status: "CAUGHT_UP", progress: patch.progress } },
       },
       function (response) {
         if (ext.runtime.lastError || !response || !response.ok) {
@@ -3503,7 +3603,7 @@ function appendStoryCatchupAction(body, view, workKey) {
           button.textContent = "Retry";
           return;
         }
-        applyOptimisticLibraryEntryPatch(workKey, entry, { progress: patch.progress }, patch.chapters);
+        applyOptimisticLibraryEntryPatch(workKey, entry, { status: "CAUGHT_UP", progress: patch.progress }, patch.chapters);
         renderQuickAddButton(workKey);
       },
     );
@@ -3735,7 +3835,9 @@ function sendQuickAddAction(btn, workKey, addTheme, compact) {
             typeof item.chn === "number" &&
             Number.isFinite(item.chn) &&
             item.chn > 1;
-          var next = { status: startedStoryPage ? "READING" : "PLANNING", readerStatus: startedStoryPage ? "READING" : "PLANNING" };
+          var nextCanonical = startedStoryPage ? "READING" : "SAVED";
+          var nextLegacy = legacyReaderStatus(nextCanonical);
+          var next = { status: nextLegacy, readerStatus: nextLegacy, canonicalReaderStatus: nextCanonical };
           if (response.entryId) {
             next.entryId = response.entryId;
             next.statusChoicesAvailable = true;
@@ -4156,6 +4258,315 @@ function renderStorySheet(sheet, view, workKey) {
   applySheetVisibility(sheet, wasOpen);
 }
 
+
+function finishQualifyAo3BodyElement() {
+  var articles = qsa(
+    document,
+    [
+      "#chapters .userstuff.module[role='article']",
+      "#chapters .userstuff[role='article']",
+      "#chapters [role='article'].userstuff",
+    ].join(",")
+  );
+  if (articles.length) return articles[articles.length - 1];
+  return one(document, "#chapters") || one(document, ".chapter[id^='chapter-']") || one(document, ".chapter");
+}
+
+function finishQualifyAo3AnchorElement() {
+  var endNotes = qsa(
+    document,
+    [
+      "#work_endnotes",
+      ".afterword .end.notes.module",
+      "#chapters .end.notes.module",
+    ].join(",")
+  );
+  if (endNotes.length) return endNotes[endNotes.length - 1];
+  return one(document, "#chapters") || finishQualifyAo3BodyElement();
+}
+
+function finishQualifyBodyElement() {
+  if (isAO3()) return finishQualifyAo3BodyElement();
+  if (isFFN()) {
+    return one(document, "#storytextp") || one(document, "#storycontent");
+  }
+  return null;
+}
+
+function finishQualifyAnchorElement() {
+  if (isAO3()) return finishQualifyAo3AnchorElement();
+  if (isFFNDesktop()) return one(document, "#storytextp") || finishQualifyBodyElement();
+  if (isFFNMobile()) {
+    var content = one(document, "#storycontent");
+    return (content && content.parentElement) || content || finishQualifyBodyElement();
+  }
+  return null;
+}
+
+function finishQualifyPostedChapterCount(item) {
+  if (!item) return null;
+  var published = Number(item.chPub);
+  if (Number.isFinite(published) && published > 0) return Math.trunc(published);
+  var total = Number(item.cht);
+  if (Number.isFinite(total) && total > 0) return Math.trunc(total);
+  return null;
+}
+
+function finishQualifyCurrentChapterCount(item) {
+  var current = Number(item && item.chn);
+  if (!Number.isFinite(current) || current <= 0) return null;
+  return Math.trunc(current);
+}
+
+function finishQualifyIsLastPostedChapter(item) {
+  var current = finishQualifyCurrentChapterCount(item);
+  var posted = finishQualifyPostedChapterCount(item);
+  return current != null && posted != null && current >= posted;
+}
+
+function finishQualifySourceWorkState(item) {
+  var raw = String((item && (item.s || item.cmp)) || "").trim().toLowerCase();
+  if (raw === "complete") return "complete";
+  if (raw === "wip") return "wip";
+  if (raw === "hiatus" || raw === "on_hiatus" || raw === "paused") return "hiatus";
+  return null;
+}
+
+function finishQualifySessionKey(workKey, entryId, item) {
+  return [
+    workKey,
+    entryId || "no-entry",
+    finishQualifyCurrentChapterCount(item) || "x",
+    finishQualifyPostedChapterCount(item) || "x",
+  ].join(":");
+}
+
+function finishQualifyWasDismissed(key) {
+  try {
+    var raw = window.sessionStorage && window.sessionStorage.getItem(FINISH_QUALIFY_DISMISS_KEY);
+    if (!raw) return false;
+    var parsed = JSON.parse(raw);
+    return !!(parsed && parsed[key]);
+  } catch (_) {
+    return false;
+  }
+}
+
+function finishQualifyRememberDismissed(key) {
+  try {
+    if (!window.sessionStorage) return;
+    var raw = window.sessionStorage.getItem(FINISH_QUALIFY_DISMISS_KEY);
+    var parsed = raw ? JSON.parse(raw) : {};
+    parsed[key] = Date.now();
+    window.sessionStorage.setItem(FINISH_QUALIFY_DISMISS_KEY, JSON.stringify(parsed));
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+function finishQualifyProgressPatch(item) {
+  var current = finishQualifyCurrentChapterCount(item);
+  var posted = finishQualifyPostedChapterCount(item);
+  if (current == null || posted == null) return null;
+  return {
+    progress: { unit: "CHAPTER", value: current, total: posted },
+    chapters: { current: current, total: posted },
+  };
+}
+
+function finishQualifySignalPayload(decision, state, workState, readerStatus) {
+  var entryId = decision && decision.entry && decision.entry.entryId;
+  var chapter = finishQualifyCurrentChapterCount(decision && decision.item);
+  var total = finishQualifyPostedChapterCount(decision && decision.item);
+  if (!entryId || chapter == null || total == null) return null;
+  var payload = {
+    entryId: entryId,
+    workKey: decision.workKey,
+    source: isAO3() ? "ao3" : "ffn",
+    chapter: chapter,
+    total: total,
+    state: state,
+  };
+  if (state === "resolved") {
+    payload.workStatus = workState;
+    payload.readerStatus = readerStatus;
+  }
+  return payload;
+}
+
+function sendFinishQualifySignal(decision, state, workState, readerStatus) {
+  var payload = finishQualifySignalPayload(decision, state, workState, readerStatus);
+  if (!payload) return;
+  try {
+    ext.runtime.sendMessage({
+      type: "TRACE_FINISH_QUALIFICATION_SIGNAL",
+      payload: payload,
+    });
+  } catch (_) {
+    /* non-blocking check-in fallback */
+  }
+}
+
+function optimisticWorkStatusFromOverride(entry, override) {
+  var next = Object.assign({}, entry || {});
+  if (!override) return next;
+  next.workStatus = override;
+  next.workStatusProvenance = "override";
+  if (override === "abandoned") next.workMark = { kind: "abandoned" };
+  else if (next.workMark && next.workMark.kind === "abandoned") delete next.workMark;
+  return next;
+}
+
+function applyOptimisticFinishQualify(workKey, entry, patch, nextChapters) {
+  var next = snapshotStoryEntry(entry);
+  if (patch.status) {
+    next.status = legacyReaderStatus(patch.status);
+    next.readerStatus = legacyReaderStatus(patch.status);
+    next.canonicalReaderStatus = canonicalReaderStatus(patch.status);
+    next.statusChoicesAvailable = true;
+  }
+  if (nextChapters) {
+    next.chapters = nextChapters;
+    next.catchupState = "UP";
+    next.newChapterCount = 0;
+  }
+  if (patch.story_snapshot && Object.prototype.hasOwnProperty.call(patch.story_snapshot, "work_status_override")) {
+    next = optimisticWorkStatusFromOverride(next, patch.story_snapshot.work_status_override);
+  }
+  optimisticStoryPageEntries[workKey] = next;
+}
+
+function finishQualifyReaderStatusForWorkState(workState) {
+  return workState === "complete" || workState === "abandoned" ? "FINISHED" : "CAUGHT_UP";
+}
+
+function sendFinishQualifyPatch(decision, workState, done) {
+  var entry = decision.entry || {};
+  var entryId = entry.entryId;
+  var progress = finishQualifyProgressPatch(decision.item);
+  if (!entryId || !progress) {
+    done(false, "Could not save. Try again.");
+    return;
+  }
+  var readerStatus = finishQualifyReaderStatusForWorkState(workState);
+  var patch = {
+    status: readerStatus,
+    progress: progress.progress,
+  };
+  if (decision.requiresWorkStateChoice) {
+    patch.story_snapshot = { work_status_override: workState };
+  }
+  ext.runtime.sendMessage(
+    {
+      type: "TRACE_PATCH_LIBRARY_ENTRY",
+      payload: { entryId: entryId, patch: patch },
+    },
+    function (response) {
+      if (ext.runtime.lastError || !response || !response.ok) {
+        done(false, readerStatusChoiceErrorCopy(response && response.error));
+        return;
+      }
+      applyOptimisticFinishQualify(decision.workKey, entry, patch, progress.chapters);
+      renderQuickAddButton(decision.workKey);
+      if (decision.requiresWorkStateChoice) {
+        sendFinishQualifySignal(decision, "resolved", workState, readerStatus);
+      }
+      done(true);
+    },
+  );
+}
+
+function finishQualifyDecision(view, workKey) {
+  var entry = view && view.entry;
+  if (!view || !view.hasAuth || !entry || !entry.entryId) return null;
+  var status = canonicalReaderStatus(entryStatus(entry));
+  if (status === "FINISHED" || status === "CAUGHT_UP" || status === "DROPPED") return null;
+  var item = storySheetCurrentItem();
+  if (!item || item.ctx !== "story" || !finishQualifyIsLastPostedChapter(item)) return null;
+  var anchorEl = finishQualifyAnchorElement();
+  var bodyEl = finishQualifyBodyElement();
+  if (!anchorEl || !bodyEl) return null;
+  var sourceWorkState = finishQualifySourceWorkState(item);
+  return {
+    workKey: workKey,
+    entry: entry,
+    item: item,
+    sourceWorkState: sourceWorkState,
+    requiresWorkStateChoice: !sourceWorkState,
+    anchorEl: anchorEl,
+    bodyEl: bodyEl,
+    sessionKey: finishQualifySessionKey(workKey, entry.entryId, item),
+  };
+}
+
+function setupFinishQualify(view, workKey) {
+  var decision = finishQualifyDecision(view, workKey);
+  var signature = decision ? decision.sessionKey + ":" + (decision.sourceWorkState || "unknown") : "";
+  if (finishQualifyWatchState[workKey] && finishQualifyWatchState[workKey].signature === signature) return;
+  if (finishQualifyWatchState[workKey] && typeof finishQualifyWatchState[workKey].cleanup === "function") {
+    finishQualifyWatchState[workKey].cleanup();
+  }
+  finishQualifyWatchState[workKey] = null;
+  if (!decision || finishQualifyWasDismissed(decision.sessionKey)) return;
+  if (!window.TraceFinishQualify || typeof window.TraceFinishQualify.onReachEnd !== "function") return;
+
+  var cleanup = window.TraceFinishQualify.onReachEnd(decision.bodyEl, function () {
+    if (finishQualifyWasDismissed(decision.sessionKey)) return;
+    if (decision.sourceWorkState) {
+      sendFinishQualifyPatch(decision, decision.sourceWorkState, function (ok) {
+        if (ok && window.TraceFinishQualify && typeof window.TraceFinishQualify.toast === "function") {
+          window.TraceFinishQualify.toast({
+            kind: finishQualifyReaderStatusForWorkState(decision.sourceWorkState) === "FINISHED" ? "finished" : "caughtup",
+            story: {
+              src: storySheetSourceLine(),
+              title: decision.item.t,
+              chapter: finishQualifyCurrentChapterCount(decision.item),
+              total: finishQualifyPostedChapterCount(decision.item),
+            },
+            onOpenInTrace: function () {
+              openTraceUrlInBrowserTab(storyTraceOpenUrl(view.authState, decision.entry));
+            },
+          });
+        }
+      });
+      return;
+    }
+    if (finishQualifyBandState[workKey] && typeof finishQualifyBandState[workKey].remove === "function") {
+      finishQualifyBandState[workKey].remove();
+    }
+    sendFinishQualifySignal(decision, "open");
+    finishQualifyBandState[workKey] = window.TraceFinishQualify.mount({
+      anchorEl: decision.anchorEl,
+      placement: "inline",
+      align: isAO3() ? "start" : "center",
+      story: {
+        src: storySheetSourceLine(),
+        title: decision.item.t,
+        chapter: finishQualifyCurrentChapterCount(decision.item),
+        total: finishQualifyPostedChapterCount(decision.item),
+      },
+      onQualify: function (workState, controls) {
+        sendFinishQualifyPatch(decision, workState, function (ok, message) {
+          if (ok) {
+            finishQualifyRememberDismissed(decision.sessionKey);
+            if (controls && typeof controls.resolve === "function") controls.resolve();
+          } else if (controls && typeof controls.fail === "function") {
+            controls.fail(message);
+          }
+        });
+        return false;
+      },
+      onDismiss: function () {
+        finishQualifyRememberDismissed(decision.sessionKey);
+      },
+      onOpenInTrace: function () {
+        openTraceUrlInBrowserTab(storyTraceOpenUrl(view.authState, decision.entry));
+      },
+    });
+  });
+  finishQualifyWatchState[workKey] = { signature: signature, cleanup: cleanup };
+}
+
 function renderQuickAddButton(workKey) {
   var anchor = findQuickAddAnchor();
   if (!anchor) {
@@ -4234,6 +4645,7 @@ function renderQuickAddButton(workKey) {
     };
 
     renderStorySheet(sheet, view, workKey);
+    setupFinishQualify(view, workKey);
   });
 }
 

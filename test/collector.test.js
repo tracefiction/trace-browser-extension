@@ -42,6 +42,7 @@ test("collectAO3Work (ao3_story.html) extracts full metadata", () => {
   assert.equal(item.src, "ao3");
   assert.equal(item.ctx, "story");
   assert.equal(item.u, "https://archiveofourown.org/works/28534965");
+  assert.equal(item.chu, "https://archiveofourown.org/works/28534965/chapters/69925506");
   assert.equal(item.t, "Redivider");
   assert.equal(item.a, "Vichan");
   assert.equal(item.r, "Mature");
@@ -71,7 +72,19 @@ test("collectAO3Work (ao3_story.html) extracts full metadata", () => {
     pos: 2,
     url: "https://archiveofourown.org/series/1637290",
   });
-  assert.equal(item.s, "wip", "chapters 17/? → wip via chapter-based fallback");
+  assert.equal(item.s, null, "bare chapters 17/? does not over-infer work status");
+});
+
+test("collectAO3Work emits current chapter URL without query or hash", () => {
+  const dom = domFromFixture(
+    "ao3_story.html",
+    "https://archiveofourown.org/works/28534965/chapters/69925506?show_comments=true#workskin"
+  );
+  const { collectAO3Work } = createCollectorBindings(dom);
+  const item = collectAO3Work();
+
+  assert.equal(item.u, "https://archiveofourown.org/works/28534965");
+  assert.equal(item.chu, "https://archiveofourown.org/works/28534965/chapters/69925506");
 });
 
 test("collector disables Trace collection on pages with password fields", () => {
@@ -123,6 +136,29 @@ test("detectAo3CurrentChapterNumber prefers selected option label over dropdown 
   });
   const { detectAo3CurrentChapterNumber } = createCollectorBindings(dom);
   assert.equal(detectAo3CurrentChapterNumber(), 10);
+});
+
+test("detectAo3CurrentChapterNumber prefers AO3 ordinal over chapter number in title", () => {
+  const html = `<!doctype html><html><body>
+    <select id="selected_id">
+      <option value="111">11. Chapter 10 - Previous</option>
+      <option value="456" selected>12. Chapter 11 - Please Move On Good Lord</option>
+    </select>
+    <div id="chapters">
+      <div class="chapter" id="chapter-12">
+        <div class="chapter preface group">
+          <h3 class="title"><a href="/works/123/chapters/456">Chapter 12</a>: Chapter 11 - Please Move On Good Lord</h3>
+        </div>
+      </div>
+    </div>
+  </body></html>`;
+  const dom = new JSDOM(html, {
+    url: "https://archiveofourown.org/works/123/chapters/456",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  const { detectAo3CurrentChapterNumber } = createCollectorBindings(dom);
+  assert.equal(detectAo3CurrentChapterNumber(), 12);
 });
 
 test("detectAo3CurrentChapterNumber prefers chapter container id over ambiguous jump menu", () => {
@@ -293,7 +329,40 @@ test("storyMetadataFingerprint ignores current chapter progress", () => {
 
   assert.equal(
     storyMetadataFingerprint(base),
-    storyMetadataFingerprint({ ...base, chn: 4 }),
+    storyMetadataFingerprint({
+      ...base,
+      chn: 4,
+      chu: "https://archiveofourown.org/works/123/chapters/789",
+    }),
+  );
+});
+
+test("auto-track dedupe does not suppress upgraded AO3 chapter URL payloads", () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://archiveofourown.org/works/123/chapters/456",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  const { rememberRecentAutoTrack, shouldSkipRecentAutoTrack } =
+    createCollectorBindings(dom);
+  const base = {
+    src: "ao3",
+    u: "https://archiveofourown.org/works/123",
+    t: "Example",
+    a: "Author",
+    chn: 52,
+    cht: 70,
+  };
+
+  rememberRecentAutoTrack(base);
+
+  assert.equal(shouldSkipRecentAutoTrack(base), true);
+  assert.equal(
+    shouldSkipRecentAutoTrack({
+      ...base,
+      chu: "https://archiveofourown.org/works/123/chapters/789",
+    }),
+    false,
   );
 });
 
@@ -484,6 +553,8 @@ test("sendAutoTrackForStory updates overlay cache only after confirmed ack", () 
   assert.notEqual(dom.window.sessionStorage.getItem("trace:auto-track:last"), null);
   assert.deepEqual(plainJson(store.libraryOverlayCache.entries["ao3:28534965"]), {
     status: "READING",
+    readerStatus: "READING",
+    canonicalReaderStatus: "READING",
     chapters: { current: 3, total: 17 },
   });
 });
@@ -1457,7 +1528,7 @@ test("FFN mobile story quick-add shows planning after chapter-one success", () =
   handle.click();
 
   assert.equal(sent[0].payload.item.chn, 1);
-  assert.match(handle.textContent || "", /Planning/i);
+  assert.match(handle.textContent || "", /Saved/i);
   assert.equal(dom.window.document.querySelector("[data-trace-status-choice]"), null);
 });
 
@@ -1526,10 +1597,11 @@ test("FFN mobile story quick-add shows reading progress after later-chapter succ
 test("FFN mobile story quick-add shows optional post-add status choices when entryId exists", () => {
   const entryId = "00000000-0000-4000-8000-000000000321";
   const choices = [
-    { label: "Plan", status: "PLANNING", expected: /Plan/i },
+    { label: "Saved", status: "SAVED", expected: /Saved/i },
     { label: "Reading", status: "READING", expected: /Reading/i },
+    { label: "Caught up", status: "CAUGHT_UP", expected: /Caught up/i },
     { label: "Paused", status: "PAUSED", expected: /Paused/i },
-    { label: "Done", status: "COMPLETED", expected: /Done/i },
+    { label: "Finished", status: "FINISHED", expected: /Finished/i },
     { label: "Dropped", status: "DROPPED", expected: /Dropped/i },
   ];
 
@@ -1599,7 +1671,7 @@ test("FFN mobile story quick-add shows optional post-add status choices when ent
     assert.match(sheet.textContent || "", /Reading status/i);
     assert.deepEqual(
       Array.from(sheet.querySelectorAll("[data-trace-status-choice]")).map((button) => button.textContent),
-      ["Plan", "Reading", "Paused", "Done", "Dropped"],
+      ["Saved", "Reading", "Caught up", "Paused", "Finished", "Dropped"],
     );
     const choiceBtn = sheet.querySelector(
       `[data-trace-status-choice='${choice.status}']`,
@@ -1729,14 +1801,14 @@ test("story sheet shows status editing for cached entries with entryId and hides
     assert.equal(hideBtn.getAttribute("aria-label"), "Hide this work");
     assert.deepEqual(
       Array.from(choices.querySelectorAll("[data-trace-status-choice]")).map((button) => button.textContent),
-      ["Plan", "Reading", "Paused", "Done", "Dropped"],
+      ["Saved", "Reading", "Caught up", "Paused", "Finished", "Dropped"],
     );
-    const completed = choices.querySelector("[data-trace-status-choice='COMPLETED']");
-    assert.ok(completed);
-    completed.click();
+    const finished = choices.querySelector("[data-trace-status-choice='FINISHED']");
+    assert.ok(finished);
+    finished.click();
     assert.deepEqual(plainJson(sent.at(-1)), {
       type: "TRACE_SET_READER_STATUS",
-      payload: { entryId, status: "COMPLETED" },
+      payload: { entryId, status: "FINISHED" },
     });
   }
 });
@@ -1804,11 +1876,15 @@ test("story sheet selected status choice uses status-specific D1 tint", () => {
   assert.equal(selected.getAttribute("data-trace-status-choice"), "PAUSED");
   assert.match(
     selected.getAttribute("style") || "",
-    /background:\s*rgba\(154,\s*149,\s*131,\s*0\.12\)/,
+    /background:\s*(?:#efddcd|rgb\(239,\s*221,\s*205\))/i,
+  );
+  assert.match(
+    selected.getAttribute("style") || "",
+    /--sc:\s*#a8623a/i,
   );
   assert.doesNotMatch(
     selected.getAttribute("style") || "",
-    /background:\s*rgba\(138,\s*110,\s*42,\s*0\.10\)/,
+    /background:\s*rgba\(154,\s*149,\s*131,\s*0\.12\)/,
   );
 });
 
@@ -1892,6 +1968,389 @@ test("story sheet Planning to Reading sends chapter progress 1 and displays 1/? 
   assert.equal(sheet.getAttribute("aria-hidden"), "false");
   assert.doesNotMatch(handle.textContent || "", /·/i);
   assert.doesNotMatch(handle.textContent || "", /Reading\s*0\/\?/i);
+});
+
+
+test("finish qualify watches AO3 chapter text before end notes", () => {
+  const collectorSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  const entryId = "00000000-0000-4000-8000-000000000777";
+  const sent = [];
+  let watchedBody = null;
+  let toastShown = false;
+  const dom = new JSDOM(
+    `<!doctype html><html><body>
+      <h2 class="title heading">AO3 Notes Boundary</h2>
+      <h3 class="byline heading"><a rel="author" href="/users/demo/pseuds/demo">demo</a></h3>
+      <ul class="required-tags"><li><span class="rating" title="Teen And Up Audiences"><span class="text">Teen</span></span><span title="Complete Work">Complete Work</span></li></ul>
+      <dl class="work meta group"><dd class="chapters">1/1</dd><dd class="words">100</dd></dl>
+      <div id="chapters">
+        <div class="chapter" id="chapter-1">
+          <div class="chapter preface group"><h3 class="title">Chapter 1</h3></div>
+          <div class="userstuff module" role="article" data-test-id="chapter-text">
+            <p>This is the actual story body.</p>
+          </div>
+          <div class="chapter preface group">
+            <div class="end notes module" id="chapter_1_endnotes">
+              <h3 class="heading">Notes:</h3>
+              <blockquote class="userstuff"><p>Long end notes should not delay finish evidence.</p></blockquote>
+            </div>
+          </div>
+        </div>
+      </div>
+    </body></html>`,
+    {
+      url: "https://archiveofourown.org/works/777/chapters/888",
+      contentType: "text/html",
+      runScripts: "outside-only",
+    },
+  );
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(msg, cb) {
+        sent.push(msg);
+        if (msg.type === "TRACE_PATCH_LIBRARY_ENTRY" && typeof cb === "function") {
+          cb({ ok: true, entryId, patch: msg.payload.patch });
+        }
+      },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb({
+            authToken: "test-token",
+            libraryOverlayCache: {
+              entries: {
+                "ao3:777": {
+                  entryId,
+                  status: "READING",
+                  readerStatus: "READING",
+                  chapters: { current: 1, total: 1 },
+                },
+              },
+            },
+          });
+        },
+        set(_value, cb) {
+          if (typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  dom.window.TraceFinishQualify = {
+    onReachEnd(bodyEl, cb) {
+      watchedBody = bodyEl;
+      cb();
+      return function () {};
+    },
+    toast() {
+      toastShown = true;
+    },
+  };
+  dom.window.chrome = chrome;
+  dom.window.browser = chrome;
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+
+  assert.equal(watchedBody, dom.window.document.querySelector("[data-test-id='chapter-text']"));
+  assert.notEqual(watchedBody, dom.window.document.querySelector("#chapters"));
+  assert.equal(toastShown, true);
+  assert.deepEqual(plainJson(sent.find((msg) => msg.type === "TRACE_PATCH_LIBRARY_ENTRY").payload), {
+    entryId,
+    patch: {
+      status: "FINISHED",
+      progress: { unit: "CHAPTER", value: 1, total: 1 },
+    },
+  });
+});
+
+test("finish qualify band prompts on unknown FFN final chapter and writes finished for abandoned work override", () => {
+  const collectorSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  const finishSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "trace-finish-qualify.js"),
+    "utf8",
+  );
+  const entryId = "00000000-0000-4000-8000-000000000901";
+  const sent = [];
+  const dom = domFromFixture(
+    "ffn_story_mobile.html",
+    "https://m.fanfiction.net/s/7038840/28/A-Chance-Encounter"
+  );
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(msg, cb) {
+        sent.push(msg);
+        if (msg.type === "TRACE_PATCH_LIBRARY_ENTRY" && typeof cb === "function") {
+          cb({ ok: true, entryId, patch: msg.payload.patch });
+        }
+      },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb({
+            authToken: "test-token",
+            libraryOverlayCache: {
+              entries: {
+                "ffn:7038840": {
+                  entryId,
+                  status: "READING",
+                  readerStatus: "READING",
+                  chapters: { current: 28, total: 28 },
+                },
+              },
+            },
+          });
+        },
+        set(_value, cb) {
+          if (typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  dom.window.chrome = chrome;
+  dom.window.browser = chrome;
+  dom.window.eval(finishSrc);
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+
+  const band = dom.window.document.querySelector("[data-trace-finish-qualify]");
+  assert.ok(band);
+  assert.match(band.textContent || "", /reached the end/i);
+  const openSignal = sent.find(
+    (msg) => msg.type === "TRACE_FINISH_QUALIFICATION_SIGNAL" && msg.payload.state === "open",
+  );
+  assert.deepEqual(plainJson(openSignal.payload), {
+    entryId,
+    workKey: "ffn:7038840",
+    source: "ffn",
+    chapter: 28,
+    total: 28,
+    state: "open",
+  });
+  assert.deepEqual(
+    Array.from(band.querySelectorAll("[data-trace-work-choice]")).map((button) => button.textContent),
+    ["It’s complete", "Still ongoing", "On hiatus", "Looks abandoned"],
+  );
+  const abandoned = band.querySelector("[data-trace-work-choice='abandoned']");
+  assert.ok(abandoned);
+  abandoned.click();
+
+  const patchMsg = sent.find((msg) => msg.type === "TRACE_PATCH_LIBRARY_ENTRY");
+  assert.ok(patchMsg);
+  assert.deepEqual(plainJson(patchMsg.payload), {
+    entryId,
+    patch: {
+      status: "FINISHED",
+      progress: { unit: "CHAPTER", value: 28, total: 28 },
+      story_snapshot: { work_status_override: "abandoned" },
+    },
+  });
+  const resolvedSignal = sent.find(
+    (msg) => msg.type === "TRACE_FINISH_QUALIFICATION_SIGNAL" && msg.payload.state === "resolved",
+  );
+  assert.deepEqual(plainJson(resolvedSignal.payload), {
+    entryId,
+    workKey: "ffn:7038840",
+    source: "ffn",
+    chapter: 28,
+    total: 28,
+    state: "resolved",
+    workStatus: "abandoned",
+    readerStatus: "FINISHED",
+  });
+  assert.match(band.textContent || "", /Finished/i);
+  assert.match(band.textContent || "", /Work looks abandoned/i);
+});
+
+test("finish qualify inserts AO3 prompt after the final end notes and aligns to content column", () => {
+  const collectorSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  const finishSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "trace-finish-qualify.js"),
+    "utf8",
+  );
+  const entryId = "00000000-0000-4000-8000-000000000903";
+  const dom = new JSDOM(
+    `<!doctype html><html><body>
+      <h2 class="title heading">AO3 Two Notes</h2>
+      <h3 class="byline heading"><a rel="author" href="/users/demo/pseuds/demo">demo</a></h3>
+      <dl class="work meta group"><dd class="chapters">1/?</dd><dd class="words">100</dd></dl>
+      <div id="chapters">
+        <div class="chapter" id="chapter-1">
+          <div class="chapter preface group"><h3 class="title">Chapter 1</h3></div>
+          <div class="userstuff module" role="article"><p>This is the actual story body.</p></div>
+          <div class="chapter preface group">
+            <div class="end notes module" id="chapter_1_endnotes">
+              <h3 class="heading">Notes:</h3>
+              <blockquote class="userstuff"><p>Chapter notes.</p></blockquote>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="afterword preface group">
+        <div id="work_endnotes" class="end notes module">
+          <h3 class="heading">Notes:</h3>
+          <blockquote class="userstuff"><p>Work notes.</p></blockquote>
+        </div>
+      </div>
+      <div id="feedback" class="feedback"></div>
+    </body></html>`,
+    {
+      url: "https://archiveofourown.org/works/903/chapters/904",
+      contentType: "text/html",
+      runScripts: "outside-only",
+    },
+  );
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(_msg, cb) {
+        if (typeof cb === "function") cb({ ok: true, entryId });
+      },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb({
+            authToken: "test-token",
+            libraryOverlayCache: {
+              entries: {
+                "ao3:903": {
+                  entryId,
+                  status: "READING",
+                  readerStatus: "READING",
+                  chapters: { current: 1, total: 1 },
+                },
+              },
+            },
+          });
+        },
+        set(_value, cb) {
+          if (typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  dom.window.chrome = chrome;
+  dom.window.browser = chrome;
+  dom.window.eval(finishSrc);
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+
+  const band = dom.window.document.querySelector("[data-trace-finish-qualify]");
+  const workEndNotes = dom.window.document.querySelector("#work_endnotes");
+  assert.ok(band);
+  assert.equal(workEndNotes.nextElementSibling, band);
+  assert.match(band.getAttribute("style") || "", /max-width:\s*520px/);
+  assert.match(band.getAttribute("style") || "", /margin:\s*22px 0/);
+});
+
+test("finish qualify silently marks known-complete final chapter as finished", () => {
+  const collectorSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  const finishSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "trace-finish-qualify.js"),
+    "utf8",
+  );
+  const entryId = "00000000-0000-4000-8000-000000000902";
+  const sent = [];
+  const dom = new JSDOM(
+    `<!doctype html><html><body>
+      <div id="profile_top">
+        <b class="xcontrast_txt">Complete Signal</b>
+        <a href="/u/1/demo">Demo</a>
+        <span class="xgray xcontrast_txt">Rated: T - English - Chapters: 1 - Status: Complete - Words: 100</span>
+      </div>
+      <div id="storytextp">Short synthetic chapter body.</div>
+    </body></html>`,
+    {
+      url: "https://www.fanfiction.net/s/9001/1/Complete-Signal",
+      contentType: "text/html",
+      runScripts: "outside-only",
+    },
+  );
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(msg, cb) {
+        sent.push(msg);
+        if (msg.type === "TRACE_PATCH_LIBRARY_ENTRY" && typeof cb === "function") {
+          cb({ ok: true, entryId, patch: msg.payload.patch });
+        }
+      },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb({
+            authToken: "test-token",
+            libraryOverlayCache: {
+              entries: {
+                "ffn:9001": {
+                  entryId,
+                  status: "READING",
+                  readerStatus: "READING",
+                  chapters: { current: 1, total: 1 },
+                },
+              },
+            },
+          });
+        },
+        set(_value, cb) {
+          if (typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  dom.window.chrome = chrome;
+  dom.window.browser = chrome;
+  dom.window.eval(finishSrc);
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+
+  assert.equal(dom.window.document.querySelector("[data-trace-finish-qualify]"), null);
+  const patchMsg = sent.find((msg) => msg.type === "TRACE_PATCH_LIBRARY_ENTRY");
+  assert.ok(patchMsg);
+  assert.deepEqual(plainJson(patchMsg.payload), {
+    entryId,
+    patch: {
+      status: "FINISHED",
+      progress: { unit: "CHAPTER", value: 1, total: 1 },
+    },
+  });
+  assert.ok(dom.window.document.querySelector("[data-trace-finish-toast]"));
 });
 
 test("story sheet position block shows unknown total without chapter stepper controls", () => {
@@ -2029,7 +2488,7 @@ test("FFN mobile story post-add status mutation failure keeps saved state", () =
   assert.equal(sent.at(-1).type, "TRACE_SET_READER_STATUS");
   assert.equal(sheet.getAttribute("data-trace-open"), "1");
   assert.equal(sheet.getAttribute("aria-hidden"), "false");
-  assert.match(sheet.textContent || "", /Plan/i);
+  assert.match(sheet.textContent || "", /Saved/i);
   assert.match(sheet.textContent || "", /Could not update. Try again./i);
 });
 
@@ -2171,7 +2630,10 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
     type: "TRACE_PATCH_LIBRARY_ENTRY",
     payload: {
       entryId: "00000000-0000-4000-8000-000000703884",
-      patch: { progress: { unit: "CHAPTER", value: 5, total: 28 } },
+      patch: {
+        status: "CAUGHT_UP",
+        progress: { unit: "CHAPTER", value: 5, total: 28 },
+      },
     },
   });
   assert.equal(sheet.getAttribute("data-trace-open"), "1");

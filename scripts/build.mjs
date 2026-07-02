@@ -298,13 +298,17 @@ manifest.host_permissions = unique([
   ...extraHostPermissions,
 ]);
 const savedFiltersScript = "ao3-saved-filters.js";
+const finishQualifyScript = "trace-finish-qualify.js";
 const contentScripts = (manifest.content_scripts || []).map((entry) => {
   const scripts = Array.isArray(entry.js) ? entry.js : [];
   if (scripts.includes("collector.js")) {
     return {
       ...entry,
       matches: SITE_HOST_MATCHES,
-      js: scripts.filter((script) => script !== savedFiltersScript),
+      js: unique([
+        finishQualifyScript,
+        ...scripts.filter((script) => script !== savedFiltersScript && script !== finishQualifyScript),
+      ]),
       exclude_matches: SITE_AUTH_EXCLUDE_MATCHES,
     };
   }

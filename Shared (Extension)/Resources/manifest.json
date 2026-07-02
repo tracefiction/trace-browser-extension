@@ -58,6 +58,7 @@
         "https://m.fanfiction.net/*"
       ],
       "js": [
+        "trace-finish-qualify.js",
         "collector.js",
         "library-overlay-keys.js",
         "library-overlay.js"

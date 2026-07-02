@@ -223,6 +223,7 @@ globalThis.__testHooks = {
   handleSetHiddenWork,
   handleSetReaderStatus,
   handlePatchLibraryEntry,
+  handleFinishQualificationSignal,
   syncAo3SavedFilters,
   scheduleAo3SavedFiltersSync,
   sanitizeAo3SavedFilterPresets,
@@ -1873,6 +1874,62 @@ test("TRACE_PATCH_LIBRARY_ENTRY patches catch-up progress and clears new chapter
   assert.equal(entry.newChapterCount, 0);
 });
 
+
+test("TRACE_PATCH_LIBRARY_ENTRY accepts canonical finished status and work override", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000780";
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-patch-4",
+      libraryOverlayCache: {
+        entries: {
+          "ffn:780": {
+            entryId,
+            status: "READING",
+            readerStatus: "READING",
+            chapters: { current: 7, total: 8 },
+            catchupState: "BEHIND",
+            newChapterCount: 1,
+          },
+        },
+        syncVersion: "v-before-finish-qualify",
+      },
+    },
+    fetchImpl: async (_url, init) => {
+      assert.deepEqual(JSON.parse(init.body), {
+        status: "FINISHED",
+        progress: { unit: "CHAPTER", value: 8, total: 8 },
+        story_snapshot: { work_status_override: "abandoned" },
+      });
+      return createResponse({ json: { data: { entry_id: entryId } } });
+    },
+  });
+  h.hooks.setBearerToken("token-patch-4");
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_PATCH_LIBRARY_ENTRY",
+    payload: {
+      entryId,
+      patch: {
+        status: "FINISHED",
+        progress: { unit: "CHAPTER", value: 8, total: 8 },
+        story_snapshot: { work_status_override: "abandoned" },
+      },
+    },
+  });
+
+  assert.equal(response.ok, true);
+  const entry = h.store.libraryOverlayCache.entries["ffn:780"];
+  assert.equal(entry.status, "COMPLETED");
+  assert.equal(entry.readerStatus, "COMPLETED");
+  assert.equal(entry.canonicalReaderStatus, "FINISHED");
+  assert.deepEqual(plainJson(entry.chapters), { current: 8, total: 8 });
+  assert.equal(entry.catchupState, "UP");
+  assert.equal(entry.newChapterCount, 0);
+  assert.equal(entry.workStatus, "abandoned");
+  assert.equal(entry.workStatusProvenance, "override");
+  assert.deepEqual(plainJson(entry.workMark), { kind: "abandoned" });
+});
+
 test("TRACE_PATCH_LIBRARY_ENTRY validates auth, entry id, rating, and progress", async () => {
   const noAuth = createBackgroundHarness();
   assert.deepEqual(
@@ -1903,6 +1960,124 @@ test("TRACE_PATCH_LIBRARY_ENTRY validates auth, entry id, rating, and progress",
       plainJson(
         await invalid.dispatchMessage({
           type: "TRACE_PATCH_LIBRARY_ENTRY",
+          payload,
+        }),
+      ),
+      { ok: false, error: "invalid_request" },
+    );
+  }
+});
+
+test("TRACE_FINISH_QUALIFICATION_SIGNAL posts unresolved and resolved finish evidence", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000781";
+  const seenBodies = [];
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-finish-1" },
+    fetchImpl: async (url, init) => {
+      assert.equal(
+        String(url),
+        "https://tracefiction.com/api/extension/finish-qualification",
+      );
+      assert.equal(init.method, "POST");
+      assert.equal(init.headers.Authorization, "Bearer token-finish-1");
+      seenBodies.push(JSON.parse(init.body));
+      return createResponse({
+        json: {
+          success: true,
+          data: { state: seenBodies.at(-1).state, eventId: "event-1" },
+        },
+      });
+    },
+  });
+  h.hooks.setBearerToken("token-finish-1");
+
+  const openResponse = await h.dispatchMessage({
+    type: "TRACE_FINISH_QUALIFICATION_SIGNAL",
+    payload: {
+      entryId,
+      workKey: "ao3:781",
+      source: "ao3",
+      chapter: 5,
+      total: 5,
+      state: "open",
+    },
+  });
+  const resolvedResponse = await h.dispatchMessage({
+    type: "TRACE_FINISH_QUALIFICATION_SIGNAL",
+    payload: {
+      entryId,
+      workKey: "ao3:781",
+      source: "ao3",
+      chapter: 5,
+      total: 5,
+      state: "resolved",
+      workStatus: "hiatus",
+      readerStatus: "CAUGHT_UP",
+    },
+  });
+
+  assert.equal(openResponse.ok, true);
+  assert.equal(resolvedResponse.ok, true);
+  assert.deepEqual(plainJson(seenBodies), [
+    {
+      entryId,
+      workKey: "ao3:781",
+      source: "ao3",
+      chapter: 5,
+      total: 5,
+      state: "open",
+    },
+    {
+      entryId,
+      workKey: "ao3:781",
+      source: "ao3",
+      chapter: 5,
+      total: 5,
+      state: "resolved",
+      workStatus: "hiatus",
+      readerStatus: "CAUGHT_UP",
+    },
+  ]);
+  assert.match(h.store.traceAuthState.lastFinishQualificationAt, /^\d{4}-/);
+});
+
+test("TRACE_FINISH_QUALIFICATION_SIGNAL validates auth and resolved payloads", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000782";
+  const noAuth = createBackgroundHarness();
+  assert.deepEqual(
+    plainJson(
+      await noAuth.dispatchMessage({
+        type: "TRACE_FINISH_QUALIFICATION_SIGNAL",
+        payload: {
+          entryId,
+          source: "ao3",
+          chapter: 1,
+          total: 1,
+          state: "open",
+        },
+      }),
+    ),
+    { ok: false, error: "not_authenticated" },
+  );
+
+  const invalid = createBackgroundHarness({ storageState: { authToken: "token-finish-2" } });
+  invalid.hooks.setBearerToken("token-finish-2");
+  for (const payload of [
+    { entryId: "bad-id", source: "ao3", chapter: 1, total: 1, state: "open" },
+    { entryId, source: "ao3", chapter: 0, total: 1, state: "open" },
+    {
+      entryId,
+      source: "ao3",
+      chapter: 1,
+      total: 1,
+      state: "resolved",
+      workStatus: "hiatus",
+    },
+  ]) {
+    assert.deepEqual(
+      plainJson(
+        await invalid.dispatchMessage({
+          type: "TRACE_FINISH_QUALIFICATION_SIGNAL",
           payload,
         }),
       ),

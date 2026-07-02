@@ -10,6 +10,7 @@ const TRACE_WEB_ORIGIN = "__TRACE_WEB_ORIGIN__";
 const API_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/track`;
 const METADATA_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/metadata`;
 const LIBRARY_METADATA_REFRESH_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/library/metadata-refresh`;
+const FINISH_QUALIFICATION_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/finish-qualification`;
 const LIBRARY_OVERLAY_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/library-overlay`;
 const WORK_PREFERENCES_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/work-preferences`;
 const AO3_SAVED_FILTERS_SYNC_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/ao3-saved-filters/sync`;
@@ -1722,6 +1723,14 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     handlePatchLibraryEntry(msg.payload, sender, sendResponse);
     return true; // async response
   }
+
+  // -------------------------------------------------
+  // K. Finish-qualification signal for Check-in fallback
+  // -------------------------------------------------
+  if (msg.type === "TRACE_FINISH_QUALIFICATION_SIGNAL") {
+    handleFinishQualificationSignal(msg.payload, sender, sendResponse);
+    return true; // async response
+  }
 });
 
 // =======================================================
@@ -1915,11 +1924,16 @@ async function executeAutoTrack(payload, sender) {
         firstSaveSeen: true,
         lastTrackSuccessAt: new Date().toISOString(),
       });
+      const json = await response.json().catch(() => null);
+      const entryId =
+        json && json.data && typeof json.data.entry_id === "string"
+          ? json.data.entry_id
+          : null;
       await refreshLibraryOverlay();
       await signalLibraryInvalidated("track");
       setBadge(sender?.tab?.id, "OK", "#0D7A5F");
       setTimeout(() => clearBadge(sender?.tab?.id), 2000);
-      return { ok: true };
+      return entryId ? { ok: true, entryId } : { ok: true };
     }
   } catch (error) {
     console.error("[Trace] Network error:", error);
@@ -2112,14 +2126,73 @@ function isValidUuid(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
 }
 
+function normalizeReaderStatusForPatch(value) {
+  if (
+    typeof value !== "string" &&
+    typeof value !== "number" &&
+    typeof value !== "boolean"
+  ) {
+    return null;
+  }
+  const raw = String(value).trim().toUpperCase();
+  if (!raw) return null;
+  if (raw === "PLANNING") return "SAVED";
+  if (raw === "COMPLETED") return "FINISHED";
+  if (
+    raw === "SAVED" ||
+    raw === "READING" ||
+    raw === "CAUGHT_UP" ||
+    raw === "PAUSED" ||
+    raw === "FINISHED" ||
+    raw === "DROPPED"
+  ) {
+    return raw;
+  }
+  return null;
+}
+
+function legacyReaderStatusForOverlay(status) {
+  const normalized = normalizeReaderStatusForPatch(status);
+  if (normalized === "SAVED") return "PLANNING";
+  if (normalized === "CAUGHT_UP") return "READING";
+  if (normalized === "FINISHED") return "COMPLETED";
+  return normalized;
+}
+
 function isStorySheetReaderStatus(status) {
-  return (
-    status === "PLANNING" ||
-    status === "READING" ||
-    status === "PAUSED" ||
-    status === "COMPLETED" ||
-    status === "DROPPED"
-  );
+  return normalizeReaderStatusForPatch(status) !== null;
+}
+
+function normalizeWorkStatusOverride(value) {
+  if (value === null) return null;
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (!normalized) return undefined;
+  if (normalized === "complete") return "complete";
+  if (normalized === "wip" || normalized === "ongoing") return "wip";
+  if (normalized === "hiatus" || normalized === "on_hiatus" || normalized === "paused") return "hiatus";
+  if (normalized === "abandoned") return "abandoned";
+  return undefined;
+}
+
+function normalizePatchStorySnapshot(rawSnapshot) {
+  if (!rawSnapshot || typeof rawSnapshot !== "object" || Array.isArray(rawSnapshot)) return null;
+  const patch = {};
+  if (Object.prototype.hasOwnProperty.call(rawSnapshot, "work_status_override")) {
+    const workStatusOverride = normalizeWorkStatusOverride(rawSnapshot.work_status_override);
+    if (workStatusOverride === undefined) return null;
+    patch.work_status_override = workStatusOverride;
+  }
+  if (Object.prototype.hasOwnProperty.call(rawSnapshot, "abandoned_at_chapters_published")) {
+    if (rawSnapshot.abandoned_at_chapters_published === null) {
+      patch.abandoned_at_chapters_published = null;
+    } else {
+      const value = Number(rawSnapshot.abandoned_at_chapters_published);
+      if (!Number.isInteger(value) || value < 0 || value > 10_000_000) return null;
+      patch.abandoned_at_chapters_published = value;
+    }
+  }
+  return Object.keys(patch).length > 0 ? patch : null;
 }
 
 function patchOverlayHiddenPreference(key, hidden) {
@@ -2289,15 +2362,59 @@ function normalizeLibraryEntryPatch(rawPatch) {
   }
 
   if (Object.prototype.hasOwnProperty.call(rawPatch, "status")) {
-    const status =
-      typeof rawPatch.status === "string"
-        ? rawPatch.status.trim().toUpperCase()
-        : "";
-    if (!isStorySheetReaderStatus(status)) return null;
+    const status = normalizeReaderStatusForPatch(rawPatch.status);
+    if (!status) return null;
     patch.status = status;
   }
 
+  if (Object.prototype.hasOwnProperty.call(rawPatch, "story_snapshot")) {
+    const storySnapshot = normalizePatchStorySnapshot(rawPatch.story_snapshot);
+    if (!storySnapshot) return null;
+    patch.story_snapshot = storySnapshot;
+  }
+
   return Object.keys(patch).length > 0 ? patch : null;
+}
+
+function normalizeFinishQualificationSignal(rawSignal) {
+  if (!rawSignal || typeof rawSignal !== "object") return null;
+  const entryId =
+    typeof rawSignal.entryId === "string" ? rawSignal.entryId.trim() : "";
+  if (!isValidUuid(entryId)) return null;
+
+  const source = String(rawSignal.source || "").trim().toLowerCase();
+  if (source !== "ao3" && source !== "ffn") return null;
+
+  const chapter = Number(rawSignal.chapter);
+  const total = Number(rawSignal.total);
+  if (!Number.isInteger(chapter) || chapter < 1 || chapter > 10_000_000) return null;
+  if (!Number.isInteger(total) || total < 1 || total > 10_000_000) return null;
+
+  const state = String(rawSignal.state || "").trim().toLowerCase();
+  if (state !== "open" && state !== "resolved") return null;
+
+  const payload = {
+    entryId,
+    source,
+    chapter,
+    total,
+    state,
+  };
+
+  if (typeof rawSignal.workKey === "string") {
+    const workKey = rawSignal.workKey.trim();
+    if (workKey && isValidExternalWorkKey(workKey)) payload.workKey = workKey;
+  }
+
+  if (state === "resolved") {
+    const workStatus = normalizeWorkStatusOverride(rawSignal.workStatus);
+    const readerStatus = normalizeReaderStatusForPatch(rawSignal.readerStatus);
+    if (!workStatus || !readerStatus) return null;
+    payload.workStatus = workStatus;
+    payload.readerStatus = readerStatus;
+  }
+
+  return payload;
 }
 
 function patchOverlayReaderStatus(entryId, status, progress) {
@@ -2322,10 +2439,13 @@ function patchOverlayReaderStatus(entryId, status, progress) {
         for (const [key, rawEntry] of Object.entries(entries)) {
           if (!rawEntry || typeof rawEntry !== "object") continue;
           if (rawEntry.entryId !== entryId) continue;
+          const canonicalStatus = normalizeReaderStatusForPatch(status);
+          const legacyStatus = legacyReaderStatusForOverlay(canonicalStatus);
           entries[key] = {
             ...rawEntry,
-            status,
-            readerStatus: status,
+            status: legacyStatus,
+            readerStatus: legacyStatus,
+            canonicalReaderStatus: canonicalStatus,
             ...(chaptersFromReaderProgress(progress)
               ? { chapters: chaptersFromReaderProgress(progress) }
               : {}),
@@ -2381,8 +2501,10 @@ function patchOverlayLibraryEntry(entryId, patch) {
 
           const nextEntry = { ...rawEntry };
           if (patch.status) {
-            nextEntry.status = patch.status;
-            nextEntry.readerStatus = patch.status;
+            const legacyStatus = legacyReaderStatusForOverlay(patch.status);
+            nextEntry.status = legacyStatus;
+            nextEntry.readerStatus = legacyStatus;
+            nextEntry.canonicalReaderStatus = patch.status;
           }
           if (patch.progress) {
             const nextChapters = chaptersFromReaderProgress(patch.progress);
@@ -2414,6 +2536,22 @@ function patchOverlayLibraryEntry(entryId, patch) {
           }
           if (Object.prototype.hasOwnProperty.call(patch, "rating")) {
             nextEntry.rating = patch.rating;
+          }
+          if (patch.story_snapshot && Object.prototype.hasOwnProperty.call(patch.story_snapshot, "work_status_override")) {
+            const override = patch.story_snapshot.work_status_override;
+            if (override === null) {
+              nextEntry.workStatus = "unknown";
+              nextEntry.workStatusProvenance = "unknown";
+              if (nextEntry.workMark && nextEntry.workMark.kind === "abandoned") delete nextEntry.workMark;
+            } else {
+              nextEntry.workStatus = override;
+              nextEntry.workStatusProvenance = "override";
+              if (override === "abandoned") {
+                nextEntry.workMark = { kind: "abandoned" };
+              } else if (nextEntry.workMark && nextEntry.workMark.kind === "abandoned") {
+                delete nextEntry.workMark;
+              }
+            }
           }
 
           entries[key] = nextEntry;
@@ -2505,6 +2643,59 @@ async function handlePatchLibraryEntry(payload, sender, sendResponse) {
   }
 }
 
+async function handleFinishQualificationSignal(payload, sender, sendResponse) {
+  if (!bearerToken) {
+    if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
+    return;
+  }
+
+  const signal = normalizeFinishQualificationSignal(payload);
+  if (!signal) {
+    if (sendResponse) sendResponse({ ok: false, error: "invalid_request" });
+    return;
+  }
+
+  try {
+    const response = await fetch(FINISH_QUALIFICATION_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${bearerToken}`,
+      },
+      body: JSON.stringify(signal),
+    });
+
+    if (response.ok) {
+      setConnectedState({ lastFinishQualificationAt: new Date().toISOString() });
+      let data = null;
+      try {
+        data = await response.json();
+      } catch (_) {
+        data = null;
+      }
+      if (sendResponse) sendResponse({ ok: true, data: data && data.data });
+    } else {
+      const authError = await applyAuthFailureResponse(response, {
+        actionAtKey: "lastFinishQualificationAt",
+      });
+      if (authError) {
+        if (sendResponse) sendResponse({ ok: false, error: authError });
+      } else if (response.status === 429) {
+        setConnectedWithSyncWarning(
+          "Trace is rate limiting finish updates. Try again in a few minutes.",
+          { lastHttpStatus: response.status },
+        );
+        if (sendResponse) sendResponse({ ok: false, error: "rate_limited" });
+      } else {
+        if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
+      }
+    }
+  } catch (e) {
+    console.error("[Trace] Finish qualification signal error:", e);
+    if (sendResponse) sendResponse({ ok: false, error: "network_error" });
+  }
+}
+
 async function handleSetReaderStatus(payload, sender, sendResponse) {
   if (!bearerToken) {
     if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
@@ -2512,9 +2703,9 @@ async function handleSetReaderStatus(payload, sender, sendResponse) {
   }
 
   const entryId = payload && typeof payload.entryId === "string" ? payload.entryId.trim() : "";
-  const status = payload && typeof payload.status === "string" ? payload.status.trim().toUpperCase() : "";
+  const status = normalizeReaderStatusForPatch(payload && payload.status);
   const progress = normalizeReaderProgress(payload && payload.progress);
-  if (!isValidUuid(entryId) || !isStorySheetReaderStatus(status) || ((payload && payload.progress) && !progress)) {
+  if (!isValidUuid(entryId) || !status || ((payload && payload.progress) && !progress)) {
     if (sendResponse) sendResponse({ ok: false, error: "invalid_request" });
     return;
   }
