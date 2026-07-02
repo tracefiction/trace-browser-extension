@@ -1172,9 +1172,15 @@ function parseFFNMobileListingMeta(text, html) {
 }
 
 function extractMobileRowSummary(row, authorLink, grayDiv) {
-  if (!row || !authorLink) return null;
+  if (!row) return null;
+  var startNode = authorLink || null;
+  if (!startNode) {
+    var storyLinks = qsa(row, 'a[href*="/s/"]');
+    startNode = storyLinks.length ? storyLinks[storyLinks.length - 1] : null;
+  }
+  if (!startNode) return null;
   let out = "";
-  let n = authorLink.nextSibling;
+  let n = startNode.nextSibling;
   while (n) {
     if (grayDiv && n === grayDiv) break;
     if (n.nodeType === 3) {
@@ -1209,7 +1215,10 @@ function collectFFNListingsMobile() {
   const rows = qsa(root, "div.bs.brb");
   if (!rows.length) return [];
 
-  const fandom = extractFFNFandomMobile() || extractFFNFandom() || null;
+  const isAuthorPage = /\/u\/\d+(?:\/|$)/.test(location.pathname || "");
+  const fandom = isAuthorPage
+    ? null
+    : extractFFNFandomMobile() || extractFFNFandom() || null;
   const items = [];
 
   for (const row of rows) {

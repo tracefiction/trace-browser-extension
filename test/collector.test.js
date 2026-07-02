@@ -3106,6 +3106,49 @@ test("collectFFNListingsMobile (ffn_listing_mobile.html): A Chance Encounter row
   assert.deepEqual(plainJson(row.rels), ["Harry P./Daphne G."]);
 });
 
+test("collectFFNListingsMobile extracts author-page rows without per-row author links", () => {
+  const html = `<!doctype html><html><head>
+    <title>Author: Epicocity | FanFiction</title>
+  </head><body>
+    <div id="content">
+      <div class="bs brb">
+        <a href="https://m.fanfiction.net/s/11810169/1/Love-in-the-Time-of-Teamwork">Love in the Time of Teamwork</a>
+        <a href="https://m.fanfiction.net/s/11810169/24/Love-in-the-Time-of-Teamwork">»</a>
+        Ancienverse Book One. Once every seven years, the Kalos League hosts its annual Summit
+        in order to show the past, present and future of their region. As Ash and his friends
+        make their way for the exhibition, Team Neo proves to be even more dangerous than
+        anticipated as they threaten the entire group. Ancienverse. Amourshipping.
+        <div class="gray">
+          Pokémon, K+, English, Romance &amp; Adventure, chapters: 24, words: 172k+, favs: 724,
+          follows: 389, updated: <span data-xutime="1475588489">Oct 4, 2016</span>
+          published: <span data-xutime="1456434386">Feb 25, 2016</span>,
+          [Ash K./Satoshi, Serena] Clemont/Citron, Bonnie/Eureka
+        </div>
+      </div>
+    </div>
+  </body></html>`;
+  const dom = new JSDOM(html, {
+    url: "https://m.fanfiction.net/u/123456/Epicocity",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  const { collectFFNListingsMobile } = createCollectorBindings(dom);
+  const [row] = collectFFNListingsMobile();
+
+  assert.ok(row);
+  assert.equal(row.src, "ffn");
+  assert.equal(row.ctx, "listing");
+  assert.equal(row.u, "https://www.fanfiction.net/s/11810169/1/Love-in-the-Time-of-Teamwork");
+  assert.equal(row.a, null);
+  assert.match(row.sm || "", /Once every seven years/);
+  assert.doesNotMatch(row.sm || "", /Pokémon, K\+/);
+  assert.equal(row.w, 172000);
+  assert.equal(row.cht, 24);
+  assert.equal(row.upd, "1475588489");
+  assert.equal(row.pub, "1456434386");
+  assert.deepEqual(plainJson(row.fms), []);
+});
+
 test("parseFFNMeta: genre-only segment before Chapters yields empty chars", () => {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url: "https://www.fanfiction.net/s/1/1/x",
