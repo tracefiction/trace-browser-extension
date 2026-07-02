@@ -1,4 +1,4 @@
-# Extension Store Copy - 0.5.1
+# Extension Store Copy - 0.5.2
 
 Use this copy for Chrome Web Store, Firefox Add-ons, App Store Connect, and
 public release notes. Keep evergreen store descriptions separate from
@@ -44,26 +44,35 @@ FictionPress.
 
 ## What's New / Release Notes
 
-Trace extension 0.5.1 is a reliability patch for iOS sign-in:
+Trace extension 0.5.2 improves end-of-story handling and iOS tap reliability:
 
-- Fixes an issue where the iOS wrapper could lose native-shell context while
-  returning from external OAuth sign-in.
-- Preserves the configured Trace web origin when rewriting iOS auth callbacks,
-  including local DEBUG scheme and port settings.
-- Keeps the existing browser extension permissions and supported site behavior
-  unchanged.
+- Adds an end-of-story prompt on supported AO3 and FanFiction.net final posted
+  chapters so readers can mark a library entry Finished or Caught up and
+  identify the work as complete, ongoing, on hiatus, or abandoned.
+- Updates reading-status language in extension controls to Saved, Reading,
+  Caught up, Paused, Finished, and Dropped.
+- Fixes an iOS wrapper issue where the first tap after leaving the app and
+  returning could be ignored.
+- Uses production Trace API and web origins in the generated release build.
 
 Privacy boundary unchanged: Trace still reads story metadata and reading
 progress from supported pages, not AO3/FFN credentials, cookies, private account
-pages, story text, or unrelated browsing history.
+pages, story text, or unrelated browsing history. The new finish prompt sends
+only the explicit reader decision and the same supported-work chapter metadata
+Trace already uses for progress tracking.
 
 ## Chrome / Firefox Submission Notes
 
 This release uses the same host permissions for supported Trace, AO3, and
-FanFiction.net pages. User-visible browsing behavior is unchanged:
+FanFiction.net pages. The extension now includes an additional bundled content
+script, `trace-finish-qualify.js`, injected only on the same supported AO3 and
+FanFiction.net story-page matches already covered by the manifest.
 
 - `+ ADD` and reading-status controls send authenticated Trace API requests
   through the background worker.
+- End-of-story finish prompts send authenticated Trace API requests through the
+  background worker when the reader explicitly chooses Finished/Caught up and a
+  work status.
 - `HIDE` stores a user-owned hidden-work preference in Trace, keyed by supported
   AO3/FFN work id.
 - The popup continues to expose automatic tracking, library-status overlay, and
@@ -73,11 +82,11 @@ The extension does not request cookie permissions.
 
 ## App Store Connect - iOS What's New
 
-Trace for iOS 0.5.1 improves sign-in reliability:
+Trace for iOS 0.5.2 improves Safari extension behavior:
 
-- Fixes an issue where sign-in could fail to resume correctly after returning
-  from the browser.
-- Keeps Safari extension permissions and supported site behavior unchanged.
+- Fixes an issue where the first tap after returning to Trace could be ignored.
+- Adds end-of-story prompts on supported AO3 and FanFiction.net final posted
+  chapters so readers can mark entries Finished or Caught up.
 
 ## App Review Notes
 
@@ -97,4 +106,5 @@ To test:
 4. Open the extension popup on tracefiction.com to connect the extension.
 5. Visit a supported AO3 or FanFiction.net story/listing page and refresh if
    needed.
-6. Use `+ ADD`, status controls, import, and hide/undo on supported pages.
+6. Use `+ ADD`, status controls, import, hide/undo, and final-chapter finish
+   prompts on supported pages.
