@@ -262,15 +262,218 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 
     func handleSceneDidBecomeActive() {
         guard isViewLoaded else { return }
+        primeWebViewInteractionAfterResume()
+        DispatchQueue.main.async { [weak self] in
+            self?.primeWebViewInteractionAfterResume()
+            self?.installResumeClickFallback()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.primeWebViewInteractionAfterResume()
+        }
+    }
+
+    private func primeWebViewInteractionAfterResume() {
         webView.scrollView.delaysContentTouches = false
         webView.scrollView.canCancelContentTouches = true
         view.window?.makeKey()
+        view.endEditing(true)
         webView.becomeFirstResponder()
+    }
+
+    private func installResumeClickFallback() {
         webView.evaluateJavaScript(
             """
             (function() {
               try {
-                window.dispatchEvent(new Event('trace:native-shell-resume'));
+                if (window.__traceResumeClickFallbackCleanup) {
+                  try { window.__traceResumeClickFallbackCleanup(); } catch (e) {}
+                }
+                var done = false;
+                var cleanups = [];
+                var firstStartSeen = false;
+                var firstStartTimer = null;
+                var noClickAfterEndTimer = null;
+                var listenerLifetimeTimer = null;
+                var duplicateClickSuppressorTimer = null;
+                var startTarget = null;
+                var startPoint = null;
+                var endTarget = null;
+                var endPoint = null;
+                var movedTooFar = false;
+                var fallbackClickDispatched = false;
+                var TAP_SLOP_PX = 14;
+                var pointFromEvent = function(event) {
+                  var source = event.touches && event.touches.length
+                    ? event.touches[0]
+                    : event.changedTouches && event.changedTouches.length
+                      ? event.changedTouches[0]
+                      : event;
+                  var x = typeof source.clientX === 'number' ? source.clientX : null;
+                  var y = typeof source.clientY === 'number' ? source.clientY : null;
+                  return { x: x, y: y };
+                };
+                var distance = function(a, b) {
+                  if (!a || !b || a.x === null || a.y === null || b.x === null || b.y === null) {
+                    return 0;
+                  }
+                  var dx = b.x - a.x;
+                  var dy = b.y - a.y;
+                  return Math.sqrt(dx * dx + dy * dy);
+                };
+                var targetForPoint = function(point) {
+                  if (point && point.x !== null && point.y !== null) {
+                    return document.elementFromPoint(point.x, point.y);
+                  }
+                  return null;
+                };
+                var rememberStart = function(event) {
+                  if (firstStartSeen) return;
+                  firstStartSeen = true;
+                  startTarget = event.target;
+                  startPoint = pointFromEvent(event);
+                  armNoCompletionTimer();
+                };
+                var rememberMove = function(event) {
+                  if (!firstStartSeen || movedTooFar || !startPoint) return;
+                  var point = pointFromEvent(event);
+                  if (distance(startPoint, point) > TAP_SLOP_PX) {
+                    movedTooFar = true;
+                  }
+                };
+                var rememberEnd = function(event) {
+                  endTarget = event.target;
+                  endPoint = pointFromEvent(event);
+                  if (distance(startPoint, endPoint) > TAP_SLOP_PX) {
+                    movedTooFar = true;
+                  }
+                };
+                var clickableFallbackTarget = function() {
+                  var pointTarget = targetForPoint(endPoint);
+                  var raw = pointTarget || endTarget || startTarget;
+                  if (!raw || !(raw instanceof Element)) return null;
+                  var direct = raw.closest(
+                    'a[href],button,input,textarea,select,summary,[role="button"],[role="link"],[role="menuitem"],[role="option"],[role="checkbox"],[data-card-interactive]'
+                  );
+                  return direct || raw;
+                };
+                var suppressLateNativeClick = function() {
+                  var suppress = function(event) {
+                    if (!fallbackClickDispatched || !event.isTrusted) return;
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                  };
+                  window.addEventListener('click', suppress, { capture: true });
+                  duplicateClickSuppressorTimer = setTimeout(function() {
+                    window.removeEventListener('click', suppress, { capture: true });
+                    duplicateClickSuppressorTimer = null;
+                  }, 700);
+                };
+                var dispatchFallbackClick = function() {
+                  if (done || fallbackClickDispatched) return;
+                  if (!firstStartSeen || movedTooFar) {
+                    cleanup();
+                    return;
+                  }
+                  var target = clickableFallbackTarget();
+                  if (!target) {
+                    cleanup();
+                    return;
+                  }
+                  fallbackClickDispatched = true;
+                  suppressLateNativeClick();
+                  var point = endPoint || startPoint || { x: 0, y: 0 };
+                  var event = new MouseEvent('click', {
+                    bubbles: true,
+                    cancelable: true,
+                    composed: true,
+                    view: window,
+                    clientX: point.x || 0,
+                    clientY: point.y || 0
+                  });
+                  target.dispatchEvent(event);
+                  done = true;
+                  cleanup();
+                };
+                var armNoCompletionTimer = function() {
+                  if (firstStartTimer !== null) return;
+                  firstStartTimer = setTimeout(function() {
+                    if (done) return;
+                    cleanup();
+                  }, 1200);
+                };
+                var armNoClickAfterEndTimer = function() {
+                  if (noClickAfterEndTimer !== null) return;
+                  noClickAfterEndTimer = setTimeout(function() {
+                    if (done) return;
+                    dispatchFallbackClick();
+                  }, 140);
+                };
+                var logFirst = function(kind) {
+                  return function(event) {
+                    try {
+                      if (done) return;
+                      if (kind === 'touchstart' || kind === 'pointerdown') {
+                        rememberStart(event);
+                        return;
+                      }
+                      if (kind === 'touchmove' || kind === 'pointermove') {
+                        rememberMove(event);
+                        return;
+                      }
+                      if (kind === 'touchend' || kind === 'pointerup') {
+                        rememberEnd(event);
+                        if (firstStartSeen) {
+                          armNoClickAfterEndTimer();
+                        }
+                        return;
+                      }
+                      if (kind === 'click' || kind === 'touchcancel' || kind === 'pointercancel') {
+                        done = true;
+                        cleanup();
+                      }
+                    } catch (e) {}
+                  };
+                };
+                var add = function(type, handler) {
+                  window.addEventListener(type, handler, { capture: true, passive: true });
+                  cleanups.push(function() {
+                    window.removeEventListener(type, handler, { capture: true });
+                  });
+                };
+                var cleanup = function() {
+                  if (firstStartTimer !== null) {
+                    clearTimeout(firstStartTimer);
+                    firstStartTimer = null;
+                  }
+                  if (noClickAfterEndTimer !== null) {
+                    clearTimeout(noClickAfterEndTimer);
+                    noClickAfterEndTimer = null;
+                  }
+                  if (listenerLifetimeTimer !== null) {
+                    clearTimeout(listenerLifetimeTimer);
+                    listenerLifetimeTimer = null;
+                  }
+                  while (cleanups.length) {
+                    try { cleanups.pop()(); } catch (e) {}
+                  }
+                  if (window.__traceResumeClickFallbackCleanup === cleanup) {
+                    window.__traceResumeClickFallbackCleanup = null;
+                  }
+                };
+                window.__traceResumeClickFallbackCleanup = cleanup;
+                add('touchstart', logFirst('touchstart'));
+                add('touchmove', logFirst('touchmove'));
+                add('touchend', logFirst('touchend'));
+                add('touchcancel', logFirst('touchcancel'));
+                add('pointerdown', logFirst('pointerdown'));
+                add('pointermove', logFirst('pointermove'));
+                add('pointerup', logFirst('pointerup'));
+                add('pointercancel', logFirst('pointercancel'));
+                add('click', logFirst('click'));
+                listenerLifetimeTimer = setTimeout(function() {
+                  if (done) return;
+                  cleanup();
+                }, 60000);
                 if (document.activeElement instanceof HTMLElement) {
                   document.activeElement.blur();
                 }
