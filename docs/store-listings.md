@@ -96,6 +96,25 @@ Trace for iOS 0.5.2 improves Safari extension behavior:
 - Adds end-of-story prompts on supported AO3 and FanFiction.net final posted
   chapters so readers can mark entries Finished or Caught up.
 
+## Screenshot Preparation
+
+Prepare iPhone screenshots for the accepted App Store Connect sizes with:
+
+```bash
+npm run screenshots:store -- ~/Desktop/trace-screenshots --out dist/store-screenshots
+```
+
+The script accepts image files or folders, auto-rotates images from EXIF
+metadata, and writes exact PNG canvases for the matching orientation:
+
+- `1284 x 2778` and `1242 x 2688` for portrait screenshots.
+- `2778 x 1284` and `2688 x 1242` for landscape screenshots.
+
+By default it uses center `cover` resizing so normal iPhone screenshots fill the
+required canvas. Use `--fit contain` when preserving every source pixel matters
+more than filling the canvas, and `--orientation all` when a submission needs all
+four sizes from the same source image.
+
 ## App Review Notes
 
 Trace is a reading-library companion for AO3 and FanFiction.net. The Safari Web
