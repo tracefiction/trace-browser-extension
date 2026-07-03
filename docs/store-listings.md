@@ -51,8 +51,12 @@ Trace extension 0.5.2 improves end-of-story handling and iOS tap reliability:
   identify the work as complete, ongoing, on hiatus, or abandoned.
 - Updates reading-status language in extension controls to Saved, Reading,
   Caught up, Paused, Finished, and Dropped.
-- Fixes an iOS wrapper issue where the first tap after leaving the app and
-  returning could be ignored.
+- Fixes iOS wrapper issues where data export could open as raw ZIP bytes,
+  public collection links could stay trapped inside the app shell, and the
+  first tap after leaving the app and returning could be ignored.
+- Improves FanFiction.net author-page metadata refreshes so Trace can fill in
+  fields that are not available on FFN story pages when they appear in author
+  listings.
 - Uses production Trace API and web origins in the generated release build.
 
 Privacy boundary unchanged: Trace still reads story metadata and reading
@@ -85,6 +89,10 @@ The extension does not request cookie permissions.
 Trace for iOS 0.5.2 improves Safari extension behavior:
 
 - Fixes an issue where the first tap after returning to Trace could be ignored.
+- Exports account data through the native iOS share sheet instead of opening
+  unreadable ZIP bytes inside the web view.
+- Opens public collection pages outside the app shell so shared links behave
+  like public web pages.
 - Adds end-of-story prompts on supported AO3 and FanFiction.net final posted
   chapters so readers can mark entries Finished or Caught up.
 
