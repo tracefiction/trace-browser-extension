@@ -54,6 +54,8 @@ Trace extension 0.5.2 improves end-of-story handling and iOS tap reliability:
 - Fixes iOS wrapper issues where data export could open as raw ZIP bytes,
   public collection links could stay trapped inside the app shell, and the
   first tap after leaving the app and returning could be ignored.
+- Keeps the native iOS app surface vertically scrollable without sideways
+  rubber-banding on bounded Trace screens.
 - Improves FanFiction.net author-page metadata refreshes so Trace can fill in
   fields that are not available on FFN story pages when they appear in author
   listings.
@@ -93,6 +95,7 @@ Trace for iOS 0.5.2 improves Safari extension behavior:
   unreadable ZIP bytes inside the web view.
 - Opens public collection pages outside the app shell so shared links behave
   like public web pages.
+- Prevents sideways web-view rubber-banding on bounded Trace app screens.
 - Adds end-of-story prompts on supported AO3 and FanFiction.net final posted
   chapters so readers can mark entries Finished or Caught up.
 
