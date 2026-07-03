@@ -179,6 +179,11 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         wv.scrollView.minimumZoomScale = 1.0
         wv.scrollView.maximumZoomScale = 1.0
         wv.scrollView.pinchGestureRecognizer?.isEnabled = false
+        // The web UI is a bounded app surface. Keep the vertical scroll feel,
+        // but do not let the WKWebView rubber-band sideways like a zoomed page.
+        wv.scrollView.alwaysBounceHorizontal = false
+        wv.scrollView.showsHorizontalScrollIndicator = false
+        wv.scrollView.isDirectionalLockEnabled = true
         // WKWebView is backed by a UIScrollView. Avoid deferring the first tap
         // while the scroll view decides whether a touch is a scroll gesture.
         wv.scrollView.delaysContentTouches = false
@@ -273,6 +278,9 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     }
 
     private func primeWebViewInteractionAfterResume() {
+        webView.scrollView.alwaysBounceHorizontal = false
+        webView.scrollView.showsHorizontalScrollIndicator = false
+        webView.scrollView.isDirectionalLockEnabled = true
         webView.scrollView.delaysContentTouches = false
         webView.scrollView.canCancelContentTouches = true
         view.window?.makeKey()
