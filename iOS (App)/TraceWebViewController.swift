@@ -164,6 +164,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         config.userContentController.add(self, name: "traceWidget")
         config.userContentController.add(self, name: "tracePush")
         config.userContentController.add(self, name: "traceBilling")
+        config.userContentController.add(self, name: "traceDownload")
 
         let wv = WKWebView(frame: .zero, configuration: config)
         wv.navigationDelegate = self
@@ -246,6 +247,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: "traceWidget")
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: "tracePush")
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: "traceBilling")
+        webView?.configuration.userContentController.removeScriptMessageHandler(forName: "traceDownload")
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -256,6 +258,28 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     /// Load a Trace web URL in the shell (e.g. notification deep link).
     func loadTraceURL(_ url: URL) {
         loadTraceURLRequest(url)
+    }
+
+    func handleSceneDidBecomeActive() {
+        guard isViewLoaded else { return }
+        webView.scrollView.delaysContentTouches = false
+        webView.scrollView.canCancelContentTouches = true
+        view.window?.makeKey()
+        webView.becomeFirstResponder()
+        webView.evaluateJavaScript(
+            """
+            (function() {
+              try {
+                window.dispatchEvent(new Event('trace:native-shell-resume'));
+                if (document.activeElement instanceof HTMLElement) {
+                  document.activeElement.blur();
+                }
+              } catch (e) {}
+              return true;
+            })();
+            """,
+            completionHandler: nil
+        )
     }
 
     static func findInKeyWindow() -> TraceWebViewController? {
@@ -321,6 +345,12 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             return
         }
         let isMainFrame = navigationAction.targetFrame?.isMainFrame ?? true
+        if isMainFrame, url.scheme?.lowercased() == "blob" {
+            activeTraceNavigationURL = nil
+            decisionHandler(.cancel)
+            presentDownloadFallbackAlert()
+            return
+        }
         if shouldOpenInAuthenticationSession(url), isMainFrame {
             decisionHandler(.cancel)
             startAuthenticationSession(startURL: url)
@@ -437,7 +467,10 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         let scheme = url.scheme?.lowercased()
         guard scheme == "http" || scheme == "https" else { return false }
         let path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
-        return path == "setup" || path == "apps"
+        return path == "setup" ||
+            path == "apps" ||
+            path == "shared/collections" ||
+            path.hasPrefix("shared/collections/")
     }
 
     private func shouldOpenInAuthenticationSession(_ url: URL) -> Bool {
@@ -785,6 +818,11 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
+        if message.name == "traceDownload" {
+            handleTraceDownloadMessage(message)
+            return
+        }
+
         if message.name == "tracePush" {
             handleTracePushMessage(message)
             return
@@ -805,6 +843,150 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             defaults.set(data, forKey: Self.widgetDefaultsKey)
         }
         WidgetCenter.shared.reloadAllTimelines()
+    }
+
+    private enum TraceDownloadError: Error {
+        case invalidRequest
+        case invalidResponse
+        case exportFailed
+    }
+
+    private func handleTraceDownloadMessage(_ message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any],
+              (body["op"] as? String) == "exportAccount"
+        else {
+            presentDownloadFailureAlert(message: "Trace couldn't start the export.")
+            return
+        }
+
+        let requestedFilename = body["filename"] as? String
+        exportAccountToNativeShareSheet(filename: requestedFilename)
+    }
+
+    private func exportAccountToNativeShareSheet(filename: String?) {
+        Task { [weak self] in
+            guard let self else { return }
+
+            do {
+                let token = try await self.fetchTraceShellAccessToken()
+                let fileURL = try await self.downloadAccountExport(
+                    accessToken: token,
+                    filename: filename
+                )
+                await MainActor.run {
+                    self.presentNativeShareSheet(for: fileURL)
+                }
+            } catch {
+                await MainActor.run {
+                    let message =
+                        error is TraceBillingFlowError
+                        ? "Sign in again, then try exporting your data."
+                        : "Trace couldn't prepare the export. Check your connection and try again."
+                    self.presentDownloadFailureAlert(message: message)
+                }
+            }
+        }
+    }
+
+    private func downloadAccountExport(accessToken: String, filename: String?) async throws -> URL {
+        guard var components = URLComponents(
+            url: Self.billingAPIBaseURL,
+            resolvingAgainstBaseURL: false
+        ) else {
+            throw TraceDownloadError.invalidRequest
+        }
+        components.path = "/api/account/export"
+        guard let url = components.url else {
+            throw TraceDownloadError.invalidRequest
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/zip", forHTTPHeaderField: "Accept")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw TraceDownloadError.invalidResponse
+        }
+        guard (200...299).contains(http.statusCode), !data.isEmpty else {
+            throw TraceDownloadError.exportFailed
+        }
+
+        let exportDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TraceExports", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: exportDirectory,
+            withIntermediateDirectories: true
+        )
+
+        let safeFilename = sanitizedExportFilename(filename)
+        let fileURL = exportDirectory.appendingPathComponent(safeFilename)
+        try? FileManager.default.removeItem(at: fileURL)
+        try data.write(to: fileURL, options: [.atomic])
+        return fileURL
+    }
+
+    private func sanitizedExportFilename(_ filename: String?) -> String {
+        let fallback = "trace-export-\(Self.exportDateString()).zip"
+        guard let filename else { return fallback }
+
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-"))
+        let cleanedScalars = filename.unicodeScalars.map { scalar -> Character in
+            allowed.contains(scalar) ? Character(scalar) : "-"
+        }
+        let cleaned = String(cleanedScalars)
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".-_/ "))
+        guard !cleaned.isEmpty else { return fallback }
+        return cleaned.lowercased().hasSuffix(".zip") ? cleaned : "\(cleaned).zip"
+    }
+
+    private static func exportDateString() -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
+    }
+
+    @MainActor
+    private func presentNativeShareSheet(for fileURL: URL) {
+        let activity = UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)
+        if let popover = activity.popoverPresentationController {
+            popover.sourceView = view
+            popover.sourceRect = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
+            popover.permittedArrowDirections = []
+        }
+        let presenter = topPresenter()
+        presenter.present(activity, animated: true)
+    }
+
+    @MainActor
+    private func presentDownloadFallbackAlert() {
+        presentDownloadFailureAlert(
+            message: "This download needs the native export flow. Update Trace or open Trace in Safari, then try again."
+        )
+    }
+
+    @MainActor
+    private func presentDownloadFailureAlert(message: String) {
+        let alert = UIAlertController(
+            title: "Export unavailable",
+            message: message,
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "OK", style: .cancel))
+        topPresenter().present(alert, animated: true)
+    }
+
+    @MainActor
+    private func topPresenter() -> UIViewController {
+        var presenter: UIViewController = self
+        while let presented = presenter.presentedViewController {
+            presenter = presented
+        }
+        return presenter
     }
 
     private func handleTracePushMessage(_ message: WKScriptMessage) {

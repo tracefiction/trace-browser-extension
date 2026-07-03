@@ -32,6 +32,10 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         traceWebViewController(from: window)?.handleAuthCallback(url: url)
     }
 
+    func sceneDidBecomeActive(_ scene: UIScene) {
+        traceWebViewController(from: window)?.handleSceneDidBecomeActive()
+    }
+
     private func traceWebViewController(from window: UIWindow?) -> TraceWebViewController? {
         if let nav = window?.rootViewController as? UINavigationController {
             return nav.topViewController as? TraceWebViewController
