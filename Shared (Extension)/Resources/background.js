@@ -55,6 +55,7 @@ const AO3_SAVED_FILTER_MAX_PARAMS = 80;
 const AO3_SAVED_FILTER_ACTIVE_LIMIT = 250;
 const AO3_SAVED_FILTER_SYNC_BATCH_LIMIT = 100;
 const AO3_SAVED_FILTER_SYNC_MAX_ITERATIONS = 10;
+const AUTH_VERIFICATION_RETRY_DELAYS_MS = [750, 2_500, 8_000];
 
 // 1. Token Management
 let bearerToken = null;
@@ -63,6 +64,7 @@ let authVerificationSeq = 0;
 const optimisticChapterFloors = new Map();
 let ao3SavedFiltersSyncTimer = null;
 let ao3SavedFiltersSyncInFlight = false;
+let authVerificationRetryTimer = null;
 
 function shouldIgnoreSenderForAutoTrack(sender) {
   if (!sender || typeof sender !== "object") return false;
@@ -204,8 +206,49 @@ function setConnectedWithSyncWarning(message, extra = {}) {
   });
 }
 
+function clearAuthVerificationRetry() {
+  if (!authVerificationRetryTimer) return;
+  try {
+    clearTimeout(authVerificationRetryTimer);
+  } catch (_) {
+    /* ignore */
+  }
+  authVerificationRetryTimer = null;
+}
+
+function authVerificationRetryAttempt(extra = {}) {
+  const attempt = Number(extra.retryAttempt || 0);
+  return Number.isFinite(attempt) && attempt > 0 ? Math.trunc(attempt) : 0;
+}
+
+function scheduleAuthVerificationRetry(token, extra = {}) {
+  const attempt = authVerificationRetryAttempt(extra);
+  const delayMs = AUTH_VERIFICATION_RETRY_DELAYS_MS[attempt];
+  if (delayMs == null) return false;
+  clearAuthVerificationRetry();
+  authVerificationRetryTimer = setTimeout(() => {
+    authVerificationRetryTimer = null;
+    void verifyTraceAccountToken(token, {
+      ...extra,
+      retryAttempt: attempt + 1,
+      lastTokenSyncAt: extra.lastTokenSyncAt || new Date().toISOString(),
+    });
+  }, delayMs);
+  return true;
+}
+
+function accountVerificationRetryingState(lastTokenSyncAt, extra = {}) {
+  setCheckingState({
+    message: "Checking your Trace account connection. Retrying shortly.",
+    lastTokenSyncAt,
+    lastAccountCheckRetryAt: new Date().toISOString(),
+    ...extra,
+  });
+}
+
 function clearToken() {
   authVerificationSeq += 1;
+  clearAuthVerificationRetry();
   bearerToken = null;
   verifiedBearerToken = null;
   optimisticChapterFloors.clear();
@@ -703,6 +746,7 @@ async function verifyTraceAccountToken(token, extra = {}) {
   const trimmed = typeof token === "string" ? token.trim() : "";
   if (!trimmed) return { success: false, state: "signed_out" };
 
+  clearAuthVerificationRetry();
   const verificationSeq = ++authVerificationSeq;
   const lastTokenSyncAt = extra.lastTokenSyncAt || new Date().toISOString();
   bearerToken = trimmed;
@@ -719,6 +763,7 @@ async function verifyTraceAccountToken(token, extra = {}) {
     }
 
     if (response.ok) {
+      clearAuthVerificationRetry();
       const json = await readResponseJson(response);
       const patch = {
         [AUTH_TOKEN_KEY]: trimmed,
@@ -739,6 +784,23 @@ async function verifyTraceAccountToken(token, extra = {}) {
       return { success: false, state: "reconnect_required", error: authError };
     }
 
+    const retryScheduled = scheduleAuthVerificationRetry(trimmed, {
+      ...extra,
+      lastTokenSyncAt,
+    });
+    if (retryScheduled) {
+      accountVerificationRetryingState(lastTokenSyncAt, {
+        lastHttpStatus: response.status,
+      });
+      return {
+        success: false,
+        state: "unknown",
+        error: "account_check_retrying",
+        status: response.status,
+        retrying: true,
+      };
+    }
+
     setErrorState(
       "Trace could not verify your account. Try again shortly, or open Trace to reconnect.",
       { lastHttpStatus: response.status, lastTokenSyncAt },
@@ -752,6 +814,19 @@ async function verifyTraceAccountToken(token, extra = {}) {
   } catch (_) {
     if (verificationSeq !== authVerificationSeq || bearerToken !== trimmed) {
       return { success: false, state: "unknown", stale: true };
+    }
+    const retryScheduled = scheduleAuthVerificationRetry(trimmed, {
+      ...extra,
+      lastTokenSyncAt,
+    });
+    if (retryScheduled) {
+      accountVerificationRetryingState(lastTokenSyncAt);
+      return {
+        success: false,
+        state: "unknown",
+        error: "network_retrying",
+        retrying: true,
+      };
     }
     setErrorState(
       "Trace could not reach the API to verify your account. Try again shortly.",

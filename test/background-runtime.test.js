@@ -19,6 +19,13 @@ function plainJson(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function runTimerWithDelay(h, ms) {
+  const index = h.timers.findIndex((item) => item && item.ms === ms);
+  assert.notEqual(index, -1, `missing ${ms}ms timer`);
+  const [timer] = h.timers.splice(index, 1);
+  timer.fn();
+}
+
 function createResponse({ ok = true, status = 200, json = {} } = {}) {
   return {
     ok,
@@ -377,7 +384,56 @@ test("TRACE_AUTH_UPDATE handles bootstrap-required tokens without marking connec
   assert.equal(h.store.traceAuthState.lastAuthErrorCode, "ACCOUNT_BOOTSTRAP_REQUIRED");
 });
 
-test("TRACE_AUTH_UPDATE keeps transient verification failures disconnected", async () => {
+test("TRACE_AUTH_UPDATE retries transient verification failures before surfacing error", async () => {
+  let accountChecks = 0;
+  const h = createBackgroundHarness({
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) {
+        accountChecks += 1;
+        if (accountChecks === 1) {
+          return createResponse({ ok: false, status: 500 });
+        }
+        return createResponse({ json: { pro: false, library_count: 4 } });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: { success: true, data: { entries: {}, syncVersion: "v1" } },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+
+  const response = await h.dispatchMessage(
+    { type: "TRACE_AUTH_UPDATE", token: "network-token" },
+    { tab: { id: 25 } },
+  );
+
+  assert.deepEqual(plainJson(response), {
+    success: false,
+    state: "unknown",
+    error: "account_check_retrying",
+    status: 500,
+    retrying: true,
+  });
+  assert.equal(h.hooks.getBearerToken(), "network-token");
+  assert.equal(h.store.authToken, "network-token");
+  assert.equal(h.store.traceAuthState.state, "unknown");
+  assert.equal(h.store.traceAuthState.lastHttpStatus, 500);
+  assert.match(h.store.traceAuthState.message, /Retrying shortly/);
+  assert.ok(h.timers.some((timer) => timer?.ms === 750));
+
+  runTimerWithDelay(h, 750);
+  await flush();
+  await flush();
+
+  assert.equal(accountChecks, 2);
+  assert.equal(h.store.traceAuthState.state, "connected");
+  assert.equal(h.hooks.getVerifiedBearerToken(), "network-token");
+  assert.equal(h.store.traceLibraryCount, 4);
+});
+
+test("TRACE_AUTH_UPDATE surfaces hard error after transient verification retries are exhausted", async () => {
   const h = createBackgroundHarness({
     fetchImpl: async (url) => {
       assert.ok(String(url).endsWith("/api/account/me"));
@@ -392,12 +448,21 @@ test("TRACE_AUTH_UPDATE keeps transient verification failures disconnected", asy
 
   assert.deepEqual(plainJson(response), {
     success: false,
-    state: "error",
-    error: "account_check_failed",
+    state: "unknown",
+    error: "account_check_retrying",
     status: 500,
+    retrying: true,
   });
   assert.equal(h.hooks.getBearerToken(), "network-token");
   assert.equal(h.store.authToken, "network-token");
+  assert.equal(h.store.traceAuthState.state, "unknown");
+
+  for (const delayMs of [750, 2_500, 8_000]) {
+    runTimerWithDelay(h, delayMs);
+    await flush();
+    await flush();
+  }
+
   assert.equal(h.store.traceAuthState.state, "error");
   assert.equal(h.store.traceAuthState.lastHttpStatus, 500);
 });

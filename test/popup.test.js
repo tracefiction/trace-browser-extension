@@ -234,6 +234,17 @@ test("popup connection indicator reflects D1 state labels", async () => {
       expectedLabel: "Reconnect",
     },
     {
+      name: "checking",
+      authState: {
+        state: "unknown",
+        message: "Checking your Trace account connection. Retrying shortly.",
+      },
+      firstSaveSeen: false,
+      expectedState: "warn",
+      expectedLabel: "Checking",
+      expectedHeading: "Checking Trace",
+    },
+    {
       name: "error",
       authState: { state: "error" },
       firstSaveSeen: false,
@@ -280,6 +291,13 @@ test("popup connection indicator reflects D1 state labels", async () => {
       item.name,
     );
     assert.ok(connection.querySelector(".popup-connection-dot[aria-hidden='true']"), item.name);
+    if (item.expectedHeading) {
+      assert.equal(
+        h.document.getElementById("popup-status").textContent,
+        item.expectedHeading,
+        item.name,
+      );
+    }
   }
 });
 

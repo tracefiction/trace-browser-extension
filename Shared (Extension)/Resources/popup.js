@@ -90,6 +90,8 @@ function mergePopupModel(patch) {
 
 function recoveryHeading(state) {
   switch (state) {
+    case "unknown":
+      return "Checking Trace";
     case "upgrade_required":
       return "Library full";
     case "reconnect_required":
@@ -113,6 +115,8 @@ function recoveryCtaLabel(state) {
     return "Safari setup help";
   }
   switch (state) {
+    case "unknown":
+      return "Open Trace";
     case "upgrade_required":
       return "Open Trace to upgrade";
     case "reconnect_required":
@@ -205,11 +209,13 @@ function buildPopupUi(model) {
     const connectionLabel =
       auth === "error"
         ? "Issue"
-        : auth === "reconnect_required"
-          ? "Reconnect"
-          : auth === "upgrade_required"
-            ? "Upgrade"
-            : "Not linked";
+        : auth === "unknown"
+          ? "Checking"
+          : auth === "reconnect_required"
+            ? "Reconnect"
+            : auth === "upgrade_required"
+              ? "Upgrade"
+              : "Not linked";
     return {
       visualState: auth,
       statusState: auth,
