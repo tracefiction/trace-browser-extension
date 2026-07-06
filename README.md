@@ -115,7 +115,7 @@ npm run build
 For a release-style build, use HTTPS Trace origins:
 
 ```bash
-TRACE_API_BASE=https://api.tracefiction.com TRACE_WEB_ORIGIN=https://tracefiction.com npm run build:release
+TRACE_API_BASE=https://api.tracefiction.com TRACE_WEB_ORIGIN=https://www.tracefiction.com npm run build:release
 ```
 
 `build:release` rejects missing, localhost, non-HTTPS, and non-production Trace origins.

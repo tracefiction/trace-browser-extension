@@ -29,7 +29,7 @@ Use a Trace QA account with:
 For a production-origin release build:
 
 ```bash
-TRACE_API_BASE=https://api.tracefiction.com TRACE_WEB_ORIGIN=https://tracefiction.com npm run build:release
+TRACE_API_BASE=https://api.tracefiction.com TRACE_WEB_ORIGIN=https://www.tracefiction.com npm run build:release
 ```
 
 Chrome or Edge:

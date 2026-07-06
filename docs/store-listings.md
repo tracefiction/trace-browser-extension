@@ -1,4 +1,4 @@
-# Extension Store Copy - 0.5.3
+# Extension Store Copy - 0.5.4
 
 Use this copy for Chrome Web Store, Firefox Add-ons, App Store Connect, and
 public release notes. Keep evergreen store descriptions separate from
@@ -44,24 +44,21 @@ FictionPress.
 
 ## What's New / Release Notes
 
-Trace extension 0.5.3 improves first-story onboarding:
+Trace extension 0.5.4 improves iOS Safari setup:
 
-- Opens the Trace first-story setup page after a fresh extension install.
-- Lets Trace send a supported AO3 or FanFiction.net story URL to the extension
-  so the first story can open with the Trace control focused, and save
-  immediately when the extension can run on that archive page.
-- Improves iOS Safari setup by letting the signed-in Trace app share the current
-  Trace session with the bundled Safari extension.
-- Adds app-led iOS handoff for pasted AO3/FFN story URLs: Trace stores a
-  short-lived pending URL, opens Safari, and the extension saves the matching
-  story once Safari grants site access.
-- Retries transient account checks before showing reconnect guidance, reducing
-  false setup failures while the Trace session is still settling.
+- Uses Trace's canonical `https://www.tracefiction.com` web origin in release
+  builds, matching the production app page loaded by the iOS shell.
+- Improves the iOS app-to-web Safari extension state bridge so enabled
+  extensions are recognized after the production web redirect.
+- Opens Safari extension settings for the bundled extension identifier detected
+  from the installed app, with a fallback for older settings screens.
+- Keeps setup recovery focused on the next useful action when the Safari
+  extension is disabled or Safari website access still needs to be allowed.
 
 Privacy boundary unchanged: Trace still reads story metadata and reading
 progress from supported pages, not AO3/FFN credentials, cookies, private account
-pages, story text, or unrelated browsing history. The new onboarding handoff
-uses the same supported story URLs and Trace auth token already used for
+pages, story text, or unrelated browsing history. The onboarding handoff uses
+the same supported story URLs and Trace auth token already used for
 authenticated extension actions.
 
 ## Chrome / Firefox Submission Notes
@@ -84,18 +81,14 @@ The extension does not request cookie permissions.
 
 ## App Store Connect - iOS What's New
 
-Trace for iOS 0.5.3 improves Safari extension onboarding:
+Trace for iOS 0.5.4 improves Safari extension onboarding:
 
-- Connects the Safari extension to the signed-in Trace app session during
-  onboarding, so first-story handoff can work without signing in again inside
-  Safari.
-- Opens Safari extension settings from the Trace app on supported iOS versions,
-  with a fallback path for older iOS settings screens.
-- Lets the Trace app hand a pasted AO3 or FanFiction.net story URL to Safari,
-  then lets the bundled extension save the matching story when site access is
-  allowed.
-- Keeps first-story setup recovery copy focused on Safari website permissions
-  instead of asking readers to sign in twice.
+- Fixes Safari extension state checks after the production Trace web redirect,
+  so enabled extensions can be recognized by the iOS app.
+- Improves the Safari settings shortcut by targeting the installed bundled
+  extension identifier.
+- Keeps first-story setup guidance focused on enabling the extension in Settings
+  or opening a supported AO3/FanFiction.net story in Safari.
 
 ## Screenshot Preparation
 

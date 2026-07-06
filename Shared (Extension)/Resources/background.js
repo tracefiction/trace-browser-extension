@@ -5,7 +5,7 @@
 const ext = typeof browser !== "undefined" ? browser : chrome;
 
 const TRACE_API_BASE = "https://api.tracefiction.com";
-const TRACE_WEB_ORIGIN = "https://tracefiction.com";
+const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 
 const API_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/track`;
 const METADATA_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/metadata`;

@@ -6,5 +6,5 @@ import Foundation
 
 enum TraceWebOriginGenerated {
     /// Same origin injected into Shared (Extension)/Resources/background.js for import / sync.
-    static let httpsOrigin: String = "https://tracefiction.com"
+    static let httpsOrigin: String = "https://www.tracefiction.com"
 }

@@ -121,6 +121,14 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         let enabled: Bool
         let settingsSupported: Bool
         let error: String?
+        let queriedIdentifier: String?
+        let embeddedExtensionIdentifiers: [String]?
+    }
+
+    private struct TraceSafariExtensionStateQueryResult {
+        let identifier: String
+        let enabled: Bool
+        let errorCode: String?
     }
 
     private struct TraceSafariExtensionActionPayload: Encodable {
@@ -1146,38 +1154,91 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                     return
                 }
 
-                SFSafariExtensionManager.getStateOfExtension(
-                    withIdentifier: Self.safariExtensionBundleIdentifier
-                ) { [weak self] state, error in
-                    DispatchQueue.main.async {
-                        self?.postSafariExtensionState(
-                            nonce: nonce,
-                            enabled: state?.isEnabled == true,
-                            settingsSupported: true,
-                            error: error == nil ? nil : "state_unavailable"
-                        )
+                let identifiers = Self.safariExtensionCandidateIdentifiers()
+                self.querySafariExtensionStates(for: identifiers) { [weak self] results in
+                    guard let self else { return }
+
+                    let selected =
+                        results.first(where: { $0.enabled }) ??
+                        results.first(where: { $0.errorCode == nil }) ??
+                        results.first
+                    let errorCode: String?
+                    if let selected {
+                        errorCode = selected.errorCode
+                    } else {
+                        errorCode = "extension_identifier_missing"
                     }
+
+                    NSLog(
+                        "[Trace] Safari extension state candidates=%@ results=%@ selected=%@ enabled=%@ error=%@",
+                        identifiers.joined(separator: ","),
+                        results.map { "\($0.identifier):enabled=\($0.enabled):error=\($0.errorCode ?? "none")" }.joined(separator: ","),
+                        selected?.identifier ?? "none",
+                        selected?.enabled == true ? "true" : "false",
+                        errorCode ?? "none"
+                    )
+
+                    self.postSafariExtensionState(
+                        nonce: nonce,
+                        enabled: selected?.enabled == true,
+                        settingsSupported: true,
+                        error: errorCode,
+                        queriedIdentifier: selected?.identifier,
+                        embeddedExtensionIdentifiers: identifiers
+                    )
                 }
             }
         }
     }
 
+    @available(iOS 26.2, *)
+    private func querySafariExtensionStates(
+        for identifiers: [String],
+        completion: @escaping ([TraceSafariExtensionStateQueryResult]) -> Void
+    ) {
+        var remaining = Array(identifiers)
+        var results: [TraceSafariExtensionStateQueryResult] = []
+
+        func queryNext() {
+            guard !remaining.isEmpty else {
+                completion(results)
+                return
+            }
+
+            let identifier = remaining.removeFirst()
+            SFSafariExtensionManager.getStateOfExtension(withIdentifier: identifier) { state, error in
+                DispatchQueue.main.async {
+                    let errorCode: String?
+                    if error != nil {
+                        errorCode = "state_unavailable"
+                    } else if state == nil {
+                        errorCode = "state_missing"
+                    } else {
+                        errorCode = nil
+                    }
+                    results.append(
+                        TraceSafariExtensionStateQueryResult(
+                            identifier: identifier,
+                            enabled: state?.isEnabled == true,
+                            errorCode: errorCode
+                        )
+                    )
+                    if state?.isEnabled == true {
+                        completion(results)
+                    } else {
+                        queryNext()
+                    }
+                }
+            }
+        }
+
+        queryNext()
+    }
+
     private func handleTraceSafariExtensionSettingsRequest(nonce: String) {
         Task { [weak self] in
             guard let self else { return }
-            do {
-                try await self.storeCurrentTraceTokenForSafariExtension()
-            } catch {
-                await MainActor.run {
-                    self.postSafariExtensionActionResult(
-                        type: "TRACE_IOS_OPEN_EXTENSION_SETTINGS_RESPONSE",
-                        nonce: nonce,
-                        ok: false,
-                        error: "token_share_failed"
-                    )
-                }
-                return
-            }
+            let tokenShareSucceeded = (try? await self.storeCurrentTraceTokenForSafariExtension()) != nil
 
             await MainActor.run {
                 guard #available(iOS 26.2, *) else {
@@ -1190,8 +1251,12 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                     return
                 }
 
+                let identifiers = Self.safariExtensionCandidateIdentifiers()
+                if !tokenShareSucceeded {
+                    NSLog("[Trace] Safari extension settings opening without refreshed shared token")
+                }
                 SFSafariSettings.openExtensionsSettings(
-                    forIdentifiers: [Self.safariExtensionBundleIdentifier]
+                    forIdentifiers: identifiers
                 ) { [weak self] error in
                     DispatchQueue.main.async {
                         self?.postSafariExtensionActionResult(
@@ -1303,6 +1368,39 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         UserDefaults(suiteName: traceSharedAppGroup)
     }
 
+    private static func safariExtensionCandidateIdentifiers() -> [String] {
+        var identifiers = embeddedSafariExtensionBundleIdentifiers()
+        identifiers.append(safariExtensionBundleIdentifier)
+
+        var seen = Set<String>()
+        return identifiers.filter { identifier in
+            seen.insert(identifier).inserted
+        }
+    }
+
+    private static func embeddedSafariExtensionBundleIdentifiers() -> [String] {
+        guard let plugInsURL = Bundle.main.builtInPlugInsURL,
+              let plugInURLs = try? FileManager.default.contentsOfDirectory(
+                at: plugInsURL,
+                includingPropertiesForKeys: nil
+              )
+        else {
+            return []
+        }
+
+        return plugInURLs.compactMap { url in
+            guard url.pathExtension == "appex",
+                  let bundle = Bundle(url: url),
+                  let identifier = bundle.bundleIdentifier,
+                  let extensionInfo = bundle.object(forInfoDictionaryKey: "NSExtension") as? [String: Any],
+                  extensionInfo["NSExtensionPointIdentifier"] as? String == "com.apple.Safari.web-extension"
+            else {
+                return nil
+            }
+            return identifier
+        }.sorted()
+    }
+
     private static func storePendingFirstStoryURL(_ url: URL) throws {
         guard let defaults = pendingDefaults() else {
             throw TraceSafariExtensionBridgeError.sharedStorageUnavailable
@@ -1363,14 +1461,18 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         nonce: String,
         enabled: Bool,
         settingsSupported: Bool,
-        error: String?
+        error: String?,
+        queriedIdentifier: String? = nil,
+        embeddedExtensionIdentifiers: [String]? = nil
     ) {
         postTraceWebMessage(
             TraceSafariExtensionStatePayload(
                 nonce: nonce,
                 enabled: enabled,
                 settingsSupported: settingsSupported,
-                error: error
+                error: error,
+                queriedIdentifier: queriedIdentifier,
+                embeddedExtensionIdentifiers: embeddedExtensionIdentifiers
             )
         )
     }
@@ -1586,12 +1688,28 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     private func postTraceWebMessage<T: Encodable>(_ payload: T) {
         guard let data = try? JSONEncoder().encode(payload),
               let json = String(data: data, encoding: .utf8),
-              let originData = try? JSONEncoder().encode(Self.webAppHTTPSOrigin),
+              let originData = try? JSONEncoder().encode(currentWebMessageTargetOrigin()),
               let originJson = String(data: originData, encoding: .utf8)
         else { return }
 
         let js = "window.postMessage(\(json), \(originJson));"
         webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    private func currentWebMessageTargetOrigin() -> String {
+        guard let url = webView.url,
+              url.scheme?.lowercased() == "https",
+              let host = url.host,
+              traceAppHostsMatch(url)
+        else {
+            return Self.webAppHTTPSOrigin
+        }
+
+        var origin = "https://\(host)"
+        if let port = url.port {
+            origin += ":\(port)"
+        }
+        return origin
     }
 
     @MainActor

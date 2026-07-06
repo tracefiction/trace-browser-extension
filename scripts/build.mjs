@@ -154,7 +154,7 @@ const LOCAL_TRACE_API_MATCHES = [
   "http://127.0.0.1:3001/*",
 ];
 const RELEASE_TRACE_API_BASE = "https://api.tracefiction.com";
-const RELEASE_TRACE_WEB_ORIGIN = "https://tracefiction.com";
+const RELEASE_TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 const FIREFOX_RELEASE_EXTENSION_ID = "trace@tracefiction.com";
 const FIREFOX_DEV_EXTENSION_ID = "trace-dev@tracefiction.com";
 const SAFARI_ONLY_PERMISSIONS = ["nativeMessaging"];

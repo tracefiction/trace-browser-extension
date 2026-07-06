@@ -257,6 +257,6 @@ Full validation:
 
 ```bash
 npm test
-TRACE_API_BASE=https://api.tracefiction.com TRACE_WEB_ORIGIN=https://tracefiction.com npm run build:release
+TRACE_API_BASE=https://api.tracefiction.com TRACE_WEB_ORIGIN=https://www.tracefiction.com npm run build:release
 git diff --check
 ```
