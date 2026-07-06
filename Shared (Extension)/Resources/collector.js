@@ -4,6 +4,12 @@
 // Does not read cookies or credentials, and disables collection on pages with password fields.
 const ext = globalThis.browser ?? globalThis.chrome;
 const PRIVATE_TAG_DISPLAY_LIMIT = 3;
+const TRACE_FIRST_STORY_FOCUS_ADD_MESSAGE = "TRACE_FIRST_STORY_FOCUS_ADD";
+const TRACE_IOS_PENDING_FIRST_STORY_GET_MESSAGE = "TRACE_IOS_PENDING_FIRST_STORY_GET";
+const TRACE_IOS_PENDING_FIRST_STORY_CLEAR_MESSAGE = "TRACE_IOS_PENDING_FIRST_STORY_CLEAR";
+const FIRST_STORY_FOCUS_MAX_ATTEMPTS = 30;
+const FIRST_STORY_FOCUS_RETRY_MS = 150;
+const FIRST_STORY_SAVE_TIMEOUT_MS = 18_000;
 
 function traceIsCredentialPageUrl() {
   var path = String(location && location.pathname ? location.pathname : "").toLowerCase();
@@ -2247,7 +2253,8 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (shouldDisableTraceContentScript()) {
     if (
       msg?.type === "TRACE_COLLECT" ||
-      msg?.type === "TRACE_SCHEDULE_AUTO_TRACK"
+      msg?.type === "TRACE_SCHEDULE_AUTO_TRACK" ||
+      msg?.type === TRACE_FIRST_STORY_FOCUS_ADD_MESSAGE
     ) {
       sendResponse({ ok: false, error: "page_contains_password_field" });
     }
@@ -2262,6 +2269,10 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: false, error: String(e?.message || e) });
     }
     return false;
+  }
+  if (msg?.type === TRACE_FIRST_STORY_FOCUS_ADD_MESSAGE) {
+    handleFirstStoryFocusAdd(sendResponse);
+    return true;
   }
   if (msg?.type !== "TRACE_COLLECT") return false;
   try {
@@ -3776,9 +3787,21 @@ function applyQuickAddActionState(btn, addTheme, compact) {
   btn.disabled = false;
 }
 
-function sendQuickAddAction(btn, workKey, addTheme, compact) {
-  var collected = collect();
-  if (!collected.items.length) return;
+function sendQuickAddAction(btn, workKey, addTheme, compact, done) {
+  var notifyDone = function (result) {
+    if (typeof done === "function") done(result);
+  };
+  var collected;
+  try {
+    collected = collect();
+  } catch (e) {
+    notifyDone({ ok: false, error: String(e && e.message ? e.message : e) });
+    return;
+  }
+  if (!collected.items.length) {
+    notifyDone({ ok: false, error: "collect_failed" });
+    return;
+  }
 
   var payload = {
     s: collected.source,
@@ -3820,6 +3843,7 @@ function sendQuickAddAction(btn, workKey, addTheme, compact) {
             applyQuickAddActionState(btn, addTheme, compact);
           }
         }, 2500);
+        notifyDone({ ok: false, error: "runtime_error" });
         return;
       }
 
@@ -3863,6 +3887,11 @@ function sendQuickAddAction(btn, workKey, addTheme, compact) {
           optimisticStoryPageEntries[workKey] = next;
           renderQuickAddButton(workKey);
         }, compact ? 450 : 1500);
+        notifyDone({
+          ok: true,
+          state: "saved",
+          entryId: response.entryId || null,
+        });
       } else if (response.error === "free_limit_reached") {
         if (compact) {
           applyStoryInlineHandleState(btn, storyHandlePresentation({ hasAuth: true, entry: { __traceAutoTrackError: "free_limit_reached" } }));
@@ -3872,6 +3901,7 @@ function sendQuickAddAction(btn, workKey, addTheme, compact) {
         }
         btn.title = "Free library limit reached \u2014 upgrade for unlimited";
         btn.disabled = true;
+        notifyDone({ ok: false, error: "free_limit_reached" });
       } else if (response.error === "auth_expired") {
         if (compact) {
           applyStoryInlineHandleState(btn, storyHandlePresentation({ hasAuth: true, entry: { __traceAutoTrackError: "auth_expired" } }));
@@ -3880,6 +3910,7 @@ function sendQuickAddAction(btn, workKey, addTheme, compact) {
           btn.textContent = "Sign in again";
         }
         btn.disabled = true;
+        notifyDone({ ok: false, error: "auth_expired" });
       } else {
         if (compact) {
           applyStoryInlineHandleState(btn, {
@@ -3902,9 +3933,227 @@ function sendQuickAddAction(btn, workKey, addTheme, compact) {
             applyQuickAddActionState(btn, addTheme, compact);
           }
         }, 2500);
+        notifyDone({ ok: false, error: response.error || "quick_add_failed" });
       }
     },
   );
+}
+
+function findTraceStoryHandle(workKey) {
+  var handle = document.querySelector("[" + TRACE_STORY_HANDLE_ATTR + "]");
+  if (!handle) return null;
+  var handleWorkKey = handle.getAttribute(TRACE_STORY_HANDLE_ATTR);
+  return !handleWorkKey || handleWorkKey === workKey ? handle : null;
+}
+
+function focusFirstStoryTraceControl(handle) {
+  if (!handle) return;
+  var target = handle.closest("[" + QUICK_ADD_WRAP_ATTR + "]") || handle;
+  try {
+    target.scrollIntoView({ block: "center", behavior: "smooth" });
+  } catch (_) {
+    try {
+      target.scrollIntoView();
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  try {
+    handle.focus({ preventScroll: true });
+  } catch (_) {
+    try {
+      handle.focus();
+    } catch (_) {
+      /* ignore */
+    }
+  }
+}
+
+function firstStoryControlErrorForState(state) {
+  if (state === "auth" || state === "auth-expired") return "not_authenticated";
+  if (state === "full") return "free_limit_reached";
+  return "save_failed";
+}
+
+function parseFirstStoryUrlForMatch(rawUrl) {
+  var url;
+  try {
+    url = new URL(rawUrl);
+  } catch (_) {
+    return null;
+  }
+  if (String(url.protocol).toLowerCase() !== "https:") return null;
+  var host = String(url.hostname || "").toLowerCase();
+  var parts = String(url.pathname || "")
+    .split("/")
+    .filter(Boolean);
+
+  var isAo3Host =
+    host === "archiveofourown.org" ||
+    /\.archiveofourown\.org$/.test(host) ||
+    host === "archiveofourown.gay" ||
+    /\.archiveofourown\.gay$/.test(host) ||
+    host === "archive.transformativeworks.org" ||
+    host === "ao3.org" ||
+    /\.ao3\.org$/.test(host);
+  if (isAo3Host && parts[0] === "works" && /^\d+$/.test(parts[1] || "")) {
+    if (parts.length === 2) {
+      return { source: "ao3", storyId: parts[1], chapterId: null, chapterNumber: null };
+    }
+    if (
+      parts.length === 4 &&
+      parts[2] === "chapters" &&
+      /^\d+$/.test(parts[3] || "")
+    ) {
+      return { source: "ao3", storyId: parts[1], chapterId: parts[3], chapterNumber: null };
+    }
+  }
+
+  if (
+    (host === "www.fanfiction.net" || host === "m.fanfiction.net") &&
+    parts[0] === "s" &&
+    /^\d+$/.test(parts[1] || "")
+  ) {
+    var chapterNumber =
+      parts.length >= 3 && /^\d+$/.test(parts[2] || "")
+        ? Number(parts[2])
+        : null;
+    return { source: "ffn", storyId: parts[1], chapterId: null, chapterNumber: chapterNumber };
+  }
+
+  return null;
+}
+
+function pendingFirstStoryMatchesCurrentPage(pendingUrl) {
+  var pending = parseFirstStoryUrlForMatch(pendingUrl);
+  var current = parseFirstStoryUrlForMatch(location.href);
+  if (!pending || !current) return false;
+  if (pending.source !== current.source || pending.storyId !== current.storyId) {
+    return false;
+  }
+  if (pending.chapterId) {
+    return current.chapterId === pending.chapterId;
+  }
+  if (typeof pending.chapterNumber === "number" && pending.chapterNumber > 1) {
+    return current.chapterNumber === pending.chapterNumber;
+  }
+
+  try {
+    var collected = collect();
+    var item = collected && collected.items && collected.items[0];
+    if (
+      item &&
+      typeof item.chn === "number" &&
+      Number.isFinite(item.chn) &&
+      item.chn > 1
+    ) {
+      return false;
+    }
+  } catch (_) {
+    if (typeof current.chapterNumber === "number" && current.chapterNumber > 1) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function sendIosPendingFirstStoryClear() {
+  try {
+    ext.runtime.sendMessage({
+      type: TRACE_IOS_PENDING_FIRST_STORY_CLEAR_MESSAGE,
+    });
+  } catch (_) {
+    /* best effort */
+  }
+}
+
+function processIosPendingFirstStoryAdd() {
+  try {
+    ext.runtime.sendMessage(
+      { type: TRACE_IOS_PENDING_FIRST_STORY_GET_MESSAGE },
+      function (response) {
+        if (ext.runtime.lastError || !response || response.ok !== true) return;
+        var pendingUrl = typeof response.url === "string" ? response.url.trim() : "";
+        if (!pendingUrl) return;
+        if (!pendingFirstStoryMatchesCurrentPage(pendingUrl)) {
+          sendIosPendingFirstStoryClear();
+          return;
+        }
+        handleFirstStoryFocusAdd(function (result) {
+          if (result && result.ok) {
+            sendIosPendingFirstStoryClear();
+          }
+        });
+      },
+    );
+  } catch (_) {
+    /* native pending handoff is optional */
+  }
+}
+
+function handleFirstStoryFocusAdd(sendResponse, attempt) {
+  var workKey = getWorkKeyFromUrl();
+  if (!workKey) {
+    sendResponse({ ok: false, error: "unsupported_page" });
+    return;
+  }
+
+  renderQuickAddButton(workKey);
+  setTimeout(function () {
+    var handle = findTraceStoryHandle(workKey);
+    if (!handle) {
+      if ((attempt || 0) < FIRST_STORY_FOCUS_MAX_ATTEMPTS) {
+        handleFirstStoryFocusAdd(sendResponse, (attempt || 0) + 1);
+        return;
+      }
+      sendResponse({ ok: false, error: "trace_control_not_found" });
+      return;
+    }
+
+    focusFirstStoryTraceControl(handle);
+    var state = handle.getAttribute("data-trace-story-handle-state");
+    if (state === "status") {
+      sendResponse({ ok: true, state: "already_saved" });
+      return;
+    }
+    if (state === "adding") {
+      if ((attempt || 0) < FIRST_STORY_FOCUS_MAX_ATTEMPTS) {
+        handleFirstStoryFocusAdd(sendResponse, (attempt || 0) + 1);
+        return;
+      }
+      sendResponse({ ok: false, error: "save_failed" });
+      return;
+    }
+    if (state !== "add" && state !== "auth" && state !== "auth-expired") {
+      sendResponse({
+        ok: false,
+        error: firstStoryControlErrorForState(state),
+      });
+      return;
+    }
+
+    var finished = false;
+    var timeout = setTimeout(function () {
+      if (finished) return;
+      finished = true;
+      sendResponse({ ok: false, error: "save_failed" });
+    }, FIRST_STORY_SAVE_TIMEOUT_MS);
+    sendQuickAddAction(handle, workKey, TRACE_THEMES.add, true, function (result) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      if (result && result.ok) {
+        focusFirstStoryTraceControl(handle);
+        sendResponse({ ok: true, state: result.state || "saved" });
+        return;
+      }
+      sendResponse({
+        ok: false,
+        error: (result && result.error) || "save_failed",
+      });
+    });
+  }, FIRST_STORY_FOCUS_RETRY_MS);
 }
 
 function bindQuickAddAction(btn, workKey, addTheme, compact) {
@@ -4662,8 +4911,13 @@ function initQuickAdd() {
   if (shouldDisableTraceContentScript()) return;
   var workKey = getWorkKeyFromUrl();
   if (!workKey) return;
+  if (storyQuickAddUiReady) {
+    renderQuickAddButton(workKey);
+    return;
+  }
   storyQuickAddUiReady = true;
   renderQuickAddButton(workKey);
+  processIosPendingFirstStoryAdd();
 
   try {
     ext.storage.onChanged.addListener(function (changes, area) {

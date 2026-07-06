@@ -332,6 +332,116 @@ test("sync ignores cross-origin status requests", async () => {
   assert.deepEqual(nonTokenRequestMessages(h), []);
 });
 
+test("sync forwards first-story add requests and posts sanitized responses", async () => {
+  const h = createSyncHarness("https://tracefiction.com", {
+    sendMessageImpl(message, callback) {
+      callback?.({
+        ok: true,
+        state: "saved",
+        authToken: "token-should-not-leak",
+        story: { title: "private" },
+      });
+    },
+  });
+
+  h.window.dispatchEvent(
+    new h.window.MessageEvent("message", {
+      data: {
+        type: "TRACE_FIRST_STORY_ADD_REQUEST",
+        nonce: "first-story-1",
+        url: "https://archiveofourown.org/works/123",
+      },
+      origin: "https://tracefiction.com",
+      source: h.window,
+    }),
+  );
+  await flush();
+
+  assert.deepEqual(plainJson(h.messages), [
+    {
+      type: "TRACE_FIRST_STORY_ADD",
+      nonce: "first-story-1",
+      url: "https://archiveofourown.org/works/123",
+    },
+  ]);
+  assert.deepEqual(nonTokenRequestMessages(h), [
+    {
+      data: {
+        type: "TRACE_FIRST_STORY_ADD_RESPONSE",
+        nonce: "first-story-1",
+        ok: true,
+        state: "saved",
+      },
+      targetOrigin: "https://tracefiction.com",
+    },
+  ]);
+});
+
+test("sync returns sanitized first-story add failures", async () => {
+  const h = createSyncHarness("https://tracefiction.com", {
+    sendMessageImpl(message, callback) {
+      callback?.({
+        ok: false,
+        error: "invalid_url",
+        rawError: "do not leak",
+      });
+    },
+  });
+
+  h.window.dispatchEvent(
+    new h.window.MessageEvent("message", {
+      data: {
+        type: "TRACE_FIRST_STORY_ADD_REQUEST",
+        nonce: "first-story-2",
+        url: "https://example.com/works/123",
+      },
+      origin: "https://tracefiction.com",
+      source: h.window,
+    }),
+  );
+  await flush();
+
+  assert.deepEqual(plainJson(h.messages), [
+    {
+      type: "TRACE_FIRST_STORY_ADD",
+      nonce: "first-story-2",
+      url: "https://example.com/works/123",
+    },
+  ]);
+  assert.deepEqual(nonTokenRequestMessages(h), [
+    {
+      data: {
+        type: "TRACE_FIRST_STORY_ADD_RESPONSE",
+        nonce: "first-story-2",
+        ok: false,
+        error: "invalid_url",
+      },
+      targetOrigin: "https://tracefiction.com",
+    },
+  ]);
+});
+
+test("sync ignores first-story add requests without nonce or URL", async () => {
+  const h = createSyncHarness();
+
+  for (const data of [
+    { type: "TRACE_FIRST_STORY_ADD_REQUEST", nonce: "", url: "https://archiveofourown.org/works/123" },
+    { type: "TRACE_FIRST_STORY_ADD_REQUEST", nonce: "first-story-3", url: "" },
+  ]) {
+    h.window.dispatchEvent(
+      new h.window.MessageEvent("message", {
+        data,
+        origin: "https://tracefiction.com",
+        source: h.window,
+      }),
+    );
+  }
+  await flush();
+
+  assert.deepEqual(h.messages, []);
+  assert.deepEqual(nonTokenRequestMessages(h), []);
+});
+
 test("sync returns safe unknown state when background status messaging fails", async () => {
   const h = createSyncHarness("https://tracefiction.com", {
     sendMessageImpl() {

@@ -56,6 +56,7 @@ function createBackgroundHarness({
   fetchImpl,
   activeTabs = [{ id: 11 }],
   sendMessageImpl,
+  sendNativeMessageImpl,
 } = {}) {
   const quietConsole = {
     log() {},
@@ -72,6 +73,8 @@ function createBackgroundHarness({
   const badgeTextCalls = [];
   const badgeColorCalls = [];
   const createdTabs = [];
+  const updatedTabs = [];
+  const nativeMessages = [];
   const fetchCalls = [];
   const timers = [];
   const storageChangeListeners = [];
@@ -123,6 +126,16 @@ function createBackgroundHarness({
           onInstalledListener = fn;
         },
       },
+      sendNativeMessage(...args) {
+        const callback =
+          typeof args[args.length - 1] === "function" ? args.pop() : undefined;
+        nativeMessages.push(plainJson(args));
+        if (sendNativeMessageImpl) {
+          return sendNativeMessageImpl(...args, callback);
+        }
+        if (callback) callback(undefined);
+        return undefined;
+      },
     },
     storage: {
       local: localApi,
@@ -163,7 +176,13 @@ function createBackgroundHarness({
       },
       async create(args) {
         createdTabs.push(args);
-        return args;
+        return { id: 100 + createdTabs.length, ...args };
+      },
+      async update(tabId, args) {
+        updatedTabs.push({ tabId, args });
+        const tab = activeTabs.find((item) => item.id === tabId);
+        if (tab) Object.assign(tab, args || {});
+        return { id: tabId, ...(tab || {}), ...(args || {}) };
       },
       onUpdated: {
         addListener(fn) {
@@ -255,6 +274,8 @@ globalThis.__testHooks = {
     badgeTextCalls,
     badgeColorCalls,
     createdTabs,
+    updatedTabs,
+    nativeMessages,
     fetchCalls,
     timers,
     get hooks() {
@@ -353,6 +374,214 @@ test("TRACE_AUTH_UPDATE verifies account before marking connected", async () => 
   assert.equal(h.store.traceAuthState.authVerificationVersion, 1);
   assert.match(h.store.traceAuthState.accountVerifiedAt, /^\d{4}-/);
   assert.match(h.store.traceAuthState.lastTokenSyncAt, /^\d{4}-/);
+});
+
+test("iOS native auth token bootstraps the extension account", async () => {
+  const h = createBackgroundHarness({
+    sendNativeMessageImpl(message, callback) {
+      assert.equal(message.type, "TRACE_IOS_AUTH_TOKEN_REQUEST");
+      callback({ ok: true, token: "native-token" });
+    },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) {
+        return createResponse({ json: { pro: true, library_count: 3 } });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: { success: true, data: { entries: {}, syncVersion: "native-v1" } },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+
+  await flush();
+  await flush();
+  await flush();
+
+  assert.deepEqual(plainJson(h.nativeMessages[0]), [
+    { type: "TRACE_IOS_AUTH_TOKEN_REQUEST", reason: "missing_token" },
+  ]);
+  assert.equal(h.hooks.getBearerToken(), "native-token");
+  assert.equal(h.hooks.getVerifiedBearerToken(), "native-token");
+  assert.equal(h.store.authToken, "native-token");
+  assert.equal(h.store.traceAuthState.state, "connected");
+  assert.equal(h.store.traceUserPro, true);
+  assert.equal(h.store.traceLibraryCount, 3);
+});
+
+test("iOS native auth retries native messaging with application id after async failure", async () => {
+  const h = createBackgroundHarness({
+    sendNativeMessageImpl(firstArg, secondArg, callback) {
+      if (firstArg === "com.tracefiction.trace") {
+        assert.equal(secondArg.type, "TRACE_IOS_AUTH_TOKEN_REQUEST");
+        callback({ ok: true, token: "native-token-two-arg" });
+        return;
+      }
+      return Promise.reject(new Error("one-argument native message rejected"));
+    },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/api/account/me")) {
+        assert.equal(init.headers.Authorization, "Bearer native-token-two-arg");
+        return createResponse({ json: { pro: false, library_count: 2 } });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: { success: true, data: { entries: {}, syncVersion: "native-two-arg-v1" } },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+
+  await flush();
+  await flush();
+  await flush();
+
+  assert.deepEqual(plainJson(h.nativeMessages[0]), [
+    { type: "TRACE_IOS_AUTH_TOKEN_REQUEST", reason: "missing_token" },
+  ]);
+  assert.deepEqual(plainJson(h.nativeMessages[1]), [
+    "com.tracefiction.trace",
+    { type: "TRACE_IOS_AUTH_TOKEN_REQUEST", reason: "missing_token" },
+  ]);
+  assert.equal(h.hooks.getBearerToken(), "native-token-two-arg");
+  assert.equal(h.store.traceAuthState.state, "connected");
+});
+
+test("missing iOS native auth token leaves the extension signed out", async () => {
+  const h = createBackgroundHarness();
+
+  await flush();
+
+  assert.deepEqual(plainJson(h.nativeMessages[0]), [
+    { type: "TRACE_IOS_AUTH_TOKEN_REQUEST", reason: "missing_token" },
+  ]);
+  assert.equal(h.hooks.getBearerToken(), null);
+  assert.equal(h.store.authToken, undefined);
+  assert.equal(h.store.traceAuthState.state, "signed_out");
+});
+
+test("late missing iOS bootstrap does not overwrite a browser token update", async () => {
+  let nativeCallback;
+  const h = createBackgroundHarness({
+    sendNativeMessageImpl(message, callback) {
+      assert.equal(message.type, "TRACE_IOS_AUTH_TOKEN_REQUEST");
+      nativeCallback = callback;
+    },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) {
+        return createResponse({ json: { pro: false, library_count: 1 } });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: { success: true, data: { entries: {}, syncVersion: "web-v1" } },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+
+  const response = await h.dispatchMessage(
+    { type: "TRACE_AUTH_UPDATE", token: "web-token" },
+    { tab: { id: 23 } },
+  );
+  assert.deepEqual(plainJson(response), { success: true, state: "connected" });
+
+  nativeCallback(undefined);
+  await flush();
+
+  assert.equal(h.hooks.getBearerToken(), "web-token");
+  assert.equal(h.hooks.getVerifiedBearerToken(), "web-token");
+  assert.equal(h.store.authToken, "web-token");
+  assert.equal(h.store.traceAuthState.state, "connected");
+});
+
+test("TRACE_IOS_PENDING_FIRST_STORY messages proxy native pending state", async () => {
+  const h = createBackgroundHarness({
+    storageState: { authToken: "stored-token" },
+    sendNativeMessageImpl(message, callback) {
+      if (message.type === "TRACE_IOS_PENDING_FIRST_STORY_GET") {
+        callback({
+          ok: true,
+          url: "https://archiveofourown.org/works/123/chapters/456",
+          expiresAt: 1767225600000,
+        });
+        return;
+      }
+      if (message.type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR") {
+        callback({ ok: true });
+        return;
+      }
+      callback({ ok: false, error: "unexpected_message" });
+    },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) {
+        return createResponse({ json: { pro: false, library_count: 0 } });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: { success: true, data: { entries: {}, syncVersion: "pending-v1" } },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+
+  const pending = await h.dispatchMessage({
+    type: "TRACE_IOS_PENDING_FIRST_STORY_GET",
+  });
+  const cleared = await h.dispatchMessage({
+    type: "TRACE_IOS_PENDING_FIRST_STORY_CLEAR",
+  });
+
+  assert.deepEqual(plainJson(pending), {
+    ok: true,
+    url: "https://archiveofourown.org/works/123/chapters/456",
+    expiresAt: 1767225600000,
+  });
+  assert.deepEqual(plainJson(cleared), { ok: true });
+  assert.deepEqual(
+    h.nativeMessages.slice(-2).map((args) => plainJson(args[0])),
+    [
+      { type: "TRACE_IOS_PENDING_FIRST_STORY_GET" },
+      { type: "TRACE_IOS_PENDING_FIRST_STORY_CLEAR" },
+    ],
+  );
+});
+
+test("TRACE_IOS_PENDING_FIRST_STORY_GET stops before URL handoff when iOS auth bootstrap fails", async () => {
+  const h = createBackgroundHarness({
+    sendNativeMessageImpl(message, callback) {
+      if (message.type === "TRACE_IOS_AUTH_TOKEN_REQUEST") {
+        callback({ ok: false, error: "missing_token" });
+        return;
+      }
+      if (message.type === "TRACE_IOS_PENDING_FIRST_STORY_GET") {
+        callback({
+          ok: true,
+          url: "https://archiveofourown.org/works/123/chapters/456",
+        });
+        return;
+      }
+      callback({ ok: false, error: "unexpected_message" });
+    },
+  });
+
+  const pending = await h.dispatchMessage({
+    type: "TRACE_IOS_PENDING_FIRST_STORY_GET",
+  });
+
+  assert.deepEqual(plainJson(pending), {
+    ok: false,
+    error: "not_authenticated",
+  });
+  assert.equal(
+    h.nativeMessages.some(
+      (args) => plainJson(args[0]).type === "TRACE_IOS_PENDING_FIRST_STORY_GET",
+    ),
+    false,
+  );
 });
 
 test("TRACE_AUTH_UPDATE handles bootstrap-required tokens without marking connected", async () => {
@@ -1112,6 +1341,151 @@ test("TRACE_EXTENSION_STATUS_QUERY ignores missing or invalid nonces", async () 
   );
 });
 
+test("onInstalled opens the activation URL only for first install", async () => {
+  const h = createBackgroundHarness({
+    webOrigin: "https://tracefiction.com",
+  });
+
+  assert.equal(typeof h.onInstalledListener, "function");
+  h.onInstalledListener({ reason: "install" });
+  await flush();
+  assert.deepEqual(plainJson(h.createdTabs), [
+    {
+      url: "https://tracefiction.com/?activation=extension-installed",
+      active: true,
+    },
+  ]);
+  assert.deepEqual(plainJson(h.updatedTabs), []);
+
+  h.createdTabs.length = 0;
+  h.onInstalledListener({ reason: "update" });
+  await flush();
+  assert.deepEqual(plainJson(h.createdTabs), []);
+  assert.deepEqual(plainJson(h.updatedTabs), []);
+});
+
+test("onInstalled reuses an existing Trace tab for activation", async () => {
+  const h = createBackgroundHarness({
+    webOrigin: "https://tracefiction.com",
+    activeTabs: [
+      { id: 44, url: "https://tracefiction.com/?panel=add", active: false },
+      { id: 55, url: "https://example.com/", active: true },
+    ],
+  });
+
+  assert.equal(typeof h.onInstalledListener, "function");
+  h.onInstalledListener({ reason: "install" });
+  await flush();
+
+  assert.deepEqual(plainJson(h.createdTabs), []);
+  assert.deepEqual(plainJson(h.updatedTabs), [
+    {
+      tabId: 44,
+      args: {
+        url: "https://tracefiction.com/?activation=extension-installed",
+        active: true,
+      },
+    },
+  ]);
+});
+
+test("TRACE_FIRST_STORY_ADD rejects unsupported URLs without opening a tab", async () => {
+  const h = createBackgroundHarness();
+  h.hooks.setBearerToken("token-first-story");
+
+  for (const url of [
+    "https://archiveofourown.org/users/example/bookmarks",
+    "https://example.com/works/123",
+    "not a url",
+  ]) {
+    const response = await h.dispatchMessage({
+      type: "TRACE_FIRST_STORY_ADD",
+      nonce: "nonce-invalid",
+      url,
+    });
+    assert.deepEqual(plainJson(response), { ok: false, error: "invalid_url" });
+  }
+  assert.deepEqual(plainJson(h.createdTabs), []);
+});
+
+test("TRACE_FIRST_STORY_ADD requires an authenticated Trace session", async () => {
+  const h = createBackgroundHarness();
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_FIRST_STORY_ADD",
+    nonce: "nonce-auth",
+    url: "https://archiveofourown.org/works/123",
+  });
+
+  assert.deepEqual(plainJson(response), {
+    ok: false,
+    error: "not_authenticated",
+  });
+  assert.deepEqual(plainJson(h.createdTabs), []);
+});
+
+test("TRACE_FIRST_STORY_ADD opens supported archive URLs and dispatches focus-add", async () => {
+  const sentMessages = [];
+  const h = createBackgroundHarness({
+    sendMessageImpl: async (tabId, msg) => {
+      sentMessages.push({ tabId, msg });
+      return { ok: true, state: "saved" };
+    },
+  });
+  h.hooks.setBearerToken("token-first-story");
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_FIRST_STORY_ADD",
+    nonce: "nonce-ao3",
+    url: "https://archiveofourown.org/works/123/chapters/456",
+  });
+
+  assert.deepEqual(plainJson(response), { ok: true, state: "saved" });
+  assert.deepEqual(plainJson(h.createdTabs), [
+    {
+      url: "https://archiveofourown.org/works/123/chapters/456",
+      active: true,
+    },
+  ]);
+  assert.deepEqual(plainJson(sentMessages), [
+    {
+      tabId: 101,
+      msg: { type: "TRACE_FIRST_STORY_FOCUS_ADD" },
+    },
+  ]);
+});
+
+test("TRACE_FIRST_STORY_ADD supports FanFiction.net story chapters", async () => {
+  const sentMessages = [];
+  const h = createBackgroundHarness({
+    sendMessageImpl: async (tabId, msg) => {
+      sentMessages.push({ tabId, msg });
+      return { ok: true, state: "saved" };
+    },
+  });
+  h.hooks.setBearerToken("token-first-story");
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_FIRST_STORY_ADD",
+    nonce: "nonce-ffn",
+    url: "https://www.fanfiction.net/s/123/2/Story-Title",
+  });
+
+  assert.deepEqual(plainJson(response), { ok: true, state: "saved" });
+  assert.deepEqual(plainJson(h.createdTabs), [
+    {
+      url: "https://www.fanfiction.net/s/123/2/Story-Title",
+      active: true,
+    },
+  ]);
+  assert.deepEqual(plainJson(sentMessages), [
+    {
+      tabId: 101,
+      msg: { type: "TRACE_FIRST_STORY_FOCUS_ADD" },
+    },
+  ]);
+});
+
 test("AO3 tab completion pings the collector to schedule auto-track", async () => {
   const sentMessages = [];
   const h = createBackgroundHarness({
@@ -1197,14 +1571,18 @@ test("TRACE_OPEN_TRACE_URL rejects non-Trace URLs", async () => {
   assert.deepEqual(plainJson(h.createdTabs), []);
 });
 
-test("handleAutoTrack without a token keeps first-install popup state signed out", () => {
+test("handleAutoTrack without a token keeps first-install popup state signed out", async () => {
   const h = createBackgroundHarness();
 
-  h.hooks.handleAutoTrack(
-    { s: "ffn", item: { t: "A Story", u: "https://www.fanfiction.net/s/1/" } },
-    { tab: { id: 33 } },
-  );
+  const response = await new Promise((resolve) => {
+    h.hooks.handleAutoTrack(
+      { s: "ffn", item: { t: "A Story", u: "https://www.fanfiction.net/s/1/" } },
+      { tab: { id: 33 } },
+      resolve,
+    );
+  });
 
+  assert.deepEqual(plainJson(response), { ok: false, error: "not_authenticated" });
   assert.equal(h.store.traceAuthState.state, "signed_out");
   assert.match(h.store.traceAuthState.message, /automatic sync will work/i);
   assert.deepEqual(plainJson(h.badgeTextCalls.at(-1)), { text: "LOG", tabId: 33 });
@@ -1571,6 +1949,139 @@ test("TRACE_QUICK_ADD without token returns not_authenticated", async () => {
 
   assert.equal(response.ok, false);
   assert.equal(response.error, "not_authenticated");
+});
+
+test("TRACE_QUICK_ADD bootstraps iOS native auth before first-story quick add", async () => {
+  const h = createBackgroundHarness({
+    sendNativeMessageImpl(message, callback) {
+      if (
+        message.type === "TRACE_IOS_AUTH_TOKEN_REQUEST" &&
+        message.reason === "quick_add"
+      ) {
+        callback({ ok: true, token: "native-quick-token" });
+        return;
+      }
+      callback({ ok: false, error: "missing_token" });
+    },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/api/account/me")) {
+        assert.equal(init.headers.Authorization, "Bearer native-quick-token");
+        return createResponse({ json: { pro: false, library_count: 0 } });
+      }
+      if (String(url).endsWith("/api/extension/track")) {
+        assert.equal(init.headers.Authorization, "Bearer native-quick-token");
+        return createResponse({
+          json: {
+            success: true,
+            data: { entry_id: "entry-quick-native", type: "created" },
+          },
+        });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: { success: true, data: { entries: {}, syncVersion: "quick-native-v1" } },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_QUICK_ADD",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: { t: "Test", u: "https://archiveofourown.org/works/102" },
+      },
+    },
+    { tab: { id: 89 } },
+  );
+
+  assert.deepEqual(plainJson(response), {
+    ok: true,
+    entryId: "entry-quick-native",
+  });
+  assert.equal(h.hooks.getBearerToken(), "native-quick-token");
+  assert.equal(h.store.traceFirstSaveSeen, true);
+  assert.ok(
+    h.nativeMessages.some(
+      (args) => plainJson(args[0]).reason === "quick_add",
+    ),
+  );
+});
+
+test("TRACE_QUICK_ADD retries with iOS native auth after a stale stored token", async () => {
+  let trackCalls = 0;
+  const h = createBackgroundHarness({
+    sendNativeMessageImpl(message, callback) {
+      if (
+        message.type === "TRACE_IOS_AUTH_TOKEN_REQUEST" &&
+        message.reason === "quick_add_auth_failure"
+      ) {
+        callback({ ok: true, token: "native-quick-fresh-token" });
+        return;
+      }
+      callback({ ok: false, error: "missing_token" });
+    },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/api/account/me")) {
+        assert.equal(
+          init.headers.Authorization,
+          "Bearer native-quick-fresh-token",
+        );
+        return createResponse({ json: { pro: false, library_count: 0 } });
+      }
+      if (String(url).endsWith("/api/extension/track")) {
+        trackCalls += 1;
+        if (trackCalls === 1) {
+          assert.equal(init.headers.Authorization, "Bearer stale-quick-token");
+          return createResponse({ ok: false, status: 401 });
+        }
+        assert.equal(
+          init.headers.Authorization,
+          "Bearer native-quick-fresh-token",
+        );
+        return createResponse({
+          json: {
+            success: true,
+            data: { entry_id: "entry-quick-retry", type: "created" },
+          },
+        });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: { success: true, data: { entries: {}, syncVersion: "quick-retry-v1" } },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.hooks.setBearerToken("stale-quick-token");
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_QUICK_ADD",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: { t: "Test", u: "https://archiveofourown.org/works/103" },
+      },
+    },
+    { tab: { id: 90 } },
+  );
+
+  assert.deepEqual(plainJson(response), {
+    ok: true,
+    entryId: "entry-quick-retry",
+  });
+  assert.equal(trackCalls, 2);
+  assert.equal(h.hooks.getBearerToken(), "native-quick-fresh-token");
+  assert.ok(
+    h.nativeMessages.some(
+      (args) => plainJson(args[0]).reason === "quick_add_auth_failure",
+    ),
+  );
 });
 
 // =======================================================
@@ -2177,6 +2688,143 @@ test("TRACE_AUTO_TRACK without a token responds not_authenticated", async () => 
 
   assert.equal(response.ok, false);
   assert.equal(response.error, "not_authenticated");
+});
+
+test("TRACE_AUTO_TRACK bootstraps iOS native auth before first story track", async () => {
+  const h = createBackgroundHarness({
+    sendNativeMessageImpl(message, callback) {
+      if (
+        message.type === "TRACE_IOS_AUTH_TOKEN_REQUEST" &&
+        message.reason === "auto_track"
+      ) {
+        callback({ ok: true, token: "native-auto-token" });
+        return;
+      }
+      callback({ ok: false, error: "missing_token" });
+    },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/api/account/me")) {
+        assert.equal(init.headers.Authorization, "Bearer native-auto-token");
+        return createResponse({ json: { pro: false, library_count: 0 } });
+      }
+      if (String(url).endsWith("/api/extension/track")) {
+        assert.equal(init.headers.Authorization, "Bearer native-auto-token");
+        return createResponse({
+          json: {
+            success: true,
+            data: { entry_id: "entry-native-1", type: "created" },
+          },
+        });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: { success: true, data: { entries: {}, syncVersion: "native-at-v1" } },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  await flush();
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_AUTO_TRACK",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: { t: "Story", u: "https://archiveofourown.org/works/200" },
+      },
+    },
+    { tab: { id: 110 }, frameId: 0, documentLifecycle: "active" },
+  );
+
+  assert.deepEqual(plainJson(response), {
+    ok: true,
+    entryId: "entry-native-1",
+  });
+  assert.equal(h.hooks.getBearerToken(), "native-auto-token");
+  assert.equal(h.hooks.getVerifiedBearerToken(), "native-auto-token");
+  assert.equal(h.store.authToken, "native-auto-token");
+  assert.equal(h.store.traceAuthState.state, "connected");
+  assert.equal(h.store.traceFirstSaveSeen, true);
+  assert.ok(
+    h.nativeMessages.some(
+      (args) => plainJson(args[0]).reason === "auto_track",
+    ),
+  );
+});
+
+test("TRACE_AUTO_TRACK retries with iOS native auth after a stale stored token", async () => {
+  let trackCalls = 0;
+  const h = createBackgroundHarness({
+    sendNativeMessageImpl(message, callback) {
+      if (
+        message.type === "TRACE_IOS_AUTH_TOKEN_REQUEST" &&
+        message.reason === "auto_track_auth_failure"
+      ) {
+        callback({ ok: true, token: "native-auto-fresh-token" });
+        return;
+      }
+      callback({ ok: false, error: "missing_token" });
+    },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/api/account/me")) {
+        assert.equal(
+          init.headers.Authorization,
+          "Bearer native-auto-fresh-token",
+        );
+        return createResponse({ json: { pro: false, library_count: 0 } });
+      }
+      if (String(url).endsWith("/api/extension/track")) {
+        trackCalls += 1;
+        if (trackCalls === 1) {
+          assert.equal(init.headers.Authorization, "Bearer stale-auto-token");
+          return createResponse({ ok: false, status: 401 });
+        }
+        assert.equal(
+          init.headers.Authorization,
+          "Bearer native-auto-fresh-token",
+        );
+        return createResponse({
+          json: {
+            success: true,
+            data: { entry_id: "entry-auto-retry", type: "created" },
+          },
+        });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: { success: true, data: { entries: {}, syncVersion: "auto-retry-v1" } },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.hooks.setBearerToken("stale-auto-token");
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_AUTO_TRACK",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: { t: "Story", u: "https://archiveofourown.org/works/204" },
+      },
+    },
+    { tab: { id: 114 }, frameId: 0, documentLifecycle: "active" },
+  );
+
+  assert.deepEqual(plainJson(response), {
+    ok: true,
+    entryId: "entry-auto-retry",
+  });
+  assert.equal(trackCalls, 2);
+  assert.equal(h.hooks.getBearerToken(), "native-auto-fresh-token");
+  assert.ok(
+    h.nativeMessages.some(
+      (args) => plainJson(args[0]).reason === "auto_track_auth_failure",
+    ),
+  );
 });
 
 test("TRACE_AUTO_TRACK from a subframe responds ignored_sender", async () => {

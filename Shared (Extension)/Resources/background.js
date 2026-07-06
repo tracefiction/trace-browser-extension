@@ -18,6 +18,7 @@ const LIBRARY_ENTRY_ENDPOINT_BASE = `${TRACE_API_BASE.replace(/\/$/, "")}/api/li
 const ACCOUNT_ME_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/account/me`;
 const IMPORT_BASE = `${TRACE_WEB_ORIGIN.replace(/\/$/, "")}/import`;
 const TRACE_HOME_URL = `${TRACE_WEB_ORIGIN.replace(/\/$/, "")}/`;
+const FIRST_STORY_ACTIVATION_URL = `${TRACE_WEB_ORIGIN.replace(/\/$/, "")}/?activation=extension-installed`;
 const AUTH_TOKEN_KEY = "authToken";
 const AUTH_STATE_KEY = "traceAuthState";
 const OVERLAY_STORAGE_KEY = "libraryOverlayCache";
@@ -40,6 +41,12 @@ const PREF_LIBRARY_INLAY_KEY = "prefLibraryInlayEnabled";
 const PREF_AO3_SAVED_FILTERS_KEY = "prefAo3SavedFiltersEnabled";
 const PREF_METADATA_IMPROVE_KEY = "prefMetadataImproveEnabled";
 const AUTH_STATE_VERIFICATION_VERSION = 1;
+const FIRST_STORY_ADD_MESSAGE = "TRACE_FIRST_STORY_ADD";
+const FIRST_STORY_FOCUS_ADD_MESSAGE = "TRACE_FIRST_STORY_FOCUS_ADD";
+const IOS_AUTH_TOKEN_REQUEST_MESSAGE = "TRACE_IOS_AUTH_TOKEN_REQUEST";
+const IOS_PENDING_FIRST_STORY_GET_MESSAGE = "TRACE_IOS_PENDING_FIRST_STORY_GET";
+const IOS_PENDING_FIRST_STORY_CLEAR_MESSAGE = "TRACE_IOS_PENDING_FIRST_STORY_CLEAR";
+const IOS_NATIVE_APPLICATION_ID = "com.tracefiction.trace";
 const AO3_STORY_URL_RE =
   /^https:\/\/(?:[^/]+\.)?(?:archiveofourown\.org|archiveofourown\.gay|archive\.transformativeworks\.org|ao3\.org)\/works\/\d+(?:\/chapters\/\d+)?(?:[?#].*)?$/i;
 const FFN_STORY_PATH_RE = /^\/s\/\d+(?:\/\d+)?(?:\/.*)?$/i;
@@ -55,6 +62,8 @@ const AO3_SAVED_FILTER_MAX_PARAMS = 80;
 const AO3_SAVED_FILTER_ACTIVE_LIMIT = 250;
 const AO3_SAVED_FILTER_SYNC_BATCH_LIMIT = 100;
 const AO3_SAVED_FILTER_SYNC_MAX_ITERATIONS = 10;
+const FIRST_STORY_FOCUS_RETRY_ATTEMPTS = 24;
+const FIRST_STORY_FOCUS_RETRY_MS = 250;
 const AUTH_VERIFICATION_RETRY_DELAYS_MS = [750, 2_500, 8_000];
 
 // 1. Token Management
@@ -1432,6 +1441,246 @@ async function handleOpenTraceUrl(payload, sendResponse) {
   }
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function sendFirstStoryFocusAdd(tabId, attempt = 0) {
+  try {
+    return await ext.tabs.sendMessage(tabId, {
+      type: FIRST_STORY_FOCUS_ADD_MESSAGE,
+    });
+  } catch (error) {
+    if (
+      attempt < FIRST_STORY_FOCUS_RETRY_ATTEMPTS &&
+      isMissingTabReceiverError(error)
+    ) {
+      await delay(FIRST_STORY_FOCUS_RETRY_MS);
+      return sendFirstStoryFocusAdd(tabId, attempt + 1);
+    }
+    throw error;
+  }
+}
+
+async function handleFirstStoryAdd(payload, sendResponse) {
+  if (!bearerToken) {
+    if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
+    return;
+  }
+
+  const url = normalizeFirstStoryUrl(payload?.url);
+  if (!url) {
+    if (sendResponse) sendResponse({ ok: false, error: "invalid_url" });
+    return;
+  }
+
+  try {
+    const tab = await ext.tabs.create({ url, active: true });
+    if (!tab || typeof tab.id !== "number") {
+      if (sendResponse) sendResponse({ ok: false, error: "open_failed" });
+      return;
+    }
+
+    const response = await sendFirstStoryFocusAdd(tab.id);
+    if (response?.ok) {
+      if (sendResponse) {
+        sendResponse({
+          ok: true,
+          state: response.state || "saved",
+        });
+      }
+      return;
+    }
+
+    if (sendResponse) {
+      sendResponse({ ok: false, error: response?.error || "save_failed" });
+    }
+  } catch (error) {
+    if (isMissingTabReceiverError(error)) {
+      if (sendResponse) sendResponse({ ok: false, error: "focus_failed" });
+      return;
+    }
+    console.warn("[Trace] Failed to add first story:", error);
+    if (sendResponse) sendResponse({ ok: false, error: "open_failed" });
+  }
+}
+
+function canSendNativeMessage() {
+  return (
+    ext.runtime &&
+    typeof ext.runtime.sendNativeMessage === "function"
+  );
+}
+
+function sendIosNativeMessage(message) {
+  return new Promise((resolve) => {
+    if (!canSendNativeMessage()) {
+      resolve(null);
+      return;
+    }
+
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value || null);
+    };
+
+    const attempts = [[message], [IOS_NATIVE_APPLICATION_ID, message]];
+    const trySend = (index) => {
+      if (settled) return;
+      const args = attempts[index];
+      if (!args) {
+        finish(null);
+        return;
+      }
+      const tryNext = () => {
+        if (index + 1 < attempts.length) {
+          trySend(index + 1);
+          return;
+        }
+        finish(null);
+      };
+      const callback = (response) => {
+        if (ext.runtime.lastError) {
+          tryNext();
+          return;
+        }
+        if (!response) {
+          tryNext();
+          return;
+        }
+        finish(response);
+      };
+      try {
+        const maybePromise = ext.runtime.sendNativeMessage(...args, callback);
+        if (maybePromise && typeof maybePromise.then === "function") {
+          maybePromise
+            .then((response) => {
+              if (response) finish(response);
+              else tryNext();
+            })
+            .catch(tryNext);
+        }
+      } catch (_) {
+        tryNext();
+      }
+    };
+
+    trySend(0);
+  });
+}
+
+function truthyNativeOk(value) {
+  return value === true || value === "true";
+}
+
+function sanitizeIosNativeAuthTokenResponse(response) {
+  if (!response || typeof response !== "object" || !truthyNativeOk(response.ok)) {
+    return null;
+  }
+  const token = typeof response.token === "string" ? response.token.trim() : "";
+  return token || null;
+}
+
+function sanitizeIosPendingFirstStoryResponse(response) {
+  if (!response || typeof response !== "object") {
+    return { ok: false, error: "native_unavailable" };
+  }
+  if (!truthyNativeOk(response.ok)) {
+    return {
+      ok: false,
+      error:
+        typeof response.error === "string" && response.error.trim()
+          ? response.error.trim()
+          : "native_error",
+    };
+  }
+  const url = typeof response.url === "string" ? response.url.trim() : "";
+  const result = { ok: true, url };
+  const expiresAt =
+    typeof response.expiresAt === "number"
+      ? response.expiresAt
+      : typeof response.expiresAt === "string"
+        ? Number(response.expiresAt)
+        : null;
+  if (Number.isFinite(expiresAt)) {
+    result.expiresAt = expiresAt;
+  }
+  if (response.expired === true || response.expired === "true") {
+    result.expired = true;
+  }
+  return result;
+}
+
+async function bootstrapAuthFromIosNative(reason) {
+  if (!canSendNativeMessage()) return false;
+  const response = await sendIosNativeMessage({
+    type: IOS_AUTH_TOKEN_REQUEST_MESSAGE,
+    reason: reason || "bootstrap",
+  });
+  const token = sanitizeIosNativeAuthTokenResponse(response);
+  if (!token) return false;
+
+  const result = await verifyTraceAccountToken(token, {
+    lastTokenSyncAt: new Date().toISOString(),
+    source: "ios_native",
+  });
+  return result && result.success === true;
+}
+
+async function bootstrapInitialAuth(res) {
+  const storedToken =
+    typeof res?.authToken === "string" ? res.authToken.trim() : "";
+  if (!storedToken) {
+    const bootstrapped = await bootstrapAuthFromIosNative("missing_token");
+    if (!bootstrapped && !bearerToken && !verifiedBearerToken) setSignedOutState();
+    return;
+  }
+
+  const storedState =
+    res[AUTH_STATE_KEY] && typeof res[AUTH_STATE_KEY] === "object"
+      ? res[AUTH_STATE_KEY]
+      : null;
+  const result = await verifyTraceAccountToken(storedToken, {
+    lastTokenSyncAt: storedState?.lastTokenSyncAt || new Date().toISOString(),
+  });
+
+  if (result?.success) return;
+  if (result?.retrying || result?.stale) return;
+  if (result?.state === "unknown") return;
+  await bootstrapAuthFromIosNative("stored_token_rejected");
+}
+
+async function handleIosPendingFirstStoryGet(sendResponse) {
+  if (!bearerToken) {
+    const bootstrapped = await bootstrapAuthFromIosNative("pending_first_story");
+    if (!bootstrapped && !bearerToken) {
+      if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
+      return;
+    }
+  }
+  const response = await sendIosNativeMessage({
+    type: IOS_PENDING_FIRST_STORY_GET_MESSAGE,
+  });
+  if (sendResponse) sendResponse(sanitizeIosPendingFirstStoryResponse(response));
+}
+
+async function handleIosPendingFirstStoryClear(sendResponse) {
+  const response = await sendIosNativeMessage({
+    type: IOS_PENDING_FIRST_STORY_CLEAR_MESSAGE,
+  });
+  if (sendResponse) {
+    sendResponse({
+      ok: truthyNativeOk(response?.ok),
+      error:
+        response && !truthyNativeOk(response.ok) && typeof response.error === "string"
+          ? response.error
+          : undefined,
+    });
+  }
+}
+
 /** Match patterns for `tabs.query({ url })` so we do not enumerate unrelated tabs (Chrome review / privacy). */
 function traceWebTabQueryPatterns() {
   const origin = TRACE_WEB_ORIGIN.replace(/\/$/, "");
@@ -1545,6 +1794,30 @@ function classifyActiveTabUrl(rawUrl) {
   return { kind: "unsupported" };
 }
 
+function normalizeFirstStoryUrl(rawUrl) {
+  if (typeof rawUrl !== "string" || !rawUrl.trim()) return null;
+  try {
+    const url = new URL(rawUrl.trim());
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    if (url.username || url.password) return null;
+
+    if (isAo3Host(url.hostname)) {
+      if (!/^\/works\/\d+(?:\/chapters\/\d+)?\/?$/i.test(url.pathname)) {
+        return null;
+      }
+      return url.href;
+    }
+
+    if (isFfnHost(url.hostname)) {
+      if (!FFN_STORY_PATH_RE.test(url.pathname)) return null;
+      return url.href;
+    }
+  } catch (_) {
+    return null;
+  }
+  return null;
+}
+
 async function getActiveTabContext() {
   try {
     const [tab] = await ext.tabs.query({ active: true, currentWindow: true });
@@ -1572,19 +1845,7 @@ function pingAo3TabForAutoTrack(tabId) {
 
 try {
   ext.storage.local.get([AUTH_TOKEN_KEY, AUTH_STATE_KEY], (res) => {
-    const storedToken =
-      typeof res?.authToken === "string" ? res.authToken.trim() : "";
-    if (storedToken) {
-      const storedState =
-        res[AUTH_STATE_KEY] && typeof res[AUTH_STATE_KEY] === "object"
-          ? res[AUTH_STATE_KEY]
-          : null;
-      void verifyTraceAccountToken(storedToken, {
-        lastTokenSyncAt: storedState?.lastTokenSyncAt || new Date().toISOString(),
-      });
-    } else {
-      setSignedOutState();
-    }
+    void bootstrapInitialAuth(res || {});
   });
 } catch (e) {
   console.error("[Trace] Failed to read storage on boot:", e);
@@ -1655,6 +1916,24 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     } catch (_) {
       if (sendResponse) sendResponse(safeUnknownExtensionStatus());
     }
+    return true;
+  }
+
+  // -------------------------------------------------
+  // A3. Trace-origin first-story onboarding bridge
+  // -------------------------------------------------
+  if (msg.type === FIRST_STORY_ADD_MESSAGE) {
+    handleFirstStoryAdd(msg, sendResponse);
+    return true;
+  }
+
+  if (msg.type === IOS_PENDING_FIRST_STORY_GET_MESSAGE) {
+    handleIosPendingFirstStoryGet(sendResponse);
+    return true;
+  }
+
+  if (msg.type === IOS_PENDING_FIRST_STORY_CLEAR_MESSAGE) {
+    handleIosPendingFirstStoryClear(sendResponse);
     return true;
   }
 
@@ -1899,15 +2178,29 @@ async function handleImportTrigger(sendResponse) {
 // 3. AUTOMATIC TRACKING
 // =======================================================
 
+function respondAutoTrackNotAuthenticated(payload, sender, sendResponse) {
+  recordArchiveIssueFromPayload(payload, "auth");
+  setSignedOutState({
+    message: "Open Trace in this browser and sign in, then automatic sync will work.",
+    lastTrackAttemptAt: new Date().toISOString(),
+  });
+  setBadge(sender?.tab?.id, "LOG", "#9C6B00");
+  if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
+}
+
 function handleAutoTrack(payload, sender, sendResponse) {
   if (!bearerToken) {
-    recordArchiveIssueFromPayload(payload, "auth");
-    setSignedOutState({
-      message: "Open Trace in this browser and sign in, then automatic sync will work.",
-      lastTrackAttemptAt: new Date().toISOString(),
-    });
-    setBadge(sender?.tab?.id, "LOG", "#9C6B00");
-    if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
+    void bootstrapAuthFromIosNative("auto_track")
+      .then((bootstrapped) => {
+        if (bootstrapped && bearerToken) {
+          handleAutoTrack(payload, sender, sendResponse);
+          return;
+        }
+        respondAutoTrackNotAuthenticated(payload, sender, sendResponse);
+      })
+      .catch(() => {
+        respondAutoTrackNotAuthenticated(payload, sender, sendResponse);
+      });
     return;
   }
 
@@ -1944,7 +2237,7 @@ function handleAutoTrack(payload, sender, sendResponse) {
   );
 }
 
-async function executeAutoTrack(payload, sender) {
+async function executeAutoTrack(payload, sender, allowNativeAuthRetry = true) {
   if (!bearerToken) return;
   recordOptimisticChapterFloor(payload && payload.item);
   try {
@@ -1962,6 +2255,14 @@ async function executeAutoTrack(payload, sender) {
         actionAtKey: "lastTrackAttemptAt",
       });
       if (authError) {
+        if (allowNativeAuthRetry) {
+          const bootstrapped = await bootstrapAuthFromIosNative(
+            "auto_track_auth_failure",
+          );
+          if (bootstrapped && bearerToken) {
+            return executeAutoTrack(payload, sender, false);
+          }
+        }
         recordArchiveIssueFromPayload(payload, "auth");
         setBadge(sender?.tab?.id, "LOG", "#9C6B00");
         return { ok: false, error: authError };
@@ -2127,8 +2428,20 @@ async function handleLibraryMetadataRefresh(payload, sender) {
 // 5. QUICK-ADD (inline button on story pages)
 // =======================================================
 
-async function handleQuickAdd(payload, sender, sendResponse) {
+async function handleQuickAdd(
+  payload,
+  sender,
+  sendResponse,
+  allowNativeAuthRetry = true,
+) {
   if (!bearerToken) {
+    if (allowNativeAuthRetry) {
+      const bootstrapped = await bootstrapAuthFromIosNative("quick_add");
+      if (bootstrapped && bearerToken) {
+        await handleQuickAdd(payload, sender, sendResponse, false);
+        return;
+      }
+    }
     recordArchiveIssueFromPayload(payload, "auth");
     if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
     return;
@@ -2170,6 +2483,15 @@ async function handleQuickAdd(payload, sender, sendResponse) {
         actionAtKey: "lastQuickAddAt",
       });
       if (authError) {
+        if (allowNativeAuthRetry) {
+          const bootstrapped = await bootstrapAuthFromIosNative(
+            "quick_add_auth_failure",
+          );
+          if (bootstrapped && bearerToken) {
+            await handleQuickAdd(payload, sender, sendResponse, false);
+            return;
+          }
+        }
         recordArchiveIssueFromPayload(payload, "auth");
         if (sendResponse) sendResponse({ ok: false, error: authError });
       } else if (response.status === 402) {
@@ -2866,16 +3188,59 @@ try {
   /* ignore */
 }
 
+function createTracePeriodicAlarms() {
+  if (!ext.alarms) return;
+  try {
+    ext.alarms.create("traceLibraryOverlay", { periodInMinutes: 30 });
+    ext.alarms.create("traceAo3SavedFiltersSync", { periodInMinutes: 30 });
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+async function openFirstInstallActivationPage(details) {
+  if (!details || details.reason !== "install") return;
+  let existingTraceTab = null;
+  try {
+    const tabs = await ext.tabs?.query?.({ url: traceWebTabQueryPatterns() });
+    existingTraceTab = Array.isArray(tabs)
+      ? tabs.find((tab) => tab && typeof tab.id === "number")
+      : null;
+  } catch (_) {
+    /* fall back to opening a fresh Library tab */
+  }
+
+  try {
+    if (existingTraceTab) {
+      await ext.tabs?.update?.(existingTraceTab.id, {
+        url: FIRST_STORY_ACTIVATION_URL,
+        active: true,
+      });
+      return;
+    }
+    const maybePromise = ext.tabs?.create?.({
+      url: FIRST_STORY_ACTIVATION_URL,
+      active: true,
+    });
+    if (maybePromise && typeof maybePromise.catch === "function") {
+      maybePromise.catch(() => {});
+    }
+  } catch (_) {
+    /* best effort only */
+  }
+}
+
+try {
+  ext.runtime?.onInstalled?.addListener((details) => {
+    void openFirstInstallActivationPage(details);
+    createTracePeriodicAlarms();
+  });
+} catch (_) {
+  /* install hook optional */
+}
+
 try {
   if (ext.alarms && ext.alarms.onAlarm) {
-    ext.runtime.onInstalled.addListener(() => {
-      try {
-        ext.alarms.create("traceLibraryOverlay", { periodInMinutes: 30 });
-        ext.alarms.create("traceAo3SavedFiltersSync", { periodInMinutes: 30 });
-      } catch (_) {
-        /* ignore */
-      }
-    });
     ext.alarms.onAlarm.addListener((alarm) => {
       if (alarm.name === "traceLibraryOverlay") {
         void refreshLibraryOverlay();

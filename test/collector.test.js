@@ -1131,9 +1131,14 @@ function createStoryAutoTrackPendingHarness(options = {}) {
   );
   const sent = [];
   let autoTrackCallback;
+  let runtimeMessageListener = null;
   const chrome = {
     runtime: {
-      onMessage: { addListener() {} },
+      onMessage: {
+        addListener(fn) {
+          runtimeMessageListener = fn;
+        },
+      },
       sendMessage(msg, cb) {
         sent.push(msg);
         if (msg.type === "TRACE_AUTO_TRACK") {
@@ -1145,6 +1150,16 @@ function createStoryAutoTrackPendingHarness(options = {}) {
         }
         if (msg.type === "TRACE_QUICK_ADD" && typeof cb === "function") {
           cb(options.quickAddResponse || { ok: true });
+          return;
+        }
+        if (msg.type === "TRACE_IOS_PENDING_FIRST_STORY_GET") {
+          if (typeof cb === "function") {
+            cb(options.pendingFirstStoryResponse || { ok: true, url: "" });
+          }
+          return;
+        }
+        if (msg.type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR") {
+          if (typeof cb === "function") cb({ ok: true });
         }
       },
       lastError: null,
@@ -1184,6 +1199,15 @@ function createStoryAutoTrackPendingHarness(options = {}) {
     autoTrackCallback(response) {
       autoTrackCallback(response);
     },
+    sendRuntimeMessage(message) {
+      return new Promise((resolve) => {
+        assert.equal(typeof runtimeMessageListener, "function");
+        const asyncResponse = runtimeMessageListener(message, {}, resolve);
+        if (asyncResponse !== true) {
+          Promise.resolve().then(() => resolve(undefined));
+        }
+      });
+    },
   };
 }
 
@@ -1204,6 +1228,97 @@ test("story page unknown work shows pending while auto-track is in flight and ig
     sent.filter((msg) => msg.type === "TRACE_QUICK_ADD").length,
     0,
     "manual quick-add must not fire while auto-track is pending",
+  );
+});
+
+test("first-story focus-add command triggers existing quick-add path", async () => {
+  const { sent, sendRuntimeMessage } = createStoryAutoTrackPendingHarness({
+    store: { prefAutoTrackEnabled: false },
+  });
+  const quickAddBefore = sent.filter((msg) => msg.type === "TRACE_QUICK_ADD").length;
+
+  const response = await sendRuntimeMessage({
+    type: "TRACE_FIRST_STORY_FOCUS_ADD",
+  });
+
+  assert.deepEqual(plainJson(response), { ok: true, state: "saved" });
+  const quickAdds = sent.filter((msg) => msg.type === "TRACE_QUICK_ADD");
+  assert.equal(quickAdds.length, quickAddBefore + 1);
+  assert.equal(quickAdds.at(-1).payload.item.src, "ffn");
+  assert.equal(
+    quickAdds.at(-1).payload.item.u,
+    "https://www.fanfiction.net/s/7038840/",
+  );
+});
+
+test("matching iOS pending first-story URL triggers quick-add and clears pending state", async () => {
+  const { sent } = createStoryAutoTrackPendingHarness({
+    store: { prefAutoTrackEnabled: false },
+    pendingFirstStoryResponse: {
+      ok: true,
+      url: "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter",
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 180));
+
+  const quickAdds = sent.filter((msg) => msg.type === "TRACE_QUICK_ADD");
+  const pendingClears = sent.filter(
+    (msg) => msg.type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR",
+  );
+  assert.equal(
+    sent.filter((msg) => msg.type === "TRACE_IOS_PENDING_FIRST_STORY_GET").length,
+    1,
+  );
+  assert.equal(quickAdds.length, 1);
+  assert.equal(quickAdds[0].payload.item.src, "ffn");
+  assert.equal(quickAdds[0].payload.item.u, "https://www.fanfiction.net/s/7038840/");
+  assert.equal(pendingClears.length, 1);
+});
+
+test("matching iOS pending first-story URL tries quick-add when rendered auth state is stale", async () => {
+  const { sent } = createStoryAutoTrackPendingHarness({
+    store: {
+      authToken: null,
+      traceAuthState: { state: "signed_out" },
+      prefAutoTrackEnabled: false,
+    },
+    pendingFirstStoryResponse: {
+      ok: true,
+      url: "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter",
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 180));
+
+  const quickAdds = sent.filter((msg) => msg.type === "TRACE_QUICK_ADD");
+  const pendingClears = sent.filter(
+    (msg) => msg.type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR",
+  );
+  assert.equal(quickAdds.length, 1);
+  assert.equal(quickAdds[0].payload.item.src, "ffn");
+  assert.equal(pendingClears.length, 1);
+});
+
+test("mismatched iOS pending first-story URL clears without quick-add", async () => {
+  const { sent } = createStoryAutoTrackPendingHarness({
+    store: { prefAutoTrackEnabled: false },
+    pendingFirstStoryResponse: {
+      ok: true,
+      url: "https://m.fanfiction.net/s/9999999/1/Other-Story",
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 180));
+
+  assert.equal(
+    sent.filter((msg) => msg.type === "TRACE_IOS_PENDING_FIRST_STORY_GET").length,
+    1,
+  );
+  assert.equal(sent.filter((msg) => msg.type === "TRACE_QUICK_ADD").length, 0);
+  assert.equal(
+    sent.filter((msg) => msg.type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR").length,
+    1,
   );
 });
 

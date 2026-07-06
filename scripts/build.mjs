@@ -157,6 +157,7 @@ const RELEASE_TRACE_API_BASE = "https://api.tracefiction.com";
 const RELEASE_TRACE_WEB_ORIGIN = "https://tracefiction.com";
 const FIREFOX_RELEASE_EXTENSION_ID = "trace@tracefiction.com";
 const FIREFOX_DEV_EXTENSION_ID = "trace-dev@tracefiction.com";
+const SAFARI_ONLY_PERMISSIONS = ["nativeMessaging"];
 
 function isLocalLike(value) {
   return /localhost|127\.0\.0\.1/i.test(value);
@@ -221,6 +222,18 @@ function firefoxCompatibleManifest(baseManifest) {
   };
 }
 
+function browserStoreManifest(baseManifest) {
+  const safariOnlyPermissions = new Set(SAFARI_ONLY_PERMISSIONS);
+  return {
+    ...baseManifest,
+    permissions: unique(
+      (baseManifest.permissions || []).filter(
+        (permission) => !safariOnlyPermissions.has(permission),
+      ),
+    ),
+  };
+}
+
 function syncXcodeMarketingVersion(version) {
   let project = fs.readFileSync(XCODE_PROJECT, "utf8");
   let replacements = 0;
@@ -277,6 +290,10 @@ console.log("Wrote", popupConfigPath);
 const manifestPath = path.join(RES, "manifest.json");
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 manifest.version = version;
+manifest.permissions = unique([
+  ...(manifest.permissions || []),
+  ...SAFARI_ONLY_PERMISSIONS,
+]);
 
 const apiHostMatch = originHostMatchPattern(TRACE_API_BASE);
 const webHostMatch = originHostMatchPattern(TRACE_WEB_ORIGIN);
@@ -334,6 +351,8 @@ manifest.content_scripts = [
 fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
 console.log("Set manifest version to", version);
 
+const packagedManifest = browserStoreManifest(manifest);
+
 const skipResources = (full, name) =>
   name === ".DS_Store" || full.endsWith("manifest.json");
 
@@ -341,7 +360,7 @@ const skipResources = (full, name) =>
 const distChrome = path.join(ROOT, "dist", "chrome");
 rmrf(distChrome);
 copyDirFiltered(RES, distChrome, { skip: (sp, name) => skipResources(sp, name) });
-fs.writeFileSync(path.join(distChrome, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
+fs.writeFileSync(path.join(distChrome, "manifest.json"), JSON.stringify(packagedManifest, null, 2) + "\n");
 
 // dist/firefox: same + browser_specific_settings for AMO
 const distFf = path.join(ROOT, "dist", "firefox");
@@ -360,7 +379,7 @@ const ffDataCollection = {
   required: ["authenticationInfo", "websiteContent"],
 };
 const ffManifest = {
-  ...firefoxCompatibleManifest(manifest),
+  ...firefoxCompatibleManifest(packagedManifest),
   background: {
     scripts: ffBackgroundScripts,
   },

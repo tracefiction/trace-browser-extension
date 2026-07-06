@@ -7,6 +7,8 @@
 //
 
 import AuthenticationServices
+import Security
+import SafariServices
 import StoreKit
 import UIKit
 import UserNotifications
@@ -113,6 +115,21 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         let environment: String
     }
 
+    private struct TraceSafariExtensionStatePayload: Encodable {
+        let type = "TRACE_IOS_EXTENSION_STATE"
+        let nonce: String
+        let enabled: Bool
+        let settingsSupported: Bool
+        let error: String?
+    }
+
+    private struct TraceSafariExtensionActionPayload: Encodable {
+        let type: String
+        let nonce: String
+        let ok: Bool
+        let error: String?
+    }
+
     private static var billingAPIBaseURL: URL {
         if let configured = configuredBillingAPIBaseURLOverride {
             return configured
@@ -165,6 +182,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         config.userContentController.add(self, name: "tracePush")
         config.userContentController.add(self, name: "traceBilling")
         config.userContentController.add(self, name: "traceDownload")
+        config.userContentController.add(self, name: "traceSafariExtension")
 
         let wv = WKWebView(frame: .zero, configuration: config)
         wv.navigationDelegate = self
@@ -253,6 +271,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: "tracePush")
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: "traceBilling")
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: "traceDownload")
+        webView?.configuration.userContentController.removeScriptMessageHandler(forName: "traceSafariExtension")
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -1034,6 +1053,11 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             return
         }
 
+        if message.name == "traceSafariExtension" {
+            handleTraceSafariExtensionMessage(message)
+            return
+        }
+
         if message.name == "tracePush" {
             handleTracePushMessage(message)
             return
@@ -1060,6 +1084,312 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         case invalidRequest
         case invalidResponse
         case exportFailed
+    }
+
+    private enum TraceSafariExtensionBridgeError: Error {
+        case invalidRequest
+        case unsupportedUrl
+        case tokenShareFailed
+        case sharedStorageUnavailable
+    }
+
+    private static let safariExtensionBundleIdentifier = "com.tracefiction.trace.extension"
+    private static let traceSharedAppGroup = "group.com.tracefiction.trace"
+    private static let traceKeychainAccessGroup = "com.tracefiction.trace.shared"
+    private static let traceAppleTeamIdentifierPrefix = "3GX59FLLT6."
+    private static let traceAuthTokenService = "com.tracefiction.trace.auth"
+    private static let traceAuthTokenAccount = "extension-token"
+    private static let pendingFirstStoryDefaultsKey = "tracePendingFirstStoryUrlV1"
+    private static let pendingFirstStoryExpiresAtDefaultsKey = "tracePendingFirstStoryExpiresAtV1"
+    private static let pendingFirstStoryTTL: TimeInterval = 10 * 60
+
+    private func handleTraceSafariExtensionMessage(_ message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any],
+              let messageType = body["type"] as? String,
+              let nonce = body["nonce"] as? String,
+              !nonce.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return
+        }
+
+        switch messageType {
+        case "TRACE_IOS_EXTENSION_STATE_REQUEST":
+            handleTraceSafariExtensionStateRequest(nonce: nonce)
+        case "TRACE_IOS_OPEN_EXTENSION_SETTINGS":
+            handleTraceSafariExtensionSettingsRequest(nonce: nonce)
+        case "TRACE_IOS_OPEN_STORY_URL":
+            let url = body["url"] as? String
+            handleTraceSafariStoryOpenRequest(nonce: nonce, rawURL: url)
+        default:
+            postSafariExtensionActionResult(
+                type: "\(messageType)_RESPONSE",
+                nonce: nonce,
+                ok: false,
+                error: "unknown_message_type"
+            )
+        }
+    }
+
+    private func handleTraceSafariExtensionStateRequest(nonce: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            _ = try? await self.storeCurrentTraceTokenForSafariExtension()
+
+            await MainActor.run {
+                guard #available(iOS 26.2, *) else {
+                    self.postSafariExtensionState(
+                        nonce: nonce,
+                        enabled: false,
+                        settingsSupported: false,
+                        error: nil
+                    )
+                    return
+                }
+
+                SFSafariExtensionManager.getStateOfExtension(
+                    withIdentifier: Self.safariExtensionBundleIdentifier
+                ) { [weak self] state, error in
+                    DispatchQueue.main.async {
+                        self?.postSafariExtensionState(
+                            nonce: nonce,
+                            enabled: state?.isEnabled == true,
+                            settingsSupported: true,
+                            error: error == nil ? nil : "state_unavailable"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private func handleTraceSafariExtensionSettingsRequest(nonce: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.storeCurrentTraceTokenForSafariExtension()
+            } catch {
+                await MainActor.run {
+                    self.postSafariExtensionActionResult(
+                        type: "TRACE_IOS_OPEN_EXTENSION_SETTINGS_RESPONSE",
+                        nonce: nonce,
+                        ok: false,
+                        error: "token_share_failed"
+                    )
+                }
+                return
+            }
+
+            await MainActor.run {
+                guard #available(iOS 26.2, *) else {
+                    self.postSafariExtensionActionResult(
+                        type: "TRACE_IOS_OPEN_EXTENSION_SETTINGS_RESPONSE",
+                        nonce: nonce,
+                        ok: false,
+                        error: "settings_unsupported"
+                    )
+                    return
+                }
+
+                SFSafariSettings.openExtensionsSettings(
+                    forIdentifiers: [Self.safariExtensionBundleIdentifier]
+                ) { [weak self] error in
+                    DispatchQueue.main.async {
+                        self?.postSafariExtensionActionResult(
+                            type: "TRACE_IOS_OPEN_EXTENSION_SETTINGS_RESPONSE",
+                            nonce: nonce,
+                            ok: error == nil,
+                            error: error == nil ? nil : "settings_open_failed"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private func handleTraceSafariStoryOpenRequest(nonce: String, rawURL: String?) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                guard let url = Self.supportedFirstStoryURL(rawURL) else {
+                    throw TraceSafariExtensionBridgeError.unsupportedUrl
+                }
+                try await self.storeCurrentTraceTokenForSafariExtension()
+                try Self.storePendingFirstStoryURL(url)
+                await MainActor.run {
+                    UIApplication.shared.open(url, options: [:]) { [weak self] success in
+                        if !success {
+                            Self.clearPendingFirstStoryURL()
+                        }
+                        self?.postSafariExtensionActionResult(
+                            type: "TRACE_IOS_OPEN_STORY_URL_RESPONSE",
+                            nonce: nonce,
+                            ok: success,
+                            error: success ? nil : "open_failed"
+                        )
+                    }
+                }
+            } catch TraceSafariExtensionBridgeError.unsupportedUrl {
+                await MainActor.run {
+                    self.postSafariExtensionActionResult(
+                        type: "TRACE_IOS_OPEN_STORY_URL_RESPONSE",
+                        nonce: nonce,
+                        ok: false,
+                        error: "invalid_url"
+                    )
+                }
+            } catch {
+                await MainActor.run {
+                    self.postSafariExtensionActionResult(
+                        type: "TRACE_IOS_OPEN_STORY_URL_RESPONSE",
+                        nonce: nonce,
+                        ok: false,
+                        error: "token_share_failed"
+                    )
+                }
+            }
+        }
+    }
+
+    private static func supportedFirstStoryURL(_ rawURL: String?) -> URL? {
+        guard let rawURL,
+              let url = URL(string: rawURL.trimmingCharacters(in: .whitespacesAndNewlines)),
+              url.scheme?.lowercased() == "https",
+              let host = url.host?.lowercased()
+        else {
+            return nil
+        }
+
+        let pathParts = url.path.split(separator: "/").map(String.init)
+        if isSupportedAO3Host(host) {
+            guard pathParts.count == 2 || pathParts.count == 4,
+                  pathParts.first == "works",
+                  Int(pathParts[1]) != nil
+            else {
+                return nil
+            }
+            if pathParts.count == 4 {
+                guard pathParts[2] == "chapters", Int(pathParts[3]) != nil else {
+                    return nil
+                }
+            }
+            return url
+        }
+
+        if (host == "www.fanfiction.net" || host == "m.fanfiction.net"),
+           pathParts.count >= 2,
+           pathParts[0] == "s",
+           Int(pathParts[1]) != nil
+        {
+            if pathParts.count >= 3, Int(pathParts[2]) == nil {
+                return nil
+            }
+            return url
+        }
+
+        return nil
+    }
+
+    private static func isSupportedAO3Host(_ host: String) -> Bool {
+        host == "archiveofourown.org" ||
+            host.hasSuffix(".archiveofourown.org") ||
+            host == "archiveofourown.gay" ||
+            host.hasSuffix(".archiveofourown.gay") ||
+            host == "archive.transformativeworks.org" ||
+            host == "ao3.org" ||
+            host.hasSuffix(".ao3.org")
+    }
+
+    private static func pendingDefaults() -> UserDefaults? {
+        UserDefaults(suiteName: traceSharedAppGroup)
+    }
+
+    private static func storePendingFirstStoryURL(_ url: URL) throws {
+        guard let defaults = pendingDefaults() else {
+            throw TraceSafariExtensionBridgeError.sharedStorageUnavailable
+        }
+        defaults.set(url.absoluteString, forKey: pendingFirstStoryDefaultsKey)
+        defaults.set(
+            Date().addingTimeInterval(pendingFirstStoryTTL).timeIntervalSince1970,
+            forKey: pendingFirstStoryExpiresAtDefaultsKey
+        )
+    }
+
+    private static func clearPendingFirstStoryURL() {
+        guard let defaults = pendingDefaults() else { return }
+        defaults.removeObject(forKey: pendingFirstStoryDefaultsKey)
+        defaults.removeObject(forKey: pendingFirstStoryExpiresAtDefaultsKey)
+    }
+
+    @MainActor
+    private func storeCurrentTraceTokenForSafariExtension() async throws {
+        let token = try await fetchTraceShellAccessToken()
+        try Self.storeSharedTraceToken(token)
+    }
+
+    private static func keychainAccessGroup() -> String {
+        if let prefix = Bundle.main.object(forInfoDictionaryKey: "AppIdentifierPrefix") as? String,
+           !prefix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            return "\(prefix)\(traceKeychainAccessGroup)"
+        }
+        return "\(traceAppleTeamIdentifierPrefix)\(traceKeychainAccessGroup)"
+    }
+
+    private static func storeSharedTraceToken(_ token: String) throws {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = trimmed.data(using: .utf8), !data.isEmpty else {
+            throw TraceSafariExtensionBridgeError.tokenShareFailed
+        }
+
+        let baseQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: traceAuthTokenService,
+            kSecAttrAccount as String: traceAuthTokenAccount,
+            kSecAttrAccessGroup as String: keychainAccessGroup(),
+        ]
+        SecItemDelete(baseQuery as CFDictionary)
+
+        var addQuery = baseQuery
+        addQuery[kSecValueData as String] = data
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let status = SecItemAdd(addQuery as CFDictionary, nil)
+        guard status == errSecSuccess else {
+            throw TraceSafariExtensionBridgeError.tokenShareFailed
+        }
+    }
+
+    @MainActor
+    private func postSafariExtensionState(
+        nonce: String,
+        enabled: Bool,
+        settingsSupported: Bool,
+        error: String?
+    ) {
+        postTraceWebMessage(
+            TraceSafariExtensionStatePayload(
+                nonce: nonce,
+                enabled: enabled,
+                settingsSupported: settingsSupported,
+                error: error
+            )
+        )
+    }
+
+    @MainActor
+    private func postSafariExtensionActionResult(
+        type: String,
+        nonce: String,
+        ok: Bool,
+        error: String? = nil
+    ) {
+        postTraceWebMessage(
+            TraceSafariExtensionActionPayload(
+                type: type,
+                nonce: nonce,
+                ok: ok,
+                error: error
+            )
+        )
     }
 
     private func handleTraceDownloadMessage(_ message: WKScriptMessage) {

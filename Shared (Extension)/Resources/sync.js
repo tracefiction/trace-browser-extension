@@ -8,6 +8,9 @@ const STATUS_QUERY_MESSAGE = "TRACE_EXTENSION_STATUS_QUERY";
 const STATUS_RESPONSE_MESSAGE = "TRACE_EXTENSION_STATUS_RESPONSE";
 const TOKEN_MESSAGE = "TRACE_FICTION_TOKEN";
 const TOKEN_REQUEST_MESSAGE = "TRACE_FICTION_TOKEN_REQUEST";
+const FIRST_STORY_ADD_REQUEST_MESSAGE = "TRACE_FIRST_STORY_ADD_REQUEST";
+const FIRST_STORY_ADD_MESSAGE = "TRACE_FIRST_STORY_ADD";
+const FIRST_STORY_ADD_RESPONSE_MESSAGE = "TRACE_FIRST_STORY_ADD_RESPONSE";
 const STATUS_AUTH_STATES = new Set([
   "connected",
   "signed_out",
@@ -32,6 +35,7 @@ const ARCHIVE_ERROR_KINDS = new Set([
   "network",
   "unknown",
 ]);
+const FIRST_STORY_ADD_STATES = new Set(["opened", "saved", "already_saved"]);
 
 function isTransientRuntimeMessageError(error) {
   const parts = [
@@ -134,6 +138,21 @@ function sanitizeStatusState(raw) {
   return state;
 }
 
+function sanitizeFirstStoryAddResponse(raw) {
+  if (!raw || typeof raw !== "object") {
+    return { ok: false, error: "extension_unavailable" };
+  }
+  if (raw.ok === true) {
+    const state = FIRST_STORY_ADD_STATES.has(raw.state) ? raw.state : "saved";
+    return { ok: true, state };
+  }
+  const error =
+    typeof raw.error === "string" && raw.error.trim()
+      ? raw.error.trim()
+      : "unknown_error";
+  return { ok: false, error };
+}
+
 function requestRuntimeMessage(message, errorLabel) {
   return new Promise((resolve) => {
     let settled = false;
@@ -199,6 +218,29 @@ async function handleStatusRequest(data) {
   );
 }
 
+async function handleFirstStoryAddRequest(data) {
+  const nonce = typeof data.nonce === "string" ? data.nonce : "";
+  const url = typeof data.url === "string" ? data.url : "";
+  if (!nonce.trim() || !url.trim()) return;
+
+  const response = await requestRuntimeMessage(
+    {
+      type: FIRST_STORY_ADD_MESSAGE,
+      nonce,
+      url,
+    },
+    "[Trace Sync] Failed to add first story",
+  );
+  window.postMessage(
+    {
+      type: FIRST_STORY_ADD_RESPONSE_MESSAGE,
+      nonce,
+      ...sanitizeFirstStoryAddResponse(response),
+    },
+    window.location.origin,
+  );
+}
+
 window.addEventListener("message", (event) => {
   // Do not require `event.source === window`. Safari Web Extension content scripts
   // can see a different `window` identity than `MessageEvent.source` for same-tab
@@ -206,6 +248,10 @@ window.addEventListener("message", (event) => {
   if (event.origin !== window.location.origin) return;
   if (event.data?.type === STATUS_REQUEST_MESSAGE) {
     void handleStatusRequest(event.data);
+    return;
+  }
+  if (event.data?.type === FIRST_STORY_ADD_REQUEST_MESSAGE) {
+    void handleFirstStoryAddRequest(event.data);
     return;
   }
   if (event.data?.type !== TOKEN_MESSAGE) return;

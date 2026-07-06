@@ -13,12 +13,18 @@ Please report security or privacy issues using the public support contact listed
 The extension requests access to supported AO3 and FanFiction.net pages so it can read story metadata and show Trace library status. It requests access to Trace web/API origins so it can receive your Trace auth token from Trace and send authenticated Trace API requests.
 
 The extension does not request browser cookie permission. It does not need AO3 or FanFiction.net credentials.
+The Safari build uses native messaging only to communicate with the bundled
+Trace app for setup actions, app-auth token sharing, and first-story handoff.
 
 Content scripts are excluded from obvious AO3/FFN login and signup paths where the manifest supports it, and collection/overlay logic also disables itself at runtime on login/signup/password pages and pages that contain unknown password fields. AO3's known header login form can appear on normal story/listing pages; Trace ignores only that header form so supported reading pages still work.
 
 ## Data Sent to Trace
 
 Trace may send story URL, title, author, fandoms/tags, chapter and word counts, reading-progress metadata, reading-status changes you explicitly choose in Trace UI, finish/caught-up decisions you explicitly choose at the end of a supported story, last-posted-chapter finish-qualification signals for stories already in your Trace library, hidden-work browsing preferences you explicitly choose in Trace UI, AO3 saved filter presets you explicitly create, and your Trace auth token for Trace API requests.
+
+On iOS Safari, Trace may receive the Trace app's current auth token through the
+Safari native message bridge and shared Keychain access group after you sign in
+inside the app.
 
 Hidden-work preferences are keyed by supported AO3/FFN work id and affect Trace browsing overlays only. They are separate from library reading status and do not hide or change the source site itself.
 

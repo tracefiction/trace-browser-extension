@@ -65,6 +65,7 @@
 /* Begin PBXFileReference section */
 		BA0C6ED42F84460200C89191 /* Trace-macOS-Extension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Trace-macOS-Extension.entitlements"; sourceTree = "<group>"; };
 		BA0C6ED52F8512C300C89191 /* Trace-iOS-Debug.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Trace-iOS-Debug.entitlements"; sourceTree = "<group>"; };
+		BA0C6EE02F8512C300C89191 /* Trace-iOS-Extension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Trace-iOS-Extension.entitlements"; sourceTree = "<group>"; };
 		BA3EBD832F04965D00BA150A /* Trace.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Trace.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		BA3EBD952F04965D00BA150A /* Trace.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Trace.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		BA3EBDA02F04965D00BA150A /* Trace Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Trace Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -228,6 +229,7 @@
 			children = (
 				BA0C6ED52F8512C300C89191 /* Trace-iOS-Debug.entitlements */,
 				BA3EC00E2F04965D00BA1600 /* Trace-iOS-Release.entitlements */,
+				BA0C6EE02F8512C300C89191 /* Trace-iOS-Extension.entitlements */,
 				BA0C6ED42F84460200C89191 /* Trace-macOS-Extension.entitlements */,
 				BA3EC0062F04965D00BA1600 /* TraceWidget */,
 				BA3EBD6B2F04965A00BA150A /* Shared (App) */,
@@ -525,11 +527,13 @@
 		BA3EBDD02F04965D00BA150A /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Trace-iOS-Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 3GX59FLLT6;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "iOS (Extension)/Info.plist";
+				INFOPLIST_KEY_AppIdentifierPrefix = "$(AppIdentifierPrefix)";
 				INFOPLIST_KEY_CFBundleDisplayName = Trace;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
@@ -538,7 +542,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.5.2;
+				MARKETING_VERSION = 0.5.3;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -560,11 +564,13 @@
 		BA3EBDD12F04965D00BA150A /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Trace-iOS-Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 3GX59FLLT6;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "iOS (Extension)/Info.plist";
+				INFOPLIST_KEY_AppIdentifierPrefix = "$(AppIdentifierPrefix)";
 				INFOPLIST_KEY_CFBundleDisplayName = Trace;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
@@ -573,7 +579,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.5.2;
+				MARKETING_VERSION = 0.5.3;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -604,6 +610,7 @@
 				DEVELOPMENT_TEAM = 3GX59FLLT6;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "iOS (App)/Info.plist";
+				INFOPLIST_KEY_AppIdentifierPrefix = "$(AppIdentifierPrefix)";
 				INFOPLIST_KEY_CFBundleDisplayName = Trace;
 				INFOPLIST_KEY_CFBundleIconName = AppIcon;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.books";
@@ -616,7 +623,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.5.2;
+				MARKETING_VERSION = 0.5.3;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -652,6 +659,7 @@
 				DEVELOPMENT_TEAM = 3GX59FLLT6;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "iOS (App)/Info.plist";
+				INFOPLIST_KEY_AppIdentifierPrefix = "$(AppIdentifierPrefix)";
 				INFOPLIST_KEY_CFBundleDisplayName = Trace;
 				INFOPLIST_KEY_CFBundleIconName = AppIcon;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.books";
@@ -664,7 +672,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.5.2;
+				MARKETING_VERSION = 0.5.3;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -710,7 +718,7 @@
 					"@executable_path/../../../../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 10.14;
-				MARKETING_VERSION = 0.5.2;
+				MARKETING_VERSION = 0.5.3;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -747,7 +755,7 @@
 					"@executable_path/../../../../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 10.14;
-				MARKETING_VERSION = 0.5.2;
+				MARKETING_VERSION = 0.5.3;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -785,7 +793,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 10.14;
-				MARKETING_VERSION = 0.5.2;
+				MARKETING_VERSION = 0.5.3;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -826,7 +834,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 10.14;
-				MARKETING_VERSION = 0.5.2;
+				MARKETING_VERSION = 0.5.3;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -977,7 +985,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.5.2;
+				MARKETING_VERSION = 0.5.3;
 				PRODUCT_BUNDLE_IDENTIFIER = com.tracefiction.trace.TraceWidget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -1008,7 +1016,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.5.2;
+				MARKETING_VERSION = 0.5.3;
 				PRODUCT_BUNDLE_IDENTIFIER = com.tracefiction.trace.TraceWidget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;

@@ -1,4 +1,4 @@
-# Extension Store Copy - 0.5.2
+# Extension Store Copy - 0.5.3
 
 Use this copy for Chrome Web Store, Firefox Add-ons, App Store Connect, and
 public release notes. Keep evergreen store descriptions separate from
@@ -44,41 +44,37 @@ FictionPress.
 
 ## What's New / Release Notes
 
-Trace extension 0.5.2 improves end-of-story handling and iOS tap reliability:
+Trace extension 0.5.3 improves first-story onboarding:
 
-- Adds an end-of-story prompt on supported AO3 and FanFiction.net final posted
-  chapters so readers can mark a library entry Finished or Caught up and
-  identify the work as complete, ongoing, on hiatus, or abandoned.
-- Updates reading-status language in extension controls to Saved, Reading,
-  Caught up, Paused, Finished, and Dropped.
-- Fixes iOS wrapper issues where data export could open as raw ZIP bytes,
-  public collection links could stay trapped inside the app shell, and the
-  first tap after leaving the app and returning could be ignored.
-- Keeps the native iOS app surface vertically scrollable without sideways
-  rubber-banding on bounded Trace screens.
-- Improves FanFiction.net author-page metadata refreshes so Trace can fill in
-  fields that are not available on FFN story pages when they appear in author
-  listings.
-- Uses production Trace API and web origins in the generated release build.
+- Opens the Trace first-story setup page after a fresh extension install.
+- Lets Trace send a supported AO3 or FanFiction.net story URL to the extension
+  so the first story can open with the Trace control focused, and save
+  immediately when the extension can run on that archive page.
+- Improves iOS Safari setup by letting the signed-in Trace app share the current
+  Trace session with the bundled Safari extension.
+- Adds app-led iOS handoff for pasted AO3/FFN story URLs: Trace stores a
+  short-lived pending URL, opens Safari, and the extension saves the matching
+  story once Safari grants site access.
+- Retries transient account checks before showing reconnect guidance, reducing
+  false setup failures while the Trace session is still settling.
 
 Privacy boundary unchanged: Trace still reads story metadata and reading
 progress from supported pages, not AO3/FFN credentials, cookies, private account
-pages, story text, or unrelated browsing history. The new finish prompt sends
-only the explicit reader decision and the same supported-work chapter metadata
-Trace already uses for progress tracking.
+pages, story text, or unrelated browsing history. The new onboarding handoff
+uses the same supported story URLs and Trace auth token already used for
+authenticated extension actions.
 
 ## Chrome / Firefox Submission Notes
 
 This release uses the same host permissions for supported Trace, AO3, and
-FanFiction.net pages. The extension now includes an additional bundled content
-script, `trace-finish-qualify.js`, injected only on the same supported AO3 and
-FanFiction.net story-page matches already covered by the manifest.
+FanFiction.net pages. Chrome and Firefox packages do not request Safari native
+messaging permission; the build strips that Safari-only permission from their
+store manifests.
 
 - `+ ADD` and reading-status controls send authenticated Trace API requests
   through the background worker.
-- End-of-story finish prompts send authenticated Trace API requests through the
-  background worker when the reader explicitly chooses Finished/Caught up and a
-  work status.
+- First-story setup requests from Trace web pages are same-origin messages that
+  ask the extension to open a supported archive story URL.
 - `HIDE` stores a user-owned hidden-work preference in Trace, keyed by supported
   AO3/FFN work id.
 - The popup continues to expose automatic tracking, library-status overlay, and
@@ -88,16 +84,18 @@ The extension does not request cookie permissions.
 
 ## App Store Connect - iOS What's New
 
-Trace for iOS 0.5.2 improves Safari extension behavior:
+Trace for iOS 0.5.3 improves Safari extension onboarding:
 
-- Fixes an issue where the first tap after returning to Trace could be ignored.
-- Exports account data through the native iOS share sheet instead of opening
-  unreadable ZIP bytes inside the web view.
-- Opens public collection pages outside the app shell so shared links behave
-  like public web pages.
-- Prevents sideways web-view rubber-banding on bounded Trace app screens.
-- Adds end-of-story prompts on supported AO3 and FanFiction.net final posted
-  chapters so readers can mark entries Finished or Caught up.
+- Connects the Safari extension to the signed-in Trace app session during
+  onboarding, so first-story handoff can work without signing in again inside
+  Safari.
+- Opens Safari extension settings from the Trace app on supported iOS versions,
+  with a fallback path for older iOS settings screens.
+- Lets the Trace app hand a pasted AO3 or FanFiction.net story URL to Safari,
+  then lets the bundled extension save the matching story when site access is
+  allowed.
+- Keeps first-story setup recovery copy focused on Safari website permissions
+  instead of asking readers to sign in twice.
 
 ## Screenshot Preparation
 
@@ -127,14 +125,12 @@ status overlays. It does not request AO3/FFN credentials or browser cookies.
 
 To test:
 
-1. Install the app and enable the Safari extension in Settings -> Apps ->
-   Safari -> Extensions. On older iOS versions, this may appear as Settings ->
-   Safari -> Extensions.
-2. In Safari, allow Trace on tracefiction.com, archiveofourown.org, and
-   fanfiction.net when prompted.
-3. Sign in at tracefiction.com in Safari.
-4. Open the extension popup on tracefiction.com to connect the extension.
-5. Visit a supported AO3 or FanFiction.net story/listing page and refresh if
-   needed.
-6. Use `+ ADD`, status controls, import, hide/undo, and final-chapter finish
+1. Install the app and sign in to Trace in the app.
+2. Use the app's Safari extension setup action. On supported iOS versions this
+   opens Safari extension settings; on older versions use Settings -> Apps ->
+   Safari -> Extensions, or Settings -> Safari -> Extensions.
+3. Allow Trace on Trace, archiveofourown.org, and fanfiction.net.
+4. Return to the app and open AO3, open FanFiction.net, or paste a supported
+   story URL. Safari should open and the extension should already be connected.
+5. Use `+ ADD`, status controls, import, hide/undo, and final-chapter finish
    prompts on supported pages.
