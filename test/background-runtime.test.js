@@ -26,6 +26,14 @@ function runTimerWithDelay(h, ms) {
   timer.fn();
 }
 
+async function runTimerWithDelayWhenReady(h, ms) {
+  for (let i = 0; i < 8; i += 1) {
+    if (h.timers.some((item) => item && item.ms === ms)) break;
+    await flush();
+  }
+  runTimerWithDelay(h, ms);
+}
+
 function createResponse({ ok = true, status = 200, json = {} } = {}) {
   return {
     ok,
@@ -3133,6 +3141,70 @@ test("TRACE_AUTO_TRACK confirms legacy track responses only after overlay refres
   assert.equal(response.state.entry.entryId, entry.entryId);
 });
 
+test("TRACE_AUTO_TRACK waits for delayed overlay confirmation after a stale refresh", async () => {
+  const entry = {
+    status: "PLANNING",
+    readerStatus: "PLANNING",
+    canonicalReaderStatus: "SAVED",
+    entryId: "00000000-0000-4000-8000-000000000205",
+  };
+  let overlayCalls = 0;
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-at-delayed" },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/extension/track")) {
+        return createResponse({
+          json: { success: true, data: { entry_id: entry.entryId, type: "created" } },
+        });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        overlayCalls += 1;
+        return createResponse({
+          json: {
+            success: true,
+            data: {
+              entries: overlayCalls === 1 ? {} : { "ao3:205": entry },
+              syncVersion: `v-at-delayed-${overlayCalls}`,
+            },
+          },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.hooks.setBearerToken("token-at-delayed");
+
+  const responsePromise = h.dispatchMessage(
+    {
+      type: "TRACE_AUTO_TRACK",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: {
+          src: "ao3",
+          t: "Story",
+          u: "https://archiveofourown.org/works/205",
+        },
+      },
+    },
+    { tab: { id: 115 }, frameId: 0, documentLifecycle: "active" },
+  );
+  await flush();
+  await flush();
+
+  assert.equal(overlayCalls, 1);
+  assert.equal(h.store.libraryOverlayCache.entries["ao3:205"], undefined);
+  await runTimerWithDelayWhenReady(h, 250);
+  const response = await responsePromise;
+
+  assert.equal(overlayCalls, 2);
+  assert.equal(response.ok, true);
+  assert.equal(response.entryId, entry.entryId);
+  assert.equal(response.state.status, "saved");
+  assert.equal(response.state.entry.entryId, entry.entryId);
+  assert.equal(h.store.libraryOverlayCache.entries["ao3:205"].entryId, entry.entryId);
+});
+
 test("TRACE_AUTO_TRACK does not report saved when a 2xx write lacks library confirmation", async () => {
   const h = createBackgroundHarness({
     storageState: { authToken: "token-at-missing" },
@@ -3150,7 +3222,7 @@ test("TRACE_AUTO_TRACK does not report saved when a 2xx write lacks library conf
   });
   h.hooks.setBearerToken("token-at-missing");
 
-  const response = await h.dispatchMessage(
+  const responsePromise = h.dispatchMessage(
     {
       type: "TRACE_AUTO_TRACK",
       payload: {
@@ -3165,6 +3237,13 @@ test("TRACE_AUTO_TRACK does not report saved when a 2xx write lacks library conf
     },
     { tab: { id: 115 }, frameId: 0, documentLifecycle: "active" },
   );
+  await flush();
+  await flush();
+  for (let i = 0; i < 8; i += 1) {
+    await flush();
+    h.runTimers();
+  }
+  const response = await responsePromise;
 
   assert.equal(response.ok, false);
   assert.equal(response.error, "confirmation_missing");

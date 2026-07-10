@@ -69,6 +69,7 @@ const AO3_SAVED_FILTER_SYNC_BATCH_LIMIT = 100;
 const AO3_SAVED_FILTER_SYNC_MAX_ITERATIONS = 10;
 const FIRST_STORY_FOCUS_RETRY_ATTEMPTS = 24;
 const FIRST_STORY_FOCUS_RETRY_MS = 250;
+const TRACK_CONFIRMATION_RETRY_DELAYS_MS = [0, 250, 750, 1500];
 const AUTH_VERIFICATION_RETRY_DELAYS_MS = [750, 2_500, 8_000];
 
 // 1. Token Management
@@ -895,6 +896,32 @@ async function confirmTrackedWorkState(workKey, payload, data, fallbackEntryId) 
     );
   }
   return { workKey: confirmedWorkKey, state };
+}
+
+async function waitForTrackedWorkConfirmation(workKey, payload, data, fallbackEntryId) {
+  let confirmation = await confirmTrackedWorkState(
+    workKey,
+    payload,
+    data,
+    fallbackEntryId,
+  );
+  if (confirmation.state || !confirmation.workKey) return confirmation;
+
+  for (const delayMs of TRACK_CONFIRMATION_RETRY_DELAYS_MS) {
+    if (delayMs > 0) {
+      await delay(delayMs);
+    }
+    await refreshLibraryOverlay();
+    confirmation = await confirmTrackedWorkState(
+      confirmation.workKey,
+      payload,
+      null,
+      fallbackEntryId,
+    );
+    if (confirmation.state || !confirmation.workKey) return confirmation;
+  }
+
+  return confirmation;
 }
 
 /** Best-effort Pro flag for gating Pro-only prefs (synced from GET /api/account/me). */
@@ -2571,16 +2598,12 @@ async function executeAutoTrack(payload, sender, allowNativeAuthRetry = true) {
         data && typeof data.entry_id === "string"
           ? data.entry_id
           : null;
-      let confirmation = await confirmTrackedWorkState(workKey, payload, data, entryId);
-      await refreshLibraryOverlay();
-      if (!confirmation.state && confirmation.workKey) {
-        confirmation = await confirmTrackedWorkState(
-          confirmation.workKey,
-          payload,
-          null,
-          entryId,
-        );
-      }
+      const confirmation = await waitForTrackedWorkConfirmation(
+        workKey,
+        payload,
+        data,
+        entryId,
+      );
       if (confirmation.workKey && !confirmation.state) {
         recordArchiveIssueFromPayload(payload, "network");
         await markWorkError(
@@ -2762,16 +2785,12 @@ async function handleQuickAdd(
         data && typeof data.entry_id === "string"
           ? data.entry_id
           : null;
-      let confirmation = await confirmTrackedWorkState(workKey, payload, data, entryId);
-      await refreshLibraryOverlay();
-      if (!confirmation.state && confirmation.workKey) {
-        confirmation = await confirmTrackedWorkState(
-          confirmation.workKey,
-          payload,
-          null,
-          entryId,
-        );
-      }
+      const confirmation = await waitForTrackedWorkConfirmation(
+        workKey,
+        payload,
+        data,
+        entryId,
+      );
       if (confirmation.workKey && !confirmation.state) {
         recordArchiveIssueFromPayload(payload, "network");
         await markWorkError(
