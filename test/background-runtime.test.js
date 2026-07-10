@@ -3021,16 +3021,32 @@ test("TRACE_AUTO_TRACK with auto-track disabled responds auto_track_disabled", a
   assert.equal(trackCalls.length, 0);
 });
 
-test("TRACE_AUTO_TRACK responds ok:true only after the server write returns 2xx", async () => {
+test("TRACE_AUTO_TRACK confirms saved from an authoritative track entry", async () => {
+  const entry = {
+    status: "PLANNING",
+    readerStatus: "PLANNING",
+    canonicalReaderStatus: "SAVED",
+    entryId: "00000000-0000-4000-8000-000000000203",
+  };
   const h = createBackgroundHarness({
     storageState: { authToken: "token-at-3" },
     fetchImpl: async (url) => {
       if (String(url).endsWith("/api/extension/track")) {
-        return createResponse({ json: { success: true, data: { story_id: "s-1" } } });
+        return createResponse({
+          json: {
+            success: true,
+            data: {
+              entry_id: entry.entryId,
+              work_key: "ao3:203",
+              entry,
+              syncVersion: "v-at",
+            },
+          },
+        });
       }
       if (String(url).endsWith("/api/extension/library-overlay")) {
         return createResponse({
-          json: { success: true, data: { entries: {}, syncVersion: "v-at" } },
+          json: { success: true, data: { entries: { "ao3:203": entry }, syncVersion: "v-at" } },
         });
       }
       return createResponse({ ok: false, status: 404 });
@@ -3044,16 +3060,113 @@ test("TRACE_AUTO_TRACK responds ok:true only after the server write returns 2xx"
       payload: {
         s: "ao3",
         at: new Date().toISOString(),
-        item: { t: "Story", u: "https://archiveofourown.org/works/203" },
+        item: {
+          src: "ao3",
+          t: "Story",
+          u: "https://archiveofourown.org/works/203",
+        },
       },
     },
     { tab: { id: 113 }, frameId: 0, documentLifecycle: "active" },
   );
 
   assert.equal(response.ok, true);
-  // The collector only inspects response.ok; do not start leaking server
-  // payload fields into the ack without a documented consumer.
-  assert.deepEqual(Object.keys(response), ["ok"]);
+  assert.equal(response.entryId, entry.entryId);
+  assert.equal(response.state.status, "saved");
+  assert.equal(response.state.entry.entryId, entry.entryId);
+  assert.equal(h.store.libraryOverlayCache.entries["ao3:203"].entryId, entry.entryId);
+});
+
+test("TRACE_AUTO_TRACK confirms legacy track responses only after overlay refresh sees the entry", async () => {
+  const entry = {
+    status: "PLANNING",
+    readerStatus: "PLANNING",
+    canonicalReaderStatus: "SAVED",
+    entryId: "00000000-0000-4000-8000-000000000204",
+  };
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-at-legacy" },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/extension/track")) {
+        return createResponse({
+          json: { success: true, data: { entry_id: entry.entryId, type: "created" } },
+        });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: { success: true, data: { entries: { "ao3:204": entry }, syncVersion: "v-at-legacy" } },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.hooks.setBearerToken("token-at-legacy");
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_AUTO_TRACK",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: {
+          src: "ao3",
+          t: "Story",
+          u: "https://archiveofourown.org/works/204",
+        },
+      },
+    },
+    { tab: { id: 114 }, frameId: 0, documentLifecycle: "active" },
+  );
+
+  assert.equal(response.ok, true);
+  assert.equal(response.entryId, entry.entryId);
+  assert.equal(response.state.status, "saved");
+  assert.equal(response.state.entry.entryId, entry.entryId);
+});
+
+test("TRACE_AUTO_TRACK does not report saved when a 2xx write lacks library confirmation", async () => {
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-at-missing" },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/extension/track")) {
+        return createResponse({ json: { success: true, data: { story_id: "s-1" } } });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: { success: true, data: { entries: {}, syncVersion: "v-at-missing" } },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.hooks.setBearerToken("token-at-missing");
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_AUTO_TRACK",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: {
+          src: "ao3",
+          t: "Story",
+          u: "https://archiveofourown.org/works/205",
+        },
+      },
+    },
+    { tab: { id: 115 }, frameId: 0, documentLifecycle: "active" },
+  );
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, "confirmation_missing");
+  assert.equal(h.store.libraryOverlayCache.entries["ao3:205"], undefined);
+  const queried = await h.dispatchMessage({
+    type: "TRACE_WORK_STATE_GET",
+    workKey: "ao3:205",
+  });
+  assert.equal(queried.ok, true);
+  assert.equal(queried.state.status, "error");
+  assert.equal(queried.state.error, "confirmation_missing");
 });
 
 test("TRACE_AUTO_TRACK responds auth_expired on 401", async () => {

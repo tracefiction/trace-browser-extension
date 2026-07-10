@@ -546,7 +546,10 @@ test("sendAutoTrackForStory updates overlay cache only after confirmed ack", () 
     chn: 3,
     cht: 17,
   };
-  const { dom, store, bindings } = createAutoTrackCollectorHarness({ ok: true });
+  const { dom, store, bindings } = createAutoTrackCollectorHarness({
+    ok: true,
+    entryId: "00000000-0000-4000-8000-000000285349",
+  });
 
   bindings.sendAutoTrackForStory(item);
 
@@ -555,6 +558,8 @@ test("sendAutoTrackForStory updates overlay cache only after confirmed ack", () 
     status: "READING",
     readerStatus: "READING",
     canonicalReaderStatus: "READING",
+    entryId: "00000000-0000-4000-8000-000000285349",
+    statusChoicesAvailable: true,
     chapters: { current: 3, total: 17 },
   });
 });
@@ -1287,6 +1292,21 @@ test("story page renders saved when background state has the authoritative entry
   assert.equal(store.libraryOverlayCache.entries["ffn:7038840"], undefined);
 });
 
+test("story page does not synthesize saved from an unconfirmed auto-track ack", async () => {
+  const { dom, sent, store } = createStoryAutoTrackPendingHarness({
+    autoTrackResponse: { ok: true },
+    workStateResponse: { ok: true, state: null },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle, "expected Trace story handle");
+  assert.match(handle.textContent || "", /Adding\.\.\./);
+  assert.equal(store.libraryOverlayCache.entries["ffn:7038840"], undefined);
+  assert.equal(sent.some((msg) => msg.type === "TRACE_WORK_STATE_GET"), true);
+});
+
 test("first-story focus-add command triggers existing quick-add path", async () => {
   const { sent, sendRuntimeMessage } = createStoryAutoTrackPendingHarness({
     store: { prefAutoTrackEnabled: false },
@@ -1387,7 +1407,24 @@ test("story page auto-track success updates the pending handle to Reading progre
   const handle = dom.window.document.querySelector("[data-trace-story-handle]");
   assert.match(handle.textContent || "", /Adding\.\.\./);
 
-  autoTrackCallback({ ok: true });
+  autoTrackCallback({
+    ok: true,
+    entryId: "00000000-0000-4000-8000-000000703884",
+    state: {
+      accountId: "acct-story",
+      workKey: "ffn:7038840",
+      operation: "auto_track",
+      status: "saved",
+      entryId: "00000000-0000-4000-8000-000000703884",
+      entry: {
+        status: "READING",
+        readerStatus: "READING",
+        canonicalReaderStatus: "READING",
+        entryId: "00000000-0000-4000-8000-000000703884",
+        chapters: { current: 2, total: 28 },
+      },
+    },
+  });
 
   assert.equal(handle.disabled, false);
   assert.match(handle.textContent || "", /Reading.*2\/28/i);
@@ -3110,7 +3147,7 @@ test("auto-track optimistic cache keeps chapter-one stories as planning", () => 
     runtime: {
       onMessage: { addListener() {} },
       sendMessage(_msg, cb) {
-        cb({ ok: true });
+        cb({ ok: true, entryId: "00000000-0000-4000-8000-000000000123" });
       },
       lastError: null,
     },
@@ -3175,7 +3212,7 @@ test("auto-track optimistic cache promotes planning only after later chapters", 
     runtime: {
       onMessage: { addListener() {} },
       sendMessage(_msg, cb) {
-        cb({ ok: true });
+        cb({ ok: true, entryId: "00000000-0000-4000-8000-000000000124" });
       },
       lastError: null,
     },

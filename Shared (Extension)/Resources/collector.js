@@ -826,6 +826,13 @@ function applyConfirmedOverlayUpdateForStory(item, response) {
       });
       return;
     }
+    queryBackgroundWorkStateForStory(workKey);
+    return;
+  }
+
+  if (!response || typeof response.entryId !== "string" || !response.entryId) {
+    queryBackgroundWorkStateForStory(workKey);
+    return;
   }
 
   ext.storage.local.get(["authToken", OVERLAY_CACHE_KEY], function (res) {

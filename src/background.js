@@ -799,6 +799,7 @@ async function markWorkSaved(workKey, data, fallbackEntryId) {
   if (!workKey) return null;
   const entry =
     data && data.entry && typeof data.entry === "object" ? data.entry : null;
+  if (!entry) return null;
   const entryId =
     (entry && typeof entry.entryId === "string" && entry.entryId) ||
     (data && typeof data.entry_id === "string" && data.entry_id) ||
@@ -869,6 +870,29 @@ function readOverlayEntryForItem(item) {
       resolve(null);
     }
   });
+}
+
+async function confirmTrackedWorkState(workKey, payload, data, fallbackEntryId) {
+  const responseWorkKey = await applyTrackResponseToOverlay(payload, data);
+  const confirmedWorkKey = responseWorkKey || workKey;
+  let state = await markWorkSaved(confirmedWorkKey, data, fallbackEntryId);
+  if (state || !confirmedWorkKey) return { workKey: confirmedWorkKey, state };
+
+  const overlayEntry = await readOverlayEntryForItem(payload && payload.item);
+  if (overlayEntry && typeof overlayEntry === "object") {
+    state = await markWorkSaved(
+      confirmedWorkKey,
+      {
+        entry: overlayEntry,
+        entry_id:
+          (typeof overlayEntry.entryId === "string" && overlayEntry.entryId) ||
+          fallbackEntryId ||
+          null,
+      },
+      fallbackEntryId,
+    );
+  }
+  return { workKey: confirmedWorkKey, state };
 }
 
 /** Best-effort Pro flag for gating Pro-only prefs (synced from GET /api/account/me). */
@@ -2545,14 +2569,37 @@ async function executeAutoTrack(payload, sender, allowNativeAuthRetry = true) {
         data && typeof data.entry_id === "string"
           ? data.entry_id
           : null;
-      const responseWorkKey = await applyTrackResponseToOverlay(payload, data);
-      const state = await markWorkSaved(responseWorkKey || workKey, data, entryId);
+      let confirmation = await confirmTrackedWorkState(workKey, payload, data, entryId);
       await refreshLibraryOverlay();
+      if (!confirmation.state && confirmation.workKey) {
+        confirmation = await confirmTrackedWorkState(
+          confirmation.workKey,
+          payload,
+          null,
+          entryId,
+        );
+      }
+      if (confirmation.workKey && !confirmation.state) {
+        recordArchiveIssueFromPayload(payload, "network");
+        await markWorkError(
+          confirmation.workKey,
+          "auto_track",
+          "confirmation_missing",
+        );
+        setConnectedWithSyncWarning(
+          "Trace accepted the save but did not confirm it in your library. Try Add to Trace again.",
+          {
+            lastTrackAttemptAt: new Date().toISOString(),
+          },
+        );
+        setBadge(sender?.tab?.id, "!", "#9C6B00");
+        return { ok: false, error: "confirmation_missing" };
+      }
       await signalLibraryInvalidated("track");
       setBadge(sender?.tab?.id, "OK", "#0D7A5F");
       setTimeout(() => clearBadge(sender?.tab?.id), 2000);
       const out = entryId ? { ok: true, entryId } : { ok: true };
-      if (state) out.state = state;
+      if (confirmation.state) out.state = confirmation.state;
       return out;
     }
   } catch (error) {
@@ -2713,8 +2760,35 @@ async function handleQuickAdd(
         data && typeof data.entry_id === "string"
           ? data.entry_id
           : null;
-      const responseWorkKey = await applyTrackResponseToOverlay(payload, data);
-      const state = await markWorkSaved(responseWorkKey || workKey, data, entryId);
+      let confirmation = await confirmTrackedWorkState(workKey, payload, data, entryId);
+      await refreshLibraryOverlay();
+      if (!confirmation.state && confirmation.workKey) {
+        confirmation = await confirmTrackedWorkState(
+          confirmation.workKey,
+          payload,
+          null,
+          entryId,
+        );
+      }
+      if (confirmation.workKey && !confirmation.state) {
+        recordArchiveIssueFromPayload(payload, "network");
+        await markWorkError(
+          confirmation.workKey,
+          "quick_add",
+          "confirmation_missing",
+        );
+        setConnectedWithSyncWarning(
+          "Trace accepted the save but did not confirm it in your library. Try Add to Trace again.",
+          {
+            lastQuickAddAt: new Date().toISOString(),
+          },
+        );
+        setBadge(sender?.tab?.id, "!", "#9C6B00");
+        if (sendResponse) {
+          sendResponse({ ok: false, error: "confirmation_missing" });
+        }
+        return;
+      }
       markFirstSaveSeen();
       setConnectedState({
         firstSaveSeen: true,
@@ -2722,12 +2796,11 @@ async function handleQuickAdd(
       });
       setBadge(sender?.tab?.id, "OK", "#0D7A5F");
       setTimeout(() => clearBadge(sender?.tab?.id), 2000);
-      await refreshLibraryOverlay();
       await signalLibraryInvalidated("quick_add");
       if (sendResponse) {
         const out = { ok: true };
         if (entryId) out.entryId = entryId;
-        if (state) out.state = state;
+        if (confirmation.state) out.state = confirmation.state;
         sendResponse(out);
       }
     } else {
