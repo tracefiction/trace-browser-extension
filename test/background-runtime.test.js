@@ -793,6 +793,7 @@ test("startup re-verifies stored connected tokens before reporting connected", a
     authState: "unknown",
     firstSaveSeen: false,
     browserKind: "unknown",
+    capabilities: { firstStoryAdd: true },
     lastTokenSyncAt: Date.parse("2026-05-01T12:00:00.000Z"),
   });
 
@@ -810,6 +811,7 @@ test("startup re-verifies stored connected tokens before reporting connected", a
     authState: "connected",
     firstSaveSeen: false,
     browserKind: "unknown",
+    capabilities: { firstStoryAdd: true },
     lastTokenSyncAt: Date.parse("2026-05-01T12:00:00.000Z"),
   });
   assert.equal(h.hooks.getVerifiedBearerToken(), "legacy-connected-token");
@@ -1212,6 +1214,7 @@ test("TRACE_EXTENSION_STATUS_QUERY returns connected state without private field
     authState: "connected",
     firstSaveSeen: true,
     browserKind: "unknown",
+    capabilities: { firstStoryAdd: true },
     lastTokenSyncAt: Date.parse("2026-05-01T12:00:00.000Z"),
   });
   assert.equal(Object.prototype.hasOwnProperty.call(response, "authToken"), false);
@@ -1257,6 +1260,7 @@ test("TRACE_EXTENSION_STATUS_QUERY returns only coarse archive readiness fields"
     authState: "connected",
     firstSaveSeen: false,
     browserKind: "unknown",
+    capabilities: { firstStoryAdd: true },
     lastArchiveSeenAt: Date.parse("2026-05-01T12:00:00.000Z"),
     lastArchiveHostKind: "ao3",
     lastArchiveActionAt: Date.parse("2026-05-01T12:01:00.000Z"),
@@ -1304,6 +1308,7 @@ test("TRACE_EXTENSION_STATUS_QUERY ignores invalid archive readiness fields", as
     authState: "connected",
     firstSaveSeen: false,
     browserKind: "unknown",
+    capabilities: { firstStoryAdd: true },
   });
 });
 
@@ -1328,6 +1333,7 @@ test("TRACE_EXTENSION_STATUS_QUERY does not trust legacy stored connected state"
     authState: "unknown",
     firstSaveSeen: false,
     browserKind: "unknown",
+    capabilities: { firstStoryAdd: true },
     lastTokenSyncAt: Date.parse("2026-05-01T12:00:00.000Z"),
   });
 });
@@ -1346,6 +1352,7 @@ test("TRACE_EXTENSION_STATUS_QUERY returns signed-out state", async () => {
     authState: "signed_out",
     firstSaveSeen: false,
     browserKind: "unknown",
+    capabilities: { firstStoryAdd: true },
   });
 });
 
@@ -1366,6 +1373,7 @@ test("TRACE_EXTENSION_STATUS_QUERY returns reconnect and error states", async ()
     authState: "reconnect_required",
     firstSaveSeen: false,
     browserKind: "unknown",
+    capabilities: { firstStoryAdd: true },
   });
 
   const errored = createBackgroundHarness();
@@ -1383,6 +1391,7 @@ test("TRACE_EXTENSION_STATUS_QUERY returns reconnect and error states", async ()
     authState: "error",
     firstSaveSeen: false,
     browserKind: "unknown",
+    capabilities: { firstStoryAdd: true },
   });
 });
 

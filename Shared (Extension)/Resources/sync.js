@@ -115,6 +115,13 @@ function sanitizeStatusState(raw) {
     state.browserKind = input.browserKind;
   }
   if (
+    input.capabilities &&
+    typeof input.capabilities === "object" &&
+    input.capabilities.firstStoryAdd === true
+  ) {
+    state.capabilities = { firstStoryAdd: true };
+  }
+  if (
     typeof input.lastArchiveSeenAt === "number" &&
     Number.isFinite(input.lastArchiveSeenAt)
   ) {

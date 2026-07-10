@@ -546,6 +546,7 @@ function safeUnknownExtensionStatus() {
     connected: false,
     authState: "unknown",
     browserKind: detectBrowserKind(),
+    capabilities: { firstStoryAdd: true },
   };
 }
 
@@ -569,6 +570,7 @@ function buildExtensionStatus(snapshot = {}) {
       snapshot[TRACE_FIRST_SAVE_SEEN_KEY] === true,
     ),
     browserKind: detectBrowserKind(),
+    capabilities: { firstStoryAdd: true },
   };
   const lastTokenSyncAt = toEpochMillis(authState?.lastTokenSyncAt);
   if (lastTokenSyncAt != null) {
