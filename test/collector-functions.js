@@ -118,5 +118,6 @@ function createCollectorBindings(dom, options = {}) {
 module.exports = {
   createCollectorBindings,
   getCollectorCoreSource,
+  withDefaultScopedStorageContext,
   COLLECTOR_PATH,
 };

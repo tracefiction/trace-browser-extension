@@ -3,7 +3,10 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const { JSDOM } = require("jsdom");
-const { createCollectorBindings } = require("./collector-functions.js");
+const {
+  createCollectorBindings,
+  withDefaultScopedStorageContext,
+} = require("./collector-functions.js");
 
 const FIXTURES = path.join(__dirname, "fixtures");
 
@@ -31,31 +34,8 @@ function plainJson(v) {
   return JSON.parse(JSON.stringify(v));
 }
 
-function scopedCollectorChrome(chrome) {
-  const local = chrome && chrome.storage && chrome.storage.local;
-  if (!local || typeof local.get !== "function") return chrome;
-  const originalGet = local.get.bind(local);
-  local.get = (keys, cb) => {
-    originalGet(keys, (res) => {
-      const out = res && typeof res === "object" ? res : {};
-      if (out.authToken) {
-        if (out.traceApiBase == null) out.traceApiBase = "https://trace.test";
-        if (out.traceAccountId == null) out.traceAccountId = "acct-test";
-        const cache = out.libraryOverlayCache;
-        if (cache && typeof cache === "object") {
-          if (cache.apiBase == null) cache.apiBase = out.traceApiBase;
-          if (cache.accountId == null) cache.accountId = out.traceAccountId;
-          if (cache.contextVersion == null) cache.contextVersion = 1;
-        }
-      }
-      if (typeof cb === "function") cb(out);
-    });
-  };
-  return chrome;
-}
-
 function installCollectorChrome(dom, chrome) {
-  const scoped = scopedCollectorChrome(chrome);
+  const scoped = withDefaultScopedStorageContext(chrome);
   dom.window.chrome = scoped;
   dom.window.browser = scoped;
 }

@@ -2106,6 +2106,79 @@ test("TRACE_QUICK_ADD without token returns not_authenticated", async () => {
   assert.equal(response.error, "not_authenticated");
 });
 
+test("TRACE_QUICK_ADD rehydrates stored token on Chrome service worker cold start", async () => {
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "stored-quick-token",
+      traceAuthState: {
+        state: "connected",
+        lastTokenSyncAt: "2026-01-01T00:00:00.000Z",
+      },
+    },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/api/account/me")) {
+        assert.equal(init.headers.Authorization, "Bearer stored-quick-token");
+        return createResponse({
+          json: {
+            account_id: "acct-stored-quick",
+            pro: false,
+            library_count: 1,
+          },
+        });
+      }
+      if (String(url).endsWith("/api/extension/track")) {
+        assert.equal(init.headers.Authorization, "Bearer stored-quick-token");
+        return createResponse({
+          json: {
+            success: true,
+            data: {
+              work_key: "ao3:102",
+              entry_id: "entry-stored-quick",
+              entry: {
+                entryId: "entry-stored-quick",
+                status: "READING",
+                readerStatus: "READING",
+              },
+            },
+          },
+        });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: {
+            success: true,
+            data: { entries: {}, syncVersion: "stored-quick-v1" },
+          },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.hooks.setBearerToken(null);
+  h.hooks.setVerifiedBearerToken(null);
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_QUICK_ADD",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: {
+          src: "ao3",
+          t: "Test",
+          u: "https://archiveofourown.org/works/102",
+        },
+      },
+    },
+  );
+
+  assert.equal(response.ok, true);
+  assert.equal(response.entryId, "entry-stored-quick");
+  assert.equal(h.hooks.getBearerToken(), "stored-quick-token");
+  assert.equal(h.store.traceAccountId, "acct-stored-quick");
+  assert.equal(h.store.traceAuthState.state, "connected");
+});
+
 test("TRACE_QUICK_ADD bootstraps iOS native auth before first-story quick add", async () => {
   const h = createBackgroundHarness({
     sendNativeMessageImpl(message, callback) {
@@ -2843,6 +2916,80 @@ test("TRACE_AUTO_TRACK without a token responds not_authenticated", async () => 
 
   assert.equal(response.ok, false);
   assert.equal(response.error, "not_authenticated");
+});
+
+test("TRACE_AUTO_TRACK rehydrates stored token on Chrome service worker cold start", async () => {
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "stored-auto-token",
+      traceAuthState: {
+        state: "connected",
+        lastTokenSyncAt: "2026-01-01T00:00:00.000Z",
+      },
+    },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/api/account/me")) {
+        assert.equal(init.headers.Authorization, "Bearer stored-auto-token");
+        return createResponse({
+          json: {
+            account_id: "acct-stored-auto",
+            pro: false,
+            library_count: 1,
+          },
+        });
+      }
+      if (String(url).endsWith("/api/extension/track")) {
+        assert.equal(init.headers.Authorization, "Bearer stored-auto-token");
+        return createResponse({
+          json: {
+            success: true,
+            data: {
+              work_key: "ao3:201",
+              entry_id: "entry-stored-auto",
+              entry: {
+                entryId: "entry-stored-auto",
+                status: "READING",
+                readerStatus: "READING",
+              },
+            },
+          },
+        });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: {
+            success: true,
+            data: { entries: {}, syncVersion: "stored-auto-v1" },
+          },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.hooks.setBearerToken(null);
+  h.hooks.setVerifiedBearerToken(null);
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_AUTO_TRACK",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: {
+          src: "ao3",
+          t: "Story",
+          u: "https://archiveofourown.org/works/201",
+        },
+      },
+    },
+    { tab: { id: 111 }, frameId: 0, documentLifecycle: "active" },
+  );
+
+  assert.equal(response.ok, true);
+  assert.equal(response.entryId, "entry-stored-auto");
+  assert.equal(h.hooks.getBearerToken(), "stored-auto-token");
+  assert.equal(h.store.traceAccountId, "acct-stored-auto");
+  assert.equal(h.store.traceAuthState.state, "connected");
 });
 
 test("TRACE_AUTO_TRACK bootstraps iOS native auth before first story track", async () => {

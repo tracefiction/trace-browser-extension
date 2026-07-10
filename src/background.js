@@ -81,6 +81,7 @@ const optimisticChapterFloors = new Map();
 let ao3SavedFiltersSyncTimer = null;
 let ao3SavedFiltersSyncInFlight = false;
 let authVerificationRetryTimer = null;
+let initialAuthPromise = null;
 
 function shouldIgnoreSenderForAutoTrack(sender) {
   if (!sender || typeof sender !== "object") return false;
@@ -1997,6 +1998,29 @@ async function bootstrapInitialAuth(res) {
   await bootstrapAuthFromIosNative("stored_token_rejected");
 }
 
+function startInitialAuth(res) {
+  initialAuthPromise = bootstrapInitialAuth(res || {}).catch((error) => {
+    console.warn("[Trace] Initial auth bootstrap failed:", error);
+  });
+  return initialAuthPromise;
+}
+
+async function ensureStoredAuthReady() {
+  if (bearerToken) return true;
+  if (initialAuthPromise) {
+    await initialAuthPromise;
+    if (bearerToken) return true;
+  }
+  const snapshot = await storageGetLocal([AUTH_TOKEN_KEY, AUTH_STATE_KEY]);
+  const storedToken =
+    typeof snapshot[AUTH_TOKEN_KEY] === "string"
+      ? snapshot[AUTH_TOKEN_KEY].trim()
+      : "";
+  if (!storedToken) return false;
+  await startInitialAuth(snapshot);
+  return Boolean(bearerToken);
+}
+
 async function handleIosPendingFirstStoryGet(sendResponse) {
   if (!bearerToken) {
     const bootstrapped = await bootstrapAuthFromIosNative("pending_first_story");
@@ -2191,7 +2215,7 @@ function pingAo3TabForAutoTrack(tabId) {
 try {
   void ensureRuntimeContext();
   ext.storage.local.get([AUTH_TOKEN_KEY, AUTH_STATE_KEY], (res) => {
-    void bootstrapInitialAuth(res || {});
+    void startInitialAuth(res || {});
   });
 } catch (e) {
   console.error("[Trace] Failed to read storage on boot:", e);
@@ -2545,13 +2569,19 @@ function respondAutoTrackNotAuthenticated(payload, sender, sendResponse) {
 
 function handleAutoTrack(payload, sender, sendResponse) {
   if (!bearerToken) {
-    void bootstrapAuthFromIosNative("auto_track")
-      .then((bootstrapped) => {
-        if (bootstrapped && bearerToken) {
+    void ensureStoredAuthReady()
+      .then((ready) => {
+        if (ready && bearerToken) {
           handleAutoTrack(payload, sender, sendResponse);
           return;
         }
-        respondAutoTrackNotAuthenticated(payload, sender, sendResponse);
+        return bootstrapAuthFromIosNative("auto_track").then((bootstrapped) => {
+          if (bootstrapped && bearerToken) {
+            handleAutoTrack(payload, sender, sendResponse);
+            return;
+          }
+          respondAutoTrackNotAuthenticated(payload, sender, sendResponse);
+        });
       })
       .catch(() => {
         respondAutoTrackNotAuthenticated(payload, sender, sendResponse);
@@ -2821,6 +2851,11 @@ async function handleQuickAdd(
 ) {
   const workKey = externalStoryKeyFromItem(payload && payload.item);
   if (!bearerToken) {
+    const ready = await ensureStoredAuthReady();
+    if (ready && bearerToken) {
+      await handleQuickAdd(payload, sender, sendResponse, allowNativeAuthRetry);
+      return;
+    }
     if (allowNativeAuthRetry) {
       const bootstrapped = await bootstrapAuthFromIosNative("quick_add");
       if (bootstrapped && bearerToken) {
