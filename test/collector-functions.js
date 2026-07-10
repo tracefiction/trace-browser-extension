@@ -37,6 +37,30 @@ function createChromeMock() {
   };
 }
 
+function withDefaultScopedStorageContext(chrome, options = {}) {
+  if (options.scopeStorageContext === false) return chrome;
+  const local = chrome && chrome.storage && chrome.storage.local;
+  if (!local || typeof local.get !== "function") return chrome;
+  const originalGet = local.get.bind(local);
+  local.get = (keys, cb) => {
+    originalGet(keys, (res) => {
+      const out = res && typeof res === "object" ? res : {};
+      if (out.authToken) {
+        if (out.traceApiBase == null) out.traceApiBase = "https://trace.test";
+        if (out.traceAccountId == null) out.traceAccountId = "acct-test";
+        const cache = out.libraryOverlayCache;
+        if (cache && typeof cache === "object") {
+          if (cache.apiBase == null) cache.apiBase = out.traceApiBase;
+          if (cache.accountId == null) cache.accountId = out.traceAccountId;
+          if (cache.contextVersion == null) cache.contextVersion = 1;
+        }
+      }
+      if (typeof cb === "function") cb(out);
+    });
+  };
+  return chrome;
+}
+
 /**
  * @param {import("jsdom").JSDOM} dom
  * @param {{ chrome?: any }} [options]
@@ -50,7 +74,7 @@ function createCollectorBindings(dom, options = {}) {
     window,
     self: window,
     globalThis: null,
-    chrome: options.chrome || createChromeMock(),
+    chrome: withDefaultScopedStorageContext(options.chrome || createChromeMock(), options),
     browser: undefined,
     setTimeout: window.setTimeout.bind(window),
     clearTimeout: window.clearTimeout.bind(window),

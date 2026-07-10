@@ -23,6 +23,7 @@ const AUTH_TOKEN_KEY = "authToken";
 const AUTH_STATE_KEY = "traceAuthState";
 const OVERLAY_STORAGE_KEY = "libraryOverlayCache";
 const TRACE_ACCOUNT_ID_KEY = "traceAccountId";
+const TRACE_API_BASE_STORAGE_KEY = "traceApiBase";
 const WORK_STATE_STORAGE_KEY = "traceWorkStatesV1";
 const AO3_SAVED_FILTERS_STORAGE_KEY = "traceAo3SavedFiltersV1";
 const AO3_SAVED_FILTERS_DELETED_KEY = "traceAo3SavedFiltersDeletedV1";
@@ -681,6 +682,48 @@ function currentAccountIdFromSnapshot(snapshot = {}) {
   return verified || "unknown";
 }
 
+function normalizedTraceApiBase() {
+  return TRACE_API_BASE.replace(/\/$/, "");
+}
+
+function overlayCacheContextFromSnapshot(snapshot = {}) {
+  return {
+    apiBase: normalizedTraceApiBase(),
+    accountId: currentAccountIdFromSnapshot(snapshot),
+    contextVersion: 1,
+  };
+}
+
+function scopedOverlayCache(data = {}, snapshot = {}) {
+  return {
+    ...data,
+    ...overlayCacheContextFromSnapshot(snapshot),
+  };
+}
+
+async function ensureRuntimeContext() {
+  const apiBase = normalizedTraceApiBase();
+  const snapshot = await storageGetLocal([TRACE_API_BASE_STORAGE_KEY, OVERLAY_STORAGE_KEY]);
+  const patch = { [TRACE_API_BASE_STORAGE_KEY]: apiBase };
+  const previousApiBase =
+    typeof snapshot[TRACE_API_BASE_STORAGE_KEY] === "string"
+      ? snapshot[TRACE_API_BASE_STORAGE_KEY].replace(/\/$/, "")
+      : "";
+  const cache = snapshot[OVERLAY_STORAGE_KEY];
+  const cacheApiBase =
+    cache && typeof cache.apiBase === "string" ? cache.apiBase.replace(/\/$/, "") : "";
+  if (
+    (previousApiBase && previousApiBase !== apiBase) ||
+    (cacheApiBase && cacheApiBase !== apiBase)
+  ) {
+    patch[OVERLAY_STORAGE_KEY] = scopedOverlayCache({
+      entries: {},
+      syncVersion: new Date(0).toISOString(),
+    });
+  }
+  await storageSetLocal(patch);
+}
+
 function workStateStorageKey(accountId, workKey) {
   return `${accountId || "unknown"}|${workKey}`;
 }
@@ -835,21 +878,28 @@ async function applyTrackResponseToOverlay(payload, data) {
       : externalStoryKeyFromItem(payload && payload.item);
   if (!workKey) return null;
 
-  const snapshot = await storageGetLocal([OVERLAY_STORAGE_KEY]);
+  const snapshot = await storageGetLocal([
+    OVERLAY_STORAGE_KEY,
+    TRACE_ACCOUNT_ID_KEY,
+    AUTH_STATE_KEY,
+  ]);
   const cache = snapshot[OVERLAY_STORAGE_KEY] || {};
   const entries = {
     ...(cache.entries && typeof cache.entries === "object" ? cache.entries : {}),
     [workKey]: data.entry,
   };
-  const nextCache = {
+  const nextCache = scopedOverlayCache({
     ...cache,
     entries,
     syncVersion:
       typeof data.syncVersion === "string"
         ? data.syncVersion
         : cache.syncVersion || new Date().toISOString(),
-  };
-  await storageSetLocal({ [OVERLAY_STORAGE_KEY]: nextCache });
+  }, snapshot);
+  await storageSetLocal({
+    [TRACE_API_BASE_STORAGE_KEY]: normalizedTraceApiBase(),
+    [OVERLAY_STORAGE_KEY]: nextCache,
+  });
   return workKey;
 }
 
@@ -1048,16 +1098,18 @@ async function verifyTraceAccountToken(token, extra = {}) {
           previous[TRACE_ACCOUNT_ID_KEY] !== accountId
         ) {
           await storageSetLocal({
-            [OVERLAY_STORAGE_KEY]: {
+            [TRACE_API_BASE_STORAGE_KEY]: normalizedTraceApiBase(),
+            [OVERLAY_STORAGE_KEY]: scopedOverlayCache({
               entries: {},
               syncVersion: new Date(0).toISOString(),
-            },
+            }, { [TRACE_ACCOUNT_ID_KEY]: accountId }),
           });
           await clearWorkStates();
         }
       }
       const patch = {
         [AUTH_TOKEN_KEY]: trimmed,
+        [TRACE_API_BASE_STORAGE_KEY]: normalizedTraceApiBase(),
         ...accountStoragePatch(json),
       };
       ext.storage.local.set(patch);
@@ -1672,13 +1724,15 @@ async function fetchLibraryOverlayFromApi() {
     const data = json && json.data;
     if (data && data.entries && typeof data.syncVersion === "string") {
       const entries = applyOptimisticChapterFloors({ ...data.entries });
+      const snapshot = await storageGetLocal([TRACE_ACCOUNT_ID_KEY, AUTH_STATE_KEY]);
       await new Promise((resolve) => {
         ext.storage.local.set(
           {
-            [OVERLAY_STORAGE_KEY]: {
+            [TRACE_API_BASE_STORAGE_KEY]: normalizedTraceApiBase(),
+            [OVERLAY_STORAGE_KEY]: scopedOverlayCache({
               ...data,
               entries,
-            },
+            }, snapshot),
             libraryOverlayFetchedAt: new Date().toISOString(),
           },
           resolve,
@@ -2135,6 +2189,7 @@ function pingAo3TabForAutoTrack(tabId) {
 }
 
 try {
+  void ensureRuntimeContext();
   ext.storage.local.get([AUTH_TOKEN_KEY, AUTH_STATE_KEY], (res) => {
     void bootstrapInitialAuth(res || {});
   });

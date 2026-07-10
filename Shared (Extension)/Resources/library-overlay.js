@@ -13,7 +13,39 @@
   const ACTION_SURFACE_ATTR = "data-trace-action-surface";
   const ACTION_SURFACE_CLOSE_ATTR = "data-trace-action-surface-close";
   const TRACE_WEB_HOME_URL = "https://tracefiction.com/";
+  const TRACE_ACCOUNT_ID_KEY = "traceAccountId";
+  const TRACE_API_BASE_STORAGE_KEY = "traceApiBase";
   var currentTraceAuthState = null;
+
+  function normalizeStorageString(value) {
+    return typeof value === "string" ? value.trim() : "";
+  }
+
+  function normalizeStoredApiBase(value) {
+    return normalizeStorageString(value).replace(/\/$/, "");
+  }
+
+  function overlayCacheMatchesRuntimeContext(cache, storage) {
+    if (!cache || typeof cache !== "object") return false;
+    var expectedApiBase = normalizeStoredApiBase(storage && storage[TRACE_API_BASE_STORAGE_KEY]);
+    var cacheApiBase = normalizeStoredApiBase(cache.apiBase);
+    if (!expectedApiBase || !cacheApiBase || expectedApiBase !== cacheApiBase) {
+      return false;
+    }
+    var expectedAccountId = normalizeStorageString(storage && storage[TRACE_ACCOUNT_ID_KEY]);
+    var cacheAccountId = normalizeStorageString(cache.accountId);
+    if (expectedAccountId && cacheAccountId !== expectedAccountId) {
+      return false;
+    }
+    if (!expectedAccountId && !cacheAccountId) {
+      return false;
+    }
+    return true;
+  }
+
+  function overlayCacheForRuntimeContext(cache, storage) {
+    return overlayCacheMatchesRuntimeContext(cache, storage) ? cache : null;
+  }
 
   function usefulTraceUrl(rawUrl) {
     var fallback = TRACE_WEB_HOME_URL;
@@ -3267,6 +3299,8 @@
           "prefLibraryInlayEnabled",
           "authToken",
           "traceAuthState",
+          TRACE_ACCOUNT_ID_KEY,
+          TRACE_API_BASE_STORAGE_KEY,
         ],
         function (res) {
           if (ext.runtime.lastError) return;
@@ -3281,7 +3315,7 @@
             clearBadges();
             return;
           }
-          var cache = res && res.libraryOverlayCache;
+          var cache = overlayCacheForRuntimeContext(res && res.libraryOverlayCache, res);
           var entries = (cache && cache.entries) || {};
           var workPreferences = (cache && cache.workPreferences) || {};
           var showQuickAdd = authStateAllowsActions(res && res.traceAuthState, hasAuth) && !isSingleWorkPage();
@@ -3332,7 +3366,9 @@
           !changes.libraryOverlayCache &&
           !changes.prefLibraryInlayEnabled &&
           !changes.traceAuthState &&
-          !changes.authToken
+          !changes.authToken &&
+          !changes[TRACE_ACCOUNT_ID_KEY] &&
+          !changes[TRACE_API_BASE_STORAGE_KEY]
         ) {
           return;
         }

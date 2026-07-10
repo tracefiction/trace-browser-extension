@@ -31,6 +31,35 @@ function plainJson(v) {
   return JSON.parse(JSON.stringify(v));
 }
 
+function scopedCollectorChrome(chrome) {
+  const local = chrome && chrome.storage && chrome.storage.local;
+  if (!local || typeof local.get !== "function") return chrome;
+  const originalGet = local.get.bind(local);
+  local.get = (keys, cb) => {
+    originalGet(keys, (res) => {
+      const out = res && typeof res === "object" ? res : {};
+      if (out.authToken) {
+        if (out.traceApiBase == null) out.traceApiBase = "https://trace.test";
+        if (out.traceAccountId == null) out.traceAccountId = "acct-test";
+        const cache = out.libraryOverlayCache;
+        if (cache && typeof cache === "object") {
+          if (cache.apiBase == null) cache.apiBase = out.traceApiBase;
+          if (cache.accountId == null) cache.accountId = out.traceAccountId;
+          if (cache.contextVersion == null) cache.contextVersion = 1;
+        }
+      }
+      if (typeof cb === "function") cb(out);
+    });
+  };
+  return chrome;
+}
+
+function installCollectorChrome(dom, chrome) {
+  const scoped = scopedCollectorChrome(chrome);
+  dom.window.chrome = scoped;
+  dom.window.browser = scoped;
+}
+
 test("collectAO3Work (ao3_story.html) extracts full metadata", () => {
   const dom = domFromFixture(
     "ao3_story.html",
@@ -1058,8 +1087,7 @@ test("FFN mobile story Add saves immediately without opening the sheet", () => {
     },
   };
 
-  dom.window.chrome = chrome;
-  dom.window.browser = chrome;
+  installCollectorChrome(dom, chrome);
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -1189,8 +1217,12 @@ function createStoryAutoTrackPendingHarness(options = {}) {
     },
   };
 
-  dom.window.chrome = chrome;
-  dom.window.browser = chrome;
+  if (options.scopedStorageContext === false) {
+    dom.window.chrome = chrome;
+    dom.window.browser = chrome;
+  } else {
+    installCollectorChrome(dom, chrome);
+  }
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -1258,6 +1290,33 @@ test("story page auto-track pending overrides stale saved cache", () => {
   assert.ok(handle, "expected Trace story handle");
   assert.equal(handle.disabled, true);
   assert.match(handle.textContent || "", /Adding\.\.\./);
+});
+
+test("story page ignores unscoped cached saved state", () => {
+  const { dom } = createStoryAutoTrackPendingHarness({
+    holdAutoTrack: true,
+    scopedStorageContext: false,
+    store: {
+      authToken: "test-token",
+      traceAuthState: { state: "connected" },
+      libraryOverlayCache: {
+        entries: {
+          "ffn:7038840": {
+            entryId: "stale-entry",
+            status: "READING",
+            readerStatus: "READING",
+            chapters: { current: 4, total: 28 },
+          },
+        },
+        syncVersion: "stale-unscoped",
+      },
+    },
+  });
+
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle, "expected Trace story handle");
+  assert.notEqual(handle.getAttribute("data-trace-story-handle-state"), "saved");
+  assert.doesNotMatch(handle.textContent || "", /Reading/i);
 });
 
 test("story page rehydrates pending work state from the background on load", () => {
@@ -1556,8 +1615,7 @@ test("AO3 story places compact Trace handle centered below title and byline", ()
     },
   };
 
-  dom.window.chrome = chrome;
-  dom.window.browser = chrome;
+  installCollectorChrome(dom, chrome);
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -1643,8 +1701,7 @@ test("mobile story keeps Trace sheet as fixed bottom sheet", () => {
     },
   };
 
-  dom.window.chrome = chrome;
-  dom.window.browser = chrome;
+  installCollectorChrome(dom, chrome);
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -1720,8 +1777,7 @@ test("FFN desktop story places compact Trace handle after profile header", () =>
     },
   };
 
-  dom.window.chrome = chrome;
-  dom.window.browser = chrome;
+  installCollectorChrome(dom, chrome);
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -1785,8 +1841,7 @@ test("FFN mobile story quick-add shows planning after chapter-one success", () =
     fn();
     return 1;
   };
-  dom.window.chrome = chrome;
-  dom.window.browser = chrome;
+  installCollectorChrome(dom, chrome);
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -1848,8 +1903,7 @@ test("FFN mobile story quick-add shows reading progress after later-chapter succ
     fn();
     return 1;
   };
-  dom.window.chrome = chrome;
-  dom.window.browser = chrome;
+  installCollectorChrome(dom, chrome);
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -1925,8 +1979,7 @@ test("FFN mobile story quick-add shows optional post-add status choices when ent
       fn();
       return 1;
     };
-    dom.window.chrome = chrome;
-    dom.window.browser = chrome;
+    installCollectorChrome(dom, chrome);
     dom.window.eval(collectorSrc);
     dom.window.document.dispatchEvent(
       new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -2013,8 +2066,7 @@ test("story sheet shows status editing for cached entries with entryId and hides
       },
     };
 
-    dom.window.chrome = chrome;
-    dom.window.browser = chrome;
+    installCollectorChrome(dom, chrome);
     dom.window.eval(collectorSrc);
     dom.window.document.dispatchEvent(
       new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -2129,8 +2181,7 @@ test("story sheet selected status choice uses status-specific D1 tint", () => {
     },
   };
 
-  dom.window.chrome = chrome;
-  dom.window.browser = chrome;
+  installCollectorChrome(dom, chrome);
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -2210,8 +2261,7 @@ test("story sheet Planning to Reading sends chapter progress 1 and displays 1/? 
     },
   };
 
-  dom.window.chrome = chrome;
-  dom.window.browser = chrome;
+  installCollectorChrome(dom, chrome);
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -2322,8 +2372,7 @@ test("finish qualify watches AO3 chapter text before end notes", () => {
       toastShown = true;
     },
   };
-  dom.window.chrome = chrome;
-  dom.window.browser = chrome;
+  installCollectorChrome(dom, chrome);
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -2392,8 +2441,7 @@ test("finish qualify band prompts on unknown FFN final chapter and writes finish
     },
   };
 
-  dom.window.chrome = chrome;
-  dom.window.browser = chrome;
+  installCollectorChrome(dom, chrome);
   dom.window.eval(finishSrc);
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
@@ -2523,8 +2571,7 @@ test("finish qualify inserts AO3 prompt after the final end notes and aligns to 
     },
   };
 
-  dom.window.chrome = chrome;
-  dom.window.browser = chrome;
+  installCollectorChrome(dom, chrome);
   dom.window.eval(finishSrc);
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
@@ -2601,8 +2648,7 @@ test("finish qualify silently marks known-complete final chapter as finished", (
     },
   };
 
-  dom.window.chrome = chrome;
-  dom.window.browser = chrome;
+  installCollectorChrome(dom, chrome);
   dom.window.eval(finishSrc);
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
@@ -2668,8 +2714,7 @@ test("story sheet position block shows unknown total without chapter stepper con
     },
   };
 
-  dom.window.chrome = chrome;
-  dom.window.browser = chrome;
+  installCollectorChrome(dom, chrome);
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -2739,8 +2784,7 @@ test("FFN mobile story post-add status mutation failure keeps saved state", () =
     fn();
     return 1;
   };
-  dom.window.chrome = chrome;
-  dom.window.browser = chrome;
+  installCollectorChrome(dom, chrome);
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -2823,8 +2867,7 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
     },
   };
 
-  dom.window.chrome = chrome;
-  dom.window.browser = chrome;
+  installCollectorChrome(dom, chrome);
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -2972,8 +3015,7 @@ test("FFN mobile story sheet hidden preference auth failures become connect acti
     };
 
     dom.window.setTimeout = () => 1;
-    dom.window.chrome = chrome;
-    dom.window.browser = chrome;
+    installCollectorChrome(dom, chrome);
     dom.window.eval(collectorSrc);
     dom.window.document.dispatchEvent(
       new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -3052,8 +3094,7 @@ test("FFN mobile story sheet hides mutation controls with stale token when auth 
       },
     };
 
-    dom.window.chrome = chrome;
-    dom.window.browser = chrome;
+    installCollectorChrome(dom, chrome);
     dom.window.eval(collectorSrc);
     dom.window.document.dispatchEvent(
       new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -3118,8 +3159,7 @@ test("FFN mobile story sheet quick-add preserves free-limit and error states", (
     };
 
     dom.window.setTimeout = () => 1;
-    dom.window.chrome = chrome;
-    dom.window.browser = chrome;
+    installCollectorChrome(dom, chrome);
     dom.window.eval(collectorSrc);
     dom.window.document.dispatchEvent(
       new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -3172,8 +3212,7 @@ test("collector story Trace sheet is not rendered on password pages", () => {
     },
   };
 
-  dom.window.chrome = chrome;
-  dom.window.browser = chrome;
+  installCollectorChrome(dom, chrome);
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -3244,8 +3283,7 @@ test("auto-track confirmed state keeps chapter-one stories as planning", () => {
     },
   };
 
-  dom.window.chrome = chrome;
-  dom.window.browser = chrome;
+  installCollectorChrome(dom, chrome);
   dom.window.eval(
     collectorSrc + "\nwindow.__traceTestHooks = { sendAutoTrackForStory };",
   );
@@ -3327,8 +3365,7 @@ test("auto-track confirmed state promotes planning only after later chapters", (
     },
   };
 
-  dom.window.chrome = chrome;
-  dom.window.browser = chrome;
+  installCollectorChrome(dom, chrome);
   dom.window.eval(
     collectorSrc + "\nwindow.__traceTestHooks = { sendAutoTrackForStory };",
   );

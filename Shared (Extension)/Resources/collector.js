@@ -326,6 +326,8 @@ var LISTING_METADATA_REFRESH_MAX_ATTEMPTS = 6;
 var AUTO_TRACK_READY_RETRY_MS = 150;
 var AUTO_TRACK_READY_MAX_ATTEMPTS = 12;
 var OVERLAY_CACHE_KEY = "libraryOverlayCache";
+var TRACE_ACCOUNT_ID_KEY = "traceAccountId";
+var TRACE_API_BASE_STORAGE_KEY = "traceApiBase";
 var WORK_STATE_STORAGE_KEY = "traceWorkStatesV1";
 var WORK_STATE_GET_MESSAGE = "TRACE_WORK_STATE_GET";
 var optimisticStoryPageEntries = Object.create(null);
@@ -352,6 +354,47 @@ function count(s) {
   if (!Number.isFinite(base)) return null;
   const mult = m[2] === "k" ? 1_000 : m[2] === "m" ? 1_000_000 : 1;
   return Math.round(base * mult);
+}
+
+function normalizeStorageString(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeStoredApiBase(value) {
+  return normalizeStorageString(value).replace(/\/$/, "");
+}
+
+function overlayCacheMatchesRuntimeContext(cache, storage) {
+  if (!cache || typeof cache !== "object") return false;
+  var expectedApiBase = normalizeStoredApiBase(storage && storage[TRACE_API_BASE_STORAGE_KEY]);
+  var cacheApiBase = normalizeStoredApiBase(cache.apiBase);
+  if (!expectedApiBase || !cacheApiBase || expectedApiBase !== cacheApiBase) {
+    return false;
+  }
+  var expectedAccountId = normalizeStorageString(storage && storage[TRACE_ACCOUNT_ID_KEY]);
+  var cacheAccountId = normalizeStorageString(cache.accountId);
+  if (expectedAccountId && cacheAccountId !== expectedAccountId) {
+    return false;
+  }
+  if (!expectedAccountId && !cacheAccountId) {
+    return false;
+  }
+  return true;
+}
+
+function overlayCacheForRuntimeContext(cache, storage) {
+  return overlayCacheMatchesRuntimeContext(cache, storage) ? cache : null;
+}
+
+function overlayCacheContextPatch(storage) {
+  var patch = {
+    apiBase: normalizeStoredApiBase(storage && storage[TRACE_API_BASE_STORAGE_KEY]),
+    accountId: normalizeStorageString(storage && storage[TRACE_ACCOUNT_ID_KEY]),
+    contextVersion: 1,
+  };
+  if (!patch.apiBase) delete patch.apiBase;
+  if (!patch.accountId) delete patch.accountId;
+  return patch;
 }
 
 function overlayWorkKeyFromItem(item) {
@@ -701,10 +744,17 @@ function sendListingMetadataRefreshForTrackedItems(attempt) {
     typeof attempt === "number" && Number.isFinite(attempt) ? attempt : 0;
 
   try {
-    ext.storage.local.get(["authToken", OVERLAY_CACHE_KEY], function (res) {
+    ext.storage.local.get(
+      [
+        "authToken",
+        OVERLAY_CACHE_KEY,
+        TRACE_ACCOUNT_ID_KEY,
+        TRACE_API_BASE_STORAGE_KEY,
+      ],
+      function (res) {
       if (ext.runtime.lastError || !res || !res.authToken) return;
 
-      var cache = res[OVERLAY_CACHE_KEY];
+      var cache = overlayCacheForRuntimeContext(res[OVERLAY_CACHE_KEY], res);
       var entries = cache && cache.entries;
       if (!entries || typeof entries !== "object") {
         if (retryCount < LISTING_METADATA_REFRESH_MAX_ATTEMPTS) {
@@ -722,7 +772,8 @@ function sendListingMetadataRefreshForTrackedItems(attempt) {
         type: "TRACE_LIBRARY_METADATA_REFRESH",
         payload: { items: items },
       });
-    });
+      },
+    );
   } catch (_) {
     /* best-effort passive enrichment */
   }
@@ -886,24 +937,37 @@ function writeConfirmedOverlayEntryForStory(workKey, entry, cb) {
     return;
   }
 
-  ext.storage.local.get(["authToken", OVERLAY_CACHE_KEY], function (res) {
+  ext.storage.local.get(
+    [
+      "authToken",
+      OVERLAY_CACHE_KEY,
+      TRACE_ACCOUNT_ID_KEY,
+      TRACE_API_BASE_STORAGE_KEY,
+    ],
+    function (res) {
     if (ext.runtime.lastError || !res || !res.authToken) {
       if (typeof cb === "function") cb(false);
       return;
     }
 
-    var cache = res[OVERLAY_CACHE_KEY] || {};
+    var cache = overlayCacheForRuntimeContext(res[OVERLAY_CACHE_KEY], res) || {};
     var entries = Object.assign({}, cache.entries || {});
     entries[workKey] = entry;
     ext.storage.local.set(
       {
-        [OVERLAY_CACHE_KEY]: Object.assign({}, cache, { entries: entries }),
+        [OVERLAY_CACHE_KEY]: Object.assign(
+          {},
+          cache,
+          overlayCacheContextPatch(res),
+          { entries: entries },
+        ),
       },
       function () {
         if (typeof cb === "function") cb(!ext.runtime.lastError);
       },
     );
-  });
+    },
+  );
 }
 
 function queryBackgroundWorkStateForStory(workKey) {
@@ -4867,10 +4931,18 @@ function renderQuickAddButton(workKey) {
     return;
   }
 
-  ext.storage.local.get([OVERLAY_CACHE_KEY, "authToken", "traceAuthState"], function (res) {
+  ext.storage.local.get(
+    [
+      OVERLAY_CACHE_KEY,
+      "authToken",
+      "traceAuthState",
+      TRACE_ACCOUNT_ID_KEY,
+      TRACE_API_BASE_STORAGE_KEY,
+    ],
+    function (res) {
     if (ext.runtime.lastError) return;
 
-    var cache = res[OVERLAY_CACHE_KEY];
+    var cache = overlayCacheForRuntimeContext(res[OVERLAY_CACHE_KEY], res);
     var entries = cache && cache.entries;
     var workPreferences = cache && cache.workPreferences;
     var entry = entries && entries[workKey];
@@ -4949,7 +5021,8 @@ function renderQuickAddButton(workKey) {
 
     renderStorySheet(sheet, view, workKey);
     setupFinishQualify(view, workKey);
-  });
+    },
+  );
 }
 
 function initQuickAdd() {
@@ -4972,7 +5045,9 @@ function initQuickAdd() {
         !changes[OVERLAY_CACHE_KEY] &&
         !changes[WORK_STATE_STORAGE_KEY] &&
         !changes.authToken &&
-        !changes.traceAuthState
+        !changes.traceAuthState &&
+        !changes[TRACE_ACCOUNT_ID_KEY] &&
+        !changes[TRACE_API_BASE_STORAGE_KEY]
       ) return;
       if (changes[WORK_STATE_STORAGE_KEY]) {
         queryBackgroundWorkStateForStory(workKey);

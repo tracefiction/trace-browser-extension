@@ -36,6 +36,16 @@ function precedes(left, right) {
   );
 }
 
+function scopedOverlayCache(cache, options = {}) {
+  if (!cache || typeof cache !== "object") return cache;
+  return {
+    ...cache,
+    apiBase: options.apiBase || cache.apiBase || "https://trace.test",
+    accountId: options.accountId || cache.accountId || "acct-test",
+    contextVersion: cache.contextVersion || 1,
+  };
+}
+
 async function renderOverlayListing({
   html,
   url = "https://archiveofourown.org/works?tag_id=Harry+Potter",
@@ -44,6 +54,7 @@ async function renderOverlayListing({
   authState,
   sendMessage,
   mobile = false,
+  scopeCache = true,
 }) {
   const keysSrc = fs.readFileSync(KEYS_PATH, "utf8");
   const overlaySrc = fs.readFileSync(OVERLAY_PATH, "utf8");
@@ -57,9 +68,11 @@ async function renderOverlayListing({
   const storageChangeListeners = [];
   const storageState = {
     authToken,
+    traceApiBase: "https://trace.test",
+    traceAccountId: "acct-test",
     prefLibraryInlayEnabled: true,
     traceAuthState: authState || (authToken ? { state: "connected" } : { state: "signed_out" }),
-    libraryOverlayCache: cache,
+    libraryOverlayCache: scopeCache ? scopedOverlayCache(cache) : cache,
   };
   const chrome = {
     storage: {
@@ -89,11 +102,13 @@ async function renderOverlayListing({
   window.__traceSetStorage = function (next) {
     const changes = {};
     for (const [key, value] of Object.entries(next || {})) {
+      const nextValue =
+        key === "libraryOverlayCache" ? scopedOverlayCache(value) : value;
       changes[key] = {
         oldValue: storageState[key],
-        newValue: value,
+        newValue: nextValue,
       };
-      storageState[key] = value;
+      storageState[key] = nextValue;
     }
     storageChangeListeners.forEach((fn) => fn(changes, "local"));
   };
@@ -206,6 +221,20 @@ test("library-overlay renders legacy entry status shape", async () => {
   assert.ok(wrap);
   assert.match(wrap.textContent || "", /Reading/);
   assert.equal(wrap.querySelector("button[data-trace-quick-add]"), null);
+});
+
+test("library-overlay ignores unscoped cached saved state", async () => {
+  const window = await renderOverlayListing({
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/12345'>Demo Work</a></h4></li></ol></body></html>",
+    cache: { entries: { "ao3:12345": "READING" }, syncVersion: "stale-unscoped" },
+    scopeCache: false,
+  });
+
+  const wrap = window.document.querySelector("[data-trace-library-overlay-wrap]");
+  assert.ok(wrap);
+  assert.doesNotMatch(wrap.textContent || "", /Reading/);
+  assert.match(wrap.textContent || "", /Add to Trace/);
 });
 
 test("library-overlay places AO3 listing controls in the action row without touching the date", async () => {
