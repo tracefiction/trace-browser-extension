@@ -1,4 +1,4 @@
-# Extension Store Copy - 0.5.4
+# Extension Store Copy - 0.5.5
 
 Use this copy for Chrome Web Store, Firefox Add-ons, App Store Connect, and
 public release notes. Keep evergreen store descriptions separate from
@@ -44,22 +44,18 @@ FictionPress.
 
 ## What's New / Release Notes
 
-Trace extension 0.5.4 improves iOS Safari setup:
+Trace extension 0.5.5 makes saving stories more reliable:
 
-- Uses Trace's canonical `https://www.tracefiction.com` web origin in release
-  builds, matching the production app page loaded by the iOS shell.
-- Improves the iOS app-to-web Safari extension state bridge so enabled
-  extensions are recognized after the production web redirect.
-- Opens Safari extension settings for the bundled extension identifier detected
-  from the installed app, with a fallback for older settings screens.
-- Keeps setup recovery focused on the next useful action when the Safari
-  extension is disabled or Safari website access still needs to be allowed.
+- Waits for confirmed Trace library state before showing a story as saved.
+- Keeps save and overlay state scoped to the signed-in account, avoiding stale
+  results after switching accounts.
+- Recovers first-story adds after temporary auto-track failures.
+- Restores saved Chrome authentication after the extension background worker
+  restarts.
 
 Privacy boundary unchanged: Trace still reads story metadata and reading
-progress from supported pages, not AO3/FFN credentials, cookies, private account
-pages, story text, or unrelated browsing history. The onboarding handoff uses
-the same supported story URLs and Trace auth token already used for
-authenticated extension actions.
+progress from supported pages, not AO3/FFN credentials, cookies, private
+account pages, story text, or unrelated browsing history.
 
 ## Chrome / Firefox Submission Notes
 
@@ -81,14 +77,11 @@ The extension does not request cookie permissions.
 
 ## App Store Connect - iOS What's New
 
-Trace for iOS 0.5.4 improves Safari extension onboarding:
+Trace for iOS 0.5.5 improves Safari story saves:
 
-- Fixes Safari extension state checks after the production Trace web redirect,
-  so enabled extensions can be recognized by the iOS app.
-- Improves the Safari settings shortcut by targeting the installed bundled
-  extension identifier.
-- Keeps first-story setup guidance focused on enabling the extension in Settings
-  or opening a supported AO3/FanFiction.net story in Safari.
+- Waits for confirmed library state before showing a story as saved.
+- Keeps save state isolated to the signed-in account.
+- Retries a first-story add when automatic tracking temporarily fails.
 
 ## Screenshot Preparation
 
