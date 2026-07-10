@@ -323,9 +323,17 @@ test("TRACE_AUTH_UPDATE with blank token clears session and marks signed out", a
     storageState: {
       authToken: "token-1",
       traceUserPro: true,
+      traceAccountId: "acct-1",
       traceFirstSaveSeen: true,
       traceLibraryCount: 9,
       libraryOverlayCache: { entries: { "ao3:1": "READING" } },
+      traceWorkStatesV1: {
+        version: 1,
+        accountId: "acct-1",
+        items: {
+          "acct-1|ao3:1": { accountId: "acct-1", workKey: "ao3:1", status: "pending" },
+        },
+      },
     },
   });
 
@@ -337,9 +345,11 @@ test("TRACE_AUTH_UPDATE with blank token clears session and marks signed out", a
   assert.deepEqual(plainJson(response), { success: true, state: "signed_out" });
   assert.equal(h.store.authToken, undefined);
   assert.equal(h.store.traceUserPro, undefined);
+  assert.equal(h.store.traceAccountId, undefined);
   assert.equal(h.store.traceFirstSaveSeen, undefined);
   assert.equal(h.store.traceLibraryCount, undefined);
   assert.equal(h.store.libraryOverlayCache, undefined);
+  assert.equal(h.store.traceWorkStatesV1, undefined);
   assert.equal(h.store.traceAuthState.state, "signed_out");
   assert.deepEqual(plainJson(h.badgeTextCalls.at(-1)), { text: "", tabId: 22 });
 });
@@ -348,7 +358,9 @@ test("TRACE_AUTH_UPDATE verifies account before marking connected", async () => 
   const h = createBackgroundHarness({
     fetchImpl: async (url) => {
       if (String(url).endsWith("/api/account/me")) {
-        return createResponse({ json: { pro: true, library_count: 7 } });
+        return createResponse({
+          json: { account_id: "acct-browser", pro: true, library_count: 7 },
+        });
       }
       if (String(url).endsWith("/api/extension/library-overlay")) {
         return createResponse({
@@ -368,12 +380,62 @@ test("TRACE_AUTH_UPDATE verifies account before marking connected", async () => 
   assert.equal(h.hooks.getBearerToken(), "verified-token");
   assert.equal(h.hooks.getVerifiedBearerToken(), "verified-token");
   assert.equal(h.store.authToken, "verified-token");
+  assert.equal(h.store.traceAccountId, "acct-browser");
   assert.equal(h.store.traceUserPro, true);
   assert.equal(h.store.traceLibraryCount, 7);
   assert.equal(h.store.traceAuthState.state, "connected");
+  assert.equal(h.store.traceAuthState.lastVerifiedAccountId, "acct-browser");
   assert.equal(h.store.traceAuthState.authVerificationVersion, 1);
   assert.match(h.store.traceAuthState.accountVerifiedAt, /^\d{4}-/);
   assert.match(h.store.traceAuthState.lastTokenSyncAt, /^\d{4}-/);
+});
+
+test("TRACE_AUTH_UPDATE clears account-scoped caches when the verified account changes", async () => {
+  const h = createBackgroundHarness({
+    storageState: {
+      traceAccountId: "acct-old",
+      libraryOverlayCache: {
+        entries: {
+          "ao3:123": { status: "PLANNING" },
+        },
+        syncVersion: "old",
+      },
+      traceWorkStatesV1: {
+        version: 1,
+        accountId: "acct-old",
+        items: {
+          "acct-old|ao3:123": {
+            accountId: "acct-old",
+            workKey: "ao3:123",
+            status: "pending",
+            expiresAt: Date.now() + 60_000,
+          },
+        },
+      },
+    },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) {
+        return createResponse({
+          json: { account_id: "acct-new", pro: false, library_count: 0 },
+        });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: { success: true, data: { entries: {}, syncVersion: "new" } },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+
+  await h.dispatchMessage(
+    { type: "TRACE_AUTH_UPDATE", token: "new-account-token" },
+    { tab: { id: 24 } },
+  );
+
+  assert.equal(h.store.traceAccountId, "acct-new");
+  assert.equal(h.store.traceWorkStatesV1, undefined);
+  assert.deepEqual(plainJson(h.store.libraryOverlayCache.entries), {});
 });
 
 test("iOS native auth token bootstraps the extension account", async () => {
@@ -1909,6 +1971,82 @@ test("TRACE_QUICK_ADD returns ok and refreshes overlay on success", async () => 
   assert.equal(sentMessages.at(-1).msg.type, "TRACE_LIBRARY_INVALIDATED");
   assert.equal(sentMessages.at(-1).msg.reason, "quick_add");
   assert.match(String(sentMessages.at(-1).msg.at || ""), /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test("TRACE_QUICK_ADD stores authoritative account-scoped work state and overlay entry", async () => {
+  const entry = {
+    status: "PLANNING",
+    readerStatus: "PLANNING",
+    canonicalReaderStatus: "SAVED",
+    entryId: "00000000-0000-4000-8000-000000000099",
+  };
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-state-quick",
+      traceAccountId: "acct-state",
+    },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/extension/track")) {
+        return createResponse({
+          json: {
+            success: true,
+            data: {
+              entry_id: entry.entryId,
+              type: "created",
+              work_key: "ao3:99",
+              entry,
+              syncVersion: "2026-07-10T01:00:00.000Z",
+            },
+          },
+        });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: {
+            success: true,
+            data: {
+              entries: { "ao3:99": entry },
+              syncVersion: "2026-07-10T01:00:00.000Z",
+            },
+          },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.hooks.setBearerToken("token-state-quick");
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_QUICK_ADD",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: {
+          src: "ao3",
+          t: "Test",
+          u: "https://archiveofourown.org/works/99",
+        },
+      },
+    },
+    { tab: { id: 77 } },
+  );
+
+  assert.equal(response.ok, true);
+  assert.equal(response.entryId, entry.entryId);
+  assert.equal(response.state.status, "saved");
+  assert.equal(response.state.accountId, "acct-state");
+  assert.equal(response.state.workKey, "ao3:99");
+  assert.equal(response.state.entry.entryId, entry.entryId);
+  assert.equal(h.store.libraryOverlayCache.entries["ao3:99"].entryId, entry.entryId);
+
+  const queried = await h.dispatchMessage({
+    type: "TRACE_WORK_STATE_GET",
+    workKey: "ao3:99",
+  });
+  assert.equal(queried.ok, true);
+  assert.equal(queried.state.status, "saved");
+  assert.equal(queried.state.entryId, entry.entryId);
 });
 
 test("TRACE_QUICK_ADD returns free_limit_reached on 402", async () => {

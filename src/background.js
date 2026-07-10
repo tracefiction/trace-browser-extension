@@ -22,15 +22,20 @@ const FIRST_STORY_ACTIVATION_URL = `${TRACE_WEB_ORIGIN.replace(/\/$/, "")}/?acti
 const AUTH_TOKEN_KEY = "authToken";
 const AUTH_STATE_KEY = "traceAuthState";
 const OVERLAY_STORAGE_KEY = "libraryOverlayCache";
+const TRACE_ACCOUNT_ID_KEY = "traceAccountId";
+const WORK_STATE_STORAGE_KEY = "traceWorkStatesV1";
 const AO3_SAVED_FILTERS_STORAGE_KEY = "traceAo3SavedFiltersV1";
 const AO3_SAVED_FILTERS_DELETED_KEY = "traceAo3SavedFiltersDeletedV1";
 const AO3_SAVED_FILTERS_SYNC_META_KEY = "traceAo3SavedFiltersSyncV1";
 const AO3_SAVED_FILTERS_CLIENT_ID_KEY = "traceAo3SavedFiltersClientIdV1";
 const LIBRARY_INVALIDATED_MESSAGE = "TRACE_LIBRARY_INVALIDATED";
 const EXTENSION_STATUS_QUERY_MESSAGE = "TRACE_EXTENSION_STATUS_QUERY";
+const WORK_STATE_GET_MESSAGE = "TRACE_WORK_STATE_GET";
 const AO3_SAVED_FILTERS_SYNC_REQUEST_MESSAGE = "TRACE_AO3_SAVED_FILTERS_SYNC_REQUEST";
 const ARCHIVE_READINESS_KEY = "traceArchiveReadiness";
 const OPTIMISTIC_CHAPTER_FLOORS_MS = 20_000;
+const WORK_STATE_PENDING_TTL_MS = 2 * 60 * 1_000;
+const WORK_STATE_SETTLED_TTL_MS = 10 * 60 * 1_000;
 const ARCHIVE_READINESS_ERROR_RECENT_MS = 24 * 60 * 60 * 1_000;
 const TRACE_FIRST_SAVE_SEEN_KEY = "traceFirstSaveSeen";
 const TRACE_LIBRARY_COUNT_KEY = "traceLibraryCount";
@@ -136,6 +141,8 @@ function preservedConnectedAuthStateFields(previousState) {
     "lastTrackSuccessAt",
     "lastReaderStatusAt",
     "lastWorkPreferenceAt",
+    "lastVerifiedAccountId",
+    "authSource",
   ]) {
     if (typeof previousState[key] === "string") preserved[key] = previousState[key];
   }
@@ -264,8 +271,10 @@ function clearToken() {
   try {
     ext.storage.local.remove([
       AUTH_TOKEN_KEY,
+      TRACE_ACCOUNT_ID_KEY,
       TRACE_USER_PRO_KEY,
       OVERLAY_STORAGE_KEY,
+      WORK_STATE_STORAGE_KEY,
       TRACE_FIRST_SAVE_SEEN_KEY,
       TRACE_LIBRARY_COUNT_KEY,
     ]);
@@ -649,6 +658,197 @@ function applyOptimisticChapterFloors(entries) {
   return entries;
 }
 
+function accountIdFromAccountMe(json) {
+  return json && typeof json.account_id === "string" && json.account_id.trim()
+    ? json.account_id.trim()
+    : null;
+}
+
+function currentAccountIdFromSnapshot(snapshot = {}) {
+  const stored =
+    typeof snapshot[TRACE_ACCOUNT_ID_KEY] === "string"
+      ? snapshot[TRACE_ACCOUNT_ID_KEY].trim()
+      : "";
+  if (stored) return stored;
+  const authState = snapshot[AUTH_STATE_KEY];
+  const verified =
+    authState && typeof authState.lastVerifiedAccountId === "string"
+      ? authState.lastVerifiedAccountId.trim()
+      : "";
+  return verified || "unknown";
+}
+
+function workStateStorageKey(accountId, workKey) {
+  return `${accountId || "unknown"}|${workKey}`;
+}
+
+function normalizeWorkStates(raw, now = Date.now()) {
+  const out = {
+    version: 1,
+    accountId:
+      raw && typeof raw.accountId === "string" ? raw.accountId : null,
+    updatedAt:
+      raw && typeof raw.updatedAt === "string"
+        ? raw.updatedAt
+        : new Date(now).toISOString(),
+    items: {},
+  };
+  const items = raw && raw.items && typeof raw.items === "object" ? raw.items : {};
+  for (const [key, value] of Object.entries(items)) {
+    if (!value || typeof value !== "object") continue;
+    if (typeof value.workKey !== "string" || !value.workKey) continue;
+    const expiresAt = Number(value.expiresAt || 0);
+    if (Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt <= now) continue;
+    out.items[key] = value;
+  }
+  return out;
+}
+
+function publicWorkState(state) {
+  if (!state || typeof state !== "object") return null;
+  return {
+    accountId: typeof state.accountId === "string" ? state.accountId : null,
+    workKey: state.workKey,
+    operation: state.operation || null,
+    status: state.status || "unknown",
+    startedAt: state.startedAt || null,
+    updatedAt: state.updatedAt || null,
+    expiresAt: state.expiresAt || null,
+    entryId: state.entryId || null,
+    entry: state.entry || null,
+    error: state.error || null,
+  };
+}
+
+async function readWorkStateSnapshot() {
+  const snapshot = await storageGetLocal([
+    WORK_STATE_STORAGE_KEY,
+    TRACE_ACCOUNT_ID_KEY,
+    AUTH_STATE_KEY,
+  ]);
+  const now = Date.now();
+  const accountId = currentAccountIdFromSnapshot(snapshot);
+  return {
+    accountId,
+    now,
+    states: normalizeWorkStates(snapshot[WORK_STATE_STORAGE_KEY], now),
+  };
+}
+
+async function writeWorkStates(states) {
+  states.updatedAt = new Date().toISOString();
+  await storageSetLocal({ [WORK_STATE_STORAGE_KEY]: states });
+}
+
+async function clearWorkStates() {
+  try {
+    ext.storage.local.remove(WORK_STATE_STORAGE_KEY);
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+async function setWorkState(workKey, patch) {
+  if (!workKey) return null;
+  const snapshot = await readWorkStateSnapshot();
+  const accountId = snapshot.accountId;
+  const key = workStateStorageKey(accountId, workKey);
+  const previous = snapshot.states.items[key] || {};
+  const now = Date.now();
+  const status = patch.status || previous.status || "pending";
+  const ttl =
+    status === "pending" ? WORK_STATE_PENDING_TTL_MS : WORK_STATE_SETTLED_TTL_MS;
+  const next = {
+    ...previous,
+    ...patch,
+    accountId,
+    workKey,
+    status,
+    startedAt:
+      previous.startedAt || patch.startedAt || new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString(),
+    expiresAt: now + ttl,
+  };
+  snapshot.states.accountId = accountId;
+  snapshot.states.items[key] = next;
+  await writeWorkStates(snapshot.states);
+  return publicWorkState(next);
+}
+
+async function getWorkStateForKey(workKey) {
+  if (!workKey) return null;
+  const snapshot = await readWorkStateSnapshot();
+  const key = workStateStorageKey(snapshot.accountId, workKey);
+  const existing = snapshot.states.items[key] || null;
+  await writeWorkStates(snapshot.states);
+  return publicWorkState(existing);
+}
+
+async function markWorkPending(workKey, operation) {
+  return setWorkState(workKey, {
+    operation,
+    status: "pending",
+    error: null,
+  });
+}
+
+async function markWorkSaved(workKey, data, fallbackEntryId) {
+  if (!workKey && data && typeof data.work_key === "string") {
+    workKey = data.work_key;
+  }
+  if (!workKey) return null;
+  const entry =
+    data && data.entry && typeof data.entry === "object" ? data.entry : null;
+  const entryId =
+    (entry && typeof entry.entryId === "string" && entry.entryId) ||
+    (data && typeof data.entry_id === "string" && data.entry_id) ||
+    fallbackEntryId ||
+    null;
+  return setWorkState(workKey, {
+    status: "saved",
+    error: null,
+    entry,
+    entryId,
+    syncVersion:
+      data && typeof data.syncVersion === "string" ? data.syncVersion : null,
+  });
+}
+
+async function markWorkError(workKey, operation, error) {
+  if (!workKey) return null;
+  return setWorkState(workKey, {
+    operation,
+    status: "error",
+    error: error || "unknown_error",
+  });
+}
+
+async function applyTrackResponseToOverlay(payload, data) {
+  if (!data || !data.entry || typeof data.entry !== "object") return null;
+  const workKey =
+    typeof data.work_key === "string" && data.work_key
+      ? data.work_key
+      : externalStoryKeyFromItem(payload && payload.item);
+  if (!workKey) return null;
+
+  const snapshot = await storageGetLocal([OVERLAY_STORAGE_KEY]);
+  const cache = snapshot[OVERLAY_STORAGE_KEY] || {};
+  const entries = {
+    ...(cache.entries && typeof cache.entries === "object" ? cache.entries : {}),
+    [workKey]: data.entry,
+  };
+  const nextCache = {
+    ...cache,
+    entries,
+    syncVersion:
+      typeof data.syncVersion === "string"
+        ? data.syncVersion
+        : cache.syncVersion || new Date().toISOString(),
+  };
+  await storageSetLocal({ [OVERLAY_STORAGE_KEY]: nextCache });
+  return workKey;
+}
+
 function readOverlayEntryForItem(item) {
   return new Promise((resolve) => {
     const key = externalStoryKeyFromItem(item);
@@ -674,6 +874,10 @@ function readOverlayEntryForItem(item) {
 /** Best-effort Pro flag for gating Pro-only prefs (synced from GET /api/account/me). */
 function accountStoragePatch(json) {
   const patch = {};
+  const accountId = accountIdFromAccountMe(json);
+  if (accountId) {
+    patch[TRACE_ACCOUNT_ID_KEY] = accountId;
+  }
   if (json && typeof json.pro === "boolean") {
     patch[TRACE_USER_PRO_KEY] = json.pro;
   }
@@ -774,13 +978,34 @@ async function verifyTraceAccountToken(token, extra = {}) {
     if (response.ok) {
       clearAuthVerificationRetry();
       const json = await readResponseJson(response);
+      const accountId = accountIdFromAccountMe(json);
+      if (accountId) {
+        const previous = await storageGetLocal([TRACE_ACCOUNT_ID_KEY]);
+        if (
+          typeof previous[TRACE_ACCOUNT_ID_KEY] === "string" &&
+          previous[TRACE_ACCOUNT_ID_KEY] &&
+          previous[TRACE_ACCOUNT_ID_KEY] !== accountId
+        ) {
+          await storageSetLocal({
+            [OVERLAY_STORAGE_KEY]: {
+              entries: {},
+              syncVersion: new Date(0).toISOString(),
+            },
+          });
+          await clearWorkStates();
+        }
+      }
       const patch = {
         [AUTH_TOKEN_KEY]: trimmed,
         ...accountStoragePatch(json),
       };
       ext.storage.local.set(patch);
       verifiedBearerToken = trimmed;
-      setVerifiedConnectedState({ lastTokenSyncAt });
+      setVerifiedConnectedState({
+        lastTokenSyncAt,
+        ...(accountId ? { lastVerifiedAccountId: accountId } : {}),
+        ...(extra.source ? { authSource: extra.source } : {}),
+      });
       void refreshLibraryOverlay();
       scheduleAo3SavedFiltersSync(250);
       return { success: true, state: "connected" };
@@ -1937,6 +2162,13 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === WORK_STATE_GET_MESSAGE) {
+    void getWorkStateForKey(msg.workKey).then((state) => {
+      if (sendResponse) sendResponse({ ok: true, state });
+    });
+    return true;
+  }
+
   // -------------------------------------------------
   // B. Auto-track request from collector.js
   // -------------------------------------------------
@@ -2179,6 +2411,8 @@ async function handleImportTrigger(sendResponse) {
 // =======================================================
 
 function respondAutoTrackNotAuthenticated(payload, sender, sendResponse) {
+  const workKey = externalStoryKeyFromItem(payload && payload.item);
+  void markWorkError(workKey, "auto_track", "not_authenticated");
   recordArchiveIssueFromPayload(payload, "auth");
   setSignedOutState({
     message: "Open Trace in this browser and sign in, then automatic sync will work.",
@@ -2239,6 +2473,8 @@ function handleAutoTrack(payload, sender, sendResponse) {
 
 async function executeAutoTrack(payload, sender, allowNativeAuthRetry = true) {
   if (!bearerToken) return;
+  const workKey = externalStoryKeyFromItem(payload && payload.item);
+  await markWorkPending(workKey, "auto_track");
   recordOptimisticChapterFloor(payload && payload.item);
   try {
     const response = await fetch(API_ENDPOINT, {
@@ -2264,10 +2500,12 @@ async function executeAutoTrack(payload, sender, allowNativeAuthRetry = true) {
           }
         }
         recordArchiveIssueFromPayload(payload, "auth");
+        await markWorkError(workKey, "auto_track", authError);
         setBadge(sender?.tab?.id, "LOG", "#9C6B00");
         return { ok: false, error: authError };
       } else if (response.status === 402) {
         await refreshLibraryOverlay();
+        await markWorkError(workKey, "auto_track", "free_limit_reached");
         setUpgradeState(
           "You've reached the free library limit. Upgrade to Pro for unlimited stories.",
           {
@@ -2283,6 +2521,7 @@ async function executeAutoTrack(payload, sender, allowNativeAuthRetry = true) {
           response.status === 400 ? "parser" : "network",
         );
         await refreshLibraryOverlay();
+        await markWorkError(workKey, "auto_track", "http_" + response.status);
         setConnectedWithSyncWarning(
           `Automatic sync didn’t go through (${response.status}). Manual import from this menu still works.`,
           {
@@ -2301,20 +2540,26 @@ async function executeAutoTrack(payload, sender, allowNativeAuthRetry = true) {
         lastTrackSuccessAt: new Date().toISOString(),
       });
       const json = await response.json().catch(() => null);
+      const data = json && json.data && typeof json.data === "object" ? json.data : null;
       const entryId =
-        json && json.data && typeof json.data.entry_id === "string"
-          ? json.data.entry_id
+        data && typeof data.entry_id === "string"
+          ? data.entry_id
           : null;
+      const responseWorkKey = await applyTrackResponseToOverlay(payload, data);
+      const state = await markWorkSaved(responseWorkKey || workKey, data, entryId);
       await refreshLibraryOverlay();
       await signalLibraryInvalidated("track");
       setBadge(sender?.tab?.id, "OK", "#0D7A5F");
       setTimeout(() => clearBadge(sender?.tab?.id), 2000);
-      return entryId ? { ok: true, entryId } : { ok: true };
+      const out = entryId ? { ok: true, entryId } : { ok: true };
+      if (state) out.state = state;
+      return out;
     }
   } catch (error) {
     console.error("[Trace] Network error:", error);
     recordArchiveIssueFromPayload(payload, "network");
     await refreshLibraryOverlay();
+    await markWorkError(workKey, "auto_track", "network_error");
     setConnectedWithSyncWarning(
       "Couldn’t reach Trace for automatic sync. Manual import still works — try again later for sync.",
       {
@@ -2434,6 +2679,7 @@ async function handleQuickAdd(
   sendResponse,
   allowNativeAuthRetry = true,
 ) {
+  const workKey = externalStoryKeyFromItem(payload && payload.item);
   if (!bearerToken) {
     if (allowNativeAuthRetry) {
       const bootstrapped = await bootstrapAuthFromIosNative("quick_add");
@@ -2443,11 +2689,13 @@ async function handleQuickAdd(
       }
     }
     recordArchiveIssueFromPayload(payload, "auth");
+    await markWorkError(workKey, "quick_add", "not_authenticated");
     if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
     return;
   }
 
   try {
+    await markWorkPending(workKey, "quick_add");
     const response = await fetch(API_ENDPOINT, {
       method: "POST",
       headers: {
@@ -2460,10 +2708,13 @@ async function handleQuickAdd(
     if (response.ok) {
       recordArchiveActionFromPayload(payload, "quick_add");
       const json = await response.json().catch(() => null);
+      const data = json && json.data && typeof json.data === "object" ? json.data : null;
       const entryId =
-        json && json.data && typeof json.data.entry_id === "string"
-          ? json.data.entry_id
+        data && typeof data.entry_id === "string"
+          ? data.entry_id
           : null;
+      const responseWorkKey = await applyTrackResponseToOverlay(payload, data);
+      const state = await markWorkSaved(responseWorkKey || workKey, data, entryId);
       markFirstSaveSeen();
       setConnectedState({
         firstSaveSeen: true,
@@ -2474,9 +2725,10 @@ async function handleQuickAdd(
       await refreshLibraryOverlay();
       await signalLibraryInvalidated("quick_add");
       if (sendResponse) {
-        const payload = { ok: true };
-        if (entryId) payload.entryId = entryId;
-        sendResponse(payload);
+        const out = { ok: true };
+        if (entryId) out.entryId = entryId;
+        if (state) out.state = state;
+        sendResponse(out);
       }
     } else {
       const authError = await applyAuthFailureResponse(response, {
@@ -2493,20 +2745,24 @@ async function handleQuickAdd(
           }
         }
         recordArchiveIssueFromPayload(payload, "auth");
+        await markWorkError(workKey, "quick_add", authError);
         if (sendResponse) sendResponse({ ok: false, error: authError });
       } else if (response.status === 402) {
+        await markWorkError(workKey, "quick_add", "free_limit_reached");
         if (sendResponse) sendResponse({ ok: false, error: "free_limit_reached" });
       } else {
         recordArchiveIssueFromPayload(
           payload,
           response.status === 400 ? "parser" : "network",
         );
+        await markWorkError(workKey, "quick_add", "http_" + response.status);
         if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
       }
     }
   } catch (e) {
     console.error("[Trace] Quick-add error:", e);
     recordArchiveIssueFromPayload(payload, "network");
+    await markWorkError(workKey, "quick_add", "network_error");
     if (sendResponse) sendResponse({ ok: false, error: String(e?.message || e) });
   }
 }

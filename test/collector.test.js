@@ -1141,6 +1141,12 @@ function createStoryAutoTrackPendingHarness(options = {}) {
       },
       sendMessage(msg, cb) {
         sent.push(msg);
+        if (msg.type === "TRACE_WORK_STATE_GET") {
+          if (typeof cb === "function") {
+            cb(options.workStateResponse || { ok: true, state: null });
+          }
+          return;
+        }
         if (msg.type === "TRACE_AUTO_TRACK") {
           autoTrackCallback = cb;
           if (!options.holdAutoTrack && typeof cb === "function") {
@@ -1229,6 +1235,56 @@ test("story page unknown work shows pending while auto-track is in flight and ig
     0,
     "manual quick-add must not fire while auto-track is pending",
   );
+});
+
+test("story page rehydrates pending work state from the background on load", () => {
+  const { dom, sent } = createStoryAutoTrackPendingHarness({
+    store: { prefAutoTrackEnabled: false },
+    workStateResponse: {
+      ok: true,
+      state: {
+        accountId: "acct-story",
+        workKey: "ffn:7038840",
+        operation: "auto_track",
+        status: "pending",
+      },
+    },
+  });
+
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle, "expected Trace story handle");
+  assert.equal(handle.disabled, true);
+  assert.match(handle.textContent || "", /Adding\.\.\./);
+  assert.equal(sent.some((msg) => msg.type === "TRACE_WORK_STATE_GET"), true);
+});
+
+test("story page renders saved when background state has the authoritative entry", () => {
+  const entryId = "00000000-0000-4000-8000-000000000703";
+  const { dom, store } = createStoryAutoTrackPendingHarness({
+    store: { prefAutoTrackEnabled: false },
+    workStateResponse: {
+      ok: true,
+      state: {
+        accountId: "acct-story",
+        workKey: "ffn:7038840",
+        operation: "auto_track",
+        status: "saved",
+        entryId,
+        entry: {
+          status: "PLANNING",
+          readerStatus: "PLANNING",
+          canonicalReaderStatus: "SAVED",
+          entryId,
+        },
+      },
+    },
+  });
+
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle, "expected Trace story handle");
+  assert.equal(handle.disabled, false);
+  assert.match(handle.textContent || "", /Saved/i);
+  assert.equal(store.libraryOverlayCache.entries["ffn:7038840"], undefined);
 });
 
 test("first-story focus-add command triggers existing quick-add path", async () => {

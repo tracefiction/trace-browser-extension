@@ -326,6 +326,8 @@ var LISTING_METADATA_REFRESH_MAX_ATTEMPTS = 6;
 var AUTO_TRACK_READY_RETRY_MS = 150;
 var AUTO_TRACK_READY_MAX_ATTEMPTS = 12;
 var OVERLAY_CACHE_KEY = "libraryOverlayCache";
+var WORK_STATE_STORAGE_KEY = "traceWorkStatesV1";
+var WORK_STATE_GET_MESSAGE = "TRACE_WORK_STATE_GET";
 var optimisticStoryPageEntries = Object.create(null);
 var storyQuickAddUiReady = false;
 var TRACE_READER_STATUS_CHOICES = [
@@ -814,6 +816,18 @@ function applyConfirmedOverlayUpdateForStory(item, response) {
   var workKey = overlayWorkKeyFromItem(item);
   if (!workKey) return;
 
+  if (response && response.state && response.state.status === "saved") {
+    applyBackgroundWorkStateForStory(workKey, response.state);
+    if (response.state.entry && typeof response.state.entry === "object") {
+      writeConfirmedOverlayEntryForStory(workKey, response.state.entry, function () {
+        if (getWorkKeyFromUrl() === workKey) {
+          renderQuickAddButton(workKey);
+        }
+      });
+      return;
+    }
+  }
+
   ext.storage.local.get(["authToken", OVERLAY_CACHE_KEY], function (res) {
     if (ext.runtime.lastError || !res || !res.authToken) return;
 
@@ -892,6 +906,89 @@ function rerenderStoryHandleForWorkKey(workKey) {
 
 function optimisticStoryEntryHasLibraryState(entry) {
   return !!(entry && (entry.readerStatus || entry.status || entry.hidden));
+}
+
+function applyBackgroundWorkStateForStory(workKey, state) {
+  if (!workKey || !state || state.workKey !== workKey) return false;
+  if (state.status === "pending") {
+    var prevPending = optimisticStoryPageEntries[workKey] || {};
+    if (optimisticStoryEntryHasLibraryState(prevPending)) return false;
+    optimisticStoryPageEntries[workKey] = Object.assign({}, prevPending, {
+      __traceAutoTrackPending: true,
+      __traceAutoTrackError: null,
+    });
+    return true;
+  }
+
+  if (state.status === "saved") {
+    var entry =
+      state.entry && typeof state.entry === "object"
+        ? normalizeOverlayEntry(state.entry)
+        : {};
+    optimisticStoryPageEntries[workKey] = Object.assign({}, entry, {
+      entryId: state.entryId || entry.entryId,
+      statusChoicesAvailable: !!(state.entryId || entry.entryId),
+      __traceAutoTrackPending: false,
+      __traceAutoTrackError: null,
+    });
+    return true;
+  }
+
+  if (state.status === "error") {
+    var prevError = optimisticStoryPageEntries[workKey] || {};
+    if (optimisticStoryEntryHasLibraryState(prevError)) return false;
+    optimisticStoryPageEntries[workKey] = Object.assign({}, prevError, {
+      __traceAutoTrackPending: false,
+      __traceAutoTrackError: state.error || "network_error",
+    });
+    return true;
+  }
+
+  return false;
+}
+
+function writeConfirmedOverlayEntryForStory(workKey, entry, cb) {
+  if (!workKey || !entry || typeof entry !== "object") {
+    if (typeof cb === "function") cb(false);
+    return;
+  }
+
+  ext.storage.local.get(["authToken", OVERLAY_CACHE_KEY], function (res) {
+    if (ext.runtime.lastError || !res || !res.authToken) {
+      if (typeof cb === "function") cb(false);
+      return;
+    }
+
+    var cache = res[OVERLAY_CACHE_KEY] || {};
+    var entries = Object.assign({}, cache.entries || {});
+    entries[workKey] = entry;
+    ext.storage.local.set(
+      {
+        [OVERLAY_CACHE_KEY]: Object.assign({}, cache, { entries: entries }),
+      },
+      function () {
+        if (typeof cb === "function") cb(!ext.runtime.lastError);
+      },
+    );
+  });
+}
+
+function queryBackgroundWorkStateForStory(workKey) {
+  if (!workKey) return;
+  try {
+    ext.runtime.sendMessage(
+      { type: WORK_STATE_GET_MESSAGE, workKey: workKey },
+      function (response) {
+        if (ext.runtime.lastError) return;
+        if (!response || response.ok !== true || !response.state) return;
+        if (applyBackgroundWorkStateForStory(workKey, response.state)) {
+          rerenderStoryHandleForWorkKey(workKey);
+        }
+      },
+    );
+  } catch (_) {
+    /* best effort */
+  }
 }
 
 function updateAutoTrackPendingForStory(item) {
@@ -4917,12 +5014,21 @@ function initQuickAdd() {
   }
   storyQuickAddUiReady = true;
   renderQuickAddButton(workKey);
+  queryBackgroundWorkStateForStory(workKey);
   processIosPendingFirstStoryAdd();
 
   try {
     ext.storage.onChanged.addListener(function (changes, area) {
       if (area !== "local") return;
-      if (!changes[OVERLAY_CACHE_KEY] && !changes.authToken && !changes.traceAuthState) return;
+      if (
+        !changes[OVERLAY_CACHE_KEY] &&
+        !changes[WORK_STATE_STORAGE_KEY] &&
+        !changes.authToken &&
+        !changes.traceAuthState
+      ) return;
+      if (changes[WORK_STATE_STORAGE_KEY]) {
+        queryBackgroundWorkStateForStory(workKey);
+      }
       renderQuickAddButton(workKey);
     });
   } catch (_) {
@@ -4931,10 +5037,18 @@ function initQuickAdd() {
 
   try {
     window.addEventListener("focus", function () {
+      queryBackgroundWorkStateForStory(workKey);
+      renderQuickAddButton(workKey);
+    });
+    window.addEventListener("pageshow", function () {
+      queryBackgroundWorkStateForStory(workKey);
       renderQuickAddButton(workKey);
     });
     document.addEventListener("visibilitychange", function () {
-      if (!document.hidden) renderQuickAddButton(workKey);
+      if (!document.hidden) {
+        queryBackgroundWorkStateForStory(workKey);
+        renderQuickAddButton(workKey);
+      }
     });
   } catch (_) {
     /* ignore */
