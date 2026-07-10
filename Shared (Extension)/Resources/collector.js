@@ -4079,6 +4079,10 @@ function firstStoryControlErrorForState(state) {
   return "save_failed";
 }
 
+function firstStoryStateAllowsQuickAddRetry(state) {
+  return state === "add" || state === "auth" || state === "auth-expired" || state === "error";
+}
+
 function parseFirstStoryUrlForMatch(rawUrl) {
   var url;
   try {
@@ -4226,10 +4230,11 @@ function handleFirstStoryFocusAdd(sendResponse, attempt) {
         handleFirstStoryFocusAdd(sendResponse, (attempt || 0) + 1);
         return;
       }
-      sendResponse({ ok: false, error: "save_failed" });
-      return;
+      // The first-story activation owns this save attempt. If ambient
+      // auto-track stays pending too long, issue an explicit quick-add; the
+      // server endpoint is idempotent and this avoids a dead onboarding state.
     }
-    if (state !== "add" && state !== "auth" && state !== "auth-expired") {
+    if (state !== "adding" && !firstStoryStateAllowsQuickAddRetry(state)) {
       sendResponse({
         ok: false,
         error: firstStoryControlErrorForState(state),

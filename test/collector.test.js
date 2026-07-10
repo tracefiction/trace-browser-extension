@@ -1451,6 +1451,49 @@ test("story page auto-track failure uses existing compact error states", () => {
   }
 });
 
+test("first-story focus-add retries explicit quick-add after retryable auto-track failure", async () => {
+  const entryId = "00000000-0000-4000-8000-000000703884";
+  const { dom, sent, autoTrackCallback, sendRuntimeMessage } =
+    createStoryAutoTrackPendingHarness({
+      holdAutoTrack: true,
+      quickAddResponse: {
+        ok: true,
+        entryId,
+        state: {
+          accountId: "acct-story",
+          workKey: "ffn:7038840",
+          operation: "quick_add",
+          status: "saved",
+          entryId,
+          entry: {
+            status: "PLANNING",
+            readerStatus: "PLANNING",
+            canonicalReaderStatus: "SAVED",
+            entryId,
+          },
+        },
+      },
+    });
+
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.match(handle.textContent || "", /Adding\.\.\./);
+
+  autoTrackCallback({ ok: false, error: "confirmation_missing" });
+
+  assert.match(handle.textContent || "", /Error/i);
+  assert.equal(handle.disabled, false);
+
+  const response = await sendRuntimeMessage({
+    type: "TRACE_FIRST_STORY_FOCUS_ADD",
+  });
+
+  assert.deepEqual(plainJson(response), { ok: true, state: "saved" });
+  assert.equal(
+    sent.filter((msg) => msg.type === "TRACE_QUICK_ADD").length,
+    1,
+  );
+});
+
 test("AO3 story places compact Trace handle centered below title and byline", () => {
   const dom = new JSDOM(
     "<!doctype html><html><body><h2 class='title heading'>Demo AO3 Work</h2><h3 class='byline heading'><a rel='author' href='/users/demo/pseuds/demo'>demo</a></h3><dl class='work meta group'><dt class='chapters'>Chapters:</dt><dd class='chapters'>1/1</dd></dl></body></html>",
