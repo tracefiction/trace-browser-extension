@@ -4883,7 +4883,17 @@ function renderQuickAddButton(workKey) {
     var info = normalizeOverlayEntry(entry, preference);
 
     if (entry || optimisticEntry) {
-      if (!entry && optimisticEntry) {
+      var legacySyntheticSavedEntry =
+        entry &&
+        typeof entry === "object" &&
+        entry.statusChoicesAvailable === true;
+      if (
+        optimisticEntry &&
+        optimisticEntry.__traceAutoTrackPending &&
+        (!entry || legacySyntheticSavedEntry)
+      ) {
+        info = optimisticEntry;
+      } else if (!entry && optimisticEntry) {
         info = optimisticEntry;
       } else if (
         info &&
@@ -4951,8 +4961,8 @@ function initQuickAdd() {
     return;
   }
   storyQuickAddUiReady = true;
-  renderQuickAddButton(workKey);
   queryBackgroundWorkStateForStory(workKey);
+  renderQuickAddButton(workKey);
   processIosPendingFirstStoryAdd();
 
   try {

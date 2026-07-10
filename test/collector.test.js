@@ -1235,6 +1235,31 @@ test("story page unknown work shows pending while auto-track is in flight and ig
   );
 });
 
+test("story page auto-track pending overrides stale saved cache", () => {
+  const { dom } = createStoryAutoTrackPendingHarness({
+    holdAutoTrack: true,
+    store: {
+      libraryOverlayCache: {
+        entries: {
+          "ffn:7038840": {
+            status: "PLANNING",
+            readerStatus: "PLANNING",
+            canonicalReaderStatus: "SAVED",
+            entryId: "00000000-0000-4000-8000-000000703884",
+            statusChoicesAvailable: true,
+          },
+        },
+        syncVersion: "stale-synthetic-cache",
+      },
+    },
+  });
+
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle, "expected Trace story handle");
+  assert.equal(handle.disabled, true);
+  assert.match(handle.textContent || "", /Adding\.\.\./);
+});
+
 test("story page rehydrates pending work state from the background on load", () => {
   const { dom, sent } = createStoryAutoTrackPendingHarness({
     store: { prefAutoTrackEnabled: false },
