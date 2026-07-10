@@ -3205,9 +3205,21 @@ test("TRACE_AUTO_TRACK waits for delayed overlay confirmation after a stale refr
   assert.equal(h.store.libraryOverlayCache.entries["ao3:205"].entryId, entry.entryId);
 });
 
-test("TRACE_AUTO_TRACK does not report saved when a 2xx write lacks library confirmation", async () => {
+test("TRACE_AUTO_TRACK does not report saved from stale cache when a 2xx write lacks library confirmation", async () => {
   const h = createBackgroundHarness({
-    storageState: { authToken: "token-at-missing" },
+    storageState: {
+      authToken: "token-at-missing",
+      libraryOverlayCache: {
+        entries: {
+          "ao3:205": {
+            status: "PLANNING",
+            readerStatus: "PLANNING",
+            entryId: "00000000-0000-4000-8000-000000000205",
+          },
+        },
+        syncVersion: "stale-cache",
+      },
+    },
     fetchImpl: async (url) => {
       if (String(url).endsWith("/api/extension/track")) {
         return createResponse({ json: { success: true, data: { story_id: "s-1" } } });

@@ -1361,15 +1361,32 @@ test("library-overlay known signed-out auth state does not offer fake Hide", asy
   assert.equal(connect.getAttribute("href"), "https://tracefiction.com/");
 });
 
-test("library-overlay Add saves in place without opening the management surface", async () => {
+test("library-overlay Add saves in place only after confirmed state", async () => {
   const messages = [];
+  const entryId = "00000000-0000-4000-8000-000000077778";
   const window = await renderOverlayListing({
     html:
       "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/77778'>Quick Work</a></h4></li></ol></body></html>",
     cache: { entries: {}, syncVersion: "v-empty" },
     sendMessage(msg, cb) {
       messages.push(msg);
-      if (typeof cb === "function") cb({ ok: true });
+      if (typeof cb === "function") {
+        cb({
+          ok: true,
+          entryId,
+          state: {
+            workKey: "ao3:77778",
+            status: "saved",
+            entryId,
+            entry: {
+              status: "PLANNING",
+              readerStatus: "PLANNING",
+              canonicalReaderStatus: "SAVED",
+              entryId,
+            },
+          },
+        });
+      }
     },
   });
 
@@ -1384,6 +1401,30 @@ test("library-overlay Add saves in place without opening the management surface"
   assert.match(button.getAttribute("style") || "", /font:\s*500 12\.5px/i);
   assert.match(button.querySelector("span[aria-hidden='true']").getAttribute("style") || "", /width:\s*7px/i);
   assert.equal(window.document.querySelector("[data-trace-action-surface]"), null);
+});
+
+test("library-overlay Add does not show saved from unconfirmed ok response", async () => {
+  const messages = [];
+  const window = await renderOverlayListing({
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/77782'>Unconfirmed Work</a></h4></li></ol></body></html>",
+    cache: { entries: {}, syncVersion: "v-empty" },
+    sendMessage(msg, cb) {
+      messages.push(msg);
+      if (typeof cb === "function") cb({ ok: true, entryId: "legacy-entry-id" });
+    },
+  });
+
+  const button = window.document.querySelector(
+    "[data-trace-library-overlay-wrap] button[data-trace-quick-add]",
+  );
+  assert.ok(button);
+  button.click();
+
+  assert.equal(messages.at(-1).type, "TRACE_QUICK_ADD");
+  assert.match(button.textContent || "", /^Error$/);
+  assert.equal(button.disabled, false);
+  assert.equal(button.querySelector("span[aria-hidden='true']"), null);
 });
 
 test("library-overlay quick add immediately shows pending and ignores duplicate clicks", async () => {
@@ -1422,6 +1463,50 @@ test("library-overlay quick add immediately shows pending and ignores duplicate 
   assert.equal(messages.length, 1);
 
   pendingCallback({ ok: true });
+  assert.match(button.textContent || "", /^Error$/);
+  assert.equal(button.disabled, false);
+  assert.equal(button.querySelector("span[aria-hidden='true']"), null);
+});
+
+test("library-overlay pending quick add resolves to saved only with confirmed state", async () => {
+  const messages = [];
+  let pendingCallback;
+  const entryId = "00000000-0000-4000-8000-000000077784";
+  const window = await renderOverlayListing({
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/77784'>Confirmed Pending Work</a></h4></li></ol></body></html>",
+    cache: { entries: {}, syncVersion: "v-confirmed-pending-add" },
+    sendMessage(msg, cb) {
+      messages.push(msg);
+      pendingCallback = cb;
+    },
+  });
+
+  const button = window.document.querySelector(
+    "[data-trace-library-overlay-wrap] button[data-trace-quick-add]",
+  );
+  assert.ok(button);
+  button.click();
+
+  assert.equal(messages.length, 1);
+  assert.match(button.textContent || "", /Adding\.\.\./);
+
+  pendingCallback({
+    ok: true,
+    entryId,
+    state: {
+      workKey: "ao3:77784",
+      status: "saved",
+      entryId,
+      entry: {
+        status: "PLANNING",
+        readerStatus: "PLANNING",
+        canonicalReaderStatus: "SAVED",
+        entryId,
+      },
+    },
+  });
+
   assert.match(button.textContent || "", /^Planning$/);
   assert.match(button.querySelector("span[aria-hidden='true']").getAttribute("style") || "", /border-radius:\s*999px/i);
 });

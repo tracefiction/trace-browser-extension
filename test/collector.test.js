@@ -517,7 +517,7 @@ test("sendAutoTrackForStory clears dedupe marker when runtime messaging fails", 
   assert.deepEqual(plainJson(store.libraryOverlayCache.entries), {});
 });
 
-test("sendAutoTrackForStory keeps dedupe marker for ignored senders", () => {
+test("sendAutoTrackForStory clears dedupe marker for ignored senders so activated pages can retry", () => {
   const item = {
     src: "ao3",
     ctx: "story",
@@ -533,11 +533,11 @@ test("sendAutoTrackForStory keeps dedupe marker for ignored senders", () => {
 
   bindings.sendAutoTrackForStory(item);
 
-  assert.notEqual(dom.window.sessionStorage.getItem("trace:auto-track:last"), null);
+  assert.equal(dom.window.sessionStorage.getItem("trace:auto-track:last"), null);
   assert.deepEqual(plainJson(store.libraryOverlayCache.entries), {});
 });
 
-test("sendAutoTrackForStory updates overlay cache only after confirmed ack", () => {
+test("sendAutoTrackForStory does not synthesize saved state from entryId-only ack", () => {
   const item = {
     src: "ao3",
     ctx: "story",
@@ -554,14 +554,7 @@ test("sendAutoTrackForStory updates overlay cache only after confirmed ack", () 
   bindings.sendAutoTrackForStory(item);
 
   assert.notEqual(dom.window.sessionStorage.getItem("trace:auto-track:last"), null);
-  assert.deepEqual(plainJson(store.libraryOverlayCache.entries["ao3:28534965"]), {
-    status: "READING",
-    readerStatus: "READING",
-    canonicalReaderStatus: "READING",
-    entryId: "00000000-0000-4000-8000-000000285349",
-    statusChoicesAvailable: true,
-    chapters: { current: 3, total: 17 },
-  });
+  assert.deepEqual(plainJson(store.libraryOverlayCache.entries), {});
 });
 
 test("detectAo3CurrentChapterNumber prefers the visible chapter heading text", () => {
@@ -3165,7 +3158,7 @@ test("collector story Trace sheet is not rendered on password pages", () => {
   assert.equal(dom.window.document.querySelector("[data-trace-story-sheet]"), null);
 });
 
-test("auto-track optimistic cache keeps chapter-one stories as planning", () => {
+test("auto-track confirmed state keeps chapter-one stories as planning", () => {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url: "https://tracefiction.test/",
     contentType: "text/html",
@@ -3190,7 +3183,25 @@ test("auto-track optimistic cache keeps chapter-one stories as planning", () => 
     runtime: {
       onMessage: { addListener() {} },
       sendMessage(_msg, cb) {
-        cb({ ok: true, entryId: "00000000-0000-4000-8000-000000000123" });
+        const entryId = "00000000-0000-4000-8000-000000000123";
+        cb({
+          ok: true,
+          entryId,
+          state: {
+            accountId: "acct-story",
+            workKey: "ao3:123",
+            operation: "auto_track",
+            status: "saved",
+            entryId,
+            entry: {
+              status: "PLANNING",
+              readerStatus: "PLANNING",
+              canonicalReaderStatus: "SAVED",
+              entryId,
+              chapters: { current: 0, total: 10 },
+            },
+          },
+        });
       },
       lastError: null,
     },
@@ -3226,7 +3237,7 @@ test("auto-track optimistic cache keeps chapter-one stories as planning", () => 
   assert.equal(store.libraryOverlayCache.entries["ao3:123"].status, "PLANNING");
 });
 
-test("auto-track optimistic cache promotes planning only after later chapters", () => {
+test("auto-track confirmed state promotes planning only after later chapters", () => {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url: "https://tracefiction.test/",
     contentType: "text/html",
@@ -3255,7 +3266,25 @@ test("auto-track optimistic cache promotes planning only after later chapters", 
     runtime: {
       onMessage: { addListener() {} },
       sendMessage(_msg, cb) {
-        cb({ ok: true, entryId: "00000000-0000-4000-8000-000000000124" });
+        const entryId = "00000000-0000-4000-8000-000000000124";
+        cb({
+          ok: true,
+          entryId,
+          state: {
+            accountId: "acct-story",
+            workKey: "ao3:124",
+            operation: "auto_track",
+            status: "saved",
+            entryId,
+            entry: {
+              status: "READING",
+              readerStatus: "READING",
+              canonicalReaderStatus: "READING",
+              entryId,
+              chapters: { current: 2, total: 10 },
+            },
+          },
+        });
       },
       lastError: null,
     },

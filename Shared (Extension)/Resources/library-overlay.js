@@ -2913,6 +2913,21 @@
             return;
           }
           if (response.ok) {
+            var confirmedEntry =
+              response.state &&
+              response.state.status === "saved" &&
+              response.state.entry &&
+              typeof response.state.entry === "object"
+                ? normalizeOverlayEntry(response.state.entry)
+                : null;
+            if (!confirmedEntry || !(confirmedEntry.readerStatus || confirmedEntry.status)) {
+              btn.style.cssText = d1QuickAddStyle("error") + ";cursor:pointer";
+              btn.textContent = "Error";
+              btn.title = "Trace did not confirm this story in your library. Try again.";
+              btn.disabled = false;
+              scheduleRun(250);
+              return;
+            }
             btn.style.cssText = [
               "display:inline-flex",
               "align-items:center",
@@ -2930,9 +2945,10 @@
               "white-space:nowrap",
               "vertical-align:middle",
             ].join(";");
-            setInlineStatusContent(btn, "PLANNING");
+            setInlineStatusContent(btn, entryStatusValue(confirmedEntry) || "PLANNING");
             btn.title = "In your Trace library";
             btn.disabled = true;
+            scheduleRun(250);
           } else if (response.error === "free_limit_reached") {
             btn.style.cssText = d1QuickAddStyle("full");
             btn.textContent = "Full";

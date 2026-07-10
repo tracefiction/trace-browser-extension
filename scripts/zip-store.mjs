@@ -20,6 +20,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
 const srcDir = path.join(ROOT, "dist", target);
 const outZip = path.join(ROOT, "dist", `trace-${target}-store.zip`);
+const RELEASE_TRACE_HOSTS = new Set([
+  "tracefiction.com",
+  "www.tracefiction.com",
+  "api.tracefiction.com",
+]);
 
 const manifestPath = path.join(srcDir, "manifest.json");
 if (!fs.existsSync(manifestPath)) {
@@ -27,22 +32,40 @@ if (!fs.existsSync(manifestPath)) {
   process.exit(1);
 }
 
-if (target === "firefox") {
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  const hosts = manifest.host_permissions ?? [];
-  const hasLocal = hosts.some(
-    (h) =>
-      typeof h === "string" &&
-      (/localhost/i.test(h) || /127\.0\.0\.1/.test(h)),
+function hostFromMatchPattern(pattern) {
+  if (typeof pattern !== "string") return null;
+  const match = pattern.match(/^https?:\/\/([^/]+)\//i);
+  if (!match) return null;
+  return match[1].replace(/^\*\./, "").replace(/:\d+$/, "").toLowerCase();
+}
+
+function isTraceRelatedHost(host) {
+  if (!host) return false;
+  return (
+    host === "localhost" ||
+    host === "127.0.0.1" ||
+    host.includes("trace") ||
+    host.includes("railway.app") ||
+    host.includes("vercel.app")
   );
-  if (hasLocal) {
-    console.error(
-      "Firefox store zip refused: manifest host_permissions include localhost/127.0.0.1 (dev build output).\n" +
-        "Run: npm run package:firefox\n" +
-        "Or: npm run build:release && npm run zip:firefox",
-    );
-    process.exit(1);
-  }
+}
+
+const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+const hostPatterns = [
+  ...(manifest.host_permissions ?? []),
+  ...(manifest.content_scripts ?? []).flatMap((entry) => entry.matches ?? []),
+];
+const badTraceHosts = hostPatterns
+  .map(hostFromMatchPattern)
+  .filter((host) => isTraceRelatedHost(host) && !RELEASE_TRACE_HOSTS.has(host));
+
+if (badTraceHosts.length > 0) {
+  console.error(
+    `${target} store zip refused: manifest includes non-production Trace hosts: ${Array.from(new Set(badTraceHosts)).join(", ")}.\n` +
+      `Run: npm run package:${target}\n` +
+      `Or: npm run build:release && npm run zip:${target}`,
+  );
+  process.exit(1);
 }
 
 if (fs.existsSync(outZip)) fs.unlinkSync(outZip);

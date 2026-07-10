@@ -798,12 +798,10 @@ function sendAutoTrackForStory(validStory) {
         return;
       }
       if (!response || response.ok !== true) {
-        // ignored_sender means the background never attempted a write
-        // (subframe / prerender). Re-sending on the next dwell tick would
-        // hit the same check, so keep the dedupe marker to avoid churn.
-        if (!response || response.error !== "ignored_sender") {
-          forgetRecentAutoTrack(validStory);
-        }
+        // The background rejects prerender/pending-deletion senders before it
+        // attempts a write. Clear the dedupe marker so an activated page can
+        // retry from pageshow/visibilitychange.
+        forgetRecentAutoTrack(validStory);
         updateAutoTrackFailureForStory(validStory, response && response.error);
         return;
       }
@@ -830,79 +828,7 @@ function applyConfirmedOverlayUpdateForStory(item, response) {
     return;
   }
 
-  if (!response || typeof response.entryId !== "string" || !response.entryId) {
-    queryBackgroundWorkStateForStory(workKey);
-    return;
-  }
-
-  ext.storage.local.get(["authToken", OVERLAY_CACHE_KEY], function (res) {
-    if (ext.runtime.lastError || !res || !res.authToken) return;
-
-    var cache = res[OVERLAY_CACHE_KEY] || {};
-    var entries = Object.assign({}, cache.entries || {});
-    var existing = normalizeOverlayEntry(entries[workKey]);
-    var existingCurrent =
-      existing.chapters && typeof existing.chapters.current === "number"
-        ? existing.chapters.current
-        : null;
-    var currentChapter =
-      typeof item.chn === "number" && Number.isFinite(item.chn)
-        ? existingCurrent != null
-          ? Math.max(existingCurrent, item.chn)
-          : item.chn
-        : existingCurrent != null
-          ? existingCurrent
-          : null;
-    var totalChapters =
-      typeof item.cht === "number" && Number.isFinite(item.cht)
-        ? item.cht
-        : existing.chapters && typeof existing.chapters.total === "number"
-          ? existing.chapters.total
-          : null;
-
-    var startedStoryPage =
-      item.ctx === "story" &&
-      typeof item.chn === "number" &&
-      Number.isFinite(item.chn) &&
-      item.chn > 1;
-
-    // Match server extension auto-track: chapter 1 remains planning; chapter 2+
-    // only promotes PLANNING -> READING and preserves paused/dropped/completed.
-    var prevStatus = canonicalReaderStatus(
-      existing.canonicalReaderStatus || existing.readerStatus || existing.status
-    );
-    var nextCanonicalStatus = startedStoryPage
-      ? prevStatus === "SAVED" ? "READING" : prevStatus || "READING"
-      : prevStatus || "SAVED";
-    var legacyStatus = legacyReaderStatus(nextCanonicalStatus);
-
-    var next = Object.assign({}, existing, {
-      status: legacyStatus,
-      readerStatus: legacyStatus,
-      canonicalReaderStatus: nextCanonicalStatus,
-    });
-    if (response && typeof response.entryId === "string") {
-      next.entryId = response.entryId;
-      next.statusChoicesAvailable = true;
-    }
-    if (typeof currentChapter === "number" && Number.isFinite(currentChapter)) {
-      next.chapters = {
-        current: currentChapter,
-        total: totalChapters == null ? null : totalChapters,
-      };
-    }
-    optimisticStoryPageEntries[workKey] = next;
-
-    entries[workKey] = next;
-    ext.storage.local.set({
-      [OVERLAY_CACHE_KEY]: Object.assign({}, cache, { entries: entries }),
-    }, function () {
-      if (ext.runtime.lastError) return;
-      if (getWorkKeyFromUrl() === workKey) {
-        renderQuickAddButton(workKey);
-      }
-    });
-  });
+  queryBackgroundWorkStateForStory(workKey);
 }
 
 function rerenderStoryHandleForWorkKey(workKey) {

@@ -875,11 +875,18 @@ function readOverlayEntryForItem(item) {
   });
 }
 
-async function confirmTrackedWorkState(workKey, payload, data, fallbackEntryId) {
+async function confirmTrackedWorkState(
+  workKey,
+  payload,
+  data,
+  fallbackEntryId,
+  options = {},
+) {
   const responseWorkKey = await applyTrackResponseToOverlay(payload, data);
   const confirmedWorkKey = responseWorkKey || workKey;
   let state = await markWorkSaved(confirmedWorkKey, data, fallbackEntryId);
   if (state || !confirmedWorkKey) return { workKey: confirmedWorkKey, state };
+  if (!options.allowOverlayCacheFallback) return { workKey: confirmedWorkKey, state };
 
   const overlayEntry = await readOverlayEntryForItem(payload && payload.item);
   if (overlayEntry && typeof overlayEntry === "object") {
@@ -911,12 +918,13 @@ async function waitForTrackedWorkConfirmation(workKey, payload, data, fallbackEn
     if (delayMs > 0) {
       await delay(delayMs);
     }
-    await refreshLibraryOverlay();
+    const refreshed = await refreshLibraryOverlay();
     confirmation = await confirmTrackedWorkState(
       confirmation.workKey,
       payload,
       null,
       fallbackEntryId,
+      { allowOverlayCacheFallback: refreshed === true },
     );
     if (confirmation.state || !confirmation.workKey) return confirmation;
   }
@@ -1625,18 +1633,20 @@ async function syncAo3SavedFilters() {
 
 /** Cache AO3/FFN work id → library status for content-script overlay. */
 function refreshLibraryOverlay() {
-  if (!bearerToken) return Promise.resolve();
+  if (!bearerToken) return Promise.resolve(false);
   return new Promise((resolve) => {
     ext.storage.local.get([PREF_LIBRARY_INLAY_KEY], (prefRes) => {
       if (ext.runtime.lastError) {
-        resolve();
+        resolve(false);
         return;
       }
       if (prefRes[PREF_LIBRARY_INLAY_KEY] === false) {
-        ext.storage.local.remove(OVERLAY_STORAGE_KEY, () => resolve());
+        ext.storage.local.remove(OVERLAY_STORAGE_KEY, () => resolve(false));
         return;
       }
-      void fetchLibraryOverlayFromApi().finally(resolve);
+      void fetchLibraryOverlayFromApi()
+        .then((refreshed) => resolve(refreshed === true))
+        .catch(() => resolve(false));
     });
   });
 }
@@ -1652,11 +1662,11 @@ async function fetchLibraryOverlayFromApi() {
     });
     const authError = await applyAuthFailureResponse(response);
     if (authError) {
-      return;
+      return false;
     }
     if (!response.ok) {
       console.warn("[Trace] library overlay fetch failed:", response.status);
-      return;
+      return false;
     }
     const json = await response.json();
     const data = json && json.data;
@@ -1674,9 +1684,12 @@ async function fetchLibraryOverlayFromApi() {
           resolve,
         );
       });
+      return true;
     }
+    return false;
   } catch (e) {
     console.warn("[Trace] library overlay network error:", e);
+    return false;
   }
 }
 

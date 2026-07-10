@@ -9,6 +9,7 @@
     "build:release": "TRACE_BUILD_MODE=release node scripts/build.mjs",
     "ios:build": "node scripts/ios-simulator-build.mjs",
     "ios:screenshot:load-failure": "node scripts/ios-simulator-screenshot.mjs",
+    "package:chrome": "npm run build:release && npm run zip:chrome",
     "package:firefox": "npm run build:release && npm run zip:firefox",
     "zip:chrome": "node scripts/zip-store.mjs chrome",
     "zip:firefox": "node scripts/zip-store.mjs firefox",
