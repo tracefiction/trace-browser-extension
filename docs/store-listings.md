@@ -1,4 +1,4 @@
-# Extension Store Copy - 0.5.5
+# Extension Store Copy - 0.5.6
 
 Use this copy for Chrome Web Store, Firefox Add-ons, App Store Connect, and
 public release notes. Keep evergreen store descriptions separate from
@@ -44,14 +44,14 @@ FictionPress.
 
 ## What's New / Release Notes
 
-Trace extension 0.5.5 makes saving stories more reliable:
+Trace extension 0.5.6 makes first-time setup clearer and more reliable:
 
-- Waits for confirmed Trace library state before showing a story as saved.
-- Keeps save and overlay state scoped to the signed-in account, avoiding stale
-  results after switching accounts.
-- Recovers first-story adds after temporary auto-track failures.
-- Restores saved Chrome authentication after the extension background worker
+- Keeps Trace connection status accurate across page loads and background-worker
   restarts.
+- Confirms that a first story reached the library before completing setup.
+- Improves the app-led Safari permission and first-story handoff flow.
+- Reduces Safari website permission prompts to the origins the active build
+  actually uses.
 
 Privacy boundary unchanged: Trace still reads story metadata and reading
 progress from supported pages, not AO3/FFN credentials, cookies, private
@@ -77,11 +77,12 @@ The extension does not request cookie permissions.
 
 ## App Store Connect - iOS What's New
 
-Trace for iOS 0.5.5 improves Safari story saves:
+Trace for iOS 0.5.6 improves Safari extension setup:
 
-- Waits for confirmed library state before showing a story as saved.
-- Keeps save state isolated to the signed-in account.
-- Retries a first-story add when automatic tracking temporarily fails.
+- Guides readers through enabling the extension and granting website access.
+- Verifies that Safari reached the selected story before reporting success.
+- Waits for a confirmed library save before completing onboarding.
+- Adds clearer recovery when Safari does not run the extension.
 
 ## Screenshot Preparation
 
