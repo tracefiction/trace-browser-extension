@@ -123,6 +123,44 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         let error: String?
         let queriedIdentifier: String?
         let embeddedExtensionIdentifiers: [String]?
+        // Heartbeat written by SafariWebExtensionHandler when a content script
+        // actually runs — the only signal iOS exposes that the site permission
+        // was granted. Timestamps are epoch milliseconds; web decides staleness.
+        let lastArchiveRunAt: Double?
+        let lastArchiveSaveAt: Double?
+        let lastRunByHost: [String: Double]?
+        // Raw `permissions.getAll()` snapshot: diagnostic only, not proof of
+        // current Safari Website Access.
+        let grantedOrigins: [String]?
+        let permissionSnapshotAt: Double?
+        let heartbeatUpdatedAt: Double?
+        let lastRunHandoffId: String?
+        let lastRunHandoffAt: Double?
+    }
+
+    private struct TraceSafariExtensionHeartbeat {
+        let lastRunByHost: [String: Double]
+        let lastSaveByHost: [String: Double]
+        let grantedOrigins: [String]?
+        let permissionSnapshotAt: Double?
+        let updatedAt: Double?
+        let lastRunHandoffId: String?
+        let lastRunHandoffAt: Double?
+
+        private static func latest(in byHost: [String: Double]) -> Double? {
+            byHost
+                .filter { $0.key != "unknown" }
+                .values
+                .max()
+        }
+
+        var lastArchiveRunAt: Double? {
+            Self.latest(in: lastRunByHost)
+        }
+
+        var lastArchiveSaveAt: Double? {
+            Self.latest(in: lastSaveByHost)
+        }
     }
 
     private struct TraceSafariExtensionStateQueryResult {
@@ -136,6 +174,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         let nonce: String
         let ok: Bool
         let error: String?
+        let handoffId: String?
     }
 
     private static var billingAPIBaseURL: URL {
@@ -705,8 +744,9 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         let scheme = url.scheme?.lowercased()
         guard scheme == "http" || scheme == "https" else { return false }
         let path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
-        return path == "setup" ||
-            path == "apps" ||
+        // /setup stays in the shell: the iOS activation wizard needs the
+        // native bridge (extension state, settings deep link, heartbeat).
+        return path == "apps" ||
             path == "shared/collections" ||
             path.hasPrefix("shared/collections/")
     }
@@ -1101,6 +1141,11 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         case sharedStorageUnavailable
     }
 
+    private enum TraceSafariPendingFirstStoryMode: String {
+        case story
+        case browse
+    }
+
     private static let safariExtensionBundleIdentifier = "com.tracefiction.trace.extension"
     private static let traceSharedAppGroup = "group.com.tracefiction.trace"
     private static let traceKeychainAccessGroup = "com.tracefiction.trace.shared"
@@ -1109,7 +1154,10 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     private static let traceAuthTokenAccount = "extension-token"
     private static let pendingFirstStoryDefaultsKey = "tracePendingFirstStoryUrlV1"
     private static let pendingFirstStoryExpiresAtDefaultsKey = "tracePendingFirstStoryExpiresAtV1"
+    private static let pendingFirstStoryV2DefaultsKey = "tracePendingFirstStoryV2"
     private static let pendingFirstStoryTTL: TimeInterval = 10 * 60
+    /// Written by SafariWebExtensionHandler (extension process); read-only here.
+    private static let extensionHeartbeatDefaultsKey = "traceExtensionHeartbeatV1"
 
     private func handleTraceSafariExtensionMessage(_ message: WKScriptMessage) {
         guard let body = message.body as? [String: Any],
@@ -1127,7 +1175,16 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             handleTraceSafariExtensionSettingsRequest(nonce: nonce)
         case "TRACE_IOS_OPEN_STORY_URL":
             let url = body["url"] as? String
-            handleTraceSafariStoryOpenRequest(nonce: nonce, rawURL: url)
+            handleTraceSafariStoryOpenRequest(
+                nonce: nonce,
+                rawURL: url,
+                handoffId: Self.sanitizedHandoffId(body["handoffId"])
+            )
+        case "TRACE_IOS_OPEN_ARCHIVE_HOME":
+            handleTraceSafariArchiveHomeOpenRequest(
+                nonce: nonce,
+                handoffId: Self.sanitizedHandoffId(body["handoffId"])
+            )
         default:
             postSafariExtensionActionResult(
                 type: "\(messageType)_RESPONSE",
@@ -1271,7 +1328,11 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         }
     }
 
-    private func handleTraceSafariStoryOpenRequest(nonce: String, rawURL: String?) {
+    private func handleTraceSafariStoryOpenRequest(
+        nonce: String,
+        rawURL: String?,
+        handoffId: String?
+    ) {
         Task { [weak self] in
             guard let self else { return }
             do {
@@ -1279,7 +1340,11 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                     throw TraceSafariExtensionBridgeError.unsupportedUrl
                 }
                 try await self.storeCurrentTraceTokenForSafariExtension()
-                try Self.storePendingFirstStoryURL(url)
+                try Self.storePendingFirstStory(
+                    mode: .story,
+                    url: url,
+                    handoffId: handoffId
+                )
                 await MainActor.run {
                     UIApplication.shared.open(url, options: [:]) { [weak self] success in
                         if !success {
@@ -1289,7 +1354,8 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                             type: "TRACE_IOS_OPEN_STORY_URL_RESPONSE",
                             nonce: nonce,
                             ok: success,
-                            error: success ? nil : "open_failed"
+                            error: success ? nil : "open_failed",
+                            handoffId: success ? handoffId : nil
                         )
                     }
                 }
@@ -1306,6 +1372,50 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 await MainActor.run {
                     self.postSafariExtensionActionResult(
                         type: "TRACE_IOS_OPEN_STORY_URL_RESPONSE",
+                        nonce: nonce,
+                        ok: false,
+                        error: "token_share_failed"
+                    )
+                }
+            }
+        }
+    }
+
+    /// Opens only the fixed AO3 home URL. This is intentionally not a generic
+    /// native browser launcher: the pending record is constrained to the AO3
+    /// host and is consumed only after the reader reaches a supported story.
+    private func handleTraceSafariArchiveHomeOpenRequest(
+        nonce: String,
+        handoffId: String?
+    ) {
+        Task { [weak self] in
+            guard let self else { return }
+            let url = URL(string: "https://archiveofourown.org/")!
+            do {
+                try await self.storeCurrentTraceTokenForSafariExtension()
+                try Self.storePendingFirstStory(
+                    mode: .browse,
+                    url: nil,
+                    handoffId: handoffId
+                )
+                await MainActor.run {
+                    UIApplication.shared.open(url, options: [:]) { [weak self] success in
+                        if !success {
+                            Self.clearPendingFirstStoryURL()
+                        }
+                        self?.postSafariExtensionActionResult(
+                            type: "TRACE_IOS_OPEN_ARCHIVE_HOME_RESPONSE",
+                            nonce: nonce,
+                            ok: success,
+                            error: success ? nil : "open_failed",
+                            handoffId: success ? handoffId : nil
+                        )
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.postSafariExtensionActionResult(
+                        type: "TRACE_IOS_OPEN_ARCHIVE_HOME_RESPONSE",
                         nonce: nonce,
                         ok: false,
                         error: "token_share_failed"
@@ -1401,21 +1511,78 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         }.sorted()
     }
 
-    private static func storePendingFirstStoryURL(_ url: URL) throws {
+    private static func storePendingFirstStory(
+        mode: TraceSafariPendingFirstStoryMode,
+        url: URL?,
+        handoffId: String?
+    ) throws {
         guard let defaults = pendingDefaults() else {
             throw TraceSafariExtensionBridgeError.sharedStorageUnavailable
         }
-        defaults.set(url.absoluteString, forKey: pendingFirstStoryDefaultsKey)
-        defaults.set(
-            Date().addingTimeInterval(pendingFirstStoryTTL).timeIntervalSince1970,
-            forKey: pendingFirstStoryExpiresAtDefaultsKey
-        )
+        let hostKind: String
+        switch mode {
+        case .story:
+            guard let url, let inferredHostKind = archiveHostKind(for: url) else {
+                throw TraceSafariExtensionBridgeError.unsupportedUrl
+            }
+            hostKind = inferredHostKind
+            // Keep V1 during rollout so an already-installed older extension
+            // can still complete a direct story handoff.
+            defaults.set(url.absoluteString, forKey: pendingFirstStoryDefaultsKey)
+            defaults.set(
+                Date().addingTimeInterval(pendingFirstStoryTTL).timeIntervalSince1970,
+                forKey: pendingFirstStoryExpiresAtDefaultsKey
+            )
+        case .browse:
+            hostKind = "ao3"
+            // An old direct handoff must not be replayed while the reader is
+            // browsing AO3 home with the new protocol.
+            defaults.removeObject(forKey: pendingFirstStoryDefaultsKey)
+            defaults.removeObject(forKey: pendingFirstStoryExpiresAtDefaultsKey)
+        }
+
+        let expiresAt = Date().addingTimeInterval(pendingFirstStoryTTL).timeIntervalSince1970
+        var pending: [String: Any] = [
+            "mode": mode.rawValue,
+            "hostKind": hostKind,
+            "expiresAt": expiresAt,
+        ]
+        if let url {
+            pending["url"] = url.absoluteString
+        }
+        if let handoffId,
+           let sanitizedHandoffId = sanitizedHandoffId(handoffId)
+        {
+            pending["handoffId"] = sanitizedHandoffId
+        }
+        defaults.set(pending, forKey: pendingFirstStoryV2DefaultsKey)
     }
 
     private static func clearPendingFirstStoryURL() {
         guard let defaults = pendingDefaults() else { return }
         defaults.removeObject(forKey: pendingFirstStoryDefaultsKey)
         defaults.removeObject(forKey: pendingFirstStoryExpiresAtDefaultsKey)
+        defaults.removeObject(forKey: pendingFirstStoryV2DefaultsKey)
+    }
+
+    private static func archiveHostKind(for url: URL) -> String? {
+        guard let host = url.host?.lowercased() else { return nil }
+        if isSupportedAO3Host(host) { return "ao3" }
+        if host == "www.fanfiction.net" || host == "m.fanfiction.net" {
+            return "ffn"
+        }
+        return nil
+    }
+
+    private static func sanitizedHandoffId(_ value: Any?) -> String? {
+        guard let raw = value as? String else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 128,
+              trimmed.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil
+        else {
+            return nil
+        }
+        return trimmed
     }
 
     @MainActor
@@ -1456,6 +1623,46 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         }
     }
 
+    private static func readExtensionHeartbeat() -> TraceSafariExtensionHeartbeat? {
+        guard let defaults = pendingDefaults(),
+              let raw = defaults.dictionary(forKey: extensionHeartbeatDefaultsKey)
+        else {
+            return nil
+        }
+
+        func readHostTimestamps(_ value: Any?) -> [String: Double] {
+            var out: [String: Double] = [:]
+            guard let rawHosts = value as? [String: Any] else { return out }
+            for (host, entry) in rawHosts {
+                if let at = entry as? Double, at > 0 {
+                    out[host] = at
+                } else if let at = entry as? Int, at > 0 {
+                    out[host] = Double(at)
+                }
+            }
+            return out
+        }
+
+        func readEpochMillis(_ value: Any?) -> Double? {
+            if let at = value as? Double, at > 0 { return at }
+            if let at = value as? Int, at > 0 { return Double(at) }
+            return nil
+        }
+
+        let lastRunByHost = readHostTimestamps(raw["lastRunByHost"])
+        guard !lastRunByHost.isEmpty else { return nil }
+
+        return TraceSafariExtensionHeartbeat(
+            lastRunByHost: lastRunByHost,
+            lastSaveByHost: readHostTimestamps(raw["lastSaveByHost"]),
+            grantedOrigins: raw["grantedOrigins"] as? [String],
+            permissionSnapshotAt: readEpochMillis(raw["permissionSnapshotAt"]),
+            updatedAt: readEpochMillis(raw["updatedAt"]),
+            lastRunHandoffId: sanitizedHandoffId(raw["lastRunHandoffId"]),
+            lastRunHandoffAt: readEpochMillis(raw["lastRunHandoffAt"])
+        )
+    }
+
     @MainActor
     private func postSafariExtensionState(
         nonce: String,
@@ -1465,6 +1672,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         queriedIdentifier: String? = nil,
         embeddedExtensionIdentifiers: [String]? = nil
     ) {
+        let heartbeat = Self.readExtensionHeartbeat()
         postTraceWebMessage(
             TraceSafariExtensionStatePayload(
                 nonce: nonce,
@@ -1472,7 +1680,15 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 settingsSupported: settingsSupported,
                 error: error,
                 queriedIdentifier: queriedIdentifier,
-                embeddedExtensionIdentifiers: embeddedExtensionIdentifiers
+                embeddedExtensionIdentifiers: embeddedExtensionIdentifiers,
+                lastArchiveRunAt: heartbeat?.lastArchiveRunAt,
+                lastArchiveSaveAt: heartbeat?.lastArchiveSaveAt,
+                lastRunByHost: heartbeat?.lastRunByHost,
+                grantedOrigins: heartbeat?.grantedOrigins,
+                permissionSnapshotAt: heartbeat?.permissionSnapshotAt,
+                heartbeatUpdatedAt: heartbeat?.updatedAt,
+                lastRunHandoffId: heartbeat?.lastRunHandoffId,
+                lastRunHandoffAt: heartbeat?.lastRunHandoffAt
             )
         )
     }
@@ -1482,14 +1698,16 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         type: String,
         nonce: String,
         ok: Bool,
-        error: String? = nil
+        error: String? = nil,
+        handoffId: String? = nil
     ) {
         postTraceWebMessage(
             TraceSafariExtensionActionPayload(
                 type: type,
                 nonce: nonce,
                 ok: ok,
-                error: error
+                error: error,
+                handoffId: handoffId
             )
         )
     }

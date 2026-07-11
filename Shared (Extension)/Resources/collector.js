@@ -4173,10 +4173,33 @@ function processIosPendingFirstStoryAdd() {
       function (response) {
         if (ext.runtime.lastError || !response || response.ok !== true) return;
         var pendingUrl = typeof response.url === "string" ? response.url.trim() : "";
-        if (!pendingUrl) return;
-        if (!pendingFirstStoryMatchesCurrentPage(pendingUrl)) {
+        var mode = response.mode === "browse" ? "browse" : "story";
+        var handoffId =
+          typeof response.handoffId === "string" &&
+          /^[A-Za-z0-9_-]{1,128}$/.test(response.handoffId.trim())
+            ? response.handoffId.trim()
+            : "";
+
+        if (mode === "browse") {
+          var current = parseFirstStoryUrlForMatch(location.href);
+          var expectedHost =
+            response.hostKind === "ao3" || response.hostKind === "ffn"
+              ? response.hostKind
+              : "";
+          // The AO3 home handoff intentionally survives navigation through
+          // listing/search pages. Only a matching supported story page may
+          // consume it, so a reader can browse normally before choosing one.
+          if (!current || !expectedHost || current.source !== expectedHost) {
+            return;
+          }
+        } else if (!pendingUrl || !pendingFirstStoryMatchesCurrentPage(pendingUrl)) {
+          // A direct story handoff should land on exactly one work/chapter.
+          // Clear a mismatch rather than leaving a stale add waiting behind.
           sendIosPendingFirstStoryClear();
           return;
+        }
+        if (handoffId) {
+          announceArchivePageToBackground(handoffId);
         }
         handleFirstStoryFocusAdd(function (result) {
           if (result && result.ok) {
@@ -5084,4 +5107,28 @@ if (!shouldDisableTraceContentScript()) {
   } else {
     initQuickAdd();
   }
+}
+
+// Immediate "content script is running" ping. The iOS app uses it to verify
+// Safari's site permission, so it must not wait on DOM readiness, prefs, or
+// any network work.
+function announceArchivePageToBackground(handoffId) {
+  try {
+    var message = { type: "TRACE_ARCHIVE_SEEN" };
+    if (
+      typeof handoffId === "string" &&
+      /^[A-Za-z0-9_-]{1,128}$/.test(handoffId)
+    ) {
+      message.handoffId = handoffId;
+    }
+    ext.runtime.sendMessage(message, function () {
+      void ext.runtime.lastError;
+    });
+  } catch (_) {
+    /* best-effort only */
+  }
+}
+
+if (!shouldDisableTraceContentScript()) {
+  announceArchivePageToBackground();
 }

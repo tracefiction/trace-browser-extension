@@ -31,6 +31,11 @@ const AO3_SAVED_FILTERS_SYNC_META_KEY = "traceAo3SavedFiltersSyncV1";
 const AO3_SAVED_FILTERS_CLIENT_ID_KEY = "traceAo3SavedFiltersClientIdV1";
 const LIBRARY_INVALIDATED_MESSAGE = "TRACE_LIBRARY_INVALIDATED";
 const EXTENSION_STATUS_QUERY_MESSAGE = "TRACE_EXTENSION_STATUS_QUERY";
+const EXTENSION_STATUS_PUSH_MESSAGE = "TRACE_EXTENSION_STATUS_PUSH";
+// Bounded wait for token verification before answering a status query, so a
+// cold service worker reports "connected" instead of a transient "unknown".
+const EXTENSION_STATUS_AUTH_SETTLE_WAIT_MS = 700;
+const EXTENSION_STATUS_PUSH_DEBOUNCE_MS = 120;
 const WORK_STATE_GET_MESSAGE = "TRACE_WORK_STATE_GET";
 const AO3_SAVED_FILTERS_SYNC_REQUEST_MESSAGE = "TRACE_AO3_SAVED_FILTERS_SYNC_REQUEST";
 const ARCHIVE_READINESS_KEY = "traceArchiveReadiness";
@@ -52,6 +57,8 @@ const FIRST_STORY_FOCUS_ADD_MESSAGE = "TRACE_FIRST_STORY_FOCUS_ADD";
 const IOS_AUTH_TOKEN_REQUEST_MESSAGE = "TRACE_IOS_AUTH_TOKEN_REQUEST";
 const IOS_PENDING_FIRST_STORY_GET_MESSAGE = "TRACE_IOS_PENDING_FIRST_STORY_GET";
 const IOS_PENDING_FIRST_STORY_CLEAR_MESSAGE = "TRACE_IOS_PENDING_FIRST_STORY_CLEAR";
+const IOS_EXTENSION_HEARTBEAT_MESSAGE = "TRACE_IOS_EXTENSION_HEARTBEAT";
+const IOS_EXTENSION_HEARTBEAT_MIN_INTERVAL_MS = 5 * 60 * 1000;
 const IOS_NATIVE_APPLICATION_ID = "com.tracefiction.trace";
 const AO3_STORY_URL_RE =
   /^https:\/\/(?:[^/]+\.)?(?:archiveofourown\.org|archiveofourown\.gay|archive\.transformativeworks\.org|ao3\.org)\/works\/\d+(?:\/chapters\/\d+)?(?:[?#].*)?$/i;
@@ -108,6 +115,13 @@ function clearBadge(tabId) {
   ext.action.setBadgeText({ text: "", tabId });
 }
 
+const SETTLED_AUTH_PUSH_STATES = new Set([
+  "connected",
+  "signed_out",
+  "reconnect_required",
+  "error",
+]);
+
 function persistAuthState(nextState) {
   const write = (previousState = null) => {
     const preserved =
@@ -120,6 +134,11 @@ function persistAuthState(nextState) {
       ...nextState,
     };
     ext.storage.local.set({ [AUTH_STATE_KEY]: state });
+    // Only settled outcomes are pushed; transient "checking" states would
+    // downgrade the page UI for no reason.
+    if (SETTLED_AUTH_PUSH_STATES.has(state.state)) {
+      scheduleExtensionStatusPush();
+    }
   };
 
   try {
@@ -370,6 +389,12 @@ function normalizeArchiveErrorKind(value) {
   return null;
 }
 
+function normalizeIosHandoffId(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return /^[A-Za-z0-9_-]{1,128}$/.test(trimmed) ? trimmed : null;
+}
+
 function archiveHostKindFromPayload(payload) {
   let source = "";
   if (payload && typeof payload.s === "string") {
@@ -474,9 +499,122 @@ function applyArchiveReadiness(status, archiveReadiness, authState) {
   }
 }
 
+const lastIosHeartbeatAtByHost = Object.create(null);
+
+function collectGrantedOriginPermissions() {
+  return new Promise((resolve) => {
+    if (!ext.permissions || typeof ext.permissions.getAll !== "function") {
+      resolve(null);
+      return;
+    }
+
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(Array.isArray(value) ? value : null);
+    };
+
+    try {
+      const callback = (result) => {
+        if (ext.runtime.lastError) {
+          finish(null);
+          return;
+        }
+        finish(result?.origins);
+      };
+      const maybePromise = ext.permissions.getAll(callback);
+      if (maybePromise && typeof maybePromise.then === "function") {
+        maybePromise
+          .then((result) => finish(result?.origins))
+          .catch(() => finish(null));
+      }
+    } catch (_) {
+      finish(null);
+    }
+  });
+}
+
+// Confirmed-save action kinds: the server accepted the story, so the iOS
+// wizard may claim "in your library". Everything else only proves the
+// content script ran (i.e. Safari's site permission is granted).
+function isConfirmedSaveActionKind(actionKind) {
+  return actionKind === "track" || actionKind === "quick_add";
+}
+
+/** hostKind derived from the sender's tab URL, never from the payload. */
+function archiveHostKindFromSenderUrl(rawUrl) {
+  if (typeof rawUrl !== "string" || !rawUrl) return null;
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== "https:") return null;
+    if (isAo3Host(url.hostname)) return "ao3";
+    if (isFfnHost(url.hostname)) return "ffn";
+  } catch (_) {
+    /* fall through */
+  }
+  return null;
+}
+
+// iOS cannot read Safari's per-site permission state, so the app treats "a
+// content script actually reached the background on an archive host" as the
+// grant signal. Send that receipt immediately. `permissions.getAll()` is
+// useful diagnostic metadata, but must never delay the proof of a real run or
+// be confused with a native query of current Safari access. Confirmed saves
+// and handoff receipts bypass the regular throttle; a worker restart simply
+// re-sends an idempotent record.
+function maybeSendIosArchiveHeartbeat(hostKind, actionKind, handoffId) {
+  if (!canSendNativeMessage()) return;
+  const key = hostKind || "unknown";
+  const now = Date.now();
+  const confirmedSave = isConfirmedSaveActionKind(actionKind);
+  const normalizedHandoffId = normalizeIosHandoffId(handoffId);
+  const last = lastIosHeartbeatAtByHost[key] || 0;
+  if (
+    !confirmedSave &&
+    !normalizedHandoffId &&
+    now - last < IOS_EXTENSION_HEARTBEAT_MIN_INTERVAL_MS
+  ) {
+    return;
+  }
+  lastIosHeartbeatAtByHost[key] = now;
+
+  const message = {
+    type: IOS_EXTENSION_HEARTBEAT_MESSAGE,
+    hostKind: key,
+    at: now,
+  };
+  if (confirmedSave) {
+    message.action = actionKind;
+  }
+  if (normalizedHandoffId) {
+    message.handoffId = normalizedHandoffId;
+  }
+  void sendIosNativeMessage(message);
+
+  void collectGrantedOriginPermissions().then((grantedOrigins) => {
+    if (!grantedOrigins) return;
+    return sendIosNativeMessage({
+      type: IOS_EXTENSION_HEARTBEAT_MESSAGE,
+      hostKind: key,
+      // This snapshot may resolve after the core run receipt, so stamp the
+      // time the permission API actually replied rather than reusing the run
+      // timestamp. It remains diagnostic metadata, not access proof.
+      at: Date.now(),
+      permissionSnapshot: true,
+      grantedOrigins,
+    });
+  });
+}
+
 function recordArchiveReadiness(event = {}) {
   const now = Date.now();
   const hostKind = normalizeArchiveHostKind(event.hostKind) || "unknown";
+  maybeSendIosArchiveHeartbeat(
+    hostKind,
+    normalizeArchiveActionKind(event.actionKind),
+    event.handoffId,
+  );
   const actionKind = normalizeArchiveActionKind(event.actionKind);
   const errorKind = normalizeArchiveErrorKind(event.errorKind);
   const patch = {};
@@ -593,6 +731,9 @@ function markFirstSaveSeen() {
   } catch (_) {
     /* ignore */
   }
+  // First-save evidence flips the web setup flow to "complete"; let open
+  // Trace tabs learn immediately instead of waiting for a manual re-check.
+  scheduleExtensionStatusPush();
 }
 
 function externalStoryKeyFromItem(item) {
@@ -1067,7 +1208,19 @@ async function applyAuthFailureResponse(response, extra = {}) {
   return "auth_expired";
 }
 
-async function verifyTraceAccountToken(token, extra = {}) {
+let pendingAuthVerification = null;
+
+function verifyTraceAccountToken(token, extra = {}) {
+  const verification = runTraceAccountTokenVerification(token, extra);
+  pendingAuthVerification = verification;
+  const clearPending = () => {
+    if (pendingAuthVerification === verification) pendingAuthVerification = null;
+  };
+  verification.then(clearPending, clearPending);
+  return verification;
+}
+
+async function runTraceAccountTokenVerification(token, extra = {}) {
   const trimmed = typeof token === "string" ? token.trim() : "";
   if (!trimmed) return { success: false, state: "signed_out" };
 
@@ -1944,6 +2097,17 @@ function sanitizeIosPendingFirstStoryResponse(response) {
   }
   const url = typeof response.url === "string" ? response.url.trim() : "";
   const result = { ok: true, url };
+  const handoffId = normalizeIosHandoffId(response.handoffId);
+  if (handoffId) {
+    result.handoffId = handoffId;
+  }
+  if (response.mode === "browse" || response.mode === "story") {
+    result.mode = response.mode;
+  }
+  const hostKind = normalizeArchiveHostKind(response.hostKind);
+  if (hostKind && hostKind !== "unknown") {
+    result.hostKind = hostKind;
+  }
   const expiresAt =
     typeof response.expiresAt === "number"
       ? response.expiresAt
@@ -1980,7 +2144,13 @@ async function bootstrapInitialAuth(res) {
     typeof res?.authToken === "string" ? res.authToken.trim() : "";
   if (!storedToken) {
     const bootstrapped = await bootstrapAuthFromIosNative("missing_token");
-    if (!bootstrapped && !bearerToken && !verifiedBearerToken) setSignedOutState();
+    if (bootstrapped || bearerToken || verifiedBearerToken) return;
+    // Keep settled recovery guidance from a previous session; downgrading
+    // reconnect/error to a generic signed-out prompt loses the useful message.
+    const snapshot = await storageGetLocal([AUTH_STATE_KEY]);
+    const storedState = snapshot?.[AUTH_STATE_KEY]?.state;
+    if (storedState === "reconnect_required" || storedState === "error") return;
+    setSignedOutState();
     return;
   }
 
@@ -2092,6 +2262,36 @@ function signalLibraryInvalidated(reason) {
     reason,
     at: new Date().toISOString(),
   });
+}
+
+let extensionStatusPushTimer = null;
+
+/** Debounced so bursts of auth-state writes coalesce and the storage write
+ *  that triggered the push lands before the snapshot is read. */
+function scheduleExtensionStatusPush() {
+  if (extensionStatusPushTimer) return;
+  extensionStatusPushTimer = setTimeout(() => {
+    extensionStatusPushTimer = null;
+    void pushExtensionStatusToTraceTabs();
+  }, EXTENSION_STATUS_PUSH_DEBOUNCE_MS);
+}
+
+async function pushExtensionStatusToTraceTabs() {
+  try {
+    const snapshot = await storageGetLocal([
+      AUTH_TOKEN_KEY,
+      AUTH_STATE_KEY,
+      TRACE_FIRST_SAVE_SEEN_KEY,
+      ARCHIVE_READINESS_KEY,
+    ]);
+    await notifyTraceWebTabs({
+      type: EXTENSION_STATUS_PUSH_MESSAGE,
+      state: buildExtensionStatus(snapshot),
+      at: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.warn("[Trace] Failed to push extension status:", error);
+  }
 }
 
 function isAo3StoryUrl(url) {
@@ -2236,6 +2436,28 @@ try {
 // Listen for messages
 ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // -------------------------------------------------
+  // A0. Archive content script announcing injection.
+  // Fires immediately on page load, independent of auto-track prefs or any
+  // pending network work — the iOS wizard's "Safari permission granted"
+  // evidence. hostKind comes from the sender tab URL, never the payload.
+  // -------------------------------------------------
+  if (msg.type === "TRACE_ARCHIVE_SEEN") {
+    if (!shouldIgnoreSenderForAutoTrack(sender)) {
+      const hostKind = archiveHostKindFromSenderUrl(
+        sender?.tab?.url || sender?.url,
+      );
+      if (hostKind) {
+        recordArchiveReadiness({
+          hostKind,
+          handoffId: normalizeIosHandoffId(msg.handoffId),
+        });
+      }
+    }
+    if (sendResponse) sendResponse({ ok: true });
+    return false;
+  }
+
+  // -------------------------------------------------
   // A. Token update from sync.js
   // -------------------------------------------------
   if (msg.type === "TRACE_AUTH_UPDATE") {
@@ -2267,25 +2489,34 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const nonce = typeof msg.nonce === "string" ? msg.nonce : "";
     if (!nonce.trim()) return false;
 
-    try {
-      ext.storage.local.get(
-        [
-          AUTH_TOKEN_KEY,
-          AUTH_STATE_KEY,
-          TRACE_FIRST_SAVE_SEEN_KEY,
-          ARCHIVE_READINESS_KEY,
-        ],
-        (res) => {
-          if (ext.runtime.lastError) {
-            if (sendResponse) sendResponse(safeUnknownExtensionStatus());
-            return;
-          }
-          if (sendResponse) sendResponse(buildExtensionStatus(res || {}));
-        },
-      );
-    } catch (_) {
+    (async () => {
+      // Give startup token verification a bounded chance to settle; otherwise
+      // a cold worker answers "unknown" for an account that is connected. If
+      // the wait expires, respond with the best-known state — a settled push
+      // will correct the page shortly after.
+      try {
+        await Promise.race([
+          (async () => {
+            await ensureStoredAuthReady();
+            if (pendingAuthVerification) await pendingAuthVerification;
+          })(),
+          new Promise((resolve) =>
+            setTimeout(resolve, EXTENSION_STATUS_AUTH_SETTLE_WAIT_MS),
+          ),
+        ]);
+      } catch (_) {
+        /* respond with best-known state */
+      }
+      const snapshot = await storageGetLocal([
+        AUTH_TOKEN_KEY,
+        AUTH_STATE_KEY,
+        TRACE_FIRST_SAVE_SEEN_KEY,
+        ARCHIVE_READINESS_KEY,
+      ]);
+      if (sendResponse) sendResponse(buildExtensionStatus(snapshot));
+    })().catch(() => {
       if (sendResponse) sendResponse(safeUnknownExtensionStatus());
-    }
+    });
     return true;
   }
 
@@ -2684,12 +2915,6 @@ async function executeAutoTrack(payload, sender, allowNativeAuthRetry = true) {
         return { ok: false, error: "http_" + response.status };
       }
     } else {
-      recordArchiveActionFromPayload(payload, "track");
-      markFirstSaveSeen();
-      setConnectedState({
-        firstSaveSeen: true,
-        lastTrackSuccessAt: new Date().toISOString(),
-      });
       const json = await response.json().catch(() => null);
       const data = json && json.data && typeof json.data === "object" ? json.data : null;
       const entryId =
@@ -2718,6 +2943,15 @@ async function executeAutoTrack(payload, sender, allowNativeAuthRetry = true) {
         setBadge(sender?.tab?.id, "!", "#9C6B00");
         return { ok: false, error: "confirmation_missing" };
       }
+      // The native iOS success signal is intentionally later than the HTTP
+      // response: only the same confirmation that drives the library UI may
+      // claim a story landed.
+      recordArchiveActionFromPayload(payload, "track");
+      markFirstSaveSeen();
+      setConnectedState({
+        firstSaveSeen: true,
+        lastTrackSuccessAt: new Date().toISOString(),
+      });
       await signalLibraryInvalidated("track");
       setBadge(sender?.tab?.id, "OK", "#0D7A5F");
       setTimeout(() => clearBadge(sender?.tab?.id), 2000);
@@ -2881,7 +3115,6 @@ async function handleQuickAdd(
     });
 
     if (response.ok) {
-      recordArchiveActionFromPayload(payload, "quick_add");
       const json = await response.json().catch(() => null);
       const data = json && json.data && typeof json.data === "object" ? json.data : null;
       const entryId =
@@ -2913,6 +3146,9 @@ async function handleQuickAdd(
         }
         return;
       }
+      // Match auto-track: a successful request alone is not a confirmed save
+      // for the iOS handoff receipt.
+      recordArchiveActionFromPayload(payload, "quick_add");
       markFirstSaveSeen();
       setConnectedState({
         firstSaveSeen: true,

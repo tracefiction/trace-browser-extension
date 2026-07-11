@@ -115,7 +115,9 @@ To test:
 2. Use the app's Safari extension setup action. On supported iOS versions this
    opens Safari extension settings; on older versions use Settings -> Apps ->
    Safari -> Extensions, or Settings -> Safari -> Extensions.
-3. Allow Trace on Trace, archiveofourown.org, and fanfiction.net.
+3. Allow Trace on the reading site you use: archiveofourown.org or
+   fanfiction.net. Safari can request permission for another supported site
+   later if you visit it.
 4. Return to the app and open AO3, open FanFiction.net, or paste a supported
    story URL. Safari should open and the extension should already be connected.
 5. Use `+ ADD`, status controls, import, hide/undo, and final-chapter finish

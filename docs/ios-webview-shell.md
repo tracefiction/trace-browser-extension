@@ -15,7 +15,7 @@ The long-term product direction may include a more native iOS app, but this shel
 - Opens Apple's subscription management sheet for Apple-billed Trace Unlimited accounts.
 - Bridges Safari extension setup actions from the web shell to native iOS code.
 - Shares the signed-in web-shell access token with the Safari extension through a shared Keychain access group.
-- Stores short-lived first-story handoff URLs in app-group storage before opening AO3 or FanFiction.net in Safari.
+- Stores short-lived direct-story and fixed-host AO3 browse handoffs in app-group storage before opening Safari.
 - Opens external non-Trace links outside the shell.
 - Uses `ASWebAuthenticationSession` for OAuth flows instead of completing OAuth inside an embedded web view.
 
@@ -28,12 +28,16 @@ start callback.
 
 Installing the iOS app does not automatically enable the Safari extension or grant site access. User-facing help should keep the setup path explicit and app-led:
 
-1. Sign in to Trace inside the iOS app shell.
-2. Use the in-app "Enable Safari extension" action. On iOS versions that support Safari extension settings APIs, Trace opens the extension settings screen directly. On older iOS versions, show the concise fallback: Settings > Apps > Safari > Extensions > Trace, then allow Trace on Trace, AO3, and FanFiction.net.
-3. Return to the app after enabling the extension and site access.
-4. Open AO3, open FanFiction.net, or paste a supported story URL in the app. Trace stores a short-lived pending story URL, opens Safari, and the Safari extension saves/focuses the story when it runs on the matching page.
+1. Sign in to Trace inside the iOS app shell. Keychain token share connects the Safari extension; no Safari sign-in step exists.
+2. Use the in-app settings action (one trip). On iOS versions that support Safari extension settings APIs, Trace opens the extension settings screen directly. On older iOS versions, show the concise fallback: Settings > Apps > Safari > Extensions > Trace. Two changes on that screen: turn on **Allow Extension**, then set **Other Websites** to **Allow** (verified on-device: this flips every listed host to Allow in ~5 taps; per-site rows remain the choice for readers who prefer narrower grants). The aA page-menu gesture ("Always Allow on Every Website") is recovery-only.
+3. Return to the app; it re-checks **Allow Extension** on focus, but keeps the
+   permission gate visible until the reader confirms Website Access is Allow.
+4. Open AO3 or paste a supported story URL in the app. Trace stores a short-lived
+   pending direct-story or AO3-browse handoff, opens Safari, and the Safari
+   extension emits an opaque receipt only after it reaches the matching story.
+   The extension then saves/focuses the story on that page.
 
-The app can report whether the Safari extension is enabled when the OS API is available, but it cannot fully toggle or prove per-site permissions by itself. Safari controls those permissions; the final proof is that the extension runs on Trace, AO3, or FanFiction.net.
+The app can report whether the Safari extension is enabled when the OS API is available, but it cannot read per-site permissions directly. The proof that a content script ran is the extension heartbeat: content scripts ping the background on archive pages, the background forwards run timestamps (and confirmed-save timestamps for track/quick-add) through `SafariWebExtensionHandler` into the shared app group, and the app surfaces them in the `TRACE_IOS_EXTENSION_STATE` payload (`lastArchiveRunAt`, `lastArchiveSaveAt`, `lastRunHandoffId`). The background sends that core receipt before asynchronously recording its `browser.permissions.getAll()` snapshot as `grantedOrigins` / `permissionSnapshotAt`; that snapshot is diagnostic data, not a native query of current Website Access. The iOS native message bridge supplies the Trace token for the app-led flow, so Trace's own web origin is not an initial reader permission requirement.
 
 Xcode reinstall behavior is not authoritative for fresh users. A local build over an existing install can preserve or restore Safari extension settings and website access, making the extension look "magically" enabled. Treat that as diagnostic only; the acceptance test for first-run onboarding is a clean TestFlight/internal-distribution install after deleting Trace and confirming Safari Extensions state first.
 
@@ -57,6 +61,14 @@ Use TestFlight or an internal distribution install for the realistic first-user 
 
 1. Delete Trace from the iPhone.
 2. Confirm Trace is absent or disabled under Safari Extensions before reinstalling.
-3. Install via TestFlight/internal distribution, sign in inside the app, and observe whether iOS reports the extension enabled.
-4. If iOS reports enabled because prior permissions were restored, the app should still show Manage Safari settings and should only say to allow AO3/FanFiction.net if Safari asks.
-5. If AO3 or FanFiction.net is Ask or Deny, pasted-link handoff should open Safari but the extension can save only after the user grants site access.
+3. Install via TestFlight/internal distribution, sign in inside the app, then use the
+   wizard's one Settings trip: **Allow Extension** on and **Other Websites** →
+   **Allow**.
+4. On iOS versions with the settings deep link, record whether it lands on the
+   Extensions list or the Trace detail page. With the grant in place, paste a
+   supported story URL, return to the app, and confirm the wizard only reaches
+   success after both the archive-run heartbeat and a server-confirmed save.
+5. Repeat with AO3 or FanFiction.net set to Ask or Deny. The handoff may open
+   Safari, but the app must report that Trace did not confirm a run rather than
+   claim the story saved. Recovery must repeat both settings (Allow Extension
+   and Website Access → Allow) and offer the aA path, then retry the story.

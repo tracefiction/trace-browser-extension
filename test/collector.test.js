@@ -1409,6 +1409,93 @@ test("matching iOS pending first-story URL triggers quick-add and clears pending
   assert.equal(pendingClears.length, 1);
 });
 
+test("matching iOS pending story handoff relays its scoped run receipt", async () => {
+  const { sent } = createStoryAutoTrackPendingHarness({
+    store: { prefAutoTrackEnabled: false },
+    pendingFirstStoryResponse: {
+      ok: true,
+      mode: "story",
+      hostKind: "ffn",
+      handoffId: "handoff_7038840",
+      url: "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter",
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 180));
+
+  const receipts = sent.filter(
+    (message) =>
+      message.type === "TRACE_ARCHIVE_SEEN" &&
+      message.handoffId === "handoff_7038840",
+  );
+  assert.equal(receipts.length, 1);
+  assert.equal(sent.filter((message) => message.type === "TRACE_QUICK_ADD").length, 1);
+  assert.equal(
+    sent.filter((message) => message.type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR").length,
+    1,
+  );
+});
+
+test("matching iOS browse handoff waits for a story then relays its receipt", async () => {
+  const { sent } = createStoryAutoTrackPendingHarness({
+    store: { prefAutoTrackEnabled: false },
+    // The native app currently creates this mode for AO3. FFN is used here to
+    // exercise the collector's host-match guard with the existing story fixture.
+    pendingFirstStoryResponse: {
+      ok: true,
+      mode: "browse",
+      hostKind: "ffn",
+      handoffId: "browse_7038840",
+      url: "",
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 180));
+
+  assert.equal(
+    sent.filter(
+      (message) =>
+        message.type === "TRACE_ARCHIVE_SEEN" &&
+        message.handoffId === "browse_7038840",
+    ).length,
+    1,
+  );
+  assert.equal(sent.filter((message) => message.type === "TRACE_QUICK_ADD").length, 1);
+  assert.equal(
+    sent.filter((message) => message.type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR").length,
+    1,
+  );
+});
+
+test("mismatched iOS browse handoff stays pending without a receipt", async () => {
+  const { sent } = createStoryAutoTrackPendingHarness({
+    store: { prefAutoTrackEnabled: false },
+    pendingFirstStoryResponse: {
+      ok: true,
+      mode: "browse",
+      hostKind: "ao3",
+      handoffId: "browse_waiting",
+      url: "",
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 180));
+
+  assert.equal(
+    sent.filter(
+      (message) =>
+        message.type === "TRACE_ARCHIVE_SEEN" &&
+        message.handoffId === "browse_waiting",
+    ).length,
+    0,
+  );
+  assert.equal(sent.filter((message) => message.type === "TRACE_QUICK_ADD").length, 0);
+  assert.equal(
+    sent.filter((message) => message.type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR").length,
+    0,
+  );
+});
+
 test("matching iOS pending first-story URL tries quick-add when rendered auth state is stale", async () => {
   const { sent } = createStoryAutoTrackPendingHarness({
     store: {
@@ -1831,7 +1918,9 @@ test("FFN mobile story quick-add shows planning after chapter-one success", () =
   assert.ok(handle, "expected quick-add handle on FFN mobile story page");
   handle.click();
 
-  assert.equal(sent[0].payload.item.chn, 1);
+  const quickAdd1 = sent.find((msg) => msg && msg.payload && msg.payload.item);
+  assert.ok(quickAdd1, "expected a quick-add message with a payload item");
+  assert.equal(quickAdd1.payload.item.chn, 1);
   assert.match(handle.textContent || "", /Saved/i);
   assert.equal(dom.window.document.querySelector("[data-trace-status-choice]"), null);
 });
@@ -1893,7 +1982,9 @@ test("FFN mobile story quick-add shows reading progress after later-chapter succ
   assert.ok(handle, "expected quick-add handle on FFN mobile story page");
   handle.click();
 
-  assert.equal(sent[0].payload.item.chn, 2);
+  const quickAdd2 = sent.find((msg) => msg && msg.payload && msg.payload.item);
+  assert.ok(quickAdd2, "expected a quick-add message with a payload item");
+  assert.equal(quickAdd2.payload.item.chn, 2);
   assert.match(handle.textContent || "", /Reading.*2\/28/i);
 });
 

@@ -24,6 +24,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     private static let traceIosAuthTokenRequest = "TRACE_IOS_AUTH_TOKEN_REQUEST"
     private static let traceIosPendingFirstStoryGet = "TRACE_IOS_PENDING_FIRST_STORY_GET"
     private static let traceIosPendingFirstStoryClear = "TRACE_IOS_PENDING_FIRST_STORY_CLEAR"
+    private static let traceIosExtensionHeartbeat = "TRACE_IOS_EXTENSION_HEARTBEAT"
     private static let traceSharedAppGroup = "group.com.tracefiction.trace"
     private static let traceKeychainAccessGroup = "com.tracefiction.trace.shared"
     private static let traceAppleTeamIdentifierPrefix = "3GX59FLLT6."
@@ -31,6 +32,8 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     private static let traceAuthTokenAccount = "extension-token"
     private static let pendingFirstStoryDefaultsKey = "tracePendingFirstStoryUrlV1"
     private static let pendingFirstStoryExpiresAtDefaultsKey = "tracePendingFirstStoryExpiresAtV1"
+    private static let pendingFirstStoryV2DefaultsKey = "tracePendingFirstStoryV2"
+    private static let extensionHeartbeatDefaultsKey = "traceExtensionHeartbeatV1"
 
     func beginRequest(with context: NSExtensionContext) {
         let request = context.inputItems.first as? NSExtensionItem
@@ -87,6 +90,9 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                     "type": Self.traceIosPendingFirstStoryClear,
                     "ok": true,
                 ]
+
+            case Self.traceIosExtensionHeartbeat:
+                responseBody = Self.storeExtensionHeartbeat(payload)
 
             case Self.traceAuthUpdate:
                 let token = payload["token"] as? String
@@ -210,10 +216,113 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         UserDefaults(suiteName: traceSharedAppGroup)
     }
 
+    /// Persists the background script's "content script ran on host X" signal.
+    /// The containing app reads this to verify the Safari site-permission grant,
+    /// which iOS offers no direct API for.
+    private static func storeExtensionHeartbeat(_ payload: [String: Any]) -> [String: Any] {
+        guard let defaults = pendingDefaults() else {
+            return [
+                "type": traceIosExtensionHeartbeat,
+                "ok": false,
+                "error": "shared_storage_unavailable",
+            ]
+        }
+
+        let hostKindRaw = (payload["hostKind"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let hostKind = hostKindRaw.isEmpty ? "unknown" : String(hostKindRaw.prefix(32))
+
+        // Background sends epoch milliseconds; fall back to "now" if absent.
+        let reportedAtMs: Double
+        if let at = payload["at"] as? Double, at > 0 {
+            reportedAtMs = at
+        } else if let at = payload["at"] as? Int, at > 0 {
+            reportedAtMs = Double(at)
+        } else {
+            reportedAtMs = Date().timeIntervalSince1970 * 1000
+        }
+
+        var heartbeat =
+            defaults.dictionary(forKey: extensionHeartbeatDefaultsKey) ?? [:]
+
+        // A permissions snapshot is deliberately separate from a run receipt.
+        // `getAll()` is diagnostic metadata collected by extension JavaScript;
+        // it must not delay or overwrite proof that a content script ran.
+        let permissionSnapshot = (payload["permissionSnapshot"] as? Bool) == true
+        if permissionSnapshot {
+            if let grantedOrigins = payload["grantedOrigins"] as? [String] {
+                heartbeat["grantedOrigins"] = Array(
+                    grantedOrigins
+                        .map { String($0.prefix(256)) }
+                        .prefix(64)
+                )
+            }
+            heartbeat["permissionSnapshotAt"] = reportedAtMs
+            heartbeat["updatedAt"] = Date().timeIntervalSince1970 * 1000
+            defaults.set(heartbeat, forKey: extensionHeartbeatDefaultsKey)
+            return [
+                "type": traceIosExtensionHeartbeat,
+                "ok": true,
+            ]
+        }
+
+        var lastRunByHost =
+            heartbeat["lastRunByHost"] as? [String: Double] ?? [:]
+        lastRunByHost[hostKind] = reportedAtMs
+        heartbeat["lastRunByHost"] = lastRunByHost
+
+        if let handoffId = sanitizedHandoffId(payload["handoffId"]) {
+            heartbeat["lastRunHandoffId"] = handoffId
+            heartbeat["lastRunHandoffAt"] = reportedAtMs
+        }
+
+        // Only server-confirmed save actions may make the app claim a story
+        // landed. Keep the native boundary strict even though the background
+        // already filters action kinds before it sends this heartbeat.
+        let action = (payload["action"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if action == "track" || action == "quick_add" {
+            var lastSaveByHost =
+                heartbeat["lastSaveByHost"] as? [String: Double] ?? [:]
+            lastSaveByHost[hostKind] = reportedAtMs
+            heartbeat["lastSaveByHost"] = lastSaveByHost
+        }
+
+        // Backward-compatible handling for extension builds that included the
+        // snapshot on their main heartbeat before the separate-message split.
+        if let grantedOrigins = payload["grantedOrigins"] as? [String] {
+            heartbeat["grantedOrigins"] = Array(
+                grantedOrigins
+                    .map { String($0.prefix(256)) }
+                    .prefix(64)
+            )
+        }
+        heartbeat["updatedAt"] = Date().timeIntervalSince1970 * 1000
+
+        defaults.set(heartbeat, forKey: extensionHeartbeatDefaultsKey)
+
+        return [
+            "type": traceIosExtensionHeartbeat,
+            "ok": true,
+        ]
+    }
+
+    private static func sanitizedHandoffId(_ value: Any?) -> String? {
+        guard let raw = value as? String else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 128,
+              trimmed.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil
+        else {
+            return nil
+        }
+        return trimmed
+    }
+
     private static func clearPendingFirstStory() {
         guard let defaults = pendingDefaults() else { return }
         defaults.removeObject(forKey: pendingFirstStoryDefaultsKey)
         defaults.removeObject(forKey: pendingFirstStoryExpiresAtDefaultsKey)
+        defaults.removeObject(forKey: pendingFirstStoryV2DefaultsKey)
     }
 
     private static func pendingFirstStoryResponse() -> [String: Any] {
@@ -223,6 +332,47 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 "ok": false,
                 "error": "shared_storage_unavailable",
             ]
+        }
+
+        if let pending = defaults.dictionary(forKey: pendingFirstStoryV2DefaultsKey) {
+            let expiresAt = (pending["expiresAt"] as? NSNumber)?.doubleValue ?? 0
+            if expiresAt > 0, Date().timeIntervalSince1970 > expiresAt {
+                clearPendingFirstStory()
+                return [
+                    "type": traceIosPendingFirstStoryGet,
+                    "ok": true,
+                    "url": "",
+                    "expired": true,
+                ]
+            }
+
+            guard let mode = pending["mode"] as? String,
+                  (mode == "story" || mode == "browse")
+            else {
+                clearPendingFirstStory()
+                return [
+                    "type": traceIosPendingFirstStoryGet,
+                    "ok": true,
+                    "url": "",
+                ]
+            }
+
+            var response: [String: Any] = [
+                "type": traceIosPendingFirstStoryGet,
+                "ok": true,
+                "url": (pending["url"] as? String) ?? "",
+                "mode": mode,
+                "expiresAt": expiresAt,
+            ]
+            if let handoffId = sanitizedHandoffId(pending["handoffId"]) {
+                response["handoffId"] = handoffId
+            }
+            if let hostKind = pending["hostKind"] as? String,
+               hostKind == "ao3" || hostKind == "ffn"
+            {
+                response["hostKind"] = hostKind
+            }
+            return response
         }
 
         let expiresAt = defaults.double(forKey: pendingFirstStoryExpiresAtDefaultsKey)

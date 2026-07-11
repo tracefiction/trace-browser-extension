@@ -8,6 +8,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  AO3_HOST_MATCHES,
+  FFN_HOST_MATCHES,
+  SITE_HOST_MATCHES,
+  configuredOriginPermissions,
+} from "./build-origin-permissions.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -74,20 +80,6 @@ const env =
     ? { ...fileEnv, ...process.env }
     : { ...process.env, ...fileEnv };
 const IS_RELEASE = BUILD_MODE === "release";
-const AO3_HOST_MATCHES = [
-  "https://archiveofourown.org/*",
-  "https://*.archiveofourown.org/*",
-  "https://archiveofourown.gay/*",
-  "https://*.archiveofourown.gay/*",
-  "https://archive.transformativeworks.org/*",
-  "https://ao3.org/*",
-  "https://*.ao3.org/*",
-];
-const FFN_HOST_MATCHES = [
-  "https://www.fanfiction.net/*",
-  "https://m.fanfiction.net/*",
-];
-const SITE_HOST_MATCHES = [...AO3_HOST_MATCHES, ...FFN_HOST_MATCHES];
 const AO3_AUTH_EXCLUDE_MATCHES = [
   "https://archiveofourown.org/users/login*",
   "https://*.archiveofourown.org/users/login*",
@@ -141,18 +133,6 @@ const SITE_AUTH_EXCLUDE_MATCHES = [
   ...AO3_AUTH_EXCLUDE_MATCHES,
   ...FFN_AUTH_EXCLUDE_MATCHES,
 ];
-const PROD_TRACE_WEB_MATCHES = [
-  "https://tracefiction.com/*",
-  "https://www.tracefiction.com/*",
-];
-const LOCAL_TRACE_WEB_MATCHES = [
-  "http://localhost:5173/*",
-  "http://127.0.0.1:5173/*",
-];
-const LOCAL_TRACE_API_MATCHES = [
-  "http://localhost:3001/*",
-  "http://127.0.0.1:3001/*",
-];
 const RELEASE_TRACE_API_BASE = "https://api.tracefiction.com";
 const RELEASE_TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 const FIREFOX_RELEASE_EXTENSION_ID = "trace@tracefiction.com";
@@ -182,20 +162,6 @@ function unique(list) {
   return Array.from(new Set((list || []).filter(Boolean)));
 }
 
-/**
- * Host match pattern for manifest (e.g. https://preview.example.com/*).
- * Used so dev/staging Trace URLs get sync.js + background fetch permissions.
- */
-function originHostMatchPattern(baseUrl) {
-  if (!baseUrl) return null;
-  try {
-    const u = new URL(baseUrl);
-    return `${u.origin}/*`;
-  } catch {
-    return null;
-  }
-}
-
 function firefoxCompatibleMatchPattern(pattern) {
   if (typeof pattern !== "string") return pattern;
   const match = pattern.match(/^([^:/]+):\/\/([^/]+)(\/.*)$/);
@@ -222,10 +188,11 @@ function firefoxCompatibleManifest(baseManifest) {
   };
 }
 
-function browserStoreManifest(baseManifest) {
+function browserStoreManifest(baseManifest, browserHostPermissions) {
   const safariOnlyPermissions = new Set(SAFARI_ONLY_PERMISSIONS);
   return {
     ...baseManifest,
+    host_permissions: browserHostPermissions,
     permissions: unique(
       (baseManifest.permissions || []).filter(
         (permission) => !safariOnlyPermissions.has(permission),
@@ -295,25 +262,16 @@ manifest.permissions = unique([
   ...SAFARI_ONLY_PERMISSIONS,
 ]);
 
-const apiHostMatch = originHostMatchPattern(TRACE_API_BASE);
-const webHostMatch = originHostMatchPattern(TRACE_WEB_ORIGIN);
-const extraHostPermissions = [
-  apiHostMatch,
-  webHostMatch,
-  ...(!IS_RELEASE ? LOCAL_TRACE_WEB_MATCHES : []),
-  ...(!IS_RELEASE ? LOCAL_TRACE_API_MATCHES : []),
-];
-const syncMatches = [
-  ...PROD_TRACE_WEB_MATCHES,
-  webHostMatch,
-  ...(!IS_RELEASE ? LOCAL_TRACE_WEB_MATCHES : []),
-];
+const {
+  safariHostPermissions,
+  browserHostPermissions,
+  syncMatches,
+} = configuredOriginPermissions({
+  traceApiBase: TRACE_API_BASE,
+  traceWebOrigin: TRACE_WEB_ORIGIN,
+});
 
-manifest.host_permissions = unique([
-  ...SITE_HOST_MATCHES,
-  ...PROD_TRACE_WEB_MATCHES,
-  ...extraHostPermissions,
-]);
+manifest.host_permissions = safariHostPermissions;
 const savedFiltersScript = "ao3-saved-filters.js";
 const finishQualifyScript = "trace-finish-qualify.js";
 const contentScripts = (manifest.content_scripts || []).map((entry) => {
@@ -351,7 +309,7 @@ manifest.content_scripts = [
 fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
 console.log("Set manifest version to", version);
 
-const packagedManifest = browserStoreManifest(manifest);
+const packagedManifest = browserStoreManifest(manifest, browserHostPermissions);
 
 const skipResources = (full, name) =>
   name === ".DS_Store" || full.endsWith("manifest.json");

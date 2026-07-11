@@ -25,13 +25,9 @@
     "https://archiveofourown.gay/*",
     "https://*.archiveofourown.gay/*",
     "https://archive.transformativeworks.org/*",
-    "https://ao3.org/*",
-    "https://*.ao3.org/*",
     "https://www.fanfiction.net/*",
     "https://m.fanfiction.net/*",
-    "https://tracefiction.com/*",
-    "https://www.tracefiction.com/*",
-    "https://api.tracefiction.com/*"
+    "https://www.tracefiction.com/*"
   ],
   "icons": {
     "16": "images/icon-16.png",
@@ -53,8 +49,6 @@
         "https://archiveofourown.gay/*",
         "https://*.archiveofourown.gay/*",
         "https://archive.transformativeworks.org/*",
-        "https://ao3.org/*",
-        "https://*.ao3.org/*",
         "https://www.fanfiction.net/*",
         "https://m.fanfiction.net/*"
       ],
@@ -115,7 +109,6 @@
     },
     {
       "matches": [
-        "https://tracefiction.com/*",
         "https://www.tracefiction.com/*"
       ],
       "js": [
@@ -129,9 +122,7 @@
         "https://*.archiveofourown.org/*",
         "https://archiveofourown.gay/*",
         "https://*.archiveofourown.gay/*",
-        "https://archive.transformativeworks.org/*",
-        "https://ao3.org/*",
-        "https://*.ao3.org/*"
+        "https://archive.transformativeworks.org/*"
       ],
       "js": [
         "ao3-saved-filters.js"

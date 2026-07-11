@@ -266,6 +266,7 @@ globalThis.__testHooks = {
   patchOverlayReaderStatus,
   patchOverlayLibraryEntry,
   shouldIgnoreSenderForAutoTrack,
+  recordArchiveReadiness,
   setBearerToken(value) { bearerToken = value; },
   setVerifiedBearerToken(value) { verifiedBearerToken = value; },
   getVerifiedBearerToken() { return verifiedBearerToken; },
@@ -574,6 +575,9 @@ test("TRACE_IOS_PENDING_FIRST_STORY messages proxy native pending state", async 
       if (message.type === "TRACE_IOS_PENDING_FIRST_STORY_GET") {
         callback({
           ok: true,
+          mode: "story",
+          hostKind: "ao3",
+          handoffId: "handoff_123",
           url: "https://archiveofourown.org/works/123/chapters/456",
           expiresAt: 1767225600000,
         });
@@ -607,6 +611,9 @@ test("TRACE_IOS_PENDING_FIRST_STORY messages proxy native pending state", async 
 
   assert.deepEqual(plainJson(pending), {
     ok: true,
+    mode: "story",
+    hostKind: "ao3",
+    handoffId: "handoff_123",
     url: "https://archiveofourown.org/works/123/chapters/456",
     expiresAt: 1767225600000,
   });
@@ -791,23 +798,36 @@ test("startup re-verifies stored connected tokens before reporting connected", a
   });
 
   assert.equal(h.store.traceAuthState.state, "unknown");
-  const beforeVerification = await h.dispatchMessage({
-    type: "TRACE_EXTENSION_STATUS_QUERY",
-    nonce: "nonce-before-startup-verification",
-  });
-  assert.deepEqual(plainJson(beforeVerification), {
+
+  // A status query during startup verification waits for the settled result
+  // instead of reporting a transient "unknown" for a connected account.
+  let settledDuringVerification = null;
+  const pendingQuery = h
+    .dispatchMessage({
+      type: "TRACE_EXTENSION_STATUS_QUERY",
+      nonce: "nonce-during-startup-verification",
+    })
+    .then((response) => {
+      settledDuringVerification = response;
+      return response;
+    });
+  await flush();
+  await flush();
+  assert.equal(settledDuringVerification, null);
+
+  accountMe.resolve(createResponse({ json: { pro: false, library_count: 3 } }));
+  await flush();
+  await flush();
+
+  assert.deepEqual(plainJson(await pendingQuery), {
     installed: true,
-    connected: false,
-    authState: "unknown",
+    connected: true,
+    authState: "connected",
     firstSaveSeen: false,
     browserKind: "unknown",
     capabilities: { firstStoryAdd: true },
     lastTokenSyncAt: Date.parse("2026-05-01T12:00:00.000Z"),
   });
-
-  accountMe.resolve(createResponse({ json: { pro: false, library_count: 3 } }));
-  await flush();
-  await flush();
 
   const afterVerification = await h.dispatchMessage({
     type: "TRACE_EXTENSION_STATUS_QUERY",
@@ -825,6 +845,41 @@ test("startup re-verifies stored connected tokens before reporting connected", a
   assert.equal(h.hooks.getVerifiedBearerToken(), "legacy-connected-token");
   assert.equal(h.store.traceAuthState.authVerificationVersion, 1);
   assert.match(h.store.traceAuthState.accountVerifiedAt, /^\d{4}-/);
+});
+
+test("status query answers with best-known state when verification exceeds the wait budget", async () => {
+  const accountMe = createDeferred();
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "legacy-connected-token",
+      traceAuthState: {
+        state: "connected",
+        message: "Connected by old token receipt flow.",
+        lastTokenSyncAt: "2026-05-01T12:00:00.000Z",
+      },
+    },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) {
+        return accountMe.promise;
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+
+  const pendingQuery = h.dispatchMessage({
+    type: "TRACE_EXTENSION_STATUS_QUERY",
+    nonce: "nonce-budget-expired",
+  });
+  await runTimerWithDelayWhenReady(h, 700);
+
+  const response = await pendingQuery;
+  assert.equal(response.installed, true);
+  assert.equal(response.connected, false);
+  assert.equal(response.authState, "unknown");
+
+  // Leave no dangling fetch behind for the test runner.
+  accountMe.resolve(createResponse({ json: { pro: false, library_count: 3 } }));
+  await flush();
 });
 
 test("syncAo3SavedFilters uploads dirty local presets and stores server ids", async () => {
@@ -1150,7 +1205,9 @@ test("TRACE_AO3_SAVED_FILTERS_SYNC_REQUEST queues only when signed in", async ()
     type: "TRACE_AO3_SAVED_FILTERS_SYNC_REQUEST",
   });
   assert.deepEqual(plainJson(signedIn), { ok: true, queued: true });
-  assert.equal(h.timers.length, 1);
+  // Exclude the 120ms status-push debounce timer scheduled by the startup
+  // signed-out auth state; only the queued saved-filters sync should remain.
+  assert.equal(h.timers.filter((timer) => timer && timer.ms !== 120).length, 1);
 });
 
 test("TRACE_POPUP_GET_STATE includes local activation and active tab context", async () => {
@@ -1362,6 +1419,53 @@ test("TRACE_EXTENSION_STATUS_QUERY returns signed-out state", async () => {
     browserKind: "unknown",
     capabilities: { firstStoryAdd: true },
   });
+});
+
+test("settled auth-state changes push extension status to Trace web tabs", async () => {
+  const sentMessages = [];
+  const h = createBackgroundHarness({
+    activeTabs: [
+      { id: 12, url: "https://tracefiction.com/setup" },
+      { id: 13, url: "https://archiveofourown.org/works/1" },
+    ],
+    sendMessageImpl: async (tabId, msg) => {
+      sentMessages.push({ tabId, msg });
+      return { ok: true };
+    },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) {
+        return createResponse({ json: { pro: false, library_count: 0 } });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+
+  await h.dispatchMessage(
+    { type: "TRACE_AUTH_UPDATE", token: "fresh-token" },
+    { tab: { id: 12 } },
+  );
+  await flush();
+  await runTimerWithDelayWhenReady(h, 120);
+  await flush();
+
+  const pushes = sentMessages.filter(
+    (item) => item.msg.type === "TRACE_EXTENSION_STATUS_PUSH",
+  );
+  assert.equal(pushes.length, 1);
+  assert.equal(pushes[0].tabId, 12);
+  const pushedState = plainJson(pushes[0].msg.state);
+  assert.equal(pushedState.installed, true);
+  assert.equal(pushedState.connected, true);
+  assert.equal(pushedState.authState, "connected");
+  assert.equal(typeof pushedState.lastTokenSyncAt, "number");
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(pushedState, "authToken"),
+    false,
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(pushedState, "message"),
+    false,
+  );
 });
 
 test("TRACE_EXTENSION_STATUS_QUERY returns reconnect and error states", async () => {
@@ -3354,6 +3458,7 @@ test("TRACE_AUTO_TRACK waits for delayed overlay confirmation after a stale refr
 
 test("TRACE_AUTO_TRACK does not report saved from stale cache when a 2xx write lacks library confirmation", async () => {
   const h = createBackgroundHarness({
+    sendNativeMessageImpl: ackNativeMessages,
     storageState: {
       authToken: "token-at-missing",
       libraryOverlayCache: {
@@ -3414,6 +3519,10 @@ test("TRACE_AUTO_TRACK does not report saved from stale cache when a 2xx write l
   assert.equal(queried.ok, true);
   assert.equal(queried.state.status, "error");
   assert.equal(queried.state.error, "confirmation_missing");
+  assert.equal(
+    heartbeatMessages(h).some((message) => message.action === "track"),
+    false,
+  );
 });
 
 test("TRACE_AUTO_TRACK responds auth_expired on 401", async () => {
@@ -3553,4 +3662,209 @@ test("TRACE_AUTO_TRACK responds network_error when fetch throws", async () => {
 
   assert.equal(response.ok, false);
   assert.equal(response.error, "network_error");
+});
+
+function heartbeatMessages(h) {
+  return h.nativeMessages
+    .map((args) =>
+      args.find(
+        (arg) => arg && arg.type === "TRACE_IOS_EXTENSION_HEARTBEAT",
+      ),
+    )
+    .filter(Boolean);
+}
+
+function ackNativeMessages(...args) {
+  const callback =
+    typeof args[args.length - 1] === "function" ? args.pop() : undefined;
+  callback?.({ ok: true });
+}
+
+test("archive readiness sends one throttled iOS heartbeat per host kind", async () => {
+  const h = createBackgroundHarness({
+    sendNativeMessageImpl: ackNativeMessages,
+  });
+
+  h.hooks.recordArchiveReadiness({ hostKind: "ao3" });
+  await flush();
+
+  let beats = heartbeatMessages(h);
+  assert.equal(beats.length, 1);
+  assert.equal(beats[0].hostKind, "ao3");
+  assert.equal(typeof beats[0].at, "number");
+  assert.equal("grantedOrigins" in beats[0], false);
+
+  h.hooks.recordArchiveReadiness({ hostKind: "ao3", actionKind: "metadata" });
+  await flush();
+  assert.equal(heartbeatMessages(h).length, 1);
+
+  h.hooks.recordArchiveReadiness({ hostKind: "ffn" });
+  await flush();
+  beats = heartbeatMessages(h);
+  assert.equal(beats.length, 2);
+  assert.equal(beats[1].hostKind, "ffn");
+});
+
+test("iOS heartbeat records granted origins as a separate permission snapshot", async () => {
+  const h = createBackgroundHarness({
+    sendNativeMessageImpl: ackNativeMessages,
+  });
+  h.context.chrome.permissions = {
+    getAll(callback) {
+      callback({
+        origins: [
+          "https://archiveofourown.org/*",
+          "https://www.fanfiction.net/*",
+        ],
+        permissions: ["storage"],
+      });
+    },
+  };
+
+  h.hooks.recordArchiveReadiness({ hostKind: "ao3" });
+  await flush();
+
+  const beats = heartbeatMessages(h);
+  assert.equal(beats.length, 2);
+  assert.equal("grantedOrigins" in beats[0], false);
+  assert.equal(beats[1].permissionSnapshot, true);
+  assert.deepEqual(beats[1].grantedOrigins, [
+    "https://archiveofourown.org/*",
+    "https://www.fanfiction.net/*",
+  ]);
+});
+
+test("iOS heartbeat sends the run receipt before a stalled permission snapshot", async () => {
+  const h = createBackgroundHarness({
+    sendNativeMessageImpl: ackNativeMessages,
+  });
+  h.context.chrome.permissions = {
+    getAll() {
+      return new Promise(() => {});
+    },
+  };
+
+  h.hooks.recordArchiveReadiness({ hostKind: "ao3" });
+  await flush();
+
+  const beats = heartbeatMessages(h);
+  assert.equal(beats.length, 1);
+  assert.equal(beats[0].hostKind, "ao3");
+  assert.equal("permissionSnapshot" in beats[0], false);
+});
+
+test("unauthenticated auto-track still emits the iOS heartbeat", async () => {
+  const h = createBackgroundHarness({
+    sendNativeMessageImpl: ackNativeMessages,
+  });
+
+  await h.dispatchMessage(
+    {
+      type: "TRACE_AUTO_TRACK",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: { t: "Story", u: "https://archiveofourown.org/works/98" },
+      },
+    },
+    { tab: { id: 118 }, frameId: 0, documentLifecycle: "active" },
+  );
+  await flush();
+
+  const beats = heartbeatMessages(h);
+  assert.equal(beats.length, 1);
+  assert.equal(beats[0].hostKind, "ao3");
+});
+
+test("TRACE_ARCHIVE_SEEN records readiness from the sender tab URL only", async () => {
+  const h = createBackgroundHarness({
+    sendNativeMessageImpl: ackNativeMessages,
+  });
+
+  const response = await h.dispatchMessage(
+    { type: "TRACE_ARCHIVE_SEEN", s: "ffn" },
+    {
+      tab: { id: 21, url: "https://archiveofourown.org/works/55" },
+      frameId: 0,
+      documentLifecycle: "active",
+    },
+  );
+  await flush();
+
+  assert.equal(response?.ok, true);
+  const beats = heartbeatMessages(h);
+  assert.equal(beats.length, 1);
+  // Sender URL wins over the (spoofable) payload site hint.
+  assert.equal(beats[0].hostKind, "ao3");
+  assert.equal(h.store.traceArchiveReadiness.lastArchiveHostKind, "ao3");
+});
+
+test("TRACE_ARCHIVE_SEEN relays a validated handoff receipt despite the normal throttle", async () => {
+  const h = createBackgroundHarness({
+    sendNativeMessageImpl: ackNativeMessages,
+  });
+  const sender = {
+    tab: { id: 24, url: "https://archiveofourown.org/works/55" },
+    frameId: 0,
+    documentLifecycle: "active",
+  };
+
+  await h.dispatchMessage({ type: "TRACE_ARCHIVE_SEEN" }, sender);
+  await h.dispatchMessage(
+    { type: "TRACE_ARCHIVE_SEEN", handoffId: "handoff_55" },
+    sender,
+  );
+  await flush();
+
+  const beats = heartbeatMessages(h);
+  assert.equal(beats.length, 2);
+  assert.equal(beats[0].hostKind, "ao3");
+  assert.equal(beats[1].hostKind, "ao3");
+  assert.equal(beats[1].handoffId, "handoff_55");
+});
+
+test("TRACE_ARCHIVE_SEEN ignores non-archive senders and subframes", async () => {
+  const h = createBackgroundHarness({
+    sendNativeMessageImpl: ackNativeMessages,
+  });
+
+  await h.dispatchMessage(
+    { type: "TRACE_ARCHIVE_SEEN" },
+    {
+      tab: { id: 22, url: "https://evil.example/works/55" },
+      frameId: 0,
+      documentLifecycle: "active",
+    },
+  );
+  await h.dispatchMessage(
+    { type: "TRACE_ARCHIVE_SEEN" },
+    {
+      tab: { id: 23, url: "https://archiveofourown.org/works/55" },
+      frameId: 4,
+      documentLifecycle: "active",
+    },
+  );
+  await flush();
+
+  assert.equal(heartbeatMessages(h).length, 0);
+  assert.equal(h.store.traceArchiveReadiness, undefined);
+});
+
+test("confirmed save actions bypass the heartbeat throttle and carry the action", async () => {
+  const h = createBackgroundHarness({
+    sendNativeMessageImpl: ackNativeMessages,
+  });
+
+  h.hooks.recordArchiveReadiness({ hostKind: "ao3" });
+  await flush();
+  h.hooks.recordArchiveReadiness({ hostKind: "ao3", actionKind: "quick_add" });
+  await flush();
+  h.hooks.recordArchiveReadiness({ hostKind: "ao3", actionKind: "metadata" });
+  await flush();
+
+  const beats = heartbeatMessages(h);
+  assert.equal(beats.length, 2);
+  assert.equal("action" in beats[0], false);
+  assert.equal(beats[1].action, "quick_add");
+  assert.equal(beats[1].hostKind, "ao3");
 });

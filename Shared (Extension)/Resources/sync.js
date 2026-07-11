@@ -6,6 +6,14 @@ const ext = typeof browser !== "undefined" ? browser : chrome;
 const STATUS_REQUEST_MESSAGE = "TRACE_EXTENSION_STATUS_REQUEST";
 const STATUS_QUERY_MESSAGE = "TRACE_EXTENSION_STATUS_QUERY";
 const STATUS_RESPONSE_MESSAGE = "TRACE_EXTENSION_STATUS_RESPONSE";
+// Announces this content script to the page. The web app requests status on
+// mount, which can happen before this script is injected; the announce lets it
+// re-request instead of concluding the extension is missing.
+const STATUS_READY_MESSAGE = "TRACE_EXTENSION_STATUS_READY";
+// Background -> content script push when auth state settles.
+const STATUS_PUSH_MESSAGE = "TRACE_EXTENSION_STATUS_PUSH";
+// Content script -> page forward of a pushed status.
+const STATUS_UPDATE_MESSAGE = "TRACE_EXTENSION_STATUS_UPDATE";
 const TOKEN_MESSAGE = "TRACE_FICTION_TOKEN";
 const TOKEN_REQUEST_MESSAGE = "TRACE_FICTION_TOKEN_REQUEST";
 const FIRST_STORY_ADD_REQUEST_MESSAGE = "TRACE_FIRST_STORY_ADD_REQUEST";
@@ -287,6 +295,17 @@ document.addEventListener("visibilitychange", () => {
 
 try {
   ext.runtime.onMessage.addListener((message) => {
+    if (message?.type === STATUS_PUSH_MESSAGE) {
+      window.postMessage(
+        {
+          type: STATUS_UPDATE_MESSAGE,
+          state: sanitizeStatusState(message.state),
+          at: Date.now(),
+        },
+        window.location.origin,
+      );
+      return;
+    }
     if (message?.type !== "TRACE_LIBRARY_INVALIDATED") return;
     window.postMessage(
       {
@@ -300,3 +319,10 @@ try {
 } catch (error) {
   console.error("[Trace Sync] Failed to bind library invalidation bridge", error);
 }
+
+// Announce after listeners are bound so a page that already gave up on its
+// mount-time status request can immediately re-request through this script.
+window.postMessage(
+  { type: STATUS_READY_MESSAGE, at: Date.now() },
+  window.location.origin,
+);

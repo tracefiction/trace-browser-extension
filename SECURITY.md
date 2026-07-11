@@ -10,7 +10,7 @@ Please report security or privacy issues using the public support contact listed
 
 ## Permission Model
 
-The extension requests access to supported AO3 and FanFiction.net pages so it can read story metadata and show Trace library status. It requests access to Trace web/API origins so it can receive your Trace auth token from Trace and send authenticated Trace API requests.
+The extension requests access to supported AO3 and FanFiction.net pages so it can read story metadata and show Trace library status. It requests access to the configured Trace web origin for token sync. Safari sends authenticated API requests from its background worker through the Trace API's extension-origin CORS policy, without requesting page access to that API host; Chrome and Firefox packages retain the API host permission their cross-origin request model requires.
 
 The extension does not request browser cookie permission. It does not need AO3 or FanFiction.net credentials.
 The Safari build uses native messaging only to communicate with the bundled

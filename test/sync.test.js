@@ -32,7 +32,17 @@ function tokenRequestMessages(h) {
 function nonTokenRequestMessages(h) {
   return plainJson(
     h.postedMessages.filter(
-      (item) => item?.data?.type !== "TRACE_FICTION_TOKEN_REQUEST",
+      (item) =>
+        item?.data?.type !== "TRACE_FICTION_TOKEN_REQUEST" &&
+        item?.data?.type !== "TRACE_EXTENSION_STATUS_READY",
+    ),
+  );
+}
+
+function statusReadyMessages(h) {
+  return plainJson(
+    h.postedMessages.filter(
+      (item) => item?.data?.type === "TRACE_EXTENSION_STATUS_READY",
     ),
   );
 }
@@ -520,4 +530,65 @@ test("sync forwards library invalidation runtime messages into the page", async 
       targetOrigin: "https://tracefiction.com",
     },
   ]);
+});
+
+test("sync announces readiness to the page once on load", async () => {
+  const h = createSyncHarness();
+  await flush();
+
+  const announcements = statusReadyMessages(h);
+  assert.equal(announcements.length, 1);
+  assert.equal(announcements[0].targetOrigin, "https://tracefiction.com");
+  assert.equal(typeof announcements[0].data.at, "number");
+});
+
+test("sync forwards status push runtime messages into the page sanitized", async () => {
+  const h = createSyncHarness();
+
+  h.emitRuntimeMessage({
+    type: "TRACE_EXTENSION_STATUS_PUSH",
+    state: {
+      installed: true,
+      connected: true,
+      authState: "connected",
+      firstSaveSeen: false,
+      browserKind: "chrome",
+      capabilities: { firstStoryAdd: true },
+      token: "must not reach the page",
+    },
+    at: "2026-07-11T12:00:00.000Z",
+  });
+  await flush();
+
+  const forwarded = nonTokenRequestMessages(h);
+  assert.equal(forwarded.length, 1);
+  assert.equal(forwarded[0].targetOrigin, "https://tracefiction.com");
+  assert.equal(forwarded[0].data.type, "TRACE_EXTENSION_STATUS_UPDATE");
+  assert.deepEqual(forwarded[0].data.state, {
+    installed: true,
+    connected: true,
+    authState: "connected",
+    firstSaveSeen: false,
+    browserKind: "chrome",
+    capabilities: { firstStoryAdd: true },
+  });
+  assert.equal(typeof forwarded[0].data.at, "number");
+});
+
+test("sync forwards malformed status pushes as a safe disconnected state", async () => {
+  const h = createSyncHarness();
+
+  h.emitRuntimeMessage({
+    type: "TRACE_EXTENSION_STATUS_PUSH",
+    state: "garbage",
+  });
+  await flush();
+
+  const forwarded = nonTokenRequestMessages(h);
+  assert.equal(forwarded.length, 1);
+  assert.deepEqual(forwarded[0].data.state, {
+    installed: true,
+    connected: false,
+    authState: "unknown",
+  });
 });

@@ -59,12 +59,28 @@ Safari:
 3. Build and run the app target.
 4. Enable the Trace extension in Safari Settings -> Extensions. On iOS, use
    Settings -> Apps -> Safari -> Extensions when available, or Settings ->
-   Safari -> Extensions on older versions.
-5. On iOS Safari, allow Trace on tracefiction.com, archiveofourown.org, and
-   fanfiction.net when prompted.
+   Safari -> Extensions on older versions. Turn on **Allow Extension**.
+5. On iOS Safari, under **Permissions**, set **Other Websites** to **Allow**
+   (not Ask or Deny), or set every listed AO3/FFN site to Allow individually.
+   Allow the configured Trace web origin separately only when testing the Safari
+   web token-sync bridge.
 6. After code changes, rebuild/rerun the app target, then disable/enable the
    Safari extension if Safari keeps an old copy.
 7. Reload every AO3/FFN tab under test.
+
+### iOS App Handoff And Receipt
+
+On a clean TestFlight/internal-distribution install, sign in in the Trace app,
+complete both settings above, then test all three paths:
+
+1. Paste a direct AO3 or FFN story URL. Pass: the app reports success only
+   after the matching Safari handoff reaches the story and the save confirms.
+2. Use **Open AO3**, choose a story, then return to the app. Pass: the browse
+   handoff stays neutral until a story opens; it does not treat AO3 home as a
+   successful run.
+3. Change the archive permission to Ask or Deny and retry. Pass: recovery says
+   Trace did not confirm a run, repeats both settings, and offers the aA route;
+   it must not claim a missing heartbeat proves permission was denied.
 
 ### Page Refresh
 
