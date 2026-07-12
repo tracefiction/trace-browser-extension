@@ -1404,6 +1404,22 @@ test("library-overlay known signed-out auth state does not offer fake Hide", asy
   assert.equal(connect.getAttribute("href"), "https://tracefiction.com/");
 });
 
+test("library-overlay does not show a connection notice on story reading pages", async () => {
+  const window = await renderOverlayListing({
+    html: "<!doctype html><html><body><main><h2>Story chapter</h2></main></body></html>",
+    url: "https://archiveofourown.org/works/77783/chapters/123456",
+    authToken: "stale-token",
+    authState: {
+      state: "error",
+      message: "Check the Trace connection and try again.",
+      helpUrl: "https://tracefiction.com/apps",
+    },
+  });
+
+  assert.equal(window.document.querySelector("[data-trace-connect-notice]"), null);
+  assert.equal(window.document.body.textContent.includes("Check Trace connection"), false);
+});
+
 test("library-overlay Add saves in place only after confirmed state", async () => {
   const messages = [];
   const entryId = "00000000-0000-4000-8000-000000077778";

@@ -3307,12 +3307,13 @@
           if (ext.runtime.lastError) return;
           var hasAuth = !!res.authToken;
           currentTraceAuthState = (res && res.traceAuthState) || null;
-          renderConnectNotice(res && res.traceAuthState, hasAuth);
-          if (res && res.prefLibraryInlayEnabled === false) {
+          if (isSingleWorkPage()) {
+            removeConnectNotice();
             clearBadges();
             return;
           }
-          if (isSingleWorkPage()) {
+          renderConnectNotice(res && res.traceAuthState, hasAuth);
+          if (res && res.prefLibraryInlayEnabled === false) {
             clearBadges();
             return;
           }
