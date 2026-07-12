@@ -34,8 +34,11 @@ Installing the iOS app does not automatically enable the Safari extension or gra
    permission gate visible until the reader confirms Website Access is Allow.
 4. Open AO3 or paste a supported story URL in the app. Trace stores a short-lived
    pending direct-story or AO3-browse handoff, opens Safari, and the Safari
-   extension emits an opaque receipt only after it reaches the matching story.
-   The extension then saves/focuses the story on that page.
+   extension refreshes its auth token from the containing app before reading
+   that pending handoff. This makes the app's current Trace account
+   authoritative even if Safari previously held a valid session for another
+   account. The extension emits an opaque receipt only after it reaches the
+   matching story, then saves/focuses the story on that page.
 
 The app can report whether the Safari extension is enabled when the OS API is available, but it cannot read per-site permissions directly. The proof that a content script ran is the extension heartbeat: content scripts ping the background on archive pages, the background forwards run timestamps (and confirmed-save timestamps for track/quick-add) through `SafariWebExtensionHandler` into the shared app group, and the app surfaces them in the `TRACE_IOS_EXTENSION_STATE` payload (`lastArchiveRunAt`, `lastArchiveSaveAt`, `lastRunHandoffId`). The background sends that core receipt before asynchronously recording its `browser.permissions.getAll()` snapshot as `grantedOrigins` / `permissionSnapshotAt`; that snapshot is diagnostic data, not a native query of current Website Access. The iOS native message bridge supplies the Trace token for the app-led flow, so Trace's own web origin is not an initial reader permission requirement.
 

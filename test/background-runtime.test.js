@@ -568,10 +568,14 @@ test("late missing iOS bootstrap does not overwrite a browser token update", asy
   assert.equal(h.store.traceAuthState.state, "connected");
 });
 
-test("TRACE_IOS_PENDING_FIRST_STORY messages proxy native pending state", async () => {
+test("TRACE_IOS_PENDING_FIRST_STORY aligns an existing Safari session to the app account", async () => {
   const h = createBackgroundHarness({
-    storageState: { authToken: "stored-token" },
+    storageState: { authToken: "safari-account-token" },
     sendNativeMessageImpl(message, callback) {
+      if (message.type === "TRACE_IOS_AUTH_TOKEN_REQUEST") {
+        callback({ ok: true, token: "app-account-token" });
+        return;
+      }
       if (message.type === "TRACE_IOS_PENDING_FIRST_STORY_GET") {
         callback({
           ok: true,
@@ -589,9 +593,20 @@ test("TRACE_IOS_PENDING_FIRST_STORY messages proxy native pending state", async 
       }
       callback({ ok: false, error: "unexpected_message" });
     },
-    fetchImpl: async (url) => {
+    fetchImpl: async (url, init) => {
       if (String(url).endsWith("/api/account/me")) {
-        return createResponse({ json: { pro: false, library_count: 0 } });
+        const token = String(init?.headers?.Authorization || "").replace(
+          /^Bearer\s+/,
+          "",
+        );
+        return createResponse({
+          json: {
+            account_id:
+              token === "app-account-token" ? "acct-app" : "acct-safari",
+            pro: false,
+            library_count: 0,
+          },
+        });
       }
       if (String(url).endsWith("/api/extension/library-overlay")) {
         return createResponse({
@@ -618,9 +633,15 @@ test("TRACE_IOS_PENDING_FIRST_STORY messages proxy native pending state", async 
     expiresAt: 1767225600000,
   });
   assert.deepEqual(plainJson(cleared), { ok: true });
+  assert.equal(h.store.authToken, "app-account-token");
+  assert.equal(h.store.traceAccountId, "acct-app");
   assert.deepEqual(
-    h.nativeMessages.slice(-2).map((args) => plainJson(args[0])),
+    h.nativeMessages.slice(-3).map((args) => plainJson(args[0])),
     [
+      {
+        type: "TRACE_IOS_AUTH_TOKEN_REQUEST",
+        reason: "pending_first_story",
+      },
       { type: "TRACE_IOS_PENDING_FIRST_STORY_GET" },
       { type: "TRACE_IOS_PENDING_FIRST_STORY_CLEAR" },
     ],
@@ -629,6 +650,7 @@ test("TRACE_IOS_PENDING_FIRST_STORY messages proxy native pending state", async 
 
 test("TRACE_IOS_PENDING_FIRST_STORY_GET stops before URL handoff when iOS auth bootstrap fails", async () => {
   const h = createBackgroundHarness({
+    storageState: { authToken: "different-valid-account-token" },
     sendNativeMessageImpl(message, callback) {
       if (message.type === "TRACE_IOS_AUTH_TOKEN_REQUEST") {
         callback({ ok: false, error: "missing_token" });

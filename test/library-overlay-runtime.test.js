@@ -747,9 +747,23 @@ test("library-overlay opened surface shows status editing only when entryId exis
   const header = surface.querySelector("[data-trace-management-header]");
   assert.ok(header);
   assert.doesNotMatch(header.textContent || "", /\bTrace\b/i);
+  const openInTrace = surface.querySelector("a");
   assert.equal(
-    surface.querySelector("a").getAttribute("href"),
+    openInTrace.getAttribute("href"),
     "https://tracefiction.com/?panel=details&entryId=00000000-0000-4000-8000-000000012345",
+  );
+  let preventedBeforeBrowserFallback = null;
+  openInTrace.addEventListener("click", (event) => {
+    preventedBeforeBrowserFallback = event.defaultPrevented;
+    event.preventDefault();
+  });
+  openInTrace.dispatchEvent(
+    new withEntryId.MouseEvent("click", { bubbles: true, cancelable: true }),
+  );
+  assert.equal(
+    preventedBeforeBrowserFallback,
+    false,
+    "the anchor must retain normal browser navigation if runtime messaging stalls",
   );
   const choices = surface.querySelector("[data-trace-status-choices]");
   assert.ok(choices);

@@ -3021,9 +3021,27 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
   });
   assert.equal(sheet.getAttribute("data-trace-open"), "1");
   assert.equal(sheet.getAttribute("aria-hidden"), "false");
+  const openInTrace = sheet.querySelector("[data-trace-open-trace]");
   assert.equal(
-    sheet.querySelector("[data-trace-open-trace]").getAttribute("href"),
+    openInTrace.getAttribute("href"),
     "https://tracefiction.com/?panel=details&entryId=00000000-0000-4000-8000-000000703884",
+  );
+  let preventedBeforeBrowserFallback = null;
+  openInTrace.addEventListener("click", (event) => {
+    preventedBeforeBrowserFallback = event.defaultPrevented;
+    event.preventDefault();
+  });
+  openInTrace.dispatchEvent(
+    new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+  );
+  assert.equal(
+    preventedBeforeBrowserFallback,
+    false,
+    "the anchor must retain normal browser navigation if runtime messaging stalls",
+  );
+  assert.equal(
+    sent.some((message) => message.type === "TRACE_OPEN_TRACE_URL"),
+    false,
   );
 });
 

@@ -96,10 +96,11 @@
 
   function bindTraceOpenLink(link) {
     if (!link) return;
-    link.addEventListener("click", function (e) {
-      e.preventDefault();
-      e.stopPropagation();
-      openTraceUrlInBrowserTab(link.href);
+    link.addEventListener("click", function (event) {
+      // Keep AO3/FFN page handlers out of injected UI clicks, but deliberately
+      // preserve the anchor's normal target=_blank navigation. If Safari's
+      // extension worker is suspended, the link must still open Trace.
+      event.stopPropagation();
     });
   }
 

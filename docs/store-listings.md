@@ -1,4 +1,4 @@
-# Extension Store Copy - 0.5.6
+# Extension Store Copy - 0.5.7
 
 Use this copy for Chrome Web Store, Firefox Add-ons, App Store Connect, and
 public release notes. Keep evergreen store descriptions separate from
@@ -44,14 +44,15 @@ FictionPress.
 
 ## What's New / Release Notes
 
-Trace extension 0.5.6 makes first-time setup clearer and more reliable:
+Trace extension 0.5.7 fixes the final first-time setup handoff:
 
-- Keeps Trace connection status accurate across page loads and background-worker
-  restarts.
-- Confirms that a first story reached the library before completing setup.
-- Improves the app-led Safari permission and first-story handoff flow.
-- Reduces Safari website permission prompts to the origins the active build
-  actually uses.
+- Keeps Safari on the same Trace account as the app during an app-led first
+  story save.
+- Prevents an empty library from repeatedly replaying a completed Safari
+  handoff.
+- Keeps onboarding stable while the library refreshes in the background.
+- Makes injected Open in Trace links fall back to normal browser navigation if
+  extension messaging is unavailable.
 
 Privacy boundary unchanged: Trace still reads story metadata and reading
 progress from supported pages, not AO3/FFN credentials, cookies, private
@@ -77,12 +78,11 @@ The extension does not request cookie permissions.
 
 ## App Store Connect - iOS What's New
 
-Trace for iOS 0.5.6 improves Safari extension setup:
+Trace for iOS 0.5.7 fixes the first-story return from Safari:
 
-- Guides readers through enabling the extension and granting website access.
-- Verifies that Safari reached the selected story before reporting success.
-- Waits for a confirmed library save before completing onboarding.
-- Adds clearer recovery when Safari does not run the extension.
+- Uses the Trace account currently signed in to the app for the first save.
+- Prevents repeated loading after a confirmed story save.
+- Keeps Open in Trace responsive if Safari extension messaging is interrupted.
 
 ## Screenshot Preparation
 

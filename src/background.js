@@ -2192,12 +2192,14 @@ async function ensureStoredAuthReady() {
 }
 
 async function handleIosPendingFirstStoryGet(sendResponse) {
-  if (!bearerToken) {
-    const bootstrapped = await bootstrapAuthFromIosNative("pending_first_story");
-    if (!bootstrapped && !bearerToken) {
-      if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
-      return;
-    }
+  // This handoff originates in the containing app, so the app's current
+  // account is authoritative. Safari may already hold a perfectly valid token
+  // for another Trace account; accepting it here would save the first story to
+  // that account while the app refreshes a different, still-empty library.
+  const bootstrapped = await bootstrapAuthFromIosNative("pending_first_story");
+  if (!bootstrapped) {
+    if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
+    return;
   }
   const response = await sendIosNativeMessage({
     type: IOS_PENDING_FIRST_STORY_GET_MESSAGE,
