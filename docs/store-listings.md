@@ -1,4 +1,4 @@
-# Extension Store Copy - 0.5.11
+# Extension Store Copy - 0.5.12
 
 Use this copy for Chrome Web Store, Firefox Add-ons, App Store Connect, and
 public release notes. Keep evergreen store descriptions separate from
@@ -44,15 +44,19 @@ FictionPress.
 
 ## What's New / Release Notes
 
-Trace extension 0.5.11 keeps story-page chapter progress aligned with your
-Trace library when page changes overlap:
+Trace extension 0.5.12 makes story completion and extension startup more
+responsive:
 
-- Prevents a delayed response from an earlier chapter from replacing newer
-  confirmed progress in the story overlay.
-- Keeps cached chapter progress monotonic while overlapping story-page updates
-  settle.
-- Preserves the newer confirmed state across Safari background-worker and page
-  lifecycle handoffs.
+- Shows the Finished confirmation as soon as the server save and local overlay
+  update succeed, without waiting for other open Trace tabs.
+- Restores an existing signed-in session after a Safari background-worker
+  restart before saving story-page controls.
+- Opens the extension popup from cached account state immediately while account
+  details refresh in the background.
+- Keeps a previously verified connection visible during transient account
+  rechecks.
+- Keeps a newer Reading status and chapter position from being replaced by an
+  older Saved receipt after a page reload or Safari restart.
 
 Privacy boundary unchanged: Trace still reads story metadata and reading
 progress from supported pages, not AO3/FFN credentials, cookies, private
@@ -78,11 +82,13 @@ The extension does not request cookie permissions.
 
 ## App Store Connect - iOS What's New
 
-Trace for iOS 0.5.11 fixes stale chapter progress in the Safari story overlay:
+Trace for iOS 0.5.12 makes Safari story completion and extension startup more
+responsive:
 
-- Keeps the story overlay on the newest confirmed chapter when navigation
-  requests finish out of order.
-- Prevents older cached progress from replacing a later successful update.
+- Shows the Finished confirmation promptly after the library save succeeds.
+- Avoids a long Connecting state when reopening a previously verified session.
+- Preserves the latest Reading status in the story overlay across Safari page
+  and background-worker restarts.
 
 ## Screenshot Preparation
 

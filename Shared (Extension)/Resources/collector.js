@@ -527,6 +527,82 @@ function normalizeOverlayEntry(entry, preferenceRaw) {
   });
 }
 
+function storyEntryChapterCurrent(entry) {
+  var current = entry && entry.chapters && entry.chapters.current;
+  return typeof current === "number" && Number.isFinite(current) ? current : null;
+}
+
+function storyEntrySyncTime(value) {
+  var time = Date.parse(typeof value === "string" ? value : "");
+  return Number.isFinite(time) ? time : null;
+}
+
+function storyOverlayTransientPatch(entry) {
+  var patch = {};
+  [
+    "__traceStatusPending",
+    "__traceStatusTarget",
+    "__traceStatusError",
+    "__traceAutoTrackPending",
+    "__traceAutoTrackError",
+  ].forEach(function (key) {
+    if (entry && Object.prototype.hasOwnProperty.call(entry, key)) {
+      patch[key] = entry[key];
+    }
+  });
+  return patch;
+}
+
+function mergeStoryOverlayEntries(cachedEntry, optimisticEntry, cacheSyncVersion) {
+  if (!cachedEntry) return optimisticEntry || {};
+  if (!optimisticEntry) return cachedEntry;
+
+  var cachedCurrent = storyEntryChapterCurrent(cachedEntry);
+  var optimisticCurrent = storyEntryChapterCurrent(optimisticEntry);
+  var optimisticIsFresher = false;
+  if (optimisticCurrent != null && cachedCurrent != null) {
+    if (optimisticCurrent > cachedCurrent) {
+      optimisticIsFresher = true;
+    } else if (optimisticCurrent === cachedCurrent) {
+      var equalChapterCacheTime = storyEntrySyncTime(cacheSyncVersion);
+      var equalChapterOptimisticTime = storyEntrySyncTime(
+        optimisticEntry.__traceSyncVersion,
+      );
+      optimisticIsFresher =
+        equalChapterOptimisticTime != null &&
+        (equalChapterCacheTime == null ||
+          equalChapterOptimisticTime > equalChapterCacheTime);
+    }
+  } else if (optimisticCurrent != null && cachedCurrent == null) {
+    optimisticIsFresher = true;
+  } else if (optimisticCurrent === cachedCurrent) {
+    var cacheTime = storyEntrySyncTime(cacheSyncVersion);
+    var optimisticTime = storyEntrySyncTime(optimisticEntry.__traceSyncVersion);
+    optimisticIsFresher =
+      optimisticTime != null &&
+      (cacheTime == null || optimisticTime > cacheTime);
+  }
+
+  if (optimisticIsFresher) {
+    return Object.assign({}, cachedEntry, optimisticEntry, {
+      chapters: optimisticEntry.chapters || cachedEntry.chapters,
+      entryId: optimisticEntry.entryId || cachedEntry.entryId,
+    });
+  }
+
+  return Object.assign(
+    {},
+    cachedEntry,
+    storyOverlayTransientPatch(optimisticEntry),
+    {
+      entryId: cachedEntry.entryId || optimisticEntry.entryId,
+      statusChoicesAvailable:
+        cachedEntry.statusChoicesAvailable === true ||
+        optimisticEntry.statusChoicesAvailable === true,
+    },
+  );
+}
+
 function autoTrackFingerprint(item) {
   return JSON.stringify({
     src: item && item.src ? item.src : null,
@@ -916,6 +992,8 @@ function applyBackgroundWorkStateForStory(workKey, state) {
     optimisticStoryPageEntries[workKey] = Object.assign({}, entry, {
       entryId: state.entryId || entry.entryId,
       statusChoicesAvailable: !!(state.entryId || entry.entryId),
+      __traceSyncVersion:
+        typeof state.syncVersion === "string" ? state.syncVersion : null,
       __traceAutoTrackPending: false,
       __traceAutoTrackError: null,
     });
@@ -5039,25 +5117,12 @@ function renderQuickAddButton(workKey) {
         info = optimisticEntry;
       } else if (!entry && optimisticEntry) {
         info = optimisticEntry;
-      } else if (
-        info &&
-        optimisticEntry &&
-        optimisticEntry.chapters &&
-        typeof optimisticEntry.chapters.current === "number"
-      ) {
-        var infoCurrent =
-          info.chapters && typeof info.chapters.current === "number"
-            ? info.chapters.current
-            : null;
-        if (infoCurrent == null || optimisticEntry.chapters.current > infoCurrent) {
-          info = optimisticEntry;
-        }
-      }
-      if (info && optimisticEntry && optimisticEntry.statusChoicesAvailable) {
-        info = Object.assign({}, info, optimisticEntry, {
-          chapters: optimisticEntry.chapters || info.chapters,
-          entryId: optimisticEntry.entryId || info.entryId,
-        });
+      } else if (info && optimisticEntry) {
+        info = mergeStoryOverlayEntries(
+          info,
+          optimisticEntry,
+          cache && cache.syncVersion,
+        );
       }
     }
 

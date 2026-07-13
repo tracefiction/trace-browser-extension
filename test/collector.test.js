@@ -3513,6 +3513,69 @@ test("auto-track confirmed state promotes planning only after later chapters", (
   );
 });
 
+test("story overlay keeps authoritative Reading state over a stale Saved work receipt", () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://archiveofourown.org/works/125/chapters/3",
+    runScripts: "outside-only",
+  });
+  const { mergeStoryOverlayEntries } = createCollectorBindings(dom);
+  const merged = mergeStoryOverlayEntries(
+    {
+      status: "READING",
+      readerStatus: "READING",
+      canonicalReaderStatus: "READING",
+      entryId: "00000000-0000-4000-8000-000000000125",
+      chapters: { current: 3, total: 10 },
+    },
+    {
+      status: "PLANNING",
+      readerStatus: "PLANNING",
+      canonicalReaderStatus: "SAVED",
+      entryId: "00000000-0000-4000-8000-000000000125",
+      chapters: { current: 1, total: 10 },
+      statusChoicesAvailable: true,
+      __traceStatusPending: true,
+      __traceSyncVersion: "2026-07-14T07:00:00.000Z",
+    },
+    "2026-07-14T07:02:00.000Z",
+  );
+
+  assert.equal(merged.canonicalReaderStatus, "READING");
+  assert.equal(merged.status, "READING");
+  assert.deepEqual(plainJson(merged.chapters), { current: 3, total: 10 });
+  assert.equal(merged.statusChoicesAvailable, true);
+  assert.equal(merged.__traceStatusPending, true);
+  dom.window.close();
+});
+
+test("story overlay accepts a genuinely newer work receipt", () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://archiveofourown.org/works/126/chapters/3",
+    runScripts: "outside-only",
+  });
+  const { mergeStoryOverlayEntries } = createCollectorBindings(dom);
+  const merged = mergeStoryOverlayEntries(
+    {
+      status: "PLANNING",
+      readerStatus: "PLANNING",
+      canonicalReaderStatus: "SAVED",
+      chapters: { current: 1, total: 10 },
+    },
+    {
+      status: "READING",
+      readerStatus: "READING",
+      canonicalReaderStatus: "READING",
+      chapters: { current: 2, total: 10 },
+      __traceSyncVersion: "2026-07-14T07:03:00.000Z",
+    },
+    "2026-07-14T07:02:00.000Z",
+  );
+
+  assert.equal(merged.canonicalReaderStatus, "READING");
+  assert.deepEqual(plainJson(merged.chapters), { current: 2, total: 10 });
+  dom.window.close();
+});
+
 test("collectFFNStoryMobile (ffn_story_mobile.html)", () => {
   const dom = domFromFixture(
     "ffn_story_mobile.html",

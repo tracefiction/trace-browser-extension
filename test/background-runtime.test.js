@@ -87,6 +87,7 @@ function createBackgroundHarness({
   const fetchCalls = [];
   const timers = [];
   const storageChangeListeners = [];
+  const storageSetCalls = [];
   let onMessageListener = null;
   let onInstalledListener = null;
   let onAlarmListener = null;
@@ -112,6 +113,7 @@ function createBackgroundHarness({
       callback?.(out);
     },
     set(obj, callback) {
+      storageSetCalls.push(plainJson(obj || {}));
       Object.assign(store, obj || {});
       callback?.();
     },
@@ -276,7 +278,8 @@ globalThis.__testHooks = {
   setBearerToken(value) { bearerToken = value; },
   setVerifiedBearerToken(value) { verifiedBearerToken = value; },
   getVerifiedBearerToken() { return verifiedBearerToken; },
-  getBearerToken() { return bearerToken; }
+  getBearerToken() { return bearerToken; },
+  getWorkStateForKey,
 };
 `;
 
@@ -292,6 +295,7 @@ globalThis.__testHooks = {
     updatedTabs,
     nativeMessages,
     fetchCalls,
+    storageSetCalls,
     timers,
     get hooks() {
       return context.__testHooks;
@@ -1393,6 +1397,8 @@ test("TRACE_POPUP_GET_STATE includes local activation and active tab context", a
       authToken: "token-popup",
       traceAuthState: connected,
       traceFirstSaveSeen: false,
+      traceUserPro: false,
+      traceLibraryCount: 0,
       prefAo3SavedFiltersEnabled: false,
     },
     activeTabs: [
@@ -1409,7 +1415,7 @@ test("TRACE_POPUP_GET_STATE includes local activation and active tab context", a
 
   const response = await h.dispatchMessage({ type: "TRACE_POPUP_GET_STATE" });
 
-  assert.equal(response.pro, true);
+  assert.equal(response.pro, false);
   assert.equal(response.firstSaveSeen, false);
   assert.equal(response.libraryCount, 0);
   assert.deepEqual(plainJson(response.activeTab), {
@@ -1421,6 +1427,73 @@ test("TRACE_POPUP_GET_STATE includes local activation and active tab context", a
   assert.equal(response.libraryInlayEnabled, true);
   assert.equal(response.ao3SavedFiltersEnabled, false);
   assert.equal(response.metadataImproveEnabled, true);
+  await flush();
+  assert.equal(h.store.traceUserPro, true);
+});
+
+test("TRACE_POPUP_GET_STATE returns cached state while deduplicating a slow account refresh", async () => {
+  const accountResponse = createDeferred();
+  const h = createBackgroundHarness({
+    storageState: {
+      traceAuthState: { state: "connected", message: "Connected" },
+      traceUserPro: false,
+      traceLibraryCount: 12,
+    },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) return accountResponse.promise;
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.store.authToken = "token-popup-cached";
+  h.hooks.setBearerToken("token-popup-cached");
+
+  const first = await h.dispatchMessage({ type: "TRACE_POPUP_GET_STATE" });
+  const second = await h.dispatchMessage({ type: "TRACE_POPUP_GET_STATE" });
+
+  assert.equal(first.pro, false);
+  assert.equal(first.libraryCount, 12);
+  assert.equal(second.pro, false);
+  assert.equal(
+    h.fetchCalls.filter((call) => String(call.url).endsWith("/api/account/me")).length,
+    1,
+  );
+
+  accountResponse.resolve(createResponse({ json: { pro: true, library_count: 13 } }));
+  await flush();
+  await flush();
+  assert.equal(h.store.traceUserPro, true);
+  assert.equal(h.store.traceLibraryCount, 13);
+});
+
+test("cold auth recheck preserves a previously verified connected state", async () => {
+  const accountResponse = createDeferred();
+  const verifiedAt = "2026-07-13T12:00:00.000Z";
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-popup-verified",
+      traceAuthState: {
+        state: "connected",
+        message: "Connected",
+        authVerificationVersion: 1,
+        accountVerifiedAt: verifiedAt,
+      },
+    },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) return accountResponse.promise;
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+
+  await flush();
+  assert.equal(h.store.traceAuthState.state, "connected");
+  assert.equal(h.store.traceAuthState.accountVerifiedAt, verifiedAt);
+  assert.equal(h.hooks.getVerifiedBearerToken(), null);
+
+  accountResponse.resolve(createResponse({ json: { pro: true } }));
+  await flush();
+  await flush();
+  assert.equal(h.store.traceAuthState.state, "connected");
+  assert.equal(h.hooks.getVerifiedBearerToken(), "token-popup-verified");
 });
 
 test("TRACE_EXTENSION_STATUS_QUERY returns connected state without private fields", async () => {
@@ -2708,6 +2781,46 @@ test("TRACE_WORK_STATE_GET converts an abandoned pending save into a retryable e
   assert.equal(response.state.error, "request_interrupted");
 });
 
+test("settled work-state reads do not rewrite storage snapshots", async () => {
+  const now = Date.now();
+  const h = createBackgroundHarness({
+    storageState: {
+      traceAccountId: "acct-read-only",
+      traceWorkStatesV1: {
+        version: 1,
+        accountId: "acct-read-only",
+        updatedAt: new Date(now - 1_000).toISOString(),
+        items: {
+          "acct-read-only|ao3:705": {
+            accountId: "acct-read-only",
+            workKey: "ao3:705",
+            operation: "auto_track",
+            status: "saved",
+            entry: {
+              canonicalReaderStatus: "SAVED",
+              chapters: { current: 1, total: 10 },
+            },
+            updatedAt: new Date(now - 1_000).toISOString(),
+            expiresAt: now + 60_000,
+          },
+        },
+      },
+    },
+  });
+  await flush();
+  h.storageSetCalls.length = 0;
+
+  const state = await h.hooks.getWorkStateForKey("ao3:705");
+
+  assert.equal(state.status, "saved");
+  assert.equal(
+    h.storageSetCalls.some((patch) =>
+      Object.prototype.hasOwnProperty.call(patch, "traceWorkStatesV1"),
+    ),
+    false,
+  );
+});
+
 test("iOS native messaging returns after a bounded wait when Safari never calls back", async () => {
   const h = createBackgroundHarness({
     storageState: { authToken: "token-native-timeout" },
@@ -3302,6 +3415,115 @@ test("TRACE_PATCH_LIBRARY_ENTRY patches rating and updates overlay cache", async
   assert.equal(h.store.libraryOverlayCache.entries["ao3:777"].rating, 4);
   assert.equal(h.store.traceAuthState.state, "connected");
   assert.equal(h.store.traceFirstSaveSeen, true);
+});
+
+test("TRACE_PATCH_LIBRARY_ENTRY acknowledges before a slow Trace-tab invalidation", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000776";
+  const tabNotification = createDeferred();
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-patch-notify",
+      libraryOverlayCache: {
+        entries: {
+          "ao3:776": {
+            entryId,
+            status: "READING",
+            chapters: { current: 7, total: 8 },
+          },
+        },
+      },
+    },
+    activeTabs: [{ id: 45, url: "https://tracefiction.com/library" }],
+    sendMessageImpl: async () => tabNotification.promise,
+    fetchImpl: async (url) => {
+      if (String(url).endsWith(`/api/library/${entryId}`)) {
+        return createResponse({ json: { data: { entry_id: entryId } } });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.hooks.setBearerToken("token-patch-notify");
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_PATCH_LIBRARY_ENTRY",
+    payload: {
+      entryId,
+      patch: {
+        status: "FINISHED",
+        progress: { unit: "CHAPTER", value: 8, total: 8 },
+      },
+    },
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(h.store.libraryOverlayCache.entries["ao3:776"].canonicalReaderStatus, "FINISHED");
+  tabNotification.resolve({ ok: true });
+  await flush();
+});
+
+test("TRACE_PATCH_LIBRARY_ENTRY hydrates a stored token after a worker restart", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000775";
+  const accountResponse = createDeferred();
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-patch-hydrated",
+      libraryOverlayCache: {
+        entries: {
+          "ao3:775": {
+            entryId,
+            status: "READING",
+            chapters: { current: 4, total: 5 },
+          },
+        },
+      },
+    },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/api/account/me")) return accountResponse.promise;
+      assert.equal(init.headers.Authorization, "Bearer token-patch-hydrated");
+      return createResponse({ json: { data: { entry_id: entryId } } });
+    },
+  });
+  h.hooks.setBearerToken(null);
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_PATCH_LIBRARY_ENTRY",
+    payload: { entryId, patch: { rating: 5 } },
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(h.hooks.getBearerToken(), "token-patch-hydrated");
+  assert.equal(h.store.libraryOverlayCache.entries["ao3:775"].rating, 5);
+  accountResponse.resolve(createResponse({ json: { pro: false } }));
+  await flush();
+});
+
+test("TRACE_PATCH_LIBRARY_ENTRY rejects an expired hydrated token", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000774";
+  const accountResponse = createDeferred();
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-patch-expired" },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) return accountResponse.promise;
+      return createResponse({
+        ok: false,
+        status: 401,
+        json: { code: "INVALID_TOKEN" },
+      });
+    },
+  });
+  h.hooks.setBearerToken(null);
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_PATCH_LIBRARY_ENTRY",
+    payload: { entryId, patch: { rating: 5 } },
+  });
+
+  assert.deepEqual(plainJson(response), { ok: false, error: "auth_expired" });
+  assert.equal(h.hooks.getBearerToken(), null);
+  assert.equal(h.store.authToken, undefined);
+  assert.equal(h.store.traceAuthState.state, "reconnect_required");
+  accountResponse.resolve(createResponse({ ok: false, status: 401 }));
+  await flush();
 });
 
 test("TRACE_PATCH_LIBRARY_ENTRY patches catch-up progress and clears new chapter state", async () => {

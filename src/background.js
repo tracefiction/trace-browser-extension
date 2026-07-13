@@ -97,6 +97,8 @@ let ao3SavedFiltersSyncTimer = null;
 let ao3SavedFiltersSyncInFlight = false;
 let authVerificationRetryTimer = null;
 let initialAuthPromise = null;
+let traceUserProRefreshPromise = null;
+let workStateAccessQueue = Promise.resolve();
 
 class TraceRequestTimeoutError extends Error {
   constructor() {
@@ -359,11 +361,25 @@ function scheduleAuthVerificationRetry(token, extra = {}) {
 }
 
 function accountVerificationRetryingState(lastTokenSyncAt, extra = {}) {
+  const preserveVerifiedConnection = extra.preserveVerifiedConnection === true;
+  const stateExtra = { ...extra };
+  delete stateExtra.preserveVerifiedConnection;
+  if (preserveVerifiedConnection) {
+    setConnectedWithSyncWarning(
+      "Rechecking your Trace account connection in the background.",
+      {
+        lastTokenSyncAt,
+        lastAccountCheckRetryAt: new Date().toISOString(),
+        ...stateExtra,
+      },
+    );
+    return;
+  }
   setCheckingState({
     message: "Checking your Trace account connection. Retrying shortly.",
     lastTokenSyncAt,
     lastAccountCheckRetryAt: new Date().toISOString(),
-    ...extra,
+    ...stateExtra,
   });
 }
 
@@ -384,6 +400,9 @@ function clearToken() {
       TRACE_FIRST_SAVE_SEEN_KEY,
       TRACE_LIBRARY_COUNT_KEY,
     ]);
+    // A work-state mutation that was already queued must not restore data
+    // after logout clears the account-scoped cache.
+    void clearWorkStates();
   } catch (_) {
     /* ignore */
   }
@@ -1044,87 +1063,106 @@ async function writeWorkStates(states) {
 }
 
 async function clearWorkStates() {
-  try {
-    ext.storage.local.remove(WORK_STATE_STORAGE_KEY);
-  } catch (_) {
-    /* ignore */
-  }
+  return withWorkStateAccess(async () => {
+    try {
+      await new Promise((resolve) => {
+        ext.storage.local.remove(WORK_STATE_STORAGE_KEY, resolve);
+      });
+    } catch (_) {
+      /* ignore */
+    }
+  });
+}
+
+function withWorkStateAccess(action) {
+  const run = workStateAccessQueue.then(action, action);
+  workStateAccessQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
 }
 
 async function setWorkState(workKey, patch) {
   if (!workKey) return null;
-  const snapshot = await readWorkStateSnapshot();
-  const accountId = snapshot.accountId;
-  const key = workStateStorageKey(accountId, workKey);
-  const previous = snapshot.states.items[key] || {};
-  const startsNewOperation =
-    patch.status === "pending" &&
-    typeof patch.operationId === "string" &&
-    patch.operationId.length > 0;
-  if (
-    !startsNewOperation &&
-    patch.operationId &&
-    previous.operationId &&
-    patch.operationId !== previous.operationId
-  ) {
-    return publicWorkState(previous);
-  }
-  if (
-    previous.status === "saved" &&
-    patch.status !== "saved" &&
-    !startsNewOperation
-  ) {
-    return publicWorkState(previous);
-  }
-  const effectivePatch =
-    previous.status === "saved" && startsNewOperation
-      ? { ...patch, status: "saved" }
-      : patch;
-  const now = Date.now();
-  const status = effectivePatch.status || previous.status || "pending";
-  const ttl =
-    status === "pending" ? WORK_STATE_PENDING_TTL_MS : WORK_STATE_SETTLED_TTL_MS;
-  const next = {
-    ...previous,
-    ...effectivePatch,
-    accountId,
-    workKey,
-    status,
-    startedAt:
-      previous.startedAt || effectivePatch.startedAt || new Date(now).toISOString(),
-    updatedAt: new Date(now).toISOString(),
-    expiresAt: now + ttl,
-  };
-  snapshot.states.accountId = accountId;
-  snapshot.states.items[key] = next;
-  await writeWorkStates(snapshot.states);
-  return publicWorkState(next);
+  return withWorkStateAccess(async () => {
+    const snapshot = await readWorkStateSnapshot();
+    const accountId = snapshot.accountId;
+    const key = workStateStorageKey(accountId, workKey);
+    const previous = snapshot.states.items[key] || {};
+    const startsNewOperation =
+      patch.status === "pending" &&
+      typeof patch.operationId === "string" &&
+      patch.operationId.length > 0;
+    if (
+      !startsNewOperation &&
+      patch.operationId &&
+      previous.operationId &&
+      patch.operationId !== previous.operationId
+    ) {
+      return publicWorkState(previous);
+    }
+    if (
+      previous.status === "saved" &&
+      patch.status !== "saved" &&
+      !startsNewOperation
+    ) {
+      return publicWorkState(previous);
+    }
+    const effectivePatch =
+      previous.status === "saved" && startsNewOperation
+        ? { ...patch, status: "saved" }
+        : patch;
+    const now = Date.now();
+    const status = effectivePatch.status || previous.status || "pending";
+    const ttl =
+      status === "pending" ? WORK_STATE_PENDING_TTL_MS : WORK_STATE_SETTLED_TTL_MS;
+    const next = {
+      ...previous,
+      ...effectivePatch,
+      accountId,
+      workKey,
+      status,
+      startedAt:
+        previous.startedAt || effectivePatch.startedAt || new Date(now).toISOString(),
+      updatedAt: new Date(now).toISOString(),
+      expiresAt: now + ttl,
+    };
+    snapshot.states.accountId = accountId;
+    snapshot.states.items[key] = next;
+    await writeWorkStates(snapshot.states);
+    return publicWorkState(next);
+  });
 }
 
 async function getWorkStateForKey(workKey) {
   if (!workKey) return null;
-  const snapshot = await readWorkStateSnapshot();
-  const key = workStateStorageKey(snapshot.accountId, workKey);
-  let existing = snapshot.states.items[key] || null;
-  if (existing?.status === "pending") {
-    const pendingAt =
-      toEpochMillis(existing.updatedAt) ?? toEpochMillis(existing.startedAt);
-    if (
-      pendingAt != null &&
-      snapshot.now - pendingAt >= WORK_STATE_INTERRUPTED_AFTER_MS
-    ) {
-      existing = {
-        ...existing,
-        status: "error",
-        error: "request_interrupted",
-        updatedAt: new Date(snapshot.now).toISOString(),
-        expiresAt: snapshot.now + WORK_STATE_SETTLED_TTL_MS,
-      };
-      snapshot.states.items[key] = existing;
+  return withWorkStateAccess(async () => {
+    const snapshot = await readWorkStateSnapshot();
+    const key = workStateStorageKey(snapshot.accountId, workKey);
+    let existing = snapshot.states.items[key] || null;
+    let changed = false;
+    if (existing?.status === "pending") {
+      const pendingAt =
+        toEpochMillis(existing.updatedAt) ?? toEpochMillis(existing.startedAt);
+      if (
+        pendingAt != null &&
+        snapshot.now - pendingAt >= WORK_STATE_INTERRUPTED_AFTER_MS
+      ) {
+        existing = {
+          ...existing,
+          status: "error",
+          error: "request_interrupted",
+          updatedAt: new Date(snapshot.now).toISOString(),
+          expiresAt: snapshot.now + WORK_STATE_SETTLED_TTL_MS,
+        };
+        snapshot.states.items[key] = existing;
+        changed = true;
+      }
     }
-  }
-  await writeWorkStates(snapshot.states);
-  return publicWorkState(existing);
+    if (changed) await writeWorkStates(snapshot.states);
+    return publicWorkState(existing);
+  });
 }
 
 async function markWorkPending(workKey, operation) {
@@ -1174,27 +1212,29 @@ async function markWorkError(workKey, operation, error, operationId = null) {
 
 async function reconcilePendingWorkStatesWithOverlay(entries, syncVersion) {
   if (!entries || typeof entries !== "object") return;
-  const snapshot = await readWorkStateSnapshot();
-  let changed = false;
-  for (const [key, state] of Object.entries(snapshot.states.items)) {
-    if (!state || state.status !== "pending") continue;
-    const entry = entries[state.workKey];
-    if (!entry || typeof entry !== "object") continue;
-    const now = Date.now();
-    snapshot.states.items[key] = {
-      ...state,
-      status: "saved",
-      error: null,
-      entry,
-      entryId:
-        typeof entry.entryId === "string" ? entry.entryId : state.entryId || null,
-      syncVersion: typeof syncVersion === "string" ? syncVersion : null,
-      updatedAt: new Date(now).toISOString(),
-      expiresAt: now + WORK_STATE_SETTLED_TTL_MS,
-    };
-    changed = true;
-  }
-  if (changed) await writeWorkStates(snapshot.states);
+  return withWorkStateAccess(async () => {
+    const snapshot = await readWorkStateSnapshot();
+    let changed = false;
+    for (const [key, state] of Object.entries(snapshot.states.items)) {
+      if (!state || state.status !== "pending") continue;
+      const entry = entries[state.workKey];
+      if (!entry || typeof entry !== "object") continue;
+      const now = Date.now();
+      snapshot.states.items[key] = {
+        ...state,
+        status: "saved",
+        error: null,
+        entry,
+        entryId:
+          typeof entry.entryId === "string" ? entry.entryId : state.entryId || null,
+        syncVersion: typeof syncVersion === "string" ? syncVersion : null,
+        updatedAt: new Date(now).toISOString(),
+        expiresAt: now + WORK_STATE_SETTLED_TTL_MS,
+      };
+      changed = true;
+    }
+    if (changed) await writeWorkStates(snapshot.states);
+  });
 }
 
 function nonRegressingOverlayEntry(existing, incoming) {
@@ -1524,13 +1564,17 @@ async function runTraceAccountTokenVerification(token, extra = {}) {
   bearerToken = trimmed;
   verifiedBearerToken = null;
   ext.storage.local.set({ [AUTH_TOKEN_KEY]: trimmed });
-  setCheckingState({ lastTokenSyncAt });
+  const preserveVerifiedConnectionHint =
+    extra.preserveVerifiedConnection === true;
+  if (!preserveVerifiedConnectionHint) {
+    setCheckingState({ lastTokenSyncAt });
+  }
   const previousSnapshot = await storageGetLocal([AUTH_TOKEN_KEY, AUTH_STATE_KEY]);
   if (verificationSeq !== authVerificationSeq || bearerToken !== trimmed) {
     return { success: false, state: "unknown", stale: true };
   }
   const preserveVerifiedConnection =
-    extra.preserveVerifiedConnection === true ||
+    preserveVerifiedConnectionHint ||
     hasPersistedVerifiedConnection(previousSnapshot, trimmed);
 
   try {
@@ -1608,6 +1652,7 @@ async function runTraceAccountTokenVerification(token, extra = {}) {
     if (retryScheduled) {
       accountVerificationRetryingState(lastTokenSyncAt, {
         lastHttpStatus: response.status,
+        preserveVerifiedConnection,
       });
       return {
         success: false,
@@ -1639,7 +1684,9 @@ async function runTraceAccountTokenVerification(token, extra = {}) {
       preserveVerifiedConnection,
     });
     if (retryScheduled) {
-      accountVerificationRetryingState(lastTokenSyncAt);
+      accountVerificationRetryingState(lastTokenSyncAt, {
+        preserveVerifiedConnection,
+      });
       return {
         success: false,
         state: "unknown",
@@ -1680,29 +1727,46 @@ function refreshTraceUserPro() {
 }
 
 function fetchTraceUserProPromise() {
-  return new Promise((resolve) => {
-    if (!bearerToken) {
-      resolve();
-      return;
-    }
-    fetchWithTimeout(ACCOUNT_ME_ENDPOINT, {
-      headers: { Authorization: `Bearer ${bearerToken}` },
+  if (!bearerToken) return Promise.resolve();
+  if (pendingAuthVerification) {
+    return pendingAuthVerification.then(() => {}, () => {});
+  }
+  if (traceUserProRefreshPromise) return traceUserProRefreshPromise;
+
+  const token = bearerToken;
+  const refresh = fetchWithTimeout(ACCOUNT_ME_ENDPOINT, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+    .then(async (r) => {
+      if (r.ok) return readResponseJson(r);
+      await applyAuthFailureResponse(r);
+      return null;
     })
-      .then(async (r) => {
-        if (r.ok) return readResponseJson(r);
-        await applyAuthFailureResponse(r);
-        return null;
-      })
-      .then((j) => {
-        const patch = accountStoragePatch(j);
-        if (Object.keys(patch).length > 0) {
-          ext.storage.local.set(patch, () => resolve());
-        } else {
-          resolve();
-        }
-      })
-      .catch(() => resolve());
-  });
+    .then((j) => {
+      const patch = accountStoragePatch(j);
+      if (Object.keys(patch).length === 0) return;
+      return new Promise((resolve) => ext.storage.local.set(patch, resolve));
+    })
+    .catch(() => {})
+    .finally(() => {
+      if (traceUserProRefreshPromise === refresh) {
+        traceUserProRefreshPromise = null;
+      }
+    });
+  traceUserProRefreshPromise = refresh;
+  return refresh;
+}
+
+async function hydrateStoredBearerToken() {
+  if (bearerToken) return true;
+  const snapshot = await storageGetLocal([AUTH_TOKEN_KEY]);
+  const storedToken =
+    typeof snapshot[AUTH_TOKEN_KEY] === "string"
+      ? snapshot[AUTH_TOKEN_KEY].trim()
+      : "";
+  if (!storedToken) return false;
+  bearerToken = storedToken;
+  return true;
 }
 
 function storageGetLocal(keys) {
@@ -2506,6 +2570,7 @@ async function bootstrapInitialAuth(res) {
       : null;
   const result = await verifyTraceAccountToken(storedToken, {
     lastTokenSyncAt: storedState?.lastTokenSyncAt || new Date().toISOString(),
+    preserveVerifiedConnection: hasPersistedVerifiedConnection(res, storedToken),
   });
 
   if (result?.success) return;
@@ -2935,7 +3000,7 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // -------------------------------------------------
   if (msg.type === "TRACE_POPUP_GET_STATE") {
     (async () => {
-      await fetchTraceUserProPromise();
+      void fetchTraceUserProPromise();
       ext.storage.local.get(
         [
           AUTH_STATE_KEY,
@@ -2998,9 +3063,11 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (token) {
         bearerToken = token;
         if (prev?.state === "error" || prev?.state === "unknown") {
-          await verifyTraceAccountToken(token);
+          void verifyTraceAccountToken(token, {
+            preserveVerifiedConnection: hasPersistedVerifiedConnection(res, token),
+          });
         } else {
-          await fetchTraceUserProPromise();
+          void fetchTraceUserProPromise();
         }
         scheduleAo3SavedFiltersSync(500);
       }
@@ -4116,7 +4183,7 @@ function patchOverlayLibraryEntry(entryId, patch) {
 }
 
 async function handlePatchLibraryEntry(payload, sender, sendResponse) {
-  if (!bearerToken) {
+  if (!bearerToken && !(await hydrateStoredBearerToken())) {
     if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
     return;
   }
@@ -4143,12 +4210,12 @@ async function handlePatchLibraryEntry(payload, sender, sendResponse) {
       setBadge(sender?.tab?.id, "OK", "#0D7A5F");
       setTimeout(() => clearBadge(sender?.tab?.id), 2000);
       const workKey = await patchOverlayLibraryEntry(entryId, patch);
-      await signalLibraryInvalidated("library_entry_patch");
-      setConnectedState({
+      setAuthenticatedActionConnectedState({
         firstSaveSeen: true,
         lastLibraryEntryPatchAt: new Date().toISOString(),
       });
       if (sendResponse) sendResponse({ ok: true, entryId, patch, workKey });
+      void signalLibraryInvalidated("library_entry_patch");
     } else {
       const authError = await applyAuthFailureResponse(response, {
         actionAtKey: "lastLibraryEntryPatchAt",
