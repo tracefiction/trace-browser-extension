@@ -1172,6 +1172,13 @@ function createStoryAutoTrackPendingHarness(options = {}) {
         }
         if (msg.type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR") {
           if (typeof cb === "function") cb({ ok: true });
+          return;
+        }
+        if (msg.type === "TRACE_IOS_AUTH_REFRESH_REQUEST") {
+          Object.assign(store, options.authRefreshStorePatch || {});
+          if (typeof cb === "function") {
+            cb(options.authRefreshResponse || { ok: false });
+          }
         }
       },
       lastError: null,
@@ -1577,7 +1584,7 @@ test("story page auto-track success updates the pending handle to Reading progre
 test("story page auto-track failure uses existing compact error states", () => {
   const cases = [
     { response: { ok: false, error: "free_limit_reached" }, expected: /Full/i, disabled: true },
-    { response: { ok: false, error: "auth_expired" }, expected: /Sign in/i, disabled: true },
+    { response: { ok: false, error: "auth_expired" }, expected: /Reconnect/i, disabled: false },
     { response: { ok: false, error: "http_503" }, expected: /ERROR/i, disabled: false },
   ];
 
@@ -1592,7 +1599,38 @@ test("story page auto-track failure uses existing compact error states", () => {
 
     assert.match(handle.textContent || "", item.expected);
     assert.equal(handle.disabled, item.disabled);
+    if (item.response.error === "auth_expired") {
+      handle.click();
+      const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+      assert.equal(sheet.getAttribute("data-trace-open"), "1");
+    }
   }
+});
+
+test("story page reconnect state asks Safari to refresh native auth on resume", () => {
+  const { dom, sent } = createStoryAutoTrackPendingHarness({
+    store: {
+      authToken: undefined,
+      traceAuthState: { state: "reconnect_required" },
+      prefAutoTrackEnabled: false,
+    },
+    authRefreshResponse: { ok: true },
+    authRefreshStorePatch: {
+      authToken: "refreshed-token",
+      traceAuthState: { state: "connected" },
+    },
+  });
+
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.match(handle.textContent || "", /Reconnect/i);
+
+  dom.window.dispatchEvent(new dom.window.Event("focus"));
+
+  assert.equal(
+    sent.filter((msg) => msg.type === "TRACE_IOS_AUTH_REFRESH_REQUEST").length,
+    1,
+  );
+  assert.match(handle.textContent || "", /Add to Trace/i);
 });
 
 test("first-story focus-add retries explicit quick-add after retryable auto-track failure", async () => {
@@ -3204,7 +3242,7 @@ test("FFN mobile story sheet quick-add preserves free-limit and error states", (
   const responses = [
     { response: { ok: false, error: "free_limit_reached" }, text: /Full/i },
     { response: { ok: false, error: "http_500" }, text: /ERROR/i },
-    { response: { ok: false, error: "auth_expired" }, text: /Sign in/i },
+    { response: { ok: false, error: "auth_expired" }, text: /Reconnect/i },
   ];
 
   for (const item of responses) {

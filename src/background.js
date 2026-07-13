@@ -55,6 +55,7 @@ const AUTH_STATE_VERIFICATION_VERSION = 1;
 const FIRST_STORY_ADD_MESSAGE = "TRACE_FIRST_STORY_ADD";
 const FIRST_STORY_FOCUS_ADD_MESSAGE = "TRACE_FIRST_STORY_FOCUS_ADD";
 const IOS_AUTH_TOKEN_REQUEST_MESSAGE = "TRACE_IOS_AUTH_TOKEN_REQUEST";
+const IOS_AUTH_REFRESH_REQUEST_MESSAGE = "TRACE_IOS_AUTH_REFRESH_REQUEST";
 const IOS_PENDING_FIRST_STORY_GET_MESSAGE = "TRACE_IOS_PENDING_FIRST_STORY_GET";
 const IOS_PENDING_FIRST_STORY_CLEAR_MESSAGE = "TRACE_IOS_PENDING_FIRST_STORY_CLEAR";
 const IOS_EXTENSION_HEARTBEAT_MESSAGE = "TRACE_IOS_EXTENSION_HEARTBEAT";
@@ -1202,7 +1203,7 @@ async function applyAuthFailureResponse(response, extra = {}) {
   }
 
   setReconnectState(
-    "Your Trace session expired. Open Trace and sign in again.",
+    "Your Trace connection needs a refresh. Open Trace, then return here.",
     authFailureExtra({ ...extra, status: response.status, code }),
   );
   return "auth_expired";
@@ -2457,6 +2458,35 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
     if (sendResponse) sendResponse({ ok: true });
     return false;
+  }
+
+  // -------------------------------------------------
+  // A0.1. Safari tab resumed after the user opened Trace.
+  // Re-read the shared iOS Keychain token and verify it before the content
+  // script removes its reconnect state. Other browsers never reach native
+  // messaging, and only supported top-frame archive senders are accepted.
+  // -------------------------------------------------
+  if (msg.type === IOS_AUTH_REFRESH_REQUEST_MESSAGE) {
+    const hostKind = shouldIgnoreSenderForAutoTrack(sender)
+      ? null
+      : archiveHostKindFromSenderUrl(sender?.tab?.url || sender?.url);
+    if (detectBrowserKind() !== "safari" || !hostKind) {
+      if (sendResponse) {
+        sendResponse({ ok: false, error: "unsupported_sender" });
+      }
+      return false;
+    }
+
+    void bootstrapAuthFromIosNative("archive_resume").then((bootstrapped) => {
+      if (sendResponse) {
+        sendResponse(
+          bootstrapped
+            ? { ok: true }
+            : { ok: false, error: "native_auth_unavailable" },
+        );
+      }
+    });
+    return true;
   }
 
   // -------------------------------------------------

@@ -1,4 +1,4 @@
-# Extension Store Copy - 0.5.8
+# Extension Store Copy - 0.5.9
 
 Use this copy for Chrome Web Store, Firefox Add-ons, App Store Connect, and
 public release notes. Keep evergreen store descriptions separate from
@@ -44,14 +44,14 @@ FictionPress.
 
 ## What's New / Release Notes
 
-Trace extension 0.5.8 keeps connection warnings out of the way while reading:
+Trace extension 0.5.9 makes Safari connection recovery reliable and actionable:
 
-- Stops the listing-level connection warning from appearing over AO3 and
-  FanFiction.net story chapters.
-- Keeps connection guidance available on listing pages where Trace actions
-  require it.
-- Preserves the compact story-page Trace controls for saving and connection
-  recovery.
+- Keeps Safari's extension token aligned with silent session refreshes from the
+  Trace iOS app.
+- Refreshes the Safari connection after returning from Trace without requiring
+  another sign-in while the app session is still valid.
+- Replaces the disabled story-page Sign in status with an actionable Reconnect
+  control that opens the existing recovery sheet.
 
 Privacy boundary unchanged: Trace still reads story metadata and reading
 progress from supported pages, not AO3/FFN credentials, cookies, private
@@ -77,12 +77,13 @@ The extension does not request cookie permissions.
 
 ## App Store Connect - iOS What's New
 
-Trace for iOS 0.5.8 keeps Safari reading pages clear:
+Trace for iOS 0.5.9 keeps Safari connected during longer reading sessions:
 
-- Stops the large Trace connection warning from appearing over AO3 and
-  FanFiction.net story chapters.
-- Keeps connection recovery in the compact Trace story controls and on listing
-  pages where it is relevant.
+- Shares silently refreshed Trace access with the Safari extension when the app
+  opens or resumes.
+- Restores the Safari connection after returning from Trace when the app session
+  is still valid.
+- Makes the compact Reconnect status tappable when recovery is needed.
 
 ## Screenshot Preparation
 

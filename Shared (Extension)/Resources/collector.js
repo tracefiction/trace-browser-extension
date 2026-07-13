@@ -7,6 +7,7 @@ const PRIVATE_TAG_DISPLAY_LIMIT = 3;
 const TRACE_FIRST_STORY_FOCUS_ADD_MESSAGE = "TRACE_FIRST_STORY_FOCUS_ADD";
 const TRACE_IOS_PENDING_FIRST_STORY_GET_MESSAGE = "TRACE_IOS_PENDING_FIRST_STORY_GET";
 const TRACE_IOS_PENDING_FIRST_STORY_CLEAR_MESSAGE = "TRACE_IOS_PENDING_FIRST_STORY_CLEAR";
+const TRACE_IOS_AUTH_REFRESH_REQUEST_MESSAGE = "TRACE_IOS_AUTH_REFRESH_REQUEST";
 const FIRST_STORY_FOCUS_MAX_ATTEMPTS = 30;
 const FIRST_STORY_FOCUS_RETRY_MS = 150;
 const FIRST_STORY_SAVE_TIMEOUT_MS = 18_000;
@@ -332,6 +333,9 @@ var WORK_STATE_STORAGE_KEY = "traceWorkStatesV1";
 var WORK_STATE_GET_MESSAGE = "TRACE_WORK_STATE_GET";
 var optimisticStoryPageEntries = Object.create(null);
 var storyQuickAddUiReady = false;
+var storyAuthRecoveryNeeded = false;
+var storyAuthRefreshInFlight = false;
+var storyAuthRefreshLastAttemptAt = 0;
 var TRACE_READER_STATUS_CHOICES = [
   "SAVED",
   "READING",
@@ -985,6 +989,45 @@ function queryBackgroundWorkStateForStory(workKey) {
     );
   } catch (_) {
     /* best effort */
+  }
+}
+
+function clearStoryAuthError(workKey) {
+  var entry = optimisticStoryPageEntries[workKey];
+  if (
+    !entry ||
+    (entry.__traceAutoTrackError !== "auth_expired" &&
+      entry.__traceAutoTrackError !== "not_authenticated")
+  ) {
+    return;
+  }
+  if (!optimisticStoryEntryHasLibraryState(entry)) {
+    delete optimisticStoryPageEntries[workKey];
+    return;
+  }
+  optimisticStoryPageEntries[workKey] = Object.assign({}, entry, {
+    __traceAutoTrackError: null,
+  });
+}
+
+function requestStoryAuthRefreshOnResume(workKey) {
+  if (!storyAuthRecoveryNeeded || storyAuthRefreshInFlight) return;
+  var now = Date.now();
+  if (now - storyAuthRefreshLastAttemptAt < 1500) return;
+  storyAuthRefreshLastAttemptAt = now;
+  storyAuthRefreshInFlight = true;
+  try {
+    ext.runtime.sendMessage(
+      { type: TRACE_IOS_AUTH_REFRESH_REQUEST_MESSAGE },
+      function (response) {
+        storyAuthRefreshInFlight = false;
+        if (ext.runtime.lastError || !response || response.ok !== true) return;
+        clearStoryAuthError(workKey);
+        renderQuickAddButton(workKey);
+      },
+    );
+  } catch (_) {
+    storyAuthRefreshInFlight = false;
   }
 }
 
@@ -2898,7 +2941,7 @@ function handleDisplay(view) {
     (view.entry.__traceAutoTrackError === "auth_expired" ||
       view.entry.__traceAutoTrackError === "not_authenticated")
   ) {
-    return "Sign in";
+    return "Reconnect";
   }
   if (view.entry && view.entry.__traceAutoTrackError) return "Error";
   if (view.entry && view.entry.__traceStatusPending) return "Saving...";
@@ -2945,7 +2988,7 @@ function storyHandlePresentation(view) {
     (entry.__traceAutoTrackError === "auth_expired" ||
       entry.__traceAutoTrackError === "not_authenticated")
   ) {
-    return { kind: "auth-expired", label: "Sign in", theme: TRACE_INLINE_THEMES.error, dot: true, spinner: false, status: null, progress: null };
+    return { kind: "auth-expired", label: "Reconnect", theme: TRACE_INLINE_THEMES.error, dot: true, spinner: false, status: null, progress: null };
   }
   if (entry && entry.__traceAutoTrackError) {
     return { kind: "error", label: "Error", theme: TRACE_INLINE_THEMES.error, dot: true, spinner: false, status: null, progress: null };
@@ -3028,11 +3071,7 @@ function applyStoryInlineHandleState(handle, presentation) {
 function autoTrackHandleDisabled(entry) {
   if (!entry) return false;
   if (entry.__traceAutoTrackPending) return true;
-  return (
-    entry.__traceAutoTrackError === "free_limit_reached" ||
-    entry.__traceAutoTrackError === "auth_expired" ||
-    entry.__traceAutoTrackError === "not_authenticated"
-  );
+  return entry.__traceAutoTrackError === "free_limit_reached";
 }
 
 function applySheetVisibility(sheet, open) {
@@ -3997,15 +4036,24 @@ function sendQuickAddAction(btn, workKey, addTheme, compact, done) {
         btn.title = "Free library limit reached \u2014 upgrade for unlimited";
         btn.disabled = true;
         notifyDone({ ok: false, error: "free_limit_reached" });
-      } else if (response.error === "auth_expired") {
+      } else if (
+        response.error === "auth_expired" ||
+        response.error === "not_authenticated"
+      ) {
+        var authErrorEntry = optimisticStoryPageEntries[workKey] || {};
+        optimisticStoryPageEntries[workKey] = Object.assign({}, authErrorEntry, {
+          __traceAutoTrackPending: false,
+          __traceAutoTrackError: response.error,
+        });
         if (compact) {
-          applyStoryInlineHandleState(btn, storyHandlePresentation({ hasAuth: true, entry: { __traceAutoTrackError: "auth_expired" } }));
+          applyStoryInlineHandleState(btn, storyHandlePresentation({ hasAuth: true, entry: { __traceAutoTrackError: response.error } }));
         } else {
           btn.style.cssText = traceActionCss(TRACE_THEMES.error);
-          btn.textContent = "Sign in again";
+          btn.textContent = "Reconnect";
         }
-        btn.disabled = true;
-        notifyDone({ ok: false, error: "auth_expired" });
+        btn.disabled = false;
+        renderQuickAddButton(workKey);
+        notifyDone({ ok: false, error: response.error });
       } else {
         if (compact) {
           applyStoryInlineHandleState(btn, {
@@ -5018,6 +5066,12 @@ function renderQuickAddButton(workKey) {
       authState: authState,
       entry: info,
     };
+    var hasEntryAuthError = !!(
+      info &&
+      (info.__traceAutoTrackError === "auth_expired" ||
+        info.__traceAutoTrackError === "not_authenticated")
+    );
+    storyAuthRecoveryNeeded = !view.hasAuth || hasEntryAuthError;
 
     applyStoryInlineHandleState(handle, storyHandlePresentation(view));
     handle.title = "Open Trace story sheet";
@@ -5035,7 +5089,12 @@ function renderQuickAddButton(workKey) {
     }
     handle.__traceStoryHandleAction = function () {
       if (info && info.__traceAutoTrackPending) return;
-      if (view.hasAuth && !entryStatus(info) && !(info && info.hidden)) {
+      if (
+        view.hasAuth &&
+        !hasEntryAuthError &&
+        !entryStatus(info) &&
+        !(info && info.hidden)
+      ) {
         applySheetVisibility(sheet, false);
         sendQuickAddAction(handle, workKey, TRACE_THEMES.add, true);
         return;
@@ -5084,15 +5143,18 @@ function initQuickAdd() {
 
   try {
     window.addEventListener("focus", function () {
+      requestStoryAuthRefreshOnResume(workKey);
       queryBackgroundWorkStateForStory(workKey);
       renderQuickAddButton(workKey);
     });
     window.addEventListener("pageshow", function () {
+      requestStoryAuthRefreshOnResume(workKey);
       queryBackgroundWorkStateForStory(workKey);
       renderQuickAddButton(workKey);
     });
     document.addEventListener("visibilitychange", function () {
       if (!document.hidden) {
+        requestStoryAuthRefreshOnResume(workKey);
         queryBackgroundWorkStateForStory(workKey);
         renderQuickAddButton(workKey);
       }

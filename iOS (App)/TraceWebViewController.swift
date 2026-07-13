@@ -1169,6 +1169,11 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         }
 
         switch messageType {
+        case "TRACE_IOS_AUTH_TOKEN_UPDATE":
+            handleTraceSafariAuthTokenUpdate(
+                nonce: nonce,
+                token: body["token"] as? String
+            )
         case "TRACE_IOS_EXTENSION_STATE_REQUEST":
             handleTraceSafariExtensionStateRequest(nonce: nonce)
         case "TRACE_IOS_OPEN_EXTENSION_SETTINGS":
@@ -1191,6 +1196,27 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 nonce: nonce,
                 ok: false,
                 error: "unknown_message_type"
+            )
+        }
+    }
+
+    private func handleTraceSafariAuthTokenUpdate(nonce: String, token: String?) {
+        do {
+            guard let token else {
+                throw TraceSafariExtensionBridgeError.tokenShareFailed
+            }
+            try Self.storeSharedTraceToken(token)
+            postSafariExtensionActionResult(
+                type: "TRACE_IOS_AUTH_TOKEN_UPDATE_RESPONSE",
+                nonce: nonce,
+                ok: true
+            )
+        } catch {
+            postSafariExtensionActionResult(
+                type: "TRACE_IOS_AUTH_TOKEN_UPDATE_RESPONSE",
+                nonce: nonce,
+                ok: false,
+                error: "token_share_failed"
             )
         }
     }

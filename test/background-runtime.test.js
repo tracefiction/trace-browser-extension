@@ -65,6 +65,7 @@ function createBackgroundHarness({
   activeTabs = [{ id: 11 }],
   sendMessageImpl,
   sendNativeMessageImpl,
+  runtimeUrl = "",
 } = {}) {
   const quietConsole = {
     log() {},
@@ -124,6 +125,9 @@ function createBackgroundHarness({
   const ext = {
     runtime: {
       lastError: null,
+      getURL() {
+        return runtimeUrl;
+      },
       onMessage: {
         addListener(fn) {
           onMessageListener = fn;
@@ -531,6 +535,76 @@ test("missing iOS native auth token leaves the extension signed out", async () =
   assert.equal(h.hooks.getBearerToken(), null);
   assert.equal(h.store.authToken, undefined);
   assert.equal(h.store.traceAuthState.state, "signed_out");
+});
+
+test("Safari archive resume refreshes auth from the shared iOS token", async () => {
+  const h = createBackgroundHarness({
+    runtimeUrl: "safari-web-extension://com.tracefiction.trace.extension/",
+    sendNativeMessageImpl(message, callback) {
+      if (message.reason === "archive_resume") {
+        callback({ ok: true, token: "resumed-native-token" });
+        return;
+      }
+      callback(undefined);
+    },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/api/account/me")) {
+        assert.equal(init.headers.Authorization, "Bearer resumed-native-token");
+        return createResponse({
+          json: { account_id: "acct-resumed", pro: false, library_count: 4 },
+        });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: { success: true, data: { entries: {}, syncVersion: "resume-v1" } },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+
+  await flush();
+  const response = await h.dispatchMessage(
+    { type: "TRACE_IOS_AUTH_REFRESH_REQUEST" },
+    {
+      frameId: 0,
+      tab: { id: 41, url: "https://archiveofourown.org/works/123" },
+    },
+  );
+
+  assert.deepEqual(plainJson(response), { ok: true });
+  assert.equal(h.store.authToken, "resumed-native-token");
+  assert.equal(h.store.traceAuthState.state, "connected");
+  assert.equal(h.store.traceAccountId, "acct-resumed");
+  assert.equal(
+    h.nativeMessages.some(
+      (args) => args[0]?.type === "TRACE_IOS_AUTH_TOKEN_REQUEST" &&
+        args[0]?.reason === "archive_resume",
+    ),
+    true,
+  );
+});
+
+test("native auth resume rejects non-Safari archive senders", async () => {
+  const h = createBackgroundHarness({
+    runtimeUrl: "chrome-extension://trace/",
+  });
+  await flush();
+  const nativeCount = h.nativeMessages.length;
+
+  const response = await h.dispatchMessage(
+    { type: "TRACE_IOS_AUTH_REFRESH_REQUEST" },
+    {
+      frameId: 0,
+      tab: { id: 42, url: "https://archiveofourown.org/works/123" },
+    },
+  );
+
+  assert.deepEqual(plainJson(response), {
+    ok: false,
+    error: "unsupported_sender",
+  });
+  assert.equal(h.nativeMessages.length, nativeCount);
 });
 
 test("late missing iOS bootstrap does not overwrite a browser token update", async () => {
