@@ -269,6 +269,7 @@ globalThis.__testHooks = {
   patchOverlayHiddenPreference,
   patchOverlayReaderStatus,
   patchOverlayLibraryEntry,
+  sendIosNativeMessage,
   shouldIgnoreSenderForAutoTrack,
   recordArchiveReadiness,
   setBearerToken(value) { bearerToken = value; },
@@ -835,7 +836,7 @@ test("TRACE_AUTH_UPDATE retries transient verification failures before surfacing
   assert.equal(h.store.traceLibraryCount, 4);
 });
 
-test("TRACE_AUTH_UPDATE surfaces hard error after transient verification retries are exhausted", async () => {
+test("TRACE_AUTH_UPDATE keeps a token usable after transient verification retries are exhausted", async () => {
   const h = createBackgroundHarness({
     fetchImpl: async (url) => {
       assert.ok(String(url).endsWith("/api/account/me"));
@@ -865,8 +866,82 @@ test("TRACE_AUTH_UPDATE surfaces hard error after transient verification retries
     await flush();
   }
 
-  assert.equal(h.store.traceAuthState.state, "error");
+  assert.equal(h.store.traceAuthState.state, "connected");
   assert.equal(h.store.traceAuthState.lastHttpStatus, 500);
+  assert.match(h.store.traceAuthState.message, /temporarily/i);
+});
+
+test("TRACE_AUTH_UPDATE treats account-check rate limiting as non-blocking without retry amplification", async () => {
+  let accountChecks = 0;
+  const h = createBackgroundHarness({
+    fetchImpl: async (url) => {
+      assert.ok(String(url).endsWith("/api/account/me"));
+      accountChecks += 1;
+      return createResponse({ ok: false, status: 429 });
+    },
+  });
+
+  const response = await h.dispatchMessage(
+    { type: "TRACE_AUTH_UPDATE", token: "rate-limited-token" },
+    { tab: { id: 25 } },
+  );
+
+  assert.deepEqual(plainJson(response), {
+    success: false,
+    state: "connected",
+    error: "account_check_rate_limited",
+    status: 429,
+    degraded: true,
+  });
+  assert.equal(accountChecks, 1);
+  assert.equal(h.hooks.getBearerToken(), "rate-limited-token");
+  assert.equal(h.store.authToken, "rate-limited-token");
+  assert.equal(h.store.traceAuthState.state, "connected");
+  assert.equal(h.store.traceAuthState.lastHttpStatus, 429);
+  assert.equal(h.timers.some((timer) => timer?.ms === 750), false);
+});
+
+test("startup keeps a previously verified connection usable after transient account checks fail", async () => {
+  let accountChecks = 0;
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "verified-network-token",
+      traceAccountId: "acct-verified",
+      traceAuthState: {
+        state: "connected",
+        message: "Extension connected to your Trace account.",
+        authVerificationVersion: 1,
+        accountVerifiedAt: "2026-07-12T12:00:00.000Z",
+        lastVerifiedAccountId: "acct-verified",
+        lastTokenSyncAt: "2026-07-12T12:00:00.000Z",
+      },
+    },
+    fetchImpl: async (url) => {
+      assert.ok(String(url).endsWith("/api/account/me"));
+      accountChecks += 1;
+      return createResponse({ ok: false, status: 500 });
+    },
+  });
+
+  await flush();
+  await flush();
+  for (const delayMs of [750, 2_500, 8_000]) {
+    await runTimerWithDelayWhenReady(h, delayMs);
+    await flush();
+    await flush();
+  }
+
+  assert.equal(accountChecks, 4);
+  assert.equal(h.hooks.getBearerToken(), "verified-network-token");
+  assert.equal(h.store.authToken, "verified-network-token");
+  assert.equal(h.store.traceAuthState.state, "connected");
+  assert.equal(h.store.traceAuthState.authVerificationVersion, 1);
+  assert.equal(
+    h.store.traceAuthState.accountVerifiedAt,
+    "2026-07-12T12:00:00.000Z",
+  );
+  assert.equal(h.store.traceAuthState.lastHttpStatus, 500);
+  assert.match(h.store.traceAuthState.message, /temporarily/i);
 });
 
 test("startup re-verifies stored connected tokens before reporting connected", async () => {
@@ -2264,6 +2339,392 @@ test("TRACE_QUICK_ADD stores authoritative account-scoped work state and overlay
   assert.equal(queried.ok, true);
   assert.equal(queried.state.status, "saved");
   assert.equal(queried.state.entryId, entry.entryId);
+});
+
+test("a confirmed save repairs an old account-check error across Safari worker restarts", async () => {
+  const entry = {
+    status: "PLANNING",
+    readerStatus: "PLANNING",
+    canonicalReaderStatus: "SAVED",
+    entryId: "00000000-0000-4000-8000-000000000703",
+  };
+  const firstWorker = createBackgroundHarness({
+    storageState: {
+      authToken: "token-cold-start-repair",
+      traceAccountId: "acct-cold-start-repair",
+      traceAuthState: {
+        state: "error",
+        message: "Trace could not verify your account.",
+        lastHttpStatus: 500,
+      },
+    },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) {
+        return createResponse({ ok: false, status: 500 });
+      }
+      if (String(url).endsWith("/api/extension/track")) {
+        return createResponse({
+          json: {
+            success: true,
+            data: {
+              entry_id: entry.entryId,
+              work_key: "ao3:703",
+              entry,
+              syncVersion: "2026-07-13T10:00:00.000Z",
+            },
+          },
+        });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: {
+            success: true,
+            data: {
+              entries: { "ao3:703": entry },
+              syncVersion: "2026-07-13T10:00:00.000Z",
+            },
+          },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  await flush();
+  await flush();
+  assert.equal(firstWorker.store.traceAuthState.state, "unknown");
+  assert.equal(firstWorker.timers.some((timer) => timer?.ms === 750), true);
+
+  const saveResponse = await firstWorker.dispatchMessage({
+    type: "TRACE_QUICK_ADD",
+    payload: {
+      s: "ao3",
+      at: new Date().toISOString(),
+      item: {
+        src: "ao3",
+        t: "Cold start repair",
+        u: "https://archiveofourown.org/works/703",
+      },
+    },
+  });
+
+  assert.equal(saveResponse.ok, true);
+  assert.equal(firstWorker.store.traceAuthState.state, "connected");
+  assert.equal(firstWorker.store.traceAuthState.authVerificationVersion, 1);
+  assert.match(firstWorker.store.traceAuthState.accountVerifiedAt, /^\d{4}-/);
+  assert.equal(firstWorker.timers.some((timer) => timer?.ms === 750), false);
+
+  let restartAccountChecks = 0;
+  const restartedWorker = createBackgroundHarness({
+    storageState: plainJson(firstWorker.store),
+    fetchImpl: async (url) => {
+      assert.ok(String(url).endsWith("/api/account/me"));
+      restartAccountChecks += 1;
+      return createResponse({ ok: false, status: 500 });
+    },
+  });
+  await flush();
+  await flush();
+  for (const delayMs of [750, 2_500, 8_000]) {
+    await runTimerWithDelayWhenReady(restartedWorker, delayMs);
+    await flush();
+    await flush();
+  }
+
+  assert.equal(restartAccountChecks, 4);
+  assert.equal(restartedWorker.store.traceAuthState.state, "connected");
+  assert.equal(restartedWorker.store.traceAuthState.authVerificationVersion, 1);
+  assert.match(restartedWorker.store.traceAuthState.message, /temporarily/i);
+});
+
+test("TRACE_QUICK_ADD reconciles a timed-out write when a fresh overlay confirms the save", async () => {
+  const trackRequest = createDeferred();
+  const entry = {
+    status: "PLANNING",
+    readerStatus: "PLANNING",
+    canonicalReaderStatus: "SAVED",
+    entryId: "00000000-0000-4000-8000-000000000704",
+  };
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-timeout-confirmed",
+      traceAccountId: "acct-timeout-confirmed",
+    },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) {
+        return createResponse({
+          json: { account_id: "acct-timeout-confirmed", pro: false },
+        });
+      }
+      if (String(url).endsWith("/api/extension/track")) {
+        return trackRequest.promise;
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: {
+            success: true,
+            data: {
+              entries: { "ao3:704": entry },
+              syncVersion: "2026-07-13T10:00:00.000Z",
+            },
+          },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  await flush();
+  await flush();
+
+  const responsePromise = h.dispatchMessage(
+    {
+      type: "TRACE_QUICK_ADD",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: {
+          src: "ao3",
+          t: "Timed out but saved",
+          u: "https://archiveofourown.org/works/704",
+        },
+      },
+    },
+    { tab: { id: 704 } },
+  );
+  await runTimerWithDelayWhenReady(h, 10_000);
+  const response = await responsePromise;
+
+  assert.equal(response.ok, true);
+  assert.equal(response.state.status, "saved");
+  assert.equal(response.state.entryId, entry.entryId);
+  const queried = await h.dispatchMessage({
+    type: "TRACE_WORK_STATE_GET",
+    workKey: "ao3:704",
+  });
+  assert.equal(queried.state.status, "saved");
+  assert.equal(queried.state.error, null);
+});
+
+test("TRACE_QUICK_ADD returns a bounded timeout when the write cannot be confirmed", async () => {
+  const trackRequest = createDeferred();
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-timeout-missing",
+      traceAccountId: "acct-timeout-missing",
+    },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) {
+        return createResponse({
+          json: { account_id: "acct-timeout-missing", pro: false },
+        });
+      }
+      if (String(url).endsWith("/api/extension/track")) {
+        return trackRequest.promise;
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: {
+            success: true,
+            data: { entries: {}, syncVersion: "2026-07-13T10:01:00.000Z" },
+          },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  await flush();
+  await flush();
+
+  const responsePromise = h.dispatchMessage({
+    type: "TRACE_QUICK_ADD",
+    payload: {
+      s: "ao3",
+      at: new Date().toISOString(),
+      item: {
+        src: "ao3",
+        t: "Still missing",
+        u: "https://archiveofourown.org/works/705",
+      },
+    },
+  });
+  await runTimerWithDelayWhenReady(h, 10_000);
+  const response = await responsePromise;
+
+  assert.deepEqual(plainJson(response), {
+    ok: false,
+    error: "request_timeout",
+  });
+  const queried = await h.dispatchMessage({
+    type: "TRACE_WORK_STATE_GET",
+    workKey: "ao3:705",
+  });
+  assert.equal(queried.state.status, "error");
+  assert.equal(queried.state.error, "request_timeout");
+});
+
+test("an older timed-out quick add cannot overwrite a newer confirmed retry", async () => {
+  const firstTrackRequest = createDeferred();
+  const entry = {
+    status: "PLANNING",
+    readerStatus: "PLANNING",
+    canonicalReaderStatus: "SAVED",
+    entryId: "00000000-0000-4000-8000-000000000707",
+  };
+  let trackCalls = 0;
+  let overlayCalls = 0;
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-retry-wins",
+      traceAccountId: "acct-retry-wins",
+    },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) {
+        return createResponse({
+          json: { account_id: "acct-retry-wins", pro: false },
+        });
+      }
+      if (String(url).endsWith("/api/extension/track")) {
+        trackCalls += 1;
+        if (trackCalls === 1) return firstTrackRequest.promise;
+        return createResponse({
+          json: {
+            success: true,
+            data: {
+              entry_id: entry.entryId,
+              work_key: "ao3:707",
+              entry,
+              syncVersion: "2026-07-13T10:05:00.000Z",
+            },
+          },
+        });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        overlayCalls += 1;
+        if (overlayCalls > 1) throw new Error("overlay temporarily offline");
+        return createResponse({
+          json: {
+            success: true,
+            data: { entries: {}, syncVersion: "2026-07-13T10:04:00.000Z" },
+          },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  await flush();
+  await flush();
+
+  const payload = {
+    s: "ao3",
+    at: new Date().toISOString(),
+    item: {
+      src: "ao3",
+      t: "Retry wins",
+      u: "https://archiveofourown.org/works/707",
+    },
+  };
+  const firstResponsePromise = h.dispatchMessage({
+    type: "TRACE_QUICK_ADD",
+    payload,
+  });
+  await flush();
+  const secondResponse = await h.dispatchMessage({
+    type: "TRACE_QUICK_ADD",
+    payload,
+  });
+  assert.equal(secondResponse.ok, true);
+  assert.equal(secondResponse.state.status, "saved");
+
+  await runTimerWithDelayWhenReady(h, 10_000);
+  const firstResponse = await firstResponsePromise;
+
+  assert.equal(firstResponse.ok, true);
+  assert.equal(firstResponse.state.status, "saved");
+  assert.equal(firstResponse.state.entryId, entry.entryId);
+  const queried = await h.dispatchMessage({
+    type: "TRACE_WORK_STATE_GET",
+    workKey: "ao3:707",
+  });
+  assert.equal(queried.state.status, "saved");
+  assert.equal(queried.state.error, null);
+});
+
+test("TRACE_WORK_STATE_GET converts an abandoned pending save into a retryable error", async () => {
+  const now = Date.now();
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-abandoned",
+      traceAccountId: "acct-abandoned",
+      traceWorkStatesV1: {
+        version: 1,
+        accountId: "acct-abandoned",
+        updatedAt: new Date(now - 60_000).toISOString(),
+        items: {
+          "acct-abandoned|ao3:706": {
+            accountId: "acct-abandoned",
+            workKey: "ao3:706",
+            operation: "quick_add",
+            status: "pending",
+            startedAt: new Date(now - 60_000).toISOString(),
+            updatedAt: new Date(now - 60_000).toISOString(),
+            expiresAt: now + 60_000,
+          },
+        },
+      },
+    },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) {
+        return createResponse({
+          json: { account_id: "acct-abandoned", pro: false },
+        });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: {
+            success: true,
+            data: { entries: {}, syncVersion: "2026-07-13T10:02:00.000Z" },
+          },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  await flush();
+  await flush();
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_WORK_STATE_GET",
+    workKey: "ao3:706",
+  });
+
+  assert.equal(response.state.status, "error");
+  assert.equal(response.state.error, "request_interrupted");
+});
+
+test("iOS native messaging returns after a bounded wait when Safari never calls back", async () => {
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-native-timeout" },
+    sendNativeMessageImpl() {
+      // Deliberately never invokes Safari's callback.
+    },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) {
+        return createResponse({ json: { pro: false } });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: { success: true, data: { entries: {}, syncVersion: "v-native" } },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  await flush();
+  await flush();
+
+  const responsePromise = h.hooks.sendIosNativeMessage({ type: "TEST_MESSAGE" });
+  await runTimerWithDelayWhenReady(h, 5_000);
+
+  assert.equal(await responsePromise, null);
 });
 
 test("TRACE_QUICK_ADD returns free_limit_reached on 402", async () => {
@@ -3758,6 +4219,66 @@ test("TRACE_AUTO_TRACK responds network_error when fetch throws", async () => {
 
   assert.equal(response.ok, false);
   assert.equal(response.error, "network_error");
+});
+
+test("TRACE_AUTO_TRACK returns a bounded timeout instead of leaving the story pending", async () => {
+  const trackRequest = createDeferred();
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-at-timeout",
+      traceAccountId: "acct-at-timeout",
+    },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/account/me")) {
+        return createResponse({
+          json: { account_id: "acct-at-timeout", pro: false },
+        });
+      }
+      if (String(url).endsWith("/api/extension/track")) {
+        return trackRequest.promise;
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: {
+            success: true,
+            data: { entries: {}, syncVersion: "2026-07-13T10:03:00.000Z" },
+          },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  await flush();
+  await flush();
+
+  const responsePromise = h.dispatchMessage(
+    {
+      type: "TRACE_AUTO_TRACK",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: {
+          src: "ao3",
+          t: "Story",
+          u: "https://archiveofourown.org/works/708",
+        },
+      },
+    },
+    { tab: { id: 708 }, frameId: 0, documentLifecycle: "active" },
+  );
+  await runTimerWithDelayWhenReady(h, 10_000);
+  const response = await responsePromise;
+
+  assert.deepEqual(plainJson(response), {
+    ok: false,
+    error: "request_timeout",
+  });
+  const queried = await h.dispatchMessage({
+    type: "TRACE_WORK_STATE_GET",
+    workKey: "ao3:708",
+  });
+  assert.equal(queried.state.status, "error");
+  assert.equal(queried.state.error, "request_timeout");
 });
 
 function heartbeatMessages(h) {

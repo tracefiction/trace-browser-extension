@@ -1,4 +1,4 @@
-# Extension Store Copy - 0.5.9
+# Extension Store Copy - 0.5.10
 
 Use this copy for Chrome Web Store, Firefox Add-ons, App Store Connect, and
 public release notes. Keep evergreen store descriptions separate from
@@ -44,14 +44,15 @@ FictionPress.
 
 ## What's New / Release Notes
 
-Trace extension 0.5.9 makes Safari connection recovery reliable and actionable:
+Trace extension 0.5.10 makes Safari saves and account checks resilient to
+browser restarts and temporary API delays:
 
-- Keeps Safari's extension token aligned with silent session refreshes from the
-  Trace iOS app.
-- Refreshes the Safari connection after returning from Trace without requiring
-  another sign-in while the app session is still valid.
-- Replaces the disabled story-page Sign in status with an actionable Reconnect
-  control that opens the existing recovery sheet.
+- Keeps a verified Trace connection usable when an account recheck is
+  temporarily unavailable or rate limited.
+- Bounds save requests so listing and story controls cannot remain stuck in an
+  adding state indefinitely.
+- Reconciles uncertain saves with fresh library state and prevents older
+  requests from overwriting a newer confirmed save.
 
 Privacy boundary unchanged: Trace still reads story metadata and reading
 progress from supported pages, not AO3/FFN credentials, cookies, private
@@ -77,13 +78,13 @@ The extension does not request cookie permissions.
 
 ## App Store Connect - iOS What's New
 
-Trace for iOS 0.5.9 keeps Safari connected during longer reading sessions:
+Trace for iOS 0.5.10 fixes intermittent Safari connection and saving failures:
 
-- Shares silently refreshed Trace access with the Safari extension when the app
-  opens or resumes.
-- Restores the Safari connection after returning from Trace when the app session
-  is still valid.
-- Makes the compact Reconnect status tappable when recovery is needed.
+- Prevents false Check Trace connection warnings after Safari restarts when the
+  account is still connected.
+- Stops Add to Trace from remaining stuck during temporary request failures.
+- Reconciles confirmed saves and preserves their state across overlapping
+  actions and Safari worker restarts.
 
 ## Screenshot Preparation
 

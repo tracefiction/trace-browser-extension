@@ -42,6 +42,10 @@ const ARCHIVE_READINESS_KEY = "traceArchiveReadiness";
 const OPTIMISTIC_CHAPTER_FLOORS_MS = 20_000;
 const WORK_STATE_PENDING_TTL_MS = 2 * 60 * 1_000;
 const WORK_STATE_SETTLED_TTL_MS = 10 * 60 * 1_000;
+const WORK_STATE_INTERRUPTED_AFTER_MS = 30_000;
+const CRITICAL_REQUEST_TIMEOUT_MS = 10_000;
+const OVERLAY_REQUEST_TIMEOUT_MS = 3_000;
+const NATIVE_MESSAGE_TIMEOUT_MS = 5_000;
 const ARCHIVE_READINESS_ERROR_RECENT_MS = 24 * 60 * 60 * 1_000;
 const TRACE_FIRST_SAVE_SEEN_KEY = "traceFirstSaveSeen";
 const TRACE_LIBRARY_COUNT_KEY = "traceLibraryCount";
@@ -85,11 +89,55 @@ const AUTH_VERIFICATION_RETRY_DELAYS_MS = [750, 2_500, 8_000];
 let bearerToken = null;
 let verifiedBearerToken = null;
 let authVerificationSeq = 0;
+let authStateWriteSeq = 0;
+let authStateContinuityFields = {};
+let workOperationSeq = 0;
 const optimisticChapterFloors = new Map();
 let ao3SavedFiltersSyncTimer = null;
 let ao3SavedFiltersSyncInFlight = false;
 let authVerificationRetryTimer = null;
 let initialAuthPromise = null;
+
+class TraceRequestTimeoutError extends Error {
+  constructor() {
+    super("request_timeout");
+    this.name = "TraceRequestTimeoutError";
+  }
+}
+
+async function fetchWithTimeout(
+  url,
+  init = {},
+  timeoutMs = CRITICAL_REQUEST_TIMEOUT_MS,
+) {
+  let controller = null;
+  const requestInit = { ...init };
+  if (
+    !requestInit.signal &&
+    typeof AbortController !== "undefined"
+  ) {
+    controller = new AbortController();
+    requestInit.signal = controller.signal;
+  }
+
+  let timeoutId = null;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      try {
+        controller?.abort();
+      } catch (_) {
+        /* ignore */
+      }
+      reject(new TraceRequestTimeoutError());
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([fetch(url, requestInit), timeout]);
+  } finally {
+    if (timeoutId != null) clearTimeout(timeoutId);
+  }
+}
 
 function shouldIgnoreSenderForAutoTrack(sender) {
   if (!sender || typeof sender !== "object") return false;
@@ -124,16 +172,37 @@ const SETTLED_AUTH_PUSH_STATES = new Set([
 ]);
 
 function persistAuthState(nextState) {
+  const writeSeq = ++authStateWriteSeq;
+  const preservesConnection =
+    nextState?.state === "connected" || nextState?.state === "unknown";
+  if (preservesConnection) {
+    authStateContinuityFields = {
+      ...authStateContinuityFields,
+      ...preservedConnectedAuthStateFields(nextState),
+    };
+  } else if (
+    nextState?.state === "signed_out" ||
+    nextState?.state === "reconnect_required" ||
+    nextState?.state === "error"
+  ) {
+    authStateContinuityFields = {};
+  }
   const write = (previousState = null) => {
-    const preserved =
-      nextState?.state === "connected"
-        ? preservedConnectedAuthStateFields(previousState)
-        : {};
+    if (writeSeq !== authStateWriteSeq) return;
+    const preserved = preservesConnection
+      ? {
+          ...preservedConnectedAuthStateFields(previousState),
+          ...authStateContinuityFields,
+        }
+      : {};
     const state = {
       updatedAt: new Date().toISOString(),
       ...preserved,
       ...nextState,
     };
+    if (preservesConnection) {
+      authStateContinuityFields = preservedConnectedAuthStateFields(state);
+    }
     ext.storage.local.set({ [AUTH_STATE_KEY]: state });
     // Only settled outcomes are pushed; transient "checking" states would
     // downgrade the page UI for no reason.
@@ -166,8 +235,12 @@ function preservedConnectedAuthStateFields(previousState) {
     "lastWorkPreferenceAt",
     "lastVerifiedAccountId",
     "authSource",
+    "accountVerifiedAt",
   ]) {
     if (typeof previousState[key] === "string") preserved[key] = previousState[key];
+  }
+  if (previousState.authVerificationVersion === AUTH_STATE_VERIFICATION_VERSION) {
+    preserved.authVerificationVersion = AUTH_STATE_VERIFICATION_VERSION;
   }
   return preserved;
 }
@@ -187,6 +260,15 @@ function setVerifiedConnectedState(extra = {}) {
     authVerificationVersion: AUTH_STATE_VERIFICATION_VERSION,
     accountVerifiedAt: new Date().toISOString(),
   });
+}
+
+function setAuthenticatedActionConnectedState(extra = {}) {
+  if (bearerToken) {
+    authVerificationSeq += 1;
+    clearAuthVerificationRetry();
+    verifiedBearerToken = bearerToken;
+  }
+  setVerifiedConnectedState(extra);
 }
 
 function setCheckingState(extra = {}) {
@@ -290,6 +372,7 @@ function clearToken() {
   clearAuthVerificationRetry();
   bearerToken = null;
   verifiedBearerToken = null;
+  authStateContinuityFields = {};
   optimisticChapterFloors.clear();
   try {
     ext.storage.local.remove([
@@ -325,6 +408,21 @@ function hasCurrentSessionVerifiedToken(authState, token) {
   return (
     Boolean(token) &&
     verifiedBearerToken === token &&
+    authState?.authVerificationVersion === AUTH_STATE_VERIFICATION_VERSION &&
+    toEpochMillis(authState?.accountVerifiedAt) != null
+  );
+}
+
+function hasPersistedVerifiedConnection(snapshot, token) {
+  const storedToken =
+    typeof snapshot?.[AUTH_TOKEN_KEY] === "string"
+      ? snapshot[AUTH_TOKEN_KEY].trim()
+      : "";
+  const authState = snapshot?.[AUTH_STATE_KEY];
+  return (
+    Boolean(token) &&
+    storedToken === token &&
+    (authState?.state === "connected" || authState?.state === "unknown") &&
     authState?.authVerificationVersion === AUTH_STATE_VERIFICATION_VERSION &&
     toEpochMillis(authState?.accountVerifiedAt) != null
   );
@@ -844,6 +942,12 @@ function scopedOverlayCache(data = {}, snapshot = {}) {
   };
 }
 
+function isOlderOverlaySyncVersion(incoming, current) {
+  const incomingAt = toEpochMillis(incoming);
+  const currentAt = toEpochMillis(current);
+  return incomingAt != null && currentAt != null && incomingAt < currentAt;
+}
+
 async function ensureRuntimeContext() {
   const apiBase = normalizedTraceApiBase();
   const snapshot = await storageGetLocal([TRACE_API_BASE_STORAGE_KEY, OVERLAY_STORAGE_KEY]);
@@ -909,6 +1013,15 @@ function publicWorkState(state) {
   };
 }
 
+function savedResultFromWorkState(state) {
+  if (!state || state.status !== "saved") return null;
+  const out = state.entryId
+    ? { ok: true, entryId: state.entryId }
+    : { ok: true };
+  out.state = state;
+  return out;
+}
+
 async function readWorkStateSnapshot() {
   const snapshot = await storageGetLocal([
     WORK_STATE_STORAGE_KEY,
@@ -943,6 +1056,17 @@ async function setWorkState(workKey, patch) {
   const accountId = snapshot.accountId;
   const key = workStateStorageKey(accountId, workKey);
   const previous = snapshot.states.items[key] || {};
+  if (previous.status === "saved" && patch.status !== "saved") {
+    return publicWorkState(previous);
+  }
+  if (
+    patch.operationId &&
+    previous.operationId &&
+    patch.operationId !== previous.operationId &&
+    patch.status !== "saved"
+  ) {
+    return publicWorkState(previous);
+  }
   const now = Date.now();
   const status = patch.status || previous.status || "pending";
   const ttl =
@@ -968,17 +1092,37 @@ async function getWorkStateForKey(workKey) {
   if (!workKey) return null;
   const snapshot = await readWorkStateSnapshot();
   const key = workStateStorageKey(snapshot.accountId, workKey);
-  const existing = snapshot.states.items[key] || null;
+  let existing = snapshot.states.items[key] || null;
+  if (existing?.status === "pending") {
+    const pendingAt =
+      toEpochMillis(existing.updatedAt) ?? toEpochMillis(existing.startedAt);
+    if (
+      pendingAt != null &&
+      snapshot.now - pendingAt >= WORK_STATE_INTERRUPTED_AFTER_MS
+    ) {
+      existing = {
+        ...existing,
+        status: "error",
+        error: "request_interrupted",
+        updatedAt: new Date(snapshot.now).toISOString(),
+        expiresAt: snapshot.now + WORK_STATE_SETTLED_TTL_MS,
+      };
+      snapshot.states.items[key] = existing;
+    }
+  }
   await writeWorkStates(snapshot.states);
   return publicWorkState(existing);
 }
 
 async function markWorkPending(workKey, operation) {
-  return setWorkState(workKey, {
+  const operationId = `${Date.now()}:${++workOperationSeq}`;
+  await setWorkState(workKey, {
     operation,
+    operationId,
     status: "pending",
     error: null,
   });
+  return operationId;
 }
 
 async function markWorkSaved(workKey, data, fallbackEntryId) {
@@ -1004,13 +1148,39 @@ async function markWorkSaved(workKey, data, fallbackEntryId) {
   });
 }
 
-async function markWorkError(workKey, operation, error) {
+async function markWorkError(workKey, operation, error, operationId = null) {
   if (!workKey) return null;
   return setWorkState(workKey, {
     operation,
+    ...(operationId ? { operationId } : {}),
     status: "error",
     error: error || "unknown_error",
   });
+}
+
+async function reconcilePendingWorkStatesWithOverlay(entries, syncVersion) {
+  if (!entries || typeof entries !== "object") return;
+  const snapshot = await readWorkStateSnapshot();
+  let changed = false;
+  for (const [key, state] of Object.entries(snapshot.states.items)) {
+    if (!state || state.status !== "pending") continue;
+    const entry = entries[state.workKey];
+    if (!entry || typeof entry !== "object") continue;
+    const now = Date.now();
+    snapshot.states.items[key] = {
+      ...state,
+      status: "saved",
+      error: null,
+      entry,
+      entryId:
+        typeof entry.entryId === "string" ? entry.entryId : state.entryId || null,
+      syncVersion: typeof syncVersion === "string" ? syncVersion : null,
+      updatedAt: new Date(now).toISOString(),
+      expiresAt: now + WORK_STATE_SETTLED_TTL_MS,
+    };
+    changed = true;
+  }
+  if (changed) await writeWorkStates(snapshot.states);
 }
 
 async function applyTrackResponseToOverlay(payload, data) {
@@ -1035,7 +1205,8 @@ async function applyTrackResponseToOverlay(payload, data) {
     ...cache,
     entries,
     syncVersion:
-      typeof data.syncVersion === "string"
+      typeof data.syncVersion === "string" &&
+      !isOlderOverlaySyncVersion(data.syncVersion, cache.syncVersion)
         ? data.syncVersion
         : cache.syncVersion || new Date().toISOString(),
   }, snapshot);
@@ -1123,6 +1294,45 @@ async function waitForTrackedWorkConfirmation(workKey, payload, data, fallbackEn
   }
 
   return confirmation;
+}
+
+async function reconcileUncertainTrackRequest(workKey, payload) {
+  const refreshed = await refreshLibraryOverlay();
+  if (!refreshed) return { workKey, state: null };
+  return confirmTrackedWorkState(
+    workKey,
+    payload,
+    null,
+    null,
+    { allowOverlayCacheFallback: true },
+  );
+}
+
+async function finalizeConfirmedTrack(
+  payload,
+  sender,
+  confirmation,
+  entryId,
+  operation,
+) {
+  const isAutoTrack = operation === "auto_track";
+  const action = isAutoTrack ? "track" : "quick_add";
+  recordArchiveActionFromPayload(payload, action);
+  markFirstSaveSeen();
+  setAuthenticatedActionConnectedState({
+    firstSaveSeen: true,
+    [isAutoTrack ? "lastTrackSuccessAt" : "lastQuickAddAt"]:
+      new Date().toISOString(),
+  });
+  await signalLibraryInvalidated(action);
+  setBadge(sender?.tab?.id, "OK", "#0D7A5F");
+  setTimeout(() => clearBadge(sender?.tab?.id), 2000);
+  const confirmedEntryId = entryId || confirmation?.state?.entryId || null;
+  const out = confirmedEntryId
+    ? { ok: true, entryId: confirmedEntryId }
+    : { ok: true };
+  if (confirmation?.state) out.state = confirmation.state;
+  return out;
 }
 
 /** Best-effort Pro flag for gating Pro-only prefs (synced from GET /api/account/me). */
@@ -1228,13 +1438,23 @@ async function runTraceAccountTokenVerification(token, extra = {}) {
   clearAuthVerificationRetry();
   const verificationSeq = ++authVerificationSeq;
   const lastTokenSyncAt = extra.lastTokenSyncAt || new Date().toISOString();
+  if (bearerToken && bearerToken !== trimmed) {
+    authStateContinuityFields = {};
+  }
   bearerToken = trimmed;
   verifiedBearerToken = null;
   ext.storage.local.set({ [AUTH_TOKEN_KEY]: trimmed });
   setCheckingState({ lastTokenSyncAt });
+  const previousSnapshot = await storageGetLocal([AUTH_TOKEN_KEY, AUTH_STATE_KEY]);
+  if (verificationSeq !== authVerificationSeq || bearerToken !== trimmed) {
+    return { success: false, state: "unknown", stale: true };
+  }
+  const preserveVerifiedConnection =
+    extra.preserveVerifiedConnection === true ||
+    hasPersistedVerifiedConnection(previousSnapshot, trimmed);
 
   try {
-    const response = await fetch(ACCOUNT_ME_ENDPOINT, {
+    const response = await fetchWithTimeout(ACCOUNT_ME_ENDPOINT, {
       headers: { Authorization: `Bearer ${trimmed}` },
     });
     if (verificationSeq !== authVerificationSeq || bearerToken !== trimmed) {
@@ -1286,9 +1506,24 @@ async function runTraceAccountTokenVerification(token, extra = {}) {
       return { success: false, state: "reconnect_required", error: authError };
     }
 
+    if (response.status === 429) {
+      setConnectedWithSyncWarning(
+        "Trace is temporarily rate limiting account checks. Your connection remains available.",
+        { lastHttpStatus: response.status, lastTokenSyncAt },
+      );
+      return {
+        success: false,
+        state: "connected",
+        error: "account_check_rate_limited",
+        status: response.status,
+        degraded: true,
+      };
+    }
+
     const retryScheduled = scheduleAuthVerificationRetry(trimmed, {
       ...extra,
       lastTokenSyncAt,
+      preserveVerifiedConnection,
     });
     if (retryScheduled) {
       accountVerificationRetryingState(lastTokenSyncAt, {
@@ -1303,15 +1538,16 @@ async function runTraceAccountTokenVerification(token, extra = {}) {
       };
     }
 
-    setErrorState(
-      "Trace could not verify your account. Try again shortly, or open Trace to reconnect.",
+    setConnectedWithSyncWarning(
+      "Trace is temporarily unable to recheck your account. Your connection remains available.",
       { lastHttpStatus: response.status, lastTokenSyncAt },
     );
     return {
       success: false,
-      state: "error",
+      state: "connected",
       error: "account_check_failed",
       status: response.status,
+      degraded: true,
     };
   } catch (_) {
     if (verificationSeq !== authVerificationSeq || bearerToken !== trimmed) {
@@ -1320,6 +1556,7 @@ async function runTraceAccountTokenVerification(token, extra = {}) {
     const retryScheduled = scheduleAuthVerificationRetry(trimmed, {
       ...extra,
       lastTokenSyncAt,
+      preserveVerifiedConnection,
     });
     if (retryScheduled) {
       accountVerificationRetryingState(lastTokenSyncAt);
@@ -1330,17 +1567,22 @@ async function runTraceAccountTokenVerification(token, extra = {}) {
         retrying: true,
       };
     }
-    setErrorState(
-      "Trace could not reach the API to verify your account. Try again shortly.",
+    setConnectedWithSyncWarning(
+      "Trace is temporarily unable to recheck your account. Your connection remains available.",
       { lastTokenSyncAt },
     );
-    return { success: false, state: "error", error: "network_error" };
+    return {
+      success: false,
+      state: "connected",
+      error: "network_error",
+      degraded: true,
+    };
   }
 }
 
 function refreshTraceUserPro() {
   if (!bearerToken) return;
-  fetch(ACCOUNT_ME_ENDPOINT, {
+  fetchWithTimeout(ACCOUNT_ME_ENDPOINT, {
     headers: { Authorization: `Bearer ${bearerToken}` },
   })
     .then(async (r) => {
@@ -1363,7 +1605,7 @@ function fetchTraceUserProPromise() {
       resolve();
       return;
     }
-    fetch(ACCOUNT_ME_ENDPOINT, {
+    fetchWithTimeout(ACCOUNT_ME_ENDPOINT, {
       headers: { Authorization: `Bearer ${bearerToken}` },
     })
       .then(async (r) => {
@@ -1747,7 +1989,7 @@ async function syncAo3SavedFilters() {
         break;
       }
 
-      const response = await fetch(AO3_SAVED_FILTERS_SYNC_ENDPOINT, {
+      const response = await fetchWithTimeout(AO3_SAVED_FILTERS_SYNC_ENDPOINT, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1861,12 +2103,16 @@ function refreshLibraryOverlay() {
 async function fetchLibraryOverlayFromApi() {
   if (!bearerToken) return;
   try {
-    const response = await fetch(LIBRARY_OVERLAY_ENDPOINT, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${bearerToken}`,
+    const response = await fetchWithTimeout(
+      LIBRARY_OVERLAY_ENDPOINT,
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${bearerToken}`,
+        },
       },
-    });
+      OVERLAY_REQUEST_TIMEOUT_MS,
+    );
     const authError = await applyAuthFailureResponse(response);
     if (authError) {
       return false;
@@ -1878,14 +2124,26 @@ async function fetchLibraryOverlayFromApi() {
     const json = await response.json();
     const data = json && json.data;
     if (data && data.entries && typeof data.syncVersion === "string") {
-      const entries = applyOptimisticChapterFloors({ ...data.entries });
-      const snapshot = await storageGetLocal([TRACE_ACCOUNT_ID_KEY, AUTH_STATE_KEY]);
+      const snapshot = await storageGetLocal([
+        TRACE_ACCOUNT_ID_KEY,
+        AUTH_STATE_KEY,
+        OVERLAY_STORAGE_KEY,
+      ]);
+      const currentCache = snapshot[OVERLAY_STORAGE_KEY];
+      const keepNewerCache =
+        currentCache &&
+        typeof currentCache === "object" &&
+        isOlderOverlaySyncVersion(data.syncVersion, currentCache.syncVersion);
+      const effectiveData = keepNewerCache ? currentCache : data;
+      const entries = applyOptimisticChapterFloors({
+        ...(effectiveData.entries || {}),
+      });
       await new Promise((resolve) => {
         ext.storage.local.set(
           {
             [TRACE_API_BASE_STORAGE_KEY]: normalizedTraceApiBase(),
             [OVERLAY_STORAGE_KEY]: scopedOverlayCache({
-              ...data,
+              ...effectiveData,
               entries,
             }, snapshot),
             libraryOverlayFetchedAt: new Date().toISOString(),
@@ -1893,6 +2151,10 @@ async function fetchLibraryOverlayFromApi() {
           resolve,
         );
       });
+      await reconcilePendingWorkStatesWithOverlay(
+        entries,
+        effectiveData.syncVersion,
+      );
       return true;
     }
     return false;
@@ -2020,11 +2282,14 @@ function sendIosNativeMessage(message) {
     }
 
     let settled = false;
+    let timeoutId = null;
     const finish = (value) => {
       if (settled) return;
       settled = true;
+      if (timeoutId != null) clearTimeout(timeoutId);
       resolve(value || null);
     };
+    timeoutId = setTimeout(() => finish(null), NATIVE_MESSAGE_TIMEOUT_MS);
 
     const attempts = [[message], [IOS_NATIVE_APPLICATION_ID, message]];
     const trySend = (index) => {
@@ -2165,7 +2430,7 @@ async function bootstrapInitialAuth(res) {
 
   if (result?.success) return;
   if (result?.retrying || result?.stale) return;
-  if (result?.state === "unknown") return;
+  if (result?.state === "unknown" || result?.state === "connected") return;
   await bootstrapAuthFromIosNative("stored_token_rejected");
 }
 
@@ -2888,10 +3153,10 @@ function handleAutoTrack(payload, sender, sendResponse) {
 async function executeAutoTrack(payload, sender, allowNativeAuthRetry = true) {
   if (!bearerToken) return;
   const workKey = externalStoryKeyFromItem(payload && payload.item);
-  await markWorkPending(workKey, "auto_track");
+  const workOperationId = await markWorkPending(workKey, "auto_track");
   recordOptimisticChapterFloor(payload && payload.item);
   try {
-    const response = await fetch(API_ENDPOINT, {
+    const response = await fetchWithTimeout(API_ENDPOINT, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -2914,12 +3179,17 @@ async function executeAutoTrack(payload, sender, allowNativeAuthRetry = true) {
           }
         }
         recordArchiveIssueFromPayload(payload, "auth");
-        await markWorkError(workKey, "auto_track", authError);
+        await markWorkError(workKey, "auto_track", authError, workOperationId);
         setBadge(sender?.tab?.id, "LOG", "#9C6B00");
         return { ok: false, error: authError };
       } else if (response.status === 402) {
         await refreshLibraryOverlay();
-        await markWorkError(workKey, "auto_track", "free_limit_reached");
+        await markWorkError(
+          workKey,
+          "auto_track",
+          "free_limit_reached",
+          workOperationId,
+        );
         setUpgradeState(
           "You've reached the free library limit. Upgrade to Pro for unlimited stories.",
           {
@@ -2935,7 +3205,12 @@ async function executeAutoTrack(payload, sender, allowNativeAuthRetry = true) {
           response.status === 400 ? "parser" : "network",
         );
         await refreshLibraryOverlay();
-        await markWorkError(workKey, "auto_track", "http_" + response.status);
+        await markWorkError(
+          workKey,
+          "auto_track",
+          "http_" + response.status,
+          workOperationId,
+        );
         setConnectedWithSyncWarning(
           `Automatic sync didn’t go through (${response.status}). Manual import from this menu still works.`,
           {
@@ -2965,6 +3240,7 @@ async function executeAutoTrack(payload, sender, allowNativeAuthRetry = true) {
           confirmation.workKey,
           "auto_track",
           "confirmation_missing",
+          workOperationId,
         );
         setConnectedWithSyncWarning(
           "Trace accepted the save but did not confirm it in your library. Try Add to Trace again.",
@@ -2978,24 +3254,39 @@ async function executeAutoTrack(payload, sender, allowNativeAuthRetry = true) {
       // The native iOS success signal is intentionally later than the HTTP
       // response: only the same confirmation that drives the library UI may
       // claim a story landed.
-      recordArchiveActionFromPayload(payload, "track");
-      markFirstSaveSeen();
-      setConnectedState({
-        firstSaveSeen: true,
-        lastTrackSuccessAt: new Date().toISOString(),
-      });
-      await signalLibraryInvalidated("track");
-      setBadge(sender?.tab?.id, "OK", "#0D7A5F");
-      setTimeout(() => clearBadge(sender?.tab?.id), 2000);
-      const out = entryId ? { ok: true, entryId } : { ok: true };
-      if (confirmation.state) out.state = confirmation.state;
-      return out;
+      return finalizeConfirmedTrack(
+        payload,
+        sender,
+        confirmation,
+        entryId,
+        "auto_track",
+      );
     }
   } catch (error) {
     console.error("[Trace] Network error:", error);
     recordArchiveIssueFromPayload(payload, "network");
-    await refreshLibraryOverlay();
-    await markWorkError(workKey, "auto_track", "network_error");
+    const confirmation = await reconcileUncertainTrackRequest(workKey, payload);
+    if (confirmation.state) {
+      return finalizeConfirmedTrack(
+        payload,
+        sender,
+        confirmation,
+        confirmation.state.entryId,
+        "auto_track",
+      );
+    }
+    const errorCode =
+      error instanceof TraceRequestTimeoutError
+        ? "request_timeout"
+        : "network_error";
+    const errorState = await markWorkError(
+      workKey,
+      "auto_track",
+      errorCode,
+      workOperationId,
+    );
+    const newerSavedResult = savedResultFromWorkState(errorState);
+    if (newerSavedResult) return newerSavedResult;
     setConnectedWithSyncWarning(
       "Couldn’t reach Trace for automatic sync. Manual import still works — try again later for sync.",
       {
@@ -3003,7 +3294,7 @@ async function executeAutoTrack(payload, sender, allowNativeAuthRetry = true) {
       },
     );
     setBadge(sender?.tab?.id, "!", "#9C6B00");
-    return { ok: false, error: "network_error" };
+    return { ok: false, error: errorCode };
   }
 }
 
@@ -3026,7 +3317,7 @@ async function handleMetadataBroadcast(payload, sender) {
   if (!shouldBroadcast) return;
 
   try {
-    const response = await fetch(METADATA_ENDPOINT, {
+    const response = await fetchWithTimeout(METADATA_ENDPOINT, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -3068,7 +3359,7 @@ async function handleLibraryMetadataRefresh(payload, sender) {
   if (!shouldBroadcast) return;
 
   try {
-    const response = await fetch(LIBRARY_METADATA_REFRESH_ENDPOINT, {
+    const response = await fetchWithTimeout(LIBRARY_METADATA_REFRESH_ENDPOINT, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -3135,9 +3426,10 @@ async function handleQuickAdd(
     return;
   }
 
+  let workOperationId = null;
   try {
-    await markWorkPending(workKey, "quick_add");
-    const response = await fetch(API_ENDPOINT, {
+    workOperationId = await markWorkPending(workKey, "quick_add");
+    const response = await fetchWithTimeout(API_ENDPOINT, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -3165,6 +3457,7 @@ async function handleQuickAdd(
           confirmation.workKey,
           "quick_add",
           "confirmation_missing",
+          workOperationId,
         );
         setConnectedWithSyncWarning(
           "Trace accepted the save but did not confirm it in your library. Try Add to Trace again.",
@@ -3180,19 +3473,14 @@ async function handleQuickAdd(
       }
       // Match auto-track: a successful request alone is not a confirmed save
       // for the iOS handoff receipt.
-      recordArchiveActionFromPayload(payload, "quick_add");
-      markFirstSaveSeen();
-      setConnectedState({
-        firstSaveSeen: true,
-        lastQuickAddAt: new Date().toISOString(),
-      });
-      setBadge(sender?.tab?.id, "OK", "#0D7A5F");
-      setTimeout(() => clearBadge(sender?.tab?.id), 2000);
-      await signalLibraryInvalidated("quick_add");
+      const out = await finalizeConfirmedTrack(
+        payload,
+        sender,
+        confirmation,
+        entryId,
+        "quick_add",
+      );
       if (sendResponse) {
-        const out = { ok: true };
-        if (entryId) out.entryId = entryId;
-        if (confirmation.state) out.state = confirmation.state;
         sendResponse(out);
       }
     } else {
@@ -3210,25 +3498,63 @@ async function handleQuickAdd(
           }
         }
         recordArchiveIssueFromPayload(payload, "auth");
-        await markWorkError(workKey, "quick_add", authError);
+        await markWorkError(workKey, "quick_add", authError, workOperationId);
         if (sendResponse) sendResponse({ ok: false, error: authError });
       } else if (response.status === 402) {
-        await markWorkError(workKey, "quick_add", "free_limit_reached");
+        await markWorkError(
+          workKey,
+          "quick_add",
+          "free_limit_reached",
+          workOperationId,
+        );
         if (sendResponse) sendResponse({ ok: false, error: "free_limit_reached" });
       } else {
         recordArchiveIssueFromPayload(
           payload,
           response.status === 400 ? "parser" : "network",
         );
-        await markWorkError(workKey, "quick_add", "http_" + response.status);
+        await markWorkError(
+          workKey,
+          "quick_add",
+          "http_" + response.status,
+          workOperationId,
+        );
         if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
       }
     }
   } catch (e) {
     console.error("[Trace] Quick-add error:", e);
     recordArchiveIssueFromPayload(payload, "network");
-    await markWorkError(workKey, "quick_add", "network_error");
-    if (sendResponse) sendResponse({ ok: false, error: String(e?.message || e) });
+    const confirmation = await reconcileUncertainTrackRequest(workKey, payload);
+    if (confirmation.state) {
+      const out = await finalizeConfirmedTrack(
+        payload,
+        sender,
+        confirmation,
+        confirmation.state.entryId,
+        "quick_add",
+      );
+      if (sendResponse) sendResponse(out);
+      return;
+    }
+    const errorCode =
+      e instanceof TraceRequestTimeoutError ? "request_timeout" : "network_error";
+    const errorState = await markWorkError(
+      workKey,
+      "quick_add",
+      errorCode,
+      workOperationId,
+    );
+    const newerSavedResult = savedResultFromWorkState(errorState);
+    if (newerSavedResult) {
+      if (sendResponse) sendResponse(newerSavedResult);
+      return;
+    }
+    setConnectedWithSyncWarning(
+      "Trace did not confirm this save. Try Add to Trace again.",
+      { lastQuickAddAt: new Date().toISOString() },
+    );
+    if (sendResponse) sendResponse({ ok: false, error: errorCode });
   }
 }
 
@@ -3391,7 +3717,7 @@ async function handleSetHiddenWork(payload, sender, sendResponse) {
   }
 
   try {
-    const response = await fetch(WORK_PREFERENCES_ENDPOINT, {
+    const response = await fetchWithTimeout(WORK_PREFERENCES_ENDPOINT, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -3713,7 +4039,7 @@ async function handlePatchLibraryEntry(payload, sender, sendResponse) {
   }
 
   try {
-    const response = await fetch(`${LIBRARY_ENTRY_ENDPOINT_BASE}/${encodeURIComponent(entryId)}`, {
+    const response = await fetchWithTimeout(`${LIBRARY_ENTRY_ENDPOINT_BASE}/${encodeURIComponent(entryId)}`, {
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
@@ -3724,14 +4050,14 @@ async function handlePatchLibraryEntry(payload, sender, sendResponse) {
 
     if (response.ok) {
       markFirstSaveSeen();
-      setConnectedState({
-        firstSaveSeen: true,
-        lastLibraryEntryPatchAt: new Date().toISOString(),
-      });
       setBadge(sender?.tab?.id, "OK", "#0D7A5F");
       setTimeout(() => clearBadge(sender?.tab?.id), 2000);
       const workKey = await patchOverlayLibraryEntry(entryId, patch);
       await signalLibraryInvalidated("library_entry_patch");
+      setConnectedState({
+        firstSaveSeen: true,
+        lastLibraryEntryPatchAt: new Date().toISOString(),
+      });
       if (sendResponse) sendResponse({ ok: true, entryId, patch, workKey });
     } else {
       const authError = await applyAuthFailureResponse(response, {
@@ -3774,7 +4100,7 @@ async function handleFinishQualificationSignal(payload, sender, sendResponse) {
   }
 
   try {
-    const response = await fetch(FINISH_QUALIFICATION_ENDPOINT, {
+    const response = await fetchWithTimeout(FINISH_QUALIFICATION_ENDPOINT, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -3829,7 +4155,7 @@ async function handleSetReaderStatus(payload, sender, sendResponse) {
   }
 
   try {
-    const response = await fetch(`${LIBRARY_ENTRY_ENDPOINT_BASE}/${encodeURIComponent(entryId)}`, {
+    const response = await fetchWithTimeout(`${LIBRARY_ENTRY_ENDPOINT_BASE}/${encodeURIComponent(entryId)}`, {
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
