@@ -269,6 +269,7 @@ globalThis.__testHooks = {
   patchOverlayHiddenPreference,
   patchOverlayReaderStatus,
   patchOverlayLibraryEntry,
+  nonRegressingOverlayEntry,
   sendIosNativeMessage,
   shouldIgnoreSenderForAutoTrack,
   recordArchiveReadiness,
@@ -2064,7 +2065,14 @@ test("executeAutoTrack success refreshes overlay cache immediately", async () =>
   h.hooks.setBearerToken("token-6");
 
   await h.hooks.executeAutoTrack(
-    { s: "ao3", item: { t: "Story", u: "https://archiveofourown.org/works/2" } },
+    {
+      s: "ao3",
+      item: {
+        src: "ao3",
+        t: "Story",
+        u: "https://archiveofourown.org/works/2",
+      },
+    },
     { tab: { id: 67 } },
   );
 
@@ -3900,6 +3908,131 @@ test("TRACE_AUTO_TRACK confirms saved from an authoritative track entry", async 
   assert.equal(response.state.status, "saved");
   assert.equal(response.state.entry.entryId, entry.entryId);
   assert.equal(h.store.libraryOverlayCache.entries["ao3:203"].entryId, entry.entryId);
+});
+
+test("TRACE_AUTO_TRACK ignores an older chapter response that finishes last", async () => {
+  const chapter10 = createDeferred();
+  const chapter11 = createDeferred();
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-at-ordered",
+      traceAccountId: "acct-at-ordered",
+      libraryOverlayCache: {
+        entries: {
+          "ao3:211": {
+            status: "READING",
+            readerStatus: "READING",
+            entryId: "entry-at-ordered",
+            chapters: { current: 9, total: 13 },
+          },
+        },
+        syncVersion: "2026-07-13T10:00:00.000Z",
+      },
+    },
+    fetchImpl: async (url, init) => {
+      if (!String(url).endsWith("/api/extension/track")) {
+        return createResponse({ ok: false, status: 404 });
+      }
+      const body = JSON.parse(init.body);
+      return body.item.chn === 10 ? chapter10.promise : chapter11.promise;
+    },
+  });
+  h.hooks.setBearerToken("token-at-ordered");
+
+  const payloadForChapter = (chapter) => ({
+    s: "ao3",
+    at: new Date().toISOString(),
+    item: {
+      src: "ao3",
+      ctx: "story",
+      t: "Story",
+      u: "https://archiveofourown.org/works/211",
+      chn: chapter,
+      cht: 13,
+    },
+  });
+
+  const chapter10Result = h.hooks.executeAutoTrack(
+    payloadForChapter(10),
+    { tab: { id: 210 } },
+  );
+  await flush();
+  const chapter11Result = h.hooks.executeAutoTrack(
+    payloadForChapter(11),
+    { tab: { id: 211 } },
+  );
+  await flush();
+
+  chapter11.resolve(
+    createResponse({
+      json: {
+        success: true,
+        data: {
+          entry_id: "entry-at-ordered",
+          work_key: "ao3:211",
+          entry: {
+            status: "READING",
+            readerStatus: "READING",
+            entryId: "entry-at-ordered",
+            chapters: { current: 11, total: 13 },
+          },
+          syncVersion: "2026-07-13T10:00:02.000Z",
+        },
+      },
+    }),
+  );
+  const newer = await chapter11Result;
+  assert.equal(newer.state.entry.chapters.current, 11);
+
+  chapter10.resolve(
+    createResponse({
+      json: {
+        success: true,
+        data: {
+          entry_id: "entry-at-ordered",
+          work_key: "ao3:211",
+          entry: {
+            status: "READING",
+            readerStatus: "READING",
+            entryId: "entry-at-ordered",
+            chapters: { current: 10, total: 13 },
+          },
+          syncVersion: "2026-07-13T10:00:01.000Z",
+        },
+      },
+    }),
+  );
+  const older = await chapter10Result;
+
+  assert.equal(older.state.entry.chapters.current, 11);
+  assert.equal(
+    h.store.libraryOverlayCache.entries["ao3:211"].chapters.current,
+    11,
+  );
+  assert.equal(
+    h.store.traceWorkStatesV1.items["acct-at-ordered|ao3:211"].entry.chapters.current,
+    11,
+  );
+  assert.equal(
+    h.store.libraryOverlayCache.syncVersion,
+    "2026-07-13T10:00:02.000Z",
+  );
+});
+
+test("overlay cache chapter progress never regresses", () => {
+  const h = createBackgroundHarness();
+  const merged = h.hooks.nonRegressingOverlayEntry(
+    {
+      status: "READING",
+      chapters: { current: 11, total: 13 },
+    },
+    {
+      status: "READING",
+      chapters: { current: 10, total: 12 },
+    },
+  );
+
+  assert.deepEqual(plainJson(merged.chapters), { current: 11, total: 13 });
 });
 
 test("TRACE_AUTO_TRACK confirms legacy track responses only after overlay refresh sees the entry", async () => {

@@ -1009,6 +1009,7 @@ function publicWorkState(state) {
     expiresAt: state.expiresAt || null,
     entryId: state.entryId || null,
     entry: state.entry || null,
+    syncVersion: state.syncVersion || null,
     error: state.error || null,
   };
 }
@@ -1056,29 +1057,41 @@ async function setWorkState(workKey, patch) {
   const accountId = snapshot.accountId;
   const key = workStateStorageKey(accountId, workKey);
   const previous = snapshot.states.items[key] || {};
-  if (previous.status === "saved" && patch.status !== "saved") {
-    return publicWorkState(previous);
-  }
+  const startsNewOperation =
+    patch.status === "pending" &&
+    typeof patch.operationId === "string" &&
+    patch.operationId.length > 0;
   if (
+    !startsNewOperation &&
     patch.operationId &&
     previous.operationId &&
-    patch.operationId !== previous.operationId &&
-    patch.status !== "saved"
+    patch.operationId !== previous.operationId
   ) {
     return publicWorkState(previous);
   }
+  if (
+    previous.status === "saved" &&
+    patch.status !== "saved" &&
+    !startsNewOperation
+  ) {
+    return publicWorkState(previous);
+  }
+  const effectivePatch =
+    previous.status === "saved" && startsNewOperation
+      ? { ...patch, status: "saved" }
+      : patch;
   const now = Date.now();
-  const status = patch.status || previous.status || "pending";
+  const status = effectivePatch.status || previous.status || "pending";
   const ttl =
     status === "pending" ? WORK_STATE_PENDING_TTL_MS : WORK_STATE_SETTLED_TTL_MS;
   const next = {
     ...previous,
-    ...patch,
+    ...effectivePatch,
     accountId,
     workKey,
     status,
     startedAt:
-      previous.startedAt || patch.startedAt || new Date(now).toISOString(),
+      previous.startedAt || effectivePatch.startedAt || new Date(now).toISOString(),
     updatedAt: new Date(now).toISOString(),
     expiresAt: now + ttl,
   };
@@ -1125,7 +1138,7 @@ async function markWorkPending(workKey, operation) {
   return operationId;
 }
 
-async function markWorkSaved(workKey, data, fallbackEntryId) {
+async function markWorkSaved(workKey, data, fallbackEntryId, operationId = null) {
   if (!workKey && data && typeof data.work_key === "string") {
     workKey = data.work_key;
   }
@@ -1139,6 +1152,7 @@ async function markWorkSaved(workKey, data, fallbackEntryId) {
     fallbackEntryId ||
     null;
   return setWorkState(workKey, {
+    ...(operationId ? { operationId } : {}),
     status: "saved",
     error: null,
     entry,
@@ -1183,6 +1197,44 @@ async function reconcilePendingWorkStatesWithOverlay(entries, syncVersion) {
   if (changed) await writeWorkStates(snapshot.states);
 }
 
+function nonRegressingOverlayEntry(existing, incoming) {
+  if (!incoming || typeof incoming !== "object") return incoming;
+  if (!existing || typeof existing !== "object") return incoming;
+  const existingChapters = existing.chapters;
+  const incomingChapters = incoming.chapters;
+  if (!existingChapters || !incomingChapters) return incoming;
+
+  const existingCurrent = existingChapters.current;
+  const incomingCurrent = incomingChapters.current;
+  if (
+    typeof existingCurrent !== "number" ||
+    !Number.isFinite(existingCurrent) ||
+    typeof incomingCurrent !== "number" ||
+    !Number.isFinite(incomingCurrent)
+  ) {
+    return incoming;
+  }
+
+  const existingTotal = existingChapters.total;
+  const incomingTotal = incomingChapters.total;
+  const current = Math.max(existingCurrent, incomingCurrent);
+  const totalCandidates = [existingTotal, incomingTotal].filter(
+    (value) => typeof value === "number" && Number.isFinite(value),
+  );
+  const total = totalCandidates.length > 0 ? Math.max(...totalCandidates) : null;
+  if (current === incomingCurrent && total === incomingChapters.total) {
+    return incoming;
+  }
+  return {
+    ...incoming,
+    chapters: {
+      ...incomingChapters,
+      current,
+      total,
+    },
+  };
+}
+
 async function applyTrackResponseToOverlay(payload, data) {
   if (!data || !data.entry || typeof data.entry !== "object") return null;
   const workKey =
@@ -1197,9 +1249,11 @@ async function applyTrackResponseToOverlay(payload, data) {
     AUTH_STATE_KEY,
   ]);
   const cache = snapshot[OVERLAY_STORAGE_KEY] || {};
+  const existingEntries =
+    cache.entries && typeof cache.entries === "object" ? cache.entries : {};
   const entries = {
-    ...(cache.entries && typeof cache.entries === "object" ? cache.entries : {}),
-    [workKey]: data.entry,
+    ...existingEntries,
+    [workKey]: nonRegressingOverlayEntry(existingEntries[workKey], data.entry),
   };
   const nextCache = scopedOverlayCache({
     ...cache,
@@ -1244,11 +1298,27 @@ async function confirmTrackedWorkState(
   payload,
   data,
   fallbackEntryId,
+  operationId,
   options = {},
 ) {
-  const responseWorkKey = await applyTrackResponseToOverlay(payload, data);
+  const responseWorkKey =
+    data && typeof data.work_key === "string" && data.work_key
+      ? data.work_key
+      : externalStoryKeyFromItem(payload && payload.item);
   const confirmedWorkKey = responseWorkKey || workKey;
-  let state = await markWorkSaved(confirmedWorkKey, data, fallbackEntryId);
+  let state = await markWorkSaved(
+    confirmedWorkKey,
+    data,
+    fallbackEntryId,
+    operationId,
+  );
+  if (state && state.entry) {
+    await applyTrackResponseToOverlay(payload, {
+      work_key: confirmedWorkKey,
+      entry: state.entry,
+      syncVersion: state.syncVersion,
+    });
+  }
   if (state || !confirmedWorkKey) return { workKey: confirmedWorkKey, state };
   if (!options.allowOverlayCacheFallback) return { workKey: confirmedWorkKey, state };
 
@@ -1264,17 +1334,25 @@ async function confirmTrackedWorkState(
           null,
       },
       fallbackEntryId,
+      operationId,
     );
   }
   return { workKey: confirmedWorkKey, state };
 }
 
-async function waitForTrackedWorkConfirmation(workKey, payload, data, fallbackEntryId) {
+async function waitForTrackedWorkConfirmation(
+  workKey,
+  payload,
+  data,
+  fallbackEntryId,
+  operationId,
+) {
   let confirmation = await confirmTrackedWorkState(
     workKey,
     payload,
     data,
     fallbackEntryId,
+    operationId,
   );
   if (confirmation.state || !confirmation.workKey) return confirmation;
 
@@ -1288,6 +1366,7 @@ async function waitForTrackedWorkConfirmation(workKey, payload, data, fallbackEn
       payload,
       null,
       fallbackEntryId,
+      operationId,
       { allowOverlayCacheFallback: refreshed === true },
     );
     if (confirmation.state || !confirmation.workKey) return confirmation;
@@ -1296,7 +1375,7 @@ async function waitForTrackedWorkConfirmation(workKey, payload, data, fallbackEn
   return confirmation;
 }
 
-async function reconcileUncertainTrackRequest(workKey, payload) {
+async function reconcileUncertainTrackRequest(workKey, payload, operationId) {
   const refreshed = await refreshLibraryOverlay();
   if (!refreshed) return { workKey, state: null };
   return confirmTrackedWorkState(
@@ -1304,6 +1383,7 @@ async function reconcileUncertainTrackRequest(workKey, payload) {
     payload,
     null,
     null,
+    operationId,
     { allowOverlayCacheFallback: true },
   );
 }
@@ -3233,6 +3313,7 @@ async function executeAutoTrack(payload, sender, allowNativeAuthRetry = true) {
         payload,
         data,
         entryId,
+        workOperationId,
       );
       if (confirmation.workKey && !confirmation.state) {
         recordArchiveIssueFromPayload(payload, "network");
@@ -3265,7 +3346,11 @@ async function executeAutoTrack(payload, sender, allowNativeAuthRetry = true) {
   } catch (error) {
     console.error("[Trace] Network error:", error);
     recordArchiveIssueFromPayload(payload, "network");
-    const confirmation = await reconcileUncertainTrackRequest(workKey, payload);
+    const confirmation = await reconcileUncertainTrackRequest(
+      workKey,
+      payload,
+      workOperationId,
+    );
     if (confirmation.state) {
       return finalizeConfirmedTrack(
         payload,
@@ -3450,6 +3535,7 @@ async function handleQuickAdd(
         payload,
         data,
         entryId,
+        workOperationId,
       );
       if (confirmation.workKey && !confirmation.state) {
         recordArchiveIssueFromPayload(payload, "network");
@@ -3525,7 +3611,11 @@ async function handleQuickAdd(
   } catch (e) {
     console.error("[Trace] Quick-add error:", e);
     recordArchiveIssueFromPayload(payload, "network");
-    const confirmation = await reconcileUncertainTrackRequest(workKey, payload);
+    const confirmation = await reconcileUncertainTrackRequest(
+      workKey,
+      payload,
+      workOperationId,
+    );
     if (confirmation.state) {
       const out = await finalizeConfirmedTrack(
         payload,

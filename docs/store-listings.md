@@ -1,4 +1,4 @@
-# Extension Store Copy - 0.5.10
+# Extension Store Copy - 0.5.11
 
 Use this copy for Chrome Web Store, Firefox Add-ons, App Store Connect, and
 public release notes. Keep evergreen store descriptions separate from
@@ -44,15 +44,15 @@ FictionPress.
 
 ## What's New / Release Notes
 
-Trace extension 0.5.10 makes Safari saves and account checks resilient to
-browser restarts and temporary API delays:
+Trace extension 0.5.11 keeps story-page chapter progress aligned with your
+Trace library when page changes overlap:
 
-- Keeps a verified Trace connection usable when an account recheck is
-  temporarily unavailable or rate limited.
-- Bounds save requests so listing and story controls cannot remain stuck in an
-  adding state indefinitely.
-- Reconciles uncertain saves with fresh library state and prevents older
-  requests from overwriting a newer confirmed save.
+- Prevents a delayed response from an earlier chapter from replacing newer
+  confirmed progress in the story overlay.
+- Keeps cached chapter progress monotonic while overlapping story-page updates
+  settle.
+- Preserves the newer confirmed state across Safari background-worker and page
+  lifecycle handoffs.
 
 Privacy boundary unchanged: Trace still reads story metadata and reading
 progress from supported pages, not AO3/FFN credentials, cookies, private
@@ -78,13 +78,11 @@ The extension does not request cookie permissions.
 
 ## App Store Connect - iOS What's New
 
-Trace for iOS 0.5.10 fixes intermittent Safari connection and saving failures:
+Trace for iOS 0.5.11 fixes stale chapter progress in the Safari story overlay:
 
-- Prevents false Check Trace connection warnings after Safari restarts when the
-  account is still connected.
-- Stops Add to Trace from remaining stuck during temporary request failures.
-- Reconciles confirmed saves and preserves their state across overlapping
-  actions and Safari worker restarts.
+- Keeps the story overlay on the newest confirmed chapter when navigation
+  requests finish out of order.
+- Prevents older cached progress from replacing a later successful update.
 
 ## Screenshot Preparation
 
