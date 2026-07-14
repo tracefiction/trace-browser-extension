@@ -23,6 +23,8 @@ const RELEASE_ORIGIN_PATHS = [
 ];
 
 const MANIFEST_PATH = "Shared (Extension)/Resources/manifest.json";
+const BACKGROUND_SOURCE_PATH = "src/background.js";
+const GENERATED_BACKGROUND_PATH = "Shared (Extension)/Resources/background.js";
 
 const errors = [];
 const warnings = [];
@@ -197,6 +199,49 @@ function checkReleaseArtifactsDoNotUseLocalOrigins(files) {
   }
 }
 
+function generatedBackgroundOrigin(text, constantName) {
+  const match = text.match(
+    new RegExp(`const ${constantName} = "([^"\\n]*)";`),
+  );
+  return match?.[1] ?? null;
+}
+
+function firstDifferentLine(expected, actual) {
+  const expectedLines = expected.split("\n");
+  const actualLines = actual.split("\n");
+  const count = Math.max(expectedLines.length, actualLines.length);
+  for (let index = 0; index < count; index += 1) {
+    if (expectedLines[index] !== actualLines[index]) return index + 1;
+  }
+  return 1;
+}
+
+function checkGeneratedBackgroundParity() {
+  const source = readText(BACKGROUND_SOURCE_PATH);
+  const generated = readText(GENERATED_BACKGROUND_PATH);
+  const apiBase = generatedBackgroundOrigin(generated, "TRACE_API_BASE");
+  const webOrigin = generatedBackgroundOrigin(generated, "TRACE_WEB_ORIGIN");
+  if (apiBase === null || webOrigin === null) {
+    addError(
+      GENERATED_BACKGROUND_PATH,
+      1,
+      "generated background must contain configured Trace origin constants.",
+    );
+    return;
+  }
+
+  const expected = source
+    .replace(/__TRACE_API_BASE__/g, apiBase)
+    .replace(/__TRACE_WEB_ORIGIN__/g, webOrigin);
+  if (generated !== expected) {
+    addError(
+      GENERATED_BACKGROUND_PATH,
+      firstDifferentLine(expected, generated),
+      "generated Safari background is stale; run npm run build or npm run build:release.",
+    );
+  }
+}
+
 function loadJsonFromGit(repoPath) {
   const result = runGit(["show", `HEAD:${repoPath}`], { allowFailure: true });
   if (result.status !== 0) return null;
@@ -245,6 +290,7 @@ function main() {
   checkPrivateHarnessIsUntracked();
   checkForbiddenPrivacyPatterns(files);
   checkReleaseArtifactsDoNotUseLocalOrigins(files);
+  checkGeneratedBackgroundParity();
   checkManifestPermissionChanges();
 
   printIssues();

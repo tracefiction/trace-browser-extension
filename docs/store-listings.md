@@ -1,4 +1,4 @@
-# Extension Store Copy - 0.5.12
+# Extension Store Copy - 0.5.13
 
 Use this copy for Chrome Web Store, Firefox Add-ons, App Store Connect, and
 public release notes. Keep evergreen store descriptions separate from
@@ -44,7 +44,7 @@ FictionPress.
 
 ## What's New / Release Notes
 
-Trace extension 0.5.12 makes story completion and extension startup more
+Trace extension 0.5.13 makes story completion and extension startup more
 responsive:
 
 - Shows the Finished confirmation as soon as the server save and local overlay
@@ -57,6 +57,8 @@ responsive:
   rechecks.
 - Keeps a newer Reading status and chapter position from being replaced by an
   older Saved receipt after a page reload or Safari restart.
+- Ensures Safari finishes queued story-state cleanup after disconnect so an
+  in-flight update cannot restore stale local status.
 
 Privacy boundary unchanged: Trace still reads story metadata and reading
 progress from supported pages, not AO3/FFN credentials, cookies, private
@@ -82,13 +84,15 @@ The extension does not request cookie permissions.
 
 ## App Store Connect - iOS What's New
 
-Trace for iOS 0.5.12 makes Safari story completion and extension startup more
+Trace for iOS 0.5.13 makes Safari story completion and extension startup more
 responsive:
 
 - Shows the Finished confirmation promptly after the library save succeeds.
 - Avoids a long Connecting state when reopening a previously verified session.
 - Preserves the latest Reading status in the story overlay across Safari page
   and background-worker restarts.
+- Prevents an in-flight story-state update from restoring stale local status
+  after the extension disconnects.
 
 ## Screenshot Preparation
 

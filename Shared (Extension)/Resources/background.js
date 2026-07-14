@@ -400,6 +400,9 @@ function clearToken() {
       TRACE_FIRST_SAVE_SEEN_KEY,
       TRACE_LIBRARY_COUNT_KEY,
     ]);
+    // A work-state mutation that was already queued must not restore data
+    // after logout clears the account-scoped cache.
+    void clearWorkStates();
   } catch (_) {
     /* ignore */
   }

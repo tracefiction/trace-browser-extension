@@ -279,6 +279,7 @@ globalThis.__testHooks = {
   setVerifiedBearerToken(value) { verifiedBearerToken = value; },
   getVerifiedBearerToken() { return verifiedBearerToken; },
   getBearerToken() { return bearerToken; },
+  setWorkState,
   getWorkStateForKey,
 };
 `;
@@ -371,6 +372,49 @@ test("TRACE_AUTH_UPDATE with blank token clears session and marks signed out", a
   assert.equal(h.store.traceWorkStatesV1, undefined);
   assert.equal(h.store.traceAuthState.state, "signed_out");
   assert.deepEqual(plainJson(h.badgeTextCalls.at(-1)), { text: "", tabId: 22 });
+});
+
+test("TRACE_AUTH_UPDATE clears a work-state write that was queued before sign-out", async () => {
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-queued",
+      traceAccountId: "acct-queued",
+    },
+  });
+  const queuedWriteStarted = createDeferred();
+  const originalSet = h.context.chrome.storage.local.set;
+  let releaseQueuedWrite = null;
+  h.context.chrome.storage.local.set = (patch, callback) => {
+    if (
+      releaseQueuedWrite === null &&
+      Object.prototype.hasOwnProperty.call(patch, "traceWorkStatesV1")
+    ) {
+      releaseQueuedWrite = () => originalSet(patch, callback);
+      queuedWriteStarted.resolve();
+      return;
+    }
+    originalSet(patch, callback);
+  };
+
+  const queuedWrite = h.hooks.setWorkState("ao3:queued", {
+    operation: "auto_track",
+    operationId: "queued-operation",
+    status: "pending",
+  });
+  await queuedWriteStarted.promise;
+
+  const response = await h.dispatchMessage(
+    { type: "TRACE_AUTH_UPDATE", token: "" },
+    { tab: { id: 23 } },
+  );
+  assert.deepEqual(plainJson(response), { success: true, state: "signed_out" });
+
+  releaseQueuedWrite();
+  await queuedWrite;
+  for (let attempt = 0; attempt < 8 && h.store.traceWorkStatesV1; attempt += 1) {
+    await flush();
+  }
+  assert.equal(h.store.traceWorkStatesV1, undefined);
 });
 
 test("TRACE_AUTH_UPDATE verifies account before marking connected", async () => {
