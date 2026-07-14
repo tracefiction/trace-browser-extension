@@ -1157,6 +1157,7 @@ function createStoryAutoTrackPendingHarness(options = {}) {
   );
   const sent = [];
   let autoTrackCallback;
+  let connectAndSaveCallback;
   let runtimeMessageListener = null;
   const chrome = {
     runtime: {
@@ -1185,10 +1186,37 @@ function createStoryAutoTrackPendingHarness(options = {}) {
           return;
         }
         if (msg.type === "TRACE_IOS_PENDING_FIRST_STORY_GET") {
+          const response = options.pendingFirstStoryResponse || { ok: true, url: "" };
           if (typeof cb === "function") {
-            cb(options.pendingFirstStoryResponse || { ok: true, url: "" });
+            cb(response);
+            return;
           }
-          return;
+          return Promise.resolve(response);
+        }
+        if (msg.type === "TRACE_CONNECT_AND_SAVE") {
+          const response = options.connectAndSaveResponse || {
+            ok: true,
+            snapshot: {
+              state: "connected",
+              reason: "none",
+              canExecuteAuthenticated: true,
+            },
+            error: "commands_unavailable",
+          };
+          if (options.holdConnectAndSave) {
+            if (typeof cb === "function") {
+              connectAndSaveCallback = cb;
+              return;
+            }
+            return new Promise((resolve) => {
+              connectAndSaveCallback = resolve;
+            });
+          }
+          if (typeof cb === "function") {
+            cb(response);
+            return;
+          }
+          return Promise.resolve(response);
         }
         if (msg.type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR") {
           if (typeof cb === "function") cb({ ok: true });
@@ -1230,6 +1258,7 @@ function createStoryAutoTrackPendingHarness(options = {}) {
   } else {
     installCollectorChrome(dom, chrome);
   }
+  dom.window.TRACE_SESSION_MODE = options.sessionMode || "legacy";
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -1241,6 +1270,9 @@ function createStoryAutoTrackPendingHarness(options = {}) {
     store,
     autoTrackCallback(response) {
       autoTrackCallback(response);
+    },
+    resolveConnectAndSave(response) {
+      connectAndSaveCallback(response);
     },
     sendRuntimeMessage(message) {
       return new Promise((resolve) => {
@@ -1460,6 +1492,55 @@ test("matching iOS pending first-story URL triggers quick-add and clears pending
   assert.equal(quickAdds[0].payload.item.src, "ffn");
   assert.equal(quickAdds[0].payload.item.u, "https://www.fanfiction.net/s/7038840/");
   assert.equal(pendingClears.length, 1);
+});
+
+test("kernel pending first story exposes Connect and save and never saves before verification", async () => {
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    holdConnectAndSave: true,
+    store: { prefAutoTrackEnabled: false },
+    pendingFirstStoryResponse: {
+      ok: true,
+      mode: "story",
+      hostKind: "ffn",
+      handoffId: "handoff_kernel_7038840",
+      url: "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter",
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  const handle = h.dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle);
+  assert.match(handle.textContent || "", /Connect and save/i);
+  assert.equal(h.sent.filter((message) => message.type === "TRACE_QUICK_ADD").length, 0);
+  assert.equal(
+    h.sent.filter((message) => message.type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR").length,
+    0,
+  );
+
+  handle.click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(h.sent.filter((message) => message.type === "TRACE_CONNECT_AND_SAVE").length, 1);
+  assert.match(handle.textContent || "", /Connecting/i);
+  assert.equal(h.sent.filter((message) => message.type === "TRACE_QUICK_ADD").length, 0);
+
+  h.resolveConnectAndSave({
+    ok: true,
+    snapshot: {
+      state: "connected",
+      reason: "none",
+      canExecuteAuthenticated: true,
+    },
+    error: "commands_unavailable",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.match(handle.textContent || "", /Connected/i);
+  assert.equal(h.sent.filter((message) => message.type === "TRACE_QUICK_ADD").length, 0);
+  assert.equal(
+    h.sent.filter((message) => message.type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR").length,
+    0,
+  );
 });
 
 test("matching iOS pending story handoff relays its scoped run receipt", async () => {

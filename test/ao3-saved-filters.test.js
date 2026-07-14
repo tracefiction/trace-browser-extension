@@ -167,6 +167,7 @@ test("manifest loads AO3 saved filters with existing archive content scripts", (
   assert.ok(archiveEntry, "expected archive content script entry");
   assert.ok(savedFiltersEntry, "expected AO3 saved filters content script entry");
   assert.deepEqual(archiveEntry.js, [
+    "popup-config.js",
     "trace-finish-qualify.js",
     "collector.js",
     "library-overlay-keys.js",

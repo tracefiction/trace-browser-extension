@@ -12,6 +12,20 @@ test("the app synchronizer is the sole v2 writer and native utility handlers do 
   assert.match(app, /traceAuthTokenAccount = "extension-provider-v2"/);
   assert.match(app, /retiredTraceAuthTokenAccount = "extension-token"/);
   assert.match(app, /case "TRACE_IOS_AUTH_TOKEN_CLEAR"/);
+  assert.match(app, /traceProviderProtocolVersion = 2/);
+  assert.match(
+    app,
+    /case "TRACE_IOS_AUTH_TOKEN_UPDATE":[\s\S]*body\["protocolVersion"\] as\? Int == Self\.traceProviderProtocolVersion[\s\S]*handleTraceSafariAuthTokenUpdate/,
+  );
+  assert.match(
+    app,
+    /case "TRACE_IOS_AUTH_TOKEN_CLEAR":[\s\S]*body\["protocolVersion"\] as\? Int == Self\.traceProviderProtocolVersion[\s\S]*handleTraceSafariAuthTokenClear/,
+  );
+  assert.match(app, /sharedProviderBootstrapReady = prepareSharedProviderForWebShell\(\)/);
+  assert.match(
+    app,
+    /if !sharedProviderBootstrapReady \{[\s\S]*sharedProviderBootstrapReady = prepareSharedProviderForWebShell\(\)[\s\S]*guard sharedProviderBootstrapReady[\s\S]*storeSharedTraceToken/,
+  );
   assert.match(app, /for account in \[traceAuthTokenAccount, retiredTraceAuthTokenAccount\]/);
   assert.match(app, /status == errSecSuccess \|\| status == errSecItemNotFound/);
 

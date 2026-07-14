@@ -11,7 +11,9 @@ import {
   BrowserStorage,
   ExplicitCredentialProvider,
   LegacyAccountState,
+  NativePendingFirstStoryReader,
   VerificationApi,
+  type PendingFirstStoryResponse,
   type RuntimePort,
   type StorageArea,
   type TabsPort,
@@ -23,6 +25,7 @@ export const SESSION_MESSAGE_TYPES = Object.freeze({
   snapshot: "TRACE_SESSION_GET_SNAPSHOT",
   action: "TRACE_SESSION_ACTION",
   connectAndSave: "TRACE_CONNECT_AND_SAVE",
+  pendingFirstStory: "TRACE_IOS_PENDING_FIRST_STORY_GET",
   status: "TRACE_EXTENSION_STATUS_QUERY",
 });
 
@@ -38,6 +41,12 @@ interface RuntimeEnvironment {
   readonly apiBase: string;
   readonly webOrigin: string;
   readonly randomId: () => string;
+  readonly retryClock?: RetryClock;
+}
+
+interface RetryClock {
+  setTimeout(callback: () => void, delayMs: number): unknown;
+  clearTimeout(handle: unknown): void;
 }
 
 interface RuntimeResponse {
@@ -67,7 +76,7 @@ function toExtensionStatus(snapshot: SessionSnapshot): ExtensionStatusResponse {
         : snapshot.state === "reconnect_required"
           ? "reconnect_required"
           : snapshot.state === "degraded"
-            ? "error"
+            ? "unknown"
             : "unknown";
   return Object.freeze({
     installed: true,
@@ -112,6 +121,40 @@ const DISABLED_SNAPSHOT: SessionSnapshot = Object.freeze({
   reason: "none",
 });
 
+const RETRY_DELAYS_MS = Object.freeze([750, 2_500, 8_000] as const);
+
+const DEFAULT_RETRY_CLOCK: RetryClock = Object.freeze({
+  setTimeout(callback: () => void, delayMs: number) {
+    return globalThis.setTimeout(callback, delayMs);
+  },
+  clearTimeout(handle: unknown) {
+    globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>);
+  },
+});
+
+type RuntimeSender = Parameters<Parameters<RuntimePort["onMessage"]["addListener"]>[0]>[1];
+
+function isSupportedArchiveSender(sender: RuntimeSender | undefined): boolean {
+  const rawUrl = sender?.tab?.url ?? sender?.url;
+  if (typeof rawUrl !== "string") return false;
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== "https:") return false;
+    const host = url.hostname.toLowerCase();
+    return (
+      host === "archiveofourown.org" ||
+      host.endsWith(".archiveofourown.org") ||
+      host === "archiveofourown.gay" ||
+      host.endsWith(".archiveofourown.gay") ||
+      host === "archive.transformativeworks.org" ||
+      host === "www.fanfiction.net" ||
+      host === "m.fanfiction.net"
+    );
+  } catch {
+    return false;
+  }
+}
+
 class MemoryDiagnostics implements DiagnosticsPort {
   readonly #events: DiagnosticEvent[] = [];
 
@@ -126,9 +169,15 @@ export class SessionRuntimeController {
   readonly #sessionStorage: BrowserSessionStoragePort;
   readonly #credentials: BrowserCredentialPort;
   readonly #legacy: LegacyAccountState;
+  readonly #pendingFirstStory: NativePendingFirstStoryReader;
   readonly #service: SessionService;
+  readonly #retryClock: RetryClock;
   #initialization: Promise<void> | null = null;
   #storageFailure = false;
+  #automaticVerificationRetry = false;
+  #retryAttempt = 0;
+  #retryGeneration = 0;
+  #retryTimer: unknown | null = null;
 
   constructor(environment: RuntimeEnvironment) {
     this.#mode = environment.mode;
@@ -139,6 +188,11 @@ export class SessionRuntimeController {
     );
     this.#sessionStorage = new BrowserSessionStoragePort(storage);
     this.#legacy = new LegacyAccountState(storage);
+    this.#pendingFirstStory = new NativePendingFirstStoryReader(
+      environment.runtime,
+      environment.storageMode,
+    );
+    this.#retryClock = environment.retryClock ?? DEFAULT_RETRY_CLOCK;
     this.#credentials = new BrowserCredentialPort(
       storage,
       new ExplicitCredentialProvider({
@@ -153,7 +207,9 @@ export class SessionRuntimeController {
     this.#service = new SessionService({
       storage: this.#sessionStorage,
       credentials: this.#credentials,
-      api: new VerificationApi(environment.fetch, environment.apiBase),
+      api: new VerificationApi(environment.fetch, environment.apiBase, (disposition) => {
+        this.#automaticVerificationRetry = disposition === "automatic";
+      }),
       diagnostics: new MemoryDiagnostics(),
     });
   }
@@ -169,7 +225,10 @@ export class SessionRuntimeController {
     return this.#service.snapshot();
   }
 
-  async handle(message: unknown): Promise<RuntimeResponse | ExtensionStatusResponse | null> {
+  async handle(
+    message: unknown,
+    sender?: RuntimeSender,
+  ): Promise<RuntimeResponse | ExtensionStatusResponse | PendingFirstStoryResponse | null> {
     if (!isRecord(message) || typeof message.type !== "string") return null;
     if (!Object.values(SESSION_MESSAGE_TYPES).includes(message.type as never)) return null;
     await this.start();
@@ -178,16 +237,22 @@ export class SessionRuntimeController {
       if (typeof message.nonce !== "string" || !message.nonce.trim()) return null;
       return toExtensionStatus(this.snapshot());
     }
+    if (message.type === SESSION_MESSAGE_TYPES.pendingFirstStory) {
+      return isSupportedArchiveSender(sender)
+        ? this.#pendingFirstStory.read()
+        : { ok: false, error: "native_unavailable" };
+    }
     if (message.type === SESSION_MESSAGE_TYPES.snapshot) return this.#response();
     if (message.type === SESSION_MESSAGE_TYPES.connectAndSave) {
-      const action = await this.#runAction("connect");
+      if (!isSupportedArchiveSender(sender)) return null;
+      const action = await this.#runManualAction("connect");
       return this.#response(
         action,
         this.snapshot().state === "connected" ? "commands_unavailable" : undefined,
       );
     }
     if (!isSessionAction(message.action)) return this.#response({ kind: "ignored" });
-    return this.#response(await this.#runAction(message.action));
+    return this.#response(await this.#runManualAction(message.action));
   }
 
   async #startOnce(): Promise<void> {
@@ -197,12 +262,14 @@ export class SessionRuntimeController {
         await this.#sessionStorage.clearAll();
         await this.#credentials.clearAll();
       } else {
+        this.#automaticVerificationRetry = false;
         await this.#service.start();
       }
       this.#storageFailure = false;
     } catch {
       this.#storageFailure = true;
     }
+    this.#reconcileAutomaticRetry();
   }
 
   async #retryInitialization(): Promise<SessionActionResult> {
@@ -225,6 +292,9 @@ export class SessionRuntimeController {
   }
 
   async #runAction(action: SessionAction): Promise<SessionActionResult> {
+    if (action === "connect" || action === "retry" || action === "reconnect") {
+      this.#automaticVerificationRetry = false;
+    }
     if (action === "retry" && this.#storageFailure) return this.#retryInitialization();
     if (this.#storageFailure || this.#mode === "disabled") return { kind: "ignored" };
 
@@ -249,6 +319,55 @@ export class SessionRuntimeController {
     return this.#service.connect();
   }
 
+  async #runManualAction(action: SessionAction): Promise<SessionActionResult> {
+    this.#cancelAutomaticRetry(true);
+    const result = await this.#runAction(action);
+    this.#reconcileAutomaticRetry();
+    return result;
+  }
+
+  #automaticRetryIsEligible(): boolean {
+    const snapshot = this.snapshot();
+    return (
+      snapshot.state === "degraded" &&
+      (
+        snapshot.reason === "storage_unavailable" ||
+        (snapshot.reason === "verification_unavailable" && this.#automaticVerificationRetry)
+      )
+    );
+  }
+
+  #reconcileAutomaticRetry(): void {
+    if (!this.#automaticRetryIsEligible()) {
+      this.#cancelAutomaticRetry(true);
+      return;
+    }
+    if (this.#retryTimer !== null || this.#retryAttempt >= RETRY_DELAYS_MS.length) return;
+    const generation = this.#retryGeneration;
+    const delayMs = RETRY_DELAYS_MS[this.#retryAttempt]!;
+    this.#retryAttempt += 1;
+    this.#retryTimer = this.#retryClock.setTimeout(() => {
+      this.#retryTimer = null;
+      void this.#runAutomaticRetry(generation);
+    }, delayMs);
+  }
+
+  async #runAutomaticRetry(generation: number): Promise<void> {
+    if (generation !== this.#retryGeneration || !this.#automaticRetryIsEligible()) return;
+    await this.#runAction("retry");
+    if (generation !== this.#retryGeneration) return;
+    this.#reconcileAutomaticRetry();
+  }
+
+  #cancelAutomaticRetry(resetAttempt: boolean): void {
+    this.#retryGeneration += 1;
+    if (this.#retryTimer !== null) {
+      this.#retryClock.clearTimeout(this.#retryTimer);
+      this.#retryTimer = null;
+    }
+    if (resetAttempt) this.#retryAttempt = 0;
+  }
+
   async #clearLegacyAfterDisconnect(result: SessionActionResult): Promise<void> {
     if (result.kind !== "completed" || result.state !== "signed_out") return;
     try {
@@ -271,11 +390,11 @@ export class SessionRuntimeController {
 
 export function installSessionRuntime(environment: RuntimeEnvironment): SessionRuntimeController {
   const controller = new SessionRuntimeController(environment);
-  environment.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  environment.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!isRecord(message) || !Object.values(SESSION_MESSAGE_TYPES).includes(message.type as never)) {
       return false;
     }
-    void controller.handle(message).then(
+    void controller.handle(message, sender).then(
       (response) => sendResponse(response),
       () => sendResponse({
         ok: true,

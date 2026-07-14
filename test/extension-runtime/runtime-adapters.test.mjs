@@ -20,6 +20,41 @@ function deferred() {
   return { promise, resolve };
 }
 
+async function waitUntil(predicate, message) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail(message);
+}
+
+class FakeRetryClock {
+  constructor() {
+    this.pending = [];
+  }
+
+  setTimeout(callback, delayMs) {
+    const handle = { callback, delayMs };
+    this.pending.push(handle);
+    return handle;
+  }
+
+  clearTimeout(handle) {
+    this.pending = this.pending.filter((candidate) => candidate !== handle);
+  }
+
+  runNext() {
+    const next = this.pending.shift();
+    assert.ok(next, "expected a scheduled retry");
+    next.callback();
+    return next.delayMs;
+  }
+}
+
+const archiveSender = {
+  tab: { url: "https://www.fanfiction.net/s/7038840/1/A-Chance-Encounter" },
+};
+
 class PromiseStorageArea {
   constructor(initial = {}) {
     this.values = { ...initial };
@@ -49,6 +84,21 @@ class PromiseStorageArea {
       await wait;
     }
     for (const key of list) delete this.values[key];
+  }
+}
+
+class FailingThenHealthyStorageArea extends PromiseStorageArea {
+  constructor(initial = {}, failures = 1) {
+    super(initial);
+    this.failures = failures;
+  }
+
+  async get(keys) {
+    if (this.failures > 0) {
+      this.failures -= 1;
+      throw new Error("injected storage failure");
+    }
+    return super.get(keys);
   }
 }
 
@@ -196,7 +246,7 @@ test("Connect and save reports command handoff only after current-worker verific
     randomId: () => "id",
   });
 
-  const result = controller.handle({ type: "TRACE_CONNECT_AND_SAVE" });
+  const result = controller.handle({ type: "TRACE_CONNECT_AND_SAVE" }, archiveSender);
   while (!verificationStarted) await new Promise((resolve) => setImmediate(resolve));
   assert.equal(controller.snapshot().state, "verifying");
   verification.resolve(new Response(JSON.stringify({ account_id: "account-a" }), { status: 200 }));
@@ -227,9 +277,206 @@ test("Connect and save does not claim a command handoff when acquisition fails",
     randomId: () => "id",
   });
 
-  const result = await controller.handle({ type: "TRACE_CONNECT_AND_SAVE" });
+  const result = await controller.handle({ type: "TRACE_CONNECT_AND_SAVE" }, archiveSender);
   assert.equal(result.snapshot.state, "signed_out");
   assert.equal(Object.hasOwn(result, "error"), false);
+});
+
+test("Connect and save rejects non-archive senders before credential acquisition", async () => {
+  const area = new PromiseStorageArea();
+  let tabQueries = 0;
+  const controller = installSessionRuntime({
+    mode: "kernel",
+    runtime: { onMessage: { addListener() {} } },
+    tabs: {
+      async query() { tabQueries += 1; return []; },
+      async sendMessage() { return null; },
+    },
+    storageArea: area,
+    storageMode: "promise",
+    fetch: async () => new Response("", { status: 503 }),
+    apiBase: "https://api.tracefiction.com",
+    webOrigin: "https://www.tracefiction.com",
+    randomId: () => "id",
+  });
+
+  assert.equal(
+    await controller.handle(
+      { type: "TRACE_CONNECT_AND_SAVE" },
+      { tab: { url: "https://www.tracefiction.com/library" } },
+    ),
+    null,
+  );
+  assert.equal(tabQueries, 0);
+});
+
+test("kernel exposes only a sanitized pending-story read to archive content scripts", async () => {
+  const area = new PromiseStorageArea();
+  const nativeMessages = [];
+  const controller = installSessionRuntime({
+    mode: "kernel",
+    runtime: {
+      onMessage: { addListener() {} },
+      async sendNativeMessage(message) {
+        nativeMessages.push(message);
+        return {
+          ok: true,
+          url: "https://www.fanfiction.net/s/7038840/1/A-Chance-Encounter",
+          mode: "story",
+          hostKind: "ffn",
+          handoffId: "handoff_7038840",
+          expiresAt: 1_800_000_000,
+          token: "must-not-escape",
+          accountId: "must-not-escape",
+        };
+      },
+    },
+    tabs: { async query() { return []; }, async sendMessage() { return null; } },
+    storageArea: area,
+    storageMode: "promise",
+    fetch: async () => new Response("", { status: 503 }),
+    apiBase: "https://api.tracefiction.com",
+    webOrigin: "https://www.tracefiction.com",
+    randomId: () => "id",
+  });
+
+  assert.deepEqual(
+    await controller.handle({ type: "TRACE_IOS_PENDING_FIRST_STORY_GET" }, archiveSender),
+    {
+      ok: true,
+      url: "https://www.fanfiction.net/s/7038840/1/A-Chance-Encounter",
+      mode: "story",
+      hostKind: "ffn",
+      handoffId: "handoff_7038840",
+      expiresAt: 1_800_000_000,
+    },
+  );
+  assert.deepEqual(nativeMessages, [{ type: "TRACE_IOS_PENDING_FIRST_STORY_GET" }]);
+  assert.deepEqual(
+    await controller.handle(
+      { type: "TRACE_IOS_PENDING_FIRST_STORY_GET" },
+      { tab: { url: "https://www.tracefiction.com/library" } },
+    ),
+    { ok: false, error: "native_unavailable" },
+  );
+  assert.equal(nativeMessages.length, 1);
+});
+
+test("one controller-owned retry sequence uses 750ms, 2.5s, and 8s then stops on success", async () => {
+  const area = new PromiseStorageArea({
+    traceSessionEnvelopeV1: {
+      version: 1,
+      epoch: 1,
+      desired: "connected",
+      accountId: "account-a",
+      credentialRef: "credential-a",
+    },
+    traceSessionCredentialsV1: {
+      version: 1,
+      entries: { "credential-a": "current-token" },
+    },
+  });
+  const retryClock = new FakeRetryClock();
+  let verificationCalls = 0;
+  const controller = installSessionRuntime({
+    mode: "kernel",
+    runtime: { onMessage: { addListener() {} } },
+    tabs: { async query() { return []; }, async sendMessage() { return null; } },
+    storageArea: area,
+    storageMode: "promise",
+    fetch: async () => {
+      verificationCalls += 1;
+      return verificationCalls <= 3
+        ? new Response("", { status: 503 })
+        : new Response(JSON.stringify({ account_id: "account-a" }), { status: 200 });
+    },
+    apiBase: "https://api.tracefiction.com",
+    webOrigin: "https://www.tracefiction.com",
+    randomId: () => "id",
+    retryClock,
+  });
+
+  await controller.start();
+  assert.equal(controller.snapshot().state, "degraded");
+  assert.deepEqual(retryClock.pending.map((entry) => entry.delayMs), [750]);
+  await controller.handle({ type: "TRACE_SESSION_GET_SNAPSHOT" });
+  await controller.handle({ type: "TRACE_SESSION_GET_SNAPSHOT" });
+  assert.deepEqual(retryClock.pending.map((entry) => entry.delayMs), [750]);
+
+  assert.equal(retryClock.runNext(), 750);
+  await waitUntil(() => verificationCalls === 2 && retryClock.pending.length === 1, "second retry was not scheduled");
+  assert.deepEqual(retryClock.pending.map((entry) => entry.delayMs), [2_500]);
+  assert.equal(retryClock.runNext(), 2_500);
+  await waitUntil(() => verificationCalls === 3 && retryClock.pending.length === 1, "third retry was not scheduled");
+  assert.deepEqual(retryClock.pending.map((entry) => entry.delayMs), [8_000]);
+  assert.equal(retryClock.runNext(), 8_000);
+  await waitUntil(() => controller.snapshot().state === "connected", "retry sequence did not reconnect");
+  assert.equal(verificationCalls, 4);
+  assert.equal(retryClock.pending.length, 0);
+});
+
+test("storage unavailability uses the same single retry clock and stops after recovery", async () => {
+  const area = new FailingThenHealthyStorageArea();
+  const retryClock = new FakeRetryClock();
+  const controller = installSessionRuntime({
+    mode: "kernel",
+    runtime: { onMessage: { addListener() {} } },
+    tabs: { async query() { return []; }, async sendMessage() { return null; } },
+    storageArea: area,
+    storageMode: "promise",
+    fetch: async () => new Response("", { status: 503 }),
+    apiBase: "https://api.tracefiction.com",
+    webOrigin: "https://www.tracefiction.com",
+    randomId: () => "id",
+    retryClock,
+  });
+
+  await controller.start();
+  assert.equal(controller.snapshot().state, "degraded");
+  assert.equal(controller.snapshot().reason, "storage_unavailable");
+  assert.deepEqual(retryClock.pending.map((entry) => entry.delayMs), [750]);
+  assert.equal(retryClock.runNext(), 750);
+  await waitUntil(() => controller.snapshot().state === "signed_out", "storage retry did not recover");
+  assert.equal(retryClock.pending.length, 0);
+});
+
+test("HTTP 429 remains degraded for explicit Retry and maps public status to unknown", async () => {
+  const area = new PromiseStorageArea({
+    traceSessionEnvelopeV1: {
+      version: 1,
+      epoch: 1,
+      desired: "connected",
+      accountId: "account-a",
+      credentialRef: "credential-a",
+    },
+    traceSessionCredentialsV1: {
+      version: 1,
+      entries: { "credential-a": "current-token" },
+    },
+  });
+  const retryClock = new FakeRetryClock();
+  const controller = installSessionRuntime({
+    mode: "kernel",
+    runtime: { onMessage: { addListener() {} } },
+    tabs: { async query() { return []; }, async sendMessage() { return null; } },
+    storageArea: area,
+    storageMode: "promise",
+    fetch: async () => new Response("", { status: 429 }),
+    apiBase: "https://api.tracefiction.com",
+    webOrigin: "https://www.tracefiction.com",
+    randomId: () => "id",
+    retryClock,
+  });
+
+  await controller.start();
+  assert.equal(controller.snapshot().state, "degraded");
+  assert.equal(retryClock.pending.length, 0);
+  assert.deepEqual(
+    await controller.handle({ type: "TRACE_EXTENSION_STATUS_QUERY", nonce: "status-429" }),
+    { installed: true, connected: false, authState: "unknown" },
+  );
+  await controller.handle({ type: "TRACE_SESSION_ACTION", action: "retry" });
+  assert.equal(retryClock.pending.length, 0);
 });
 
 test("disabled mode clears both new stores and the complete legacy inventory", async () => {

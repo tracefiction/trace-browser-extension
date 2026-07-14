@@ -586,13 +586,17 @@ function runImport(button) {
   });
 }
 
-function kernelActionForState(state) {
-  if (state === "signed_out") return "connect";
-  if (state === "connecting" || state === "verifying") return "cancel";
-  if (state === "connected") return "disconnect";
-  if (state === "degraded") return "retry";
-  if (state === "reconnect_required") return "reconnect";
-  return null;
+function kernelActionsForState(state) {
+  if (state === "signed_out") return { primary: "connect", secondary: null };
+  if (state === "connecting" || state === "verifying") {
+    return { primary: "cancel", secondary: null };
+  }
+  if (state === "connected") return { primary: null, secondary: "disconnect" };
+  if (state === "degraded") return { primary: "retry", secondary: "disconnect" };
+  if (state === "reconnect_required") {
+    return { primary: "reconnect", secondary: "disconnect" };
+  }
+  return { primary: null, secondary: null };
 }
 
 function renderKernelSnapshot(snapshot) {
@@ -601,13 +605,16 @@ function renderKernelSnapshot(snapshot) {
   const statusEl = document.getElementById("popup-status");
   const leadEl = document.getElementById("popup-lead");
   const ctaEl = document.getElementById("popup-cta");
+  const secondaryActionEl = document.getElementById("popup-session-secondary");
   const sessionHelpEl = document.getElementById("popup-session-help");
   const connectionEl = document.getElementById("popup-connection");
   const localSettingsEl = document.getElementById("popup-local-settings");
   const proSettingsEl = document.getElementById("popup-pro-settings");
   const importEl = document.getElementById("popup-import");
   const archiveLinksEl = document.getElementById("popup-archive-links");
-  const action = SESSION_DISABLED ? null : kernelActionForState(state);
+  const actions = SESSION_DISABLED
+    ? { primary: null, secondary: null }
+    : kernelActionsForState(state);
   const credentialRecovery =
     state === "signed_out" ||
     (state === "reconnect_required" &&
@@ -676,10 +683,17 @@ function renderKernelSnapshot(snapshot) {
     if (label) label.textContent = state === "connected" ? "Connected" : state === "initializing" ? "Checking" : "Not linked";
   }
   if (ctaEl) {
-    ctaEl.hidden = action == null;
+    ctaEl.hidden = actions.primary == null;
     ctaEl.href = "#";
-    ctaEl.textContent = action ? labels[action] : "";
-    ctaEl.dataset.sessionAction = action || "";
+    ctaEl.textContent = actions.primary ? labels[actions.primary] : "";
+    ctaEl.dataset.sessionAction = actions.primary || "";
+    ctaEl.dataset.emphasis = "primary";
+  }
+  if (secondaryActionEl) {
+    secondaryActionEl.hidden = actions.secondary == null;
+    secondaryActionEl.textContent = actions.secondary ? labels[actions.secondary] : "";
+    secondaryActionEl.dataset.sessionAction = actions.secondary || "";
+    secondaryActionEl.dataset.emphasis = "secondary";
   }
   if (sessionHelpEl) {
     // Keep iOS recovery as precise text-only guidance until a real-device
@@ -726,22 +740,26 @@ function requestKernelSnapshot() {
 
 function initializeKernelPopup() {
   renderKernelSnapshot({ state: "initializing", reason: "none" });
-  const cta = document.getElementById("popup-cta");
-  cta?.addEventListener("click", (event) => {
-    event.preventDefault();
-    if (cta.getAttribute("aria-disabled") === "true") return;
-    const action = cta.dataset.sessionAction;
-    if (!action) return;
-    cta.setAttribute("aria-disabled", "true");
-    sendKernelRuntimeMessage(
-      { type: "TRACE_SESSION_ACTION", action },
-      (response) => {
-        cta.removeAttribute("aria-disabled");
-        if (!response) return;
-        renderKernelSnapshot(response?.snapshot);
-      },
-    );
-  });
+  for (const actionControl of [
+    document.getElementById("popup-cta"),
+    document.getElementById("popup-session-secondary"),
+  ]) {
+    actionControl?.addEventListener("click", (event) => {
+      event.preventDefault();
+      if (actionControl.getAttribute("aria-disabled") === "true") return;
+      const action = actionControl.dataset.sessionAction;
+      if (!action) return;
+      actionControl.setAttribute("aria-disabled", "true");
+      sendKernelRuntimeMessage(
+        { type: "TRACE_SESSION_ACTION", action },
+        (response) => {
+          actionControl.removeAttribute("aria-disabled");
+          if (!response) return;
+          renderKernelSnapshot(response?.snapshot);
+        },
+      );
+    });
+  }
   requestKernelSnapshot();
 }
 

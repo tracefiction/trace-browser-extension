@@ -7,10 +7,14 @@ const PRIVATE_TAG_DISPLAY_LIMIT = 3;
 const TRACE_FIRST_STORY_FOCUS_ADD_MESSAGE = "TRACE_FIRST_STORY_FOCUS_ADD";
 const TRACE_IOS_PENDING_FIRST_STORY_GET_MESSAGE = "TRACE_IOS_PENDING_FIRST_STORY_GET";
 const TRACE_IOS_PENDING_FIRST_STORY_CLEAR_MESSAGE = "TRACE_IOS_PENDING_FIRST_STORY_CLEAR";
+const TRACE_CONNECT_AND_SAVE_MESSAGE = "TRACE_CONNECT_AND_SAVE";
 const TRACE_IOS_AUTH_REFRESH_REQUEST_MESSAGE = "TRACE_IOS_AUTH_REFRESH_REQUEST";
+const TRACE_SESSION_MODE = globalThis.TRACE_SESSION_MODE || "legacy";
+const KERNEL_SESSION_ACTIVE = TRACE_SESSION_MODE === "kernel";
 const FIRST_STORY_FOCUS_MAX_ATTEMPTS = 30;
 const FIRST_STORY_FOCUS_RETRY_MS = 150;
 const FIRST_STORY_SAVE_TIMEOUT_MS = 18_000;
+var kernelPendingFirstStory = null;
 
 function traceIsCredentialPageUrl() {
   var path = String(location && location.pathname ? location.pathname : "").toLowerCase();
@@ -4303,12 +4307,68 @@ function sendIosPendingFirstStoryClear() {
   }
 }
 
-function processIosPendingFirstStoryAdd() {
+function sendKernelCollectorMessage(message, onResponse) {
+  var settled = false;
+  var finish = function (response) {
+    if (settled) return;
+    settled = true;
+    onResponse(response || null);
+  };
+  if (typeof browser !== "undefined") {
+    try {
+      Promise.resolve(ext.runtime.sendMessage(message)).then(finish, function () {
+        finish(null);
+      });
+    } catch (_) {
+      finish(null);
+    }
+    return;
+  }
   try {
-    ext.runtime.sendMessage(
-      { type: TRACE_IOS_PENDING_FIRST_STORY_GET_MESSAGE },
-      function (response) {
-        if (ext.runtime.lastError || !response || response.ok !== true) return;
+    ext.runtime.sendMessage(message, function (response) {
+      finish(ext.runtime.lastError ? null : response);
+    });
+  } catch (_) {
+    finish(null);
+  }
+}
+
+function applyKernelConnectAndSavePresentation(handle, label, kind, disabled) {
+  applyStoryInlineHandleState(handle, {
+    kind: kind,
+    label: label,
+    theme: disabled ? TRACE_INLINE_THEMES.saving : TRACE_INLINE_THEMES.add,
+    dot: false,
+    spinner: kind === "connecting-and-saving",
+    status: null,
+    progress: null,
+  });
+  handle.disabled = disabled;
+}
+
+function runKernelConnectAndSave(handle, workKey) {
+  if (!kernelPendingFirstStory || kernelPendingFirstStory.workKey !== workKey) return;
+  applyKernelConnectAndSavePresentation(
+    handle,
+    "Connecting…",
+    "connecting-and-saving",
+    true,
+  );
+  sendKernelCollectorMessage({ type: TRACE_CONNECT_AND_SAVE_MESSAGE }, function (response) {
+    if (response && response.snapshot && response.snapshot.state === "connected") {
+      applyKernelConnectAndSavePresentation(handle, "Connected", "connected-save-pending", true);
+      handle.title =
+        "Trace verified this extension session. The pending save remains queued for the command owner.";
+      return;
+    }
+    applyKernelConnectAndSavePresentation(handle, "Connect and save", "connect-and-save", false);
+    handle.title = "Connect this extension session before saving the pending story.";
+  });
+}
+
+function processIosPendingFirstStoryAdd() {
+  var processResponse = function (response) {
+        if ((!KERNEL_SESSION_ACTIVE && ext.runtime.lastError) || !response || response.ok !== true) return;
         var pendingUrl = typeof response.url === "string" ? response.url.trim() : "";
         var mode = response.mode === "browse" ? "browse" : "story";
         var handoffId =
@@ -4330,20 +4390,38 @@ function processIosPendingFirstStoryAdd() {
             return;
           }
         } else if (!pendingUrl || !pendingFirstStoryMatchesCurrentPage(pendingUrl)) {
-          // A direct story handoff should land on exactly one work/chapter.
-          // Clear a mismatch rather than leaving a stale add waiting behind.
-          sendIosPendingFirstStoryClear();
+          // Kernel retrieval is read-only. The later command owner decides
+          // when a pending handoff has been consumed or should be cleared.
+          if (!KERNEL_SESSION_ACTIVE) sendIosPendingFirstStoryClear();
           return;
         }
         if (handoffId) {
           announceArchivePageToBackground(handoffId);
+        }
+        if (KERNEL_SESSION_ACTIVE) {
+          var workKey = getWorkKeyFromUrl();
+          if (!workKey) return;
+          kernelPendingFirstStory = { workKey: workKey, handoffId: handoffId };
+          renderQuickAddButton(workKey);
+          return;
         }
         handleFirstStoryFocusAdd(function (result) {
           if (result && result.ok) {
             sendIosPendingFirstStoryClear();
           }
         });
-      },
+      };
+  try {
+    if (KERNEL_SESSION_ACTIVE) {
+      sendKernelCollectorMessage(
+        { type: TRACE_IOS_PENDING_FIRST_STORY_GET_MESSAGE },
+        processResponse,
+      );
+      return;
+    }
+    ext.runtime.sendMessage(
+      { type: TRACE_IOS_PENDING_FIRST_STORY_GET_MESSAGE },
+      processResponse,
     );
   } catch (_) {
     /* native pending handoff is optional */
@@ -5175,6 +5253,36 @@ function renderQuickAddButton(workKey) {
         info.__traceAutoTrackError === "not_authenticated")
     );
     storyAuthRecoveryNeeded = !view.hasAuth || hasEntryAuthError;
+
+    if (
+      KERNEL_SESSION_ACTIVE &&
+      kernelPendingFirstStory &&
+      kernelPendingFirstStory.workKey === workKey
+    ) {
+      applyKernelConnectAndSavePresentation(
+        handle,
+        "Connect and save",
+        "connect-and-save",
+        false,
+      );
+      handle.title = "Connect this extension session before saving the pending story.";
+      if (!handle.__traceStoryHandleBound) {
+        handle.__traceStoryHandleBound = true;
+        handle.addEventListener("click", function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (handle.disabled) return;
+          if (typeof handle.__traceStoryHandleAction === "function") {
+            handle.__traceStoryHandleAction();
+          }
+        });
+      }
+      handle.__traceStoryHandleAction = function () {
+        runKernelConnectAndSave(handle, workKey);
+      };
+      applySheetVisibility(sheet, false);
+      return;
+    }
 
     applyStoryInlineHandleState(handle, storyHandlePresentation(view));
     handle.title = "Open Trace story sheet";

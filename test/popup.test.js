@@ -211,6 +211,61 @@ test("kernel popup uses the promise runtime contract on Firefox and Safari", asy
   assert.equal(h.document.getElementById("popup-cta").hasAttribute("aria-disabled"), false);
 });
 
+for (const promiseRuntime of [false, true]) {
+  const runtimeLabel = promiseRuntime ? "promise" : "callback";
+  for (const fixture of [
+    { state: "initializing", primary: null, secondary: null },
+    { state: "signed_out", primary: "connect", secondary: null },
+    { state: "connecting", primary: "cancel", secondary: null },
+    { state: "verifying", primary: "cancel", secondary: null },
+    { state: "connected", primary: null, secondary: "disconnect" },
+    { state: "degraded", primary: "retry", secondary: "disconnect" },
+    { state: "reconnect_required", primary: "reconnect", secondary: "disconnect" },
+  ]) {
+    test(`kernel ${runtimeLabel} popup exposes the required ${fixture.state} actions`, async () => {
+      const h = createPopupHarness({
+        sessionMode: "kernel",
+        promiseRuntime,
+        sessionSnapshot: {
+          state: fixture.state,
+          accountId: fixture.state === "connected" ? "account-a" : null,
+          canExecuteAuthenticated: fixture.state === "connected",
+          reason: fixture.state === "degraded" ? "verification_unavailable" : "none",
+        },
+      });
+      await flush();
+      const primary = h.document.getElementById("popup-cta");
+      const secondary = h.document.getElementById("popup-session-secondary");
+
+      assert.equal(primary.hidden, fixture.primary == null);
+      assert.equal(primary.dataset.sessionAction || null, fixture.primary);
+      assert.equal(secondary.hidden, fixture.secondary == null);
+      assert.equal(secondary.dataset.sessionAction || null, fixture.secondary);
+
+      if (fixture.primary) {
+        primary.dispatchEvent(
+          new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+        );
+        await flush();
+        assert.deepEqual(JSON.parse(JSON.stringify(h.messages.at(-1))), {
+          type: "TRACE_SESSION_ACTION",
+          action: fixture.primary,
+        });
+      }
+      if (fixture.secondary) {
+        secondary.dispatchEvent(
+          new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+        );
+        await flush();
+        assert.deepEqual(JSON.parse(JSON.stringify(h.messages.at(-1))), {
+          type: "TRACE_SESSION_ACTION",
+          action: fixture.secondary,
+        });
+      }
+    });
+  }
+}
+
 test("kernel iOS credential recovery gives app-only guidance without an unproven link", async () => {
   const h = createPopupHarness({
     sessionMode: "kernel",

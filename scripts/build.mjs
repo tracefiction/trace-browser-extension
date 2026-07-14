@@ -323,6 +323,7 @@ const contentScripts = (manifest.content_scripts || []).map((entry) => {
       ...entry,
       matches: SITE_HOST_MATCHES,
       js: unique([
+        "popup-config.js",
         finishQualifyScript,
         ...scripts.filter((script) => script !== savedFiltersScript && script !== finishQualifyScript),
       ]),

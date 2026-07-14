@@ -44,7 +44,11 @@ export interface TabsPort {
 
 export type RuntimeMessageListener = (
   message: unknown,
-  sender: { readonly id?: string },
+  sender: {
+    readonly id?: string;
+    readonly url?: string;
+    readonly tab?: { readonly url?: string };
+  },
   sendResponse: (response: unknown) => void,
 ) => boolean | void;
 
@@ -437,13 +441,107 @@ export class ExplicitCredentialProvider implements CredentialProvider {
   }
 }
 
+export interface PendingFirstStoryResponse {
+  readonly ok: boolean;
+  readonly url?: string;
+  readonly mode?: "story" | "browse";
+  readonly hostKind?: "ao3" | "ffn";
+  readonly handoffId?: string;
+  readonly expiresAt?: number;
+  readonly expired?: true;
+  readonly error?: "native_unavailable" | "native_error";
+}
+
+function sanitizePendingFirstStoryResponse(response: unknown): PendingFirstStoryResponse {
+  if (!isRecord(response)) return { ok: false, error: "native_unavailable" };
+  if (response.ok !== true && response.ok !== "true") {
+    return { ok: false, error: "native_error" };
+  }
+  const sanitized: {
+    ok: true;
+    url: string;
+    mode?: "story" | "browse";
+    hostKind?: "ao3" | "ffn";
+    handoffId?: string;
+    expiresAt?: number;
+    expired?: true;
+  } = { ok: true, url: "" };
+  if (typeof response.url === "string" && response.url.length <= 4_096) {
+    sanitized.url = response.url.trim();
+  }
+  if (response.mode === "story" || response.mode === "browse") {
+    sanitized.mode = response.mode;
+  }
+  if (response.hostKind === "ao3" || response.hostKind === "ffn") {
+    sanitized.hostKind = response.hostKind;
+  }
+  if (
+    typeof response.handoffId === "string" &&
+    /^[A-Za-z0-9_-]{1,128}$/.test(response.handoffId.trim())
+  ) {
+    sanitized.handoffId = response.handoffId.trim();
+  }
+  const expiresAt = typeof response.expiresAt === "number"
+    ? response.expiresAt
+    : typeof response.expiresAt === "string"
+      ? Number(response.expiresAt)
+      : Number.NaN;
+  if (Number.isFinite(expiresAt)) sanitized.expiresAt = expiresAt;
+  if (response.expired === true || response.expired === "true") sanitized.expired = true;
+  return Object.freeze(sanitized);
+}
+
+export class NativePendingFirstStoryReader {
+  readonly #runtime: RuntimePort;
+  readonly #mode: "callback" | "promise";
+
+  constructor(runtime: RuntimePort, mode: "callback" | "promise") {
+    this.#runtime = runtime;
+    this.#mode = mode;
+  }
+
+  async read(): Promise<PendingFirstStoryResponse> {
+    if (typeof this.#runtime.sendNativeMessage !== "function") {
+      return { ok: false, error: "native_unavailable" };
+    }
+    const request = { type: "TRACE_IOS_PENDING_FIRST_STORY_GET" };
+    const attempts: readonly (readonly unknown[])[] = [
+      [request],
+      ["com.tracefiction.trace", request],
+    ];
+    const deadline = Date.now() + 5_000;
+    for (const args of attempts) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) break;
+      const response = await withTimeout(
+        extensionCall<unknown>(
+          this.#runtime as unknown as Record<string, (...args: unknown[]) => unknown>,
+          "sendNativeMessage",
+          args,
+          this.#runtime,
+          this.#mode,
+        ),
+        remainingMs,
+      );
+      if (response !== null) return sanitizePendingFirstStoryResponse(response);
+    }
+    return { ok: false, error: "native_unavailable" };
+  }
+}
+
 export class VerificationApi implements SessionApiPort {
   readonly #fetch: typeof fetch;
   readonly #endpoint: string;
+  readonly #onRetryDisposition: (disposition: "automatic" | "manual" | "none") => void;
 
-  constructor(fetchImpl: typeof fetch, apiBase: string) {
+  constructor(
+    fetchImpl: typeof fetch,
+    apiBase: string,
+    onRetryDisposition: (disposition: "automatic" | "manual" | "none") => void = () => {},
+  ) {
     this.#fetch = fetchImpl;
     this.#endpoint = `${apiBase.replace(/\/$/, "")}/api/account/me`;
+    this.#onRetryDisposition = onRetryDisposition;
   }
 
   async verifyCredential(credential: string): Promise<VerificationResult> {
@@ -455,9 +553,20 @@ export class VerificationApi implements SessionApiPort {
       }),
       10_000,
     );
-    if (response === null) return { kind: "unavailable" };
+    if (response === null) {
+      this.#onRetryDisposition("automatic");
+      return { kind: "unavailable" };
+    }
+    if (response.status === 429) {
+      this.#onRetryDisposition("manual");
+      return { kind: "unavailable" };
+    }
+    if (response.status >= 500) {
+      this.#onRetryDisposition("automatic");
+      return { kind: "unavailable" };
+    }
+    this.#onRetryDisposition("none");
     if (response.status === 401 || response.status === 403) return { kind: "rejected" };
-    if (response.status === 429 || response.status >= 500) return { kind: "unavailable" };
     if (!response.ok) return { kind: "account_unavailable" };
 
     let body: unknown;

@@ -213,10 +213,11 @@ function makeStorageData(authState = connectedAuthState(), cacheVariant = "defau
   };
 }
 
-function extensionMockSource(storageData) {
+function extensionMockSource(storageData, sessionSnapshot = null) {
   return `
     (() => {
       const storageData = ${JSON.stringify(storageData)};
+      const sessionSnapshot = ${JSON.stringify(sessionSnapshot)};
       const storageListeners = [];
       const popupState = {
         authState: storageData.traceAuthState,
@@ -247,6 +248,13 @@ function extensionMockSource(storageData) {
       function respond(msg, cb) {
         window.__traceMessages.push(msg);
         let response = { ok: true };
+        if (
+          sessionSnapshot &&
+          msg &&
+          (msg.type === "TRACE_SESSION_GET_SNAPSHOT" || msg.type === "TRACE_SESSION_ACTION")
+        ) {
+          response = { ok: true, snapshot: sessionSnapshot, action: { kind: "ignored" } };
+        }
         if (msg && msg.type === "TRACE_POPUP_GET_STATE") response = popupState;
         if (msg && msg.type === "TRACE_SET_READER_STATUS") {
           response = { ok: true, entryId: msg.payload && msg.payload.entryId, status: msg.payload && msg.payload.status };
@@ -286,6 +294,7 @@ function extensionMockSource(storageData) {
         },
       };
       window.__traceMessages = [];
+      if (sessionSnapshot) window.TRACE_SESSION_MODE = "kernel";
       window.chrome = api;
       window.browser = api;
       window.xcookie_read = window.xcookie_read || function () {};
@@ -494,10 +503,13 @@ async function renderPopupScreenshot(browser, definition, assets, manifest) {
   const messages = [];
   page.on("pageerror", (error) => messages.push({ type: "pageerror", text: error.message }));
   await page.addInitScript(
-    extensionMockSource({
-      ...makeStorageData(definition.authState),
-      ...(definition.storageData || {}),
-    }),
+    extensionMockSource(
+      {
+        ...makeStorageData(definition.authState),
+        ...(definition.storageData || {}),
+      },
+      definition.sessionSnapshot || null,
+    ),
   );
   await installPopupRoutes(page, assets.popupHtml, assets.popupCss, assets.popupJs, assets.markSvg);
   await page.goto("https://trace-extension.local/popup.html", { waitUntil: "domcontentloaded" });
@@ -885,6 +897,39 @@ async function main() {
         name: "Extension popup connected light",
         file: "popup-connected-light.png",
         authState: connectedAuthState(),
+        colorScheme: "light",
+      },
+      {
+        name: "Kernel popup connected",
+        file: "popup-kernel-connected.png",
+        sessionSnapshot: {
+          state: "connected",
+          accountId: null,
+          canExecuteAuthenticated: true,
+          reason: "none",
+        },
+        colorScheme: "light",
+      },
+      {
+        name: "Kernel popup degraded",
+        file: "popup-kernel-degraded.png",
+        sessionSnapshot: {
+          state: "degraded",
+          accountId: null,
+          canExecuteAuthenticated: false,
+          reason: "verification_unavailable",
+        },
+        colorScheme: "light",
+      },
+      {
+        name: "Kernel popup reconnect required",
+        file: "popup-kernel-reconnect-required.png",
+        sessionSnapshot: {
+          state: "reconnect_required",
+          accountId: null,
+          canExecuteAuthenticated: false,
+          reason: "credential_rejected",
+        },
         colorScheme: "light",
       },
     ];

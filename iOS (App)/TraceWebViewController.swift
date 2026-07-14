@@ -66,6 +66,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     private var activeTraceNavigationURL: URL?
     private var lastIntendedTraceURL: URL?
     private var failedTraceURL: URL?
+    private var sharedProviderBootstrapReady = false
     private lazy var billingCoordinator = TraceBillingCoordinator(
         apiBaseURL: Self.billingAPIBaseURL
     ) { [weak self] in
@@ -313,6 +314,11 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        // The web shell and native binary deploy independently. Clear any v2
+        // provider left by an earlier current shell before this navigation can
+        // accept a versioned synchronizer write. An old cached shell cannot
+        // repopulate v2 because its unversioned mutation is rejected below.
+        sharedProviderBootstrapReady = prepareSharedProviderForWebShell()
         navigationController?.setNavigationBarHidden(true, animated: false)
         apnsTokenObserver = NotificationCenter.default.addObserver(
             forName: .traceApnsDeviceTokenReceived,
@@ -1241,6 +1247,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     private static let traceAuthTokenService = "com.tracefiction.trace.auth"
     private static let traceAuthTokenAccount = "extension-provider-v2"
     private static let retiredTraceAuthTokenAccount = "extension-token"
+    private static let traceProviderProtocolVersion = 2
     private static let pendingFirstStoryDefaultsKey = "tracePendingFirstStoryUrlV1"
     private static let pendingFirstStoryExpiresAtDefaultsKey = "tracePendingFirstStoryExpiresAtV1"
     private static let pendingFirstStoryV2DefaultsKey = "tracePendingFirstStoryV2"
@@ -1259,11 +1266,29 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 
         switch messageType {
         case "TRACE_IOS_AUTH_TOKEN_UPDATE":
+            guard body["protocolVersion"] as? Int == Self.traceProviderProtocolVersion else {
+                postSafariExtensionActionResult(
+                    type: "TRACE_IOS_AUTH_TOKEN_UPDATE_RESPONSE",
+                    nonce: nonce,
+                    ok: false,
+                    error: "unsupported_protocol"
+                )
+                return
+            }
             handleTraceSafariAuthTokenUpdate(
                 nonce: nonce,
                 token: body["token"] as? String
             )
         case "TRACE_IOS_AUTH_TOKEN_CLEAR":
+            guard body["protocolVersion"] as? Int == Self.traceProviderProtocolVersion else {
+                postSafariExtensionActionResult(
+                    type: "TRACE_IOS_AUTH_TOKEN_CLEAR_RESPONSE",
+                    nonce: nonce,
+                    ok: false,
+                    error: "unsupported_protocol"
+                )
+                return
+            }
             handleTraceSafariAuthTokenClear(nonce: nonce)
         case "TRACE_IOS_EXTENSION_STATE_REQUEST":
             handleTraceSafariExtensionStateRequest(nonce: nonce)
@@ -1313,6 +1338,12 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 
     private func handleTraceSafariAuthTokenUpdate(nonce: String, token: String?) {
         do {
+            if !sharedProviderBootstrapReady {
+                sharedProviderBootstrapReady = prepareSharedProviderForWebShell()
+            }
+            guard sharedProviderBootstrapReady else {
+                throw TraceSafariExtensionBridgeError.tokenShareFailed
+            }
             guard let token else {
                 throw TraceSafariExtensionBridgeError.tokenShareFailed
             }
@@ -1334,12 +1365,8 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 
     private func handleTraceSafariAuthTokenClear(nonce: String) {
         do {
-            #if DEBUG
-            if UserDefaults.standard.bool(forKey: "traceDebugFailProviderClear") {
-                throw TraceSafariExtensionBridgeError.tokenShareFailed
-            }
-            #endif
-            try Self.clearSharedTraceTokens()
+            try clearSharedProviderForWebShell()
+            sharedProviderBootstrapReady = true
             postSafariExtensionActionResult(
                 type: "TRACE_IOS_AUTH_TOKEN_CLEAR_RESPONSE",
                 nonce: nonce,
@@ -1353,6 +1380,24 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 error: "provider_clear_failed"
             )
         }
+    }
+
+    private func prepareSharedProviderForWebShell() -> Bool {
+        do {
+            try clearSharedProviderForWebShell()
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func clearSharedProviderForWebShell() throws {
+        #if DEBUG
+        if UserDefaults.standard.bool(forKey: "traceDebugFailProviderClear") {
+            throw TraceSafariExtensionBridgeError.tokenShareFailed
+        }
+        #endif
+        try Self.clearSharedTraceTokens()
     }
 
     private func handleTraceSafariExtensionStateRequest(nonce: String) {
