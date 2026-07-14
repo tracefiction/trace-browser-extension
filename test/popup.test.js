@@ -19,6 +19,13 @@ const POPUP_JS_PATH = path.join(
   "Resources",
   "popup.js",
 );
+const POPUP_CSS_PATH = path.join(
+  __dirname,
+  "..",
+  "Shared (Extension)",
+  "Resources",
+  "popup.css",
+);
 
 function flush() {
   return new Promise((resolve) => setImmediate(resolve));
@@ -48,6 +55,7 @@ function createPopupHarness({
 } = {}) {
   const html = fs.readFileSync(POPUP_HTML_PATH, "utf8");
   const js = fs.readFileSync(POPUP_JS_PATH, "utf8");
+  const css = fs.readFileSync(POPUP_CSS_PATH, "utf8");
   const dom = new JSDOM(html, {
     url: "https://tracefiction.com",
     runScripts: "outside-only",
@@ -55,6 +63,9 @@ function createPopupHarness({
     userAgent,
   });
   const { window } = dom;
+  const style = window.document.createElement("style");
+  style.textContent = css;
+  window.document.head.appendChild(style);
   const store = { ...storageState };
   const messages = [];
   const storageChangeListeners = [];
@@ -184,7 +195,9 @@ test("kernel popup is read-only on open and exposes only explicit session action
   assert.equal(h.document.getElementById("popup-status").textContent, "Connect Trace");
   assert.equal(h.document.getElementById("popup-cta").textContent, "Connect");
   assert.equal(h.document.getElementById("popup-import").hidden, true);
-  assert.equal(h.document.getElementById("popup-local-settings").hidden, true);
+  const localSettings = h.document.getElementById("popup-local-settings");
+  assert.equal(localSettings.hidden, true);
+  assert.equal(h.window.getComputedStyle(localSettings).display, "none");
 
   h.document.getElementById("popup-cta").dispatchEvent(
     new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),

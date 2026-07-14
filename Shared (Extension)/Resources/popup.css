@@ -291,6 +291,7 @@ body[data-trace-popup-state="connected_saved"] .popup-sheet {
 
 .popup-import[hidden],
 .popup-cta[hidden],
+.popup-local-settings[hidden],
 .popup-archive-links[hidden] {
     display: none;
 }

@@ -515,6 +515,17 @@ async function renderPopupScreenshot(browser, definition, assets, manifest) {
   await page.goto("https://trace-extension.local/popup.html", { waitUntil: "domcontentloaded" });
   await page.waitForSelector("#popup-connection[data-state]", { timeout: 10000 });
   await page.waitForTimeout(250);
+  if (definition.sessionSnapshot) {
+    const localSettings = await page.$eval("#popup-local-settings", (element) => ({
+      hidden: element.hidden,
+      display: getComputedStyle(element).display,
+    }));
+    if (!localSettings.hidden || localSettings.display !== "none") {
+      throw new Error(
+        `Kernel popup exposed legacy local settings: ${JSON.stringify(localSettings)}`,
+      );
+    }
+  }
   const outputPath = path.join(outputRoot, definition.file);
   const clipHeight = await page.evaluate(() => {
     const bodyBox = document.body.getBoundingClientRect();
