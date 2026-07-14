@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const OUTPUT = path.join(ROOT, ".trace-build", "extension-core");
+const OUTPUT = path.join(ROOT, ".trace-build");
 const TSC = path.join(ROOT, "node_modules", "typescript", "bin", "tsc");
 
 fs.rmSync(OUTPUT, { recursive: true, force: true });

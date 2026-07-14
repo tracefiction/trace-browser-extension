@@ -4,8 +4,8 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "lib": ["ES2022"],
-    "rootDir": "src/extension-core",
-    "outDir": ".trace-build/extension-core",
+    "rootDir": "src",
+    "outDir": ".trace-build",
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
@@ -17,5 +17,5 @@
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true
   },
-  "include": ["src/extension-core/**/*.mts"]
+  "include": ["src/extension-core/**/*.mts", "src/extension-shadow/**/*.mts"]
 }

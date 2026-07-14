@@ -895,8 +895,10 @@ test("core graph is browser-neutral, deterministic, and absent from production r
     path.join(ROOT, "Shared (Extension)", "Resources"),
     path.join(ROOT, "iOS (App)"),
   ];
+  const shadowSourceDirectory = path.join(ROOT, "src", "extension-shadow");
   for (const productionFile of productionRoots.flatMap(listFiles)) {
     if (productionFile.startsWith(`${sourceDirectory}${path.sep}`)) continue;
+    if (productionFile.startsWith(`${shadowSourceDirectory}${path.sep}`)) continue;
     if (!/\.(?:css|html|js|json|mjs|swift)$/.test(productionFile)) continue;
     assert.doesNotMatch(
       fs.readFileSync(productionFile, "utf8"),
