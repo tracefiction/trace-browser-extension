@@ -77,6 +77,8 @@ class FakeCredentials {
     this.deleteResults = [];
     this.storeResults = [];
     this.storeEpochs = [];
+    this.clearAllResults = [];
+    this.clearAllCount = 0;
   }
 
   seed(reference, credential) {
@@ -127,6 +129,16 @@ class FakeCredentials {
 
   queueDeleteResult(result) {
     this.deleteResults.push(result);
+  }
+
+  async clearAll() {
+    this.clearAllCount += 1;
+    if (this.clearAllResults.length > 0) await this.clearAllResults.shift();
+    this.values.clear();
+  }
+
+  queueClearAllResult(result) {
+    this.clearAllResults.push(result);
   }
 }
 
@@ -425,22 +437,36 @@ test("Disconnect completes and releases the lock while credential cleanup is stu
   await harness.service.start();
   await connectAccount(harness);
   const cleanup = deferred();
-  harness.credentials.queueDeleteResult(cleanup.promise);
+  harness.credentials.queueClearAllResult(cleanup.promise);
 
   assert.deepEqual(await harness.service.disconnect(), {
     kind: "completed",
     state: "signed_out",
   });
   assert.equal(harness.storage.value.desired, "disconnected");
-  assert.deepEqual(harness.credentials.deletedReferences, ["credential-1"]);
+  assert.equal(harness.credentials.clearAllCount, 1);
 
   harness.credentials.queueAcquisition({ kind: "credential", credential: "token-new" });
   harness.api.queueVerification({ kind: "verified", accountId: "account-a" });
-  assert.deepEqual(await harness.service.connect(), {
+  const reconnecting = harness.service.connect();
+  cleanup.resolve();
+  assert.deepEqual(await reconnecting, {
     kind: "completed",
     state: "connected",
   });
-  cleanup.resolve();
+});
+
+test("Disconnect clears orphan credentials even when the envelope has no reference", async () => {
+  const harness = createHarness();
+  harness.credentials.seed("orphan", "orphan-token");
+  await harness.service.start();
+
+  assert.deepEqual(await harness.service.disconnect(), {
+    kind: "completed",
+    state: "signed_out",
+  });
+  assert.equal(harness.credentials.clearAllCount, 1);
+  assert.equal(harness.credentials.values.size, 0);
 });
 
 test("online restart re-verifies while offline restart is read-only degraded", async () => {
@@ -604,7 +630,7 @@ test("malformed verified identity cannot publish connected", async () => {
     kind: "completed",
     state: "reconnect_required",
   });
-  assert.equal(harness.service.snapshot().reason, "identity_conflict");
+  assert.equal(harness.service.snapshot().reason, "invalid_account_response");
   assert.equal(harness.service.publicationScope(), null);
   assert.equal(harness.storage.value.credentialRef, null);
 });
@@ -629,7 +655,7 @@ test("malformed port results fail closed instead of escaping the kernel", async 
     kind: "completed",
     state: "reconnect_required",
   });
-  assert.equal(malformedVerification.service.snapshot().reason, "identity_conflict");
+  assert.equal(malformedVerification.service.snapshot().reason, "invalid_account_response");
 
   const malformedEffect = createHarness();
   await malformedEffect.service.start();
@@ -895,15 +921,15 @@ test("core graph is browser-neutral, deterministic, and absent from production r
     path.join(ROOT, "Shared (Extension)", "Resources"),
     path.join(ROOT, "iOS (App)"),
   ];
-  const shadowSourceDirectory = path.join(ROOT, "src", "extension-shadow");
+  const runtimeSourceDirectory = path.join(ROOT, "src", "extension-runtime");
   for (const productionFile of productionRoots.flatMap(listFiles)) {
     if (productionFile.startsWith(`${sourceDirectory}${path.sep}`)) continue;
-    if (productionFile.startsWith(`${shadowSourceDirectory}${path.sep}`)) continue;
+    if (productionFile.startsWith(`${runtimeSourceDirectory}${path.sep}`)) continue;
     if (!/\.(?:css|html|js|json|mjs|swift)$/.test(productionFile)) continue;
     assert.doesNotMatch(
       fs.readFileSync(productionFile, "utf8"),
       /(?:extension-core|\.trace-build)/,
-      `${path.relative(ROOT, productionFile)} reaches the shadow-only core`,
+      `${path.relative(ROOT, productionFile)} reaches the TypeScript source graph`,
     );
   }
   assert.equal(

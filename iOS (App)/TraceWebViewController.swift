@@ -630,6 +630,25 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         guard url.scheme?.lowercased() == "traceauth" else { return url }
         guard var parts = URLComponents(string: Self.webAppHTTPSOrigin) else { return nil }
         let callbackParts = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        if url.host?.lowercased() == "open" {
+            let queryItems = callbackParts?.queryItems ?? []
+            guard callbackParts?.path.isEmpty == true,
+                  callbackParts?.fragment == nil,
+                  callbackParts?.user == nil,
+                  callbackParts?.password == nil,
+                  callbackParts?.port == nil,
+                  queryItems.count == 1,
+                  queryItems[0].name == "destination",
+                  queryItems[0].value == "extension-connect"
+            else {
+                return nil
+            }
+            parts.path = "/setup"
+            parts.queryItems = [URLQueryItem(name: "setupPath", value: "ios-app")]
+            parts.fragment = "first-story-setup"
+            return parts.url
+        }
+        guard url.host?.lowercased() == "callback" else { return nil }
         var queryItems = callbackParts?.queryItems ?? []
         queryItems.removeAll { $0.name == "trace_app" }
         queryItems.append(URLQueryItem(name: "trace_app", value: "1"))
@@ -1220,7 +1239,8 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     private static let traceKeychainAccessGroup = "com.tracefiction.trace.shared"
     private static let traceAppleTeamIdentifierPrefix = "3GX59FLLT6."
     private static let traceAuthTokenService = "com.tracefiction.trace.auth"
-    private static let traceAuthTokenAccount = "extension-token"
+    private static let traceAuthTokenAccount = "extension-provider-v2"
+    private static let retiredTraceAuthTokenAccount = "extension-token"
     private static let pendingFirstStoryDefaultsKey = "tracePendingFirstStoryUrlV1"
     private static let pendingFirstStoryExpiresAtDefaultsKey = "tracePendingFirstStoryExpiresAtV1"
     private static let pendingFirstStoryV2DefaultsKey = "tracePendingFirstStoryV2"
@@ -1243,6 +1263,8 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 nonce: nonce,
                 token: body["token"] as? String
             )
+        case "TRACE_IOS_AUTH_TOKEN_CLEAR":
+            handleTraceSafariAuthTokenClear(nonce: nonce)
         case "TRACE_IOS_EXTENSION_STATE_REQUEST":
             handleTraceSafariExtensionStateRequest(nonce: nonce)
         case "TRACE_IOS_OPEN_EXTENSION_SETTINGS":
@@ -1305,7 +1327,30 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 type: "TRACE_IOS_AUTH_TOKEN_UPDATE_RESPONSE",
                 nonce: nonce,
                 ok: false,
-                error: "token_share_failed"
+                error: "provider_update_failed"
+            )
+        }
+    }
+
+    private func handleTraceSafariAuthTokenClear(nonce: String) {
+        do {
+            #if DEBUG
+            if UserDefaults.standard.bool(forKey: "traceDebugFailProviderClear") {
+                throw TraceSafariExtensionBridgeError.tokenShareFailed
+            }
+            #endif
+            try Self.clearSharedTraceTokens()
+            postSafariExtensionActionResult(
+                type: "TRACE_IOS_AUTH_TOKEN_CLEAR_RESPONSE",
+                nonce: nonce,
+                ok: true
+            )
+        } catch {
+            postSafariExtensionActionResult(
+                type: "TRACE_IOS_AUTH_TOKEN_CLEAR_RESPONSE",
+                nonce: nonce,
+                ok: false,
+                error: "provider_clear_failed"
             )
         }
     }
@@ -1313,7 +1358,6 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     private func handleTraceSafariExtensionStateRequest(nonce: String) {
         Task { [weak self] in
             guard let self else { return }
-            _ = try? await self.storeCurrentTraceTokenForSafariExtension()
 
             await MainActor.run {
                 guard #available(iOS 26.2, *) else {
@@ -1410,7 +1454,6 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     private func handleTraceSafariExtensionSettingsRequest(nonce: String) {
         Task { [weak self] in
             guard let self else { return }
-            let tokenShareSucceeded = (try? await self.storeCurrentTraceTokenForSafariExtension()) != nil
 
             await MainActor.run {
                 guard #available(iOS 26.2, *) else {
@@ -1424,9 +1467,6 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 }
 
                 let identifiers = Self.safariExtensionCandidateIdentifiers()
-                if !tokenShareSucceeded {
-                    NSLog("[Trace] Safari extension settings opening without refreshed shared token")
-                }
                 SFSafariSettings.openExtensionsSettings(
                     forIdentifiers: identifiers
                 ) { [weak self] error in
@@ -1454,7 +1494,6 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 guard let url = Self.supportedFirstStoryURL(rawURL) else {
                     throw TraceSafariExtensionBridgeError.unsupportedUrl
                 }
-                try await self.storeCurrentTraceTokenForSafariExtension()
                 try Self.storePendingFirstStory(
                     mode: .story,
                     url: url,
@@ -1489,7 +1528,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                         type: "TRACE_IOS_OPEN_STORY_URL_RESPONSE",
                         nonce: nonce,
                         ok: false,
-                        error: "token_share_failed"
+                        error: "handoff_store_failed"
                     )
                 }
             }
@@ -1523,7 +1562,6 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             guard let self else { return }
             let url = hostKind.homeURL
             do {
-                try await self.storeCurrentTraceTokenForSafariExtension()
                 try Self.storePendingFirstStory(
                     mode: .browse,
                     url: nil,
@@ -1550,7 +1588,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                         type: responseType,
                         nonce: nonce,
                         ok: false,
-                        error: "token_share_failed"
+                        error: "handoff_store_failed"
                     )
                 }
             }
@@ -1721,12 +1759,6 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         return trimmed
     }
 
-    @MainActor
-    private func storeCurrentTraceTokenForSafariExtension() async throws {
-        let token = try await fetchTraceShellAccessToken()
-        try Self.storeSharedTraceToken(token)
-    }
-
     private static func keychainAccessGroup() -> String {
         if let prefix = Bundle.main.object(forInfoDictionaryKey: "AppIdentifierPrefix") as? String,
            !prefix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -1756,6 +1788,21 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         let status = SecItemAdd(addQuery as CFDictionary, nil)
         guard status == errSecSuccess else {
             throw TraceSafariExtensionBridgeError.tokenShareFailed
+        }
+    }
+
+    private static func clearSharedTraceTokens() throws {
+        for account in [traceAuthTokenAccount, retiredTraceAuthTokenAccount] {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: traceAuthTokenService,
+                kSecAttrAccount as String: account,
+                kSecAttrAccessGroup as String: keychainAccessGroup(),
+            ]
+            let status = SecItemDelete(query as CFDictionary)
+            guard status == errSecSuccess || status == errSecItemNotFound else {
+                throw TraceSafariExtensionBridgeError.tokenShareFailed
+            }
         }
     }
 

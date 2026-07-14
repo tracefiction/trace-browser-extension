@@ -122,6 +122,7 @@ To test:
    fanfiction.net. Safari can request permission for another supported site
    later if you visit it.
 4. Return to the app and open AO3, open FanFiction.net, or paste a supported
-   story URL. Safari should open and the extension should already be connected.
+   story URL. Safari should open. Press **Connect** or **Connect and save** in
+   the extension when offered; browser-only Trace sign-in is not sufficient.
 5. Use `+ ADD`, status controls, import, hide/undo, and final-chapter finish
    prompts on supported pages.

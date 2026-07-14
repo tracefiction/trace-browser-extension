@@ -29,7 +29,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     private static let traceKeychainAccessGroup = "com.tracefiction.trace.shared"
     private static let traceAppleTeamIdentifierPrefix = "3GX59FLLT6."
     private static let traceAuthTokenService = "com.tracefiction.trace.auth"
-    private static let traceAuthTokenAccount = "extension-token"
+    private static let traceAuthTokenAccount = "extension-provider-v2"
     private static let pendingFirstStoryDefaultsKey = "tracePendingFirstStoryUrlV1"
     private static let pendingFirstStoryExpiresAtDefaultsKey = "tracePendingFirstStoryExpiresAtV1"
     private static let pendingFirstStoryV2DefaultsKey = "tracePendingFirstStoryV2"

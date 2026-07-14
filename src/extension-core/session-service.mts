@@ -22,7 +22,8 @@ export type CredentialAcquisition =
 export type VerificationResult =
   | { readonly kind: "verified"; readonly accountId: string }
   | { readonly kind: "rejected" }
-  | { readonly kind: "malformed" }
+  | { readonly kind: "account_unavailable" }
+  | { readonly kind: "invalid_response" }
   | { readonly kind: "unavailable" };
 
 export type AuthenticatedEffectResult<T> =
@@ -61,6 +62,8 @@ export interface CredentialPort {
    */
   storeUnique(credential: string, epoch: number): Promise<string>;
   delete(reference: string): Promise<void>;
+  /** Enqueue whole-store cleanup on the same lock as storeUnique. */
+  clearAll(): Promise<void>;
 }
 
 export interface SessionApiPort {
@@ -162,16 +165,21 @@ function normalizeAcquisition(value: unknown): CredentialAcquisition {
 }
 
 function normalizeVerification(value: unknown): VerificationResult {
-  if (!isRecord(value)) return { kind: "malformed" };
+  if (!isRecord(value)) return { kind: "invalid_response" };
   if (value.kind === "verified") {
     return isNonEmpty(value.accountId)
       ? { kind: "verified", accountId: value.accountId }
-      : { kind: "malformed" };
+      : { kind: "invalid_response" };
   }
-  if (value.kind === "rejected" || value.kind === "unavailable") {
+  if (
+    value.kind === "rejected" ||
+    value.kind === "account_unavailable" ||
+    value.kind === "invalid_response" ||
+    value.kind === "unavailable"
+  ) {
     return { kind: value.kind };
   }
-  return { kind: "malformed" };
+  return { kind: "invalid_response" };
 }
 
 function normalizeEffectResult<T>(value: unknown): AuthenticatedEffectResult<T> {
@@ -265,7 +273,11 @@ export class SessionService {
       return this.#withLock(async () => {
         if (!this.#isCurrentAcquisition(start.epoch)) return { kind: "stale" };
         this.#activeAcquisitionEpoch = null;
-        this.#transition({ type: "signed_out", epoch: start.epoch });
+        this.#transition({
+          type: "signed_out",
+          epoch: start.epoch,
+          reason: "provider_unavailable",
+        });
         return { kind: "unavailable" };
       });
     }
@@ -288,7 +300,11 @@ export class SessionService {
       return this.#withLock(async () => {
         if (!this.#isCurrentAcquisition(start.epoch)) return { kind: "stale" };
         this.#activeAcquisitionEpoch = null;
-        this.#transition({ type: "signed_out", epoch: start.epoch });
+        this.#transition({
+          type: "signed_out",
+          epoch: start.epoch,
+          reason: "provider_unavailable",
+        });
         return { kind: "unavailable" };
       });
     }
@@ -576,8 +592,12 @@ export class SessionService {
       return this.#degradeVerification(plan);
     }
 
-    if (verification.kind === "malformed") {
-      return this.#clearCredentialReference(plan.epoch, "identity_conflict");
+    if (verification.kind === "invalid_response") {
+      return this.#clearCredentialReference(plan.epoch, "invalid_account_response");
+    }
+
+    if (verification.kind === "account_unavailable") {
+      return this.#clearCredentialReference(plan.epoch, "account_unavailable");
     }
 
     if (verification.kind === "rejected") {
@@ -675,8 +695,11 @@ export class SessionService {
       }
       return this.#degradeRefresh(plan);
     }
-    if (verification.kind === "malformed") {
-      return this.#clearCredentialReference(plan.epoch, "identity_conflict");
+    if (verification.kind === "invalid_response") {
+      return this.#clearCredentialReference(plan.epoch, "invalid_account_response");
+    }
+    if (verification.kind === "account_unavailable") {
+      return this.#clearCredentialReference(plan.epoch, "account_unavailable");
     }
     if (
       verification.kind === "rejected" ||
@@ -780,7 +803,12 @@ export class SessionService {
 
   async #clearCredentialReference(
     epoch: number,
-    reason: "credential_absent" | "credential_rejected" | "identity_conflict",
+    reason:
+      | "credential_absent"
+      | "credential_rejected"
+      | "identity_conflict"
+      | "account_unavailable"
+      | "invalid_account_response",
   ): Promise<SessionActionResult> {
     return this.#withLock(async (): Promise<SessionActionResult> => {
       if (!this.#isCurrentEpoch(epoch)) return { kind: "stale" };
@@ -844,14 +872,14 @@ export class SessionService {
         ? { kind: "completed", state: "signed_out" }
         : { kind: "storage_error" };
       if (persisted) this.#transition({ type: "signed_out", epoch });
-      if (oldReference !== null) {
-        if (persisted) {
-          this.#scheduleCredentialDelete(oldReference);
-        } else {
-          // A failed Disconnect write leaves the old envelope durable. The
-          // credential deletion is therefore the only restart-safe fence.
-          await this.#deleteCredential(oldReference);
-        }
+      if (persisted) {
+        // Disconnect is destructive even when the current envelope has no
+        // reference: stale writes may have left unreferenced credentials.
+        this.#scheduleCredentialClearAll();
+      } else if (oldReference !== null) {
+        // A failed Disconnect write leaves the old envelope durable. The
+        // credential deletion is therefore the only restart-safe fence.
+        await this.#deleteCredential(oldReference);
       }
       return result;
     });
@@ -896,6 +924,19 @@ export class SessionService {
     // deliberately detached so a stuck platform store cannot hold the session
     // lock or delay an accepted Disconnect/refresh transition.
     void this.#deleteCredential(reference);
+  }
+
+  #scheduleCredentialClearAll(): void {
+    // Calling clearAll synchronously enqueues it on the credential adapter's
+    // lock before a later Connect can enqueue storeUnique. Do not await it:
+    // accepted Disconnect must not hang on best-effort hygiene.
+    try {
+      void this.#ports.credentials.clearAll().catch(() => {
+        this.#record("credential_cleanup_failed");
+      });
+    } catch {
+      this.#record("credential_cleanup_failed");
+    }
   }
 
   #copyScope(scope: AccountScope | null): AccountScope | null {

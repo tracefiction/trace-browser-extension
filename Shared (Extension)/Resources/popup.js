@@ -1,4 +1,5 @@
-const ext = typeof browser !== "undefined" ? browser : chrome;
+const USES_BROWSER_PROMISE_API = typeof browser !== "undefined";
+const ext = USES_BROWSER_PROMISE_API ? browser : chrome;
 const STATUS_KEY = "traceAuthState";
 const PREF_AUTO_TRACK_KEY = "prefAutoTrackEnabled";
 const PREF_LIBRARY_INLAY_KEY = "prefLibraryInlayEnabled";
@@ -9,6 +10,9 @@ const TRACE_FIRST_SAVE_SEEN_KEY = "traceFirstSaveSeen";
 const TRACE_LIBRARY_COUNT_KEY = "traceLibraryCount";
 const DEFAULT_TRACE_WEB_ORIGIN = "https://tracefiction.com";
 const TRACE_WEB_ORIGIN = configuredTraceWebOrigin();
+const TRACE_SESSION_MODE = globalThis.TRACE_SESSION_MODE || "legacy";
+const KERNEL_SESSION_ACTIVE = TRACE_SESSION_MODE === "kernel";
+const SESSION_DISABLED = TRACE_SESSION_MODE === "disabled";
 const TRACE_HOME_URL = `${TRACE_WEB_ORIGIN}/`;
 const TRACE_IOS_SETUP_URL = `${DEFAULT_TRACE_WEB_ORIGIN}/apps#safari-ios-setup`;
 const AO3_WORKS_URL = "https://archiveofourown.org/works";
@@ -582,6 +586,168 @@ function runImport(button) {
   });
 }
 
+function kernelActionForState(state) {
+  if (state === "signed_out") return "connect";
+  if (state === "connecting" || state === "verifying") return "cancel";
+  if (state === "connected") return "disconnect";
+  if (state === "degraded") return "retry";
+  if (state === "reconnect_required") return "reconnect";
+  return null;
+}
+
+function renderKernelSnapshot(snapshot) {
+  const state = snapshot?.state || "initializing";
+  const reason = snapshot?.reason || "none";
+  const statusEl = document.getElementById("popup-status");
+  const leadEl = document.getElementById("popup-lead");
+  const ctaEl = document.getElementById("popup-cta");
+  const sessionHelpEl = document.getElementById("popup-session-help");
+  const connectionEl = document.getElementById("popup-connection");
+  const localSettingsEl = document.getElementById("popup-local-settings");
+  const proSettingsEl = document.getElementById("popup-pro-settings");
+  const importEl = document.getElementById("popup-import");
+  const archiveLinksEl = document.getElementById("popup-archive-links");
+  const action = SESSION_DISABLED ? null : kernelActionForState(state);
+  const credentialRecovery =
+    state === "signed_out" ||
+    (state === "reconnect_required" &&
+      ["credential_absent", "credential_rejected", "identity_conflict"].includes(reason));
+  const labels = {
+    connect: "Connect",
+    cancel: "Cancel",
+    disconnect: "Disconnect",
+    retry: "Retry",
+    reconnect: "Reconnect",
+  };
+  const headings = {
+    initializing: "Checking Trace",
+    signed_out: "Connect Trace",
+    connecting: "Connecting…",
+    verifying: "Verifying account…",
+    connected: "Connected",
+    degraded: "Trace is temporarily offline",
+    reconnect_required: "Reconnect Trace",
+  };
+  let lead = "";
+  if (SESSION_DISABLED) {
+    lead = "Authenticated extension features are temporarily unavailable.";
+  } else if (state === "signed_out" && isLikelyIosExtensionUi) {
+    lead =
+      "Open the Trace app and sign in there. Signing in on tracefiction.com in Safari does not connect this extension. Return to Safari and press Connect.";
+  } else if (state === "reconnect_required" && isLikelyIosExtensionUi && credentialRecovery) {
+    lead =
+      "Open the Trace app and sign in there. Signing in on tracefiction.com in Safari does not connect this extension. Return to Safari and press Reconnect.";
+  } else if (state === "signed_out") {
+    lead =
+      "Open Trace in this browser and sign in, then return here and press Connect.";
+  } else if (state === "reconnect_required") {
+    if (reason === "storage_write_failed" || reason === "storage_unavailable") {
+      lead = "Trace could not update extension storage. Retry Reconnect after local storage recovers.";
+    } else if (reason === "account_unavailable" || reason === "invalid_account_response") {
+      lead = "Trace could not safely verify this account. Press Reconnect to try again.";
+    } else if (reason === "malformed_envelope" || reason === "unsupported_envelope") {
+      lead = "Trace found unsupported local session data. Reconnect will safely replace it.";
+    } else {
+      lead = "Sign in to Trace in this browser if needed, then press Reconnect.";
+    }
+  } else if (state === "degraded") {
+    lead = reason === "storage_unavailable"
+      ? "Trace could not read extension storage. Retry after local storage recovers."
+      : "Your saved session is protected. Check your connection and retry.";
+  } else if (state === "connected") {
+    lead = "This extension session was verified for the current browser worker.";
+  } else if (state === "connecting" || state === "verifying") {
+    lead = "Keep this popup open while Trace verifies your account.";
+  } else {
+    lead = reason === "storage_unavailable"
+      ? "Trace could not read extension storage. Retry in a moment."
+      : "Checking the extension session.";
+  }
+
+  document.body.dataset.tracePopupState = state;
+  if (statusEl) statusEl.textContent = SESSION_DISABLED ? "Trace unavailable" : headings[state] || "Trace";
+  if (leadEl) {
+    leadEl.hidden = false;
+    leadEl.textContent = lead;
+  }
+  if (connectionEl) {
+    connectionEl.dataset.state = state === "connected" ? "connected" : state === "degraded" ? "warn" : "off";
+    const label = connectionEl.querySelector(".popup-connection-label");
+    if (label) label.textContent = state === "connected" ? "Connected" : state === "initializing" ? "Checking" : "Not linked";
+  }
+  if (ctaEl) {
+    ctaEl.hidden = action == null;
+    ctaEl.href = "#";
+    ctaEl.textContent = action ? labels[action] : "";
+    ctaEl.dataset.sessionAction = action || "";
+  }
+  if (sessionHelpEl) {
+    // Keep iOS recovery as precise text-only guidance until a real-device
+    // release gate proves the custom-scheme action from an installed popup.
+    sessionHelpEl.hidden =
+      SESSION_DISABLED || !credentialRecovery || isLikelyIosExtensionUi;
+    sessionHelpEl.href = TRACE_HOME_URL;
+    sessionHelpEl.textContent = "Open Trace to sign in";
+  }
+  if (localSettingsEl) localSettingsEl.hidden = true;
+  if (proSettingsEl) proSettingsEl.hidden = true;
+  if (importEl) importEl.hidden = true;
+  if (archiveLinksEl) archiveLinksEl.hidden = true;
+}
+
+function sendKernelRuntimeMessage(message, onResponse) {
+  if (USES_BROWSER_PROMISE_API) {
+    try {
+      Promise.resolve(ext.runtime.sendMessage(message)).then(
+        (response) => onResponse(response),
+        () => onResponse(null),
+      );
+    } catch {
+      onResponse(null);
+    }
+    return;
+  }
+  try {
+    ext.runtime.sendMessage(message, (response) => {
+      const failed = Boolean(ext.runtime.lastError);
+      onResponse(failed ? null : response);
+    });
+  } catch {
+    onResponse(null);
+  }
+}
+
+function requestKernelSnapshot() {
+  sendKernelRuntimeMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" }, (response) => {
+    if (!response) return;
+    renderKernelSnapshot(response?.snapshot);
+  });
+}
+
+function initializeKernelPopup() {
+  renderKernelSnapshot({ state: "initializing", reason: "none" });
+  const cta = document.getElementById("popup-cta");
+  cta?.addEventListener("click", (event) => {
+    event.preventDefault();
+    if (cta.getAttribute("aria-disabled") === "true") return;
+    const action = cta.dataset.sessionAction;
+    if (!action) return;
+    cta.setAttribute("aria-disabled", "true");
+    sendKernelRuntimeMessage(
+      { type: "TRACE_SESSION_ACTION", action },
+      (response) => {
+        cta.removeAttribute("aria-disabled");
+        if (!response) return;
+        renderKernelSnapshot(response?.snapshot);
+      },
+    );
+  });
+  requestKernelSnapshot();
+}
+
+if (KERNEL_SESSION_ACTIVE || SESSION_DISABLED) {
+  initializeKernelPopup();
+} else {
 readAndRender();
 
 try {
@@ -652,4 +818,5 @@ if (importBtn) {
   importBtn.addEventListener("click", () => {
     runImport(importBtn);
   });
+}
 }

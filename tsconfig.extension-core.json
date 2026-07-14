@@ -3,7 +3,7 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "lib": ["ES2022"],
+    "lib": ["ES2022", "DOM"],
     "rootDir": "src",
     "outDir": ".trace-build",
     "strict": true,
@@ -17,5 +17,8 @@
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true
   },
-  "include": ["src/extension-core/**/*.mts", "src/extension-shadow/**/*.mts"]
+  "include": [
+    "src/extension-core/**/*.mts",
+    "src/extension-runtime/**/*.mts"
+  ]
 }

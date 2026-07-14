@@ -28,6 +28,9 @@ export type SessionReason =
   | "none"
   | "credential_absent"
   | "credential_rejected"
+  | "provider_unavailable"
+  | "account_unavailable"
+  | "invalid_account_response"
   | "identity_conflict"
   | "malformed_envelope"
   | "unsupported_envelope"
@@ -52,7 +55,11 @@ export interface SessionSnapshot {
 }
 
 export type SessionEvent =
-  | { readonly type: "signed_out"; readonly epoch: number }
+  | {
+      readonly type: "signed_out";
+      readonly epoch: number;
+      readonly reason?: "none" | "provider_unavailable";
+    }
   | { readonly type: "connecting"; readonly epoch: number }
   | {
       readonly type: "verifying";
@@ -150,7 +157,7 @@ export function reduceSession(_model: SessionModel, event: SessionEvent): Sessio
         accountId: null,
         publicationScope: null,
         displayScope: null,
-        reason: "none",
+        reason: event.reason ?? "none",
       };
     case "connecting":
       return {

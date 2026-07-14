@@ -62,8 +62,9 @@ Safari:
    Safari -> Extensions on older versions. Turn on **Allow Extension**.
 5. On iOS Safari, under **Permissions**, set **Other Websites** to **Allow**
    (not Ask or Deny), or set every listed AO3/FFN site to Allow individually.
-   Allow the configured Trace web origin separately only when testing the Safari
-   web token-sync bridge.
+   The configured Trace web origin is not an iOS credential provider; iOS
+   connection requires app sign-in followed by the explicit extension Connect
+   action.
 6. After code changes, rebuild/rerun the app target, then disable/enable the
    Safari extension if Safari keeps an old copy.
 7. Reload every AO3/FFN tab under test.
@@ -71,7 +72,8 @@ Safari:
 ### iOS App Handoff And Receipt
 
 On a clean TestFlight/internal-distribution install, sign in in the Trace app,
-complete both settings above, then test all three paths:
+complete both settings above, press **Connect** or **Connect and save** when the
+extension offers it, then test all three paths:
 
 1. Paste a direct AO3 or FFN story URL. Pass: the app reports success only
    after the matching Safari handoff reaches the story and the save confirms.

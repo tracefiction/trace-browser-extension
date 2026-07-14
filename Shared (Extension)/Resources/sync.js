@@ -19,6 +19,10 @@ const TOKEN_REQUEST_MESSAGE = "TRACE_FICTION_TOKEN_REQUEST";
 const FIRST_STORY_ADD_REQUEST_MESSAGE = "TRACE_FIRST_STORY_ADD_REQUEST";
 const FIRST_STORY_ADD_MESSAGE = "TRACE_FIRST_STORY_ADD";
 const FIRST_STORY_ADD_RESPONSE_MESSAGE = "TRACE_FIRST_STORY_ADD_RESPONSE";
+const CREDENTIAL_GRANT_REQUEST_MESSAGE = "TRACE_CREDENTIAL_GRANT_REQUEST";
+const SESSION_MODE = globalThis.TRACE_SESSION_MODE || "legacy";
+const KERNEL_SESSION_ACTIVE = SESSION_MODE === "kernel";
+const pendingCredentialGrants = new Map();
 const STATUS_AUTH_STATES = new Set([
   "connected",
   "signed_out",
@@ -74,12 +78,15 @@ function sendRuntimeMessage(message, errorLabel) {
   }
 }
 
-function requestTraceToken(reason) {
+function requestTraceToken(reason, requestId) {
   window.postMessage(
     {
       type: TOKEN_REQUEST_MESSAGE,
       reason,
       at: Date.now(),
+      ...(requestId
+        ? { protocolVersion: 1, requestId }
+        : {}),
     },
     window.location.origin,
   );
@@ -272,6 +279,22 @@ window.addEventListener("message", (event) => {
   if (event.data?.type !== TOKEN_MESSAGE) return;
 
   const token = typeof event.data.token === "string" ? event.data.token : null;
+  if (KERNEL_SESSION_ACTIVE) {
+    const requestId =
+      event.data.protocolVersion === 1 && typeof event.data.requestId === "string"
+        ? event.data.requestId
+        : "";
+    const pending = requestId ? pendingCredentialGrants.get(requestId) : null;
+    if (!pending) return;
+    pendingCredentialGrants.delete(requestId);
+    window.clearTimeout(pending.timeout);
+    pending.sendResponse({
+      ok: Boolean(token && token.trim()),
+      requestId,
+      token: token && token.trim() ? token.trim() : null,
+    });
+    return;
+  }
 
   sendRuntimeMessage(
     {
@@ -282,19 +305,47 @@ window.addEventListener("message", (event) => {
   );
 });
 
-requestTraceTokenIfVisible("sync_ready");
-window.addEventListener("pageshow", () => {
-  requestTraceTokenIfVisible("pageshow");
-});
-window.addEventListener("focus", () => {
-  requestTraceTokenIfVisible("focus");
-});
-document.addEventListener("visibilitychange", () => {
-  requestTraceTokenIfVisible("visibilitychange");
-});
+if (!KERNEL_SESSION_ACTIVE) {
+  requestTraceTokenIfVisible("sync_ready");
+  window.addEventListener("pageshow", () => {
+    requestTraceTokenIfVisible("pageshow");
+  });
+  window.addEventListener("focus", () => {
+    requestTraceTokenIfVisible("focus");
+  });
+  document.addEventListener("visibilitychange", () => {
+    requestTraceTokenIfVisible("visibilitychange");
+  });
+}
 
 try {
-  ext.runtime.onMessage.addListener((message) => {
+  ext.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type === CREDENTIAL_GRANT_REQUEST_MESSAGE) {
+      if (
+        !KERNEL_SESSION_ACTIVE ||
+        message.protocolVersion !== 1 ||
+        typeof message.requestId !== "string" ||
+        !message.requestId.trim() ||
+        (message.purpose !== "connect" && message.purpose !== "refresh")
+      ) {
+        return false;
+      }
+      const requestId = message.requestId;
+      const previous = pendingCredentialGrants.get(requestId);
+      if (previous) {
+        window.clearTimeout(previous.timeout);
+        previous.sendResponse({ ok: false, requestId, token: null });
+      }
+      const timeout = window.setTimeout(() => {
+        const pending = pendingCredentialGrants.get(requestId);
+        if (!pending) return;
+        pendingCredentialGrants.delete(requestId);
+        pending.sendResponse({ ok: false, requestId, token: null });
+      }, 10_000);
+      pendingCredentialGrants.set(requestId, { timeout, sendResponse });
+      requestTraceToken("credential_grant", requestId);
+      return true;
+    }
     if (message?.type === STATUS_PUSH_MESSAGE) {
       window.postMessage(
         {
@@ -304,9 +355,9 @@ try {
         },
         window.location.origin,
       );
-      return;
+      return false;
     }
-    if (message?.type !== "TRACE_LIBRARY_INVALIDATED") return;
+    if (message?.type !== "TRACE_LIBRARY_INVALIDATED") return false;
     window.postMessage(
       {
         type: "TRACE_LIBRARY_INVALIDATED",
@@ -315,6 +366,7 @@ try {
       },
       window.location.origin,
     );
+    return false;
   });
 } catch (error) {
   console.error("[Trace Sync] Failed to bind library invalidation bridge", error);

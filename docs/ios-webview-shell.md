@@ -14,7 +14,7 @@ The long-term product direction may include a more native iOS app, but this shel
 - Reports iOS notification permission results back to the web app so denial and setup failures have visible recovery copy.
 - Opens Apple's subscription management sheet for Apple-billed Trace Unlimited accounts.
 - Bridges Safari extension setup actions from the web shell to native iOS code.
-- Shares the signed-in web-shell access token with the Safari extension through a shared Keychain access group.
+- Maintains an app-owned Safari credential provider in a shared Keychain access group while the app is signed in; the extension can read it only after an explicit Safari-side Connect gesture.
 - Stores short-lived direct-story and fixed-host AO3 browse handoffs in app-group storage before opening Safari.
 - Opens external non-Trace links outside the shell.
 - Uses `ASWebAuthenticationSession` for OAuth flows instead of completing OAuth inside an embedded web view.
@@ -28,19 +28,18 @@ start callback.
 
 Installing the iOS app does not automatically enable the Safari extension or grant site access. User-facing help should keep the setup path explicit and app-led:
 
-1. Sign in to Trace inside the iOS app shell. Keychain token share connects the Safari extension; no Safari sign-in step exists.
+1. Sign in to Trace inside the iOS app shell. Signing in on tracefiction.com in Safari does not connect the extension.
 2. Use the in-app settings action (one trip). On iOS versions that support Safari extension settings APIs, Trace opens the extension settings screen directly. On older iOS versions, show the concise fallback: Settings > Apps > Safari > Extensions > Trace. Two changes on that screen: turn on **Allow Extension**, then set **Other Websites** to **Allow** (verified on-device: this flips every listed host to Allow in ~5 taps; per-site rows remain the choice for readers who prefer narrower grants). The aA page-menu gesture ("Always Allow on Every Website") is recovery-only.
 3. Return to the app; it re-checks **Allow Extension** on focus, but keeps the
    permission gate visible until the reader confirms Website Access is Allow.
 4. Open AO3 or paste a supported story URL in the app. Trace stores a short-lived
-   pending direct-story or AO3-browse handoff, opens Safari, and the Safari
-   extension refreshes its auth token from the containing app before reading
-   that pending handoff. This makes the app's current Trace account
-   authoritative even if Safari previously held a valid session for another
-   account. The extension emits an opaque receipt only after it reaches the
-   matching story, then saves/focuses the story on that page.
+   pending direct-story or AO3-browse handoff and opens Safari. When the
+   extension offers **Connect** or **Connect and save**, press it; the extension
+   reads the app-owned provider and verifies the account before continuing.
+   The extension emits an opaque receipt only after it reaches the matching
+   story, then saves/focuses the story on that page.
 
-The app can report whether the Safari extension is enabled when the OS API is available, but it cannot read per-site permissions directly. The proof that a content script ran is the extension heartbeat: content scripts ping the background on archive pages, the background forwards run timestamps (and confirmed-save timestamps for track/quick-add) through `SafariWebExtensionHandler` into the shared app group, and the app surfaces them in the `TRACE_IOS_EXTENSION_STATE` payload (`lastArchiveRunAt`, `lastArchiveSaveAt`, `lastRunHandoffId`). The background sends that core receipt before asynchronously recording its `browser.permissions.getAll()` snapshot as `grantedOrigins` / `permissionSnapshotAt`; that snapshot is diagnostic data, not a native query of current Website Access. The iOS native message bridge supplies the Trace token for the app-led flow, so Trace's own web origin is not an initial reader permission requirement.
+The app can report whether the Safari extension is enabled when the OS API is available, but it cannot read per-site permissions directly. The proof that a content script ran is the extension heartbeat: content scripts ping the background on archive pages, the background forwards run timestamps (and confirmed-save timestamps for track/quick-add) through `SafariWebExtensionHandler` into the shared app group, and the app surfaces them in the `TRACE_IOS_EXTENSION_STATE` payload (`lastArchiveRunAt`, `lastArchiveSaveAt`, `lastRunHandoffId`). The background sends that core receipt before asynchronously recording its `browser.permissions.getAll()` snapshot as `grantedOrigins` / `permissionSnapshotAt`; that snapshot is diagnostic data, not a native query of current Website Access. The iOS native message bridge supplies a credential only in response to the explicit Connect flow, so Trace's own web origin is not an initial reader permission requirement.
 
 Xcode reinstall behavior is not authoritative for fresh users. A local build over an existing install can preserve or restore Safari extension settings and website access, making the extension look "magically" enabled. Treat that as diagnostic only; the acceptance test for first-run onboarding is a clean TestFlight/internal-distribution install after deleting Trace and confirming Safari Extensions state first.
 
@@ -66,7 +65,8 @@ Use TestFlight or an internal distribution install for the realistic first-user 
 2. Confirm Trace is absent or disabled under Safari Extensions before reinstalling.
 3. Install via TestFlight/internal distribution, sign in inside the app, then use the
    wizard's one Settings trip: **Allow Extension** on and **Other Websites** →
-   **Allow**.
+   **Allow**. Return to Safari and press **Connect** or **Connect and save**
+   when the extension offers it.
 4. On iOS versions with the settings deep link, record whether it lands on the
    Extensions list or the Trace detail page. With the grant in place, paste a
    supported story URL, return to the app, and confirm the wizard only reaches

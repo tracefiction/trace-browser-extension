@@ -112,6 +112,7 @@
         "https://www.tracefiction.com/*"
       ],
       "js": [
+        "popup-config.js",
         "sync.js"
       ],
       "run_at": "document_idle"

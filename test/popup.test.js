@@ -37,6 +37,14 @@ function createPopupHarness({
   importResponse = { ok: true },
   userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
   traceWebOrigin,
+  sessionMode = "legacy",
+  sessionSnapshot = {
+    state: "signed_out",
+    accountId: null,
+    canExecuteAuthenticated: false,
+    reason: "none",
+  },
+  promiseRuntime = false,
 } = {}) {
   const html = fs.readFileSync(POPUP_HTML_PATH, "utf8");
   const js = fs.readFileSync(POPUP_JS_PATH, "utf8");
@@ -58,17 +66,24 @@ function createPopupHarness({
       lastError: null,
       sendMessage(message, callback) {
         messages.push(message);
+        let response;
         if (message.type === "TRACE_POPUP_OPEN") {
-          callback?.({ ok: true });
-          return;
+          response = { ok: true };
         }
         if (message.type === "TRACE_POPUP_GET_STATE") {
-          callback?.(popupState);
-          return;
+          response = popupState;
         }
         if (message.type === "TRACE_IMPORT_TRIGGER") {
-          callback?.(importResponse);
+          response = importResponse;
         }
+        if (message.type === "TRACE_SESSION_GET_SNAPSHOT") {
+          response = { ok: true, snapshot: sessionSnapshot };
+        }
+        if (message.type === "TRACE_SESSION_ACTION") {
+          response = { ok: true, snapshot: sessionSnapshot, action: { kind: "ignored" } };
+        }
+        if (promiseRuntime) return Promise.resolve(response);
+        callback?.(response);
       },
     },
     storage: {
@@ -104,8 +119,8 @@ function createPopupHarness({
 
   const context = {
     console,
-    chrome: ext,
-    browser: undefined,
+    chrome: promiseRuntime ? undefined : ext,
+    browser: promiseRuntime ? ext : undefined,
     document: window.document,
     window,
     self: window,
@@ -117,6 +132,7 @@ function createPopupHarness({
       return timeouts.length;
     },
     clearTimeout() {},
+    TRACE_SESSION_MODE: sessionMode,
   };
   if (traceWebOrigin !== undefined) {
     context.TRACE_EXTENSION_WEB_ORIGIN = traceWebOrigin;
@@ -157,6 +173,85 @@ function createPopupHarness({
     },
   };
 }
+
+test("kernel popup is read-only on open and exposes only explicit session actions", async () => {
+  const h = createPopupHarness({ sessionMode: "kernel" });
+  await flush();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(h.messages)), [
+    { type: "TRACE_SESSION_GET_SNAPSHOT" },
+  ]);
+  assert.equal(h.document.getElementById("popup-status").textContent, "Connect Trace");
+  assert.equal(h.document.getElementById("popup-cta").textContent, "Connect");
+  assert.equal(h.document.getElementById("popup-import").hidden, true);
+  assert.equal(h.document.getElementById("popup-local-settings").hidden, true);
+
+  h.document.getElementById("popup-cta").dispatchEvent(
+    new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(h.messages.at(-1))), {
+    type: "TRACE_SESSION_ACTION",
+    action: "connect",
+  });
+});
+
+test("kernel popup uses the promise runtime contract on Firefox and Safari", async () => {
+  const h = createPopupHarness({ sessionMode: "kernel", promiseRuntime: true });
+  await flush();
+
+  assert.equal(h.document.getElementById("popup-status").textContent, "Connect Trace");
+  h.document.getElementById("popup-cta").dispatchEvent(
+    new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+  );
+  await flush();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.messages.at(-1))), {
+    type: "TRACE_SESSION_ACTION",
+    action: "connect",
+  });
+  assert.equal(h.document.getElementById("popup-cta").hasAttribute("aria-disabled"), false);
+});
+
+test("kernel iOS credential recovery gives app-only guidance without an unproven link", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    userAgent:
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+    sessionSnapshot: {
+      state: "reconnect_required",
+      accountId: null,
+      canExecuteAuthenticated: false,
+      reason: "credential_rejected",
+    },
+  });
+  await flush();
+
+  assert.match(h.document.getElementById("popup-lead").textContent, /Trace app/i);
+  assert.match(h.document.getElementById("popup-lead").textContent, /does not connect/i);
+  assert.equal(h.document.getElementById("popup-session-help").hidden, true);
+  assert.doesNotMatch(
+    h.document.getElementById("popup-session-help").getAttribute("href") || "",
+    /^traceauth:/,
+  );
+});
+
+test("kernel iOS account-response failures are not mislabeled as an app sign-in problem", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    userAgent:
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+    sessionSnapshot: {
+      state: "reconnect_required",
+      accountId: null,
+      canExecuteAuthenticated: false,
+      reason: "invalid_account_response",
+    },
+  });
+  await flush();
+
+  assert.match(h.document.getElementById("popup-lead").textContent, /safely verify/i);
+  assert.doesNotMatch(h.document.getElementById("popup-lead").textContent, /sign in/i);
+  assert.equal(h.document.getElementById("popup-session-help").hidden, true);
+});
 
 test("popup renders signed-out fallback with a direct Trace sign-in CTA", async () => {
   const h = createPopupHarness({
