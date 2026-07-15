@@ -67,6 +67,9 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     private var lastIntendedTraceURL: URL?
     private var failedTraceURL: URL?
     private var sharedProviderBootstrapReady = false
+#if DEBUG && targetEnvironment(simulator)
+    private var traceSimulatorFailNextProviderClear = false
+#endif
     private lazy var billingCoordinator = TraceBillingCoordinator(
         apiBaseURL: Self.billingAPIBaseURL
     ) { [weak self] in
@@ -314,11 +317,35 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 
     override func viewDidLoad() {
         super.viewDidLoad()
+#if DEBUG && targetEnvironment(simulator)
+        let traceSimulatorSeededStaleProvider =
+            ProcessInfo.processInfo.environment["traceDebugSeedStaleProvider"] == "true"
+        if traceSimulatorSeededStaleProvider {
+            UserDefaults.standard.set(
+                "stale-v2-provider",
+                forKey: Self.traceSimulatorProviderV2Key
+            )
+            UserDefaults.standard.set(
+                "stale-retired-provider",
+                forKey: Self.traceSimulatorRetiredProviderKey
+            )
+        }
+#endif
         // The web shell and native binary deploy independently. Clear any v2
         // provider left by an earlier current shell before this navigation can
         // accept a versioned synchronizer write. An old cached shell cannot
         // repopulate v2 because its unversioned mutation is rejected below.
         sharedProviderBootstrapReady = prepareSharedProviderForWebShell()
+#if DEBUG && targetEnvironment(simulator)
+        if traceSimulatorSeededStaleProvider &&
+            (
+                UserDefaults.standard.object(forKey: Self.traceSimulatorProviderV2Key) != nil ||
+                    UserDefaults.standard.object(forKey: Self.traceSimulatorRetiredProviderKey) != nil
+            )
+        {
+            sharedProviderBootstrapReady = false
+        }
+#endif
         navigationController?.setNavigationBarHidden(true, animated: false)
         apnsTokenObserver = NotificationCenter.default.addObserver(
             forName: .traceApnsDeviceTokenReceived,
@@ -1248,6 +1275,12 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     private static let traceAuthTokenAccount = "extension-provider-v2"
     private static let retiredTraceAuthTokenAccount = "extension-token"
     private static let traceProviderProtocolVersion = 2
+#if DEBUG && targetEnvironment(simulator)
+    private static let traceSimulatorProviderV2Key =
+        "traceDebugSimulatorAppProviderV2"
+    private static let traceSimulatorRetiredProviderKey =
+        "traceDebugSimulatorAppProviderRetired"
+#endif
     private static let pendingFirstStoryDefaultsKey = "tracePendingFirstStoryUrlV1"
     private static let pendingFirstStoryExpiresAtDefaultsKey = "tracePendingFirstStoryExpiresAtV1"
     private static let pendingFirstStoryV2DefaultsKey = "tracePendingFirstStoryV2"
@@ -1348,6 +1381,10 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 throw TraceSafariExtensionBridgeError.tokenShareFailed
             }
             try Self.storeSharedTraceToken(token)
+#if DEBUG && targetEnvironment(simulator)
+            traceSimulatorFailNextProviderClear =
+                ProcessInfo.processInfo.environment["traceDebugFailProviderClear"] == "true"
+#endif
             postSafariExtensionActionResult(
                 type: "TRACE_IOS_AUTH_TOKEN_UPDATE_RESPONSE",
                 nonce: nonce,
@@ -1392,11 +1429,12 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     }
 
     private func clearSharedProviderForWebShell() throws {
-        #if DEBUG
-        if UserDefaults.standard.bool(forKey: "traceDebugFailProviderClear") {
+#if DEBUG && targetEnvironment(simulator)
+        if traceSimulatorFailNextProviderClear {
+            traceSimulatorFailNextProviderClear = false
             throw TraceSafariExtensionBridgeError.tokenShareFailed
         }
-        #endif
+#endif
         try Self.clearSharedTraceTokens()
     }
 
@@ -1815,7 +1853,17 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 
     private static func storeSharedTraceToken(_ token: String) throws {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let data = trimmed.data(using: .utf8), !data.isEmpty else {
+        guard !trimmed.isEmpty else {
+            throw TraceSafariExtensionBridgeError.tokenShareFailed
+        }
+#if DEBUG && targetEnvironment(simulator)
+        UserDefaults.standard.set(trimmed, forKey: traceSimulatorProviderV2Key)
+        guard UserDefaults.standard.string(forKey: traceSimulatorProviderV2Key) == trimmed else {
+            throw TraceSafariExtensionBridgeError.tokenShareFailed
+        }
+        return
+#else
+        guard let data = trimmed.data(using: .utf8) else {
             throw TraceSafariExtensionBridgeError.tokenShareFailed
         }
 
@@ -1834,9 +1882,19 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         guard status == errSecSuccess else {
             throw TraceSafariExtensionBridgeError.tokenShareFailed
         }
+#endif
     }
 
     private static func clearSharedTraceTokens() throws {
+#if DEBUG && targetEnvironment(simulator)
+        UserDefaults.standard.removeObject(forKey: traceSimulatorProviderV2Key)
+        UserDefaults.standard.removeObject(forKey: traceSimulatorRetiredProviderKey)
+        guard UserDefaults.standard.object(forKey: traceSimulatorProviderV2Key) == nil,
+              UserDefaults.standard.object(forKey: traceSimulatorRetiredProviderKey) == nil
+        else {
+            throw TraceSafariExtensionBridgeError.tokenShareFailed
+        }
+#else
         for account in [traceAuthTokenAccount, retiredTraceAuthTokenAccount] {
             let query: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
@@ -1849,6 +1907,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 throw TraceSafariExtensionBridgeError.tokenShareFailed
             }
         }
+#endif
     }
 
     private static func readExtensionHeartbeat() -> TraceSafariExtensionHeartbeat? {

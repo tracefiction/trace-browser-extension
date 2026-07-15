@@ -279,7 +279,7 @@ for (const promiseRuntime of [false, true]) {
   }
 }
 
-test("kernel iOS credential recovery gives app-only guidance without an unproven link", async () => {
+test("kernel iOS credential recovery gives app-only guidance and opens the app", async () => {
   const h = createPopupHarness({
     sessionMode: "kernel",
     userAgent:
@@ -295,10 +295,12 @@ test("kernel iOS credential recovery gives app-only guidance without an unproven
 
   assert.match(h.document.getElementById("popup-lead").textContent, /Trace app/i);
   assert.match(h.document.getElementById("popup-lead").textContent, /does not connect/i);
-  assert.equal(h.document.getElementById("popup-session-help").hidden, true);
-  assert.doesNotMatch(
-    h.document.getElementById("popup-session-help").getAttribute("href") || "",
-    /^traceauth:/,
+  const helper = h.document.getElementById("popup-session-help");
+  assert.equal(helper.hidden, false);
+  assert.equal(helper.textContent, "Open Trace app");
+  assert.equal(
+    helper.getAttribute("href"),
+    "traceauth://open?destination=extension-connect",
   );
 });
 

@@ -2,6 +2,7 @@ import XCTest
 
 final class TraceInstalledLifecycleUITests: XCTestCase {
     private let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
+    private let traceApp = XCUIApplication(bundleIdentifier: "com.tracefiction.trace")
 
     private var fixtureOrigin: URL {
         guard
@@ -16,46 +17,82 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = false
-        safari.launch()
-        XCTAssertTrue(safari.wait(for: .runningForeground, timeout: 8))
-        openFixturePage()
     }
 
-    private func openFixturePage() {
-        let address = safari.textFields["Address"]
-        XCTAssertTrue(address.waitForExistence(timeout: 5))
-        address.tap()
-        address.typeText(fixtureOrigin.absoluteString)
-        safari.keyboards.buttons["go"].tap()
+    private func launchSafariFixture() {
+        activateSafariPage()
         XCTAssertTrue(
             safari.staticTexts["Trace installed iOS fixture"].waitForExistence(timeout: 8)
+        )
+        XCTAssertTrue(
+            safari.staticTexts["Browser-only Trace session is signed in."].waitForExistence(timeout: 5)
+        )
+    }
+
+    private func activateSafariPage() {
+        if safari.state == .notRunning {
+            safari.launch()
+        } else {
+            safari.activate()
+        }
+        XCTAssertTrue(safari.wait(for: .runningForeground, timeout: 8))
+    }
+
+    private func restartSafariPage() {
+        safari.terminate()
+        safari.launch()
+        XCTAssertTrue(safari.wait(for: .runningForeground, timeout: 8))
+    }
+
+    private func launchTraceApp(
+        seedStaleProvider: Bool = false,
+        failProviderClear: Bool = false
+    ) {
+        traceApp.terminate()
+        traceApp.launchEnvironment = [
+            "traceDebugSeedStaleProvider": seedStaleProvider ? "true" : "false",
+            "traceDebugFailProviderClear": failProviderClear ? "true" : "false",
+        ]
+        traceApp.launch()
+        XCTAssertTrue(traceApp.wait(for: .runningForeground, timeout: 8))
+        XCTAssertTrue(
+            traceApp.staticTexts["Trace installed app fixture"].waitForExistence(timeout: 8)
         )
     }
 
     private func openTracePopup() {
-        let pageMenu = safari.buttons["Page Menu"]
-        XCTAssertTrue(pageMenu.waitForExistence(timeout: 5))
-        pageMenu.tap()
-        let highlightsNotNow = safari.buttons["Not Now"]
-        if highlightsNotNow.waitForExistence(timeout: 1) {
-            highlightsNotNow.tap()
-        }
-
         let traceExtension = safari.cells["Trace"]
-        if !traceExtension.waitForExistence(timeout: 1) {
-            let manageExtensions = safari.cells["Manage Extensions"]
-            XCTAssertTrue(manageExtensions.waitForExistence(timeout: 3))
-            manageExtensions.tap()
-
-            let traceSwitch = safari.switches["Trace"]
-            XCTAssertTrue(traceSwitch.waitForExistence(timeout: 3))
-            if (traceSwitch.value as? String) != "1" {
-                traceSwitch.tap()
+        var menuReady = false
+        for _ in 0..<3 where !menuReady {
+            let pageMenu = safari.buttons["Page Menu"]
+            XCTAssertTrue(pageMenu.waitForExistence(timeout: 5))
+            pageMenu.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            let highlightsNotNow = safari.buttons["Not Now"]
+            if highlightsNotNow.waitForExistence(timeout: 1) {
+                highlightsNotNow.tap()
             }
-            safari.buttons["Done"].tap()
+
+            if traceExtension.waitForExistence(timeout: 3) {
+                menuReady = true
+                break
+            }
+            let manageExtensions = safari.cells["Manage Extensions"]
+            if manageExtensions.waitForExistence(timeout: 2) {
+                manageExtensions.tap()
+                let traceSwitch = safari.switches["Trace"]
+                XCTAssertTrue(traceSwitch.waitForExistence(timeout: 3))
+                if (traceSwitch.value as? String) != "1" {
+                    traceSwitch.tap()
+                }
+                safari.buttons["Done"].tap()
+                menuReady = traceExtension.waitForExistence(timeout: 5)
+            }
         }
-        XCTAssertTrue(traceExtension.waitForExistence(timeout: 5))
-        XCTAssertTrue(traceExtension.isHittable)
+        guard menuReady else {
+            XCTFail("Safari never presented Trace or Manage Extensions in the page menu")
+            return
+        }
+        XCTAssertTrue(waitForHittable(traceExtension, timeout: 5))
 
         // Safari exposes the extension row to accessibility but ignores a
         // semantic `Cell.tap()`. Use the row's stable screen frame, not a
@@ -98,6 +135,29 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
         return false
     }
 
+    private func waitForHittable(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if element.exists && element.isHittable {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        } while Date() < deadline
+        return false
+    }
+
+    private func waitForTextContaining(
+        _ fragment: String,
+        in application: XCUIApplication,
+        timeout: TimeInterval = 8
+    ) -> XCUIElement {
+        let element = application.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", fragment)
+        ).firstMatch
+        XCTAssertTrue(element.waitForExistence(timeout: timeout))
+        return element
+    }
+
     private func control(_ mode: String) {
         let expectation = expectation(description: "fixture mode \(mode)")
         var request = URLRequest(url: fixtureOrigin.appending(path: "__control"))
@@ -113,13 +173,14 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
     }
 
     private func relaunchSafari() {
-        safari.terminate()
-        safari.launch()
-        XCTAssertTrue(safari.wait(for: .runningForeground, timeout: 8))
-        openFixturePage()
+        restartSafariPage()
+        XCTAssertTrue(
+            safari.staticTexts["Trace installed iOS fixture"].waitForExistence(timeout: 8)
+        )
     }
 
-    func testSignedOutConnectWithoutAppCredentialFailsClosed() {
+    func testBrowserOnlySignInCannotConnectWithoutAppProvider() {
+        launchSafariFixture()
         openTracePopup()
         XCTAssertTrue(safari.staticTexts["NOT LINKED"].exists)
         XCTAssertTrue(
@@ -137,7 +198,36 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
         XCTAssertTrue(safari.staticTexts["NOT LINKED"].exists)
     }
 
+    func testOpenTraceAppFromPopup() {
+        launchSafariFixture()
+        openTracePopup()
+        let openApp = safari.links["Open Trace app"]
+        XCTAssertTrue(openApp.waitForExistence(timeout: 5))
+        openApp.tap()
+
+        let openConfirmation = safari.buttons["Open"]
+        if openConfirmation.waitForExistence(timeout: 2) {
+            openConfirmation.tap()
+        }
+
+        XCTAssertTrue(traceApp.wait(for: .runningForeground, timeout: 8))
+        XCTAssertTrue(
+            traceApp.staticTexts["Trace installed app fixture"].waitForExistence(timeout: 8)
+        )
+        _ = waitForTextContaining(
+            "/setup?setupPath=ios-app#first-story-setup",
+            in: traceApp
+        )
+        XCTAssertNotEqual(safari.state, .runningForeground)
+
+        launchSafariFixture()
+        openTracePopup()
+        XCTAssertTrue(safari.staticTexts["Connect Trace"].waitForExistence(timeout: 8))
+        XCTAssertTrue(safari.staticTexts["NOT LINKED"].exists)
+    }
+
     func testResetSession() {
+        launchSafariFixture()
         openTracePopup()
         let disconnect = safari.buttons["Disconnect"]
         if disconnect.exists {
@@ -148,6 +238,7 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
     }
 
     func testConnectRestartRetryAndDisconnect() {
+        launchSafariFixture()
         control("ok-a")
         openTracePopup()
         safari.links["Connect"].tap()
@@ -172,7 +263,43 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
         XCTAssertTrue(safari.staticTexts["NOT LINKED"].exists)
     }
 
+    func testReturnAfterAppSignInRequiresExplicitConnect() {
+        launchSafariFixture()
+        openTracePopup()
+        XCTAssertTrue(safari.staticTexts["Connect Trace"].exists)
+        XCTAssertTrue(safari.staticTexts["NOT LINKED"].exists)
+        safari.links["Connect"].tap()
+        XCTAssertTrue(safari.staticTexts["Connected"].waitForExistence(timeout: 8))
+    }
+
+    func testConnectAndSaveFromInstalledArchiveSender() {
+        activateSafariPage()
+        openTracePopup()
+
+        // Reopen the work after Safari grants the extension site access so
+        // the installed collector and DEBUG-only driver load together.
+        restartSafariPage()
+        XCTAssertTrue(
+            safari.staticTexts["Installed Connect-and-save driver ready"]
+                .waitForExistence(timeout: 20)
+        )
+        let connectAndSave = safari.buttons["Connect and save"]
+        XCTAssertTrue(connectAndSave.waitForExistence(timeout: 15))
+        let safariFrame = safari.frame
+        let actionFrame = connectAndSave.frame
+        safari.coordinate(withNormalizedOffset: CGVector(
+            dx: actionFrame.midX / safariFrame.width,
+            dy: actionFrame.midY / safariFrame.height
+        )).tap()
+        XCTAssertTrue(
+            safari.staticTexts["Installed result: connected / commands_unavailable"]
+                .waitForExistence(timeout: 15)
+        )
+        XCTAssertTrue(safari.buttons["Connected"].exists)
+    }
+
     func testLeaveReconnectRequiredForProviderChange() {
+        launchSafariFixture()
         control("ok-a")
         openTracePopup()
         safari.links["Connect"].tap()
@@ -185,7 +312,17 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
         XCTAssertTrue(safari.links["Reconnect"].exists)
     }
 
+    func testReconnectWithSameProvider() {
+        launchSafariFixture()
+        control("ok-a")
+        openTracePopup()
+        XCTAssertTrue(safari.staticTexts["Reconnect Trace"].waitForExistence(timeout: 6))
+        safari.links["Reconnect"].tap()
+        XCTAssertTrue(safari.staticTexts["Connected"].waitForExistence(timeout: 8))
+    }
+
     func testReconnectWithChangedProvider() {
+        launchSafariFixture()
         control("ok-b")
         openTracePopup()
         XCTAssertTrue(safari.staticTexts["Reconnect Trace"].waitForExistence(timeout: 6))
@@ -194,6 +331,7 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
     }
 
     func testLeaveReconnectRequiredForMissingProvider() {
+        launchSafariFixture()
         control("rejected")
         openTracePopup()
         XCTAssertTrue(safari.staticTexts["Connected"].waitForExistence(timeout: 6))
@@ -203,10 +341,60 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
     }
 
     func testReconnectWithoutProviderFailsClosed() {
+        launchSafariFixture()
         control("ok-b")
         openTracePopup()
         XCTAssertTrue(safari.staticTexts["Reconnect Trace"].waitForExistence(timeout: 6))
         safari.links["Reconnect"].tap()
+        XCTAssertTrue(safari.staticTexts["Connect Trace"].waitForExistence(timeout: 8))
+        XCTAssertTrue(safari.staticTexts["NOT LINKED"].exists)
+    }
+
+    func testConnectedSessionAfterAppSignOutNeedsReconnectOnRejection() {
+        launchSafariFixture()
+        control("ok-a")
+        openTracePopup()
+        XCTAssertTrue(safari.staticTexts["Connected"].waitForExistence(timeout: 8))
+        control("rejected")
+        relaunchSafari()
+        openTracePopup()
+        XCTAssertTrue(safari.staticTexts["Reconnect Trace"].waitForExistence(timeout: 8))
+    }
+
+    func testAppSignedOutColdStartClearsStaleProvider() {
+        launchTraceApp(seedStaleProvider: true)
+        _ = waitForTextContaining("Signed out and provider cleared", in: traceApp)
+    }
+
+    func testAppSignInWritesProvider() {
+        launchTraceApp()
+        _ = waitForTextContaining("Provider ready", in: traceApp)
+    }
+
+    func testAppSignOutClearsProvider() {
+        launchTraceApp()
+        _ = waitForTextContaining("Provider ready", in: traceApp)
+        traceApp.buttons["App sign out"].tap()
+        _ = waitForTextContaining("Signed out and provider cleared", in: traceApp)
+    }
+
+    func testAppClearFailureBlocksSignOut() {
+        launchTraceApp(failProviderClear: true)
+        _ = waitForTextContaining("Provider ready", in: traceApp)
+        traceApp.buttons["App sign out"].tap()
+        _ = waitForTextContaining("Sign out blocked: provider_clear_failed", in: traceApp)
+        _ = waitForTextContaining("Still signed in", in: traceApp)
+        let retry = traceApp.buttons["Retry provider cleanup"]
+        XCTAssertTrue(retry.exists)
+        retry.tap()
+        _ = waitForTextContaining("Signed out and provider cleared", in: traceApp)
+    }
+
+    func testAppResumeDoesNotAmbientlyConnect() {
+        launchTraceApp()
+        _ = waitForTextContaining("Provider ready", in: traceApp)
+        launchSafariFixture()
+        openTracePopup()
         XCTAssertTrue(safari.staticTexts["Connect Trace"].waitForExistence(timeout: 8))
         XCTAssertTrue(safari.staticTexts["NOT LINKED"].exists)
     }

@@ -16,8 +16,19 @@ const EVIDENCE_ROOT = path.resolve(
 );
 const PROVIDER_DEFAULTS_DOMAIN = "com.tracefiction.trace.extension";
 const PROVIDER_DEFAULTS_KEY = "traceDebugSimulatorProviderCredential";
+const TRACE_APP_BUNDLE_ID = "com.tracefiction.trace";
+const APP_PROVIDER_V2_KEY = "traceDebugSimulatorAppProviderV2";
+const APP_PROVIDER_RETIRED_KEY = "traceDebugSimulatorAppProviderRetired";
+const APP_SEED_STALE_KEY = "traceDebugSeedStaleProvider";
+const APP_FAIL_CLEAR_KEY = "traceDebugFailProviderClear";
+const CONNECT_AND_SAVE_DRIVER = "trace-installed-connect-and-save-driver.js";
+const CONNECT_AND_SAVE_DRIVER_MARKER = "TRACE_INSTALLED_CONNECT_AND_SAVE_DRIVER";
+const AO3_WORK_URL = "https://archiveofourown.org/works/28534965/chapters/69925506";
 const TEST_TARGET = "TraceInstalledLifecycleUITests/TraceInstalledLifecycleUITests";
 const MODES = new Set(["ok-a", "ok-b", "rejected", "unavailable"]);
+const JOURNEY_PHASE = process.env.TRACE_IOS_JOURNEY_PHASE ?? "all";
+const PRESERVE_FAILED_WORKSPACE =
+  process.env.TRACE_IOS_PRESERVE_FAILED_WORKSPACE === "1";
 
 function run(command, args, { cwd = ROOT, env = process.env, quiet = false } = {}) {
   return new Promise((resolve, reject) => {
@@ -59,6 +70,15 @@ function closeServer(server) {
   return new Promise((resolve) => server.close(resolve));
 }
 
+async function waitForEvidence(predicate, message, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.fail(message);
+}
+
 function copyWorkingTree(destination) {
   const excluded = new Set([
     ".git",
@@ -77,6 +97,87 @@ function copyWorkingTree(destination) {
   fs.symlinkSync(path.join(ROOT, "node_modules"), path.join(destination, "node_modules"), "dir");
 }
 
+function installConnectAndSaveDriver(sourceRoot) {
+  const resourcesRoot = path.join(sourceRoot, "Shared (Extension)", "Resources");
+  const manifestPath = path.join(resourcesRoot, "manifest.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const archiveEntry = manifest.content_scripts.find(
+    (entry) =>
+      entry.js?.includes("collector.js") &&
+      entry.matches?.some((pattern) => pattern.includes("archiveofourown.org")),
+  );
+  assert.ok(archiveEntry, "archive collector manifest entry is required for installed Connect-and-save");
+  assert.equal(
+    archiveEntry.js.includes(CONNECT_AND_SAVE_DRIVER),
+    false,
+    "installed Connect-and-save driver was already present",
+  );
+  archiveEntry.js.push(CONNECT_AND_SAVE_DRIVER);
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  fs.writeFileSync(
+    path.join(resourcesRoot, CONNECT_AND_SAVE_DRIVER),
+    `(() => {
+  const marker = ${JSON.stringify(CONNECT_AND_SAVE_DRIVER_MARKER)};
+  const status = document.createElement("p");
+  status.id = "trace-installed-connect-and-save-status";
+  status.setAttribute("role", "status");
+  status.style.cssText = "position:fixed;z-index:2147483647;top:8px;left:8px;right:8px;padding:12px;background:#fff7df;color:#3a4339;border:2px solid #1f4d3f;font:16px -apple-system,sans-serif";
+  status.textContent = marker + ": preparing";
+  document.documentElement.appendChild(status);
+
+  const action = document.createElement("button");
+  action.type = "button";
+  action.textContent = "Connect and save";
+  action.style.cssText = "position:fixed;z-index:2147483647;top:72px;left:8px;right:8px;padding:14px;background:#1f4d3f;color:white;border:0;border-radius:8px;font:600 16px -apple-system,sans-serif";
+  document.documentElement.appendChild(action);
+
+  if (
+    typeof getWorkKeyFromUrl !== "function" ||
+    typeof runKernelConnectAndSave !== "function" ||
+    typeof sendKernelCollectorMessage !== "function"
+  ) {
+    status.textContent = marker + ": collector unavailable";
+    return;
+  }
+  const workKey = getWorkKeyFromUrl();
+  if (!workKey) {
+    status.textContent = marker + ": unsupported archive page";
+    return;
+  }
+
+  const productionSend = sendKernelCollectorMessage;
+  sendKernelCollectorMessage = function(message, callback) {
+    return productionSend(message, function(response) {
+      if (message && message.type === TRACE_CONNECT_AND_SAVE_MESSAGE) {
+        const state = response && response.snapshot && response.snapshot.state;
+        const error = response && response.error;
+        status.textContent = "Installed result: " + (state || "missing") + " / " + (error || "missing");
+      }
+      if (typeof callback === "function") callback(response);
+    });
+  };
+  kernelPendingFirstStory = { workKey, handoffId: "installed-ios-connect-and-save" };
+  action.addEventListener("click", function() {
+    runKernelConnectAndSave(action, workKey);
+  });
+  status.textContent = "Installed Connect-and-save driver ready";
+})();\n`,
+  );
+}
+
+function removeConnectAndSaveDriver(sourceRoot) {
+  const resourcesRoot = path.join(sourceRoot, "Shared (Extension)", "Resources");
+  const manifestPath = path.join(resourcesRoot, "manifest.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  for (const entry of manifest.content_scripts ?? []) {
+    if (Array.isArray(entry.js)) {
+      entry.js = entry.js.filter((script) => script !== CONNECT_AND_SAVE_DRIVER);
+    }
+  }
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  fs.rmSync(path.join(resourcesRoot, CONNECT_AND_SAVE_DRIVER), { force: true });
+}
+
 function fixtureHtml() {
   return `<!doctype html>
     <html lang="en">
@@ -85,9 +186,99 @@ function fixtureHtml() {
       <style>
         body { font: 18px -apple-system, sans-serif; padding: 32px; }
         h1 { font-size: 28px; }
+        button { display: block; font: inherit; margin: 16px 0; padding: 12px; }
+        [hidden] { display: none !important; }
       </style>
-      <h1>Trace installed iOS fixture</h1>
-      <p>This local page exists only for the installed Safari lifecycle test.</p>
+      <main id="browser-fixture">
+        <h1>Trace installed iOS fixture</h1>
+        <p>Browser-only Trace session is signed in.</p>
+        <p>This local page exists only for the installed Safari lifecycle test.</p>
+      </main>
+      <main id="app-fixture" hidden>
+        <h1>Trace installed app fixture</h1>
+        <p id="app-route"></p>
+        <p id="app-provider-status">App fixture ready</p>
+        <button id="app-sign-out" type="button">App sign out</button>
+        <button id="app-provider-retry" type="button">Retry provider cleanup</button>
+      </main>
+      <script>
+        (() => {
+          const pending = new Map();
+          let nonce = 0;
+          const browserFixture = document.getElementById("browser-fixture");
+          const appFixture = document.getElementById("app-fixture");
+          const appStatus = document.getElementById("app-provider-status");
+          const native = window.webkit?.messageHandlers?.traceSafariExtension;
+
+          window.addEventListener("message", (event) => {
+            const data = event.data || {};
+            if (data.type === "TRACE_FICTION_TOKEN_REQUEST") {
+              window.postMessage({
+                type: "TRACE_FICTION_TOKEN",
+                protocolVersion: 1,
+                requestId: data.requestId,
+                token: "browser-only-token",
+              }, window.location.origin);
+              return;
+            }
+            const action = pending.get(data.nonce);
+            if (!action) return;
+            pending.delete(data.nonce);
+            const ok = data.ok === true || data.ok === "true";
+            const error = typeof data.error === "string" ? data.error : null;
+            if (action === "update") {
+              appStatus.textContent = ok
+                ? "Provider ready"
+                : "Provider update failed: " + (error || "native_error");
+            } else {
+              appStatus.textContent = ok
+                ? "Signed out and provider cleared"
+                : "Sign out blocked: " + (error || "native_error") + ". Still signed in. Retry available.";
+            }
+            fetch("/__app-event", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action, ok, error }),
+            }).catch(() => {});
+          });
+
+          if (!native || typeof native.postMessage !== "function") return;
+          browserFixture.hidden = true;
+          appFixture.hidden = false;
+          document.getElementById("app-route").textContent =
+            "App route: " + location.pathname + location.search + location.hash;
+
+          const mutate = (action, token) => {
+            const requestNonce = "installed-app-" + (++nonce);
+            pending.set(requestNonce, action);
+            native.postMessage(action === "update" ? {
+              type: "TRACE_IOS_AUTH_TOKEN_UPDATE",
+              protocolVersion: 2,
+              nonce: requestNonce,
+              token,
+            } : {
+              type: "TRACE_IOS_AUTH_TOKEN_CLEAR",
+              protocolVersion: 2,
+              nonce: requestNonce,
+            });
+          };
+
+          document.getElementById("app-sign-out").addEventListener("click", () => {
+            mutate("clear");
+          });
+          document.getElementById("app-provider-retry").addEventListener("click", () => {
+            mutate("clear");
+          });
+          fetch("/__app-mode")
+            .then((response) => response.text())
+            .then((appMode) => {
+              if (appMode === "signed-in-a") mutate("update", "ios-fixture-token-a");
+              else if (appMode === "signed-in-b") mutate("update", "ios-fixture-token-b");
+              else mutate("clear");
+            })
+            .catch(() => { appStatus.textContent = "App fixture control unavailable"; });
+        })();
+      </script>
     </html>`;
 }
 
@@ -105,6 +296,12 @@ function redactVerification(authorization, mode) {
 async function main() {
   assert.ok(DEVICE_ID, "Set TRACE_IOS_SIMULATOR_ID to one booted iOS simulator UDID");
   assert.equal(fs.existsSync(path.join(ROOT, "node_modules")), true, "Run npm install first");
+  assert.ok(
+    ["all", "app", "session"].includes(JOURNEY_PHASE),
+    "TRACE_IOS_JOURNEY_PHASE must be all, app, or session",
+  );
+  const runsAppJourneys = JOURNEY_PHASE === "all" || JOURNEY_PHASE === "app";
+  const runsSessionJourneys = JOURNEY_PHASE === "all" || JOURNEY_PHASE === "session";
 
   const sourceRevision = (await run("git", ["rev-parse", "HEAD"], { quiet: true })).trim();
   const sourceStatus = (await run("git", ["status", "--short"], { quiet: true })).trim();
@@ -115,10 +312,38 @@ async function main() {
   const derivedData = path.join(temporaryRoot, "derived-data");
   const uiDerivedData = path.join(temporaryRoot, "ui-derived-data");
   const verificationEvents = [];
+  const appEvents = [];
   let mode = "ok-a";
+  let appMode = "signed-out";
   let succeeded = false;
 
   const server = http.createServer((request, response) => {
+    if (request.url === "/__app-mode") {
+      response.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+      response.end(appMode);
+      return;
+    }
+
+    if (request.url === "/__app-event" && request.method === "POST") {
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => { body += chunk; });
+      request.on("end", () => {
+        try {
+          const event = JSON.parse(body);
+          appEvents.push({
+            action: event.action === "update" ? "update" : "clear",
+            ok: event.ok === true,
+            error: typeof event.error === "string" ? event.error : null,
+          });
+          response.writeHead(204).end();
+        } catch {
+          response.writeHead(400).end();
+        }
+      });
+      return;
+    }
+
     if (request.url === "/__control" && request.method === "POST") {
       let body = "";
       request.setEncoding("utf8");
@@ -166,21 +391,29 @@ async function main() {
   });
 
   const simctl = (...args) => run("xcrun", ["simctl", ...args], { quiet: true });
-  const clearProvider = async () => {
-    try {
-      await simctl("spawn", DEVICE_ID, "defaults", "delete", PROVIDER_DEFAULTS_DOMAIN, PROVIDER_DEFAULTS_KEY);
-    } catch {
-      // An absent key is the intended state.
-    }
-  };
-  const setProvider = (value) => simctl(
+  const writeDefault = (domain, key, value) => simctl(
     "spawn",
     DEVICE_ID,
     "defaults",
     "write",
+    domain,
+    key,
+    "-string",
+    value,
+  );
+  const deleteDefault = async (domain, key) => {
+    try {
+      await simctl("spawn", DEVICE_ID, "defaults", "delete", domain, key);
+    } catch {
+      // An absent key is the intended state.
+    }
+  };
+  const clearProvider = async () => {
+    await deleteDefault(PROVIDER_DEFAULTS_DOMAIN, PROVIDER_DEFAULTS_KEY);
+  };
+  const setProvider = (value) => writeDefault(
     PROVIDER_DEFAULTS_DOMAIN,
     PROVIDER_DEFAULTS_KEY,
-    "-string",
     value,
   );
   const capture = (name) => simctl(
@@ -203,6 +436,14 @@ async function main() {
     assert.ok(address && typeof address === "object");
     const origin = `http://127.0.0.1:${address.port}`;
 
+    try {
+      await simctl("shutdown", DEVICE_ID);
+    } catch {
+      // A stopped simulator is already at the required isolation boundary.
+    }
+    await simctl("boot", DEVICE_ID);
+    await simctl("bootstatus", DEVICE_ID, "-b");
+
     copyWorkingTree(sourceRoot);
     const buildEnvironment = {
       ...process.env,
@@ -211,6 +452,7 @@ async function main() {
       TRACE_SESSION_MODE: "kernel",
     };
     await run("npm", ["run", "build:kernel"], { cwd: sourceRoot, env: buildEnvironment });
+    if (runsSessionJourneys) installConnectAndSaveDriver(sourceRoot);
 
     await run("xcodebuild", [
       "-project", "Trace.xcodeproj",
@@ -224,6 +466,11 @@ async function main() {
 
     const appPath = path.join(derivedData, "Build", "Products", "Debug-iphonesimulator", "Trace.app");
     assert.equal(fs.existsSync(appPath), true, "Trace simulator app was not built");
+    try {
+      await simctl("uninstall", DEVICE_ID, TRACE_APP_BUNDLE_ID);
+    } catch {
+      // A missing prior install is already isolated.
+    }
     await simctl("install", DEVICE_ID, appPath);
 
     const uiRoot = path.join(sourceRoot, "test", "installed-ios");
@@ -244,13 +491,15 @@ async function main() {
       "CODE_SIGNING_ALLOWED=NO",
     ], { cwd: uiRoot });
 
-    const runTest = async (name) => {
-      const resultBundle = path.join(EVIDENCE_ROOT, `${name}.xcresult`);
+    const runTest = async (name, { artifact = name, url = origin } = {}) => {
+      const artifactName = JOURNEY_PHASE === "all" ? artifact : `${JOURNEY_PHASE}-${artifact}`;
+      const resultBundle = path.join(EVIDENCE_ROOT, `${artifactName}.xcresult`);
       fs.rmSync(resultBundle, { recursive: true, force: true });
       // Provider fixtures are changed between separate test invocations.
       // Restarting Safari prevents its extension process from retaining a
       // cached DEBUG UserDefaults value across those explicit boundaries.
       await terminateSafari();
+      await simctl("openurl", DEVICE_ID, url);
       await run("xcodebuild", [
         "test-without-building",
         "-quiet",
@@ -262,43 +511,144 @@ async function main() {
         "CODE_SIGNING_ALLOWED=NO",
         `-only-testing:${TEST_TARGET}/${name}`,
       ], { cwd: uiRoot, env: testEnvironment });
-      await capture(name);
+      await capture(artifactName);
     };
 
     await clearProvider();
-    await runTest("testResetSession");
-    await runTest("testSignedOutConnectWithoutAppCredentialFailsClosed");
+    for (const historicalAppDebugKey of [
+      APP_PROVIDER_V2_KEY,
+      APP_PROVIDER_RETIRED_KEY,
+      APP_FAIL_CLEAR_KEY,
+    ]) {
+      await deleteDefault(TRACE_APP_BUNDLE_ID, historicalAppDebugKey);
+    }
 
-    await setProvider("ios-fixture-token-a");
-    await runTest("testConnectRestartRetryAndDisconnect");
+    if (runsAppJourneys) {
+      appMode = "signed-out";
+      let priorAppEventCount = appEvents.length;
+      await runTest("testAppSignedOutColdStartClearsStaleProvider");
+      await waitForEvidence(
+        () => appEvents.slice(priorAppEventCount).some(
+          (event) => event.action === "clear" && event.ok,
+        ),
+        "the signed-out cold-start clear was not acknowledged",
+      );
 
-    await setProvider("ios-fixture-token-a");
-    await runTest("testLeaveReconnectRequiredForProviderChange");
-    await setProvider("ios-fixture-token-b");
-    await runTest("testReconnectWithChangedProvider");
+      await runTest("testResetSession", { artifact: "testResetSessionBeforeBrowserOnly" });
+      await runTest("testBrowserOnlySignInCannotConnectWithoutAppProvider");
 
-    await setProvider("ios-fixture-token-b");
-    await runTest("testLeaveReconnectRequiredForMissingProvider");
-    await clearProvider();
-    await runTest("testReconnectWithoutProviderFailsClosed");
+      appMode = "signed-out";
+      await runTest("testOpenTraceAppFromPopup");
+
+      appMode = "signed-in-a";
+      priorAppEventCount = appEvents.length;
+      await runTest("testAppSignInWritesProvider");
+      await waitForEvidence(
+        () => appEvents.slice(priorAppEventCount).some(
+          (event) => event.action === "update" && event.ok,
+        ),
+        "the app's real v2 update handler did not acknowledge provider A",
+      );
+      await runTest("testAppResumeDoesNotAmbientlyConnect");
+
+      // Unsigned Simulator apps cannot share the production Keychain access
+      // group. Mirror only the value acknowledged by the real app v2 handler;
+      // the signed/TestFlight gate remains responsible for the physical shared
+      // Keychain boundary.
+      await setProvider("ios-fixture-token-a");
+      mode = "ok-a";
+      await runTest("testReturnAfterAppSignInRequiresExplicitConnect");
+
+      appMode = "signed-in-a";
+      priorAppEventCount = appEvents.length;
+      await runTest("testAppSignOutClearsProvider");
+      await waitForEvidence(
+        () => appEvents.slice(priorAppEventCount).some(
+          (event) => event.action === "clear" && event.ok,
+        ),
+        "app sign-out did not acknowledge provider cleanup",
+      );
+      await clearProvider();
+      await runTest("testConnectedSessionAfterAppSignOutNeedsReconnectOnRejection");
+
+      await runTest("testResetSession", { artifact: "testResetSessionBeforeClearFailure" });
+      appMode = "signed-in-b";
+      priorAppEventCount = appEvents.length;
+      await runTest("testAppClearFailureBlocksSignOut");
+      await waitForEvidence(
+        () => appEvents.slice(priorAppEventCount).some(
+          (event) =>
+            event.action === "clear" &&
+            !event.ok &&
+            event.error === "provider_clear_failed",
+        ),
+        "the app provider-clear failure was not acknowledged",
+      );
+    }
+
+    if (runsSessionJourneys) {
+      await runTest("testResetSession", { artifact: "testResetSessionBeforeSameProvider" });
+      await setProvider("ios-fixture-token-a");
+      await runTest("testConnectAndSaveFromInstalledArchiveSender", { url: AO3_WORK_URL });
+      await runTest("testResetSession", { artifact: "testResetSessionAfterConnectAndSave" });
+      await runTest("testLeaveReconnectRequiredForProviderChange", {
+        artifact: "testLeaveReconnectRequiredForSameProvider",
+      });
+      await runTest("testReconnectWithSameProvider");
+
+      await runTest("testResetSession", { artifact: "testResetSessionBeforeChangedProvider" });
+      await setProvider("ios-fixture-token-a");
+      await runTest("testLeaveReconnectRequiredForProviderChange", {
+        artifact: "testLeaveReconnectRequiredForChangedProvider",
+      });
+      await setProvider("ios-fixture-token-b");
+      await runTest("testReconnectWithChangedProvider");
+
+      await setProvider("ios-fixture-token-b");
+      await runTest("testLeaveReconnectRequiredForMissingProvider");
+      await clearProvider();
+      await runTest("testReconnectWithoutProviderFailsClosed");
+
+      await setProvider("ios-fixture-token-a");
+      await runTest("testConnectRestartRetryAndDisconnect");
+    }
 
     assert.ok(
       verificationEvents.some((event) => event.fixture === "fixture-a" && event.mode === "ok-a"),
       "fixture A never completed account verification",
     );
-    assert.ok(
-      verificationEvents.some((event) => event.fixture === "fixture-b" && event.mode === "ok-b"),
-      "fixture B never completed account verification",
-    );
-    assert.ok(
-      verificationEvents.some((event) => event.mode === "unavailable"),
-      "the installed offline/retry boundary was not exercised",
-    );
-    assert.ok(
-      verificationEvents.filter((event) => event.mode === "rejected").length >= 2,
-      "the one-refresh rejection boundary was not exercised",
-    );
+    if (runsSessionJourneys) {
+      assert.ok(
+        verificationEvents.some((event) => event.fixture === "fixture-b" && event.mode === "ok-b"),
+        "fixture B never completed account verification",
+      );
+      assert.ok(
+        verificationEvents.some((event) => event.mode === "unavailable"),
+        "the installed offline/retry boundary was not exercised",
+      );
+      assert.ok(
+        verificationEvents.filter((event) => event.mode === "rejected").length >= 2,
+        "the one-refresh rejection boundary was not exercised",
+      );
+    }
+    if (runsAppJourneys) {
+      assert.ok(
+        appEvents.some((event) => event.action === "update" && event.ok),
+        "the app v2 provider update was not acknowledged",
+      );
+      assert.ok(
+        appEvents.some((event) => event.action === "clear" && event.ok),
+        "the app v2 provider clear was not acknowledged",
+      );
+      assert.ok(
+        appEvents.some(
+          (event) => event.action === "clear" && !event.ok && event.error === "provider_clear_failed",
+        ),
+        "the app provider-clear failure was not observed",
+      );
+    }
 
+    removeConnectAndSaveDriver(sourceRoot);
     await run("npm", ["run", "build:kernel:release"], {
       cwd: sourceRoot,
       env: {
@@ -316,7 +666,7 @@ async function main() {
       "CODE_SIGNING_ALLOWED=NO",
       "build",
     ], { cwd: sourceRoot });
-    const releaseExtension = path.join(
+    const releaseExtensionBundle = path.join(
       temporaryRoot,
       "release-derived-data",
       "Build",
@@ -325,45 +675,120 @@ async function main() {
       "Trace.app",
       "PlugIns",
       "Trace Extension.appex",
+    );
+    assert.equal(
+      fs.existsSync(path.join(releaseExtensionBundle, CONNECT_AND_SAVE_DRIVER)),
+      false,
+      "installed Connect-and-save driver leaked into the Release extension bundle",
+    );
+    const releaseManifest = JSON.parse(fs.readFileSync(
+      path.join(sourceRoot, "Shared (Extension)", "Resources", "manifest.json"),
+      "utf8",
+    ));
+    assert.equal(
+      releaseManifest.content_scripts.some(
+        (entry) => entry.js?.includes(CONNECT_AND_SAVE_DRIVER),
+      ),
+      false,
+      "installed Connect-and-save driver leaked into the Release manifest",
+    );
+    const releaseExtension = path.join(
+      releaseExtensionBundle,
       "Trace Extension",
     );
     const releaseStrings = await run("strings", [releaseExtension], { quiet: true });
-    assert.doesNotMatch(
-      releaseStrings,
-      /traceDebugSimulatorProviderCredential/,
-      "simulator fixture credential seam leaked into the Release binary",
+    for (const debugString of [
+      PROVIDER_DEFAULTS_KEY,
+      CONNECT_AND_SAVE_DRIVER_MARKER,
+    ]) {
+      assert.doesNotMatch(
+        releaseStrings,
+        new RegExp(debugString),
+        `${debugString} leaked into the Release extension binary`,
+      );
+    }
+    const releaseApp = path.join(
+      temporaryRoot,
+      "release-derived-data",
+      "Build",
+      "Products",
+      "Release-iphonesimulator",
+      "Trace.app",
+      "Trace",
     );
+    const releaseAppStrings = await run("strings", [releaseApp], { quiet: true });
+    for (const debugString of [
+      APP_PROVIDER_V2_KEY,
+      APP_PROVIDER_RETIRED_KEY,
+      APP_SEED_STALE_KEY,
+      APP_FAIL_CLEAR_KEY,
+      "stale-v2-provider",
+      "stale-retired-provider",
+    ]) {
+      assert.doesNotMatch(
+        releaseAppStrings,
+        new RegExp(debugString),
+        `${debugString} leaked into the Release containing-app binary`,
+      );
+    }
 
     const summary = {
-      schema: "trace.installed-ios-session-evidence/v1",
+      schema: "trace.installed-ios-session-evidence/v2",
       recordedAt: new Date().toISOString(),
       sourceRevision,
       sourceTreeState: sourceStatus ? "dirty" : "clean",
       deviceId: DEVICE_ID,
       sessionMode: "kernel",
+      journeyPhase: JOURNEY_PHASE,
       journeys: [
-        "signed-out Connect with no app credential",
-        "verified Connect",
-        "online Safari restart re-verification",
-        "unavailable restart then Retry",
-        "Disconnect",
-        "same-provider rejection to reconnect-required",
-        "explicit different-provider Reconnect",
-        "missing-provider Reconnect",
+        ...(runsAppJourneys ? [
+          "signed-out app cold start clears stale provider state",
+          "browser-only website sign-in cannot satisfy Connect",
+          "Open Trace app routes in-shell without connecting",
+          "app sign-in writes the v2 provider without ambient connection",
+          "return from app sign-in requires explicit verified Connect",
+          "app sign-out clears the provider without ambient session mutation",
+          "post-sign-out verification rejection requires Reconnect",
+          "provider-clear failure remains signed in and retryable",
+        ] : []),
+        ...(runsSessionJourneys ? [
+          "installed AO3 Connect-and-save reaches the collector and returns commands_unavailable",
+          "verified explicit Connect",
+          "online Safari restart re-verification",
+          "unavailable restart then Retry",
+          "Disconnect",
+          "same-provider rejection to reconnect-required",
+          "explicit same-provider Reconnect",
+          "explicit different-provider Reconnect",
+          "missing-provider Reconnect",
+        ] : []),
       ],
       fixtureVerificationEvents: verificationEvents,
+      appProviderEvents: appEvents,
+      connectAndSaveBoundary: runsSessionJourneys ? {
+        senderOrigin: new URL(AO3_WORK_URL).origin,
+        snapshotState: "connected",
+        error: "commands_unavailable",
+      } : null,
+      nativeProviderReachProof:
+        "installed explicit Connect verified the app-only fixture token; browser-only token differs",
       releaseFixtureSeamPresent: false,
       keychainBoundary: "deferred to the required real-device/TestFlight release-candidate smoke",
     };
+    const summaryName = JOURNEY_PHASE === "all"
+      ? "summary.json"
+      : `summary-${JOURNEY_PHASE}.json`;
     fs.writeFileSync(
-      path.join(EVIDENCE_ROOT, "summary.json"),
+      path.join(EVIDENCE_ROOT, summaryName),
       `${JSON.stringify(summary, null, 2)}\n`,
     );
     succeeded = true;
-    console.log(`Installed iOS session lifecycle passed. Evidence: ${EVIDENCE_ROOT}`);
+    console.log(
+      `Installed iOS session lifecycle phase ${JOURNEY_PHASE} passed. Evidence: ${EVIDENCE_ROOT}`,
+    );
   } finally {
     await closeServer(server);
-    if (succeeded) {
+    if (succeeded || !PRESERVE_FAILED_WORKSPACE) {
       fs.rmSync(temporaryRoot, { recursive: true, force: true });
     } else {
       console.error(`Preserved failed installed-iOS workspace: ${temporaryRoot}`);

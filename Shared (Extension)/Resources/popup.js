@@ -15,6 +15,7 @@ const KERNEL_SESSION_ACTIVE = TRACE_SESSION_MODE === "kernel";
 const SESSION_DISABLED = TRACE_SESSION_MODE === "disabled";
 const TRACE_HOME_URL = `${TRACE_WEB_ORIGIN}/`;
 const TRACE_IOS_SETUP_URL = `${DEFAULT_TRACE_WEB_ORIGIN}/apps#safari-ios-setup`;
+const TRACE_IOS_APP_CONNECT_URL = "traceauth://open?destination=extension-connect";
 const AO3_WORKS_URL = "https://archiveofourown.org/works";
 const FFN_HOME_URL = "https://www.fanfiction.net/";
 const IOS_SIGN_IN_GUIDANCE =
@@ -696,12 +697,14 @@ function renderKernelSnapshot(snapshot) {
     secondaryActionEl.dataset.emphasis = "secondary";
   }
   if (sessionHelpEl) {
-    // Keep iOS recovery as precise text-only guidance until a real-device
-    // release gate proves the custom-scheme action from an installed popup.
     sessionHelpEl.hidden =
-      SESSION_DISABLED || !credentialRecovery || isLikelyIosExtensionUi;
-    sessionHelpEl.href = TRACE_HOME_URL;
-    sessionHelpEl.textContent = "Open Trace to sign in";
+      SESSION_DISABLED || !credentialRecovery;
+    sessionHelpEl.href = isLikelyIosExtensionUi
+      ? TRACE_IOS_APP_CONNECT_URL
+      : TRACE_HOME_URL;
+    sessionHelpEl.textContent = isLikelyIosExtensionUi
+      ? "Open Trace app"
+      : "Open Trace to sign in";
   }
   if (localSettingsEl) localSettingsEl.hidden = true;
   if (proSettingsEl) proSettingsEl.hidden = true;
