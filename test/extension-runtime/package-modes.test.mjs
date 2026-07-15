@@ -44,6 +44,22 @@ function assertCollectorModeConfig(root, expectedMode) {
   }
 }
 
+function assertSurfacePrivateBoundary(root) {
+  for (const name of ["popup.js", "collector.js", "library-overlay.js", "sync.js"]) {
+    const source = fs.readFileSync(path.join(root, name), "utf8");
+    for (const marker of [
+      "indexedDB",
+      "private-database",
+      "traceKernelPrivateV1",
+      "session-envelope",
+      "session-credentials",
+      "account-data",
+    ]) {
+      assert.doesNotMatch(source, new RegExp(marker), `${name} contains ${marker}`);
+    }
+  }
+}
+
 test("legacy, kernel, and disabled packages have one deterministic classic owner", () => {
   try {
     runBuild("build:release");
@@ -72,11 +88,15 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
       assert.equal(hasSavedFilterScript(firefoxManifest), false);
       assertCollectorModeConfig(chromeRoot, mode);
       assertCollectorModeConfig(firefoxRoot, mode);
+      assertSurfacePrivateBoundary(chromeRoot);
+      assertSurfacePrivateBoundary(firefoxRoot);
       const bundle = fs.readFileSync(path.join(chromeRoot, "background.js"), "utf8");
       assert.match(bundle, /TRACE_SESSION_MODE === "legacy"/);
       assert.match(bundle, new RegExp(`TRACE_SESSION_MODE = "${mode}"`));
       assert.match(bundle, /traceSessionEnvelopeV1/);
       assert.match(bundle, /traceSessionCredentialsV1/);
+      assert.match(bundle, /traceKernelPrivateV1/);
+      assert.match(bundle, /indexedDB/);
       assert.equal(fs.existsSync(path.join(chromeRoot, "extension-session-runtime.js")), false);
       assert.equal(fs.existsSync(path.join(chromeRoot, "legacy-background.js")), false);
     }

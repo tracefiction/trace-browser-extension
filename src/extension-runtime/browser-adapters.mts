@@ -6,11 +6,23 @@ import type {
   SessionStoragePort,
   VerificationResult,
 } from "../extension-core/index.mjs";
+import {
+  PRIVATE_RECORD_KEYS,
+  type PrivateRecordDatabase,
+} from "./private-database.mjs";
 
-export const SESSION_ENVELOPE_KEY = "traceSessionEnvelopeV1" as const;
-export const SESSION_CREDENTIALS_KEY = "traceSessionCredentialsV1" as const;
+export const LEGACY_SESSION_ENVELOPE_KEY = "traceSessionEnvelopeV1" as const;
+export const LEGACY_SESSION_CREDENTIALS_KEY = "traceSessionCredentialsV1" as const;
+
+export const ACCOUNT_DATA_ALARM = "traceAccountDataRefresh" as const;
+export const LEGACY_ACCOUNT_ALARMS = Object.freeze([
+  "traceLibraryOverlay",
+  "traceAo3SavedFiltersSync",
+] as const);
 
 export const LEGACY_ACCOUNT_KEYS = Object.freeze([
+  LEGACY_SESSION_ENVELOPE_KEY,
+  LEGACY_SESSION_CREDENTIALS_KEY,
   "authToken",
   "traceAuthState",
   "traceAccountId",
@@ -40,6 +52,10 @@ export interface RuntimePort {
 export interface TabsPort {
   readonly query: (...args: unknown[]) => unknown;
   readonly sendMessage: (...args: unknown[]) => unknown;
+}
+
+export interface AlarmsPort {
+  readonly clear: (...args: unknown[]) => unknown;
 }
 
 export type RuntimeMessageListener = (
@@ -111,23 +127,22 @@ export class BrowserStorage {
 }
 
 export class BrowserSessionStoragePort implements SessionStoragePort {
-  readonly #storage: BrowserStorage;
+  readonly #database: PrivateRecordDatabase;
 
-  constructor(storage: BrowserStorage) {
-    this.#storage = storage;
+  constructor(database: PrivateRecordDatabase) {
+    this.#database = database;
   }
 
-  async read(): Promise<unknown | null> {
-    const snapshot = await this.#storage.get(SESSION_ENVELOPE_KEY);
-    return snapshot[SESSION_ENVELOPE_KEY] ?? null;
+  read(): Promise<unknown | null> {
+    return this.#database.get(PRIVATE_RECORD_KEYS.sessionEnvelope);
   }
 
   write(envelope: SessionEnvelope): Promise<void> {
-    return this.#storage.set({ [SESSION_ENVELOPE_KEY]: envelope });
+    return this.#database.put(PRIVATE_RECORD_KEYS.sessionEnvelope, envelope);
   }
 
   clearAll(): Promise<void> {
-    return this.#storage.remove(SESSION_ENVELOPE_KEY);
+    return this.#database.delete(PRIVATE_RECORD_KEYS.sessionEnvelope);
   }
 }
 
@@ -157,13 +172,17 @@ export interface CredentialProvider {
 }
 
 export class BrowserCredentialPort implements CredentialPort {
-  readonly #storage: BrowserStorage;
+  readonly #database: PrivateRecordDatabase;
   readonly #provider: CredentialProvider;
   readonly #randomId: () => string;
   #tail: Promise<void> = Promise.resolve();
 
-  constructor(storage: BrowserStorage, provider: CredentialProvider, randomId: () => string) {
-    this.#storage = storage;
+  constructor(
+    database: PrivateRecordDatabase,
+    provider: CredentialProvider,
+    randomId: () => string,
+  ) {
+    this.#database = database;
     this.#provider = provider;
     this.#randomId = randomId;
   }
@@ -200,7 +219,7 @@ export class BrowserCredentialPort implements CredentialPort {
       const entries = await this.#readEntries();
       delete entries[reference];
       if (Object.keys(entries).length === 0) {
-        await this.#storage.remove(SESSION_CREDENTIALS_KEY);
+        await this.#database.delete(PRIVATE_RECORD_KEYS.sessionCredentials);
       } else {
         await this.#writeEntries(entries);
       }
@@ -211,13 +230,14 @@ export class BrowserCredentialPort implements CredentialPort {
     // #withLock mutates #tail synchronously, which is the ordering guarantee
     // SessionService relies on when it detaches cleanup before a later Connect.
     return this.#withLock(async () => {
-      await this.#storage.remove(SESSION_CREDENTIALS_KEY);
+      await this.#database.delete(PRIVATE_RECORD_KEYS.sessionCredentials);
     });
   }
 
   async #readEntries(): Promise<Record<string, string>> {
-    const snapshot = await this.#storage.get(SESSION_CREDENTIALS_KEY);
-    return parseCredentialStore(snapshot[SESSION_CREDENTIALS_KEY]);
+    return parseCredentialStore(
+      await this.#database.get(PRIVATE_RECORD_KEYS.sessionCredentials),
+    );
   }
 
   #writeEntries(entries: Record<string, string>): Promise<void> {
@@ -225,7 +245,7 @@ export class BrowserCredentialPort implements CredentialPort {
       version: 1,
       entries: Object.freeze({ ...entries }),
     });
-    return this.#storage.set({ [SESSION_CREDENTIALS_KEY]: value });
+    return this.#database.put(PRIVATE_RECORD_KEYS.sessionCredentials, value);
   }
 
   async #withLock<T>(work: () => Promise<T>): Promise<T> {
@@ -252,6 +272,41 @@ export class LegacyAccountState {
 
   clear(): Promise<void> {
     return this.#storage.remove(LEGACY_ACCOUNT_KEYS);
+  }
+}
+
+export class KernelAlarmState {
+  readonly #alarms: AlarmsPort;
+  readonly #runtime: RuntimePort;
+  readonly #mode: "callback" | "promise";
+
+  constructor(
+    alarms: AlarmsPort,
+    runtime: RuntimePort,
+    mode: "callback" | "promise",
+  ) {
+    this.#alarms = alarms;
+    this.#runtime = runtime;
+    this.#mode = mode;
+  }
+
+  async clearRetired(): Promise<void> {
+    for (const name of LEGACY_ACCOUNT_ALARMS) await this.#clear(name);
+  }
+
+  async clearAll(): Promise<void> {
+    await this.#clear(ACCOUNT_DATA_ALARM);
+    await this.clearRetired();
+  }
+
+  async #clear(name: string): Promise<void> {
+    await extensionCall<unknown>(
+      this.#alarms as unknown as Record<string, (...args: unknown[]) => unknown>,
+      "clear",
+      [name],
+      this.#runtime,
+      this.#mode,
+    );
   }
 }
 

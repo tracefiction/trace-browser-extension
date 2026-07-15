@@ -16,6 +16,13 @@ The extension does not request browser cookie permission. It does not need AO3 o
 The Safari build uses native messaging only to communicate with the bundled
 Trace app for setup actions, app-auth token sharing, and first-story handoff.
 
+The modular kernel keeps its session envelope, extension-owned credential map,
+and account-private read model in one IndexedDB database owned by the extension
+origin. AO3/FFN content scripts run against the visited page's origin and
+cannot open that database; they receive only bounded values through validated
+extension messages. Installation preferences and non-private origin metadata
+may remain in extension local storage.
+
 Content scripts are excluded from obvious AO3/FFN login and signup paths where the manifest supports it, and collection/overlay logic also disables itself at runtime on login/signup/password pages and pages that contain unknown password fields. AO3's known header login form can appear on normal story/listing pages; Trace ignores only that header form so supported reading pages still work.
 
 ## Data Sent to Trace

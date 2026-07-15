@@ -21,7 +21,7 @@
     "screenshots:store": "node scripts/prepare-store-screenshots.mjs",
     "package:amo-source": "bash scripts/package-amo-source.sh",
     "test:core": "npm run build:core && node --test test/extension-core/*.test.mjs",
-    "test:runtime": "npm run build:core && node --test test/extension-runtime/runtime-adapters.test.mjs test/extension-runtime/ios-provider-boundary.test.mjs",
+    "test:runtime": "npm run build:core && node --test test/extension-runtime/runtime-adapters.test.mjs test/extension-runtime/private-database.test.mjs test/extension-runtime/account-data-repository.test.mjs test/extension-runtime/ios-provider-boundary.test.mjs",
     "test:session:installed:chrome": "node scripts/test-extension-session-lifecycle.mjs",
     "test:session:installed:firefox": "node scripts/test-extension-session-firefox.mjs",
     "test:session:installed:ios": "node scripts/test-extension-session-ios.mjs",
@@ -38,6 +38,7 @@
   },
   "devDependencies": {
     "esbuild": "0.25.11",
+    "fake-indexeddb": "^6.2.4",
     "jsdom": "^25.0.1",
     "playwright": "^1.59.1",
     "sharp": "^0.34.5",

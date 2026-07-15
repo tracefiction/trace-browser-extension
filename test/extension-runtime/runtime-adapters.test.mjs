@@ -1,13 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { IDBFactory } from "fake-indexeddb";
 
 import {
   BrowserCredentialPort,
-  BrowserStorage,
+  ACCOUNT_DATA_ALARM,
   LEGACY_ACCOUNT_KEYS,
-  SESSION_CREDENTIALS_KEY,
+  LEGACY_ACCOUNT_ALARMS,
   VerificationApi,
 } from "../../.trace-build/extension-runtime/browser-adapters.mjs";
+import {
+  BrowserPrivateRecordDatabase,
+  PRIVATE_RECORD_KEYS,
+} from "../../.trace-build/extension-runtime/private-database.mjs";
 import {
   installSessionRuntime,
 } from "../../.trace-build/extension-runtime/controller.mjs";
@@ -55,6 +60,34 @@ const archiveSender = {
   tab: { url: "https://www.fanfiction.net/s/7038840/1/A-Chance-Encounter" },
 };
 
+class PromiseAlarms {
+  constructor() {
+    this.cleared = [];
+  }
+
+  async clear(name) {
+    this.cleared.push(name);
+    return true;
+  }
+}
+
+const runtimeInstaller = installSessionRuntime;
+
+function installTestRuntime(options) {
+  return runtimeInstaller({
+    alarms: new PromiseAlarms(),
+    databaseFactory: new IDBFactory(),
+    ...options,
+  });
+}
+
+async function seedPrivateSession(databaseFactory, envelope, credentials) {
+  const database = new BrowserPrivateRecordDatabase(databaseFactory);
+  await database.put(PRIVATE_RECORD_KEYS.sessionEnvelope, envelope);
+  await database.put(PRIVATE_RECORD_KEYS.sessionCredentials, credentials);
+  return database;
+}
+
 class PromiseStorageArea {
   constructor(initial = {}) {
     this.values = { ...initial };
@@ -87,22 +120,25 @@ class PromiseStorageArea {
   }
 }
 
-class FailingThenHealthyStorageArea extends PromiseStorageArea {
-  constructor(initial = {}, failures = 1) {
-    super(initial);
+class FailingThenHealthyIDBFactory {
+  constructor(failures = 1) {
+    this.factory = new IDBFactory();
     this.failures = failures;
   }
 
-  async get(keys) {
+  open(...args) {
     if (this.failures > 0) {
       this.failures -= 1;
-      throw new Error("injected storage failure");
+      throw new Error("injected database failure");
     }
-    return super.get(keys);
+    return this.factory.open(...args);
+  }
+
+  deleteDatabase(...args) {
+    return this.factory.deleteDatabase(...args);
   }
 }
 
-const runtime = { onMessage: { addListener() {} } };
 const unavailableProvider = {
   async acquire() {
     return { kind: "absent" };
@@ -111,22 +147,27 @@ const unavailableProvider = {
 };
 
 test("whole-store cleanup is ordered before an immediate later credential write", async () => {
-  const area = new PromiseStorageArea({
-    [SESSION_CREDENTIALS_KEY]: {
-      version: 1,
-      entries: { old: "old-token" },
-    },
+  const databaseFactory = new IDBFactory();
+  const underlying = new BrowserPrivateRecordDatabase(databaseFactory);
+  await underlying.put(PRIVATE_RECORD_KEYS.sessionCredentials, {
+    version: 1,
+    entries: { old: "old-token" },
   });
   const cleanup = deferred();
-  area.nextRemove = cleanup.promise;
-  const storage = new BrowserStorage(area, runtime, "promise");
-  const credentials = new BrowserCredentialPort(storage, unavailableProvider, () => "new-id");
+  const database = {
+    get: (key) => underlying.get(key),
+    put: (key, value) => underlying.put(key, value),
+    async delete(key) {
+      await cleanup.promise;
+      await underlying.delete(key);
+    },
+    deleteDatabase: () => underlying.deleteDatabase(),
+  };
+  const credentials = new BrowserCredentialPort(database, unavailableProvider, () => "new-id");
 
   const clearing = credentials.clearAll();
   const storing = credentials.storeUnique("new-token", 2);
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(area.sets.length, 0);
-
   cleanup.resolve();
   await clearing;
   const reference = await storing;
@@ -170,7 +211,7 @@ test("runtime registers its message listener before asynchronous cleanup", async
       },
     },
   };
-  const controller = installSessionRuntime({
+  const controller = installTestRuntime({
     mode: "kernel",
     runtime: extensionRuntime,
     tabs: { async query() { return []; }, async sendMessage() { return null; } },
@@ -191,7 +232,7 @@ test("runtime registers its message listener before asynchronous cleanup", async
 
 test("Trace-page status exposes only the coarse current-worker session state", async () => {
   const area = new PromiseStorageArea();
-  const controller = installSessionRuntime({
+  const controller = installTestRuntime({
     mode: "kernel",
     runtime: { onMessage: { addListener() {} } },
     tabs: { async query() { return []; }, async sendMessage() { return null; } },
@@ -222,7 +263,7 @@ test("Connect and save reports command handoff only after current-worker verific
   const area = new PromiseStorageArea();
   const verification = deferred();
   let verificationStarted = false;
-  const controller = installSessionRuntime({
+  const controller = installTestRuntime({
     mode: "kernel",
     runtime: { onMessage: { addListener() {} } },
     tabs: {
@@ -265,7 +306,7 @@ test("Connect and save reports command handoff only after current-worker verific
 
 test("Connect and save does not claim a command handoff when acquisition fails", async () => {
   const area = new PromiseStorageArea();
-  const controller = installSessionRuntime({
+  const controller = installTestRuntime({
     mode: "kernel",
     runtime: { onMessage: { addListener() {} } },
     tabs: { async query() { return []; }, async sendMessage() { return null; } },
@@ -285,7 +326,7 @@ test("Connect and save does not claim a command handoff when acquisition fails",
 test("Connect and save rejects non-archive senders before credential acquisition", async () => {
   const area = new PromiseStorageArea();
   let tabQueries = 0;
-  const controller = installSessionRuntime({
+  const controller = installTestRuntime({
     mode: "kernel",
     runtime: { onMessage: { addListener() {} } },
     tabs: {
@@ -313,7 +354,7 @@ test("Connect and save rejects non-archive senders before credential acquisition
 test("kernel exposes only a sanitized pending-story read to archive content scripts", async () => {
   const area = new PromiseStorageArea();
   const nativeMessages = [];
-  const controller = installSessionRuntime({
+  const controller = installTestRuntime({
     mode: "kernel",
     runtime: {
       onMessage: { addListener() {} },
@@ -363,25 +404,26 @@ test("kernel exposes only a sanitized pending-story read to archive content scri
 });
 
 test("one controller-owned retry sequence uses 750ms, 2.5s, and 8s then stops on success", async () => {
-  const area = new PromiseStorageArea({
-    traceSessionEnvelopeV1: {
-      version: 1,
-      epoch: 1,
-      desired: "connected",
-      accountId: "account-a",
-      credentialRef: "credential-a",
-    },
-    traceSessionCredentialsV1: {
-      version: 1,
-      entries: { "credential-a": "current-token" },
-    },
+  const area = new PromiseStorageArea();
+  const databaseFactory = new IDBFactory();
+  const privateDatabase = await seedPrivateSession(databaseFactory, {
+    version: 1,
+    epoch: 1,
+    desired: "connected",
+    accountId: "account-a",
+    credentialRef: "credential-a",
+  }, {
+    version: 1,
+    entries: { "credential-a": "current-token" },
   });
   const retryClock = new FakeRetryClock();
   let verificationCalls = 0;
-  const controller = installSessionRuntime({
+  const controller = installTestRuntime({
     mode: "kernel",
     runtime: { onMessage: { addListener() {} } },
     tabs: { async query() { return []; }, async sendMessage() { return null; } },
+    databaseFactory,
+    privateDatabase,
     storageArea: area,
     storageMode: "promise",
     fetch: async () => {
@@ -416,12 +458,13 @@ test("one controller-owned retry sequence uses 750ms, 2.5s, and 8s then stops on
 });
 
 test("storage unavailability uses the same single retry clock and stops after recovery", async () => {
-  const area = new FailingThenHealthyStorageArea();
+  const area = new PromiseStorageArea();
   const retryClock = new FakeRetryClock();
-  const controller = installSessionRuntime({
+  const controller = installTestRuntime({
     mode: "kernel",
     runtime: { onMessage: { addListener() {} } },
     tabs: { async query() { return []; }, async sendMessage() { return null; } },
+    databaseFactory: new FailingThenHealthyIDBFactory(),
     storageArea: area,
     storageMode: "promise",
     fetch: async () => new Response("", { status: 503 }),
@@ -441,24 +484,25 @@ test("storage unavailability uses the same single retry clock and stops after re
 });
 
 test("HTTP 429 remains degraded for explicit Retry and maps public status to unknown", async () => {
-  const area = new PromiseStorageArea({
-    traceSessionEnvelopeV1: {
-      version: 1,
-      epoch: 1,
-      desired: "connected",
-      accountId: "account-a",
-      credentialRef: "credential-a",
-    },
-    traceSessionCredentialsV1: {
-      version: 1,
-      entries: { "credential-a": "current-token" },
-    },
+  const area = new PromiseStorageArea();
+  const databaseFactory = new IDBFactory();
+  const privateDatabase = await seedPrivateSession(databaseFactory, {
+    version: 1,
+    epoch: 1,
+    desired: "connected",
+    accountId: "account-a",
+    credentialRef: "credential-a",
+  }, {
+    version: 1,
+    entries: { "credential-a": "current-token" },
   });
   const retryClock = new FakeRetryClock();
-  const controller = installSessionRuntime({
+  const controller = installTestRuntime({
     mode: "kernel",
     runtime: { onMessage: { addListener() {} } },
     tabs: { async query() { return []; }, async sendMessage() { return null; } },
+    databaseFactory,
+    privateDatabase,
     storageArea: area,
     storageMode: "promise",
     fetch: async () => new Response("", { status: 429 }),
@@ -479,17 +523,35 @@ test("HTTP 429 remains degraded for explicit Retry and maps public status to unk
   assert.equal(retryClock.pending.length, 0);
 });
 
-test("disabled mode clears both new stores and the complete legacy inventory", async () => {
+test("disabled mode deletes the private database, alarms, and complete legacy inventory", async () => {
   const area = new PromiseStorageArea({
     traceSessionEnvelopeV1: { version: 1 },
     traceSessionCredentialsV1: { version: 1, entries: { old: "secret" } },
     authToken: "secret",
     traceAo3SavedFiltersActiveV1: { id: "old" },
   });
-  const controller = installSessionRuntime({
+  const alarms = new PromiseAlarms();
+  const databaseFactory = new IDBFactory();
+  const seededDatabase = await seedPrivateSession(databaseFactory, {
+    version: 1,
+    epoch: 1,
+    desired: "connected",
+    accountId: "account-a",
+    credentialRef: "old",
+  }, { version: 1, entries: { old: "secret" } });
+  await seededDatabase.put(PRIVATE_RECORD_KEYS.accountData, {
+    version: 1,
+    scope: { accountId: "account-a", epoch: 1 },
+    summary: null,
+    overlay: null,
+  });
+  const controller = installTestRuntime({
     mode: "disabled",
     runtime: { onMessage: { addListener() {} } },
     tabs: { async query() { return []; }, async sendMessage() { return null; } },
+    alarms,
+    databaseFactory,
+    privateDatabase: seededDatabase,
     storageArea: area,
     storageMode: "promise",
     fetch: async () => new Response("", { status: 503 }),
@@ -499,6 +561,11 @@ test("disabled mode clears both new stores and the complete legacy inventory", a
   });
   await controller.start();
   assert.deepEqual(area.values, {});
+  const emptyDatabase = new BrowserPrivateRecordDatabase(databaseFactory);
+  assert.equal(await emptyDatabase.get(PRIVATE_RECORD_KEYS.sessionEnvelope), null);
+  assert.equal(await emptyDatabase.get(PRIVATE_RECORD_KEYS.sessionCredentials), null);
+  assert.equal(await emptyDatabase.get(PRIVATE_RECORD_KEYS.accountData), null);
+  assert.deepEqual(alarms.cleared, [ACCOUNT_DATA_ALARM, ...LEGACY_ACCOUNT_ALARMS]);
   assert.deepEqual(controller.snapshot(), {
     state: "signed_out",
     accountId: null,

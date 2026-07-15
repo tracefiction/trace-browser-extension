@@ -10,14 +10,20 @@ import {
   BrowserSessionStoragePort,
   BrowserStorage,
   ExplicitCredentialProvider,
+  KernelAlarmState,
   LegacyAccountState,
   NativePendingFirstStoryReader,
   VerificationApi,
   type PendingFirstStoryResponse,
+  type AlarmsPort,
   type RuntimePort,
   type StorageArea,
   type TabsPort,
 } from "./browser-adapters.mjs";
+import {
+  BrowserPrivateRecordDatabase,
+  type PrivateRecordDatabase,
+} from "./private-database.mjs";
 
 export type SessionMode = "kernel" | "disabled";
 
@@ -35,7 +41,10 @@ interface RuntimeEnvironment {
   readonly mode: SessionMode;
   readonly runtime: RuntimePort;
   readonly tabs: TabsPort;
+  readonly alarms: AlarmsPort;
   readonly storageArea: StorageArea;
+  readonly databaseFactory: IDBFactory;
+  readonly privateDatabase?: PrivateRecordDatabase;
   readonly storageMode: "callback" | "promise";
   readonly fetch: typeof fetch;
   readonly apiBase: string;
@@ -168,7 +177,9 @@ export class SessionRuntimeController {
   readonly #mode: SessionMode;
   readonly #sessionStorage: BrowserSessionStoragePort;
   readonly #credentials: BrowserCredentialPort;
+  readonly #database: PrivateRecordDatabase;
   readonly #legacy: LegacyAccountState;
+  readonly #alarms: KernelAlarmState;
   readonly #pendingFirstStory: NativePendingFirstStoryReader;
   readonly #service: SessionService;
   readonly #retryClock: RetryClock;
@@ -186,15 +197,23 @@ export class SessionRuntimeController {
       environment.runtime,
       environment.storageMode,
     );
-    this.#sessionStorage = new BrowserSessionStoragePort(storage);
+    this.#database = environment.privateDatabase ?? new BrowserPrivateRecordDatabase(
+      environment.databaseFactory,
+    );
+    this.#sessionStorage = new BrowserSessionStoragePort(this.#database);
     this.#legacy = new LegacyAccountState(storage);
+    this.#alarms = new KernelAlarmState(
+      environment.alarms,
+      environment.runtime,
+      environment.storageMode,
+    );
     this.#pendingFirstStory = new NativePendingFirstStoryReader(
       environment.runtime,
       environment.storageMode,
     );
     this.#retryClock = environment.retryClock ?? DEFAULT_RETRY_CLOCK;
     this.#credentials = new BrowserCredentialPort(
-      storage,
+      this.#database,
       new ExplicitCredentialProvider({
         runtime: environment.runtime,
         tabs: environment.tabs,
@@ -259,9 +278,10 @@ export class SessionRuntimeController {
     try {
       await this.#legacy.clear();
       if (this.#mode === "disabled") {
-        await this.#sessionStorage.clearAll();
-        await this.#credentials.clearAll();
+        await this.#alarms.clearAll();
+        await this.#database.deleteDatabase();
       } else {
+        await this.#alarms.clearRetired();
         this.#automaticVerificationRetry = false;
         await this.#service.start();
       }
@@ -277,9 +297,10 @@ export class SessionRuntimeController {
     try {
       await this.#legacy.clear();
       if (this.#mode === "disabled") {
-        await this.#sessionStorage.clearAll();
-        await this.#credentials.clearAll();
+        await this.#alarms.clearAll();
+        await this.#database.deleteDatabase();
       } else {
+        await this.#alarms.clearRetired();
         await this.#service.start();
       }
       this.#storageFailure = false;

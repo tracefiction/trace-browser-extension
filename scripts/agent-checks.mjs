@@ -25,6 +25,20 @@ const RELEASE_ORIGIN_PATHS = [
 const MANIFEST_PATH = "Shared (Extension)/Resources/manifest.json";
 const BACKGROUND_SOURCE_PATH = "src/background.js";
 const GENERATED_BACKGROUND_PATH = "Shared (Extension)/Resources/background.js";
+const PRIVATE_SURFACE_PATHS = [
+  "Shared (Extension)/Resources/popup.js",
+  "Shared (Extension)/Resources/collector.js",
+  "Shared (Extension)/Resources/library-overlay.js",
+  "Shared (Extension)/Resources/sync.js",
+];
+const PRIVATE_DATABASE_MARKERS = [
+  "indexedDB",
+  "private-database",
+  "traceKernelPrivateV1",
+  "session-envelope",
+  "session-credentials",
+  "account-data",
+];
 
 const errors = [];
 const warnings = [];
@@ -284,6 +298,21 @@ function checkManifestPermissionChanges() {
   }
 }
 
+function checkSurfacesCannotBypassPrivateDatabase() {
+  for (const repoPath of PRIVATE_SURFACE_PATHS) {
+    const text = readText(repoPath);
+    for (const marker of PRIVATE_DATABASE_MARKERS) {
+      const index = text.indexOf(marker);
+      if (index === -1) continue;
+      addError(
+        repoPath,
+        lineNumberForIndex(text, index),
+        `surface must use bounded runtime messages, not private database marker ${marker}.`,
+      );
+    }
+  }
+}
+
 function main() {
   const files = publicWorkingFiles();
   checkPackageManagerFiles(files);
@@ -292,6 +321,7 @@ function main() {
   checkReleaseArtifactsDoNotUseLocalOrigins(files);
   checkGeneratedBackgroundParity();
   checkManifestPermissionChanges();
+  checkSurfacesCannotBypassPrivateDatabase();
 
   printIssues();
   process.exitCode = errors.length > 0 ? 1 : 0;

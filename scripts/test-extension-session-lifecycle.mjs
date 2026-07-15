@@ -13,6 +13,8 @@ import { chromium } from "playwright";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = path.join(ROOT, "dist", "chrome");
 const LEGACY_KEYS = [
+  "traceSessionEnvelopeV1",
+  "traceSessionCredentialsV1",
   "authToken",
   "traceAuthState",
   "traceAccountId",
@@ -118,6 +120,29 @@ async function storage(page, method, value) {
       else resolve(result);
     });
   }), { storageMethod: method, storageValue: value });
+}
+
+async function privateRecord(page, key) {
+  return page.evaluate((recordKey) => new Promise((resolve, reject) => {
+    const opening = indexedDB.open("traceKernelPrivateV1", 1);
+    opening.onupgradeneeded = () => {
+      if (!opening.result.objectStoreNames.contains("records")) {
+        opening.result.createObjectStore("records");
+      }
+    };
+    opening.onerror = () => reject(opening.error ?? new Error("private database open failed"));
+    opening.onsuccess = () => {
+      const database = opening.result;
+      const transaction = database.transaction("records", "readonly");
+      const request = transaction.objectStore("records").get(recordKey);
+      request.onerror = () => reject(request.error ?? new Error("private record read failed"));
+      transaction.onabort = () => reject(transaction.error ?? new Error("private read aborted"));
+      transaction.oncomplete = () => {
+        database.close();
+        resolve(request.result ?? null);
+      };
+    };
+  }), key);
 }
 
 async function terminateWorker(context, page, worker) {
@@ -234,6 +259,11 @@ try {
   assert.equal(connected.snapshot.state, "connected");
   assert.equal(connected.snapshot.canExecuteAuthenticated, true);
   assert.equal(verificationCount, 1);
+  assert.equal((await privateRecord(controlPage, "session-envelope")).desired, "connected");
+  assert.equal(
+    Object.keys((await privateRecord(controlPage, "session-credentials")).entries).length,
+    1,
+  );
 
   worker = await extensionWorker(context);
   await terminateWorker(context, controlPage, worker);
@@ -262,8 +292,7 @@ try {
   });
   assert.equal(signedOut.snapshot.state, "signed_out");
   await waitFor(async () => {
-    const snapshot = await storage(controlPage, "get", "traceSessionCredentialsV1");
-    return snapshot.traceSessionCredentialsV1 === undefined;
+    return await privateRecord(controlPage, "session-credentials") === null;
   }, "extension-owned credential cleanup");
 
   await tracePage.evaluate(() => {
@@ -284,14 +313,11 @@ try {
   assert.deepEqual(staleConnect.action, { kind: "stale" });
   assert.equal(staleConnect.snapshot.state, "signed_out");
 
-  const stored = await storage(controlPage, "get", [
-    "traceSessionEnvelopeV1",
-    "traceSessionCredentialsV1",
-    ...LEGACY_KEYS,
-  ]);
-  assert.equal(stored.traceSessionEnvelopeV1.desired, "disconnected");
-  assert.equal(stored.traceSessionCredentialsV1, undefined);
-  assert.deepEqual(Object.keys(stored).filter((key) => LEGACY_KEYS.includes(key)), []);
+  const envelope = await privateRecord(controlPage, "session-envelope");
+  assert.equal(envelope.desired, "disconnected");
+  assert.equal(await privateRecord(controlPage, "session-credentials"), null);
+  const stored = await storage(controlPage, "get", LEGACY_KEYS);
+  assert.deepEqual(Object.keys(stored), []);
   console.log(`kernel lifecycle passed (${verificationCount} verification reads)`);
 } finally {
   delayedVerificationRelease.resolve();
