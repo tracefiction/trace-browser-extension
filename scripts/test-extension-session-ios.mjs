@@ -16,9 +16,12 @@ const EVIDENCE_ROOT = path.resolve(
 );
 const PROVIDER_DEFAULTS_DOMAIN = "com.tracefiction.trace.extension";
 const PROVIDER_DEFAULTS_KEY = "traceDebugSimulatorProviderCredential";
+const PROVIDER_REQUEST_COUNT_KEY = "traceDebugSimulatorProviderRequestCount";
+const PROVIDER_REQUEST_RESULT_KEY = "traceDebugSimulatorProviderRequestResult";
 const TRACE_APP_BUNDLE_ID = "com.tracefiction.trace";
 const APP_PROVIDER_V2_KEY = "traceDebugSimulatorAppProviderV2";
 const APP_PROVIDER_RETIRED_KEY = "traceDebugSimulatorAppProviderRetired";
+const APP_BOOTSTRAP_CLEAR_RESULT_KEY = "traceDebugSimulatorBootstrapClearResult";
 const APP_SEED_STALE_KEY = "traceDebugSeedStaleProvider";
 const APP_FAIL_CLEAR_KEY = "traceDebugFailProviderClear";
 const CONNECT_AND_SAVE_DRIVER = "trace-installed-connect-and-save-driver.js";
@@ -274,6 +277,9 @@ function fixtureHtml() {
             .then((appMode) => {
               if (appMode === "signed-in-a") mutate("update", "ios-fixture-token-a");
               else if (appMode === "signed-in-b") mutate("update", "ios-fixture-token-b");
+              else if (appMode === "bootstrap-only") {
+                appStatus.textContent = "Bootstrap probe complete";
+              }
               else mutate("clear");
             })
             .catch(() => { appStatus.textContent = "App fixture control unavailable"; });
@@ -313,6 +319,8 @@ async function main() {
   const uiDerivedData = path.join(temporaryRoot, "ui-derived-data");
   const verificationEvents = [];
   const appEvents = [];
+  let bootstrapClearEvidence = null;
+  let extensionPreferencesPath = null;
   let mode = "ok-a";
   let appMode = "signed-out";
   let succeeded = false;
@@ -408,6 +416,92 @@ async function main() {
       // An absent key is the intended state.
     }
   };
+  const readInstalledAppDefault = async (key) => {
+    try {
+      const container = (await simctl(
+        "get_app_container",
+        DEVICE_ID,
+        TRACE_APP_BUNDLE_ID,
+        "data",
+      )).trim();
+      const preferences = path.join(
+        container,
+        "Library",
+        "Preferences",
+        `${TRACE_APP_BUNDLE_ID}.plist`,
+      );
+      return (await run(
+        "plutil",
+        ["-extract", key, "raw", "-o", "-", preferences],
+        { quiet: true },
+      )).trim();
+    } catch {
+      return null;
+    }
+  };
+  const waitForDefault = async (reader, key, expected, timeoutMs = 15_000) => {
+    const deadline = Date.now() + timeoutMs;
+    let value = null;
+    while (Date.now() < deadline) {
+      value = await reader(key);
+      if (value === expected) return value;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return value;
+  };
+  const resolveInstalledExtensionPreferences = async () => {
+    const appContainer = (await simctl(
+      "get_app_container",
+      DEVICE_ID,
+      TRACE_APP_BUNDLE_ID,
+      "data",
+    )).trim();
+    const pluginRoot = path.resolve(appContainer, "../../PluginKitPlugin");
+    for (const entry of fs.readdirSync(pluginRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const container = path.join(pluginRoot, entry.name);
+      const metadata = path.join(
+        container,
+        ".com.apple.mobile_container_manager.metadata.plist",
+      );
+      if (!fs.existsSync(metadata)) continue;
+      try {
+        const identifier = (await run(
+          "plutil",
+          ["-extract", "MCMMetadataIdentifier", "raw", "-o", "-", metadata],
+          { quiet: true },
+        )).trim();
+        if (identifier === PROVIDER_DEFAULTS_DOMAIN) {
+          return path.join(
+            container,
+            "Library",
+            "Preferences",
+            `${PROVIDER_DEFAULTS_DOMAIN}.plist`,
+          );
+        }
+      } catch {
+        // Ignore unrelated or malformed plugin-container metadata.
+      }
+    }
+    return null;
+  };
+  const readInstalledExtensionDefault = async (key) => {
+    if (!extensionPreferencesPath || !fs.existsSync(extensionPreferencesPath)) return null;
+    try {
+      return (await run(
+        "plutil",
+        ["-extract", key, "raw", "-o", "-", extensionPreferencesPath],
+        { quiet: true },
+      )).trim();
+    } catch {
+      return null;
+    }
+  };
+  const readProviderRequestCount = async () => {
+    const raw = await readInstalledExtensionDefault(PROVIDER_REQUEST_COUNT_KEY);
+    const count = Number.parseInt(raw ?? "", 10);
+    return Number.isInteger(count) ? count : 0;
+  };
   const clearProvider = async () => {
     await deleteDefault(PROVIDER_DEFAULTS_DOMAIN, PROVIDER_DEFAULTS_KEY);
   };
@@ -416,6 +510,25 @@ async function main() {
     PROVIDER_DEFAULTS_KEY,
     value,
   );
+  const providerRequestEvidence = [];
+  const assertProviderRequest = async (journey, expectedResult, baselineCount) => {
+    const deadline = Date.now() + 15_000;
+    let count = baselineCount;
+    let result = null;
+    while (Date.now() < deadline) {
+      count = await readProviderRequestCount();
+      result = await readInstalledExtensionDefault(PROVIDER_REQUEST_RESULT_KEY);
+      if (count > baselineCount && result === expectedResult) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.ok(count > baselineCount, `${journey} did not reach the native provider`);
+    assert.equal(result, expectedResult, `${journey} recorded the wrong provider outcome`);
+    providerRequestEvidence.push({
+      journey,
+      requestsObserved: count - baselineCount,
+      result,
+    });
+  };
   const capture = (name) => simctl(
     "io",
     DEVICE_ID,
@@ -472,6 +585,11 @@ async function main() {
       // A missing prior install is already isolated.
     }
     await simctl("install", DEVICE_ID, appPath);
+    extensionPreferencesPath = await resolveInstalledExtensionPreferences();
+    assert.ok(
+      extensionPreferencesPath,
+      "the installed Trace native-extension preferences container was not found",
+    );
 
     const uiRoot = path.join(sourceRoot, "test", "installed-ios");
     const testEnvironment = {
@@ -518,30 +636,40 @@ async function main() {
     for (const historicalAppDebugKey of [
       APP_PROVIDER_V2_KEY,
       APP_PROVIDER_RETIRED_KEY,
+      APP_BOOTSTRAP_CLEAR_RESULT_KEY,
       APP_FAIL_CLEAR_KEY,
     ]) {
       await deleteDefault(TRACE_APP_BUNDLE_ID, historicalAppDebugKey);
     }
 
     if (runsAppJourneys) {
-      appMode = "signed-out";
-      let priorAppEventCount = appEvents.length;
+      appMode = "bootstrap-only";
       await runTest("testAppSignedOutColdStartClearsStaleProvider");
-      await waitForEvidence(
-        () => appEvents.slice(priorAppEventCount).some(
-          (event) => event.action === "clear" && event.ok,
-        ),
-        "the signed-out cold-start clear was not acknowledged",
+      bootstrapClearEvidence = await waitForDefault(
+        readInstalledAppDefault,
+        APP_BOOTSTRAP_CLEAR_RESULT_KEY,
+        "cleared",
+      );
+      assert.equal(
+        bootstrapClearEvidence,
+        "cleared",
+        "the boot-time stale-provider clear did not complete",
       );
 
       await runTest("testResetSession", { artifact: "testResetSessionBeforeBrowserOnly" });
+      const browserOnlyProviderBaseline = await readProviderRequestCount();
       await runTest("testBrowserOnlySignInCannotConnectWithoutAppProvider");
+      await assertProviderRequest(
+        "browser-only Connect",
+        "missing",
+        browserOnlyProviderBaseline,
+      );
 
       appMode = "signed-out";
       await runTest("testOpenTraceAppFromPopup");
 
       appMode = "signed-in-a";
-      priorAppEventCount = appEvents.length;
+      let priorAppEventCount = appEvents.length;
       await runTest("testAppSignInWritesProvider");
       await waitForEvidence(
         () => appEvents.slice(priorAppEventCount).some(
@@ -557,7 +685,9 @@ async function main() {
       // Keychain boundary.
       await setProvider("ios-fixture-token-a");
       mode = "ok-a";
+      const appProviderBaseline = await readProviderRequestCount();
       await runTest("testReturnAfterAppSignInRequiresExplicitConnect");
+      await assertProviderRequest("app-provider Connect", "present", appProviderBaseline);
 
       appMode = "signed-in-a";
       priorAppEventCount = appEvents.length;
@@ -589,7 +719,13 @@ async function main() {
     if (runsSessionJourneys) {
       await runTest("testResetSession", { artifact: "testResetSessionBeforeSameProvider" });
       await setProvider("ios-fixture-token-a");
+      const connectAndSaveProviderBaseline = await readProviderRequestCount();
       await runTest("testConnectAndSaveFromInstalledArchiveSender", { url: AO3_WORK_URL });
+      await assertProviderRequest(
+        "installed Connect-and-save",
+        "present",
+        connectAndSaveProviderBaseline,
+      );
       await runTest("testResetSession", { artifact: "testResetSessionAfterConnectAndSave" });
       await runTest("testLeaveReconnectRequiredForProviderChange", {
         artifact: "testLeaveReconnectRequiredForSameProvider",
@@ -699,6 +835,8 @@ async function main() {
     const releaseStrings = await run("strings", [releaseExtension], { quiet: true });
     for (const debugString of [
       PROVIDER_DEFAULTS_KEY,
+      PROVIDER_REQUEST_COUNT_KEY,
+      PROVIDER_REQUEST_RESULT_KEY,
       CONNECT_AND_SAVE_DRIVER_MARKER,
     ]) {
       assert.doesNotMatch(
@@ -720,6 +858,7 @@ async function main() {
     for (const debugString of [
       APP_PROVIDER_V2_KEY,
       APP_PROVIDER_RETIRED_KEY,
+      APP_BOOTSTRAP_CLEAR_RESULT_KEY,
       APP_SEED_STALE_KEY,
       APP_FAIL_CLEAR_KEY,
       "stale-v2-provider",
@@ -770,8 +909,11 @@ async function main() {
         snapshotState: "connected",
         error: "commands_unavailable",
       } : null,
-      nativeProviderReachProof:
-        "installed explicit Connect verified the app-only fixture token; browser-only token differs",
+      nativeProviderReachProof: providerRequestEvidence,
+      bootstrapClearProof: runsAppJourneys ? {
+        result: bootstrapClearEvidence,
+        webMutationAllowed: false,
+      } : null,
       releaseFixtureSeamPresent: false,
       keychainBoundary: "deferred to the required real-device/TestFlight release-candidate smoke",
     };

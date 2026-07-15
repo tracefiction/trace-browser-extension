@@ -363,7 +363,7 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
 
     func testAppSignedOutColdStartClearsStaleProvider() {
         launchTraceApp(seedStaleProvider: true)
-        _ = waitForTextContaining("Signed out and provider cleared", in: traceApp)
+        _ = waitForTextContaining("Bootstrap probe complete", in: traceApp)
     }
 
     func testAppSignInWritesProvider() {

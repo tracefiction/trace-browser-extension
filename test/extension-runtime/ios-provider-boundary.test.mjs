@@ -36,11 +36,19 @@ test("the app synchronizer is the sole v2 writer and native utility handlers do 
     extension,
     /#if DEBUG && targetEnvironment\(simulator\)[\s\S]*traceDebugSimulatorProviderCredential[\s\S]*#endif/,
   );
+  assert.match(extension, /traceDebugSimulatorProviderRequestCount/);
+  assert.match(extension, /traceDebugSimulatorProviderRequestResult/);
+  assert.match(extension, /recordSimulatorProviderRequest\(hasCredential: token\?\.isEmpty == false\)/);
   assert.match(
     app,
     /#if DEBUG && targetEnvironment\(simulator\)[\s\S]*traceDebugSimulatorAppProviderV2[\s\S]*traceDebugSimulatorAppProviderRetired[\s\S]*#endif/,
   );
   assert.match(app, /traceDebugSeedStaleProvider/);
+  assert.match(app, /traceDebugSimulatorBootstrapClearResult/);
+  assert.match(
+    app,
+    /sharedProviderBootstrapReady \? "cleared" : "failed"[\s\S]*traceSimulatorBootstrapClearResultKey/,
+  );
   assert.match(app, /traceDebugFailProviderClear/);
   assert.match(
     app,
@@ -102,6 +110,12 @@ test("installed iOS Connect-and-save uses a temporary authorized-sender driver",
   assert.match(runner, /removeConnectAndSaveDriver\(sourceRoot\);[\s\S]*build:kernel:release/);
   assert.match(runner, /installed Connect-and-save driver leaked into the Release extension bundle/);
   assert.match(runner, /simctl\("openurl", DEVICE_ID, url\)/);
+  assert.match(runner, /appMode = "bootstrap-only"/);
+  assert.match(runner, /"browser-only Connect",[\s\S]*"missing",[\s\S]*browserOnlyProviderBaseline/);
+  assert.match(
+    runner,
+    /"installed Connect-and-save",[\s\S]*"present",[\s\S]*connectAndSaveProviderBaseline/,
+  );
   assert.match(
     runner,
     /runTest\("testConnectAndSaveFromInstalledArchiveSender", \{ url: AO3_WORK_URL \}\)/,

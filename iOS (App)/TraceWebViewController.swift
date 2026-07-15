@@ -345,6 +345,10 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         {
             sharedProviderBootstrapReady = false
         }
+        UserDefaults.standard.set(
+            sharedProviderBootstrapReady ? "cleared" : "failed",
+            forKey: Self.traceSimulatorBootstrapClearResultKey
+        )
 #endif
         navigationController?.setNavigationBarHidden(true, animated: false)
         apnsTokenObserver = NotificationCenter.default.addObserver(
@@ -1280,6 +1284,8 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         "traceDebugSimulatorAppProviderV2"
     private static let traceSimulatorRetiredProviderKey =
         "traceDebugSimulatorAppProviderRetired"
+    private static let traceSimulatorBootstrapClearResultKey =
+        "traceDebugSimulatorBootstrapClearResult"
 #endif
     private static let pendingFirstStoryDefaultsKey = "tracePendingFirstStoryUrlV1"
     private static let pendingFirstStoryExpiresAtDefaultsKey = "tracePendingFirstStoryExpiresAtV1"

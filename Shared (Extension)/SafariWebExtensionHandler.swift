@@ -36,6 +36,10 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     /// Release builds do not contain this key or branch.
     private static let traceSimulatorProviderCredentialKey =
         "traceDebugSimulatorProviderCredential"
+    private static let traceSimulatorProviderRequestCountKey =
+        "traceDebugSimulatorProviderRequestCount"
+    private static let traceSimulatorProviderRequestResultKey =
+        "traceDebugSimulatorProviderRequestResult"
 #endif
     private static let pendingFirstStoryDefaultsKey = "tracePendingFirstStoryUrlV1"
     private static let pendingFirstStoryExpiresAtDefaultsKey = "tracePendingFirstStoryExpiresAtV1"
@@ -74,7 +78,11 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         if let payload, let messageType = payload["type"] as? String {
             switch messageType {
             case Self.traceIosAuthTokenRequest:
-                if let token = Self.readSharedTraceToken(), !token.isEmpty {
+                let token = Self.readSharedTraceToken()
+#if DEBUG && targetEnvironment(simulator)
+                Self.recordSimulatorProviderRequest(hasCredential: token?.isEmpty == false)
+#endif
+                if let token, !token.isEmpty {
                     responseBody = [
                         "type": Self.traceIosAuthTokenRequest,
                         "ok": true,
@@ -229,6 +237,20 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
+
+#if DEBUG && targetEnvironment(simulator)
+    /// Redacted proof that an installed Connect actually crossed the native
+    /// provider boundary. Never persist the credential or any account data.
+    private static func recordSimulatorProviderRequest(hasCredential: Bool) {
+        let defaults = UserDefaults.standard
+        let requestCount = defaults.integer(forKey: traceSimulatorProviderRequestCountKey)
+        defaults.set(requestCount + 1, forKey: traceSimulatorProviderRequestCountKey)
+        defaults.set(
+            hasCredential ? "present" : "missing",
+            forKey: traceSimulatorProviderRequestResultKey
+        )
+    }
+#endif
 
     private static func pendingDefaults() -> UserDefaults? {
         UserDefaults(suiteName: traceSharedAppGroup)

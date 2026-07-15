@@ -45,6 +45,12 @@ fixture key is present in either binary. It does not replace the
 release-candidate smoke on a real device: that smoke remains responsible for
 proving the app-owned shared Keychain boundary in a signed/TestFlight build.
 
+The redacted summary records the native provider request count and only the
+`present`/`missing` outcome, proving that both successful and browser-only
+Connect attempts crossed that boundary. The cold-start probe loads a web mode
+that cannot mutate provider state and separately records the native bootstrap
+clear result, so a later web clear cannot mask a failed boot-time clear.
+
 The session phase also appends a DEBUG-run-only content driver after the real
 AO3 collector in the temporary build copy. It invokes the installed
 collector/controller path from an authorized AO3 sender and records the
