@@ -189,6 +189,13 @@ async function main() {
     "screenshot",
     path.join(EVIDENCE_ROOT, `${name}.png`),
   );
+  const terminateSafari = async () => {
+    try {
+      await simctl("terminate", DEVICE_ID, "com.apple.mobilesafari");
+    } catch {
+      // A stopped Safari is the desired precondition.
+    }
+  };
 
   try {
     await listen(server);
@@ -240,6 +247,10 @@ async function main() {
     const runTest = async (name) => {
       const resultBundle = path.join(EVIDENCE_ROOT, `${name}.xcresult`);
       fs.rmSync(resultBundle, { recursive: true, force: true });
+      // Provider fixtures are changed between separate test invocations.
+      // Restarting Safari prevents its extension process from retaining a
+      // cached DEBUG UserDefaults value across those explicit boundaries.
+      await terminateSafari();
       await run("xcodebuild", [
         "test-without-building",
         "-quiet",
