@@ -32,6 +32,10 @@ test("the app synchronizer is the sole v2 writer and native utility handlers do 
   const extension = read("Shared (Extension)", "SafariWebExtensionHandler.swift");
   assert.match(extension, /traceAuthTokenAccount = "extension-provider-v2"/);
   assert.doesNotMatch(extension, /"extension-token"/);
+  assert.match(
+    extension,
+    /#if DEBUG && targetEnvironment\(simulator\)[\s\S]*traceDebugSimulatorProviderCredential[\s\S]*#endif/,
+  );
 });
 
 test("the one app-opening route is fixed and unknown destinations fail closed", () => {

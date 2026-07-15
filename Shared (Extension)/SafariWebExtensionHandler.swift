@@ -30,6 +30,13 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     private static let traceAppleTeamIdentifierPrefix = "3GX59FLLT6."
     private static let traceAuthTokenService = "com.tracefiction.trace.auth"
     private static let traceAuthTokenAccount = "extension-provider-v2"
+#if DEBUG && targetEnvironment(simulator)
+    /// Simulator-only input for the installed Safari lifecycle harness. The
+    /// real app/extension boundary remains the shared Keychain item above;
+    /// Release builds do not contain this key or branch.
+    private static let traceSimulatorProviderCredentialKey =
+        "traceDebugSimulatorProviderCredential"
+#endif
     private static let pendingFirstStoryDefaultsKey = "tracePendingFirstStoryUrlV1"
     private static let pendingFirstStoryExpiresAtDefaultsKey = "tracePendingFirstStoryExpiresAtV1"
     private static let pendingFirstStoryV2DefaultsKey = "tracePendingFirstStoryV2"
@@ -189,6 +196,17 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     }
 
     private static func readSharedTraceToken() -> String? {
+#if DEBUG && targetEnvironment(simulator)
+        if let fixture = UserDefaults.standard.string(
+            forKey: traceSimulatorProviderCredentialKey
+        ) {
+            let trimmed = fixture.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+#endif
+
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: traceAuthTokenService,

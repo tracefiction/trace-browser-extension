@@ -24,6 +24,7 @@
     "test:runtime": "npm run build:core && node --test test/extension-runtime/runtime-adapters.test.mjs test/extension-runtime/ios-provider-boundary.test.mjs",
     "test:session:installed:chrome": "node scripts/test-extension-session-lifecycle.mjs",
     "test:session:installed:firefox": "node scripts/test-extension-session-firefox.mjs",
+    "test:session:installed:ios": "node scripts/test-extension-session-ios.mjs",
     "test:session:packages": "node --test test/extension-runtime/package-modes.test.mjs",
     "test": "npm run test:core && npm run test:runtime && npm run test:session:packages && node --test test/collector.test.js test/library-overlay.test.js test/library-overlay-runtime.test.js test/library-overlay-site-hint.test.js test/background-runtime.test.js test/build-origin-permissions.test.mjs test/popup.test.js test/sync.test.js test/ao3-saved-filters.test.js test/prepare-store-screenshots.test.js",
     "visual:install-browsers": "playwright install chromium",
