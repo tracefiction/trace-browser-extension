@@ -1258,10 +1258,26 @@ function nonRegressingOverlayEntry(existing, incoming) {
   const existingTotal = existingChapters.total;
   const incomingTotal = incomingChapters.total;
   const current = Math.max(existingCurrent, incomingCurrent);
-  const totalCandidates = [existingTotal, incomingTotal].filter(
-    (value) => typeof value === "number" && Number.isFinite(value),
-  );
-  const total = totalCandidates.length > 0 ? Math.max(...totalCandidates) : null;
+  const existingHasTotal =
+    typeof existingTotal === "number" && Number.isFinite(existingTotal);
+  const incomingHasTotal =
+    typeof incomingTotal === "number" && Number.isFinite(incomingTotal);
+  // A response for an older chapter must not roll back either part of the
+  // progress snapshot. At the same or a later chapter, however, the incoming
+  // total is authoritative: authors can delete or merge posted chapters, so a
+  // smaller total can be a correction rather than a regression.
+  const total =
+    incomingCurrent < existingCurrent
+      ? existingHasTotal
+        ? existingTotal
+        : incomingHasTotal
+          ? incomingTotal
+          : null
+      : incomingHasTotal
+        ? incomingTotal
+        : existingHasTotal
+          ? existingTotal
+          : null;
   if (current === incomingCurrent && total === incomingChapters.total) {
     return incoming;
   }

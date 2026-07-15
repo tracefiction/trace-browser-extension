@@ -346,6 +346,26 @@ test("storyMetadataFingerprint ignores current chapter progress", () => {
   );
 });
 
+test("successful story updates can clear stale auto-track pending state", () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://www.fanfiction.net/s/9001/15/Corrected-Total",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  const { clearStoryOverlayTransientState } = createCollectorBindings(dom);
+  const entry = clearStoryOverlayTransientState({
+    entryId: "00000000-0000-4000-8000-000000009001",
+    status: "READING",
+    readerStatus: "READING",
+    chapters: { current: 15, total: 15 },
+    __traceAutoTrackPending: true,
+  });
+
+  assert.equal(entry.__traceAutoTrackPending, undefined);
+  assert.equal(entry.status, "READING");
+  assert.deepEqual(plainJson(entry.chapters), { current: 15, total: 15 });
+});
+
 test("auto-track dedupe does not suppress upgraded AO3 chapter URL payloads", () => {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url: "https://archiveofourown.org/works/123/chapters/456",
@@ -1277,6 +1297,32 @@ test("story page auto-track pending overrides stale saved cache", () => {
   assert.ok(handle, "expected Trace story handle");
   assert.equal(handle.disabled, true);
   assert.match(handle.textContent || "", /Adding\.\.\./);
+});
+
+test("story page confirmed overlay entry clears an older auto-track pending handle", () => {
+  const { dom } = createStoryAutoTrackPendingHarness({
+    holdAutoTrack: true,
+    store: {
+      libraryOverlayCache: {
+        entries: {
+          "ffn:7038840": {
+            status: "READING",
+            readerStatus: "READING",
+            canonicalReaderStatus: "READING",
+            entryId: "00000000-0000-4000-8000-000000703884",
+            chapters: { current: 3, total: 28 },
+          },
+        },
+        syncVersion: "confirmed-overlay-entry",
+      },
+    },
+  });
+
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle, "expected Trace story handle");
+  assert.equal(handle.disabled, false);
+  assert.match(handle.textContent || "", /Reading\s*3\/28/i);
+  assert.doesNotMatch(handle.textContent || "", /Adding\.\.\./);
 });
 
 test("story page ignores unscoped cached saved state", () => {

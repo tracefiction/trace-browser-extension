@@ -1,4 +1,4 @@
-# Extension Store Copy - 0.5.13
+# Extension Store Copy - 0.5.14
 
 Use this copy for Chrome Web Store, Firefox Add-ons, App Store Connect, and
 public release notes. Keep evergreen store descriptions separate from
@@ -44,21 +44,17 @@ FictionPress.
 
 ## What's New / Release Notes
 
-Trace extension 0.5.13 makes story completion and extension startup more
-responsive:
+Trace extension 0.5.14 stabilizes saved state and chapter progress on story
+pages:
 
-- Shows the Finished confirmation as soon as the server save and local overlay
-  update succeed, without waiting for other open Trace tabs.
-- Restores an existing signed-in session after a Safari background-worker
-  restart before saving story-page controls.
-- Opens the extension popup from cached account state immediately while account
-  details refresh in the background.
-- Keeps a previously verified connection visible during transient account
-  rechecks.
-- Keeps a newer Reading status and chapter position from being replaced by an
-  older Saved receipt after a page reload or Safari restart.
-- Ensures Safari finishes queued story-state cleanup after disconnect so an
-  in-flight update cannot restore stale local status.
+- Replaces the temporary Adding state as soon as Trace confirms that the story
+  is saved.
+- Prevents final-chapter completion checks from repeatedly refreshing the story
+  controls after a successful update.
+- Accepts corrected chapter totals when a story's posted chapter count is
+  reduced without moving reading progress backwards.
+- Clears stale saving and status indicators after confirmed finish and
+  work-status updates.
 
 Privacy boundary unchanged: Trace still reads story metadata and reading
 progress from supported pages, not AO3/FFN credentials, cookies, private
@@ -84,15 +80,13 @@ The extension does not request cookie permissions.
 
 ## App Store Connect - iOS What's New
 
-Trace for iOS 0.5.13 makes Safari story completion and extension startup more
-responsive:
+Trace for iOS 0.5.14 stabilizes saved state and chapter progress in Safari:
 
-- Shows the Finished confirmation promptly after the library save succeeds.
-- Avoids a long Connecting state when reopening a previously verified session.
-- Preserves the latest Reading status in the story overlay across Safari page
-  and background-worker restarts.
-- Prevents an in-flight story-state update from restoring stale local status
-  after the extension disconnects.
+- Replaces the temporary Adding state as soon as Trace confirms that the story
+  is saved.
+- Keeps final-chapter completion controls responsive after successful updates.
+- Accepts corrected chapter totals without moving reading progress backwards.
+- Clears stale saving and status indicators after confirmed story updates.
 
 ## Screenshot Preparation
 

@@ -103,6 +103,7 @@ function createCollectorBindings(dom, options = {}) {
     forgetRecentAutoTrack: globalScope.forgetRecentAutoTrack,
     sendAutoTrackForStory: globalScope.sendAutoTrackForStory,
     applyConfirmedOverlayUpdateForStory: globalScope.applyConfirmedOverlayUpdateForStory,
+    clearStoryOverlayTransientState: globalScope.clearStoryOverlayTransientState,
     mergeStoryOverlayEntries: globalScope.mergeStoryOverlayEntries,
     quickAddStatusDisplay: globalScope.quickAddStatusDisplay,
     collectFFNStory: globalScope.collectFFNStory,

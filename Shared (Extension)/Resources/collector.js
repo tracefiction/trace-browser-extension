@@ -553,6 +553,16 @@ function storyOverlayTransientPatch(entry) {
   return patch;
 }
 
+function clearStoryOverlayTransientState(entry) {
+  var next = Object.assign({}, entry || {});
+  delete next.__traceAutoTrackPending;
+  delete next.__traceAutoTrackError;
+  delete next.__traceStatusPending;
+  delete next.__traceStatusTarget;
+  delete next.__traceStatusError;
+  return next;
+}
+
 function mergeStoryOverlayEntries(cachedEntry, optimisticEntry, cacheSyncVersion) {
   if (!cachedEntry) return optimisticEntry || {};
   if (!optimisticEntry) return cachedEntry;
@@ -4940,6 +4950,10 @@ function applyOptimisticFinishQualify(workKey, entry, patch, nextChapters) {
   if (patch.story_snapshot && Object.prototype.hasOwnProperty.call(patch.story_snapshot, "work_status_override")) {
     next = optimisticWorkStatusFromOverride(next, patch.story_snapshot.work_status_override);
   }
+  // The finish/catch-up PATCH is authoritative for the visible entry. Do not
+  // carry an older auto-track or status mutation spinner into the confirmed
+  // state, otherwise the handle can remain stuck on "Adding..." until reload.
+  next = clearStoryOverlayTransientState(next);
   optimisticStoryPageEntries[workKey] = next;
 }
 
@@ -5017,6 +5031,11 @@ function setupFinishQualify(view, workKey) {
   if (!decision || finishQualifyWasDismissed(decision.sessionKey)) return;
   if (!window.TraceFinishQualify || typeof window.TraceFinishQualify.onReachEnd !== "function") return;
 
+  // `onReachEnd` checks the current viewport immediately and may invoke its
+  // callback before returning. Install the guard first so a successful
+  // synchronous finish PATCH cannot re-enter render -> setup recursively.
+  var watchState = { signature: signature, cleanup: null };
+  finishQualifyWatchState[workKey] = watchState;
   var cleanup = window.TraceFinishQualify.onReachEnd(decision.bodyEl, function () {
     if (finishQualifyWasDismissed(decision.sessionKey)) return;
     if (decision.sourceWorkState) {
@@ -5071,7 +5090,13 @@ function setupFinishQualify(view, workKey) {
       },
     });
   });
-  finishQualifyWatchState[workKey] = { signature: signature, cleanup: cleanup };
+  if (finishQualifyWatchState[workKey] === watchState) {
+    watchState.cleanup = cleanup;
+  } else if (typeof cleanup === "function") {
+    // The synchronous callback may have resolved the entry and cleared this
+    // watcher during its nested render. Do not restore the obsolete watcher.
+    cleanup();
+  }
 }
 
 function renderQuickAddButton(workKey) {
@@ -5118,9 +5143,22 @@ function renderQuickAddButton(workKey) {
       } else if (!entry && optimisticEntry) {
         info = optimisticEntry;
       } else if (info && optimisticEntry) {
+        var optimisticEntryForMerge = optimisticEntry;
+        if (
+          entry &&
+          !legacySyntheticSavedEntry &&
+          optimisticEntry.__traceAutoTrackPending
+        ) {
+          // A real account-scoped overlay entry is authoritative proof that
+          // the save landed. Keep any other optimistic fields, but do not let
+          // an older in-flight receipt hold the visible handle on "Adding..."
+          // until a later focus/pageshow reconciliation.
+          optimisticEntryForMerge = Object.assign({}, optimisticEntry);
+          delete optimisticEntryForMerge.__traceAutoTrackPending;
+        }
         info = mergeStoryOverlayEntries(
           info,
-          optimisticEntry,
+          optimisticEntryForMerge,
           cache && cache.syncVersion,
         );
       }

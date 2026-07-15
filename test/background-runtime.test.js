@@ -4301,6 +4301,22 @@ test("overlay cache chapter progress never regresses", () => {
   assert.deepEqual(plainJson(merged.chapters), { current: 11, total: 13 });
 });
 
+test("overlay cache accepts a corrected chapter total with current progress", () => {
+  const h = createBackgroundHarness();
+  const merged = h.hooks.nonRegressingOverlayEntry(
+    {
+      status: "READING",
+      chapters: { current: 15, total: 17 },
+    },
+    {
+      status: "READING",
+      chapters: { current: 15, total: 15 },
+    },
+  );
+
+  assert.deepEqual(plainJson(merged.chapters), { current: 15, total: 15 });
+});
+
 test("TRACE_AUTO_TRACK confirms legacy track responses only after overlay refresh sees the entry", async () => {
   const entry = {
     status: "PLANNING",
