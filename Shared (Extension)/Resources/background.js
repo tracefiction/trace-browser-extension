@@ -4,8 +4,8 @@
 // It never receives AO3/FFN passwords or cookies; URLs are injected by `npm run build`.
 const ext = typeof browser !== "undefined" ? browser : chrome;
 
-const TRACE_API_BASE = "https://ff-app-development.up.railway.app";
-const TRACE_WEB_ORIGIN = "https://trace-git-dev-zacs-projects-378417c9.vercel.app";
+const TRACE_API_BASE = "https://api.tracefiction.com";
+const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 
 const API_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/track`;
 const METADATA_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/metadata`;

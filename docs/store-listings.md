@@ -1,4 +1,4 @@
-# Extension Store Copy - 0.5.14
+# Extension Store Copy - 0.5.15
 
 Use this copy for Chrome Web Store, Firefox Add-ons, App Store Connect, and
 public release notes. Keep evergreen store descriptions separate from
@@ -44,17 +44,14 @@ FictionPress.
 
 ## What's New / Release Notes
 
-Trace extension 0.5.14 stabilizes saved state and chapter progress on story
-pages:
+Trace extension 0.5.15 makes first-time iOS Safari setup more reliable:
 
-- Replaces the temporary Adding state as soon as Trace confirms that the story
-  is saved.
-- Prevents final-chapter completion checks from repeatedly refreshing the story
-  controls after a successful update.
-- Accepts corrected chapter totals when a story's posted chapter count is
-  reduced without moving reading progress backwards.
-- Clears stale saving and status indicators after confirmed finish and
-  work-status updates.
+- Opens AO3 or FanFiction.net directly from the guided setup.
+- Keeps the Safari extension aligned with the Trace account signed in to the
+  app, including after switching accounts.
+- Waits for the first story to appear in that account before reporting setup
+  complete.
+- Refreshes the library after the first story is confirmed saved.
 
 Privacy boundary unchanged: Trace still reads story metadata and reading
 progress from supported pages, not AO3/FFN credentials, cookies, private
@@ -80,13 +77,14 @@ The extension does not request cookie permissions.
 
 ## App Store Connect - iOS What's New
 
-Trace for iOS 0.5.14 stabilizes saved state and chapter progress in Safari:
+Trace for iOS 0.5.15 makes first-time Safari setup more reliable:
 
-- Replaces the temporary Adding state as soon as Trace confirms that the story
-  is saved.
-- Keeps final-chapter completion controls responsive after successful updates.
-- Accepts corrected chapter totals without moving reading progress backwards.
-- Clears stale saving and status indicators after confirmed story updates.
+- Opens AO3 or FanFiction.net directly from the guided setup.
+- Keeps the Safari extension aligned with the Trace account signed in to the
+  app, including after switching accounts.
+- Waits for the first story to appear in that account before reporting setup
+  complete.
+- Refreshes the library after the first story is confirmed saved.
 
 ## Screenshot Preparation
 
