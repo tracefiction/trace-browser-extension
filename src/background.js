@@ -97,6 +97,7 @@ let ao3SavedFiltersSyncTimer = null;
 let ao3SavedFiltersSyncInFlight = false;
 let authVerificationRetryTimer = null;
 let initialAuthPromise = null;
+let iosNativeAuthBootstrapPromise = null;
 let traceUserProRefreshPromise = null;
 let workStateAccessQueue = Promise.resolve();
 
@@ -2551,18 +2552,32 @@ function sanitizeIosPendingFirstStoryResponse(response) {
 
 async function bootstrapAuthFromIosNative(reason) {
   if (!canSendNativeMessage()) return false;
-  const response = await sendIosNativeMessage({
-    type: IOS_AUTH_TOKEN_REQUEST_MESSAGE,
-    reason: reason || "bootstrap",
-  });
-  const token = sanitizeIosNativeAuthTokenResponse(response);
-  if (!token) return false;
+  if (iosNativeAuthBootstrapPromise) return iosNativeAuthBootstrapPromise;
 
-  const result = await verifyTraceAccountToken(token, {
-    lastTokenSyncAt: new Date().toISOString(),
-    source: "ios_native",
-  });
-  return result && result.success === true;
+  const bootstrapPromise = (async () => {
+    const response = await sendIosNativeMessage({
+      type: IOS_AUTH_TOKEN_REQUEST_MESSAGE,
+      reason: reason || "bootstrap",
+    });
+    const token = sanitizeIosNativeAuthTokenResponse(response);
+    if (!token) return false;
+    if (token === bearerToken && token === verifiedBearerToken) return true;
+
+    const result = await verifyTraceAccountToken(token, {
+      lastTokenSyncAt: new Date().toISOString(),
+      source: "ios_native",
+    });
+    return result && result.success === true;
+  })();
+  iosNativeAuthBootstrapPromise = bootstrapPromise;
+
+  try {
+    return await bootstrapPromise;
+  } finally {
+    if (iosNativeAuthBootstrapPromise === bootstrapPromise) {
+      iosNativeAuthBootstrapPromise = null;
+    }
+  }
 }
 
 async function bootstrapInitialAuth(res) {
@@ -3258,17 +3273,45 @@ function respondAutoTrackNotAuthenticated(payload, sender, sendResponse) {
   if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
 }
 
-function handleAutoTrack(payload, sender, sendResponse) {
+function handleAutoTrack(
+  payload,
+  sender,
+  sendResponse,
+  nativeAuthPrepared = false,
+) {
+  if (shouldIgnoreSenderForAutoTrack(sender)) {
+    if (sendResponse) sendResponse({ ok: false, error: "ignored_sender" });
+    return;
+  }
+
+  // A Safari extension can retain a valid token for a different Trace
+  // account. Refresh from the containing app before the first write instead
+  // of waiting for a 401, which would never happen for that valid token.
+  if (
+    !nativeAuthPrepared &&
+    detectBrowserKind() === "safari" &&
+    canSendNativeMessage()
+  ) {
+    void bootstrapAuthFromIosNative("auto_track")
+      .then(() => {
+        handleAutoTrack(payload, sender, sendResponse, true);
+      })
+      .catch(() => {
+        handleAutoTrack(payload, sender, sendResponse, true);
+      });
+    return;
+  }
+
   if (!bearerToken) {
     void ensureStoredAuthReady()
       .then((ready) => {
         if (ready && bearerToken) {
-          handleAutoTrack(payload, sender, sendResponse);
+          handleAutoTrack(payload, sender, sendResponse, true);
           return;
         }
         return bootstrapAuthFromIosNative("auto_track").then((bootstrapped) => {
           if (bootstrapped && bearerToken) {
-            handleAutoTrack(payload, sender, sendResponse);
+            handleAutoTrack(payload, sender, sendResponse, true);
             return;
           }
           respondAutoTrackNotAuthenticated(payload, sender, sendResponse);
@@ -3277,11 +3320,6 @@ function handleAutoTrack(payload, sender, sendResponse) {
       .catch(() => {
         respondAutoTrackNotAuthenticated(payload, sender, sendResponse);
       });
-    return;
-  }
-
-  if (shouldIgnoreSenderForAutoTrack(sender)) {
-    if (sendResponse) sendResponse({ ok: false, error: "ignored_sender" });
     return;
   }
 
@@ -3573,18 +3611,43 @@ async function handleQuickAdd(
   sender,
   sendResponse,
   allowNativeAuthRetry = true,
+  nativeAuthPrepared = false,
 ) {
   const workKey = externalStoryKeyFromItem(payload && payload.item);
+  // Match auto-track: a valid Safari token is not proof that it belongs to
+  // the containing app's current account. Adopt the app token before writing.
+  if (
+    !nativeAuthPrepared &&
+    detectBrowserKind() === "safari" &&
+    canSendNativeMessage()
+  ) {
+    await bootstrapAuthFromIosNative("quick_add").catch(() => false);
+    await handleQuickAdd(
+      payload,
+      sender,
+      sendResponse,
+      allowNativeAuthRetry,
+      true,
+    );
+    return;
+  }
+
   if (!bearerToken) {
     const ready = await ensureStoredAuthReady();
     if (ready && bearerToken) {
-      await handleQuickAdd(payload, sender, sendResponse, allowNativeAuthRetry);
+      await handleQuickAdd(
+        payload,
+        sender,
+        sendResponse,
+        allowNativeAuthRetry,
+        true,
+      );
       return;
     }
     if (allowNativeAuthRetry) {
       const bootstrapped = await bootstrapAuthFromIosNative("quick_add");
       if (bootstrapped && bearerToken) {
-        await handleQuickAdd(payload, sender, sendResponse, false);
+        await handleQuickAdd(payload, sender, sendResponse, false, true);
         return;
       }
     }
@@ -3662,7 +3725,7 @@ async function handleQuickAdd(
             "quick_add_auth_failure",
           );
           if (bootstrapped && bearerToken) {
-            await handleQuickAdd(payload, sender, sendResponse, false);
+            await handleQuickAdd(payload, sender, sendResponse, false, true);
             return;
           }
         }

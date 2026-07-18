@@ -3065,6 +3065,61 @@ test("TRACE_QUICK_ADD bootstraps iOS native auth before first-story quick add", 
   );
 });
 
+test("Safari quick add replaces an already-valid token with the containing app account before writing", async () => {
+  let trackCalls = 0;
+  const h = createBackgroundHarness({
+    runtimeUrl: "safari-web-extension://trace/",
+    sendNativeMessageImpl(message, callback) {
+      if (
+        message.type === "TRACE_IOS_AUTH_TOKEN_REQUEST" &&
+        message.reason === "quick_add"
+      ) {
+        callback({ ok: true, token: "current-app-token" });
+        return;
+      }
+      callback({ ok: false, error: "missing_token" });
+    },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/api/account/me")) {
+        assert.equal(init.headers.Authorization, "Bearer current-app-token");
+        return createResponse({ json: { pro: false, library_count: 0 } });
+      }
+      if (String(url).endsWith("/api/extension/track")) {
+        trackCalls += 1;
+        assert.equal(init.headers.Authorization, "Bearer current-app-token");
+        return createResponse({
+          json: {
+            success: true,
+            data: { entry_id: "entry-current-account", type: "created" },
+          },
+        });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: { success: true, data: { entries: {}, syncVersion: "current-v1" } },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  await flush();
+  h.hooks.setBearerToken("valid-other-account-token");
+  h.hooks.setVerifiedBearerToken("valid-other-account-token");
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_QUICK_ADD",
+    payload: {
+      s: "ao3",
+      at: new Date().toISOString(),
+      item: { t: "Test", u: "https://archiveofourown.org/works/103" },
+    },
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(trackCalls, 1);
+  assert.equal(h.hooks.getBearerToken(), "current-app-token");
+});
+
 test("TRACE_QUICK_ADD retries with iOS native auth after a stale stored token", async () => {
   let trackCalls = 0;
   const h = createBackgroundHarness({
@@ -3989,6 +4044,64 @@ test("TRACE_AUTO_TRACK bootstraps iOS native auth before first story track", asy
       (args) => plainJson(args[0]).reason === "auto_track",
     ),
   );
+});
+
+test("Safari auto-track replaces an already-valid token with the containing app account before writing", async () => {
+  let trackCalls = 0;
+  const h = createBackgroundHarness({
+    runtimeUrl: "safari-web-extension://trace/",
+    sendNativeMessageImpl(message, callback) {
+      if (
+        message.type === "TRACE_IOS_AUTH_TOKEN_REQUEST" &&
+        message.reason === "auto_track"
+      ) {
+        callback({ ok: true, token: "current-app-auto-token" });
+        return;
+      }
+      callback({ ok: false, error: "missing_token" });
+    },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/api/account/me")) {
+        assert.equal(init.headers.Authorization, "Bearer current-app-auto-token");
+        return createResponse({ json: { pro: false, library_count: 0 } });
+      }
+      if (String(url).endsWith("/api/extension/track")) {
+        trackCalls += 1;
+        assert.equal(init.headers.Authorization, "Bearer current-app-auto-token");
+        return createResponse({
+          json: {
+            success: true,
+            data: { entry_id: "entry-current-auto", type: "created" },
+          },
+        });
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: { success: true, data: { entries: {}, syncVersion: "current-auto-v1" } },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  await flush();
+  h.hooks.setBearerToken("valid-other-account-token");
+  h.hooks.setVerifiedBearerToken("valid-other-account-token");
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_AUTO_TRACK",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: { t: "Story", u: "https://archiveofourown.org/works/202" },
+      },
+    },
+    { tab: { id: 112 }, frameId: 0, documentLifecycle: "active" },
+  );
+
+  assert.equal(response.ok, true);
+  assert.equal(trackCalls, 1);
+  assert.equal(h.hooks.getBearerToken(), "current-app-auto-token");
 });
 
 test("TRACE_AUTO_TRACK retries with iOS native auth after a stale stored token", async () => {

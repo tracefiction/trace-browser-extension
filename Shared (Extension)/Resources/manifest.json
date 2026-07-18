@@ -27,7 +27,7 @@
     "https://archive.transformativeworks.org/*",
     "https://www.fanfiction.net/*",
     "https://m.fanfiction.net/*",
-    "https://www.tracefiction.com/*"
+    "https://trace-git-dev-zacs-projects-378417c9.vercel.app/*"
   ],
   "icons": {
     "16": "images/icon-16.png",
@@ -109,7 +109,7 @@
     },
     {
       "matches": [
-        "https://www.tracefiction.com/*"
+        "https://trace-git-dev-zacs-projects-378417c9.vercel.app/*"
       ],
       "js": [
         "sync.js"

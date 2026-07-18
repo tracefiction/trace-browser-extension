@@ -120,6 +120,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         let nonce: String
         let enabled: Bool
         let settingsSupported: Bool
+        let archiveBrowseHosts: [String]
         let error: String?
         let queriedIdentifier: String?
         let embeddedExtensionIdentifiers: [String]?
@@ -732,6 +733,11 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 
     private func traceAppHostsMatch(_ url: URL) -> Bool {
         guard let host = url.host?.lowercased() else { return false }
+#if DEBUG
+        if let uiTestHost = Self.onboardingUITestURL?.host?.lowercased(), host == uiTestHost {
+            return true
+        }
+#endif
         if host == "tracefiction.com" || host == "www.tracefiction.com" { return true }
         if let appHost = URL(string: Self.webAppHTTPSOrigin)?.host?.lowercased(), host == appHost {
             return true
@@ -858,6 +864,11 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     }
 
     private static func defaultTraceURL() -> URL? {
+#if DEBUG
+        if let uiTestURL = onboardingUITestURL {
+            return uiTestURL
+        }
+#endif
         return traceURL(path: "/", queryItems: [URLQueryItem(name: "trace_app", value: "1")])
     }
 
@@ -866,6 +877,23 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     }
 
 #if DEBUG
+    private static var onboardingUITestURL: URL? {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let flagIndex = arguments.firstIndex(of: "--trace-onboarding-ui-test-url"),
+              arguments.indices.contains(flagIndex + 1),
+              let url = URL(string: arguments[flagIndex + 1]),
+              let host = url.host?.lowercased(),
+              host == "localhost" || host == "127.0.0.1"
+        else {
+            return nil
+        }
+        return url
+    }
+
+    private static var isOnboardingUITest: Bool {
+        onboardingUITestURL != nil
+    }
+
     private static var shouldShowDebugLoadFailureView: Bool {
         return ProcessInfo.processInfo.arguments.contains("--trace-show-load-failure")
     }
@@ -1146,6 +1174,20 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         case browse
     }
 
+    private enum TraceSafariArchiveHostKind: String {
+        case ao3
+        case ffn
+
+        var homeURL: URL {
+            switch self {
+            case .ao3:
+                return URL(string: "https://archiveofourown.org/")!
+            case .ffn:
+                return URL(string: "https://www.fanfiction.net/")!
+            }
+        }
+    }
+
     private static let safariExtensionBundleIdentifier = "com.tracefiction.trace.extension"
     private static let traceSharedAppGroup = "group.com.tracefiction.trace"
     private static let traceKeychainAccessGroup = "com.tracefiction.trace.shared"
@@ -1188,7 +1230,27 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         case "TRACE_IOS_OPEN_ARCHIVE_HOME":
             handleTraceSafariArchiveHomeOpenRequest(
                 nonce: nonce,
-                handoffId: Self.sanitizedHandoffId(body["handoffId"])
+                handoffId: Self.sanitizedHandoffId(body["handoffId"]),
+                hostKind: .ao3,
+                responseType: "TRACE_IOS_OPEN_ARCHIVE_HOME_RESPONSE"
+            )
+        case "TRACE_IOS_OPEN_ARCHIVE_HOME_V2":
+            guard let rawHostKind = body["hostKind"] as? String,
+                  let hostKind = TraceSafariArchiveHostKind(rawValue: rawHostKind)
+            else {
+                postSafariExtensionActionResult(
+                    type: "TRACE_IOS_OPEN_ARCHIVE_HOME_V2_RESPONSE",
+                    nonce: nonce,
+                    ok: false,
+                    error: "invalid_host"
+                )
+                return
+            }
+            handleTraceSafariArchiveHomeOpenRequest(
+                nonce: nonce,
+                handoffId: Self.sanitizedHandoffId(body["handoffId"]),
+                hostKind: hostKind,
+                responseType: "TRACE_IOS_OPEN_ARCHIVE_HOME_V2_RESPONSE"
             )
         default:
             postSafariExtensionActionResult(
@@ -1407,22 +1469,39 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         }
     }
 
-    /// Opens only the fixed AO3 home URL. This is intentionally not a generic
-    /// native browser launcher: the pending record is constrained to the AO3
-    /// host and is consumed only after the reader reaches a supported story.
+    /// Opens one fixed supported archive home. This is intentionally not a
+    /// generic browser launcher: the pending record is constrained to the
+    /// selected host and is consumed only after a supported story is reached.
     private func handleTraceSafariArchiveHomeOpenRequest(
         nonce: String,
-        handoffId: String?
+        handoffId: String?,
+        hostKind: TraceSafariArchiveHostKind,
+        responseType: String
     ) {
+#if DEBUG
+        if Self.isOnboardingUITest {
+            let expectedHost = ProcessInfo.processInfo.environment["TRACE_UI_TEST_EXPECTED_ARCHIVE_HOST"]
+            let matchesExpectation = expectedHost == hostKind.rawValue
+            postSafariExtensionActionResult(
+                type: responseType,
+                nonce: nonce,
+                ok: matchesExpectation,
+                error: matchesExpectation ? nil : "ui_test_unexpected_host",
+                handoffId: matchesExpectation ? handoffId : nil
+            )
+            return
+        }
+#endif
         Task { [weak self] in
             guard let self else { return }
-            let url = URL(string: "https://archiveofourown.org/")!
+            let url = hostKind.homeURL
             do {
                 try await self.storeCurrentTraceTokenForSafariExtension()
                 try Self.storePendingFirstStory(
                     mode: .browse,
                     url: nil,
-                    handoffId: handoffId
+                    handoffId: handoffId,
+                    browseHostKind: hostKind
                 )
                 await MainActor.run {
                     UIApplication.shared.open(url, options: [:]) { [weak self] success in
@@ -1430,7 +1509,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                             Self.clearPendingFirstStoryURL()
                         }
                         self?.postSafariExtensionActionResult(
-                            type: "TRACE_IOS_OPEN_ARCHIVE_HOME_RESPONSE",
+                            type: responseType,
                             nonce: nonce,
                             ok: success,
                             error: success ? nil : "open_failed",
@@ -1441,7 +1520,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             } catch {
                 await MainActor.run {
                     self.postSafariExtensionActionResult(
-                        type: "TRACE_IOS_OPEN_ARCHIVE_HOME_RESPONSE",
+                        type: responseType,
                         nonce: nonce,
                         ok: false,
                         error: "token_share_failed"
@@ -1540,7 +1619,8 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     private static func storePendingFirstStory(
         mode: TraceSafariPendingFirstStoryMode,
         url: URL?,
-        handoffId: String?
+        handoffId: String?,
+        browseHostKind: TraceSafariArchiveHostKind? = nil
     ) throws {
         guard let defaults = pendingDefaults() else {
             throw TraceSafariExtensionBridgeError.sharedStorageUnavailable
@@ -1560,7 +1640,10 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 forKey: pendingFirstStoryExpiresAtDefaultsKey
             )
         case .browse:
-            hostKind = "ao3"
+            guard let browseHostKind else {
+                throw TraceSafariExtensionBridgeError.unsupportedUrl
+            }
+            hostKind = browseHostKind.rawValue
             // An old direct handoff must not be replayed while the reader is
             // browsing AO3 home with the new protocol.
             defaults.removeObject(forKey: pendingFirstStoryDefaultsKey)
@@ -1704,6 +1787,10 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 nonce: nonce,
                 enabled: enabled,
                 settingsSupported: settingsSupported,
+                archiveBrowseHosts: [
+                    TraceSafariArchiveHostKind.ao3.rawValue,
+                    TraceSafariArchiveHostKind.ffn.rawValue,
+                ],
                 error: error,
                 queriedIdentifier: queriedIdentifier,
                 embeddedExtensionIdentifiers: embeddedExtensionIdentifiers,
@@ -1942,14 +2029,21 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 
     private func currentWebMessageTargetOrigin() -> String {
         guard let url = webView.url,
-              url.scheme?.lowercased() == "https",
+              let scheme = url.scheme?.lowercased(),
               let host = url.host,
               traceAppHostsMatch(url)
         else {
             return Self.webAppHTTPSOrigin
         }
 
-        var origin = "https://\(host)"
+#if DEBUG
+        let schemeIsAllowed = scheme == "https" || (Self.isOnboardingUITest && scheme == "http")
+#else
+        let schemeIsAllowed = scheme == "https"
+#endif
+        guard schemeIsAllowed else { return Self.webAppHTTPSOrigin }
+
+        var origin = "\(scheme)://\(host)"
         if let port = url.port {
             origin += ":\(port)"
         }

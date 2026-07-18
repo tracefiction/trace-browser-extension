@@ -15,6 +15,11 @@
 	</array>
 	<key>NSUserNotificationsUsageDescription</key>
 	<string>Trace can send an optional weekly reminder when your library could use a quick check-in.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>TRACE_API_BASE_URL</key>
 	<string>$(TRACE_API_BASE_URL)</string>
 	<key>UIApplicationSceneManifest</key>

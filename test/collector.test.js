@@ -1492,8 +1492,8 @@ test("matching iOS pending story handoff relays its scoped run receipt", async (
 test("matching iOS browse handoff waits for a story then relays its receipt", async () => {
   const { sent } = createStoryAutoTrackPendingHarness({
     store: { prefAutoTrackEnabled: false },
-    // The native app currently creates this mode for AO3. FFN is used here to
-    // exercise the collector's host-match guard with the existing story fixture.
+    // FFN browse is a first-class native handoff. The existing FFN fixture also
+    // exercises the collector's host-match guard.
     pendingFirstStoryResponse: {
       ok: true,
       mode: "browse",

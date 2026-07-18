@@ -13,6 +13,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		BA3EC1012F90000000BA1700 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = BA3EBD672F04965A00BA150A /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = BA3EBD822F04965D00BA150A;
+			remoteInfo = "Trace (iOS)";
+		};
 		BA3EBDA22F04965D00BA150A /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = BA3EBD672F04965A00BA150A /* Project object */;
@@ -63,6 +70,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		BA3EC1002F90000000BA1700 /* TraceOnboardingUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TraceOnboardingUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		BA0C6ED42F84460200C89191 /* Trace-macOS-Extension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Trace-macOS-Extension.entitlements"; sourceTree = "<group>"; };
 		BA0C6ED52F8512C300C89191 /* Trace-iOS-Debug.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Trace-iOS-Debug.entitlements"; sourceTree = "<group>"; };
 		BA0C6EE02F8512C300C89191 /* Trace-iOS-Extension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Trace-iOS-Extension.entitlements"; sourceTree = "<group>"; };
@@ -128,6 +136,11 @@
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		BA3EC1032F90000000BA1700 /* TraceOnboardingUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = TraceOnboardingUITests;
+			sourceTree = "<group>";
+		};
 		BA3EBD6B2F04965A00BA150A /* Shared (App) */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
@@ -186,6 +199,13 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		BA3EC1042F90000000BA1700 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		BA3EBD802F04965D00BA150A /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -227,6 +247,7 @@
 		BA3EBD662F04965A00BA150A = {
 			isa = PBXGroup;
 			children = (
+				BA3EC1032F90000000BA1700 /* TraceOnboardingUITests */,
 				BA0C6ED52F8512C300C89191 /* Trace-iOS-Debug.entitlements */,
 				BA3EC00E2F04965D00BA1600 /* Trace-iOS-Release.entitlements */,
 				BA0C6EE02F8512C300C89191 /* Trace-iOS-Extension.entitlements */,
@@ -245,6 +266,7 @@
 		BA3EBD842F04965D00BA150A /* Products */ = {
 			isa = PBXGroup;
 			children = (
+				BA3EC1002F90000000BA1700 /* TraceOnboardingUITests.xctest */,
 				BA3EBD832F04965D00BA150A /* Trace.app */,
 				BA3EBD952F04965D00BA150A /* Trace.app */,
 				BA3EBDA02F04965D00BA150A /* Trace Extension.appex */,
@@ -257,6 +279,29 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		BA3EC1072F90000000BA1700 /* TraceOnboardingUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BA3EC10A2F90000000BA1700 /* Build configuration list for PBXNativeTarget "TraceOnboardingUITests" */;
+			buildPhases = (
+				BA3EC1062F90000000BA1700 /* Sources */,
+				BA3EC1042F90000000BA1700 /* Frameworks */,
+				BA3EC1052F90000000BA1700 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				BA3EC1022F90000000BA1700 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				BA3EC1032F90000000BA1700 /* TraceOnboardingUITests */,
+			);
+			name = TraceOnboardingUITests;
+			packageProductDependencies = (
+			);
+			productName = TraceOnboardingUITests;
+			productReference = BA3EC1002F90000000BA1700 /* TraceOnboardingUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 		BA3EBD822F04965D00BA150A /* Trace (iOS) */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = BA3EBDD42F04965D00BA150A /* Build configuration list for PBXNativeTarget "Trace (iOS)" */;
@@ -384,6 +429,10 @@
 				LastSwiftUpdateCheck = 2620;
 				LastUpgradeCheck = 2620;
 				TargetAttributes = {
+					BA3EC1072F90000000BA1700 = {
+						CreatedOnToolsVersion = 26.2;
+						TestTargetID = BA3EBD822F04965D00BA150A;
+					};
 					BA3EBD822F04965D00BA150A = {
 						CreatedOnToolsVersion = 26.2;
 						SystemCapabilities = {
@@ -420,6 +469,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				BA3EC1072F90000000BA1700 /* TraceOnboardingUITests */,
 				BA3EBD822F04965D00BA150A /* Trace (iOS) */,
 				BA3EBD9F2F04965D00BA150A /* Trace Extension (iOS) */,
 				BA3EC0052F04965D00BA1600 /* TraceWidget */,
@@ -430,6 +480,13 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		BA3EC1052F90000000BA1700 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		BA3EBD812F04965D00BA150A /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -468,6 +525,13 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		BA3EC1062F90000000BA1700 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		BA3EBD7F2F04965D00BA150A /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -506,6 +570,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		BA3EC1022F90000000BA1700 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = BA3EBD822F04965D00BA150A /* Trace (iOS) */;
+			targetProxy = BA3EC1012F90000000BA1700 /* PBXContainerItemProxy */;
+		};
 		BA3EBDA32F04965D00BA150A /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = BA3EBD9F2F04965D00BA150A /* Trace Extension (iOS) */;
@@ -524,6 +593,40 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		BA3EC1082F90000000BA1700 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 3GX59FLLT6;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tracefiction.trace.onboarding-ui-tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = "Trace (iOS)";
+			};
+			name = Debug;
+		};
+		BA3EC1092F90000000BA1700 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 3GX59FLLT6;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tracefiction.trace.onboarding-ui-tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = "Trace (iOS)";
+			};
+			name = Release;
+		};
 		BA3EBDD02F04965D00BA150A /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -1034,6 +1137,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		BA3EC10A2F90000000BA1700 /* Build configuration list for PBXNativeTarget "TraceOnboardingUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BA3EC1082F90000000BA1700 /* Debug */,
+				BA3EC1092F90000000BA1700 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		BA3EBD6A2F04965A00BA150A /* Build configuration list for PBXProject "Trace" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
