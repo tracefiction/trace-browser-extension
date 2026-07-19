@@ -35,6 +35,32 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     /// Must match `WEB_SHELL_UA` in `client/src/auth/auth-return.ts`.
     static let webShellUserAgentToken = "TraceFictionWebShell/1"
 
+    private static var nativeAppMetadataJSON: String {
+#if DEBUG
+        let releaseChannel = "debug"
+#else
+        let releaseChannel = "app_store"
+#endif
+        var metadata = ["releaseChannel": releaseChannel]
+        if let version = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String, !version.isEmpty {
+            metadata["version"] = version
+        }
+        if let build = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleVersion"
+        ) as? String, !build.isEmpty {
+            metadata["build"] = build
+        }
+        guard JSONSerialization.isValidJSONObject(metadata),
+              let data = try? JSONSerialization.data(withJSONObject: metadata),
+              let json = String(data: data, encoding: .utf8)
+        else {
+            return #"{"releaseChannel":"unknown"}"#
+        }
+        return json
+    }
+
     private var webView: WKWebView!
     private var traceLoadFailureView: UIView?
     private var activeTraceNavigationURL: URL?
@@ -217,6 +243,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         (function() {
           try {
             Object.defineProperty(window, '__TRACE_NATIVE_SHELL__', { value: true, writable: false, configurable: false });
+            Object.defineProperty(window, '__TRACE_NATIVE_APP__', { value: Object.freeze(\(Self.nativeAppMetadataJSON)), writable: false, configurable: false });
           } catch (e) {}
         })();
         """

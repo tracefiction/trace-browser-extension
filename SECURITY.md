@@ -25,6 +25,9 @@ Trace may send story URL, title, author, fandoms/tags, chapter and word counts, 
 On iOS Safari, Trace may receive the Trace app's current auth token through the
 Safari native message bridge and shared Keychain access group after you sign in
 inside the app.
+The iOS shell exposes its app version, build number, and release channel to the
+Trace web app for authenticated onboarding diagnostics. This diagnostic does
+not include story URLs, archive browsing history, or account email.
 
 Hidden-work preferences are keyed by supported AO3/FFN work id and affect Trace browsing overlays only. They are separate from library reading status and do not hide or change the source site itself.
 

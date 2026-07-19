@@ -51,6 +51,11 @@ Trace may send this data to the Trace API when you import, quick-add, auto-track
 On iOS Safari, the app can share your Trace auth token with the bundled Safari
 extension through the app's native message handler and shared Keychain access
 group after you sign in to Trace in the app.
+The iOS app shell also exposes its app version, build number, and release
+channel to the Trace web app. Trace sends those values with a privacy-safe
+authenticated onboarding diagnostic so release-specific setup failures can be
+distinguished without collecting story URLs, archive browsing history, or
+account email.
 
 The metadata-improvement preference is separate from automatic progress tracking and can be turned off in the extension popup.
 Hidden-work preferences affect Trace browsing overlays only; they are separate from reading status and do not hide or change the source site itself.
