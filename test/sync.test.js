@@ -510,6 +510,51 @@ test("sync returns sanitized first-story add failures", async () => {
   ]);
 });
 
+test("sync preserves the bounded site-permission failure and hides unknown errors", async () => {
+  const responses = [
+    { ok: false, error: "permission_required", rawError: "private" },
+    { ok: false, error: "internal_stack_trace" },
+  ];
+  const h = createSyncHarness("https://tracefiction.com", {
+    sendMessageImpl(_message, callback) {
+      callback?.(responses.shift());
+    },
+  });
+
+  for (const nonce of ["permission-1", "permission-2"]) {
+    h.window.dispatchEvent(
+      new h.window.MessageEvent("message", {
+        data: {
+          type: "TRACE_FIRST_STORY_ADD_REQUEST",
+          nonce,
+          url: "https://archiveofourown.org/works/123",
+        },
+        origin: "https://tracefiction.com",
+        source: h.window,
+      }),
+    );
+    await flush();
+  }
+
+  assert.deepEqual(
+    nonTokenRequestMessages(h).map((message) => message.data),
+    [
+      {
+        type: "TRACE_FIRST_STORY_ADD_RESPONSE",
+        nonce: "permission-1",
+        ok: false,
+        error: "permission_required",
+      },
+      {
+        type: "TRACE_FIRST_STORY_ADD_RESPONSE",
+        nonce: "permission-2",
+        ok: false,
+        error: "unknown_error",
+      },
+    ],
+  );
+});
+
 test("sync ignores first-story add requests without nonce or URL", async () => {
   const h = createSyncHarness();
 

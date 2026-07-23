@@ -100,10 +100,14 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 responseBody = Self.pendingFirstStoryResponse()
 
             case Self.traceIosPendingFirstStoryClear:
-                Self.clearPendingFirstStory()
+                let expectedHandoffId = Self.sanitizedHandoffId(payload["handoffId"])
+                let cleared = Self.clearPendingFirstStory(
+                    expectedHandoffId: expectedHandoffId
+                )
                 responseBody = [
                     "type": Self.traceIosPendingFirstStoryClear,
                     "ok": true,
+                    "cleared": cleared,
                 ]
 
             case Self.traceIosExtensionHeartbeat:
@@ -358,11 +362,23 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         return trimmed
     }
 
-    private static func clearPendingFirstStory() {
-        guard let defaults = pendingDefaults() else { return }
+    @discardableResult
+    private static func clearPendingFirstStory(
+        expectedHandoffId: String? = nil
+    ) -> Bool {
+        guard let defaults = pendingDefaults() else { return false }
+        if let expectedHandoffId {
+            guard
+                let pending = defaults.dictionary(forKey: pendingFirstStoryV2DefaultsKey),
+                sanitizedHandoffId(pending["handoffId"]) == expectedHandoffId
+            else {
+                return false
+            }
+        }
         defaults.removeObject(forKey: pendingFirstStoryDefaultsKey)
         defaults.removeObject(forKey: pendingFirstStoryExpiresAtDefaultsKey)
         defaults.removeObject(forKey: pendingFirstStoryV2DefaultsKey)
+        return true
     }
 
     private static func pendingFirstStoryResponse() -> [String: Any] {

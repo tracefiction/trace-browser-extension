@@ -220,6 +220,7 @@ function extensionMockSource(storageData, sessionSnapshot = null) {
       const sessionSnapshot = ${JSON.stringify(sessionSnapshot)};
       const storageListeners = [];
       const popupState = {
+        ok: true,
         authState: storageData.traceAuthState,
         firstSaveSeen: storageData.traceFirstSaveSeen === true,
         libraryCount: typeof storageData.traceLibraryCount === "number" ? storageData.traceLibraryCount : null,
@@ -227,6 +228,7 @@ function extensionMockSource(storageData, sessionSnapshot = null) {
         pro: storageData.traceUserPro === true,
         autoTrackEnabled: storageData.prefAutoTrackEnabled !== false,
         libraryInlayEnabled: storageData.prefLibraryInlayEnabled !== false,
+        ao3SavedFiltersEnabled: storageData.prefAo3SavedFiltersEnabled !== false,
         metadataImproveEnabled: storageData.prefMetadataImproveEnabled !== false,
       };
       function pick(keys) {
@@ -520,9 +522,13 @@ async function renderPopupScreenshot(browser, definition, assets, manifest) {
       hidden: element.hidden,
       display: getComputedStyle(element).display,
     }));
-    if (!localSettings.hidden || localSettings.display !== "none") {
+    const projectedSettingsExpected =
+      definition.sessionSnapshot.state === "connected";
+    const projectedSettingsVisible =
+      !localSettings.hidden && localSettings.display !== "none";
+    if (projectedSettingsVisible !== projectedSettingsExpected) {
       throw new Error(
-        `Kernel popup exposed legacy local settings: ${JSON.stringify(localSettings)}`,
+        `Kernel popup projected settings visibility was incorrect: ${JSON.stringify(localSettings)}`,
       );
     }
   }
@@ -859,6 +865,26 @@ async function main() {
           traceLibraryCount: 0,
           traceActiveTab: { kind: "supported_story", site: "ao3", canImport: true },
         },
+        colorScheme: "dark",
+      },
+      {
+        name: "Kernel popup iOS first run on story",
+        file: "popup-kernel-ios-first-run-story.png",
+        authState: connectedAuthState(),
+        sessionSnapshot: {
+          state: "connected",
+          accountId: null,
+          canExecuteAuthenticated: true,
+          reason: "none",
+        },
+        storageData: {
+          traceFirstSaveSeen: false,
+          traceLibraryCount: 0,
+          traceActiveTab: { kind: "supported_story", site: "ao3", canImport: true },
+        },
+        viewport: { width: 360, height: 520 },
+        userAgent:
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
         colorScheme: "dark",
       },
       {

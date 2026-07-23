@@ -54,7 +54,9 @@ clear result, so a later web clear cannot mask a failed boot-time clear.
 The session phase also appends a DEBUG-run-only content driver after the real
 AO3 collector in the temporary build copy. It invokes the installed
 collector/controller path from an authorized AO3 sender and records the
-`connected / commands_unavailable` boundary without persisting a mutation
-intent. The runner removes this file before the Release build and verifies that
+`connected / saved` boundary against the local authenticated track fixture.
+The fixture returns the production authoritative-entry response shape, and the
+runner records the bounded confirmed write without retaining story content.
+The runner removes the driver before the Release build and verifies that
 neither its resource nor its manifest entry is present in that build. This
 journey requires the selected Simulator to reach `archiveofourown.org`.

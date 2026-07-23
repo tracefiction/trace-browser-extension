@@ -48,6 +48,20 @@ const ARCHIVE_ERROR_KINDS = new Set([
   "unknown",
 ]);
 const FIRST_STORY_ADD_STATES = new Set(["opened", "saved", "already_saved"]);
+const FIRST_STORY_ADD_ERRORS = new Set([
+  "not_authenticated",
+  "invalid_url",
+  "no_active_tab",
+  "unsupported_page",
+  "permission_required",
+  "collect_failed",
+  "open_failed",
+  "save_failed",
+  "free_limit_reached",
+  "auth_expired",
+  "rate_limited",
+  "unavailable",
+]);
 
 function isTransientRuntimeMessageError(error) {
   const parts = [
@@ -168,10 +182,9 @@ function sanitizeFirstStoryAddResponse(raw) {
     const state = FIRST_STORY_ADD_STATES.has(raw.state) ? raw.state : "saved";
     return { ok: true, state };
   }
-  const error =
-    typeof raw.error === "string" && raw.error.trim()
-      ? raw.error.trim()
-      : "unknown_error";
+  const error = FIRST_STORY_ADD_ERRORS.has(raw.error)
+    ? raw.error
+    : "unknown_error";
   return { ok: false, error };
 }
 

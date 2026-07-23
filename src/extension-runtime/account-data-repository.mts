@@ -1,11 +1,13 @@
 import {
   copyAccountOverlay,
   copyAccountSummary,
+  copyLibraryOverlayEntry,
   createEmptyAccountData,
   parseAccountData,
   sameAccountScope,
   type AccountDataV1,
   type AccountScope,
+  type ConfirmedStorySave,
 } from "../extension-core/index.mjs";
 import {
   PRIVATE_RECORD_KEYS,
@@ -19,12 +21,14 @@ export interface AccountScopeSource {
 
 export type AccountDataWriteResult =
   | { readonly kind: "published"; readonly value: AccountDataV1 }
-  | { readonly kind: "rejected_scope" | "invalid_model" };
+  | { readonly kind: "rejected_scope" | "invalid_model" | "stale_write" };
 
 export class AccountDataRepository {
   readonly #database: PrivateRecordDatabase;
   readonly #scopes: AccountScopeSource;
   #tail: Promise<void> = Promise.resolve();
+  #overlayReservation = 0;
+  #appliedOverlayReservation = 0;
 
   constructor(database: PrivateRecordDatabase, scopes: AccountScopeSource) {
     this.#database = database;
@@ -76,13 +80,51 @@ export class AccountDataRepository {
   publishOverlay(
     requestedScope: AccountScope,
     value: unknown,
+    reservation = this.reserveOverlayWrite(),
   ): Promise<AccountDataWriteResult> {
     const overlay = copyAccountOverlay(value);
     if (overlay === null) return Promise.resolve({ kind: "invalid_model" });
     return this.#publish(requestedScope, (current) => Object.freeze({
       ...current,
       overlay,
-    }));
+    }), reservation);
+  }
+
+  publishConfirmedStory(
+    requestedScope: AccountScope,
+    confirmation: ConfirmedStorySave,
+  ): Promise<AccountDataWriteResult> {
+    const reservation = this.reserveOverlayWrite();
+    const entry = copyLibraryOverlayEntry(confirmation.entry);
+    if (entry === null) return Promise.resolve({ kind: "invalid_model" });
+    return this.#publish(requestedScope, (current) => {
+      const overlay = current.overlay ?? Object.freeze({
+        entries: Object.freeze({}),
+        workPreferences: Object.freeze({}),
+        syncVersion: new Date(0).toISOString(),
+      });
+      return Object.freeze({
+        ...current,
+        overlay: Object.freeze({
+          entries: Object.freeze({
+            ...overlay.entries,
+            [confirmation.workKey]: entry,
+          }),
+          workPreferences: overlay.workPreferences,
+          syncVersion: confirmation.syncVersion,
+        }),
+      });
+    }, reservation);
+  }
+
+  /**
+   * Reserve before starting an overlay request. A command confirmation that
+   * publishes while that request is in flight receives a newer reservation,
+   * so the older full response cannot erase the command's exact entry.
+   */
+  reserveOverlayWrite(): number {
+    this.#overlayReservation += 1;
+    return this.#overlayReservation;
   }
 
   /**
@@ -99,10 +141,17 @@ export class AccountDataRepository {
   #publish(
     requestedScope: AccountScope,
     update: (current: AccountDataV1) => AccountDataV1,
+    overlayReservation?: number,
   ): Promise<AccountDataWriteResult> {
     return this.#withLock(async () => {
       if (!sameAccountScope(this.#scopes.publicationScope(), requestedScope)) {
         return { kind: "rejected_scope" };
+      }
+      if (
+        overlayReservation !== undefined &&
+        overlayReservation < this.#appliedOverlayReservation
+      ) {
+        return { kind: "stale_write" };
       }
       const parsed = parseAccountData(
         await this.#database.get(PRIVATE_RECORD_KEYS.accountData),
@@ -119,6 +168,9 @@ export class AccountDataRepository {
         return { kind: "invalid_model" };
       }
       await this.#database.put(PRIVATE_RECORD_KEYS.accountData, validated.value);
+      if (overlayReservation !== undefined) {
+        this.#appliedOverlayReservation = overlayReservation;
+      }
       return { kind: "published", value: validated.value };
     });
   }

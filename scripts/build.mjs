@@ -246,7 +246,6 @@ let bg = fs.readFileSync(SRC_BG, "utf8");
 bg = bg
   .replace(/__TRACE_API_BASE__/g, TRACE_API_BASE)
   .replace(/__TRACE_WEB_ORIGIN__/g, TRACE_WEB_ORIGIN);
-const gatedLegacyBackground = `// Generated legacy runtime gate.\nif (globalThis.TRACE_SESSION_MODE === "legacy") {\n${bg}\n}\n`;
 
 const sessionRuntimeOutput = path.join(ROOT, ".trace-build", "extension-session-runtime.js");
 if (HAS_SESSION_RUNTIME) {
@@ -284,9 +283,13 @@ ${HAS_SESSION_RUNTIME ? `globalThis.TRACE_SESSION_MODE = ${JSON.stringify(SESSIO
 fs.rmSync(path.join(RES, "extension-session-runtime.js"), { force: true });
 fs.rmSync(path.join(RES, "legacy-background.js"), { force: true });
 if (HAS_SESSION_RUNTIME) {
+  const runtimeHeader = `// Generated ${SESSION_MODE} runtime. Do not edit by hand.
+const TRACE_API_BASE = ${JSON.stringify(TRACE_API_BASE)};
+const TRACE_WEB_ORIGIN = ${JSON.stringify(TRACE_WEB_ORIGIN)};
+`;
   fs.writeFileSync(
     outBg,
-    `${fs.readFileSync(sessionRuntimeOutput, "utf8")}\n${gatedLegacyBackground}`,
+    `${runtimeHeader}${fs.readFileSync(sessionRuntimeOutput, "utf8")}`,
     "utf8",
   );
 } else {
@@ -316,41 +319,37 @@ const {
 manifest.host_permissions = safariHostPermissions;
 const savedFiltersScript = "ao3-saved-filters.js";
 const finishQualifyScript = "trace-finish-qualify.js";
-const contentScripts = (manifest.content_scripts || []).map((entry) => {
-  const scripts = Array.isArray(entry.js) ? entry.js : [];
-  if (scripts.includes("collector.js")) {
-    return {
-      ...entry,
-      matches: SITE_HOST_MATCHES,
-      js: unique([
-        "popup-config.js",
-        finishQualifyScript,
-        ...scripts.filter((script) => script !== savedFiltersScript && script !== finishQualifyScript),
-      ]),
-      exclude_matches: SITE_AUTH_EXCLUDE_MATCHES,
-    };
-  }
-  if (scripts.includes("sync.js")) {
-    return {
-      ...entry,
-      matches: unique(syncMatches),
-      js: unique(["popup-config.js", ...scripts]),
-    };
-  }
-  return entry;
-}).filter((entry) => Array.isArray(entry.js) && entry.js.length > 0);
-
-manifest.content_scripts = [
-  ...contentScripts.filter((entry) => !(entry.js || []).includes(savedFiltersScript)),
-  ...(SESSION_MODE === "legacy"
-    ? [{
-        matches: AO3_HOST_MATCHES,
-        js: [savedFiltersScript],
-        run_at: "document_end",
-        exclude_matches: AO3_AUTH_EXCLUDE_MATCHES,
-      }]
-    : []),
+// This is the canonical content-script declaration. Do not derive it from the
+// previously generated manifest: a disabled build intentionally writes an
+// empty list, and every later build must remain order-independent.
+const contentScripts = [
+  {
+    matches: SITE_HOST_MATCHES,
+    js: [
+      "popup-config.js",
+      finishQualifyScript,
+      "collector.js",
+      "library-overlay-keys.js",
+      "library-overlay.js",
+    ],
+    run_at: "document_end",
+    exclude_matches: SITE_AUTH_EXCLUDE_MATCHES,
+  },
+  {
+    matches: unique(syncMatches),
+    js: ["popup-config.js", "sync.js"],
+    run_at: "document_idle",
+  },
 ];
+
+manifest.content_scripts = SESSION_MODE === "disabled"
+  ? []
+  : [...contentScripts, {
+      matches: AO3_HOST_MATCHES,
+      js: [savedFiltersScript],
+      run_at: "document_end",
+      exclude_matches: AO3_AUTH_EXCLUDE_MATCHES,
+    }];
 
 fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
 console.log("Set manifest version to", version);

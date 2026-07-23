@@ -55,6 +55,7 @@ async function renderOverlayListing({
   sendMessage,
   mobile = false,
   scopeCache = true,
+  sessionMode = "legacy",
 }) {
   const keysSrc = fs.readFileSync(KEYS_PATH, "utf8");
   const overlaySrc = fs.readFileSync(OVERLAY_PATH, "utf8");
@@ -66,6 +67,7 @@ async function renderOverlayListing({
 
   const { window } = dom;
   const storageChangeListeners = [];
+  const runtimeMessages = [];
   const storageState = {
     authToken,
     traceApiBase: "https://trace.test",
@@ -91,14 +93,30 @@ async function renderOverlayListing({
       lastError: null,
       sendMessage:
         sendMessage ||
-        ((_msg, cb) => {
-          if (typeof cb === "function") cb({ ok: true });
+        ((msg, cb) => {
+          runtimeMessages.push(msg);
+          if (typeof cb !== "function") return;
+          if (msg.type === "TRACE_ACCOUNT_PROJECTION_GET") {
+            cb({
+              ok: true,
+              snapshot: {
+                state: authToken ? "connected" : "signed_out",
+                reason: "none",
+                canExecuteAuthenticated: !!authToken,
+              },
+              projection: cache,
+            });
+            return;
+          }
+          cb({ ok: true });
         }),
     },
   };
 
   window.chrome = chrome;
   window.browser = chrome;
+  window.TRACE_SESSION_MODE = sessionMode;
+  window.__traceRuntimeMessages = runtimeMessages;
   window.__traceSetStorage = function (next) {
     const changes = {};
     for (const [key, value] of Object.entries(next || {})) {
@@ -235,6 +253,51 @@ test("library-overlay ignores unscoped cached saved state", async () => {
   assert.ok(wrap);
   assert.doesNotMatch(wrap.textContent || "", /Reading/);
   assert.match(wrap.textContent || "", /Add to Trace/);
+});
+
+test("kernel listing reads only visible projection keys and enables migrated entry commands", async () => {
+  const window = await renderOverlayListing({
+    sessionMode: "kernel",
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/12345'>Demo Work</a></h4></li></ol></body></html>",
+    cache: {
+      entries: {
+        "ao3:12345": {
+          status: "READING",
+          readerStatus: "READING",
+          canonicalReaderStatus: "READING",
+          entryId: "00000000-0000-4000-8000-000000000123",
+        },
+      },
+      workPreferences: {},
+      syncVersion: "2026-07-20T12:00:00.000Z",
+    },
+  });
+
+  const request = window.__traceRuntimeMessages.find(
+    (message) => message.type === "TRACE_ACCOUNT_PROJECTION_GET",
+  );
+  assert.deepEqual(plainJson(request.workKeys), ["ao3:12345"]);
+  const { surface } = openTraceLens(window);
+  assert.ok(surface.querySelector("[data-trace-status-choice]"));
+  assert.ok(window.document.querySelector("[data-trace-hidden-action]"));
+  assert.match(surface.textContent || "", /Reading/);
+});
+
+test("kernel listing allows add and migrated hide commands for unknown works", async () => {
+  const window = await renderOverlayListing({
+    sessionMode: "kernel",
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/12345'>Demo Work</a></h4></li></ol></body></html>",
+    cache: {
+      entries: {},
+      workPreferences: {},
+      syncVersion: "2026-07-20T12:00:00.000Z",
+    },
+  });
+
+  assert.ok(window.document.querySelector("button[data-trace-quick-add='ao3:12345']"));
+  assert.ok(window.document.querySelector("[data-trace-hidden-action]"));
 });
 
 test("library-overlay places AO3 listing controls in the action row without touching the date", async () => {
@@ -646,6 +709,7 @@ test("library-overlay renders optional WIP new-chapter context when present", as
   assert.deepEqual(plainJson(sent.at(-1)), {
     type: "TRACE_PATCH_LIBRARY_ENTRY",
     payload: {
+      workKey: "ao3:33345",
       entryId: "00000000-0000-4000-8000-000000033345",
       patch: { rating: 4 },
     },
@@ -684,6 +748,7 @@ test("library-overlay renders optional WIP new-chapter context when present", as
   assert.deepEqual(plainJson(sent.at(-1)), {
     type: "TRACE_PATCH_LIBRARY_ENTRY",
     payload: {
+      workKey: "ao3:33345",
       entryId: "00000000-0000-4000-8000-000000033345",
       patch: { progress: { unit: "CHAPTER", value: 6, total: 8 } },
     },
@@ -784,7 +849,7 @@ test("library-overlay opened surface shows status editing only when entryId exis
   completed.click();
   assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1))), {
     type: "TRACE_SET_READER_STATUS",
-    payload: { entryId, status: "COMPLETED" },
+    payload: { workKey: "ao3:12345", entryId, status: "COMPLETED" },
   });
   assert.ok(withEntryId.document.querySelector("[data-trace-action-surface]"));
   assert.match(withEntryId.document.querySelector("[data-trace-library-overlay-wrap]").textContent || "", /Finished/i);
@@ -994,6 +1059,7 @@ test("library-overlay Planning to Reading sends chapter progress 1 and never dis
   assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1))), {
     type: "TRACE_SET_READER_STATUS",
     payload: {
+      workKey: "ao3:12346",
       entryId,
       status: "READING",
       progress: { unit: "CHAPTER", value: 1, total: 17 },

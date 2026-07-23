@@ -153,8 +153,10 @@ function installConnectAndSaveDriver(sourceRoot) {
     return productionSend(message, function(response) {
       if (message && message.type === TRACE_CONNECT_AND_SAVE_MESSAGE) {
         const state = response && response.snapshot && response.snapshot.state;
-        const error = response && response.error;
-        status.textContent = "Installed result: " + (state || "missing") + " / " + (error || "missing");
+        const outcome = response && response.ok === true
+          ? "saved"
+          : response && response.error;
+        status.textContent = "Installed result: " + (state || "missing") + " / " + (outcome || "missing");
       }
       if (typeof callback === "function") callback(response);
     });
@@ -318,6 +320,7 @@ async function main() {
   const derivedData = path.join(temporaryRoot, "derived-data");
   const uiDerivedData = path.join(temporaryRoot, "ui-derived-data");
   const verificationEvents = [];
+  const storyCommandEvents = [];
   const appEvents = [];
   let bootstrapClearEvidence = null;
   let extensionPreferencesPath = null;
@@ -391,6 +394,99 @@ async function main() {
       response.end(JSON.stringify({
         account_id: mode === "ok-a" ? "ios-fixture-account-a" : "ios-fixture-account-b",
       }));
+      return;
+    }
+
+    if (request.url === "/api/extension/library-overlay") {
+      const authorization = request.headers.authorization ?? "";
+      const expected = mode === "ok-a"
+        ? "Bearer ios-fixture-token-a"
+        : "Bearer ios-fixture-token-b";
+      if (mode === "rejected" || authorization !== expected) {
+        response.writeHead(401, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: "fixture_rejected" }));
+        return;
+      }
+      if (mode === "unavailable") {
+        response.writeHead(503, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: "fixture_unavailable" }));
+        return;
+      }
+      const saved = storyCommandEvents.some(
+        (event) => event.account === mode && event.workKey === "ao3:28534965",
+      );
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        success: true,
+        data: {
+          entries: saved ? {
+            "ao3:28534965": {
+              status: "PLANNING",
+              readerStatus: "PLANNING",
+              canonicalReaderStatus: "SAVED",
+              entryId: "00000000-0000-4000-8000-000000000123",
+            },
+          } : {},
+          workPreferences: {},
+          syncVersion: saved
+            ? "2026-07-19T12:00:01.000Z"
+            : "1970-01-01T00:00:00.000Z",
+        },
+      }));
+      return;
+    }
+
+    if (request.url === "/api/extension/track" && request.method === "POST") {
+      const authorization = request.headers.authorization ?? "";
+      const expected = mode === "ok-a"
+        ? "Bearer ios-fixture-token-a"
+        : "Bearer ios-fixture-token-b";
+      if (mode === "rejected" || authorization !== expected) {
+        response.writeHead(401, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: "fixture_rejected" }));
+        return;
+      }
+      if (mode === "unavailable") {
+        response.writeHead(503, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: "fixture_unavailable" }));
+        return;
+      }
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => { body += chunk; });
+      request.on("end", () => {
+        let payload = null;
+        try {
+          payload = JSON.parse(body);
+        } catch {
+          response.writeHead(400, { "Content-Type": "application/json" });
+          response.end(JSON.stringify({ error: "fixture_invalid_json" }));
+          return;
+        }
+        const workUrl = payload?.item?.u;
+        if (typeof workUrl !== "string" || !workUrl.includes("/works/28534965")) {
+          response.writeHead(400, { "Content-Type": "application/json" });
+          response.end(JSON.stringify({ error: "fixture_unexpected_work" }));
+          return;
+        }
+        storyCommandEvents.push({ account: mode, workKey: "ao3:28534965" });
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({
+          success: true,
+          data: {
+            entry_id: "00000000-0000-4000-8000-000000000123",
+            type: "created",
+            work_key: "ao3:28534965",
+            entry: {
+              status: "PLANNING",
+              readerStatus: "PLANNING",
+              canonicalReaderStatus: "SAVED",
+              entryId: "00000000-0000-4000-8000-000000000123",
+            },
+            syncVersion: "2026-07-19T12:00:01.000Z",
+          },
+        }));
+      });
       return;
     }
 
@@ -718,6 +814,7 @@ async function main() {
 
     if (runsSessionJourneys) {
       await runTest("testResetSession", { artifact: "testResetSessionBeforeSameProvider" });
+      mode = "ok-a";
       await setProvider("ios-fixture-token-a");
       const connectAndSaveProviderBaseline = await readProviderRequestCount();
       await runTest("testConnectAndSaveFromInstalledArchiveSender", { url: AO3_WORK_URL });
@@ -725,6 +822,11 @@ async function main() {
         "installed Connect-and-save",
         "present",
         connectAndSaveProviderBaseline,
+      );
+      assert.deepEqual(
+        storyCommandEvents,
+        [{ account: "ok-a", workKey: "ao3:28534965" }],
+        "installed Connect-and-save did not produce exactly one account-scoped write",
       );
       await runTest("testResetSession", { artifact: "testResetSessionAfterConnectAndSave" });
       await runTest("testLeaveReconnectRequiredForProviderChange", {
@@ -891,7 +993,7 @@ async function main() {
           "provider-clear failure remains signed in and retryable",
         ] : []),
         ...(runsSessionJourneys ? [
-          "installed AO3 Connect-and-save reaches the collector and returns commands_unavailable",
+          "installed AO3 Connect-and-save reaches the collector and confirms one save",
           "verified explicit Connect",
           "online Safari restart re-verification",
           "unavailable restart then Retry",
@@ -903,11 +1005,13 @@ async function main() {
         ] : []),
       ],
       fixtureVerificationEvents: verificationEvents,
+      fixtureStoryCommandEvents: storyCommandEvents,
       appProviderEvents: appEvents,
       connectAndSaveBoundary: runsSessionJourneys ? {
         senderOrigin: new URL(AO3_WORK_URL).origin,
         snapshotState: "connected",
-        error: "commands_unavailable",
+        result: "saved",
+        confirmedWrites: storyCommandEvents.length,
       } : null,
       nativeProviderReachProof: providerRequestEvidence,
       bootstrapClearProof: runsAppJourneys ? {

@@ -40,6 +40,14 @@ test("the app synchronizer is the sole v2 writer and native utility handlers do 
   assert.match(extension, /traceDebugSimulatorProviderRequestResult/);
   assert.match(extension, /recordSimulatorProviderRequest\(hasCredential: token\?\.isEmpty == false\)/);
   assert.match(
+    extension,
+    /case Self\.traceIosPendingFirstStoryClear:[\s\S]*expectedHandoffId:[\s\S]*"cleared": cleared/,
+  );
+  assert.match(
+    extension,
+    /guard[\s\S]*sanitizedHandoffId\(pending\["handoffId"\]\) == expectedHandoffId[\s\S]*else \{[\s\S]*return false/,
+  );
+  assert.match(
     app,
     /#if DEBUG && targetEnvironment\(simulator\)[\s\S]*traceDebugSimulatorAppProviderV2[\s\S]*traceDebugSimulatorAppProviderRetired[\s\S]*#endif/,
   );
@@ -79,6 +87,24 @@ test("the one app-opening route is fixed and unknown destinations fail closed", 
   assert.match(app, /URLQueryItem\(name: "setupPath", value: "ios-app"\)/);
   assert.match(app, /parts\.fragment = "first-story-setup"/);
   assert.match(app, /guard url\.host\?\.lowercased\(\) == "callback" else \{ return nil \}/);
+});
+
+test("archive onboarding choices open fixed mobile destinations and record the attempted URL", () => {
+  const app = read("iOS (App)", "TraceWebViewController.swift");
+  assert.match(
+    app,
+    /case \.ao3:[\s\S]*URL\(string: "https:\/\/archiveofourown\.org\/"\)!/,
+  );
+  assert.match(
+    app,
+    /case \.ffn:[\s\S]*URL\(string: "https:\/\/m\.fanfiction\.net\/"\)!/,
+  );
+  assert.match(
+    app,
+    /let url = hostKind\.mobileHomeURL[\s\S]*UIApplication\.shared\.open\(url, options: \[:\]\)/,
+  );
+  assert.match(app, /Opening archive home host=%\{public\}@ destination=%\{public\}@/);
+  assert.match(app, /Archive home open completed host=%\{public\}@ destination=%\{public\}@ success=%\{public\}@/);
 });
 
 test("kernel popup and page bridge have no ambient or website-auth fallback", () => {
@@ -123,6 +149,6 @@ test("installed iOS Connect-and-save uses a temporary authorized-sender driver",
 
   assert.match(ui, /func testConnectAndSaveFromInstalledArchiveSender\(\)/);
   assert.match(ui, /Installed Connect-and-save driver ready/);
-  assert.match(ui, /Installed result: connected \/ commands_unavailable/);
+  assert.match(ui, /Installed result: connected \/ saved/);
   assert.doesNotMatch(ui, /keyboards\.buttons\["go"\]/);
 });

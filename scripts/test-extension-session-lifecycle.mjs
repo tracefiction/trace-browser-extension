@@ -12,7 +12,7 @@ import { chromium } from "playwright";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = path.join(ROOT, "dist", "chrome");
-const LEGACY_KEYS = [
+const LEGACY_ACCOUNT_KEYS = [
   "traceSessionEnvelopeV1",
   "traceSessionCredentialsV1",
   "authToken",
@@ -24,11 +24,6 @@ const LEGACY_KEYS = [
   "traceUserPro",
   "traceLibraryCount",
   "traceFirstSaveSeen",
-  "traceAo3SavedFiltersV1",
-  "traceAo3SavedFiltersDeletedV1",
-  "traceAo3SavedFiltersSyncV1",
-  "traceAo3SavedFiltersClientIdV1",
-  "traceAo3SavedFiltersActiveV1",
 ];
 
 function deferred() {
@@ -166,6 +161,13 @@ async function terminateWorker(context, page, worker) {
 const delayedVerificationSeen = deferred();
 const delayedVerificationRelease = deferred();
 let verificationCount = 0;
+let overlayReadCount = 0;
+let libraryPatchCount = 0;
+let firstStoryTrackCount = 0;
+let metadataContributionCount = 0;
+let savedFilterSyncCount = 0;
+let installedRating = 0;
+const installedEntryId = "00000000-0000-4000-8000-000000000123";
 
 const server = http.createServer(async (request, response) => {
   if (request.url === "/api/account/me") {
@@ -182,6 +184,153 @@ const server = http.createServer(async (request, response) => {
     }
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify({ account_id: "kernel-account-a" }));
+    return;
+  }
+
+  if (request.url === "/api/extension/library-overlay") {
+    overlayReadCount += 1;
+    if (!(request.headers.authorization ?? "").startsWith("Bearer kernel-")) {
+      response.writeHead(401, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      success: true,
+      data: {
+        entries: {
+          "ffn:7038840": {
+            status: "READING",
+            readerStatus: "READING",
+            canonicalReaderStatus: "READING",
+            entryId: installedEntryId,
+            chapters: { current: 2, total: 12 },
+            rating: installedRating,
+          },
+        },
+        workPreferences: {},
+        syncVersion: `2026-07-20T09:00:0${installedRating}.000Z`,
+      },
+    }));
+    return;
+  }
+
+  if (
+    request.url === `/api/library/${installedEntryId}` &&
+    request.method === "PATCH"
+  ) {
+    let body = "";
+    request.setEncoding("utf8");
+    for await (const chunk of request) body += chunk;
+    const patch = JSON.parse(body);
+    assert.equal(patch.rating, 5);
+    installedRating = patch.rating;
+    libraryPatchCount += 1;
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ data: { entry_id: installedEntryId } }));
+    return;
+  }
+
+  if (request.url === "/api/extension/track" && request.method === "POST") {
+    assert.equal(
+      (request.headers.authorization ?? "").startsWith("Bearer kernel-"),
+      true,
+    );
+    let body = "";
+    request.setEncoding("utf8");
+    for await (const chunk of request) body += chunk;
+    const payload = JSON.parse(body);
+    assert.equal(payload.item.ctx, "story");
+    assert.match(payload.item.u, /\/s\/999999\/?$/);
+    firstStoryTrackCount += 1;
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      success: true,
+      data: {
+        entry_id: "00000000-0000-4000-8000-000000000999",
+        type: "created",
+        work_key: "ffn:999999",
+        entry: {
+          status: "PLANNING",
+          readerStatus: "PLANNING",
+          canonicalReaderStatus: "SAVED",
+          entryId: "00000000-0000-4000-8000-000000000999",
+          chapters: { current: 0, total: 12 },
+        },
+        syncVersion: "2026-07-20T09:10:00.000Z",
+      },
+    }));
+    return;
+  }
+
+  if (request.url === "/api/extension/metadata" && request.method === "POST") {
+    assert.equal(
+      (request.headers.authorization ?? "").startsWith("Bearer kernel-"),
+      true,
+    );
+    let body = "";
+    request.setEncoding("utf8");
+    for await (const chunk of request) body += chunk;
+    const payload = JSON.parse(body);
+    assert.equal(payload.item.ctx, "story");
+    assert.equal(payload.item.u, "https://www.fanfiction.net/s/7038840/");
+    metadataContributionCount += 1;
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      success: true,
+      data: { story_id: 7038840 },
+    }));
+    return;
+  }
+
+  if (
+    request.url === "/api/extension/ao3-saved-filters/sync" &&
+    request.method === "POST"
+  ) {
+    assert.equal(
+      (request.headers.authorization ?? "").startsWith("Bearer kernel-"),
+      true,
+    );
+    let body = "";
+    request.setEncoding("utf8");
+    for await (const chunk of request) body += chunk;
+    const payload = JSON.parse(body);
+    assert.deepEqual(payload.deletes, []);
+    if (payload.upserts.length === 0) {
+      const at = "2026-07-20T09:19:00.000Z";
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        success: true,
+        data: {
+          serverTime: at,
+          syncVersion: at,
+          presets: [],
+          deleted: [],
+        },
+      }));
+      return;
+    }
+    assert.equal(payload.upserts.length, 1);
+    assert.equal(payload.upserts[0].name, "Installed AO3 filter");
+    assert.deepEqual(payload.upserts[0].params, [
+      ["work_search[sort_column]", "kudos_count"],
+    ]);
+    savedFilterSyncCount += 1;
+    const at = "2026-07-20T09:20:00.000Z";
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      success: true,
+      data: {
+        serverTime: at,
+        syncVersion: at,
+        presets: [{
+          ...payload.upserts[0],
+          id: "00000000-0000-4000-8000-000000000777",
+          updatedAt: at,
+        }],
+        deleted: [],
+      },
+    }));
     return;
   }
 
@@ -230,6 +379,36 @@ try {
       `--load-extension=${DIST}`,
     ],
   });
+  const installedStoryHtml = fs.readFileSync(
+    path.join(ROOT, "test", "fixtures", "ffn_story.html"),
+    "utf8",
+  );
+  const installedAo3ListingHtml = fs.readFileSync(
+    path.join(ROOT, "test", "fixtures", "ao3_listing.html"),
+    "utf8",
+  );
+  await context.route("https://www.fanfiction.net/**", async (route) => {
+    if (route.request().resourceType() !== "document") {
+      await route.abort();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "text/html; charset=utf-8",
+      body: installedStoryHtml,
+    });
+  });
+  await context.route("https://archiveofourown.org/**", async (route) => {
+    if (route.request().resourceType() !== "document") {
+      await route.abort();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "text/html; charset=utf-8",
+      body: installedAo3ListingHtml,
+    });
+  });
 
   let worker = await extensionWorker(context);
   const extensionId = new URL(worker.url()).host;
@@ -241,13 +420,15 @@ try {
   const initial = await sendSession(controlPage, { type: "TRACE_SESSION_GET_SNAPSHOT" });
   assert.equal(initial.snapshot.state, "signed_out");
 
-  const legacySeed = Object.fromEntries(LEGACY_KEYS.map((key) => [key, "stale-value"]));
+  const legacySeed = Object.fromEntries(
+    LEGACY_ACCOUNT_KEYS.map((key) => [key, "stale-value"]),
+  );
   await storage(controlPage, "set", legacySeed);
   await terminateWorker(context, controlPage, worker);
   const afterUpgrade = await sendSession(controlPage, { type: "TRACE_SESSION_GET_SNAPSHOT" });
   assert.equal(afterUpgrade.snapshot.state, "signed_out");
   await waitFor(async () => {
-    const snapshot = await storage(controlPage, "get", LEGACY_KEYS);
+    const snapshot = await storage(controlPage, "get", LEGACY_ACCOUNT_KEYS);
     return Object.keys(snapshot).length === 0;
   }, "legacy account state cleanup");
 
@@ -286,6 +467,112 @@ try {
   assert.equal(recovered.snapshot.state, "connected");
   assert.equal(recovered.snapshot.canExecuteAuthenticated, true);
 
+  const savedFilterPage = await context.newPage();
+  await savedFilterPage.goto(
+    "https://archiveofourown.org/works?work_search%5Bsort_column%5D=kudos_count&tag_id=Naruto",
+    { waitUntil: "domcontentloaded" },
+  );
+  const savedFilterRoot = savedFilterPage.locator(
+    "[data-trace-ao3-saved-filters]",
+  );
+  await savedFilterRoot.waitFor({ state: "visible", timeout: 10_000 });
+  await savedFilterRoot.locator(
+    "[data-trace-sf-action='save-open']",
+  ).click();
+  await savedFilterRoot.locator("[data-trace-sf-name]").fill(
+    "Installed AO3 filter",
+  );
+  await savedFilterRoot.locator(
+    "[data-trace-sf-action='save-confirm']",
+  ).click();
+  await waitFor(async () => {
+    const saved = await storage(
+      controlPage,
+      "get",
+      "traceAo3SavedFiltersV1",
+    );
+    return (
+      savedFilterSyncCount === 1 &&
+      saved.traceAo3SavedFiltersV1?.[0]?.dirty === false &&
+      saved.traceAo3SavedFiltersV1?.[0]?.serverId ===
+        "00000000-0000-4000-8000-000000000777"
+    );
+  }, "installed Chromium AO3 saved-filter sync");
+  await savedFilterPage.close();
+
+  await storage(controlPage, "set", {
+    prefAutoTrackEnabled: false,
+    prefMetadataImproveEnabled: false,
+  });
+  const handoffUrl =
+    "https://www.fanfiction.net/s/999999/1/First-Story-Handoff";
+  const [handoffPage, handoffResponse] = await Promise.all([
+    context.waitForEvent("page"),
+    tracePage.evaluate((url) => new Promise((resolve, reject) => {
+      const nonce = "installed_desktop_handoff";
+      const timeout = window.setTimeout(
+        () => reject(new Error("first-story handoff response timed out")),
+        15_000,
+      );
+      const onMessage = (event) => {
+        if (event.origin !== window.location.origin) return;
+        if (
+          event.data?.type !== "TRACE_FIRST_STORY_ADD_RESPONSE" ||
+          event.data?.nonce !== nonce
+        ) {
+          return;
+        }
+        window.removeEventListener("message", onMessage);
+        window.clearTimeout(timeout);
+        resolve(event.data);
+      };
+      window.addEventListener("message", onMessage);
+      window.postMessage({
+        type: "TRACE_FIRST_STORY_ADD_REQUEST",
+        nonce,
+        url,
+      }, window.location.origin);
+    }), handoffUrl),
+  ]);
+  assert.deepEqual(
+    {
+      ok: handoffResponse.ok,
+      state: handoffResponse.state,
+    },
+    { ok: true, state: "saved" },
+  );
+  assert.equal(firstStoryTrackCount, 1);
+  await handoffPage.close();
+
+  await storage(controlPage, "set", { prefMetadataImproveEnabled: true });
+  const archivePage = await context.newPage();
+  await archivePage.goto(
+    "https://www.fanfiction.net/s/7038840/2/A-Chance-Encounter",
+    { waitUntil: "domcontentloaded" },
+  );
+  const storyHandle = archivePage.locator("[data-trace-story-handle]");
+  await storyHandle.waitFor({ state: "visible", timeout: 10_000 });
+  await storyHandle.click();
+  const ratingFive = archivePage.locator("[data-trace-rating-choice='5']");
+  await ratingFive.waitFor({ state: "visible", timeout: 10_000 });
+  await ratingFive.click();
+  await waitFor(
+    () => (
+      libraryPatchCount === 1 &&
+      installedRating === 5 &&
+      overlayReadCount >= 2 &&
+      metadataContributionCount === 1
+    ),
+    "installed Chromium authoritative library mutation and metadata contribution",
+  );
+  assert.equal(libraryPatchCount, 1, "installed mutation must write exactly once");
+  assert.equal(
+    metadataContributionCount,
+    1,
+    "installed metadata contribution must write exactly once",
+  );
+  await archivePage.close();
+
   const signedOut = await sendSession(controlPage, {
     type: "TRACE_SESSION_ACTION",
     action: "disconnect",
@@ -303,22 +590,27 @@ try {
     action: "connect",
   });
   await delayedVerificationSeen.promise;
-  const disconnectedDuringVerification = await sendSession(controlPage, {
+  const queuedDisconnect = sendSession(controlPage, {
     type: "TRACE_SESSION_ACTION",
     action: "disconnect",
   });
-  assert.equal(disconnectedDuringVerification.snapshot.state, "signed_out");
   delayedVerificationRelease.resolve();
   const staleConnect = await delayedConnect;
-  assert.deepEqual(staleConnect.action, { kind: "stale" });
-  assert.equal(staleConnect.snapshot.state, "signed_out");
+  const disconnectedDuringVerification = await queuedDisconnect;
+  assert.equal(staleConnect.action.kind, "completed");
+  assert.equal(disconnectedDuringVerification.snapshot.state, "signed_out");
 
   const envelope = await privateRecord(controlPage, "session-envelope");
   assert.equal(envelope.desired, "disconnected");
   assert.equal(await privateRecord(controlPage, "session-credentials"), null);
-  const stored = await storage(controlPage, "get", LEGACY_KEYS);
+  const stored = await storage(controlPage, "get", LEGACY_ACCOUNT_KEYS);
   assert.deepEqual(Object.keys(stored), []);
-  console.log(`kernel lifecycle passed (${verificationCount} verification reads)`);
+  console.log(
+    `kernel lifecycle, AO3 saved-filter sync, desktop first-story handoff, ` +
+    `metadata contribution, and library mutation passed ` +
+    `(${verificationCount} verification reads, ` +
+    `${overlayReadCount} projection reads)`,
+  );
 } finally {
   delayedVerificationRelease.resolve();
   if (context) await context.close();

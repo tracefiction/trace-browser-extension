@@ -260,7 +260,10 @@ for (const promiseRuntime of [false, true]) {
           new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
         );
         await flush();
-        assert.deepEqual(JSON.parse(JSON.stringify(h.messages.at(-1))), {
+        const actionMessage = h.messages
+          .filter((message) => message.type === "TRACE_SESSION_ACTION")
+          .at(-1);
+        assert.deepEqual(JSON.parse(JSON.stringify(actionMessage)), {
           type: "TRACE_SESSION_ACTION",
           action: fixture.primary,
         });
@@ -270,7 +273,10 @@ for (const promiseRuntime of [false, true]) {
           new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
         );
         await flush();
-        assert.deepEqual(JSON.parse(JSON.stringify(h.messages.at(-1))), {
+        const actionMessage = h.messages
+          .filter((message) => message.type === "TRACE_SESSION_ACTION")
+          .at(-1);
+        assert.deepEqual(JSON.parse(JSON.stringify(actionMessage)), {
           type: "TRACE_SESSION_ACTION",
           action: fixture.secondary,
         });
@@ -278,6 +284,51 @@ for (const promiseRuntime of [false, true]) {
     });
   }
 }
+
+test("connected kernel popup renders authoritative summary, preferences, and migrated import", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    sessionSnapshot: {
+      state: "connected",
+      accountId: "must-not-render",
+      canExecuteAuthenticated: true,
+      reason: "none",
+    },
+    popupState: {
+      ok: true,
+      authState: {
+        state: "connected",
+        reason: "none",
+        canExecuteAuthenticated: true,
+      },
+      firstSaveSeen: true,
+      libraryCount: 8,
+      activeTab: { kind: "supported_story", site: "ffn", canImport: true },
+      pro: true,
+      autoTrackEnabled: false,
+      libraryInlayEnabled: true,
+      ao3SavedFiltersEnabled: false,
+      metadataImproveEnabled: true,
+    },
+  });
+  await flush();
+
+  assert.equal(h.document.getElementById("popup-local-settings").hidden, false);
+  assert.equal(h.document.getElementById("popup-pro-settings").hidden, false);
+  assert.equal(h.document.getElementById("pref-auto-track").checked, false);
+  assert.equal(h.document.getElementById("pref-library-inlay").checked, true);
+  assert.equal(h.document.getElementById("pref-ao3-saved-filters").checked, false);
+  assert.equal(h.document.getElementById("popup-import").hidden, false);
+  assert.equal(h.document.getElementById("popup-import").textContent, "Import this story");
+  h.document.getElementById("popup-import").click();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.messages.at(-1))), {
+    type: "TRACE_IMPORT_TRIGGER",
+  });
+  assert.equal(
+    h.messages.some((message) => message.type === "TRACE_POPUP_GET_STATE"),
+    true,
+  );
+});
 
 test("kernel iOS credential recovery gives app-only guidance and opens the app", async () => {
   const h = createPopupHarness({
@@ -806,6 +857,45 @@ test("popup import failure re-enables the button and exposes the failure reason"
   assert.equal(button.disabled, false);
   assert.equal(button.textContent, "Import failed — try again");
   assert.equal(button.title, "collect_failed");
+});
+
+test("popup import turns a missing site grant into actionable permission guidance", async () => {
+  const connected = { state: "connected", message: "Connected" };
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    sessionSnapshot: {
+      state: "connected",
+      accountId: "must-not-render",
+      canExecuteAuthenticated: true,
+      reason: "none",
+    },
+    importResponse: { ok: false, error: "permission_required" },
+    popupState: {
+      ok: true,
+      authState: {
+        state: "connected",
+        reason: "none",
+        canExecuteAuthenticated: true,
+      },
+      firstSaveSeen: false,
+      libraryCount: 0,
+      activeTab: { kind: "supported_story", site: "ao3", canImport: true },
+      pro: false,
+      autoTrackEnabled: true,
+      libraryInlayEnabled: true,
+      ao3SavedFiltersEnabled: true,
+      metadataImproveEnabled: true,
+    },
+    storageState: { traceAuthState: connected },
+  });
+  await flush();
+
+  const button = h.document.getElementById("popup-import");
+  button.click();
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, "Allow site access, then retry");
+  assert.match(button.title, /extension settings/i);
+  assert.match(button.title, /refresh/i);
 });
 
 test("popup import success closes the popup after a short delay", async () => {

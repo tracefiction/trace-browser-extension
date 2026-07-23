@@ -216,6 +216,7 @@ export class SessionService {
   #lockTail: Promise<void> = Promise.resolve();
   #initialization: Promise<PersistedVerificationPlan | null> | null = null;
   #start: Promise<SessionSnapshot> | null = null;
+  #providerSynchronization: Promise<SessionActionResult> | null = null;
 
   constructor(ports: SessionServicePorts) {
     this.#ports = ports;
@@ -356,6 +357,37 @@ export class SessionService {
     return this.connect();
   }
 
+  /**
+   * Aligns an authenticated worker with its external credential provider
+   * without treating every check as an account transition.
+   *
+   * A matching credential is a no-op. A rotated credential for the same
+   * account replaces only the private capability and keeps the account epoch
+   * stable. A genuinely different account takes a fenced account-transition
+   * path. Temporary provider failures refuse the caller's mutation but retain
+   * the last verified display/session state.
+   */
+  synchronizeProviderCredential(): Promise<SessionActionResult> {
+    if (this.#providerSynchronization !== null) {
+      return this.#providerSynchronization;
+    }
+    const operation = this.#synchronizeProviderCredentialOnce();
+    this.#providerSynchronization = operation;
+    void operation.then(
+      () => {
+        if (this.#providerSynchronization === operation) {
+          this.#providerSynchronization = null;
+        }
+      },
+      () => {
+        if (this.#providerSynchronization === operation) {
+          this.#providerSynchronization = null;
+        }
+      },
+    );
+    return operation;
+  }
+
   async retry(): Promise<SessionActionResult> {
     await this.#ensureInitialized();
     const storageRetry = await this.#withLock(async () => (
@@ -394,6 +426,96 @@ export class SessionService {
     const capability = await this.#withLock(async () => this.#capability);
     if (capability === null) return { kind: "ignored" };
     return this.#refreshFromCapability(capability, "expiry");
+  }
+
+  async #synchronizeProviderCredentialOnce(): Promise<SessionActionResult> {
+    await this.#ensureInitialized();
+    const capability = await this.#withLock(async () => this.#capability);
+    if (capability === null) {
+      return this.#model.state === "signed_out"
+        ? this.connect()
+        : this.reconnect();
+    }
+
+    let acquisition: CredentialAcquisition;
+    try {
+      acquisition = normalizeAcquisition(
+        await this.#ports.credentials.acquire("refresh"),
+      );
+    } catch {
+      this.#record("credential_provider_failed");
+      return { kind: "unavailable" };
+    }
+    if (acquisition.kind === "unavailable" || acquisition.kind === "cancelled") {
+      this.#record("credential_provider_failed");
+      return { kind: "unavailable" };
+    }
+    if (acquisition.kind === "absent") {
+      return this.disconnect();
+    }
+
+    if (acquisition.credential === capability.credential) {
+      return this.#withLock(async () =>
+        this.#isCurrentCapability(capability)
+          ? { kind: "completed", state: "connected" }
+          : { kind: "stale" }
+      );
+    }
+
+    let verification: VerificationResult;
+    try {
+      verification = normalizeVerification(
+        await this.#ports.api.verifyCredential(acquisition.credential),
+      );
+    } catch {
+      this.#record("verification_failed");
+      return { kind: "unavailable" };
+    }
+    if (verification.kind === "unavailable" || verification.kind === "invalid_response") {
+      this.#record("verification_failed");
+      return { kind: "unavailable" };
+    }
+    if (verification.kind === "rejected" || verification.kind === "account_unavailable") {
+      return this.disconnect();
+    }
+
+    if (verification.accountId !== capability.accountId) {
+      return this.#switchToVerifiedProviderCredential(
+        capability,
+        acquisition.credential,
+        verification.accountId,
+      );
+    }
+
+    const stillCurrent = await this.#withLock(async () =>
+      this.#isCurrentCapability(capability)
+    );
+    if (!stillCurrent) {
+      this.#record("stale_effect_discarded");
+      return { kind: "stale" };
+    }
+
+    let credentialRef: string;
+    try {
+      credentialRef = await this.#ports.credentials.storeUnique(
+        acquisition.credential,
+        capability.epoch,
+      );
+      if (!isNonEmpty(credentialRef)) throw new TypeError("empty credential reference");
+    } catch {
+      this.#record("credential_provider_failed");
+      return { kind: "unavailable" };
+    }
+
+    const committed = await this.#commitSynchronizedCredential(
+      capability,
+      credentialRef,
+      acquisition.credential,
+    );
+    if (committed.kind !== "completed" || committed.state !== "connected") {
+      this.#scheduleCredentialDelete(credentialRef);
+    }
+    return committed;
   }
 
   // This boundary is for the authenticated API adapter, not UI/content
@@ -799,6 +921,117 @@ export class SessionService {
       }
       return { kind: "completed", state: "connected" };
     });
+  }
+
+  async #commitSynchronizedCredential(
+    expectedCapability: ExecutionCapability,
+    credentialRef: string,
+    credential: string,
+  ): Promise<SessionActionResult> {
+    return this.#withLock(async () => {
+      if (!this.#isCurrentCapability(expectedCapability)) {
+        this.#record("stale_effect_discarded");
+        return { kind: "stale" };
+      }
+      const oldReference = this.#envelope.credentialRef;
+      const persisted = await this.#persist(
+        connectedEnvelope(
+          expectedCapability.epoch,
+          credentialRef,
+          expectedCapability.accountId,
+        ),
+      );
+      if (!persisted) return { kind: "storage_error" };
+      this.#capability = createCapability(
+        expectedCapability.accountId,
+        expectedCapability.epoch,
+        credential,
+      );
+      this.#transition({
+        type: "connected",
+        scope: {
+          accountId: expectedCapability.accountId,
+          epoch: expectedCapability.epoch,
+        },
+      });
+      if (oldReference !== null && oldReference !== credentialRef) {
+        this.#scheduleCredentialDelete(oldReference);
+      }
+      return { kind: "completed", state: "connected" };
+    });
+  }
+
+  async #switchToVerifiedProviderCredential(
+    expectedCapability: ExecutionCapability,
+    credential: string,
+    accountId: string,
+  ): Promise<SessionActionResult> {
+    const transition = await this.#withLock(async () => {
+      if (!this.#isCurrentCapability(expectedCapability)) {
+        this.#record("stale_effect_discarded");
+        return { kind: "stale" as const };
+      }
+      const oldReference = this.#envelope.credentialRef;
+      const epoch = this.#reserveNextEpoch();
+      const persisted = await this.#persist(disconnectedEnvelope(epoch));
+      if (!persisted) return { kind: "storage_error" as const };
+      this.#transition({ type: "connecting", epoch });
+      this.#activeAcquisitionEpoch = epoch;
+      return { kind: "ready" as const, epoch, oldReference };
+    });
+    if (transition.kind !== "ready") return transition;
+
+    let credentialRef: string;
+    try {
+      credentialRef = await this.#ports.credentials.storeUnique(
+        credential,
+        transition.epoch,
+      );
+      if (!isNonEmpty(credentialRef)) throw new TypeError("empty credential reference");
+    } catch {
+      this.#record("credential_provider_failed");
+      return this.#withLock(async () => {
+        if (!this.#isCurrentAcquisition(transition.epoch)) {
+          return { kind: "stale" };
+        }
+        this.#activeAcquisitionEpoch = null;
+        this.#transition({
+          type: "signed_out",
+          epoch: transition.epoch,
+          reason: "provider_unavailable",
+        });
+        if (transition.oldReference !== null) {
+          this.#scheduleCredentialDelete(transition.oldReference);
+        }
+        return { kind: "unavailable" };
+      });
+    }
+
+    const admitted = await this.#withLock(async () => {
+      if (!this.#isCurrentAcquisition(transition.epoch)) {
+        this.#record("stale_effect_discarded");
+        this.#scheduleCredentialDelete(credentialRef);
+        return false;
+      }
+      this.#activeAcquisitionEpoch = null;
+      return true;
+    });
+    if (!admitted) return { kind: "stale" };
+
+    const committed = await this.#commitVerified(
+      transition.epoch,
+      credentialRef,
+      accountId,
+      credential,
+      transition.oldReference,
+    );
+    if (committed.kind !== "completed" || committed.state !== "connected") {
+      this.#scheduleCredentialDelete(credentialRef);
+      if (transition.oldReference !== null) {
+        this.#scheduleCredentialDelete(transition.oldReference);
+      }
+    }
+    return committed;
   }
 
   async #clearCredentialReference(

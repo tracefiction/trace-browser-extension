@@ -539,19 +539,52 @@ function setImportBusy(button) {
   button.title = currentImportTitle();
 }
 
-function setImportSuccess(button) {
-  button.textContent = "Opened import tab";
+function setImportSuccess(button, response) {
+  button.textContent =
+    response?.state === "saved" || response?.state === "already_saved"
+      ? "Saved to Trace"
+      : "Opened import tab";
   button.title = "";
 }
 
+function importFailureCopy(error) {
+  if (error === "permission_required") {
+    return {
+      label: "Allow site access, then retry",
+      title:
+        "Allow Trace on this AO3 or FanFiction.net site in your browser’s extension settings, refresh the page, then retry.",
+    };
+  }
+  if (error === "not_authenticated" || error === "auth_expired") {
+    return {
+      label: "Reconnect Trace, then retry",
+      title: "Reconnect this extension session before importing.",
+    };
+  }
+  if (error === "unsupported_page" || error === "no_active_tab") {
+    return {
+      label: "Open a supported page",
+      title: "Open a supported AO3 or FanFiction.net story or listing page, then retry.",
+    };
+  }
+  return {
+    label: "Import failed — try again",
+    title:
+      error ||
+      "Open an AO3 or FanFiction.net tab and refresh it after updating the extension.",
+  };
+}
+
 function setImportFailure(button, error) {
-  button.textContent = "Import failed — try again";
+  const copy = importFailureCopy(error);
+  button.textContent = copy.label;
   button.disabled = false;
-  resetImportButtonAfterFailure(button, error);
+  resetImportButtonAfterFailure(button, copy.title);
   if (!isImportCurrentlyAvailable()) {
     restoreImportButton(button);
   } else {
-    button.textContent = "Import failed — try again";
+    button.textContent = copy.label;
+    button.title = copy.title;
   }
 }
 
@@ -575,7 +608,7 @@ function runImport(button) {
 
   ext.runtime.sendMessage({ type: "TRACE_IMPORT_TRIGGER" }, (res) => {
     if (res?.ok) {
-      setImportSuccess(button);
+      setImportSuccess(button, res);
       setTimeout(() => window.close(), 600);
     } else {
       setImportFailure(
@@ -738,7 +771,59 @@ function requestKernelSnapshot() {
   sendKernelRuntimeMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" }, (response) => {
     if (!response) return;
     renderKernelSnapshot(response?.snapshot);
+    if (response?.snapshot?.state === "connected") requestKernelPopupState();
   });
+}
+
+function requestKernelPopupState() {
+  sendKernelRuntimeMessage({ type: "TRACE_POPUP_GET_STATE" }, (state) => {
+    if (
+      !state ||
+      state.ok !== true ||
+      state.authState?.state !== "connected" ||
+      document.body.dataset.tracePopupState !== "connected"
+    ) {
+      return;
+    }
+    // The session owner still controls Connect/Disconnect. Once connected,
+    // render the account-scoped first-story/import state from its projection.
+    renderStatus({
+      authState: state.authState,
+      firstSaveSeen: state.firstSaveSeen === true,
+      libraryCount:
+        typeof state.libraryCount === "number" ? state.libraryCount : undefined,
+      activeTab: state.activeTab || undefined,
+    });
+    applyLocalUi(state.ao3SavedFiltersEnabled);
+    applyProUi(
+      state.pro,
+      state.autoTrackEnabled,
+      state.libraryInlayEnabled,
+      state.metadataImproveEnabled,
+    );
+    const localSettings = document.getElementById("popup-local-settings");
+    const proSettings = document.getElementById("popup-pro-settings");
+    const importButton = document.getElementById("popup-import");
+    if (localSettings) localSettings.hidden = false;
+    if (proSettings) proSettings.hidden = false;
+    if (importButton) restoreImportButton(importButton);
+  });
+}
+
+function bindPreferenceControls() {
+  const controls = [
+    ["pref-auto-track", PREF_AUTO_TRACK_KEY],
+    ["pref-library-inlay", PREF_LIBRARY_INLAY_KEY],
+    ["pref-ao3-saved-filters", PREF_AO3_SAVED_FILTERS_KEY],
+    ["pref-metadata-improve", PREF_METADATA_IMPROVE_KEY],
+  ];
+  for (const [id, key] of controls) {
+    const input = document.getElementById(id);
+    if (!input) continue;
+    input.addEventListener("change", () => {
+      ext.storage.local.set({ [key]: input.checked });
+    });
+  }
 }
 
 function initializeKernelPopup() {
@@ -748,10 +833,10 @@ function initializeKernelPopup() {
     document.getElementById("popup-session-secondary"),
   ]) {
     actionControl?.addEventListener("click", (event) => {
-      event.preventDefault();
-      if (actionControl.getAttribute("aria-disabled") === "true") return;
       const action = actionControl.dataset.sessionAction;
       if (!action) return;
+      event.preventDefault();
+      if (actionControl.getAttribute("aria-disabled") === "true") return;
       actionControl.setAttribute("aria-disabled", "true");
       sendKernelRuntimeMessage(
         { type: "TRACE_SESSION_ACTION", action },
@@ -759,6 +844,7 @@ function initializeKernelPopup() {
           actionControl.removeAttribute("aria-disabled");
           if (!response) return;
           renderKernelSnapshot(response?.snapshot);
+          if (response?.snapshot?.state === "connected") requestKernelPopupState();
         },
       );
     });
@@ -803,36 +889,10 @@ ext.storage.onChanged.addListener((changes, area) => {
   }
 });
 
-const autoTrackInput = document.getElementById("pref-auto-track");
-const libraryInlayInput = document.getElementById("pref-library-inlay");
-const ao3SavedFiltersInput = document.getElementById("pref-ao3-saved-filters");
-const metadataImproveInput = document.getElementById("pref-metadata-improve");
-if (autoTrackInput) {
-  autoTrackInput.addEventListener("change", () => {
-    ext.storage.local.set({ [PREF_AUTO_TRACK_KEY]: autoTrackInput.checked });
-  });
-}
-if (libraryInlayInput) {
-  libraryInlayInput.addEventListener("change", () => {
-    ext.storage.local.set({ [PREF_LIBRARY_INLAY_KEY]: libraryInlayInput.checked });
-  });
-}
-if (ao3SavedFiltersInput) {
-  ao3SavedFiltersInput.addEventListener("change", () => {
-    ext.storage.local.set({
-      [PREF_AO3_SAVED_FILTERS_KEY]: ao3SavedFiltersInput.checked,
-    });
-  });
-}
-if (metadataImproveInput) {
-  metadataImproveInput.addEventListener("change", () => {
-    ext.storage.local.set({
-      [PREF_METADATA_IMPROVE_KEY]: metadataImproveInput.checked,
-    });
-  });
 }
 
-// Import button
+// Import is rendered only when the active session owner has exposed a
+// supported archive page, but the same explicit control works in both modes.
 const importBtn = document.getElementById("popup-import");
 if (importBtn) {
   setImportInitial(importBtn);
@@ -840,4 +900,5 @@ if (importBtn) {
     runImport(importBtn);
   });
 }
-}
+
+bindPreferenceControls();

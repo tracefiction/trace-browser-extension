@@ -1,24 +1,60 @@
 import type {
+  ArchivePermissionSnapshot,
+  ArchivePermissionSnapshotPort,
+  ArchiveReadinessReceiptPort,
+  ArchiveRunReceipt,
   CredentialAcquisition,
   CredentialPort,
   SessionApiPort,
   SessionEnvelope,
   SessionStoragePort,
+  PendingStoryHandoffPort,
+  StorySaveReceiptPort,
+  StoryHostKind,
   VerificationResult,
 } from "../extension-core/index.mjs";
 import {
   PRIVATE_RECORD_KEYS,
   type PrivateRecordDatabase,
 } from "./private-database.mjs";
+import {
+  BrowserStorage,
+  extensionCall,
+  type AlarmsPort,
+  type BrowserTab,
+  type PermissionsPort,
+  type RuntimePort,
+  type TabsPort,
+} from "./browser-platform.mjs";
+export {
+  BrowserStorage,
+  extensionCall,
+  type AlarmsPort,
+  type BrowserTab,
+  type PermissionsPort,
+  type RuntimeMessageListener,
+  type RuntimeMessageSender,
+  type RuntimePort,
+  type StorageArea,
+  type TabsPort,
+} from "./browser-platform.mjs";
 
 export const LEGACY_SESSION_ENVELOPE_KEY = "traceSessionEnvelopeV1" as const;
 export const LEGACY_SESSION_CREDENTIALS_KEY = "traceSessionCredentialsV1" as const;
 
 export const ACCOUNT_DATA_ALARM = "traceAccountDataRefresh" as const;
+export const SAVED_FILTER_SYNC_ALARM = "traceAo3SavedFiltersSync" as const;
 export const LEGACY_ACCOUNT_ALARMS = Object.freeze([
   "traceLibraryOverlay",
-  "traceAo3SavedFiltersSync",
 ] as const);
+
+export const SAVED_FILTER_LOCAL_KEYS = Object.freeze({
+  presets: "traceAo3SavedFiltersV1",
+  deleted: "traceAo3SavedFiltersDeletedV1",
+  syncMeta: "traceAo3SavedFiltersSyncV1",
+  clientId: "traceAo3SavedFiltersClientIdV1",
+  activeMeta: "traceAo3SavedFiltersActiveV1",
+} as const);
 
 export const LEGACY_ACCOUNT_KEYS = Object.freeze([
   LEGACY_SESSION_ENVELOPE_KEY,
@@ -32,99 +68,13 @@ export const LEGACY_ACCOUNT_KEYS = Object.freeze([
   "traceUserPro",
   "traceLibraryCount",
   "traceFirstSaveSeen",
-  "traceAo3SavedFiltersV1",
-  "traceAo3SavedFiltersDeletedV1",
-  "traceAo3SavedFiltersSyncV1",
-  "traceAo3SavedFiltersClientIdV1",
-  "traceAo3SavedFiltersActiveV1",
 ] as const);
 
-export interface RuntimePort {
-  readonly id?: string;
-  readonly lastError?: { readonly message?: string };
-  readonly onMessage: {
-    addListener(listener: RuntimeMessageListener): void;
-  };
-  readonly getPlatformInfo?: (...args: unknown[]) => unknown;
-  readonly sendNativeMessage?: (...args: unknown[]) => unknown;
-}
-
-export interface TabsPort {
-  readonly query: (...args: unknown[]) => unknown;
-  readonly sendMessage: (...args: unknown[]) => unknown;
-}
-
-export interface AlarmsPort {
-  readonly clear: (...args: unknown[]) => unknown;
-}
-
-export type RuntimeMessageListener = (
-  message: unknown,
-  sender: {
-    readonly id?: string;
-    readonly url?: string;
-    readonly tab?: { readonly url?: string };
-  },
-  sendResponse: (response: unknown) => void,
-) => boolean | void;
-
-export interface StorageArea {
-  readonly get: (...args: unknown[]) => unknown;
-  readonly set: (...args: unknown[]) => unknown;
-  readonly remove: (...args: unknown[]) => unknown;
-}
-
-export interface BrowserTab {
-  readonly id?: number;
-  readonly url?: string;
-  readonly active?: boolean;
-  readonly lastAccessed?: number;
-}
-
-export class BrowserStorage {
-  readonly #area: StorageArea;
-  readonly #runtime: RuntimePort;
-  readonly #mode: "callback" | "promise";
-
-  constructor(area: StorageArea, runtime: RuntimePort, mode: "callback" | "promise") {
-    this.#area = area;
-    this.#runtime = runtime;
-    this.#mode = mode;
-  }
-
-  get(keys: string | readonly string[]): Promise<Record<string, unknown>> {
-    return this.#call<Record<string, unknown>>("get", [keys]);
-  }
-
-  set(patch: Record<string, unknown>): Promise<void> {
-    return this.#call<void>("set", [patch]);
-  }
-
-  remove(keys: string | readonly string[]): Promise<void> {
-    return this.#call<void>("remove", [keys]);
-  }
-
-  #call<T>(method: "get" | "set" | "remove", args: readonly unknown[]): Promise<T> {
-    if (this.#mode === "promise") {
-      try {
-        return Promise.resolve(this.#area[method](...args) as T | PromiseLike<T>);
-      } catch (error) {
-        return Promise.reject(error);
-      }
-    }
-    return new Promise<T>((resolve, reject) => {
-      try {
-        this.#area[method](...args, (value: T) => {
-          const message = this.#runtime.lastError?.message;
-          if (message) reject(new Error(message));
-          else resolve(value);
-        });
-      } catch (error) {
-        reject(error);
-      }
-    });
-  }
-}
+export const DISABLED_LOCAL_KEYS = Object.freeze([
+  ...LEGACY_ACCOUNT_KEYS,
+  ...Object.values(SAVED_FILTER_LOCAL_KEYS),
+  "traceArchiveReadiness",
+] as const);
 
 export class BrowserSessionStoragePort implements SessionStoragePort {
   readonly #database: PrivateRecordDatabase;
@@ -273,6 +223,10 @@ export class LegacyAccountState {
   clear(): Promise<void> {
     return this.#storage.remove(LEGACY_ACCOUNT_KEYS);
   }
+
+  clearAll(): Promise<void> {
+    return this.#storage.remove(DISABLED_LOCAL_KEYS);
+  }
 }
 
 export class KernelAlarmState {
@@ -296,6 +250,7 @@ export class KernelAlarmState {
 
   async clearAll(): Promise<void> {
     await this.#clear(ACCOUNT_DATA_ALARM);
+    await this.#clear(SAVED_FILTER_SYNC_ALARM);
     await this.clearRetired();
   }
 
@@ -324,31 +279,167 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | nul
   });
 }
 
-function extensionCall<T>(
-  target: Record<string, (...args: unknown[]) => unknown>,
-  method: string,
-  args: readonly unknown[],
+async function sendNativeMessageWithFallback(
   runtime: RuntimePort,
   mode: "callback" | "promise",
-): Promise<T> {
-  if (mode === "promise") {
-    try {
-      return Promise.resolve(target[method]!(...args) as T | PromiseLike<T>);
-    } catch (error) {
-      return Promise.reject(error);
-    }
+  message: Readonly<Record<string, unknown>>,
+): Promise<unknown | null> {
+  if (typeof runtime.sendNativeMessage !== "function") return null;
+  const attempts: readonly (readonly unknown[])[] = [
+    [message],
+    ["com.tracefiction.trace", message],
+  ];
+  const deadline = Date.now() + 5_000;
+  for (const args of attempts) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    const response = await withTimeout(
+      extensionCall<unknown>(
+        runtime as unknown as Record<string, (...args: unknown[]) => unknown>,
+        "sendNativeMessage",
+        args,
+        runtime,
+        mode,
+      ),
+      remainingMs,
+    );
+    if (response !== null) return response;
   }
-  return new Promise<T>((resolve, reject) => {
-    try {
-      target[method]!(...args, (value: T) => {
-        const message = runtime.lastError?.message;
-        if (message) reject(new Error(message));
-        else resolve(value);
-      });
-    } catch (error) {
-      reject(error);
-    }
-  });
+  return null;
+}
+
+export class NativeArchiveReadinessReceiptPort implements ArchiveReadinessReceiptPort {
+  readonly #runtime: RuntimePort;
+  readonly #mode: "callback" | "promise";
+
+  constructor(runtime: RuntimePort, mode: "callback" | "promise") {
+    this.#runtime = runtime;
+    this.#mode = mode;
+  }
+
+  publishRunReceipt(receipt: ArchiveRunReceipt): Promise<boolean> {
+    return this.#publish({
+      type: "TRACE_IOS_EXTENSION_HEARTBEAT",
+      hostKind: receipt.hostKind,
+      at: receipt.at,
+      ...(receipt.handoffId === undefined ? {} : { handoffId: receipt.handoffId }),
+    });
+  }
+
+  publishPermissionSnapshot(snapshot: ArchivePermissionSnapshot): Promise<boolean> {
+    return this.#publish({
+      type: "TRACE_IOS_EXTENSION_HEARTBEAT",
+      hostKind: snapshot.hostKind,
+      at: snapshot.at,
+      permissionSnapshot: true,
+      grantedOrigins: [...snapshot.grantedOrigins],
+    });
+  }
+
+  async #publish(message: Readonly<Record<string, unknown>>): Promise<boolean> {
+    const response = await sendNativeMessageWithFallback(
+      this.#runtime,
+      this.#mode,
+      message,
+    );
+    return isRecord(response) && (response.ok === true || response.ok === "true");
+  }
+}
+
+export class NativeStorySaveReceiptPort implements StorySaveReceiptPort {
+  readonly #runtime: RuntimePort;
+  readonly #mode: "callback" | "promise";
+
+  constructor(runtime: RuntimePort, mode: "callback" | "promise") {
+    this.#runtime = runtime;
+    this.#mode = mode;
+  }
+
+  async publishSaveReceipt(receipt: Readonly<{
+    hostKind: StoryHostKind;
+    action: "quick_add";
+    at: number;
+    handoffId?: string;
+  }>): Promise<boolean> {
+    const response = await sendNativeMessageWithFallback(
+      this.#runtime,
+      this.#mode,
+      {
+        type: "TRACE_IOS_EXTENSION_HEARTBEAT",
+        hostKind: receipt.hostKind,
+        action: receipt.action,
+        at: receipt.at,
+        ...(receipt.handoffId === undefined ? {} : { handoffId: receipt.handoffId }),
+      },
+    );
+    return isRecord(response) && (response.ok === true || response.ok === "true");
+  }
+}
+
+export class NativePendingStoryHandoffPort implements PendingStoryHandoffPort {
+  readonly #runtime: RuntimePort;
+  readonly #mode: "callback" | "promise";
+
+  constructor(runtime: RuntimePort, mode: "callback" | "promise") {
+    this.#runtime = runtime;
+    this.#mode = mode;
+  }
+
+  async clearExpected(handoffId: string): Promise<boolean> {
+    const response = await sendNativeMessageWithFallback(
+      this.#runtime,
+      this.#mode,
+      {
+        type: "TRACE_IOS_PENDING_FIRST_STORY_CLEAR",
+        handoffId,
+      },
+    );
+    return (
+      isRecord(response) &&
+      (response.ok === true || response.ok === "true") &&
+      response.cleared !== false &&
+      response.cleared !== "false"
+    );
+  }
+}
+
+export class BrowserArchivePermissionSnapshotPort implements ArchivePermissionSnapshotPort {
+  readonly #permissions: PermissionsPort | undefined;
+  readonly #runtime: RuntimePort;
+  readonly #mode: "callback" | "promise";
+
+  constructor(
+    permissions: PermissionsPort | undefined,
+    runtime: RuntimePort,
+    mode: "callback" | "promise",
+  ) {
+    this.#permissions = permissions;
+    this.#runtime = runtime;
+    this.#mode = mode;
+  }
+
+  async readGrantedOrigins(): Promise<readonly string[] | null> {
+    if (this.#permissions === undefined) return null;
+    const response = await withTimeout(
+      extensionCall<unknown>(
+        this.#permissions as unknown as Record<string, (...args: unknown[]) => unknown>,
+        "getAll",
+        [],
+        this.#runtime,
+        this.#mode,
+      ),
+      2_000,
+    );
+    if (!isRecord(response) || !Array.isArray(response.origins)) return null;
+    return Object.freeze(
+      Array.from(new Set(
+        response.origins
+          .filter((origin): origin is string => typeof origin === "string")
+          .map((origin) => origin.trim().slice(0, 256))
+          .filter(Boolean),
+      )).slice(0, 64),
+    );
+  }
 }
 
 export class ExplicitCredentialProvider implements CredentialProvider {
@@ -466,27 +557,13 @@ export class ExplicitCredentialProvider implements CredentialProvider {
   }
 
   async #acquireNative(): Promise<CredentialAcquisition> {
-    if (typeof this.#runtime.sendNativeMessage !== "function") return { kind: "absent" };
     const request = { type: "TRACE_IOS_AUTH_TOKEN_REQUEST", protocolVersion: 2 };
-    const attempts: readonly (readonly unknown[])[] = [
-      [request],
-      ["com.tracefiction.trace", request],
-    ];
-    const deadline = Date.now() + 5_000;
-    for (const args of attempts) {
-      const remainingMs = deadline - Date.now();
-      if (remainingMs <= 0) break;
-      const response = await withTimeout(
-        extensionCall<unknown>(
-          this.#runtime as unknown as Record<string, (...args: unknown[]) => unknown>,
-          "sendNativeMessage",
-          args,
-          this.#runtime,
-          this.#mode,
-        ),
-        remainingMs,
-      );
-      if (!isRecord(response)) continue;
+    const response = await sendNativeMessageWithFallback(
+      this.#runtime,
+      this.#mode,
+      request,
+    );
+    if (isRecord(response)) {
       const credential = typeof response.token === "string" ? response.token.trim() : "";
       if ((response.ok === true || response.ok === "true") && credential) {
         return { kind: "credential", credential };
@@ -556,31 +633,15 @@ export class NativePendingFirstStoryReader {
   }
 
   async read(): Promise<PendingFirstStoryResponse> {
-    if (typeof this.#runtime.sendNativeMessage !== "function") {
-      return { ok: false, error: "native_unavailable" };
-    }
     const request = { type: "TRACE_IOS_PENDING_FIRST_STORY_GET" };
-    const attempts: readonly (readonly unknown[])[] = [
-      [request],
-      ["com.tracefiction.trace", request],
-    ];
-    const deadline = Date.now() + 5_000;
-    for (const args of attempts) {
-      const remainingMs = deadline - Date.now();
-      if (remainingMs <= 0) break;
-      const response = await withTimeout(
-        extensionCall<unknown>(
-          this.#runtime as unknown as Record<string, (...args: unknown[]) => unknown>,
-          "sendNativeMessage",
-          args,
-          this.#runtime,
-          this.#mode,
-        ),
-        remainingMs,
-      );
-      if (response !== null) return sanitizePendingFirstStoryResponse(response);
-    }
-    return { ok: false, error: "native_unavailable" };
+    const response = await sendNativeMessageWithFallback(
+      this.#runtime,
+      this.#mode,
+      request,
+    );
+    return response === null
+      ? { ok: false, error: "native_unavailable" }
+      : sanitizePendingFirstStoryResponse(response);
   }
 }
 

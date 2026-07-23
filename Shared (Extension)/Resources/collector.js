@@ -11,10 +11,26 @@ const TRACE_CONNECT_AND_SAVE_MESSAGE = "TRACE_CONNECT_AND_SAVE";
 const TRACE_IOS_AUTH_REFRESH_REQUEST_MESSAGE = "TRACE_IOS_AUTH_REFRESH_REQUEST";
 const TRACE_SESSION_MODE = globalThis.TRACE_SESSION_MODE || "legacy";
 const KERNEL_SESSION_ACTIVE = TRACE_SESSION_MODE === "kernel";
+const TRACE_WEB_HOME_URL = configuredTraceWebHomeUrl();
 const FIRST_STORY_FOCUS_MAX_ATTEMPTS = 30;
 const FIRST_STORY_FOCUS_RETRY_MS = 150;
 const FIRST_STORY_SAVE_TIMEOUT_MS = 18_000;
+const KERNEL_PROJECTION_RETRY_DELAYS_MS = [250, 750, 2_000];
+
+function configuredTraceWebHomeUrl() {
+  var configured =
+    typeof globalThis.TRACE_EXTENSION_WEB_ORIGIN === "string"
+      ? globalThis.TRACE_EXTENSION_WEB_ORIGIN.trim()
+      : "";
+  try {
+    return new URL(configured || "https://tracefiction.com").origin + "/";
+  } catch (_) {
+    return "https://tracefiction.com/";
+  }
+}
 var kernelPendingFirstStory = null;
+var kernelProjectionRetryTimer = null;
+var kernelProjectionRetryWorkKey = null;
 
 function traceIsCredentialPageUrl() {
   var path = String(location && location.pathname ? location.pathname : "").toLowerCase();
@@ -326,6 +342,7 @@ var AUTO_TRACK_DEDUPE_KEY = "trace:auto-track:last";
 var AUTO_TRACK_DEDUPE_WINDOW_MS = 90 * 1000;
 var METADATA_BROADCAST_DEDUPE_KEY = "trace:metadata-broadcast:last";
 var LISTING_METADATA_REFRESH_DEDUPE_KEY = "trace:listing-metadata-refresh:last";
+var LISTING_METADATA_REFRESH_ITEM_LIMIT = 100;
 var LISTING_METADATA_REFRESH_RETRY_MS = 500;
 var LISTING_METADATA_REFRESH_MAX_ATTEMPTS = 6;
 var AUTO_TRACK_READY_RETRY_MS = 150;
@@ -335,6 +352,7 @@ var TRACE_ACCOUNT_ID_KEY = "traceAccountId";
 var TRACE_API_BASE_STORAGE_KEY = "traceApiBase";
 var WORK_STATE_STORAGE_KEY = "traceWorkStatesV1";
 var WORK_STATE_GET_MESSAGE = "TRACE_WORK_STATE_GET";
+var ACCOUNT_PROJECTION_GET_MESSAGE = "TRACE_ACCOUNT_PROJECTION_GET";
 var optimisticStoryPageEntries = Object.create(null);
 var storyQuickAddUiReady = false;
 var storyAuthRecoveryNeeded = false;
@@ -829,13 +847,64 @@ function collectTrackedListingMetadataRefreshItems(cacheEntries) {
     if (!refreshItem) continue;
     seen[workKey] = true;
     out.push(refreshItem);
+    if (out.length >= LISTING_METADATA_REFRESH_ITEM_LIMIT) break;
   }
   return out;
+}
+
+function visibleListingWorkKeysForMetadataRefresh() {
+  var seen = Object.create(null);
+  return collectFFNListings()
+    .map(function (item) {
+      return overlayWorkKeyFromItem(item);
+    })
+    .filter(function (workKey) {
+      if (!workKey || seen[workKey]) return false;
+      seen[workKey] = true;
+      return true;
+    })
+    .slice(0, 250);
+}
+
+function submitListingMetadataRefresh(cacheEntries) {
+  var items = collectTrackedListingMetadataRefreshItems(cacheEntries);
+  if (!items.length || !shouldSendListingMetadataRefresh(items)) return;
+  ext.runtime.sendMessage({
+    type: "TRACE_LIBRARY_METADATA_REFRESH",
+    payload: { items: items },
+  });
 }
 
 function sendListingMetadataRefreshForTrackedItems(attempt) {
   var retryCount =
     typeof attempt === "number" && Number.isFinite(attempt) ? attempt : 0;
+
+  if (KERNEL_SESSION_ACTIVE) {
+    var workKeys = visibleListingWorkKeysForMetadataRefresh();
+    if (!workKeys.length) return;
+    ext.runtime.sendMessage(
+      { type: ACCOUNT_PROJECTION_GET_MESSAGE, workKeys: workKeys },
+      function (response) {
+        if (ext.runtime.lastError || !response || response.ok !== true) {
+          if (retryCount < LISTING_METADATA_REFRESH_MAX_ATTEMPTS) {
+            setTimeout(function () {
+              sendListingMetadataRefreshForTrackedItems(retryCount + 1);
+            }, LISTING_METADATA_REFRESH_RETRY_MS);
+          }
+          return;
+        }
+        var entries =
+          response.projection &&
+          response.projection.entries &&
+          typeof response.projection.entries === "object"
+            ? response.projection.entries
+            : null;
+        if (!entries) return;
+        submitListingMetadataRefresh(entries);
+      },
+    );
+    return;
+  }
 
   try {
     ext.storage.local.get(
@@ -859,13 +928,7 @@ function sendListingMetadataRefreshForTrackedItems(attempt) {
         return;
       }
 
-      var items = collectTrackedListingMetadataRefreshItems(entries);
-      if (!items.length || !shouldSendListingMetadataRefresh(items)) return;
-
-      ext.runtime.sendMessage({
-        type: "TRACE_LIBRARY_METADATA_REFRESH",
-        payload: { items: items },
-      });
+      submitListingMetadataRefresh(entries);
       },
     );
   } catch (_) {
@@ -1032,6 +1095,10 @@ function writeConfirmedOverlayEntryForStory(workKey, entry, cb) {
     if (typeof cb === "function") cb(false);
     return;
   }
+  if (KERNEL_SESSION_ACTIVE) {
+    if (typeof cb === "function") cb(true);
+    return;
+  }
 
   ext.storage.local.get(
     [
@@ -1103,6 +1170,9 @@ function clearStoryAuthError(workKey) {
 }
 
 function requestStoryAuthRefreshOnResume(workKey) {
+  // Kernel mode deliberately requires an explicit Connect/Retry action and
+  // owns native account adoption inside the background controller.
+  if (KERNEL_SESSION_ACTIVE) return;
   if (!storyAuthRecoveryNeeded || storyAuthRefreshInFlight) return;
   var now = Date.now();
   if (now - storyAuthRefreshLastAttemptAt < 1500) return;
@@ -2920,7 +2990,7 @@ function findQuickAddAnchor() {
 }
 
 function storyTraceOpenUrl(authState, entry) {
-  var fallback = "https://tracefiction.com/";
+  var fallback = TRACE_WEB_HOME_URL;
   var raw = authState && authState.helpUrl ? authState.helpUrl : fallback;
   try {
     var url = new URL(raw, fallback);
@@ -3721,7 +3791,7 @@ function bindReaderStatusChoice(btn, workKey, entry, status, errorEl) {
       {
         type: "TRACE_SET_READER_STATUS",
         payload: Object.assign(
-          { entryId: entryId, status: status },
+          { workKey: workKey, entryId: entryId, status: status },
           statusPatch && statusPatch.progress ? { progress: statusPatch.progress } : {},
         ),
       },
@@ -3740,7 +3810,7 @@ function bindReaderStatusChoice(btn, workKey, entry, status, errorEl) {
 
 function appendStoryRatingControls(body, view, workKey) {
   var entry = view.entry || {};
-  if (!view.hasAuth || !entry.entryId) return;
+  if (!view.hasAuth || !view.canMutate || !entry.entryId) return;
   var current = storyEntryRatingValue(entry);
   var wrap = document.createElement("div");
   wrap.setAttribute("data-trace-rating-control", "1");
@@ -3783,7 +3853,11 @@ function appendStoryRatingControls(body, view, workKey) {
         ext.runtime.sendMessage(
           {
             type: "TRACE_PATCH_LIBRARY_ENTRY",
-            payload: { entryId: entry.entryId, patch: { rating: nextRating } },
+            payload: {
+              workKey: workKey,
+              entryId: entry.entryId,
+              patch: { rating: nextRating },
+            },
           },
           function (response) {
             if (ext.runtime.lastError || !response || !response.ok) {
@@ -3812,7 +3886,7 @@ function appendStoryRatingControls(body, view, workKey) {
 
 function appendStoryCatchupAction(body, view, workKey) {
   var entry = view.entry || {};
-  if (!view.hasAuth || !entry.entryId) return;
+  if (!view.hasAuth || !view.canMutate || !entry.entryId) return;
   var patch = storyCatchupProgressPatch(entry);
   if (!patch) return;
   var wrap = document.createElement("div");
@@ -3841,7 +3915,11 @@ function appendStoryCatchupAction(body, view, workKey) {
     ext.runtime.sendMessage(
       {
         type: "TRACE_PATCH_LIBRARY_ENTRY",
-        payload: { entryId: entry.entryId, patch: { status: "CAUGHT_UP", progress: patch.progress } },
+        payload: {
+          workKey: workKey,
+          entryId: entry.entryId,
+          patch: { status: "CAUGHT_UP", progress: patch.progress },
+        },
       },
       function (response) {
         if (ext.runtime.lastError || !response || !response.ok) {
@@ -3862,7 +3940,7 @@ function appendStoryCatchupAction(body, view, workKey) {
 
 function appendReaderStatusChoices(actions, view, workKey) {
   var entry = view.entry || {};
-  if (!view.hasAuth) return;
+  if (!view.hasAuth || !view.canMutate) return;
   if (!entry.entryId) return;
 
   var wrap = document.createElement("div");
@@ -4348,21 +4426,92 @@ function applyKernelConnectAndSavePresentation(handle, label, kind, disabled) {
 
 function runKernelConnectAndSave(handle, workKey) {
   if (!kernelPendingFirstStory || kernelPendingFirstStory.workKey !== workKey) return;
+  if (kernelPendingFirstStory.commandInFlight) return;
+  kernelPendingFirstStory.commandInFlight = true;
+  var collected;
+  try {
+    collected = collect();
+  } catch (_) {
+    collected = null;
+  }
+  if (!collected || !collected.items || !collected.items.length) {
+    kernelPendingFirstStory.commandInFlight = false;
+    applyKernelConnectAndSavePresentation(handle, "Try again", "connect-and-save", false);
+    handle.title = "Trace could not read this story yet. Reload the page and try again.";
+    return;
+  }
+  var payload = {
+    s: collected.source,
+    at: new Date().toISOString(),
+    item: collected.items[0],
+  };
+  var pendingHandoffId = kernelPendingFirstStory.handoffId;
   applyKernelConnectAndSavePresentation(
     handle,
     "Connecting…",
     "connecting-and-saving",
     true,
   );
-  sendKernelCollectorMessage({ type: TRACE_CONNECT_AND_SAVE_MESSAGE }, function (response) {
-    if (response && response.snapshot && response.snapshot.state === "connected") {
-      applyKernelConnectAndSavePresentation(handle, "Connected", "connected-save-pending", true);
-      handle.title =
-        "Trace verified this extension session. The pending save remains queued for the command owner.";
+  sendKernelCollectorMessage({
+    type: TRACE_CONNECT_AND_SAVE_MESSAGE,
+    workKey: workKey,
+    handoffId: pendingHandoffId,
+    payload: payload,
+  }, function (response) {
+    if (response && response.ok === true) {
+      var item = payload.item || {};
+      var startedStoryPage =
+        item.ctx === "story" &&
+        typeof item.chn === "number" &&
+        Number.isFinite(item.chn) &&
+        item.chn > 1;
+      var canonicalStatus = startedStoryPage ? "READING" : "SAVED";
+      var legacyStatus = legacyReaderStatus(canonicalStatus);
+      var entry = response.command && response.command.confirmation
+        ? response.command.confirmation.entry
+        : null;
+      optimisticStoryPageEntries[workKey] = entry || {
+        status: legacyStatus,
+        readerStatus: legacyStatus,
+        canonicalReaderStatus: canonicalStatus,
+        entryId: response.entryId || undefined,
+      };
+      kernelPendingFirstStory = null;
+      var anchor = findQuickAddAnchor();
+      if (anchor) {
+        renderQuickAddFromSnapshot(workKey, anchor, {
+          libraryOverlayCache: {
+            entries: {},
+            workPreferences: {},
+            syncVersion:
+              response.command && response.command.confirmation
+                ? response.command.confirmation.syncVersion || null
+                : null,
+          },
+          traceAuthState: response.snapshot || {
+            state: "connected",
+            reason: "none",
+            canExecuteAuthenticated: true,
+          },
+          authToken: "kernel-session",
+        });
+      }
+      focusFirstStoryTraceControl(findTraceStoryHandle(workKey) || handle);
       return;
     }
-    applyKernelConnectAndSavePresentation(handle, "Connect and save", "connect-and-save", false);
-    handle.title = "Connect this extension session before saving the pending story.";
+    if (kernelPendingFirstStory && kernelPendingFirstStory.workKey === workKey) {
+      kernelPendingFirstStory.commandInFlight = false;
+    }
+    var connected = response && response.snapshot && response.snapshot.state === "connected";
+    applyKernelConnectAndSavePresentation(
+      handle,
+      connected ? "Retry save" : "Connect and save",
+      "connect-and-save",
+      false,
+    );
+    handle.title = connected
+      ? "Trace did not confirm this save. Try again."
+      : "Connect this extension session before saving the pending story.";
   });
 }
 
@@ -4401,7 +4550,18 @@ function processIosPendingFirstStoryAdd() {
         if (KERNEL_SESSION_ACTIVE) {
           var workKey = getWorkKeyFromUrl();
           if (!workKey) return;
-          kernelPendingFirstStory = { workKey: workKey, handoffId: handoffId };
+          if (
+            !kernelPendingFirstStory ||
+            kernelPendingFirstStory.workKey !== workKey ||
+            kernelPendingFirstStory.handoffId !== handoffId
+          ) {
+            kernelPendingFirstStory = {
+              workKey: workKey,
+              handoffId: handoffId,
+              automaticAttempted: false,
+              commandInFlight: false,
+            };
+          }
           renderQuickAddButton(workKey);
           return;
         }
@@ -4843,11 +5003,13 @@ function renderStorySheet(sheet, view, workKey) {
     });
     actions.appendChild(addBtn);
   }
-  var hiddenBtn = document.createElement("button");
-  hiddenBtn.type = "button";
-  resetStoryHiddenPreferenceBtn(hiddenBtn, view.entry && view.entry.hidden === true);
-  bindStoryHiddenPreferenceAction(hiddenBtn, workKey, view.entry || {});
-  actions.appendChild(hiddenBtn);
+  if (view.canMutate) {
+    var hiddenBtn = document.createElement("button");
+    hiddenBtn.type = "button";
+    resetStoryHiddenPreferenceBtn(hiddenBtn, view.entry && view.entry.hidden === true);
+    bindStoryHiddenPreferenceAction(hiddenBtn, workKey, view.entry || {});
+    actions.appendChild(hiddenBtn);
+  }
   sheet.appendChild(actions);
 
   applySheetVisibility(sheet, wasOpen);
@@ -5058,7 +5220,7 @@ function sendFinishQualifyPatch(decision, workState, done) {
   ext.runtime.sendMessage(
     {
       type: "TRACE_PATCH_LIBRARY_ENTRY",
-      payload: { entryId: entryId, patch: patch },
+      payload: { workKey: decision.workKey, entryId: entryId, patch: patch },
     },
     function (response) {
       if (ext.runtime.lastError || !response || !response.ok) {
@@ -5077,7 +5239,7 @@ function sendFinishQualifyPatch(decision, workState, done) {
 
 function finishQualifyDecision(view, workKey) {
   var entry = view && view.entry;
-  if (!view || !view.hasAuth || !entry || !entry.entryId) return null;
+  if (!view || !view.hasAuth || !view.canMutate || !entry || !entry.entryId) return null;
   var status = canonicalReaderStatus(entryStatus(entry));
   if (status === "FINISHED" || status === "CAUGHT_UP" || status === "DROPPED") return null;
   var item = storySheetCurrentItem();
@@ -5177,25 +5339,10 @@ function setupFinishQualify(view, workKey) {
   }
 }
 
-function renderQuickAddButton(workKey) {
-  var anchor = findQuickAddAnchor();
-  if (!anchor) {
-    removeQuickAddElements();
-    return;
-  }
-
-  ext.storage.local.get(
-    [
-      OVERLAY_CACHE_KEY,
-      "authToken",
-      "traceAuthState",
-      TRACE_ACCOUNT_ID_KEY,
-      TRACE_API_BASE_STORAGE_KEY,
-    ],
-    function (res) {
-    if (ext.runtime.lastError) return;
-
-    var cache = overlayCacheForRuntimeContext(res[OVERLAY_CACHE_KEY], res);
+function renderQuickAddFromSnapshot(workKey, anchor, res) {
+    var cache = KERNEL_SESSION_ACTIVE
+      ? res[OVERLAY_CACHE_KEY]
+      : overlayCacheForRuntimeContext(res[OVERLAY_CACHE_KEY], res);
     var entries = cache && cache.entries;
     var workPreferences = cache && cache.workPreferences;
     var entry = entries && entries[workKey];
@@ -5246,6 +5393,7 @@ function renderQuickAddButton(workKey) {
       hasAuth: authStateAllowsActions(authState, !!res.authToken),
       authState: authState,
       entry: info,
+      canMutate: true,
     };
     var hasEntryAuthError = !!(
       info &&
@@ -5259,13 +5407,18 @@ function renderQuickAddButton(workKey) {
       kernelPendingFirstStory &&
       kernelPendingFirstStory.workKey === workKey
     ) {
+      var pendingFirstStory = kernelPendingFirstStory;
       applyKernelConnectAndSavePresentation(
         handle,
-        "Connect and save",
-        "connect-and-save",
-        false,
+        pendingFirstStory.commandInFlight ? "Connecting…" : "Connect and save",
+        pendingFirstStory.commandInFlight
+          ? "connecting-and-saving"
+          : "connect-and-save",
+        pendingFirstStory.commandInFlight,
       );
-      handle.title = "Connect this extension session before saving the pending story.";
+      handle.title = pendingFirstStory.commandInFlight
+        ? "Trace is connecting and saving this story."
+        : "Connect this extension session before saving the pending story.";
       if (!handle.__traceStoryHandleBound) {
         handle.__traceStoryHandleBound = true;
         handle.addEventListener("click", function (e) {
@@ -5281,6 +5434,22 @@ function renderQuickAddButton(workKey) {
         runKernelConnectAndSave(handle, workKey);
       };
       applySheetVisibility(sheet, false);
+      if (
+        !pendingFirstStory.automaticAttempted &&
+        typeof pendingFirstStory.handoffId === "string" &&
+        pendingFirstStory.handoffId.length > 0
+      ) {
+        pendingFirstStory.automaticAttempted = true;
+        focusFirstStoryTraceControl(handle);
+        setTimeout(function () {
+          if (
+            kernelPendingFirstStory === pendingFirstStory &&
+            !pendingFirstStory.commandInFlight
+          ) {
+            runKernelConnectAndSave(handle, workKey);
+          }
+        }, 0);
+      }
       return;
     }
 
@@ -5315,6 +5484,85 @@ function renderQuickAddButton(workKey) {
 
     renderStorySheet(sheet, view, workKey);
     setupFinishQualify(view, workKey);
+}
+
+function clearKernelProjectionRetry(workKey) {
+  if (
+    kernelProjectionRetryTimer === null ||
+    (kernelProjectionRetryWorkKey !== null &&
+      kernelProjectionRetryWorkKey !== workKey)
+  ) {
+    return;
+  }
+  clearTimeout(kernelProjectionRetryTimer);
+  kernelProjectionRetryTimer = null;
+  kernelProjectionRetryWorkKey = null;
+}
+
+function scheduleKernelProjectionRetry(workKey, attempt) {
+  if (
+    attempt >= KERNEL_PROJECTION_RETRY_DELAYS_MS.length ||
+    kernelProjectionRetryTimer !== null ||
+    getWorkKeyFromUrl() !== workKey
+  ) {
+    return;
+  }
+  kernelProjectionRetryWorkKey = workKey;
+  kernelProjectionRetryTimer = setTimeout(function () {
+    kernelProjectionRetryTimer = null;
+    kernelProjectionRetryWorkKey = null;
+    if (getWorkKeyFromUrl() === workKey) {
+      renderQuickAddButton(workKey, attempt + 1);
+    }
+  }, KERNEL_PROJECTION_RETRY_DELAYS_MS[attempt]);
+}
+
+function renderQuickAddButton(workKey, projectionAttempt) {
+  var anchor = findQuickAddAnchor();
+  if (!anchor) {
+    clearKernelProjectionRetry(workKey);
+    removeQuickAddElements();
+    return;
+  }
+
+  if (KERNEL_SESSION_ACTIVE) {
+    var attempt = Number.isInteger(projectionAttempt) && projectionAttempt >= 0
+      ? projectionAttempt
+      : 0;
+    ext.runtime.sendMessage(
+      { type: ACCOUNT_PROJECTION_GET_MESSAGE, workKeys: [workKey] },
+      function (response) {
+        if (ext.runtime.lastError || !response || response.ok !== true) {
+          scheduleKernelProjectionRetry(workKey, attempt);
+          return;
+        }
+        clearKernelProjectionRetry(workKey);
+        var snapshot = response.snapshot || { state: "signed_out" };
+        renderQuickAddFromSnapshot(workKey, anchor, {
+          libraryOverlayCache: response.projection || {
+            entries: {},
+            workPreferences: {},
+            syncVersion: null,
+          },
+          traceAuthState: snapshot,
+          authToken: snapshot.state === "connected" ? "kernel-session" : null,
+        });
+      },
+    );
+    return;
+  }
+
+  ext.storage.local.get(
+    [
+      OVERLAY_CACHE_KEY,
+      "authToken",
+      "traceAuthState",
+      TRACE_ACCOUNT_ID_KEY,
+      TRACE_API_BASE_STORAGE_KEY,
+    ],
+    function (res) {
+      if (ext.runtime.lastError) return;
+      renderQuickAddFromSnapshot(workKey, anchor, res);
     },
   );
 }

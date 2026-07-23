@@ -83,10 +83,66 @@ Start with these files:
 - `Shared (Extension)/Resources/library-overlay.js` - on-page library status and quick-add UI.
 - `Shared (Extension)/Resources/sync.js` - Trace-site auth token bridge.
 - `src/background.js` - network requests to the Trace API.
+- `src/extension-core/` and `src/extension-runtime/` - the modular session,
+  archive-readiness, account-projection, and authenticated story-command
+  boundaries used by the normal kernel release. `src/background.js` remains
+  only as the explicit legacy rollback owner.
+
+Kernel builds distinguish save-if-absent commands from automatic progress
+commands and use the account projection as the sole library read owner.
+Story/listing content scripts request only validated work keys visible on the
+current supported archive page. Existing-entry status, rating, chapter
+progress, finish qualification, and visibility actions use typed kernel
+commands bound to the sender host, work key, authoritative entry id, and
+current account epoch. Popup import is owned by the same controller: it accepts
+only the extension popup, collects a bounded payload from the active supported
+archive tab, and opens the configured Trace import page. Desktop first-story
+handoff accepts only the configured Trace origin and routes the resulting
+story-page save through the existing story-command owner. A missing archive
+content script is reported as a site-permission problem instead of a generic
+import failure.
+
+Kernel metadata contribution keeps page extraction in the AO3/FFN collector
+but moves preference enforcement, authenticated API access, account fencing,
+and projection invalidation into one background owner. Story metadata must
+match the browser-provided top-frame story sender. Batched listing enrichment
+is item-count and byte bounded, and every item must match the sender's archive
+host. FFN listing pages select tracked rows through a bounded account-projection
+read rather than reading legacy token or overlay-cache keys. The normal release
+uses the kernel owner after the parity and installed-browser audit; the legacy
+owner is available only through the explicit rollback build.
+
+Kernel builds also retain the existing local-first AO3 saved-filter surface.
+Local creates, edits, and deletes remain usable while signed out or offline;
+the kernel owns only authenticated synchronization. It validates the AO3
+top-frame request, drains upserts and tombstones in bounded batches, applies the
+server's last-write-wins timestamps without overwriting a newer dirty local
+edit, and serializes remote merges against account transitions. A periodic
+pull preserves cross-device updates. The content script receives no Trace
+credential or account identifier, and disabled builds omit the surface and
+remove its local data.
+
+The kernel Trace-page bridge accepts status and first-story requests only from
+the exact configured Trace origin and opens only same-origin Trace URLs
+requested by supported archive content scripts. Status responses and pushes
+contain coarse session and onboarding evidence only: booleans, enums, epoch
+timestamps, and a browser kind. They do not expose credentials, account ids,
+story ids, URLs, titles, private library fields, or raw errors. Archive
+readiness records are serialized in local storage, and a successful action
+clears an older coarse issue. Disabled builds inject no content scripts and
+delete both private kernel state and extension-local feature/readiness state.
 
 For a tagged release, confirm `package.json` version matches the generated manifest version. Safari consumes checked-in files under `Shared (Extension)/Resources`; Chromium and Firefox packages are generated into `dist/`, which is intentionally not committed.
 
-`Shared (Extension)/Resources/background.js` is a committed build artifact generated from `src/background.js` by `npm run build` / `npm run build:release` (literal string substitution of `__TRACE_API_BASE__` and `__TRACE_WEB_ORIGIN__`). Safari requires it to be checked in. When auditing the extension, read `src/background.js` as the source of truth and confirm the two files agree for the release you are inspecting. `Shared (Extension)/Resources/popup-config.js` and `iOS (App)/TraceWebOrigin.generated.swift` are committed for the same reason — popup navigation and the iOS DEBUG `WKWebView` shell need compiled constants, and both are regenerated from the same `.env` values.
+`Shared (Extension)/Resources/background.js` is a committed build artifact.
+Kernel builds bundle `src/extension-runtime/index.mts` and its core/runtime
+dependency graph; the generated header records the configured API and web
+origins for release auditing. Only `build:legacy:release` generates that file
+from `src/background.js` by literal substitution. Safari requires the selected
+release artifact to be checked in. `Shared (Extension)/Resources/popup-config.js`
+and `iOS (App)/TraceWebOrigin.generated.swift` are committed for the same reason
+— popup navigation and the iOS DEBUG `WKWebView` shell need compiled constants,
+and all generated artifacts use the same `.env` values.
 
 ## Build And Test
 
@@ -123,7 +179,10 @@ For a release-style build, use HTTPS Trace origins:
 TRACE_API_BASE=https://api.tracefiction.com TRACE_WEB_ORIGIN=https://www.tracefiction.com npm run build:release
 ```
 
-`build:release` rejects missing, localhost, non-HTTPS, and non-production Trace origins.
+`build:release` packages the kernel session owner and rejects missing,
+localhost, non-HTTPS, and non-production Trace origins. The explicit
+`build:legacy:release` command remains available as the bounded rollback path;
+it is not used by the store packaging commands.
 
 ## Load Locally
 

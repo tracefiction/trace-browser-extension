@@ -114,6 +114,7 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
                 [
                     "Connect Trace",
                     "Connected",
+                    "CONNECTED",
                     "Trace is temporarily offline",
                     "Reconnect Trace",
                     "Checking Trace",
@@ -133,6 +134,13 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
             RunLoop.current.run(until: Date().addingTimeInterval(0.1))
         } while Date() < deadline
         return false
+    }
+
+    private func waitForPopupConnected(timeout: TimeInterval = 8) -> Bool {
+        // The first-story projection uses the connection badge while later
+        // projections also use "Connected" as the sheet heading. Safari may
+        // expose the badge's visually uppercased text to accessibility.
+        waitForPopupState(["Connected", "CONNECTED"], timeout: timeout)
     }
 
     private func waitForHittable(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
@@ -242,11 +250,11 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
         control("ok-a")
         openTracePopup()
         safari.links["Connect"].tap()
-        XCTAssertTrue(safari.staticTexts["Connected"].waitForExistence(timeout: 8))
+        XCTAssertTrue(waitForPopupConnected())
 
         relaunchSafari()
         openTracePopup()
-        XCTAssertTrue(safari.staticTexts["Connected"].waitForExistence(timeout: 8))
+        XCTAssertTrue(waitForPopupConnected())
 
         control("unavailable")
         relaunchSafari()
@@ -256,7 +264,7 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
         )
         control("ok-a")
         safari.links["Retry"].tap()
-        XCTAssertTrue(safari.staticTexts["Connected"].waitForExistence(timeout: 8))
+        XCTAssertTrue(waitForPopupConnected())
 
         safari.buttons["Disconnect"].tap()
         XCTAssertTrue(safari.staticTexts["Connect Trace"].waitForExistence(timeout: 8))
@@ -269,7 +277,7 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
         XCTAssertTrue(safari.staticTexts["Connect Trace"].exists)
         XCTAssertTrue(safari.staticTexts["NOT LINKED"].exists)
         safari.links["Connect"].tap()
-        XCTAssertTrue(safari.staticTexts["Connected"].waitForExistence(timeout: 8))
+        XCTAssertTrue(waitForPopupConnected())
     }
 
     func testConnectAndSaveFromInstalledArchiveSender() {
@@ -292,10 +300,10 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
             dy: actionFrame.midY / safariFrame.height
         )).tap()
         XCTAssertTrue(
-            safari.staticTexts["Installed result: connected / commands_unavailable"]
+            safari.staticTexts["Installed result: connected / saved"]
                 .waitForExistence(timeout: 15)
         )
-        XCTAssertTrue(safari.buttons["Connected"].exists)
+        XCTAssertTrue(safari.buttons["Saved"].exists)
     }
 
     func testLeaveReconnectRequiredForProviderChange() {
@@ -303,7 +311,7 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
         control("ok-a")
         openTracePopup()
         safari.links["Connect"].tap()
-        XCTAssertTrue(safari.staticTexts["Connected"].waitForExistence(timeout: 8))
+        XCTAssertTrue(waitForPopupConnected())
 
         control("rejected")
         relaunchSafari()
@@ -318,7 +326,7 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
         openTracePopup()
         XCTAssertTrue(safari.staticTexts["Reconnect Trace"].waitForExistence(timeout: 6))
         safari.links["Reconnect"].tap()
-        XCTAssertTrue(safari.staticTexts["Connected"].waitForExistence(timeout: 8))
+        XCTAssertTrue(waitForPopupConnected())
     }
 
     func testReconnectWithChangedProvider() {
@@ -327,14 +335,14 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
         openTracePopup()
         XCTAssertTrue(safari.staticTexts["Reconnect Trace"].waitForExistence(timeout: 6))
         safari.links["Reconnect"].tap()
-        XCTAssertTrue(safari.staticTexts["Connected"].waitForExistence(timeout: 8))
+        XCTAssertTrue(waitForPopupConnected())
     }
 
     func testLeaveReconnectRequiredForMissingProvider() {
         launchSafariFixture()
         control("rejected")
         openTracePopup()
-        XCTAssertTrue(safari.staticTexts["Connected"].waitForExistence(timeout: 6))
+        XCTAssertTrue(waitForPopupConnected(timeout: 6))
         relaunchSafari()
         openTracePopup()
         XCTAssertTrue(safari.staticTexts["Reconnect Trace"].waitForExistence(timeout: 8))
@@ -354,7 +362,7 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
         launchSafariFixture()
         control("ok-a")
         openTracePopup()
-        XCTAssertTrue(safari.staticTexts["Connected"].waitForExistence(timeout: 8))
+        XCTAssertTrue(waitForPopupConnected())
         control("rejected")
         relaunchSafari()
         openTracePopup()

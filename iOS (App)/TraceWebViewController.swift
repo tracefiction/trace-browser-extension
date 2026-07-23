@@ -7,6 +7,7 @@
 //
 
 import AuthenticationServices
+import os.log
 import Security
 import SafariServices
 import StoreKit
@@ -1261,17 +1262,21 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         case ao3
         case ffn
 
-        var homeURL: URL {
+        var mobileHomeURL: URL {
             switch self {
             case .ao3:
                 return URL(string: "https://archiveofourown.org/")!
             case .ffn:
-                return URL(string: "https://www.fanfiction.net/")!
+                return URL(string: "https://m.fanfiction.net/")!
             }
         }
     }
 
     private static let safariExtensionBundleIdentifier = "com.tracefiction.trace.extension"
+    private static let safariBridgeLog = OSLog(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.tracefiction.trace",
+        category: "SafariBridge"
+    )
     private static let traceSharedAppGroup = "group.com.tracefiction.trace"
     private static let traceKeychainAccessGroup = "com.tracefiction.trace.shared"
     private static let traceAppleTeamIdentifierPrefix = "3GX59FLLT6."
@@ -1649,7 +1654,14 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 #endif
         Task { [weak self] in
             guard let self else { return }
-            let url = hostKind.homeURL
+            let url = hostKind.mobileHomeURL
+            os_log(
+                "Opening archive home host=%{public}@ destination=%{public}@",
+                log: Self.safariBridgeLog,
+                type: .info,
+                hostKind.rawValue,
+                url.absoluteString
+            )
             do {
                 try Self.storePendingFirstStory(
                     mode: .browse,
@@ -1659,6 +1671,14 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 )
                 await MainActor.run {
                     UIApplication.shared.open(url, options: [:]) { [weak self] success in
+                        os_log(
+                            "Archive home open completed host=%{public}@ destination=%{public}@ success=%{public}@",
+                            log: Self.safariBridgeLog,
+                            type: success ? .info : .error,
+                            hostKind.rawValue,
+                            url.absoluteString,
+                            success ? "yes" : "no"
+                        )
                         if !success {
                             Self.clearPendingFirstStoryURL()
                         }

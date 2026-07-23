@@ -695,6 +695,178 @@ test("same-account refresh replaces capability and fences its late result", asyn
   assert.deepEqual(current, { kind: "published", value: "token-new" });
 });
 
+test("provider synchronization is a no-op for the current native credential", async () => {
+  const harness = createHarness();
+  await harness.service.start();
+  await connectAccount(harness);
+  const writesBefore = harness.storage.writes.length;
+
+  harness.credentials.queueAcquisition({
+    kind: "credential",
+    credential: "token-a",
+  });
+  assert.deepEqual(await harness.service.synchronizeProviderCredential(), {
+    kind: "completed",
+    state: "connected",
+  });
+
+  assert.equal(harness.storage.writes.length, writesBefore);
+  assert.equal(harness.storage.value.epoch, 1);
+  assert.deepEqual(harness.api.verifiedCredentials, ["token-a"]);
+  assert.deepEqual(harness.credentials.acquirePurposes, ["connect", "refresh"]);
+});
+
+test("provider synchronization rotates a same-account credential without changing scope", async () => {
+  const harness = createHarness();
+  await harness.service.start();
+  await connectAccount(harness, { token: "token-old" });
+  const scopeBefore = harness.service.publicationScope();
+
+  harness.credentials.queueAcquisition({
+    kind: "credential",
+    credential: "token-new",
+  });
+  harness.api.queueVerification({ kind: "verified", accountId: "account-a" });
+  assert.deepEqual(await harness.service.synchronizeProviderCredential(), {
+    kind: "completed",
+    state: "connected",
+  });
+
+  assert.deepEqual(harness.service.publicationScope(), scopeBefore);
+  assert.equal(harness.storage.value.epoch, 1);
+  assert.deepEqual(harness.credentials.deletedReferences, ["credential-1"]);
+  assert.deepEqual(
+    await harness.service.executeAuthenticated(async (credential) => ({
+      kind: "success",
+      value: credential,
+    })),
+    { kind: "published", value: "token-new" },
+  );
+});
+
+test("provider synchronization retains a verified session when the provider is temporarily unavailable", async () => {
+  const harness = createHarness();
+  await harness.service.start();
+  await connectAccount(harness);
+  const envelopeBefore = { ...harness.storage.value };
+
+  harness.credentials.queueAcquisition({ kind: "unavailable" });
+  assert.deepEqual(await harness.service.synchronizeProviderCredential(), {
+    kind: "unavailable",
+  });
+
+  assert.equal(harness.service.snapshot().state, "connected");
+  assert.deepEqual(harness.storage.value, envelopeBefore);
+  assert.deepEqual(
+    await harness.service.executeAuthenticated(async (credential) => ({
+      kind: "success",
+      value: credential,
+    })),
+    { kind: "published", value: "token-a" },
+  );
+});
+
+test("concurrent provider synchronization shares one native acquisition", async () => {
+  const harness = createHarness();
+  await harness.service.start();
+  await connectAccount(harness);
+  const acquisition = deferred();
+  harness.credentials.queueAcquisition(acquisition.promise);
+
+  const first = harness.service.synchronizeProviderCredential();
+  const second = harness.service.synchronizeProviderCredential();
+  assert.equal(first, second);
+  await waitFor(
+    () => harness.credentials.acquirePurposes.length === 2,
+    "provider refresh acquisition",
+  );
+  acquisition.resolve({ kind: "credential", credential: "token-a" });
+
+  assert.deepEqual(await first, { kind: "completed", state: "connected" });
+  assert.deepEqual(await second, { kind: "completed", state: "connected" });
+  assert.deepEqual(harness.credentials.acquirePurposes, ["connect", "refresh"]);
+});
+
+test("provider synchronization fences a genuine account change", async () => {
+  const harness = createHarness();
+  await harness.service.start();
+  await connectAccount(harness);
+
+  harness.credentials.queueAcquisition({
+    kind: "credential",
+    credential: "token-b",
+  });
+  harness.api.queueVerification({ kind: "verified", accountId: "account-b" });
+
+  assert.deepEqual(await harness.service.synchronizeProviderCredential(), {
+    kind: "completed",
+    state: "connected",
+  });
+  assert.deepEqual(harness.service.publicationScope(), {
+    accountId: "account-b",
+    epoch: 2,
+  });
+  assert.deepEqual(harness.credentials.acquirePurposes, [
+    "connect",
+    "refresh",
+  ]);
+});
+
+test("failed account-switch credential storage leaves a durable signed-out fence", async () => {
+  const harness = createHarness();
+  await harness.service.start();
+  await connectAccount(harness);
+  const store = deferred();
+  harness.credentials.queueStoreResult(store.promise);
+  harness.credentials.queueAcquisition({
+    kind: "credential",
+    credential: "token-b",
+  });
+  harness.api.queueVerification({ kind: "verified", accountId: "account-b" });
+
+  const synchronization = harness.service.synchronizeProviderCredential();
+  await waitFor(
+    () => harness.credentials.storeEpochs.includes(2),
+    "account-switch credential store",
+  );
+  store.reject(new Error("credential store unavailable"));
+
+  assert.deepEqual(await synchronization, { kind: "unavailable" });
+  assert.equal(harness.service.snapshot().state, "signed_out");
+  assert.deepEqual(harness.storage.value, {
+    version: 1,
+    epoch: 2,
+    desired: "disconnected",
+    accountId: null,
+    credentialRef: null,
+  });
+  assert.deepEqual(
+    await harness.service.executeAuthenticated(async () => ({
+      kind: "success",
+      value: "must-not-run",
+    })),
+    { kind: "unavailable" },
+  );
+  await waitFor(
+    () => harness.credentials.deletedReferences.includes("credential-1"),
+    "old provider credential cleanup",
+  );
+});
+
+test("provider synchronization treats a definitively absent native account as disconnect", async () => {
+  const harness = createHarness();
+  await harness.service.start();
+  await connectAccount(harness);
+  harness.credentials.queueAcquisition({ kind: "absent" });
+
+  assert.deepEqual(await harness.service.synchronizeProviderCredential(), {
+    kind: "completed",
+    state: "signed_out",
+  });
+  assert.equal(harness.service.publicationScope(), null);
+  assert.equal(harness.storage.value.desired, "disconnected");
+});
+
 test("degradation revokes a capability before another same-capability result publishes", async () => {
   const harness = createHarness();
   await harness.service.start();
@@ -902,7 +1074,7 @@ function hashDirectory(directory) {
   return hash.digest("hex");
 }
 
-test("core graph is browser-neutral, deterministic, and absent from production resources", () => {
+test("core graph is browser-neutral, deterministic, and bundled only into the kernel owner", () => {
   const sourceDirectory = path.join(ROOT, "src", "extension-core");
   for (const file of listFiles(sourceDirectory)) {
     const source = fs.readFileSync(file, "utf8");
@@ -922,12 +1094,32 @@ test("core graph is browser-neutral, deterministic, and absent from production r
     path.join(ROOT, "iOS (App)"),
   ];
   const runtimeSourceDirectory = path.join(ROOT, "src", "extension-runtime");
+  const generatedBackground = path.join(
+    ROOT,
+    "Shared (Extension)",
+    "Resources",
+    "background.js",
+  );
+  const popupConfig = fs.readFileSync(
+    path.join(ROOT, "Shared (Extension)", "Resources", "popup-config.js"),
+    "utf8",
+  );
+  const packagedMode =
+    popupConfig.match(/globalThis\.TRACE_SESSION_MODE = "(kernel|disabled)"/)?.[1] ??
+    "legacy";
   for (const productionFile of productionRoots.flatMap(listFiles)) {
     if (productionFile.startsWith(`${sourceDirectory}${path.sep}`)) continue;
     if (productionFile.startsWith(`${runtimeSourceDirectory}${path.sep}`)) continue;
     if (!/\.(?:css|html|js|json|mjs|swift)$/.test(productionFile)) continue;
+    const source = fs.readFileSync(productionFile, "utf8");
+    if (productionFile === generatedBackground && packagedMode !== "legacy") {
+      assert.match(source, /src\/extension-core\//);
+      assert.match(source, /src\/extension-runtime\//);
+      assert.doesNotMatch(source, /\.trace-build/);
+      continue;
+    }
     assert.doesNotMatch(
-      fs.readFileSync(productionFile, "utf8"),
+      source,
       /(?:extension-core|\.trace-build)/,
       `${path.relative(ROOT, productionFile)} reaches the TypeScript source graph`,
     );

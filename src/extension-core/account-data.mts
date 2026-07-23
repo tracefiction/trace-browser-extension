@@ -383,3 +383,7 @@ export function copyAccountSummary(value: unknown): AccountSummary | null {
 export function copyAccountOverlay(value: unknown): AccountOverlay | null {
   return copyOverlay(value);
 }
+
+export function copyLibraryOverlayEntry(value: unknown): LibraryOverlayEntry | null {
+  return copyEntry(value);
+}

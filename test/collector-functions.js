@@ -63,7 +63,7 @@ function withDefaultScopedStorageContext(chrome, options = {}) {
 
 /**
  * @param {import("jsdom").JSDOM} dom
- * @param {{ chrome?: any }} [options]
+ * @param {{ chrome?: any, sessionMode?: "legacy" | "kernel" }} [options]
  */
 function createCollectorBindings(dom, options = {}) {
   const { window } = dom;
@@ -74,6 +74,7 @@ function createCollectorBindings(dom, options = {}) {
     window,
     self: window,
     globalThis: null,
+    TRACE_SESSION_MODE: options.sessionMode,
     chrome: withDefaultScopedStorageContext(options.chrome || createChromeMock(), options),
     browser: undefined,
     setTimeout: window.setTimeout.bind(window),

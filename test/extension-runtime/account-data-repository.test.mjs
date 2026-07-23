@@ -95,6 +95,80 @@ test("serial authoritative overlay replaces a higher opaque timestamp", async ()
   assert.deepEqual((await repository.read()).summary, summary);
 });
 
+test("confirmed story publication patches only the current account overlay", async () => {
+  const { repository, state } = createHarness();
+  state.display = accountA1;
+  state.publication = accountA1;
+  await repository.publishOverlay(accountA1, {
+    entries: { "ao3:123": { status: "READING" } },
+    workPreferences: {
+      "ffn:999": { browsePreference: { hidden: true } },
+    },
+    syncVersion: "2026-07-15T12:00:00.000Z",
+  });
+  const entryId = "00000000-0000-4000-8000-000000000123";
+  const result = await repository.publishConfirmedStory(accountA1, {
+    workKey: "ffn:7038840",
+    entryId,
+    entry: {
+      status: "PLANNING",
+      readerStatus: "PLANNING",
+      canonicalReaderStatus: "SAVED",
+      entryId,
+    },
+    syncVersion: "2026-07-19T12:00:00.000Z",
+  });
+  assert.equal(result.kind, "published");
+  assert.deepEqual((await repository.read()).overlay, {
+    entries: {
+      "ao3:123": { status: "READING" },
+      "ffn:7038840": {
+        status: "PLANNING",
+        readerStatus: "PLANNING",
+        canonicalReaderStatus: "SAVED",
+        entryId,
+      },
+    },
+    workPreferences: {
+      "ffn:999": { browsePreference: { hidden: true } },
+    },
+    syncVersion: "2026-07-19T12:00:00.000Z",
+  });
+});
+
+test("a late full refresh cannot erase a newer command confirmation", async () => {
+  const { repository, state } = createHarness();
+  state.display = accountA1;
+  state.publication = accountA1;
+  const refreshReservation = repository.reserveOverlayWrite();
+  const entryId = "00000000-0000-4000-8000-000000000123";
+
+  assert.equal((await repository.publishConfirmedStory(accountA1, {
+    workKey: "ffn:7038840",
+    entryId,
+    entry: {
+      status: "PLANNING",
+      readerStatus: "PLANNING",
+      canonicalReaderStatus: "SAVED",
+      entryId,
+    },
+    syncVersion: "2026-07-19T12:00:00.000Z",
+  })).kind, "published");
+
+  assert.deepEqual(
+    await repository.publishOverlay(accountA1, {
+      entries: {},
+      workPreferences: {},
+      syncVersion: "2026-07-19T12:00:01.000Z",
+    }, refreshReservation),
+    { kind: "stale_write" },
+  );
+  assert.equal(
+    (await repository.read()).overlay.entries["ffn:7038840"].entryId,
+    entryId,
+  );
+});
+
 test("malformed stored data is unreadable and cleared best effort", async () => {
   const { database, repository, state } = createHarness();
   state.display = accountA1;

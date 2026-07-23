@@ -1,4554 +1,6044 @@
-// Trace MV3 background service worker.
-// Receives metadata/progress messages from content scripts and sends them to the Trace API.
-// Stores only Trace extension prefs, overlay cache, and the Trace auth token used for API calls.
-// It never receives AO3/FFN passwords or cookies; URLs are injected by `npm run build`.
-const ext = typeof browser !== "undefined" ? browser : chrome;
-
+// Generated kernel runtime. Do not edit by hand.
 const TRACE_API_BASE = "https://api.tracefiction.com";
 const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
-
-const API_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/track`;
-const METADATA_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/metadata`;
-const LIBRARY_METADATA_REFRESH_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/library/metadata-refresh`;
-const FINISH_QUALIFICATION_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/finish-qualification`;
-const LIBRARY_OVERLAY_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/library-overlay`;
-const WORK_PREFERENCES_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/work-preferences`;
-const AO3_SAVED_FILTERS_SYNC_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/ao3-saved-filters/sync`;
-const LIBRARY_ENTRY_ENDPOINT_BASE = `${TRACE_API_BASE.replace(/\/$/, "")}/api/library`;
-const ACCOUNT_ME_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/account/me`;
-const IMPORT_BASE = `${TRACE_WEB_ORIGIN.replace(/\/$/, "")}/import`;
-const TRACE_HOME_URL = `${TRACE_WEB_ORIGIN.replace(/\/$/, "")}/`;
-const FIRST_STORY_ACTIVATION_URL = `${TRACE_WEB_ORIGIN.replace(/\/$/, "")}/?activation=extension-installed`;
-const AUTH_TOKEN_KEY = "authToken";
-const AUTH_STATE_KEY = "traceAuthState";
-const OVERLAY_STORAGE_KEY = "libraryOverlayCache";
-const TRACE_ACCOUNT_ID_KEY = "traceAccountId";
-const TRACE_API_BASE_STORAGE_KEY = "traceApiBase";
-const WORK_STATE_STORAGE_KEY = "traceWorkStatesV1";
-const AO3_SAVED_FILTERS_STORAGE_KEY = "traceAo3SavedFiltersV1";
-const AO3_SAVED_FILTERS_DELETED_KEY = "traceAo3SavedFiltersDeletedV1";
-const AO3_SAVED_FILTERS_SYNC_META_KEY = "traceAo3SavedFiltersSyncV1";
-const AO3_SAVED_FILTERS_CLIENT_ID_KEY = "traceAo3SavedFiltersClientIdV1";
-const LIBRARY_INVALIDATED_MESSAGE = "TRACE_LIBRARY_INVALIDATED";
-const EXTENSION_STATUS_QUERY_MESSAGE = "TRACE_EXTENSION_STATUS_QUERY";
-const EXTENSION_STATUS_PUSH_MESSAGE = "TRACE_EXTENSION_STATUS_PUSH";
-// Bounded wait for token verification before answering a status query, so a
-// cold service worker reports "connected" instead of a transient "unknown".
-const EXTENSION_STATUS_AUTH_SETTLE_WAIT_MS = 700;
-const EXTENSION_STATUS_PUSH_DEBOUNCE_MS = 120;
-const WORK_STATE_GET_MESSAGE = "TRACE_WORK_STATE_GET";
-const AO3_SAVED_FILTERS_SYNC_REQUEST_MESSAGE = "TRACE_AO3_SAVED_FILTERS_SYNC_REQUEST";
-const ARCHIVE_READINESS_KEY = "traceArchiveReadiness";
-const OPTIMISTIC_CHAPTER_FLOORS_MS = 20_000;
-const WORK_STATE_PENDING_TTL_MS = 2 * 60 * 1_000;
-const WORK_STATE_SETTLED_TTL_MS = 10 * 60 * 1_000;
-const WORK_STATE_INTERRUPTED_AFTER_MS = 30_000;
-const CRITICAL_REQUEST_TIMEOUT_MS = 10_000;
-const OVERLAY_REQUEST_TIMEOUT_MS = 3_000;
-const NATIVE_MESSAGE_TIMEOUT_MS = 5_000;
-const ARCHIVE_READINESS_ERROR_RECENT_MS = 24 * 60 * 60 * 1_000;
-const TRACE_FIRST_SAVE_SEEN_KEY = "traceFirstSaveSeen";
-const TRACE_LIBRARY_COUNT_KEY = "traceLibraryCount";
-// OVERLAY_PRO_KEY removed — overlay is available to all users
-const TRACE_USER_PRO_KEY = "traceUserPro";
-const PREF_AUTO_TRACK_KEY = "prefAutoTrackEnabled";
-const PREF_LIBRARY_INLAY_KEY = "prefLibraryInlayEnabled";
-const PREF_AO3_SAVED_FILTERS_KEY = "prefAo3SavedFiltersEnabled";
-const PREF_METADATA_IMPROVE_KEY = "prefMetadataImproveEnabled";
-const AUTH_STATE_VERIFICATION_VERSION = 1;
-const FIRST_STORY_ADD_MESSAGE = "TRACE_FIRST_STORY_ADD";
-const FIRST_STORY_FOCUS_ADD_MESSAGE = "TRACE_FIRST_STORY_FOCUS_ADD";
-const IOS_AUTH_TOKEN_REQUEST_MESSAGE = "TRACE_IOS_AUTH_TOKEN_REQUEST";
-const IOS_AUTH_REFRESH_REQUEST_MESSAGE = "TRACE_IOS_AUTH_REFRESH_REQUEST";
-const IOS_PENDING_FIRST_STORY_GET_MESSAGE = "TRACE_IOS_PENDING_FIRST_STORY_GET";
-const IOS_PENDING_FIRST_STORY_CLEAR_MESSAGE = "TRACE_IOS_PENDING_FIRST_STORY_CLEAR";
-const IOS_EXTENSION_HEARTBEAT_MESSAGE = "TRACE_IOS_EXTENSION_HEARTBEAT";
-const IOS_EXTENSION_HEARTBEAT_MIN_INTERVAL_MS = 5 * 60 * 1000;
-const IOS_NATIVE_APPLICATION_ID = "com.tracefiction.trace";
-const AO3_STORY_URL_RE =
-  /^https:\/\/(?:[^/]+\.)?(?:archiveofourown\.org|archiveofourown\.gay|archive\.transformativeworks\.org|ao3\.org)\/works\/\d+(?:\/chapters\/\d+)?(?:[?#].*)?$/i;
-const FFN_STORY_PATH_RE = /^\/s\/\d+(?:\/\d+)?(?:\/.*)?$/i;
-const AO3_SAVED_FILTER_CLIENT_ID_RE = /^[A-Za-z0-9._:-]{1,80}$/;
-const AO3_SAVED_FILTER_PARAM_KEY_RE =
-  /^(?:work_search|include_work_search|exclude_work_search)\[[a-z0-9_]+\](?:\[\])?$/;
-const AO3_SAVED_FILTER_MAX_NAME_LENGTH = 96;
-const AO3_SAVED_FILTER_MAX_CONTEXT_KEY_LENGTH = 240;
-const AO3_SAVED_FILTER_MAX_CONTEXT_LABEL_LENGTH = 120;
-const AO3_SAVED_FILTER_MAX_SUMMARY_PARTS = 5;
-const AO3_SAVED_FILTER_MAX_SUMMARY_PART_LENGTH = 64;
-const AO3_SAVED_FILTER_MAX_PARAMS = 80;
-const AO3_SAVED_FILTER_ACTIVE_LIMIT = 250;
-const AO3_SAVED_FILTER_SYNC_BATCH_LIMIT = 100;
-const AO3_SAVED_FILTER_SYNC_MAX_ITERATIONS = 10;
-const FIRST_STORY_FOCUS_RETRY_ATTEMPTS = 24;
-const FIRST_STORY_FOCUS_RETRY_MS = 250;
-const TRACK_CONFIRMATION_RETRY_DELAYS_MS = [0, 250, 750, 1500];
-const AUTH_VERIFICATION_RETRY_DELAYS_MS = [750, 2_500, 8_000];
-
-// 1. Token Management
-let bearerToken = null;
-let verifiedBearerToken = null;
-let authVerificationSeq = 0;
-let authStateWriteSeq = 0;
-let authStateContinuityFields = {};
-let workOperationSeq = 0;
-const optimisticChapterFloors = new Map();
-let ao3SavedFiltersSyncTimer = null;
-let ao3SavedFiltersSyncInFlight = false;
-let authVerificationRetryTimer = null;
-let initialAuthPromise = null;
-let iosNativeAuthBootstrapPromise = null;
-let traceUserProRefreshPromise = null;
-let workStateAccessQueue = Promise.resolve();
-
-class TraceRequestTimeoutError extends Error {
-  constructor() {
-    super("request_timeout");
-    this.name = "TraceRequestTimeoutError";
-  }
-}
-
-async function fetchWithTimeout(
-  url,
-  init = {},
-  timeoutMs = CRITICAL_REQUEST_TIMEOUT_MS,
-) {
-  let controller = null;
-  const requestInit = { ...init };
-  if (
-    !requestInit.signal &&
-    typeof AbortController !== "undefined"
-  ) {
-    controller = new AbortController();
-    requestInit.signal = controller.signal;
-  }
-
-  let timeoutId = null;
-  const timeout = new Promise((_, reject) => {
-    timeoutId = setTimeout(() => {
-      try {
-        controller?.abort();
-      } catch (_) {
-        /* ignore */
+(() => {
+  // src/extension-core/archive-readiness.mts
+  var ARCHIVE_RUN_THROTTLE_MS = 5 * 60 * 1e3;
+  var SYSTEM_CLOCK = Object.freeze({
+    now: () => Date.now()
+  });
+  var ArchiveReadinessService = class {
+    #receipts;
+    #permissions;
+    #clock;
+    #lastRunAttemptByHost = /* @__PURE__ */ new Map();
+    constructor(options) {
+      this.#receipts = options.receipts;
+      this.#permissions = options.permissions;
+      this.#clock = options.clock ?? SYSTEM_CLOCK;
+    }
+    async recordRun(input) {
+      const at = this.#clock.now();
+      const lastAttempt = this.#lastRunAttemptByHost.get(input.hostKind);
+      if (input.handoffId === void 0 && lastAttempt !== void 0 && at - lastAttempt < ARCHIVE_RUN_THROTTLE_MS) {
+        return { kind: "throttled" };
       }
-      reject(new TraceRequestTimeoutError());
-    }, timeoutMs);
-  });
-
-  try {
-    return await Promise.race([fetch(url, requestInit), timeout]);
-  } finally {
-    if (timeoutId != null) clearTimeout(timeoutId);
-  }
-}
-
-function shouldIgnoreSenderForAutoTrack(sender) {
-  if (!sender || typeof sender !== "object") return false;
-  if (typeof sender.frameId === "number" && sender.frameId !== 0) {
-    return true;
-  }
-  const lifecycle =
-    typeof sender.documentLifecycle === "string"
-      ? sender.documentLifecycle.toLowerCase()
-      : "";
-  return lifecycle === "prerender" || lifecycle === "pending_deletion";
-}
-
-function setBadge(tabId, text, color) {
-  if (!tabId) return;
-  ext.action.setBadgeText({ text, tabId });
-  if (color) {
-    ext.action.setBadgeBackgroundColor({ color, tabId });
-  }
-}
-
-function clearBadge(tabId) {
-  if (!tabId) return;
-  ext.action.setBadgeText({ text: "", tabId });
-}
-
-const SETTLED_AUTH_PUSH_STATES = new Set([
-  "connected",
-  "signed_out",
-  "reconnect_required",
-  "error",
-]);
-
-function persistAuthState(nextState) {
-  const writeSeq = ++authStateWriteSeq;
-  const preservesConnection =
-    nextState?.state === "connected" || nextState?.state === "unknown";
-  if (preservesConnection) {
-    authStateContinuityFields = {
-      ...authStateContinuityFields,
-      ...preservedConnectedAuthStateFields(nextState),
-    };
-  } else if (
-    nextState?.state === "signed_out" ||
-    nextState?.state === "reconnect_required" ||
-    nextState?.state === "error"
-  ) {
-    authStateContinuityFields = {};
-  }
-  const write = (previousState = null) => {
-    if (writeSeq !== authStateWriteSeq) return;
-    const preserved = preservesConnection
-      ? {
-          ...preservedConnectedAuthStateFields(previousState),
-          ...authStateContinuityFields,
-        }
-      : {};
-    const state = {
-      updatedAt: new Date().toISOString(),
-      ...preserved,
-      ...nextState,
-    };
-    if (preservesConnection) {
-      authStateContinuityFields = preservedConnectedAuthStateFields(state);
-    }
-    ext.storage.local.set({ [AUTH_STATE_KEY]: state });
-    // Only settled outcomes are pushed; transient "checking" states would
-    // downgrade the page UI for no reason.
-    if (SETTLED_AUTH_PUSH_STATES.has(state.state)) {
-      scheduleExtensionStatusPush();
-    }
-  };
-
-  try {
-    ext.storage.local.get([AUTH_STATE_KEY], (res) => {
-      const previousState =
-        res?.[AUTH_STATE_KEY] && typeof res[AUTH_STATE_KEY] === "object"
-          ? res[AUTH_STATE_KEY]
-          : null;
-      write(previousState);
-    });
-  } catch (_) {
-    write();
-  }
-}
-
-function preservedConnectedAuthStateFields(previousState) {
-  if (!previousState || typeof previousState !== "object") return {};
-  const preserved = {};
-  if (previousState.firstSaveSeen === true) preserved.firstSaveSeen = true;
-  for (const key of [
-    "lastQuickAddAt",
-    "lastTrackSuccessAt",
-    "lastReaderStatusAt",
-    "lastWorkPreferenceAt",
-    "lastVerifiedAccountId",
-    "authSource",
-    "accountVerifiedAt",
-  ]) {
-    if (typeof previousState[key] === "string") preserved[key] = previousState[key];
-  }
-  if (previousState.authVerificationVersion === AUTH_STATE_VERIFICATION_VERSION) {
-    preserved.authVerificationVersion = AUTH_STATE_VERIFICATION_VERSION;
-  }
-  return preserved;
-}
-
-function setConnectedState(extra = {}) {
-  persistAuthState({
-    state: "connected",
-    message: "Extension connected to your Trace account.",
-    helpUrl: TRACE_HOME_URL,
-    ...extra,
-  });
-}
-
-function setVerifiedConnectedState(extra = {}) {
-  setConnectedState({
-    ...extra,
-    authVerificationVersion: AUTH_STATE_VERIFICATION_VERSION,
-    accountVerifiedAt: new Date().toISOString(),
-  });
-}
-
-function setAuthenticatedActionConnectedState(extra = {}) {
-  if (bearerToken) {
-    authVerificationSeq += 1;
-    clearAuthVerificationRetry();
-    verifiedBearerToken = bearerToken;
-  }
-  setVerifiedConnectedState(extra);
-}
-
-function setCheckingState(extra = {}) {
-  persistAuthState({
-    state: "unknown",
-    message: "Checking your Trace account connection.",
-    helpUrl: TRACE_HOME_URL,
-    ...extra,
-  });
-}
-
-function setSignedOutState(extra = {}) {
-  persistAuthState({
-    state: "signed_out",
-    message:
-      "Open Trace in this browser and sign in. Already signed in? Open any Trace page and we’ll connect automatically.",
-    helpUrl: TRACE_HOME_URL,
-    ...extra,
-  });
-}
-
-function setReconnectState(message, extra = {}) {
-  persistAuthState({
-    state: "reconnect_required",
-    message,
-    helpUrl: TRACE_HOME_URL,
-    ...extra,
-  });
-}
-
-function setErrorState(message, extra = {}) {
-  persistAuthState({
-    state: "error",
-    message,
-    helpUrl: TRACE_HOME_URL,
-    ...extra,
-  });
-}
-
-function setUpgradeState(message, extra = {}) {
-  persistAuthState({
-    state: "upgrade_required",
-    message,
-    helpUrl: TRACE_HOME_URL,
-    ...extra,
-  });
-}
-
-/** Auto-track failed but session token may still be valid; manual import does not use this POST. */
-function setConnectedWithSyncWarning(message, extra = {}) {
-  persistAuthState({
-    state: "connected",
-    message,
-    helpUrl: TRACE_HOME_URL,
-    ...extra,
-  });
-}
-
-function clearAuthVerificationRetry() {
-  if (!authVerificationRetryTimer) return;
-  try {
-    clearTimeout(authVerificationRetryTimer);
-  } catch (_) {
-    /* ignore */
-  }
-  authVerificationRetryTimer = null;
-}
-
-function authVerificationRetryAttempt(extra = {}) {
-  const attempt = Number(extra.retryAttempt || 0);
-  return Number.isFinite(attempt) && attempt > 0 ? Math.trunc(attempt) : 0;
-}
-
-function scheduleAuthVerificationRetry(token, extra = {}) {
-  const attempt = authVerificationRetryAttempt(extra);
-  const delayMs = AUTH_VERIFICATION_RETRY_DELAYS_MS[attempt];
-  if (delayMs == null) return false;
-  clearAuthVerificationRetry();
-  authVerificationRetryTimer = setTimeout(() => {
-    authVerificationRetryTimer = null;
-    void verifyTraceAccountToken(token, {
-      ...extra,
-      retryAttempt: attempt + 1,
-      lastTokenSyncAt: extra.lastTokenSyncAt || new Date().toISOString(),
-    });
-  }, delayMs);
-  return true;
-}
-
-function accountVerificationRetryingState(lastTokenSyncAt, extra = {}) {
-  const preserveVerifiedConnection = extra.preserveVerifiedConnection === true;
-  const stateExtra = { ...extra };
-  delete stateExtra.preserveVerifiedConnection;
-  if (preserveVerifiedConnection) {
-    setConnectedWithSyncWarning(
-      "Rechecking your Trace account connection in the background.",
-      {
-        lastTokenSyncAt,
-        lastAccountCheckRetryAt: new Date().toISOString(),
-        ...stateExtra,
-      },
-    );
-    return;
-  }
-  setCheckingState({
-    message: "Checking your Trace account connection. Retrying shortly.",
-    lastTokenSyncAt,
-    lastAccountCheckRetryAt: new Date().toISOString(),
-    ...stateExtra,
-  });
-}
-
-function clearToken() {
-  authVerificationSeq += 1;
-  clearAuthVerificationRetry();
-  bearerToken = null;
-  verifiedBearerToken = null;
-  authStateContinuityFields = {};
-  optimisticChapterFloors.clear();
-  try {
-    ext.storage.local.remove([
-      AUTH_TOKEN_KEY,
-      TRACE_ACCOUNT_ID_KEY,
-      TRACE_USER_PRO_KEY,
-      OVERLAY_STORAGE_KEY,
-      WORK_STATE_STORAGE_KEY,
-      TRACE_FIRST_SAVE_SEEN_KEY,
-      TRACE_LIBRARY_COUNT_KEY,
-    ]);
-    // A work-state mutation that was already queued must not restore data
-    // after logout clears the account-scoped cache.
-    void clearWorkStates();
-  } catch (_) {
-    /* ignore */
-  }
-}
-
-function detectBrowserKind() {
-  try {
-    const url =
-      ext.runtime && typeof ext.runtime.getURL === "function"
-        ? ext.runtime.getURL("")
-        : "";
-    if (/^chrome-extension:\/\//i.test(url)) return "chrome";
-    if (/^moz-extension:\/\//i.test(url)) return "firefox";
-    if (/^safari-web-extension:\/\//i.test(url)) return "safari";
-  } catch (_) {
-    /* ignore */
-  }
-  return "unknown";
-}
-
-function hasCurrentSessionVerifiedToken(authState, token) {
-  return (
-    Boolean(token) &&
-    verifiedBearerToken === token &&
-    authState?.authVerificationVersion === AUTH_STATE_VERIFICATION_VERSION &&
-    toEpochMillis(authState?.accountVerifiedAt) != null
-  );
-}
-
-function hasPersistedVerifiedConnection(snapshot, token) {
-  const storedToken =
-    typeof snapshot?.[AUTH_TOKEN_KEY] === "string"
-      ? snapshot[AUTH_TOKEN_KEY].trim()
-      : "";
-  const authState = snapshot?.[AUTH_STATE_KEY];
-  return (
-    Boolean(token) &&
-    storedToken === token &&
-    (authState?.state === "connected" || authState?.state === "unknown") &&
-    authState?.authVerificationVersion === AUTH_STATE_VERIFICATION_VERSION &&
-    toEpochMillis(authState?.accountVerifiedAt) != null
-  );
-}
-
-function normalizeStatusAuthState(authState, token) {
-  const rawState = authState?.state;
-  const hasToken = Boolean(token);
-  if (rawState === "connected" && hasCurrentSessionVerifiedToken(authState, token)) {
-    return "connected";
-  }
-  if (rawState === "connected" && hasToken) return "unknown";
-  if (rawState === "signed_out") return "signed_out";
-  if (rawState === "reconnect_required") return "reconnect_required";
-  if (rawState === "error") return "error";
-  if (rawState === "unknown") return "unknown";
-  if (hasToken) return "unknown";
-  return "signed_out";
-}
-
-function toEpochMillis(value) {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.trunc(value);
-  }
-  if (typeof value === "string") {
-    const parsed = Date.parse(value);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return null;
-}
-
-function normalizeArchiveHostKind(value) {
-  if (value === "ao3" || value === "ffn" || value === "unknown") {
-    return value;
-  }
-  return null;
-}
-
-function normalizeArchiveActionKind(value) {
-  if (
-    value === "track" ||
-    value === "quick_add" ||
-    value === "import" ||
-    value === "metadata" ||
-    value === "unknown"
-  ) {
-    return value;
-  }
-  return null;
-}
-
-function normalizeArchiveErrorKind(value) {
-  if (
-    value === "permission" ||
-    value === "unsupported_page" ||
-    value === "auth" ||
-    value === "parser" ||
-    value === "network" ||
-    value === "unknown"
-  ) {
-    return value;
-  }
-  return null;
-}
-
-function normalizeIosHandoffId(value) {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return /^[A-Za-z0-9_-]{1,128}$/.test(trimmed) ? trimmed : null;
-}
-
-function archiveHostKindFromPayload(payload) {
-  let source = "";
-  if (payload && typeof payload.s === "string") {
-    source = payload.s;
-  } else if (payload?.item && typeof payload.item.src === "string") {
-    source = payload.item.src;
-  } else if (Array.isArray(payload?.items) && typeof payload.items[0]?.src === "string") {
-    source = payload.items[0].src;
-  } else if (Array.isArray(payload?.items) && typeof payload.items[0]?.source === "string") {
-    source = payload.items[0].source;
-  }
-  if (source === "ao3" || source === "ffn") return source;
-  return "unknown";
-}
-
-function archiveHostKindFromTabContext(tabContext) {
-  const site = tabContext && typeof tabContext.site === "string" ? tabContext.site : "";
-  if (site === "ao3" || site === "ffn") return site;
-  return "unknown";
-}
-
-function tabContextLooksLikeArchive(tabContext) {
-  return (
-    tabContext?.kind === "supported_story" ||
-    tabContext?.kind === "supported_archive" ||
-    tabContext?.kind === "blocked_archive"
-  );
-}
-
-function sanitizeArchiveReadiness(raw) {
-  if (!raw || typeof raw !== "object") return {};
-  const out = {};
-  const lastArchiveSeenAt = toEpochMillis(raw.lastArchiveSeenAt);
-  const lastArchiveHostKind = normalizeArchiveHostKind(raw.lastArchiveHostKind);
-  const lastArchiveActionAt = toEpochMillis(raw.lastArchiveActionAt);
-  const lastArchiveActionKind = normalizeArchiveActionKind(
-    raw.lastArchiveActionKind,
-  );
-  const lastArchiveErrorAt = toEpochMillis(raw.lastArchiveErrorAt);
-  const lastArchiveErrorKind = normalizeArchiveErrorKind(raw.lastArchiveErrorKind);
-
-  if (lastArchiveSeenAt != null) {
-    out.lastArchiveSeenAt = lastArchiveSeenAt;
-  }
-  if (lastArchiveHostKind) {
-    out.lastArchiveHostKind = lastArchiveHostKind;
-  }
-  if (lastArchiveActionAt != null) {
-    out.lastArchiveActionAt = lastArchiveActionAt;
-  }
-  if (lastArchiveActionKind) {
-    out.lastArchiveActionKind = lastArchiveActionKind;
-  }
-  if (
-    lastArchiveErrorKind &&
-    lastArchiveErrorAt != null &&
-    Date.now() - lastArchiveErrorAt <= ARCHIVE_READINESS_ERROR_RECENT_MS
-  ) {
-    out.lastArchiveErrorKind = lastArchiveErrorKind;
-  }
-
-  return out;
-}
-
-function archiveReadinessFromLegacyAuthState(authState) {
-  if (!authState || typeof authState !== "object") return {};
-  const quickAddAt = toEpochMillis(authState.lastQuickAddAt);
-  const trackAt = toEpochMillis(authState.lastTrackSuccessAt);
-  if (quickAddAt == null && trackAt == null) return {};
-
-  if (quickAddAt != null && (trackAt == null || quickAddAt >= trackAt)) {
-    return {
-      lastArchiveActionAt: quickAddAt,
-      lastArchiveActionKind: "quick_add",
-    };
-  }
-
-  return {
-    lastArchiveActionAt: trackAt,
-    lastArchiveActionKind: "track",
-  };
-}
-
-function applyArchiveReadiness(status, archiveReadiness, authState) {
-  const legacy = archiveReadinessFromLegacyAuthState(authState);
-  const merged = { ...legacy, ...archiveReadiness };
-
-  if (typeof merged.lastArchiveSeenAt === "number") {
-    status.lastArchiveSeenAt = merged.lastArchiveSeenAt;
-  }
-  if (normalizeArchiveHostKind(merged.lastArchiveHostKind)) {
-    status.lastArchiveHostKind = merged.lastArchiveHostKind;
-  }
-  if (typeof merged.lastArchiveActionAt === "number") {
-    status.lastArchiveActionAt = merged.lastArchiveActionAt;
-  }
-  if (normalizeArchiveActionKind(merged.lastArchiveActionKind)) {
-    status.lastArchiveActionKind = merged.lastArchiveActionKind;
-  }
-  if (normalizeArchiveErrorKind(merged.lastArchiveErrorKind)) {
-    status.lastArchiveErrorKind = merged.lastArchiveErrorKind;
-  }
-}
-
-const lastIosHeartbeatAtByHost = Object.create(null);
-
-function collectGrantedOriginPermissions() {
-  return new Promise((resolve) => {
-    if (!ext.permissions || typeof ext.permissions.getAll !== "function") {
-      resolve(null);
-      return;
-    }
-
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      resolve(Array.isArray(value) ? value : null);
-    };
-
-    try {
-      const callback = (result) => {
-        if (ext.runtime.lastError) {
-          finish(null);
-          return;
-        }
-        finish(result?.origins);
-      };
-      const maybePromise = ext.permissions.getAll(callback);
-      if (maybePromise && typeof maybePromise.then === "function") {
-        maybePromise
-          .then((result) => finish(result?.origins))
-          .catch(() => finish(null));
-      }
-    } catch (_) {
-      finish(null);
-    }
-  });
-}
-
-// Confirmed-save action kinds: the server accepted the story, so the iOS
-// wizard may claim "in your library". Everything else only proves the
-// content script ran (i.e. Safari's site permission is granted).
-function isConfirmedSaveActionKind(actionKind) {
-  return actionKind === "track" || actionKind === "quick_add";
-}
-
-/** hostKind derived from the sender's tab URL, never from the payload. */
-function archiveHostKindFromSenderUrl(rawUrl) {
-  if (typeof rawUrl !== "string" || !rawUrl) return null;
-  try {
-    const url = new URL(rawUrl);
-    if (url.protocol !== "https:") return null;
-    if (isAo3Host(url.hostname)) return "ao3";
-    if (isFfnHost(url.hostname)) return "ffn";
-  } catch (_) {
-    /* fall through */
-  }
-  return null;
-}
-
-// iOS cannot read Safari's per-site permission state, so the app treats "a
-// content script actually reached the background on an archive host" as the
-// grant signal. Send that receipt immediately. `permissions.getAll()` is
-// useful diagnostic metadata, but must never delay the proof of a real run or
-// be confused with a native query of current Safari access. Confirmed saves
-// and handoff receipts bypass the regular throttle; a worker restart simply
-// re-sends an idempotent record.
-function maybeSendIosArchiveHeartbeat(hostKind, actionKind, handoffId) {
-  if (!canSendNativeMessage()) return;
-  const key = hostKind || "unknown";
-  const now = Date.now();
-  const confirmedSave = isConfirmedSaveActionKind(actionKind);
-  const normalizedHandoffId = normalizeIosHandoffId(handoffId);
-  const last = lastIosHeartbeatAtByHost[key] || 0;
-  if (
-    !confirmedSave &&
-    !normalizedHandoffId &&
-    now - last < IOS_EXTENSION_HEARTBEAT_MIN_INTERVAL_MS
-  ) {
-    return;
-  }
-  lastIosHeartbeatAtByHost[key] = now;
-
-  const message = {
-    type: IOS_EXTENSION_HEARTBEAT_MESSAGE,
-    hostKind: key,
-    at: now,
-  };
-  if (confirmedSave) {
-    message.action = actionKind;
-  }
-  if (normalizedHandoffId) {
-    message.handoffId = normalizedHandoffId;
-  }
-  void sendIosNativeMessage(message);
-
-  void collectGrantedOriginPermissions().then((grantedOrigins) => {
-    if (!grantedOrigins) return;
-    return sendIosNativeMessage({
-      type: IOS_EXTENSION_HEARTBEAT_MESSAGE,
-      hostKind: key,
-      // This snapshot may resolve after the core run receipt, so stamp the
-      // time the permission API actually replied rather than reusing the run
-      // timestamp. It remains diagnostic metadata, not access proof.
-      at: Date.now(),
-      permissionSnapshot: true,
-      grantedOrigins,
-    });
-  });
-}
-
-function recordArchiveReadiness(event = {}) {
-  const now = Date.now();
-  const hostKind = normalizeArchiveHostKind(event.hostKind) || "unknown";
-  maybeSendIosArchiveHeartbeat(
-    hostKind,
-    normalizeArchiveActionKind(event.actionKind),
-    event.handoffId,
-  );
-  const actionKind = normalizeArchiveActionKind(event.actionKind);
-  const errorKind = normalizeArchiveErrorKind(event.errorKind);
-  const patch = {};
-
-  if (event.seen !== false) {
-    patch.lastArchiveSeenAt = now;
-    patch.lastArchiveHostKind = hostKind;
-  }
-  if (actionKind) {
-    patch.lastArchiveActionAt = now;
-    patch.lastArchiveActionKind = actionKind;
-    patch.lastArchiveErrorKind = null;
-    patch.lastArchiveErrorAt = null;
-  }
-  if (errorKind) {
-    patch.lastArchiveErrorKind = errorKind;
-    patch.lastArchiveErrorAt = now;
-  }
-  if (Object.keys(patch).length === 0) return;
-
-  try {
-    ext.storage.local.get([ARCHIVE_READINESS_KEY], (res) => {
-      if (ext.runtime.lastError) return;
-      const prev =
-        res && res[ARCHIVE_READINESS_KEY] && typeof res[ARCHIVE_READINESS_KEY] === "object"
-          ? res[ARCHIVE_READINESS_KEY]
-          : {};
-      const next = { ...prev };
-      for (const [key, value] of Object.entries(patch)) {
-        if (value == null) {
-          delete next[key];
-        } else {
-          next[key] = value;
-        }
-      }
-      ext.storage.local.set({ [ARCHIVE_READINESS_KEY]: next });
-    });
-  } catch (_) {
-    /* best-effort local readiness only */
-  }
-}
-
-function recordArchiveActionFromPayload(payload, actionKind) {
-  recordArchiveReadiness({
-    hostKind: archiveHostKindFromPayload(payload),
-    actionKind,
-  });
-}
-
-function recordArchiveIssueFromPayload(payload, errorKind) {
-  recordArchiveReadiness({
-    hostKind: archiveHostKindFromPayload(payload),
-    errorKind,
-  });
-}
-
-function hasFirstSaveSignal(authState, firstSaveSeen) {
-  return (
-    firstSaveSeen === true ||
-    authState?.firstSaveSeen === true ||
-    Boolean(authState?.lastQuickAddAt) ||
-    Boolean(authState?.lastTrackSuccessAt) ||
-    Boolean(authState?.lastReaderStatusAt)
-  );
-}
-
-function safeUnknownExtensionStatus() {
-  return {
-    installed: true,
-    connected: false,
-    authState: "unknown",
-    browserKind: detectBrowserKind(),
-    capabilities: { firstStoryAdd: true },
-  };
-}
-
-function buildExtensionStatus(snapshot = {}) {
-  const authState =
-    snapshot[AUTH_STATE_KEY] && typeof snapshot[AUTH_STATE_KEY] === "object"
-      ? snapshot[AUTH_STATE_KEY]
-      : null;
-  const storedToken =
-    typeof snapshot[AUTH_TOKEN_KEY] === "string"
-      ? snapshot[AUTH_TOKEN_KEY].trim()
-      : "";
-  const tokenForStatus = storedToken || bearerToken || "";
-  const normalizedAuthState = normalizeStatusAuthState(authState, tokenForStatus);
-  const status = {
-    installed: true,
-    connected: normalizedAuthState === "connected",
-    authState: normalizedAuthState,
-    firstSaveSeen: hasFirstSaveSignal(
-      authState,
-      snapshot[TRACE_FIRST_SAVE_SEEN_KEY] === true,
-    ),
-    browserKind: detectBrowserKind(),
-    capabilities: { firstStoryAdd: true },
-  };
-  const lastTokenSyncAt = toEpochMillis(authState?.lastTokenSyncAt);
-  if (lastTokenSyncAt != null) {
-    status.lastTokenSyncAt = lastTokenSyncAt;
-  }
-  applyArchiveReadiness(
-    status,
-    sanitizeArchiveReadiness(snapshot[ARCHIVE_READINESS_KEY]),
-    authState,
-  );
-  return status;
-}
-
-function markFirstSaveSeen() {
-  try {
-    ext.storage.local.set({ [TRACE_FIRST_SAVE_SEEN_KEY]: true });
-  } catch (_) {
-    /* ignore */
-  }
-  // First-save evidence flips the web setup flow to "complete"; let open
-  // Trace tabs learn immediately instead of waiting for a manual re-check.
-  scheduleExtensionStatusPush();
-}
-
-function externalStoryKeyFromItem(item) {
-  if (!item || !item.src || !item.u) return null;
-  const url = String(item.u || "");
-  if (item.src === "ao3") {
-    const ao3 = url.match(/\/works\/(\d+)/);
-    return ao3 ? `ao3:${ao3[1]}` : null;
-  }
-  if (item.src === "ffn") {
-    const ffn = url.match(/\/s\/(\d+)/);
-    return ffn ? `ffn:${ffn[1]}` : null;
-  }
-  return null;
-}
-
-function recordOptimisticChapterFloor(item) {
-  const key = externalStoryKeyFromItem(item);
-  const chapter = item && typeof item.chn === "number" ? item.chn : null;
-  if (!key || chapter == null || !Number.isFinite(chapter) || chapter < 1) {
-    return;
-  }
-  const prev = optimisticChapterFloors.get(key);
-  const nextCurrent = prev
-    ? Math.max(prev.current || 0, Math.trunc(chapter))
-    : Math.trunc(chapter);
-  optimisticChapterFloors.set(key, {
-    current: nextCurrent,
-    total:
-      item && typeof item.cht === "number" && Number.isFinite(item.cht)
-        ? Math.trunc(item.cht)
-        : prev && typeof prev.total === "number"
-          ? prev.total
-          : null,
-    at: Date.now(),
-  });
-}
-
-function applyOptimisticChapterFloors(entries) {
-  const now = Date.now();
-  for (const [key, floor] of optimisticChapterFloors.entries()) {
-    if (!floor || now - floor.at > OPTIMISTIC_CHAPTER_FLOORS_MS) {
-      optimisticChapterFloors.delete(key);
-      continue;
-    }
-    const existing = entries[key];
-    if (!existing || !existing.chapters) continue;
-    const current =
-      typeof existing.chapters.current === "number"
-        ? existing.chapters.current
-        : null;
-    if (current == null) continue;
-    if (current >= floor.current) {
-      optimisticChapterFloors.delete(key);
-      continue;
-    }
-    entries[key] = {
-      ...existing,
-      chapters: {
-        current: floor.current,
-        total:
-          existing.chapters.total != null
-            ? existing.chapters.total
-            : floor.total,
-      },
-    };
-  }
-  return entries;
-}
-
-function accountIdFromAccountMe(json) {
-  return json && typeof json.account_id === "string" && json.account_id.trim()
-    ? json.account_id.trim()
-    : null;
-}
-
-function currentAccountIdFromSnapshot(snapshot = {}) {
-  const stored =
-    typeof snapshot[TRACE_ACCOUNT_ID_KEY] === "string"
-      ? snapshot[TRACE_ACCOUNT_ID_KEY].trim()
-      : "";
-  if (stored) return stored;
-  const authState = snapshot[AUTH_STATE_KEY];
-  const verified =
-    authState && typeof authState.lastVerifiedAccountId === "string"
-      ? authState.lastVerifiedAccountId.trim()
-      : "";
-  return verified || "unknown";
-}
-
-function normalizedTraceApiBase() {
-  return TRACE_API_BASE.replace(/\/$/, "");
-}
-
-function overlayCacheContextFromSnapshot(snapshot = {}) {
-  return {
-    apiBase: normalizedTraceApiBase(),
-    accountId: currentAccountIdFromSnapshot(snapshot),
-    contextVersion: 1,
-  };
-}
-
-function scopedOverlayCache(data = {}, snapshot = {}) {
-  return {
-    ...data,
-    ...overlayCacheContextFromSnapshot(snapshot),
-  };
-}
-
-function isOlderOverlaySyncVersion(incoming, current) {
-  const incomingAt = toEpochMillis(incoming);
-  const currentAt = toEpochMillis(current);
-  return incomingAt != null && currentAt != null && incomingAt < currentAt;
-}
-
-async function ensureRuntimeContext() {
-  const apiBase = normalizedTraceApiBase();
-  const snapshot = await storageGetLocal([TRACE_API_BASE_STORAGE_KEY, OVERLAY_STORAGE_KEY]);
-  const patch = { [TRACE_API_BASE_STORAGE_KEY]: apiBase };
-  const previousApiBase =
-    typeof snapshot[TRACE_API_BASE_STORAGE_KEY] === "string"
-      ? snapshot[TRACE_API_BASE_STORAGE_KEY].replace(/\/$/, "")
-      : "";
-  const cache = snapshot[OVERLAY_STORAGE_KEY];
-  const cacheApiBase =
-    cache && typeof cache.apiBase === "string" ? cache.apiBase.replace(/\/$/, "") : "";
-  if (
-    (previousApiBase && previousApiBase !== apiBase) ||
-    (cacheApiBase && cacheApiBase !== apiBase)
-  ) {
-    patch[OVERLAY_STORAGE_KEY] = scopedOverlayCache({
-      entries: {},
-      syncVersion: new Date(0).toISOString(),
-    });
-  }
-  await storageSetLocal(patch);
-}
-
-function workStateStorageKey(accountId, workKey) {
-  return `${accountId || "unknown"}|${workKey}`;
-}
-
-function normalizeWorkStates(raw, now = Date.now()) {
-  const out = {
-    version: 1,
-    accountId:
-      raw && typeof raw.accountId === "string" ? raw.accountId : null,
-    updatedAt:
-      raw && typeof raw.updatedAt === "string"
-        ? raw.updatedAt
-        : new Date(now).toISOString(),
-    items: {},
-  };
-  const items = raw && raw.items && typeof raw.items === "object" ? raw.items : {};
-  for (const [key, value] of Object.entries(items)) {
-    if (!value || typeof value !== "object") continue;
-    if (typeof value.workKey !== "string" || !value.workKey) continue;
-    const expiresAt = Number(value.expiresAt || 0);
-    if (Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt <= now) continue;
-    out.items[key] = value;
-  }
-  return out;
-}
-
-function publicWorkState(state) {
-  if (!state || typeof state !== "object") return null;
-  return {
-    accountId: typeof state.accountId === "string" ? state.accountId : null,
-    workKey: state.workKey,
-    operation: state.operation || null,
-    status: state.status || "unknown",
-    startedAt: state.startedAt || null,
-    updatedAt: state.updatedAt || null,
-    expiresAt: state.expiresAt || null,
-    entryId: state.entryId || null,
-    entry: state.entry || null,
-    syncVersion: state.syncVersion || null,
-    error: state.error || null,
-  };
-}
-
-function savedResultFromWorkState(state) {
-  if (!state || state.status !== "saved") return null;
-  const out = state.entryId
-    ? { ok: true, entryId: state.entryId }
-    : { ok: true };
-  out.state = state;
-  return out;
-}
-
-async function readWorkStateSnapshot() {
-  const snapshot = await storageGetLocal([
-    WORK_STATE_STORAGE_KEY,
-    TRACE_ACCOUNT_ID_KEY,
-    AUTH_STATE_KEY,
-  ]);
-  const now = Date.now();
-  const accountId = currentAccountIdFromSnapshot(snapshot);
-  return {
-    accountId,
-    now,
-    states: normalizeWorkStates(snapshot[WORK_STATE_STORAGE_KEY], now),
-  };
-}
-
-async function writeWorkStates(states) {
-  states.updatedAt = new Date().toISOString();
-  await storageSetLocal({ [WORK_STATE_STORAGE_KEY]: states });
-}
-
-async function clearWorkStates() {
-  return withWorkStateAccess(async () => {
-    try {
-      await new Promise((resolve) => {
-        ext.storage.local.remove(WORK_STATE_STORAGE_KEY, resolve);
+      this.#lastRunAttemptByHost.set(input.hostKind, at);
+      const receipt = Object.freeze({
+        hostKind: input.hostKind,
+        at,
+        ...input.handoffId === void 0 ? {} : { handoffId: input.handoffId }
       });
-    } catch (_) {
-      /* ignore */
+      let published = false;
+      try {
+        published = await this.#receipts.publishRunReceipt(receipt);
+      } catch {
+        published = false;
+      }
+      if (!published) {
+        if (this.#lastRunAttemptByHost.get(input.hostKind) === at) {
+          this.#lastRunAttemptByHost.delete(input.hostKind);
+        }
+        return { kind: "unavailable" };
+      }
+      void this.#publishPermissionSnapshot(input.hostKind);
+      return { kind: "published" };
     }
+    async #publishPermissionSnapshot(hostKind2) {
+      let grantedOrigins = null;
+      try {
+        grantedOrigins = await this.#permissions.readGrantedOrigins();
+      } catch {
+        return;
+      }
+      if (grantedOrigins === null) return;
+      try {
+        await this.#receipts.publishPermissionSnapshot(Object.freeze({
+          hostKind: hostKind2,
+          at: this.#clock.now(),
+          grantedOrigins: Object.freeze([...grantedOrigins])
+        }));
+      } catch {
+      }
+    }
+  };
+
+  // src/extension-core/session-model.mts
+  var SESSION_ENVELOPE_VERSION = 1;
+  var INITIAL_SESSION_ENVELOPE = Object.freeze({
+    version: SESSION_ENVELOPE_VERSION,
+    epoch: 0,
+    desired: "disconnected",
+    accountId: null,
+    credentialRef: null
   });
-}
-
-function withWorkStateAccess(action) {
-  const run = workStateAccessQueue.then(action, action);
-  workStateAccessQueue = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  return run;
-}
-
-async function setWorkState(workKey, patch) {
-  if (!workKey) return null;
-  return withWorkStateAccess(async () => {
-    const snapshot = await readWorkStateSnapshot();
-    const accountId = snapshot.accountId;
-    const key = workStateStorageKey(accountId, workKey);
-    const previous = snapshot.states.items[key] || {};
-    const startsNewOperation =
-      patch.status === "pending" &&
-      typeof patch.operationId === "string" &&
-      patch.operationId.length > 0;
-    if (
-      !startsNewOperation &&
-      patch.operationId &&
-      previous.operationId &&
-      patch.operationId !== previous.operationId
-    ) {
-      return publicWorkState(previous);
+  var INITIAL_SESSION_MODEL = Object.freeze({
+    state: "initializing",
+    epoch: 0,
+    accountId: null,
+    publicationScope: null,
+    displayScope: null,
+    reason: "none"
+  });
+  function isRecord(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function isNullableIdentifier(value) {
+    return value === null || typeof value === "string" && value.length > 0;
+  }
+  function parseSessionEnvelope(raw) {
+    if (raw === null || raw === void 0) return { kind: "missing" };
+    if (!isRecord(raw)) {
+      return { kind: "invalid", reason: "malformed_envelope" };
     }
-    if (
-      previous.status === "saved" &&
-      patch.status !== "saved" &&
-      !startsNewOperation
-    ) {
-      return publicWorkState(previous);
+    if (raw.version !== SESSION_ENVELOPE_VERSION) {
+      return { kind: "invalid", reason: "unsupported_envelope" };
     }
-    const effectivePatch =
-      previous.status === "saved" && startsNewOperation
-        ? { ...patch, status: "saved" }
-        : patch;
-    const now = Date.now();
-    const status = effectivePatch.status || previous.status || "pending";
-    const ttl =
-      status === "pending" ? WORK_STATE_PENDING_TTL_MS : WORK_STATE_SETTLED_TTL_MS;
-    const next = {
-      ...previous,
-      ...effectivePatch,
-      accountId,
-      workKey,
-      status,
-      startedAt:
-        previous.startedAt || effectivePatch.startedAt || new Date(now).toISOString(),
-      updatedAt: new Date(now).toISOString(),
-      expiresAt: now + ttl,
+    if (!Number.isSafeInteger(raw.epoch) || raw.epoch < 0) {
+      return { kind: "invalid", reason: "malformed_envelope" };
+    }
+    if (raw.desired !== "disconnected" && raw.desired !== "connected") {
+      return { kind: "invalid", reason: "malformed_envelope" };
+    }
+    if (!isNullableIdentifier(raw.accountId) || !isNullableIdentifier(raw.credentialRef)) {
+      return { kind: "invalid", reason: "malformed_envelope" };
+    }
+    if (raw.desired === "disconnected" && (raw.accountId !== null || raw.credentialRef !== null)) {
+      return { kind: "invalid", reason: "malformed_envelope" };
+    }
+    return {
+      kind: "valid",
+      envelope: Object.freeze({
+        version: SESSION_ENVELOPE_VERSION,
+        epoch: raw.epoch,
+        desired: raw.desired,
+        accountId: raw.accountId,
+        credentialRef: raw.credentialRef
+      })
     };
-    snapshot.states.accountId = accountId;
-    snapshot.states.items[key] = next;
-    await writeWorkStates(snapshot.states);
-    return publicWorkState(next);
-  });
-}
-
-async function getWorkStateForKey(workKey) {
-  if (!workKey) return null;
-  return withWorkStateAccess(async () => {
-    const snapshot = await readWorkStateSnapshot();
-    const key = workStateStorageKey(snapshot.accountId, workKey);
-    let existing = snapshot.states.items[key] || null;
-    let changed = false;
-    if (existing?.status === "pending") {
-      const pendingAt =
-        toEpochMillis(existing.updatedAt) ?? toEpochMillis(existing.startedAt);
-      if (
-        pendingAt != null &&
-        snapshot.now - pendingAt >= WORK_STATE_INTERRUPTED_AFTER_MS
-      ) {
-        existing = {
-          ...existing,
-          status: "error",
-          error: "request_interrupted",
-          updatedAt: new Date(snapshot.now).toISOString(),
-          expiresAt: snapshot.now + WORK_STATE_SETTLED_TTL_MS,
+  }
+  function reduceSession(_model, event) {
+    switch (event.type) {
+      case "signed_out":
+        return {
+          state: "signed_out",
+          epoch: event.epoch,
+          accountId: null,
+          publicationScope: null,
+          displayScope: null,
+          reason: event.reason ?? "none"
         };
-        snapshot.states.items[key] = existing;
-        changed = true;
-      }
+      case "connecting":
+        return {
+          state: "connecting",
+          epoch: event.epoch,
+          accountId: null,
+          publicationScope: null,
+          displayScope: null,
+          reason: "none"
+        };
+      case "verifying":
+        return {
+          state: "verifying",
+          epoch: event.epoch,
+          accountId: event.accountId,
+          publicationScope: null,
+          displayScope: null,
+          reason: "none"
+        };
+      case "connected":
+        return {
+          state: "connected",
+          epoch: event.scope.epoch,
+          accountId: event.scope.accountId,
+          publicationScope: event.scope,
+          displayScope: event.scope,
+          reason: "none"
+        };
+      case "degraded":
+        return {
+          state: "degraded",
+          epoch: event.epoch,
+          accountId: event.displayScope?.accountId ?? null,
+          publicationScope: null,
+          displayScope: event.displayScope,
+          reason: event.reason
+        };
+      case "reconnect_required":
+        return {
+          state: "reconnect_required",
+          epoch: event.epoch,
+          accountId: null,
+          publicationScope: null,
+          displayScope: null,
+          reason: event.reason
+        };
     }
-    if (changed) await writeWorkStates(snapshot.states);
-    return publicWorkState(existing);
-  });
-}
-
-async function markWorkPending(workKey, operation) {
-  const operationId = `${Date.now()}:${++workOperationSeq}`;
-  await setWorkState(workKey, {
-    operation,
-    operationId,
-    status: "pending",
-    error: null,
-  });
-  return operationId;
-}
-
-async function markWorkSaved(workKey, data, fallbackEntryId, operationId = null) {
-  if (!workKey && data && typeof data.work_key === "string") {
-    workKey = data.work_key;
   }
-  if (!workKey) return null;
-  const entry =
-    data && data.entry && typeof data.entry === "object" ? data.entry : null;
-  if (!entry) return null;
-  const entryId =
-    (entry && typeof entry.entryId === "string" && entry.entryId) ||
-    (data && typeof data.entry_id === "string" && data.entry_id) ||
-    fallbackEntryId ||
-    null;
-  return setWorkState(workKey, {
-    ...(operationId ? { operationId } : {}),
-    status: "saved",
-    error: null,
-    entry,
-    entryId,
-    syncVersion:
-      data && typeof data.syncVersion === "string" ? data.syncVersion : null,
-  });
-}
-
-async function markWorkError(workKey, operation, error, operationId = null) {
-  if (!workKey) return null;
-  return setWorkState(workKey, {
-    operation,
-    ...(operationId ? { operationId } : {}),
-    status: "error",
-    error: error || "unknown_error",
-  });
-}
-
-async function reconcilePendingWorkStatesWithOverlay(entries, syncVersion) {
-  if (!entries || typeof entries !== "object") return;
-  return withWorkStateAccess(async () => {
-    const snapshot = await readWorkStateSnapshot();
-    let changed = false;
-    for (const [key, state] of Object.entries(snapshot.states.items)) {
-      if (!state || state.status !== "pending") continue;
-      const entry = entries[state.workKey];
-      if (!entry || typeof entry !== "object") continue;
-      const now = Date.now();
-      snapshot.states.items[key] = {
-        ...state,
-        status: "saved",
-        error: null,
-        entry,
-        entryId:
-          typeof entry.entryId === "string" ? entry.entryId : state.entryId || null,
-        syncVersion: typeof syncVersion === "string" ? syncVersion : null,
-        updatedAt: new Date(now).toISOString(),
-        expiresAt: now + WORK_STATE_SETTLED_TTL_MS,
-      };
-      changed = true;
-    }
-    if (changed) await writeWorkStates(snapshot.states);
-  });
-}
-
-function nonRegressingOverlayEntry(existing, incoming) {
-  if (!incoming || typeof incoming !== "object") return incoming;
-  if (!existing || typeof existing !== "object") return incoming;
-  const existingChapters = existing.chapters;
-  const incomingChapters = incoming.chapters;
-  if (!existingChapters || !incomingChapters) return incoming;
-
-  const existingCurrent = existingChapters.current;
-  const incomingCurrent = incomingChapters.current;
-  if (
-    typeof existingCurrent !== "number" ||
-    !Number.isFinite(existingCurrent) ||
-    typeof incomingCurrent !== "number" ||
-    !Number.isFinite(incomingCurrent)
-  ) {
-    return incoming;
+  function toSessionSnapshot(model) {
+    return Object.freeze({
+      state: model.state,
+      accountId: model.accountId,
+      canExecuteAuthenticated: model.publicationScope !== null,
+      reason: model.reason
+    });
+  }
+  function sameAccountScope(left, right) {
+    return left !== null && right !== null && left.accountId === right.accountId && left.epoch === right.epoch;
   }
 
-  const existingTotal = existingChapters.total;
-  const incomingTotal = incomingChapters.total;
-  const current = Math.max(existingCurrent, incomingCurrent);
-  const existingHasTotal =
-    typeof existingTotal === "number" && Number.isFinite(existingTotal);
-  const incomingHasTotal =
-    typeof incomingTotal === "number" && Number.isFinite(incomingTotal);
-  // A response for an older chapter must not roll back either part of the
-  // progress snapshot. At the same or a later chapter, however, the incoming
-  // total is authoritative: authors can delete or merge posted chapters, so a
-  // smaller total can be a correction rather than a regression.
-  const total =
-    incomingCurrent < existingCurrent
-      ? existingHasTotal
-        ? existingTotal
-        : incomingHasTotal
-          ? incomingTotal
-          : null
-      : incomingHasTotal
-        ? incomingTotal
-        : existingHasTotal
-          ? existingTotal
-          : null;
-  if (current === incomingCurrent && total === incomingChapters.total) {
-    return incoming;
+  // src/extension-core/account-scope.mts
+  function canSyncSavedFilters(publicationScope, repositoryScope) {
+    return sameAccountScope(publicationScope, repositoryScope);
   }
-  return {
-    ...incoming,
-    chapters: {
-      ...incomingChapters,
-      current,
-      total,
-    },
-  };
-}
 
-async function applyTrackResponseToOverlay(payload, data) {
-  if (!data || !data.entry || typeof data.entry !== "object") return null;
-  const workKey =
-    typeof data.work_key === "string" && data.work_key
-      ? data.work_key
-      : externalStoryKeyFromItem(payload && payload.item);
-  if (!workKey) return null;
-
-  const snapshot = await storageGetLocal([
-    OVERLAY_STORAGE_KEY,
-    TRACE_ACCOUNT_ID_KEY,
-    AUTH_STATE_KEY,
+  // src/extension-core/account-data.mts
+  var WORK_KEY_PATTERN = /^(ao3|ffn):[1-9][0-9]{0,19}$/;
+  var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  var ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+  var MAX_OVERLAY_RECORDS = 1e4;
+  var LEGACY_STATUSES = Object.freeze([
+    "PLANNING",
+    "READING",
+    "PAUSED",
+    "COMPLETED",
+    "DROPPED"
   ]);
-  const cache = snapshot[OVERLAY_STORAGE_KEY] || {};
-  const existingEntries =
-    cache.entries && typeof cache.entries === "object" ? cache.entries : {};
-  const entries = {
-    ...existingEntries,
-    [workKey]: nonRegressingOverlayEntry(existingEntries[workKey], data.entry),
-  };
-  const nextCache = scopedOverlayCache({
-    ...cache,
-    entries,
-    syncVersion:
-      typeof data.syncVersion === "string" &&
-      !isOlderOverlaySyncVersion(data.syncVersion, cache.syncVersion)
-        ? data.syncVersion
-        : cache.syncVersion || new Date().toISOString(),
-  }, snapshot);
-  await storageSetLocal({
-    [TRACE_API_BASE_STORAGE_KEY]: normalizedTraceApiBase(),
-    [OVERLAY_STORAGE_KEY]: nextCache,
-  });
-  return workKey;
-}
-
-function readOverlayEntryForItem(item) {
-  return new Promise((resolve) => {
-    const key = externalStoryKeyFromItem(item);
-    if (!key) {
-      resolve(null);
-      return;
-    }
-    try {
-      ext.storage.local.get([OVERLAY_STORAGE_KEY], (res) => {
-        if (ext.runtime.lastError) {
-          resolve(null);
-          return;
-        }
-        const cache = res && res[OVERLAY_STORAGE_KEY];
-        resolve(cache && cache.entries ? cache.entries[key] ?? null : null);
-      });
-    } catch (_) {
-      resolve(null);
-    }
-  });
-}
-
-async function confirmTrackedWorkState(
-  workKey,
-  payload,
-  data,
-  fallbackEntryId,
-  operationId,
-  options = {},
-) {
-  const responseWorkKey =
-    data && typeof data.work_key === "string" && data.work_key
-      ? data.work_key
-      : externalStoryKeyFromItem(payload && payload.item);
-  const confirmedWorkKey = responseWorkKey || workKey;
-  let state = await markWorkSaved(
-    confirmedWorkKey,
-    data,
-    fallbackEntryId,
-    operationId,
-  );
-  if (state && state.entry) {
-    await applyTrackResponseToOverlay(payload, {
-      work_key: confirmedWorkKey,
-      entry: state.entry,
-      syncVersion: state.syncVersion,
-    });
+  var CANONICAL_STATUSES = Object.freeze([
+    "SAVED",
+    "READING",
+    "CAUGHT_UP",
+    "PAUSED",
+    "FINISHED",
+    "DROPPED"
+  ]);
+  var WORK_STATUSES = Object.freeze([
+    "complete",
+    "wip",
+    "hiatus",
+    "abandoned",
+    "unknown"
+  ]);
+  var WORK_STATUS_PROVENANCE = Object.freeze(["source", "override", "unknown"]);
+  var CATCHUP_STATES = Object.freeze(["UP", "BEHIND", "UNKNOWN"]);
+  function isRecord2(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
   }
-  if (state || !confirmedWorkKey) return { workKey: confirmedWorkKey, state };
-  if (!options.allowOverlayCacheFallback) return { workKey: confirmedWorkKey, state };
-
-  const overlayEntry = await readOverlayEntryForItem(payload && payload.item);
-  if (overlayEntry && typeof overlayEntry === "object") {
-    state = await markWorkSaved(
-      confirmedWorkKey,
-      {
-        entry: overlayEntry,
-        entry_id:
-          (typeof overlayEntry.entryId === "string" && overlayEntry.entryId) ||
-          fallbackEntryId ||
-          null,
-      },
-      fallbackEntryId,
-      operationId,
-    );
+  function hasOnlyKeys(value, keys) {
+    return Object.keys(value).every((key) => keys.includes(key));
   }
-  return { workKey: confirmedWorkKey, state };
-}
-
-async function waitForTrackedWorkConfirmation(
-  workKey,
-  payload,
-  data,
-  fallbackEntryId,
-  operationId,
-) {
-  let confirmation = await confirmTrackedWorkState(
-    workKey,
-    payload,
-    data,
-    fallbackEntryId,
-    operationId,
-  );
-  if (confirmation.state || !confirmation.workKey) return confirmation;
-
-  for (const delayMs of TRACK_CONFIRMATION_RETRY_DELAYS_MS) {
-    if (delayMs > 0) {
-      await delay(delayMs);
-    }
-    const refreshed = await refreshLibraryOverlay();
-    confirmation = await confirmTrackedWorkState(
-      confirmation.workKey,
-      payload,
-      null,
-      fallbackEntryId,
-      operationId,
-      { allowOverlayCacheFallback: refreshed === true },
-    );
-    if (confirmation.state || !confirmation.workKey) return confirmation;
+  function isSafeInteger(value, minimum = 0) {
+    return Number.isSafeInteger(value) && value >= minimum;
   }
-
-  return confirmation;
-}
-
-async function reconcileUncertainTrackRequest(workKey, payload, operationId) {
-  const refreshed = await refreshLibraryOverlay();
-  if (!refreshed) return { workKey, state: null };
-  return confirmTrackedWorkState(
-    workKey,
-    payload,
-    null,
-    null,
-    operationId,
-    { allowOverlayCacheFallback: true },
-  );
-}
-
-async function finalizeConfirmedTrack(
-  payload,
-  sender,
-  confirmation,
-  entryId,
-  operation,
-) {
-  const isAutoTrack = operation === "auto_track";
-  const action = isAutoTrack ? "track" : "quick_add";
-  recordArchiveActionFromPayload(payload, action);
-  markFirstSaveSeen();
-  setAuthenticatedActionConnectedState({
-    firstSaveSeen: true,
-    [isAutoTrack ? "lastTrackSuccessAt" : "lastQuickAddAt"]:
-      new Date().toISOString(),
-  });
-  await signalLibraryInvalidated(action);
-  setBadge(sender?.tab?.id, "OK", "#0D7A5F");
-  setTimeout(() => clearBadge(sender?.tab?.id), 2000);
-  const confirmedEntryId = entryId || confirmation?.state?.entryId || null;
-  const out = confirmedEntryId
-    ? { ok: true, entryId: confirmedEntryId }
-    : { ok: true };
-  if (confirmation?.state) out.state = confirmation.state;
-  return out;
-}
-
-/** Best-effort Pro flag for gating Pro-only prefs (synced from GET /api/account/me). */
-function accountStoragePatch(json) {
-  const patch = {};
-  const accountId = accountIdFromAccountMe(json);
-  if (accountId) {
-    patch[TRACE_ACCOUNT_ID_KEY] = accountId;
+  function enumValue(values, value) {
+    return typeof value === "string" && values.includes(value) ? value : null;
   }
-  if (json && typeof json.pro === "boolean") {
-    patch[TRACE_USER_PRO_KEY] = json.pro;
+  function copyScope(value) {
+    if (!isRecord2(value) || !hasOnlyKeys(value, ["accountId", "epoch"])) return null;
+    if (typeof value.accountId !== "string" || value.accountId.trim() !== value.accountId) return null;
+    if (value.accountId.length === 0 || !isSafeInteger(value.epoch)) return null;
+    return Object.freeze({ accountId: value.accountId, epoch: value.epoch });
   }
-  if (json && typeof json.library_count === "number" && Number.isFinite(json.library_count)) {
-    patch[TRACE_LIBRARY_COUNT_KEY] = Math.max(0, Math.trunc(json.library_count));
-  }
-  return patch;
-}
-
-async function readResponseJson(response) {
-  if (!response || typeof response !== "object") return null;
-  try {
-    if (typeof response.clone === "function") {
-      return await response.clone().json();
-    }
-  } catch (_) {
-    /* fall through */
-  }
-  try {
-    if (typeof response.json === "function") {
-      return await response.json();
-    }
-  } catch (_) {
-    /* ignore */
-  }
-  return null;
-}
-
-function responsePayloadCode(payload) {
-  return payload && typeof payload.code === "string" ? payload.code : null;
-}
-
-function authFailureExtra(extra = {}) {
-  const out = {
-    lastHttpStatus: extra.status,
-  };
-  if (extra.code) out.lastAuthErrorCode = extra.code;
-  if (extra.actionAtKey) out[extra.actionAtKey] = new Date().toISOString();
-  return out;
-}
-
-async function applyAuthFailureResponse(response, extra = {}) {
-  if (!response || (response.status !== 401 && response.status !== 409)) {
-    return null;
-  }
-
-  const payload = await readResponseJson(response);
-  const code = responsePayloadCode(payload);
-  if (response.status === 409 && code !== "ACCOUNT_BOOTSTRAP_REQUIRED") {
-    return null;
-  }
-
-  clearToken();
-
-  if (response.status === 409) {
-    setReconnectState(
-      "Open Trace to finish account setup before using the extension.",
-      authFailureExtra({ ...extra, status: response.status, code }),
-    );
-    return "account_bootstrap_required";
-  }
-
-  if (code === "ACCOUNT_DELETED_STALE_TOKEN") {
-    setReconnectState(
-      "This Trace session belongs to a deleted account. Open Trace and sign in again.",
-      authFailureExtra({ ...extra, status: response.status, code }),
-    );
-    return "account_deleted_stale_token";
-  }
-
-  setReconnectState(
-    "Your Trace connection needs a refresh. Open Trace, then return here.",
-    authFailureExtra({ ...extra, status: response.status, code }),
-  );
-  return "auth_expired";
-}
-
-let pendingAuthVerification = null;
-
-function verifyTraceAccountToken(token, extra = {}) {
-  const verification = runTraceAccountTokenVerification(token, extra);
-  pendingAuthVerification = verification;
-  const clearPending = () => {
-    if (pendingAuthVerification === verification) pendingAuthVerification = null;
-  };
-  verification.then(clearPending, clearPending);
-  return verification;
-}
-
-async function runTraceAccountTokenVerification(token, extra = {}) {
-  const trimmed = typeof token === "string" ? token.trim() : "";
-  if (!trimmed) return { success: false, state: "signed_out" };
-
-  clearAuthVerificationRetry();
-  const verificationSeq = ++authVerificationSeq;
-  const lastTokenSyncAt = extra.lastTokenSyncAt || new Date().toISOString();
-  if (bearerToken && bearerToken !== trimmed) {
-    authStateContinuityFields = {};
-  }
-  bearerToken = trimmed;
-  verifiedBearerToken = null;
-  ext.storage.local.set({ [AUTH_TOKEN_KEY]: trimmed });
-  const preserveVerifiedConnectionHint =
-    extra.preserveVerifiedConnection === true;
-  if (!preserveVerifiedConnectionHint) {
-    setCheckingState({ lastTokenSyncAt });
-  }
-  const previousSnapshot = await storageGetLocal([AUTH_TOKEN_KEY, AUTH_STATE_KEY]);
-  if (verificationSeq !== authVerificationSeq || bearerToken !== trimmed) {
-    return { success: false, state: "unknown", stale: true };
-  }
-  const preserveVerifiedConnection =
-    preserveVerifiedConnectionHint ||
-    hasPersistedVerifiedConnection(previousSnapshot, trimmed);
-
-  try {
-    const response = await fetchWithTimeout(ACCOUNT_ME_ENDPOINT, {
-      headers: { Authorization: `Bearer ${trimmed}` },
-    });
-    if (verificationSeq !== authVerificationSeq || bearerToken !== trimmed) {
-      return { success: false, state: "unknown", stale: true };
-    }
-
-    if (response.ok) {
-      clearAuthVerificationRetry();
-      const json = await readResponseJson(response);
-      const accountId = accountIdFromAccountMe(json);
-      if (accountId) {
-        const previous = await storageGetLocal([TRACE_ACCOUNT_ID_KEY]);
-        if (
-          typeof previous[TRACE_ACCOUNT_ID_KEY] === "string" &&
-          previous[TRACE_ACCOUNT_ID_KEY] &&
-          previous[TRACE_ACCOUNT_ID_KEY] !== accountId
-        ) {
-          await storageSetLocal({
-            [TRACE_API_BASE_STORAGE_KEY]: normalizedTraceApiBase(),
-            [OVERLAY_STORAGE_KEY]: scopedOverlayCache({
-              entries: {},
-              syncVersion: new Date(0).toISOString(),
-            }, { [TRACE_ACCOUNT_ID_KEY]: accountId }),
-          });
-          await clearWorkStates();
-        }
-      }
-      const patch = {
-        [AUTH_TOKEN_KEY]: trimmed,
-        [TRACE_API_BASE_STORAGE_KEY]: normalizedTraceApiBase(),
-        ...accountStoragePatch(json),
-      };
-      ext.storage.local.set(patch);
-      verifiedBearerToken = trimmed;
-      setVerifiedConnectedState({
-        lastTokenSyncAt,
-        ...(accountId ? { lastVerifiedAccountId: accountId } : {}),
-        ...(extra.source ? { authSource: extra.source } : {}),
-      });
-      void refreshLibraryOverlay();
-      scheduleAo3SavedFiltersSync(250);
-      return { success: true, state: "connected" };
-    }
-
-    const authError = await applyAuthFailureResponse(response, {
-      actionAtKey: "lastTokenSyncAt",
-    });
-    if (authError) {
-      return { success: false, state: "reconnect_required", error: authError };
-    }
-
-    if (response.status === 429) {
-      setConnectedWithSyncWarning(
-        "Trace is temporarily rate limiting account checks. Your connection remains available.",
-        { lastHttpStatus: response.status, lastTokenSyncAt },
-      );
-      return {
-        success: false,
-        state: "connected",
-        error: "account_check_rate_limited",
-        status: response.status,
-        degraded: true,
-      };
-    }
-
-    const retryScheduled = scheduleAuthVerificationRetry(trimmed, {
-      ...extra,
-      lastTokenSyncAt,
-      preserveVerifiedConnection,
-    });
-    if (retryScheduled) {
-      accountVerificationRetryingState(lastTokenSyncAt, {
-        lastHttpStatus: response.status,
-        preserveVerifiedConnection,
-      });
-      return {
-        success: false,
-        state: "unknown",
-        error: "account_check_retrying",
-        status: response.status,
-        retrying: true,
-      };
-    }
-
-    setConnectedWithSyncWarning(
-      "Trace is temporarily unable to recheck your account. Your connection remains available.",
-      { lastHttpStatus: response.status, lastTokenSyncAt },
-    );
-    return {
-      success: false,
-      state: "connected",
-      error: "account_check_failed",
-      status: response.status,
-      degraded: true,
-    };
-  } catch (_) {
-    if (verificationSeq !== authVerificationSeq || bearerToken !== trimmed) {
-      return { success: false, state: "unknown", stale: true };
-    }
-    const retryScheduled = scheduleAuthVerificationRetry(trimmed, {
-      ...extra,
-      lastTokenSyncAt,
-      preserveVerifiedConnection,
-    });
-    if (retryScheduled) {
-      accountVerificationRetryingState(lastTokenSyncAt, {
-        preserveVerifiedConnection,
-      });
-      return {
-        success: false,
-        state: "unknown",
-        error: "network_retrying",
-        retrying: true,
-      };
-    }
-    setConnectedWithSyncWarning(
-      "Trace is temporarily unable to recheck your account. Your connection remains available.",
-      { lastTokenSyncAt },
-    );
-    return {
-      success: false,
-      state: "connected",
-      error: "network_error",
-      degraded: true,
-    };
-  }
-}
-
-function refreshTraceUserPro() {
-  if (!bearerToken) return;
-  fetchWithTimeout(ACCOUNT_ME_ENDPOINT, {
-    headers: { Authorization: `Bearer ${bearerToken}` },
-  })
-    .then(async (r) => {
-      if (r.ok) return readResponseJson(r);
-      await applyAuthFailureResponse(r);
+  function copySummary(value) {
+    if (!isRecord2(value) || !hasOnlyKeys(value, ["pro", "libraryCount", "firstStoryCompleted"])) {
       return null;
-    })
-    .then((j) => {
-      const patch = accountStoragePatch(j);
-      if (Object.keys(patch).length > 0) {
-        ext.storage.local.set(patch);
-      }
-    })
-    .catch(() => {});
-}
-
-function fetchTraceUserProPromise() {
-  if (!bearerToken) return Promise.resolve();
-  if (pendingAuthVerification) {
-    return pendingAuthVerification.then(() => {}, () => {});
-  }
-  if (traceUserProRefreshPromise) return traceUserProRefreshPromise;
-
-  const token = bearerToken;
-  const refresh = fetchWithTimeout(ACCOUNT_ME_ENDPOINT, {
-    headers: { Authorization: `Bearer ${token}` },
-  })
-    .then(async (r) => {
-      if (r.ok) return readResponseJson(r);
-      await applyAuthFailureResponse(r);
+    }
+    if (typeof value.pro !== "boolean" || !isSafeInteger(value.libraryCount) || typeof value.firstStoryCompleted !== "boolean") {
       return null;
-    })
-    .then((j) => {
-      const patch = accountStoragePatch(j);
-      if (Object.keys(patch).length === 0) return;
-      return new Promise((resolve) => ext.storage.local.set(patch, resolve));
-    })
-    .catch(() => {})
-    .finally(() => {
-      if (traceUserProRefreshPromise === refresh) {
-        traceUserProRefreshPromise = null;
-      }
+    }
+    return Object.freeze({
+      pro: value.pro,
+      libraryCount: value.libraryCount,
+      firstStoryCompleted: value.firstStoryCompleted
     });
-  traceUserProRefreshPromise = refresh;
-  return refresh;
-}
-
-async function hydrateStoredBearerToken() {
-  if (bearerToken) return true;
-  const snapshot = await storageGetLocal([AUTH_TOKEN_KEY]);
-  const storedToken =
-    typeof snapshot[AUTH_TOKEN_KEY] === "string"
-      ? snapshot[AUTH_TOKEN_KEY].trim()
-      : "";
-  if (!storedToken) return false;
-  bearerToken = storedToken;
-  return true;
-}
-
-function storageGetLocal(keys) {
-  return new Promise((resolve) => {
-    try {
-      ext.storage.local.get(keys, (res) => {
-        if (ext.runtime.lastError) {
-          resolve({});
-          return;
-        }
-        resolve(res || {});
+  }
+  function copyBrowsePreference(value) {
+    if (!isRecord2(value) || !hasOnlyKeys(value, ["hidden"]) || typeof value.hidden !== "boolean") {
+      return null;
+    }
+    return Object.freeze({ hidden: value.hidden });
+  }
+  function copyChapters(value) {
+    if (!isRecord2(value) || !hasOnlyKeys(value, ["current", "total"])) return null;
+    if (!isSafeInteger(value.current)) return null;
+    if (value.total !== null && !isSafeInteger(value.total, 1)) return null;
+    return Object.freeze({ current: value.current, total: value.total });
+  }
+  function copyWorkMark(value) {
+    if (!isRecord2(value) || !hasOnlyKeys(value, ["kind", "challenge"])) return null;
+    if (value.kind !== "abandoned" && value.kind !== "hiatus") return null;
+    let challenge;
+    if (Object.hasOwn(value, "challenge")) {
+      const raw = value.challenge;
+      if (!isRecord2(raw) || !hasOnlyKeys(raw, ["kind", "chapterDelta"])) return null;
+      if (raw.kind !== "source-updated" && raw.kind !== "chapter-count-changed") return null;
+      if (Object.hasOwn(raw, "chapterDelta") && !isSafeInteger(raw.chapterDelta, 1)) return null;
+      challenge = Object.freeze({
+        kind: raw.kind,
+        ...Object.hasOwn(raw, "chapterDelta") ? { chapterDelta: raw.chapterDelta } : {}
       });
-    } catch (_) {
-      resolve({});
     }
-  });
-}
-
-function storageSetLocal(patch) {
-  return new Promise((resolve) => {
-    try {
-      ext.storage.local.set(patch, () => resolve());
-    } catch (_) {
-      resolve();
-    }
-  });
-}
-
-function makeAo3SavedFilterLocalId(prefix = "sf") {
-  try {
-    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") {
-      return globalThis.crypto.randomUUID();
-    }
-  } catch (_) {
-    /* ignore */
-  }
-  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function isUsefulIsoDateTime(value) {
-  return typeof value === "string" && Number.isFinite(Date.parse(value));
-}
-
-function boundedCleanText(value, maxLength) {
-  const cleaned = String(value || "").replace(/\s+/g, " ").trim();
-  return cleaned.slice(0, maxLength);
-}
-
-function validAo3SavedFilterClientId(value) {
-  const id = String(value || "").trim();
-  return AO3_SAVED_FILTER_CLIENT_ID_RE.test(id) ? id : "";
-}
-
-function sanitizeAo3SavedFilterPairs(raw) {
-  if (!Array.isArray(raw)) return [];
-  const pairs = [];
-  for (const pair of raw) {
-    if (!Array.isArray(pair) || pair.length < 2) continue;
-    const key = String(pair[0] || "").trim();
-    const value = String(pair[1] || "").trim();
-    if (!AO3_SAVED_FILTER_PARAM_KEY_RE.test(key) || !value) continue;
-    pairs.push([key, value.slice(0, 300)]);
-    if (pairs.length >= AO3_SAVED_FILTER_MAX_PARAMS) break;
-  }
-  pairs.sort((a, b) => {
-    if (a[0] < b[0]) return -1;
-    if (a[0] > b[0]) return 1;
-    if (a[1] < b[1]) return -1;
-    if (a[1] > b[1]) return 1;
-    return 0;
-  });
-  return pairs;
-}
-
-function sanitizeAo3SavedFilterSummary(raw) {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .map((part) =>
-      boundedCleanText(part, AO3_SAVED_FILTER_MAX_SUMMARY_PART_LENGTH),
-    )
-    .filter(Boolean)
-    .slice(0, AO3_SAVED_FILTER_MAX_SUMMARY_PARTS);
-}
-
-function sanitizeAo3SavedFilterPreset(raw) {
-  if (!raw || typeof raw !== "object") return null;
-  const params = sanitizeAo3SavedFilterPairs(raw.params);
-  if (params.length === 0) return null;
-  const fallbackId = makeAo3SavedFilterLocalId();
-  const id = String(raw.id || "").trim() || fallbackId;
-  const clientId =
-    validAo3SavedFilterClientId(raw.clientId) ||
-    validAo3SavedFilterClientId(id) ||
-    fallbackId;
-  const serverId = isValidUuid(raw.serverId) ? String(raw.serverId).trim() : "";
-  const now = new Date().toISOString();
-  const updatedAt = isUsefulIsoDateTime(raw.updatedAt) ? raw.updatedAt : now;
-  const clientUpdatedAt = isUsefulIsoDateTime(raw.clientUpdatedAt)
-    ? raw.clientUpdatedAt
-    : updatedAt;
-  const scope = raw.scope === "global" ? "global" : "context";
-  return {
-    id,
-    clientId,
-    serverId,
-    name: boundedCleanText(raw.name, AO3_SAVED_FILTER_MAX_NAME_LENGTH) || "AO3 filter",
-    params,
-    scope,
-    contextKey:
-      scope === "context"
-        ? boundedCleanText(raw.contextKey, AO3_SAVED_FILTER_MAX_CONTEXT_KEY_LENGTH)
-        : "",
-    contextLabel:
-      scope === "context"
-        ? boundedCleanText(raw.contextLabel, AO3_SAVED_FILTER_MAX_CONTEXT_LABEL_LENGTH)
-        : "",
-    summary: sanitizeAo3SavedFilterSummary(raw.summary),
-    createdAt: isUsefulIsoDateTime(raw.createdAt) ? raw.createdAt : now,
-    updatedAt,
-    clientUpdatedAt,
-    dirty: raw.dirty === true,
-  };
-}
-
-function sanitizeAo3SavedFilterPresets(raw) {
-  if (!Array.isArray(raw)) return [];
-  const out = [];
-  const seen = new Set();
-  for (const item of raw) {
-    const preset = sanitizeAo3SavedFilterPreset(item);
-    if (!preset || seen.has(preset.clientId)) continue;
-    seen.add(preset.clientId);
-    out.push(preset);
-  }
-  return out;
-}
-
-function sanitizeAo3DeletedSavedFilter(raw) {
-  if (!raw || typeof raw !== "object") return null;
-  const clientId =
-    validAo3SavedFilterClientId(raw.clientId) ||
-    validAo3SavedFilterClientId(raw.id);
-  if (!clientId) return null;
-  const now = new Date().toISOString();
-  return {
-    id: String(raw.id || clientId).trim(),
-    clientId,
-    serverId: isValidUuid(raw.serverId) ? String(raw.serverId).trim() : "",
-    clientUpdatedAt: isUsefulIsoDateTime(raw.clientUpdatedAt)
-      ? raw.clientUpdatedAt
-      : now,
-  };
-}
-
-function sanitizeAo3DeletedSavedFilters(raw) {
-  if (!Array.isArray(raw)) return [];
-  const out = [];
-  const seen = new Set();
-  for (const item of raw) {
-    const deleted = sanitizeAo3DeletedSavedFilter(item);
-    if (!deleted || seen.has(deleted.clientId)) continue;
-    seen.add(deleted.clientId);
-    out.push(deleted);
-  }
-  return out;
-}
-
-function sanitizeAo3SavedFilterSyncMeta(raw) {
-  if (!raw || typeof raw !== "object") return {};
-  const out = {};
-  if (isUsefulIsoDateTime(raw.syncVersion)) out.syncVersion = raw.syncVersion;
-  if (isUsefulIsoDateTime(raw.lastSyncedAt)) out.lastSyncedAt = raw.lastSyncedAt;
-  return out;
-}
-
-async function ensureAo3SavedFiltersClientId(snapshot) {
-  const existing = validAo3SavedFilterClientId(
-    snapshot && snapshot[AO3_SAVED_FILTERS_CLIENT_ID_KEY],
-  );
-  if (existing) return existing;
-  const clientId = makeAo3SavedFilterLocalId("device").slice(0, 80);
-  await storageSetLocal({ [AO3_SAVED_FILTERS_CLIENT_ID_KEY]: clientId });
-  return clientId;
-}
-
-function ao3SavedFilterNeedsSync(preset) {
-  return preset?.dirty === true || !isValidUuid(preset?.serverId);
-}
-
-function ao3SavedFilterUpsertPayload(preset) {
-  const body = {
-    clientId: preset.clientId,
-    name: preset.name,
-    scope: preset.scope === "global" ? "global" : "context",
-    contextKey: preset.scope === "context" ? preset.contextKey || null : null,
-    contextLabel: preset.scope === "context" ? preset.contextLabel || null : null,
-    params: preset.params,
-    summary: preset.summary,
-    createdAt: preset.createdAt,
-    clientUpdatedAt: preset.clientUpdatedAt,
-  };
-  if (isValidUuid(preset.serverId)) body.id = preset.serverId;
-  return body;
-}
-
-function ao3SavedFilterDeletePayload(deleted) {
-  const body = {
-    clientId: deleted.clientId,
-    clientUpdatedAt: deleted.clientUpdatedAt,
-  };
-  if (isValidUuid(deleted.serverId)) body.id = deleted.serverId;
-  return body;
-}
-
-function isLocalAo3SavedFilterNewer(local, remoteClientUpdatedAt) {
-  if (!local || local.dirty !== true) return false;
-  const localTime = Date.parse(local.clientUpdatedAt || "");
-  const remoteTime = Date.parse(remoteClientUpdatedAt || "");
-  return Number.isFinite(localTime) && Number.isFinite(remoteTime) && localTime > remoteTime;
-}
-
-function localPresetFromRemoteAo3SavedFilter(remote, existing) {
-  const id = existing?.id || remote.clientId || remote.id;
-  return {
-    id,
-    clientId: remote.clientId,
-    serverId: remote.id,
-    name: remote.name,
-    params: sanitizeAo3SavedFilterPairs(remote.params),
-    scope: remote.scope === "global" ? "global" : "context",
-    contextKey: remote.scope === "context" ? String(remote.contextKey || "") : "",
-    contextLabel: remote.scope === "context" ? String(remote.contextLabel || "") : "",
-    summary: sanitizeAo3SavedFilterSummary(remote.summary),
-    createdAt: remote.createdAt,
-    updatedAt: remote.updatedAt,
-    clientUpdatedAt: remote.clientUpdatedAt,
-    dirty: false,
-  };
-}
-
-function mergeAo3SavedFiltersAfterSync({
-  presets,
-  deleted,
-  activeMeta,
-  response,
-  sentDeleteClientIds,
-}) {
-  const byClientId = new Map();
-  const localIdByClientId = new Map();
-  for (const preset of presets) {
-    byClientId.set(preset.clientId, preset);
-    localIdByClientId.set(preset.clientId, preset.id);
-  }
-
-  const deletedByClientId = new Map();
-  for (const item of deleted) {
-    deletedByClientId.set(item.clientId, item);
-  }
-  for (const clientId of sentDeleteClientIds) {
-    deletedByClientId.delete(clientId);
-  }
-
-  for (const remote of Array.isArray(response?.presets) ? response.presets : []) {
-    const existing = byClientId.get(remote.clientId);
-    if (isLocalAo3SavedFilterNewer(existing, remote.clientUpdatedAt)) continue;
-    const next = localPresetFromRemoteAo3SavedFilter(remote, existing);
-    if (next.params.length === 0) continue;
-    byClientId.set(remote.clientId, next);
-    deletedByClientId.delete(remote.clientId);
-  }
-
-  for (const remote of Array.isArray(response?.deleted) ? response.deleted : []) {
-    const existing = byClientId.get(remote.clientId);
-    if (isLocalAo3SavedFilterNewer(existing, remote.clientUpdatedAt)) continue;
-    byClientId.delete(remote.clientId);
-    deletedByClientId.delete(remote.clientId);
-  }
-
-  const nextPresets = Array.from(byClientId.values()).sort((a, b) => {
-    const at = Date.parse(a.updatedAt || a.clientUpdatedAt || "") || 0;
-    const bt = Date.parse(b.updatedAt || b.clientUpdatedAt || "") || 0;
-    return at - bt;
-  });
-
-  let nextActiveMeta = activeMeta || null;
-  if (nextActiveMeta && nextActiveMeta.id) {
-    const stillActive = nextPresets.some((preset) => preset.id === nextActiveMeta.id);
-    if (!stillActive) {
-      const clientId = Array.from(localIdByClientId.entries()).find(
-        ([, localId]) => localId === nextActiveMeta.id,
-      )?.[0];
-      const replacement = clientId
-        ? nextPresets.find((preset) => preset.clientId === clientId)
-        : null;
-      nextActiveMeta = replacement
-        ? { ...nextActiveMeta, id: replacement.id }
-        : null;
-    }
-  }
-
-  return {
-    presets: nextPresets,
-    deleted: Array.from(deletedByClientId.values()),
-    activeMeta: nextActiveMeta,
-  };
-}
-
-function snapshotHasPendingAo3SavedFilterSync(snapshot) {
-  const presets = sanitizeAo3SavedFilterPresets(
-    snapshot && snapshot[AO3_SAVED_FILTERS_STORAGE_KEY],
-  );
-  const deleted = sanitizeAo3DeletedSavedFilters(
-    snapshot && snapshot[AO3_SAVED_FILTERS_DELETED_KEY],
-  );
-  return presets.some(ao3SavedFilterNeedsSync) || deleted.length > 0;
-}
-
-function scheduleAo3SavedFiltersSync(delayMs = 750) {
-  if (!bearerToken) return;
-  if (ao3SavedFiltersSyncTimer) clearTimeout(ao3SavedFiltersSyncTimer);
-  ao3SavedFiltersSyncTimer = setTimeout(() => {
-    ao3SavedFiltersSyncTimer = null;
-    void syncAo3SavedFilters();
-  }, delayMs);
-}
-
-async function syncAo3SavedFilters() {
-  if (!bearerToken) return { ok: false, error: "not_authenticated" };
-  if (ao3SavedFiltersSyncInFlight) return { ok: false, error: "sync_in_flight" };
-  ao3SavedFiltersSyncInFlight = true;
-
-  try {
-    let snapshot = await storageGetLocal([
-      AO3_SAVED_FILTERS_STORAGE_KEY,
-      AO3_SAVED_FILTERS_DELETED_KEY,
-      AO3_SAVED_FILTERS_SYNC_META_KEY,
-      AO3_SAVED_FILTERS_CLIENT_ID_KEY,
-      "traceAo3SavedFiltersActiveV1",
-    ]);
-    const clientId = await ensureAo3SavedFiltersClientId(snapshot);
-    let lastSyncVersion = null;
-    let didSync = false;
-    let hasMorePending = false;
-
-    for (let i = 0; i < AO3_SAVED_FILTER_SYNC_MAX_ITERATIONS; i += 1) {
-      const presets = sanitizeAo3SavedFilterPresets(
-        snapshot[AO3_SAVED_FILTERS_STORAGE_KEY],
-      );
-      const deleted = sanitizeAo3DeletedSavedFilters(
-        snapshot[AO3_SAVED_FILTERS_DELETED_KEY],
-      );
-      const syncMeta = sanitizeAo3SavedFilterSyncMeta(
-        snapshot[AO3_SAVED_FILTERS_SYNC_META_KEY],
-      );
-      const upserts = presets
-        .filter(ao3SavedFilterNeedsSync)
-        .map(ao3SavedFilterUpsertPayload);
-      const deletes = deleted.map(ao3SavedFilterDeletePayload);
-      const batchUpserts = upserts.slice(0, AO3_SAVED_FILTER_SYNC_BATCH_LIMIT);
-      const batchDeletes = deletes.slice(0, AO3_SAVED_FILTER_SYNC_BATCH_LIMIT);
-
-      if (didSync && batchUpserts.length === 0 && batchDeletes.length === 0) {
-        hasMorePending = false;
-        break;
-      }
-
-      const response = await fetchWithTimeout(AO3_SAVED_FILTERS_SYNC_ENDPOINT, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${bearerToken}`,
-        },
-        body: JSON.stringify({
-          clientId,
-          since: syncMeta.syncVersion || null,
-          upserts: batchUpserts,
-          deletes: batchDeletes,
-        }),
-      });
-
-      const authError = await applyAuthFailureResponse(response);
-      if (authError) return { ok: false, error: authError };
-      if (!response.ok) {
-        if (response.status === 429) {
-          setConnectedWithSyncWarning(
-            "Trace is rate limiting saved filter sync. Your filters are still saved locally.",
-            { lastHttpStatus: response.status },
-          );
-          return { ok: false, error: "rate_limited" };
-        }
-        if (response.status === 422) {
-          const body = await response.json().catch(() => null);
-          if (body?.code === "AO3_SAVED_FILTER_LIMIT_REACHED") {
-            const limit = Number(body.limit || AO3_SAVED_FILTER_ACTIVE_LIMIT);
-            setConnectedWithSyncWarning(
-              `Trace can sync up to ${limit} AO3 saved filters. Delete one before saving another.`,
-              { ao3SavedFilterLimit: limit, lastHttpStatus: response.status },
-            );
-            return {
-              ok: false,
-              error: "limit_reached",
-              limit,
-            };
-          }
-        }
-        return { ok: false, error: "http_" + response.status };
-      }
-
-      const json = await response.json().catch(() => null);
-      const data = json && json.data && typeof json.data === "object" ? json.data : null;
-      if (!data || !isUsefulIsoDateTime(data.syncVersion)) {
-        return { ok: false, error: "invalid_response" };
-      }
-
-      const merged = mergeAo3SavedFiltersAfterSync({
-        presets,
-        deleted,
-        activeMeta: snapshot.traceAo3SavedFiltersActiveV1 || null,
-        response: data,
-        sentDeleteClientIds: new Set(batchDeletes.map((item) => item.clientId)),
-      });
-      const patch = {
-        [AO3_SAVED_FILTERS_STORAGE_KEY]: merged.presets,
-        [AO3_SAVED_FILTERS_DELETED_KEY]: merged.deleted,
-        traceAo3SavedFiltersActiveV1: merged.activeMeta,
-        [AO3_SAVED_FILTERS_SYNC_META_KEY]: {
-          syncVersion: data.syncVersion,
-          lastSyncedAt: new Date().toISOString(),
-        },
-        [AO3_SAVED_FILTERS_CLIENT_ID_KEY]: clientId,
-      };
-      await storageSetLocal(patch);
-      snapshot = { ...snapshot, ...patch };
-      lastSyncVersion = data.syncVersion;
-      didSync = true;
-      hasMorePending =
-        upserts.length > batchUpserts.length ||
-        deletes.length > batchDeletes.length;
-      if (!hasMorePending) break;
-    }
-
-    if (!didSync) {
-      return { ok: false, error: "not_synced" };
-    }
-    setConnectedState({ lastAo3SavedFiltersSyncAt: new Date().toISOString() });
-    if (hasMorePending) scheduleAo3SavedFiltersSync(250);
-    const result = { ok: true, syncVersion: lastSyncVersion };
-    if (hasMorePending) result.partial = true;
-    return result;
-  } catch (error) {
-    console.warn("[Trace] AO3 saved filters sync failed:", error);
-    return { ok: false, error: "network_error" };
-  } finally {
-    ao3SavedFiltersSyncInFlight = false;
-  }
-}
-
-/** Cache AO3/FFN work id → library status for content-script overlay. */
-function refreshLibraryOverlay() {
-  if (!bearerToken) return Promise.resolve(false);
-  return new Promise((resolve) => {
-    ext.storage.local.get([PREF_LIBRARY_INLAY_KEY], (prefRes) => {
-      if (ext.runtime.lastError) {
-        resolve(false);
-        return;
-      }
-      if (prefRes[PREF_LIBRARY_INLAY_KEY] === false) {
-        ext.storage.local.remove(OVERLAY_STORAGE_KEY, () => resolve(false));
-        return;
-      }
-      void fetchLibraryOverlayFromApi()
-        .then((refreshed) => resolve(refreshed === true))
-        .catch(() => resolve(false));
-    });
-  });
-}
-
-async function fetchLibraryOverlayFromApi() {
-  if (!bearerToken) return;
-  try {
-    const response = await fetchWithTimeout(
-      LIBRARY_OVERLAY_ENDPOINT,
-      {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${bearerToken}`,
-        },
-      },
-      OVERLAY_REQUEST_TIMEOUT_MS,
-    );
-    const authError = await applyAuthFailureResponse(response);
-    if (authError) {
-      return false;
-    }
-    if (!response.ok) {
-      console.warn("[Trace] library overlay fetch failed:", response.status);
-      return false;
-    }
-    const json = await response.json();
-    const data = json && json.data;
-    if (data && data.entries && typeof data.syncVersion === "string") {
-      const snapshot = await storageGetLocal([
-        TRACE_ACCOUNT_ID_KEY,
-        AUTH_STATE_KEY,
-        OVERLAY_STORAGE_KEY,
-      ]);
-      const currentCache = snapshot[OVERLAY_STORAGE_KEY];
-      const keepNewerCache =
-        currentCache &&
-        typeof currentCache === "object" &&
-        isOlderOverlaySyncVersion(data.syncVersion, currentCache.syncVersion);
-      const effectiveData = keepNewerCache ? currentCache : data;
-      const entries = applyOptimisticChapterFloors({
-        ...(effectiveData.entries || {}),
-      });
-      await new Promise((resolve) => {
-        ext.storage.local.set(
-          {
-            [TRACE_API_BASE_STORAGE_KEY]: normalizedTraceApiBase(),
-            [OVERLAY_STORAGE_KEY]: scopedOverlayCache({
-              ...effectiveData,
-              entries,
-            }, snapshot),
-            libraryOverlayFetchedAt: new Date().toISOString(),
-          },
-          resolve,
-        );
-      });
-      await reconcilePendingWorkStatesWithOverlay(
-        entries,
-        effectiveData.syncVersion,
-      );
-      return true;
-    }
-    return false;
-  } catch (e) {
-    console.warn("[Trace] library overlay network error:", e);
-    return false;
-  }
-}
-
-function isTraceWebUrl(url) {
-  if (!url) return false;
-  const origin = TRACE_WEB_ORIGIN.replace(/\/$/, "");
-  return String(url) === origin || String(url).startsWith(origin + "/");
-}
-
-function normalizeTraceWebOpenUrl(rawUrl) {
-  if (typeof rawUrl !== "string" || !rawUrl.trim()) return null;
-  try {
-    const configuredOrigin = new URL(TRACE_WEB_ORIGIN).origin;
-    const url = new URL(rawUrl, configuredOrigin);
-    const allowedOrigins = new Set([
-      configuredOrigin,
-      "https://tracefiction.com",
-      "https://www.tracefiction.com",
-    ]);
-    if (!allowedOrigins.has(url.origin)) return null;
-    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
-    return url.href;
-  } catch (_) {
-    return null;
-  }
-}
-
-async function handleOpenTraceUrl(payload, sendResponse) {
-  const url = normalizeTraceWebOpenUrl(payload?.url);
-  if (!url) {
-    if (sendResponse) sendResponse({ ok: false, error: "invalid_trace_url" });
-    return;
-  }
-  try {
-    await ext.tabs.create({ url });
-    if (sendResponse) sendResponse({ ok: true });
-  } catch (error) {
-    console.warn("[Trace] Failed to open Trace tab:", error);
-    if (sendResponse) sendResponse({ ok: false, error: "open_failed" });
-  }
-}
-
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function sendFirstStoryFocusAdd(tabId, attempt = 0) {
-  try {
-    return await ext.tabs.sendMessage(tabId, {
-      type: FIRST_STORY_FOCUS_ADD_MESSAGE,
-    });
-  } catch (error) {
-    if (
-      attempt < FIRST_STORY_FOCUS_RETRY_ATTEMPTS &&
-      isMissingTabReceiverError(error)
-    ) {
-      await delay(FIRST_STORY_FOCUS_RETRY_MS);
-      return sendFirstStoryFocusAdd(tabId, attempt + 1);
-    }
-    throw error;
-  }
-}
-
-async function handleFirstStoryAdd(payload, sendResponse) {
-  if (!bearerToken) {
-    if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
-    return;
-  }
-
-  const url = normalizeFirstStoryUrl(payload?.url);
-  if (!url) {
-    if (sendResponse) sendResponse({ ok: false, error: "invalid_url" });
-    return;
-  }
-
-  try {
-    const tab = await ext.tabs.create({ url, active: true });
-    if (!tab || typeof tab.id !== "number") {
-      if (sendResponse) sendResponse({ ok: false, error: "open_failed" });
-      return;
-    }
-
-    const response = await sendFirstStoryFocusAdd(tab.id);
-    if (response?.ok) {
-      if (sendResponse) {
-        sendResponse({
-          ok: true,
-          state: response.state || "saved",
-        });
-      }
-      return;
-    }
-
-    if (sendResponse) {
-      sendResponse({ ok: false, error: response?.error || "save_failed" });
-    }
-  } catch (error) {
-    if (isMissingTabReceiverError(error)) {
-      if (sendResponse) sendResponse({ ok: false, error: "focus_failed" });
-      return;
-    }
-    console.warn("[Trace] Failed to add first story:", error);
-    if (sendResponse) sendResponse({ ok: false, error: "open_failed" });
-  }
-}
-
-function canSendNativeMessage() {
-  return (
-    ext.runtime &&
-    typeof ext.runtime.sendNativeMessage === "function"
-  );
-}
-
-function sendIosNativeMessage(message) {
-  return new Promise((resolve) => {
-    if (!canSendNativeMessage()) {
-      resolve(null);
-      return;
-    }
-
-    let settled = false;
-    let timeoutId = null;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      if (timeoutId != null) clearTimeout(timeoutId);
-      resolve(value || null);
-    };
-    timeoutId = setTimeout(() => finish(null), NATIVE_MESSAGE_TIMEOUT_MS);
-
-    const attempts = [[message], [IOS_NATIVE_APPLICATION_ID, message]];
-    const trySend = (index) => {
-      if (settled) return;
-      const args = attempts[index];
-      if (!args) {
-        finish(null);
-        return;
-      }
-      const tryNext = () => {
-        if (index + 1 < attempts.length) {
-          trySend(index + 1);
-          return;
-        }
-        finish(null);
-      };
-      const callback = (response) => {
-        if (ext.runtime.lastError) {
-          tryNext();
-          return;
-        }
-        if (!response) {
-          tryNext();
-          return;
-        }
-        finish(response);
-      };
-      try {
-        const maybePromise = ext.runtime.sendNativeMessage(...args, callback);
-        if (maybePromise && typeof maybePromise.then === "function") {
-          maybePromise
-            .then((response) => {
-              if (response) finish(response);
-              else tryNext();
-            })
-            .catch(tryNext);
-        }
-      } catch (_) {
-        tryNext();
-      }
-    };
-
-    trySend(0);
-  });
-}
-
-function truthyNativeOk(value) {
-  return value === true || value === "true";
-}
-
-function sanitizeIosNativeAuthTokenResponse(response) {
-  if (!response || typeof response !== "object" || !truthyNativeOk(response.ok)) {
-    return null;
-  }
-  const token = typeof response.token === "string" ? response.token.trim() : "";
-  return token || null;
-}
-
-function sanitizeIosPendingFirstStoryResponse(response) {
-  if (!response || typeof response !== "object") {
-    return { ok: false, error: "native_unavailable" };
-  }
-  if (!truthyNativeOk(response.ok)) {
-    return {
-      ok: false,
-      error:
-        typeof response.error === "string" && response.error.trim()
-          ? response.error.trim()
-          : "native_error",
-    };
-  }
-  const url = typeof response.url === "string" ? response.url.trim() : "";
-  const result = { ok: true, url };
-  const handoffId = normalizeIosHandoffId(response.handoffId);
-  if (handoffId) {
-    result.handoffId = handoffId;
-  }
-  if (response.mode === "browse" || response.mode === "story") {
-    result.mode = response.mode;
-  }
-  const hostKind = normalizeArchiveHostKind(response.hostKind);
-  if (hostKind && hostKind !== "unknown") {
-    result.hostKind = hostKind;
-  }
-  const expiresAt =
-    typeof response.expiresAt === "number"
-      ? response.expiresAt
-      : typeof response.expiresAt === "string"
-        ? Number(response.expiresAt)
-        : null;
-  if (Number.isFinite(expiresAt)) {
-    result.expiresAt = expiresAt;
-  }
-  if (response.expired === true || response.expired === "true") {
-    result.expired = true;
-  }
-  return result;
-}
-
-async function bootstrapAuthFromIosNative(reason) {
-  if (!canSendNativeMessage()) return false;
-  if (iosNativeAuthBootstrapPromise) return iosNativeAuthBootstrapPromise;
-
-  const bootstrapPromise = (async () => {
-    const response = await sendIosNativeMessage({
-      type: IOS_AUTH_TOKEN_REQUEST_MESSAGE,
-      reason: reason || "bootstrap",
-    });
-    const token = sanitizeIosNativeAuthTokenResponse(response);
-    if (!token) return false;
-    if (token === bearerToken && token === verifiedBearerToken) return true;
-
-    const result = await verifyTraceAccountToken(token, {
-      lastTokenSyncAt: new Date().toISOString(),
-      source: "ios_native",
-    });
-    return result && result.success === true;
-  })();
-  iosNativeAuthBootstrapPromise = bootstrapPromise;
-
-  try {
-    return await bootstrapPromise;
-  } finally {
-    if (iosNativeAuthBootstrapPromise === bootstrapPromise) {
-      iosNativeAuthBootstrapPromise = null;
-    }
-  }
-}
-
-async function bootstrapInitialAuth(res) {
-  const storedToken =
-    typeof res?.authToken === "string" ? res.authToken.trim() : "";
-  if (!storedToken) {
-    const bootstrapped = await bootstrapAuthFromIosNative("missing_token");
-    if (bootstrapped || bearerToken || verifiedBearerToken) return;
-    // Keep settled recovery guidance from a previous session; downgrading
-    // reconnect/error to a generic signed-out prompt loses the useful message.
-    const snapshot = await storageGetLocal([AUTH_STATE_KEY]);
-    const storedState = snapshot?.[AUTH_STATE_KEY]?.state;
-    if (storedState === "reconnect_required" || storedState === "error") return;
-    setSignedOutState();
-    return;
-  }
-
-  const storedState =
-    res[AUTH_STATE_KEY] && typeof res[AUTH_STATE_KEY] === "object"
-      ? res[AUTH_STATE_KEY]
-      : null;
-  const result = await verifyTraceAccountToken(storedToken, {
-    lastTokenSyncAt: storedState?.lastTokenSyncAt || new Date().toISOString(),
-    preserveVerifiedConnection: hasPersistedVerifiedConnection(res, storedToken),
-  });
-
-  if (result?.success) return;
-  if (result?.retrying || result?.stale) return;
-  if (result?.state === "unknown" || result?.state === "connected") return;
-  await bootstrapAuthFromIosNative("stored_token_rejected");
-}
-
-function startInitialAuth(res) {
-  initialAuthPromise = bootstrapInitialAuth(res || {}).catch((error) => {
-    console.warn("[Trace] Initial auth bootstrap failed:", error);
-  });
-  return initialAuthPromise;
-}
-
-async function ensureStoredAuthReady() {
-  if (bearerToken) return true;
-  if (initialAuthPromise) {
-    await initialAuthPromise;
-    if (bearerToken) return true;
-  }
-  const snapshot = await storageGetLocal([AUTH_TOKEN_KEY, AUTH_STATE_KEY]);
-  const storedToken =
-    typeof snapshot[AUTH_TOKEN_KEY] === "string"
-      ? snapshot[AUTH_TOKEN_KEY].trim()
-      : "";
-  if (!storedToken) return false;
-  await startInitialAuth(snapshot);
-  return Boolean(bearerToken);
-}
-
-async function handleIosPendingFirstStoryGet(sendResponse) {
-  // This handoff originates in the containing app, so the app's current
-  // account is authoritative. Safari may already hold a perfectly valid token
-  // for another Trace account; accepting it here would save the first story to
-  // that account while the app refreshes a different, still-empty library.
-  const bootstrapped = await bootstrapAuthFromIosNative("pending_first_story");
-  if (!bootstrapped) {
-    if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
-    return;
-  }
-  const response = await sendIosNativeMessage({
-    type: IOS_PENDING_FIRST_STORY_GET_MESSAGE,
-  });
-  if (sendResponse) sendResponse(sanitizeIosPendingFirstStoryResponse(response));
-}
-
-async function handleIosPendingFirstStoryClear(sendResponse) {
-  const response = await sendIosNativeMessage({
-    type: IOS_PENDING_FIRST_STORY_CLEAR_MESSAGE,
-  });
-  if (sendResponse) {
-    sendResponse({
-      ok: truthyNativeOk(response?.ok),
-      error:
-        response && !truthyNativeOk(response.ok) && typeof response.error === "string"
-          ? response.error
-          : undefined,
+    return Object.freeze({
+      kind: value.kind,
+      ...challenge === void 0 ? {} : { challenge }
     });
   }
-}
-
-/** Match patterns for `tabs.query({ url })` so we do not enumerate unrelated tabs (Chrome review / privacy). */
-function traceWebTabQueryPatterns() {
-  const origin = TRACE_WEB_ORIGIN.replace(/\/$/, "");
-  const patterns = new Set([`${origin}/*`]);
-  try {
-    const host = new URL(origin).hostname;
-    if (host === "tracefiction.com") {
-      patterns.add("https://www.tracefiction.com/*");
-    } else if (host === "www.tracefiction.com") {
-      patterns.add("https://tracefiction.com/*");
+  function copyPrivateContext(value) {
+    if (!isRecord2(value) || !hasOnlyKeys(value, ["hasNotes", "tagCount", "notePreview", "tags"]) || typeof value.hasNotes !== "boolean" || !isSafeInteger(value.tagCount)) {
+      return null;
     }
-  } catch {
-    /* ignore invalid TRACE_WEB_ORIGIN in edge builds */
-  }
-  return Array.from(patterns);
-}
-
-async function notifyTraceWebTabs(message) {
-  if (!ext.tabs?.query || !ext.tabs?.sendMessage) return;
-  try {
-    const tabs = await ext.tabs.query({ url: traceWebTabQueryPatterns() });
-    for (const tab of tabs || []) {
-      if (!tab?.id || !isTraceWebUrl(tab.url)) continue;
-      try {
-        await ext.tabs.sendMessage(tab.id, message);
-      } catch (error) {
-        if (!isMissingTabReceiverError(error)) {
-          console.warn("[Trace] Failed to notify Trace web tab:", error);
-        }
-      }
-    }
-  } catch (error) {
-    console.warn("[Trace] Failed to enumerate Trace web tabs:", error);
-  }
-}
-
-function signalLibraryInvalidated(reason) {
-  return notifyTraceWebTabs({
-    type: LIBRARY_INVALIDATED_MESSAGE,
-    reason,
-    at: new Date().toISOString(),
-  });
-}
-
-let extensionStatusPushTimer = null;
-
-/** Debounced so bursts of auth-state writes coalesce and the storage write
- *  that triggered the push lands before the snapshot is read. */
-function scheduleExtensionStatusPush() {
-  if (extensionStatusPushTimer) return;
-  extensionStatusPushTimer = setTimeout(() => {
-    extensionStatusPushTimer = null;
-    void pushExtensionStatusToTraceTabs();
-  }, EXTENSION_STATUS_PUSH_DEBOUNCE_MS);
-}
-
-async function pushExtensionStatusToTraceTabs() {
-  try {
-    const snapshot = await storageGetLocal([
-      AUTH_TOKEN_KEY,
-      AUTH_STATE_KEY,
-      TRACE_FIRST_SAVE_SEEN_KEY,
-      ARCHIVE_READINESS_KEY,
-    ]);
-    await notifyTraceWebTabs({
-      type: EXTENSION_STATUS_PUSH_MESSAGE,
-      state: buildExtensionStatus(snapshot),
-      at: new Date().toISOString(),
-    });
-  } catch (error) {
-    console.warn("[Trace] Failed to push extension status:", error);
-  }
-}
-
-function isAo3StoryUrl(url) {
-  return AO3_STORY_URL_RE.test(String(url || ""));
-}
-
-function isAo3Host(hostname) {
-  const host = String(hostname || "").toLowerCase();
-  return (
-    host === "archiveofourown.org" ||
-    host.endsWith(".archiveofourown.org") ||
-    host === "archiveofourown.gay" ||
-    host.endsWith(".archiveofourown.gay") ||
-    host === "archive.transformativeworks.org" ||
-    host === "ao3.org" ||
-    host.endsWith(".ao3.org")
-  );
-}
-
-function isFfnHost(hostname) {
-  return /(^|\.)fanfiction\.net$/i.test(String(hostname || ""));
-}
-
-function isAo3CredentialPath(pathname) {
-  return /^\/users\/(?:login|sign_up|password|auth\/|logout)/i.test(String(pathname || ""));
-}
-
-function isFfnCredentialPath(pathname) {
-  return /^\/(?:login\.php|signup\.php|account\/(?:login|signup)|auth\/)/i.test(String(pathname || ""));
-}
-
-function classifyActiveTabUrl(rawUrl) {
-  if (!rawUrl) return { kind: "unknown" };
-  let url;
-  try {
-    url = new URL(String(rawUrl));
-  } catch (_) {
-    return { kind: "unsupported" };
-  }
-
-  if (isTraceWebUrl(url.href)) return { kind: "trace" };
-
-  if (isAo3Host(url.hostname)) {
-    if (isAo3CredentialPath(url.pathname)) {
-      return { kind: "blocked_archive", site: "ao3", canImport: false };
-    }
-    return {
-      kind: /^\/works\/\d+(?:\/chapters\/\d+)?\/?$/i.test(url.pathname)
-        ? "supported_story"
-        : "supported_archive",
-      site: "ao3",
-      canImport: true,
-    };
-  }
-
-  if (isFfnHost(url.hostname)) {
-    if (isFfnCredentialPath(url.pathname)) {
-      return { kind: "blocked_archive", site: "ffn", canImport: false };
-    }
-    return {
-      kind: FFN_STORY_PATH_RE.test(url.pathname)
-        ? "supported_story"
-        : "supported_archive",
-      site: "ffn",
-      canImport: true,
-    };
-  }
-
-  return { kind: "unsupported" };
-}
-
-function normalizeFirstStoryUrl(rawUrl) {
-  if (typeof rawUrl !== "string" || !rawUrl.trim()) return null;
-  try {
-    const url = new URL(rawUrl.trim());
-    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
-    if (url.username || url.password) return null;
-
-    if (isAo3Host(url.hostname)) {
-      if (!/^\/works\/\d+(?:\/chapters\/\d+)?\/?$/i.test(url.pathname)) {
+    let notePreview;
+    if (Object.hasOwn(value, "notePreview")) {
+      if (typeof value.notePreview !== "string" || value.notePreview.length > 180 || value.notePreview.trim() !== value.notePreview) {
         return null;
       }
-      return url.href;
+      notePreview = value.notePreview;
     }
-
-    if (isFfnHost(url.hostname)) {
-      if (!FFN_STORY_PATH_RE.test(url.pathname)) return null;
-      return url.href;
-    }
-  } catch (_) {
-    return null;
-  }
-  return null;
-}
-
-async function getActiveTabContext() {
-  try {
-    const [tab] = await ext.tabs.query({ active: true, currentWindow: true });
-    return classifyActiveTabUrl(tab && tab.url);
-  } catch (_) {
-    return { kind: "unknown" };
-  }
-}
-
-function pingAo3TabForAutoTrack(tabId) {
-  if (!tabId || !ext.tabs?.sendMessage) return;
-  setTimeout(() => {
-    ext.tabs
-      .sendMessage(tabId, {
-        type: "TRACE_SCHEDULE_AUTO_TRACK",
-        trigger: "background_tab_complete",
-      })
-      .catch((error) => {
-        if (!isMissingTabReceiverError(error)) {
-          console.warn("[Trace] Failed to ping AO3 tab for auto-track:", error);
+    let tags;
+    if (Object.hasOwn(value, "tags")) {
+      if (!Array.isArray(value.tags) || value.tags.length > 5) return null;
+      const copied = [];
+      for (const tag of value.tags) {
+        if (typeof tag !== "string" || tag.length === 0 || tag.length > 100 || tag.trim() !== tag) {
+          return null;
         }
+        copied.push(tag);
+      }
+      tags = Object.freeze(copied);
+    }
+    return Object.freeze({
+      hasNotes: value.hasNotes,
+      tagCount: value.tagCount,
+      ...notePreview === void 0 ? {} : { notePreview },
+      ...tags === void 0 ? {} : { tags }
+    });
+  }
+  function copyEntry(value) {
+    if (!isRecord2(value)) return null;
+    const status = enumValue(LEGACY_STATUSES, value.status);
+    if (status === null) return null;
+    const result = { status };
+    if (Object.hasOwn(value, "chapters")) {
+      const chapters = copyChapters(value.chapters);
+      if (chapters === null) return null;
+      result.chapters = chapters;
+    }
+    if (Object.hasOwn(value, "readerStatus")) {
+      const readerStatus = enumValue(LEGACY_STATUSES, value.readerStatus);
+      if (readerStatus === null || readerStatus !== status) return null;
+      result.readerStatus = readerStatus;
+    }
+    if (Object.hasOwn(value, "canonicalReaderStatus")) {
+      const canonical = enumValue(CANONICAL_STATUSES, value.canonicalReaderStatus);
+      if (canonical === null) return null;
+      result.canonicalReaderStatus = canonical;
+    }
+    if (Object.hasOwn(value, "entryId")) {
+      if (typeof value.entryId !== "string" || !UUID_PATTERN.test(value.entryId)) return null;
+      result.entryId = value.entryId;
+    }
+    if (Object.hasOwn(value, "browsePreference")) {
+      const preference = copyBrowsePreference(value.browsePreference);
+      if (preference === null) return null;
+      result.browsePreference = preference;
+    }
+    if (Object.hasOwn(value, "workMark")) {
+      const mark = copyWorkMark(value.workMark);
+      if (mark === null) return null;
+      result.workMark = mark;
+    }
+    if (Object.hasOwn(value, "workStatus")) {
+      const workStatus = enumValue(WORK_STATUSES, value.workStatus);
+      if (workStatus === null) return null;
+      result.workStatus = workStatus;
+    }
+    if (Object.hasOwn(value, "workStatusProvenance")) {
+      const provenance = enumValue(WORK_STATUS_PROVENANCE, value.workStatusProvenance);
+      if (provenance === null) return null;
+      result.workStatusProvenance = provenance;
+    }
+    if (Object.hasOwn(value, "catchupState")) {
+      const catchup = enumValue(CATCHUP_STATES, value.catchupState);
+      if (catchup === null) return null;
+      result.catchupState = catchup;
+    }
+    if (Object.hasOwn(value, "newChapterCount")) {
+      if (!isSafeInteger(value.newChapterCount)) return null;
+      result.newChapterCount = value.newChapterCount;
+    }
+    if (Object.hasOwn(value, "rating")) {
+      if (!isSafeInteger(value.rating) || value.rating > 5) return null;
+      result.rating = value.rating;
+    }
+    if (Object.hasOwn(value, "privateContext")) {
+      const context = copyPrivateContext(value.privateContext);
+      if (context === null) return null;
+      result.privateContext = context;
+    }
+    return Object.freeze(result);
+  }
+  function copyEntryMap(value) {
+    if (!isRecord2(value) || Object.keys(value).length > MAX_OVERLAY_RECORDS) return null;
+    const result = {};
+    for (const [key, raw] of Object.entries(value)) {
+      if (key.length > 32 || !WORK_KEY_PATTERN.test(key)) return null;
+      const entry = copyEntry(raw);
+      if (entry === null) return null;
+      result[key] = entry;
+    }
+    return Object.freeze(result);
+  }
+  function copyPreferenceMap(value) {
+    if (!isRecord2(value) || Object.keys(value).length > MAX_OVERLAY_RECORDS) return null;
+    const result = {};
+    for (const [key, raw] of Object.entries(value)) {
+      if (key.length > 32 || !WORK_KEY_PATTERN.test(key) || !isRecord2(raw)) return null;
+      if (!hasOnlyKeys(raw, ["browsePreference"])) return null;
+      const preference = copyBrowsePreference(raw.browsePreference);
+      if (preference === null) return null;
+      result[key] = Object.freeze({ browsePreference: preference });
+    }
+    return Object.freeze(result);
+  }
+  function copyOverlay(value) {
+    if (!isRecord2(value) || !hasOnlyKeys(value, ["entries", "workPreferences", "syncVersion"])) {
+      return null;
+    }
+    const entries = copyEntryMap(value.entries);
+    const workPreferences = copyPreferenceMap(value.workPreferences);
+    if (entries === null || workPreferences === null) return null;
+    if (typeof value.syncVersion !== "string" || !ISO_TIMESTAMP_PATTERN.test(value.syncVersion) || !Number.isFinite(Date.parse(value.syncVersion)) || new Date(value.syncVersion).toISOString() !== value.syncVersion) {
+      return null;
+    }
+    return Object.freeze({ entries, workPreferences, syncVersion: value.syncVersion });
+  }
+  function parseAccountData(value) {
+    if (value === null || value === void 0) return { kind: "missing" };
+    if (!isRecord2(value) || !hasOnlyKeys(value, ["version", "scope", "summary", "overlay"]) || value.version !== 1 || !Object.hasOwn(value, "summary") || !Object.hasOwn(value, "overlay")) {
+      return { kind: "invalid" };
+    }
+    const scope2 = copyScope(value.scope);
+    if (scope2 === null) return { kind: "invalid" };
+    const summary = value.summary === null ? null : copySummary(value.summary);
+    if (value.summary !== null && summary === null) return { kind: "invalid" };
+    const overlay = value.overlay === null ? null : copyOverlay(value.overlay);
+    if (value.overlay !== null && overlay === null) return { kind: "invalid" };
+    return {
+      kind: "valid",
+      value: Object.freeze({ version: 1, scope: scope2, summary, overlay })
+    };
+  }
+  function createEmptyAccountData(scope2) {
+    const parsed = parseAccountData({ version: 1, scope: scope2, summary: null, overlay: null });
+    if (parsed.kind !== "valid") throw new TypeError("invalid account scope");
+    return parsed.value;
+  }
+  function copyAccountSummary(value) {
+    return copySummary(value);
+  }
+  function copyAccountOverlay(value) {
+    return copyOverlay(value);
+  }
+  function copyLibraryOverlayEntry(value) {
+    return copyEntry(value);
+  }
+
+  // src/extension-core/account-projection.mts
+  function scopeKey(scope2) {
+    return `${scope2.accountId}:${scope2.epoch}`;
+  }
+  var AccountProjectionService = class {
+    #ports;
+    #maxAgeMs;
+    #lastRefresh = null;
+    #inflight = null;
+    #invalidationGeneration = 0;
+    constructor(ports) {
+      this.#ports = ports;
+      this.#maxAgeMs = ports.maxAgeMs ?? 3e4;
+    }
+    async read(options = {}) {
+      if (options.refresh !== false) await this.refreshIfNeeded();
+      return this.#ports.repository.read();
+    }
+    invalidate() {
+      this.#invalidationGeneration += 1;
+      this.#lastRefresh = null;
+    }
+    refreshIfNeeded(force = false) {
+      const scope2 = this.#ports.session.publicationScope();
+      if (scope2 === null) {
+        return Promise.resolve({ kind: "not_authenticated" });
+      }
+      const key = scopeKey(scope2);
+      const generation = this.#invalidationGeneration;
+      if (this.#inflight?.scope === key) {
+        if (this.#inflight.generation === generation) return this.#inflight.promise;
+        return this.#inflight.promise.then(() => this.refreshIfNeeded(true));
+      }
+      if (!force && this.#lastRefresh?.scope === key && this.#ports.clock.now() - this.#lastRefresh.at < this.#maxAgeMs) {
+        return Promise.resolve({ kind: "current" });
+      }
+      const promise = this.#refresh(scope2, generation).finally(() => {
+        if (this.#inflight?.promise === promise) this.#inflight = null;
       });
-  }, 200);
-}
-
-try {
-  void ensureRuntimeContext();
-  ext.storage.local.get([AUTH_TOKEN_KEY, AUTH_STATE_KEY], (res) => {
-    void startInitialAuth(res || {});
-  });
-} catch (e) {
-  console.error("[Trace] Failed to read storage on boot:", e);
-  setErrorState("Trace could not load extension storage.");
-}
-
-try {
-  ext.tabs?.onUpdated?.addListener((tabId, changeInfo, tab) => {
-    if (!tabId) return;
-    if (changeInfo?.status !== "complete") return;
-    if (!isAo3StoryUrl(tab?.url)) return;
-    pingAo3TabForAutoTrack(tabId);
-  });
-} catch (e) {
-  console.warn("[Trace] Failed to attach tabs.onUpdated listener:", e);
-}
-
-// Listen for messages
-ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  // -------------------------------------------------
-  // A0. Archive content script announcing injection.
-  // Fires immediately on page load, independent of auto-track prefs or any
-  // pending network work — the iOS wizard's "Safari permission granted"
-  // evidence. hostKind comes from the sender tab URL, never the payload.
-  // -------------------------------------------------
-  if (msg.type === "TRACE_ARCHIVE_SEEN") {
-    if (!shouldIgnoreSenderForAutoTrack(sender)) {
-      const hostKind = archiveHostKindFromSenderUrl(
-        sender?.tab?.url || sender?.url,
+      this.#inflight = Object.freeze({ scope: key, generation, promise });
+      return promise;
+    }
+    async #refresh(scope2, generation) {
+      let reservation = this.#ports.repository.reserveOverlayWrite();
+      let fetched = await this.#ports.session.executeAuthenticated(
+        (credential) => this.#ports.api.load(credential)
       );
-      if (hostKind) {
-        recordArchiveReadiness({
-          hostKind,
-          handoffId: normalizeIosHandoffId(msg.handoffId),
+      if (fetched.kind === "auth_rejected" && fetched.recovery === "connected") {
+        reservation = this.#ports.repository.reserveOverlayWrite();
+        fetched = await this.#ports.session.executeAuthenticated(
+          (credential) => this.#ports.api.load(credential)
+        );
+      }
+      if (fetched.kind === "auth_rejected") return { kind: "auth_expired" };
+      if (fetched.kind === "stale") return { kind: "stale" };
+      if (fetched.kind !== "published") return { kind: "unavailable" };
+      if (!sameAccountScope(this.#ports.session.publicationScope(), scope2)) {
+        return { kind: "stale" };
+      }
+      let overlay;
+      if (fetched.value.overlay.kind === "value") {
+        try {
+          const result = await this.#ports.repository.publishOverlay(
+            scope2,
+            fetched.value.overlay.value,
+            reservation
+          );
+          overlay = result.kind === "published" ? "published" : result.kind === "stale_write" ? "stale" : result.kind === "invalid_model" ? "invalid" : "stale";
+        } catch {
+          overlay = "unavailable";
+        }
+      } else {
+        overlay = fetched.value.overlay.kind === "invalid_response" ? "invalid" : "unavailable";
+      }
+      let summary;
+      if (fetched.value.summary.kind === "value") {
+        if (fetched.value.summary.value.accountId !== scope2.accountId) {
+          summary = "invalid";
+        } else {
+          try {
+            const result = await this.#ports.repository.publishSummary(
+              scope2,
+              fetched.value.summary.value.value
+            );
+            summary = result.kind === "published" ? "published" : result.kind === "invalid_model" ? "invalid" : "unavailable";
+          } catch {
+            summary = "unavailable";
+          }
+        }
+      } else {
+        summary = fetched.value.summary.kind === "invalid_response" ? "invalid" : "unavailable";
+      }
+      if (sameAccountScope(this.#ports.session.displayScope(), scope2) && generation === this.#invalidationGeneration && (overlay === "published" || summary === "published")) {
+        this.#lastRefresh = Object.freeze({
+          scope: scopeKey(scope2),
+          at: this.#ports.clock.now()
         });
       }
+      return Object.freeze({ kind: "refreshed", overlay, summary });
     }
-    if (sendResponse) sendResponse({ ok: true });
-    return false;
-  }
+  };
 
-  // -------------------------------------------------
-  // A0.1. Safari tab resumed after the user opened Trace.
-  // Re-read the shared iOS Keychain token and verify it before the content
-  // script removes its reconnect state. Other browsers never reach native
-  // messaging, and only supported top-frame archive senders are accepted.
-  // -------------------------------------------------
-  if (msg.type === IOS_AUTH_REFRESH_REQUEST_MESSAGE) {
-    const hostKind = shouldIgnoreSenderForAutoTrack(sender)
-      ? null
-      : archiveHostKindFromSenderUrl(sender?.tab?.url || sender?.url);
-    if (detectBrowserKind() !== "safari" || !hostKind) {
-      if (sendResponse) {
-        sendResponse({ ok: false, error: "unsupported_sender" });
-      }
+  // src/extension-core/library-command.mts
+  function failed(reason) {
+    return Object.freeze({ kind: "failed", reason });
+  }
+  function executionFailure(result) {
+    if (result.kind === "stale") return failed("stale");
+    if (result.kind === "auth_rejected") return failed("auth_expired");
+    return failed("not_authenticated");
+  }
+  function projectionFailure(result) {
+    return failed(result.kind);
+  }
+  function canonicalReaderStatus(entry) {
+    if (entry.canonicalReaderStatus !== void 0) {
+      return entry.canonicalReaderStatus;
+    }
+    const legacy = entry.readerStatus ?? entry.status;
+    if (legacy === "PLANNING") return "SAVED";
+    if (legacy === "COMPLETED") return "FINISHED";
+    return legacy === "READING" || legacy === "PAUSED" || legacy === "DROPPED" ? legacy : null;
+  }
+  function entryForCommand(data, command) {
+    const entry = data.overlay?.entries[command.workKey];
+    if (entry === void 0 || entry.entryId !== command.entryId) return null;
+    return entry;
+  }
+  function entryPatchSatisfied(entry, patch) {
+    if (patch.status !== void 0 && canonicalReaderStatus(entry) !== patch.status) {
       return false;
     }
-
-    void bootstrapAuthFromIosNative("archive_resume").then((bootstrapped) => {
-      if (sendResponse) {
-        sendResponse(
-          bootstrapped
-            ? { ok: true }
-            : { ok: false, error: "native_auth_unavailable" },
+    if (patch.progress !== void 0) {
+      if (entry.chapters === void 0 || entry.chapters.current !== patch.progress.value || entry.chapters.total !== patch.progress.total) {
+        return false;
+      }
+    }
+    if (patch.rating !== void 0 && entry.rating !== patch.rating) return false;
+    const override = patch.story_snapshot?.work_status_override;
+    if (override !== void 0) {
+      if (override === null) {
+        if (entry.workStatusProvenance === "override") return false;
+      } else if (entry.workStatus !== override || entry.workStatusProvenance !== "override") {
+        return false;
+      }
+    }
+    return true;
+  }
+  function preferenceSatisfied(data, command) {
+    const hidden = data.overlay?.workPreferences[command.workKey]?.browsePreference.hidden === true;
+    return hidden === command.hidden;
+  }
+  function libraryMutationSatisfied(data, command) {
+    if (command.kind === "work_preference") return preferenceSatisfied(data, command);
+    const entry = entryForCommand(data, command);
+    return entry !== null && entryPatchSatisfied(entry, command.patch);
+  }
+  function confirmedMutation(data, command, source) {
+    const entry = command.kind === "entry_patch" ? entryForCommand(data, command) ?? void 0 : data.overlay?.entries[command.workKey];
+    return Object.freeze({
+      kind: "confirmed",
+      commandKind: command.kind,
+      workKey: command.workKey,
+      ...command.kind === "entry_patch" ? { entryId: command.entryId } : {},
+      ...entry === void 0 ? {} : { entry },
+      source
+    });
+  }
+  var LibraryMutationService = class {
+    #ports;
+    #tail = Promise.resolve();
+    constructor(ports) {
+      this.#ports = ports;
+    }
+    execute(command) {
+      return this.#withLock(() => this.#execute(command));
+    }
+    async #execute(command) {
+      const scope2 = this.#ports.session.publicationScope();
+      if (scope2 === null) return failed("not_authenticated");
+      let projection = await this.#ports.projection.refreshAndRead();
+      if (projection.kind !== "value") return projectionFailure(projection);
+      if (!sameAccountScope(this.#ports.session.publicationScope(), scope2)) {
+        return failed("stale");
+      }
+      if (command.kind === "entry_patch" && entryForCommand(projection.value, command) === null) {
+        return failed("invalid_request");
+      }
+      if (libraryMutationSatisfied(projection.value, command)) {
+        return confirmedMutation(projection.value, command, "preflight");
+      }
+      let mutation = await this.#ports.session.executeAuthenticated(
+        (credential) => this.#ports.api.mutate(credential, command)
+      );
+      if (mutation.kind === "auth_rejected" && mutation.recovery === "connected") {
+        projection = await this.#ports.projection.refreshAndRead();
+        if (projection.kind !== "value") return projectionFailure(projection);
+        if (libraryMutationSatisfied(projection.value, command)) {
+          return confirmedMutation(projection.value, command, "preflight");
+        }
+        mutation = await this.#ports.session.executeAuthenticated(
+          (credential) => this.#ports.api.mutate(credential, command)
         );
       }
-    });
-    return true;
-  }
-
-  // -------------------------------------------------
-  // A. Token update from sync.js
-  // -------------------------------------------------
-  if (msg.type === "TRACE_AUTH_UPDATE") {
-    const token = typeof msg.token === "string" ? msg.token.trim() : "";
-
-    if (!token) {
-      clearToken();
-      setSignedOutState();
-      clearBadge(sender?.tab?.id);
-      if (sendResponse) sendResponse({ success: true, state: "signed_out" });
-      return;
-    }
-
-    setBadge(sender?.tab?.id, "SYNC", "#2196F3");
-    setTimeout(() => clearBadge(sender?.tab?.id), 2000);
-
-    void verifyTraceAccountToken(token, {
-      lastTokenSyncAt: new Date().toISOString(),
-    }).then((result) => {
-      if (sendResponse) sendResponse(result);
-    });
-    return true;
-  }
-
-  // -------------------------------------------------
-  // A2. Trace-origin extension status handshake
-  // -------------------------------------------------
-  if (msg.type === EXTENSION_STATUS_QUERY_MESSAGE) {
-    const nonce = typeof msg.nonce === "string" ? msg.nonce : "";
-    if (!nonce.trim()) return false;
-
-    (async () => {
-      // Give startup token verification a bounded chance to settle; otherwise
-      // a cold worker answers "unknown" for an account that is connected. If
-      // the wait expires, respond with the best-known state — a settled push
-      // will correct the page shortly after.
-      try {
-        await Promise.race([
-          (async () => {
-            await ensureStoredAuthReady();
-            if (pendingAuthVerification) await pendingAuthVerification;
-          })(),
-          new Promise((resolve) =>
-            setTimeout(resolve, EXTENSION_STATUS_AUTH_SETTLE_WAIT_MS),
-          ),
-        ]);
-      } catch (_) {
-        /* respond with best-known state */
+      if (mutation.kind !== "published") return executionFailure(mutation);
+      if (mutation.value.kind === "rejected") return failed(mutation.value.reason);
+      projection = await this.#ports.projection.refreshAndRead();
+      if (projection.kind !== "value") return projectionFailure(projection);
+      if (!sameAccountScope(this.#ports.session.publicationScope(), scope2)) {
+        return failed("stale");
       }
-      const snapshot = await storageGetLocal([
-        AUTH_TOKEN_KEY,
-        AUTH_STATE_KEY,
-        TRACE_FIRST_SAVE_SEEN_KEY,
-        ARCHIVE_READINESS_KEY,
-      ]);
-      if (sendResponse) sendResponse(buildExtensionStatus(snapshot));
-    })().catch(() => {
-      if (sendResponse) sendResponse(safeUnknownExtensionStatus());
+      if (!libraryMutationSatisfied(projection.value, command)) {
+        return failed("confirmation_missing");
+      }
+      return confirmedMutation(
+        projection.value,
+        command,
+        mutation.value.kind === "accepted" ? "mutation" : "reconciliation"
+      );
+    }
+    async #withLock(work) {
+      const previous = this.#tail;
+      let release = () => {
+      };
+      this.#tail = new Promise((resolve) => {
+        release = resolve;
+      });
+      await previous;
+      try {
+        return await work();
+      } finally {
+        release();
+      }
+    }
+  };
+  var FinishQualificationService = class {
+    #ports;
+    #tail = Promise.resolve();
+    constructor(ports) {
+      this.#ports = ports;
+    }
+    execute(command) {
+      return this.#withLock(() => this.#execute(command));
+    }
+    async #execute(command) {
+      const scope2 = this.#ports.session.publicationScope();
+      if (scope2 === null) return failed("not_authenticated");
+      const projection = await this.#ports.projection.refreshAndRead();
+      if (projection.kind !== "value") return projectionFailure(projection);
+      if (!sameAccountScope(this.#ports.session.publicationScope(), scope2)) {
+        return failed("stale");
+      }
+      if (entryForCommand(projection.value, command) === null) {
+        return failed("invalid_request");
+      }
+      let signal = await this.#ports.session.executeAuthenticated(
+        (credential) => this.#ports.api.qualifyFinish(credential, command)
+      );
+      if (signal.kind === "auth_rejected" && signal.recovery === "connected") {
+        signal = await this.#ports.session.executeAuthenticated(
+          (credential) => this.#ports.api.qualifyFinish(credential, command)
+        );
+      }
+      if (signal.kind !== "published") return executionFailure(signal);
+      if (signal.value.kind === "rejected") return failed(signal.value.reason);
+      if (signal.value.kind === "uncertain") return failed("unavailable");
+      if (!sameAccountScope(this.#ports.session.publicationScope(), scope2)) {
+        return failed("stale");
+      }
+      if (signal.value.state === "resolved") {
+        await this.#ports.projection.refreshAndRead();
+        if (!sameAccountScope(this.#ports.session.publicationScope(), scope2)) {
+          return failed("stale");
+        }
+      }
+      return Object.freeze({
+        kind: "acknowledged",
+        state: signal.value.state,
+        eventId: signal.value.eventId
+      });
+    }
+    async #withLock(work) {
+      const previous = this.#tail;
+      let release = () => {
+      };
+      this.#tail = new Promise((resolve) => {
+        release = resolve;
+      });
+      await previous;
+      try {
+        return await work();
+      } finally {
+        release();
+      }
+    }
+  };
+
+  // src/extension-core/metadata-contribution.mts
+  function failure(reason) {
+    return Object.freeze({ kind: "failed", reason });
+  }
+  function executionFailure2(result) {
+    if (result.kind === "stale") return failure("stale");
+    if (result.kind === "auth_rejected") return failure("auth_expired");
+    return failure("not_authenticated");
+  }
+  var MetadataContributionService = class {
+    #ports;
+    constructor(ports) {
+      this.#ports = ports;
+    }
+    async execute(command) {
+      let enabled = true;
+      try {
+        enabled = await this.#ports.preference.enabled();
+      } catch {
+        enabled = true;
+      }
+      if (!enabled) {
+        return Object.freeze({ kind: "skipped", reason: "preference_disabled" });
+      }
+      try {
+        await this.#ports.authority.prepare();
+      } catch {
+        return failure("unavailable");
+      }
+      const scope2 = this.#ports.session.publicationScope();
+      if (scope2 === null) return failure("not_authenticated");
+      let contribution = await this.#executeAuthenticated(command);
+      if (contribution.kind === "auth_rejected" && contribution.recovery === "connected") {
+        contribution = await this.#executeAuthenticated(command);
+      }
+      if (contribution.kind !== "published") return executionFailure2(contribution);
+      if (contribution.value.kind === "rejected") {
+        return failure(contribution.value.reason);
+      }
+      if (contribution.value.kind === "invalid_response") {
+        return failure("invalid_response");
+      }
+      if (contribution.value.kind === "unavailable") return failure("unavailable");
+      if (!sameAccountScope(this.#ports.session.publicationScope(), scope2)) {
+        return failure("stale");
+      }
+      if (!contribution.value.updated) {
+        return Object.freeze({
+          kind: "accepted",
+          updated: false,
+          projection: "not_needed",
+          notification: "not_needed"
+        });
+      }
+      let projection = "invalidated";
+      try {
+        this.#ports.projection.invalidate();
+      } catch {
+        projection = "unavailable";
+      }
+      if (!sameAccountScope(this.#ports.session.publicationScope(), scope2)) {
+        return failure("stale");
+      }
+      let notification = "unavailable";
+      try {
+        notification = await this.#ports.notification.publish() ? "published" : "unavailable";
+      } catch {
+        notification = "unavailable";
+      }
+      return Object.freeze({
+        kind: "accepted",
+        updated: true,
+        projection,
+        notification
+      });
+    }
+    #executeAuthenticated(command) {
+      return this.#ports.session.executeAuthenticated(
+        (credential) => this.#ports.api.contribute(credential, command)
+      );
+    }
+  };
+
+  // src/extension-core/saved-filter-sync.mts
+  var SAVED_FILTER_ACTIVE_LIMIT = 250;
+  var SAVED_FILTER_SYNC_BATCH_LIMIT = 100;
+  var SAVED_FILTER_SYNC_MAX_ITERATIONS = 10;
+  var CLIENT_ID_PATTERN = /^[A-Za-z0-9._:-]{1,80}$/;
+  var PARAM_KEY_PATTERN = /^(?:work_search|include_work_search|exclude_work_search)\[[a-z0-9_]+\](?:\[\])?$/;
+  var UUID_PATTERN2 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  var MAX_REMOTE_ROWS = SAVED_FILTER_ACTIVE_LIMIT * 2;
+  var MAX_LOCAL_TOMBSTONES = 1e4;
+  function isRecord3(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function hasOnlyKeys2(value, keys) {
+    return Object.keys(value).every((key) => keys.includes(key));
+  }
+  function isIso(value) {
+    return typeof value === "string" && Number.isFinite(Date.parse(value));
+  }
+  function cleanText(value, maxLength) {
+    return typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, maxLength) : "";
+  }
+  function copyPairs(value) {
+    if (!Array.isArray(value) || value.length === 0 || value.length > 80) return null;
+    const pairs = [];
+    for (const pair of value) {
+      if (!Array.isArray(pair) || pair.length !== 2) return null;
+      const key = typeof pair[0] === "string" ? pair[0].trim() : "";
+      const item = typeof pair[1] === "string" ? pair[1].trim() : "";
+      if (!PARAM_KEY_PATTERN.test(key) || item.length === 0 || item.length > 300) return null;
+      pairs.push([key, item]);
+    }
+    pairs.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
+    return Object.freeze(pairs.map((pair) => Object.freeze(pair)));
+  }
+  function copySummary2(value) {
+    if (!Array.isArray(value) || value.length > 5) return null;
+    const summary = [];
+    for (const item of value) {
+      const text = cleanText(item, 64);
+      if (!text || text !== item) return null;
+      summary.push(text);
+    }
+    return Object.freeze(summary);
+  }
+  function validClientId(value) {
+    return typeof value === "string" && CLIENT_ID_PATTERN.test(value);
+  }
+  function validUuid(value) {
+    return typeof value === "string" && UUID_PATTERN2.test(value);
+  }
+  function copyLocalPreset(value, now) {
+    if (!isRecord3(value)) return null;
+    const id = cleanText(value.id, 120);
+    const clientId = validClientId(value.clientId) ? value.clientId : validClientId(id) ? id : "";
+    const params = copyPairs(value.params);
+    const summary = copySummary2(Array.isArray(value.summary) ? value.summary : []);
+    if (!id || !clientId || params === null || summary === null) return null;
+    const scope2 = value.scope === "global" ? "global" : "context";
+    const updatedAt = isIso(value.updatedAt) ? value.updatedAt : now;
+    return Object.freeze({
+      id,
+      clientId,
+      serverId: validUuid(value.serverId) ? value.serverId : "",
+      name: cleanText(value.name, 96) || "AO3 filter",
+      params,
+      scope: scope2,
+      contextKey: scope2 === "context" ? cleanText(value.contextKey, 240) : "",
+      contextLabel: scope2 === "context" ? cleanText(value.contextLabel, 120) : "",
+      summary,
+      createdAt: isIso(value.createdAt) ? value.createdAt : now,
+      updatedAt,
+      clientUpdatedAt: isIso(value.clientUpdatedAt) ? value.clientUpdatedAt : updatedAt,
+      dirty: value.dirty === true
     });
-    return true;
   }
-
-  // -------------------------------------------------
-  // A3. Trace-origin first-story onboarding bridge
-  // -------------------------------------------------
-  if (msg.type === FIRST_STORY_ADD_MESSAGE) {
-    handleFirstStoryAdd(msg, sendResponse);
-    return true;
-  }
-
-  if (msg.type === IOS_PENDING_FIRST_STORY_GET_MESSAGE) {
-    handleIosPendingFirstStoryGet(sendResponse);
-    return true;
-  }
-
-  if (msg.type === IOS_PENDING_FIRST_STORY_CLEAR_MESSAGE) {
-    handleIosPendingFirstStoryClear(sendResponse);
-    return true;
-  }
-
-  if (msg.type === WORK_STATE_GET_MESSAGE) {
-    void getWorkStateForKey(msg.workKey).then((state) => {
-      if (sendResponse) sendResponse({ ok: true, state });
+  function copyLocalDeletion(value, now) {
+    if (!isRecord3(value)) return null;
+    const id = cleanText(value.id, 120);
+    const clientId = validClientId(value.clientId) ? value.clientId : validClientId(id) ? id : "";
+    if (!clientId) return null;
+    return Object.freeze({
+      id: id || clientId,
+      clientId,
+      serverId: validUuid(value.serverId) ? value.serverId : "",
+      clientUpdatedAt: isIso(value.clientUpdatedAt) ? value.clientUpdatedAt : now
     });
-    return true;
   }
-
-  // -------------------------------------------------
-  // B. Auto-track request from collector.js
-  // -------------------------------------------------
-  if (msg.type === "TRACE_AUTO_TRACK") {
-    handleAutoTrack(msg.payload, sender, sendResponse);
-    return true;
+  function copyActiveMeta(value) {
+    if (!isRecord3(value)) return null;
+    const id = cleanText(value.id, 120);
+    const signature = cleanText(value.signature, 4096);
+    const contextKey = cleanText(value.contextKey, 240);
+    if (!id || !signature || !contextKey) return null;
+    return Object.freeze({
+      id,
+      signature,
+      contextKey,
+      appliedAt: isIso(value.appliedAt) ? value.appliedAt : ""
+    });
   }
+  function normalizeSavedFilterSnapshot(raw, now) {
+    const root = isRecord3(raw) ? raw : {};
+    const presets = [];
+    const presetIds = /* @__PURE__ */ new Set();
+    const presetClientIds = /* @__PURE__ */ new Set();
+    if (Array.isArray(root.presets)) {
+      for (const value of root.presets.slice(0, SAVED_FILTER_ACTIVE_LIMIT)) {
+        const preset = copyLocalPreset(value, now);
+        if (preset === null || presetIds.has(preset.id) || presetClientIds.has(preset.clientId)) {
+          continue;
+        }
+        presetIds.add(preset.id);
+        presetClientIds.add(preset.clientId);
+        presets.push(preset);
+      }
+    }
+    const deleted = [];
+    const deletedClientIds = /* @__PURE__ */ new Set();
+    if (Array.isArray(root.deleted)) {
+      for (const value of root.deleted.slice(0, MAX_LOCAL_TOMBSTONES)) {
+        const item = copyLocalDeletion(value, now);
+        if (item === null || deletedClientIds.has(item.clientId)) continue;
+        deletedClientIds.add(item.clientId);
+        deleted.push(item);
+      }
+    }
+    return Object.freeze({
+      presets: Object.freeze(presets),
+      deleted: Object.freeze(deleted),
+      activeMeta: copyActiveMeta(root.activeMeta),
+      syncVersion: isIso(root.syncVersion) ? root.syncVersion : null,
+      lastSyncedAt: isIso(root.lastSyncedAt) ? root.lastSyncedAt : null,
+      clientId: validClientId(root.clientId) ? root.clientId : null
+    });
+  }
+  function copyRemotePreset(value) {
+    if (!isRecord3(value) || !hasOnlyKeys2(value, [
+      "id",
+      "clientId",
+      "name",
+      "scope",
+      "contextKey",
+      "contextLabel",
+      "params",
+      "summary",
+      "createdAt",
+      "updatedAt",
+      "clientUpdatedAt"
+    ]) || !validUuid(value.id) || !validClientId(value.clientId) || value.scope !== "context" && value.scope !== "global" || !isIso(value.createdAt) || !isIso(value.updatedAt) || !isIso(value.clientUpdatedAt)) {
+      return null;
+    }
+    const name = cleanText(value.name, 96);
+    const params = copyPairs(value.params);
+    const summary = copySummary2(value.summary);
+    if (!name || name !== value.name || params === null || summary === null) return null;
+    if (value.contextKey !== null && (typeof value.contextKey !== "string" || value.contextKey.length > 240)) {
+      return null;
+    }
+    if (value.contextLabel !== null && (typeof value.contextLabel !== "string" || value.contextLabel.length > 120)) {
+      return null;
+    }
+    return Object.freeze({
+      id: value.id,
+      clientId: value.clientId,
+      name,
+      scope: value.scope,
+      contextKey: value.contextKey,
+      contextLabel: value.contextLabel,
+      params,
+      summary,
+      createdAt: value.createdAt,
+      updatedAt: value.updatedAt,
+      clientUpdatedAt: value.clientUpdatedAt
+    });
+  }
+  function copyRemoteDeletion(value) {
+    if (!isRecord3(value) || !hasOnlyKeys2(value, [
+      "id",
+      "clientId",
+      "deletedAt",
+      "updatedAt",
+      "clientUpdatedAt"
+    ]) || !validUuid(value.id) || !validClientId(value.clientId) || !isIso(value.deletedAt) || !isIso(value.updatedAt) || !isIso(value.clientUpdatedAt)) {
+      return null;
+    }
+    return Object.freeze({
+      id: value.id,
+      clientId: value.clientId,
+      deletedAt: value.deletedAt,
+      updatedAt: value.updatedAt,
+      clientUpdatedAt: value.clientUpdatedAt
+    });
+  }
+  function parseSavedFilterSyncData(value) {
+    if (!isRecord3(value) || !hasOnlyKeys2(value, ["serverTime", "syncVersion", "presets", "deleted"]) || !isIso(value.serverTime) || !isIso(value.syncVersion) || !Array.isArray(value.presets) || !Array.isArray(value.deleted) || value.presets.length > MAX_REMOTE_ROWS || value.deleted.length > MAX_REMOTE_ROWS) {
+      return null;
+    }
+    const presets = [];
+    const deleted = [];
+    const seenPresets = /* @__PURE__ */ new Set();
+    const seenDeleted = /* @__PURE__ */ new Set();
+    for (const raw of value.presets) {
+      const preset = copyRemotePreset(raw);
+      if (preset === null || seenPresets.has(preset.clientId)) return null;
+      seenPresets.add(preset.clientId);
+      presets.push(preset);
+    }
+    for (const raw of value.deleted) {
+      const item = copyRemoteDeletion(raw);
+      if (item === null || seenDeleted.has(item.clientId)) return null;
+      seenDeleted.add(item.clientId);
+      deleted.push(item);
+    }
+    return Object.freeze({
+      serverTime: value.serverTime,
+      syncVersion: value.syncVersion,
+      presets: Object.freeze(presets),
+      deleted: Object.freeze(deleted)
+    });
+  }
+  function needsSync(preset) {
+    return preset.dirty || !validUuid(preset.serverId);
+  }
+  function upsertFromPreset(preset) {
+    return Object.freeze({
+      ...validUuid(preset.serverId) ? { id: preset.serverId } : {},
+      clientId: preset.clientId,
+      name: preset.name,
+      scope: preset.scope,
+      contextKey: preset.scope === "context" ? preset.contextKey || null : null,
+      contextLabel: preset.scope === "context" ? preset.contextLabel || null : null,
+      params: preset.params,
+      summary: preset.summary,
+      createdAt: preset.createdAt,
+      clientUpdatedAt: preset.clientUpdatedAt
+    });
+  }
+  function deleteFromLocal(item) {
+    return Object.freeze({
+      ...validUuid(item.serverId) ? { id: item.serverId } : {},
+      clientId: item.clientId,
+      clientUpdatedAt: item.clientUpdatedAt
+    });
+  }
+  function savedFilterSyncRequest(snapshot) {
+    if (snapshot.clientId === null) return null;
+    return Object.freeze({
+      clientId: snapshot.clientId,
+      since: snapshot.syncVersion,
+      upserts: Object.freeze(
+        snapshot.presets.filter(needsSync).slice(0, SAVED_FILTER_SYNC_BATCH_LIMIT).map(upsertFromPreset)
+      ),
+      deletes: Object.freeze(
+        snapshot.deleted.slice(0, SAVED_FILTER_SYNC_BATCH_LIMIT).map(deleteFromLocal)
+      )
+    });
+  }
+  function localIsNewer(local, remoteClientUpdatedAt) {
+    if (local?.dirty !== true) return false;
+    return Date.parse(local.clientUpdatedAt) > Date.parse(remoteClientUpdatedAt);
+  }
+  function mergeSavedFilterSyncData(snapshot, data, sentDeleteClientIds, syncedAt) {
+    const byClientId = new Map(snapshot.presets.map((item) => [item.clientId, item]));
+    const localIdByClientId = new Map(
+      snapshot.presets.map((item) => [item.clientId, item.id])
+    );
+    const deletedByClientId = new Map(
+      snapshot.deleted.map((item) => [item.clientId, item])
+    );
+    for (const clientId of sentDeleteClientIds) deletedByClientId.delete(clientId);
+    for (const remote of data.presets) {
+      const existing = byClientId.get(remote.clientId);
+      if (localIsNewer(existing, remote.clientUpdatedAt)) continue;
+      byClientId.set(remote.clientId, Object.freeze({
+        id: existing?.id ?? remote.clientId,
+        clientId: remote.clientId,
+        serverId: remote.id,
+        name: remote.name,
+        params: remote.params,
+        scope: remote.scope,
+        contextKey: remote.scope === "context" ? remote.contextKey ?? "" : "",
+        contextLabel: remote.scope === "context" ? remote.contextLabel ?? "" : "",
+        summary: remote.summary,
+        createdAt: remote.createdAt,
+        updatedAt: remote.updatedAt,
+        clientUpdatedAt: remote.clientUpdatedAt,
+        dirty: false
+      }));
+      deletedByClientId.delete(remote.clientId);
+    }
+    for (const remote of data.deleted) {
+      const existing = byClientId.get(remote.clientId);
+      if (localIsNewer(existing, remote.clientUpdatedAt)) continue;
+      byClientId.delete(remote.clientId);
+      deletedByClientId.delete(remote.clientId);
+    }
+    const presets = Array.from(byClientId.values()).sort(
+      (a, b) => Date.parse(a.updatedAt) - Date.parse(b.updatedAt)
+    );
+    let activeMeta = snapshot.activeMeta;
+    if (activeMeta !== null && !presets.some((item) => item.id === activeMeta.id)) {
+      const activeClientId = Array.from(localIdByClientId.entries()).find(([, localId]) => localId === activeMeta.id)?.[0];
+      const replacement = activeClientId === void 0 ? void 0 : presets.find((item) => item.clientId === activeClientId);
+      activeMeta = replacement === void 0 ? null : Object.freeze({ ...activeMeta, id: replacement.id });
+    }
+    return Object.freeze({
+      presets: Object.freeze(presets),
+      deleted: Object.freeze(Array.from(deletedByClientId.values())),
+      activeMeta,
+      syncVersion: data.syncVersion,
+      lastSyncedAt: syncedAt,
+      clientId: snapshot.clientId
+    });
+  }
+  function savedFilterSnapshotHasPending(snapshot) {
+    return snapshot.presets.some(needsSync) || snapshot.deleted.length > 0;
+  }
+  function failure2(reason, limit) {
+    return Object.freeze({
+      kind: "failed",
+      reason,
+      ...limit === void 0 ? {} : { limit }
+    });
+  }
+  var SavedFilterSyncService = class {
+    #ports;
+    #inFlight = null;
+    #generation = 0;
+    constructor(ports) {
+      this.#ports = ports;
+    }
+    sync() {
+      const generation = this.#generation;
+      this.#inFlight ??= this.#syncOnce(generation).finally(() => {
+        this.#inFlight = null;
+      });
+      return this.#inFlight;
+    }
+    cancel() {
+      this.#generation += 1;
+    }
+    async #syncOnce(generation) {
+      let scope2 = this.#ports.session.publicationScope();
+      if (scope2 === null) return failure2("not_authenticated");
+      let requests = 0;
+      let lastSyncVersion = "";
+      for (let iteration = 0; iteration < SAVED_FILTER_SYNC_MAX_ITERATIONS; iteration += 1) {
+        if (generation !== this.#generation) return failure2("stale");
+        let snapshot;
+        try {
+          snapshot = await this.#ports.repository.read();
+        } catch {
+          return failure2("storage_unavailable");
+        }
+        if (snapshot === null || snapshot.clientId === null) {
+          return failure2("storage_unavailable");
+        }
+        const request = savedFilterSyncRequest(snapshot);
+        if (request === null) return failure2("storage_unavailable");
+        let execution = await this.#execute(request);
+        if (generation !== this.#generation) return failure2("stale");
+        if (execution.kind === "auth_rejected" && execution.recovery === "connected") {
+          const recoveredScope = this.#ports.session.publicationScope();
+          if (recoveredScope === null || recoveredScope.accountId !== scope2.accountId) {
+            return failure2("stale");
+          }
+          scope2 = recoveredScope;
+          execution = await this.#execute(request);
+          if (generation !== this.#generation) return failure2("stale");
+        }
+        if (execution.kind === "auth_rejected") return failure2("auth_expired");
+        if (execution.kind !== "published") {
+          return failure2(execution.kind === "stale" ? "stale" : "unavailable");
+        }
+        const outcome = execution.value;
+        if (outcome.kind === "rejected") {
+          return failure2(outcome.reason, outcome.limit);
+        }
+        if (outcome.kind === "invalid_response") return failure2("invalid_response");
+        if (outcome.kind === "unavailable") return failure2("unavailable");
+        if (!sameAccountScope(this.#ports.session.publicationScope(), scope2)) {
+          return failure2("stale");
+        }
+        const merged = await this.#ports.repository.merge(
+          scope2,
+          outcome.data,
+          new Set(request.deletes.map((item) => item.clientId)),
+          this.#ports.clock.now()
+        );
+        if (merged.kind !== "published") {
+          return failure2(
+            merged.kind === "stale" ? "stale" : "storage_unavailable"
+          );
+        }
+        requests += 1;
+        lastSyncVersion = merged.snapshot.syncVersion ?? "";
+        if (!savedFilterSnapshotHasPending(merged.snapshot)) {
+          return Object.freeze({
+            kind: "completed",
+            syncVersion: lastSyncVersion,
+            requests
+          });
+        }
+      }
+      return Object.freeze({
+        kind: "partial",
+        syncVersion: lastSyncVersion,
+        requests
+      });
+    }
+    #execute(request) {
+      return this.#ports.session.executeAuthenticated(
+        (credential) => this.#ports.api.sync(credential, request)
+      );
+    }
+  };
 
-  // -------------------------------------------------
-  // F. Popup: Pro + prefs for Trace Pro toggles
-  // -------------------------------------------------
-  if (msg.type === "TRACE_POPUP_GET_STATE") {
-    (async () => {
-      void fetchTraceUserProPromise();
-      ext.storage.local.get(
-        [
-          AUTH_STATE_KEY,
-          TRACE_FIRST_SAVE_SEEN_KEY,
-          TRACE_LIBRARY_COUNT_KEY,
-          PREF_AUTO_TRACK_KEY,
-          PREF_LIBRARY_INLAY_KEY,
-          PREF_AO3_SAVED_FILTERS_KEY,
-          PREF_METADATA_IMPROVE_KEY,
-          TRACE_USER_PRO_KEY,
-        ],
-        async (r) => {
-          const activeTab = await getActiveTabContext();
-          if (sendResponse) {
-            sendResponse({
-              authState: r[AUTH_STATE_KEY] || null,
-              firstSaveSeen: r[TRACE_FIRST_SAVE_SEEN_KEY] === true,
-              libraryCount:
-                typeof r[TRACE_LIBRARY_COUNT_KEY] === "number"
-                  ? r[TRACE_LIBRARY_COUNT_KEY]
-                  : null,
-              activeTab,
-              pro: r[TRACE_USER_PRO_KEY] === true,
-              autoTrackEnabled: r[PREF_AUTO_TRACK_KEY] !== false,
-              libraryInlayEnabled: r[PREF_LIBRARY_INLAY_KEY] !== false,
-              ao3SavedFiltersEnabled: r[PREF_AO3_SAVED_FILTERS_KEY] !== false,
-              metadataImproveEnabled: r[PREF_METADATA_IMPROVE_KEY] !== false,
-            });
+  // src/extension-core/session-service.mts
+  var CAPABILITY_MARKER = Symbol("trace.extension.session-capability");
+  function disconnectedEnvelope(epoch) {
+    return Object.freeze({
+      version: SESSION_ENVELOPE_VERSION,
+      epoch,
+      desired: "disconnected",
+      accountId: null,
+      credentialRef: null
+    });
+  }
+  function connectedEnvelope(epoch, credentialRef, accountId) {
+    return Object.freeze({
+      version: SESSION_ENVELOPE_VERSION,
+      epoch,
+      desired: "connected",
+      accountId,
+      credentialRef
+    });
+  }
+  function isRecord4(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function isNonEmpty(value) {
+    return typeof value === "string" && value.trim().length > 0;
+  }
+  function normalizeAcquisition(value) {
+    if (!isRecord4(value)) return { kind: "unavailable" };
+    if (value.kind === "credential") {
+      return isNonEmpty(value.credential) ? { kind: "credential", credential: value.credential } : { kind: "unavailable" };
+    }
+    if (value.kind === "absent" || value.kind === "cancelled" || value.kind === "unavailable") {
+      return { kind: value.kind };
+    }
+    return { kind: "unavailable" };
+  }
+  function normalizeVerification(value) {
+    if (!isRecord4(value)) return { kind: "invalid_response" };
+    if (value.kind === "verified") {
+      return isNonEmpty(value.accountId) ? { kind: "verified", accountId: value.accountId } : { kind: "invalid_response" };
+    }
+    if (value.kind === "rejected" || value.kind === "account_unavailable" || value.kind === "invalid_response" || value.kind === "unavailable") {
+      return { kind: value.kind };
+    }
+    return { kind: "invalid_response" };
+  }
+  function normalizeEffectResult(value) {
+    if (!isRecord4(value)) return { kind: "unavailable" };
+    if (value.kind === "success" && Object.hasOwn(value, "value")) {
+      return { kind: "success", value: value.value };
+    }
+    if (value.kind === "auth_rejected" || value.kind === "unavailable") {
+      return { kind: value.kind };
+    }
+    return { kind: "unavailable" };
+  }
+  function createCapability(accountId, epoch, credential) {
+    return Object.freeze({
+      [CAPABILITY_MARKER]: true,
+      accountId,
+      epoch,
+      credential
+    });
+  }
+  var SessionService = class {
+    #ports;
+    #model = INITIAL_SESSION_MODEL;
+    #envelope = INITIAL_SESSION_ENVELOPE;
+    #reservation = 0;
+    #capability = null;
+    #activeAcquisitionEpoch = null;
+    #lockTail = Promise.resolve();
+    #initialization = null;
+    #start = null;
+    #providerSynchronization = null;
+    constructor(ports) {
+      this.#ports = ports;
+    }
+    snapshot() {
+      return toSessionSnapshot(this.#model);
+    }
+    publicationScope() {
+      return this.#copyScope(this.#model.publicationScope);
+    }
+    displayScope() {
+      return this.#copyScope(this.#model.displayScope);
+    }
+    start() {
+      this.#start ??= this.#startOnce();
+      return this.#start.then(() => this.snapshot());
+    }
+    async connect() {
+      await this.#ensureInitialized();
+      const start = await this.#withLock(async () => {
+        if (this.#model.state !== "signed_out") return null;
+        const epoch = this.#reserveNextEpoch();
+        const persisted = await this.#persist(disconnectedEnvelope(epoch));
+        if (!persisted) return { epoch, persisted: false };
+        this.#transition({ type: "connecting", epoch });
+        this.#activeAcquisitionEpoch = epoch;
+        return { epoch, persisted: true };
+      });
+      if (start === null) return { kind: "ignored" };
+      if (!start.persisted) return { kind: "storage_error" };
+      let acquisition;
+      try {
+        acquisition = normalizeAcquisition(
+          await this.#ports.credentials.acquire("connect")
+        );
+      } catch {
+        this.#record("credential_provider_failed");
+        acquisition = { kind: "unavailable" };
+      }
+      if (acquisition.kind === "unavailable") {
+        this.#record("credential_provider_failed");
+      }
+      if (acquisition.kind === "cancelled") {
+        return this.#disconnectInternal(true, start.epoch);
+      }
+      if (acquisition.kind !== "credential") {
+        return this.#withLock(async () => {
+          if (!this.#isCurrentAcquisition(start.epoch)) return { kind: "stale" };
+          this.#activeAcquisitionEpoch = null;
+          this.#transition({
+            type: "signed_out",
+            epoch: start.epoch,
+            reason: "provider_unavailable"
+          });
+          return { kind: "unavailable" };
+        });
+      }
+      const stillCurrent = await this.#withLock(async () => this.#isCurrentAcquisition(start.epoch));
+      if (!stillCurrent) {
+        this.#record("stale_effect_discarded");
+        return { kind: "stale" };
+      }
+      let credentialRef;
+      try {
+        credentialRef = await this.#ports.credentials.storeUnique(
+          acquisition.credential,
+          start.epoch
+        );
+        if (!isNonEmpty(credentialRef)) throw new TypeError("empty credential reference");
+      } catch {
+        this.#record("credential_provider_failed");
+        return this.#withLock(async () => {
+          if (!this.#isCurrentAcquisition(start.epoch)) return { kind: "stale" };
+          this.#activeAcquisitionEpoch = null;
+          this.#transition({
+            type: "signed_out",
+            epoch: start.epoch,
+            reason: "provider_unavailable"
+          });
+          return { kind: "unavailable" };
+        });
+      }
+      const admission = await this.#withLock(async () => {
+        if (!this.#isCurrentAcquisition(start.epoch)) {
+          this.#scheduleCredentialDelete(credentialRef);
+          return "stale";
+        }
+        this.#activeAcquisitionEpoch = null;
+        const persisted = await this.#persist(
+          connectedEnvelope(start.epoch, credentialRef, null)
+        );
+        if (!persisted) {
+          this.#scheduleCredentialDelete(credentialRef);
+          return "storage_error";
+        }
+        this.#transition({ type: "verifying", epoch: start.epoch, accountId: null });
+        return "admitted";
+      });
+      if (admission !== "admitted") {
+        this.#record("stale_effect_discarded");
+        return { kind: admission };
+      }
+      return this.#verifyCredential({
+        epoch: start.epoch,
+        credentialRef,
+        expectedAccountId: null,
+        rejectionPolicy: "reconnect"
+      }, acquisition.credential);
+    }
+    async cancelConnect() {
+      await this.#ensureInitialized();
+      return this.#disconnectInternal(true);
+    }
+    async disconnect() {
+      await this.#ensureInitialized();
+      return this.#disconnectInternal(false);
+    }
+    async reconnect() {
+      const disconnected = await this.disconnect();
+      if (disconnected.kind !== "completed" || disconnected.state !== "signed_out") {
+        return disconnected;
+      }
+      return this.connect();
+    }
+    /**
+     * Aligns an authenticated worker with its external credential provider
+     * without treating every check as an account transition.
+     *
+     * A matching credential is a no-op. A rotated credential for the same
+     * account replaces only the private capability and keeps the account epoch
+     * stable. A genuinely different account takes a fenced account-transition
+     * path. Temporary provider failures refuse the caller's mutation but retain
+     * the last verified display/session state.
+     */
+    synchronizeProviderCredential() {
+      if (this.#providerSynchronization !== null) {
+        return this.#providerSynchronization;
+      }
+      const operation = this.#synchronizeProviderCredentialOnce();
+      this.#providerSynchronization = operation;
+      void operation.then(
+        () => {
+          if (this.#providerSynchronization === operation) {
+            this.#providerSynchronization = null;
           }
         },
-      );
-    })();
-    return true;
-  }
-
-  // -------------------------------------------------
-  // C. Manual import trigger from popup
-  // -------------------------------------------------
-  if (msg.type === "TRACE_IMPORT_TRIGGER") {
-    handleImportTrigger(sendResponse);
-    return true;
-  }
-
-  // -------------------------------------------------
-  // C2. Open Trace from content scripts in a browser tab
-  // -------------------------------------------------
-  if (msg.type === "TRACE_OPEN_TRACE_URL") {
-    handleOpenTraceUrl(msg.payload, sendResponse);
-    return true;
-  }
-
-  // -------------------------------------------------
-  // E. Popup opened — heal stale error state if token still present
-  // -------------------------------------------------
-  if (msg.type === "TRACE_POPUP_OPEN") {
-    void (async () => {
-      const res = await storageGetLocal([AUTH_TOKEN_KEY, AUTH_STATE_KEY]);
-      const token = res?.[AUTH_TOKEN_KEY];
-      const prev = res?.[AUTH_STATE_KEY];
-      if (token) {
-        bearerToken = token;
-        if (prev?.state === "error" || prev?.state === "unknown") {
-          void verifyTraceAccountToken(token, {
-            preserveVerifiedConnection: hasPersistedVerifiedConnection(res, token),
-          });
-        } else {
-          void fetchTraceUserProPromise();
+        () => {
+          if (this.#providerSynchronization === operation) {
+            this.#providerSynchronization = null;
+          }
         }
-        scheduleAo3SavedFiltersSync(500);
+      );
+      return operation;
+    }
+    async retry() {
+      await this.#ensureInitialized();
+      const storageRetry = await this.#withLock(async () => this.#model.state === "degraded" && this.#model.reason === "storage_unavailable" ? { epoch: this.#reservation } : null);
+      if (storageRetry !== null) return this.#retryStorageRead(storageRetry.epoch);
+      const plan = await this.#withLock(async () => {
+        if (this.#model.state !== "degraded" || this.#envelope.desired !== "connected" || this.#envelope.credentialRef === null) {
+          return null;
+        }
+        this.#transition({
+          type: "verifying",
+          epoch: this.#reservation,
+          accountId: this.#envelope.accountId
+        });
+        return {
+          epoch: this.#reservation,
+          credentialRef: this.#envelope.credentialRef,
+          expectedAccountId: this.#envelope.accountId,
+          rejectionPolicy: this.#envelope.accountId === null ? "reconnect" : "refresh"
+        };
+      });
+      if (plan === null) return { kind: "ignored" };
+      return this.#verifyPersisted(plan);
+    }
+    async refreshForExpiry() {
+      await this.#ensureInitialized();
+      const capability = await this.#withLock(async () => this.#capability);
+      if (capability === null) return { kind: "ignored" };
+      return this.#refreshFromCapability(capability, "expiry");
+    }
+    async #synchronizeProviderCredentialOnce() {
+      await this.#ensureInitialized();
+      const capability = await this.#withLock(async () => this.#capability);
+      if (capability === null) {
+        return this.#model.state === "signed_out" ? this.connect() : this.reconnect();
       }
-      if (sendResponse) sendResponse({ ok: true });
-    })();
-    return true;
-  }
-
-  // -------------------------------------------------
-  // D. Metadata broadcast from collector.js
-  // -------------------------------------------------
-  if (msg.type === "TRACE_METADATA_BROADCAST") {
-    handleMetadataBroadcast(msg.payload, sender);
-    return false;
-  }
-
-  if (msg.type === "TRACE_LIBRARY_METADATA_REFRESH") {
-    handleLibraryMetadataRefresh(msg.payload, sender);
-    return false;
-  }
-
-  // -------------------------------------------------
-  // D2. AO3 saved filter local changes need background sync
-  // -------------------------------------------------
-  if (msg.type === AO3_SAVED_FILTERS_SYNC_REQUEST_MESSAGE) {
-    scheduleAo3SavedFiltersSync(150);
-    if (sendResponse) sendResponse({ ok: true, queued: Boolean(bearerToken) });
-    return false;
-  }
-
-  // -------------------------------------------------
-  // G. Quick-add from inline button on story pages
-  // -------------------------------------------------
-  if (msg.type === "TRACE_QUICK_ADD") {
-    handleQuickAdd(msg.payload, sender, sendResponse);
-    return true; // async response
-  }
-
-  // -------------------------------------------------
-  // H. Hidden work preference from listing overlay
-  // -------------------------------------------------
-  if (msg.type === "TRACE_SET_HIDDEN_WORK") {
-    handleSetHiddenWork(msg.payload, sender, sendResponse);
-    return true; // async response
-  }
-
-  // -------------------------------------------------
-  // I. Reading status update from story sheet
-  // -------------------------------------------------
-  if (msg.type === "TRACE_SET_READER_STATUS") {
-    handleSetReaderStatus(msg.payload, sender, sendResponse);
-    return true; // async response
-  }
-
-  // -------------------------------------------------
-  // J. Library entry patch from extension reader actions
-  // -------------------------------------------------
-  if (msg.type === "TRACE_PATCH_LIBRARY_ENTRY") {
-    handlePatchLibraryEntry(msg.payload, sender, sendResponse);
-    return true; // async response
-  }
-
-  // -------------------------------------------------
-  // K. Finish-qualification signal for Check-in fallback
-  // -------------------------------------------------
-  if (msg.type === "TRACE_FINISH_QUALIFICATION_SIGNAL") {
-    handleFinishQualificationSignal(msg.payload, sender, sendResponse);
-    return true; // async response
-  }
-});
-
-// =======================================================
-// 2. MANUAL IMPORT
-// =======================================================
-
-/** tabs.sendMessage when no content script is listening (chrome://, PDF, post-reload tab, etc.). */
-function isMissingTabReceiverError(e) {
-  const parts = [
-    typeof e === "string" ? e : "",
-    e?.message,
-    typeof e?.toString === "function" && e.toString !== Object.prototype.toString
-      ? e.toString()
-      : "",
-    e?.stack,
-    ext.runtime.lastError?.message,
-  ];
-  const msg = parts.filter(Boolean).join("\n");
-  return /receiving end does not exist/i.test(msg);
-}
-
-function toBase64Json(obj) {
-  const json = JSON.stringify(obj);
-  const bytes = new TextEncoder().encode(json);
-  let bin = "";
-  bytes.forEach((b) => (bin += String.fromCharCode(b)));
-  return btoa(bin);
-}
-
-async function handleImportTrigger(sendResponse) {
-  let activeTabContext = null;
-  try {
-    const [tab] = await ext.tabs.query({ active: true, currentWindow: true });
-    activeTabContext = classifyActiveTabUrl(tab && tab.url);
-    if (!tab?.id) {
-      if (sendResponse) sendResponse({ ok: false, error: "no_active_tab" });
-      return;
+      let acquisition;
+      try {
+        acquisition = normalizeAcquisition(
+          await this.#ports.credentials.acquire("refresh")
+        );
+      } catch {
+        this.#record("credential_provider_failed");
+        return { kind: "unavailable" };
+      }
+      if (acquisition.kind === "unavailable" || acquisition.kind === "cancelled") {
+        this.#record("credential_provider_failed");
+        return { kind: "unavailable" };
+      }
+      if (acquisition.kind === "absent") {
+        return this.disconnect();
+      }
+      if (acquisition.credential === capability.credential) {
+        return this.#withLock(
+          async () => this.#isCurrentCapability(capability) ? { kind: "completed", state: "connected" } : { kind: "stale" }
+        );
+      }
+      let verification;
+      try {
+        verification = normalizeVerification(
+          await this.#ports.api.verifyCredential(acquisition.credential)
+        );
+      } catch {
+        this.#record("verification_failed");
+        return { kind: "unavailable" };
+      }
+      if (verification.kind === "unavailable" || verification.kind === "invalid_response") {
+        this.#record("verification_failed");
+        return { kind: "unavailable" };
+      }
+      if (verification.kind === "rejected" || verification.kind === "account_unavailable") {
+        return this.disconnect();
+      }
+      if (verification.accountId !== capability.accountId) {
+        return this.#switchToVerifiedProviderCredential(
+          capability,
+          acquisition.credential,
+          verification.accountId
+        );
+      }
+      const stillCurrent = await this.#withLock(
+        async () => this.#isCurrentCapability(capability)
+      );
+      if (!stillCurrent) {
+        this.#record("stale_effect_discarded");
+        return { kind: "stale" };
+      }
+      let credentialRef;
+      try {
+        credentialRef = await this.#ports.credentials.storeUnique(
+          acquisition.credential,
+          capability.epoch
+        );
+        if (!isNonEmpty(credentialRef)) throw new TypeError("empty credential reference");
+      } catch {
+        this.#record("credential_provider_failed");
+        return { kind: "unavailable" };
+      }
+      const committed = await this.#commitSynchronizedCredential(
+        capability,
+        credentialRef,
+        acquisition.credential
+      );
+      if (committed.kind !== "completed" || committed.state !== "connected") {
+        this.#scheduleCredentialDelete(credentialRef);
+      }
+      return committed;
     }
+    // This boundary is for the authenticated API adapter, not UI/content
+    // surfaces. The production import gate must keep raw credentials confined to
+    // that adapter when the kernel is wired in a later slice.
+    async executeAuthenticated(effect) {
+      await this.#ensureInitialized();
+      const capability = await this.#withLock(async () => this.#capability);
+      if (capability === null) return { kind: "unavailable" };
+      let result;
+      try {
+        result = normalizeEffectResult(await effect(capability.credential));
+      } catch {
+        result = { kind: "unavailable" };
+      }
+      if (result.kind === "success") {
+        return this.#withLock(async () => {
+          if (!this.#isCurrentCapability(capability)) {
+            this.#record("stale_effect_discarded");
+            return { kind: "stale" };
+          }
+          return { kind: "published", value: result.value };
+        });
+      }
+      if (result.kind === "unavailable") {
+        return this.#withLock(async () => {
+          if (!this.#isCurrentCapability(capability)) return { kind: "stale" };
+          this.#capability = null;
+          const scope2 = {
+            accountId: capability.accountId,
+            epoch: capability.epoch
+          };
+          this.#transition({
+            type: "degraded",
+            epoch: capability.epoch,
+            displayScope: scope2,
+            reason: "verification_unavailable"
+          });
+          return { kind: "unavailable" };
+        });
+      }
+      const refresh = await this.#refreshFromCapability(capability, "rejection");
+      if (refresh.kind === "stale" || refresh.kind === "ignored") {
+        return { kind: "auth_rejected", recovery: "stale" };
+      }
+      return {
+        kind: "auth_rejected",
+        recovery: this.#model.state === "connected" ? "connected" : "reconnect_required"
+      };
+    }
+    async #startOnce() {
+      const plan = await this.#ensureInitialized();
+      if (plan !== null) await this.#verifyPersisted(plan);
+      return this.snapshot();
+    }
+    #ensureInitialized() {
+      this.#initialization ??= this.#initializeEnvelope();
+      return this.#initialization;
+    }
+    async #initializeEnvelope() {
+      let raw;
+      try {
+        raw = await this.#ports.storage.read();
+      } catch {
+        return this.#withLock(async () => {
+          this.#record("storage_read_failed");
+          this.#transition({
+            type: "degraded",
+            epoch: this.#reservation,
+            displayScope: null,
+            reason: "storage_unavailable"
+          });
+          return null;
+        });
+      }
+      const parsed = parseSessionEnvelope(raw);
+      return this.#withLock(async () => this.#applyParsedEnvelope(parsed));
+    }
+    async #retryStorageRead(expectedEpoch) {
+      let raw;
+      try {
+        raw = await this.#ports.storage.read();
+      } catch {
+        this.#record("storage_read_failed");
+        return { kind: "unavailable" };
+      }
+      const parsed = parseSessionEnvelope(raw);
+      const applied = await this.#withLock(async () => {
+        if (this.#reservation !== expectedEpoch || this.#model.state !== "degraded" || this.#model.reason !== "storage_unavailable") {
+          return { kind: "stale", plan: null };
+        }
+        return { kind: "applied", plan: this.#applyParsedEnvelope(parsed) };
+      });
+      if (applied.kind === "stale") return { kind: "stale" };
+      if (applied.plan === null) {
+        const state = this.#model.state;
+        if (state === "signed_out" || state === "reconnect_required") {
+          return { kind: "completed", state };
+        }
+        return { kind: "ignored" };
+      }
+      return this.#verifyPersisted(applied.plan);
+    }
+    #applyParsedEnvelope(parsed) {
+      if (parsed.kind === "missing") {
+        this.#envelope = INITIAL_SESSION_ENVELOPE;
+        this.#reservation = 0;
+        this.#transition({ type: "signed_out", epoch: 0 });
+        return null;
+      }
+      if (parsed.kind === "invalid") {
+        this.#envelope = INITIAL_SESSION_ENVELOPE;
+        this.#reservation = 0;
+        this.#transition({
+          type: "reconnect_required",
+          epoch: 0,
+          reason: parsed.reason
+        });
+        return null;
+      }
+      this.#envelope = parsed.envelope;
+      this.#reservation = parsed.envelope.epoch;
+      if (parsed.envelope.desired === "disconnected") {
+        this.#transition({ type: "signed_out", epoch: this.#reservation });
+        return null;
+      }
+      if (parsed.envelope.credentialRef === null) {
+        this.#transition({
+          type: "reconnect_required",
+          epoch: this.#reservation,
+          reason: "credential_absent"
+        });
+        return null;
+      }
+      this.#transition({
+        type: "verifying",
+        epoch: this.#reservation,
+        accountId: parsed.envelope.accountId
+      });
+      return {
+        epoch: this.#reservation,
+        credentialRef: parsed.envelope.credentialRef,
+        expectedAccountId: parsed.envelope.accountId,
+        rejectionPolicy: parsed.envelope.accountId === null ? "reconnect" : "refresh"
+      };
+    }
+    async #verifyPersisted(plan) {
+      let credential;
+      try {
+        credential = await this.#ports.credentials.load(plan.credentialRef);
+      } catch {
+        this.#record("credential_provider_failed");
+        return this.#degradeVerification(plan);
+      }
+      if (credential === null || !isNonEmpty(credential)) {
+        return this.#clearCredentialReference(plan.epoch, "credential_absent");
+      }
+      return this.#verifyCredential(plan, credential);
+    }
+    async #verifyCredential(plan, credential) {
+      let verification;
+      try {
+        verification = normalizeVerification(
+          await this.#ports.api.verifyCredential(credential)
+        );
+      } catch {
+        verification = { kind: "unavailable" };
+      }
+      if (verification.kind === "unavailable") {
+        this.#record("verification_failed");
+        return this.#degradeVerification(plan);
+      }
+      if (verification.kind === "invalid_response") {
+        return this.#clearCredentialReference(plan.epoch, "invalid_account_response");
+      }
+      if (verification.kind === "account_unavailable") {
+        return this.#clearCredentialReference(plan.epoch, "account_unavailable");
+      }
+      if (verification.kind === "rejected") {
+        if (plan.rejectionPolicy === "reconnect") {
+          return this.#clearCredentialReference(plan.epoch, "credential_rejected");
+        }
+        const refreshPlan = await this.#withLock(async () => {
+          if (!this.#isCurrentEpoch(plan.epoch)) return null;
+          return {
+            epoch: plan.epoch,
+            expectedAccountId: plan.expectedAccountId ?? "",
+            oldCredentialRef: plan.credentialRef,
+            reason: "rejection"
+          };
+        });
+        if (refreshPlan === null) return { kind: "stale" };
+        return this.#performRefresh(refreshPlan);
+      }
+      if (!isNonEmpty(verification.accountId)) {
+        return this.#clearCredentialReference(plan.epoch, "identity_conflict");
+      }
+      if (plan.expectedAccountId !== null && verification.accountId !== plan.expectedAccountId) {
+        return this.#clearCredentialReference(plan.epoch, "identity_conflict");
+      }
+      return this.#commitVerified(
+        plan.epoch,
+        plan.credentialRef,
+        verification.accountId,
+        credential
+      );
+    }
+    async #refreshFromCapability(capability, reason) {
+      const plan = await this.#withLock(async () => {
+        if (!this.#isCurrentCapability(capability)) return null;
+        if (this.#envelope.credentialRef === null) return null;
+        this.#capability = null;
+        this.#transition({
+          type: "verifying",
+          epoch: capability.epoch,
+          accountId: capability.accountId
+        });
+        return {
+          epoch: capability.epoch,
+          expectedAccountId: capability.accountId,
+          oldCredentialRef: this.#envelope.credentialRef,
+          reason
+        };
+      });
+      if (plan === null) return { kind: "stale" };
+      return this.#performRefresh(plan);
+    }
+    async #performRefresh(plan) {
+      let acquisition;
+      try {
+        acquisition = normalizeAcquisition(
+          await this.#ports.credentials.acquire("refresh")
+        );
+      } catch {
+        this.#record("credential_provider_failed");
+        acquisition = { kind: "unavailable" };
+      }
+      if (acquisition.kind === "unavailable") {
+        this.#record("credential_provider_failed");
+      }
+      if (acquisition.kind !== "credential") {
+        if (plan.reason === "rejection") {
+          return this.#clearCredentialReference(plan.epoch, "credential_rejected");
+        }
+        return this.#degradeRefresh(plan);
+      }
+      let verification;
+      try {
+        verification = normalizeVerification(
+          await this.#ports.api.verifyCredential(acquisition.credential)
+        );
+      } catch {
+        verification = { kind: "unavailable" };
+      }
+      if (verification.kind === "unavailable") {
+        if (plan.reason === "rejection") {
+          return this.#clearCredentialReference(plan.epoch, "credential_rejected");
+        }
+        return this.#degradeRefresh(plan);
+      }
+      if (verification.kind === "invalid_response") {
+        return this.#clearCredentialReference(plan.epoch, "invalid_account_response");
+      }
+      if (verification.kind === "account_unavailable") {
+        return this.#clearCredentialReference(plan.epoch, "account_unavailable");
+      }
+      if (verification.kind === "rejected" || plan.expectedAccountId.length > 0 && verification.accountId !== plan.expectedAccountId) {
+        return this.#clearCredentialReference(
+          plan.epoch,
+          verification.kind === "rejected" ? "credential_rejected" : "identity_conflict"
+        );
+      }
+      let credentialRef;
+      try {
+        credentialRef = await this.#ports.credentials.storeUnique(
+          acquisition.credential,
+          plan.epoch
+        );
+        if (!isNonEmpty(credentialRef)) throw new TypeError("empty credential reference");
+      } catch {
+        if (plan.reason === "rejection") {
+          return this.#clearCredentialReference(plan.epoch, "credential_rejected");
+        }
+        return this.#degradeRefresh(plan);
+      }
+      const accountId = plan.expectedAccountId.length > 0 ? plan.expectedAccountId : verification.accountId;
+      const committed = await this.#commitVerified(
+        plan.epoch,
+        credentialRef,
+        accountId,
+        acquisition.credential,
+        plan.oldCredentialRef
+      );
+      if (committed.kind !== "completed" || committed.state !== "connected") {
+        this.#scheduleCredentialDelete(credentialRef);
+        return committed;
+      }
+      return committed;
+    }
+    async #degradeVerification(plan) {
+      return this.#withLock(async () => {
+        if (!this.#isCurrentEpoch(plan.epoch)) return { kind: "stale" };
+        const displayScope = plan.expectedAccountId === null ? null : { accountId: plan.expectedAccountId, epoch: plan.epoch };
+        this.#transition({
+          type: "degraded",
+          epoch: plan.epoch,
+          displayScope,
+          reason: "verification_unavailable"
+        });
+        return { kind: "unavailable" };
+      });
+    }
+    async #degradeRefresh(plan) {
+      return this.#withLock(async () => {
+        if (!this.#isCurrentEpoch(plan.epoch)) return { kind: "stale" };
+        this.#transition({
+          type: "degraded",
+          epoch: plan.epoch,
+          displayScope: {
+            accountId: plan.expectedAccountId,
+            epoch: plan.epoch
+          },
+          reason: "verification_unavailable"
+        });
+        return { kind: "unavailable" };
+      });
+    }
+    async #commitVerified(epoch, credentialRef, accountId, credential, cleanupReference = null) {
+      return this.#withLock(async () => {
+        if (!this.#isCurrentEpoch(epoch)) {
+          this.#record("stale_effect_discarded");
+          return { kind: "stale" };
+        }
+        const persisted = await this.#persist(
+          connectedEnvelope(epoch, credentialRef, accountId)
+        );
+        if (!persisted) return { kind: "storage_error" };
+        this.#capability = createCapability(accountId, epoch, credential);
+        this.#transition({ type: "connected", scope: { accountId, epoch } });
+        if (cleanupReference !== null && cleanupReference !== credentialRef) {
+          this.#scheduleCredentialDelete(cleanupReference);
+        }
+        return { kind: "completed", state: "connected" };
+      });
+    }
+    async #commitSynchronizedCredential(expectedCapability, credentialRef, credential) {
+      return this.#withLock(async () => {
+        if (!this.#isCurrentCapability(expectedCapability)) {
+          this.#record("stale_effect_discarded");
+          return { kind: "stale" };
+        }
+        const oldReference = this.#envelope.credentialRef;
+        const persisted = await this.#persist(
+          connectedEnvelope(
+            expectedCapability.epoch,
+            credentialRef,
+            expectedCapability.accountId
+          )
+        );
+        if (!persisted) return { kind: "storage_error" };
+        this.#capability = createCapability(
+          expectedCapability.accountId,
+          expectedCapability.epoch,
+          credential
+        );
+        this.#transition({
+          type: "connected",
+          scope: {
+            accountId: expectedCapability.accountId,
+            epoch: expectedCapability.epoch
+          }
+        });
+        if (oldReference !== null && oldReference !== credentialRef) {
+          this.#scheduleCredentialDelete(oldReference);
+        }
+        return { kind: "completed", state: "connected" };
+      });
+    }
+    async #switchToVerifiedProviderCredential(expectedCapability, credential, accountId) {
+      const transition = await this.#withLock(async () => {
+        if (!this.#isCurrentCapability(expectedCapability)) {
+          this.#record("stale_effect_discarded");
+          return { kind: "stale" };
+        }
+        const oldReference = this.#envelope.credentialRef;
+        const epoch = this.#reserveNextEpoch();
+        const persisted = await this.#persist(disconnectedEnvelope(epoch));
+        if (!persisted) return { kind: "storage_error" };
+        this.#transition({ type: "connecting", epoch });
+        this.#activeAcquisitionEpoch = epoch;
+        return { kind: "ready", epoch, oldReference };
+      });
+      if (transition.kind !== "ready") return transition;
+      let credentialRef;
+      try {
+        credentialRef = await this.#ports.credentials.storeUnique(
+          credential,
+          transition.epoch
+        );
+        if (!isNonEmpty(credentialRef)) throw new TypeError("empty credential reference");
+      } catch {
+        this.#record("credential_provider_failed");
+        return this.#withLock(async () => {
+          if (!this.#isCurrentAcquisition(transition.epoch)) {
+            return { kind: "stale" };
+          }
+          this.#activeAcquisitionEpoch = null;
+          this.#transition({
+            type: "signed_out",
+            epoch: transition.epoch,
+            reason: "provider_unavailable"
+          });
+          if (transition.oldReference !== null) {
+            this.#scheduleCredentialDelete(transition.oldReference);
+          }
+          return { kind: "unavailable" };
+        });
+      }
+      const admitted = await this.#withLock(async () => {
+        if (!this.#isCurrentAcquisition(transition.epoch)) {
+          this.#record("stale_effect_discarded");
+          this.#scheduleCredentialDelete(credentialRef);
+          return false;
+        }
+        this.#activeAcquisitionEpoch = null;
+        return true;
+      });
+      if (!admitted) return { kind: "stale" };
+      const committed = await this.#commitVerified(
+        transition.epoch,
+        credentialRef,
+        accountId,
+        credential,
+        transition.oldReference
+      );
+      if (committed.kind !== "completed" || committed.state !== "connected") {
+        this.#scheduleCredentialDelete(credentialRef);
+        if (transition.oldReference !== null) {
+          this.#scheduleCredentialDelete(transition.oldReference);
+        }
+      }
+      return committed;
+    }
+    async #clearCredentialReference(epoch, reason) {
+      return this.#withLock(async () => {
+        if (!this.#isCurrentEpoch(epoch)) return { kind: "stale" };
+        const oldReference = this.#envelope.credentialRef;
+        this.#capability = null;
+        const persisted = await this.#persist(
+          connectedEnvelope(epoch, null, this.#envelope.accountId)
+        );
+        const result = persisted ? { kind: "completed", state: "reconnect_required" } : { kind: "storage_error" };
+        if (persisted) {
+          this.#transition({ type: "reconnect_required", epoch, reason });
+        }
+        if (oldReference !== null) {
+          if (persisted) {
+            this.#scheduleCredentialDelete(oldReference);
+          } else {
+            await this.#deleteCredential(oldReference);
+          }
+        }
+        return result;
+      });
+    }
+    async #disconnectInternal(onlyConnecting, expectedAcquisitionEpoch) {
+      return this.#withLock(async () => {
+        const isUnverifiedConnect = this.#model.state === "connecting" || this.#model.state === "verifying" && this.#envelope.accountId === null;
+        if (onlyConnecting && !isUnverifiedConnect) {
+          return expectedAcquisitionEpoch !== void 0 && !this.#isCurrentEpoch(expectedAcquisitionEpoch) ? { kind: "stale" } : { kind: "ignored" };
+        }
+        if (expectedAcquisitionEpoch !== void 0 && this.#activeAcquisitionEpoch !== expectedAcquisitionEpoch) {
+          return { kind: "stale" };
+        }
+        const oldReference = this.#envelope.credentialRef;
+        const epoch = this.#reserveNextEpoch();
+        this.#capability = null;
+        this.#activeAcquisitionEpoch = null;
+        try {
+          this.#ports.credentials.cancelAcquisition?.();
+        } catch {
+          this.#record("credential_provider_failed");
+        }
+        const persisted = await this.#persist(disconnectedEnvelope(epoch));
+        const result = persisted ? { kind: "completed", state: "signed_out" } : { kind: "storage_error" };
+        if (persisted) this.#transition({ type: "signed_out", epoch });
+        if (persisted) {
+          this.#scheduleCredentialClearAll();
+        } else if (oldReference !== null) {
+          await this.#deleteCredential(oldReference);
+        }
+        return result;
+      });
+    }
+    #reserveNextEpoch() {
+      if (!Number.isSafeInteger(this.#reservation + 1)) {
+        throw new RangeError("session epoch exhausted");
+      }
+      this.#reservation += 1;
+      this.#capability = null;
+      return this.#reservation;
+    }
+    async #persist(envelope) {
+      try {
+        await this.#ports.storage.write(envelope);
+        this.#envelope = envelope;
+        return true;
+      } catch {
+        this.#capability = null;
+        this.#transition({
+          type: "reconnect_required",
+          epoch: this.#reservation,
+          reason: "storage_write_failed"
+        });
+        this.#record("storage_write_failed");
+        return false;
+      }
+    }
+    async #deleteCredential(reference) {
+      try {
+        await this.#ports.credentials.delete(reference);
+      } catch {
+        this.#record("credential_cleanup_failed");
+      }
+    }
+    #scheduleCredentialDelete(reference) {
+      void this.#deleteCredential(reference);
+    }
+    #scheduleCredentialClearAll() {
+      try {
+        void this.#ports.credentials.clearAll().catch(() => {
+          this.#record("credential_cleanup_failed");
+        });
+      } catch {
+        this.#record("credential_cleanup_failed");
+      }
+    }
+    #copyScope(scope2) {
+      return scope2 === null ? null : Object.freeze({ accountId: scope2.accountId, epoch: scope2.epoch });
+    }
+    #isCurrentEpoch(epoch) {
+      return this.#reservation === epoch && this.#envelope.epoch === epoch;
+    }
+    #isCurrentAcquisition(epoch) {
+      return this.#isCurrentEpoch(epoch) && this.#activeAcquisitionEpoch === epoch && this.#model.state === "connecting";
+    }
+    #isCurrentCapability(capability) {
+      return this.#capability === capability && this.#reservation === capability.epoch && this.#model.state === "connected";
+    }
+    #transition(event) {
+      this.#model = reduceSession(this.#model, event);
+      this.#record("session_state_changed");
+    }
+    #record(code) {
+      try {
+        this.#ports.diagnostics.record({
+          code,
+          state: this.#model.state,
+          epoch: this.#reservation
+        });
+      } catch {
+      }
+    }
+    async #withLock(work) {
+      const previous = this.#lockTail;
+      let release = () => {
+      };
+      this.#lockTail = new Promise((resolve) => {
+        release = resolve;
+      });
+      await previous;
+      try {
+        return await work();
+      } finally {
+        release();
+      }
+    }
+  };
 
-    const res = await ext.tabs.sendMessage(tab.id, { type: "TRACE_COLLECT" });
-    if (!res?.ok || !res.payload) {
-      setBadge(tab.id, "ERR", "#B3261E");
-      recordArchiveReadiness({
-        hostKind: archiveHostKindFromTabContext(activeTabContext),
-        errorKind:
-          res?.error === "page_contains_password_field"
-            ? "unsupported_page"
-            : tabContextLooksLikeArchive(activeTabContext)
-              ? "parser"
-              : "unsupported_page",
-      });
-      if (sendResponse) sendResponse({ ok: false, error: res?.error || "collect_failed" });
-      return;
-    }
-
-    const b64 = toBase64Json(res.payload);
-    const url = `${IMPORT_BASE}#U${encodeURIComponent(b64)}`;
-    await ext.tabs.create({ url });
-    if (Array.isArray(res.payload.items) && res.payload.items.length > 0) {
-      recordArchiveActionFromPayload(res.payload, "import");
-    } else {
-      recordArchiveReadiness({
-        hostKind: archiveHostKindFromTabContext(activeTabContext),
-        errorKind: "unsupported_page",
-      });
-    }
-    if (sendResponse) sendResponse({ ok: true });
-  } catch (e) {
-    if (isMissingTabReceiverError(e)) {
-      console.debug("[Trace] Import skipped (no collector on this tab)");
-      recordArchiveReadiness({
-        hostKind: archiveHostKindFromTabContext(activeTabContext),
-        errorKind: tabContextLooksLikeArchive(activeTabContext)
-          ? "permission"
-          : "unsupported_page",
-      });
-    } else {
-      console.error("[Trace] Import trigger failed:", e);
-      recordArchiveReadiness({
-        hostKind: archiveHostKindFromTabContext(activeTabContext),
-        errorKind: tabContextLooksLikeArchive(activeTabContext)
-          ? "unknown"
-          : "unsupported_page",
-      });
-    }
-    if (sendResponse) sendResponse({ ok: false, error: String(e?.message || e) });
+  // src/extension-core/story-command.mts
+  function failure3(reason) {
+    return Object.freeze({ kind: "failed", reason });
   }
-}
+  function executionFailure3(result) {
+    if (result.kind === "stale") return failure3("stale");
+    if (result.kind === "auth_rejected") return failure3("auth_expired");
+    return failure3("not_authenticated");
+  }
+  function confirmationSatisfiesStoryCommand(command, confirmation) {
+    if (confirmation.workKey !== command.workKey) return false;
+    if (command.intent === "ensure_saved") return true;
+    const target = command.progress;
+    const chapters = confirmation.entry.chapters;
+    if (target === void 0 || chapters === void 0) return false;
+    if (chapters.current < target.current) return false;
+    return target.total === null || chapters.total !== null && chapters.total >= target.total;
+  }
+  var StoryCommandService = class {
+    #ports;
+    #tail = Promise.resolve();
+    constructor(ports) {
+      this.#ports = ports;
+    }
+    execute(command) {
+      return this.#withLock(() => this.#execute(command));
+    }
+    async #execute(command) {
+      const scope2 = this.#ports.session.publicationScope();
+      if (scope2 === null) return failure3("not_authenticated");
+      let lookup = await this.#lookup(command.workKey, true);
+      if (lookup.kind !== "published") return executionFailure3(lookup);
+      if (lookup.value.kind === "found" && confirmationSatisfiesStoryCommand(command, lookup.value.confirmation)) {
+        return this.#finalize(scope2, command, lookup.value.confirmation, "preflight");
+      }
+      if (lookup.value.kind === "invalid_response") return failure3("invalid_response");
+      if (lookup.value.kind === "unavailable") return failure3("unavailable");
+      let mutation = await this.#ports.session.executeAuthenticated(
+        (credential) => this.#ports.api.track(credential, command)
+      );
+      if (mutation.kind === "auth_rejected" && mutation.recovery === "connected") {
+        lookup = await this.#lookup(command.workKey, false);
+        if (lookup.kind !== "published") return executionFailure3(lookup);
+        if (lookup.value.kind === "found" && confirmationSatisfiesStoryCommand(command, lookup.value.confirmation)) {
+          return this.#finalize(scope2, command, lookup.value.confirmation, "preflight");
+        }
+        if (lookup.value.kind === "invalid_response") return failure3("invalid_response");
+        if (lookup.value.kind === "unavailable") return failure3("unavailable");
+        mutation = await this.#ports.session.executeAuthenticated(
+          (credential) => this.#ports.api.track(credential, command)
+        );
+      }
+      if (mutation.kind !== "published") return executionFailure3(mutation);
+      if (mutation.value.kind === "confirmed") {
+        if (!confirmationSatisfiesStoryCommand(command, mutation.value.confirmation)) {
+          return failure3("confirmation_missing");
+        }
+        return this.#finalize(scope2, command, mutation.value.confirmation, "mutation");
+      }
+      if (mutation.value.kind === "rejected") return failure3(mutation.value.reason);
+      if (mutation.value.kind === "invalid_response") return failure3("invalid_response");
+      lookup = await this.#lookup(command.workKey, false);
+      if (lookup.kind !== "published") return executionFailure3(lookup);
+      if (lookup.value.kind === "found" && confirmationSatisfiesStoryCommand(command, lookup.value.confirmation)) {
+        return this.#finalize(scope2, command, lookup.value.confirmation, "reconciliation");
+      }
+      if (lookup.value.kind === "invalid_response") return failure3("invalid_response");
+      return failure3(
+        lookup.value.kind === "unavailable" ? "unavailable" : "confirmation_missing"
+      );
+    }
+    async #lookup(workKey, allowAuthRecovery) {
+      let result = await this.#ports.session.executeAuthenticated(
+        (credential) => this.#ports.api.lookup(credential, workKey)
+      );
+      if (allowAuthRecovery && result.kind === "auth_rejected" && result.recovery === "connected") {
+        result = await this.#ports.session.executeAuthenticated(
+          (credential) => this.#ports.api.lookup(credential, workKey)
+        );
+      }
+      return result;
+    }
+    async #finalize(scope2, command, confirmation, source) {
+      if (confirmation.workKey !== command.workKey || !sameAccountScope(this.#ports.session.publicationScope(), scope2)) {
+        return failure3("stale");
+      }
+      let projection;
+      try {
+        projection = await this.#ports.projection.publishConfirmed(scope2, confirmation);
+      } catch {
+        projection = { kind: "unavailable" };
+      }
+      if (projection.kind === "rejected_scope") return failure3("stale");
+      if (projection.kind === "stale_write") return failure3("stale");
+      if (projection.kind === "invalid_model") return failure3("invalid_response");
+      if (!sameAccountScope(this.#ports.session.publicationScope(), scope2)) {
+        return failure3("stale");
+      }
+      let receipt = "not_applicable";
+      if (command.intent === "ensure_saved") {
+        try {
+          receipt = await this.#ports.receipt.publishSaveReceipt({
+            hostKind: command.hostKind,
+            action: "quick_add",
+            at: this.#ports.clock.now(),
+            ...command.handoffId === void 0 ? {} : { handoffId: command.handoffId }
+          }) ? "published" : "unavailable";
+        } catch {
+          receipt = "unavailable";
+        }
+      }
+      let handoff = "not_present";
+      if (command.intent === "ensure_saved" && command.handoffId !== void 0) {
+        try {
+          handoff = await this.#ports.handoff.clearExpected(command.handoffId) ? "cleared" : "unavailable";
+        } catch {
+          handoff = "unavailable";
+        }
+      }
+      return Object.freeze({
+        kind: "confirmed",
+        intent: command.intent,
+        confirmation,
+        source,
+        projection: projection.kind === "published" ? "published" : "unavailable",
+        receipt,
+        handoff
+      });
+    }
+    async #withLock(work) {
+      const previous = this.#tail;
+      let release = () => {
+      };
+      this.#tail = new Promise((resolve) => {
+        release = resolve;
+      });
+      await previous;
+      try {
+        return await work();
+      } finally {
+        release();
+      }
+    }
+  };
 
-// =======================================================
-// 3. AUTOMATIC TRACKING
-// =======================================================
-
-function respondAutoTrackNotAuthenticated(payload, sender, sendResponse) {
-  const workKey = externalStoryKeyFromItem(payload && payload.item);
-  void markWorkError(workKey, "auto_track", "not_authenticated");
-  recordArchiveIssueFromPayload(payload, "auth");
-  setSignedOutState({
-    message: "Open Trace in this browser and sign in, then automatic sync will work.",
-    lastTrackAttemptAt: new Date().toISOString(),
+  // src/extension-runtime/private-database.mts
+  var PRIVATE_DATABASE_NAME = "traceKernelPrivateV1";
+  var PRIVATE_DATABASE_VERSION = 1;
+  var PRIVATE_RECORD_STORE = "records";
+  var PRIVATE_RECORD_KEYS = Object.freeze({
+    sessionEnvelope: "session-envelope",
+    sessionCredentials: "session-credentials",
+    accountData: "account-data"
   });
-  setBadge(sender?.tab?.id, "LOG", "#9C6B00");
-  if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
-}
-
-function handleAutoTrack(
-  payload,
-  sender,
-  sendResponse,
-  nativeAuthPrepared = false,
-) {
-  if (shouldIgnoreSenderForAutoTrack(sender)) {
-    if (sendResponse) sendResponse({ ok: false, error: "ignored_sender" });
-    return;
+  function databaseError(message, error = null) {
+    const detail = error?.message?.trim();
+    return new Error(detail ? `${message}: ${detail}` : message, { cause: error ?? void 0 });
   }
-
-  // A Safari extension can retain a valid token for a different Trace
-  // account. Refresh from the containing app before the first write instead
-  // of waiting for a 401, which would never happen for that valid token.
-  if (
-    !nativeAuthPrepared &&
-    detectBrowserKind() === "safari" &&
-    canSendNativeMessage()
-  ) {
-    void bootstrapAuthFromIosNative("auto_track")
-      .then(() => {
-        handleAutoTrack(payload, sender, sendResponse, true);
-      })
-      .catch(() => {
-        handleAutoTrack(payload, sender, sendResponse, true);
+  var BrowserPrivateRecordDatabase = class {
+    #factory;
+    #openPromise = null;
+    constructor(factory) {
+      this.#factory = factory;
+    }
+    get(key) {
+      return this.#runTransaction("readonly", (store) => store.get(key), (request) => request.result === void 0 ? null : request.result);
+    }
+    put(key, value) {
+      return this.#runTransaction("readwrite", (store) => store.put(value, key), () => void 0);
+    }
+    delete(key) {
+      return this.#runTransaction("readwrite", (store) => store.delete(key), () => void 0);
+    }
+    async deleteDatabase() {
+      const pending = this.#openPromise;
+      this.#openPromise = null;
+      if (pending !== null) {
+        try {
+          (await pending).close();
+        } catch {
+        }
+      }
+      await new Promise((resolve, reject) => {
+        let settled = false;
+        const request = this.#factory.deleteDatabase(PRIVATE_DATABASE_NAME);
+        const finish = (result, error) => {
+          if (settled) return;
+          settled = true;
+          if (result === "resolve") resolve();
+          else reject(error);
+        };
+        request.onsuccess = () => finish("resolve");
+        request.onerror = () => finish(
+          "reject",
+          databaseError("private database deletion failed", request.error)
+        );
+        request.onblocked = () => finish(
+          "reject",
+          databaseError("private database deletion blocked")
+        );
       });
-    return;
-  }
-
-  if (!bearerToken) {
-    void ensureStoredAuthReady()
-      .then((ready) => {
-        if (ready && bearerToken) {
-          handleAutoTrack(payload, sender, sendResponse, true);
+    }
+    async #runTransaction(mode, start, readResult) {
+      const database = await this.#open();
+      return new Promise((resolve, reject) => {
+        let request;
+        let result;
+        let requestSucceeded = false;
+        let settled = false;
+        const transaction = database.transaction(PRIVATE_RECORD_STORE, mode);
+        const finishReject = (message, error = null) => {
+          if (settled) return;
+          settled = true;
+          reject(databaseError(message, error));
+        };
+        try {
+          request = start(transaction.objectStore(PRIVATE_RECORD_STORE));
+        } catch (error) {
+          try {
+            transaction.abort();
+          } catch {
+          }
+          finishReject(
+            "private database request failed",
+            error instanceof DOMException ? error : null
+          );
           return;
         }
-        return bootstrapAuthFromIosNative("auto_track").then((bootstrapped) => {
-          if (bootstrapped && bearerToken) {
-            handleAutoTrack(payload, sender, sendResponse, true);
+        request.onsuccess = () => {
+          try {
+            result = readResult(request);
+            requestSucceeded = true;
+          } catch (error) {
+            try {
+              transaction.abort();
+            } catch {
+            }
+            finishReject(
+              "private database result invalid",
+              error instanceof DOMException ? error : null
+            );
+          }
+        };
+        request.onerror = () => finishReject(
+          "private database request failed",
+          request.error
+        );
+        transaction.onabort = () => finishReject(
+          "private database transaction aborted",
+          transaction.error
+        );
+        transaction.onerror = () => {
+        };
+        transaction.oncomplete = () => {
+          if (settled) return;
+          if (!requestSucceeded) {
+            finishReject("private database request completed without a result");
             return;
           }
-          respondAutoTrackNotAuthenticated(payload, sender, sendResponse);
-        });
-      })
-      .catch(() => {
-        respondAutoTrackNotAuthenticated(payload, sender, sendResponse);
+          settled = true;
+          resolve(result);
+        };
       });
-    return;
-  }
+    }
+    #open() {
+      if (this.#openPromise !== null) return this.#openPromise;
+      const opening = new Promise((resolve, reject) => {
+        let settled = false;
+        const request = this.#factory.open(PRIVATE_DATABASE_NAME, PRIVATE_DATABASE_VERSION);
+        const finishReject = (message, error = null) => {
+          if (settled) return;
+          settled = true;
+          reject(databaseError(message, error));
+        };
+        request.onupgradeneeded = (event) => {
+          const database = request.result;
+          if (event.oldVersion !== 0 || database.objectStoreNames.length !== 0) {
+            request.transaction?.abort();
+            return;
+          }
+          database.createObjectStore(PRIVATE_RECORD_STORE);
+        };
+        request.onerror = () => finishReject("private database open failed", request.error);
+        request.onblocked = () => finishReject("private database open blocked");
+        request.onsuccess = () => {
+          const database = request.result;
+          if (settled) {
+            database.close();
+            return;
+          }
+          if (database.version !== PRIVATE_DATABASE_VERSION || !database.objectStoreNames.contains(PRIVATE_RECORD_STORE) || database.objectStoreNames.length !== 1) {
+            database.close();
+            finishReject("private database schema invalid");
+            return;
+          }
+          settled = true;
+          database.onversionchange = () => {
+            database.close();
+            if (this.#openPromise === cached) this.#openPromise = null;
+          };
+          resolve(database);
+        };
+      });
+      const cached = opening.catch((error) => {
+        if (this.#openPromise === cached) this.#openPromise = null;
+        throw error;
+      });
+      this.#openPromise = cached;
+      return cached;
+    }
+  };
 
-  ext.storage.local.get(
-    [PREF_AUTO_TRACK_KEY],
-    (prefRes) => {
-      if (ext.runtime.lastError) {
-        void executeAutoTrack(payload, sender)
-          .then((result) => {
-            if (sendResponse) sendResponse(result);
-          })
-          .catch((error) => {
-            if (sendResponse) sendResponse({ ok: false, error: String(error?.message || error) });
+  // src/extension-runtime/browser-platform.mts
+  var BrowserStorage = class {
+    #area;
+    #runtime;
+    #mode;
+    constructor(area, runtime, mode) {
+      this.#area = area;
+      this.#runtime = runtime;
+      this.#mode = mode;
+    }
+    get(keys) {
+      return this.#call("get", [keys]);
+    }
+    set(patch) {
+      return this.#call("set", [patch]);
+    }
+    remove(keys) {
+      return this.#call("remove", [keys]);
+    }
+    #call(method, args) {
+      if (this.#mode === "promise") {
+        try {
+          return Promise.resolve(this.#area[method](...args));
+        } catch (error) {
+          return Promise.reject(error);
+        }
+      }
+      return new Promise((resolve, reject) => {
+        try {
+          this.#area[method](...args, (value) => {
+            const message = this.#runtime.lastError?.message;
+            if (message) reject(new Error(message));
+            else resolve(value);
           });
-        return;
+        } catch (error) {
+          reject(error);
+        }
+      });
+    }
+  };
+  function extensionCall(target, method, args, runtime, mode) {
+    if (mode === "promise") {
+      try {
+        return Promise.resolve(target[method](...args));
+      } catch (error) {
+        return Promise.reject(error);
       }
-      if (prefRes[PREF_AUTO_TRACK_KEY] === false) {
-        if (sendResponse) sendResponse({ ok: false, error: "auto_track_disabled" });
-        return;
-      }
-      void executeAutoTrack(payload, sender)
-        .then((result) => {
-          if (sendResponse) sendResponse(result);
-        })
-        .catch((error) => {
-          if (sendResponse) sendResponse({ ok: false, error: String(error?.message || error) });
+    }
+    return new Promise((resolve, reject) => {
+      try {
+        target[method](...args, (value) => {
+          const message = runtime.lastError?.message;
+          if (message) reject(new Error(message));
+          else resolve(value);
         });
-    },
-  );
-}
-
-async function executeAutoTrack(payload, sender, allowNativeAuthRetry = true) {
-  if (!bearerToken) return;
-  const workKey = externalStoryKeyFromItem(payload && payload.item);
-  const workOperationId = await markWorkPending(workKey, "auto_track");
-  recordOptimisticChapterFloor(payload && payload.item);
-  try {
-    const response = await fetchWithTimeout(API_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${bearerToken}`,
-      },
-      body: JSON.stringify(payload),
+      } catch (error) {
+        reject(error);
+      }
     });
-
-    if (!response.ok) {
-      const authError = await applyAuthFailureResponse(response, {
-        actionAtKey: "lastTrackAttemptAt",
-      });
-      if (authError) {
-        if (allowNativeAuthRetry) {
-          const bootstrapped = await bootstrapAuthFromIosNative(
-            "auto_track_auth_failure",
-          );
-          if (bootstrapped && bearerToken) {
-            return executeAutoTrack(payload, sender, false);
-          }
-        }
-        recordArchiveIssueFromPayload(payload, "auth");
-        await markWorkError(workKey, "auto_track", authError, workOperationId);
-        setBadge(sender?.tab?.id, "LOG", "#9C6B00");
-        return { ok: false, error: authError };
-      } else if (response.status === 402) {
-        await refreshLibraryOverlay();
-        await markWorkError(
-          workKey,
-          "auto_track",
-          "free_limit_reached",
-          workOperationId,
-        );
-        setUpgradeState(
-          "You've reached the free library limit. Upgrade to Pro for unlimited stories.",
-          {
-            lastTrackAttemptAt: new Date().toISOString(),
-            lastHttpStatus: response.status,
-          },
-        );
-        setBadge(sender?.tab?.id, "FULL", "#735B1A");
-        return { ok: false, error: "free_limit_reached" };
-      } else {
-        recordArchiveIssueFromPayload(
-          payload,
-          response.status === 400 ? "parser" : "network",
-        );
-        await refreshLibraryOverlay();
-        await markWorkError(
-          workKey,
-          "auto_track",
-          "http_" + response.status,
-          workOperationId,
-        );
-        setConnectedWithSyncWarning(
-          `Automatic sync didn’t go through (${response.status}). Manual import from this menu still works.`,
-          {
-            lastTrackAttemptAt: new Date().toISOString(),
-            lastHttpStatus: response.status,
-          },
-        );
-        setBadge(sender?.tab?.id, "!", "#9C6B00");
-        return { ok: false, error: "http_" + response.status };
-      }
-    } else {
-      const json = await response.json().catch(() => null);
-      const data = json && json.data && typeof json.data === "object" ? json.data : null;
-      const entryId =
-        data && typeof data.entry_id === "string"
-          ? data.entry_id
-          : null;
-      const confirmation = await waitForTrackedWorkConfirmation(
-        workKey,
-        payload,
-        data,
-        entryId,
-        workOperationId,
-      );
-      if (confirmation.workKey && !confirmation.state) {
-        recordArchiveIssueFromPayload(payload, "network");
-        await markWorkError(
-          confirmation.workKey,
-          "auto_track",
-          "confirmation_missing",
-          workOperationId,
-        );
-        setConnectedWithSyncWarning(
-          "Trace accepted the save but did not confirm it in your library. Try Add to Trace again.",
-          {
-            lastTrackAttemptAt: new Date().toISOString(),
-          },
-        );
-        setBadge(sender?.tab?.id, "!", "#9C6B00");
-        return { ok: false, error: "confirmation_missing" };
-      }
-      // The native iOS success signal is intentionally later than the HTTP
-      // response: only the same confirmation that drives the library UI may
-      // claim a story landed.
-      return finalizeConfirmedTrack(
-        payload,
-        sender,
-        confirmation,
-        entryId,
-        "auto_track",
-      );
-    }
-  } catch (error) {
-    console.error("[Trace] Network error:", error);
-    recordArchiveIssueFromPayload(payload, "network");
-    const confirmation = await reconcileUncertainTrackRequest(
-      workKey,
-      payload,
-      workOperationId,
-    );
-    if (confirmation.state) {
-      return finalizeConfirmedTrack(
-        payload,
-        sender,
-        confirmation,
-        confirmation.state.entryId,
-        "auto_track",
-      );
-    }
-    const errorCode =
-      error instanceof TraceRequestTimeoutError
-        ? "request_timeout"
-        : "network_error";
-    const errorState = await markWorkError(
-      workKey,
-      "auto_track",
-      errorCode,
-      workOperationId,
-    );
-    const newerSavedResult = savedResultFromWorkState(errorState);
-    if (newerSavedResult) return newerSavedResult;
-    setConnectedWithSyncWarning(
-      "Couldn’t reach Trace for automatic sync. Manual import still works — try again later for sync.",
-      {
-        lastTrackAttemptAt: new Date().toISOString(),
-      },
-    );
-    setBadge(sender?.tab?.id, "!", "#9C6B00");
-    return { ok: false, error: errorCode };
   }
-}
 
-// =======================================================
-// 4. METADATA BROADCAST
-// =======================================================
-
-async function handleMetadataBroadcast(payload, sender) {
-  if (!bearerToken) return;
-
-  const shouldBroadcast = await new Promise((resolve) => {
-    ext.storage.local.get([PREF_METADATA_IMPROVE_KEY], (prefRes) => {
-      if (ext.runtime.lastError) {
-        resolve(true);
-        return;
-      }
-      resolve(prefRes[PREF_METADATA_IMPROVE_KEY] !== false);
-    });
+  // src/extension-runtime/browser-adapters.mts
+  var LEGACY_SESSION_ENVELOPE_KEY = "traceSessionEnvelopeV1";
+  var LEGACY_SESSION_CREDENTIALS_KEY = "traceSessionCredentialsV1";
+  var ACCOUNT_DATA_ALARM = "traceAccountDataRefresh";
+  var SAVED_FILTER_SYNC_ALARM = "traceAo3SavedFiltersSync";
+  var LEGACY_ACCOUNT_ALARMS = Object.freeze([
+    "traceLibraryOverlay"
+  ]);
+  var SAVED_FILTER_LOCAL_KEYS = Object.freeze({
+    presets: "traceAo3SavedFiltersV1",
+    deleted: "traceAo3SavedFiltersDeletedV1",
+    syncMeta: "traceAo3SavedFiltersSyncV1",
+    clientId: "traceAo3SavedFiltersClientIdV1",
+    activeMeta: "traceAo3SavedFiltersActiveV1"
   });
-  if (!shouldBroadcast) return;
-
-  try {
-    const response = await fetchWithTimeout(METADATA_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${bearerToken}`,
-      },
-      body: JSON.stringify(payload),
-    });
-
-    const authError = await applyAuthFailureResponse(response);
-    if (authError) {
-      recordArchiveIssueFromPayload(payload, "auth");
-    } else if (response.ok) {
-      recordArchiveActionFromPayload(payload, "metadata");
-      await signalLibraryInvalidated("metadata");
-    } else {
-      recordArchiveIssueFromPayload(
-        payload,
-        response.status === 400 ? "parser" : "network",
-      );
+  var LEGACY_ACCOUNT_KEYS = Object.freeze([
+    LEGACY_SESSION_ENVELOPE_KEY,
+    LEGACY_SESSION_CREDENTIALS_KEY,
+    "authToken",
+    "traceAuthState",
+    "traceAccountId",
+    "libraryOverlayCache",
+    "libraryOverlayFetchedAt",
+    "traceWorkStatesV1",
+    "traceUserPro",
+    "traceLibraryCount",
+    "traceFirstSaveSeen"
+  ]);
+  var DISABLED_LOCAL_KEYS = Object.freeze([
+    ...LEGACY_ACCOUNT_KEYS,
+    ...Object.values(SAVED_FILTER_LOCAL_KEYS),
+    "traceArchiveReadiness"
+  ]);
+  var BrowserSessionStoragePort = class {
+    #database;
+    constructor(database) {
+      this.#database = database;
     }
-  } catch (error) {
-    console.error("[Trace] Metadata broadcast error:", error);
-    recordArchiveIssueFromPayload(payload, "network");
+    read() {
+      return this.#database.get(PRIVATE_RECORD_KEYS.sessionEnvelope);
+    }
+    write(envelope) {
+      return this.#database.put(PRIVATE_RECORD_KEYS.sessionEnvelope, envelope);
+    }
+    clearAll() {
+      return this.#database.delete(PRIVATE_RECORD_KEYS.sessionEnvelope);
+    }
+  };
+  function isRecord5(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
   }
-}
-
-async function handleLibraryMetadataRefresh(payload, sender) {
-  if (!bearerToken) return;
-
-  const shouldBroadcast = await new Promise((resolve) => {
-    ext.storage.local.get([PREF_METADATA_IMPROVE_KEY], (prefRes) => {
-      if (ext.runtime.lastError) {
-        resolve(true);
-        return;
-      }
-      resolve(prefRes[PREF_METADATA_IMPROVE_KEY] !== false);
-    });
-  });
-  if (!shouldBroadcast) return;
-
-  try {
-    const response = await fetchWithTimeout(LIBRARY_METADATA_REFRESH_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${bearerToken}`,
-      },
-      body: JSON.stringify(payload),
-    });
-
-    const authError = await applyAuthFailureResponse(response);
-    if (authError) {
-      recordArchiveIssueFromPayload(payload, "auth");
-      return;
-    }
-    if (!response.ok) {
-      recordArchiveIssueFromPayload(
-        payload,
-        response.status === 400 ? "parser" : "network",
-      );
-      return;
-    }
-
-    const json = await response.json().catch(() => null);
-    const updated =
-      json && json.data && typeof json.data.updated === "number"
-        ? json.data.updated
-        : 0;
-    if (updated > 0) {
-      recordArchiveActionFromPayload(payload, "metadata");
-      await signalLibraryInvalidated("metadata");
-    }
-  } catch (error) {
-    console.error("[Trace] Library metadata refresh error:", error);
-    recordArchiveIssueFromPayload(payload, "network");
-  }
-}
-
-// =======================================================
-// 5. QUICK-ADD (inline button on story pages)
-// =======================================================
-
-async function handleQuickAdd(
-  payload,
-  sender,
-  sendResponse,
-  allowNativeAuthRetry = true,
-  nativeAuthPrepared = false,
-) {
-  const workKey = externalStoryKeyFromItem(payload && payload.item);
-  // Match auto-track: a valid Safari token is not proof that it belongs to
-  // the containing app's current account. Adopt the app token before writing.
-  if (
-    !nativeAuthPrepared &&
-    detectBrowserKind() === "safari" &&
-    canSendNativeMessage()
-  ) {
-    await bootstrapAuthFromIosNative("quick_add").catch(() => false);
-    await handleQuickAdd(
-      payload,
-      sender,
-      sendResponse,
-      allowNativeAuthRetry,
-      true,
-    );
-    return;
-  }
-
-  if (!bearerToken) {
-    const ready = await ensureStoredAuthReady();
-    if (ready && bearerToken) {
-      await handleQuickAdd(
-        payload,
-        sender,
-        sendResponse,
-        allowNativeAuthRetry,
-        true,
-      );
-      return;
-    }
-    if (allowNativeAuthRetry) {
-      const bootstrapped = await bootstrapAuthFromIosNative("quick_add");
-      if (bootstrapped && bearerToken) {
-        await handleQuickAdd(payload, sender, sendResponse, false, true);
-        return;
+  function parseCredentialStore(raw) {
+    if (!isRecord5(raw) || raw.version !== 1 || !isRecord5(raw.entries)) return {};
+    const entries = {};
+    for (const [reference, credential] of Object.entries(raw.entries)) {
+      if (reference.trim() && typeof credential === "string" && credential.trim()) {
+        entries[reference] = credential;
       }
     }
-    recordArchiveIssueFromPayload(payload, "auth");
-    await markWorkError(workKey, "quick_add", "not_authenticated");
-    if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
-    return;
+    return entries;
   }
-
-  let workOperationId = null;
-  try {
-    workOperationId = await markWorkPending(workKey, "quick_add");
-    const response = await fetchWithTimeout(API_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${bearerToken}`,
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (response.ok) {
-      const json = await response.json().catch(() => null);
-      const data = json && json.data && typeof json.data === "object" ? json.data : null;
-      const entryId =
-        data && typeof data.entry_id === "string"
-          ? data.entry_id
-          : null;
-      const confirmation = await waitForTrackedWorkConfirmation(
-        workKey,
-        payload,
-        data,
-        entryId,
-        workOperationId,
-      );
-      if (confirmation.workKey && !confirmation.state) {
-        recordArchiveIssueFromPayload(payload, "network");
-        await markWorkError(
-          confirmation.workKey,
-          "quick_add",
-          "confirmation_missing",
-          workOperationId,
-        );
-        setConnectedWithSyncWarning(
-          "Trace accepted the save but did not confirm it in your library. Try Add to Trace again.",
-          {
-            lastQuickAddAt: new Date().toISOString(),
-          },
-        );
-        setBadge(sender?.tab?.id, "!", "#9C6B00");
-        if (sendResponse) {
-          sendResponse({ ok: false, error: "confirmation_missing" });
-        }
-        return;
-      }
-      // Match auto-track: a successful request alone is not a confirmed save
-      // for the iOS handoff receipt.
-      const out = await finalizeConfirmedTrack(
-        payload,
-        sender,
-        confirmation,
-        entryId,
-        "quick_add",
-      );
-      if (sendResponse) {
-        sendResponse(out);
-      }
-    } else {
-      const authError = await applyAuthFailureResponse(response, {
-        actionAtKey: "lastQuickAddAt",
+  var BrowserCredentialPort = class {
+    #database;
+    #provider;
+    #randomId;
+    #tail = Promise.resolve();
+    constructor(database, provider, randomId) {
+      this.#database = database;
+      this.#provider = provider;
+      this.#randomId = randomId;
+    }
+    acquire(purpose) {
+      return this.#provider.acquire(purpose);
+    }
+    cancelAcquisition() {
+      this.#provider.cancel();
+    }
+    load(reference) {
+      return this.#withLock(async () => {
+        const entries = await this.#readEntries();
+        return entries[reference] ?? null;
       });
-      if (authError) {
-        if (allowNativeAuthRetry) {
-          const bootstrapped = await bootstrapAuthFromIosNative(
-            "quick_add_auth_failure",
-          );
-          if (bootstrapped && bearerToken) {
-            await handleQuickAdd(payload, sender, sendResponse, false, true);
-            return;
-          }
+    }
+    storeUnique(credential, epoch) {
+      return this.#withLock(async () => {
+        const suffix = this.#randomId().trim();
+        if (!suffix) throw new TypeError("credential reference is empty");
+        const reference = `session:${epoch}:${suffix}`;
+        const entries = await this.#readEntries();
+        entries[reference] = credential;
+        await this.#writeEntries(entries);
+        return reference;
+      });
+    }
+    delete(reference) {
+      return this.#withLock(async () => {
+        const entries = await this.#readEntries();
+        delete entries[reference];
+        if (Object.keys(entries).length === 0) {
+          await this.#database.delete(PRIVATE_RECORD_KEYS.sessionCredentials);
+        } else {
+          await this.#writeEntries(entries);
         }
-        recordArchiveIssueFromPayload(payload, "auth");
-        await markWorkError(workKey, "quick_add", authError, workOperationId);
-        if (sendResponse) sendResponse({ ok: false, error: authError });
-      } else if (response.status === 402) {
-        await markWorkError(
-          workKey,
-          "quick_add",
-          "free_limit_reached",
-          workOperationId,
-        );
-        if (sendResponse) sendResponse({ ok: false, error: "free_limit_reached" });
-      } else {
-        recordArchiveIssueFromPayload(
-          payload,
-          response.status === 400 ? "parser" : "network",
-        );
-        await markWorkError(
-          workKey,
-          "quick_add",
-          "http_" + response.status,
-          workOperationId,
-        );
-        if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
+      });
+    }
+    clearAll() {
+      return this.#withLock(async () => {
+        await this.#database.delete(PRIVATE_RECORD_KEYS.sessionCredentials);
+      });
+    }
+    async #readEntries() {
+      return parseCredentialStore(
+        await this.#database.get(PRIVATE_RECORD_KEYS.sessionCredentials)
+      );
+    }
+    #writeEntries(entries) {
+      const value = Object.freeze({
+        version: 1,
+        entries: Object.freeze({ ...entries })
+      });
+      return this.#database.put(PRIVATE_RECORD_KEYS.sessionCredentials, value);
+    }
+    async #withLock(work) {
+      const previous = this.#tail;
+      let release = () => {
+      };
+      this.#tail = new Promise((resolve) => {
+        release = resolve;
+      });
+      await previous;
+      try {
+        return await work();
+      } finally {
+        release();
       }
     }
-  } catch (e) {
-    console.error("[Trace] Quick-add error:", e);
-    recordArchiveIssueFromPayload(payload, "network");
-    const confirmation = await reconcileUncertainTrackRequest(
-      workKey,
-      payload,
-      workOperationId,
-    );
-    if (confirmation.state) {
-      const out = await finalizeConfirmedTrack(
-        payload,
-        sender,
-        confirmation,
-        confirmation.state.entryId,
-        "quick_add",
+  };
+  var LegacyAccountState = class {
+    #storage;
+    constructor(storage) {
+      this.#storage = storage;
+    }
+    clear() {
+      return this.#storage.remove(LEGACY_ACCOUNT_KEYS);
+    }
+    clearAll() {
+      return this.#storage.remove(DISABLED_LOCAL_KEYS);
+    }
+  };
+  var KernelAlarmState = class {
+    #alarms;
+    #runtime;
+    #mode;
+    constructor(alarms, runtime, mode) {
+      this.#alarms = alarms;
+      this.#runtime = runtime;
+      this.#mode = mode;
+    }
+    async clearRetired() {
+      for (const name of LEGACY_ACCOUNT_ALARMS) await this.#clear(name);
+    }
+    async clearAll() {
+      await this.#clear(ACCOUNT_DATA_ALARM);
+      await this.#clear(SAVED_FILTER_SYNC_ALARM);
+      await this.clearRetired();
+    }
+    async #clear(name) {
+      await extensionCall(
+        this.#alarms,
+        "clear",
+        [name],
+        this.#runtime,
+        this.#mode
       );
-      if (sendResponse) sendResponse(out);
-      return;
     }
-    const errorCode =
-      e instanceof TraceRequestTimeoutError ? "request_timeout" : "network_error";
-    const errorState = await markWorkError(
-      workKey,
-      "quick_add",
-      errorCode,
-      workOperationId,
-    );
-    const newerSavedResult = savedResultFromWorkState(errorState);
-    if (newerSavedResult) {
-      if (sendResponse) sendResponse(newerSavedResult);
-      return;
-    }
-    setConnectedWithSyncWarning(
-      "Trace did not confirm this save. Try Add to Trace again.",
-      { lastQuickAddAt: new Date().toISOString() },
-    );
-    if (sendResponse) sendResponse({ ok: false, error: errorCode });
+  };
+  function withTimeout(promise, timeoutMs) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const timer = setTimeout(() => finish(null), timeoutMs);
+      promise.then((value) => finish(value), () => finish(null));
+    });
   }
-}
-
-// =======================================================
-// 6. WORK PREFERENCES (listing overlay hide/unhide)
-// =======================================================
-
-function isValidExternalWorkKey(key) {
-  return /^(?:ao3|ffn):\d+$/.test(String(key || ""));
-}
-
-function isValidUuid(value) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
-}
-
-function normalizeReaderStatusForPatch(value) {
-  if (
-    typeof value !== "string" &&
-    typeof value !== "number" &&
-    typeof value !== "boolean"
-  ) {
+  async function sendNativeMessageWithFallback(runtime, mode, message) {
+    if (typeof runtime.sendNativeMessage !== "function") return null;
+    const attempts = [
+      [message],
+      ["com.tracefiction.trace", message]
+    ];
+    const deadline = Date.now() + 5e3;
+    for (const args of attempts) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) break;
+      const response = await withTimeout(
+        extensionCall(
+          runtime,
+          "sendNativeMessage",
+          args,
+          runtime,
+          mode
+        ),
+        remainingMs
+      );
+      if (response !== null) return response;
+    }
     return null;
   }
-  const raw = String(value).trim().toUpperCase();
-  if (!raw) return null;
-  if (raw === "PLANNING") return "SAVED";
-  if (raw === "COMPLETED") return "FINISHED";
-  if (
-    raw === "SAVED" ||
-    raw === "READING" ||
-    raw === "CAUGHT_UP" ||
-    raw === "PAUSED" ||
-    raw === "FINISHED" ||
-    raw === "DROPPED"
-  ) {
-    return raw;
-  }
-  return null;
-}
-
-function legacyReaderStatusForOverlay(status) {
-  const normalized = normalizeReaderStatusForPatch(status);
-  if (normalized === "SAVED") return "PLANNING";
-  if (normalized === "CAUGHT_UP") return "READING";
-  if (normalized === "FINISHED") return "COMPLETED";
-  return normalized;
-}
-
-function isStorySheetReaderStatus(status) {
-  return normalizeReaderStatusForPatch(status) !== null;
-}
-
-function normalizeWorkStatusOverride(value) {
-  if (value === null) return null;
-  if (typeof value !== "string") return undefined;
-  const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, "_");
-  if (!normalized) return undefined;
-  if (normalized === "complete") return "complete";
-  if (normalized === "wip" || normalized === "ongoing") return "wip";
-  if (normalized === "hiatus" || normalized === "on_hiatus" || normalized === "paused") return "hiatus";
-  if (normalized === "abandoned") return "abandoned";
-  return undefined;
-}
-
-function normalizePatchStorySnapshot(rawSnapshot) {
-  if (!rawSnapshot || typeof rawSnapshot !== "object" || Array.isArray(rawSnapshot)) return null;
-  const patch = {};
-  if (Object.prototype.hasOwnProperty.call(rawSnapshot, "work_status_override")) {
-    const workStatusOverride = normalizeWorkStatusOverride(rawSnapshot.work_status_override);
-    if (workStatusOverride === undefined) return null;
-    patch.work_status_override = workStatusOverride;
-  }
-  if (Object.prototype.hasOwnProperty.call(rawSnapshot, "abandoned_at_chapters_published")) {
-    if (rawSnapshot.abandoned_at_chapters_published === null) {
-      patch.abandoned_at_chapters_published = null;
-    } else {
-      const value = Number(rawSnapshot.abandoned_at_chapters_published);
-      if (!Number.isInteger(value) || value < 0 || value > 10_000_000) return null;
-      patch.abandoned_at_chapters_published = value;
+  var NativeArchiveReadinessReceiptPort = class {
+    #runtime;
+    #mode;
+    constructor(runtime, mode) {
+      this.#runtime = runtime;
+      this.#mode = mode;
     }
-  }
-  return Object.keys(patch).length > 0 ? patch : null;
-}
-
-function patchOverlayHiddenPreference(key, hidden) {
-  return new Promise((resolve) => {
-    try {
-      ext.storage.local.get([OVERLAY_STORAGE_KEY], (res) => {
-        if (ext.runtime.lastError) {
-          resolve();
-          return;
-        }
-
-        const prev =
-          res && res[OVERLAY_STORAGE_KEY] && typeof res[OVERLAY_STORAGE_KEY] === "object"
-            ? res[OVERLAY_STORAGE_KEY]
-            : {};
-        const entries =
-          prev.entries && typeof prev.entries === "object"
-            ? { ...prev.entries }
-            : {};
-        const workPreferences =
-          prev.workPreferences && typeof prev.workPreferences === "object"
-            ? { ...prev.workPreferences }
-            : {};
-
-        const existingEntry = entries[key];
-        if (existingEntry && typeof existingEntry === "object") {
-          const nextEntry = { ...existingEntry };
-          if (hidden) {
-            nextEntry.browsePreference = {
-              ...(existingEntry.browsePreference || {}),
-              hidden: true,
-            };
-          } else if (nextEntry.browsePreference) {
-            nextEntry.browsePreference = { ...nextEntry.browsePreference };
-            delete nextEntry.browsePreference.hidden;
-            if (Object.keys(nextEntry.browsePreference).length === 0) {
-              delete nextEntry.browsePreference;
-            }
-          }
-          entries[key] = nextEntry;
-        }
-
-        if (hidden) {
-          workPreferences[key] = { browsePreference: { hidden: true } };
-        } else {
-          delete workPreferences[key];
-        }
-
-        ext.storage.local.set(
-          {
-            [OVERLAY_STORAGE_KEY]: {
-              ...prev,
-              entries,
-              workPreferences,
-              syncVersion: new Date().toISOString(),
-            },
-          },
-          () => resolve(),
-        );
+    publishRunReceipt(receipt) {
+      return this.#publish({
+        type: "TRACE_IOS_EXTENSION_HEARTBEAT",
+        hostKind: receipt.hostKind,
+        at: receipt.at,
+        ...receipt.handoffId === void 0 ? {} : { handoffId: receipt.handoffId }
       });
-    } catch (_) {
-      resolve();
     }
-  });
-}
-
-async function handleSetHiddenWork(payload, sender, sendResponse) {
-  if (!bearerToken) {
-    if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
-    return;
-  }
-
-  const key = payload && typeof payload.key === "string" ? payload.key.trim() : "";
-  const hidden = payload && payload.hidden === true;
-  if (!isValidExternalWorkKey(key) || typeof payload?.hidden !== "boolean") {
-    if (sendResponse) sendResponse({ ok: false, error: "invalid_request" });
-    return;
-  }
-
-  try {
-    const response = await fetchWithTimeout(WORK_PREFERENCES_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${bearerToken}`,
-      },
-      body: JSON.stringify({ key, hidden }),
-    });
-
-    if (response.ok) {
-      setConnectedState({ lastWorkPreferenceAt: new Date().toISOString() });
-      setBadge(sender?.tab?.id, hidden ? "HID" : "OK", hidden ? "#5B5142" : "#0D7A5F");
-      setTimeout(() => clearBadge(sender?.tab?.id), 2000);
-      await patchOverlayHiddenPreference(key, hidden);
-      await signalLibraryInvalidated("work_preference");
-      if (sendResponse) sendResponse({ ok: true, key, hidden });
-    } else {
-      const authError = await applyAuthFailureResponse(response, {
-        actionAtKey: "lastWorkPreferenceAt",
+    publishPermissionSnapshot(snapshot) {
+      return this.#publish({
+        type: "TRACE_IOS_EXTENSION_HEARTBEAT",
+        hostKind: snapshot.hostKind,
+        at: snapshot.at,
+        permissionSnapshot: true,
+        grantedOrigins: [...snapshot.grantedOrigins]
       });
-      if (authError) {
-        if (sendResponse) sendResponse({ ok: false, error: authError });
-      } else if (response.status === 402) {
-        setUpgradeState(
-          "You've reached the free library limit. Upgrade to Pro for unlimited stories.",
-          { lastHttpStatus: response.status },
-        );
-        if (sendResponse) sendResponse({ ok: false, error: "free_limit_reached" });
-      } else if (response.status === 429) {
-        setConnectedWithSyncWarning(
-          "Trace is rate limiting preference changes. Try again in a few minutes.",
-          { lastHttpStatus: response.status },
-        );
-        if (sendResponse) sendResponse({ ok: false, error: "rate_limited" });
-      } else {
-        if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
-      }
     }
-  } catch (e) {
-    console.error("[Trace] Work preference error:", e);
-    if (sendResponse) sendResponse({ ok: false, error: "network_error" });
-  }
-}
-
-// =======================================================
-// 7. READER STATUS (story sheet post-add choices)
-// =======================================================
-
-function normalizeReaderProgress(raw) {
-  if (!raw || typeof raw !== "object") return null;
-  if (raw.unit !== "CHAPTER") return null;
-  const value = Number(raw.value);
-  if (!Number.isFinite(value) || value < 0) return null;
-  const progress = { unit: "CHAPTER", value: Math.trunc(value) };
-  if (raw.total === null || raw.total === undefined) {
-    progress.total = null;
-  } else {
-    const total = Number(raw.total);
-    if (!Number.isFinite(total) || total < 0) return null;
-    progress.total = Math.trunc(total);
-  }
-  return progress;
-}
-
-function chaptersFromReaderProgress(progress) {
-  if (!progress || progress.unit !== "CHAPTER") return null;
-  return {
-    current: progress.value,
-    total: progress.total == null ? null : progress.total,
+    async #publish(message) {
+      const response = await sendNativeMessageWithFallback(
+        this.#runtime,
+        this.#mode,
+        message
+      );
+      return isRecord5(response) && (response.ok === true || response.ok === "true");
+    }
   };
-}
-
-function normalizeLibraryEntryPatch(rawPatch) {
-  if (!rawPatch || typeof rawPatch !== "object") return null;
-  const patch = {};
-
-  if (Object.prototype.hasOwnProperty.call(rawPatch, "rating")) {
-    const rating = Number(rawPatch.rating);
-    if (!Number.isInteger(rating) || rating < 0 || rating > 5) return null;
-    patch.rating = rating;
-  }
-
-  if (Object.prototype.hasOwnProperty.call(rawPatch, "progress")) {
-    const progress = normalizeReaderProgress(rawPatch.progress);
-    if (!progress) return null;
-    patch.progress = progress;
-  }
-
-  if (Object.prototype.hasOwnProperty.call(rawPatch, "status")) {
-    const status = normalizeReaderStatusForPatch(rawPatch.status);
-    if (!status) return null;
-    patch.status = status;
-  }
-
-  if (Object.prototype.hasOwnProperty.call(rawPatch, "story_snapshot")) {
-    const storySnapshot = normalizePatchStorySnapshot(rawPatch.story_snapshot);
-    if (!storySnapshot) return null;
-    patch.story_snapshot = storySnapshot;
-  }
-
-  return Object.keys(patch).length > 0 ? patch : null;
-}
-
-function normalizeFinishQualificationSignal(rawSignal) {
-  if (!rawSignal || typeof rawSignal !== "object") return null;
-  const entryId =
-    typeof rawSignal.entryId === "string" ? rawSignal.entryId.trim() : "";
-  if (!isValidUuid(entryId)) return null;
-
-  const source = String(rawSignal.source || "").trim().toLowerCase();
-  if (source !== "ao3" && source !== "ffn") return null;
-
-  const chapter = Number(rawSignal.chapter);
-  const total = Number(rawSignal.total);
-  if (!Number.isInteger(chapter) || chapter < 1 || chapter > 10_000_000) return null;
-  if (!Number.isInteger(total) || total < 1 || total > 10_000_000) return null;
-
-  const state = String(rawSignal.state || "").trim().toLowerCase();
-  if (state !== "open" && state !== "resolved") return null;
-
-  const payload = {
-    entryId,
-    source,
-    chapter,
-    total,
-    state,
+  var NativeStorySaveReceiptPort = class {
+    #runtime;
+    #mode;
+    constructor(runtime, mode) {
+      this.#runtime = runtime;
+      this.#mode = mode;
+    }
+    async publishSaveReceipt(receipt) {
+      const response = await sendNativeMessageWithFallback(
+        this.#runtime,
+        this.#mode,
+        {
+          type: "TRACE_IOS_EXTENSION_HEARTBEAT",
+          hostKind: receipt.hostKind,
+          action: receipt.action,
+          at: receipt.at,
+          ...receipt.handoffId === void 0 ? {} : { handoffId: receipt.handoffId }
+        }
+      );
+      return isRecord5(response) && (response.ok === true || response.ok === "true");
+    }
   };
-
-  if (typeof rawSignal.workKey === "string") {
-    const workKey = rawSignal.workKey.trim();
-    if (workKey && isValidExternalWorkKey(workKey)) payload.workKey = workKey;
-  }
-
-  if (state === "resolved") {
-    const workStatus = normalizeWorkStatusOverride(rawSignal.workStatus);
-    const readerStatus = normalizeReaderStatusForPatch(rawSignal.readerStatus);
-    if (!workStatus || !readerStatus) return null;
-    payload.workStatus = workStatus;
-    payload.readerStatus = readerStatus;
-  }
-
-  return payload;
-}
-
-function patchOverlayReaderStatus(entryId, status, progress) {
-  return new Promise((resolve) => {
-    try {
-      ext.storage.local.get([OVERLAY_STORAGE_KEY], (res) => {
-        if (ext.runtime.lastError) {
-          resolve(null);
-          return;
-        }
-
-        const prev =
-          res && res[OVERLAY_STORAGE_KEY] && typeof res[OVERLAY_STORAGE_KEY] === "object"
-            ? res[OVERLAY_STORAGE_KEY]
-            : {};
-        const entries =
-          prev.entries && typeof prev.entries === "object"
-            ? { ...prev.entries }
-            : {};
-        let patchedKey = null;
-
-        for (const [key, rawEntry] of Object.entries(entries)) {
-          if (!rawEntry || typeof rawEntry !== "object") continue;
-          if (rawEntry.entryId !== entryId) continue;
-          const canonicalStatus = normalizeReaderStatusForPatch(status);
-          const legacyStatus = legacyReaderStatusForOverlay(canonicalStatus);
-          entries[key] = {
-            ...rawEntry,
-            status: legacyStatus,
-            readerStatus: legacyStatus,
-            canonicalReaderStatus: canonicalStatus,
-            ...(chaptersFromReaderProgress(progress)
-              ? { chapters: chaptersFromReaderProgress(progress) }
-              : {}),
-          };
-          patchedKey = key;
-          break;
-        }
-
-        if (!patchedKey) {
-          resolve(null);
-          return;
-        }
-
-        ext.storage.local.set(
-          {
-            [OVERLAY_STORAGE_KEY]: {
-              ...prev,
-              entries,
-              syncVersion: new Date().toISOString(),
-            },
-          },
-          () => resolve(patchedKey),
-        );
-      });
-    } catch (_) {
-      resolve(null);
+  var NativePendingStoryHandoffPort = class {
+    #runtime;
+    #mode;
+    constructor(runtime, mode) {
+      this.#runtime = runtime;
+      this.#mode = mode;
     }
-  });
-}
-
-function patchOverlayLibraryEntry(entryId, patch) {
-  return new Promise((resolve) => {
-    try {
-      ext.storage.local.get([OVERLAY_STORAGE_KEY], (res) => {
-        if (ext.runtime.lastError) {
-          resolve(null);
-          return;
+    async clearExpected(handoffId) {
+      const response = await sendNativeMessageWithFallback(
+        this.#runtime,
+        this.#mode,
+        {
+          type: "TRACE_IOS_PENDING_FIRST_STORY_CLEAR",
+          handoffId
         }
-
-        const prev =
-          res && res[OVERLAY_STORAGE_KEY] && typeof res[OVERLAY_STORAGE_KEY] === "object"
-            ? res[OVERLAY_STORAGE_KEY]
-            : {};
-        const entries =
-          prev.entries && typeof prev.entries === "object"
-            ? { ...prev.entries }
-            : {};
-        let patchedKey = null;
-
-        for (const [key, rawEntry] of Object.entries(entries)) {
-          if (!rawEntry || typeof rawEntry !== "object") continue;
-          if (rawEntry.entryId !== entryId) continue;
-
-          const nextEntry = { ...rawEntry };
-          if (patch.status) {
-            const legacyStatus = legacyReaderStatusForOverlay(patch.status);
-            nextEntry.status = legacyStatus;
-            nextEntry.readerStatus = legacyStatus;
-            nextEntry.canonicalReaderStatus = patch.status;
-          }
-          if (patch.progress) {
-            const nextChapters = chaptersFromReaderProgress(patch.progress);
-            if (nextChapters) {
-              const previousCurrent =
-                rawEntry.chapters && typeof rawEntry.chapters.current === "number"
-                  ? rawEntry.chapters.current
-                  : null;
-              const previousNew =
-                typeof rawEntry.newChapterCount === "number" &&
-                Number.isFinite(rawEntry.newChapterCount)
-                  ? rawEntry.newChapterCount
-                  : null;
-              const inferredPublished =
-                previousCurrent == null || previousNew == null
-                  ? null
-                  : previousCurrent + previousNew;
-              nextEntry.chapters = nextChapters;
-              if (inferredPublished != null) {
-                const nextNewChapterCount = Math.max(
-                  0,
-                  inferredPublished - nextChapters.current,
-                );
-                nextEntry.newChapterCount = nextNewChapterCount;
-                nextEntry.catchupState =
-                  nextNewChapterCount > 0 ? "BEHIND" : "UP";
-              }
-            }
-          }
-          if (Object.prototype.hasOwnProperty.call(patch, "rating")) {
-            nextEntry.rating = patch.rating;
-          }
-          if (patch.story_snapshot && Object.prototype.hasOwnProperty.call(patch.story_snapshot, "work_status_override")) {
-            const override = patch.story_snapshot.work_status_override;
-            if (override === null) {
-              nextEntry.workStatus = "unknown";
-              nextEntry.workStatusProvenance = "unknown";
-              if (nextEntry.workMark && nextEntry.workMark.kind === "abandoned") delete nextEntry.workMark;
-            } else {
-              nextEntry.workStatus = override;
-              nextEntry.workStatusProvenance = "override";
-              if (override === "abandoned") {
-                nextEntry.workMark = { kind: "abandoned" };
-              } else if (nextEntry.workMark && nextEntry.workMark.kind === "abandoned") {
-                delete nextEntry.workMark;
-              }
-            }
-          }
-
-          entries[key] = nextEntry;
-          patchedKey = key;
-          break;
-        }
-
-        if (!patchedKey) {
-          resolve(null);
-          return;
-        }
-
-        ext.storage.local.set(
-          {
-            [OVERLAY_STORAGE_KEY]: {
-              ...prev,
-              entries,
-              syncVersion: new Date().toISOString(),
-            },
-          },
-          () => resolve(patchedKey),
-        );
-      });
-    } catch (_) {
-      resolve(null);
+      );
+      return isRecord5(response) && (response.ok === true || response.ok === "true") && response.cleared !== false && response.cleared !== "false";
     }
-  });
-}
-
-async function handlePatchLibraryEntry(payload, sender, sendResponse) {
-  if (!bearerToken && !(await hydrateStoredBearerToken())) {
-    if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
-    return;
-  }
-
-  const entryId = payload && typeof payload.entryId === "string" ? payload.entryId.trim() : "";
-  const patch = normalizeLibraryEntryPatch(payload && payload.patch);
-  if (!isValidUuid(entryId) || !patch) {
-    if (sendResponse) sendResponse({ ok: false, error: "invalid_request" });
-    return;
-  }
-
-  try {
-    const response = await fetchWithTimeout(`${LIBRARY_ENTRY_ENDPOINT_BASE}/${encodeURIComponent(entryId)}`, {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${bearerToken}`,
-      },
-      body: JSON.stringify(patch),
-    });
-
-    if (response.ok) {
-      markFirstSaveSeen();
-      setBadge(sender?.tab?.id, "OK", "#0D7A5F");
-      setTimeout(() => clearBadge(sender?.tab?.id), 2000);
-      const workKey = await patchOverlayLibraryEntry(entryId, patch);
-      setAuthenticatedActionConnectedState({
-        firstSaveSeen: true,
-        lastLibraryEntryPatchAt: new Date().toISOString(),
-      });
-      if (sendResponse) sendResponse({ ok: true, entryId, patch, workKey });
-      void signalLibraryInvalidated("library_entry_patch");
-    } else {
-      const authError = await applyAuthFailureResponse(response, {
-        actionAtKey: "lastLibraryEntryPatchAt",
-      });
-      if (authError) {
-        if (sendResponse) sendResponse({ ok: false, error: authError });
-      } else if (response.status === 402) {
-        setUpgradeState(
-          "You've reached the free library limit. Upgrade to Pro for unlimited stories.",
-          { lastHttpStatus: response.status },
-        );
-        if (sendResponse) sendResponse({ ok: false, error: "free_limit_reached" });
-      } else if (response.status === 429) {
-        setConnectedWithSyncWarning(
-          "Trace is rate limiting library updates. Try again in a few minutes.",
-          { lastHttpStatus: response.status },
-        );
-        if (sendResponse) sendResponse({ ok: false, error: "rate_limited" });
-      } else {
-        if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
-      }
+  };
+  var BrowserArchivePermissionSnapshotPort = class {
+    #permissions;
+    #runtime;
+    #mode;
+    constructor(permissions, runtime, mode) {
+      this.#permissions = permissions;
+      this.#runtime = runtime;
+      this.#mode = mode;
     }
-  } catch (e) {
-    console.error("[Trace] Library entry patch error:", e);
-    if (sendResponse) sendResponse({ ok: false, error: "network_error" });
-  }
-}
-
-async function handleFinishQualificationSignal(payload, sender, sendResponse) {
-  if (!bearerToken) {
-    if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
-    return;
-  }
-
-  const signal = normalizeFinishQualificationSignal(payload);
-  if (!signal) {
-    if (sendResponse) sendResponse({ ok: false, error: "invalid_request" });
-    return;
-  }
-
-  try {
-    const response = await fetchWithTimeout(FINISH_QUALIFICATION_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${bearerToken}`,
-      },
-      body: JSON.stringify(signal),
-    });
-
-    if (response.ok) {
-      setConnectedState({ lastFinishQualificationAt: new Date().toISOString() });
-      let data = null;
+    async readGrantedOrigins() {
+      if (this.#permissions === void 0) return null;
+      const response = await withTimeout(
+        extensionCall(
+          this.#permissions,
+          "getAll",
+          [],
+          this.#runtime,
+          this.#mode
+        ),
+        2e3
+      );
+      if (!isRecord5(response) || !Array.isArray(response.origins)) return null;
+      return Object.freeze(
+        Array.from(new Set(
+          response.origins.filter((origin) => typeof origin === "string").map((origin) => origin.trim().slice(0, 256)).filter(Boolean)
+        )).slice(0, 64)
+      );
+    }
+  };
+  var ExplicitCredentialProvider = class {
+    #runtime;
+    #tabs;
+    #mode;
+    #webOrigin;
+    #webTabPattern;
+    #randomId;
+    #generation = 0;
+    #isIos = null;
+    constructor(options) {
+      this.#runtime = options.runtime;
+      this.#tabs = options.tabs;
+      this.#mode = options.mode;
+      const webUrl = new URL(options.webOrigin);
+      this.#webOrigin = webUrl.origin;
+      this.#webTabPattern = `${webUrl.protocol}//${webUrl.hostname}/*`;
+      this.#randomId = options.randomId;
+    }
+    async acquire(purpose) {
+      const generation = ++this.#generation;
+      const result = await this.#detectIos() ? await this.#acquireNative() : await this.#acquireFromTraceTab(purpose);
+      return generation === this.#generation ? result : { kind: "cancelled" };
+    }
+    cancel() {
+      this.#generation += 1;
+    }
+    async #detectIos() {
+      this.#isIos ??= (async () => {
+        if (/iPhone|iPad|iPod/i.test(globalThis.navigator?.userAgent ?? "")) return true;
+        if (typeof this.#runtime.getPlatformInfo !== "function") return false;
+        try {
+          const info = await extensionCall(
+            this.#runtime,
+            "getPlatformInfo",
+            [],
+            this.#runtime,
+            this.#mode
+          );
+          return info?.os === "ios";
+        } catch {
+          return false;
+        }
+      })();
+      return this.#isIos;
+    }
+    async #acquireFromTraceTab(purpose) {
+      let tabs;
       try {
-        data = await response.json();
-      } catch (_) {
-        data = null;
-      }
-      if (sendResponse) sendResponse({ ok: true, data: data && data.data });
-    } else {
-      const authError = await applyAuthFailureResponse(response, {
-        actionAtKey: "lastFinishQualificationAt",
-      });
-      if (authError) {
-        if (sendResponse) sendResponse({ ok: false, error: authError });
-      } else if (response.status === 429) {
-        setConnectedWithSyncWarning(
-          "Trace is rate limiting finish updates. Try again in a few minutes.",
-          { lastHttpStatus: response.status },
+        tabs = await extensionCall(
+          this.#tabs,
+          "query",
+          [{ url: [this.#webTabPattern] }],
+          this.#runtime,
+          this.#mode
         );
-        if (sendResponse) sendResponse({ ok: false, error: "rate_limited" });
-      } else {
-        if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
+      } catch {
+        return { kind: "unavailable" };
       }
-    }
-  } catch (e) {
-    console.error("[Trace] Finish qualification signal error:", e);
-    if (sendResponse) sendResponse({ ok: false, error: "network_error" });
-  }
-}
-
-async function handleSetReaderStatus(payload, sender, sendResponse) {
-  if (!bearerToken) {
-    if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
-    return;
-  }
-
-  const entryId = payload && typeof payload.entryId === "string" ? payload.entryId.trim() : "";
-  const status = normalizeReaderStatusForPatch(payload && payload.status);
-  const progress = normalizeReaderProgress(payload && payload.progress);
-  if (!isValidUuid(entryId) || !status || ((payload && payload.progress) && !progress)) {
-    if (sendResponse) sendResponse({ ok: false, error: "invalid_request" });
-    return;
-  }
-
-  try {
-    const response = await fetchWithTimeout(`${LIBRARY_ENTRY_ENDPOINT_BASE}/${encodeURIComponent(entryId)}`, {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${bearerToken}`,
-      },
-      body: JSON.stringify(progress ? { status, progress } : { status }),
-    });
-
-    if (response.ok) {
-      markFirstSaveSeen();
-      setConnectedState({
-        firstSaveSeen: true,
-        lastReaderStatusAt: new Date().toISOString(),
-      });
-      setBadge(sender?.tab?.id, "OK", "#0D7A5F");
-      setTimeout(() => clearBadge(sender?.tab?.id), 2000);
-      const workKey = await patchOverlayReaderStatus(entryId, status, progress);
-      await signalLibraryInvalidated("reader_status");
-      if (sendResponse) sendResponse({ ok: true, entryId, status, workKey });
-    } else {
-      const authError = await applyAuthFailureResponse(response, {
-        actionAtKey: "lastReaderStatusAt",
-      });
-      if (authError) {
-        if (sendResponse) sendResponse({ ok: false, error: authError });
-      } else if (response.status === 402) {
-        setUpgradeState(
-          "You've reached the free library limit. Upgrade to Pro for unlimited stories.",
-          { lastHttpStatus: response.status },
+      const candidates = tabs.filter((tab) => {
+        if (typeof tab.id !== "number" || typeof tab.url !== "string") return false;
+        try {
+          return new URL(tab.url).origin === this.#webOrigin;
+        } catch {
+          return false;
+        }
+      }).sort(
+        (left, right) => Number(right.active === true) - Number(left.active === true) || (right.lastAccessed ?? 0) - (left.lastAccessed ?? 0)
+      );
+      const deadline = Date.now() + 1e4;
+      for (const tab of candidates) {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) break;
+        const requestId = this.#randomId();
+        const response = await withTimeout(
+          extensionCall(
+            this.#tabs,
+            "sendMessage",
+            [tab.id, {
+              type: "TRACE_CREDENTIAL_GRANT_REQUEST",
+              protocolVersion: 1,
+              requestId,
+              purpose
+            }],
+            this.#runtime,
+            this.#mode
+          ),
+          remainingMs
         );
-        if (sendResponse) sendResponse({ ok: false, error: "free_limit_reached" });
-      } else if (response.status === 429) {
-        setConnectedWithSyncWarning(
-          "Trace is rate limiting library updates. Try again in a few minutes.",
-          { lastHttpStatus: response.status },
+        if (!isRecord5(response) || response.requestId !== requestId) continue;
+        const credential = typeof response.token === "string" ? response.token.trim() : "";
+        if (response.ok === true && credential) return { kind: "credential", credential };
+      }
+      return { kind: "absent" };
+    }
+    async #acquireNative() {
+      const request = { type: "TRACE_IOS_AUTH_TOKEN_REQUEST", protocolVersion: 2 };
+      const response = await sendNativeMessageWithFallback(
+        this.#runtime,
+        this.#mode,
+        request
+      );
+      if (isRecord5(response)) {
+        const credential = typeof response.token === "string" ? response.token.trim() : "";
+        if ((response.ok === true || response.ok === "true") && credential) {
+          return { kind: "credential", credential };
+        }
+      }
+      return { kind: "absent" };
+    }
+  };
+  function sanitizePendingFirstStoryResponse(response) {
+    if (!isRecord5(response)) return { ok: false, error: "native_unavailable" };
+    if (response.ok !== true && response.ok !== "true") {
+      return { ok: false, error: "native_error" };
+    }
+    const sanitized = { ok: true, url: "" };
+    if (typeof response.url === "string" && response.url.length <= 4096) {
+      sanitized.url = response.url.trim();
+    }
+    if (response.mode === "story" || response.mode === "browse") {
+      sanitized.mode = response.mode;
+    }
+    if (response.hostKind === "ao3" || response.hostKind === "ffn") {
+      sanitized.hostKind = response.hostKind;
+    }
+    if (typeof response.handoffId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(response.handoffId.trim())) {
+      sanitized.handoffId = response.handoffId.trim();
+    }
+    const expiresAt = typeof response.expiresAt === "number" ? response.expiresAt : typeof response.expiresAt === "string" ? Number(response.expiresAt) : Number.NaN;
+    if (Number.isFinite(expiresAt)) sanitized.expiresAt = expiresAt;
+    if (response.expired === true || response.expired === "true") sanitized.expired = true;
+    return Object.freeze(sanitized);
+  }
+  var NativePendingFirstStoryReader = class {
+    #runtime;
+    #mode;
+    constructor(runtime, mode) {
+      this.#runtime = runtime;
+      this.#mode = mode;
+    }
+    async read() {
+      const request = { type: "TRACE_IOS_PENDING_FIRST_STORY_GET" };
+      const response = await sendNativeMessageWithFallback(
+        this.#runtime,
+        this.#mode,
+        request
+      );
+      return response === null ? { ok: false, error: "native_unavailable" } : sanitizePendingFirstStoryResponse(response);
+    }
+  };
+  var VerificationApi = class {
+    #fetch;
+    #endpoint;
+    #onRetryDisposition;
+    constructor(fetchImpl, apiBase, onRetryDisposition = () => {
+    }) {
+      this.#fetch = fetchImpl;
+      this.#endpoint = `${apiBase.replace(/\/$/, "")}/api/account/me`;
+      this.#onRetryDisposition = onRetryDisposition;
+    }
+    async verifyCredential(credential) {
+      const response = await withTimeout(
+        this.#fetch(this.#endpoint, {
+          method: "GET",
+          cache: "no-store",
+          headers: { Authorization: `Bearer ${credential}` }
+        }),
+        1e4
+      );
+      if (response === null) {
+        this.#onRetryDisposition("automatic");
+        return { kind: "unavailable" };
+      }
+      if (response.status === 429) {
+        this.#onRetryDisposition("manual");
+        return { kind: "unavailable" };
+      }
+      if (response.status >= 500) {
+        this.#onRetryDisposition("automatic");
+        return { kind: "unavailable" };
+      }
+      this.#onRetryDisposition("none");
+      if (response.status === 401 || response.status === 403) return { kind: "rejected" };
+      if (!response.ok) return { kind: "account_unavailable" };
+      let body;
+      try {
+        body = await response.json();
+      } catch {
+        return { kind: "invalid_response" };
+      }
+      if (!isRecord5(body) || typeof body.account_id !== "string" || !body.account_id.trim()) {
+        return { kind: "invalid_response" };
+      }
+      return { kind: "verified", accountId: body.account_id.trim() };
+    }
+  };
+
+  // src/extension-runtime/account-data-repository.mts
+  var AccountDataRepository = class {
+    #database;
+    #scopes;
+    #tail = Promise.resolve();
+    #overlayReservation = 0;
+    #appliedOverlayReservation = 0;
+    constructor(database, scopes) {
+      this.#database = database;
+      this.#scopes = scopes;
+    }
+    read() {
+      return this.#withLock(async () => {
+        const startingScope = this.#scopes.displayScope();
+        if (startingScope === null) return null;
+        const parsed = parseAccountData(
+          await this.#database.get(PRIVATE_RECORD_KEYS.accountData)
         );
-        if (sendResponse) sendResponse({ ok: false, error: "rate_limited" });
-      } else {
-        if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
-      }
-    }
-  } catch (e) {
-    console.error("[Trace] Reading status error:", e);
-    if (sendResponse) sendResponse({ ok: false, error: "network_error" });
-  }
-}
-
-// =======================================================
-// 8. LIBRARY OVERLAY CACHE (periodic refresh)
-// =======================================================
-
-try {
-  ext.storage.onChanged.addListener((changes, area) => {
-    if (area !== "local") return;
-    if (changes[PREF_LIBRARY_INLAY_KEY]) {
-      void refreshLibraryOverlay();
-    }
-    if (
-      changes[AO3_SAVED_FILTERS_STORAGE_KEY] ||
-      changes[AO3_SAVED_FILTERS_DELETED_KEY]
-    ) {
-      const snapshot = {};
-      if (changes[AO3_SAVED_FILTERS_STORAGE_KEY]) {
-        snapshot[AO3_SAVED_FILTERS_STORAGE_KEY] =
-          changes[AO3_SAVED_FILTERS_STORAGE_KEY].newValue;
-      }
-      if (changes[AO3_SAVED_FILTERS_DELETED_KEY]) {
-        snapshot[AO3_SAVED_FILTERS_DELETED_KEY] =
-          changes[AO3_SAVED_FILTERS_DELETED_KEY].newValue;
-      }
-      if (snapshotHasPendingAo3SavedFilterSync(snapshot)) {
-        scheduleAo3SavedFiltersSync(750);
-      }
-    }
-  });
-} catch (_) {
-  /* ignore */
-}
-
-function createTracePeriodicAlarms() {
-  if (!ext.alarms) return;
-  try {
-    ext.alarms.create("traceLibraryOverlay", { periodInMinutes: 30 });
-    ext.alarms.create("traceAo3SavedFiltersSync", { periodInMinutes: 30 });
-  } catch (_) {
-    /* ignore */
-  }
-}
-
-async function openFirstInstallActivationPage(details) {
-  if (!details || details.reason !== "install") return;
-  let existingTraceTab = null;
-  try {
-    const tabs = await ext.tabs?.query?.({ url: traceWebTabQueryPatterns() });
-    existingTraceTab = Array.isArray(tabs)
-      ? tabs.find((tab) => tab && typeof tab.id === "number")
-      : null;
-  } catch (_) {
-    /* fall back to opening a fresh Library tab */
-  }
-
-  try {
-    if (existingTraceTab) {
-      await ext.tabs?.update?.(existingTraceTab.id, {
-        url: FIRST_STORY_ACTIVATION_URL,
-        active: true,
+        if (parsed.kind === "invalid") {
+          try {
+            await this.#database.delete(PRIVATE_RECORD_KEYS.accountData);
+          } catch {
+          }
+          return null;
+        }
+        if (parsed.kind !== "valid") return null;
+        const currentScope = this.#scopes.displayScope();
+        return sameAccountScope(startingScope, currentScope) && sameAccountScope(parsed.value.scope, currentScope) ? parsed.value : null;
       });
-      return;
     }
-    const maybePromise = ext.tabs?.create?.({
-      url: FIRST_STORY_ACTIVATION_URL,
-      active: true,
-    });
-    if (maybePromise && typeof maybePromise.catch === "function") {
-      maybePromise.catch(() => {});
+    ensureScope(requestedScope) {
+      return this.#publish(requestedScope, (current) => current);
     }
-  } catch (_) {
-    /* best effort only */
+    publishSummary(requestedScope, value) {
+      const summary = copyAccountSummary(value);
+      if (summary === null) return Promise.resolve({ kind: "invalid_model" });
+      return this.#publish(requestedScope, (current) => Object.freeze({
+        ...current,
+        summary
+      }));
+    }
+    publishOverlay(requestedScope, value, reservation = this.reserveOverlayWrite()) {
+      const overlay = copyAccountOverlay(value);
+      if (overlay === null) return Promise.resolve({ kind: "invalid_model" });
+      return this.#publish(requestedScope, (current) => Object.freeze({
+        ...current,
+        overlay
+      }), reservation);
+    }
+    publishConfirmedStory(requestedScope, confirmation) {
+      const reservation = this.reserveOverlayWrite();
+      const entry = copyLibraryOverlayEntry(confirmation.entry);
+      if (entry === null) return Promise.resolve({ kind: "invalid_model" });
+      return this.#publish(requestedScope, (current) => {
+        const overlay = current.overlay ?? Object.freeze({
+          entries: Object.freeze({}),
+          workPreferences: Object.freeze({}),
+          syncVersion: (/* @__PURE__ */ new Date(0)).toISOString()
+        });
+        return Object.freeze({
+          ...current,
+          overlay: Object.freeze({
+            entries: Object.freeze({
+              ...overlay.entries,
+              [confirmation.workKey]: entry
+            }),
+            workPreferences: overlay.workPreferences,
+            syncVersion: confirmation.syncVersion
+          })
+        });
+      }, reservation);
+    }
+    /**
+     * Reserve before starting an overlay request. A command confirmation that
+     * publishes while that request is in flight receives a newer reservation,
+     * so the older full response cannot erase the command's exact entry.
+     */
+    reserveOverlayWrite() {
+      this.#overlayReservation += 1;
+      return this.#overlayReservation;
+    }
+    /**
+     * Calling this mutates the lock tail synchronously. Disconnect can therefore
+     * detach the returned promise while still ordering an immediate Reconnect's
+     * later account-root write after this deletion.
+     */
+    clear() {
+      return this.#withLock(async () => {
+        await this.#database.delete(PRIVATE_RECORD_KEYS.accountData);
+      });
+    }
+    #publish(requestedScope, update, overlayReservation) {
+      return this.#withLock(async () => {
+        if (!sameAccountScope(this.#scopes.publicationScope(), requestedScope)) {
+          return { kind: "rejected_scope" };
+        }
+        if (overlayReservation !== void 0 && overlayReservation < this.#appliedOverlayReservation) {
+          return { kind: "stale_write" };
+        }
+        const parsed = parseAccountData(
+          await this.#database.get(PRIVATE_RECORD_KEYS.accountData)
+        );
+        if (!sameAccountScope(this.#scopes.publicationScope(), requestedScope)) {
+          return { kind: "rejected_scope" };
+        }
+        const current = parsed.kind === "valid" && sameAccountScope(parsed.value.scope, requestedScope) ? parsed.value : createEmptyAccountData(requestedScope);
+        const next = update(current);
+        const validated = parseAccountData(next);
+        if (validated.kind !== "valid" || !sameAccountScope(validated.value.scope, requestedScope)) {
+          return { kind: "invalid_model" };
+        }
+        await this.#database.put(PRIVATE_RECORD_KEYS.accountData, validated.value);
+        if (overlayReservation !== void 0) {
+          this.#appliedOverlayReservation = overlayReservation;
+        }
+        return { kind: "published", value: validated.value };
+      });
+    }
+    async #withLock(work) {
+      const previous = this.#tail;
+      let release = () => {
+      };
+      this.#tail = new Promise((resolve) => {
+        release = resolve;
+      });
+      await previous;
+      try {
+        return await work();
+      } finally {
+        release();
+      }
+    }
+  };
+
+  // src/extension-runtime/archive-sender.mts
+  function isInactiveSender(sender) {
+    if (typeof sender?.frameId === "number" && sender.frameId !== 0) return true;
+    const lifecycle = typeof sender?.documentLifecycle === "string" ? sender.documentLifecycle.toLowerCase() : "";
+    return lifecycle === "prerender" || lifecycle === "pending_deletion";
   }
-}
-
-try {
-  ext.runtime?.onInstalled?.addListener((details) => {
-    void openFirstInstallActivationPage(details);
-    createTracePeriodicAlarms();
-  });
-} catch (_) {
-  /* install hook optional */
-}
-
-try {
-  if (ext.alarms && ext.alarms.onAlarm) {
-    ext.alarms.onAlarm.addListener((alarm) => {
-      if (alarm.name === "traceLibraryOverlay") {
-        void refreshLibraryOverlay();
-      }
-      if (alarm.name === "traceAo3SavedFiltersSync") {
-        void syncAo3SavedFilters();
-      }
-    });
+  function archiveHostKindFromSender(sender) {
+    if (isInactiveSender(sender)) return null;
+    const rawUrl = sender?.tab?.url ?? sender?.url;
+    if (typeof rawUrl !== "string") return null;
     try {
-      ext.alarms.get("traceLibraryOverlay", (a) => {
-        if (ext.runtime.lastError) return;
-        if (!a) {
-          ext.alarms.create("traceLibraryOverlay", { periodInMinutes: 30 });
-        }
-      });
-      ext.alarms.get("traceAo3SavedFiltersSync", (a) => {
-        if (ext.runtime.lastError) return;
-        if (!a) {
-          ext.alarms.create("traceAo3SavedFiltersSync", { periodInMinutes: 30 });
-        }
-      });
-    } catch (_) {
-      /* ignore */
+      const url = new URL(rawUrl);
+      if (url.protocol !== "https:") return null;
+      const host = url.hostname.toLowerCase();
+      if (host === "archiveofourown.org" || host.endsWith(".archiveofourown.org") || host === "archiveofourown.gay" || host.endsWith(".archiveofourown.gay") || host === "archive.transformativeworks.org" || host === "ao3.org" || host.endsWith(".ao3.org")) {
+        return "ao3";
+      }
+      if (host === "www.fanfiction.net" || host === "m.fanfiction.net") {
+        return "ffn";
+      }
+    } catch {
+    }
+    return null;
+  }
+  function isBlockedArchivePath(rawUrl, hostKind2) {
+    if (typeof rawUrl !== "string") return true;
+    try {
+      const pathname = new URL(rawUrl).pathname;
+      return hostKind2 === "ao3" ? /^\/users\/(?:login|sign_up|password|auth\/|logout)/i.test(pathname) : /^\/(?:login\.php|signup\.php|account\/(?:login|signup)|auth\/)/i.test(pathname);
+    } catch {
+      return true;
     }
   }
-} catch (_) {
-  /* alarms optional */
-}
+  function workKeyFromArchiveUrl(rawUrl, expectedHost) {
+    if (typeof rawUrl !== "string" || rawUrl.length > 4096) return null;
+    try {
+      const url = new URL(rawUrl);
+      if (url.protocol !== "https:") return null;
+      const host = url.hostname.toLowerCase();
+      if (expectedHost === "ao3") {
+        const supported = host === "archiveofourown.org" || host.endsWith(".archiveofourown.org") || host === "archiveofourown.gay" || host.endsWith(".archiveofourown.gay") || host === "archive.transformativeworks.org" || host === "ao3.org" || host.endsWith(".ao3.org");
+        if (!supported) return null;
+        const match2 = url.pathname.match(/^\/works\/([1-9][0-9]{0,19})(?:\/|$)/);
+        return match2?.[1] ? `ao3:${match2[1]}` : null;
+      }
+      if (host !== "www.fanfiction.net" && host !== "m.fanfiction.net") return null;
+      const match = url.pathname.match(/^\/s\/([1-9][0-9]{0,19})(?:\/|$)/);
+      return match?.[1] ? `ffn:${match[1]}` : null;
+    } catch {
+      return null;
+    }
+  }
+  function sourceMatchesArchiveHost(source, hostKind2) {
+    if (typeof source !== "string") return false;
+    const normalized = source.trim().toLowerCase();
+    return hostKind2 === "ao3" ? normalized === "ao3" || normalized === "archiveofourown.org" || normalized === "archiveofourown.gay" || normalized === "archive.transformativeworks.org" : normalized === "ffn" || normalized === "fanfiction.net";
+  }
+
+  // src/extension-runtime/story-command.mts
+  var UUID_PATTERN3 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  var WORK_KEY_PATTERN2 = /^(ao3|ffn):[1-9][0-9]{0,19}$/;
+  var REQUEST_TIMEOUT_MS = 12e3;
+  function isRecord6(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function isIsoTimestamp(value) {
+    return typeof value === "string" && value.length <= 64 && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+  }
+  function confirmedStorySave(value, expectedWorkKey) {
+    if (!isRecord6(value)) return null;
+    const workKey = typeof value.work_key === "string" ? value.work_key.trim() : "";
+    const entryId = typeof value.entry_id === "string" ? value.entry_id.trim() : "";
+    const entry = copyLibraryOverlayEntry(value.entry);
+    if (workKey !== expectedWorkKey || !WORK_KEY_PATTERN2.test(workKey) || !UUID_PATTERN3.test(entryId) || entry === null || entry.entryId !== entryId || !isIsoTimestamp(value.syncVersion)) {
+      return null;
+    }
+    return Object.freeze({
+      workKey,
+      entryId,
+      entry,
+      syncVersion: value.syncVersion
+    });
+  }
+  var StoryCommandApi = class {
+    #fetch;
+    #trackEndpoint;
+    #overlayEndpoint;
+    constructor(fetchImpl, apiBase) {
+      this.#fetch = fetchImpl;
+      const base = apiBase.replace(/\/$/, "");
+      this.#trackEndpoint = `${base}/api/extension/track`;
+      this.#overlayEndpoint = `${base}/api/extension/library-overlay`;
+    }
+    async lookup(credential, workKey) {
+      const response = await this.#request(this.#overlayEndpoint, credential, {
+        method: "GET",
+        cache: "no-store"
+      });
+      if (response === null) return { kind: "success", value: { kind: "unavailable" } };
+      if (response.status === 401 || response.status === 403) return { kind: "auth_rejected" };
+      if (!response.ok) return { kind: "success", value: { kind: "unavailable" } };
+      const body = await this.#json(response);
+      const data = isRecord6(body) && isRecord6(body.data) ? body.data : null;
+      if (data === null || !isRecord6(data.entries) || !isIsoTimestamp(data.syncVersion)) {
+        return { kind: "success", value: { kind: "invalid_response" } };
+      }
+      const rawEntry = data.entries[workKey];
+      if (rawEntry === void 0) return { kind: "success", value: { kind: "absent" } };
+      const entry = copyLibraryOverlayEntry(rawEntry);
+      const entryId = entry?.entryId;
+      if (entry === null || typeof entryId !== "string" || !UUID_PATTERN3.test(entryId)) {
+        return { kind: "success", value: { kind: "invalid_response" } };
+      }
+      return {
+        kind: "success",
+        value: {
+          kind: "found",
+          confirmation: Object.freeze({
+            workKey,
+            entryId,
+            entry,
+            syncVersion: data.syncVersion
+          })
+        }
+      };
+    }
+    async track(credential, command) {
+      const response = await this.#request(this.#trackEndpoint, credential, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(command.payload)
+      });
+      if (response === null) return { kind: "success", value: { kind: "uncertain" } };
+      if (response.status === 401 || response.status === 403) return { kind: "auth_rejected" };
+      if (response.status === 400) {
+        return { kind: "success", value: { kind: "rejected", reason: "invalid_request" } };
+      }
+      if (response.status === 402) {
+        return {
+          kind: "success",
+          value: { kind: "rejected", reason: "free_limit_reached" }
+        };
+      }
+      if (response.status === 429) {
+        return { kind: "success", value: { kind: "rejected", reason: "rate_limited" } };
+      }
+      if (!response.ok) return { kind: "success", value: { kind: "uncertain" } };
+      const body = await this.#json(response);
+      const confirmation = confirmedStorySave(
+        isRecord6(body) ? body.data : null,
+        command.workKey
+      );
+      return confirmation === null ? { kind: "success", value: { kind: "uncertain" } } : { kind: "success", value: { kind: "confirmed", confirmation } };
+    }
+    async #request(url, credential, init) {
+      const abort = new AbortController();
+      const timer = globalThis.setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS);
+      try {
+        return await this.#fetch(url, {
+          ...init,
+          signal: abort.signal,
+          headers: {
+            ...init.headers,
+            Authorization: `Bearer ${credential}`
+          }
+        });
+      } catch {
+        return null;
+      } finally {
+        globalThis.clearTimeout(timer);
+      }
+    }
+    async #json(response) {
+      try {
+        return await response.json();
+      } catch {
+        return null;
+      }
+    }
+  };
+  var AccountStoryProjectionPort = class {
+    #repository;
+    constructor(repository) {
+      this.#repository = repository;
+    }
+    async publishConfirmed(scope2, confirmation) {
+      try {
+        const result = await this.#repository.publishConfirmedStory(scope2, confirmation);
+        return result.kind === "published" ? { kind: "published" } : result;
+      } catch {
+        return { kind: "unavailable" };
+      }
+    }
+  };
+
+  // src/extension-runtime/account-projection.mts
+  var REQUEST_TIMEOUT_MS2 = 12e3;
+  function isRecord7(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  async function responseJson(response) {
+    try {
+      return await response.json();
+    } catch {
+      return null;
+    }
+  }
+  var AccountProjectionApi = class {
+    #fetch;
+    #overlayEndpoint;
+    #accountEndpoint;
+    constructor(fetchImpl, apiBase) {
+      this.#fetch = fetchImpl;
+      const base = apiBase.replace(/\/$/, "");
+      this.#overlayEndpoint = `${base}/api/extension/library-overlay`;
+      this.#accountEndpoint = `${base}/api/account/me`;
+    }
+    async load(credential) {
+      const [overlayResult, accountResult] = await Promise.all([
+        this.#request(this.#overlayEndpoint, credential),
+        this.#request(this.#accountEndpoint, credential)
+      ]);
+      const responses = [overlayResult, accountResult];
+      if (responses.some(
+        (result) => result.kind === "response" && (result.response.status === 401 || result.response.status === 403)
+      )) {
+        return { kind: "auth_rejected" };
+      }
+      if (responses.every((result) => result.kind === "unavailable")) {
+        return { kind: "unavailable" };
+      }
+      const overlay = await this.#overlayPart(overlayResult);
+      const summary = await this.#summaryPart(accountResult);
+      return {
+        kind: "success",
+        value: Object.freeze({ overlay, summary })
+      };
+    }
+    async #overlayPart(result) {
+      if (result.kind === "unavailable") return { kind: "unavailable" };
+      if (!result.response.ok) {
+        return result.response.status === 429 || result.response.status >= 500 ? { kind: "unavailable" } : { kind: "invalid_response" };
+      }
+      const body = await responseJson(result.response);
+      const overlay = copyAccountOverlay(
+        isRecord7(body) && isRecord7(body.data) ? body.data : null
+      );
+      return overlay === null ? { kind: "invalid_response" } : { kind: "value", value: overlay };
+    }
+    async #summaryPart(result) {
+      if (result.kind === "unavailable") return { kind: "unavailable" };
+      if (!result.response.ok) {
+        return result.response.status === 429 || result.response.status >= 500 ? { kind: "unavailable" } : { kind: "invalid_response" };
+      }
+      const body = await responseJson(result.response);
+      if (!isRecord7(body) || typeof body.account_id !== "string" || !body.account_id.trim()) {
+        return { kind: "invalid_response" };
+      }
+      const libraryCount = body.library_count;
+      const summary = copyAccountSummary({
+        pro: body.pro,
+        libraryCount,
+        firstStoryCompleted: typeof body.first_story_completed_at === "string" && body.first_story_completed_at.trim().length > 0 || Number.isSafeInteger(libraryCount) && libraryCount > 0
+      });
+      return summary === null ? { kind: "invalid_response" } : {
+        kind: "value",
+        value: Object.freeze({
+          accountId: body.account_id.trim(),
+          value: summary
+        })
+      };
+    }
+    async #request(url, credential) {
+      const abort = new AbortController();
+      const timer = globalThis.setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS2);
+      try {
+        const response = await this.#fetch(url, {
+          method: "GET",
+          cache: "no-store",
+          headers: { Authorization: `Bearer ${credential}` },
+          signal: abort.signal
+        });
+        return { kind: "response", response };
+      } catch {
+        return { kind: "unavailable" };
+      } finally {
+        globalThis.clearTimeout(timer);
+      }
+    }
+  };
+
+  // src/extension-runtime/library-command.mts
+  var REQUEST_TIMEOUT_MS3 = 12e3;
+  var UUID_PATTERN4 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  function isRecord8(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  var LibraryCommandApi = class {
+    #fetch;
+    #libraryEndpoint;
+    #preferenceEndpoint;
+    #finishEndpoint;
+    constructor(fetchImpl, apiBase) {
+      this.#fetch = fetchImpl;
+      const base = apiBase.replace(/\/$/, "");
+      this.#libraryEndpoint = `${base}/api/library`;
+      this.#preferenceEndpoint = `${base}/api/extension/work-preferences`;
+      this.#finishEndpoint = `${base}/api/extension/finish-qualification`;
+    }
+    async mutate(credential, command) {
+      const url = command.kind === "entry_patch" ? `${this.#libraryEndpoint}/${encodeURIComponent(command.entryId)}` : this.#preferenceEndpoint;
+      const response = await this.#request(url, credential, {
+        method: command.kind === "entry_patch" ? "PATCH" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          command.kind === "entry_patch" ? command.patch : { key: command.workKey, hidden: command.hidden }
+        )
+      });
+      if (response === null) return { kind: "success", value: { kind: "uncertain" } };
+      if (response.status === 401 || response.status === 403) return { kind: "auth_rejected" };
+      if (response.status === 400 || response.status === 404) {
+        return { kind: "success", value: { kind: "rejected", reason: "invalid_request" } };
+      }
+      if (response.status === 402) {
+        return {
+          kind: "success",
+          value: { kind: "rejected", reason: "free_limit_reached" }
+        };
+      }
+      if (response.status === 429) {
+        return { kind: "success", value: { kind: "rejected", reason: "rate_limited" } };
+      }
+      if (!response.ok) return { kind: "success", value: { kind: "uncertain" } };
+      const body = await this.#json(response);
+      const data = isRecord8(body) && isRecord8(body.data) ? body.data : null;
+      const confirmed = command.kind === "entry_patch" ? data !== null && typeof data.entry_id === "string" && UUID_PATTERN4.test(data.entry_id) && data.entry_id === command.entryId : data !== null && data.key === command.workKey && isRecord8(data.browsePreference) && data.browsePreference.hidden === command.hidden;
+      return {
+        kind: "success",
+        value: confirmed ? { kind: "accepted" } : { kind: "uncertain" }
+      };
+    }
+    async qualifyFinish(credential, command) {
+      const response = await this.#request(this.#finishEndpoint, credential, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          entryId: command.entryId,
+          workKey: command.workKey,
+          source: command.source,
+          chapter: command.chapter,
+          total: command.total,
+          state: command.state,
+          ...command.state === "resolved" ? {
+            workStatus: command.workStatus,
+            readerStatus: command.readerStatus
+          } : {}
+        })
+      });
+      if (response === null) return { kind: "success", value: { kind: "uncertain" } };
+      if (response.status === 401 || response.status === 403) return { kind: "auth_rejected" };
+      if (response.status === 400 || response.status === 404) {
+        return { kind: "success", value: { kind: "rejected", reason: "invalid_request" } };
+      }
+      if (response.status === 429) {
+        return { kind: "success", value: { kind: "rejected", reason: "rate_limited" } };
+      }
+      if (!response.ok) return { kind: "success", value: { kind: "uncertain" } };
+      const body = await this.#json(response);
+      const data = isRecord8(body) && isRecord8(body.data) ? body.data : null;
+      if (data === null || data.state !== "open" && data.state !== "resolved" && data.state !== "ignored" || data.eventId !== null && (typeof data.eventId !== "string" || !UUID_PATTERN4.test(data.eventId))) {
+        return { kind: "success", value: { kind: "uncertain" } };
+      }
+      return {
+        kind: "success",
+        value: {
+          kind: "acknowledged",
+          state: data.state,
+          eventId: data.eventId
+        }
+      };
+    }
+    async #request(url, credential, init) {
+      const abort = new AbortController();
+      const timer = globalThis.setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS3);
+      try {
+        return await this.#fetch(url, {
+          ...init,
+          signal: abort.signal,
+          headers: {
+            ...init.headers,
+            Authorization: `Bearer ${credential}`
+          }
+        });
+      } catch {
+        return null;
+      } finally {
+        globalThis.clearTimeout(timer);
+      }
+    }
+    async #json(response) {
+      try {
+        return await response.json();
+      } catch {
+        return null;
+      }
+    }
+  };
+  function refreshFailure(result) {
+    if (result.kind === "not_authenticated") return { kind: "not_authenticated" };
+    if (result.kind === "auth_expired") return { kind: "auth_expired" };
+    if (result.kind === "stale") return { kind: "stale" };
+    if (result.kind === "unavailable") return { kind: "unavailable" };
+    if (result.kind === "refreshed" && result.overlay !== "published" && result.overlay !== "stale") {
+      return { kind: "unavailable" };
+    }
+    return null;
+  }
+  var AccountLibraryCommandProjection = class {
+    #projection;
+    constructor(projection) {
+      this.#projection = projection;
+    }
+    async refreshAndRead() {
+      const refreshed = await this.#projection.refreshIfNeeded(true);
+      const failure4 = refreshFailure(refreshed);
+      if (failure4 !== null) return failure4;
+      const value = await this.#projection.read({ refresh: false });
+      return value === null ? { kind: "unavailable" } : { kind: "value", value };
+    }
+  };
+
+  // src/extension-runtime/library-command-sender.mts
+  var UUID_PATTERN5 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  var WORK_KEY_PATTERN3 = /^(ao3|ffn):[1-9][0-9]{0,19}$/;
+  var MAX_COMMAND_BYTES = 8 * 1024;
+  var MAX_CHAPTER = 1e7;
+  function isRecord9(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function cloneBoundedRecord(value) {
+    let serialized;
+    try {
+      serialized = JSON.stringify(value);
+    } catch {
+      return null;
+    }
+    if (!serialized || serialized.length > MAX_COMMAND_BYTES) return null;
+    try {
+      const parsed = JSON.parse(serialized);
+      return isRecord9(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  function canonicalStatus(value) {
+    if (typeof value !== "string") return null;
+    const normalized = value.trim().toUpperCase();
+    if (normalized === "PLANNING") return "SAVED";
+    if (normalized === "COMPLETED") return "FINISHED";
+    return normalized === "SAVED" || normalized === "READING" || normalized === "CAUGHT_UP" || normalized === "PAUSED" || normalized === "FINISHED" || normalized === "DROPPED" ? normalized : null;
+  }
+  function chapterProgress(value) {
+    if (!isRecord9(value) || value.unit !== "CHAPTER") return null;
+    if (!Number.isSafeInteger(value.value) || value.value < 0 || value.value > MAX_CHAPTER) {
+      return null;
+    }
+    if (value.total !== null && value.total !== void 0 && (!Number.isSafeInteger(value.total) || value.total < 0 || value.total > MAX_CHAPTER)) {
+      return null;
+    }
+    return Object.freeze({
+      unit: "CHAPTER",
+      value: value.value,
+      total: value.total === void 0 ? null : value.total
+    });
+  }
+  function libraryPatch(value) {
+    if (!isRecord9(value)) return null;
+    const patch = {};
+    if (Object.hasOwn(value, "status")) {
+      const status = canonicalStatus(value.status);
+      if (status === null) return null;
+      patch.status = status;
+    }
+    if (Object.hasOwn(value, "progress")) {
+      const progress = chapterProgress(value.progress);
+      if (progress === null) return null;
+      patch.progress = progress;
+    }
+    if (Object.hasOwn(value, "rating")) {
+      if (!Number.isSafeInteger(value.rating) || value.rating < 0 || value.rating > 5) {
+        return null;
+      }
+      patch.rating = value.rating;
+    }
+    if (Object.hasOwn(value, "story_snapshot")) {
+      if (!isRecord9(value.story_snapshot)) return null;
+      const keys = Object.keys(value.story_snapshot);
+      if (keys.length !== 1 || keys[0] !== "work_status_override") return null;
+      const override = value.story_snapshot.work_status_override;
+      if (override !== null && override !== "wip" && override !== "complete" && override !== "hiatus" && override !== "abandoned") {
+        return null;
+      }
+      patch.story_snapshot = Object.freeze({ work_status_override: override });
+    }
+    return Object.keys(patch).length === 0 ? null : Object.freeze(patch);
+  }
+  function senderCommandScope(sender, claimedWorkKey) {
+    const hostKind2 = archiveHostKindFromSender(sender);
+    if (hostKind2 === null) return null;
+    const senderUrl = sender?.tab?.url ?? sender?.url;
+    if (isBlockedArchivePath(senderUrl, hostKind2)) return null;
+    const workKey = typeof claimedWorkKey === "string" ? claimedWorkKey.trim().toLowerCase() : "";
+    if (!WORK_KEY_PATTERN3.test(workKey) || !workKey.startsWith(`${hostKind2}:`)) {
+      return null;
+    }
+    const senderWorkKey = workKeyFromArchiveUrl(senderUrl, hostKind2);
+    if (senderWorkKey !== null && senderWorkKey !== workKey) return null;
+    return Object.freeze({ hostKind: hostKind2, workKey });
+  }
+  function libraryMutationCommandFromMessage(message, sender) {
+    if (!isRecord9(message) || typeof message.type !== "string") return null;
+    const payload = cloneBoundedRecord(message.payload);
+    if (payload === null) return null;
+    const claimedWorkKey = message.type === "TRACE_SET_HIDDEN_WORK" ? payload.key : payload.workKey;
+    const scope2 = senderCommandScope(sender, claimedWorkKey);
+    if (scope2 === null) return null;
+    if (message.type === "TRACE_SET_HIDDEN_WORK") {
+      if (typeof payload.hidden !== "boolean") return null;
+      return Object.freeze({
+        kind: "work_preference",
+        ...scope2,
+        hidden: payload.hidden
+      });
+    }
+    const entryId = typeof payload.entryId === "string" ? payload.entryId.trim() : "";
+    if (!UUID_PATTERN5.test(entryId)) return null;
+    if (message.type === "TRACE_SET_READER_STATUS") {
+      const status = canonicalStatus(payload.status);
+      if (status === null) return null;
+      let progress;
+      if (Object.hasOwn(payload, "progress")) {
+        const parsed = chapterProgress(payload.progress);
+        if (parsed === null) return null;
+        progress = parsed;
+      }
+      return Object.freeze({
+        kind: "entry_patch",
+        ...scope2,
+        entryId,
+        patch: Object.freeze({
+          status,
+          ...progress === void 0 ? {} : { progress }
+        })
+      });
+    }
+    if (message.type !== "TRACE_PATCH_LIBRARY_ENTRY") return null;
+    const patch = libraryPatch(payload.patch);
+    if (patch === null) return null;
+    return Object.freeze({
+      kind: "entry_patch",
+      ...scope2,
+      entryId,
+      patch
+    });
+  }
+  function finishQualificationCommandFromMessage(message, sender) {
+    if (!isRecord9(message) || message.type !== "TRACE_FINISH_QUALIFICATION_SIGNAL") {
+      return null;
+    }
+    const payload = cloneBoundedRecord(message.payload);
+    if (payload === null) return null;
+    const scope2 = senderCommandScope(sender, payload.workKey);
+    if (scope2 === null || payload.source !== scope2.hostKind) return null;
+    const entryId = typeof payload.entryId === "string" ? payload.entryId.trim() : "";
+    if (!UUID_PATTERN5.test(entryId)) return null;
+    if (!Number.isSafeInteger(payload.chapter) || payload.chapter < 1 || payload.chapter > MAX_CHAPTER || !Number.isSafeInteger(payload.total) || payload.total < 1 || payload.total > MAX_CHAPTER) {
+      return null;
+    }
+    if (payload.state !== "open" && payload.state !== "resolved") return null;
+    const command = {
+      kind: "finish_qualification",
+      ...scope2,
+      entryId,
+      source: scope2.hostKind,
+      chapter: payload.chapter,
+      total: payload.total,
+      state: payload.state
+    };
+    if (payload.state === "resolved") {
+      if (payload.workStatus !== "complete" && payload.workStatus !== "wip" && payload.workStatus !== "hiatus" && payload.workStatus !== "abandoned") {
+        return null;
+      }
+      const status = canonicalStatus(payload.readerStatus);
+      if (status === null) return null;
+      command.workStatus = payload.workStatus;
+      command.readerStatus = status;
+    } else if (Object.hasOwn(payload, "workStatus") || Object.hasOwn(payload, "readerStatus")) {
+      return null;
+    }
+    return Object.freeze(command);
+  }
+
+  // src/extension-runtime/first-story-initiation.mts
+  var MAX_IMPORT_PAYLOAD_BYTES = 512 * 1024;
+  var MAX_IMPORT_ITEMS = 250;
+  var MAX_FIRST_STORY_URL_LENGTH = 4096;
+  var FIRST_STORY_FOCUS_RETRY_ATTEMPTS = 24;
+  var FIRST_STORY_FOCUS_RETRY_MS = 250;
+  var HANDOFF_NONCE_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+  var SUCCESS_STATES = Object.freeze(["saved", "already_saved"]);
+  function isRecord10(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function isAo3Host(host) {
+    return host === "archiveofourown.org" || host.endsWith(".archiveofourown.org") || host === "archiveofourown.gay" || host.endsWith(".archiveofourown.gay") || host === "archive.transformativeworks.org" || host === "ao3.org" || host.endsWith(".ao3.org");
+  }
+  function isFfnHost(host) {
+    return host === "www.fanfiction.net" || host === "m.fanfiction.net";
+  }
+  function isTopFrame(sender) {
+    return sender !== void 0 && (sender.frameId === void 0 || sender.frameId === 0) && (sender.documentLifecycle === void 0 || sender.documentLifecycle === "active");
+  }
+  function classifyActiveTabUrl(rawUrl, webOrigin) {
+    if (typeof rawUrl !== "string") return Object.freeze({ kind: "unknown" });
+    try {
+      const url = new URL(rawUrl);
+      if (url.origin === new URL(webOrigin).origin) return Object.freeze({ kind: "trace" });
+      const host = url.hostname.toLowerCase();
+      if (isAo3Host(host)) {
+        if (/^\/users\/(?:login|sign_up|password|auth\/|logout)/i.test(url.pathname)) {
+          return Object.freeze({ kind: "blocked_archive", site: "ao3", canImport: false });
+        }
+        return Object.freeze({
+          kind: /^\/works\/\d+(?:\/chapters\/\d+)?\/?$/i.test(url.pathname) ? "supported_story" : "supported_archive",
+          site: "ao3",
+          canImport: true
+        });
+      }
+      if (isFfnHost(host)) {
+        if (/^\/(?:login\.php|signup\.php|account\/(?:login|signup)|auth\/)/i.test(url.pathname)) {
+          return Object.freeze({ kind: "blocked_archive", site: "ffn", canImport: false });
+        }
+        return Object.freeze({
+          kind: /^\/s\/[1-9][0-9]{0,19}(?:\/|$)/i.test(url.pathname) ? "supported_story" : "supported_archive",
+          site: "ffn",
+          canImport: true
+        });
+      }
+      return Object.freeze({ kind: "unsupported" });
+    } catch {
+      return Object.freeze({ kind: "unsupported" });
+    }
+  }
+  function normalizeFirstStoryUrl(rawUrl) {
+    if (typeof rawUrl !== "string" || !rawUrl.trim() || rawUrl.length > MAX_FIRST_STORY_URL_LENGTH) {
+      return null;
+    }
+    try {
+      const url = new URL(rawUrl.trim());
+      if (url.protocol !== "https:" || url.username || url.password) return null;
+      const host = url.hostname.toLowerCase();
+      if (isAo3Host(host) && /^\/works\/[1-9][0-9]{0,19}(?:\/chapters\/[1-9][0-9]{0,19})?\/?$/i.test(
+        url.pathname
+      )) {
+        return url.href;
+      }
+      if (isFfnHost(host) && /^\/s\/[1-9][0-9]{0,19}(?:\/[1-9][0-9]{0,9})?(?:\/|$)/i.test(url.pathname)) {
+        return url.href;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+  function isPopupSender(sender, runtimeId) {
+    if (runtimeId !== void 0 && sender?.id !== runtimeId) return false;
+    if (typeof sender?.url !== "string") {
+      return (sender?.tab === void 0 || sender.tab === null) && runtimeId !== void 0 && sender?.id === runtimeId;
+    }
+    try {
+      const url = new URL(sender.url);
+      return ["chrome-extension:", "moz-extension:", "safari-web-extension:"].includes(url.protocol) && url.pathname === "/popup.html";
+    } catch {
+      return false;
+    }
+  }
+  function isTraceWebSender(sender, runtimeId, webOrigin) {
+    if (!isTopFrame(sender)) return false;
+    if (runtimeId !== void 0 && sender?.id !== runtimeId) return false;
+    const rawUrl = sender?.url ?? sender?.tab?.url;
+    if (typeof rawUrl !== "string") return false;
+    try {
+      return new URL(rawUrl).origin === new URL(webOrigin).origin;
+    } catch {
+      return false;
+    }
+  }
+  function firstStoryInitiationFromMessage(message, sender, runtimeId, webOrigin) {
+    if (!isRecord10(message) || typeof message.type !== "string") return null;
+    if (message.type === "TRACE_IMPORT_TRIGGER") {
+      return isPopupSender(sender, runtimeId) ? Object.freeze({ kind: "popup_import" }) : null;
+    }
+    if (message.type !== "TRACE_FIRST_STORY_ADD") return null;
+    if (!isTraceWebSender(sender, runtimeId, webOrigin)) return null;
+    const nonce = typeof message.nonce === "string" ? message.nonce.trim() : "";
+    if (!HANDOFF_NONCE_PATTERN.test(nonce)) return null;
+    const url = normalizeFirstStoryUrl(message.url);
+    if (url === null) return Object.freeze({ kind: "invalid", error: "invalid_url" });
+    return Object.freeze({ kind: "web_save", nonce, url });
+  }
+  function isMissingReceiverError(error) {
+    const value = [
+      typeof error === "string" ? error : "",
+      isRecord10(error) && typeof error.message === "string" ? error.message : "",
+      String(error ?? "")
+    ].join("\n");
+    return /receiving end does not exist|could not establish connection|message port closed/i.test(
+      value
+    );
+  }
+  function sourceMatchesSite(value, site) {
+    if (typeof value !== "string") return false;
+    const source = value.trim().toLowerCase();
+    return site === "ao3" ? source === "ao3" || source === "archiveofourown.org" || source === "archiveofourown.gay" || source === "archive.transformativeworks.org" : source === "ffn" || source === "fanfiction.net";
+  }
+  function boundedImportPayload(response, site) {
+    if (!isRecord10(response) || response.ok !== true || !isRecord10(response.payload)) {
+      return null;
+    }
+    if (!sourceMatchesSite(response.payload.s, site)) return null;
+    if (typeof response.payload.at !== "string" || !response.payload.at || response.payload.at.length > 128) {
+      return null;
+    }
+    if (!Array.isArray(response.payload.items) || response.payload.items.length === 0 || response.payload.items.length > MAX_IMPORT_ITEMS || !response.payload.items.every((item) => isRecord10(item) && sourceMatchesSite(item.src, site) && normalizeFirstStoryUrl(item.u) !== null)) {
+      return null;
+    }
+    let serialized;
+    try {
+      serialized = JSON.stringify(response.payload);
+    } catch {
+      return null;
+    }
+    if (!serialized || new TextEncoder().encode(serialized).byteLength > MAX_IMPORT_PAYLOAD_BYTES) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(serialized);
+      return isRecord10(parsed) ? Object.freeze(parsed) : null;
+    } catch {
+      return null;
+    }
+  }
+  function encodeImportPayload(payload) {
+    const bytes = new TextEncoder().encode(JSON.stringify(payload));
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary);
+  }
+  function responseError(response) {
+    if (!isRecord10(response) || typeof response.error !== "string") return "save_failed";
+    if (response.error === "not_authenticated" || response.error === "free_limit_reached" || response.error === "auth_expired" || response.error === "rate_limited") {
+      return response.error;
+    }
+    if (response.error === "page_contains_password_field") return "unsupported_page";
+    return "save_failed";
+  }
+  var BrowserFirstStoryInitiator = class {
+    #runtime;
+    #tabs;
+    #mode;
+    #webOrigin;
+    #delay;
+    constructor(options) {
+      this.#runtime = options.runtime;
+      this.#tabs = options.tabs;
+      this.#mode = options.mode;
+      this.#webOrigin = new URL(options.webOrigin).origin;
+      this.#delay = options.delay ?? ((milliseconds) => new Promise((resolve) => globalThis.setTimeout(resolve, milliseconds)));
+    }
+    async importActivePage() {
+      let tabs;
+      try {
+        tabs = await this.#call("query", [{
+          active: true,
+          currentWindow: true
+        }]);
+      } catch {
+        return Object.freeze({ ok: false, error: "unavailable" });
+      }
+      const tab = tabs[0];
+      if (typeof tab?.id !== "number") {
+        return Object.freeze({ ok: false, error: "no_active_tab" });
+      }
+      const context = classifyActiveTabUrl(tab.url, this.#webOrigin);
+      if (context.kind !== "supported_story" && context.kind !== "supported_archive") {
+        return Object.freeze({ ok: false, error: "unsupported_page" });
+      }
+      let response;
+      try {
+        response = await this.#call("sendMessage", [tab.id, { type: "TRACE_COLLECT" }]);
+      } catch (error) {
+        return Object.freeze({
+          ok: false,
+          error: isMissingReceiverError(error) ? "permission_required" : "collect_failed"
+        });
+      }
+      const payload = boundedImportPayload(response, context.site);
+      if (payload === null) {
+        const error = isRecord10(response) && response.error === "page_contains_password_field" ? "unsupported_page" : "collect_failed";
+        return Object.freeze({ ok: false, error });
+      }
+      const importUrl = `${this.#webOrigin}/import#U${encodeURIComponent(
+        encodeImportPayload(payload)
+      )}`;
+      try {
+        await this.#call("create", [{ url: importUrl }]);
+        return Object.freeze({ ok: true, state: "opened" });
+      } catch {
+        return Object.freeze({ ok: false, error: "open_failed" });
+      }
+    }
+    async saveFromTrace(url) {
+      const normalized = normalizeFirstStoryUrl(url);
+      if (normalized === null) return Object.freeze({ ok: false, error: "invalid_url" });
+      let tab;
+      try {
+        tab = await this.#call("create", [{ url: normalized, active: true }]);
+      } catch {
+        return Object.freeze({ ok: false, error: "open_failed" });
+      }
+      if (typeof tab?.id !== "number") {
+        return Object.freeze({ ok: false, error: "open_failed" });
+      }
+      for (let attempt = 0; attempt <= FIRST_STORY_FOCUS_RETRY_ATTEMPTS; attempt += 1) {
+        try {
+          const response = await this.#call("sendMessage", [
+            tab.id,
+            { type: "TRACE_FIRST_STORY_FOCUS_ADD" }
+          ]);
+          if (isRecord10(response) && response.ok === true) {
+            const state = SUCCESS_STATES.find((candidate) => candidate === response.state);
+            return state === void 0 ? Object.freeze({ ok: false, error: "save_failed" }) : Object.freeze({ ok: true, state });
+          }
+          return Object.freeze({ ok: false, error: responseError(response) });
+        } catch (error) {
+          if (!isMissingReceiverError(error)) {
+            return Object.freeze({ ok: false, error: "save_failed" });
+          }
+          if (attempt === FIRST_STORY_FOCUS_RETRY_ATTEMPTS) {
+            return Object.freeze({ ok: false, error: "permission_required" });
+          }
+          await this.#delay(FIRST_STORY_FOCUS_RETRY_MS);
+        }
+      }
+      return Object.freeze({ ok: false, error: "save_failed" });
+    }
+    #call(method, args) {
+      return extensionCall(
+        this.#tabs,
+        method,
+        args,
+        this.#runtime,
+        this.#mode
+      );
+    }
+  };
+
+  // src/extension-runtime/metadata-contribution.mts
+  var REQUEST_TIMEOUT_MS4 = 12e3;
+  var METADATA_PREFERENCE_KEY = "prefMetadataImproveEnabled";
+  function isRecord11(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function validCount(value) {
+    return Number.isSafeInteger(value) && value >= 0;
+  }
+  var MetadataContributionApi = class {
+    #fetch;
+    #storyEndpoint;
+    #libraryEndpoint;
+    constructor(fetchImpl, apiBase) {
+      this.#fetch = fetchImpl;
+      const base = apiBase.replace(/\/$/, "");
+      this.#storyEndpoint = `${base}/api/extension/metadata`;
+      this.#libraryEndpoint = `${base}/api/extension/library/metadata-refresh`;
+    }
+    async contribute(credential, command) {
+      const response = await this.#request(
+        command.kind === "story_metadata" ? this.#storyEndpoint : this.#libraryEndpoint,
+        credential,
+        command.payload
+      );
+      if (response === null) {
+        return { kind: "success", value: { kind: "unavailable" } };
+      }
+      if (response.status === 401 || response.status === 403) {
+        return { kind: "auth_rejected" };
+      }
+      if (response.status === 400) {
+        return {
+          kind: "success",
+          value: { kind: "rejected", reason: "invalid_request" }
+        };
+      }
+      if (response.status === 429) {
+        return {
+          kind: "success",
+          value: { kind: "rejected", reason: "rate_limited" }
+        };
+      }
+      if (!response.ok) {
+        return { kind: "success", value: { kind: "unavailable" } };
+      }
+      const body = await this.#json(response);
+      const data = isRecord11(body) && body.success === true && isRecord11(body.data) ? body.data : null;
+      if (data === null) {
+        return { kind: "success", value: { kind: "invalid_response" } };
+      }
+      if (command.kind === "story_metadata") {
+        return Number.isSafeInteger(data.story_id) && data.story_id > 0 ? { kind: "success", value: { kind: "accepted", updated: true } } : { kind: "success", value: { kind: "invalid_response" } };
+      }
+      return validCount(data.updated) && validCount(data.ignored) ? {
+        kind: "success",
+        value: { kind: "accepted", updated: data.updated > 0 }
+      } : { kind: "success", value: { kind: "invalid_response" } };
+    }
+    async #request(url, credential, payload) {
+      const abort = new AbortController();
+      const timer = globalThis.setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS4);
+      try {
+        return await this.#fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${credential}`
+          },
+          body: JSON.stringify(payload),
+          signal: abort.signal
+        });
+      } catch {
+        return null;
+      } finally {
+        globalThis.clearTimeout(timer);
+      }
+    }
+    async #json(response) {
+      try {
+        return await response.json();
+      } catch {
+        return null;
+      }
+    }
+  };
+  var BrowserMetadataPreferencePort = class {
+    #storage;
+    constructor(storage) {
+      this.#storage = storage;
+    }
+    async enabled() {
+      const value = await this.#storage.get(METADATA_PREFERENCE_KEY);
+      return value[METADATA_PREFERENCE_KEY] !== false;
+    }
+  };
+  var TraceWebMetadataNotificationPort = class {
+    #runtime;
+    #tabs;
+    #mode;
+    #webOrigin;
+    #queryPattern;
+    constructor(options) {
+      this.#runtime = options.runtime;
+      this.#tabs = options.tabs;
+      this.#mode = options.mode;
+      const webUrl = new URL(options.webOrigin);
+      this.#webOrigin = webUrl.origin;
+      this.#queryPattern = `${webUrl.protocol}//${webUrl.hostname}/*`;
+    }
+    async publish() {
+      let tabs;
+      try {
+        tabs = await extensionCall(
+          this.#tabs,
+          "query",
+          [{ url: [this.#queryPattern] }],
+          this.#runtime,
+          this.#mode
+        );
+      } catch {
+        return false;
+      }
+      const message = Object.freeze({
+        type: "TRACE_LIBRARY_INVALIDATED",
+        reason: "metadata",
+        at: (/* @__PURE__ */ new Date()).toISOString()
+      });
+      for (const tab of tabs) {
+        if (typeof tab.id !== "number" || !this.#isTraceWebUrl(tab.url)) continue;
+        try {
+          await extensionCall(
+            this.#tabs,
+            "sendMessage",
+            [tab.id, message],
+            this.#runtime,
+            this.#mode
+          );
+        } catch {
+        }
+      }
+      return true;
+    }
+    #isTraceWebUrl(rawUrl) {
+      if (typeof rawUrl !== "string") return false;
+      try {
+        return new URL(rawUrl).origin === this.#webOrigin;
+      } catch {
+        return false;
+      }
+    }
+  };
+
+  // src/extension-runtime/metadata-contribution-sender.mts
+  var MAX_STORY_METADATA_BYTES = 64 * 1024;
+  var MAX_LIBRARY_REFRESH_BYTES = 512 * 1024;
+  var MAX_LIBRARY_REFRESH_ITEMS = 100;
+  var MAX_METADATA_ARRAY_ITEMS = 200;
+  var MAX_METADATA_INTEGER = 1e8;
+  var SOURCE_STORY_ID_PATTERN = /^[1-9][0-9]{0,39}$/;
+  var LIBRARY_REFRESH_FIELDS = /* @__PURE__ */ new Set([
+    "source",
+    "sourceStoryId",
+    "url",
+    "title",
+    "author",
+    "summary",
+    "chapters",
+    "chaptersPublished",
+    "chaptersPlanned",
+    "words",
+    "status",
+    "updatedAt",
+    "publishedAt",
+    "rating",
+    "language",
+    "fandoms",
+    "characters",
+    "relationships",
+    "genre"
+  ]);
+  var STRING_LIMITS = Object.freeze({
+    title: 300,
+    author: 120,
+    summary: 2e4,
+    status: 60,
+    updatedAt: 50,
+    publishedAt: 50,
+    rating: 60,
+    language: 60,
+    genre: 100
+  });
+  var INTEGER_FIELDS = Object.freeze([
+    "chapters",
+    "chaptersPublished",
+    "chaptersPlanned",
+    "words"
+  ]);
+  var ARRAY_FIELDS = Object.freeze([
+    "fandoms",
+    "characters",
+    "relationships"
+  ]);
+  function isRecord12(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function cloneBoundedRecord2(value, maxBytes) {
+    let serialized;
+    try {
+      serialized = JSON.stringify(value);
+    } catch {
+      return null;
+    }
+    if (!serialized || new TextEncoder().encode(serialized).byteLength > maxBytes) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(serialized);
+      return isRecord12(parsed) ? Object.freeze(parsed) : null;
+    } catch {
+      return null;
+    }
+  }
+  function validOptionalString(value, maxLength) {
+    return value === void 0 || value === null || typeof value === "string" && value.length <= maxLength;
+  }
+  function validOptionalInteger(value) {
+    return value === void 0 || value === null || Number.isSafeInteger(value) && value >= 0 && value <= MAX_METADATA_INTEGER;
+  }
+  function validOptionalStringArray(value) {
+    return value === void 0 || Array.isArray(value) && value.length <= MAX_METADATA_ARRAY_ITEMS && value.every(
+      (item) => item === null || typeof item === "string" && item.length <= 255
+    );
+  }
+  function refreshItemWorkKey(item, hostKind2) {
+    if (item.source !== hostKind2 || Object.keys(item).some((key) => !LIBRARY_REFRESH_FIELDS.has(key))) {
+      return null;
+    }
+    const rawId = typeof item.sourceStoryId === "string" ? item.sourceStoryId.trim() : "";
+    if (rawId && !SOURCE_STORY_ID_PATTERN.test(rawId)) return null;
+    const urlWorkKey = item.url === void 0 ? null : workKeyFromArchiveUrl(item.url, hostKind2);
+    if (item.url !== void 0 && urlWorkKey === null) return null;
+    const idWorkKey = rawId ? `${hostKind2}:${rawId}` : null;
+    if (urlWorkKey !== null && idWorkKey !== null && urlWorkKey !== idWorkKey) {
+      return null;
+    }
+    const workKey = urlWorkKey ?? idWorkKey;
+    if (workKey === null) return null;
+    for (const [field, maxLength] of Object.entries(STRING_LIMITS)) {
+      if (!validOptionalString(item[field], maxLength)) return null;
+    }
+    for (const field of INTEGER_FIELDS) {
+      if (!validOptionalInteger(item[field])) return null;
+    }
+    for (const field of ARRAY_FIELDS) {
+      if (!validOptionalStringArray(item[field])) return null;
+    }
+    return workKey;
+  }
+  function storyMetadataCommand(message, hostKind2, senderUrl) {
+    const senderWorkKey = workKeyFromArchiveUrl(senderUrl, hostKind2);
+    if (senderWorkKey === null) return null;
+    const payload = cloneBoundedRecord2(message.payload, MAX_STORY_METADATA_BYTES);
+    if (payload === null || !sourceMatchesArchiveHost(payload.s, hostKind2) || typeof payload.at !== "string" || payload.at.length === 0 || payload.at.length > 500 || !isRecord12(payload.item) || payload.item.ctx !== "story" || typeof payload.item.t !== "string" || payload.item.t.trim().length === 0 || payload.item.t.length > 300 || !sourceMatchesArchiveHost(payload.item.src, hostKind2) || workKeyFromArchiveUrl(payload.item.u, hostKind2) !== senderWorkKey) {
+      return null;
+    }
+    return Object.freeze({
+      kind: "story_metadata",
+      hostKind: hostKind2,
+      workKeys: Object.freeze([senderWorkKey]),
+      payload
+    });
+  }
+  function libraryMetadataRefreshCommand(message, hostKind2, senderUrl) {
+    if (workKeyFromArchiveUrl(senderUrl, hostKind2) !== null) return null;
+    const payload = cloneBoundedRecord2(message.payload, MAX_LIBRARY_REFRESH_BYTES);
+    if (payload === null || Object.keys(payload).length !== 1 || !Array.isArray(payload.items) || payload.items.length < 1 || payload.items.length > MAX_LIBRARY_REFRESH_ITEMS) {
+      return null;
+    }
+    const workKeys = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const item of payload.items) {
+      if (!isRecord12(item)) return null;
+      const workKey = refreshItemWorkKey(item, hostKind2);
+      if (workKey === null) return null;
+      if (!seen.has(workKey)) {
+        seen.add(workKey);
+        workKeys.push(workKey);
+      }
+    }
+    return Object.freeze({
+      kind: "library_metadata_refresh",
+      hostKind: hostKind2,
+      workKeys: Object.freeze(workKeys),
+      payload
+    });
+  }
+  function metadataContributionCommandFromMessage(message, sender) {
+    if (!isRecord12(message)) return null;
+    const hostKind2 = archiveHostKindFromSender(sender);
+    if (hostKind2 === null) return null;
+    const senderUrl = sender?.tab?.url ?? sender?.url;
+    if (isBlockedArchivePath(senderUrl, hostKind2)) return null;
+    if (message.type === "TRACE_METADATA_BROADCAST") {
+      return storyMetadataCommand(message, hostKind2, senderUrl);
+    }
+    if (message.type === "TRACE_LIBRARY_METADATA_REFRESH") {
+      return libraryMetadataRefreshCommand(message, hostKind2, senderUrl);
+    }
+    return null;
+  }
+
+  // src/extension-runtime/saved-filter-sync.mts
+  var REQUEST_TIMEOUT_MS5 = 12e3;
+  var SAVED_FILTER_STORAGE_KEYS = SAVED_FILTER_LOCAL_KEYS;
+  function isRecord13(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function hasOnlyKeys3(value, keys) {
+    return Object.keys(value).every((key) => keys.includes(key));
+  }
+  var SavedFilterSyncApi = class {
+    #fetch;
+    #endpoint;
+    #activeAbort = null;
+    constructor(fetchImpl, apiBase) {
+      this.#fetch = fetchImpl;
+      this.#endpoint = `${apiBase.replace(/\/$/, "")}/api/extension/ao3-saved-filters/sync`;
+    }
+    async sync(credential, request) {
+      const abort = new AbortController();
+      this.#activeAbort = abort;
+      const timer = globalThis.setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS5);
+      let response;
+      try {
+        response = await this.#fetch(this.#endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${credential}`
+          },
+          body: JSON.stringify(request),
+          signal: abort.signal
+        });
+      } catch {
+        return { kind: "success", value: { kind: "unavailable" } };
+      } finally {
+        globalThis.clearTimeout(timer);
+        if (this.#activeAbort === abort) this.#activeAbort = null;
+      }
+      if (response.status === 401 || response.status === 403) {
+        return { kind: "auth_rejected" };
+      }
+      if (response.status === 400) {
+        return {
+          kind: "success",
+          value: { kind: "rejected", reason: "invalid_request" }
+        };
+      }
+      if (response.status === 429) {
+        return {
+          kind: "success",
+          value: { kind: "rejected", reason: "rate_limited" }
+        };
+      }
+      if (response.status === 422) {
+        const body2 = await this.#json(response);
+        if (isRecord13(body2) && body2.code === "AO3_SAVED_FILTER_LIMIT_REACHED" && Number.isSafeInteger(body2.limit) && body2.limit > 0 && body2.limit <= 250) {
+          return {
+            kind: "success",
+            value: {
+              kind: "rejected",
+              reason: "limit_reached",
+              limit: body2.limit
+            }
+          };
+        }
+        return { kind: "success", value: { kind: "invalid_response" } };
+      }
+      if (!response.ok) {
+        return { kind: "success", value: { kind: "unavailable" } };
+      }
+      const body = await this.#json(response);
+      if (!isRecord13(body) || !hasOnlyKeys3(body, ["success", "data"]) || body.success !== true) {
+        return { kind: "success", value: { kind: "invalid_response" } };
+      }
+      const data = parseSavedFilterSyncData(body.data);
+      return data === null ? { kind: "success", value: { kind: "invalid_response" } } : { kind: "success", value: { kind: "accepted", data } };
+    }
+    cancelPending() {
+      this.#activeAbort?.abort();
+    }
+    async #json(response) {
+      try {
+        return await response.json();
+      } catch {
+        return null;
+      }
+    }
+  };
+  var BrowserSavedFilterRepository = class {
+    #storage;
+    #session;
+    #randomId;
+    #tail = Promise.resolve();
+    constructor(options) {
+      this.#storage = options.storage;
+      this.#session = options.session;
+      this.#randomId = options.randomId;
+    }
+    read() {
+      return this.#withLock(async () => {
+        const snapshot = await this.#readUnlocked();
+        if (snapshot.clientId !== null) return snapshot;
+        const generated = `device:${this.#randomId()}`.slice(0, 80);
+        const clientId = /^[A-Za-z0-9._:-]{1,80}$/.test(generated) ? generated : null;
+        if (clientId === null) return null;
+        await this.#storage.set({ [SAVED_FILTER_STORAGE_KEYS.clientId]: clientId });
+        return Object.freeze({ ...snapshot, clientId });
+      });
+    }
+    merge(requestedScope, data, sentDeleteClientIds, syncedAt) {
+      return this.#withLock(async () => {
+        if (!canSyncSavedFilters(this.#session.publicationScope(), requestedScope)) {
+          return { kind: "stale" };
+        }
+        let current;
+        try {
+          current = await this.#readUnlocked();
+        } catch {
+          return { kind: "unavailable" };
+        }
+        if (current.clientId === null || !canSyncSavedFilters(this.#session.publicationScope(), requestedScope)) {
+          return { kind: "stale" };
+        }
+        const next = mergeSavedFilterSyncData(
+          current,
+          data,
+          sentDeleteClientIds,
+          syncedAt
+        );
+        if (!canSyncSavedFilters(this.#session.publicationScope(), requestedScope)) {
+          return { kind: "stale" };
+        }
+        try {
+          await this.#storage.set({
+            [SAVED_FILTER_STORAGE_KEYS.presets]: next.presets,
+            [SAVED_FILTER_STORAGE_KEYS.deleted]: next.deleted,
+            [SAVED_FILTER_STORAGE_KEYS.activeMeta]: next.activeMeta,
+            [SAVED_FILTER_STORAGE_KEYS.syncMeta]: {
+              syncVersion: next.syncVersion,
+              lastSyncedAt: next.lastSyncedAt
+            },
+            [SAVED_FILTER_STORAGE_KEYS.clientId]: next.clientId
+          });
+        } catch {
+          return { kind: "unavailable" };
+        }
+        return canSyncSavedFilters(this.#session.publicationScope(), requestedScope) ? { kind: "published", snapshot: next } : { kind: "stale" };
+      });
+    }
+    async #readUnlocked() {
+      const raw = await this.#storage.get(Object.values(SAVED_FILTER_STORAGE_KEYS));
+      const rawSyncMeta = raw[SAVED_FILTER_STORAGE_KEYS.syncMeta];
+      const syncMeta = isRecord13(rawSyncMeta) ? rawSyncMeta : {};
+      return normalizeSavedFilterSnapshot({
+        presets: raw[SAVED_FILTER_STORAGE_KEYS.presets],
+        deleted: raw[SAVED_FILTER_STORAGE_KEYS.deleted],
+        activeMeta: raw[SAVED_FILTER_STORAGE_KEYS.activeMeta],
+        syncVersion: syncMeta.syncVersion,
+        lastSyncedAt: syncMeta.lastSyncedAt,
+        clientId: raw[SAVED_FILTER_STORAGE_KEYS.clientId]
+      }, (/* @__PURE__ */ new Date()).toISOString());
+    }
+    async #withLock(work) {
+      const previous = this.#tail;
+      let release = () => {
+      };
+      this.#tail = new Promise((resolve) => {
+        release = resolve;
+      });
+      await previous;
+      try {
+        return await work();
+      } finally {
+        release();
+      }
+    }
+  };
+  var SavedFilterSyncAlarm = class _SavedFilterSyncAlarm {
+    static name = SAVED_FILTER_SYNC_ALARM;
+    static install(alarms, runtime, onAlarm) {
+      alarms.onAlarm?.addListener((alarm) => {
+        if (alarm?.name === _SavedFilterSyncAlarm.name) onAlarm();
+      });
+      try {
+        const result = alarms.create?.(
+          _SavedFilterSyncAlarm.name,
+          { periodInMinutes: 30 }
+        );
+        if (result && typeof result.then === "function") {
+          void Promise.resolve(result).catch(() => void 0);
+        }
+      } catch {
+        void runtime.lastError;
+      }
+    }
+  };
+
+  // src/extension-runtime/saved-filter-sync-sender.mts
+  var SAVED_FILTER_SYNC_MESSAGE = "TRACE_AO3_SAVED_FILTERS_SYNC_REQUEST";
+  function isRecord14(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function isSavedFilterSyncRequest(message, sender) {
+    if (!isRecord14(message) || Object.keys(message).length !== 1 || message.type !== SAVED_FILTER_SYNC_MESSAGE || archiveHostKindFromSender(sender) !== "ao3") {
+      return false;
+    }
+    const senderUrl = sender?.tab?.url ?? sender?.url;
+    return !isBlockedArchivePath(senderUrl, "ao3");
+  }
+
+  // src/extension-runtime/story-command-sender.mts
+  var MAX_TRACK_PAYLOAD_BYTES = 64 * 1024;
+  var HANDOFF_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+  var COMMAND_TYPES = Object.freeze({
+    connectAndSave: "TRACE_CONNECT_AND_SAVE",
+    quickAdd: "TRACE_QUICK_ADD",
+    autoTrack: "TRACE_AUTO_TRACK"
+  });
+  function isRecord15(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function progressTarget(item) {
+    if (!Number.isSafeInteger(item.chn) || item.chn < 1) return null;
+    const chapter = item.chn;
+    const rawTotal = Number.isSafeInteger(item.cht) && item.cht > 0 ? item.cht : Number.isSafeInteger(item.chPub) && item.chPub > 0 ? item.chPub : null;
+    return Object.freeze({
+      current: chapter > 1 ? chapter : 0,
+      total: rawTotal
+    });
+  }
+  function cloneBoundedPayload(value) {
+    let serialized;
+    try {
+      serialized = JSON.stringify(value);
+    } catch {
+      return null;
+    }
+    if (!serialized || serialized.length > MAX_TRACK_PAYLOAD_BYTES) return null;
+    let parsed;
+    try {
+      parsed = JSON.parse(serialized);
+    } catch {
+      return null;
+    }
+    return isRecord15(parsed) ? Object.freeze(parsed) : null;
+  }
+  function storyTrackCommandFromMessage(message, sender) {
+    if (!isRecord15(message)) return null;
+    const hostKind2 = archiveHostKindFromSender(sender);
+    if (hostKind2 === null) return null;
+    const senderUrl = sender?.tab?.url ?? sender?.url;
+    if (isBlockedArchivePath(senderUrl, hostKind2)) return null;
+    const senderWorkKey = workKeyFromArchiveUrl(senderUrl, hostKind2);
+    const payload = cloneBoundedPayload(message.payload);
+    if (payload === null || !sourceMatchesArchiveHost(payload.s, hostKind2)) return null;
+    if (typeof payload.at !== "string" || payload.at.length === 0 || payload.at.length > 128) {
+      return null;
+    }
+    if (!isRecord15(payload.item)) return null;
+    if (!sourceMatchesArchiveHost(payload.item.src, hostKind2)) return null;
+    const payloadWorkKey = workKeyFromArchiveUrl(payload.item.u, hostKind2);
+    if (payloadWorkKey === null) return null;
+    const messageType = typeof message.type === "string" ? message.type : "";
+    const context = payload.item.ctx;
+    let intent;
+    let progress;
+    if (messageType === COMMAND_TYPES.autoTrack) {
+      if (context !== "story" || senderWorkKey === null || payloadWorkKey !== senderWorkKey) {
+        return null;
+      }
+      const target = progressTarget(payload.item);
+      if (target === null) return null;
+      intent = "record_progress";
+      progress = target;
+    } else if (messageType === COMMAND_TYPES.connectAndSave) {
+      if (context !== "story" || senderWorkKey === null || payloadWorkKey !== senderWorkKey) {
+        return null;
+      }
+      intent = "ensure_saved";
+    } else if (messageType === COMMAND_TYPES.quickAdd) {
+      if (context !== "story" && context !== "listing" && context !== "bookmark") return null;
+      if (senderWorkKey !== null && (context !== "story" || payloadWorkKey !== senderWorkKey)) {
+        return null;
+      }
+      if (senderWorkKey === null && context === "story") return null;
+      intent = "ensure_saved";
+    } else {
+      return null;
+    }
+    const claimedWorkKey = typeof message.workKey === "string" ? message.workKey.trim() : "";
+    if (claimedWorkKey && claimedWorkKey !== payloadWorkKey) return null;
+    const rawHandoffId = typeof message.handoffId === "string" ? message.handoffId.trim() : "";
+    const handoffId = messageType === COMMAND_TYPES.connectAndSave && HANDOFF_ID_PATTERN.test(rawHandoffId) ? rawHandoffId : void 0;
+    return Object.freeze({
+      intent,
+      hostKind: hostKind2,
+      workKey: payloadWorkKey,
+      payload,
+      ...progress === void 0 ? {} : { progress },
+      ...handoffId === void 0 ? {} : { handoffId }
+    });
+  }
+
+  // src/extension-runtime/trace-web-navigation.mts
+  var TRACE_WEB_OPEN_MESSAGE = "TRACE_OPEN_TRACE_URL";
+  var MAX_TRACE_WEB_URL_LENGTH = 2048;
+  function isRecord16(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function traceWebNavigationRequestFromMessage(message, sender, webOrigin) {
+    if (!isRecord16(message) || Object.keys(message).length !== 2 || message.type !== TRACE_WEB_OPEN_MESSAGE || !isRecord16(message.payload) || Object.keys(message.payload).length !== 1) {
+      return null;
+    }
+    const hostKind2 = archiveHostKindFromSender(sender);
+    const senderUrl = sender?.tab?.url ?? sender?.url;
+    if (hostKind2 === null || isBlockedArchivePath(senderUrl, hostKind2)) return null;
+    const rawUrl = message.payload.url;
+    if (typeof rawUrl !== "string" || rawUrl.length === 0 || rawUrl.length > MAX_TRACE_WEB_URL_LENGTH) {
+      return Object.freeze({ kind: "invalid" });
+    }
+    try {
+      const configuredOrigin = new URL(webOrigin).origin;
+      const url = new URL(rawUrl, configuredOrigin);
+      if (url.origin !== configuredOrigin || url.username || url.password || url.protocol !== "https:" && url.protocol !== "http:") {
+        return Object.freeze({ kind: "invalid" });
+      }
+      return Object.freeze({ kind: "open", url: url.href });
+    } catch {
+      return Object.freeze({ kind: "invalid" });
+    }
+  }
+  var BrowserTraceWebNavigation = class {
+    #runtime;
+    #tabs;
+    #mode;
+    constructor(options) {
+      this.#runtime = options.runtime;
+      this.#tabs = options.tabs;
+      this.#mode = options.mode;
+    }
+    async open(url) {
+      try {
+        await extensionCall(
+          this.#tabs,
+          "create",
+          [{ url }],
+          this.#runtime,
+          this.#mode
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  };
+
+  // src/extension-runtime/trace-web-status.mts
+  var TraceWebStatusNotification = class {
+    #runtime;
+    #tabs;
+    #mode;
+    #webOrigin;
+    #queryPattern;
+    constructor(options) {
+      this.#runtime = options.runtime;
+      this.#tabs = options.tabs;
+      this.#mode = options.mode;
+      const webUrl = new URL(options.webOrigin);
+      this.#webOrigin = webUrl.origin;
+      this.#queryPattern = `${webUrl.protocol}//${webUrl.hostname}/*`;
+    }
+    async publish(state) {
+      let tabs;
+      try {
+        tabs = await extensionCall(
+          this.#tabs,
+          "query",
+          [{ url: [this.#queryPattern] }],
+          this.#runtime,
+          this.#mode
+        );
+      } catch {
+        return false;
+      }
+      const message = Object.freeze({
+        type: "TRACE_EXTENSION_STATUS_PUSH",
+        state
+      });
+      for (const tab of tabs) {
+        if (typeof tab.id !== "number" || !this.#isTraceWebUrl(tab.url)) continue;
+        try {
+          await extensionCall(
+            this.#tabs,
+            "sendMessage",
+            [tab.id, message],
+            this.#runtime,
+            this.#mode
+          );
+        } catch {
+        }
+      }
+      return true;
+    }
+    #isTraceWebUrl(rawUrl) {
+      if (typeof rawUrl !== "string") return false;
+      try {
+        return new URL(rawUrl).origin === this.#webOrigin;
+      } catch {
+        return false;
+      }
+    }
+  };
+
+  // src/extension-runtime/archive-readiness-status.mts
+  var ARCHIVE_READINESS_STATUS_KEY = "traceArchiveReadiness";
+  var ARCHIVE_READINESS_ERROR_RECENT_MS = 24 * 60 * 60 * 1e3;
+  function isRecord17(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function epochMillis(value) {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : null;
+  }
+  function hostKind(value) {
+    return value === "ao3" || value === "ffn" || value === "unknown" ? value : null;
+  }
+  function actionKind(value) {
+    return value === "track" || value === "quick_add" || value === "import" || value === "metadata" ? value : null;
+  }
+  function errorKind(value) {
+    return value === "permission" || value === "unsupported_page" || value === "auth" || value === "parser" || value === "network" || value === "unknown" ? value : null;
+  }
+  function storedReadiness(value) {
+    if (!isRecord17(value)) return Object.freeze({});
+    const seenAt = epochMillis(value.lastArchiveSeenAt);
+    const seenHost = hostKind(value.lastArchiveHostKind);
+    const actionAt = epochMillis(value.lastArchiveActionAt);
+    const action = actionKind(value.lastArchiveActionKind);
+    const errorAt = epochMillis(value.lastArchiveErrorAt);
+    const error = errorKind(value.lastArchiveErrorKind);
+    return Object.freeze({
+      ...seenAt === null ? {} : { lastArchiveSeenAt: seenAt },
+      ...seenHost === null ? {} : { lastArchiveHostKind: seenHost },
+      ...actionAt === null ? {} : { lastArchiveActionAt: actionAt },
+      ...action === null ? {} : { lastArchiveActionKind: action },
+      ...errorAt === null ? {} : { lastArchiveErrorAt: errorAt },
+      ...error === null ? {} : { lastArchiveErrorKind: error }
+    });
+  }
+  var BrowserArchiveReadinessStatus = class {
+    #storage;
+    #clock;
+    #tail = Promise.resolve();
+    constructor(storage, clock = { now: () => Date.now() }) {
+      this.#storage = storage;
+      this.#clock = clock;
+    }
+    record(event) {
+      return this.#withLock(async () => {
+        const at = Math.max(0, Math.trunc(this.#clock.now()));
+        const values = await this.#storage.get(ARCHIVE_READINESS_STATUS_KEY);
+        const previous = storedReadiness(values[ARCHIVE_READINESS_STATUS_KEY]);
+        const next = { ...previous };
+        if (event.seen !== false) {
+          next.lastArchiveSeenAt = at;
+          next.lastArchiveHostKind = event.hostKind;
+        }
+        if (event.actionKind !== void 0) {
+          next.lastArchiveActionAt = at;
+          next.lastArchiveActionKind = event.actionKind;
+          delete next.lastArchiveErrorAt;
+          delete next.lastArchiveErrorKind;
+        }
+        if (event.errorKind !== void 0) {
+          next.lastArchiveErrorAt = at;
+          next.lastArchiveErrorKind = event.errorKind;
+        }
+        await this.#storage.set({
+          [ARCHIVE_READINESS_STATUS_KEY]: Object.freeze(next)
+        });
+      });
+    }
+    read() {
+      return this.#withLock(async () => {
+        const values = await this.#storage.get(ARCHIVE_READINESS_STATUS_KEY);
+        const stored = storedReadiness(values[ARCHIVE_READINESS_STATUS_KEY]);
+        const {
+          lastArchiveErrorAt,
+          lastArchiveErrorKind,
+          ...publicFields
+        } = stored;
+        const errorIsRecent = lastArchiveErrorAt !== void 0 && lastArchiveErrorKind !== void 0 && this.#clock.now() - lastArchiveErrorAt <= ARCHIVE_READINESS_ERROR_RECENT_MS;
+        return Object.freeze({
+          ...publicFields,
+          ...errorIsRecent ? { lastArchiveErrorKind } : {}
+        });
+      });
+    }
+    async #withLock(work) {
+      const previous = this.#tail;
+      let release = () => {
+      };
+      this.#tail = new Promise((resolve) => {
+        release = resolve;
+      });
+      await previous;
+      try {
+        return await work();
+      } finally {
+        release();
+      }
+    }
+  };
+
+  // src/extension-runtime/runtime-messages.mts
+  var SESSION_MESSAGE_TYPES = Object.freeze({
+    snapshot: "TRACE_SESSION_GET_SNAPSHOT",
+    action: "TRACE_SESSION_ACTION",
+    connectAndSave: "TRACE_CONNECT_AND_SAVE",
+    quickAdd: "TRACE_QUICK_ADD",
+    autoTrack: "TRACE_AUTO_TRACK",
+    metadataBroadcast: "TRACE_METADATA_BROADCAST",
+    libraryMetadataRefresh: "TRACE_LIBRARY_METADATA_REFRESH",
+    savedFilterSync: SAVED_FILTER_SYNC_MESSAGE,
+    projection: "TRACE_ACCOUNT_PROJECTION_GET",
+    workState: "TRACE_WORK_STATE_GET",
+    popupState: "TRACE_POPUP_GET_STATE",
+    importTrigger: "TRACE_IMPORT_TRIGGER",
+    firstStoryAdd: "TRACE_FIRST_STORY_ADD",
+    setHiddenWork: "TRACE_SET_HIDDEN_WORK",
+    setReaderStatus: "TRACE_SET_READER_STATUS",
+    patchLibraryEntry: "TRACE_PATCH_LIBRARY_ENTRY",
+    finishQualification: "TRACE_FINISH_QUALIFICATION_SIGNAL",
+    pendingFirstStory: "TRACE_IOS_PENDING_FIRST_STORY_GET",
+    status: "TRACE_EXTENSION_STATUS_QUERY",
+    openTraceUrl: TRACE_WEB_OPEN_MESSAGE
+  });
+  var WORK_KEY_PATTERN4 = /^(ao3|ffn):[1-9][0-9]{0,19}$/;
+  var MAX_PROJECTION_WORK_KEYS = 250;
+  var POPUP_PREFERENCE_KEYS = Object.freeze([
+    "prefAutoTrackEnabled",
+    "prefLibraryInlayEnabled",
+    "prefAo3SavedFiltersEnabled",
+    "prefMetadataImproveEnabled"
+  ]);
+  function isRecord18(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function isSessionAction(value) {
+    return value === "connect" || value === "cancel" || value === "disconnect" || value === "retry" || value === "reconnect";
+  }
+  function toPublicSessionSnapshot(snapshot) {
+    return Object.freeze({
+      state: snapshot.state,
+      reason: snapshot.reason,
+      canExecuteAuthenticated: snapshot.canExecuteAuthenticated
+    });
+  }
+  function toExtensionStatus(snapshot, options = {}) {
+    const authState = snapshot.state === "connected" ? "connected" : snapshot.state === "signed_out" ? "signed_out" : snapshot.state === "reconnect_required" ? "reconnect_required" : "unknown";
+    return Object.freeze({
+      installed: true,
+      connected: snapshot.state === "connected",
+      authState,
+      ...options.firstSaveSeen === void 0 ? {} : { firstSaveSeen: options.firstSaveSeen },
+      ...options.browserKind === void 0 ? {} : { browserKind: options.browserKind },
+      capabilities: Object.freeze({ firstStoryAdd: true }),
+      ...options.readiness ?? {}
+    });
+  }
+  function browserKind(runtime) {
+    if (typeof runtime.getURL !== "function") return "unknown";
+    try {
+      const value = runtime.getURL("");
+      if (typeof value !== "string") return "unknown";
+      if (value.startsWith("chrome-extension://")) return "chrome";
+      if (value.startsWith("moz-extension://")) return "firefox";
+      if (value.startsWith("safari-web-extension://")) return "safari";
+    } catch {
+    }
+    return "unknown";
+  }
+  function boundedProjectionWorkKeys(value, sender) {
+    const host = archiveHostKindFromSender(sender);
+    if (host === null || !Array.isArray(value) || value.length > MAX_PROJECTION_WORK_KEYS) {
+      return null;
+    }
+    const senderUrl = sender?.tab?.url ?? sender?.url;
+    if (isBlockedArchivePath(senderUrl, host)) return null;
+    const keys = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const candidate of value) {
+      if (typeof candidate !== "string" || !WORK_KEY_PATTERN4.test(candidate) || !candidate.startsWith(`${host}:`)) {
+        return null;
+      }
+      if (!seen.has(candidate)) {
+        seen.add(candidate);
+        keys.push(candidate);
+      }
+    }
+    return Object.freeze(keys);
+  }
+  function publicProjection(accountData, workKeys) {
+    const entries = {};
+    const workPreferences = {};
+    const overlay = accountData?.overlay;
+    if (overlay !== null && overlay !== void 0) {
+      for (const workKey of workKeys) {
+        const entry = overlay.entries[workKey];
+        const preference = overlay.workPreferences[workKey];
+        if (entry !== void 0) entries[workKey] = entry;
+        if (preference !== void 0) workPreferences[workKey] = preference;
+      }
+    }
+    return Object.freeze({
+      entries: Object.freeze(entries),
+      workPreferences: Object.freeze(workPreferences),
+      syncVersion: overlay?.syncVersion ?? null
+    });
+  }
+  function publicWorkState(accountData, workKey) {
+    const overlay = accountData?.overlay;
+    const entry = overlay?.entries[workKey];
+    if (overlay === null || overlay === void 0 || entry === void 0) return null;
+    return Object.freeze({
+      workKey,
+      status: "saved",
+      ...entry.entryId === void 0 ? {} : { entryId: entry.entryId },
+      entry,
+      syncVersion: overlay.syncVersion
+    });
+  }
+
+  // src/extension-runtime/controller.mts
+  var DEGRADED_STORAGE_SNAPSHOT = Object.freeze({
+    state: "degraded",
+    accountId: null,
+    canExecuteAuthenticated: false,
+    reason: "storage_unavailable"
+  });
+  var DISABLED_SNAPSHOT = Object.freeze({
+    state: "signed_out",
+    accountId: null,
+    canExecuteAuthenticated: false,
+    reason: "none"
+  });
+  var RETRY_DELAYS_MS = Object.freeze([750, 2500, 8e3]);
+  var DEFAULT_RETRY_CLOCK = Object.freeze({
+    setTimeout(callback, delayMs) {
+      return globalThis.setTimeout(callback, delayMs);
+    },
+    clearTimeout(handle) {
+      globalThis.clearTimeout(handle);
+    }
+  });
+  function isSupportedArchiveSender(sender) {
+    return archiveHostKindFromSender(sender) !== null;
+  }
+  var MemoryDiagnostics = class {
+    #events = [];
+    record(event) {
+      this.#events.push(Object.freeze({ ...event }));
+      if (this.#events.length > 80) this.#events.shift();
+    }
+  };
+  var SessionRuntimeController = class {
+    #mode;
+    #sessionStorage;
+    #credentials;
+    #database;
+    #legacy;
+    #alarms;
+    #pendingFirstStory;
+    #service;
+    #accountData;
+    #storyCommands;
+    #libraryMutations;
+    #finishQualification;
+    #metadataContributions;
+    #savedFilters;
+    #savedFilterApi;
+    #firstStoryInitiator;
+    #traceWebNavigation;
+    #traceWebStatus;
+    #archiveReadinessStatus;
+    #projection;
+    #storage;
+    #runtime;
+    #tabs;
+    #storageMode;
+    #webOrigin;
+    #retryClock;
+    #initialization = null;
+    #storageFailure = false;
+    #automaticVerificationRetry = false;
+    #retryAttempt = 0;
+    #retryGeneration = 0;
+    #retryTimer = null;
+    #isIos = null;
+    #nativeAuthorityPreparation = null;
+    #accountTransitionTail = Promise.resolve();
+    #savedFilterSyncInFlight = null;
+    #savedFilterSyncQueued = false;
+    #savedFilterSyncQueuedWithCurrentAuthority = false;
+    #lastPublishedStatusKey = null;
+    #statusPublicationTail = Promise.resolve();
+    constructor(environment) {
+      this.#mode = environment.mode;
+      const storage = new BrowserStorage(
+        environment.storageArea,
+        environment.runtime,
+        environment.storageMode
+      );
+      this.#storage = storage;
+      this.#archiveReadinessStatus = environment.archiveReadinessStatus ?? new BrowserArchiveReadinessStatus(storage);
+      this.#runtime = environment.runtime;
+      this.#tabs = environment.tabs;
+      this.#storageMode = environment.storageMode;
+      this.#webOrigin = new URL(environment.webOrigin).origin;
+      this.#database = environment.privateDatabase ?? new BrowserPrivateRecordDatabase(
+        environment.databaseFactory
+      );
+      this.#sessionStorage = new BrowserSessionStoragePort(this.#database);
+      this.#legacy = new LegacyAccountState(storage);
+      this.#alarms = new KernelAlarmState(
+        environment.alarms,
+        environment.runtime,
+        environment.storageMode
+      );
+      this.#pendingFirstStory = new NativePendingFirstStoryReader(
+        environment.runtime,
+        environment.storageMode
+      );
+      this.#retryClock = environment.retryClock ?? DEFAULT_RETRY_CLOCK;
+      this.#credentials = new BrowserCredentialPort(
+        this.#database,
+        new ExplicitCredentialProvider({
+          runtime: environment.runtime,
+          tabs: environment.tabs,
+          mode: environment.storageMode,
+          webOrigin: environment.webOrigin,
+          randomId: environment.randomId
+        }),
+        environment.randomId
+      );
+      this.#service = new SessionService({
+        storage: this.#sessionStorage,
+        credentials: this.#credentials,
+        api: new VerificationApi(environment.fetch, environment.apiBase, (disposition) => {
+          this.#automaticVerificationRetry = disposition === "automatic";
+        }),
+        diagnostics: new MemoryDiagnostics()
+      });
+      this.#savedFilterApi = new SavedFilterSyncApi(
+        environment.fetch,
+        environment.apiBase
+      );
+      this.#savedFilters = new SavedFilterSyncService({
+        session: this.#service,
+        api: this.#savedFilterApi,
+        repository: new BrowserSavedFilterRepository({
+          storage,
+          session: this.#service,
+          randomId: environment.randomId
+        }),
+        clock: { now: () => (/* @__PURE__ */ new Date()).toISOString() }
+      });
+      this.#accountData = new AccountDataRepository(this.#database, this.#service);
+      this.#projection = new AccountProjectionService({
+        session: this.#service,
+        api: new AccountProjectionApi(environment.fetch, environment.apiBase),
+        repository: this.#accountData,
+        clock: { now: () => Date.now() }
+      });
+      this.#metadataContributions = new MetadataContributionService({
+        session: this.#service,
+        api: new MetadataContributionApi(environment.fetch, environment.apiBase),
+        preference: new BrowserMetadataPreferencePort(storage),
+        authority: {
+          prepare: async () => {
+            const preparation = await this.#prepareNativeAuthority();
+            if (!preparation.ready) throw new Error("native authority unavailable");
+          }
+        },
+        projection: {
+          invalidate: () => this.#projection.invalidate()
+        },
+        notification: new TraceWebMetadataNotificationPort({
+          runtime: environment.runtime,
+          tabs: environment.tabs,
+          mode: environment.storageMode,
+          webOrigin: environment.webOrigin
+        })
+      });
+      const libraryCommandPorts = {
+        session: this.#service,
+        api: new LibraryCommandApi(environment.fetch, environment.apiBase),
+        projection: new AccountLibraryCommandProjection(this.#projection)
+      };
+      this.#libraryMutations = new LibraryMutationService(libraryCommandPorts);
+      this.#finishQualification = new FinishQualificationService(libraryCommandPorts);
+      this.#firstStoryInitiator = new BrowserFirstStoryInitiator({
+        runtime: environment.runtime,
+        tabs: environment.tabs,
+        mode: environment.storageMode,
+        webOrigin: environment.webOrigin,
+        ...environment.firstStoryDelay === void 0 ? {} : { delay: environment.firstStoryDelay }
+      });
+      this.#traceWebNavigation = new BrowserTraceWebNavigation({
+        runtime: environment.runtime,
+        tabs: environment.tabs,
+        mode: environment.storageMode
+      });
+      this.#traceWebStatus = new TraceWebStatusNotification({
+        runtime: environment.runtime,
+        tabs: environment.tabs,
+        mode: environment.storageMode,
+        webOrigin: environment.webOrigin
+      });
+      this.#storyCommands = new StoryCommandService({
+        session: this.#service,
+        api: new StoryCommandApi(environment.fetch, environment.apiBase),
+        projection: new AccountStoryProjectionPort(this.#accountData),
+        receipt: new NativeStorySaveReceiptPort(
+          environment.runtime,
+          environment.storageMode
+        ),
+        handoff: new NativePendingStoryHandoffPort(
+          environment.runtime,
+          environment.storageMode
+        ),
+        clock: { now: () => Date.now() }
+      });
+    }
+    start() {
+      this.#initialization ??= this.#startOnce();
+      return this.#initialization;
+    }
+    snapshot() {
+      if (this.#storageFailure) return DEGRADED_STORAGE_SNAPSHOT;
+      if (this.#mode === "disabled") return DISABLED_SNAPSHOT;
+      return this.#service.snapshot();
+    }
+    async handle(message, sender) {
+      if (!isRecord18(message) || typeof message.type !== "string") return null;
+      if (!Object.values(SESSION_MESSAGE_TYPES).includes(message.type)) return null;
+      switch (message.type) {
+        case SESSION_MESSAGE_TYPES.snapshot:
+        case SESSION_MESSAGE_TYPES.action:
+          return this.#handleSessionMessage(message, sender);
+        case SESSION_MESSAGE_TYPES.status:
+          return this.#handleStatusMessage(message, sender);
+        case SESSION_MESSAGE_TYPES.openTraceUrl:
+          return this.#handleTraceNavigationMessage(message, sender);
+        case SESSION_MESSAGE_TYPES.pendingFirstStory:
+        case SESSION_MESSAGE_TYPES.projection:
+        case SESSION_MESSAGE_TYPES.workState:
+        case SESSION_MESSAGE_TYPES.popupState:
+          return this.#handleReadMessage(message, sender);
+        case SESSION_MESSAGE_TYPES.savedFilterSync:
+          return this.#handleSavedFilterMessage(message, sender);
+        case SESSION_MESSAGE_TYPES.importTrigger:
+        case SESSION_MESSAGE_TYPES.firstStoryAdd:
+          return this.#handleFirstStoryMessage(message, sender);
+        case SESSION_MESSAGE_TYPES.metadataBroadcast:
+        case SESSION_MESSAGE_TYPES.libraryMetadataRefresh:
+          return this.#handleMetadataMessage(message, sender);
+        case SESSION_MESSAGE_TYPES.setHiddenWork:
+        case SESSION_MESSAGE_TYPES.setReaderStatus:
+        case SESSION_MESSAGE_TYPES.patchLibraryEntry:
+        case SESSION_MESSAGE_TYPES.finishQualification:
+          return this.#handleLibraryMessage(message, sender);
+        case SESSION_MESSAGE_TYPES.connectAndSave:
+        case SESSION_MESSAGE_TYPES.quickAdd:
+        case SESSION_MESSAGE_TYPES.autoTrack:
+          return this.#handleStoryMessage(message, sender);
+        default:
+          return null;
+      }
+    }
+    async #handleSessionMessage(message, sender) {
+      if (!isPopupSender(sender, this.#runtime.id) && !isTraceWebSender(sender, this.#runtime.id, this.#webOrigin)) {
+        return null;
+      }
+      if (message.type === SESSION_MESSAGE_TYPES.snapshot && Object.keys(message).length !== 1 || message.type === SESSION_MESSAGE_TYPES.action && Object.keys(message).length !== 2) {
+        return null;
+      }
+      await this.start();
+      if (message.type === SESSION_MESSAGE_TYPES.snapshot) return this.#response();
+      if (!isSessionAction(message.action)) return this.#response({ kind: "ignored" });
+      return this.#response(await this.#runManualAction(message.action, true));
+    }
+    async #handleStatusMessage(message, sender) {
+      await this.start();
+      if (Object.keys(message).length !== 2 || typeof message.nonce !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(message.nonce) || !isTraceWebSender(sender, this.#runtime.id, this.#webOrigin)) {
+        return null;
+      }
+      return this.#extensionStatus();
+    }
+    async #handleTraceNavigationMessage(message, sender) {
+      const request = traceWebNavigationRequestFromMessage(
+        message,
+        sender,
+        this.#webOrigin
+      );
+      if (request === null) return null;
+      await this.start();
+      if (this.#mode === "disabled") {
+        return Object.freeze({ ok: false, error: "commands_unavailable" });
+      }
+      if (request.kind === "invalid") {
+        return Object.freeze({ ok: false, error: "invalid_trace_url" });
+      }
+      return await this.#traceWebNavigation.open(request.url) ? Object.freeze({ ok: true }) : Object.freeze({ ok: false, error: "open_failed" });
+    }
+    async #handleReadMessage(message, sender) {
+      await this.start();
+      if (message.type === SESSION_MESSAGE_TYPES.pendingFirstStory) {
+        return isSupportedArchiveSender(sender) ? this.#pendingFirstStory.read() : { ok: false, error: "native_unavailable" };
+      }
+      if (message.type === SESSION_MESSAGE_TYPES.projection) {
+        const workKeys = boundedProjectionWorkKeys(message.workKeys, sender);
+        if (workKeys === null) return null;
+        await this.#bootstrapNativeAuthorityForArchiveRead();
+        const accountData = await this.#projection.read();
+        return Object.freeze({
+          ok: true,
+          snapshot: toPublicSessionSnapshot(this.snapshot()),
+          projection: publicProjection(accountData, workKeys)
+        });
+      }
+      if (message.type === SESSION_MESSAGE_TYPES.workState) {
+        const host = archiveHostKindFromSender(sender);
+        const workKey = typeof message.workKey === "string" ? message.workKey : "";
+        const senderUrl = sender?.tab?.url ?? sender?.url;
+        if (host === null || isBlockedArchivePath(senderUrl, host) || !WORK_KEY_PATTERN4.test(workKey) || workKey !== workKeyFromArchiveUrl(senderUrl, host)) {
+          return null;
+        }
+        await this.#bootstrapNativeAuthorityForArchiveRead();
+        const accountData = await this.#projection.read();
+        return Object.freeze({
+          ok: true,
+          snapshot: toPublicSessionSnapshot(this.snapshot()),
+          state: publicWorkState(accountData, workKey)
+        });
+      }
+      if (!isPopupSender(sender, this.#runtime.id)) return null;
+      return this.#popupState();
+    }
+    async #handleSavedFilterMessage(message, sender) {
+      if (!isSavedFilterSyncRequest(message, sender)) return null;
+      await this.start();
+      return this.#savedFilterResponse(await this.#runSavedFilterSync());
+    }
+    async #handleFirstStoryMessage(message, sender) {
+      const initiation = firstStoryInitiationFromMessage(
+        message,
+        sender,
+        this.#runtime.id,
+        this.#webOrigin
+      );
+      if (initiation === null) return null;
+      await this.start();
+      if (initiation.kind === "invalid") {
+        return this.#firstStoryResponse({
+          ok: false,
+          error: initiation.error
+        }, void 0, initiation);
+      }
+      const preparation = initiation.kind === "web_save" ? await this.#prepareNativeAuthority() : { ready: true };
+      const action = preparation.action;
+      if (!preparation.ready || this.snapshot().state !== "connected") {
+        return this.#firstStoryResponse(
+          { ok: false, error: "not_authenticated" },
+          action,
+          initiation
+        );
+      }
+      const result = initiation.kind === "popup_import" ? await this.#firstStoryInitiator.importActivePage() : await this.#firstStoryInitiator.saveFromTrace(initiation.url);
+      return this.#firstStoryResponse(result, action, initiation);
+    }
+    async #handleMetadataMessage(message, sender) {
+      const command = metadataContributionCommandFromMessage(message, sender);
+      if (command === null) return null;
+      await this.start();
+      return this.#metadataContributionResponse(
+        await this.#metadataContributions.execute(command),
+        command
+      );
+    }
+    async #handleLibraryMessage(message, sender) {
+      const finishCommand = message.type === SESSION_MESSAGE_TYPES.finishQualification ? finishQualificationCommandFromMessage(message, sender) : null;
+      const libraryCommand = message.type === SESSION_MESSAGE_TYPES.finishQualification ? null : libraryMutationCommandFromMessage(message, sender);
+      if (finishCommand === null && libraryCommand === null) return null;
+      await this.start();
+      const preparation = await this.#prepareNativeAuthority();
+      const action = preparation.action;
+      if (!preparation.ready || this.snapshot().state !== "connected") {
+        const reason = action?.kind === "unavailable" ? "unavailable" : "not_authenticated";
+        return finishCommand === null ? this.#libraryCommandResponse(
+          { kind: "failed", reason },
+          action
+        ) : this.#finishQualificationResponse(
+          { kind: "failed", reason },
+          action
+        );
+      }
+      return finishCommand === null ? this.#libraryCommandResponse(
+        await this.#libraryMutations.execute(libraryCommand),
+        action
+      ) : this.#finishQualificationResponse(
+        await this.#finishQualification.execute(finishCommand),
+        action
+      );
+    }
+    async #handleStoryMessage(message, sender) {
+      const command = storyTrackCommandFromMessage(message, sender);
+      if (command === null) return null;
+      await this.start();
+      if (message.type === SESSION_MESSAGE_TYPES.connectAndSave) {
+        const preparation2 = await this.#prepareNativeAuthority();
+        const action2 = preparation2.action ?? await this.#runManualAction(
+          this.snapshot().state === "connected" ? "reconnect" : "connect"
+        );
+        if (!preparation2.ready && preparation2.action !== void 0) {
+          return this.#commandResponse(
+            {
+              kind: "failed",
+              reason: action2.kind === "unavailable" ? "unavailable" : "not_authenticated"
+            },
+            action2,
+            command
+          );
+        }
+        if (this.snapshot().state !== "connected") {
+          return this.#commandResponse(
+            { kind: "failed", reason: "not_authenticated" },
+            action2,
+            command
+          );
+        }
+        return this.#commandResponse(
+          await this.#storyCommands.execute(command),
+          action2,
+          command
+        );
+      }
+      if (message.type === SESSION_MESSAGE_TYPES.quickAdd) {
+        const preparation2 = await this.#prepareNativeAuthority();
+        if (!preparation2.ready) {
+          return this.#commandResponse(
+            {
+              kind: "failed",
+              reason: preparation2.action?.kind === "unavailable" ? "unavailable" : "not_authenticated"
+            },
+            preparation2.action,
+            command
+          );
+        }
+        return this.#commandResponse(
+          await this.#storyCommands.execute(command),
+          preparation2.action,
+          command
+        );
+      }
+      const preferences = await this.#storage.get("prefAutoTrackEnabled").catch(() => ({}));
+      if (preferences.prefAutoTrackEnabled === false) {
+        return this.#response(void 0, "auto_track_disabled");
+      }
+      const preparation = await this.#prepareNativeAuthority();
+      const action = preparation.action;
+      if (!preparation.ready || this.snapshot().state !== "connected") {
+        return this.#commandResponse(
+          {
+            kind: "failed",
+            reason: action?.kind === "unavailable" ? "unavailable" : "not_authenticated"
+          },
+          action,
+          command
+        );
+      }
+      return this.#commandResponse(
+        await this.#storyCommands.execute(command),
+        action,
+        command
+      );
+    }
+    async #startOnce() {
+      try {
+        if (this.#mode === "disabled") {
+          await this.#legacy.clearAll();
+          await this.#alarms.clearAll();
+          await this.#database.deleteDatabase();
+        } else {
+          await this.#legacy.clear();
+          await this.#alarms.clearRetired();
+          this.#automaticVerificationRetry = false;
+          await this.#service.start();
+        }
+        this.#storageFailure = false;
+      } catch {
+        this.#storageFailure = true;
+      }
+      this.#reconcileAutomaticRetry();
+    }
+    async #retryInitialization() {
+      if (!this.#storageFailure) return { kind: "ignored" };
+      try {
+        if (this.#mode === "disabled") {
+          await this.#legacy.clearAll();
+          await this.#alarms.clearAll();
+          await this.#database.deleteDatabase();
+        } else {
+          await this.#legacy.clear();
+          await this.#alarms.clearRetired();
+          await this.#service.start();
+        }
+        this.#storageFailure = false;
+        return this.#mode === "disabled" ? { kind: "completed", state: "signed_out" } : { kind: "ignored" };
+      } catch {
+        return { kind: "unavailable" };
+      }
+    }
+    async #runAction(action) {
+      if (action === "connect" || action === "retry" || action === "reconnect") {
+        this.#automaticVerificationRetry = false;
+      }
+      if (action === "retry" && this.#storageFailure) return this.#retryInitialization();
+      if (this.#storageFailure || this.#mode === "disabled") return { kind: "ignored" };
+      if (action === "connect") return this.#service.connect();
+      if (action === "retry") return this.#service.retry();
+      if (action === "cancel") {
+        const result = await this.#service.cancelConnect();
+        await this.#clearLegacyAfterDisconnect(result);
+        return result;
+      }
+      if (action === "disconnect") {
+        const result = await this.#service.disconnect();
+        await this.#clearLegacyAfterDisconnect(result);
+        return result;
+      }
+      const disconnected = await this.#service.disconnect();
+      await this.#clearLegacyAfterDisconnect(disconnected);
+      if (disconnected.kind !== "completed" || disconnected.state !== "signed_out") {
+        return disconnected;
+      }
+      return this.#service.connect();
+    }
+    async #runManualAction(action, scheduleSavedFilters = false) {
+      if (this.#savedFilterSyncInFlight !== null) {
+        this.#savedFilters.cancel();
+        this.#savedFilterApi.cancelPending();
+      }
+      const result = await this.#withAccountTransitionLock(
+        () => this.#runManualActionUnlocked(action)
+      );
+      this.#publishStatus();
+      if (scheduleSavedFilters && result.kind === "completed" && result.state === "connected") {
+        this.#queueSavedFilterSync(true);
+      }
+      return result;
+    }
+    async #runManualActionUnlocked(action) {
+      this.#cancelAutomaticRetry(true);
+      const result = await this.#runAction(action);
+      this.#reconcileAutomaticRetry();
+      return result;
+    }
+    #automaticRetryIsEligible() {
+      const snapshot = this.snapshot();
+      return snapshot.state === "degraded" && (snapshot.reason === "storage_unavailable" || snapshot.reason === "verification_unavailable" && this.#automaticVerificationRetry);
+    }
+    #reconcileAutomaticRetry() {
+      if (!this.#automaticRetryIsEligible()) {
+        this.#cancelAutomaticRetry(true);
+        return;
+      }
+      if (this.#retryTimer !== null || this.#retryAttempt >= RETRY_DELAYS_MS.length) return;
+      const generation = this.#retryGeneration;
+      const delayMs = RETRY_DELAYS_MS[this.#retryAttempt];
+      this.#retryAttempt += 1;
+      this.#retryTimer = this.#retryClock.setTimeout(() => {
+        this.#retryTimer = null;
+        void this.#runAutomaticRetry(generation);
+      }, delayMs);
+    }
+    async #runAutomaticRetry(generation) {
+      if (generation !== this.#retryGeneration || !this.#automaticRetryIsEligible()) return;
+      await this.#withAccountTransitionLock(() => this.#runAction("retry"));
+      this.#publishStatus();
+      if (generation !== this.#retryGeneration) return;
+      this.#reconcileAutomaticRetry();
+    }
+    #cancelAutomaticRetry(resetAttempt) {
+      this.#retryGeneration += 1;
+      if (this.#retryTimer !== null) {
+        this.#retryClock.clearTimeout(this.#retryTimer);
+        this.#retryTimer = null;
+      }
+      if (resetAttempt) this.#retryAttempt = 0;
+    }
+    async #clearLegacyAfterDisconnect(result) {
+      if (result.kind !== "completed" || result.state !== "signed_out") return;
+      try {
+        await this.#accountData.clear();
+      } catch {
+      }
+      try {
+        await this.#legacy.clear();
+      } catch {
+      }
+    }
+    #response(action, error) {
+      return Object.freeze({
+        ok: true,
+        snapshot: toPublicSessionSnapshot(this.snapshot()),
+        ...action === void 0 ? {} : { action },
+        ...error === void 0 ? {} : { error }
+      });
+    }
+    async #commandResponse(command, action, request) {
+      if (request !== void 0) {
+        await this.#recordStoryReadiness(request, command);
+      }
+      this.#publishStatus();
+      return Object.freeze({
+        ok: command.kind === "confirmed",
+        snapshot: toPublicSessionSnapshot(this.snapshot()),
+        ...action === void 0 ? {} : { action },
+        command,
+        ...command.kind === "confirmed" ? {
+          entryId: command.confirmation.entryId,
+          state: Object.freeze({
+            workKey: command.confirmation.workKey,
+            status: "saved",
+            entryId: command.confirmation.entryId,
+            entry: command.confirmation.entry,
+            syncVersion: command.confirmation.syncVersion
+          })
+        } : { error: command.reason }
+      });
+    }
+    #libraryCommandResponse(command, action) {
+      this.#publishStatus();
+      return Object.freeze({
+        ok: command.kind === "confirmed",
+        snapshot: toPublicSessionSnapshot(this.snapshot()),
+        ...action === void 0 ? {} : { action },
+        command,
+        ...command.kind === "confirmed" ? {
+          ...command.entryId === void 0 ? {} : { entryId: command.entryId }
+        } : { error: command.reason }
+      });
+    }
+    #finishQualificationResponse(command, action) {
+      this.#publishStatus();
+      return Object.freeze({
+        ok: command.kind === "acknowledged",
+        snapshot: toPublicSessionSnapshot(this.snapshot()),
+        ...action === void 0 ? {} : { action },
+        command,
+        ...command.kind === "failed" ? { error: command.reason } : {}
+      });
+    }
+    async #metadataContributionResponse(command, request) {
+      await this.#recordMetadataReadiness(request, command);
+      this.#publishStatus();
+      return Object.freeze({
+        ok: command.kind !== "failed",
+        snapshot: toPublicSessionSnapshot(this.snapshot()),
+        command,
+        ...command.kind === "failed" ? { error: command.reason } : {}
+      });
+    }
+    #savedFilterResponse(sync) {
+      this.#publishStatus();
+      return Object.freeze({
+        ok: sync.kind !== "failed",
+        snapshot: toPublicSessionSnapshot(this.snapshot()),
+        sync,
+        ...sync.kind === "failed" ? { error: sync.reason } : {}
+      });
+    }
+    async #firstStoryResponse(result, action, initiation) {
+      if (initiation?.kind === "popup_import") {
+        await this.#recordImportReadiness(result);
+      }
+      this.#publishStatus();
+      return Object.freeze({
+        ok: result.ok,
+        snapshot: toPublicSessionSnapshot(this.snapshot()),
+        ...action === void 0 ? {} : { action },
+        ...result.ok ? { state: result.state } : { error: result.error }
+      });
+    }
+    async #recordStoryReadiness(request, result) {
+      try {
+        if (result.kind === "confirmed") {
+          await this.#archiveReadinessStatus.record({
+            hostKind: request.hostKind,
+            actionKind: request.intent === "record_progress" ? "track" : "quick_add"
+          });
+          return;
+        }
+        const errorKind2 = this.#archiveErrorKind(result.reason);
+        if (errorKind2 !== null) {
+          await this.#archiveReadinessStatus.record({
+            hostKind: request.hostKind,
+            errorKind: errorKind2
+          });
+        }
+      } catch {
+      }
+    }
+    async #recordMetadataReadiness(request, result) {
+      try {
+        if (result.kind === "accepted" && (request.kind === "story_metadata" || result.updated)) {
+          await this.#archiveReadinessStatus.record({
+            hostKind: request.hostKind,
+            actionKind: "metadata"
+          });
+          return;
+        }
+        if (result.kind === "failed") {
+          const errorKind2 = this.#archiveErrorKind(result.reason);
+          if (errorKind2 !== null) {
+            await this.#archiveReadinessStatus.record({
+              hostKind: request.hostKind,
+              errorKind: errorKind2
+            });
+          }
+        }
+      } catch {
+      }
+    }
+    async #recordImportReadiness(result) {
+      let hostKind2 = "unknown";
+      try {
+        const tabs = await this.#callTabsQuery({ active: true, currentWindow: true });
+        const context = classifyActiveTabUrl(tabs[0]?.url, this.#webOrigin);
+        if ("site" in context) hostKind2 = context.site;
+        if (result.ok && result.state === "opened") {
+          await this.#archiveReadinessStatus.record({ hostKind: hostKind2, actionKind: "import" });
+          return;
+        }
+        if (!result.ok) {
+          const errorKind2 = result.error === "permission_required" ? "permission" : result.error === "unsupported_page" || result.error === "no_active_tab" || result.error === "invalid_url" ? "unsupported_page" : result.error === "collect_failed" ? "parser" : "unknown";
+          await this.#archiveReadinessStatus.record({ hostKind: hostKind2, errorKind: errorKind2 });
+        }
+      } catch {
+      }
+    }
+    #archiveErrorKind(reason) {
+      if (reason === "not_authenticated" || reason === "auth_expired") return "auth";
+      if (reason === "invalid_request" || reason === "invalid_response") return "parser";
+      if (reason === "unavailable" || reason === "rate_limited" || reason === "confirmation_missing") {
+        return "network";
+      }
+      return null;
+    }
+    async #bootstrapNativeAuthorityForArchiveRead() {
+      const state = this.snapshot().state;
+      if (state !== "signed_out" && state !== "reconnect_required") return;
+      if (!await this.#usesNativeAccountAuthority()) return;
+      await this.#prepareNativeAuthority();
+    }
+    #prepareNativeAuthority() {
+      if (this.#nativeAuthorityPreparation !== null) {
+        return this.#nativeAuthorityPreparation;
+      }
+      const operation = this.#prepareNativeAuthorityOnce();
+      this.#nativeAuthorityPreparation = operation;
+      void operation.then(
+        () => {
+          if (this.#nativeAuthorityPreparation === operation) {
+            this.#nativeAuthorityPreparation = null;
+          }
+        },
+        () => {
+          if (this.#nativeAuthorityPreparation === operation) {
+            this.#nativeAuthorityPreparation = null;
+          }
+        }
+      );
+      return operation;
+    }
+    async #prepareNativeAuthorityOnce() {
+      if (!await this.#usesNativeAccountAuthority()) {
+        return Object.freeze({ ready: true });
+      }
+      return this.#withAccountTransitionLock(
+        () => this.#prepareNativeAuthorityUnlocked()
+      );
+    }
+    async #prepareNativeAuthorityUnlocked() {
+      const before = this.#service.publicationScope();
+      const action = await this.#service.synchronizeProviderCredential();
+      const after = this.#service.publicationScope();
+      const scopeChanged = before?.accountId !== after?.accountId || before?.epoch !== after?.epoch;
+      if (scopeChanged) {
+        try {
+          await this.#accountData.clear();
+        } catch {
+        }
+        this.#projection.invalidate();
+      }
+      return Object.freeze({
+        ready: action.kind === "completed" && action.state === "connected" && after !== null,
+        action
+      });
+    }
+    requestSavedFilterSync() {
+      if (this.#mode === "kernel") this.#queueSavedFilterSync();
+    }
+    #queueSavedFilterSync(nativeAuthorityCurrent = false) {
+      if (this.#mode !== "kernel") return;
+      this.#savedFilterSyncQueuedWithCurrentAuthority ||= nativeAuthorityCurrent;
+      if (this.#savedFilterSyncQueued) return;
+      this.#savedFilterSyncQueued = true;
+      queueMicrotask(() => {
+        const authorityCurrent = this.#savedFilterSyncQueuedWithCurrentAuthority;
+        this.#savedFilterSyncQueued = false;
+        this.#savedFilterSyncQueuedWithCurrentAuthority = false;
+        void this.#runSavedFilterSync(authorityCurrent);
+      });
+    }
+    #runSavedFilterSync(nativeAuthorityCurrent = false) {
+      this.#savedFilterSyncInFlight ??= this.#withAccountTransitionLock(async () => {
+        if (!nativeAuthorityCurrent && await this.#usesNativeAccountAuthority()) {
+          const preparation = await this.#prepareNativeAuthorityUnlocked();
+          if (!preparation.ready) {
+            return Object.freeze({
+              kind: "failed",
+              reason: preparation.action?.kind === "unavailable" ? "unavailable" : "not_authenticated"
+            });
+          }
+        }
+        if (this.snapshot().state !== "connected") {
+          return Object.freeze({
+            kind: "failed",
+            reason: "not_authenticated"
+          });
+        }
+        return this.#savedFilters.sync();
+      }).finally(() => {
+        this.#savedFilterSyncInFlight = null;
+      });
+      return this.#savedFilterSyncInFlight;
+    }
+    async #withAccountTransitionLock(work) {
+      const previous = this.#accountTransitionTail;
+      let release = () => {
+      };
+      this.#accountTransitionTail = new Promise((resolve) => {
+        release = resolve;
+      });
+      await previous;
+      try {
+        return await work();
+      } finally {
+        release();
+      }
+    }
+    #publishStatus() {
+      this.#statusPublicationTail = this.#statusPublicationTail.then(async () => {
+        const status = await this.#extensionStatus();
+        const statusKey = JSON.stringify(status);
+        if (statusKey === this.#lastPublishedStatusKey) return;
+        this.#lastPublishedStatusKey = statusKey;
+        await this.#traceWebStatus.publish(status);
+      }).catch(() => {
+      });
+    }
+    async #extensionStatus() {
+      const [accountData, readiness] = await Promise.all([
+        this.#accountData.read().catch(() => null),
+        this.#archiveReadinessStatus.read().catch(
+          () => Object.freeze({})
+        )
+      ]);
+      return toExtensionStatus(this.snapshot(), {
+        firstSaveSeen: accountData?.summary?.firstStoryCompleted === true || Object.keys(accountData?.overlay?.entries ?? {}).length > 0,
+        browserKind: browserKind(this.#runtime),
+        readiness
+      });
+    }
+    async #popupState() {
+      const [accountData, preferences, activeTab] = await Promise.all([
+        this.#projection.read(),
+        this.#storage.get(POPUP_PREFERENCE_KEYS).catch(() => ({})),
+        this.#activeTabContext()
+      ]);
+      return Object.freeze({
+        ok: true,
+        authState: toPublicSessionSnapshot(this.snapshot()),
+        firstSaveSeen: accountData?.summary?.firstStoryCompleted === true,
+        libraryCount: accountData?.summary?.libraryCount ?? null,
+        activeTab,
+        pro: accountData?.summary?.pro === true,
+        autoTrackEnabled: preferences.prefAutoTrackEnabled !== false,
+        libraryInlayEnabled: preferences.prefLibraryInlayEnabled !== false,
+        ao3SavedFiltersEnabled: preferences.prefAo3SavedFiltersEnabled !== false,
+        metadataImproveEnabled: preferences.prefMetadataImproveEnabled !== false
+      });
+    }
+    async #activeTabContext() {
+      try {
+        const tabs = await this.#callTabsQuery({ active: true, currentWindow: true });
+        return classifyActiveTabUrl(tabs[0]?.url, this.#webOrigin);
+      } catch {
+        return Object.freeze({ kind: "unknown" });
+      }
+    }
+    #callTabsQuery(query) {
+      if (this.#storageMode === "promise") {
+        try {
+          return Promise.resolve(
+            this.#tabs.query(query)
+          );
+        } catch (error) {
+          return Promise.reject(error);
+        }
+      }
+      return new Promise((resolve, reject) => {
+        try {
+          this.#tabs.query(query, (tabs) => {
+            const message = this.#runtime.lastError?.message;
+            if (message) reject(new Error(message));
+            else resolve(tabs);
+          });
+        } catch (error) {
+          reject(error);
+        }
+      });
+    }
+    #usesNativeAccountAuthority() {
+      this.#isIos ??= (async () => {
+        if (/iPhone|iPad|iPod/i.test(globalThis.navigator?.userAgent ?? "")) return true;
+        if (typeof this.#runtime.getPlatformInfo !== "function") return false;
+        try {
+          let value;
+          if (this.#storageMode === "promise") {
+            value = await this.#runtime.getPlatformInfo();
+          } else {
+            value = await new Promise((resolve, reject) => {
+              this.#runtime.getPlatformInfo((info) => {
+                const message = this.#runtime.lastError?.message;
+                if (message) reject(new Error(message));
+                else resolve(info);
+              });
+            });
+          }
+          return isRecord18(value) && value.os === "ios";
+        } catch {
+          return false;
+        }
+      })();
+      return this.#isIos;
+    }
+  };
+  function installSessionRuntime(environment) {
+    const controller = new SessionRuntimeController(environment);
+    if (environment.mode === "kernel") {
+      SavedFilterSyncAlarm.install(
+        environment.alarms,
+        environment.runtime,
+        () => controller.requestSavedFilterSync()
+      );
+    }
+    environment.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (!isRecord18(message) || !Object.values(SESSION_MESSAGE_TYPES).includes(message.type)) {
+        return false;
+      }
+      void controller.handle(message, sender).then(
+        (response) => sendResponse(response),
+        () => sendResponse({
+          ok: false,
+          snapshot: toPublicSessionSnapshot(DEGRADED_STORAGE_SNAPSHOT),
+          error: "runtime_unavailable"
+        })
+      );
+      return true;
+    });
+    void controller.start();
+    return controller;
+  }
+
+  // src/extension-runtime/archive-readiness.mts
+  var ARCHIVE_READINESS_MESSAGE_TYPES = Object.freeze({
+    archiveSeen: "TRACE_ARCHIVE_SEEN"
+  });
+  function isRecord19(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function normalizeHandoffId(value) {
+    if (typeof value !== "string") return null;
+    const trimmed = value.trim();
+    return /^[A-Za-z0-9_-]{1,128}$/.test(trimmed) ? trimmed : null;
+  }
+  var ArchiveReadinessRuntimeController = class {
+    #service;
+    #status;
+    constructor(environment) {
+      this.#status = environment.status;
+      this.#service = new ArchiveReadinessService({
+        receipts: new NativeArchiveReadinessReceiptPort(
+          environment.runtime,
+          environment.storageMode
+        ),
+        permissions: new BrowserArchivePermissionSnapshotPort(
+          environment.permissions,
+          environment.runtime,
+          environment.storageMode
+        ),
+        ...environment.clock === void 0 ? {} : { clock: environment.clock }
+      });
+    }
+    async handle(message, sender) {
+      if (!isRecord19(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.archiveSeen) {
+        return null;
+      }
+      const hostKind2 = archiveHostKindFromSender(sender);
+      if (hostKind2 === null) return { ok: true, receipt: "ignored" };
+      void this.#status?.record({ hostKind: hostKind2 }).catch(() => {
+      });
+      const handoffId = normalizeHandoffId(message.handoffId);
+      const result = await this.#service.recordRun({
+        hostKind: hostKind2,
+        ...handoffId === null ? {} : { handoffId }
+      });
+      return { ok: true, receipt: result.kind };
+    }
+  };
+  function installArchiveReadinessRuntime(environment) {
+    const controller = new ArchiveReadinessRuntimeController(environment);
+    environment.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (!isRecord19(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.archiveSeen) {
+        return false;
+      }
+      void controller.handle(message, sender).then(
+        (response) => sendResponse(response),
+        () => sendResponse({ ok: true, receipt: "unavailable" })
+      );
+      return true;
+    });
+    return controller;
+  }
+
+  // src/extension-runtime/index.mts
+  var scope = globalThis;
+  scope.TRACE_SESSION_MODE = "kernel";
+  try {
+    const extension = scope.browser ?? scope.chrome;
+    if (!extension) throw new Error("extension environment unavailable");
+    const storageMode = scope.browser ? "promise" : "callback";
+    const archiveReadinessStatus = new BrowserArchiveReadinessStatus(
+      new BrowserStorage(extension.storage.local, extension.runtime, storageMode)
+    );
+    if (true) {
+      installArchiveReadinessRuntime({
+        runtime: extension.runtime,
+        ...extension.permissions === void 0 ? {} : { permissions: extension.permissions },
+        storageMode,
+        status: archiveReadinessStatus
+      });
+    }
+    if (!scope.indexedDB) throw new Error("private database unavailable");
+    let fallbackId = 0;
+    const randomId = () => {
+      const uuid = scope.crypto?.randomUUID?.();
+      if (uuid) return uuid;
+      fallbackId += 1;
+      return `${Date.now()}-${fallbackId}`;
+    };
+    installSessionRuntime({
+      mode: "kernel",
+      runtime: extension.runtime,
+      tabs: extension.tabs,
+      alarms: extension.alarms,
+      storageArea: extension.storage.local,
+      databaseFactory: scope.indexedDB,
+      storageMode,
+      fetch: globalThis.fetch.bind(globalThis),
+      apiBase: "https://api.tracefiction.com",
+      webOrigin: "https://www.tracefiction.com",
+      randomId,
+      archiveReadinessStatus
+    });
+  } catch {
+    scope.__traceSessionRuntimeBootFailed = true;
+  }
+})();
