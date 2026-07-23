@@ -35,13 +35,39 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     /// Must match `WEB_SHELL_UA` in `client/src/auth/auth-return.ts`.
     static let webShellUserAgentToken = "TraceFictionWebShell/1"
 
+    private static let productionWebHosts: Set<String> = [
+        "tracefiction.com",
+        "www.tracefiction.com",
+    ]
+
+    private static let verifiedAuthCallbackHosts: Set<String> = [
+        "www.tracefiction.com",
+    ]
+
+    private static var httpsAuthCallbackURL: URL? {
+        guard #available(iOS 17.4, *) else { return nil }
+        guard let origin = URL(string: webAppHTTPSOrigin),
+              origin.scheme?.lowercased() == "https",
+              let host = origin.host?.lowercased(),
+              productionWebHosts.contains(host)
+        else {
+            return nil
+        }
+        return URL(string: "https://www.tracefiction.com/auth/callback")
+    }
+
     private static var nativeAppMetadataJSON: String {
 #if DEBUG
         let releaseChannel = "debug"
 #else
         let releaseChannel = "app_store"
 #endif
-        var metadata = ["releaseChannel": releaseChannel]
+        var metadata: [String: Any] = [
+            "releaseChannel": releaseChannel,
+        ]
+        if let callbackURL = httpsAuthCallbackURL {
+            metadata["httpsAuthCallbackURL"] = callbackURL.absoluteString
+        }
         if let version = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleShortVersionString"
         ) as? String, !version.isEmpty {
@@ -619,25 +645,44 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         loadTraceURLRequest(url)
     }
 
-    /// Handles Auth0-style callbacks routed to `traceauth://…` (cold start / universal links).
+    /// Handles Auth0 callbacks routed through the custom-scheme fallback.
     func handleAuthCallback(url: URL) {
         guard let target = Self.rewriteTraceAuthURL(url) else { return }
         loadTraceURLRequest(target)
     }
 
-    /// Maps `traceauth://callback?…` → `{webAppHTTPSOrigin}/auth/callback?…`
+    /// Normalizes either callback transport into the Trace web callback.
     static func rewriteTraceAuthURL(_ url: URL) -> URL? {
-        guard url.scheme?.lowercased() == "traceauth" else { return url }
-        guard var parts = URLComponents(string: Self.webAppHTTPSOrigin) else { return nil }
+        let scheme = url.scheme?.lowercased()
+        let parts: URLComponents
+        if scheme == "traceauth" {
+            guard let webParts = URLComponents(string: Self.webAppHTTPSOrigin) else {
+                return nil
+            }
+            parts = webParts
+        } else if scheme == "https",
+                  let host = url.host?.lowercased(),
+                  verifiedAuthCallbackHosts.contains(host),
+                  url.path == "/auth/callback",
+                  let callbackParts = URLComponents(
+                    url: url,
+                    resolvingAgainstBaseURL: false
+                  ) {
+            parts = callbackParts
+        } else {
+            return url
+        }
+
+        var normalizedParts = parts
         let callbackParts = URLComponents(url: url, resolvingAgainstBaseURL: false)
         var queryItems = callbackParts?.queryItems ?? []
         queryItems.removeAll { $0.name == "trace_app" }
         queryItems.append(URLQueryItem(name: "trace_app", value: "1"))
 
-        parts.path = "/auth/callback"
-        parts.queryItems = queryItems
-        parts.fragment = callbackParts?.fragment
-        return parts.url
+        normalizedParts.path = "/auth/callback"
+        normalizedParts.queryItems = queryItems
+        normalizedParts.fragment = callbackParts?.fragment
+        return normalizedParts.url
     }
 
     func webView(
@@ -807,10 +852,8 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         activeAuthRecoveryAlert?.dismiss(animated: false)
         let sessionID = UUID()
         activeAuthSessionID = sessionID
-        let session = ASWebAuthenticationSession(
-            url: startURL,
-            callbackURLScheme: "traceauth"
-        ) { [weak self] callbackURL, error in
+        let completionHandler: ASWebAuthenticationSession.CompletionHandler = {
+            [weak self] callbackURL, error in
             guard let self = self else { return }
             guard self.activeAuthSessionID == sessionID else { return }
             self.authSession = nil
@@ -831,6 +874,22 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 self.loadTraceURLRequest(httpsURL)
             }
         }
+
+        let session: ASWebAuthenticationSession
+        if #available(iOS 17.4, *),
+           let callback = Self.httpsAuthenticationCallback(for: startURL) {
+            session = ASWebAuthenticationSession(
+                url: startURL,
+                callback: callback,
+                completionHandler: completionHandler
+            )
+        } else {
+            session = ASWebAuthenticationSession(
+                url: startURL,
+                callbackURLScheme: "traceauth",
+                completionHandler: completionHandler
+            )
+        }
         session.presentationContextProvider = self
         session.prefersEphemeralWebBrowserSession = false
         authSession = session
@@ -839,6 +898,30 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             activeAuthSessionID = nil
             presentAuthRecoveryAlert(kind: .failed, retryURL: startURL)
         }
+    }
+
+    @available(iOS 17.4, *)
+    private static func httpsAuthenticationCallback(
+        for startURL: URL
+    ) -> ASWebAuthenticationSession.Callback? {
+        guard httpsAuthCallbackURL != nil,
+              let authorizeParts = URLComponents(
+                url: startURL,
+                resolvingAgainstBaseURL: false
+              ),
+              let redirectValue = authorizeParts.queryItems?.first(
+                where: { $0.name == "redirect_uri" }
+              )?.value,
+              let redirectURL = URL(string: redirectValue),
+              redirectURL.scheme?.lowercased() == "https",
+              let host = redirectURL.host?.lowercased(),
+              verifiedAuthCallbackHosts.contains(host),
+              redirectURL.path == "/auth/callback"
+        else {
+            return nil
+        }
+
+        return .https(host: host, path: "/auth/callback")
     }
 
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
