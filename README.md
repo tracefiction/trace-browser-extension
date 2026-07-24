@@ -131,6 +131,9 @@ story ids, URLs, titles, private library fields, or raw errors. Archive
 readiness records are serialized in local storage, and a successful action
 clears an older coarse issue. Disabled builds inject no content scripts and
 delete both private kernel state and extension-local feature/readiness state.
+On desktop first install, the activation page's authenticated status handshake
+and token-free activation-readiness signal cause one explicit kernel Connect or
+Reconnect action; they do not restore the legacy ambient-token path.
 
 For a tagged release, confirm `package.json` version matches the generated manifest version. Safari consumes checked-in files under `Shared (Extension)/Resources`; Chromium and Firefox packages are generated into `dist/`, which is intentionally not committed.
 

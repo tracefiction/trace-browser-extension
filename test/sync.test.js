@@ -108,6 +108,44 @@ function createSyncHarness(
   };
 }
 
+function dispatchPageMessage(h, data, origin = "https://tracefiction.com") {
+  h.window.dispatchEvent(
+    new h.window.MessageEvent("message", {
+      data,
+      origin,
+      source: h.window,
+    }),
+  );
+}
+
+function createFirstInstallHarness({
+  url = "https://tracefiction.com/?activation=extension-installed",
+  sessionMode = "kernel",
+  authState = "signed_out",
+} = {}) {
+  return createSyncHarness(url, {
+    sessionMode,
+    sendMessageImpl(message, callback) {
+      if (message.type === "TRACE_EXTENSION_STATUS_QUERY") {
+        callback?.({
+          installed: true,
+          connected: false,
+          authState,
+        });
+      } else if (message.type === "TRACE_SESSION_ACTION") {
+        callback?.({
+          ok: true,
+          snapshot: {
+            state: "connected",
+            reason: "none",
+            canExecuteAuthenticated: true,
+          },
+        });
+      }
+    },
+  });
+}
+
 test("sync forwards same-origin TRACE_FICTION_TOKEN messages to background", async () => {
   const h = createSyncHarness();
   h.window.dispatchEvent(
@@ -346,6 +384,103 @@ test("sync answers same-origin extension status requests with sanitized state", 
       targetOrigin: "https://tracefiction.com",
     },
   ]);
+});
+
+test("kernel first install connects from both empty and existing library readiness", async () => {
+  const statusHarness = createFirstInstallHarness();
+  dispatchPageMessage(statusHarness, {
+    type: "TRACE_EXTENSION_STATUS_REQUEST",
+    nonce: "install-connect",
+  });
+  await flush();
+  assert.deepEqual(plainJson(statusHarness.messages), [
+    { type: "TRACE_EXTENSION_STATUS_QUERY", nonce: "install-connect" },
+    { type: "TRACE_SESSION_ACTION", action: "connect" },
+  ]);
+
+  const readyHarness = createFirstInstallHarness();
+  dispatchPageMessage(readyHarness, {
+    type: "TRACE_EXTENSION_FIRST_INSTALL_READY",
+    protocolVersion: 1,
+  });
+  await flush();
+  assert.equal(readyHarness.messages[0].type, "TRACE_EXTENSION_STATUS_QUERY");
+  assert.match(
+    readyHarness.messages[0].nonce,
+    /^first-install-[a-z0-9]+-[a-z0-9]+$/,
+  );
+  assert.deepEqual(plainJson(readyHarness.messages[1]), {
+    type: "TRACE_SESSION_ACTION",
+    action: "connect",
+  });
+});
+
+test("kernel first install reconnects a retained session at most once", async () => {
+  const h = createFirstInstallHarness({ authState: "reconnect_required" });
+  for (const nonce of ["install-reconnect-1", "install-reconnect-2"]) {
+    dispatchPageMessage(h, {
+      type: "TRACE_EXTENSION_STATUS_REQUEST",
+      nonce,
+    });
+    await flush();
+  }
+  assert.deepEqual(
+    plainJson(
+      h.messages.filter((message) => message.type === "TRACE_SESSION_ACTION"),
+    ),
+    [{ type: "TRACE_SESSION_ACTION", action: "reconnect" }],
+  );
+});
+
+test("first-install activation stays exact-origin, exact-envelope, kernel-only, and route-bound", async () => {
+  const invalidReadyCases = [
+    {
+      h: createFirstInstallHarness(),
+      origin: "https://evil.example",
+      data: {
+        type: "TRACE_EXTENSION_FIRST_INSTALL_READY",
+        protocolVersion: 1,
+      },
+    },
+    {
+      h: createFirstInstallHarness(),
+      origin: "https://tracefiction.com",
+      data: {
+        type: "TRACE_EXTENSION_FIRST_INSTALL_READY",
+        protocolVersion: 1,
+        token: "must-not-be-accepted",
+      },
+    },
+    {
+      h: createFirstInstallHarness({ url: "https://tracefiction.com/library" }),
+      origin: "https://tracefiction.com",
+      data: {
+        type: "TRACE_EXTENSION_FIRST_INSTALL_READY",
+        protocolVersion: 1,
+      },
+    },
+  ];
+  for (const item of invalidReadyCases) {
+    dispatchPageMessage(item.h, item.data, item.origin);
+    await flush();
+    assert.deepEqual(item.h.messages, []);
+  }
+
+  for (const h of [
+    createFirstInstallHarness({ url: "https://tracefiction.com/library" }),
+    createFirstInstallHarness({ sessionMode: "legacy" }),
+  ]) {
+    h.messages.length = 0;
+    dispatchPageMessage(h, {
+      type: "TRACE_EXTENSION_STATUS_REQUEST",
+      nonce: "bounded-status",
+    });
+    await flush();
+    assert.deepEqual(
+      h.messages.filter((message) => message.type === "TRACE_SESSION_ACTION"),
+      [],
+    );
+  }
 });
 
 test("sync drops invalid archive readiness values without failing status", async () => {

@@ -20,9 +20,15 @@ const FIRST_STORY_ADD_REQUEST_MESSAGE = "TRACE_FIRST_STORY_ADD_REQUEST";
 const FIRST_STORY_ADD_MESSAGE = "TRACE_FIRST_STORY_ADD";
 const FIRST_STORY_ADD_RESPONSE_MESSAGE = "TRACE_FIRST_STORY_ADD_RESPONSE";
 const CREDENTIAL_GRANT_REQUEST_MESSAGE = "TRACE_CREDENTIAL_GRANT_REQUEST";
+const SESSION_ACTION_MESSAGE = "TRACE_SESSION_ACTION";
+const FIRST_INSTALL_READY_MESSAGE = "TRACE_EXTENSION_FIRST_INSTALL_READY";
+const FIRST_INSTALL_ACTIVATION = "extension-installed";
 const SESSION_MODE = globalThis.TRACE_SESSION_MODE || "legacy";
 const KERNEL_SESSION_ACTIVE = SESSION_MODE === "kernel";
 const pendingCredentialGrants = new Map();
+let activationSessionRequest = null;
+let activationSessionConnected = false;
+let activationNonceSequence = 0;
 const STATUS_AUTH_STATES = new Set([
   "connected",
   "signed_out",
@@ -117,6 +123,70 @@ function safeStatusState() {
     connected: false,
     authState: "unknown",
   };
+}
+
+function isFirstInstallActivationPage() {
+  try {
+    const url = new window.URL(window.location.href);
+    return (
+      url.pathname === "/" &&
+      url.searchParams.get("activation") === FIRST_INSTALL_ACTIVATION
+    );
+  } catch {
+    return false;
+  }
+}
+
+// A kernel session is command-led: the Trace page never pushes an ambient
+// credential into it. The authenticated activation page's first status
+// handshake is the readiness signal for one explicit Connect/Reconnect action.
+async function ensureFirstInstallSession(state) {
+  if (
+    !KERNEL_SESSION_ACTIVE ||
+    activationSessionConnected ||
+    activationSessionRequest ||
+    !isFirstInstallActivationPage()
+  ) {
+    return;
+  }
+  const action =
+    state?.authState === "signed_out"
+      ? "connect"
+      : state?.authState === "reconnect_required"
+        ? "reconnect"
+        : null;
+  if (!action) return;
+
+  const request = requestRuntimeMessage(
+    { type: SESSION_ACTION_MESSAGE, action },
+    "[Trace Sync] Failed to activate the first-install session",
+  );
+  activationSessionRequest = request;
+  const response = await request;
+  if (activationSessionRequest !== request) return;
+  activationSessionRequest = null;
+  activationSessionConnected = response?.snapshot?.state === "connected";
+}
+
+async function handleFirstInstallReady(data) {
+  if (
+    !KERNEL_SESSION_ACTIVE ||
+    !isFirstInstallActivationPage() ||
+    data.protocolVersion !== 1 ||
+    Object.keys(data).length !== 2
+  ) {
+    return;
+  }
+  activationNonceSequence += 1;
+  const nonce = `first-install-${Date.now().toString(36)}-${activationNonceSequence.toString(36)}`;
+  const response = await requestRuntimeMessage(
+    {
+      type: STATUS_QUERY_MESSAGE,
+      nonce,
+    },
+    "[Trace Sync] Failed to query first-install session status",
+  );
+  await ensureFirstInstallSession(sanitizeStatusState(response));
 }
 
 function sanitizeStatusState(raw) {
@@ -243,14 +313,16 @@ async function handleStatusRequest(data) {
     },
     "[Trace Sync] Failed to query extension status",
   );
+  const state = sanitizeStatusState(response);
   window.postMessage(
     {
       type: STATUS_RESPONSE_MESSAGE,
       nonce,
-      state: sanitizeStatusState(response),
+      state,
     },
     window.location.origin,
   );
+  void ensureFirstInstallSession(state);
 }
 
 async function handleFirstStoryAddRequest(data) {
@@ -287,6 +359,10 @@ window.addEventListener("message", (event) => {
   }
   if (event.data?.type === FIRST_STORY_ADD_REQUEST_MESSAGE) {
     void handleFirstStoryAddRequest(event.data);
+    return;
+  }
+  if (event.data?.type === FIRST_INSTALL_READY_MESSAGE) {
+    void handleFirstInstallReady(event.data);
     return;
   }
   if (event.data?.type !== TOKEN_MESSAGE) return;
