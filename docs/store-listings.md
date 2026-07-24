@@ -1,4 +1,4 @@
-# Extension Store Copy - 0.6.0
+# Extension Store Copy - Browser 0.6.1 / iOS 0.6.0
 
 Use this copy for Chrome Web Store, Firefox Add-ons, App Store Connect, and
 public release notes. Keep evergreen store descriptions separate from
@@ -44,9 +44,10 @@ FictionPress.
 
 ## What's New / Release Notes
 
-Trace extension 0.6.0 rebuilds its connection and library foundations for more
+Trace extension 0.6.1 rebuilds its connection and library foundations for more
 reliable setup and browsing:
 
+- Opens Trace onboarding after a first Chrome or Firefox installation.
 - Explains when Safari still needs permission for the archive site and how to
   fix it.
 - Keeps the extension aligned with the Trace account signed in to the app,

@@ -4657,6 +4657,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   // src/extension-runtime/trace-web-navigation.mts
   var TRACE_WEB_OPEN_MESSAGE = "TRACE_OPEN_TRACE_URL";
   var MAX_TRACE_WEB_URL_LENGTH = 2048;
+  var FIRST_INSTALL_ACTIVATION_PATH = "/?activation=extension-installed";
   function isRecord16(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
@@ -4706,6 +4707,93 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
     }
   };
+  function activationTarget(webOrigin) {
+    try {
+      const configured = new URL(webOrigin);
+      if (configured.protocol !== "https:" && configured.protocol !== "http:" || configured.username || configured.password) {
+        return null;
+      }
+      return Object.freeze({
+        origin: configured.origin,
+        queryPattern: `${configured.protocol}//${configured.hostname}/*`,
+        url: new URL(FIRST_INSTALL_ACTIVATION_PATH, configured.origin).href
+      });
+    } catch {
+      return null;
+    }
+  }
+  function tabUsesOrigin(tab, origin) {
+    if (typeof tab !== "object" || tab === null || typeof tab.id !== "number" || typeof tab.url !== "string") {
+      return false;
+    }
+    try {
+      return new URL(tab.url).origin === origin;
+    } catch {
+      return false;
+    }
+  }
+  async function platformIsIos(runtime, mode) {
+    if (/iPhone|iPad|iPod/i.test(globalThis.navigator?.userAgent ?? "")) {
+      return true;
+    }
+    if (typeof runtime.getPlatformInfo !== "function") return false;
+    try {
+      const info = await extensionCall(
+        runtime,
+        "getPlatformInfo",
+        [],
+        runtime,
+        mode
+      );
+      return typeof info === "object" && info !== null && info.os === "ios";
+    } catch {
+      return false;
+    }
+  }
+  function installTraceFirstInstallActivation(options) {
+    const target = activationTarget(options.webOrigin);
+    if (!target || !options.runtime.onInstalled) return;
+    options.runtime.onInstalled.addListener((details) => {
+      if (details.reason !== "install") return;
+      void (async () => {
+        if (await platformIsIos(options.runtime, options.mode)) return;
+        try {
+          const tabs = await extensionCall(
+            options.tabs,
+            "query",
+            [{ url: [target.queryPattern] }],
+            options.runtime,
+            options.mode
+          );
+          const existing = tabs.find((tab) => tabUsesOrigin(tab, target.origin));
+          if (existing && typeof options.tabs.update === "function") {
+            try {
+              await extensionCall(
+                options.tabs,
+                "update",
+                [existing.id, { url: target.url, active: true }],
+                options.runtime,
+                options.mode
+              );
+              return;
+            } catch {
+            }
+          }
+        } catch {
+        }
+        try {
+          await extensionCall(
+            options.tabs,
+            "create",
+            [{ url: target.url, active: true }],
+            options.runtime,
+            options.mode
+          );
+        } catch {
+        }
+      })();
+    });
+  }
 
   // src/extension-runtime/trace-web-status.mts
   var TraceWebStatusNotification = class {
@@ -6009,6 +6097,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       new BrowserStorage(extension.storage.local, extension.runtime, storageMode)
     );
     if (true) {
+      installTraceFirstInstallActivation({
+        runtime: extension.runtime,
+        tabs: extension.tabs,
+        mode: storageMode,
+        webOrigin: "https://www.tracefiction.com"
+      });
       installArchiveReadinessRuntime({
         runtime: extension.runtime,
         ...extension.permissions === void 0 ? {} : { permissions: extension.permissions },

@@ -279,3 +279,22 @@ they pass on a newly archived build.
   filters still render inside that drawer.
 
 No API/server change is required by these findings.
+
+## Post-Tag Browser Install Correction
+
+The first unpacked Chrome check after tagging 0.6.0 found that a fresh browser
+install no longer opened Trace onboarding. The retired legacy background still
+owned and tested that listener, but the kernel release bundle did not. Browser
+release 0.6.1 restores the behavior inside the existing Trace web-navigation
+boundary:
+
+- only `runtime.onInstalled` with reason `install` can trigger it;
+- iOS remains app-led and does not open a Safari tab;
+- an existing exact-origin Trace tab is reused when possible, otherwise the
+  fixed `/?activation=extension-installed` URL opens in a new active tab; and
+- the package-mode test executes the listener from the generated kernel bundle
+  even when session storage cannot start, preventing another source-only test
+  gap.
+
+This correction changes no manifest permission, page scope, collected data, API
+request, or authentication boundary.
