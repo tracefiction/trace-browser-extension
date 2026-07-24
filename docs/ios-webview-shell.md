@@ -9,7 +9,8 @@ The long-term product direction may include a more native iOS app, but this shel
 - Loads the configured Trace web origin in a full-screen `WKWebView`.
 - Shows a native retry surface when the Trace main-frame web app load fails before the web UI can recover.
 - Marks the session as the native shell so the web app can show mobile-appropriate auth UI.
-- Handles the `traceauth://callback` URL scheme and returns the OAuth result to the web view.
+- Uses the verified Trace HTTPS `/auth/callback` on production iOS 17.4+ and
+  retains `traceauth://callback` for older iOS and local/debug fallback.
 - Shows a native retry alert when the external OAuth session is cancelled or fails before returning to the web view.
 - Reports iOS notification permission results back to the web app so denial and setup failures have visible recovery copy.
 - Opens Apple's subscription management sheet for Apple-billed Trace Unlimited accounts.
@@ -23,6 +24,15 @@ OAuth callbacks are rewritten back to the configured Trace web origin at
 `/auth/callback`, preserving the origin scheme/port for DEBUG builds and adding
 `trace_app=1` so the web app can reliably detect the native shell after a cold
 start callback.
+
+The canonical production callback host is declared as a `webcredentials:`
+Associated Domain and serves `/.well-known/apple-app-site-association` from the
+web app.
+Redirect-only hosts are intentionally not declared.
+`ASWebAuthenticationSession.Callback.https` matches the HTTPS callback on iOS
+17.4 and later. The shell only advertises this capability when its configured
+web origin is a production Trace HTTPS host; otherwise the web app requests the
+custom callback.
 
 ## Safari Extension Setup
 
@@ -53,6 +63,24 @@ Xcode reinstall behavior is not authoritative for fresh users. A local build ove
 - `Shared (Extension)/Resources/` - Safari Web Extension resources included in the app build.
 
 The generated web origin is written by `npm run build` / `npm run build:release`.
+
+Before an iOS release, confirm both the deployed callback URL and
+`traceauth://callback` are in the Auth0 application's callback allowlist. Fetch
+the AASA file from every associated production domain and verify it returns
+JSON without authentication or a cross-host redirect. Confirm the Apple App ID
+and distribution provisioning profile include the Associated Domains
+capability; the signing-free simulator build cannot validate provisioning.
+
+After archiving, verify that the app version, build number, signed Associated
+Domains entitlement, and every embedded Safari extension resource match this
+checkout:
+
+```bash
+npm run ios:verify-archive -- "/path/to/Trace (iOS).xcarchive"
+```
+
+This check intentionally fails if Xcode archived a differently versioned
+checkout or bundled stale generated extension resources.
 
 ## Agent Simulator Validation
 

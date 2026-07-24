@@ -14,6 +14,7 @@
     "build:disabled:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=disabled node scripts/build.mjs",
     "build:release": "npm run build:kernel:release",
     "ios:build": "node scripts/ios-simulator-build.mjs",
+    "ios:verify-archive": "node scripts/verify-ios-archive.mjs",
     "ios:screenshot:load-failure": "node scripts/ios-simulator-screenshot.mjs",
     "package:chrome": "npm run build:release && npm run zip:chrome",
     "package:firefox": "npm run build:release && npm run zip:firefox",

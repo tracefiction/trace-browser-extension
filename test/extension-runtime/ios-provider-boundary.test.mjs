@@ -79,14 +79,69 @@ test("the app synchronizer is the sole v2 writer and native utility handlers do 
 test("the one app-opening route is fixed and unknown destinations fail closed", () => {
   const app = read("iOS (App)", "TraceWebViewController.swift");
   assert.match(app, /url\.host\?\.lowercased\(\) == "open"/);
-  assert.match(app, /callbackParts\?\.path\.isEmpty == true/);
+  assert.match(app, /callbackParts\.path\.isEmpty/);
   assert.match(app, /queryItems\.count == 1/);
   assert.match(app, /queryItems\[0\]\.name == "destination"/);
   assert.match(app, /queryItems\[0\]\.value == "extension-connect"/);
   assert.match(app, /parts\.path = "\/setup"/);
   assert.match(app, /URLQueryItem\(name: "setupPath", value: "ios-app"\)/);
   assert.match(app, /parts\.fragment = "first-story-setup"/);
-  assert.match(app, /guard url\.host\?\.lowercased\(\) == "callback" else \{ return nil \}/);
+  assert.match(
+    app,
+    /guard url\.host\?\.lowercased\(\) == "callback",[\s\S]*callbackParts\.path\.isEmpty,[\s\S]*callbackParts\.user == nil,[\s\S]*callbackParts\.password == nil,[\s\S]*callbackParts\.port == nil/,
+  );
+});
+
+test("native auth callbacks use one verified HTTPS route with a custom-scheme fallback", () => {
+  const app = read("iOS (App)", "TraceWebViewController.swift");
+  const debugEntitlements = read("Trace-iOS-Debug.entitlements");
+  const releaseEntitlements = read("Trace-iOS-Release.entitlements");
+
+  assert.match(app, /verifiedHTTPSAuthCallbackHost = "www\.tracefiction\.com"/);
+  assert.match(app, /verifiedHTTPSAuthCallbackPath = "\/auth\/callback"/);
+  assert.match(app, /guard #available\(iOS 17\.4, \*\) else \{ return nil \}/);
+  assert.match(app, /metadata\["httpsAuthCallbackURL"\] = callbackURL\.absoluteString/);
+  assert.match(
+    app,
+    /parts\.scheme\?\.lowercased\(\) == "https"[\s\S]*parts\.host\?\.lowercased\(\) == verifiedHTTPSAuthCallbackHost[\s\S]*parts\.path == verifiedHTTPSAuthCallbackPath[\s\S]*parts\.user == nil[\s\S]*parts\.password == nil[\s\S]*parts\.port == nil/,
+  );
+  assert.match(
+    app,
+    /let redirectItems = \(authorizeParts\.queryItems \?\? \[\]\)\.filter[\s\S]*redirectItems\.count == 1[\s\S]*redirectItems\[0\]\.value == callbackURL\.absoluteString/,
+  );
+  assert.match(
+    app,
+    /ASWebAuthenticationSession\([\s\S]*callback: callback,[\s\S]*completionHandler: completionHandler/,
+  );
+  assert.match(
+    app,
+    /ASWebAuthenticationSession\([\s\S]*callbackURLScheme: "traceauth",[\s\S]*completionHandler: completionHandler/,
+  );
+  assert.match(debugEntitlements, /webcredentials:www\.tracefiction\.com/);
+  assert.match(releaseEntitlements, /webcredentials:www\.tracefiction\.com/);
+  assert.doesNotMatch(debugEntitlements, /authsrv:/);
+  assert.doesNotMatch(releaseEntitlements, /authsrv:/);
+});
+
+test("opening iOS extension Settings is immediate and independent of authentication", () => {
+  const app = read("iOS (App)", "TraceWebViewController.swift");
+  const start = app.indexOf(
+    "private func handleTraceSafariExtensionSettingsRequest",
+  );
+  const end = app.indexOf(
+    "private func handleTraceSafariStoryOpenRequest",
+    start,
+  );
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+
+  const settingsHandler = app.slice(start, end);
+  assert.match(settingsHandler, /SFSafariSettings\.openExtensionsSettings/);
+  assert.doesNotMatch(settingsHandler, /\bTask\b|\bawait\b/);
+  assert.doesNotMatch(
+    settingsHandler,
+    /storeCurrentTraceTokenForSafariExtension/,
+  );
 });
 
 test("archive onboarding choices open fixed mobile destinations and record the attempted URL", () => {

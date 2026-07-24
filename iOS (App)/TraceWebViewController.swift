@@ -36,13 +36,37 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     /// Must match `WEB_SHELL_UA` in `client/src/auth/auth-return.ts`.
     static let webShellUserAgentToken = "TraceFictionWebShell/1"
 
+    private static let productionWebHosts: Set<String> = [
+        "tracefiction.com",
+        "www.tracefiction.com",
+    ]
+    private static let verifiedHTTPSAuthCallbackHost = "www.tracefiction.com"
+    private static let verifiedHTTPSAuthCallbackPath = "/auth/callback"
+
+    private static var httpsAuthCallbackURL: URL? {
+        guard #available(iOS 17.4, *) else { return nil }
+        guard let origin = URL(string: webAppHTTPSOrigin),
+              origin.scheme?.lowercased() == "https",
+              let host = origin.host?.lowercased(),
+              productionWebHosts.contains(host)
+        else {
+            return nil
+        }
+        return URL(
+            string: "https://\(verifiedHTTPSAuthCallbackHost)\(verifiedHTTPSAuthCallbackPath)"
+        )
+    }
+
     private static var nativeAppMetadataJSON: String {
 #if DEBUG
         let releaseChannel = "debug"
 #else
         let releaseChannel = "app_store"
 #endif
-        var metadata = ["releaseChannel": releaseChannel]
+        var metadata: [String: Any] = ["releaseChannel": releaseChannel]
+        if let callbackURL = httpsAuthCallbackURL {
+            metadata["httpsAuthCallbackURL"] = callbackURL.absoluteString
+        }
         if let version = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleShortVersionString"
         ) as? String, !version.isEmpty {
@@ -657,24 +681,31 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         loadTraceURLRequest(url)
     }
 
-    /// Handles Auth0-style callbacks routed to `traceauth://…` (cold start / universal links).
+    /// Handles fixed custom-scheme routes delivered by iOS.
     func handleAuthCallback(url: URL) {
         guard let target = Self.rewriteTraceAuthURL(url) else { return }
         loadTraceURLRequest(target)
     }
 
-    /// Maps `traceauth://callback?…` → `{webAppHTTPSOrigin}/auth/callback?…`
+    /// Maps the fixed onboarding route or either supported auth callback
+    /// transport back into the configured Trace web origin.
     static func rewriteTraceAuthURL(_ url: URL) -> URL? {
-        guard url.scheme?.lowercased() == "traceauth" else { return url }
         guard var parts = URLComponents(string: Self.webAppHTTPSOrigin) else { return nil }
-        let callbackParts = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        if url.host?.lowercased() == "open" {
-            let queryItems = callbackParts?.queryItems ?? []
-            guard callbackParts?.path.isEmpty == true,
-                  callbackParts?.fragment == nil,
-                  callbackParts?.user == nil,
-                  callbackParts?.password == nil,
-                  callbackParts?.port == nil,
+        guard let callbackParts = URLComponents(
+            url: url,
+            resolvingAgainstBaseURL: false
+        ) else {
+            return nil
+        }
+
+        let scheme = url.scheme?.lowercased()
+        if scheme == "traceauth", url.host?.lowercased() == "open" {
+            let queryItems = callbackParts.queryItems ?? []
+            guard callbackParts.path.isEmpty,
+                  callbackParts.fragment == nil,
+                  callbackParts.user == nil,
+                  callbackParts.password == nil,
+                  callbackParts.port == nil,
                   queryItems.count == 1,
                   queryItems[0].name == "destination",
                   queryItems[0].value == "extension-connect"
@@ -686,15 +717,43 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             parts.fragment = "first-story-setup"
             return parts.url
         }
-        guard url.host?.lowercased() == "callback" else { return nil }
-        var queryItems = callbackParts?.queryItems ?? []
+
+        if scheme == "traceauth" {
+            guard url.host?.lowercased() == "callback",
+                  callbackParts.path.isEmpty,
+                  callbackParts.user == nil,
+                  callbackParts.password == nil,
+                  callbackParts.port == nil
+            else {
+                return nil
+            }
+        } else if scheme == "https" {
+            guard isVerifiedHTTPSAuthCallback(url) else { return nil }
+        } else {
+            return nil
+        }
+
+        var queryItems = callbackParts.queryItems ?? []
         queryItems.removeAll { $0.name == "trace_app" }
         queryItems.append(URLQueryItem(name: "trace_app", value: "1"))
 
         parts.path = "/auth/callback"
         parts.queryItems = queryItems
-        parts.fragment = callbackParts?.fragment
+        parts.fragment = callbackParts.fragment
         return parts.url
+    }
+
+    private static func isVerifiedHTTPSAuthCallback(_ url: URL) -> Bool {
+        guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        else {
+            return false
+        }
+        return parts.scheme?.lowercased() == "https" &&
+            parts.host?.lowercased() == verifiedHTTPSAuthCallbackHost &&
+            parts.path == verifiedHTTPSAuthCallbackPath &&
+            parts.user == nil &&
+            parts.password == nil &&
+            parts.port == nil
     }
 
     func webView(
@@ -864,10 +923,8 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         activeAuthRecoveryAlert?.dismiss(animated: false)
         let sessionID = UUID()
         activeAuthSessionID = sessionID
-        let session = ASWebAuthenticationSession(
-            url: startURL,
-            callbackURLScheme: "traceauth"
-        ) { [weak self] callbackURL, error in
+        let completionHandler: ASWebAuthenticationSession.CompletionHandler = {
+            [weak self] callbackURL, error in
             guard let self = self else { return }
             guard self.activeAuthSessionID == sessionID else { return }
             self.authSession = nil
@@ -888,6 +945,22 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 self.loadTraceURLRequest(httpsURL)
             }
         }
+
+        let session: ASWebAuthenticationSession
+        if #available(iOS 17.4, *),
+           let callback = Self.httpsAuthenticationCallback(for: startURL) {
+            session = ASWebAuthenticationSession(
+                url: startURL,
+                callback: callback,
+                completionHandler: completionHandler
+            )
+        } else {
+            session = ASWebAuthenticationSession(
+                url: startURL,
+                callbackURLScheme: "traceauth",
+                completionHandler: completionHandler
+            )
+        }
         session.presentationContextProvider = self
         session.prefersEphemeralWebBrowserSession = false
         authSession = session
@@ -896,6 +969,34 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             activeAuthSessionID = nil
             presentAuthRecoveryAlert(kind: .failed, retryURL: startURL)
         }
+    }
+
+    @available(iOS 17.4, *)
+    private static func httpsAuthenticationCallback(
+        for startURL: URL
+    ) -> ASWebAuthenticationSession.Callback? {
+        guard let callbackURL = httpsAuthCallbackURL,
+              let authorizeParts = URLComponents(
+                url: startURL,
+                resolvingAgainstBaseURL: false
+              )
+        else {
+            return nil
+        }
+
+        let redirectItems = (authorizeParts.queryItems ?? []).filter {
+            $0.name == "redirect_uri"
+        }
+        guard redirectItems.count == 1,
+              redirectItems[0].value == callbackURL.absoluteString
+        else {
+            return nil
+        }
+
+        return .https(
+            host: verifiedHTTPSAuthCallbackHost,
+            path: verifiedHTTPSAuthCallbackPath
+        )
     }
 
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
@@ -1546,33 +1647,28 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     }
 
     private func handleTraceSafariExtensionSettingsRequest(nonce: String) {
-        Task { [weak self] in
-            guard let self else { return }
+        guard #available(iOS 26.2, *) else {
+            postSafariExtensionActionResult(
+                type: "TRACE_IOS_OPEN_EXTENSION_SETTINGS_RESPONSE",
+                nonce: nonce,
+                ok: false,
+                error: "settings_unsupported"
+            )
+            return
+        }
 
-            await MainActor.run {
-                guard #available(iOS 26.2, *) else {
-                    self.postSafariExtensionActionResult(
-                        type: "TRACE_IOS_OPEN_EXTENSION_SETTINGS_RESPONSE",
-                        nonce: nonce,
-                        ok: false,
-                        error: "settings_unsupported"
-                    )
-                    return
-                }
-
-                let identifiers = Self.safariExtensionCandidateIdentifiers()
-                SFSafariSettings.openExtensionsSettings(
-                    forIdentifiers: identifiers
-                ) { [weak self] error in
-                    DispatchQueue.main.async {
-                        self?.postSafariExtensionActionResult(
-                            type: "TRACE_IOS_OPEN_EXTENSION_SETTINGS_RESPONSE",
-                            nonce: nonce,
-                            ok: error == nil,
-                            error: error == nil ? nil : "settings_open_failed"
-                        )
-                    }
-                }
+        // Opening system settings is independent of extension authentication.
+        // Keep this call directly coupled to the reader's tap.
+        SFSafariSettings.openExtensionsSettings(
+            forIdentifiers: Self.safariExtensionCandidateIdentifiers()
+        ) { [weak self] error in
+            DispatchQueue.main.async {
+                self?.postSafariExtensionActionResult(
+                    type: "TRACE_IOS_OPEN_EXTENSION_SETTINGS_RESPONSE",
+                    nonce: nonce,
+                    ok: error == nil,
+                    error: error == nil ? nil : "settings_open_failed"
+                )
             }
         }
     }
