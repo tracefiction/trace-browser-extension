@@ -205,11 +205,10 @@
     if (!isSupportedFilterPath()) return null;
     var byId = document.getElementById("work-filters");
     if (byId && byId.tagName && byId.tagName.toLowerCase() === "form") return byId;
-    var forms = document.querySelectorAll("form.filters, form[action*='/works']");
+    var forms = document.querySelectorAll("form.filters");
     for (var i = 0; i < forms.length; i++) {
       var form = forms[i];
-      var action = String(form.getAttribute("action") || "");
-      if (action.indexOf("/works") >= 0 || formHasWorkSearchControls(form)) return form;
+      if (formHasWorkSearchControls(form)) return form;
     }
     return null;
   }
@@ -410,7 +409,14 @@
   function requestSavedFiltersSync() {
     try {
       if (!ext.runtime || typeof ext.runtime.sendMessage !== "function") return;
-      ext.runtime.sendMessage({ type: SYNC_REQUEST_MESSAGE }, function () {
+      var message = { type: SYNC_REQUEST_MESSAGE };
+      if (globalThis.browser) {
+        Promise.resolve(ext.runtime.sendMessage(message)).catch(function () {
+          /* Best-effort background sync; local save has already succeeded. */
+        });
+        return;
+      }
+      ext.runtime.sendMessage(message, function () {
         /* Best-effort background sync; local save has already succeeded. */
       });
     } catch (_) {

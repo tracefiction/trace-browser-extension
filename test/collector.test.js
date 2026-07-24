@@ -981,6 +981,80 @@ test("sendListingMetadataRefreshForTrackedItems dedupes repeated listing submiss
   ]);
 });
 
+test("kernel listing metadata selects tracked rows through the bounded account projection", () => {
+  const html = `<!doctype html><html><body>
+    <div id="content_wrapper_inner">
+      <div class="z-list zhover zpointer">
+        <a class="stitle" href="/s/7654321/1/Tracked-Story">Tracked Story</a>
+        by <a href="/u/1/tester">tester</a>
+        <div class="z-indent">
+          Tracked summary.
+          <div class="z-padtop2 xgray">Rated: Fiction T - English - Words: 12,345</div>
+        </div>
+      </div>
+      <div class="z-list zhover zpointer">
+        <a class="stitle" href="/s/9999999/1/Untracked-Story">Untracked Story</a>
+        by <a href="/u/2/tester">tester</a>
+        <div class="z-indent">Untracked summary.</div>
+      </div>
+    </div>
+  </body></html>`;
+  const dom = new JSDOM(html, {
+    url: "https://www.fanfiction.net/book/Example/",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  const sentMessages = [];
+  let storageReads = 0;
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(message, callback) {
+        sentMessages.push(message);
+        if (message.type === "TRACE_ACCOUNT_PROJECTION_GET") {
+          callback({
+            ok: true,
+            projection: {
+              entries: {
+                "ffn:7654321": { status: "READING" },
+              },
+              workPreferences: {},
+              syncVersion: "2026-07-20T12:00:00.000Z",
+            },
+          });
+        }
+      },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get() {
+          storageReads += 1;
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+  const { sendListingMetadataRefreshForTrackedItems } = createCollectorBindings(
+    dom,
+    { chrome, sessionMode: "kernel" },
+  );
+
+  sendListingMetadataRefreshForTrackedItems(0);
+
+  assert.equal(storageReads, 0);
+  assert.equal(sentMessages.length, 2);
+  assert.deepEqual(plainJson(sentMessages[0]), {
+    type: "TRACE_ACCOUNT_PROJECTION_GET",
+    workKeys: ["ffn:7654321", "ffn:9999999"],
+  });
+  assert.equal(sentMessages[1].type, "TRACE_LIBRARY_METADATA_REFRESH");
+  assert.deepEqual(
+    plainJson(sentMessages[1].payload.items.map((item) => item.sourceStoryId)),
+    ["7654321"],
+  );
+});
+
 test("parseFFNMeta: listing row — characters after Published", () => {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url: "https://www.fanfiction.net/book/Harry-Potter/",
@@ -1136,6 +1210,10 @@ function createStoryAutoTrackPendingHarness(options = {}) {
     configurable: true,
   });
   dom.window.document.hasFocus = () => true;
+  const scrolledTargets = [];
+  dom.window.HTMLElement.prototype.scrollIntoView = function () {
+    scrolledTargets.push(this);
+  };
 
   const collectorSrc = fs.readFileSync(
     path.join(
@@ -1156,7 +1234,11 @@ function createStoryAutoTrackPendingHarness(options = {}) {
     options.store || {},
   );
   const sent = [];
+  const projectionResponses = Array.isArray(options.projectionResponses)
+    ? options.projectionResponses.slice()
+    : null;
   let autoTrackCallback;
+  let connectAndSaveCallback;
   let runtimeMessageListener = null;
   const chrome = {
     runtime: {
@@ -1173,6 +1255,26 @@ function createStoryAutoTrackPendingHarness(options = {}) {
           }
           return;
         }
+        if (msg.type === "TRACE_ACCOUNT_PROJECTION_GET") {
+          if (typeof cb === "function") {
+            cb((projectionResponses && projectionResponses.length > 0
+              ? projectionResponses.shift()
+              : options.projectionResponse) || {
+              ok: true,
+              snapshot: {
+                state: "connected",
+                reason: "none",
+                canExecuteAuthenticated: true,
+              },
+              projection: {
+                entries: {},
+                workPreferences: {},
+                syncVersion: null,
+              },
+            });
+          }
+          return;
+        }
         if (msg.type === "TRACE_AUTO_TRACK") {
           autoTrackCallback = cb;
           if (!options.holdAutoTrack && typeof cb === "function") {
@@ -1185,10 +1287,37 @@ function createStoryAutoTrackPendingHarness(options = {}) {
           return;
         }
         if (msg.type === "TRACE_IOS_PENDING_FIRST_STORY_GET") {
+          const response = options.pendingFirstStoryResponse || { ok: true, url: "" };
           if (typeof cb === "function") {
-            cb(options.pendingFirstStoryResponse || { ok: true, url: "" });
+            cb(response);
+            return;
           }
-          return;
+          return Promise.resolve(response);
+        }
+        if (msg.type === "TRACE_CONNECT_AND_SAVE") {
+          const response = options.connectAndSaveResponse || {
+            ok: true,
+            snapshot: {
+              state: "connected",
+              reason: "none",
+              canExecuteAuthenticated: true,
+            },
+            error: "commands_unavailable",
+          };
+          if (options.holdConnectAndSave) {
+            if (typeof cb === "function") {
+              connectAndSaveCallback = cb;
+              return;
+            }
+            return new Promise((resolve) => {
+              connectAndSaveCallback = resolve;
+            });
+          }
+          if (typeof cb === "function") {
+            cb(response);
+            return;
+          }
+          return Promise.resolve(response);
         }
         if (msg.type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR") {
           if (typeof cb === "function") cb({ ok: true });
@@ -1230,6 +1359,7 @@ function createStoryAutoTrackPendingHarness(options = {}) {
   } else {
     installCollectorChrome(dom, chrome);
   }
+  dom.window.TRACE_SESSION_MODE = options.sessionMode || "legacy";
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -1238,9 +1368,13 @@ function createStoryAutoTrackPendingHarness(options = {}) {
   return {
     dom,
     sent,
+    scrolledTargets,
     store,
     autoTrackCallback(response) {
       autoTrackCallback(response);
+    },
+    resolveConnectAndSave(response) {
+      connectAndSaveCallback(response);
     },
     sendRuntimeMessage(message) {
       return new Promise((resolve) => {
@@ -1462,6 +1596,253 @@ test("matching iOS pending first-story URL triggers quick-add and clears pending
   assert.equal(pendingClears.length, 1);
 });
 
+test("kernel pending first story automatically sends one bounded command and focuses the confirmed story control", async () => {
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    holdConnectAndSave: true,
+    store: { prefAutoTrackEnabled: false },
+    pendingFirstStoryResponse: {
+      ok: true,
+      mode: "story",
+      hostKind: "ffn",
+      handoffId: "handoff_kernel_7038840",
+      url: "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter",
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  const handle = h.dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle);
+  assert.match(handle.textContent || "", /Connecting/i);
+  assert.equal(handle.disabled, true);
+  assert.equal(h.dom.window.document.activeElement, handle);
+  assert.ok(h.scrolledTargets.length >= 1);
+  assert.equal(h.sent.filter((message) => message.type === "TRACE_QUICK_ADD").length, 0);
+  assert.equal(
+    h.sent.filter((message) => message.type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR").length,
+    0,
+  );
+
+  h.dom.window.dispatchEvent(new h.dom.window.Event("focus"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const commands = h.sent.filter((message) => message.type === "TRACE_CONNECT_AND_SAVE");
+  assert.equal(commands.length, 1);
+  assert.equal(commands[0].workKey, "ffn:7038840");
+  assert.equal(commands[0].handoffId, "handoff_kernel_7038840");
+  assert.equal(commands[0].payload.s, "ffn");
+  assert.equal(commands[0].payload.item.ctx, "story");
+  assert.equal(commands[0].payload.item.u, "https://www.fanfiction.net/s/7038840/");
+  assert.equal(h.sent.filter((message) => message.type === "TRACE_QUICK_ADD").length, 0);
+
+  const entryId = "00000000-0000-4000-8000-000000000123";
+  h.resolveConnectAndSave({
+    ok: true,
+    snapshot: {
+      state: "connected",
+      reason: "none",
+      canExecuteAuthenticated: true,
+    },
+    entryId,
+    command: {
+      kind: "confirmed",
+      intent: "ensure_saved",
+      confirmation: {
+        workKey: "ffn:7038840",
+        entryId,
+        entry: {
+          status: "PLANNING",
+          readerStatus: "PLANNING",
+          canonicalReaderStatus: "SAVED",
+          entryId,
+        },
+        syncVersion: "2026-07-19T12:00:00.000Z",
+      },
+      source: "mutation",
+      projection: "published",
+      receipt: "published",
+      handoff: "cleared",
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.match(handle.textContent || "", /Saved/i);
+  assert.equal(handle.disabled, false);
+  assert.equal(h.dom.window.document.activeElement, handle);
+  assert.ok(h.scrolledTargets.length >= 2);
+  assert.equal(h.sent.filter((message) => message.type === "TRACE_QUICK_ADD").length, 0);
+  assert.equal(
+    h.sent.filter((message) => message.type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR").length,
+    0,
+  );
+});
+
+test("kernel pending first-story automatic failure stays bounded and offers an explicit retry", async () => {
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    pendingFirstStoryResponse: {
+      ok: true,
+      mode: "browse",
+      hostKind: "ffn",
+      handoffId: "handoff_kernel_retry_7038840",
+      url: "",
+    },
+    connectAndSaveResponse: {
+      ok: false,
+      snapshot: {
+        state: "connected",
+        reason: "none",
+        canExecuteAuthenticated: true,
+      },
+      error: "confirmation_missing",
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  const handle = h.dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle);
+  assert.match(handle.textContent || "", /Retry save/i);
+  assert.equal(handle.disabled, false);
+  assert.equal(
+    h.sent.filter((message) => message.type === "TRACE_CONNECT_AND_SAVE").length,
+    1,
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(
+    h.sent.filter((message) => message.type === "TRACE_CONNECT_AND_SAVE").length,
+    1,
+  );
+
+  handle.click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(
+    h.sent.filter((message) => message.type === "TRACE_CONNECT_AND_SAVE").length,
+    2,
+  );
+});
+
+test("kernel pending first story without an opaque app handoff remains explicit", async () => {
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    pendingFirstStoryResponse: {
+      ok: true,
+      mode: "story",
+      hostKind: "ffn",
+      url: "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter",
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  const handle = h.dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle);
+  assert.match(handle.textContent || "", /Connect and save/i);
+  assert.equal(handle.disabled, false);
+  assert.equal(
+    h.sent.filter((message) => message.type === "TRACE_CONNECT_AND_SAVE").length,
+    0,
+  );
+});
+
+test("kernel story projection renders known state with migrated mutation controls", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000123";
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    pendingFirstStoryResponse: { ok: true, url: "" },
+    projectionResponse: {
+      ok: true,
+      snapshot: {
+        state: "connected",
+        reason: "none",
+        canExecuteAuthenticated: true,
+      },
+      projection: {
+        entries: {
+          "ffn:7038840": {
+            status: "READING",
+            readerStatus: "READING",
+            canonicalReaderStatus: "READING",
+            entryId,
+            chapters: { current: 2, total: 12 },
+            rating: 4,
+          },
+        },
+        workPreferences: {},
+        syncVersion: "2026-07-20T12:00:00.000Z",
+      },
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  const projectionRequest = h.sent.find(
+    (message) => message.type === "TRACE_ACCOUNT_PROJECTION_GET",
+  );
+  assert.deepEqual(plainJson(projectionRequest.workKeys), ["ffn:7038840"]);
+
+  const handle = h.dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle);
+  assert.match(handle.textContent || "", /Reading/i);
+  handle.click();
+  const sheet = h.dom.window.document.querySelector("[data-trace-story-sheet]");
+  assert.equal(sheet.getAttribute("aria-hidden"), "false");
+  assert.ok(sheet.querySelector("[data-trace-status-choices]"));
+  assert.ok(sheet.querySelector("[data-trace-rating-control]"));
+  assert.equal(sheet.querySelector("[data-trace-catchup-action]"), null);
+  assert.ok(sheet.querySelector("[data-trace-hidden-action]"));
+});
+
+test("kernel story projection retries a transient cold-worker read without retrying mutations", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000123";
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    pendingFirstStoryResponse: { ok: true, url: "" },
+    projectionResponses: [
+      { ok: false },
+      {
+        ok: true,
+        snapshot: {
+          state: "connected",
+          reason: "none",
+          canExecuteAuthenticated: true,
+        },
+        projection: {
+          entries: {
+            "ffn:7038840": {
+              status: "READING",
+              readerStatus: "READING",
+              canonicalReaderStatus: "READING",
+              entryId,
+              chapters: { current: 3, total: 12 },
+            },
+          },
+          workPreferences: {},
+          syncVersion: "2026-07-20T12:00:00.000Z",
+        },
+      },
+    ],
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 400));
+
+  assert.equal(
+    h.sent.filter((message) => message.type === "TRACE_ACCOUNT_PROJECTION_GET").length,
+    2,
+  );
+  assert.equal(
+    h.sent.filter((message) =>
+      message.type === "TRACE_AUTO_TRACK" ||
+      message.type === "TRACE_QUICK_ADD"
+    ).length,
+    0,
+  );
+  const handle = h.dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle);
+  assert.match(handle.textContent || "", /Reading/i);
+});
+
 test("matching iOS pending story handoff relays its scoped run receipt", async () => {
   const { sent } = createStoryAutoTrackPendingHarness({
     store: { prefAutoTrackEnabled: false },
@@ -1677,6 +2058,36 @@ test("story page reconnect state asks Safari to refresh native auth on resume", 
     1,
   );
   assert.match(handle.textContent || "", /Add to Trace/i);
+});
+
+test("kernel reconnect state never invokes the retired legacy auth-refresh route", () => {
+  const { dom, sent } = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    projectionResponse: {
+      ok: true,
+      snapshot: {
+        state: "reconnect_required",
+        reason: "credential_missing",
+        canExecuteAuthenticated: false,
+      },
+      projection: {
+        entries: {},
+        workPreferences: {},
+        syncVersion: null,
+      },
+    },
+  });
+
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.match(handle.textContent || "", /Reconnect/i);
+  dom.window.dispatchEvent(new dom.window.Event("focus"));
+
+  assert.equal(
+    sent.filter((msg) => msg.type === "TRACE_IOS_AUTH_REFRESH_REQUEST").length,
+    0,
+  );
+  assert.match(handle.textContent || "", /Reconnect/i);
 });
 
 test("first-story focus-add retries explicit quick-add after retryable auto-track failure", async () => {
@@ -2157,7 +2568,11 @@ test("FFN mobile story quick-add shows optional post-add status choices when ent
     choiceBtn.click();
 
     assert.equal(sent.at(-1).type, "TRACE_SET_READER_STATUS");
-    assert.deepEqual(plainJson(sent.at(-1).payload), { entryId, status: choice.status });
+    assert.deepEqual(plainJson(sent.at(-1).payload), {
+      workKey: "ffn:7038840",
+      entryId,
+      status: choice.status,
+    });
     assert.equal(sheet.getAttribute("data-trace-open"), "1");
     assert.equal(sheet.getAttribute("aria-hidden"), "false");
     assert.match(sheet.textContent || "", choice.expected);
@@ -2284,7 +2699,7 @@ test("story sheet shows status editing for cached entries with entryId and hides
     finished.click();
     assert.deepEqual(plainJson(sent.at(-1)), {
       type: "TRACE_SET_READER_STATUS",
-      payload: { entryId, status: "FINISHED" },
+      payload: { workKey: "ffn:7038840", entryId, status: "FINISHED" },
     });
   }
 });
@@ -2432,6 +2847,7 @@ test("story sheet Planning to Reading sends chapter progress 1 and displays 1/? 
   assert.deepEqual(plainJson(sent.at(-1)), {
     type: "TRACE_SET_READER_STATUS",
     payload: {
+      workKey: "ffn:7038840",
       entryId,
       status: "READING",
       progress: { unit: "CHAPTER", value: 1, total: null },
@@ -2537,6 +2953,7 @@ test("finish qualify watches AO3 chapter text before end notes", () => {
   assert.notEqual(watchedBody, dom.window.document.querySelector("#chapters"));
   assert.equal(toastShown, true);
   assert.deepEqual(plainJson(sent.find((msg) => msg.type === "TRACE_PATCH_LIBRARY_ENTRY").payload), {
+    workKey: "ao3:777",
     entryId,
     patch: {
       status: "FINISHED",
@@ -2628,6 +3045,7 @@ test("finish qualify band prompts on unknown FFN final chapter and writes finish
   const patchMsg = sent.find((msg) => msg.type === "TRACE_PATCH_LIBRARY_ENTRY");
   assert.ok(patchMsg);
   assert.deepEqual(plainJson(patchMsg.payload), {
+    workKey: "ffn:7038840",
     entryId,
     patch: {
       status: "FINISHED",
@@ -2814,6 +3232,7 @@ test("finish qualify silently marks known-complete final chapter as finished", (
   const patchMsg = sent.find((msg) => msg.type === "TRACE_PATCH_LIBRARY_ENTRY");
   assert.ok(patchMsg);
   assert.deepEqual(plainJson(patchMsg.payload), {
+    workKey: "ffn:9001",
     entryId,
     patch: {
       status: "FINISHED",
@@ -3086,6 +3505,7 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
   assert.deepEqual(plainJson(sent.at(-1)), {
     type: "TRACE_PATCH_LIBRARY_ENTRY",
     payload: {
+      workKey: "ffn:7038840",
       entryId: "00000000-0000-4000-8000-000000703884",
       patch: { rating: 5 },
     },
@@ -3096,6 +3516,7 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
   assert.deepEqual(plainJson(sent.at(-1)), {
     type: "TRACE_PATCH_LIBRARY_ENTRY",
     payload: {
+      workKey: "ffn:7038840",
       entryId: "00000000-0000-4000-8000-000000703884",
       patch: {
         status: "CAUGHT_UP",

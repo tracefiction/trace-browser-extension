@@ -167,6 +167,7 @@ test("manifest loads AO3 saved filters with existing archive content scripts", (
   assert.ok(archiveEntry, "expected archive content script entry");
   assert.ok(savedFiltersEntry, "expected AO3 saved filters content script entry");
   assert.deepEqual(archiveEntry.js, [
+    "popup-config.js",
     "trace-finish-qualify.js",
     "collector.js",
     "library-overlay-keys.js",
@@ -193,6 +194,40 @@ test("packaged extension resources avoid AMO-flagged HTML sinks", () => {
     }
   }
   assert.deepEqual(unsafeAssignments, []);
+});
+
+test("AO3 saved filters never mounts into the Recent Works header search", async () => {
+  const html = `<!doctype html>
+    <html>
+      <body>
+        <header>
+          <form class="search" id="search" action="/works/search">
+            <fieldset>
+              <legend>Search</legend>
+              <input name="work_search[query]" type="text">
+              <button type="submit">Search</button>
+            </fieldset>
+          </form>
+        </header>
+        <main>
+          <h2>Recent Works</h2>
+        </main>
+      </body>
+    </html>`;
+  const { window } = await renderSavedFilters({
+    html,
+    url: "https://archiveofourown.org/works",
+  });
+
+  assert.equal(root(window), null);
+  assert.equal(
+    window.document.getElementById("trace-ao3-saved-filters-style"),
+    null,
+  );
+  assert.equal(
+    window.document.querySelector("#search [data-trace-ao3-saved-filters]"),
+    null,
+  );
 });
 
 test("AO3 saved filters saves normalized current URL params locally", async () => {

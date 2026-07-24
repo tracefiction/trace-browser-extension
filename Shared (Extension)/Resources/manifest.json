@@ -3,7 +3,7 @@
   "default_locale": "en",
   "name": "Trace",
   "description": "Track fanfiction reading: import AO3/FFN metadata into Trace and sync progress.",
-  "version": "0.5.15",
+  "version": "0.6.0",
   "action": {
     "default_title": "Trace",
     "default_popup": "popup.html",
@@ -53,6 +53,7 @@
         "https://m.fanfiction.net/*"
       ],
       "js": [
+        "popup-config.js",
         "trace-finish-qualify.js",
         "collector.js",
         "library-overlay-keys.js",
@@ -112,6 +113,7 @@
         "https://www.tracefiction.com/*"
       ],
       "js": [
+        "popup-config.js",
         "sync.js"
       ],
       "run_at": "document_idle"

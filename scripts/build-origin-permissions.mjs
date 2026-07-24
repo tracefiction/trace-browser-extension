@@ -29,7 +29,11 @@ export function originHostMatchPattern(baseUrl) {
   if (!baseUrl) return null;
   try {
     const url = new URL(baseUrl);
-    return `${url.origin}/*`;
+    // WebExtension match patterns do not include ports. A host-only pattern
+    // still matches every port for that host, while retaining the configured
+    // port in runtime API/page URLs. Safari rejects the whole content-script
+    // entry when a development port is embedded in `matches`.
+    return `${url.protocol}//${url.hostname}/*`;
   } catch {
     return null;
   }

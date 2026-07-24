@@ -25,6 +25,21 @@ const RELEASE_ORIGIN_PATHS = [
 const MANIFEST_PATH = "Shared (Extension)/Resources/manifest.json";
 const BACKGROUND_SOURCE_PATH = "src/background.js";
 const GENERATED_BACKGROUND_PATH = "Shared (Extension)/Resources/background.js";
+const POPUP_CONFIG_PATH = "Shared (Extension)/Resources/popup-config.js";
+const PRIVATE_SURFACE_PATHS = [
+  "Shared (Extension)/Resources/popup.js",
+  "Shared (Extension)/Resources/collector.js",
+  "Shared (Extension)/Resources/library-overlay.js",
+  "Shared (Extension)/Resources/sync.js",
+];
+const PRIVATE_DATABASE_MARKERS = [
+  "indexedDB",
+  "private-database",
+  "traceKernelPrivateV1",
+  "session-envelope",
+  "session-credentials",
+  "account-data",
+];
 
 const errors = [];
 const warnings = [];
@@ -219,6 +234,7 @@ function firstDifferentLine(expected, actual) {
 function checkGeneratedBackgroundParity() {
   const source = readText(BACKGROUND_SOURCE_PATH);
   const generated = readText(GENERATED_BACKGROUND_PATH);
+  const popupConfig = readText(POPUP_CONFIG_PATH);
   const apiBase = generatedBackgroundOrigin(generated, "TRACE_API_BASE");
   const webOrigin = generatedBackgroundOrigin(generated, "TRACE_WEB_ORIGIN");
   if (apiBase === null || webOrigin === null) {
@@ -230,14 +246,44 @@ function checkGeneratedBackgroundParity() {
     return;
   }
 
+  const configuredMode =
+    popupConfig.match(/globalThis\.TRACE_SESSION_MODE = "(kernel|disabled)"/)?.[1] ??
+    "legacy";
   const expected = source
     .replace(/__TRACE_API_BASE__/g, apiBase)
     .replace(/__TRACE_WEB_ORIGIN__/g, webOrigin);
-  if (generated !== expected) {
+  if (configuredMode === "legacy" && generated !== expected) {
     addError(
       GENERATED_BACKGROUND_PATH,
       firstDifferentLine(expected, generated),
       "generated Safari background is stale; run npm run build or npm run build:release.",
+    );
+    return;
+  }
+  if (configuredMode === "legacy") return;
+
+  for (const marker of [
+    `scope.TRACE_SESSION_MODE = "${configuredMode}"`,
+    "traceSessionEnvelopeV1",
+    "traceSessionCredentialsV1",
+    "traceKernelPrivateV1",
+  ]) {
+    if (generated.includes(marker)) continue;
+    addError(
+      GENERATED_BACKGROUND_PATH,
+      1,
+      `generated ${configuredMode} Safari background is missing ${marker}.`,
+    );
+  }
+  for (const retiredMarker of [
+    "// Generated legacy runtime gate.",
+    'if (globalThis.TRACE_SESSION_MODE === "legacy")',
+  ]) {
+    if (!generated.includes(retiredMarker)) continue;
+    addError(
+      GENERATED_BACKGROUND_PATH,
+      lineNumberForPattern(generated, retiredMarker),
+      `generated ${configuredMode} Safari background still embeds the retired legacy owner.`,
     );
   }
 }
@@ -284,6 +330,21 @@ function checkManifestPermissionChanges() {
   }
 }
 
+function checkSurfacesCannotBypassPrivateDatabase() {
+  for (const repoPath of PRIVATE_SURFACE_PATHS) {
+    const text = readText(repoPath);
+    for (const marker of PRIVATE_DATABASE_MARKERS) {
+      const index = text.indexOf(marker);
+      if (index === -1) continue;
+      addError(
+        repoPath,
+        lineNumberForIndex(text, index),
+        `surface must use bounded runtime messages, not private database marker ${marker}.`,
+      );
+    }
+  }
+}
+
 function main() {
   const files = publicWorkingFiles();
   checkPackageManagerFiles(files);
@@ -292,6 +353,7 @@ function main() {
   checkReleaseArtifactsDoNotUseLocalOrigins(files);
   checkGeneratedBackgroundParity();
   checkManifestPermissionChanges();
+  checkSurfacesCannotBypassPrivateDatabase();
 
   printIssues();
   process.exitCode = errors.length > 0 ? 1 : 0;

@@ -6,6 +6,24 @@ import {
   configuredOriginPermissions,
 } from "../scripts/build-origin-permissions.mjs";
 
+test("local development ports stay in runtime URLs but not manifest match patterns", () => {
+  const {
+    safariHostPermissions,
+    browserHostPermissions,
+    syncMatches,
+  } = configuredOriginPermissions({
+    traceApiBase: "http://127.0.0.1:8765",
+    traceWebOrigin: "http://localhost:5173",
+  });
+
+  assert.ok(safariHostPermissions.includes("http://localhost/*"));
+  assert.equal(safariHostPermissions.some((pattern) => pattern.includes(":5173")), false);
+  assert.ok(browserHostPermissions.includes("http://127.0.0.1/*"));
+  assert.ok(browserHostPermissions.includes("http://localhost/*"));
+  assert.equal(browserHostPermissions.some((pattern) => /:\d+\//.test(pattern)), false);
+  assert.deepEqual(syncMatches, ["http://localhost/*"]);
+});
+
 test("remote development builds declare only their active Trace origins", () => {
   const {
     safariHostPermissions,

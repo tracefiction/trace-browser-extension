@@ -213,12 +213,14 @@ function makeStorageData(authState = connectedAuthState(), cacheVariant = "defau
   };
 }
 
-function extensionMockSource(storageData) {
+function extensionMockSource(storageData, sessionSnapshot = null) {
   return `
     (() => {
       const storageData = ${JSON.stringify(storageData)};
+      const sessionSnapshot = ${JSON.stringify(sessionSnapshot)};
       const storageListeners = [];
       const popupState = {
+        ok: true,
         authState: storageData.traceAuthState,
         firstSaveSeen: storageData.traceFirstSaveSeen === true,
         libraryCount: typeof storageData.traceLibraryCount === "number" ? storageData.traceLibraryCount : null,
@@ -226,6 +228,7 @@ function extensionMockSource(storageData) {
         pro: storageData.traceUserPro === true,
         autoTrackEnabled: storageData.prefAutoTrackEnabled !== false,
         libraryInlayEnabled: storageData.prefLibraryInlayEnabled !== false,
+        ao3SavedFiltersEnabled: storageData.prefAo3SavedFiltersEnabled !== false,
         metadataImproveEnabled: storageData.prefMetadataImproveEnabled !== false,
       };
       function pick(keys) {
@@ -247,6 +250,13 @@ function extensionMockSource(storageData) {
       function respond(msg, cb) {
         window.__traceMessages.push(msg);
         let response = { ok: true };
+        if (
+          sessionSnapshot &&
+          msg &&
+          (msg.type === "TRACE_SESSION_GET_SNAPSHOT" || msg.type === "TRACE_SESSION_ACTION")
+        ) {
+          response = { ok: true, snapshot: sessionSnapshot, action: { kind: "ignored" } };
+        }
         if (msg && msg.type === "TRACE_POPUP_GET_STATE") response = popupState;
         if (msg && msg.type === "TRACE_SET_READER_STATUS") {
           response = { ok: true, entryId: msg.payload && msg.payload.entryId, status: msg.payload && msg.payload.status };
@@ -286,6 +296,7 @@ function extensionMockSource(storageData) {
         },
       };
       window.__traceMessages = [];
+      if (sessionSnapshot) window.TRACE_SESSION_MODE = "kernel";
       window.chrome = api;
       window.browser = api;
       window.xcookie_read = window.xcookie_read || function () {};
@@ -494,15 +505,33 @@ async function renderPopupScreenshot(browser, definition, assets, manifest) {
   const messages = [];
   page.on("pageerror", (error) => messages.push({ type: "pageerror", text: error.message }));
   await page.addInitScript(
-    extensionMockSource({
-      ...makeStorageData(definition.authState),
-      ...(definition.storageData || {}),
-    }),
+    extensionMockSource(
+      {
+        ...makeStorageData(definition.authState),
+        ...(definition.storageData || {}),
+      },
+      definition.sessionSnapshot || null,
+    ),
   );
   await installPopupRoutes(page, assets.popupHtml, assets.popupCss, assets.popupJs, assets.markSvg);
   await page.goto("https://trace-extension.local/popup.html", { waitUntil: "domcontentloaded" });
   await page.waitForSelector("#popup-connection[data-state]", { timeout: 10000 });
   await page.waitForTimeout(250);
+  if (definition.sessionSnapshot) {
+    const localSettings = await page.$eval("#popup-local-settings", (element) => ({
+      hidden: element.hidden,
+      display: getComputedStyle(element).display,
+    }));
+    const projectedSettingsExpected =
+      definition.sessionSnapshot.state === "connected";
+    const projectedSettingsVisible =
+      !localSettings.hidden && localSettings.display !== "none";
+    if (projectedSettingsVisible !== projectedSettingsExpected) {
+      throw new Error(
+        `Kernel popup projected settings visibility was incorrect: ${JSON.stringify(localSettings)}`,
+      );
+    }
+  }
   const outputPath = path.join(outputRoot, definition.file);
   const clipHeight = await page.evaluate(() => {
     const bodyBox = document.body.getBoundingClientRect();
@@ -839,6 +868,26 @@ async function main() {
         colorScheme: "dark",
       },
       {
+        name: "Kernel popup iOS first run on story",
+        file: "popup-kernel-ios-first-run-story.png",
+        authState: connectedAuthState(),
+        sessionSnapshot: {
+          state: "connected",
+          accountId: null,
+          canExecuteAuthenticated: true,
+          reason: "none",
+        },
+        storageData: {
+          traceFirstSaveSeen: false,
+          traceLibraryCount: 0,
+          traceActiveTab: { kind: "supported_story", site: "ao3", canImport: true },
+        },
+        viewport: { width: 360, height: 520 },
+        userAgent:
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        colorScheme: "dark",
+      },
+      {
         name: "Extension popup signed out",
         file: "popup-signed-out.png",
         authState: {
@@ -885,6 +934,39 @@ async function main() {
         name: "Extension popup connected light",
         file: "popup-connected-light.png",
         authState: connectedAuthState(),
+        colorScheme: "light",
+      },
+      {
+        name: "Kernel popup connected",
+        file: "popup-kernel-connected.png",
+        sessionSnapshot: {
+          state: "connected",
+          accountId: null,
+          canExecuteAuthenticated: true,
+          reason: "none",
+        },
+        colorScheme: "light",
+      },
+      {
+        name: "Kernel popup degraded",
+        file: "popup-kernel-degraded.png",
+        sessionSnapshot: {
+          state: "degraded",
+          accountId: null,
+          canExecuteAuthenticated: false,
+          reason: "verification_unavailable",
+        },
+        colorScheme: "light",
+      },
+      {
+        name: "Kernel popup reconnect required",
+        file: "popup-kernel-reconnect-required.png",
+        sessionSnapshot: {
+          state: "reconnect_required",
+          accountId: null,
+          canExecuteAuthenticated: false,
+          reason: "credential_rejected",
+        },
         colorScheme: "light",
       },
     ];

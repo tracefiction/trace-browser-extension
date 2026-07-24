@@ -1,4 +1,5 @@
-const ext = typeof browser !== "undefined" ? browser : chrome;
+const USES_BROWSER_PROMISE_API = typeof browser !== "undefined";
+const ext = USES_BROWSER_PROMISE_API ? browser : chrome;
 const STATUS_KEY = "traceAuthState";
 const PREF_AUTO_TRACK_KEY = "prefAutoTrackEnabled";
 const PREF_LIBRARY_INLAY_KEY = "prefLibraryInlayEnabled";
@@ -9,8 +10,12 @@ const TRACE_FIRST_SAVE_SEEN_KEY = "traceFirstSaveSeen";
 const TRACE_LIBRARY_COUNT_KEY = "traceLibraryCount";
 const DEFAULT_TRACE_WEB_ORIGIN = "https://tracefiction.com";
 const TRACE_WEB_ORIGIN = configuredTraceWebOrigin();
+const TRACE_SESSION_MODE = globalThis.TRACE_SESSION_MODE || "legacy";
+const KERNEL_SESSION_ACTIVE = TRACE_SESSION_MODE === "kernel";
+const SESSION_DISABLED = TRACE_SESSION_MODE === "disabled";
 const TRACE_HOME_URL = `${TRACE_WEB_ORIGIN}/`;
 const TRACE_IOS_SETUP_URL = `${DEFAULT_TRACE_WEB_ORIGIN}/apps#safari-ios-setup`;
+const TRACE_IOS_APP_CONNECT_URL = "traceauth://open?destination=extension-connect";
 const AO3_WORKS_URL = "https://archiveofourown.org/works";
 const FFN_HOME_URL = "https://www.fanfiction.net/";
 const IOS_SIGN_IN_GUIDANCE =
@@ -534,19 +539,52 @@ function setImportBusy(button) {
   button.title = currentImportTitle();
 }
 
-function setImportSuccess(button) {
-  button.textContent = "Opened import tab";
+function setImportSuccess(button, response) {
+  button.textContent =
+    response?.state === "saved" || response?.state === "already_saved"
+      ? "Saved to Trace"
+      : "Opened import tab";
   button.title = "";
 }
 
+function importFailureCopy(error) {
+  if (error === "permission_required") {
+    return {
+      label: "Allow site access, then retry",
+      title:
+        "Allow Trace on this AO3 or FanFiction.net site in your browser’s extension settings, refresh the page, then retry.",
+    };
+  }
+  if (error === "not_authenticated" || error === "auth_expired") {
+    return {
+      label: "Reconnect Trace, then retry",
+      title: "Reconnect this extension session before importing.",
+    };
+  }
+  if (error === "unsupported_page" || error === "no_active_tab") {
+    return {
+      label: "Open a supported page",
+      title: "Open a supported AO3 or FanFiction.net story or listing page, then retry.",
+    };
+  }
+  return {
+    label: "Import failed — try again",
+    title:
+      error ||
+      "Open an AO3 or FanFiction.net tab and refresh it after updating the extension.",
+  };
+}
+
 function setImportFailure(button, error) {
-  button.textContent = "Import failed — try again";
+  const copy = importFailureCopy(error);
+  button.textContent = copy.label;
   button.disabled = false;
-  resetImportButtonAfterFailure(button, error);
+  resetImportButtonAfterFailure(button, copy.title);
   if (!isImportCurrentlyAvailable()) {
     restoreImportButton(button);
   } else {
-    button.textContent = "Import failed — try again";
+    button.textContent = copy.label;
+    button.title = copy.title;
   }
 }
 
@@ -570,7 +608,7 @@ function runImport(button) {
 
   ext.runtime.sendMessage({ type: "TRACE_IMPORT_TRIGGER" }, (res) => {
     if (res?.ok) {
-      setImportSuccess(button);
+      setImportSuccess(button, res);
       setTimeout(() => window.close(), 600);
     } else {
       setImportFailure(
@@ -582,6 +620,241 @@ function runImport(button) {
   });
 }
 
+function kernelActionsForState(state) {
+  if (state === "signed_out") return { primary: "connect", secondary: null };
+  if (state === "connecting" || state === "verifying") {
+    return { primary: "cancel", secondary: null };
+  }
+  if (state === "connected") return { primary: null, secondary: "disconnect" };
+  if (state === "degraded") return { primary: "retry", secondary: "disconnect" };
+  if (state === "reconnect_required") {
+    return { primary: "reconnect", secondary: "disconnect" };
+  }
+  return { primary: null, secondary: null };
+}
+
+function renderKernelSnapshot(snapshot) {
+  const state = snapshot?.state || "initializing";
+  const reason = snapshot?.reason || "none";
+  const statusEl = document.getElementById("popup-status");
+  const leadEl = document.getElementById("popup-lead");
+  const ctaEl = document.getElementById("popup-cta");
+  const secondaryActionEl = document.getElementById("popup-session-secondary");
+  const sessionHelpEl = document.getElementById("popup-session-help");
+  const connectionEl = document.getElementById("popup-connection");
+  const localSettingsEl = document.getElementById("popup-local-settings");
+  const proSettingsEl = document.getElementById("popup-pro-settings");
+  const importEl = document.getElementById("popup-import");
+  const archiveLinksEl = document.getElementById("popup-archive-links");
+  const actions = SESSION_DISABLED
+    ? { primary: null, secondary: null }
+    : kernelActionsForState(state);
+  const credentialRecovery =
+    state === "signed_out" ||
+    (state === "reconnect_required" &&
+      ["credential_absent", "credential_rejected", "identity_conflict"].includes(reason));
+  const labels = {
+    connect: "Connect",
+    cancel: "Cancel",
+    disconnect: "Disconnect",
+    retry: "Retry",
+    reconnect: "Reconnect",
+  };
+  const headings = {
+    initializing: "Checking Trace",
+    signed_out: "Connect Trace",
+    connecting: "Connecting…",
+    verifying: "Verifying account…",
+    connected: "Connected",
+    degraded: "Trace is temporarily offline",
+    reconnect_required: "Reconnect Trace",
+  };
+  let lead = "";
+  if (SESSION_DISABLED) {
+    lead = "Authenticated extension features are temporarily unavailable.";
+  } else if (state === "signed_out" && isLikelyIosExtensionUi) {
+    lead =
+      "Open the Trace app and sign in there. Signing in on tracefiction.com in Safari does not connect this extension. Return to Safari and press Connect.";
+  } else if (state === "reconnect_required" && isLikelyIosExtensionUi && credentialRecovery) {
+    lead =
+      "Open the Trace app and sign in there. Signing in on tracefiction.com in Safari does not connect this extension. Return to Safari and press Reconnect.";
+  } else if (state === "signed_out") {
+    lead =
+      "Open Trace in this browser and sign in, then return here and press Connect.";
+  } else if (state === "reconnect_required") {
+    if (reason === "storage_write_failed" || reason === "storage_unavailable") {
+      lead = "Trace could not update extension storage. Retry Reconnect after local storage recovers.";
+    } else if (reason === "account_unavailable" || reason === "invalid_account_response") {
+      lead = "Trace could not safely verify this account. Press Reconnect to try again.";
+    } else if (reason === "malformed_envelope" || reason === "unsupported_envelope") {
+      lead = "Trace found unsupported local session data. Reconnect will safely replace it.";
+    } else {
+      lead = "Sign in to Trace in this browser if needed, then press Reconnect.";
+    }
+  } else if (state === "degraded") {
+    lead = reason === "storage_unavailable"
+      ? "Trace could not read extension storage. Retry after local storage recovers."
+      : "Your saved session is protected. Check your connection and retry.";
+  } else if (state === "connected") {
+    lead = "This extension session was verified for the current browser worker.";
+  } else if (state === "connecting" || state === "verifying") {
+    lead = "Keep this popup open while Trace verifies your account.";
+  } else {
+    lead = reason === "storage_unavailable"
+      ? "Trace could not read extension storage. Retry in a moment."
+      : "Checking the extension session.";
+  }
+
+  document.body.dataset.tracePopupState = state;
+  if (statusEl) statusEl.textContent = SESSION_DISABLED ? "Trace unavailable" : headings[state] || "Trace";
+  if (leadEl) {
+    leadEl.hidden = false;
+    leadEl.textContent = lead;
+  }
+  if (connectionEl) {
+    connectionEl.dataset.state = state === "connected" ? "connected" : state === "degraded" ? "warn" : "off";
+    const label = connectionEl.querySelector(".popup-connection-label");
+    if (label) label.textContent = state === "connected" ? "Connected" : state === "initializing" ? "Checking" : "Not linked";
+  }
+  if (ctaEl) {
+    ctaEl.hidden = actions.primary == null;
+    ctaEl.href = "#";
+    ctaEl.textContent = actions.primary ? labels[actions.primary] : "";
+    ctaEl.dataset.sessionAction = actions.primary || "";
+    ctaEl.dataset.emphasis = "primary";
+  }
+  if (secondaryActionEl) {
+    secondaryActionEl.hidden = actions.secondary == null;
+    secondaryActionEl.textContent = actions.secondary ? labels[actions.secondary] : "";
+    secondaryActionEl.dataset.sessionAction = actions.secondary || "";
+    secondaryActionEl.dataset.emphasis = "secondary";
+  }
+  if (sessionHelpEl) {
+    sessionHelpEl.hidden =
+      SESSION_DISABLED || !credentialRecovery;
+    sessionHelpEl.href = isLikelyIosExtensionUi
+      ? TRACE_IOS_APP_CONNECT_URL
+      : TRACE_HOME_URL;
+    sessionHelpEl.textContent = isLikelyIosExtensionUi
+      ? "Open Trace app"
+      : "Open Trace to sign in";
+  }
+  if (localSettingsEl) localSettingsEl.hidden = true;
+  if (proSettingsEl) proSettingsEl.hidden = true;
+  if (importEl) importEl.hidden = true;
+  if (archiveLinksEl) archiveLinksEl.hidden = true;
+}
+
+function sendKernelRuntimeMessage(message, onResponse) {
+  if (USES_BROWSER_PROMISE_API) {
+    try {
+      Promise.resolve(ext.runtime.sendMessage(message)).then(
+        (response) => onResponse(response),
+        () => onResponse(null),
+      );
+    } catch {
+      onResponse(null);
+    }
+    return;
+  }
+  try {
+    ext.runtime.sendMessage(message, (response) => {
+      const failed = Boolean(ext.runtime.lastError);
+      onResponse(failed ? null : response);
+    });
+  } catch {
+    onResponse(null);
+  }
+}
+
+function requestKernelSnapshot() {
+  sendKernelRuntimeMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" }, (response) => {
+    if (!response) return;
+    renderKernelSnapshot(response?.snapshot);
+    if (response?.snapshot?.state === "connected") requestKernelPopupState();
+  });
+}
+
+function requestKernelPopupState() {
+  sendKernelRuntimeMessage({ type: "TRACE_POPUP_GET_STATE" }, (state) => {
+    if (
+      !state ||
+      state.ok !== true ||
+      state.authState?.state !== "connected" ||
+      document.body.dataset.tracePopupState !== "connected"
+    ) {
+      return;
+    }
+    // The session owner still controls Connect/Disconnect. Once connected,
+    // render the account-scoped first-story/import state from its projection.
+    renderStatus({
+      authState: state.authState,
+      firstSaveSeen: state.firstSaveSeen === true,
+      libraryCount:
+        typeof state.libraryCount === "number" ? state.libraryCount : undefined,
+      activeTab: state.activeTab || undefined,
+    });
+    applyLocalUi(state.ao3SavedFiltersEnabled);
+    applyProUi(
+      state.pro,
+      state.autoTrackEnabled,
+      state.libraryInlayEnabled,
+      state.metadataImproveEnabled,
+    );
+    const localSettings = document.getElementById("popup-local-settings");
+    const proSettings = document.getElementById("popup-pro-settings");
+    const importButton = document.getElementById("popup-import");
+    if (localSettings) localSettings.hidden = false;
+    if (proSettings) proSettings.hidden = false;
+    if (importButton) restoreImportButton(importButton);
+  });
+}
+
+function bindPreferenceControls() {
+  const controls = [
+    ["pref-auto-track", PREF_AUTO_TRACK_KEY],
+    ["pref-library-inlay", PREF_LIBRARY_INLAY_KEY],
+    ["pref-ao3-saved-filters", PREF_AO3_SAVED_FILTERS_KEY],
+    ["pref-metadata-improve", PREF_METADATA_IMPROVE_KEY],
+  ];
+  for (const [id, key] of controls) {
+    const input = document.getElementById(id);
+    if (!input) continue;
+    input.addEventListener("change", () => {
+      ext.storage.local.set({ [key]: input.checked });
+    });
+  }
+}
+
+function initializeKernelPopup() {
+  renderKernelSnapshot({ state: "initializing", reason: "none" });
+  for (const actionControl of [
+    document.getElementById("popup-cta"),
+    document.getElementById("popup-session-secondary"),
+  ]) {
+    actionControl?.addEventListener("click", (event) => {
+      const action = actionControl.dataset.sessionAction;
+      if (!action) return;
+      event.preventDefault();
+      if (actionControl.getAttribute("aria-disabled") === "true") return;
+      actionControl.setAttribute("aria-disabled", "true");
+      sendKernelRuntimeMessage(
+        { type: "TRACE_SESSION_ACTION", action },
+        (response) => {
+          actionControl.removeAttribute("aria-disabled");
+          if (!response) return;
+          renderKernelSnapshot(response?.snapshot);
+          if (response?.snapshot?.state === "connected") requestKernelPopupState();
+        },
+      );
+    });
+  }
+  requestKernelSnapshot();
+}
+
+if (KERNEL_SESSION_ACTIVE || SESSION_DISABLED) {
+  initializeKernelPopup();
+} else {
 readAndRender();
 
 try {
@@ -616,36 +889,10 @@ ext.storage.onChanged.addListener((changes, area) => {
   }
 });
 
-const autoTrackInput = document.getElementById("pref-auto-track");
-const libraryInlayInput = document.getElementById("pref-library-inlay");
-const ao3SavedFiltersInput = document.getElementById("pref-ao3-saved-filters");
-const metadataImproveInput = document.getElementById("pref-metadata-improve");
-if (autoTrackInput) {
-  autoTrackInput.addEventListener("change", () => {
-    ext.storage.local.set({ [PREF_AUTO_TRACK_KEY]: autoTrackInput.checked });
-  });
-}
-if (libraryInlayInput) {
-  libraryInlayInput.addEventListener("change", () => {
-    ext.storage.local.set({ [PREF_LIBRARY_INLAY_KEY]: libraryInlayInput.checked });
-  });
-}
-if (ao3SavedFiltersInput) {
-  ao3SavedFiltersInput.addEventListener("change", () => {
-    ext.storage.local.set({
-      [PREF_AO3_SAVED_FILTERS_KEY]: ao3SavedFiltersInput.checked,
-    });
-  });
-}
-if (metadataImproveInput) {
-  metadataImproveInput.addEventListener("change", () => {
-    ext.storage.local.set({
-      [PREF_METADATA_IMPROVE_KEY]: metadataImproveInput.checked,
-    });
-  });
 }
 
-// Import button
+// Import is rendered only when the active session owner has exposed a
+// supported archive page, but the same explicit control works in both modes.
 const importBtn = document.getElementById("popup-import");
 if (importBtn) {
   setImportInitial(importBtn);
@@ -653,3 +900,5 @@ if (importBtn) {
     runImport(importBtn);
   });
 }
+
+bindPreferenceControls();

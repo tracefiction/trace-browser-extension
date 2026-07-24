@@ -12,10 +12,26 @@
   const LENS_ATTR = "data-trace-library-lens";
   const ACTION_SURFACE_ATTR = "data-trace-action-surface";
   const ACTION_SURFACE_CLOSE_ATTR = "data-trace-action-surface-close";
-  const TRACE_WEB_HOME_URL = "https://tracefiction.com/";
+  const TRACE_SESSION_MODE = globalThis.TRACE_SESSION_MODE || "legacy";
+  const KERNEL_SESSION_ACTIVE = TRACE_SESSION_MODE === "kernel";
+  const TRACE_WEB_HOME_URL = configuredTraceWebHomeUrl();
+  const ACCOUNT_PROJECTION_GET_MESSAGE = "TRACE_ACCOUNT_PROJECTION_GET";
+  const MAX_PROJECTION_WORK_KEYS = 250;
   const TRACE_ACCOUNT_ID_KEY = "traceAccountId";
   const TRACE_API_BASE_STORAGE_KEY = "traceApiBase";
   var currentTraceAuthState = null;
+
+  function configuredTraceWebHomeUrl() {
+    var configured =
+      typeof globalThis.TRACE_EXTENSION_WEB_ORIGIN === "string"
+        ? globalThis.TRACE_EXTENSION_WEB_ORIGIN.trim()
+        : "";
+    try {
+      return new URL(configured || "https://tracefiction.com").origin + "/";
+    } catch (_) {
+      return "https://tracefiction.com/";
+    }
+  }
 
   function normalizeStorageString(value) {
     return typeof value === "string" ? value.trim() : "";
@@ -1774,7 +1790,7 @@
     ].join(";");
   }
 
-  function appendRatingControls(surface, entry) {
+  function appendRatingControls(surface, entry, workKey) {
     if (!entry || !entry.entryId) return;
     var current = entryRatingValue(entry);
     var wrap = document.createElement("div");
@@ -1818,7 +1834,11 @@
           ext.runtime.sendMessage(
             {
               type: "TRACE_PATCH_LIBRARY_ENTRY",
-              payload: { entryId: entry.entryId, patch: { rating: nextRating } },
+              payload: {
+                workKey: workKey,
+                entryId: entry.entryId,
+                patch: { rating: nextRating },
+              },
             },
             function (response) {
               if (ext.runtime.lastError || !response || !response.ok) {
@@ -1845,7 +1865,7 @@
     surface.appendChild(wrap);
   }
 
-  function appendCatchupAction(surface, entry, rerender, refreshSurface) {
+  function appendCatchupAction(surface, entry, workKey, rerender, refreshSurface) {
     if (!entry || !entry.entryId) return;
     var patch = catchupProgressPatch(entry);
     if (!patch) return;
@@ -1874,7 +1894,11 @@
       ext.runtime.sendMessage(
         {
           type: "TRACE_PATCH_LIBRARY_ENTRY",
-          payload: { entryId: entry.entryId, patch: { progress: patch.progress } },
+          payload: {
+            workKey: workKey,
+            entryId: entry.entryId,
+            patch: { progress: patch.progress },
+          },
         },
         function (response) {
           if (ext.runtime.lastError || !response || !response.ok) {
@@ -2205,7 +2229,7 @@
     if (meta.childNodes.length > 0) surface.appendChild(meta);
   }
 
-  function bindStatusChoice(choice, entry, status, rerender, refreshSurface) {
+  function bindStatusChoice(choice, entry, workKey, status, rerender, refreshSurface) {
     choice.addEventListener("click", function (e) {
       e.preventDefault();
       e.stopPropagation();
@@ -2224,7 +2248,7 @@
       delete entry.__traceStatusError;
       rerender();
       if (typeof refreshSurface === "function") refreshSurface();
-      var payload = { entryId: entry.entryId, status: status };
+      var payload = { workKey: workKey, entryId: entry.entryId, status: status };
       if (statusPatch && statusPatch.progress) payload.progress = statusPatch.progress;
       ext.runtime.sendMessage(
         {
@@ -2288,7 +2312,7 @@
     ].join(";");
   }
 
-  function appendStatusControls(surface, entry, rerender, showActions, refreshSurface) {
+  function appendStatusControls(surface, entry, workKey, rerender, showActions, refreshSurface) {
     if (!showActions) return;
     if (!entry || !entry.entryId) return;
     var wrap = document.createElement("div");
@@ -2324,7 +2348,7 @@
       ].join(";");
       choice.appendChild(dot);
       choice.appendChild(document.createTextNode(statusControlChoiceLabel(status)));
-      bindStatusChoice(choice, entry, status, rerender, refreshSurface);
+      bindStatusChoice(choice, entry, workKey, status, rerender, refreshSurface);
       row.appendChild(choice);
     });
     wrap.appendChild(label);
@@ -2459,14 +2483,14 @@
       renderListingActionSurface(latestTrigger, entry, workKey, showActions, rerender, platform, anchor);
     }
     var status = entryStatusValue(entry);
-    appendStatusControls(body, entry, rerender, showActions, refreshSurface);
+    appendStatusControls(body, entry, workKey, rerender, showActions, refreshSurface);
     if (status && (!showActions || !(entry && entry.entryId))) {
       body.appendChild(surfaceRowEl("Reading status", statusChoiceLabel(status), false));
     }
     var position = status ? surfacePositionBlock(entry) : null;
     if (position) body.appendChild(position);
-    appendCatchupAction(body, entry, rerender, refreshSurface);
-    appendRatingControls(body, entry);
+    appendCatchupAction(body, entry, workKey, rerender, refreshSurface);
+    appendRatingControls(body, entry, workKey);
     appendPrivateContextRows(body, entry);
     surface.appendChild(body);
 
@@ -2845,6 +2869,7 @@
   function renderOverlayState(wrap, entry, platform, anchor, workKey, showActions) {
     removeWrapChildren(wrap);
     var row = listingRowForAnchor(platform, anchor);
+    var canMutate = showActions;
     wrap.style.opacity = "";
 
     if (entry && entry.hidden) {
@@ -2852,7 +2877,7 @@
         row.appendChild(wrap);
       }
       wrap.appendChild(
-        hiddenPlaceholderEl(workKey, entry, showActions, function () {
+        hiddenPlaceholderEl(workKey, entry, canMutate, function () {
           restoreListingRow(row);
           renderOverlayState(wrap, entry, platform, anchor, workKey, showActions);
         }),
@@ -2865,7 +2890,7 @@
 
     if (entry && (entry.readerStatus || entry.status)) {
       wrap.appendChild(
-        lensEl(entry, workKey, showActions, function () {
+        lensEl(entry, workKey, canMutate, function () {
           renderOverlayState(wrap, entry, platform, anchor, workKey, showActions);
         }, platform, anchor),
       );
@@ -2874,13 +2899,15 @@
 
     if (showActions) {
       wrap.appendChild(quickAddBtnEl(platform, anchor, workKey));
-      var hiddenEntry = entry || { status: null, readerStatus: null, hidden: false };
-      wrap.appendChild(
-        preferenceBtnEl(workKey, false, function (nextHidden) {
-          hiddenEntry.hidden = nextHidden;
-          renderOverlayState(wrap, hiddenEntry, platform, anchor, workKey, showActions);
-        }),
-      );
+      if (canMutate) {
+        var hiddenEntry = entry || { status: null, readerStatus: null, hidden: false };
+        wrap.appendChild(
+          preferenceBtnEl(workKey, false, function (nextHidden) {
+            hiddenEntry.hidden = nextHidden;
+            renderOverlayState(wrap, hiddenEntry, platform, anchor, workKey, showActions);
+          }),
+        );
+      }
       return true;
     }
 
@@ -3225,6 +3252,27 @@
     }
   }
 
+  function visibleWorkKeys() {
+    var keys = [];
+    var seen = new Set();
+    var anchors = document.querySelectorAll('a[href*="/works/"], a[href*="/s/"]');
+    for (var i = 0; i < anchors.length && keys.length < MAX_PROJECTION_WORK_KEYS; i += 1) {
+      var anchor = anchors[i];
+      var href = anchor.getAttribute("href");
+      if (!href) continue;
+      try {
+        var absolute = new URL(href, document.baseURI).href;
+        var info = keyFromAbsoluteUrl(absolute);
+        if (!info || !isDecoratableWorkLink(absolute, info) || seen.has(info.key)) continue;
+        seen.add(info.key);
+        keys.push(info.key);
+      } catch (_) {
+        /* Ignore malformed archive links. */
+      }
+    }
+    return keys;
+  }
+
   var rerunTimer = null;
   var domObserver = null;
 
@@ -3292,8 +3340,61 @@
     });
   }
 
+  function renderProjection(res, cache) {
+    var hasAuth = !!res.authToken;
+    currentTraceAuthState = (res && res.traceAuthState) || null;
+    if (isSingleWorkPage()) {
+      removeConnectNotice();
+      clearBadges();
+      return;
+    }
+    renderConnectNotice(res && res.traceAuthState, hasAuth);
+    if (res && res.prefLibraryInlayEnabled === false) {
+      clearBadges();
+      return;
+    }
+    var entries = (cache && cache.entries) || {};
+    var workPreferences = (cache && cache.workPreferences) || {};
+    var showQuickAdd =
+      authStateAllowsActions(res && res.traceAuthState, hasAuth) &&
+      !isSingleWorkPage();
+    var openSurfaceKey = currentOpenActionSurfaceKey();
+    clearBadges();
+    if (
+      Object.keys(entries).length === 0 &&
+      Object.keys(workPreferences).length === 0 &&
+      !showQuickAdd
+    ) {
+      return;
+    }
+    decorate(entries, workPreferences, showQuickAdd);
+    reopenActionSurface(openSurfaceKey);
+  }
+
   function run() {
     try {
+      if (KERNEL_SESSION_ACTIVE) {
+        ext.storage.local.get(["prefLibraryInlayEnabled"], function (preferences) {
+          if (ext.runtime.lastError) return;
+          ext.runtime.sendMessage(
+            {
+              type: ACCOUNT_PROJECTION_GET_MESSAGE,
+              workKeys: visibleWorkKeys(),
+            },
+            function (response) {
+              if (ext.runtime.lastError || !response || response.ok !== true) return;
+              var snapshot = response.snapshot || { state: "signed_out" };
+              renderProjection({
+                prefLibraryInlayEnabled:
+                  preferences && preferences.prefLibraryInlayEnabled,
+                traceAuthState: snapshot,
+                authToken: snapshot.state === "connected" ? "kernel-session" : null,
+              }, response.projection);
+            },
+          );
+        });
+        return;
+      }
       ext.storage.local.get(
         [
           "libraryOverlayCache",
@@ -3305,33 +3406,10 @@
         ],
         function (res) {
           if (ext.runtime.lastError) return;
-          var hasAuth = !!res.authToken;
-          currentTraceAuthState = (res && res.traceAuthState) || null;
-          if (isSingleWorkPage()) {
-            removeConnectNotice();
-            clearBadges();
-            return;
-          }
-          renderConnectNotice(res && res.traceAuthState, hasAuth);
-          if (res && res.prefLibraryInlayEnabled === false) {
-            clearBadges();
-            return;
-          }
-          var cache = overlayCacheForRuntimeContext(res && res.libraryOverlayCache, res);
-          var entries = (cache && cache.entries) || {};
-          var workPreferences = (cache && cache.workPreferences) || {};
-          var showQuickAdd = authStateAllowsActions(res && res.traceAuthState, hasAuth) && !isSingleWorkPage();
-          var openSurfaceKey = currentOpenActionSurfaceKey();
-          clearBadges();
-          if (
-            Object.keys(entries).length === 0 &&
-            Object.keys(workPreferences).length === 0 &&
-            !showQuickAdd
-          ) {
-            return;
-          }
-          decorate(entries, workPreferences, showQuickAdd);
-          reopenActionSurface(openSurfaceKey);
+          renderProjection(
+            res,
+            overlayCacheForRuntimeContext(res && res.libraryOverlayCache, res),
+          );
         },
       );
     } catch {

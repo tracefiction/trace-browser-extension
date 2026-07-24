@@ -29,7 +29,18 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     private static let traceKeychainAccessGroup = "com.tracefiction.trace.shared"
     private static let traceAppleTeamIdentifierPrefix = "3GX59FLLT6."
     private static let traceAuthTokenService = "com.tracefiction.trace.auth"
-    private static let traceAuthTokenAccount = "extension-token"
+    private static let traceAuthTokenAccount = "extension-provider-v2"
+#if DEBUG && targetEnvironment(simulator)
+    /// Simulator-only input for the installed Safari lifecycle harness. The
+    /// real app/extension boundary remains the shared Keychain item above;
+    /// Release builds do not contain this key or branch.
+    private static let traceSimulatorProviderCredentialKey =
+        "traceDebugSimulatorProviderCredential"
+    private static let traceSimulatorProviderRequestCountKey =
+        "traceDebugSimulatorProviderRequestCount"
+    private static let traceSimulatorProviderRequestResultKey =
+        "traceDebugSimulatorProviderRequestResult"
+#endif
     private static let pendingFirstStoryDefaultsKey = "tracePendingFirstStoryUrlV1"
     private static let pendingFirstStoryExpiresAtDefaultsKey = "tracePendingFirstStoryExpiresAtV1"
     private static let pendingFirstStoryV2DefaultsKey = "tracePendingFirstStoryV2"
@@ -67,7 +78,11 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         if let payload, let messageType = payload["type"] as? String {
             switch messageType {
             case Self.traceIosAuthTokenRequest:
-                if let token = Self.readSharedTraceToken(), !token.isEmpty {
+                let token = Self.readSharedTraceToken()
+#if DEBUG && targetEnvironment(simulator)
+                Self.recordSimulatorProviderRequest(hasCredential: token?.isEmpty == false)
+#endif
+                if let token, !token.isEmpty {
                     responseBody = [
                         "type": Self.traceIosAuthTokenRequest,
                         "ok": true,
@@ -85,10 +100,14 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 responseBody = Self.pendingFirstStoryResponse()
 
             case Self.traceIosPendingFirstStoryClear:
-                Self.clearPendingFirstStory()
+                let expectedHandoffId = Self.sanitizedHandoffId(payload["handoffId"])
+                let cleared = Self.clearPendingFirstStory(
+                    expectedHandoffId: expectedHandoffId
+                )
                 responseBody = [
                     "type": Self.traceIosPendingFirstStoryClear,
                     "ok": true,
+                    "cleared": cleared,
                 ]
 
             case Self.traceIosExtensionHeartbeat:
@@ -189,6 +208,17 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     }
 
     private static func readSharedTraceToken() -> String? {
+#if DEBUG && targetEnvironment(simulator)
+        if let fixture = UserDefaults.standard.string(
+            forKey: traceSimulatorProviderCredentialKey
+        ) {
+            let trimmed = fixture.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+#endif
+
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: traceAuthTokenService,
@@ -211,6 +241,20 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
+
+#if DEBUG && targetEnvironment(simulator)
+    /// Redacted proof that an installed Connect actually crossed the native
+    /// provider boundary. Never persist the credential or any account data.
+    private static func recordSimulatorProviderRequest(hasCredential: Bool) {
+        let defaults = UserDefaults.standard
+        let requestCount = defaults.integer(forKey: traceSimulatorProviderRequestCountKey)
+        defaults.set(requestCount + 1, forKey: traceSimulatorProviderRequestCountKey)
+        defaults.set(
+            hasCredential ? "present" : "missing",
+            forKey: traceSimulatorProviderRequestResultKey
+        )
+    }
+#endif
 
     private static func pendingDefaults() -> UserDefaults? {
         UserDefaults(suiteName: traceSharedAppGroup)
@@ -318,11 +362,23 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         return trimmed
     }
 
-    private static func clearPendingFirstStory() {
-        guard let defaults = pendingDefaults() else { return }
+    @discardableResult
+    private static func clearPendingFirstStory(
+        expectedHandoffId: String? = nil
+    ) -> Bool {
+        guard let defaults = pendingDefaults() else { return false }
+        if let expectedHandoffId {
+            guard
+                let pending = defaults.dictionary(forKey: pendingFirstStoryV2DefaultsKey),
+                sanitizedHandoffId(pending["handoffId"]) == expectedHandoffId
+            else {
+                return false
+            }
+        }
         defaults.removeObject(forKey: pendingFirstStoryDefaultsKey)
         defaults.removeObject(forKey: pendingFirstStoryExpiresAtDefaultsKey)
         defaults.removeObject(forKey: pendingFirstStoryV2DefaultsKey)
+        return true
     }
 
     private static func pendingFirstStoryResponse() -> [String: Any] {

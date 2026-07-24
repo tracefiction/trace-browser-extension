@@ -7,6 +7,7 @@
 //
 
 import AuthenticationServices
+import os.log
 import Security
 import SafariServices
 import StoreKit
@@ -39,10 +40,8 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         "tracefiction.com",
         "www.tracefiction.com",
     ]
-
-    private static let verifiedAuthCallbackHosts: Set<String> = [
-        "www.tracefiction.com",
-    ]
+    private static let verifiedHTTPSAuthCallbackHost = "www.tracefiction.com"
+    private static let verifiedHTTPSAuthCallbackPath = "/auth/callback"
 
     private static var httpsAuthCallbackURL: URL? {
         guard #available(iOS 17.4, *) else { return nil }
@@ -53,7 +52,9 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         else {
             return nil
         }
-        return URL(string: "https://www.tracefiction.com/auth/callback")
+        return URL(
+            string: "https://\(verifiedHTTPSAuthCallbackHost)\(verifiedHTTPSAuthCallbackPath)"
+        )
     }
 
     private static var nativeAppMetadataJSON: String {
@@ -62,9 +63,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 #else
         let releaseChannel = "app_store"
 #endif
-        var metadata: [String: Any] = [
-            "releaseChannel": releaseChannel,
-        ]
+        var metadata: [String: Any] = ["releaseChannel": releaseChannel]
         if let callbackURL = httpsAuthCallbackURL {
             metadata["httpsAuthCallbackURL"] = callbackURL.absoluteString
         }
@@ -92,6 +91,10 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     private var activeTraceNavigationURL: URL?
     private var lastIntendedTraceURL: URL?
     private var failedTraceURL: URL?
+    private var sharedProviderBootstrapReady = false
+#if DEBUG && targetEnvironment(simulator)
+    private var traceSimulatorFailNextProviderClear = false
+#endif
     private lazy var billingCoordinator = TraceBillingCoordinator(
         apiBaseURL: Self.billingAPIBaseURL
     ) { [weak self] in
@@ -339,6 +342,39 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 
     override func viewDidLoad() {
         super.viewDidLoad()
+#if DEBUG && targetEnvironment(simulator)
+        let traceSimulatorSeededStaleProvider =
+            ProcessInfo.processInfo.environment["traceDebugSeedStaleProvider"] == "true"
+        if traceSimulatorSeededStaleProvider {
+            UserDefaults.standard.set(
+                "stale-v2-provider",
+                forKey: Self.traceSimulatorProviderV2Key
+            )
+            UserDefaults.standard.set(
+                "stale-retired-provider",
+                forKey: Self.traceSimulatorRetiredProviderKey
+            )
+        }
+#endif
+        // The web shell and native binary deploy independently. Clear any v2
+        // provider left by an earlier current shell before this navigation can
+        // accept a versioned synchronizer write. An old cached shell cannot
+        // repopulate v2 because its unversioned mutation is rejected below.
+        sharedProviderBootstrapReady = prepareSharedProviderForWebShell()
+#if DEBUG && targetEnvironment(simulator)
+        if traceSimulatorSeededStaleProvider &&
+            (
+                UserDefaults.standard.object(forKey: Self.traceSimulatorProviderV2Key) != nil ||
+                    UserDefaults.standard.object(forKey: Self.traceSimulatorRetiredProviderKey) != nil
+            )
+        {
+            sharedProviderBootstrapReady = false
+        }
+        UserDefaults.standard.set(
+            sharedProviderBootstrapReady ? "cleared" : "failed",
+            forKey: Self.traceSimulatorBootstrapClearResultKey
+        )
+#endif
         navigationController?.setNavigationBarHidden(true, animated: false)
         apnsTokenObserver = NotificationCenter.default.addObserver(
             forName: .traceApnsDeviceTokenReceived,
@@ -645,44 +681,79 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         loadTraceURLRequest(url)
     }
 
-    /// Handles Auth0 callbacks routed through the custom-scheme fallback.
+    /// Handles fixed custom-scheme routes delivered by iOS.
     func handleAuthCallback(url: URL) {
         guard let target = Self.rewriteTraceAuthURL(url) else { return }
         loadTraceURLRequest(target)
     }
 
-    /// Normalizes either callback transport into the Trace web callback.
+    /// Maps the fixed onboarding route or either supported auth callback
+    /// transport back into the configured Trace web origin.
     static func rewriteTraceAuthURL(_ url: URL) -> URL? {
-        let scheme = url.scheme?.lowercased()
-        let parts: URLComponents
-        if scheme == "traceauth" {
-            guard let webParts = URLComponents(string: Self.webAppHTTPSOrigin) else {
-                return nil
-            }
-            parts = webParts
-        } else if scheme == "https",
-                  let host = url.host?.lowercased(),
-                  verifiedAuthCallbackHosts.contains(host),
-                  url.path == "/auth/callback",
-                  let callbackParts = URLComponents(
-                    url: url,
-                    resolvingAgainstBaseURL: false
-                  ) {
-            parts = callbackParts
-        } else {
-            return url
+        guard var parts = URLComponents(string: Self.webAppHTTPSOrigin) else { return nil }
+        guard let callbackParts = URLComponents(
+            url: url,
+            resolvingAgainstBaseURL: false
+        ) else {
+            return nil
         }
 
-        var normalizedParts = parts
-        let callbackParts = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        var queryItems = callbackParts?.queryItems ?? []
+        let scheme = url.scheme?.lowercased()
+        if scheme == "traceauth", url.host?.lowercased() == "open" {
+            let queryItems = callbackParts.queryItems ?? []
+            guard callbackParts.path.isEmpty,
+                  callbackParts.fragment == nil,
+                  callbackParts.user == nil,
+                  callbackParts.password == nil,
+                  callbackParts.port == nil,
+                  queryItems.count == 1,
+                  queryItems[0].name == "destination",
+                  queryItems[0].value == "extension-connect"
+            else {
+                return nil
+            }
+            parts.path = "/setup"
+            parts.queryItems = [URLQueryItem(name: "setupPath", value: "ios-app")]
+            parts.fragment = "first-story-setup"
+            return parts.url
+        }
+
+        if scheme == "traceauth" {
+            guard url.host?.lowercased() == "callback",
+                  callbackParts.path.isEmpty,
+                  callbackParts.user == nil,
+                  callbackParts.password == nil,
+                  callbackParts.port == nil
+            else {
+                return nil
+            }
+        } else if scheme == "https" {
+            guard isVerifiedHTTPSAuthCallback(url) else { return nil }
+        } else {
+            return nil
+        }
+
+        var queryItems = callbackParts.queryItems ?? []
         queryItems.removeAll { $0.name == "trace_app" }
         queryItems.append(URLQueryItem(name: "trace_app", value: "1"))
 
-        normalizedParts.path = "/auth/callback"
-        normalizedParts.queryItems = queryItems
-        normalizedParts.fragment = callbackParts?.fragment
-        return normalizedParts.url
+        parts.path = "/auth/callback"
+        parts.queryItems = queryItems
+        parts.fragment = callbackParts.fragment
+        return parts.url
+    }
+
+    private static func isVerifiedHTTPSAuthCallback(_ url: URL) -> Bool {
+        guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        else {
+            return false
+        }
+        return parts.scheme?.lowercased() == "https" &&
+            parts.host?.lowercased() == verifiedHTTPSAuthCallbackHost &&
+            parts.path == verifiedHTTPSAuthCallbackPath &&
+            parts.user == nil &&
+            parts.password == nil &&
+            parts.port == nil
     }
 
     func webView(
@@ -904,24 +975,28 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     private static func httpsAuthenticationCallback(
         for startURL: URL
     ) -> ASWebAuthenticationSession.Callback? {
-        guard httpsAuthCallbackURL != nil,
+        guard let callbackURL = httpsAuthCallbackURL,
               let authorizeParts = URLComponents(
                 url: startURL,
                 resolvingAgainstBaseURL: false
-              ),
-              let redirectValue = authorizeParts.queryItems?.first(
-                where: { $0.name == "redirect_uri" }
-              )?.value,
-              let redirectURL = URL(string: redirectValue),
-              redirectURL.scheme?.lowercased() == "https",
-              let host = redirectURL.host?.lowercased(),
-              verifiedAuthCallbackHosts.contains(host),
-              redirectURL.path == "/auth/callback"
+              )
         else {
             return nil
         }
 
-        return .https(host: host, path: "/auth/callback")
+        let redirectItems = (authorizeParts.queryItems ?? []).filter {
+            $0.name == "redirect_uri"
+        }
+        guard redirectItems.count == 1,
+              redirectItems[0].value == callbackURL.absoluteString
+        else {
+            return nil
+        }
+
+        return .https(
+            host: verifiedHTTPSAuthCallbackHost,
+            path: verifiedHTTPSAuthCallbackPath
+        )
     }
 
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
@@ -1288,22 +1363,36 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         case ao3
         case ffn
 
-        var homeURL: URL {
+        var mobileHomeURL: URL {
             switch self {
             case .ao3:
                 return URL(string: "https://archiveofourown.org/")!
             case .ffn:
-                return URL(string: "https://www.fanfiction.net/")!
+                return URL(string: "https://m.fanfiction.net/")!
             }
         }
     }
 
     private static let safariExtensionBundleIdentifier = "com.tracefiction.trace.extension"
+    private static let safariBridgeLog = OSLog(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.tracefiction.trace",
+        category: "SafariBridge"
+    )
     private static let traceSharedAppGroup = "group.com.tracefiction.trace"
     private static let traceKeychainAccessGroup = "com.tracefiction.trace.shared"
     private static let traceAppleTeamIdentifierPrefix = "3GX59FLLT6."
     private static let traceAuthTokenService = "com.tracefiction.trace.auth"
-    private static let traceAuthTokenAccount = "extension-token"
+    private static let traceAuthTokenAccount = "extension-provider-v2"
+    private static let retiredTraceAuthTokenAccount = "extension-token"
+    private static let traceProviderProtocolVersion = 2
+#if DEBUG && targetEnvironment(simulator)
+    private static let traceSimulatorProviderV2Key =
+        "traceDebugSimulatorAppProviderV2"
+    private static let traceSimulatorRetiredProviderKey =
+        "traceDebugSimulatorAppProviderRetired"
+    private static let traceSimulatorBootstrapClearResultKey =
+        "traceDebugSimulatorBootstrapClearResult"
+#endif
     private static let pendingFirstStoryDefaultsKey = "tracePendingFirstStoryUrlV1"
     private static let pendingFirstStoryExpiresAtDefaultsKey = "tracePendingFirstStoryExpiresAtV1"
     private static let pendingFirstStoryV2DefaultsKey = "tracePendingFirstStoryV2"
@@ -1322,10 +1411,30 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 
         switch messageType {
         case "TRACE_IOS_AUTH_TOKEN_UPDATE":
+            guard body["protocolVersion"] as? Int == Self.traceProviderProtocolVersion else {
+                postSafariExtensionActionResult(
+                    type: "TRACE_IOS_AUTH_TOKEN_UPDATE_RESPONSE",
+                    nonce: nonce,
+                    ok: false,
+                    error: "unsupported_protocol"
+                )
+                return
+            }
             handleTraceSafariAuthTokenUpdate(
                 nonce: nonce,
                 token: body["token"] as? String
             )
+        case "TRACE_IOS_AUTH_TOKEN_CLEAR":
+            guard body["protocolVersion"] as? Int == Self.traceProviderProtocolVersion else {
+                postSafariExtensionActionResult(
+                    type: "TRACE_IOS_AUTH_TOKEN_CLEAR_RESPONSE",
+                    nonce: nonce,
+                    ok: false,
+                    error: "unsupported_protocol"
+                )
+                return
+            }
+            handleTraceSafariAuthTokenClear(nonce: nonce)
         case "TRACE_IOS_EXTENSION_STATE_REQUEST":
             handleTraceSafariExtensionStateRequest(nonce: nonce)
         case "TRACE_IOS_OPEN_EXTENSION_SETTINGS":
@@ -1374,10 +1483,20 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 
     private func handleTraceSafariAuthTokenUpdate(nonce: String, token: String?) {
         do {
+            if !sharedProviderBootstrapReady {
+                sharedProviderBootstrapReady = prepareSharedProviderForWebShell()
+            }
+            guard sharedProviderBootstrapReady else {
+                throw TraceSafariExtensionBridgeError.tokenShareFailed
+            }
             guard let token else {
                 throw TraceSafariExtensionBridgeError.tokenShareFailed
             }
             try Self.storeSharedTraceToken(token)
+#if DEBUG && targetEnvironment(simulator)
+            traceSimulatorFailNextProviderClear =
+                ProcessInfo.processInfo.environment["traceDebugFailProviderClear"] == "true"
+#endif
             postSafariExtensionActionResult(
                 type: "TRACE_IOS_AUTH_TOKEN_UPDATE_RESPONSE",
                 nonce: nonce,
@@ -1388,15 +1507,52 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 type: "TRACE_IOS_AUTH_TOKEN_UPDATE_RESPONSE",
                 nonce: nonce,
                 ok: false,
-                error: "token_share_failed"
+                error: "provider_update_failed"
             )
         }
+    }
+
+    private func handleTraceSafariAuthTokenClear(nonce: String) {
+        do {
+            try clearSharedProviderForWebShell()
+            sharedProviderBootstrapReady = true
+            postSafariExtensionActionResult(
+                type: "TRACE_IOS_AUTH_TOKEN_CLEAR_RESPONSE",
+                nonce: nonce,
+                ok: true
+            )
+        } catch {
+            postSafariExtensionActionResult(
+                type: "TRACE_IOS_AUTH_TOKEN_CLEAR_RESPONSE",
+                nonce: nonce,
+                ok: false,
+                error: "provider_clear_failed"
+            )
+        }
+    }
+
+    private func prepareSharedProviderForWebShell() -> Bool {
+        do {
+            try clearSharedProviderForWebShell()
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func clearSharedProviderForWebShell() throws {
+#if DEBUG && targetEnvironment(simulator)
+        if traceSimulatorFailNextProviderClear {
+            traceSimulatorFailNextProviderClear = false
+            throw TraceSafariExtensionBridgeError.tokenShareFailed
+        }
+#endif
+        try Self.clearSharedTraceTokens()
     }
 
     private func handleTraceSafariExtensionStateRequest(nonce: String) {
         Task { [weak self] in
             guard let self else { return }
-            _ = try? await self.storeCurrentTraceTokenForSafariExtension()
 
             await MainActor.run {
                 guard #available(iOS 26.2, *) else {
@@ -1491,37 +1647,28 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     }
 
     private func handleTraceSafariExtensionSettingsRequest(nonce: String) {
-        Task { [weak self] in
-            guard let self else { return }
-            let tokenShareSucceeded = (try? await self.storeCurrentTraceTokenForSafariExtension()) != nil
+        guard #available(iOS 26.2, *) else {
+            postSafariExtensionActionResult(
+                type: "TRACE_IOS_OPEN_EXTENSION_SETTINGS_RESPONSE",
+                nonce: nonce,
+                ok: false,
+                error: "settings_unsupported"
+            )
+            return
+        }
 
-            await MainActor.run {
-                guard #available(iOS 26.2, *) else {
-                    self.postSafariExtensionActionResult(
-                        type: "TRACE_IOS_OPEN_EXTENSION_SETTINGS_RESPONSE",
-                        nonce: nonce,
-                        ok: false,
-                        error: "settings_unsupported"
-                    )
-                    return
-                }
-
-                let identifiers = Self.safariExtensionCandidateIdentifiers()
-                if !tokenShareSucceeded {
-                    NSLog("[Trace] Safari extension settings opening without refreshed shared token")
-                }
-                SFSafariSettings.openExtensionsSettings(
-                    forIdentifiers: identifiers
-                ) { [weak self] error in
-                    DispatchQueue.main.async {
-                        self?.postSafariExtensionActionResult(
-                            type: "TRACE_IOS_OPEN_EXTENSION_SETTINGS_RESPONSE",
-                            nonce: nonce,
-                            ok: error == nil,
-                            error: error == nil ? nil : "settings_open_failed"
-                        )
-                    }
-                }
+        // Opening system settings is independent of extension authentication.
+        // Keep this call directly coupled to the reader's tap.
+        SFSafariSettings.openExtensionsSettings(
+            forIdentifiers: Self.safariExtensionCandidateIdentifiers()
+        ) { [weak self] error in
+            DispatchQueue.main.async {
+                self?.postSafariExtensionActionResult(
+                    type: "TRACE_IOS_OPEN_EXTENSION_SETTINGS_RESPONSE",
+                    nonce: nonce,
+                    ok: error == nil,
+                    error: error == nil ? nil : "settings_open_failed"
+                )
             }
         }
     }
@@ -1537,7 +1684,6 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 guard let url = Self.supportedFirstStoryURL(rawURL) else {
                     throw TraceSafariExtensionBridgeError.unsupportedUrl
                 }
-                try await self.storeCurrentTraceTokenForSafariExtension()
                 try Self.storePendingFirstStory(
                     mode: .story,
                     url: url,
@@ -1572,7 +1718,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                         type: "TRACE_IOS_OPEN_STORY_URL_RESPONSE",
                         nonce: nonce,
                         ok: false,
-                        error: "token_share_failed"
+                        error: "handoff_store_failed"
                     )
                 }
             }
@@ -1604,9 +1750,15 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 #endif
         Task { [weak self] in
             guard let self else { return }
-            let url = hostKind.homeURL
+            let url = hostKind.mobileHomeURL
+            os_log(
+                "Opening archive home host=%{public}@ destination=%{public}@",
+                log: Self.safariBridgeLog,
+                type: .info,
+                hostKind.rawValue,
+                url.absoluteString
+            )
             do {
-                try await self.storeCurrentTraceTokenForSafariExtension()
                 try Self.storePendingFirstStory(
                     mode: .browse,
                     url: nil,
@@ -1615,6 +1767,14 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 )
                 await MainActor.run {
                     UIApplication.shared.open(url, options: [:]) { [weak self] success in
+                        os_log(
+                            "Archive home open completed host=%{public}@ destination=%{public}@ success=%{public}@",
+                            log: Self.safariBridgeLog,
+                            type: success ? .info : .error,
+                            hostKind.rawValue,
+                            url.absoluteString,
+                            success ? "yes" : "no"
+                        )
                         if !success {
                             Self.clearPendingFirstStoryURL()
                         }
@@ -1633,7 +1793,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                         type: responseType,
                         nonce: nonce,
                         ok: false,
-                        error: "token_share_failed"
+                        error: "handoff_store_failed"
                     )
                 }
             }
@@ -1804,12 +1964,6 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         return trimmed
     }
 
-    @MainActor
-    private func storeCurrentTraceTokenForSafariExtension() async throws {
-        let token = try await fetchTraceShellAccessToken()
-        try Self.storeSharedTraceToken(token)
-    }
-
     private static func keychainAccessGroup() -> String {
         if let prefix = Bundle.main.object(forInfoDictionaryKey: "AppIdentifierPrefix") as? String,
            !prefix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -1821,7 +1975,17 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 
     private static func storeSharedTraceToken(_ token: String) throws {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let data = trimmed.data(using: .utf8), !data.isEmpty else {
+        guard !trimmed.isEmpty else {
+            throw TraceSafariExtensionBridgeError.tokenShareFailed
+        }
+#if DEBUG && targetEnvironment(simulator)
+        UserDefaults.standard.set(trimmed, forKey: traceSimulatorProviderV2Key)
+        guard UserDefaults.standard.string(forKey: traceSimulatorProviderV2Key) == trimmed else {
+            throw TraceSafariExtensionBridgeError.tokenShareFailed
+        }
+        return
+#else
+        guard let data = trimmed.data(using: .utf8) else {
             throw TraceSafariExtensionBridgeError.tokenShareFailed
         }
 
@@ -1840,6 +2004,32 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         guard status == errSecSuccess else {
             throw TraceSafariExtensionBridgeError.tokenShareFailed
         }
+#endif
+    }
+
+    private static func clearSharedTraceTokens() throws {
+#if DEBUG && targetEnvironment(simulator)
+        UserDefaults.standard.removeObject(forKey: traceSimulatorProviderV2Key)
+        UserDefaults.standard.removeObject(forKey: traceSimulatorRetiredProviderKey)
+        guard UserDefaults.standard.object(forKey: traceSimulatorProviderV2Key) == nil,
+              UserDefaults.standard.object(forKey: traceSimulatorRetiredProviderKey) == nil
+        else {
+            throw TraceSafariExtensionBridgeError.tokenShareFailed
+        }
+#else
+        for account in [traceAuthTokenAccount, retiredTraceAuthTokenAccount] {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: traceAuthTokenService,
+                kSecAttrAccount as String: account,
+                kSecAttrAccessGroup as String: keychainAccessGroup(),
+            ]
+            let status = SecItemDelete(query as CFDictionary)
+            guard status == errSecSuccess || status == errSecItemNotFound else {
+                throw TraceSafariExtensionBridgeError.tokenShareFailed
+            }
+        }
+#endif
     }
 
     private static func readExtensionHeartbeat() -> TraceSafariExtensionHeartbeat? {

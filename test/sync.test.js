@@ -49,7 +49,7 @@ function statusReadyMessages(h) {
 
 function createSyncHarness(
   origin = "https://tracefiction.com",
-  { sendMessageImpl } = {},
+  { sendMessageImpl, sessionMode = "legacy" } = {},
 ) {
   const js = fs.readFileSync(SYNC_JS_PATH, "utf8");
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -91,6 +91,7 @@ function createSyncHarness(
       },
     },
     browser: undefined,
+    TRACE_SESSION_MODE: sessionMode,
     globalThis: null,
   };
   context.globalThis = context;
@@ -102,7 +103,7 @@ function createSyncHarness(
     postedMessages,
     consoleErrors,
     emitRuntimeMessage(message, sender = {}, sendResponse = () => {}) {
-      onRuntimeMessage?.(message, sender, sendResponse);
+      return onRuntimeMessage?.(message, sender, sendResponse);
     },
   };
 }
@@ -126,12 +127,13 @@ test("sync forwards same-origin TRACE_FICTION_TOKEN messages to background", asy
 test("sync requests a Trace token when ready and on page lifecycle events", async () => {
   const h = createSyncHarness();
 
-  assert.deepEqual(tokenRequestMessages(h), [
+  const grantRequests = tokenRequestMessages(h);
+  assert.deepEqual(grantRequests, [
     {
       data: {
         type: "TRACE_FICTION_TOKEN_REQUEST",
         reason: "sync_ready",
-        at: h.postedMessages[0].data.at,
+        at: grantRequests[0].data.at,
       },
       targetOrigin: "https://tracefiction.com",
     },
@@ -151,6 +153,81 @@ test("sync requests a Trace token when ready and on page lifecycle events", asyn
       targetOrigin: "https://tracefiction.com",
     },
   ]);
+});
+
+test("kernel sync accepts only a correlated explicit credential grant", async () => {
+  const h = createSyncHarness("https://tracefiction.com", { sessionMode: "kernel" });
+  assert.deepEqual(tokenRequestMessages(h), []);
+  const responses = [];
+
+  assert.equal(
+    h.emitRuntimeMessage(
+      {
+        type: "TRACE_CREDENTIAL_GRANT_REQUEST",
+        protocolVersion: 1,
+        requestId: "grant-1",
+        purpose: "connect",
+      },
+      {},
+      (response) => responses.push(response),
+    ),
+    true,
+  );
+  const explicitRequests = tokenRequestMessages(h);
+  assert.deepEqual(explicitRequests, [
+    {
+      data: {
+        type: "TRACE_FICTION_TOKEN_REQUEST",
+        reason: "credential_grant",
+        at: explicitRequests[0].data.at,
+        protocolVersion: 1,
+        requestId: "grant-1",
+      },
+      targetOrigin: "https://tracefiction.com",
+    },
+  ]);
+
+  h.window.dispatchEvent(
+    new h.window.MessageEvent("message", {
+      data: {
+        type: "TRACE_FICTION_TOKEN",
+        token: "wrong-token",
+        protocolVersion: 1,
+        requestId: "other-grant",
+      },
+      origin: "https://tracefiction.com",
+    }),
+  );
+  assert.deepEqual(responses, []);
+  h.window.dispatchEvent(
+    new h.window.MessageEvent("message", {
+      data: {
+        type: "TRACE_FICTION_TOKEN",
+        token: "current-token",
+        protocolVersion: 1,
+        requestId: "grant-1",
+      },
+      origin: "https://tracefiction.com",
+    }),
+  );
+  assert.deepEqual(plainJson(responses), [
+    { ok: true, requestId: "grant-1", token: "current-token" },
+  ]);
+  assert.deepEqual(h.messages, []);
+});
+
+test("kernel sync ignores ambient token and lifecycle pushes", async () => {
+  const h = createSyncHarness("https://tracefiction.com", { sessionMode: "kernel" });
+  h.window.dispatchEvent(
+    new h.window.MessageEvent("message", {
+      data: { type: "TRACE_FICTION_TOKEN", token: "ambient-token" },
+      origin: "https://tracefiction.com",
+    }),
+  );
+  h.window.dispatchEvent(new h.window.Event("pageshow"));
+  await flush();
+  assert.deepEqual(h.messages, []);
+  assert.deepEqual(tokenRequestMessages(h), []);
 });
 
 test("sync ignores unrelated or cross-origin messages", () => {
@@ -431,6 +508,51 @@ test("sync returns sanitized first-story add failures", async () => {
       targetOrigin: "https://tracefiction.com",
     },
   ]);
+});
+
+test("sync preserves the bounded site-permission failure and hides unknown errors", async () => {
+  const responses = [
+    { ok: false, error: "permission_required", rawError: "private" },
+    { ok: false, error: "internal_stack_trace" },
+  ];
+  const h = createSyncHarness("https://tracefiction.com", {
+    sendMessageImpl(_message, callback) {
+      callback?.(responses.shift());
+    },
+  });
+
+  for (const nonce of ["permission-1", "permission-2"]) {
+    h.window.dispatchEvent(
+      new h.window.MessageEvent("message", {
+        data: {
+          type: "TRACE_FIRST_STORY_ADD_REQUEST",
+          nonce,
+          url: "https://archiveofourown.org/works/123",
+        },
+        origin: "https://tracefiction.com",
+        source: h.window,
+      }),
+    );
+    await flush();
+  }
+
+  assert.deepEqual(
+    nonTokenRequestMessages(h).map((message) => message.data),
+    [
+      {
+        type: "TRACE_FIRST_STORY_ADD_RESPONSE",
+        nonce: "permission-1",
+        ok: false,
+        error: "permission_required",
+      },
+      {
+        type: "TRACE_FIRST_STORY_ADD_RESPONSE",
+        nonce: "permission-2",
+        ok: false,
+        error: "unknown_error",
+      },
+    ],
+  );
 });
 
 test("sync ignores first-story add requests without nonce or URL", async () => {

@@ -19,6 +19,13 @@ const POPUP_JS_PATH = path.join(
   "Resources",
   "popup.js",
 );
+const POPUP_CSS_PATH = path.join(
+  __dirname,
+  "..",
+  "Shared (Extension)",
+  "Resources",
+  "popup.css",
+);
 
 function flush() {
   return new Promise((resolve) => setImmediate(resolve));
@@ -37,9 +44,18 @@ function createPopupHarness({
   importResponse = { ok: true },
   userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
   traceWebOrigin,
+  sessionMode = "legacy",
+  sessionSnapshot = {
+    state: "signed_out",
+    accountId: null,
+    canExecuteAuthenticated: false,
+    reason: "none",
+  },
+  promiseRuntime = false,
 } = {}) {
   const html = fs.readFileSync(POPUP_HTML_PATH, "utf8");
   const js = fs.readFileSync(POPUP_JS_PATH, "utf8");
+  const css = fs.readFileSync(POPUP_CSS_PATH, "utf8");
   const dom = new JSDOM(html, {
     url: "https://tracefiction.com",
     runScripts: "outside-only",
@@ -47,6 +63,9 @@ function createPopupHarness({
     userAgent,
   });
   const { window } = dom;
+  const style = window.document.createElement("style");
+  style.textContent = css;
+  window.document.head.appendChild(style);
   const store = { ...storageState };
   const messages = [];
   const storageChangeListeners = [];
@@ -58,17 +77,24 @@ function createPopupHarness({
       lastError: null,
       sendMessage(message, callback) {
         messages.push(message);
+        let response;
         if (message.type === "TRACE_POPUP_OPEN") {
-          callback?.({ ok: true });
-          return;
+          response = { ok: true };
         }
         if (message.type === "TRACE_POPUP_GET_STATE") {
-          callback?.(popupState);
-          return;
+          response = popupState;
         }
         if (message.type === "TRACE_IMPORT_TRIGGER") {
-          callback?.(importResponse);
+          response = importResponse;
         }
+        if (message.type === "TRACE_SESSION_GET_SNAPSHOT") {
+          response = { ok: true, snapshot: sessionSnapshot };
+        }
+        if (message.type === "TRACE_SESSION_ACTION") {
+          response = { ok: true, snapshot: sessionSnapshot, action: { kind: "ignored" } };
+        }
+        if (promiseRuntime) return Promise.resolve(response);
+        callback?.(response);
       },
     },
     storage: {
@@ -104,8 +130,8 @@ function createPopupHarness({
 
   const context = {
     console,
-    chrome: ext,
-    browser: undefined,
+    chrome: promiseRuntime ? undefined : ext,
+    browser: promiseRuntime ? ext : undefined,
     document: window.document,
     window,
     self: window,
@@ -117,6 +143,7 @@ function createPopupHarness({
       return timeouts.length;
     },
     clearTimeout() {},
+    TRACE_SESSION_MODE: sessionMode,
   };
   if (traceWebOrigin !== undefined) {
     context.TRACE_EXTENSION_WEB_ORIGIN = traceWebOrigin;
@@ -157,6 +184,195 @@ function createPopupHarness({
     },
   };
 }
+
+test("kernel popup is read-only on open and exposes only explicit session actions", async () => {
+  const h = createPopupHarness({ sessionMode: "kernel" });
+  await flush();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(h.messages)), [
+    { type: "TRACE_SESSION_GET_SNAPSHOT" },
+  ]);
+  assert.equal(h.document.getElementById("popup-status").textContent, "Connect Trace");
+  assert.equal(h.document.getElementById("popup-cta").textContent, "Connect");
+  assert.equal(h.document.getElementById("popup-import").hidden, true);
+  const localSettings = h.document.getElementById("popup-local-settings");
+  assert.equal(localSettings.hidden, true);
+  assert.equal(h.window.getComputedStyle(localSettings).display, "none");
+
+  h.document.getElementById("popup-cta").dispatchEvent(
+    new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(h.messages.at(-1))), {
+    type: "TRACE_SESSION_ACTION",
+    action: "connect",
+  });
+});
+
+test("kernel popup uses the promise runtime contract on Firefox and Safari", async () => {
+  const h = createPopupHarness({ sessionMode: "kernel", promiseRuntime: true });
+  await flush();
+
+  assert.equal(h.document.getElementById("popup-status").textContent, "Connect Trace");
+  h.document.getElementById("popup-cta").dispatchEvent(
+    new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+  );
+  await flush();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.messages.at(-1))), {
+    type: "TRACE_SESSION_ACTION",
+    action: "connect",
+  });
+  assert.equal(h.document.getElementById("popup-cta").hasAttribute("aria-disabled"), false);
+});
+
+for (const promiseRuntime of [false, true]) {
+  const runtimeLabel = promiseRuntime ? "promise" : "callback";
+  for (const fixture of [
+    { state: "initializing", primary: null, secondary: null },
+    { state: "signed_out", primary: "connect", secondary: null },
+    { state: "connecting", primary: "cancel", secondary: null },
+    { state: "verifying", primary: "cancel", secondary: null },
+    { state: "connected", primary: null, secondary: "disconnect" },
+    { state: "degraded", primary: "retry", secondary: "disconnect" },
+    { state: "reconnect_required", primary: "reconnect", secondary: "disconnect" },
+  ]) {
+    test(`kernel ${runtimeLabel} popup exposes the required ${fixture.state} actions`, async () => {
+      const h = createPopupHarness({
+        sessionMode: "kernel",
+        promiseRuntime,
+        sessionSnapshot: {
+          state: fixture.state,
+          accountId: fixture.state === "connected" ? "account-a" : null,
+          canExecuteAuthenticated: fixture.state === "connected",
+          reason: fixture.state === "degraded" ? "verification_unavailable" : "none",
+        },
+      });
+      await flush();
+      const primary = h.document.getElementById("popup-cta");
+      const secondary = h.document.getElementById("popup-session-secondary");
+
+      assert.equal(primary.hidden, fixture.primary == null);
+      assert.equal(primary.dataset.sessionAction || null, fixture.primary);
+      assert.equal(secondary.hidden, fixture.secondary == null);
+      assert.equal(secondary.dataset.sessionAction || null, fixture.secondary);
+
+      if (fixture.primary) {
+        primary.dispatchEvent(
+          new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+        );
+        await flush();
+        const actionMessage = h.messages
+          .filter((message) => message.type === "TRACE_SESSION_ACTION")
+          .at(-1);
+        assert.deepEqual(JSON.parse(JSON.stringify(actionMessage)), {
+          type: "TRACE_SESSION_ACTION",
+          action: fixture.primary,
+        });
+      }
+      if (fixture.secondary) {
+        secondary.dispatchEvent(
+          new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+        );
+        await flush();
+        const actionMessage = h.messages
+          .filter((message) => message.type === "TRACE_SESSION_ACTION")
+          .at(-1);
+        assert.deepEqual(JSON.parse(JSON.stringify(actionMessage)), {
+          type: "TRACE_SESSION_ACTION",
+          action: fixture.secondary,
+        });
+      }
+    });
+  }
+}
+
+test("connected kernel popup renders authoritative summary, preferences, and migrated import", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    sessionSnapshot: {
+      state: "connected",
+      accountId: "must-not-render",
+      canExecuteAuthenticated: true,
+      reason: "none",
+    },
+    popupState: {
+      ok: true,
+      authState: {
+        state: "connected",
+        reason: "none",
+        canExecuteAuthenticated: true,
+      },
+      firstSaveSeen: true,
+      libraryCount: 8,
+      activeTab: { kind: "supported_story", site: "ffn", canImport: true },
+      pro: true,
+      autoTrackEnabled: false,
+      libraryInlayEnabled: true,
+      ao3SavedFiltersEnabled: false,
+      metadataImproveEnabled: true,
+    },
+  });
+  await flush();
+
+  assert.equal(h.document.getElementById("popup-local-settings").hidden, false);
+  assert.equal(h.document.getElementById("popup-pro-settings").hidden, false);
+  assert.equal(h.document.getElementById("pref-auto-track").checked, false);
+  assert.equal(h.document.getElementById("pref-library-inlay").checked, true);
+  assert.equal(h.document.getElementById("pref-ao3-saved-filters").checked, false);
+  assert.equal(h.document.getElementById("popup-import").hidden, false);
+  assert.equal(h.document.getElementById("popup-import").textContent, "Import this story");
+  h.document.getElementById("popup-import").click();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.messages.at(-1))), {
+    type: "TRACE_IMPORT_TRIGGER",
+  });
+  assert.equal(
+    h.messages.some((message) => message.type === "TRACE_POPUP_GET_STATE"),
+    true,
+  );
+});
+
+test("kernel iOS credential recovery gives app-only guidance and opens the app", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    userAgent:
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+    sessionSnapshot: {
+      state: "reconnect_required",
+      accountId: null,
+      canExecuteAuthenticated: false,
+      reason: "credential_rejected",
+    },
+  });
+  await flush();
+
+  assert.match(h.document.getElementById("popup-lead").textContent, /Trace app/i);
+  assert.match(h.document.getElementById("popup-lead").textContent, /does not connect/i);
+  const helper = h.document.getElementById("popup-session-help");
+  assert.equal(helper.hidden, false);
+  assert.equal(helper.textContent, "Open Trace app");
+  assert.equal(
+    helper.getAttribute("href"),
+    "traceauth://open?destination=extension-connect",
+  );
+});
+
+test("kernel iOS account-response failures are not mislabeled as an app sign-in problem", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    userAgent:
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+    sessionSnapshot: {
+      state: "reconnect_required",
+      accountId: null,
+      canExecuteAuthenticated: false,
+      reason: "invalid_account_response",
+    },
+  });
+  await flush();
+
+  assert.match(h.document.getElementById("popup-lead").textContent, /safely verify/i);
+  assert.doesNotMatch(h.document.getElementById("popup-lead").textContent, /sign in/i);
+  assert.equal(h.document.getElementById("popup-session-help").hidden, true);
+});
 
 test("popup renders signed-out fallback with a direct Trace sign-in CTA", async () => {
   const h = createPopupHarness({
@@ -641,6 +857,45 @@ test("popup import failure re-enables the button and exposes the failure reason"
   assert.equal(button.disabled, false);
   assert.equal(button.textContent, "Import failed — try again");
   assert.equal(button.title, "collect_failed");
+});
+
+test("popup import turns a missing site grant into actionable permission guidance", async () => {
+  const connected = { state: "connected", message: "Connected" };
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    sessionSnapshot: {
+      state: "connected",
+      accountId: "must-not-render",
+      canExecuteAuthenticated: true,
+      reason: "none",
+    },
+    importResponse: { ok: false, error: "permission_required" },
+    popupState: {
+      ok: true,
+      authState: {
+        state: "connected",
+        reason: "none",
+        canExecuteAuthenticated: true,
+      },
+      firstSaveSeen: false,
+      libraryCount: 0,
+      activeTab: { kind: "supported_story", site: "ao3", canImport: true },
+      pro: false,
+      autoTrackEnabled: true,
+      libraryInlayEnabled: true,
+      ao3SavedFiltersEnabled: true,
+      metadataImproveEnabled: true,
+    },
+    storageState: { traceAuthState: connected },
+  });
+  await flush();
+
+  const button = h.document.getElementById("popup-import");
+  button.click();
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, "Allow site access, then retry");
+  assert.match(button.title, /extension settings/i);
+  assert.match(button.title, /refresh/i);
 });
 
 test("popup import success closes the popup after a short delay", async () => {
