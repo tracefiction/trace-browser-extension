@@ -2215,24 +2215,28 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     async #execute(command) {
       const scope2 = this.#ports.session.publicationScope();
       if (scope2 === null) return failure3("not_authenticated");
-      let lookup = await this.#lookup(command.workKey, true);
-      if (lookup.kind !== "published") return executionFailure3(lookup);
-      if (lookup.value.kind === "found" && confirmationSatisfiesStoryCommand(command, lookup.value.confirmation)) {
-        return this.#finalize(scope2, command, lookup.value.confirmation, "preflight");
-      }
-      if (lookup.value.kind === "invalid_response") return failure3("invalid_response");
-      if (lookup.value.kind === "unavailable") return failure3("unavailable");
-      let mutation = await this.#ports.session.executeAuthenticated(
-        (credential) => this.#ports.api.track(credential, command)
-      );
-      if (mutation.kind === "auth_rejected" && mutation.recovery === "connected") {
-        lookup = await this.#lookup(command.workKey, false);
+      if (command.intent === "ensure_saved") {
+        const lookup = await this.#lookup(command.workKey, true);
         if (lookup.kind !== "published") return executionFailure3(lookup);
         if (lookup.value.kind === "found" && confirmationSatisfiesStoryCommand(command, lookup.value.confirmation)) {
           return this.#finalize(scope2, command, lookup.value.confirmation, "preflight");
         }
         if (lookup.value.kind === "invalid_response") return failure3("invalid_response");
         if (lookup.value.kind === "unavailable") return failure3("unavailable");
+      }
+      let mutation = await this.#ports.session.executeAuthenticated(
+        (credential) => this.#ports.api.track(credential, command)
+      );
+      if (mutation.kind === "auth_rejected" && mutation.recovery === "connected") {
+        if (command.intent === "ensure_saved") {
+          const lookup = await this.#lookup(command.workKey, false);
+          if (lookup.kind !== "published") return executionFailure3(lookup);
+          if (lookup.value.kind === "found" && confirmationSatisfiesStoryCommand(command, lookup.value.confirmation)) {
+            return this.#finalize(scope2, command, lookup.value.confirmation, "preflight");
+          }
+          if (lookup.value.kind === "invalid_response") return failure3("invalid_response");
+          if (lookup.value.kind === "unavailable") return failure3("unavailable");
+        }
         mutation = await this.#ports.session.executeAuthenticated(
           (credential) => this.#ports.api.track(credential, command)
         );
@@ -2246,14 +2250,24 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
       if (mutation.value.kind === "rejected") return failure3(mutation.value.reason);
       if (mutation.value.kind === "invalid_response") return failure3("invalid_response");
-      lookup = await this.#lookup(command.workKey, false);
-      if (lookup.kind !== "published") return executionFailure3(lookup);
-      if (lookup.value.kind === "found" && confirmationSatisfiesStoryCommand(command, lookup.value.confirmation)) {
-        return this.#finalize(scope2, command, lookup.value.confirmation, "reconciliation");
+      const reconciliation = await this.#lookup(command.workKey, false);
+      if (reconciliation.kind !== "published") return executionFailure3(reconciliation);
+      if (reconciliation.value.kind === "found" && confirmationSatisfiesStoryCommand(
+        command,
+        reconciliation.value.confirmation
+      )) {
+        return this.#finalize(
+          scope2,
+          command,
+          reconciliation.value.confirmation,
+          "reconciliation"
+        );
       }
-      if (lookup.value.kind === "invalid_response") return failure3("invalid_response");
+      if (reconciliation.value.kind === "invalid_response") {
+        return failure3("invalid_response");
+      }
       return failure3(
-        lookup.value.kind === "unavailable" ? "unavailable" : "confirmation_missing"
+        reconciliation.value.kind === "unavailable" ? "unavailable" : "confirmation_missing"
       );
     }
     async #lookup(workKey, allowAuthRecovery) {

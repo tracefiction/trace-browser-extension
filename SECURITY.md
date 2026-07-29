@@ -32,9 +32,10 @@ reconciles an uncertain request). A network timeout is never retried as another
 write without that reconciliation, and connection alone is not presented as a
 saved story.
 
-Automatic tracking is a separate progress command: an existing entry does not
-short-circuit the write unless its authoritative chapter position already
-satisfies the requested target. Progress commands do not emit first-save
+Automatic tracking is a separate progress command that goes directly to the
+server's monotonic update and requires its authoritative chapter confirmation.
+An uncertain request is reconciled against the account projection before Trace
+can report the target as saved. Progress commands do not emit first-save
 receipts or clear first-story handoffs. On iOS, the command first re-adopts the
 containing app's current account so restored extension state cannot write to a
 stale account.
