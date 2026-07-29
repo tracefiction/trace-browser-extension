@@ -80,11 +80,18 @@ export interface AccountOverlay {
   readonly syncVersion: string;
 }
 
+export interface AccountCapacityRecovery {
+  readonly blockedAt: number;
+  readonly blockedLibraryCount: number;
+  readonly nextPromptAt: number;
+}
+
 export interface AccountDataV1 {
   readonly version: 1;
   readonly scope: AccountScope;
   readonly summary: AccountSummary | null;
   readonly overlay: AccountOverlay | null;
+  readonly capacityRecovery: AccountCapacityRecovery | null;
 }
 
 export type ParsedAccountData =
@@ -130,6 +137,23 @@ function copySummary(value: unknown): AccountSummary | null {
     pro: value.pro,
     libraryCount: value.libraryCount,
     firstStoryCompleted: value.firstStoryCompleted,
+  });
+}
+
+function copyCapacityRecovery(value: unknown): AccountCapacityRecovery | null {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ["blockedAt", "blockedLibraryCount", "nextPromptAt"]) ||
+    !isSafeInteger(value.blockedAt) ||
+    !isSafeInteger(value.blockedLibraryCount) ||
+    !isSafeInteger(value.nextPromptAt)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    blockedAt: value.blockedAt,
+    blockedLibraryCount: value.blockedLibraryCount,
+    nextPromptAt: value.nextPromptAt,
   });
 }
 
@@ -351,7 +375,13 @@ export function parseAccountData(value: unknown): ParsedAccountData {
   if (value === null || value === undefined) return { kind: "missing" };
   if (
     !isRecord(value) ||
-    !hasOnlyKeys(value, ["version", "scope", "summary", "overlay"]) ||
+    !hasOnlyKeys(value, [
+      "version",
+      "scope",
+      "summary",
+      "overlay",
+      "capacityRecovery",
+    ]) ||
     value.version !== 1 ||
     !Object.hasOwn(value, "summary") ||
     !Object.hasOwn(value, "overlay")
@@ -364,14 +394,35 @@ export function parseAccountData(value: unknown): ParsedAccountData {
   if (value.summary !== null && summary === null) return { kind: "invalid" };
   const overlay = value.overlay === null ? null : copyOverlay(value.overlay);
   if (value.overlay !== null && overlay === null) return { kind: "invalid" };
+  const rawCapacityRecovery = Object.hasOwn(value, "capacityRecovery")
+    ? value.capacityRecovery
+    : null;
+  const capacityRecovery = rawCapacityRecovery === null
+    ? null
+    : copyCapacityRecovery(rawCapacityRecovery);
+  if (rawCapacityRecovery !== null && capacityRecovery === null) {
+    return { kind: "invalid" };
+  }
   return {
     kind: "valid",
-    value: Object.freeze({ version: 1, scope, summary, overlay }),
+    value: Object.freeze({
+      version: 1,
+      scope,
+      summary,
+      overlay,
+      capacityRecovery,
+    }),
   };
 }
 
 export function createEmptyAccountData(scope: AccountScope): AccountDataV1 {
-  const parsed = parseAccountData({ version: 1, scope, summary: null, overlay: null });
+  const parsed = parseAccountData({
+    version: 1,
+    scope,
+    summary: null,
+    overlay: null,
+    capacityRecovery: null,
+  });
   if (parsed.kind !== "valid") throw new TypeError("invalid account scope");
   return parsed.value;
 }

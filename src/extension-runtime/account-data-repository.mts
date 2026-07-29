@@ -23,6 +23,11 @@ export type AccountDataWriteResult =
   | { readonly kind: "published"; readonly value: AccountDataV1 }
   | { readonly kind: "rejected_scope" | "invalid_model" | "stale_write" };
 
+export type CapacityRecoveryAcknowledgement = "shown" | "dismissed";
+
+const CAPACITY_PROMPT_COOLDOWN_MS = 24 * 60 * 60 * 1_000;
+const CAPACITY_DISMISSAL_MS = 7 * 24 * 60 * 60 * 1_000;
+
 export class AccountDataRepository {
   readonly #database: PrivateRecordDatabase;
   readonly #scopes: AccountScopeSource;
@@ -74,6 +79,69 @@ export class AccountDataRepository {
     return this.#publish(requestedScope, (current) => Object.freeze({
       ...current,
       summary,
+      capacityRecovery:
+        summary.pro ||
+        (
+          current.capacityRecovery !== null &&
+          summary.libraryCount < current.capacityRecovery.blockedLibraryCount
+        )
+          ? null
+          : current.capacityRecovery,
+    }));
+  }
+
+  publishCapacityBlocked(
+    requestedScope: AccountScope,
+    at: number,
+  ): Promise<AccountDataWriteResult> {
+    if (!Number.isSafeInteger(at) || at < 0) {
+      return Promise.resolve({ kind: "invalid_model" });
+    }
+    return this.#publish(requestedScope, (current) => Object.freeze({
+      ...current,
+      capacityRecovery: current.capacityRecovery ?? Object.freeze({
+        blockedAt: at,
+        blockedLibraryCount: current.summary?.libraryCount ?? 0,
+        nextPromptAt: 0,
+      }),
+    }));
+  }
+
+  acknowledgeCapacityRecovery(
+    requestedScope: AccountScope,
+    acknowledgement: CapacityRecoveryAcknowledgement,
+    at: number,
+  ): Promise<AccountDataWriteResult> {
+    if (
+      (acknowledgement !== "shown" && acknowledgement !== "dismissed") ||
+      !Number.isSafeInteger(at) ||
+      at < 0
+    ) {
+      return Promise.resolve({ kind: "invalid_model" });
+    }
+    const delay = acknowledgement === "dismissed"
+      ? CAPACITY_DISMISSAL_MS
+      : CAPACITY_PROMPT_COOLDOWN_MS;
+    return this.#publish(requestedScope, (current) => Object.freeze({
+      ...current,
+      capacityRecovery: current.capacityRecovery === null
+        ? null
+        : Object.freeze({
+            ...current.capacityRecovery,
+            nextPromptAt: Math.max(
+              current.capacityRecovery.nextPromptAt,
+              at + delay,
+            ),
+          }),
+    }));
+  }
+
+  clearCapacityRecovery(
+    requestedScope: AccountScope,
+  ): Promise<AccountDataWriteResult> {
+    return this.#publish(requestedScope, (current) => Object.freeze({
+      ...current,
+      capacityRecovery: null,
     }));
   }
 

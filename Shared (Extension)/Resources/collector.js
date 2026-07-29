@@ -16,6 +16,7 @@ const FIRST_STORY_FOCUS_MAX_ATTEMPTS = 30;
 const FIRST_STORY_FOCUS_RETRY_MS = 150;
 const FIRST_STORY_SAVE_TIMEOUT_MS = 18_000;
 const KERNEL_PROJECTION_RETRY_DELAYS_MS = [250, 750, 2_000];
+const TRACE_CAPACITY_NOTICE_ATTR = "data-trace-capacity-notice";
 
 function configuredTraceWebHomeUrl() {
   var configured =
@@ -78,6 +79,83 @@ function authStateAllowsActions(authState, hasAuth) {
   return state !== "signed_out" && state !== "reconnect_required";
 }
 
+function acknowledgeCapacityRecovery(action) {
+  try {
+    ext.runtime.sendMessage(
+      { type: "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE", action: action },
+      function () {
+        void ext.runtime.lastError;
+      },
+    );
+  } catch (_) {
+    /* capacity acknowledgement is best effort */
+  }
+}
+
+function showCapacityRecoveryNotice(capacity, force) {
+  if (!force && !(capacity && capacity.blocked === true && capacity.prompt === true)) {
+    return;
+  }
+  if (document.querySelector("[" + TRACE_CAPACITY_NOTICE_ATTR + "]")) return;
+
+  var notice = document.createElement("section");
+  notice.setAttribute(TRACE_CAPACITY_NOTICE_ATTR, "1");
+  notice.setAttribute("role", "status");
+  notice.setAttribute("aria-label", "Trace library full");
+  notice.style.cssText = [
+    "position:fixed",
+    "right:max(16px,env(safe-area-inset-right))",
+    "bottom:max(16px,env(safe-area-inset-bottom))",
+    "z-index:2147483646",
+    "box-sizing:border-box",
+    "width:min(360px,calc(100vw - 32px))",
+    "padding:16px",
+    "border:1px solid rgba(28,39,34,0.16)",
+    "border-radius:14px",
+    "background:#f6f1e4",
+    "box-shadow:0 18px 46px rgba(28,39,34,0.22)",
+    "color:#1c2722",
+  ].join(";");
+
+  var eyebrow = document.createElement("div");
+  eyebrow.textContent = "TRACE";
+  eyebrow.style.cssText = "font:600 9px/1 'Geist Mono',ui-monospace,monospace;letter-spacing:0.16em;color:#b54a30";
+  var title = document.createElement("h2");
+  title.textContent = "This story wasn’t added";
+  title.style.cssText = "margin:8px 0 0;font:500 20px/1.15 Georgia,'Times New Roman',serif;color:#1c2722";
+  var copy = document.createElement("p");
+  copy.textContent = "Your Trace library is full. Make room or get Trace Unlimited to keep adding stories.";
+  copy.style.cssText = "margin:8px 0 14px;font:500 13px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif;color:#5f665f";
+  var actions = document.createElement("div");
+  actions.style.cssText = "display:flex;align-items:center;gap:10px";
+  var open = document.createElement("a");
+  open.setAttribute("data-trace-open-trace", "1");
+  open.href = TRACE_WEB_HOME_URL;
+  open.target = "_blank";
+  open.rel = "noopener noreferrer";
+  open.textContent = "Manage library";
+  open.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 14px;border-radius:9px;background:#1c2722;color:#fff;text-decoration:none;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif";
+  open.addEventListener("click", function (event) {
+    event.stopPropagation();
+  });
+  var dismiss = document.createElement("button");
+  dismiss.type = "button";
+  dismiss.textContent = "Not now";
+  dismiss.style.cssText = "min-height:44px;padding:0 8px;border:0;background:transparent;color:#5f665f;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif;cursor:pointer";
+  dismiss.addEventListener("click", function () {
+    acknowledgeCapacityRecovery("dismissed");
+    notice.remove();
+  });
+  actions.appendChild(open);
+  actions.appendChild(dismiss);
+  notice.appendChild(eyebrow);
+  notice.appendChild(title);
+  notice.appendChild(copy);
+  notice.appendChild(actions);
+  (document.body || document.documentElement).appendChild(notice);
+  acknowledgeCapacityRecovery("shown");
+}
+
 function txt(el) {
   return el ? (el.textContent || "").trim() : null;
 }
@@ -97,7 +175,8 @@ function stripTraceUiFromClone(el) {
       "[data-trace-open-trace]",
       "[data-trace-bottom-sheet-grabber]",
       "[data-trace-finish-qualify]",
-      "[data-trace-finish-toast]"
+      "[data-trace-finish-toast]",
+      "[data-trace-capacity-notice]"
     ].join(",")
   )) {
     node.remove();
@@ -1009,8 +1088,13 @@ function sendAutoTrackForStory(validStory) {
         // The background rejects prerender/pending-deletion senders before it
         // attempts a write. Clear the dedupe marker so an activated page can
         // retry from pageshow/visibilitychange.
-        forgetRecentAutoTrack(validStory);
+        if (!(response && response.error === "free_limit_reached")) {
+          forgetRecentAutoTrack(validStory);
+        }
         updateAutoTrackFailureForStory(validStory, response && response.error);
+        if (response && response.error === "free_limit_reached") {
+          showCapacityRecoveryNotice(response.capacity, true);
+        }
         return;
       }
       applyConfirmedOverlayUpdateForStory(validStory, response);
@@ -3232,8 +3316,7 @@ function applyStoryInlineHandleState(handle, presentation) {
 
 function autoTrackHandleDisabled(entry) {
   if (!entry) return false;
-  if (entry.__traceAutoTrackPending) return true;
-  return entry.__traceAutoTrackError === "free_limit_reached";
+  return entry.__traceAutoTrackPending === true;
 }
 
 function applySheetVisibility(sheet, open) {
@@ -4197,6 +4280,13 @@ function sendQuickAddAction(btn, workKey, addTheme, compact, done) {
           entryId: response.entryId || null,
         });
       } else if (response.error === "free_limit_reached") {
+        var capacityEntry = optimisticStoryPageEntries[workKey] || {};
+        if (!optimisticStoryEntryHasLibraryState(capacityEntry)) {
+          optimisticStoryPageEntries[workKey] = Object.assign({}, capacityEntry, {
+            __traceAutoTrackPending: false,
+            __traceAutoTrackError: "free_limit_reached",
+          });
+        }
         if (compact) {
           applyStoryInlineHandleState(btn, storyHandlePresentation({ hasAuth: true, entry: { __traceAutoTrackError: "free_limit_reached" } }));
         } else {
@@ -4204,7 +4294,13 @@ function sendQuickAddAction(btn, workKey, addTheme, compact, done) {
           btn.textContent = "Library full";
         }
         btn.title = "Free library limit reached \u2014 upgrade for unlimited";
-        btn.disabled = true;
+        btn.disabled = false;
+        showCapacityRecoveryNotice(response.capacity, true);
+        renderQuickAddButton(workKey);
+        setTimeout(function () {
+          var capacitySheet = document.querySelector("[" + TRACE_STORY_SHEET_ATTR + "]");
+          if (capacitySheet) applySheetVisibility(capacitySheet, true);
+        }, 0);
         notifyDone({ ok: false, error: "free_limit_reached" });
       } else if (
         response.error === "auth_expired" ||
@@ -4867,6 +4963,34 @@ function renderStorySheet(sheet, view, workKey) {
   var body = document.createElement("div");
   body.className = "x-sheet-body";
   body.style.cssText = "padding:14px 16px 16px;display:flex;flex-direction:column;gap:14px";
+  if (view.entry && view.entry.__traceAutoTrackError === "free_limit_reached") {
+    var capacityTitle = document.createElement("h4");
+    capacityTitle.textContent = "This story wasn’t added";
+    capacityTitle.style.cssText = "margin:0;font:500 19px/1.2 " + storySheetSerifFont() + ";color:#1c2722";
+    var capacityCopy = document.createElement("p");
+    capacityCopy.textContent = "Your Trace library is full. Make room or get Trace Unlimited to keep adding stories.";
+    capacityCopy.style.cssText = "margin:0;font:500 12.5px/1.5 " + TRACE_UI.font + ";color:#6e6a5b";
+    body.appendChild(capacityTitle);
+    body.appendChild(capacityCopy);
+    sheet.appendChild(body);
+
+    var capacityActions = document.createElement("div");
+    capacityActions.className = "x-sheet-foot";
+    capacityActions.style.cssText = "display:flex;gap:8px;padding:0 16px 16px";
+    var capacityOpen = document.createElement("a");
+    capacityOpen.className = "x-pbtn x-pbtn-primary";
+    capacityOpen.setAttribute("data-trace-open-trace", "1");
+    capacityOpen.href = TRACE_WEB_HOME_URL;
+    capacityOpen.target = "_blank";
+    capacityOpen.rel = "noopener noreferrer";
+    capacityOpen.textContent = "Manage library";
+    capacityOpen.style.cssText = storySheetPrimaryButtonCss() + ";flex:1";
+    bindTraceOpenLink(capacityOpen);
+    capacityActions.appendChild(capacityOpen);
+    sheet.appendChild(capacityActions);
+    applySheetVisibility(sheet, wasOpen);
+    return;
+  }
   appendReaderStatusChoices(body, view, workKey);
   if (view.entry && (view.entry.__traceStatusPending || view.entry.__traceStatusError || view.entry.__traceAutoTrackError)) {
     var notice = document.createElement("div");
@@ -5469,6 +5593,10 @@ function renderQuickAddFromSnapshot(workKey, anchor, res) {
     }
     handle.__traceStoryHandleAction = function () {
       if (info && info.__traceAutoTrackPending) return;
+      if (info && info.__traceAutoTrackError === "free_limit_reached") {
+        applySheetVisibility(sheet, sheet.getAttribute("data-trace-open") !== "1");
+        return;
+      }
       if (
         view.hasAuth &&
         !hasEntryAuthError &&
@@ -5538,6 +5666,10 @@ function renderQuickAddButton(workKey, projectionAttempt) {
         }
         clearKernelProjectionRetry(workKey);
         var snapshot = response.snapshot || { state: "signed_out" };
+        showCapacityRecoveryNotice(
+          response.projection && response.projection.capacity,
+          false,
+        );
         renderQuickAddFromSnapshot(workKey, anchor, {
           libraryOverlayCache: response.projection || {
             entries: {},

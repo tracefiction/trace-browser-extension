@@ -1102,6 +1102,144 @@ test("archive projection and work-state reads return only requested current-acco
   }), null);
 });
 
+test("capacity failures persist recovery state, suppress new work, and preserve existing progress", async () => {
+  const databaseFactory = new IDBFactory();
+  const privateDatabase = await seedPrivateSession(databaseFactory, {
+    version: 1,
+    epoch: 1,
+    desired: "connected",
+    accountId: "account-a",
+    credentialRef: "credential-a",
+  }, {
+    version: 1,
+    entries: { "credential-a": "current-token" },
+  });
+  let trackRequests = 0;
+  const controller = installTestRuntime({
+    mode: "kernel",
+    databaseFactory,
+    privateDatabase,
+    runtime: { id: "trace-extension", onMessage: { addListener() {} } },
+    tabs: { async query() { return []; }, async sendMessage() { return null; } },
+    storageArea: new PromiseStorageArea(),
+    storageMode: "promise",
+    fetch: async (url, options = {}) => {
+      if (url.endsWith("/api/account/me")) {
+        return new Response(JSON.stringify({
+          account_id: "account-a",
+          pro: false,
+          library_count: 100,
+          first_story_completed_at: "2026-07-19T12:00:00.000Z",
+        }), { status: 200 });
+      }
+      if (url.endsWith("/api/extension/library-overlay")) {
+        return new Response(JSON.stringify({
+          success: true,
+          data: {
+            entries: {
+              "ffn:999": {
+                status: "READING",
+                readerStatus: "READING",
+                canonicalReaderStatus: "READING",
+                entryId: "00000000-0000-4000-8000-000000000999",
+                chapters: { current: 1, total: 5 },
+              },
+            },
+            workPreferences: {},
+            syncVersion: "2026-07-20T12:00:00.000Z",
+          },
+        }), { status: 200 });
+      }
+      if (url.endsWith("/api/extension/track")) {
+        trackRequests += 1;
+        const item = JSON.parse(options.body).item;
+        if (item.u.includes("/7038840/")) {
+          return new Response("", { status: 402 });
+        }
+        return new Response(JSON.stringify({
+          success: true,
+          data: {
+            entry_id: "00000000-0000-4000-8000-000000000999",
+            type: "updated",
+            work_key: "ffn:999",
+            entry: {
+              status: "READING",
+              readerStatus: "READING",
+              canonicalReaderStatus: "READING",
+              entryId: "00000000-0000-4000-8000-000000000999",
+              chapters: { current: 2, total: 5 },
+            },
+            syncVersion: "2026-07-20T12:00:01.000Z",
+          },
+        }), { status: 200 });
+      }
+      return new Response("", { status: 404 });
+    },
+    apiBase: "https://api.tracefiction.com",
+    webOrigin: "https://www.tracefiction.com",
+    randomId: () => "id",
+  });
+  await controller.start();
+
+  const blocked = await controller.handle({
+    ...storyCommandMessage,
+    type: "TRACE_AUTO_TRACK",
+  }, archiveSender);
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.error, "free_limit_reached");
+  assert.deepEqual(blocked.capacity, { blocked: true, prompt: true });
+  assert.equal(trackRequests, 1);
+
+  const repeated = await controller.handle({
+    ...storyCommandMessage,
+    type: "TRACE_AUTO_TRACK",
+  }, archiveSender);
+  assert.equal(repeated.error, "free_limit_reached");
+  assert.equal(trackRequests, 1);
+
+  const existingSender = {
+    tab: { url: "https://www.fanfiction.net/s/999/2/Existing" },
+  };
+  const existingProgress = await controller.handle({
+    ...storyCommandMessage,
+    type: "TRACE_AUTO_TRACK",
+    workKey: "ffn:999",
+    payload: {
+      ...storyCommandMessage.payload,
+      item: {
+        ...storyCommandMessage.payload.item,
+        u: "https://www.fanfiction.net/s/999/2/Existing",
+        chn: 2,
+        cht: 5,
+      },
+    },
+  }, existingSender);
+  assert.equal(existingProgress.ok, true);
+  assert.equal(existingProgress.state.entry.chapters.current, 2);
+  assert.equal(trackRequests, 2);
+
+  const acknowledged = await controller.handle({
+    type: "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE",
+    action: "dismissed",
+  }, archiveSender);
+  assert.equal(acknowledged.ok, true);
+  assert.deepEqual(acknowledged.capacity, { blocked: true, prompt: false });
+
+  const popup = await controller.handle(
+    { type: "TRACE_POPUP_GET_STATE" },
+    { ...popupSender, id: "trace-extension" },
+  );
+  assert.deepEqual(popup.capacity, { blocked: true, prompt: false });
+  assert.equal(JSON.stringify(popup).includes("account-a"), false);
+  assert.equal(await controller.handle({
+    type: "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE",
+    action: "dismissed",
+  }, {
+    frameId: 0,
+    tab: { url: "https://www.fanfiction.net/login.php" },
+  }), null);
+});
+
 test("popup state is extension-page-only and contains sanitized summary plus local preferences", async () => {
   const databaseFactory = new IDBFactory();
   const privateDatabase = await seedPrivateSession(databaseFactory, {
@@ -1165,6 +1303,7 @@ test("popup state is extension-page-only and contains sanitized summary plus loc
   );
   assert.equal(popup.authState.state, "connected");
   assert.equal(popup.pro, true);
+  assert.equal(popup.capacity, null);
   assert.equal(popup.libraryCount, 8);
   assert.equal(popup.firstSaveSeen, true);
   assert.equal(popup.autoTrackEnabled, false);

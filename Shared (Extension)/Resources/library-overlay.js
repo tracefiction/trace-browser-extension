@@ -9,6 +9,7 @@
   const WRAP_ATTR = "data-trace-library-overlay-wrap";
   const CONNECT_NOTICE_ATTR = "data-trace-connect-notice";
   const CONNECT_NOTICE_DISMISS_KEY = "trace:connect-notice:dismissed";
+  const CAPACITY_NOTICE_ATTR = "data-trace-capacity-notice";
   const LENS_ATTR = "data-trace-library-lens";
   const ACTION_SURFACE_ATTR = "data-trace-action-surface";
   const ACTION_SURFACE_CLOSE_ATTR = "data-trace-action-surface-close";
@@ -118,6 +119,79 @@
       // extension worker is suspended, the link must still open Trace.
       event.stopPropagation();
     });
+  }
+
+  function acknowledgeCapacityRecovery(action) {
+    try {
+      ext.runtime.sendMessage(
+        { type: "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE", action: action },
+        function () {
+          void ext.runtime.lastError;
+        },
+      );
+    } catch (_) {
+      /* capacity acknowledgement is best effort */
+    }
+  }
+
+  function showCapacityRecoveryNotice(capacity, force) {
+    if (!force && !(capacity && capacity.blocked === true && capacity.prompt === true)) {
+      return;
+    }
+    if (document.querySelector("[" + CAPACITY_NOTICE_ATTR + "]")) return;
+    var notice = document.createElement("section");
+    notice.setAttribute(CAPACITY_NOTICE_ATTR, "1");
+    notice.setAttribute("role", "status");
+    notice.setAttribute("aria-label", "Trace library full");
+    notice.style.cssText = [
+      "position:fixed",
+      "right:max(16px,env(safe-area-inset-right))",
+      "bottom:max(16px,env(safe-area-inset-bottom))",
+      "z-index:2147483646",
+      "box-sizing:border-box",
+      "width:min(360px,calc(100vw - 32px))",
+      "padding:16px",
+      "border:1px solid rgba(28,39,34,0.16)",
+      "border-radius:14px",
+      "background:#f6f1e4",
+      "box-shadow:0 18px 46px rgba(28,39,34,0.22)",
+      "color:#1c2722",
+    ].join(";");
+    var eyebrow = document.createElement("div");
+    eyebrow.textContent = "TRACE";
+    eyebrow.style.cssText = "font:600 9px/1 'Geist Mono',ui-monospace,monospace;letter-spacing:0.16em;color:#b54a30";
+    var title = document.createElement("h2");
+    title.textContent = "This story wasn’t added";
+    title.style.cssText = "margin:8px 0 0;font:500 20px/1.15 Georgia,'Times New Roman',serif;color:#1c2722";
+    var copy = document.createElement("p");
+    copy.textContent = "Your Trace library is full. Make room or get Trace Unlimited to keep adding stories.";
+    copy.style.cssText = "margin:8px 0 14px;font:500 13px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif;color:#5f665f";
+    var actions = document.createElement("div");
+    actions.style.cssText = "display:flex;align-items:center;gap:10px";
+    var open = document.createElement("a");
+    open.setAttribute("data-trace-open-trace", "1");
+    open.href = TRACE_WEB_HOME_URL;
+    open.target = "_blank";
+    open.rel = "noopener noreferrer";
+    open.textContent = "Manage library";
+    open.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 14px;border-radius:9px;background:#1c2722;color:#fff;text-decoration:none;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif";
+    bindTraceOpenLink(open);
+    var dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.textContent = "Not now";
+    dismiss.style.cssText = "min-height:44px;padding:0 8px;border:0;background:transparent;color:#5f665f;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif;cursor:pointer";
+    dismiss.addEventListener("click", function () {
+      acknowledgeCapacityRecovery("dismissed");
+      notice.remove();
+    });
+    actions.appendChild(open);
+    actions.appendChild(dismiss);
+    notice.appendChild(eyebrow);
+    notice.appendChild(title);
+    notice.appendChild(copy);
+    notice.appendChild(actions);
+    (document.body || document.documentElement).appendChild(notice);
+    acknowledgeCapacityRecovery("shown");
   }
 
   function authStateAllowsActions(authState, hasAuth) {
@@ -2938,6 +3012,10 @@
       e.preventDefault();
       e.stopPropagation();
       if (btn.disabled) return;
+      if (btn.getAttribute("data-trace-capacity-blocked") === "1") {
+        showCapacityRecoveryNotice(null, true);
+        return;
+      }
 
       if (btn.getAttribute("data-trace-connect-action") === "1") {
         setQuickAddCheckingAction(btn);
@@ -3013,7 +3091,9 @@
             btn.style.cssText = d1QuickAddStyle("full");
             btn.textContent = "Full";
             btn.title = "Free library limit reached \u2014 upgrade for unlimited";
-            btn.disabled = true;
+            btn.setAttribute("data-trace-capacity-blocked", "1");
+            btn.disabled = false;
+            showCapacityRecoveryNotice(response.capacity, true);
           } else if (response.error === "not_authenticated" || response.error === "auth_expired") {
             setQuickAddAuthAction(btn, response.error);
           } else {
@@ -3384,6 +3464,10 @@
             function (response) {
               if (ext.runtime.lastError || !response || response.ok !== true) return;
               var snapshot = response.snapshot || { state: "signed_out" };
+              showCapacityRecoveryNotice(
+                response.projection && response.projection.capacity,
+                false,
+              );
               renderProjection({
                 prefLibraryInlayEnabled:
                   preferences && preferences.prefLibraryInlayEnabled,

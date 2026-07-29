@@ -14,7 +14,11 @@ const fixtureRoot = path.join(repoRoot, "test", "visual-fixtures");
 const resourceRoot = path.join(repoRoot, "Shared (Extension)", "Resources");
 const outputRoot = process.env.TRACE_VISUAL_OUTPUT_DIR || "/tmp/trace-extension-visual-fixtures";
 const renderSource = "fixture-rendered";
-const visualMode = process.argv.includes("--popup-only") ? "popup" : "all";
+const visualMode = process.argv.includes("--capacity-only")
+  ? "capacity"
+  : process.argv.includes("--popup-only")
+    ? "popup"
+    : "all";
 
 process.env.PW_TEST_SCREENSHOT_NO_FONTS_READY = process.env.PW_TEST_SCREENSHOT_NO_FONTS_READY || "1";
 
@@ -80,6 +84,9 @@ function fixtureHtmlForRendering(html) {
 
 function makeOverlayCache(variant = "default") {
   const cache = {
+    contextVersion: 1,
+    accountId: "visual-account",
+    apiBase: "https://api.tracefiction.com",
     syncVersion: "visual-fixtures-v1",
     entries: {
       "ao3:10404927": {
@@ -205,6 +212,8 @@ function makeStorageData(authState = connectedAuthState(), cacheVariant = "defau
     traceActiveTab: connected
       ? { kind: "supported_story", site: "ao3", canImport: true }
       : { kind: "unsupported" },
+    traceAccountId: connected ? "visual-account" : null,
+    traceApiBase: "https://api.tracefiction.com",
     libraryOverlayCache: makeOverlayCache(cacheVariant),
     prefAutoTrackEnabled: true,
     prefLibraryInlayEnabled: true,
@@ -225,6 +234,7 @@ function extensionMockSource(storageData, sessionSnapshot = null) {
         firstSaveSeen: storageData.traceFirstSaveSeen === true,
         libraryCount: typeof storageData.traceLibraryCount === "number" ? storageData.traceLibraryCount : null,
         activeTab: storageData.traceActiveTab || { kind: "unknown" },
+        capacity: storageData.traceCapacityRecovery || null,
         pro: storageData.traceUserPro === true,
         autoTrackEnabled: storageData.prefAutoTrackEnabled !== false,
         libraryInlayEnabled: storageData.prefLibraryInlayEnabled !== false,
@@ -690,6 +700,32 @@ async function main() {
         },
       },
       {
+        name: "AO3 listing capacity recovery notice",
+        file: "ao3-listing-capacity-recovery-notice.png",
+        fixture: "ao3_listing.html",
+        url: "https://archiveofourown.org/works?tag_id=Harry+Potter",
+        viewport: { width: 900, height: 620 },
+        contentScripts: ["keys", "overlay"],
+        storageData: { traceMockQuickAddError: "free_limit_reached" },
+        waitFor: "#work_25010857 [data-trace-quick-add]",
+        scrollTo: "#work_25010857",
+        clickSelector: "#work_25010857 [data-trace-quick-add]",
+        clickWaitFor: "[data-trace-capacity-notice]",
+      },
+      {
+        name: "AO3 listing capacity recovery notice mobile",
+        file: "ao3-listing-capacity-recovery-notice-mobile.png",
+        fixture: "ao3_listing.html",
+        url: "https://archiveofourown.org/works?tag_id=Harry+Potter",
+        viewport: { width: 390, height: 844 },
+        contentScripts: ["keys", "overlay"],
+        storageData: { traceMockQuickAddError: "free_limit_reached" },
+        waitFor: "#work_25010857 [data-trace-quick-add]",
+        scrollTo: "#work_25010857",
+        clickSelector: "#work_25010857 [data-trace-quick-add]",
+        clickWaitFor: "[data-trace-capacity-notice]",
+      },
+      {
         name: "AO3 desktop unknown Add and Hide action row",
         file: "ao3-desktop-unknown-action-row.png",
         fixture: "ao3_listing_desktop_unknown_long.html",
@@ -768,9 +804,40 @@ async function main() {
         viewport: { width: 1440, height: 1000 },
         contentScripts: ["collector"],
         cacheVariant: "story-free-limit",
+        storageData: { prefAutoTrackEnabled: false },
         waitFor: "[data-trace-story-handle][data-trace-story-handle-state='full']",
         scrollTo: "[data-trace-story-handle]",
         scrollBlock: "start",
+      },
+      {
+        name: "AO3 story free-limit recovery sheet",
+        file: "ao3-story-free-limit-recovery-sheet.png",
+        fixture: "ao3_story.html",
+        url: "https://archiveofourown.org/works/28534965/chapters/71063826",
+        viewport: { width: 1440, height: 1000 },
+        contentScripts: ["collector"],
+        cacheVariant: "story-free-limit",
+        storageData: { prefAutoTrackEnabled: false },
+        waitFor: "[data-trace-story-handle][data-trace-story-handle-state='full']",
+        scrollTo: "[data-trace-story-handle]",
+        scrollBlock: "start",
+        openSelector: "[data-trace-story-handle]",
+        openWaitFor: "[data-trace-story-sheet][data-trace-open='1']",
+      },
+      {
+        name: "AO3 story free-limit recovery sheet mobile",
+        file: "ao3-story-free-limit-recovery-sheet-mobile.png",
+        fixture: "ao3_story.html",
+        url: "https://archiveofourown.org/works/28534965/chapters/71063826",
+        viewport: { width: 390, height: 844 },
+        contentScripts: ["collector"],
+        cacheVariant: "story-free-limit",
+        storageData: { prefAutoTrackEnabled: false },
+        waitFor: "[data-trace-story-handle][data-trace-story-handle-state='full']",
+        scrollTo: "[data-trace-story-handle]",
+        scrollBlock: "start",
+        openSelector: "[data-trace-story-handle]",
+        openWaitFor: "[data-trace-story-sheet][data-trace-open='1']",
       },
       {
         name: "Opened AO3 listing action surface",
@@ -843,8 +910,13 @@ async function main() {
       },
     ];
 
-    if (visualMode === "all") {
-      for (const definition of fixtureScreenshots) {
+    if (visualMode === "all" || visualMode === "capacity") {
+      const selectedFixtures = visualMode === "capacity"
+        ? fixtureScreenshots.filter((definition) =>
+            /capacity|free-limit/i.test(definition.name)
+          )
+        : fixtureScreenshots;
+      for (const definition of selectedFixtures) {
         await renderFixtureScreenshot(browser, definition, scripts, manifest);
       }
     }
@@ -937,6 +1009,28 @@ async function main() {
         colorScheme: "light",
       },
       {
+        name: "Extension popup library full",
+        file: "popup-library-full.png",
+        authState: connectedAuthState(),
+        storageData: {
+          traceLibraryCount: 100,
+          traceUserPro: false,
+          traceCapacityRecovery: { blocked: true, prompt: false },
+        },
+        colorScheme: "light",
+      },
+      {
+        name: "Extension popup library full dark",
+        file: "popup-library-full-dark.png",
+        authState: connectedAuthState(),
+        storageData: {
+          traceLibraryCount: 100,
+          traceUserPro: false,
+          traceCapacityRecovery: { blocked: true, prompt: false },
+        },
+        colorScheme: "dark",
+      },
+      {
         name: "Kernel popup connected",
         file: "popup-kernel-connected.png",
         sessionSnapshot: {
@@ -971,7 +1065,10 @@ async function main() {
       },
     ];
 
-    for (const definition of popupScreenshots) {
+    const selectedPopups = visualMode === "capacity"
+      ? popupScreenshots.filter((definition) => /library full/i.test(definition.name))
+      : popupScreenshots;
+    for (const definition of selectedPopups) {
       await renderPopupScreenshot(browser, definition, assets, manifest);
     }
   } finally {

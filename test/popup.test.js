@@ -783,6 +783,40 @@ test("popup shows reconnect guidance with a direct recovery CTA", async () => {
   );
 });
 
+test("popup keeps a durable library-capacity recovery action", async () => {
+  const connected = {
+    state: "connected",
+    message: "Connected",
+    helpUrl: "https://tracefiction.com/",
+  };
+  const h = createPopupHarness({
+    storageState: {
+      traceAuthState: connected,
+      traceFirstSaveSeen: true,
+      traceLibraryCount: 100,
+    },
+    popupState: {
+      pro: false,
+      autoTrackEnabled: true,
+      libraryInlayEnabled: true,
+      ao3SavedFiltersEnabled: true,
+      metadataImproveEnabled: true,
+      authState: connected,
+      firstSaveSeen: true,
+      libraryCount: 100,
+      capacity: { blocked: true, prompt: false },
+      activeTab: { kind: "supported_story", site: "ao3", canImport: true },
+    },
+  });
+  await flush();
+
+  assert.equal(h.document.body.dataset.tracePopupState, "upgrade_required");
+  assert.equal(h.document.getElementById("popup-status").textContent, "Library full");
+  assert.match(h.document.getElementById("popup-lead").textContent, /make room or get/i);
+  assert.equal(h.document.getElementById("popup-cta").textContent, "Manage library");
+  assert.equal(h.document.getElementById("popup-import").hidden, true);
+});
+
 test("popup shows local and connected controls and persists toggle changes", async () => {
   const h = createPopupHarness({
     storageState: {

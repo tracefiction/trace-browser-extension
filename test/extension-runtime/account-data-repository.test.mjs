@@ -56,6 +56,7 @@ test("repository creates and reads only the exact display/publication scope", as
     scope: accountA1,
     summary: null,
     overlay: null,
+    capacityRecovery: null,
   });
 
   state.display = accountA2;
@@ -134,6 +135,53 @@ test("confirmed story publication patches only the current account overlay", asy
     },
     syncVersion: "2026-07-19T12:00:00.000Z",
   });
+});
+
+test("capacity recovery is account scoped, snoozed, and reset by room or entitlement", async () => {
+  const { repository, state } = createHarness();
+  state.display = accountA1;
+  state.publication = accountA1;
+  await repository.publishSummary(accountA1, {
+    ...summary,
+    libraryCount: 100,
+  });
+
+  const blocked = await repository.publishCapacityBlocked(accountA1, 1_000);
+  assert.equal(blocked.kind, "published");
+  assert.deepEqual(blocked.value.capacityRecovery, {
+    blockedAt: 1_000,
+    blockedLibraryCount: 100,
+    nextPromptAt: 0,
+  });
+
+  await repository.acknowledgeCapacityRecovery(accountA1, "shown", 2_000);
+  const afterShown = (await repository.read()).capacityRecovery;
+  assert.equal(afterShown.nextPromptAt, 2_000 + (24 * 60 * 60 * 1_000));
+
+  await repository.acknowledgeCapacityRecovery(accountA1, "dismissed", 3_000);
+  const afterDismissal = (await repository.read()).capacityRecovery;
+  assert.equal(afterDismissal.nextPromptAt, 3_000 + (7 * 24 * 60 * 60 * 1_000));
+
+  await repository.publishCapacityBlocked(accountA1, 4_000);
+  assert.deepEqual((await repository.read()).capacityRecovery, afterDismissal);
+
+  await repository.publishSummary(accountA1, {
+    ...summary,
+    libraryCount: 99,
+  });
+  assert.equal((await repository.read()).capacityRecovery, null);
+
+  await repository.publishSummary(accountA1, {
+    ...summary,
+    libraryCount: 100,
+  });
+  await repository.publishCapacityBlocked(accountA1, 5_000);
+  await repository.publishSummary(accountA1, {
+    ...summary,
+    pro: true,
+    libraryCount: 100,
+  });
+  assert.equal((await repository.read()).capacityRecovery, null);
 });
 
 test("a late full refresh cannot erase a newer command confirmation", async () => {
