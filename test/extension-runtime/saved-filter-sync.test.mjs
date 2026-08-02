@@ -294,7 +294,7 @@ test("controller syncs a local preset without exposing credentials to the AO3 pa
     storageMode: "promise",
     fetch: async (url, options) => {
       calls.push({ url, options });
-      if (url.endsWith("/api/account/me")) {
+      if (url.endsWith("/api/extension/account")) {
         return new Response(JSON.stringify({ account_id: "account-a" }), { status: 200 });
       }
       assert.ok(url.endsWith("/api/extension/ao3-saved-filters/sync"));

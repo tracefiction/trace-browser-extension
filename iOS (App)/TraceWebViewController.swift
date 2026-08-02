@@ -91,7 +91,6 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     private var activeTraceNavigationURL: URL?
     private var lastIntendedTraceURL: URL?
     private var failedTraceURL: URL?
-    private var sharedProviderBootstrapReady = false
 #if DEBUG && targetEnvironment(simulator)
     private var traceSimulatorFailNextProviderClear = false
 #endif
@@ -233,6 +232,21 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         let handoffId: String?
     }
 
+    private struct TraceSafariAuthProviderMetadataPayload: Encodable {
+        let kind: String
+        let sessionId: String
+        let expiresAt: String
+    }
+
+    private struct TraceSafariAuthProviderStatusPayload: Encodable {
+        let type = "TRACE_IOS_AUTH_PROVIDER_STATUS_RESPONSE"
+        let nonce: String
+        let ok: Bool
+        let protocolVersion: Int
+        let installationId: String
+        let provider: TraceSafariAuthProviderMetadataPayload?
+    }
+
     private static var billingAPIBaseURL: URL {
         if let configured = configuredBillingAPIBaseURLOverride {
             return configured
@@ -355,25 +369,6 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 forKey: Self.traceSimulatorRetiredProviderKey
             )
         }
-#endif
-        // The web shell and native binary deploy independently. Clear any v2
-        // provider left by an earlier current shell before this navigation can
-        // accept a versioned synchronizer write. An old cached shell cannot
-        // repopulate v2 because its unversioned mutation is rejected below.
-        sharedProviderBootstrapReady = prepareSharedProviderForWebShell()
-#if DEBUG && targetEnvironment(simulator)
-        if traceSimulatorSeededStaleProvider &&
-            (
-                UserDefaults.standard.object(forKey: Self.traceSimulatorProviderV2Key) != nil ||
-                    UserDefaults.standard.object(forKey: Self.traceSimulatorRetiredProviderKey) != nil
-            )
-        {
-            sharedProviderBootstrapReady = false
-        }
-        UserDefaults.standard.set(
-            sharedProviderBootstrapReady ? "cleared" : "failed",
-            forKey: Self.traceSimulatorBootstrapClearResultKey
-        )
 #endif
         navigationController?.setNavigationBarHidden(true, animated: false)
         apnsTokenObserver = NotificationCenter.default.addObserver(
@@ -1384,14 +1379,50 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     private static let traceAuthTokenService = "com.tracefiction.trace.auth"
     private static let traceAuthTokenAccount = "extension-provider-v2"
     private static let retiredTraceAuthTokenAccount = "extension-token"
-    private static let traceProviderProtocolVersion = 2
+    private static let traceLegacyProviderProtocolVersion = 2
+    private static let traceDeviceProviderProtocolVersion = 3
+    private static let traceProviderRecordVersion = 2
+    private static let traceInstallationIdDefaultsKey = "traceInstallationIdV1"
+
+    private struct TraceSafariProviderRecord: Codable {
+        let version: Int
+        let kind: String?
+        let token: String?
+        let sessionId: String?
+        let credential: String?
+        let expiresAt: String?
+
+        static func legacyAccessToken(_ token: String) -> TraceSafariProviderRecord {
+            TraceSafariProviderRecord(
+                version: 1,
+                kind: nil,
+                token: token,
+                sessionId: nil,
+                credential: nil,
+                expiresAt: nil
+            )
+        }
+
+        static func deviceSession(
+            sessionId: String,
+            credential: String,
+            expiresAt: String
+        ) -> TraceSafariProviderRecord {
+            TraceSafariProviderRecord(
+                version: TraceWebViewController.traceProviderRecordVersion,
+                kind: "device_session",
+                token: nil,
+                sessionId: sessionId,
+                credential: credential,
+                expiresAt: expiresAt
+            )
+        }
+    }
 #if DEBUG && targetEnvironment(simulator)
     private static let traceSimulatorProviderV2Key =
         "traceDebugSimulatorAppProviderV2"
     private static let traceSimulatorRetiredProviderKey =
         "traceDebugSimulatorAppProviderRetired"
-    private static let traceSimulatorBootstrapClearResultKey =
-        "traceDebugSimulatorBootstrapClearResult"
 #endif
     private static let pendingFirstStoryDefaultsKey = "tracePendingFirstStoryUrlV1"
     private static let pendingFirstStoryExpiresAtDefaultsKey = "tracePendingFirstStoryExpiresAtV1"
@@ -1411,7 +1442,17 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 
         switch messageType {
         case "TRACE_IOS_AUTH_TOKEN_UPDATE":
-            guard body["protocolVersion"] as? Int == Self.traceProviderProtocolVersion else {
+            let protocolVersion = body["protocolVersion"] as? Int
+            if protocolVersion == Self.traceLegacyProviderProtocolVersion {
+                handleTraceSafariAuthTokenUpdate(
+                    nonce: nonce,
+                    token: body["token"] as? String
+                )
+                return
+            }
+            guard protocolVersion == Self.traceDeviceProviderProtocolVersion,
+                  let provider = body["provider"] as? [String: Any]
+            else {
                 postSafariExtensionActionResult(
                     type: "TRACE_IOS_AUTH_TOKEN_UPDATE_RESPONSE",
                     nonce: nonce,
@@ -1420,12 +1461,14 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 )
                 return
             }
-            handleTraceSafariAuthTokenUpdate(
+            handleTraceSafariDeviceSessionUpdate(
                 nonce: nonce,
-                token: body["token"] as? String
+                provider: provider
             )
         case "TRACE_IOS_AUTH_TOKEN_CLEAR":
-            guard body["protocolVersion"] as? Int == Self.traceProviderProtocolVersion else {
+            guard body["protocolVersion"] as? Int == Self.traceLegacyProviderProtocolVersion
+                    || body["protocolVersion"] as? Int == Self.traceDeviceProviderProtocolVersion
+            else {
                 postSafariExtensionActionResult(
                     type: "TRACE_IOS_AUTH_TOKEN_CLEAR_RESPONSE",
                     nonce: nonce,
@@ -1435,6 +1478,17 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 return
             }
             handleTraceSafariAuthTokenClear(nonce: nonce)
+        case "TRACE_IOS_AUTH_PROVIDER_STATUS_REQUEST":
+            guard body["protocolVersion"] as? Int == Self.traceDeviceProviderProtocolVersion else {
+                postSafariExtensionActionResult(
+                    type: "TRACE_IOS_AUTH_PROVIDER_STATUS_RESPONSE",
+                    nonce: nonce,
+                    ok: false,
+                    error: "unsupported_protocol"
+                )
+                return
+            }
+            handleTraceSafariAuthProviderStatus(nonce: nonce)
         case "TRACE_IOS_EXTENSION_STATE_REQUEST":
             handleTraceSafariExtensionStateRequest(nonce: nonce)
         case "TRACE_IOS_OPEN_EXTENSION_SETTINGS":
@@ -1483,12 +1537,6 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 
     private func handleTraceSafariAuthTokenUpdate(nonce: String, token: String?) {
         do {
-            if !sharedProviderBootstrapReady {
-                sharedProviderBootstrapReady = prepareSharedProviderForWebShell()
-            }
-            guard sharedProviderBootstrapReady else {
-                throw TraceSafariExtensionBridgeError.tokenShareFailed
-            }
             guard let token else {
                 throw TraceSafariExtensionBridgeError.tokenShareFailed
             }
@@ -1512,10 +1560,92 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         }
     }
 
+    private func handleTraceSafariDeviceSessionUpdate(
+        nonce: String,
+        provider: [String: Any]
+    ) {
+        do {
+            guard provider["version"] as? Int == Self.traceProviderRecordVersion,
+                  provider["kind"] as? String == "device_session",
+                  let rawSessionId = provider["sessionId"] as? String,
+                  let sessionId = UUID(uuidString: rawSessionId)?.uuidString.lowercased(),
+                  let rawCredential = provider["credential"] as? String,
+                  let expiresAt = provider["expiresAt"] as? String,
+                  ISO8601DateFormatter().date(from: expiresAt) != nil
+            else {
+                throw TraceSafariExtensionBridgeError.tokenShareFailed
+            }
+            let credential = rawCredential.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            guard credential.range(
+                of: "^trd_v1_[A-Za-z0-9_-]{43}$",
+                options: .regularExpression
+            ) != nil else {
+                throw TraceSafariExtensionBridgeError.tokenShareFailed
+            }
+
+            try Self.writeSharedProviderRecord(
+                .deviceSession(
+                    sessionId: sessionId,
+                    credential: credential,
+                    expiresAt: expiresAt
+                )
+            )
+            postSafariExtensionActionResult(
+                type: "TRACE_IOS_AUTH_TOKEN_UPDATE_RESPONSE",
+                nonce: nonce,
+                ok: true
+            )
+        } catch {
+            postSafariExtensionActionResult(
+                type: "TRACE_IOS_AUTH_TOKEN_UPDATE_RESPONSE",
+                nonce: nonce,
+                ok: false,
+                error: "provider_update_failed"
+            )
+        }
+    }
+
+    private func handleTraceSafariAuthProviderStatus(nonce: String) {
+        do {
+            let installationId = Self.traceInstallationId()
+            let record = try Self.readSharedProviderRecord()
+            var provider: TraceSafariAuthProviderMetadataPayload?
+            if let record,
+               record.version == Self.traceProviderRecordVersion,
+               record.kind == "device_session",
+               let sessionId = record.sessionId,
+               let expiresAt = record.expiresAt
+            {
+                provider = TraceSafariAuthProviderMetadataPayload(
+                    kind: "device_session",
+                    sessionId: sessionId,
+                    expiresAt: expiresAt
+                )
+            }
+            postTraceWebMessage(
+                TraceSafariAuthProviderStatusPayload(
+                    nonce: nonce,
+                    ok: true,
+                    protocolVersion: Self.traceDeviceProviderProtocolVersion,
+                    installationId: installationId,
+                    provider: provider
+                )
+            )
+        } catch {
+            postSafariExtensionActionResult(
+                type: "TRACE_IOS_AUTH_PROVIDER_STATUS_RESPONSE",
+                nonce: nonce,
+                ok: false,
+                error: "provider_unavailable"
+            )
+        }
+    }
+
     private func handleTraceSafariAuthTokenClear(nonce: String) {
         do {
             try clearSharedProviderForWebShell()
-            sharedProviderBootstrapReady = true
             postSafariExtensionActionResult(
                 type: "TRACE_IOS_AUTH_TOKEN_CLEAR_RESPONSE",
                 nonce: nonce,
@@ -1528,15 +1658,6 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 ok: false,
                 error: "provider_clear_failed"
             )
-        }
-    }
-
-    private func prepareSharedProviderForWebShell() -> Bool {
-        do {
-            try clearSharedProviderForWebShell()
-            return true
-        } catch {
-            return false
         }
     }
 
@@ -1978,30 +2099,88 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         guard !trimmed.isEmpty else {
             throw TraceSafariExtensionBridgeError.tokenShareFailed
         }
-#if DEBUG && targetEnvironment(simulator)
-        UserDefaults.standard.set(trimmed, forKey: traceSimulatorProviderV2Key)
-        guard UserDefaults.standard.string(forKey: traceSimulatorProviderV2Key) == trimmed else {
-            throw TraceSafariExtensionBridgeError.tokenShareFailed
-        }
-        return
-#else
-        guard let data = trimmed.data(using: .utf8) else {
-            throw TraceSafariExtensionBridgeError.tokenShareFailed
-        }
+        try writeSharedProviderRecord(.legacyAccessToken(trimmed))
+    }
 
+    private static func traceInstallationId() -> String {
+        let defaults = UserDefaults.standard
+        if let existing = defaults.string(forKey: traceInstallationIdDefaultsKey),
+           let uuid = UUID(uuidString: existing)
+        {
+            return uuid.uuidString.lowercased()
+        }
+        let created = UUID().uuidString.lowercased()
+        defaults.set(created, forKey: traceInstallationIdDefaultsKey)
+        return created
+    }
+
+    private static func readSharedProviderRecord() throws -> TraceSafariProviderRecord? {
+#if DEBUG && targetEnvironment(simulator)
+        guard let data = UserDefaults.standard.data(
+            forKey: traceSimulatorProviderV2Key
+        ) else {
+            return nil
+        }
+#else
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: traceAuthTokenService,
+            kSecAttrAccount as String: traceAuthTokenAccount,
+            kSecAttrAccessGroup as String: keychainAccessGroup(),
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = item as? Data else {
+            throw TraceSafariExtensionBridgeError.tokenShareFailed
+        }
+#endif
+        do {
+            return try JSONDecoder().decode(TraceSafariProviderRecord.self, from: data)
+        } catch {
+            throw TraceSafariExtensionBridgeError.tokenShareFailed
+        }
+    }
+
+    private static func writeSharedProviderRecord(
+        _ record: TraceSafariProviderRecord
+    ) throws {
+        let data: Data
+        do {
+            data = try JSONEncoder().encode(record)
+        } catch {
+            throw TraceSafariExtensionBridgeError.tokenShareFailed
+        }
+#if DEBUG && targetEnvironment(simulator)
+        UserDefaults.standard.set(data, forKey: traceSimulatorProviderV2Key)
+        guard UserDefaults.standard.data(forKey: traceSimulatorProviderV2Key) == data else {
+            throw TraceSafariExtensionBridgeError.tokenShareFailed
+        }
+#else
         let baseQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: traceAuthTokenService,
             kSecAttrAccount as String: traceAuthTokenAccount,
             kSecAttrAccessGroup as String: keychainAccessGroup(),
         ]
-        SecItemDelete(baseQuery as CFDictionary)
+        let updateStatus = SecItemUpdate(
+            baseQuery as CFDictionary,
+            [kSecValueData as String: data] as CFDictionary
+        )
+        if updateStatus == errSecSuccess {
+            return
+        }
+        guard updateStatus == errSecItemNotFound else {
+            throw TraceSafariExtensionBridgeError.tokenShareFailed
+        }
 
         var addQuery = baseQuery
         addQuery[kSecValueData as String] = data
-        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        let status = SecItemAdd(addQuery as CFDictionary, nil)
-        guard status == errSecSuccess else {
+        addQuery[kSecAttrAccessible as String] =
+            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        guard SecItemAdd(addQuery as CFDictionary, nil) == errSecSuccess else {
             throw TraceSafariExtensionBridgeError.tokenShareFailed
         }
 #endif
@@ -2017,20 +2196,38 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             throw TraceSafariExtensionBridgeError.tokenShareFailed
         }
 #else
-        for account in [traceAuthTokenAccount, retiredTraceAuthTokenAccount] {
-            let query: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: traceAuthTokenService,
-                kSecAttrAccount as String: account,
-                kSecAttrAccessGroup as String: keychainAccessGroup(),
-            ]
-            let status = SecItemDelete(query as CFDictionary)
-            guard status == errSecSuccess || status == errSecItemNotFound else {
-                throw TraceSafariExtensionBridgeError.tokenShareFailed
-            }
-        }
+        try deleteSharedTraceToken(account: traceAuthTokenAccount)
+        try clearRetiredSharedTraceToken()
 #endif
     }
+
+    private static func clearRetiredSharedTraceToken() throws {
+#if DEBUG && targetEnvironment(simulator)
+        UserDefaults.standard.removeObject(forKey: traceSimulatorRetiredProviderKey)
+        guard UserDefaults.standard.object(
+            forKey: traceSimulatorRetiredProviderKey
+        ) == nil else {
+            throw TraceSafariExtensionBridgeError.tokenShareFailed
+        }
+#else
+        try deleteSharedTraceToken(account: retiredTraceAuthTokenAccount)
+#endif
+    }
+
+#if !DEBUG || !targetEnvironment(simulator)
+    private static func deleteSharedTraceToken(account: String) throws {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: traceAuthTokenService,
+            kSecAttrAccount as String: account,
+            kSecAttrAccessGroup as String: keychainAccessGroup(),
+        ]
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw TraceSafariExtensionBridgeError.tokenShareFailed
+        }
+    }
+#endif
 
     private static func readExtensionHeartbeat() -> TraceSafariExtensionHeartbeat? {
         guard let defaults = pendingDefaults(),

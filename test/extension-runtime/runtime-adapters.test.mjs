@@ -4,6 +4,7 @@ import { IDBFactory } from "fake-indexeddb";
 
 import {
   BrowserCredentialPort,
+  ExplicitCredentialProvider,
   ACCOUNT_DATA_ALARM,
   LEGACY_ACCOUNT_KEYS,
   LEGACY_ACCOUNT_ALARMS,
@@ -24,6 +25,15 @@ function deferred() {
     resolve = resolvePromise;
   });
   return { promise, resolve };
+}
+
+function nativeCredentialResponse(credential = "current-app-token") {
+  return {
+    ok: true,
+    protocolVersion: 3,
+    credential,
+    credentialKind: "access_token",
+  };
 }
 
 async function waitUntil(predicate, message) {
@@ -171,6 +181,89 @@ const unavailableProvider = {
   },
   cancel() {},
 };
+
+test("iOS credential acquisition retries one transient provider read but not explicit sign-out", async () => {
+  const responses = [
+    { ok: false, error: "provider_unavailable" },
+    {
+      ok: true,
+      protocolVersion: 3,
+      credential: "current-app-token",
+      credentialKind: "access_token",
+    },
+    { ok: false, error: "missing_token" },
+    { ok: false, error: "provider_unavailable" },
+    { ok: false, error: "provider_unavailable" },
+  ];
+  let nativeReads = 0;
+  const provider = new ExplicitCredentialProvider({
+    runtime: {
+      async getPlatformInfo() {
+        return { os: "ios" };
+      },
+      async sendNativeMessage() {
+        nativeReads += 1;
+        return responses.shift();
+      },
+    },
+    tabs: {
+      async query() {
+        assert.fail("iOS credentials must not come from a browser tab");
+      },
+      async sendMessage() {
+        assert.fail("iOS credentials must not come from a browser tab");
+      },
+    },
+    mode: "promise",
+    webOrigin: "https://www.tracefiction.com",
+    randomId: () => "credential-id",
+  });
+
+  assert.deepEqual(await provider.acquire("refresh"), {
+    kind: "credential",
+    credential: "current-app-token",
+  });
+  assert.equal(nativeReads, 2);
+  assert.deepEqual(await provider.acquire("refresh"), { kind: "absent" });
+  assert.equal(nativeReads, 3);
+  assert.deepEqual(await provider.acquire("refresh"), { kind: "unavailable" });
+  assert.equal(nativeReads, 5);
+});
+
+test("iOS credential retry is cancelled before a second native read", async () => {
+  let nativeReads = 0;
+  const provider = new ExplicitCredentialProvider({
+    runtime: {
+      async getPlatformInfo() {
+        return { os: "ios" };
+      },
+      async sendNativeMessage() {
+        nativeReads += 1;
+        return { ok: false, error: "provider_unavailable" };
+      },
+    },
+    tabs: {
+      async query() {
+        assert.fail("iOS credentials must not come from a browser tab");
+      },
+      async sendMessage() {
+        assert.fail("iOS credentials must not come from a browser tab");
+      },
+    },
+    mode: "promise",
+    webOrigin: "https://www.tracefiction.com",
+    randomId: () => "credential-id",
+  });
+
+  const acquisition = provider.acquire("refresh");
+  while (nativeReads === 0) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  provider.cancel();
+
+  assert.deepEqual(await acquisition, { kind: "cancelled" });
+  assert.equal(nativeReads, 1);
+});
 
 test("whole-store cleanup is ordered before an immediate later credential write", async () => {
   const databaseFactory = new IDBFactory();
@@ -344,7 +437,7 @@ test("Connect and save mutates only after current-worker verification and author
     fetch: async (url, options) => {
       fetches.push({ url, options });
       assert.equal(options.headers.Authorization, "Bearer explicit-token");
-      if (url.endsWith("/api/account/me")) {
+      if (url.endsWith("/api/extension/account")) {
         verificationStarted = true;
         return verification.promise;
       }
@@ -395,7 +488,7 @@ test("Connect and save mutates only after current-worker verification and author
   assert.equal(response.command.receipt, "unavailable");
   assert.equal(response.entryId, entryId);
   assert.deepEqual(fetches.map(({ url }) => new URL(url).pathname), [
-    "/api/account/me",
+    "/api/extension/account",
     "/api/extension/library-overlay",
     "/api/extension/track",
   ]);
@@ -437,7 +530,7 @@ test("iOS Connect and save adopts the containing app account before any story wr
       async sendNativeMessage(message) {
         nativeMessages.push(message);
         if (message.type === "TRACE_IOS_AUTH_TOKEN_REQUEST") {
-          return { ok: true, token: "current-app-token" };
+          return nativeCredentialResponse();
         }
         if (message.type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR") {
           return { ok: true, cleared: true };
@@ -460,7 +553,7 @@ test("iOS Connect and save adopts the containing app account before any story wr
         path: new URL(url).pathname,
         authorization: options.headers.Authorization,
       });
-      if (url.endsWith("/api/account/me")) {
+      if (url.endsWith("/api/extension/account")) {
         const accountId = options.headers.Authorization === "Bearer old-account-token"
           ? "account-a"
           : "account-b";
@@ -548,6 +641,7 @@ test("iOS auto-track adopts the app account, records progress, and emits no save
   });
   const nativeMessages = [];
   const writes = [];
+  let providerReads = 0;
   const controller = installTestRuntime({
     mode: "kernel",
     databaseFactory,
@@ -559,9 +653,13 @@ test("iOS auto-track adopts the app account, records progress, and emits no save
       },
       async sendNativeMessage(message) {
         nativeMessages.push(message);
-        return message.type === "TRACE_IOS_AUTH_TOKEN_REQUEST"
-          ? { ok: true, token: "current-app-token" }
-          : { ok: true };
+        if (message.type === "TRACE_IOS_AUTH_TOKEN_REQUEST") {
+          providerReads += 1;
+          return providerReads === 1
+            ? { ok: false, error: "provider_unavailable" }
+            : nativeCredentialResponse();
+        }
+        return { ok: true };
       },
     },
     tabs: {
@@ -576,7 +674,7 @@ test("iOS auto-track adopts the app account, records progress, and emits no save
     storageMode: "promise",
     fetch: async (url, options) => {
       const authorization = options.headers.Authorization;
-      if (url.endsWith("/api/account/me")) {
+      if (url.endsWith("/api/extension/account")) {
         return new Response(JSON.stringify({
           account_id: authorization === "Bearer old-account-token"
             ? "account-a"
@@ -644,6 +742,7 @@ test("iOS auto-track adopts the app account, records progress, and emits no save
   ]);
   assert.deepEqual(nativeMessages.map(({ type }) => type), [
     "TRACE_IOS_AUTH_TOKEN_REQUEST",
+    "TRACE_IOS_AUTH_TOKEN_REQUEST",
   ]);
   assert.equal(
     (await privateDatabase.get(PRIVATE_RECORD_KEYS.accountData)).scope.accountId,
@@ -678,7 +777,7 @@ test("iOS metadata contribution adopts the app account and invalidates without a
       async sendNativeMessage(message) {
         nativeMessages.push(message);
         return message.type === "TRACE_IOS_AUTH_TOKEN_REQUEST"
-          ? { ok: true, token: "current-app-token" }
+          ? nativeCredentialResponse()
           : { ok: true };
       },
     },
@@ -695,7 +794,7 @@ test("iOS metadata contribution adopts the app account and invalidates without a
     storageMode: "promise",
     fetch: async (url, options) => {
       const authorization = options.headers.Authorization;
-      if (url.endsWith("/api/account/me")) {
+      if (url.endsWith("/api/extension/account")) {
         return new Response(JSON.stringify({
           account_id: authorization === "Bearer old-account-token"
             ? "account-a"
@@ -843,7 +942,7 @@ test("concurrent iOS page mutations share same-account authority without clearin
     storageArea: new PromiseStorageArea(),
     storageMode: "promise",
     fetch: async (url) => {
-      if (url.endsWith("/api/account/me")) {
+      if (url.endsWith("/api/extension/account")) {
         return new Response(JSON.stringify({ account_id: "account-a" }), { status: 200 });
       }
       if (url.endsWith("/api/extension/metadata")) {
@@ -914,7 +1013,7 @@ test("concurrent iOS page mutations share same-account authority without clearin
     () => nativeMessages.length === 1,
     "expected one coalesced native credential acquisition",
   );
-  provider.resolve({ ok: true, token: "current-app-token" });
+  provider.resolve(nativeCredentialResponse());
 
   const [metadataResponse, autoTrackResponse] = await Promise.all([metadata, autoTrack]);
   assert.equal(metadataResponse.ok, true);
@@ -946,7 +1045,7 @@ test("iOS archive projection adopts containing-app authority after delayed site 
       async sendNativeMessage(message) {
         nativeMessages.push(message);
         return message.type === "TRACE_IOS_AUTH_TOKEN_REQUEST"
-          ? { ok: true, token: "current-app-token" }
+          ? nativeCredentialResponse()
           : { ok: true };
       },
     },
@@ -962,7 +1061,7 @@ test("iOS archive projection adopts containing-app authority after delayed site 
     storageMode: "promise",
     fetch: async (url, options) => {
       authorizations.push(options.headers.Authorization);
-      if (url.endsWith("/api/account/me")) {
+      if (url.endsWith("/api/extension/account")) {
         return new Response(JSON.stringify({
           account_id: "account-a",
           pro: false,
@@ -1036,7 +1135,7 @@ test("archive projection and work-state reads return only requested current-acco
     storageArea: new PromiseStorageArea(),
     storageMode: "promise",
     fetch: async (url) => {
-      if (url.endsWith("/api/account/me")) {
+      if (url.endsWith("/api/extension/account")) {
         return new Response(JSON.stringify({
           account_id: "account-a",
           pro: false,
@@ -1124,7 +1223,7 @@ test("capacity failures persist recovery state, suppress new work, and preserve 
     storageArea: new PromiseStorageArea(),
     storageMode: "promise",
     fetch: async (url, options = {}) => {
-      if (url.endsWith("/api/account/me")) {
+      if (url.endsWith("/api/extension/account")) {
         return new Response(JSON.stringify({
           account_id: "account-a",
           pro: false,
@@ -1271,7 +1370,7 @@ test("popup state is extension-page-only and contains sanitized summary plus loc
     }),
     storageMode: "promise",
     fetch: async (url) => {
-      if (url.endsWith("/api/account/me")) {
+      if (url.endsWith("/api/extension/account")) {
         return new Response(JSON.stringify({
           account_id: "account-a",
           pro: true,

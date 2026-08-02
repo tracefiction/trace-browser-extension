@@ -2575,6 +2575,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   // src/extension-runtime/browser-adapters.mts
   var LEGACY_SESSION_ENVELOPE_KEY = "traceSessionEnvelopeV1";
   var LEGACY_SESSION_CREDENTIALS_KEY = "traceSessionCredentialsV1";
+  var UUID_PATTERN3 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   var ACCOUNT_DATA_ALARM = "traceAccountDataRefresh";
   var SAVED_FILTER_SYNC_ALARM = "traceAo3SavedFiltersSync";
   var LEGACY_ACCOUNT_ALARMS = Object.freeze([
@@ -2761,13 +2762,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       promise.then((value) => finish(value), () => finish(null));
     });
   }
-  async function sendNativeMessageWithFallback(runtime, mode, message) {
+  async function sendNativeMessageWithFallback(runtime, mode, message, timeoutMs = 5e3) {
     if (typeof runtime.sendNativeMessage !== "function") return null;
     const attempts = [
       [message],
       ["com.tracefiction.trace", message]
     ];
-    const deadline = Date.now() + 5e3;
+    const deadline = Date.now() + Math.max(0, timeoutMs);
     for (const args of attempts) {
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) break;
@@ -2785,6 +2786,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     return null;
   }
+  var IOS_NATIVE_CREDENTIAL_READ_BUDGET_MS = 2500;
+  var IOS_NATIVE_CREDENTIAL_READ_ATTEMPT_TIMEOUT_MS = 1e3;
+  var IOS_NATIVE_CREDENTIAL_READ_RETRY_DELAY_MS = 150;
   var NativeArchiveReadinessReceiptPort = class {
     #runtime;
     #mode;
@@ -2908,7 +2912,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     async acquire(purpose) {
       const generation = ++this.#generation;
-      const result = await this.#detectIos() ? await this.#acquireNative() : await this.#acquireFromTraceTab(purpose);
+      const result = await this.#detectIos() ? await this.#acquireNative(generation) : await this.#acquireFromTraceTab(purpose);
       return generation === this.#generation ? result : { kind: "cancelled" };
     }
     cancel() {
@@ -2982,20 +2986,47 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
       return { kind: "absent" };
     }
-    async #acquireNative() {
-      const request = { type: "TRACE_IOS_AUTH_TOKEN_REQUEST", protocolVersion: 2 };
+    async #acquireNativeOnce(timeoutMs) {
+      const request = { type: "TRACE_IOS_AUTH_TOKEN_REQUEST", protocolVersion: 3 };
       const response = await sendNativeMessageWithFallback(
         this.#runtime,
         this.#mode,
-        request
+        request,
+        timeoutMs
       );
-      if (isRecord5(response)) {
-        const credential = typeof response.token === "string" ? response.token.trim() : "";
-        if ((response.ok === true || response.ok === "true") && credential) {
-          return { kind: "credential", credential };
-        }
+      if (!isRecord5(response)) return { kind: "unavailable" };
+      const credential = typeof response.credential === "string" ? response.credential.trim() : typeof response.token === "string" ? response.token.trim() : "";
+      const credentialKind = response.credentialKind;
+      const validKind = credentialKind === "device_session" || credentialKind === "access_token";
+      const validDeviceMetadata = credentialKind !== "device_session" || typeof response.sessionId === "string" && UUID_PATTERN3.test(response.sessionId) && typeof response.expiresAt === "string" && Number.isFinite(Date.parse(response.expiresAt));
+      if ((response.ok === true || response.ok === "true") && credential && validKind && validDeviceMetadata) {
+        return { kind: "credential", credential };
       }
-      return { kind: "absent" };
+      return response.error === "missing_token" ? { kind: "absent" } : { kind: "unavailable" };
+    }
+    async #acquireNative(generation) {
+      const deadline = Date.now() + IOS_NATIVE_CREDENTIAL_READ_BUDGET_MS;
+      const read = () => this.#acquireNativeOnce(
+        Math.min(
+          IOS_NATIVE_CREDENTIAL_READ_ATTEMPT_TIMEOUT_MS,
+          Math.max(0, deadline - Date.now())
+        )
+      );
+      const first = await read();
+      if (first.kind !== "unavailable" || generation !== this.#generation) {
+        return first;
+      }
+      const remainingBeforeDelay = deadline - Date.now();
+      if (remainingBeforeDelay <= IOS_NATIVE_CREDENTIAL_READ_RETRY_DELAY_MS) {
+        return first;
+      }
+      await new Promise((resolve) => {
+        setTimeout(resolve, IOS_NATIVE_CREDENTIAL_READ_RETRY_DELAY_MS);
+      });
+      if (generation !== this.#generation || Date.now() >= deadline) {
+        return { kind: "cancelled" };
+      }
+      return read();
     }
   };
   function sanitizePendingFirstStoryResponse(response) {
@@ -3045,7 +3076,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     constructor(fetchImpl, apiBase, onRetryDisposition = () => {
     }) {
       this.#fetch = fetchImpl;
-      this.#endpoint = `${apiBase.replace(/\/$/, "")}/api/account/me`;
+      this.#endpoint = `${apiBase.replace(/\/$/, "")}/api/extension/account`;
       this.#onRetryDisposition = onRetryDisposition;
     }
     async verifyCredential(credential) {
@@ -3316,7 +3347,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   }
 
   // src/extension-runtime/story-command.mts
-  var UUID_PATTERN3 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  var UUID_PATTERN4 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   var WORK_KEY_PATTERN2 = /^(ao3|ffn):[1-9][0-9]{0,19}$/;
   var REQUEST_TIMEOUT_MS = 12e3;
   function isRecord6(value) {
@@ -3330,7 +3361,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     const workKey = typeof value.work_key === "string" ? value.work_key.trim() : "";
     const entryId = typeof value.entry_id === "string" ? value.entry_id.trim() : "";
     const entry = copyLibraryOverlayEntry(value.entry);
-    if (workKey !== expectedWorkKey || !WORK_KEY_PATTERN2.test(workKey) || !UUID_PATTERN3.test(entryId) || entry === null || entry.entryId !== entryId || !isIsoTimestamp(value.syncVersion)) {
+    if (workKey !== expectedWorkKey || !WORK_KEY_PATTERN2.test(workKey) || !UUID_PATTERN4.test(entryId) || entry === null || entry.entryId !== entryId || !isIsoTimestamp(value.syncVersion)) {
       return null;
     }
     return Object.freeze({
@@ -3367,7 +3398,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (rawEntry === void 0) return { kind: "success", value: { kind: "absent" } };
       const entry = copyLibraryOverlayEntry(rawEntry);
       const entryId = entry?.entryId;
-      if (entry === null || typeof entryId !== "string" || !UUID_PATTERN3.test(entryId)) {
+      if (entry === null || typeof entryId !== "string" || !UUID_PATTERN4.test(entryId)) {
         return { kind: "success", value: { kind: "invalid_response" } };
       }
       return {
@@ -3472,7 +3503,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#fetch = fetchImpl;
       const base = apiBase.replace(/\/$/, "");
       this.#overlayEndpoint = `${base}/api/extension/library-overlay`;
-      this.#accountEndpoint = `${base}/api/account/me`;
+      this.#accountEndpoint = `${base}/api/extension/account`;
     }
     async load(credential) {
       const [overlayResult, accountResult] = await Promise.all([
@@ -3550,7 +3581,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 
   // src/extension-runtime/library-command.mts
   var REQUEST_TIMEOUT_MS3 = 12e3;
-  var UUID_PATTERN4 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  var UUID_PATTERN5 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   function isRecord8(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
@@ -3562,7 +3593,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     constructor(fetchImpl, apiBase) {
       this.#fetch = fetchImpl;
       const base = apiBase.replace(/\/$/, "");
-      this.#libraryEndpoint = `${base}/api/library`;
+      this.#libraryEndpoint = `${base}/api/extension/library`;
       this.#preferenceEndpoint = `${base}/api/extension/work-preferences`;
       this.#finishEndpoint = `${base}/api/extension/finish-qualification`;
     }
@@ -3592,7 +3623,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (!response.ok) return { kind: "success", value: { kind: "uncertain" } };
       const body = await this.#json(response);
       const data = isRecord8(body) && isRecord8(body.data) ? body.data : null;
-      const confirmed = command.kind === "entry_patch" ? data !== null && typeof data.entry_id === "string" && UUID_PATTERN4.test(data.entry_id) && data.entry_id === command.entryId : data !== null && data.key === command.workKey && isRecord8(data.browsePreference) && data.browsePreference.hidden === command.hidden;
+      const confirmed = command.kind === "entry_patch" ? data !== null && typeof data.entry_id === "string" && UUID_PATTERN5.test(data.entry_id) && data.entry_id === command.entryId : data !== null && data.key === command.workKey && isRecord8(data.browsePreference) && data.browsePreference.hidden === command.hidden;
       return {
         kind: "success",
         value: confirmed ? { kind: "accepted" } : { kind: "uncertain" }
@@ -3626,7 +3657,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (!response.ok) return { kind: "success", value: { kind: "uncertain" } };
       const body = await this.#json(response);
       const data = isRecord8(body) && isRecord8(body.data) ? body.data : null;
-      if (data === null || data.state !== "open" && data.state !== "resolved" && data.state !== "ignored" || data.eventId !== null && (typeof data.eventId !== "string" || !UUID_PATTERN4.test(data.eventId))) {
+      if (data === null || data.state !== "open" && data.state !== "resolved" && data.state !== "ignored" || data.eventId !== null && (typeof data.eventId !== "string" || !UUID_PATTERN5.test(data.eventId))) {
         return { kind: "success", value: { kind: "uncertain" } };
       }
       return {
@@ -3689,7 +3720,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   };
 
   // src/extension-runtime/library-command-sender.mts
-  var UUID_PATTERN5 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  var UUID_PATTERN6 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   var WORK_KEY_PATTERN3 = /^(ao3|ffn):[1-9][0-9]{0,19}$/;
   var MAX_COMMAND_BYTES = 8 * 1024;
   var MAX_CHAPTER = 1e7;
@@ -3792,7 +3823,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       });
     }
     const entryId = typeof payload.entryId === "string" ? payload.entryId.trim() : "";
-    if (!UUID_PATTERN5.test(entryId)) return null;
+    if (!UUID_PATTERN6.test(entryId)) return null;
     if (message.type === "TRACE_SET_READER_STATUS") {
       const status = canonicalStatus(payload.status);
       if (status === null) return null;
@@ -3831,7 +3862,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     const scope2 = senderCommandScope(sender, payload.workKey);
     if (scope2 === null || payload.source !== scope2.hostKind) return null;
     const entryId = typeof payload.entryId === "string" ? payload.entryId.trim() : "";
-    if (!UUID_PATTERN5.test(entryId)) return null;
+    if (!UUID_PATTERN6.test(entryId)) return null;
     if (!Number.isSafeInteger(payload.chapter) || payload.chapter < 1 || payload.chapter > MAX_CHAPTER || !Number.isSafeInteger(payload.total) || payload.total < 1 || payload.total > MAX_CHAPTER) {
       return null;
     }

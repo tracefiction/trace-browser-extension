@@ -41,6 +41,8 @@ export {
 
 export const LEGACY_SESSION_ENVELOPE_KEY = "traceSessionEnvelopeV1" as const;
 export const LEGACY_SESSION_CREDENTIALS_KEY = "traceSessionCredentialsV1" as const;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export const ACCOUNT_DATA_ALARM = "traceAccountDataRefresh" as const;
 export const SAVED_FILTER_SYNC_ALARM = "traceAo3SavedFiltersSync" as const;
@@ -283,13 +285,14 @@ async function sendNativeMessageWithFallback(
   runtime: RuntimePort,
   mode: "callback" | "promise",
   message: Readonly<Record<string, unknown>>,
+  timeoutMs = 5_000,
 ): Promise<unknown | null> {
   if (typeof runtime.sendNativeMessage !== "function") return null;
   const attempts: readonly (readonly unknown[])[] = [
     [message],
     ["com.tracefiction.trace", message],
   ];
-  const deadline = Date.now() + 5_000;
+  const deadline = Date.now() + Math.max(0, timeoutMs);
   for (const args of attempts) {
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) break;
@@ -307,6 +310,10 @@ async function sendNativeMessageWithFallback(
   }
   return null;
 }
+
+const IOS_NATIVE_CREDENTIAL_READ_BUDGET_MS = 2_500;
+const IOS_NATIVE_CREDENTIAL_READ_ATTEMPT_TIMEOUT_MS = 1_000;
+const IOS_NATIVE_CREDENTIAL_READ_RETRY_DELAY_MS = 150;
 
 export class NativeArchiveReadinessReceiptPort implements ArchiveReadinessReceiptPort {
   readonly #runtime: RuntimePort;
@@ -471,7 +478,7 @@ export class ExplicitCredentialProvider implements CredentialProvider {
   async acquire(purpose: "connect" | "refresh"): Promise<CredentialAcquisition> {
     const generation = ++this.#generation;
     const result = (await this.#detectIos())
-      ? await this.#acquireNative()
+      ? await this.#acquireNative(generation)
       : await this.#acquireFromTraceTab(purpose);
     return generation === this.#generation ? result : { kind: "cancelled" };
   }
@@ -556,20 +563,73 @@ export class ExplicitCredentialProvider implements CredentialProvider {
     return { kind: "absent" };
   }
 
-  async #acquireNative(): Promise<CredentialAcquisition> {
-    const request = { type: "TRACE_IOS_AUTH_TOKEN_REQUEST", protocolVersion: 2 };
+  async #acquireNativeOnce(timeoutMs: number): Promise<CredentialAcquisition> {
+    const request = { type: "TRACE_IOS_AUTH_TOKEN_REQUEST", protocolVersion: 3 };
     const response = await sendNativeMessageWithFallback(
       this.#runtime,
       this.#mode,
       request,
+      timeoutMs,
     );
-    if (isRecord(response)) {
-      const credential = typeof response.token === "string" ? response.token.trim() : "";
-      if ((response.ok === true || response.ok === "true") && credential) {
-        return { kind: "credential", credential };
-      }
+    if (!isRecord(response)) return { kind: "unavailable" };
+    const credential =
+      typeof response.credential === "string"
+        ? response.credential.trim()
+        : typeof response.token === "string"
+          ? response.token.trim()
+          : "";
+    const credentialKind = response.credentialKind;
+    const validKind =
+      credentialKind === "device_session" ||
+      credentialKind === "access_token";
+    const validDeviceMetadata =
+      credentialKind !== "device_session" ||
+      (
+        typeof response.sessionId === "string" &&
+        UUID_PATTERN.test(response.sessionId) &&
+        typeof response.expiresAt === "string" &&
+        Number.isFinite(Date.parse(response.expiresAt))
+      );
+    if (
+      (response.ok === true || response.ok === "true") &&
+      credential &&
+      validKind &&
+      validDeviceMetadata
+    ) {
+      return { kind: "credential", credential };
     }
-    return { kind: "absent" };
+    return response.error === "missing_token"
+      ? { kind: "absent" }
+      : { kind: "unavailable" };
+  }
+
+  async #acquireNative(generation: number): Promise<CredentialAcquisition> {
+    const deadline = Date.now() + IOS_NATIVE_CREDENTIAL_READ_BUDGET_MS;
+    const read = () =>
+      this.#acquireNativeOnce(
+        Math.min(
+          IOS_NATIVE_CREDENTIAL_READ_ATTEMPT_TIMEOUT_MS,
+          Math.max(0, deadline - Date.now()),
+        ),
+      );
+
+    const first = await read();
+    if (first.kind !== "unavailable" || generation !== this.#generation) {
+      return first;
+    }
+
+    const remainingBeforeDelay = deadline - Date.now();
+    if (remainingBeforeDelay <= IOS_NATIVE_CREDENTIAL_READ_RETRY_DELAY_MS) {
+      return first;
+    }
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, IOS_NATIVE_CREDENTIAL_READ_RETRY_DELAY_MS);
+    });
+    if (generation !== this.#generation || Date.now() >= deadline) {
+      return { kind: "cancelled" };
+    }
+
+    return read();
   }
 }
 
@@ -656,7 +716,7 @@ export class VerificationApi implements SessionApiPort {
     onRetryDisposition: (disposition: "automatic" | "manual" | "none") => void = () => {},
   ) {
     this.#fetch = fetchImpl;
-    this.#endpoint = `${apiBase.replace(/\/$/, "")}/api/account/me`;
+    this.#endpoint = `${apiBase.replace(/\/$/, "")}/api/extension/account`;
     this.#onRetryDisposition = onRetryDisposition;
   }
 

@@ -420,7 +420,7 @@ test("TRACE_AUTH_UPDATE clears a work-state write that was queued before sign-ou
 test("TRACE_AUTH_UPDATE verifies account before marking connected", async () => {
   const h = createBackgroundHarness({
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         return createResponse({
           json: { account_id: "acct-browser", pro: true, library_count: 7 },
         });
@@ -477,7 +477,7 @@ test("TRACE_AUTH_UPDATE clears account-scoped caches when the verified account c
       },
     },
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         return createResponse({
           json: { account_id: "acct-new", pro: false, library_count: 0 },
         });
@@ -508,7 +508,7 @@ test("iOS native auth token bootstraps the extension account", async () => {
       callback({ ok: true, token: "native-token" });
     },
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         return createResponse({ json: { pro: true, library_count: 3 } });
       }
       if (String(url).endsWith("/api/extension/library-overlay")) {
@@ -525,7 +525,11 @@ test("iOS native auth token bootstraps the extension account", async () => {
   await flush();
 
   assert.deepEqual(plainJson(h.nativeMessages[0]), [
-    { type: "TRACE_IOS_AUTH_TOKEN_REQUEST", reason: "missing_token" },
+    {
+      type: "TRACE_IOS_AUTH_TOKEN_REQUEST",
+      protocolVersion: 3,
+      reason: "missing_token",
+    },
   ]);
   assert.equal(h.hooks.getBearerToken(), "native-token");
   assert.equal(h.hooks.getVerifiedBearerToken(), "native-token");
@@ -546,7 +550,7 @@ test("iOS native auth retries native messaging with application id after async f
       return Promise.reject(new Error("one-argument native message rejected"));
     },
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         assert.equal(init.headers.Authorization, "Bearer native-token-two-arg");
         return createResponse({ json: { pro: false, library_count: 2 } });
       }
@@ -564,11 +568,19 @@ test("iOS native auth retries native messaging with application id after async f
   await flush();
 
   assert.deepEqual(plainJson(h.nativeMessages[0]), [
-    { type: "TRACE_IOS_AUTH_TOKEN_REQUEST", reason: "missing_token" },
+    {
+      type: "TRACE_IOS_AUTH_TOKEN_REQUEST",
+      protocolVersion: 3,
+      reason: "missing_token",
+    },
   ]);
   assert.deepEqual(plainJson(h.nativeMessages[1]), [
     "com.tracefiction.trace",
-    { type: "TRACE_IOS_AUTH_TOKEN_REQUEST", reason: "missing_token" },
+    {
+      type: "TRACE_IOS_AUTH_TOKEN_REQUEST",
+      protocolVersion: 3,
+      reason: "missing_token",
+    },
   ]);
   assert.equal(h.hooks.getBearerToken(), "native-token-two-arg");
   assert.equal(h.store.traceAuthState.state, "connected");
@@ -580,7 +592,11 @@ test("missing iOS native auth token leaves the extension signed out", async () =
   await flush();
 
   assert.deepEqual(plainJson(h.nativeMessages[0]), [
-    { type: "TRACE_IOS_AUTH_TOKEN_REQUEST", reason: "missing_token" },
+    {
+      type: "TRACE_IOS_AUTH_TOKEN_REQUEST",
+      protocolVersion: 3,
+      reason: "missing_token",
+    },
   ]);
   assert.equal(h.hooks.getBearerToken(), null);
   assert.equal(h.store.authToken, undefined);
@@ -598,7 +614,7 @@ test("Safari archive resume refreshes auth from the shared iOS token", async () 
       callback(undefined);
     },
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         assert.equal(init.headers.Authorization, "Bearer resumed-native-token");
         return createResponse({
           json: { account_id: "acct-resumed", pro: false, library_count: 4 },
@@ -665,7 +681,7 @@ test("late missing iOS bootstrap does not overwrite a browser token update", asy
       nativeCallback = callback;
     },
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         return createResponse({ json: { pro: false, library_count: 1 } });
       }
       if (String(url).endsWith("/api/extension/library-overlay")) {
@@ -718,7 +734,7 @@ test("TRACE_IOS_PENDING_FIRST_STORY aligns an existing Safari session to the app
       callback({ ok: false, error: "unexpected_message" });
     },
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         const token = String(init?.headers?.Authorization || "").replace(
           /^Bearer\s+/,
           "",
@@ -764,6 +780,7 @@ test("TRACE_IOS_PENDING_FIRST_STORY aligns an existing Safari session to the app
     [
       {
         type: "TRACE_IOS_AUTH_TOKEN_REQUEST",
+        protocolVersion: 3,
         reason: "pending_first_story",
       },
       { type: "TRACE_IOS_PENDING_FIRST_STORY_GET" },
@@ -810,7 +827,7 @@ test("TRACE_IOS_PENDING_FIRST_STORY_GET stops before URL handoff when iOS auth b
 test("TRACE_AUTH_UPDATE handles bootstrap-required tokens without marking connected", async () => {
   const h = createBackgroundHarness({
     fetchImpl: async (url) => {
-      assert.ok(String(url).endsWith("/api/account/me"));
+      assert.ok(String(url).endsWith("/api/extension/account"));
       return createResponse({
         ok: false,
         status: 409,
@@ -840,7 +857,7 @@ test("TRACE_AUTH_UPDATE retries transient verification failures before surfacing
   let accountChecks = 0;
   const h = createBackgroundHarness({
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         accountChecks += 1;
         if (accountChecks === 1) {
           return createResponse({ ok: false, status: 500 });
@@ -888,7 +905,7 @@ test("TRACE_AUTH_UPDATE retries transient verification failures before surfacing
 test("TRACE_AUTH_UPDATE keeps a token usable after transient verification retries are exhausted", async () => {
   const h = createBackgroundHarness({
     fetchImpl: async (url) => {
-      assert.ok(String(url).endsWith("/api/account/me"));
+      assert.ok(String(url).endsWith("/api/extension/account"));
       return createResponse({ ok: false, status: 500 });
     },
   });
@@ -924,7 +941,7 @@ test("TRACE_AUTH_UPDATE treats account-check rate limiting as non-blocking witho
   let accountChecks = 0;
   const h = createBackgroundHarness({
     fetchImpl: async (url) => {
-      assert.ok(String(url).endsWith("/api/account/me"));
+      assert.ok(String(url).endsWith("/api/extension/account"));
       accountChecks += 1;
       return createResponse({ ok: false, status: 429 });
     },
@@ -966,7 +983,7 @@ test("startup keeps a previously verified connection usable after transient acco
       },
     },
     fetchImpl: async (url) => {
-      assert.ok(String(url).endsWith("/api/account/me"));
+      assert.ok(String(url).endsWith("/api/extension/account"));
       accountChecks += 1;
       return createResponse({ ok: false, status: 500 });
     },
@@ -1005,7 +1022,7 @@ test("startup re-verifies stored connected tokens before reporting connected", a
       },
     },
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         return accountMe.promise;
       }
       if (String(url).endsWith("/api/extension/library-overlay")) {
@@ -1079,7 +1096,7 @@ test("status query answers with best-known state when verification exceeds the w
       },
     },
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         return accountMe.promise;
       }
       return createResponse({ ok: false, status: 404 });
@@ -1449,7 +1466,7 @@ test("TRACE_POPUP_GET_STATE includes local activation and active tab context", a
       { id: 23, url: "https://archiveofourown.org/works/12345/chapters/67890" },
     ],
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         return createResponse({ json: { pro: true, library_count: 0 } });
       }
       return createResponse({ ok: false, status: 404 });
@@ -1484,7 +1501,7 @@ test("TRACE_POPUP_GET_STATE returns cached state while deduplicating a slow acco
       traceLibraryCount: 12,
     },
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/api/account/me")) return accountResponse.promise;
+      if (String(url).endsWith("/api/extension/account")) return accountResponse.promise;
       return createResponse({ ok: false, status: 404 });
     },
   });
@@ -1498,7 +1515,7 @@ test("TRACE_POPUP_GET_STATE returns cached state while deduplicating a slow acco
   assert.equal(first.libraryCount, 12);
   assert.equal(second.pro, false);
   assert.equal(
-    h.fetchCalls.filter((call) => String(call.url).endsWith("/api/account/me")).length,
+    h.fetchCalls.filter((call) => String(call.url).endsWith("/api/extension/account")).length,
     1,
   );
 
@@ -1523,7 +1540,7 @@ test("cold auth recheck preserves a previously verified connected state", async 
       },
     },
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/api/account/me")) return accountResponse.promise;
+      if (String(url).endsWith("/api/extension/account")) return accountResponse.promise;
       return createResponse({ ok: false, status: 404 });
     },
   });
@@ -1722,7 +1739,7 @@ test("settled auth-state changes push extension status to Trace web tabs", async
       return { ok: true };
     },
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         return createResponse({ json: { pro: false, library_count: 0 } });
       }
       return createResponse({ ok: false, status: 404 });
@@ -1994,7 +2011,7 @@ test("TRACE_POPUP_OPEN heals stale error state when token still exists", async (
       traceAuthState: { state: "error", message: "stale error" },
     },
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         return createResponse({ json: { pro: true } });
       }
       return createResponse({ ok: false, status: 403 });
@@ -2159,7 +2176,7 @@ test("executeAutoTrack success refreshes overlay cache immediately", async () =>
       return { ok: true };
     },
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         return createResponse({ json: { pro: false, library_count: 1 } });
       }
       if (String(url).endsWith("/api/extension/track")) {
@@ -2353,7 +2370,7 @@ test("TRACE_QUICK_ADD returns ok and refreshes overlay on success", async () => 
       if (String(url).endsWith("/api/extension/library-overlay")) {
         return createResponse({ json: { success: true, data: { entries: {}, syncVersion: "v1" } } });
       }
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         return createResponse({ json: { pro: false } });
       }
       return createResponse({ ok: false, status: 404 });
@@ -2484,7 +2501,7 @@ test("a confirmed save repairs an old account-check error across Safari worker r
       },
     },
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         return createResponse({ ok: false, status: 500 });
       }
       if (String(url).endsWith("/api/extension/track")) {
@@ -2542,7 +2559,7 @@ test("a confirmed save repairs an old account-check error across Safari worker r
   const restartedWorker = createBackgroundHarness({
     storageState: plainJson(firstWorker.store),
     fetchImpl: async (url) => {
-      assert.ok(String(url).endsWith("/api/account/me"));
+      assert.ok(String(url).endsWith("/api/extension/account"));
       restartAccountChecks += 1;
       return createResponse({ ok: false, status: 500 });
     },
@@ -2575,7 +2592,7 @@ test("TRACE_QUICK_ADD reconciles a timed-out write when a fresh overlay confirms
       traceAccountId: "acct-timeout-confirmed",
     },
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         return createResponse({
           json: { account_id: "acct-timeout-confirmed", pro: false },
         });
@@ -2637,7 +2654,7 @@ test("TRACE_QUICK_ADD returns a bounded timeout when the write cannot be confirm
       traceAccountId: "acct-timeout-missing",
     },
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         return createResponse({
           json: { account_id: "acct-timeout-missing", pro: false },
         });
@@ -2702,7 +2719,7 @@ test("an older timed-out quick add cannot overwrite a newer confirmed retry", as
       traceAccountId: "acct-retry-wins",
     },
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         return createResponse({
           json: { account_id: "acct-retry-wins", pro: false },
         });
@@ -2797,7 +2814,7 @@ test("TRACE_WORK_STATE_GET converts an abandoned pending save into a retryable e
       },
     },
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         return createResponse({
           json: { account_id: "acct-abandoned", pro: false },
         });
@@ -2872,7 +2889,7 @@ test("iOS native messaging returns after a bounded wait when Safari never calls 
       // Deliberately never invokes Safari's callback.
     },
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         return createResponse({ json: { pro: false } });
       }
       if (String(url).endsWith("/api/extension/library-overlay")) {
@@ -2942,7 +2959,7 @@ test("TRACE_QUICK_ADD rehydrates stored token on Chrome service worker cold star
       },
     },
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         assert.equal(init.headers.Authorization, "Bearer stored-quick-token");
         return createResponse({
           json: {
@@ -3018,7 +3035,7 @@ test("TRACE_QUICK_ADD bootstraps iOS native auth before first-story quick add", 
       callback({ ok: false, error: "missing_token" });
     },
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         assert.equal(init.headers.Authorization, "Bearer native-quick-token");
         return createResponse({ json: { pro: false, library_count: 0 } });
       }
@@ -3080,7 +3097,7 @@ test("Safari quick add replaces an already-valid token with the containing app a
       callback({ ok: false, error: "missing_token" });
     },
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         assert.equal(init.headers.Authorization, "Bearer current-app-token");
         return createResponse({ json: { pro: false, library_count: 0 } });
       }
@@ -3134,7 +3151,7 @@ test("TRACE_QUICK_ADD retries with iOS native auth after a stale stored token", 
       callback({ ok: false, error: "missing_token" });
     },
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         assert.equal(
           init.headers.Authorization,
           "Bearer native-quick-fresh-token",
@@ -3221,7 +3238,7 @@ test("TRACE_SET_READER_STATUS patches library entry status and overlay cache", a
       return { ok: true };
     },
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith(`/api/library/${entryId}`)) {
+      if (String(url).endsWith(`/api/extension/library/${entryId}`)) {
         assert.equal(init.method, "PATCH");
         assert.equal(init.headers.Authorization, "Bearer token-status-1");
         assert.deepEqual(JSON.parse(init.body), {
@@ -3230,7 +3247,7 @@ test("TRACE_SET_READER_STATUS patches library entry status and overlay cache", a
         });
         return createResponse({ json: { data: { entry_id: entryId } } });
       }
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         return createResponse({ json: { pro: false } });
       }
       return createResponse({ ok: false, status: 404 });
@@ -3283,7 +3300,7 @@ test("TRACE_SET_READER_STATUS handles validation and auth failures", async () =>
   const expired = createBackgroundHarness({
     storageState: { authToken: "token-status-3" },
     fetchImpl: async (url) => {
-      if (String(url).includes("/api/library/")) {
+      if (String(url).includes("/api/extension/library/")) {
         return createResponse({ ok: false, status: 401 });
       }
       return createResponse({ ok: false, status: 404 });
@@ -3494,7 +3511,7 @@ test("TRACE_PATCH_LIBRARY_ENTRY patches rating and updates overlay cache", async
     fetchImpl: async (url, init) => {
       assert.equal(
         String(url),
-        `https://tracefiction.com/api/library/${entryId}`,
+        `https://tracefiction.com/api/extension/library/${entryId}`,
       );
       assert.equal(init.method, "PATCH");
       assert.deepEqual(JSON.parse(init.body), { rating: 4 });
@@ -3535,7 +3552,7 @@ test("TRACE_PATCH_LIBRARY_ENTRY acknowledges before a slow Trace-tab invalidatio
     activeTabs: [{ id: 45, url: "https://tracefiction.com/library" }],
     sendMessageImpl: async () => tabNotification.promise,
     fetchImpl: async (url) => {
-      if (String(url).endsWith(`/api/library/${entryId}`)) {
+      if (String(url).endsWith(`/api/extension/library/${entryId}`)) {
         return createResponse({ json: { data: { entry_id: entryId } } });
       }
       return createResponse({ ok: false, status: 404 });
@@ -3577,7 +3594,7 @@ test("TRACE_PATCH_LIBRARY_ENTRY hydrates a stored token after a worker restart",
       },
     },
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith("/api/account/me")) return accountResponse.promise;
+      if (String(url).endsWith("/api/extension/account")) return accountResponse.promise;
       assert.equal(init.headers.Authorization, "Bearer token-patch-hydrated");
       return createResponse({ json: { data: { entry_id: entryId } } });
     },
@@ -3602,7 +3619,7 @@ test("TRACE_PATCH_LIBRARY_ENTRY rejects an expired hydrated token", async () => 
   const h = createBackgroundHarness({
     storageState: { authToken: "token-patch-expired" },
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/api/account/me")) return accountResponse.promise;
+      if (String(url).endsWith("/api/extension/account")) return accountResponse.promise;
       return createResponse({
         ok: false,
         status: 401,
@@ -3918,7 +3935,7 @@ test("TRACE_AUTO_TRACK rehydrates stored token on Chrome service worker cold sta
       },
     },
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         assert.equal(init.headers.Authorization, "Bearer stored-auto-token");
         return createResponse({
           json: {
@@ -3995,7 +4012,7 @@ test("TRACE_AUTO_TRACK bootstraps iOS native auth before first story track", asy
       callback({ ok: false, error: "missing_token" });
     },
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         assert.equal(init.headers.Authorization, "Bearer native-auto-token");
         return createResponse({ json: { pro: false, library_count: 0 } });
       }
@@ -4061,7 +4078,7 @@ test("Safari auto-track replaces an already-valid token with the containing app 
       callback({ ok: false, error: "missing_token" });
     },
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         assert.equal(init.headers.Authorization, "Bearer current-app-auto-token");
         return createResponse({ json: { pro: false, library_count: 0 } });
       }
@@ -4118,7 +4135,7 @@ test("TRACE_AUTO_TRACK retries with iOS native auth after a stale stored token",
       callback({ ok: false, error: "missing_token" });
     },
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         assert.equal(
           init.headers.Authorization,
           "Bearer native-auto-fresh-token",
@@ -4757,7 +4774,7 @@ test("TRACE_AUTO_TRACK returns a bounded timeout instead of leaving the story pe
       traceAccountId: "acct-at-timeout",
     },
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/api/account/me")) {
+      if (String(url).endsWith("/api/extension/account")) {
         return createResponse({
           json: { account_id: "acct-at-timeout", pro: false },
         });

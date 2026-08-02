@@ -15,7 +15,9 @@ The long-term product direction may include a more native iOS app, but this shel
 - Reports iOS notification permission results back to the web app so denial and setup failures have visible recovery copy.
 - Opens Apple's subscription management sheet for Apple-billed Trace Unlimited accounts.
 - Bridges Safari extension setup actions from the web shell to native iOS code.
-- Maintains an app-owned Safari credential provider in a shared Keychain access group while the app is signed in; the extension can read it only after an explicit Safari-side Connect gesture.
+- Maintains an app-owned, scoped device-session provider in a shared Keychain
+  access group; the extension can read it only after an explicit Safari-side
+  Connect gesture.
 - Stores short-lived direct-story and fixed-host AO3/FFN browse handoffs in app-group storage before opening Safari.
 - Opens external non-Trace links outside the shell.
 - Uses `ASWebAuthenticationSession` for OAuth flows instead of completing OAuth inside an embedded web view.
@@ -53,6 +55,26 @@ Installing the iOS app does not automatically enable the Safari extension or gra
    opaque receipt only after the matching story is confirmed.
 
 The app can report whether the Safari extension is enabled when the OS API is available, but it cannot read per-site permissions directly. The proof that a content script ran is the extension heartbeat: content scripts ping the background on archive pages, the background forwards run timestamps (and confirmed-save timestamps for track/quick-add) through `SafariWebExtensionHandler` into the shared app group, and the app surfaces them in the `TRACE_IOS_EXTENSION_STATE` payload (`lastArchiveRunAt`, `lastArchiveSaveAt`, `lastRunHandoffId`). The background sends that core receipt before asynchronously recording its `browser.permissions.getAll()` snapshot as `grantedOrigins` / `permissionSnapshotAt`; that snapshot is diagnostic data, not a native query of current Website Access. The iOS native message bridge supplies a credential only for a scoped app-issued handoff or an explicit Connect action, so Trace's own web origin is not an initial reader permission requirement.
+
+## Device-Session Provider
+
+Provider protocol v3 stores a version-2 record containing only
+`device_session`, the server session UUID, an opaque `trd_v1_...` credential,
+and absolute expiry. The app reports a random installation UUID and provider
+metadata to the Trace web shell without returning the credential to web
+content. The server credential is valid only for `/api/extension/*`; it is not
+an Auth0 refresh token and cannot call general Trace APIs.
+
+The web shell resolves or issues a device session while authenticated with
+Auth0, waits for the native Keychain write acknowledgement, and only then
+revokes the replaced session. Native updates and clears share one serialized,
+generation-fenced lane. Temporary Keychain errors are unavailable rather than
+signed out. Explicit app logout revokes the server session, clears the provider,
+then ends Auth0; ambient browser-session loss does not clear a valid provider.
+
+Protocol-v2 access-token records remain readable/writable only for the 0.6.0 to
+0.6.1 compatibility window. New extension requests use native protocol v3 and
+validate device-session metadata before accepting the credential.
 
 Xcode reinstall behavior is not authoritative for fresh users. A local build over an existing install can preserve or restore Safari extension settings and website access, making the extension look "magically" enabled. Treat that as diagnostic only; the acceptance test for first-run onboarding is a clean TestFlight/internal-distribution install after deleting Trace and confirming Safari Extensions state first.
 

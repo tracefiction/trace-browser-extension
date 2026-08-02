@@ -278,7 +278,30 @@ they pass on a newly archived build.
   site header. On a tag/search page with AO3's real filter drawer, confirm saved
   filters still render inside that drawer.
 
-No API/server change is required by these findings.
+No API/server change was required by the original 0.6.0 cutover findings. The
+0.6.1 device-session correction below intentionally adds a scoped server auth
+boundary.
+
+## 0.6.1 iOS Device-Session Correction
+
+Production retention evidence showed that a short-lived Auth0 access token was
+not a durable native provider. Version 0.6.1 replaces it on capable iOS shells
+with a revocable opaque device session:
+
+- native protocol v3 and provider record v2 carry a session UUID, scoped opaque
+  credential, and expiry;
+- the credential is accepted only by `/api/extension/*`, while Auth0 remains
+  accepted for desktop and old-binary compatibility;
+- account and library-entry operations use scoped extension routes;
+- provider acquisition may retry before a request, but no library mutation is
+  ever replayed;
+- explicit logout revokes server state before native clear and Auth0 logout;
+- ambient Auth0 loss preserves the valid device provider.
+
+The server migration and dual-auth extension routes must deploy before the
+0.6.1 iOS binary. The release gate includes a physical-device/TestFlight pass
+for Keychain sharing, app suspension, add, auto-progress, manual status update,
+rotation, and logout.
 
 ## Post-Tag Browser Install Correction
 

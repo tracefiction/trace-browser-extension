@@ -301,7 +301,7 @@ test("controller desktop handoff reaches the existing story-command owner", asyn
     storageMode: "promise",
     fetch: async (url) => {
       const path = new URL(url).pathname;
-      if (path === "/api/account/me") {
+      if (path === "/api/extension/account") {
         return new Response(JSON.stringify({ account_id: "account-a" }), { status: 200 });
       }
       if (path === "/api/extension/track") {

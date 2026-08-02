@@ -369,9 +369,9 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
         XCTAssertTrue(safari.staticTexts["Reconnect Trace"].waitForExistence(timeout: 8))
     }
 
-    func testAppSignedOutColdStartClearsStaleProvider() {
+    func testAppSignedOutColdStartPreservesDeviceProvider() {
         launchTraceApp(seedStaleProvider: true)
-        _ = waitForTextContaining("Bootstrap probe complete", in: traceApp)
+        _ = waitForTextContaining("Signed out; provider unchanged", in: traceApp)
     }
 
     func testAppSignInWritesProvider() {

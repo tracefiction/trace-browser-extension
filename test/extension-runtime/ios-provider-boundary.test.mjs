@@ -6,39 +6,65 @@ import test from "node:test";
 const ROOT = process.cwd();
 const read = (...parts) => fs.readFileSync(path.join(ROOT, ...parts), "utf8");
 
-test("the app synchronizer is the sole v2 writer and native utility handlers do not acquire tokens", () => {
+test("the app synchronizer is the sole versioned writer and native utility handlers do not acquire tokens", () => {
   const app = read("iOS (App)", "TraceWebViewController.swift");
   assert.doesNotMatch(app, /storeCurrentTraceTokenForSafariExtension/);
   assert.match(app, /traceAuthTokenAccount = "extension-provider-v2"/);
   assert.match(app, /retiredTraceAuthTokenAccount = "extension-token"/);
+  assert.match(app, /traceProviderRecordVersion = 2/);
+  assert.match(app, /struct TraceSafariProviderRecord: Codable/);
   assert.match(app, /case "TRACE_IOS_AUTH_TOKEN_CLEAR"/);
-  assert.match(app, /traceProviderProtocolVersion = 2/);
+  assert.match(app, /traceLegacyProviderProtocolVersion = 2/);
+  assert.match(app, /traceDeviceProviderProtocolVersion = 3/);
+  assert.match(app, /case "TRACE_IOS_AUTH_PROVIDER_STATUS_REQUEST"/);
   assert.match(
     app,
-    /case "TRACE_IOS_AUTH_TOKEN_UPDATE":[\s\S]*body\["protocolVersion"\] as\? Int == Self\.traceProviderProtocolVersion[\s\S]*handleTraceSafariAuthTokenUpdate/,
+    /case "TRACE_IOS_AUTH_TOKEN_UPDATE":[\s\S]*traceLegacyProviderProtocolVersion[\s\S]*handleTraceSafariAuthTokenUpdate[\s\S]*traceDeviceProviderProtocolVersion[\s\S]*handleTraceSafariDeviceSessionUpdate/,
   );
   assert.match(
     app,
-    /case "TRACE_IOS_AUTH_TOKEN_CLEAR":[\s\S]*body\["protocolVersion"\] as\? Int == Self\.traceProviderProtocolVersion[\s\S]*handleTraceSafariAuthTokenClear/,
+    /case "TRACE_IOS_AUTH_TOKEN_CLEAR":[\s\S]*traceLegacyProviderProtocolVersion[\s\S]*traceDeviceProviderProtocolVersion[\s\S]*handleTraceSafariAuthTokenClear/,
   );
-  assert.match(app, /sharedProviderBootstrapReady = prepareSharedProviderForWebShell\(\)/);
+  assert.doesNotMatch(app, /prepareSharedProviderForWebShell/);
+  assert.match(app, /handleTraceSafariAuthTokenUpdate[\s\S]*storeSharedTraceToken/);
   assert.match(
     app,
-    /if !sharedProviderBootstrapReady \{[\s\S]*sharedProviderBootstrapReady = prepareSharedProviderForWebShell\(\)[\s\S]*guard sharedProviderBootstrapReady[\s\S]*storeSharedTraceToken/,
+    /let updateStatus = SecItemUpdate[\s\S]*updateStatus == errSecItemNotFound[\s\S]*SecItemAdd/,
   );
-  assert.match(app, /for account in \[traceAuthTokenAccount, retiredTraceAuthTokenAccount\]/);
+  const providerWriter = app.slice(
+    app.indexOf("private static func writeSharedProviderRecord"),
+    app.indexOf("private static func clearSharedTraceTokens"),
+  );
+  assert.doesNotMatch(providerWriter, /SecItemDelete/);
+  assert.match(app, /deleteSharedTraceToken\(account: traceAuthTokenAccount\)/);
+  assert.match(app, /deleteSharedTraceToken\(account: retiredTraceAuthTokenAccount\)/);
   assert.match(app, /status == errSecSuccess \|\| status == errSecItemNotFound/);
 
   const extension = read("Shared (Extension)", "SafariWebExtensionHandler.swift");
   assert.match(extension, /traceAuthTokenAccount = "extension-provider-v2"/);
   assert.doesNotMatch(extension, /"extension-token"/);
+  assert.match(extension, /traceProviderRecordVersion = 2/);
+  assert.match(extension, /enum SharedTraceCredential/);
+  assert.match(
+    extension,
+    /status == errSecItemNotFound[\s\S]*return \.missing[\s\S]*status == errSecSuccess[\s\S]*return \.unavailable/,
+  );
+  assert.match(
+    extension,
+    /JSONDecoder\(\)\.decode[\s\S]*record\.version == 1[\s\S]*record\.version == traceProviderRecordVersion/,
+  );
+  assert.match(
+    extension,
+    /case \.missing:[\s\S]*"error": "missing_token"[\s\S]*case \.unavailable:[\s\S]*"error": "provider_unavailable"/,
+  );
   assert.match(
     extension,
     /#if DEBUG && targetEnvironment\(simulator\)[\s\S]*traceDebugSimulatorProviderCredential[\s\S]*#endif/,
   );
   assert.match(extension, /traceDebugSimulatorProviderRequestCount/);
   assert.match(extension, /traceDebugSimulatorProviderRequestResult/);
-  assert.match(extension, /recordSimulatorProviderRequest\(hasCredential: token\?\.isEmpty == false\)/);
+  assert.match(extension, /traceSimulatorMissingProviderFixture/);
+  assert.match(extension, /recordSimulatorProviderRequest\(credential\)/);
   assert.match(
     extension,
     /case Self\.traceIosPendingFirstStoryClear:[\s\S]*expectedHandoffId:[\s\S]*"cleared": cleared/,
@@ -52,11 +78,6 @@ test("the app synchronizer is the sole v2 writer and native utility handlers do 
     /#if DEBUG && targetEnvironment\(simulator\)[\s\S]*traceDebugSimulatorAppProviderV2[\s\S]*traceDebugSimulatorAppProviderRetired[\s\S]*#endif/,
   );
   assert.match(app, /traceDebugSeedStaleProvider/);
-  assert.match(app, /traceDebugSimulatorBootstrapClearResult/);
-  assert.match(
-    app,
-    /sharedProviderBootstrapReady \? "cleared" : "failed"[\s\S]*traceSimulatorBootstrapClearResultKey/,
-  );
   assert.match(app, /traceDebugFailProviderClear/);
   assert.match(
     app,
@@ -64,7 +85,7 @@ test("the app synchronizer is the sole v2 writer and native utility handlers do 
   );
   assert.match(
     app,
-    /#if DEBUG && targetEnvironment\(simulator\)[\s\S]*UserDefaults\.standard\.set\(trimmed, forKey: traceSimulatorProviderV2Key\)[\s\S]*#else[\s\S]*SecItemAdd/,
+    /#if DEBUG && targetEnvironment\(simulator\)[\s\S]*UserDefaults\.standard\.set\(data, forKey: traceSimulatorProviderV2Key\)[\s\S]*#else[\s\S]*SecItemUpdate[\s\S]*SecItemAdd/,
   );
   assert.match(
     app,
@@ -183,6 +204,8 @@ test("installed iOS Connect-and-save uses a temporary authorized-sender driver",
   const runner = read("scripts", "test-extension-session-ios.mjs");
   const ui = read("test", "installed-ios", "TraceInstalledLifecycleUITests.swift");
 
+  assert.match(runner, /if \(relative === "\.env"\) return false/);
+  assert.match(runner, /PROVIDER_MISSING_FIXTURE/);
   assert.match(runner, /function installConnectAndSaveDriver/);
   assert.match(runner, /entry\.matches\?\.some\(\(pattern\) => pattern\.includes\("archiveofourown\.org"\)\)/);
   assert.match(runner, /archiveEntry\.js\.push\(CONNECT_AND_SAVE_DRIVER\)/);
@@ -191,7 +214,12 @@ test("installed iOS Connect-and-save uses a temporary authorized-sender driver",
   assert.match(runner, /removeConnectAndSaveDriver\(sourceRoot\);[\s\S]*build:kernel:release/);
   assert.match(runner, /installed Connect-and-save driver leaked into the Release extension bundle/);
   assert.match(runner, /simctl\("openurl", DEVICE_ID, url\)/);
-  assert.match(runner, /appMode = "bootstrap-only"/);
+  assert.match(
+    runner,
+    /appMode = "signed-out"[\s\S]*testAppSignedOutColdStartPreservesDeviceProvider[\s\S]*appEvents\.length,[\s\S]*priorColdStartEventCount/,
+  );
+  assert.match(runner, /protocolVersion: 3,[\s\S]*kind: "device_session"/);
+  assert.match(runner, /request\.url === "\/api\/extension\/account"/);
   assert.match(runner, /"browser-only Connect",[\s\S]*"missing",[\s\S]*browserOnlyProviderBaseline/);
   assert.match(
     runner,

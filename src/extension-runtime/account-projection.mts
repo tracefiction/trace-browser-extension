@@ -36,7 +36,7 @@ export class AccountProjectionApi implements AccountProjectionApiPort {
     this.#fetch = fetchImpl;
     const base = apiBase.replace(/\/$/, "");
     this.#overlayEndpoint = `${base}/api/extension/library-overlay`;
-    this.#accountEndpoint = `${base}/api/account/me`;
+    this.#accountEndpoint = `${base}/api/extension/account`;
   }
 
   async load(

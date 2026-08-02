@@ -29,7 +29,7 @@ export class LibraryCommandApi implements LibraryCommandApiPort {
   constructor(fetchImpl: typeof fetch, apiBase: string) {
     this.#fetch = fetchImpl;
     const base = apiBase.replace(/\/$/, "");
-    this.#libraryEndpoint = `${base}/api/library`;
+    this.#libraryEndpoint = `${base}/api/extension/library`;
     this.#preferenceEndpoint = `${base}/api/extension/work-preferences`;
     this.#finishEndpoint = `${base}/api/extension/finish-qualification`;
   }
