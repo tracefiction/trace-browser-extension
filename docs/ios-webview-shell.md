@@ -73,8 +73,19 @@ signed out. Explicit app logout revokes the server session, clears the provider,
 then ends Auth0; ambient browser-session loss does not clear a valid provider.
 
 Protocol-v2 access-token records remain readable/writable only for the 0.6.0 to
-0.6.1 compatibility window. New extension requests use native protocol v3 and
+0.6.2 compatibility window. New extension requests use native protocol v3 and
 validate device-session metadata before accepting the credential.
+
+The released v0.6.0 shell stored its Auth0 JWT bytes directly under the same
+Keychain account later used by versioned provider records. On upgrade, the app
+recognizes only that bounded three-segment JWT format as replaceable legacy
+data, reports no current provider, and lets the authenticated device-session
+lifecycle atomically overwrite it. Other malformed records and Keychain errors
+remain unavailable rather than being silently replaced.
+
+Device-session expiry uses the API contract's ISO-8601 string form, including
+JavaScript's normal fractional seconds. Both the app writer and extension
+reader also accept the equivalent form without fractional seconds.
 
 Xcode reinstall behavior is not authoritative for fresh users. A local build over an existing install can preserve or restore Safari extension settings and website access, making the extension look "magically" enabled. Treat that as diagnostic only; the acceptance test for first-run onboarding is a clean TestFlight/internal-distribution install after deleting Trace and confirming Safari Extensions state first.
 

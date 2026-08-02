@@ -31,6 +31,20 @@ test("the app synchronizer is the sole versioned writer and native utility handl
     app,
     /let updateStatus = SecItemUpdate[\s\S]*updateStatus == errSecItemNotFound[\s\S]*SecItemAdd/,
   );
+  assert.match(
+    app,
+    /JSONDecoder\(\)\.decode[\s\S]*isLegacyV060RawAccessToken\(data\)[\s\S]*return nil[\s\S]*throw TraceSafariExtensionBridgeError\.tokenShareFailed/,
+  );
+  assert.match(
+    app,
+    /data\.count >= 32[\s\S]*data\.count <= 16_384[\s\S]*\^\[A-Za-z0-9_-\]\+\\\\\.\[A-Za-z0-9_-\]\+\\\\\.\[A-Za-z0-9_-\]\+\$/,
+  );
+  assert.match(app, /traceDebugSeedLegacyRawProvider/);
+  assert.match(app, /Legacy v0\.6\.0 provider detected/);
+  assert.match(
+    app,
+    /parseISO8601Date\(expiresAt\)[\s\S]*withInternetDateTime, \.withFractionalSeconds[\s\S]*ISO8601DateFormatter\(\)\.date\(from: value\)/,
+  );
   const providerWriter = app.slice(
     app.indexOf("private static func writeSharedProviderRecord"),
     app.indexOf("private static func clearSharedTraceTokens"),
@@ -67,6 +81,10 @@ test("the app synchronizer is the sole versioned writer and native utility handl
   assert.match(extension, /recordSimulatorProviderRequest\(credential\)/);
   assert.match(
     extension,
+    /parseISO8601Date\(expiresAt\)[\s\S]*withInternetDateTime, \.withFractionalSeconds[\s\S]*ISO8601DateFormatter\(\)\.date\(from: value\)/,
+  );
+  assert.match(
+    extension,
     /case Self\.traceIosPendingFirstStoryClear:[\s\S]*expectedHandoffId:[\s\S]*"cleared": cleared/,
   );
   assert.match(
@@ -82,6 +100,10 @@ test("the app synchronizer is the sole versioned writer and native utility handl
   assert.match(
     app,
     /if traceSimulatorFailNextProviderClear \{[\s\S]*traceSimulatorFailNextProviderClear = false[\s\S]*throw TraceSafariExtensionBridgeError\.tokenShareFailed/,
+  );
+  assert.match(
+    app,
+    /handleTraceSafariDeviceSessionUpdate[\s\S]*writeSharedProviderRecord[\s\S]*traceDebugFailProviderClear/,
   );
   assert.match(
     app,

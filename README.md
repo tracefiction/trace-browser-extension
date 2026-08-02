@@ -46,11 +46,13 @@ Trace may send this data to the Trace API when you import, quick-add, auto-track
 - last-posted-chapter finish-qualification signals for stories already in your Trace library, so Trace can recover or improve work-status metadata
 - hidden-work browsing preferences you explicitly choose in the Trace overlay, keyed by the supported AO3/FFN work id
 - AO3 saved filter presets you explicitly create, stored as normalized AO3 filter query parameters plus the preset name/scope
-- your Trace auth token for authenticated Trace API requests
+- your Trace auth token for authenticated Trace API requests, or on iOS Safari
+  an extension-scoped device credential instead
 
-On iOS Safari, the app can share your Trace auth token with the bundled Safari
-extension through the app's native message handler and shared Keychain access
-group after you sign in to Trace in the app.
+On iOS Safari, the app stores an opaque device credential in the shared
+Keychain after you sign in to Trace in the app. That credential can call only
+Trace extension API routes; the bundled Safari extension does not receive the
+app's Auth0 access token.
 The iOS app shell also exposes its app version, build number, and release
 channel to the Trace web app. Trace sends those values with a privacy-safe
 authenticated onboarding diagnostic so release-specific setup failures can be

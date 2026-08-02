@@ -113,9 +113,10 @@ Content scripts are excluded from obvious AO3/FFN login and signup paths where t
 
 Trace may send story URL, title, author, fandoms/tags, chapter and word counts, reading-progress metadata, reading-status changes you explicitly choose in Trace UI, finish/caught-up decisions you explicitly choose at the end of a supported story, last-posted-chapter finish-qualification signals for stories already in your Trace library, hidden-work browsing preferences you explicitly choose in Trace UI, AO3 saved filter presets you explicitly create, and your Trace auth token for Trace API requests.
 
-On iOS Safari, Trace may receive the Trace app's current auth token through the
-Safari native message bridge and shared Keychain access group after you sign in
-inside the app.
+On iOS Safari, the app stores an opaque device credential in the shared
+Keychain after you sign in inside the app. The credential is limited to Trace
+extension API routes; the Safari extension does not receive the app's Auth0
+access token.
 The iOS shell exposes its app version, build number, and release channel to the
 Trace web app for authenticated onboarding diagnostics. This diagnostic does
 not include story URLs, archive browsing history, or account email.

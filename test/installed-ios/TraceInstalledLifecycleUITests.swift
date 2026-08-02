@@ -46,11 +46,13 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
 
     private func launchTraceApp(
         seedStaleProvider: Bool = false,
+        seedLegacyRawProvider: Bool = false,
         failProviderClear: Bool = false
     ) {
         traceApp.terminate()
         traceApp.launchEnvironment = [
             "traceDebugSeedStaleProvider": seedStaleProvider ? "true" : "false",
+            "traceDebugSeedLegacyRawProvider": seedLegacyRawProvider ? "true" : "false",
             "traceDebugFailProviderClear": failProviderClear ? "true" : "false",
         ]
         traceApp.launch()
@@ -376,6 +378,11 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
 
     func testAppSignInWritesProvider() {
         launchTraceApp()
+        _ = waitForTextContaining("Provider ready", in: traceApp)
+    }
+
+    func testAppSignInMigratesV060RawProvider() {
+        launchTraceApp(seedLegacyRawProvider: true)
         _ = waitForTextContaining("Provider ready", in: traceApp)
     }
 

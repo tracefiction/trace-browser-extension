@@ -23,6 +23,7 @@ const TRACE_APP_BUNDLE_ID = "com.tracefiction.trace";
 const APP_PROVIDER_V2_KEY = "traceDebugSimulatorAppProviderV2";
 const APP_PROVIDER_RETIRED_KEY = "traceDebugSimulatorAppProviderRetired";
 const APP_SEED_STALE_KEY = "traceDebugSeedStaleProvider";
+const APP_SEED_LEGACY_RAW_KEY = "traceDebugSeedLegacyRawProvider";
 const APP_FAIL_CLEAR_KEY = "traceDebugFailProviderClear";
 const APP_DEVICE_SESSION_A = "10000000-0000-4000-8000-000000000001";
 const APP_DEVICE_SESSION_B = "20000000-0000-4000-8000-000000000002";
@@ -237,11 +238,26 @@ function fixtureHtml() {
               }, window.location.origin);
               return;
             }
-            const action = pending.get(data.nonce);
-            if (!action) return;
+            const pendingAction = pending.get(data.nonce);
+            if (!pendingAction) return;
             pending.delete(data.nonce);
             const ok = data.ok === true || data.ok === "true";
             const error = typeof data.error === "string" ? data.error : null;
+            if (typeof pendingAction === "object" && pendingAction.action === "status") {
+              fetch("/__app-event", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "status", ok, error }),
+              }).catch(() => {});
+              if (ok) {
+                mutate("update", pendingAction.provider);
+              } else {
+                appStatus.textContent =
+                  "Provider status failed: " + (error || "native_error");
+              }
+              return;
+            }
+            const action = pendingAction;
             if (action === "update") {
               appStatus.textContent = ok
                 ? "Provider ready"
@@ -279,6 +295,16 @@ function fixtureHtml() {
             });
           };
 
+          const prepareProvider = (provider) => {
+            const requestNonce = "installed-app-" + (++nonce);
+            pending.set(requestNonce, { action: "status", provider });
+            native.postMessage({
+              type: "TRACE_IOS_AUTH_PROVIDER_STATUS_REQUEST",
+              protocolVersion: 3,
+              nonce: requestNonce,
+            });
+          };
+
           document.getElementById("app-sign-out").addEventListener("click", () => {
             mutate("clear");
           });
@@ -288,14 +314,14 @@ function fixtureHtml() {
           fetch("/__app-mode")
             .then((response) => response.text())
             .then((appMode) => {
-              if (appMode === "signed-in-a") mutate("update", {
+              if (appMode === "signed-in-a") prepareProvider({
                 version: 2,
                 kind: "device_session",
                 sessionId: "${APP_DEVICE_SESSION_A}",
                 credential: "${APP_DEVICE_CREDENTIAL_A}",
                 expiresAt: "${APP_DEVICE_SESSION_EXPIRES_AT}",
               });
-              else if (appMode === "signed-in-b") mutate("update", {
+              else if (appMode === "signed-in-b") prepareProvider({
                 version: 2,
                 kind: "device_session",
                 sessionId: "${APP_DEVICE_SESSION_B}",
@@ -365,7 +391,12 @@ async function main() {
         try {
           const event = JSON.parse(body);
           appEvents.push({
-            action: event.action === "update" ? "update" : "clear",
+            action:
+              event.action === "update"
+                ? "update"
+                : event.action === "status"
+                  ? "status"
+                  : "clear",
             ok: event.ok === true,
             error: typeof event.error === "string" ? event.error : null,
           });
@@ -798,6 +829,27 @@ async function main() {
         ),
         "the app's real v3 update handler did not acknowledge provider A",
       );
+      await waitForEvidence(
+        () => appEvents.slice(priorAppEventCount).some(
+          (event) => event.action === "status" && event.ok,
+        ),
+        "the app's real v3 status handler did not acknowledge provider access",
+      );
+
+      priorAppEventCount = appEvents.length;
+      await runTest("testAppSignInMigratesV060RawProvider");
+      await waitForEvidence(
+        () => appEvents.slice(priorAppEventCount).some(
+          (event) => event.action === "status" && event.ok,
+        ),
+        "the app did not classify the v0.6.0 raw provider as replaceable legacy data",
+      );
+      await waitForEvidence(
+        () => appEvents.slice(priorAppEventCount).some(
+          (event) => event.action === "update" && event.ok,
+        ),
+        "the app did not overwrite the v0.6.0 raw provider with the v3 device provider",
+      );
       await runTest("testAppResumeDoesNotAmbientlyConnect");
 
       // Unsigned Simulator apps cannot share the production Keychain access
@@ -987,6 +1039,7 @@ async function main() {
       APP_PROVIDER_V2_KEY,
       APP_PROVIDER_RETIRED_KEY,
       APP_SEED_STALE_KEY,
+      APP_SEED_LEGACY_RAW_KEY,
       APP_FAIL_CLEAR_KEY,
       "stale-v2-provider",
       "stale-retired-provider",
@@ -1012,6 +1065,7 @@ async function main() {
           "browser-only website sign-in cannot satisfy Connect",
           "Open Trace app routes in-shell without connecting",
           "app sign-in writes the v3 device provider without ambient connection",
+          "v0.6.0 raw Keychain providers migrate to the v3 device provider",
           "return from app sign-in requires explicit verified Connect",
           "app sign-out clears the provider without ambient session mutation",
           "post-sign-out verification rejection requires Reconnect",

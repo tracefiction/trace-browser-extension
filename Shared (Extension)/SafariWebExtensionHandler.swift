@@ -315,7 +315,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
               let sessionId = record.sessionId,
               UUID(uuidString: sessionId) != nil,
               let expiresAt = record.expiresAt,
-              ISO8601DateFormatter().date(from: expiresAt) != nil,
+              parseISO8601Date(expiresAt) != nil,
               let credential = record.credential
         else {
             return .unavailable
@@ -333,6 +333,15 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             sessionId: sessionId,
             expiresAt: expiresAt
         )
+    }
+
+    /// JavaScript `Date#toISOString` and the extension API contract include
+    /// fractional seconds. Accept that canonical form while retaining support
+    /// for ISO-8601 timestamps without a fractional component.
+    private static func parseISO8601Date(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
     }
 
 #if DEBUG && targetEnvironment(simulator)

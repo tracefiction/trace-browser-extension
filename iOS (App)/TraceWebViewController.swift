@@ -359,6 +359,8 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 #if DEBUG && targetEnvironment(simulator)
         let traceSimulatorSeededStaleProvider =
             ProcessInfo.processInfo.environment["traceDebugSeedStaleProvider"] == "true"
+        let traceSimulatorSeededLegacyRawProvider =
+            ProcessInfo.processInfo.environment["traceDebugSeedLegacyRawProvider"] == "true"
         if traceSimulatorSeededStaleProvider {
             UserDefaults.standard.set(
                 "stale-v2-provider",
@@ -367,6 +369,15 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             UserDefaults.standard.set(
                 "stale-retired-provider",
                 forKey: Self.traceSimulatorRetiredProviderKey
+            )
+        }
+        if traceSimulatorSeededLegacyRawProvider {
+            UserDefaults.standard.set(
+                Data(
+                    "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0cmFjZS12MC02LTAifQ.signature_fixture"
+                        .utf8
+                ),
+                forKey: Self.traceSimulatorProviderV2Key
             )
         }
 #endif
@@ -1571,7 +1582,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                   let sessionId = UUID(uuidString: rawSessionId)?.uuidString.lowercased(),
                   let rawCredential = provider["credential"] as? String,
                   let expiresAt = provider["expiresAt"] as? String,
-                  ISO8601DateFormatter().date(from: expiresAt) != nil
+                  Self.parseISO8601Date(expiresAt) != nil
             else {
                 throw TraceSafariExtensionBridgeError.tokenShareFailed
             }
@@ -1592,6 +1603,10 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                     expiresAt: expiresAt
                 )
             )
+#if DEBUG && targetEnvironment(simulator)
+            traceSimulatorFailNextProviderClear =
+                ProcessInfo.processInfo.environment["traceDebugFailProviderClear"] == "true"
+#endif
             postSafariExtensionActionResult(
                 type: "TRACE_IOS_AUTH_TOKEN_UPDATE_RESPONSE",
                 nonce: nonce,
@@ -2137,11 +2152,46 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             throw TraceSafariExtensionBridgeError.tokenShareFailed
         }
 #endif
-        do {
-            return try JSONDecoder().decode(TraceSafariProviderRecord.self, from: data)
-        } catch {
-            throw TraceSafariExtensionBridgeError.tokenShareFailed
+        if let record = try? JSONDecoder().decode(
+            TraceSafariProviderRecord.self,
+            from: data
+        ) {
+            return record
         }
+        if isLegacyV060RawAccessToken(data) {
+            os_log(
+                "Legacy v0.6.0 provider detected; awaiting device-session replacement",
+                log: safariBridgeLog,
+                type: .info
+            )
+            return nil
+        }
+        throw TraceSafariExtensionBridgeError.tokenShareFailed
+    }
+
+    /// v0.6.0 stored the Auth0 JWT bytes directly under the provider-v2
+    /// Keychain account. Treat only that known three-segment format as
+    /// replaceable legacy data; malformed or unreadable records remain
+    /// unavailable and are never silently overwritten.
+    private static func isLegacyV060RawAccessToken(_ data: Data) -> Bool {
+        guard data.count >= 32, data.count <= 16_384,
+              let token = String(data: data, encoding: .utf8)
+        else {
+            return false
+        }
+        return token.range(
+            of: "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$",
+            options: .regularExpression
+        ) != nil
+    }
+
+    /// JavaScript `Date#toISOString` and the extension API contract include
+    /// fractional seconds. Accept that canonical form while retaining support
+    /// for ISO-8601 timestamps without a fractional component.
+    private static func parseISO8601Date(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
     }
 
     private static func writeSharedProviderRecord(
