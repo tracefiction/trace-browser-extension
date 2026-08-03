@@ -170,7 +170,7 @@ let installedRating = 0;
 const installedEntryId = "00000000-0000-4000-8000-000000000123";
 
 const server = http.createServer(async (request, response) => {
-  if (request.url === "/api/account/me") {
+  if (request.url === "/api/extension/account") {
     verificationCount += 1;
     const authorization = request.headers.authorization ?? "";
     if (authorization === "Bearer kernel-delay-token") {
@@ -216,7 +216,7 @@ const server = http.createServer(async (request, response) => {
   }
 
   if (
-    request.url === `/api/library/${installedEntryId}` &&
+    request.url === `/api/extension/library/${installedEntryId}` &&
     request.method === "PATCH"
   ) {
     let body = "";

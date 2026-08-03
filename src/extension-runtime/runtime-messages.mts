@@ -44,6 +44,7 @@ export const SESSION_MESSAGE_TYPES = Object.freeze({
   projection: "TRACE_ACCOUNT_PROJECTION_GET",
   workState: "TRACE_WORK_STATE_GET",
   popupState: "TRACE_POPUP_GET_STATE",
+  capacityRecovery: "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE",
   importTrigger: "TRACE_IMPORT_TRIGGER",
   firstStoryAdd: "TRACE_FIRST_STORY_ADD",
   setHiddenWork: "TRACE_SET_HIDDEN_WORK",
@@ -72,6 +73,12 @@ interface PublicProjection {
   readonly entries: Readonly<Record<string, LibraryOverlayEntry>>;
   readonly workPreferences: Readonly<Record<string, LibraryWorkPreference>>;
   readonly syncVersion: string | null;
+  readonly capacity: PublicCapacityRecovery | null;
+}
+
+export interface PublicCapacityRecovery {
+  readonly blocked: true;
+  readonly prompt: boolean;
 }
 
 export interface RuntimeResponse {
@@ -85,6 +92,7 @@ export interface RuntimeResponse {
     | MetadataContributionResult;
   readonly entryId?: string;
   readonly state?: PublicWorkState;
+  readonly capacity?: PublicCapacityRecovery | null;
   readonly error?:
     | "commands_unavailable"
     | "runtime_unavailable"
@@ -133,6 +141,7 @@ export interface PopupStateResponse {
   readonly libraryCount: number | null;
   readonly activeTab: Readonly<Record<string, unknown>>;
   readonly pro: boolean;
+  readonly capacity: PublicCapacityRecovery | null;
   readonly autoTrackEnabled: boolean;
   readonly libraryInlayEnabled: boolean;
   readonly ao3SavedFiltersEnabled: boolean;
@@ -261,6 +270,7 @@ export function boundedProjectionWorkKeys(
 export function publicProjection(
   accountData: AccountDataV1 | null,
   workKeys: readonly string[],
+  now = Date.now(),
 ): PublicProjection {
   const entries: Record<string, LibraryOverlayEntry> = {};
   const workPreferences: Record<string, LibraryWorkPreference> = {};
@@ -277,6 +287,19 @@ export function publicProjection(
     entries: Object.freeze(entries),
     workPreferences: Object.freeze(workPreferences),
     syncVersion: overlay?.syncVersion ?? null,
+    capacity: publicCapacityRecovery(accountData, now),
+  });
+}
+
+export function publicCapacityRecovery(
+  accountData: AccountDataV1 | null,
+  now = Date.now(),
+): PublicCapacityRecovery | null {
+  const capacity = accountData?.capacityRecovery;
+  if (capacity === null || capacity === undefined) return null;
+  return Object.freeze({
+    blocked: true,
+    prompt: now >= capacity.nextPromptAt,
   });
 }
 

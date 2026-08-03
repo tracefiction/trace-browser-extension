@@ -142,7 +142,7 @@ test("library command API accepts only exact mutation acknowledgements", async (
     kind: "success",
     value: { kind: "accepted" },
   });
-  assert.equal(new URL(calls[0].url).pathname, `/api/library/${entryId}`);
+  assert.equal(new URL(calls[0].url).pathname, `/api/extension/library/${entryId}`);
   assert.equal(calls[0].options.headers.Authorization, "Bearer private-token");
   assert.deepEqual(JSON.parse(calls[0].options.body), { rating: 5 });
   assert.equal(new URL(calls[1].url).pathname, "/api/extension/work-preferences");
@@ -219,7 +219,7 @@ test("controller owns patch execution and confirms it through the account projec
     fetch: async (url, options = {}) => {
       const path = new URL(url).pathname;
       paths.push(path);
-      if (path === "/api/account/me") {
+      if (path === "/api/extension/account") {
         return new Response(JSON.stringify({
           account_id: "account-a",
           library_count: 1,
@@ -245,7 +245,7 @@ test("controller owns patch execution and confirms it through the account projec
           },
         }), { status: 200 });
       }
-      assert.equal(path, `/api/library/${entryId}`);
+      assert.equal(path, `/api/extension/library/${entryId}`);
       assert.equal(options.headers.Authorization, "Bearer private-token");
       rating = JSON.parse(options.body).rating;
       return new Response(JSON.stringify({ data: { entry_id: entryId } }), { status: 200 });
@@ -267,6 +267,6 @@ test("controller owns patch execution and confirms it through the account projec
   assert.equal(response.command.kind, "confirmed");
   assert.equal(response.command.source, "mutation");
   assert.equal(rating, 5);
-  assert.equal(paths.filter((path) => path === `/api/library/${entryId}`).length, 1);
+  assert.equal(paths.filter((path) => path === `/api/extension/library/${entryId}`).length, 1);
   assert.ok(paths.filter((path) => path === "/api/extension/library-overlay").length >= 2);
 });

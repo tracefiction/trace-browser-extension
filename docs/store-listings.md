@@ -1,4 +1,4 @@
-# Extension Store Copy - 0.6.0
+# Extension Store Copy - Browser 0.6.1 / iOS 0.6.2
 
 Use this copy for Chrome Web Store, Firefox Add-ons, App Store Connect, and
 public release notes. Keep evergreen store descriptions separate from
@@ -44,9 +44,10 @@ FictionPress.
 
 ## What's New / Release Notes
 
-Trace extension 0.6.0 rebuilds its connection and library foundations for more
+Trace extension 0.6.1 rebuilds its connection and library foundations for more
 reliable setup and browsing:
 
+- Opens Trace onboarding after a first Chrome or Firefox installation.
 - Explains when Safari still needs permission for the archive site and how to
   fix it.
 - Keeps the extension aligned with the Trace account signed in to the app,
@@ -79,16 +80,13 @@ The extension does not request cookie permissions.
 
 ## App Store Connect - iOS What's New
 
-Trace for iOS 0.6.0 rebuilds the Safari extension for more reliable setup and
-browsing:
+Trace for iOS 0.6.2 fixes an upgrade issue that could leave Safari showing
+“Connect” even while the Trace app was signed in:
 
-- Explains when Safari still needs permission for the archive site and how to
-  fix it.
-- Keeps the extension aligned with the Trace account signed in to the app,
-  including after reconnecting or switching accounts.
-- Confirms saves against the current Trace library before reporting success.
-- Improves the consistency of library status and reading progress across
-  account and network changes.
+- Restores the connection automatically for readers upgrading from Trace 0.6.0.
+- Keeps the Safari extension aligned with the account signed in to the app.
+- Restores add, automatic progress, and page-level status updates after the
+  connection is repaired.
 
 ## Screenshot Preparation
 

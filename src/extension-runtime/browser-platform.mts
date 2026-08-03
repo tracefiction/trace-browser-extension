@@ -1,6 +1,9 @@
 export interface RuntimePort {
   readonly id?: string;
   readonly lastError?: { readonly message?: string };
+  readonly onInstalled?: {
+    addListener(listener: (details: { readonly reason?: string }) => void): void;
+  };
   readonly onMessage: {
     addListener(listener: RuntimeMessageListener): void;
   };
@@ -25,6 +28,7 @@ export interface TabsPort {
   readonly query: (...args: unknown[]) => unknown;
   readonly sendMessage: (...args: unknown[]) => unknown;
   readonly create: (...args: unknown[]) => unknown;
+  readonly update?: (...args: unknown[]) => unknown;
 }
 
 export interface AlarmsPort {

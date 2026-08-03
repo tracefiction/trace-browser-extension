@@ -46,11 +46,13 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
 
     private func launchTraceApp(
         seedStaleProvider: Bool = false,
+        seedLegacyRawProvider: Bool = false,
         failProviderClear: Bool = false
     ) {
         traceApp.terminate()
         traceApp.launchEnvironment = [
             "traceDebugSeedStaleProvider": seedStaleProvider ? "true" : "false",
+            "traceDebugSeedLegacyRawProvider": seedLegacyRawProvider ? "true" : "false",
             "traceDebugFailProviderClear": failProviderClear ? "true" : "false",
         ]
         traceApp.launch()
@@ -369,13 +371,18 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
         XCTAssertTrue(safari.staticTexts["Reconnect Trace"].waitForExistence(timeout: 8))
     }
 
-    func testAppSignedOutColdStartClearsStaleProvider() {
+    func testAppSignedOutColdStartPreservesDeviceProvider() {
         launchTraceApp(seedStaleProvider: true)
-        _ = waitForTextContaining("Bootstrap probe complete", in: traceApp)
+        _ = waitForTextContaining("Signed out; provider unchanged", in: traceApp)
     }
 
     func testAppSignInWritesProvider() {
         launchTraceApp()
+        _ = waitForTextContaining("Provider ready", in: traceApp)
+    }
+
+    func testAppSignInMigratesV060RawProvider() {
+        launchTraceApp(seedLegacyRawProvider: true)
         _ = waitForTextContaining("Provider ready", in: traceApp)
     }
 

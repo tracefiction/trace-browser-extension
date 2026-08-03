@@ -113,7 +113,7 @@ assert.equal(fs.existsSync(WEB_EXT), true, "web-ext is missing; run npm install"
 const result = deferred();
 let verificationReads = 0;
 const server = http.createServer((request, response) => {
-  if (request.url === "/api/account/me") {
+  if (request.url === "/api/extension/account") {
     verificationReads += 1;
     if (request.headers.authorization !== "Bearer firefox-kernel-token") {
       response.writeHead(401, { "Content-Type": "application/json" });

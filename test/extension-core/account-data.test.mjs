@@ -52,6 +52,34 @@ test("account record parser copies a bounded, immutable V1 model", () => {
   assert.equal(Object.hasOwn(parsed.value.overlay.entries["ao3:123"], "ignoredFutureField"), false);
   assert.deepEqual(parsed.value.scope, scope);
   assert.notEqual(parsed.value.scope, scope);
+  assert.equal(parsed.value.capacityRecovery, null);
+});
+
+test("account parser accepts legacy records and validates capacity recovery state", () => {
+  const legacy = parseAccountData(validRoot());
+  assert.equal(legacy.kind, "valid");
+  assert.equal(legacy.value.capacityRecovery, null);
+
+  const blocked = parseAccountData(validRoot({
+    capacityRecovery: {
+      blockedAt: 100,
+      blockedLibraryCount: 100,
+      nextPromptAt: 200,
+    },
+  }));
+  assert.equal(blocked.kind, "valid");
+  assert.deepEqual(blocked.value.capacityRecovery, {
+    blockedAt: 100,
+    blockedLibraryCount: 100,
+    nextPromptAt: 200,
+  });
+  assert.deepEqual(parseAccountData(validRoot({
+    capacityRecovery: {
+      blockedAt: -1,
+      blockedLibraryCount: 100,
+      nextPromptAt: 200,
+    },
+  })), { kind: "invalid" });
 });
 
 test("account parser fails closed for wrong roots, scopes, and private bounds", () => {
@@ -127,6 +155,7 @@ test("empty account data is exact-scope and contains no inferred values", () => 
     scope,
     summary: null,
     overlay: null,
+    capacityRecovery: null,
   });
   assert.throws(
     () => createEmptyAccountData({ accountId: "account-a", epoch: Number.NaN }),

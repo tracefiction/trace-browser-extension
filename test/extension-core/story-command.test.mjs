@@ -281,7 +281,7 @@ test("a definitive 401 may retry once after recovery, while other failures do no
   assert.deepEqual(capped.calls.receipt, []);
 });
 
-test("progress intent mutates until authoritative chapters reach its target", async () => {
+test("progress starts with its authoritative monotonic mutation", async () => {
   const behind = Object.freeze({
     ...confirmation,
     entry: Object.freeze({
@@ -314,12 +314,13 @@ test("progress intent mutates until authoritative chapters reach its target", as
   assert.equal(result.source, "mutation");
   assert.equal(result.receipt, "not_applicable");
   assert.equal(result.handoff, "not_present");
+  assert.equal(h.calls.lookup, 0);
   assert.equal(h.calls.track, 1);
   assert.deepEqual(h.calls.receipt, []);
   assert.deepEqual(h.calls.clear, []);
 });
 
-test("progress preflight skips mutation only when current and total reach the target", async () => {
+test("progress does not use a full-overlay preflight to suppress its mutation", async () => {
   const current = Object.freeze({
     ...confirmation,
     entry: Object.freeze({
@@ -335,13 +336,15 @@ test("progress preflight skips mutation only when current and total reach the ta
   const h = createHarness({
     command: progressCommand,
     lookup: [{ kind: "found", confirmation: current }],
+    mutations: [{ kind: "confirmed", confirmation: current }],
   });
 
   const result = await h.service.execute(progressCommand);
 
   assert.equal(result.kind, "confirmed");
-  assert.equal(result.source, "preflight");
-  assert.equal(h.calls.track, 0);
+  assert.equal(result.source, "mutation");
+  assert.equal(h.calls.lookup, 0);
+  assert.equal(h.calls.track, 1);
   assert.deepEqual(h.calls.receipt, []);
 });
 
@@ -360,10 +363,7 @@ test("uncertain progress write is not confirmed by an older reconciled chapter",
   });
   const h = createHarness({
     command: progressCommand,
-    lookup: [
-      { kind: "found", confirmation: behind },
-      { kind: "found", confirmation: behind },
-    ],
+    lookup: [{ kind: "found", confirmation: behind }],
     mutations: [{ kind: "uncertain" }],
   });
 
@@ -371,6 +371,39 @@ test("uncertain progress write is not confirmed by an older reconciled chapter",
     kind: "failed",
     reason: "confirmation_missing",
   });
+  assert.equal(h.calls.lookup, 1);
+  assert.equal(h.calls.track, 1);
   assert.deepEqual(h.calls.receipt, []);
   assert.deepEqual(h.calls.clear, []);
+});
+
+test("progress retries a definitive 401 directly after auth recovery", async () => {
+  const current = Object.freeze({
+    ...confirmation,
+    entry: Object.freeze({
+      ...confirmation.entry,
+      chapters: Object.freeze({ current: 4, total: 12 }),
+    }),
+  });
+  const progressCommand = Object.freeze({
+    ...command,
+    intent: "record_progress",
+    progress: Object.freeze({ current: 4, total: 12 }),
+  });
+  const h = createHarness({
+    command: progressCommand,
+    lookup: [{ kind: "found", confirmation: current }],
+    mutations: [
+      { kind: "auth_rejected" },
+      { kind: "confirmed", confirmation: current },
+    ],
+    authRecovery: "connected",
+  });
+
+  const result = await h.service.execute(progressCommand);
+
+  assert.equal(result.kind, "confirmed");
+  assert.equal(result.source, "mutation");
+  assert.equal(h.calls.lookup, 0);
+  assert.equal(h.calls.track, 2);
 });

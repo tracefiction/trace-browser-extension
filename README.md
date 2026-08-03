@@ -46,11 +46,13 @@ Trace may send this data to the Trace API when you import, quick-add, auto-track
 - last-posted-chapter finish-qualification signals for stories already in your Trace library, so Trace can recover or improve work-status metadata
 - hidden-work browsing preferences you explicitly choose in the Trace overlay, keyed by the supported AO3/FFN work id
 - AO3 saved filter presets you explicitly create, stored as normalized AO3 filter query parameters plus the preset name/scope
-- your Trace auth token for authenticated Trace API requests
+- your Trace auth token for authenticated Trace API requests, or on iOS Safari
+  an extension-scoped device credential instead
 
-On iOS Safari, the app can share your Trace auth token with the bundled Safari
-extension through the app's native message handler and shared Keychain access
-group after you sign in to Trace in the app.
+On iOS Safari, the app stores an opaque device credential in the shared
+Keychain after you sign in to Trace in the app. That credential can call only
+Trace extension API routes; the bundled Safari extension does not receive the
+app's Auth0 access token.
 The iOS app shell also exposes its app version, build number, and release
 channel to the Trace web app. Trace sends those values with a privacy-safe
 authenticated onboarding diagnostic so release-specific setup failures can be
@@ -131,6 +133,9 @@ story ids, URLs, titles, private library fields, or raw errors. Archive
 readiness records are serialized in local storage, and a successful action
 clears an older coarse issue. Disabled builds inject no content scripts and
 delete both private kernel state and extension-local feature/readiness state.
+On desktop first install, the activation page's authenticated status handshake
+and token-free activation-readiness signal cause one explicit kernel Connect or
+Reconnect action; they do not restore the legacy ambient-token path.
 
 For a tagged release, confirm `package.json` version matches the generated manifest version. Safari consumes checked-in files under `Shared (Extension)/Resources`; Chromium and Firefox packages are generated into `dist/`, which is intentionally not committed.
 

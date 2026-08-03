@@ -252,6 +252,16 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       firstStoryCompleted: value.firstStoryCompleted
     });
   }
+  function copyCapacityRecovery(value) {
+    if (!isRecord2(value) || !hasOnlyKeys(value, ["blockedAt", "blockedLibraryCount", "nextPromptAt"]) || !isSafeInteger(value.blockedAt) || !isSafeInteger(value.blockedLibraryCount) || !isSafeInteger(value.nextPromptAt)) {
+      return null;
+    }
+    return Object.freeze({
+      blockedAt: value.blockedAt,
+      blockedLibraryCount: value.blockedLibraryCount,
+      nextPromptAt: value.nextPromptAt
+    });
+  }
   function copyBrowsePreference(value) {
     if (!isRecord2(value) || !hasOnlyKeys(value, ["hidden"]) || typeof value.hidden !== "boolean") {
       return null;
@@ -414,7 +424,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   }
   function parseAccountData(value) {
     if (value === null || value === void 0) return { kind: "missing" };
-    if (!isRecord2(value) || !hasOnlyKeys(value, ["version", "scope", "summary", "overlay"]) || value.version !== 1 || !Object.hasOwn(value, "summary") || !Object.hasOwn(value, "overlay")) {
+    if (!isRecord2(value) || !hasOnlyKeys(value, [
+      "version",
+      "scope",
+      "summary",
+      "overlay",
+      "capacityRecovery"
+    ]) || value.version !== 1 || !Object.hasOwn(value, "summary") || !Object.hasOwn(value, "overlay")) {
       return { kind: "invalid" };
     }
     const scope2 = copyScope(value.scope);
@@ -423,13 +439,30 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     if (value.summary !== null && summary === null) return { kind: "invalid" };
     const overlay = value.overlay === null ? null : copyOverlay(value.overlay);
     if (value.overlay !== null && overlay === null) return { kind: "invalid" };
+    const rawCapacityRecovery = Object.hasOwn(value, "capacityRecovery") ? value.capacityRecovery : null;
+    const capacityRecovery = rawCapacityRecovery === null ? null : copyCapacityRecovery(rawCapacityRecovery);
+    if (rawCapacityRecovery !== null && capacityRecovery === null) {
+      return { kind: "invalid" };
+    }
     return {
       kind: "valid",
-      value: Object.freeze({ version: 1, scope: scope2, summary, overlay })
+      value: Object.freeze({
+        version: 1,
+        scope: scope2,
+        summary,
+        overlay,
+        capacityRecovery
+      })
     };
   }
   function createEmptyAccountData(scope2) {
-    const parsed = parseAccountData({ version: 1, scope: scope2, summary: null, overlay: null });
+    const parsed = parseAccountData({
+      version: 1,
+      scope: scope2,
+      summary: null,
+      overlay: null,
+      capacityRecovery: null
+    });
     if (parsed.kind !== "valid") throw new TypeError("invalid account scope");
     return parsed.value;
   }
@@ -2182,24 +2215,28 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     async #execute(command) {
       const scope2 = this.#ports.session.publicationScope();
       if (scope2 === null) return failure3("not_authenticated");
-      let lookup = await this.#lookup(command.workKey, true);
-      if (lookup.kind !== "published") return executionFailure3(lookup);
-      if (lookup.value.kind === "found" && confirmationSatisfiesStoryCommand(command, lookup.value.confirmation)) {
-        return this.#finalize(scope2, command, lookup.value.confirmation, "preflight");
-      }
-      if (lookup.value.kind === "invalid_response") return failure3("invalid_response");
-      if (lookup.value.kind === "unavailable") return failure3("unavailable");
-      let mutation = await this.#ports.session.executeAuthenticated(
-        (credential) => this.#ports.api.track(credential, command)
-      );
-      if (mutation.kind === "auth_rejected" && mutation.recovery === "connected") {
-        lookup = await this.#lookup(command.workKey, false);
+      if (command.intent === "ensure_saved") {
+        const lookup = await this.#lookup(command.workKey, true);
         if (lookup.kind !== "published") return executionFailure3(lookup);
         if (lookup.value.kind === "found" && confirmationSatisfiesStoryCommand(command, lookup.value.confirmation)) {
           return this.#finalize(scope2, command, lookup.value.confirmation, "preflight");
         }
         if (lookup.value.kind === "invalid_response") return failure3("invalid_response");
         if (lookup.value.kind === "unavailable") return failure3("unavailable");
+      }
+      let mutation = await this.#ports.session.executeAuthenticated(
+        (credential) => this.#ports.api.track(credential, command)
+      );
+      if (mutation.kind === "auth_rejected" && mutation.recovery === "connected") {
+        if (command.intent === "ensure_saved") {
+          const lookup = await this.#lookup(command.workKey, false);
+          if (lookup.kind !== "published") return executionFailure3(lookup);
+          if (lookup.value.kind === "found" && confirmationSatisfiesStoryCommand(command, lookup.value.confirmation)) {
+            return this.#finalize(scope2, command, lookup.value.confirmation, "preflight");
+          }
+          if (lookup.value.kind === "invalid_response") return failure3("invalid_response");
+          if (lookup.value.kind === "unavailable") return failure3("unavailable");
+        }
         mutation = await this.#ports.session.executeAuthenticated(
           (credential) => this.#ports.api.track(credential, command)
         );
@@ -2213,14 +2250,24 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
       if (mutation.value.kind === "rejected") return failure3(mutation.value.reason);
       if (mutation.value.kind === "invalid_response") return failure3("invalid_response");
-      lookup = await this.#lookup(command.workKey, false);
-      if (lookup.kind !== "published") return executionFailure3(lookup);
-      if (lookup.value.kind === "found" && confirmationSatisfiesStoryCommand(command, lookup.value.confirmation)) {
-        return this.#finalize(scope2, command, lookup.value.confirmation, "reconciliation");
+      const reconciliation = await this.#lookup(command.workKey, false);
+      if (reconciliation.kind !== "published") return executionFailure3(reconciliation);
+      if (reconciliation.value.kind === "found" && confirmationSatisfiesStoryCommand(
+        command,
+        reconciliation.value.confirmation
+      )) {
+        return this.#finalize(
+          scope2,
+          command,
+          reconciliation.value.confirmation,
+          "reconciliation"
+        );
       }
-      if (lookup.value.kind === "invalid_response") return failure3("invalid_response");
+      if (reconciliation.value.kind === "invalid_response") {
+        return failure3("invalid_response");
+      }
       return failure3(
-        lookup.value.kind === "unavailable" ? "unavailable" : "confirmation_missing"
+        reconciliation.value.kind === "unavailable" ? "unavailable" : "confirmation_missing"
       );
     }
     async #lookup(workKey, allowAuthRecovery) {
@@ -2528,6 +2575,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   // src/extension-runtime/browser-adapters.mts
   var LEGACY_SESSION_ENVELOPE_KEY = "traceSessionEnvelopeV1";
   var LEGACY_SESSION_CREDENTIALS_KEY = "traceSessionCredentialsV1";
+  var UUID_PATTERN3 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   var ACCOUNT_DATA_ALARM = "traceAccountDataRefresh";
   var SAVED_FILTER_SYNC_ALARM = "traceAo3SavedFiltersSync";
   var LEGACY_ACCOUNT_ALARMS = Object.freeze([
@@ -2714,13 +2762,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       promise.then((value) => finish(value), () => finish(null));
     });
   }
-  async function sendNativeMessageWithFallback(runtime, mode, message) {
+  async function sendNativeMessageWithFallback(runtime, mode, message, timeoutMs = 5e3) {
     if (typeof runtime.sendNativeMessage !== "function") return null;
     const attempts = [
       [message],
       ["com.tracefiction.trace", message]
     ];
-    const deadline = Date.now() + 5e3;
+    const deadline = Date.now() + Math.max(0, timeoutMs);
     for (const args of attempts) {
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) break;
@@ -2738,6 +2786,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     return null;
   }
+  var IOS_NATIVE_CREDENTIAL_READ_BUDGET_MS = 2500;
+  var IOS_NATIVE_CREDENTIAL_READ_ATTEMPT_TIMEOUT_MS = 1e3;
+  var IOS_NATIVE_CREDENTIAL_READ_RETRY_DELAY_MS = 150;
   var NativeArchiveReadinessReceiptPort = class {
     #runtime;
     #mode;
@@ -2861,7 +2912,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     async acquire(purpose) {
       const generation = ++this.#generation;
-      const result = await this.#detectIos() ? await this.#acquireNative() : await this.#acquireFromTraceTab(purpose);
+      const result = await this.#detectIos() ? await this.#acquireNative(generation) : await this.#acquireFromTraceTab(purpose);
       return generation === this.#generation ? result : { kind: "cancelled" };
     }
     cancel() {
@@ -2935,20 +2986,47 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
       return { kind: "absent" };
     }
-    async #acquireNative() {
-      const request = { type: "TRACE_IOS_AUTH_TOKEN_REQUEST", protocolVersion: 2 };
+    async #acquireNativeOnce(timeoutMs) {
+      const request = { type: "TRACE_IOS_AUTH_TOKEN_REQUEST", protocolVersion: 3 };
       const response = await sendNativeMessageWithFallback(
         this.#runtime,
         this.#mode,
-        request
+        request,
+        timeoutMs
       );
-      if (isRecord5(response)) {
-        const credential = typeof response.token === "string" ? response.token.trim() : "";
-        if ((response.ok === true || response.ok === "true") && credential) {
-          return { kind: "credential", credential };
-        }
+      if (!isRecord5(response)) return { kind: "unavailable" };
+      const credential = typeof response.credential === "string" ? response.credential.trim() : typeof response.token === "string" ? response.token.trim() : "";
+      const credentialKind = response.credentialKind;
+      const validKind = credentialKind === "device_session" || credentialKind === "access_token";
+      const validDeviceMetadata = credentialKind !== "device_session" || typeof response.sessionId === "string" && UUID_PATTERN3.test(response.sessionId) && typeof response.expiresAt === "string" && Number.isFinite(Date.parse(response.expiresAt));
+      if ((response.ok === true || response.ok === "true") && credential && validKind && validDeviceMetadata) {
+        return { kind: "credential", credential };
       }
-      return { kind: "absent" };
+      return response.error === "missing_token" ? { kind: "absent" } : { kind: "unavailable" };
+    }
+    async #acquireNative(generation) {
+      const deadline = Date.now() + IOS_NATIVE_CREDENTIAL_READ_BUDGET_MS;
+      const read = () => this.#acquireNativeOnce(
+        Math.min(
+          IOS_NATIVE_CREDENTIAL_READ_ATTEMPT_TIMEOUT_MS,
+          Math.max(0, deadline - Date.now())
+        )
+      );
+      const first = await read();
+      if (first.kind !== "unavailable" || generation !== this.#generation) {
+        return first;
+      }
+      const remainingBeforeDelay = deadline - Date.now();
+      if (remainingBeforeDelay <= IOS_NATIVE_CREDENTIAL_READ_RETRY_DELAY_MS) {
+        return first;
+      }
+      await new Promise((resolve) => {
+        setTimeout(resolve, IOS_NATIVE_CREDENTIAL_READ_RETRY_DELAY_MS);
+      });
+      if (generation !== this.#generation || Date.now() >= deadline) {
+        return { kind: "cancelled" };
+      }
+      return read();
     }
   };
   function sanitizePendingFirstStoryResponse(response) {
@@ -2998,7 +3076,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     constructor(fetchImpl, apiBase, onRetryDisposition = () => {
     }) {
       this.#fetch = fetchImpl;
-      this.#endpoint = `${apiBase.replace(/\/$/, "")}/api/account/me`;
+      this.#endpoint = `${apiBase.replace(/\/$/, "")}/api/extension/account`;
       this.#onRetryDisposition = onRetryDisposition;
     }
     async verifyCredential(credential) {
@@ -3039,6 +3117,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   };
 
   // src/extension-runtime/account-data-repository.mts
+  var CAPACITY_PROMPT_COOLDOWN_MS = 24 * 60 * 60 * 1e3;
+  var CAPACITY_DISMISSAL_MS = 7 * 24 * 60 * 60 * 1e3;
   var AccountDataRepository = class {
     #database;
     #scopes;
@@ -3076,7 +3156,43 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (summary === null) return Promise.resolve({ kind: "invalid_model" });
       return this.#publish(requestedScope, (current) => Object.freeze({
         ...current,
-        summary
+        summary,
+        capacityRecovery: summary.pro || current.capacityRecovery !== null && summary.libraryCount < current.capacityRecovery.blockedLibraryCount ? null : current.capacityRecovery
+      }));
+    }
+    publishCapacityBlocked(requestedScope, at) {
+      if (!Number.isSafeInteger(at) || at < 0) {
+        return Promise.resolve({ kind: "invalid_model" });
+      }
+      return this.#publish(requestedScope, (current) => Object.freeze({
+        ...current,
+        capacityRecovery: current.capacityRecovery ?? Object.freeze({
+          blockedAt: at,
+          blockedLibraryCount: current.summary?.libraryCount ?? 0,
+          nextPromptAt: 0
+        })
+      }));
+    }
+    acknowledgeCapacityRecovery(requestedScope, acknowledgement, at) {
+      if (acknowledgement !== "shown" && acknowledgement !== "dismissed" || !Number.isSafeInteger(at) || at < 0) {
+        return Promise.resolve({ kind: "invalid_model" });
+      }
+      const delay = acknowledgement === "dismissed" ? CAPACITY_DISMISSAL_MS : CAPACITY_PROMPT_COOLDOWN_MS;
+      return this.#publish(requestedScope, (current) => Object.freeze({
+        ...current,
+        capacityRecovery: current.capacityRecovery === null ? null : Object.freeze({
+          ...current.capacityRecovery,
+          nextPromptAt: Math.max(
+            current.capacityRecovery.nextPromptAt,
+            at + delay
+          )
+        })
+      }));
+    }
+    clearCapacityRecovery(requestedScope) {
+      return this.#publish(requestedScope, (current) => Object.freeze({
+        ...current,
+        capacityRecovery: null
       }));
     }
     publishOverlay(requestedScope, value, reservation = this.reserveOverlayWrite()) {
@@ -3231,7 +3347,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   }
 
   // src/extension-runtime/story-command.mts
-  var UUID_PATTERN3 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  var UUID_PATTERN4 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   var WORK_KEY_PATTERN2 = /^(ao3|ffn):[1-9][0-9]{0,19}$/;
   var REQUEST_TIMEOUT_MS = 12e3;
   function isRecord6(value) {
@@ -3245,7 +3361,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     const workKey = typeof value.work_key === "string" ? value.work_key.trim() : "";
     const entryId = typeof value.entry_id === "string" ? value.entry_id.trim() : "";
     const entry = copyLibraryOverlayEntry(value.entry);
-    if (workKey !== expectedWorkKey || !WORK_KEY_PATTERN2.test(workKey) || !UUID_PATTERN3.test(entryId) || entry === null || entry.entryId !== entryId || !isIsoTimestamp(value.syncVersion)) {
+    if (workKey !== expectedWorkKey || !WORK_KEY_PATTERN2.test(workKey) || !UUID_PATTERN4.test(entryId) || entry === null || entry.entryId !== entryId || !isIsoTimestamp(value.syncVersion)) {
       return null;
     }
     return Object.freeze({
@@ -3282,7 +3398,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (rawEntry === void 0) return { kind: "success", value: { kind: "absent" } };
       const entry = copyLibraryOverlayEntry(rawEntry);
       const entryId = entry?.entryId;
-      if (entry === null || typeof entryId !== "string" || !UUID_PATTERN3.test(entryId)) {
+      if (entry === null || typeof entryId !== "string" || !UUID_PATTERN4.test(entryId)) {
         return { kind: "success", value: { kind: "invalid_response" } };
       }
       return {
@@ -3387,7 +3503,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#fetch = fetchImpl;
       const base = apiBase.replace(/\/$/, "");
       this.#overlayEndpoint = `${base}/api/extension/library-overlay`;
-      this.#accountEndpoint = `${base}/api/account/me`;
+      this.#accountEndpoint = `${base}/api/extension/account`;
     }
     async load(credential) {
       const [overlayResult, accountResult] = await Promise.all([
@@ -3465,7 +3581,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 
   // src/extension-runtime/library-command.mts
   var REQUEST_TIMEOUT_MS3 = 12e3;
-  var UUID_PATTERN4 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  var UUID_PATTERN5 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   function isRecord8(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
@@ -3477,7 +3593,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     constructor(fetchImpl, apiBase) {
       this.#fetch = fetchImpl;
       const base = apiBase.replace(/\/$/, "");
-      this.#libraryEndpoint = `${base}/api/library`;
+      this.#libraryEndpoint = `${base}/api/extension/library`;
       this.#preferenceEndpoint = `${base}/api/extension/work-preferences`;
       this.#finishEndpoint = `${base}/api/extension/finish-qualification`;
     }
@@ -3507,7 +3623,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (!response.ok) return { kind: "success", value: { kind: "uncertain" } };
       const body = await this.#json(response);
       const data = isRecord8(body) && isRecord8(body.data) ? body.data : null;
-      const confirmed = command.kind === "entry_patch" ? data !== null && typeof data.entry_id === "string" && UUID_PATTERN4.test(data.entry_id) && data.entry_id === command.entryId : data !== null && data.key === command.workKey && isRecord8(data.browsePreference) && data.browsePreference.hidden === command.hidden;
+      const confirmed = command.kind === "entry_patch" ? data !== null && typeof data.entry_id === "string" && UUID_PATTERN5.test(data.entry_id) && data.entry_id === command.entryId : data !== null && data.key === command.workKey && isRecord8(data.browsePreference) && data.browsePreference.hidden === command.hidden;
       return {
         kind: "success",
         value: confirmed ? { kind: "accepted" } : { kind: "uncertain" }
@@ -3541,7 +3657,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (!response.ok) return { kind: "success", value: { kind: "uncertain" } };
       const body = await this.#json(response);
       const data = isRecord8(body) && isRecord8(body.data) ? body.data : null;
-      if (data === null || data.state !== "open" && data.state !== "resolved" && data.state !== "ignored" || data.eventId !== null && (typeof data.eventId !== "string" || !UUID_PATTERN4.test(data.eventId))) {
+      if (data === null || data.state !== "open" && data.state !== "resolved" && data.state !== "ignored" || data.eventId !== null && (typeof data.eventId !== "string" || !UUID_PATTERN5.test(data.eventId))) {
         return { kind: "success", value: { kind: "uncertain" } };
       }
       return {
@@ -3604,7 +3720,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   };
 
   // src/extension-runtime/library-command-sender.mts
-  var UUID_PATTERN5 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  var UUID_PATTERN6 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   var WORK_KEY_PATTERN3 = /^(ao3|ffn):[1-9][0-9]{0,19}$/;
   var MAX_COMMAND_BYTES = 8 * 1024;
   var MAX_CHAPTER = 1e7;
@@ -3707,7 +3823,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       });
     }
     const entryId = typeof payload.entryId === "string" ? payload.entryId.trim() : "";
-    if (!UUID_PATTERN5.test(entryId)) return null;
+    if (!UUID_PATTERN6.test(entryId)) return null;
     if (message.type === "TRACE_SET_READER_STATUS") {
       const status = canonicalStatus(payload.status);
       if (status === null) return null;
@@ -3746,7 +3862,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     const scope2 = senderCommandScope(sender, payload.workKey);
     if (scope2 === null || payload.source !== scope2.hostKind) return null;
     const entryId = typeof payload.entryId === "string" ? payload.entryId.trim() : "";
-    if (!UUID_PATTERN5.test(entryId)) return null;
+    if (!UUID_PATTERN6.test(entryId)) return null;
     if (!Number.isSafeInteger(payload.chapter) || payload.chapter < 1 || payload.chapter > MAX_CHAPTER || !Number.isSafeInteger(payload.total) || payload.total < 1 || payload.total > MAX_CHAPTER) {
       return null;
     }
@@ -4657,6 +4773,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   // src/extension-runtime/trace-web-navigation.mts
   var TRACE_WEB_OPEN_MESSAGE = "TRACE_OPEN_TRACE_URL";
   var MAX_TRACE_WEB_URL_LENGTH = 2048;
+  var FIRST_INSTALL_ACTIVATION_PATH = "/?activation=extension-installed";
   function isRecord16(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
@@ -4706,6 +4823,93 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
     }
   };
+  function activationTarget(webOrigin) {
+    try {
+      const configured = new URL(webOrigin);
+      if (configured.protocol !== "https:" && configured.protocol !== "http:" || configured.username || configured.password) {
+        return null;
+      }
+      return Object.freeze({
+        origin: configured.origin,
+        queryPattern: `${configured.protocol}//${configured.hostname}/*`,
+        url: new URL(FIRST_INSTALL_ACTIVATION_PATH, configured.origin).href
+      });
+    } catch {
+      return null;
+    }
+  }
+  function tabUsesOrigin(tab, origin) {
+    if (typeof tab !== "object" || tab === null || typeof tab.id !== "number" || typeof tab.url !== "string") {
+      return false;
+    }
+    try {
+      return new URL(tab.url).origin === origin;
+    } catch {
+      return false;
+    }
+  }
+  async function platformIsIos(runtime, mode) {
+    if (/iPhone|iPad|iPod/i.test(globalThis.navigator?.userAgent ?? "")) {
+      return true;
+    }
+    if (typeof runtime.getPlatformInfo !== "function") return false;
+    try {
+      const info = await extensionCall(
+        runtime,
+        "getPlatformInfo",
+        [],
+        runtime,
+        mode
+      );
+      return typeof info === "object" && info !== null && info.os === "ios";
+    } catch {
+      return false;
+    }
+  }
+  function installTraceFirstInstallActivation(options) {
+    const target = activationTarget(options.webOrigin);
+    if (!target || !options.runtime.onInstalled) return;
+    options.runtime.onInstalled.addListener((details) => {
+      if (details.reason !== "install") return;
+      void (async () => {
+        if (await platformIsIos(options.runtime, options.mode)) return;
+        try {
+          const tabs = await extensionCall(
+            options.tabs,
+            "query",
+            [{ url: [target.queryPattern] }],
+            options.runtime,
+            options.mode
+          );
+          const existing = tabs.find((tab) => tabUsesOrigin(tab, target.origin));
+          if (existing && typeof options.tabs.update === "function") {
+            try {
+              await extensionCall(
+                options.tabs,
+                "update",
+                [existing.id, { url: target.url, active: true }],
+                options.runtime,
+                options.mode
+              );
+              return;
+            } catch {
+            }
+          }
+        } catch {
+        }
+        try {
+          await extensionCall(
+            options.tabs,
+            "create",
+            [{ url: target.url, active: true }],
+            options.runtime,
+            options.mode
+          );
+        } catch {
+        }
+      })();
+    });
+  }
 
   // src/extension-runtime/trace-web-status.mts
   var TraceWebStatusNotification = class {
@@ -4877,6 +5081,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     projection: "TRACE_ACCOUNT_PROJECTION_GET",
     workState: "TRACE_WORK_STATE_GET",
     popupState: "TRACE_POPUP_GET_STATE",
+    capacityRecovery: "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE",
     importTrigger: "TRACE_IMPORT_TRIGGER",
     firstStoryAdd: "TRACE_FIRST_STORY_ADD",
     setHiddenWork: "TRACE_SET_HIDDEN_WORK",
@@ -4952,7 +5157,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     return Object.freeze(keys);
   }
-  function publicProjection(accountData, workKeys) {
+  function publicProjection(accountData, workKeys, now = Date.now()) {
     const entries = {};
     const workPreferences = {};
     const overlay = accountData?.overlay;
@@ -4967,7 +5172,16 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     return Object.freeze({
       entries: Object.freeze(entries),
       workPreferences: Object.freeze(workPreferences),
-      syncVersion: overlay?.syncVersion ?? null
+      syncVersion: overlay?.syncVersion ?? null,
+      capacity: publicCapacityRecovery(accountData, now)
+    });
+  }
+  function publicCapacityRecovery(accountData, now = Date.now()) {
+    const capacity = accountData?.capacityRecovery;
+    if (capacity === null || capacity === void 0) return null;
+    return Object.freeze({
+      blocked: true,
+      prompt: now >= capacity.nextPromptAt
     });
   }
   function publicWorkState(accountData, workKey) {
@@ -5209,6 +5423,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         case SESSION_MESSAGE_TYPES.workState:
         case SESSION_MESSAGE_TYPES.popupState:
           return this.#handleReadMessage(message, sender);
+        case SESSION_MESSAGE_TYPES.capacityRecovery:
+          return this.#handleCapacityRecoveryMessage(message, sender);
         case SESSION_MESSAGE_TYPES.savedFilterSync:
           return this.#handleSavedFilterMessage(message, sender);
         case SESSION_MESSAGE_TYPES.importTrigger:
@@ -5304,6 +5520,35 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       await this.start();
       return this.#savedFilterResponse(await this.#runSavedFilterSync());
     }
+    async #handleCapacityRecoveryMessage(message, sender) {
+      const host = archiveHostKindFromSender(sender);
+      const senderUrl = sender?.tab?.url ?? sender?.url;
+      if (host === null || isBlockedArchivePath(senderUrl, host) || Object.keys(message).length !== 2 || message.action !== "shown" && message.action !== "dismissed") {
+        return null;
+      }
+      await this.start();
+      const preparation = await this.#prepareNativeAuthority();
+      const scope2 = this.#service.publicationScope();
+      if (!preparation.ready || scope2 === null) {
+        return this.#response(
+          preparation.action,
+          preparation.action?.kind === "unavailable" ? "unavailable" : "not_authenticated"
+        );
+      }
+      const result = await this.#accountData.acknowledgeCapacityRecovery(
+        scope2,
+        message.action,
+        Date.now()
+      );
+      const accountData = result.kind === "published" ? result.value : await this.#accountData.read().catch(() => null);
+      return Object.freeze({
+        ok: result.kind === "published",
+        snapshot: toPublicSessionSnapshot(this.snapshot()),
+        ...preparation.action === void 0 ? {} : { action: preparation.action },
+        capacity: publicCapacityRecovery(accountData),
+        ...result.kind === "published" ? {} : { error: "unavailable" }
+      });
+    }
     async #handleFirstStoryMessage(message, sender) {
       const initiation = firstStoryInitiationFromMessage(
         message,
@@ -5392,7 +5637,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           );
         }
         return this.#commandResponse(
-          await this.#storyCommands.execute(command),
+          await this.#executeStoryCommand(command),
           action2,
           command
         );
@@ -5410,7 +5655,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           );
         }
         return this.#commandResponse(
-          await this.#storyCommands.execute(command),
+          await this.#executeStoryCommand(command),
           preparation2.action,
           command
         );
@@ -5432,10 +5677,20 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         );
       }
       return this.#commandResponse(
-        await this.#storyCommands.execute(command),
+        await this.#executeStoryCommand(command),
         action,
         command
       );
+    }
+    async #executeStoryCommand(command) {
+      let accountData = await this.#accountData.read().catch(() => null);
+      if (accountData?.capacityRecovery !== null && accountData?.capacityRecovery !== void 0 && accountData.overlay === null) {
+        accountData = await this.#projection.read().catch(() => accountData);
+      }
+      if (accountData?.capacityRecovery !== null && accountData?.capacityRecovery !== void 0 && accountData.overlay !== null && accountData.overlay.entries[command.workKey] === void 0) {
+        return Object.freeze({ kind: "failed", reason: "free_limit_reached" });
+      }
+      return this.#storyCommands.execute(command);
     }
     async #startOnce() {
       try {
@@ -5574,12 +5829,25 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (request !== void 0) {
         await this.#recordStoryReadiness(request, command);
       }
+      let accountData = await this.#accountData.read().catch(() => null);
+      const scope2 = this.#service.publicationScope();
+      if (command.kind === "failed" && command.reason === "free_limit_reached" && scope2 !== null) {
+        const result = await this.#accountData.publishCapacityBlocked(
+          scope2,
+          Date.now()
+        );
+        if (result.kind === "published") accountData = result.value;
+      } else if (command.kind === "confirmed" && command.intent === "ensure_saved" && command.source !== "preflight" && scope2 !== null) {
+        const result = await this.#accountData.clearCapacityRecovery(scope2);
+        if (result.kind === "published") accountData = result.value;
+      }
       this.#publishStatus();
       return Object.freeze({
         ok: command.kind === "confirmed",
         snapshot: toPublicSessionSnapshot(this.snapshot()),
         ...action === void 0 ? {} : { action },
         command,
+        capacity: publicCapacityRecovery(accountData),
         ...command.kind === "confirmed" ? {
           entryId: command.confirmation.entryId,
           state: Object.freeze({
@@ -5849,6 +6117,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         libraryCount: accountData?.summary?.libraryCount ?? null,
         activeTab,
         pro: accountData?.summary?.pro === true,
+        capacity: publicCapacityRecovery(accountData),
         autoTrackEnabled: preferences.prefAutoTrackEnabled !== false,
         libraryInlayEnabled: preferences.prefLibraryInlayEnabled !== false,
         ao3SavedFiltersEnabled: preferences.prefAo3SavedFiltersEnabled !== false,
@@ -6009,6 +6278,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       new BrowserStorage(extension.storage.local, extension.runtime, storageMode)
     );
     if (true) {
+      installTraceFirstInstallActivation({
+        runtime: extension.runtime,
+        tabs: extension.tabs,
+        mode: storageMode,
+        webOrigin: "https://www.tracefiction.com"
+      });
       installArchiveReadinessRuntime({
         runtime: extension.runtime,
         ...extension.permissions === void 0 ? {} : { permissions: extension.permissions },

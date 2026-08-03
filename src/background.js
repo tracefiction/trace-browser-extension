@@ -14,8 +14,8 @@ const FINISH_QUALIFICATION_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/
 const LIBRARY_OVERLAY_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/library-overlay`;
 const WORK_PREFERENCES_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/work-preferences`;
 const AO3_SAVED_FILTERS_SYNC_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/ao3-saved-filters/sync`;
-const LIBRARY_ENTRY_ENDPOINT_BASE = `${TRACE_API_BASE.replace(/\/$/, "")}/api/library`;
-const ACCOUNT_ME_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/account/me`;
+const LIBRARY_ENTRY_ENDPOINT_BASE = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/library`;
+const ACCOUNT_ME_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/account`;
 const IMPORT_BASE = `${TRACE_WEB_ORIGIN.replace(/\/$/, "")}/import`;
 const TRACE_HOME_URL = `${TRACE_WEB_ORIGIN.replace(/\/$/, "")}/`;
 const FIRST_STORY_ACTIVATION_URL = `${TRACE_WEB_ORIGIN.replace(/\/$/, "")}/?activation=extension-installed`;
@@ -1472,7 +1472,7 @@ async function finalizeConfirmedTrack(
   return out;
 }
 
-/** Best-effort Pro flag for gating Pro-only prefs (synced from GET /api/account/me). */
+/** Best-effort Pro flag for gating Pro-only prefs (synced from the scoped extension account endpoint). */
 function accountStoragePatch(json) {
   const patch = {};
   const accountId = accountIdFromAccountMe(json);
@@ -2505,7 +2505,12 @@ function sanitizeIosNativeAuthTokenResponse(response) {
   if (!response || typeof response !== "object" || !truthyNativeOk(response.ok)) {
     return null;
   }
-  const token = typeof response.token === "string" ? response.token.trim() : "";
+  const token =
+    typeof response.credential === "string"
+      ? response.credential.trim()
+      : typeof response.token === "string"
+        ? response.token.trim()
+        : "";
   return token || null;
 }
 
@@ -2557,6 +2562,7 @@ async function bootstrapAuthFromIosNative(reason) {
   const bootstrapPromise = (async () => {
     const response = await sendIosNativeMessage({
       type: IOS_AUTH_TOKEN_REQUEST_MESSAGE,
+      protocolVersion: 3,
       reason: reason || "bootstrap",
     });
     const token = sanitizeIosNativeAuthTokenResponse(response);

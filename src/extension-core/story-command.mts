@@ -173,30 +173,12 @@ export class StoryCommandService {
     const scope = this.#ports.session.publicationScope();
     if (scope === null) return failure("not_authenticated");
 
-    // Lookup is deliberately first. Besides avoiding needless updates for an
-    // already-saved work, it is the restart recovery path when the server
-    // committed a prior POST but the worker died before acknowledging it.
-    let lookup = await this.#lookup(command.workKey, true);
-    if (lookup.kind !== "published") return executionFailure(lookup);
-    if (
-      lookup.value.kind === "found" &&
-      confirmationSatisfiesStoryCommand(command, lookup.value.confirmation)
-    ) {
-      return this.#finalize(scope, command, lookup.value.confirmation, "preflight");
-    }
-    if (lookup.value.kind === "invalid_response") return failure("invalid_response");
-    if (lookup.value.kind === "unavailable") return failure("unavailable");
-
-    let mutation = await this.#ports.session.executeAuthenticated((credential) =>
-      this.#ports.api.track(credential, command)
-    );
-    if (
-      mutation.kind === "auth_rejected" &&
-      mutation.recovery === "connected"
-    ) {
-      // A 401 is a definitive non-write, so it is safe to use the refreshed
-      // capability. Re-check first in case another actor saved meanwhile.
-      lookup = await this.#lookup(command.workKey, false);
+    if (command.intent === "ensure_saved") {
+      // Save preflight avoids duplicate first-save work and recovers a prior
+      // committed POST after a worker restart. Progress writes are monotonic
+      // and return authoritative confirmation, so they should not wait for a
+      // whole-library lookup before every chapter update.
+      const lookup = await this.#lookup(command.workKey, true);
       if (lookup.kind !== "published") return executionFailure(lookup);
       if (
         lookup.value.kind === "found" &&
@@ -206,6 +188,30 @@ export class StoryCommandService {
       }
       if (lookup.value.kind === "invalid_response") return failure("invalid_response");
       if (lookup.value.kind === "unavailable") return failure("unavailable");
+    }
+
+    let mutation = await this.#ports.session.executeAuthenticated((credential) =>
+      this.#ports.api.track(credential, command)
+    );
+    if (
+      mutation.kind === "auth_rejected" &&
+      mutation.recovery === "connected"
+    ) {
+      // A 401 is a definitive non-write, so it is safe to use the refreshed
+      // capability. Save commands re-check in case another actor saved while
+      // auth recovered; monotonic progress commands can retry directly.
+      if (command.intent === "ensure_saved") {
+        const lookup = await this.#lookup(command.workKey, false);
+        if (lookup.kind !== "published") return executionFailure(lookup);
+        if (
+          lookup.value.kind === "found" &&
+          confirmationSatisfiesStoryCommand(command, lookup.value.confirmation)
+        ) {
+          return this.#finalize(scope, command, lookup.value.confirmation, "preflight");
+        }
+        if (lookup.value.kind === "invalid_response") return failure("invalid_response");
+        if (lookup.value.kind === "unavailable") return failure("unavailable");
+      }
       mutation = await this.#ports.session.executeAuthenticated((credential) =>
         this.#ports.api.track(credential, command)
       );
@@ -222,17 +228,29 @@ export class StoryCommandService {
 
     // A timeout/network failure is not evidence that POST did not commit.
     // Reconcile with the authoritative account projection; never blindly POST.
-    lookup = await this.#lookup(command.workKey, false);
-    if (lookup.kind !== "published") return executionFailure(lookup);
+    const reconciliation = await this.#lookup(command.workKey, false);
+    if (reconciliation.kind !== "published") return executionFailure(reconciliation);
     if (
-      lookup.value.kind === "found" &&
-      confirmationSatisfiesStoryCommand(command, lookup.value.confirmation)
+      reconciliation.value.kind === "found" &&
+      confirmationSatisfiesStoryCommand(
+        command,
+        reconciliation.value.confirmation,
+      )
     ) {
-      return this.#finalize(scope, command, lookup.value.confirmation, "reconciliation");
+      return this.#finalize(
+        scope,
+        command,
+        reconciliation.value.confirmation,
+        "reconciliation",
+      );
     }
-    if (lookup.value.kind === "invalid_response") return failure("invalid_response");
+    if (reconciliation.value.kind === "invalid_response") {
+      return failure("invalid_response");
+    }
     return failure(
-      lookup.value.kind === "unavailable" ? "unavailable" : "confirmation_missing",
+      reconciliation.value.kind === "unavailable"
+        ? "unavailable"
+        : "confirmation_missing",
     );
   }
 

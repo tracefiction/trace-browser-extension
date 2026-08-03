@@ -43,7 +43,7 @@ test("projection API fetches overlay and summary without exposing the credential
     },
   });
   assert.deepEqual(calls.map(({ url }) => new URL(url).pathname).sort(), [
-    "/api/account/me",
+    "/api/extension/account",
     "/api/extension/library-overlay",
   ]);
   assert.ok(calls.every(({ options }) =>
@@ -71,7 +71,7 @@ test("projection API preserves a valid part when the other endpoint is unavailab
 
 test("any projection 401 rejects the private capability", async () => {
   const api = new AccountProjectionApi(async (url) =>
-    url.endsWith("/api/account/me")
+    url.endsWith("/api/extension/account")
       ? new Response("", { status: 401 })
       : jsonResponse({
           success: true,

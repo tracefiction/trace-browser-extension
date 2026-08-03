@@ -66,6 +66,7 @@ const popupModel = {
   firstSaveSeen: false,
   libraryCount: null,
   activeTab: { kind: "unknown" },
+  capacity: null,
 };
 
 function usefulActionUrl(rawUrl) {
@@ -207,6 +208,28 @@ function buildPopupUi(model) {
   const authState = model.authState || fallbackStatus;
   const auth = authState.state || fallbackStatus.state;
   const activeTab = model.activeTab || { kind: "unknown" };
+
+  if (auth === "connected" && model.capacity?.blocked === true) {
+    return {
+      visualState: "upgrade_required",
+      statusState: "connected",
+      connectionState: "connected",
+      connectionLabel: "Connected",
+      eyebrow: "Library capacity",
+      heading: "Library full",
+      lead: "New stories won’t be added until you make room or get Trace Unlimited.",
+      leadHidden: false,
+      ctaHidden: false,
+      ctaLabel: "Manage library",
+      ctaUrl: TRACE_HOME_URL,
+      ctaEmphasis: "primary",
+      archiveLinksHidden: true,
+      importHidden: true,
+      importDisabled: true,
+      importLabel: "Import from this page",
+      importTitle: "Make room or get Trace Unlimited before importing new stories.",
+    };
+  }
 
   if (auth !== "connected") {
     const connectionState =
@@ -446,6 +469,7 @@ function fetchPopupState() {
       libraryCount:
         typeof s.libraryCount === "number" ? s.libraryCount : undefined,
       activeTab: s.activeTab || undefined,
+      capacity: s.capacity ?? null,
     });
     applyLocalUi(s.ao3SavedFiltersEnabled);
     applyProUi(
@@ -793,6 +817,7 @@ function requestKernelPopupState() {
       libraryCount:
         typeof state.libraryCount === "number" ? state.libraryCount : undefined,
       activeTab: state.activeTab || undefined,
+      capacity: state.capacity ?? null,
     });
     applyLocalUi(state.ao3SavedFiltersEnabled);
     applyProUi(

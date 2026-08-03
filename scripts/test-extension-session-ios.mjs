@@ -16,14 +16,22 @@ const EVIDENCE_ROOT = path.resolve(
 );
 const PROVIDER_DEFAULTS_DOMAIN = "com.tracefiction.trace.extension";
 const PROVIDER_DEFAULTS_KEY = "traceDebugSimulatorProviderCredential";
+const PROVIDER_MISSING_FIXTURE = "trace-provider-fixture-missing-v1";
 const PROVIDER_REQUEST_COUNT_KEY = "traceDebugSimulatorProviderRequestCount";
 const PROVIDER_REQUEST_RESULT_KEY = "traceDebugSimulatorProviderRequestResult";
 const TRACE_APP_BUNDLE_ID = "com.tracefiction.trace";
 const APP_PROVIDER_V2_KEY = "traceDebugSimulatorAppProviderV2";
 const APP_PROVIDER_RETIRED_KEY = "traceDebugSimulatorAppProviderRetired";
-const APP_BOOTSTRAP_CLEAR_RESULT_KEY = "traceDebugSimulatorBootstrapClearResult";
 const APP_SEED_STALE_KEY = "traceDebugSeedStaleProvider";
+const APP_SEED_LEGACY_RAW_KEY = "traceDebugSeedLegacyRawProvider";
 const APP_FAIL_CLEAR_KEY = "traceDebugFailProviderClear";
+const APP_DEVICE_SESSION_A = "10000000-0000-4000-8000-000000000001";
+const APP_DEVICE_SESSION_B = "20000000-0000-4000-8000-000000000002";
+const APP_DEVICE_CREDENTIAL_A =
+  "trd_v1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const APP_DEVICE_CREDENTIAL_B =
+  "trd_v1_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+const APP_DEVICE_SESSION_EXPIRES_AT = "2027-08-02T00:00:00.000Z";
 const CONNECT_AND_SAVE_DRIVER = "trace-installed-connect-and-save-driver.js";
 const CONNECT_AND_SAVE_DRIVER_MARKER = "TRACE_INSTALLED_CONNECT_AND_SAVE_DRIVER";
 const AO3_WORK_URL = "https://archiveofourown.org/works/28534965/chapters/69925506";
@@ -94,6 +102,10 @@ function copyWorkingTree(destination) {
     filter(source) {
       const relative = path.relative(ROOT, source);
       if (!relative) return true;
+      // The harness supplies isolated fixture origins explicitly. A developer
+      // `.env` has precedence in dev builds and would make this test exercise
+      // whichever deployment happens to be configured on the host machine.
+      if (relative === ".env") return false;
       return !relative.split(path.sep).some((part) => excluded.has(part));
     },
   });
@@ -226,11 +238,26 @@ function fixtureHtml() {
               }, window.location.origin);
               return;
             }
-            const action = pending.get(data.nonce);
-            if (!action) return;
+            const pendingAction = pending.get(data.nonce);
+            if (!pendingAction) return;
             pending.delete(data.nonce);
             const ok = data.ok === true || data.ok === "true";
             const error = typeof data.error === "string" ? data.error : null;
+            if (typeof pendingAction === "object" && pendingAction.action === "status") {
+              fetch("/__app-event", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "status", ok, error }),
+              }).catch(() => {});
+              if (ok) {
+                mutate("update", pendingAction.provider);
+              } else {
+                appStatus.textContent =
+                  "Provider status failed: " + (error || "native_error");
+              }
+              return;
+            }
+            const action = pendingAction;
             if (action === "update") {
               appStatus.textContent = ok
                 ? "Provider ready"
@@ -253,17 +280,27 @@ function fixtureHtml() {
           document.getElementById("app-route").textContent =
             "App route: " + location.pathname + location.search + location.hash;
 
-          const mutate = (action, token) => {
+          const mutate = (action, provider) => {
             const requestNonce = "installed-app-" + (++nonce);
             pending.set(requestNonce, action);
             native.postMessage(action === "update" ? {
               type: "TRACE_IOS_AUTH_TOKEN_UPDATE",
-              protocolVersion: 2,
+              protocolVersion: 3,
               nonce: requestNonce,
-              token,
+              provider,
             } : {
               type: "TRACE_IOS_AUTH_TOKEN_CLEAR",
-              protocolVersion: 2,
+              protocolVersion: 3,
+              nonce: requestNonce,
+            });
+          };
+
+          const prepareProvider = (provider) => {
+            const requestNonce = "installed-app-" + (++nonce);
+            pending.set(requestNonce, { action: "status", provider });
+            native.postMessage({
+              type: "TRACE_IOS_AUTH_PROVIDER_STATUS_REQUEST",
+              protocolVersion: 3,
               nonce: requestNonce,
             });
           };
@@ -277,12 +314,23 @@ function fixtureHtml() {
           fetch("/__app-mode")
             .then((response) => response.text())
             .then((appMode) => {
-              if (appMode === "signed-in-a") mutate("update", "ios-fixture-token-a");
-              else if (appMode === "signed-in-b") mutate("update", "ios-fixture-token-b");
-              else if (appMode === "bootstrap-only") {
-                appStatus.textContent = "Bootstrap probe complete";
+              if (appMode === "signed-in-a") prepareProvider({
+                version: 2,
+                kind: "device_session",
+                sessionId: "${APP_DEVICE_SESSION_A}",
+                credential: "${APP_DEVICE_CREDENTIAL_A}",
+                expiresAt: "${APP_DEVICE_SESSION_EXPIRES_AT}",
+              });
+              else if (appMode === "signed-in-b") prepareProvider({
+                version: 2,
+                kind: "device_session",
+                sessionId: "${APP_DEVICE_SESSION_B}",
+                credential: "${APP_DEVICE_CREDENTIAL_B}",
+                expiresAt: "${APP_DEVICE_SESSION_EXPIRES_AT}",
+              });
+              else {
+                appStatus.textContent = "Signed out; provider unchanged";
               }
-              else mutate("clear");
             })
             .catch(() => { appStatus.textContent = "App fixture control unavailable"; });
         })();
@@ -322,7 +370,7 @@ async function main() {
   const verificationEvents = [];
   const storyCommandEvents = [];
   const appEvents = [];
-  let bootstrapClearEvidence = null;
+  let coldStartPreservationEvidence = null;
   let extensionPreferencesPath = null;
   let mode = "ok-a";
   let appMode = "signed-out";
@@ -343,7 +391,12 @@ async function main() {
         try {
           const event = JSON.parse(body);
           appEvents.push({
-            action: event.action === "update" ? "update" : "clear",
+            action:
+              event.action === "update"
+                ? "update"
+                : event.action === "status"
+                  ? "status"
+                  : "clear",
             ok: event.ok === true,
             error: typeof event.error === "string" ? event.error : null,
           });
@@ -371,7 +424,7 @@ async function main() {
       return;
     }
 
-    if (request.url === "/api/account/me") {
+    if (request.url === "/api/extension/account") {
       const authorization = request.headers.authorization ?? "";
       verificationEvents.push(redactVerification(authorization, mode));
       if (mode === "unavailable") {
@@ -599,7 +652,14 @@ async function main() {
     return Number.isInteger(count) ? count : 0;
   };
   const clearProvider = async () => {
-    await deleteDefault(PROVIDER_DEFAULTS_DOMAIN, PROVIDER_DEFAULTS_KEY);
+    // An unsigned simulator cannot prove the shared access group. Use an
+    // explicit DEBUG-only state so "missing" cannot be confused with an
+    // entitlement/read failure from the real Keychain path.
+    await writeDefault(
+      PROVIDER_DEFAULTS_DOMAIN,
+      PROVIDER_DEFAULTS_KEY,
+      PROVIDER_MISSING_FIXTURE,
+    );
   };
   const setProvider = (value) => writeDefault(
     PROVIDER_DEFAULTS_DOMAIN,
@@ -732,25 +792,21 @@ async function main() {
     for (const historicalAppDebugKey of [
       APP_PROVIDER_V2_KEY,
       APP_PROVIDER_RETIRED_KEY,
-      APP_BOOTSTRAP_CLEAR_RESULT_KEY,
       APP_FAIL_CLEAR_KEY,
     ]) {
       await deleteDefault(TRACE_APP_BUNDLE_ID, historicalAppDebugKey);
     }
 
     if (runsAppJourneys) {
-      appMode = "bootstrap-only";
-      await runTest("testAppSignedOutColdStartClearsStaleProvider");
-      bootstrapClearEvidence = await waitForDefault(
-        readInstalledAppDefault,
-        APP_BOOTSTRAP_CLEAR_RESULT_KEY,
-        "cleared",
-      );
+      appMode = "signed-out";
+      const priorColdStartEventCount = appEvents.length;
+      await runTest("testAppSignedOutColdStartPreservesDeviceProvider");
       assert.equal(
-        bootstrapClearEvidence,
-        "cleared",
-        "the boot-time stale-provider clear did not complete",
+        appEvents.length,
+        priorColdStartEventCount,
+        "ambient signed-out startup mutated the app-owned provider",
       );
+      coldStartPreservationEvidence = "no native mutation observed";
 
       await runTest("testResetSession", { artifact: "testResetSessionBeforeBrowserOnly" });
       const browserOnlyProviderBaseline = await readProviderRequestCount();
@@ -771,13 +827,35 @@ async function main() {
         () => appEvents.slice(priorAppEventCount).some(
           (event) => event.action === "update" && event.ok,
         ),
-        "the app's real v2 update handler did not acknowledge provider A",
+        "the app's real v3 update handler did not acknowledge provider A",
+      );
+      await waitForEvidence(
+        () => appEvents.slice(priorAppEventCount).some(
+          (event) => event.action === "status" && event.ok,
+        ),
+        "the app's real v3 status handler did not acknowledge provider access",
+      );
+
+      priorAppEventCount = appEvents.length;
+      await runTest("testAppSignInMigratesV060RawProvider");
+      await waitForEvidence(
+        () => appEvents.slice(priorAppEventCount).some(
+          (event) => event.action === "status" && event.ok,
+        ),
+        "the app did not classify the v0.6.0 raw provider as replaceable legacy data",
+      );
+      await waitForEvidence(
+        () => appEvents.slice(priorAppEventCount).some(
+          (event) => event.action === "update" && event.ok,
+        ),
+        "the app did not overwrite the v0.6.0 raw provider with the v3 device provider",
       );
       await runTest("testAppResumeDoesNotAmbientlyConnect");
 
       // Unsigned Simulator apps cannot share the production Keychain access
-      // group. Mirror only the value acknowledged by the real app v2 handler;
-      // the signed/TestFlight gate remains responsible for the physical shared
+      // group. Mirror only a legacy fixture value after the real app v3
+      // handler validates and acknowledges the device-session record. The
+      // signed/TestFlight gate remains responsible for the physical shared
       // Keychain boundary.
       await setProvider("ios-fixture-token-a");
       mode = "ok-a";
@@ -872,11 +950,11 @@ async function main() {
     if (runsAppJourneys) {
       assert.ok(
         appEvents.some((event) => event.action === "update" && event.ok),
-        "the app v2 provider update was not acknowledged",
+        "the app v3 provider update was not acknowledged",
       );
       assert.ok(
         appEvents.some((event) => event.action === "clear" && event.ok),
-        "the app v2 provider clear was not acknowledged",
+        "the app v3 provider clear was not acknowledged",
       );
       assert.ok(
         appEvents.some(
@@ -960,8 +1038,8 @@ async function main() {
     for (const debugString of [
       APP_PROVIDER_V2_KEY,
       APP_PROVIDER_RETIRED_KEY,
-      APP_BOOTSTRAP_CLEAR_RESULT_KEY,
       APP_SEED_STALE_KEY,
+      APP_SEED_LEGACY_RAW_KEY,
       APP_FAIL_CLEAR_KEY,
       "stale-v2-provider",
       "stale-retired-provider",
@@ -983,10 +1061,11 @@ async function main() {
       journeyPhase: JOURNEY_PHASE,
       journeys: [
         ...(runsAppJourneys ? [
-          "signed-out app cold start clears stale provider state",
+          "ambient signed-out app startup preserves device-provider state",
           "browser-only website sign-in cannot satisfy Connect",
           "Open Trace app routes in-shell without connecting",
-          "app sign-in writes the v2 provider without ambient connection",
+          "app sign-in writes the v3 device provider without ambient connection",
+          "v0.6.0 raw Keychain providers migrate to the v3 device provider",
           "return from app sign-in requires explicit verified Connect",
           "app sign-out clears the provider without ambient session mutation",
           "post-sign-out verification rejection requires Reconnect",
@@ -1014,9 +1093,9 @@ async function main() {
         confirmedWrites: storyCommandEvents.length,
       } : null,
       nativeProviderReachProof: providerRequestEvidence,
-      bootstrapClearProof: runsAppJourneys ? {
-        result: bootstrapClearEvidence,
-        webMutationAllowed: false,
+      coldStartPreservationProof: runsAppJourneys ? {
+        result: coldStartPreservationEvidence,
+        owner: "explicit logout lifecycle",
       } : null,
       releaseFixtureSeamPresent: false,
       keychainBoundary: "deferred to the required real-device/TestFlight release-candidate smoke",

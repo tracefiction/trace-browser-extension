@@ -108,6 +108,7 @@ import {
   browserKind,
   isRecord,
   isSessionAction,
+  publicCapacityRecovery,
   publicProjection,
   publicWorkState,
   toExtensionStatus,
@@ -414,6 +415,8 @@ export class SessionRuntimeController {
       case SESSION_MESSAGE_TYPES.workState:
       case SESSION_MESSAGE_TYPES.popupState:
         return this.#handleReadMessage(message, sender);
+      case SESSION_MESSAGE_TYPES.capacityRecovery:
+        return this.#handleCapacityRecoveryMessage(message, sender);
       case SESSION_MESSAGE_TYPES.savedFilterSync:
         return this.#handleSavedFilterMessage(message, sender);
       case SESSION_MESSAGE_TYPES.importTrigger:
@@ -558,6 +561,48 @@ export class SessionRuntimeController {
     return this.#savedFilterResponse(await this.#runSavedFilterSync());
   }
 
+  async #handleCapacityRecoveryMessage(
+    message: Record<string, unknown>,
+    sender: RuntimeSender | undefined,
+  ): Promise<RuntimeResponse | null> {
+    const host = archiveHostKindFromSender(sender);
+    const senderUrl = sender?.tab?.url ?? sender?.url;
+    if (
+      host === null ||
+      isBlockedArchivePath(senderUrl, host) ||
+      Object.keys(message).length !== 2 ||
+      (message.action !== "shown" && message.action !== "dismissed")
+    ) {
+      return null;
+    }
+    await this.start();
+    const preparation = await this.#prepareNativeAuthority();
+    const scope = this.#service.publicationScope();
+    if (!preparation.ready || scope === null) {
+      return this.#response(
+        preparation.action,
+        preparation.action?.kind === "unavailable"
+          ? "unavailable"
+          : "not_authenticated",
+      );
+    }
+    const result = await this.#accountData.acknowledgeCapacityRecovery(
+      scope,
+      message.action,
+      Date.now(),
+    );
+    const accountData = result.kind === "published"
+      ? result.value
+      : await this.#accountData.read().catch(() => null);
+    return Object.freeze({
+      ok: result.kind === "published",
+      snapshot: toPublicSessionSnapshot(this.snapshot()),
+      ...(preparation.action === undefined ? {} : { action: preparation.action }),
+      capacity: publicCapacityRecovery(accountData),
+      ...(result.kind === "published" ? {} : { error: "unavailable" as const }),
+    });
+  }
+
   async #handleFirstStoryMessage(
     message: Record<string, unknown>,
     sender: RuntimeSender | undefined,
@@ -678,7 +723,7 @@ export class SessionRuntimeController {
         );
       }
       return this.#commandResponse(
-        await this.#storyCommands.execute(command),
+        await this.#executeStoryCommand(command),
         action,
         command,
       );
@@ -698,7 +743,7 @@ export class SessionRuntimeController {
         );
       }
       return this.#commandResponse(
-        await this.#storyCommands.execute(command),
+        await this.#executeStoryCommand(command),
         preparation.action,
         command,
       );
@@ -724,10 +769,30 @@ export class SessionRuntimeController {
       );
     }
     return this.#commandResponse(
-      await this.#storyCommands.execute(command),
+      await this.#executeStoryCommand(command),
       action,
       command,
     );
+  }
+
+  async #executeStoryCommand(command: StoryTrackCommand): Promise<StoryCommandResult> {
+    let accountData = await this.#accountData.read().catch(() => null);
+    if (
+      accountData?.capacityRecovery !== null &&
+      accountData?.capacityRecovery !== undefined &&
+      accountData.overlay === null
+    ) {
+      accountData = await this.#projection.read().catch(() => accountData);
+    }
+    if (
+      accountData?.capacityRecovery !== null &&
+      accountData?.capacityRecovery !== undefined &&
+      accountData.overlay !== null &&
+      accountData.overlay.entries[command.workKey] === undefined
+    ) {
+      return Object.freeze({ kind: "failed", reason: "free_limit_reached" });
+    }
+    return this.#storyCommands.execute(command);
   }
 
   async #startOnce(): Promise<void> {
@@ -903,12 +968,34 @@ export class SessionRuntimeController {
     if (request !== undefined) {
       await this.#recordStoryReadiness(request, command);
     }
+    let accountData = await this.#accountData.read().catch(() => null);
+    const scope = this.#service.publicationScope();
+    if (
+      command.kind === "failed" &&
+      command.reason === "free_limit_reached" &&
+      scope !== null
+    ) {
+      const result = await this.#accountData.publishCapacityBlocked(
+        scope,
+        Date.now(),
+      );
+      if (result.kind === "published") accountData = result.value;
+    } else if (
+      command.kind === "confirmed" &&
+      command.intent === "ensure_saved" &&
+      command.source !== "preflight" &&
+      scope !== null
+    ) {
+      const result = await this.#accountData.clearCapacityRecovery(scope);
+      if (result.kind === "published") accountData = result.value;
+    }
     this.#publishStatus();
     return Object.freeze({
       ok: command.kind === "confirmed",
       snapshot: toPublicSessionSnapshot(this.snapshot()),
       ...(action === undefined ? {} : { action }),
       command,
+      capacity: publicCapacityRecovery(accountData),
       ...(command.kind === "confirmed"
         ? {
             entryId: command.confirmation.entryId,
@@ -1265,6 +1352,7 @@ export class SessionRuntimeController {
       libraryCount: accountData?.summary?.libraryCount ?? null,
       activeTab,
       pro: accountData?.summary?.pro === true,
+      capacity: publicCapacityRecovery(accountData),
       autoTrackEnabled: preferences.prefAutoTrackEnabled !== false,
       libraryInlayEnabled: preferences.prefLibraryInlayEnabled !== false,
       ao3SavedFiltersEnabled: preferences.prefAo3SavedFiltersEnabled !== false,

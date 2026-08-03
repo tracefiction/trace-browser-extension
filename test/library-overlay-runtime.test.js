@@ -1850,13 +1850,17 @@ test("library-overlay keeps workMark challenges hidden from listing UI", async (
   assert.doesNotMatch(surface.textContent || "", /\+4/);
 });
 
-test("library-overlay quick-add still maps free-limit response to FULL", async () => {
+test("library-overlay quick-add maps free limit to a reusable recovery notice", async () => {
   const window = await renderOverlayListing({
     html:
       "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/66666'>Unknown Work</a></h4></li></ol></body></html>",
     cache: { entries: {}, syncVersion: "v-empty" },
     sendMessage(_msg, cb) {
-      if (typeof cb === "function") cb({ ok: false, error: "free_limit_reached" });
+      if (typeof cb === "function") cb({
+        ok: false,
+        error: "free_limit_reached",
+        capacity: { blocked: true, prompt: true },
+      });
     },
   });
 
@@ -1867,7 +1871,15 @@ test("library-overlay quick-add still maps free-limit response to FULL", async (
   assert.match(button.textContent || "", /Add to Trace/);
   button.click();
   assert.match(button.textContent || "", /Full/i);
-  assert.equal(button.disabled, true);
+  assert.equal(button.disabled, false);
+  const notice = window.document.querySelector("[data-trace-capacity-notice]");
+  assert.ok(notice);
+  assert.match(notice.textContent || "", /wasn’t added/i);
+  assert.match(notice.textContent || "", /Manage library/i);
+  notice.querySelector("button").click();
+  assert.equal(window.document.querySelector("[data-trace-capacity-notice]"), null);
+  button.click();
+  assert.ok(window.document.querySelector("[data-trace-capacity-notice]"));
 });
 
 test("library-overlay exits on pages with password fields", async () => {

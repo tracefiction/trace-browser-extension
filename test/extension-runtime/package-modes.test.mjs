@@ -72,7 +72,9 @@ function assertSurfacePrivateBoundary(root) {
 
 async function assertArchiveReceiptSurvivesStorageFailure(bundle) {
   const listeners = [];
+  const installedListeners = [];
   const nativeMessages = [];
+  const createdTabs = [];
   const context = {
     URL,
     Date,
@@ -83,10 +85,18 @@ async function assertArchiveReceiptSurvivesStorageFailure(bundle) {
     crypto: { randomUUID: () => "package-proof-id" },
     browser: {
       runtime: {
+        onInstalled: {
+          addListener(listener) {
+            installedListeners.push(listener);
+          },
+        },
         onMessage: {
           addListener(listener) {
             listeners.push(listener);
           },
+        },
+        async getPlatformInfo() {
+          return { os: "mac" };
         },
         async sendNativeMessage(message) {
           nativeMessages.push(message);
@@ -95,12 +105,27 @@ async function assertArchiveReceiptSurvivesStorageFailure(bundle) {
       },
       alarms: { async clear() { return true; } },
       storage: { local: {} },
-      tabs: { async query() { return []; }, async sendMessage() { return null; } },
+      tabs: {
+        async query() { return []; },
+        async create(options) {
+          createdTabs.push(options);
+          return { id: 4, url: options.url };
+        },
+        async sendMessage() { return null; },
+      },
     },
   };
   vm.runInNewContext(bundle, context);
   assert.equal(context.__traceSessionRuntimeBootFailed, true);
   assert.equal(listeners.length, 1);
+  assert.equal(installedListeners.length, 1);
+
+  installedListeners[0]({ reason: "install" });
+  for (let attempt = 0; attempt < 8; attempt += 1) await Promise.resolve();
+  assert.deepEqual(JSON.parse(JSON.stringify(createdTabs)), [{
+    url: "https://www.tracefiction.com/?activation=extension-installed",
+    active: true,
+  }]);
 
   const response = await new Promise((resolve) => {
     const keepsWorkerAlive = listeners[0](

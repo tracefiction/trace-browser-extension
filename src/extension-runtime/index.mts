@@ -1,5 +1,6 @@
 import { installSessionRuntime, type SessionMode } from "./controller.mjs";
 import { installArchiveReadinessRuntime } from "./archive-readiness.mjs";
+import { installTraceFirstInstallActivation } from "./trace-web-navigation.mjs";
 export * from "./account-projection.mjs";
 export * from "./archive-readiness-status.mjs";
 export * from "./library-command.mjs";
@@ -55,6 +56,12 @@ try {
     new BrowserStorage(extension.storage.local, extension.runtime, storageMode),
   );
   if (__TRACE_SESSION_MODE__ === "kernel") {
+    installTraceFirstInstallActivation({
+      runtime: extension.runtime,
+      tabs: extension.tabs,
+      mode: storageMode,
+      webOrigin: __TRACE_WEB_ORIGIN__,
+    });
     // Install positive archive-run evidence before any IndexedDB, credential,
     // account-projection, or session-restoration work can stall the worker.
     installArchiveReadinessRuntime({

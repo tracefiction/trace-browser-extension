@@ -30,12 +30,35 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     private static let traceAppleTeamIdentifierPrefix = "3GX59FLLT6."
     private static let traceAuthTokenService = "com.tracefiction.trace.auth"
     private static let traceAuthTokenAccount = "extension-provider-v2"
+    private static let traceProviderRecordVersion = 2
+
+    private struct TraceSafariProviderRecord: Codable {
+        let version: Int
+        let kind: String?
+        let token: String?
+        let sessionId: String?
+        let credential: String?
+        let expiresAt: String?
+    }
+
+    private enum SharedTraceCredential {
+        case ready(
+            credential: String,
+            kind: String,
+            sessionId: String?,
+            expiresAt: String?
+        )
+        case missing
+        case unavailable
+    }
 #if DEBUG && targetEnvironment(simulator)
     /// Simulator-only input for the installed Safari lifecycle harness. The
     /// real app/extension boundary remains the shared Keychain item above;
     /// Release builds do not contain this key or branch.
     private static let traceSimulatorProviderCredentialKey =
         "traceDebugSimulatorProviderCredential"
+    private static let traceSimulatorMissingProviderFixture =
+        "trace-provider-fixture-missing-v1"
     private static let traceSimulatorProviderRequestCountKey =
         "traceDebugSimulatorProviderRequestCount"
     private static let traceSimulatorProviderRequestResultKey =
@@ -78,21 +101,36 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         if let payload, let messageType = payload["type"] as? String {
             switch messageType {
             case Self.traceIosAuthTokenRequest:
-                let token = Self.readSharedTraceToken()
+                let credential = Self.readSharedTraceCredential()
 #if DEBUG && targetEnvironment(simulator)
-                Self.recordSimulatorProviderRequest(hasCredential: token?.isEmpty == false)
+                Self.recordSimulatorProviderRequest(credential)
 #endif
-                if let token, !token.isEmpty {
-                    responseBody = [
+                switch credential {
+                case .ready(let credential, let kind, let sessionId, let expiresAt):
+                    var ready: [String: Any] = [
                         "type": Self.traceIosAuthTokenRequest,
                         "ok": true,
-                        "token": token,
+                        "protocolVersion": 3,
+                        "credential": credential,
+                        // Keep token additive during the 0.6.0 -> 0.6.1 binary
+                        // transition. New runtime code reads credential/kind.
+                        "token": credential,
+                        "credentialKind": kind,
                     ]
-                } else {
+                    if let sessionId { ready["sessionId"] = sessionId }
+                    if let expiresAt { ready["expiresAt"] = expiresAt }
+                    responseBody = ready
+                case .missing:
                     responseBody = [
                         "type": Self.traceIosAuthTokenRequest,
                         "ok": false,
                         "error": "missing_token",
+                    ]
+                case .unavailable:
+                    responseBody = [
+                        "type": Self.traceIosAuthTokenRequest,
+                        "ok": false,
+                        "error": "provider_unavailable",
                     ]
                 }
 
@@ -207,14 +245,24 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         return "\(traceAppleTeamIdentifierPrefix)\(traceKeychainAccessGroup)"
     }
 
-    private static func readSharedTraceToken() -> String? {
+    private static func readSharedTraceCredential() -> SharedTraceCredential {
 #if DEBUG && targetEnvironment(simulator)
         if let fixture = UserDefaults.standard.string(
             forKey: traceSimulatorProviderCredentialKey
         ) {
             let trimmed = fixture.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed == traceSimulatorMissingProviderFixture {
+                return .missing
+            }
             if !trimmed.isEmpty {
-                return trimmed
+                return .ready(
+                    credential: trimmed,
+                    kind: trimmed.hasPrefix("trd_v1_")
+                        ? "device_session"
+                        : "access_token",
+                    sessionId: nil,
+                    expiresAt: nil
+                )
             }
         }
 #endif
@@ -232,25 +280,90 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
 
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess,
-              let data = item as? Data,
-              let token = String(data: data, encoding: .utf8)
-        else {
-            return nil
+        if status == errSecItemNotFound {
+            return .missing
         }
-        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        guard status == errSecSuccess, let data = item as? Data else {
+            os_log(
+                "Shared provider read unavailable status=%{public}d",
+                log: log,
+                type: .error,
+                status
+            )
+            return .unavailable
+        }
+        guard let record = try? JSONDecoder().decode(
+            TraceSafariProviderRecord.self,
+            from: data
+        ) else {
+            return .unavailable
+        }
+
+        if record.version == 1, let token = record.token {
+            let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty
+                ? .unavailable
+                : .ready(
+                    credential: trimmed,
+                    kind: "access_token",
+                    sessionId: nil,
+                    expiresAt: nil
+                )
+        }
+        guard record.version == traceProviderRecordVersion,
+              record.kind == "device_session",
+              let sessionId = record.sessionId,
+              UUID(uuidString: sessionId) != nil,
+              let expiresAt = record.expiresAt,
+              parseISO8601Date(expiresAt) != nil,
+              let credential = record.credential
+        else {
+            return .unavailable
+        }
+        let trimmed = credential.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.range(
+            of: "^trd_v1_[A-Za-z0-9_-]{43}$",
+            options: .regularExpression
+        ) != nil else {
+            return .unavailable
+        }
+        return .ready(
+            credential: trimmed,
+            kind: "device_session",
+            sessionId: sessionId,
+            expiresAt: expiresAt
+        )
+    }
+
+    /// JavaScript `Date#toISOString` and the extension API contract include
+    /// fractional seconds. Accept that canonical form while retaining support
+    /// for ISO-8601 timestamps without a fractional component.
+    private static func parseISO8601Date(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
     }
 
 #if DEBUG && targetEnvironment(simulator)
     /// Redacted proof that an installed Connect actually crossed the native
     /// provider boundary. Never persist the credential or any account data.
-    private static func recordSimulatorProviderRequest(hasCredential: Bool) {
+    private static func recordSimulatorProviderRequest(
+        _ credential: SharedTraceCredential
+    ) {
         let defaults = UserDefaults.standard
         let requestCount = defaults.integer(forKey: traceSimulatorProviderRequestCountKey)
         defaults.set(requestCount + 1, forKey: traceSimulatorProviderRequestCountKey)
+        let result: String
+        switch credential {
+        case .ready:
+            result = "present"
+        case .missing:
+            result = "missing"
+        case .unavailable:
+            result = "unavailable"
+        }
         defaults.set(
-            hasCredential ? "present" : "missing",
+            result,
             forKey: traceSimulatorProviderRequestResultKey
         )
     }

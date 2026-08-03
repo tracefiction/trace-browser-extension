@@ -465,6 +465,10 @@ function createAutoTrackCollectorHarness(response, options = {}) {
       lastError: null,
       sendMessage(message, cb) {
         sentMessages.push(message);
+        if (message.type === "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE") {
+          if (typeof cb === "function") cb({ ok: true });
+          return;
+        }
         if (options.lastError) {
           chrome.runtime.lastError = { message: options.lastError };
           cb();
@@ -498,7 +502,7 @@ function createAutoTrackCollectorHarness(response, options = {}) {
   return { dom, store, sentMessages, bindings };
 }
 
-test("sendAutoTrackForStory clears dedupe marker on failed acknowledgements", () => {
+test("sendAutoTrackForStory clears retryable failures but retains a capacity-block marker", () => {
   const failures = [
     undefined,
     { ok: false, error: "auth_expired" },
@@ -521,9 +525,18 @@ test("sendAutoTrackForStory clears dedupe marker on failed acknowledgements", ()
       createAutoTrackCollectorHarness(response);
     bindings.sendAutoTrackForStory(item);
 
-    assert.equal(sentMessages.length, 1);
-    assert.equal(dom.window.sessionStorage.getItem("trace:auto-track:last"), null);
+    assert.equal(
+      dom.window.sessionStorage.getItem("trace:auto-track:last") !== null,
+      response?.error === "free_limit_reached",
+    );
+    assert.equal(
+      sentMessages.filter((message) => message.type === "TRACE_AUTO_TRACK").length,
+      1,
+    );
     assert.deepEqual(plainJson(store.libraryOverlayCache.entries), {});
+    if (response?.error === "free_limit_reached") {
+      assert.ok(dom.window.document.querySelector("[data-trace-capacity-notice]"));
+    }
   }
 });
 
@@ -2010,7 +2023,15 @@ test("story page auto-track success updates the pending handle to Reading progre
 
 test("story page auto-track failure uses existing compact error states", () => {
   const cases = [
-    { response: { ok: false, error: "free_limit_reached" }, expected: /Full/i, disabled: true },
+    {
+      response: {
+        ok: false,
+        error: "free_limit_reached",
+        capacity: { blocked: true, prompt: true },
+      },
+      expected: /Full/i,
+      disabled: false,
+    },
     { response: { ok: false, error: "auth_expired" }, expected: /Reconnect/i, disabled: false },
     { response: { ok: false, error: "http_503" }, expected: /ERROR/i, disabled: false },
   ];
@@ -2026,6 +2047,14 @@ test("story page auto-track failure uses existing compact error states", () => {
 
     assert.match(handle.textContent || "", item.expected);
     assert.equal(handle.disabled, item.disabled);
+    if (item.response.error === "free_limit_reached") {
+      assert.ok(dom.window.document.querySelector("[data-trace-capacity-notice]"));
+      handle.click();
+      const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+      assert.equal(sheet.getAttribute("data-trace-open"), "1");
+      assert.match(sheet.textContent || "", /wasn’t added/i);
+      assert.match(sheet.textContent || "", /Manage library/i);
+    }
     if (item.response.error === "auth_expired") {
       handle.click();
       const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
