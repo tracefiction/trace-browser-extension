@@ -15,6 +15,7 @@ const TRACE_WEB_HOME_URL = configuredTraceWebHomeUrl();
 const FIRST_STORY_FOCUS_MAX_ATTEMPTS = 30;
 const FIRST_STORY_FOCUS_RETRY_MS = 150;
 const FIRST_STORY_SAVE_TIMEOUT_MS = 18_000;
+const COLLECTOR_MESSAGE_TIMEOUT_MS = 20_000;
 const KERNEL_PROJECTION_RETRY_DELAYS_MS = [250, 750, 2_000];
 const TRACE_CAPACITY_NOTICE_ATTR = "data-trace-capacity-notice";
 
@@ -29,6 +30,56 @@ function configuredTraceWebHomeUrl() {
     return "https://tracefiction.com/";
   }
 }
+
+// Firefox/Safari expose Promise-based runtime messaging through `browser`,
+// while Chromium and the Safari wrapper's compatibility surface may require a
+// callback. Keep every collector command on this boundary so feature code
+// never has to infer which API shape is active.
+function sendCollectorMessage(message, onResponse, timeoutMs) {
+  var expectsResponse = typeof onResponse === "function";
+  var respond = expectsResponse ? onResponse : function () {};
+  var timeout = Number(timeoutMs);
+  if (!Number.isFinite(timeout) || timeout <= 0) timeout = COLLECTOR_MESSAGE_TIMEOUT_MS;
+  var settled = false;
+  var timer = null;
+  var finish = function (response) {
+    if (settled) return;
+    settled = true;
+    if (timer !== null) clearTimeout(timer);
+    respond(response == null ? null : response);
+  };
+  var armTimeout = function () {
+    if (settled || !expectsResponse) return;
+    timer = setTimeout(function () {
+      finish(null);
+    }, timeout);
+  };
+  if (typeof globalThis.browser !== "undefined" && ext === globalThis.browser) {
+    try {
+      var pending = ext.runtime.sendMessage(message);
+      armTimeout();
+      Promise.resolve(pending).then(finish, function () {
+        finish(null);
+      });
+    } catch (_) {
+      finish(null);
+    }
+    return;
+  }
+  try {
+    ext.runtime.sendMessage(message, function (response) {
+      finish(ext.runtime.lastError ? null : response);
+    });
+    armTimeout();
+  } catch (_) {
+    finish(null);
+  }
+}
+
+function sendCollectorMessageBestEffort(message) {
+  sendCollectorMessage(message);
+}
+
 var kernelPendingFirstStory = null;
 var kernelProjectionRetryTimer = null;
 var kernelProjectionRetryWorkKey = null;
@@ -80,16 +131,10 @@ function authStateAllowsActions(authState, hasAuth) {
 }
 
 function acknowledgeCapacityRecovery(action) {
-  try {
-    ext.runtime.sendMessage(
-      { type: "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE", action: action },
-      function () {
-        void ext.runtime.lastError;
-      },
-    );
-  } catch (_) {
-    /* capacity acknowledgement is best effort */
-  }
+  sendCollectorMessageBestEffort({
+    type: "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE",
+    action: action,
+  });
 }
 
 function showCapacityRecoveryNotice(capacity, force) {
@@ -317,9 +362,46 @@ function hasStableAo3ChapterSignal() {
   return false;
 }
 
-function detectAo3CurrentChapterNumber() {
+function isAo3EntireWorkView() {
+  var isEntireWork = false;
+  try {
+    isEntireWork = new URL(location.href).searchParams.get("view_full_work") === "true";
+  } catch (_) {
+    isEntireWork = /(?:\?|&)view_full_work=true(?:&|$)/.test(location.search || "");
+  }
+  return isEntireWork;
+}
+
+function ao3EntireWorkRenderedChapterCount() {
+  if (!isAo3EntireWorkView()) return null;
+
+  var articles = qsa(
+    document,
+    [
+      "#chapters .userstuff.module[role='article']",
+      "#chapters .userstuff[role='article']",
+      "#chapters [role='article'].userstuff",
+    ].join(",")
+  );
+  if (articles.length > 0) return articles.length;
+
+  var chapterContainers = qsa(document, "#chapters .chapter[id^='chapter-']");
+  return chapterContainers.length > 0 ? chapterContainers.length : null;
+}
+
+function detectAo3CurrentChapterNumber(publishedChapterCount) {
   const path = location.pathname || "";
-  if (!/\/chapters\/\d+/.test(path)) return 1;
+  if (!/\/chapters\/\d+/.test(path)) {
+    var renderedEntireWorkCount = ao3EntireWorkRenderedChapterCount();
+    if (renderedEntireWorkCount != null) {
+      var published = Number(publishedChapterCount);
+      if (Number.isFinite(published) && published > 0) {
+        return Math.min(Math.trunc(published), renderedEntireWorkCount);
+      }
+      return renderedEntireWorkCount;
+    }
+    return 1;
+  }
   const currentChapterIdMatch = path.match(/\/chapters\/(\d+)/);
   const currentChapterId = currentChapterIdMatch ? currentChapterIdMatch[1] : null;
 
@@ -448,6 +530,7 @@ var TRACE_READER_STATUS_CHOICES = [
 var FINISH_QUALIFY_DISMISS_KEY = "trace:finish-qualify:dismissed";
 var finishQualifyWatchState = Object.create(null);
 var finishQualifyBandState = Object.create(null);
+var finishQualifyGeneration = 0;
 
 function count(s) {
   // Handles: "12,148" -> 12148, "127k+" -> 127000, "1.2m" -> 1200000
@@ -948,7 +1031,7 @@ function visibleListingWorkKeysForMetadataRefresh() {
 function submitListingMetadataRefresh(cacheEntries) {
   var items = collectTrackedListingMetadataRefreshItems(cacheEntries);
   if (!items.length || !shouldSendListingMetadataRefresh(items)) return;
-  ext.runtime.sendMessage({
+  sendCollectorMessageBestEffort({
     type: "TRACE_LIBRARY_METADATA_REFRESH",
     payload: { items: items },
   });
@@ -961,10 +1044,10 @@ function sendListingMetadataRefreshForTrackedItems(attempt) {
   if (KERNEL_SESSION_ACTIVE) {
     var workKeys = visibleListingWorkKeysForMetadataRefresh();
     if (!workKeys.length) return;
-    ext.runtime.sendMessage(
+    sendCollectorMessage(
       { type: ACCOUNT_PROJECTION_GET_MESSAGE, workKeys: workKeys },
       function (response) {
-        if (ext.runtime.lastError || !response || response.ok !== true) {
+        if (!response || response.ok !== true) {
           if (retryCount < LISTING_METADATA_REFRESH_MAX_ATTEMPTS) {
             setTimeout(function () {
               sendListingMetadataRefreshForTrackedItems(retryCount + 1);
@@ -1069,7 +1152,7 @@ function forgetRecentAutoTrack(item) {
 function sendAutoTrackForStory(validStory) {
   rememberRecentAutoTrack(validStory);
   updateAutoTrackPendingForStory(validStory);
-  ext.runtime.sendMessage(
+  sendCollectorMessage(
     {
       type: "TRACE_AUTO_TRACK",
       payload: {
@@ -1079,7 +1162,7 @@ function sendAutoTrackForStory(validStory) {
       },
     },
     function (response) {
-      if (ext.runtime.lastError) {
+      if (!response) {
         forgetRecentAutoTrack(validStory);
         updateAutoTrackFailureForStory(validStory, "network_error");
         return;
@@ -1174,7 +1257,7 @@ function applyBackgroundWorkStateForStory(workKey, state) {
   return false;
 }
 
-function writeConfirmedOverlayEntryForStory(workKey, entry, cb) {
+function writeConfirmedOverlayEntryForStory(workKey, entry, cb, expectedAccountId) {
   if (!workKey || !entry || typeof entry !== "object") {
     if (typeof cb === "function") cb(false);
     return;
@@ -1193,6 +1276,15 @@ function writeConfirmedOverlayEntryForStory(workKey, entry, cb) {
     ],
     function (res) {
     if (ext.runtime.lastError || !res || !res.authToken) {
+      if (typeof cb === "function") cb(false);
+      return;
+    }
+
+    var activeAccountId = normalizeStorageString(res[TRACE_ACCOUNT_ID_KEY]);
+    if (
+      expectedAccountId &&
+      (!activeAccountId || activeAccountId !== normalizeStorageString(expectedAccountId))
+    ) {
       if (typeof cb === "function") cb(false);
       return;
     }
@@ -1219,20 +1311,15 @@ function writeConfirmedOverlayEntryForStory(workKey, entry, cb) {
 
 function queryBackgroundWorkStateForStory(workKey) {
   if (!workKey) return;
-  try {
-    ext.runtime.sendMessage(
-      { type: WORK_STATE_GET_MESSAGE, workKey: workKey },
-      function (response) {
-        if (ext.runtime.lastError) return;
-        if (!response || response.ok !== true || !response.state) return;
-        if (applyBackgroundWorkStateForStory(workKey, response.state)) {
-          rerenderStoryHandleForWorkKey(workKey);
-        }
-      },
-    );
-  } catch (_) {
-    /* best effort */
-  }
+  sendCollectorMessage(
+    { type: WORK_STATE_GET_MESSAGE, workKey: workKey },
+    function (response) {
+      if (!response || response.ok !== true || !response.state) return;
+      if (applyBackgroundWorkStateForStory(workKey, response.state)) {
+        rerenderStoryHandleForWorkKey(workKey);
+      }
+    },
+  );
 }
 
 function clearStoryAuthError(workKey) {
@@ -1262,19 +1349,15 @@ function requestStoryAuthRefreshOnResume(workKey) {
   if (now - storyAuthRefreshLastAttemptAt < 1500) return;
   storyAuthRefreshLastAttemptAt = now;
   storyAuthRefreshInFlight = true;
-  try {
-    ext.runtime.sendMessage(
-      { type: TRACE_IOS_AUTH_REFRESH_REQUEST_MESSAGE },
-      function (response) {
-        storyAuthRefreshInFlight = false;
-        if (ext.runtime.lastError || !response || response.ok !== true) return;
-        clearStoryAuthError(workKey);
-        renderQuickAddButton(workKey);
-      },
-    );
-  } catch (_) {
-    storyAuthRefreshInFlight = false;
-  }
+  sendCollectorMessage(
+    { type: TRACE_IOS_AUTH_REFRESH_REQUEST_MESSAGE },
+    function (response) {
+      storyAuthRefreshInFlight = false;
+      if (!response || response.ok !== true) return;
+      clearStoryAuthError(workKey);
+      renderQuickAddButton(workKey);
+    },
+  );
 }
 
 function updateAutoTrackPendingForStory(item) {
@@ -1773,9 +1856,9 @@ function collectAO3Work() {
   const chRaw = txt(one(meta, "dd.chapters")) || txt(one(document, "dd.chapters"));
   const chp = parseCh(chRaw);
   const { cht } = ao3ImportChapters(chp);
-  const chn = detectAo3CurrentChapterNumber();
   const chPub =
     typeof chp.n === "number" && Number.isFinite(chp.n) ? chp.n : null;
+  const chn = detectAo3CurrentChapterNumber(chPub);
 
   const status = (() => {
     const req = one(document, ".required-tags");
@@ -2682,7 +2765,14 @@ function collectStoryForAutoTrack() {
   if (isAO3()) {
     if (!/\/works\/\d+/.test(location.href)) return null;
     if (!hasStableAo3ChapterSignal()) return null;
-    return collectAO3Work();
+    var ao3Story = collectAO3Work();
+    if (ao3Story && isAo3EntireWorkView()) {
+      // Rendering every chapter is not evidence that the reader has reached the
+      // last one. Preserve normal save/metadata behavior while the dedicated
+      // end detector owns the final progress transition.
+      return Object.assign({}, ao3Story, { chn: 1, chu: null });
+    }
+    return ao3Story;
   }
   if (isFFN()) {
     if (!/\/s\/\d+/.test(location.href)) return null;
@@ -2735,7 +2825,7 @@ function startDwellTimer(attempt) {
   }
   if (shouldBroadcastMetadata(validStory)) {
     rememberMetadataBroadcast(validStory);
-    ext.runtime.sendMessage({
+    sendCollectorMessageBestEffort({
       type: "TRACE_METADATA_BROADCAST",
       payload: {
         s: validStory.src,
@@ -3099,14 +3189,10 @@ function storyTraceOpenUrl(authState, entry) {
 
 function openTraceUrlInBrowserTab(url) {
   if (!url) return;
-  try {
-    ext.runtime.sendMessage({
-      type: "TRACE_OPEN_TRACE_URL",
-      payload: { url: url },
-    });
-  } catch (_) {
-    /* The background worker handles Trace tab creation when available. */
-  }
+  sendCollectorMessageBestEffort({
+    type: "TRACE_OPEN_TRACE_URL",
+    payload: { url: url },
+  });
 }
 
 function bindTraceOpenLink(link) {
@@ -3733,6 +3819,9 @@ function readerStatusChoiceErrorCopy(error) {
   }
   if (error === "rate_limited") return "Trace is rate limiting updates. Try again soon.";
   if (error === "free_limit_reached") return "Library limit reached.";
+  if (error === "finish_qualification_disabled") {
+    return "Automatic finish updates are temporarily unavailable. Open Trace to update this work.";
+  }
   return "Could not update. Try again.";
 }
 
@@ -3870,7 +3959,7 @@ function bindReaderStatusChoice(btn, workKey, entry, status, errorEl) {
     updateOptimisticReaderStatusPending(workKey, entry, status);
     renderQuickAddButton(workKey);
 
-    ext.runtime.sendMessage(
+    sendCollectorMessage(
       {
         type: "TRACE_SET_READER_STATUS",
         payload: Object.assign(
@@ -3879,7 +3968,7 @@ function bindReaderStatusChoice(btn, workKey, entry, status, errorEl) {
         ),
       },
       function (response) {
-        if (ext.runtime.lastError || !response || !response.ok) {
+        if (!response || !response.ok) {
           updateOptimisticReaderStatusError(workKey, previousEntry, readerStatusChoiceErrorCopy(response && response.error));
           renderQuickAddButton(workKey);
           return;
@@ -3933,7 +4022,7 @@ function appendStoryRatingControls(body, view, workKey) {
         entry.rating = nextRating;
         message.textContent = "Saving...";
         renderStars(true);
-        ext.runtime.sendMessage(
+        sendCollectorMessage(
           {
             type: "TRACE_PATCH_LIBRARY_ENTRY",
             payload: {
@@ -3943,7 +4032,7 @@ function appendStoryRatingControls(body, view, workKey) {
             },
           },
           function (response) {
-            if (ext.runtime.lastError || !response || !response.ok) {
+            if (!response || !response.ok) {
               current = previous;
               entry.rating = previous;
               message.textContent = "Could not save";
@@ -3995,7 +4084,7 @@ function appendStoryCatchupAction(body, view, workKey) {
     event.stopPropagation();
     button.disabled = true;
     button.textContent = "Saving...";
-    ext.runtime.sendMessage(
+    sendCollectorMessage(
       {
         type: "TRACE_PATCH_LIBRARY_ENTRY",
         payload: {
@@ -4005,7 +4094,7 @@ function appendStoryCatchupAction(body, view, workKey) {
         },
       },
       function (response) {
-        if (ext.runtime.lastError || !response || !response.ok) {
+        if (!response || !response.ok) {
           button.disabled = false;
           button.textContent = "Retry";
           return;
@@ -4205,10 +4294,10 @@ function sendQuickAddAction(btn, workKey, addTheme, compact, done) {
   }
   btn.disabled = true;
 
-  ext.runtime.sendMessage(
+  sendCollectorMessage(
     { type: "TRACE_QUICK_ADD", payload: payload },
     function (response) {
-      if (ext.runtime.lastError || !response) {
+      if (!response) {
         if (compact) {
           applyStoryInlineHandleState(btn, {
             kind: "error",
@@ -4472,39 +4561,9 @@ function pendingFirstStoryMatchesCurrentPage(pendingUrl) {
 }
 
 function sendIosPendingFirstStoryClear() {
-  try {
-    ext.runtime.sendMessage({
-      type: TRACE_IOS_PENDING_FIRST_STORY_CLEAR_MESSAGE,
-    });
-  } catch (_) {
-    /* best effort */
-  }
-}
-
-function sendKernelCollectorMessage(message, onResponse) {
-  var settled = false;
-  var finish = function (response) {
-    if (settled) return;
-    settled = true;
-    onResponse(response || null);
-  };
-  if (typeof browser !== "undefined") {
-    try {
-      Promise.resolve(ext.runtime.sendMessage(message)).then(finish, function () {
-        finish(null);
-      });
-    } catch (_) {
-      finish(null);
-    }
-    return;
-  }
-  try {
-    ext.runtime.sendMessage(message, function (response) {
-      finish(ext.runtime.lastError ? null : response);
-    });
-  } catch (_) {
-    finish(null);
-  }
+  sendCollectorMessageBestEffort({
+    type: TRACE_IOS_PENDING_FIRST_STORY_CLEAR_MESSAGE,
+  });
 }
 
 function applyKernelConnectAndSavePresentation(handle, label, kind, disabled) {
@@ -4548,7 +4607,7 @@ function runKernelConnectAndSave(handle, workKey) {
     "connecting-and-saving",
     true,
   );
-  sendKernelCollectorMessage({
+  sendCollectorMessage({
     type: TRACE_CONNECT_AND_SAVE_MESSAGE,
     workKey: workKey,
     handoffId: pendingHandoffId,
@@ -4667,21 +4726,10 @@ function processIosPendingFirstStoryAdd() {
           }
         });
       };
-  try {
-    if (KERNEL_SESSION_ACTIVE) {
-      sendKernelCollectorMessage(
-        { type: TRACE_IOS_PENDING_FIRST_STORY_GET_MESSAGE },
-        processResponse,
-      );
-      return;
-    }
-    ext.runtime.sendMessage(
-      { type: TRACE_IOS_PENDING_FIRST_STORY_GET_MESSAGE },
-      processResponse,
-    );
-  } catch (_) {
-    /* native pending handoff is optional */
-  }
+  sendCollectorMessage(
+    { type: TRACE_IOS_PENDING_FIRST_STORY_GET_MESSAGE },
+    processResponse,
+  );
 }
 
 function handleFirstStoryFocusAdd(sendResponse, attempt) {
@@ -4818,13 +4866,13 @@ function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
     btn.style.cssText = storySheetGhostButtonCss() + ";cursor:wait;color:#6e6a5b";
     btn.textContent = "Saving...";
     btn.disabled = true;
-    ext.runtime.sendMessage(
+    sendCollectorMessage(
       {
         type: "TRACE_SET_HIDDEN_WORK",
         payload: { key: workKey, hidden: nextHidden },
       },
       function (response) {
-        if (ext.runtime.lastError || !response) {
+        if (!response) {
           btn.style.cssText = storySheetGhostButtonCss() + ";cursor:pointer;color:#b54a30";
           btn.textContent = "Error";
           btn.disabled = false;
@@ -5187,22 +5235,22 @@ function finishQualifyAnchorElement() {
 function finishQualifyPostedChapterCount(item) {
   if (!item) return null;
   var published = Number(item.chPub);
-  if (Number.isFinite(published) && published > 0) return Math.trunc(published);
+  if (Number.isSafeInteger(published) && published > 0) return published;
   var total = Number(item.cht);
-  if (Number.isFinite(total) && total > 0) return Math.trunc(total);
+  if (Number.isSafeInteger(total) && total > 0) return total;
   return null;
 }
 
 function finishQualifyCurrentChapterCount(item) {
   var current = Number(item && item.chn);
-  if (!Number.isFinite(current) || current <= 0) return null;
-  return Math.trunc(current);
+  if (!Number.isSafeInteger(current) || current <= 0) return null;
+  return current;
 }
 
 function finishQualifyIsLastPostedChapter(item) {
   var current = finishQualifyCurrentChapterCount(item);
   var posted = finishQualifyPostedChapterCount(item);
-  return current != null && posted != null && current >= posted;
+  return current != null && posted != null && current === posted;
 }
 
 function finishQualifySourceWorkState(item) {
@@ -5245,17 +5293,7 @@ function finishQualifyRememberDismissed(key) {
   }
 }
 
-function finishQualifyProgressPatch(item) {
-  var current = finishQualifyCurrentChapterCount(item);
-  var posted = finishQualifyPostedChapterCount(item);
-  if (current == null || posted == null) return null;
-  return {
-    progress: { unit: "CHAPTER", value: current, total: posted },
-    chapters: { current: current, total: posted },
-  };
-}
-
-function finishQualifySignalPayload(decision, state, workState, readerStatus) {
+function finishQualifySignalPayload(decision, state, workState) {
   var entryId = decision && decision.entry && decision.entry.entryId;
   var chapter = finishQualifyCurrentChapterCount(decision && decision.item);
   var total = finishQualifyPostedChapterCount(decision && decision.item);
@@ -5270,93 +5308,144 @@ function finishQualifySignalPayload(decision, state, workState, readerStatus) {
   };
   if (state === "resolved") {
     payload.workStatus = workState;
-    payload.readerStatus = readerStatus;
+    payload.resolutionSource = decision.requiresWorkStateChoice ? "reader" : "source";
   }
   return payload;
 }
 
-function sendFinishQualifySignal(decision, state, workState, readerStatus) {
-  var payload = finishQualifySignalPayload(decision, state, workState, readerStatus);
-  if (!payload) return;
-  try {
-    ext.runtime.sendMessage({
+function finishQualifySignalResult(response) {
+  var result = null;
+  if (
+    response &&
+    response.command &&
+    response.command.kind === "acknowledged" &&
+    typeof response.command.state === "string"
+  ) {
+    result = response.command;
+  } else if (response && response.data && typeof response.data.state === "string") {
+    result = response.data;
+  }
+  if (
+    !result ||
+    (result.state !== "open" && result.state !== "resolved" && result.state !== "ignored")
+  ) {
+    return null;
+  }
+  return {
+    state: result.state,
+    eventId: typeof result.eventId === "string" ? result.eventId : null,
+    workKey:
+      result.workKey === null
+        ? null
+        : typeof result.workKey === "string"
+          ? result.workKey
+          : undefined,
+    entry:
+      result.entry === null
+        ? null
+        : result.entry && typeof result.entry === "object"
+          ? result.entry
+          : undefined,
+  };
+}
+
+function sendFinishQualifySignal(decision, state, workState, done) {
+  var payload = finishQualifySignalPayload(decision, state, workState);
+  if (!payload) {
+    if (typeof done === "function") done(false, "invalid_request");
+    return;
+  }
+  sendCollectorMessage({
       type: "TRACE_FINISH_QUALIFICATION_SIGNAL",
       payload: payload,
-    });
-  } catch (_) {
-    /* non-blocking check-in fallback */
-  }
+    }, function (response) {
+      if (typeof done !== "function") return;
+      if (!response || response.ok !== true) {
+        done(false, response && response.error);
+        return;
+      }
+      var result = finishQualifySignalResult(response);
+      if (!result) {
+        done(false, "confirmation_missing");
+        return;
+      }
+      done(true, result);
+    },
+  );
 }
 
-function optimisticWorkStatusFromOverride(entry, override) {
-  var next = Object.assign({}, entry || {});
-  if (!override) return next;
-  next.workStatus = override;
-  next.workStatusProvenance = "override";
-  if (override === "abandoned") next.workMark = { kind: "abandoned" };
-  else if (next.workMark && next.workMark.kind === "abandoned") delete next.workMark;
-  return next;
+function finishQualifyResultMatchesDecision(decision, result) {
+  var entry = result && result.entry;
+  var expectedEntryId = decision && decision.entry && decision.entry.entryId;
+  if (!expectedEntryId) return false;
+  if (
+    result &&
+    (result.state === "resolved" || result.state === "ignored") &&
+    result.workKey === null &&
+    result.entry === null
+  ) {
+    return true;
+  }
+  if (!entry || typeof entry !== "object") return false;
+  if (entry.entryId !== expectedEntryId) return false;
+  return !result.workKey || result.workKey === decision.workKey;
 }
 
-function applyOptimisticFinishQualify(workKey, entry, patch, nextChapters) {
-  var next = snapshotStoryEntry(entry);
-  if (patch.status) {
-    next.status = legacyReaderStatus(patch.status);
-    next.readerStatus = legacyReaderStatus(patch.status);
-    next.canonicalReaderStatus = canonicalReaderStatus(patch.status);
-    next.statusChoicesAvailable = true;
+function refreshFinishQualifyProjection(decision, result) {
+  if (!finishQualifyResultMatchesDecision(decision, result)) return false;
+  var entry = result.entry;
+
+  if (entry === null && result.workKey === null) {
+    // The background owner already removed the exact account/work/entry
+    // projection. A terminal replay after server-side deletion is settled; it
+    // must not reopen recovery or manufacture a replacement entry in-page.
+    renderQuickAddButton(decision.workKey);
+    return true;
   }
-  if (nextChapters) {
-    next.chapters = nextChapters;
-    next.catchupState = "UP";
-    next.newChapterCount = 0;
+
+  if (KERNEL_SESSION_ACTIVE) {
+    // The kernel publishes the acknowledged entry into its account-scoped
+    // projection before replying. Read that projection instead of creating a
+    // second content-script authority for private library state.
+    renderQuickAddButton(decision.workKey);
+    return true;
   }
-  if (patch.story_snapshot && Object.prototype.hasOwnProperty.call(patch.story_snapshot, "work_status_override")) {
-    next = optimisticWorkStatusFromOverride(next, patch.story_snapshot.work_status_override);
-  }
-  // The finish/catch-up PATCH is authoritative for the visible entry. Do not
-  // carry an older auto-track or status mutation spinner into the confirmed
-  // state, otherwise the handle can remain stuck on "Adding..." until reload.
-  next = clearStoryOverlayTransientState(next);
-  optimisticStoryPageEntries[workKey] = next;
+
+  // The explicit legacy rollback still uses the account-scoped storage
+  // projection. Never hold the response in a page-global cache; publish it only
+  // when the active legacy account still matches the decision that sent it.
+  writeConfirmedOverlayEntryForStory(
+    decision.workKey,
+    clearStoryOverlayTransientState(snapshotStoryEntry(entry)),
+    function () {
+      if (getWorkKeyFromUrl() === decision.workKey) {
+        renderQuickAddButton(decision.workKey);
+      }
+    },
+    decision.accountId || null,
+  );
+  return true;
 }
 
-function finishQualifyReaderStatusForWorkState(workState) {
-  return workState === "complete" || workState === "abandoned" ? "FINISHED" : "CAUGHT_UP";
-}
-
-function sendFinishQualifyPatch(decision, workState, done) {
-  var entry = decision.entry || {};
-  var entryId = entry.entryId;
-  var progress = finishQualifyProgressPatch(decision.item);
-  if (!entryId || !progress) {
+function sendFinishQualifyResolution(decision, workState, done) {
+  if (!decision.entry || !decision.entry.entryId) {
     done(false, "Could not save. Try again.");
     return;
   }
-  var readerStatus = finishQualifyReaderStatusForWorkState(workState);
-  var patch = {
-    status: readerStatus,
-    progress: progress.progress,
-  };
-  if (decision.requiresWorkStateChoice) {
-    patch.story_snapshot = { work_status_override: workState };
-  }
-  ext.runtime.sendMessage(
-    {
-      type: "TRACE_PATCH_LIBRARY_ENTRY",
-      payload: { workKey: decision.workKey, entryId: entryId, patch: patch },
-    },
-    function (response) {
-      if (ext.runtime.lastError || !response || !response.ok) {
-        done(false, readerStatusChoiceErrorCopy(response && response.error));
+  sendFinishQualifySignal(
+    decision,
+    "resolved",
+    workState,
+    function (ok, result) {
+      if (!ok || !result || (result.state !== "resolved" && result.state !== "ignored")) {
+        done(false, readerStatusChoiceErrorCopy(ok ? "confirmation_missing" : result));
         return;
       }
-      applyOptimisticFinishQualify(decision.workKey, entry, patch, progress.chapters);
-      renderQuickAddButton(decision.workKey);
-      if (decision.requiresWorkStateChoice) {
-        sendFinishQualifySignal(decision, "resolved", workState, readerStatus);
+      if (!finishQualifyResultMatchesDecision(decision, result)) {
+        done(false, readerStatusChoiceErrorCopy("confirmation_missing"));
+        return;
       }
-      done(true);
+      done(true, null, result);
     },
   );
 }
@@ -5365,13 +5454,14 @@ function finishQualifyDecision(view, workKey) {
   var entry = view && view.entry;
   if (!view || !view.hasAuth || !view.canMutate || !entry || !entry.entryId) return null;
   var status = canonicalReaderStatus(entryStatus(entry));
-  if (status === "FINISHED" || status === "CAUGHT_UP" || status === "DROPPED") return null;
   var item = storySheetCurrentItem();
   if (!item || item.ctx !== "story" || !finishQualifyIsLastPostedChapter(item)) return null;
+  var sourceWorkState = finishQualifySourceWorkState(item);
+  if (status === "FINISHED" || status === "DROPPED") return null;
+  if (status === "CAUGHT_UP" && sourceWorkState !== "complete") return null;
   var anchorEl = finishQualifyAnchorElement();
   var bodyEl = finishQualifyBodyElement();
   if (!anchorEl || !bodyEl) return null;
-  var sourceWorkState = finishQualifySourceWorkState(item);
   return {
     workKey: workKey,
     entry: entry,
@@ -5380,78 +5470,203 @@ function finishQualifyDecision(view, workKey) {
     requiresWorkStateChoice: !sourceWorkState,
     anchorEl: anchorEl,
     bodyEl: bodyEl,
+    accountId: view.accountId || null,
     sessionKey: finishQualifySessionKey(workKey, entry.entryId, item),
   };
 }
 
+function finishQualifyRemoveBand(workKey) {
+  if (finishQualifyBandState[workKey] && typeof finishQualifyBandState[workKey].remove === "function") {
+    finishQualifyBandState[workKey].remove();
+  }
+  finishQualifyBandState[workKey] = null;
+}
+
+function finishQualifyClearFlow(workKey, removeBand) {
+  var current = finishQualifyWatchState[workKey];
+  if (current && typeof current.cleanup === "function") current.cleanup();
+  finishQualifyWatchState[workKey] = null;
+  if (removeBand !== false) finishQualifyRemoveBand(workKey);
+}
+
+function finishQualifySettleFlow(workKey, flowState, removeBand) {
+  if (!finishQualifyFlowIsCurrent(workKey, flowState)) return false;
+  if (typeof flowState.cleanup === "function") flowState.cleanup();
+  flowState.cleanup = null;
+  flowState.settled = true;
+  if (removeBand !== false) finishQualifyRemoveBand(workKey);
+  return true;
+}
+
+function finishQualifyFlowIsCurrent(workKey, flowState) {
+  return (
+    !!flowState &&
+    finishQualifyWatchState[workKey] === flowState &&
+    getWorkKeyFromUrl() === workKey
+  );
+}
+
+function finishQualifyStoryDescriptor(decision) {
+  return {
+    src: storySheetSourceLine(),
+    title: decision.item.t,
+    chapter: finishQualifyCurrentChapterCount(decision.item),
+    total: finishQualifyPostedChapterCount(decision.item),
+  };
+}
+
+function showFinishQualifyToast(decision, view, result) {
+  if (!window.TraceFinishQualify || typeof window.TraceFinishQualify.toast !== "function") return;
+  var authoritativeStatus = entryStatus(result && result.entry);
+  window.TraceFinishQualify.toast({
+    kind: authoritativeStatus === "FINISHED" ? "finished" : "caughtup",
+    story: finishQualifyStoryDescriptor(decision),
+    onOpenInTrace: function () {
+      openTraceUrlInBrowserTab(storyTraceOpenUrl(view.authState, decision.entry));
+    },
+  });
+}
+
+function mountFinishQualifyBand(decision, view, workKey, flowState) {
+  if (!finishQualifyFlowIsCurrent(workKey, flowState)) return;
+  finishQualifyRemoveBand(workKey);
+  finishQualifyBandState[workKey] = window.TraceFinishQualify.mount({
+    anchorEl: decision.anchorEl,
+    placement: "inline",
+    align: isAO3() ? "start" : "center",
+    story: finishQualifyStoryDescriptor(decision),
+    onQualify: function (workState, controls) {
+      if (!finishQualifyFlowIsCurrent(workKey, flowState)) {
+        if (controls && typeof controls.fail === "function") {
+          controls.fail("This page state changed. Reopen the story to try again.");
+        }
+        return false;
+      }
+      sendFinishQualifyResolution(decision, workState, function (ok, message, result) {
+        if (!finishQualifyFlowIsCurrent(workKey, flowState)) return;
+        if (ok) {
+          finishQualifyRememberDismissed(decision.sessionKey);
+          if (result && result.state === "resolved" && result.entry && controls && typeof controls.resolve === "function") {
+            controls.resolve();
+          } else {
+            finishQualifyRemoveBand(workKey);
+          }
+          finishQualifySettleFlow(workKey, flowState, false);
+          refreshFinishQualifyProjection(decision, result);
+        } else if (controls && typeof controls.fail === "function") {
+          controls.fail(message);
+        }
+      });
+      return false;
+    },
+    onDismiss: function () {
+      finishQualifyRememberDismissed(decision.sessionKey);
+      finishQualifyClearFlow(workKey, false);
+      finishQualifyBandState[workKey] = null;
+    },
+    onOpenInTrace: function () {
+      openTraceUrlInBrowserTab(storyTraceOpenUrl(view.authState, decision.entry));
+    },
+  });
+}
+
+function mountFinishQualifyRecovery(decision, view, workKey, flowState, message) {
+  if (
+    !finishQualifyFlowIsCurrent(workKey, flowState) ||
+    !window.TraceFinishQualify ||
+    typeof window.TraceFinishQualify.recovery !== "function"
+  ) return;
+  finishQualifyRemoveBand(workKey);
+  finishQualifyBandState[workKey] = window.TraceFinishQualify.recovery({
+    anchorEl: decision.anchorEl,
+    align: isAO3() ? "start" : "center",
+    story: finishQualifyStoryDescriptor(decision),
+    message: message || "Could not update. Retry here or open Trace.",
+    onRetry: function (controls) {
+      if (!finishQualifyFlowIsCurrent(workKey, flowState)) {
+        controls.fail("This page state changed. Reopen the story to try again.");
+        return;
+      }
+      sendFinishQualifyResolution(
+        decision,
+        decision.sourceWorkState,
+        function (ok, nextMessage, result) {
+          if (!finishQualifyFlowIsCurrent(workKey, flowState)) return;
+          if (!ok || !result) {
+            controls.fail(nextMessage || "Could not update. Try again or open Trace.");
+            return;
+          }
+          controls.resolve();
+          finishQualifyBandState[workKey] = null;
+          finishQualifySettleFlow(workKey, flowState, false);
+          refreshFinishQualifyProjection(decision, result);
+          if (result.state === "resolved" && result.entry) showFinishQualifyToast(decision, view, result);
+        },
+      );
+    },
+    onOpenInTrace: function () {
+      openTraceUrlInBrowserTab(storyTraceOpenUrl(view.authState, decision.entry));
+    },
+  });
+}
+
 function setupFinishQualify(view, workKey) {
   var decision = finishQualifyDecision(view, workKey);
-  var signature = decision ? decision.sessionKey + ":" + (decision.sourceWorkState || "unknown") : "";
+  var signature = decision
+    ? [
+        decision.sessionKey,
+        decision.sourceWorkState || "unknown",
+        decision.accountId || "account-scoped",
+      ].join(":")
+    : "";
   if (finishQualifyWatchState[workKey] && finishQualifyWatchState[workKey].signature === signature) return;
-  if (finishQualifyWatchState[workKey] && typeof finishQualifyWatchState[workKey].cleanup === "function") {
-    finishQualifyWatchState[workKey].cleanup();
-  }
-  finishQualifyWatchState[workKey] = null;
+  finishQualifyClearFlow(workKey, true);
   if (!decision || finishQualifyWasDismissed(decision.sessionKey)) return;
   if (!window.TraceFinishQualify || typeof window.TraceFinishQualify.onReachEnd !== "function") return;
 
   // `onReachEnd` checks the current viewport immediately and may invoke its
   // callback before returning. Install the guard first so a successful
-  // synchronous finish PATCH cannot re-enter render -> setup recursively.
-  var watchState = { signature: signature, cleanup: null };
+  // synchronous finish resolution cannot re-enter render -> setup recursively.
+  finishQualifyGeneration += 1;
+  var watchState = {
+    signature: signature,
+    generation: finishQualifyGeneration,
+    cleanup: null,
+  };
   finishQualifyWatchState[workKey] = watchState;
   var cleanup = window.TraceFinishQualify.onReachEnd(decision.bodyEl, function () {
-    if (finishQualifyWasDismissed(decision.sessionKey)) return;
+    if (
+      !finishQualifyFlowIsCurrent(workKey, watchState) ||
+      finishQualifyWasDismissed(decision.sessionKey)
+    ) return;
     if (decision.sourceWorkState) {
-      sendFinishQualifyPatch(decision, decision.sourceWorkState, function (ok) {
-        if (ok && window.TraceFinishQualify && typeof window.TraceFinishQualify.toast === "function") {
-          window.TraceFinishQualify.toast({
-            kind: finishQualifyReaderStatusForWorkState(decision.sourceWorkState) === "FINISHED" ? "finished" : "caughtup",
-            story: {
-              src: storySheetSourceLine(),
-              title: decision.item.t,
-              chapter: finishQualifyCurrentChapterCount(decision.item),
-              total: finishQualifyPostedChapterCount(decision.item),
-            },
-            onOpenInTrace: function () {
-              openTraceUrlInBrowserTab(storyTraceOpenUrl(view.authState, decision.entry));
-            },
-          });
+      sendFinishQualifyResolution(decision, decision.sourceWorkState, function (ok, message, result) {
+        if (!finishQualifyFlowIsCurrent(workKey, watchState)) return;
+        if (!ok || !result) {
+          mountFinishQualifyRecovery(decision, view, workKey, watchState, message);
+          return;
         }
+        finishQualifySettleFlow(workKey, watchState, true);
+        refreshFinishQualifyProjection(decision, result);
+        if (result.state === "resolved" && result.entry) showFinishQualifyToast(decision, view, result);
       });
       return;
     }
-    if (finishQualifyBandState[workKey] && typeof finishQualifyBandState[workKey].remove === "function") {
-      finishQualifyBandState[workKey].remove();
-    }
-    sendFinishQualifySignal(decision, "open");
-    finishQualifyBandState[workKey] = window.TraceFinishQualify.mount({
-      anchorEl: decision.anchorEl,
-      placement: "inline",
-      align: isAO3() ? "start" : "center",
-      story: {
-        src: storySheetSourceLine(),
-        title: decision.item.t,
-        chapter: finishQualifyCurrentChapterCount(decision.item),
-        total: finishQualifyPostedChapterCount(decision.item),
-      },
-      onQualify: function (workState, controls) {
-        sendFinishQualifyPatch(decision, workState, function (ok, message) {
-          if (ok) {
-            finishQualifyRememberDismissed(decision.sessionKey);
-            if (controls && typeof controls.resolve === "function") controls.resolve();
-          } else if (controls && typeof controls.fail === "function") {
-            controls.fail(message);
-          }
-        });
-        return false;
-      },
-      onDismiss: function () {
-        finishQualifyRememberDismissed(decision.sessionKey);
-      },
-      onOpenInTrace: function () {
-        openTraceUrlInBrowserTab(storyTraceOpenUrl(view.authState, decision.entry));
-      },
+    sendFinishQualifySignal(decision, "open", null, function (ok, result) {
+      if (!finishQualifyFlowIsCurrent(workKey, watchState)) return;
+      if (!ok || !result || result.state === "open") {
+        // The open signal is observational. A suspended worker or malformed
+        // response must not hide the reader's explicit qualification control.
+        mountFinishQualifyBand(decision, view, workKey, watchState);
+        return;
+      }
+      if (result.state !== "open" && refreshFinishQualifyProjection(decision, result)) {
+        finishQualifySettleFlow(workKey, watchState, true);
+        return;
+      }
+      // An unexpected acknowledgement is treated like an unavailable open
+      // signal: keep manual resolution possible without inventing local state.
+      mountFinishQualifyBand(decision, view, workKey, watchState);
     });
   });
   if (finishQualifyWatchState[workKey] === watchState) {
@@ -5476,6 +5691,11 @@ function renderQuickAddFromSnapshot(workKey, anchor, res) {
     var handle = els.handle;
     var sheet = els.sheet;
     var authState = res.traceAuthState || { state: res.authToken ? "connected" : "signed_out" };
+    var accountId = normalizeStorageString(
+      res[TRACE_ACCOUNT_ID_KEY] ||
+      (cache && cache.accountId) ||
+      (authState && authState.accountId),
+    );
     var info = normalizeOverlayEntry(entry, preference);
 
     if (entry || optimisticEntry) {
@@ -5518,6 +5738,7 @@ function renderQuickAddFromSnapshot(workKey, anchor, res) {
       authState: authState,
       entry: info,
       canMutate: true,
+      accountId: accountId,
     };
     var hasEntryAuthError = !!(
       info &&
@@ -5657,10 +5878,10 @@ function renderQuickAddButton(workKey, projectionAttempt) {
     var attempt = Number.isInteger(projectionAttempt) && projectionAttempt >= 0
       ? projectionAttempt
       : 0;
-    ext.runtime.sendMessage(
+    sendCollectorMessage(
       { type: ACCOUNT_PROJECTION_GET_MESSAGE, workKeys: [workKey] },
       function (response) {
-        if (ext.runtime.lastError || !response || response.ok !== true) {
+        if (!response || response.ok !== true) {
           scheduleKernelProjectionRetry(workKey, attempt);
           return;
         }
@@ -5767,20 +5988,14 @@ if (!shouldDisableTraceContentScript()) {
 // Safari's site permission, so it must not wait on DOM readiness, prefs, or
 // any network work.
 function announceArchivePageToBackground(handoffId) {
-  try {
-    var message = { type: "TRACE_ARCHIVE_SEEN" };
-    if (
-      typeof handoffId === "string" &&
-      /^[A-Za-z0-9_-]{1,128}$/.test(handoffId)
-    ) {
-      message.handoffId = handoffId;
-    }
-    ext.runtime.sendMessage(message, function () {
-      void ext.runtime.lastError;
-    });
-  } catch (_) {
-    /* best-effort only */
+  var message = { type: "TRACE_ARCHIVE_SEEN" };
+  if (
+    typeof handoffId === "string" &&
+    /^[A-Za-z0-9_-]{1,128}$/.test(handoffId)
+  ) {
+    message.handoffId = handoffId;
   }
+  sendCollectorMessageBestEffort(message);
 }
 
 if (!shouldDisableTraceContentScript()) {

@@ -162,9 +162,32 @@ export class AccountDataRepository {
     requestedScope: AccountScope,
     confirmation: ConfirmedStorySave,
   ): Promise<AccountDataWriteResult> {
-    const reservation = this.reserveOverlayWrite();
+    return this.publishAuthoritativeStory(requestedScope, confirmation);
+  }
+
+  /**
+   * Publishes an exact server acknowledgement into the account-scoped root.
+   * Finish qualification responses from the first additive server release may
+   * omit syncVersion, so preserve the current opaque version in that case.
+   */
+  publishAuthoritativeStory(
+    requestedScope: AccountScope,
+    confirmation: Readonly<{
+      workKey: string;
+      entryId: string;
+      entry: unknown;
+      syncVersion?: string;
+    }>,
+    reservation = this.reserveOverlayWrite(),
+  ): Promise<AccountDataWriteResult> {
     const entry = copyLibraryOverlayEntry(confirmation.entry);
-    if (entry === null) return Promise.resolve({ kind: "invalid_model" });
+    if (
+      entry === null ||
+      entry.entryId === undefined ||
+      entry.entryId !== confirmation.entryId
+    ) {
+      return Promise.resolve({ kind: "invalid_model" });
+    }
     return this.#publish(requestedScope, (current) => {
       const overlay = current.overlay ?? Object.freeze({
         entries: Object.freeze({}),
@@ -179,7 +202,28 @@ export class AccountDataRepository {
             [confirmation.workKey]: entry,
           }),
           workPreferences: overlay.workPreferences,
-          syncVersion: confirmation.syncVersion,
+          syncVersion: confirmation.syncVersion ?? overlay.syncVersion,
+        }),
+      });
+    }, reservation);
+  }
+
+  removeAuthoritativeStory(
+    requestedScope: AccountScope,
+    identity: Readonly<{ workKey: string; entryId: string }>,
+    reservation = this.reserveOverlayWrite(),
+  ): Promise<AccountDataWriteResult> {
+    return this.#publish(requestedScope, (current) => {
+      const overlay = current.overlay;
+      const stored = overlay?.entries[identity.workKey];
+      if (overlay === null || stored?.entryId !== identity.entryId) return current;
+      const entries = { ...overlay.entries };
+      delete entries[identity.workKey];
+      return Object.freeze({
+        ...current,
+        overlay: Object.freeze({
+          ...overlay,
+          entries: Object.freeze(entries),
         }),
       });
     }, reservation);

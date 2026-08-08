@@ -3781,6 +3781,13 @@ test("TRACE_PATCH_LIBRARY_ENTRY validates auth, entry id, rating, and progress",
 
 test("TRACE_FINISH_QUALIFICATION_SIGNAL posts unresolved and resolved finish evidence", async () => {
   const entryId = "00000000-0000-4000-8000-000000000781";
+  const entry = {
+    status: "READING",
+    readerStatus: "READING",
+    canonicalReaderStatus: "CAUGHT_UP",
+    entryId,
+    chapters: { current: 5, total: 5 },
+  };
   const seenBodies = [];
   const h = createBackgroundHarness({
     storageState: { authToken: "token-finish-1" },
@@ -3795,12 +3802,19 @@ test("TRACE_FINISH_QUALIFICATION_SIGNAL posts unresolved and resolved finish evi
       return createResponse({
         json: {
           success: true,
-          data: { state: seenBodies.at(-1).state, eventId: "event-1" },
+          data: {
+            state: seenBodies.at(-1).state,
+            eventId: "00000000-0000-4000-8000-000000000991",
+            operationId: seenBodies.at(-1).operationId || null,
+            workKey: "ao3:781",
+            entry,
+            syncVersion: "2026-08-08T08:00:00.000Z",
+          },
         },
       });
     },
   });
-  h.hooks.setBearerToken("token-finish-1");
+  h.hooks.setBearerToken(null);
 
   const openResponse = await h.dispatchMessage({
     type: "TRACE_FINISH_QUALIFICATION_SIGNAL",
@@ -3823,12 +3837,19 @@ test("TRACE_FINISH_QUALIFICATION_SIGNAL posts unresolved and resolved finish evi
       total: 5,
       state: "resolved",
       workStatus: "hiatus",
-      readerStatus: "CAUGHT_UP",
+      resolutionSource: "source",
     },
   });
 
   assert.equal(openResponse.ok, true);
   assert.equal(resolvedResponse.ok, true);
+  assert.match(
+    seenBodies[1].operationId,
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+  );
+  assert.deepEqual(plainJson(resolvedResponse.data.entry), entry);
+  assert.deepEqual(plainJson(h.store.libraryOverlayCache.entries["ao3:781"]), entry);
+  assert.equal(h.store.libraryOverlayCache.accountId, "unknown");
   assert.deepEqual(plainJson(seenBodies), [
     {
       entryId,
@@ -3846,10 +3867,346 @@ test("TRACE_FINISH_QUALIFICATION_SIGNAL posts unresolved and resolved finish evi
       total: 5,
       state: "resolved",
       workStatus: "hiatus",
-      readerStatus: "CAUGHT_UP",
+      resolutionSource: "source",
+      operationId: seenBodies[1].operationId,
     },
   ]);
   assert.match(h.store.traceAuthState.lastFinishQualificationAt, /^\d{4}-/);
+});
+
+test("TRACE_FINISH_QUALIFICATION_SIGNAL does not retry an uncertain open observation", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000785";
+  let attempts = 0;
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-finish-open" },
+    fetchImpl: async (url) => {
+      if (!String(url).endsWith("/api/extension/finish-qualification")) {
+        return createResponse({ json: { account_id: "account-a" } });
+      }
+      attempts += 1;
+      return createResponse({ ok: false, status: 503 });
+    },
+  });
+  h.hooks.setBearerToken("token-finish-open");
+
+  assert.deepEqual(plainJson(await h.dispatchMessage({
+    type: "TRACE_FINISH_QUALIFICATION_SIGNAL",
+    payload: {
+      entryId,
+      workKey: "ao3:785",
+      source: "ao3",
+      chapter: 1,
+      total: 1,
+      state: "open",
+    },
+  })), { ok: false, error: "http_503" });
+  assert.equal(attempts, 1);
+});
+
+test("TRACE_FINISH_QUALIFICATION_SIGNAL retries once with normalized reader provenance", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000783";
+  const bodies = [];
+  const operationIds = [];
+  let attempts = 0;
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-finish-3" },
+    fetchImpl: async (url, init) => {
+      if (!String(url).endsWith("/api/extension/finish-qualification")) {
+        return createResponse({ json: { account_id: "account-a" } });
+      }
+      attempts += 1;
+      bodies.push(JSON.parse(init.body));
+      operationIds.push(bodies.at(-1).operationId);
+      if (attempts === 1) throw new Error("response lost");
+      return createResponse({
+        json: {
+          success: true,
+          data: {
+            state: "resolved",
+            eventId: null,
+            operationId: bodies.at(-1).operationId,
+            workKey: "ao3:783",
+            entry: {
+              status: "COMPLETED",
+              readerStatus: "COMPLETED",
+              canonicalReaderStatus: "FINISHED",
+              entryId,
+              chapters: { current: 1, total: 1 },
+            },
+          },
+        },
+      });
+    },
+  });
+  h.hooks.setBearerToken("token-finish-3");
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_FINISH_QUALIFICATION_SIGNAL",
+    payload: {
+      entryId,
+      workKey: "ao3:783",
+      source: "ao3",
+      chapter: 1,
+      total: 1,
+      state: "resolved",
+      workStatus: "complete",
+    },
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(attempts, 2);
+  assert.deepEqual(plainJson(bodies[0]), plainJson(bodies[1]));
+  assert.equal(typeof operationIds[0], "string");
+  assert.ok(operationIds[0].length > 0);
+  assert.equal(operationIds[0], operationIds[1]);
+  assert.equal(bodies[0].resolutionSource, "reader");
+  assert.equal(response.data.entry.entryId, entryId);
+});
+
+test("TRACE_FINISH_QUALIFICATION_SIGNAL never accepts mismatched authoritative identity", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000784";
+  let attempts = 0;
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-finish-4" },
+    fetchImpl: async (url) => {
+      if (!String(url).endsWith("/api/extension/finish-qualification")) {
+        return createResponse({ json: { account_id: "account-a" } });
+      }
+      attempts += 1;
+      return createResponse({
+        json: {
+          success: true,
+          data: {
+            state: "resolved",
+            eventId: null,
+            workKey: "ao3:999",
+            entry: {
+              status: "COMPLETED",
+              entryId,
+              chapters: { current: 1, total: 1 },
+            },
+          },
+        },
+      });
+    },
+  });
+  h.hooks.setBearerToken("token-finish-4");
+
+  assert.deepEqual(plainJson(await h.dispatchMessage({
+    type: "TRACE_FINISH_QUALIFICATION_SIGNAL",
+    payload: {
+      entryId,
+      workKey: "ao3:784",
+      source: "ao3",
+      chapter: 1,
+      total: 1,
+      state: "resolved",
+      workStatus: "complete",
+    },
+  })), { ok: false, error: "invalid_response" });
+  assert.equal(attempts, 1);
+});
+
+test("TRACE_FINISH_QUALIFICATION_SIGNAL rejects command-incompatible response states", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000786";
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-finish-state" },
+    fetchImpl: async (url) => {
+      if (!String(url).endsWith("/api/extension/finish-qualification")) {
+        return createResponse({ json: { account_id: "account-a" } });
+      }
+      return createResponse({
+        json: {
+          success: true,
+          data: {
+            state: "resolved",
+            eventId: null,
+            workKey: "ao3:786",
+            entry: {
+              status: "COMPLETED",
+              readerStatus: "COMPLETED",
+              canonicalReaderStatus: "FINISHED",
+              entryId,
+              chapters: { current: 1, total: 1 },
+            },
+          },
+        },
+      });
+    },
+  });
+  h.hooks.setBearerToken("token-finish-state");
+
+  assert.deepEqual(plainJson(await h.dispatchMessage({
+    type: "TRACE_FINISH_QUALIFICATION_SIGNAL",
+    payload: {
+      entryId,
+      workKey: "ao3:786",
+      source: "ao3",
+      chapter: 1,
+      total: 1,
+      state: "open",
+    },
+  })), { ok: false, error: "invalid_response" });
+});
+
+test("TRACE_FINISH_QUALIFICATION_SIGNAL accepts an ignored deletion receipt and removes stale cache", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000787";
+  let attempts = 0;
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-finish-deleted",
+      libraryOverlayCache: {
+        accountId: "unknown",
+        apiBase: "https://tracefiction.com",
+        contextVersion: 1,
+        entries: {
+          "ao3:787": { status: "READING", entryId },
+        },
+        workPreferences: {},
+        syncVersion: "2026-08-08T08:00:00.000Z",
+      },
+    },
+    fetchImpl: async (url, init) => {
+      if (!String(url).endsWith("/api/extension/finish-qualification")) {
+        return createResponse({ json: { account_id: "account-a" } });
+      }
+      attempts += 1;
+      const body = JSON.parse(init.body);
+      return createResponse({
+        json: {
+          success: true,
+          data: {
+            state: "ignored",
+            eventId: null,
+            operationId: body.operationId,
+            workKey: null,
+            entry: null,
+            syncVersion: null,
+          },
+        },
+      });
+    },
+  });
+  h.hooks.setBearerToken("token-finish-deleted");
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_FINISH_QUALIFICATION_SIGNAL",
+    payload: {
+      entryId,
+      workKey: "ao3:787",
+      source: "ao3",
+      chapter: 1,
+      total: 1,
+      state: "resolved",
+      workStatus: "wip",
+    },
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.data.state, "ignored");
+  assert.equal(attempts, 1);
+  assert.equal(h.store.libraryOverlayCache.entries["ao3:787"], undefined);
+});
+
+test("TRACE_FINISH_QUALIFICATION_SIGNAL accepts a resolved receipt replay after deletion", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000788";
+  let attempts = 0;
+  const h = createBackgroundHarness({
+    storageState: {
+      authToken: "token-finish-replayed-deletion",
+      libraryOverlayCache: {
+        accountId: "unknown",
+        apiBase: "https://tracefiction.com",
+        contextVersion: 1,
+        entries: {
+          "ao3:788": { status: "READING", entryId },
+          "ao3:789": {
+            status: "READING",
+            entryId: "00000000-0000-4000-8000-000000000789",
+          },
+        },
+        workPreferences: {},
+        syncVersion: "2026-08-08T08:00:00.000Z",
+      },
+    },
+    fetchImpl: async (url, init) => {
+      if (!String(url).endsWith("/api/extension/finish-qualification")) {
+        return createResponse({ json: { account_id: "account-a" } });
+      }
+      attempts += 1;
+      const body = JSON.parse(init.body);
+      return createResponse({
+        json: {
+          success: true,
+          data: {
+            state: "resolved",
+            eventId: "00000000-0000-4000-8000-000000000999",
+            operationId: body.operationId,
+            workKey: null,
+            entry: null,
+            syncVersion: null,
+          },
+        },
+      });
+    },
+  });
+  h.hooks.setBearerToken("token-finish-replayed-deletion");
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_FINISH_QUALIFICATION_SIGNAL",
+    payload: {
+      entryId,
+      workKey: "ao3:788",
+      source: "ao3",
+      chapter: 1,
+      total: 1,
+      state: "resolved",
+      workStatus: "complete",
+    },
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.data.state, "resolved");
+  assert.equal(attempts, 1);
+  assert.equal(h.store.libraryOverlayCache.entries["ao3:788"], undefined);
+  assert.ok(h.store.libraryOverlayCache.entries["ao3:789"]);
+});
+
+test("TRACE_FINISH_QUALIFICATION_SIGNAL does not retry an explicit disabled response", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000790";
+  let attempts = 0;
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-finish-disabled" },
+    fetchImpl: async (url) => {
+      if (!String(url).endsWith("/api/extension/finish-qualification")) {
+        return createResponse({ json: { account_id: "account-a" } });
+      }
+      attempts += 1;
+      return createResponse({
+        ok: false,
+        status: 503,
+        json: {
+          code: "EXTENSION_FINISH_QUALIFICATION_DISABLED",
+          retryable: false,
+        },
+      });
+    },
+  });
+  h.hooks.setBearerToken("token-finish-disabled");
+
+  assert.deepEqual(plainJson(await h.dispatchMessage({
+    type: "TRACE_FINISH_QUALIFICATION_SIGNAL",
+    payload: {
+      entryId,
+      workKey: "ao3:790",
+      source: "ao3",
+      chapter: 1,
+      total: 1,
+      state: "resolved",
+      workStatus: "complete",
+    },
+  })), { ok: false, error: "finish_qualification_disabled" });
+  assert.equal(attempts, 1);
 });
 
 test("TRACE_FINISH_QUALIFICATION_SIGNAL validates auth and resolved payloads", async () => {
@@ -3878,11 +4235,20 @@ test("TRACE_FINISH_QUALIFICATION_SIGNAL validates auth and resolved payloads", a
     { entryId, source: "ao3", chapter: 0, total: 1, state: "open" },
     {
       entryId,
+      workKey: "ao3:782",
+      source: "ao3",
+      chapter: 2,
+      total: 1,
+      state: "open",
+    },
+    {
+      entryId,
       source: "ao3",
       chapter: 1,
       total: 1,
       state: "resolved",
-      workStatus: "hiatus",
+      workStatus: "abandoned",
+      resolutionSource: "source",
     },
   ]) {
     assert.deepEqual(
