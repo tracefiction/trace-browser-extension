@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const { setTimeout: delay } = require("node:timers/promises");
 const { JSDOM } = require("jsdom");
 const {
   createCollectorBindings,
@@ -37,8 +38,171 @@ function plainJson(v) {
 function installCollectorChrome(dom, chrome) {
   const scoped = withDefaultScopedStorageContext(chrome);
   dom.window.chrome = scoped;
-  dom.window.browser = scoped;
+  delete dom.window.browser;
 }
+
+function installCollectorBrowser(dom, browser) {
+  const scoped = withDefaultScopedStorageContext(browser);
+  dom.window.browser = scoped;
+  delete dom.window.chrome;
+}
+
+test("collector routes runtime messaging through the Promise/callback portability boundary", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  const directRuntimeCalls = source.match(/ext\.runtime\.sendMessage\s*\(/g) || [];
+  assert.equal(
+    directRuntimeCalls.length,
+    2,
+    "only the Promise and callback branches inside sendCollectorMessage may call runtime.sendMessage",
+  );
+
+  const responseBearingOwners = [
+    "sendListingMetadataRefreshForTrackedItems",
+    "sendAutoTrackForStory",
+    "queryBackgroundWorkStateForStory",
+    "requestStoryAuthRefreshOnResume",
+    "bindReaderStatusChoice",
+    "appendStoryRatingControls",
+    "appendStoryCatchupAction",
+    "sendQuickAddAction",
+    "processIosPendingFirstStoryAdd",
+    "bindStoryHiddenPreferenceAction",
+    "sendFinishQualifySignal",
+    "renderQuickAddButton",
+  ];
+  for (const name of responseBearingOwners) {
+    const start = source.indexOf(`function ${name}(`);
+    assert.notEqual(start, -1, `expected ${name}`);
+    const next = source.indexOf("\nfunction ", start + 1);
+    const body = source.slice(start, next === -1 ? source.length : next);
+    assert.match(body, /sendCollectorMessage\s*\(/, `${name} must use the portable adapter`);
+  }
+  assert.match(source, /function sendCollectorMessageBestEffort\(/);
+});
+
+test("collector callback messaging settles when Safari never invokes its callback", async () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://archiveofourown.org/works/1",
+  });
+  const { sendCollectorMessage } = createCollectorBindings(dom, {
+    chrome: {
+      runtime: {
+        sendMessage() {},
+        lastError: null,
+      },
+    },
+  });
+
+  const response = await Promise.race([
+    new Promise((resolve) => sendCollectorMessage({ type: "TEST" }, resolve, 5)),
+    delay(200, "test_hung"),
+  ]);
+
+  assert.equal(response, null);
+});
+
+test("collector Promise messaging settles when Safari never resolves its Promise", async () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://archiveofourown.org/works/1",
+  });
+  const { sendCollectorMessage } = createCollectorBindings(dom, {
+    browser: {
+      runtime: {
+        sendMessage() {
+          return new Promise(() => {});
+        },
+      },
+    },
+  });
+
+  const response = await Promise.race([
+    new Promise((resolve) => sendCollectorMessage({ type: "TEST" }, resolve, 5)),
+    delay(200, "test_hung"),
+  ]);
+
+  assert.equal(response, null);
+});
+
+test("collector messaging ignores callback and Promise settlements after timeout", async () => {
+  let callback;
+  let resolvePromise;
+  const callbackResponses = [];
+  const promiseResponses = [];
+  const callbackDom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://archiveofourown.org/works/1",
+  });
+  const callbackBindings = createCollectorBindings(callbackDom, {
+    chrome: {
+      runtime: {
+        sendMessage(_message, next) {
+          callback = next;
+        },
+        lastError: null,
+      },
+    },
+  });
+  const promiseDom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://archiveofourown.org/works/1",
+  });
+  const promiseBindings = createCollectorBindings(promiseDom, {
+    browser: {
+      runtime: {
+        sendMessage() {
+          return new Promise((resolve) => {
+            resolvePromise = resolve;
+          });
+        },
+      },
+    },
+  });
+
+  callbackBindings.sendCollectorMessage(
+    { type: "TEST_CALLBACK" },
+    (response) => callbackResponses.push(response),
+    5,
+  );
+  promiseBindings.sendCollectorMessage(
+    { type: "TEST_PROMISE" },
+    (response) => promiseResponses.push(response),
+    5,
+  );
+  await delay(20);
+  callback({ ok: true });
+  resolvePromise({ ok: true });
+  await delay(0);
+
+  assert.deepEqual(callbackResponses, [null]);
+  assert.deepEqual(promiseResponses, [null]);
+});
+
+test("finish qualification requires the exact latest posted chapter", () => {
+  const collectorSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://archiveofourown.org/works/1",
+    runScripts: "outside-only",
+  });
+  installCollectorChrome(dom, {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(_message, callback) {
+        if (callback) callback(null);
+      },
+      lastError: null,
+    },
+  });
+  dom.window.eval(collectorSrc);
+
+  assert.equal(dom.window.finishQualifyIsLastPostedChapter({ chn: 12, chPub: 12 }), true);
+  assert.equal(dom.window.finishQualifyIsLastPostedChapter({ chn: 11, chPub: 12 }), false);
+  assert.equal(dom.window.finishQualifyIsLastPostedChapter({ chn: 13, chPub: 12 }), false);
+  assert.equal(dom.window.finishQualifyIsLastPostedChapter({ chn: 12.5, chPub: 12 }), false);
+});
 
 test("collectAO3Work (ao3_story.html) extracts full metadata", () => {
   const dom = domFromFixture(
@@ -94,6 +258,41 @@ test("collectAO3Work emits current chapter URL without query or hash", () => {
 
   assert.equal(item.u, "https://archiveofourown.org/works/28534965");
   assert.equal(item.chu, "https://archiveofourown.org/works/28534965/chapters/69925506");
+});
+
+test("collectAO3Work treats a fully rendered AO3 Entire Work page as the latest chapter", () => {
+  const dom = new JSDOM(
+    `<!doctype html><html><body>
+      <h2 class="title heading">Entire Work</h2>
+      <h3 class="byline heading"><a rel="author">Author</a></h3>
+      <ul class="required-tags"><li><span title="Complete Work">Complete Work</span></li></ul>
+      <dl class="work meta group"><dd class="chapters">3/3</dd></dl>
+      <div id="chapters">
+        <div class="chapter" id="chapter-101"><div class="userstuff module" role="article">One</div></div>
+        <div class="chapter" id="chapter-205"><div class="userstuff module" role="article">Two</div></div>
+        <div class="chapter" id="chapter-999"><div class="userstuff module" role="article">Three</div></div>
+      </div>
+    </body></html>`,
+    {
+      url: "https://archiveofourown.org/works/123?view_full_work=true",
+      contentType: "text/html",
+      runScripts: "outside-only",
+    },
+  );
+  const { collectAO3Work } = createCollectorBindings(dom);
+  const item = collectAO3Work();
+
+  assert.equal(item.chn, 3);
+  assert.equal(item.chPub, 3);
+  assert.equal(item.cht, 3);
+  assert.equal(item.chu, null, "Entire Work does not invent a single-chapter URL");
+
+  dom.window.document.querySelector("#chapter-999").remove();
+  assert.equal(
+    collectAO3Work().chn,
+    2,
+    "a partially rendered Entire Work page must not claim the final published chapter",
+  );
 });
 
 test("collector disables Trace collection on pages with password fields", () => {
@@ -1252,6 +1451,8 @@ function createStoryAutoTrackPendingHarness(options = {}) {
     : null;
   let autoTrackCallback;
   let connectAndSaveCallback;
+  let deferredAutoTrackPreferenceRead;
+  let deferredWorkStateRead;
   let runtimeMessageListener = null;
   const chrome = {
     runtime: {
@@ -1263,6 +1464,10 @@ function createStoryAutoTrackPendingHarness(options = {}) {
       sendMessage(msg, cb) {
         sent.push(msg);
         if (msg.type === "TRACE_WORK_STATE_GET") {
+          if (options.holdWorkStateRead) {
+            deferredWorkStateRead = cb;
+            return;
+          }
           if (typeof cb === "function") {
             cb(options.workStateResponse || { ok: true, state: null });
           }
@@ -1355,6 +1560,16 @@ function createStoryAutoTrackPendingHarness(options = {}) {
               out[key] = store[key];
             }
           }
+          if (
+            options.holdAutoTrackPreferenceRead &&
+            list.length === 1 &&
+            list[0] === "prefAutoTrackEnabled"
+          ) {
+            deferredAutoTrackPreferenceRead = function () {
+              cb(out);
+            };
+            return;
+          }
           cb(out);
         },
         set(value, cb) {
@@ -1385,6 +1600,18 @@ function createStoryAutoTrackPendingHarness(options = {}) {
     store,
     autoTrackCallback(response) {
       autoTrackCallback(response);
+    },
+    resolveAutoTrackPreferenceRead() {
+      assert.equal(typeof deferredAutoTrackPreferenceRead, "function");
+      const resolve = deferredAutoTrackPreferenceRead;
+      deferredAutoTrackPreferenceRead = null;
+      resolve();
+    },
+    resolveWorkStateRead(response) {
+      assert.equal(typeof deferredWorkStateRead, "function");
+      const resolve = deferredWorkStateRead;
+      deferredWorkStateRead = null;
+      resolve(response || options.workStateResponse || { ok: true, state: null });
     },
     resolveConnectAndSave(response) {
       connectAndSaveCallback(response);
@@ -1470,6 +1697,223 @@ test("story page confirmed overlay entry clears an older auto-track pending hand
   assert.equal(handle.disabled, false);
   assert.match(handle.textContent || "", /Reading\s*3\/28/i);
   assert.doesNotMatch(handle.textContent || "", /Adding\.\.\./);
+});
+
+test("story page projects a newly viewed chapter while auto-track confirms it", () => {
+  const harness = createStoryAutoTrackPendingHarness({
+    holdAutoTrack: true,
+    url: "https://m.fanfiction.net/s/7038840/4/A-Chance-Encounter",
+    store: {
+      libraryOverlayCache: {
+        entries: {
+          "ffn:7038840": {
+            status: "READING",
+            readerStatus: "READING",
+            canonicalReaderStatus: "READING",
+            entryId: "00000000-0000-4000-8000-000000703884",
+            chapters: { current: 3, total: 28 },
+          },
+        },
+        syncVersion: "chapter-three-projection",
+      },
+    },
+  });
+
+  const handle = harness.dom.window.document.querySelector(
+    "[data-trace-story-handle]",
+  );
+  assert.ok(handle, "expected Trace story handle");
+  assert.equal(handle.disabled, true);
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "tracking");
+  assert.match(handle.textContent || "", /Reading\s*4\/28/i);
+  assert.doesNotMatch(handle.textContent || "", /3\/28/);
+  assert.ok(handle.querySelector("svg"), "expected pending progress to retain a spinner");
+
+  harness.autoTrackCallback({ ok: false, error: "network_error" });
+  assert.match(handle.textContent || "", /Error/i);
+  assert.doesNotMatch(handle.textContent || "", /4\/28/);
+});
+
+test("story page projects Saved to Reading on chapter two while auto-track confirms it", () => {
+  const harness = createStoryAutoTrackPendingHarness({
+    holdAutoTrack: true,
+    sessionMode: "kernel",
+    url: "https://m.fanfiction.net/s/7038840/2/A-Chance-Encounter",
+    projectionResponse: {
+      ok: true,
+      snapshot: {
+        state: "connected",
+        reason: "none",
+        canExecuteAuthenticated: true,
+      },
+      projection: {
+        entries: {
+          "ffn:7038840": {
+            status: "PLANNING",
+            readerStatus: "PLANNING",
+            canonicalReaderStatus: "SAVED",
+            entryId: "00000000-0000-4000-8000-000000703884",
+            chapters: { current: 1, total: 28 },
+          },
+        },
+        workPreferences: {},
+        syncVersion: "saved-chapter-one-projection",
+      },
+    },
+  });
+
+  const handle = harness.dom.window.document.querySelector(
+    "[data-trace-story-handle]",
+  );
+  assert.ok(handle, "expected Trace story handle");
+  assert.equal(handle.disabled, true);
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "tracking");
+  assert.match(handle.textContent || "", /Reading\s*2\/28/i);
+  assert.doesNotMatch(handle.textContent || "", /^Saved$/);
+  assert.ok(handle.querySelector("svg"), "expected pending transition to retain a spinner");
+
+  harness.autoTrackCallback({ ok: false, error: "network_error" });
+  assert.match(handle.textContent || "", /Error/i);
+  assert.doesNotMatch(handle.textContent || "", /Reading\s*2\/28/i);
+});
+
+test("story page projects pending progress before the auto-track preference read settles", () => {
+  const harness = createStoryAutoTrackPendingHarness({
+    holdAutoTrack: true,
+    holdAutoTrackPreferenceRead: true,
+    sessionMode: "kernel",
+    url: "https://m.fanfiction.net/s/7038840/3/A-Chance-Encounter",
+    workStateResponse: {
+      ok: true,
+      state: {
+        workKey: "ffn:7038840",
+        status: "saved",
+        entryId: "00000000-0000-4000-8000-000000703884",
+        entry: {
+          status: "READING",
+          readerStatus: "READING",
+          canonicalReaderStatus: "READING",
+          entryId: "00000000-0000-4000-8000-000000703884",
+          chapters: { current: 2, total: 28 },
+        },
+        syncVersion: "chapter-two-work-state",
+      },
+    },
+  });
+
+  const handle = harness.dom.window.document.querySelector(
+    "[data-trace-story-handle]",
+  );
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "tracking");
+  assert.match(handle.textContent || "", /Reading\s*3\/28/i);
+  assert.ok(handle.querySelector("svg"), "expected immediate pending progress to show a spinner");
+
+  harness.resolveAutoTrackPreferenceRead();
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "tracking");
+  assert.match(handle.textContent || "", /Reading\s*3\/28/i);
+  assert.ok(handle.querySelector("svg"), "expected pending progress to show a spinner");
+
+  harness.autoTrackCallback({ ok: false, error: "network_error" });
+  assert.match(handle.textContent || "", /Error/i);
+  assert.doesNotMatch(handle.textContent || "", /Reading\s*3\/28/i);
+});
+
+test("story page removes provisional progress when auto-track is disabled", () => {
+  const harness = createStoryAutoTrackPendingHarness({
+    holdAutoTrack: true,
+    holdAutoTrackPreferenceRead: true,
+    sessionMode: "kernel",
+    url: "https://m.fanfiction.net/s/7038840/3/A-Chance-Encounter",
+    store: { prefAutoTrackEnabled: false },
+    workStateResponse: {
+      ok: true,
+      state: {
+        workKey: "ffn:7038840",
+        status: "saved",
+        entryId: "00000000-0000-4000-8000-000000703884",
+        entry: {
+          status: "READING",
+          readerStatus: "READING",
+          canonicalReaderStatus: "READING",
+          entryId: "00000000-0000-4000-8000-000000703884",
+          chapters: { current: 2, total: 28 },
+        },
+        syncVersion: "chapter-two-auto-track-disabled",
+      },
+    },
+  });
+
+  const handle = harness.dom.window.document.querySelector(
+    "[data-trace-story-handle]",
+  );
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "tracking");
+  assert.match(handle.textContent || "", /Reading\s*3\/28/i);
+
+  harness.resolveAutoTrackPreferenceRead();
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "status");
+  assert.match(handle.textContent || "", /Reading\s*2\/28/i);
+  assert.equal(handle.querySelector("animateTransform"), null);
+  assert.equal(
+    harness.sent.some((message) => message.type === "TRACE_AUTO_TRACK"),
+    false,
+  );
+});
+
+test("story page keeps pending progress over a later stale work-state read", () => {
+  const harness = createStoryAutoTrackPendingHarness({
+    holdAutoTrack: true,
+    holdWorkStateRead: true,
+    sessionMode: "kernel",
+    url: "https://m.fanfiction.net/s/7038840/3/A-Chance-Encounter",
+    projectionResponse: {
+      ok: true,
+      snapshot: {
+        state: "connected",
+        reason: "none",
+        canExecuteAuthenticated: true,
+      },
+      projection: {
+        entries: {
+          "ffn:7038840": {
+            status: "READING",
+            readerStatus: "READING",
+            canonicalReaderStatus: "READING",
+            entryId: "00000000-0000-4000-8000-000000703884",
+            chapters: { current: 2, total: 28 },
+          },
+        },
+        workPreferences: {},
+        syncVersion: "chapter-two-projection",
+      },
+    },
+  });
+
+  const handle = harness.dom.window.document.querySelector(
+    "[data-trace-story-handle]",
+  );
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "tracking");
+  assert.match(handle.textContent || "", /Reading\s*3\/28/i);
+
+  harness.resolveWorkStateRead({
+    ok: true,
+    state: {
+      workKey: "ffn:7038840",
+      status: "saved",
+      entryId: "00000000-0000-4000-8000-000000703884",
+      entry: {
+        status: "READING",
+        readerStatus: "READING",
+        canonicalReaderStatus: "READING",
+        entryId: "00000000-0000-4000-8000-000000703884",
+        chapters: { current: 2, total: 28 },
+      },
+      syncVersion: "stale-chapter-two-work-state",
+    },
+  });
+
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "tracking");
+  assert.match(handle.textContent || "", /Reading\s*3\/28/i);
+  assert.ok(handle.querySelector("svg"), "expected pending progress to retain its spinner");
 });
 
 test("story page ignores unscoped cached saved state", () => {
@@ -2829,6 +3273,24 @@ test("story sheet Planning to Reading sends chapter progress 1 and displays 1/? 
       onMessage: { addListener() {} },
       sendMessage(msg, cb) {
         sent.push(msg);
+        if (msg.type === "TRACE_AUTO_TRACK" && typeof cb === "function") {
+          cb({
+            ok: true,
+            state: {
+              workKey: "ffn:7038840",
+              status: "saved",
+              entryId,
+              entry: {
+                entryId,
+                status: "PLANNING",
+                readerStatus: "PLANNING",
+                canonicalReaderStatus: "SAVED",
+                chapters: { current: 0, total: null },
+              },
+            },
+          });
+          return;
+        }
         if (msg.type === "TRACE_SET_READER_STATUS" && typeof cb === "function") {
           cb({ ok: true, entryId, status: msg.payload.status });
         }
@@ -2890,7 +3352,7 @@ test("story sheet Planning to Reading sends chapter progress 1 and displays 1/? 
 });
 
 
-test("finish qualify watches AO3 chapter text before end notes", () => {
+test("finish qualify watches AO3 chapter text and routes resolution through the finish endpoint", async () => {
   const collectorSrc = fs.readFileSync(
     path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
     "utf8",
@@ -2931,8 +3393,26 @@ test("finish qualify watches AO3 chapter text before end notes", () => {
       onMessage: { addListener() {} },
       sendMessage(msg, cb) {
         sent.push(msg);
-        if (msg.type === "TRACE_PATCH_LIBRARY_ENTRY" && typeof cb === "function") {
-          cb({ ok: true, entryId, patch: msg.payload.patch });
+        if (
+          msg.type === "TRACE_FINISH_QUALIFICATION_SIGNAL" &&
+          msg.payload.state === "resolved" &&
+          typeof cb === "function"
+        ) {
+          cb({
+            ok: true,
+            command: {
+              kind: "acknowledged",
+              state: "resolved",
+              eventId: null,
+              entry: {
+                entryId,
+                status: "FINISHED",
+                readerStatus: "FINISHED",
+                canonicalReaderStatus: "FINISHED",
+                chapters: { current: 1, total: 1 },
+              },
+            },
+          });
         }
       },
       lastError: null,
@@ -2977,21 +3457,146 @@ test("finish qualify watches AO3 chapter text before end notes", () => {
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(watchedBody, dom.window.document.querySelector("[data-test-id='chapter-text']"));
   assert.notEqual(watchedBody, dom.window.document.querySelector("#chapters"));
   assert.equal(toastShown, true);
-  assert.deepEqual(plainJson(sent.find((msg) => msg.type === "TRACE_PATCH_LIBRARY_ENTRY").payload), {
-    workKey: "ao3:777",
+  assert.equal(
+    sent.filter((msg) => msg.type === "TRACE_FINISH_QUALIFICATION_SIGNAL").length,
+    1,
+  );
+  assert.equal(sent.some((msg) => msg.type === "TRACE_PATCH_LIBRARY_ENTRY"), false);
+  assert.deepEqual(plainJson(sent.find((msg) => msg.type === "TRACE_FINISH_QUALIFICATION_SIGNAL").payload), {
     entryId,
-    patch: {
-      status: "FINISHED",
-      progress: { unit: "CHAPTER", value: 1, total: 1 },
-    },
+    workKey: "ao3:777",
+    source: "ao3",
+    chapter: 1,
+    total: 1,
+    state: "resolved",
+    workStatus: "complete",
+    resolutionSource: "source",
   });
 });
 
-test("finish qualify band prompts on unknown FFN final chapter and writes finished for abandoned work override", () => {
+test("finish qualify on AO3 Entire Work waits for crossing the final rendered chapter end", () => {
+  const collectorSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  const finishSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "trace-finish-qualify.js"),
+    "utf8",
+  );
+  const entryId = "00000000-0000-4000-8000-000000000778";
+  const sent = [];
+  const dom = new JSDOM(
+    `<!doctype html><html><body>
+      <h2 class="title heading">Entire Work Finish</h2>
+      <h3 class="byline heading"><a rel="author">Author</a></h3>
+      <ul class="required-tags"><li><span title="Complete Work">Complete Work</span></li></ul>
+      <dl class="work meta group"><dd class="chapters">3/3</dd></dl>
+      <div id="chapters">
+        <div class="chapter" id="chapter-101"><div class="userstuff module" role="article">One</div></div>
+        <div class="chapter" id="chapter-205"><div class="userstuff module" role="article">Two</div></div>
+        <div class="chapter" id="chapter-999"><div data-final-body class="userstuff module" role="article">Three</div></div>
+      </div>
+    </body></html>`,
+    {
+      url: "https://archiveofourown.org/works/778?view_full_work=true",
+      contentType: "text/html",
+      runScripts: "outside-only",
+    },
+  );
+  let finalRect = { top: 750, bottom: 1_250 };
+  const finalBody = dom.window.document.querySelector("[data-final-body]");
+  finalBody.getBoundingClientRect = () => finalRect;
+  Object.defineProperty(dom.window, "innerHeight", { value: 800, configurable: true });
+  Object.defineProperty(dom.window.document, "visibilityState", {
+    value: "visible",
+    configurable: true,
+  });
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(message, callback) {
+        sent.push(message);
+        if (message.type === "TRACE_FINISH_QUALIFICATION_SIGNAL" && callback) {
+          callback({
+            ok: true,
+            command: {
+              kind: "acknowledged",
+              state: "resolved",
+              eventId: null,
+              workKey: "ao3:778",
+              entry: {
+                entryId,
+                status: "COMPLETED",
+                readerStatus: "COMPLETED",
+                canonicalReaderStatus: "FINISHED",
+                chapters: { current: 3, total: 3 },
+              },
+            },
+          });
+        }
+      },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, callback) {
+          callback({
+            authToken: "test-token",
+            libraryOverlayCache: {
+              entries: {
+                "ao3:778": {
+                  entryId,
+                  status: "READING",
+                  readerStatus: "READING",
+                  canonicalReaderStatus: "READING",
+                  chapters: { current: 3, total: 3 },
+                },
+              },
+            },
+          });
+        },
+        set(_value, callback) {
+          if (callback) callback();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  installCollectorChrome(dom, chrome);
+  dom.window.eval(finishSrc);
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(new dom.window.Event("DOMContentLoaded", { bubbles: true }));
+
+  assert.equal(
+    sent.filter((message) => message.type === "TRACE_FINISH_QUALIFICATION_SIGNAL").length,
+    0,
+    "rendering the full work must not finish it on page load",
+  );
+  const autoTrack = sent.find((message) => message.type === "TRACE_AUTO_TRACK");
+  assert.equal(
+    autoTrack?.payload?.item?.chn,
+    1,
+    "rendering all chapters alone must not auto-track final-chapter progress",
+  );
+  finalBody.dispatchEvent(new dom.window.WheelEvent("wheel", { bubbles: true }));
+  finalRect = { top: 350, bottom: 850 };
+  dom.window.dispatchEvent(new dom.window.Event("scroll"));
+
+  const finishSignals = sent.filter(
+    (message) => message.type === "TRACE_FINISH_QUALIFICATION_SIGNAL",
+  );
+  assert.equal(finishSignals.length, 1);
+  assert.equal(finishSignals[0].payload.chapter, 3);
+  assert.equal(finishSignals[0].payload.total, 3);
+});
+
+test("finish qualify band marks an unknown ongoing FFN final chapter caught up through the finish endpoint", () => {
   const collectorSrc = fs.readFileSync(
     path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
     "utf8",
@@ -3011,8 +3616,42 @@ test("finish qualify band prompts on unknown FFN final chapter and writes finish
       onMessage: { addListener() {} },
       sendMessage(msg, cb) {
         sent.push(msg);
-        if (msg.type === "TRACE_PATCH_LIBRARY_ENTRY" && typeof cb === "function") {
-          cb({ ok: true, entryId, patch: msg.payload.patch });
+        if (msg.type === "TRACE_FINISH_QUALIFICATION_SIGNAL" && typeof cb === "function") {
+          if (msg.payload.state === "open") {
+            cb({
+              ok: true,
+              command: {
+                kind: "acknowledged",
+                state: "open",
+                eventId: null,
+                entry: {
+                  entryId,
+                  status: "READING",
+                  readerStatus: "READING",
+                  canonicalReaderStatus: "READING",
+                  chapters: { current: 28, total: 28 },
+                },
+              },
+            });
+            return;
+          }
+          cb({
+            ok: true,
+            command: {
+              kind: "acknowledged",
+              state: "resolved",
+              eventId: null,
+              entry: {
+                entryId,
+                status: "CAUGHT_UP",
+                readerStatus: "CAUGHT_UP",
+                canonicalReaderStatus: "CAUGHT_UP",
+                chapters: { current: 28, total: 28 },
+                workStatus: "wip",
+                workStatusProvenance: "override",
+              },
+            },
+          });
         }
       },
       lastError: null,
@@ -3043,10 +3682,20 @@ test("finish qualify band prompts on unknown FFN final chapter and writes finish
   };
 
   installCollectorChrome(dom, chrome);
+  Object.defineProperty(dom.window.document, "visibilityState", {
+    value: "visible",
+    configurable: true,
+  });
   dom.window.eval(finishSrc);
+  const onReachEnd = dom.window.TraceFinishQualify.onReachEnd;
+  dom.window.TraceFinishQualify.onReachEnd = (body, callback) =>
+    onReachEnd(body, callback, { dwellMs: 0 });
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+  dom.window.document.querySelector("#storycontent").dispatchEvent(
+    new dom.window.Event("touchend", { bubbles: true }),
   );
 
   const band = dom.window.document.querySelector("[data-trace-finish-qualify]");
@@ -3067,21 +3716,11 @@ test("finish qualify band prompts on unknown FFN final chapter and writes finish
     Array.from(band.querySelectorAll("[data-trace-work-choice]")).map((button) => button.textContent),
     ["It’s complete", "Still ongoing", "On hiatus", "Looks abandoned"],
   );
-  const abandoned = band.querySelector("[data-trace-work-choice='abandoned']");
-  assert.ok(abandoned);
-  abandoned.click();
+  const ongoing = band.querySelector("[data-trace-work-choice='wip']");
+  assert.ok(ongoing);
+  ongoing.click();
 
-  const patchMsg = sent.find((msg) => msg.type === "TRACE_PATCH_LIBRARY_ENTRY");
-  assert.ok(patchMsg);
-  assert.deepEqual(plainJson(patchMsg.payload), {
-    workKey: "ffn:7038840",
-    entryId,
-    patch: {
-      status: "FINISHED",
-      progress: { unit: "CHAPTER", value: 28, total: 28 },
-      story_snapshot: { work_status_override: "abandoned" },
-    },
-  });
+  assert.equal(sent.some((msg) => msg.type === "TRACE_PATCH_LIBRARY_ENTRY"), false);
   const resolvedSignal = sent.find(
     (msg) => msg.type === "TRACE_FINISH_QUALIFICATION_SIGNAL" && msg.payload.state === "resolved",
   );
@@ -3092,11 +3731,11 @@ test("finish qualify band prompts on unknown FFN final chapter and writes finish
     chapter: 28,
     total: 28,
     state: "resolved",
-    workStatus: "abandoned",
-    readerStatus: "FINISHED",
+    workStatus: "wip",
+    resolutionSource: "reader",
   });
-  assert.match(band.textContent || "", /Finished/i);
-  assert.match(band.textContent || "", /Work looks abandoned/i);
+  assert.match(band.textContent || "", /Caught up/i);
+  assert.match(band.textContent || "", /Work is ongoing/i);
 });
 
 test("finish qualify inserts AO3 prompt after the final end notes and aligns to content column", () => {
@@ -3144,7 +3783,23 @@ test("finish qualify inserts AO3 prompt after the final end notes and aligns to 
     runtime: {
       onMessage: { addListener() {} },
       sendMessage(_msg, cb) {
-        if (typeof cb === "function") cb({ ok: true, entryId });
+        if (typeof cb === "function") {
+          cb({
+            ok: true,
+            command: {
+              kind: "acknowledged",
+              state: "open",
+              eventId: null,
+              entry: {
+                entryId,
+                status: "READING",
+                readerStatus: "READING",
+                canonicalReaderStatus: "READING",
+                chapters: { current: 1, total: 1 },
+              },
+            },
+          });
+        }
       },
       lastError: null,
     },
@@ -3174,10 +3829,20 @@ test("finish qualify inserts AO3 prompt after the final end notes and aligns to 
   };
 
   installCollectorChrome(dom, chrome);
+  Object.defineProperty(dom.window.document, "visibilityState", {
+    value: "visible",
+    configurable: true,
+  });
   dom.window.eval(finishSrc);
+  const onReachEnd = dom.window.TraceFinishQualify.onReachEnd;
+  dom.window.TraceFinishQualify.onReachEnd = (body, callback) =>
+    onReachEnd(body, callback, { dwellMs: 0 });
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+  dom.window.document.querySelector("[role='article']").dispatchEvent(
+    new dom.window.Event("touchend", { bubbles: true }),
   );
 
   const band = dom.window.document.querySelector("[data-trace-finish-qualify]");
@@ -3188,7 +3853,7 @@ test("finish qualify inserts AO3 prompt after the final end notes and aligns to 
   assert.match(band.getAttribute("style") || "", /margin:\s*22px 0/);
 });
 
-test("finish qualify silently marks known-complete final chapter as finished", () => {
+test("finish qualify promotes caught-up known-complete work with promise runtime messaging", async () => {
   const collectorSrc = fs.readFileSync(
     path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
     "utf8",
@@ -3217,11 +3882,31 @@ test("finish qualify silently marks known-complete final chapter as finished", (
   const chrome = {
     runtime: {
       onMessage: { addListener() {} },
-      sendMessage(msg, cb) {
+      sendMessage(msg) {
         sent.push(msg);
-        if (msg.type === "TRACE_PATCH_LIBRARY_ENTRY" && typeof cb === "function") {
-          cb({ ok: true, entryId, patch: msg.payload.patch });
+        if (
+          msg.type === "TRACE_FINISH_QUALIFICATION_SIGNAL" &&
+          msg.payload.state === "resolved"
+        ) {
+          return Promise.resolve({
+            ok: true,
+            command: {
+              kind: "acknowledged",
+              state: "resolved",
+              eventId: null,
+              entry: {
+                entryId,
+                status: "FINISHED",
+                readerStatus: "FINISHED",
+                canonicalReaderStatus: "FINISHED",
+                chapters: { current: 1, total: 1 },
+                workStatus: "complete",
+                workStatusProvenance: "source",
+              },
+            },
+          });
         }
+        return Promise.resolve({ ok: true });
       },
       lastError: null,
     },
@@ -3234,8 +3919,9 @@ test("finish qualify silently marks known-complete final chapter as finished", (
               entries: {
                 "ffn:9001": {
                   entryId,
-                  status: "READING",
-                  readerStatus: "READING",
+                  status: "CAUGHT_UP",
+                  readerStatus: "CAUGHT_UP",
+                  canonicalReaderStatus: "CAUGHT_UP",
                   chapters: { current: 1, total: 1 },
                 },
               },
@@ -3250,25 +3936,828 @@ test("finish qualify silently marks known-complete final chapter as finished", (
     },
   };
 
-  installCollectorChrome(dom, chrome);
+  installCollectorBrowser(dom, chrome);
+  Object.defineProperty(dom.window.document, "visibilityState", {
+    value: "visible",
+    configurable: true,
+  });
   dom.window.eval(finishSrc);
+  const onReachEnd = dom.window.TraceFinishQualify.onReachEnd;
+  dom.window.TraceFinishQualify.onReachEnd = (body, callback) =>
+    onReachEnd(body, callback, { dwellMs: 0 });
   dom.window.eval(collectorSrc);
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
+  dom.window.document.querySelector("#storytextp").dispatchEvent(
+    new dom.window.Event("touchend", { bubbles: true }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(dom.window.document.querySelector("[data-trace-finish-qualify]"), null);
-  const patchMsg = sent.find((msg) => msg.type === "TRACE_PATCH_LIBRARY_ENTRY");
-  assert.ok(patchMsg);
-  assert.deepEqual(plainJson(patchMsg.payload), {
-    workKey: "ffn:9001",
+  assert.equal(sent.some((msg) => msg.type === "TRACE_PATCH_LIBRARY_ENTRY"), false);
+  const finishSignal = sent.find((msg) => msg.type === "TRACE_FINISH_QUALIFICATION_SIGNAL");
+  assert.ok(finishSignal);
+  assert.deepEqual(plainJson(finishSignal.payload), {
     entryId,
-    patch: {
-      status: "FINISHED",
-      progress: { unit: "CHAPTER", value: 1, total: 1 },
-    },
+    workKey: "ffn:9001",
+    source: "ffn",
+    chapter: 1,
+    total: 1,
+    state: "resolved",
+    workStatus: "complete",
+    resolutionSource: "source",
   });
   assert.ok(dom.window.document.querySelector("[data-trace-finish-toast]"));
+});
+
+test("finish qualify open acknowledgement controls whether the manual prompt mounts", () => {
+  const collectorSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  const entryId = "00000000-0000-4000-8000-000000000904";
+  const cases = [
+    { name: "ignored with authoritative terminal entry", response: "ignored", expectedMounts: 0 },
+    { name: "transport unavailable", response: "unavailable", expectedMounts: 1 },
+  ];
+
+  for (const item of cases) {
+    const dom = new JSDOM(
+      `<!doctype html><html><body>
+        <h2 class="title heading">Open signal ${item.name}</h2>
+        <h3 class="byline heading"><a rel="author" href="/users/demo/pseuds/demo">demo</a></h3>
+        <dl class="work meta group"><dd class="chapters">1/?</dd><dd class="words">100</dd></dl>
+        <div id="chapters"><div class="chapter" id="chapter-1">
+          <div class="userstuff module" role="article"><p>Story body.</p></div>
+        </div></div>
+      </body></html>`,
+      {
+        url: "https://archiveofourown.org/works/904/chapters/905",
+        contentType: "text/html",
+        runScripts: "outside-only",
+      },
+    );
+    let mounts = 0;
+    let removals = 0;
+    let storedAuthToken = "test-token";
+    let storedAccountId = "account-a";
+    let storedAuthState = { state: "connected", accountId: "account-a" };
+    let storedEntry = {
+      entryId,
+      status: "READING",
+      readerStatus: "READING",
+      canonicalReaderStatus: "READING",
+      chapters: { current: 1, total: 1 },
+    };
+    const finishedEntry = {
+      entryId,
+      status: "FINISHED",
+      readerStatus: "FINISHED",
+      canonicalReaderStatus: "FINISHED",
+      chapters: { current: 1, total: 1 },
+    };
+    const chrome = {
+      runtime: {
+        onMessage: { addListener() {} },
+        lastError: null,
+        sendMessage(message, callback) {
+          if (
+            message.type !== "TRACE_FINISH_QUALIFICATION_SIGNAL" ||
+            message.payload.state !== "open" ||
+            typeof callback !== "function"
+          ) {
+            return;
+          }
+          if (item.response === "unavailable") {
+            this.lastError = { message: "worker suspended" };
+            callback(undefined);
+            this.lastError = null;
+            return;
+          }
+          callback({
+            ok: true,
+            command: {
+              kind: "acknowledged",
+              state: "ignored",
+              eventId: null,
+              entry: finishedEntry,
+            },
+          });
+        },
+      },
+      storage: {
+        local: {
+          get(_keys, callback) {
+            callback({
+              authToken: storedAuthToken,
+              traceAccountId: storedAccountId,
+              traceAuthState: storedAuthState,
+              libraryOverlayCache: {
+                accountId: storedAccountId,
+                entries: {
+                  "ao3:904": storedEntry,
+                },
+              },
+            });
+          },
+          set(value, callback) {
+            const projected = value?.libraryOverlayCache?.entries?.["ao3:904"];
+            if (projected) storedEntry = projected;
+            if (typeof callback === "function") callback();
+          },
+        },
+        onChanged: { addListener() {} },
+      },
+    };
+    dom.window.TraceFinishQualify = {
+      onReachEnd(_body, callback) {
+        callback();
+        return function () {};
+      },
+      mount() {
+        mounts += 1;
+        return { remove() { removals += 1; } };
+      },
+    };
+
+    installCollectorChrome(dom, chrome);
+    dom.window.eval(collectorSrc);
+    dom.window.document.dispatchEvent(
+      new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+    );
+
+    assert.equal(mounts, item.expectedMounts, item.name);
+    if (item.response === "unavailable") {
+      storedEntry = finishedEntry;
+      dom.window.renderQuickAddButton("ao3:904");
+      assert.equal(removals, 1, "a terminal projection removes the obsolete prompt");
+    }
+    if (item.response === "ignored") {
+      assert.match(
+        dom.window.document.querySelector("[data-trace-story-handle]").textContent || "",
+        /Finished/i,
+      );
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(dom.window, "confirmedStoryPageEntries"),
+        false,
+        "finish responses do not create a second page-global library authority",
+      );
+    }
+  }
+});
+
+test("finish qualify ignores a delayed open response after the projection becomes terminal", () => {
+  const collectorSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  const entryId = "00000000-0000-4000-8000-000000000905";
+  let storedEntry = {
+    entryId,
+    status: "READING",
+    readerStatus: "READING",
+    canonicalReaderStatus: "READING",
+    chapters: { current: 1, total: 1 },
+  };
+  let openCallback = null;
+  let mounts = 0;
+  const dom = new JSDOM(
+    `<!doctype html><html><body>
+      <h2 class="title heading">Delayed Open</h2>
+      <h3 class="byline heading"><a rel="author">Author</a></h3>
+      <dl class="work meta group"><dd class="chapters">1/?</dd></dl>
+      <div id="chapters"><div class="chapter" id="chapter-1">
+        <div class="userstuff module" role="article">Story.</div>
+      </div></div>
+    </body></html>`,
+    {
+      url: "https://archiveofourown.org/works/905/chapters/906",
+      contentType: "text/html",
+      runScripts: "outside-only",
+    },
+  );
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      lastError: null,
+      sendMessage(message, callback) {
+        if (
+          message.type === "TRACE_FINISH_QUALIFICATION_SIGNAL" &&
+          message.payload.state === "open"
+        ) {
+          openCallback = callback;
+        }
+      },
+    },
+    storage: {
+      local: {
+        get(_keys, callback) {
+          callback({
+            authToken: "test-token",
+            libraryOverlayCache: { entries: { "ao3:905": storedEntry } },
+          });
+        },
+        set(_value, callback) {
+          if (callback) callback();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+  dom.window.TraceFinishQualify = {
+    onReachEnd(_body, callback) {
+      callback();
+      return function () {};
+    },
+    mount() {
+      mounts += 1;
+      return { remove() {} };
+    },
+  };
+
+  installCollectorChrome(dom, chrome);
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(new dom.window.Event("DOMContentLoaded", { bubbles: true }));
+  assert.equal(typeof openCallback, "function");
+
+  storedEntry = {
+    ...storedEntry,
+    status: "COMPLETED",
+    readerStatus: "COMPLETED",
+    canonicalReaderStatus: "FINISHED",
+  };
+  dom.window.renderQuickAddButton("ao3:905");
+  openCallback({
+    ok: true,
+    command: {
+      kind: "acknowledged",
+      state: "open",
+      eventId: "00000000-0000-4000-8000-000000000001",
+      workKey: "ao3:905",
+      entry: storedEntry,
+    },
+  });
+
+  assert.equal(mounts, 0);
+});
+
+test("known-source finish failures show a durable retry affordance and recover", () => {
+  const collectorSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  const finishSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "trace-finish-qualify.js"),
+    "utf8",
+  );
+  const entryId = "00000000-0000-4000-8000-000000000907";
+  let storedEntry = {
+    entryId,
+    status: "READING",
+    readerStatus: "READING",
+    canonicalReaderStatus: "READING",
+    chapters: { current: 1, total: 1 },
+  };
+  let attempts = 0;
+  const dom = new JSDOM(
+    `<!doctype html><html><body>
+      <h2 class="title heading">Retry Finish</h2>
+      <h3 class="byline heading"><a rel="author">Author</a></h3>
+      <ul class="required-tags"><li><span title="Complete Work">Complete Work</span></li></ul>
+      <dl class="work meta group"><dd class="chapters">1/1</dd></dl>
+      <div id="chapters"><div class="chapter" id="chapter-1">
+        <div class="userstuff module" role="article">Story.</div>
+      </div></div>
+    </body></html>`,
+    {
+      url: "https://archiveofourown.org/works/907/chapters/908",
+      contentType: "text/html",
+      runScripts: "outside-only",
+    },
+  );
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      lastError: null,
+      sendMessage(message, callback) {
+        if (message.type !== "TRACE_FINISH_QUALIFICATION_SIGNAL" || !callback) return;
+        attempts += 1;
+        if (attempts === 1) {
+          callback({ ok: false, error: "network_error" });
+          return;
+        }
+        callback({
+          ok: true,
+          command: {
+            kind: "acknowledged",
+            state: "resolved",
+            eventId: null,
+            workKey: "ao3:907",
+            entry: {
+              entryId,
+              status: "COMPLETED",
+              readerStatus: "COMPLETED",
+              canonicalReaderStatus: "FINISHED",
+              chapters: { current: 1, total: 1 },
+            },
+          },
+        });
+      },
+    },
+    storage: {
+      local: {
+        get(_keys, callback) {
+          callback({
+            authToken: "test-token",
+            libraryOverlayCache: { entries: { "ao3:907": storedEntry } },
+          });
+        },
+        set(value, callback) {
+          const projected = value?.libraryOverlayCache?.entries?.["ao3:907"];
+          if (projected) storedEntry = projected;
+          if (callback) callback();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  installCollectorChrome(dom, chrome);
+  Object.defineProperty(dom.window.document, "visibilityState", {
+    value: "visible",
+    configurable: true,
+  });
+  dom.window.eval(finishSrc);
+  dom.window.TraceFinishQualify.onReachEnd = (_body, callback) => {
+    callback();
+    return function () {};
+  };
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(new dom.window.Event("DOMContentLoaded", { bubbles: true }));
+
+  const recovery = dom.window.document.querySelector("[data-trace-finish-recovery]");
+  assert.ok(recovery);
+  assert.match(recovery.textContent || "", /couldn.t update/i);
+  assert.ok(recovery.querySelector("[data-trace-finish-open]"));
+  recovery.querySelector("[data-trace-finish-retry]").click();
+
+  assert.equal(attempts, 2);
+  assert.ok(dom.window.document.querySelector("[data-trace-finish-toast]"));
+});
+
+test("terminal finish replay after deletion settles without recovery or stale projection", () => {
+  const collectorSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  const finishSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "trace-finish-qualify.js"),
+    "utf8",
+  );
+  const entryId = "00000000-0000-4000-8000-000000000908";
+  let deleted = false;
+  let attempts = 0;
+  const dom = new JSDOM(
+    `<!doctype html><html><body>
+      <h2 class="title heading">Deleted Finish</h2>
+      <h3 class="byline heading"><a rel="author">Author</a></h3>
+      <ul class="required-tags"><li><span title="Complete Work">Complete Work</span></li></ul>
+      <dl class="work meta group"><dd class="chapters">1/1</dd></dl>
+      <div id="chapters"><div class="chapter" id="chapter-1">
+        <div class="userstuff module" role="article">Story.</div>
+      </div></div>
+    </body></html>`,
+    {
+      url: "https://archiveofourown.org/works/908/chapters/909",
+      contentType: "text/html",
+      runScripts: "outside-only",
+    },
+  );
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      lastError: null,
+      sendMessage(message, callback) {
+        if (message.type !== "TRACE_FINISH_QUALIFICATION_SIGNAL" || !callback) return;
+        attempts += 1;
+        deleted = true;
+        callback({
+          ok: true,
+          command: {
+            kind: "acknowledged",
+            state: "resolved",
+            eventId: "00000000-0000-4000-8000-000000000999",
+            workKey: null,
+            entry: null,
+          },
+        });
+      },
+    },
+    storage: {
+      local: {
+        get(_keys, callback) {
+          callback({
+            authToken: "test-token",
+            libraryOverlayCache: {
+              entries: deleted
+                ? {}
+                : {
+                    "ao3:908": {
+                      entryId,
+                      status: "READING",
+                      readerStatus: "READING",
+                      canonicalReaderStatus: "READING",
+                      chapters: { current: 1, total: 1 },
+                    },
+                  },
+            },
+          });
+        },
+        set(_value, callback) {
+          if (callback) callback();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  installCollectorChrome(dom, chrome);
+  Object.defineProperty(dom.window.document, "visibilityState", {
+    value: "visible",
+    configurable: true,
+  });
+  dom.window.eval(finishSrc);
+  dom.window.TraceFinishQualify.onReachEnd = (_body, callback) => {
+    callback();
+    return function () {};
+  };
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(new dom.window.Event("DOMContentLoaded", { bubbles: true }));
+
+  assert.equal(attempts, 1);
+  assert.equal(dom.window.document.querySelector("[data-trace-finish-recovery]"), null);
+  assert.equal(dom.window.document.querySelector("[data-trace-finish-toast]"), null);
+});
+
+test("finish end detection requires visible story-targeted interaction and dwell for a short story", () => {
+  const finishSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "trace-finish-qualify.js"),
+    "utf8",
+  );
+  const dom = new JSDOM(
+    "<!doctype html><html><body><div id='story'>Short story.</div></body></html>",
+    { url: "https://archiveofourown.org/works/1", runScripts: "outside-only" },
+  );
+  const body = dom.window.document.querySelector("#story");
+  body.getBoundingClientRect = () => ({ top: 100, bottom: 400 });
+  Object.defineProperty(dom.window, "innerHeight", { value: 800, configurable: true });
+  Object.defineProperty(dom.window, "scrollY", { value: 0, configurable: true });
+  Object.defineProperty(dom.window.document, "visibilityState", {
+    value: "visible",
+    configurable: true,
+  });
+  let fired = 0;
+  let now = 1_000;
+  let timer = null;
+
+  dom.window.eval(finishSrc);
+  const cleanup = dom.window.TraceFinishQualify.onReachEnd(body, () => {
+    fired += 1;
+  }, {
+    dwellMs: 2_000,
+    now: () => now,
+    setTimer(fn) {
+      timer = fn;
+      return 1;
+    },
+    clearTimer() {
+      timer = null;
+    },
+  });
+
+  assert.equal(fired, 0);
+  dom.window.dispatchEvent(new dom.window.Event("touchend", { bubbles: true }));
+  dom.window.dispatchEvent(new dom.window.Event("pointerup", { bubbles: true }));
+  dom.window.dispatchEvent(new dom.window.KeyboardEvent("keyup", { key: "End", bubbles: true }));
+  dom.window.dispatchEvent(new dom.window.Event("scroll"));
+  assert.equal(fired, 0, "window-level and programmatic events are not reading evidence");
+  dom.window.dispatchEvent(new dom.window.Event("resize"));
+  assert.equal(fired, 0);
+
+  body.dispatchEvent(new dom.window.Event("touchend", { bubbles: true }));
+  assert.equal(fired, 0, "interaction alone does not bypass the dwell requirement");
+  assert.equal(typeof timer, "function");
+  now = 2_999;
+  timer();
+  assert.equal(fired, 0);
+  body.dispatchEvent(new dom.window.KeyboardEvent("keyup", { key: "a", bubbles: true }));
+  assert.equal(fired, 0, "ordinary typing is not reading navigation evidence");
+  now = 3_000;
+  body.dispatchEvent(new dom.window.KeyboardEvent("keyup", { key: "PageDown", bubbles: true }));
+  assert.equal(fired, 1);
+  cleanup();
+});
+
+test("finish end detection treats fully visible short stories as short at nonzero page scroll", () => {
+  const finishSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "trace-finish-qualify.js"),
+    "utf8",
+  );
+  const dom = new JSDOM(
+    "<!doctype html><html><body><div id='story'><p id='text'>Short restored story.</p></div></body></html>",
+    { url: "https://archiveofourown.org/works/5", runScripts: "outside-only" },
+  );
+  const body = dom.window.document.querySelector("#story");
+  const text = dom.window.document.querySelector("#text");
+  body.getBoundingClientRect = () => ({ top: 120, bottom: 420 });
+  Object.defineProperty(dom.window, "innerHeight", { value: 800, configurable: true });
+  Object.defineProperty(dom.window, "scrollY", { value: 640, configurable: true });
+  Object.defineProperty(dom.window.document, "visibilityState", {
+    value: "visible",
+    configurable: true,
+  });
+  let fired = 0;
+
+  dom.window.eval(finishSrc);
+  const cleanup = dom.window.TraceFinishQualify.onReachEnd(body, () => {
+    fired += 1;
+  }, { dwellMs: 0 });
+
+  assert.equal(fired, 0, "page scroll offset alone does not bypass short-story evidence");
+  dom.window.dispatchEvent(new dom.window.Event("scroll"));
+  assert.equal(fired, 0);
+  text.dispatchEvent(new dom.window.Event("pointerup", { bubbles: true }));
+  assert.equal(fired, 1);
+  cleanup();
+});
+
+test("finish end detection waits for visibility and excludes interactive story controls", () => {
+  const finishSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "trace-finish-qualify.js"),
+    "utf8",
+  );
+  const dom = new JSDOM(
+    "<!doctype html><html><body><div id='story'><button id='control'>Bookmark</button><p id='text'>Story.</p></div></body></html>",
+    { url: "https://archiveofourown.org/works/2", runScripts: "outside-only" },
+  );
+  const body = dom.window.document.querySelector("#story");
+  const control = dom.window.document.querySelector("#control");
+  const text = dom.window.document.querySelector("#text");
+  body.getBoundingClientRect = () => ({ top: 100, bottom: 400 });
+  Object.defineProperty(dom.window, "innerHeight", { value: 800, configurable: true });
+  Object.defineProperty(dom.window, "scrollY", { value: 0, configurable: true });
+  let visibility = "hidden";
+  Object.defineProperty(dom.window.document, "visibilityState", {
+    get: () => visibility,
+    configurable: true,
+  });
+  let fired = 0;
+
+  dom.window.eval(finishSrc);
+  const cleanup = dom.window.TraceFinishQualify.onReachEnd(body, () => {
+    fired += 1;
+  }, { dwellMs: 0 });
+
+  control.dispatchEvent(new dom.window.Event("pointerup", { bubbles: true }));
+  assert.equal(fired, 0, "a button inside the story is not reading evidence");
+  text.dispatchEvent(new dom.window.Event("pointerup", { bubbles: true }));
+  assert.equal(fired, 0, "hidden documents cannot finish");
+  visibility = "visible";
+  dom.window.document.dispatchEvent(new dom.window.Event("visibilitychange"));
+  assert.equal(fired, 0, "hidden interactions are not retained as reading evidence");
+  text.dispatchEvent(new dom.window.Event("pointerup", { bubbles: true }));
+  assert.equal(fired, 1);
+  cleanup();
+});
+
+test("finish end detection pauses short-story dwell while the document is hidden", () => {
+  const finishSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "trace-finish-qualify.js"),
+    "utf8",
+  );
+  const dom = new JSDOM(
+    "<!doctype html><html><body><div id='story'><p id='text'>Story.</p></div></body></html>",
+    { url: "https://archiveofourown.org/works/4", runScripts: "outside-only" },
+  );
+  const body = dom.window.document.querySelector("#story");
+  const text = dom.window.document.querySelector("#text");
+  body.getBoundingClientRect = () => ({ top: 100, bottom: 400 });
+  Object.defineProperty(dom.window, "innerHeight", { value: 800, configurable: true });
+  Object.defineProperty(dom.window, "scrollY", { value: 0, configurable: true });
+  let visibility = "visible";
+  Object.defineProperty(dom.window.document, "visibilityState", {
+    get: () => visibility,
+    configurable: true,
+  });
+  let now = 0;
+  let fired = 0;
+  let timer = null;
+  let scheduledDelay = null;
+
+  dom.window.eval(finishSrc);
+  const cleanup = dom.window.TraceFinishQualify.onReachEnd(body, () => {
+    fired += 1;
+  }, {
+    dwellMs: 2_000,
+    now: () => now,
+    setTimer(fn, delay) {
+      timer = fn;
+      scheduledDelay = delay;
+      return 1;
+    },
+    clearTimer() {
+      timer = null;
+      scheduledDelay = null;
+    },
+  });
+
+  now = 500;
+  text.dispatchEvent(new dom.window.Event("pointerup", { bubbles: true }));
+  assert.equal(scheduledDelay, 1_500);
+  now = 1_000;
+  visibility = "hidden";
+  dom.window.document.dispatchEvent(new dom.window.Event("visibilitychange"));
+  assert.equal(timer, null, "hiding pauses the dwell timer");
+
+  now = 5_000;
+  visibility = "visible";
+  dom.window.document.dispatchEvent(new dom.window.Event("visibilitychange"));
+  assert.equal(fired, 0, "hidden wall-clock time does not satisfy dwell");
+  assert.equal(scheduledDelay, 1_000, "only the remaining visible dwell is scheduled");
+
+  now = 6_000;
+  timer();
+  assert.equal(fired, 1);
+  cleanup();
+});
+
+test("finish end detection preserves scroll-to-end behavior for a long story", () => {
+  const finishSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "trace-finish-qualify.js"),
+    "utf8",
+  );
+  const dom = new JSDOM(
+    "<!doctype html><html><body><div id='story'>Long story.</div></body></html>",
+    { url: "https://archiveofourown.org/works/3", runScripts: "outside-only" },
+  );
+  const body = dom.window.document.querySelector("#story");
+  let bottom = 1_400;
+  body.getBoundingClientRect = () => ({ top: 100, bottom });
+  Object.defineProperty(dom.window, "innerHeight", { value: 800, configurable: true });
+  Object.defineProperty(dom.window, "scrollY", { value: 0, configurable: true });
+  Object.defineProperty(dom.window.document, "visibilityState", {
+    value: "visible",
+    configurable: true,
+  });
+  let fired = 0;
+
+  dom.window.eval(finishSrc);
+  const cleanup = dom.window.TraceFinishQualify.onReachEnd(body, () => {
+    fired += 1;
+  });
+  assert.equal(fired, 0);
+  body.dispatchEvent(new dom.window.WheelEvent("wheel", { bubbles: true }));
+  bottom = 850;
+  dom.window.dispatchEvent(new dom.window.Event("scroll"));
+  assert.equal(fired, 1);
+  cleanup();
+});
+
+test("finish end detection does not mistake delayed browser scroll restoration for reading", () => {
+  const finishSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "trace-finish-qualify.js"),
+    "utf8",
+  );
+  const dom = new JSDOM(
+    "<!doctype html><html><body><div id='story'>Restored story.</div></body></html>",
+    { url: "https://archiveofourown.org/works/31", runScripts: "outside-only" },
+  );
+  const body = dom.window.document.querySelector("#story");
+  let bottom = 1_400;
+  body.getBoundingClientRect = () => ({ top: 100, bottom });
+  Object.defineProperty(dom.window, "innerHeight", { value: 800, configurable: true });
+  Object.defineProperty(dom.window.document, "visibilityState", {
+    value: "visible",
+    configurable: true,
+  });
+  let fired = 0;
+
+  dom.window.eval(finishSrc);
+  const cleanup = dom.window.TraceFinishQualify.onReachEnd(body, () => {
+    fired += 1;
+  }, { dwellMs: 0 });
+
+  bottom = 850;
+  dom.window.dispatchEvent(new dom.window.Event("scroll"));
+  assert.equal(fired, 0, "an unattributed restoration scroll is not reading evidence");
+
+  body.dispatchEvent(new dom.window.Event("pointerdown", { bubbles: true }));
+  assert.equal(fired, 1, "explicit story interaction can qualify the restored end state");
+  cleanup();
+});
+
+test("finish end detection does not treat a deep link below the story as reaching its end", () => {
+  const finishSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "trace-finish-qualify.js"),
+    "utf8",
+  );
+  const dom = new JSDOM(
+    "<!doctype html><html><body><div id='story'>Story.</div><div id='comments'>Comments.</div></body></html>",
+    {
+      url: "https://archiveofourown.org/works/6#comments",
+      runScripts: "outside-only",
+    },
+  );
+  const body = dom.window.document.querySelector("#story");
+  body.getBoundingClientRect = () => ({ top: -700, bottom: -120 });
+  Object.defineProperty(dom.window, "innerHeight", { value: 800, configurable: true });
+  Object.defineProperty(dom.window.document, "visibilityState", {
+    value: "visible",
+    configurable: true,
+  });
+  let fired = 0;
+
+  dom.window.eval(finishSrc);
+  const cleanup = dom.window.TraceFinishQualify.onReachEnd(body, () => {
+    fired += 1;
+  }, { dwellMs: 0 });
+
+  dom.window.dispatchEvent(new dom.window.Event("scroll"));
+  dom.window.document.body.dispatchEvent(
+    new dom.window.KeyboardEvent("keyup", { key: "End", bubbles: true }),
+  );
+  body.dispatchEvent(new dom.window.Event("pointerup", { bubbles: true }));
+  assert.equal(fired, 0);
+  cleanup();
+});
+
+test("finish end detection accepts guarded document-level keyboard evidence for a restored short story", () => {
+  const finishSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "trace-finish-qualify.js"),
+    "utf8",
+  );
+  const dom = new JSDOM(
+    "<!doctype html><html><body><div id='story'>Short story.</div></body></html>",
+    { url: "https://archiveofourown.org/works/7", runScripts: "outside-only" },
+  );
+  const body = dom.window.document.querySelector("#story");
+  body.getBoundingClientRect = () => ({ top: 100, bottom: 500 });
+  Object.defineProperty(dom.window, "innerHeight", { value: 800, configurable: true });
+  Object.defineProperty(dom.window.document, "visibilityState", {
+    value: "visible",
+    configurable: true,
+  });
+  let fired = 0;
+
+  dom.window.eval(finishSrc);
+  const cleanup = dom.window.TraceFinishQualify.onReachEnd(body, () => {
+    fired += 1;
+  }, { dwellMs: 0 });
+
+  dom.window.document.body.dispatchEvent(
+    new dom.window.KeyboardEvent("keyup", { key: "PageDown", bubbles: true }),
+  );
+  assert.equal(fired, 1);
+  cleanup();
+});
+
+test("finish end detection requires explicit navigation evidence for a large scroll step past the end", () => {
+  const finishSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "trace-finish-qualify.js"),
+    "utf8",
+  );
+  const makeDom = () => new JSDOM(
+    "<!doctype html><html><body><div id='story'>Long story.</div></body></html>",
+    { url: "https://archiveofourown.org/works/8", runScripts: "outside-only" },
+  );
+
+  for (const withEvidence of [false, true]) {
+    const dom = makeDom();
+    const body = dom.window.document.querySelector("#story");
+    let rect = { top: 100, bottom: 1_400 };
+    body.getBoundingClientRect = () => rect;
+    Object.defineProperty(dom.window, "innerHeight", { value: 800, configurable: true });
+    Object.defineProperty(dom.window.document, "visibilityState", {
+      value: "visible",
+      configurable: true,
+    });
+    let fired = 0;
+    dom.window.eval(finishSrc);
+    const cleanup = dom.window.TraceFinishQualify.onReachEnd(body, () => {
+      fired += 1;
+    }, { dwellMs: 0 });
+
+    if (withEvidence) {
+      dom.window.document.body.dispatchEvent(
+        new dom.window.KeyboardEvent("keydown", { key: "PageDown", bubbles: true }),
+      );
+    }
+    rect = { top: -900, bottom: -100 };
+    dom.window.dispatchEvent(new dom.window.Event("scroll"));
+    assert.equal(fired, withEvidence ? 1 : 0);
+    cleanup();
+  }
 });
 
 test("story sheet position block shows unknown total without chapter stepper controls", () => {

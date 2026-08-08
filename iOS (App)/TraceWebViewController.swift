@@ -1394,6 +1394,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     private static let traceDeviceProviderProtocolVersion = 3
     private static let traceProviderRecordVersion = 2
     private static let traceInstallationIdDefaultsKey = "traceInstallationIdV1"
+    private static let appProviderHealthDefaultsKey = "traceAppProviderHealthV1"
 
     private struct TraceSafariProviderRecord: Codable {
         let version: Int
@@ -1453,6 +1454,12 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 
         switch messageType {
         case "TRACE_IOS_AUTH_TOKEN_UPDATE":
+            os_log(
+                "Credential provider update requested protocol=%{public}d",
+                log: Self.safariBridgeLog,
+                type: .info,
+                body["protocolVersion"] as? Int ?? -1
+            )
             let protocolVersion = body["protocolVersion"] as? Int
             if protocolVersion == Self.traceLegacyProviderProtocolVersion {
                 handleTraceSafariAuthTokenUpdate(
@@ -1552,6 +1559,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 throw TraceSafariExtensionBridgeError.tokenShareFailed
             }
             try Self.storeSharedTraceToken(token)
+            Self.recordAppProviderHealth(state: "ready")
 #if DEBUG && targetEnvironment(simulator)
             traceSimulatorFailNextProviderClear =
                 ProcessInfo.processInfo.environment["traceDebugFailProviderClear"] == "true"
@@ -1562,6 +1570,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 ok: true
             )
         } catch {
+            Self.recordAppProviderHealth(state: "write_failed")
             postSafariExtensionActionResult(
                 type: "TRACE_IOS_AUTH_TOKEN_UPDATE_RESPONSE",
                 nonce: nonce,
@@ -1579,40 +1588,46 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             guard provider["version"] as? Int == Self.traceProviderRecordVersion,
                   provider["kind"] as? String == "device_session",
                   let rawSessionId = provider["sessionId"] as? String,
-                  let sessionId = UUID(uuidString: rawSessionId)?.uuidString.lowercased(),
                   let rawCredential = provider["credential"] as? String,
                   let expiresAt = provider["expiresAt"] as? String,
-                  Self.parseISO8601Date(expiresAt) != nil
+                  let validated = TraceSafariProviderCodec.deviceSession(
+                      sessionId: rawSessionId,
+                      credential: rawCredential,
+                      expiresAt: expiresAt
+                  )
             else {
-                throw TraceSafariExtensionBridgeError.tokenShareFailed
-            }
-            let credential = rawCredential.trimmingCharacters(
-                in: .whitespacesAndNewlines
-            )
-            guard credential.range(
-                of: "^trd_v1_[A-Za-z0-9_-]{43}$",
-                options: .regularExpression
-            ) != nil else {
                 throw TraceSafariExtensionBridgeError.tokenShareFailed
             }
 
             try Self.writeSharedProviderRecord(
                 .deviceSession(
-                    sessionId: sessionId,
-                    credential: credential,
-                    expiresAt: expiresAt
+                    sessionId: validated.sessionId,
+                    credential: validated.credential,
+                    expiresAt: validated.expiresAt
                 )
             )
 #if DEBUG && targetEnvironment(simulator)
             traceSimulatorFailNextProviderClear =
                 ProcessInfo.processInfo.environment["traceDebugFailProviderClear"] == "true"
 #endif
+            Self.recordAppProviderHealth(state: "ready")
+            os_log(
+                "Device credential provider write succeeded",
+                log: Self.safariBridgeLog,
+                type: .info
+            )
             postSafariExtensionActionResult(
                 type: "TRACE_IOS_AUTH_TOKEN_UPDATE_RESPONSE",
                 nonce: nonce,
                 ok: true
             )
         } catch {
+            Self.recordAppProviderHealth(state: "write_failed")
+            os_log(
+                "Device credential provider write failed",
+                log: Self.safariBridgeLog,
+                type: .error
+            )
             postSafariExtensionActionResult(
                 type: "TRACE_IOS_AUTH_TOKEN_UPDATE_RESPONSE",
                 nonce: nonce,
@@ -1630,15 +1645,30 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             if let record,
                record.version == Self.traceProviderRecordVersion,
                record.kind == "device_session",
-               let sessionId = record.sessionId,
-               let expiresAt = record.expiresAt
+               let rawSessionId = record.sessionId,
+               let rawCredential = record.credential,
+               let expiresAt = record.expiresAt,
+               let validated = TraceSafariProviderCodec.deviceSession(
+                   sessionId: rawSessionId,
+                   credential: rawCredential,
+                   expiresAt: expiresAt
+               )
             {
                 provider = TraceSafariAuthProviderMetadataPayload(
                     kind: "device_session",
-                    sessionId: sessionId,
-                    expiresAt: expiresAt
+                    sessionId: validated.sessionId,
+                    expiresAt: validated.expiresAt
                 )
             }
+            os_log(
+                "Credential provider status succeeded provider=%{public}@",
+                log: Self.safariBridgeLog,
+                type: .info,
+                provider == nil ? "missing" : "ready"
+            )
+            Self.recordAppProviderHealth(
+                state: provider == nil ? "missing" : "ready"
+            )
             postTraceWebMessage(
                 TraceSafariAuthProviderStatusPayload(
                     nonce: nonce,
@@ -1649,6 +1679,12 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 )
             )
         } catch {
+            Self.recordAppProviderHealth(state: "unavailable")
+            os_log(
+                "Credential provider status failed",
+                log: Self.safariBridgeLog,
+                type: .error
+            )
             postSafariExtensionActionResult(
                 type: "TRACE_IOS_AUTH_PROVIDER_STATUS_RESPONSE",
                 nonce: nonce,
@@ -1661,12 +1697,14 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     private func handleTraceSafariAuthTokenClear(nonce: String) {
         do {
             try clearSharedProviderForWebShell()
+            Self.recordAppProviderHealth(state: "signed_out")
             postSafariExtensionActionResult(
                 type: "TRACE_IOS_AUTH_TOKEN_CLEAR_RESPONSE",
                 nonce: nonce,
                 ok: true
             )
         } catch {
+            Self.recordAppProviderHealth(state: "clear_failed")
             postSafariExtensionActionResult(
                 type: "TRACE_IOS_AUTH_TOKEN_CLEAR_RESPONSE",
                 nonce: nonce,
@@ -1989,6 +2027,19 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         UserDefaults(suiteName: traceSharedAppGroup)
     }
 
+    /// Privacy-safe provider health shared only with this app group. It gives
+    /// support and release QA a durable boundary result without exposing a
+    /// credential, account identifier, session identifier, story, or URL.
+    private static func recordAppProviderHealth(state: String) {
+        pendingDefaults()?.set(
+            [
+                "state": state,
+                "updatedAt": Date().timeIntervalSince1970 * 1000,
+            ],
+            forKey: appProviderHealthDefaultsKey
+        )
+    }
+
     private static func safariExtensionCandidateIdentifiers() -> [String] {
         var identifiers = embeddedSafariExtensionBundleIdentifiers()
         identifiers.append(safariExtensionBundleIdentifier)
@@ -2149,6 +2200,12 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess, let data = item as? Data else {
+            os_log(
+                "Shared provider read failed status=%{public}d",
+                log: safariBridgeLog,
+                type: .error,
+                status
+            )
             throw TraceSafariExtensionBridgeError.tokenShareFailed
         }
 #endif
@@ -2158,7 +2215,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         ) {
             return record
         }
-        if isLegacyV060RawAccessToken(data) {
+        if TraceSafariProviderCodec.isLegacyV060RawAccessToken(data) {
             os_log(
                 "Legacy v0.6.0 provider detected; awaiting device-session replacement",
                 log: safariBridgeLog,
@@ -2167,31 +2224,6 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             return nil
         }
         throw TraceSafariExtensionBridgeError.tokenShareFailed
-    }
-
-    /// v0.6.0 stored the Auth0 JWT bytes directly under the provider-v2
-    /// Keychain account. Treat only that known three-segment format as
-    /// replaceable legacy data; malformed or unreadable records remain
-    /// unavailable and are never silently overwritten.
-    private static func isLegacyV060RawAccessToken(_ data: Data) -> Bool {
-        guard data.count >= 32, data.count <= 16_384,
-              let token = String(data: data, encoding: .utf8)
-        else {
-            return false
-        }
-        return token.range(
-            of: "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$",
-            options: .regularExpression
-        ) != nil
-    }
-
-    /// JavaScript `Date#toISOString` and the extension API contract include
-    /// fractional seconds. Accept that canonical form while retaining support
-    /// for ISO-8601 timestamps without a fractional component.
-    private static func parseISO8601Date(_ value: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
     }
 
     private static func writeSharedProviderRecord(
@@ -2223,6 +2255,12 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             return
         }
         guard updateStatus == errSecItemNotFound else {
+            os_log(
+                "Shared provider update failed status=%{public}d",
+                log: safariBridgeLog,
+                type: .error,
+                updateStatus
+            )
             throw TraceSafariExtensionBridgeError.tokenShareFailed
         }
 
@@ -2230,7 +2268,14 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         addQuery[kSecValueData as String] = data
         addQuery[kSecAttrAccessible as String] =
             kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        guard SecItemAdd(addQuery as CFDictionary, nil) == errSecSuccess else {
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        guard addStatus == errSecSuccess else {
+            os_log(
+                "Shared provider add failed status=%{public}d",
+                log: safariBridgeLog,
+                type: .error,
+                addStatus
+            )
             throw TraceSafariExtensionBridgeError.tokenShareFailed
         }
 #endif

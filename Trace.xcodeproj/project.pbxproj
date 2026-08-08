@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		BA3EC2012F91000000BA1800 /* TraceSafariProviderCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA3EC2002F91000000BA1800 /* TraceSafariProviderCodec.swift */; };
 		BA3EBDA12F04965D00BA150A /* Trace Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = BA3EBDA02F04965D00BA150A /* Trace Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		BA3EBDAB2F04965D00BA150A /* Trace Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = BA3EBDAA2F04965D00BA150A /* Trace Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		BA3EC0022F04965D00BA1600 /* TraceWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = BA3EC0012F04965D00BA1600 /* TraceWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -70,6 +71,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		BA3EC2002F91000000BA1800 /* TraceSafariProviderCodec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Shared (Extension)/TraceSafariProviderCodec.swift"; sourceTree = "<group>"; };
 		BA3EC1002F90000000BA1700 /* TraceOnboardingUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TraceOnboardingUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		BA0C6ED42F84460200C89191 /* Trace-macOS-Extension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Trace-macOS-Extension.entitlements"; sourceTree = "<group>"; };
 		BA0C6ED52F8512C300C89191 /* Trace-iOS-Debug.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Trace-iOS-Debug.entitlements"; sourceTree = "<group>"; };
@@ -247,6 +249,7 @@
 		BA3EBD662F04965A00BA150A = {
 			isa = PBXGroup;
 			children = (
+				BA3EC2002F91000000BA1800 /* TraceSafariProviderCodec.swift */,
 				BA3EC1032F90000000BA1700 /* TraceOnboardingUITests */,
 				BA0C6ED52F8512C300C89191 /* Trace-iOS-Debug.entitlements */,
 				BA3EC00E2F04965D00BA1600 /* Trace-iOS-Release.entitlements */,
@@ -536,6 +539,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				BA3EC2012F91000000BA1800 /* TraceSafariProviderCodec.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -632,7 +636,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = "Trace-iOS-Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				DEVELOPMENT_TEAM = 3GX59FLLT6;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "iOS (Extension)/Info.plist";
@@ -645,7 +649,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.6.2;
+				MARKETING_VERSION = 0.6.3;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -669,7 +673,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = "Trace-iOS-Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				DEVELOPMENT_TEAM = 3GX59FLLT6;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "iOS (Extension)/Info.plist";
@@ -682,7 +686,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.6.2;
+				MARKETING_VERSION = 0.6.3;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -709,7 +713,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Trace-iOS-Debug.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				DEVELOPMENT_TEAM = 3GX59FLLT6;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "iOS (App)/Info.plist";
@@ -726,7 +730,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.6.2;
+				MARKETING_VERSION = 0.6.3;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -758,7 +762,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Trace-iOS-Release.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				DEVELOPMENT_TEAM = 3GX59FLLT6;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "iOS (App)/Info.plist";
@@ -775,7 +779,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.6.2;
+				MARKETING_VERSION = 0.6.3;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -806,7 +810,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = "Trace-macOS-Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				DEVELOPMENT_TEAM = 3GX59FLLT6;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -821,7 +825,7 @@
 					"@executable_path/../../../../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 10.14;
-				MARKETING_VERSION = 0.6.2;
+				MARKETING_VERSION = 0.6.3;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -843,7 +847,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = "Trace-macOS-Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				DEVELOPMENT_TEAM = 3GX59FLLT6;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -858,7 +862,7 @@
 					"@executable_path/../../../../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 10.14;
-				MARKETING_VERSION = 0.6.2;
+				MARKETING_VERSION = 0.6.3;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -881,7 +885,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				DEVELOPMENT_TEAM = 3GX59FLLT6;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -896,7 +900,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 10.14;
-				MARKETING_VERSION = 0.6.2;
+				MARKETING_VERSION = 0.6.3;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -922,7 +926,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				DEVELOPMENT_TEAM = 3GX59FLLT6;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -937,7 +941,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 10.14;
-				MARKETING_VERSION = 0.6.2;
+				MARKETING_VERSION = 0.6.3;
 				OTHER_LDFLAGS = (
 					"-framework",
 					SafariServices,
@@ -1077,7 +1081,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = TraceWidget/TraceWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				DEVELOPMENT_TEAM = 3GX59FLLT6;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = TraceWidget/Info.plist;
@@ -1088,7 +1092,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.6.2;
+				MARKETING_VERSION = 0.6.3;
 				PRODUCT_BUNDLE_IDENTIFIER = com.tracefiction.trace.TraceWidget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -1108,7 +1112,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = TraceWidget/TraceWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				DEVELOPMENT_TEAM = 3GX59FLLT6;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = TraceWidget/Info.plist;
@@ -1119,7 +1123,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.6.2;
+				MARKETING_VERSION = 0.6.3;
 				PRODUCT_BUNDLE_IDENTIFIER = com.tracefiction.trace.TraceWidget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;

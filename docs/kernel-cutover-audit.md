@@ -12,9 +12,9 @@ quality, sender and privacy boundaries, account-transition safety, failure
 semantics, package modes, and installed-browser behavior.
 
 The audit first preserved the legacy production owner while parity and
-installed behavior were assessed. The final cutover slice changes
-`build:release` to the kernel owner and preserves `build:legacy:release` as the
-explicit rollback command.
+installed behavior were assessed. The final cutover selects the kernel owner
+for both `build` and `build:release`, and preserves `build:legacy` and
+`build:legacy:release` as explicit rollback commands.
 
 ## Ownership And Parity
 
@@ -241,9 +241,10 @@ they pass on a newly archived build.
 
 ## Cutover Decision
 
-- `build:release`, `package:chrome`, and `package:firefox` select the kernel.
-- `build:legacy:release` provides an explicit, tested rollback without changing
-  build implementation or source ownership.
+- `build`, `build:release`, `package:chrome`, and `package:firefox` select the
+  kernel so local/Xcode QA cannot silently exercise the legacy owner.
+- `build:legacy` and `build:legacy:release` provide explicit, tested rollback
+  paths without changing build implementation or source ownership.
 - Kernel and disabled packages contain no embedded legacy runtime or runtime
   mode gate.
 - The package-mode suite proves legacy, kernel, and disabled builds remain

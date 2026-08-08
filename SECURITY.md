@@ -53,11 +53,19 @@ Kernel library mutations accept only bounded commands from active top-frame
 AO3/FFN senders. Status, rating, chapter progress, and work-status patches must
 name the exact entry id currently projected for the claimed same-host work key;
 hide/unhide remains keyed separately because it does not require a library
-entry. The worker forces an authoritative overlay refresh before and after a
-write. A timeout or malformed success response is reconciled through that
-projection and is never treated as success or blindly repeated. Finish
+entry. For those general entry and preference writes, the worker forces an
+authoritative overlay refresh before and after the request. A timeout or
+malformed success response is reconciled through that projection and is never
+treated as success or blindly repeated. Finish
 qualification uses its documented idempotent endpoint, remains account fenced,
-and cannot carry arbitrary library patch fields.
+and cannot carry arbitrary library patch fields. It does not infer success from
+the account projection: the server must return the exact work key and a valid
+authoritative entry with the requested entry id. An uncertain resolved request
+may retry that same endpoint once; an observational open request is never
+retried. After a resolved acknowledgement, projection invalidation and refresh
+are detached cache maintenance and cannot delay or replace the server result;
+open and ignored results do not churn the cache. A general library mutation is
+still never blindly repeated.
 
 Kernel first-story initiation has separate trusted entry points. Popup import
 is accepted only from the extension popup and can collect only the current

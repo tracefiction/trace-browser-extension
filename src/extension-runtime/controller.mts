@@ -345,7 +345,13 @@ export class SessionRuntimeController {
     const libraryCommandPorts = {
       session: this.#service,
       api: new LibraryCommandApi(environment.fetch, environment.apiBase),
-      projection: new AccountLibraryCommandProjection(this.#projection),
+      projection: new AccountLibraryCommandProjection(
+        this.#projection,
+        this.#accountData,
+      ),
+      finishOperationIds: {
+        create: environment.randomId,
+      },
     };
     this.#libraryMutations = new LibraryMutationService(libraryCommandPorts);
     this.#finishQualification = new FinishQualificationService(libraryCommandPorts);

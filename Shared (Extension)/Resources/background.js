@@ -718,44 +718,76 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#ports = ports;
     }
     execute(command) {
-      return this.#withLock(() => this.#execute(command));
+      const publicationReservation = this.#ports.projection.reserveFinishPublication();
+      return this.#withLock(() => this.#execute(command, publicationReservation));
     }
-    async #execute(command) {
+    async #execute(command, publicationReservation) {
       const scope2 = this.#ports.session.publicationScope();
       if (scope2 === null) return failed("not_authenticated");
-      const projection = await this.#ports.projection.refreshAndRead();
-      if (projection.kind !== "value") return projectionFailure(projection);
-      if (!sameAccountScope(this.#ports.session.publicationScope(), scope2)) {
-        return failed("stale");
+      let operation;
+      if (command.state === "resolved") {
+        let operationId;
+        try {
+          operationId = this.#ports.finishOperationIds.create().trim();
+        } catch {
+          return failed("unavailable");
+        }
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(operationId)) {
+          return failed("unavailable");
+        }
+        operation = Object.freeze({ ...command, operationId });
+      } else {
+        operation = command;
       }
-      if (entryForCommand(projection.value, command) === null) {
-        return failed("invalid_request");
-      }
-      let signal = await this.#ports.session.executeAuthenticated(
-        (credential) => this.#ports.api.qualifyFinish(credential, command)
-      );
-      if (signal.kind === "auth_rejected" && signal.recovery === "connected") {
-        signal = await this.#ports.session.executeAuthenticated(
-          (credential) => this.#ports.api.qualifyFinish(credential, command)
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        let signal = await this.#ports.session.executeAuthenticated(
+          (credential) => this.#ports.api.qualifyFinish(credential, operation)
         );
-      }
-      if (signal.kind !== "published") return executionFailure(signal);
-      if (signal.value.kind === "rejected") return failed(signal.value.reason);
-      if (signal.value.kind === "uncertain") return failed("unavailable");
-      if (!sameAccountScope(this.#ports.session.publicationScope(), scope2)) {
-        return failed("stale");
-      }
-      if (signal.value.state === "resolved") {
-        await this.#ports.projection.refreshAndRead();
+        if (signal.kind === "auth_rejected" && signal.recovery === "connected") {
+          signal = await this.#ports.session.executeAuthenticated(
+            (credential) => this.#ports.api.qualifyFinish(credential, operation)
+          );
+        }
+        if (signal.kind !== "published") return executionFailure(signal);
+        if (signal.value.kind === "rejected") return failed(signal.value.reason);
         if (!sameAccountScope(this.#ports.session.publicationScope(), scope2)) {
           return failed("stale");
         }
+        if (signal.value.kind === "uncertain") {
+          if (command.state === "resolved" && attempt === 0) continue;
+          return failed("unavailable");
+        }
+        if (signal.value.kind === "invalid_response") {
+          return failed("invalid_response");
+        }
+        if (signal.value.state !== "ignored" && signal.value.state !== command.state) {
+          return failed("invalid_response");
+        }
+        if (signal.value.operationId !== (operation.state === "resolved" ? operation.operationId : null)) {
+          return failed("invalid_response");
+        }
+        let publication;
+        try {
+          publication = await this.#ports.projection.publishFinishAcknowledgement(
+            scope2,
+            operation,
+            signal.value,
+            publicationReservation
+          );
+        } catch {
+          publication = { kind: "unavailable" };
+        }
+        if (!sameAccountScope(this.#ports.session.publicationScope(), scope2)) {
+          return failed("stale");
+        }
+        if (publication.kind === "published") return signal.value;
+        if (publication.kind === "rejected_scope" || publication.kind === "stale_write") {
+          return failed("stale");
+        }
+        if (publication.kind === "invalid_model") return failed("invalid_response");
+        return failed("unavailable");
       }
-      return Object.freeze({
-        kind: "acknowledged",
-        state: signal.value.state,
-        eventId: signal.value.eventId
-      });
+      return failed("unavailable");
     }
     async #withLock(work) {
       const previous = this.#tail;
@@ -3204,9 +3236,18 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }), reservation);
     }
     publishConfirmedStory(requestedScope, confirmation) {
-      const reservation = this.reserveOverlayWrite();
+      return this.publishAuthoritativeStory(requestedScope, confirmation);
+    }
+    /**
+     * Publishes an exact server acknowledgement into the account-scoped root.
+     * Finish qualification responses from the first additive server release may
+     * omit syncVersion, so preserve the current opaque version in that case.
+     */
+    publishAuthoritativeStory(requestedScope, confirmation, reservation = this.reserveOverlayWrite()) {
       const entry = copyLibraryOverlayEntry(confirmation.entry);
-      if (entry === null) return Promise.resolve({ kind: "invalid_model" });
+      if (entry === null || entry.entryId === void 0 || entry.entryId !== confirmation.entryId) {
+        return Promise.resolve({ kind: "invalid_model" });
+      }
       return this.#publish(requestedScope, (current) => {
         const overlay = current.overlay ?? Object.freeze({
           entries: Object.freeze({}),
@@ -3221,7 +3262,23 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
               [confirmation.workKey]: entry
             }),
             workPreferences: overlay.workPreferences,
-            syncVersion: confirmation.syncVersion
+            syncVersion: confirmation.syncVersion ?? overlay.syncVersion
+          })
+        });
+      }, reservation);
+    }
+    removeAuthoritativeStory(requestedScope, identity, reservation = this.reserveOverlayWrite()) {
+      return this.#publish(requestedScope, (current) => {
+        const overlay = current.overlay;
+        const stored = overlay?.entries[identity.workKey];
+        if (overlay === null || stored?.entryId !== identity.entryId) return current;
+        const entries = { ...overlay.entries };
+        delete entries[identity.workKey];
+        return Object.freeze({
+          ...current,
+          overlay: Object.freeze({
+            ...overlay,
+            entries: Object.freeze(entries)
           })
         });
       }, reservation);
@@ -3582,8 +3639,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   // src/extension-runtime/library-command.mts
   var REQUEST_TIMEOUT_MS3 = 12e3;
   var UUID_PATTERN5 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  var WORK_KEY_PATTERN3 = /^(ao3|ffn):[1-9][0-9]{0,19}$/;
   function isRecord8(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function isIsoTimestamp2(value) {
+    return typeof value === "string" && value.length <= 64 && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
   }
   var LibraryCommandApi = class {
     #fetch;
@@ -3632,7 +3693,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     async qualifyFinish(credential, command) {
       const response = await this.#request(this.#finishEndpoint, credential, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json"
+        },
         body: JSON.stringify({
           entryId: command.entryId,
           workKey: command.workKey,
@@ -3641,31 +3704,69 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           total: command.total,
           state: command.state,
           ...command.state === "resolved" ? {
+            operationId: command.operationId,
             workStatus: command.workStatus,
-            readerStatus: command.readerStatus
+            resolutionSource: command.resolutionSource
           } : {}
         })
       });
       if (response === null) return { kind: "success", value: { kind: "uncertain" } };
       if (response.status === 401 || response.status === 403) return { kind: "auth_rejected" };
-      if (response.status === 400 || response.status === 404) {
+      if (response.status === 400 || response.status === 404 || response.status === 409) {
         return { kind: "success", value: { kind: "rejected", reason: "invalid_request" } };
       }
       if (response.status === 429) {
         return { kind: "success", value: { kind: "rejected", reason: "rate_limited" } };
       }
+      if (response.status === 503) {
+        const error = await this.#json(response);
+        if (isRecord8(error) && error.code === "EXTENSION_FINISH_QUALIFICATION_DISABLED" && error.retryable === false) {
+          return {
+            kind: "success",
+            value: {
+              kind: "rejected",
+              reason: "finish_qualification_disabled"
+            }
+          };
+        }
+        return { kind: "success", value: { kind: "uncertain" } };
+      }
       if (!response.ok) return { kind: "success", value: { kind: "uncertain" } };
       const body = await this.#json(response);
       const data = isRecord8(body) && isRecord8(body.data) ? body.data : null;
-      if (data === null || data.state !== "open" && data.state !== "resolved" && data.state !== "ignored" || data.eventId !== null && (typeof data.eventId !== "string" || !UUID_PATTERN5.test(data.eventId))) {
-        return { kind: "success", value: { kind: "uncertain" } };
+      const workKey = data === null ? void 0 : data.workKey;
+      const entry = data === null ? null : copyLibraryOverlayEntry(data.entry);
+      const syncVersion = data !== null && Object.hasOwn(data, "syncVersion") ? data.syncVersion : void 0;
+      const terminalWithoutProjection = (data?.state === "resolved" || data?.state === "ignored") && workKey === null && data.entry === null && syncVersion === null;
+      const expectedOperationId = command.state === "resolved" ? command.operationId : null;
+      const responseOperationId = data !== null && Object.hasOwn(data, "operationId") ? data.operationId : null;
+      if (data === null || data.state !== "ignored" && data.state !== command.state || responseOperationId !== expectedOperationId || data.eventId !== null && (typeof data.eventId !== "string" || !UUID_PATTERN5.test(data.eventId)) || !terminalWithoutProjection && (typeof workKey !== "string" || workKey !== command.workKey || !WORK_KEY_PATTERN3.test(workKey) || entry === null || entry.entryId !== command.entryId || syncVersion !== void 0 && !isIsoTimestamp2(syncVersion))) {
+        return { kind: "success", value: { kind: "invalid_response" } };
+      }
+      if (terminalWithoutProjection) {
+        return {
+          kind: "success",
+          value: {
+            kind: "acknowledged",
+            state: data.state,
+            eventId: data.eventId,
+            operationId: expectedOperationId,
+            workKey: null,
+            entry: null,
+            syncVersion: null
+          }
+        };
       }
       return {
         kind: "success",
         value: {
           kind: "acknowledged",
           state: data.state,
-          eventId: data.eventId
+          eventId: data.eventId,
+          operationId: expectedOperationId,
+          workKey,
+          entry,
+          ...typeof syncVersion === "string" ? { syncVersion } : {}
         }
       };
     }
@@ -3707,8 +3808,29 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   }
   var AccountLibraryCommandProjection = class {
     #projection;
-    constructor(projection) {
+    #repository;
+    constructor(projection, repository) {
       this.#projection = projection;
+      this.#repository = repository;
+    }
+    reserveFinishPublication() {
+      return this.#repository.reserveOverlayWrite();
+    }
+    async publishFinishAcknowledgement(scope2, command, acknowledgement, reservation) {
+      try {
+        const result = acknowledgement.workKey === null || acknowledgement.entry === null ? await this.#repository.removeAuthoritativeStory(scope2, {
+          workKey: command.workKey,
+          entryId: command.entryId
+        }, reservation) : await this.#repository.publishAuthoritativeStory(scope2, {
+          workKey: acknowledgement.workKey,
+          entryId: acknowledgement.entry.entryId ?? "",
+          entry: acknowledgement.entry,
+          ...acknowledgement.syncVersion === void 0 ? {} : { syncVersion: acknowledgement.syncVersion }
+        }, reservation);
+        return result.kind === "published" ? { kind: "published" } : result;
+      } catch {
+        return { kind: "unavailable" };
+      }
     }
     async refreshAndRead() {
       const refreshed = await this.#projection.refreshIfNeeded(true);
@@ -3721,7 +3843,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 
   // src/extension-runtime/library-command-sender.mts
   var UUID_PATTERN6 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-  var WORK_KEY_PATTERN3 = /^(ao3|ffn):[1-9][0-9]{0,19}$/;
+  var WORK_KEY_PATTERN4 = /^(ao3|ffn):[1-9][0-9]{0,19}$/;
   var MAX_COMMAND_BYTES = 8 * 1024;
   var MAX_CHAPTER = 1e7;
   function isRecord9(value) {
@@ -3800,7 +3922,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     const senderUrl = sender?.tab?.url ?? sender?.url;
     if (isBlockedArchivePath(senderUrl, hostKind2)) return null;
     const workKey = typeof claimedWorkKey === "string" ? claimedWorkKey.trim().toLowerCase() : "";
-    if (!WORK_KEY_PATTERN3.test(workKey) || !workKey.startsWith(`${hostKind2}:`)) {
+    if (!WORK_KEY_PATTERN4.test(workKey) || !workKey.startsWith(`${hostKind2}:`)) {
       return null;
     }
     const senderWorkKey = workKeyFromArchiveUrl(senderUrl, hostKind2);
@@ -3863,31 +3985,40 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     if (scope2 === null || payload.source !== scope2.hostKind) return null;
     const entryId = typeof payload.entryId === "string" ? payload.entryId.trim() : "";
     if (!UUID_PATTERN6.test(entryId)) return null;
-    if (!Number.isSafeInteger(payload.chapter) || payload.chapter < 1 || payload.chapter > MAX_CHAPTER || !Number.isSafeInteger(payload.total) || payload.total < 1 || payload.total > MAX_CHAPTER) {
+    if (!Number.isSafeInteger(payload.chapter) || payload.chapter < 1 || payload.chapter > MAX_CHAPTER || !Number.isSafeInteger(payload.total) || payload.total < 1 || payload.total > MAX_CHAPTER || payload.chapter !== payload.total) {
       return null;
     }
     if (payload.state !== "open" && payload.state !== "resolved") return null;
-    const command = {
+    const commandBase = {
       kind: "finish_qualification",
       ...scope2,
       entryId,
       source: scope2.hostKind,
       chapter: payload.chapter,
-      total: payload.total,
-      state: payload.state
+      total: payload.total
     };
-    if (payload.state === "resolved") {
-      if (payload.workStatus !== "complete" && payload.workStatus !== "wip" && payload.workStatus !== "hiatus" && payload.workStatus !== "abandoned") {
+    if (payload.state === "open") {
+      if (Object.hasOwn(payload, "workStatus") || Object.hasOwn(payload, "readerStatus") || Object.hasOwn(payload, "resolutionSource")) {
         return null;
       }
-      const status = canonicalStatus(payload.readerStatus);
-      if (status === null) return null;
-      command.workStatus = payload.workStatus;
-      command.readerStatus = status;
-    } else if (Object.hasOwn(payload, "workStatus") || Object.hasOwn(payload, "readerStatus")) {
+      return Object.freeze({ ...commandBase, state: "open" });
+    }
+    if (payload.workStatus !== "complete" && payload.workStatus !== "wip" && payload.workStatus !== "hiatus" && payload.workStatus !== "abandoned") {
       return null;
     }
-    return Object.freeze(command);
+    if (payload.readerStatus !== void 0 && canonicalStatus(payload.readerStatus) === null) return null;
+    if (payload.resolutionSource !== void 0 && payload.resolutionSource !== "source" && payload.resolutionSource !== "reader") {
+      return null;
+    }
+    if (payload.resolutionSource === "source" && payload.workStatus === "abandoned") {
+      return null;
+    }
+    return Object.freeze({
+      ...commandBase,
+      state: "resolved",
+      workStatus: payload.workStatus,
+      resolutionSource: payload.resolutionSource ?? "reader"
+    });
   }
 
   // src/extension-runtime/first-story-initiation.mts
@@ -5092,7 +5223,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     status: "TRACE_EXTENSION_STATUS_QUERY",
     openTraceUrl: TRACE_WEB_OPEN_MESSAGE
   });
-  var WORK_KEY_PATTERN4 = /^(ao3|ffn):[1-9][0-9]{0,19}$/;
+  var WORK_KEY_PATTERN5 = /^(ao3|ffn):[1-9][0-9]{0,19}$/;
   var MAX_PROJECTION_WORK_KEYS = 250;
   var POPUP_PREFERENCE_KEYS = Object.freeze([
     "prefAutoTrackEnabled",
@@ -5147,7 +5278,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     const keys = [];
     const seen = /* @__PURE__ */ new Set();
     for (const candidate of value) {
-      if (typeof candidate !== "string" || !WORK_KEY_PATTERN4.test(candidate) || !candidate.startsWith(`${host}:`)) {
+      if (typeof candidate !== "string" || !WORK_KEY_PATTERN5.test(candidate) || !candidate.startsWith(`${host}:`)) {
         return null;
       }
       if (!seen.has(candidate)) {
@@ -5361,7 +5492,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       const libraryCommandPorts = {
         session: this.#service,
         api: new LibraryCommandApi(environment.fetch, environment.apiBase),
-        projection: new AccountLibraryCommandProjection(this.#projection)
+        projection: new AccountLibraryCommandProjection(
+          this.#projection,
+          this.#accountData
+        ),
+        finishOperationIds: {
+          create: environment.randomId
+        }
       };
       this.#libraryMutations = new LibraryMutationService(libraryCommandPorts);
       this.#finishQualification = new FinishQualificationService(libraryCommandPorts);
@@ -5501,7 +5638,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         const host = archiveHostKindFromSender(sender);
         const workKey = typeof message.workKey === "string" ? message.workKey : "";
         const senderUrl = sender?.tab?.url ?? sender?.url;
-        if (host === null || isBlockedArchivePath(senderUrl, host) || !WORK_KEY_PATTERN4.test(workKey) || workKey !== workKeyFromArchiveUrl(senderUrl, host)) {
+        if (host === null || isBlockedArchivePath(senderUrl, host) || !WORK_KEY_PATTERN5.test(workKey) || workKey !== workKeyFromArchiveUrl(senderUrl, host)) {
           return null;
         }
         await this.#bootstrapNativeAuthorityForArchiveRead();
@@ -6268,6 +6405,22 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   }
 
   // src/extension-runtime/index.mts
+  var UUID_PATTERN7 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  function fallbackUuid(seed) {
+    let hash = 2166136261;
+    const bytes = [];
+    for (let index = 0; index < 16; index += 1) {
+      for (let offset = 0; offset < seed.length; offset += 1) {
+        hash ^= seed.charCodeAt(offset) + index;
+        hash = Math.imul(hash, 16777619);
+      }
+      bytes.push(hash >>> index % 4 * 8 & 255);
+    }
+    bytes[6] = bytes[6] & 15 | 64;
+    bytes[8] = bytes[8] & 63 | 128;
+    const hex = bytes.map((value) => value.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
   var scope = globalThis;
   scope.TRACE_SESSION_MODE = "kernel";
   try {
@@ -6295,9 +6448,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     let fallbackId = 0;
     const randomId = () => {
       const uuid = scope.crypto?.randomUUID?.();
-      if (uuid) return uuid;
+      if (typeof uuid === "string" && UUID_PATTERN7.test(uuid)) return uuid;
       fallbackId += 1;
-      return `${Date.now()}-${fallbackId}`;
+      return fallbackUuid(`${Date.now()}:${fallbackId}`);
     };
     installSessionRuntime({
       mode: "kernel",

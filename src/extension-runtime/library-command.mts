@@ -1,8 +1,9 @@
 import type {
   AccountDataV1,
+  AccountScope,
   AccountProjectionRefreshResult,
   AuthenticatedEffectResult,
-  FinishQualificationCommand,
+  FinishQualificationOperation,
   FinishQualificationOutcome,
   LibraryCommandApiPort,
   LibraryCommandProjectionPort,
@@ -10,14 +11,28 @@ import type {
   LibraryMutationOutcome,
   LibraryProjectionReadResult,
 } from "../extension-core/index.mjs";
-import { AccountProjectionService } from "../extension-core/index.mjs";
+import { AccountDataRepository } from "./account-data-repository.mjs";
+import {
+  AccountProjectionService,
+  copyLibraryOverlayEntry,
+} from "../extension-core/index.mjs";
 
 const REQUEST_TIMEOUT_MS = 12_000;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const WORK_KEY_PATTERN = /^(ao3|ffn):[1-9][0-9]{0,19}$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isIsoTimestamp(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length <= 64 &&
+    Number.isFinite(Date.parse(value)) &&
+    new Date(value).toISOString() === value
+  );
 }
 
 export class LibraryCommandApi implements LibraryCommandApiPort {
@@ -85,11 +100,13 @@ export class LibraryCommandApi implements LibraryCommandApiPort {
 
   async qualifyFinish(
     credential: string,
-    command: FinishQualificationCommand,
+    command: FinishQualificationOperation,
   ): Promise<AuthenticatedEffectResult<FinishQualificationOutcome>> {
     const response = await this.#request(this.#finishEndpoint, credential, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify({
         entryId: command.entryId,
         workKey: command.workKey,
@@ -99,43 +116,106 @@ export class LibraryCommandApi implements LibraryCommandApiPort {
         state: command.state,
         ...(command.state === "resolved"
           ? {
+              operationId: command.operationId,
               workStatus: command.workStatus,
-              readerStatus: command.readerStatus,
+              resolutionSource: command.resolutionSource,
             }
           : {}),
       }),
     });
     if (response === null) return { kind: "success", value: { kind: "uncertain" } };
     if (response.status === 401 || response.status === 403) return { kind: "auth_rejected" };
-    if (response.status === 400 || response.status === 404) {
+    if (response.status === 400 || response.status === 404 || response.status === 409) {
       return { kind: "success", value: { kind: "rejected", reason: "invalid_request" } };
     }
     if (response.status === 429) {
       return { kind: "success", value: { kind: "rejected", reason: "rate_limited" } };
     }
+    if (response.status === 503) {
+      const error = await this.#json(response);
+      if (
+        isRecord(error) &&
+        error.code === "EXTENSION_FINISH_QUALIFICATION_DISABLED" &&
+        error.retryable === false
+      ) {
+        return {
+          kind: "success",
+          value: {
+            kind: "rejected",
+            reason: "finish_qualification_disabled",
+          },
+        };
+      }
+      return { kind: "success", value: { kind: "uncertain" } };
+    }
     if (!response.ok) return { kind: "success", value: { kind: "uncertain" } };
     const body = await this.#json(response);
     const data = isRecord(body) && isRecord(body.data) ? body.data : null;
+    const workKey = data === null ? undefined : data.workKey;
+    const entry = data === null ? null : copyLibraryOverlayEntry(data.entry);
+    const syncVersion = data !== null && Object.hasOwn(data, "syncVersion")
+      ? data.syncVersion
+      : undefined;
+    const terminalWithoutProjection =
+      (data?.state === "resolved" || data?.state === "ignored") &&
+      workKey === null &&
+      data.entry === null &&
+      syncVersion === null;
+    const expectedOperationId = command.state === "resolved"
+      ? command.operationId
+      : null;
+    const responseOperationId = data !== null && Object.hasOwn(data, "operationId")
+      ? data.operationId
+      : null;
     if (
       data === null ||
       (
-        data.state !== "open" &&
-        data.state !== "resolved" &&
-        data.state !== "ignored"
+        data.state !== "ignored" &&
+        data.state !== command.state
       ) ||
+      responseOperationId !== expectedOperationId ||
       (
         data.eventId !== null &&
         (typeof data.eventId !== "string" || !UUID_PATTERN.test(data.eventId))
+      ) ||
+      (
+        !terminalWithoutProjection &&
+        (
+          typeof workKey !== "string" ||
+          workKey !== command.workKey ||
+          !WORK_KEY_PATTERN.test(workKey) ||
+          entry === null ||
+          entry.entryId !== command.entryId ||
+          (syncVersion !== undefined && !isIsoTimestamp(syncVersion))
+        )
       )
     ) {
-      return { kind: "success", value: { kind: "uncertain" } };
+      return { kind: "success", value: { kind: "invalid_response" } };
+    }
+    if (terminalWithoutProjection) {
+      return {
+        kind: "success",
+        value: {
+          kind: "acknowledged",
+          state: data.state as "resolved" | "ignored",
+          eventId: data.eventId as string | null,
+          operationId: expectedOperationId,
+          workKey: null,
+          entry: null,
+          syncVersion: null,
+        },
+      };
     }
     return {
       kind: "success",
       value: {
         kind: "acknowledged",
-        state: data.state,
+        state: data.state as "open" | "resolved" | "ignored",
         eventId: data.eventId as string | null,
+        operationId: expectedOperationId,
+        workKey: workKey as string,
+        entry: entry!,
+        ...(typeof syncVersion === "string" ? { syncVersion } : {}),
       },
     };
   }
@@ -191,9 +271,49 @@ function refreshFailure(
 
 export class AccountLibraryCommandProjection implements LibraryCommandProjectionPort {
   readonly #projection: AccountProjectionService;
+  readonly #repository: AccountDataRepository;
 
-  constructor(projection: AccountProjectionService) {
+  constructor(
+    projection: AccountProjectionService,
+    repository: AccountDataRepository,
+  ) {
     this.#projection = projection;
+    this.#repository = repository;
+  }
+
+  reserveFinishPublication(): number {
+    return this.#repository.reserveOverlayWrite();
+  }
+
+  async publishFinishAcknowledgement(
+    scope: AccountScope,
+    command: FinishQualificationOperation,
+    acknowledgement: Extract<FinishQualificationOutcome, { readonly kind: "acknowledged" }>,
+    reservation: number,
+  ): Promise<
+    | Readonly<{ kind: "published" }>
+    | Readonly<{
+        kind: "rejected_scope" | "invalid_model" | "stale_write" | "unavailable";
+      }>
+  > {
+    try {
+      const result = acknowledgement.workKey === null || acknowledgement.entry === null
+        ? await this.#repository.removeAuthoritativeStory(scope, {
+          workKey: command.workKey,
+          entryId: command.entryId,
+          }, reservation)
+        : await this.#repository.publishAuthoritativeStory(scope, {
+            workKey: acknowledgement.workKey,
+            entryId: acknowledgement.entry.entryId ?? "",
+            entry: acknowledgement.entry,
+            ...(acknowledgement.syncVersion === undefined
+              ? {}
+              : { syncVersion: acknowledgement.syncVersion }),
+          }, reservation);
+      return result.kind === "published" ? { kind: "published" } : result;
+    } catch {
+      return { kind: "unavailable" };
+    }
   }
 
   async refreshAndRead(): Promise<LibraryProjectionReadResult> {

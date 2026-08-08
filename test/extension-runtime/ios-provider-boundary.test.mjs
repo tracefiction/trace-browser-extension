@@ -6,8 +6,17 @@ import test from "node:test";
 const ROOT = process.cwd();
 const read = (...parts) => fs.readFileSync(path.join(ROOT, ...parts), "utf8");
 
+test("non-production iOS wrappers require Debug while Release remains production-bound", () => {
+  const app = read("iOS (App)", "TraceWebViewController.swift");
+  assert.match(
+    app,
+    /#if DEBUG[\s\S]*webAppHTTPSOriginDebug = TraceWebOriginGenerated\.httpsOrigin[\s\S]*return webAppHTTPSOriginDebug[\s\S]*#else[\s\S]*return "https:\/\/tracefiction\.com"[\s\S]*#endif/,
+  );
+});
+
 test("the app synchronizer is the sole versioned writer and native utility handlers do not acquire tokens", () => {
   const app = read("iOS (App)", "TraceWebViewController.swift");
+  const codec = read("Shared (Extension)", "TraceSafariProviderCodec.swift");
   assert.doesNotMatch(app, /storeCurrentTraceTokenForSafariExtension/);
   assert.match(app, /traceAuthTokenAccount = "extension-provider-v2"/);
   assert.match(app, /retiredTraceAuthTokenAccount = "extension-token"/);
@@ -33,18 +42,19 @@ test("the app synchronizer is the sole versioned writer and native utility handl
   );
   assert.match(
     app,
-    /JSONDecoder\(\)\.decode[\s\S]*isLegacyV060RawAccessToken\(data\)[\s\S]*return nil[\s\S]*throw TraceSafariExtensionBridgeError\.tokenShareFailed/,
+    /JSONDecoder\(\)\.decode[\s\S]*TraceSafariProviderCodec\.isLegacyV060RawAccessToken\(data\)[\s\S]*return nil[\s\S]*throw TraceSafariExtensionBridgeError\.tokenShareFailed/,
   );
   assert.match(
-    app,
+    codec,
     /data\.count >= 32[\s\S]*data\.count <= 16_384[\s\S]*\^\[A-Za-z0-9_-\]\+\\\\\.\[A-Za-z0-9_-\]\+\\\\\.\[A-Za-z0-9_-\]\+\$/,
   );
   assert.match(app, /traceDebugSeedLegacyRawProvider/);
   assert.match(app, /Legacy v0\.6\.0 provider detected/);
   assert.match(
-    app,
+    codec,
     /parseISO8601Date\(expiresAt\)[\s\S]*withInternetDateTime, \.withFractionalSeconds[\s\S]*ISO8601DateFormatter\(\)\.date\(from: value\)/,
   );
+  assert.match(app, /TraceSafariProviderCodec\.deviceSession/);
   const providerWriter = app.slice(
     app.indexOf("private static func writeSharedProviderRecord"),
     app.indexOf("private static func clearSharedTraceTokens"),
@@ -81,7 +91,7 @@ test("the app synchronizer is the sole versioned writer and native utility handl
   assert.match(extension, /recordSimulatorProviderRequest\(credential\)/);
   assert.match(
     extension,
-    /parseISO8601Date\(expiresAt\)[\s\S]*withInternetDateTime, \.withFractionalSeconds[\s\S]*ISO8601DateFormatter\(\)\.date\(from: value\)/,
+    /TraceSafariProviderCodec\.deviceSession/,
   );
   assert.match(
     extension,
@@ -117,6 +127,46 @@ test("the app synchronizer is the sole versioned writer and native utility handl
     app,
     /object\(forKey: traceSimulatorProviderV2Key\) == nil[\s\S]*object\(forKey: traceSimulatorRetiredProviderKey\) == nil/,
   );
+});
+
+test("native provider failures stay observable without credentials", () => {
+  const app = read("iOS (App)", "TraceWebViewController.swift");
+  const extension = read("Shared (Extension)", "SafariWebExtensionHandler.swift");
+
+  assert.match(app, /Shared provider read failed status=%\{public\}d/);
+  assert.match(app, /Shared provider update failed status=%\{public\}d/);
+  assert.match(app, /Shared provider add failed status=%\{public\}d/);
+  assert.match(app, /Device credential provider write succeeded/);
+  assert.match(app, /Device credential provider write failed/);
+  assert.match(extension, /Shared credential read succeeded kind=%\{public\}@/);
+  assert.match(extension, /Shared credential is missing/);
+  assert.match(extension, /Shared credential is unavailable/);
+  assert.match(app, /traceAppProviderHealthV1/);
+  assert.match(extension, /traceExtensionProviderHealthV1/);
+  assert.match(app, /recordAppProviderHealth\(state: "write_failed"\)/);
+  assert.match(extension, /recordProviderReadHealth\(credential\)/);
+
+  const appHealthWriter = app.slice(
+    app.indexOf("private static func recordAppProviderHealth"),
+    app.indexOf("private static func safariExtensionCandidateIdentifiers"),
+  );
+  const extensionHealthWriter = extension.slice(
+    extension.indexOf("private static func recordProviderReadHealth"),
+    extension.indexOf("private static func storeExtensionHeartbeat"),
+  );
+  for (const writer of [appHealthWriter, extensionHealthWriter]) {
+    assert.match(writer, /"state": state/);
+    assert.match(writer, /"updatedAt": Date\(\)\.timeIntervalSince1970 \* 1000/);
+    assert.doesNotMatch(
+      writer,
+      /"(?:credential|token|accountId|sessionId|story|url)"\s*:/,
+    );
+  }
+
+  for (const source of [app, extension]) {
+    assert.doesNotMatch(source, /credential=%\{public\}/);
+    assert.doesNotMatch(source, /token=%\{public\}/);
+  }
 });
 
 test("the one app-opening route is fixed and unknown destinations fail closed", () => {
