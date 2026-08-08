@@ -6,6 +6,14 @@ import test from "node:test";
 const ROOT = process.cwd();
 const read = (...parts) => fs.readFileSync(path.join(ROOT, ...parts), "utf8");
 
+test("non-production iOS wrappers require Debug while Release remains production-bound", () => {
+  const app = read("iOS (App)", "TraceWebViewController.swift");
+  assert.match(
+    app,
+    /#if DEBUG[\s\S]*webAppHTTPSOriginDebug = TraceWebOriginGenerated\.httpsOrigin[\s\S]*return webAppHTTPSOriginDebug[\s\S]*#else[\s\S]*return "https:\/\/tracefiction\.com"[\s\S]*#endif/,
+  );
+});
+
 test("the app synchronizer is the sole versioned writer and native utility handlers do not acquire tokens", () => {
   const app = read("iOS (App)", "TraceWebViewController.swift");
   assert.doesNotMatch(app, /storeCurrentTraceTokenForSafariExtension/);

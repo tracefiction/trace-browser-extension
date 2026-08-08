@@ -197,7 +197,12 @@ Chrome / Edge: open `chrome://extensions`, enable Developer Mode, choose `Load u
 
 Firefox: open `about:debugging#/runtime/this-firefox`, choose `Load Temporary Add-on`, and select `dist/firefox/manifest.json`.
 
-Safari: open `Trace.xcodeproj` in Xcode, select your own Apple signing team locally, and build the iOS or macOS app target. The public Xcode project intentionally does not include a private Apple development team.
+Safari: open `Trace.xcodeproj` in Xcode, select your own Apple signing team
+locally, and build the iOS or macOS app target. Use **Debug** with local/dev/
+staging generated origins; use **Release** only with the canonical production
+origins. The iOS Release shell intentionally remains production-bound. The
+public Xcode project intentionally does not include a private Apple development
+team.
 
 ## Repo Layout
 
