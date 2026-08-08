@@ -247,6 +247,10 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         let provider: TraceSafariAuthProviderMetadataPayload?
     }
 
+    private struct TraceAppDidBecomeActivePayload: Encodable {
+        let type = "TRACE_IOS_APP_DID_BECOME_ACTIVE"
+    }
+
     private static var billingAPIBaseURL: URL {
         if let configured = configuredBillingAPIBaseURLOverride {
             return configured
@@ -425,6 +429,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             self?.primeWebViewInteractionAfterResume()
+            self?.postTraceWebMessage(TraceAppDidBecomeActivePayload())
         }
     }
 
@@ -1442,6 +1447,12 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 
         switch messageType {
         case "TRACE_IOS_AUTH_TOKEN_UPDATE":
+            os_log(
+                "Credential provider update requested protocol=%{public}d",
+                log: Self.safariBridgeLog,
+                type: .info,
+                body["protocolVersion"] as? Int ?? -1
+            )
             let protocolVersion = body["protocolVersion"] as? Int
             if protocolVersion == Self.traceLegacyProviderProtocolVersion {
                 handleTraceSafariAuthTokenUpdate(
@@ -1592,12 +1603,22 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                     expiresAt: expiresAt
                 )
             )
+            os_log(
+                "Device credential provider write succeeded",
+                log: Self.safariBridgeLog,
+                type: .info
+            )
             postSafariExtensionActionResult(
                 type: "TRACE_IOS_AUTH_TOKEN_UPDATE_RESPONSE",
                 nonce: nonce,
                 ok: true
             )
         } catch {
+            os_log(
+                "Device credential provider write failed",
+                log: Self.safariBridgeLog,
+                type: .error
+            )
             postSafariExtensionActionResult(
                 type: "TRACE_IOS_AUTH_TOKEN_UPDATE_RESPONSE",
                 nonce: nonce,
@@ -1624,6 +1645,12 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                     expiresAt: expiresAt
                 )
             }
+            os_log(
+                "Credential provider status succeeded provider=%{public}@",
+                log: Self.safariBridgeLog,
+                type: .info,
+                provider == nil ? "missing" : "ready"
+            )
             postTraceWebMessage(
                 TraceSafariAuthProviderStatusPayload(
                     nonce: nonce,
@@ -1634,6 +1661,11 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                 )
             )
         } catch {
+            os_log(
+                "Credential provider status failed",
+                log: Self.safariBridgeLog,
+                type: .error
+            )
             postSafariExtensionActionResult(
                 type: "TRACE_IOS_AUTH_PROVIDER_STATUS_RESPONSE",
                 nonce: nonce,
@@ -2134,6 +2166,12 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess, let data = item as? Data else {
+            os_log(
+                "Shared provider read failed status=%{public}d",
+                log: safariBridgeLog,
+                type: .error,
+                status
+            )
             throw TraceSafariExtensionBridgeError.tokenShareFailed
         }
 #endif
@@ -2173,6 +2211,12 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             return
         }
         guard updateStatus == errSecItemNotFound else {
+            os_log(
+                "Shared provider update failed status=%{public}d",
+                log: safariBridgeLog,
+                type: .error,
+                updateStatus
+            )
             throw TraceSafariExtensionBridgeError.tokenShareFailed
         }
 
@@ -2180,7 +2224,14 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         addQuery[kSecValueData as String] = data
         addQuery[kSecAttrAccessible as String] =
             kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        guard SecItemAdd(addQuery as CFDictionary, nil) == errSecSuccess else {
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        guard addStatus == errSecSuccess else {
+            os_log(
+                "Shared provider add failed status=%{public}d",
+                log: safariBridgeLog,
+                type: .error,
+                addStatus
+            )
             throw TraceSafariExtensionBridgeError.tokenShareFailed
         }
 #endif

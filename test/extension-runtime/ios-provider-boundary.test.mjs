@@ -105,6 +105,31 @@ test("the app synchronizer is the sole versioned writer and native utility handl
   );
 });
 
+test("app resume reconciles the provider and native failures stay observable without credentials", () => {
+  const app = read("iOS (App)", "TraceWebViewController.swift");
+  const extension = read("Shared (Extension)", "SafariWebExtensionHandler.swift");
+
+  assert.match(app, /struct TraceAppDidBecomeActivePayload: Encodable/);
+  assert.match(app, /let type = "TRACE_IOS_APP_DID_BECOME_ACTIVE"/);
+  assert.match(
+    app,
+    /handleSceneDidBecomeActive[\s\S]*postTraceWebMessage\(TraceAppDidBecomeActivePayload\(\)\)/,
+  );
+  assert.match(app, /Shared provider read failed status=%\{public\}d/);
+  assert.match(app, /Shared provider update failed status=%\{public\}d/);
+  assert.match(app, /Shared provider add failed status=%\{public\}d/);
+  assert.match(app, /Device credential provider write succeeded/);
+  assert.match(app, /Device credential provider write failed/);
+  assert.match(extension, /Shared credential read succeeded kind=%\{public\}@/);
+  assert.match(extension, /Shared credential is missing/);
+  assert.match(extension, /Shared credential is unavailable/);
+
+  for (const source of [app, extension]) {
+    assert.doesNotMatch(source, /credential=%\{public\}/);
+    assert.doesNotMatch(source, /token=%\{public\}/);
+  }
+});
+
 test("the one app-opening route is fixed and unknown destinations fail closed", () => {
   const app = read("iOS (App)", "TraceWebViewController.swift");
   assert.match(app, /url\.host\?\.lowercased\(\) == "open"/);

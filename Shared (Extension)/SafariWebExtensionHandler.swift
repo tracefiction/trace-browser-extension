@@ -107,6 +107,12 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
 #endif
                 switch credential {
                 case .ready(let credential, let kind, let sessionId, let expiresAt):
+                    os_log(
+                        "Shared credential read succeeded kind=%{public}@",
+                        log: Self.log,
+                        type: .info,
+                        kind
+                    )
                     var ready: [String: Any] = [
                         "type": Self.traceIosAuthTokenRequest,
                         "ok": true,
@@ -121,12 +127,22 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                     if let expiresAt { ready["expiresAt"] = expiresAt }
                     responseBody = ready
                 case .missing:
+                    os_log(
+                        "Shared credential is missing",
+                        log: Self.log,
+                        type: .info
+                    )
                     responseBody = [
                         "type": Self.traceIosAuthTokenRequest,
                         "ok": false,
                         "error": "missing_token",
                     ]
                 case .unavailable:
+                    os_log(
+                        "Shared credential is unavailable",
+                        log: Self.log,
+                        type: .error
+                    )
                     responseBody = [
                         "type": Self.traceIosAuthTokenRequest,
                         "ok": false,
@@ -296,6 +312,11 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             TraceSafariProviderRecord.self,
             from: data
         ) else {
+            os_log(
+                "Shared provider record decode failed",
+                log: log,
+                type: .error
+            )
             return .unavailable
         }
 
@@ -318,6 +339,11 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
               ISO8601DateFormatter().date(from: expiresAt) != nil,
               let credential = record.credential
         else {
+            os_log(
+                "Shared provider record validation failed",
+                log: log,
+                type: .error
+            )
             return .unavailable
         }
         let trimmed = credential.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -325,6 +351,11 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             of: "^trd_v1_[A-Za-z0-9_-]{43}$",
             options: .regularExpression
         ) != nil else {
+            os_log(
+                "Shared provider credential validation failed",
+                log: log,
+                type: .error
+            )
             return .unavailable
         }
         return .ready(
