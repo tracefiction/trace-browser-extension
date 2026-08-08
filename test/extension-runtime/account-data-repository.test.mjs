@@ -217,6 +217,115 @@ test("a late full refresh cannot erase a newer command confirmation", async () =
   );
 });
 
+test("a later authoritative mutation supersedes a finish acknowledgement", async () => {
+  const { repository, state } = createHarness();
+  state.display = accountA1;
+  state.publication = accountA1;
+  const entryId = "00000000-0000-4000-8000-000000000123";
+  await repository.publishOverlay(accountA1, {
+    entries: {},
+    workPreferences: {},
+    syncVersion: "2026-07-19T12:00:00.000Z",
+  });
+
+  const finishReservation = repository.reserveOverlayWrite();
+  const laterMutationReservation = repository.reserveOverlayWrite();
+
+  assert.equal((await repository.publishOverlay(accountA1, {
+    entries: {
+      "ffn:7038840": {
+        status: "READING",
+        readerStatus: "READING",
+        canonicalReaderStatus: "READING",
+        entryId,
+      },
+    },
+    workPreferences: {},
+    syncVersion: "2026-07-19T12:00:01.000Z",
+  }, laterMutationReservation)).kind, "published");
+
+  assert.equal((await repository.publishAuthoritativeStory(accountA1, {
+    workKey: "ffn:7038840",
+    entryId,
+    entry: {
+      status: "COMPLETED",
+      readerStatus: "COMPLETED",
+      canonicalReaderStatus: "FINISHED",
+      entryId,
+    },
+  }, finishReservation)).kind, "stale_write");
+  assert.equal(
+    (await repository.read()).overlay.syncVersion,
+    "2026-07-19T12:00:01.000Z",
+    "a finish response delayed past a newer mutation cannot overwrite it",
+  );
+  assert.equal(
+    (await repository.read()).overlay.entries["ffn:7038840"].canonicalReaderStatus,
+    "READING",
+  );
+});
+
+test("a terminal deletion receipt removes only the exact account, work, and entry", async () => {
+  const { repository, state } = createHarness();
+  state.display = accountA1;
+  state.publication = accountA1;
+  const entryId = "00000000-0000-4000-8000-000000000123";
+  await repository.publishOverlay(accountA1, {
+    entries: {
+      "ffn:7038840": {
+        status: "READING",
+        entryId,
+      },
+      "ao3:123": {
+        status: "READING",
+        entryId: "00000000-0000-4000-8000-000000000124",
+      },
+    },
+    workPreferences: {},
+    syncVersion: "2026-07-19T12:00:00.000Z",
+  });
+
+  assert.equal((await repository.removeAuthoritativeStory(accountA1, {
+    workKey: "ffn:7038840",
+    entryId,
+  })).kind, "published");
+  assert.deepEqual(Object.keys((await repository.read()).overlay.entries), ["ao3:123"]);
+
+  assert.equal((await repository.removeAuthoritativeStory(accountA1, {
+    workKey: "ao3:123",
+    entryId,
+  })).kind, "published");
+  assert.ok((await repository.read()).overlay.entries["ao3:123"]);
+
+  const replacementEntryId = "00000000-0000-4000-8000-000000000125";
+  await repository.publishAuthoritativeStory(accountA1, {
+    workKey: "ffn:7038840",
+    entryId: replacementEntryId,
+    entry: {
+      status: "READING",
+      entryId: replacementEntryId,
+    },
+  });
+  assert.equal((await repository.removeAuthoritativeStory(accountA1, {
+    workKey: "ffn:7038840",
+    entryId,
+  })).kind, "published");
+  assert.equal(
+    (await repository.read()).overlay.entries["ffn:7038840"].entryId,
+    replacementEntryId,
+  );
+
+  state.publication = accountB1;
+  assert.equal((await repository.removeAuthoritativeStory(accountA1, {
+    workKey: "ffn:7038840",
+    entryId: replacementEntryId,
+  })).kind, "rejected_scope");
+  assert.equal(
+    (await repository.read()).overlay.entries["ffn:7038840"].entryId,
+    replacementEntryId,
+  );
+});
+
 test("malformed stored data is unreadable and cleared best effort", async () => {
   const { database, repository, state } = createHarness();
   state.display = accountA1;

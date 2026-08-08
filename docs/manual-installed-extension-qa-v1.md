@@ -56,18 +56,25 @@ Safari:
 
 1. Open `Trace.xcodeproj`.
 2. Select the macOS or iOS app target and a local signing team.
-3. Build and run the app target.
-4. Enable the Trace extension in Safari Settings -> Extensions. On iOS, use
+3. Match the Xcode configuration to the generated origins:
+   - Use **Debug** for local, dev, or staging `TRACE_WEB_ORIGIN` and
+     `TRACE_API_BASE` values.
+   - Use **Release** only with the canonical production origins. The iOS
+     Release shell intentionally hardcodes the production web origin even when
+     extension resources were generated for dev. Pairing a dev extension with
+     a Release app creates incompatible native credentials and is not valid QA.
+4. Build and run the app target.
+5. Enable the Trace extension in Safari Settings -> Extensions. On iOS, use
    Settings -> Apps -> Safari -> Extensions when available, or Settings ->
    Safari -> Extensions on older versions. Turn on **Allow Extension**.
-5. On iOS Safari, under **Permissions**, set **Other Websites** to **Allow**
+6. On iOS Safari, under **Permissions**, set **Other Websites** to **Allow**
    (not Ask or Deny), or set every listed AO3/FFN site to Allow individually.
    The configured Trace web origin is not an iOS credential provider; iOS
    connection requires app sign-in followed by a scoped app-issued handoff or
    an explicit extension Connect action.
-6. After code changes, rebuild/rerun the app target, then disable/enable the
+7. After code changes, rebuild/rerun the app target, then disable/enable the
    Safari extension if Safari keeps an old copy.
-7. Reload every AO3/FFN tab under test.
+8. Reload every AO3/FFN tab under test.
 
 ### iOS App Handoff And Receipt
 
@@ -363,3 +370,70 @@ prove release readiness because:
 - Mobile browser chrome clips management sheets or hides actions.
 - Signed-out/reconnect/free-cap states differ from mocked fixture behavior.
 - Password/login page guard fails on real AO3/FFN auth pages.
+
+## Final-Chapter Lifecycle Release Gate
+
+This matrix is mandatory for every release that changes collector, background,
+projection, auto-track, status, or finish-qualification code. Automated DOM and
+kernel tests are necessary but do not replace the signed iOS run.
+
+Use disposable public test works or QA fixtures and record the before/after
+Trace status. Do not capture private notes, tags, account identifiers, or story
+text in evidence.
+
+- AO3 complete multi-chapter work, normal chapter view:
+  - Begin on the penultimate chapter in `Reading` and advance normally.
+  - Pass: progress advances, crossing the final chapter end marks `Finished`,
+    and refresh shows the same authoritative status.
+- AO3 ongoing multi-chapter work, normal chapter view:
+  - Pass: crossing the last posted chapter end marks `Caught up`, not
+    `Finished`, and the work-status display remains ongoing rather than unknown.
+- AO3 one-chapter work:
+  - Pass: opening an initially short/fully visible page does not finish it.
+  - Interact with the story, satisfy the visible dwell, and cross/reach its end.
+    Pass: the authoritative status becomes `Finished` or `Caught up` according
+    to source state.
+- AO3 Entire Work (`view_full_work=true`):
+  - Pass: opening or restoring the page does not immediately finish it and does
+    not infer final-chapter progress merely because every chapter is rendered.
+    A newly saved work may intentionally remain at the safe chapter-1 baseline
+    until the reader provides end-of-work evidence.
+  - Read/scroll through the rendered chapters to the final work end. Pass: only
+    that crossing qualifies the exact published chapter count.
+- AO3 deep links and restoration:
+  - Open `#comments`, `#work_endnotes`, and another target below the story.
+    Pass: none auto-finishes a story that began above the viewport.
+  - Restore a genuinely read final-chapter position. Pass only when the
+    extension has explicit restoration/reading evidence; initial geometry
+    alone is not accepted.
+- Unknown source state:
+  - Pass: the qualification band remains available after a suspended worker,
+    source-resolution failure, or temporary network failure and exposes a
+    retry/Open Trace recovery path instead of disappearing.
+- Retry and ordering:
+  - Force one response-loss/retry after a finish write. Pass: there is one
+    lifecycle/history transition and the acknowledgement reconciles.
+  - Finish, change the entry back to `Reading` as a reread, then reach the same
+    final chapter again. Pass: the new intent can finish while the old receipt
+    cannot overwrite a later status.
+- Projection and account fencing:
+  - Finish a work, then make a newer manual status change. Pass: the newer
+    account projection wins immediately and after refresh.
+  - Disconnect account A and connect account B where the work is absent. Pass:
+    no entry status, notes, tags, rating, or saved state from A appears for B.
+- FFN desktop/mobile:
+  - Repeat complete/ongoing-or-unknown final-chapter behavior on both desktop
+    and mobile hosts. Pass: no initial-load false finish and failure recovery is
+    visible.
+- Cold/suspended iOS worker:
+  - With Safari cold, open a final chapter and complete it; repeat after the app
+    has been suspended. Pass: credential hydration succeeds before the command,
+    authoritative projection updates, and reconnect guidance is truthful on a
+    real credential failure.
+
+For the release record capture: extension version/build SHA, API deployment
+SHA, migration version, device model, iOS version, Safari extension permission
+state, account type, scenario result, resulting Trace status, Admin finish
+funnel counts, and any Sentry issue. A signed TestFlight/internal-distribution
+physical-device pass is a hard gate; simulator or source-injected pages cannot
+waive it.

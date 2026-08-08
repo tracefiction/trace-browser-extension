@@ -6,7 +6,8 @@
   "scripts": {
     "icons": "node scripts/generate-extension-icons.mjs",
     "build:core": "node scripts/build-extension-core.mjs",
-    "build": "npm run build:core && node scripts/build.mjs",
+    "build": "npm run build:kernel",
+    "build:legacy": "npm run build:core && TRACE_SESSION_MODE=legacy node scripts/build.mjs",
     "build:legacy:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=legacy node scripts/build.mjs",
     "build:kernel": "npm run build:core && TRACE_SESSION_MODE=kernel node scripts/build.mjs",
     "build:kernel:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel node scripts/build.mjs",
@@ -24,6 +25,7 @@
     "package:amo-source": "bash scripts/package-amo-source.sh",
     "test:core": "npm run build:core && node --test test/extension-core/*.test.mjs",
     "test:runtime": "npm run build:core && node --test test/extension-runtime/archive-readiness.test.mjs test/extension-runtime/archive-readiness-status.test.mjs test/extension-runtime/story-command.test.mjs test/extension-runtime/library-command.test.mjs test/extension-runtime/metadata-contribution.test.mjs test/extension-runtime/saved-filter-sync.test.mjs test/extension-runtime/first-story-initiation.test.mjs test/extension-runtime/first-install-activation.test.mjs test/extension-runtime/trace-web-boundary.test.mjs test/extension-runtime/account-projection.test.mjs test/extension-runtime/runtime-adapters.test.mjs test/extension-runtime/private-database.test.mjs test/extension-runtime/account-data-repository.test.mjs test/extension-runtime/ios-provider-boundary.test.mjs",
+    "test:swift-provider-codec": "node scripts/test-swift-provider-codec.mjs",
     "test:session:installed:chrome": "node scripts/test-extension-session-lifecycle.mjs",
     "test:session:installed:firefox": "node scripts/test-extension-session-firefox.mjs",
     "test:session:installed:ios": "node scripts/test-extension-session-ios.mjs",
@@ -33,7 +35,7 @@
     "visual:screenshots": "node scripts/render-visual-fixtures.mjs",
     "visual:popup": "node scripts/render-visual-fixtures.mjs --popup-only",
     "agent:lint": "node scripts/agent-checks.mjs",
-    "agent:check": "npm run agent:lint && npm test && npm run build:release && npm run agent:lint"
+    "agent:check": "npm run agent:lint && npm run test:swift-provider-codec && npm test && npm run build:release && npm run agent:lint"
   },
   "engines": {
     "node": ">=18"

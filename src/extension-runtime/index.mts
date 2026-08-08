@@ -45,6 +45,25 @@ interface RuntimeGlobal {
   __traceSessionRuntimeBootFailed?: true;
 }
 
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function fallbackUuid(seed: string): string {
+  let hash = 2166136261;
+  const bytes: number[] = [];
+  for (let index = 0; index < 16; index += 1) {
+    for (let offset = 0; offset < seed.length; offset += 1) {
+      hash ^= seed.charCodeAt(offset) + index;
+      hash = Math.imul(hash, 16777619);
+    }
+    bytes.push((hash >>> ((index % 4) * 8)) & 0xff);
+  }
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.map((value) => value.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 const scope = globalThis as unknown as RuntimeGlobal;
 scope.TRACE_SESSION_MODE = __TRACE_SESSION_MODE__;
 
@@ -77,9 +96,9 @@ try {
   let fallbackId = 0;
   const randomId = (): string => {
     const uuid = scope.crypto?.randomUUID?.();
-    if (uuid) return uuid;
+    if (typeof uuid === "string" && UUID_PATTERN.test(uuid)) return uuid;
     fallbackId += 1;
-    return `${Date.now()}-${fallbackId}`;
+    return fallbackUuid(`${Date.now()}:${fallbackId}`);
   };
   installSessionRuntime({
     mode: __TRACE_SESSION_MODE__,

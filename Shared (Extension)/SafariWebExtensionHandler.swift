@@ -68,6 +68,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     private static let pendingFirstStoryExpiresAtDefaultsKey = "tracePendingFirstStoryExpiresAtV1"
     private static let pendingFirstStoryV2DefaultsKey = "tracePendingFirstStoryV2"
     private static let extensionHeartbeatDefaultsKey = "traceExtensionHeartbeatV1"
+    private static let providerHealthDefaultsKey = "traceExtensionProviderHealthV1"
 
     func beginRequest(with context: NSExtensionContext) {
         let request = context.inputItems.first as? NSExtensionItem
@@ -102,11 +103,18 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             switch messageType {
             case Self.traceIosAuthTokenRequest:
                 let credential = Self.readSharedTraceCredential()
+                Self.recordProviderReadHealth(credential)
 #if DEBUG && targetEnvironment(simulator)
                 Self.recordSimulatorProviderRequest(credential)
 #endif
                 switch credential {
                 case .ready(let credential, let kind, let sessionId, let expiresAt):
+                    os_log(
+                        "Shared credential read succeeded kind=%{public}@",
+                        log: Self.log,
+                        type: .info,
+                        kind
+                    )
                     var ready: [String: Any] = [
                         "type": Self.traceIosAuthTokenRequest,
                         "ok": true,
@@ -121,12 +129,22 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                     if let expiresAt { ready["expiresAt"] = expiresAt }
                     responseBody = ready
                 case .missing:
+                    os_log(
+                        "Shared credential is missing",
+                        log: Self.log,
+                        type: .info
+                    )
                     responseBody = [
                         "type": Self.traceIosAuthTokenRequest,
                         "ok": false,
                         "error": "missing_token",
                     ]
                 case .unavailable:
+                    os_log(
+                        "Shared credential is unavailable",
+                        log: Self.log,
+                        type: .error
+                    )
                     responseBody = [
                         "type": Self.traceIosAuthTokenRequest,
                         "ok": false,
@@ -296,6 +314,11 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             TraceSafariProviderRecord.self,
             from: data
         ) else {
+            os_log(
+                "Shared provider record decode failed",
+                log: log,
+                type: .error
+            )
             return .unavailable
         }
 
@@ -312,36 +335,28 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         }
         guard record.version == traceProviderRecordVersion,
               record.kind == "device_session",
-              let sessionId = record.sessionId,
-              UUID(uuidString: sessionId) != nil,
+              let rawSessionId = record.sessionId,
               let expiresAt = record.expiresAt,
-              parseISO8601Date(expiresAt) != nil,
-              let credential = record.credential
+              let rawCredential = record.credential,
+              let provider = TraceSafariProviderCodec.deviceSession(
+                  sessionId: rawSessionId,
+                  credential: rawCredential,
+                  expiresAt: expiresAt
+              )
         else {
-            return .unavailable
-        }
-        let trimmed = credential.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.range(
-            of: "^trd_v1_[A-Za-z0-9_-]{43}$",
-            options: .regularExpression
-        ) != nil else {
+            os_log(
+                "Shared provider record validation failed",
+                log: log,
+                type: .error
+            )
             return .unavailable
         }
         return .ready(
-            credential: trimmed,
+            credential: provider.credential,
             kind: "device_session",
-            sessionId: sessionId,
-            expiresAt: expiresAt
+            sessionId: provider.sessionId,
+            expiresAt: provider.expiresAt
         )
-    }
-
-    /// JavaScript `Date#toISOString` and the extension API contract include
-    /// fractional seconds. Accept that canonical form while retaining support
-    /// for ISO-8601 timestamps without a fractional component.
-    private static func parseISO8601Date(_ value: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
     }
 
 #if DEBUG && targetEnvironment(simulator)
@@ -371,6 +386,29 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
 
     private static func pendingDefaults() -> UserDefaults? {
         UserDefaults(suiteName: traceSharedAppGroup)
+    }
+
+    /// Redacted, durable proof of the extension-side provider boundary. This
+    /// deliberately records no credential, account, session, story, or URL.
+    private static func recordProviderReadHealth(
+        _ credential: SharedTraceCredential
+    ) {
+        let state: String
+        switch credential {
+        case .ready:
+            state = "ready"
+        case .missing:
+            state = "missing"
+        case .unavailable:
+            state = "unavailable"
+        }
+        pendingDefaults()?.set(
+            [
+                "state": state,
+                "updatedAt": Date().timeIntervalSince1970 * 1000,
+            ],
+            forKey: providerHealthDefaultsKey
+        )
     }
 
     /// Persists the background script's "content script ran on host X" signal.

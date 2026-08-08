@@ -157,6 +157,82 @@
     return wrap;
   }
 
+  function buildRecoveryBand(opts) {
+    var s = opts.story || {};
+    var inlineStart = opts.align === 'start';
+    var wrap = el('aside',
+      'display:block;background:' + T.paper + ';border:1px solid ' + T.line + ';'
+      + 'border-radius:14px;overflow:hidden;'
+      + 'box-shadow:0 16px 40px -16px rgba(20,14,0,0.34),0 0 0 1px ' + T.lineSoft + ';'
+      + '-webkit-font-smoothing:antialiased;position:relative;width:100%;max-width:520px;'
+      + 'margin:22px ' + (inlineStart ? '0' : 'auto') + ';');
+    wrap.setAttribute('data-trace-finish-recovery', s.handle || '1');
+    wrap.setAttribute('role', 'alert');
+    wrap.setAttribute('aria-live', 'polite');
+
+    var pad = el('div', 'padding:15px 17px;');
+    var kick = el('div',
+      'font:500 9px/1 ' + T.mono + ';letter-spacing:0.14em;text-transform:uppercase;'
+      + 'color:' + T.rust + ';margin-bottom:8px;',
+      (s.src ? s.src + ' \u00b7 ' : '') + 'update needs attention');
+    pad.appendChild(kick);
+    pad.appendChild(el('div',
+      'font:500 17px/1.2 ' + T.serif + ';color:' + T.ink + ';',
+      'Trace couldn\u2019t update your reading status'));
+    var message = el('div', 'font-size:12.5px;color:' + T.muted + ';margin-top:4px;',
+      opts.message || 'Retry the finish update, or open Trace to update it there.');
+    message.setAttribute('data-trace-finish-recovery-message', '1');
+    pad.appendChild(message);
+
+    var actions = el('div', 'display:flex;flex-wrap:wrap;align-items:center;gap:9px;margin-top:13px;');
+    var retry = el('button',
+      'display:inline-flex;align-items:center;justify-content:center;cursor:pointer;'
+      + 'background:' + T.forest + ';border:1px solid ' + T.forest + ';border-radius:9px;'
+      + 'min-height:44px;padding:8px 12px;font:600 12.5px/1 ' + T.sans + ';color:#fff;',
+      'Retry update');
+    retry.type = 'button';
+    retry.setAttribute('data-trace-finish-retry', '1');
+    actions.appendChild(retry);
+
+    if (typeof opts.onOpenInTrace === 'function') {
+      var open = el('button',
+        'display:inline-block;cursor:pointer;background:none;border:0;'
+        + 'min-height:44px;padding:8px 4px;font-size:12.5px;color:' + T.forest
+        + ';text-decoration:underline;text-underline-offset:2px;',
+        'Open in Trace');
+      open.type = 'button';
+      open.setAttribute('data-trace-finish-open', '1');
+      open.addEventListener('click', opts.onOpenInTrace);
+      actions.appendChild(open);
+    }
+    pad.appendChild(actions);
+    wrap.appendChild(pad);
+
+    function setRetryBusy(busy) {
+      retry.disabled = busy === true;
+      retry.style.cursor = busy === true ? 'wait' : 'pointer';
+      retry.style.opacity = busy === true ? '0.68' : '1';
+    }
+
+    retry.addEventListener('click', function () {
+      setRetryBusy(true);
+      var controls = {
+        resolve: function () { removeNode(wrap); },
+        fail: function (nextMessage) {
+          setRetryBusy(false);
+          message.textContent = nextMessage || 'Could not update. Try again or open Trace.';
+        }
+      };
+      if (typeof opts.onRetry !== 'function') {
+        controls.fail();
+        return;
+      }
+      opts.onRetry(controls);
+    });
+
+    return wrap;
+  }
+
   function setBusy(wrap, busy) {
     var buttons = wrap ? wrap.querySelectorAll('button[data-trace-work-choice]') : [];
     for (var i = 0; i < buttons.length; i += 1) {
@@ -264,22 +340,242 @@
   }
 
   // ---- scroll-to-end trigger ------------------------------------------------
-  function onReachEnd(bodyEl, cb, thresholdPx) {
+  function onReachEnd(bodyEl, cb, options) {
     if (!bodyEl) return function () {};
-    var th = thresholdPx || 60, fired = false;
-    function check() {
-      if (fired) return;
-      var r = bodyEl.getBoundingClientRect();
-      // bottom of chapter body is at/above the viewport bottom
-      if (r.bottom - window.innerHeight <= th) { fired = true; cleanup(); cb(); }
+    var config = typeof options === 'number' ? { thresholdPx: options } : (options || {});
+    var th = typeof config.thresholdPx === 'number' ? config.thresholdPx : 60;
+    var defaultDwell = 2000;
+    var dwellMs = typeof config.dwellMs === 'number' && config.dwellMs >= 0
+      ? config.dwellMs
+      : defaultDwell;
+    var now = typeof config.now === 'function' ? config.now : function () { return Date.now(); };
+    var setTimer = typeof config.setTimer === 'function' ? config.setTimer : setTimeout;
+    var clearTimer = typeof config.clearTimer === 'function' ? config.clearTimer : clearTimeout;
+    var navigationEvidenceWindowMs =
+      typeof config.navigationEvidenceWindowMs === 'number' && config.navigationEvidenceWindowMs >= 0
+        ? config.navigationEvidenceWindowMs
+        : 5000;
+    var fired = false, cleaned = false, interactionAt = null, dwellTimer = null;
+    var visibleElapsedMs = 0, visibleSince = null;
+    var initial = bodyEl.getBoundingClientRect();
+    var initialBottom = typeof initial.bottom === 'number' ? initial.bottom : Infinity;
+    var sawEndBelowViewport = initialBottom - window.innerHeight > th;
+    var lastBottom = initialBottom;
+    var requiresRestorationEvidence = !sawEndBelowViewport;
+
+    function documentIsVisible() {
+      return typeof document.visibilityState !== 'string' || document.visibilityState === 'visible';
     }
+
+    visibleSince = documentIsVisible() ? now() : null;
+
+    function visibleDwellElapsed() {
+      if (visibleSince === null) return visibleElapsedMs;
+      return visibleElapsedMs + Math.max(0, now() - visibleSince);
+    }
+
+    function targetIsEditable(target) {
+      return !!(
+        target &&
+        target.closest &&
+        target.closest('input,textarea,select,button,[contenteditable="true"]')
+      );
+    }
+
+    function targetIsInsideStory(target) {
+      if (!target || (target !== bodyEl && !bodyEl.contains(target))) return false;
+      return !targetIsEditable(target);
+    }
+
+    function isReadingNavigationKey(event) {
+      var key = event && event.key;
+      return key === 'ArrowDown' || key === 'PageDown' || key === 'End' || key === ' ' || key === 'Spacebar';
+    }
+
+    function bodyIntersectsViewport(rect) {
+      return rect.bottom >= -th && rect.top <= window.innerHeight + th;
+    }
+
+    function bodyIsAtVisibleEnd(rect) {
+      return bodyIntersectsViewport(rect) && rect.bottom - window.innerHeight <= th;
+    }
+
+    function documentReadingContext(event, rect) {
+      if (!bodyIntersectsViewport(rect)) return false;
+      var target = event && event.target;
+      if (targetIsEditable(target)) return false;
+      if (targetIsInsideStory(target)) return true;
+      var active = document.activeElement;
+      if (active && active !== document.body && active !== document.documentElement) {
+        return targetIsInsideStory(active);
+      }
+      return target === document || target === document.body || target === document.documentElement;
+    }
+
+    function evidenceReady() {
+      return interactionAt !== null && visibleDwellElapsed() >= dwellMs;
+    }
+
+    function hasRecentNavigationEvidence() {
+      return interactionAt !== null && now() - interactionAt <= navigationEvidenceWindowMs;
+    }
+
+    function check(cause) {
+      if (fired || cleaned || !documentIsVisible()) return;
+      var rect = bodyEl.getBoundingClientRect();
+      var bottom = typeof rect.bottom === 'number' ? rect.bottom : Infinity;
+      var wasBeforeEnd = lastBottom - window.innerHeight > th;
+      var isBeforeEnd = bottom - window.innerHeight > th;
+      var isAtVisibleEnd = bodyIsAtVisibleEnd(rect);
+      var crossedVisibleEnd = sawEndBelowViewport && wasBeforeEnd && isAtVisibleEnd;
+      var crossedPastEnd =
+        sawEndBelowViewport &&
+        wasBeforeEnd &&
+        bottom < -th;
+
+      if (isBeforeEnd) sawEndBelowViewport = true;
+      lastBottom = bottom;
+
+      var crossedEnd = crossedVisibleEnd || crossedPastEnd;
+      var crossedByScroll =
+        cause === 'scroll' && crossedEnd && hasRecentNavigationEvidence();
+      if (cause === 'scroll' && crossedEnd && !crossedByScroll) {
+        // A browser can restore scroll position after the content script has
+        // installed. Treat an unattributed arrival as restored state rather
+        // than consuming it as proof that the reader traversed the story.
+        requiresRestorationEvidence = true;
+      }
+      var restoredWithEvidence =
+        requiresRestorationEvidence && isAtVisibleEnd && evidenceReady();
+      if (!crossedByScroll && !restoredWithEvidence) return;
+      fired = true;
+      cleanup();
+      cb();
+    }
+
+    function scheduleDwellCheck() {
+      if (
+        interactionAt === null ||
+        dwellTimer !== null ||
+        !documentIsVisible()
+      ) return;
+      var remaining = Math.max(0, dwellMs - visibleDwellElapsed());
+      if (remaining === 0) {
+        check('evidence');
+        return;
+      }
+      dwellTimer = setTimer(function () {
+        dwellTimer = null;
+        check('evidence');
+      }, remaining);
+    }
+
+    function handleVisibilityChange() {
+      var timestamp = now();
+      if (documentIsVisible()) {
+        if (visibleSince === null) visibleSince = timestamp;
+        scheduleDwellCheck();
+        check('visibility');
+        return;
+      }
+      if (visibleSince !== null) {
+        visibleElapsedMs += Math.max(0, timestamp - visibleSince);
+        visibleSince = null;
+      }
+      if (dwellTimer !== null) {
+        clearTimer(dwellTimer);
+        dwellTimer = null;
+      }
+    }
+
+    function recordPointerEvidence(event) {
+      var rect = bodyEl.getBoundingClientRect();
+      if (
+        !documentIsVisible() ||
+        !bodyIntersectsViewport(rect) ||
+        !targetIsInsideStory(event && event.target)
+      ) return;
+      interactionAt = now();
+      scheduleDwellCheck();
+      check('evidence');
+    }
+
+    function recordKeyboardEvidence(event) {
+      var rect = bodyEl.getBoundingClientRect();
+      if (
+        !documentIsVisible() ||
+        !documentReadingContext(event, rect) ||
+        !isReadingNavigationKey(event)
+      ) return;
+      interactionAt = now();
+      scheduleDwellCheck();
+      check('evidence');
+    }
+
+    function recordWheelEvidence(event) {
+      var rect = bodyEl.getBoundingClientRect();
+      if (!documentIsVisible() || !documentReadingContext(event, rect)) return;
+      interactionAt = now();
+      scheduleDwellCheck();
+      check('evidence');
+    }
+
+    function recordFocusEvidence(event) {
+      var rect = bodyEl.getBoundingClientRect();
+      if (
+        !documentIsVisible() ||
+        !bodyIntersectsViewport(rect) ||
+        !targetIsInsideStory(event && event.target)
+      ) return;
+      interactionAt = now();
+      scheduleDwellCheck();
+      check('evidence');
+    }
+
+    function handleScroll() {
+      check('scroll');
+    }
+
+    function handleResize() {
+      check('resize');
+    }
+
     function cleanup() {
-      window.removeEventListener('scroll', check, true);
-      window.removeEventListener('resize', check);
+      if (cleaned) return;
+      cleaned = true;
+      window.removeEventListener('scroll', handleScroll, true);
+      window.removeEventListener('resize', handleResize);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      document.removeEventListener('touchstart', recordPointerEvidence, true);
+      document.removeEventListener('touchend', recordPointerEvidence, true);
+      document.removeEventListener('pointerdown', recordPointerEvidence, true);
+      document.removeEventListener('pointerup', recordPointerEvidence, true);
+      document.removeEventListener('click', recordPointerEvidence, true);
+      document.removeEventListener('wheel', recordWheelEvidence, true);
+      document.removeEventListener('keydown', recordKeyboardEvidence, true);
+      document.removeEventListener('keyup', recordKeyboardEvidence, true);
+      document.removeEventListener('focusin', recordFocusEvidence, true);
+      if (dwellTimer !== null) {
+        clearTimer(dwellTimer);
+        dwellTimer = null;
+      }
     }
-    window.addEventListener('scroll', check, true);
-    window.addEventListener('resize', check);
-    check();
+    window.addEventListener('scroll', handleScroll, true);
+    window.addEventListener('resize', handleResize);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    // Capture navigation intent before the browser applies its default scroll.
+    // `touchend`/`keyup` can arrive only after a large jump has already moved
+    // the story out of the viewport, which is too late to attribute safely.
+    document.addEventListener('touchstart', recordPointerEvidence, true);
+    document.addEventListener('touchend', recordPointerEvidence, true);
+    document.addEventListener('pointerdown', recordPointerEvidence, true);
+    document.addEventListener('pointerup', recordPointerEvidence, true);
+    document.addEventListener('click', recordPointerEvidence, true);
+    document.addEventListener('wheel', recordWheelEvidence, true);
+    document.addEventListener('keydown', recordKeyboardEvidence, true);
+    document.addEventListener('keyup', recordKeyboardEvidence, true);
+    document.addEventListener('focusin', recordFocusEvidence, true);
+    check('install');
     return cleanup;
   }
 
@@ -291,5 +587,18 @@
     return { node: band, remove: function () { removeNode(band); } };
   }
 
-  root.TraceFinishQualify = { mount: mount, toast: toast, onReachEnd: onReachEnd, _palette: T };
+  function recovery(opts) {
+    var band = buildRecoveryBand(opts);
+    if (opts.anchorEl) insertAfter(opts.anchorEl, band);
+    else document.body.appendChild(band);
+    return { node: band, remove: function () { removeNode(band); } };
+  }
+
+  root.TraceFinishQualify = {
+    mount: mount,
+    recovery: recovery,
+    toast: toast,
+    onReachEnd: onReachEnd,
+    _palette: T
+  };
 })(typeof window !== 'undefined' ? window : this);

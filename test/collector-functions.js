@@ -67,6 +67,9 @@ function withDefaultScopedStorageContext(chrome, options = {}) {
  */
 function createCollectorBindings(dom, options = {}) {
   const { window } = dom;
+  const browser = options.browser
+    ? withDefaultScopedStorageContext(options.browser, options)
+    : undefined;
   const globalScope = {
     console,
     document: window.document,
@@ -75,8 +78,10 @@ function createCollectorBindings(dom, options = {}) {
     self: window,
     globalThis: null,
     TRACE_SESSION_MODE: options.sessionMode,
-    chrome: withDefaultScopedStorageContext(options.chrome || createChromeMock(), options),
-    browser: undefined,
+    chrome: browser
+      ? undefined
+      : withDefaultScopedStorageContext(options.chrome || createChromeMock(), options),
+    browser,
     setTimeout: window.setTimeout.bind(window),
     clearTimeout: window.clearTimeout.bind(window),
     // collector `canonicalFFN` uses `new URL(...)`; Node's vm context has no URL by default
@@ -87,6 +92,7 @@ function createCollectorBindings(dom, options = {}) {
   vm.runInContext(getCollectorCoreSource(), globalScope);
   return {
     collect: globalScope.collect,
+    sendCollectorMessage: globalScope.sendCollectorMessage,
     shouldDisableTraceContentScript: globalScope.shouldDisableTraceContentScript,
     collectAO3Work: globalScope.collectAO3Work,
     collectAO3Listings: globalScope.collectAO3Listings,

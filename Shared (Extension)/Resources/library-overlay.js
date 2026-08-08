@@ -21,6 +21,7 @@
   const TRACE_ACCOUNT_ID_KEY = "traceAccountId";
   const TRACE_API_BASE_STORAGE_KEY = "traceApiBase";
   var currentTraceAuthState = null;
+  var confirmedQuickAddEntries = new Map();
 
   function configuredTraceWebHomeUrl() {
     var configured =
@@ -454,10 +455,13 @@
   };
 
   const LABEL = {
-    PLANNING: "Planning",
+    PLANNING: "Saved",
+    SAVED: "Saved",
     READING: "Reading",
+    CAUGHT_UP: "Caught up",
     PAUSED: "Paused",
     COMPLETED: "Finished",
+    FINISHED: "Finished",
     DROPPED: "Dropped",
   };
   const MANAGEMENT_STATUS_CHOICES = [
@@ -1383,6 +1387,24 @@
     return Math.max(0, Math.min(5, Math.trunc(rating)));
   }
 
+  function normalizeCanonicalReaderStatus(raw) {
+    if (typeof raw !== "string") return null;
+    var status = raw.trim().toUpperCase();
+    if (status === "PLANNING") return "SAVED";
+    if (status === "COMPLETED") return "FINISHED";
+    if (
+      status === "SAVED" ||
+      status === "READING" ||
+      status === "CAUGHT_UP" ||
+      status === "PAUSED" ||
+      status === "FINISHED" ||
+      status === "DROPPED"
+    ) {
+      return status;
+    }
+    return null;
+  }
+
   /**
    * Legacy cache: plain status string.
    * Current contract: entries[key] carries library state; workPreferences[key]
@@ -1399,6 +1421,7 @@
       return {
         status: raw,
         readerStatus: raw,
+        canonicalReaderStatus: normalizeCanonicalReaderStatus(raw),
         chapters: undefined,
         hidden: preference && preference.hidden === true,
       };
@@ -1411,10 +1434,14 @@
       var status = typeof raw.status === "string" ? raw.status : null;
       var readerStatus =
         typeof raw.readerStatus === "string" ? raw.readerStatus : status;
-      if (!status && !readerStatus && !hidden) return null;
+      var canonicalReaderStatus =
+        normalizeCanonicalReaderStatus(raw.canonicalReaderStatus) ||
+        normalizeCanonicalReaderStatus(readerStatus || status);
+      if (!status && !readerStatus && !canonicalReaderStatus && !hidden) return null;
       return {
         status: status,
         readerStatus: readerStatus,
+        canonicalReaderStatus: canonicalReaderStatus,
         entryId: typeof raw.entryId === "string" ? raw.entryId : undefined,
         chapters: normalizeChapters(raw.chapters),
         hidden: hidden,
@@ -1444,7 +1471,7 @@
   }
 
   function chapterSuffix(status, chapters) {
-    if (status === "PLANNING") return "";
+    if (status === "PLANNING" || status === "SAVED") return "";
     var displayChapters = chaptersForStatusDisplay(status, chapters);
     if (!displayChapters || typeof displayChapters.current !== "number") return "";
     var t = displayChapters.total;
@@ -1453,7 +1480,7 @@
   }
 
   function progressClause(status, chapters) {
-    if (status === "PLANNING") return "";
+    if (status === "PLANNING" || status === "SAVED") return "";
     var displayChapters = chaptersForStatusDisplay(status, chapters);
     if (!displayChapters || typeof displayChapters.current !== "number") return "";
     if (displayChapters.total == null) {
@@ -1592,7 +1619,7 @@
   }
 
   function statusDisplay(entry) {
-    var status = entry && (entry.readerStatus || entry.status);
+    var status = entryDisplayStatusValue(entry);
     if (!status) return null;
     var label = LABEL[status] || status;
     var suffix = chapterSuffix(status, entry.chapters);
@@ -1600,13 +1627,13 @@
   }
 
   function statusOnlyDisplay(entry) {
-    var status = entryStatusValue(entry);
+    var status = entryDisplayStatusValue(entry);
     return status ? statusChoiceLabel(status) : null;
   }
 
   function progressOnlyDisplay(entry) {
-    var status = entryStatusValue(entry);
-    if (status === "PLANNING") return "Not started";
+    var status = entryDisplayStatusValue(entry);
+    if (status === "PLANNING" || status === "SAVED") return "Not started";
     var chapters = chaptersForStatusDisplay(status, entry && entry.chapters);
     if (!chapters || typeof chapters.current !== "number") return "Not started";
     return chapters.current + "/" + (chapters.total == null ? "?" : chapters.total);
@@ -1648,6 +1675,13 @@
 
   function entryStatusValue(entry) {
     return entry && (entry.readerStatus || entry.status) ? entry.readerStatus || entry.status : null;
+  }
+
+  function entryDisplayStatusValue(entry) {
+    return (
+      normalizeCanonicalReaderStatus(entry && entry.canonicalReaderStatus) ||
+      normalizeCanonicalReaderStatus(entryStatusValue(entry))
+    );
   }
 
   function statusChoiceLabel(status) {
@@ -1745,14 +1779,14 @@
       };
     }
     if (entry.hidden) return INLINE_HIDDEN_THEME;
-    var status = entryStatusValue(entry);
+    var status = entryDisplayStatusValue(entry);
     return (status && INLINE_STATUS_THEME[status]) || INLINE_CONTEXT_THEME;
   }
 
   function lensDotColor(entry, theme) {
     if (entry && entry.__traceStatusError) return TRACE_D1.rust;
     if (entry && entry.__traceStatusPending) return TRACE_D1.ink4;
-    var status = entryStatusValue(entry);
+    var status = entryDisplayStatusValue(entry);
     if (status && D1_STATUS_ACCENT[status]) return D1_STATUS_ACCENT[status];
     return theme && theme.accent ? theme.accent : TRACE_D1.ink3;
   }
@@ -1770,15 +1804,15 @@
   }
 
   function lensProgressText(entry) {
-    var status = entryStatusValue(entry);
-    if (!status || status === "PLANNING") return "";
+    var status = entryDisplayStatusValue(entry);
+    if (!status || status === "PLANNING" || status === "SAVED") return "";
     var chapters = chaptersForStatusDisplay(status, entry && entry.chapters);
     if (!chapters || typeof chapters.current !== "number") return "";
     return chapters.current + "/" + (chapters.total == null ? "?" : chapters.total);
   }
 
   function badgeEl(entry) {
-    var status = entry.readerStatus || entry.status;
+    var status = entryDisplayStatusValue(entry);
     const theme = STATUS_THEME[status] || STATUS_THEME.PLANNING;
     const label = LABEL[status] || status;
     const suffix = chapterSuffix(status, entry.chapters);
@@ -1820,7 +1854,7 @@
         ),
       );
     }
-    if (entry.readerStatus || entry.status) {
+    if (entryDisplayStatusValue(entry)) {
       wrap.appendChild(badgeEl(entry));
     }
     var newChapterText = newChaptersDisplay(entry, true);
@@ -2311,6 +2345,7 @@
       var statusPatch = readerStatusProgressPatch(entry, status);
       var previousStatus = entry.status;
       var previousReaderStatus = entry.readerStatus;
+      var previousCanonicalReaderStatus = entry.canonicalReaderStatus;
       var previousChapters = entry.chapters
         ? {
             current: entry.chapters.current,
@@ -2333,6 +2368,7 @@
           if (ext.runtime.lastError || !response || !response.ok) {
             entry.status = previousStatus;
             entry.readerStatus = previousReaderStatus;
+            entry.canonicalReaderStatus = previousCanonicalReaderStatus;
             if (previousChapters) {
               entry.chapters = previousChapters;
             } else {
@@ -2347,6 +2383,7 @@
           }
           entry.status = status;
           entry.readerStatus = status;
+          entry.canonicalReaderStatus = normalizeCanonicalReaderStatus(status);
           if (statusPatch && statusPatch.chapters) {
             entry.chapters = statusPatch.chapters;
           }
@@ -2962,7 +2999,7 @@
 
     restoreListingRow(row);
 
-    if (entry && (entry.readerStatus || entry.status)) {
+    if (entry && entryDisplayStatusValue(entry)) {
       wrap.appendChild(
         lensEl(entry, workKey, canMutate, function () {
           renderOverlayState(wrap, entry, platform, anchor, workKey, showActions);
@@ -3058,7 +3095,7 @@
               typeof response.state.entry === "object"
                 ? normalizeOverlayEntry(response.state.entry)
                 : null;
-            if (!confirmedEntry || !(confirmedEntry.readerStatus || confirmedEntry.status)) {
+            if (!confirmedEntry || !entryDisplayStatusValue(confirmedEntry)) {
               btn.style.cssText = d1QuickAddStyle("error") + ";cursor:pointer";
               btn.textContent = "Error";
               btn.title = "Trace did not confirm this story in your library. Try again.";
@@ -3066,6 +3103,7 @@
               scheduleRun(250);
               return;
             }
+            rememberConfirmedQuickAdd(workKey, confirmedEntry);
             btn.style.cssText = [
               "display:inline-flex",
               "align-items:center",
@@ -3083,7 +3121,7 @@
               "white-space:nowrap",
               "vertical-align:middle",
             ].join(";");
-            setInlineStatusContent(btn, entryStatusValue(confirmedEntry) || "PLANNING");
+            setInlineStatusContent(btn, entryDisplayStatusValue(confirmedEntry) || "SAVED");
             btn.title = "In your Trace library";
             btn.disabled = true;
             scheduleRun(250);
@@ -3423,6 +3461,9 @@
   function renderProjection(res, cache) {
     var hasAuth = !!res.authToken;
     currentTraceAuthState = (res && res.traceAuthState) || null;
+    if (!authStateAllowsActions(currentTraceAuthState, hasAuth)) {
+      confirmedQuickAddEntries.clear();
+    }
     if (isSingleWorkPage()) {
       removeConnectNotice();
       clearBadges();
@@ -3433,7 +3474,7 @@
       clearBadges();
       return;
     }
-    var entries = (cache && cache.entries) || {};
+    var entries = entriesWithConfirmedQuickAdds((cache && cache.entries) || {});
     var workPreferences = (cache && cache.workPreferences) || {};
     var showQuickAdd =
       authStateAllowsActions(res && res.traceAuthState, hasAuth) &&
@@ -3449,6 +3490,46 @@
     }
     decorate(entries, workPreferences, showQuickAdd);
     reopenActionSurface(openSurfaceKey);
+  }
+
+  /**
+   * A successful quick-add response is authoritative for that operation. Keep
+   * it visible until the account projection contains the work, so a scheduled
+   * refresh cannot regress through a stale "unknown" snapshot.
+   */
+  function rememberConfirmedQuickAdd(workKey, entry) {
+    confirmedQuickAddEntries.delete(workKey);
+    confirmedQuickAddEntries.set(workKey, entry);
+    while (confirmedQuickAddEntries.size > MAX_PROJECTION_WORK_KEYS) {
+      var oldestWorkKey = confirmedQuickAddEntries.keys().next().value;
+      confirmedQuickAddEntries.delete(oldestWorkKey);
+    }
+  }
+
+  function entriesWithConfirmedQuickAdds(projectedEntries) {
+    var entries = projectedEntries;
+    confirmedQuickAddEntries.forEach(function (confirmedEntry, workKey) {
+      var projected = projectedEntries[workKey];
+      var projectedHasLibraryStatus =
+        typeof projected === "string"
+          ? projected.trim().length > 0
+          : !!(
+              projected &&
+              typeof projected === "object" &&
+              (typeof projected.canonicalReaderStatus === "string" ||
+                typeof projected.readerStatus === "string" ||
+                typeof projected.status === "string")
+            );
+      if (projectedHasLibraryStatus) {
+        confirmedQuickAddEntries.delete(workKey);
+        return;
+      }
+      if (entries === projectedEntries) {
+        entries = Object.assign({}, projectedEntries);
+      }
+      entries[workKey] = confirmedEntry;
+    });
+    return entries;
   }
 
   function run() {

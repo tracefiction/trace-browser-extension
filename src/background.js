@@ -92,6 +92,7 @@ let authVerificationSeq = 0;
 let authStateWriteSeq = 0;
 let authStateContinuityFields = {};
 let workOperationSeq = 0;
+let finishOperationSeq = 0;
 const optimisticChapterFloors = new Map();
 let ao3SavedFiltersSyncTimer = null;
 let ao3SavedFiltersSyncInFlight = false;
@@ -1821,6 +1822,29 @@ function makeAo3SavedFilterLocalId(prefix = "sf") {
     /* ignore */
   }
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function makeFinishOperationId() {
+  try {
+    const uuid = globalThis.crypto?.randomUUID?.();
+    if (isValidUuid(uuid)) return uuid;
+  } catch (_) {
+    /* use the bounded worker-local fallback below */
+  }
+  const seed = `${Date.now()}:${++finishOperationSeq}:${Math.random()}`;
+  let hash = 2166136261;
+  const bytes = [];
+  for (let index = 0; index < 16; index += 1) {
+    for (let offset = 0; offset < seed.length; offset += 1) {
+      hash ^= seed.charCodeAt(offset) + index;
+      hash = Math.imul(hash, 16777619);
+    }
+    bytes.push((hash >>> ((index % 4) * 8)) & 0xff);
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.map((value) => value.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function isUsefulIsoDateTime(value) {
@@ -4075,6 +4099,7 @@ function normalizeFinishQualificationSignal(rawSignal) {
   const total = Number(rawSignal.total);
   if (!Number.isInteger(chapter) || chapter < 1 || chapter > 10_000_000) return null;
   if (!Number.isInteger(total) || total < 1 || total > 10_000_000) return null;
+  if (chapter !== total) return null;
 
   const state = String(rawSignal.state || "").trim().toLowerCase();
   if (state !== "open" && state !== "resolved") return null;
@@ -4087,20 +4112,160 @@ function normalizeFinishQualificationSignal(rawSignal) {
     state,
   };
 
-  if (typeof rawSignal.workKey === "string") {
-    const workKey = rawSignal.workKey.trim();
-    if (workKey && isValidExternalWorkKey(workKey)) payload.workKey = workKey;
-  }
+  const workKey =
+    typeof rawSignal.workKey === "string" ? rawSignal.workKey.trim().toLowerCase() : "";
+  if (!isValidExternalWorkKey(workKey) || !workKey.startsWith(`${source}:`)) return null;
+  payload.workKey = workKey;
 
   if (state === "resolved") {
     const workStatus = normalizeWorkStatusOverride(rawSignal.workStatus);
-    const readerStatus = normalizeReaderStatusForPatch(rawSignal.readerStatus);
-    if (!workStatus || !readerStatus) return null;
+    if (!workStatus) return null;
+    if (
+      rawSignal.readerStatus !== undefined &&
+      !normalizeReaderStatusForPatch(rawSignal.readerStatus)
+    ) return null;
     payload.workStatus = workStatus;
-    payload.readerStatus = readerStatus;
+    const resolutionSource = rawSignal.resolutionSource === undefined
+      ? "reader"
+      : String(rawSignal.resolutionSource).trim().toLowerCase();
+    if (resolutionSource !== "source" && resolutionSource !== "reader") return null;
+    if (resolutionSource === "source" && workStatus === "abandoned") return null;
+    payload.resolutionSource = resolutionSource;
+  } else if (rawSignal.resolutionSource !== undefined) {
+    return null;
   }
 
   return payload;
+}
+
+function normalizeFinishQualificationResponseData(rawData, signal) {
+  if (!rawData || typeof rawData !== "object") return null;
+  if (
+    rawData.state !== "ignored" &&
+    rawData.state !== signal.state
+  ) return null;
+  if (rawData.eventId !== null && !isValidUuid(rawData.eventId)) return null;
+  const expectedOperationId = signal.state === "resolved" ? signal.operationId : null;
+  const responseOperationId = Object.prototype.hasOwnProperty.call(rawData, "operationId")
+    ? rawData.operationId
+    : null;
+  if (responseOperationId !== expectedOperationId) return null;
+  const terminalWithoutProjection =
+    (rawData.state === "resolved" || rawData.state === "ignored") &&
+    rawData.workKey === null &&
+    rawData.entry === null &&
+    rawData.syncVersion === null;
+  if (terminalWithoutProjection) {
+    return {
+      state: rawData.state,
+      eventId: rawData.eventId,
+      operationId: expectedOperationId,
+      workKey: null,
+      entry: null,
+      syncVersion: null,
+    };
+  }
+  if (rawData.workKey !== signal.workKey) return null;
+  const entry = rawData.entry;
+  if (!entry || typeof entry !== "object" || entry.entryId !== signal.entryId) return null;
+  if (!["PLANNING", "READING", "PAUSED", "COMPLETED", "DROPPED"].includes(entry.status)) {
+    return null;
+  }
+  if (
+    entry.readerStatus !== undefined &&
+    (entry.readerStatus !== entry.status ||
+      !["PLANNING", "READING", "PAUSED", "COMPLETED", "DROPPED"].includes(entry.readerStatus))
+  ) return null;
+  if (
+    entry.canonicalReaderStatus !== undefined &&
+    !["SAVED", "READING", "CAUGHT_UP", "PAUSED", "FINISHED", "DROPPED"].includes(
+      entry.canonicalReaderStatus,
+    )
+  ) return null;
+  if (entry.chapters !== undefined) {
+    if (!entry.chapters || typeof entry.chapters !== "object") return null;
+    if (!Number.isSafeInteger(entry.chapters.current) || entry.chapters.current < 0) return null;
+    if (
+      entry.chapters.total !== null &&
+      (!Number.isSafeInteger(entry.chapters.total) || entry.chapters.total < 1)
+    ) return null;
+  }
+  if (rawData.syncVersion !== undefined) {
+    const parsed = Date.parse(rawData.syncVersion);
+    if (
+      typeof rawData.syncVersion !== "string" ||
+      !Number.isFinite(parsed) ||
+      new Date(parsed).toISOString() !== rawData.syncVersion
+    ) return null;
+  }
+  return {
+    state: rawData.state,
+    eventId: rawData.eventId,
+    operationId: expectedOperationId,
+    workKey: rawData.workKey,
+    entry,
+    ...(rawData.syncVersion === undefined ? {} : { syncVersion: rawData.syncVersion }),
+  };
+}
+
+async function publishFinishQualificationOverlay(
+  data,
+  signal,
+  expectedToken,
+  expectedAccountId,
+) {
+  if (!data || bearerToken !== expectedToken) return false;
+  const snapshot = await storageGetLocal([
+    OVERLAY_STORAGE_KEY,
+    TRACE_ACCOUNT_ID_KEY,
+    AUTH_STATE_KEY,
+  ]);
+  if (
+    bearerToken !== expectedToken ||
+    (
+      expectedAccountId !== "unknown" &&
+      currentAccountIdFromSnapshot(snapshot) !== expectedAccountId
+    )
+  ) {
+    return false;
+  }
+  const context = overlayCacheContextFromSnapshot(snapshot);
+  const stored = snapshot[OVERLAY_STORAGE_KEY];
+  const storedMatchesScope =
+    stored &&
+    typeof stored === "object" &&
+    stored.apiBase === context.apiBase &&
+    stored.accountId === context.accountId &&
+    stored.contextVersion === context.contextVersion;
+  const current = storedMatchesScope ? stored : {};
+  const entries = current.entries && typeof current.entries === "object"
+    ? { ...current.entries }
+    : {};
+  if (data.workKey === null && data.entry === null) {
+    if (entries[signal.workKey]?.entryId === signal.entryId) {
+      delete entries[signal.workKey];
+    }
+  } else {
+    entries[data.workKey] = data.entry;
+  }
+  const next = scopedOverlayCache({
+    ...current,
+    entries,
+    workPreferences:
+      current.workPreferences && typeof current.workPreferences === "object"
+        ? current.workPreferences
+        : {},
+    syncVersion:
+      typeof data.syncVersion === "string"
+        ? data.syncVersion
+        : current.syncVersion || new Date(0).toISOString(),
+  }, snapshot);
+  if (bearerToken !== expectedToken) return false;
+  await storageSetLocal({
+    [TRACE_API_BASE_STORAGE_KEY]: normalizedTraceApiBase(),
+    [OVERLAY_STORAGE_KEY]: next,
+  });
+  return bearerToken === expectedToken;
 }
 
 function patchOverlayReaderStatus(entryId, status, progress) {
@@ -4330,7 +4495,7 @@ async function handlePatchLibraryEntry(payload, sender, sendResponse) {
 }
 
 async function handleFinishQualificationSignal(payload, sender, sendResponse) {
-  if (!bearerToken) {
+  if (!bearerToken && !(await hydrateStoredBearerToken())) {
     if (sendResponse) sendResponse({ ok: false, error: "not_authenticated" });
     return;
   }
@@ -4341,44 +4506,106 @@ async function handleFinishQualificationSignal(payload, sender, sendResponse) {
     return;
   }
 
-  try {
-    const response = await fetchWithTimeout(FINISH_QUALIFICATION_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${bearerToken}`,
-      },
-      body: JSON.stringify(signal),
-    });
+  const requestToken = bearerToken;
+  const requestScope = await storageGetLocal([
+    TRACE_ACCOUNT_ID_KEY,
+    AUTH_STATE_KEY,
+  ]);
+  const requestAccountId = currentAccountIdFromSnapshot(requestScope);
+  const operationId = signal.state === "resolved" ? makeFinishOperationId() : null;
+  const requestSignal = operationId ? { ...signal, operationId } : signal;
+  const request = {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${requestToken}`,
+    },
+    body: JSON.stringify(requestSignal),
+  };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let response;
+    try {
+      response = await fetchWithTimeout(FINISH_QUALIFICATION_ENDPOINT, request);
+    } catch (e) {
+      if (signal.state === "resolved" && attempt === 0) continue;
+      console.error("[Trace] Finish qualification signal error:", e);
+      if (sendResponse) sendResponse({ ok: false, error: "network_error" });
+      return;
+    }
 
     if (response.ok) {
-      setConnectedState({ lastFinishQualificationAt: new Date().toISOString() });
-      let data = null;
+      let body = null;
       try {
-        data = await response.json();
+        body = await response.json();
       } catch (_) {
-        data = null;
+        body = null;
       }
-      if (sendResponse) sendResponse({ ok: true, data: data && data.data });
-    } else {
-      const authError = await applyAuthFailureResponse(response, {
-        actionAtKey: "lastFinishQualificationAt",
-      });
-      if (authError) {
-        if (sendResponse) sendResponse({ ok: false, error: authError });
-      } else if (response.status === 429) {
-        setConnectedWithSyncWarning(
-          "Trace is rate limiting finish updates. Try again in a few minutes.",
-          { lastHttpStatus: response.status },
-        );
-        if (sendResponse) sendResponse({ ok: false, error: "rate_limited" });
-      } else {
-        if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
+      const data = normalizeFinishQualificationResponseData(body && body.data, requestSignal);
+      if (!data) {
+        if (sendResponse) sendResponse({ ok: false, error: "invalid_response" });
+        return;
+      }
+      if (
+        bearerToken !== requestToken ||
+        !(await publishFinishQualificationOverlay(
+          data,
+          requestSignal,
+          requestToken,
+          requestAccountId,
+        ))
+      ) {
+        if (sendResponse) sendResponse({ ok: false, error: "stale" });
+        return;
+      }
+      setConnectedState({ lastFinishQualificationAt: new Date().toISOString() });
+      void signalLibraryInvalidated("finish_qualification");
+      if (sendResponse) sendResponse({ ok: true, data });
+      return;
+    }
+
+    if (response.status === 503) {
+      let errorBody = null;
+      try {
+        errorBody = await response.json();
+      } catch (_) {
+        errorBody = null;
+      }
+      if (
+        errorBody &&
+        errorBody.code === "EXTENSION_FINISH_QUALIFICATION_DISABLED" &&
+        errorBody.retryable === false
+      ) {
+        if (sendResponse) {
+          sendResponse({ ok: false, error: "finish_qualification_disabled" });
+        }
+        return;
       }
     }
-  } catch (e) {
-    console.error("[Trace] Finish qualification signal error:", e);
-    if (sendResponse) sendResponse({ ok: false, error: "network_error" });
+
+    if (
+      signal.state === "resolved" &&
+      (response.status === 408 || response.status >= 500) &&
+      attempt === 0
+    ) {
+      continue;
+    }
+    const authError = await applyAuthFailureResponse(response, {
+      actionAtKey: "lastFinishQualificationAt",
+    });
+    if (authError) {
+      if (sendResponse) sendResponse({ ok: false, error: authError });
+    } else if (response.status === 409) {
+      if (sendResponse) sendResponse({ ok: false, error: "invalid_request" });
+    } else if (response.status === 429) {
+      setConnectedWithSyncWarning(
+        "Trace is rate limiting finish updates. Try again in a few minutes.",
+        { lastHttpStatus: response.status },
+      );
+      if (sendResponse) sendResponse({ ok: false, error: "rate_limited" });
+    } else {
+      if (sendResponse) sendResponse({ ok: false, error: "http_" + response.status });
+    }
+    return;
   }
 }
 

@@ -580,6 +580,54 @@ test("library-overlay prefers readerStatus and entryId-era optional fields", asy
   assert.match(surface.textContent || "", /2 private tags/i);
 });
 
+test("library-overlay presents canonical saved, caught-up, and finished statuses", async () => {
+  const window = await renderOverlayListing({
+    html:
+      "<!doctype html><html><body><ol>" +
+      "<li class='work blurb group'><h4 class='heading'><a href='/works/12001'>Saved Work</a></h4></li>" +
+      "<li class='work blurb group'><h4 class='heading'><a href='/works/12002'>Caught Up Work</a></h4></li>" +
+      "<li class='work blurb group'><h4 class='heading'><a href='/works/12003'>Finished Work</a></h4></li>" +
+      "<li class='work blurb group'><h4 class='heading'><a href='/works/12004'>Canonical Only Work</a></h4></li>" +
+      "</ol></body></html>",
+    cache: {
+      entries: {
+        "ao3:12001": {
+          status: "PLANNING",
+          readerStatus: "PLANNING",
+          canonicalReaderStatus: "SAVED",
+        },
+        "ao3:12002": {
+          status: "READING",
+          readerStatus: "READING",
+          canonicalReaderStatus: "CAUGHT_UP",
+          chapters: { current: 8, total: 8 },
+        },
+        "ao3:12003": {
+          status: "COMPLETED",
+          readerStatus: "COMPLETED",
+          canonicalReaderStatus: "FINISHED",
+          chapters: { current: 12, total: 12 },
+        },
+        "ao3:12004": {
+          canonicalReaderStatus: "CAUGHT_UP",
+          chapters: { current: 4, total: 4 },
+        },
+      },
+      syncVersion: "v-canonical-statuses",
+    },
+  });
+
+  const labels = Array.from(
+    window.document.querySelectorAll("[data-trace-library-lens]"),
+    (lens) => lens.textContent || "",
+  );
+  assert.match(labels[0], /^Saved$/);
+  assert.match(labels[1], /Caught up\s*8\/8/i);
+  assert.match(labels[2], /Finished\s*12\/12/i);
+  assert.match(labels[3], /Caught up\s*4\/4/i);
+  assert.doesNotMatch(labels.join(" "), /Planning|CAUGHT_UP|COMPLETED/);
+});
+
 test("library-overlay renders display-safe private note preview and tag pills when provided", async () => {
   const window = await renderOverlayListing({
     html:
@@ -1521,7 +1569,7 @@ test("library-overlay Add saves in place only after confirmed state", async () =
   button.click();
 
   assert.equal(messages.at(-1).type, "TRACE_QUICK_ADD");
-  assert.match(button.textContent || "", /^Planning$/);
+  assert.match(button.textContent || "", /^Saved$/);
   assert.match(button.getAttribute("style") || "", /gap:\s*7px/i);
   assert.match(button.getAttribute("style") || "", /font:\s*500 12\.5px/i);
   assert.match(button.querySelector("span[aria-hidden='true']").getAttribute("style") || "", /width:\s*7px/i);
@@ -1632,8 +1680,154 @@ test("library-overlay pending quick add resolves to saved only with confirmed st
     },
   });
 
-  assert.match(button.textContent || "", /^Planning$/);
+  assert.match(button.textContent || "", /^Saved$/);
   assert.match(button.querySelector("span[aria-hidden='true']").getAttribute("style") || "", /border-radius:\s*999px/i);
+});
+
+test("library-overlay confirmed quick add does not regress through a stale kernel projection", async () => {
+  let quickAddCallback;
+  const entryId = "00000000-0000-4000-8000-000000077785";
+  const emptyProjection = {
+    entries: {},
+    workPreferences: {},
+    syncVersion: "v-stale-after-confirmed-add",
+  };
+  let projection = emptyProjection;
+  const window = await renderOverlayListing({
+    sessionMode: "kernel",
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/77785'>No Flicker Work</a></h4></li></ol></body></html>",
+    cache: emptyProjection,
+    sendMessage(message, callback) {
+      if (message.type === "TRACE_ACCOUNT_PROJECTION_GET") {
+        callback({
+          ok: true,
+          snapshot: {
+            state: "connected",
+            reason: "none",
+            canExecuteAuthenticated: true,
+          },
+          projection,
+        });
+        return;
+      }
+      if (message.type === "TRACE_QUICK_ADD") {
+        quickAddCallback = callback;
+      }
+    },
+  });
+
+  const button = window.document.querySelector(
+    "[data-trace-library-overlay-wrap] button[data-trace-quick-add]",
+  );
+  assert.ok(button);
+  button.click();
+  assert.equal(typeof quickAddCallback, "function");
+
+  quickAddCallback({
+    ok: true,
+    entryId,
+    state: {
+      workKey: "ao3:77785",
+      status: "saved",
+      entryId,
+      entry: {
+        status: "PLANNING",
+        readerStatus: "PLANNING",
+        canonicalReaderStatus: "SAVED",
+        entryId,
+      },
+    },
+  });
+
+  assert.match(button.textContent || "", /^Saved$/);
+  await sleep(350);
+  const wrap = window.document.querySelector("[data-trace-library-overlay-wrap]");
+  assert.match(wrap.textContent || "", /Saved/);
+  assert.doesNotMatch(wrap.textContent || "", /Add to Trace/);
+  assert.ok(wrap.querySelector("[data-trace-library-lens='ao3:77785']"));
+
+  projection = {
+    entries: {
+      "ao3:77785": {
+        status: "READING",
+        readerStatus: "READING",
+        canonicalReaderStatus: "READING",
+        entryId,
+        chapters: { current: 2, total: 10 },
+      },
+    },
+    workPreferences: {},
+    syncVersion: "v-projection-acknowledged-add",
+  };
+  window.dispatchEvent(new window.Event("focus"));
+  await sleep(140);
+  const acknowledgedWrap = window.document.querySelector(
+    "[data-trace-library-overlay-wrap]",
+  );
+  assert.match(acknowledgedWrap.textContent || "", /Reading\s*2\/10/i);
+});
+
+test("library-overlay discards confirmed quick-add presentation when the session disconnects", async () => {
+  let quickAddCallback;
+  let snapshotState = "connected";
+  const projection = {
+    entries: {},
+    workPreferences: {},
+    syncVersion: "v-disconnected-after-add",
+  };
+  const window = await renderOverlayListing({
+    sessionMode: "kernel",
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/77786'>Session Scoped Work</a></h4></li></ol></body></html>",
+    cache: projection,
+    sendMessage(message, callback) {
+      if (message.type === "TRACE_ACCOUNT_PROJECTION_GET") {
+        callback({
+          ok: true,
+          snapshot: {
+            state: snapshotState,
+            reason: "none",
+            canExecuteAuthenticated: snapshotState === "connected",
+          },
+          projection,
+        });
+        return;
+      }
+      if (message.type === "TRACE_QUICK_ADD") {
+        quickAddCallback = callback;
+      }
+    },
+  });
+
+  const button = window.document.querySelector("[data-trace-quick-add]");
+  button.click();
+  quickAddCallback({
+    ok: true,
+    entryId: "00000000-0000-4000-8000-000000077786",
+    state: {
+      workKey: "ao3:77786",
+      status: "saved",
+      entry: {
+        readerStatus: "PLANNING",
+        canonicalReaderStatus: "SAVED",
+      },
+    },
+  });
+  assert.match(button.textContent || "", /^Saved$/);
+
+  snapshotState = "signed_out";
+  window.dispatchEvent(new window.Event("focus"));
+  await sleep(140);
+  assert.equal(window.document.querySelector("[data-trace-library-lens]"), null);
+
+  snapshotState = "connected";
+  window.dispatchEvent(new window.Event("focus"));
+  await sleep(140);
+  assert.match(
+    window.document.querySelector("[data-trace-quick-add]").textContent || "",
+    /Add to Trace/,
+  );
 });
 
 test("library-overlay known works expose hide without changing reading status", async () => {

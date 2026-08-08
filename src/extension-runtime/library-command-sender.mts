@@ -228,49 +228,59 @@ export function finishQualificationCommandFromMessage(
     (payload.chapter as number) > MAX_CHAPTER ||
     !Number.isSafeInteger(payload.total) ||
     (payload.total as number) < 1 ||
-    (payload.total as number) > MAX_CHAPTER
+    (payload.total as number) > MAX_CHAPTER ||
+    payload.chapter !== payload.total
   ) {
     return null;
   }
   if (payload.state !== "open" && payload.state !== "resolved") return null;
-  const command: {
-    kind: "finish_qualification";
-    hostKind: StoryHostKind;
-    workKey: string;
-    entryId: string;
-    source: StoryHostKind;
-    chapter: number;
-    total: number;
-    state: "open" | "resolved";
-    workStatus?: "complete" | "wip" | "hiatus" | "abandoned";
-    readerStatus?: CanonicalReaderStatus;
-  } = {
-    kind: "finish_qualification",
+  const commandBase = {
+    kind: "finish_qualification" as const,
     ...scope,
     entryId,
     source: scope.hostKind,
     chapter: payload.chapter as number,
     total: payload.total as number,
-    state: payload.state,
   };
-  if (payload.state === "resolved") {
+  if (payload.state === "open") {
     if (
-      payload.workStatus !== "complete" &&
-      payload.workStatus !== "wip" &&
-      payload.workStatus !== "hiatus" &&
-      payload.workStatus !== "abandoned"
+      Object.hasOwn(payload, "workStatus") ||
+      Object.hasOwn(payload, "readerStatus") ||
+      Object.hasOwn(payload, "resolutionSource")
     ) {
       return null;
     }
-    const status = canonicalStatus(payload.readerStatus);
-    if (status === null) return null;
-    command.workStatus = payload.workStatus;
-    command.readerStatus = status;
-  } else if (
-    Object.hasOwn(payload, "workStatus") ||
-    Object.hasOwn(payload, "readerStatus")
+    return Object.freeze({ ...commandBase, state: "open" });
+  }
+  if (
+    payload.workStatus !== "complete" &&
+    payload.workStatus !== "wip" &&
+    payload.workStatus !== "hiatus" &&
+    payload.workStatus !== "abandoned"
   ) {
     return null;
   }
-  return Object.freeze(command);
+  if (
+    payload.readerStatus !== undefined &&
+    canonicalStatus(payload.readerStatus) === null
+  ) return null;
+  if (
+    payload.resolutionSource !== undefined &&
+    payload.resolutionSource !== "source" &&
+    payload.resolutionSource !== "reader"
+  ) {
+    return null;
+  }
+  if (
+    payload.resolutionSource === "source" &&
+    payload.workStatus === "abandoned"
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    ...commandBase,
+    state: "resolved",
+    workStatus: payload.workStatus,
+    resolutionSource: payload.resolutionSource ?? "reader",
+  });
 }
