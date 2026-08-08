@@ -196,6 +196,10 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     runBuild("build:release");
     assertCollectorModeConfig(path.join(ROOT, "dist", "chrome"), "kernel");
     assertCollectorModeConfig(path.join(ROOT, "dist", "firefox"), "kernel");
+
+    runBuild("build");
+    assertCollectorModeConfig(path.join(ROOT, "dist", "chrome"), "kernel");
+    assertCollectorModeConfig(path.join(ROOT, "dist", "firefox"), "kernel");
   } finally {
     runBuild("build:release");
   }

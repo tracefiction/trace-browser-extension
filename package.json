@@ -6,7 +6,8 @@
   "scripts": {
     "icons": "node scripts/generate-extension-icons.mjs",
     "build:core": "node scripts/build-extension-core.mjs",
-    "build": "npm run build:core && node scripts/build.mjs",
+    "build": "npm run build:kernel",
+    "build:legacy": "npm run build:core && TRACE_SESSION_MODE=legacy node scripts/build.mjs",
     "build:legacy:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=legacy node scripts/build.mjs",
     "build:kernel": "npm run build:core && TRACE_SESSION_MODE=kernel node scripts/build.mjs",
     "build:kernel:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel node scripts/build.mjs",

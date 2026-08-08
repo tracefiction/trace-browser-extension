@@ -176,6 +176,10 @@ Then run:
 npm run build
 ```
 
+The default development build uses the kernel session owner. The explicit
+`build:legacy` command exists only for bounded rollback diagnostics; do not use
+it for normal development or installed-extension QA.
+
 For a release-style build, use HTTPS Trace origins:
 
 ```bash
