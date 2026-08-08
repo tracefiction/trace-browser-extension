@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		BA3EC2012F91000000BA1800 /* TraceSafariProviderCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA3EC2002F91000000BA1800 /* TraceSafariProviderCodec.swift */; };
 		BA3EBDA12F04965D00BA150A /* Trace Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = BA3EBDA02F04965D00BA150A /* Trace Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		BA3EBDAB2F04965D00BA150A /* Trace Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = BA3EBDAA2F04965D00BA150A /* Trace Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		BA3EC0022F04965D00BA1600 /* TraceWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = BA3EC0012F04965D00BA1600 /* TraceWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -70,6 +71,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		BA3EC2002F91000000BA1800 /* TraceSafariProviderCodec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Shared (Extension)/TraceSafariProviderCodec.swift"; sourceTree = "<group>"; };
 		BA3EC1002F90000000BA1700 /* TraceOnboardingUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TraceOnboardingUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		BA0C6ED42F84460200C89191 /* Trace-macOS-Extension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Trace-macOS-Extension.entitlements"; sourceTree = "<group>"; };
 		BA0C6ED52F8512C300C89191 /* Trace-iOS-Debug.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Trace-iOS-Debug.entitlements"; sourceTree = "<group>"; };
@@ -247,6 +249,7 @@
 		BA3EBD662F04965A00BA150A = {
 			isa = PBXGroup;
 			children = (
+				BA3EC2002F91000000BA1800 /* TraceSafariProviderCodec.swift */,
 				BA3EC1032F90000000BA1700 /* TraceOnboardingUITests */,
 				BA0C6ED52F8512C300C89191 /* Trace-iOS-Debug.entitlements */,
 				BA3EC00E2F04965D00BA1600 /* Trace-iOS-Release.entitlements */,
@@ -536,6 +539,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				BA3EC2012F91000000BA1800 /* TraceSafariProviderCodec.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

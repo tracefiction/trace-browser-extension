@@ -7,6 +7,15 @@ on:
   pull_request:
 
 jobs:
+  swift-provider-codec:
+    runs-on: macos-15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify shared Safari provider codec
+        run: npm run test:swift-provider-codec
+
   test:
     runs-on: ubuntu-latest
     strategy:

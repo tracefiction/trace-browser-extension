@@ -729,6 +729,7 @@ function storyOverlayTransientPatch(entry) {
     "__traceStatusError",
     "__traceAutoTrackPending",
     "__traceAutoTrackError",
+    "__traceObservedChapters",
   ].forEach(function (key) {
     if (entry && Object.prototype.hasOwnProperty.call(entry, key)) {
       patch[key] = entry[key];
@@ -741,6 +742,7 @@ function clearStoryOverlayTransientState(entry) {
   var next = Object.assign({}, entry || {});
   delete next.__traceAutoTrackPending;
   delete next.__traceAutoTrackError;
+  delete next.__traceObservedChapters;
   delete next.__traceStatusPending;
   delete next.__traceStatusTarget;
   delete next.__traceStatusError;
@@ -752,7 +754,10 @@ function mergeStoryOverlayEntries(cachedEntry, optimisticEntry, cacheSyncVersion
   if (!optimisticEntry) return cachedEntry;
 
   var cachedCurrent = storyEntryChapterCurrent(cachedEntry);
-  var optimisticCurrent = storyEntryChapterCurrent(optimisticEntry);
+  var optimisticCurrent = storyEntryChapterCurrent({
+    chapters:
+      optimisticEntry.__traceObservedChapters || optimisticEntry.chapters,
+  });
   var optimisticIsFresher = false;
   if (optimisticCurrent != null && cachedCurrent != null) {
     if (optimisticCurrent > cachedCurrent) {
@@ -779,7 +784,11 @@ function mergeStoryOverlayEntries(cachedEntry, optimisticEntry, cacheSyncVersion
 
   if (optimisticIsFresher) {
     return Object.assign({}, cachedEntry, optimisticEntry, {
-      chapters: optimisticEntry.chapters || cachedEntry.chapters,
+      chapters:
+        optimisticEntry.__traceAutoTrackPending &&
+        optimisticEntry.__traceObservedChapters
+          ? cachedEntry.chapters || optimisticEntry.chapters
+          : optimisticEntry.chapters || cachedEntry.chapters,
       entryId: optimisticEntry.entryId || cachedEntry.entryId,
     });
   }
@@ -1149,9 +1158,11 @@ function forgetRecentAutoTrack(item) {
   }
 }
 
-function sendAutoTrackForStory(validStory) {
+function sendAutoTrackForStory(validStory, options) {
   rememberRecentAutoTrack(validStory);
-  updateAutoTrackPendingForStory(validStory);
+  if (!options || options.pendingAlreadySet !== true) {
+    updateAutoTrackPendingForStory(validStory);
+  }
   sendCollectorMessage(
     {
       type: "TRACE_AUTO_TRACK",
@@ -1216,7 +1227,32 @@ function optimisticStoryEntryHasLibraryState(entry) {
   return !!(entry && (entry.readerStatus || entry.status || entry.hidden));
 }
 
-function applyBackgroundWorkStateForStory(workKey, state) {
+function pendingAutoTrackPatchForStaleEntry(entry, optimisticEntry) {
+  if (
+    !optimisticEntry ||
+    optimisticEntry.__traceAutoTrackPending !== true ||
+    !optimisticEntry.__traceObservedChapters
+  ) {
+    return {};
+  }
+  var observedChapter = storyEntryChapterCurrent({
+    chapters: optimisticEntry.__traceObservedChapters,
+  });
+  var confirmedChapter = storyEntryChapterCurrent(entry);
+  if (
+    observedChapter == null ||
+    (confirmedChapter != null && confirmedChapter >= observedChapter)
+  ) {
+    return {};
+  }
+  return {
+    __traceAutoTrackPending: true,
+    __traceAutoTrackError: null,
+    __traceObservedChapters: optimisticEntry.__traceObservedChapters,
+  };
+}
+
+function applyBackgroundWorkStateForStory(workKey, state, options) {
   if (!workKey || !state || state.workKey !== workKey) return false;
   if (state.status === "pending") {
     var prevPending = optimisticStoryPageEntries[workKey] || {};
@@ -1229,18 +1265,28 @@ function applyBackgroundWorkStateForStory(workKey, state) {
   }
 
   if (state.status === "saved") {
+    var previousEntry = optimisticStoryPageEntries[workKey] || {};
     var entry =
       state.entry && typeof state.entry === "object"
         ? normalizeOverlayEntry(state.entry)
         : {};
-    optimisticStoryPageEntries[workKey] = Object.assign({}, entry, {
-      entryId: state.entryId || entry.entryId,
-      statusChoicesAvailable: !!(state.entryId || entry.entryId),
-      __traceSyncVersion:
-        typeof state.syncVersion === "string" ? state.syncVersion : null,
-      __traceAutoTrackPending: false,
-      __traceAutoTrackError: null,
-    });
+    var pendingPatch =
+      options && options.preservePendingIfUnacknowledged === true
+        ? pendingAutoTrackPatchForStaleEntry(entry, previousEntry)
+        : {};
+    optimisticStoryPageEntries[workKey] = Object.assign(
+      {},
+      entry,
+      {
+        entryId: state.entryId || entry.entryId,
+        statusChoicesAvailable: !!(state.entryId || entry.entryId),
+        __traceSyncVersion:
+          typeof state.syncVersion === "string" ? state.syncVersion : null,
+        __traceAutoTrackPending: false,
+        __traceAutoTrackError: null,
+      },
+      pendingPatch,
+    );
     return true;
   }
 
@@ -1315,7 +1361,11 @@ function queryBackgroundWorkStateForStory(workKey) {
     { type: WORK_STATE_GET_MESSAGE, workKey: workKey },
     function (response) {
       if (!response || response.ok !== true || !response.state) return;
-      if (applyBackgroundWorkStateForStory(workKey, response.state)) {
+      if (
+        applyBackgroundWorkStateForStory(workKey, response.state, {
+          preservePendingIfUnacknowledged: true,
+        })
+      ) {
         rerenderStoryHandleForWorkKey(workKey);
       }
     },
@@ -1364,10 +1414,42 @@ function updateAutoTrackPendingForStory(item) {
   var workKey = overlayWorkKeyFromItem(item);
   if (!workKey) return;
   var prev = optimisticStoryPageEntries[workKey] || {};
-  if (optimisticStoryEntryHasLibraryState(prev)) return;
-  optimisticStoryPageEntries[workKey] = Object.assign({}, prev, {
+  var observedChapter =
+    item && typeof item.chn === "number" && Number.isFinite(item.chn)
+      ? Math.max(1, Math.trunc(item.chn))
+      : null;
+  var observedTotal =
+    item && typeof item.cht === "number" && Number.isFinite(item.cht)
+      ? Math.max(observedChapter || 1, Math.trunc(item.cht))
+      : null;
+  var pending = Object.assign({}, prev, {
     __traceAutoTrackPending: true,
+    __traceAutoTrackError: null,
   });
+  if (observedChapter != null) {
+    pending.__traceObservedChapters = {
+      current: observedChapter,
+      total: observedTotal,
+    };
+  }
+  optimisticStoryPageEntries[workKey] = pending;
+  rerenderStoryHandleForWorkKey(workKey);
+}
+
+function clearAutoTrackPendingForStory(item) {
+  var workKey = overlayWorkKeyFromItem(item);
+  if (!workKey) return;
+  var prev = optimisticStoryPageEntries[workKey];
+  if (!prev || prev.__traceAutoTrackPending !== true) return;
+  var next = Object.assign({}, prev);
+  delete next.__traceAutoTrackPending;
+  delete next.__traceAutoTrackError;
+  delete next.__traceObservedChapters;
+  if (Object.keys(next).length === 0) {
+    delete optimisticStoryPageEntries[workKey];
+  } else {
+    optimisticStoryPageEntries[workKey] = next;
+  }
   rerenderStoryHandleForWorkKey(workKey);
 }
 
@@ -1375,16 +1457,19 @@ function updateAutoTrackFailureForStory(item, error) {
   var workKey = overlayWorkKeyFromItem(item);
   if (!workKey) return;
   var prev = optimisticStoryPageEntries[workKey] || {};
-  if (optimisticStoryEntryHasLibraryState(prev)) return;
   if (error === "ignored_sender") {
     delete optimisticStoryPageEntries[workKey];
     rerenderStoryHandleForWorkKey(workKey);
     return;
   }
-  optimisticStoryPageEntries[workKey] = Object.assign({}, prev, {
+  var failed = Object.assign({}, prev, {
     __traceAutoTrackPending: false,
     __traceAutoTrackError: error || "network_error",
   });
+  if (failed.__traceObservedChapters) {
+    delete failed.__traceObservedChapters;
+  }
+  optimisticStoryPageEntries[workKey] = failed;
   rerenderStoryHandleForWorkKey(workKey);
 }
 
@@ -2670,24 +2755,43 @@ function storyInlineStatusDisplay(info) {
   return progress ? label + " " + progress : label;
 }
 
-function storyInlineProgressDisplay(info) {
+function storyInlineDisplayChapters(info, status) {
+  var chapters =
+    info && info.__traceAutoTrackPending && info.__traceObservedChapters
+      ? info.__traceObservedChapters
+      : info && info.chapters;
+  return displayChaptersForStatus(status, chapters);
+}
+
+function storyInlineProgressDisplay(info, statusOverride) {
   var status =
-    info && typeof info.readerStatus === "string"
+    canonicalReaderStatus(statusOverride) ||
+    (info && typeof info.readerStatus === "string"
       ? info.readerStatus
       : info && typeof info.status === "string"
         ? info.status
-        : null;
+        : null);
+  var chapters = info && storyInlineDisplayChapters(info, status);
   if (
     canonicalReaderStatus(status) !== "SAVED" &&
-    info &&
-    displayChaptersForStatus(status, info && info.chapters) &&
-    typeof displayChaptersForStatus(status, info && info.chapters).current === "number"
+    chapters &&
+    typeof chapters.current === "number"
   ) {
-    var chapters = displayChaptersForStatus(status, info && info.chapters);
     var total = chapters.total;
     return chapters.current + "/" + (total == null ? "?" : total);
   }
   return null;
+}
+
+function storyPendingAutoTrackStatus(entry) {
+  var status = entryStatus(entry);
+  if (status !== "SAVED" || !entry || !entry.__traceObservedChapters) {
+    return status;
+  }
+  var observedChapter = storyEntryChapterCurrent({
+    chapters: entry.__traceObservedChapters,
+  });
+  return observedChapter != null && observedChapter > 1 ? "READING" : status;
 }
 
 function shouldDelayAutoTrackUntilVisible() {
@@ -2834,25 +2938,43 @@ function startDwellTimer(attempt) {
       },
     });
   }
+  if (shouldSkipRecentAutoTrack(validStory)) {
+    return;
+  }
+  var preferenceReadSettled = false;
+  var pendingAlreadySet = false;
   ext.storage.local.get(
     ["prefAutoTrackEnabled"],
     (prefRes) => {
+      preferenceReadSettled = true;
       if (ext.runtime.lastError) {
         if (shouldSkipRecentAutoTrack(validStory)) {
           return;
         }
-        sendAutoTrackForStory(validStory);
+        sendAutoTrackForStory(validStory, {
+          pendingAlreadySet: pendingAlreadySet,
+        });
         return;
       }
       if (prefRes.prefAutoTrackEnabled === false) {
+        clearAutoTrackPendingForStory(validStory);
         return;
       }
       if (shouldSkipRecentAutoTrack(validStory)) {
         return;
       }
-      sendAutoTrackForStory(validStory);
+      sendAutoTrackForStory(validStory, {
+        pendingAlreadySet: pendingAlreadySet,
+      });
     },
   );
+  if (!preferenceReadSettled) {
+    // Safari resolves extension storage asynchronously. Project the observed
+    // chapter while that read is pending so stale progress is never the first
+    // story-handle state. Synchronous browser/test adapters skip this branch.
+    pendingAlreadySet = true;
+    updateAutoTrackPendingForStory(validStory);
+  }
 }
 
 function scheduleAutoTrackForCurrentPage(attempt) {
@@ -3302,6 +3424,19 @@ function storyHandlePresentation(view) {
     };
   }
   if (entry && entry.__traceAutoTrackPending) {
+    var pendingStatus = storyPendingAutoTrackStatus(entry);
+    var pendingProgress = storyInlineProgressDisplay(entry, pendingStatus);
+    if (pendingStatus && pendingProgress) {
+      return {
+        kind: "tracking",
+        label: quickAddStatusLabel(pendingStatus) || "Reading",
+        theme: TRACE_INLINE_THEMES[pendingStatus] || TRACE_INLINE_THEMES.saving,
+        dot: false,
+        spinner: true,
+        status: pendingStatus,
+        progress: pendingProgress,
+      };
+    }
     return {
       kind: "adding",
       label: "Adding...",
@@ -3917,6 +4052,9 @@ function updateOptimisticReaderStatus(workKey, status, chapters) {
   delete next.__traceStatusPending;
   delete next.__traceStatusTarget;
   delete next.__traceStatusError;
+  delete next.__traceAutoTrackPending;
+  delete next.__traceAutoTrackError;
+  delete next.__traceObservedChapters;
   optimisticStoryPageEntries[workKey] = next;
 }
 
@@ -5722,8 +5860,19 @@ function renderQuickAddFromSnapshot(workKey, anchor, res) {
           // the save landed. Keep any other optimistic fields, but do not let
           // an older in-flight receipt hold the visible handle on "Adding..."
           // until a later focus/pageshow reconciliation.
-          optimisticEntryForMerge = Object.assign({}, optimisticEntry);
-          delete optimisticEntryForMerge.__traceAutoTrackPending;
+          var projectedChapter = storyEntryChapterCurrent(info);
+          var observedChapter = storyEntryChapterCurrent({
+            chapters:
+              optimisticEntry.__traceObservedChapters || optimisticEntry.chapters,
+          });
+          if (
+            observedChapter == null ||
+            (projectedChapter != null && projectedChapter >= observedChapter)
+          ) {
+            optimisticEntryForMerge = Object.assign({}, optimisticEntry);
+            delete optimisticEntryForMerge.__traceAutoTrackPending;
+            delete optimisticEntryForMerge.__traceObservedChapters;
+          }
         }
         info = mergeStoryOverlayEntries(
           info,

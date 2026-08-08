@@ -68,6 +68,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     private static let pendingFirstStoryExpiresAtDefaultsKey = "tracePendingFirstStoryExpiresAtV1"
     private static let pendingFirstStoryV2DefaultsKey = "tracePendingFirstStoryV2"
     private static let extensionHeartbeatDefaultsKey = "traceExtensionHeartbeatV1"
+    private static let providerHealthDefaultsKey = "traceExtensionProviderHealthV1"
 
     func beginRequest(with context: NSExtensionContext) {
         let request = context.inputItems.first as? NSExtensionItem
@@ -102,6 +103,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             switch messageType {
             case Self.traceIosAuthTokenRequest:
                 let credential = Self.readSharedTraceCredential()
+                Self.recordProviderReadHealth(credential)
 #if DEBUG && targetEnvironment(simulator)
                 Self.recordSimulatorProviderRequest(credential)
 #endif
@@ -333,11 +335,14 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         }
         guard record.version == traceProviderRecordVersion,
               record.kind == "device_session",
-              let sessionId = record.sessionId,
-              UUID(uuidString: sessionId) != nil,
+              let rawSessionId = record.sessionId,
               let expiresAt = record.expiresAt,
-              ISO8601DateFormatter().date(from: expiresAt) != nil,
-              let credential = record.credential
+              let rawCredential = record.credential,
+              let provider = TraceSafariProviderCodec.deviceSession(
+                  sessionId: rawSessionId,
+                  credential: rawCredential,
+                  expiresAt: expiresAt
+              )
         else {
             os_log(
                 "Shared provider record validation failed",
@@ -346,23 +351,11 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             )
             return .unavailable
         }
-        let trimmed = credential.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.range(
-            of: "^trd_v1_[A-Za-z0-9_-]{43}$",
-            options: .regularExpression
-        ) != nil else {
-            os_log(
-                "Shared provider credential validation failed",
-                log: log,
-                type: .error
-            )
-            return .unavailable
-        }
         return .ready(
-            credential: trimmed,
+            credential: provider.credential,
             kind: "device_session",
-            sessionId: sessionId,
-            expiresAt: expiresAt
+            sessionId: provider.sessionId,
+            expiresAt: provider.expiresAt
         )
     }
 
@@ -393,6 +386,29 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
 
     private static func pendingDefaults() -> UserDefaults? {
         UserDefaults(suiteName: traceSharedAppGroup)
+    }
+
+    /// Redacted, durable proof of the extension-side provider boundary. This
+    /// deliberately records no credential, account, session, story, or URL.
+    private static func recordProviderReadHealth(
+        _ credential: SharedTraceCredential
+    ) {
+        let state: String
+        switch credential {
+        case .ready:
+            state = "ready"
+        case .missing:
+            state = "missing"
+        case .unavailable:
+            state = "unavailable"
+        }
+        pendingDefaults()?.set(
+            [
+                "state": state,
+                "updatedAt": Date().timeIntervalSince1970 * 1000,
+            ],
+            forKey: providerHealthDefaultsKey
+        )
     }
 
     /// Persists the background script's "content script ran on host X" signal.

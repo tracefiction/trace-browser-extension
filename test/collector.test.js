@@ -1451,6 +1451,8 @@ function createStoryAutoTrackPendingHarness(options = {}) {
     : null;
   let autoTrackCallback;
   let connectAndSaveCallback;
+  let deferredAutoTrackPreferenceRead;
+  let deferredWorkStateRead;
   let runtimeMessageListener = null;
   const chrome = {
     runtime: {
@@ -1462,6 +1464,10 @@ function createStoryAutoTrackPendingHarness(options = {}) {
       sendMessage(msg, cb) {
         sent.push(msg);
         if (msg.type === "TRACE_WORK_STATE_GET") {
+          if (options.holdWorkStateRead) {
+            deferredWorkStateRead = cb;
+            return;
+          }
           if (typeof cb === "function") {
             cb(options.workStateResponse || { ok: true, state: null });
           }
@@ -1554,6 +1560,16 @@ function createStoryAutoTrackPendingHarness(options = {}) {
               out[key] = store[key];
             }
           }
+          if (
+            options.holdAutoTrackPreferenceRead &&
+            list.length === 1 &&
+            list[0] === "prefAutoTrackEnabled"
+          ) {
+            deferredAutoTrackPreferenceRead = function () {
+              cb(out);
+            };
+            return;
+          }
           cb(out);
         },
         set(value, cb) {
@@ -1584,6 +1600,18 @@ function createStoryAutoTrackPendingHarness(options = {}) {
     store,
     autoTrackCallback(response) {
       autoTrackCallback(response);
+    },
+    resolveAutoTrackPreferenceRead() {
+      assert.equal(typeof deferredAutoTrackPreferenceRead, "function");
+      const resolve = deferredAutoTrackPreferenceRead;
+      deferredAutoTrackPreferenceRead = null;
+      resolve();
+    },
+    resolveWorkStateRead(response) {
+      assert.equal(typeof deferredWorkStateRead, "function");
+      const resolve = deferredWorkStateRead;
+      deferredWorkStateRead = null;
+      resolve(response || options.workStateResponse || { ok: true, state: null });
     },
     resolveConnectAndSave(response) {
       connectAndSaveCallback(response);
@@ -1669,6 +1697,223 @@ test("story page confirmed overlay entry clears an older auto-track pending hand
   assert.equal(handle.disabled, false);
   assert.match(handle.textContent || "", /Reading\s*3\/28/i);
   assert.doesNotMatch(handle.textContent || "", /Adding\.\.\./);
+});
+
+test("story page projects a newly viewed chapter while auto-track confirms it", () => {
+  const harness = createStoryAutoTrackPendingHarness({
+    holdAutoTrack: true,
+    url: "https://m.fanfiction.net/s/7038840/4/A-Chance-Encounter",
+    store: {
+      libraryOverlayCache: {
+        entries: {
+          "ffn:7038840": {
+            status: "READING",
+            readerStatus: "READING",
+            canonicalReaderStatus: "READING",
+            entryId: "00000000-0000-4000-8000-000000703884",
+            chapters: { current: 3, total: 28 },
+          },
+        },
+        syncVersion: "chapter-three-projection",
+      },
+    },
+  });
+
+  const handle = harness.dom.window.document.querySelector(
+    "[data-trace-story-handle]",
+  );
+  assert.ok(handle, "expected Trace story handle");
+  assert.equal(handle.disabled, true);
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "tracking");
+  assert.match(handle.textContent || "", /Reading\s*4\/28/i);
+  assert.doesNotMatch(handle.textContent || "", /3\/28/);
+  assert.ok(handle.querySelector("svg"), "expected pending progress to retain a spinner");
+
+  harness.autoTrackCallback({ ok: false, error: "network_error" });
+  assert.match(handle.textContent || "", /Error/i);
+  assert.doesNotMatch(handle.textContent || "", /4\/28/);
+});
+
+test("story page projects Saved to Reading on chapter two while auto-track confirms it", () => {
+  const harness = createStoryAutoTrackPendingHarness({
+    holdAutoTrack: true,
+    sessionMode: "kernel",
+    url: "https://m.fanfiction.net/s/7038840/2/A-Chance-Encounter",
+    projectionResponse: {
+      ok: true,
+      snapshot: {
+        state: "connected",
+        reason: "none",
+        canExecuteAuthenticated: true,
+      },
+      projection: {
+        entries: {
+          "ffn:7038840": {
+            status: "PLANNING",
+            readerStatus: "PLANNING",
+            canonicalReaderStatus: "SAVED",
+            entryId: "00000000-0000-4000-8000-000000703884",
+            chapters: { current: 1, total: 28 },
+          },
+        },
+        workPreferences: {},
+        syncVersion: "saved-chapter-one-projection",
+      },
+    },
+  });
+
+  const handle = harness.dom.window.document.querySelector(
+    "[data-trace-story-handle]",
+  );
+  assert.ok(handle, "expected Trace story handle");
+  assert.equal(handle.disabled, true);
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "tracking");
+  assert.match(handle.textContent || "", /Reading\s*2\/28/i);
+  assert.doesNotMatch(handle.textContent || "", /^Saved$/);
+  assert.ok(handle.querySelector("svg"), "expected pending transition to retain a spinner");
+
+  harness.autoTrackCallback({ ok: false, error: "network_error" });
+  assert.match(handle.textContent || "", /Error/i);
+  assert.doesNotMatch(handle.textContent || "", /Reading\s*2\/28/i);
+});
+
+test("story page projects pending progress before the auto-track preference read settles", () => {
+  const harness = createStoryAutoTrackPendingHarness({
+    holdAutoTrack: true,
+    holdAutoTrackPreferenceRead: true,
+    sessionMode: "kernel",
+    url: "https://m.fanfiction.net/s/7038840/3/A-Chance-Encounter",
+    workStateResponse: {
+      ok: true,
+      state: {
+        workKey: "ffn:7038840",
+        status: "saved",
+        entryId: "00000000-0000-4000-8000-000000703884",
+        entry: {
+          status: "READING",
+          readerStatus: "READING",
+          canonicalReaderStatus: "READING",
+          entryId: "00000000-0000-4000-8000-000000703884",
+          chapters: { current: 2, total: 28 },
+        },
+        syncVersion: "chapter-two-work-state",
+      },
+    },
+  });
+
+  const handle = harness.dom.window.document.querySelector(
+    "[data-trace-story-handle]",
+  );
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "tracking");
+  assert.match(handle.textContent || "", /Reading\s*3\/28/i);
+  assert.ok(handle.querySelector("svg"), "expected immediate pending progress to show a spinner");
+
+  harness.resolveAutoTrackPreferenceRead();
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "tracking");
+  assert.match(handle.textContent || "", /Reading\s*3\/28/i);
+  assert.ok(handle.querySelector("svg"), "expected pending progress to show a spinner");
+
+  harness.autoTrackCallback({ ok: false, error: "network_error" });
+  assert.match(handle.textContent || "", /Error/i);
+  assert.doesNotMatch(handle.textContent || "", /Reading\s*3\/28/i);
+});
+
+test("story page removes provisional progress when auto-track is disabled", () => {
+  const harness = createStoryAutoTrackPendingHarness({
+    holdAutoTrack: true,
+    holdAutoTrackPreferenceRead: true,
+    sessionMode: "kernel",
+    url: "https://m.fanfiction.net/s/7038840/3/A-Chance-Encounter",
+    store: { prefAutoTrackEnabled: false },
+    workStateResponse: {
+      ok: true,
+      state: {
+        workKey: "ffn:7038840",
+        status: "saved",
+        entryId: "00000000-0000-4000-8000-000000703884",
+        entry: {
+          status: "READING",
+          readerStatus: "READING",
+          canonicalReaderStatus: "READING",
+          entryId: "00000000-0000-4000-8000-000000703884",
+          chapters: { current: 2, total: 28 },
+        },
+        syncVersion: "chapter-two-auto-track-disabled",
+      },
+    },
+  });
+
+  const handle = harness.dom.window.document.querySelector(
+    "[data-trace-story-handle]",
+  );
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "tracking");
+  assert.match(handle.textContent || "", /Reading\s*3\/28/i);
+
+  harness.resolveAutoTrackPreferenceRead();
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "status");
+  assert.match(handle.textContent || "", /Reading\s*2\/28/i);
+  assert.equal(handle.querySelector("animateTransform"), null);
+  assert.equal(
+    harness.sent.some((message) => message.type === "TRACE_AUTO_TRACK"),
+    false,
+  );
+});
+
+test("story page keeps pending progress over a later stale work-state read", () => {
+  const harness = createStoryAutoTrackPendingHarness({
+    holdAutoTrack: true,
+    holdWorkStateRead: true,
+    sessionMode: "kernel",
+    url: "https://m.fanfiction.net/s/7038840/3/A-Chance-Encounter",
+    projectionResponse: {
+      ok: true,
+      snapshot: {
+        state: "connected",
+        reason: "none",
+        canExecuteAuthenticated: true,
+      },
+      projection: {
+        entries: {
+          "ffn:7038840": {
+            status: "READING",
+            readerStatus: "READING",
+            canonicalReaderStatus: "READING",
+            entryId: "00000000-0000-4000-8000-000000703884",
+            chapters: { current: 2, total: 28 },
+          },
+        },
+        workPreferences: {},
+        syncVersion: "chapter-two-projection",
+      },
+    },
+  });
+
+  const handle = harness.dom.window.document.querySelector(
+    "[data-trace-story-handle]",
+  );
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "tracking");
+  assert.match(handle.textContent || "", /Reading\s*3\/28/i);
+
+  harness.resolveWorkStateRead({
+    ok: true,
+    state: {
+      workKey: "ffn:7038840",
+      status: "saved",
+      entryId: "00000000-0000-4000-8000-000000703884",
+      entry: {
+        status: "READING",
+        readerStatus: "READING",
+        canonicalReaderStatus: "READING",
+        entryId: "00000000-0000-4000-8000-000000703884",
+        chapters: { current: 2, total: 28 },
+      },
+      syncVersion: "stale-chapter-two-work-state",
+    },
+  });
+
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "tracking");
+  assert.match(handle.textContent || "", /Reading\s*3\/28/i);
+  assert.ok(handle.querySelector("svg"), "expected pending progress to retain its spinner");
 });
 
 test("story page ignores unscoped cached saved state", () => {
@@ -3028,6 +3273,24 @@ test("story sheet Planning to Reading sends chapter progress 1 and displays 1/? 
       onMessage: { addListener() {} },
       sendMessage(msg, cb) {
         sent.push(msg);
+        if (msg.type === "TRACE_AUTO_TRACK" && typeof cb === "function") {
+          cb({
+            ok: true,
+            state: {
+              workKey: "ffn:7038840",
+              status: "saved",
+              entryId,
+              entry: {
+                entryId,
+                status: "PLANNING",
+                readerStatus: "PLANNING",
+                canonicalReaderStatus: "SAVED",
+                chapters: { current: 0, total: null },
+              },
+            },
+          });
+          return;
+        }
         if (msg.type === "TRACE_SET_READER_STATUS" && typeof cb === "function") {
           cb({ ok: true, entryId, status: msg.payload.status });
         }

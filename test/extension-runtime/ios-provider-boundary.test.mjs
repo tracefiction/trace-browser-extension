@@ -16,6 +16,7 @@ test("non-production iOS wrappers require Debug while Release remains production
 
 test("the app synchronizer is the sole versioned writer and native utility handlers do not acquire tokens", () => {
   const app = read("iOS (App)", "TraceWebViewController.swift");
+  const codec = read("Shared (Extension)", "TraceSafariProviderCodec.swift");
   assert.doesNotMatch(app, /storeCurrentTraceTokenForSafariExtension/);
   assert.match(app, /traceAuthTokenAccount = "extension-provider-v2"/);
   assert.match(app, /retiredTraceAuthTokenAccount = "extension-token"/);
@@ -39,6 +40,21 @@ test("the app synchronizer is the sole versioned writer and native utility handl
     app,
     /let updateStatus = SecItemUpdate[\s\S]*updateStatus == errSecItemNotFound[\s\S]*SecItemAdd/,
   );
+  assert.match(
+    app,
+    /JSONDecoder\(\)\.decode[\s\S]*TraceSafariProviderCodec\.isLegacyV060RawAccessToken\(data\)[\s\S]*return nil[\s\S]*throw TraceSafariExtensionBridgeError\.tokenShareFailed/,
+  );
+  assert.match(
+    codec,
+    /data\.count >= 32[\s\S]*data\.count <= 16_384[\s\S]*\^\[A-Za-z0-9_-\]\+\\\\\.\[A-Za-z0-9_-\]\+\\\\\.\[A-Za-z0-9_-\]\+\$/,
+  );
+  assert.match(app, /traceDebugSeedLegacyRawProvider/);
+  assert.match(app, /Legacy v0\.6\.0 provider detected/);
+  assert.match(
+    codec,
+    /parseISO8601Date\(expiresAt\)[\s\S]*withInternetDateTime, \.withFractionalSeconds[\s\S]*ISO8601DateFormatter\(\)\.date\(from: value\)/,
+  );
+  assert.match(app, /TraceSafariProviderCodec\.deviceSession/);
   const providerWriter = app.slice(
     app.indexOf("private static func writeSharedProviderRecord"),
     app.indexOf("private static func clearSharedTraceTokens"),
@@ -75,6 +91,10 @@ test("the app synchronizer is the sole versioned writer and native utility handl
   assert.match(extension, /recordSimulatorProviderRequest\(credential\)/);
   assert.match(
     extension,
+    /TraceSafariProviderCodec\.deviceSession/,
+  );
+  assert.match(
+    extension,
     /case Self\.traceIosPendingFirstStoryClear:[\s\S]*expectedHandoffId:[\s\S]*"cleared": cleared/,
   );
   assert.match(
@@ -105,16 +125,10 @@ test("the app synchronizer is the sole versioned writer and native utility handl
   );
 });
 
-test("app resume reconciles the provider and native failures stay observable without credentials", () => {
+test("native provider failures stay observable without credentials", () => {
   const app = read("iOS (App)", "TraceWebViewController.swift");
   const extension = read("Shared (Extension)", "SafariWebExtensionHandler.swift");
 
-  assert.match(app, /struct TraceAppDidBecomeActivePayload: Encodable/);
-  assert.match(app, /let type = "TRACE_IOS_APP_DID_BECOME_ACTIVE"/);
-  assert.match(
-    app,
-    /handleSceneDidBecomeActive[\s\S]*postTraceWebMessage\(TraceAppDidBecomeActivePayload\(\)\)/,
-  );
   assert.match(app, /Shared provider read failed status=%\{public\}d/);
   assert.match(app, /Shared provider update failed status=%\{public\}d/);
   assert.match(app, /Shared provider add failed status=%\{public\}d/);
@@ -123,6 +137,27 @@ test("app resume reconciles the provider and native failures stay observable wit
   assert.match(extension, /Shared credential read succeeded kind=%\{public\}@/);
   assert.match(extension, /Shared credential is missing/);
   assert.match(extension, /Shared credential is unavailable/);
+  assert.match(app, /traceAppProviderHealthV1/);
+  assert.match(extension, /traceExtensionProviderHealthV1/);
+  assert.match(app, /recordAppProviderHealth\(state: "write_failed"\)/);
+  assert.match(extension, /recordProviderReadHealth\(credential\)/);
+
+  const appHealthWriter = app.slice(
+    app.indexOf("private static func recordAppProviderHealth"),
+    app.indexOf("private static func safariExtensionCandidateIdentifiers"),
+  );
+  const extensionHealthWriter = extension.slice(
+    extension.indexOf("private static func recordProviderReadHealth"),
+    extension.indexOf("private static func storeExtensionHeartbeat"),
+  );
+  for (const writer of [appHealthWriter, extensionHealthWriter]) {
+    assert.match(writer, /"state": state/);
+    assert.match(writer, /"updatedAt": Date\(\)\.timeIntervalSince1970 \* 1000/);
+    assert.doesNotMatch(
+      writer,
+      /"(?:credential|token|accountId|sessionId|story|url)"\s*:/,
+    );
+  }
 
   for (const source of [app, extension]) {
     assert.doesNotMatch(source, /credential=%\{public\}/);
