@@ -1,4 +1,4 @@
-# Extension Store Copy - Browser 0.6.1 / iOS 0.6.2
+# Extension Store Copy - Browser 0.6.1 / iOS 0.6.4
 
 Use this copy for Chrome Web Store, Firefox Add-ons, App Store Connect, and
 public release notes. Keep evergreen store descriptions separate from
@@ -80,13 +80,15 @@ The extension does not request cookie permissions.
 
 ## App Store Connect - iOS What's New
 
-Trace for iOS 0.6.2 fixes an upgrade issue that could leave Safari showing
-“Connect” even while the Trace app was signed in:
+Trace for iOS 0.6.4 makes story controls quicker and clearer:
 
-- Restores the connection automatically for readers upgrading from Trace 0.6.0.
-- Keeps the Safari extension aligned with the account signed in to the app.
-- Restores add, automatic progress, and page-level status updates after the
-  connection is repaired.
+- Shows an already-saved story immediately instead of briefly presenting it as
+  a new save in progress.
+- Uses the same Saved, Reading, Caught up, Paused, Finished, and Dropped status
+  names throughout Trace.
+- Refreshes the story status menu so every option is easier to scan and select.
+- Reserves space for the Trace story control while the page loads, reducing
+  layout movement.
 
 ## Screenshot Preparation
 

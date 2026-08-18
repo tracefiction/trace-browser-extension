@@ -17,7 +17,7 @@ Use a Trace QA account with:
 
 - At least one unknown AO3 work and one unknown FFN work visible in listings.
 - At least one known AO3 work and one known FFN work in the library.
-- One library work in `Planning` with chapter progress `0` and a known chapter total.
+- One library work in `Saved` with chapter progress `0` and a known chapter total.
 - One hidden-only work preference that is not in the library.
 - One account at, or near, the free library cap.
 - One signed-out/reconnect scenario.
@@ -124,8 +124,9 @@ library entry.
 Reading status mutation depends on:
 
 - `PATCH /api/library/:entryId`
-- Status values: `PLANNING`, `READING`, `PAUSED`, `COMPLETED`, `DROPPED`
-- Optional chapter progress payload for Planning -> Reading:
+- Canonical status values: `SAVED`, `READING`, `CAUGHT_UP`, `PAUSED`,
+  `FINISHED`, `DROPPED`
+- Optional chapter progress payload for Saved -> Reading:
   `{ "progress": { "unit": "CHAPTER", "value": 1, "total": number|null } }`
 
 ## Pass/Fail Criteria
@@ -140,7 +141,7 @@ Pass only if all apply:
 - Hide collapses the row to `Hidden by Trace | Undo`.
 - Undo restores the work in place without requiring a page refresh.
 - Status changes persist after hard refresh.
-- Planning -> Reading from `0` persists/displays `1/N` or `1/?`, never `0/N`.
+- Saved -> Reading from `0` persists/displays `1/N` or `1/?`, never `0/N`.
 - Signed-out, reconnect, free-cap, and password-page guards still behave.
 
 Fail if any apply:
@@ -161,7 +162,7 @@ Use a normal desktop viewport on an AO3 works listing.
   - Find a work not in the Trace library.
   - Verify `+ Add` appears near the date metadata, not under title/author.
   - Click `+ Add`.
-  - Pass: row updates inline to saved/planning state; no full management surface
+  - Pass: row updates inline to `Saved`; no full management surface
     opens.
 
 - Unknown work Hide:
@@ -185,8 +186,8 @@ Use a normal desktop viewport on an AO3 works listing.
     Hide/Unhide, Open in Trace.
 
 - Status changes:
-  - Change status through `Planning`, `Reading`, `Paused`, `Finished`,
-    `Dropped`.
+  - Change status through `Saved`, `Reading`, `Caught up`, `Paused`,
+    `Finished`, `Dropped`.
   - Hard-refresh after each or at the end.
   - Pass: latest status persists and no `Reading | 0/N` display appears.
 
@@ -233,8 +234,8 @@ available.
   - Hard-refresh.
   - Pass: last status persists.
 
-- Planning -> Reading progress:
-  - Use a work seeded as `Planning` with chapter progress `0`.
+- Saved -> Reading progress:
+  - Use a work seeded as `Saved` with chapter progress `0`.
   - Change to `Reading`.
   - Pass: display becomes `Reading | 1/N` or `Reading | 1/?`; server state
     persists chapter `1` after refresh.
@@ -277,7 +278,7 @@ Use both `www.fanfiction.net` and `m.fanfiction.net` listing pages.
   - Pass: compact header, progress, full statuses, and actions are visible.
 
 - Status changes:
-  - Change through all five statuses.
+  - Change through all six statuses.
   - Hard-refresh.
   - Pass: last status persists and display remains accurate.
 
@@ -331,7 +332,7 @@ Capture PNG screenshots for the release QA record:
 - Chrome AO3 listing mobile: date/metadata placement.
 - Chrome AO3 story page: quick Add after success.
 - Chrome AO3 story page: opened sheet.
-- Chrome AO3 story page: Planning -> Reading result showing `1/N` or `1/?`.
+- Chrome AO3 story page: Saved -> Reading result showing `1/N` or `1/?`.
 - Chrome FFN listing desktop and mobile: title line intact with Trace controls.
 - Chrome FFN story page: opened sheet.
 - Safari AO3 listing: placement and management surface.

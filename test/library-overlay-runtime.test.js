@@ -798,12 +798,20 @@ test("library-overlay renders optional WIP new-chapter context when present", as
     payload: {
       workKey: "ao3:33345",
       entryId: "00000000-0000-4000-8000-000000033345",
-      patch: { progress: { unit: "CHAPTER", value: 6, total: 8 } },
+      patch: {
+        status: "CAUGHT_UP",
+        progress: { unit: "CHAPTER", value: 6, total: 8 },
+      },
     },
   });
   const caughtUpSurface = window.document.querySelector("[data-trace-action-surface]");
   assert.ok(caughtUpSurface);
   assert.equal(caughtUpSurface.querySelector("[data-trace-catchup-action]"), null);
+  assert.equal(
+    caughtUpSurface.querySelector("[data-trace-status-selected='1']")
+      .getAttribute("data-trace-status-choice"),
+    "CAUGHT_UP",
+  );
 });
 
 test("library-overlay keeps legacy fallback when optional work fields are missing", async () => {
@@ -890,14 +898,14 @@ test("library-overlay opened surface shows status editing only when entryId exis
   assert.doesNotMatch(position.textContent || "", /Reading\s*·\s*3\/17/i);
   assert.deepEqual(
     Array.from(choices.querySelectorAll("[data-trace-status-choice]")).map((button) => button.textContent),
-    ["Plan", "Reading", "Paused", "Done", "Dropped"],
+    ["Saved", "Reading", "Caught up", "Paused", "Finished", "Dropped"],
   );
-  const completed = choices.querySelector("[data-trace-status-choice='COMPLETED']");
-  assert.ok(completed);
-  completed.click();
+  const finished = choices.querySelector("[data-trace-status-choice='FINISHED']");
+  assert.ok(finished);
+  finished.click();
   assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1))), {
     type: "TRACE_SET_READER_STATUS",
-    payload: { workKey: "ao3:12345", entryId, status: "COMPLETED" },
+    payload: { workKey: "ao3:12345", entryId, status: "FINISHED" },
   });
   assert.ok(withEntryId.document.querySelector("[data-trace-action-surface]"));
   assert.match(withEntryId.document.querySelector("[data-trace-library-overlay-wrap]").textContent || "", /Finished/i);
@@ -1054,7 +1062,7 @@ test("library-overlay status failure restores previous state and exposes compact
   });
 
   const { surface } = openTraceLens(window);
-  surface.querySelector("[data-trace-status-choice='COMPLETED']").click();
+  surface.querySelector("[data-trace-status-choice='FINISHED']").click();
   assert.ok(window.document.querySelector("[data-trace-action-surface]"));
   assert.match(window.document.querySelector("[data-trace-library-lens]").textContent || "", /Saving/i);
 
@@ -1164,7 +1172,7 @@ test("library-overlay renders hidden-only workPreferences collapsed without stat
   assert.ok(wrap);
   assert.equal(row.getAttribute("data-trace-row-hidden"), "1");
   assert.match(wrap.textContent || "", /Hidden by Trace\s*Unhide/i);
-  assert.doesNotMatch(wrap.textContent || "", /Reading|Planning|Paused|Finished|Dropped/);
+  assert.doesNotMatch(wrap.textContent || "", /Saved|Reading|Caught up|Paused|Finished|Dropped/);
   assert.equal(wrap.querySelector("button[data-trace-quick-add]"), null);
 });
 
@@ -1857,7 +1865,7 @@ test("library-overlay known works expose hide without changing reading status", 
   const { surface } = openTraceLens(window);
   const hide = surface.querySelector("button[data-trace-hidden-action='hide']");
   assert.ok(hide);
-  assert.match(hide.getAttribute("style") || "", /min-height:\s*38px/i);
+  assert.match(hide.getAttribute("style") || "", /min-height:\s*44px/i);
   assert.match(hide.getAttribute("style") || "", /background:\s*transparent/i);
   assert.match(hide.textContent || "", /Hide/i);
 
