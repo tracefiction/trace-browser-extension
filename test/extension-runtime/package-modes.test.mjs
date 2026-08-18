@@ -23,11 +23,15 @@ function runBuild(script) {
 }
 
 function runIosPermissionSpikeBuild() {
-  const result = spawnSync("npm", ["run", "build:ios-permission-spike"], {
-    cwd: ROOT,
-    env: RELEASE_ENV,
-    encoding: "utf8",
-  });
+  const result = spawnSync(
+    "npm",
+    ["run", "build:ios-permission-spike:release"],
+    {
+      cwd: ROOT,
+      env: RELEASE_ENV,
+      encoding: "utf8",
+    },
+  );
   assert.equal(result.status, 0, result.stderr || result.stdout);
 }
 
@@ -228,6 +232,11 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
         /archiveofourown|transformativeworks/.test(origin),
       ),
       false,
+    );
+    assert.ok(
+      safariSpike.host_permissions.includes(
+        "https://www.tracefiction.com/*",
+      ),
     );
     assert.equal(
       safariSpike.content_scripts.some((entry) =>

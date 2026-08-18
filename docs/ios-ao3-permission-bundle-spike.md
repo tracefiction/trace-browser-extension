@@ -1,8 +1,8 @@
 # iOS AO3 permission-bundle capability spike
 
-This debug-only spike tests whether Safari can grant every AO3 origin Trace
-supports through one runtime permission request. It does not change a normal or
-release build and it does not read or send story data.
+This isolated capability spike tests whether Safari can grant every AO3 origin Trace
+supports through one runtime permission request. It does not change the normal
+production build and it does not read or send story data.
 
 ## Compile check
 
@@ -15,6 +15,21 @@ The second command proves the generated resources compile inside the iOS app.
 It does not exercise Safari's consent UI. For the decisive result, rerun
 `npm run build:ios-permission-spike`, open `Trace.xcodeproj` in Xcode, and run
 the **Trace (iOS)** Debug scheme on a real iPhone or iPad.
+
+## TestFlight build
+
+For the 0.6.4 permission experiment, use the dedicated production-origin spike
+build before archiving:
+
+```bash
+TRACE_API_BASE=https://api.tracefiction.com \
+TRACE_WEB_ORIGIN=https://www.tracefiction.com \
+npm run build:ios-permission-spike:release
+```
+
+Archive the **Trace (iOS)** scheme without running another extension build.
+The experiment is version **0.6.4**, build **13**. A normal
+`npm run build:release` restores the production Safari manifest and popup.
 
 The spike build changes only the generated Safari manifest:
 

@@ -89,8 +89,17 @@ if (!["legacy", "kernel", "disabled"].includes(requestedSessionMode)) {
 const SESSION_MODE = requestedSessionMode;
 const HAS_SESSION_RUNTIME = SESSION_MODE !== "legacy";
 const IOS_PERMISSION_SPIKE = process.env.TRACE_IOS_PERMISSION_SPIKE === "1";
-if (IOS_PERMISSION_SPIKE && IS_RELEASE) {
-  throw new Error("TRACE_IOS_PERMISSION_SPIKE is debug-only and cannot be used for a release build.");
+const IOS_PERMISSION_SPIKE_RELEASE =
+  process.env.TRACE_IOS_PERMISSION_SPIKE_RELEASE === "1";
+if (IOS_PERMISSION_SPIKE_RELEASE && (!IOS_PERMISSION_SPIKE || !IS_RELEASE)) {
+  throw new Error(
+    "TRACE_IOS_PERMISSION_SPIKE_RELEASE requires a release-mode permission spike build.",
+  );
+}
+if (IOS_PERMISSION_SPIKE && IS_RELEASE && !IOS_PERMISSION_SPIKE_RELEASE) {
+  throw new Error(
+    "Release-mode permission spikes must use the dedicated build:ios-permission-spike:release command.",
+  );
 }
 const AO3_AUTH_EXCLUDE_MATCHES = [
   "https://archiveofourown.org/users/login*",
@@ -490,6 +499,10 @@ console.log("Wrote", iosGenerated);
 console.log("Build mode=" + BUILD_MODE);
 console.log("TRACE_SESSION_MODE=" + SESSION_MODE);
 console.log("TRACE_IOS_PERMISSION_SPIKE=" + (IOS_PERMISSION_SPIKE ? "1" : "0"));
+console.log(
+  "TRACE_IOS_PERMISSION_SPIKE_RELEASE=" +
+    (IOS_PERMISSION_SPIKE_RELEASE ? "1" : "0"),
+);
 console.log("Built dist/chrome and dist/firefox");
 console.log("TRACE_API_BASE=" + TRACE_API_BASE);
 console.log("TRACE_WEB_ORIGIN=" + TRACE_WEB_ORIGIN);
