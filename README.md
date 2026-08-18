@@ -41,7 +41,7 @@ Trace may send this data to the Trace API when you import, quick-add, auto-track
 - fandoms/tags and related story metadata
 - chapter and word counts
 - reading-progress metadata
-- reading-status updates you explicitly choose in the Trace overlay, such as Planning, Reading, Paused, Finished, or Dropped
+- reading-status updates you explicitly choose in the Trace overlay: Saved, Reading, Caught up, Paused, Finished, or Dropped
 - finish/caught-up decisions you explicitly choose at the end of a supported story, including whether you identify the work as complete, ongoing, on hiatus, or abandoned
 - last-posted-chapter finish-qualification signals for stories already in your Trace library, so Trace can recover or improve work-status metadata
 - hidden-work browsing preferences you explicitly choose in the Trace overlay, keyed by the supported AO3/FFN work id

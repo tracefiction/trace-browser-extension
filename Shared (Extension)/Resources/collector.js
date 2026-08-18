@@ -4374,6 +4374,19 @@ function ensureQuickAddElements(workKey, anchor) {
   return { wrap: wrap, handle: handle, sheet: sheet };
 }
 
+function reserveQuickAddSlot(workKey) {
+  var anchor = findQuickAddAnchor();
+  if (!anchor) return false;
+  var els = ensureQuickAddElements(workKey, anchor);
+  els.handle.setAttribute("data-trace-story-handle-state", "loading");
+  els.handle.style.cssText = traceInlineHandleCss(TRACE_INLINE_THEMES.muted) +
+    ";visibility:hidden;pointer-events:none";
+  els.handle.textContent = "Trace";
+  els.handle.disabled = true;
+  applySheetVisibility(els.sheet, false);
+  return true;
+}
+
 function removeQuickAddElements() {
   var wrap = document.querySelector("[" + QUICK_ADD_WRAP_ATTR + "]");
   if (wrap) {
@@ -5837,34 +5850,25 @@ function renderQuickAddFromSnapshot(workKey, anchor, res) {
     var info = normalizeOverlayEntry(entry, preference);
 
     if (entry || optimisticEntry) {
-      var legacySyntheticSavedEntry =
-        entry &&
-        typeof entry === "object" &&
-        entry.statusChoicesAvailable === true;
-      if (
-        optimisticEntry &&
-        optimisticEntry.__traceAutoTrackPending &&
-        (!entry || legacySyntheticSavedEntry)
-      ) {
-        info = optimisticEntry;
-      } else if (!entry && optimisticEntry) {
+      if (!entry && optimisticEntry) {
         info = optimisticEntry;
       } else if (info && optimisticEntry) {
         var optimisticEntryForMerge = optimisticEntry;
         if (
-          entry &&
-          !legacySyntheticSavedEntry &&
+          optimisticStoryEntryHasLibraryState(info) &&
           optimisticEntry.__traceAutoTrackPending
         ) {
-          // A real account-scoped overlay entry is authoritative proof that
-          // the save landed. Keep any other optimistic fields, but do not let
-          // an older in-flight receipt hold the visible handle on "Adding..."
-          // until a later focus/pageshow reconciliation.
+          // Keep a spinner only when the page has genuinely observed progress
+          // beyond the confirmed entry. A confirmed Saved entry represents
+          // chapter one even when the compact cache omits chapter metadata.
           var projectedChapter = storyEntryChapterCurrent(info);
           var observedChapter = storyEntryChapterCurrent({
             chapters:
               optimisticEntry.__traceObservedChapters || optimisticEntry.chapters,
           });
+          if (projectedChapter == null && entryStatus(info) === "SAVED") {
+            projectedChapter = 1;
+          }
           if (
             observedChapter == null ||
             (projectedChapter != null && projectedChapter >= observedChapter)
@@ -6077,6 +6081,7 @@ function initQuickAdd() {
     renderQuickAddButton(workKey);
     return;
   }
+  reserveQuickAddSlot(workKey);
   storyQuickAddUiReady = true;
   queryBackgroundWorkStateForStory(workKey);
   renderQuickAddButton(workKey);
@@ -6126,7 +6131,12 @@ function initQuickAdd() {
 }
 
 if (!shouldDisableTraceContentScript()) {
+  // The content script runs at document_end, so the story header is normally
+  // available before DOMContentLoaded. Reserve the Trace row immediately to
+  // avoid shifting the archive content when storage hydration completes.
   if (document.readyState === "loading") {
+    var initialQuickAddWorkKey = getWorkKeyFromUrl();
+    if (initialQuickAddWorkKey) reserveQuickAddSlot(initialQuickAddWorkKey);
     document.addEventListener("DOMContentLoaded", initQuickAdd);
   } else {
     initQuickAdd();
