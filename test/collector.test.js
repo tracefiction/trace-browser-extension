@@ -1589,9 +1589,11 @@ function createStoryAutoTrackPendingHarness(options = {}) {
   }
   dom.window.TRACE_SESSION_MODE = options.sessionMode || "legacy";
   dom.window.eval(collectorSrc);
-  dom.window.document.dispatchEvent(
-    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
-  );
+  if (!options.skipDomContentLoaded) {
+    dom.window.document.dispatchEvent(
+      new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+    );
+  }
 
   return {
     dom,
@@ -1628,6 +1630,19 @@ function createStoryAutoTrackPendingHarness(options = {}) {
   };
 }
 
+test("story page reserves the Trace slot before DOMContentLoaded", () => {
+  const { dom } = createStoryAutoTrackPendingHarness({
+    holdAutoTrack: true,
+    skipDomContentLoaded: true,
+  });
+
+  const wrap = dom.window.document.querySelector("[data-trace-quick-add-wrap]");
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(wrap, "expected Trace story slot before DOMContentLoaded");
+  assert.ok(handle, "expected Trace story handle before DOMContentLoaded");
+  assert.match(wrap.getAttribute("style") || "", /min-height:\s*26px/i);
+});
+
 test("story page unknown work shows pending while auto-track is in flight and ignores manual add", () => {
   const { dom, sent } = createStoryAutoTrackPendingHarness({
     holdAutoTrack: true,
@@ -1648,7 +1663,7 @@ test("story page unknown work shows pending while auto-track is in flight and ig
   );
 });
 
-test("story page auto-track pending overrides stale saved cache", () => {
+test("story page keeps a confirmed cached saved state while auto-track reconciles", () => {
   const { dom } = createStoryAutoTrackPendingHarness({
     holdAutoTrack: true,
     store: {
@@ -1669,8 +1684,9 @@ test("story page auto-track pending overrides stale saved cache", () => {
 
   const handle = dom.window.document.querySelector("[data-trace-story-handle]");
   assert.ok(handle, "expected Trace story handle");
-  assert.equal(handle.disabled, true);
-  assert.match(handle.textContent || "", /Adding\.\.\./);
+  assert.equal(handle.disabled, false);
+  assert.match(handle.textContent || "", /Saved/i);
+  assert.doesNotMatch(handle.textContent || "", /Adding\.\.\./);
 });
 
 test("story page confirmed overlay entry clears an older auto-track pending handle", () => {

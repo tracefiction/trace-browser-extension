@@ -852,8 +852,8 @@ async function main() {
         openWaitFor: "[data-trace-action-surface]",
       },
       {
-        name: "AO3 Planning to Reading result",
-        file: "ao3-planning-reading-result.png",
+        name: "AO3 Saved to Reading result",
+        file: "ao3-saved-reading-result.png",
         fixture: "ao3_listing.html",
         url: "https://archiveofourown.org/works?tag_id=Harry+Potter",
         viewport: { width: 1440, height: 1000 },

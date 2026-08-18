@@ -465,10 +465,11 @@
     DROPPED: "Dropped",
   };
   const MANAGEMENT_STATUS_CHOICES = [
-    "PLANNING",
+    "SAVED",
     "READING",
+    "CAUGHT_UP",
     "PAUSED",
-    "COMPLETED",
+    "FINISHED",
     "DROPPED",
   ];
 
@@ -1405,6 +1406,14 @@
     return null;
   }
 
+  function legacyReaderStatus(status) {
+    var canonical = normalizeCanonicalReaderStatus(status);
+    if (canonical === "SAVED") return "PLANNING";
+    if (canonical === "CAUGHT_UP") return "READING";
+    if (canonical === "FINISHED") return "COMPLETED";
+    return canonical;
+  }
+
   /**
    * Legacy cache: plain status string.
    * Current contract: entries[key] carries library state; workPreferences[key]
@@ -1689,8 +1698,6 @@
   }
 
   function statusControlChoiceLabel(status) {
-    if (status === "PLANNING") return "Plan";
-    if (status === "COMPLETED") return "Done";
     return statusChoiceLabel(status);
   }
 
@@ -1749,11 +1756,11 @@
   }
 
   function readerStatusProgressPatch(entry, nextStatus) {
-    var currentStatus = entryStatusValue(entry);
+    var currentStatus = entryDisplayStatusValue(entry);
     var chapters = entry && entry.chapters;
     if (
       nextStatus !== "READING" ||
-      currentStatus !== "PLANNING" ||
+      currentStatus !== "SAVED" ||
       !chapters ||
       typeof chapters.current !== "number" ||
       chapters.current > 0
@@ -1903,19 +1910,23 @@
     var current = entryRatingValue(entry);
     var wrap = document.createElement("div");
     wrap.setAttribute("data-trace-rating-control", "1");
-    wrap.style.cssText = "display:grid;gap:8px;padding-top:12px;border-top:1px solid " + TRACE_D1.line;
+    wrap.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;padding-top:2px";
 
+    var labelWrap = document.createElement("div");
+    labelWrap.style.cssText = "min-width:72px";
     var label = document.createElement("div");
     label.className = "x-sheet-label";
     label.textContent = "Your rating";
-    label.style.cssText = "font:500 9px/1 " + TRACE_D1.mono + ";letter-spacing:0.18em;text-transform:uppercase;color:" + TRACE_D1.ink4;
-    wrap.appendChild(label);
+    label.style.cssText = "font:600 12px/1.3 " + TRACE_D1.font + ";color:" + TRACE_D1.ink2;
+    labelWrap.appendChild(label);
 
     var row = document.createElement("div");
     row.style.cssText = "display:flex;align-items:center;gap:2px";
     var message = document.createElement("span");
     message.setAttribute("data-trace-rating-message", "1");
-    message.style.cssText = "margin-left:8px;font:600 11.5px/1.3 " + TRACE_D1.font + ";color:" + TRACE_D1.ink3;
+    message.textContent = current > 0 ? current + " of 5" : "Not rated";
+    message.style.cssText = "display:block;margin-top:2px;font:500 10.5px/1.3 " + TRACE_D1.font + ";color:" + TRACE_D1.ink4;
+    labelWrap.appendChild(message);
 
     function renderStars(disabled) {
       removeWrapChildren(row);
@@ -1958,17 +1969,17 @@
               }
               current = nextRating;
               entry.rating = nextRating;
-              message.textContent = nextRating > 0 ? "Saved" : "Cleared";
+              message.textContent = nextRating > 0 ? nextRating + " of 5" : "Not rated";
               renderStars(false);
             },
           );
         });
         row.appendChild(star);
       }
-      row.appendChild(message);
     }
 
     renderStars(false);
+    wrap.appendChild(labelWrap);
     wrap.appendChild(row);
     surface.appendChild(wrap);
   }
@@ -1979,20 +1990,20 @@
     if (!patch) return;
     var wrap = document.createElement("div");
     wrap.setAttribute("data-trace-catchup-action", "1");
-    wrap.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0 0;border-top:1px solid " + TRACE_D1.line;
+    wrap.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px";
     var text = document.createElement("div");
     text.style.cssText = "min-width:0";
     var title = document.createElement("div");
     title.textContent = "Catch up";
-    title.style.cssText = "font:600 12.5px/1.25 " + TRACE_D1.font + ";color:" + TRACE_D1.ink;
+    title.style.cssText = "font:600 11.5px/1.25 " + TRACE_D1.font + ";color:" + TRACE_D1.ink2;
     var copy = document.createElement("div");
     copy.textContent = "Set progress to chapter " + patch.chapters.current + ".";
-    copy.style.cssText = "margin-top:2px;font:500 11.5px/1.35 " + TRACE_D1.font + ";color:" + TRACE_D1.ink3;
+    copy.style.cssText = "margin-top:2px;font:500 10.5px/1.35 " + TRACE_D1.font + ";color:" + TRACE_D1.ink3;
     text.appendChild(title);
     text.appendChild(copy);
     var button = document.createElement("button");
     button.type = "button";
-    button.textContent = "Mark caught up";
+    button.textContent = "Catch up to " + patch.chapters.current;
     button.style.cssText = surfaceGhostButtonStyle(UPDATED_THEME) + ";flex:0 0 auto";
     button.addEventListener("click", function (event) {
       event.preventDefault();
@@ -2005,7 +2016,7 @@
           payload: {
             workKey: workKey,
             entryId: entry.entryId,
-            patch: { progress: patch.progress },
+            patch: { status: "CAUGHT_UP", progress: patch.progress },
           },
         },
         function (response) {
@@ -2015,6 +2026,9 @@
             return;
           }
           entry.chapters = patch.chapters;
+          entry.status = legacyReaderStatus("CAUGHT_UP");
+          entry.readerStatus = legacyReaderStatus("CAUGHT_UP");
+          entry.canonicalReaderStatus = "CAUGHT_UP";
           entry.catchupState = "UP";
           entry.newChapterCount = 0;
           rerender();
@@ -2215,7 +2229,7 @@
   }
 
   function surfacePositionBlock(entry) {
-    var status = entryStatusValue(entry);
+    var status = entryDisplayStatusValue(entry);
     var chapters = chaptersForStatusDisplay(status, entry && entry.chapters);
     if (!chapters || typeof chapters.current !== "number") return null;
     var percent = null;
@@ -2226,7 +2240,7 @@
     var position = document.createElement("section");
     position.className = "x-pos";
     position.setAttribute("data-trace-action-position", "1");
-    position.style.cssText = "background:#f1d8c8;border:1px solid rgba(181,74,48,0.24);border-radius:12px;padding:13px 14px";
+    position.style.cssText = "background:#f1d8c8;border:1px solid rgba(181,74,48,0.24);border-radius:13px;padding:14px";
 
     var top = document.createElement("div");
     top.className = "top";
@@ -2247,7 +2261,7 @@
 
     var side = document.createElement("span");
     side.className = "pct";
-    side.style.cssText = "font:500 10.5px/1.2 " + TRACE_D1.mono + ";color:" + TRACE_D1.ink3 + ";text-align:right";
+    side.style.cssText = "font:600 10.5px/1.2 " + TRACE_D1.font + ";color:" + (entry && entry.catchupState === "BEHIND" ? TRACE_D1.rust : TRACE_D1.ink3) + ";text-align:right";
     var catchup = catchupLabel(entry);
     side.textContent = catchup || (percent == null ? "" : percent + "%");
     if (side.textContent) top.appendChild(side);
@@ -2256,7 +2270,7 @@
     if (percent != null) {
       var bar = document.createElement("div");
       bar.className = "bar";
-      bar.style.cssText = "height:5px;border-radius:999px;background:rgba(28,39,34,0.12);overflow:hidden;margin:10px 0 0";
+      bar.style.cssText = "height:5px;border-radius:999px;background:rgba(28,39,34,0.12);overflow:hidden;margin:11px 0 0";
       var fill = document.createElement("i");
       fill.setAttribute("aria-hidden", "true");
       fill.style.cssText = "display:block;height:100%;border-radius:999px;background:" + TRACE_D1.rust + ";width:" + percent + "%";
@@ -2306,13 +2320,16 @@
     if (!context || (!context.hasNotes && !context.tagCount)) return;
     var meta = document.createElement("div");
     meta.className = "x-meta";
-    meta.style.cssText = "display:flex;flex-direction:column;gap:9px;padding-top:12px;border-top:1px solid " + TRACE_D1.line;
+    meta.style.cssText = "display:flex;flex-direction:column;gap:9px;padding-top:15px;border-top:1px solid " + TRACE_D1.line;
+    var label = document.createElement("div");
+    label.className = "x-sheet-label";
+    label.textContent = "Private context";
+    label.style.cssText = "font:500 9px/1 " + TRACE_D1.mono + ";letter-spacing:0.18em;text-transform:uppercase;color:" + TRACE_D1.ink4;
+    meta.appendChild(label);
     if (context.hasNotes) {
-      meta.appendChild(surfaceMetaRow(
-        "note",
+      meta.appendChild(
         surfaceNoteText(context.notePreview || "Private note saved \u00b7 edit in Trace"),
-        "Private note",
-      ));
+      );
     }
     if (context.tagCount > 0) {
       var tags = document.createElement("span");
@@ -2332,7 +2349,7 @@
           false,
         ));
       }
-      meta.appendChild(surfaceMetaRow("tag", tags, "Private tags"));
+      meta.appendChild(tags);
     }
     if (meta.childNodes.length > 0) surface.appendChild(meta);
   }
@@ -2381,8 +2398,8 @@
             if (typeof refreshSurface === "function") refreshSurface();
             return;
           }
-          entry.status = status;
-          entry.readerStatus = status;
+          entry.status = legacyReaderStatus(status);
+          entry.readerStatus = legacyReaderStatus(status);
           entry.canonicalReaderStatus = normalizeCanonicalReaderStatus(status);
           if (statusPatch && statusPatch.chapters) {
             entry.chapters = statusPatch.chapters;
@@ -2401,7 +2418,6 @@
     var accent = D1_STATUS_ACCENT[status] || STATUS_TOKENS.READING.accent;
     var soft = D1_STATUS_SOFT[status] || STATUS_TOKENS.READING.container;
     return [
-      "flex:1",
       "display:flex",
       "flex-direction:column",
       "align-items:center",
@@ -2409,10 +2425,10 @@
       "gap:5px",
       "box-sizing:border-box",
       "min-width:0",
-      "min-height:50px",
-      "padding:8px 2px",
+      "min-height:54px",
+      "padding:8px 3px",
       "overflow:visible",
-      "border-radius:8px",
+      "border-radius:10px",
       "border:1px solid " + (selected ? accent : TRACE_D1.lineStrong),
       "background:" + (selected ? soft : TRACE_D1.paper),
       "color:" + (selected ? TRACE_D1.ink : TRACE_D1.ink3),
@@ -2428,19 +2444,19 @@
     if (!entry || !entry.entryId) return;
     var wrap = document.createElement("div");
     wrap.setAttribute("data-trace-status-choices", "1");
-    wrap.style.cssText = "display:grid;gap:8px;padding-top:12px;border-top:1px solid " + TRACE_D1.line;
+    wrap.style.cssText = "display:grid;gap:9px";
     var label = document.createElement("div");
     label.className = "x-sheet-label";
     label.textContent = "Reading status";
     label.style.cssText = "font:500 9px/1 " + TRACE_D1.mono + ";letter-spacing:0.18em;text-transform:uppercase;color:" + TRACE_D1.ink4;
     var row = document.createElement("div");
     row.className = "x-seg";
-    row.style.cssText = "display:flex;gap:5px";
+    row.style.cssText = "display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px";
     MANAGEMENT_STATUS_CHOICES.forEach(function (status) {
       var choice = document.createElement("button");
       choice.type = "button";
       choice.setAttribute("data-trace-status-choice", status);
-      var selected = entryStatusValue(entry) === status;
+      var selected = entryDisplayStatusValue(entry) === status;
       if (selected) {
         choice.setAttribute("data-trace-status-selected", "1");
         choice.setAttribute("aria-pressed", "true");
@@ -2482,8 +2498,8 @@
       "z-index:2147483647",
       "box-sizing:border-box",
       "display:block",
-      "width:" + (mobile ? "100%" : "min(360px,calc(100vw - 24px))"),
-      "max-width:" + (mobile ? "430px" : "360px"),
+      "width:" + (mobile ? "100%" : "min(376px,calc(100vw - 24px))"),
+      "max-width:" + (mobile ? "430px" : "376px"),
       "padding:0",
       "border-radius:" + (mobile ? "20px 20px 0 0" : "16px"),
       "border:1px solid " + TRACE_D1.lineStrong,
@@ -2498,7 +2514,7 @@
       css.push("left:0", "right:0", "bottom:0", "margin:0 auto", "max-height:min(72vh,520px)");
     } else {
       var rect = trigger.getBoundingClientRect();
-      var surfaceWidth = Math.min(360, Math.max(280, (window.innerWidth || 360) - 24));
+      var surfaceWidth = Math.min(376, Math.max(280, (window.innerWidth || 376) - 24));
       var viewportHeight = window.innerHeight || document.documentElement.clientHeight || 640;
       var top = rect.bottom + 8;
       top = Math.min(Math.max(8, top), Math.max(8, viewportHeight - 120));
@@ -2525,9 +2541,9 @@
     header.style.cssText = [
       "display:grid",
       "grid-template-columns:1fr auto",
-      "gap:10px",
+      "gap:12px",
       "align-items:start",
-      "padding:16px 16px 13px",
+      "padding:17px 18px 15px",
       "border-bottom:1px solid " + TRACE_D1.line,
     ].join(";");
     var text = document.createElement("div");
@@ -2541,7 +2557,7 @@
     var title = document.createElement("div");
     title.className = "ti";
     title.textContent = listingMeta.title || lensHeadline(entry);
-    title.style.cssText = "margin-top:3px;font:500 17px/1.2 'Fraunces',Georgia,serif;color:" + TRACE_D1.ink;
+    title.style.cssText = "margin-top:4px;font:500 18px/1.18 'Fraunces',Georgia,serif;color:" + TRACE_D1.ink + ";overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
     var caption = document.createElement("div");
     caption.className = "au";
     caption.textContent = listingMeta.author
@@ -2562,9 +2578,9 @@
       "display:inline-flex",
       "align-items:center",
       "justify-content:center",
-      "width:26px",
-      "height:26px",
-      "border-radius:7px",
+      "width:30px",
+      "height:30px",
+      "border-radius:9px",
       "border:1px solid " + TRACE_D1.line,
       "background:" + TRACE_D1.paper2,
       "color:" + TRACE_D1.ink3,
@@ -2581,7 +2597,7 @@
     var body = document.createElement("div");
     body.className = "x-sheet-body";
     body.setAttribute("data-trace-action-body", "1");
-    body.style.cssText = "display:flex;flex-direction:column;gap:14px;padding:14px 16px 16px";
+    body.style.cssText = "display:flex;flex-direction:column;gap:17px;padding:16px 18px 18px";
     function refreshSurface() {
       var latestTrigger = trigger;
       var lenses = document.querySelectorAll("[" + LENS_ATTR + "]");
@@ -2593,21 +2609,25 @@
       }
       renderListingActionSurface(latestTrigger, entry, workKey, showActions, rerender, platform, anchor);
     }
-    var status = entryStatusValue(entry);
+    var status = entryDisplayStatusValue(entry);
     appendStatusControls(body, entry, workKey, rerender, showActions, refreshSurface);
     if (status && (!showActions || !(entry && entry.entryId))) {
       body.appendChild(surfaceRowEl("Reading status", statusChoiceLabel(status), false));
     }
     var position = status ? surfacePositionBlock(entry) : null;
-    if (position) body.appendChild(position);
-    appendCatchupAction(body, entry, workKey, rerender, refreshSurface);
+    if (position) {
+      appendCatchupAction(position, entry, workKey, rerender, refreshSurface);
+      body.appendChild(position);
+    } else {
+      appendCatchupAction(body, entry, workKey, rerender, refreshSurface);
+    }
     appendRatingControls(body, entry, workKey);
     appendPrivateContextRows(body, entry);
     surface.appendChild(body);
 
     var actions = document.createElement("div");
     actions.className = "x-sheet-foot";
-    actions.style.cssText = "display:flex;gap:8px;padding:0 16px 16px";
+    actions.style.cssText = "display:flex;gap:8px;padding:0 18px 18px";
     var open = document.createElement("a");
     open.href = traceEntryOpenUrl(entry);
     open.className = "x-pbtn x-pbtn-primary";
@@ -2615,7 +2635,7 @@
     open.rel = "noopener noreferrer";
     open.appendChild(traceIconEl("open"));
     open.appendChild(document.createTextNode("Open in Trace"));
-    open.style.cssText = surfacePrimaryButtonStyle() + ";flex:1";
+    open.style.cssText = surfacePrimaryButtonStyle() + ";flex:1;min-height:44px;border-radius:11px";
     bindTraceOpenLink(open);
     actions.appendChild(open);
     if (showActions) {
@@ -2625,13 +2645,13 @@
         rerender();
       }, true);
       preference.className = "x-pbtn x-pbtn-ghost";
-      preference.style.cssText = surfaceGhostButtonStyle(entry && entry.hidden === true ? HIDDEN_THEME : HIDE_ACTION_THEME) + ";flex:0 0 auto;min-width:72px";
+      preference.style.cssText = surfaceGhostButtonStyle(entry && entry.hidden === true ? HIDDEN_THEME : HIDE_ACTION_THEME) + ";flex:0 0 auto;min-width:78px;min-height:44px;border-radius:11px";
       if (!(entry && entry.hidden === true)) {
         removeWrapChildren(preference);
         preference.setAttribute("aria-label", "Hide this work");
         preference.appendChild(traceIconEl("eyeoff"));
         preference.appendChild(document.createTextNode("Hide"));
-        preference.style.cssText = surfaceGhostButtonStyle(HIDE_ACTION_THEME) + ";flex:0 0 auto";
+        preference.style.cssText = surfaceGhostButtonStyle(HIDE_ACTION_THEME) + ";flex:0 0 auto;min-width:78px;min-height:44px;border-radius:11px";
       }
       actions.appendChild(preference);
     }
