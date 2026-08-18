@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="permission-spike.css">
+    <script type="module" src="permission-spike.mjs"></script>
+</head>
+<body>
+    <main>
+        <p class="eyebrow">Developer capability test</p>
+        <h1>Can Safari grant every AO3 address at once?</h1>
+        <p class="lead">
+            This debug build requests the complete known AO3 bundle in one
+            Safari permission dialog. It does not read or send story data.
+        </p>
+
+        <ol>
+            <li>Press the request button once.</li>
+            <li>Approve Safari’s permission prompt.</li>
+            <li>Look for a green pass result and native acknowledgement.</li>
+        </ol>
+
+        <button id="spike-request" type="button">Request complete AO3 access</button>
+        <button id="spike-recheck" class="secondary" type="button">
+            Recheck after restarting Safari
+        </button>
+
+        <p id="spike-status" class="status" data-kind="neutral" role="status">
+            Reading the current permission state…
+        </p>
+        <p id="spike-result" class="result" data-complete="false">
+            Waiting for permission data
+        </p>
+
+        <details>
+            <summary>Raw test evidence</summary>
+            <pre id="spike-evidence"></pre>
+        </details>
+    </main>
+</body>
+</html>

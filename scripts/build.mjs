@@ -88,6 +88,10 @@ if (!["legacy", "kernel", "disabled"].includes(requestedSessionMode)) {
 }
 const SESSION_MODE = requestedSessionMode;
 const HAS_SESSION_RUNTIME = SESSION_MODE !== "legacy";
+const IOS_PERMISSION_SPIKE = process.env.TRACE_IOS_PERMISSION_SPIKE === "1";
+if (IOS_PERMISSION_SPIKE && IS_RELEASE) {
+  throw new Error("TRACE_IOS_PERMISSION_SPIKE is debug-only and cannot be used for a release build.");
+}
 const AO3_AUTH_EXCLUDE_MATCHES = [
   "https://archiveofourown.org/users/login*",
   "https://*.archiveofourown.org/users/login*",
@@ -146,6 +150,8 @@ const RELEASE_TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 const FIREFOX_RELEASE_EXTENSION_ID = "trace@tracefiction.com";
 const FIREFOX_DEV_EXTENSION_ID = "trace-dev@tracefiction.com";
 const SAFARI_ONLY_PERMISSIONS = ["nativeMessaging"];
+const IOS_PERMISSION_SPIKE_PERMISSIONS = ["activeTab", "scripting"];
+const IOS_PERMISSION_SPIKE_POPUP = "permission-spike.html";
 
 function isLocalLike(value) {
   return /localhost|127\.0\.0\.1/i.test(value);
@@ -302,9 +308,18 @@ console.log("Wrote", popupConfigPath);
 const manifestPath = path.join(RES, "manifest.json");
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 manifest.version = version;
+manifest.action = {
+  ...(manifest.action || {}),
+  default_popup: IOS_PERMISSION_SPIKE
+    ? IOS_PERMISSION_SPIKE_POPUP
+    : "popup.html",
+};
 manifest.permissions = unique([
-  ...(manifest.permissions || []),
+  ...(manifest.permissions || []).filter(
+    (permission) => !IOS_PERMISSION_SPIKE_PERMISSIONS.includes(permission),
+  ),
   ...SAFARI_ONLY_PERMISSIONS,
+  ...(IOS_PERMISSION_SPIKE ? IOS_PERMISSION_SPIKE_PERMISSIONS : []),
 ]);
 
 const {
@@ -316,15 +331,27 @@ const {
   traceWebOrigin: TRACE_WEB_ORIGIN,
 });
 
-manifest.host_permissions = safariHostPermissions;
+manifest.host_permissions = IOS_PERMISSION_SPIKE
+  ? safariHostPermissions.filter(
+      (permission) => !AO3_HOST_MATCHES.includes(permission),
+    )
+  : safariHostPermissions;
+if (IOS_PERMISSION_SPIKE) {
+  manifest.optional_host_permissions = [...AO3_HOST_MATCHES];
+} else {
+  delete manifest.optional_host_permissions;
+}
 const savedFiltersScript = "ao3-saved-filters.js";
 const finishQualifyScript = "trace-finish-qualify.js";
 // This is the canonical content-script declaration. Do not derive it from the
 // previously generated manifest: a disabled build intentionally writes an
 // empty list, and every later build must remain order-independent.
+const archiveMatches = IOS_PERMISSION_SPIKE
+  ? FFN_HOST_MATCHES
+  : SITE_HOST_MATCHES;
 const contentScripts = [
   {
-    matches: SITE_HOST_MATCHES,
+    matches: archiveMatches,
     js: [
       "popup-config.js",
       finishQualifyScript,
@@ -344,17 +371,51 @@ const contentScripts = [
 
 manifest.content_scripts = SESSION_MODE === "disabled"
   ? []
-  : [...contentScripts, {
+  : [...contentScripts, ...(IOS_PERMISSION_SPIKE ? [] : [{
       matches: AO3_HOST_MATCHES,
       js: [savedFiltersScript],
       run_at: "document_end",
       exclude_matches: AO3_AUTH_EXCLUDE_MATCHES,
-    }];
+    }])];
 
 fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
 console.log("Set manifest version to", version);
 
-const packagedManifest = browserStoreManifest(manifest, browserHostPermissions);
+// The spike is Safari-only. Chrome and Firefox packages remain production-shaped
+// even when the checked-in Safari resources are prepared for a device probe.
+const packagedSourceManifest = IOS_PERMISSION_SPIKE
+  ? {
+      ...manifest,
+      action: {
+        ...(manifest.action || {}),
+        default_popup: "popup.html",
+      },
+      permissions: (manifest.permissions || []).filter(
+        (permission) => !IOS_PERMISSION_SPIKE_PERMISSIONS.includes(permission),
+      ),
+      host_permissions: safariHostPermissions,
+      content_scripts: SESSION_MODE === "disabled"
+        ? []
+        : [
+            {
+              ...contentScripts[0],
+              matches: SITE_HOST_MATCHES,
+            },
+            contentScripts[1],
+            {
+              matches: AO3_HOST_MATCHES,
+              js: [savedFiltersScript],
+              run_at: "document_end",
+              exclude_matches: AO3_AUTH_EXCLUDE_MATCHES,
+            },
+          ],
+    }
+  : manifest;
+delete packagedSourceManifest.optional_host_permissions;
+const packagedManifest = browserStoreManifest(
+  packagedSourceManifest,
+  browserHostPermissions,
+);
 
 const skipResources = (full, name) =>
   name === ".DS_Store" || full.endsWith("manifest.json");
@@ -428,6 +489,7 @@ console.log("Wrote", iosGenerated);
 
 console.log("Build mode=" + BUILD_MODE);
 console.log("TRACE_SESSION_MODE=" + SESSION_MODE);
+console.log("TRACE_IOS_PERMISSION_SPIKE=" + (IOS_PERMISSION_SPIKE ? "1" : "0"));
 console.log("Built dist/chrome and dist/firefox");
 console.log("TRACE_API_BASE=" + TRACE_API_BASE);
 console.log("TRACE_WEB_ORIGIN=" + TRACE_WEB_ORIGIN);

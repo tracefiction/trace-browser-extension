@@ -22,6 +22,15 @@ function runBuild(script) {
   assert.equal(result.status, 0, result.stderr || result.stdout);
 }
 
+function runIosPermissionSpikeBuild() {
+  const result = spawnSync("npm", ["run", "build:ios-permission-spike"], {
+    cwd: ROOT,
+    env: RELEASE_ENV,
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+}
+
 function manifest(root) {
   return JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
 }
@@ -200,6 +209,53 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     runBuild("build");
     assertCollectorModeConfig(path.join(ROOT, "dist", "chrome"), "kernel");
     assertCollectorModeConfig(path.join(ROOT, "dist", "firefox"), "kernel");
+
+    runIosPermissionSpikeBuild();
+    const safariSpike = manifest(RESOURCES);
+    assert.equal(
+      safariSpike.action.default_popup,
+      "permission-spike.html",
+    );
+    assert.deepEqual(safariSpike.optional_host_permissions, [
+      "https://archiveofourown.org/*",
+      "https://*.archiveofourown.org/*",
+      "https://archiveofourown.gay/*",
+      "https://*.archiveofourown.gay/*",
+      "https://archive.transformativeworks.org/*",
+    ]);
+    assert.equal(
+      safariSpike.host_permissions.some((origin) =>
+        /archiveofourown|transformativeworks/.test(origin),
+      ),
+      false,
+    );
+    assert.equal(
+      safariSpike.content_scripts.some((entry) =>
+        entry.matches?.some((origin) =>
+          /archiveofourown|transformativeworks/.test(origin),
+        ),
+      ),
+      false,
+    );
+    assert.ok(safariSpike.permissions.includes("activeTab"));
+    assert.ok(safariSpike.permissions.includes("scripting"));
+
+    for (const packageRoot of [
+      path.join(ROOT, "dist", "chrome"),
+      path.join(ROOT, "dist", "firefox"),
+    ]) {
+      const packaged = manifest(packageRoot);
+      assert.equal(packaged.action.default_popup, "popup.html");
+      assert.equal(Object.hasOwn(packaged, "optional_host_permissions"), false);
+      assert.equal(hasSavedFilterScript(packaged), true);
+      assert.ok(
+        packaged.host_permissions.includes(
+          "https://archiveofourown.org/*",
+        ),
+      );
+      assert.equal(packaged.permissions.includes("activeTab"), false);
+      assert.equal(packaged.permissions.includes("scripting"), false);
+    }
   } finally {
     runBuild("build:release");
   }
