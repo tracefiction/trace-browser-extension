@@ -902,6 +902,20 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         let scheme = url.scheme?.lowercased()
         guard scheme == "http" || scheme == "https" else { return false }
         let path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+        if TraceWebOriginGenerated.allowReleaseExperimentOrigin,
+           path == "setup",
+           let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           components.queryItems?.contains(
+               where: {
+                   $0.name == "iosAo3PermissionHandoff" && $0.value == "1"
+               }
+           ) == true
+        {
+            // Safari Web Extension content scripts do not run in this WKWebView.
+            // Open only the fixed experiment handoff in Safari so the next
+            // explicit page tap can call browser.permissions.request.
+            return true
+        }
         // /setup stays in the shell: the iOS activation wizard needs the
         // native bridge (extension state, settings deep link, heartbeat).
         return path == "apps" ||

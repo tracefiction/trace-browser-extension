@@ -118,6 +118,14 @@ drops URLs, titles, account fields, and unknown properties. Content-script
 requests to open Trace are bound to supported top-frame archive senders and
 the exact configured Trace origin.
 
+The dev-only iOS AO3-permission experiment opens outside the app shell only
+for the exact generated Trace origin, `/setup`, and the fixed
+`iosAo3PermissionHandoff=1` query. The Safari content script still validates
+the exact configured origin, and the background requests only the compiled
+five-pattern AO3 optional-host bundle. The handoff does not carry credentials,
+account identifiers, story data, arbitrary destinations, or raw permission
+errors.
+
 Saved-filter synchronization remains serialized with account transitions so a
 response from one account cannot merge after another account becomes current.
 A user-requested session transition cancels the in-flight sync request and

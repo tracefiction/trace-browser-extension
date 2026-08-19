@@ -59,13 +59,16 @@ authenticated onboarding diagnostic so release-specific setup failures can be
 distinguished without collecting story URLs, archive browsing history, or
 account email.
 
-The dev-only iOS onboarding experiment build requests the complete supported
-AO3 host bundle only after the reader presses **Allow AO3 access** on Trace's
-configured development setup page. Safari owns the permission prompt. The
-extension returns only coarse grant/coverage/script-registration results to the
-Trace page, then requires the normal AO3 content-script heartbeat before setup
-can advance. It does not return granted-origin strings, page URLs, or story
-data, and normal production/Chrome/Firefox packages do not include this bridge.
+The dev-only iOS onboarding experiment build first hands the reader from the
+app's embedded web view to one fixed Trace setup URL in Safari, because Safari
+Web Extension content scripts do not run inside the app web view. That public
+handoff page requires no second sign-in and requests the complete supported AO3
+host bundle only after the reader presses **Allow AO3 access**. Safari owns the
+permission prompt. The extension returns only coarse
+grant/coverage/script-registration results to the Trace page, navigates to AO3,
+then requires the normal AO3 content-script heartbeat before setup can advance.
+It does not return granted-origin strings, page URLs, or story data, and normal
+production/Chrome/Firefox packages do not include this bridge.
 
 The metadata-improvement preference is separate from automatic progress tracking and can be turned off in the extension popup.
 Hidden-work preferences affect Trace browsing overlays only; they are separate from reading status and do not hide or change the source site itself.

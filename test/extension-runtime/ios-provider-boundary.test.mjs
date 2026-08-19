@@ -14,6 +14,18 @@ test("Release stays production-bound unless the generated exact-origin experimen
   );
 });
 
+test("the exact onboarding experiment handoff opens outside WKWebView in Safari", () => {
+  const app = read("iOS (App)", "TraceWebViewController.swift");
+  assert.match(
+    app,
+    /TraceWebOriginGenerated\.allowReleaseExperimentOrigin[\s\S]*path == "setup"[\s\S]*\$0\.name == "iosAo3PermissionHandoff" && \$0\.value == "1"[\s\S]*return true/,
+  );
+  assert.match(
+    app,
+    /Safari Web Extension content scripts do not run in this WKWebView/,
+  );
+});
+
 test("the app synchronizer is the sole versioned writer and native utility handlers do not acquire tokens", () => {
   const app = read("iOS (App)", "TraceWebViewController.swift");
   const codec = read("Shared (Extension)", "TraceSafariProviderCodec.swift");
