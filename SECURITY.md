@@ -16,6 +16,11 @@ The extension does not request browser cookie permission. It does not need AO3 o
 The Safari build uses native messaging only to communicate with the bundled
 Trace app for setup actions, app-auth token sharing, and first-story handoff.
 
+The developer-only iOS popup permission spike moves the same bounded AO3 and
+FanFiction.net patterns to optional host permissions and requests them only
+from an explicit extension-popup click. It adds no host, collection, or token
+path. Normal builds retain the release permission model described above.
+
 The modular kernel keeps its session envelope, extension-owned credential map,
 and account-private read model in one IndexedDB database owned by the extension
 origin. AO3/FFN content scripts run against the visited page's origin and
