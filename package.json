@@ -11,6 +11,8 @@
     "build:legacy:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=legacy node scripts/build.mjs",
     "build:kernel": "npm run build:core && TRACE_SESSION_MODE=kernel node scripts/build.mjs",
     "build:kernel:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel node scripts/build.mjs",
+    "build:ios-popup-permission-spike": "npm run build:core && TRACE_SESSION_MODE=kernel TRACE_IOS_POPUP_PERMISSION_SPIKE=1 node scripts/build.mjs",
+    "build:ios-popup-permission-spike:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel TRACE_IOS_POPUP_PERMISSION_SPIKE=1 node scripts/build.mjs",
     "build:disabled": "npm run build:core && TRACE_SESSION_MODE=disabled node scripts/build.mjs",
     "build:disabled:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=disabled node scripts/build.mjs",
     "build:release": "npm run build:kernel:release",

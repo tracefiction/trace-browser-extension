@@ -26,6 +26,39 @@ const POPUP_CSS_PATH = path.join(
   "Resources",
   "popup.css",
 );
+const ARCHIVE_PERMISSION_BUNDLE = Object.freeze([
+  "https://archiveofourown.org/*",
+  "https://*.archiveofourown.org/*",
+  "https://archiveofourown.gay/*",
+  "https://*.archiveofourown.gay/*",
+  "https://archive.transformativeworks.org/*",
+  "https://www.fanfiction.net/*",
+  "https://m.fanfiction.net/*",
+]);
+const ARCHIVE_PERMISSION_CONTENT_SCRIPTS = Object.freeze([
+  {
+    id: "trace-popup-permission-archive-runtime",
+    js: [
+      "popup-config.js",
+      "trace-finish-qualify.js",
+      "collector.js",
+      "library-overlay-keys.js",
+      "library-overlay.js",
+    ],
+    matches: [...ARCHIVE_PERMISSION_BUNDLE],
+    excludeMatches: [],
+    persistAcrossSessions: true,
+    runAt: "document_end",
+  },
+  {
+    id: "trace-popup-permission-ao3-saved-filters",
+    js: ["ao3-saved-filters.js"],
+    matches: ARCHIVE_PERMISSION_BUNDLE.slice(0, 5),
+    excludeMatches: [],
+    persistAcrossSessions: true,
+    runAt: "document_end",
+  },
+]);
 
 function flush() {
   return new Promise((resolve) => setImmediate(resolve));
@@ -52,6 +85,13 @@ function createPopupHarness({
     reason: "none",
   },
   promiseRuntime = false,
+  permissionSpike = false,
+  grantedOrigins = [],
+  permissionRequestGranted = true,
+  permissionRequestOrigins,
+  permissionRequestError = null,
+  registeredScriptIds = [],
+  registrationError = null,
 } = {}) {
   const html = fs.readFileSync(POPUP_HTML_PATH, "utf8");
   const js = fs.readFileSync(POPUP_JS_PATH, "utf8");
@@ -70,6 +110,9 @@ function createPopupHarness({
   const messages = [];
   const storageChangeListeners = [];
   const timeouts = [];
+  const permissionRequests = [];
+  const registeredScripts = registeredScriptIds.map((id) => ({ id }));
+  let currentGrantedOrigins = [...grantedOrigins];
   let closeCalled = false;
 
   const ext = {
@@ -126,6 +169,37 @@ function createPopupHarness({
         },
       },
     },
+    permissions: {
+      async getAll() {
+        return { origins: [...currentGrantedOrigins], permissions: [] };
+      },
+      async request(request) {
+        permissionRequests.push(request);
+        if (permissionRequestError) throw new Error(permissionRequestError);
+        if (permissionRequestGranted) {
+          currentGrantedOrigins = Array.isArray(permissionRequestOrigins)
+            ? [...permissionRequestOrigins]
+            : [...(request?.origins || [])];
+        }
+        return permissionRequestGranted;
+      },
+    },
+    scripting: {
+      async getRegisteredContentScripts({ ids } = {}) {
+        const allowed = new Set(Array.isArray(ids) ? ids : []);
+        return registeredScripts.filter(
+          (entry) => allowed.size === 0 || allowed.has(entry.id),
+        );
+      },
+      async registerContentScripts(entries) {
+        if (registrationError) throw new Error(registrationError);
+        for (const entry of entries || []) {
+          if (!registeredScripts.some((current) => current.id === entry.id)) {
+            registeredScripts.push(entry);
+          }
+        }
+      },
+    },
   };
 
   const context = {
@@ -148,6 +222,17 @@ function createPopupHarness({
   if (traceWebOrigin !== undefined) {
     context.TRACE_EXTENSION_WEB_ORIGIN = traceWebOrigin;
   }
+  if (permissionSpike) {
+    context.TRACE_IOS_POPUP_PERMISSION_SPIKE = true;
+    context.TRACE_ARCHIVE_PERMISSION_BUNDLE = [...ARCHIVE_PERMISSION_BUNDLE];
+    context.TRACE_ARCHIVE_PERMISSION_CONTENT_SCRIPTS =
+      ARCHIVE_PERMISSION_CONTENT_SCRIPTS.map((entry) => ({
+        ...entry,
+        js: [...entry.js],
+        matches: [...entry.matches],
+        excludeMatches: [...entry.excludeMatches],
+      }));
+  }
   context.globalThis = context;
   window.close = () => {
     closeCalled = true;
@@ -161,6 +246,8 @@ function createPopupHarness({
     document: window.document,
     store,
     messages,
+    permissionRequests,
+    registeredScripts,
     get closeCalled() {
       return closeCalled;
     },
@@ -184,6 +271,110 @@ function createPopupHarness({
     },
   };
 }
+
+test("normal popup keeps the developer permission surface hidden", async () => {
+  const h = createPopupHarness({ sessionMode: "kernel", promiseRuntime: true });
+  await flush();
+
+  assert.equal(h.document.getElementById("popup-permission-spike").hidden, true);
+  assert.notEqual(h.document.body.dataset.tracePermissionSpike, "true");
+  assert.deepEqual(h.permissionRequests, []);
+});
+
+test("popup spike requests the exact archive bundle and registers both production script groups", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    permissionSpike: true,
+  });
+  await flush();
+
+  assert.equal(h.document.getElementById("popup-permission-spike").hidden, false);
+  assert.equal(h.document.body.dataset.tracePermissionSpike, "true");
+  assert.equal(h.document.getElementById("popup-permission-request").textContent.trim(), "Allow AO3 & FFN");
+  assert.equal(h.document.getElementById("popup-permission-ao3").textContent, "Needed");
+  assert.equal(h.document.getElementById("popup-permission-ffn").textContent, "Needed");
+
+  h.document.getElementById("popup-permission-request").click();
+  await flush();
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(h.permissionRequests)),
+    [{ origins: [...ARCHIVE_PERMISSION_BUNDLE] }],
+  );
+  assert.deepEqual(
+    h.registeredScripts.map((entry) => entry.id).sort(),
+    ARCHIVE_PERMISSION_CONTENT_SCRIPTS.map((entry) => entry.id).sort(),
+  );
+  assert.equal(h.document.getElementById("popup-permission-heading").textContent, "Website access allowed");
+  assert.equal(h.document.getElementById("popup-permission-status").dataset.state, "success");
+  assert.equal(h.document.getElementById("popup-permission-request").hidden, true);
+  assert.equal(h.document.getElementById("popup-permission-open-ao3").hidden, false);
+  assert.equal(h.document.getElementById("popup-permission-note").hidden, false);
+});
+
+test("popup spike reports a denied request without claiming readiness", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    permissionSpike: true,
+    permissionRequestGranted: false,
+  });
+  await flush();
+
+  h.document.getElementById("popup-permission-request").click();
+  await flush();
+
+  assert.equal(h.permissionRequests.length, 1);
+  assert.equal(h.registeredScripts.length, 0);
+  assert.equal(h.document.getElementById("popup-permission-heading").textContent, "Allow story sites");
+  assert.match(h.document.getElementById("popup-permission-status").textContent, /did not allow/i);
+  assert.equal(h.document.getElementById("popup-permission-open-ao3").hidden, true);
+  assert.equal(h.document.getElementById("popup-permission-request").textContent, "Try allowing again");
+});
+
+test("popup spike keeps granted sites distinct from a script-registration failure", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    permissionSpike: true,
+    registrationError: "Safari blocked dynamic registration.",
+  });
+  await flush();
+
+  h.document.getElementById("popup-permission-request").click();
+  await flush();
+
+  assert.equal(h.document.getElementById("popup-permission-ao3").textContent, "Allowed");
+  assert.equal(h.document.getElementById("popup-permission-ffn").textContent, "Allowed");
+  assert.equal(h.document.getElementById("popup-permission-status").dataset.state, "error");
+  assert.match(h.document.getElementById("popup-permission-status").textContent, /dynamic registration/i);
+  assert.equal(h.document.getElementById("popup-permission-open-ao3").hidden, true);
+  assert.equal(h.document.getElementById("popup-permission-request").textContent, "Retry preparing Trace");
+
+  h.document.getElementById("popup-permission-request").click();
+  await flush();
+  assert.equal(h.permissionRequests.length, 1);
+});
+
+test("popup spike restores dynamic scripts when permission survived an extension restart", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    permissionSpike: true,
+    grantedOrigins: ARCHIVE_PERMISSION_BUNDLE,
+    registeredScriptIds: [ARCHIVE_PERMISSION_CONTENT_SCRIPTS[0].id],
+  });
+  await flush();
+
+  assert.deepEqual(h.permissionRequests, []);
+  assert.deepEqual(
+    h.registeredScripts.map((entry) => entry.id).sort(),
+    ARCHIVE_PERMISSION_CONTENT_SCRIPTS.map((entry) => entry.id).sort(),
+  );
+  assert.equal(h.document.getElementById("popup-permission-heading").textContent, "Website access allowed");
+  assert.match(h.document.getElementById("popup-permission-evidence").textContent, /"registrationsComplete": true/);
+});
 
 test("kernel popup is read-only on open and exposes only explicit session actions", async () => {
   const h = createPopupHarness({ sessionMode: "kernel" });
