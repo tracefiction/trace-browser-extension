@@ -1,9 +1,12 @@
 import {
   AO3_PERMISSION_BUNDLE,
-  AO3_PERMISSION_SPIKE_SCRIPT_ID,
+  AO3_PERMISSION_REGISTRATION_SCRIPT_IDS,
   permissionBundleCoverage,
-  registeredProbeScript,
+  registeredTraceScripts,
 } from "./permission-spike-core.mjs";
+
+const TRACE_PERMISSION_RECONCILE_MESSAGE =
+  "TRACE_IOS_PERMISSION_SPIKE_RECONCILE";
 
 const ext = globalThis.browser ?? globalThis.chrome;
 const state = {
@@ -64,26 +67,39 @@ async function permissionsSnapshot() {
 async function readRegisteredScripts() {
   if (!ext?.scripting?.getRegisteredContentScripts) return [];
   const scripts = await ext.scripting.getRegisteredContentScripts({
-    ids: [AO3_PERMISSION_SPIKE_SCRIPT_ID],
+    ids: [...AO3_PERMISSION_REGISTRATION_SCRIPT_IDS],
   });
   return Array.isArray(scripts) ? scripts : [];
 }
 
-async function registerProbeScript() {
+async function registerTraceScripts() {
   if (!ext?.scripting?.registerContentScripts) {
     throw new Error("scripting.registerContentScripts is unavailable");
   }
   if (ext.scripting.unregisterContentScripts) {
-    try {
-      await ext.scripting.unregisterContentScripts({
-        ids: [AO3_PERMISSION_SPIKE_SCRIPT_ID],
-      });
-    } catch {
-      // A fresh install has nothing to unregister.
+    for (const id of AO3_PERMISSION_REGISTRATION_SCRIPT_IDS) {
+      try {
+        await ext.scripting.unregisterContentScripts({ ids: [id] });
+      } catch {
+        // A fresh install can have only a subset of the known IDs.
+      }
     }
   }
-  await ext.scripting.registerContentScripts([registeredProbeScript()]);
+  await ext.scripting.registerContentScripts(registeredTraceScripts());
   return readRegisteredScripts();
+}
+
+async function reconcileThroughBackground() {
+  if (!ext?.runtime?.sendMessage) return registerTraceScripts();
+  try {
+    const response = await ext.runtime.sendMessage({
+      type: TRACE_PERMISSION_RECONCILE_MESSAGE,
+    });
+    if (response?.ok === true) return readRegisteredScripts();
+  } catch {
+    // Fall through to direct registration if the spike worker was restarted.
+  }
+  return registerTraceScripts();
 }
 
 async function publishNativeSnapshot(origins) {
@@ -146,7 +162,7 @@ async function requestBundle() {
     state.after = await permissionsSnapshot();
     const coverage = permissionBundleCoverage(state.after.origins);
     state.registeredScripts = coverage.complete
-      ? await registerProbeScript()
+      ? await reconcileThroughBackground()
       : await readRegisteredScripts();
     state.nativeAcknowledged = await publishNativeSnapshot(
       state.after.origins,
@@ -154,7 +170,7 @@ async function requestBundle() {
     setStatus(
       state.requestGranted && coverage.complete ? "success" : "error",
       state.requestGranted && coverage.complete
-        ? "Pass: Safari granted every known AO3 pattern."
+        ? "Pass: Safari granted AO3 and Trace’s real scripts are registered."
         : "Fail: Safari did not return the complete AO3 bundle.",
     );
   } catch (error) {

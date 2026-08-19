@@ -248,6 +248,14 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     );
     assert.ok(safariSpike.permissions.includes("activeTab"));
     assert.ok(safariSpike.permissions.includes("scripting"));
+    assert.match(
+      fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8"),
+      /importScripts\("permission-spike-background\.js"\)/,
+    );
+    assert.equal(
+      fs.existsSync(path.join(RESOURCES, "permission-spike-background.js")),
+      true,
+    );
 
     for (const packageRoot of [
       path.join(ROOT, "dist", "chrome"),
@@ -264,6 +272,16 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
       );
       assert.equal(packaged.permissions.includes("activeTab"), false);
       assert.equal(packaged.permissions.includes("scripting"), false);
+      assert.doesNotMatch(
+        fs.readFileSync(path.join(packageRoot, "background.js"), "utf8"),
+        /permission-spike-background/,
+      );
+      assert.equal(
+        fs.readdirSync(packageRoot).some((name) =>
+          name.startsWith("permission-spike"),
+        ),
+        false,
+      );
     }
   } finally {
     runBuild("build:release");

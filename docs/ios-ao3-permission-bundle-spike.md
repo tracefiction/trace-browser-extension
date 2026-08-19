@@ -28,7 +28,8 @@ npm run build:ios-permission-spike:release
 ```
 
 Archive the **Trace (iOS)** scheme without running another extension build.
-The experiment is version **0.6.4**, build **13**. A normal
+The grant experiment was build **13**. The update-restoration experiment is
+version **0.6.4**, build **14**. A normal
 `npm run build:release` restores the production Safari manifest and popup.
 
 The spike build changes only the generated Safari manifest:
@@ -39,13 +40,17 @@ The spike build changes only the generated Safari manifest:
 - `activeTab` and `scripting` are enabled.
 - the Safari action opens `permission-spike.html` instead of the production
   popup.
-- the harmless verification badge is excluded from AO3 login, signup,
-  password, authentication, and logout pages.
+- build 14 removes build 13's harmless verification badge and dynamically
+  restores Trace's real AO3 collector, overlay, and saved-filter scripts when
+  Safari still reports the complete granted bundle.
+- update, startup, permission-change, and explicit popup reconciliation are
+  idempotent; all exclude AO3 login, signup, password, authentication, and
+  logout pages.
 
 Chrome and Firefox packages remain production-shaped. Running `npm run build`
 or `npm run build:release` restores the normal Safari manifest.
 
-## Clean real-device test
+## Build 13 clean grant test
 
 1. Delete the existing Trace app and confirm its Safari extension is absent.
 2. Build and install the debug app, then enable **Allow Extension** only. Do not
@@ -69,6 +74,20 @@ or `npm run build:release` restores the normal Safari manifest.
 9. Rebuild/reinstall the extension and confirm whether the permission survives
    the update. Registered scripts may require re-registration after an update;
    the production design must restore them from the granted-origin snapshot.
+
+## Build 14 update-restoration test
+
+1. Keep build 13 installed with the complete AO3 bundle granted and the green
+   probe visible. Do not delete the app or change Website Access.
+2. Install build 14 over build 13 through TestFlight.
+3. Force-quit Safari, reopen it, and load or refresh an AO3 works page.
+4. Pass: the green probe is gone and Trace's real overlay appears. The popup's
+   raw evidence lists `trace-ao3-runtime-main` and
+   `trace-ao3-runtime-saved-filters`, not the old probe ID.
+5. Return to the Trace app and verify AO3. Pass: the normal archive heartbeat
+   makes verification succeed without granting Website Access again.
+6. Repeat on the reachable `.gay` and Transformative Works variants, then
+   restart Safari once more and verify that the real scripts still run.
 
 ## Decision rule
 

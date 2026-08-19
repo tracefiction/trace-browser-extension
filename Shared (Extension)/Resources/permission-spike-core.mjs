@@ -9,6 +9,15 @@ export const AO3_PERMISSION_BUNDLE = Object.freeze([
 export const AO3_PERMISSION_SPIKE_SCRIPT_ID =
   "trace-ao3-permission-bundle-spike";
 
+export const AO3_TRACE_MAIN_SCRIPT_ID = "trace-ao3-runtime-main";
+export const AO3_TRACE_SAVED_FILTERS_SCRIPT_ID =
+  "trace-ao3-runtime-saved-filters";
+export const AO3_PERMISSION_REGISTRATION_SCRIPT_IDS = Object.freeze([
+  AO3_PERMISSION_SPIKE_SCRIPT_ID,
+  AO3_TRACE_MAIN_SCRIPT_ID,
+  AO3_TRACE_SAVED_FILTERS_SCRIPT_ID,
+]);
+
 const AO3_AUTH_PATHS = Object.freeze([
   "users/login*",
   "users/sign_up*",
@@ -54,4 +63,31 @@ export function registeredProbeScript() {
     persistAcrossSessions: true,
     runAt: "document_idle",
   };
+}
+
+export function registeredTraceScripts() {
+  return [
+    {
+      id: AO3_TRACE_MAIN_SCRIPT_ID,
+      js: [
+        "popup-config.js",
+        "trace-finish-qualify.js",
+        "collector.js",
+        "library-overlay-keys.js",
+        "library-overlay.js",
+      ],
+      matches: [...AO3_PERMISSION_BUNDLE],
+      excludeMatches: [...AO3_PERMISSION_SPIKE_EXCLUDE_MATCHES],
+      persistAcrossSessions: true,
+      runAt: "document_end",
+    },
+    {
+      id: AO3_TRACE_SAVED_FILTERS_SCRIPT_ID,
+      js: ["ao3-saved-filters.js"],
+      matches: [...AO3_PERMISSION_BUNDLE],
+      excludeMatches: [...AO3_PERMISSION_SPIKE_EXCLUDE_MATCHES],
+      persistAcrossSessions: true,
+      runAt: "document_end",
+    },
+  ];
 }

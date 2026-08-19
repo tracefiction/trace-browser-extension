@@ -8,22 +8,22 @@
 </head>
 <body>
     <main>
-        <p class="eyebrow">Developer capability test</p>
-        <h1>Can Safari grant every AO3 address at once?</h1>
+        <p class="eyebrow">Developer update test</p>
+        <h1>Did Trace restore AO3 after the update?</h1>
         <p class="lead">
-            This debug build requests the complete known AO3 bundle in one
-            Safari permission dialog. It does not read or send story data.
+            This build replaces the green permission probe with Trace’s real
+            AO3 collector and overlay using the access Safari already granted.
         </p>
 
         <ol>
-            <li>Press the request button once.</li>
-            <li>Approve Safari’s permission prompt.</li>
-            <li>Look for a green pass result and native acknowledgement.</li>
+            <li>Install this update over build 13.</li>
+            <li>Open or reload an AO3 page.</li>
+            <li>Verify AO3 again in the Trace app.</li>
         </ol>
 
-        <button id="spike-request" type="button">Request complete AO3 access</button>
+        <button id="spike-request" type="button">Request or restore AO3 access</button>
         <button id="spike-recheck" class="secondary" type="button">
-            Recheck after restarting Safari
+            Recheck current state
         </button>
 
         <p id="spike-status" class="status" data-kind="neutral" role="status">
