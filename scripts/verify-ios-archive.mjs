@@ -4,6 +4,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { embeddedBundleIdentifierError } from "./ios-bundle-identifiers.mjs";
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const input = process.argv[2];
 
@@ -123,6 +125,10 @@ const appVersion = readPlistValue(
   path.join(appPath, "Info.plist"),
   "CFBundleShortVersionString",
 );
+const appBundleIdentifier = readPlistValue(
+  path.join(appPath, "Info.plist"),
+  "CFBundleIdentifier",
+);
 const appBuild = readPlistValue(
   path.join(appPath, "Info.plist"),
   "CFBundleVersion",
@@ -131,6 +137,24 @@ const executableName = readPlistValue(
   path.join(appPath, "Info.plist"),
   "CFBundleExecutable",
 );
+
+const pluginsPath = path.join(appPath, "PlugIns");
+if (requirePath(pluginsPath, "Trace embedded plug-ins")) {
+  for (const entry of fs.readdirSync(pluginsPath, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.endsWith(".appex")) continue;
+    const embeddedInfoPlist = path.join(pluginsPath, entry.name, "Info.plist");
+    if (!requirePath(embeddedInfoPlist, `${entry.name} Info.plist`)) continue;
+    const embeddedBundleIdentifier = readPlistValue(
+      embeddedInfoPlist,
+      "CFBundleIdentifier",
+    );
+    const identifierError = embeddedBundleIdentifierError(
+      appBundleIdentifier,
+      embeddedBundleIdentifier,
+    );
+    if (identifierError) errors.push(`${entry.name}: ${identifierError}`);
+  }
+}
 
 if (packageJson && sourceManifest && packageJson.version !== sourceManifest.version) {
   errors.push(
