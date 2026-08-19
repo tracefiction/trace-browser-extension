@@ -14,33 +14,6 @@ const fixtureRoot = path.join(repoRoot, "test", "visual-fixtures");
 const resourceRoot = path.join(repoRoot, "Shared (Extension)", "Resources");
 const outputRoot = process.env.TRACE_VISUAL_OUTPUT_DIR || "/tmp/trace-extension-visual-fixtures";
 const renderSource = "fixture-rendered";
-const popupPermissionBundle = [
-  "https://archiveofourown.org/*",
-  "https://*.archiveofourown.org/*",
-  "https://archiveofourown.gay/*",
-  "https://*.archiveofourown.gay/*",
-  "https://archive.transformativeworks.org/*",
-  "https://www.fanfiction.net/*",
-  "https://m.fanfiction.net/*",
-];
-const popupPermissionContentScripts = [
-  {
-    id: "trace-popup-permission-archive-runtime",
-    js: ["popup-config.js", "trace-finish-qualify.js", "collector.js", "library-overlay-keys.js", "library-overlay.js"],
-    matches: popupPermissionBundle,
-    excludeMatches: [],
-    persistAcrossSessions: true,
-    runAt: "document_end",
-  },
-  {
-    id: "trace-popup-permission-ao3-saved-filters",
-    js: ["ao3-saved-filters.js"],
-    matches: popupPermissionBundle.slice(0, 5),
-    excludeMatches: [],
-    persistAcrossSessions: true,
-    runAt: "document_end",
-  },
-];
 const visualMode = process.argv.includes("--capacity-only")
   ? "capacity"
   : process.argv.includes("--popup-only")
@@ -254,14 +227,7 @@ function extensionMockSource(storageData, sessionSnapshot = null) {
     (() => {
       const storageData = ${JSON.stringify(storageData)};
       const sessionSnapshot = ${JSON.stringify(sessionSnapshot)};
-      const popupPermissionBundle = ${JSON.stringify(popupPermissionBundle)};
-      const popupPermissionContentScripts = ${JSON.stringify(popupPermissionContentScripts)};
-      let grantedOrigins = Array.isArray(storageData.traceGrantedOrigins)
-        ? [...storageData.traceGrantedOrigins]
-        : [];
-      const registeredScripts = Array.isArray(storageData.traceRegisteredScriptIds)
-        ? storageData.traceRegisteredScriptIds.map((id) => ({ id }))
-        : [];
+      let activeTabProbeInjected = storageData.traceProbeAlreadyInjected === true;
       const storageListeners = [];
       const popupState = {
         ok: true,
@@ -339,37 +305,43 @@ function extensionMockSource(storageData, sessionSnapshot = null) {
             },
           },
         },
-        permissions: {
-          async getAll() {
-            return { origins: [...grantedOrigins], permissions: [] };
+        tabs: {
+          async query() {
+            return [{
+              id: 7,
+              url: storageData.traceProbeUrl || "https://archiveofourown.org/works/28534965",
+            }];
           },
-          async request(request) {
-            if (storageData.tracePermissionRequestGranted === false) return false;
-            grantedOrigins = [...(request && request.origins ? request.origins : [])];
-            return true;
+          async sendMessage(_tabId, message) {
+            window.__traceMessages.push(message);
+            if (message && message.type === "TRACE_ACTIVE_TAB_PROBE_PING") {
+              if (!activeTabProbeInjected) throw new Error("No receiving end");
+              return { ok: true, probe: true };
+            }
+            if (message && message.type === "TRACE_ACTIVE_TAB_PROBE_SAVE") {
+              return storageData.traceProbeSaveError
+                ? { ok: false, error: storageData.traceProbeSaveError }
+                : { ok: true, state: "saved", site: "ao3", serverConfirmed: true };
+            }
+            return { ok: false };
           },
         },
         scripting: {
-          async getRegisteredContentScripts({ ids } = {}) {
-            const requested = new Set(Array.isArray(ids) ? ids : []);
-            return registeredScripts.filter((entry) => requested.size === 0 || requested.has(entry.id));
-          },
-          async registerContentScripts(entries) {
-            for (const entry of entries || []) {
-              if (!registeredScripts.some((current) => current.id === entry.id)) {
-                registeredScripts.push(entry);
-              }
+          async executeScript(injection) {
+            window.__traceInjections = [...(window.__traceInjections || []), injection];
+            if (storageData.traceProbeInjectionFailure === true) {
+              throw new Error("Safari denied current-tab execution");
             }
+            activeTabProbeInjected = true;
+            return [];
           },
         },
       };
       window.__traceMessages = [];
       if (sessionSnapshot) window.TRACE_SESSION_MODE = "kernel";
-      if (storageData.tracePermissionSpike === true) {
+      if (storageData.traceActiveTabProbe === true) {
         window.TRACE_SESSION_MODE = "kernel";
-        window.TRACE_IOS_POPUP_PERMISSION_SPIKE = true;
-        window.TRACE_ARCHIVE_PERMISSION_BUNDLE = popupPermissionBundle;
-        window.TRACE_ARCHIVE_PERMISSION_CONTENT_SCRIPTS = popupPermissionContentScripts;
+        window.TRACE_IOS_ACTIVE_TAB_PROBE = true;
       }
       window.chrome = api;
       window.browser = api;
@@ -591,9 +563,11 @@ async function renderPopupScreenshot(browser, definition, assets, manifest) {
   await page.goto("https://trace-extension.local/popup.html", { waitUntil: "domcontentloaded" });
   await page.waitForSelector("#popup-connection[data-state]", { timeout: 10000 });
   await page.waitForTimeout(250);
-  if (definition.clickPermissionRequest) {
-    await page.click("#popup-permission-request");
-    await page.waitForTimeout(150);
+  if (definition.storageData?.traceActiveTabProbe === true) {
+    await page.waitForFunction(
+      () => document.querySelector("#popup-probe-result")?.dataset.state !== "checking",
+      { timeout: 10000 },
+    );
   }
   if (definition.sessionSnapshot) {
     const localSettings = await page.$eval("#popup-local-settings", (element) => ({
@@ -991,12 +965,11 @@ async function main() {
 
     const popupScreenshots = [
       {
-        name: "iOS popup permission spike initial",
-        file: "popup-ios-permission-spike-initial.png",
+        name: "iOS active-tab probe success",
+        file: "popup-ios-active-tab-probe-success.png",
         authState: connectedAuthState(),
         storageData: {
-          tracePermissionSpike: true,
-          traceGrantedOrigins: [],
+          traceActiveTabProbe: true,
         },
         viewport: { width: 360, height: 620 },
         userAgent:
@@ -1004,12 +977,12 @@ async function main() {
         colorScheme: "light",
       },
       {
-        name: "iOS popup permission spike allowed",
-        file: "popup-ios-permission-spike-allowed.png",
+        name: "iOS active-tab probe current-tab failure",
+        file: "popup-ios-active-tab-probe-failure.png",
         authState: connectedAuthState(),
         storageData: {
-          tracePermissionSpike: true,
-          traceGrantedOrigins: popupPermissionBundle,
+          traceActiveTabProbe: true,
+          traceProbeInjectionFailure: true,
         },
         viewport: { width: 360, height: 620 },
         userAgent:
@@ -1017,15 +990,13 @@ async function main() {
         colorScheme: "light",
       },
       {
-        name: "iOS popup permission spike denied",
-        file: "popup-ios-permission-spike-denied.png",
+        name: "iOS active-tab probe unsupported page",
+        file: "popup-ios-active-tab-probe-unsupported.png",
         authState: connectedAuthState(),
         storageData: {
-          tracePermissionSpike: true,
-          traceGrantedOrigins: [],
-          tracePermissionRequestGranted: false,
+          traceActiveTabProbe: true,
+          traceProbeUrl: "https://www.google.com/",
         },
-        clickPermissionRequest: true,
         viewport: { width: 360, height: 620 },
         userAgent:
           "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",

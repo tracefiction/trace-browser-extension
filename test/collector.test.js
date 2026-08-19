@@ -5899,3 +5899,102 @@ test("collect() routes FFN story URL to single item", () => {
   assert.equal(res.items[0].t, "A Chance Encounter");
   assert.ok(res.items[0].chars && res.items[0].chars.length >= 1);
 });
+
+function createActiveTabProbeCollectorHarness(fixture, url, response) {
+  const dom = domFromFixture(fixture, url);
+  const sent = [];
+  let listener = null;
+  dom.window.TRACE_IOS_ACTIVE_TAB_PROBE = true;
+  dom.window.TRACE_SESSION_MODE = "kernel";
+  installCollectorChrome(dom, {
+    runtime: {
+      lastError: null,
+      onMessage: {
+        addListener(fn) {
+          listener = fn;
+        },
+      },
+      sendMessage(message, callback) {
+        sent.push(message);
+        callback?.(response);
+      },
+    },
+    storage: {
+      local: {
+        get(_keys, callback) {
+          callback?.({});
+        },
+        set(_values, callback) {
+          callback?.();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  });
+  const collectorSource = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  dom.window.eval(collectorSource);
+  assert.equal(typeof listener, "function");
+  return { dom, sent, listener };
+}
+
+for (const fixture of [
+  {
+    name: "AO3",
+    file: "ao3_story.html",
+    url: "https://archiveofourown.org/works/28534965/chapters/69925506",
+    site: "ao3",
+    workKey: "ao3:28534965",
+  },
+  {
+    name: "FFN",
+    file: "ffn_story.html",
+    url: "https://www.fanfiction.net/s/7038840/1/A-Chance-Encounter",
+    site: "ffn",
+    workKey: "ffn:7038840",
+  },
+]) {
+  test(`active-tab probe saves one ${fixture.name} story without ambient behavior`, async () => {
+    const h = createActiveTabProbeCollectorHarness(fixture.file, fixture.url, {
+      ok: true,
+      command: { kind: "confirmed" },
+    });
+    const ping = await new Promise((resolve) => {
+      const keepAlive = h.listener(
+        { type: "TRACE_ACTIVE_TAB_PROBE_PING" },
+        {},
+        resolve,
+      );
+      assert.equal(keepAlive, false);
+    });
+    assert.deepEqual(plainJson(ping), { ok: true, probe: true });
+
+    const saved = await new Promise((resolve) => {
+      const keepAlive = h.listener(
+        { type: "TRACE_ACTIVE_TAB_PROBE_SAVE" },
+        {},
+        resolve,
+      );
+      assert.equal(keepAlive, true);
+    });
+    assert.deepEqual(plainJson(saved), {
+      ok: true,
+      state: "saved",
+      site: fixture.site,
+      serverConfirmed: true,
+    });
+    assert.equal(h.sent.length, 1);
+    assert.equal(h.sent[0].type, "TRACE_CONNECT_AND_SAVE");
+    assert.equal(h.sent[0].workKey, fixture.workKey);
+    assert.equal(h.sent[0].payload.item.ctx, "story");
+    assert.equal(
+      h.sent.some((message) =>
+        ["TRACE_ARCHIVE_SEEN", "TRACE_AUTO_TRACK", "TRACE_METADATA_BROADCAST"].includes(message.type),
+      ),
+      false,
+    );
+    assert.equal(h.dom.window.document.querySelector("[data-trace-quick-add]"), null);
+  });
+}

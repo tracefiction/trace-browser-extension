@@ -11,6 +11,8 @@ const TRACE_CONNECT_AND_SAVE_MESSAGE = "TRACE_CONNECT_AND_SAVE";
 const TRACE_IOS_AUTH_REFRESH_REQUEST_MESSAGE = "TRACE_IOS_AUTH_REFRESH_REQUEST";
 const TRACE_SESSION_MODE = globalThis.TRACE_SESSION_MODE || "legacy";
 const KERNEL_SESSION_ACTIVE = TRACE_SESSION_MODE === "kernel";
+const TRACE_ACTIVE_TAB_PROBE_MODE =
+  globalThis.TRACE_IOS_ACTIVE_TAB_PROBE === true;
 const TRACE_WEB_HOME_URL = configuredTraceWebHomeUrl();
 const FIRST_STORY_FOCUS_MAX_ATTEMPTS = 30;
 const FIRST_STORY_FOCUS_RETRY_MS = 150;
@@ -2820,6 +2822,83 @@ function shouldDelayAutoTrackUntilVisible() {
 
 // Listen for background requests
 ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (TRACE_ACTIVE_TAB_PROBE_MODE) {
+    if (msg?.type === "TRACE_ACTIVE_TAB_PROBE_PING") {
+      if (shouldDisableTraceContentScript()) {
+        sendResponse({ ok: false, probe: true, error: "blocked_page" });
+      } else {
+        sendResponse({ ok: true, probe: true });
+      }
+      return false;
+    }
+    if (msg?.type !== "TRACE_ACTIVE_TAB_PROBE_SAVE") return false;
+    if (shouldDisableTraceContentScript()) {
+      sendResponse({ ok: false, error: "blocked_page" });
+      return false;
+    }
+    var probeCollected;
+    var probeWorkKey;
+    try {
+      probeCollected = collect();
+      probeWorkKey = getWorkKeyFromUrl();
+    } catch (_) {
+      probeCollected = null;
+      probeWorkKey = null;
+    }
+    var probeItem = probeCollected && probeCollected.items
+      ? probeCollected.items[0]
+      : null;
+    if (
+      !probeWorkKey ||
+      !probeItem ||
+      probeItem.ctx !== "story" ||
+      probeCollected.items.length !== 1
+    ) {
+      sendResponse({ ok: false, error: "unsupported_page" });
+      return false;
+    }
+    sendCollectorMessage({
+      type: TRACE_CONNECT_AND_SAVE_MESSAGE,
+      workKey: probeWorkKey,
+      payload: {
+        s: probeCollected.source,
+        at: new Date().toISOString(),
+        item: probeItem,
+      },
+    }, function (response) {
+      if (
+        response &&
+        response.ok === true &&
+        response.command &&
+        response.command.kind === "confirmed"
+      ) {
+        sendResponse({
+          ok: true,
+          state: "saved",
+          site: probeItem.src === "ffn" ? "ffn" : "ao3",
+          serverConfirmed: true,
+        });
+        return;
+      }
+      var reason = response && response.command && response.command.reason
+        ? response.command.reason
+        : response && response.error
+          ? response.error
+          : "save_failed";
+      var publicReason = [
+        "not_authenticated",
+        "auth_expired",
+        "free_limit_reached",
+        "rate_limited",
+        "unavailable",
+      ].includes(reason)
+        ? reason
+        : "save_failed";
+      sendResponse({ ok: false, error: publicReason });
+    });
+    return true;
+  }
+
   if (shouldDisableTraceContentScript()) {
     if (
       msg?.type === "TRACE_COLLECT" ||
@@ -2982,7 +3061,7 @@ function scheduleAutoTrackForCurrentPage(attempt) {
   queueAutoTrackWhenVisible(attempt);
 }
 
-if (!shouldDisableTraceContentScript()) {
+if (!TRACE_ACTIVE_TAB_PROBE_MODE && !shouldDisableTraceContentScript()) {
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", function () {
       scheduleAutoTrackForCurrentPage();
@@ -6130,7 +6209,7 @@ function initQuickAdd() {
   }
 }
 
-if (!shouldDisableTraceContentScript()) {
+if (!TRACE_ACTIVE_TAB_PROBE_MODE && !shouldDisableTraceContentScript()) {
   // The content script runs at document_end, so the story header is normally
   // available before DOMContentLoaded. Reserve the Trace row immediately to
   // avoid shifting the archive content when storage hydration completes.
@@ -6157,6 +6236,6 @@ function announceArchivePageToBackground(handoffId) {
   sendCollectorMessageBestEffort(message);
 }
 
-if (!shouldDisableTraceContentScript()) {
+if (!TRACE_ACTIVE_TAB_PROBE_MODE && !shouldDisableTraceContentScript()) {
   announceArchivePageToBackground();
 }

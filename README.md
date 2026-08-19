@@ -182,10 +182,9 @@ The default development build uses the kernel session owner. The explicit
 `build:legacy` command exists only for bounded rollback diagnostics; do not use
 it for normal development or installed-extension QA.
 
-The developer-only iOS toolbar-popup permission experiment is documented in
-[`docs/ios-popup-permission-spike.md`](docs/ios-popup-permission-spike.md). It
-requests only Trace's existing AO3/FFN host bundle and is not part of normal
-builds.
+The developer-only iOS active-tab first-value experiment is documented in
+[`docs/ios-active-tab-first-value-probe.md`](docs/ios-active-tab-first-value-probe.md).
+It declares no website origins and is not part of normal builds.
 
 For a release-style build, use HTTPS Trace origins:
 

@@ -205,21 +205,20 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     assertCollectorModeConfig(path.join(ROOT, "dist", "chrome"), "kernel");
     assertCollectorModeConfig(path.join(ROOT, "dist", "firefox"), "kernel");
 
-    runBuild("build:ios-popup-permission-spike:release");
+    runBuild("build:ios-active-tab-probe:release");
     const safariManifest = manifest(RESOURCES);
     const safariConfig = fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8");
-    assert.deepEqual(safariManifest.optional_host_permissions, SITE_HOST_MATCHES);
-    assert.equal(
-      safariManifest.host_permissions.some((origin) => SITE_HOST_MATCHES.includes(origin)),
-      false,
-    );
-    assert.ok(safariManifest.permissions.includes("scripting"));
-    assert.equal(
-      safariManifest.content_scripts.some((entry) => entry.js?.includes("collector.js")),
-      false,
-    );
-    assert.match(safariConfig, /TRACE_IOS_POPUP_PERMISSION_SPIKE = true/);
-    assert.match(safariConfig, /TRACE_ARCHIVE_PERMISSION_CONTENT_SCRIPTS/);
+    assert.deepEqual(safariManifest.permissions, [
+      "alarms",
+      "storage",
+      "nativeMessaging",
+      "activeTab",
+      "scripting",
+    ]);
+    assert.deepEqual(safariManifest.host_permissions, []);
+    assert.equal(Object.hasOwn(safariManifest, "optional_host_permissions"), false);
+    assert.deepEqual(safariManifest.content_scripts, []);
+    assert.match(safariConfig, /TRACE_IOS_ACTIVE_TAB_PROBE = true/);
 
     for (const packageRoot of [
       path.join(ROOT, "dist", "chrome"),
@@ -229,11 +228,13 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
       const packagedConfig = fs.readFileSync(path.join(packageRoot, "popup-config.js"), "utf8");
       assert.equal(Object.hasOwn(packaged, "optional_host_permissions"), false);
       assert.equal(packaged.permissions.includes("scripting"), false);
+      assert.equal(packaged.permissions.includes("activeTab"), false);
+      assert.ok(packaged.permissions.includes("tabs"));
       for (const origin of SITE_HOST_MATCHES) {
         assert.ok(packaged.host_permissions.includes(origin));
       }
       assertCollectorModeConfig(packageRoot, "kernel");
-      assert.doesNotMatch(packagedConfig, /TRACE_IOS_POPUP_PERMISSION_SPIKE/);
+      assert.doesNotMatch(packagedConfig, /TRACE_IOS_ACTIVE_TAB_PROBE/);
     }
   } finally {
     runBuild("build:release");
