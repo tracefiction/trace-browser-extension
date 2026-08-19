@@ -17,6 +17,60 @@
                 <span class="popup-connection-label">Checking</span>
             </span>
         </header>
+        <section
+            id="popup-permission-spike"
+            class="popup-permission-spike"
+            aria-labelledby="popup-permission-heading"
+            hidden
+        >
+            <p class="popup-permission-kicker">Website access test</p>
+            <h1 id="popup-permission-heading" class="popup-permission-heading">
+                Allow story sites
+            </h1>
+            <p id="popup-permission-lead" class="popup-permission-lead">
+                Trace needs access to AO3 and FanFiction.net so it can notice stories you read.
+                When Safari asks, choose <strong>Always Allow</strong>.
+            </p>
+            <div class="popup-permission-sites" aria-label="Sites requested">
+                <div class="popup-permission-site">
+                    <span>AO3</span>
+                    <span id="popup-permission-ao3" class="popup-permission-site-state" data-state="checking">
+                        Checking
+                    </span>
+                </div>
+                <div class="popup-permission-site">
+                    <span>FanFiction.net</span>
+                    <span id="popup-permission-ffn" class="popup-permission-site-state" data-state="checking">
+                        Checking
+                    </span>
+                </div>
+            </div>
+            <p id="popup-permission-status" class="popup-permission-status" role="status">
+                Checking current access…
+            </p>
+            <div class="popup-permission-actions">
+                <button id="popup-permission-request" class="popup-permission-request" type="button">
+                    Allow AO3 &amp; FFN
+                </button>
+                <a
+                    id="popup-permission-open-ao3"
+                    class="popup-permission-open"
+                    href="https://archiveofourown.org/works"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    hidden
+                >
+                    Open AO3 to verify
+                </a>
+            </div>
+            <p id="popup-permission-note" class="popup-permission-note" hidden>
+                Safari reports access now. Restart Safari and check again to test whether it lasts.
+            </p>
+            <details class="popup-permission-evidence">
+                <summary>Technical evidence</summary>
+                <pre id="popup-permission-evidence"></pre>
+            </details>
+        </section>
         <section class="popup-sheet" aria-labelledby="popup-status">
             <p class="popup-eyebrow" hidden></p>
             <p id="popup-status" class="popup-status" role="status">Checking Trace connection…</p>
