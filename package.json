@@ -13,6 +13,8 @@
     "build:kernel:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel node scripts/build.mjs",
     "build:ios-active-tab-probe": "npm run build:core && TRACE_SESSION_MODE=kernel TRACE_IOS_ACTIVE_TAB_PROBE=1 node scripts/build.mjs",
     "build:ios-active-tab-probe:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel TRACE_IOS_ACTIVE_TAB_PROBE=1 node scripts/build.mjs",
+    "build:ios-active-tab-optional-hosts-probe": "npm run build:core && TRACE_SESSION_MODE=kernel TRACE_IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE=1 node scripts/build.mjs",
+    "build:ios-active-tab-optional-hosts-probe:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel TRACE_IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE=1 node scripts/build.mjs",
     "build:disabled": "npm run build:core && TRACE_SESSION_MODE=disabled node scripts/build.mjs",
     "build:disabled:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=disabled node scripts/build.mjs",
     "build:release": "npm run build:kernel:release",

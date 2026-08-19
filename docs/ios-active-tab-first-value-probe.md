@@ -4,6 +4,11 @@ This developer-only Trace 0.6.4 build 18 answers one narrow platform question:
 can a user open Trace from Safari on a supported story and receive real value
 without first granting persistent website access?
 
+Device result: passed on canonical AO3, AO3 variant hosts, and FanFiction.net.
+Every tested story received a server-confirmed save and appeared in the Trace
+library without a Safari website-access prompt. Probe 1B now isolates whether
+optional host declarations change that behavior.
+
 It is a capability probe, not the proposed production onboarding. A pass would
 justify designing and testing an onboarding that delivers the first save before
 asking for the durable permissions required by automatic tracking and overlays.

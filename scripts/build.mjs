@@ -12,6 +12,7 @@ import { build as esbuild } from "esbuild";
 import {
   AO3_HOST_MATCHES,
   FFN_HOST_MATCHES,
+  MINIMIZED_SITE_HOST_MATCHES,
   SITE_HOST_MATCHES,
   configuredOriginPermissions,
 } from "./build-origin-permissions.mjs";
@@ -80,7 +81,10 @@ const env =
     ? { ...fileEnv, ...process.env }
     : { ...process.env, ...fileEnv };
 const IS_RELEASE = BUILD_MODE === "release";
-const IOS_ACTIVE_TAB_PROBE = /^(?:1|true)$/i.test(
+const IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE = /^(?:1|true)$/i.test(
+  String(env.TRACE_IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE ?? ""),
+);
+const IOS_ACTIVE_TAB_PROBE = IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE || /^(?:1|true)$/i.test(
   String(env.TRACE_IOS_ACTIVE_TAB_PROBE ?? ""),
 );
 const requestedSessionMode = process.env.TRACE_SESSION_MODE ?? fileEnv.TRACE_SESSION_MODE ?? "legacy";
@@ -325,7 +329,11 @@ const {
 });
 
 manifest.host_permissions = IOS_ACTIVE_TAB_PROBE ? [] : safariHostPermissions;
-delete manifest.optional_host_permissions;
+if (IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE) {
+  manifest.optional_host_permissions = [...MINIMIZED_SITE_HOST_MATCHES];
+} else {
+  delete manifest.optional_host_permissions;
+}
 const savedFiltersScript = "ao3-saved-filters.js";
 const finishQualifyScript = "trace-finish-qualify.js";
 // This is the canonical content-script declaration. Do not derive it from the
@@ -476,6 +484,10 @@ console.log("Wrote", iosGenerated);
 console.log("Build mode=" + BUILD_MODE);
 console.log("TRACE_SESSION_MODE=" + SESSION_MODE);
 console.log("TRACE_IOS_ACTIVE_TAB_PROBE=" + IOS_ACTIVE_TAB_PROBE);
+console.log(
+  "TRACE_IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE=" +
+    IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE,
+);
 console.log("Built dist/chrome and dist/firefox");
 console.log("TRACE_API_BASE=" + TRACE_API_BASE);
 console.log("TRACE_WEB_ORIGIN=" + TRACE_WEB_ORIGIN);

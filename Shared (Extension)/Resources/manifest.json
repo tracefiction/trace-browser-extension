@@ -33,5 +33,12 @@
   "background": {
     "service_worker": "background.js"
   },
-  "content_scripts": []
+  "content_scripts": [],
+  "optional_host_permissions": [
+    "https://*.archiveofourown.org/*",
+    "https://*.archiveofourown.gay/*",
+    "https://archive.transformativeworks.org/*",
+    "https://www.fanfiction.net/*",
+    "https://m.fanfiction.net/*"
+  ]
 }

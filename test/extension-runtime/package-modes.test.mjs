@@ -6,6 +6,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 import {
+  MINIMIZED_SITE_HOST_MATCHES,
   SITE_HOST_MATCHES,
 } from "../../scripts/build-origin-permissions.mjs";
 
@@ -219,6 +220,24 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     assert.equal(Object.hasOwn(safariManifest, "optional_host_permissions"), false);
     assert.deepEqual(safariManifest.content_scripts, []);
     assert.match(safariConfig, /TRACE_IOS_ACTIVE_TAB_PROBE = true/);
+
+    runBuild("build:ios-active-tab-optional-hosts-probe:release");
+    const optionalSafariManifest = manifest(RESOURCES);
+    const optionalSafariConfig = fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8");
+    assert.deepEqual(optionalSafariManifest.permissions, [
+      "alarms",
+      "storage",
+      "nativeMessaging",
+      "activeTab",
+      "scripting",
+    ]);
+    assert.deepEqual(optionalSafariManifest.host_permissions, []);
+    assert.deepEqual(
+      optionalSafariManifest.optional_host_permissions,
+      MINIMIZED_SITE_HOST_MATCHES,
+    );
+    assert.deepEqual(optionalSafariManifest.content_scripts, []);
+    assert.match(optionalSafariConfig, /TRACE_IOS_ACTIVE_TAB_PROBE = true/);
 
     for (const packageRoot of [
       path.join(ROOT, "dist", "chrome"),

@@ -1379,7 +1379,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         }
     }
 
-    private static let safariExtensionBundleIdentifier = "com.tracefiction.trace.active-tab-probe"
+    private static let safariExtensionBundleIdentifier = "com.tracefiction.trace.active-tab-optional-probe"
     private static let safariBridgeLog = OSLog(
         subsystem: Bundle.main.bundleIdentifier ?? "com.tracefiction.trace",
         category: "SafariBridge"
