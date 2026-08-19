@@ -51,29 +51,12 @@ const isLikelyIosExtensionUi = (() => {
   }
 })();
 
-const POPUP_PERMISSION_SPIKE_ACTIVE =
-  globalThis.TRACE_IOS_POPUP_PERMISSION_SPIKE === true;
-const ARCHIVE_PERMISSION_BUNDLE = Object.freeze(
-  Array.isArray(globalThis.TRACE_ARCHIVE_PERMISSION_BUNDLE)
-    ? globalThis.TRACE_ARCHIVE_PERMISSION_BUNDLE.filter(
-        (origin) => typeof origin === "string" && origin.length > 0,
-      )
-    : [],
-);
-const ARCHIVE_PERMISSION_CONTENT_SCRIPTS = Object.freeze(
-  Array.isArray(globalThis.TRACE_ARCHIVE_PERMISSION_CONTENT_SCRIPTS)
-    ? globalThis.TRACE_ARCHIVE_PERMISSION_CONTENT_SCRIPTS.filter(
-        (entry) => entry && typeof entry.id === "string",
-      )
-    : [],
-);
-const GLOBAL_PERMISSION_PATTERNS = new Set(["<all_urls>", "*://*/*"]);
-const popupPermissionState = {
-  requestGranted: null,
-  origins: [],
-  registeredScriptIds: [],
-  error: null,
-};
+const ACTIVE_TAB_PROBE = globalThis.TRACE_IOS_ACTIVE_TAB_PROBE === true;
+const ACTIVE_TAB_PROBE_FILES = Object.freeze([
+  "popup-config.js",
+  "trace-finish-qualify.js",
+  "collector.js",
+]);
 
 const fallbackStatus = {
   state: "signed_out",
@@ -572,290 +555,177 @@ function restoreImportButton(button) {
   button.title = ui.importTitle || "";
 }
 
-function permissionBundleCoverage(origins) {
-  const granted = new Set(
-    Array.isArray(origins)
-      ? origins.filter((origin) => typeof origin === "string")
-      : [],
-  );
-  const globallyGranted = [...GLOBAL_PERMISSION_PATTERNS].some((origin) =>
-    granted.has(origin),
-  );
-  const missing = globallyGranted
-    ? []
-    : ARCHIVE_PERMISSION_BUNDLE.filter((origin) => !granted.has(origin));
-  return { complete: missing.length === 0, globallyGranted, missing };
-}
-
-function permissionSiteCoverage(origins, site) {
-  const coverage = permissionBundleCoverage(origins);
-  if (coverage.globallyGranted) return true;
-  const expected = ARCHIVE_PERMISSION_BUNDLE.filter((origin) =>
-    site === "ao3"
-      ? origin.includes("archiveofourown") || origin.includes("transformativeworks")
-      : origin.includes("fanfiction.net"),
-  );
-  return expected.length > 0 && expected.every(
-    (origin) => !coverage.missing.includes(origin),
-  );
-}
-
-function setPermissionSiteState(id, allowed, state = "ready") {
-  const element = document.getElementById(id);
-  if (!element) return;
-  if (state === "checking") {
-    element.dataset.state = "checking";
-    element.textContent = "Checking";
-    return;
+function classifyProbeStory(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    const host = url.hostname.toLowerCase();
+    const ao3Host =
+      host === "archiveofourown.org" ||
+      host.endsWith(".archiveofourown.org") ||
+      host === "archiveofourown.gay" ||
+      host.endsWith(".archiveofourown.gay") ||
+      host === "archive.transformativeworks.org";
+    if (ao3Host && /^\/works\/[1-9][0-9]*(?:\/chapters\/[1-9][0-9]*)?\/?$/.test(url.pathname)) {
+      return { ok: true, site: "AO3" };
+    }
+    const ffnHost = host === "www.fanfiction.net" || host === "m.fanfiction.net";
+    if (ffnHost && /^\/s\/[1-9][0-9]*(?:\/[1-9][0-9]*)?(?:\/[^/]+)?\/?$/.test(url.pathname)) {
+      return { ok: true, site: "FanFiction.net" };
+    }
+  } catch {
+    // A missing or hidden URL is a failed activeTab capability signal.
   }
-  if (state === "error") {
-    element.dataset.state = "error";
-    element.textContent = "Check failed";
-    return;
+  return { ok: false, site: null };
+}
+
+async function probeQueryActiveTab() {
+  if (!ext?.tabs?.query) throw new Error("active_tab_unavailable");
+  if (USES_BROWSER_PROMISE_API) {
+    const tabs = await ext.tabs.query({ active: true, currentWindow: true });
+    return Array.isArray(tabs) ? tabs[0] : null;
   }
-  element.dataset.state = allowed ? "allowed" : "needed";
-  element.textContent = allowed ? "Allowed" : "Needed";
+  return await new Promise((resolve, reject) => {
+    ext.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (ext.runtime.lastError) reject(new Error("active_tab_unavailable"));
+      else resolve(Array.isArray(tabs) ? tabs[0] : null);
+    });
+  });
 }
 
-function permissionErrorMessage(error, fallback) {
-  return error && typeof error.message === "string" && error.message.length > 0
-    ? error.message
-    : fallback;
+async function probeSendTabMessage(tabId, message) {
+  if (!ext?.tabs?.sendMessage) throw new Error("message_unavailable");
+  if (USES_BROWSER_PROMISE_API) return await ext.tabs.sendMessage(tabId, message);
+  return await new Promise((resolve, reject) => {
+    ext.tabs.sendMessage(tabId, message, (response) => {
+      if (ext.runtime.lastError) reject(new Error("message_unavailable"));
+      else resolve(response);
+    });
+  });
 }
 
-function renderPermissionPromptLead(element) {
-  if (!element) return;
-  const emphasis = document.createElement("strong");
-  emphasis.textContent = "Always Allow";
-  element.replaceChildren(
-    document.createTextNode(
-      "Trace needs access to AO3 and FanFiction.net so it can notice stories you read. When Safari asks, choose ",
-    ),
-    emphasis,
-    document.createTextNode("."),
-  );
+async function probeInject(tabId) {
+  if (!ext?.scripting?.executeScript) throw new Error("scripting_unavailable");
+  const injection = { target: { tabId }, files: [...ACTIVE_TAB_PROBE_FILES] };
+  if (USES_BROWSER_PROMISE_API) return await ext.scripting.executeScript(injection);
+  return await new Promise((resolve, reject) => {
+    ext.scripting.executeScript(injection, (result) => {
+      if (ext.runtime.lastError) reject(new Error("injection_failed"));
+      else resolve(result);
+    });
+  });
 }
 
-function renderPermissionSpike() {
-  const coverage = permissionBundleCoverage(popupPermissionState.origins);
-  const registeredIds = new Set(popupPermissionState.registeredScriptIds);
-  const registrationsComplete = ARCHIVE_PERMISSION_CONTENT_SCRIPTS.length > 0 &&
-    ARCHIVE_PERMISSION_CONTENT_SCRIPTS.every((entry) => registeredIds.has(entry.id));
-  const complete = coverage.complete && registrationsComplete;
-  const heading = document.getElementById("popup-permission-heading");
-  const lead = document.getElementById("popup-permission-lead");
-  const status = document.getElementById("popup-permission-status");
-  const request = document.getElementById("popup-permission-request");
-  const openAo3 = document.getElementById("popup-permission-open-ao3");
-  const note = document.getElementById("popup-permission-note");
-  const evidence = document.getElementById("popup-permission-evidence");
+function setProbeCheck(id, state, label) {
+  const row = document.getElementById(id);
+  if (!row) return;
+  row.dataset.state = state;
+  const value = row.querySelector(".popup-probe-check-value");
+  if (value) value.textContent = label;
+}
 
-  setPermissionSiteState(
-    "popup-permission-ao3",
-    permissionSiteCoverage(popupPermissionState.origins, "ao3"),
-    popupPermissionState.error && !coverage.complete ? "error" : "ready",
-  );
-  setPermissionSiteState(
-    "popup-permission-ffn",
-    permissionSiteCoverage(popupPermissionState.origins, "ffn"),
-    popupPermissionState.error && !coverage.complete ? "error" : "ready",
-  );
+function setProbeResult(state, heading, detail) {
+  const result = document.getElementById("popup-probe-result");
+  const headingEl = document.getElementById("popup-probe-result-heading");
+  const detailEl = document.getElementById("popup-probe-result-detail");
+  if (result) result.dataset.state = state;
+  if (headingEl) headingEl.textContent = heading;
+  if (detailEl) detailEl.textContent = detail;
+}
 
-  if (complete) {
-    if (heading) heading.textContent = "Website access allowed";
-    if (lead) {
-      lead.textContent =
-        "Trace can now run on every AO3 and FanFiction.net address it supports.";
+function resetProbeUi() {
+  setProbeCheck("popup-probe-opened", "pass", "Confirmed");
+  setProbeCheck("popup-probe-story", "checking", "Checking");
+  setProbeCheck("popup-probe-access", "waiting", "Waiting");
+  setProbeCheck("popup-probe-save", "waiting", "Waiting");
+  setProbeResult("checking", "Running capability test…", "Keep this popup open for a moment.");
+}
+
+function probeFailureCopy(reason) {
+  if (reason === "unsupported_page") {
+    return ["Open a supported story", "Open an AO3 or FanFiction.net story page, then open Trace from Safari’s toolbar."];
+  }
+  if (reason === "not_authenticated" || reason === "auth_expired") {
+    return ["Trace is not connected", "Open the Trace app, sign in, then return to this story and retry."];
+  }
+  if (reason === "free_limit_reached") {
+    return ["Library limit reached", "Make room in your Trace library, then retry this test."];
+  }
+  if (reason === "rate_limited") {
+    return ["Trace needs a moment", "Wait briefly, then retry the test."];
+  }
+  if (reason === "injection_failed" || reason === "current_tab_denied") {
+    return ["Current-tab access failed", "Safari did not let Trace run on this tab without website access."];
+  }
+  return ["Save could not be confirmed", "Check your connection and retry. Record this probe as failed if it repeats."];
+}
+
+async function runActiveTabProbe() {
+  const retry = document.getElementById("popup-probe-retry");
+  if (retry) retry.disabled = true;
+  resetProbeUi();
+  try {
+    const tab = await probeQueryActiveTab();
+    const story = classifyProbeStory(tab?.url);
+    if (!tab || !Number.isInteger(tab.id) || !story.ok) {
+      setProbeCheck("popup-probe-story", "fail", "Not found");
+      throw new Error("unsupported_page");
     }
-    if (status) {
-      status.dataset.state = "success";
-      status.textContent = "Access and both archive scripts are ready.";
+    setProbeCheck("popup-probe-story", "pass", story.site);
+
+    let ping = null;
+    try {
+      ping = await probeSendTabMessage(tab.id, { type: "TRACE_ACTIVE_TAB_PROBE_PING" });
+    } catch {
+      // Expected when this click is the first time Trace has touched the tab.
     }
-    if (request) {
-      request.disabled = true;
-      request.textContent = "Access allowed";
-      request.hidden = true;
-    }
-    if (openAo3) openAo3.hidden = false;
-    if (note) note.hidden = false;
-  } else {
-    if (heading) heading.textContent = "Allow story sites";
-    renderPermissionPromptLead(lead);
-    if (status) {
-      status.dataset.state = popupPermissionState.error ? "error" : "neutral";
-      if (popupPermissionState.error) {
-        status.textContent = popupPermissionState.error;
-      } else if (popupPermissionState.requestGranted === false) {
-        status.textContent = "Safari did not allow the complete site bundle. Try again.";
-      } else if (coverage.complete && !registrationsComplete) {
-        status.textContent = "Access was allowed, but Trace could not prepare its archive scripts.";
-        status.dataset.state = "error";
-      } else {
-        status.textContent = "Website access is still needed.";
+    if (ping?.ok !== true || ping?.probe !== true) {
+      try {
+        await probeInject(tab.id);
+        ping = await probeSendTabMessage(tab.id, { type: "TRACE_ACTIVE_TAB_PROBE_PING" });
+      } catch {
+        throw new Error("injection_failed");
       }
     }
-    if (request) {
-      request.disabled = false;
-      request.hidden = false;
-      request.textContent = coverage.complete
-        ? "Retry preparing Trace"
-        : popupPermissionState.requestGranted === false
-          ? "Try allowing again"
-          : "Allow AO3 & FFN";
+    if (ping?.ok !== true || ping?.probe !== true) throw new Error("current_tab_denied");
+    setProbeCheck("popup-probe-access", "pass", "Granted by click");
+
+    const response = await probeSendTabMessage(tab.id, { type: "TRACE_ACTIVE_TAB_PROBE_SAVE" });
+    if (
+      response?.ok !== true ||
+      response?.state !== "saved" ||
+      response?.serverConfirmed !== true
+    ) {
+      throw new Error(response?.error || "save_failed");
     }
-    if (openAo3) openAo3.hidden = true;
-    if (note) note.hidden = true;
-  }
-
-  if (evidence) {
-    evidence.textContent = JSON.stringify(
-      {
-        requestedPatternCount: ARCHIVE_PERMISSION_BUNDLE.length,
-        grantedPatternCount: ARCHIVE_PERMISSION_BUNDLE.length - coverage.missing.length,
-        requestGranted: popupPermissionState.requestGranted,
-        completeCoverage: coverage.complete,
-        missingPatterns: coverage.missing,
-        expectedScriptIds: ARCHIVE_PERMISSION_CONTENT_SCRIPTS.map((entry) => entry.id),
-        registeredScriptIds: popupPermissionState.registeredScriptIds,
-        registrationsComplete,
-        error: popupPermissionState.error,
-      },
-      null,
-      2,
-    );
-  }
-}
-
-async function permissionSnapshot() {
-  if (!ext?.permissions?.getAll) {
-    throw new Error("Safari did not expose the permission status API.");
-  }
-  const snapshot = await ext.permissions.getAll();
-  return Array.isArray(snapshot?.origins) ? snapshot.origins : [];
-}
-
-async function registeredPermissionScripts() {
-  if (!ext?.scripting?.getRegisteredContentScripts) {
-    throw new Error("Safari did not expose dynamic content scripts.");
-  }
-  const ids = ARCHIVE_PERMISSION_CONTENT_SCRIPTS.map((entry) => entry.id);
-  const scripts = await ext.scripting.getRegisteredContentScripts({ ids });
-  return Array.isArray(scripts) ? scripts : [];
-}
-
-async function ensurePermissionScripts() {
-  const existing = await registeredPermissionScripts();
-  const existingIds = new Set(existing.map((entry) => entry?.id).filter(Boolean));
-  const missing = ARCHIVE_PERMISSION_CONTENT_SCRIPTS.filter(
-    (entry) => !existingIds.has(entry.id),
-  );
-  if (missing.length > 0) {
-    if (!ext?.scripting?.registerContentScripts) {
-      throw new Error("Safari could not register Trace on the allowed sites.");
-    }
-    await ext.scripting.registerContentScripts(missing.map((entry) => ({ ...entry })));
-  }
-  const registered = await registeredPermissionScripts();
-  popupPermissionState.registeredScriptIds = registered
-    .map((entry) => entry?.id)
-    .filter(Boolean);
-}
-
-async function refreshPermissionSpike() {
-  popupPermissionState.error = null;
-  try {
-    popupPermissionState.origins = await permissionSnapshot();
-    if (permissionBundleCoverage(popupPermissionState.origins).complete) {
-      await ensurePermissionScripts();
-    } else {
-      popupPermissionState.registeredScriptIds = [];
-    }
+    setProbeCheck("popup-probe-save", "pass", "Confirmed");
+    setProbeResult("success", "Saved to your Trace library.", "The server confirmed this story. No website-permission API was called.");
   } catch (error) {
-    popupPermissionState.error = permissionErrorMessage(
-      error,
-      "Trace could not check Safari website access.",
-    );
-  }
-  renderPermissionSpike();
-}
-
-async function requestPermissionBundle() {
-  const request = document.getElementById("popup-permission-request");
-  popupPermissionState.error = null;
-  if (request) {
-    request.disabled = true;
-    request.textContent = "Waiting for Safari…";
-  }
-  const status = document.getElementById("popup-permission-status");
-  if (status) {
-    status.dataset.state = "neutral";
-    status.textContent = "Choose Always Allow in Safari’s prompt.";
-  }
-  try {
-    if (!ext?.permissions?.request || ARCHIVE_PERMISSION_BUNDLE.length === 0) {
-      throw new Error("This build could not start Safari’s website access request.");
+    const reason = typeof error?.message === "string" ? error.message : "save_failed";
+    if (reason !== "unsupported_page") {
+      const accessPassed = document.getElementById("popup-probe-access")?.dataset.state === "pass";
+      setProbeCheck(accessPassed ? "popup-probe-save" : "popup-probe-access", "fail", "Failed");
     }
-    // Keep this call directly in the button's click turn. Awaiting another API
-    // first would consume the user gesture Safari requires for permissions.
-    const decision = ext.permissions.request({
-      origins: [...ARCHIVE_PERMISSION_BUNDLE],
-    });
-    popupPermissionState.requestGranted = await decision;
-    popupPermissionState.origins = await permissionSnapshot();
-    if (permissionBundleCoverage(popupPermissionState.origins).complete) {
-      await ensurePermissionScripts();
-    }
-  } catch (error) {
-    popupPermissionState.error = permissionErrorMessage(
-      error,
-      "Safari’s website access request failed.",
-    );
+    const [heading, detail] = probeFailureCopy(reason);
+    setProbeResult("failure", heading, detail);
+  } finally {
+    if (retry) retry.disabled = false;
   }
-  renderPermissionSpike();
 }
 
-async function retryPermissionScripts() {
-  const request = document.getElementById("popup-permission-request");
-  const status = document.getElementById("popup-permission-status");
-  popupPermissionState.error = null;
-  if (request) {
-    request.disabled = true;
-    request.textContent = "Preparing Trace…";
-  }
-  if (status) {
-    status.dataset.state = "neutral";
-    status.textContent = "Preparing Trace on the allowed sites…";
-  }
-  try {
-    await ensurePermissionScripts();
-  } catch (error) {
-    popupPermissionState.error = permissionErrorMessage(
-      error,
-      "Trace could not prepare its archive scripts.",
-    );
-  }
-  renderPermissionSpike();
-}
-
-function initializePermissionSpike() {
-  document.body.dataset.tracePermissionSpike = "true";
-  const section = document.getElementById("popup-permission-spike");
+function initializeActiveTabProbe() {
+  document.body.dataset.traceActiveTabProbe = "true";
+  const section = document.getElementById("popup-active-tab-probe");
   const connection = document.getElementById("popup-connection");
-  const request = document.getElementById("popup-permission-request");
   if (section) section.hidden = false;
   if (connection) {
     connection.dataset.state = "warn";
     const label = connection.querySelector(".popup-connection-label");
-    if (label) label.textContent = "Setup";
+    if (label) label.textContent = "Probe 1A";
   }
-  request?.addEventListener("click", () => {
-    if (permissionBundleCoverage(popupPermissionState.origins).complete) {
-      void retryPermissionScripts();
-    } else {
-      void requestPermissionBundle();
-    }
+  document.getElementById("popup-probe-retry")?.addEventListener("click", () => {
+    void runActiveTabProbe();
   });
-  void refreshPermissionSpike();
+  void runActiveTabProbe();
 }
 
 function setArchiveLinks() {
@@ -1187,8 +1057,8 @@ function initializeKernelPopup() {
   requestKernelSnapshot();
 }
 
-if (POPUP_PERMISSION_SPIKE_ACTIVE) {
-  initializePermissionSpike();
+if (ACTIVE_TAB_PROBE) {
+  initializeActiveTabProbe();
 } else if (KERNEL_SESSION_ACTIVE || SESSION_DISABLED) {
   initializeKernelPopup();
 } else {
@@ -1231,11 +1101,11 @@ ext.storage.onChanged.addListener((changes, area) => {
 // Import is rendered only when the active session owner has exposed a
 // supported archive page, but the same explicit control works in both modes.
 const importBtn = document.getElementById("popup-import");
-if (importBtn && !POPUP_PERMISSION_SPIKE_ACTIVE) {
+if (importBtn && !ACTIVE_TAB_PROBE) {
   setImportInitial(importBtn);
   importBtn.addEventListener("click", () => {
     runImport(importBtn);
   });
 }
 
-if (!POPUP_PERMISSION_SPIKE_ACTIVE) bindPreferenceControls();
+if (!ACTIVE_TAB_PROBE) bindPreferenceControls();

@@ -18,58 +18,47 @@
             </span>
         </header>
         <section
-            id="popup-permission-spike"
-            class="popup-permission-spike"
-            aria-labelledby="popup-permission-heading"
+            id="popup-active-tab-probe"
+            class="popup-probe"
+            aria-labelledby="popup-probe-heading"
             hidden
         >
-            <p class="popup-permission-kicker">Website access test</p>
-            <h1 id="popup-permission-heading" class="popup-permission-heading">
-                Allow story sites
+            <p class="popup-probe-kicker">Developer capability test</p>
+            <h1 id="popup-probe-heading" class="popup-probe-heading">
+                Can Trace save this story without website access?
             </h1>
-            <p id="popup-permission-lead" class="popup-permission-lead">
-                Trace needs access to AO3 and FanFiction.net so it can notice stories you read.
-                When Safari asks, choose <strong>Always Allow</strong>.
+            <p class="popup-probe-lead">
+                This build tests only the story tab where you opened Trace.
             </p>
-            <div class="popup-permission-sites" aria-label="Sites requested">
-                <div class="popup-permission-site">
-                    <span>AO3</span>
-                    <span id="popup-permission-ao3" class="popup-permission-site-state" data-state="checking">
-                        Checking
-                    </span>
+            <div class="popup-probe-ledger" aria-label="Capability evidence">
+                <div id="popup-probe-opened" class="popup-probe-check" data-state="pass">
+                    <span class="popup-probe-check-label">Trace opened</span>
+                    <span class="popup-probe-check-value">Confirmed</span>
                 </div>
-                <div class="popup-permission-site">
-                    <span>FanFiction.net</span>
-                    <span id="popup-permission-ffn" class="popup-permission-site-state" data-state="checking">
-                        Checking
-                    </span>
+                <div id="popup-probe-story" class="popup-probe-check" data-state="checking">
+                    <span class="popup-probe-check-label">Story page identified</span>
+                    <span class="popup-probe-check-value">Checking</span>
+                </div>
+                <div id="popup-probe-access" class="popup-probe-check" data-state="waiting">
+                    <span class="popup-probe-check-label">Current-tab access</span>
+                    <span class="popup-probe-check-value">Waiting</span>
+                </div>
+                <div id="popup-probe-save" class="popup-probe-check" data-state="waiting">
+                    <span class="popup-probe-check-label">Server-confirmed save</span>
+                    <span class="popup-probe-check-value">Waiting</span>
                 </div>
             </div>
-            <p id="popup-permission-status" class="popup-permission-status" role="status">
-                Checking current access…
-            </p>
-            <div class="popup-permission-actions">
-                <button id="popup-permission-request" class="popup-permission-request" type="button">
-                    Allow AO3 &amp; FFN
-                </button>
-                <a
-                    id="popup-permission-open-ao3"
-                    class="popup-permission-open"
-                    href="https://archiveofourown.org/works"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    hidden
-                >
-                    Open AO3 to verify
-                </a>
+            <div id="popup-probe-result" class="popup-probe-result" data-state="checking" role="status">
+                <p id="popup-probe-result-heading" class="popup-probe-result-heading">Running capability test…</p>
+                <p id="popup-probe-result-detail" class="popup-probe-result-detail">Keep this popup open for a moment.</p>
             </div>
-            <p id="popup-permission-note" class="popup-permission-note" hidden>
-                Safari reports access now. Restart Safari and check again to test whether it lasts.
+            <button id="popup-probe-retry" class="popup-probe-retry" type="button" disabled>
+                Run test again
+            </button>
+            <p class="popup-probe-disclosure">
+                This build does not call Safari’s website-permission API. If Safari showed an
+                access prompt before this screen, record the probe as failed.
             </p>
-            <details class="popup-permission-evidence">
-                <summary>Technical evidence</summary>
-                <pre id="popup-permission-evidence"></pre>
-            </details>
         </section>
         <section class="popup-sheet" aria-labelledby="popup-status">
             <p class="popup-eyebrow" hidden></p>
