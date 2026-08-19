@@ -17,6 +17,18 @@ export const FFN_HOST_MATCHES = [
 
 export const SITE_HOST_MATCHES = [...AO3_HOST_MATCHES, ...FFN_HOST_MATCHES];
 
+// Probe 1B deliberately declares the smallest durable Safari host bundle
+// without requesting it. WebExtension wildcard host patterns cover both the
+// apex and subdomains, so AO3 needs two wildcard families plus its legacy host;
+// FFN stays limited to the two product-supported hosts.
+export const MINIMIZED_SITE_HOST_MATCHES = [
+  "https://*.archiveofourown.org/*",
+  "https://*.archiveofourown.gay/*",
+  "https://archive.transformativeworks.org/*",
+  "https://www.fanfiction.net/*",
+  "https://m.fanfiction.net/*",
+];
+
 function unique(list) {
   return Array.from(new Set((list || []).filter(Boolean)));
 }
