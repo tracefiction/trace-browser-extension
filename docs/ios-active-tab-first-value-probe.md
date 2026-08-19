@@ -25,7 +25,7 @@ When `TRACE_IOS_ACTIVE_TAB_PROBE=1`:
 - Chrome and Firefox packages remain production-shaped.
 
 The probe uses the separate Safari extension identifier
-`com.tracefiction.trace.extension.active-tab-probe` so permission state from an
+`com.tracefiction.trace.active-tab-probe` so permission state from an
 earlier Trace extension build cannot make the result look better than it is.
 
 ## Build
