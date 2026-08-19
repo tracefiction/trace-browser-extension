@@ -654,7 +654,7 @@
 					"-framework",
 					SafariServices,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.tracefiction.trace.extension.active-tab-probe;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tracefiction.trace.active-tab-probe;
 				PRODUCT_NAME = "Trace Extension";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
@@ -691,7 +691,7 @@
 					"-framework",
 					SafariServices,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.tracefiction.trace.extension.active-tab-probe;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tracefiction.trace.active-tab-probe;
 				PRODUCT_NAME = "Trace Extension";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
