@@ -51,6 +51,30 @@ const isLikelyIosExtensionUi = (() => {
   }
 })();
 
+const POPUP_PERMISSION_SPIKE_ACTIVE =
+  globalThis.TRACE_IOS_POPUP_PERMISSION_SPIKE === true;
+const ARCHIVE_PERMISSION_BUNDLE = Object.freeze(
+  Array.isArray(globalThis.TRACE_ARCHIVE_PERMISSION_BUNDLE)
+    ? globalThis.TRACE_ARCHIVE_PERMISSION_BUNDLE.filter(
+        (origin) => typeof origin === "string" && origin.length > 0,
+      )
+    : [],
+);
+const ARCHIVE_PERMISSION_CONTENT_SCRIPTS = Object.freeze(
+  Array.isArray(globalThis.TRACE_ARCHIVE_PERMISSION_CONTENT_SCRIPTS)
+    ? globalThis.TRACE_ARCHIVE_PERMISSION_CONTENT_SCRIPTS.filter(
+        (entry) => entry && typeof entry.id === "string",
+      )
+    : [],
+);
+const GLOBAL_PERMISSION_PATTERNS = new Set(["<all_urls>", "*://*/*"]);
+const popupPermissionState = {
+  requestGranted: null,
+  origins: [],
+  registeredScriptIds: [],
+  error: null,
+};
+
 const fallbackStatus = {
   state: "signed_out",
   message: isLikelyIosExtensionUi
@@ -548,6 +572,292 @@ function restoreImportButton(button) {
   button.title = ui.importTitle || "";
 }
 
+function permissionBundleCoverage(origins) {
+  const granted = new Set(
+    Array.isArray(origins)
+      ? origins.filter((origin) => typeof origin === "string")
+      : [],
+  );
+  const globallyGranted = [...GLOBAL_PERMISSION_PATTERNS].some((origin) =>
+    granted.has(origin),
+  );
+  const missing = globallyGranted
+    ? []
+    : ARCHIVE_PERMISSION_BUNDLE.filter((origin) => !granted.has(origin));
+  return { complete: missing.length === 0, globallyGranted, missing };
+}
+
+function permissionSiteCoverage(origins, site) {
+  const coverage = permissionBundleCoverage(origins);
+  if (coverage.globallyGranted) return true;
+  const expected = ARCHIVE_PERMISSION_BUNDLE.filter((origin) =>
+    site === "ao3"
+      ? origin.includes("archiveofourown") || origin.includes("transformativeworks")
+      : origin.includes("fanfiction.net"),
+  );
+  return expected.length > 0 && expected.every(
+    (origin) => !coverage.missing.includes(origin),
+  );
+}
+
+function setPermissionSiteState(id, allowed, state = "ready") {
+  const element = document.getElementById(id);
+  if (!element) return;
+  if (state === "checking") {
+    element.dataset.state = "checking";
+    element.textContent = "Checking";
+    return;
+  }
+  if (state === "error") {
+    element.dataset.state = "error";
+    element.textContent = "Check failed";
+    return;
+  }
+  element.dataset.state = allowed ? "allowed" : "needed";
+  element.textContent = allowed ? "Allowed" : "Needed";
+}
+
+function permissionErrorMessage(error, fallback) {
+  return error && typeof error.message === "string" && error.message.length > 0
+    ? error.message
+    : fallback;
+}
+
+function renderPermissionPromptLead(element) {
+  if (!element) return;
+  const emphasis = document.createElement("strong");
+  emphasis.textContent = "Always Allow";
+  element.replaceChildren(
+    document.createTextNode(
+      "Trace needs access to AO3 and FanFiction.net so it can notice stories you read. When Safari asks, choose ",
+    ),
+    emphasis,
+    document.createTextNode("."),
+  );
+}
+
+function renderPermissionSpike() {
+  const coverage = permissionBundleCoverage(popupPermissionState.origins);
+  const registeredIds = new Set(popupPermissionState.registeredScriptIds);
+  const registrationsComplete = ARCHIVE_PERMISSION_CONTENT_SCRIPTS.length > 0 &&
+    ARCHIVE_PERMISSION_CONTENT_SCRIPTS.every((entry) => registeredIds.has(entry.id));
+  const complete = coverage.complete && registrationsComplete;
+  const heading = document.getElementById("popup-permission-heading");
+  const lead = document.getElementById("popup-permission-lead");
+  const status = document.getElementById("popup-permission-status");
+  const request = document.getElementById("popup-permission-request");
+  const openAo3 = document.getElementById("popup-permission-open-ao3");
+  const note = document.getElementById("popup-permission-note");
+  const evidence = document.getElementById("popup-permission-evidence");
+
+  setPermissionSiteState(
+    "popup-permission-ao3",
+    permissionSiteCoverage(popupPermissionState.origins, "ao3"),
+    popupPermissionState.error && !coverage.complete ? "error" : "ready",
+  );
+  setPermissionSiteState(
+    "popup-permission-ffn",
+    permissionSiteCoverage(popupPermissionState.origins, "ffn"),
+    popupPermissionState.error && !coverage.complete ? "error" : "ready",
+  );
+
+  if (complete) {
+    if (heading) heading.textContent = "Website access allowed";
+    if (lead) {
+      lead.textContent =
+        "Trace can now run on every AO3 and FanFiction.net address it supports.";
+    }
+    if (status) {
+      status.dataset.state = "success";
+      status.textContent = "Access and both archive scripts are ready.";
+    }
+    if (request) {
+      request.disabled = true;
+      request.textContent = "Access allowed";
+      request.hidden = true;
+    }
+    if (openAo3) openAo3.hidden = false;
+    if (note) note.hidden = false;
+  } else {
+    if (heading) heading.textContent = "Allow story sites";
+    renderPermissionPromptLead(lead);
+    if (status) {
+      status.dataset.state = popupPermissionState.error ? "error" : "neutral";
+      if (popupPermissionState.error) {
+        status.textContent = popupPermissionState.error;
+      } else if (popupPermissionState.requestGranted === false) {
+        status.textContent = "Safari did not allow the complete site bundle. Try again.";
+      } else if (coverage.complete && !registrationsComplete) {
+        status.textContent = "Access was allowed, but Trace could not prepare its archive scripts.";
+        status.dataset.state = "error";
+      } else {
+        status.textContent = "Website access is still needed.";
+      }
+    }
+    if (request) {
+      request.disabled = false;
+      request.hidden = false;
+      request.textContent = coverage.complete
+        ? "Retry preparing Trace"
+        : popupPermissionState.requestGranted === false
+          ? "Try allowing again"
+          : "Allow AO3 & FFN";
+    }
+    if (openAo3) openAo3.hidden = true;
+    if (note) note.hidden = true;
+  }
+
+  if (evidence) {
+    evidence.textContent = JSON.stringify(
+      {
+        requestedPatternCount: ARCHIVE_PERMISSION_BUNDLE.length,
+        grantedPatternCount: ARCHIVE_PERMISSION_BUNDLE.length - coverage.missing.length,
+        requestGranted: popupPermissionState.requestGranted,
+        completeCoverage: coverage.complete,
+        missingPatterns: coverage.missing,
+        expectedScriptIds: ARCHIVE_PERMISSION_CONTENT_SCRIPTS.map((entry) => entry.id),
+        registeredScriptIds: popupPermissionState.registeredScriptIds,
+        registrationsComplete,
+        error: popupPermissionState.error,
+      },
+      null,
+      2,
+    );
+  }
+}
+
+async function permissionSnapshot() {
+  if (!ext?.permissions?.getAll) {
+    throw new Error("Safari did not expose the permission status API.");
+  }
+  const snapshot = await ext.permissions.getAll();
+  return Array.isArray(snapshot?.origins) ? snapshot.origins : [];
+}
+
+async function registeredPermissionScripts() {
+  if (!ext?.scripting?.getRegisteredContentScripts) {
+    throw new Error("Safari did not expose dynamic content scripts.");
+  }
+  const ids = ARCHIVE_PERMISSION_CONTENT_SCRIPTS.map((entry) => entry.id);
+  const scripts = await ext.scripting.getRegisteredContentScripts({ ids });
+  return Array.isArray(scripts) ? scripts : [];
+}
+
+async function ensurePermissionScripts() {
+  const existing = await registeredPermissionScripts();
+  const existingIds = new Set(existing.map((entry) => entry?.id).filter(Boolean));
+  const missing = ARCHIVE_PERMISSION_CONTENT_SCRIPTS.filter(
+    (entry) => !existingIds.has(entry.id),
+  );
+  if (missing.length > 0) {
+    if (!ext?.scripting?.registerContentScripts) {
+      throw new Error("Safari could not register Trace on the allowed sites.");
+    }
+    await ext.scripting.registerContentScripts(missing.map((entry) => ({ ...entry })));
+  }
+  const registered = await registeredPermissionScripts();
+  popupPermissionState.registeredScriptIds = registered
+    .map((entry) => entry?.id)
+    .filter(Boolean);
+}
+
+async function refreshPermissionSpike() {
+  popupPermissionState.error = null;
+  try {
+    popupPermissionState.origins = await permissionSnapshot();
+    if (permissionBundleCoverage(popupPermissionState.origins).complete) {
+      await ensurePermissionScripts();
+    } else {
+      popupPermissionState.registeredScriptIds = [];
+    }
+  } catch (error) {
+    popupPermissionState.error = permissionErrorMessage(
+      error,
+      "Trace could not check Safari website access.",
+    );
+  }
+  renderPermissionSpike();
+}
+
+async function requestPermissionBundle() {
+  const request = document.getElementById("popup-permission-request");
+  popupPermissionState.error = null;
+  if (request) {
+    request.disabled = true;
+    request.textContent = "Waiting for Safari…";
+  }
+  const status = document.getElementById("popup-permission-status");
+  if (status) {
+    status.dataset.state = "neutral";
+    status.textContent = "Choose Always Allow in Safari’s prompt.";
+  }
+  try {
+    if (!ext?.permissions?.request || ARCHIVE_PERMISSION_BUNDLE.length === 0) {
+      throw new Error("This build could not start Safari’s website access request.");
+    }
+    // Keep this call directly in the button's click turn. Awaiting another API
+    // first would consume the user gesture Safari requires for permissions.
+    const decision = ext.permissions.request({
+      origins: [...ARCHIVE_PERMISSION_BUNDLE],
+    });
+    popupPermissionState.requestGranted = await decision;
+    popupPermissionState.origins = await permissionSnapshot();
+    if (permissionBundleCoverage(popupPermissionState.origins).complete) {
+      await ensurePermissionScripts();
+    }
+  } catch (error) {
+    popupPermissionState.error = permissionErrorMessage(
+      error,
+      "Safari’s website access request failed.",
+    );
+  }
+  renderPermissionSpike();
+}
+
+async function retryPermissionScripts() {
+  const request = document.getElementById("popup-permission-request");
+  const status = document.getElementById("popup-permission-status");
+  popupPermissionState.error = null;
+  if (request) {
+    request.disabled = true;
+    request.textContent = "Preparing Trace…";
+  }
+  if (status) {
+    status.dataset.state = "neutral";
+    status.textContent = "Preparing Trace on the allowed sites…";
+  }
+  try {
+    await ensurePermissionScripts();
+  } catch (error) {
+    popupPermissionState.error = permissionErrorMessage(
+      error,
+      "Trace could not prepare its archive scripts.",
+    );
+  }
+  renderPermissionSpike();
+}
+
+function initializePermissionSpike() {
+  document.body.dataset.tracePermissionSpike = "true";
+  const section = document.getElementById("popup-permission-spike");
+  const connection = document.getElementById("popup-connection");
+  const request = document.getElementById("popup-permission-request");
+  if (section) section.hidden = false;
+  if (connection) {
+    connection.dataset.state = "warn";
+    const label = connection.querySelector(".popup-connection-label");
+    if (label) label.textContent = "Setup";
+  }
+  request?.addEventListener("click", () => {
+    if (permissionBundleCoverage(popupPermissionState.origins).complete) {
+      void retryPermissionScripts();
+    } else {
+      void requestPermissionBundle();
+    }
+  });
+  void refreshPermissionSpike();
+}
+
 function setArchiveLinks() {
   const ao3 = document.getElementById("popup-open-ao3");
   const ffn = document.getElementById("popup-open-ffn");
@@ -877,7 +1187,9 @@ function initializeKernelPopup() {
   requestKernelSnapshot();
 }
 
-if (KERNEL_SESSION_ACTIVE || SESSION_DISABLED) {
+if (POPUP_PERMISSION_SPIKE_ACTIVE) {
+  initializePermissionSpike();
+} else if (KERNEL_SESSION_ACTIVE || SESSION_DISABLED) {
   initializeKernelPopup();
 } else {
 readAndRender();
@@ -919,11 +1231,11 @@ ext.storage.onChanged.addListener((changes, area) => {
 // Import is rendered only when the active session owner has exposed a
 // supported archive page, but the same explicit control works in both modes.
 const importBtn = document.getElementById("popup-import");
-if (importBtn) {
+if (importBtn && !POPUP_PERMISSION_SPIKE_ACTIVE) {
   setImportInitial(importBtn);
   importBtn.addEventListener("click", () => {
     runImport(importBtn);
   });
 }
 
-bindPreferenceControls();
+if (!POPUP_PERMISSION_SPIKE_ACTIVE) bindPreferenceControls();

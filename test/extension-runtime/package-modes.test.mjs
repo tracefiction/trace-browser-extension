@@ -5,6 +5,10 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import vm from "node:vm";
 
+import {
+  SITE_HOST_MATCHES,
+} from "../../scripts/build-origin-permissions.mjs";
+
 const ROOT = process.cwd();
 const RESOURCES = path.join(ROOT, "Shared (Extension)", "Resources");
 const RELEASE_ENV = {
@@ -200,6 +204,37 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     runBuild("build");
     assertCollectorModeConfig(path.join(ROOT, "dist", "chrome"), "kernel");
     assertCollectorModeConfig(path.join(ROOT, "dist", "firefox"), "kernel");
+
+    runBuild("build:ios-popup-permission-spike:release");
+    const safariManifest = manifest(RESOURCES);
+    const safariConfig = fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8");
+    assert.deepEqual(safariManifest.optional_host_permissions, SITE_HOST_MATCHES);
+    assert.equal(
+      safariManifest.host_permissions.some((origin) => SITE_HOST_MATCHES.includes(origin)),
+      false,
+    );
+    assert.ok(safariManifest.permissions.includes("scripting"));
+    assert.equal(
+      safariManifest.content_scripts.some((entry) => entry.js?.includes("collector.js")),
+      false,
+    );
+    assert.match(safariConfig, /TRACE_IOS_POPUP_PERMISSION_SPIKE = true/);
+    assert.match(safariConfig, /TRACE_ARCHIVE_PERMISSION_CONTENT_SCRIPTS/);
+
+    for (const packageRoot of [
+      path.join(ROOT, "dist", "chrome"),
+      path.join(ROOT, "dist", "firefox"),
+    ]) {
+      const packaged = manifest(packageRoot);
+      const packagedConfig = fs.readFileSync(path.join(packageRoot, "popup-config.js"), "utf8");
+      assert.equal(Object.hasOwn(packaged, "optional_host_permissions"), false);
+      assert.equal(packaged.permissions.includes("scripting"), false);
+      for (const origin of SITE_HOST_MATCHES) {
+        assert.ok(packaged.host_permissions.includes(origin));
+      }
+      assertCollectorModeConfig(packageRoot, "kernel");
+      assert.doesNotMatch(packagedConfig, /TRACE_IOS_POPUP_PERMISSION_SPIKE/);
+    }
   } finally {
     runBuild("build:release");
   }
