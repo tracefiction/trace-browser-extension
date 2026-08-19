@@ -35,6 +35,19 @@ function runIosPermissionSpikeBuild() {
   assert.equal(result.status, 0, result.stderr || result.stdout);
 }
 
+function runIosOnboardingExperimentBuild() {
+  const result = spawnSync(
+    "npm",
+    ["run", "build:ios-onboarding-experiment:release"],
+    {
+      cwd: ROOT,
+      env: process.env,
+      encoding: "utf8",
+    },
+  );
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+}
+
 function manifest(root) {
   return JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
 }
@@ -283,7 +296,56 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
         false,
       );
     }
+
+    runIosOnboardingExperimentBuild();
+    const safariExperiment = manifest(RESOURCES);
+    assert.equal(safariExperiment.action.default_popup, "popup.html");
+    assert.deepEqual(safariExperiment.optional_host_permissions, [
+      "https://archiveofourown.org/*",
+      "https://*.archiveofourown.org/*",
+      "https://archiveofourown.gay/*",
+      "https://*.archiveofourown.gay/*",
+      "https://archive.transformativeworks.org/*",
+    ]);
+    assert.ok(
+      safariExperiment.host_permissions.includes(
+        "https://trace-git-dev-zacs-projects-378417c9.vercel.app/*",
+      ),
+    );
+    assert.equal(
+      safariExperiment.host_permissions.includes(
+        "https://www.tracefiction.com/*",
+      ),
+      false,
+    );
+    const experimentConfig = fs.readFileSync(
+      path.join(RESOURCES, "popup-config.js"),
+      "utf8",
+    );
+    assert.match(experimentConfig, /TRACE_IOS_PERMISSION_EXPERIMENT = true/);
+    assert.match(
+      experimentConfig,
+      /trace-git-dev-zacs-projects-378417c9\.vercel\.app/,
+    );
+    assert.match(
+      fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8"),
+      /TRACE_PERMISSION_WEB_ORIGIN = "https:\/\/trace-git-dev-zacs-projects-378417c9\.vercel\.app"/,
+    );
+    assert.match(
+      fs.readFileSync(
+        path.join(ROOT, "iOS (App)", "TraceWebOrigin.generated.swift"),
+        "utf8",
+      ),
+      /httpsOrigin: String = "https:\/\/trace-git-dev-zacs-projects-378417c9\.vercel\.app"[\s\S]*allowReleaseExperimentOrigin: Bool = true/,
+    );
   } finally {
     runBuild("build:release");
+    assert.match(
+      fs.readFileSync(
+        path.join(ROOT, "iOS (App)", "TraceWebOrigin.generated.swift"),
+        "utf8",
+      ),
+      /allowReleaseExperimentOrigin: Bool = false/,
+    );
   }
 });

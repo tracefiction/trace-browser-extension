@@ -49,7 +49,11 @@ function statusReadyMessages(h) {
 
 function createSyncHarness(
   origin = "https://tracefiction.com",
-  { sendMessageImpl, sessionMode = "legacy" } = {},
+  {
+    sendMessageImpl,
+    sessionMode = "legacy",
+    permissionExperiment = false,
+  } = {},
 ) {
   const js = fs.readFileSync(SYNC_JS_PATH, "utf8");
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -92,6 +96,7 @@ function createSyncHarness(
     },
     browser: undefined,
     TRACE_SESSION_MODE: sessionMode,
+    TRACE_IOS_PERMISSION_EXPERIMENT: permissionExperiment,
     globalThis: null,
   };
   context.globalThis = context;
@@ -280,6 +285,95 @@ test("sync ignores unrelated or cross-origin messages", () => {
   h.window.postMessage({ type: "OTHER_EVENT", token: "abc123" }, "https://tracefiction.com");
 
   assert.deepEqual(h.messages, []);
+});
+
+test("experimental sync bridges only an explicit permission button click and returns coarse evidence", async () => {
+  const h = createSyncHarness("https://trace-git-dev.example/setup", {
+    permissionExperiment: true,
+    sendMessageImpl(message, callback) {
+      callback?.({
+        ok: true,
+        outcome: "granted_complete",
+        requestAttempted: true,
+        granted: true,
+        coverageComplete: true,
+        missingCount: 0,
+        scriptsRegistered: true,
+        origins: ["must-not-leak"],
+        rawError: "must-not-leak",
+      });
+    },
+  });
+  const button = h.window.document.createElement("button");
+  button.dataset.traceAo3PermissionRequest = "permission-1";
+  h.window.document.body.append(button);
+
+  button.click();
+  await flush();
+
+  assert.deepEqual(plainJson(h.messages), [
+    {
+      type: "TRACE_AO3_PERMISSION_REQUEST",
+      protocolVersion: 1,
+      requestId: "permission-1",
+    },
+  ]);
+  assert.deepEqual(
+    nonTokenRequestMessages(h).map((message) => message.data),
+    [
+      { type: "TRACE_AO3_PERMISSION_BRIDGE_READY", protocolVersion: 1 },
+      {
+        type: "TRACE_AO3_PERMISSION_RESPONSE",
+        protocolVersion: 1,
+        requestId: "permission-1",
+        ok: true,
+        outcome: "granted_complete",
+        requestAttempted: true,
+        granted: true,
+        coverageComplete: true,
+        missingCount: 0,
+        scriptsRegistered: true,
+      },
+    ],
+  );
+});
+
+test("permission bridge is absent outside the experiment and rejects malformed request ids", async () => {
+  for (const [permissionExperiment, requestId] of [
+    [false, "permission-1"],
+    [true, ""],
+    [true, "x".repeat(129)],
+  ]) {
+    const h = createSyncHarness("https://trace-git-dev.example/setup", {
+      permissionExperiment,
+    });
+    h.messages.length = 0;
+    const button = h.window.document.createElement("button");
+    button.dataset.traceAo3PermissionRequest = requestId;
+    h.window.document.body.append(button);
+    button.click();
+    await flush();
+    assert.deepEqual(h.messages, []);
+  }
+});
+
+test("experimental sync re-announces permission readiness when the page mounts late", async () => {
+  const h = createSyncHarness("https://trace-git-dev.example/setup", {
+    permissionExperiment: true,
+  });
+  h.postedMessages.length = 0;
+  dispatchPageMessage(
+    h,
+    {
+      type: "TRACE_AO3_PERMISSION_BRIDGE_STATUS_REQUEST",
+      protocolVersion: 1,
+    },
+    "https://trace-git-dev.example",
+  );
+  await flush();
+  assert.deepEqual(nonTokenRequestMessages(h).map((item) => item.data), [
+    { type: "TRACE_AO3_PERMISSION_BRIDGE_READY", protocolVersion: 1 },
+  ]);
 });
 
 test("sync suppresses transient Safari stale-tab sendMessage errors", async () => {

@@ -23,8 +23,16 @@ const CREDENTIAL_GRANT_REQUEST_MESSAGE = "TRACE_CREDENTIAL_GRANT_REQUEST";
 const SESSION_ACTION_MESSAGE = "TRACE_SESSION_ACTION";
 const FIRST_INSTALL_READY_MESSAGE = "TRACE_EXTENSION_FIRST_INSTALL_READY";
 const FIRST_INSTALL_ACTIVATION = "extension-installed";
+const AO3_PERMISSION_REQUEST_MESSAGE = "TRACE_AO3_PERMISSION_REQUEST";
+const AO3_PERMISSION_RESPONSE_MESSAGE = "TRACE_AO3_PERMISSION_RESPONSE";
+const AO3_PERMISSION_BRIDGE_READY_MESSAGE =
+  "TRACE_AO3_PERMISSION_BRIDGE_READY";
+const AO3_PERMISSION_BRIDGE_STATUS_REQUEST_MESSAGE =
+  "TRACE_AO3_PERMISSION_BRIDGE_STATUS_REQUEST";
 const SESSION_MODE = globalThis.TRACE_SESSION_MODE || "legacy";
 const KERNEL_SESSION_ACTIVE = SESSION_MODE === "kernel";
+const AO3_PERMISSION_EXPERIMENT_ACTIVE =
+  globalThis.TRACE_IOS_PERMISSION_EXPERIMENT === true;
 const pendingCredentialGrants = new Map();
 let activationSessionRequest = null;
 let activationSessionConnected = false;
@@ -67,6 +75,16 @@ const FIRST_STORY_ADD_ERRORS = new Set([
   "auth_expired",
   "rate_limited",
   "unavailable",
+]);
+const AO3_PERMISSION_OUTCOMES = new Set([
+  "granted_complete",
+  "granted_incomplete",
+  "denied",
+  "unsupported",
+  "gesture_required",
+  "untrusted_sender",
+  "bridge_unavailable",
+  "error",
 ]);
 
 function isTransientRuntimeMessageError(error) {
@@ -348,6 +366,66 @@ async function handleFirstStoryAddRequest(data) {
   );
 }
 
+function sanitizeAo3PermissionResponse(raw, requestId) {
+  const input = raw && typeof raw === "object" ? raw : {};
+  return {
+    type: AO3_PERMISSION_RESPONSE_MESSAGE,
+    protocolVersion: 1,
+    requestId,
+    ok: input.ok === true,
+    outcome: AO3_PERMISSION_OUTCOMES.has(input.outcome)
+      ? input.outcome
+      : "bridge_unavailable",
+    requestAttempted: input.requestAttempted === true,
+    granted: input.granted === true,
+    coverageComplete: input.coverageComplete === true,
+    missingCount:
+      typeof input.missingCount === "number" &&
+      Number.isInteger(input.missingCount) &&
+      input.missingCount >= 0 &&
+      input.missingCount <= 5
+        ? input.missingCount
+        : 5,
+    scriptsRegistered: input.scriptsRegistered === true,
+  };
+}
+
+async function handleAo3PermissionClick(event) {
+  if (!AO3_PERMISSION_EXPERIMENT_ACTIVE) return;
+  const target = event.target;
+  const trigger = target?.closest?.("[data-trace-ao3-permission-request]");
+  const requestId = trigger?.dataset?.traceAo3PermissionRequest;
+  if (
+    typeof requestId !== "string" ||
+    !requestId.trim() ||
+    requestId.length > 128
+  ) {
+    return;
+  }
+  const response = await requestRuntimeMessage(
+    {
+      type: AO3_PERMISSION_REQUEST_MESSAGE,
+      protocolVersion: 1,
+      requestId,
+    },
+    "[Trace Sync] Failed to request AO3 permission",
+  );
+  window.postMessage(
+    sanitizeAo3PermissionResponse(response, requestId),
+    window.location.origin,
+  );
+}
+
+if (AO3_PERMISSION_EXPERIMENT_ACTIVE) {
+  document.addEventListener("click", (event) => {
+    void handleAo3PermissionClick(event);
+  }, true);
+  window.postMessage(
+    { type: AO3_PERMISSION_BRIDGE_READY_MESSAGE, protocolVersion: 1 },
+    window.location.origin,
+  );
+}
+
 window.addEventListener("message", (event) => {
   // Do not require `event.source === window`. Safari Web Extension content scripts
   // can see a different `window` identity than `MessageEvent.source` for same-tab
@@ -363,6 +441,17 @@ window.addEventListener("message", (event) => {
   }
   if (event.data?.type === FIRST_INSTALL_READY_MESSAGE) {
     void handleFirstInstallReady(event.data);
+    return;
+  }
+  if (
+    AO3_PERMISSION_EXPERIMENT_ACTIVE &&
+    event.data?.type === AO3_PERMISSION_BRIDGE_STATUS_REQUEST_MESSAGE &&
+    event.data?.protocolVersion === 1
+  ) {
+    window.postMessage(
+      { type: AO3_PERMISSION_BRIDGE_READY_MESSAGE, protocolVersion: 1 },
+      window.location.origin,
+    );
     return;
   }
   if (event.data?.type !== TOKEN_MESSAGE) return;

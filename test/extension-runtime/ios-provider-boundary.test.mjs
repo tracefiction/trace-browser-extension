@@ -6,11 +6,11 @@ import test from "node:test";
 const ROOT = process.cwd();
 const read = (...parts) => fs.readFileSync(path.join(ROOT, ...parts), "utf8");
 
-test("non-production iOS wrappers require Debug while Release remains production-bound", () => {
+test("Release stays production-bound unless the generated exact-origin experiment flag is true", () => {
   const app = read("iOS (App)", "TraceWebViewController.swift");
   assert.match(
     app,
-    /#if DEBUG[\s\S]*webAppHTTPSOriginDebug = TraceWebOriginGenerated\.httpsOrigin[\s\S]*return webAppHTTPSOriginDebug[\s\S]*#else[\s\S]*return "https:\/\/tracefiction\.com"[\s\S]*#endif/,
+    /#if DEBUG[\s\S]*webAppHTTPSOriginDebug = TraceWebOriginGenerated\.httpsOrigin[\s\S]*return webAppHTTPSOriginDebug[\s\S]*#else[\s\S]*if TraceWebOriginGenerated\.allowReleaseExperimentOrigin[\s\S]*return TraceWebOriginGenerated\.httpsOrigin[\s\S]*return "https:\/\/tracefiction\.com"[\s\S]*#endif/,
   );
 });
 

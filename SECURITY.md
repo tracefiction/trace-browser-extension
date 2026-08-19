@@ -16,6 +16,15 @@ The extension does not request browser cookie permission. It does not need AO3 o
 The Safari build uses native messaging only to communicate with the bundled
 Trace app for setup actions, app-auth token sharing, and first-story handoff.
 
+The dev-only iOS onboarding permission experiment makes AO3 host access
+optional, accepts a request only from the exact configured development Trace
+origin, and asks for the fixed five-pattern AO3 bundle after an explicit page
+button click. The result crossing back to the page is limited to coarse
+booleans, an outcome enum, and a missing-pattern count. Raw errors, granted
+origin strings, page URLs, browsing history, and story data never cross that
+bridge. Complete permission coverage still is not activation: the real Trace
+scripts must register and publish the existing AO3 heartbeat.
+
 The modular kernel keeps its session envelope, extension-owned credential map,
 and account-private read model in one IndexedDB database owned by the extension
 origin. AO3/FFN content scripts run against the visited page's origin and

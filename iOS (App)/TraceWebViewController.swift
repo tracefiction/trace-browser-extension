@@ -29,6 +29,9 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 #if DEBUG
         return webAppHTTPSOriginDebug
 #else
+        if TraceWebOriginGenerated.allowReleaseExperimentOrigin {
+            return TraceWebOriginGenerated.httpsOrigin
+        }
         return "https://tracefiction.com"
 #endif
     }

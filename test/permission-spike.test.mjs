@@ -14,6 +14,7 @@ import {
 } from "../Shared (Extension)/Resources/permission-spike-core.mjs";
 import {
   reconcileTraceAo3Scripts,
+  requestTraceAo3Permission,
 } from "../src/permission-spike-background.mjs";
 
 test("AO3 permission bundle contains every currently supported manifest pattern", () => {
@@ -152,4 +153,101 @@ test("reconciliation removes stale scripts when AO3 access is incomplete", async
     AO3_PERMISSION_REGISTRATION_SCRIPT_IDS.length,
   );
   assert.equal(registerCalls, 0);
+});
+
+test("a trusted Trace-page request grants the complete bundle and registers real scripts", async () => {
+  const requested = [];
+  const registered = [];
+  const extensionApi = {
+    permissions: {
+      async request(options) {
+        requested.push(options);
+        return true;
+      },
+      async getAll() {
+        return { origins: [...AO3_PERMISSION_BUNDLE] };
+      },
+    },
+    scripting: {
+      async unregisterContentScripts() {},
+      async registerContentScripts(scripts) {
+        registered.push(...scripts);
+      },
+    },
+  };
+
+  const result = await requestTraceAo3Permission(
+    extensionApi,
+    { tab: { url: "https://trace-git-dev.example/setup" } },
+    "https://trace-git-dev.example",
+  );
+
+  assert.deepEqual(requested, [{ origins: [...AO3_PERMISSION_BUNDLE] }]);
+  assert.deepEqual(result, {
+    ok: true,
+    outcome: "granted_complete",
+    requestAttempted: true,
+    granted: true,
+    coverageComplete: true,
+    missingCount: 0,
+    scriptsRegistered: true,
+  });
+  assert.deepEqual(
+    registered.map((script) => script.id),
+    [AO3_TRACE_MAIN_SCRIPT_ID, AO3_TRACE_SAVED_FILTERS_SCRIPT_ID],
+  );
+});
+
+test("permission request fails closed for untrusted senders and reports denial without private detail", async () => {
+  let requestCalls = 0;
+  const extensionApi = {
+    permissions: {
+      async request() {
+        requestCalls += 1;
+        return false;
+      },
+      async getAll() {
+        return { origins: [] };
+      },
+    },
+    scripting: {
+      async unregisterContentScripts() {},
+      async registerContentScripts() {},
+    },
+  };
+
+  assert.deepEqual(
+    await requestTraceAo3Permission(
+      extensionApi,
+      { tab: { url: "https://evil.example/setup" } },
+      "https://trace-git-dev.example",
+    ),
+    {
+      ok: false,
+      outcome: "untrusted_sender",
+      requestAttempted: false,
+      granted: false,
+      coverageComplete: false,
+      missingCount: AO3_PERMISSION_BUNDLE.length,
+      scriptsRegistered: false,
+    },
+  );
+  assert.equal(requestCalls, 0);
+
+  assert.deepEqual(
+    await requestTraceAo3Permission(
+      extensionApi,
+      { tab: { url: "https://trace-git-dev.example/setup" } },
+      "https://trace-git-dev.example",
+    ),
+    {
+      ok: false,
+      outcome: "denied",
+      requestAttempted: true,
+      granted: false,
+      coverageComplete: false,
+      missingCount: AO3_PERMISSION_BUNDLE.length,
+      scriptsRegistered: false,
+    },
+  );
 });
