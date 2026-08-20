@@ -223,6 +223,10 @@ test("native auth callbacks use one verified HTTPS route with a custom-scheme fa
 
 test("opening iOS extension Settings is immediate and independent of authentication", () => {
   const app = read("iOS (App)", "TraceWebViewController.swift");
+  assert.match(
+    app,
+    /safariExtensionBundleIdentifier = "com\.tracefiction\.trace\.earned-permission"/,
+  );
   const start = app.indexOf(
     "private func handleTraceSafariExtensionSettingsRequest",
   );
@@ -235,10 +239,34 @@ test("opening iOS extension Settings is immediate and independent of authenticat
 
   const settingsHandler = app.slice(start, end);
   assert.match(settingsHandler, /SFSafariSettings\.openExtensionsSettings/);
+  assert.match(
+    settingsHandler,
+    /forIdentifiers: Self\.safariExtensionSettingsIdentifiers\(\)/,
+  );
   assert.doesNotMatch(settingsHandler, /\bTask\b|\bawait\b/);
   assert.doesNotMatch(
     settingsHandler,
     /storeCurrentTraceTokenForSafariExtension/,
+  );
+
+  const identifierStart = app.indexOf(
+    "private static func safariExtensionSettingsIdentifiers",
+  );
+  const identifierEnd = app.indexOf(
+    "private static func embeddedSafariExtensionBundleIdentifiers",
+    identifierStart,
+  );
+  assert.notEqual(identifierStart, -1);
+  assert.notEqual(identifierEnd, -1);
+
+  const settingsIdentifiers = app.slice(identifierStart, identifierEnd);
+  assert.match(
+    settingsIdentifiers,
+    /let embeddedIdentifiers = embeddedSafariExtensionBundleIdentifiers\(\)/,
+  );
+  assert.match(
+    settingsIdentifiers,
+    /embeddedIdentifiers\.isEmpty[\s\S]*\[safariExtensionBundleIdentifier\][\s\S]*embeddedIdentifiers/,
   );
 });
 
