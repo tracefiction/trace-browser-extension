@@ -620,6 +620,60 @@ test("earned-permission onboarding confirms automation only from a post-grant ar
   );
 });
 
+test("earned-permission onboarding confirms a heartbeat while the popup stays open", async () => {
+  const grantAt = Date.now() - 5_000;
+  const origins = [
+    "https://*.archiveofourown.org/*",
+    "https://*.archiveofourown.gay/*",
+    "https://archive.transformativeworks.org/*",
+    "https://www.fanfiction.net/*",
+    "https://m.fanfiction.net/*",
+  ];
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    grantedOrigins: [...origins],
+    registeredContentScripts: [
+      { id: "trace-archive-automation-v1" },
+      { id: "trace-ao3-saved-filters-v1" },
+    ],
+    storageState: {
+      traceEarnedPermissionOnboardingV1: {
+        firstSaveAt: grantAt - 1_000,
+        grantAt,
+        registrationVersion: 2,
+        promptResult: "granted",
+      },
+      traceArchiveReadiness: { lastArchiveSeenAt: grantAt - 1_000 },
+    },
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  assert.equal(
+    h.document.getElementById("popup-earned-primary").textContent,
+    "Reload story to verify",
+  );
+
+  h.emitStorageChange({
+    traceArchiveReadiness: {
+      newValue: { lastArchiveSeenAt: grantAt + 1_000 },
+    },
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  assert.equal(
+    h.document.getElementById("popup-earned-heading").textContent,
+    "Automatic tracking is on.",
+  );
+  assert.equal(
+    h.document.getElementById("popup-earned-save").querySelector(
+      ".popup-probe-check-value",
+    ).textContent,
+    "Run confirmed",
+  );
+});
+
 test("earned-permission onboarding replaces build 25 registrations before re-verifying", async () => {
   const previousGrantAt = Date.now() - 60_000;
   const origins = [

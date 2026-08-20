@@ -1,6 +1,6 @@
 # iOS earned-permission onboarding
 
-Trace 0.6.4 build 26 tests the complete value-first Safari onboarding proposed
+Trace 0.6.4 build 27 tests the complete value-first Safari onboarding proposed
 after the build 18 and 19 capability probes. Build 20 proved the Safari
 permission flow but failed authentication because its preview shell fell back
 to the custom-scheme OAuth return. Build 21 proved the verified HTTPS callback,
@@ -30,6 +30,12 @@ archive scripts load `content-config.js`, which enables the normal heartbeat,
 automatic tracking, and overlay behavior after the five-site grant. The
 registration configuration version is bumped so an install over build 25
 replaces its stale scripts before asking for a fresh verification reload.
+
+Build 27 makes that successful verification visible without another toolbar
+interaction. While the popup remains open across its requested story reload, it
+observes the locally persisted archive heartbeat and immediately changes the
+pending automatic-tracking row to **Run confirmed**. The timestamp still has to
+be newer than the permission grant; no success condition is weakened.
 
 This is a signed physical-device candidate, not yet a production permission
 migration. It uses the fresh Safari extension identifier
@@ -80,7 +86,7 @@ TRACE_WEB_ORIGIN=https://www.tracefiction.com \
 npm run build:ios-earned-permission-onboarding:release
 ```
 
-Build 26 is paired to the stable Vercel dev deployment of the web half with:
+Build 27 is paired to the stable Vercel dev deployment of the web half with:
 
 ```bash
 npm run build:ios-earned-permission-onboarding:preview-release
@@ -106,7 +112,7 @@ Trace extension.
 
 1. Delete the earlier Trace build, confirm its Safari extension has gone, and
    restart Safari.
-2. Install build 26, sign in inside Trace, and enable the Trace extension. Do
+2. Install build 27, sign in inside Trace, and enable the Trace extension. Do
    not pre-approve Website Access in Settings.
 3. From Trace, open an AO3 or FanFiction.net story. Open Trace from Safari's
    toolbar. Record any Safari prompt that appears before the Trace popup; none
