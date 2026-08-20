@@ -1,6 +1,6 @@
 # iOS earned-permission onboarding
 
-Trace 0.6.4 build 25 tests the complete value-first Safari onboarding proposed
+Trace 0.6.4 build 26 tests the complete value-first Safari onboarding proposed
 after the build 18 and 19 capability probes. Build 20 proved the Safari
 permission flow but failed authentication because its preview shell fell back
 to the custom-scheme OAuth return. Build 21 proved the verified HTTPS callback,
@@ -23,6 +23,13 @@ earned-permission popup now invokes the existing atomic Connect-and-save path,
 which adopts and verifies the containing app's account before writing the first
 story. It no longer exits after a read-only snapshot reports the freshly
 installed extension as not connected.
+
+Build 26 fixes the post-grant registration failure found on device in build 25.
+Popup-only probe flags now remain in `popup-config.js`; persistently registered
+archive scripts load `content-config.js`, which enables the normal heartbeat,
+automatic tracking, and overlay behavior after the five-site grant. The
+registration configuration version is bumped so an install over build 25
+replaces its stale scripts before asking for a fresh verification reload.
 
 This is a signed physical-device candidate, not yet a production permission
 migration. It uses the fresh Safari extension identifier
@@ -73,7 +80,7 @@ TRACE_WEB_ORIGIN=https://www.tracefiction.com \
 npm run build:ios-earned-permission-onboarding:release
 ```
 
-Build 25 is paired to the stable Vercel dev deployment of the web half with:
+Build 26 is paired to the stable Vercel dev deployment of the web half with:
 
 ```bash
 npm run build:ios-earned-permission-onboarding:preview-release
@@ -99,7 +106,7 @@ Trace extension.
 
 1. Delete the earlier Trace build, confirm its Safari extension has gone, and
    restart Safari.
-2. Install build 25, sign in inside Trace, and enable the Trace extension. Do
+2. Install build 26, sign in inside Trace, and enable the Trace extension. Do
    not pre-approve Website Access in Settings.
 3. From Trace, open an AO3 or FanFiction.net story. Open Trace from Safari's
    toolbar. Record any Safari prompt that appears before the Trace popup; none

@@ -153,10 +153,11 @@ Kernel builds bundle `src/extension-runtime/index.mts` and its core/runtime
 dependency graph; the generated header records the configured API and web
 origins for release auditing. Only `build:legacy:release` generates that file
 from `src/background.js` by literal substitution. Safari requires the selected
-release artifact to be checked in. `Shared (Extension)/Resources/popup-config.js`
-and `iOS (App)/TraceWebOrigin.generated.swift` are committed for the same reason
-— popup navigation and the iOS DEBUG `WKWebView` shell need compiled constants,
-and all generated artifacts use the same `.env` values.
+release artifact to be checked in. `Shared (Extension)/Resources/popup-config.js`,
+`Shared (Extension)/Resources/content-config.js`, and
+`iOS (App)/TraceWebOrigin.generated.swift` are committed for the same reason —
+popup navigation, page-script configuration, and the iOS DEBUG `WKWebView` shell
+need compiled constants, and all generated artifacts use the same `.env` values.
 
 ## Build And Test
 

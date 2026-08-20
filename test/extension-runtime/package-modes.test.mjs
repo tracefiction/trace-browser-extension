@@ -37,25 +37,29 @@ function hasSavedFilterScript(value) {
 
 function assertCollectorModeConfig(root, expectedMode) {
   const value = manifest(root);
-  const config = fs.readFileSync(path.join(root, "popup-config.js"), "utf8");
+  const popupConfig = fs.readFileSync(path.join(root, "popup-config.js"), "utf8");
+  const contentConfig = fs.readFileSync(path.join(root, "content-config.js"), "utf8");
   if (expectedMode === "disabled") {
     assert.deepEqual(
       value.content_scripts,
       [],
       "disabled packages must not inject extension code into archive or Trace pages",
     );
-    assert.match(config, /TRACE_SESSION_MODE = "disabled"/);
+    assert.match(popupConfig, /TRACE_SESSION_MODE = "disabled"/);
+    assert.match(contentConfig, /TRACE_SESSION_MODE = "disabled"/);
     return;
   }
   const collectorEntries = value.content_scripts.filter((entry) => entry.js?.includes("collector.js"));
   assert.ok(collectorEntries.length > 0, "expected an archive collector content-script entry");
   for (const entry of collectorEntries) {
-    assert.ok(entry.js.indexOf("popup-config.js") < entry.js.indexOf("collector.js"));
+    assert.ok(entry.js.indexOf("content-config.js") < entry.js.indexOf("collector.js"));
   }
+  assert.doesNotMatch(contentConfig, /TRACE_IOS_ACTIVE_TAB_PROBE/);
+  assert.doesNotMatch(contentConfig, /TRACE_IOS_EARNED_PERMISSION_ONBOARDING/);
   if (expectedMode === "legacy") {
-    assert.doesNotMatch(config, /TRACE_SESSION_MODE/);
+    assert.doesNotMatch(contentConfig, /TRACE_SESSION_MODE/);
   } else {
-    assert.match(config, new RegExp(`TRACE_SESSION_MODE = "${expectedMode}"`));
+    assert.match(contentConfig, new RegExp(`TRACE_SESSION_MODE = "${expectedMode}"`));
   }
 }
 
@@ -259,6 +263,32 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     assert.match(earnedSafariConfig, /TRACE_IOS_EARNED_PERMISSION_ONBOARDING/);
     assert.match(earnedSafariConfig, /trace-archive-automation-v1/);
     assert.match(earnedSafariConfig, /persistAcrossSessions/);
+    const earnedConfigContext = {};
+    vm.runInNewContext(earnedSafariConfig, earnedConfigContext);
+    const earnedOnboarding = earnedConfigContext.TRACE_IOS_EARNED_PERMISSION_ONBOARDING;
+    assert.equal(earnedOnboarding.version, 2);
+    const automationRegistration = earnedOnboarding.registrations.find(
+      (registration) => registration.id === "trace-archive-automation-v1",
+    );
+    assert.deepEqual(Array.from(automationRegistration.js), [
+      "content-config.js",
+      "trace-finish-qualify.js",
+      "collector.js",
+      "library-overlay-keys.js",
+      "library-overlay.js",
+    ]);
+    const earnedContentConfig = fs.readFileSync(
+      path.join(RESOURCES, "content-config.js"),
+      "utf8",
+    );
+    const earnedContentContext = {};
+    vm.runInNewContext(earnedContentConfig, earnedContentContext);
+    assert.equal(earnedContentContext.TRACE_SESSION_MODE, "kernel");
+    assert.equal(earnedContentContext.TRACE_IOS_ACTIVE_TAB_PROBE, undefined);
+    assert.equal(
+      earnedContentContext.TRACE_IOS_EARNED_PERMISSION_ONBOARDING,
+      undefined,
+    );
     assert.match(
       fs.readFileSync(
         path.join(ROOT, "iOS (App)", "TraceWebOrigin.generated.swift"),
