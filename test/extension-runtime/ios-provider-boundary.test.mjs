@@ -193,6 +193,11 @@ test("native auth callbacks use one verified HTTPS route with a custom-scheme fa
   assert.match(app, /verifiedHTTPSAuthCallbackHost = "www\.tracefiction\.com"/);
   assert.match(app, /verifiedHTTPSAuthCallbackPath = "\/auth\/callback"/);
   assert.match(app, /guard #available\(iOS 17\.4, \*\) else \{ return nil \}/);
+  assert.match(
+    app,
+    /let usesProductionWebOrigin = productionWebHosts\.contains\(host\)[\s\S]*#if DEBUG[\s\S]*let usesReviewedReleasePreview = false[\s\S]*#else[\s\S]*TraceWebOriginGenerated\.allowReleaseExperimentOrigin[\s\S]*#endif[\s\S]*guard usesProductionWebOrigin \|\| usesReviewedReleasePreview/,
+    "only production and the exact reviewed Release dev preview may use the verified callback",
+  );
   assert.match(app, /metadata\["httpsAuthCallbackURL"\] = callbackURL\.absoluteString/);
   assert.match(
     app,

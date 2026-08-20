@@ -1,6 +1,6 @@
 // Generated kernel runtime. Do not edit by hand.
 const TRACE_API_BASE = "https://api.tracefiction.com";
-const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
+const TRACE_WEB_ORIGIN = "https://trace-git-dev-zacs-projects-378417c9.vercel.app";
 (() => {
   // src/extension-core/archive-readiness.mts
   var ARCHIVE_RUN_THROTTLE_MS = 5 * 60 * 1e3;
@@ -6435,7 +6435,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         runtime: extension.runtime,
         tabs: extension.tabs,
         mode: storageMode,
-        webOrigin: "https://www.tracefiction.com"
+        webOrigin: "https://trace-git-dev-zacs-projects-378417c9.vercel.app"
       });
       installArchiveReadinessRuntime({
         runtime: extension.runtime,
@@ -6462,7 +6462,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       storageMode,
       fetch: globalThis.fetch.bind(globalThis),
       apiBase: "https://api.tracefiction.com",
-      webOrigin: "https://www.tracefiction.com",
+      webOrigin: "https://trace-git-dev-zacs-projects-378417c9.vercel.app",
       randomId,
       archiveReadinessStatus
     });

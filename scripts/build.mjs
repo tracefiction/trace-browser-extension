@@ -167,8 +167,8 @@ const SITE_AUTH_EXCLUDE_MATCHES = [
 ];
 const RELEASE_TRACE_API_BASE = "https://api.tracefiction.com";
 const RELEASE_TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
-const EARNED_PERMISSION_PREVIEW_WEB_ORIGIN =
-  "https://trace-git-codex-ios-first-value-o-711093-zacs-projects-378417c9.vercel.app";
+const EARNED_PERMISSION_DEV_WEB_ORIGIN =
+  "https://trace-git-dev-zacs-projects-378417c9.vercel.app";
 const FIREFOX_RELEASE_EXTENSION_ID = "trace@tracefiction.com";
 const FIREFOX_DEV_EXTENSION_ID = "trace-dev@tracefiction.com";
 const SAFARI_ONLY_PERMISSIONS = ["nativeMessaging"];
@@ -273,7 +273,7 @@ if (IS_RELEASE) {
     "TRACE_WEB_ORIGIN",
     TRACE_WEB_ORIGIN,
     IOS_EARNED_PERMISSION_PREVIEW_RELEASE
-      ? EARNED_PERMISSION_PREVIEW_WEB_ORIGIN
+      ? EARNED_PERMISSION_DEV_WEB_ORIGIN
       : RELEASE_TRACE_WEB_ORIGIN,
   );
 } else if (isLocalLike(TRACE_API_BASE) || isLocalLike(TRACE_WEB_ORIGIN)) {
@@ -522,7 +522,7 @@ import Foundation
 enum TraceWebOriginGenerated {
     /// Same origin injected into Shared (Extension)/Resources/background.js for import / sync.
     static let httpsOrigin: String = ${swiftLiteral}
-    /// True only for the exact, reviewable build-20 TestFlight preview.
+    /// True only for the exact, reviewable earned-permission TestFlight preview.
     static let allowReleaseExperimentOrigin: Bool = ${IOS_EARNED_PERMISSION_PREVIEW_RELEASE ? "true" : "false"}
 }
 `;
