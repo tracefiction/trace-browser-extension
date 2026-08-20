@@ -59,6 +59,15 @@ authenticated onboarding diagnostic so release-specific setup failures can be
 distinguished without collecting story URLs, archive browsing history, or
 account email.
 
+The iOS earned-permission TestFlight build saves the first story only after an
+explicit Safari toolbar tap. After the server confirms that save, a separate
+button can request five optional AO3/FanFiction.net origin patterns for
+automatic tracking. Refusal preserves toolbar-based saving. Its diagnostic
+funnel stays in extension-local storage and contains only bounded event names
+and timestamps; it is not network telemetry and contains no URLs, story or
+account identity, page content, or browsing history. See
+[`docs/ios-earned-permission-onboarding.md`](docs/ios-earned-permission-onboarding.md).
+
 The metadata-improvement preference is separate from automatic progress tracking and can be turned off in the extension popup.
 Hidden-work preferences affect Trace browsing overlays only; they are separate from reading status and do not hide or change the source site itself.
 Saved AO3 filters sync only when you are signed in. They do not include AO3 credentials, cookies, page HTML, or story text.

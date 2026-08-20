@@ -7,4 +7,6 @@ import Foundation
 enum TraceWebOriginGenerated {
     /// Same origin injected into Shared (Extension)/Resources/background.js for import / sync.
     static let httpsOrigin: String = "https://www.tracefiction.com"
+    /// True only for the exact, reviewable build-20 TestFlight preview.
+    static let allowReleaseExperimentOrigin: Bool = false
 }

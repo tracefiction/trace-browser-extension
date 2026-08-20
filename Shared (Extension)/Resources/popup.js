@@ -52,6 +52,15 @@ const isLikelyIosExtensionUi = (() => {
 })();
 
 const ACTIVE_TAB_PROBE = globalThis.TRACE_IOS_ACTIVE_TAB_PROBE === true;
+const EARNED_PERMISSION_ONBOARDING =
+  globalThis.TRACE_IOS_EARNED_PERMISSION_ONBOARDING &&
+  typeof globalThis.TRACE_IOS_EARNED_PERMISSION_ONBOARDING === "object"
+    ? globalThis.TRACE_IOS_EARNED_PERMISSION_ONBOARDING
+    : null;
+const EARNED_PERMISSION_STATE_KEY = "traceEarnedPermissionOnboardingV1";
+const EARNED_PERMISSION_FUNNEL_KEY = "traceEarnedPermissionFunnelV1";
+const ARCHIVE_READINESS_KEY = "traceArchiveReadiness";
+const MAX_EARNED_FUNNEL_EVENTS = 32;
 const ACTIVE_TAB_PROBE_FILES = Object.freeze([
   "popup-config.js",
   "trace-finish-qualify.js",
@@ -659,6 +668,677 @@ function probeFailureCopy(reason) {
   return ["Save could not be confirmed", "Check your connection and retry. Record this probe as failed if it repeats."];
 }
 
+function extensionPromiseCall(target, method, args = []) {
+  if (!target || typeof target[method] !== "function") {
+    return Promise.reject(new Error(`${method}_unavailable`));
+  }
+  if (USES_BROWSER_PROMISE_API) {
+    try {
+      return Promise.resolve(target[method](...args));
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+  return new Promise((resolve, reject) => {
+    try {
+      target[method](...args, (value) => {
+        const message = ext.runtime.lastError?.message;
+        if (message) reject(new Error(message));
+        else resolve(value);
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+function earnedStorageGet(keys) {
+  return extensionPromiseCall(ext.storage?.local, "get", [keys]);
+}
+
+function earnedStorageSet(patch) {
+  return extensionPromiseCall(ext.storage?.local, "set", [patch]);
+}
+
+async function recordEarnedEvent(event) {
+  try {
+    const values = await earnedStorageGet(EARNED_PERMISSION_FUNNEL_KEY);
+    const previous = Array.isArray(values?.[EARNED_PERMISSION_FUNNEL_KEY])
+      ? values[EARNED_PERMISSION_FUNNEL_KEY]
+      : [];
+    const next = [
+      ...previous.filter(
+        (entry) =>
+          entry &&
+          typeof entry.event === "string" &&
+          typeof entry.at === "number",
+      ),
+      { event, at: Date.now() },
+    ].slice(-MAX_EARNED_FUNNEL_EVENTS);
+    await earnedStorageSet({ [EARNED_PERMISSION_FUNNEL_KEY]: next });
+  } catch {
+    // Probe evidence is best effort and never blocks a save or permission action.
+  }
+}
+
+function normalizedEarnedState(value) {
+  if (!value || typeof value !== "object") return {};
+  return {
+    firstSaveAt:
+      typeof value.firstSaveAt === "number" && value.firstSaveAt > 0
+        ? value.firstSaveAt
+        : null,
+    grantAt:
+      typeof value.grantAt === "number" && value.grantAt > 0
+        ? value.grantAt
+        : null,
+    registrationVersion:
+      Number.isInteger(value.registrationVersion) && value.registrationVersion > 0
+        ? value.registrationVersion
+        : null,
+    promptResult:
+      value.promptResult === "granted" || value.promptResult === "declined"
+        ? value.promptResult
+        : null,
+  };
+}
+
+async function readEarnedState() {
+  const values = await earnedStorageGet([
+    EARNED_PERMISSION_STATE_KEY,
+    ARCHIVE_READINESS_KEY,
+  ]);
+  return {
+    onboarding: normalizedEarnedState(values?.[EARNED_PERMISSION_STATE_KEY]),
+    readiness:
+      values?.[ARCHIVE_READINESS_KEY] &&
+      typeof values[ARCHIVE_READINESS_KEY] === "object"
+        ? values[ARCHIVE_READINESS_KEY]
+        : {},
+  };
+}
+
+async function writeEarnedState(patch) {
+  const current = await readEarnedState();
+  const next = { ...current.onboarding, ...patch };
+  await earnedStorageSet({ [EARNED_PERMISSION_STATE_KEY]: next });
+  return next;
+}
+
+function earnedOrigins() {
+  return Array.isArray(EARNED_PERMISSION_ONBOARDING?.origins)
+    ? EARNED_PERMISSION_ONBOARDING.origins.filter(
+        (origin) => typeof origin === "string" && origin.length > 0,
+      )
+    : [];
+}
+
+function earnedRegistrations() {
+  return Array.isArray(EARNED_PERMISSION_ONBOARDING?.registrations)
+    ? EARNED_PERMISSION_ONBOARDING.registrations.filter(
+        (registration) =>
+          registration &&
+          typeof registration.id === "string" &&
+          Array.isArray(registration.matches) &&
+          Array.isArray(registration.js),
+      )
+    : [];
+}
+
+async function readGrantedOrigins() {
+  try {
+    const response = await extensionPromiseCall(ext.permissions, "getAll");
+    return Array.isArray(response?.origins)
+      ? response.origins.filter((origin) => typeof origin === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function hasCompleteEarnedGrant(grantedOrigins) {
+  const granted = new Set(grantedOrigins);
+  const required = earnedOrigins();
+  return required.length > 0 && required.every((origin) => granted.has(origin));
+}
+
+async function readRegisteredScriptIds() {
+  try {
+    const registrations = await extensionPromiseCall(
+      ext.scripting,
+      "getRegisteredContentScripts",
+    );
+    return new Set(
+      Array.isArray(registrations)
+        ? registrations
+            .map((registration) => registration?.id)
+            .filter((id) => typeof id === "string")
+        : [],
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function hasCompleteEarnedRegistration(registeredIds) {
+  const required = earnedRegistrations();
+  return (
+    required.length > 0 &&
+    required.every((registration) => registeredIds.has(registration.id))
+  );
+}
+
+async function ensureEarnedRegistrations() {
+  const registrations = earnedRegistrations();
+  if (registrations.length === 0) throw new Error("registration_config_missing");
+  const currentIds = await readRegisteredScriptIds();
+  const staleIds = registrations
+    .map((registration) => registration.id)
+    .filter((id) => currentIds.has(id));
+  if (staleIds.length > 0) {
+    await extensionPromiseCall(ext.scripting, "unregisterContentScripts", [
+      { ids: staleIds },
+    ]);
+  }
+  await extensionPromiseCall(ext.scripting, "registerContentScripts", [
+    registrations,
+  ]);
+  const confirmedIds = await readRegisteredScriptIds();
+  if (!hasCompleteEarnedRegistration(confirmedIds)) {
+    throw new Error("registration_not_confirmed");
+  }
+}
+
+function setEarnedCheck(id, state, label, rowLabel = null) {
+  setProbeCheck(id, state, label);
+  if (rowLabel) {
+    const labelEl = document
+      .getElementById(id)
+      ?.querySelector(".popup-probe-check-label");
+    if (labelEl) labelEl.textContent = rowLabel;
+  }
+}
+
+function setEarnedResult(state, heading, detail) {
+  const result = document.getElementById("popup-earned-result");
+  const headingEl = document.getElementById("popup-earned-result-heading");
+  const detailEl = document.getElementById("popup-earned-result-detail");
+  if (result) result.dataset.state = state;
+  if (headingEl) headingEl.textContent = heading;
+  if (detailEl) detailEl.textContent = detail;
+}
+
+function setEarnedCopy({ kicker, heading, lead, disclosure }) {
+  const kickerEl = document.getElementById("popup-earned-kicker");
+  const headingEl = document.getElementById("popup-earned-heading");
+  const leadEl = document.getElementById("popup-earned-lead");
+  const disclosureEl = document.getElementById("popup-earned-disclosure");
+  if (kickerEl) kickerEl.textContent = kicker;
+  if (headingEl) headingEl.textContent = heading;
+  if (leadEl) leadEl.textContent = lead;
+  if (disclosureEl) disclosureEl.textContent = disclosure;
+}
+
+function setEarnedConnection(state, label) {
+  const connection = document.getElementById("popup-connection");
+  if (!connection) return;
+  connection.dataset.state = state;
+  const labelEl = connection.querySelector(".popup-connection-label");
+  if (labelEl) labelEl.textContent = label;
+}
+
+function setEarnedAction(button, { hidden = false, disabled = false, label, action }) {
+  if (!button) return;
+  button.hidden = hidden;
+  button.disabled = disabled;
+  button.textContent = label;
+  button.dataset.earnedAction = action || "";
+}
+
+function configureEarnedActions(primary, secondary = null) {
+  setEarnedAction(document.getElementById("popup-earned-primary"), primary);
+  setEarnedAction(
+    document.getElementById("popup-earned-secondary"),
+    secondary || { hidden: true, label: "Not now", action: "" },
+  );
+}
+
+function resetEarnedLedger() {
+  setEarnedCheck("popup-earned-story", "checking", "Checking", "Story page");
+  setEarnedCheck("popup-earned-access", "waiting", "Waiting", "This story only");
+  setEarnedCheck("popup-earned-save", "waiting", "Waiting", "Saved to Trace");
+}
+
+function renderEarnedAutomationInvitation() {
+  setEarnedConnection("connected", "Saved");
+  setEarnedCopy({
+    kicker: "Story saved",
+    heading: "Want Trace to work automatically?",
+    lead:
+      "Allow Trace on AO3 and FanFiction.net once, and future stories can save as they open.",
+    disclosure:
+      "Safari will list five supported AO3 and FanFiction.net addresses. Trace does not request access to other websites.",
+  });
+  setEarnedCheck("popup-earned-story", "pass", "Confirmed");
+  setEarnedCheck("popup-earned-access", "pass", "This tab");
+  setEarnedCheck("popup-earned-save", "pass", "Server confirmed");
+  setEarnedResult(
+    "success",
+    "Your story is in your library.",
+    "Automatic tracking is optional. You can keep using the Safari toolbar one story at a time.",
+  );
+  configureEarnedActions(
+    { label: "Turn on automatic tracking", action: "request_automation" },
+    { label: "Not now", action: "decline_automation" },
+  );
+}
+
+function renderEarnedVerificationPending() {
+  setEarnedConnection("warn", "Checking");
+  setEarnedCopy({
+    kicker: "Automatic tracking",
+    heading: "One quick check.",
+    lead:
+      "Reload this story. Trace should appear without another toolbar tap.",
+    disclosure:
+      "Trace will call setup complete only after its archive script actually runs.",
+  });
+  setEarnedCheck("popup-earned-story", "pass", "Saved");
+  setEarnedCheck(
+    "popup-earned-access",
+    "pass",
+    "Five sites allowed",
+    "Website access",
+  );
+  setEarnedCheck(
+    "popup-earned-save",
+    "checking",
+    "Verify next load",
+    "Automatic tracking",
+  );
+  setEarnedResult(
+    "checking",
+    "Safari access is allowed.",
+    "The tracking scripts are registered. Reload once to prove they run.",
+  );
+  configureEarnedActions(
+    { label: "Reload story to verify", action: "reload_to_verify" },
+    { label: "Do this later", action: "close" },
+  );
+}
+
+function renderEarnedAutomationConfirmed() {
+  setEarnedConnection("connected", "Ready");
+  setEarnedCopy({
+    kicker: "Setup complete",
+    heading: "Automatic tracking is on.",
+    lead: "Trace ran automatically after website access was enabled.",
+    disclosure:
+      "If you later change Safari access, open Trace from the toolbar to recover or save one story manually.",
+  });
+  setEarnedCheck("popup-earned-story", "pass", "Saved");
+  setEarnedCheck(
+    "popup-earned-access",
+    "pass",
+    "Five sites allowed",
+    "Website access",
+  );
+  setEarnedCheck(
+    "popup-earned-save",
+    "pass",
+    "Run confirmed",
+    "Automatic tracking",
+  );
+  setEarnedResult(
+    "success",
+    "You’re ready.",
+    "Future supported story pages can save and update while you read.",
+  );
+  configureEarnedActions(
+    { label: "Done", action: "close" },
+    { hidden: true, label: "", action: "" },
+  );
+}
+
+function renderEarnedAutomationDeclined() {
+  setEarnedConnection("connected", "Manual");
+  setEarnedCopy({
+    kicker: "Story saved",
+    heading: "Use Trace when you need it.",
+    lead: "Open Trace from Safari’s toolbar on each story you want to save.",
+    disclosure:
+      "Nothing else was allowed. You can turn on automatic tracking from this panel later.",
+  });
+  setEarnedCheck("popup-earned-story", "pass", "Confirmed");
+  setEarnedCheck("popup-earned-access", "pass", "This tab");
+  setEarnedCheck("popup-earned-save", "pass", "Server confirmed");
+  setEarnedResult(
+    "success",
+    "Your story is safe.",
+    "Trace will keep working one story at a time from the toolbar.",
+  );
+  configureEarnedActions(
+    { label: "Turn on automatic tracking", action: "request_automation" },
+    { label: "Done", action: "close" },
+  );
+}
+
+function renderEarnedAutomationPaused() {
+  setEarnedConnection("error", "Paused");
+  setEarnedCopy({
+    kicker: "Automatic tracking paused",
+    heading: "Safari access changed.",
+    lead:
+      "Your saved stories are untouched. Allow the supported sites again to restore automatic tracking.",
+    disclosure:
+      "You can also keep saving the current story from the Safari toolbar without enabling automation.",
+  });
+  setEarnedCheck("popup-earned-story", "pass", "Library safe");
+  setEarnedCheck("popup-earned-access", "fail", "Needs access");
+  setEarnedCheck("popup-earned-save", "waiting", "Paused");
+  setEarnedResult(
+    "failure",
+    "Automatic tracking needs access.",
+    "Safari will show the same five supported addresses.",
+  );
+  configureEarnedActions(
+    { label: "Allow automatic tracking again", action: "request_automation" },
+    { label: "Not now", action: "close" },
+  );
+}
+
+function earnedAutomationVerified(onboarding, readiness) {
+  return Boolean(
+    onboarding.grantAt &&
+      typeof readiness?.lastArchiveSeenAt === "number" &&
+      readiness.lastArchiveSeenAt > onboarding.grantAt,
+  );
+}
+
+async function renderEarnedSavedState() {
+  const [{ onboarding, readiness }, grantedOrigins, registeredIds] =
+    await Promise.all([
+      readEarnedState(),
+      readGrantedOrigins(),
+      readRegisteredScriptIds(),
+    ]);
+  const hasGrant = hasCompleteEarnedGrant(grantedOrigins);
+  const hasRegistration =
+    hasCompleteEarnedRegistration(registeredIds) &&
+    onboarding.registrationVersion ===
+      (EARNED_PERMISSION_ONBOARDING.version || 1);
+  if (onboarding.grantAt && !hasGrant) {
+    renderEarnedAutomationPaused();
+    return;
+  }
+  if (
+    hasGrant &&
+    hasRegistration &&
+    earnedAutomationVerified(onboarding, readiness)
+  ) {
+    renderEarnedAutomationConfirmed();
+    return;
+  }
+  if (hasGrant) {
+    if (!hasRegistration) {
+      try {
+        await ensureEarnedRegistrations();
+        await writeEarnedState({
+          grantAt: Date.now(),
+          registrationVersion: EARNED_PERMISSION_ONBOARDING.version || 1,
+          promptResult: "granted",
+        });
+        void recordEarnedEvent("automation_registration_recovered");
+      } catch {
+        renderEarnedAutomationPaused();
+        return;
+      }
+    }
+    if (!onboarding.grantAt) {
+      await writeEarnedState({
+        grantAt: Date.now(),
+        registrationVersion: EARNED_PERMISSION_ONBOARDING.version || 1,
+        promptResult: "granted",
+      });
+    }
+    renderEarnedVerificationPending();
+    return;
+  }
+  if (onboarding.promptResult === "declined") {
+    renderEarnedAutomationDeclined();
+    return;
+  }
+  renderEarnedAutomationInvitation();
+}
+
+async function requestEarnedAutomation() {
+  configureEarnedActions(
+    { label: "Waiting for Safari…", action: "", disabled: true },
+    { hidden: true, label: "", action: "" },
+  );
+  setEarnedResult(
+    "checking",
+    "Choose Always Allow in Safari.",
+    "The next prompt covers only the supported AO3 and FanFiction.net addresses.",
+  );
+  void recordEarnedEvent("automation_permission_requested");
+  try {
+    const granted = await extensionPromiseCall(ext.permissions, "request", [
+      { origins: earnedOrigins() },
+    ]);
+    if (granted !== true) {
+      await writeEarnedState({ promptResult: "declined" });
+      void recordEarnedEvent("automation_permission_declined");
+      renderEarnedAutomationDeclined();
+      return;
+    }
+    const grantedOrigins = await readGrantedOrigins();
+    if (!hasCompleteEarnedGrant(grantedOrigins)) {
+      throw new Error("permission_not_confirmed");
+    }
+    await ensureEarnedRegistrations();
+    await writeEarnedState({
+      grantAt: Date.now(),
+      registrationVersion: EARNED_PERMISSION_ONBOARDING.version || 1,
+      promptResult: "granted",
+    });
+    void recordEarnedEvent("automation_registered");
+    renderEarnedVerificationPending();
+    await reloadEarnedStory();
+  } catch {
+    void recordEarnedEvent("automation_setup_failed");
+    renderEarnedAutomationPaused();
+  }
+}
+
+async function reloadEarnedStory() {
+  try {
+    const tab = await probeQueryActiveTab();
+    if (!tab || !Number.isInteger(tab.id)) throw new Error("no_active_tab");
+    await extensionPromiseCall(ext.tabs, "reload", [tab.id]);
+    void recordEarnedEvent("automation_verification_reload");
+  } catch {
+    setEarnedResult(
+      "failure",
+      "Reload this story manually.",
+      "Then reopen Trace. The panel will confirm whether automatic tracking ran.",
+    );
+  }
+}
+
+async function runEarnedFirstSave() {
+  setEarnedConnection("warn", "Saving");
+  resetEarnedLedger();
+  setEarnedCopy({
+    kicker: "Your first story",
+    heading: "Saving this story…",
+    lead: "Trace is using access to this tab only.",
+    disclosure:
+      "Trace cannot see other tabs or websites from this one-time action.",
+  });
+  setEarnedResult(
+    "checking",
+    "Connecting to your library…",
+    "Keep this panel open for a moment.",
+  );
+  configureEarnedActions(
+    { label: "Saving…", action: "", disabled: true },
+    { hidden: true, label: "", action: "" },
+  );
+  void recordEarnedEvent("first_story_save_started");
+  try {
+    const tab = await probeQueryActiveTab();
+    const story = classifyProbeStory(tab?.url);
+    if (!tab || !Number.isInteger(tab.id) || !story.ok) {
+      setEarnedCheck("popup-earned-story", "fail", "Not a story");
+      throw new Error("unsupported_page");
+    }
+    setEarnedCheck("popup-earned-story", "pass", story.site);
+
+    let ping = null;
+    try {
+      ping = await probeSendTabMessage(tab.id, {
+        type: "TRACE_ACTIVE_TAB_PROBE_PING",
+      });
+    } catch {
+      // Expected on the first toolbar action for this tab.
+    }
+    if (ping?.ok !== true || ping?.probe !== true) {
+      await probeInject(tab.id);
+      ping = await probeSendTabMessage(tab.id, {
+        type: "TRACE_ACTIVE_TAB_PROBE_PING",
+      });
+    }
+    if (ping?.ok !== true || ping?.probe !== true) {
+      throw new Error("current_tab_denied");
+    }
+    setEarnedCheck("popup-earned-access", "pass", "Allowed by tap");
+
+    const response = await probeSendTabMessage(tab.id, {
+      type: "TRACE_ACTIVE_TAB_PROBE_SAVE",
+    });
+    if (
+      response?.ok !== true ||
+      !["saved", "already_saved"].includes(response?.state) ||
+      response?.serverConfirmed !== true
+    ) {
+      throw new Error(response?.error || "save_failed");
+    }
+    setEarnedCheck("popup-earned-save", "pass", "Server confirmed");
+    await writeEarnedState({ firstSaveAt: Date.now() });
+    void recordEarnedEvent("first_story_save_confirmed");
+    await renderEarnedSavedState();
+  } catch (error) {
+    setEarnedConnection("error", "Issue");
+    const reason = typeof error?.message === "string" ? error.message : "save_failed";
+    const accessPassed =
+      document.getElementById("popup-earned-access")?.dataset.state === "pass";
+    if (reason !== "unsupported_page") {
+      setEarnedCheck(
+        accessPassed ? "popup-earned-save" : "popup-earned-access",
+        "fail",
+        "Needs attention",
+      );
+    }
+    const [heading, detail] = probeFailureCopy(reason);
+    setEarnedCopy({
+      kicker: "First story",
+      heading,
+      lead: detail,
+      disclosure:
+        reason === "not_authenticated" || reason === "auth_expired"
+          ? "Signing in to the Trace app connects the Safari extension; a Safari website login does not."
+          : "No automatic website access was requested.",
+    });
+    setEarnedResult("failure", heading, detail);
+    configureEarnedActions(
+      { label: "Try again", action: "retry_save" },
+      { hidden: true, label: "", action: "" },
+    );
+    void recordEarnedEvent("first_story_save_failed");
+  }
+}
+
+async function earnedSessionIsConnected() {
+  return await new Promise((resolve) => {
+    sendKernelRuntimeMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" }, (response) => {
+      resolve(response?.snapshot?.state === "connected");
+    });
+  });
+}
+
+async function initializeEarnedPermissionFlow() {
+  document.body.dataset.traceEarnedPermission = "true";
+  const section = document.getElementById("popup-earned-permission");
+  const connection = document.getElementById("popup-connection");
+  if (section) section.hidden = false;
+  if (connection) {
+    connection.dataset.state = "warn";
+    const label = connection.querySelector(".popup-connection-label");
+    if (label) label.textContent = "First story";
+  }
+  for (const button of [
+    document.getElementById("popup-earned-primary"),
+    document.getElementById("popup-earned-secondary"),
+  ]) {
+    button?.addEventListener("click", () => {
+      const action = button.dataset.earnedAction;
+      if (action === "retry_save") void runEarnedFirstSave();
+      if (action === "request_automation") void requestEarnedAutomation();
+      if (action === "decline_automation") {
+        void writeEarnedState({ promptResult: "declined" });
+        void recordEarnedEvent("automation_offer_declined");
+        renderEarnedAutomationDeclined();
+      }
+      if (action === "reload_to_verify") void reloadEarnedStory();
+      if (action === "close") window.close();
+    });
+  }
+  void recordEarnedEvent("popup_opened");
+  const connected = await earnedSessionIsConnected();
+  if (!connected) {
+    setEarnedConnection("off", "Not linked");
+    setEarnedCopy({
+      kicker: "Connect Trace",
+      heading: "Sign in to the Trace app first.",
+      lead:
+        "The Safari extension needs the account from your Trace app before it can save this story.",
+      disclosure:
+        "After signing in, return to this story and open Trace from Safari’s toolbar again.",
+    });
+    setEarnedResult(
+      "failure",
+      "Trace is not connected.",
+      "Open the Trace app, sign in, then try this story again.",
+    );
+    configureEarnedActions(
+      { label: "Open Trace app", action: "open_trace_app" },
+      { hidden: true, label: "", action: "" },
+    );
+    document
+      .getElementById("popup-earned-primary")
+      ?.addEventListener("click", () => {
+        if (
+          document.getElementById("popup-earned-primary")?.dataset.earnedAction ===
+          "open_trace_app"
+        ) {
+          window.location.href = TRACE_IOS_APP_CONNECT_URL;
+        }
+      });
+    void recordEarnedEvent("connection_required");
+    return;
+  }
+  const { onboarding } = await readEarnedState();
+  if (onboarding.firstSaveAt) {
+    const grantedOrigins = await readGrantedOrigins();
+    if (hasCompleteEarnedGrant(grantedOrigins)) {
+      await renderEarnedSavedState();
+      return;
+    }
+  }
+  await runEarnedFirstSave();
+}
+
 async function runActiveTabProbe() {
   const retry = document.getElementById("popup-probe-retry");
   if (retry) retry.disabled = true;
@@ -1057,7 +1737,9 @@ function initializeKernelPopup() {
   requestKernelSnapshot();
 }
 
-if (ACTIVE_TAB_PROBE) {
+if (EARNED_PERMISSION_ONBOARDING) {
+  void initializeEarnedPermissionFlow();
+} else if (ACTIVE_TAB_PROBE) {
   initializeActiveTabProbe();
 } else if (KERNEL_SESSION_ACTIVE || SESSION_DISABLED) {
   initializeKernelPopup();

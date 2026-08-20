@@ -228,6 +228,12 @@ function extensionMockSource(storageData, sessionSnapshot = null) {
       const storageData = ${JSON.stringify(storageData)};
       const sessionSnapshot = ${JSON.stringify(sessionSnapshot)};
       let activeTabProbeInjected = storageData.traceProbeAlreadyInjected === true;
+      let grantedOrigins = Array.isArray(storageData.traceGrantedOrigins)
+        ? [...storageData.traceGrantedOrigins]
+        : [];
+      let registeredContentScripts = Array.isArray(storageData.traceRegisteredContentScripts)
+        ? [...storageData.traceRegisteredContentScripts]
+        : [];
       const storageListeners = [];
       const popupState = {
         ok: true,
@@ -292,11 +298,14 @@ function extensionMockSource(storageData, sessionSnapshot = null) {
         storage: {
           local: {
             get(keys, cb) {
-              if (typeof cb === "function") cb(pick(keys));
+              const value = pick(keys);
+              if (typeof cb === "function") cb(value);
+              return Promise.resolve(value);
             },
             set(values, cb) {
               Object.assign(storageData, values || {});
               if (typeof cb === "function") cb();
+              return Promise.resolve();
             },
           },
           onChanged: {
@@ -325,6 +334,18 @@ function extensionMockSource(storageData, sessionSnapshot = null) {
             }
             return { ok: false };
           },
+          async reload(tabId) {
+            window.__traceReloads = [...(window.__traceReloads || []), tabId];
+          },
+        },
+        permissions: {
+          async getAll() {
+            return { origins: [...grantedOrigins], permissions: [] };
+          },
+          async request(request) {
+            grantedOrigins = [...(request && request.origins || [])];
+            return storageData.tracePermissionRequestResult !== false;
+          },
         },
         scripting: {
           async executeScript(injection) {
@@ -335,6 +356,16 @@ function extensionMockSource(storageData, sessionSnapshot = null) {
             activeTabProbeInjected = true;
             return [];
           },
+          async getRegisteredContentScripts() {
+            return [...registeredContentScripts];
+          },
+          async unregisterContentScripts(filter) {
+            const ids = new Set(filter && filter.ids || []);
+            registeredContentScripts = registeredContentScripts.filter((entry) => !ids.has(entry.id));
+          },
+          async registerContentScripts(registrations) {
+            registeredContentScripts.push(...registrations);
+          },
         },
       };
       window.__traceMessages = [];
@@ -342,6 +373,24 @@ function extensionMockSource(storageData, sessionSnapshot = null) {
       if (storageData.traceActiveTabProbe === true) {
         window.TRACE_SESSION_MODE = "kernel";
         window.TRACE_IOS_ACTIVE_TAB_PROBE = true;
+      }
+      if (storageData.traceEarnedPermissionOnboarding === true) {
+        window.TRACE_SESSION_MODE = "kernel";
+        window.TRACE_IOS_ACTIVE_TAB_PROBE = true;
+        window.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {
+          version: 1,
+          origins: [
+            "https://*.archiveofourown.org/*",
+            "https://*.archiveofourown.gay/*",
+            "https://archive.transformativeworks.org/*",
+            "https://www.fanfiction.net/*",
+            "https://m.fanfiction.net/*",
+          ],
+          registrations: [
+            { id: "trace-archive-automation-v1", matches: ["https://*.archiveofourown.org/*"], js: ["collector.js"], persistAcrossSessions: true },
+            { id: "trace-ao3-saved-filters-v1", matches: ["https://*.archiveofourown.org/*"], js: ["ao3-saved-filters.js"], persistAcrossSessions: true },
+          ],
+        };
       }
       window.chrome = api;
       window.browser = api;
@@ -569,7 +618,16 @@ async function renderPopupScreenshot(browser, definition, assets, manifest) {
       { timeout: 10000 },
     );
   }
-  if (definition.sessionSnapshot) {
+  if (definition.storageData?.traceEarnedPermissionOnboarding === true) {
+    await page.waitForFunction(
+      () => document.querySelector("#popup-earned-result")?.dataset.state !== "checking",
+      { timeout: 10000 },
+    );
+  }
+  if (
+    definition.sessionSnapshot &&
+    definition.storageData?.traceEarnedPermissionOnboarding !== true
+  ) {
     const localSettings = await page.$eval("#popup-local-settings", (element) => ({
       hidden: element.hidden,
       display: getComputedStyle(element).display,
@@ -964,6 +1022,87 @@ async function main() {
     }
 
     const popupScreenshots = [
+      {
+        name: "iOS earned-permission first save",
+        file: "popup-ios-earned-first-save.png",
+        authState: connectedAuthState(),
+        sessionSnapshot: {
+          state: "connected",
+          accountId: "visual-account",
+          canExecuteAuthenticated: true,
+          reason: "none",
+        },
+        storageData: {
+          traceEarnedPermissionOnboarding: true,
+          traceFirstSaveSeen: false,
+          traceLibraryCount: 0,
+        },
+        viewport: { width: 360, height: 680 },
+        userAgent:
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        colorScheme: "light",
+      },
+      {
+        name: "iOS earned-permission manual mode",
+        file: "popup-ios-earned-manual-mode.png",
+        authState: connectedAuthState(),
+        sessionSnapshot: {
+          state: "connected",
+          accountId: "visual-account",
+          canExecuteAuthenticated: true,
+          reason: "none",
+        },
+        storageData: {
+          traceEarnedPermissionOnboarding: true,
+          traceEarnedPermissionOnboardingV1: {
+            firstSaveAt: Date.now() - 60_000,
+            promptResult: "declined",
+          },
+        },
+        viewport: { width: 360, height: 680 },
+        userAgent:
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        colorScheme: "light",
+      },
+      {
+        name: "iOS earned-permission automation confirmed",
+        file: "popup-ios-earned-automation-confirmed.png",
+        authState: connectedAuthState(),
+        sessionSnapshot: {
+          state: "connected",
+          accountId: "visual-account",
+          canExecuteAuthenticated: true,
+          reason: "none",
+        },
+        storageData: (() => {
+          const grantAt = Date.now() - 60_000;
+          return {
+            traceEarnedPermissionOnboarding: true,
+            traceGrantedOrigins: [
+              "https://*.archiveofourown.org/*",
+              "https://*.archiveofourown.gay/*",
+              "https://archive.transformativeworks.org/*",
+              "https://www.fanfiction.net/*",
+              "https://m.fanfiction.net/*",
+            ],
+            traceRegisteredContentScripts: [
+              { id: "trace-archive-automation-v1" },
+              { id: "trace-ao3-saved-filters-v1" },
+            ],
+            traceEarnedPermissionOnboardingV1: {
+              firstSaveAt: grantAt - 2_000,
+              grantAt,
+              registrationVersion: 1,
+              promptResult: "granted",
+            },
+            traceArchiveReadiness: { lastArchiveSeenAt: grantAt + 2_000 },
+          };
+        })(),
+        viewport: { width: 360, height: 680 },
+        userAgent:
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        colorScheme: "light",
+      },
       {
         name: "iOS active-tab probe success",
         file: "popup-ios-active-tab-probe-success.png",

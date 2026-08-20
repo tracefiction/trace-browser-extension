@@ -137,6 +137,32 @@ body {
     display: none;
 }
 
+.popup-earned-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.popup-earned-secondary {
+    min-height: 40px;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--ink-3);
+    font: 650 12.5px/1 var(--trace-font);
+    cursor: pointer;
+}
+
+.popup-earned-secondary:hover {
+    color: var(--ink);
+    background: var(--paper-2);
+}
+
+.popup-earned-secondary:focus-visible {
+    outline: 2px solid var(--forest);
+    outline-offset: 2px;
+}
+
 body[data-trace-active-tab-probe="true"] {
     overflow-y: auto;
 }
@@ -146,6 +172,22 @@ body[data-trace-active-tab-probe="true"] .popup-local-settings,
 body[data-trace-active-tab-probe="true"] .popup-pro-settings,
 body[data-trace-active-tab-probe="true"] .popup-actions {
     display: none;
+}
+
+body[data-trace-earned-permission="true"] {
+    overflow-y: auto;
+}
+
+body[data-trace-earned-permission="true"] .popup-sheet,
+body[data-trace-earned-permission="true"] .popup-local-settings,
+body[data-trace-earned-permission="true"] .popup-pro-settings,
+body[data-trace-earned-permission="true"] .popup-actions,
+body[data-trace-earned-permission="true"] #popup-active-tab-probe {
+    display: none;
+}
+
+body[data-trace-earned-permission="true"] .popup-brand {
+    padding-bottom: 2px;
 }
 
 body[data-trace-active-tab-probe="true"] .popup-brand {

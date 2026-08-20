@@ -29,6 +29,9 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 #if DEBUG
         return webAppHTTPSOriginDebug
 #else
+        if TraceWebOriginGenerated.allowReleaseExperimentOrigin {
+            return TraceWebOriginGenerated.httpsOrigin
+        }
         return "https://tracefiction.com"
 #endif
     }
@@ -175,6 +178,9 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         let enabled: Bool
         let settingsSupported: Bool
         let archiveBrowseHosts: [String]
+        // Build-20 capability: the web shell should guide one active-tab save
+        // before the Safari popup offers a durable optional host grant.
+        let earnedPermissionOnboarding: Bool
         let error: String?
         let queriedIdentifier: String?
         let embeddedExtensionIdentifiers: [String]?
@@ -2383,6 +2389,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                     TraceSafariArchiveHostKind.ao3.rawValue,
                     TraceSafariArchiveHostKind.ffn.rawValue,
                 ],
+                earnedPermissionOnboarding: true,
                 error: error,
                 queriedIdentifier: queriedIdentifier,
                 embeddedExtensionIdentifiers: embeddedExtensionIdentifiers,
