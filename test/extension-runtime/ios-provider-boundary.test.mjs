@@ -12,6 +12,10 @@ test("Release stays production-bound unless the generated exact preview seam is 
     app,
     /#if DEBUG[\s\S]*webAppHTTPSOriginDebug = TraceWebOriginGenerated\.httpsOrigin[\s\S]*return webAppHTTPSOriginDebug[\s\S]*#else[\s\S]*TraceWebOriginGenerated\.allowReleaseExperimentOrigin[\s\S]*return TraceWebOriginGenerated\.httpsOrigin[\s\S]*return "https:\/\/tracefiction\.com"[\s\S]*#endif/,
   );
+  assert.match(
+    app,
+    /billingAPIBaseURL[\s\S]*TraceWebOriginGenerated\.allowReleaseExperimentOrigin[\s\S]*TraceWebOriginGenerated\.apiOrigin[\s\S]*configuredBillingAPIBaseURLOverride/,
+  );
 });
 
 test("the app synchronizer is the sole versioned writer and native utility handlers do not acquire tokens", () => {

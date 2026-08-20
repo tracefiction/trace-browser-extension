@@ -1,5 +1,5 @@
 // Generated kernel runtime. Do not edit by hand.
-const TRACE_API_BASE = "https://api.tracefiction.com";
+const TRACE_API_BASE = "https://ff-app-development.up.railway.app";
 const TRACE_WEB_ORIGIN = "https://trace-git-dev-zacs-projects-378417c9.vercel.app";
 (() => {
   // src/extension-core/archive-readiness.mts
@@ -6461,7 +6461,7 @@ const TRACE_WEB_ORIGIN = "https://trace-git-dev-zacs-projects-378417c9.vercel.ap
       databaseFactory: scope.indexedDB,
       storageMode,
       fetch: globalThis.fetch.bind(globalThis),
-      apiBase: "https://api.tracefiction.com",
+      apiBase: "https://ff-app-development.up.railway.app",
       webOrigin: "https://trace-git-dev-zacs-projects-378417c9.vercel.app",
       randomId,
       archiveReadinessStatus

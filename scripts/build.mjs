@@ -167,6 +167,8 @@ const SITE_AUTH_EXCLUDE_MATCHES = [
 ];
 const RELEASE_TRACE_API_BASE = "https://api.tracefiction.com";
 const RELEASE_TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
+const EARNED_PERMISSION_DEV_API_BASE =
+  "https://ff-app-development.up.railway.app";
 const EARNED_PERMISSION_DEV_WEB_ORIGIN =
   "https://trace-git-dev-zacs-projects-378417c9.vercel.app";
 const FIREFOX_RELEASE_EXTENSION_ID = "trace@tracefiction.com";
@@ -268,7 +270,13 @@ const TRACE_WEB_ORIGIN = (
 ).replace(/\/$/, "");
 
 if (IS_RELEASE) {
-  assertReleaseUrl("TRACE_API_BASE", TRACE_API_BASE, RELEASE_TRACE_API_BASE);
+  assertReleaseUrl(
+    "TRACE_API_BASE",
+    TRACE_API_BASE,
+    IOS_EARNED_PERMISSION_PREVIEW_RELEASE
+      ? EARNED_PERMISSION_DEV_API_BASE
+      : RELEASE_TRACE_API_BASE,
+  );
   assertReleaseUrl(
     "TRACE_WEB_ORIGIN",
     TRACE_WEB_ORIGIN,
@@ -522,6 +530,8 @@ import Foundation
 enum TraceWebOriginGenerated {
     /// Same origin injected into Shared (Extension)/Resources/background.js for import / sync.
     static let httpsOrigin: String = ${swiftLiteral}
+    /// Same API origin compiled into the extension background worker.
+    static let apiOrigin: String = ${JSON.stringify(TRACE_API_BASE)}
     /// True only for the exact, reviewable earned-permission TestFlight preview.
     static let allowReleaseExperimentOrigin: Bool = ${IOS_EARNED_PERMISSION_PREVIEW_RELEASE ? "true" : "false"}
 }

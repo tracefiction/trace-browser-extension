@@ -31,6 +31,11 @@ const packagedManifestPath = path.join(extensionPath, "manifest.json");
 const sourceManifestPath = path.join(sourceResources, "manifest.json");
 const projectPath = path.join(ROOT, "Trace.xcodeproj", "project.pbxproj");
 const packagePath = path.join(ROOT, "package.json");
+const generatedOriginPath = path.join(
+  ROOT,
+  "iOS (App)",
+  "TraceWebOrigin.generated.swift",
+);
 const errors = [];
 
 function requirePath(target, label) {
@@ -68,6 +73,17 @@ function readPlistValue(plistPath, key) {
 function uniqueBuildSettingValues(source, name) {
   const pattern = new RegExp(`${name} = ([^;]+);`, "g");
   return new Set(Array.from(source.matchAll(pattern), (match) => match[1]));
+}
+
+function readGeneratedStringSetting(source, name) {
+  const match = source.match(
+    new RegExp(`static let ${name}: String = "([^"]+)"`),
+  );
+  if (!match) {
+    errors.push(`Generated iOS configuration is missing ${name}`);
+    return null;
+  }
+  return match[1];
 }
 
 function digest(target) {
@@ -116,6 +132,20 @@ requirePath(packagedManifestPath, "Packaged extension manifest");
 requirePath(sourceManifestPath, "Source extension manifest");
 
 const packageJson = readJson(packagePath, "package.json");
+const generatedOrigins = requirePath(
+  generatedOriginPath,
+  "Generated iOS origin configuration",
+)
+  ? fs.readFileSync(generatedOriginPath, "utf8")
+  : "";
+const generatedWebOrigin = readGeneratedStringSetting(
+  generatedOrigins,
+  "httpsOrigin",
+);
+const generatedApiOrigin = readGeneratedStringSetting(
+  generatedOrigins,
+  "apiOrigin",
+);
 const sourceManifest = readJson(sourceManifestPath, "Source extension manifest");
 const packagedManifest = readJson(
   packagedManifestPath,
@@ -206,6 +236,16 @@ if (requirePath(inspectedExecutable, "Trace executable")) {
   } else {
     if (!strings.stdout.includes("httpsAuthCallbackURL")) {
       errors.push("Trace executable does not advertise the verified HTTPS callback");
+    }
+    if (generatedWebOrigin && !strings.stdout.includes(generatedWebOrigin)) {
+      errors.push(
+        `Trace executable does not contain generated web origin ${generatedWebOrigin}`,
+      );
+    }
+    if (generatedApiOrigin && !strings.stdout.includes(generatedApiOrigin)) {
+      errors.push(
+        `Trace executable does not contain generated API origin ${generatedApiOrigin}`,
+      );
     }
     if (
       strings.stdout.includes(

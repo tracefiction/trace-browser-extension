@@ -7,6 +7,8 @@ import Foundation
 enum TraceWebOriginGenerated {
     /// Same origin injected into Shared (Extension)/Resources/background.js for import / sync.
     static let httpsOrigin: String = "https://trace-git-dev-zacs-projects-378417c9.vercel.app"
+    /// Same API origin compiled into the extension background worker.
+    static let apiOrigin: String = "https://ff-app-development.up.railway.app"
     /// True only for the exact, reviewable earned-permission TestFlight preview.
     static let allowReleaseExperimentOrigin: Bool = true
 }
