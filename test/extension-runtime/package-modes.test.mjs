@@ -278,7 +278,7 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
       previewResult.stderr || previewResult.stdout,
     );
     const previewOrigin =
-      "https://trace-git-codex-ios-first-value-o-711093-zacs-projects-378417c9.vercel.app";
+      "https://trace-git-dev-zacs-projects-378417c9.vercel.app";
     assert.match(
       fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8"),
       new RegExp(previewOrigin.replaceAll(".", "\\.")),
@@ -288,7 +288,7 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
         path.join(ROOT, "iOS (App)", "TraceWebOrigin.generated.swift"),
         "utf8",
       ),
-      /trace-git-codex-ios-first-value-o-711093-zacs-projects-378417c9\.vercel\.app"[\s\S]*allowReleaseExperimentOrigin: Bool = true/,
+      /trace-git-dev-zacs-projects-378417c9\.vercel\.app"[\s\S]*allowReleaseExperimentOrigin: Bool = true/,
     );
 
     for (const packageRoot of [

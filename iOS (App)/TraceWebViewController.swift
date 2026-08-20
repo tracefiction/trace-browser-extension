@@ -50,9 +50,22 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         guard #available(iOS 17.4, *) else { return nil }
         guard let origin = URL(string: webAppHTTPSOrigin),
               origin.scheme?.lowercased() == "https",
-              let host = origin.host?.lowercased(),
-              productionWebHosts.contains(host)
+              let host = origin.host?.lowercased()
         else {
+            return nil
+        }
+
+        let usesProductionWebOrigin = productionWebHosts.contains(host)
+#if DEBUG
+        // Local and ordinary preview Debug builds keep the custom-scheme
+        // transport. Only a release build produced by the exact reviewed dev
+        // preview command may borrow Trace's verified HTTPS callback.
+        let usesReviewedReleasePreview = false
+#else
+        let usesReviewedReleasePreview =
+            TraceWebOriginGenerated.allowReleaseExperimentOrigin
+#endif
+        guard usesProductionWebOrigin || usesReviewedReleasePreview else {
             return nil
         }
         return URL(
