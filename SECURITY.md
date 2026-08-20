@@ -24,6 +24,16 @@ data type or token path and does not run automatic tracking, overlays, saved
 filters, Trace-site sync, or archive heartbeats. Normal builds retain the
 release permission model described above.
 
+The iOS earned-permission TestFlight build keeps that active-tab first-save
+boundary, then exposes a separate user action that requests exactly five
+optional supported-origin patterns. Only after Safari reports the complete
+grant does it dynamically register the production archive scripts. Login,
+signup, password, authentication, and logout paths remain excluded. A fresh
+post-grant archive heartbeat is required before the popup claims automatic
+tracking is ready. Refusal or later revocation preserves current-tab toolbar
+saves. The build stores at most 32 coarse event-name/timestamp pairs locally
+for device diagnosis and sends none of that funnel to Trace.
+
 The modular kernel keeps its session envelope, extension-owned credential map,
 and account-private read model in one IndexedDB database owned by the extension
 origin. AO3/FFN content scripts run against the visited page's origin and

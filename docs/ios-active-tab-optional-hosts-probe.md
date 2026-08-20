@@ -7,8 +7,11 @@ prompt. Probe 1B changes one variable: the manifest now declares the minimized
 future automatic-tracking host bundle as optional, but never requests it.
 
 It is not the proposed production onboarding and it does not enable automatic
-tracking. A pass permits the next build to test an earned, post-save permission
-request from a separate direct click.
+tracking. On a physical device, Safari sometimes surfaced additional-permission
+UI even though active-tab saving continued to work after a restart. Build 20
+therefore tests whether a complete [earned, post-save permission
+flow](ios-earned-permission-onboarding.md) can make the permission interaction
+deliberate and understandable without blocking first value.
 
 ## Probe boundary
 

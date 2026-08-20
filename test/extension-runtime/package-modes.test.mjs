@@ -239,6 +239,58 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     assert.deepEqual(optionalSafariManifest.content_scripts, []);
     assert.match(optionalSafariConfig, /TRACE_IOS_ACTIVE_TAB_PROBE = true/);
 
+    runBuild("build:ios-earned-permission-onboarding:release");
+    const earnedSafariManifest = manifest(RESOURCES);
+    const earnedSafariConfig = fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8");
+    assert.deepEqual(earnedSafariManifest.permissions, [
+      "alarms",
+      "storage",
+      "nativeMessaging",
+      "activeTab",
+      "scripting",
+    ]);
+    assert.deepEqual(earnedSafariManifest.host_permissions, []);
+    assert.deepEqual(
+      earnedSafariManifest.optional_host_permissions,
+      MINIMIZED_SITE_HOST_MATCHES,
+    );
+    assert.deepEqual(earnedSafariManifest.content_scripts, []);
+    assert.match(earnedSafariConfig, /TRACE_IOS_ACTIVE_TAB_PROBE = true/);
+    assert.match(earnedSafariConfig, /TRACE_IOS_EARNED_PERMISSION_ONBOARDING/);
+    assert.match(earnedSafariConfig, /trace-archive-automation-v1/);
+    assert.match(earnedSafariConfig, /persistAcrossSessions/);
+    assert.match(
+      fs.readFileSync(
+        path.join(ROOT, "iOS (App)", "TraceWebOrigin.generated.swift"),
+        "utf8",
+      ),
+      /httpsOrigin: String = "https:\/\/www\.tracefiction\.com"[\s\S]*allowReleaseExperimentOrigin: Bool = false/,
+    );
+
+    const previewResult = spawnSync(
+      "npm",
+      ["run", "build:ios-earned-permission-onboarding:preview-release"],
+      { cwd: ROOT, env: process.env, encoding: "utf8" },
+    );
+    assert.equal(
+      previewResult.status,
+      0,
+      previewResult.stderr || previewResult.stdout,
+    );
+    const previewOrigin =
+      "https://trace-git-codex-ios-first-value-o-711093-zacs-projects-378417c9.vercel.app";
+    assert.match(
+      fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8"),
+      new RegExp(previewOrigin.replaceAll(".", "\\.")),
+    );
+    assert.match(
+      fs.readFileSync(
+        path.join(ROOT, "iOS (App)", "TraceWebOrigin.generated.swift"),
+        "utf8",
+      ),
+      /trace-git-codex-ios-first-value-o-711093-zacs-projects-378417c9\.vercel\.app"[\s\S]*allowReleaseExperimentOrigin: Bool = true/,
+    );
+
     for (const packageRoot of [
       path.join(ROOT, "dist", "chrome"),
       path.join(ROOT, "dist", "firefox"),
@@ -257,5 +309,12 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     }
   } finally {
     runBuild("build:release");
+    assert.match(
+      fs.readFileSync(
+        path.join(ROOT, "iOS (App)", "TraceWebOrigin.generated.swift"),
+        "utf8",
+      ),
+      /allowReleaseExperimentOrigin: Bool = false/,
+    );
   }
 });
