@@ -1398,7 +1398,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         }
     }
 
-    private static let safariExtensionBundleIdentifier = "com.tracefiction.trace.active-tab-optional-probe"
+    private static let safariExtensionBundleIdentifier = "com.tracefiction.trace.earned-permission"
     private static let safariBridgeLog = OSLog(
         subsystem: Bundle.main.bundleIdentifier ?? "com.tracefiction.trace",
         category: "SafariBridge"
@@ -1853,7 +1853,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         // Opening system settings is independent of extension authentication.
         // Keep this call directly coupled to the reader's tap.
         SFSafariSettings.openExtensionsSettings(
-            forIdentifiers: Self.safariExtensionCandidateIdentifiers()
+            forIdentifiers: Self.safariExtensionSettingsIdentifiers()
         ) { [weak self] error in
             DispatchQueue.main.async {
                 self?.postSafariExtensionActionResult(
@@ -2067,6 +2067,16 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         return identifiers.filter { identifier in
             seen.insert(identifier).inserted
         }
+    }
+
+    /// Settings must receive only identifiers that are actually embedded in
+    /// this build. Passing a retired probe identifier alongside the installed
+    /// extension can make Safari reject the entire open-settings request.
+    private static func safariExtensionSettingsIdentifiers() -> [String] {
+        let embeddedIdentifiers = embeddedSafariExtensionBundleIdentifiers()
+        return embeddedIdentifiers.isEmpty
+            ? [safariExtensionBundleIdentifier]
+            : embeddedIdentifiers
     }
 
     private static func embeddedSafariExtensionBundleIdentifiers() -> [String] {
