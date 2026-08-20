@@ -1,6 +1,6 @@
 # iOS earned-permission onboarding
 
-Trace 0.6.4 build 24 tests the complete value-first Safari onboarding proposed
+Trace 0.6.4 build 25 tests the complete value-first Safari onboarding proposed
 after the build 18 and 19 capability probes. Build 20 proved the Safari
 permission flow but failed authentication because its preview shell fell back
 to the custom-scheme OAuth return. Build 21 proved the verified HTTPS callback,
@@ -13,10 +13,16 @@ story with the access Safari grants from their explicit toolbar tap. Only after
 the Trace API confirms that save does the popup offer the broader website access
 needed for automatic tracking.
 
-Build 24 removes the previous hybrid deployment: its stable dev web shell,
+Build 24 removed the previous hybrid deployment: its stable dev web shell,
 extension worker, and native API fallback all use Trace's Railway development
 API. Ordinary release builds remain pinned to the production web and API
 origins.
+
+Build 25 fixes the clean-install connection deadlock found in build 24. The
+earned-permission popup now invokes the existing atomic Connect-and-save path,
+which adopts and verifies the containing app's account before writing the first
+story. It no longer exits after a read-only snapshot reports the freshly
+installed extension as not connected.
 
 This is a signed physical-device candidate, not yet a production permission
 migration. It uses the fresh Safari extension identifier
@@ -67,7 +73,7 @@ TRACE_WEB_ORIGIN=https://www.tracefiction.com \
 npm run build:ios-earned-permission-onboarding:release
 ```
 
-Build 24 is paired to the stable Vercel dev deployment of the web half with:
+Build 25 is paired to the stable Vercel dev deployment of the web half with:
 
 ```bash
 npm run build:ios-earned-permission-onboarding:preview-release
@@ -93,7 +99,7 @@ Trace extension.
 
 1. Delete the earlier Trace build, confirm its Safari extension has gone, and
    restart Safari.
-2. Install build 24, sign in inside Trace, and enable the Trace extension. Do
+2. Install build 25, sign in inside Trace, and enable the Trace extension. Do
    not pre-approve Website Access in Settings.
 3. From Trace, open an AO3 or FanFiction.net story. Open Trace from Safari's
    toolbar. Record any Safari prompt that appears before the Trace popup; none

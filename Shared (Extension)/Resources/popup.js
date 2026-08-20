@@ -1259,14 +1259,6 @@ async function runEarnedFirstSave() {
   }
 }
 
-async function earnedSessionIsConnected() {
-  return await new Promise((resolve) => {
-    sendKernelRuntimeMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" }, (response) => {
-      resolve(response?.snapshot?.state === "connected");
-    });
-  });
-}
-
 async function initializeEarnedPermissionFlow() {
   document.body.dataset.traceEarnedPermission = "true";
   const section = document.getElementById("popup-earned-permission");
@@ -1295,39 +1287,6 @@ async function initializeEarnedPermissionFlow() {
     });
   }
   void recordEarnedEvent("popup_opened");
-  const connected = await earnedSessionIsConnected();
-  if (!connected) {
-    setEarnedConnection("off", "Not linked");
-    setEarnedCopy({
-      kicker: "Connect Trace",
-      heading: "Sign in to the Trace app first.",
-      lead:
-        "The Safari extension needs the account from your Trace app before it can save this story.",
-      disclosure:
-        "After signing in, return to this story and open Trace from Safari’s toolbar again.",
-    });
-    setEarnedResult(
-      "failure",
-      "Trace is not connected.",
-      "Open the Trace app, sign in, then try this story again.",
-    );
-    configureEarnedActions(
-      { label: "Open Trace app", action: "open_trace_app" },
-      { hidden: true, label: "", action: "" },
-    );
-    document
-      .getElementById("popup-earned-primary")
-      ?.addEventListener("click", () => {
-        if (
-          document.getElementById("popup-earned-primary")?.dataset.earnedAction ===
-          "open_trace_app"
-        ) {
-          window.location.href = TRACE_IOS_APP_CONNECT_URL;
-        }
-      });
-    void recordEarnedEvent("connection_required");
-    return;
-  }
   const { onboarding } = await readEarnedState();
   if (onboarding.firstSaveAt) {
     const grantedOrigins = await readGrantedOrigins();
