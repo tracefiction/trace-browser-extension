@@ -523,18 +523,52 @@ test("earned-permission manual mode saves each later story from the toolbar", as
   assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "pass");
 });
 
-test("earned-permission onboarding requires the native Trace app session before injection", async () => {
+for (const promiseRuntime of [false, true]) {
+  test(`earned-permission onboarding lets connect-and-save bootstrap a clean extension session with the ${promiseRuntime ? "promise" : "callback"} API`, async () => {
+    const h = createPopupHarness({
+      sessionMode: "kernel",
+      promiseRuntime,
+      earnedPermissionOnboarding: true,
+    });
+    for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+    assert.equal(
+      h.messages.some(({ type }) => type === "TRACE_SESSION_GET_SNAPSHOT"),
+      false,
+    );
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(h.injections)),
+      [{ target: { tabId: 7 }, files: ACTIVE_TAB_PROBE_FILES }],
+    );
+    assert.equal(h.document.getElementById("popup-earned-story").dataset.state, "pass");
+    assert.equal(h.document.getElementById("popup-earned-access").dataset.state, "pass");
+    assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "pass");
+    assert.equal(
+      h.document.getElementById("popup-earned-heading").textContent,
+      "Want Trace to work automatically?",
+    );
+  });
+}
+
+test("earned-permission onboarding shows a completed connection failure instead of hanging on Checking", async () => {
   const h = createPopupHarness({
     sessionMode: "kernel",
     promiseRuntime: true,
     earnedPermissionOnboarding: true,
+    probeSaveResponse: { ok: false, error: "not_authenticated" },
   });
-  for (let attempt = 0; attempt < 5; attempt += 1) await flush();
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
 
-  assert.deepEqual(h.injections, []);
+  assert.equal(h.document.getElementById("popup-earned-story").dataset.state, "pass");
+  assert.equal(h.document.getElementById("popup-earned-access").dataset.state, "pass");
+  assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "fail");
   assert.equal(
-    h.document.getElementById("popup-earned-heading").textContent,
-    "Sign in to the Trace app first.",
+    h.document.getElementById("popup-earned-result-heading").textContent,
+    "Trace is not connected",
+  );
+  assert.equal(
+    h.document.getElementById("popup-earned-primary").textContent,
+    "Try again",
   );
 });
 
