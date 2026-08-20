@@ -1286,6 +1286,10 @@ async function initializeEarnedPermissionFlow() {
       if (action === "close") window.close();
     });
   }
+  ext.storage?.onChanged?.addListener((changes, area) => {
+    if (area !== "local" || !changes[ARCHIVE_READINESS_KEY]) return;
+    void renderEarnedSavedState();
+  });
   void recordEarnedEvent("popup_opened");
   const { onboarding } = await readEarnedState();
   if (onboarding.firstSaveAt) {
