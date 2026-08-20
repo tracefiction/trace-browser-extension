@@ -17,7 +17,7 @@
     "build:ios-active-tab-optional-hosts-probe:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel TRACE_IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE=1 node scripts/build.mjs",
     "build:ios-earned-permission-onboarding": "npm run build:core && TRACE_SESSION_MODE=kernel TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1 node scripts/build.mjs",
     "build:ios-earned-permission-onboarding:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1 node scripts/build.mjs",
-    "build:ios-earned-permission-onboarding:preview-release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1 TRACE_IOS_EARNED_PERMISSION_PREVIEW_RELEASE=1 TRACE_API_BASE=https://api.tracefiction.com TRACE_WEB_ORIGIN=https://trace-git-dev-zacs-projects-378417c9.vercel.app node scripts/build.mjs",
+    "build:ios-earned-permission-onboarding:preview-release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1 TRACE_IOS_EARNED_PERMISSION_PREVIEW_RELEASE=1 TRACE_API_BASE=https://ff-app-development.up.railway.app TRACE_WEB_ORIGIN=https://trace-git-dev-zacs-projects-378417c9.vercel.app node scripts/build.mjs",
     "build:disabled": "npm run build:core && TRACE_SESSION_MODE=disabled node scripts/build.mjs",
     "build:disabled:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=disabled node scripts/build.mjs",
     "build:release": "npm run build:kernel:release",

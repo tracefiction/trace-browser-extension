@@ -267,6 +267,14 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     }
 
     private static var billingAPIBaseURL: URL {
+        // The exact earned-permission preview keeps its web shell, extension,
+        // and native API calls in one development environment. Ordinary
+        // Release builds remain pinned to the production build setting below.
+        if TraceWebOriginGenerated.allowReleaseExperimentOrigin,
+           let previewURL = URL(string: TraceWebOriginGenerated.apiOrigin) {
+            return previewURL
+        }
+
         if let configured = configuredBillingAPIBaseURLOverride {
             return configured
         }

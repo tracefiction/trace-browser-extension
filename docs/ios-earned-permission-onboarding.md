@@ -1,17 +1,22 @@
 # iOS earned-permission onboarding
 
-Trace 0.6.4 build 23 tests the complete value-first Safari onboarding proposed
+Trace 0.6.4 build 24 tests the complete value-first Safari onboarding proposed
 after the build 18 and 19 capability probes. Build 20 proved the Safari
 permission flow but failed authentication because its preview shell fell back
 to the custom-scheme OAuth return. Build 21 proved the verified HTTPS callback,
 but its per-branch Vercel origin was not in Auth0's origin allowlist. Build 22
 uses Trace's stable dev deployment so Auth0 needs only one persistent dev
-origin. Build 23 also opens Safari Settings with only the extension identifier
+origin. Build 23 also opened Safari Settings with only the extension identifier
 actually embedded in the app; build 22 could include a retired probe identifier
 and make that recovery action appear to do nothing. A user first saves one real
 story with the access Safari grants from their explicit toolbar tap. Only after
 the Trace API confirms that save does the popup offer the broader website access
 needed for automatic tracking.
+
+Build 24 removes the previous hybrid deployment: its stable dev web shell,
+extension worker, and native API fallback all use Trace's Railway development
+API. Ordinary release builds remain pinned to the production web and API
+origins.
 
 This is a signed physical-device candidate, not yet a production permission
 migration. It uses the fresh Safari extension identifier
@@ -62,17 +67,18 @@ TRACE_WEB_ORIGIN=https://www.tracefiction.com \
 npm run build:ios-earned-permission-onboarding:release
 ```
 
-Build 23 is paired to the stable Vercel dev deployment of the web half with:
+Build 24 is paired to the stable Vercel dev deployment of the web half with:
 
 ```bash
 npm run build:ios-earned-permission-onboarding:preview-release
 ```
 
-That script accepts the compiled exact dev origin and keeps the API on
-`https://api.tracefiction.com`. In Release, that exact dev deployment is
-permitted to use `https://www.tracefiction.com/auth/callback`, so OAuth returns
-through the same verified HTTPS association as production rather than
-`traceauth://`.
+That script accepts the compiled exact dev origins
+`https://trace-git-dev-zacs-projects-378417c9.vercel.app` and
+`https://ff-app-development.up.railway.app`. In Release, that exact dev web
+deployment is permitted to use `https://www.tracefiction.com/auth/callback`, so
+OAuth returns through the same verified HTTPS association as production rather
+than `traceauth://`.
 Normal release builds reset the generated Swift flag and remain hard-bound to
 Trace's production web origin. Ordinary Debug previews still use the custom
 scheme and cannot opt into the production callback accidentally.
@@ -87,7 +93,7 @@ Trace extension.
 
 1. Delete the earlier Trace build, confirm its Safari extension has gone, and
    restart Safari.
-2. Install build 23, sign in inside Trace, and enable the Trace extension. Do
+2. Install build 24, sign in inside Trace, and enable the Trace extension. Do
    not pre-approve Website Access in Settings.
 3. From Trace, open an AO3 or FanFiction.net story. Open Trace from Safari's
    toolbar. Record any Safari prompt that appears before the Trace popup; none
