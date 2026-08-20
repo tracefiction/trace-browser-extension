@@ -255,7 +255,7 @@ function createPopupHarness({
   if (earnedPermissionOnboarding) {
     context.TRACE_IOS_ACTIVE_TAB_PROBE = true;
     context.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {
-      version: 1,
+      version: 2,
       origins: [
         "https://*.archiveofourown.org/*",
         "https://*.archiveofourown.gay/*",
@@ -594,7 +594,7 @@ test("earned-permission onboarding confirms automation only from a post-grant ar
       traceEarnedPermissionOnboardingV1: {
         firstSaveAt: grantAt - 1_000,
         grantAt,
-        registrationVersion: 1,
+        registrationVersion: 2,
         promptResult: "granted",
       },
       traceArchiveReadiness: { lastArchiveSeenAt: grantAt + 1_000 },
@@ -617,6 +617,54 @@ test("earned-permission onboarding confirms automation only from a post-grant ar
       ".popup-probe-check-value",
     ).textContent,
     "Run confirmed",
+  );
+});
+
+test("earned-permission onboarding replaces build 25 registrations before re-verifying", async () => {
+  const previousGrantAt = Date.now() - 60_000;
+  const origins = [
+    "https://*.archiveofourown.org/*",
+    "https://*.archiveofourown.gay/*",
+    "https://archive.transformativeworks.org/*",
+    "https://www.fanfiction.net/*",
+    "https://m.fanfiction.net/*",
+  ];
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    grantedOrigins: [...origins],
+    registeredContentScripts: [
+      { id: "trace-archive-automation-v1" },
+      { id: "trace-ao3-saved-filters-v1" },
+    ],
+    storageState: {
+      traceEarnedPermissionOnboardingV1: {
+        firstSaveAt: previousGrantAt - 1_000,
+        grantAt: previousGrantAt,
+        registrationVersion: 1,
+        promptResult: "granted",
+      },
+      traceArchiveReadiness: { lastArchiveSeenAt: previousGrantAt + 1_000 },
+    },
+  });
+  for (let attempt = 0; attempt < 10; attempt += 1) await flush();
+
+  assert.equal(h.registrationRequests.length, 1);
+  assert.deepEqual(
+    h.registrationRequests[0].map((registration) => registration.id),
+    ["trace-archive-automation-v1", "trace-ao3-saved-filters-v1"],
+  );
+  assert.equal(
+    h.store.traceEarnedPermissionOnboardingV1.registrationVersion,
+    2,
+  );
+  assert.ok(
+    h.store.traceEarnedPermissionOnboardingV1.grantAt > previousGrantAt,
+  );
+  assert.equal(
+    h.document.getElementById("popup-earned-primary").textContent,
+    "Reload story to verify",
   );
 });
 

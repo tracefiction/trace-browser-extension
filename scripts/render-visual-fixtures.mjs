@@ -378,7 +378,7 @@ function extensionMockSource(storageData, sessionSnapshot = null) {
         window.TRACE_SESSION_MODE = "kernel";
         window.TRACE_IOS_ACTIVE_TAB_PROBE = true;
         window.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {
-          version: 1,
+          version: 2,
           origins: [
             "https://*.archiveofourown.org/*",
             "https://*.archiveofourown.gay/*",
@@ -1092,7 +1092,7 @@ async function main() {
             traceEarnedPermissionOnboardingV1: {
               firstSaveAt: grantAt - 2_000,
               grantAt,
-              registrationVersion: 1,
+              registrationVersion: 2,
               promptResult: "granted",
             },
             traceArchiveReadiness: { lastArchiveSeenAt: grantAt + 2_000 },
