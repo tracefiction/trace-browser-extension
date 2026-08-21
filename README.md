@@ -59,13 +59,16 @@ authenticated onboarding diagnostic so release-specific setup failures can be
 distinguished without collecting story URLs, archive browsing history, or
 account email.
 
-The iOS earned-permission TestFlight build saves the first story only after an
-explicit Safari toolbar tap. After the server confirms that save, a separate
-button can request five optional AO3/FanFiction.net origin patterns for
-automatic tracking. Refusal preserves toolbar-based saving. Its diagnostic
-funnel stays in extension-local storage and contains only bounded event names
-and timestamps; it is not network telemetry and contains no URLs, story or
-account identity, page content, or browsing history. See
+The iOS earned-permission build asks for Website Access before any first-story
+write. If access was missed in Settings, an explicit Safari toolbar tap lets the
+popup identify the current supported story, request exactly five optional
+AO3/FanFiction.net origin patterns, register the production scripts, and reload
+the story. The normal content-script handoff then supplies the fresh run and
+server-confirmed save. Denial or partial coverage saves nothing; there is no
+toolbar-only completion mode. Its diagnostic funnel stays in extension-local
+storage and contains only bounded event names and timestamps; it is not network
+telemetry and contains no URLs, story or account identity, page content, or
+browsing history. See
 [`docs/ios-earned-permission-onboarding.md`](docs/ios-earned-permission-onboarding.md).
 
 The metadata-improvement preference is separate from automatic progress tracking and can be turned off in the extension popup.

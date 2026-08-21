@@ -14,6 +14,18 @@ export interface RuntimePort {
 
 export interface PermissionsPort {
   readonly getAll: (...args: unknown[]) => unknown;
+  readonly onAdded?: {
+    addListener(listener: () => void): void;
+  };
+  readonly onRemoved?: {
+    addListener(listener: () => void): void;
+  };
+}
+
+export interface ScriptingPort {
+  readonly getRegisteredContentScripts: (...args: unknown[]) => unknown;
+  readonly registerContentScripts: (...args: unknown[]) => unknown;
+  readonly unregisterContentScripts: (...args: unknown[]) => unknown;
 }
 
 export interface RuntimeMessageSender {

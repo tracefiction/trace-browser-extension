@@ -1,17 +1,14 @@
 # iOS earned-permission onboarding
 
-Trace 0.6.4 build 28 tests the complete value-first Safari onboarding proposed
-after the build 18 and 19 capability probes. Build 20 proved the Safari
+Trace 0.6.4 builds 18–28 established the Safari capabilities needed for the
+production permission-first onboarding in build 29. Build 20 proved the Safari
 permission flow but failed authentication because its preview shell fell back
 to the custom-scheme OAuth return. Build 21 proved the verified HTTPS callback,
 but its per-branch Vercel origin was not in Auth0's origin allowlist. Build 22
 uses Trace's stable dev deployment so Auth0 needs only one persistent dev
 origin. Build 23 also opened Safari Settings with only the extension identifier
 actually embedded in the app; build 22 could include a retired probe identifier
-and make that recovery action appear to do nothing. A user first saves one real
-story with the access Safari grants from their explicit toolbar tap. Only after
-the Trace API confirms that save does the popup offer the broader website access
-needed for automatic tracking.
+and make that recovery action appear to do nothing.
 
 Build 24 removed the previous hybrid deployment: its stable dev web shell,
 extension worker, and native API fallback all use Trace's Railway development
@@ -45,27 +42,47 @@ from producing a false clean-install pass. The containing app remains
 `com.tracefiction.trace`, and the embedded identifier has exactly one component
 below it as App Store Connect requires.
 
-This is a signed physical-device candidate, not yet a production permission
-migration.
+Build 28 proved the API surface, exact five-origin grant, dynamic registration,
+fresh-run evidence, AO3 variants, FanFiction.net, Safari restart, and device
+reboot. The production decision on 2026-08-21 supersedes its save-first product
+ordering: active-tab access remains only a recovery bridge, and no story may be
+saved before the required Website Access grant.
+
+Build 29 implements that production ordering. It combines extension enablement
+and Website Access in one Settings visit, uses a literal Safari toolbar guide
+only when the automatic path does not start, requests the exact five-origin
+bundle before any save, and requires both a fresh post-registration run and a
+server-confirmed save. Its clean-install identifier is
+`com.tracefiction.trace.earned-v3` so retained build 28 permissions cannot
+produce a false pass.
 
 ## User contract
 
 When `TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1`:
 
-- the app setup asks the user to enable Trace, choose an AO3 or
-  FanFiction.net story, and open Trace from Safari's toolbar;
-- the first toolbar action uses `activeTab` to inject only into that story tab;
-- the popup reports the story as saved only after the server confirms it;
-- no durable website access is requested before that first value;
-- a separate direct click offers automatic tracking across exactly five
-  supported origin patterns;
-- declining leaves a working one-story-at-a-time toolbar path, including for
-  later stories;
-- accepting registers the production archive scripts persistently and reloads
-  the story;
-- setup is called complete only after a fresh post-grant archive heartbeat
-  proves that the registered script actually ran;
-- revoked access or missing registrations produce a recoverable paused state;
+- the app first asks the user to enable Trace and set Website Access to Allow in
+  one Safari Settings visit;
+- after the extension is enabled, the user chooses an AO3 or FanFiction.net
+  story; a complete Settings grant lets the normal content script start and
+  save automatically;
+- if Trace does not start, the app shows a literal Safari extension-button
+  guide plus Safari Settings as the alternate recovery;
+- the popup uses `activeTab` only to identify the current supported story. It
+  does not inject a collector or send a save command before permission;
+- one direct action requests exactly five supported origin patterns and tells
+  the reader to choose **Always Allow**;
+- denial/cancel or an incomplete grant saves nothing and remains retryable;
+- a complete existing grant skips the prompt;
+- the background worker owns persistent production-script registration. It
+  reconciles at startup, on permission changes, and on popup request;
+- partial coverage unregisters the bundle so one working hostname cannot be
+  presented as complete setup;
+- after registration, the popup reloads the story. The normal pending-handoff
+  path then supplies the fresh run and server-confirmed save;
+- setup is complete only after both that fresh post-registration run and the
+  current app account's server confirmation;
+- revoked or expired access returns to the same permission recovery on the next
+  positive signal; inactivity alone is never treated as permission loss;
 - Chrome and Firefox packages remain production-shaped.
 
 The five optional patterns are:
@@ -92,7 +109,8 @@ TRACE_WEB_ORIGIN=https://www.tracefiction.com \
 npm run build:ios-earned-permission-onboarding:release
 ```
 
-Build 28 is paired to the stable Vercel dev deployment of the web half with:
+The build 29 physical-device candidate is paired to the stable Vercel dev
+deployment of the web half with:
 
 ```bash
 npm run build:ios-earned-permission-onboarding:preview-release
@@ -118,31 +136,37 @@ Trace extension.
 
 1. Delete the earlier Trace build, confirm its Safari extension has gone, and
    restart Safari.
-2. Install build 28, sign in inside Trace, and enable the Trace extension. Do
-   not pre-approve Website Access in Settings.
-3. Open an AO3 or FanFiction.net story without opening Trace from Safari's
-   toolbar. Confirm Trace does not run, scroll the page, show its story control,
-   or save the story. Any of those behaviors means the clean-state test failed.
-4. From Trace, open an AO3 or FanFiction.net story. Open Trace from Safari's
-   toolbar. Record any Safari prompt that appears before the Trace popup; none
-   is expected for this first toolbar-granted save.
-5. Confirm the popup identifies the story and says **Server confirmed**.
-   Confirm the story exists in the signed-in Trace library.
-6. Choose **Not now**. Open a different supported story and invoke Trace again.
-   Confirm that second story is also server-confirmed and appears in the
-   library. This proves the manual fallback is real rather than explanatory UI.
-7. Reopen Trace and choose **Turn on automatic tracking**. Record Safari's exact
-   prompts and choices. Accept the requested supported addresses.
-8. Let Trace reload the story. Keep the popup open through the reload when
-   Safari permits it; otherwise reopen it after the page finishes. It
-   must say **Automatic tracking is on** only after **Run confirmed** appears.
-9. Open new stories on canonical AO3, an AO3 variant, and FFN without invoking
+2. Install the candidate, sign in inside Trace, and open Safari Settings from
+   onboarding. Turn on **Allow Extension** and set the listed Website Access
+   permissions to **Allow** in that one visit.
+3. Return to Trace, choose AO3 or FanFiction.net, and open a story. Confirm Trace
+   starts without a toolbar action, the fresh run is received, the server
+   confirms the save, and only then does the app complete onboarding.
+4. Reset to a clean extension identity. This time enable the extension but leave
+   Website Access on Ask. Open a story from Trace. Confirm no story is saved.
+5. Follow the app's visual recovery: open Trace from Safari's extension button.
+   Confirm the popup identifies the story but sends no save and presents
+   **Allow access and add story**.
+6. Choose that action and **Always Allow** in every Safari prompt. Confirm the
+   exact five-origin bundle is granted, registration succeeds, and the story
+   reloads. The reloaded content script must produce the run and save receipts.
+7. Repeat the clean recovery but choose Deny/cancel. Confirm the story remains
+   absent, **Try again** is available, and the Settings path is visible. Retry
+   successfully without restarting onboarding.
+8. Start with four of five origins allowed. Confirm Trace treats coverage as
+   incomplete, does not save, and requests/reconciles the missing bundle.
+9. Grant access but simulate one registration failure. Confirm retry skips the
+   permission prompt and retries registration/reload only.
+10. Open new stories on canonical AO3, an AO3 variant, and FFN without invoking
    the toolbar. Confirm the overlay/automatic behavior and Trace library saves.
-10. Restart Safari and repeat on AO3 and FFN. Reboot the device and repeat once.
-11. Change one relevant Safari Website Access entry back to Ask or Deny. Confirm
-    the popup reports automatic tracking as paused while a deliberate toolbar
-    tap can still save the current story.
-12. Open Trace on an unrelated site. It must not inject, read, or request
+11. Restart Safari and repeat on AO3 and FFN. Reboot the device and repeat once.
+    If Safari offers a one-day grant, repeat after expiry and confirm the next
+    missing run returns to permission recovery without inferring loss from idle
+    time alone.
+12. Change one relevant Safari Website Access entry back to Ask or Deny. Confirm
+    the dynamic bundle is no longer presented as ready and the next story
+    returns to recovery without being saved first.
+13. Open Trace on an unrelated site. It must not inject, read, or request
     access to that site.
 
 Record the iOS version, tested host family, prompt wording, first failing row,
@@ -151,8 +175,9 @@ Do not record private story titles or URLs.
 
 ## Decision rule
 
-The candidate passes only if first value arrives before the broad permission
-prompt, the optional prompt is caused by the labeled direct click, acceptance
-survives Safari restart and device reboot, the five host families work without
-extra grants, refusal preserves manual saves, and every success claim is backed
-by either server confirmation or the fresh archive heartbeat it describes.
+The candidate passes only if no first-story write occurs before the complete
+grant, the permission prompt is caused by the labeled direct action, acceptance
+survives Safari restart and device reboot, all five host patterns work without
+extra grants, denial and partial coverage stay incomplete and retryable, and
+onboarding success is backed by both a fresh post-registration run and current
+account server confirmation.
