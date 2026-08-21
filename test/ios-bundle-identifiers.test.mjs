@@ -27,6 +27,13 @@ test("accepts one embedded component below the app bundle identifier", () => {
     ),
     null,
   );
+  assert.equal(
+    embeddedBundleIdentifierError(
+      APP_BUNDLE_IDENTIFIER,
+      "com.tracefiction.trace.earned-v2",
+    ),
+    null,
+  );
 });
 
 test("rejects multiple components below the app bundle identifier", () => {

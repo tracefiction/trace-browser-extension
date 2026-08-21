@@ -227,9 +227,16 @@ test("native auth callbacks use one verified HTTPS route with a custom-scheme fa
 
 test("opening iOS extension Settings is immediate and independent of authentication", () => {
   const app = read("iOS (App)", "TraceWebViewController.swift");
+  const project = read("Trace.xcodeproj", "project.pbxproj");
   assert.match(
     app,
-    /safariExtensionBundleIdentifier = "com\.tracefiction\.trace\.earned-permission"/,
+    /safariExtensionBundleIdentifier = "com\.tracefiction\.trace\.earned-v2"/,
+  );
+  assert.equal(
+    project.match(
+      /PRODUCT_BUNDLE_IDENTIFIER = com\.tracefiction\.trace\.earned-v2;/g,
+    )?.length,
+    2,
   );
   const start = app.indexOf(
     "private func handleTraceSafariExtensionSettingsRequest",
