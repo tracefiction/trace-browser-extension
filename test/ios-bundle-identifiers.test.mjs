@@ -30,7 +30,7 @@ test("accepts one embedded component below the app bundle identifier", () => {
   assert.equal(
     embeddedBundleIdentifierError(
       APP_BUNDLE_IDENTIFIER,
-      "com.tracefiction.trace.earned-v2",
+      "com.tracefiction.trace.earned-v3",
     ),
     null,
   );

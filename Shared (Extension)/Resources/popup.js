@@ -66,6 +66,7 @@ const ACTIVE_TAB_PROBE_FILES = Object.freeze([
   "trace-finish-qualify.js",
   "collector.js",
 ]);
+let earnedPreparedContext = null;
 
 const fallbackStatus = {
   state: "signed_out",
@@ -740,6 +741,10 @@ function normalizedEarnedState(value) {
       value.promptResult === "granted" || value.promptResult === "declined"
         ? value.promptResult
         : null,
+    completedAt:
+      typeof value.completedAt === "number" && value.completedAt > 0
+        ? value.completedAt
+        : null,
   };
 }
 
@@ -773,18 +778,6 @@ function earnedOrigins() {
     : [];
 }
 
-function earnedRegistrations() {
-  return Array.isArray(EARNED_PERMISSION_ONBOARDING?.registrations)
-    ? EARNED_PERMISSION_ONBOARDING.registrations.filter(
-        (registration) =>
-          registration &&
-          typeof registration.id === "string" &&
-          Array.isArray(registration.matches) &&
-          Array.isArray(registration.js),
-      )
-    : [];
-}
-
 async function readGrantedOrigins() {
   try {
     const response = await extensionPromiseCall(ext.permissions, "getAll");
@@ -800,53 +793,6 @@ function hasCompleteEarnedGrant(grantedOrigins) {
   const granted = new Set(grantedOrigins);
   const required = earnedOrigins();
   return required.length > 0 && required.every((origin) => granted.has(origin));
-}
-
-async function readRegisteredScriptIds() {
-  try {
-    const registrations = await extensionPromiseCall(
-      ext.scripting,
-      "getRegisteredContentScripts",
-    );
-    return new Set(
-      Array.isArray(registrations)
-        ? registrations
-            .map((registration) => registration?.id)
-            .filter((id) => typeof id === "string")
-        : [],
-    );
-  } catch {
-    return new Set();
-  }
-}
-
-function hasCompleteEarnedRegistration(registeredIds) {
-  const required = earnedRegistrations();
-  return (
-    required.length > 0 &&
-    required.every((registration) => registeredIds.has(registration.id))
-  );
-}
-
-async function ensureEarnedRegistrations() {
-  const registrations = earnedRegistrations();
-  if (registrations.length === 0) throw new Error("registration_config_missing");
-  const currentIds = await readRegisteredScriptIds();
-  const staleIds = registrations
-    .map((registration) => registration.id)
-    .filter((id) => currentIds.has(id));
-  if (staleIds.length > 0) {
-    await extensionPromiseCall(ext.scripting, "unregisterContentScripts", [
-      { ids: staleIds },
-    ]);
-  }
-  await extensionPromiseCall(ext.scripting, "registerContentScripts", [
-    registrations,
-  ]);
-  const confirmedIds = await readRegisteredScriptIds();
-  if (!hasCompleteEarnedRegistration(confirmedIds)) {
-    throw new Error("registration_not_confirmed");
-  }
 }
 
 function setEarnedCheck(id, state, label, rowLabel = null) {
@@ -899,256 +845,14 @@ function configureEarnedActions(primary, secondary = null) {
   setEarnedAction(document.getElementById("popup-earned-primary"), primary);
   setEarnedAction(
     document.getElementById("popup-earned-secondary"),
-    secondary || { hidden: true, label: "Not now", action: "" },
+    secondary || { hidden: true, label: "", action: "" },
   );
 }
 
 function resetEarnedLedger() {
   setEarnedCheck("popup-earned-story", "checking", "Checking", "Story page");
-  setEarnedCheck("popup-earned-access", "waiting", "Waiting", "This story only");
+  setEarnedCheck("popup-earned-access", "waiting", "Waiting", "Website access");
   setEarnedCheck("popup-earned-save", "waiting", "Waiting", "Saved to Trace");
-}
-
-function renderEarnedAutomationInvitation() {
-  setEarnedConnection("connected", "Saved");
-  setEarnedCopy({
-    kicker: "Story saved",
-    heading: "Want Trace to work automatically?",
-    lead:
-      "Allow Trace on AO3 and FanFiction.net once, and future stories can save as they open.",
-    disclosure:
-      "Safari will list five supported AO3 and FanFiction.net addresses. Trace does not request access to other websites.",
-  });
-  setEarnedCheck("popup-earned-story", "pass", "Confirmed");
-  setEarnedCheck("popup-earned-access", "pass", "This tab");
-  setEarnedCheck("popup-earned-save", "pass", "Server confirmed");
-  setEarnedResult(
-    "success",
-    "Your story is in your library.",
-    "Automatic tracking is optional. You can keep using the Safari toolbar one story at a time.",
-  );
-  configureEarnedActions(
-    { label: "Turn on automatic tracking", action: "request_automation" },
-    { label: "Not now", action: "decline_automation" },
-  );
-}
-
-function renderEarnedVerificationPending() {
-  setEarnedConnection("warn", "Checking");
-  setEarnedCopy({
-    kicker: "Automatic tracking",
-    heading: "One quick check.",
-    lead:
-      "Reload this story. Trace should appear without another toolbar tap.",
-    disclosure:
-      "Trace will call setup complete only after its archive script actually runs.",
-  });
-  setEarnedCheck("popup-earned-story", "pass", "Saved");
-  setEarnedCheck(
-    "popup-earned-access",
-    "pass",
-    "Five sites allowed",
-    "Website access",
-  );
-  setEarnedCheck(
-    "popup-earned-save",
-    "checking",
-    "Verify next load",
-    "Automatic tracking",
-  );
-  setEarnedResult(
-    "checking",
-    "Safari access is allowed.",
-    "The tracking scripts are registered. Reload once to prove they run.",
-  );
-  configureEarnedActions(
-    { label: "Reload story to verify", action: "reload_to_verify" },
-    { label: "Do this later", action: "close" },
-  );
-}
-
-function renderEarnedAutomationConfirmed() {
-  setEarnedConnection("connected", "Ready");
-  setEarnedCopy({
-    kicker: "Setup complete",
-    heading: "Automatic tracking is on.",
-    lead: "Trace ran automatically after website access was enabled.",
-    disclosure:
-      "If you later change Safari access, open Trace from the toolbar to recover or save one story manually.",
-  });
-  setEarnedCheck("popup-earned-story", "pass", "Saved");
-  setEarnedCheck(
-    "popup-earned-access",
-    "pass",
-    "Five sites allowed",
-    "Website access",
-  );
-  setEarnedCheck(
-    "popup-earned-save",
-    "pass",
-    "Run confirmed",
-    "Automatic tracking",
-  );
-  setEarnedResult(
-    "success",
-    "You’re ready.",
-    "Future supported story pages can save and update while you read.",
-  );
-  configureEarnedActions(
-    { label: "Done", action: "close" },
-    { hidden: true, label: "", action: "" },
-  );
-}
-
-function renderEarnedAutomationDeclined() {
-  setEarnedConnection("connected", "Manual");
-  setEarnedCopy({
-    kicker: "Story saved",
-    heading: "Use Trace when you need it.",
-    lead: "Open Trace from Safari’s toolbar on each story you want to save.",
-    disclosure:
-      "Nothing else was allowed. You can turn on automatic tracking from this panel later.",
-  });
-  setEarnedCheck("popup-earned-story", "pass", "Confirmed");
-  setEarnedCheck("popup-earned-access", "pass", "This tab");
-  setEarnedCheck("popup-earned-save", "pass", "Server confirmed");
-  setEarnedResult(
-    "success",
-    "Your story is safe.",
-    "Trace will keep working one story at a time from the toolbar.",
-  );
-  configureEarnedActions(
-    { label: "Turn on automatic tracking", action: "request_automation" },
-    { label: "Done", action: "close" },
-  );
-}
-
-function renderEarnedAutomationPaused() {
-  setEarnedConnection("error", "Paused");
-  setEarnedCopy({
-    kicker: "Automatic tracking paused",
-    heading: "Safari access changed.",
-    lead:
-      "Your saved stories are untouched. Allow the supported sites again to restore automatic tracking.",
-    disclosure:
-      "You can also keep saving the current story from the Safari toolbar without enabling automation.",
-  });
-  setEarnedCheck("popup-earned-story", "pass", "Library safe");
-  setEarnedCheck("popup-earned-access", "fail", "Needs access");
-  setEarnedCheck("popup-earned-save", "waiting", "Paused");
-  setEarnedResult(
-    "failure",
-    "Automatic tracking needs access.",
-    "Safari will show the same five supported addresses.",
-  );
-  configureEarnedActions(
-    { label: "Allow automatic tracking again", action: "request_automation" },
-    { label: "Not now", action: "close" },
-  );
-}
-
-function earnedAutomationVerified(onboarding, readiness) {
-  return Boolean(
-    onboarding.grantAt &&
-      typeof readiness?.lastArchiveSeenAt === "number" &&
-      readiness.lastArchiveSeenAt > onboarding.grantAt,
-  );
-}
-
-async function renderEarnedSavedState() {
-  const [{ onboarding, readiness }, grantedOrigins, registeredIds] =
-    await Promise.all([
-      readEarnedState(),
-      readGrantedOrigins(),
-      readRegisteredScriptIds(),
-    ]);
-  const hasGrant = hasCompleteEarnedGrant(grantedOrigins);
-  const hasRegistration =
-    hasCompleteEarnedRegistration(registeredIds) &&
-    onboarding.registrationVersion ===
-      (EARNED_PERMISSION_ONBOARDING.version || 1);
-  if (onboarding.grantAt && !hasGrant) {
-    renderEarnedAutomationPaused();
-    return;
-  }
-  if (
-    hasGrant &&
-    hasRegistration &&
-    earnedAutomationVerified(onboarding, readiness)
-  ) {
-    renderEarnedAutomationConfirmed();
-    return;
-  }
-  if (hasGrant) {
-    if (!hasRegistration) {
-      try {
-        await ensureEarnedRegistrations();
-        await writeEarnedState({
-          grantAt: Date.now(),
-          registrationVersion: EARNED_PERMISSION_ONBOARDING.version || 1,
-          promptResult: "granted",
-        });
-        void recordEarnedEvent("automation_registration_recovered");
-      } catch {
-        renderEarnedAutomationPaused();
-        return;
-      }
-    }
-    if (!onboarding.grantAt) {
-      await writeEarnedState({
-        grantAt: Date.now(),
-        registrationVersion: EARNED_PERMISSION_ONBOARDING.version || 1,
-        promptResult: "granted",
-      });
-    }
-    renderEarnedVerificationPending();
-    return;
-  }
-  if (onboarding.promptResult === "declined") {
-    renderEarnedAutomationDeclined();
-    return;
-  }
-  renderEarnedAutomationInvitation();
-}
-
-async function requestEarnedAutomation() {
-  configureEarnedActions(
-    { label: "Waiting for Safari…", action: "", disabled: true },
-    { hidden: true, label: "", action: "" },
-  );
-  setEarnedResult(
-    "checking",
-    "Choose Always Allow in Safari.",
-    "The next prompt covers only the supported AO3 and FanFiction.net addresses.",
-  );
-  void recordEarnedEvent("automation_permission_requested");
-  try {
-    const granted = await extensionPromiseCall(ext.permissions, "request", [
-      { origins: earnedOrigins() },
-    ]);
-    if (granted !== true) {
-      await writeEarnedState({ promptResult: "declined" });
-      void recordEarnedEvent("automation_permission_declined");
-      renderEarnedAutomationDeclined();
-      return;
-    }
-    const grantedOrigins = await readGrantedOrigins();
-    if (!hasCompleteEarnedGrant(grantedOrigins)) {
-      throw new Error("permission_not_confirmed");
-    }
-    await ensureEarnedRegistrations();
-    await writeEarnedState({
-      grantAt: Date.now(),
-      registrationVersion: EARNED_PERMISSION_ONBOARDING.version || 1,
-      promptResult: "granted",
-    });
-    void recordEarnedEvent("automation_registered");
-    renderEarnedVerificationPending();
-    await reloadEarnedStory();
-  } catch {
-    void recordEarnedEvent("automation_setup_failed");
-    renderEarnedAutomationPaused();
-  }
 }
 
 async function reloadEarnedStory() {
@@ -1161,101 +865,314 @@ async function reloadEarnedStory() {
     setEarnedResult(
       "failure",
       "Reload this story manually.",
-      "Then reopen Trace. The panel will confirm whether automatic tracking ran.",
+      "Then return to the Trace app. It will confirm the fresh run and server save.",
     );
+    configureEarnedActions({
+      label: "Try reload again",
+      action: "reload_to_verify",
+    });
   }
 }
 
-async function runEarnedFirstSave() {
-  setEarnedConnection("warn", "Saving");
-  resetEarnedLedger();
+function renderEarnedPermissionInvitation(story, hasGrant) {
+  setEarnedConnection("warn", "Setup");
   setEarnedCopy({
-    kicker: "Your first story",
-    heading: "Saving this story…",
-    lead: "Trace is using access to this tab only.",
+    kicker: "Finish setup",
+    heading: hasGrant
+      ? "Add this story to Trace."
+      : "Allow access and add this story.",
+    lead:
+      "Trace found this story. Website access is required before Trace can save it or work on future stories.",
+    disclosure: hasGrant
+      ? "Safari already reports the supported sites as allowed. Trace will verify the setup and reload this story once."
+      : "When Safari asks, choose Always Allow. Trace requests only the five supported AO3 and FanFiction.net addresses.",
+  });
+  setEarnedCheck("popup-earned-story", "pass", story.site, "Story page");
+  setEarnedCheck(
+    "popup-earned-access",
+    hasGrant ? "pass" : "waiting",
+    hasGrant ? "Allowed" : "Needed",
+    "Website access",
+  );
+  setEarnedCheck(
+    "popup-earned-save",
+    "waiting",
+    "After access",
+    "Saved to Trace",
+  );
+  setEarnedResult(
+    hasGrant ? "checking" : "failure",
+    hasGrant ? "Website access found." : "One permission remains.",
+    hasGrant
+      ? "Tap below to add the story."
+      : "Trace will not save the story until access is allowed.",
+  );
+  configureEarnedActions(
+    {
+      label: hasGrant ? "Add this story" : "Allow access and add story",
+      action: "allow_and_add",
+    },
+  );
+}
+
+function renderEarnedAccessPending(story) {
+  setEarnedConnection("warn", "Finishing");
+  setEarnedCopy({
+    kicker: "Finishing setup",
+    heading: "Access allowed. Adding your story…",
+    lead:
+      "Trace will reload this story once and confirm the save in your library.",
     disclosure:
-      "Trace cannot see other tabs or websites from this one-time action.",
+      "Setup completes only after Trace runs on the reloaded page and the server confirms the story.",
+  });
+  setEarnedCheck("popup-earned-story", "pass", story.site, "Story page");
+  setEarnedCheck(
+    "popup-earned-access",
+    "pass",
+    "Allowed",
+    "Website access",
+  );
+  setEarnedCheck(
+    "popup-earned-save",
+    "checking",
+    "Reloading",
+    "Saved to Trace",
+  );
+  setEarnedResult(
+    "checking",
+    "Keep this panel open for a moment.",
+    "Safari may close it as the story reloads. Trace will continue in the page.",
+  );
+  configureEarnedActions({
+    label: "Reloading story…",
+    action: "",
+    disabled: true,
+  });
+}
+
+function renderEarnedPermissionDeclined(story) {
+  setEarnedConnection("error", "Access needed");
+  setEarnedCopy({
+    kicker: "Website access needed",
+    heading: "Access wasn’t allowed.",
+    lead:
+      "Trace did not add the story. Try again and choose Always Allow when Safari asks.",
+    disclosure:
+      "If the prompt no longer appears, open Settings > Apps > Safari > Extensions > Trace, then set Permissions to Allow.",
+  });
+  setEarnedCheck("popup-earned-story", "pass", story.site, "Story page");
+  setEarnedCheck(
+    "popup-earned-access",
+    "fail",
+    "Not allowed",
+    "Website access",
+  );
+  setEarnedCheck(
+    "popup-earned-save",
+    "waiting",
+    "Not added",
+    "Saved to Trace",
+  );
+  setEarnedResult(
+    "failure",
+    "Nothing was saved.",
+    "You can retry without leaving this story.",
+  );
+  configureEarnedActions({ label: "Try again", action: "allow_and_add" });
+}
+
+function renderEarnedRegistrationFailure(story) {
+  setEarnedConnection("error", "Try again");
+  setEarnedCopy({
+    kicker: "Setup needs attention",
+    heading: "Trace couldn’t finish setup.",
+    lead:
+      "Website access is allowed, but Trace could not prepare the supported sites.",
+    disclosure:
+      "Retry first. If this repeats, restart Safari, reopen this story, and open Trace again.",
+  });
+  setEarnedCheck("popup-earned-story", "pass", story.site, "Story page");
+  setEarnedCheck(
+    "popup-earned-access",
+    "pass",
+    "Allowed",
+    "Website access",
+  );
+  setEarnedCheck(
+    "popup-earned-save",
+    "fail",
+    "Not added",
+    "Saved to Trace",
+  );
+  setEarnedResult(
+    "failure",
+    "The story was not saved.",
+    "Retrying will not ask for website access again.",
+  );
+  configureEarnedActions({ label: "Try again", action: "allow_and_add" });
+}
+
+function renderEarnedUnsupportedStory() {
+  setEarnedConnection("error", "Story needed");
+  setEarnedCopy({
+    kicker: "Finish setup",
+    heading: "Open a supported story first.",
+    lead:
+      "Open an AO3 or FanFiction.net story, then open Trace from Safari’s toolbar again.",
+    disclosure:
+      "Trace will not request website access or save anything from this page.",
+  });
+  setEarnedCheck("popup-earned-story", "fail", "Not found", "Story page");
+  setEarnedCheck(
+    "popup-earned-access",
+    "waiting",
+    "Not requested",
+    "Website access",
+  );
+  setEarnedCheck(
+    "popup-earned-save",
+    "waiting",
+    "Not added",
+    "Saved to Trace",
+  );
+  setEarnedResult(
+    "failure",
+    "This isn’t a supported story page.",
+    "AO3 and FanFiction.net stories are supported.",
+  );
+  configureEarnedActions({ label: "Check again", action: "prepare" });
+}
+
+function renderEarnedRunConfirmed() {
+  setEarnedConnection("connected", "Ready");
+  setEarnedCopy({
+    kicker: "Setup complete",
+    heading: "Trace is ready.",
+    lead: "Website access and a fresh story-page run are confirmed.",
+    disclosure:
+      "Return to the Trace app. It will finish only after the server confirms your story.",
+  });
+  setEarnedCheck("popup-earned-story", "pass", "Confirmed", "Story page");
+  setEarnedCheck(
+    "popup-earned-access",
+    "pass",
+    "Allowed",
+    "Website access",
+  );
+  setEarnedCheck(
+    "popup-earned-save",
+    "pass",
+    "Run confirmed",
+    "Trace on sites",
+  );
+  setEarnedResult(
+    "success",
+    "Return to the Trace app.",
+    "Trace will show setup complete after the server confirms your story.",
+  );
+  configureEarnedActions({ label: "Done", action: "close" });
+}
+
+function earnedRunVerified(onboarding, readiness) {
+  return Boolean(
+    onboarding.grantAt &&
+      typeof readiness?.lastArchiveSeenAt === "number" &&
+      readiness.lastArchiveSeenAt > onboarding.grantAt,
+  );
+}
+
+async function reconcileEarnedRegistration() {
+  return extensionPromiseCall(ext.runtime, "sendMessage", [
+    { type: "TRACE_EARNED_PERMISSION_RECONCILE" },
+  ]);
+}
+
+async function prepareEarnedPermissionFlow() {
+  resetEarnedLedger();
+  const tab = await probeQueryActiveTab().catch(() => null);
+  const story = classifyProbeStory(tab?.url);
+  if (!tab || !Number.isInteger(tab.id) || !story.ok) {
+    earnedPreparedContext = null;
+    renderEarnedUnsupportedStory();
+    return;
+  }
+  const [{ onboarding, readiness }, grantedOrigins] = await Promise.all([
+    readEarnedState(),
+    readGrantedOrigins(),
+  ]);
+  const hasGrant = hasCompleteEarnedGrant(grantedOrigins);
+  earnedPreparedContext = Object.freeze({ story, hasGrant });
+  if (hasGrant && earnedRunVerified(onboarding, readiness)) {
+    if (!onboarding.completedAt) {
+      await writeEarnedState({ completedAt: Date.now() });
+    }
+    renderEarnedRunConfirmed();
+    return;
+  }
+  if (hasGrant) {
+    const registration = await reconcileEarnedRegistration().catch(() => null);
+    if (registration?.ok !== true || registration?.registered !== true) {
+      renderEarnedRegistrationFailure(story);
+      return;
+    }
+    void recordEarnedEvent("website_access_registration_ready");
+  }
+  renderEarnedPermissionInvitation(story, hasGrant);
+}
+
+async function allowAccessAndAddEarnedStory() {
+  const prepared = earnedPreparedContext;
+  if (!prepared?.story?.ok) {
+    await prepareEarnedPermissionFlow();
+    return;
+  }
+  // Safari requires permissions.request to be invoked directly from the user
+  // gesture. Start it before any awaited tab, storage, or permission reads.
+  const permissionRequest = prepared.hasGrant
+    ? null
+    : extensionPromiseCall(ext.permissions, "request", [
+        { origins: earnedOrigins() },
+      ]);
+  configureEarnedActions({
+    label: "Waiting for Safari…",
+    action: "",
+    disabled: true,
   });
   setEarnedResult(
     "checking",
-    "Connecting to your library…",
-    "Keep this panel open for a moment.",
+    "Choose Always Allow in Safari.",
+    "Trace will not add the story unless the complete supported-site bundle is allowed.",
   );
-  configureEarnedActions(
-    { label: "Saving…", action: "", disabled: true },
-    { hidden: true, label: "", action: "" },
-  );
-  void recordEarnedEvent("first_story_save_started");
+  const story = prepared.story;
+  void recordEarnedEvent("website_access_action_started");
   try {
-    const tab = await probeQueryActiveTab();
-    const story = classifyProbeStory(tab?.url);
-    if (!tab || !Number.isInteger(tab.id) || !story.ok) {
-      setEarnedCheck("popup-earned-story", "fail", "Not a story");
-      throw new Error("unsupported_page");
+    if (permissionRequest) {
+      void recordEarnedEvent("website_access_requested");
     }
-    setEarnedCheck("popup-earned-story", "pass", story.site);
-
-    let ping = null;
-    try {
-      ping = await probeSendTabMessage(tab.id, {
-        type: "TRACE_ACTIVE_TAB_PROBE_PING",
-      });
-    } catch {
-      // Expected on the first toolbar action for this tab.
+    const granted = permissionRequest ? await permissionRequest : true;
+    const grantedOrigins = await readGrantedOrigins();
+    if (granted !== true || !hasCompleteEarnedGrant(grantedOrigins)) {
+      await writeEarnedState({ promptResult: "declined" });
+      void recordEarnedEvent("website_access_not_allowed");
+      renderEarnedPermissionDeclined(story);
+      return;
     }
-    if (ping?.ok !== true || ping?.probe !== true) {
-      await probeInject(tab.id);
-      ping = await probeSendTabMessage(tab.id, {
-        type: "TRACE_ACTIVE_TAB_PROBE_PING",
-      });
+    earnedPreparedContext = Object.freeze({ story, hasGrant: true });
+    const registration = await reconcileEarnedRegistration();
+    if (registration?.ok !== true || registration?.registered !== true) {
+      throw new Error("registration_failed");
     }
-    if (ping?.ok !== true || ping?.probe !== true) {
-      throw new Error("current_tab_denied");
+    void recordEarnedEvent("website_access_registered");
+    renderEarnedAccessPending(story);
+    await reloadEarnedStory();
+  } catch {
+    void recordEarnedEvent("website_access_setup_failed");
+    const grantedOrigins = await readGrantedOrigins();
+    if (hasCompleteEarnedGrant(grantedOrigins)) {
+      renderEarnedRegistrationFailure(story);
+    } else {
+      renderEarnedPermissionDeclined(story);
     }
-    setEarnedCheck("popup-earned-access", "pass", "Allowed by tap");
-
-    const response = await probeSendTabMessage(tab.id, {
-      type: "TRACE_ACTIVE_TAB_PROBE_SAVE",
-    });
-    if (
-      response?.ok !== true ||
-      !["saved", "already_saved"].includes(response?.state) ||
-      response?.serverConfirmed !== true
-    ) {
-      throw new Error(response?.error || "save_failed");
-    }
-    setEarnedCheck("popup-earned-save", "pass", "Server confirmed");
-    await writeEarnedState({ firstSaveAt: Date.now() });
-    void recordEarnedEvent("first_story_save_confirmed");
-    await renderEarnedSavedState();
-  } catch (error) {
-    setEarnedConnection("error", "Issue");
-    const reason = typeof error?.message === "string" ? error.message : "save_failed";
-    const accessPassed =
-      document.getElementById("popup-earned-access")?.dataset.state === "pass";
-    if (reason !== "unsupported_page") {
-      setEarnedCheck(
-        accessPassed ? "popup-earned-save" : "popup-earned-access",
-        "fail",
-        "Needs attention",
-      );
-    }
-    const [heading, detail] = probeFailureCopy(reason);
-    setEarnedCopy({
-      kicker: "First story",
-      heading,
-      lead: detail,
-      disclosure:
-        reason === "not_authenticated" || reason === "auth_expired"
-          ? "Signing in to the Trace app connects the Safari extension; a Safari website login does not."
-          : "No automatic website access was requested.",
-    });
-    setEarnedResult("failure", heading, detail);
-    configureEarnedActions(
-      { label: "Try again", action: "retry_save" },
-      { hidden: true, label: "", action: "" },
-    );
-    void recordEarnedEvent("first_story_save_failed");
   }
 }
 
@@ -1275,31 +1192,18 @@ async function initializeEarnedPermissionFlow() {
   ]) {
     button?.addEventListener("click", () => {
       const action = button.dataset.earnedAction;
-      if (action === "retry_save") void runEarnedFirstSave();
-      if (action === "request_automation") void requestEarnedAutomation();
-      if (action === "decline_automation") {
-        void writeEarnedState({ promptResult: "declined" });
-        void recordEarnedEvent("automation_offer_declined");
-        renderEarnedAutomationDeclined();
-      }
+      if (action === "prepare") void prepareEarnedPermissionFlow();
+      if (action === "allow_and_add") void allowAccessAndAddEarnedStory();
       if (action === "reload_to_verify") void reloadEarnedStory();
       if (action === "close") window.close();
     });
   }
   ext.storage?.onChanged?.addListener((changes, area) => {
     if (area !== "local" || !changes[ARCHIVE_READINESS_KEY]) return;
-    void renderEarnedSavedState();
+    void prepareEarnedPermissionFlow();
   });
   void recordEarnedEvent("popup_opened");
-  const { onboarding } = await readEarnedState();
-  if (onboarding.firstSaveAt) {
-    const grantedOrigins = await readGrantedOrigins();
-    if (hasCompleteEarnedGrant(grantedOrigins)) {
-      await renderEarnedSavedState();
-      return;
-    }
-  }
-  await runEarnedFirstSave();
+  await prepareEarnedPermissionFlow();
 }
 
 async function runActiveTabProbe() {

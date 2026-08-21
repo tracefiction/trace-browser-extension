@@ -24,15 +24,17 @@ data type or token path and does not run automatic tracking, overlays, saved
 filters, Trace-site sync, or archive heartbeats. Normal builds retain the
 release permission model described above.
 
-The iOS earned-permission TestFlight build keeps that active-tab first-save
-boundary, then exposes a separate user action that requests exactly five
-optional supported-origin patterns. Only after Safari reports the complete
-grant does it dynamically register the production archive scripts. Login,
-signup, password, authentication, and logout paths remain excluded. A fresh
-post-grant archive heartbeat is required before the popup claims automatic
-tracking is ready. Refusal or later revocation preserves current-tab toolbar
-saves. The build stores at most 32 coarse event-name/timestamp pairs locally
-for device diagnosis and sends none of that funnel to Trace.
+The iOS earned-permission build uses `activeTab` only to identify the current
+supported story during recovery; it does not inject or save before Website
+Access. One explicit action requests exactly five optional supported-origin
+patterns. Only after Safari reports the complete grant does the background
+worker register the production archive scripts and reload the story. Login,
+signup, password, authentication, and logout paths remain excluded. The fresh
+post-registration content-script run and current-account server confirmation
+are both required before app onboarding completes. Refusal, expiry, or partial
+coverage saves nothing and returns to permission recovery; no toolbar-only mode
+is treated as complete. The build stores at most 32 coarse event-name/timestamp
+pairs locally for device diagnosis and sends none of that funnel to Trace.
 
 The modular kernel keeps its session envelope, extension-owned credential map,
 and account-private read model in one IndexedDB database owned by the extension

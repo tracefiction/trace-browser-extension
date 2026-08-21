@@ -266,7 +266,7 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     const earnedConfigContext = {};
     vm.runInNewContext(earnedSafariConfig, earnedConfigContext);
     const earnedOnboarding = earnedConfigContext.TRACE_IOS_EARNED_PERMISSION_ONBOARDING;
-    assert.equal(earnedOnboarding.version, 2);
+    assert.equal(earnedOnboarding.version, 3);
     const automationRegistration = earnedOnboarding.registrations.find(
       (registration) => registration.id === "trace-archive-automation-v1",
     );

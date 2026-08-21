@@ -71,6 +71,8 @@ function createPopupHarness({
   grantedOrigins = [],
   registeredContentScripts = [],
   permissionRequestResult = true,
+  permissionRequestError = null,
+  registrationReconcileResult = null,
 } = {}) {
   const html = fs.readFileSync(POPUP_HTML_PATH, "utf8");
   const js = fs.readFileSync(POPUP_JS_PATH, "utf8");
@@ -93,6 +95,7 @@ function createPopupHarness({
   const injections = [];
   const permissionRequests = [];
   const registrationRequests = [];
+  const reconcileRequests = [];
   const reloads = [];
   let currentRegisteredContentScripts = [...registeredContentScripts];
   let closeCalled = false;
@@ -117,6 +120,17 @@ function createPopupHarness({
         }
         if (message.type === "TRACE_SESSION_ACTION") {
           response = { ok: true, snapshot: sessionSnapshot, action: { kind: "ignored" } };
+        }
+        if (message.type === "TRACE_EARNED_PERMISSION_RECONCILE") {
+          reconcileRequests.push(message);
+          const completeGrant = grantedOrigins.length === 5;
+          response = registrationReconcileResult ?? {
+            ok: completeGrant,
+            completeGrant,
+            registered: completeGrant,
+            changed: completeGrant,
+            ...(completeGrant ? { grantAt: Date.now() } : { error: "permission_incomplete" }),
+          };
         }
         if (promiseRuntime) return Promise.resolve(response);
         callback?.(response);
@@ -188,6 +202,13 @@ function createPopupHarness({
       },
       request(request, callback) {
         permissionRequests.push(request);
+        if (permissionRequestError) {
+          if (promiseRuntime) return Promise.reject(new Error(permissionRequestError));
+          ext.runtime.lastError = { message: permissionRequestError };
+          callback?.(undefined);
+          ext.runtime.lastError = null;
+          return;
+        }
         if (permissionRequestResult) {
           grantedOrigins.splice(0, grantedOrigins.length, ...(request.origins || []));
         }
@@ -255,7 +276,7 @@ function createPopupHarness({
   if (earnedPermissionOnboarding) {
     context.TRACE_IOS_ACTIVE_TAB_PROBE = true;
     context.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {
-      version: 2,
+      version: 3,
       origins: [
         "https://*.archiveofourown.org/*",
         "https://*.archiveofourown.gay/*",
@@ -296,6 +317,7 @@ function createPopupHarness({
     injections,
     permissionRequests,
     registrationRequests,
+    reconcileRequests,
     reloads,
     get closeCalled() {
       return closeCalled;
@@ -387,7 +409,7 @@ test("active-tab probe makes injection failure explicit and retryable", async ()
 });
 
 for (const promiseRuntime of [false, true]) {
-  test(`earned-permission onboarding confirms the first save before offering automation with the ${promiseRuntime ? "promise" : "callback"} API`, async () => {
+  test(`earned-permission onboarding identifies the story without saving before permission with the ${promiseRuntime ? "promise" : "callback"} API`, async () => {
     const h = createPopupHarness({
       sessionMode: "kernel",
       promiseRuntime,
@@ -402,22 +424,31 @@ for (const promiseRuntime of [false, true]) {
     for (let attempt = 0; attempt < 8; attempt += 1) await flush();
 
     assert.equal(h.document.body.dataset.traceEarnedPermission, "true");
-    assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "pass");
+    assert.equal(h.document.getElementById("popup-earned-story").dataset.state, "pass");
+    assert.equal(h.document.getElementById("popup-earned-access").dataset.state, "waiting");
+    assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "waiting");
     assert.equal(
       h.document.getElementById("popup-earned-result-heading").textContent,
-      "Your story is in your library.",
+      "One permission remains.",
     );
     assert.equal(
       h.document.getElementById("popup-earned-primary").textContent,
-      "Turn on automatic tracking",
+      "Allow access and add story",
     );
     assert.equal(h.permissionRequests.length, 0);
-    assert.equal(h.registrationRequests.length, 0);
+    assert.equal(h.reconcileRequests.length, 0);
+    assert.equal(h.injections.length, 0);
+    assert.equal(
+      h.tabMessages.some(
+        ({ message }) => message.type === "TRACE_ACTIVE_TAB_PROBE_SAVE",
+      ),
+      false,
+    );
     assert.equal(h.document.body.textContent.includes("archiveofourown.org/works/123"), false);
   });
 }
 
-test("earned-permission automation request registers exact persistent scripts and reloads for proof", async () => {
+test("earned-permission action requests the exact sites, delegates registration, and reloads for proof", async () => {
   const h = createPopupHarness({
     sessionMode: "kernel",
     promiseRuntime: true,
@@ -438,25 +469,22 @@ test("earned-permission automation request registers exact persistent scripts an
 
   assert.equal(h.permissionRequests.length, 1);
   assert.equal(h.permissionRequests[0].origins.length, 5);
-  assert.equal(h.registrationRequests.length, 1);
-  assert.deepEqual(
-    h.registrationRequests[0].map((registration) => registration.id),
-    ["trace-archive-automation-v1", "trace-ao3-saved-filters-v1"],
-  );
-  assert.equal(
-    h.registrationRequests[0].every(
-      (registration) => registration.persistAcrossSessions === true,
-    ),
-    true,
-  );
+  assert.equal(h.reconcileRequests.length, 1);
+  assert.equal(h.registrationRequests.length, 0);
   assert.deepEqual(h.reloads, [7]);
   assert.equal(
     h.document.getElementById("popup-earned-result-heading").textContent,
-    "Safari access is allowed.",
+    "Keep this panel open for a moment.",
+  );
+  assert.equal(
+    h.tabMessages.some(
+      ({ message }) => message.type === "TRACE_ACTIVE_TAB_PROBE_SAVE",
+    ),
+    false,
   );
 });
 
-test("earned-permission denial preserves the one-story-at-a-time path", async () => {
+test("earned-permission denial saves nothing and offers concise retry and Settings recovery", async () => {
   const h = createPopupHarness({
     sessionMode: "kernel",
     promiseRuntime: true,
@@ -480,15 +508,43 @@ test("earned-permission denial preserves the one-story-at-a-time path", async ()
   assert.equal(h.reloads.length, 0);
   assert.equal(
     h.document.getElementById("popup-earned-heading").textContent,
-    "Use Trace when you need it.",
+    "Access wasn’t allowed.",
   );
   assert.match(
-    h.document.getElementById("popup-earned-lead").textContent,
-    /toolbar on each story/i,
+    h.document.getElementById("popup-earned-disclosure").textContent,
+    /Settings > Apps > Safari > Extensions > Trace/i,
   );
+  assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Try again");
+  assert.equal(h.permissionRequests.length, 1);
+  assert.equal(h.reconcileRequests.length, 0);
 });
 
-test("earned-permission manual mode saves each later story from the toolbar", async () => {
+test("earned-permission request errors do not claim access or save the story", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    permissionRequestError: "Safari request unavailable",
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  h.document.getElementById("popup-earned-primary").dispatchEvent(
+    new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+  );
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  assert.equal(h.document.getElementById("popup-earned-access").dataset.state, "fail");
+  assert.equal(
+    h.document.getElementById("popup-earned-heading").textContent,
+    "Access wasn’t allowed.",
+  );
+  assert.equal(h.registrationRequests.length, 0);
+  assert.equal(h.reconcileRequests.length, 0);
+  assert.equal(h.reloads.length, 0);
+  assert.equal(h.tabMessages.length, 0);
+});
+
+test("earned-permission previously declined state still requires access and never becomes a manual mode", async () => {
   const h = createPopupHarness({
     sessionMode: "kernel",
     promiseRuntime: true,
@@ -514,17 +570,17 @@ test("earned-permission manual mode saves each later story from the toolbar", as
     h.tabMessages.filter(
       ({ message }) => message.type === "TRACE_ACTIVE_TAB_PROBE_SAVE",
     ).length,
-    1,
+    0,
   );
   assert.equal(
     h.document.getElementById("popup-earned-heading").textContent,
-    "Use Trace when you need it.",
+    "Allow access and add this story.",
   );
-  assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "pass");
+  assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "waiting");
 });
 
 for (const promiseRuntime of [false, true]) {
-  test(`earned-permission onboarding lets connect-and-save bootstrap a clean extension session with the ${promiseRuntime ? "promise" : "callback"} API`, async () => {
+  test(`earned-permission onboarding keeps a clean extension session untouched until the permission action with the ${promiseRuntime ? "promise" : "callback"} API`, async () => {
     const h = createPopupHarness({
       sessionMode: "kernel",
       promiseRuntime,
@@ -536,21 +592,19 @@ for (const promiseRuntime of [false, true]) {
       h.messages.some(({ type }) => type === "TRACE_SESSION_GET_SNAPSHOT"),
       false,
     );
-    assert.deepEqual(
-      JSON.parse(JSON.stringify(h.injections)),
-      [{ target: { tabId: 7 }, files: ACTIVE_TAB_PROBE_FILES }],
-    );
+    assert.deepEqual(JSON.parse(JSON.stringify(h.injections)), []);
+    assert.equal(h.tabMessages.length, 0);
     assert.equal(h.document.getElementById("popup-earned-story").dataset.state, "pass");
-    assert.equal(h.document.getElementById("popup-earned-access").dataset.state, "pass");
-    assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "pass");
+    assert.equal(h.document.getElementById("popup-earned-access").dataset.state, "waiting");
+    assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "waiting");
     assert.equal(
       h.document.getElementById("popup-earned-heading").textContent,
-      "Want Trace to work automatically?",
+      "Allow access and add this story.",
     );
   });
 }
 
-test("earned-permission onboarding shows a completed connection failure instead of hanging on Checking", async () => {
+test("earned-permission onboarding does not touch the save path before permission even if Trace is disconnected", async () => {
   const h = createPopupHarness({
     sessionMode: "kernel",
     promiseRuntime: true,
@@ -560,16 +614,17 @@ test("earned-permission onboarding shows a completed connection failure instead 
   for (let attempt = 0; attempt < 8; attempt += 1) await flush();
 
   assert.equal(h.document.getElementById("popup-earned-story").dataset.state, "pass");
-  assert.equal(h.document.getElementById("popup-earned-access").dataset.state, "pass");
-  assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "fail");
+  assert.equal(h.document.getElementById("popup-earned-access").dataset.state, "waiting");
+  assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "waiting");
   assert.equal(
     h.document.getElementById("popup-earned-result-heading").textContent,
-    "Trace is not connected",
+    "One permission remains.",
   );
   assert.equal(
     h.document.getElementById("popup-earned-primary").textContent,
-    "Try again",
+    "Allow access and add story",
   );
+  assert.equal(h.tabMessages.length, 0);
 });
 
 test("earned-permission onboarding confirms automation only from a post-grant archive run", async () => {
@@ -594,7 +649,7 @@ test("earned-permission onboarding confirms automation only from a post-grant ar
       traceEarnedPermissionOnboardingV1: {
         firstSaveAt: grantAt - 1_000,
         grantAt,
-        registrationVersion: 2,
+        registrationVersion: 3,
         promptResult: "granted",
       },
       traceArchiveReadiness: { lastArchiveSeenAt: grantAt + 1_000 },
@@ -610,7 +665,7 @@ test("earned-permission onboarding confirms automation only from a post-grant ar
 
   assert.equal(
     h.document.getElementById("popup-earned-heading").textContent,
-    "Automatic tracking is on.",
+    "Trace is ready.",
   );
   assert.equal(
     h.document.getElementById("popup-earned-save").querySelector(
@@ -642,7 +697,7 @@ test("earned-permission onboarding confirms a heartbeat while the popup stays op
       traceEarnedPermissionOnboardingV1: {
         firstSaveAt: grantAt - 1_000,
         grantAt,
-        registrationVersion: 2,
+        registrationVersion: 3,
         promptResult: "granted",
       },
       traceArchiveReadiness: { lastArchiveSeenAt: grantAt - 1_000 },
@@ -652,7 +707,7 @@ test("earned-permission onboarding confirms a heartbeat while the popup stays op
 
   assert.equal(
     h.document.getElementById("popup-earned-primary").textContent,
-    "Reload story to verify",
+    "Add this story",
   );
 
   h.emitStorageChange({
@@ -664,7 +719,7 @@ test("earned-permission onboarding confirms a heartbeat while the popup stays op
 
   assert.equal(
     h.document.getElementById("popup-earned-heading").textContent,
-    "Automatic tracking is on.",
+    "Trace is ready.",
   );
   assert.equal(
     h.document.getElementById("popup-earned-save").querySelector(
@@ -674,7 +729,7 @@ test("earned-permission onboarding confirms a heartbeat while the popup stays op
   );
 });
 
-test("earned-permission onboarding replaces build 25 registrations before re-verifying", async () => {
+test("earned-permission onboarding gives a bounded retry when background registration fails", async () => {
   const previousGrantAt = Date.now() - 60_000;
   const origins = [
     "https://*.archiveofourown.org/*",
@@ -692,33 +747,34 @@ test("earned-permission onboarding replaces build 25 registrations before re-ver
       { id: "trace-archive-automation-v1" },
       { id: "trace-ao3-saved-filters-v1" },
     ],
+    registrationReconcileResult: {
+      ok: false,
+      completeGrant: true,
+      registered: false,
+      changed: false,
+      error: "registration_failed",
+    },
     storageState: {
       traceEarnedPermissionOnboardingV1: {
         firstSaveAt: previousGrantAt - 1_000,
         grantAt: previousGrantAt,
-        registrationVersion: 1,
+        registrationVersion: 2,
         promptResult: "granted",
       },
-      traceArchiveReadiness: { lastArchiveSeenAt: previousGrantAt + 1_000 },
+      traceArchiveReadiness: { lastArchiveSeenAt: previousGrantAt - 1_000 },
     },
   });
   for (let attempt = 0; attempt < 10; attempt += 1) await flush();
 
-  assert.equal(h.registrationRequests.length, 1);
-  assert.deepEqual(
-    h.registrationRequests[0].map((registration) => registration.id),
-    ["trace-archive-automation-v1", "trace-ao3-saved-filters-v1"],
-  );
-  assert.equal(
-    h.store.traceEarnedPermissionOnboardingV1.registrationVersion,
-    2,
-  );
-  assert.ok(
-    h.store.traceEarnedPermissionOnboardingV1.grantAt > previousGrantAt,
-  );
+  assert.equal(h.reconcileRequests.length, 1);
+  assert.equal(h.registrationRequests.length, 0);
   assert.equal(
     h.document.getElementById("popup-earned-primary").textContent,
-    "Reload story to verify",
+    "Try again",
+  );
+  assert.equal(
+    h.document.getElementById("popup-earned-heading").textContent,
+    "Trace couldn’t finish setup.",
   );
 });
 
