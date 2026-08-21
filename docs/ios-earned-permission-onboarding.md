@@ -1,6 +1,6 @@
 # iOS earned-permission onboarding
 
-Trace 0.6.4 build 27 tests the complete value-first Safari onboarding proposed
+Trace 0.6.4 build 28 tests the complete value-first Safari onboarding proposed
 after the build 18 and 19 capability probes. Build 20 proved the Safari
 permission flow but failed authentication because its preview shell fell back
 to the custom-scheme OAuth return. Build 21 proved the verified HTTPS callback,
@@ -37,10 +37,16 @@ observes the locally persisted archive heartbeat and immediately changes the
 pending automatic-tracking row to **Run confirmed**. The timestamp still has to
 be newer than the permission grant; no success condition is weakened.
 
+Build 28 changes no onboarding behavior. It gives the embedded Safari extension
+the fresh identifier `com.tracefiction.trace.earned-v2` after device testing
+showed that deleting and reinstalling build 27 could preserve its granted host
+access and registered scripts. The identity reset prevents retained Safari state
+from producing a false clean-install pass. The containing app remains
+`com.tracefiction.trace`, and the embedded identifier has exactly one component
+below it as App Store Connect requires.
+
 This is a signed physical-device candidate, not yet a production permission
-migration. It uses the fresh Safari extension identifier
-`com.tracefiction.trace.earned-permission` so an earlier build's grants and
-registered scripts cannot make the result look better than it is.
+migration.
 
 ## User contract
 
@@ -86,7 +92,7 @@ TRACE_WEB_ORIGIN=https://www.tracefiction.com \
 npm run build:ios-earned-permission-onboarding:release
 ```
 
-Build 27 is paired to the stable Vercel dev deployment of the web half with:
+Build 28 is paired to the stable Vercel dev deployment of the web half with:
 
 ```bash
 npm run build:ios-earned-permission-onboarding:preview-release
@@ -112,27 +118,31 @@ Trace extension.
 
 1. Delete the earlier Trace build, confirm its Safari extension has gone, and
    restart Safari.
-2. Install build 27, sign in inside Trace, and enable the Trace extension. Do
+2. Install build 28, sign in inside Trace, and enable the Trace extension. Do
    not pre-approve Website Access in Settings.
-3. From Trace, open an AO3 or FanFiction.net story. Open Trace from Safari's
+3. Open an AO3 or FanFiction.net story without opening Trace from Safari's
+   toolbar. Confirm Trace does not run, scroll the page, show its story control,
+   or save the story. Any of those behaviors means the clean-state test failed.
+4. From Trace, open an AO3 or FanFiction.net story. Open Trace from Safari's
    toolbar. Record any Safari prompt that appears before the Trace popup; none
    is expected for this first toolbar-granted save.
-4. Confirm the popup identifies the story and says **Server confirmed**.
+5. Confirm the popup identifies the story and says **Server confirmed**.
    Confirm the story exists in the signed-in Trace library.
-5. Choose **Not now**. Open a different supported story and invoke Trace again.
+6. Choose **Not now**. Open a different supported story and invoke Trace again.
    Confirm that second story is also server-confirmed and appears in the
    library. This proves the manual fallback is real rather than explanatory UI.
-6. Reopen Trace and choose **Turn on automatic tracking**. Record Safari's exact
+7. Reopen Trace and choose **Turn on automatic tracking**. Record Safari's exact
    prompts and choices. Accept the requested supported addresses.
-7. Let Trace reload the story. Reopen the popup after the page finishes. It
+8. Let Trace reload the story. Keep the popup open through the reload when
+   Safari permits it; otherwise reopen it after the page finishes. It
    must say **Automatic tracking is on** only after **Run confirmed** appears.
-8. Open new stories on canonical AO3, an AO3 variant, and FFN without invoking
+9. Open new stories on canonical AO3, an AO3 variant, and FFN without invoking
    the toolbar. Confirm the overlay/automatic behavior and Trace library saves.
-9. Restart Safari and repeat on AO3 and FFN. Reboot the device and repeat once.
-10. Change one relevant Safari Website Access entry back to Ask or Deny. Confirm
+10. Restart Safari and repeat on AO3 and FFN. Reboot the device and repeat once.
+11. Change one relevant Safari Website Access entry back to Ask or Deny. Confirm
     the popup reports automatic tracking as paused while a deliberate toolbar
     tap can still save the current story.
-11. Open Trace on an unrelated site. It must not inject, read, or request
+12. Open Trace on an unrelated site. It must not inject, read, or request
     access to that site.
 
 Record the iOS version, tested host family, prompt wording, first failing row,
