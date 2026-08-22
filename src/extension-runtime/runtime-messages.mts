@@ -56,6 +56,11 @@ export const SESSION_MESSAGE_TYPES = Object.freeze({
   openTraceUrl: TRACE_WEB_OPEN_MESSAGE,
 });
 
+// Content-free invalidation signal for archive pages. Account projection data
+// remains in private IndexedDB; only this opaque revision crosses browser
+// storage so reloaded content scripts can re-query after a confirmed write.
+export const ACCOUNT_PROJECTION_REVISION_KEY = "traceAccountProjectionRevisionV1";
+
 export type PublicSessionSnapshot = Pick<
   SessionSnapshot,
   "state" | "reason" | "canExecuteAuthenticated"

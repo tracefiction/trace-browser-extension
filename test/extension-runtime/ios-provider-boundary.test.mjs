@@ -230,11 +230,11 @@ test("opening iOS extension Settings is immediate and independent of authenticat
   const project = read("Trace.xcodeproj", "project.pbxproj");
   assert.match(
     app,
-    /safariExtensionBundleIdentifier = "com\.tracefiction\.trace\.earned-v4"/,
+    /safariExtensionBundleIdentifier = "com\.tracefiction\.trace\.earned-v5"/,
   );
   assert.equal(
     project.match(
-      /PRODUCT_BUNDLE_IDENTIFIER = com\.tracefiction\.trace\.earned-v4;/g,
+      /PRODUCT_BUNDLE_IDENTIFIER = com\.tracefiction\.trace\.earned-v5;/g,
     )?.length,
     2,
   );

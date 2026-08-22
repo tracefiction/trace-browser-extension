@@ -1455,6 +1455,7 @@ function createStoryAutoTrackPendingHarness(options = {}) {
   let deferredAutoTrackPreferenceRead;
   let deferredWorkStateRead;
   let runtimeMessageListener = null;
+  const storageChangeListeners = [];
   const chrome = {
     runtime: {
       onMessage: {
@@ -1476,9 +1477,13 @@ function createStoryAutoTrackPendingHarness(options = {}) {
         }
         if (msg.type === "TRACE_ACCOUNT_PROJECTION_GET") {
           if (typeof cb === "function") {
+            const configuredResponse =
+              typeof options.projectionResponse === "function"
+                ? options.projectionResponse(msg)
+                : options.projectionResponse;
             cb((projectionResponses && projectionResponses.length > 0
               ? projectionResponses.shift()
-              : options.projectionResponse) || {
+              : configuredResponse) || {
               ok: true,
               snapshot: {
                 state: "connected",
@@ -1582,7 +1587,11 @@ function createStoryAutoTrackPendingHarness(options = {}) {
           if (typeof cb === "function") cb();
         },
       },
-      onChanged: { addListener() {} },
+      onChanged: {
+        addListener(fn) {
+          storageChangeListeners.push(fn);
+        },
+      },
     },
   };
 
@@ -1605,6 +1614,12 @@ function createStoryAutoTrackPendingHarness(options = {}) {
     sent,
     scrolledTargets,
     store,
+    dispatchStorageChange(key, value) {
+      const oldValue = store[key];
+      store[key] = value;
+      const changes = { [key]: { oldValue, newValue: value } };
+      storageChangeListeners.forEach((listener) => listener(changes, "local"));
+    },
     autoTrackCallback(response) {
       autoTrackCallback(response);
     },
@@ -2338,6 +2353,59 @@ test("kernel story projection renders known state with migrated mutation control
   assert.ok(sheet.querySelector("[data-trace-rating-control]"));
   assert.equal(sheet.querySelector("[data-trace-catchup-action]"), null);
   assert.ok(sheet.querySelector("[data-trace-hidden-action]"));
+});
+
+test("kernel story page re-queries its private projection after a confirmed-save revision", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000123";
+  let confirmed = false;
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    pendingFirstStoryResponse: { ok: true, url: "" },
+    projectionResponse() {
+      return {
+        ok: true,
+        snapshot: {
+          state: "connected",
+          reason: "none",
+          canExecuteAuthenticated: true,
+        },
+        projection: {
+          entries: confirmed
+            ? {
+                "ffn:7038840": {
+                  status: "PLANNING",
+                  readerStatus: "PLANNING",
+                  canonicalReaderStatus: "SAVED",
+                  entryId,
+                },
+              }
+            : {},
+          workPreferences: {},
+          syncVersion: confirmed ? "2026-08-22T08:30:00.000Z" : null,
+        },
+      };
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  const handle = h.dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle);
+  assert.match(handle.textContent || "", /Add to Trace/i);
+
+  const projectionsBeforeRevision = h.sent.filter(
+    (message) => message.type === "TRACE_ACCOUNT_PROJECTION_GET",
+  ).length;
+  confirmed = true;
+  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.ok(
+    h.sent.filter((message) => message.type === "TRACE_ACCOUNT_PROJECTION_GET").length >
+      projectionsBeforeRevision,
+  );
+  assert.match(handle.textContent || "", /Saved/i);
+  assert.doesNotMatch(handle.textContent || "", /Add to Trace/i);
 });
 
 test("kernel story projection retries a transient cold-worker read without retrying mutations", async () => {

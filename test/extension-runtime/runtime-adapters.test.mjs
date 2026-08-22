@@ -18,6 +18,9 @@ import {
 import {
   installSessionRuntime,
 } from "../../.trace-build/extension-runtime/controller.mjs";
+import {
+  ACCOUNT_PROJECTION_REVISION_KEY,
+} from "../../.trace-build/extension-runtime/runtime-messages.mjs";
 
 function deferred() {
   let resolve;
@@ -487,6 +490,10 @@ test("Connect and save mutates only after current-worker verification and author
   assert.equal(response.command.projection, "published");
   assert.equal(response.command.receipt, "unavailable");
   assert.equal(response.entryId, entryId);
+  assert.deepEqual(
+    area.sets.filter((patch) => Object.hasOwn(patch, ACCOUNT_PROJECTION_REVISION_KEY)),
+    [{ [ACCOUNT_PROJECTION_REVISION_KEY]: 1 }],
+  );
   assert.deepEqual(fetches.map(({ url }) => new URL(url).pathname), [
     "/api/extension/account",
     "/api/extension/library-overlay",
@@ -1438,6 +1445,10 @@ test("Connect and save does not claim a command handoff when acquisition fails",
   assert.equal(result.snapshot.state, "signed_out");
   assert.equal(result.ok, false);
   assert.equal(result.error, "not_authenticated");
+  assert.equal(
+    area.sets.some((patch) => Object.hasOwn(patch, ACCOUNT_PROJECTION_REVISION_KEY)),
+    false,
+  );
 });
 
 test("Connect and save rejects non-archive senders before credential acquisition", async () => {

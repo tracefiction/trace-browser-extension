@@ -284,6 +284,59 @@ test("kernel listing reads only visible projection keys and enables migrated ent
   assert.match(surface.textContent || "", /Reading/);
 });
 
+test("kernel listing re-queries its private projection after a confirmed-save revision", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000123";
+  let confirmed = false;
+  let projectionReads = 0;
+  const window = await renderOverlayListing({
+    sessionMode: "kernel",
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/12345'>Demo Work</a></h4></li></ol></body></html>",
+    cache: { entries: {}, workPreferences: {}, syncVersion: null },
+    sendMessage(message, cb) {
+      if (message.type !== "TRACE_ACCOUNT_PROJECTION_GET") {
+        if (typeof cb === "function") cb({ ok: true });
+        return;
+      }
+      projectionReads += 1;
+      cb({
+        ok: true,
+        snapshot: {
+          state: "connected",
+          reason: "none",
+          canExecuteAuthenticated: true,
+        },
+        projection: {
+          entries: confirmed
+            ? {
+                "ao3:12345": {
+                  status: "PLANNING",
+                  readerStatus: "PLANNING",
+                  canonicalReaderStatus: "SAVED",
+                  entryId,
+                },
+              }
+            : {},
+          workPreferences: {},
+          syncVersion: confirmed ? "2026-08-22T08:30:00.000Z" : null,
+        },
+      });
+    },
+  });
+
+  assert.ok(window.document.querySelector("button[data-trace-quick-add='ao3:12345']"));
+  const readsBeforeRevision = projectionReads;
+  confirmed = true;
+  window.__traceSetStorage({ traceAccountProjectionRevisionV1: 1 });
+  await sleep(120);
+
+  assert.ok(projectionReads > readsBeforeRevision);
+  assert.match(
+    window.document.querySelector("[data-trace-library-overlay-wrap]").textContent || "",
+    /Saved/i,
+  );
+});
+
 test("kernel listing allows add and migrated hide commands for unknown works", async () => {
   const window = await renderOverlayListing({
     sessionMode: "kernel",
