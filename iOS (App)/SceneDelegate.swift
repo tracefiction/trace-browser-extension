@@ -36,6 +36,10 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         traceWebViewController(from: window)?.handleSceneDidBecomeActive()
     }
 
+    func sceneWillResignActive(_ scene: UIScene) {
+        traceWebViewController(from: window)?.handleSceneWillResignActive()
+    }
+
     private func traceWebViewController(from window: UIWindow?) -> TraceWebViewController? {
         if let nav = window?.rootViewController as? UINavigationController {
             return nav.topViewController as? TraceWebViewController

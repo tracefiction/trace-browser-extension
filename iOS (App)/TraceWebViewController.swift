@@ -107,6 +107,9 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     private var activeTraceNavigationURL: URL?
     private var lastIntendedTraceURL: URL?
     private var failedTraceURL: URL?
+    private lazy var reviewCoordinator = TraceReviewCoordinator { [weak self] in
+        self?.viewIfLoaded?.window?.windowScene
+    }
 #if DEBUG && targetEnvironment(simulator)
     private var traceSimulatorFailNextProviderClear = false
 #endif
@@ -327,6 +330,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         config.userContentController.add(self, name: "tracePush")
         config.userContentController.add(self, name: "traceBilling")
         config.userContentController.add(self, name: "traceDownload")
+        config.userContentController.add(self, name: "traceReview")
         config.userContentController.add(self, name: "traceSafariExtension")
 
         let wv = WKWebView(frame: .zero, configuration: config)
@@ -441,6 +445,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: "tracePush")
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: "traceBilling")
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: "traceDownload")
+        webView?.configuration.userContentController.removeScriptMessageHandler(forName: "traceReview")
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: "traceSafariExtension")
     }
 
@@ -455,6 +460,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     }
 
     func handleSceneDidBecomeActive() {
+        reviewCoordinator.sceneDidBecomeActive()
         guard isViewLoaded else { return }
         primeWebViewInteractionAfterResume()
         DispatchQueue.main.async { [weak self] in
@@ -464,6 +470,10 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             self?.primeWebViewInteractionAfterResume()
         }
+    }
+
+    func handleSceneWillResignActive() {
+        reviewCoordinator.sceneWillResignActive()
     }
 
     private func primeWebViewInteractionAfterResume() {
@@ -1352,6 +1362,11 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             return
         }
 
+        if message.name == "traceReview" {
+            handleTraceReviewMessage(message)
+            return
+        }
+
         if message.name == "tracePush" {
             handleTracePushMessage(message)
             return
@@ -1372,6 +1387,26 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
             defaults.set(data, forKey: Self.widgetDefaultsKey)
         }
         WidgetCenter.shared.reloadAllTimelines()
+    }
+
+    private func handleTraceReviewMessage(_ message: WKScriptMessage) {
+        guard message.frameInfo.isMainFrame,
+              let body = message.body as? [String: Any],
+              let messageType = body["type"] as? String
+        else {
+            return
+        }
+
+        switch messageType {
+        case "TRACE_IOS_LIBRARY_ACTIVITY_COMPLETED", "TRACE_IOS_STORY_RATING_SAVED":
+            guard let entryID = body["entryId"] as? String else { return }
+            reviewCoordinator.recordSuccessfulLibraryActivity(entryID: entryID)
+        case "TRACE_IOS_REVIEW_CONTEXT":
+            guard let context = body["context"] as? String else { return }
+            reviewCoordinator.updateContext(isLibrary: context == "library")
+        default:
+            return
+        }
     }
 
     private enum TraceDownloadError: Error {

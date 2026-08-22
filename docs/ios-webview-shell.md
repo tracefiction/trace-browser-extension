@@ -14,6 +14,8 @@ The long-term product direction may include a more native iOS app, but this shel
 - Shows a native retry alert when the external OAuth session is cancelled or fails before returning to the web view.
 - Reports iOS notification permission results back to the web app so denial and setup failures have visible recovery copy.
 - Opens Apple's subscription management sheet for Apple-billed Trace Unlimited accounts.
+- Requests an App Store review only after sustained successful library use and
+  exposes a permanent, user-initiated review link through the web settings UI.
 - Bridges Safari extension setup actions from the web shell to native iOS code.
 - Maintains an app-owned, scoped device-session provider in a shared Keychain
   access group; the extension can read it only after an explicit Safari-side
@@ -35,6 +37,26 @@ Redirect-only hosts are intentionally not declared.
 17.4 and later. The shell only advertises this capability when its configured
 web origin is a production Trace HTTPS host; otherwise the web app requests the
 custom callback.
+
+## App Store Review Request
+
+The web app reports only successful, high-value library changes: a status
+change, progress update, or positive rating. The message contains an opaque
+entry ID and is accepted only from the WKWebView main frame. Notes, tags,
+rating values, and other private story data are not sent through this bridge.
+
+Native iOS stores the eligibility counters locally in `UserDefaults`. A review
+request becomes eligible after activity on three distinct stories across at
+least two local calendar days. Trace then waits until the app is active, the
+authenticated library route is visible, and a two-second calm window has
+passed. Navigating away or backgrounding the app cancels the pending request.
+Trace records an attempt before calling StoreKit and will not request again in
+the same app version. Apple still decides whether the system sheet appears.
+StoreKit intentionally suppresses this system sheet in TestFlight builds.
+
+The Settings → Rate Trace action is separate from automatic eligibility and
+opens the App Store product page with `action=write-review`. A direct user tap
+must not call the in-app request API.
 
 ## Safari Extension Setup
 
@@ -92,6 +114,10 @@ Xcode reinstall behavior is not authoritative for fresh users. A local build ove
 ## What To Inspect
 
 - `iOS (App)/TraceWebViewController.swift` - web view setup, navigation handling, OAuth callback handling.
+- `iOS (App)/TraceReviewCoordinator.swift` - local eligibility persistence,
+  calm-moment scheduling, and StoreKit request.
+- `iOS (App)/TraceReviewEligibility.swift` - deterministic eligibility state
+  covered by the standalone Swift contract.
 - `iOS (App)/TraceWebOrigin.generated.swift` - generated Trace web origin used by the shell.
 - `Shared (Extension)/Resources/` - Safari Web Extension resources included in the app build.
 
