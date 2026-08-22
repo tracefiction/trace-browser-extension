@@ -101,6 +101,7 @@ import {
   type PublicArchiveReadiness,
 } from "./archive-readiness-status.mjs";
 import {
+  ACCOUNT_PROJECTION_REVISION_KEY,
   POPUP_PREFERENCE_KEYS,
   SESSION_MESSAGE_TYPES,
   WORK_KEY_PATTERN,
@@ -995,6 +996,9 @@ export class SessionRuntimeController {
       const result = await this.#accountData.clearCapacityRecovery(scope);
       if (result.kind === "published") accountData = result.value;
     }
+    if (command.kind === "confirmed" && command.projection === "published") {
+      await this.#publishAccountProjectionRevision();
+    }
     this.#publishStatus();
     return Object.freeze({
       ok: command.kind === "confirmed",
@@ -1015,6 +1019,24 @@ export class SessionRuntimeController {
           }
         : { error: command.reason }),
     });
+  }
+
+  async #publishAccountProjectionRevision(): Promise<void> {
+    try {
+      const values = await this.#storage.get(ACCOUNT_PROJECTION_REVISION_KEY);
+      const current = values[ACCOUNT_PROJECTION_REVISION_KEY];
+      const revision =
+        typeof current === "number" &&
+        Number.isSafeInteger(current) &&
+        current >= 0 &&
+        current < Number.MAX_SAFE_INTEGER
+          ? current + 1
+          : 1;
+      await this.#storage.set({ [ACCOUNT_PROJECTION_REVISION_KEY]: revision });
+    } catch {
+      // The authoritative command response remains valid if this best-effort,
+      // content-free invalidation signal cannot be published.
+    }
   }
 
   #libraryCommandResponse(

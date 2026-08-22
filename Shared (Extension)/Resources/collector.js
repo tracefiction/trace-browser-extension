@@ -515,6 +515,7 @@ var OVERLAY_CACHE_KEY = "libraryOverlayCache";
 var TRACE_ACCOUNT_ID_KEY = "traceAccountId";
 var TRACE_API_BASE_STORAGE_KEY = "traceApiBase";
 var WORK_STATE_STORAGE_KEY = "traceWorkStatesV1";
+var ACCOUNT_PROJECTION_REVISION_KEY = "traceAccountProjectionRevisionV1";
 var WORK_STATE_GET_MESSAGE = "TRACE_WORK_STATE_GET";
 var ACCOUNT_PROJECTION_GET_MESSAGE = "TRACE_ACCOUNT_PROJECTION_GET";
 var optimisticStoryPageEntries = Object.create(null);
@@ -6218,6 +6219,7 @@ function initQuickAdd() {
       if (
         !changes[OVERLAY_CACHE_KEY] &&
         !changes[WORK_STATE_STORAGE_KEY] &&
+        !changes[ACCOUNT_PROJECTION_REVISION_KEY] &&
         !changes.authToken &&
         !changes.traceAuthState &&
         !changes[TRACE_ACCOUNT_ID_KEY] &&

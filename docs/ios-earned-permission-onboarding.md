@@ -63,6 +63,14 @@ could restore its prior Website Access. The containing app remains
 `com.tracefiction.trace`; this reset prevents retained Safari state from
 producing a false clean-install result.
 
+Build 33 fixes a permission-flow reload race that could leave the confirmed
+first story labelled **Add to Trace** until Safari focused or reloaded the page.
+After the private account projection stores a confirmed save, the background
+now publishes a content-free revision signal so current story and listing pages
+immediately re-query and render **Saved**. The embedded extension uses the fresh
+identifier `com.tracefiction.trace.earned-v5` so build 32 Website Access cannot
+hide the clean-onboarding behavior during device testing.
+
 ## User contract
 
 When `TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1`:
@@ -116,7 +124,7 @@ TRACE_WEB_ORIGIN=https://www.tracefiction.com \
 npm run build:ios-earned-permission-onboarding:release
 ```
 
-The build 32 physical-device candidate is paired to the stable Vercel dev
+The build 33 physical-device candidate is paired to the stable Vercel dev
 deployment of the web half with:
 
 ```bash

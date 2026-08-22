@@ -17,6 +17,7 @@
   const KERNEL_SESSION_ACTIVE = TRACE_SESSION_MODE === "kernel";
   const TRACE_WEB_HOME_URL = configuredTraceWebHomeUrl();
   const ACCOUNT_PROJECTION_GET_MESSAGE = "TRACE_ACCOUNT_PROJECTION_GET";
+  const ACCOUNT_PROJECTION_REVISION_KEY = "traceAccountProjectionRevisionV1";
   const MAX_PROJECTION_WORK_KEYS = 250;
   const TRACE_ACCOUNT_ID_KEY = "traceAccountId";
   const TRACE_API_BASE_STORAGE_KEY = "traceApiBase";
@@ -3629,6 +3630,7 @@
         if (area !== "local") return;
         if (
           !changes.libraryOverlayCache &&
+          !changes[ACCOUNT_PROJECTION_REVISION_KEY] &&
           !changes.prefLibraryInlayEnabled &&
           !changes.traceAuthState &&
           !changes.authToken &&

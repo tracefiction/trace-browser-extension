@@ -5226,6 +5226,7 @@ const TRACE_WEB_ORIGIN = "https://trace-git-dev-zacs-projects-378417c9.vercel.ap
     status: "TRACE_EXTENSION_STATUS_QUERY",
     openTraceUrl: TRACE_WEB_OPEN_MESSAGE
   });
+  var ACCOUNT_PROJECTION_REVISION_KEY = "traceAccountProjectionRevisionV1";
   var WORK_KEY_PATTERN5 = /^(ao3|ffn):[1-9][0-9]{0,19}$/;
   var MAX_PROJECTION_WORK_KEYS = 250;
   var POPUP_PREFERENCE_KEYS = Object.freeze([
@@ -5981,6 +5982,9 @@ const TRACE_WEB_ORIGIN = "https://trace-git-dev-zacs-projects-378417c9.vercel.ap
         const result = await this.#accountData.clearCapacityRecovery(scope2);
         if (result.kind === "published") accountData = result.value;
       }
+      if (command.kind === "confirmed" && command.projection === "published") {
+        await this.#publishAccountProjectionRevision();
+      }
       this.#publishStatus();
       return Object.freeze({
         ok: command.kind === "confirmed",
@@ -5999,6 +6003,15 @@ const TRACE_WEB_ORIGIN = "https://trace-git-dev-zacs-projects-378417c9.vercel.ap
           })
         } : { error: command.reason }
       });
+    }
+    async #publishAccountProjectionRevision() {
+      try {
+        const values = await this.#storage.get(ACCOUNT_PROJECTION_REVISION_KEY);
+        const current = values[ACCOUNT_PROJECTION_REVISION_KEY];
+        const revision = typeof current === "number" && Number.isSafeInteger(current) && current >= 0 && current < Number.MAX_SAFE_INTEGER ? current + 1 : 1;
+        await this.#storage.set({ [ACCOUNT_PROJECTION_REVISION_KEY]: revision });
+      } catch {
+      }
     }
     #libraryCommandResponse(command, action) {
       this.#publishStatus();
