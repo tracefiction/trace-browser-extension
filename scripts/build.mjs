@@ -16,12 +16,20 @@ import {
   SITE_HOST_MATCHES,
   configuredOriginPermissions,
 } from "./build-origin-permissions.mjs";
+import {
+  IOS_PRODUCTION_EXTENSION_BUNDLE_IDENTIFIER,
+} from "./ios-bundle-identifiers.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
 const RES = path.join(ROOT, "Shared (Extension)", "Resources");
 const SRC_BG = path.join(ROOT, "src", "background.js");
 const XCODE_PROJECT = path.join(ROOT, "Trace.xcodeproj", "project.pbxproj");
+const IOS_APP_CONTROLLER = path.join(
+  ROOT,
+  "iOS (App)",
+  "TraceWebViewController.swift",
+);
 
 function loadEnvFile(p) {
   const out = {};
@@ -202,6 +210,35 @@ function assertReleaseUrl(name, value, expected) {
   }
 }
 
+function assertProductionIosReleaseIdentity() {
+  const project = fs.readFileSync(XCODE_PROJECT, "utf8");
+  const controller = fs.readFileSync(IOS_APP_CONTROLLER, "utf8");
+  const escapedIdentifier = IOS_PRODUCTION_EXTENSION_BUNDLE_IDENTIFIER.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    "\\$&",
+  );
+  const projectMatches = project.match(
+    new RegExp(
+      `PRODUCT_BUNDLE_IDENTIFIER = ${escapedIdentifier};`,
+      "g",
+    ),
+  );
+  if (projectMatches?.length !== 2) {
+    throw new Error(
+      `Production iOS release requires ${IOS_PRODUCTION_EXTENSION_BUNDLE_IDENTIFIER} in both Safari extension build configurations.`,
+    );
+  }
+  if (
+    !controller.includes(
+      `safariExtensionBundleIdentifier = "${IOS_PRODUCTION_EXTENSION_BUNDLE_IDENTIFIER}"`,
+    )
+  ) {
+    throw new Error(
+      `Production iOS release requires the native Settings bridge to use ${IOS_PRODUCTION_EXTENSION_BUNDLE_IDENTIFIER}.`,
+    );
+  }
+}
+
 function unique(list) {
   return Array.from(new Set((list || []).filter(Boolean)));
 }
@@ -334,6 +371,12 @@ if (IS_RELEASE) {
       ? EARNED_PERMISSION_DEV_WEB_ORIGIN
       : RELEASE_TRACE_WEB_ORIGIN,
   );
+  if (
+    IOS_EARNED_PERMISSION_ONBOARDING &&
+    !IOS_EARNED_PERMISSION_PREVIEW_RELEASE
+  ) {
+    assertProductionIosReleaseIdentity();
+  }
 } else if (isLocalLike(TRACE_API_BASE) || isLocalLike(TRACE_WEB_ORIGIN)) {
   console.warn(
     "[Trace build] Using local development origins. Use TRACE_BUILD_MODE=release for store/App Store artifacts.",
@@ -545,6 +588,8 @@ enum TraceWebOriginGenerated {
     static let httpsOrigin: String = ${swiftLiteral}
     /// Same API origin compiled into the extension background worker.
     static let apiOrigin: String = ${JSON.stringify(TRACE_API_BASE)}
+    /// Advertise the new web onboarding only when this binary contains the earned-permission runtime.
+    static let earnedPermissionOnboardingEnabled: Bool = ${IOS_EARNED_PERMISSION_ONBOARDING ? "true" : "false"}
     /// True only for the exact, reviewable earned-permission TestFlight preview.
     static let allowReleaseExperimentOrigin: Bool = ${IOS_EARNED_PERMISSION_PREVIEW_RELEASE ? "true" : "false"}
 }

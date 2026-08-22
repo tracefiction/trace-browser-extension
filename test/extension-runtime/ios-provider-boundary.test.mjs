@@ -8,6 +8,7 @@ const read = (...parts) => fs.readFileSync(path.join(ROOT, ...parts), "utf8");
 
 test("Release stays production-bound unless the generated exact preview seam is enabled", () => {
   const app = read("iOS (App)", "TraceWebViewController.swift");
+  const archiveVerifier = read("scripts", "verify-ios-archive.mjs");
   assert.match(
     app,
     /#if DEBUG[\s\S]*webAppHTTPSOriginDebug = TraceWebOriginGenerated\.httpsOrigin[\s\S]*return webAppHTTPSOriginDebug[\s\S]*#else[\s\S]*TraceWebOriginGenerated\.allowReleaseExperimentOrigin[\s\S]*return TraceWebOriginGenerated\.httpsOrigin[\s\S]*return "https:\/\/tracefiction\.com"[\s\S]*#endif/,
@@ -15,6 +16,14 @@ test("Release stays production-bound unless the generated exact preview seam is 
   assert.match(
     app,
     /billingAPIBaseURL[\s\S]*TraceWebOriginGenerated\.allowReleaseExperimentOrigin[\s\S]*TraceWebOriginGenerated\.apiOrigin[\s\S]*configuredBillingAPIBaseURLOverride/,
+  );
+  assert.match(
+    app,
+    /earnedPermissionOnboarding:[\s\S]*TraceWebOriginGenerated\.earnedPermissionOnboardingEnabled/,
+  );
+  assert.match(
+    archiveVerifier,
+    /globalThis\.TRACE_EXTENSION_WEB_ORIGIN = \"\$\{RELEASE_TRACE_WEB_ORIGIN\}\";/,
   );
 });
 
@@ -230,11 +239,11 @@ test("opening iOS extension Settings is immediate and independent of authenticat
   const project = read("Trace.xcodeproj", "project.pbxproj");
   assert.match(
     app,
-    /safariExtensionBundleIdentifier = "com\.tracefiction\.trace\.earned-v5"/,
+    /safariExtensionBundleIdentifier = "com\.tracefiction\.trace\.extension"/,
   );
   assert.equal(
     project.match(
-      /PRODUCT_BUNDLE_IDENTIFIER = com\.tracefiction\.trace\.earned-v5;/g,
+      /PRODUCT_BUNDLE_IDENTIFIER = com\.tracefiction\.trace\.extension;/g,
     )?.length,
     2,
   );
@@ -316,7 +325,7 @@ test("kernel popup and page bridge have no ambient or website-auth fallback", ()
   assert.match(sync, /pendingCredentialGrants\.get\(requestId\)/);
 });
 
-test("installed iOS Connect-and-save uses a temporary authorized-sender driver", () => {
+test("installed iOS Connect-and-save uses the real automatic path with a temporary authorized-sender driver", () => {
   const runner = read("scripts", "test-extension-session-ios.mjs");
   const ui = read("test", "installed-ios", "TraceInstalledLifecycleUITests.swift");
 
@@ -324,11 +333,13 @@ test("installed iOS Connect-and-save uses a temporary authorized-sender driver",
   assert.match(runner, /PROVIDER_MISSING_FIXTURE/);
   assert.match(runner, /function installConnectAndSaveDriver/);
   assert.match(runner, /entry\.matches\?\.some\(\(pattern\) => pattern\.includes\("archiveofourown\.org"\)\)/);
-  assert.match(runner, /archiveEntry\.js\.push\(CONNECT_AND_SAVE_DRIVER\)/);
+  assert.match(runner, /fs\.appendFileSync\(collectorPath/);
+  assert.match(runner, /collectorSource\.includes\(CONNECT_AND_SAVE_DRIVER_MARKER\)/);
   assert.match(runner, /kernelPendingFirstStory = \{ workKey, handoffId: "installed-ios-connect-and-save" \}/);
   assert.match(runner, /message\.type === TRACE_CONNECT_AND_SAVE_MESSAGE/);
+  assert.doesNotMatch(runner, /runKernelConnectAndSave\(action/);
   assert.match(runner, /removeConnectAndSaveDriver\(sourceRoot\);[\s\S]*build:kernel:release/);
-  assert.match(runner, /installed Connect-and-save driver leaked into the Release extension bundle/);
+  assert.match(runner, /installed Connect-and-save driver leaked into the Release collector/);
   assert.match(runner, /simctl\("openurl", DEVICE_ID, url\)/);
   assert.match(
     runner,
@@ -343,7 +354,7 @@ test("installed iOS Connect-and-save uses a temporary authorized-sender driver",
   );
   assert.match(
     runner,
-    /runTest\("testConnectAndSaveFromInstalledArchiveSender", \{ url: AO3_WORK_URL \}\)/,
+    /runTest\("testConnectAndSaveFromInstalledArchiveSender", \{[\s\S]*url: ARCHIVE_WORK_URL/,
   );
 
   assert.match(ui, /func testConnectAndSaveFromInstalledArchiveSender\(\)/);

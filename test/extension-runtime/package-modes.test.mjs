@@ -294,7 +294,7 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
         path.join(ROOT, "iOS (App)", "TraceWebOrigin.generated.swift"),
         "utf8",
       ),
-      /httpsOrigin: String = "https:\/\/www\.tracefiction\.com"[\s\S]*allowReleaseExperimentOrigin: Bool = false/,
+      /httpsOrigin: String = "https:\/\/www\.tracefiction\.com"[\s\S]*earnedPermissionOnboardingEnabled: Bool = true[\s\S]*allowReleaseExperimentOrigin: Bool = false/,
     );
 
     const previewResult = spawnSync(
@@ -324,7 +324,7 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
         path.join(ROOT, "iOS (App)", "TraceWebOrigin.generated.swift"),
         "utf8",
       ),
-      /trace-git-dev-zacs-projects-378417c9\.vercel\.app"[\s\S]*ff-app-development\.up\.railway\.app"[\s\S]*allowReleaseExperimentOrigin: Bool = true/,
+      /trace-git-dev-zacs-projects-378417c9\.vercel\.app"[\s\S]*ff-app-development\.up\.railway\.app"[\s\S]*earnedPermissionOnboardingEnabled: Bool = true[\s\S]*allowReleaseExperimentOrigin: Bool = true/,
     );
 
     for (const packageRoot of [
@@ -350,7 +350,7 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
         path.join(ROOT, "iOS (App)", "TraceWebOrigin.generated.swift"),
         "utf8",
       ),
-      /allowReleaseExperimentOrigin: Bool = false/,
+      /earnedPermissionOnboardingEnabled: Bool = false[\s\S]*allowReleaseExperimentOrigin: Bool = false/,
     );
   }
 });

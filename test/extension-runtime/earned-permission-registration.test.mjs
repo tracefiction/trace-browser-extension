@@ -182,7 +182,7 @@ test("partial grant unregisters the bundle so Trace never presents partial cover
   assert.equal(h.registered.length, 0);
 });
 
-test("permission events and popup message share the same serialized reconciler", async () => {
+test("worker startup adopts an existing complete grant before any popup opens", async () => {
   const h = createHarness({ origins: [...ORIGINS] });
   installEarnedPermissionRegistrationRuntime(h.environment);
   await new Promise((resolve) => setImmediate(resolve));
@@ -190,6 +190,10 @@ test("permission events and popup message share the same serialized reconciler",
   assert.equal(typeof h.addedListener, "function");
   assert.equal(typeof h.removedListener, "function");
   assert.equal(h.registered.length, 1);
+  assert.equal(
+    h.store[EARNED_PERMISSION_STATE_KEY].promptResult,
+    "granted",
+  );
   const response = await h.dispatch({
     type: EARNED_PERMISSION_REGISTRATION_MESSAGE,
   });

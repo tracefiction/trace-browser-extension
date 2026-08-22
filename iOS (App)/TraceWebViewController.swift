@@ -1406,7 +1406,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         }
     }
 
-    private static let safariExtensionBundleIdentifier = "com.tracefiction.trace.earned-v5"
+    private static let safariExtensionBundleIdentifier = "com.tracefiction.trace.extension"
     private static let safariBridgeLog = OSLog(
         subsystem: Bundle.main.bundleIdentifier ?? "com.tracefiction.trace",
         category: "SafariBridge"
@@ -2420,7 +2420,8 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                     TraceSafariArchiveHostKind.ao3.rawValue,
                     TraceSafariArchiveHostKind.ffn.rawValue,
                 ],
-                earnedPermissionOnboarding: true,
+                earnedPermissionOnboarding:
+                    TraceWebOriginGenerated.earnedPermissionOnboardingEnabled,
                 error: error,
                 queriedIdentifier: queriedIdentifier,
                 embeddedExtensionIdentifiers: embeddedExtensionIdentifiers,

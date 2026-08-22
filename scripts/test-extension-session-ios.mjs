@@ -32,9 +32,19 @@ const APP_DEVICE_CREDENTIAL_A =
 const APP_DEVICE_CREDENTIAL_B =
   "trd_v1_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
 const APP_DEVICE_SESSION_EXPIRES_AT = "2027-08-02T00:00:00.000Z";
-const CONNECT_AND_SAVE_DRIVER = "trace-installed-connect-and-save-driver.js";
 const CONNECT_AND_SAVE_DRIVER_MARKER = "TRACE_INSTALLED_CONNECT_AND_SAVE_DRIVER";
-const AO3_WORK_URL = "https://archiveofourown.org/works/28534965/chapters/69925506";
+const CONNECT_AND_SAVE_DRIVER_START =
+  `/* ${CONNECT_AND_SAVE_DRIVER_MARKER}:start */`;
+const CONNECT_AND_SAVE_DRIVER_END =
+  `/* ${CONNECT_AND_SAVE_DRIVER_MARKER}:end */`;
+// Use the same public FFN story as the checked-in collector fixture. A fresh
+// Safari simulator can be redirected from AO3 works to AO3's Terms/content
+// policy consent page, which tests a site cookie rather than Trace's installed
+// sender, provider, and confirmed-save boundary.
+const ARCHIVE_WORK_URL =
+  "https://www.fanfiction.net/s/7038840/1/A-Chance-Encounter";
+const ARCHIVE_WORK_KEY = "ffn:7038840";
+const ARCHIVE_WORK_URL_IDENTITY_MARKER = "/s/7038840/";
 const TEST_TARGET = "TraceInstalledLifecycleUITests/TraceInstalledLifecycleUITests";
 const MODES = new Set(["ok-a", "ok-b", "rejected", "unavailable"]);
 const JOURNEY_PHASE = process.env.TRACE_IOS_JOURNEY_PHASE ?? "all";
@@ -115,6 +125,7 @@ function copyWorkingTree(destination) {
 function installConnectAndSaveDriver(sourceRoot) {
   const resourcesRoot = path.join(sourceRoot, "Shared (Extension)", "Resources");
   const manifestPath = path.join(resourcesRoot, "manifest.json");
+  const collectorPath = path.join(resourcesRoot, "collector.js");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   const archiveEntry = manifest.content_scripts.find(
     (entry) =>
@@ -122,16 +133,17 @@ function installConnectAndSaveDriver(sourceRoot) {
       entry.matches?.some((pattern) => pattern.includes("archiveofourown.org")),
   );
   assert.ok(archiveEntry, "archive collector manifest entry is required for installed Connect-and-save");
+  const collectorSource = fs.readFileSync(collectorPath, "utf8");
   assert.equal(
-    archiveEntry.js.includes(CONNECT_AND_SAVE_DRIVER),
+    collectorSource.includes(CONNECT_AND_SAVE_DRIVER_MARKER),
     false,
     "installed Connect-and-save driver was already present",
   );
-  archiveEntry.js.push(CONNECT_AND_SAVE_DRIVER);
-  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-  fs.writeFileSync(
-    path.join(resourcesRoot, CONNECT_AND_SAVE_DRIVER),
-    `(() => {
+  // Safari 26 isolates top-level lexical declarations between separate content
+  // script files. Append the DEBUG-only driver to the copied collector so it
+  // exercises the collector's real private Connect-and-save function instead
+  // of duplicating production payload or runtime-message logic.
+  fs.appendFileSync(collectorPath, `\n${CONNECT_AND_SAVE_DRIVER_START}\n(() => {
   const marker = ${JSON.stringify(CONNECT_AND_SAVE_DRIVER_MARKER)};
   const status = document.createElement("p");
   status.id = "trace-installed-connect-and-save-status";
@@ -140,16 +152,10 @@ function installConnectAndSaveDriver(sourceRoot) {
   status.textContent = marker + ": preparing";
   document.documentElement.appendChild(status);
 
-  const action = document.createElement("button");
-  action.type = "button";
-  action.textContent = "Connect and save";
-  action.style.cssText = "position:fixed;z-index:2147483647;top:72px;left:8px;right:8px;padding:14px;background:#1f4d3f;color:white;border:0;border-radius:8px;font:600 16px -apple-system,sans-serif";
-  document.documentElement.appendChild(action);
-
   if (
     typeof getWorkKeyFromUrl !== "function" ||
     typeof runKernelConnectAndSave !== "function" ||
-    typeof sendKernelCollectorMessage !== "function"
+    typeof sendCollectorMessage !== "function"
   ) {
     status.textContent = marker + ": collector unavailable";
     return;
@@ -160,8 +166,8 @@ function installConnectAndSaveDriver(sourceRoot) {
     return;
   }
 
-  const productionSend = sendKernelCollectorMessage;
-  sendKernelCollectorMessage = function(message, callback) {
+  const productionSend = sendCollectorMessage;
+  sendCollectorMessage = function(message, callback) {
     return productionSend(message, function(response) {
       if (message && message.type === TRACE_CONNECT_AND_SAVE_MESSAGE) {
         const state = response && response.snapshot && response.snapshot.state;
@@ -174,25 +180,25 @@ function installConnectAndSaveDriver(sourceRoot) {
     });
   };
   kernelPendingFirstStory = { workKey, handoffId: "installed-ios-connect-and-save" };
-  action.addEventListener("click", function() {
-    runKernelConnectAndSave(action, workKey);
-  });
   status.textContent = "Installed Connect-and-save driver ready";
-})();\n`,
-  );
+})();\n${CONNECT_AND_SAVE_DRIVER_END}\n`);
 }
 
 function removeConnectAndSaveDriver(sourceRoot) {
   const resourcesRoot = path.join(sourceRoot, "Shared (Extension)", "Resources");
-  const manifestPath = path.join(resourcesRoot, "manifest.json");
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  for (const entry of manifest.content_scripts ?? []) {
-    if (Array.isArray(entry.js)) {
-      entry.js = entry.js.filter((script) => script !== CONNECT_AND_SAVE_DRIVER);
-    }
-  }
-  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-  fs.rmSync(path.join(resourcesRoot, CONNECT_AND_SAVE_DRIVER), { force: true });
+  const collectorPath = path.join(resourcesRoot, "collector.js");
+  const collectorSource = fs.readFileSync(collectorPath, "utf8");
+  const startIndex = collectorSource.indexOf(CONNECT_AND_SAVE_DRIVER_START);
+  if (startIndex < 0) return;
+  const endIndex = collectorSource.indexOf(
+    CONNECT_AND_SAVE_DRIVER_END,
+    startIndex,
+  );
+  assert.notEqual(endIndex, -1, "installed Connect-and-save driver end marker is missing");
+  const restoredCollector =
+    collectorSource.slice(0, startIndex).trimEnd() + "\n" +
+    collectorSource.slice(endIndex + CONNECT_AND_SAVE_DRIVER_END.length).trimStart();
+  fs.writeFileSync(collectorPath, restoredCollector);
 }
 
 function fixtureHtml() {
@@ -466,14 +472,14 @@ async function main() {
         return;
       }
       const saved = storyCommandEvents.some(
-        (event) => event.account === mode && event.workKey === "ao3:28534965",
+        (event) => event.account === mode && event.workKey === ARCHIVE_WORK_KEY,
       );
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({
         success: true,
         data: {
           entries: saved ? {
-            "ao3:28534965": {
+            [ARCHIVE_WORK_KEY]: {
               status: "PLANNING",
               readerStatus: "PLANNING",
               canonicalReaderStatus: "SAVED",
@@ -517,19 +523,22 @@ async function main() {
           return;
         }
         const workUrl = payload?.item?.u;
-        if (typeof workUrl !== "string" || !workUrl.includes("/works/28534965")) {
+        if (
+          typeof workUrl !== "string" ||
+          !workUrl.includes(ARCHIVE_WORK_URL_IDENTITY_MARKER)
+        ) {
           response.writeHead(400, { "Content-Type": "application/json" });
           response.end(JSON.stringify({ error: "fixture_unexpected_work" }));
           return;
         }
-        storyCommandEvents.push({ account: mode, workKey: "ao3:28534965" });
+        storyCommandEvents.push({ account: mode, workKey: ARCHIVE_WORK_KEY });
         response.writeHead(200, { "Content-Type": "application/json" });
         response.end(JSON.stringify({
           success: true,
           data: {
             entry_id: "00000000-0000-4000-8000-000000000123",
             type: "created",
-            work_key: "ao3:28534965",
+            work_key: ARCHIVE_WORK_KEY,
             entry: {
               status: "PLANNING",
               readerStatus: "PLANNING",
@@ -895,7 +904,9 @@ async function main() {
       mode = "ok-a";
       await setProvider("ios-fixture-token-a");
       const connectAndSaveProviderBaseline = await readProviderRequestCount();
-      await runTest("testConnectAndSaveFromInstalledArchiveSender", { url: AO3_WORK_URL });
+      await runTest("testConnectAndSaveFromInstalledArchiveSender", {
+        url: ARCHIVE_WORK_URL,
+      });
       await assertProviderRequest(
         "installed Connect-and-save",
         "present",
@@ -903,8 +914,11 @@ async function main() {
       );
       assert.deepEqual(
         storyCommandEvents,
-        [{ account: "ok-a", workKey: "ao3:28534965" }],
-        "installed Connect-and-save did not produce exactly one account-scoped write",
+        [
+          { account: "ok-a", workKey: ARCHIVE_WORK_KEY },
+          { account: "ok-a", workKey: ARCHIVE_WORK_KEY },
+        ],
+        "installed first-story setup did not produce the bounded save and automatic-progress pair",
       );
       await runTest("testResetSession", { artifact: "testResetSessionAfterConnectAndSave" });
       await runTest("testLeaveReconnectRequiredForProviderChange", {
@@ -992,21 +1006,25 @@ async function main() {
       "PlugIns",
       "Trace Extension.appex",
     );
+    const releaseCollectorSource = fs.readFileSync(
+      path.join(releaseExtensionBundle, "collector.js"),
+      "utf8",
+    );
     assert.equal(
-      fs.existsSync(path.join(releaseExtensionBundle, CONNECT_AND_SAVE_DRIVER)),
+      releaseCollectorSource.includes(CONNECT_AND_SAVE_DRIVER_MARKER),
       false,
-      "installed Connect-and-save driver leaked into the Release extension bundle",
+      "installed Connect-and-save driver leaked into the Release collector",
     );
     const releaseManifest = JSON.parse(fs.readFileSync(
       path.join(sourceRoot, "Shared (Extension)", "Resources", "manifest.json"),
       "utf8",
     ));
     assert.equal(
-      releaseManifest.content_scripts.some(
-        (entry) => entry.js?.includes(CONNECT_AND_SAVE_DRIVER),
-      ),
-      false,
-      "installed Connect-and-save driver leaked into the Release manifest",
+      releaseManifest.content_scripts.filter(
+        (entry) => entry.js?.includes("collector.js"),
+      ).length,
+      1,
+      "Release manifest must contain exactly one production collector entry",
     );
     const releaseExtension = path.join(
       releaseExtensionBundle,
@@ -1072,7 +1090,7 @@ async function main() {
           "provider-clear failure remains signed in and retryable",
         ] : []),
         ...(runsSessionJourneys ? [
-          "installed AO3 Connect-and-save reaches the collector and confirms one save",
+          "installed archive Connect-and-save reaches the collector and confirms one save",
           "verified explicit Connect",
           "online Safari restart re-verification",
           "unavailable restart then Retry",
@@ -1087,7 +1105,7 @@ async function main() {
       fixtureStoryCommandEvents: storyCommandEvents,
       appProviderEvents: appEvents,
       connectAndSaveBoundary: runsSessionJourneys ? {
-        senderOrigin: new URL(AO3_WORK_URL).origin,
+        senderOrigin: new URL(ARCHIVE_WORK_URL).origin,
         snapshotState: "connected",
         result: "saved",
         confirmedWrites: storyCommandEvents.length,

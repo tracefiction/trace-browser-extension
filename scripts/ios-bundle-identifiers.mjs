@@ -1,3 +1,9 @@
+export const IOS_PRODUCTION_APP_BUNDLE_IDENTIFIER = "com.tracefiction.trace";
+export const IOS_PRODUCTION_EXTENSION_BUNDLE_IDENTIFIER =
+  "com.tracefiction.trace.extension";
+export const IOS_PRODUCTION_WIDGET_BUNDLE_IDENTIFIER =
+  "com.tracefiction.trace.TraceWidget";
+
 export function embeddedBundleIdentifierError(
   appBundleIdentifier,
   embeddedBundleIdentifier,
@@ -17,4 +23,17 @@ export function embeddedBundleIdentifierError(
   }
 
   return null;
+}
+
+export function productionEmbeddedBundleIdentifierError(
+  embeddedBundleIdentifier,
+) {
+  if (
+    embeddedBundleIdentifier === IOS_PRODUCTION_EXTENSION_BUNDLE_IDENTIFIER ||
+    embeddedBundleIdentifier === IOS_PRODUCTION_WIDGET_BUNDLE_IDENTIFIER
+  ) {
+    return null;
+  }
+
+  return `Unexpected production embedded bundle identifier ${embeddedBundleIdentifier}`;
 }

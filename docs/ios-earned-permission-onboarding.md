@@ -71,6 +71,16 @@ immediately re-query and render **Saved**. The embedded extension uses the fresh
 identifier `com.tracefiction.trace.earned-v5` so build 32 Website Access cannot
 hide the clean-onboarding behavior during device testing.
 
+Build 34 is the first production-identity release candidate. It restores the
+embedded Safari extension identifier to the identifier used by 0.6.3,
+`com.tracefiction.trace.extension`, and binds the app, popup, and background
+worker to Trace's production web/API origins. This build must be installed over
+the public 0.6.3 app before any clean-onboarding reset: retained auth, Website
+Access, dynamic script reconciliation, existing overlays, manual add,
+automatic tracking, and server sync are release gates. The earlier disposable
+identities prove clean onboarding behavior only; they do not prove upgrade
+continuity.
+
 ## User contract
 
 When `TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1`:
@@ -119,9 +129,16 @@ text, cookies, or credentials.
 The normal production-origin build is:
 
 ```bash
-TRACE_API_BASE=https://api.tracefiction.com \
-TRACE_WEB_ORIGIN=https://www.tracefiction.com \
 npm run build:ios-earned-permission-onboarding:release
+```
+
+The script pins both production origins and refuses to run if the Xcode target
+or native Settings bridge does not use
+`com.tracefiction.trace.extension`. After archiving, verify the production
+contract with:
+
+```bash
+npm run ios:verify-production-archive -- /path/to/Trace.xcarchive
 ```
 
 The build 33 physical-device candidate is paired to the stable Vercel dev
@@ -141,13 +158,46 @@ Normal release builds reset the generated Swift flag and remain hard-bound to
 Trace's production web origin. Ordinary Debug previews still use the custom
 scheme and cannot opt into the production callback accidentally.
 
-Archive the **Trace (iOS)** scheme without running another extension build.
+Build 33 is a development-only clean-state artifact and must never be submitted
+as a release. Archive the **Trace (iOS)** scheme only after the production
+earned-permission build, without running another extension build.
 `npm run build:release` restores the normal production resources.
 
 ## Physical-device protocol
 
-Use a real iPhone or iPad and begin with no grant inherited from an earlier
-Trace extension.
+### Existing-user upgrade gate
+
+Use a real iPhone or iPad. Do not uninstall, sign out, disable the extension,
+or change Website Access between the baseline and candidate.
+
+1. Install the public App Store 0.6.3 build and sign in to an existing Trace
+   account.
+2. Confirm a known baseline on AO3 and FFN: existing overlays load, one manual
+   add succeeds, one automatic story/progress update succeeds, and the server
+   state appears in the Library.
+3. Install the production-identity build 34 through TestFlight over 0.6.3.
+4. Before opening the updated Trace app, open a supported story in Safari.
+   Confirm Trace still runs and no enablement, Website Access, or reconnect
+   prompt interrupts the reader.
+5. Open Trace. Confirm the same account and Library remain present and the app
+   does not restart onboarding.
+6. Repeat manual add, automatic tracking, overlay state, and server-confirmed
+   sync on canonical AO3, an AO3 variant, desktop/mobile FFN, and a different
+   story.
+7. Restart Safari and repeat on AO3 and FFN. Reboot the device and repeat once.
+8. Sign out and back in only after continuity has passed; confirm the extension
+   adopts the current account without stale-account writes.
+
+Any lost permission, unexpected onboarding, missing overlay, disconnected
+extension, duplicate/stale write, or tracking/sync regression fails the release
+candidate.
+
+### New-user production onboarding gate
+
+After recording the upgrade result, use a clean device/identity when available.
+If Safari retains state on the only device, explicitly record the retained
+state and use the build-33 fresh-identity result as the clean permission proof;
+do not describe an uninstall as clean when Safari restored the grant.
 
 1. Delete the earlier Trace build, confirm its Safari extension has gone, and
    restart Safari.
