@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -6,6 +7,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 import {
+  AO3_HOST_MATCHES,
   MINIMIZED_SITE_HOST_MATCHES,
   SITE_HOST_MATCHES,
 } from "../../scripts/build-origin-permissions.mjs";
@@ -248,11 +250,23 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     const earnedSafariConfig = fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8");
     assert.deepEqual(earnedSafariManifest.permissions, [
       "alarms",
+      "tabs",
       "storage",
       "nativeMessaging",
-      "activeTab",
-      "scripting",
     ]);
+    const earnedPermissionSurface = {
+      permissions: earnedSafariManifest.permissions,
+      host_permissions: earnedSafariManifest.host_permissions,
+      content_scripts: earnedSafariManifest.content_scripts,
+    };
+    assert.equal(
+      crypto
+        .createHash("sha256")
+        .update(JSON.stringify(earnedPermissionSurface))
+        .digest("hex"),
+      "09aa341fbcaf4a92b430bc4faf4a04ae5635b7d458219ec24f6aebf53daf5d83",
+      "production onboarding must preserve the exact v0.6.3 Safari permission surface",
+    );
     assert.deepEqual(
       earnedSafariManifest.host_permissions,
       [...SITE_HOST_MATCHES, "https://www.tracefiction.com/*"],
@@ -261,15 +275,34 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
       Object.hasOwn(earnedSafariManifest, "optional_host_permissions"),
       false,
     );
-    assert.deepEqual(earnedSafariManifest.content_scripts, []);
-    assert.match(earnedSafariConfig, /TRACE_IOS_ACTIVE_TAB_PROBE = true/);
+    assert.equal(earnedSafariManifest.content_scripts.length, 3);
+    assert.deepEqual(earnedSafariManifest.content_scripts[0].matches, SITE_HOST_MATCHES);
+    assert.deepEqual(earnedSafariManifest.content_scripts[0].js, [
+      "popup-config.js",
+      "trace-finish-qualify.js",
+      "collector.js",
+      "library-overlay-keys.js",
+      "library-overlay.js",
+    ]);
+    assert.deepEqual(earnedSafariManifest.content_scripts[1], {
+      matches: ["https://www.tracefiction.com/*"],
+      js: ["popup-config.js", "sync.js"],
+      run_at: "document_idle",
+    });
+    assert.deepEqual(earnedSafariManifest.content_scripts[2].matches, AO3_HOST_MATCHES);
+    assert.deepEqual(earnedSafariManifest.content_scripts[2].js, [
+      "ao3-saved-filters.js",
+    ]);
+    assert.doesNotMatch(earnedSafariConfig, /TRACE_IOS_ACTIVE_TAB_PROBE/);
     assert.match(earnedSafariConfig, /TRACE_IOS_EARNED_PERMISSION_ONBOARDING/);
+    assert.match(earnedSafariConfig, /trace-earned-permission-ready/);
     assert.match(earnedSafariConfig, /trace-archive-automation-v1/);
     assert.match(earnedSafariConfig, /persistAcrossSessions/);
     const earnedConfigContext = {};
     vm.runInNewContext(earnedSafariConfig, earnedConfigContext);
     const earnedOnboarding = earnedConfigContext.TRACE_IOS_EARNED_PERMISSION_ONBOARDING;
     assert.equal(earnedOnboarding.version, 3);
+    assert.equal(earnedOnboarding.registrationMode, "static");
     const automationRegistration = earnedOnboarding.registrations.find(
       (registration) => registration.id === "trace-archive-automation-v1",
     );

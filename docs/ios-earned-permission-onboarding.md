@@ -89,15 +89,27 @@ content-script declarations, so Safari no longer treated the old Website
 Access as a current grant and the background correctly withheld dynamic
 registration.
 
-Build 35 is the compatibility candidate. It restores the exact bounded Safari
-host request set used by 0.6.3 while retaining `activeTab`, an empty static
-`content_scripts` array, and complete-grant dynamic registration. Safari still
-withholds required hosts until the user grants them; `permissions.request()`
-can request those withheld required hosts from the popup's direct user gesture.
-Existing users can therefore retain Website Access across the upgrade while
-new users keep the permission-first popup flow. Grant checks use
-`permissions.contains()` so equivalent legacy grant patterns are accepted, and
-the worker explicitly reconciles dynamic registrations on extension updates.
+The physical 0.6.3-to-build-35 gate also failed. The old site rows returned in
+Safari Settings, but every existing **Allow** grant changed to **Ask** and the
+overlay stopped. Restoring `host_permissions` alone was therefore insufficient:
+build 35 still replaced the legacy `tabs` permission with `activeTab` and
+`scripting`, and still removed the legacy static `content_scripts` declarations.
+
+Build 36 is the full-surface compatibility candidate. Its API permissions,
+required host permissions, static content-script matches, exclusions, ordering,
+and script lists are byte-for-byte equivalent to the permission-bearing 0.6.3
+manifest projection. It does not add `activeTab`, `scripting`, optional hosts,
+or dynamic registrations. This is the narrowest remaining candidate for
+preserving Safari's existing Website Access authorization across an upgrade.
+
+The static declarations do not weaken the permission-first product contract.
+On a fresh or partial grant, `popup-config.js` asks the background to reconcile
+the complete AO3/FFN bundle. Collector, automatic tracking, manual add, listing
+overlays, and AO3 saved filters remain inert until
+`permissions.contains()` confirms that complete bundle. The popup can request
+withheld required hosts from its direct user gesture; after a complete grant,
+the story reload starts the already-declared static scripts and the normal
+fresh-run plus server-confirmed-save path.
 
 ## User contract
 
@@ -110,20 +122,19 @@ When `TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1`:
   save automatically;
 - if Trace does not start, the app shows a literal Safari extension-button
   guide plus Safari Settings as the alternate recovery;
-- the popup uses `activeTab` only to identify the current supported story. It
-  does not inject a collector or send a save command before permission;
+- opening Trace from Safari obtains only Safari's current-site interaction
+  needed to identify the supported story. It does not inject a collector or
+  send a save command before complete Website Access;
 - one direct action requests exactly five supported origin patterns and tells
   the reader to choose **Always Allow**;
 - denial/cancel or an incomplete grant saves nothing and remains retryable;
 - a complete existing grant skips the prompt;
-- the background worker owns persistent production-script registration. It
-  reconciles at startup, extension install/update, permission changes, and
-  popup request;
-- partial coverage unregisters the bundle so one working hostname cannot be
-  presented as complete setup;
-- after registration, the popup reloads the story. The normal pending-handoff
+- the background worker owns the complete-bundle readiness decision. Static
+  content scripts remain inert when coverage is partial, so one working
+  hostname cannot be presented as complete setup;
+- after the complete grant, the popup reloads the story. The normal pending-handoff
   path then supplies the fresh run and server-confirmed save;
-- setup is complete only after both that fresh post-registration run and the
+- setup is complete only after both that fresh post-grant run and the
   current app account's server confirmation;
 - revoked or expired access returns to the same permission recovery on the next
   positive signal; inactivity alone is never treated as permission loss;
@@ -139,7 +150,7 @@ set:
 - `https://m.fanfiction.net/*`
 
 Archive login, signup, password, authentication, and logout routes are excluded
-from the dynamically registered scripts. The flow stores only a bounded local
+from the static scripts. The flow stores only a bounded local
 list of coarse event names and timestamps for device-side diagnosis. It adds no
 network telemetry, URLs, story identity, account identity, page HTML, story
 text, cookies, or credentials.
@@ -195,7 +206,7 @@ or change Website Access between the baseline and candidate.
 2. Confirm a known baseline on AO3 and FFN: existing overlays load, one manual
    add succeeds, one automatic story/progress update succeeds, and the server
    state appears in the Library.
-3. Install the production-identity build 35 through TestFlight over 0.6.3.
+3. Install the production-identity build 36 through TestFlight over 0.6.3.
 4. Before opening the updated Trace app, open a supported story in Safari.
    Confirm Trace still runs and no enablement, Website Access, or reconnect
    prompt interrupts the reader.
@@ -233,15 +244,15 @@ do not describe an uninstall as clean when Safari restored the grant.
    Confirm the popup identifies the story but sends no save and presents
    **Allow access and add story**.
 6. Choose that action and **Always Allow** in every Safari prompt. Confirm the
-   exact five-origin bundle is granted, registration succeeds, and the story
-   reloads. The reloaded content script must produce the run and save receipts.
+   exact five-origin bundle is granted and the story reloads. The reloaded
+   content script must produce the run and save receipts.
 7. Repeat the clean recovery but choose Deny/cancel. Confirm the story remains
    absent, **Try again** is available, and the Settings path is visible. Retry
    successfully without restarting onboarding.
 8. Start with four of five origins allowed. Confirm Trace treats coverage as
    incomplete, does not save, and requests/reconciles the missing bundle.
-9. Grant access but simulate one registration failure. Confirm retry skips the
-   permission prompt and retries registration/reload only.
+9. Grant access but interrupt the first verification reload. Confirm retry
+   skips the permission prompt and retries the reload/verification only.
 10. Open new stories on canonical AO3, an AO3 variant, and FFN without invoking
    the toolbar. Confirm the overlay/automatic behavior and Trace library saves.
 11. Restart Safari and repeat on AO3 and FFN. Reboot the device and repeat once.
@@ -249,7 +260,7 @@ do not describe an uninstall as clean when Safari restored the grant.
     missing run returns to permission recovery without inferring loss from idle
     time alone.
 12. Change one relevant Safari Website Access entry back to Ask or Deny. Confirm
-    the dynamic bundle is no longer presented as ready and the next story
+    the complete bundle is no longer presented as ready and the next story
     returns to recovery without being saved first.
 13. Open Trace on an unrelated site. It must not inject, read, or request
     access to that site.
@@ -264,5 +275,5 @@ The candidate passes only if no first-story write occurs before the complete
 grant, the permission prompt is caused by the labeled direct action, acceptance
 survives Safari restart and device reboot, all five host patterns work without
 extra grants, denial and partial coverage stay incomplete and retryable, and
-onboarding success is backed by both a fresh post-registration run and current
+onboarding success is backed by both a fresh post-grant run and current
 account server confirmation.

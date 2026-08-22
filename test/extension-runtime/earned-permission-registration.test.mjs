@@ -43,6 +43,8 @@ function createHarness({
   registrations = [],
   state = null,
   now = 1_780_000_000_000,
+  config = CONFIG,
+  scriptingAvailable = true,
 } = {}) {
   const store = state ? { [EARNED_PERMISSION_STATE_KEY]: { ...state } } : {};
   let currentRegistrations = registrations.map((item) => ({ ...item }));
@@ -111,10 +113,10 @@ function createHarness({
   const environment = {
     runtime,
     permissions,
-    scripting,
+    ...(scriptingAvailable ? { scripting } : {}),
     storage,
     storageMode: "promise",
-    config: CONFIG,
+    config,
     clock: () => now,
   };
   return {
@@ -213,6 +215,48 @@ test("semantic permission coverage adopts a legacy grant even when getAll uses d
   assert.equal(result.completeGrant, true);
   assert.equal(result.registered, true);
   assert.equal(h.registered.length, 1);
+});
+
+test("static compatibility mode adopts a complete grant without scripting", async () => {
+  const h = createHarness({
+    origins: [...ORIGINS],
+    config: { ...CONFIG, registrationMode: "static" },
+    scriptingAvailable: false,
+  });
+  const controller = new EarnedPermissionRegistrationController(h.environment);
+
+  assert.deepEqual(await controller.reconcile(), {
+    ok: true,
+    completeGrant: true,
+    registered: true,
+    changed: false,
+    grantAt: 1_780_000_000_000,
+  });
+  assert.equal(h.registered.length, 0);
+  assert.deepEqual(h.store[EARNED_PERMISSION_STATE_KEY], {
+    grantAt: 1_780_000_000_000,
+    registrationVersion: 3,
+    promptResult: "granted",
+  });
+});
+
+test("static compatibility mode keeps archive runtime gated for a partial grant", async () => {
+  const h = createHarness({
+    origins: ORIGINS.slice(0, 4),
+    config: { ...CONFIG, registrationMode: "static" },
+    scriptingAvailable: false,
+  });
+  const controller = new EarnedPermissionRegistrationController(h.environment);
+
+  assert.deepEqual(await controller.reconcile(), {
+    ok: false,
+    completeGrant: false,
+    registered: false,
+    changed: false,
+    error: "permission_incomplete",
+  });
+  assert.equal(h.registered.length, 0);
+  assert.equal(h.unregistered.length, 0);
 });
 
 test("worker startup adopts an existing complete grant before any popup opens", async () => {

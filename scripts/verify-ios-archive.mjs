@@ -256,12 +256,65 @@ if (productionRelease) {
   ) {
     errors.push("Production Safari manifest does not preserve the legacy required host set");
   }
-  if (JSON.stringify(sourceManifest?.content_scripts) !== "[]") {
-    errors.push("Production earned-permission manifest must have no static content scripts");
+  const expectedLegacyPermissions = [
+    "alarms",
+    "tabs",
+    "storage",
+    "nativeMessaging",
+  ];
+  if (
+    JSON.stringify(sourceManifest?.permissions) !==
+    JSON.stringify(expectedLegacyPermissions)
+  ) {
+    errors.push("Production Safari manifest does not preserve the 0.6.3 API permission set");
   }
-  for (const permission of ["activeTab", "scripting", "nativeMessaging"]) {
-    if (!sourceManifest?.permissions?.includes(permission)) {
-      errors.push(`Production earned-permission manifest is missing ${permission}`);
+  const sourceContentScripts = sourceManifest?.content_scripts;
+  const permissionSurface = {
+    permissions: sourceManifest?.permissions,
+    host_permissions: sourceManifest?.host_permissions,
+    content_scripts: sourceContentScripts,
+  };
+  const permissionSurfaceDigest = crypto
+    .createHash("sha256")
+    .update(JSON.stringify(permissionSurface))
+    .digest("hex");
+  if (
+    permissionSurfaceDigest !==
+    "09aa341fbcaf4a92b430bc4faf4a04ae5635b7d458219ec24f6aebf53daf5d83"
+  ) {
+    errors.push("Production Safari manifest does not exactly preserve the v0.6.3 permission surface");
+  }
+  if (!Array.isArray(sourceContentScripts) || sourceContentScripts.length !== 3) {
+    errors.push("Production Safari manifest does not preserve the three static content-script declarations");
+  } else {
+    const [archiveScript, traceScript, savedFiltersScript] = sourceContentScripts;
+    if (
+      JSON.stringify(archiveScript?.matches) !== JSON.stringify(SITE_HOST_MATCHES) ||
+      JSON.stringify(archiveScript?.js) !== JSON.stringify([
+        "popup-config.js",
+        "trace-finish-qualify.js",
+        "collector.js",
+        "library-overlay-keys.js",
+        "library-overlay.js",
+      ])
+    ) {
+      errors.push("Production Safari archive content-script declaration does not preserve the 0.6.3 permission surface");
+    }
+    if (
+      JSON.stringify(traceScript?.matches) !==
+        JSON.stringify([`${RELEASE_TRACE_WEB_ORIGIN}/*`]) ||
+      JSON.stringify(traceScript?.js) !==
+        JSON.stringify(["popup-config.js", "sync.js"])
+    ) {
+      errors.push("Production Safari Trace-site content-script declaration does not preserve the 0.6.3 permission surface");
+    }
+    if (
+      JSON.stringify(savedFiltersScript?.matches) !==
+        JSON.stringify(SITE_HOST_MATCHES.slice(0, 5)) ||
+      JSON.stringify(savedFiltersScript?.js) !==
+        JSON.stringify(["ao3-saved-filters.js"])
+    ) {
+      errors.push("Production Safari saved-filter declaration does not preserve the 0.6.3 permission surface");
     }
   }
 

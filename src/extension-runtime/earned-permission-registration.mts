@@ -21,6 +21,7 @@ export type EarnedPermissionRegistration = Readonly<{
 
 export type EarnedPermissionRegistrationConfig = Readonly<{
   version: number;
+  registrationMode?: "dynamic" | "static";
   origins: readonly string[];
   registrations: readonly EarnedPermissionRegistration[];
 }>;
@@ -44,7 +45,7 @@ export type EarnedPermissionRegistrationResult = Readonly<{
 type Environment = Readonly<{
   runtime: RuntimePort;
   permissions: PermissionsPort;
-  scripting: ScriptingPort;
+  scripting?: ScriptingPort;
   storage: BrowserStorage;
   storageMode: "callback" | "promise";
   config: EarnedPermissionRegistrationConfig;
@@ -164,6 +165,52 @@ export class EarnedPermissionRegistrationController {
       (typeof semanticGrant === "boolean"
         ? semanticGrant
         : config.origins.every((origin) => granted.has(origin)));
+    const staticRegistration = config.registrationMode === "static";
+    if (staticRegistration) {
+      if (!completeGrant) {
+        return Object.freeze({
+          ok: false,
+          completeGrant: false,
+          registered: false,
+          changed: false,
+          error: "permission_incomplete",
+        });
+      }
+      const grantAt =
+        typeof stored.grantAt === "number"
+          ? stored.grantAt
+          : (this.#environment.clock?.() ?? Date.now());
+      if (
+        stored.grantAt !== grantAt ||
+        stored.registrationVersion !== config.version ||
+        stored.promptResult !== "granted"
+      ) {
+        await storage.set({
+          [EARNED_PERMISSION_STATE_KEY]: {
+            ...stored,
+            grantAt,
+            registrationVersion: config.version,
+            promptResult: "granted",
+          },
+        });
+      }
+      return Object.freeze({
+        ok: true,
+        completeGrant: true,
+        registered: true,
+        changed: false,
+        grantAt,
+      });
+    }
+    if (!scripting) {
+      return Object.freeze({
+        ok: false,
+        completeGrant: true,
+        registered: false,
+        changed: false,
+        error: "registration_failed",
+      });
+    }
     const configuredIds = config.registrations.map(({ id }) => id);
     const current = await callExtensionApi<readonly { readonly id?: string }[]>(
       scripting as unknown as Record<string, (...args: unknown[]) => unknown>,

@@ -66,6 +66,7 @@ async function renderSavedFilters({
   url = "https://archiveofourown.org/works?work_search%5Bsort_column%5D=kudos_count&work_search%5Bcomplete%5D=T&work_search%5Bwords_from%5D=50000&tag_id=Harry+Potter+-+J*d*+K*d*+Rowling&page=2&commit=Sort+and+Filter",
   storage = {},
   setErrorMessage = "",
+  earnedPermissionComplete,
 } = {}) {
   const script = fs.readFileSync(SCRIPT_PATH, "utf8");
   const dom = new JSDOM(html, {
@@ -123,6 +124,12 @@ async function renderSavedFilters({
 
   window.chrome = chrome;
   window.browser = chrome;
+  if (typeof earnedPermissionComplete === "boolean") {
+    window.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {
+      registrationMode: "static",
+    };
+    window.TRACE_EARNED_PERMISSION_COMPLETE = earnedPermissionComplete;
+  }
   window.__TRACE_AO3_SAVED_FILTERS_TESTS__ = true;
   window.__traceAo3SavedFiltersNavigate = (href) => {
     navigations.push(href);
@@ -135,6 +142,16 @@ async function renderSavedFilters({
     storageState,
     navigations,
     runtimeMessages,
+    async grantEarnedPermission() {
+      window.TRACE_EARNED_PERMISSION_COMPLETE = true;
+      window.document.dispatchEvent(
+        new window.CustomEvent("trace-earned-permission-ready"),
+      );
+      window.document.dispatchEvent(
+        new window.Event("DOMContentLoaded", { bubbles: true }),
+      );
+      await sleep(80);
+    },
     emitStorageChange(changes, area = "local") {
       if (area === "local") {
         for (const [key, change] of Object.entries(changes || {})) {
@@ -155,6 +172,16 @@ async function renderSavedFilters({
 function root(window) {
   return window.document.querySelector("[data-trace-ao3-saved-filters]");
 }
+
+test("AO3 saved filters remain inert until the complete Safari grant", async () => {
+  const harness = await renderSavedFilters({ earnedPermissionComplete: false });
+  assert.equal(root(harness.window), null);
+  assert.deepEqual(harness.runtimeMessages, []);
+
+  await harness.grantEarnedPermission();
+
+  assert.ok(root(harness.window));
+});
 
 test("manifest loads AO3 saved filters with existing archive content scripts", () => {
   const manifest = JSON.parse(fs.readFileSync(MANIFEST_PATH, "utf8"));

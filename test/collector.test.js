@@ -6082,6 +6082,93 @@ function createActiveTabProbeCollectorHarness(fixture, url, response) {
   return { dom, sent, listener };
 }
 
+function createStaticEarnedPermissionCollectorHarness() {
+  const dom = domFromFixture(
+    "ao3_story.html",
+    "https://archiveofourown.org/works/28534965/chapters/69925506",
+  );
+  const sent = [];
+  let listener = null;
+  dom.window.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {
+    registrationMode: "static",
+  };
+  dom.window.TRACE_EARNED_PERMISSION_COMPLETE = false;
+  dom.window.TRACE_SESSION_MODE = "kernel";
+  installCollectorChrome(dom, {
+    runtime: {
+      lastError: null,
+      onMessage: {
+        addListener(fn) {
+          listener = fn;
+        },
+      },
+      sendMessage(message, callback) {
+        sent.push(message);
+        callback?.({ ok: true });
+      },
+    },
+    storage: {
+      local: {
+        get(_keys, callback) {
+          callback?.({
+            prefAutoTrackEnabled: true,
+            prefLibraryInlayEnabled: true,
+            traceAuthState: { state: "connected" },
+          });
+        },
+        set(_values, callback) {
+          callback?.();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  });
+  const collectorSource = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  dom.window.eval(collectorSource);
+  assert.equal(typeof listener, "function");
+  return { dom, sent, listener };
+}
+
+test("static earned-permission collector cannot read or save before the complete grant", async () => {
+  const harness = createStaticEarnedPermissionCollectorHarness();
+  const response = await new Promise((resolve) => {
+    const keepsWorkerAlive = harness.listener(
+      { type: "TRACE_COLLECT" },
+      {},
+      resolve,
+    );
+    assert.equal(keepsWorkerAlive, false);
+  });
+  assert.deepEqual(plainJson(response), {
+    ok: false,
+    error: "website_access_incomplete",
+  });
+  assert.deepEqual(harness.sent, []);
+  assert.equal(
+    harness.dom.window.document.querySelector("[data-trace-quick-add-wrap]"),
+    null,
+  );
+
+  harness.dom.window.TRACE_EARNED_PERMISSION_COMPLETE = true;
+  harness.dom.window.document.dispatchEvent(
+    new harness.dom.window.CustomEvent("trace-earned-permission-ready"),
+  );
+  harness.dom.window.document.dispatchEvent(
+    new harness.dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+  await delay(80);
+
+  assert.ok(
+    harness.sent.some((message) => message.type === "TRACE_ARCHIVE_SEEN"),
+  );
+  assert.ok(
+    harness.dom.window.document.querySelector("[data-trace-quick-add-wrap]"),
+  );
+});
+
 for (const fixture of [
   {
     name: "AO3",

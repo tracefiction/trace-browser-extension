@@ -15,6 +15,9 @@
   const ACTION_SURFACE_CLOSE_ATTR = "data-trace-action-surface-close";
   const TRACE_SESSION_MODE = globalThis.TRACE_SESSION_MODE || "legacy";
   const KERNEL_SESSION_ACTIVE = TRACE_SESSION_MODE === "kernel";
+  const TRACE_EARNED_PERMISSION_GATE_ACTIVE =
+    globalThis.TRACE_IOS_EARNED_PERMISSION_ONBOARDING?.registrationMode ===
+    "static";
   const TRACE_WEB_HOME_URL = configuredTraceWebHomeUrl();
   const ACCOUNT_PROJECTION_GET_MESSAGE = "TRACE_ACCOUNT_PROJECTION_GET";
   const ACCOUNT_PROJECTION_REVISION_KEY = "traceAccountProjectionRevisionV1";
@@ -23,6 +26,23 @@
   const TRACE_API_BASE_STORAGE_KEY = "traceApiBase";
   var currentTraceAuthState = null;
   var confirmedQuickAddEntries = new Map();
+
+  function runWhenTraceEarnedPermissionReady(start) {
+    if (
+      !TRACE_EARNED_PERMISSION_GATE_ACTIVE ||
+      globalThis.TRACE_EARNED_PERMISSION_COMPLETE === true
+    ) {
+      start();
+      return;
+    }
+    document.addEventListener(
+      "trace-earned-permission-ready",
+      function () {
+        if (globalThis.TRACE_EARNED_PERMISSION_COMPLETE === true) start();
+      },
+      { once: true },
+    );
+  }
 
   function configuredTraceWebHomeUrl() {
     var configured =
@@ -3603,46 +3623,48 @@
     }
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", run, { once: true });
-  } else {
-    run();
-  }
-  startDomObserver();
+  runWhenTraceEarnedPermissionReady(function () {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", run, { once: true });
+    } else {
+      run();
+    }
+    startDomObserver();
 
-  try {
-    window.addEventListener("pageshow", function () {
-      scheduleRun(60);
-    });
-    window.addEventListener("focus", function () {
-      scheduleRun(80);
-    });
-    document.addEventListener("visibilitychange", function () {
-      if (!document.hidden) scheduleRun(80);
-    });
-  } catch {
-    /* ignore */
-  }
-
-  try {
-    if (ext.storage && ext.storage.onChanged) {
-      ext.storage.onChanged.addListener(function (changes, area) {
-        if (area !== "local") return;
-        if (
-          !changes.libraryOverlayCache &&
-          !changes[ACCOUNT_PROJECTION_REVISION_KEY] &&
-          !changes.prefLibraryInlayEnabled &&
-          !changes.traceAuthState &&
-          !changes.authToken &&
-          !changes[TRACE_ACCOUNT_ID_KEY] &&
-          !changes[TRACE_API_BASE_STORAGE_KEY]
-        ) {
-          return;
-        }
+    try {
+      window.addEventListener("pageshow", function () {
         scheduleRun(60);
       });
+      window.addEventListener("focus", function () {
+        scheduleRun(80);
+      });
+      document.addEventListener("visibilitychange", function () {
+        if (!document.hidden) scheduleRun(80);
+      });
+    } catch {
+      /* ignore */
     }
-  } catch {
-    /* ignore */
-  }
+
+    try {
+      if (ext.storage && ext.storage.onChanged) {
+        ext.storage.onChanged.addListener(function (changes, area) {
+          if (area !== "local") return;
+          if (
+            !changes.libraryOverlayCache &&
+            !changes[ACCOUNT_PROJECTION_REVISION_KEY] &&
+            !changes.prefLibraryInlayEnabled &&
+            !changes.traceAuthState &&
+            !changes.authToken &&
+            !changes[TRACE_ACCOUNT_ID_KEY] &&
+            !changes[TRACE_API_BASE_STORAGE_KEY]
+          ) {
+            return;
+          }
+          scheduleRun(60);
+        });
+      }
+    } catch {
+      /* ignore */
+    }
+  });
 })();
