@@ -457,8 +457,16 @@ const {
   traceWebOrigin: TRACE_WEB_ORIGIN,
 });
 
-manifest.host_permissions = IOS_ACTIVE_TAB_PROBE ? [] : safariHostPermissions;
-if (IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE || IOS_EARNED_PERMISSION_ONBOARDING) {
+// The production earned-permission flow keeps the same required Safari host
+// declarations as 0.6.3. Safari still withholds those hosts until the user
+// grants them, and permissions.request() can request withheld required hosts
+// from the popup's user gesture. Keeping the declarations stable preserves
+// existing Website Access across an in-place App Store upgrade.
+manifest.host_permissions =
+  IOS_ACTIVE_TAB_PROBE && !IOS_EARNED_PERMISSION_ONBOARDING
+    ? []
+    : safariHostPermissions;
+if (IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE) {
   manifest.optional_host_permissions = [...MINIMIZED_SITE_HOST_MATCHES];
 } else {
   delete manifest.optional_host_permissions;

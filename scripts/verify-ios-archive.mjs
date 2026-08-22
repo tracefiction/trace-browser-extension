@@ -4,7 +4,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { MINIMIZED_SITE_HOST_MATCHES } from "./build-origin-permissions.mjs";
+import { SITE_HOST_MATCHES } from "./build-origin-permissions.mjs";
 import {
   embeddedBundleIdentifierError,
   IOS_PRODUCTION_APP_BUNDLE_IDENTIFIER,
@@ -243,15 +243,18 @@ if (productionRelease) {
     errors.push("Production archive does not advertise the earned-permission native capability");
   }
 
-  const sourceOptionalHosts = sourceManifest?.optional_host_permissions;
-  if (
-    JSON.stringify(sourceOptionalHosts) !==
-    JSON.stringify(MINIMIZED_SITE_HOST_MATCHES)
-  ) {
-    errors.push("Production Safari manifest does not contain the exact five optional archive origins");
+  if (Object.hasOwn(sourceManifest ?? {}, "optional_host_permissions")) {
+    errors.push("Production earned-permission manifest must not move core hosts to optional permissions");
   }
-  if (JSON.stringify(sourceManifest?.host_permissions) !== "[]") {
-    errors.push("Production earned-permission manifest must have no required host permissions");
+  const expectedRequiredHosts = [
+    ...SITE_HOST_MATCHES,
+    `${RELEASE_TRACE_WEB_ORIGIN}/*`,
+  ];
+  if (
+    JSON.stringify(sourceManifest?.host_permissions) !==
+    JSON.stringify(expectedRequiredHosts)
+  ) {
+    errors.push("Production Safari manifest does not preserve the legacy required host set");
   }
   if (JSON.stringify(sourceManifest?.content_scripts) !== "[]") {
     errors.push("Production earned-permission manifest must have no static content scripts");

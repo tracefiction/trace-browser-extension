@@ -81,6 +81,24 @@ automatic tracking, and server sync are release gates. The earlier disposable
 identities prove clean onboarding behavior only; they do not prove upgrade
 continuity.
 
+The physical 0.6.3-to-build-34 gate failed before the updated app was opened:
+Safari no longer listed the previously configured sites, the listing overlay
+was absent, and the popup could identify a story only through `activeTab`.
+Build 34 had removed both the legacy required host declarations and the static
+content-script declarations, so Safari no longer treated the old Website
+Access as a current grant and the background correctly withheld dynamic
+registration.
+
+Build 35 is the compatibility candidate. It restores the exact bounded Safari
+host request set used by 0.6.3 while retaining `activeTab`, an empty static
+`content_scripts` array, and complete-grant dynamic registration. Safari still
+withholds required hosts until the user grants them; `permissions.request()`
+can request those withheld required hosts from the popup's direct user gesture.
+Existing users can therefore retain Website Access across the upgrade while
+new users keep the permission-first popup flow. Grant checks use
+`permissions.contains()` so equivalent legacy grant patterns are accepted, and
+the worker explicitly reconciles dynamic registrations on extension updates.
+
 ## User contract
 
 When `TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1`:
@@ -99,7 +117,8 @@ When `TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1`:
 - denial/cancel or an incomplete grant saves nothing and remains retryable;
 - a complete existing grant skips the prompt;
 - the background worker owns persistent production-script registration. It
-  reconciles at startup, on permission changes, and on popup request;
+  reconciles at startup, extension install/update, permission changes, and
+  popup request;
 - partial coverage unregisters the bundle so one working hostname cannot be
   presented as complete setup;
 - after registration, the popup reloads the story. The normal pending-handoff
@@ -110,7 +129,8 @@ When `TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1`:
   positive signal; inactivity alone is never treated as permission loss;
 - Chrome and Firefox packages remain production-shaped.
 
-The five optional patterns are:
+The popup requests these five minimized patterns from the bounded required host
+set:
 
 - `https://*.archiveofourown.org/*`
 - `https://*.archiveofourown.gay/*`
@@ -175,7 +195,7 @@ or change Website Access between the baseline and candidate.
 2. Confirm a known baseline on AO3 and FFN: existing overlays load, one manual
    add succeeds, one automatic story/progress update succeeds, and the server
    state appears in the Library.
-3. Install the production-identity build 34 through TestFlight over 0.6.3.
+3. Install the production-identity build 35 through TestFlight over 0.6.3.
 4. Before opening the updated Trace app, open a supported story in Safari.
    Confirm Trace still runs and no enablement, Website Access, or reconnect
    prompt interrupts the reader.

@@ -253,10 +253,13 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
       "activeTab",
       "scripting",
     ]);
-    assert.deepEqual(earnedSafariManifest.host_permissions, []);
     assert.deepEqual(
-      earnedSafariManifest.optional_host_permissions,
-      MINIMIZED_SITE_HOST_MATCHES,
+      earnedSafariManifest.host_permissions,
+      [...SITE_HOST_MATCHES, "https://www.tracefiction.com/*"],
+    );
+    assert.equal(
+      Object.hasOwn(earnedSafariManifest, "optional_host_permissions"),
+      false,
     );
     assert.deepEqual(earnedSafariManifest.content_scripts, []);
     assert.match(earnedSafariConfig, /TRACE_IOS_ACTIVE_TAB_PROBE = true/);

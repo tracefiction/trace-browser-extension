@@ -127,7 +127,7 @@ export class EarnedPermissionRegistrationController {
   async #reconcile(): Promise<EarnedPermissionRegistrationResult> {
     const { config, permissions, runtime, scripting, storageMode, storage } =
       this.#environment;
-    const [permissionSnapshot, stored] = await Promise.all([
+    const [permissionSnapshot, semanticGrant, stored] = await Promise.all([
       callExtensionApi<{ readonly origins?: readonly string[] }>(
         permissions as unknown as Record<string, (...args: unknown[]) => unknown>,
         "getAll",
@@ -135,6 +135,18 @@ export class EarnedPermissionRegistrationController {
         runtime,
         storageMode,
       ).catch(() => Object.freeze({ origins: [] })),
+      typeof permissions.contains === "function"
+        ? callExtensionApi<boolean>(
+            permissions as unknown as Record<
+              string,
+              (...args: unknown[]) => unknown
+            >,
+            "contains",
+            [{ origins: config.origins }],
+            runtime,
+            storageMode,
+          ).catch(() => null)
+        : Promise.resolve(null),
       storage
         .get(EARNED_PERMISSION_STATE_KEY)
         .then((value) => storedState(value[EARNED_PERMISSION_STATE_KEY]))
@@ -149,7 +161,9 @@ export class EarnedPermissionRegistrationController {
     );
     const completeGrant =
       config.origins.length > 0 &&
-      config.origins.every((origin) => granted.has(origin));
+      (typeof semanticGrant === "boolean"
+        ? semanticGrant
+        : config.origins.every((origin) => granted.has(origin)));
     const configuredIds = config.registrations.map(({ id }) => id);
     const current = await callExtensionApi<readonly { readonly id?: string }[]>(
       scripting as unknown as Record<string, (...args: unknown[]) => unknown>,
@@ -303,6 +317,11 @@ export function installEarnedPermissionRegistrationRuntime(
   });
   environment.permissions.onRemoved?.addListener(() => {
     void controller.reconcile();
+  });
+  environment.runtime.onInstalled?.addListener((details) => {
+    if (details.reason === "install" || details.reason === "update") {
+      void controller.reconcile();
+    }
   });
   void controller.reconcile();
   return controller;

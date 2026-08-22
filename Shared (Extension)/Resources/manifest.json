@@ -20,7 +20,16 @@
     "activeTab",
     "scripting"
   ],
-  "host_permissions": [],
+  "host_permissions": [
+    "https://archiveofourown.org/*",
+    "https://*.archiveofourown.org/*",
+    "https://archiveofourown.gay/*",
+    "https://*.archiveofourown.gay/*",
+    "https://archive.transformativeworks.org/*",
+    "https://www.fanfiction.net/*",
+    "https://m.fanfiction.net/*",
+    "https://www.tracefiction.com/*"
+  ],
   "icons": {
     "16": "images/icon-16.png",
     "32": "images/icon-32.png",
@@ -33,12 +42,5 @@
   "background": {
     "service_worker": "background.js"
   },
-  "content_scripts": [],
-  "optional_host_permissions": [
-    "https://*.archiveofourown.org/*",
-    "https://*.archiveofourown.gay/*",
-    "https://archive.transformativeworks.org/*",
-    "https://www.fanfiction.net/*",
-    "https://m.fanfiction.net/*"
-  ]
+  "content_scripts": []
 }
