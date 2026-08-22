@@ -143,6 +143,109 @@ body {
     gap: 8px;
 }
 
+.popup-earned {
+    gap: 10px;
+    padding: 14px 18px 18px;
+}
+
+.popup-earned-story-summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    color: var(--forest-deep);
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.25;
+}
+
+.popup-earned-story-summary::before {
+    content: "✓";
+    display: grid;
+    width: 19px;
+    height: 19px;
+    flex: 0 0 19px;
+    place-items: center;
+    border-radius: 999px;
+    background: var(--forest-soft);
+    color: var(--forest-deep);
+    font-size: 12px;
+    font-weight: 850;
+}
+
+.popup-earned-story-summary[data-state="checking"] {
+    color: var(--honey);
+}
+
+.popup-earned-story-summary[data-state="checking"]::before {
+    content: "···";
+    background: var(--honey-soft);
+    color: var(--honey);
+    font-size: 8px;
+    letter-spacing: -1px;
+}
+
+.popup-earned-story-summary[data-state="error"] {
+    color: var(--rust);
+}
+
+.popup-earned-story-summary[data-state="error"]::before {
+    content: "!";
+    background: var(--rust-soft);
+    color: var(--rust);
+}
+
+.popup-earned .popup-probe-heading {
+    margin-top: 0;
+    font-size: 23px;
+    line-height: 1.12;
+}
+
+.popup-earned .popup-probe-lead {
+    margin-top: -1px;
+    font-size: 13.5px;
+    line-height: 1.45;
+}
+
+.popup-earned .popup-probe-retry {
+    min-height: 46px;
+}
+
+.popup-earned-help {
+    margin-top: -1px;
+    color: var(--ink-3);
+    font-size: 11px;
+}
+
+.popup-earned-help summary {
+    width: max-content;
+    max-width: 100%;
+    cursor: pointer;
+    font-weight: 650;
+}
+
+.popup-earned-help summary:focus-visible {
+    border-radius: 3px;
+    outline: 2px solid var(--forest);
+    outline-offset: 3px;
+}
+
+.popup-earned-help .popup-probe-disclosure {
+    margin-top: 7px;
+}
+
+.popup-earned-internal {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    padding: 0 !important;
+    margin: -1px !important;
+    overflow: hidden !important;
+    clip: rect(0, 0, 0, 0) !important;
+    white-space: nowrap !important;
+    border: 0 !important;
+}
+
 .popup-earned-secondary {
     min-height: 40px;
     border: 0;
@@ -187,7 +290,7 @@ body[data-trace-earned-permission="true"] #popup-active-tab-probe {
 }
 
 body[data-trace-earned-permission="true"] .popup-brand {
-    padding-bottom: 2px;
+    padding: 14px 18px 0;
 }
 
 body[data-trace-active-tab-probe="true"] .popup-brand {

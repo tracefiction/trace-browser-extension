@@ -428,12 +428,26 @@ for (const promiseRuntime of [false, true]) {
     assert.equal(h.document.getElementById("popup-earned-access").dataset.state, "waiting");
     assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "waiting");
     assert.equal(
-      h.document.getElementById("popup-earned-result-heading").textContent,
-      "One permission remains.",
+      h.document.getElementById("popup-earned-kicker").textContent,
+      "AO3 story found",
+    );
+    assert.equal(
+      h.document.getElementById("popup-earned-heading").textContent,
+      "Allow Trace on AO3 and FanFiction.net",
+    );
+    assert.equal(
+      h.document.getElementById("popup-earned-lead").textContent,
+      "When Safari asks, choose Always Allow.",
     );
     assert.equal(
       h.document.getElementById("popup-earned-primary").textContent,
       "Allow access and add story",
+    );
+    assert.equal(h.document.getElementById("popup-earned-help").hidden, true);
+    assert.ok(
+      h.document.getElementById("popup-earned-primary").compareDocumentPosition(
+        h.document.getElementById("popup-earned-ledger"),
+      ) & h.window.Node.DOCUMENT_POSITION_FOLLOWING,
     );
     assert.equal(h.permissionRequests.length, 0);
     assert.equal(h.reconcileRequests.length, 0);
@@ -473,9 +487,10 @@ test("earned-permission action requests the exact sites, delegates registration,
   assert.equal(h.registrationRequests.length, 0);
   assert.deepEqual(h.reloads, [7]);
   assert.equal(
-    h.document.getElementById("popup-earned-result-heading").textContent,
-    "Keep this panel open for a moment.",
+    h.document.getElementById("popup-earned-heading").textContent,
+    "Adding your story…",
   );
+  assert.equal(h.document.getElementById("popup-earned-primary").disabled, true);
   assert.equal(
     h.tabMessages.some(
       ({ message }) => message.type === "TRACE_ACTIVE_TAB_PROBE_SAVE",
@@ -508,7 +523,12 @@ test("earned-permission denial saves nothing and offers concise retry and Settin
   assert.equal(h.reloads.length, 0);
   assert.equal(
     h.document.getElementById("popup-earned-heading").textContent,
-    "Access wasn’t allowed.",
+    "Access wasn’t allowed",
+  );
+  assert.equal(h.document.getElementById("popup-earned-help").hidden, false);
+  assert.equal(
+    h.document.getElementById("popup-earned-help-summary").textContent,
+    "No prompt?",
   );
   assert.match(
     h.document.getElementById("popup-earned-disclosure").textContent,
@@ -536,12 +556,36 @@ test("earned-permission request errors do not claim access or save the story", a
   assert.equal(h.document.getElementById("popup-earned-access").dataset.state, "fail");
   assert.equal(
     h.document.getElementById("popup-earned-heading").textContent,
-    "Access wasn’t allowed.",
+    "Access wasn’t allowed",
   );
   assert.equal(h.registrationRequests.length, 0);
   assert.equal(h.reconcileRequests.length, 0);
   assert.equal(h.reloads.length, 0);
   assert.equal(h.tabMessages.length, 0);
+});
+
+test("earned-permission unsupported pages give a direct exit instead of a retry loop", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    activeTab: { id: 7, url: "https://www.google.com/" },
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  assert.equal(
+    h.document.getElementById("popup-earned-heading").textContent,
+    "Open a story first",
+  );
+  assert.equal(
+    h.document.getElementById("popup-earned-primary").textContent,
+    "Close and open a story",
+  );
+  h.document.getElementById("popup-earned-primary").dispatchEvent(
+    new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+  );
+  assert.equal(h.closeCalled, true);
+  assert.equal(h.permissionRequests.length, 0);
 });
 
 test("earned-permission previously declined state still requires access and never becomes a manual mode", async () => {
@@ -574,7 +618,7 @@ test("earned-permission previously declined state still requires access and neve
   );
   assert.equal(
     h.document.getElementById("popup-earned-heading").textContent,
-    "Allow access and add this story.",
+    "Allow Trace on AO3 and FanFiction.net",
   );
   assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "waiting");
 });
@@ -599,7 +643,7 @@ for (const promiseRuntime of [false, true]) {
     assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "waiting");
     assert.equal(
       h.document.getElementById("popup-earned-heading").textContent,
-      "Allow access and add this story.",
+      "Allow Trace on AO3 and FanFiction.net",
     );
   });
 }
@@ -617,8 +661,8 @@ test("earned-permission onboarding does not touch the save path before permissio
   assert.equal(h.document.getElementById("popup-earned-access").dataset.state, "waiting");
   assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "waiting");
   assert.equal(
-    h.document.getElementById("popup-earned-result-heading").textContent,
-    "One permission remains.",
+    h.document.getElementById("popup-earned-heading").textContent,
+    "Allow Trace on AO3 and FanFiction.net",
   );
   assert.equal(
     h.document.getElementById("popup-earned-primary").textContent,
@@ -665,7 +709,7 @@ test("earned-permission onboarding confirms automation only from a post-grant ar
 
   assert.equal(
     h.document.getElementById("popup-earned-heading").textContent,
-    "Trace is ready.",
+    "Trace is ready",
   );
   assert.equal(
     h.document.getElementById("popup-earned-save").querySelector(
@@ -707,7 +751,7 @@ test("earned-permission onboarding confirms a heartbeat while the popup stays op
 
   assert.equal(
     h.document.getElementById("popup-earned-primary").textContent,
-    "Add this story",
+    "Add story",
   );
 
   h.emitStorageChange({
@@ -719,7 +763,7 @@ test("earned-permission onboarding confirms a heartbeat while the popup stays op
 
   assert.equal(
     h.document.getElementById("popup-earned-heading").textContent,
-    "Trace is ready.",
+    "Trace is ready",
   );
   assert.equal(
     h.document.getElementById("popup-earned-save").querySelector(
@@ -774,7 +818,12 @@ test("earned-permission onboarding gives a bounded retry when background registr
   );
   assert.equal(
     h.document.getElementById("popup-earned-heading").textContent,
-    "Trace couldn’t finish setup.",
+    "Trace couldn’t finish setup",
+  );
+  assert.equal(h.document.getElementById("popup-earned-help").hidden, false);
+  assert.equal(
+    h.document.getElementById("popup-earned-help-summary").textContent,
+    "Still not working?",
   );
 });
 
