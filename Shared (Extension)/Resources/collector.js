@@ -83,6 +83,7 @@ function sendCollectorMessageBestEffort(message) {
 }
 
 var kernelPendingFirstStory = null;
+var kernelFirstStoryLookupPending = KERNEL_SESSION_ACTIVE;
 var kernelProjectionRetryTimer = null;
 var kernelProjectionRetryWorkKey = null;
 
@@ -4902,60 +4903,72 @@ function runKernelConnectAndSave(handle, workKey) {
 
 function processIosPendingFirstStoryAdd() {
   var processResponse = function (response) {
-        if ((!KERNEL_SESSION_ACTIVE && ext.runtime.lastError) || !response || response.ok !== true) return;
-        var pendingUrl = typeof response.url === "string" ? response.url.trim() : "";
-        var mode = response.mode === "browse" ? "browse" : "story";
-        var handoffId =
-          typeof response.handoffId === "string" &&
-          /^[A-Za-z0-9_-]{1,128}$/.test(response.handoffId.trim())
-            ? response.handoffId.trim()
-            : "";
+    try {
+      if (
+        (!KERNEL_SESSION_ACTIVE && ext.runtime.lastError) ||
+        !response ||
+        response.ok !== true
+      ) return;
+      var pendingUrl = typeof response.url === "string" ? response.url.trim() : "";
+      var mode = response.mode === "browse" ? "browse" : "story";
+      var handoffId =
+        typeof response.handoffId === "string" &&
+        /^[A-Za-z0-9_-]{1,128}$/.test(response.handoffId.trim())
+          ? response.handoffId.trim()
+          : "";
 
-        if (mode === "browse") {
-          var current = parseFirstStoryUrlForMatch(location.href);
-          var expectedHost =
-            response.hostKind === "ao3" || response.hostKind === "ffn"
-              ? response.hostKind
-              : "";
-          // The AO3 home handoff intentionally survives navigation through
-          // listing/search pages. Only a matching supported story page may
-          // consume it, so a reader can browse normally before choosing one.
-          if (!current || !expectedHost || current.source !== expectedHost) {
-            return;
-          }
-        } else if (!pendingUrl || !pendingFirstStoryMatchesCurrentPage(pendingUrl)) {
-          // Kernel retrieval is read-only. The later command owner decides
-          // when a pending handoff has been consumed or should be cleared.
-          if (!KERNEL_SESSION_ACTIVE) sendIosPendingFirstStoryClear();
+      if (mode === "browse") {
+        var current = parseFirstStoryUrlForMatch(location.href);
+        var expectedHost =
+          response.hostKind === "ao3" || response.hostKind === "ffn"
+            ? response.hostKind
+            : "";
+        // The AO3 home handoff intentionally survives navigation through
+        // listing/search pages. Only a matching supported story page may
+        // consume it, so a reader can browse normally before choosing one.
+        if (!current || !expectedHost || current.source !== expectedHost) {
           return;
         }
-        if (handoffId) {
-          announceArchivePageToBackground(handoffId);
+      } else if (!pendingUrl || !pendingFirstStoryMatchesCurrentPage(pendingUrl)) {
+        // Kernel retrieval is read-only. The later command owner decides
+        // when a pending handoff has been consumed or should be cleared.
+        if (!KERNEL_SESSION_ACTIVE) sendIosPendingFirstStoryClear();
+        return;
+      }
+      if (handoffId) {
+        announceArchivePageToBackground(handoffId);
+      }
+      if (KERNEL_SESSION_ACTIVE) {
+        var workKey = getWorkKeyFromUrl();
+        if (!workKey) return;
+        if (
+          !kernelPendingFirstStory ||
+          kernelPendingFirstStory.workKey !== workKey ||
+          kernelPendingFirstStory.handoffId !== handoffId
+        ) {
+          kernelPendingFirstStory = {
+            workKey: workKey,
+            handoffId: handoffId,
+            automaticAttempted: false,
+            commandInFlight: false,
+          };
         }
-        if (KERNEL_SESSION_ACTIVE) {
-          var workKey = getWorkKeyFromUrl();
-          if (!workKey) return;
-          if (
-            !kernelPendingFirstStory ||
-            kernelPendingFirstStory.workKey !== workKey ||
-            kernelPendingFirstStory.handoffId !== handoffId
-          ) {
-            kernelPendingFirstStory = {
-              workKey: workKey,
-              handoffId: handoffId,
-              automaticAttempted: false,
-              commandInFlight: false,
-            };
-          }
-          renderQuickAddButton(workKey);
-          return;
+        renderQuickAddButton(workKey);
+        return;
+      }
+      handleFirstStoryFocusAdd(function (result) {
+        if (result && result.ok) {
+          sendIosPendingFirstStoryClear();
         }
-        handleFirstStoryFocusAdd(function (result) {
-          if (result && result.ok) {
-            sendIosPendingFirstStoryClear();
-          }
-        });
-      };
+      });
+    } finally {
+      if (KERNEL_SESSION_ACTIVE) {
+        kernelFirstStoryLookupPending = false;
+        var currentWorkKey = getWorkKeyFromUrl();
+        if (currentWorkKey) renderQuickAddButton(currentWorkKey);
+      }
+    }
+  };
   sendCollectorMessage(
     { type: TRACE_IOS_PENDING_FIRST_STORY_GET_MESSAGE },
     processResponse,
@@ -5979,6 +5992,22 @@ function renderQuickAddFromSnapshot(workKey, anchor, res) {
     );
     storyAuthRecoveryNeeded = !view.hasAuth || hasEntryAuthError;
 
+    if (KERNEL_SESSION_ACTIVE && kernelFirstStoryLookupPending) {
+      applyStoryInlineHandleState(handle, {
+        kind: "checking",
+        label: "Checking…",
+        theme: TRACE_INLINE_THEMES.saving,
+        dot: false,
+        spinner: true,
+        status: null,
+        progress: null,
+      });
+      handle.title = "Checking this story in Trace";
+      handle.disabled = true;
+      applySheetVisibility(sheet, false);
+      return;
+    }
+
     if (
       KERNEL_SESSION_ACTIVE &&
       kernelPendingFirstStory &&
@@ -6103,6 +6132,23 @@ function renderQuickAddButton(workKey, projectionAttempt) {
   if (!anchor) {
     clearKernelProjectionRetry(workKey);
     removeQuickAddElements();
+    return;
+  }
+
+  if (KERNEL_SESSION_ACTIVE && kernelFirstStoryLookupPending) {
+    renderQuickAddFromSnapshot(workKey, anchor, {
+      libraryOverlayCache: {
+        entries: {},
+        workPreferences: {},
+        syncVersion: null,
+      },
+      traceAuthState: {
+        state: "signed_out",
+        reason: "credential_missing",
+        canExecuteAuthenticated: false,
+      },
+      authToken: null,
+    });
     return;
   }
 

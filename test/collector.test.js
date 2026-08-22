@@ -1451,6 +1451,7 @@ function createStoryAutoTrackPendingHarness(options = {}) {
     : null;
   let autoTrackCallback;
   let connectAndSaveCallback;
+  let pendingFirstStoryCallback;
   let deferredAutoTrackPreferenceRead;
   let deferredWorkStateRead;
   let runtimeMessageListener = null;
@@ -1506,6 +1507,10 @@ function createStoryAutoTrackPendingHarness(options = {}) {
         }
         if (msg.type === "TRACE_IOS_PENDING_FIRST_STORY_GET") {
           const response = options.pendingFirstStoryResponse || { ok: true, url: "" };
+          if (options.holdPendingFirstStoryRead) {
+            pendingFirstStoryCallback = cb;
+            return;
+          }
           if (typeof cb === "function") {
             cb(response);
             return;
@@ -1617,6 +1622,12 @@ function createStoryAutoTrackPendingHarness(options = {}) {
     },
     resolveConnectAndSave(response) {
       connectAndSaveCallback(response);
+    },
+    resolvePendingFirstStory(response) {
+      assert.equal(typeof pendingFirstStoryCallback, "function");
+      const resolve = pendingFirstStoryCallback;
+      pendingFirstStoryCallback = null;
+      resolve(response || options.pendingFirstStoryResponse || { ok: true, url: "" });
     },
     sendRuntimeMessage(message) {
       return new Promise((resolve) => {
@@ -2147,6 +2158,69 @@ test("kernel pending first story automatically sends one bounded command and foc
     h.sent.filter((message) => message.type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR").length,
     0,
   );
+});
+
+test("kernel story control never offers Add before the onboarding handoff lookup settles", async () => {
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    holdPendingFirstStoryRead: true,
+    holdConnectAndSave: true,
+    store: { prefAutoTrackEnabled: false },
+  });
+
+  const handle = h.dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle);
+  assert.equal(handle.disabled, true);
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "checking");
+  assert.match(handle.textContent || "", /Checking/i);
+  assert.doesNotMatch(handle.textContent || "", /Add to Trace/i);
+
+  h.resolvePendingFirstStory({
+    ok: true,
+    mode: "story",
+    hostKind: "ffn",
+    handoffId: "handoff_kernel_no_false_add",
+    url: "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.match(handle.textContent || "", /Connecting/i);
+  assert.doesNotMatch(handle.textContent || "", /Add to Trace/i);
+
+  const entryId = "00000000-0000-4000-8000-000000000124";
+  h.resolveConnectAndSave({
+    ok: true,
+    snapshot: {
+      state: "connected",
+      reason: "none",
+      canExecuteAuthenticated: true,
+    },
+    entryId,
+    command: {
+      kind: "confirmed",
+      intent: "ensure_saved",
+      confirmation: {
+        workKey: "ffn:7038840",
+        entryId,
+        entry: {
+          status: "PLANNING",
+          readerStatus: "PLANNING",
+          canonicalReaderStatus: "SAVED",
+          entryId,
+        },
+        syncVersion: "2026-08-22T07:30:00.000Z",
+      },
+      source: "mutation",
+      projection: "published",
+      receipt: "published",
+      handoff: "cleared",
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(handle.disabled, false);
+  assert.match(handle.textContent || "", /Saved/i);
+  assert.doesNotMatch(handle.textContent || "", /Add to Trace/i);
 });
 
 test("kernel pending first-story automatic failure stays bounded and offers an explicit retry", async () => {
