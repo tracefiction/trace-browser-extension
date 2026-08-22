@@ -1002,6 +1002,18 @@ async function main() {
         openWaitFor: "[data-trace-action-surface]",
       },
       {
+        name: "Opened AO3 listing action surface mobile",
+        file: "ao3-listing-action-surface-mobile.png",
+        fixture: "ao3_listing.html",
+        url: "https://archiveofourown.org/works?tag_id=Harry+Potter",
+        viewport: { width: 390, height: 844 },
+        contentScripts: ["keys", "overlay"],
+        waitFor: "#work_10404927 [data-trace-library-lens]",
+        scrollTo: "#work_10404927",
+        openSelector: "#work_10404927 [data-trace-library-lens]",
+        openWaitFor: "[data-trace-action-surface]",
+      },
+      {
         name: "AO3 Saved to Reading result",
         file: "ao3-saved-reading-result.png",
         fixture: "ao3_listing.html",

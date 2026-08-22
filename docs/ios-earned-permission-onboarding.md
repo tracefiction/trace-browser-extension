@@ -206,7 +206,7 @@ or change Website Access between the baseline and candidate.
 2. Confirm a known baseline on AO3 and FFN: existing overlays load, one manual
    add succeeds, one automatic story/progress update succeeds, and the server
    state appears in the Library.
-3. Install the production-identity build 37 through TestFlight over 0.6.3.
+3. Install the production-identity build 38 through TestFlight over 0.6.3.
 4. Before opening the updated Trace app, open a supported story in Safari.
    Confirm Trace still runs and no enablement, Website Access, or reconnect
    prompt interrupts the reader.
