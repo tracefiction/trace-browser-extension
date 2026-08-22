@@ -1406,7 +1406,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         }
     }
 
-    private static let safariExtensionBundleIdentifier = "com.tracefiction.trace.earned-v3"
+    private static let safariExtensionBundleIdentifier = "com.tracefiction.trace.earned-v4"
     private static let safariBridgeLog = OSLog(
         subsystem: Bundle.main.bundleIdentifier ?? "com.tracefiction.trace",
         category: "SafariBridge"
