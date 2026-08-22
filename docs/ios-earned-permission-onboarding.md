@@ -56,6 +56,13 @@ server-confirmed save. Its clean-install identifier is
 `com.tracefiction.trace.earned-v3` so retained build 28 permissions cannot
 produce a false pass.
 
+Build 32 changes no onboarding behavior from build 31. It gives the embedded
+Safari extension the fresh identifier `com.tracefiction.trace.earned-v4` after
+device testing showed that deleting and reinstalling the build 31 extension
+could restore its prior Website Access. The containing app remains
+`com.tracefiction.trace`; this reset prevents retained Safari state from
+producing a false clean-install result.
+
 ## User contract
 
 When `TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1`:
@@ -109,7 +116,7 @@ TRACE_WEB_ORIGIN=https://www.tracefiction.com \
 npm run build:ios-earned-permission-onboarding:release
 ```
 
-The build 29 physical-device candidate is paired to the stable Vercel dev
+The build 32 physical-device candidate is paired to the stable Vercel dev
 deployment of the web half with:
 
 ```bash
