@@ -66,14 +66,37 @@
             aria-labelledby="popup-earned-heading"
             hidden
         >
-            <p id="popup-earned-kicker" class="popup-probe-kicker">Your first story</p>
+            <p
+                id="popup-earned-kicker"
+                class="popup-earned-story-summary"
+                data-state="checking"
+            >
+                Checking this story…
+            </p>
             <h1 id="popup-earned-heading" class="popup-probe-heading">
                 Checking this story…
             </h1>
             <p id="popup-earned-lead" class="popup-probe-lead">
                 Trace is checking what remains before it can save.
             </p>
-            <div id="popup-earned-ledger" class="popup-probe-ledger" aria-label="First-story progress">
+            <div class="popup-earned-actions">
+                <button id="popup-earned-primary" class="popup-probe-retry" type="button" disabled>
+                    Allow access and add story
+                </button>
+                <button id="popup-earned-secondary" class="popup-earned-secondary" type="button" hidden>
+                    Close
+                </button>
+            </div>
+            <details id="popup-earned-help" class="popup-earned-help" hidden>
+                <summary id="popup-earned-help-summary">Need another way?</summary>
+                <p id="popup-earned-disclosure" class="popup-probe-disclosure"></p>
+            </details>
+            <div
+                id="popup-earned-ledger"
+                class="popup-probe-ledger popup-earned-internal"
+                aria-label="First-story progress"
+                aria-hidden="true"
+            >
                 <div id="popup-earned-story" class="popup-probe-check" data-state="checking">
                     <span class="popup-probe-check-label">Story page</span>
                     <span class="popup-probe-check-value">Checking</span>
@@ -87,21 +110,16 @@
                     <span class="popup-probe-check-value">Waiting</span>
                 </div>
             </div>
-            <div id="popup-earned-result" class="popup-probe-result" data-state="checking" role="status" aria-live="polite">
+            <div
+                id="popup-earned-result"
+                class="popup-probe-result popup-earned-internal"
+                data-state="checking"
+                role="status"
+                aria-live="polite"
+            >
                 <p id="popup-earned-result-heading" class="popup-probe-result-heading">Checking setup…</p>
                 <p id="popup-earned-result-detail" class="popup-probe-result-detail">Nothing will be saved before website access is allowed.</p>
             </div>
-            <div class="popup-earned-actions">
-                <button id="popup-earned-primary" class="popup-probe-retry" type="button" disabled>
-                    Allow access and add story
-                </button>
-                <button id="popup-earned-secondary" class="popup-earned-secondary" type="button" hidden>
-                    Close
-                </button>
-            </div>
-            <p id="popup-earned-disclosure" class="popup-probe-disclosure">
-                When Safari asks, choose Always Allow.
-            </p>
         </section>
         <section class="popup-sheet" aria-labelledby="popup-status">
             <p class="popup-eyebrow" hidden></p>

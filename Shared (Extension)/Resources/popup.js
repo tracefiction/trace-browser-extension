@@ -814,15 +814,32 @@ function setEarnedResult(state, heading, detail) {
   if (detailEl) detailEl.textContent = detail;
 }
 
-function setEarnedCopy({ kicker, heading, lead, disclosure }) {
+function setEarnedCopy({
+  kicker,
+  kickerState = "pass",
+  heading,
+  lead,
+  helpLabel = "Need another way?",
+  disclosure = "",
+}) {
   const kickerEl = document.getElementById("popup-earned-kicker");
   const headingEl = document.getElementById("popup-earned-heading");
   const leadEl = document.getElementById("popup-earned-lead");
+  const helpEl = document.getElementById("popup-earned-help");
+  const helpSummaryEl = document.getElementById("popup-earned-help-summary");
   const disclosureEl = document.getElementById("popup-earned-disclosure");
-  if (kickerEl) kickerEl.textContent = kicker;
+  if (kickerEl) {
+    kickerEl.textContent = kicker;
+    kickerEl.dataset.state = kickerState;
+  }
   if (headingEl) headingEl.textContent = heading;
   if (leadEl) leadEl.textContent = lead;
+  if (helpSummaryEl) helpSummaryEl.textContent = helpLabel;
   if (disclosureEl) disclosureEl.textContent = disclosure;
+  if (helpEl) {
+    helpEl.hidden = !disclosure;
+    if (!disclosure) helpEl.open = false;
+  }
 }
 
 function setEarnedConnection(state, label) {
@@ -862,10 +879,18 @@ async function reloadEarnedStory() {
     await extensionPromiseCall(ext.tabs, "reload", [tab.id]);
     void recordEarnedEvent("automation_verification_reload");
   } catch {
+    setEarnedConnection("error", "Reload needed");
+    setEarnedCopy({
+      kicker: earnedPreparedContext?.story?.site
+        ? `${earnedPreparedContext.story.site} story found`
+        : "Story found",
+      heading: "Reload this story",
+      lead: "Reload the page, then return to the Trace app.",
+    });
     setEarnedResult(
       "failure",
-      "Reload this story manually.",
-      "Then return to the Trace app. It will confirm the fresh run and server save.",
+      "Reload this story.",
+      "Then return to the Trace app.",
     );
     configureEarnedActions({
       label: "Try reload again",
@@ -877,15 +902,13 @@ async function reloadEarnedStory() {
 function renderEarnedPermissionInvitation(story, hasGrant) {
   setEarnedConnection("warn", "Setup");
   setEarnedCopy({
-    kicker: "Finish setup",
+    kicker: `${story.site} story found`,
     heading: hasGrant
-      ? "Add this story to Trace."
-      : "Allow access and add this story.",
-    lead:
-      "Trace found this story. Website access is required before Trace can save it or work on future stories.",
-    disclosure: hasGrant
-      ? "Safari already reports the supported sites as allowed. Trace will verify the setup and reload this story once."
-      : "When Safari asks, choose Always Allow. Trace requests only the five supported AO3 and FanFiction.net addresses.",
+      ? "Add this story to Trace"
+      : "Allow Trace on AO3 and FanFiction.net",
+    lead: hasGrant
+      ? "Website access is already allowed."
+      : "When Safari asks, choose Always Allow.",
   });
   setEarnedCheck("popup-earned-story", "pass", story.site, "Story page");
   setEarnedCheck(
@@ -909,7 +932,7 @@ function renderEarnedPermissionInvitation(story, hasGrant) {
   );
   configureEarnedActions(
     {
-      label: hasGrant ? "Add this story" : "Allow access and add story",
+      label: hasGrant ? "Add story" : "Allow access and add story",
       action: "allow_and_add",
     },
   );
@@ -918,12 +941,9 @@ function renderEarnedPermissionInvitation(story, hasGrant) {
 function renderEarnedAccessPending(story) {
   setEarnedConnection("warn", "Finishing");
   setEarnedCopy({
-    kicker: "Finishing setup",
-    heading: "Access allowed. Adding your story…",
-    lead:
-      "Trace will reload this story once and confirm the save in your library.",
-    disclosure:
-      "Setup completes only after Trace runs on the reloaded page and the server confirms the story.",
+    kicker: `${story.site} story found`,
+    heading: "Adding your story…",
+    lead: "Trace will reload this page once.",
   });
   setEarnedCheck("popup-earned-story", "pass", story.site, "Story page");
   setEarnedCheck(
@@ -940,11 +960,11 @@ function renderEarnedAccessPending(story) {
   );
   setEarnedResult(
     "checking",
-    "Keep this panel open for a moment.",
-    "Safari may close it as the story reloads. Trace will continue in the page.",
+    "Adding your story…",
+    "Trace will reload this page once.",
   );
   configureEarnedActions({
-    label: "Reloading story…",
+    label: "Adding story…",
     action: "",
     disabled: true,
   });
@@ -953,12 +973,12 @@ function renderEarnedAccessPending(story) {
 function renderEarnedPermissionDeclined(story) {
   setEarnedConnection("error", "Access needed");
   setEarnedCopy({
-    kicker: "Website access needed",
-    heading: "Access wasn’t allowed.",
-    lead:
-      "Trace did not add the story. Try again and choose Always Allow when Safari asks.",
+    kicker: `${story.site} story found`,
+    heading: "Access wasn’t allowed",
+    lead: "Try again, then choose Always Allow in Safari.",
+    helpLabel: "No prompt?",
     disclosure:
-      "If the prompt no longer appears, open Settings > Apps > Safari > Extensions > Trace, then set Permissions to Allow.",
+      "Open Settings > Apps > Safari > Extensions > Trace, then set Permissions to Allow.",
   });
   setEarnedCheck("popup-earned-story", "pass", story.site, "Story page");
   setEarnedCheck(
@@ -984,12 +1004,12 @@ function renderEarnedPermissionDeclined(story) {
 function renderEarnedRegistrationFailure(story) {
   setEarnedConnection("error", "Try again");
   setEarnedCopy({
-    kicker: "Setup needs attention",
-    heading: "Trace couldn’t finish setup.",
-    lead:
-      "Website access is allowed, but Trace could not prepare the supported sites.",
+    kicker: `${story.site} story found`,
+    heading: "Trace couldn’t finish setup",
+    lead: "Website access is allowed. Try again.",
+    helpLabel: "Still not working?",
     disclosure:
-      "Retry first. If this repeats, restart Safari, reopen this story, and open Trace again.",
+      "Restart Safari, reopen this story, and open Trace again.",
   });
   setEarnedCheck("popup-earned-story", "pass", story.site, "Story page");
   setEarnedCheck(
@@ -1015,12 +1035,10 @@ function renderEarnedRegistrationFailure(story) {
 function renderEarnedUnsupportedStory() {
   setEarnedConnection("error", "Story needed");
   setEarnedCopy({
-    kicker: "Finish setup",
-    heading: "Open a supported story first.",
-    lead:
-      "Open an AO3 or FanFiction.net story, then open Trace from Safari’s toolbar again.",
-    disclosure:
-      "Trace will not request website access or save anything from this page.",
+    kicker: "No supported story found",
+    kickerState: "error",
+    heading: "Open a story first",
+    lead: "Open an AO3 or FanFiction.net story in Safari, then open Trace again.",
   });
   setEarnedCheck("popup-earned-story", "fail", "Not found", "Story page");
   setEarnedCheck(
@@ -1040,17 +1058,15 @@ function renderEarnedUnsupportedStory() {
     "This isn’t a supported story page.",
     "AO3 and FanFiction.net stories are supported.",
   );
-  configureEarnedActions({ label: "Check again", action: "prepare" });
+  configureEarnedActions({ label: "Close and open a story", action: "close" });
 }
 
 function renderEarnedRunConfirmed() {
   setEarnedConnection("connected", "Ready");
   setEarnedCopy({
-    kicker: "Setup complete",
-    heading: "Trace is ready.",
-    lead: "Website access and a fresh story-page run are confirmed.",
-    disclosure:
-      "Return to the Trace app. It will finish only after the server confirms your story.",
+    kicker: "Website access confirmed",
+    heading: "Trace is ready",
+    lead: "Return to the Trace app to finish.",
   });
   setEarnedCheck("popup-earned-story", "pass", "Confirmed", "Story page");
   setEarnedCheck(
@@ -1143,6 +1159,11 @@ async function allowAccessAndAddEarnedStory() {
     "Choose Always Allow in Safari.",
     "Trace will not add the story unless the complete supported-site bundle is allowed.",
   );
+  setEarnedCopy({
+    kicker: `${prepared.story.site} story found`,
+    heading: "Allow website access",
+    lead: "Choose Always Allow in Safari.",
+  });
   const story = prepared.story;
   void recordEarnedEvent("website_access_action_started");
   try {

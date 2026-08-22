@@ -275,6 +275,14 @@ function extensionMockSource(storageData, sessionSnapshot = null) {
           response = { ok: true, snapshot: sessionSnapshot, action: { kind: "ignored" } };
         }
         if (msg && msg.type === "TRACE_POPUP_GET_STATE") response = popupState;
+        if (msg && msg.type === "TRACE_EARNED_PERMISSION_RECONCILE") {
+          response = storageData.traceEarnedPermissionReconcileResult || {
+            ok: true,
+            completeGrant: true,
+            registered: true,
+            changed: true,
+          };
+        }
         if (msg && msg.type === "TRACE_SET_READER_STATUS") {
           response = { ok: true, entryId: msg.payload && msg.payload.entryId, status: msg.payload && msg.payload.status };
         }
@@ -343,8 +351,9 @@ function extensionMockSource(storageData, sessionSnapshot = null) {
             return { origins: [...grantedOrigins], permissions: [] };
           },
           async request(request) {
-            grantedOrigins = [...(request && request.origins || [])];
-            return storageData.tracePermissionRequestResult !== false;
+            const allowed = storageData.tracePermissionRequestResult !== false;
+            if (allowed) grantedOrigins = [...(request && request.origins || [])];
+            return allowed;
           },
         },
         scripting: {
@@ -623,6 +632,47 @@ async function renderPopupScreenshot(browser, definition, assets, manifest) {
       () => document.querySelector("#popup-earned-result")?.dataset.state !== "checking",
       { timeout: 10000 },
     );
+  }
+  if (definition.clickSelector) {
+    await page.click(definition.clickSelector);
+    if (definition.clickWaitForText) {
+      await page.waitForFunction(
+        (expectedText) => document.body.innerText.includes(expectedText),
+        definition.clickWaitForText,
+        { timeout: 10000 },
+      );
+    }
+    await page.waitForTimeout(150);
+  }
+  if (definition.firstViewportMaxHeight) {
+    const firstViewport = await page.evaluate(({ selector, maxHeight }) => {
+      const action = document.querySelector(selector);
+      const body = document.body.getBoundingClientRect();
+      const actionBox = action?.getBoundingClientRect();
+      return {
+        maxHeight,
+        bodyHeight: Math.ceil(body.height),
+        actionTop: actionBox ? Math.floor(actionBox.top) : null,
+        actionBottom: actionBox ? Math.ceil(actionBox.bottom) : null,
+        actionHidden: action
+          ? action.hidden || getComputedStyle(action).display === "none"
+          : true,
+      };
+    }, {
+      selector: definition.firstViewportAction || "#popup-earned-primary",
+      maxHeight: definition.firstViewportMaxHeight,
+    });
+    if (
+      firstViewport.actionHidden ||
+      firstViewport.actionTop === null ||
+      firstViewport.actionTop < 0 ||
+      firstViewport.actionBottom > firstViewport.maxHeight ||
+      firstViewport.bodyHeight > firstViewport.maxHeight
+    ) {
+      throw new Error(
+        `Popup first action requires scrolling: ${JSON.stringify(firstViewport)}`,
+      );
+    }
   }
   if (
     definition.sessionSnapshot &&
@@ -1038,13 +1088,14 @@ async function main() {
           traceLibraryCount: 0,
         },
         viewport: { width: 360, height: 680 },
+        firstViewportMaxHeight: 360,
         userAgent:
           "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
         colorScheme: "light",
       },
       {
-        name: "iOS earned-permission manual mode",
-        file: "popup-ios-earned-manual-mode.png",
+        name: "iOS earned-permission reopen after denial",
+        file: "popup-ios-earned-reopen-after-denial.png",
         authState: connectedAuthState(),
         sessionSnapshot: {
           state: "connected",
@@ -1060,6 +1111,102 @@ async function main() {
           },
         },
         viewport: { width: 360, height: 680 },
+        userAgent:
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        colorScheme: "light",
+      },
+      {
+        name: "iOS earned-permission denied",
+        file: "popup-ios-earned-denied.png",
+        authState: connectedAuthState(),
+        sessionSnapshot: {
+          state: "connected",
+          accountId: "visual-account",
+          canExecuteAuthenticated: true,
+          reason: "none",
+        },
+        storageData: {
+          traceEarnedPermissionOnboarding: true,
+          tracePermissionRequestResult: false,
+        },
+        clickSelector: "#popup-earned-primary",
+        clickWaitForText: "Access wasn’t allowed",
+        viewport: { width: 360, height: 680 },
+        firstViewportMaxHeight: 360,
+        userAgent:
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        colorScheme: "light",
+      },
+      {
+        name: "iOS earned-permission adding story",
+        file: "popup-ios-earned-adding-story.png",
+        authState: connectedAuthState(),
+        sessionSnapshot: {
+          state: "connected",
+          accountId: "visual-account",
+          canExecuteAuthenticated: true,
+          reason: "none",
+        },
+        storageData: {
+          traceEarnedPermissionOnboarding: true,
+        },
+        clickSelector: "#popup-earned-primary",
+        clickWaitForText: "Adding your story…",
+        viewport: { width: 360, height: 680 },
+        firstViewportMaxHeight: 360,
+        userAgent:
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        colorScheme: "light",
+      },
+      {
+        name: "iOS earned-permission registration failure",
+        file: "popup-ios-earned-registration-failure.png",
+        authState: connectedAuthState(),
+        sessionSnapshot: {
+          state: "connected",
+          accountId: "visual-account",
+          canExecuteAuthenticated: true,
+          reason: "none",
+        },
+        storageData: {
+          traceEarnedPermissionOnboarding: true,
+          traceGrantedOrigins: [
+            "https://*.archiveofourown.org/*",
+            "https://*.archiveofourown.gay/*",
+            "https://archive.transformativeworks.org/*",
+            "https://www.fanfiction.net/*",
+            "https://m.fanfiction.net/*",
+          ],
+          traceEarnedPermissionReconcileResult: {
+            ok: false,
+            completeGrant: true,
+            registered: false,
+            changed: false,
+            error: "registration_failed",
+          },
+        },
+        viewport: { width: 360, height: 680 },
+        firstViewportMaxHeight: 360,
+        userAgent:
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        colorScheme: "light",
+      },
+      {
+        name: "iOS earned-permission unsupported page",
+        file: "popup-ios-earned-unsupported.png",
+        authState: connectedAuthState(),
+        sessionSnapshot: {
+          state: "connected",
+          accountId: "visual-account",
+          canExecuteAuthenticated: true,
+          reason: "none",
+        },
+        storageData: {
+          traceEarnedPermissionOnboarding: true,
+          traceProbeUrl: "https://www.google.com/",
+        },
+        viewport: { width: 360, height: 680 },
+        firstViewportMaxHeight: 360,
         userAgent:
           "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
         colorScheme: "light",
