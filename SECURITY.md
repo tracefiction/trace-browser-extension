@@ -16,6 +16,26 @@ The extension does not request browser cookie permission. It does not need AO3 o
 The Safari build uses native messaging only to communicate with the bundled
 Trace app for setup actions, app-auth token sharing, and first-story handoff.
 
+The developer-only iOS active-tab first-value probe declares no website
+origins. It can inspect only the active story tab after the user explicitly
+opens Trace from Safari, injects only the bounded collector needed for that
+save, and uses the existing authenticated story-command path. It adds no new
+data type or token path and does not run automatic tracking, overlays, saved
+filters, Trace-site sync, or archive heartbeats. Normal builds retain the
+release permission model described above.
+
+The iOS earned-permission build uses `activeTab` only to identify the current
+supported story during recovery; it does not inject or save before Website
+Access. One explicit action requests exactly five optional supported-origin
+patterns. Only after Safari reports the complete grant does the background
+worker register the production archive scripts and reload the story. Login,
+signup, password, authentication, and logout paths remain excluded. The fresh
+post-registration content-script run and current-account server confirmation
+are both required before app onboarding completes. Refusal, expiry, or partial
+coverage saves nothing and returns to permission recovery; no toolbar-only mode
+is treated as complete. The build stores at most 32 coarse event-name/timestamp
+pairs locally for device diagnosis and sends none of that funnel to Trace.
+
 The modular kernel keeps its session envelope, extension-owned credential map,
 and account-private read model in one IndexedDB database owned by the extension
 origin. AO3/FFN content scripts run against the visited page's origin and

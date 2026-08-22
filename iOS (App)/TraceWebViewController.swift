@@ -29,6 +29,9 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
 #if DEBUG
         return webAppHTTPSOriginDebug
 #else
+        if TraceWebOriginGenerated.allowReleaseExperimentOrigin {
+            return TraceWebOriginGenerated.httpsOrigin
+        }
         return "https://tracefiction.com"
 #endif
     }
@@ -47,9 +50,22 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         guard #available(iOS 17.4, *) else { return nil }
         guard let origin = URL(string: webAppHTTPSOrigin),
               origin.scheme?.lowercased() == "https",
-              let host = origin.host?.lowercased(),
-              productionWebHosts.contains(host)
+              let host = origin.host?.lowercased()
         else {
+            return nil
+        }
+
+        let usesProductionWebOrigin = productionWebHosts.contains(host)
+#if DEBUG
+        // Local and ordinary preview Debug builds keep the custom-scheme
+        // transport. Only a release build produced by the exact reviewed dev
+        // preview command may borrow Trace's verified HTTPS callback.
+        let usesReviewedReleasePreview = false
+#else
+        let usesReviewedReleasePreview =
+            TraceWebOriginGenerated.allowReleaseExperimentOrigin
+#endif
+        guard usesProductionWebOrigin || usesReviewedReleasePreview else {
             return nil
         }
         return URL(
@@ -175,6 +191,9 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         let enabled: Bool
         let settingsSupported: Bool
         let archiveBrowseHosts: [String]
+        // Build-20 capability: the web shell should guide one active-tab save
+        // before the Safari popup offers a durable optional host grant.
+        let earnedPermissionOnboarding: Bool
         let error: String?
         let queriedIdentifier: String?
         let embeddedExtensionIdentifiers: [String]?
@@ -248,6 +267,14 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
     }
 
     private static var billingAPIBaseURL: URL {
+        // The exact earned-permission preview keeps its web shell, extension,
+        // and native API calls in one development environment. Ordinary
+        // Release builds remain pinned to the production build setting below.
+        if TraceWebOriginGenerated.allowReleaseExperimentOrigin,
+           let previewURL = URL(string: TraceWebOriginGenerated.apiOrigin) {
+            return previewURL
+        }
+
         if let configured = configuredBillingAPIBaseURLOverride {
             return configured
         }
@@ -1834,7 +1861,7 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         // Opening system settings is independent of extension authentication.
         // Keep this call directly coupled to the reader's tap.
         SFSafariSettings.openExtensionsSettings(
-            forIdentifiers: Self.safariExtensionCandidateIdentifiers()
+            forIdentifiers: Self.safariExtensionSettingsIdentifiers()
         ) { [weak self] error in
             DispatchQueue.main.async {
                 self?.postSafariExtensionActionResult(
@@ -2048,6 +2075,16 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         return identifiers.filter { identifier in
             seen.insert(identifier).inserted
         }
+    }
+
+    /// Settings must receive only identifiers that are actually embedded in
+    /// this build. Passing a retired probe identifier alongside the installed
+    /// extension can make Safari reject the entire open-settings request.
+    private static func safariExtensionSettingsIdentifiers() -> [String] {
+        let embeddedIdentifiers = embeddedSafariExtensionBundleIdentifiers()
+        return embeddedIdentifiers.isEmpty
+            ? [safariExtensionBundleIdentifier]
+            : embeddedIdentifiers
     }
 
     private static func embeddedSafariExtensionBundleIdentifiers() -> [String] {
@@ -2383,6 +2420,8 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
                     TraceSafariArchiveHostKind.ao3.rawValue,
                     TraceSafariArchiveHostKind.ffn.rawValue,
                 ],
+                earnedPermissionOnboarding:
+                    TraceWebOriginGenerated.earnedPermissionOnboardingEnabled,
                 error: error,
                 queriedIdentifier: queriedIdentifier,
                 embeddedExtensionIdentifiers: embeddedExtensionIdentifiers,

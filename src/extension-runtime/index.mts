@@ -1,5 +1,6 @@
 import { installSessionRuntime, type SessionMode } from "./controller.mjs";
 import { installArchiveReadinessRuntime } from "./archive-readiness.mjs";
+import { installEarnedPermissionRegistrationRuntime } from "./earned-permission-registration.mjs";
 import { installTraceFirstInstallActivation } from "./trace-web-navigation.mjs";
 export * from "./account-projection.mjs";
 export * from "./archive-readiness-status.mjs";
@@ -18,6 +19,7 @@ import type {
   AlarmsPort,
   PermissionsPort,
   RuntimePort,
+  ScriptingPort,
   StorageArea,
   TabsPort,
 } from "./browser-platform.mjs";
@@ -27,6 +29,20 @@ import { BrowserArchiveReadinessStatus } from "./archive-readiness-status.mjs";
 declare const __TRACE_SESSION_MODE__: SessionMode;
 declare const __TRACE_API_BASE__: string;
 declare const __TRACE_WEB_ORIGIN__: string;
+declare const __TRACE_IOS_EARNED_PERMISSION_CONFIG__: EarnedPermissionRegistrationConfig | null;
+
+type EarnedPermissionRegistrationConfig = Readonly<{
+  version: number;
+  origins: readonly string[];
+  registrations: readonly Readonly<{
+    id: string;
+    matches: readonly string[];
+    js: readonly string[];
+    runAt: string;
+    persistAcrossSessions: boolean;
+    excludeMatches?: readonly string[];
+  }>[];
+}>;
 
 interface ExtensionApi {
   readonly runtime: RuntimePort;
@@ -34,6 +50,7 @@ interface ExtensionApi {
   readonly storage: { readonly local: StorageArea };
   readonly tabs: TabsPort;
   readonly permissions?: PermissionsPort;
+  readonly scripting?: ScriptingPort;
 }
 
 interface RuntimeGlobal {
@@ -91,6 +108,24 @@ try {
       storageMode,
       status: archiveReadinessStatus,
     });
+    if (
+      __TRACE_IOS_EARNED_PERMISSION_CONFIG__ !== null &&
+      extension.permissions !== undefined &&
+      extension.scripting !== undefined
+    ) {
+      installEarnedPermissionRegistrationRuntime({
+        runtime: extension.runtime,
+        permissions: extension.permissions,
+        scripting: extension.scripting,
+        storage: new BrowserStorage(
+          extension.storage.local,
+          extension.runtime,
+          storageMode,
+        ),
+        storageMode,
+        config: __TRACE_IOS_EARNED_PERMISSION_CONFIG__,
+      });
+    }
   }
   if (!scope.indexedDB) throw new Error("private database unavailable");
   let fallbackId = 0;

@@ -120,6 +120,8 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
                     "Trace is temporarily offline",
                     "Reconnect Trace",
                     "Checking Trace",
+                    "Connecting…",
+                    "Verifying account…",
                 ],
                 timeout: 8
             ),
@@ -289,22 +291,20 @@ final class TraceInstalledLifecycleUITests: XCTestCase {
         // Reopen the work after Safari grants the extension site access so
         // the installed collector and DEBUG-only driver load together.
         restartSafariPage()
+        let savedResult = safari.staticTexts["Installed result: connected / saved"]
         XCTAssertTrue(
-            safari.staticTexts["Installed Connect-and-save driver ready"]
-                .waitForExistence(timeout: 20)
+            waitForPopupState(
+                [
+                    "Installed Connect-and-save driver ready",
+                    "Installed result: connected / saved",
+                ],
+                timeout: 20
+            )
         )
-        let connectAndSave = safari.buttons["Connect and save"]
-        XCTAssertTrue(connectAndSave.waitForExistence(timeout: 15))
-        let safariFrame = safari.frame
-        let actionFrame = connectAndSave.frame
-        safari.coordinate(withNormalizedOffset: CGVector(
-            dx: actionFrame.midX / safariFrame.width,
-            dy: actionFrame.midY / safariFrame.height
-        )).tap()
-        XCTAssertTrue(
-            safari.staticTexts["Installed result: connected / saved"]
-                .waitForExistence(timeout: 15)
-        )
+        // The driver only creates the same pending handoff that onboarding
+        // owns. The production collector must perform the automatic attempt;
+        // an artificial test button would introduce a duplicate-write race.
+        XCTAssertTrue(savedResult.waitForExistence(timeout: 15))
         XCTAssertTrue(safari.buttons["Saved"].exists)
     }
 

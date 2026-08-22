@@ -2,6 +2,9 @@
 const TRACE_API_BASE = "https://api.tracefiction.com";
 const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 (() => {
+  // <define:__TRACE_IOS_EARNED_PERMISSION_CONFIG__>
+  var define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default = { version: 3, origins: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*", "https://www.fanfiction.net/*", "https://m.fanfiction.net/*"], registrations: [{ id: "trace-archive-automation-v1", matches: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*", "https://www.fanfiction.net/*", "https://m.fanfiction.net/*"], js: ["content-config.js", "trace-finish-qualify.js", "collector.js", "library-overlay-keys.js", "library-overlay.js"], runAt: "document_end", persistAcrossSessions: true, excludeMatches: ["https://archiveofourown.org/users/login*", "https://*.archiveofourown.org/users/login*", "https://archiveofourown.org/users/sign_up*", "https://*.archiveofourown.org/users/sign_up*", "https://archiveofourown.org/users/password*", "https://*.archiveofourown.org/users/password*", "https://archiveofourown.org/users/auth/*", "https://*.archiveofourown.org/users/auth/*", "https://archiveofourown.org/users/logout*", "https://*.archiveofourown.org/users/logout*", "https://archiveofourown.gay/users/login*", "https://*.archiveofourown.gay/users/login*", "https://archiveofourown.gay/users/sign_up*", "https://*.archiveofourown.gay/users/sign_up*", "https://archiveofourown.gay/users/password*", "https://*.archiveofourown.gay/users/password*", "https://archiveofourown.gay/users/auth/*", "https://*.archiveofourown.gay/users/auth/*", "https://archiveofourown.gay/users/logout*", "https://*.archiveofourown.gay/users/logout*", "https://archive.transformativeworks.org/users/login*", "https://archive.transformativeworks.org/users/sign_up*", "https://archive.transformativeworks.org/users/password*", "https://archive.transformativeworks.org/users/auth/*", "https://archive.transformativeworks.org/users/logout*", "https://ao3.org/users/login*", "https://*.ao3.org/users/login*", "https://ao3.org/users/sign_up*", "https://*.ao3.org/users/sign_up*", "https://ao3.org/users/password*", "https://*.ao3.org/users/password*", "https://ao3.org/users/auth/*", "https://*.ao3.org/users/auth/*", "https://ao3.org/users/logout*", "https://*.ao3.org/users/logout*", "https://www.fanfiction.net/login.php*", "https://www.fanfiction.net/signup.php*", "https://www.fanfiction.net/account/login*", "https://www.fanfiction.net/account/signup*", "https://www.fanfiction.net/auth/*", "https://m.fanfiction.net/login.php*", "https://m.fanfiction.net/signup.php*", "https://m.fanfiction.net/account/login*", "https://m.fanfiction.net/account/signup*", "https://m.fanfiction.net/auth/*"] }, { id: "trace-ao3-saved-filters-v1", matches: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*"], js: ["ao3-saved-filters.js"], runAt: "document_end", persistAcrossSessions: true, excludeMatches: ["https://archiveofourown.org/users/login*", "https://*.archiveofourown.org/users/login*", "https://archiveofourown.org/users/sign_up*", "https://*.archiveofourown.org/users/sign_up*", "https://archiveofourown.org/users/password*", "https://*.archiveofourown.org/users/password*", "https://archiveofourown.org/users/auth/*", "https://*.archiveofourown.org/users/auth/*", "https://archiveofourown.org/users/logout*", "https://*.archiveofourown.org/users/logout*", "https://archiveofourown.gay/users/login*", "https://*.archiveofourown.gay/users/login*", "https://archiveofourown.gay/users/sign_up*", "https://*.archiveofourown.gay/users/sign_up*", "https://archiveofourown.gay/users/password*", "https://*.archiveofourown.gay/users/password*", "https://archiveofourown.gay/users/auth/*", "https://*.archiveofourown.gay/users/auth/*", "https://archiveofourown.gay/users/logout*", "https://*.archiveofourown.gay/users/logout*", "https://archive.transformativeworks.org/users/login*", "https://archive.transformativeworks.org/users/sign_up*", "https://archive.transformativeworks.org/users/password*", "https://archive.transformativeworks.org/users/auth/*", "https://archive.transformativeworks.org/users/logout*", "https://ao3.org/users/login*", "https://*.ao3.org/users/login*", "https://ao3.org/users/sign_up*", "https://*.ao3.org/users/sign_up*", "https://ao3.org/users/password*", "https://*.ao3.org/users/password*", "https://ao3.org/users/auth/*", "https://*.ao3.org/users/auth/*", "https://ao3.org/users/logout*", "https://*.ao3.org/users/logout*"] }] };
+
   // src/extension-core/archive-readiness.mts
   var ARCHIVE_RUN_THROTTLE_MS = 5 * 60 * 1e3;
   var SYSTEM_CLOCK = Object.freeze({
@@ -5223,6 +5226,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     status: "TRACE_EXTENSION_STATUS_QUERY",
     openTraceUrl: TRACE_WEB_OPEN_MESSAGE
   });
+  var ACCOUNT_PROJECTION_REVISION_KEY = "traceAccountProjectionRevisionV1";
   var WORK_KEY_PATTERN5 = /^(ao3|ffn):[1-9][0-9]{0,19}$/;
   var MAX_PROJECTION_WORK_KEYS = 250;
   var POPUP_PREFERENCE_KEYS = Object.freeze([
@@ -5978,6 +5982,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         const result = await this.#accountData.clearCapacityRecovery(scope2);
         if (result.kind === "published") accountData = result.value;
       }
+      if (command.kind === "confirmed" && command.projection === "published") {
+        await this.#publishAccountProjectionRevision();
+      }
       this.#publishStatus();
       return Object.freeze({
         ok: command.kind === "confirmed",
@@ -5996,6 +6003,15 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           })
         } : { error: command.reason }
       });
+    }
+    async #publishAccountProjectionRevision() {
+      try {
+        const values = await this.#storage.get(ACCOUNT_PROJECTION_REVISION_KEY);
+        const current = values[ACCOUNT_PROJECTION_REVISION_KEY];
+        const revision = typeof current === "number" && Number.isSafeInteger(current) && current >= 0 && current < Number.MAX_SAFE_INTEGER ? current + 1 : 1;
+        await this.#storage.set({ [ACCOUNT_PROJECTION_REVISION_KEY]: revision });
+      } catch {
+      }
     }
     #libraryCommandResponse(command, action) {
       this.#publishStatus();
@@ -6404,6 +6420,218 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     return controller;
   }
 
+  // src/extension-runtime/earned-permission-registration.mts
+  var EARNED_PERMISSION_REGISTRATION_MESSAGE = "TRACE_EARNED_PERMISSION_RECONCILE";
+  var EARNED_PERMISSION_STATE_KEY = "traceEarnedPermissionOnboardingV1";
+  function isRecord20(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function callExtensionApi(target, method, args, runtime, mode) {
+    if (mode === "promise") {
+      try {
+        return Promise.resolve(target[method](...args));
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
+    return new Promise((resolve, reject) => {
+      try {
+        target[method](...args, (value) => {
+          const message = runtime.lastError?.message;
+          if (message) reject(new Error(message));
+          else resolve(value);
+        });
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+  function storedState(value) {
+    if (!isRecord20(value)) return Object.freeze({});
+    return Object.freeze({
+      ...typeof value.grantAt === "number" && value.grantAt > 0 ? { grantAt: value.grantAt } : {},
+      ...Number.isInteger(value.registrationVersion) && Number(value.registrationVersion) > 0 ? { registrationVersion: Number(value.registrationVersion) } : {},
+      ...value.promptResult === "granted" || value.promptResult === "declined" ? { promptResult: value.promptResult } : {},
+      ...typeof value.completedAt === "number" && value.completedAt > 0 ? { completedAt: value.completedAt } : {}
+    });
+  }
+  var EarnedPermissionRegistrationController = class {
+    #environment;
+    #tail = Promise.resolve({
+      ok: false,
+      completeGrant: false,
+      registered: false,
+      changed: false,
+      error: "permission_incomplete"
+    });
+    constructor(environment) {
+      this.#environment = environment;
+    }
+    reconcile() {
+      const next = this.#tail.then(
+        () => this.#reconcile(),
+        () => this.#reconcile()
+      );
+      this.#tail = next;
+      return next;
+    }
+    async #reconcile() {
+      const { config, permissions, runtime, scripting, storageMode, storage } = this.#environment;
+      const [permissionSnapshot, stored] = await Promise.all([
+        callExtensionApi(
+          permissions,
+          "getAll",
+          [],
+          runtime,
+          storageMode
+        ).catch(() => Object.freeze({ origins: [] })),
+        storage.get(EARNED_PERMISSION_STATE_KEY).then((value) => storedState(value[EARNED_PERMISSION_STATE_KEY])).catch(() => Object.freeze({}))
+      ]);
+      const granted = new Set(
+        Array.isArray(permissionSnapshot.origins) ? permissionSnapshot.origins.filter(
+          (origin) => typeof origin === "string"
+        ) : []
+      );
+      const completeGrant = config.origins.length > 0 && config.origins.every((origin) => granted.has(origin));
+      const configuredIds = config.registrations.map(({ id }) => id);
+      const current = await callExtensionApi(
+        scripting,
+        "getRegisteredContentScripts",
+        [],
+        runtime,
+        storageMode
+      ).catch(() => []);
+      const currentIds = new Set(
+        current.map(({ id }) => id).filter((id) => typeof id === "string")
+      );
+      const registered = configuredIds.every((id) => currentIds.has(id));
+      if (!completeGrant) {
+        const staleIds = configuredIds.filter((id) => currentIds.has(id));
+        if (staleIds.length > 0) {
+          await callExtensionApi(
+            scripting,
+            "unregisterContentScripts",
+            [{ ids: staleIds }],
+            runtime,
+            storageMode
+          ).catch(() => void 0);
+        }
+        return Object.freeze({
+          ok: false,
+          completeGrant: false,
+          registered: false,
+          changed: staleIds.length > 0,
+          error: "permission_incomplete"
+        });
+      }
+      const versionCurrent = stored.registrationVersion === config.version;
+      if (registered && versionCurrent) {
+        const grantAt = typeof stored.grantAt === "number" ? stored.grantAt : this.#environment.clock?.() ?? Date.now();
+        if (stored.grantAt !== grantAt || stored.promptResult !== "granted") {
+          await storage.set({
+            [EARNED_PERMISSION_STATE_KEY]: {
+              ...stored,
+              grantAt,
+              registrationVersion: config.version,
+              promptResult: "granted"
+            }
+          });
+        }
+        return Object.freeze({
+          ok: true,
+          completeGrant: true,
+          registered: true,
+          changed: false,
+          grantAt
+        });
+      }
+      try {
+        const staleIds = configuredIds.filter((id) => currentIds.has(id));
+        if (staleIds.length > 0) {
+          await callExtensionApi(
+            scripting,
+            "unregisterContentScripts",
+            [{ ids: staleIds }],
+            runtime,
+            storageMode
+          );
+        }
+        await callExtensionApi(
+          scripting,
+          "registerContentScripts",
+          [config.registrations],
+          runtime,
+          storageMode
+        );
+        const confirmed = await callExtensionApi(
+          scripting,
+          "getRegisteredContentScripts",
+          [],
+          runtime,
+          storageMode
+        );
+        const confirmedIds = new Set(
+          confirmed.map(({ id }) => id).filter((id) => typeof id === "string")
+        );
+        if (!configuredIds.every((id) => confirmedIds.has(id))) {
+          throw new Error("registration_not_confirmed");
+        }
+        const grantAt = this.#environment.clock?.() ?? Date.now();
+        await storage.set({
+          [EARNED_PERMISSION_STATE_KEY]: {
+            ...stored,
+            grantAt,
+            registrationVersion: config.version,
+            promptResult: "granted",
+            completedAt: null
+          }
+        });
+        return Object.freeze({
+          ok: true,
+          completeGrant: true,
+          registered: true,
+          changed: true,
+          grantAt
+        });
+      } catch {
+        return Object.freeze({
+          ok: false,
+          completeGrant: true,
+          registered: false,
+          changed: false,
+          error: "registration_failed"
+        });
+      }
+    }
+  };
+  function installEarnedPermissionRegistrationRuntime(environment) {
+    const controller = new EarnedPermissionRegistrationController(environment);
+    environment.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (!isRecord20(message) || message.type !== EARNED_PERMISSION_REGISTRATION_MESSAGE) {
+        return false;
+      }
+      void controller.reconcile().then(
+        (response) => sendResponse(response),
+        () => sendResponse({
+          ok: false,
+          completeGrant: false,
+          registered: false,
+          changed: false,
+          error: "registration_failed"
+        })
+      );
+      return true;
+    });
+    environment.permissions.onAdded?.addListener(() => {
+      void controller.reconcile();
+    });
+    environment.permissions.onRemoved?.addListener(() => {
+      void controller.reconcile();
+    });
+    void controller.reconcile();
+    return controller;
+  }
+
   // src/extension-runtime/index.mts
   var UUID_PATTERN7 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   function fallbackUuid(seed) {
@@ -6443,6 +6671,20 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         storageMode,
         status: archiveReadinessStatus
       });
+      if (define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default !== null && extension.permissions !== void 0 && extension.scripting !== void 0) {
+        installEarnedPermissionRegistrationRuntime({
+          runtime: extension.runtime,
+          permissions: extension.permissions,
+          scripting: extension.scripting,
+          storage: new BrowserStorage(
+            extension.storage.local,
+            extension.runtime,
+            storageMode
+          ),
+          storageMode,
+          config: define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default
+        });
+      }
     }
     if (!scope.indexedDB) throw new Error("private database unavailable");
     let fallbackId = 0;

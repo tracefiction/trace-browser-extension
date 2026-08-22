@@ -52,11 +52,17 @@ that cannot mutate provider state and separately records the native bootstrap
 clear result, so a later web clear cannot mask a failed boot-time clear.
 
 The session phase also appends a DEBUG-run-only content driver after the real
-AO3 collector in the temporary build copy. It invokes the installed
-collector/controller path from an authorized AO3 sender and records the
+archive collector in the temporary build copy. It invokes the installed
+collector/controller path from an authorized FanFiction.net story sender and records the
 `connected / saved` boundary against the local authenticated track fixture.
-The fixture returns the production authoritative-entry response shape, and the
-runner records the bounded confirmed write without retaining story content.
+With automatic tracking enabled, the fixture requires the bounded pair of one
+onboarding save and one automatic progress mutation for the same account and
+work, while the UI must settle on one authoritative `Saved` entry. A third
+mutation or any stale-account/work write fails the run. The fixture returns the
+production authoritative-entry response shape without retaining story content.
 The runner removes the driver before the Release build and verifies that
-neither its resource nor its manifest entry is present in that build. This
-journey requires the selected Simulator to reach `archiveofourown.org`.
+neither its resource nor its manifest entry is present in that build. FFN is
+used because a fresh Safari simulator can redirect AO3 works to a separate
+Terms/content-policy consent page; that cookie gate is not part of Trace's
+installed extension contract. This journey requires the selected Simulator to
+reach `www.fanfiction.net`.

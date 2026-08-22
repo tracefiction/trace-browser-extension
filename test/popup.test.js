@@ -26,6 +26,11 @@ const POPUP_CSS_PATH = path.join(
   "Resources",
   "popup.css",
 );
+const ACTIVE_TAB_PROBE_FILES = [
+  "popup-config.js",
+  "trace-finish-qualify.js",
+  "collector.js",
+];
 
 function flush() {
   return new Promise((resolve) => setImmediate(resolve));
@@ -52,6 +57,22 @@ function createPopupHarness({
     reason: "none",
   },
   promiseRuntime = false,
+  activeTabProbe = false,
+  activeTab = { id: 7, url: "https://archiveofourown.org/works/123" },
+  existingProbe = false,
+  injectionError = null,
+  probeSaveResponse = {
+    ok: true,
+    state: "saved",
+    site: "ao3",
+    serverConfirmed: true,
+  },
+  earnedPermissionOnboarding = false,
+  grantedOrigins = [],
+  registeredContentScripts = [],
+  permissionRequestResult = true,
+  permissionRequestError = null,
+  registrationReconcileResult = null,
 } = {}) {
   const html = fs.readFileSync(POPUP_HTML_PATH, "utf8");
   const js = fs.readFileSync(POPUP_JS_PATH, "utf8");
@@ -70,6 +91,13 @@ function createPopupHarness({
   const messages = [];
   const storageChangeListeners = [];
   const timeouts = [];
+  const tabMessages = [];
+  const injections = [];
+  const permissionRequests = [];
+  const registrationRequests = [];
+  const reconcileRequests = [];
+  const reloads = [];
+  let currentRegisteredContentScripts = [...registeredContentScripts];
   let closeCalled = false;
 
   const ext = {
@@ -93,6 +121,17 @@ function createPopupHarness({
         if (message.type === "TRACE_SESSION_ACTION") {
           response = { ok: true, snapshot: sessionSnapshot, action: { kind: "ignored" } };
         }
+        if (message.type === "TRACE_EARNED_PERMISSION_RECONCILE") {
+          reconcileRequests.push(message);
+          const completeGrant = grantedOrigins.length === 5;
+          response = registrationReconcileResult ?? {
+            ok: completeGrant,
+            completeGrant,
+            registered: completeGrant,
+            changed: completeGrant,
+            ...(completeGrant ? { grantAt: Date.now() } : { error: "permission_incomplete" }),
+          };
+        }
         if (promiseRuntime) return Promise.resolve(response);
         callback?.(response);
       },
@@ -113,10 +152,12 @@ function createPopupHarness({
               out[key] = store[key];
             }
           }
+          if (promiseRuntime) return Promise.resolve(out);
           callback?.(out);
         },
         set(obj, callback) {
           Object.assign(store, obj || {});
+          if (promiseRuntime) return Promise.resolve();
           callback?.();
         },
       },
@@ -126,10 +167,93 @@ function createPopupHarness({
         },
       },
     },
+    tabs: {
+      query(_query, callback) {
+        if (promiseRuntime) return Promise.resolve([activeTab]);
+        callback?.([activeTab]);
+      },
+      sendMessage(tabId, message, callback) {
+        tabMessages.push({ tabId, message });
+        const injected = existingProbe || injections.length > 0;
+        if (message.type === "TRACE_ACTIVE_TAB_PROBE_PING" && !injected) {
+          if (promiseRuntime) return Promise.reject(new Error("no receiver"));
+          ext.runtime.lastError = { message: "no receiver" };
+          callback?.(undefined);
+          ext.runtime.lastError = null;
+          return;
+        }
+        const response = message.type === "TRACE_ACTIVE_TAB_PROBE_PING"
+          ? { ok: true, probe: true }
+          : probeSaveResponse;
+        if (promiseRuntime) return Promise.resolve(response);
+        callback?.(response);
+      },
+      reload(tabId, callback) {
+        reloads.push(tabId);
+        if (promiseRuntime) return Promise.resolve();
+        callback?.();
+      },
+    },
+    permissions: {
+      getAll(callback) {
+        const response = { origins: [...grantedOrigins], permissions: [] };
+        if (promiseRuntime) return Promise.resolve(response);
+        callback?.(response);
+      },
+      request(request, callback) {
+        permissionRequests.push(request);
+        if (permissionRequestError) {
+          if (promiseRuntime) return Promise.reject(new Error(permissionRequestError));
+          ext.runtime.lastError = { message: permissionRequestError };
+          callback?.(undefined);
+          ext.runtime.lastError = null;
+          return;
+        }
+        if (permissionRequestResult) {
+          grantedOrigins.splice(0, grantedOrigins.length, ...(request.origins || []));
+        }
+        if (promiseRuntime) return Promise.resolve(permissionRequestResult);
+        callback?.(permissionRequestResult);
+      },
+    },
+    scripting: {
+      executeScript(injection, callback) {
+        injections.push(injection);
+        if (injectionError) {
+          if (promiseRuntime) return Promise.reject(new Error(injectionError));
+          ext.runtime.lastError = { message: injectionError };
+          callback?.(undefined);
+          ext.runtime.lastError = null;
+          return;
+        }
+        if (promiseRuntime) return Promise.resolve([]);
+        callback?.([]);
+      },
+      getRegisteredContentScripts(callback) {
+        const response = [...currentRegisteredContentScripts];
+        if (promiseRuntime) return Promise.resolve(response);
+        callback?.(response);
+      },
+      unregisterContentScripts(filter, callback) {
+        const ids = new Set(filter?.ids || []);
+        currentRegisteredContentScripts = currentRegisteredContentScripts.filter(
+          (registration) => !ids.has(registration.id),
+        );
+        if (promiseRuntime) return Promise.resolve();
+        callback?.();
+      },
+      registerContentScripts(registrations, callback) {
+        registrationRequests.push(registrations);
+        currentRegisteredContentScripts.push(...registrations);
+        if (promiseRuntime) return Promise.resolve();
+        callback?.();
+      },
+    },
   };
 
   const context = {
     console,
+    URL: window.URL,
     chrome: promiseRuntime ? undefined : ext,
     browser: promiseRuntime ? ext : undefined,
     document: window.document,
@@ -148,6 +272,34 @@ function createPopupHarness({
   if (traceWebOrigin !== undefined) {
     context.TRACE_EXTENSION_WEB_ORIGIN = traceWebOrigin;
   }
+  if (activeTabProbe) context.TRACE_IOS_ACTIVE_TAB_PROBE = true;
+  if (earnedPermissionOnboarding) {
+    context.TRACE_IOS_ACTIVE_TAB_PROBE = true;
+    context.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {
+      version: 3,
+      origins: [
+        "https://*.archiveofourown.org/*",
+        "https://*.archiveofourown.gay/*",
+        "https://archive.transformativeworks.org/*",
+        "https://www.fanfiction.net/*",
+        "https://m.fanfiction.net/*",
+      ],
+      registrations: [
+        {
+          id: "trace-archive-automation-v1",
+          matches: ["https://*.archiveofourown.org/*"],
+          js: ["collector.js"],
+          persistAcrossSessions: true,
+        },
+        {
+          id: "trace-ao3-saved-filters-v1",
+          matches: ["https://*.archiveofourown.org/*"],
+          js: ["ao3-saved-filters.js"],
+          persistAcrossSessions: true,
+        },
+      ],
+    };
+  }
   context.globalThis = context;
   window.close = () => {
     closeCalled = true;
@@ -161,6 +313,12 @@ function createPopupHarness({
     document: window.document,
     store,
     messages,
+    tabMessages,
+    injections,
+    permissionRequests,
+    registrationRequests,
+    reconcileRequests,
+    reloads,
     get closeCalled() {
       return closeCalled;
     },
@@ -184,6 +342,490 @@ function createPopupHarness({
     },
   };
 }
+
+test("normal popup keeps the active-tab probe hidden", async () => {
+  const h = createPopupHarness({ sessionMode: "kernel", promiseRuntime: true });
+  await flush();
+
+  assert.equal(h.document.getElementById("popup-active-tab-probe").hidden, true);
+  assert.notEqual(h.document.body.dataset.traceActiveTabProbe, "true");
+  assert.deepEqual(h.injections, []);
+});
+
+for (const promiseRuntime of [false, true]) {
+  test(`active-tab probe saves a supported story with the ${promiseRuntime ? "promise" : "callback"} API`, async () => {
+    const h = createPopupHarness({
+      sessionMode: "kernel",
+      promiseRuntime,
+      activeTabProbe: true,
+    });
+    await flush();
+    await flush();
+
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(h.injections)),
+      [{ target: { tabId: 7 }, files: ACTIVE_TAB_PROBE_FILES }],
+    );
+    assert.equal(h.document.getElementById("popup-active-tab-probe").hidden, false);
+    assert.equal(h.document.body.dataset.traceActiveTabProbe, "true");
+    assert.equal(h.document.getElementById("popup-probe-story").dataset.state, "pass");
+    assert.equal(h.document.getElementById("popup-probe-access").dataset.state, "pass");
+    assert.equal(h.document.getElementById("popup-probe-save").dataset.state, "pass");
+    assert.equal(h.document.getElementById("popup-probe-result").dataset.state, "success");
+    assert.equal(h.document.getElementById("popup-probe-result-heading").textContent, "Saved to your Trace library.");
+    assert.equal(h.document.body.textContent.includes("archiveofourown.org/works/123"), false);
+  });
+}
+
+test("active-tab probe does not inject on an unsupported page", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    activeTabProbe: true,
+    activeTab: { id: 8, url: "https://www.google.com/" },
+  });
+  await flush();
+
+  assert.deepEqual(h.injections, []);
+  assert.deepEqual(h.tabMessages, []);
+  assert.equal(h.document.getElementById("popup-probe-story").dataset.state, "fail");
+  assert.equal(h.document.getElementById("popup-probe-result").dataset.state, "failure");
+  assert.equal(h.document.getElementById("popup-probe-result-heading").textContent, "Open a supported story");
+});
+
+test("active-tab probe makes injection failure explicit and retryable", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    activeTabProbe: true,
+    injectionError: "Safari denied execution",
+  });
+  await flush();
+  await flush();
+
+  assert.equal(h.document.getElementById("popup-probe-access").dataset.state, "fail");
+  assert.equal(h.document.getElementById("popup-probe-result-heading").textContent, "Current-tab access failed");
+  assert.equal(h.document.getElementById("popup-probe-retry").disabled, false);
+});
+
+for (const promiseRuntime of [false, true]) {
+  test(`earned-permission onboarding identifies the story without saving before permission with the ${promiseRuntime ? "promise" : "callback"} API`, async () => {
+    const h = createPopupHarness({
+      sessionMode: "kernel",
+      promiseRuntime,
+      earnedPermissionOnboarding: true,
+      sessionSnapshot: {
+        state: "connected",
+        accountId: "account-a",
+        canExecuteAuthenticated: true,
+        reason: "none",
+      },
+    });
+    for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+    assert.equal(h.document.body.dataset.traceEarnedPermission, "true");
+    assert.equal(h.document.getElementById("popup-earned-story").dataset.state, "pass");
+    assert.equal(h.document.getElementById("popup-earned-access").dataset.state, "waiting");
+    assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "waiting");
+    assert.equal(
+      h.document.getElementById("popup-earned-kicker").textContent,
+      "AO3 story found",
+    );
+    assert.equal(
+      h.document.getElementById("popup-earned-heading").textContent,
+      "Allow Trace on AO3 and FanFiction.net",
+    );
+    assert.equal(
+      h.document.getElementById("popup-earned-lead").textContent,
+      "When Safari asks, choose Always Allow.",
+    );
+    assert.equal(
+      h.document.getElementById("popup-earned-primary").textContent,
+      "Allow access and add story",
+    );
+    assert.equal(h.document.getElementById("popup-earned-help").hidden, true);
+    assert.ok(
+      h.document.getElementById("popup-earned-primary").compareDocumentPosition(
+        h.document.getElementById("popup-earned-ledger"),
+      ) & h.window.Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    assert.equal(h.permissionRequests.length, 0);
+    assert.equal(h.reconcileRequests.length, 0);
+    assert.equal(h.injections.length, 0);
+    assert.equal(
+      h.tabMessages.some(
+        ({ message }) => message.type === "TRACE_ACTIVE_TAB_PROBE_SAVE",
+      ),
+      false,
+    );
+    assert.equal(h.document.body.textContent.includes("archiveofourown.org/works/123"), false);
+  });
+}
+
+test("earned-permission action requests the exact sites, delegates registration, and reloads for proof", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    sessionSnapshot: {
+      state: "connected",
+      accountId: "account-a",
+      canExecuteAuthenticated: true,
+      reason: "none",
+    },
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  h.document.getElementById("popup-earned-primary").dispatchEvent(
+    new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+  );
+  for (let attempt = 0; attempt < 10; attempt += 1) await flush();
+
+  assert.equal(h.permissionRequests.length, 1);
+  assert.equal(h.permissionRequests[0].origins.length, 5);
+  assert.equal(h.reconcileRequests.length, 1);
+  assert.equal(h.registrationRequests.length, 0);
+  assert.deepEqual(h.reloads, [7]);
+  assert.equal(
+    h.document.getElementById("popup-earned-heading").textContent,
+    "Adding your story…",
+  );
+  assert.equal(h.document.getElementById("popup-earned-primary").disabled, true);
+  assert.equal(
+    h.tabMessages.some(
+      ({ message }) => message.type === "TRACE_ACTIVE_TAB_PROBE_SAVE",
+    ),
+    false,
+  );
+});
+
+test("earned-permission denial saves nothing and offers concise retry and Settings recovery", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    permissionRequestResult: false,
+    sessionSnapshot: {
+      state: "connected",
+      accountId: "account-a",
+      canExecuteAuthenticated: true,
+      reason: "none",
+    },
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  h.document.getElementById("popup-earned-primary").dispatchEvent(
+    new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+  );
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  assert.equal(h.registrationRequests.length, 0);
+  assert.equal(h.reloads.length, 0);
+  assert.equal(
+    h.document.getElementById("popup-earned-heading").textContent,
+    "Access wasn’t allowed",
+  );
+  assert.equal(h.document.getElementById("popup-earned-help").hidden, false);
+  assert.equal(
+    h.document.getElementById("popup-earned-help-summary").textContent,
+    "No prompt?",
+  );
+  assert.match(
+    h.document.getElementById("popup-earned-disclosure").textContent,
+    /Settings > Apps > Safari > Extensions > Trace/i,
+  );
+  assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Try again");
+  assert.equal(h.permissionRequests.length, 1);
+  assert.equal(h.reconcileRequests.length, 0);
+});
+
+test("earned-permission request errors do not claim access or save the story", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    permissionRequestError: "Safari request unavailable",
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  h.document.getElementById("popup-earned-primary").dispatchEvent(
+    new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+  );
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  assert.equal(h.document.getElementById("popup-earned-access").dataset.state, "fail");
+  assert.equal(
+    h.document.getElementById("popup-earned-heading").textContent,
+    "Access wasn’t allowed",
+  );
+  assert.equal(h.registrationRequests.length, 0);
+  assert.equal(h.reconcileRequests.length, 0);
+  assert.equal(h.reloads.length, 0);
+  assert.equal(h.tabMessages.length, 0);
+});
+
+test("earned-permission unsupported pages give a direct exit instead of a retry loop", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    activeTab: { id: 7, url: "https://www.google.com/" },
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  assert.equal(
+    h.document.getElementById("popup-earned-heading").textContent,
+    "Open a story first",
+  );
+  assert.equal(
+    h.document.getElementById("popup-earned-primary").textContent,
+    "Close and open a story",
+  );
+  h.document.getElementById("popup-earned-primary").dispatchEvent(
+    new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+  );
+  assert.equal(h.closeCalled, true);
+  assert.equal(h.permissionRequests.length, 0);
+});
+
+test("earned-permission previously declined state still requires access and never becomes a manual mode", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    storageState: {
+      traceEarnedPermissionOnboardingV1: {
+        firstSaveAt: Date.now() - 5_000,
+        grantAt: null,
+        registrationVersion: null,
+        promptResult: "declined",
+      },
+    },
+    sessionSnapshot: {
+      state: "connected",
+      accountId: "account-a",
+      canExecuteAuthenticated: true,
+      reason: "none",
+    },
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  assert.equal(
+    h.tabMessages.filter(
+      ({ message }) => message.type === "TRACE_ACTIVE_TAB_PROBE_SAVE",
+    ).length,
+    0,
+  );
+  assert.equal(
+    h.document.getElementById("popup-earned-heading").textContent,
+    "Allow Trace on AO3 and FanFiction.net",
+  );
+  assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "waiting");
+});
+
+for (const promiseRuntime of [false, true]) {
+  test(`earned-permission onboarding keeps a clean extension session untouched until the permission action with the ${promiseRuntime ? "promise" : "callback"} API`, async () => {
+    const h = createPopupHarness({
+      sessionMode: "kernel",
+      promiseRuntime,
+      earnedPermissionOnboarding: true,
+    });
+    for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+    assert.equal(
+      h.messages.some(({ type }) => type === "TRACE_SESSION_GET_SNAPSHOT"),
+      false,
+    );
+    assert.deepEqual(JSON.parse(JSON.stringify(h.injections)), []);
+    assert.equal(h.tabMessages.length, 0);
+    assert.equal(h.document.getElementById("popup-earned-story").dataset.state, "pass");
+    assert.equal(h.document.getElementById("popup-earned-access").dataset.state, "waiting");
+    assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "waiting");
+    assert.equal(
+      h.document.getElementById("popup-earned-heading").textContent,
+      "Allow Trace on AO3 and FanFiction.net",
+    );
+  });
+}
+
+test("earned-permission onboarding does not touch the save path before permission even if Trace is disconnected", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    probeSaveResponse: { ok: false, error: "not_authenticated" },
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  assert.equal(h.document.getElementById("popup-earned-story").dataset.state, "pass");
+  assert.equal(h.document.getElementById("popup-earned-access").dataset.state, "waiting");
+  assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "waiting");
+  assert.equal(
+    h.document.getElementById("popup-earned-heading").textContent,
+    "Allow Trace on AO3 and FanFiction.net",
+  );
+  assert.equal(
+    h.document.getElementById("popup-earned-primary").textContent,
+    "Allow access and add story",
+  );
+  assert.equal(h.tabMessages.length, 0);
+});
+
+test("earned-permission onboarding confirms automation only from a post-grant archive run", async () => {
+  const grantAt = Date.now() - 5_000;
+  const origins = [
+    "https://*.archiveofourown.org/*",
+    "https://*.archiveofourown.gay/*",
+    "https://archive.transformativeworks.org/*",
+    "https://www.fanfiction.net/*",
+    "https://m.fanfiction.net/*",
+  ];
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    grantedOrigins: [...origins],
+    registeredContentScripts: [
+      { id: "trace-archive-automation-v1" },
+      { id: "trace-ao3-saved-filters-v1" },
+    ],
+    storageState: {
+      traceEarnedPermissionOnboardingV1: {
+        firstSaveAt: grantAt - 1_000,
+        grantAt,
+        registrationVersion: 3,
+        promptResult: "granted",
+      },
+      traceArchiveReadiness: { lastArchiveSeenAt: grantAt + 1_000 },
+    },
+    sessionSnapshot: {
+      state: "connected",
+      accountId: "account-a",
+      canExecuteAuthenticated: true,
+      reason: "none",
+    },
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  assert.equal(
+    h.document.getElementById("popup-earned-heading").textContent,
+    "Trace is ready",
+  );
+  assert.equal(
+    h.document.getElementById("popup-earned-save").querySelector(
+      ".popup-probe-check-value",
+    ).textContent,
+    "Run confirmed",
+  );
+});
+
+test("earned-permission onboarding confirms a heartbeat while the popup stays open", async () => {
+  const grantAt = Date.now() - 5_000;
+  const origins = [
+    "https://*.archiveofourown.org/*",
+    "https://*.archiveofourown.gay/*",
+    "https://archive.transformativeworks.org/*",
+    "https://www.fanfiction.net/*",
+    "https://m.fanfiction.net/*",
+  ];
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    grantedOrigins: [...origins],
+    registeredContentScripts: [
+      { id: "trace-archive-automation-v1" },
+      { id: "trace-ao3-saved-filters-v1" },
+    ],
+    storageState: {
+      traceEarnedPermissionOnboardingV1: {
+        firstSaveAt: grantAt - 1_000,
+        grantAt,
+        registrationVersion: 3,
+        promptResult: "granted",
+      },
+      traceArchiveReadiness: { lastArchiveSeenAt: grantAt - 1_000 },
+    },
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  assert.equal(
+    h.document.getElementById("popup-earned-primary").textContent,
+    "Add story",
+  );
+
+  h.emitStorageChange({
+    traceArchiveReadiness: {
+      newValue: { lastArchiveSeenAt: grantAt + 1_000 },
+    },
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  assert.equal(
+    h.document.getElementById("popup-earned-heading").textContent,
+    "Trace is ready",
+  );
+  assert.equal(
+    h.document.getElementById("popup-earned-save").querySelector(
+      ".popup-probe-check-value",
+    ).textContent,
+    "Run confirmed",
+  );
+});
+
+test("earned-permission onboarding gives a bounded retry when background registration fails", async () => {
+  const previousGrantAt = Date.now() - 60_000;
+  const origins = [
+    "https://*.archiveofourown.org/*",
+    "https://*.archiveofourown.gay/*",
+    "https://archive.transformativeworks.org/*",
+    "https://www.fanfiction.net/*",
+    "https://m.fanfiction.net/*",
+  ];
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    grantedOrigins: [...origins],
+    registeredContentScripts: [
+      { id: "trace-archive-automation-v1" },
+      { id: "trace-ao3-saved-filters-v1" },
+    ],
+    registrationReconcileResult: {
+      ok: false,
+      completeGrant: true,
+      registered: false,
+      changed: false,
+      error: "registration_failed",
+    },
+    storageState: {
+      traceEarnedPermissionOnboardingV1: {
+        firstSaveAt: previousGrantAt - 1_000,
+        grantAt: previousGrantAt,
+        registrationVersion: 2,
+        promptResult: "granted",
+      },
+      traceArchiveReadiness: { lastArchiveSeenAt: previousGrantAt - 1_000 },
+    },
+  });
+  for (let attempt = 0; attempt < 10; attempt += 1) await flush();
+
+  assert.equal(h.reconcileRequests.length, 1);
+  assert.equal(h.registrationRequests.length, 0);
+  assert.equal(
+    h.document.getElementById("popup-earned-primary").textContent,
+    "Try again",
+  );
+  assert.equal(
+    h.document.getElementById("popup-earned-heading").textContent,
+    "Trace couldn’t finish setup",
+  );
+  assert.equal(h.document.getElementById("popup-earned-help").hidden, false);
+  assert.equal(
+    h.document.getElementById("popup-earned-help-summary").textContent,
+    "Still not working?",
+  );
+});
 
 test("kernel popup is read-only on open and exposes only explicit session actions", async () => {
   const h = createPopupHarness({ sessionMode: "kernel" });

@@ -4,12 +4,23 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const input = process.argv[2];
+import { MINIMIZED_SITE_HOST_MATCHES } from "./build-origin-permissions.mjs";
+import {
+  embeddedBundleIdentifierError,
+  IOS_PRODUCTION_APP_BUNDLE_IDENTIFIER,
+  IOS_PRODUCTION_EXTENSION_BUNDLE_IDENTIFIER,
+  productionEmbeddedBundleIdentifierError,
+} from "./ios-bundle-identifiers.mjs";
 
-if (!input) {
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const args = process.argv.slice(2);
+const productionRelease = args.includes("--production");
+const inputs = args.filter((arg) => !arg.startsWith("--"));
+const input = inputs[0];
+
+if (!input || inputs.length !== 1) {
   console.error(
-    "Usage: npm run ios:verify-archive -- /path/to/Trace.xcarchive",
+    "Usage: npm run ios:verify-archive -- [--production] /path/to/Trace.xcarchive",
   );
   process.exit(2);
 }
@@ -29,7 +40,19 @@ const packagedManifestPath = path.join(extensionPath, "manifest.json");
 const sourceManifestPath = path.join(sourceResources, "manifest.json");
 const projectPath = path.join(ROOT, "Trace.xcodeproj", "project.pbxproj");
 const packagePath = path.join(ROOT, "package.json");
+const appControllerPath = path.join(
+  ROOT,
+  "iOS (App)",
+  "TraceWebViewController.swift",
+);
+const generatedOriginPath = path.join(
+  ROOT,
+  "iOS (App)",
+  "TraceWebOrigin.generated.swift",
+);
 const errors = [];
+const RELEASE_TRACE_API_BASE = "https://api.tracefiction.com";
+const RELEASE_TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 
 function requirePath(target, label) {
   if (!fs.existsSync(target)) {
@@ -66,6 +89,17 @@ function readPlistValue(plistPath, key) {
 function uniqueBuildSettingValues(source, name) {
   const pattern = new RegExp(`${name} = ([^;]+);`, "g");
   return new Set(Array.from(source.matchAll(pattern), (match) => match[1]));
+}
+
+function readGeneratedStringSetting(source, name) {
+  const match = source.match(
+    new RegExp(`static let ${name}: String = "([^"]+)"`),
+  );
+  if (!match) {
+    errors.push(`Generated iOS configuration is missing ${name}`);
+    return null;
+  }
+  return match[1];
 }
 
 function digest(target) {
@@ -114,6 +148,20 @@ requirePath(packagedManifestPath, "Packaged extension manifest");
 requirePath(sourceManifestPath, "Source extension manifest");
 
 const packageJson = readJson(packagePath, "package.json");
+const generatedOrigins = requirePath(
+  generatedOriginPath,
+  "Generated iOS origin configuration",
+)
+  ? fs.readFileSync(generatedOriginPath, "utf8")
+  : "";
+const generatedWebOrigin = readGeneratedStringSetting(
+  generatedOrigins,
+  "httpsOrigin",
+);
+const generatedApiOrigin = readGeneratedStringSetting(
+  generatedOrigins,
+  "apiOrigin",
+);
 const sourceManifest = readJson(sourceManifestPath, "Source extension manifest");
 const packagedManifest = readJson(
   packagedManifestPath,
@@ -123,6 +171,10 @@ const appVersion = readPlistValue(
   path.join(appPath, "Info.plist"),
   "CFBundleShortVersionString",
 );
+const appBundleIdentifier = readPlistValue(
+  path.join(appPath, "Info.plist"),
+  "CFBundleIdentifier",
+);
 const appBuild = readPlistValue(
   path.join(appPath, "Info.plist"),
   "CFBundleVersion",
@@ -131,6 +183,118 @@ const executableName = readPlistValue(
   path.join(appPath, "Info.plist"),
   "CFBundleExecutable",
 );
+
+const pluginsPath = path.join(appPath, "PlugIns");
+const embeddedBundleIdentifiers = new Set();
+if (requirePath(pluginsPath, "Trace embedded plug-ins")) {
+  for (const entry of fs.readdirSync(pluginsPath, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.endsWith(".appex")) continue;
+    const embeddedInfoPlist = path.join(pluginsPath, entry.name, "Info.plist");
+    if (!requirePath(embeddedInfoPlist, `${entry.name} Info.plist`)) continue;
+    const embeddedBundleIdentifier = readPlistValue(
+      embeddedInfoPlist,
+      "CFBundleIdentifier",
+    );
+    if (embeddedBundleIdentifier) {
+      embeddedBundleIdentifiers.add(embeddedBundleIdentifier);
+    }
+    const identifierError = embeddedBundleIdentifierError(
+      appBundleIdentifier,
+      embeddedBundleIdentifier,
+    );
+    if (identifierError) errors.push(`${entry.name}: ${identifierError}`);
+    if (productionRelease && embeddedBundleIdentifier) {
+      const productionIdentifierError =
+        productionEmbeddedBundleIdentifierError(embeddedBundleIdentifier);
+      if (productionIdentifierError) {
+        errors.push(`${entry.name}: ${productionIdentifierError}`);
+      }
+    }
+  }
+}
+
+if (productionRelease) {
+  if (appBundleIdentifier !== IOS_PRODUCTION_APP_BUNDLE_IDENTIFIER) {
+    errors.push(
+      `Production app identifier must be ${IOS_PRODUCTION_APP_BUNDLE_IDENTIFIER}; received ${appBundleIdentifier}`,
+    );
+  }
+  if (
+    !embeddedBundleIdentifiers.has(IOS_PRODUCTION_EXTENSION_BUNDLE_IDENTIFIER)
+  ) {
+    errors.push(
+      `Production archive is missing ${IOS_PRODUCTION_EXTENSION_BUNDLE_IDENTIFIER}`,
+    );
+  }
+  if (generatedWebOrigin !== RELEASE_TRACE_WEB_ORIGIN) {
+    errors.push(
+      `Production web origin must be ${RELEASE_TRACE_WEB_ORIGIN}; received ${generatedWebOrigin}`,
+    );
+  }
+  if (generatedApiOrigin !== RELEASE_TRACE_API_BASE) {
+    errors.push(
+      `Production API origin must be ${RELEASE_TRACE_API_BASE}; received ${generatedApiOrigin}`,
+    );
+  }
+  if (!/allowReleaseExperimentOrigin: Bool = false/.test(generatedOrigins)) {
+    errors.push("Production archive cannot enable the reviewed dev-preview origin seam");
+  }
+  if (!/earnedPermissionOnboardingEnabled: Bool = true/.test(generatedOrigins)) {
+    errors.push("Production archive does not advertise the earned-permission native capability");
+  }
+
+  const sourceOptionalHosts = sourceManifest?.optional_host_permissions;
+  if (
+    JSON.stringify(sourceOptionalHosts) !==
+    JSON.stringify(MINIMIZED_SITE_HOST_MATCHES)
+  ) {
+    errors.push("Production Safari manifest does not contain the exact five optional archive origins");
+  }
+  if (JSON.stringify(sourceManifest?.host_permissions) !== "[]") {
+    errors.push("Production earned-permission manifest must have no required host permissions");
+  }
+  if (JSON.stringify(sourceManifest?.content_scripts) !== "[]") {
+    errors.push("Production earned-permission manifest must have no static content scripts");
+  }
+  for (const permission of ["activeTab", "scripting", "nativeMessaging"]) {
+    if (!sourceManifest?.permissions?.includes(permission)) {
+      errors.push(`Production earned-permission manifest is missing ${permission}`);
+    }
+  }
+
+  if (requirePath(appControllerPath, "iOS app controller")) {
+    const appController = fs.readFileSync(appControllerPath, "utf8");
+    if (
+      !appController.includes(
+        `safariExtensionBundleIdentifier = "${IOS_PRODUCTION_EXTENSION_BUNDLE_IDENTIFIER}"`,
+      )
+    ) {
+      errors.push("Native Settings bridge does not use the stable production extension identifier");
+    }
+  }
+
+  const backgroundPath = path.join(sourceResources, "background.js");
+  const popupConfigPath = path.join(sourceResources, "popup-config.js");
+  if (requirePath(backgroundPath, "Generated production background")) {
+    const background = fs.readFileSync(backgroundPath, "utf8");
+    if (!background.includes(`const TRACE_API_BASE = "${RELEASE_TRACE_API_BASE}";`)) {
+      errors.push("Generated background is not bound to the production API");
+    }
+  }
+  if (requirePath(popupConfigPath, "Generated production popup config")) {
+    const popupConfig = fs.readFileSync(popupConfigPath, "utf8");
+    if (
+      !popupConfig.includes(
+        `globalThis.TRACE_EXTENSION_WEB_ORIGIN = "${RELEASE_TRACE_WEB_ORIGIN}";`,
+      )
+    ) {
+      errors.push("Generated popup is not bound to the production web origin");
+    }
+    if (!popupConfig.includes("TRACE_IOS_EARNED_PERMISSION_ONBOARDING")) {
+      errors.push("Generated popup is missing earned-permission onboarding configuration");
+    }
+  }
+}
 
 if (packageJson && sourceManifest && packageJson.version !== sourceManifest.version) {
   errors.push(
@@ -183,6 +347,16 @@ if (requirePath(inspectedExecutable, "Trace executable")) {
     if (!strings.stdout.includes("httpsAuthCallbackURL")) {
       errors.push("Trace executable does not advertise the verified HTTPS callback");
     }
+    if (generatedWebOrigin && !strings.stdout.includes(generatedWebOrigin)) {
+      errors.push(
+        `Trace executable does not contain generated web origin ${generatedWebOrigin}`,
+      );
+    }
+    if (generatedApiOrigin && !strings.stdout.includes(generatedApiOrigin)) {
+      errors.push(
+        `Trace executable does not contain generated API origin ${generatedApiOrigin}`,
+      );
+    }
     if (
       strings.stdout.includes(
         "Safari extension settings opening without refreshed shared token",
@@ -207,6 +381,21 @@ if (isArchive && requirePath(executablePath, "Signed Trace executable")) {
       "Archived Trace app is missing webcredentials:www.tracefiction.com",
     );
   }
+
+  const extensionEntitlements = spawnSync(
+    "/usr/bin/codesign",
+    ["-d", "--entitlements", "-", extensionPath],
+    { encoding: "utf8" },
+  );
+  const extensionEntitlementsOutput =
+    `${extensionEntitlements.stdout}\n${extensionEntitlements.stderr}`;
+  if (extensionEntitlements.status !== 0) {
+    errors.push("Could not read entitlements from the archived Safari extension");
+  } else if (
+    !extensionEntitlementsOutput.includes("group.com.tracefiction.trace")
+  ) {
+    errors.push("Archived Safari extension is missing the shared Trace app group");
+  }
 }
 
 if (errors.length > 0) {
@@ -216,5 +405,5 @@ if (errors.length > 0) {
 }
 
 console.log(
-  `iOS package verified: Trace ${appVersion} (${appBuild}), ${resourceCount} extension resources match source`,
+  `iOS package verified${productionRelease ? " for production" : ""}: Trace ${appVersion} (${appBuild}), ${resourceCount} extension resources match source`,
 );

@@ -11,6 +11,8 @@ const TRACE_CONNECT_AND_SAVE_MESSAGE = "TRACE_CONNECT_AND_SAVE";
 const TRACE_IOS_AUTH_REFRESH_REQUEST_MESSAGE = "TRACE_IOS_AUTH_REFRESH_REQUEST";
 const TRACE_SESSION_MODE = globalThis.TRACE_SESSION_MODE || "legacy";
 const KERNEL_SESSION_ACTIVE = TRACE_SESSION_MODE === "kernel";
+const TRACE_ACTIVE_TAB_PROBE_MODE =
+  globalThis.TRACE_IOS_ACTIVE_TAB_PROBE === true;
 const TRACE_WEB_HOME_URL = configuredTraceWebHomeUrl();
 const FIRST_STORY_FOCUS_MAX_ATTEMPTS = 30;
 const FIRST_STORY_FOCUS_RETRY_MS = 150;
@@ -81,6 +83,7 @@ function sendCollectorMessageBestEffort(message) {
 }
 
 var kernelPendingFirstStory = null;
+var kernelFirstStoryLookupPending = KERNEL_SESSION_ACTIVE;
 var kernelProjectionRetryTimer = null;
 var kernelProjectionRetryWorkKey = null;
 
@@ -512,6 +515,7 @@ var OVERLAY_CACHE_KEY = "libraryOverlayCache";
 var TRACE_ACCOUNT_ID_KEY = "traceAccountId";
 var TRACE_API_BASE_STORAGE_KEY = "traceApiBase";
 var WORK_STATE_STORAGE_KEY = "traceWorkStatesV1";
+var ACCOUNT_PROJECTION_REVISION_KEY = "traceAccountProjectionRevisionV1";
 var WORK_STATE_GET_MESSAGE = "TRACE_WORK_STATE_GET";
 var ACCOUNT_PROJECTION_GET_MESSAGE = "TRACE_ACCOUNT_PROJECTION_GET";
 var optimisticStoryPageEntries = Object.create(null);
@@ -2820,6 +2824,83 @@ function shouldDelayAutoTrackUntilVisible() {
 
 // Listen for background requests
 ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (TRACE_ACTIVE_TAB_PROBE_MODE) {
+    if (msg?.type === "TRACE_ACTIVE_TAB_PROBE_PING") {
+      if (shouldDisableTraceContentScript()) {
+        sendResponse({ ok: false, probe: true, error: "blocked_page" });
+      } else {
+        sendResponse({ ok: true, probe: true });
+      }
+      return false;
+    }
+    if (msg?.type !== "TRACE_ACTIVE_TAB_PROBE_SAVE") return false;
+    if (shouldDisableTraceContentScript()) {
+      sendResponse({ ok: false, error: "blocked_page" });
+      return false;
+    }
+    var probeCollected;
+    var probeWorkKey;
+    try {
+      probeCollected = collect();
+      probeWorkKey = getWorkKeyFromUrl();
+    } catch (_) {
+      probeCollected = null;
+      probeWorkKey = null;
+    }
+    var probeItem = probeCollected && probeCollected.items
+      ? probeCollected.items[0]
+      : null;
+    if (
+      !probeWorkKey ||
+      !probeItem ||
+      probeItem.ctx !== "story" ||
+      probeCollected.items.length !== 1
+    ) {
+      sendResponse({ ok: false, error: "unsupported_page" });
+      return false;
+    }
+    sendCollectorMessage({
+      type: TRACE_CONNECT_AND_SAVE_MESSAGE,
+      workKey: probeWorkKey,
+      payload: {
+        s: probeCollected.source,
+        at: new Date().toISOString(),
+        item: probeItem,
+      },
+    }, function (response) {
+      if (
+        response &&
+        response.ok === true &&
+        response.command &&
+        response.command.kind === "confirmed"
+      ) {
+        sendResponse({
+          ok: true,
+          state: "saved",
+          site: probeItem.src === "ffn" ? "ffn" : "ao3",
+          serverConfirmed: true,
+        });
+        return;
+      }
+      var reason = response && response.command && response.command.reason
+        ? response.command.reason
+        : response && response.error
+          ? response.error
+          : "save_failed";
+      var publicReason = [
+        "not_authenticated",
+        "auth_expired",
+        "free_limit_reached",
+        "rate_limited",
+        "unavailable",
+      ].includes(reason)
+        ? reason
+        : "save_failed";
+      sendResponse({ ok: false, error: publicReason });
+    });
+    return true;
+  }
+
   if (shouldDisableTraceContentScript()) {
     if (
       msg?.type === "TRACE_COLLECT" ||
@@ -2982,7 +3063,7 @@ function scheduleAutoTrackForCurrentPage(attempt) {
   queueAutoTrackWhenVisible(attempt);
 }
 
-if (!shouldDisableTraceContentScript()) {
+if (!TRACE_ACTIVE_TAB_PROBE_MODE && !shouldDisableTraceContentScript()) {
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", function () {
       scheduleAutoTrackForCurrentPage();
@@ -4374,6 +4455,19 @@ function ensureQuickAddElements(workKey, anchor) {
   return { wrap: wrap, handle: handle, sheet: sheet };
 }
 
+function reserveQuickAddSlot(workKey) {
+  var anchor = findQuickAddAnchor();
+  if (!anchor) return false;
+  var els = ensureQuickAddElements(workKey, anchor);
+  els.handle.setAttribute("data-trace-story-handle-state", "loading");
+  els.handle.style.cssText = traceInlineHandleCss(TRACE_INLINE_THEMES.muted) +
+    ";visibility:hidden;pointer-events:none";
+  els.handle.textContent = "Trace";
+  els.handle.disabled = true;
+  applySheetVisibility(els.sheet, false);
+  return true;
+}
+
 function removeQuickAddElements() {
   var wrap = document.querySelector("[" + QUICK_ADD_WRAP_ATTR + "]");
   if (wrap) {
@@ -4810,60 +4904,72 @@ function runKernelConnectAndSave(handle, workKey) {
 
 function processIosPendingFirstStoryAdd() {
   var processResponse = function (response) {
-        if ((!KERNEL_SESSION_ACTIVE && ext.runtime.lastError) || !response || response.ok !== true) return;
-        var pendingUrl = typeof response.url === "string" ? response.url.trim() : "";
-        var mode = response.mode === "browse" ? "browse" : "story";
-        var handoffId =
-          typeof response.handoffId === "string" &&
-          /^[A-Za-z0-9_-]{1,128}$/.test(response.handoffId.trim())
-            ? response.handoffId.trim()
-            : "";
+    try {
+      if (
+        (!KERNEL_SESSION_ACTIVE && ext.runtime.lastError) ||
+        !response ||
+        response.ok !== true
+      ) return;
+      var pendingUrl = typeof response.url === "string" ? response.url.trim() : "";
+      var mode = response.mode === "browse" ? "browse" : "story";
+      var handoffId =
+        typeof response.handoffId === "string" &&
+        /^[A-Za-z0-9_-]{1,128}$/.test(response.handoffId.trim())
+          ? response.handoffId.trim()
+          : "";
 
-        if (mode === "browse") {
-          var current = parseFirstStoryUrlForMatch(location.href);
-          var expectedHost =
-            response.hostKind === "ao3" || response.hostKind === "ffn"
-              ? response.hostKind
-              : "";
-          // The AO3 home handoff intentionally survives navigation through
-          // listing/search pages. Only a matching supported story page may
-          // consume it, so a reader can browse normally before choosing one.
-          if (!current || !expectedHost || current.source !== expectedHost) {
-            return;
-          }
-        } else if (!pendingUrl || !pendingFirstStoryMatchesCurrentPage(pendingUrl)) {
-          // Kernel retrieval is read-only. The later command owner decides
-          // when a pending handoff has been consumed or should be cleared.
-          if (!KERNEL_SESSION_ACTIVE) sendIosPendingFirstStoryClear();
+      if (mode === "browse") {
+        var current = parseFirstStoryUrlForMatch(location.href);
+        var expectedHost =
+          response.hostKind === "ao3" || response.hostKind === "ffn"
+            ? response.hostKind
+            : "";
+        // The AO3 home handoff intentionally survives navigation through
+        // listing/search pages. Only a matching supported story page may
+        // consume it, so a reader can browse normally before choosing one.
+        if (!current || !expectedHost || current.source !== expectedHost) {
           return;
         }
-        if (handoffId) {
-          announceArchivePageToBackground(handoffId);
+      } else if (!pendingUrl || !pendingFirstStoryMatchesCurrentPage(pendingUrl)) {
+        // Kernel retrieval is read-only. The later command owner decides
+        // when a pending handoff has been consumed or should be cleared.
+        if (!KERNEL_SESSION_ACTIVE) sendIosPendingFirstStoryClear();
+        return;
+      }
+      if (handoffId) {
+        announceArchivePageToBackground(handoffId);
+      }
+      if (KERNEL_SESSION_ACTIVE) {
+        var workKey = getWorkKeyFromUrl();
+        if (!workKey) return;
+        if (
+          !kernelPendingFirstStory ||
+          kernelPendingFirstStory.workKey !== workKey ||
+          kernelPendingFirstStory.handoffId !== handoffId
+        ) {
+          kernelPendingFirstStory = {
+            workKey: workKey,
+            handoffId: handoffId,
+            automaticAttempted: false,
+            commandInFlight: false,
+          };
         }
-        if (KERNEL_SESSION_ACTIVE) {
-          var workKey = getWorkKeyFromUrl();
-          if (!workKey) return;
-          if (
-            !kernelPendingFirstStory ||
-            kernelPendingFirstStory.workKey !== workKey ||
-            kernelPendingFirstStory.handoffId !== handoffId
-          ) {
-            kernelPendingFirstStory = {
-              workKey: workKey,
-              handoffId: handoffId,
-              automaticAttempted: false,
-              commandInFlight: false,
-            };
-          }
-          renderQuickAddButton(workKey);
-          return;
+        renderQuickAddButton(workKey);
+        return;
+      }
+      handleFirstStoryFocusAdd(function (result) {
+        if (result && result.ok) {
+          sendIosPendingFirstStoryClear();
         }
-        handleFirstStoryFocusAdd(function (result) {
-          if (result && result.ok) {
-            sendIosPendingFirstStoryClear();
-          }
-        });
-      };
+      });
+    } finally {
+      if (KERNEL_SESSION_ACTIVE) {
+        kernelFirstStoryLookupPending = false;
+        var currentWorkKey = getWorkKeyFromUrl();
+        if (currentWorkKey) renderQuickAddButton(currentWorkKey);
+      }
+    }
+  };
   sendCollectorMessage(
     { type: TRACE_IOS_PENDING_FIRST_STORY_GET_MESSAGE },
     processResponse,
@@ -5837,34 +5943,25 @@ function renderQuickAddFromSnapshot(workKey, anchor, res) {
     var info = normalizeOverlayEntry(entry, preference);
 
     if (entry || optimisticEntry) {
-      var legacySyntheticSavedEntry =
-        entry &&
-        typeof entry === "object" &&
-        entry.statusChoicesAvailable === true;
-      if (
-        optimisticEntry &&
-        optimisticEntry.__traceAutoTrackPending &&
-        (!entry || legacySyntheticSavedEntry)
-      ) {
-        info = optimisticEntry;
-      } else if (!entry && optimisticEntry) {
+      if (!entry && optimisticEntry) {
         info = optimisticEntry;
       } else if (info && optimisticEntry) {
         var optimisticEntryForMerge = optimisticEntry;
         if (
-          entry &&
-          !legacySyntheticSavedEntry &&
+          optimisticStoryEntryHasLibraryState(info) &&
           optimisticEntry.__traceAutoTrackPending
         ) {
-          // A real account-scoped overlay entry is authoritative proof that
-          // the save landed. Keep any other optimistic fields, but do not let
-          // an older in-flight receipt hold the visible handle on "Adding..."
-          // until a later focus/pageshow reconciliation.
+          // Keep a spinner only when the page has genuinely observed progress
+          // beyond the confirmed entry. A confirmed Saved entry represents
+          // chapter one even when the compact cache omits chapter metadata.
           var projectedChapter = storyEntryChapterCurrent(info);
           var observedChapter = storyEntryChapterCurrent({
             chapters:
               optimisticEntry.__traceObservedChapters || optimisticEntry.chapters,
           });
+          if (projectedChapter == null && entryStatus(info) === "SAVED") {
+            projectedChapter = 1;
+          }
           if (
             observedChapter == null ||
             (projectedChapter != null && projectedChapter >= observedChapter)
@@ -5895,6 +5992,22 @@ function renderQuickAddFromSnapshot(workKey, anchor, res) {
         info.__traceAutoTrackError === "not_authenticated")
     );
     storyAuthRecoveryNeeded = !view.hasAuth || hasEntryAuthError;
+
+    if (KERNEL_SESSION_ACTIVE && kernelFirstStoryLookupPending) {
+      applyStoryInlineHandleState(handle, {
+        kind: "checking",
+        label: "Checking…",
+        theme: TRACE_INLINE_THEMES.saving,
+        dot: false,
+        spinner: true,
+        status: null,
+        progress: null,
+      });
+      handle.title = "Checking this story in Trace";
+      handle.disabled = true;
+      applySheetVisibility(sheet, false);
+      return;
+    }
 
     if (
       KERNEL_SESSION_ACTIVE &&
@@ -6023,6 +6136,23 @@ function renderQuickAddButton(workKey, projectionAttempt) {
     return;
   }
 
+  if (KERNEL_SESSION_ACTIVE && kernelFirstStoryLookupPending) {
+    renderQuickAddFromSnapshot(workKey, anchor, {
+      libraryOverlayCache: {
+        entries: {},
+        workPreferences: {},
+        syncVersion: null,
+      },
+      traceAuthState: {
+        state: "signed_out",
+        reason: "credential_missing",
+        canExecuteAuthenticated: false,
+      },
+      authToken: null,
+    });
+    return;
+  }
+
   if (KERNEL_SESSION_ACTIVE) {
     var attempt = Number.isInteger(projectionAttempt) && projectionAttempt >= 0
       ? projectionAttempt
@@ -6077,6 +6207,7 @@ function initQuickAdd() {
     renderQuickAddButton(workKey);
     return;
   }
+  reserveQuickAddSlot(workKey);
   storyQuickAddUiReady = true;
   queryBackgroundWorkStateForStory(workKey);
   renderQuickAddButton(workKey);
@@ -6088,6 +6219,7 @@ function initQuickAdd() {
       if (
         !changes[OVERLAY_CACHE_KEY] &&
         !changes[WORK_STATE_STORAGE_KEY] &&
+        !changes[ACCOUNT_PROJECTION_REVISION_KEY] &&
         !changes.authToken &&
         !changes.traceAuthState &&
         !changes[TRACE_ACCOUNT_ID_KEY] &&
@@ -6125,8 +6257,13 @@ function initQuickAdd() {
   }
 }
 
-if (!shouldDisableTraceContentScript()) {
+if (!TRACE_ACTIVE_TAB_PROBE_MODE && !shouldDisableTraceContentScript()) {
+  // The content script runs at document_end, so the story header is normally
+  // available before DOMContentLoaded. Reserve the Trace row immediately to
+  // avoid shifting the archive content when storage hydration completes.
   if (document.readyState === "loading") {
+    var initialQuickAddWorkKey = getWorkKeyFromUrl();
+    if (initialQuickAddWorkKey) reserveQuickAddSlot(initialQuickAddWorkKey);
     document.addEventListener("DOMContentLoaded", initQuickAdd);
   } else {
     initQuickAdd();
@@ -6147,6 +6284,6 @@ function announceArchivePageToBackground(handoffId) {
   sendCollectorMessageBestEffort(message);
 }
 
-if (!shouldDisableTraceContentScript()) {
+if (!TRACE_ACTIVE_TAB_PROBE_MODE && !shouldDisableTraceContentScript()) {
   announceArchivePageToBackground();
 }

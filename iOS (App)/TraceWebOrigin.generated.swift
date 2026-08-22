@@ -7,4 +7,10 @@ import Foundation
 enum TraceWebOriginGenerated {
     /// Same origin injected into Shared (Extension)/Resources/background.js for import / sync.
     static let httpsOrigin: String = "https://www.tracefiction.com"
+    /// Same API origin compiled into the extension background worker.
+    static let apiOrigin: String = "https://api.tracefiction.com"
+    /// Advertise the new web onboarding only when this binary contains the earned-permission runtime.
+    static let earnedPermissionOnboardingEnabled: Bool = true
+    /// True only for the exact, reviewable earned-permission TestFlight preview.
+    static let allowReleaseExperimentOrigin: Bool = false
 }

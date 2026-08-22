@@ -41,7 +41,7 @@ Trace may send this data to the Trace API when you import, quick-add, auto-track
 - fandoms/tags and related story metadata
 - chapter and word counts
 - reading-progress metadata
-- reading-status updates you explicitly choose in the Trace overlay, such as Planning, Reading, Paused, Finished, or Dropped
+- reading-status updates you explicitly choose in the Trace overlay: Saved, Reading, Caught up, Paused, Finished, or Dropped
 - finish/caught-up decisions you explicitly choose at the end of a supported story, including whether you identify the work as complete, ongoing, on hiatus, or abandoned
 - last-posted-chapter finish-qualification signals for stories already in your Trace library, so Trace can recover or improve work-status metadata
 - hidden-work browsing preferences you explicitly choose in the Trace overlay, keyed by the supported AO3/FFN work id
@@ -58,6 +58,18 @@ channel to the Trace web app. Trace sends those values with a privacy-safe
 authenticated onboarding diagnostic so release-specific setup failures can be
 distinguished without collecting story URLs, archive browsing history, or
 account email.
+
+The iOS earned-permission build asks for Website Access before any first-story
+write. If access was missed in Settings, an explicit Safari toolbar tap lets the
+popup identify the current supported story, request exactly five optional
+AO3/FanFiction.net origin patterns, register the production scripts, and reload
+the story. The normal content-script handoff then supplies the fresh run and
+server-confirmed save. Denial or partial coverage saves nothing; there is no
+toolbar-only completion mode. Its diagnostic funnel stays in extension-local
+storage and contains only bounded event names and timestamps; it is not network
+telemetry and contains no URLs, story or account identity, page content, or
+browsing history. See
+[`docs/ios-earned-permission-onboarding.md`](docs/ios-earned-permission-onboarding.md).
 
 The metadata-improvement preference is separate from automatic progress tracking and can be turned off in the extension popup.
 Hidden-work preferences affect Trace browsing overlays only; they are separate from reading status and do not hide or change the source site itself.
@@ -144,10 +156,11 @@ Kernel builds bundle `src/extension-runtime/index.mts` and its core/runtime
 dependency graph; the generated header records the configured API and web
 origins for release auditing. Only `build:legacy:release` generates that file
 from `src/background.js` by literal substitution. Safari requires the selected
-release artifact to be checked in. `Shared (Extension)/Resources/popup-config.js`
-and `iOS (App)/TraceWebOrigin.generated.swift` are committed for the same reason
-— popup navigation and the iOS DEBUG `WKWebView` shell need compiled constants,
-and all generated artifacts use the same `.env` values.
+release artifact to be checked in. `Shared (Extension)/Resources/popup-config.js`,
+`Shared (Extension)/Resources/content-config.js`, and
+`iOS (App)/TraceWebOrigin.generated.swift` are committed for the same reason —
+popup navigation, page-script configuration, and the iOS DEBUG `WKWebView` shell
+need compiled constants, and all generated artifacts use the same `.env` values.
 
 ## Build And Test
 
@@ -181,6 +194,10 @@ npm run build
 The default development build uses the kernel session owner. The explicit
 `build:legacy` command exists only for bounded rollback diagnostics; do not use
 it for normal development or installed-extension QA.
+
+The developer-only iOS active-tab first-value experiment is documented in
+[`docs/ios-active-tab-first-value-probe.md`](docs/ios-active-tab-first-value-probe.md).
+It declares no website origins and is not part of normal builds.
 
 For a release-style build, use HTTPS Trace origins:
 

@@ -1451,9 +1451,11 @@ function createStoryAutoTrackPendingHarness(options = {}) {
     : null;
   let autoTrackCallback;
   let connectAndSaveCallback;
+  let pendingFirstStoryCallback;
   let deferredAutoTrackPreferenceRead;
   let deferredWorkStateRead;
   let runtimeMessageListener = null;
+  const storageChangeListeners = [];
   const chrome = {
     runtime: {
       onMessage: {
@@ -1475,9 +1477,13 @@ function createStoryAutoTrackPendingHarness(options = {}) {
         }
         if (msg.type === "TRACE_ACCOUNT_PROJECTION_GET") {
           if (typeof cb === "function") {
+            const configuredResponse =
+              typeof options.projectionResponse === "function"
+                ? options.projectionResponse(msg)
+                : options.projectionResponse;
             cb((projectionResponses && projectionResponses.length > 0
               ? projectionResponses.shift()
-              : options.projectionResponse) || {
+              : configuredResponse) || {
               ok: true,
               snapshot: {
                 state: "connected",
@@ -1506,6 +1512,10 @@ function createStoryAutoTrackPendingHarness(options = {}) {
         }
         if (msg.type === "TRACE_IOS_PENDING_FIRST_STORY_GET") {
           const response = options.pendingFirstStoryResponse || { ok: true, url: "" };
+          if (options.holdPendingFirstStoryRead) {
+            pendingFirstStoryCallback = cb;
+            return;
+          }
           if (typeof cb === "function") {
             cb(response);
             return;
@@ -1577,7 +1587,11 @@ function createStoryAutoTrackPendingHarness(options = {}) {
           if (typeof cb === "function") cb();
         },
       },
-      onChanged: { addListener() {} },
+      onChanged: {
+        addListener(fn) {
+          storageChangeListeners.push(fn);
+        },
+      },
     },
   };
 
@@ -1589,15 +1603,23 @@ function createStoryAutoTrackPendingHarness(options = {}) {
   }
   dom.window.TRACE_SESSION_MODE = options.sessionMode || "legacy";
   dom.window.eval(collectorSrc);
-  dom.window.document.dispatchEvent(
-    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
-  );
+  if (!options.skipDomContentLoaded) {
+    dom.window.document.dispatchEvent(
+      new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+    );
+  }
 
   return {
     dom,
     sent,
     scrolledTargets,
     store,
+    dispatchStorageChange(key, value) {
+      const oldValue = store[key];
+      store[key] = value;
+      const changes = { [key]: { oldValue, newValue: value } };
+      storageChangeListeners.forEach((listener) => listener(changes, "local"));
+    },
     autoTrackCallback(response) {
       autoTrackCallback(response);
     },
@@ -1616,6 +1638,12 @@ function createStoryAutoTrackPendingHarness(options = {}) {
     resolveConnectAndSave(response) {
       connectAndSaveCallback(response);
     },
+    resolvePendingFirstStory(response) {
+      assert.equal(typeof pendingFirstStoryCallback, "function");
+      const resolve = pendingFirstStoryCallback;
+      pendingFirstStoryCallback = null;
+      resolve(response || options.pendingFirstStoryResponse || { ok: true, url: "" });
+    },
     sendRuntimeMessage(message) {
       return new Promise((resolve) => {
         assert.equal(typeof runtimeMessageListener, "function");
@@ -1627,6 +1655,19 @@ function createStoryAutoTrackPendingHarness(options = {}) {
     },
   };
 }
+
+test("story page reserves the Trace slot before DOMContentLoaded", () => {
+  const { dom } = createStoryAutoTrackPendingHarness({
+    holdAutoTrack: true,
+    skipDomContentLoaded: true,
+  });
+
+  const wrap = dom.window.document.querySelector("[data-trace-quick-add-wrap]");
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(wrap, "expected Trace story slot before DOMContentLoaded");
+  assert.ok(handle, "expected Trace story handle before DOMContentLoaded");
+  assert.match(wrap.getAttribute("style") || "", /min-height:\s*26px/i);
+});
 
 test("story page unknown work shows pending while auto-track is in flight and ignores manual add", () => {
   const { dom, sent } = createStoryAutoTrackPendingHarness({
@@ -1648,7 +1689,7 @@ test("story page unknown work shows pending while auto-track is in flight and ig
   );
 });
 
-test("story page auto-track pending overrides stale saved cache", () => {
+test("story page keeps a confirmed cached saved state while auto-track reconciles", () => {
   const { dom } = createStoryAutoTrackPendingHarness({
     holdAutoTrack: true,
     store: {
@@ -1669,8 +1710,9 @@ test("story page auto-track pending overrides stale saved cache", () => {
 
   const handle = dom.window.document.querySelector("[data-trace-story-handle]");
   assert.ok(handle, "expected Trace story handle");
-  assert.equal(handle.disabled, true);
-  assert.match(handle.textContent || "", /Adding\.\.\./);
+  assert.equal(handle.disabled, false);
+  assert.match(handle.textContent || "", /Saved/i);
+  assert.doesNotMatch(handle.textContent || "", /Adding\.\.\./);
 });
 
 test("story page confirmed overlay entry clears an older auto-track pending handle", () => {
@@ -2133,6 +2175,69 @@ test("kernel pending first story automatically sends one bounded command and foc
   );
 });
 
+test("kernel story control never offers Add before the onboarding handoff lookup settles", async () => {
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    holdPendingFirstStoryRead: true,
+    holdConnectAndSave: true,
+    store: { prefAutoTrackEnabled: false },
+  });
+
+  const handle = h.dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle);
+  assert.equal(handle.disabled, true);
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "checking");
+  assert.match(handle.textContent || "", /Checking/i);
+  assert.doesNotMatch(handle.textContent || "", /Add to Trace/i);
+
+  h.resolvePendingFirstStory({
+    ok: true,
+    mode: "story",
+    hostKind: "ffn",
+    handoffId: "handoff_kernel_no_false_add",
+    url: "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.match(handle.textContent || "", /Connecting/i);
+  assert.doesNotMatch(handle.textContent || "", /Add to Trace/i);
+
+  const entryId = "00000000-0000-4000-8000-000000000124";
+  h.resolveConnectAndSave({
+    ok: true,
+    snapshot: {
+      state: "connected",
+      reason: "none",
+      canExecuteAuthenticated: true,
+    },
+    entryId,
+    command: {
+      kind: "confirmed",
+      intent: "ensure_saved",
+      confirmation: {
+        workKey: "ffn:7038840",
+        entryId,
+        entry: {
+          status: "PLANNING",
+          readerStatus: "PLANNING",
+          canonicalReaderStatus: "SAVED",
+          entryId,
+        },
+        syncVersion: "2026-08-22T07:30:00.000Z",
+      },
+      source: "mutation",
+      projection: "published",
+      receipt: "published",
+      handoff: "cleared",
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(handle.disabled, false);
+  assert.match(handle.textContent || "", /Saved/i);
+  assert.doesNotMatch(handle.textContent || "", /Add to Trace/i);
+});
+
 test("kernel pending first-story automatic failure stays bounded and offers an explicit retry", async () => {
   const h = createStoryAutoTrackPendingHarness({
     sessionMode: "kernel",
@@ -2248,6 +2353,59 @@ test("kernel story projection renders known state with migrated mutation control
   assert.ok(sheet.querySelector("[data-trace-rating-control]"));
   assert.equal(sheet.querySelector("[data-trace-catchup-action]"), null);
   assert.ok(sheet.querySelector("[data-trace-hidden-action]"));
+});
+
+test("kernel story page re-queries its private projection after a confirmed-save revision", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000123";
+  let confirmed = false;
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    pendingFirstStoryResponse: { ok: true, url: "" },
+    projectionResponse() {
+      return {
+        ok: true,
+        snapshot: {
+          state: "connected",
+          reason: "none",
+          canExecuteAuthenticated: true,
+        },
+        projection: {
+          entries: confirmed
+            ? {
+                "ffn:7038840": {
+                  status: "PLANNING",
+                  readerStatus: "PLANNING",
+                  canonicalReaderStatus: "SAVED",
+                  entryId,
+                },
+              }
+            : {},
+          workPreferences: {},
+          syncVersion: confirmed ? "2026-08-22T08:30:00.000Z" : null,
+        },
+      };
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  const handle = h.dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle);
+  assert.match(handle.textContent || "", /Add to Trace/i);
+
+  const projectionsBeforeRevision = h.sent.filter(
+    (message) => message.type === "TRACE_ACCOUNT_PROJECTION_GET",
+  ).length;
+  confirmed = true;
+  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.ok(
+    h.sent.filter((message) => message.type === "TRACE_ACCOUNT_PROJECTION_GET").length >
+      projectionsBeforeRevision,
+  );
+  assert.match(handle.textContent || "", /Saved/i);
+  assert.doesNotMatch(handle.textContent || "", /Add to Trace/i);
 });
 
 test("kernel story projection retries a transient cold-worker read without retrying mutations", async () => {
@@ -5883,3 +6041,102 @@ test("collect() routes FFN story URL to single item", () => {
   assert.equal(res.items[0].t, "A Chance Encounter");
   assert.ok(res.items[0].chars && res.items[0].chars.length >= 1);
 });
+
+function createActiveTabProbeCollectorHarness(fixture, url, response) {
+  const dom = domFromFixture(fixture, url);
+  const sent = [];
+  let listener = null;
+  dom.window.TRACE_IOS_ACTIVE_TAB_PROBE = true;
+  dom.window.TRACE_SESSION_MODE = "kernel";
+  installCollectorChrome(dom, {
+    runtime: {
+      lastError: null,
+      onMessage: {
+        addListener(fn) {
+          listener = fn;
+        },
+      },
+      sendMessage(message, callback) {
+        sent.push(message);
+        callback?.(response);
+      },
+    },
+    storage: {
+      local: {
+        get(_keys, callback) {
+          callback?.({});
+        },
+        set(_values, callback) {
+          callback?.();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  });
+  const collectorSource = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  dom.window.eval(collectorSource);
+  assert.equal(typeof listener, "function");
+  return { dom, sent, listener };
+}
+
+for (const fixture of [
+  {
+    name: "AO3",
+    file: "ao3_story.html",
+    url: "https://archiveofourown.org/works/28534965/chapters/69925506",
+    site: "ao3",
+    workKey: "ao3:28534965",
+  },
+  {
+    name: "FFN",
+    file: "ffn_story.html",
+    url: "https://www.fanfiction.net/s/7038840/1/A-Chance-Encounter",
+    site: "ffn",
+    workKey: "ffn:7038840",
+  },
+]) {
+  test(`active-tab probe saves one ${fixture.name} story without ambient behavior`, async () => {
+    const h = createActiveTabProbeCollectorHarness(fixture.file, fixture.url, {
+      ok: true,
+      command: { kind: "confirmed" },
+    });
+    const ping = await new Promise((resolve) => {
+      const keepAlive = h.listener(
+        { type: "TRACE_ACTIVE_TAB_PROBE_PING" },
+        {},
+        resolve,
+      );
+      assert.equal(keepAlive, false);
+    });
+    assert.deepEqual(plainJson(ping), { ok: true, probe: true });
+
+    const saved = await new Promise((resolve) => {
+      const keepAlive = h.listener(
+        { type: "TRACE_ACTIVE_TAB_PROBE_SAVE" },
+        {},
+        resolve,
+      );
+      assert.equal(keepAlive, true);
+    });
+    assert.deepEqual(plainJson(saved), {
+      ok: true,
+      state: "saved",
+      site: fixture.site,
+      serverConfirmed: true,
+    });
+    assert.equal(h.sent.length, 1);
+    assert.equal(h.sent[0].type, "TRACE_CONNECT_AND_SAVE");
+    assert.equal(h.sent[0].workKey, fixture.workKey);
+    assert.equal(h.sent[0].payload.item.ctx, "story");
+    assert.equal(
+      h.sent.some((message) =>
+        ["TRACE_ARCHIVE_SEEN", "TRACE_AUTO_TRACK", "TRACE_METADATA_BROADCAST"].includes(message.type),
+      ),
+      false,
+    );
+    assert.equal(h.dom.window.document.querySelector("[data-trace-quick-add]"), null);
+  });
+}

@@ -12,15 +12,24 @@ import { build as esbuild } from "esbuild";
 import {
   AO3_HOST_MATCHES,
   FFN_HOST_MATCHES,
+  MINIMIZED_SITE_HOST_MATCHES,
   SITE_HOST_MATCHES,
   configuredOriginPermissions,
 } from "./build-origin-permissions.mjs";
+import {
+  IOS_PRODUCTION_EXTENSION_BUNDLE_IDENTIFIER,
+} from "./ios-bundle-identifiers.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
 const RES = path.join(ROOT, "Shared (Extension)", "Resources");
 const SRC_BG = path.join(ROOT, "src", "background.js");
 const XCODE_PROJECT = path.join(ROOT, "Trace.xcodeproj", "project.pbxproj");
+const IOS_APP_CONTROLLER = path.join(
+  ROOT,
+  "iOS (App)",
+  "TraceWebViewController.swift",
+);
 
 function loadEnvFile(p) {
   const out = {};
@@ -80,6 +89,26 @@ const env =
     ? { ...fileEnv, ...process.env }
     : { ...process.env, ...fileEnv };
 const IS_RELEASE = BUILD_MODE === "release";
+const IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE = /^(?:1|true)$/i.test(
+  String(env.TRACE_IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE ?? ""),
+);
+const IOS_EARNED_PERMISSION_ONBOARDING = /^(?:1|true)$/i.test(
+  String(env.TRACE_IOS_EARNED_PERMISSION_ONBOARDING ?? ""),
+);
+const IOS_EARNED_PERMISSION_PREVIEW_RELEASE = /^(?:1|true)$/i.test(
+  String(env.TRACE_IOS_EARNED_PERMISSION_PREVIEW_RELEASE ?? ""),
+);
+const IOS_ACTIVE_TAB_PROBE = IOS_EARNED_PERMISSION_ONBOARDING || IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE || /^(?:1|true)$/i.test(
+  String(env.TRACE_IOS_ACTIVE_TAB_PROBE ?? ""),
+);
+if (
+  IOS_EARNED_PERMISSION_PREVIEW_RELEASE &&
+  (!IOS_EARNED_PERMISSION_ONBOARDING || !IS_RELEASE)
+) {
+  throw new Error(
+    "TRACE_IOS_EARNED_PERMISSION_PREVIEW_RELEASE requires the release-mode earned-permission build.",
+  );
+}
 const requestedSessionMode = process.env.TRACE_SESSION_MODE ?? fileEnv.TRACE_SESSION_MODE ?? "legacy";
 if (!["legacy", "kernel", "disabled"].includes(requestedSessionMode)) {
   throw new Error(
@@ -88,6 +117,9 @@ if (!["legacy", "kernel", "disabled"].includes(requestedSessionMode)) {
 }
 const SESSION_MODE = requestedSessionMode;
 const HAS_SESSION_RUNTIME = SESSION_MODE !== "legacy";
+if (IOS_ACTIVE_TAB_PROBE && SESSION_MODE !== "kernel") {
+  throw new Error("TRACE_IOS_ACTIVE_TAB_PROBE requires TRACE_SESSION_MODE=kernel.");
+}
 const AO3_AUTH_EXCLUDE_MATCHES = [
   "https://archiveofourown.org/users/login*",
   "https://*.archiveofourown.org/users/login*",
@@ -143,9 +175,21 @@ const SITE_AUTH_EXCLUDE_MATCHES = [
 ];
 const RELEASE_TRACE_API_BASE = "https://api.tracefiction.com";
 const RELEASE_TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
+const EARNED_PERMISSION_DEV_API_BASE =
+  "https://ff-app-development.up.railway.app";
+const EARNED_PERMISSION_DEV_WEB_ORIGIN =
+  "https://trace-git-dev-zacs-projects-378417c9.vercel.app";
 const FIREFOX_RELEASE_EXTENSION_ID = "trace@tracefiction.com";
 const FIREFOX_DEV_EXTENSION_ID = "trace-dev@tracefiction.com";
 const SAFARI_ONLY_PERMISSIONS = ["nativeMessaging"];
+const NORMAL_SAFARI_PERMISSIONS = ["alarms", "tabs", "storage", ...SAFARI_ONLY_PERMISSIONS];
+const IOS_ACTIVE_TAB_PROBE_PERMISSIONS = [
+  "alarms",
+  "storage",
+  ...SAFARI_ONLY_PERMISSIONS,
+  "activeTab",
+  "scripting",
+];
 
 function isLocalLike(value) {
   return /localhost|127\.0\.0\.1/i.test(value);
@@ -163,6 +207,35 @@ function assertReleaseUrl(name, value, expected) {
   }
   if (value !== expected) {
     throw new Error(`${name} must be ${expected} for store/App Store release builds. Received: ${value}`);
+  }
+}
+
+function assertProductionIosReleaseIdentity() {
+  const project = fs.readFileSync(XCODE_PROJECT, "utf8");
+  const controller = fs.readFileSync(IOS_APP_CONTROLLER, "utf8");
+  const escapedIdentifier = IOS_PRODUCTION_EXTENSION_BUNDLE_IDENTIFIER.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    "\\$&",
+  );
+  const projectMatches = project.match(
+    new RegExp(
+      `PRODUCT_BUNDLE_IDENTIFIER = ${escapedIdentifier};`,
+      "g",
+    ),
+  );
+  if (projectMatches?.length !== 2) {
+    throw new Error(
+      `Production iOS release requires ${IOS_PRODUCTION_EXTENSION_BUNDLE_IDENTIFIER} in both Safari extension build configurations.`,
+    );
+  }
+  if (
+    !controller.includes(
+      `safariExtensionBundleIdentifier = "${IOS_PRODUCTION_EXTENSION_BUNDLE_IDENTIFIER}"`,
+    )
+  ) {
+    throw new Error(
+      `Production iOS release requires the native Settings bridge to use ${IOS_PRODUCTION_EXTENSION_BUNDLE_IDENTIFIER}.`,
+    );
   }
 }
 
@@ -233,9 +306,77 @@ const TRACE_WEB_ORIGIN = (
   env.TRACE_WEB_ORIGIN ?? "http://localhost:5173"
 ).replace(/\/$/, "");
 
+const savedFiltersScript = "ao3-saved-filters.js";
+const finishQualifyScript = "trace-finish-qualify.js";
+// Keep the optional-permission runtime and the generated Safari manifest on
+// one canonical content-script declaration. The background worker receives
+// this same configuration at build time so a grant made in Safari Settings
+// can register the scripts without requiring the popup to open first.
+const archiveContentScript = {
+  matches: SITE_HOST_MATCHES,
+  js: [
+    "content-config.js",
+    finishQualifyScript,
+    "collector.js",
+    "library-overlay-keys.js",
+    "library-overlay.js",
+  ],
+  run_at: "document_end",
+  exclude_matches: SITE_AUTH_EXCLUDE_MATCHES,
+};
+const savedFiltersContentScript = {
+  matches: AO3_HOST_MATCHES,
+  js: [savedFiltersScript],
+  run_at: "document_end",
+  exclude_matches: AO3_AUTH_EXCLUDE_MATCHES,
+};
+const earnedPermissionRegistrations = [
+  {
+    id: "trace-archive-automation-v1",
+    matches: MINIMIZED_SITE_HOST_MATCHES,
+    js: archiveContentScript.js,
+    runAt: "document_end",
+    persistAcrossSessions: true,
+    excludeMatches: SITE_AUTH_EXCLUDE_MATCHES,
+  },
+  {
+    id: "trace-ao3-saved-filters-v1",
+    matches: MINIMIZED_SITE_HOST_MATCHES.filter((match) =>
+      match.includes("archiveofourown") || match.includes("transformativeworks"),
+    ),
+    js: savedFiltersContentScript.js,
+    runAt: "document_end",
+    persistAcrossSessions: true,
+    excludeMatches: AO3_AUTH_EXCLUDE_MATCHES,
+  },
+];
+const earnedPermissionRuntimeConfig = {
+  version: 3,
+  origins: MINIMIZED_SITE_HOST_MATCHES,
+  registrations: earnedPermissionRegistrations,
+};
+
 if (IS_RELEASE) {
-  assertReleaseUrl("TRACE_API_BASE", TRACE_API_BASE, RELEASE_TRACE_API_BASE);
-  assertReleaseUrl("TRACE_WEB_ORIGIN", TRACE_WEB_ORIGIN, RELEASE_TRACE_WEB_ORIGIN);
+  assertReleaseUrl(
+    "TRACE_API_BASE",
+    TRACE_API_BASE,
+    IOS_EARNED_PERMISSION_PREVIEW_RELEASE
+      ? EARNED_PERMISSION_DEV_API_BASE
+      : RELEASE_TRACE_API_BASE,
+  );
+  assertReleaseUrl(
+    "TRACE_WEB_ORIGIN",
+    TRACE_WEB_ORIGIN,
+    IOS_EARNED_PERMISSION_PREVIEW_RELEASE
+      ? EARNED_PERMISSION_DEV_WEB_ORIGIN
+      : RELEASE_TRACE_WEB_ORIGIN,
+  );
+  if (
+    IOS_EARNED_PERMISSION_ONBOARDING &&
+    !IOS_EARNED_PERMISSION_PREVIEW_RELEASE
+  ) {
+    assertProductionIosReleaseIdentity();
+  }
 } else if (isLocalLike(TRACE_API_BASE) || isLocalLike(TRACE_WEB_ORIGIN)) {
   console.warn(
     "[Trace build] Using local development origins. Use TRACE_BUILD_MODE=release for store/App Store artifacts.",
@@ -263,6 +404,11 @@ if (HAS_SESSION_RUNTIME) {
       __TRACE_SESSION_MODE__: JSON.stringify(SESSION_MODE),
       __TRACE_API_BASE__: JSON.stringify(TRACE_API_BASE),
       __TRACE_WEB_ORIGIN__: JSON.stringify(TRACE_WEB_ORIGIN),
+      __TRACE_IOS_EARNED_PERMISSION_CONFIG__: JSON.stringify(
+        IOS_EARNED_PERMISSION_ONBOARDING
+          ? earnedPermissionRuntimeConfig
+          : null,
+      ),
     },
     logLevel: "silent",
   });
@@ -274,9 +420,7 @@ syncXcodeMarketingVersion(version);
 
 const outBg = path.join(RES, "background.js");
 const popupConfigPath = path.join(RES, "popup-config.js");
-const popupConfig = `// Generated by npm run build (scripts/build.mjs). Do not edit by hand.
-globalThis.TRACE_EXTENSION_WEB_ORIGIN = ${JSON.stringify(TRACE_WEB_ORIGIN)};
-${HAS_SESSION_RUNTIME ? `globalThis.TRACE_SESSION_MODE = ${JSON.stringify(SESSION_MODE)};\n` : ""}`;
+const contentConfigPath = path.join(RES, "content-config.js");
 // Remove resources emitted by the proof-only multi-file packaging seam. The
 // production owner is one classic background entry so Safari, Chrome, and
 // Firefox execute the same ordered artifact.
@@ -296,16 +440,13 @@ const TRACE_WEB_ORIGIN = ${JSON.stringify(TRACE_WEB_ORIGIN)};
   fs.writeFileSync(outBg, bg, "utf8");
 }
 console.log("Wrote", outBg);
-fs.writeFileSync(popupConfigPath, popupConfig, "utf8");
-console.log("Wrote", popupConfigPath);
 
 const manifestPath = path.join(RES, "manifest.json");
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 manifest.version = version;
-manifest.permissions = unique([
-  ...(manifest.permissions || []),
-  ...SAFARI_ONLY_PERMISSIONS,
-]);
+manifest.permissions = IOS_ACTIVE_TAB_PROBE
+  ? [...IOS_ACTIVE_TAB_PROBE_PERMISSIONS]
+  : [...NORMAL_SAFARI_PERMISSIONS];
 
 const {
   safariHostPermissions,
@@ -316,45 +457,55 @@ const {
   traceWebOrigin: TRACE_WEB_ORIGIN,
 });
 
-manifest.host_permissions = safariHostPermissions;
-const savedFiltersScript = "ao3-saved-filters.js";
-const finishQualifyScript = "trace-finish-qualify.js";
-// This is the canonical content-script declaration. Do not derive it from the
-// previously generated manifest: a disabled build intentionally writes an
-// empty list, and every later build must remain order-independent.
-const contentScripts = [
-  {
-    matches: SITE_HOST_MATCHES,
-    js: [
-      "popup-config.js",
-      finishQualifyScript,
-      "collector.js",
-      "library-overlay-keys.js",
-      "library-overlay.js",
-    ],
-    run_at: "document_end",
-    exclude_matches: SITE_AUTH_EXCLUDE_MATCHES,
-  },
-  {
-    matches: unique(syncMatches),
-    js: ["popup-config.js", "sync.js"],
-    run_at: "document_idle",
-  },
+manifest.host_permissions = IOS_ACTIVE_TAB_PROBE ? [] : safariHostPermissions;
+if (IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE || IOS_EARNED_PERMISSION_ONBOARDING) {
+  manifest.optional_host_permissions = [...MINIMIZED_SITE_HOST_MATCHES];
+} else {
+  delete manifest.optional_host_permissions;
+}
+const traceContentScript = {
+  matches: unique(syncMatches),
+  js: ["content-config.js", "sync.js"],
+  run_at: "document_idle",
+};
+const normalContentScripts = [
+  archiveContentScript,
+  traceContentScript,
+  savedFiltersContentScript,
 ];
+const popupConfig = `// Generated by npm run build (scripts/build.mjs). Do not edit by hand.
+globalThis.TRACE_EXTENSION_WEB_ORIGIN = ${JSON.stringify(TRACE_WEB_ORIGIN)};
+${HAS_SESSION_RUNTIME ? `globalThis.TRACE_SESSION_MODE = ${JSON.stringify(SESSION_MODE)};\n` : ""}${IOS_ACTIVE_TAB_PROBE ? "globalThis.TRACE_IOS_ACTIVE_TAB_PROBE = true;\n" : ""}${IOS_EARNED_PERMISSION_ONBOARDING ? `globalThis.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = ${JSON.stringify({
+  ...earnedPermissionRuntimeConfig,
+})};\n` : ""}`;
+const contentConfig = `// Generated by npm run build (scripts/build.mjs). Do not edit by hand.
+globalThis.TRACE_EXTENSION_WEB_ORIGIN = ${JSON.stringify(TRACE_WEB_ORIGIN)};
+${HAS_SESSION_RUNTIME ? `globalThis.TRACE_SESSION_MODE = ${JSON.stringify(SESSION_MODE)};\n` : ""}`;
+fs.writeFileSync(popupConfigPath, popupConfig, "utf8");
+console.log("Wrote", popupConfigPath);
+fs.writeFileSync(contentConfigPath, contentConfig, "utf8");
+console.log("Wrote", contentConfigPath);
 
-manifest.content_scripts = SESSION_MODE === "disabled"
+manifest.content_scripts = SESSION_MODE === "disabled" || IOS_ACTIVE_TAB_PROBE
   ? []
-  : [...contentScripts, {
-      matches: AO3_HOST_MATCHES,
-      js: [savedFiltersScript],
-      run_at: "document_end",
-      exclude_matches: AO3_AUTH_EXCLUDE_MATCHES,
-    }];
+  : normalContentScripts;
 
 fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
 console.log("Set manifest version to", version);
 
-const packagedManifest = browserStoreManifest(manifest, browserHostPermissions);
+const packagedSourceManifest = IOS_ACTIVE_TAB_PROBE
+  ? {
+      ...manifest,
+      permissions: [...NORMAL_SAFARI_PERMISSIONS],
+      host_permissions: safariHostPermissions,
+      content_scripts: normalContentScripts,
+    }
+  : manifest;
+delete packagedSourceManifest.optional_host_permissions;
+const packagedManifest = browserStoreManifest(
+  packagedSourceManifest,
+  browserHostPermissions,
+);
 
 const skipResources = (full, name) =>
   name === ".DS_Store" || full.endsWith("manifest.json");
@@ -363,6 +514,13 @@ const skipResources = (full, name) =>
 const distChrome = path.join(ROOT, "dist", "chrome");
 rmrf(distChrome);
 copyDirFiltered(RES, distChrome, { skip: (sp, name) => skipResources(sp, name) });
+if (IOS_ACTIVE_TAB_PROBE) {
+  fs.writeFileSync(
+    path.join(distChrome, "popup-config.js"),
+    contentConfig,
+    "utf8",
+  );
+}
 fs.writeFileSync(
   path.join(distChrome, "manifest.json"),
   JSON.stringify(packagedManifest, null, 2) + "\n",
@@ -372,6 +530,13 @@ fs.writeFileSync(
 const distFf = path.join(ROOT, "dist", "firefox");
 rmrf(distFf);
 copyDirFiltered(RES, distFf, { skip: (sp, name) => skipResources(sp, name) });
+if (IOS_ACTIVE_TAB_PROBE) {
+  fs.writeFileSync(
+    path.join(distFf, "popup-config.js"),
+    contentConfig,
+    "utf8",
+  );
+}
 // Firefox MV3 uses `background.scripts` (not extension service workers). Omit
 // `service_worker` in dist/firefox so addons-linter does not warn it is ignored.
 const sw = manifest.background?.service_worker;
@@ -421,6 +586,12 @@ import Foundation
 enum TraceWebOriginGenerated {
     /// Same origin injected into Shared (Extension)/Resources/background.js for import / sync.
     static let httpsOrigin: String = ${swiftLiteral}
+    /// Same API origin compiled into the extension background worker.
+    static let apiOrigin: String = ${JSON.stringify(TRACE_API_BASE)}
+    /// Advertise the new web onboarding only when this binary contains the earned-permission runtime.
+    static let earnedPermissionOnboardingEnabled: Bool = ${IOS_EARNED_PERMISSION_ONBOARDING ? "true" : "false"}
+    /// True only for the exact, reviewable earned-permission TestFlight preview.
+    static let allowReleaseExperimentOrigin: Bool = ${IOS_EARNED_PERMISSION_PREVIEW_RELEASE ? "true" : "false"}
 }
 `;
 fs.writeFileSync(iosGenerated, iosSwift, "utf8");
@@ -428,6 +599,19 @@ console.log("Wrote", iosGenerated);
 
 console.log("Build mode=" + BUILD_MODE);
 console.log("TRACE_SESSION_MODE=" + SESSION_MODE);
+console.log("TRACE_IOS_ACTIVE_TAB_PROBE=" + IOS_ACTIVE_TAB_PROBE);
+console.log(
+  "TRACE_IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE=" +
+    IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE,
+);
+console.log(
+  "TRACE_IOS_EARNED_PERMISSION_ONBOARDING=" +
+    IOS_EARNED_PERMISSION_ONBOARDING,
+);
+console.log(
+  "TRACE_IOS_EARNED_PERMISSION_PREVIEW_RELEASE=" +
+    IOS_EARNED_PERMISSION_PREVIEW_RELEASE,
+);
 console.log("Built dist/chrome and dist/firefox");
 console.log("TRACE_API_BASE=" + TRACE_API_BASE);
 console.log("TRACE_WEB_ORIGIN=" + TRACE_WEB_ORIGIN);

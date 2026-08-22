@@ -5,6 +5,11 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import vm from "node:vm";
 
+import {
+  MINIMIZED_SITE_HOST_MATCHES,
+  SITE_HOST_MATCHES,
+} from "../../scripts/build-origin-permissions.mjs";
+
 const ROOT = process.cwd();
 const RESOURCES = path.join(ROOT, "Shared (Extension)", "Resources");
 const RELEASE_ENV = {
@@ -32,25 +37,29 @@ function hasSavedFilterScript(value) {
 
 function assertCollectorModeConfig(root, expectedMode) {
   const value = manifest(root);
-  const config = fs.readFileSync(path.join(root, "popup-config.js"), "utf8");
+  const popupConfig = fs.readFileSync(path.join(root, "popup-config.js"), "utf8");
+  const contentConfig = fs.readFileSync(path.join(root, "content-config.js"), "utf8");
   if (expectedMode === "disabled") {
     assert.deepEqual(
       value.content_scripts,
       [],
       "disabled packages must not inject extension code into archive or Trace pages",
     );
-    assert.match(config, /TRACE_SESSION_MODE = "disabled"/);
+    assert.match(popupConfig, /TRACE_SESSION_MODE = "disabled"/);
+    assert.match(contentConfig, /TRACE_SESSION_MODE = "disabled"/);
     return;
   }
   const collectorEntries = value.content_scripts.filter((entry) => entry.js?.includes("collector.js"));
   assert.ok(collectorEntries.length > 0, "expected an archive collector content-script entry");
   for (const entry of collectorEntries) {
-    assert.ok(entry.js.indexOf("popup-config.js") < entry.js.indexOf("collector.js"));
+    assert.ok(entry.js.indexOf("content-config.js") < entry.js.indexOf("collector.js"));
   }
+  assert.doesNotMatch(contentConfig, /TRACE_IOS_ACTIVE_TAB_PROBE/);
+  assert.doesNotMatch(contentConfig, /TRACE_IOS_EARNED_PERMISSION_ONBOARDING/);
   if (expectedMode === "legacy") {
-    assert.doesNotMatch(config, /TRACE_SESSION_MODE/);
+    assert.doesNotMatch(contentConfig, /TRACE_SESSION_MODE/);
   } else {
-    assert.match(config, new RegExp(`TRACE_SESSION_MODE = "${expectedMode}"`));
+    assert.match(contentConfig, new RegExp(`TRACE_SESSION_MODE = "${expectedMode}"`));
   }
 }
 
@@ -200,7 +209,148 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     runBuild("build");
     assertCollectorModeConfig(path.join(ROOT, "dist", "chrome"), "kernel");
     assertCollectorModeConfig(path.join(ROOT, "dist", "firefox"), "kernel");
+
+    runBuild("build:ios-active-tab-probe:release");
+    const safariManifest = manifest(RESOURCES);
+    const safariConfig = fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8");
+    assert.deepEqual(safariManifest.permissions, [
+      "alarms",
+      "storage",
+      "nativeMessaging",
+      "activeTab",
+      "scripting",
+    ]);
+    assert.deepEqual(safariManifest.host_permissions, []);
+    assert.equal(Object.hasOwn(safariManifest, "optional_host_permissions"), false);
+    assert.deepEqual(safariManifest.content_scripts, []);
+    assert.match(safariConfig, /TRACE_IOS_ACTIVE_TAB_PROBE = true/);
+
+    runBuild("build:ios-active-tab-optional-hosts-probe:release");
+    const optionalSafariManifest = manifest(RESOURCES);
+    const optionalSafariConfig = fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8");
+    assert.deepEqual(optionalSafariManifest.permissions, [
+      "alarms",
+      "storage",
+      "nativeMessaging",
+      "activeTab",
+      "scripting",
+    ]);
+    assert.deepEqual(optionalSafariManifest.host_permissions, []);
+    assert.deepEqual(
+      optionalSafariManifest.optional_host_permissions,
+      MINIMIZED_SITE_HOST_MATCHES,
+    );
+    assert.deepEqual(optionalSafariManifest.content_scripts, []);
+    assert.match(optionalSafariConfig, /TRACE_IOS_ACTIVE_TAB_PROBE = true/);
+
+    runBuild("build:ios-earned-permission-onboarding:release");
+    const earnedSafariManifest = manifest(RESOURCES);
+    const earnedSafariConfig = fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8");
+    assert.deepEqual(earnedSafariManifest.permissions, [
+      "alarms",
+      "storage",
+      "nativeMessaging",
+      "activeTab",
+      "scripting",
+    ]);
+    assert.deepEqual(earnedSafariManifest.host_permissions, []);
+    assert.deepEqual(
+      earnedSafariManifest.optional_host_permissions,
+      MINIMIZED_SITE_HOST_MATCHES,
+    );
+    assert.deepEqual(earnedSafariManifest.content_scripts, []);
+    assert.match(earnedSafariConfig, /TRACE_IOS_ACTIVE_TAB_PROBE = true/);
+    assert.match(earnedSafariConfig, /TRACE_IOS_EARNED_PERMISSION_ONBOARDING/);
+    assert.match(earnedSafariConfig, /trace-archive-automation-v1/);
+    assert.match(earnedSafariConfig, /persistAcrossSessions/);
+    const earnedConfigContext = {};
+    vm.runInNewContext(earnedSafariConfig, earnedConfigContext);
+    const earnedOnboarding = earnedConfigContext.TRACE_IOS_EARNED_PERMISSION_ONBOARDING;
+    assert.equal(earnedOnboarding.version, 3);
+    const automationRegistration = earnedOnboarding.registrations.find(
+      (registration) => registration.id === "trace-archive-automation-v1",
+    );
+    assert.deepEqual(Array.from(automationRegistration.js), [
+      "content-config.js",
+      "trace-finish-qualify.js",
+      "collector.js",
+      "library-overlay-keys.js",
+      "library-overlay.js",
+    ]);
+    const earnedContentConfig = fs.readFileSync(
+      path.join(RESOURCES, "content-config.js"),
+      "utf8",
+    );
+    const earnedContentContext = {};
+    vm.runInNewContext(earnedContentConfig, earnedContentContext);
+    assert.equal(earnedContentContext.TRACE_SESSION_MODE, "kernel");
+    assert.equal(earnedContentContext.TRACE_IOS_ACTIVE_TAB_PROBE, undefined);
+    assert.equal(
+      earnedContentContext.TRACE_IOS_EARNED_PERMISSION_ONBOARDING,
+      undefined,
+    );
+    assert.match(
+      fs.readFileSync(
+        path.join(ROOT, "iOS (App)", "TraceWebOrigin.generated.swift"),
+        "utf8",
+      ),
+      /httpsOrigin: String = "https:\/\/www\.tracefiction\.com"[\s\S]*earnedPermissionOnboardingEnabled: Bool = true[\s\S]*allowReleaseExperimentOrigin: Bool = false/,
+    );
+
+    const previewResult = spawnSync(
+      "npm",
+      ["run", "build:ios-earned-permission-onboarding:preview-release"],
+      { cwd: ROOT, env: process.env, encoding: "utf8" },
+    );
+    assert.equal(
+      previewResult.status,
+      0,
+      previewResult.stderr || previewResult.stdout,
+    );
+    const previewOrigin =
+      "https://trace-git-dev-zacs-projects-378417c9.vercel.app";
+    const previewApiOrigin =
+      "https://ff-app-development.up.railway.app";
+    assert.match(
+      fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8"),
+      new RegExp(previewOrigin.replaceAll(".", "\\.")),
+    );
+    assert.match(
+      fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8"),
+      new RegExp(previewApiOrigin.replaceAll(".", "\\.")),
+    );
+    assert.match(
+      fs.readFileSync(
+        path.join(ROOT, "iOS (App)", "TraceWebOrigin.generated.swift"),
+        "utf8",
+      ),
+      /trace-git-dev-zacs-projects-378417c9\.vercel\.app"[\s\S]*ff-app-development\.up\.railway\.app"[\s\S]*earnedPermissionOnboardingEnabled: Bool = true[\s\S]*allowReleaseExperimentOrigin: Bool = true/,
+    );
+
+    for (const packageRoot of [
+      path.join(ROOT, "dist", "chrome"),
+      path.join(ROOT, "dist", "firefox"),
+    ]) {
+      const packaged = manifest(packageRoot);
+      const packagedConfig = fs.readFileSync(path.join(packageRoot, "popup-config.js"), "utf8");
+      assert.equal(Object.hasOwn(packaged, "optional_host_permissions"), false);
+      assert.equal(packaged.permissions.includes("scripting"), false);
+      assert.equal(packaged.permissions.includes("activeTab"), false);
+      assert.ok(packaged.permissions.includes("tabs"));
+      for (const origin of SITE_HOST_MATCHES) {
+        assert.ok(packaged.host_permissions.includes(origin));
+      }
+      assertCollectorModeConfig(packageRoot, "kernel");
+      assert.doesNotMatch(packagedConfig, /TRACE_IOS_ACTIVE_TAB_PROBE/);
+    }
   } finally {
     runBuild("build:release");
+    assert.match(
+      fs.readFileSync(
+        path.join(ROOT, "iOS (App)", "TraceWebOrigin.generated.swift"),
+        "utf8",
+      ),
+      /earnedPermissionOnboardingEnabled: Bool = false[\s\S]*allowReleaseExperimentOrigin: Bool = false/,
+    );
   }
 });
