@@ -2,7 +2,11 @@
 
 This repository is public for transparency. Trace reads fanfiction story metadata so readers can import stories, sync reading progress, and see their Trace library status while browsing. Users should be able to verify the boundary themselves: metadata, reading-status choices, progress, and explicit browsing preferences — not AO3/FanFiction.net logins, cookies, private account pages, or full page HTML.
 
-The code here covers the Trace browser extension plus the iOS/macOS Safari Web Extension wrapper.
+The code here is the canonical source for the Trace extension on Chrome,
+Firefox, iOS Safari, and macOS Safari. The production Apple containing app,
+Xcode project, signing configuration, and native Trace app features live in a
+separate private repository. That app pins an exact commit from this public
+repository rather than carrying a second copy of the extension.
 
 ## What This Repository Helps You Verify
 
@@ -53,11 +57,9 @@ On iOS Safari, the app stores an opaque device credential in the shared
 Keychain after you sign in to Trace in the app. That credential can call only
 Trace extension API routes; the bundled Safari extension does not receive the
 app's Auth0 access token.
-The iOS app shell also exposes its app version, build number, and release
-channel to the Trace web app. Trace sends those values with a privacy-safe
-authenticated onboarding diagnostic so release-specific setup failures can be
-distinguished without collecting story URLs, archive browsing history, or
-account email.
+The private containing app also exposes its app version, build number, and
+release channel to the Trace web app. That app-owned diagnostic does not
+include story URLs, archive browsing history, or account email.
 
 The iOS earned-permission build asks for Website Access before any first-story
 write. If access was missed in Settings, an explicit Safari toolbar tap lets the
@@ -156,11 +158,10 @@ Kernel builds bundle `src/extension-runtime/index.mts` and its core/runtime
 dependency graph; the generated header records the configured API and web
 origins for release auditing. Only `build:legacy:release` generates that file
 from `src/background.js` by literal substitution. Safari requires the selected
-release artifact to be checked in. `Shared (Extension)/Resources/popup-config.js`,
-`Shared (Extension)/Resources/content-config.js`, and
-`iOS (App)/TraceWebOrigin.generated.swift` are committed for the same reason —
-popup navigation, page-script configuration, and the iOS DEBUG `WKWebView` shell
-need compiled constants, and all generated artifacts use the same `.env` values.
+release artifact to be checked in. `Shared (Extension)/Resources/popup-config.js`
+and `Shared (Extension)/Resources/content-config.js` are committed for the same
+reason: Safari consumes those generated extension constants directly. Native
+app configuration is generated and validated in the private Apple client.
 
 ## Build And Test
 
@@ -216,19 +217,18 @@ Chrome / Edge: open `chrome://extensions`, enable Developer Mode, choose `Load u
 
 Firefox: open `about:debugging#/runtime/this-firefox`, choose `Load Temporary Add-on`, and select `dist/firefox/manifest.json`.
 
-Safari: open `Trace.xcodeproj` in Xcode, select your own Apple signing team
-locally, and build the iOS or macOS app target. Use **Debug** with local/dev/
-staging generated origins; use **Release** only with the canonical production
-origins. The iOS Release shell intentionally remains production-bound. The
-public Xcode project intentionally does not include a private Apple development
-team.
+Safari: Apple requires a Safari Web Extension to be embedded in a containing
+app. This repository intentionally does not publish Trace's production Xcode
+app project. The extension sources under `Shared (Extension)/`, plus the iOS
+and macOS extension property lists and entitlements, are consumed at a pinned
+revision by the private Apple client.
 
 ## Repo Layout
 
 - `src/background.js` - source for the extension service worker. The build injects configured Trace origins and writes `Shared (Extension)/Resources/background.js`.
 - `Shared (Extension)/Resources/` - browser extension assets used by Safari and copied into Chromium/Firefox `dist/` builds.
-- `Shared (App)/`, `iOS (App)/`, `macOS (App)/` - minimal Apple app shells that host the Safari Web Extension / Trace web view.
-- `TraceWidget/` - WidgetKit source for the iOS wrapper.
+- `Shared (Extension)/*.swift` - the public Safari native-message handler and credential codec.
+- `iOS (Extension)/` and `macOS (Extension)/` - public Safari extension target metadata consumed by the private containing app.
 - `scripts/` - build and packaging scripts.
 - `test/` - Node test suite for collector, popup, background, sync, and overlay behavior.
 
