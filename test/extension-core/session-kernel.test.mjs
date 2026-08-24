@@ -1091,7 +1091,6 @@ test("core graph is browser-neutral, deterministic, and bundled only into the ke
   const productionRoots = [
     path.join(ROOT, "src"),
     path.join(ROOT, "Shared (Extension)", "Resources"),
-    path.join(ROOT, "iOS (App)"),
   ];
   const runtimeSourceDirectory = path.join(ROOT, "src", "extension-runtime");
   const generatedBackground = path.join(

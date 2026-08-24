@@ -289,14 +289,6 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
       earnedContentContext.TRACE_IOS_EARNED_PERMISSION_ONBOARDING,
       undefined,
     );
-    assert.match(
-      fs.readFileSync(
-        path.join(ROOT, "iOS (App)", "TraceWebOrigin.generated.swift"),
-        "utf8",
-      ),
-      /httpsOrigin: String = "https:\/\/www\.tracefiction\.com"[\s\S]*earnedPermissionOnboardingEnabled: Bool = true[\s\S]*allowReleaseExperimentOrigin: Bool = false/,
-    );
-
     const previewResult = spawnSync(
       "npm",
       ["run", "build:ios-earned-permission-onboarding:preview-release"],
@@ -319,14 +311,6 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
       fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8"),
       new RegExp(previewApiOrigin.replaceAll(".", "\\.")),
     );
-    assert.match(
-      fs.readFileSync(
-        path.join(ROOT, "iOS (App)", "TraceWebOrigin.generated.swift"),
-        "utf8",
-      ),
-      /trace-git-dev-zacs-projects-378417c9\.vercel\.app"[\s\S]*ff-app-development\.up\.railway\.app"[\s\S]*earnedPermissionOnboardingEnabled: Bool = true[\s\S]*allowReleaseExperimentOrigin: Bool = true/,
-    );
-
     for (const packageRoot of [
       path.join(ROOT, "dist", "chrome"),
       path.join(ROOT, "dist", "firefox"),
@@ -345,12 +329,5 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     }
   } finally {
     runBuild("build:release");
-    assert.match(
-      fs.readFileSync(
-        path.join(ROOT, "iOS (App)", "TraceWebOrigin.generated.swift"),
-        "utf8",
-      ),
-      /earnedPermissionOnboardingEnabled: Bool = false[\s\S]*allowReleaseExperimentOrigin: Bool = false/,
-    );
   }
 });

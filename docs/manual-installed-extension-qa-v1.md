@@ -52,46 +52,10 @@ that either `Inspect views service worker` is listed or
 `chrome-extension://<extension-id>/popup.html` opens the Trace popup. Use
 Chrome for Testing or Chromium if a repeatable command-line harness is needed.
 
-Safari:
-
-1. Open `Trace.xcodeproj`.
-2. Select the macOS or iOS app target and a local signing team.
-3. Match the Xcode configuration to the generated origins:
-   - Use **Debug** for local, dev, or staging `TRACE_WEB_ORIGIN` and
-     `TRACE_API_BASE` values.
-   - Use **Release** only with the canonical production origins. The iOS
-     Release shell intentionally hardcodes the production web origin even when
-     extension resources were generated for dev. Pairing a dev extension with
-     a Release app creates incompatible native credentials and is not valid QA.
-4. Build and run the app target.
-5. Enable the Trace extension in Safari Settings -> Extensions. On iOS, use
-   Settings -> Apps -> Safari -> Extensions when available, or Settings ->
-   Safari -> Extensions on older versions. Turn on **Allow Extension**.
-6. On iOS Safari, under **Permissions**, set **Other Websites** to **Allow**
-   (not Ask or Deny), or set every listed AO3/FFN site to Allow individually.
-   The configured Trace web origin is not an iOS credential provider; iOS
-   connection requires app sign-in followed by a scoped app-issued handoff or
-   an explicit extension Connect action.
-7. After code changes, rebuild/rerun the app target, then disable/enable the
-   Safari extension if Safari keeps an old copy.
-8. Reload every AO3/FFN tab under test.
-
-### iOS App Handoff And Receipt
-
-On a clean TestFlight/internal-distribution install, sign in in the Trace app
-and complete both settings above. The app-issued handoff is the explicit
-authorization to connect and save the matching first story; it should complete
-without another click in Safari. Then test all three paths:
-
-1. Paste a direct AO3 or FFN story URL. Pass: the app reports success only
-   after the matching Safari handoff reaches the story and the save confirms.
-2. Use **Open AO3**, choose a story, then return to the app. Pass: the browse
-   handoff stays neutral until a story opens, then saves once, scrolls to and
-   focuses the normal clickable Trace story control, and does not treat AO3
-   home as a successful run.
-3. Change the archive permission to Ask or Deny and retry. Pass: recovery says
-   Trace did not confirm a run, repeats both settings, and offers the aA route;
-   it must not claim a missing heartbeat proves permission was denied.
+Safari builds and native app handoff acceptance are maintained in the private
+Apple client repository. That repository pins this public source revision and
+verifies the embedded extension resources byte-for-byte. This public checklist
+remains the source of truth for browser-extension behavior and privacy checks.
 
 ### Page Refresh
 
@@ -101,11 +65,6 @@ Chrome or Edge:
 - If behavior looks stale, close and reopen the AO3/FFN tab after reloading the
   extension.
 
-Safari:
-
-- Use `Option+Cmd+R` where available.
-- If behavior looks stale, enable the Develop menu and use `Develop -> Empty
-  Caches`, then reload the page.
 - On iOS, close the tab and reopen the page after rebuilding.
 
 ### Required Production API

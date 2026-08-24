@@ -132,14 +132,11 @@ The normal production-origin build is:
 npm run build:ios-earned-permission-onboarding:release
 ```
 
-The script pins both production origins and refuses to run if the Xcode target
-or native Settings bridge does not use
-`com.tracefiction.trace.extension`. After archiving, verify the production
-contract with:
-
-```bash
-npm run ios:verify-production-archive -- /path/to/Trace.xcarchive
-```
+The script pins both production origins and writes the public extension
+resources consumed by Safari. The private Apple client separately verifies
+that its Xcode target and native Settings bridge use
+`com.tracefiction.trace.extension`, and verifies the archived app against this
+exact public source revision.
 
 The build 33 physical-device candidate is paired to the stable Vercel dev
 deployment of the web half with:

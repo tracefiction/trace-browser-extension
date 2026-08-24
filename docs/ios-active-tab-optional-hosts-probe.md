@@ -41,11 +41,12 @@ Probe 1A cannot make the result appear better than it is.
 
 ```bash
 npm run build:ios-active-tab-optional-hosts-probe:release
-npm run ios:build
 ```
 
-Archive the **Trace (iOS)** scheme without running another extension build.
-`npm run build:release` restores normal production resources.
+This command generates the public extension resources. Trace maintainers then
+pin this repository revision in the private Apple client and archive the
+containing app without running another extension build. `npm run build:release`
+restores normal production resources in this repository.
 
 ## Physical-device protocol
 

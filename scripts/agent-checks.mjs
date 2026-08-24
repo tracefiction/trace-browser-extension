@@ -17,7 +17,6 @@ const SOURCE_EXTENSIONS = new Set([".js", ".mjs", ".html"]);
 
 const RELEASE_ORIGIN_PATHS = [
   "Shared (Extension)/Resources",
-  "iOS (App)/TraceWebOrigin.generated.swift",
   "iOS (Extension)/Info.plist",
   "macOS (Extension)/Info.plist",
 ];

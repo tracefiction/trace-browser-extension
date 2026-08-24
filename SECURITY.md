@@ -13,8 +13,11 @@ Please report security or privacy issues using the public support contact listed
 The extension requests access to supported AO3 and FanFiction.net pages so it can read story metadata and show Trace library status. It requests access to the configured Trace web origin for token sync. Safari sends authenticated API requests from its background worker through the Trace API's extension-origin CORS policy, without requesting page access to that API host; Chrome and Firefox packages retain the API host permission their cross-origin request model requires.
 
 The extension does not request browser cookie permission. It does not need AO3 or FanFiction.net credentials.
-The Safari build uses native messaging only to communicate with the bundled
-Trace app for setup actions, app-auth token sharing, and first-story handoff.
+The Safari extension uses native messaging only to communicate with its
+bundled Trace containing app for setup actions, app-auth token sharing, and
+first-story handoff. The extension-side handler and credential codec remain in
+this public repository; the containing app implementation is private and pins
+an exact public extension commit.
 
 The developer-only iOS active-tab first-value probe declares no website
 origins. It can inspect only the active story tab after the user explicitly
