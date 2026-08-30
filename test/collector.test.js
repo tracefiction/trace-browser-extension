@@ -734,7 +734,25 @@ test("sendAutoTrackForStory clears retryable failures but retains a capacity-blo
     );
     assert.deepEqual(plainJson(store.libraryOverlayCache.entries), {});
     if (response?.error === "free_limit_reached") {
-      assert.ok(dom.window.document.querySelector("[data-trace-capacity-notice]"));
+      const notice = dom.window.document.querySelector("[data-trace-capacity-notice]");
+      assert.ok(notice);
+      const upgrade = Array.from(notice.querySelectorAll("a")).find((link) =>
+        /Get Trace Unlimited/i.test(link.textContent || "")
+      );
+      assert.equal(
+        upgrade?.href,
+        "https://tracefiction.com/?upgrade=1&source=extension_cap",
+      );
+      assert.deepEqual(
+        plainJson(sentMessages.find((message) =>
+          message.type === "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE"
+        )),
+        {
+          type: "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE",
+          action: "shown",
+          surface: "story",
+        },
+      );
     }
   }
 });
@@ -2655,6 +2673,7 @@ test("story page auto-track failure uses existing compact error states", () => {
       const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
       assert.equal(sheet.getAttribute("data-trace-open"), "1");
       assert.match(sheet.textContent || "", /wasn’t added/i);
+      assert.match(sheet.textContent || "", /Get Trace Unlimited/i);
       assert.match(sheet.textContent || "", /Manage library/i);
     }
     if (item.response.error === "auth_expired") {

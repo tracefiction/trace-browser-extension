@@ -54,6 +54,7 @@ import {
   StoryCommandApi,
 } from "./story-command.mjs";
 import { AccountProjectionApi } from "./account-projection.mjs";
+import { ExtensionCapacityEventApi } from "./billing-conversion.mjs";
 import {
   AccountLibraryCommandProjection,
   LibraryCommandApi,
@@ -221,6 +222,7 @@ export class SessionRuntimeController {
   readonly #pendingFirstStory: NativePendingFirstStoryReader;
   readonly #service: SessionService;
   readonly #accountData: AccountDataRepository;
+  readonly #capacityEvents: ExtensionCapacityEventApi;
   readonly #storyCommands: StoryCommandService;
   readonly #libraryMutations: LibraryMutationService;
   readonly #finishQualification: FinishQualificationService;
@@ -302,6 +304,10 @@ export class SessionRuntimeController {
       }),
       diagnostics: new MemoryDiagnostics(),
     });
+    this.#capacityEvents = new ExtensionCapacityEventApi(
+      environment.fetch,
+      environment.apiBase,
+    );
     this.#savedFilterApi = new SavedFilterSyncApi(
       environment.fetch,
       environment.apiBase,
@@ -577,8 +583,9 @@ export class SessionRuntimeController {
     if (
       host === null ||
       isBlockedArchivePath(senderUrl, host) ||
-      Object.keys(message).length !== 2 ||
-      (message.action !== "shown" && message.action !== "dismissed")
+      Object.keys(message).length !== 3 ||
+      (message.action !== "shown" && message.action !== "dismissed") ||
+      (message.surface !== "story" && message.surface !== "listing")
     ) {
       return null;
     }
@@ -601,6 +608,16 @@ export class SessionRuntimeController {
     const accountData = result.kind === "published"
       ? result.value
       : await this.#accountData.read().catch(() => null);
+    if (result.kind === "published") {
+      await this.#service.executeAuthenticated((credential) =>
+        this.#capacityEvents.record(credential, {
+          event: message.action === "shown"
+            ? "prompt_viewed"
+            : "prompt_dismissed",
+          surface: message.surface as "story" | "listing",
+        })
+      );
+    }
     return Object.freeze({
       ok: result.kind === "published",
       snapshot: toPublicSessionSnapshot(this.snapshot()),

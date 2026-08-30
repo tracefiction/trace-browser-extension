@@ -19,6 +19,7 @@ const TRACE_EARNED_PERMISSION_GATE_ACTIVE =
 const TRACE_EARNED_PERMISSION_READY_EVENT =
   "trace-earned-permission-ready";
 const TRACE_WEB_HOME_URL = configuredTraceWebHomeUrl();
+const TRACE_WEB_UPGRADE_URL = traceUpgradeUrl();
 const FIRST_STORY_FOCUS_MAX_ATTEMPTS = 30;
 const FIRST_STORY_FOCUS_RETRY_MS = 150;
 const FIRST_STORY_SAVE_TIMEOUT_MS = 18_000;
@@ -35,6 +36,17 @@ function configuredTraceWebHomeUrl() {
     return new URL(configured || "https://tracefiction.com").origin + "/";
   } catch (_) {
     return "https://tracefiction.com/";
+  }
+}
+
+function traceUpgradeUrl() {
+  try {
+    var url = new URL(TRACE_WEB_HOME_URL);
+    url.searchParams.set("upgrade", "1");
+    url.searchParams.set("source", "extension_cap");
+    return url.href;
+  } catch (_) {
+    return TRACE_WEB_HOME_URL + "?upgrade=1&source=extension_cap";
   }
 }
 
@@ -163,6 +175,7 @@ function acknowledgeCapacityRecovery(action) {
   sendCollectorMessageBestEffort({
     type: "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE",
     action: action,
+    surface: "story",
   });
 }
 
@@ -202,14 +215,25 @@ function showCapacityRecoveryNotice(capacity, force) {
   copy.style.cssText = "margin:8px 0 14px;font:500 13px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif;color:#5f665f";
   var actions = document.createElement("div");
   actions.style.cssText = "display:flex;align-items:center;gap:10px";
-  var open = document.createElement("a");
-  open.setAttribute("data-trace-open-trace", "1");
-  open.href = TRACE_WEB_HOME_URL;
-  open.target = "_blank";
-  open.rel = "noopener noreferrer";
-  open.textContent = "Manage library";
-  open.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 14px;border-radius:9px;background:#1c2722;color:#fff;text-decoration:none;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif";
-  open.addEventListener("click", function (event) {
+  actions.style.flexWrap = "wrap";
+  var upgrade = document.createElement("a");
+  upgrade.setAttribute("data-trace-open-trace", "1");
+  upgrade.href = TRACE_WEB_UPGRADE_URL;
+  upgrade.target = "_blank";
+  upgrade.rel = "noopener noreferrer";
+  upgrade.textContent = "Get Trace Unlimited";
+  upgrade.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 14px;border-radius:9px;background:#1c2722;color:#fff;text-decoration:none;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif";
+  upgrade.addEventListener("click", function (event) {
+    event.stopPropagation();
+  });
+  var manage = document.createElement("a");
+  manage.setAttribute("data-trace-open-trace", "1");
+  manage.href = TRACE_WEB_HOME_URL;
+  manage.target = "_blank";
+  manage.rel = "noopener noreferrer";
+  manage.textContent = "Manage library";
+  manage.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 12px;border-radius:9px;border:1px solid rgba(28,39,34,0.2);color:#1c2722;text-decoration:none;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif";
+  manage.addEventListener("click", function (event) {
     event.stopPropagation();
   });
   var dismiss = document.createElement("button");
@@ -220,7 +244,8 @@ function showCapacityRecoveryNotice(capacity, force) {
     acknowledgeCapacityRecovery("dismissed");
     notice.remove();
   });
-  actions.appendChild(open);
+  actions.appendChild(upgrade);
+  actions.appendChild(manage);
   actions.appendChild(dismiss);
   notice.appendChild(eyebrow);
   notice.appendChild(title);
@@ -5308,16 +5333,26 @@ function renderStorySheet(sheet, view, workKey) {
     var capacityActions = document.createElement("div");
     capacityActions.className = "x-sheet-foot";
     capacityActions.style.cssText = "display:flex;gap:8px;padding:0 16px 16px";
-    var capacityOpen = document.createElement("a");
-    capacityOpen.className = "x-pbtn x-pbtn-primary";
-    capacityOpen.setAttribute("data-trace-open-trace", "1");
-    capacityOpen.href = TRACE_WEB_HOME_URL;
-    capacityOpen.target = "_blank";
-    capacityOpen.rel = "noopener noreferrer";
-    capacityOpen.textContent = "Manage library";
-    capacityOpen.style.cssText = storySheetPrimaryButtonCss() + ";flex:1";
-    bindTraceOpenLink(capacityOpen);
-    capacityActions.appendChild(capacityOpen);
+    var capacityUpgrade = document.createElement("a");
+    capacityUpgrade.className = "x-pbtn x-pbtn-primary";
+    capacityUpgrade.setAttribute("data-trace-open-trace", "1");
+    capacityUpgrade.href = TRACE_WEB_UPGRADE_URL;
+    capacityUpgrade.target = "_blank";
+    capacityUpgrade.rel = "noopener noreferrer";
+    capacityUpgrade.textContent = "Get Trace Unlimited";
+    capacityUpgrade.style.cssText = storySheetPrimaryButtonCss() + ";flex:1";
+    bindTraceOpenLink(capacityUpgrade);
+    capacityActions.appendChild(capacityUpgrade);
+    var capacityManage = document.createElement("a");
+    capacityManage.className = "x-pbtn";
+    capacityManage.setAttribute("data-trace-open-trace", "1");
+    capacityManage.href = TRACE_WEB_HOME_URL;
+    capacityManage.target = "_blank";
+    capacityManage.rel = "noopener noreferrer";
+    capacityManage.textContent = "Manage library";
+    capacityManage.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:0 12px;border:1px solid rgba(28,39,34,.22);border-radius:9px;color:#1c2722;text-decoration:none;font:650 12px/1 " + TRACE_UI.font + ";flex:1";
+    bindTraceOpenLink(capacityManage);
+    capacityActions.appendChild(capacityManage);
     sheet.appendChild(capacityActions);
     applySheetVisibility(sheet, wasOpen);
     return;

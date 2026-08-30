@@ -3,6 +3,7 @@ import { installArchiveReadinessRuntime } from "./archive-readiness.mjs";
 import { installEarnedPermissionRegistrationRuntime } from "./earned-permission-registration.mjs";
 import { installTraceFirstInstallActivation } from "./trace-web-navigation.mjs";
 export * from "./account-projection.mjs";
+export * from "./billing-conversion.mjs";
 export * from "./archive-readiness-status.mjs";
 export * from "./library-command.mjs";
 export * from "./library-command-sender.mjs";
