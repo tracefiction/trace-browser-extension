@@ -2130,7 +2130,15 @@ test("library-overlay quick-add maps free limit to a reusable recovery notice", 
   const notice = window.document.querySelector("[data-trace-capacity-notice]");
   assert.ok(notice);
   assert.match(notice.textContent || "", /wasn’t added/i);
+  assert.match(notice.textContent || "", /Get Trace Unlimited/i);
   assert.match(notice.textContent || "", /Manage library/i);
+  const upgrade = Array.from(notice.querySelectorAll("a")).find((link) =>
+    /Get Trace Unlimited/i.test(link.textContent || "")
+  );
+  assert.equal(
+    upgrade?.href,
+    "https://tracefiction.com/?upgrade=1&source=extension_cap",
+  );
   notice.querySelector("button").click();
   assert.equal(window.document.querySelector("[data-trace-capacity-notice]"), null);
   button.click();
