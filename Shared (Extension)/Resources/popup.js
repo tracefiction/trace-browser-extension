@@ -14,6 +14,7 @@ const TRACE_SESSION_MODE = globalThis.TRACE_SESSION_MODE || "legacy";
 const KERNEL_SESSION_ACTIVE = TRACE_SESSION_MODE === "kernel";
 const SESSION_DISABLED = TRACE_SESSION_MODE === "disabled";
 const TRACE_HOME_URL = `${TRACE_WEB_ORIGIN}/`;
+const TRACE_UPGRADE_URL = `${TRACE_HOME_URL}?upgrade=1&source=extension_cap`;
 const TRACE_IOS_SETUP_URL = `${DEFAULT_TRACE_WEB_ORIGIN}/apps#safari-ios-setup`;
 const TRACE_IOS_APP_CONNECT_URL = "traceauth://open?destination=extension-connect";
 const AO3_WORKS_URL = "https://archiveofourown.org/works";
@@ -237,8 +238,8 @@ function buildPopupUi(model) {
       lead: "New stories won’t be added until you make room or get Trace Unlimited.",
       leadHidden: false,
       ctaHidden: false,
-      ctaLabel: "Manage library",
-      ctaUrl: TRACE_HOME_URL,
+      ctaLabel: "Get Trace Unlimited",
+      ctaUrl: TRACE_UPGRADE_URL,
       ctaEmphasis: "primary",
       archiveLinksHidden: true,
       importHidden: true,

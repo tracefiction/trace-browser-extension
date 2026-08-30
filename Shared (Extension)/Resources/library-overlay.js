@@ -16,6 +16,7 @@
   const TRACE_SESSION_MODE = globalThis.TRACE_SESSION_MODE || "legacy";
   const KERNEL_SESSION_ACTIVE = TRACE_SESSION_MODE === "kernel";
   const TRACE_WEB_HOME_URL = configuredTraceWebHomeUrl();
+  const TRACE_WEB_UPGRADE_URL = traceUpgradeUrl();
   const ACCOUNT_PROJECTION_GET_MESSAGE = "TRACE_ACCOUNT_PROJECTION_GET";
   const ACCOUNT_PROJECTION_REVISION_KEY = "traceAccountProjectionRevisionV1";
   const MAX_PROJECTION_WORK_KEYS = 250;
@@ -33,6 +34,17 @@
       return new URL(configured || "https://tracefiction.com").origin + "/";
     } catch (_) {
       return "https://tracefiction.com/";
+    }
+  }
+
+  function traceUpgradeUrl() {
+    try {
+      var url = new URL(TRACE_WEB_HOME_URL);
+      url.searchParams.set("upgrade", "1");
+      url.searchParams.set("source", "extension_cap");
+      return url.href;
+    } catch (_) {
+      return TRACE_WEB_HOME_URL + "?upgrade=1&source=extension_cap";
     }
   }
 
@@ -126,7 +138,11 @@
   function acknowledgeCapacityRecovery(action) {
     try {
       ext.runtime.sendMessage(
-        { type: "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE", action: action },
+        {
+          type: "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE",
+          action: action,
+          surface: "listing",
+        },
         function () {
           void ext.runtime.lastError;
         },
@@ -170,14 +186,23 @@
     copy.style.cssText = "margin:8px 0 14px;font:500 13px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif;color:#5f665f";
     var actions = document.createElement("div");
     actions.style.cssText = "display:flex;align-items:center;gap:10px";
-    var open = document.createElement("a");
-    open.setAttribute("data-trace-open-trace", "1");
-    open.href = TRACE_WEB_HOME_URL;
-    open.target = "_blank";
-    open.rel = "noopener noreferrer";
-    open.textContent = "Manage library";
-    open.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 14px;border-radius:9px;background:#1c2722;color:#fff;text-decoration:none;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif";
-    bindTraceOpenLink(open);
+    actions.style.flexWrap = "wrap";
+    var upgrade = document.createElement("a");
+    upgrade.setAttribute("data-trace-open-trace", "1");
+    upgrade.href = TRACE_WEB_UPGRADE_URL;
+    upgrade.target = "_blank";
+    upgrade.rel = "noopener noreferrer";
+    upgrade.textContent = "Get Trace Unlimited";
+    upgrade.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 14px;border-radius:9px;background:#1c2722;color:#fff;text-decoration:none;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif";
+    bindTraceOpenLink(upgrade);
+    var manage = document.createElement("a");
+    manage.setAttribute("data-trace-open-trace", "1");
+    manage.href = TRACE_WEB_HOME_URL;
+    manage.target = "_blank";
+    manage.rel = "noopener noreferrer";
+    manage.textContent = "Manage library";
+    manage.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 12px;border-radius:9px;border:1px solid rgba(28,39,34,0.2);color:#1c2722;text-decoration:none;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif";
+    bindTraceOpenLink(manage);
     var dismiss = document.createElement("button");
     dismiss.type = "button";
     dismiss.textContent = "Not now";
@@ -186,7 +211,8 @@
       acknowledgeCapacityRecovery("dismissed");
       notice.remove();
     });
-    actions.appendChild(open);
+    actions.appendChild(upgrade);
+    actions.appendChild(manage);
     actions.appendChild(dismiss);
     notice.appendChild(eyebrow);
     notice.appendChild(title);

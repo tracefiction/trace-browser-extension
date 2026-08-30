@@ -1455,7 +1455,11 @@ test("popup keeps a durable library-capacity recovery action", async () => {
   assert.equal(h.document.body.dataset.tracePopupState, "upgrade_required");
   assert.equal(h.document.getElementById("popup-status").textContent, "Library full");
   assert.match(h.document.getElementById("popup-lead").textContent, /make room or get/i);
-  assert.equal(h.document.getElementById("popup-cta").textContent, "Manage library");
+  assert.equal(h.document.getElementById("popup-cta").textContent, "Get Trace Unlimited");
+  assert.equal(
+    h.document.getElementById("popup-cta").href,
+    "https://tracefiction.com/?upgrade=1&source=extension_cap",
+  );
   assert.equal(h.document.getElementById("popup-import").hidden, true);
 });
 

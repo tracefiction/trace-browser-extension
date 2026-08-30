@@ -1221,6 +1221,7 @@ test("capacity failures persist recovery state, suppress new work, and preserve 
     entries: { "credential-a": "current-token" },
   });
   let trackRequests = 0;
+  const capacityEvents = [];
   const controller = installTestRuntime({
     mode: "kernel",
     databaseFactory,
@@ -1279,6 +1280,10 @@ test("capacity failures persist recovery state, suppress new work, and preserve 
           },
         }), { status: 200 });
       }
+      if (url.endsWith("/api/extension/capacity-events")) {
+        capacityEvents.push(JSON.parse(options.body));
+        return new Response(JSON.stringify({ accepted: true }), { status: 200 });
+      }
       return new Response("", { status: 404 });
     },
     apiBase: "https://api.tracefiction.com",
@@ -1327,9 +1332,14 @@ test("capacity failures persist recovery state, suppress new work, and preserve 
   const acknowledged = await controller.handle({
     type: "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE",
     action: "dismissed",
+    surface: "story",
   }, archiveSender);
   assert.equal(acknowledged.ok, true);
   assert.deepEqual(acknowledged.capacity, { blocked: true, prompt: false });
+  assert.deepEqual(capacityEvents, [{
+    event: "prompt_dismissed",
+    surface: "story",
+  }]);
 
   const popup = await controller.handle(
     { type: "TRACE_POPUP_GET_STATE" },
@@ -1340,6 +1350,7 @@ test("capacity failures persist recovery state, suppress new work, and preserve 
   assert.equal(await controller.handle({
     type: "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE",
     action: "dismissed",
+    surface: "story",
   }, {
     frameId: 0,
     tab: { url: "https://www.fanfiction.net/login.php" },
