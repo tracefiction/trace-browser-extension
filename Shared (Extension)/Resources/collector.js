@@ -5519,6 +5519,14 @@ function finishQualifyAo3BodyElement() {
   return one(document, "#chapters") || one(document, ".chapter[id^='chapter-']") || one(document, ".chapter");
 }
 
+function finishQualifyAo3FallbackEndElement(bodyEl) {
+  // AO3 work skins can distort the inner article's layout box without moving
+  // the server-rendered chapter wrapper. Keep the precise article boundary as
+  // the primary signal and use #chapters only as a guarded fallback.
+  var chapters = one(document, "#chapters");
+  return chapters && chapters !== bodyEl ? chapters : null;
+}
+
 function finishQualifyAo3AnchorElement() {
   var endNotes = qsa(
     document,
@@ -5788,9 +5796,46 @@ function finishQualifyDecision(view, workKey) {
     requiresWorkStateChoice: !sourceWorkState,
     anchorEl: anchorEl,
     bodyEl: bodyEl,
+    fallbackEndEl: isAO3() ? finishQualifyAo3FallbackEndElement(bodyEl) : null,
     accountId: view.accountId || null,
     sessionKey: finishQualifySessionKey(workKey, entry.entryId, item),
   };
+}
+
+function watchFinishQualifyEnd(decision, onReachEnd) {
+  var elements = [decision.bodyEl];
+  if (
+    decision.fallbackEndEl &&
+    decision.fallbackEndEl !== decision.bodyEl
+  ) {
+    elements.push(decision.fallbackEndEl);
+  }
+  var cleanups = [];
+  var reached = false;
+
+  function cleanupAll() {
+    while (cleanups.length) {
+      var cleanup = cleanups.pop();
+      if (typeof cleanup === "function") cleanup();
+    }
+  }
+
+  function settleReach() {
+    if (reached) return;
+    reached = true;
+    cleanupAll();
+    onReachEnd();
+  }
+
+  for (var i = 0; i < elements.length; i += 1) {
+    if (reached) break;
+    var cleanup = window.TraceFinishQualify.onReachEnd(elements[i], settleReach);
+    if (typeof cleanup !== "function") continue;
+    if (reached) cleanup();
+    else cleanups.push(cleanup);
+  }
+
+  return cleanupAll;
 }
 
 function finishQualifyRemoveBand(workKey) {
@@ -5952,7 +5997,7 @@ function setupFinishQualify(view, workKey) {
     cleanup: null,
   };
   finishQualifyWatchState[workKey] = watchState;
-  var cleanup = window.TraceFinishQualify.onReachEnd(decision.bodyEl, function () {
+  var cleanup = watchFinishQualifyEnd(decision, function () {
     if (
       !finishQualifyFlowIsCurrent(workKey, watchState) ||
       finishQualifyWasDismissed(decision.sessionKey)

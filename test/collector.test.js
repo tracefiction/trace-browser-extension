@@ -4030,6 +4030,137 @@ test("finish qualify inserts AO3 prompt after the final end notes and aligns to 
   assert.match(band.getAttribute("style") || "", /margin:\s*22px 0/);
 });
 
+test("finish qualify falls back to the AO3 chapters boundary when a work skin distorts article geometry", () => {
+  const collectorSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  const finishSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "trace-finish-qualify.js"),
+    "utf8",
+  );
+  const entryId = "00000000-0000-4000-8000-000000768805";
+  const sent = [];
+  const dom = new JSDOM(
+    `<!doctype html><html><body>
+      <h2 class="title heading">Unknown two-chapter work</h2>
+      <h3 class="byline heading"><a rel="author">Author</a></h3>
+      <dl class="work meta group"><dd class="chapters">2/?</dd></dl>
+      <select id="selected_id">
+        <option value="201225900">1. First chapter</option>
+        <option selected value="201225961">2. Final posted chapter</option>
+      </select>
+      <div id="chapters"><div class="chapter" id="chapter-2">
+        <div class="userstuff module" role="article"><p>Story body.</p></div>
+      </div></div>
+    </body></html>`,
+    {
+      url: "https://archiveofourown.org/works/76880511/chapters/201225961",
+      contentType: "text/html",
+      runScripts: "outside-only",
+    },
+  );
+  const body = dom.window.document.querySelector("[role='article']");
+  const chapters = dom.window.document.querySelector("#chapters");
+  let chaptersRect = { top: 100, bottom: 1_400 };
+  body.getBoundingClientRect = () => ({ top: 100, bottom: 1_400 });
+  chapters.getBoundingClientRect = () => chaptersRect;
+  Object.defineProperty(dom.window, "innerHeight", { value: 800, configurable: true });
+  Object.defineProperty(dom.window.document, "visibilityState", {
+    value: "visible",
+    configurable: true,
+  });
+
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      lastError: null,
+      sendMessage(message, callback) {
+        sent.push(message);
+        if (
+          message.type === "TRACE_FINISH_QUALIFICATION_SIGNAL" &&
+          message.payload.state === "open" &&
+          typeof callback === "function"
+        ) {
+          callback({
+            ok: true,
+            command: {
+              kind: "acknowledged",
+              state: "open",
+              eventId: null,
+              workKey: "ao3:76880511",
+              entry: {
+                entryId,
+                status: "READING",
+                readerStatus: "READING",
+                canonicalReaderStatus: "READING",
+                chapters: { current: 2, total: 2 },
+              },
+            },
+          });
+        }
+      },
+    },
+    storage: {
+      local: {
+        get(_keys, callback) {
+          callback({
+            authToken: "test-token",
+            libraryOverlayCache: {
+              entries: {
+                "ao3:76880511": {
+                  entryId,
+                  status: "READING",
+                  readerStatus: "READING",
+                  canonicalReaderStatus: "READING",
+                  chapters: { current: 2, total: 2 },
+                },
+              },
+            },
+          });
+        },
+        set(_value, callback) {
+          if (callback) callback();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  installCollectorChrome(dom, chrome);
+  dom.window.eval(finishSrc);
+  const onReachEnd = dom.window.TraceFinishQualify.onReachEnd;
+  dom.window.TraceFinishQualify.onReachEnd = (endElement, callback) =>
+    onReachEnd(endElement, callback, { dwellMs: 0 });
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+
+  body.dispatchEvent(new dom.window.Event("touchstart", { bubbles: true }));
+  chaptersRect = { top: -500, bottom: 850 };
+  dom.window.dispatchEvent(new dom.window.Event("scroll"));
+  dom.window.dispatchEvent(new dom.window.Event("scroll"));
+
+  const openSignals = sent.filter(
+    (message) =>
+      message.type === "TRACE_FINISH_QUALIFICATION_SIGNAL" &&
+      message.payload.state === "open",
+  );
+  assert.equal(openSignals.length, 1, "the fallback should settle only once");
+  const openSignal = openSignals[0];
+  assert.ok(openSignal, "the stable #chapters boundary should open qualification");
+  assert.deepEqual(plainJson(openSignal.payload), {
+    entryId,
+    workKey: "ao3:76880511",
+    source: "ao3",
+    chapter: 2,
+    total: 2,
+    state: "open",
+  });
+  assert.ok(dom.window.document.querySelector("[data-trace-finish-qualify]"));
+});
+
 test("finish qualify promotes caught-up known-complete work with promise runtime messaging", async () => {
   const collectorSrc = fs.readFileSync(
     path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
