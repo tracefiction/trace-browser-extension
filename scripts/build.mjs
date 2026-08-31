@@ -517,22 +517,82 @@ ${HAS_SESSION_RUNTIME ? `globalThis.TRACE_SESSION_MODE = ${JSON.stringify(SESSIO
   if (!config || config.registrationMode !== "static" || !archiveHost) return;
   globalThis.TRACE_EARNED_PERMISSION_COMPLETE = false;
   var extension = globalThis.browser || globalThis.chrome;
+  var retryDelays = [0, 150, 500, 1500];
+  var retryTimer = null;
+  var responseTimer = null;
+  var cycleActive = false;
+  var decisionReceived = false;
   var publish = function (response) {
-    if (!response || response.ok !== true || response.completeGrant !== true || response.registered !== true) return;
-    globalThis.TRACE_EARNED_PERMISSION_COMPLETE = true;
-    try {
-      document.dispatchEvent(new CustomEvent("trace-earned-permission-ready"));
-    } catch (_) {}
-  };
-  try {
-    if (globalThis.browser && extension === globalThis.browser) {
-      Promise.resolve(extension.runtime.sendMessage({ type: "TRACE_EARNED_PERMISSION_RECONCILE" })).then(publish, function () {});
-    } else {
-      extension.runtime.sendMessage({ type: "TRACE_EARNED_PERMISSION_RECONCILE" }, function (response) {
-        if (extension.runtime.lastError) return;
-        publish(response);
-      });
+    if (!response || typeof response !== "object") return false;
+    var recognized =
+      response.ok === true && response.completeGrant === true && response.registered === true ||
+      response.ok === false && typeof response.completeGrant === "boolean" && typeof response.registered === "boolean";
+    if (!recognized) return false;
+    decisionReceived = true;
+    cycleActive = false;
+    if (retryTimer !== null) clearTimeout(retryTimer);
+    if (responseTimer !== null) clearTimeout(responseTimer);
+    retryTimer = null;
+    responseTimer = null;
+    if (response.ok === true && response.completeGrant === true && response.registered === true) {
+      if (globalThis.TRACE_EARNED_PERMISSION_COMPLETE !== true) {
+        globalThis.TRACE_EARNED_PERMISSION_COMPLETE = true;
+        try {
+          document.dispatchEvent(new CustomEvent("trace-earned-permission-ready"));
+        } catch (_) {}
+      }
     }
+    return true;
+  };
+  var scheduleAttempt = function (attempt) {
+    if (decisionReceived || globalThis.TRACE_EARNED_PERMISSION_COMPLETE === true) return;
+    if (attempt >= retryDelays.length) {
+      cycleActive = false;
+      return;
+    }
+    var send = function () {
+      retryTimer = null;
+      var settled = false;
+      var finish = function (response) {
+        if (settled) return;
+        settled = true;
+        if (responseTimer !== null) clearTimeout(responseTimer);
+        responseTimer = null;
+        if (!publish(response)) scheduleAttempt(attempt + 1);
+      };
+      responseTimer = setTimeout(function () { finish(null); }, 1000);
+      try {
+        if (globalThis.browser && extension === globalThis.browser) {
+          Promise.resolve(extension.runtime.sendMessage({ type: "TRACE_EARNED_PERMISSION_RECONCILE" })).then(finish, function () { finish(null); });
+        } else {
+          extension.runtime.sendMessage({ type: "TRACE_EARNED_PERMISSION_RECONCILE" }, function (response) {
+            if (extension.runtime.lastError) {
+              finish(null);
+              return;
+            }
+            finish(response);
+          });
+        }
+      } catch (_) {
+        finish(null);
+      }
+    };
+    var delay = retryDelays[attempt];
+    if (delay === 0) send();
+    else retryTimer = setTimeout(send, delay);
+  };
+  var beginCycle = function () {
+    if (decisionReceived || cycleActive || globalThis.TRACE_EARNED_PERMISSION_COMPLETE === true) return;
+    cycleActive = true;
+    scheduleAttempt(0);
+  };
+  beginCycle();
+  try {
+    globalThis.addEventListener("pageshow", beginCycle);
+    globalThis.addEventListener("focus", beginCycle);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) beginCycle();
+    });
   } catch (_) {}
 })();
 ` : ""}`;

@@ -81,6 +81,78 @@ function assertSurfacePrivateBoundary(root) {
   }
 }
 
+function earnedPermissionBootstrapHarness(source, responses) {
+  let nextTimerId = 1;
+  const timers = new Map();
+  const windowListeners = new Map();
+  const dispatchedEvents = [];
+  let messageCount = 0;
+  const context = {
+    Promise,
+    location: { hostname: "archiveofourown.org" },
+    setTimeout(callback, delay) {
+      const id = nextTimerId;
+      nextTimerId += 1;
+      timers.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+    addEventListener(type, listener) {
+      windowListeners.set(type, listener);
+    },
+    CustomEvent: class CustomEvent {
+      constructor(type) {
+        this.type = type;
+      }
+    },
+    document: {
+      hidden: false,
+      addEventListener() {},
+      dispatchEvent(event) {
+        dispatchedEvents.push(event.type);
+      },
+    },
+    browser: {
+      runtime: {
+        sendMessage(message) {
+          assert.deepEqual(
+            JSON.parse(JSON.stringify(message)),
+            { type: "TRACE_EARNED_PERMISSION_RECONCILE" },
+          );
+          const response = responses[messageCount];
+          messageCount += 1;
+          return response === "pending"
+            ? new Promise(() => {})
+            : Promise.resolve(response);
+        },
+      },
+    },
+  };
+  vm.runInNewContext(source, context);
+  return {
+    context,
+    dispatchedEvents,
+    get messageCount() {
+      return messageCount;
+    },
+    fireWindowEvent(type) {
+      windowListeners.get(type)?.();
+    },
+    async runNextTimer() {
+      const next = [...timers.entries()].sort(
+        (left, right) => left[1].delay - right[1].delay,
+      )[0];
+      assert.ok(next, "expected a pending bootstrap timer");
+      timers.delete(next[0]);
+      next[1].callback();
+      await Promise.resolve();
+      await Promise.resolve();
+    },
+  };
+}
+
 async function assertArchiveReceiptSurvivesStorageFailure(bundle) {
   const listeners = [];
   const installedListeners = [];
@@ -298,6 +370,93 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     assert.match(earnedSafariConfig, /trace-archive-automation-v1/);
     assert.match(earnedSafariConfig, /persistAcrossSessions/);
     assert.match(earnedSafariConfig, /trace-earned-permission-ready/);
+    const recoveredBootstrap = earnedPermissionBootstrapHarness(
+      earnedSafariConfig,
+      [
+        "pending",
+        {
+          ok: true,
+          completeGrant: true,
+          registered: true,
+        },
+      ],
+    );
+    assert.equal(recoveredBootstrap.messageCount, 1);
+    assert.equal(
+      recoveredBootstrap.context.TRACE_EARNED_PERMISSION_COMPLETE,
+      false,
+      "archive behavior must remain gated while Safari drops the first worker message",
+    );
+    await recoveredBootstrap.runNextTimer();
+    await recoveredBootstrap.runNextTimer();
+    assert.equal(recoveredBootstrap.messageCount, 2);
+    assert.equal(
+      recoveredBootstrap.context.TRACE_EARNED_PERMISSION_COMPLETE,
+      true,
+    );
+    assert.deepEqual(recoveredBootstrap.dispatchedEvents, [
+      "trace-earned-permission-ready",
+    ]);
+    recoveredBootstrap.fireWindowEvent("pageshow");
+    assert.equal(
+      recoveredBootstrap.messageCount,
+      2,
+      "successful readiness must not start duplicate reconcile cycles",
+    );
+
+    const incompleteBootstrap = earnedPermissionBootstrapHarness(
+      earnedSafariConfig,
+      [
+        {
+          ok: false,
+          completeGrant: false,
+          registered: false,
+          error: "permission_incomplete",
+        },
+      ],
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    incompleteBootstrap.fireWindowEvent("pageshow");
+    assert.equal(
+      incompleteBootstrap.messageCount,
+      1,
+      "a real incomplete grant remains fail-closed instead of being retried",
+    );
+    assert.equal(
+      incompleteBootstrap.context.TRACE_EARNED_PERMISSION_COMPLETE,
+      false,
+    );
+    assert.deepEqual(incompleteBootstrap.dispatchedEvents, []);
+
+    const lifecycleBootstrap = earnedPermissionBootstrapHarness(
+      earnedSafariConfig,
+      ["pending", "pending", "pending", "pending", {
+        ok: true,
+        completeGrant: true,
+        registered: true,
+      }],
+    );
+    for (let timer = 0; timer < 7; timer += 1) {
+      await lifecycleBootstrap.runNextTimer();
+    }
+    assert.equal(lifecycleBootstrap.messageCount, 4);
+    assert.equal(
+      lifecycleBootstrap.context.TRACE_EARNED_PERMISSION_COMPLETE,
+      false,
+    );
+    lifecycleBootstrap.fireWindowEvent("focus");
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(lifecycleBootstrap.messageCount, 5);
+    assert.equal(
+      lifecycleBootstrap.context.TRACE_EARNED_PERMISSION_COMPLETE,
+      true,
+      "returning to a page must start a fresh bounded cycle after transport exhaustion",
+    );
+    assert.deepEqual(lifecycleBootstrap.dispatchedEvents, [
+      "trace-earned-permission-ready",
+    ]);
     const earnedConfigContext = {};
     vm.runInNewContext(earnedSafariConfig, earnedConfigContext);
     const earnedOnboarding = earnedConfigContext.TRACE_IOS_EARNED_PERMISSION_ONBOARDING;

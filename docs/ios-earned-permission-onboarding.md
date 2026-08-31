@@ -120,6 +120,15 @@ therefore keeps the bounded AO3, FFN, and Trace declarations stable while
 retaining the permission-first behavior gate: static scripts do nothing until
 `permissions.contains()` confirms the complete five-origin archive bundle.
 
+Build 42 makes that static behavior gate resilient to Safari background-worker
+startup. Safari may drop a content-script message while its nonpersistent
+worker is still loading; the archive bootstrap now retries only missing or
+transport-failed readiness responses, with a bounded backoff and a new cycle
+when the page becomes active again. A real incomplete Website Access decision
+still stops immediately and keeps every archive behavior inert. Successful
+readiness is published once, so retries cannot duplicate collector or overlay
+startup.
+
 ## User contract
 
 When `TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1`:
