@@ -9,18 +9,20 @@ import UIKit
 @MainActor
 final class TraceReviewCoordinator {
     private enum DefaultsKey {
-        static let activityEntryIDs = "traceReviewActivityEntryIDsV2"
-        static let activityDayKeys = "traceReviewActivityDayKeysV2"
-        static let activityVersion = "traceReviewActivityVersionV2"
-        static let lastRequestedVersion = "traceReviewLastRequestedVersionV2"
+        static let pendingVersion = "traceReviewPendingVersionV3"
+        static let lastRequestedVersion = "traceReviewLastRequestedVersionV3"
+        static let lastObservedActivityTimestamp =
+            "traceReviewLastObservedActivityTimestampV3"
     }
 
     private static let maximumEntryIDLength = 200
+    private static let maximumObservedActivityAge: TimeInterval = 7 * 24 * 60 * 60
+    private static let maximumObservedActivityFutureSkew: TimeInterval = 5 * 60
 
     private let defaults: UserDefaults
     private let requestDelay: TimeInterval
     private let currentVersion: () -> String
-    private let currentDayKey: () -> String
+    private let now: () -> Date
     private let windowScene: () -> UIWindowScene?
     private let requestReview: (UIWindowScene) -> Void
 
@@ -32,14 +34,14 @@ final class TraceReviewCoordinator {
         defaults: UserDefaults = .standard,
         requestDelay: TimeInterval = 2,
         currentVersion: @escaping () -> String = TraceReviewCoordinator.appVersion,
-        currentDayKey: @escaping () -> String = TraceReviewCoordinator.localDayKey,
+        now: @escaping () -> Date = Date.init,
         windowScene: @escaping () -> UIWindowScene?,
         requestReview: @escaping (UIWindowScene) -> Void = TraceReviewCoordinator.requestSystemReview
     ) {
         self.defaults = defaults
         self.requestDelay = requestDelay
         self.currentVersion = currentVersion
-        self.currentDayKey = currentDayKey
+        self.now = now
         self.windowScene = windowScene
         self.requestReview = requestReview
     }
@@ -65,13 +67,30 @@ final class TraceReviewCoordinator {
         }
 
         var state = loadState()
-        state.recordActivity(
-            entryID: entryID,
-            dayKey: currentDayKey(),
+        let changed = state.recordDirectActivity(version: currentVersion())
+        saveState(state)
+        if changed {
+            scheduleRequestIfEligible()
+        }
+    }
+
+    func observeSuccessfulLibraryActivity(at rawTimestamp: String) {
+        guard let observedAt = Self.parseActivityTimestamp(rawTimestamp) else {
+            return
+        }
+
+        var state = loadState()
+        let changed = state.observeServerActivity(
+            timestamp: observedAt.timeIntervalSince1970,
+            now: now().timeIntervalSince1970,
+            maximumAge: Self.maximumObservedActivityAge,
+            maximumFutureSkew: Self.maximumObservedActivityFutureSkew,
             version: currentVersion()
         )
         saveState(state)
-        scheduleRequestIfEligible()
+        if changed {
+            scheduleRequestIfEligible()
+        }
     }
 
     func updateContext(isLibrary: Bool) {
@@ -117,30 +136,23 @@ final class TraceReviewCoordinator {
 
     private func loadState() -> TraceReviewEligibilityState {
         TraceReviewEligibilityState(
-            activityEntryIDs: Set(
-                defaults.stringArray(forKey: DefaultsKey.activityEntryIDs) ?? []
-            ),
-            activityDayKeys: Set(
-                defaults.stringArray(forKey: DefaultsKey.activityDayKeys) ?? []
-            ),
-            activityVersion: defaults.string(forKey: DefaultsKey.activityVersion),
-            lastRequestedVersion: defaults.string(forKey: DefaultsKey.lastRequestedVersion)
+            pendingVersion: defaults.string(forKey: DefaultsKey.pendingVersion),
+            lastRequestedVersion: defaults.string(forKey: DefaultsKey.lastRequestedVersion),
+            lastObservedActivityTimestamp: defaults.object(
+                forKey: DefaultsKey.lastObservedActivityTimestamp
+            ) as? TimeInterval
         )
     }
 
     private func saveState(_ state: TraceReviewEligibilityState) {
-        defaults.set(
-            Array(state.activityEntryIDs).sorted(),
-            forKey: DefaultsKey.activityEntryIDs
-        )
-        defaults.set(
-            Array(state.activityDayKeys).sorted(),
-            forKey: DefaultsKey.activityDayKeys
-        )
-        defaults.set(state.activityVersion, forKey: DefaultsKey.activityVersion)
+        defaults.set(state.pendingVersion, forKey: DefaultsKey.pendingVersion)
         defaults.set(
             state.lastRequestedVersion,
             forKey: DefaultsKey.lastRequestedVersion
+        )
+        defaults.set(
+            state.lastObservedActivityTimestamp,
+            forKey: DefaultsKey.lastObservedActivityTimestamp
         )
     }
 
@@ -158,14 +170,19 @@ final class TraceReviewCoordinator {
         return version
     }
 
-    private static func localDayKey() -> String {
-        let components = Calendar.autoupdatingCurrent.dateComponents(
-            [.era, .year, .month, .day],
-            from: Date()
-        )
-        return [components.era, components.year, components.month, components.day]
-            .map { String($0 ?? 0) }
-            .joined(separator: "-")
+    private static func parseActivityTimestamp(_ value: String) -> Date? {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return nil }
+
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: normalized) {
+            return date
+        }
+
+        let standard = ISO8601DateFormatter()
+        standard.formatOptions = [.withInternetDateTime]
+        return standard.date(from: normalized)
     }
 
     private static func requestSystemReview(in scene: UIWindowScene) {

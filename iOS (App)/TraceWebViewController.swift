@@ -1401,6 +1401,9 @@ final class TraceWebViewController: UIViewController, WKNavigationDelegate,
         case "TRACE_IOS_LIBRARY_ACTIVITY_COMPLETED", "TRACE_IOS_STORY_RATING_SAVED":
             guard let entryID = body["entryId"] as? String else { return }
             reviewCoordinator.recordSuccessfulLibraryActivity(entryID: entryID)
+        case "TRACE_IOS_LIBRARY_ACTIVITY_OBSERVED":
+            guard let activityAt = body["activityAt"] as? String else { return }
+            reviewCoordinator.observeSuccessfulLibraryActivity(at: activityAt)
         case "TRACE_IOS_REVIEW_CONTEXT":
             guard let context = body["context"] as? String else { return }
             reviewCoordinator.updateContext(isLibrary: context == "library")
