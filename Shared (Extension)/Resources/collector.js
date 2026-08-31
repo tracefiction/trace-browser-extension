@@ -13,6 +13,11 @@ const TRACE_SESSION_MODE = globalThis.TRACE_SESSION_MODE || "legacy";
 const KERNEL_SESSION_ACTIVE = TRACE_SESSION_MODE === "kernel";
 const TRACE_ACTIVE_TAB_PROBE_MODE =
   globalThis.TRACE_IOS_ACTIVE_TAB_PROBE === true;
+const TRACE_EARNED_PERMISSION_GATE_ACTIVE =
+  globalThis.TRACE_IOS_EARNED_PERMISSION_ONBOARDING?.registrationMode ===
+  "static";
+const TRACE_EARNED_PERMISSION_READY_EVENT =
+  "trace-earned-permission-ready";
 const TRACE_WEB_HOME_URL = configuredTraceWebHomeUrl();
 const TRACE_WEB_UPGRADE_URL = traceUpgradeUrl();
 const FIRST_STORY_FOCUS_MAX_ATTEMPTS = 30;
@@ -137,6 +142,27 @@ function tracePageHasPasswordField(root) {
 
 function shouldDisableTraceContentScript() {
   return tracePageHasPasswordField(document);
+}
+
+function traceEarnedPermissionReady() {
+  return (
+    !TRACE_EARNED_PERMISSION_GATE_ACTIVE ||
+    globalThis.TRACE_EARNED_PERMISSION_COMPLETE === true
+  );
+}
+
+function runWhenTraceEarnedPermissionReady(start) {
+  if (traceEarnedPermissionReady()) {
+    start();
+    return;
+  }
+  document.addEventListener(
+    TRACE_EARNED_PERMISSION_READY_EVENT,
+    function () {
+      if (traceEarnedPermissionReady()) start();
+    },
+    { once: true },
+  );
 }
 
 function authStateAllowsActions(authState, hasAuth) {
@@ -2926,6 +2952,17 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (!traceEarnedPermissionReady()) {
+    if (
+      msg?.type === "TRACE_COLLECT" ||
+      msg?.type === "TRACE_SCHEDULE_AUTO_TRACK" ||
+      msg?.type === TRACE_FIRST_STORY_FOCUS_ADD_MESSAGE
+    ) {
+      sendResponse({ ok: false, error: "website_access_incomplete" });
+    }
+    return false;
+  }
+
   if (shouldDisableTraceContentScript()) {
     if (
       msg?.type === "TRACE_COLLECT" ||
@@ -3089,19 +3126,21 @@ function scheduleAutoTrackForCurrentPage(attempt) {
 }
 
 if (!TRACE_ACTIVE_TAB_PROBE_MODE && !shouldDisableTraceContentScript()) {
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", function () {
+  runWhenTraceEarnedPermissionReady(function () {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", function () {
+        scheduleAutoTrackForCurrentPage();
+        scheduleListingMetadataRefreshForCurrentPage();
+      });
+    } else {
+      scheduleAutoTrackForCurrentPage();
+      scheduleListingMetadataRefreshForCurrentPage();
+    }
+
+    window.addEventListener("pageshow", function () {
       scheduleAutoTrackForCurrentPage();
       scheduleListingMetadataRefreshForCurrentPage();
     });
-  } else {
-    scheduleAutoTrackForCurrentPage();
-    scheduleListingMetadataRefreshForCurrentPage();
-  }
-
-  window.addEventListener("pageshow", function () {
-    scheduleAutoTrackForCurrentPage();
-    scheduleListingMetadataRefreshForCurrentPage();
   });
 }
 
@@ -6293,16 +6332,18 @@ function initQuickAdd() {
 }
 
 if (!TRACE_ACTIVE_TAB_PROBE_MODE && !shouldDisableTraceContentScript()) {
-  // The content script runs at document_end, so the story header is normally
-  // available before DOMContentLoaded. Reserve the Trace row immediately to
-  // avoid shifting the archive content when storage hydration completes.
-  if (document.readyState === "loading") {
-    var initialQuickAddWorkKey = getWorkKeyFromUrl();
-    if (initialQuickAddWorkKey) reserveQuickAddSlot(initialQuickAddWorkKey);
-    document.addEventListener("DOMContentLoaded", initQuickAdd);
-  } else {
-    initQuickAdd();
-  }
+  runWhenTraceEarnedPermissionReady(function () {
+    // The content script runs at document_end, so the story header is normally
+    // available before DOMContentLoaded. Reserve the Trace row immediately to
+    // avoid shifting the archive content when storage hydration completes.
+    if (document.readyState === "loading") {
+      var initialQuickAddWorkKey = getWorkKeyFromUrl();
+      if (initialQuickAddWorkKey) reserveQuickAddSlot(initialQuickAddWorkKey);
+      document.addEventListener("DOMContentLoaded", initQuickAdd);
+    } else {
+      initQuickAdd();
+    }
+  });
 }
 
 // Immediate "content script is running" ping. The iOS app uses it to verify
@@ -6320,5 +6361,7 @@ function announceArchivePageToBackground(handoffId) {
 }
 
 if (!TRACE_ACTIVE_TAB_PROBE_MODE && !shouldDisableTraceContentScript()) {
-  announceArchivePageToBackground();
+  runWhenTraceEarnedPermissionReady(function () {
+    announceArchivePageToBackground();
+  });
 }

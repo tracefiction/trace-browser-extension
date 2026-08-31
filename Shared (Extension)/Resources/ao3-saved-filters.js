@@ -20,6 +20,9 @@
   const MAX_SUMMARY_TEXT_LENGTH = 240;
   const SAVED_FILTER_ACTIVE_LIMIT = 250;
   const SAVED_FILTER_LIMIT_WARNING_THRESHOLD = 200;
+  const TRACE_EARNED_PERMISSION_GATE_ACTIVE =
+    globalThis.TRACE_IOS_EARNED_PERMISSION_ONBOARDING?.registrationMode ===
+    "static";
   const IGNORED_QUERY_KEYS = new Set([
     "authenticity_token",
     "commit",
@@ -1688,7 +1691,23 @@
     startObservers();
   }
 
-  if (document.readyState === "loading") {
+  if (
+    TRACE_EARNED_PERMISSION_GATE_ACTIVE &&
+    globalThis.TRACE_EARNED_PERMISSION_COMPLETE !== true
+  ) {
+    document.addEventListener(
+      "trace-earned-permission-ready",
+      function () {
+        if (globalThis.TRACE_EARNED_PERMISSION_COMPLETE !== true) return;
+        if (document.readyState === "loading") {
+          document.addEventListener("DOMContentLoaded", boot, { once: true });
+        } else {
+          boot();
+        }
+      },
+      { once: true },
+    );
+  } else if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", boot, { once: true });
   } else {
     boot();

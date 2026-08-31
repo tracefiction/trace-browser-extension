@@ -21,6 +21,7 @@ export type EarnedPermissionRegistration = Readonly<{
 
 export type EarnedPermissionRegistrationConfig = Readonly<{
   version: number;
+  registrationMode?: "dynamic" | "static";
   origins: readonly string[];
   registrations: readonly EarnedPermissionRegistration[];
 }>;
@@ -44,7 +45,7 @@ export type EarnedPermissionRegistrationResult = Readonly<{
 type Environment = Readonly<{
   runtime: RuntimePort;
   permissions: PermissionsPort;
-  scripting: ScriptingPort;
+  scripting?: ScriptingPort;
   storage: BrowserStorage;
   storageMode: "callback" | "promise";
   config: EarnedPermissionRegistrationConfig;
@@ -127,7 +128,7 @@ export class EarnedPermissionRegistrationController {
   async #reconcile(): Promise<EarnedPermissionRegistrationResult> {
     const { config, permissions, runtime, scripting, storageMode, storage } =
       this.#environment;
-    const [permissionSnapshot, stored] = await Promise.all([
+    const [permissionSnapshot, semanticGrant, stored] = await Promise.all([
       callExtensionApi<{ readonly origins?: readonly string[] }>(
         permissions as unknown as Record<string, (...args: unknown[]) => unknown>,
         "getAll",
@@ -135,6 +136,18 @@ export class EarnedPermissionRegistrationController {
         runtime,
         storageMode,
       ).catch(() => Object.freeze({ origins: [] })),
+      typeof permissions.contains === "function"
+        ? callExtensionApi<boolean>(
+            permissions as unknown as Record<
+              string,
+              (...args: unknown[]) => unknown
+            >,
+            "contains",
+            [{ origins: config.origins }],
+            runtime,
+            storageMode,
+          ).catch(() => null)
+        : Promise.resolve(null),
       storage
         .get(EARNED_PERMISSION_STATE_KEY)
         .then((value) => storedState(value[EARNED_PERMISSION_STATE_KEY]))
@@ -149,7 +162,55 @@ export class EarnedPermissionRegistrationController {
     );
     const completeGrant =
       config.origins.length > 0 &&
-      config.origins.every((origin) => granted.has(origin));
+      (typeof semanticGrant === "boolean"
+        ? semanticGrant
+        : config.origins.every((origin) => granted.has(origin)));
+    const staticRegistration = config.registrationMode === "static";
+    if (staticRegistration) {
+      if (!completeGrant) {
+        return Object.freeze({
+          ok: false,
+          completeGrant: false,
+          registered: false,
+          changed: false,
+          error: "permission_incomplete",
+        });
+      }
+      const grantAt =
+        typeof stored.grantAt === "number"
+          ? stored.grantAt
+          : (this.#environment.clock?.() ?? Date.now());
+      if (
+        stored.grantAt !== grantAt ||
+        stored.registrationVersion !== config.version ||
+        stored.promptResult !== "granted"
+      ) {
+        await storage.set({
+          [EARNED_PERMISSION_STATE_KEY]: {
+            ...stored,
+            grantAt,
+            registrationVersion: config.version,
+            promptResult: "granted",
+          },
+        });
+      }
+      return Object.freeze({
+        ok: true,
+        completeGrant: true,
+        registered: true,
+        changed: false,
+        grantAt,
+      });
+    }
+    if (!scripting) {
+      return Object.freeze({
+        ok: false,
+        completeGrant: true,
+        registered: false,
+        changed: false,
+        error: "registration_failed",
+      });
+    }
     const configuredIds = config.registrations.map(({ id }) => id);
     const current = await callExtensionApi<readonly { readonly id?: string }[]>(
       scripting as unknown as Record<string, (...args: unknown[]) => unknown>,
@@ -303,6 +364,11 @@ export function installEarnedPermissionRegistrationRuntime(
   });
   environment.permissions.onRemoved?.addListener(() => {
     void controller.reconcile();
+  });
+  environment.runtime.onInstalled?.addListener((details) => {
+    if (details.reason === "install" || details.reason === "update") {
+      void controller.reconcile();
+    }
   });
   void controller.reconcile();
   return controller;

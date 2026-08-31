@@ -34,6 +34,7 @@ declare const __TRACE_IOS_EARNED_PERMISSION_CONFIG__: EarnedPermissionRegistrati
 
 type EarnedPermissionRegistrationConfig = Readonly<{
   version: number;
+  registrationMode?: "dynamic" | "static";
   origins: readonly string[];
   registrations: readonly Readonly<{
     id: string;
@@ -112,12 +113,15 @@ try {
     if (
       __TRACE_IOS_EARNED_PERMISSION_CONFIG__ !== null &&
       extension.permissions !== undefined &&
-      extension.scripting !== undefined
+      (__TRACE_IOS_EARNED_PERMISSION_CONFIG__.registrationMode === "static" ||
+        extension.scripting !== undefined)
     ) {
       installEarnedPermissionRegistrationRuntime({
         runtime: extension.runtime,
         permissions: extension.permissions,
-        scripting: extension.scripting,
+        ...(extension.scripting === undefined
+          ? {}
+          : { scripting: extension.scripting }),
         storage: new BrowserStorage(
           extension.storage.local,
           extension.runtime,

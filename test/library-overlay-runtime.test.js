@@ -800,10 +800,22 @@ test("library-overlay renders optional WIP new-chapter context when present", as
 
   const ratingControl = surface.querySelector("[data-trace-rating-control]");
   assert.ok(ratingControl);
+  assert.match(ratingControl.getAttribute("style") || "", /display:\s*grid/i);
+  const ratingChoices = Array.from(
+    ratingControl.querySelectorAll("[data-trace-rating-choice]"),
+  );
+  const ratingRow = ratingChoices[0].parentElement;
+  assert.match(
+    ratingRow.getAttribute("style") || "",
+    /grid-template-columns:\s*repeat\(5,minmax\(0,1fr\)\)/i,
+  );
+  assert.match(ratingRow.getAttribute("style") || "", /width:\s*100%/i);
+  for (const button of ratingChoices) {
+    assert.match(button.getAttribute("style") || "", /width:\s*100%/i);
+    assert.match(button.getAttribute("style") || "", /min-width:\s*0/i);
+  }
   assert.equal(
-    Array.from(ratingControl.querySelectorAll("[data-trace-rating-choice]"))
-      .map((button) => button.textContent)
-      .join(""),
+    ratingChoices.map((button) => button.textContent).join(""),
     "★★☆☆☆",
   );
   ratingControl.querySelector("[data-trace-rating-choice='4']").click();

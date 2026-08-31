@@ -14,6 +14,7 @@ export interface RuntimePort {
 
 export interface PermissionsPort {
   readonly getAll: (...args: unknown[]) => unknown;
+  readonly contains?: (...args: unknown[]) => unknown;
   readonly onAdded?: {
     addListener(listener: () => void): void;
   };

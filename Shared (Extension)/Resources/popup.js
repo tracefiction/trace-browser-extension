@@ -796,6 +796,26 @@ function hasCompleteEarnedGrant(grantedOrigins) {
   return required.length > 0 && required.every((origin) => granted.has(origin));
 }
 
+async function readCompleteEarnedGrant(grantedOrigins = null) {
+  const required = earnedOrigins();
+  if (required.length === 0) return false;
+  if (typeof ext.permissions?.contains === "function") {
+    try {
+      return (
+        (await extensionPromiseCall(ext.permissions, "contains", [
+          { origins: required },
+        ])) === true
+      );
+    } catch {
+      // Fall through to exact snapshots on engines without a usable contains().
+    }
+  }
+  const snapshot = Array.isArray(grantedOrigins)
+    ? grantedOrigins
+    : await readGrantedOrigins();
+  return hasCompleteEarnedGrant(snapshot);
+}
+
 function setEarnedCheck(id, state, label, rowLabel = null) {
   setProbeCheck(id, state, label);
   if (rowLabel) {
@@ -1117,7 +1137,7 @@ async function prepareEarnedPermissionFlow() {
     readEarnedState(),
     readGrantedOrigins(),
   ]);
-  const hasGrant = hasCompleteEarnedGrant(grantedOrigins);
+  const hasGrant = await readCompleteEarnedGrant(grantedOrigins);
   earnedPreparedContext = Object.freeze({ story, hasGrant });
   if (hasGrant && earnedRunVerified(onboarding, readiness)) {
     if (!onboarding.completedAt) {
@@ -1173,7 +1193,10 @@ async function allowAccessAndAddEarnedStory() {
     }
     const granted = permissionRequest ? await permissionRequest : true;
     const grantedOrigins = await readGrantedOrigins();
-    if (granted !== true || !hasCompleteEarnedGrant(grantedOrigins)) {
+    if (
+      granted !== true ||
+      !(await readCompleteEarnedGrant(grantedOrigins))
+    ) {
       await writeEarnedState({ promptResult: "declined" });
       void recordEarnedEvent("website_access_not_allowed");
       renderEarnedPermissionDeclined(story);
@@ -1190,7 +1213,7 @@ async function allowAccessAndAddEarnedStory() {
   } catch {
     void recordEarnedEvent("website_access_setup_failed");
     const grantedOrigins = await readGrantedOrigins();
-    if (hasCompleteEarnedGrant(grantedOrigins)) {
+    if (await readCompleteEarnedGrant(grantedOrigins)) {
       renderEarnedRegistrationFailure(story);
     } else {
       renderEarnedPermissionDeclined(story);

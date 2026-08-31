@@ -81,6 +81,15 @@ automatic tracking, and server sync are release gates. The earlier disposable
 identities prove clean onboarding behavior only; they do not prove upgrade
 continuity.
 
+Trace 0.6.6 build 40 restores the complete permission-bearing manifest surface
+that shipped in 0.6.5 build 52. Build 39 came from the post-repository-split
+mainline and replaced the required host/static content-script declarations
+with `activeTab`, optional hosts, and dynamic registration. On Safari that can
+reset an existing reader's Website Access during an App Store update. Build 40
+therefore keeps the bounded AO3, FFN, and Trace declarations stable while
+retaining the permission-first behavior gate: static scripts do nothing until
+`permissions.contains()` confirms the complete five-origin archive bundle.
+
 ## User contract
 
 When `TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1`:
@@ -92,17 +101,17 @@ When `TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1`:
   save automatically;
 - if Trace does not start, the app shows a literal Safari extension-button
   guide plus Safari Settings as the alternate recovery;
-- the popup uses `activeTab` only to identify the current supported story. It
-  does not inject a collector or send a save command before permission;
+- opening Trace from Safari obtains only Safari's current-site interaction
+  needed to identify the supported story. It does not inject a collector or
+  send a save command before complete Website Access;
 - one direct action requests exactly five supported origin patterns and tells
   the reader to choose **Always Allow**;
 - denial/cancel or an incomplete grant saves nothing and remains retryable;
 - a complete existing grant skips the prompt;
-- the background worker owns persistent production-script registration. It
-  reconciles at startup, on permission changes, and on popup request;
-- partial coverage unregisters the bundle so one working hostname cannot be
-  presented as complete setup;
-- after registration, the popup reloads the story. The normal pending-handoff
+- the background worker owns the complete-bundle readiness decision. Static
+  content scripts remain inert when coverage is partial, so one working
+  hostname cannot be presented as complete setup;
+- after the complete grant, the popup reloads the story. The normal pending-handoff
   path then supplies the fresh run and server-confirmed save;
 - setup is complete only after both that fresh post-registration run and the
   current app account's server confirmation;
@@ -110,7 +119,8 @@ When `TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1`:
   positive signal; inactivity alone is never treated as permission loss;
 - Chrome and Firefox packages remain production-shaped.
 
-The five optional patterns are:
+The popup requests these five minimized patterns from the bounded required host
+set:
 
 - `https://*.archiveofourown.org/*`
 - `https://*.archiveofourown.gay/*`
@@ -119,7 +129,7 @@ The five optional patterns are:
 - `https://m.fanfiction.net/*`
 
 Archive login, signup, password, authentication, and logout routes are excluded
-from the dynamically registered scripts. The flow stores only a bounded local
+from the static scripts. The flow stores only a bounded local
 list of coarse event names and timestamps for device-side diagnosis. It adds no
 network telemetry, URLs, story identity, account identity, page HTML, story
 text, cookies, or credentials.
