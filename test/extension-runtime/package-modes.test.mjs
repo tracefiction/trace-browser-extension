@@ -265,7 +265,7 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
         .update(JSON.stringify(earnedPermissionSurface))
         .digest("hex"),
       "09aa341fbcaf4a92b430bc4faf4a04ae5635b7d458219ec24f6aebf53daf5d83",
-      "production onboarding must preserve the exact v0.6.3 Safari permission surface",
+      "production onboarding must preserve the exact v0.6.5 Safari permission surface",
     );
     assert.deepEqual(
       earnedSafariManifest.host_permissions,
@@ -295,9 +295,9 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     ]);
     assert.doesNotMatch(earnedSafariConfig, /TRACE_IOS_ACTIVE_TAB_PROBE/);
     assert.match(earnedSafariConfig, /TRACE_IOS_EARNED_PERMISSION_ONBOARDING/);
-    assert.match(earnedSafariConfig, /trace-earned-permission-ready/);
     assert.match(earnedSafariConfig, /trace-archive-automation-v1/);
     assert.match(earnedSafariConfig, /persistAcrossSessions/);
+    assert.match(earnedSafariConfig, /trace-earned-permission-ready/);
     const earnedConfigContext = {};
     vm.runInNewContext(earnedSafariConfig, earnedConfigContext);
     const earnedOnboarding = earnedConfigContext.TRACE_IOS_EARNED_PERMISSION_ONBOARDING;

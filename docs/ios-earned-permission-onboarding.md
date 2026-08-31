@@ -111,6 +111,15 @@ withheld required hosts from its direct user gesture; after a complete grant,
 the story reload starts the already-declared static scripts and the normal
 fresh-run plus server-confirmed-save path.
 
+Trace 0.6.6 build 40 restores the complete permission-bearing manifest surface
+that shipped in 0.6.5 build 52. Build 39 came from the post-repository-split
+mainline and replaced the required host/static content-script declarations
+with `activeTab`, optional hosts, and dynamic registration. On Safari that can
+reset an existing reader's Website Access during an App Store update. Build 40
+therefore keeps the bounded AO3, FFN, and Trace declarations stable while
+retaining the permission-first behavior gate: static scripts do nothing until
+`permissions.contains()` confirms the complete five-origin archive bundle.
+
 ## User contract
 
 When `TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1`:
