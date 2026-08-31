@@ -72,6 +72,7 @@ function createPopupHarness({
   registeredContentScripts = [],
   permissionRequestResult = true,
   permissionRequestError = null,
+  permissionContainsResult = null,
   registrationReconcileResult = null,
 } = {}) {
   const html = fs.readFileSync(POPUP_HTML_PATH, "utf8");
@@ -197,6 +198,16 @@ function createPopupHarness({
     permissions: {
       getAll(callback) {
         const response = { origins: [...grantedOrigins], permissions: [] };
+        if (promiseRuntime) return Promise.resolve(response);
+        callback?.(response);
+      },
+      contains(request, callback) {
+        const response =
+          typeof permissionContainsResult === "boolean"
+            ? permissionContainsResult
+            : (request?.origins || []).every((origin) =>
+                grantedOrigins.includes(origin),
+              );
         if (promiseRuntime) return Promise.resolve(response);
         callback?.(response);
       },
@@ -717,6 +728,36 @@ test("earned-permission onboarding confirms automation only from a post-grant ar
     ).textContent,
     "Run confirmed",
   );
+});
+
+test("earned-permission onboarding accepts semantically complete legacy grants", async () => {
+  const grantAt = Date.now() - 5_000;
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    grantedOrigins: ["https://archiveofourown.org/*"],
+    permissionContainsResult: true,
+    registeredContentScripts: [
+      { id: "trace-archive-automation-v1" },
+      { id: "trace-ao3-saved-filters-v1" },
+    ],
+    storageState: {
+      traceEarnedPermissionOnboardingV1: {
+        grantAt,
+        registrationVersion: 3,
+        promptResult: "granted",
+      },
+      traceArchiveReadiness: { lastArchiveSeenAt: grantAt + 1_000 },
+    },
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  assert.equal(
+    h.document.getElementById("popup-earned-heading").textContent,
+    "Trace is ready",
+  );
+  assert.equal(h.permissionRequests.length, 0);
 });
 
 test("earned-permission onboarding confirms a heartbeat while the popup stays open", async () => {

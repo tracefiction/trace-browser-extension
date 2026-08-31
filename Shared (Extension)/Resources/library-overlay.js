@@ -15,6 +15,9 @@
   const ACTION_SURFACE_CLOSE_ATTR = "data-trace-action-surface-close";
   const TRACE_SESSION_MODE = globalThis.TRACE_SESSION_MODE || "legacy";
   const KERNEL_SESSION_ACTIVE = TRACE_SESSION_MODE === "kernel";
+  const TRACE_EARNED_PERMISSION_GATE_ACTIVE =
+    globalThis.TRACE_IOS_EARNED_PERMISSION_ONBOARDING?.registrationMode ===
+    "static";
   const TRACE_WEB_HOME_URL = configuredTraceWebHomeUrl();
   const TRACE_WEB_UPGRADE_URL = traceUpgradeUrl();
   const ACCOUNT_PROJECTION_GET_MESSAGE = "TRACE_ACCOUNT_PROJECTION_GET";
@@ -24,6 +27,23 @@
   const TRACE_API_BASE_STORAGE_KEY = "traceApiBase";
   var currentTraceAuthState = null;
   var confirmedQuickAddEntries = new Map();
+
+  function runWhenTraceEarnedPermissionReady(start) {
+    if (
+      !TRACE_EARNED_PERMISSION_GATE_ACTIVE ||
+      globalThis.TRACE_EARNED_PERMISSION_COMPLETE === true
+    ) {
+      start();
+      return;
+    }
+    document.addEventListener(
+      "trace-earned-permission-ready",
+      function () {
+        if (globalThis.TRACE_EARNED_PERMISSION_COMPLETE === true) start();
+      },
+      { once: true },
+    );
+  }
 
   function configuredTraceWebHomeUrl() {
     var configured =
@@ -1920,8 +1940,10 @@
       "display:inline-flex",
       "align-items:center",
       "justify-content:center",
-      "width:30px",
-      "height:30px",
+      "box-sizing:border-box",
+      "width:100%",
+      "min-width:0",
+      "height:40px",
       "border:0",
       "border-radius:7px",
       "background:transparent",
@@ -1937,10 +1959,10 @@
     var current = entryRatingValue(entry);
     var wrap = document.createElement("div");
     wrap.setAttribute("data-trace-rating-control", "1");
-    wrap.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;padding-top:2px";
+    wrap.style.cssText = "display:grid;gap:6px;min-width:0;padding-top:2px";
 
     var labelWrap = document.createElement("div");
-    labelWrap.style.cssText = "min-width:72px";
+    labelWrap.style.cssText = "display:flex;align-items:baseline;justify-content:space-between;gap:8px;min-width:0";
     var label = document.createElement("div");
     label.className = "x-sheet-label";
     label.textContent = "Your rating";
@@ -1948,7 +1970,7 @@
     labelWrap.appendChild(label);
 
     var row = document.createElement("div");
-    row.style.cssText = "display:flex;align-items:center;gap:2px";
+    row.style.cssText = "display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:2px;width:100%;min-width:0";
     var message = document.createElement("span");
     message.setAttribute("data-trace-rating-message", "1");
     message.textContent = current > 0 ? current + " of 5" : "Not rated";
@@ -3629,46 +3651,48 @@
     }
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", run, { once: true });
-  } else {
-    run();
-  }
-  startDomObserver();
+  runWhenTraceEarnedPermissionReady(function () {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", run, { once: true });
+    } else {
+      run();
+    }
+    startDomObserver();
 
-  try {
-    window.addEventListener("pageshow", function () {
-      scheduleRun(60);
-    });
-    window.addEventListener("focus", function () {
-      scheduleRun(80);
-    });
-    document.addEventListener("visibilitychange", function () {
-      if (!document.hidden) scheduleRun(80);
-    });
-  } catch {
-    /* ignore */
-  }
-
-  try {
-    if (ext.storage && ext.storage.onChanged) {
-      ext.storage.onChanged.addListener(function (changes, area) {
-        if (area !== "local") return;
-        if (
-          !changes.libraryOverlayCache &&
-          !changes[ACCOUNT_PROJECTION_REVISION_KEY] &&
-          !changes.prefLibraryInlayEnabled &&
-          !changes.traceAuthState &&
-          !changes.authToken &&
-          !changes[TRACE_ACCOUNT_ID_KEY] &&
-          !changes[TRACE_API_BASE_STORAGE_KEY]
-        ) {
-          return;
-        }
+    try {
+      window.addEventListener("pageshow", function () {
         scheduleRun(60);
       });
+      window.addEventListener("focus", function () {
+        scheduleRun(80);
+      });
+      document.addEventListener("visibilitychange", function () {
+        if (!document.hidden) scheduleRun(80);
+      });
+    } catch {
+      /* ignore */
     }
-  } catch {
-    /* ignore */
-  }
+
+    try {
+      if (ext.storage && ext.storage.onChanged) {
+        ext.storage.onChanged.addListener(function (changes, area) {
+          if (area !== "local") return;
+          if (
+            !changes.libraryOverlayCache &&
+            !changes[ACCOUNT_PROJECTION_REVISION_KEY] &&
+            !changes.prefLibraryInlayEnabled &&
+            !changes.traceAuthState &&
+            !changes.authToken &&
+            !changes[TRACE_ACCOUNT_ID_KEY] &&
+            !changes[TRACE_API_BASE_STORAGE_KEY]
+          ) {
+            return;
+          }
+          scheduleRun(60);
+        });
+      }
+    } catch {
+      /* ignore */
+    }
+  });
 })();
