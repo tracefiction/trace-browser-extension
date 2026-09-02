@@ -3656,6 +3656,143 @@ test("finish qualify watches AO3 chapter text and routes resolution through the 
   });
 });
 
+test("one-shot finish evidence survives the initial Saved round-trip", async () => {
+  const collectorSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  const entryId = "00000000-0000-4000-8000-000000000779";
+  const sent = [];
+  const endCallbacks = [];
+  let autoTrackCallback = null;
+  const dom = new JSDOM(
+    `<!doctype html><html><body>
+      <h2 class="title heading">Fast one-shot</h2>
+      <h3 class="byline heading"><a rel="author">Author</a></h3>
+      <ul class="required-tags"><li><span title="Complete Work">Complete Work</span></li></ul>
+      <dl class="work meta group"><dd class="chapters">1/1</dd></dl>
+      <div id="chapters"><div class="chapter" id="chapter-1">
+        <div class="userstuff module" role="article"><p>A short story.</p></div>
+      </div></div>
+    </body></html>`,
+    {
+      url: "https://archiveofourown.org/works/779/chapters/880",
+      contentType: "text/html",
+      runScripts: "outside-only",
+    },
+  );
+  const store = {
+    authToken: "test-token",
+    prefAutoTrackEnabled: true,
+    libraryOverlayCache: { entries: {} },
+  };
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(message, callback) {
+        sent.push(message);
+        if (message.type === "TRACE_AUTO_TRACK") {
+          autoTrackCallback = callback;
+          return;
+        }
+        if (message.type === "TRACE_WORK_STATE_GET") {
+          callback?.({ ok: false });
+          return;
+        }
+        if (message.type === "TRACE_FINISH_QUALIFICATION_SIGNAL") {
+          callback?.({
+            ok: true,
+            command: {
+              kind: "acknowledged",
+              state: "resolved",
+              eventId: null,
+              workKey: "ao3:779",
+              entry: {
+                entryId,
+                status: "FINISHED",
+                readerStatus: "FINISHED",
+                canonicalReaderStatus: "FINISHED",
+                chapters: { current: 1, total: 1 },
+              },
+            },
+          });
+        }
+      },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, callback) {
+          callback(store);
+        },
+        set(value, callback) {
+          Object.assign(store, value);
+          callback?.();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  dom.window.TraceFinishQualify = {
+    onReachEnd(_body, callback) {
+      endCallbacks.push(callback);
+      return function () {};
+    },
+    toast() {},
+  };
+  installCollectorChrome(dom, chrome);
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+  await delay(0);
+
+  assert.ok(endCallbacks.length > 0, "reading evidence should be armed before save confirmation");
+  assert.equal(typeof autoTrackCallback, "function");
+  endCallbacks[0]();
+  assert.equal(
+    sent.some((message) => message.type === "TRACE_FINISH_QUALIFICATION_SIGNAL"),
+    false,
+    "end evidence alone must not invent an entry",
+  );
+
+  autoTrackCallback({
+    ok: true,
+    entryId,
+    state: {
+      accountId: "acct-story",
+      workKey: "ao3:779",
+      operation: "auto_track",
+      status: "saved",
+      entryId,
+      entry: {
+        entryId,
+        status: "SAVED",
+        readerStatus: "SAVED",
+        canonicalReaderStatus: "SAVED",
+        chapters: { current: 0, total: 1 },
+      },
+    },
+  });
+  await delay(0);
+
+  const finish = sent.find(
+    (message) => message.type === "TRACE_FINISH_QUALIFICATION_SIGNAL",
+  );
+  assert.ok(finish, "confirmed Saved entry should consume retained end evidence");
+  assert.deepEqual(plainJson(finish.payload), {
+    entryId,
+    workKey: "ao3:779",
+    source: "ao3",
+    chapter: 1,
+    total: 1,
+    state: "resolved",
+    workStatus: "complete",
+    resolutionSource: "source",
+  });
+});
+
 test("finish qualify on AO3 Entire Work waits for crossing the final rendered chapter end", () => {
   const collectorSrc = fs.readFileSync(
     path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
@@ -4475,7 +4612,7 @@ test("known-source finish failures show a durable retry affordance and recover",
 
   const recovery = dom.window.document.querySelector("[data-trace-finish-recovery]");
   assert.ok(recovery);
-  assert.match(recovery.textContent || "", /couldn.t update/i);
+  assert.match(recovery.textContent || "", /couldn.t .*update/i);
   assert.ok(recovery.querySelector("[data-trace-finish-open]"));
   recovery.querySelector("[data-trace-finish-retry]").click();
 

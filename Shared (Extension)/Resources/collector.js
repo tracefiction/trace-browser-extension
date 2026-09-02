@@ -583,6 +583,7 @@ var TRACE_READER_STATUS_CHOICES = [
   "DROPPED",
 ];
 var FINISH_QUALIFY_DISMISS_KEY = "trace:finish-qualify:dismissed";
+var finishQualifyEvidenceState = Object.create(null);
 var finishQualifyWatchState = Object.create(null);
 var finishQualifyBandState = Object.create(null);
 var finishQualifyGeneration = 0;
@@ -5794,29 +5795,136 @@ function sendFinishQualifyResolution(decision, workState, done) {
   );
 }
 
-function finishQualifyDecision(view, workKey) {
-  var entry = view && view.entry;
-  if (!view || !view.hasAuth || !view.canMutate || !entry || !entry.entryId) return null;
-  var status = canonicalReaderStatus(entryStatus(entry));
+function finishQualifyPageCandidate(workKey) {
   var item = storySheetCurrentItem();
   if (!item || item.ctx !== "story" || !finishQualifyIsLastPostedChapter(item)) return null;
   var sourceWorkState = finishQualifySourceWorkState(item);
-  if (status === "FINISHED" || status === "DROPPED") return null;
-  if (status === "CAUGHT_UP" && sourceWorkState !== "complete") return null;
   var anchorEl = finishQualifyAnchorElement();
   var bodyEl = finishQualifyBodyElement();
   if (!anchorEl || !bodyEl) return null;
   return {
     workKey: workKey,
-    entry: entry,
     item: item,
     sourceWorkState: sourceWorkState,
     requiresWorkStateChoice: !sourceWorkState,
     anchorEl: anchorEl,
     bodyEl: bodyEl,
-    accountId: view.accountId || null,
-    sessionKey: finishQualifySessionKey(workKey, entry.entryId, item),
+    fallbackEndEl: isAO3() ? finishQualifyAo3FallbackEndElement(bodyEl) : null,
   };
+}
+
+function finishQualifyEvidenceSignature(candidate) {
+  if (!candidate || !candidate.item) return "";
+  return [
+    candidate.workKey,
+    candidate.item.src || "unknown",
+    candidate.item.u || location.href,
+    finishQualifyCurrentChapterCount(candidate.item),
+    finishQualifyPostedChapterCount(candidate.item),
+  ].join(":");
+}
+
+function ensureFinishQualifyEvidenceWatch(workKey) {
+  var candidate = finishQualifyPageCandidate(workKey);
+  if (
+    !candidate ||
+    !window.TraceFinishQualify ||
+    typeof window.TraceFinishQualify.onReachEnd !== "function"
+  ) return null;
+
+  var signature = finishQualifyEvidenceSignature(candidate);
+  var current = finishQualifyEvidenceState[workKey];
+  if (current && current.signature === signature) return current;
+  if (current && typeof current.cleanup === "function") current.cleanup();
+
+  var state = {
+    signature: signature,
+    reached: false,
+    cleanup: null,
+    subscribers: [],
+  };
+  finishQualifyEvidenceState[workKey] = state;
+  var cleanup = watchFinishQualifyEnd(candidate, function () {
+    if (finishQualifyEvidenceState[workKey] !== state || state.reached) return;
+    state.reached = true;
+    state.cleanup = null;
+    var subscribers = state.subscribers.slice();
+    state.subscribers.length = 0;
+    subscribers.forEach(function (subscriber) {
+      subscriber();
+    });
+  });
+  if (finishQualifyEvidenceState[workKey] === state && !state.reached) {
+    state.cleanup = cleanup;
+  } else if (typeof cleanup === "function") {
+    cleanup();
+  }
+  return state;
+}
+
+function waitForFinishQualifyEvidence(workKey, onReachEnd) {
+  var evidence = ensureFinishQualifyEvidenceWatch(workKey);
+  if (!evidence) return function () {};
+  if (evidence.reached) {
+    onReachEnd();
+    return function () {};
+  }
+  evidence.subscribers.push(onReachEnd);
+  return function () {
+    var index = evidence.subscribers.indexOf(onReachEnd);
+    if (index >= 0) evidence.subscribers.splice(index, 1);
+  };
+}
+
+function finishQualifyDecision(view, workKey) {
+  var entry = view && view.entry;
+  if (!view || !view.hasAuth || !view.canMutate || !entry || !entry.entryId) return null;
+  var candidate = finishQualifyPageCandidate(workKey);
+  if (!candidate) return null;
+  var status = canonicalReaderStatus(entryStatus(entry));
+  if (status === "FINISHED" || status === "DROPPED") return null;
+  if (status === "CAUGHT_UP" && candidate.sourceWorkState !== "complete") return null;
+  return Object.assign({}, candidate, {
+    entry: entry,
+    accountId: view.accountId || null,
+    sessionKey: finishQualifySessionKey(workKey, entry.entryId, candidate.item),
+  });
+}
+
+function watchFinishQualifyEnd(decision, onReachEnd) {
+  var elements = [decision.bodyEl];
+  if (
+    decision.fallbackEndEl &&
+    decision.fallbackEndEl !== decision.bodyEl
+  ) {
+    elements.push(decision.fallbackEndEl);
+  }
+  var cleanups = [];
+  var reached = false;
+
+  function cleanupAll() {
+    while (cleanups.length) {
+      var cleanup = cleanups.pop();
+      if (typeof cleanup === "function") cleanup();
+    }
+  }
+
+  function settleReach() {
+    if (reached) return;
+    reached = true;
+    cleanupAll();
+    onReachEnd();
+  }
+
+  for (var i = 0; i < elements.length; i += 1) {
+    if (reached) break;
+    var cleanup = window.TraceFinishQualify.onReachEnd(elements[i], settleReach);
+    if (typeof cleanup !== "function") continue;
+    if (reached) cleanup();
+    else cleanups.push(cleanup);
+  }
+
+  return cleanupAll;
 }
 
 function finishQualifyRemoveBand(workKey) {
@@ -5978,7 +6086,7 @@ function setupFinishQualify(view, workKey) {
     cleanup: null,
   };
   finishQualifyWatchState[workKey] = watchState;
-  var cleanup = window.TraceFinishQualify.onReachEnd(decision.bodyEl, function () {
+  var cleanup = waitForFinishQualifyEvidence(workKey, function () {
     if (
       !finishQualifyFlowIsCurrent(workKey, watchState) ||
       finishQualifyWasDismissed(decision.sessionKey)
@@ -6309,6 +6417,10 @@ function initQuickAdd() {
   }
   reserveQuickAddSlot(workKey);
   storyQuickAddUiReady = true;
+  // Begin collecting deliberate reading-end evidence before the initial save
+  // round-trip finishes. Short one-shots can otherwise be fully read while the
+  // entry is still being created, forcing the reader to revisit the ending.
+  ensureFinishQualifyEvidenceWatch(workKey);
   queryBackgroundWorkStateForStory(workKey);
   renderQuickAddButton(workKey);
   processIosPendingFirstStoryAdd();

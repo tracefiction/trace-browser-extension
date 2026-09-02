@@ -700,7 +700,7 @@
       "." + ROOT_ATTR + " .trace-sf-row:hover { background: #e7e6e1; }",
       "." + ROOT_ATTR + " .trace-sf-row[data-active='true'] { background: #e9f2ec; }",
       "." + ROOT_ATTR + " .trace-sf-row[data-active='true']:hover { background: #dcebe1; }",
-      "." + ROOT_ATTR + " .trace-sf-row[data-menu-open='true'] { background: #f7f6f1; z-index: 20; }",
+      "." + ROOT_ATTR + " .trace-sf-row[data-menu-open='true'] { background: #f7f6f1; }",
       "." + ROOT_ATTR + " .trace-sf-row-inner { display: grid; grid-template-columns: 3px minmax(0, 1fr) 2.2rem; align-items: stretch; min-width: 0; }",
       "." + ROOT_ATTR + " .trace-sf-edge { width: 3px; flex: 0 0 auto; background: transparent; }",
       "." + ROOT_ATTR + " .trace-sf-row[data-active='true'] .trace-sf-edge { background: #2f7d5b; }",
@@ -715,11 +715,14 @@
       "." + ROOT_ATTR + " .trace-sf-menu-btn:focus, ." + ROOT_ATTR + " .trace-sf-menu-btn:active { outline: 0; }",
       "." + ROOT_ATTR + " .trace-sf-row:hover .trace-sf-menu-btn, ." + ROOT_ATTR + " .trace-sf-menu-btn:hover, ." + ROOT_ATTR + " .trace-sf-menu-btn:focus-visible, ." + ROOT_ATTR + " .trace-sf-row[data-menu-open='true'] .trace-sf-menu-btn { opacity: 1; }",
       "." + ROOT_ATTR + " .trace-sf-menu-btn:hover, ." + ROOT_ATTR + " .trace-sf-menu-btn:focus-visible, ." + ROOT_ATTR + " .trace-sf-row[data-menu-open='true'] .trace-sf-menu-btn { background: rgba(42,42,42,0.045); box-shadow: none; color: #5a5950; }",
-      "." + ROOT_ATTR + " .trace-sf-menu { background: #fffdf8; border: 1px solid #c3c2bc; border-radius: 0.36rem; box-shadow: 0 7px 16px rgba(28,28,23,0.16); display: grid; gap: 0.08rem; margin: 0; padding: 0.22rem; pointer-events: auto; position: absolute; right: 0.48rem; top: 1.9rem; width: min(10rem, calc(100% - 1rem)); z-index: 30; }",
-      "." + ROOT_ATTR + " .trace-sf-menu button { -webkit-appearance: none; appearance: none; background: transparent; background-image: none; border: 0; border-radius: 0.26rem; box-shadow: none; color: #46524a; cursor: pointer; display: block; font-family: inherit; font-size: 0.72rem; height: auto; line-height: 1.2; margin: 0; min-height: 1.7rem; padding: 0.32rem 0.42rem; text-align: left; text-shadow: none; text-transform: none; white-space: nowrap; width: 100%; }",
-      "." + ROOT_ATTR + " .trace-sf-menu button:hover, ." + ROOT_ATTR + " .trace-sf-menu button:focus-visible { background: #f0efeb; outline: 0; }",
-      "." + ROOT_ATTR + " .trace-sf-menu button:disabled { color: #8f958f; cursor: default; opacity: 0.62; }",
-      "." + ROOT_ATTR + " .trace-sf-menu button[data-danger='true'] { color: #9a3412; }",
+      "." + ROOT_ATTR + " .trace-sf-manage { align-items: center; background: #efeee9; border-top: 1px solid #d8d6cf; display: flex; flex-wrap: wrap; gap: 0; margin: 0; padding: 0.38rem 0.62rem 0.42rem calc(3px + 0.72rem); animation: trace-sf-reveal 0.14s ease-out both; }",
+      "." + ROOT_ATTR + " .trace-sf-manage button { -webkit-appearance: none; appearance: none; background: transparent; background-image: none; border: 0; border-left: 1px solid #cbc9c1; border-radius: 0; box-shadow: none; color: #46524a; cursor: pointer; display: inline-flex; align-items: center; font-family: inherit; font-size: 0.7rem; font-weight: 650; height: auto; line-height: 1.2; margin: 0; min-height: 1.9rem; padding: 0.34rem 0.58rem; text-align: left; text-shadow: none; text-transform: none; white-space: nowrap; }",
+      "." + ROOT_ATTR + " .trace-sf-manage button:first-child { border-left: 0; padding-left: 0; }",
+      "." + ROOT_ATTR + " .trace-sf-manage button:hover, ." + ROOT_ATTR + " .trace-sf-manage button:focus-visible { color: #1f5c45; outline: 0; text-decoration: underline; text-underline-offset: 0.16rem; }",
+      "." + ROOT_ATTR + " .trace-sf-manage button:disabled { color: #8f958f; cursor: default; opacity: 0.62; text-decoration: none; }",
+      "." + ROOT_ATTR + " .trace-sf-manage button[data-danger='true'] { color: #9a3412; }",
+      "@keyframes trace-sf-reveal { from { opacity: 0; transform: translateY(-0.18rem); } to { opacity: 1; transform: translateY(0); } }",
+      "@media (prefers-reduced-motion: reduce) { ." + ROOT_ATTR + " .trace-sf-manage { animation: none; } }",
       "." + ROOT_ATTR + " .trace-sf-form, ." + ROOT_ATTR + " .trace-sf-empty, ." + ROOT_ATTR + " .trace-sf-note, ." + ROOT_ATTR + " .trace-sf-error { border-top: 1px solid rgba(65,72,70,0.14); padding: 0.78rem 0.82rem; }",
       "." + ROOT_ATTR + " .trace-sf-label { color: #647067; font-size: 0.66rem; font-weight: 750; letter-spacing: 0.08em; margin-bottom: 0.42rem; text-transform: uppercase; }",
       "." + ROOT_ATTR + " .trace-sf-input-row { display: block; position: relative; }",
@@ -1180,11 +1183,11 @@
         escapeHtml(summaryText) +
         "</span>" +
         "</button>" +
-        "<button type='button' class='trace-sf-menu-btn' data-trace-sf-action='menu' data-id='" + escapeAttr(preset.id) + "' aria-haspopup='menu' aria-expanded='" + (state.menuId === preset.id ? "true" : "false") + "' aria-label='Manage " + escapeAttr(preset.name) + "'>" + renderKebabIcon() + "</button>" +
+        "<button type='button' class='trace-sf-menu-btn' data-trace-sf-action='menu' data-id='" + escapeAttr(preset.id) + "' aria-expanded='" + (state.menuId === preset.id ? "true" : "false") + "' aria-controls='trace-sf-manage-" + escapeAttr(preset.id) + "' aria-label='Manage " + escapeAttr(preset.name) + "'>" + renderKebabIcon() + "</button>" +
         "</div>"
       );
       if (state.menuId === preset.id) {
-        html += renderMenu(preset);
+        html += renderManagementActions(preset);
       }
       if (state.confirmDeleteId === preset.id) {
         html += renderDeleteConfirm(preset);
@@ -1194,13 +1197,13 @@
     return html;
   }
 
-  function renderMenu(preset) {
+  function renderManagementActions(preset) {
     var canUpdate = state.current && state.current.canSave;
     return (
-      "<div class='trace-sf-menu' role='menu'>" +
-      "<button type='button' role='menuitem' data-trace-sf-action='rename-open' data-id='" + escapeAttr(preset.id) + "'>Rename</button>" +
-      "<button type='button' role='menuitem' data-trace-sf-action='update-current' data-id='" + escapeAttr(preset.id) + "'" + (canUpdate ? "" : " disabled") + ">Update to current</button>" +
-      "<button type='button' role='menuitem' data-danger='true' data-trace-sf-action='delete-confirm' data-id='" + escapeAttr(preset.id) + "'>Delete</button>" +
+      "<div class='trace-sf-manage' id='trace-sf-manage-" + escapeAttr(preset.id) + "' role='group' aria-label='Manage " + escapeAttr(preset.name) + "'>" +
+      "<button type='button' data-trace-sf-action='rename-open' data-id='" + escapeAttr(preset.id) + "'>Rename</button>" +
+      "<button type='button' data-trace-sf-action='update-current' data-id='" + escapeAttr(preset.id) + "'" + (canUpdate ? "" : " disabled title='Choose filters on this page before replacing this preset'") + ">Replace with current filters</button>" +
+      "<button type='button' data-danger='true' data-trace-sf-action='delete-confirm' data-id='" + escapeAttr(preset.id) + "'>Delete</button>" +
       "</div>"
     );
   }
@@ -1390,6 +1393,20 @@
     state.renameId = null;
     state.confirmDeleteId = null;
     render();
+    if (state.menuId) revealManagementSoon(id);
+  }
+
+  function revealManagementSoon(id) {
+    setTimeout(function () {
+      try {
+        var row = state.root && state.root.querySelector(".trace-sf-row[data-id='" + cssEscape(id) + "']");
+        if (row && typeof row.scrollIntoView === "function") {
+          row.scrollIntoView({ block: "nearest", inline: "nearest" });
+        }
+      } catch (_) {
+        /* The action tray remains in flow even when scrollIntoView is unavailable. */
+      }
+    }, 0);
   }
 
   function closeMenu(restoreFocus) {
@@ -1665,7 +1682,7 @@
         if (!state.menuId || !state.root) return;
         var target = event.target;
         if (target && target.closest) {
-          if (target.closest("." + ROOT_ATTR + " .trace-sf-menu")) return;
+          if (target.closest("." + ROOT_ATTR + " .trace-sf-manage")) return;
           if (target.closest("." + ROOT_ATTR + " .trace-sf-menu-btn")) return;
         }
         closeMenu(false);

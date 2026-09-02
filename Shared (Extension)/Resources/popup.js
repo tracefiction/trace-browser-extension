@@ -68,6 +68,7 @@ const ACTIVE_TAB_PROBE_FILES = Object.freeze([
   "collector.js",
 ]);
 let earnedPreparedContext = null;
+let kernelPopupInitialized = false;
 
 const fallbackStatus = {
   state: "signed_out",
@@ -1082,34 +1083,6 @@ function renderEarnedUnsupportedStory() {
   configureEarnedActions({ label: "Close and open a story", action: "close" });
 }
 
-function renderEarnedRunConfirmed() {
-  setEarnedConnection("connected", "Ready");
-  setEarnedCopy({
-    kicker: "Website access confirmed",
-    heading: "Trace is ready",
-    lead: "Return to the Trace app to finish.",
-  });
-  setEarnedCheck("popup-earned-story", "pass", "Confirmed", "Story page");
-  setEarnedCheck(
-    "popup-earned-access",
-    "pass",
-    "Allowed",
-    "Website access",
-  );
-  setEarnedCheck(
-    "popup-earned-save",
-    "pass",
-    "Run confirmed",
-    "Trace on sites",
-  );
-  setEarnedResult(
-    "success",
-    "Return to the Trace app.",
-    "Trace will show setup complete after the server confirms your story.",
-  );
-  configureEarnedActions({ label: "Done", action: "close" });
-}
-
 function earnedRunVerified(onboarding, readiness) {
   return Boolean(
     onboarding.grantAt &&
@@ -1126,6 +1099,25 @@ async function reconcileEarnedRegistration() {
 
 async function prepareEarnedPermissionFlow() {
   resetEarnedLedger();
+  const [{ onboarding, readiness }, grantedOrigins] = await Promise.all([
+    readEarnedState(),
+    readGrantedOrigins(),
+  ]);
+  const hasGrant = await readCompleteEarnedGrant(grantedOrigins);
+
+  // The earned-permission screen is onboarding, not the extension's permanent
+  // popup. Once the post-grant archive run has been proved, every later open
+  // should expose the normal controls regardless of the current Safari page.
+  if (hasGrant && onboarding.completedAt) {
+    activateKernelPopupAfterEarnedPermission();
+    return;
+  }
+  if (hasGrant && earnedRunVerified(onboarding, readiness)) {
+    await writeEarnedState({ completedAt: onboarding.completedAt || Date.now() });
+    activateKernelPopupAfterEarnedPermission();
+    return;
+  }
+
   const tab = await probeQueryActiveTab().catch(() => null);
   const story = classifyProbeStory(tab?.url);
   if (!tab || !Number.isInteger(tab.id) || !story.ok) {
@@ -1133,19 +1125,7 @@ async function prepareEarnedPermissionFlow() {
     renderEarnedUnsupportedStory();
     return;
   }
-  const [{ onboarding, readiness }, grantedOrigins] = await Promise.all([
-    readEarnedState(),
-    readGrantedOrigins(),
-  ]);
-  const hasGrant = await readCompleteEarnedGrant(grantedOrigins);
   earnedPreparedContext = Object.freeze({ story, hasGrant });
-  if (hasGrant && earnedRunVerified(onboarding, readiness)) {
-    if (!onboarding.completedAt) {
-      await writeEarnedState({ completedAt: Date.now() });
-    }
-    renderEarnedRunConfirmed();
-    return;
-  }
   if (hasGrant) {
     const registration = await reconcileEarnedRegistration().catch(() => null);
     if (registration?.ok !== true || registration?.registered !== true) {
@@ -1624,6 +1604,8 @@ function bindPreferenceControls() {
 }
 
 function initializeKernelPopup() {
+  if (kernelPopupInitialized) return;
+  kernelPopupInitialized = true;
   renderKernelSnapshot({ state: "initializing", reason: "none" });
   for (const actionControl of [
     document.getElementById("popup-cta"),
@@ -1647,6 +1629,14 @@ function initializeKernelPopup() {
     });
   }
   requestKernelSnapshot();
+}
+
+function activateKernelPopupAfterEarnedPermission() {
+  earnedPreparedContext = null;
+  delete document.body.dataset.traceEarnedPermission;
+  const section = document.getElementById("popup-earned-permission");
+  if (section) section.hidden = true;
+  initializeKernelPopup();
 }
 
 if (EARNED_PERMISSION_ONBOARDING) {
@@ -1695,11 +1685,13 @@ ext.storage.onChanged.addListener((changes, area) => {
 // Import is rendered only when the active session owner has exposed a
 // supported archive page, but the same explicit control works in both modes.
 const importBtn = document.getElementById("popup-import");
-if (importBtn && !ACTIVE_TAB_PROBE) {
+const NORMAL_POPUP_CONTROLS_AVAILABLE =
+  !ACTIVE_TAB_PROBE || Boolean(EARNED_PERMISSION_ONBOARDING);
+if (importBtn && NORMAL_POPUP_CONTROLS_AVAILABLE) {
   setImportInitial(importBtn);
   importBtn.addEventListener("click", () => {
     runImport(importBtn);
   });
 }
 
-if (!ACTIVE_TAB_PROBE) bindPreferenceControls();
+if (NORMAL_POPUP_CONTROLS_AVAILABLE) bindPreferenceControls();

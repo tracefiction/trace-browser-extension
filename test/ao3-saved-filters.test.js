@@ -1009,21 +1009,30 @@ test("AO3 saved filters supports inline rename and delete", async () => {
     },
   });
   const mount = root(window);
+  const revealed = [];
+  window.Element.prototype.scrollIntoView = function (options) {
+    revealed.push({ element: this, options });
+  };
 
   mount.querySelector("[data-trace-sf-action='menu']").click();
   await sleep(0);
   assert.equal(mount.querySelector(".trace-sf-row").getAttribute("data-menu-open"), "true");
   assert.equal(mount.querySelector(".trace-sf-menu-btn").getAttribute("aria-expanded"), "true");
-  assert.match(window.document.getElementById("trace-ao3-saved-filters-style").textContent, /\.trace-sf-menu \{[^}]*position: absolute/s);
-  assert.match(window.document.getElementById("trace-ao3-saved-filters-style").textContent, /\.trace-sf-row\[data-menu-open='true'\] \{[^}]*z-index: 20/s);
-  assert.match(window.document.getElementById("trace-ao3-saved-filters-style").textContent, /\.trace-sf-menu \{[^}]*border-radius: 0\.36rem;[^}]*box-shadow: 0 7px 16px/s);
+  assert.match(window.document.getElementById("trace-ao3-saved-filters-style").textContent, /\.trace-sf-manage \{[^}]*display: flex/s);
+  assert.doesNotMatch(window.document.getElementById("trace-ao3-saved-filters-style").textContent, /\.trace-sf-manage \{[^}]*position: absolute/s);
   assert.match(window.document.getElementById("trace-ao3-saved-filters-style").textContent, /\.trace-sf-menu-btn:focus[^}]*outline: 0/s);
   assert.equal(mount.querySelector(".trace-sf-menu-btn").textContent, "");
   assert.equal(mount.querySelectorAll(".trace-sf-menu-btn svg circle").length, 3);
-  assert.match(mount.querySelector(".trace-sf-menu").textContent, /Rename/);
+  assert.equal(mount.querySelector(".trace-sf-manage").getAttribute("role"), "group");
+  assert.match(mount.querySelector(".trace-sf-manage").getAttribute("aria-label"), /^Manage /);
+  assert.match(mount.querySelector(".trace-sf-manage").textContent, /Rename/);
+  assert.match(mount.querySelector(".trace-sf-manage").textContent, /Replace with current filters/);
+  assert.equal(mount.querySelector(".trace-sf-row > .trace-sf-manage") !== null, true);
+  assert.equal(revealed.at(-1).element.classList.contains("trace-sf-row"), true);
+  assert.equal(revealed.at(-1).options.block, "nearest");
   window.document.body.dispatchEvent(new window.Event("pointerdown", { bubbles: true }));
   await sleep(0);
-  assert.equal(mount.querySelector(".trace-sf-menu"), null);
+  assert.equal(mount.querySelector(".trace-sf-manage"), null);
   assert.equal(mount.querySelector(".trace-sf-menu-btn").getAttribute("aria-expanded"), "false");
 
   mount.querySelector("[data-trace-sf-action='menu']").click();
@@ -1034,7 +1043,7 @@ test("AO3 saved filters supports inline rename and delete", async () => {
     cancelable: true,
   }));
   await sleep(0);
-  assert.equal(mount.querySelector(".trace-sf-menu"), null);
+  assert.equal(mount.querySelector(".trace-sf-manage"), null);
   assert.equal(mount.querySelector(".trace-sf-menu-btn").getAttribute("aria-expanded"), "false");
 
   mount.querySelector("[data-trace-sf-action='menu']").click();
