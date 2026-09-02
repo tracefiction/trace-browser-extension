@@ -3317,7 +3317,7 @@ test("story sheet shows status editing for cached entries with entryId and hides
     const header = sheet.querySelector("[data-trace-management-header]");
     assert.ok(header);
     assert.match(header.className || "", /\bx-sheet-head\b/);
-    assert.doesNotMatch(header.textContent || "", /\bTrace\b/i);
+    assert.match(header.textContent || "", /Trace\s*·\s*FFN/i);
     assert.ok(sheet.querySelector(".x-sheet-body"));
     assert.ok(sheet.querySelector(".x-sheet-foot"));
     const choices = sheet.querySelector("[data-trace-status-choices]");
@@ -3354,7 +3354,7 @@ test("story sheet shows status editing for cached entries with entryId and hides
   }
 });
 
-test("story sheet selected status choice uses status-specific D1 tint", () => {
+test("story sheet selected status choice uses the unified ink selection and status accent", () => {
   const dom = domFromFixture(
     "ffn_story_mobile.html",
     "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter"
@@ -3416,7 +3416,7 @@ test("story sheet selected status choice uses status-specific D1 tint", () => {
   assert.equal(selected.getAttribute("data-trace-status-choice"), "PAUSED");
   assert.match(
     selected.getAttribute("style") || "",
-    /background:\s*(?:#efddcd|rgb\(239,\s*221,\s*205\))/i,
+    /background:\s*(?:#151e1c|rgb\(21,\s*30,\s*28\))/i,
   );
   assert.match(
     selected.getAttribute("style") || "",
@@ -4995,10 +4995,10 @@ test("story sheet position block shows unknown total without chapter stepper con
   const position = sheet.querySelector("[data-trace-story-position]");
   assert.ok(position);
   assert.match(position.className || "", /\bx-pos\b/);
-  assert.match(position.textContent || "", /Ch 3\s*\/\s*\?/);
+  assert.match(position.textContent || "", /Chapter 3\s*of\s*\?/);
   assert.equal(position.querySelector(".bar"), null);
   assert.equal(position.querySelector(".step"), null);
-  assert.doesNotMatch(sheet.textContent || "", /(?:chapter|Set to current)/i);
+  assert.doesNotMatch(sheet.textContent || "", /Set to current/i);
 });
 
 test("FFN mobile story post-add status mutation failure keeps saved state", () => {
@@ -5155,34 +5155,33 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
   assert.ok(sheet.querySelector(".x-meta"));
   assert.ok(sheet.querySelector(".x-sheet-foot"));
   assert.match(sheet.textContent || "", /Hidden/i);
-  assert.match(sheet.textContent || "", /Ch 3\s*\/\s*28/);
+  assert.match(sheet.textContent || "", /Chapter 3\s*of\s*28/);
   assert.match(sheet.textContent || "", /11%/);
   assert.match(sheet.textContent || "", /Set progress to chapter 5/i);
-  assert.ok(sheet.querySelector(".x-pos .bar i"));
+  assert.equal(sheet.querySelector(".x-pos .bar"), null);
   assert.equal(sheet.querySelector(".x-pos .step"), null);
   assert.match(sheet.textContent || "", /Reading/i);
   assert.match(sheet.textContent || "", /My actual private note for this story\./i);
   assert.doesNotMatch(sheet.textContent || "", /Private note saved\s*·\s*edit in Trace/i);
-  assert.ok(sheet.querySelector(".x-meta-row .note"));
+  assert.ok(sheet.querySelector(".x-meta .note"));
   assert.match(sheet.textContent || "", /comfort/i);
   assert.match(sheet.textContent || "", /reread/i);
   assert.match(sheet.textContent || "", /favorite/i);
   assert.match(sheet.textContent || "", /\+1/i);
   assert.doesNotMatch(sheet.textContent || "", /long/i);
   assert.doesNotMatch(sheet.textContent || "", /4 private tags/i);
-  const privateTagRow = Array.from(sheet.querySelectorAll(".x-meta-row")).find((row) =>
-    /comfort/i.test(row.textContent || ""),
-  );
+  const privateTagRow = sheet.querySelector(".x-meta");
   assert.ok(privateTagRow);
   assert.equal(privateTagRow.querySelectorAll(".x-utag").length, 4);
   for (const tag of privateTagRow.querySelectorAll(".x-utag")) {
-    assert.match(tag.getAttribute("style") || "", /border-radius:\s*999px/i);
-    assert.match(tag.getAttribute("style") || "", /background:\s*(?:#d8e3d5|rgb\(216,\s*227,\s*213\))/i);
-    assert.match(tag.getAttribute("style") || "", /padding:\s*5px 14px/i);
+    assert.match(tag.getAttribute("style") || "", /border-bottom:\s*1px dotted/i);
+    assert.match(tag.getAttribute("style") || "", /background:\s*transparent/i);
+    assert.match(tag.getAttribute("style") || "", /padding:\s*2px 0px/i);
     assert.match(tag.getAttribute("style") || "", /max-width:\s*150px/i);
     assert.match(tag.getAttribute("style") || "", /text-overflow:\s*ellipsis/i);
   }
-  assert.doesNotMatch(sheet.textContent || "", /Marked abandoned/i);
+  assert.match(sheet.textContent || "", /Marked abandoned/i);
+  assert.ok(sheet.querySelector("[data-trace-work-mark='abandoned']"));
   assert.match(sheet.textContent || "", /Hidden from future listings/i);
   const undoBtn = sheet.querySelector("button[data-trace-hidden-action='undo']");
   assert.ok(undoBtn);

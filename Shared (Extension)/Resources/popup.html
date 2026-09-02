@@ -133,8 +133,12 @@
             class="popup-local-settings"
             aria-label="Local site preferences"
         >
+            <p class="popup-section-label">On supported sites</p>
             <label class="popup-switch-row" for="pref-ao3-saved-filters">
-                <span>Saved filters on AO3</span>
+                <span class="popup-switch-copy">
+                    <strong>Saved filters on AO3</strong>
+                    <small>Show saved filters inside AO3’s own filter panel</small>
+                </span>
                 <input type="checkbox" id="pref-ao3-saved-filters" />
             </label>
         </section>
@@ -144,15 +148,24 @@
             aria-label="Extension preferences"
         >
             <label class="popup-switch-row" for="pref-auto-track">
-                <span>Automatic tracking</span>
+                <span class="popup-switch-copy">
+                    <strong>Automatic progress</strong>
+                    <small>Keep your place in step as you read</small>
+                </span>
                 <input type="checkbox" id="pref-auto-track" />
             </label>
             <label class="popup-switch-row" for="pref-library-inlay">
-                <span>Library status on sites</span>
+                <span class="popup-switch-copy">
+                    <strong>Library memory on sites</strong>
+                    <small>Show status, progress, and private work marks</small>
+                </span>
                 <input type="checkbox" id="pref-library-inlay" />
             </label>
             <label class="popup-switch-row" for="pref-metadata-improve">
-                <span>Improve shared story metadata</span>
+                <span class="popup-switch-copy">
+                    <strong>Improve story metadata</strong>
+                    <small>Contribute public story facts when supported</small>
+                </span>
                 <input type="checkbox" id="pref-metadata-improve" />
             </label>
         </section>
@@ -206,6 +219,7 @@
             >
                 Connection help
             </a>
+            <p class="popup-privacy">Trace reads supported story pages only for your library, progress, and the metadata setting above.</p>
         </div>
     </main>
 </body>

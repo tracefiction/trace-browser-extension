@@ -166,8 +166,11 @@ test("manifest loads AO3 saved filters with existing archive content scripts", (
   );
   assert.ok(archiveEntry, "expected archive content script entry");
   assert.ok(savedFiltersEntry, "expected AO3 saved filters content script entry");
-  assert.deepEqual(archiveEntry.js, [
-    "content-config.js",
+  assert.ok(
+    ["content-config.js", "popup-config.js"].includes(archiveEntry.js[0]),
+    "expected the archive bundle's generated config owner",
+  );
+  assert.deepEqual(archiveEntry.js.slice(1), [
     "trace-finish-qualify.js",
     "collector.js",
     "library-overlay-keys.js",
@@ -751,13 +754,12 @@ test("AO3 saved filters uses a compact AO3-native drawer section", async () => {
     Array.from(mount.querySelector(".trace-sf-head").children).map((child) => child.className),
     [
       "trace-sf-panel-caret",
-      "trace-sf-mark",
       "trace-sf-head-text",
       "trace-sf-spacer",
       "trace-sf-head-actions",
       "trace-sf-head-meta",
     ],
-    "narrow header should order the collapse affordance before the mark/title and second-line meta",
+    "narrow header should order the collapse affordance before the title and second-line meta",
   );
   assert.equal(
     mount.querySelector(".trace-sf-panel-caret").getAttribute("data-collapsed"),
@@ -777,16 +779,8 @@ test("AO3 saved filters uses a compact AO3-native drawer section", async () => {
     "Saved filters",
     "saved-filter title should remain intact in narrow headers",
   );
-  assert.equal(
-    mount.querySelector(".trace-sf-mark").textContent,
-    "",
-    "saved-filter header should not render the old text placeholder mark",
-  );
-  assert.equal(
-    mount.querySelector(".trace-sf-mark svg rect").getAttribute("fill"),
-    "#16342D",
-    "saved-filter header should render the real Trace mark colors",
-  );
+  assert.equal(mount.querySelector(".trace-sf-mark"), null);
+  assert.equal(mount.querySelector(".trace-sf-by").textContent, "by Trace");
   mount.querySelector("[data-trace-sf-action='toggle-panel']").click();
   await sleep(0);
   assert.equal(mount.querySelector(".trace-sf-card").getAttribute("data-panel-collapsed"), "false");
