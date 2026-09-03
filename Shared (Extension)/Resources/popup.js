@@ -1084,11 +1084,16 @@ function renderEarnedUnsupportedStory() {
 }
 
 function earnedRunVerified(onboarding, readiness) {
-  return Boolean(
-    onboarding.grantAt &&
-      typeof readiness?.lastArchiveSeenAt === "number" &&
-      readiness.lastArchiveSeenAt > onboarding.grantAt,
-  );
+  const lastArchiveSeenAt = readiness?.lastArchiveSeenAt;
+  if (typeof lastArchiveSeenAt !== "number" || lastArchiveSeenAt <= 0) {
+    return false;
+  }
+
+  // A content-script heartbeat is direct proof that Trace ran on an archive
+  // page. Older installs and Safari process restarts can retain that proof
+  // without retaining (or promptly reporting) the permission grant timestamp.
+  // When both timestamps exist, keep the stricter post-grant ordering check.
+  return !onboarding.grantAt || lastArchiveSeenAt > onboarding.grantAt;
 }
 
 async function reconcileEarnedRegistration() {
@@ -1106,13 +1111,15 @@ async function prepareEarnedPermissionFlow() {
   const hasGrant = await readCompleteEarnedGrant(grantedOrigins);
 
   // The earned-permission screen is onboarding, not the extension's permanent
-  // popup. Once the post-grant archive run has been proved, every later open
-  // should expose the normal controls regardless of the current Safari page.
-  if (hasGrant && onboarding.completedAt) {
+  // popup. Completion is sticky: Safari can report permission snapshots late,
+  // and revoking access later must not resurrect a first-run experience.
+  if (onboarding.completedAt) {
     activateKernelPopupAfterEarnedPermission();
     return;
   }
-  if (hasGrant && earnedRunVerified(onboarding, readiness)) {
+  // A successful archive heartbeat is stronger proof than a permission API
+  // snapshot: it means the installed content script actually executed.
+  if (earnedRunVerified(onboarding, readiness)) {
     await writeEarnedState({ completedAt: onboarding.completedAt || Date.now() });
     activateKernelPopupAfterEarnedPermission();
     return;

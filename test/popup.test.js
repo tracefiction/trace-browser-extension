@@ -873,6 +873,70 @@ test("completed earned-permission onboarding opens normal controls away from sto
   assert.equal(h.injections.length, 0, "normal popup must not run the retired active-tab probe");
 });
 
+test("completed earned-permission onboarding stays complete when Safari omits the grant snapshot", async () => {
+  const completedAt = Date.now() - 5_000;
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    activeTab: { id: 8, url: "https://www.google.com/" },
+    grantedOrigins: [],
+    permissionContainsResult: false,
+    storageState: {
+      traceEarnedPermissionOnboardingV1: {
+        grantAt: completedAt - 5_000,
+        registrationVersion: 3,
+        promptResult: "granted",
+        completedAt,
+      },
+    },
+    sessionSnapshot: {
+      state: "connected",
+      accountId: "account-a",
+      canExecuteAuthenticated: true,
+      reason: "none",
+    },
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  assert.equal(h.document.body.dataset.traceEarnedPermission, undefined);
+  assert.equal(h.document.getElementById("popup-earned-permission").hidden, true);
+  assert.equal(h.document.getElementById("popup-status").textContent, "Connected");
+  assert.equal(h.permissionRequests.length, 0);
+});
+
+test("archive heartbeat completes onboarding when legacy state has no grant timestamp", async () => {
+  const lastArchiveSeenAt = Date.now() - 1_000;
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    activeTab: { id: 8, url: "https://www.google.com/" },
+    grantedOrigins: [],
+    permissionContainsResult: false,
+    storageState: {
+      traceEarnedPermissionOnboardingV1: {
+        registrationVersion: 3,
+        promptResult: "granted",
+      },
+      traceArchiveReadiness: { lastArchiveSeenAt },
+    },
+    sessionSnapshot: {
+      state: "connected",
+      accountId: "account-a",
+      canExecuteAuthenticated: true,
+      reason: "none",
+    },
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  assert.equal(h.document.body.dataset.traceEarnedPermission, undefined);
+  assert.equal(h.document.getElementById("popup-earned-permission").hidden, true);
+  assert.equal(h.document.getElementById("popup-status").textContent, "Connected");
+  assert.equal(h.store.traceEarnedPermissionOnboardingV1.completedAt > lastArchiveSeenAt, true);
+  assert.equal(h.permissionRequests.length, 0);
+});
+
 test("earned-permission onboarding gives a bounded retry when background registration fails", async () => {
   const previousGrantAt = Date.now() - 60_000;
   const origins = [
