@@ -56,6 +56,7 @@ async function renderOverlayListing({
   mobile = false,
   scopeCache = true,
   sessionMode = "legacy",
+  earnedPermissionComplete,
 }) {
   const keysSrc = fs.readFileSync(KEYS_PATH, "utf8");
   const overlaySrc = fs.readFileSync(OVERLAY_PATH, "utf8");
@@ -116,6 +117,12 @@ async function renderOverlayListing({
   window.chrome = chrome;
   window.browser = chrome;
   window.TRACE_SESSION_MODE = sessionMode;
+  if (typeof earnedPermissionComplete === "boolean") {
+    window.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {
+      registrationMode: "static",
+    };
+    window.TRACE_EARNED_PERMISSION_COMPLETE = earnedPermissionComplete;
+  }
   window.__traceRuntimeMessages = runtimeMessages;
   window.__traceSetStorage = function (next) {
     const changes = {};
@@ -166,6 +173,32 @@ function openTraceLens(window) {
   assert.ok(surface, "expected Trace action surface");
   return { lens, surface };
 }
+
+test("library overlay remains inert until the complete Safari grant", async () => {
+  const window = await renderOverlayListing({
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/12345'>Demo Work</a></h4></li></ol></body></html>",
+    earnedPermissionComplete: false,
+  });
+  assert.equal(
+    window.document.querySelector("[data-trace-library-overlay-wrap]"),
+    null,
+  );
+  assert.deepEqual(window.__traceRuntimeMessages, []);
+
+  window.TRACE_EARNED_PERMISSION_COMPLETE = true;
+  window.document.dispatchEvent(
+    new window.CustomEvent("trace-earned-permission-ready"),
+  );
+  window.document.dispatchEvent(
+    new window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+  await sleep(120);
+
+  assert.ok(
+    window.document.querySelector("[data-trace-library-overlay-wrap]"),
+  );
+});
 
 test("library-overlay reruns when listing links are inserted after initial render", async () => {
   const keysSrc = fs.readFileSync(KEYS_PATH, "utf8");

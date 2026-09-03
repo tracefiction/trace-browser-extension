@@ -5546,6 +5546,14 @@ function finishQualifyAo3BodyElement() {
   return one(document, "#chapters") || one(document, ".chapter[id^='chapter-']") || one(document, ".chapter");
 }
 
+function finishQualifyAo3FallbackEndElement(bodyEl) {
+  // AO3 work skins can distort the inner article's layout box without moving
+  // the server-rendered chapter wrapper. Keep the precise article boundary as
+  // the primary signal and use #chapters only as a guarded fallback.
+  var chapters = one(document, "#chapters");
+  return chapters && chapters !== bodyEl ? chapters : null;
+}
+
 function finishQualifyAo3AnchorElement() {
   var endNotes = qsa(
     document,
