@@ -16,6 +16,8 @@ const outputRoot = process.env.TRACE_VISUAL_OUTPUT_DIR || "/tmp/trace-extension-
 const renderSource = "fixture-rendered";
 const visualMode = process.argv.includes("--capacity-only")
   ? "capacity"
+  : process.argv.includes("--corrective-only")
+    ? "corrective"
   : process.argv.includes("--popup-only")
     ? "popup"
     : "all";
@@ -219,6 +221,36 @@ function makeStorageData(authState = connectedAuthState(), cacheVariant = "defau
     prefLibraryInlayEnabled: true,
     prefMetadataImproveEnabled: true,
     traceUserPro: connected,
+  };
+}
+
+function postOnboardingPopupStorageData() {
+  const grantAt = Date.now() - 60_000;
+  return {
+    traceEarnedPermissionOnboarding: true,
+    traceGrantedOrigins: [
+      "https://*.archiveofourown.org/*",
+      "https://*.archiveofourown.gay/*",
+      "https://archive.transformativeworks.org/*",
+      "https://www.fanfiction.net/*",
+      "https://m.fanfiction.net/*",
+    ],
+    traceRegisteredContentScripts: [
+      { id: "trace-archive-automation-v1" },
+      { id: "trace-ao3-saved-filters-v1" },
+    ],
+    traceEarnedPermissionOnboardingV1: {
+      firstSaveAt: grantAt - 2_000,
+      grantAt,
+      registrationVersion: 2,
+      promptResult: "granted",
+    },
+    traceArchiveReadiness: { lastArchiveSeenAt: grantAt + 2_000 },
+    traceActiveTab: {
+      kind: "supported_archive",
+      site: "ao3",
+      canImport: true,
+    },
   };
 }
 
@@ -529,6 +561,31 @@ async function renderFixtureScreenshot(browser, definition, scripts, manifest) {
   await installFixtureRoutes(page, html, definition.url);
   await page.goto(definition.url, { waitUntil: "domcontentloaded" });
   await injectScripts(page, definition.contentScripts.map((name) => scripts[name]));
+  if (definition.finishQualify) {
+    await page.evaluate((finishQualify) => {
+      const anchor = document.querySelector(finishQualify.anchorSelector);
+      if (!anchor || !window.TraceFinishQualify) return;
+      if (finishQualify.kind === "toast") {
+        window.TraceFinishQualify.toast({
+          kind: finishQualify.result || "finished",
+          story: { src: finishQualify.source || "AO3" },
+          onOpenInTrace() {},
+          autoDismissMs: 0,
+        });
+        return;
+      }
+      window.TraceFinishQualify.mount({
+        anchorEl: anchor,
+        placement: "inline",
+        align: "start",
+        story: { src: finishQualify.source || "AO3" },
+        onQualify() { return false; },
+        onDismiss() {},
+        onOpenInTrace() {},
+        autoDismissMs: 0,
+      });
+    }, definition.finishQualify);
+  }
   if (definition.waitFor) await waitForDomSelector(page, definition.waitFor);
   if (definition.scrollTo) await scrollTo(page, definition.scrollTo, definition.scrollBlock || "center");
   await focusForScreenshot(page, definition.focusBeforeOpen);
@@ -629,7 +686,9 @@ async function renderPopupScreenshot(browser, definition, assets, manifest) {
   }
   if (definition.storageData?.traceEarnedPermissionOnboarding === true) {
     await page.waitForFunction(
-      () => document.querySelector("#popup-earned-result")?.dataset.state !== "checking",
+      () =>
+        document.body.dataset.traceEarnedPermission !== "true" ||
+        document.querySelector("#popup-earned-result")?.dataset.state !== "checking",
       { timeout: 10000 },
     );
   }
@@ -725,6 +784,8 @@ async function main() {
     keys: { name: "library-overlay-keys.js", source: await readText(resourceRoot, "library-overlay-keys.js") },
     overlay: { name: "library-overlay.js", source: await readText(resourceRoot, "library-overlay.js") },
     collector: { name: "collector.js", source: await readText(resourceRoot, "collector.js") },
+    finish: { name: "trace-finish-qualify.js", source: await readText(resourceRoot, "trace-finish-qualify.js") },
+    savedFilters: { name: "ao3-saved-filters.js", source: await readText(resourceRoot, "ao3-saved-filters.js") },
     popupHtml: await readText(resourceRoot, "popup.html"),
     popupCss: await readText(resourceRoot, "popup.css"),
     popupJs: await readText(resourceRoot, "popup.js"),
@@ -734,6 +795,8 @@ async function main() {
     keys: assets.keys,
     overlay: assets.overlay,
     collector: assets.collector,
+    finish: assets.finish,
+    savedFilters: assets.savedFilters,
   };
   const manifest = {
     generatedAt: new Date().toISOString(),
@@ -1070,13 +1133,75 @@ async function main() {
         openSelector: "[data-trace-story-handle]",
         openWaitFor: "[data-trace-story-sheet][data-trace-open='1']",
       },
+      {
+        name: "AO3 finish status decision",
+        file: "ao3-finish-status-decision.png",
+        fixture: "ao3_story.html",
+        url: "https://archiveofourown.org/works/28534965/chapters/71063826",
+        viewport: { width: 390, height: 844 },
+        contentScripts: ["finish"],
+        finishQualify: { kind: "prompt", anchorSelector: "#chapters", source: "AO3" },
+        waitFor: "[data-trace-finish-qualify]",
+        scrollTo: "[data-trace-finish-qualify]",
+        focusForScreenshot: { target: "[data-trace-finish-qualify]" },
+        corrective: true,
+      },
+      {
+        name: "FFN automatic finish confirmation",
+        file: "ffn-auto-finish-confirmation.png",
+        fixture: "ffn_story_mobile.html",
+        url: "https://m.fanfiction.net/s/7038840/28/Stay-Standing",
+        viewport: { width: 390, height: 844 },
+        contentScripts: ["finish"],
+        finishQualify: { kind: "toast", anchorSelector: "#content", source: "FanFiction.net", result: "finished" },
+        waitFor: "[data-trace-finish-toast]",
+        focusForScreenshot: { target: "[data-trace-finish-toast]" },
+        corrective: true,
+      },
+      {
+        name: "AO3 saved-filter management tray",
+        file: "ao3-saved-filter-management.png",
+        fixture: "../fixtures/ao3_listing.html",
+        url: "https://archiveofourown.org/works?work_search%5Bsort_column%5D=kudos_count&work_search%5Bcomplete%5D=T&tag_id=Harry+Potter+-+J*d*+K*d*+Rowling",
+        viewport: { width: 390, height: 844 },
+        contentScripts: ["savedFilters"],
+        storageData: {
+          traceAo3SavedFiltersPanelCollapsedV1: true,
+          traceAo3SavedFiltersV1: [
+            {
+              id: "visual-context-1",
+              name: "Long complete works",
+              params: [["work_search[complete]", "T"], ["work_search[sort_column]", "kudos_count"]],
+              scope: "context",
+              context: { type: "tagId", key: "tagId:Harry Potter - J. K. Rowling", tagId: "Harry Potter - J. K. Rowling", label: "Harry Potter" },
+              summary: ["Complete works only", "Sort: Kudos"],
+            },
+            {
+              id: "visual-global-1",
+              name: "Quiet comfort reads",
+              params: [["work_search[other_tag_names]", "Fluff"]],
+              scope: "global",
+              summary: ["Include: Fluff"],
+            },
+          ],
+        },
+        waitFor: "[data-trace-ao3-saved-filters]",
+        openSelector: ".trace-sf-head",
+        openWaitFor: ".trace-sf-menu-btn",
+        clickSelector: ".trace-sf-menu-btn",
+        clickWaitFor: ".trace-sf-manage",
+        focusForScreenshot: { target: "[data-trace-ao3-saved-filters]" },
+        corrective: true,
+      },
     ];
 
-    if (visualMode === "all" || visualMode === "capacity") {
+    if (visualMode === "all" || visualMode === "capacity" || visualMode === "corrective") {
       const selectedFixtures = visualMode === "capacity"
         ? fixtureScreenshots.filter((definition) =>
             /capacity|free-limit/i.test(definition.name)
           )
+        : visualMode === "corrective"
+          ? fixtureScreenshots.filter((definition) => definition.corrective === true)
         : fixtureScreenshots;
       for (const definition of selectedFixtures) {
         await renderFixtureScreenshot(browser, definition, scripts, manifest);
@@ -1224,8 +1349,8 @@ async function main() {
         colorScheme: "light",
       },
       {
-        name: "iOS earned-permission automation confirmed",
-        file: "popup-ios-earned-automation-confirmed.png",
+        name: "iOS post-onboarding extension controls",
+        file: "popup-ios-post-onboarding-controls.png",
         authState: connectedAuthState(),
         sessionSnapshot: {
           state: "connected",
@@ -1233,34 +1358,28 @@ async function main() {
           canExecuteAuthenticated: true,
           reason: "none",
         },
-        storageData: (() => {
-          const grantAt = Date.now() - 60_000;
-          return {
-            traceEarnedPermissionOnboarding: true,
-            traceGrantedOrigins: [
-              "https://*.archiveofourown.org/*",
-              "https://*.archiveofourown.gay/*",
-              "https://archive.transformativeworks.org/*",
-              "https://www.fanfiction.net/*",
-              "https://m.fanfiction.net/*",
-            ],
-            traceRegisteredContentScripts: [
-              { id: "trace-archive-automation-v1" },
-              { id: "trace-ao3-saved-filters-v1" },
-            ],
-            traceEarnedPermissionOnboardingV1: {
-              firstSaveAt: grantAt - 2_000,
-              grantAt,
-              registrationVersion: 2,
-              promptResult: "granted",
-            },
-            traceArchiveReadiness: { lastArchiveSeenAt: grantAt + 2_000 },
-          };
-        })(),
+        storageData: postOnboardingPopupStorageData(),
         viewport: { width: 360, height: 680 },
         userAgent:
           "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-        colorScheme: "light",
+        colorScheme: "dark",
+      },
+      {
+        name: "iOS post-onboarding expanded settings",
+        file: "popup-ios-post-onboarding-settings-expanded.png",
+        authState: connectedAuthState(),
+        sessionSnapshot: {
+          state: "connected",
+          accountId: "visual-account",
+          canExecuteAuthenticated: true,
+          reason: "none",
+        },
+        storageData: postOnboardingPopupStorageData(),
+        clickSelector: "#popup-preferences > summary",
+        viewport: { width: 360, height: 680 },
+        userAgent:
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        colorScheme: "dark",
       },
       {
         name: "iOS active-tab probe success",
@@ -1445,6 +1564,8 @@ async function main() {
 
     const selectedPopups = visualMode === "capacity"
       ? popupScreenshots.filter((definition) => /library full/i.test(definition.name))
+      : visualMode === "corrective"
+        ? popupScreenshots.filter((definition) => definition.file === "popup-ios-post-onboarding-controls.png")
       : popupScreenshots;
     for (const definition of selectedPopups) {
       await renderPopupScreenshot(browser, definition, assets, manifest);

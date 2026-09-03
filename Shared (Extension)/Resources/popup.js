@@ -52,6 +52,10 @@ const isLikelyIosExtensionUi = (() => {
   }
 })();
 
+if (isLikelyIosExtensionUi) {
+  document.body.dataset.tracePlatform = "ios";
+}
+
 const ACTIVE_TAB_PROBE = globalThis.TRACE_IOS_ACTIVE_TAB_PROBE === true;
 const EARNED_PERMISSION_ONBOARDING =
   globalThis.TRACE_IOS_EARNED_PERMISSION_ONBOARDING &&
@@ -68,6 +72,7 @@ const ACTIVE_TAB_PROBE_FILES = Object.freeze([
   "collector.js",
 ]);
 let earnedPreparedContext = null;
+let kernelPopupInitialized = false;
 
 const fallbackStatus = {
   state: "signed_out",
@@ -408,6 +413,7 @@ function renderStatus(patch) {
   const importEl = document.getElementById("popup-import");
   const archiveLinksEl = document.getElementById("popup-archive-links");
   const settingsEl = document.getElementById("popup-pro-settings");
+  const preferencesEl = document.getElementById("popup-preferences");
   const connectionEl = document.getElementById("popup-connection");
   const eyebrowEl = document.querySelector(".popup-eyebrow");
   document.body.dataset.tracePopupState = ui.visualState;
@@ -454,12 +460,24 @@ function renderStatus(patch) {
   if (settingsEl && ui.statusState !== "connected") {
     settingsEl.classList.add("hidden");
   }
+  if (preferencesEl) preferencesEl.hidden = ui.statusState !== "connected";
+}
+
+function updatePreferenceSummary() {
+  const countEl = document.getElementById("popup-preferences-count");
+  if (!countEl) return;
+  const inputs = Array.from(
+    document.querySelectorAll("#popup-preferences input[type='checkbox']"),
+  );
+  const enabled = inputs.filter((input) => input.checked).length;
+  countEl.textContent = `${enabled} of ${inputs.length} on`;
 }
 
 function applyLocalUi(ao3SavedFilters) {
   const ao3SavedFiltersEl = document.getElementById("pref-ao3-saved-filters");
   if (!ao3SavedFiltersEl) return;
   ao3SavedFiltersEl.checked = ao3SavedFilters !== false;
+  updatePreferenceSummary();
 }
 
 function applyProUi(pro, autoTrack, libraryInlay, metadataImprove) {
@@ -476,6 +494,7 @@ function applyProUi(pro, autoTrack, libraryInlay, metadataImprove) {
   autoEl.checked = Boolean(autoTrack);
   inlayEl.checked = Boolean(libraryInlay);
   metadataEl.checked = metadataImprove !== false;
+  updatePreferenceSummary();
 }
 
 function fetchPopupState() {
@@ -1082,40 +1101,17 @@ function renderEarnedUnsupportedStory() {
   configureEarnedActions({ label: "Close and open a story", action: "close" });
 }
 
-function renderEarnedRunConfirmed() {
-  setEarnedConnection("connected", "Ready");
-  setEarnedCopy({
-    kicker: "Website access confirmed",
-    heading: "Trace is ready",
-    lead: "Return to the Trace app to finish.",
-  });
-  setEarnedCheck("popup-earned-story", "pass", "Confirmed", "Story page");
-  setEarnedCheck(
-    "popup-earned-access",
-    "pass",
-    "Allowed",
-    "Website access",
-  );
-  setEarnedCheck(
-    "popup-earned-save",
-    "pass",
-    "Run confirmed",
-    "Trace on sites",
-  );
-  setEarnedResult(
-    "success",
-    "Return to the Trace app.",
-    "Trace will show setup complete after the server confirms your story.",
-  );
-  configureEarnedActions({ label: "Done", action: "close" });
-}
-
 function earnedRunVerified(onboarding, readiness) {
-  return Boolean(
-    onboarding.grantAt &&
-      typeof readiness?.lastArchiveSeenAt === "number" &&
-      readiness.lastArchiveSeenAt > onboarding.grantAt,
-  );
+  const lastArchiveSeenAt = readiness?.lastArchiveSeenAt;
+  if (typeof lastArchiveSeenAt !== "number" || lastArchiveSeenAt <= 0) {
+    return false;
+  }
+
+  // A content-script heartbeat is direct proof that Trace ran on an archive
+  // page. Older installs and Safari process restarts can retain that proof
+  // without retaining (or promptly reporting) the permission grant timestamp.
+  // When both timestamps exist, keep the stricter post-grant ordering check.
+  return !onboarding.grantAt || lastArchiveSeenAt > onboarding.grantAt;
 }
 
 async function reconcileEarnedRegistration() {
@@ -1126,6 +1122,27 @@ async function reconcileEarnedRegistration() {
 
 async function prepareEarnedPermissionFlow() {
   resetEarnedLedger();
+  const [{ onboarding, readiness }, grantedOrigins] = await Promise.all([
+    readEarnedState(),
+    readGrantedOrigins(),
+  ]);
+  const hasGrant = await readCompleteEarnedGrant(grantedOrigins);
+
+  // The earned-permission screen is onboarding, not the extension's permanent
+  // popup. Completion is sticky: Safari can report permission snapshots late,
+  // and revoking access later must not resurrect a first-run experience.
+  if (onboarding.completedAt) {
+    activateKernelPopupAfterEarnedPermission();
+    return;
+  }
+  // A successful archive heartbeat is stronger proof than a permission API
+  // snapshot: it means the installed content script actually executed.
+  if (earnedRunVerified(onboarding, readiness)) {
+    await writeEarnedState({ completedAt: onboarding.completedAt || Date.now() });
+    activateKernelPopupAfterEarnedPermission();
+    return;
+  }
+
   const tab = await probeQueryActiveTab().catch(() => null);
   const story = classifyProbeStory(tab?.url);
   if (!tab || !Number.isInteger(tab.id) || !story.ok) {
@@ -1133,19 +1150,7 @@ async function prepareEarnedPermissionFlow() {
     renderEarnedUnsupportedStory();
     return;
   }
-  const [{ onboarding, readiness }, grantedOrigins] = await Promise.all([
-    readEarnedState(),
-    readGrantedOrigins(),
-  ]);
-  const hasGrant = await readCompleteEarnedGrant(grantedOrigins);
   earnedPreparedContext = Object.freeze({ story, hasGrant });
-  if (hasGrant && earnedRunVerified(onboarding, readiness)) {
-    if (!onboarding.completedAt) {
-      await writeEarnedState({ completedAt: Date.now() });
-    }
-    renderEarnedRunConfirmed();
-    return;
-  }
   if (hasGrant) {
     const registration = await reconcileEarnedRegistration().catch(() => null);
     if (registration?.ok !== true || registration?.registered !== true) {
@@ -1440,6 +1445,7 @@ function renderKernelSnapshot(snapshot) {
   const connectionEl = document.getElementById("popup-connection");
   const localSettingsEl = document.getElementById("popup-local-settings");
   const proSettingsEl = document.getElementById("popup-pro-settings");
+  const preferencesEl = document.getElementById("popup-preferences");
   const importEl = document.getElementById("popup-import");
   const archiveLinksEl = document.getElementById("popup-archive-links");
   const actions = SESSION_DISABLED
@@ -1488,9 +1494,13 @@ function renderKernelSnapshot(snapshot) {
       lead = "Sign in to Trace in this browser if needed, then press Reconnect.";
     }
   } else if (state === "degraded") {
-    lead = reason === "storage_unavailable"
-      ? "Trace could not read extension storage. Retry after local storage recovers."
-      : "Your saved session is protected. Check your connection and retry.";
+    if (reason === "storage_unavailable") {
+      lead = "Trace could not read extension storage. Retry after local storage recovers.";
+    } else if (reason === "runtime_unavailable") {
+      lead = "Trace could not reach its extension session. Retry in a moment.";
+    } else {
+      lead = "Your saved session is protected. Check your connection and retry.";
+    }
   } else if (state === "connected") {
     lead = "This extension session was verified for the current browser worker.";
   } else if (state === "connecting" || state === "verifying") {
@@ -1537,6 +1547,7 @@ function renderKernelSnapshot(snapshot) {
   }
   if (localSettingsEl) localSettingsEl.hidden = true;
   if (proSettingsEl) proSettingsEl.hidden = true;
+  if (preferencesEl) preferencesEl.hidden = true;
   if (importEl) importEl.hidden = true;
   if (archiveLinksEl) archiveLinksEl.hidden = true;
 }
@@ -1563,9 +1574,22 @@ function sendKernelRuntimeMessage(message, onResponse) {
   }
 }
 
+const KERNEL_SNAPSHOT_RETRY_DELAYS_MS = Object.freeze([180, 650]);
+let kernelSnapshotAttempt = 0;
+
 function requestKernelSnapshot() {
   sendKernelRuntimeMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" }, (response) => {
-    if (!response) return;
+    if (!response) {
+      const retryDelay = KERNEL_SNAPSHOT_RETRY_DELAYS_MS[kernelSnapshotAttempt];
+      kernelSnapshotAttempt += 1;
+      if (retryDelay !== undefined) {
+        setTimeout(requestKernelSnapshot, retryDelay);
+        return;
+      }
+      renderKernelSnapshot({ state: "degraded", reason: "runtime_unavailable" });
+      return;
+    }
+    kernelSnapshotAttempt = 0;
     renderKernelSnapshot(response?.snapshot);
     if (response?.snapshot?.state === "connected") requestKernelPopupState();
   });
@@ -1600,10 +1624,13 @@ function requestKernelPopupState() {
     );
     const localSettings = document.getElementById("popup-local-settings");
     const proSettings = document.getElementById("popup-pro-settings");
+    const preferences = document.getElementById("popup-preferences");
     const importButton = document.getElementById("popup-import");
     if (localSettings) localSettings.hidden = false;
     if (proSettings) proSettings.hidden = false;
+    if (preferences) preferences.hidden = false;
     if (importButton) restoreImportButton(importButton);
+    updatePreferenceSummary();
   });
 }
 
@@ -1619,11 +1646,14 @@ function bindPreferenceControls() {
     if (!input) continue;
     input.addEventListener("change", () => {
       ext.storage.local.set({ [key]: input.checked });
+      updatePreferenceSummary();
     });
   }
 }
 
 function initializeKernelPopup() {
+  if (kernelPopupInitialized) return;
+  kernelPopupInitialized = true;
   renderKernelSnapshot({ state: "initializing", reason: "none" });
   for (const actionControl of [
     document.getElementById("popup-cta"),
@@ -1647,6 +1677,14 @@ function initializeKernelPopup() {
     });
   }
   requestKernelSnapshot();
+}
+
+function activateKernelPopupAfterEarnedPermission() {
+  earnedPreparedContext = null;
+  delete document.body.dataset.traceEarnedPermission;
+  const section = document.getElementById("popup-earned-permission");
+  if (section) section.hidden = true;
+  initializeKernelPopup();
 }
 
 if (EARNED_PERMISSION_ONBOARDING) {
@@ -1695,11 +1733,13 @@ ext.storage.onChanged.addListener((changes, area) => {
 // Import is rendered only when the active session owner has exposed a
 // supported archive page, but the same explicit control works in both modes.
 const importBtn = document.getElementById("popup-import");
-if (importBtn && !ACTIVE_TAB_PROBE) {
+const NORMAL_POPUP_CONTROLS_AVAILABLE =
+  !ACTIVE_TAB_PROBE || Boolean(EARNED_PERMISSION_ONBOARDING);
+if (importBtn && NORMAL_POPUP_CONTROLS_AVAILABLE) {
   setImportInitial(importBtn);
   importBtn.addEventListener("click", () => {
     runImport(importBtn);
   });
 }
 
-if (!ACTIVE_TAB_PROBE) bindPreferenceControls();
+if (NORMAL_POPUP_CONTROLS_AVAILABLE) bindPreferenceControls();

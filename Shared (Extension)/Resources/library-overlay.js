@@ -311,23 +311,21 @@
   const TRACE_D1 = {
     font: "Geist,ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif",
     mono: "'Geist Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",
-    paper: "#f3efe4",
-    paper2: "#ebe6d7",
-    card: "#f7f3e9",
-    card2: "#ede8d8",
-    ink: "#1c2722",
-    ink2: "#3a4339",
-    ink3: "#6e6a5b",
-    ink4: "#9a9583",
-    ink5: "#c4bea8",
-    line: "rgba(28,39,34,0.10)",
-    lineStrong: "rgba(28,39,34,0.18)",
-    forest: "#1f4d3f",
-    forestDeep: "#133029",
-    rust: "#b54a30",
-    honey: "#8a6e2a",
-    forestSoft: "#d8e3d5",
-    honeySoft: "#ebdcab",
+    paper: "#fefcf7",
+    paper2: "#ece7dd",
+    card: "#f7f4ed",
+    card2: "#efeae1",
+    ink: "#151e1c",
+    ink2: "#27312e",
+    ink3: "#5b645f",
+    ink4: "#777f7a",
+    ink5: "#a5aaa6",
+    line: "#d4cdc0",
+    lineStrong: "#bbb3a5",
+    forest: "#2a5d53",
+    forestDeep: "#183f37",
+    rust: "#bc4329",
+    honey: "#996e29",
     forestLine: "rgba(31,77,63,0.35)",
     mutedLine: "rgba(110,106,91,0.3)",
     rustLine: "rgba(181,74,48,0.36)",
@@ -469,17 +467,6 @@
     CAUGHT_UP: STATUS_TOKENS.CAUGHT_UP.accent,
     FINISHED: STATUS_TOKENS.FINISHED.accent,
   };
-  const D1_STATUS_SOFT = {
-    READING: STATUS_TOKENS.READING.container,
-    PLANNING: STATUS_TOKENS.PLANNING.container,
-    PAUSED: STATUS_TOKENS.PAUSED.container,
-    COMPLETED: STATUS_TOKENS.COMPLETED.container,
-    DROPPED: STATUS_TOKENS.DROPPED.container,
-    SAVED: STATUS_TOKENS.SAVED.container,
-    CAUGHT_UP: STATUS_TOKENS.CAUGHT_UP.container,
-    FINISHED: STATUS_TOKENS.FINISHED.container,
-  };
-
   const INLINE_HIDDEN_THEME = {
     bg: "rgba(91, 81, 66, 0.055)",
     fg: "#5b5142",
@@ -785,7 +772,7 @@
 
   function surfacePrimaryButtonStyle() {
     return surfaceButtonStyle(
-      { bg: TRACE_D1.forestDeep, fg: TRACE_D1.paper, border: TRACE_D1.forestDeep },
+      { bg: TRACE_D1.ink, fg: TRACE_D1.paper, border: TRACE_D1.ink },
       true,
     );
   }
@@ -908,11 +895,11 @@
         "box-sizing:border-box",
         "width:min(340px,calc(100vw - 32px))",
         "padding:16px",
-        "border-radius:14px",
+        "border-radius:10px",
         "background:" + TRACE_D1.card,
         "color:" + TRACE_D1.ink,
         "border:1px solid " + TRACE_D1.lineStrong,
-        "box-shadow:0 18px 44px rgba(28,28,23,0.22)",
+        "box-shadow:0 18px 44px rgba(15,20,18,0.22)",
         "font:500 13px/1.45 " + TRACE_D1.font,
       ].join(";");
 
@@ -942,7 +929,7 @@
       headingEl.setAttribute("data-trace-connect-notice-heading", "1");
       headingEl.style.cssText = [
         "margin:0 32px 8px 0",
-        "font:500 20px/1.15 Fraunces,Georgia,'Times New Roman',serif",
+        "font:700 17px/1.2 " + TRACE_D1.font,
         "letter-spacing:0",
         "color:" + TRACE_D1.ink,
       ].join(";");
@@ -965,10 +952,10 @@
         "width:100%",
         "min-height:42px",
         "padding:10px 14px",
-        "border-radius:11px",
-        "background:" + TRACE_D1.forestDeep,
+        "border-radius:8px",
+        "background:" + TRACE_D1.ink,
         "color:" + TRACE_D1.paper,
-        "border:1px solid " + TRACE_D1.forestDeep,
+        "border:1px solid " + TRACE_D1.ink,
         "text-decoration:none",
         "font:600 13.5px/1.15 " + TRACE_D1.font,
         "letter-spacing:0",
@@ -2289,43 +2276,33 @@
     var position = document.createElement("section");
     position.className = "x-pos";
     position.setAttribute("data-trace-action-position", "1");
-    position.style.cssText = "background:#f1d8c8;border:1px solid rgba(181,74,48,0.24);border-radius:13px;padding:14px";
+    position.style.cssText = "display:grid;gap:7px;padding:13px 0;border-top:1px solid " + TRACE_D1.line + ";border-bottom:1px solid " + TRACE_D1.line;
 
     var top = document.createElement("div");
     top.className = "top";
     top.style.cssText = "display:flex;align-items:baseline;justify-content:space-between;gap:10px";
     var value = document.createElement("span");
     value.className = "chap";
-    value.style.cssText = "font:500 22px/1 'Fraunces',Georgia,serif;color:" + TRACE_D1.ink;
+    value.style.cssText = "font:650 14px/1.25 " + TRACE_D1.font + ";color:" + TRACE_D1.ink;
     var big = document.createElement("span");
     big.className = "big";
-    big.textContent = "Ch " + chapters.current;
+    big.textContent = "Chapter " + chapters.current;
     var small = document.createElement("span");
     small.className = "sm";
-    small.textContent = " / " + (chapters.total == null ? "?" : chapters.total);
-    small.style.cssText = "font-size:15px;color:" + TRACE_D1.ink4;
+    small.textContent = " of " + (chapters.total == null ? "?" : chapters.total);
+    small.style.cssText = "font-weight:500;color:" + TRACE_D1.ink3;
     value.appendChild(big);
     value.appendChild(small);
     top.appendChild(value);
 
     var side = document.createElement("span");
     side.className = "pct";
-    side.style.cssText = "font:600 10.5px/1.2 " + TRACE_D1.font + ";color:" + (entry && entry.catchupState === "BEHIND" ? TRACE_D1.rust : TRACE_D1.ink3) + ";text-align:right";
+    side.style.cssText = "font:600 11px/1.2 " + TRACE_D1.font + ";color:" + (entry && entry.catchupState === "BEHIND" ? TRACE_D1.rust : TRACE_D1.ink3) + ";text-align:right";
     var catchup = catchupLabel(entry);
     side.textContent = catchup || (percent == null ? "" : percent + "%");
     if (side.textContent) top.appendChild(side);
     position.appendChild(top);
 
-    if (percent != null) {
-      var bar = document.createElement("div");
-      bar.className = "bar";
-      bar.style.cssText = "height:5px;border-radius:999px;background:rgba(28,39,34,0.12);overflow:hidden;margin:11px 0 0";
-      var fill = document.createElement("i");
-      fill.setAttribute("aria-hidden", "true");
-      fill.style.cssText = "display:block;height:100%;border-radius:999px;background:" + TRACE_D1.rust + ";width:" + percent + "%";
-      bar.appendChild(fill);
-      position.appendChild(bar);
-    }
     return position;
   }
 
@@ -2333,7 +2310,7 @@
     var note = document.createElement("span");
     note.className = "note";
     note.textContent = text;
-    note.style.cssText = "display:block;flex:1;min-width:0;text-align:left;font:italic 13.5px/1.45 'Fraunces',Georgia,serif;color:" + TRACE_D1.ink2;
+    note.style.cssText = "display:block;flex:1;min-width:0;text-align:left;font:500 12.5px/1.5 " + TRACE_D1.font + ";color:" + TRACE_D1.ink2;
     return note;
   }
 
@@ -2349,11 +2326,11 @@
       "overflow:hidden",
       "text-overflow:ellipsis",
       "vertical-align:middle",
-      "border-radius:999px",
-      "padding:3px 10px",
+      "padding:2px 0",
+      "border-bottom:1px dotted " + (collectionTone ? TRACE_D1.honey : TRACE_D1.forest),
       "font:500 11.5px/1.15 " + TRACE_D1.font,
       "white-space:nowrap",
-      "background:" + (collectionTone ? TRACE_D1.honeySoft : TRACE_D1.forestSoft),
+      "background:transparent",
       "color:" + (collectionTone ? TRACE_D1.honey : TRACE_D1.forest),
     ].join(";");
     return tag;
@@ -2369,7 +2346,7 @@
     if (!context || (!context.hasNotes && !context.tagCount)) return;
     var meta = document.createElement("div");
     meta.className = "x-meta";
-    meta.style.cssText = "display:flex;flex-direction:column;gap:9px;padding-top:15px;border-top:1px solid " + TRACE_D1.line;
+    meta.style.cssText = "display:flex;flex-direction:column;gap:9px;padding:13px 14px;background:" + TRACE_D1.card2 + ";border-left:2px solid " + TRACE_D1.honey + ";border-radius:0 8px 8px 0";
     var label = document.createElement("div");
     label.className = "x-sheet-label";
     label.textContent = "Private context";
@@ -2383,7 +2360,7 @@
     if (context.tagCount > 0) {
       var tags = document.createElement("span");
       tags.className = "tags";
-      tags.style.cssText = "display:flex;flex:1;min-width:0;flex-wrap:wrap;gap:6px;text-align:left";
+      tags.style.cssText = "display:flex;flex:1;min-width:0;flex-wrap:wrap;column-gap:12px;row-gap:5px;text-align:left";
       if (context.tags && context.tags.length) {
         var visibleTags = visiblePrivateTags(context);
         visibleTags.forEach(function (tag) {
@@ -2401,6 +2378,43 @@
       meta.appendChild(tags);
     }
     if (meta.childNodes.length > 0) surface.appendChild(meta);
+  }
+
+  function workMarkCopy(entry) {
+    var mark = entry && entry.workMark;
+    if (!mark) return null;
+    var label = mark.kind === "hiatus" ? "Marked hiatus" : "Marked abandoned";
+    var detail = null;
+    var challenge = mark.challenge;
+    if (challenge) {
+      if (challenge.chapterDelta) {
+        detail = challenge.chapterDelta + (challenge.chapterDelta === 1 ? " new chapter" : " new chapters") + " since you marked it.";
+      } else if (challenge.kind === "source-updated") {
+        detail = "The source has updated since you marked it.";
+      } else {
+        detail = "The chapter count has changed since you marked it.";
+      }
+    }
+    return { label: label, detail: detail };
+  }
+
+  function appendWorkMarkSurface(surface, entry) {
+    var copy = workMarkCopy(entry);
+    if (!copy) return;
+    var block = document.createElement("section");
+    block.setAttribute("data-trace-work-mark", entry.workMark.kind);
+    block.style.cssText = "display:grid;gap:4px;padding:11px 13px;border:1px solid " + TRACE_D1.line + ";border-left:3px solid " + TRACE_D1.rust + ";border-radius:7px;background:" + TRACE_D1.paper;
+    var title = document.createElement("strong");
+    title.textContent = copy.label;
+    title.style.cssText = "font:650 12px/1.25 " + TRACE_D1.font + ";color:" + TRACE_D1.ink;
+    block.appendChild(title);
+    if (copy.detail) {
+      var detail = document.createElement("span");
+      detail.textContent = copy.detail;
+      detail.style.cssText = "font:500 11.5px/1.4 " + TRACE_D1.font + ";color:" + TRACE_D1.ink3;
+      block.appendChild(detail);
+    }
+    surface.appendChild(block);
   }
 
   function bindStatusChoice(choice, entry, workKey, status, rerender, refreshSurface) {
@@ -2465,7 +2479,6 @@
 
   function statusChoiceStyle(status, selected) {
     var accent = D1_STATUS_ACCENT[status] || STATUS_TOKENS.READING.accent;
-    var soft = D1_STATUS_SOFT[status] || STATUS_TOKENS.READING.container;
     return [
       "display:flex",
       "flex-direction:column",
@@ -2477,10 +2490,10 @@
       "min-height:54px",
       "padding:8px 3px",
       "overflow:visible",
-      "border-radius:10px",
-      "border:1px solid " + (selected ? accent : TRACE_D1.lineStrong),
-      "background:" + (selected ? soft : TRACE_D1.paper),
-      "color:" + (selected ? TRACE_D1.ink : TRACE_D1.ink3),
+      "border-radius:7px",
+      "border:1px solid " + (selected ? TRACE_D1.ink : TRACE_D1.line),
+      "background:" + (selected ? TRACE_D1.ink : TRACE_D1.paper),
+      "color:" + (selected ? TRACE_D1.paper : TRACE_D1.ink3),
       "font:500 11px/1 " + TRACE_D1.font,
       "letter-spacing:0",
       "text-transform:none",
@@ -2520,7 +2533,6 @@
         "height:7px",
         "border-radius:999px",
         "background:" + (selected ? D1_STATUS_ACCENT[status] || STATUS_TOKENS.READING.accent : TRACE_D1.ink5),
-        selected ? "box-shadow:0 0 0 3px " + (D1_STATUS_SOFT[status] || STATUS_TOKENS.READING.container) : "",
       ].join(";");
       choice.appendChild(dot);
       choice.appendChild(document.createTextNode(statusControlChoiceLabel(status)));
@@ -2550,17 +2562,17 @@
       "width:" + (mobile ? "100%" : "min(376px,calc(100vw - 24px))"),
       "max-width:" + (mobile ? "430px" : "376px"),
       "padding:0",
-      "border-radius:" + (mobile ? "20px 20px 0 0" : "16px"),
+      "border-radius:" + (mobile ? "16px 16px 0 0" : "12px"),
       "border:1px solid " + TRACE_D1.lineStrong,
       "background:" + TRACE_D1.card,
       "color:" + TRACE_D1.ink,
-      "box-shadow:0 1px 0 rgba(255,250,230,0.4) inset, 0 28px 60px -20px rgba(20,14,0,0.42), 0 0 0 1px " + TRACE_D1.lineStrong,
+      "box-shadow:0 22px 54px -20px rgba(15,20,18,0.42)",
       "font:500 13px/1.4 " + TRACE_D1.font,
       "overflow:auto",
       "-webkit-font-smoothing:antialiased",
     ];
     if (mobile) {
-      css.push("left:0", "right:0", "bottom:0", "margin:0 auto", "max-height:min(72vh,520px)");
+      css.push("left:0", "right:0", "bottom:0", "margin:0 auto", "max-height:min(82vh,680px)");
     } else {
       var rect = trigger.getBoundingClientRect();
       var surfaceWidth = Math.min(376, Math.max(280, (window.innerWidth || 376) - 24));
@@ -2601,12 +2613,12 @@
     source.className = "src";
     var sourcePlatform = platform || String(workKey || "").split(":")[0];
     var listingMeta = surfaceListingMeta(sourcePlatform, anchor);
-    source.textContent = sourcePlatform === "ffn" ? "FFN" : "AO3";
-    source.style.cssText = "font:500 9px/1 " + TRACE_D1.mono + ";letter-spacing:0.14em;text-transform:uppercase;color:" + TRACE_D1.rust;
+    source.textContent = "Trace · " + (sourcePlatform === "ffn" ? "FFN" : "AO3");
+    source.style.cssText = "font:650 9px/1 " + TRACE_D1.mono + ";letter-spacing:0.14em;text-transform:uppercase;color:" + TRACE_D1.rust;
     var title = document.createElement("div");
     title.className = "ti";
     title.textContent = listingMeta.title || lensHeadline(entry);
-    title.style.cssText = "margin-top:4px;font:500 18px/1.18 'Fraunces',Georgia,serif;color:" + TRACE_D1.ink + ";overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+    title.style.cssText = "margin-top:6px;font:700 17px/1.22 " + TRACE_D1.font + ";color:" + TRACE_D1.ink + ";overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
     var caption = document.createElement("div");
     caption.className = "au";
     caption.textContent = listingMeta.author
@@ -2646,7 +2658,7 @@
     var body = document.createElement("div");
     body.className = "x-sheet-body";
     body.setAttribute("data-trace-action-body", "1");
-    body.style.cssText = "display:flex;flex-direction:column;gap:17px;padding:16px 18px 18px";
+    body.style.cssText = "display:flex;flex-direction:column;gap:15px;padding:16px 18px 15px;background:" + TRACE_D1.card;
     function refreshSurface() {
       var latestTrigger = trigger;
       var lenses = document.querySelectorAll("[" + LENS_ATTR + "]");
@@ -2672,11 +2684,12 @@
     }
     appendRatingControls(body, entry, workKey);
     appendPrivateContextRows(body, entry);
+    appendWorkMarkSurface(body, entry);
     surface.appendChild(body);
 
     var actions = document.createElement("div");
     actions.className = "x-sheet-foot";
-    actions.style.cssText = "display:flex;gap:8px;padding:0 18px 18px";
+    actions.style.cssText = "display:grid;grid-template-columns:1fr auto;gap:8px;padding:13px 18px 18px;background:" + TRACE_D1.card + ";border-top:1px solid " + TRACE_D1.line;
     var open = document.createElement("a");
     open.href = traceEntryOpenUrl(entry);
     open.className = "x-pbtn x-pbtn-primary";
@@ -2684,7 +2697,7 @@
     open.rel = "noopener noreferrer";
     open.appendChild(traceIconEl("open"));
     open.appendChild(document.createTextNode("Open in Trace"));
-    open.style.cssText = surfacePrimaryButtonStyle() + ";flex:1;min-height:44px;border-radius:11px";
+    open.style.cssText = surfacePrimaryButtonStyle() + ";min-height:44px;border-radius:8px";
     bindTraceOpenLink(open);
     actions.appendChild(open);
     if (showActions) {
@@ -2694,13 +2707,13 @@
         rerender();
       }, true);
       preference.className = "x-pbtn x-pbtn-ghost";
-      preference.style.cssText = surfaceGhostButtonStyle(entry && entry.hidden === true ? HIDDEN_THEME : HIDE_ACTION_THEME) + ";flex:0 0 auto;min-width:78px;min-height:44px;border-radius:11px";
+      preference.style.cssText = surfaceGhostButtonStyle(entry && entry.hidden === true ? HIDDEN_THEME : HIDE_ACTION_THEME) + ";min-width:72px;min-height:44px;border-radius:8px";
       if (!(entry && entry.hidden === true)) {
         removeWrapChildren(preference);
         preference.setAttribute("aria-label", "Hide this work");
         preference.appendChild(traceIconEl("eyeoff"));
         preference.appendChild(document.createTextNode("Hide"));
-        preference.style.cssText = surfaceGhostButtonStyle(HIDE_ACTION_THEME) + ";flex:0 0 auto;min-width:78px;min-height:44px;border-radius:11px";
+        preference.style.cssText = surfaceGhostButtonStyle(HIDE_ACTION_THEME) + ";min-width:72px;min-height:44px;border-radius:8px";
       }
       actions.appendChild(preference);
     }
@@ -2763,6 +2776,21 @@
       progressEl.textContent = progress;
       progressEl.style.cssText = "flex:0 0 auto;font:500 11px/1.3 " + TRACE_D1.mono + ";color:" + TRACE_D1.ink3;
       btn.appendChild(progressEl);
+    }
+    var workMark = workMarkCopy(entry);
+    if (workMark) {
+      var markEl = document.createElement("span");
+      markEl.textContent = entry.workMark.kind === "hiatus" ? "Hiatus" : "Abandoned";
+      markEl.setAttribute("data-trace-inline-work-mark", entry.workMark.kind);
+      markEl.style.cssText = "flex:0 0 auto;padding-left:7px;border-left:1px solid " + TRACE_D1.lineStrong + ";font:600 10.5px/1.3 " + TRACE_D1.font + ";color:" + TRACE_D1.ink3;
+      btn.appendChild(markEl);
+      if (entry.workMark.challenge) {
+        var challengeEl = document.createElement("span");
+        challengeEl.textContent = entry.workMark.challenge.chapterDelta ? "+" + entry.workMark.challenge.chapterDelta + " ch" : "Updated";
+        challengeEl.setAttribute("data-trace-inline-work-mark-challenge", "1");
+        challengeEl.style.cssText = "flex:0 0 auto;font:700 10.5px/1.3 " + TRACE_D1.font + ";color:" + TRACE_D1.rust;
+        btn.appendChild(challengeEl);
+      }
     }
     btn.addEventListener("mouseenter", function () {
       label.style.textDecoration = "underline";

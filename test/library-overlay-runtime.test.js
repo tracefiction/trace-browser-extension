@@ -56,6 +56,7 @@ async function renderOverlayListing({
   mobile = false,
   scopeCache = true,
   sessionMode = "legacy",
+  earnedPermissionComplete,
 }) {
   const keysSrc = fs.readFileSync(KEYS_PATH, "utf8");
   const overlaySrc = fs.readFileSync(OVERLAY_PATH, "utf8");
@@ -116,6 +117,12 @@ async function renderOverlayListing({
   window.chrome = chrome;
   window.browser = chrome;
   window.TRACE_SESSION_MODE = sessionMode;
+  if (typeof earnedPermissionComplete === "boolean") {
+    window.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {
+      registrationMode: "static",
+    };
+    window.TRACE_EARNED_PERMISSION_COMPLETE = earnedPermissionComplete;
+  }
   window.__traceRuntimeMessages = runtimeMessages;
   window.__traceSetStorage = function (next) {
     const changes = {};
@@ -166,6 +173,32 @@ function openTraceLens(window) {
   assert.ok(surface, "expected Trace action surface");
   return { lens, surface };
 }
+
+test("library overlay remains inert until the complete Safari grant", async () => {
+  const window = await renderOverlayListing({
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/12345'>Demo Work</a></h4></li></ol></body></html>",
+    earnedPermissionComplete: false,
+  });
+  assert.equal(
+    window.document.querySelector("[data-trace-library-overlay-wrap]"),
+    null,
+  );
+  assert.deepEqual(window.__traceRuntimeMessages, []);
+
+  window.TRACE_EARNED_PERMISSION_COMPLETE = true;
+  window.document.dispatchEvent(
+    new window.CustomEvent("trace-earned-permission-ready"),
+  );
+  window.document.dispatchEvent(
+    new window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+  await sleep(120);
+
+  assert.ok(
+    window.document.querySelector("[data-trace-library-overlay-wrap]"),
+  );
+});
 
 test("library-overlay reruns when listing links are inserted after initial render", async () => {
   const keysSrc = fs.readFileSync(KEYS_PATH, "utf8");
@@ -681,7 +714,7 @@ test("library-overlay presents canonical saved, caught-up, and finished statuses
   assert.doesNotMatch(labels.join(" "), /Planning|CAUGHT_UP|COMPLETED/);
 });
 
-test("library-overlay renders display-safe private note preview and tag pills when provided", async () => {
+test("library-overlay renders display-safe private note preview and dotted tag annotations when provided", async () => {
   const window = await renderOverlayListing({
     html:
       "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/12346'>Demo Work</a></h4></li></ol></body></html>",
@@ -721,9 +754,9 @@ test("library-overlay renders display-safe private note preview and tag pills wh
   const privateTags = Array.from(surface.querySelectorAll(".x-utag"));
   assert.equal(privateTags.length, 4);
   for (const tag of privateTags) {
-    assert.match(tag.getAttribute("style") || "", /border-radius:\s*999px/i);
-    assert.match(tag.getAttribute("style") || "", /background:\s*(?:#d8e3d5|rgb\(216,\s*227,\s*213\))/i);
-    assert.match(tag.getAttribute("style") || "", /padding:\s*3px 10px/i);
+    assert.match(tag.getAttribute("style") || "", /border-bottom:\s*1px dotted/i);
+    assert.match(tag.getAttribute("style") || "", /background:\s*transparent/i);
+    assert.match(tag.getAttribute("style") || "", /padding:\s*2px 0px/i);
     assert.match(tag.getAttribute("style") || "", /max-width:\s*150px/i);
     assert.match(tag.getAttribute("style") || "", /text-overflow:\s*ellipsis/i);
   }
@@ -932,7 +965,7 @@ test("library-overlay opened surface shows status editing only when entryId exis
   assert.match(surface.getAttribute("style") || "", /max-height:\s*calc\(100vh/i);
   const header = surface.querySelector("[data-trace-management-header]");
   assert.ok(header);
-  assert.doesNotMatch(header.textContent || "", /\bTrace\b/i);
+  assert.match(header.textContent || "", /Trace\s*·\s*AO3/i);
   const openInTrace = surface.querySelector("a");
   assert.equal(
     openInTrace.getAttribute("href"),
@@ -959,7 +992,7 @@ test("library-overlay opened surface shows status editing only when entryId exis
   assert.equal(selected.getAttribute("aria-pressed"), "true");
   const position = surface.querySelector("[data-trace-action-position]");
   assert.ok(position);
-  assert.match(position.textContent || "", /Ch\s*3\s*\/\s*17/);
+  assert.match(position.textContent || "", /Chapter\s*3\s*of\s*17/);
   assert.doesNotMatch(position.textContent || "", /Reading\s*·\s*3\/17/i);
   assert.deepEqual(
     Array.from(choices.querySelectorAll("[data-trace-status-choice]")).map((button) => button.textContent),
@@ -1141,7 +1174,7 @@ test("library-overlay status failure restores previous state and exposes compact
   assert.match(retrySurface.textContent || "", /Paused/i);
   const retryPosition = retrySurface.querySelector("[data-trace-action-position]");
   assert.ok(retryPosition);
-  assert.match(retryPosition.textContent || "", /Ch\s*3\s*\/\s*12/i);
+  assert.match(retryPosition.textContent || "", /Chapter\s*3\s*of\s*12/i);
   assert.doesNotMatch(retryPosition.textContent || "", /Paused\s*·\s*3\/12/i);
   assert.equal(
     retrySurface.querySelector("[data-trace-status-selected='1']").getAttribute("data-trace-status-choice"),
@@ -2063,7 +2096,7 @@ test("library-overlay hide failure keeps existing badge and offers retry", async
   assert.equal(hide.disabled, false);
 });
 
-test("library-overlay keeps workMark hidden from listing UI", async () => {
+test("library-overlay presents workMark in the quiet inline memory and action surface", async () => {
   const window = await renderOverlayListing({
     html:
       "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/44444'>Marked Work</a></h4></li></ol></body></html>",
@@ -2082,13 +2115,13 @@ test("library-overlay keeps workMark hidden from listing UI", async () => {
   const wrap = window.document.querySelector("[data-trace-library-overlay-wrap]");
   assert.ok(wrap);
   assert.match(wrap.textContent || "", /Dropped/);
-  assert.equal(wrap.querySelector("[data-trace-work-mark]"), null);
+  assert.ok(wrap.querySelector("[data-trace-inline-work-mark='abandoned']"));
   const { surface } = openTraceLens(window);
-  assert.doesNotMatch(surface.textContent || "", /Abandoned/i);
-  assert.doesNotMatch(surface.textContent || "", /Work mark/i);
+  assert.match(surface.textContent || "", /Marked abandoned/i);
+  assert.ok(surface.querySelector("[data-trace-work-mark='abandoned']"));
 });
 
-test("library-overlay keeps workMark challenges hidden from listing UI", async () => {
+test("library-overlay presents workMark challenges with concrete chapter copy", async () => {
   const window = await renderOverlayListing({
     html:
       "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/55555'>Challenge Work</a></h4></li></ol></body></html>",
@@ -2110,11 +2143,10 @@ test("library-overlay keeps workMark challenges hidden from listing UI", async (
   const wrap = window.document.querySelector("[data-trace-library-overlay-wrap]");
   assert.ok(wrap);
   assert.match(wrap.textContent || "", /Reading/);
-  assert.doesNotMatch(wrap.textContent || "", /\+4/);
-  assert.equal(wrap.querySelector("[data-trace-work-mark-challenge]"), null);
+  assert.match(wrap.textContent || "", /\+4 ch/);
+  assert.ok(wrap.querySelector("[data-trace-inline-work-mark-challenge]"));
   const { surface } = openTraceLens(window);
-  assert.doesNotMatch(surface.textContent || "", /Attention/i);
-  assert.doesNotMatch(surface.textContent || "", /\+4/);
+  assert.match(surface.textContent || "", /4 new chapters since you marked it/i);
 });
 
 test("library-overlay quick-add maps free limit to a reusable recovery notice", async () => {

@@ -136,13 +136,19 @@ Use a normal desktop viewport on an AO3 works listing.
   - Find a known library work.
   - Pass: lens is directly below the AO3 updated/date value and preserves the
     native date text/alignment.
+  - For an abandoned or hiatus-marked fixture, pass: the mark is visible but
+    quiet. A source challenge uses a concrete delta such as `+2 ch`; an
+    unchallenged mark does not carry explanatory filler.
 
 - Management surface:
   - Click the known work lens.
   - Pass: surface opens near the lens, is not clipped, and has no green TRACE
     bubble.
   - Verify visible actions: reading status choices, progress display,
-    Hide/Unhide, Open in Trace.
+    private record context when available, Hide/Unhide, Open in Trace.
+  - Pass: statuses form a stable six-choice grid, progress uses one clear
+    `Chapter N of total` line, and private tags are visually distinct from
+    source taxonomy without becoming heavy pills.
 
 - Status changes:
   - Change status through `Saved`, `Reading`, `Caught up`, `Paused`,
@@ -274,11 +280,30 @@ Use both `www.fanfiction.net` and `m.fanfiction.net` listing pages.
   - Connected after a successful quick add/track or account library count:
     shows compact connected state, current toggles, and the Library/import path
     where applicable.
+  - `Saved filters on AO3` explains that it controls visibility inside AO3's
+    own filter panel. It does not imply that filter rules are edited in the
+    popup.
+  - Light and dark appearance keep the same hierarchy, legibility, and tap
+    targets.
   - Reconnect/error: shows recovery/error state.
   - iOS Safari popup help, where shown: names both enabling the Safari
     extension and allowing it on Trace, AO3, and FFN.
   - Pass: popup state matches auth/page context and controls are not
     misleading.
+
+## AO3 Saved Filters On The Real Site
+
+- Open a real AO3 works search or tag listing and expand AO3's normal filter
+  panel.
+- Pass: `Saved filters` appears as an addition to that panel, with quiet
+  `by Trace` attribution and no repeated Trace mark.
+- Create or update a filter from the current AO3 controls, apply it, rename it,
+  and delete it.
+- Pass: Trace never substitutes a mock filter form, the native Include/Exclude
+  controls remain readable, and narrow/mobile filter layouts stay usable.
+- Turn `Saved filters on AO3` off in the popup and reload the listing.
+- Pass: the saved-filter module is absent while AO3's own filters remain
+  unchanged; turning it back on restores the module.
 
 ## Screenshots To Capture
 
@@ -288,6 +313,9 @@ Capture PNG screenshots for the release QA record:
 - Chrome AO3 listing desktop: hidden collapsed row with Undo.
 - Chrome AO3 listing desktop: known lens under date.
 - Chrome AO3 listing desktop: opened management surface with all statuses.
+- Chrome AO3 listing desktop: hiatus/abandoned mark and challenged delta.
+- Chrome AO3 filters desktop/mobile: saved-filter module within the real AO3
+  filter panel.
 - Chrome AO3 listing mobile: date/metadata placement.
 - Chrome AO3 story page: quick Add after success.
 - Chrome AO3 story page: opened sheet.
@@ -298,6 +326,7 @@ Capture PNG screenshots for the release QA record:
 - Safari AO3 story: sheet bottom viewport.
 - Safari FFN listing/story: placement and sheet.
 - Signed-out/reconnect popup.
+- Connected popup in light and dark appearance.
 - Free-cap Add failure.
 - Password/login page with no Trace UI.
 

@@ -74,6 +74,7 @@ function createPopupHarness({
   permissionRequestError = null,
   permissionContainsResult = null,
   registrationReconcileResult = null,
+  sessionSnapshotResponses = null,
 } = {}) {
   const html = fs.readFileSync(POPUP_HTML_PATH, "utf8");
   const js = fs.readFileSync(POPUP_JS_PATH, "utf8");
@@ -117,7 +118,9 @@ function createPopupHarness({
           response = importResponse;
         }
         if (message.type === "TRACE_SESSION_GET_SNAPSHOT") {
-          response = { ok: true, snapshot: sessionSnapshot };
+          response = Array.isArray(sessionSnapshotResponses)
+            ? sessionSnapshotResponses.shift()
+            : { ok: true, snapshot: sessionSnapshot };
         }
         if (message.type === "TRACE_SESSION_ACTION") {
           response = { ok: true, snapshot: sessionSnapshot, action: { kind: "ignored" } };
@@ -718,16 +721,10 @@ test("earned-permission onboarding confirms automation only from a post-grant ar
   });
   for (let attempt = 0; attempt < 8; attempt += 1) await flush();
 
-  assert.equal(
-    h.document.getElementById("popup-earned-heading").textContent,
-    "Trace is ready",
-  );
-  assert.equal(
-    h.document.getElementById("popup-earned-save").querySelector(
-      ".popup-probe-check-value",
-    ).textContent,
-    "Run confirmed",
-  );
+  assert.equal(h.document.body.dataset.traceEarnedPermission, undefined);
+  assert.equal(h.document.getElementById("popup-earned-permission").hidden, true);
+  assert.equal(h.document.getElementById("popup-status").textContent, "Connected");
+  assert.equal(h.store.traceEarnedPermissionOnboardingV1.completedAt > grantAt, true);
 });
 
 test("earned-permission onboarding accepts semantically complete legacy grants", async () => {
@@ -736,6 +733,12 @@ test("earned-permission onboarding accepts semantically complete legacy grants",
     sessionMode: "kernel",
     promiseRuntime: true,
     earnedPermissionOnboarding: true,
+    sessionSnapshot: {
+      state: "connected",
+      accountId: "account-a",
+      canExecuteAuthenticated: true,
+      reason: "none",
+    },
     grantedOrigins: ["https://archiveofourown.org/*"],
     permissionContainsResult: true,
     registeredContentScripts: [
@@ -753,10 +756,9 @@ test("earned-permission onboarding accepts semantically complete legacy grants",
   });
   for (let attempt = 0; attempt < 8; attempt += 1) await flush();
 
-  assert.equal(
-    h.document.getElementById("popup-earned-heading").textContent,
-    "Trace is ready",
-  );
+  assert.equal(h.document.body.dataset.traceEarnedPermission, undefined);
+  assert.equal(h.document.getElementById("popup-earned-permission").hidden, true);
+  assert.equal(h.document.getElementById("popup-status").textContent, "Connected");
   assert.equal(h.permissionRequests.length, 0);
 });
 
@@ -773,6 +775,12 @@ test("earned-permission onboarding confirms a heartbeat while the popup stays op
     sessionMode: "kernel",
     promiseRuntime: true,
     earnedPermissionOnboarding: true,
+    sessionSnapshot: {
+      state: "connected",
+      accountId: "account-a",
+      canExecuteAuthenticated: true,
+      reason: "none",
+    },
     grantedOrigins: [...origins],
     registeredContentScripts: [
       { id: "trace-archive-automation-v1" },
@@ -802,16 +810,134 @@ test("earned-permission onboarding confirms a heartbeat while the popup stays op
   });
   for (let attempt = 0; attempt < 8; attempt += 1) await flush();
 
-  assert.equal(
-    h.document.getElementById("popup-earned-heading").textContent,
-    "Trace is ready",
-  );
-  assert.equal(
-    h.document.getElementById("popup-earned-save").querySelector(
-      ".popup-probe-check-value",
-    ).textContent,
-    "Run confirmed",
-  );
+  assert.equal(h.document.body.dataset.traceEarnedPermission, undefined);
+  assert.equal(h.document.getElementById("popup-earned-permission").hidden, true);
+  assert.equal(h.document.getElementById("popup-status").textContent, "Connected");
+});
+
+test("completed earned-permission onboarding opens normal controls away from story pages", async () => {
+  const completedAt = Date.now() - 5_000;
+  const origins = [
+    "https://*.archiveofourown.org/*",
+    "https://*.archiveofourown.gay/*",
+    "https://archive.transformativeworks.org/*",
+    "https://www.fanfiction.net/*",
+    "https://m.fanfiction.net/*",
+  ];
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    activeTab: { id: 8, url: "https://www.google.com/" },
+    grantedOrigins: [...origins],
+    storageState: {
+      traceEarnedPermissionOnboardingV1: {
+        grantAt: completedAt - 5_000,
+        registrationVersion: 3,
+        promptResult: "granted",
+        completedAt,
+      },
+    },
+    sessionSnapshot: {
+      state: "connected",
+      accountId: "account-a",
+      canExecuteAuthenticated: true,
+      reason: "none",
+    },
+    popupState: {
+      ok: true,
+      authState: {
+        state: "connected",
+        accountId: "account-a",
+        canExecuteAuthenticated: true,
+        reason: "none",
+      },
+      firstSaveSeen: true,
+      libraryCount: 12,
+      activeTab: { kind: "unsupported" },
+      pro: true,
+      autoTrackEnabled: true,
+      libraryInlayEnabled: true,
+      ao3SavedFiltersEnabled: true,
+      metadataImproveEnabled: true,
+    },
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  assert.equal(h.document.body.dataset.traceEarnedPermission, undefined);
+  assert.equal(h.document.getElementById("popup-earned-permission").hidden, true);
+  assert.equal(h.document.getElementById("popup-status").textContent, "Connected");
+  assert.equal(h.document.getElementById("popup-local-settings").hidden, false);
+  const savedFilters = h.document.getElementById("pref-ao3-saved-filters");
+  savedFilters.checked = false;
+  savedFilters.dispatchEvent(new h.window.Event("change", { bubbles: true }));
+  await flush();
+  assert.equal(h.store.prefAo3SavedFiltersEnabled, false);
+  assert.equal(h.injections.length, 0, "normal popup must not run the retired active-tab probe");
+});
+
+test("completed earned-permission onboarding stays complete when Safari omits the grant snapshot", async () => {
+  const completedAt = Date.now() - 5_000;
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    activeTab: { id: 8, url: "https://www.google.com/" },
+    grantedOrigins: [],
+    permissionContainsResult: false,
+    storageState: {
+      traceEarnedPermissionOnboardingV1: {
+        grantAt: completedAt - 5_000,
+        registrationVersion: 3,
+        promptResult: "granted",
+        completedAt,
+      },
+    },
+    sessionSnapshot: {
+      state: "connected",
+      accountId: "account-a",
+      canExecuteAuthenticated: true,
+      reason: "none",
+    },
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  assert.equal(h.document.body.dataset.traceEarnedPermission, undefined);
+  assert.equal(h.document.getElementById("popup-earned-permission").hidden, true);
+  assert.equal(h.document.getElementById("popup-status").textContent, "Connected");
+  assert.equal(h.permissionRequests.length, 0);
+});
+
+test("archive heartbeat completes onboarding when legacy state has no grant timestamp", async () => {
+  const lastArchiveSeenAt = Date.now() - 1_000;
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    activeTab: { id: 8, url: "https://www.google.com/" },
+    grantedOrigins: [],
+    permissionContainsResult: false,
+    storageState: {
+      traceEarnedPermissionOnboardingV1: {
+        registrationVersion: 3,
+        promptResult: "granted",
+      },
+      traceArchiveReadiness: { lastArchiveSeenAt },
+    },
+    sessionSnapshot: {
+      state: "connected",
+      accountId: "account-a",
+      canExecuteAuthenticated: true,
+      reason: "none",
+    },
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+
+  assert.equal(h.document.body.dataset.traceEarnedPermission, undefined);
+  assert.equal(h.document.getElementById("popup-earned-permission").hidden, true);
+  assert.equal(h.document.getElementById("popup-status").textContent, "Connected");
+  assert.equal(h.store.traceEarnedPermissionOnboardingV1.completedAt > lastArchiveSeenAt, true);
+  assert.equal(h.permissionRequests.length, 0);
 });
 
 test("earned-permission onboarding gives a bounded retry when background registration fails", async () => {
@@ -889,6 +1015,30 @@ test("kernel popup is read-only on open and exposes only explicit session action
     type: "TRACE_SESSION_ACTION",
     action: "connect",
   });
+});
+
+test("kernel popup retries a missing session owner finitely and never spins forever", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    sessionSnapshotResponses: [null, null, null],
+  });
+  await flush();
+  h.runTimeouts();
+  await flush();
+  h.runTimeouts();
+  await flush();
+
+  assert.equal(
+    h.messages.filter(({ type }) => type === "TRACE_SESSION_GET_SNAPSHOT").length,
+    3,
+  );
+  assert.equal(
+    h.document.getElementById("popup-status").textContent,
+    "Trace is temporarily offline",
+  );
+  assert.equal(h.document.getElementById("popup-cta").textContent, "Retry");
+  assert.equal(h.document.body.dataset.tracePopupState, "degraded");
 });
 
 test("kernel popup uses the promise runtime contract on Firefox and Safari", async () => {
@@ -998,11 +1148,22 @@ test("connected kernel popup renders authoritative summary, preferences, and mig
 
   assert.equal(h.document.getElementById("popup-local-settings").hidden, false);
   assert.equal(h.document.getElementById("popup-pro-settings").hidden, false);
+  const preferences = h.document.getElementById("popup-preferences");
+  assert.equal(preferences.hidden, false);
+  assert.equal(preferences.open, false);
+  assert.equal(
+    h.document.getElementById("popup-preferences-count").textContent,
+    "2 of 4 on",
+  );
   assert.equal(h.document.getElementById("pref-auto-track").checked, false);
   assert.equal(h.document.getElementById("pref-library-inlay").checked, true);
   assert.equal(h.document.getElementById("pref-ao3-saved-filters").checked, false);
   assert.equal(h.document.getElementById("popup-import").hidden, false);
   assert.equal(h.document.getElementById("popup-import").textContent, "Import this story");
+  assert.ok(
+    h.document.getElementById("popup-import").compareDocumentPosition(preferences) &
+      h.window.Node.DOCUMENT_POSITION_FOLLOWING,
+  );
   h.document.getElementById("popup-import").click();
   assert.deepEqual(JSON.parse(JSON.stringify(h.messages.at(-1))), {
     type: "TRACE_IMPORT_TRIGGER",

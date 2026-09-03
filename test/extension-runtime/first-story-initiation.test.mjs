@@ -5,6 +5,7 @@ import { IDBFactory } from "fake-indexeddb";
 import {
   BrowserFirstStoryInitiator,
   firstStoryInitiationFromMessage,
+  isPopupSender,
 } from "../../.trace-build/extension-runtime/first-story-initiation.mjs";
 import {
   installSessionRuntime,
@@ -29,6 +30,30 @@ const traceSender = {
 };
 const storyUrl = "https://www.fanfiction.net/s/7038840/1/A-Chance-Encounter";
 const entryId = "00000000-0000-4000-8000-000000000123";
+
+test("popup ownership accepts trusted Safari resource URLs without Chrome-shaped sender ids", () => {
+  assert.equal(isPopupSender({
+    url: "safari-web-extension://com.tracefiction.trace.Extension/popup.html",
+  }, runtimeId), true);
+  assert.equal(isPopupSender({
+    id: "com.tracefiction.trace.Extension",
+    url: "safari-web-extension://9A87D1E4/Resources/popup.html",
+  }, runtimeId), true);
+  assert.equal(isPopupSender({
+    id: runtimeId,
+  }, runtimeId), true);
+
+  assert.equal(isPopupSender({
+    id: runtimeId,
+    url: "https://archiveofourown.org/popup.html",
+    tab: { url: "https://archiveofourown.org/works/123" },
+  }, runtimeId), false);
+  assert.equal(isPopupSender({
+    id: runtimeId,
+    url: "safari-web-extension://com.tracefiction.trace.Extension/settings.html",
+  }, runtimeId), false);
+  assert.equal(isPopupSender({ id: "another-extension" }, runtimeId), false);
+});
 
 test("first-story messages are accepted only from their owning popup or Trace surface", () => {
   assert.deepEqual(firstStoryInitiationFromMessage(

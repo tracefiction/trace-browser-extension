@@ -34,15 +34,14 @@
 (function (root) {
   'use strict';
 
-  // ---- TRUE Trace injected palette (from shipped data-trace-* elements) ----
+  // ---- Quiet Margin palette shared by Trace's archive surfaces -------------
   var T = {
-    paper:'rgb(247,243,233)', sunk:'rgb(243,239,228)', sunk2:'rgb(235,230,215)',
-    ink:'rgb(28,39,34)', muted:'rgb(110,106,91)', faint:'rgb(154,149,131)',
-    dotEmpty:'rgb(196,190,168)', line:'rgba(28,39,34,0.18)', lineSoft:'rgba(28,39,34,0.1)',
-    rust:'rgb(181,74,48)', forest:'rgb(19,48,41)', finished:'rgb(31,77,63)',
-    honey:'rgb(138,110,42)', caughtup:'rgb(47,143,134)',
-    sans:'Manrope, system-ui, -apple-system, "Segoe UI", sans-serif',
-    serif:'Fraunces, Georgia, "Times New Roman", serif',
+    paper:'rgb(255,253,248)', sunk:'rgb(246,241,231)', sunk2:'rgb(235,230,215)',
+    ink:'rgb(21,30,28)', muted:'rgb(91,100,95)', faint:'rgb(119,126,121)',
+    dotEmpty:'rgb(196,190,168)', line:'rgb(212,205,192)', lineSoft:'rgba(21,30,28,0.08)',
+    rust:'rgb(188,67,41)', forest:'rgb(24,63,55)', finished:'rgb(74,129,87)',
+    honey:'rgb(153,110,41)', caughtup:'rgb(31,138,125)',
+    sans:'Geist, Manrope, system-ui, -apple-system, "Segoe UI", sans-serif',
     mono:'"Geist Mono", ui-monospace, monospace'
   };
   var Z = 2147483646;
@@ -74,51 +73,55 @@
   }
   function insertAfter(ref, node) { ref.parentNode.insertBefore(node, ref.nextSibling); }
 
+  function surfaceStyle(corner) {
+    return 'display:block;background:' + T.paper + ';border:1px solid ' + T.line + ';'
+      + 'border-radius:10px;overflow:hidden;'
+      + 'box-shadow:0 8px 24px rgba(21,30,28,0.12),0 1px 2px rgba(21,30,28,0.08);'
+      + '-webkit-font-smoothing:antialiased;animation:traceFinishArrive .22s cubic-bezier(.2,.8,.2,1) both;'
+      + (corner
+          ? 'position:fixed;z-index:' + Z + ';width:330px;max-width:calc(100vw - 24px);right:18px;bottom:18px;'
+          : 'position:relative;width:100%;max-width:520px;margin:22px auto;');
+  }
+
+  function ensureMotionStyle() {
+    if (document.getElementById('trace-finish-motion')) return;
+    var style = document.createElement('style');
+    style.id = 'trace-finish-motion';
+    style.textContent = '@keyframes traceFinishArrive{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:translateY(0)}}'
+      + '@media(prefers-reduced-motion:reduce){[data-trace-finish-qualify],[data-trace-finish-recovery],[data-trace-finish-toast]{animation:none!important;transition:none!important}}';
+    (document.head || document.documentElement).appendChild(style);
+  }
+
   // ---- the qualify band -----------------------------------------------------
   function buildBand(opts) {
     var s = opts.story || {};
     var corner = opts.placement === 'corner';
     var inlineStart = !corner && opts.align === 'start';
 
-    var wrap = el('aside',
-      'display:block;background:' + T.paper + ';border:1px solid ' + T.line + ';'
-      + 'border-radius:14px;overflow:hidden;'
-      + 'box-shadow:0 16px 40px -16px rgba(20,14,0,0.34),0 0 0 1px ' + T.lineSoft + ';'
-      + '-webkit-font-smoothing:antialiased;'
-      + (corner
-          ? 'position:fixed;z-index:' + Z + ';width:330px;max-width:calc(100vw - 24px);right:18px;bottom:18px;'
-          : 'position:relative;width:100%;max-width:520px;margin:22px ' + (inlineStart ? '0' : 'auto') + ';'));
+    ensureMotionStyle();
+    var wrap = el('aside', surfaceStyle(corner));
+    if (inlineStart) wrap.style.margin = '22px 0';
     wrap.setAttribute('data-trace-finish-qualify', s.handle || '1');
     wrap.setAttribute('role', 'dialog');
     wrap.setAttribute('aria-label', 'Trace \u2014 reached the end');
 
-    var pad = el('div', 'padding:15px 17px;');
-
-    // kicker: "AO3 · REACHED THE END"
-    var kick = el('div',
-      'font:500 9px/1 ' + T.mono + ';letter-spacing:0.14em;text-transform:uppercase;'
-      + 'color:' + T.rust + ';margin-bottom:8px;');
-    kick.textContent = (s.src ? s.src + ' \u00b7 ' : '') + 'reached the end';
-    pad.appendChild(kick);
-
-    // headline
-    var head = el('div',
-      'font:500 17px/1.2 ' + T.serif + ';color:' + T.ink + ';');
-    head.textContent = s.title ? '\u201c' + s.title + '\u201d is\u2026 complete?' : 'Is this story complete?';
+    var accent = el('div', 'height:3px;background:' + T.forest + ';');
+    wrap.appendChild(accent);
+    var pad = el('div', 'padding:15px 16px 14px;');
+    var head = el('div', 'font:650 15px/1.25 ' + T.sans + ';color:' + T.ink + ';');
+    head.textContent = 'You reached the end';
     pad.appendChild(head);
 
-    var sub = el('div', 'font-size:12.5px;color:' + T.muted + ';margin-top:4px;');
-    sub.textContent = 'You finished the last posted chapter'
-      + (s.total ? ' (ch ' + (s.chapter || s.total) + ' of ' + s.total + ')' : '') + '.';
+    var sub = el('div', 'font-size:12.5px;color:' + T.muted + ';margin-top:3px;');
+    sub.textContent = 'What is the work\u2019s current status?';
     pad.appendChild(sub);
 
-    // options
-    var opt = el('div', 'display:flex;flex-wrap:wrap;gap:7px;margin-top:13px;');
+    var opt = el('div', 'display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-top:13px;');
     WORK.forEach(function (w) {
       var b = el('button',
-        'display:inline-flex;align-items:center;gap:7px;cursor:pointer;'
-        + 'background:' + T.paper + ';border:1px solid ' + T.line + ';border-radius:9px;'
-        + 'padding:8px 12px;font:500 12.5px/1 ' + T.sans + ';color:' + T.ink + ';');
+        'display:flex;align-items:center;gap:8px;cursor:pointer;min-width:0;min-height:42px;'
+        + 'background:' + T.paper + ';border:1px solid ' + T.line + ';border-radius:7px;'
+        + 'padding:8px 10px;font:550 12.5px/1.2 ' + T.sans + ';color:' + T.ink + ';');
       b.type = 'button';
       b.setAttribute('data-trace-work-choice', w[0]);
       b.appendChild(dot(w[2]));
@@ -141,12 +144,11 @@
     });
     pad.appendChild(opt);
 
-    // dismiss
     var dis = el('button',
-      'display:inline-block;margin-top:11px;cursor:pointer;background:none;border:0;'
-      + 'font-size:11.5px;color:' + T.faint + ';');
+      'display:inline-block;margin-top:10px;cursor:pointer;background:none;border:0;'
+      + 'min-height:30px;padding:4px 1px;font-size:11.5px;color:' + T.faint + ';');
     dis.type = 'button';
-    dis.textContent = corner ? 'Dismiss' : 'Not sure / later';
+    dis.textContent = corner ? 'Dismiss' : 'Decide later';
     dis.addEventListener('click', function () {
       if (typeof opts.onDismiss === 'function') opts.onDismiss();
       removeNode(wrap);
@@ -160,34 +162,27 @@
   function buildRecoveryBand(opts) {
     var s = opts.story || {};
     var inlineStart = opts.align === 'start';
-    var wrap = el('aside',
-      'display:block;background:' + T.paper + ';border:1px solid ' + T.line + ';'
-      + 'border-radius:14px;overflow:hidden;'
-      + 'box-shadow:0 16px 40px -16px rgba(20,14,0,0.34),0 0 0 1px ' + T.lineSoft + ';'
-      + '-webkit-font-smoothing:antialiased;position:relative;width:100%;max-width:520px;'
-      + 'margin:22px ' + (inlineStart ? '0' : 'auto') + ';');
+    ensureMotionStyle();
+    var wrap = el('aside', surfaceStyle(false));
+    if (inlineStart) wrap.style.margin = '22px 0';
     wrap.setAttribute('data-trace-finish-recovery', s.handle || '1');
     wrap.setAttribute('role', 'alert');
     wrap.setAttribute('aria-live', 'polite');
 
-    var pad = el('div', 'padding:15px 17px;');
-    var kick = el('div',
-      'font:500 9px/1 ' + T.mono + ';letter-spacing:0.14em;text-transform:uppercase;'
-      + 'color:' + T.rust + ';margin-bottom:8px;',
-      (s.src ? s.src + ' \u00b7 ' : '') + 'update needs attention');
-    pad.appendChild(kick);
+    wrap.appendChild(el('div', 'height:3px;background:' + T.rust + ';'));
+    var pad = el('div', 'padding:15px 16px 14px;');
     pad.appendChild(el('div',
-      'font:500 17px/1.2 ' + T.serif + ';color:' + T.ink + ';',
-      'Trace couldn\u2019t update your reading status'));
+      'font:650 15px/1.25 ' + T.sans + ';color:' + T.ink + ';',
+      'Trace couldn\u2019t save the update'));
     var message = el('div', 'font-size:12.5px;color:' + T.muted + ';margin-top:4px;',
-      opts.message || 'Retry the finish update, or open Trace to update it there.');
+      opts.message || 'Retry here, or update the story in Trace.');
     message.setAttribute('data-trace-finish-recovery-message', '1');
     pad.appendChild(message);
 
     var actions = el('div', 'display:flex;flex-wrap:wrap;align-items:center;gap:9px;margin-top:13px;');
     var retry = el('button',
       'display:inline-flex;align-items:center;justify-content:center;cursor:pointer;'
-      + 'background:' + T.forest + ';border:1px solid ' + T.forest + ';border-radius:9px;'
+      + 'background:' + T.forest + ';border:1px solid ' + T.forest + ';border-radius:7px;'
       + 'min-height:44px;padding:8px 12px;font:600 12.5px/1 ' + T.sans + ';color:#fff;',
       'Retry update');
     retry.type = 'button';
@@ -262,18 +257,19 @@
   function showResolved(wrap, pad, workState, opts) {
     var result = workStatusResult(workState);
     var accent = result.accent;
-    wrap.style.background = 'color-mix(in oklab,' + accent + ' 8%, ' + T.paper + ')';
-    wrap.style.borderColor = 'color-mix(in oklab,' + accent + ' 42%, transparent)';
+    wrap.style.background = T.paper;
+    wrap.style.borderColor = T.line;
 
     pad.textContent = '';
-    var row = el('div', 'display:flex;align-items:center;gap:10px;');
+    var row = el('div', 'display:grid;grid-template-columns:4px 26px minmax(0,1fr);align-items:center;gap:10px;');
+    row.appendChild(el('span', 'display:block;align-self:stretch;border-radius:999px;background:' + accent + ';'));
     var ic = el('span',
       'display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;'
-      + 'width:28px;height:28px;border-radius:999px;background:' + accent + ';color:#fff;'
-      + 'font:700 15px/1 ' + T.sans + ';');
+      + 'width:26px;height:26px;border-radius:999px;background:' + T.sunk + ';color:' + accent + ';'
+      + 'font:750 14px/1 ' + T.sans + ';');
     ic.textContent = '\u2713';
     var txt = el('div', '');
-    var t1 = el('div', 'font:500 16px/1.2 ' + T.serif + ';color:' + T.ink + ';');
+    var t1 = el('div', 'font:650 14px/1.2 ' + T.sans + ';color:' + T.ink + ';');
     t1.textContent = result.reader;
     var t2 = el('div', 'font-size:12px;color:' + T.muted + ';margin-top:2px;');
     t2.textContent = result.work;
@@ -283,10 +279,10 @@
 
     if (typeof opts.onOpenInTrace === 'function') {
       var link = el('a',
-        'display:inline-block;margin-top:11px;cursor:pointer;'
-        + 'font-size:12.5px;color:' + T.forest + ';text-decoration:underline;text-underline-offset:2px;');
+        'display:inline-block;margin:9px 0 0 50px;cursor:pointer;'
+        + 'font:550 12px/1.2 ' + T.sans + ';color:' + T.forest + ';text-decoration:none;');
       link.href = opts.traceHref || '#';
-      link.textContent = 'Rate & note it in your library \u2192';
+      link.textContent = 'Open in Trace \u2192';
       link.addEventListener('click', function (e) {
         if (!opts.traceHref) e.preventDefault();
         opts.onOpenInTrace();
@@ -311,25 +307,28 @@
     var s = opts.story || {};
     var finished = opts.kind === 'finished';
     var accent = finished ? T.finished : T.caughtup;
+    ensureMotionStyle();
     var t = el('div',
       'position:fixed;z-index:' + Z + ';right:18px;bottom:18px;max-width:300px;'
-      + 'display:flex;align-items:center;gap:10px;'
-      + 'background:' + T.paper + ';border:1px solid color-mix(in oklab,' + accent + ' 42%,transparent);'
-      + 'border-radius:12px;padding:12px 14px;'
-      + 'box-shadow:0 16px 40px -16px rgba(20,14,0,0.34);');
+      + 'display:grid;grid-template-columns:3px 24px minmax(0,1fr);align-items:center;gap:10px;'
+      + 'background:' + T.paper + ';border:1px solid ' + T.line + ';'
+      + 'border-radius:9px;padding:11px 13px;'
+      + 'box-shadow:0 8px 24px rgba(21,30,28,0.14),0 1px 2px rgba(21,30,28,0.08);'
+      + 'animation:traceFinishArrive .22s cubic-bezier(.2,.8,.2,1) both;');
     t.setAttribute('data-trace-finish-toast', '1');
+    t.appendChild(el('span', 'display:block;align-self:stretch;border-radius:999px;background:' + accent + ';'));
     var ic = el('span',
       'display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;'
-      + 'width:24px;height:24px;border-radius:999px;background:' + accent + ';color:#fff;font:700 13px/1 ' + T.sans + ';');
+      + 'width:24px;height:24px;border-radius:999px;background:' + T.sunk + ';color:' + accent + ';font:750 13px/1 ' + T.sans + ';');
     ic.textContent = '\u2713';
-    var txt = el('div', 'font-size:13px;color:' + T.ink + ';');
-    var b = el('span', 'font:500 13.5px/1.2 ' + T.serif + ';');
-    b.textContent = finished ? 'Finished' : 'Caught up';
+    var txt = el('div', 'font-size:12px;color:' + T.muted + ';');
+    var b = el('span', 'display:block;font:650 13.5px/1.2 ' + T.sans + ';color:' + T.ink + ';');
+    b.textContent = finished ? 'Marked Finished' : 'Marked Caught up';
     txt.appendChild(b);
     if (typeof opts.onOpenInTrace === 'function') {
-      var u = el('span', 'display:block;font-size:11.5px;color:' + T.forest
-        + ';text-decoration:underline;cursor:pointer;margin-top:2px;');
-      u.textContent = 'undo \u00b7 open in Trace';
+      var u = el('span', 'display:block;font:550 11.5px/1.2 ' + T.sans + ';color:' + T.forest
+        + ';cursor:pointer;margin-top:2px;');
+      u.textContent = 'Open in Trace \u2192';
       u.addEventListener('click', opts.onOpenInTrace);
       txt.appendChild(u);
     }

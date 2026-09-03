@@ -24,24 +24,21 @@ requires a local fallback.
 
 Light surface:
 
-- `paper`: `#f3efe4`
-- `paper-2`: `#ebe6d7`
-- `card`: `#f7f3e9`
-- `card-2`: `#ede8d8`
-- `ink`: `#1c2722`
-- `ink-2`: `#3a4339`
-- `ink-3`: `#6e6a5b`
-- `ink-4`: `#9a9583`
-- `ink-5`: `#c4bea8`
-- `line`: `rgba(28, 39, 34, 0.10)`
-- `line-strong`: `rgba(28, 39, 34, 0.18)`
-- `forest`: `#1f4d3f`
-- `forest-deep`: `#133029`
-- `forest-soft`: `#d8e3d5`
-- `rust`: `#b54a30`
-- `rust-soft`: `#f1d8c8`
-- `honey`: `#8a6e2a`
-- `honey-soft`: `#ebdcab`
+- `paper`: `#fefcf7`
+- `paper-2`: `#ece7dd`
+- `card`: `#f7f4ed`
+- `card-2`: `#efeae1`
+- `ink`: `#151e1c`
+- `ink-2`: `#27312e`
+- `ink-3`: `#5b645f`
+- `ink-4`: `#777f7a`
+- `ink-5`: `#a5aaa6`
+- `line`: `#d4cdc0`
+- `line-strong`: `#bbb3a5`
+- `forest`: `#2a5d53`
+- `forest-deep`: `#183f37`
+- `rust`: `#bc4329`
+- `honey`: `#996e29`
 
 Status mapping:
 
@@ -54,9 +51,27 @@ Status mapping:
 
 Typography:
 
-- UI: `Geist`, then system sans-serif fallbacks
-- Accent headings: `Fraunces`, then `Georgia`
+- UI: `Manrope` or `Geist`, then system sans-serif fallbacks
 - Mono labels/progress: `Geist Mono`, then system monospace fallbacks
+- Reserve serif type for infrequent editorial/error notices. Management
+  surfaces, popup controls, and repeated archive annotations stay sans-serif.
+
+## Ownership Grammar
+
+Trace has two layers on an archive page:
+
+- The archive owns the story facts and surrounding page.
+- The reader owns status, place, rating, note, tags, hiding, and work marks.
+
+The collapsed annotation must remain subordinate to the archive. The expanded
+surface may become a deliberate Trace surface, but it still cannot restyle or
+obscure archive content. Reader-owned context uses one quiet attached record
+surface, a short brass rule, and a consistent inset. Do not invent a different
+card, icon, or color for every field.
+
+Archive and Trace brand marks must not repeat beside every work. The extension
+popup may carry the Trace mark once. Inline actions and saved-filter modules use
+plain text ownership where attribution is needed.
 
 ## Listing Overlay
 
@@ -75,6 +90,8 @@ Unknown works:
 Known works:
 
 - Show an inline lens: status dot, status label, optional mono progress.
+- Show an `Abandoned` or `Hiatus` work mark when present. If the source now
+  challenges that mark, show only the useful delta, such as `+2 ch`.
 - Do not show progress bars, chevrons, or full cards in collapsed listing rows.
 - Keep update attention quiet in collapsed rows; detailed context belongs in the
   action surface.
@@ -108,15 +125,22 @@ Must preserve:
 - reading status choices
 - reading position
 - catch-up/new-chapter context
-- private note preview and private tag pills when provided by the API
+- private note preview and private tags when provided by the API
+- abandoned/hiatus work marks and source challenges when provided by the API
 - hide/unhide
 - `Open in Trace`
 
 Visual rules:
 
 - Keep it compact, flat, and text-led.
-- Use the forest filled button only for the primary Trace action.
+- Use the dark ink filled button only for the primary Trace action.
 - Avoid nested cards and decorative sections.
+- Use a single `Chapter N of total` position line. Do not add a decorative
+  progress bar or restate the same progress in multiple controls.
+- Render private tags as lightweight dotted-underlined annotations rather than
+  generic pills.
+- Use six direct status choices in a stable 3-by-2 grid. Status-specific color
+  belongs to the dot; the selected control uses one consistent dark treatment.
 
 ## Story Handle
 
@@ -148,7 +172,9 @@ The story sheet uses the shared sheet grammar:
 - compact header
 - segmented reading-status control
 - reading-position block
-- private note preview and private tag pills where available
+- private note preview and dotted-underlined private tags where available
+- abandoned/hiatus work mark where available, with challenge copy only when it
+  changes the reader's decision
 - footer with `Open in Trace` and hide/unhide controls
 
 Intentional product choices:
@@ -157,6 +183,9 @@ Intentional product choices:
 - If the API does not provide note text or tag names, do not fabricate them.
 - Long notes and tags must be truncated so the sheet does not require awkward
   internal scrolling.
+- Do not explain a work mark merely because it exists. `Marked hiatus` or
+  `Marked abandoned` is sufficient until the source provides a meaningful
+  challenge.
 
 ## Toolbar Popup
 
@@ -179,8 +208,23 @@ State mapping:
 Popup rules:
 
 - Show connection state only in the header for connected saved state.
-- Preferences use check-square controls.
-- Do not let system dark mode switch the popup to an unreviewed dark theme.
+- Preferences use native-looking switch controls with a concise title and one
+  line explaining the effect.
+- `Saved filters on AO3` is a display preference only. Filter rules are created,
+  edited, applied, and deleted inside AO3's real filter panel.
+- The popup supports a reviewed light and dark palette while keeping the same
+  hierarchy and state model.
+
+## AO3 Saved Filters
+
+- Render inside AO3's actual filters sidebar/panel; never replace it with a
+  Trace-owned mock filter screen.
+- Keep AO3's spacing, hierarchy, and action grammar recognizable. Trace adds a
+  quiet active edge and direct rule controls rather than a separate app shell.
+- Use `Saved filters` with quiet `by Trace` attribution. Do not add a repeated
+  Trace logo or mark.
+- Preserve the existing create, apply, rename, update, and delete behavior.
+- Narrow layouts must remain operable inside AO3's own mobile filter flow.
 
 ## Connection Notice
 
@@ -197,8 +241,10 @@ Must preserve:
 
 Visual target:
 
-- warm card, small serif title, concise body, one forest CTA, dismiss affordance
+- warm, restrained surface; concise sans-serif copy; one dark primary CTA;
+  dismiss affordance
 - rust/honey title tint only where the state needs it
+- dismissal is required. A user may keep Trace installed without connecting it.
 
 ## Privacy And Permissions
 
@@ -227,7 +273,8 @@ npm run visual:screenshots
 
 Important generated screenshots include:
 
-- `popup-connected-light.png`
+- `popup-connected.png`
+- `popup-library-full-dark.png`
 - `popup-signed-out.png`
 - `popup-reconnect-required.png`
 - `popup-error.png`

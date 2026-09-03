@@ -66,6 +66,7 @@ async function renderSavedFilters({
   url = "https://archiveofourown.org/works?work_search%5Bsort_column%5D=kudos_count&work_search%5Bcomplete%5D=T&work_search%5Bwords_from%5D=50000&tag_id=Harry+Potter+-+J*d*+K*d*+Rowling&page=2&commit=Sort+and+Filter",
   storage = {},
   setErrorMessage = "",
+  earnedPermissionComplete,
 } = {}) {
   const script = fs.readFileSync(SCRIPT_PATH, "utf8");
   const dom = new JSDOM(html, {
@@ -123,6 +124,12 @@ async function renderSavedFilters({
 
   window.chrome = chrome;
   window.browser = chrome;
+  if (typeof earnedPermissionComplete === "boolean") {
+    window.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {
+      registrationMode: "static",
+    };
+    window.TRACE_EARNED_PERMISSION_COMPLETE = earnedPermissionComplete;
+  }
   window.__TRACE_AO3_SAVED_FILTERS_TESTS__ = true;
   window.__traceAo3SavedFiltersNavigate = (href) => {
     navigations.push(href);
@@ -135,6 +142,16 @@ async function renderSavedFilters({
     storageState,
     navigations,
     runtimeMessages,
+    async grantEarnedPermission() {
+      window.TRACE_EARNED_PERMISSION_COMPLETE = true;
+      window.document.dispatchEvent(
+        new window.CustomEvent("trace-earned-permission-ready"),
+      );
+      window.document.dispatchEvent(
+        new window.Event("DOMContentLoaded", { bubbles: true }),
+      );
+      await sleep(80);
+    },
     emitStorageChange(changes, area = "local") {
       if (area === "local") {
         for (const [key, change] of Object.entries(changes || {})) {
@@ -156,7 +173,17 @@ function root(window) {
   return window.document.querySelector("[data-trace-ao3-saved-filters]");
 }
 
-test("manifest loads AO3 saved filters with existing archive content scripts", () => {
+test("AO3 saved filters remain inert until the complete Safari grant", async () => {
+  const harness = await renderSavedFilters({ earnedPermissionComplete: false });
+  assert.equal(root(harness.window), null);
+  assert.deepEqual(harness.runtimeMessages, []);
+
+  await harness.grantEarnedPermission();
+
+  assert.ok(root(harness.window));
+});
+
+test("manifest loads AO3 saved filters with the generated archive content scripts", () => {
   const manifest = JSON.parse(fs.readFileSync(MANIFEST_PATH, "utf8"));
   const archiveEntry = manifest.content_scripts.find((entry) =>
     (entry.js || []).includes("collector.js"),
@@ -166,8 +193,11 @@ test("manifest loads AO3 saved filters with existing archive content scripts", (
   );
   assert.ok(archiveEntry, "expected archive content script entry");
   assert.ok(savedFiltersEntry, "expected AO3 saved filters content script entry");
-  assert.deepEqual(archiveEntry.js, [
-    "content-config.js",
+  assert.ok(
+    ["content-config.js", "popup-config.js"].includes(archiveEntry.js[0]),
+    "expected the archive bundle's generated config owner",
+  );
+  assert.deepEqual(archiveEntry.js.slice(1), [
     "trace-finish-qualify.js",
     "collector.js",
     "library-overlay-keys.js",
@@ -751,13 +781,12 @@ test("AO3 saved filters uses a compact AO3-native drawer section", async () => {
     Array.from(mount.querySelector(".trace-sf-head").children).map((child) => child.className),
     [
       "trace-sf-panel-caret",
-      "trace-sf-mark",
       "trace-sf-head-text",
       "trace-sf-spacer",
       "trace-sf-head-actions",
       "trace-sf-head-meta",
     ],
-    "narrow header should order the collapse affordance before the mark/title and second-line meta",
+    "narrow header should order the collapse affordance before the title and second-line meta",
   );
   assert.equal(
     mount.querySelector(".trace-sf-panel-caret").getAttribute("data-collapsed"),
@@ -777,16 +806,8 @@ test("AO3 saved filters uses a compact AO3-native drawer section", async () => {
     "Saved filters",
     "saved-filter title should remain intact in narrow headers",
   );
-  assert.equal(
-    mount.querySelector(".trace-sf-mark").textContent,
-    "",
-    "saved-filter header should not render the old text placeholder mark",
-  );
-  assert.equal(
-    mount.querySelector(".trace-sf-mark svg rect").getAttribute("fill"),
-    "#16342D",
-    "saved-filter header should render the real Trace mark colors",
-  );
+  assert.equal(mount.querySelector(".trace-sf-mark"), null);
+  assert.equal(mount.querySelector(".trace-sf-by").textContent, "by Trace");
   mount.querySelector("[data-trace-sf-action='toggle-panel']").click();
   await sleep(0);
   assert.equal(mount.querySelector(".trace-sf-card").getAttribute("data-panel-collapsed"), "false");
@@ -1015,21 +1036,30 @@ test("AO3 saved filters supports inline rename and delete", async () => {
     },
   });
   const mount = root(window);
+  const revealed = [];
+  window.Element.prototype.scrollIntoView = function (options) {
+    revealed.push({ element: this, options });
+  };
 
   mount.querySelector("[data-trace-sf-action='menu']").click();
   await sleep(0);
   assert.equal(mount.querySelector(".trace-sf-row").getAttribute("data-menu-open"), "true");
   assert.equal(mount.querySelector(".trace-sf-menu-btn").getAttribute("aria-expanded"), "true");
-  assert.match(window.document.getElementById("trace-ao3-saved-filters-style").textContent, /\.trace-sf-menu \{[^}]*position: absolute/s);
-  assert.match(window.document.getElementById("trace-ao3-saved-filters-style").textContent, /\.trace-sf-row\[data-menu-open='true'\] \{[^}]*z-index: 20/s);
-  assert.match(window.document.getElementById("trace-ao3-saved-filters-style").textContent, /\.trace-sf-menu \{[^}]*border-radius: 0\.36rem;[^}]*box-shadow: 0 7px 16px/s);
+  assert.match(window.document.getElementById("trace-ao3-saved-filters-style").textContent, /\.trace-sf-manage \{[^}]*display: flex/s);
+  assert.doesNotMatch(window.document.getElementById("trace-ao3-saved-filters-style").textContent, /\.trace-sf-manage \{[^}]*position: absolute/s);
   assert.match(window.document.getElementById("trace-ao3-saved-filters-style").textContent, /\.trace-sf-menu-btn:focus[^}]*outline: 0/s);
   assert.equal(mount.querySelector(".trace-sf-menu-btn").textContent, "");
   assert.equal(mount.querySelectorAll(".trace-sf-menu-btn svg circle").length, 3);
-  assert.match(mount.querySelector(".trace-sf-menu").textContent, /Rename/);
+  assert.equal(mount.querySelector(".trace-sf-manage").getAttribute("role"), "group");
+  assert.match(mount.querySelector(".trace-sf-manage").getAttribute("aria-label"), /^Manage /);
+  assert.match(mount.querySelector(".trace-sf-manage").textContent, /Rename/);
+  assert.match(mount.querySelector(".trace-sf-manage").textContent, /Replace with current filters/);
+  assert.equal(mount.querySelector(".trace-sf-row > .trace-sf-manage") !== null, true);
+  assert.equal(revealed.at(-1).element.classList.contains("trace-sf-row"), true);
+  assert.equal(revealed.at(-1).options.block, "nearest");
   window.document.body.dispatchEvent(new window.Event("pointerdown", { bubbles: true }));
   await sleep(0);
-  assert.equal(mount.querySelector(".trace-sf-menu"), null);
+  assert.equal(mount.querySelector(".trace-sf-manage"), null);
   assert.equal(mount.querySelector(".trace-sf-menu-btn").getAttribute("aria-expanded"), "false");
 
   mount.querySelector("[data-trace-sf-action='menu']").click();
@@ -1040,7 +1070,7 @@ test("AO3 saved filters supports inline rename and delete", async () => {
     cancelable: true,
   }));
   await sleep(0);
-  assert.equal(mount.querySelector(".trace-sf-menu"), null);
+  assert.equal(mount.querySelector(".trace-sf-manage"), null);
   assert.equal(mount.querySelector(".trace-sf-menu-btn").getAttribute("aria-expanded"), "false");
 
   mount.querySelector("[data-trace-sf-action='menu']").click();

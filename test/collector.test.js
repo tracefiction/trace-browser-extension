@@ -3317,7 +3317,7 @@ test("story sheet shows status editing for cached entries with entryId and hides
     const header = sheet.querySelector("[data-trace-management-header]");
     assert.ok(header);
     assert.match(header.className || "", /\bx-sheet-head\b/);
-    assert.doesNotMatch(header.textContent || "", /\bTrace\b/i);
+    assert.match(header.textContent || "", /Trace\s*·\s*FFN/i);
     assert.ok(sheet.querySelector(".x-sheet-body"));
     assert.ok(sheet.querySelector(".x-sheet-foot"));
     const choices = sheet.querySelector("[data-trace-status-choices]");
@@ -3354,7 +3354,7 @@ test("story sheet shows status editing for cached entries with entryId and hides
   }
 });
 
-test("story sheet selected status choice uses status-specific D1 tint", () => {
+test("story sheet selected status choice uses the unified ink selection and status accent", () => {
   const dom = domFromFixture(
     "ffn_story_mobile.html",
     "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter"
@@ -3416,7 +3416,7 @@ test("story sheet selected status choice uses status-specific D1 tint", () => {
   assert.equal(selected.getAttribute("data-trace-status-choice"), "PAUSED");
   assert.match(
     selected.getAttribute("style") || "",
-    /background:\s*(?:#efddcd|rgb\(239,\s*221,\s*205\))/i,
+    /background:\s*(?:#151e1c|rgb\(21,\s*30,\s*28\))/i,
   );
   assert.match(
     selected.getAttribute("style") || "",
@@ -3647,6 +3647,143 @@ test("finish qualify watches AO3 chapter text and routes resolution through the 
   assert.deepEqual(plainJson(sent.find((msg) => msg.type === "TRACE_FINISH_QUALIFICATION_SIGNAL").payload), {
     entryId,
     workKey: "ao3:777",
+    source: "ao3",
+    chapter: 1,
+    total: 1,
+    state: "resolved",
+    workStatus: "complete",
+    resolutionSource: "source",
+  });
+});
+
+test("one-shot finish evidence survives the initial Saved round-trip", async () => {
+  const collectorSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  const entryId = "00000000-0000-4000-8000-000000000779";
+  const sent = [];
+  const endCallbacks = [];
+  let autoTrackCallback = null;
+  const dom = new JSDOM(
+    `<!doctype html><html><body>
+      <h2 class="title heading">Fast one-shot</h2>
+      <h3 class="byline heading"><a rel="author">Author</a></h3>
+      <ul class="required-tags"><li><span title="Complete Work">Complete Work</span></li></ul>
+      <dl class="work meta group"><dd class="chapters">1/1</dd></dl>
+      <div id="chapters"><div class="chapter" id="chapter-1">
+        <div class="userstuff module" role="article"><p>A short story.</p></div>
+      </div></div>
+    </body></html>`,
+    {
+      url: "https://archiveofourown.org/works/779/chapters/880",
+      contentType: "text/html",
+      runScripts: "outside-only",
+    },
+  );
+  const store = {
+    authToken: "test-token",
+    prefAutoTrackEnabled: true,
+    libraryOverlayCache: { entries: {} },
+  };
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(message, callback) {
+        sent.push(message);
+        if (message.type === "TRACE_AUTO_TRACK") {
+          autoTrackCallback = callback;
+          return;
+        }
+        if (message.type === "TRACE_WORK_STATE_GET") {
+          callback?.({ ok: false });
+          return;
+        }
+        if (message.type === "TRACE_FINISH_QUALIFICATION_SIGNAL") {
+          callback?.({
+            ok: true,
+            command: {
+              kind: "acknowledged",
+              state: "resolved",
+              eventId: null,
+              workKey: "ao3:779",
+              entry: {
+                entryId,
+                status: "FINISHED",
+                readerStatus: "FINISHED",
+                canonicalReaderStatus: "FINISHED",
+                chapters: { current: 1, total: 1 },
+              },
+            },
+          });
+        }
+      },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, callback) {
+          callback(store);
+        },
+        set(value, callback) {
+          Object.assign(store, value);
+          callback?.();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  dom.window.TraceFinishQualify = {
+    onReachEnd(_body, callback) {
+      endCallbacks.push(callback);
+      return function () {};
+    },
+    toast() {},
+  };
+  installCollectorChrome(dom, chrome);
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+  await delay(0);
+
+  assert.ok(endCallbacks.length > 0, "reading evidence should be armed before save confirmation");
+  assert.equal(typeof autoTrackCallback, "function");
+  endCallbacks[0]();
+  assert.equal(
+    sent.some((message) => message.type === "TRACE_FINISH_QUALIFICATION_SIGNAL"),
+    false,
+    "end evidence alone must not invent an entry",
+  );
+
+  autoTrackCallback({
+    ok: true,
+    entryId,
+    state: {
+      accountId: "acct-story",
+      workKey: "ao3:779",
+      operation: "auto_track",
+      status: "saved",
+      entryId,
+      entry: {
+        entryId,
+        status: "SAVED",
+        readerStatus: "SAVED",
+        canonicalReaderStatus: "SAVED",
+        chapters: { current: 0, total: 1 },
+      },
+    },
+  });
+  await delay(0);
+
+  const finish = sent.find(
+    (message) => message.type === "TRACE_FINISH_QUALIFICATION_SIGNAL",
+  );
+  assert.ok(finish, "confirmed Saved entry should consume retained end evidence");
+  assert.deepEqual(plainJson(finish.payload), {
+    entryId,
+    workKey: "ao3:779",
     source: "ao3",
     chapter: 1,
     total: 1,
@@ -4028,6 +4165,137 @@ test("finish qualify inserts AO3 prompt after the final end notes and aligns to 
   assert.equal(workEndNotes.nextElementSibling, band);
   assert.match(band.getAttribute("style") || "", /max-width:\s*520px/);
   assert.match(band.getAttribute("style") || "", /margin:\s*22px 0/);
+});
+
+test("finish qualify falls back to the AO3 chapters boundary when a work skin distorts article geometry", () => {
+  const collectorSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  const finishSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "trace-finish-qualify.js"),
+    "utf8",
+  );
+  const entryId = "00000000-0000-4000-8000-000000768805";
+  const sent = [];
+  const dom = new JSDOM(
+    `<!doctype html><html><body>
+      <h2 class="title heading">Unknown two-chapter work</h2>
+      <h3 class="byline heading"><a rel="author">Author</a></h3>
+      <dl class="work meta group"><dd class="chapters">2/?</dd></dl>
+      <select id="selected_id">
+        <option value="201225900">1. First chapter</option>
+        <option selected value="201225961">2. Final posted chapter</option>
+      </select>
+      <div id="chapters"><div class="chapter" id="chapter-2">
+        <div class="userstuff module" role="article"><p>Story body.</p></div>
+      </div></div>
+    </body></html>`,
+    {
+      url: "https://archiveofourown.org/works/76880511/chapters/201225961",
+      contentType: "text/html",
+      runScripts: "outside-only",
+    },
+  );
+  const body = dom.window.document.querySelector("[role='article']");
+  const chapters = dom.window.document.querySelector("#chapters");
+  let chaptersRect = { top: 100, bottom: 1_400 };
+  body.getBoundingClientRect = () => ({ top: 100, bottom: 1_400 });
+  chapters.getBoundingClientRect = () => chaptersRect;
+  Object.defineProperty(dom.window, "innerHeight", { value: 800, configurable: true });
+  Object.defineProperty(dom.window.document, "visibilityState", {
+    value: "visible",
+    configurable: true,
+  });
+
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      lastError: null,
+      sendMessage(message, callback) {
+        sent.push(message);
+        if (
+          message.type === "TRACE_FINISH_QUALIFICATION_SIGNAL" &&
+          message.payload.state === "open" &&
+          typeof callback === "function"
+        ) {
+          callback({
+            ok: true,
+            command: {
+              kind: "acknowledged",
+              state: "open",
+              eventId: null,
+              workKey: "ao3:76880511",
+              entry: {
+                entryId,
+                status: "READING",
+                readerStatus: "READING",
+                canonicalReaderStatus: "READING",
+                chapters: { current: 2, total: 2 },
+              },
+            },
+          });
+        }
+      },
+    },
+    storage: {
+      local: {
+        get(_keys, callback) {
+          callback({
+            authToken: "test-token",
+            libraryOverlayCache: {
+              entries: {
+                "ao3:76880511": {
+                  entryId,
+                  status: "READING",
+                  readerStatus: "READING",
+                  canonicalReaderStatus: "READING",
+                  chapters: { current: 2, total: 2 },
+                },
+              },
+            },
+          });
+        },
+        set(_value, callback) {
+          if (callback) callback();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+
+  installCollectorChrome(dom, chrome);
+  dom.window.eval(finishSrc);
+  const onReachEnd = dom.window.TraceFinishQualify.onReachEnd;
+  dom.window.TraceFinishQualify.onReachEnd = (endElement, callback) =>
+    onReachEnd(endElement, callback, { dwellMs: 0 });
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+
+  body.dispatchEvent(new dom.window.Event("touchstart", { bubbles: true }));
+  chaptersRect = { top: -500, bottom: 850 };
+  dom.window.dispatchEvent(new dom.window.Event("scroll"));
+  dom.window.dispatchEvent(new dom.window.Event("scroll"));
+
+  const openSignals = sent.filter(
+    (message) =>
+      message.type === "TRACE_FINISH_QUALIFICATION_SIGNAL" &&
+      message.payload.state === "open",
+  );
+  assert.equal(openSignals.length, 1, "the fallback should settle only once");
+  const openSignal = openSignals[0];
+  assert.ok(openSignal, "the stable #chapters boundary should open qualification");
+  assert.deepEqual(plainJson(openSignal.payload), {
+    entryId,
+    workKey: "ao3:76880511",
+    source: "ao3",
+    chapter: 2,
+    total: 2,
+    state: "open",
+  });
+  assert.ok(dom.window.document.querySelector("[data-trace-finish-qualify]"));
 });
 
 test("finish qualify promotes caught-up known-complete work with promise runtime messaging", async () => {
@@ -4475,7 +4743,7 @@ test("known-source finish failures show a durable retry affordance and recover",
 
   const recovery = dom.window.document.querySelector("[data-trace-finish-recovery]");
   assert.ok(recovery);
-  assert.match(recovery.textContent || "", /couldn.t update/i);
+  assert.match(recovery.textContent || "", /couldn.t .*update/i);
   assert.ok(recovery.querySelector("[data-trace-finish-open]"));
   recovery.querySelector("[data-trace-finish-retry]").click();
 
@@ -4995,10 +5263,10 @@ test("story sheet position block shows unknown total without chapter stepper con
   const position = sheet.querySelector("[data-trace-story-position]");
   assert.ok(position);
   assert.match(position.className || "", /\bx-pos\b/);
-  assert.match(position.textContent || "", /Ch 3\s*\/\s*\?/);
+  assert.match(position.textContent || "", /Chapter 3\s*of\s*\?/);
   assert.equal(position.querySelector(".bar"), null);
   assert.equal(position.querySelector(".step"), null);
-  assert.doesNotMatch(sheet.textContent || "", /(?:chapter|Set to current)/i);
+  assert.doesNotMatch(sheet.textContent || "", /Set to current/i);
 });
 
 test("FFN mobile story post-add status mutation failure keeps saved state", () => {
@@ -5155,34 +5423,33 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
   assert.ok(sheet.querySelector(".x-meta"));
   assert.ok(sheet.querySelector(".x-sheet-foot"));
   assert.match(sheet.textContent || "", /Hidden/i);
-  assert.match(sheet.textContent || "", /Ch 3\s*\/\s*28/);
+  assert.match(sheet.textContent || "", /Chapter 3\s*of\s*28/);
   assert.match(sheet.textContent || "", /11%/);
   assert.match(sheet.textContent || "", /Set progress to chapter 5/i);
-  assert.ok(sheet.querySelector(".x-pos .bar i"));
+  assert.equal(sheet.querySelector(".x-pos .bar"), null);
   assert.equal(sheet.querySelector(".x-pos .step"), null);
   assert.match(sheet.textContent || "", /Reading/i);
   assert.match(sheet.textContent || "", /My actual private note for this story\./i);
   assert.doesNotMatch(sheet.textContent || "", /Private note saved\s*·\s*edit in Trace/i);
-  assert.ok(sheet.querySelector(".x-meta-row .note"));
+  assert.ok(sheet.querySelector(".x-meta .note"));
   assert.match(sheet.textContent || "", /comfort/i);
   assert.match(sheet.textContent || "", /reread/i);
   assert.match(sheet.textContent || "", /favorite/i);
   assert.match(sheet.textContent || "", /\+1/i);
   assert.doesNotMatch(sheet.textContent || "", /long/i);
   assert.doesNotMatch(sheet.textContent || "", /4 private tags/i);
-  const privateTagRow = Array.from(sheet.querySelectorAll(".x-meta-row")).find((row) =>
-    /comfort/i.test(row.textContent || ""),
-  );
+  const privateTagRow = sheet.querySelector(".x-meta");
   assert.ok(privateTagRow);
   assert.equal(privateTagRow.querySelectorAll(".x-utag").length, 4);
   for (const tag of privateTagRow.querySelectorAll(".x-utag")) {
-    assert.match(tag.getAttribute("style") || "", /border-radius:\s*999px/i);
-    assert.match(tag.getAttribute("style") || "", /background:\s*(?:#d8e3d5|rgb\(216,\s*227,\s*213\))/i);
-    assert.match(tag.getAttribute("style") || "", /padding:\s*5px 14px/i);
+    assert.match(tag.getAttribute("style") || "", /border-bottom:\s*1px dotted/i);
+    assert.match(tag.getAttribute("style") || "", /background:\s*transparent/i);
+    assert.match(tag.getAttribute("style") || "", /padding:\s*2px 0px/i);
     assert.match(tag.getAttribute("style") || "", /max-width:\s*150px/i);
     assert.match(tag.getAttribute("style") || "", /text-overflow:\s*ellipsis/i);
   }
-  assert.doesNotMatch(sheet.textContent || "", /Marked abandoned/i);
+  assert.match(sheet.textContent || "", /Marked abandoned/i);
+  assert.ok(sheet.querySelector("[data-trace-work-mark='abandoned']"));
   assert.match(sheet.textContent || "", /Hidden from future listings/i);
   const undoBtn = sheet.querySelector("button[data-trace-hidden-action='undo']");
   assert.ok(undoBtn);
@@ -6100,6 +6367,93 @@ function createActiveTabProbeCollectorHarness(fixture, url, response) {
   assert.equal(typeof listener, "function");
   return { dom, sent, listener };
 }
+
+function createStaticEarnedPermissionCollectorHarness() {
+  const dom = domFromFixture(
+    "ao3_story.html",
+    "https://archiveofourown.org/works/28534965/chapters/69925506",
+  );
+  const sent = [];
+  let listener = null;
+  dom.window.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {
+    registrationMode: "static",
+  };
+  dom.window.TRACE_EARNED_PERMISSION_COMPLETE = false;
+  dom.window.TRACE_SESSION_MODE = "kernel";
+  installCollectorChrome(dom, {
+    runtime: {
+      lastError: null,
+      onMessage: {
+        addListener(fn) {
+          listener = fn;
+        },
+      },
+      sendMessage(message, callback) {
+        sent.push(message);
+        callback?.({ ok: true });
+      },
+    },
+    storage: {
+      local: {
+        get(_keys, callback) {
+          callback?.({
+            prefAutoTrackEnabled: true,
+            prefLibraryInlayEnabled: true,
+            traceAuthState: { state: "connected" },
+          });
+        },
+        set(_values, callback) {
+          callback?.();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  });
+  const collectorSource = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  dom.window.eval(collectorSource);
+  assert.equal(typeof listener, "function");
+  return { dom, sent, listener };
+}
+
+test("static earned-permission collector cannot read or save before the complete grant", async () => {
+  const harness = createStaticEarnedPermissionCollectorHarness();
+  const response = await new Promise((resolve) => {
+    const keepsWorkerAlive = harness.listener(
+      { type: "TRACE_COLLECT" },
+      {},
+      resolve,
+    );
+    assert.equal(keepsWorkerAlive, false);
+  });
+  assert.deepEqual(plainJson(response), {
+    ok: false,
+    error: "website_access_incomplete",
+  });
+  assert.deepEqual(harness.sent, []);
+  assert.equal(
+    harness.dom.window.document.querySelector("[data-trace-quick-add-wrap]"),
+    null,
+  );
+
+  harness.dom.window.TRACE_EARNED_PERMISSION_COMPLETE = true;
+  harness.dom.window.document.dispatchEvent(
+    new harness.dom.window.CustomEvent("trace-earned-permission-ready"),
+  );
+  harness.dom.window.document.dispatchEvent(
+    new harness.dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+  await delay(80);
+
+  assert.ok(
+    harness.sent.some((message) => message.type === "TRACE_ARCHIVE_SEEN"),
+  );
+  assert.ok(
+    harness.dom.window.document.querySelector("[data-trace-quick-add-wrap]"),
+  );
+});
 
 for (const fixture of [
   {

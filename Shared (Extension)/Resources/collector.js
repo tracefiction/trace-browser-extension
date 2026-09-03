@@ -583,6 +583,7 @@ var TRACE_READER_STATUS_CHOICES = [
   "DROPPED",
 ];
 var FINISH_QUALIFY_DISMISS_KEY = "trace:finish-qualify:dismissed";
+var finishQualifyEvidenceState = Object.create(null);
 var finishQualifyWatchState = Object.create(null);
 var finishQualifyBandState = Object.create(null);
 var finishQualifyGeneration = 0;
@@ -3624,6 +3625,7 @@ function storyHandlePresentation(view) {
       spinner: false,
       status: status,
       progress: storyInlineProgressDisplay(entry),
+      workMark: entry && entry.workMark ? entry.workMark : null,
     };
   }
   return {
@@ -3671,6 +3673,23 @@ function applyStoryInlineHandleState(handle, presentation) {
     progress.textContent = presentation.progress;
     progress.style.cssText = traceStoryHandleProgressCss();
     handle.appendChild(progress);
+  }
+
+  if (presentation && presentation.workMark) {
+    var mark = document.createElement("span");
+    mark.setAttribute("data-trace-inline-work-mark", presentation.workMark.kind);
+    mark.textContent = presentation.workMark.kind === "hiatus" ? "Hiatus" : "Abandoned";
+    mark.style.cssText = "padding-left:7px;border-left:1px solid #bbb3a5;color:#5b645f;font:600 10.5px/1.2 " + TRACE_UI.font;
+    handle.appendChild(mark);
+    if (presentation.workMark.challenge) {
+      var challenge = document.createElement("span");
+      challenge.setAttribute("data-trace-inline-work-mark-challenge", "1");
+      challenge.textContent = presentation.workMark.challenge.chapterDelta
+        ? "+" + presentation.workMark.challenge.chapterDelta + " ch"
+        : "Updated";
+      challenge.style.cssText = "color:#bc4329;font:700 10.5px/1.2 " + TRACE_UI.font;
+      handle.appendChild(challenge);
+    }
   }
 
   var chev = document.createElement("span");
@@ -3830,17 +3849,17 @@ function storySheetCss(mobile) {
   var base = [
     "z-index:2147483646",
     "box-sizing:border-box",
-    "max-height:" + (mobile ? "calc(100dvh - 8px)" : "min(68vh,520px)"),
+    "max-height:" + (mobile ? "calc(100dvh - 8px)" : "min(78vh,680px)"),
     "overflow:auto",
     "overscroll-behavior:contain",
     "padding:0",
-    "border-radius:" + (mobile ? "20px 20px 0 0" : "16px"),
-    "border:1px solid rgba(28,39,34,0.18)",
-    "background:#f7f3e9",
-    "color:#1c2722",
+    "border-radius:" + (mobile ? "16px 16px 0 0" : "12px"),
+    "border:1px solid #bbb3a5",
+    "background:#f7f4ed",
+    "color:#151e1c",
     "box-shadow:" + (mobile
-      ? "0 -18px 50px -16px rgba(20,14,0,0.4),0 0 0 1px rgba(28,39,34,0.10)"
-      : "0 1px 0 rgba(255,250,230,0.4) inset,0 28px 60px -20px rgba(20,14,0,0.42),0 0 0 1px rgba(28,39,34,0.10)"),
+      ? "0 -18px 50px -16px rgba(15,20,18,0.42)"
+      : "0 22px 54px -20px rgba(15,20,18,0.42)"),
     "font:500 13px/1.4 " + TRACE_UI.font,
     "-webkit-font-smoothing:antialiased",
   ];
@@ -3915,7 +3934,7 @@ function storySheetAuthorLine(item) {
 }
 
 function storySheetLabelCss() {
-  return "font:500 9px/1 'Geist Mono',ui-monospace,monospace;letter-spacing:0.18em;text-transform:uppercase;color:#9a9583";
+  return "font:650 9px/1 'Geist Mono',ui-monospace,monospace;letter-spacing:0.16em;text-transform:uppercase;color:#777f7a";
 }
 
 function storySheetSerifFont() {
@@ -3931,10 +3950,10 @@ function storySheetPrimaryButtonCss() {
     "box-sizing:border-box",
     "min-height:42px",
     "padding:12px 16px",
-    "border-radius:11px",
-    "border:1px solid #133029",
-    "background:#133029",
-    "color:#f3efe4",
+    "border-radius:8px",
+    "border:1px solid #151e1c",
+    "background:#151e1c",
+    "color:#fefcf7",
     "font:600 13.5px/1 " + TRACE_UI.font,
     "text-decoration:none",
     "white-space:nowrap",
@@ -3951,10 +3970,10 @@ function storySheetGhostButtonCss() {
     "box-sizing:border-box",
     "min-height:42px",
     "padding:12px 14px",
-    "border-radius:11px",
-    "border:1px solid rgba(28,39,34,0.18)",
+    "border-radius:8px",
+    "border:1px solid #bbb3a5",
     "background:transparent",
-    "color:#3a4339",
+    "color:#27312e",
     "font:600 13px/1 " + TRACE_UI.font,
     "text-decoration:none",
     "white-space:nowrap",
@@ -3973,10 +3992,6 @@ function storySheetIconButtonCss() {
 
 function storyStatusAccent(status) {
   return traceStatusToken(status).accent;
-}
-
-function storyStatusSoft(status) {
-  return traceStatusToken(status).container;
 }
 
 function storySheetSvgIcon(kind) {
@@ -4014,25 +4029,11 @@ function storySheetSvgIcon(kind) {
   return svg;
 }
 
-function storySheetMetaRow(iconKind, child) {
-  var row = document.createElement("div");
-  row.className = "x-meta-row";
-  row.style.cssText = "display:flex;gap:11px;align-items:flex-start";
-  var icon = document.createElement("span");
-  icon.setAttribute("aria-hidden", "true");
-  icon.className = "ic";
-  icon.style.cssText = "width:16px;height:16px;color:#9a9583;flex-shrink:0;margin-top:1px";
-  icon.appendChild(storySheetSvgIcon(iconKind));
-  row.appendChild(icon);
-  row.appendChild(child);
-  return row;
-}
-
 function storySheetNoteText(text) {
   var note = document.createElement("span");
   note.className = "note";
   note.textContent = text;
-  note.style.cssText = "display:block;flex:1;min-width:0;text-align:left;font:italic 15px/1.45 " + storySheetSerifFont() + ";color:#3a4339";
+  note.style.cssText = "display:block;flex:1;min-width:0;text-align:left;font:500 12.5px/1.5 " + TRACE_UI.font + ";color:#27312e";
   return note;
 }
 
@@ -4042,19 +4043,17 @@ function storySheetTagPill(text, collectionTone) {
   tag.textContent = text;
   if (text && String(text).length > 24) tag.title = text;
   tag.style.cssText = [
-    "display:inline-flex",
-    "align-items:center",
-    "gap:5px",
+    "display:inline-block",
     "box-sizing:border-box",
     "max-width:150px",
     "overflow:hidden",
     "text-overflow:ellipsis",
-    "border-radius:999px",
-    "padding:5px 14px",
-    "font:600 14px/1.15 " + TRACE_UI.font,
+    "padding:2px 0",
+    "border-bottom:1px dotted " + (collectionTone ? "#996e29" : "#2a5d53"),
+    "font:500 11.5px/1.15 " + TRACE_UI.font,
     "white-space:nowrap",
-    "background:" + (collectionTone ? "#ebdcab" : "#d8e3d5"),
-    "color:" + (collectionTone ? "#8a6e2a" : "#1f4d3f"),
+    "background:transparent",
+    "color:" + (collectionTone ? "#996e29" : "#2a5d53"),
   ].join(";");
   return tag;
 }
@@ -4410,7 +4409,7 @@ function appendReaderStatusChoices(actions, view, workKey) {
 
   var row = document.createElement("div");
   row.className = "x-seg";
-  row.style.cssText = "display:flex;gap:5px";
+  row.style.cssText = "display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px";
   var error = document.createElement("div");
   error.setAttribute(TRACE_STATUS_CHOICE_ERROR_ATTR, "1");
   error.style.cssText = "min-height:16px;color:#b54a30;font:600 11.5px/1.3 " + TRACE_UI.font;
@@ -4428,18 +4427,17 @@ function appendReaderStatusChoices(actions, view, workKey) {
       choice.setAttribute("aria-pressed", "false");
     }
     choice.style.cssText = [
-      "flex:1",
       "--sc:" + storyStatusAccent(status),
       "box-sizing:border-box",
       "min-width:0",
       "min-height:48px",
-      "border:1px solid " + (selected ? storyStatusAccent(status) : "rgba(28,39,34,0.18)"),
-      "background:" + (selected ? storyStatusSoft(status) : "#f3efe4"),
-      "border-radius:8px",
+      "border:1px solid " + (selected ? "#151e1c" : "#d4cdc0"),
+      "background:" + (selected ? "#151e1c" : "#fefcf7"),
+      "border-radius:7px",
       "padding:8px 2px",
       "overflow:visible",
       "font:500 11px/1 " + TRACE_UI.font,
-      "color:" + (selected ? "#1c2722" : "#6e6a5b"),
+      "color:" + (selected ? "#fefcf7" : "#5b645f"),
       "cursor:pointer",
       "display:flex",
       "flex-direction:column",
@@ -4456,7 +4454,7 @@ function appendReaderStatusChoices(actions, view, workKey) {
       "height:7px",
       "border-radius:999px",
       "background:" + (selected ? storyStatusAccent(status) : "#c4bea8"),
-      "box-shadow:" + (selected ? "0 0 0 3px " + storyStatusSoft(status) : "none"),
+      "box-shadow:none",
     ].join(";");
     var text = document.createElement("span");
     text.textContent = readerStatusChoiceLabel(status);
@@ -5232,6 +5230,42 @@ function clearElement(el) {
   while (el.firstChild) el.removeChild(el.firstChild);
 }
 
+function storyWorkMarkCopy(entry) {
+  var mark = entry && entry.workMark;
+  if (!mark) return null;
+  var label = mark.kind === "hiatus" ? "Marked hiatus" : "Marked abandoned";
+  var detail = null;
+  if (mark.challenge) {
+    if (mark.challenge.chapterDelta) {
+      detail = mark.challenge.chapterDelta + (mark.challenge.chapterDelta === 1 ? " new chapter" : " new chapters") + " since you marked it.";
+    } else if (mark.challenge.kind === "source-updated") {
+      detail = "The source has updated since you marked it.";
+    } else {
+      detail = "The chapter count has changed since you marked it.";
+    }
+  }
+  return { label: label, detail: detail };
+}
+
+function appendStoryWorkMark(body, entry) {
+  var copy = storyWorkMarkCopy(entry);
+  if (!copy) return;
+  var block = document.createElement("section");
+  block.setAttribute("data-trace-work-mark", entry.workMark.kind);
+  block.style.cssText = "display:grid;gap:4px;padding:11px 13px;border:1px solid #d4cdc0;border-left:3px solid #bc4329;border-radius:7px;background:#fefcf7";
+  var title = document.createElement("strong");
+  title.textContent = copy.label;
+  title.style.cssText = "font:650 12px/1.25 " + TRACE_UI.font + ";color:#151e1c";
+  block.appendChild(title);
+  if (copy.detail) {
+    var detail = document.createElement("span");
+    detail.textContent = copy.detail;
+    detail.style.cssText = "font:500 11.5px/1.4 " + TRACE_UI.font + ";color:#5b645f";
+    block.appendChild(detail);
+  }
+  body.appendChild(block);
+}
+
 function renderStorySheet(sheet, view, workKey) {
   var wasOpen = sheet.getAttribute("data-trace-open") === "1";
   var placement = sheet.getAttribute("data-trace-story-sheet-placement");
@@ -5254,22 +5288,23 @@ function renderStorySheet(sheet, view, workKey) {
     "gap:10px",
     "align-items:start",
     "padding:16px 16px 13px",
-    "border-bottom:1px solid rgba(28,39,34,0.10)",
+    "border-bottom:1px solid #d4cdc0",
+    "background:#fefcf7",
   ].join(";");
   var headText = document.createElement("div");
   headText.style.cssText = "min-width:0";
   var source = document.createElement("div");
   source.className = "src";
-  source.textContent = storySheetSourceLine();
-  source.style.cssText = "font:500 9px/1 'Geist Mono',ui-monospace,monospace;letter-spacing:0.14em;text-transform:uppercase;color:#b54a30";
+  source.textContent = "Trace · " + storySheetSourceLine();
+  source.style.cssText = "font:650 9px/1 'Geist Mono',ui-monospace,monospace;letter-spacing:0.14em;text-transform:uppercase;color:#bc4329";
   var title = document.createElement("div");
   title.className = "ti";
   title.textContent = (item && item.t) || storyHeadline(view);
-  title.style.cssText = "margin-top:3px;font:500 17px/1.2 " + storySheetSerifFont() + ";letter-spacing:0;color:#1c2722;overflow:hidden;text-overflow:ellipsis";
+  title.style.cssText = "margin-top:6px;font:700 17px/1.22 " + TRACE_UI.font + ";letter-spacing:0;color:#151e1c;overflow:hidden;text-overflow:ellipsis";
   var author = document.createElement("div");
   author.className = "au";
   author.textContent = storySheetAuthorLine(item);
-  author.style.cssText = "margin-top:2px;font:500 12px/1.3 " + TRACE_UI.font + ";color:#6e6a5b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+  author.style.cssText = "margin-top:2px;font:500 12px/1.3 " + TRACE_UI.font + ";color:#5b645f;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
   headText.appendChild(source);
   headText.appendChild(title);
   if (author.textContent) headText.appendChild(author);
@@ -5279,7 +5314,7 @@ function renderStorySheet(sheet, view, workKey) {
   close.className = "x-close";
   close.type = "button";
   close.textContent = "\u00d7";
-  close.style.cssText = "width:26px;height:26px;border-radius:7px;border:1px solid rgba(28,39,34,0.10);background:#ebe6d7;color:#6e6a5b;font:600 16px/1 system-ui,-apple-system,'Segoe UI',sans-serif;cursor:pointer";
+  close.style.cssText = "width:30px;height:30px;border-radius:8px;border:1px solid #d4cdc0;background:#ece7dd;color:#5b645f;font:600 16px/1 system-ui,-apple-system,'Segoe UI',sans-serif;cursor:pointer";
   close.addEventListener("click", function () {
     applySheetVisibility(sheet, false);
   });
@@ -5318,7 +5353,7 @@ function renderStorySheet(sheet, view, workKey) {
 
   var body = document.createElement("div");
   body.className = "x-sheet-body";
-  body.style.cssText = "padding:14px 16px 16px;display:flex;flex-direction:column;gap:14px";
+  body.style.cssText = "padding:15px 16px;display:flex;flex-direction:column;gap:15px;background:#f7f4ed";
   if (view.entry && view.entry.__traceAutoTrackError === "free_limit_reached") {
     var capacityTitle = document.createElement("h4");
     capacityTitle.textContent = "This story wasn’t added";
@@ -5375,7 +5410,7 @@ function renderStorySheet(sheet, view, workKey) {
   var position = document.createElement("section");
   position.className = "x-pos";
   position.setAttribute("data-trace-story-position", "1");
-  position.style.cssText = "background:#f1d8c8;border:1px solid rgba(181,74,48,0.24);border-radius:12px;padding:13px 14px";
+  position.style.cssText = "display:grid;gap:7px;padding:13px 0;border-top:1px solid #d4cdc0;border-bottom:1px solid #d4cdc0";
   var chapters = displayChaptersForStatus(status, view.entry && view.entry.chapters);
   var positionPercent = null;
   if (
@@ -5391,20 +5426,20 @@ function renderStorySheet(sheet, view, workKey) {
   positionTop.style.cssText = "display:flex;align-items:baseline;justify-content:space-between;gap:10px";
   var positionValue = document.createElement("span");
   positionValue.className = "chap";
-  positionValue.style.cssText = "font:500 22px/1 " + storySheetSerifFont() + ";letter-spacing:0;color:#1c2722";
+  positionValue.style.cssText = "font:650 14px/1.25 " + TRACE_UI.font + ";letter-spacing:0;color:#151e1c";
   var positionSmall = document.createElement("span");
   positionSmall.className = "sm";
-  positionSmall.style.cssText = "font-size:15px;color:#9a9583";
+  positionSmall.style.cssText = "font-weight:500;color:#5b645f";
   var positionStatus = document.createElement("span");
   positionStatus.className = "pct";
-  positionStatus.style.cssText = "font:500 10.5px/1.2 'Geist Mono',ui-monospace,monospace;color:#6e6a5b;text-align:right";
+  positionStatus.style.cssText = "font:600 11px/1.2 " + TRACE_UI.font + ";color:#5b645f;text-align:right";
   if (chapters && typeof chapters.current === "number") {
     var positionBig = document.createElement("span");
     positionBig.className = "big";
-    positionBig.textContent = "Ch " + chapters.current;
+    positionBig.textContent = "Chapter " + chapters.current;
     positionValue.appendChild(positionBig);
     positionValue.appendChild(document.createTextNode(" "));
-    positionSmall.textContent = "/ " + (chapters.total == null ? "?" : chapters.total);
+    positionSmall.textContent = "of " + (chapters.total == null ? "?" : chapters.total);
     positionValue.appendChild(positionSmall);
   } else {
     positionValue.textContent = progress || "Not started";
@@ -5413,33 +5448,24 @@ function renderStorySheet(sheet, view, workKey) {
   positionTop.appendChild(positionValue);
   if (positionStatus.textContent) positionTop.appendChild(positionStatus);
   position.appendChild(positionTop);
-  if (positionPercent != null) {
-    var bar = document.createElement("div");
-    bar.className = "bar";
-    bar.style.cssText = "height:5px;border-radius:999px;background:rgba(28,39,34,0.12);overflow:hidden;margin:10px 0 0";
-    var fill = document.createElement("i");
-    fill.setAttribute("aria-hidden", "true");
-    fill.style.cssText = "display:block;height:100%;border-radius:999px;background:#b54a30;width:" + positionPercent + "%";
-    bar.appendChild(fill);
-    position.appendChild(bar);
-  }
   body.appendChild(position);
   appendStoryCatchupAction(body, view, workKey);
   appendStoryRatingControls(body, view, workKey);
 
   var meta = document.createElement("div");
   meta.className = "x-meta";
-  meta.style.cssText = "display:flex;flex-direction:column;gap:12px";
+  meta.style.cssText = "display:flex;flex-direction:column;gap:10px;padding:13px 14px;background:#efeae1;border-left:2px solid #996e29;border-radius:0 8px 8px 0";
   var privateContext = view.entry && view.entry.privateContext;
+  var privateContextLabel = document.createElement("span");
+  privateContextLabel.textContent = "Private context";
+  privateContextLabel.style.cssText = "font:500 9px/1 'Geist Mono',ui-monospace,monospace;letter-spacing:0.18em;text-transform:uppercase;color:#777f7a";
+  meta.appendChild(privateContextLabel);
   if (privateContext && privateContext.hasNotes) {
-    meta.appendChild(storySheetMetaRow(
-      "note",
-      storySheetNoteText(privateContext.notePreview || "Private note saved \u00b7 edit in Trace"),
-    ));
+    meta.appendChild(storySheetNoteText(privateContext.notePreview || "Private note saved \u00b7 edit in Trace"));
   }
   if (privateContext && privateContext.tagCount) {
     var tags = document.createElement("span");
-    tags.style.cssText = "display:flex;flex:1;min-width:0;flex-wrap:wrap;gap:8px;text-align:left";
+    tags.style.cssText = "display:flex;flex:1;min-width:0;flex-wrap:wrap;column-gap:12px;row-gap:5px;text-align:left";
     if (privateContext.tags && privateContext.tags.length) {
       var visibleTags = visiblePrivateTags(privateContext);
       visibleTags.forEach(function (tag) {
@@ -5454,17 +5480,18 @@ function renderStorySheet(sheet, view, workKey) {
         false,
       ));
     }
-    meta.appendChild(storySheetMetaRow("tag", tags));
+    meta.appendChild(tags);
   }
   if (view.entry && view.entry.hidden) {
-    meta.appendChild(storySheetMetaRow("eyeoff", storySheetNoteText("Hidden from future listings")));
+    meta.appendChild(storySheetNoteText("Hidden from future listings"));
   }
-  if (meta.childNodes.length > 0) body.appendChild(meta);
+  if (meta.childNodes.length > 1) body.appendChild(meta);
+  appendStoryWorkMark(body, view.entry);
   sheet.appendChild(body);
 
   var actions = document.createElement("div");
   actions.className = "x-sheet-foot";
-  actions.style.cssText = "display:flex;gap:8px;padding:0 16px 16px";
+  actions.style.cssText = "display:flex;gap:8px;padding:13px 16px 16px;background:#f7f4ed;border-top:1px solid #d4cdc0";
   var open = document.createElement("a");
   open.className = "x-pbtn x-pbtn-primary";
   open.setAttribute("data-trace-open-trace", "1");
@@ -5517,6 +5544,14 @@ function finishQualifyAo3BodyElement() {
   );
   if (articles.length) return articles[articles.length - 1];
   return one(document, "#chapters") || one(document, ".chapter[id^='chapter-']") || one(document, ".chapter");
+}
+
+function finishQualifyAo3FallbackEndElement(bodyEl) {
+  // AO3 work skins can distort the inner article's layout box without moving
+  // the server-rendered chapter wrapper. Keep the precise article boundary as
+  // the primary signal and use #chapters only as a guarded fallback.
+  var chapters = one(document, "#chapters");
+  return chapters && chapters !== bodyEl ? chapters : null;
 }
 
 function finishQualifyAo3AnchorElement() {
@@ -5768,29 +5803,136 @@ function sendFinishQualifyResolution(decision, workState, done) {
   );
 }
 
-function finishQualifyDecision(view, workKey) {
-  var entry = view && view.entry;
-  if (!view || !view.hasAuth || !view.canMutate || !entry || !entry.entryId) return null;
-  var status = canonicalReaderStatus(entryStatus(entry));
+function finishQualifyPageCandidate(workKey) {
   var item = storySheetCurrentItem();
   if (!item || item.ctx !== "story" || !finishQualifyIsLastPostedChapter(item)) return null;
   var sourceWorkState = finishQualifySourceWorkState(item);
-  if (status === "FINISHED" || status === "DROPPED") return null;
-  if (status === "CAUGHT_UP" && sourceWorkState !== "complete") return null;
   var anchorEl = finishQualifyAnchorElement();
   var bodyEl = finishQualifyBodyElement();
   if (!anchorEl || !bodyEl) return null;
   return {
     workKey: workKey,
-    entry: entry,
     item: item,
     sourceWorkState: sourceWorkState,
     requiresWorkStateChoice: !sourceWorkState,
     anchorEl: anchorEl,
     bodyEl: bodyEl,
-    accountId: view.accountId || null,
-    sessionKey: finishQualifySessionKey(workKey, entry.entryId, item),
+    fallbackEndEl: isAO3() ? finishQualifyAo3FallbackEndElement(bodyEl) : null,
   };
+}
+
+function finishQualifyEvidenceSignature(candidate) {
+  if (!candidate || !candidate.item) return "";
+  return [
+    candidate.workKey,
+    candidate.item.src || "unknown",
+    candidate.item.u || location.href,
+    finishQualifyCurrentChapterCount(candidate.item),
+    finishQualifyPostedChapterCount(candidate.item),
+  ].join(":");
+}
+
+function ensureFinishQualifyEvidenceWatch(workKey) {
+  var candidate = finishQualifyPageCandidate(workKey);
+  if (
+    !candidate ||
+    !window.TraceFinishQualify ||
+    typeof window.TraceFinishQualify.onReachEnd !== "function"
+  ) return null;
+
+  var signature = finishQualifyEvidenceSignature(candidate);
+  var current = finishQualifyEvidenceState[workKey];
+  if (current && current.signature === signature) return current;
+  if (current && typeof current.cleanup === "function") current.cleanup();
+
+  var state = {
+    signature: signature,
+    reached: false,
+    cleanup: null,
+    subscribers: [],
+  };
+  finishQualifyEvidenceState[workKey] = state;
+  var cleanup = watchFinishQualifyEnd(candidate, function () {
+    if (finishQualifyEvidenceState[workKey] !== state || state.reached) return;
+    state.reached = true;
+    state.cleanup = null;
+    var subscribers = state.subscribers.slice();
+    state.subscribers.length = 0;
+    subscribers.forEach(function (subscriber) {
+      subscriber();
+    });
+  });
+  if (finishQualifyEvidenceState[workKey] === state && !state.reached) {
+    state.cleanup = cleanup;
+  } else if (typeof cleanup === "function") {
+    cleanup();
+  }
+  return state;
+}
+
+function waitForFinishQualifyEvidence(workKey, onReachEnd) {
+  var evidence = ensureFinishQualifyEvidenceWatch(workKey);
+  if (!evidence) return function () {};
+  if (evidence.reached) {
+    onReachEnd();
+    return function () {};
+  }
+  evidence.subscribers.push(onReachEnd);
+  return function () {
+    var index = evidence.subscribers.indexOf(onReachEnd);
+    if (index >= 0) evidence.subscribers.splice(index, 1);
+  };
+}
+
+function finishQualifyDecision(view, workKey) {
+  var entry = view && view.entry;
+  if (!view || !view.hasAuth || !view.canMutate || !entry || !entry.entryId) return null;
+  var candidate = finishQualifyPageCandidate(workKey);
+  if (!candidate) return null;
+  var status = canonicalReaderStatus(entryStatus(entry));
+  if (status === "FINISHED" || status === "DROPPED") return null;
+  if (status === "CAUGHT_UP" && candidate.sourceWorkState !== "complete") return null;
+  return Object.assign({}, candidate, {
+    entry: entry,
+    accountId: view.accountId || null,
+    sessionKey: finishQualifySessionKey(workKey, entry.entryId, candidate.item),
+  });
+}
+
+function watchFinishQualifyEnd(decision, onReachEnd) {
+  var elements = [decision.bodyEl];
+  if (
+    decision.fallbackEndEl &&
+    decision.fallbackEndEl !== decision.bodyEl
+  ) {
+    elements.push(decision.fallbackEndEl);
+  }
+  var cleanups = [];
+  var reached = false;
+
+  function cleanupAll() {
+    while (cleanups.length) {
+      var cleanup = cleanups.pop();
+      if (typeof cleanup === "function") cleanup();
+    }
+  }
+
+  function settleReach() {
+    if (reached) return;
+    reached = true;
+    cleanupAll();
+    onReachEnd();
+  }
+
+  for (var i = 0; i < elements.length; i += 1) {
+    if (reached) break;
+    var cleanup = window.TraceFinishQualify.onReachEnd(elements[i], settleReach);
+    if (typeof cleanup !== "function") continue;
+    if (reached) cleanup();
+    else cleanups.push(cleanup);
+  }
+
+  return cleanupAll;
 }
 
 function finishQualifyRemoveBand(workKey) {
@@ -5952,7 +6094,7 @@ function setupFinishQualify(view, workKey) {
     cleanup: null,
   };
   finishQualifyWatchState[workKey] = watchState;
-  var cleanup = window.TraceFinishQualify.onReachEnd(decision.bodyEl, function () {
+  var cleanup = waitForFinishQualifyEvidence(workKey, function () {
     if (
       !finishQualifyFlowIsCurrent(workKey, watchState) ||
       finishQualifyWasDismissed(decision.sessionKey)
@@ -6283,6 +6425,10 @@ function initQuickAdd() {
   }
   reserveQuickAddSlot(workKey);
   storyQuickAddUiReady = true;
+  // Begin collecting deliberate reading-end evidence before the initial save
+  // round-trip finishes. Short one-shots can otherwise be fully read while the
+  // entry is still being created, forcing the reader to revisit the ending.
+  ensureFinishQualifyEvidenceWatch(workKey);
   queryBackgroundWorkStateForStory(workKey);
   renderQuickAddButton(workKey);
   processIosPendingFirstStoryAdd();
