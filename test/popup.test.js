@@ -74,6 +74,7 @@ function createPopupHarness({
   permissionRequestError = null,
   permissionContainsResult = null,
   registrationReconcileResult = null,
+  sessionSnapshotResponses = null,
 } = {}) {
   const html = fs.readFileSync(POPUP_HTML_PATH, "utf8");
   const js = fs.readFileSync(POPUP_JS_PATH, "utf8");
@@ -117,7 +118,9 @@ function createPopupHarness({
           response = importResponse;
         }
         if (message.type === "TRACE_SESSION_GET_SNAPSHOT") {
-          response = { ok: true, snapshot: sessionSnapshot };
+          response = Array.isArray(sessionSnapshotResponses)
+            ? sessionSnapshotResponses.shift()
+            : { ok: true, snapshot: sessionSnapshot };
         }
         if (message.type === "TRACE_SESSION_ACTION") {
           response = { ok: true, snapshot: sessionSnapshot, action: { kind: "ignored" } };
@@ -1014,6 +1017,30 @@ test("kernel popup is read-only on open and exposes only explicit session action
   });
 });
 
+test("kernel popup retries a missing session owner finitely and never spins forever", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    sessionSnapshotResponses: [null, null, null],
+  });
+  await flush();
+  h.runTimeouts();
+  await flush();
+  h.runTimeouts();
+  await flush();
+
+  assert.equal(
+    h.messages.filter(({ type }) => type === "TRACE_SESSION_GET_SNAPSHOT").length,
+    3,
+  );
+  assert.equal(
+    h.document.getElementById("popup-status").textContent,
+    "Trace is temporarily offline",
+  );
+  assert.equal(h.document.getElementById("popup-cta").textContent, "Retry");
+  assert.equal(h.document.body.dataset.tracePopupState, "degraded");
+});
+
 test("kernel popup uses the promise runtime contract on Firefox and Safari", async () => {
   const h = createPopupHarness({ sessionMode: "kernel", promiseRuntime: true });
   await flush();
@@ -1121,11 +1148,22 @@ test("connected kernel popup renders authoritative summary, preferences, and mig
 
   assert.equal(h.document.getElementById("popup-local-settings").hidden, false);
   assert.equal(h.document.getElementById("popup-pro-settings").hidden, false);
+  const preferences = h.document.getElementById("popup-preferences");
+  assert.equal(preferences.hidden, false);
+  assert.equal(preferences.open, false);
+  assert.equal(
+    h.document.getElementById("popup-preferences-count").textContent,
+    "2 of 4 on",
+  );
   assert.equal(h.document.getElementById("pref-auto-track").checked, false);
   assert.equal(h.document.getElementById("pref-library-inlay").checked, true);
   assert.equal(h.document.getElementById("pref-ao3-saved-filters").checked, false);
   assert.equal(h.document.getElementById("popup-import").hidden, false);
   assert.equal(h.document.getElementById("popup-import").textContent, "Import this story");
+  assert.ok(
+    h.document.getElementById("popup-import").compareDocumentPosition(preferences) &
+      h.window.Node.DOCUMENT_POSITION_FOLLOWING,
+  );
   h.document.getElementById("popup-import").click();
   assert.deepEqual(JSON.parse(JSON.stringify(h.messages.at(-1))), {
     type: "TRACE_IMPORT_TRIGGER",

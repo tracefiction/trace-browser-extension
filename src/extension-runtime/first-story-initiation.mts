@@ -167,7 +167,6 @@ export function isPopupSender(
   sender: RuntimeMessageSender | undefined,
   runtimeId: string | undefined,
 ): boolean {
-  if (runtimeId !== undefined && sender?.id !== runtimeId) return false;
   if (typeof sender?.url !== "string") {
     return (
       (sender?.tab === undefined || sender.tab === null) &&
@@ -179,7 +178,7 @@ export function isPopupSender(
     const url = new URL(sender.url);
     return (
       ["chrome-extension:", "moz-extension:", "safari-web-extension:"].includes(url.protocol) &&
-      url.pathname === "/popup.html"
+      url.pathname.endsWith("/popup.html")
     );
   } catch {
     return false;

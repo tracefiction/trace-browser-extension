@@ -52,6 +52,10 @@ const isLikelyIosExtensionUi = (() => {
   }
 })();
 
+if (isLikelyIosExtensionUi) {
+  document.body.dataset.tracePlatform = "ios";
+}
+
 const ACTIVE_TAB_PROBE = globalThis.TRACE_IOS_ACTIVE_TAB_PROBE === true;
 const EARNED_PERMISSION_ONBOARDING =
   globalThis.TRACE_IOS_EARNED_PERMISSION_ONBOARDING &&
@@ -409,6 +413,7 @@ function renderStatus(patch) {
   const importEl = document.getElementById("popup-import");
   const archiveLinksEl = document.getElementById("popup-archive-links");
   const settingsEl = document.getElementById("popup-pro-settings");
+  const preferencesEl = document.getElementById("popup-preferences");
   const connectionEl = document.getElementById("popup-connection");
   const eyebrowEl = document.querySelector(".popup-eyebrow");
   document.body.dataset.tracePopupState = ui.visualState;
@@ -455,12 +460,24 @@ function renderStatus(patch) {
   if (settingsEl && ui.statusState !== "connected") {
     settingsEl.classList.add("hidden");
   }
+  if (preferencesEl) preferencesEl.hidden = ui.statusState !== "connected";
+}
+
+function updatePreferenceSummary() {
+  const countEl = document.getElementById("popup-preferences-count");
+  if (!countEl) return;
+  const inputs = Array.from(
+    document.querySelectorAll("#popup-preferences input[type='checkbox']"),
+  );
+  const enabled = inputs.filter((input) => input.checked).length;
+  countEl.textContent = `${enabled} of ${inputs.length} on`;
 }
 
 function applyLocalUi(ao3SavedFilters) {
   const ao3SavedFiltersEl = document.getElementById("pref-ao3-saved-filters");
   if (!ao3SavedFiltersEl) return;
   ao3SavedFiltersEl.checked = ao3SavedFilters !== false;
+  updatePreferenceSummary();
 }
 
 function applyProUi(pro, autoTrack, libraryInlay, metadataImprove) {
@@ -477,6 +494,7 @@ function applyProUi(pro, autoTrack, libraryInlay, metadataImprove) {
   autoEl.checked = Boolean(autoTrack);
   inlayEl.checked = Boolean(libraryInlay);
   metadataEl.checked = metadataImprove !== false;
+  updatePreferenceSummary();
 }
 
 function fetchPopupState() {
@@ -1427,6 +1445,7 @@ function renderKernelSnapshot(snapshot) {
   const connectionEl = document.getElementById("popup-connection");
   const localSettingsEl = document.getElementById("popup-local-settings");
   const proSettingsEl = document.getElementById("popup-pro-settings");
+  const preferencesEl = document.getElementById("popup-preferences");
   const importEl = document.getElementById("popup-import");
   const archiveLinksEl = document.getElementById("popup-archive-links");
   const actions = SESSION_DISABLED
@@ -1475,9 +1494,13 @@ function renderKernelSnapshot(snapshot) {
       lead = "Sign in to Trace in this browser if needed, then press Reconnect.";
     }
   } else if (state === "degraded") {
-    lead = reason === "storage_unavailable"
-      ? "Trace could not read extension storage. Retry after local storage recovers."
-      : "Your saved session is protected. Check your connection and retry.";
+    if (reason === "storage_unavailable") {
+      lead = "Trace could not read extension storage. Retry after local storage recovers.";
+    } else if (reason === "runtime_unavailable") {
+      lead = "Trace could not reach its extension session. Retry in a moment.";
+    } else {
+      lead = "Your saved session is protected. Check your connection and retry.";
+    }
   } else if (state === "connected") {
     lead = "This extension session was verified for the current browser worker.";
   } else if (state === "connecting" || state === "verifying") {
@@ -1524,6 +1547,7 @@ function renderKernelSnapshot(snapshot) {
   }
   if (localSettingsEl) localSettingsEl.hidden = true;
   if (proSettingsEl) proSettingsEl.hidden = true;
+  if (preferencesEl) preferencesEl.hidden = true;
   if (importEl) importEl.hidden = true;
   if (archiveLinksEl) archiveLinksEl.hidden = true;
 }
@@ -1550,9 +1574,22 @@ function sendKernelRuntimeMessage(message, onResponse) {
   }
 }
 
+const KERNEL_SNAPSHOT_RETRY_DELAYS_MS = Object.freeze([180, 650]);
+let kernelSnapshotAttempt = 0;
+
 function requestKernelSnapshot() {
   sendKernelRuntimeMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" }, (response) => {
-    if (!response) return;
+    if (!response) {
+      const retryDelay = KERNEL_SNAPSHOT_RETRY_DELAYS_MS[kernelSnapshotAttempt];
+      kernelSnapshotAttempt += 1;
+      if (retryDelay !== undefined) {
+        setTimeout(requestKernelSnapshot, retryDelay);
+        return;
+      }
+      renderKernelSnapshot({ state: "degraded", reason: "runtime_unavailable" });
+      return;
+    }
+    kernelSnapshotAttempt = 0;
     renderKernelSnapshot(response?.snapshot);
     if (response?.snapshot?.state === "connected") requestKernelPopupState();
   });
@@ -1587,10 +1624,13 @@ function requestKernelPopupState() {
     );
     const localSettings = document.getElementById("popup-local-settings");
     const proSettings = document.getElementById("popup-pro-settings");
+    const preferences = document.getElementById("popup-preferences");
     const importButton = document.getElementById("popup-import");
     if (localSettings) localSettings.hidden = false;
     if (proSettings) proSettings.hidden = false;
+    if (preferences) preferences.hidden = false;
     if (importButton) restoreImportButton(importButton);
+    updatePreferenceSummary();
   });
 }
 
@@ -1606,6 +1646,7 @@ function bindPreferenceControls() {
     if (!input) continue;
     input.addEventListener("change", () => {
       ext.storage.local.set({ [key]: input.checked });
+      updatePreferenceSummary();
     });
   }
 }

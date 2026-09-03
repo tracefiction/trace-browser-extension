@@ -4132,13 +4132,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     return null;
   }
   function isPopupSender(sender, runtimeId) {
-    if (runtimeId !== void 0 && sender?.id !== runtimeId) return false;
     if (typeof sender?.url !== "string") {
       return (sender?.tab === void 0 || sender.tab === null) && runtimeId !== void 0 && sender?.id === runtimeId;
     }
     try {
       const url = new URL(sender.url);
-      return ["chrome-extension:", "moz-extension:", "safari-web-extension:"].includes(url.protocol) && url.pathname === "/popup.html";
+      return ["chrome-extension:", "moz-extension:", "safari-web-extension:"].includes(url.protocol) && url.pathname.endsWith("/popup.html");
     } catch {
       return false;
     }

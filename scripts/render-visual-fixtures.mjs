@@ -1350,12 +1350,17 @@ async function main() {
               promptResult: "granted",
             },
             traceArchiveReadiness: { lastArchiveSeenAt: grantAt + 2_000 },
+            traceActiveTab: {
+              kind: "supported_archive",
+              site: "ao3",
+              canImport: true,
+            },
           };
         })(),
         viewport: { width: 360, height: 680 },
         userAgent:
           "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-        colorScheme: "light",
+        colorScheme: "dark",
       },
       {
         name: "iOS active-tab probe success",
