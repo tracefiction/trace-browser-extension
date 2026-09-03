@@ -224,6 +224,36 @@ function makeStorageData(authState = connectedAuthState(), cacheVariant = "defau
   };
 }
 
+function postOnboardingPopupStorageData() {
+  const grantAt = Date.now() - 60_000;
+  return {
+    traceEarnedPermissionOnboarding: true,
+    traceGrantedOrigins: [
+      "https://*.archiveofourown.org/*",
+      "https://*.archiveofourown.gay/*",
+      "https://archive.transformativeworks.org/*",
+      "https://www.fanfiction.net/*",
+      "https://m.fanfiction.net/*",
+    ],
+    traceRegisteredContentScripts: [
+      { id: "trace-archive-automation-v1" },
+      { id: "trace-ao3-saved-filters-v1" },
+    ],
+    traceEarnedPermissionOnboardingV1: {
+      firstSaveAt: grantAt - 2_000,
+      grantAt,
+      registrationVersion: 2,
+      promptResult: "granted",
+    },
+    traceArchiveReadiness: { lastArchiveSeenAt: grantAt + 2_000 },
+    traceActiveTab: {
+      kind: "supported_archive",
+      site: "ao3",
+      canImport: true,
+    },
+  };
+}
+
 function extensionMockSource(storageData, sessionSnapshot = null) {
   return `
     (() => {
@@ -1328,35 +1358,24 @@ async function main() {
           canExecuteAuthenticated: true,
           reason: "none",
         },
-        storageData: (() => {
-          const grantAt = Date.now() - 60_000;
-          return {
-            traceEarnedPermissionOnboarding: true,
-            traceGrantedOrigins: [
-              "https://*.archiveofourown.org/*",
-              "https://*.archiveofourown.gay/*",
-              "https://archive.transformativeworks.org/*",
-              "https://www.fanfiction.net/*",
-              "https://m.fanfiction.net/*",
-            ],
-            traceRegisteredContentScripts: [
-              { id: "trace-archive-automation-v1" },
-              { id: "trace-ao3-saved-filters-v1" },
-            ],
-            traceEarnedPermissionOnboardingV1: {
-              firstSaveAt: grantAt - 2_000,
-              grantAt,
-              registrationVersion: 2,
-              promptResult: "granted",
-            },
-            traceArchiveReadiness: { lastArchiveSeenAt: grantAt + 2_000 },
-            traceActiveTab: {
-              kind: "supported_archive",
-              site: "ao3",
-              canImport: true,
-            },
-          };
-        })(),
+        storageData: postOnboardingPopupStorageData(),
+        viewport: { width: 360, height: 680 },
+        userAgent:
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        colorScheme: "dark",
+      },
+      {
+        name: "iOS post-onboarding expanded settings",
+        file: "popup-ios-post-onboarding-settings-expanded.png",
+        authState: connectedAuthState(),
+        sessionSnapshot: {
+          state: "connected",
+          accountId: "visual-account",
+          canExecuteAuthenticated: true,
+          reason: "none",
+        },
+        storageData: postOnboardingPopupStorageData(),
+        clickSelector: "#popup-preferences > summary",
         viewport: { width: 360, height: 680 },
         userAgent:
           "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
