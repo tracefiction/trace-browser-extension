@@ -2945,6 +2945,283 @@ test("mobile story keeps Trace sheet as fixed bottom sheet", () => {
   assert.equal(dom.window.document.body.style.overflow, "");
 });
 
+function createStorySheetModalHarness(options = {}) {
+  const dom = new JSDOM(
+    "<!doctype html><html><body style='position:relative'><a id='before' href='#before'>Before</a><h2 class='title heading'>Accessible AO3 Work</h2><h3 class='byline heading'><a rel='author' href='/users/demo/pseuds/demo'>demo</a></h3><dl class='work meta group'><dt class='chapters'>Chapters:</dt><dd class='chapters'>4/12</dd></dl></body></html>",
+    {
+      url: "https://archiveofourown.org/works/77890/chapters/4",
+      contentType: "text/html",
+      runScripts: "outside-only",
+    },
+  );
+  dom.window.matchMedia = (query) => ({
+    matches:
+      (options.mobile === true && String(query).includes("max-width: 640px")) ||
+      (options.reducedMotion === true && String(query).includes("prefers-reduced-motion")),
+    media: String(query),
+    onchange: null,
+    addListener() {},
+    removeListener() {},
+    addEventListener() {},
+    removeEventListener() {},
+    dispatchEvent() {
+      return false;
+    },
+  });
+  const collectorSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  const entry = {
+    entryId: "entry-story-modal",
+    status: "READING",
+    readerStatus: "READING",
+    chapters: { current: 4, total: 12 },
+  };
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(message, callback) {
+        if (
+          typeof options.onSendMessage === "function" &&
+          options.onSendMessage(message, callback) === true
+        ) {
+          return;
+        }
+        if (typeof callback === "function") callback({ ok: true });
+      },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, callback) {
+          callback({
+            authToken: "test-token",
+            prefAutoTrackEnabled: false,
+            libraryOverlayCache: {
+              entries: { "ao3:77890": entry },
+            },
+          });
+        },
+        set(_value, callback) {
+          if (typeof callback === "function") callback();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+  installCollectorChrome(dom, chrome);
+  dom.window.eval(collectorSrc);
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+  return { dom, entry };
+}
+
+test("story sheet contains focus and restores the archive after Escape or outside click", async () => {
+  const { dom } = createStorySheetModalHarness();
+  Object.defineProperty(dom.window, "scrollX", { value: 8, configurable: true });
+  Object.defineProperty(dom.window, "scrollY", { value: 360, configurable: true });
+  const restoredScroll = [];
+  dom.window.scrollTo = (x, y) => restoredScroll.push([x, y]);
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+
+  handle.focus();
+  handle.click();
+  await delay(20);
+  assert.equal(handle.getAttribute("aria-haspopup"), "dialog");
+  assert.equal(handle.getAttribute("aria-controls"), sheet.id);
+  assert.equal(handle.getAttribute("aria-expanded"), "true");
+  assert.equal(sheet.getAttribute("role"), "dialog");
+  assert.equal(sheet.getAttribute("aria-modal"), "true");
+  const title = dom.window.document.getElementById(sheet.getAttribute("aria-labelledby"));
+  const description = dom.window.document.getElementById(sheet.getAttribute("aria-describedby"));
+  assert.ok(title);
+  assert.match(title.textContent || "", /Accessible AO3 Work/i);
+  assert.ok(description);
+  assert.match(description.textContent || "", /reading status and private Trace actions/i);
+  const statusGroup = sheet.querySelector("[data-trace-status-choices] [role='group']");
+  const ratingGroup = sheet.querySelector("[data-trace-rating-control] [role='group']");
+  assert.equal(
+    dom.window.document.getElementById(statusGroup.getAttribute("aria-labelledby")).textContent,
+    "Reading status",
+  );
+  assert.equal(
+    dom.window.document.getElementById(ratingGroup.getAttribute("aria-labelledby")).textContent,
+    "Your rating",
+  );
+  const firstRating = sheet.querySelector("[data-trace-rating-choice='1']");
+  assert.equal(firstRating.getAttribute("aria-label"), "Set rating to 1 out of 5");
+  assert.equal(firstRating.getAttribute("aria-pressed"), "false");
+  assert.equal(dom.window.document.body.hasAttribute("inert"), true);
+  assert.equal(dom.window.document.body.style.position, "fixed");
+  assert.equal(dom.window.document.body.style.top, "-360px");
+  assert.equal(dom.window.document.activeElement.getAttribute("data-trace-status-choice"), "READING");
+
+  const focusables = Array.from(sheet.querySelectorAll("button:not([disabled]), a[href]"));
+  focusables.at(-1).focus();
+  sheet.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+  assert.equal(dom.window.document.activeElement, focusables[0]);
+  focusables[0].focus();
+  sheet.dispatchEvent(
+    new dom.window.KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true }),
+  );
+  assert.equal(dom.window.document.activeElement, focusables.at(-1));
+
+  Object.defineProperty(dom.window, "scrollY", { value: 0, configurable: true });
+  dom.window.document.dispatchEvent(
+    new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+  );
+  assert.equal(sheet.getAttribute("aria-hidden"), "true");
+  assert.equal(sheet.getAttribute("aria-modal"), "false");
+  assert.equal(handle.getAttribute("aria-expanded"), "false");
+  assert.equal(dom.window.document.body.hasAttribute("inert"), false);
+  assert.equal(dom.window.document.body.style.position, "relative");
+  assert.deepEqual(restoredScroll, [[8, 360]]);
+  assert.equal(dom.window.document.activeElement, handle);
+
+  handle.click();
+  await delay(20);
+  const outsideClick = new dom.window.MouseEvent("click", { bubbles: true, cancelable: true });
+  const outsideDispatched = dom.window.document.body.dispatchEvent(outsideClick);
+  assert.equal(outsideDispatched, false);
+  assert.equal(outsideClick.defaultPrevented, true);
+  assert.equal(sheet.getAttribute("aria-hidden"), "true");
+  assert.equal(dom.window.document.activeElement, handle);
+});
+
+test("story sheet teardown restores the host page when its anchor disappears", async () => {
+  const { dom } = createStorySheetModalHarness();
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  handle.click();
+  await delay(20);
+  assert.equal(dom.window.document.body.hasAttribute("inert"), true);
+
+  dom.window.eval("removeQuickAddElements()");
+
+  assert.equal(dom.window.document.querySelector("[data-trace-story-sheet]"), null);
+  assert.equal(dom.window.document.querySelector("[data-trace-story-handle]"), null);
+  assert.equal(dom.window.document.body.hasAttribute("inert"), false);
+  assert.equal(dom.window.document.body.style.position, "relative");
+  assert.equal(dom.window.document.documentElement.style.overflow, "");
+});
+
+test("story desktop popover chooses the visible side of its trigger", () => {
+  const { dom } = createStorySheetModalHarness();
+  Object.defineProperty(dom.window, "innerWidth", { value: 800, configurable: true });
+  Object.defineProperty(dom.window, "innerHeight", { value: 640, configurable: true });
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+  handle.getBoundingClientRect = () => ({
+    top: 590,
+    right: 790,
+    bottom: 620,
+    left: 710,
+    width: 80,
+    height: 30,
+  });
+  sheet.getBoundingClientRect = () => ({
+    top: 0,
+    right: 360,
+    bottom: 420,
+    left: 0,
+    width: 360,
+    height: 420,
+  });
+
+  handle.click();
+  assert.equal(sheet.getAttribute("data-trace-popover-side"), "above");
+  assert.equal(sheet.style.top, "162px");
+  assert.equal(sheet.style.left, "430px");
+  assert.equal(sheet.style.maxHeight, "620px");
+});
+
+test("story sheet keeps a pending mutation open and announces its result", async () => {
+  let pendingCallback = null;
+  const { dom } = createStorySheetModalHarness({
+    onSendMessage(message, callback) {
+      if (message.type !== "TRACE_SET_READER_STATUS") return false;
+      pendingCallback = callback;
+      return true;
+    },
+  });
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  handle.click();
+  dom.window.document
+    .querySelector("[data-trace-story-sheet] [data-trace-status-choice='FINISHED']")
+    .click();
+  await delay(20);
+
+  const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+  const live = dom.window.document.querySelector("[data-trace-story-live-region]");
+  assert.ok(live);
+  assert.equal(sheet.getAttribute("data-trace-modal-pending"), "1");
+  assert.equal(sheet.getAttribute("aria-busy"), "true");
+  assert.match(live.textContent || "", /Saving reading status as Finished/i);
+  dom.window.document.dispatchEvent(
+    new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+  );
+  assert.equal(sheet.getAttribute("aria-hidden"), "false");
+  await delay(20);
+  assert.match(live.textContent || "", /still in progress/i);
+
+  pendingCallback({ ok: true, status: "FINISHED" });
+  await delay(30);
+  assert.match(live.textContent || "", /Reading status saved as Finished/i);
+  assert.notEqual(sheet.getAttribute("data-trace-modal-pending"), "1");
+  assert.equal(sheet.hasAttribute("aria-busy"), false);
+});
+
+test("story sheet prevents overlapping mutations while a save is pending", async () => {
+  let ratingCallback = null;
+  let statusRequests = 0;
+  const { dom } = createStorySheetModalHarness({
+    onSendMessage(message, callback) {
+      if (message.type === "TRACE_PATCH_LIBRARY_ENTRY") {
+        ratingCallback = callback;
+        return true;
+      }
+      if (message.type === "TRACE_SET_READER_STATUS") {
+        statusRequests += 1;
+        return true;
+      }
+      return false;
+    },
+  });
+  dom.window.document.querySelector("[data-trace-story-handle]").click();
+  await delay(20);
+  const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+  sheet.querySelector("[data-trace-rating-choice='4']").click();
+  sheet.querySelector("[data-trace-status-choice='FINISHED']").click();
+  await delay(20);
+
+  assert.equal(typeof ratingCallback, "function");
+  assert.equal(statusRequests, 0);
+  assert.equal(sheet.getAttribute("aria-busy"), "true");
+  assert.match(
+    dom.window.document.querySelector("[data-trace-story-live-region]").textContent || "",
+    /still in progress/i,
+  );
+
+  ratingCallback({ ok: true });
+  await delay(20);
+  assert.equal(sheet.hasAttribute("aria-busy"), false);
+});
+
+test("story bottom sheet removes drag recovery motion when reduced motion is requested", () => {
+  const { dom } = createStorySheetModalHarness({ mobile: true, reducedMotion: true });
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  handle.click();
+  const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+  const grabber = sheet.querySelector("[data-trace-bottom-sheet-grabber]");
+  grabber.dispatchEvent(new dom.window.MouseEvent("pointerdown", { bubbles: true, clientY: 100 }));
+  grabber.dispatchEvent(new dom.window.MouseEvent("pointermove", { bubbles: true, clientY: 120 }));
+  grabber.dispatchEvent(new dom.window.MouseEvent("pointerup", { bubbles: true, clientY: 120 }));
+  assert.equal(sheet.style.transition, "");
+  assert.equal(sheet.style.transform, "translateX(-50%)");
+});
+
 test("FFN desktop story places compact Trace handle after profile header", () => {
   const dom = new JSDOM(
     "<!doctype html><html><body><div id='profile_top'><b class='xcontrast_txt'>Demo FFN Work</b> by <a href='/u/1/demo'>demo</a><div class='xcontrast_txt'>A long enough story summary for Trace collection to ignore title-only nodes.</div><span class='xgray xcontrast_txt'>Rated: Fiction T - English - Chapters: 3 - Words: 12,345</span></div></body></html>",

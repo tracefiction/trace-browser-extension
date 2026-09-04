@@ -962,7 +962,7 @@ test("library-overlay opened surface shows status editing only when entryId exis
 
   const surface = openTraceLens(withEntryId).surface;
   assert.match(surface.getAttribute("style") || "", /position:\s*fixed/i);
-  assert.match(surface.getAttribute("style") || "", /max-height:\s*calc\(100vh/i);
+  assert.match(surface.getAttribute("style") || "", /max-height:\s*\d+px/i);
   const header = surface.querySelector("[data-trace-management-header]");
   assert.ok(header);
   assert.match(header.textContent || "", /Trace\s*·\s*AO3/i);
@@ -1059,6 +1059,269 @@ test("library-overlay mobile action surface grabber drags down to close", async 
   assert.equal(window.document.body.style.overflow, "");
 });
 
+test("library-overlay bottom sheet removes drag recovery motion when reduced motion is requested", async () => {
+  const window = await renderOverlayListing({
+    mobile: true,
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/77893'>Reduced Motion Work</a></h4></li></ol></body></html>",
+    cache: {
+      entries: {
+        "ao3:77893": {
+          status: "READING",
+          readerStatus: "READING",
+          entryId: "entry-reduced-motion-sheet",
+        },
+      },
+      syncVersion: "v-reduced-motion-sheet",
+    },
+  });
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = (query) =>
+    String(query).includes("prefers-reduced-motion")
+      ? { matches: true }
+      : originalMatchMedia(query);
+
+  const { surface } = openTraceLens(window);
+  const grabber = surface.querySelector("[data-trace-bottom-sheet-grabber]");
+  grabber.dispatchEvent(new window.MouseEvent("pointerdown", { bubbles: true, clientY: 100 }));
+  grabber.dispatchEvent(new window.MouseEvent("pointermove", { bubbles: true, clientY: 120 }));
+  grabber.dispatchEvent(new window.MouseEvent("pointerup", { bubbles: true, clientY: 120 }));
+  assert.equal(surface.style.transition, "");
+  assert.equal(surface.style.transform, "");
+});
+
+test("library-overlay action surface contains focus and restores the archive after close", async () => {
+  const window = await renderOverlayListing({
+    html:
+      "<!doctype html><html><body style='position:relative'><a id='before' href='#before'>Before</a><ol><li class='work blurb group'><h4 class='heading'><a href='/works/77890'>Accessible Work</a></h4></li></ol></body></html>",
+    cache: {
+      entries: {
+        "ao3:77890": {
+          status: "READING",
+          readerStatus: "READING",
+          entryId: "entry-accessible-sheet",
+          chapters: { current: 4, total: 12 },
+        },
+      },
+      syncVersion: "v-accessible-sheet",
+    },
+  });
+  Object.defineProperty(window, "scrollX", { value: 12, configurable: true });
+  Object.defineProperty(window, "scrollY", { value: 420, configurable: true });
+  const restoredScroll = [];
+  window.scrollTo = (x, y) => restoredScroll.push([x, y]);
+
+  const lens = window.document.querySelector("[data-trace-library-lens]");
+  lens.focus();
+  const { surface } = openTraceLens(window);
+  await sleep(20);
+
+  assert.equal(lens.getAttribute("aria-haspopup"), "dialog");
+  assert.equal(lens.getAttribute("aria-controls"), surface.id);
+  assert.equal(lens.getAttribute("aria-expanded"), "true");
+  assert.equal(surface.getAttribute("role"), "dialog");
+  assert.equal(surface.getAttribute("aria-modal"), "true");
+  const title = window.document.getElementById(surface.getAttribute("aria-labelledby"));
+  const description = window.document.getElementById(surface.getAttribute("aria-describedby"));
+  assert.ok(title);
+  assert.match(title.textContent || "", /Accessible Work/i);
+  assert.ok(description);
+  assert.match(description.textContent || "", /reading status and private Trace actions/i);
+  assert.equal(window.document.body.hasAttribute("inert"), true);
+  assert.equal(window.document.body.style.position, "fixed");
+  assert.equal(window.document.body.style.top, "-420px");
+
+  const focusables = Array.from(surface.querySelectorAll("button:not([disabled]), a[href]"));
+  assert.ok(focusables.length > 2);
+  assert.equal(window.document.activeElement.getAttribute("data-trace-status-choice"), "READING");
+  const firstRating = surface.querySelector("[data-trace-rating-choice='1']");
+  assert.equal(firstRating.getAttribute("aria-label"), "Set rating to 1 out of 5");
+  assert.equal(firstRating.getAttribute("aria-pressed"), "false");
+  focusables.at(-1).focus();
+  surface.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+  assert.equal(window.document.activeElement, focusables[0]);
+  focusables[0].focus();
+  surface.dispatchEvent(
+    new window.KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true }),
+  );
+  assert.equal(window.document.activeElement, focusables.at(-1));
+
+  Object.defineProperty(window, "scrollY", { value: 0, configurable: true });
+  window.document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  assert.equal(window.document.querySelector("[data-trace-action-surface]"), null);
+  assert.equal(window.document.body.hasAttribute("inert"), false);
+  assert.equal(window.document.body.style.position, "relative");
+  assert.equal(window.document.body.style.top, "");
+  assert.deepEqual(restoredScroll, [[12, 420]]);
+  assert.equal(window.document.activeElement, lens);
+  assert.equal(lens.getAttribute("aria-expanded"), "false");
+
+  openTraceLens(window);
+  await sleep(20);
+  const outsideClick = new window.MouseEvent("click", { bubbles: true, cancelable: true });
+  const outsideDispatched = window.document.body.dispatchEvent(outsideClick);
+  assert.equal(outsideDispatched, false);
+  assert.equal(outsideClick.defaultPrevented, true);
+  assert.equal(window.document.querySelector("[data-trace-action-surface]"), null);
+});
+
+test("library-overlay desktop popover chooses the visible side of its trigger", async () => {
+  const window = await renderOverlayListing({
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/77891'>Viewport Edge Work</a></h4></li></ol></body></html>",
+    cache: {
+      entries: {
+        "ao3:77891": {
+          status: "READING",
+          readerStatus: "READING",
+          entryId: "entry-viewport-sheet",
+          chapters: { current: 4, total: 12 },
+        },
+      },
+      syncVersion: "v-viewport-sheet",
+    },
+  });
+  Object.defineProperty(window, "innerWidth", { value: 800, configurable: true });
+  Object.defineProperty(window, "innerHeight", { value: 640, configurable: true });
+  const lens = window.document.querySelector("[data-trace-library-lens]");
+  lens.getBoundingClientRect = () => ({
+    top: 590,
+    right: 790,
+    bottom: 620,
+    left: 710,
+    width: 80,
+    height: 30,
+  });
+  const originalRect = window.HTMLElement.prototype.getBoundingClientRect;
+  window.HTMLElement.prototype.getBoundingClientRect = function () {
+    if (this.hasAttribute && this.hasAttribute("data-trace-action-surface")) {
+      return { top: 0, right: 376, bottom: 420, left: 0, width: 376, height: 420 };
+    }
+    return originalRect.call(this);
+  };
+
+  const { surface } = openTraceLens(window);
+  assert.equal(surface.getAttribute("data-trace-popover-side"), "above");
+  assert.equal(surface.style.top, "162px");
+  assert.equal(surface.style.left, "416px");
+  assert.equal(surface.style.maxHeight, "624px");
+});
+
+test("library-overlay keeps a pending mutation open and announces its result", async () => {
+  let pendingCallback = null;
+  const window = await renderOverlayListing({
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/77892'>Pending Work</a></h4></li></ol></body></html>",
+    cache: {
+      entries: {
+        "ao3:77892": {
+          status: "READING",
+          readerStatus: "READING",
+          entryId: "entry-pending-sheet",
+          chapters: { current: 4, total: 12 },
+        },
+      },
+      syncVersion: "v-pending-sheet",
+    },
+    sendMessage(_msg, cb) {
+      pendingCallback = cb;
+    },
+  });
+
+  const { surface } = openTraceLens(window);
+  surface.querySelector("[data-trace-status-choice='FINISHED']").click();
+  await sleep(20);
+  const pendingSurface = window.document.querySelector("[data-trace-action-surface]");
+  assert.ok(pendingSurface);
+  assert.equal(pendingSurface.getAttribute("data-trace-modal-pending"), "1");
+  assert.equal(pendingSurface.getAttribute("aria-busy"), "true");
+  const live = window.document.querySelector("[data-trace-listing-live-region]");
+  assert.ok(live);
+  assert.match(live.textContent || "", /Saving reading status as Finished/i);
+
+  window.document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  assert.ok(window.document.querySelector("[data-trace-action-surface]"));
+  await sleep(20);
+  assert.match(live.textContent || "", /still in progress/i);
+
+  window.__traceSetStorage({
+    libraryOverlayCache: {
+      entries: {
+        "ao3:77892": {
+          status: "READING",
+          readerStatus: "READING",
+          entryId: "entry-pending-sheet",
+          chapters: { current: 4, total: 12 },
+        },
+      },
+      syncVersion: "v-pending-sheet-refresh",
+    },
+  });
+  await sleep(100);
+  const refreshedPendingSurface = window.document.querySelector("[data-trace-action-surface]");
+  assert.ok(refreshedPendingSurface);
+  assert.equal(refreshedPendingSurface.getAttribute("data-trace-modal-pending"), "1");
+  assert.equal(window.document.body.hasAttribute("inert"), true);
+
+  pendingCallback({ ok: true, status: "FINISHED" });
+  await sleep(30);
+  assert.match(live.textContent || "", /Reading status saved as Finished/i);
+  assert.notEqual(
+    window.document.querySelector("[data-trace-action-surface]").getAttribute("data-trace-modal-pending"),
+    "1",
+  );
+  assert.equal(
+    window.document.querySelector("[data-trace-action-surface]").hasAttribute("aria-busy"),
+    false,
+  );
+});
+
+test("library-overlay prevents overlapping mutations while a save is pending", async () => {
+  let ratingCallback = null;
+  let statusRequests = 0;
+  const window = await renderOverlayListing({
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/77894'>Single Save Work</a></h4></li></ol></body></html>",
+    cache: {
+      entries: {
+        "ao3:77894": {
+          status: "READING",
+          readerStatus: "READING",
+          entryId: "entry-single-save-sheet",
+          chapters: { current: 4, total: 12 },
+        },
+      },
+      syncVersion: "v-single-save-sheet",
+    },
+    sendMessage(message, callback) {
+      if (message.type === "TRACE_PATCH_LIBRARY_ENTRY") {
+        ratingCallback = callback;
+        return;
+      }
+      if (message.type === "TRACE_SET_READER_STATUS") {
+        statusRequests += 1;
+      }
+    },
+  });
+
+  const { surface } = openTraceLens(window);
+  surface.querySelector("[data-trace-rating-choice='4']").click();
+  surface.querySelector("[data-trace-status-choice='FINISHED']").click();
+  await sleep(20);
+
+  assert.equal(typeof ratingCallback, "function");
+  assert.equal(statusRequests, 0);
+  assert.equal(surface.getAttribute("aria-busy"), "true");
+  assert.match(
+    window.document.querySelector("[data-trace-listing-live-region]").textContent || "",
+    /still in progress/i,
+  );
+
+  ratingCallback({ ok: true });
+  await sleep(20);
+  assert.equal(surface.hasAttribute("aria-busy"), false);
+});
+
 test("library-overlay lens click toggles same surface and switches to another lens", async () => {
   const window = await renderOverlayListing({
     html:
@@ -1074,15 +1337,21 @@ test("library-overlay lens click toggles same surface and switches to another le
 
   const lenses = window.document.querySelectorAll("[data-trace-library-lens]");
   assert.equal(lenses.length, 2);
+  Object.defineProperty(window, "scrollY", { value: 280, configurable: true });
+  const restoredScroll = [];
+  window.scrollTo = (x, y) => restoredScroll.push([x, y]);
 
   lenses[0].click();
   let surface = window.document.querySelector("[data-trace-action-surface]");
   assert.ok(surface);
   assert.equal(surface.getAttribute("data-trace-action-surface-key"), "ao3:10001");
+  assert.equal(lenses[0].getAttribute("aria-expanded"), "true");
 
   lenses[0].click();
   assert.equal(window.document.querySelector("[data-trace-action-surface]"), null);
+  assert.equal(lenses[0].getAttribute("aria-expanded"), "false");
 
+  restoredScroll.length = 0;
   lenses[0].click();
   surface = window.document.querySelector("[data-trace-action-surface]");
   assert.ok(surface);
@@ -1093,6 +1362,11 @@ test("library-overlay lens click toggles same surface and switches to another le
   assert.ok(surface);
   assert.equal(surface.getAttribute("data-trace-action-surface-key"), "ao3:10002");
   assert.match(surface.textContent || "", /Paused/i);
+  assert.equal(lenses[0].getAttribute("aria-expanded"), "false");
+  assert.equal(lenses[1].getAttribute("aria-expanded"), "true");
+  assert.equal(window.document.body.style.position, "fixed");
+  assert.equal(window.document.body.style.top, "-280px");
+  assert.deepEqual(restoredScroll, []);
 });
 
 test("library-overlay status selection keeps surface open and shows inline saving", async () => {

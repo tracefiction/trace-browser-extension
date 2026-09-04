@@ -13,6 +13,7 @@
   const LENS_ATTR = "data-trace-library-lens";
   const ACTION_SURFACE_ATTR = "data-trace-action-surface";
   const ACTION_SURFACE_CLOSE_ATTR = "data-trace-action-surface-close";
+  const ACTION_SURFACE_ID = "trace-listing-action-surface";
   const TRACE_SESSION_MODE = globalThis.TRACE_SESSION_MODE || "legacy";
   const KERNEL_SESSION_ACTIVE = TRACE_SESSION_MODE === "kernel";
   const TRACE_EARNED_PERMISSION_GATE_ACTIVE =
@@ -27,6 +28,11 @@
   const TRACE_API_BASE_STORAGE_KEY = "traceApiBase";
   var currentTraceAuthState = null;
   var confirmedQuickAddEntries = new Map();
+  var listingActionSurfaceOpener = null;
+  var listingActionSurfaceTrigger = null;
+  var listingViewportFrame = null;
+  var listingLiveAnnouncementTimer = null;
+  var listingActionSurfacePending = false;
 
   function runWhenTraceEarnedPermissionReady(start) {
     if (
@@ -1970,18 +1976,25 @@
         var star = document.createElement("button");
         star.type = "button";
         star.setAttribute("data-trace-rating-choice", String(i));
-        star.setAttribute("aria-label", current === i ? "Clear rating" : "Set rating to " + i);
+        star.setAttribute(
+          "aria-label",
+          current === i
+            ? "Clear rating of " + i + " out of 5"
+            : "Set rating to " + i + " out of 5",
+        );
+        star.setAttribute("aria-pressed", current === i ? "true" : "false");
         star.textContent = i <= current ? "\u2605" : "\u2606";
         star.style.cssText = ratingButtonStyle(i <= current, disabled);
         star.disabled = disabled === true;
         star.addEventListener("click", function (event) {
           event.preventDefault();
           event.stopPropagation();
-          if (this.disabled) return;
+          if (this.disabled || listingMutationBlocked(this)) return;
           var selected = Number(this.getAttribute("data-trace-rating-choice"));
           if (!Number.isFinite(selected)) return;
           var previous = current;
           var nextRating = current === selected ? 0 : selected;
+          setListingControlPending(this, true, "Saving rating.");
           current = nextRating;
           entry.rating = nextRating;
           message.textContent = "Saving...";
@@ -1997,6 +2010,7 @@
             },
             function (response) {
               if (ext.runtime.lastError || !response || !response.ok) {
+                setListingControlPending(message, false, "Could not save rating. Try again.");
                 current = previous;
                 entry.rating = previous;
                 message.textContent = "Could not save";
@@ -2005,6 +2019,11 @@
               }
               current = nextRating;
               entry.rating = nextRating;
+              setListingControlPending(
+                message,
+                false,
+                nextRating > 0 ? "Rating saved as " + nextRating + " of 5." : "Rating cleared.",
+              );
               message.textContent = nextRating > 0 ? nextRating + " of 5" : "Not rated";
               renderStars(false);
             },
@@ -2044,6 +2063,8 @@
     button.addEventListener("click", function (event) {
       event.preventDefault();
       event.stopPropagation();
+      if (listingMutationBlocked(button)) return;
+      setListingControlPending(button, true, "Saving reading progress.");
       button.disabled = true;
       button.textContent = "Saving...";
       ext.runtime.sendMessage(
@@ -2057,6 +2078,7 @@
         },
         function (response) {
           if (ext.runtime.lastError || !response || !response.ok) {
+            setListingControlPending(button, false, "Could not save reading progress. Try again.");
             button.disabled = false;
             button.textContent = "Retry";
             return;
@@ -2067,6 +2089,7 @@
           entry.canonicalReaderStatus = "CAUGHT_UP";
           entry.catchupState = "UP";
           entry.newChapterCount = 0;
+          setListingControlPending(button, false, "Reading progress saved.");
           rerender();
           if (typeof refreshSurface === "function") refreshSurface();
         },
@@ -2077,12 +2100,194 @@
     surface.appendChild(wrap);
   }
 
-  function closeListingActionSurface() {
+  function ensureListingModalStyles() {
+    if (document.querySelector("style[data-trace-listing-modal-styles]")) return;
+    var style = document.createElement("style");
+    style.setAttribute("data-trace-listing-modal-styles", "1");
+    style.textContent =
+      "[" + ACTION_SURFACE_ATTR + "] :focus-visible{" +
+        "outline:3px solid #2a5d53!important;outline-offset:2px!important}" +
+      "@media (max-width:640px),(pointer:coarse){" +
+        "[" + ACTION_SURFACE_CLOSE_ATTR + "]{min-width:44px!important;min-height:44px!important}}" +
+      "@media (prefers-reduced-motion:reduce){" +
+        "[" + ACTION_SURFACE_ATTR + "],[" + ACTION_SURFACE_ATTR + "] *{" +
+          "animation-duration:0.001ms!important;animation-iteration-count:1!important;" +
+          "transition-duration:0.001ms!important;scroll-behavior:auto!important}}";
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function ensureListingLiveRegion() {
+    var live = document.querySelector("[data-trace-listing-live-region]");
+    if (live) return live;
+    live = document.createElement("div");
+    live.setAttribute("data-trace-listing-live-region", "1");
+    live.setAttribute("role", "status");
+    live.setAttribute("aria-live", "polite");
+    live.setAttribute("aria-atomic", "true");
+    live.style.cssText = "position:fixed;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap";
+    document.documentElement.appendChild(live);
+    return live;
+  }
+
+  function announceListingSurface(message) {
+    var live = ensureListingLiveRegion();
+    if (listingLiveAnnouncementTimer !== null) {
+      clearTimeout(listingLiveAnnouncementTimer);
+    }
+    live.textContent = "";
+    listingLiveAnnouncementTimer = setTimeout(function () {
+      listingLiveAnnouncementTimer = null;
+      live.textContent = message || "";
+    }, 0);
+  }
+
+  function listingPrefersReducedMotion() {
+    try {
+      return !!window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function listingModalFocusable(surface) {
+    if (!surface) return [];
+    return Array.prototype.slice.call(
+      surface.querySelectorAll(
+        "button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex='-1'])",
+      ),
+    ).filter(function (element) {
+      return element.getAttribute("aria-hidden") !== "true";
+    });
+  }
+
+  function focusListingSurface(surface) {
+    if (!surface || !surface.isConnected) return;
+    var target =
+      surface.querySelector("[data-trace-status-selected='1']:not([disabled])") ||
+      surface.querySelector("[" + ACTION_SURFACE_CLOSE_ATTR + "]") ||
+      listingModalFocusable(surface)[0] ||
+      surface;
+    if (target === surface && !surface.hasAttribute("tabindex")) {
+      surface.setAttribute("tabindex", "-1");
+    }
+    try {
+      target.focus({ preventScroll: true });
+    } catch (_) {
+      try { target.focus(); } catch (_) {}
+    }
+  }
+
+  function listingViewportBounds() {
+    var visual = window.visualViewport;
+    var width = visual && Number.isFinite(visual.width)
+      ? visual.width
+      : window.innerWidth || document.documentElement.clientWidth || 320;
+    var height = visual && Number.isFinite(visual.height)
+      ? visual.height
+      : window.innerHeight || document.documentElement.clientHeight || 640;
+    return {
+      left: visual && Number.isFinite(visual.offsetLeft) ? visual.offsetLeft : 0,
+      top: visual && Number.isFinite(visual.offsetTop) ? visual.offsetTop : 0,
+      width: Math.max(320, width),
+      height: Math.max(240, height),
+    };
+  }
+
+  function positionDesktopListingSurface(surface, trigger) {
+    if (!surface || !trigger || !trigger.getBoundingClientRect) return;
+    var viewport = listingViewportBounds();
+    var margin = 8;
+    var gap = 8;
+    var rect = trigger.getBoundingClientRect();
+    var surfaceWidth = Math.min(376, Math.max(280, viewport.width - margin * 2));
+    surface.style.width = surfaceWidth + "px";
+    surface.style.maxWidth = surfaceWidth + "px";
+    surface.style.maxHeight = Math.max(120, viewport.height - margin * 2) + "px";
+    var surfaceRect = surface.getBoundingClientRect();
+    var measuredHeight = Math.min(
+      Math.max(0, surfaceRect.height || surface.scrollHeight || 0),
+      viewport.height - margin * 2,
+    );
+    var viewportBottom = viewport.top + viewport.height;
+    var belowTop = rect.bottom + gap;
+    var belowSpace = viewportBottom - margin - belowTop;
+    var aboveSpace = rect.top - gap - (viewport.top + margin);
+    var side = measuredHeight > belowSpace && aboveSpace > belowSpace ? "above" : "below";
+    var top = side === "above" ? rect.top - gap - measuredHeight : belowTop;
+    top = Math.max(
+      viewport.top + margin,
+      Math.min(top, viewportBottom - margin - measuredHeight),
+    );
+    var left = rect.left;
+    left = Math.max(
+      viewport.left + margin,
+      Math.min(left, viewport.left + viewport.width - surfaceWidth - margin),
+    );
+    surface.style.top = Math.round(top) + "px";
+    surface.style.left = Math.round(left) + "px";
+    surface.style.right = "auto";
+    surface.style.bottom = "auto";
+    surface.setAttribute("data-trace-popover-side", side);
+  }
+
+  function scheduleListingSurfacePosition() {
+    if (listingViewportFrame !== null) return;
+    var schedule = window.requestAnimationFrame || function (callback) {
+      return setTimeout(callback, 0);
+    };
+    listingViewportFrame = schedule(function () {
+      listingViewportFrame = null;
+      var surface = document.querySelector("[" + ACTION_SURFACE_ATTR + "]");
+      if (!surface || surface.getAttribute("data-trace-action-surface-placement") !== "popover") return;
+      positionDesktopListingSurface(surface, listingActionSurfaceTrigger);
+    });
+  }
+
+  function addListingViewportListeners() {
+    window.addEventListener("resize", scheduleListingSurfacePosition);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", scheduleListingSurfacePosition);
+      window.visualViewport.addEventListener("scroll", scheduleListingSurfacePosition);
+    }
+  }
+
+  function removeListingViewportListeners() {
+    window.removeEventListener("resize", scheduleListingSurfacePosition);
+    if (window.visualViewport) {
+      window.visualViewport.removeEventListener("resize", scheduleListingSurfacePosition);
+      window.visualViewport.removeEventListener("scroll", scheduleListingSurfacePosition);
+    }
+  }
+
+  function closeListingActionSurface(options) {
+    var preserveModal = options && options.preserveModal === true;
     var existing = document.querySelector("[" + ACTION_SURFACE_ATTR + "]");
+    if (preserveModal) {
+      listingActionSurfacePending = !!(
+        existing && existing.getAttribute("data-trace-modal-pending") === "1"
+      );
+    } else {
+      listingActionSurfacePending = false;
+    }
     if (existing) existing.remove();
-    unlockListingBottomSheetPageScroll();
+    if (listingActionSurfaceOpener && listingActionSurfaceOpener.isConnected) {
+      listingActionSurfaceOpener.setAttribute("aria-expanded", "false");
+    }
     document.removeEventListener("click", outsideSurfaceClick, true);
     document.removeEventListener("keydown", surfaceKeydown, true);
+    removeListingViewportListeners();
+    if (preserveModal) return;
+    unlockListingBottomSheetPageScroll();
+    var opener = listingActionSurfaceOpener;
+    listingActionSurfaceOpener = null;
+    listingActionSurfaceTrigger = null;
+    if (opener && opener.isConnected && typeof opener.focus === "function") {
+      try {
+        opener.focus({ preventScroll: true });
+      } catch (_) {
+        try { opener.focus(); } catch (_) {}
+      }
+    }
   }
 
   var listingBottomSheetScrollLock = null;
@@ -2092,10 +2297,19 @@
     var html = document.documentElement;
     var body = document.body;
     listingBottomSheetScrollLock = {
+      scrollX: window.scrollX || 0,
+      scrollY: window.scrollY || 0,
       htmlOverflow: html ? html.style.overflow : "",
       htmlOverscroll: html ? html.style.overscrollBehavior : "",
       bodyOverflow: body ? body.style.overflow : "",
       bodyOverscroll: body ? body.style.overscrollBehavior : "",
+      bodyPosition: body ? body.style.position : "",
+      bodyTop: body ? body.style.top : "",
+      bodyLeft: body ? body.style.left : "",
+      bodyRight: body ? body.style.right : "",
+      bodyWidth: body ? body.style.width : "",
+      bodyPaddingRight: body ? body.style.paddingRight : "",
+      bodyHadInert: body ? body.hasAttribute("inert") : false,
     };
     if (html) {
       html.style.overflow = "hidden";
@@ -2104,22 +2318,53 @@
     if (body) {
       body.style.overflow = "hidden";
       body.style.overscrollBehavior = "none";
+      body.style.position = "fixed";
+      body.style.top = -listingBottomSheetScrollLock.scrollY + "px";
+      body.style.left = -listingBottomSheetScrollLock.scrollX + "px";
+      body.style.right = "0";
+      body.style.width = "100%";
+      var innerWidth = window.innerWidth || 0;
+      var layoutWidth = document.documentElement.clientWidth || innerWidth;
+      var scrollbarWidth = Math.max(0, innerWidth - layoutWidth);
+      if (scrollbarWidth > 0 && typeof window.getComputedStyle === "function") {
+        var currentPadding = parseFloat(window.getComputedStyle(body).paddingRight) || 0;
+        body.style.paddingRight = currentPadding + scrollbarWidth + "px";
+      }
+      body.setAttribute("inert", "");
+      try { body.inert = true; } catch (_) {}
     }
   }
 
   function unlockListingBottomSheetPageScroll() {
     if (!listingBottomSheetScrollLock) return;
+    var lock = listingBottomSheetScrollLock;
     var html = document.documentElement;
     var body = document.body;
     if (html) {
-      html.style.overflow = listingBottomSheetScrollLock.htmlOverflow;
-      html.style.overscrollBehavior = listingBottomSheetScrollLock.htmlOverscroll;
+      html.style.overflow = lock.htmlOverflow;
+      html.style.overscrollBehavior = lock.htmlOverscroll;
     }
     if (body) {
-      body.style.overflow = listingBottomSheetScrollLock.bodyOverflow;
-      body.style.overscrollBehavior = listingBottomSheetScrollLock.bodyOverscroll;
+      body.style.overflow = lock.bodyOverflow;
+      body.style.overscrollBehavior = lock.bodyOverscroll;
+      body.style.position = lock.bodyPosition;
+      body.style.top = lock.bodyTop;
+      body.style.left = lock.bodyLeft;
+      body.style.right = lock.bodyRight;
+      body.style.width = lock.bodyWidth;
+      body.style.paddingRight = lock.bodyPaddingRight;
+      if (!lock.bodyHadInert) {
+        body.removeAttribute("inert");
+        try { body.inert = false; } catch (_) {}
+      }
     }
     listingBottomSheetScrollLock = null;
+    if (
+      typeof window.scrollTo === "function" &&
+      ((window.scrollX || 0) !== lock.scrollX || (window.scrollY || 0) !== lock.scrollY)
+    ) {
+      try { window.scrollTo(lock.scrollX, lock.scrollY); } catch (_) {}
+    }
   }
 
   function createBottomSheetGrabber(color) {
@@ -2183,9 +2428,13 @@
         closeFn();
         return;
       }
-      surface.style.transition = "transform 160ms ease";
-      surface.style.transform = "translateY(0)";
-      window.setTimeout(resetDrag, 180);
+      if (listingPrefersReducedMotion()) {
+        resetDrag();
+      } else {
+        surface.style.transition = "transform 160ms ease";
+        surface.style.transform = "translateY(0)";
+        window.setTimeout(resetDrag, 180);
+      }
     }
     handle.style.cursor = "grab";
     handle.style.touchAction = "none";
@@ -2209,11 +2458,75 @@
     ) {
       return;
     }
-    closeListingActionSurface();
+    if (e && e.cancelable) e.preventDefault();
+    if (e && e.stopPropagation) e.stopPropagation();
+    requestCloseListingActionSurface();
   }
 
   function surfaceKeydown(e) {
-    if (e && e.key === "Escape") closeListingActionSurface();
+    var surface = document.querySelector("[" + ACTION_SURFACE_ATTR + "]");
+    if (!surface || !e) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      requestCloseListingActionSurface();
+      return;
+    }
+    if (e.key !== "Tab") return;
+    var focusable = listingModalFocusable(surface);
+    if (!focusable.length) {
+      e.preventDefault();
+      focusListingSurface(surface);
+      return;
+    }
+    var first = focusable[0];
+    var last = focusable[focusable.length - 1];
+    if (e.shiftKey && (document.activeElement === first || !surface.contains(document.activeElement))) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+
+  function requestCloseListingActionSurface() {
+    var surface = document.querySelector("[" + ACTION_SURFACE_ATTR + "]");
+    if (surface && surface.getAttribute("data-trace-modal-pending") === "1") {
+      announceListingSurface("Saving is still in progress.");
+      return false;
+    }
+    closeListingActionSurface();
+    return true;
+  }
+
+  function setListingControlPending(control, pending, announcement) {
+    var surface = control && control.closest
+      ? control.closest("[" + ACTION_SURFACE_ATTR + "]")
+      : null;
+    if (!surface || !surface.isConnected) {
+      surface = document.querySelector("[" + ACTION_SURFACE_ATTR + "]");
+    }
+    if (surface) {
+      if (pending) {
+        surface.setAttribute("data-trace-modal-pending", "1");
+        surface.setAttribute("aria-busy", "true");
+      } else {
+        surface.removeAttribute("data-trace-modal-pending");
+        surface.removeAttribute("aria-busy");
+      }
+    }
+    listingActionSurfacePending = pending === true;
+    if (announcement) announceListingSurface(announcement);
+  }
+
+  function listingMutationBlocked(control) {
+    var surface = control && control.closest
+      ? control.closest("[" + ACTION_SURFACE_ATTR + "]")
+      : null;
+    if (!surface || surface.getAttribute("data-trace-modal-pending") !== "1") return false;
+    announceListingSurface("Saving is still in progress.");
+    return true;
   }
 
   function surfaceRowEl(label, value, emphasis) {
@@ -2421,7 +2734,7 @@
     choice.addEventListener("click", function (e) {
       e.preventDefault();
       e.stopPropagation();
-      if (!entry.entryId) return;
+      if (!entry.entryId || entry.__traceStatusPending || listingMutationBlocked(choice)) return;
       var statusPatch = readerStatusProgressPatch(entry, status);
       var previousStatus = entry.status;
       var previousReaderStatus = entry.readerStatus;
@@ -2435,6 +2748,11 @@
       entry.__traceStatusPending = true;
       entry.__traceStatusTarget = status;
       delete entry.__traceStatusError;
+      setListingControlPending(
+        choice,
+        true,
+        "Saving reading status as " + statusChoiceLabel(status) + ".",
+      );
       rerender();
       if (typeof refreshSurface === "function") refreshSurface();
       var payload = { workKey: workKey, entryId: entry.entryId, status: status };
@@ -2457,6 +2775,7 @@
             delete entry.__traceStatusPending;
             delete entry.__traceStatusTarget;
             entry.__traceStatusError = response && response.error ? response.error : "update_failed";
+            setListingControlPending(choice, false, "Could not save reading status. Try again.");
             rerender();
             if (typeof refreshSurface === "function") refreshSurface();
             return;
@@ -2470,6 +2789,11 @@
           delete entry.__traceStatusPending;
           delete entry.__traceStatusTarget;
           delete entry.__traceStatusError;
+          setListingControlPending(
+            choice,
+            false,
+            "Reading status saved as " + statusChoiceLabel(status) + ".",
+          );
           rerender();
           if (typeof refreshSurface === "function") refreshSurface();
         },
@@ -2509,15 +2833,22 @@
     wrap.style.cssText = "display:grid;gap:9px";
     var label = document.createElement("div");
     label.className = "x-sheet-label";
+    label.id = "trace-listing-status-label";
     label.textContent = "Reading status";
     label.style.cssText = "font:500 9px/1 " + TRACE_D1.mono + ";letter-spacing:0.18em;text-transform:uppercase;color:" + TRACE_D1.ink4;
     var row = document.createElement("div");
     row.className = "x-seg";
+    row.setAttribute("role", "group");
+    row.setAttribute("aria-labelledby", label.id);
+    if (entry.__traceStatusError) {
+      row.setAttribute("aria-describedby", "trace-listing-status-error");
+    }
     row.style.cssText = "display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px";
     MANAGEMENT_STATUS_CHOICES.forEach(function (status) {
       var choice = document.createElement("button");
       choice.type = "button";
       choice.setAttribute("data-trace-status-choice", status);
+      choice.disabled = entry.__traceStatusPending === true;
       var selected = entryDisplayStatusValue(entry) === status;
       if (selected) {
         choice.setAttribute("data-trace-status-selected", "1");
@@ -2541,19 +2872,42 @@
     });
     wrap.appendChild(label);
     wrap.appendChild(row);
+    if (entry.__traceStatusError) {
+      var error = document.createElement("div");
+      error.id = "trace-listing-status-error";
+      error.setAttribute("data-trace-status-error-message", "1");
+      error.textContent = "Could not save reading status. Try again.";
+      error.style.cssText = "color:" + TRACE_D1.rust + ";font:600 11.5px/1.35 " + TRACE_D1.font;
+      wrap.appendChild(error);
+    }
     surface.appendChild(wrap);
   }
 
-  function renderListingActionSurface(trigger, entry, workKey, showActions, rerender, platform, anchor) {
-    closeListingActionSurface();
+  function renderListingActionSurface(trigger, entry, workKey, showActions, rerender, platform, anchor, preserveModal) {
+    var existingSurface = document.querySelector("[" + ACTION_SURFACE_ATTR + "]");
+    var inheritedPending = !!(
+      (existingSurface && existingSurface.getAttribute("data-trace-modal-pending") === "1") ||
+      (preserveModal === true && listingActionSurfacePending)
+    );
+    closeListingActionSurface({ preserveModal: preserveModal === true });
     var surface = document.createElement("aside");
+    surface.id = ACTION_SURFACE_ID;
     surface.className = "x x-sheet";
     surface.setAttribute(ACTION_SURFACE_ATTR, "1");
     surface.setAttribute("data-trace-action-surface-key", workKey);
     surface.setAttribute("role", "dialog");
-    surface.setAttribute("aria-label", "Trace actions for this work");
+    surface.setAttribute("aria-modal", "true");
+    surface.setAttribute("aria-labelledby", "trace-listing-sheet-title");
+    surface.setAttribute("aria-describedby", "trace-listing-sheet-description");
+    if (inheritedPending || (entry && entry.__traceStatusPending)) {
+      surface.setAttribute("data-trace-modal-pending", "1");
+      surface.setAttribute("aria-busy", "true");
+    }
+    listingActionSurfacePending = surface.getAttribute("data-trace-modal-pending") === "1";
+    ensureListingModalStyles();
 
     var mobile = isCompactOverlayLayout();
+    surface.setAttribute("data-trace-action-surface-placement", mobile ? "bottom" : "popover");
     var css = [
       "position:fixed",
       "z-index:2147483647",
@@ -2569,31 +2923,27 @@
       "box-shadow:0 22px 54px -20px rgba(15,20,18,0.42)",
       "font:500 13px/1.4 " + TRACE_D1.font,
       "overflow:auto",
+      "overscroll-behavior:contain",
       "-webkit-font-smoothing:antialiased",
     ];
     if (mobile) {
-      css.push("left:0", "right:0", "bottom:0", "margin:0 auto", "max-height:min(82vh,680px)");
-    } else {
-      var rect = trigger.getBoundingClientRect();
-      var surfaceWidth = Math.min(376, Math.max(280, (window.innerWidth || 376) - 24));
-      var viewportHeight = window.innerHeight || document.documentElement.clientHeight || 640;
-      var top = rect.bottom + 8;
-      top = Math.min(Math.max(8, top), Math.max(8, viewportHeight - 120));
-      var left = rect.left;
-      left = Math.max(8, Math.min(left, (window.innerWidth || 320) - surfaceWidth - 8));
       css.push(
-        "top:" + Math.max(8, top) + "px",
-        "left:" + Math.max(8, left) + "px",
-        "max-height:calc(100vh - " + (Math.max(8, top) + 8) + "px)",
+        "left:0",
+        "right:0",
+        "bottom:0",
+        "margin:0 auto",
+        "max-height:calc(100dvh - max(8px,env(safe-area-inset-top,0px)))",
+        "padding-bottom:env(safe-area-inset-bottom,0px)",
       );
+    } else {
+      css.push("top:8px", "left:8px", "max-height:calc(100dvh - 16px)");
     }
     surface.style.cssText = css.join(";");
 
     if (mobile) {
-      lockListingBottomSheetPageScroll();
       var grabber = createBottomSheetGrabber(TRACE_D1.ink5);
       surface.appendChild(grabber);
-      bindBottomSheetDragClose(surface, grabber, closeListingActionSurface);
+      bindBottomSheetDragClose(surface, grabber, requestCloseListingActionSurface);
     }
 
     var header = document.createElement("div");
@@ -2617,6 +2967,7 @@
     source.style.cssText = "font:650 9px/1 " + TRACE_D1.mono + ";letter-spacing:0.14em;text-transform:uppercase;color:" + TRACE_D1.rust;
     var title = document.createElement("div");
     title.className = "ti";
+    title.id = "trace-listing-sheet-title";
     title.textContent = listingMeta.title || lensHeadline(entry);
     title.style.cssText = "margin-top:6px;font:700 17px/1.22 " + TRACE_D1.font + ";color:" + TRACE_D1.ink + ";overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
     var caption = document.createElement("div");
@@ -2650,7 +3001,7 @@
     ].join(";");
     close.addEventListener("click", function (e) {
       e.preventDefault();
-      closeListingActionSurface();
+      requestCloseListingActionSurface();
     });
     header.appendChild(close);
     surface.appendChild(header);
@@ -2668,7 +3019,7 @@
           break;
         }
       }
-      renderListingActionSurface(latestTrigger, entry, workKey, showActions, rerender, platform, anchor);
+      renderListingActionSurface(latestTrigger, entry, workKey, showActions, rerender, platform, anchor, true);
     }
     var status = entryDisplayStatusValue(entry);
     appendStatusControls(body, entry, workKey, rerender, showActions, refreshSurface);
@@ -2719,10 +3070,26 @@
     }
     surface.appendChild(actions);
 
+    var description = document.createElement("p");
+    description.id = "trace-listing-sheet-description";
+    description.textContent = "Change reading status and private Trace actions for this work.";
+    description.style.cssText = "position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0";
+    surface.insertBefore(description, surface.firstChild);
+
     document.documentElement.appendChild(surface);
+    listingActionSurfaceOpener = trigger;
+    listingActionSurfaceTrigger = trigger;
+    trigger.setAttribute("aria-haspopup", "dialog");
+    trigger.setAttribute("aria-controls", ACTION_SURFACE_ID);
+    trigger.setAttribute("aria-expanded", "true");
+    lockListingBottomSheetPageScroll();
+    if (!mobile) positionDesktopListingSurface(surface, trigger);
+    addListingViewportListeners();
     setTimeout(function () {
+      if (!surface.isConnected) return;
       document.addEventListener("click", outsideSurfaceClick, true);
       document.addEventListener("keydown", surfaceKeydown, true);
+      focusListingSurface(surface);
     }, 0);
   }
 
@@ -2739,6 +3106,9 @@
     btn.type = "button";
     btn.title = "Open Trace actions";
     btn.setAttribute("aria-label", "Open Trace actions: " + lensHeadline(entry));
+    btn.setAttribute("aria-haspopup", "dialog");
+    btn.setAttribute("aria-controls", ACTION_SURFACE_ID);
+    btn.setAttribute("aria-expanded", "false");
     btn.style.cssText = [
       "display:inline-flex",
       "align-items:center",
@@ -2807,11 +3177,36 @@
         existing &&
         existing.getAttribute("data-trace-action-surface-key") === workKey
       ) {
-        closeListingActionSurface();
+        requestCloseListingActionSurface();
         return;
       }
-      renderListingActionSurface(btn, entry, workKey, showActions, rerender, platform, anchor);
+      if (existing && existing.getAttribute("data-trace-modal-pending") === "1") {
+        announceListingSurface("Saving is still in progress.");
+        return;
+      }
+      renderListingActionSurface(
+        btn,
+        entry,
+        workKey,
+        showActions,
+        rerender,
+        platform,
+        anchor,
+        !!existing,
+      );
     });
+    btn.__traceOpenListingActionSurface = function (preserveModal) {
+      renderListingActionSurface(
+        btn,
+        entry,
+        workKey,
+        showActions,
+        rerender,
+        platform,
+        anchor,
+        preserveModal === true,
+      );
+    };
     return btn;
   }
 
@@ -2852,6 +3247,14 @@
       }
 
       var nextHidden = !hidden;
+      if (surfaceAction && listingMutationBlocked(btn)) return;
+      if (surfaceAction) {
+        setListingControlPending(
+          btn,
+          true,
+          nextHidden ? "Hiding this work." : "Unhiding this work.",
+        );
+      }
       btn.style.cssText = preferenceButtonStyle(btn, ADDING_THEME) + ";cursor:wait";
       if (btn.getAttribute("data-trace-surface-action") === "1") {
         btn.textContent = "Saving...";
@@ -2867,6 +3270,9 @@
         },
         function (response) {
           if (ext.runtime.lastError || !response) {
+            if (surfaceAction) {
+              setListingControlPending(btn, false, "Could not save the browsing preference. Try again.");
+            }
             btn.style.cssText = preferenceButtonStyle(btn, ERROR_THEME) + ";cursor:pointer";
             btn.textContent = "Error";
             btn.disabled = false;
@@ -2876,12 +3282,31 @@
             return;
           }
           if (response.ok) {
+            if (surfaceAction) {
+              setListingControlPending(
+                btn,
+                false,
+                nextHidden ? "Work hidden from future listings." : "Work restored to listings.",
+              );
+            }
             onSuccess(nextHidden);
             return;
           }
           if (response.error === "not_authenticated" || response.error === "auth_expired") {
+            if (surfaceAction) {
+              setListingControlPending(btn, false, "Trace needs to reconnect before saving this preference.");
+            }
             setPreferenceAuthAction(btn, response.error);
             return;
+          }
+          if (surfaceAction) {
+            setListingControlPending(
+              btn,
+              false,
+              response.error === "rate_limited"
+                ? "Trace is rate limited. Wait before trying again."
+                : "Could not save the browsing preference. Try again.",
+            );
           }
           if (response.error === "rate_limited") {
             btn.style.cssText = preferenceButtonStyle(btn, FULL_THEME) + ";cursor:pointer";
@@ -3271,20 +3696,27 @@
     return surface ? surface.getAttribute("data-trace-action-surface-key") : null;
   }
 
-  function reopenActionSurface(workKey) {
-    if (!workKey) return;
+  function reopenActionSurface(workKey, preserveModal) {
+    if (!workKey) return false;
     var lenses = document.querySelectorAll("[" + LENS_ATTR + "]");
     for (var i = 0; i < lenses.length; i += 1) {
       if (lenses[i].getAttribute(LENS_ATTR) === workKey) {
-        lenses[i].click();
-        return;
+        if (typeof lenses[i].__traceOpenListingActionSurface === "function") {
+          lenses[i].__traceOpenListingActionSurface(preserveModal === true);
+        } else {
+          lenses[i].click();
+        }
+        return true;
       }
     }
+    return false;
   }
 
-  function clearBadges() {
+  function clearBadges(options) {
     try {
-      closeListingActionSurface();
+      closeListingActionSurface({
+        preserveModal: !!(options && options.preserveModal === true),
+      });
       document.querySelectorAll("[data-trace-row-hidden='1']").forEach(function (row) {
         restoreListingRow(row);
       });
@@ -3577,16 +4009,19 @@
       authStateAllowsActions(res && res.traceAuthState, hasAuth) &&
       !isSingleWorkPage();
     var openSurfaceKey = currentOpenActionSurfaceKey();
-    clearBadges();
+    clearBadges({ preserveModal: !!openSurfaceKey });
     if (
       Object.keys(entries).length === 0 &&
       Object.keys(workPreferences).length === 0 &&
       !showQuickAdd
     ) {
+      if (openSurfaceKey) closeListingActionSurface();
       return;
     }
     decorate(entries, workPreferences, showQuickAdd);
-    reopenActionSurface(openSurfaceKey);
+    if (openSurfaceKey && !reopenActionSurface(openSurfaceKey, true)) {
+      closeListingActionSurface();
+    }
   }
 
   /**

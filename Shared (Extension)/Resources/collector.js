@@ -3156,6 +3156,10 @@ var TRACE_STORY_SHEET_ATTR = "data-trace-story-sheet";
 var TRACE_STORY_SHEET_CLOSE_ATTR = "data-trace-story-sheet-close";
 var TRACE_STATUS_CHOICE_ATTR = "data-trace-status-choice";
 var TRACE_STATUS_CHOICE_ERROR_ATTR = "data-trace-status-choice-error";
+var TRACE_STORY_SHEET_ID = "trace-story-sheet";
+var storySheetOpener = null;
+var storySheetViewportFrame = null;
+var storySheetLiveAnnouncementTimer = null;
 
 var TRACE_UI = {
   font: "Manrope,system-ui,-apple-system,'Segoe UI',sans-serif",
@@ -3704,25 +3708,265 @@ function autoTrackHandleDisabled(entry) {
   return entry.__traceAutoTrackPending === true;
 }
 
-function applySheetVisibility(sheet, open) {
-  if (!sheet) return;
+function ensureStorySheetModalStyles() {
+  if (document.querySelector("style[data-trace-story-modal-styles]")) return;
+  var style = document.createElement("style");
+  style.setAttribute("data-trace-story-modal-styles", "1");
+  style.textContent =
+    "[" + TRACE_STORY_SHEET_ATTR + "] :focus-visible{" +
+      "outline:3px solid #2a5d53!important;outline-offset:2px!important}" +
+    "@media (max-width:640px),(pointer:coarse){" +
+      "[" + TRACE_STORY_SHEET_CLOSE_ATTR + "]{min-width:44px!important;min-height:44px!important}}" +
+    "@media (prefers-reduced-motion:reduce){" +
+      "[" + TRACE_STORY_SHEET_ATTR + "],[" + TRACE_STORY_SHEET_ATTR + "] *{" +
+        "animation-duration:0.001ms!important;animation-iteration-count:1!important;" +
+        "transition-duration:0.001ms!important;scroll-behavior:auto!important}}";
+  (document.head || document.documentElement).appendChild(style);
+}
+
+function ensureStorySheetLiveRegion() {
+  var live = document.querySelector("[data-trace-story-live-region]");
+  if (live) return live;
+  live = document.createElement("div");
+  live.setAttribute("data-trace-story-live-region", "1");
+  live.setAttribute("role", "status");
+  live.setAttribute("aria-live", "polite");
+  live.setAttribute("aria-atomic", "true");
+  live.style.cssText = "position:fixed;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap";
+  document.documentElement.appendChild(live);
+  return live;
+}
+
+function announceStorySheet(message) {
+  var live = ensureStorySheetLiveRegion();
+  if (storySheetLiveAnnouncementTimer !== null) {
+    clearTimeout(storySheetLiveAnnouncementTimer);
+  }
+  live.textContent = "";
+  storySheetLiveAnnouncementTimer = setTimeout(function () {
+    storySheetLiveAnnouncementTimer = null;
+    live.textContent = message || "";
+  }, 0);
+}
+
+function storySheetPrefersReducedMotion() {
+  try {
+    return !!window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  } catch (_) {
+    return false;
+  }
+}
+
+function storySheetFocusable(sheet) {
+  if (!sheet) return [];
+  return Array.prototype.slice.call(
+    sheet.querySelectorAll(
+      "button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex='-1'])",
+    ),
+  ).filter(function (element) {
+    return element.getAttribute("aria-hidden") !== "true";
+  });
+}
+
+function focusStorySheet(sheet) {
+  if (!sheet || !sheet.isConnected || sheet.getAttribute("data-trace-open") !== "1") return;
+  var target =
+    sheet.querySelector("[data-trace-status-selected='1']:not([disabled])") ||
+    sheet.querySelector("[" + TRACE_STORY_SHEET_CLOSE_ATTR + "]") ||
+    storySheetFocusable(sheet)[0] ||
+    sheet;
+  if (target === sheet && !sheet.hasAttribute("tabindex")) sheet.setAttribute("tabindex", "-1");
+  try {
+    target.focus({ preventScroll: true });
+  } catch (_) {
+    try { target.focus(); } catch (_) {}
+  }
+}
+
+function setStoryHandleDialogTrigger(handle, sheet, enabled) {
+  if (!handle) return;
+  if (!enabled) {
+    handle.removeAttribute("aria-haspopup");
+    handle.removeAttribute("aria-controls");
+    handle.removeAttribute("aria-expanded");
+    return;
+  }
+  handle.setAttribute("aria-haspopup", "dialog");
+  handle.setAttribute("aria-controls", (sheet && sheet.id) || TRACE_STORY_SHEET_ID);
+  handle.setAttribute(
+    "aria-expanded",
+    sheet && sheet.getAttribute("data-trace-open") === "1" ? "true" : "false",
+  );
+}
+
+function storySheetOutsideClick(event) {
+  var sheet = document.querySelector("[" + TRACE_STORY_SHEET_ATTR + "]");
+  if (!sheet || sheet.getAttribute("data-trace-open") !== "1") return;
+  var target = event && event.target;
   if (
-    open &&
-    sheet.getAttribute("data-trace-story-sheet-placement") === "popover"
+    sheet.contains(target) ||
+    (target && target.closest && target.closest("[" + TRACE_STORY_HANDLE_ATTR + "]"))
   ) {
+    return;
+  }
+  if (event && event.cancelable) event.preventDefault();
+  if (event && event.stopPropagation) event.stopPropagation();
+  requestStorySheetClose(sheet);
+}
+
+function storySheetKeydown(event) {
+  var sheet = document.querySelector("[" + TRACE_STORY_SHEET_ATTR + "]");
+  if (!sheet || sheet.getAttribute("data-trace-open") !== "1" || !event) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    requestStorySheetClose(sheet);
+    return;
+  }
+  if (event.key !== "Tab") return;
+  var focusable = storySheetFocusable(sheet);
+  if (!focusable.length) {
+    event.preventDefault();
+    focusStorySheet(sheet);
+    return;
+  }
+  var first = focusable[0];
+  var last = focusable[focusable.length - 1];
+  if (event.shiftKey && (document.activeElement === first || !sheet.contains(document.activeElement))) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function scheduleStorySheetPosition() {
+  if (storySheetViewportFrame !== null) return;
+  var schedule = window.requestAnimationFrame || function (callback) {
+    return setTimeout(callback, 0);
+  };
+  storySheetViewportFrame = schedule(function () {
+    storySheetViewportFrame = null;
+    var sheet = document.querySelector("[" + TRACE_STORY_SHEET_ATTR + "]");
+    if (!sheet || sheet.getAttribute("data-trace-open") !== "1") return;
+    if (sheet.getAttribute("data-trace-story-sheet-placement") !== "popover") return;
     positionDesktopStorySheet(
       sheet,
       document.querySelector("[" + TRACE_STORY_HANDLE_ATTR + "]"),
     );
+  });
+}
+
+function addStorySheetModalListeners() {
+  document.addEventListener("click", storySheetOutsideClick, true);
+  document.addEventListener("keydown", storySheetKeydown, true);
+  window.addEventListener("resize", scheduleStorySheetPosition);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", scheduleStorySheetPosition);
+    window.visualViewport.addEventListener("scroll", scheduleStorySheetPosition);
   }
-  sheet.style.display = open ? "block" : "none";
-  sheet.setAttribute("aria-hidden", open ? "false" : "true");
-  sheet.setAttribute("data-trace-open", open ? "1" : "0");
-  if (open && sheet.getAttribute("data-trace-story-sheet-placement") === "bottom") {
-    lockStoryBottomSheetPageScroll();
+}
+
+function removeStorySheetModalListeners() {
+  document.removeEventListener("click", storySheetOutsideClick, true);
+  document.removeEventListener("keydown", storySheetKeydown, true);
+  window.removeEventListener("resize", scheduleStorySheetPosition);
+  if (window.visualViewport) {
+    window.visualViewport.removeEventListener("resize", scheduleStorySheetPosition);
+    window.visualViewport.removeEventListener("scroll", scheduleStorySheetPosition);
+  }
+}
+
+function applySheetVisibility(sheet, open) {
+  if (!sheet) return;
+  var wasOpen = sheet.getAttribute("data-trace-open") === "1";
+  var handle = document.querySelector("[" + TRACE_STORY_HANDLE_ATTR + "]");
+  if (open) {
+    sheet.style.display = "block";
+    sheet.setAttribute("aria-hidden", "false");
+    sheet.setAttribute("aria-modal", "true");
+    sheet.setAttribute("data-trace-open", "1");
+    setStoryHandleDialogTrigger(handle, sheet, true);
+    if (!wasOpen) {
+      storySheetOpener = handle || document.activeElement;
+      lockStoryBottomSheetPageScroll();
+      addStorySheetModalListeners();
+    }
+    if (sheet.getAttribute("data-trace-story-sheet-placement") === "popover") {
+      positionDesktopStorySheet(
+        sheet,
+        document.querySelector("[" + TRACE_STORY_HANDLE_ATTR + "]"),
+      );
+    }
+    if (!wasOpen || !sheet.contains(document.activeElement)) {
+      setTimeout(function () { focusStorySheet(sheet); }, 0);
+    }
+    return;
+  }
+  sheet.style.display = "none";
+  sheet.setAttribute("aria-hidden", "true");
+  sheet.setAttribute("aria-modal", "false");
+  sheet.setAttribute("data-trace-open", "0");
+  if (handle) handle.setAttribute("aria-expanded", "false");
+  if (!wasOpen) return;
+  removeStorySheetModalListeners();
+  unlockStoryBottomSheetPageScroll();
+  var opener = storySheetOpener;
+  storySheetOpener = null;
+  if (opener && opener.isConnected && typeof opener.focus === "function") {
+    try {
+      opener.focus({ preventScroll: true });
+    } catch (_) {
+      try { opener.focus(); } catch (_) {}
+    }
+  }
+}
+
+function requestStorySheetClose(sheet) {
+  if (sheet && sheet.getAttribute("data-trace-modal-pending") === "1") {
+    announceStorySheet("Saving is still in progress.");
+    return false;
+  }
+  applySheetVisibility(sheet, false);
+  return true;
+}
+
+function toggleStorySheet(sheet) {
+  if (!sheet) return;
+  if (sheet.getAttribute("data-trace-open") === "1") {
+    requestStorySheetClose(sheet);
   } else {
-    unlockStoryBottomSheetPageScroll();
+    applySheetVisibility(sheet, true);
   }
+}
+
+function setStorySheetControlPending(control, pending, announcement) {
+  var sheet = control && control.closest
+    ? control.closest("[" + TRACE_STORY_SHEET_ATTR + "]")
+    : null;
+  if (!sheet || !sheet.isConnected) {
+    sheet = document.querySelector("[" + TRACE_STORY_SHEET_ATTR + "][data-trace-open='1']");
+  }
+  if (sheet) {
+    if (pending) {
+      sheet.setAttribute("data-trace-modal-pending", "1");
+      sheet.setAttribute("aria-busy", "true");
+    } else {
+      sheet.removeAttribute("data-trace-modal-pending");
+      sheet.removeAttribute("aria-busy");
+    }
+  }
+  if (announcement) announceStorySheet(announcement);
+}
+
+function storySheetMutationBlocked(control) {
+  var sheet = control && control.closest
+    ? control.closest("[" + TRACE_STORY_SHEET_ATTR + "]")
+    : null;
+  if (!sheet || sheet.getAttribute("data-trace-modal-pending") !== "1") return false;
+  announceStorySheet("Saving is still in progress.");
+  return true;
 }
 
 var storyBottomSheetScrollLock = null;
@@ -3732,10 +3976,19 @@ function lockStoryBottomSheetPageScroll() {
   var html = document.documentElement;
   var body = document.body;
   storyBottomSheetScrollLock = {
+    scrollX: window.scrollX || 0,
+    scrollY: window.scrollY || 0,
     htmlOverflow: html ? html.style.overflow : "",
     htmlOverscroll: html ? html.style.overscrollBehavior : "",
     bodyOverflow: body ? body.style.overflow : "",
     bodyOverscroll: body ? body.style.overscrollBehavior : "",
+    bodyPosition: body ? body.style.position : "",
+    bodyTop: body ? body.style.top : "",
+    bodyLeft: body ? body.style.left : "",
+    bodyRight: body ? body.style.right : "",
+    bodyWidth: body ? body.style.width : "",
+    bodyPaddingRight: body ? body.style.paddingRight : "",
+    bodyHadInert: body ? body.hasAttribute("inert") : false,
   };
   if (html) {
     html.style.overflow = "hidden";
@@ -3744,22 +3997,53 @@ function lockStoryBottomSheetPageScroll() {
   if (body) {
     body.style.overflow = "hidden";
     body.style.overscrollBehavior = "none";
+    body.style.position = "fixed";
+    body.style.top = -storyBottomSheetScrollLock.scrollY + "px";
+    body.style.left = -storyBottomSheetScrollLock.scrollX + "px";
+    body.style.right = "0";
+    body.style.width = "100%";
+    var innerWidth = window.innerWidth || 0;
+    var layoutWidth = document.documentElement.clientWidth || innerWidth;
+    var scrollbarWidth = Math.max(0, innerWidth - layoutWidth);
+    if (scrollbarWidth > 0 && typeof window.getComputedStyle === "function") {
+      var currentPadding = parseFloat(window.getComputedStyle(body).paddingRight) || 0;
+      body.style.paddingRight = currentPadding + scrollbarWidth + "px";
+    }
+    body.setAttribute("inert", "");
+    try { body.inert = true; } catch (_) {}
   }
 }
 
 function unlockStoryBottomSheetPageScroll() {
   if (!storyBottomSheetScrollLock) return;
+  var lock = storyBottomSheetScrollLock;
   var html = document.documentElement;
   var body = document.body;
   if (html) {
-    html.style.overflow = storyBottomSheetScrollLock.htmlOverflow;
-    html.style.overscrollBehavior = storyBottomSheetScrollLock.htmlOverscroll;
+    html.style.overflow = lock.htmlOverflow;
+    html.style.overscrollBehavior = lock.htmlOverscroll;
   }
   if (body) {
-    body.style.overflow = storyBottomSheetScrollLock.bodyOverflow;
-    body.style.overscrollBehavior = storyBottomSheetScrollLock.bodyOverscroll;
+    body.style.overflow = lock.bodyOverflow;
+    body.style.overscrollBehavior = lock.bodyOverscroll;
+    body.style.position = lock.bodyPosition;
+    body.style.top = lock.bodyTop;
+    body.style.left = lock.bodyLeft;
+    body.style.right = lock.bodyRight;
+    body.style.width = lock.bodyWidth;
+    body.style.paddingRight = lock.bodyPaddingRight;
+    if (!lock.bodyHadInert) {
+      body.removeAttribute("inert");
+      try { body.inert = false; } catch (_) {}
+    }
   }
   storyBottomSheetScrollLock = null;
+  if (
+    typeof window.scrollTo === "function" &&
+    ((window.scrollX || 0) !== lock.scrollX || (window.scrollY || 0) !== lock.scrollY)
+  ) {
+    try { window.scrollTo(lock.scrollX, lock.scrollY); } catch (_) {}
+  }
 }
 
 function createStoryBottomSheetGrabber() {
@@ -3822,12 +4106,16 @@ function bindStoryBottomSheetDragClose(sheet, handle) {
     var delta = Math.max(0, pointerY(e) - startY);
     if (delta >= 56) {
       resetDrag();
-      applySheetVisibility(sheet, false);
+      requestStorySheetClose(sheet);
       return;
     }
-    sheet.style.transition = "transform 160ms ease";
-    sheet.style.transform = restingTransform + " translateY(0)";
-    window.setTimeout(resetDrag, 180);
+    if (storySheetPrefersReducedMotion()) {
+      resetDrag();
+    } else {
+      sheet.style.transition = "transform 160ms ease";
+      sheet.style.transform = restingTransform + " translateY(0)";
+      window.setTimeout(resetDrag, 180);
+    }
   }
   handle.style.cursor = "grab";
   handle.style.touchAction = "none";
@@ -3884,23 +4172,58 @@ function storySheetCss(mobile) {
   ].concat(base).join(";");
 }
 
+function storySheetViewportBounds() {
+  var visual = window.visualViewport;
+  var width = visual && Number.isFinite(visual.width)
+    ? visual.width
+    : window.innerWidth || document.documentElement.clientWidth || 430;
+  var height = visual && Number.isFinite(visual.height)
+    ? visual.height
+    : window.innerHeight || document.documentElement.clientHeight || 640;
+  return {
+    left: visual && Number.isFinite(visual.offsetLeft) ? visual.offsetLeft : 0,
+    top: visual && Number.isFinite(visual.offsetTop) ? visual.offsetTop : 0,
+    width: Math.max(320, width),
+    height: Math.max(240, height),
+  };
+}
+
 function positionDesktopStorySheet(sheet, handle) {
   if (!sheet || !handle || !handle.getBoundingClientRect) return;
+  var viewport = storySheetViewportBounds();
+  var margin = 10;
+  var gap = 8;
   var rect = handle.getBoundingClientRect();
-  var viewportWidth = Math.max(
-    320,
-    window.innerWidth || document.documentElement.clientWidth || 430,
-  );
-  var panelWidth = Math.min(360, Math.max(280, viewportWidth - 20));
-  var left = rect.left + rect.width / 2 - panelWidth / 2;
-  left = Math.max(10, Math.min(left, viewportWidth - panelWidth - 10));
-  var top = Math.max(10, rect.bottom + 8);
-
+  var panelWidth = Math.min(360, Math.max(280, viewport.width - margin * 2));
   sheet.style.width = panelWidth + "px";
-  sheet.style.left = left + "px";
-  sheet.style.top = top + "px";
+  sheet.style.maxWidth = panelWidth + "px";
+  sheet.style.maxHeight = Math.max(120, viewport.height - margin * 2) + "px";
+  var surfaceRect = sheet.getBoundingClientRect();
+  var measuredHeight = Math.min(
+    Math.max(0, surfaceRect.height || sheet.scrollHeight || 0),
+    viewport.height - margin * 2,
+  );
+  var viewportBottom = viewport.top + viewport.height;
+  var belowTop = rect.bottom + gap;
+  var belowSpace = viewportBottom - margin - belowTop;
+  var aboveSpace = rect.top - gap - (viewport.top + margin);
+  var side = measuredHeight > belowSpace && aboveSpace > belowSpace ? "above" : "below";
+  var top = side === "above" ? rect.top - gap - measuredHeight : belowTop;
+  top = Math.max(
+    viewport.top + margin,
+    Math.min(top, viewportBottom - margin - measuredHeight),
+  );
+  var left = rect.left + rect.width / 2 - panelWidth / 2;
+  left = Math.max(
+    viewport.left + margin,
+    Math.min(left, viewport.left + viewport.width - panelWidth - margin),
+  );
+
+  sheet.style.left = Math.round(left) + "px";
+  sheet.style.top = Math.round(top) + "px";
   sheet.style.right = "auto";
   sheet.style.bottom = "auto";
+  sheet.setAttribute("data-trace-popover-side", side);
 }
 
 function placeStorySheet(sheet, wrap, handle) {
@@ -3911,7 +4234,11 @@ function placeStorySheet(sheet, wrap, handle) {
     parent.appendChild(sheet);
   }
   sheet.style.cssText = storySheetCss(mobile);
-  if (!mobile) positionDesktopStorySheet(sheet, handle);
+  if (!mobile) {
+    positionDesktopStorySheet(sheet, handle);
+  } else {
+    sheet.removeAttribute("data-trace-popover-side");
+  }
   sheet.setAttribute("data-trace-story-sheet-placement", mobile ? "bottom" : "popover");
 }
 
@@ -4234,10 +4561,15 @@ function bindReaderStatusChoice(btn, workKey, entry, status, errorEl) {
     e.preventDefault();
     e.stopPropagation();
     var entryId = entry && entry.entryId;
-    if (!entryId) return;
+    if (!entryId || entry.__traceStatusPending || storySheetMutationBlocked(btn)) return;
     var statusPatch = readerStatusProgressPatch(entry, status);
     var previousEntry = snapshotStoryEntry(entry);
     if (errorEl) errorEl.textContent = "";
+    setStorySheetControlPending(
+      btn,
+      true,
+      "Saving reading status as " + readerStatusChoiceLabel(status) + ".",
+    );
     updateOptimisticReaderStatusPending(workKey, entry, status);
     renderQuickAddButton(workKey);
 
@@ -4251,10 +4583,16 @@ function bindReaderStatusChoice(btn, workKey, entry, status, errorEl) {
       },
       function (response) {
         if (!response || !response.ok) {
+          setStorySheetControlPending(btn, false, "Could not save reading status. Try again.");
           updateOptimisticReaderStatusError(workKey, previousEntry, readerStatusChoiceErrorCopy(response && response.error));
           renderQuickAddButton(workKey);
           return;
         }
+        setStorySheetControlPending(
+          btn,
+          false,
+          "Reading status saved as " + readerStatusChoiceLabel(status) + ".",
+        );
         updateOptimisticReaderStatus(workKey, status, statusPatch && statusPatch.chapters);
         renderQuickAddButton(workKey);
       },
@@ -4272,11 +4610,14 @@ function appendStoryRatingControls(body, view, workKey) {
 
   var label = document.createElement("div");
   label.className = "x-sheet-label";
+  label.id = "trace-story-rating-label";
   label.textContent = "Your rating";
   label.style.cssText = storySheetLabelCss();
   wrap.appendChild(label);
 
   var row = document.createElement("div");
+  row.setAttribute("role", "group");
+  row.setAttribute("aria-labelledby", label.id);
   row.style.cssText = "display:flex;align-items:center;gap:2px";
   var message = document.createElement("span");
   message.setAttribute("data-trace-rating-message", "1");
@@ -4288,18 +4629,25 @@ function appendStoryRatingControls(body, view, workKey) {
       var star = document.createElement("button");
       star.type = "button";
       star.setAttribute("data-trace-rating-choice", String(i));
-      star.setAttribute("aria-label", current === i ? "Clear rating" : "Set rating to " + i);
+      star.setAttribute(
+        "aria-label",
+        current === i
+          ? "Clear rating of " + i + " out of 5"
+          : "Set rating to " + i + " out of 5",
+      );
+      star.setAttribute("aria-pressed", current === i ? "true" : "false");
       star.textContent = i <= current ? "\u2605" : "\u2606";
       star.style.cssText = storyRatingButtonStyle(i <= current, disabled);
       star.disabled = disabled === true;
       star.addEventListener("click", function (event) {
         event.preventDefault();
         event.stopPropagation();
-        if (this.disabled) return;
+        if (this.disabled || storySheetMutationBlocked(this)) return;
         var selected = Number(this.getAttribute("data-trace-rating-choice"));
         if (!Number.isFinite(selected)) return;
         var previous = current;
         var nextRating = current === selected ? 0 : selected;
+        setStorySheetControlPending(this, true, "Saving rating.");
         current = nextRating;
         entry.rating = nextRating;
         message.textContent = "Saving...";
@@ -4315,6 +4663,7 @@ function appendStoryRatingControls(body, view, workKey) {
           },
           function (response) {
             if (!response || !response.ok) {
+              setStorySheetControlPending(message, false, "Could not save rating. Try again.");
               current = previous;
               entry.rating = previous;
               message.textContent = "Could not save";
@@ -4323,6 +4672,11 @@ function appendStoryRatingControls(body, view, workKey) {
             }
             current = nextRating;
             applyOptimisticLibraryEntryPatch(workKey, entry, { rating: nextRating });
+            setStorySheetControlPending(
+              message,
+              false,
+              nextRating > 0 ? "Rating saved as " + nextRating + " of 5." : "Rating cleared.",
+            );
             message.textContent = nextRating > 0 ? "Saved" : "Cleared";
             renderStars(false);
           },
@@ -4364,6 +4718,8 @@ function appendStoryCatchupAction(body, view, workKey) {
   button.addEventListener("click", function (event) {
     event.preventDefault();
     event.stopPropagation();
+    if (storySheetMutationBlocked(button)) return;
+    setStorySheetControlPending(button, true, "Saving reading progress.");
     button.disabled = true;
     button.textContent = "Saving...";
     sendCollectorMessage(
@@ -4377,10 +4733,12 @@ function appendStoryCatchupAction(body, view, workKey) {
       },
       function (response) {
         if (!response || !response.ok) {
+          setStorySheetControlPending(button, false, "Could not save reading progress. Try again.");
           button.disabled = false;
           button.textContent = "Retry";
           return;
         }
+        setStorySheetControlPending(button, false, "Reading progress saved.");
         applyOptimisticLibraryEntryPatch(workKey, entry, { status: "CAUGHT_UP", progress: patch.progress }, patch.chapters);
         renderQuickAddButton(workKey);
       },
@@ -4403,21 +4761,30 @@ function appendReaderStatusChoices(actions, view, workKey) {
 
   var label = document.createElement("div");
   label.className = "x-sheet-label";
+  label.id = "trace-story-status-label";
   label.textContent = "Reading status";
   label.style.cssText = storySheetLabelCss();
   wrap.appendChild(label);
 
   var row = document.createElement("div");
   row.className = "x-seg";
+  row.setAttribute("role", "group");
+  row.setAttribute("aria-labelledby", label.id);
   row.style.cssText = "display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px";
   var error = document.createElement("div");
   error.setAttribute(TRACE_STATUS_CHOICE_ERROR_ATTR, "1");
+  error.id = "trace-story-status-error";
+  if (entry.__traceStatusError) {
+    error.textContent = String(entry.__traceStatusError);
+    row.setAttribute("aria-describedby", error.id);
+  }
   error.style.cssText = "min-height:16px;color:#b54a30;font:600 11.5px/1.3 " + TRACE_UI.font;
 
   TRACE_READER_STATUS_CHOICES.forEach(function (status) {
     var choice = document.createElement("button");
     choice.type = "button";
     choice.setAttribute(TRACE_STATUS_CHOICE_ATTR, status);
+    choice.disabled = entry.__traceStatusPending === true;
     var selected = entryStatus(entry) === status;
     choice.className = selected ? "on" : "";
     if (entryStatus(entry) === status) {
@@ -4500,9 +4867,15 @@ function ensureQuickAddElements(workKey, anchor) {
 
   if (!sheet) {
     sheet = document.createElement("aside");
+    sheet.id = TRACE_STORY_SHEET_ID;
     sheet.setAttribute(TRACE_STORY_SHEET_ATTR, workKey);
     sheet.setAttribute("role", "dialog");
-    sheet.setAttribute("aria-label", "Trace story sheet");
+    sheet.setAttribute("aria-modal", "false");
+    sheet.setAttribute("aria-labelledby", "trace-story-sheet-title");
+    sheet.setAttribute("aria-describedby", "trace-story-sheet-description");
+    ensureStorySheetModalStyles();
+  } else if (!sheet.id) {
+    sheet.id = TRACE_STORY_SHEET_ID;
   }
 
   if (!wrap.isConnected) {
@@ -4531,13 +4904,14 @@ function reserveQuickAddSlot(workKey) {
 }
 
 function removeQuickAddElements() {
+  var sheet = document.querySelector("[" + TRACE_STORY_SHEET_ATTR + "]");
+  if (sheet) {
+    applySheetVisibility(sheet, false);
+    sheet.remove();
+  }
   var wrap = document.querySelector("[" + QUICK_ADD_WRAP_ATTR + "]");
   if (wrap) {
     wrap.remove();
-  }
-  var sheet = document.querySelector("[" + TRACE_STORY_SHEET_ATTR + "]");
-  if (sheet) {
-    sheet.remove();
   }
 }
 
@@ -5169,6 +5543,12 @@ function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
     }
 
     var nextHidden = !hidden;
+    if (storySheetMutationBlocked(btn)) return;
+    setStorySheetControlPending(
+      btn,
+      true,
+      nextHidden ? "Hiding this work." : "Unhiding this work.",
+    );
     btn.style.cssText = storySheetGhostButtonCss() + ";cursor:wait;color:#6e6a5b";
     btn.textContent = "Saving...";
     btn.disabled = true;
@@ -5179,6 +5559,7 @@ function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
       },
       function (response) {
         if (!response) {
+          setStorySheetControlPending(btn, false, "Could not save the browsing preference. Try again.");
           btn.style.cssText = storySheetGhostButtonCss() + ";cursor:pointer;color:#b54a30";
           btn.textContent = "Error";
           btn.disabled = false;
@@ -5189,9 +5570,17 @@ function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
         }
         if (!response.ok) {
           if (response.error === "auth_expired" || response.error === "not_authenticated") {
+            setStorySheetControlPending(btn, false, "Trace needs to reconnect before saving this preference.");
             setStoryHiddenPreferenceAuthAction(btn, response.error);
             return;
           }
+          setStorySheetControlPending(
+            btn,
+            false,
+            response.error === "rate_limited"
+              ? "Trace is rate limited. Wait before trying again."
+              : "Could not save the browsing preference. Try again.",
+          );
           btn.style.cssText = storySheetGhostButtonCss() + ";cursor:pointer;color:#b54a30";
           btn.textContent = response.error === "rate_limited" ? "Wait" : "Error";
           btn.disabled = false;
@@ -5200,6 +5589,11 @@ function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
           }, 2500);
           return;
         }
+        setStorySheetControlPending(
+          btn,
+          false,
+          nextHidden ? "Work hidden from future listings." : "Work restored to listings.",
+        );
         updateOptimisticStoryHiddenPreference(workKey, entry, nextHidden);
         renderQuickAddButton(workKey);
       },
@@ -5268,10 +5662,24 @@ function appendStoryWorkMark(body, entry) {
 
 function renderStorySheet(sheet, view, workKey) {
   var wasOpen = sheet.getAttribute("data-trace-open") === "1";
+  var wasPending = sheet.getAttribute("data-trace-modal-pending") === "1";
   var placement = sheet.getAttribute("data-trace-story-sheet-placement");
   var item = storySheetCurrentItem();
   sheet.className = "x x-sheet" + (placement === "bottom" ? " is-bottom" : "");
   clearElement(sheet);
+  if (wasPending || (view.entry && view.entry.__traceStatusPending)) {
+    sheet.setAttribute("data-trace-modal-pending", "1");
+    sheet.setAttribute("aria-busy", "true");
+  } else {
+    sheet.removeAttribute("data-trace-modal-pending");
+    sheet.removeAttribute("aria-busy");
+  }
+
+  var description = document.createElement("p");
+  description.id = "trace-story-sheet-description";
+  description.textContent = "Change reading status and private Trace actions for this work.";
+  description.style.cssText = "position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0";
+  sheet.appendChild(description);
 
   if (placement === "bottom") {
     var grab = createStoryBottomSheetGrabber();
@@ -5299,6 +5707,7 @@ function renderStorySheet(sheet, view, workKey) {
   source.style.cssText = "font:650 9px/1 'Geist Mono',ui-monospace,monospace;letter-spacing:0.14em;text-transform:uppercase;color:#bc4329";
   var title = document.createElement("div");
   title.className = "ti";
+  title.id = "trace-story-sheet-title";
   title.textContent = (item && item.t) || storyHeadline(view);
   title.style.cssText = "margin-top:6px;font:700 17px/1.22 " + TRACE_UI.font + ";letter-spacing:0;color:#151e1c;overflow:hidden;text-overflow:ellipsis";
   var author = document.createElement("div");
@@ -5316,7 +5725,7 @@ function renderStorySheet(sheet, view, workKey) {
   close.textContent = "\u00d7";
   close.style.cssText = "width:30px;height:30px;border-radius:8px;border:1px solid #d4cdc0;background:#ece7dd;color:#5b645f;font:600 16px/1 system-ui,-apple-system,'Segoe UI',sans-serif;cursor:pointer";
   close.addEventListener("click", function () {
-    applySheetVisibility(sheet, false);
+    requestStorySheetClose(sheet);
   });
   header.appendChild(headText);
   header.appendChild(close);
@@ -5347,6 +5756,7 @@ function renderStorySheet(sheet, view, workKey) {
     connect.appendChild(connectCopy);
     connect.appendChild(connectOpen);
     sheet.appendChild(connect);
+    description.textContent = connectCopy.textContent;
     applySheetVisibility(sheet, wasOpen);
     return;
   }
@@ -6222,6 +6632,7 @@ function renderQuickAddFromSnapshot(workKey, anchor, res) {
       handle.title = "Checking this story in Trace";
       handle.disabled = true;
       applySheetVisibility(sheet, false);
+      setStoryHandleDialogTrigger(handle, sheet, false);
       return;
     }
 
@@ -6257,6 +6668,7 @@ function renderQuickAddFromSnapshot(workKey, anchor, res) {
         runKernelConnectAndSave(handle, workKey);
       };
       applySheetVisibility(sheet, false);
+      setStoryHandleDialogTrigger(handle, sheet, false);
       if (
         !pendingFirstStory.automaticAttempted &&
         typeof pendingFirstStory.handoffId === "string" &&
@@ -6279,6 +6691,18 @@ function renderQuickAddFromSnapshot(workKey, anchor, res) {
     applyStoryInlineHandleState(handle, storyHandlePresentation(view));
     handle.title = "Open Trace story sheet";
     handle.disabled = autoTrackHandleDisabled(info);
+    var opensStorySheet = !!(
+      info && info.__traceAutoTrackError === "free_limit_reached"
+    ) || !(
+      view.hasAuth &&
+      !hasEntryAuthError &&
+      !entryStatus(info) &&
+      !(info && info.hidden)
+    );
+    if (!opensStorySheet && sheet.getAttribute("data-trace-open") === "1") {
+      applySheetVisibility(sheet, false);
+    }
+    setStoryHandleDialogTrigger(handle, sheet, opensStorySheet);
     if (!handle.__traceStoryHandleBound) {
       handle.__traceStoryHandleBound = true;
       handle.addEventListener("click", function (e) {
@@ -6293,7 +6717,7 @@ function renderQuickAddFromSnapshot(workKey, anchor, res) {
     handle.__traceStoryHandleAction = function () {
       if (info && info.__traceAutoTrackPending) return;
       if (info && info.__traceAutoTrackError === "free_limit_reached") {
-        applySheetVisibility(sheet, sheet.getAttribute("data-trace-open") !== "1");
+        toggleStorySheet(sheet);
         return;
       }
       if (
@@ -6306,7 +6730,7 @@ function renderQuickAddFromSnapshot(workKey, anchor, res) {
         sendQuickAddAction(handle, workKey, TRACE_THEMES.add, true);
         return;
       }
-      applySheetVisibility(sheet, sheet.getAttribute("data-trace-open") !== "1");
+      toggleStorySheet(sheet);
     };
 
     renderStorySheet(sheet, view, workKey);

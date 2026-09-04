@@ -187,6 +187,36 @@ Intentional product choices:
   `Marked abandoned` is sufficient until the source provides a meaningful
   challenge.
 
+## Shared Modal Interaction Contract
+
+The story sheet and listing action surface are one modal interaction family:
+
+- Mobile uses a fixed bottom sheet with contained internal scrolling and safe-area
+  padding. Desktop uses one viewport-fixed popover measured once after render,
+  placed above or below its invoking control, and constrained to the visual
+  viewport.
+- Opening either surface records the archive scroll position, prevents background
+  scrolling and interaction, and leaves the Trace surface outside the inert host
+  page. Closing restores the prior host styles, scroll position, and invoking
+  control without leaking keyboard or click handlers into AO3 or FFN.
+- Both surfaces expose modal dialog semantics with a visible title and associated
+  description. Initial focus enters the current status when available, Tab and
+  Shift+Tab remain contained, Escape and outside click close, and focus returns to
+  the invoking control. The invoking control exposes its dialog relationship and
+  expanded state to assistive technology.
+- A pending mutation cannot be dismissed by Escape, outside click, the close
+  control, or drag, and a second mutation cannot start until it settles. The
+  surface exposes its busy state while pending. Pending, saved, connection, and
+  error copy is announced through one polite live region rather than duplicated
+  alerts.
+- Controls retain a visible keyboard focus treatment. Mobile close controls meet
+  a 44px minimum target, and drag recovery animation is removed under
+  `prefers-reduced-motion`.
+- Viewport resize, zoom, and visual-viewport changes use one frame-throttled
+  placement update. Archive scroll does not continuously remeasure an open
+  surface. Overlay-cache refreshes and action-surface rerenders preserve the
+  existing modal lock rather than briefly unlocking and relocking the archive.
+
 ## Toolbar Popup
 
 The popup follows the same D1 visual language, with one browser-specific

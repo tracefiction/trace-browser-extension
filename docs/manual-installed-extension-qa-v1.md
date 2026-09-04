@@ -210,6 +210,62 @@ available.
   - Pass: status choices and Open in Trace are reachable and not hidden under
     Safari/Chrome controls.
 
+## Story And Listing Modal Accessibility
+
+Run this matrix on an AO3 listing, AO3 story, FFN desktop listing/story, and FFN
+mobile listing/story. Include one long listing with sticky archive chrome.
+
+- Desktop placement:
+  - Open a surface from controls near the top, middle, bottom, left, and right
+    viewport edges.
+  - Pass: the popover chooses the useful side of its trigger, remains inside the
+    visible viewport, and does not pin to a thin top/bottom strip or drift while
+    open.
+- Mobile placement:
+  - Open near the bottom browser chrome, scroll the sheet internally, and drag it
+    less than and more than the dismiss threshold.
+  - Pass: the sheet stays fixed to the visual viewport, all actions remain
+    reachable, a short drag returns without bounce, and a dismissing drag restores
+    the exact archive position.
+- Background containment:
+  - Record the archive scroll position, open each surface, and try wheel, touch,
+    page-key, link, and host-input interaction outside it.
+  - Let the overlay cache refresh while the surface is open, including after a
+    status update, and switch between fixture-backed listing lenses during the
+    automated pass.
+  - Pass: background content does not move or activate while modal. After close,
+    the prior scroll coordinate, AO3/FFN inputs, links, and keyboard behavior work
+    exactly as before. Refresh-driven rerenders do not flash, bounce, or briefly
+    unlock the archive.
+- Keyboard:
+  - Open from the keyboard, Tab and Shift+Tab through every action, then close with
+    Escape and the close button.
+  - Pass: focus starts on the current status (or the close control when there is
+    no editable status), remains contained, never disappears after an optimistic
+    rerender, and returns to the invoking control.
+- Pending safety:
+  - Delay a status, rating, catch-up, or hide response and try Escape, outside
+    click, close, drag, and a second mutation.
+  - Pass: the surface stays open, announces that saving is in progress, then
+    announces the saved or concrete recovery state. The second mutation is not
+    sent, and the surface can close normally after the request settles.
+- VoiceOver:
+  - With VoiceOver enabled, open both surfaces and traverse the status grid,
+    rating, recovery copy, Open in Trace, hide/unhide, and close controls.
+  - Pass: the dialog title and purpose are announced once; status selection is
+    spoken without relying on color; pending, saved, connection, and error states
+    are concise and not repeated.
+- Zoom, motion, and targets:
+  - Repeat desktop keyboard checks at 200% zoom and mobile checks with Reduce
+    Motion enabled.
+  - Pass: content reflows without horizontal clipping, internal scrolling reaches
+    every action, close controls provide at least a 44px mobile target, focus is
+    visible, and drag recovery has no motion under Reduce Motion.
+
+Automated coverage for this contract lives in `test/collector.test.js` and
+`test/library-overlay-runtime.test.js`. Automated DOM proof does not replace the
+installed VoiceOver, real-host, or physical Safari pass.
+
 ## FFN Listing Desktop And Mobile
 
 Use both `www.fanfiction.net` and `m.fanfiction.net` listing pages.
