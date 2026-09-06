@@ -90,17 +90,24 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         let payload = Self.coerceToStringKeyedDictionary(rawMessage)
         let reportedType = (payload?["type"] as? String) ?? "(none)"
 
-        os_log(
-            "Incoming native message type=%{public}@ profile=%{public}@",
-            log: Self.log,
-            type: .info,
-            reportedType,
-            profile?.uuidString ?? "none"
-        )
+        // Import messages contain private reader choices. Do not log request
+        // identifiers, profile IDs, payloads or untrusted message values.
+        if !reportedType.hasPrefix("TRACE_IOS_IMPORT_") {
+            os_log(
+                "Incoming native message type=%{public}@ profile=%{public}@",
+                log: Self.log,
+                type: .info,
+                reportedType,
+                profile?.uuidString ?? "none"
+            )
+        }
 
         let responseBody: [String: Any]
         if let payload, let messageType = payload["type"] as? String {
             switch messageType {
+            case "TRACE_IOS_IMPORT_PREPARE", "TRACE_IOS_IMPORT_STAGE", "TRACE_IOS_IMPORT_CANCEL":
+                responseBody = Self.importResponse(payload, profileID: profile)
+
             case Self.traceIosAuthTokenRequest:
                 let credential = Self.readSharedTraceCredential()
                 Self.recordProviderReadHealth(credential)
@@ -201,6 +208,10 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                     "status": "received",
                 ]
 
+            case let importType where importType.hasPrefix("TRACE_IOS_IMPORT_"):
+                responseBody = ["type": "TRACE_IOS_IMPORT_ERROR", "protocolVersion": 1,
+                    "ok": false, "error": "invalid_request"]
+
             default:
                 os_log(
                     "Unknown native message type: %{public}@",
@@ -239,6 +250,31 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     }
 
     /// Normalizes Obj-C bridged dictionaries so `type` / `token` lookups are reliable.
+    private static func importResponse(_ payload: [String: Any], profileID: UUID?) -> [String: Any] {
+        let type = payload["type"] as? String ?? "TRACE_IOS_IMPORT_PREPARE"
+        func failure(_ reason: String) -> [String: Any] {
+            ["type": type, "protocolVersion": 1, "ok": false, "error": reason]
+        }
+#if TRACE_NATIVE_IMPORT_HANDOFF && os(iOS)
+        guard Bundle.main.object(forInfoDictionaryKey: "TraceNativeImportContract") as? String
+                == TraceSafariImportInbox.contract,
+              let origin = Bundle.main.object(forInfoDictionaryKey: "TraceNativeImportAPIOrigin") as? String,
+              TraceSafariImportInbox.validOrigin(origin) else { return failure("unsupported") }
+        guard let container = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: traceSharedAppGroup) else { return failure("storage_unavailable") }
+        return TraceSafariImportInbox(containerURL: container).handle(message: payload,
+            profileID: profileID, currentProviderBinding: { now in
+                guard case let .ready(credential, kind, sessionID?, expiry?) = readSharedTraceCredential(),
+                      kind == "device_session",
+                      let session = TraceSafariProviderCodec.deviceSession(sessionId: sessionID,
+                        credential: credential, expiresAt: expiry) else { return nil }
+                return TraceSafariProviderCodec.importBinding(session: session, now: now)
+            }, configuredAPIOrigin: origin, now: Date())
+#else
+        return failure("unsupported")
+#endif
+    }
+
     private static func coerceToStringKeyedDictionary(_ value: Any?) -> [String: Any]? {
         guard let value else { return nil }
         if let dict = value as? [String: Any] {

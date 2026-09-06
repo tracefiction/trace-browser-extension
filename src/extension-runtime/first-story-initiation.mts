@@ -50,10 +50,12 @@ export type FirstStoryInitiationError =
   | "free_limit_reached"
   | "auth_expired"
   | "rate_limited"
-  | "unavailable";
+  | "unavailable"
+  | "native_import_unavailable";
 
 export type FirstStoryInitiationResult =
   | Readonly<{ ok: true; state: "opened" | "saved" | "already_saved" }>
+  | Readonly<{ ok: true; state: "ready_to_open"; handoffID: string; expiresAtMs: number }>
   | Readonly<{ ok: false; error: FirstStoryInitiationError }>;
 
 interface FirstStoryInitiatorOptions {
@@ -325,7 +327,9 @@ export class BrowserFirstStoryInitiator {
       new Promise((resolve) => globalThis.setTimeout(resolve, milliseconds)));
   }
 
-  async importActivePage(): Promise<FirstStoryInitiationResult> {
+  async importActivePage(
+    nativeStage?: (payloadBase64: string) => Promise<FirstStoryInitiationResult>,
+  ): Promise<FirstStoryInitiationResult> {
     let tabs: readonly BrowserTab[];
     try {
       tabs = await this.#call<readonly BrowserTab[]>("query", [{
@@ -364,6 +368,8 @@ export class BrowserFirstStoryInitiator {
           : "collect_failed";
       return Object.freeze({ ok: false, error });
     }
+
+    if (nativeStage !== undefined) return nativeStage(encodeImportPayload(payload));
 
     const importUrl = `${this.#webOrigin}/import#U${encodeURIComponent(
       encodeImportPayload(payload),

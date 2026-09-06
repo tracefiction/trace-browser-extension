@@ -1806,3 +1806,39 @@ test("popup import success closes the popup after a short delay", async () => {
   h.runTimeouts();
   assert.equal(h.closeCalled, true);
 });
+
+test("native staged Import uses a fresh direct link without claiming opened or saved", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    sessionSnapshot: { state: "connected", reason: "none", canExecuteAuthenticated: true },
+    popupState: { ok: true, authState: { state: "connected" }, firstSaveSeen: true,
+      activeTab: { kind: "supported_story", site: "ao3", canImport: true } },
+    importResponse: { ok: true, state: "ready_to_open", handoffID: "00000000-0000-4000-8000-000000000001",
+      expiresAtMs: Date.now() + 600000, snapshot: { state: "connected" } },
+  });
+  await flush();
+  const button = h.document.getElementById("popup-import");
+  button.click();
+  const link = h.document.getElementById("popup-import-open-native");
+  assert.equal(button.hidden, true);
+  assert.equal(link.hidden, false);
+  assert.equal(link.textContent, "Open in Trace");
+  assert.equal(link.getAttribute("href"), "traceauth://open?destination=library-import&handoff=00000000-0000-4000-8000-000000000001");
+  assert.equal(h.closeCalled, false);
+});
+
+test("native Import rejects a malformed continuation instead of opening a supplied URL", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel", sessionSnapshot: { state: "connected" },
+    popupState: { ok: true, authState: { state: "connected" }, firstSaveSeen: true,
+      activeTab: { kind: "supported_story", site: "ao3", canImport: true } },
+    importResponse: { ok: true, state: "ready_to_open", handoffID: "https://untrusted.example.test",
+      expiresAtMs: Date.now() + 600000, snapshot: { state: "connected" } },
+  });
+  await flush();
+  h.document.getElementById("popup-import").click();
+  const link = h.document.getElementById("popup-import-open-native");
+  assert.equal(link.hidden, true);
+  assert.equal(link.getAttribute("href"), null);
+  assert.equal(h.closeCalled, false);
+});

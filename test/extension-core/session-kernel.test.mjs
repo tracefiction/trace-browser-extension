@@ -1137,3 +1137,44 @@ test("core graph is browser-neutral, deterministic, and bundled only into the ke
   assert.equal(build.status, 0, build.stderr || build.stdout);
   assert.equal(hashDirectory(output), before);
 });
+
+test("credential-free native handoff fence revokes on same-account provider replacement", async () => {
+  const harness = createHarness();
+  await harness.service.start();
+  await connectAccount(harness, { token: "token-old" });
+  const began = deferred();
+  const continueEffect = deferred();
+  let current;
+  const operation = harness.service.executeCurrentScope(async (scope, isCurrent) => {
+    assert.deepEqual(scope, { accountId: "account-a", epoch: 1 });
+    assert.equal(Object.hasOwn(scope, "credential"), false);
+    current = isCurrent;
+    began.resolve();
+    await continueEffect.promise;
+    return "opaque-handoff";
+  });
+  await began.promise;
+  assert.equal(await current(), true);
+  harness.credentials.queueAcquisition({ kind: "credential", credential: "token-new" });
+  harness.api.queueVerification({ kind: "verified", accountId: "account-a" });
+  await harness.service.synchronizeProviderCredential();
+  assert.equal(harness.service.publicationScope().epoch, 1);
+  assert.equal(await current(), false);
+  continueEffect.resolve();
+  assert.deepEqual(await operation, { kind: "stale" });
+  assert.equal(harness.service.snapshot().state, "connected");
+});
+
+test("native transport failures retain session authority while departure fences publication", async () => {
+  const harness = createHarness();
+  await harness.service.start();
+  await connectAccount(harness);
+  assert.deepEqual(await harness.service.executeCurrentScope(async () => { throw new Error("local inbox unavailable"); }), { kind: "unavailable" });
+  assert.equal(harness.service.snapshot().state, "connected");
+  const began = deferred(); const resume = deferred();
+  const operation = harness.service.executeCurrentScope(async () => { began.resolve(); await resume.promise; return "late"; });
+  await began.promise;
+  await harness.service.disconnect();
+  resume.resolve();
+  assert.deepEqual(await operation, { kind: "stale" });
+});

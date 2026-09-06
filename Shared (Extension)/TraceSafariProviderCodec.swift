@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// Canonical validation for the credential record shared by the containing
 /// app and Safari extension. This source is compiled into both targets so the
@@ -34,6 +35,25 @@ enum TraceSafariProviderCodec {
             credential: credential,
             expiresAt: expiresAt
         )
+    }
+
+    struct ImportBinding: Codable, Equatable, Sendable {
+        let sessionID: String
+        let recordDigest: String
+    }
+
+    /// A freshness and equality fence, not independent authentication. Both
+    /// producer and containing app use the same canonical record bytes.
+    static func importBinding(session: DeviceSession, now: Date) -> ImportBinding? {
+        guard let canonical = deviceSession(sessionId: session.sessionId,
+                credential: session.credential, expiresAt: session.expiresAt),
+              let expiry = parseISO8601Date(canonical.expiresAt), expiry > now,
+              let bytes = try? JSONSerialization.data(withJSONObject: [
+                "trace-safari-import-provider-v1", "2", "device_session",
+                canonical.sessionId, canonical.credential, canonical.expiresAt
+              ], options: [.fragmentsAllowed, .withoutEscapingSlashes]) else { return nil }
+        return ImportBinding(sessionID: canonical.sessionId,
+            recordDigest: SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined())
     }
 
     /// JavaScript `Date#toISOString` and the extension API contract include

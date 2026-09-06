@@ -380,3 +380,95 @@ test("controller desktop handoff reaches the existing story-command owner", asyn
   });
   assert.equal(trackWrites, 1);
 });
+
+const importPlatforms = [
+  { name: 'iOS platform API', info: { os: 'ios' }, native: true },
+  { name: 'iOS UA without platform API', missing: true, native: true, userAgent: 'iPad' },
+  { name: 'confirmed macOS', info: { os: 'mac' } },
+  { name: 'confirmed Windows', info: { os: 'win' } },
+  { name: 'confirmed Linux', info: { os: 'linux' } },
+  { name: 'missing platform API', missing: true, unknown: true },
+  { name: 'rejected platform API', rejects: true, unknown: true },
+  { name: 'unrecognized platform', info: { os: 'unexpected' }, unknown: true },
+  { name: 'empty platform result', info: undefined, unknown: true },
+];
+for (const candidate of [false, true]) {
+  for (const platform of importPlatforms) {
+  test(`${platform.name}, native candidate=${candidate} selects only its configured Import transport`, async (t) => {
+    const navigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {
+      userAgent: platform.userAgent ?? 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15',
+    } });
+    t.after(() => { if (navigator) Object.defineProperty(globalThis, 'navigator', navigator); else delete globalThis.navigator; });
+    const { factory, database } = await seededDatabase();
+    const native = []; const created = [];
+    let collected = 0;
+    const handoffID = "00000000-0000-4000-8000-000000000099";
+    let expiry = 0;
+    let ids = 0;
+    const runtime = {
+      id: runtimeId, onMessage: { addListener() {} },
+      ...(platform.missing ? {} : { async getPlatformInfo() {
+        if (platform.rejects) throw new Error('platform unavailable');
+        return platform.info;
+      } }),
+      async sendNativeMessage(...args) {
+        const message = args.find((value) => value && typeof value === "object");
+        if (message.type === "TRACE_IOS_AUTH_TOKEN_REQUEST") return { ok: true, credential: "private-token", credentialKind: "device_session", sessionId: handoffID, expiresAt: "2030-01-01T00:00:00Z" };
+        if (message.type === "TRACE_IOS_IMPORT_PREPARE") {
+          native.push(message); expiry = Date.now() + 600000;
+          return { type: message.type, ok: true, protocolVersion: 1, state: "prepared", handoffID,
+            expiresAtMs: expiry, maximumPayloadBytes: 524288, maximumItems: 250 };
+        }
+        if (message.type === "TRACE_IOS_IMPORT_STAGE") {
+          native.push(message);
+          return { type: message.type, ok: true, protocolVersion: 1, state: "ready_to_open", handoffID, expiresAtMs: expiry };
+        }
+        return { ok: false };
+      },
+    };
+    const controller = installSessionRuntime({
+      mode: "kernel", runtime, nativeImportHandoff: candidate,
+      tabs: {
+        async query() { return [{ id: 1, url: storyUrl }]; },
+        async create(value) { created.push(value); return { id: 2 }; },
+        async sendMessage() { collected += 1; return { ok: true, payload: { s: "ffn", at: "synthetic",
+          items: [{ src: "ffn", u: storyUrl }] } }; },
+      },
+      alarms: { async clear() { return true; } }, storageArea: new StorageArea(),
+      databaseFactory: factory, privateDatabase: database, storageMode: "promise",
+      fetch: async (url) => new Response(JSON.stringify(new URL(url).pathname === "/api/extension/account"
+        ? { account_id: "account-a" }
+        : { success: true, data: { entries: {}, workPreferences: {}, syncVersion: "1970-01-01T00:00:00.000Z" } }), { status: 200 }),
+      apiBase: "https://development.example.test", webOrigin,
+      randomId: () => `00000000-0000-4000-8000-${String(++ids).padStart(12, "0")}`,
+    });
+    await controller.start();
+    const response = await controller.handle({ type: "TRACE_IMPORT_TRIGGER", accountID: "untrusted" }, popupSender);
+    const selected = candidate && platform.native;
+    const blocked = candidate && platform.unknown;
+    assert.equal(response.ok, !blocked);
+    assert.equal(response.state, blocked ? undefined : selected ? "ready_to_open" : "opened");
+    assert.equal(response.error, blocked ? 'native_import_unavailable' : undefined);
+    assert.equal(created.length, selected || blocked ? 0 : 1);
+    assert.equal(collected, blocked ? 0 : 1);
+    assert.equal(native.length, selected ? 2 : 0);
+    assert.equal(Object.hasOwn(response.snapshot, "accountId"), false);
+    if (selected) {
+      assert.equal(native[0].accountID, "account-a");
+      assert.equal(native[0].apiOrigin, "https://development.example.test");
+      assert.equal(response.handoffID, handoffID);
+    }
+    const denied = await controller.handle({ type: "TRACE_IMPORT_TRIGGER" }, {
+      id: runtimeId, frameId: 0, tab: { url: storyUrl }, url: storyUrl });
+    assert.equal(denied, null);
+    if (blocked) {
+      runtime.getPlatformInfo = async () => ({ os: 'ios' });
+      const recovered = await controller.handle({ type: 'TRACE_IMPORT_TRIGGER' }, popupSender);
+      assert.equal(recovered.state, 'ready_to_open', 'unknown detection is not cached as a permanent routing decision');
+      assert.equal(created.length, 0);
+      assert.equal(collected, 1);
+    }
+  });
+  }
+}

@@ -281,11 +281,15 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | nul
   });
 }
 
-async function sendNativeMessageWithFallback(
+export async function sendNativeMessageWithFallback(
   runtime: RuntimePort,
   mode: "callback" | "promise",
   message: Readonly<Record<string, unknown>>,
   timeoutMs = 5_000,
+  options?: Readonly<{
+    observeResponse?: (response: unknown) => void;
+    mayFallback?: () => Promise<boolean>;
+  }>,
 ): Promise<unknown | null> {
   if (typeof runtime.sendNativeMessage !== "function") return null;
   const attempts: readonly (readonly unknown[])[] = [
@@ -293,7 +297,8 @@ async function sendNativeMessageWithFallback(
     ["com.tracefiction.trace", message],
   ];
   const deadline = Date.now() + Math.max(0, timeoutMs);
-  for (const args of attempts) {
+  for (const [index, args] of attempts.entries()) {
+    if (index > 0 && options?.mayFallback && !(await options.mayFallback())) break;
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) break;
     const response = await withTimeout(
@@ -303,7 +308,10 @@ async function sendNativeMessageWithFallback(
         args,
         runtime,
         mode,
-      ),
+      ).then((response) => {
+        options?.observeResponse?.(response);
+        return response;
+      }),
       remainingMs,
     );
     if (response !== null) return response;
