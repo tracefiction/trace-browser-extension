@@ -407,6 +407,7 @@ function buildPopupUi(model) {
 }
 
 function renderStatus(patch) {
+  setImportRecoveryHelp();
   mergePopupModel(patch);
   const ui = buildPopupUi(popupModel);
   const statusEl = document.getElementById("popup-status");
@@ -581,6 +582,7 @@ function isImportCurrentlyAvailable() {
 }
 
 function restoreImportButton(button) {
+  setImportRecoveryHelp();
   const ui = buildPopupUi(popupModel);
   button.hidden = ui.importHidden;
   button.disabled = ui.importDisabled;
@@ -1376,12 +1378,14 @@ document.getElementById("popup-import-open-native")?.addEventListener("click", (
 });
 
 function setImportBusy(button) {
+  setImportRecoveryHelp();
   button.disabled = true;
   button.textContent = "Opening import…";
   button.title = currentImportTitle();
 }
 
 function setImportSuccess(button, response) {
+  setImportRecoveryHelp();
   button.textContent =
     response?.state === "saved" || response?.state === "already_saved"
       ? "Saved to Trace"
@@ -1421,6 +1425,20 @@ function importFailureCopy(error) {
   };
 }
 
+function setImportRecoveryHelp(error) {
+  const help = document.getElementById("popup-import-recovery-help");
+  const button = document.getElementById("popup-import");
+  if (!help || !button) return;
+  const visible = error === "collect_failed" &&
+    (isLikelyIosExtensionUi || window.location.protocol === "safari-web-extension:");
+  help.hidden = !visible;
+  help.textContent = visible
+    ? "Reload this story. If importing still fails, restart Safari and reopen the story."
+    : "";
+  if (visible) button.setAttribute("aria-describedby", help.id);
+  else button.removeAttribute("aria-describedby");
+}
+
 function setImportFailure(button, error) {
   const copy = importFailureCopy(error);
   button.textContent = copy.label;
@@ -1431,10 +1449,12 @@ function setImportFailure(button, error) {
   } else {
     button.textContent = copy.label;
     button.title = copy.title;
+    setImportRecoveryHelp(error);
   }
 }
 
 function setImportUnavailable(button) {
+  setImportRecoveryHelp();
   button.disabled = true;
   button.textContent = currentImportLabel();
   button.title = currentImportTitle();
@@ -1483,6 +1503,7 @@ function kernelActionsForState(state) {
 }
 
 function renderKernelSnapshot(snapshot) {
+  setImportRecoveryHelp();
   nativeImportGeneration += 1;
   nativeImportContinuation = null;
   const state = snapshot?.state || "initializing";
