@@ -263,4 +263,7 @@ entry before displaying it. A bounded batch retains the first and most recent co
 deduplicated by entry ID; it is not a total-save count. Records expire as current
 evidence after 24 hours; no heartbeat or permission-scope claim is implied.
 No additional page permission, cookie access, story text or private-site data
-is introduced. Receipt failure does not replay or block a confirmed save.
+is introduced. Receipt failure does not replay or block a confirmed save. This local record
+also covers confirmed automatic reading writes, which can create the first
+Library entry; it does not label them as manual quick-add actions or establish
+later independent use.

@@ -267,3 +267,23 @@ test("native exact receipt is independent of a failed heartbeat", async () => {
   assert.equal(messages[2].type, "TRACE_IOS_EXTENSION_HEARTBEAT");
   assert.equal("entryID" in messages[2], false);
 });
+
+test("confirmed automatic reading reaches native without becoming a quick-add heartbeat", async () => {
+  const { NativeStorySaveReceiptPort } = await import("../../.trace-build/extension-runtime/browser-adapters.mjs");
+  const context = { attemptID: "attempt", operationID: "operation", initiatedAt: 100 };
+  const messages = [];
+  const runtime = { async sendNativeMessage(message) {
+    messages.push(message);
+    return message.type === "TRACE_IOS_SAVE_PREPARE" ? { ok: true, context } : { ok: true };
+  } };
+  const port = new NativeStorySaveReceiptPort(runtime, "promise", "https://api.tracefiction.com");
+  const prepared = await port.prepareSaveReceipt("account-a");
+  assert.equal(await port.publishSaveReceipt({ accountID: "account-a", entryID: entryId,
+    workKey: "ffn:5782108", source: "mutation", context: prepared,
+    hostKind: "ffn", action: "read", at: 200 }), true);
+  assert.deepEqual(messages.map(message => message.type), ["TRACE_IOS_SAVE_PREPARE", "TRACE_IOS_SAVE_CONFIRMED"]);
+  assert.equal(messages[1].entryID, entryId);
+  assert.equal(await port.publishSaveReceipt({ accountID: "account-a", entryID: entryId,
+    workKey: "ffn:5782108", source: "mutation", hostKind: "ffn", action: "read", at: 200 }), false);
+  assert.equal(messages.length, 2, "Without native context, ordinary reading does not gain an action heartbeat");
+});

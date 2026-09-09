@@ -635,7 +635,7 @@ test("iOS Connect and save adopts the containing app account before any story wr
   assert.equal(await privateDatabase.get(PRIVATE_RECORD_KEYS.accountData), null);
 });
 
-test("iOS auto-track adopts the app account, records progress, and emits no save receipt", async () => {
+test("iOS auto-track adopts the app account, records progress, and hands its exact entry to native", async () => {
   const databaseFactory = new IDBFactory();
   const privateDatabase = await seedPrivateSession(databaseFactory, {
     version: 1,
@@ -667,6 +667,8 @@ test("iOS auto-track adopts the app account, records progress, and emits no save
             ? { ok: false, error: "provider_unavailable" }
             : nativeCredentialResponse();
         }
+        if (message.type === "TRACE_IOS_SAVE_PREPARE") return { ok: true,
+          context: { attemptID: "onboarding-attempt", operationID: "reading-operation", initiatedAt: 100 } };
         return { ok: true };
       },
     },
@@ -742,7 +744,7 @@ test("iOS auto-track adopts the app account, records progress, and emits no save
   assert.equal(response.ok, true);
   assert.equal(response.command.kind, "confirmed");
   assert.equal(response.command.intent, "record_progress");
-  assert.equal(response.command.receipt, "not_applicable");
+  assert.equal(response.command.receipt, "published");
   assert.equal(response.command.handoff, "not_present");
   assert.equal(response.state.entry.chapters.current, 2);
   assert.deepEqual(writes.map(({ authorization }) => authorization), [
@@ -751,7 +753,11 @@ test("iOS auto-track adopts the app account, records progress, and emits no save
   assert.deepEqual(nativeMessages.map(({ type }) => type), [
     "TRACE_IOS_AUTH_TOKEN_REQUEST",
     "TRACE_IOS_AUTH_TOKEN_REQUEST",
+    "TRACE_IOS_SAVE_PREPARE",
+    "TRACE_IOS_SAVE_CONFIRMED",
   ]);
+  assert.equal(nativeMessages.at(-1).accountID, "account-b");
+  assert.equal(nativeMessages.at(-1).entryID, "00000000-0000-4000-8000-000000000123");
   assert.equal(
     (await privateDatabase.get(PRIVATE_RECORD_KEYS.accountData)).scope.accountId,
     "account-b",
@@ -1028,6 +1034,7 @@ test("concurrent iOS page mutations share same-account authority without clearin
   assert.equal(autoTrackResponse.ok, true);
   assert.deepEqual(nativeMessages.map(({ type }) => type), [
     "TRACE_IOS_AUTH_TOKEN_REQUEST",
+    "TRACE_IOS_SAVE_PREPARE",
   ]);
   assert.equal(controller.snapshot().accountId, "account-a");
   const accountData = await privateDatabase.get(PRIVATE_RECORD_KEYS.accountData);

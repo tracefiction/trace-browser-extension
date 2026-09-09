@@ -58,8 +58,10 @@ saved story.
 Automatic tracking is a separate progress command that goes directly to the
 server's monotonic update and requires its authoritative chapter confirmation.
 An uncertain request is reconciled against the account projection before Trace
-can report the target as saved. Progress commands do not emit first-save
-receipts or clear first-story handoffs. On iOS, the command first re-adopts the
+can report the target as saved. Progress commands do not emit manual first-save
+heartbeats or clear first-story handoffs. During an opt-in native setup attempt,
+their exact confirmed entry also participates in the local handover described
+below. On iOS, the command first re-adopts the
 containing app's current account so restored extension state cannot write to a
 stale account.
 
@@ -171,4 +173,7 @@ entry before displaying it. A bounded batch retains the first and most recent co
 deduplicated by entry ID; it is not a total-save count. Records expire as current
 evidence after 24 hours; no heartbeat or permission-scope claim is implied.
 No additional page permission, cookie access, story text or private-site data
-is introduced. Receipt failure does not replay or block a confirmed save.
+is introduced. Receipt failure does not replay or block a confirmed save. This local record
+also covers confirmed automatic reading writes, which can create the first
+Library entry; it does not label them as manual quick-add actions or establish
+later independent use.

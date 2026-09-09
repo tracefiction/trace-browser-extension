@@ -107,7 +107,7 @@ export interface StorySaveReceiptPort {
   prepareSaveReceipt?(accountID: string): Promise<Readonly<Record<string, unknown>> | undefined>;
   publishSaveReceipt(receipt: Readonly<{
     hostKind: StoryHostKind;
-    action: "quick_add";
+    action: "quick_add" | "read";
     at: number;
     handoffId?: string;
     accountID: string;
@@ -180,11 +180,11 @@ export class StoryCommandService {
     if (scope === null) return failure("not_authenticated");
 
     let context: Readonly<Record<string, unknown>> | undefined;
-    if (command.intent === "ensure_saved") {
-      try { context = await this.#ports.receipt.prepareSaveReceipt?.(scope.accountId); }
-      catch { /* Receipt availability must never prevent a real save. */ }
-      if (!sameAccountScope(this.#ports.session.publicationScope(), scope)) return failure("stale");
-    }
+    // Automatic reading can create the first Library entry too. Both commands
+    // carry exact native evidence only after the same API confirmation checks.
+    try { context = await this.#ports.receipt.prepareSaveReceipt?.(scope.accountId); }
+    catch { /* Receipt availability must never prevent a real save. */ }
+    if (!sameAccountScope(this.#ports.session.publicationScope(), scope)) return failure("stale");
     if (command.intent === "ensure_saved") {
       // Save preflight avoids duplicate first-save work and recovers a prior
       // committed POST after a worker restart. Progress writes are monotonic
@@ -312,23 +312,21 @@ export class StoryCommandService {
       return failure("stale");
     }
 
-    let receipt: "published" | "unavailable" | "not_applicable" = "not_applicable";
-    if (command.intent === "ensure_saved") {
-      try {
-        receipt = await this.#ports.receipt.publishSaveReceipt({
-          accountID: scope.accountId, entryID: confirmation.entryId,
-          workKey: confirmation.workKey, source,
-          ...(context === undefined ? {} : { context }),
-          hostKind: command.hostKind,
-          action: "quick_add",
-          at: this.#ports.clock.now(),
-          ...(command.handoffId === undefined ? {} : { handoffId: command.handoffId }),
-        })
-          ? "published"
-          : "unavailable";
-      } catch {
-        receipt = "unavailable";
-      }
+    let receipt: "published" | "unavailable";
+    try {
+      receipt = await this.#ports.receipt.publishSaveReceipt({
+        accountID: scope.accountId, entryID: confirmation.entryId,
+        workKey: confirmation.workKey, source,
+        ...(context === undefined ? {} : { context }),
+        hostKind: command.hostKind,
+        action: command.intent === "ensure_saved" ? "quick_add" : "read",
+        at: this.#ports.clock.now(),
+        ...(command.handoffId === undefined ? {} : { handoffId: command.handoffId }),
+      })
+        ? "published"
+        : "unavailable";
+    } catch {
+      receipt = "unavailable";
     }
 
     let handoff: "cleared" | "unavailable" | "not_present" = "not_present";

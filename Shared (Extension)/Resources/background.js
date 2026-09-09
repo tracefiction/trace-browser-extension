@@ -2269,13 +2269,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       const scope2 = this.#ports.session.publicationScope();
       if (scope2 === null) return failure3("not_authenticated");
       let context;
-      if (command.intent === "ensure_saved") {
-        try {
-          context = await this.#ports.receipt.prepareSaveReceipt?.(scope2.accountId);
-        } catch {
-        }
-        if (!sameAccountScope(this.#ports.session.publicationScope(), scope2)) return failure3("stale");
+      try {
+        context = await this.#ports.receipt.prepareSaveReceipt?.(scope2.accountId);
+      } catch {
       }
+      if (!sameAccountScope(this.#ports.session.publicationScope(), scope2)) return failure3("stale");
       if (command.intent === "ensure_saved") {
         const lookup = await this.#lookup(command.workKey, true);
         if (lookup.kind !== "published") return executionFailure3(lookup);
@@ -2359,23 +2357,21 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (!sameAccountScope(this.#ports.session.publicationScope(), scope2)) {
         return failure3("stale");
       }
-      let receipt = "not_applicable";
-      if (command.intent === "ensure_saved") {
-        try {
-          receipt = await this.#ports.receipt.publishSaveReceipt({
-            accountID: scope2.accountId,
-            entryID: confirmation.entryId,
-            workKey: confirmation.workKey,
-            source,
-            ...context === void 0 ? {} : { context },
-            hostKind: command.hostKind,
-            action: "quick_add",
-            at: this.#ports.clock.now(),
-            ...command.handoffId === void 0 ? {} : { handoffId: command.handoffId }
-          }) ? "published" : "unavailable";
-        } catch {
-          receipt = "unavailable";
-        }
+      let receipt;
+      try {
+        receipt = await this.#ports.receipt.publishSaveReceipt({
+          accountID: scope2.accountId,
+          entryID: confirmation.entryId,
+          workKey: confirmation.workKey,
+          source,
+          ...context === void 0 ? {} : { context },
+          hostKind: command.hostKind,
+          action: command.intent === "ensure_saved" ? "quick_add" : "read",
+          at: this.#ports.clock.now(),
+          ...command.handoffId === void 0 ? {} : { handoffId: command.handoffId }
+        }) ? "published" : "unavailable";
+      } catch {
+        receipt = "unavailable";
       }
       let handoff = "not_present";
       if (command.intent === "ensure_saved" && command.handoffId !== void 0) {
@@ -2925,6 +2921,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         }, 1e3).catch(() => void 0);
         recorded = isRecord5(saved) && saved.ok === true;
       }
+      if (receipt.action === "read") return recorded;
       const response = await sendNativeMessageWithFallback(
         this.#runtime,
         this.#mode,

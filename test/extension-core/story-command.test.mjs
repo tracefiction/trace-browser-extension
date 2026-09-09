@@ -313,11 +313,13 @@ test("progress starts with its authoritative monotonic mutation", async () => {
   assert.equal(result.kind, "confirmed");
   assert.equal(result.intent, "record_progress");
   assert.equal(result.source, "mutation");
-  assert.equal(result.receipt, "not_applicable");
+  assert.equal(result.receipt, "published");
   assert.equal(result.handoff, "not_present");
   assert.equal(h.calls.lookup, 0);
   assert.equal(h.calls.track, 1);
-  assert.deepEqual(h.calls.receipt, []);
+  assert.equal(h.calls.receipt.length, 1);
+  assert.equal(h.calls.receipt[0].action, "read");
+  assert.equal(h.calls.receipt[0].entryID, current.entryId);
   assert.deepEqual(h.calls.clear, []);
 });
 
@@ -346,7 +348,9 @@ test("progress does not use a full-overlay preflight to suppress its mutation", 
   assert.equal(result.source, "mutation");
   assert.equal(h.calls.lookup, 0);
   assert.equal(h.calls.track, 1);
-  assert.deepEqual(h.calls.receipt, []);
+  assert.equal(h.calls.receipt.length, 1);
+  assert.equal(h.calls.receipt[0].action, "read");
+  assert.equal(h.calls.receipt[0].entryID, current.entryId);
 });
 
 test("uncertain progress write is not confirmed by an older reconciled chapter", async () => {

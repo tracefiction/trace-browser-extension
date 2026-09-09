@@ -381,7 +381,7 @@ export class NativeStorySaveReceiptPort implements StorySaveReceiptPort {
 
   async publishSaveReceipt(receipt: Readonly<{
     hostKind: StoryHostKind;
-    action: "quick_add";
+    action: "quick_add" | "read";
     at: number;
     handoffId?: string;
     accountID: string;
@@ -400,6 +400,9 @@ export class NativeStorySaveReceiptPort implements StorySaveReceiptPort {
       }, 1000).catch(() => undefined);
       recorded = isRecord(saved) && saved.ok === true;
     }
+    // A confirmed reading write can add a Library entry. It is not a manual
+    // quick-add action and must not change the existing heartbeat semantics.
+    if (receipt.action === "read") return recorded;
     const response = await sendNativeMessageWithFallback(
       this.#runtime,
       this.#mode,
