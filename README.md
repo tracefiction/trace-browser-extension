@@ -267,3 +267,7 @@ is introduced. Receipt failure does not replay or block a confirmed save. This l
 also covers confirmed automatic reading writes, which can create the first
 Library entry; it does not label them as manual quick-add actions or establish
 later independent use.
+Production packages accept only the production API origin. An explicitly paired
+native development package uses its immutable Import API-origin metadata for
+receipt validation; page messages cannot choose the environment. Production and
+development attempts and receipts never mix.

@@ -119,6 +119,28 @@ struct TraceSafariProviderCodecContract {
         let replacement = TraceSafariProviderCodec.ImportBinding(sessionID: provider.sessionID,
             recordDigest: String(repeating: "b", count: 64))
         require(R.handle(payload, defaults: defaults, provider: replacement, now: attempt.startedAt + 1)["ok"] as? Bool == false, "Replacement provider rejects")
+
+        let dev = R.Attempt(id: UUID().uuidString, accountID: attempt.accountID,
+            apiOrigin: R.developmentAPIOrigin, provider: provider,
+            startedAt: attempt.startedAt, expiresAt: attempt.expiresAt)
+        defaults.set(try! JSONEncoder().encode(dev), forKey: R.attemptKey)
+        let prepare: [String: Any] = ["type": "TRACE_IOS_SAVE_PREPARE", "accountID": dev.accountID, "apiOrigin": dev.apiOrigin]
+        require(!dev.valid() && dev.valid(apiOrigin: R.developmentAPIOrigin), "Development attempt requires exact environment opt-in")
+        require(R.handle(prepare, defaults: defaults, provider: provider, now: dev.startedAt + 1)["ok"] as? Bool == false, "Ordinary production package rejects development")
+        let devPrepared = R.handle(prepare, defaults: defaults, provider: provider, now: dev.startedAt + 1, configuredAPIOrigin: R.developmentAPIOrigin)
+        require(devPrepared["ok"] as? Bool == true, "Paired development package prepares")
+        var confirmed = prepare
+        confirmed["type"] = "TRACE_IOS_SAVE_CONFIRMED"
+        confirmed["context"] = devPrepared["context"]
+        confirmed["entryID"] = UUID().uuidString
+        confirmed["workKey"] = "ffn:7038840"
+        confirmed["source"] = "mutation"
+        require(R.handle(confirmed, defaults: defaults, provider: provider, now: dev.startedAt + 2, configuredAPIOrigin: R.developmentAPIOrigin)["ok"] as? Bool == true, "Development save persists")
+        let devSaved = R.readSaves(defaults.data(forKey: R.receiptKey))
+        require(devSaved.count == 1 && devSaved[0].valid(now: dev.startedAt + 2, apiOrigin: R.developmentAPIOrigin), "Environment change cannot mix prior production saves")
+        require(!devSaved[0].valid(now: dev.startedAt + 2), "Production consumer rejects development save")
+        require(!attempt.valid(apiOrigin: R.developmentAPIOrigin), "Development consumer rejects production attempt")
+        require(R.handle(prepare, defaults: defaults, provider: provider, now: dev.startedAt + 1, configuredAPIOrigin: "https://other.invalid")["ok"] as? Bool == false, "Unapproved package environment fails closed")
     }
 
     private static func require(

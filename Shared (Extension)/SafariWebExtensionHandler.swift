@@ -115,9 +115,19 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                    let session = TraceSafariProviderCodec.deviceSession(sessionId: sessionID,
                        credential: credential, expiresAt: expiry) {
                     let now = Date()
+                    // The paired package owns the environment. A message can
+                    // never select or broaden the receipt's accepted API origin.
+                    var receiptOrigin = TraceSafariOnboardingReceipt.productionAPIOrigin
+#if TRACE_NATIVE_IMPORT_HANDOFF && os(iOS)
+                    if Bundle.main.object(forInfoDictionaryKey: "TraceNativeImportContract") as? String
+                        == TraceSafariImportInbox.contract,
+                       let origin = Bundle.main.object(forInfoDictionaryKey: "TraceNativeImportAPIOrigin") as? String {
+                        receiptOrigin = origin
+                    }
+#endif
                     responseBody = TraceSafariOnboardingReceipt.handle(payload, defaults: defaults,
                         provider: TraceSafariProviderCodec.importBinding(session: session, now: now),
-                        now: now.timeIntervalSince1970 * 1000)
+                        now: now.timeIntervalSince1970 * 1000, configuredAPIOrigin: receiptOrigin)
                 } else { responseBody = ["ok": false] }
             case Self.traceIosAuthTokenRequest:
                 let credential = Self.readSharedTraceCredential()

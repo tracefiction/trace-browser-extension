@@ -83,6 +83,8 @@ enum TraceSafariProviderCodec {
 /// text. The native account owner must verify the provider and read the exact
 /// Library entry before presenting a success. A heartbeat is not a prerequisite.
 enum TraceSafariOnboardingReceipt {
+    static let productionAPIOrigin = "https://api.tracefiction.com"
+    static let developmentAPIOrigin = "https://ff-app-development.up.railway.app"
     static let attemptKey = "traceNativeOnboardingAttemptV1"
     static let receiptKey = "traceNativeOnboardingSaveV1"
     static let maximumSaves = 32
@@ -95,9 +97,10 @@ enum TraceSafariOnboardingReceipt {
         let provider: TraceSafariProviderCodec.ImportBinding
         let startedAt: Double
         let expiresAt: Double
-        func valid() -> Bool {
+        func valid(apiOrigin expectedOrigin: String = productionAPIOrigin) -> Bool {
             UUID(uuidString: id) != nil && !accountID.isEmpty && accountID.utf8.count <= 256 &&
-            apiOrigin == "https://api.tracefiction.com" && UUID(uuidString: provider.sessionID) != nil &&
+            [productionAPIOrigin, developmentAPIOrigin].contains(expectedOrigin) &&
+            apiOrigin == expectedOrigin && UUID(uuidString: provider.sessionID) != nil &&
             provider.recordDigest.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil &&
             startedAt.isFinite && expiresAt.isFinite && startedAt > 0 &&
             expiresAt > startedAt && expiresAt - startedAt <= 86_400_000
@@ -115,8 +118,8 @@ enum TraceSafariOnboardingReceipt {
         let workKey: String
         let confirmedAt: Double
         let source: String
-        func valid(now: Double) -> Bool {
-            attempt.valid() && context.attemptID == attempt.id &&
+        func valid(now: Double, apiOrigin: String = productionAPIOrigin) -> Bool {
+            attempt.valid(apiOrigin: apiOrigin) && context.attemptID == attempt.id &&
             UUID(uuidString: context.operationID) != nil && UUID(uuidString: entryID) != nil &&
             workKey.range(of: "^(ao3|ffn):[1-9][0-9]{0,19}$", options: .regularExpression) != nil &&
             ["preflight", "mutation", "reconciliation"].contains(source) &&
@@ -138,14 +141,15 @@ enum TraceSafariOnboardingReceipt {
         return decode(Save.self, data: data).map { [$0] } ?? []
     }
     static func handle(_ payload: [String: Any], defaults: UserDefaults,
-                       provider: TraceSafariProviderCodec.ImportBinding?, now: Double) -> [String: Any] {
+                       provider: TraceSafariProviderCodec.ImportBinding?, now: Double,
+                       configuredAPIOrigin: String = productionAPIOrigin) -> [String: Any] {
         let current = decode(Attempt.self, data: defaults.data(forKey: attemptKey))
         let previous = decode(Attempt.self, data: defaults.data(forKey: previousAttemptKey))
         let contextID = (payload["context"] as? [String: Any])?["attemptID"] as? String
         let preparing = payload["type"] as? String == "TRACE_IOS_SAVE_PREPARE"
         let selected = preparing || contextID == current?.id ? current : previous
         guard let attempt = selected, preparing || contextID == attempt.id,
-              attempt.valid(), now <= attempt.expiresAt + 86_400_000, attempt.provider == provider,
+              attempt.valid(apiOrigin: configuredAPIOrigin), now <= attempt.expiresAt + 86_400_000, attempt.provider == provider,
               payload["accountID"] as? String == attempt.accountID,
               payload["apiOrigin"] as? String == attempt.apiOrigin else { return ["ok": false] }
         if payload["type"] as? String == "TRACE_IOS_SAVE_PREPARE" {
@@ -161,9 +165,9 @@ enum TraceSafariOnboardingReceipt {
               let source = payload["source"] as? String else { return ["ok": false] }
         let save = Save(attempt: attempt, context: context, entryID: entryID,
             workKey: workKey, confirmedAt: now, source: source)
-        guard save.valid(now: now) else { return ["ok": false] }
+        guard save.valid(now: now, apiOrigin: configuredAPIOrigin) else { return ["ok": false] }
         var saves = readSaves(defaults.data(forKey: receiptKey)).filter {
-            $0.valid(now: now) && $0.attempt.accountID == attempt.accountID &&
+            $0.valid(now: now, apiOrigin: configuredAPIOrigin) && $0.attempt.accountID == attempt.accountID &&
             $0.attempt.apiOrigin == attempt.apiOrigin && $0.attempt.provider == attempt.provider
         }
         if let prior = saves.first(where: { $0.context.operationID == save.context.operationID }) {

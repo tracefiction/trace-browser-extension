@@ -177,3 +177,7 @@ is introduced. Receipt failure does not replay or block a confirmed save. This l
 also covers confirmed automatic reading writes, which can create the first
 Library entry; it does not label them as manual quick-add actions or establish
 later independent use.
+The native handler selects the receipt environment from paired package metadata,
+never from a message. Only the production API and the explicit Trace development
+API are supported, with exact matching at preparation, confirmation and readback.
+An ordinary production package rejects development receipts and vice versa.
