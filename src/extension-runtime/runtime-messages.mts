@@ -135,7 +135,9 @@ export interface FirstStoryResponse {
   readonly ok: boolean;
   readonly snapshot: PublicSessionSnapshot;
   readonly action?: SessionActionResult;
-  readonly state?: "opened" | "saved" | "already_saved";
+  readonly state?: "opened" | "saved" | "already_saved" | "ready_to_open";
+  readonly handoffID?: string;
+  readonly expiresAtMs?: number;
   readonly error?: FirstStoryInitiationError;
 }
 

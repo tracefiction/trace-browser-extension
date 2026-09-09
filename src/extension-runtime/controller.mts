@@ -127,6 +127,8 @@ import {
   type WorkStateResponse,
 } from "./runtime-messages.mjs";
 
+import { NativeLibraryImportProducer } from "./native-import.mjs";
+
 export {
   SESSION_MESSAGE_TYPES,
   type SessionMode,
@@ -146,6 +148,7 @@ interface RuntimeEnvironment {
   readonly webOrigin: string;
   readonly randomId: () => string;
   readonly retryClock?: RetryClock;
+  readonly nativeImportHandoff?: boolean;
   readonly firstStoryDelay?: (milliseconds: number) => Promise<void>;
   readonly archiveReadinessStatus?: BrowserArchiveReadinessStatus;
 }
@@ -229,6 +232,8 @@ export class SessionRuntimeController {
   readonly #metadataContributions: MetadataContributionService;
   readonly #savedFilters: SavedFilterSyncService;
   readonly #savedFilterApi: SavedFilterSyncApi;
+  readonly #nativeImportEnabled: boolean;
+  readonly #nativeImport: NativeLibraryImportProducer;
   readonly #firstStoryInitiator: BrowserFirstStoryInitiator;
   readonly #traceWebNavigation: BrowserTraceWebNavigation;
   readonly #traceWebStatus: TraceWebStatusNotification;
@@ -246,7 +251,7 @@ export class SessionRuntimeController {
   #retryAttempt = 0;
   #retryGeneration = 0;
   #retryTimer: unknown | null = null;
-  #isIos: Promise<boolean> | null = null;
+  #platform: Promise<"ios" | "desktop" | "unknown"> | null = null;
   #nativeAuthorityPreparation: Promise<NativeAuthorityPreparation> | null = null;
   #accountTransitionTail: Promise<void> = Promise.resolve();
   #savedFilterSyncInFlight: Promise<SavedFilterSyncResult> | null = null;
@@ -257,6 +262,9 @@ export class SessionRuntimeController {
 
   constructor(environment: RuntimeEnvironment) {
     this.#mode = environment.mode;
+    this.#nativeImportEnabled = environment.nativeImportHandoff === true;
+    this.#nativeImport = new NativeLibraryImportProducer({ runtime: environment.runtime,
+      mode: environment.storageMode, apiOrigin: environment.apiBase, randomID: environment.randomId });
     const storage = new BrowserStorage(
       environment.storageArea,
       environment.runtime,
@@ -389,6 +397,7 @@ export class SessionRuntimeController {
       receipt: new NativeStorySaveReceiptPort(
         environment.runtime,
         environment.storageMode,
+        environment.apiBase,
       ),
       handoff: new NativePendingStoryHandoffPort(
         environment.runtime,
@@ -645,7 +654,13 @@ export class SessionRuntimeController {
         error: initiation.error,
       }, undefined, initiation);
     }
-    const preparation = initiation.kind === "web_save"
+    const importPlatform = initiation.kind === "popup_import" && this.#nativeImportEnabled
+      ? await this.#nativePlatform() : null;
+    if (importPlatform === "unknown") {
+      return this.#firstStoryResponse({ ok: false, error: "native_import_unavailable" }, undefined, initiation);
+    }
+    const nativeImport = importPlatform === "ios";
+    const preparation = initiation.kind === "web_save" || nativeImport
       ? await this.#prepareNativeAuthority()
       : { ready: true as const };
     const action = preparation.action;
@@ -655,6 +670,22 @@ export class SessionRuntimeController {
         action,
         initiation,
       );
+    }
+    if (nativeImport) {
+      let preparedHandoff: string | null = null;
+      const fenced = await this.#service.executeCurrentScope(async (scope, isCurrent) => {
+        const result = await this.#nativeImport.run(scope, async () => {
+          const current = await this.#prepareNativeAuthority();
+          return current.ready && await isCurrent();
+        }, (stage) => this.#firstStoryInitiator.importActivePage(stage));
+        if (result.ok && result.state === "ready_to_open") preparedHandoff = result.handoffID;
+        return result;
+      });
+      if (fenced.kind !== "published" && preparedHandoff !== null) {
+        await this.#nativeImport.discardUnpublished(preparedHandoff);
+      }
+      return this.#firstStoryResponse(fenced.kind === "published" ? fenced.value
+        : { ok: false, error: "native_import_unavailable" }, action, initiation);
     }
     const result = initiation.kind === "popup_import"
       ? await this.#firstStoryInitiator.importActivePage()
@@ -1117,7 +1148,7 @@ export class SessionRuntimeController {
     action?: SessionActionResult,
     initiation?: FirstStoryInitiation,
   ): Promise<FirstStoryResponse> {
-    if (initiation?.kind === "popup_import") {
+    if (initiation?.kind === "popup_import" && !(result.ok && result.state === "ready_to_open")) {
       await this.#recordImportReadiness(result);
     }
     this.#publishStatus();
@@ -1126,6 +1157,8 @@ export class SessionRuntimeController {
       snapshot: toPublicSessionSnapshot(this.snapshot()),
       ...(action === undefined ? {} : { action }),
       ...(result.ok ? { state: result.state } : { error: result.error }),
+      ...(result.ok && result.state === "ready_to_open"
+        ? { handoffID: result.handoffID, expiresAtMs: result.expiresAtMs } : {}),
     });
   }
 
@@ -1441,10 +1474,14 @@ export class SessionRuntimeController {
     });
   }
 
-  #usesNativeAccountAuthority(): Promise<boolean> {
-    this.#isIos ??= (async () => {
-      if (/iPhone|iPad|iPod/i.test(globalThis.navigator?.userAgent ?? "")) return true;
-      if (typeof this.#runtime.getPlatformInfo !== "function") return false;
+  async #usesNativeAccountAuthority(): Promise<boolean> {
+    return await this.#nativePlatform() === "ios";
+  }
+
+  #nativePlatform(): Promise<"ios" | "desktop" | "unknown"> {
+    this.#platform ??= (async () => {
+      if (/iPhone|iPad|iPod/i.test(globalThis.navigator?.userAgent ?? "")) return "ios";
+      if (typeof this.#runtime.getPlatformInfo !== "function") return "unknown";
       try {
         let value: unknown;
         if (this.#storageMode === "promise") {
@@ -1458,12 +1495,17 @@ export class SessionRuntimeController {
             });
           });
         }
-        return isRecord(value) && value.os === "ios";
+        if (isRecord(value) && value.os === "ios") return "ios";
+        if (isRecord(value) && ["mac", "win", "linux", "openbsd", "cros"].includes(value.os as string)) return "desktop";
+        return "unknown";
       } catch {
-        return false;
+        return "unknown";
       }
     })();
-    return this.#isIos;
+    const platform = this.#platform;
+    // A transient failed detection must be recoverable on a later explicit try.
+    void platform.then((value) => { if (value === "unknown" && this.#platform === platform) this.#platform = null; });
+    return platform;
   }
 }
 

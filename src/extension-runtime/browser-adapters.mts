@@ -281,11 +281,15 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | nul
   });
 }
 
-async function sendNativeMessageWithFallback(
+export async function sendNativeMessageWithFallback(
   runtime: RuntimePort,
   mode: "callback" | "promise",
   message: Readonly<Record<string, unknown>>,
   timeoutMs = 5_000,
+  options?: Readonly<{
+    observeResponse?: (response: unknown) => void;
+    mayFallback?: () => Promise<boolean>;
+  }>,
 ): Promise<unknown | null> {
   if (typeof runtime.sendNativeMessage !== "function") return null;
   const attempts: readonly (readonly unknown[])[] = [
@@ -293,7 +297,8 @@ async function sendNativeMessageWithFallback(
     ["com.tracefiction.trace", message],
   ];
   const deadline = Date.now() + Math.max(0, timeoutMs);
-  for (const args of attempts) {
+  for (const [index, args] of attempts.entries()) {
+    if (index > 0 && options?.mayFallback && !(await options.mayFallback())) break;
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) break;
     const response = await withTimeout(
@@ -303,7 +308,10 @@ async function sendNativeMessageWithFallback(
         args,
         runtime,
         mode,
-      ),
+      ).then((response) => {
+        options?.observeResponse?.(response);
+        return response;
+      }),
       remainingMs,
     );
     if (response !== null) return response;
@@ -356,18 +364,45 @@ export class NativeArchiveReadinessReceiptPort implements ArchiveReadinessReceip
 export class NativeStorySaveReceiptPort implements StorySaveReceiptPort {
   readonly #runtime: RuntimePort;
   readonly #mode: "callback" | "promise";
+  readonly #apiOrigin: string;
 
-  constructor(runtime: RuntimePort, mode: "callback" | "promise") {
+  constructor(runtime: RuntimePort, mode: "callback" | "promise", apiOrigin = "") {
     this.#runtime = runtime;
     this.#mode = mode;
+    this.#apiOrigin = apiOrigin;
+  }
+
+  async prepareSaveReceipt(accountID: string): Promise<Readonly<Record<string, unknown>> | undefined> {
+    const response = await sendNativeMessageWithFallback(this.#runtime, this.#mode,
+      { type: "TRACE_IOS_SAVE_PREPARE", accountID, apiOrigin: this.#apiOrigin }, 1000);
+    return isRecord(response) && response.ok === true && isRecord(response.context)
+      ? response.context : undefined;
   }
 
   async publishSaveReceipt(receipt: Readonly<{
     hostKind: StoryHostKind;
-    action: "quick_add";
+    action: "quick_add" | "read";
     at: number;
     handoffId?: string;
+    accountID: string;
+    entryID: string;
+    workKey: string;
+    source: "preflight" | "mutation" | "reconciliation";
+    context?: Readonly<Record<string, unknown>>;
   }>): Promise<boolean> {
+    let recorded = false;
+    if (receipt.context !== undefined) {
+      // Independent of legacy heartbeat delivery; identity survives a missed run.
+      const saved = await sendNativeMessageWithFallback(this.#runtime, this.#mode, {
+        type: "TRACE_IOS_SAVE_CONFIRMED", apiOrigin: this.#apiOrigin,
+        accountID: receipt.accountID, entryID: receipt.entryID, workKey: receipt.workKey,
+        source: receipt.source, context: receipt.context,
+      }, 1000).catch(() => undefined);
+      recorded = isRecord(saved) && saved.ok === true;
+    }
+    // A confirmed reading write can add a Library entry. It is not a manual
+    // quick-add action and must not change the existing heartbeat semantics.
+    if (receipt.action === "read") return recorded;
     const response = await sendNativeMessageWithFallback(
       this.#runtime,
       this.#mode,
@@ -379,7 +414,7 @@ export class NativeStorySaveReceiptPort implements StorySaveReceiptPort {
         ...(receipt.handoffId === undefined ? {} : { handoffId: receipt.handoffId }),
       },
     );
-    return isRecord(response) && (response.ok === true || response.ok === "true");
+    return recorded || (isRecord(response) && (response.ok === true || response.ok === "true"));
   }
 }
 

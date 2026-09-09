@@ -518,6 +518,25 @@ export class SessionService {
     return committed;
   }
 
+  /** Credential-free private-controller fence for native handoffs. Captures
+   * capability identity, including same-account provider replacement, without
+   * lending credentials or degrading connectivity on local transport errors. */
+  async executeCurrentScope<T>(
+    effect: (scope: AccountScope, isCurrent: () => Promise<boolean>) => Promise<T>,
+  ): Promise<{ kind: "published"; value: T } | { kind: "stale" | "unavailable" }> {
+    await this.#ensureInitialized();
+    const capability = await this.#withLock(async () => this.#capability);
+    if (capability === null) return { kind: "unavailable" };
+    const isCurrent = () => this.#withLock(async () => this.#isCurrentCapability(capability));
+    try {
+      const value = await effect(Object.freeze({ accountId: capability.accountId,
+        epoch: capability.epoch }), isCurrent);
+      return await isCurrent() ? { kind: "published", value } : { kind: "stale" };
+    } catch {
+      return { kind: await isCurrent() ? "unavailable" : "stale" };
+    }
+  }
+
   // This boundary is for the authenticated API adapter, not UI/content
   // surfaces. The production import gate must keep raw credentials confined to
   // that adapter when the kernel is wired in a later slice.

@@ -688,6 +688,13 @@ body[data-trace-popup-state="connected_saved"] .popup-sheet {
     cursor: default;
 }
 
+.popup-import-recovery-help {
+    margin: 0;
+    color: var(--ink-3);
+    font-size: 13px;
+    line-height: 1.45;
+}
+
 .popup-cta,
 .popup-archive-link {
     color: var(--ink-2);

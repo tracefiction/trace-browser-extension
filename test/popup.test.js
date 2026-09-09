@@ -47,6 +47,7 @@ function createPopupHarness({
     activeTab: { kind: "unsupported" },
   },
   importResponse = { ok: true },
+  popupUrl = "https://tracefiction.com",
   userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
   traceWebOrigin,
   sessionMode = "legacy",
@@ -80,7 +81,7 @@ function createPopupHarness({
   const js = fs.readFileSync(POPUP_JS_PATH, "utf8");
   const css = fs.readFileSync(POPUP_CSS_PATH, "utf8");
   const dom = new JSDOM(html, {
-    url: "https://tracefiction.com",
+    url: popupUrl,
     runScripts: "outside-only",
     contentType: "text/html",
     userAgent,
@@ -1739,6 +1740,134 @@ test("popup import failure re-enables the button and exposes the failure reason"
   assert.equal(button.disabled, false);
   assert.equal(button.textContent, "Import failed — try again");
   assert.equal(button.title, "collect_failed");
+  assert.equal(h.document.getElementById("popup-import-recovery-help").hidden, true);
+  assert.equal(button.hasAttribute("aria-describedby"), false);
+});
+
+function createSafariImportRecoveryHarness(options = {}) {
+  return createPopupHarness({
+    sessionMode: "kernel",
+    popupUrl: "safari-web-extension://trace/popup.html",
+    sessionSnapshot: { state: "connected", reason: "none", canExecuteAuthenticated: true },
+    popupState: { ok: true, authState: { state: "connected" }, firstSaveSeen: true,
+      activeTab: { kind: "supported_story", site: "ao3", canImport: true } },
+    ...options,
+  });
+}
+
+function assertNoImportRecoveryActions(h, messageStart, importCount) {
+  assert.deepEqual(
+    h.messages.slice(messageStart).map(({ type }) => type),
+    Array(importCount).fill("TRACE_IMPORT_TRIGGER"),
+  );
+  for (const calls of [h.permissionRequests, h.reconcileRequests, h.registrationRequests,
+    h.tabMessages, h.injections, h.reloads]) assert.deepEqual(calls, []);
+}
+
+for (const promiseRuntime of [false, true]) {
+  test(`Safari collection recovery is accessible after completed onboarding with the ${promiseRuntime ? "promise" : "callback"} API`, async () => {
+    const h = createSafariImportRecoveryHarness({
+      promiseRuntime,
+      earnedPermissionOnboarding: true,
+      storageState: { traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 5000 } },
+      importResponse: { ok: false, error: "collect_failed" },
+    });
+    for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+    const button = h.document.getElementById("popup-import");
+    const help = h.document.getElementById("popup-import-recovery-help");
+    const messageStart = h.messages.length;
+    assert.equal(help.hidden, true);
+    button.click();
+    await flush();
+
+    assert.equal(h.document.getElementById("popup-earned-permission").hidden, true);
+    assert.equal(button.textContent, "Import failed — try again");
+    assert.equal(button.title, "collect_failed");
+    assert.equal(help.hidden, false);
+    assert.equal(help.getAttribute("role"), "status");
+    assert.equal(button.getAttribute("aria-describedby"), help.id);
+    assert.equal(help.textContent,
+      "Reload this story. If importing still fails, restart Safari and reopen the story.");
+    h.runTimeouts();
+    await flush();
+    assertNoImportRecoveryActions(h, messageStart, 1);
+    assert.equal(h.closeCalled, false);
+  });
+}
+
+test("Safari collection recovery clears on a new intent and stays absent for other outcomes", async () => {
+  const response = { ok: false, error: "collect_failed" };
+  const h = createSafariImportRecoveryHarness({ promiseRuntime: true, importResponse: response });
+  await flush();
+  const button = h.document.getElementById("popup-import");
+  const help = h.document.getElementById("popup-import-recovery-help");
+  const messageStart = h.messages.length;
+  let importCount = 0;
+  for (const [error, label] of [
+    ["native_import_unavailable", "Import unavailable — try again"],
+    ["permission_required", "Allow site access, then retry"],
+    ["not_authenticated", "Reconnect Trace, then retry"],
+    ["auth_expired", "Reconnect Trace, then retry"],
+    ["unsupported_page", "Open a supported page"],
+    ["no_active_tab", "Open a supported page"],
+    ["unavailable", "Import failed — try again"],
+    [undefined, "Import failed — try again"],
+  ]) {
+    response.error = "collect_failed";
+    button.click();
+    importCount += 1;
+    await flush();
+    assert.equal(help.hidden, false);
+    response.error = error;
+    button.click();
+    importCount += 1;
+    assert.equal(help.hidden, true, "a new intent clears prior guidance before its reply");
+    assert.equal(help.textContent, "");
+    assert.equal(button.hasAttribute("aria-describedby"), false);
+    await flush();
+    assert.equal(help.hidden, true);
+    assert.equal(button.textContent, label);
+    assertNoImportRecoveryActions(h, messageStart, importCount);
+  }
+
+  response.error = "collect_failed";
+  button.click();
+  importCount += 1;
+  await flush();
+  assert.equal(help.hidden, false);
+  delete response.error;
+  Object.assign(response, { ok: true, state: "ready_to_open",
+    handoffID: "00000000-0000-4000-8000-000000000001",
+    expiresAtMs: Date.now() + 600000, snapshot: { state: "connected" } });
+  button.click();
+  importCount += 1;
+  await flush();
+  assert.equal(help.hidden, true);
+  assert.equal(button.hasAttribute("aria-describedby"), false);
+  assert.equal(h.document.getElementById("popup-import-open-native").hidden, false);
+  assertNoImportRecoveryActions(h, messageStart, importCount);
+});
+
+test("Safari collection recovery clears when the popup loses its connected state", async () => {
+  const h = createPopupHarness({
+    userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)",
+    storageState: { traceAuthState: { state: "connected" }, traceFirstSaveSeen: true },
+    popupState: { firstSaveSeen: true,
+      activeTab: { kind: "supported_story", site: "ao3", canImport: true } },
+    importResponse: { ok: false, error: "collect_failed" },
+  });
+  await flush();
+  const button = h.document.getElementById("popup-import");
+  const help = h.document.getElementById("popup-import-recovery-help");
+  const messageStart = h.messages.length;
+  button.click();
+  assert.equal(help.hidden, false);
+  h.emitStorageChange({ traceAuthState: { newValue: { state: "signed_out" } } });
+  assert.equal(button.hidden, true);
+  assert.equal(help.hidden, true);
+  assert.equal(help.textContent, "");
+  assert.equal(button.hasAttribute("aria-describedby"), false);
+  assertNoImportRecoveryActions(h, messageStart, 1);
 });
 
 test("popup import turns a missing site grant into actionable permission guidance", async () => {
@@ -1805,4 +1934,40 @@ test("popup import success closes the popup after a short delay", async () => {
   assert.equal(button.textContent, "Opened import tab");
   h.runTimeouts();
   assert.equal(h.closeCalled, true);
+});
+
+test("native staged Import uses a fresh direct link without claiming opened or saved", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    sessionSnapshot: { state: "connected", reason: "none", canExecuteAuthenticated: true },
+    popupState: { ok: true, authState: { state: "connected" }, firstSaveSeen: true,
+      activeTab: { kind: "supported_story", site: "ao3", canImport: true } },
+    importResponse: { ok: true, state: "ready_to_open", handoffID: "00000000-0000-4000-8000-000000000001",
+      expiresAtMs: Date.now() + 600000, snapshot: { state: "connected" } },
+  });
+  await flush();
+  const button = h.document.getElementById("popup-import");
+  button.click();
+  const link = h.document.getElementById("popup-import-open-native");
+  assert.equal(button.hidden, true);
+  assert.equal(link.hidden, false);
+  assert.equal(link.textContent, "Open in Trace");
+  assert.equal(link.getAttribute("href"), "traceauth://open?destination=library-import&handoff=00000000-0000-4000-8000-000000000001");
+  assert.equal(h.closeCalled, false);
+});
+
+test("native Import rejects a malformed continuation instead of opening a supplied URL", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel", sessionSnapshot: { state: "connected" },
+    popupState: { ok: true, authState: { state: "connected" }, firstSaveSeen: true,
+      activeTab: { kind: "supported_story", site: "ao3", canImport: true } },
+    importResponse: { ok: true, state: "ready_to_open", handoffID: "https://untrusted.example.test",
+      expiresAtMs: Date.now() + 600000, snapshot: { state: "connected" } },
+  });
+  await flush();
+  h.document.getElementById("popup-import").click();
+  const link = h.document.getElementById("popup-import-open-native");
+  assert.equal(link.hidden, true);
+  assert.equal(link.getAttribute("href"), null);
+  assert.equal(h.closeCalled, false);
 });

@@ -73,6 +73,8 @@ const ACTIVE_TAB_PROBE_FILES = Object.freeze([
 ]);
 let earnedPreparedContext = null;
 let kernelPopupInitialized = false;
+let nativeImportContinuation = null;
+let nativeImportGeneration = 0;
 
 const fallbackStatus = {
   state: "signed_out",
@@ -405,6 +407,7 @@ function buildPopupUi(model) {
 }
 
 function renderStatus(patch) {
+  setImportRecoveryHelp();
   mergePopupModel(patch);
   const ui = buildPopupUi(popupModel);
   const statusEl = document.getElementById("popup-status");
@@ -461,6 +464,7 @@ function renderStatus(patch) {
     settingsEl.classList.add("hidden");
   }
   if (preferencesEl) preferencesEl.hidden = ui.statusState !== "connected";
+  renderNativeImportContinuation(popupModel.authState);
 }
 
 function updatePreferenceSummary() {
@@ -578,6 +582,7 @@ function isImportCurrentlyAvailable() {
 }
 
 function restoreImportButton(button) {
+  setImportRecoveryHelp();
   const ui = buildPopupUi(popupModel);
   button.hidden = ui.importHidden;
   button.disabled = ui.importDisabled;
@@ -1334,13 +1339,53 @@ function setArchiveLinks() {
 
 setArchiveLinks();
 
+function renderNativeImportContinuation(snapshot) {
+  const link = document.getElementById("popup-import-open-native");
+  const button = document.getElementById("popup-import");
+  if (!link) return;
+  if (!nativeImportContinuation || snapshot?.state !== "connected" ||
+      Date.now() >= nativeImportContinuation.expiresAtMs) {
+    nativeImportContinuation = null;
+    link.hidden = true;
+    link.removeAttribute("href");
+    return;
+  }
+  link.href = `traceauth://open?destination=library-import&handoff=${nativeImportContinuation.handoffID}`;
+  link.hidden = false;
+  if (button) button.hidden = true;
+}
+
+function showNativeImportContinuation(response, generation) {
+  if (response?.state !== "ready_to_open" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(response.handoffID || "") ||
+      !Number.isSafeInteger(response.expiresAtMs) || response.expiresAtMs <= Date.now() ||
+      response.expiresAtMs > Date.now() + 630000 ||
+      response.snapshot?.state !== "connected" || popupModel.authState?.state !== "connected" ||
+      generation !== nativeImportGeneration) return false;
+  nativeImportContinuation = { handoffID: response.handoffID,
+    expiresAtMs: response.expiresAtMs };
+  renderNativeImportContinuation(popupModel.authState);
+  setTimeout(() => {
+    renderNativeImportContinuation(popupModel.authState);
+    if (!nativeImportContinuation) restoreImportButton(document.getElementById("popup-import"));
+  }, Math.max(0, response.expiresAtMs - Date.now()));
+  return true;
+}
+
+document.getElementById("popup-import-open-native")?.addEventListener("click", (event) => {
+  renderNativeImportContinuation(popupModel.authState);
+  if (!nativeImportContinuation) event.preventDefault();
+});
+
 function setImportBusy(button) {
+  setImportRecoveryHelp();
   button.disabled = true;
   button.textContent = "Opening import…";
   button.title = currentImportTitle();
 }
 
 function setImportSuccess(button, response) {
+  setImportRecoveryHelp();
   button.textContent =
     response?.state === "saved" || response?.state === "already_saved"
       ? "Saved to Trace"
@@ -1349,6 +1394,10 @@ function setImportSuccess(button, response) {
 }
 
 function importFailureCopy(error) {
+  if (error === "native_import_unavailable") {
+    return { label: "Import unavailable — try again",
+      title: "Return to Trace to check your connection, then start a new Import." };
+  }
   if (error === "permission_required") {
     return {
       label: "Allow site access, then retry",
@@ -1376,6 +1425,20 @@ function importFailureCopy(error) {
   };
 }
 
+function setImportRecoveryHelp(error) {
+  const help = document.getElementById("popup-import-recovery-help");
+  const button = document.getElementById("popup-import");
+  if (!help || !button) return;
+  const visible = error === "collect_failed" &&
+    (isLikelyIosExtensionUi || window.location.protocol === "safari-web-extension:");
+  help.hidden = !visible;
+  help.textContent = visible
+    ? "Reload this story. If importing still fails, restart Safari and reopen the story."
+    : "";
+  if (visible) button.setAttribute("aria-describedby", help.id);
+  else button.removeAttribute("aria-describedby");
+}
+
 function setImportFailure(button, error) {
   const copy = importFailureCopy(error);
   button.textContent = copy.label;
@@ -1386,10 +1449,12 @@ function setImportFailure(button, error) {
   } else {
     button.textContent = copy.label;
     button.title = copy.title;
+    setImportRecoveryHelp(error);
   }
 }
 
 function setImportUnavailable(button) {
+  setImportRecoveryHelp();
   button.disabled = true;
   button.textContent = currentImportLabel();
   button.title = currentImportTitle();
@@ -1405,10 +1470,13 @@ function runImport(button) {
     return;
   }
 
+  const generation = nativeImportGeneration;
   setImportBusy(button);
 
-  ext.runtime.sendMessage({ type: "TRACE_IMPORT_TRIGGER" }, (res) => {
-    if (res?.ok) {
+  sendKernelRuntimeMessage({ type: "TRACE_IMPORT_TRIGGER" }, (res) => {
+    if (res?.ok && res.state === "ready_to_open") {
+      if (!showNativeImportContinuation(res, generation)) setImportFailure(button, "native_import_unavailable");
+    } else if (res?.ok) {
       setImportSuccess(button, res);
       setTimeout(() => window.close(), 600);
     } else {
@@ -1435,6 +1503,9 @@ function kernelActionsForState(state) {
 }
 
 function renderKernelSnapshot(snapshot) {
+  setImportRecoveryHelp();
+  nativeImportGeneration += 1;
+  nativeImportContinuation = null;
   const state = snapshot?.state || "initializing";
   const reason = snapshot?.reason || "none";
   const statusEl = document.getElementById("popup-status");
@@ -1550,6 +1621,7 @@ function renderKernelSnapshot(snapshot) {
   if (preferencesEl) preferencesEl.hidden = true;
   if (importEl) importEl.hidden = true;
   if (archiveLinksEl) archiveLinksEl.hidden = true;
+  renderNativeImportContinuation(snapshot);
 }
 
 function sendKernelRuntimeMessage(message, onResponse) {

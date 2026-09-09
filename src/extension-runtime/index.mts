@@ -30,6 +30,7 @@ import { BrowserArchiveReadinessStatus } from "./archive-readiness-status.mjs";
 declare const __TRACE_SESSION_MODE__: SessionMode;
 declare const __TRACE_API_BASE__: string;
 declare const __TRACE_WEB_ORIGIN__: string;
+declare const __TRACE_NATIVE_IMPORT_HANDOFF__: boolean;
 declare const __TRACE_IOS_EARNED_PERMISSION_CONFIG__: EarnedPermissionRegistrationConfig | null;
 
 type EarnedPermissionRegistrationConfig = Readonly<{
@@ -150,6 +151,7 @@ try {
     storageMode,
     fetch: globalThis.fetch.bind(globalThis),
     apiBase: __TRACE_API_BASE__,
+    nativeImportHandoff: __TRACE_NATIVE_IMPORT_HANDOFF__,
     webOrigin: __TRACE_WEB_ORIGIN__,
     randomId,
     archiveReadinessStatus,

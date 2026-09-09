@@ -58,8 +58,10 @@ saved story.
 Automatic tracking is a separate progress command that goes directly to the
 server's monotonic update and requires its authoritative chapter confirmation.
 An uncertain request is reconciled against the account projection before Trace
-can report the target as saved. Progress commands do not emit first-save
-receipts or clear first-story handoffs. On iOS, the command first re-adopts the
+can report the target as saved. Progress commands do not emit manual first-save
+heartbeats or clear first-story handoffs. During an opt-in native setup attempt,
+their exact confirmed entry also participates in the local handover described
+below. On iOS, the command first re-adopts the
 containing app's current account so restored extension state cannot write to a
 stale account.
 
@@ -161,3 +163,21 @@ Trace does not send AO3/FFN passwords, browser cookies, private messages, drafts
 ## Limitations
 
 Browser extensions run with page access granted by the browser, so users should review each release's manifest permissions before installing or updating. Public source review improves transparency, but it does not replace store review, release-tag verification, etc.
+
+For native first-story setup, an opt-in local save record carries only the
+confirmed Library entry ID, canonical AO3/FFN work key, account ID, operation and
+attempt IDs, timestamps, API origin and a non-secret provider equality digest.
+It is stored in the app/extension shared container, never sent as telemetry.
+The containing app must verify the current account/provider and read that exact
+entry before displaying it. A bounded batch retains the first and most recent confirmed stories (up to 32),
+deduplicated by entry ID; it is not a total-save count. Records expire as current
+evidence after 24 hours; no heartbeat or permission-scope claim is implied.
+No additional page permission, cookie access, story text or private-site data
+is introduced. Receipt failure does not replay or block a confirmed save. This local record
+also covers confirmed automatic reading writes, which can create the first
+Library entry; it does not label them as manual quick-add actions or establish
+later independent use.
+The native handler selects the receipt environment from paired package metadata,
+never from a message. Only the production API and the explicit Trace development
+API are supported, with exact matching at preparation, confirmation and readback.
+An ordinary production package rejects development receipts and vice versa.

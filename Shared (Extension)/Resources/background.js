@@ -1643,6 +1643,24 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
       return committed;
     }
+    /** Credential-free private-controller fence for native handoffs. Captures
+     * capability identity, including same-account provider replacement, without
+     * lending credentials or degrading connectivity on local transport errors. */
+    async executeCurrentScope(effect) {
+      await this.#ensureInitialized();
+      const capability = await this.#withLock(async () => this.#capability);
+      if (capability === null) return { kind: "unavailable" };
+      const isCurrent = () => this.#withLock(async () => this.#isCurrentCapability(capability));
+      try {
+        const value = await effect(Object.freeze({
+          accountId: capability.accountId,
+          epoch: capability.epoch
+        }), isCurrent);
+        return await isCurrent() ? { kind: "published", value } : { kind: "stale" };
+      } catch {
+        return { kind: await isCurrent() ? "unavailable" : "stale" };
+      }
+    }
     // This boundary is for the authenticated API adapter, not UI/content
     // surfaces. The production import gate must keep raw credentials confined to
     // that adapter when the kernel is wired in a later slice.
@@ -2250,11 +2268,17 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     async #execute(command) {
       const scope2 = this.#ports.session.publicationScope();
       if (scope2 === null) return failure3("not_authenticated");
+      let context;
+      try {
+        context = await this.#ports.receipt.prepareSaveReceipt?.(scope2.accountId);
+      } catch {
+      }
+      if (!sameAccountScope(this.#ports.session.publicationScope(), scope2)) return failure3("stale");
       if (command.intent === "ensure_saved") {
         const lookup = await this.#lookup(command.workKey, true);
         if (lookup.kind !== "published") return executionFailure3(lookup);
         if (lookup.value.kind === "found" && confirmationSatisfiesStoryCommand(command, lookup.value.confirmation)) {
-          return this.#finalize(scope2, command, lookup.value.confirmation, "preflight");
+          return this.#finalize(scope2, command, lookup.value.confirmation, "preflight", context);
         }
         if (lookup.value.kind === "invalid_response") return failure3("invalid_response");
         if (lookup.value.kind === "unavailable") return failure3("unavailable");
@@ -2267,7 +2291,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           const lookup = await this.#lookup(command.workKey, false);
           if (lookup.kind !== "published") return executionFailure3(lookup);
           if (lookup.value.kind === "found" && confirmationSatisfiesStoryCommand(command, lookup.value.confirmation)) {
-            return this.#finalize(scope2, command, lookup.value.confirmation, "preflight");
+            return this.#finalize(scope2, command, lookup.value.confirmation, "preflight", context);
           }
           if (lookup.value.kind === "invalid_response") return failure3("invalid_response");
           if (lookup.value.kind === "unavailable") return failure3("unavailable");
@@ -2281,7 +2305,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         if (!confirmationSatisfiesStoryCommand(command, mutation.value.confirmation)) {
           return failure3("confirmation_missing");
         }
-        return this.#finalize(scope2, command, mutation.value.confirmation, "mutation");
+        return this.#finalize(scope2, command, mutation.value.confirmation, "mutation", context);
       }
       if (mutation.value.kind === "rejected") return failure3(mutation.value.reason);
       if (mutation.value.kind === "invalid_response") return failure3("invalid_response");
@@ -2295,7 +2319,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           scope2,
           command,
           reconciliation.value.confirmation,
-          "reconciliation"
+          "reconciliation",
+          context
         );
       }
       if (reconciliation.value.kind === "invalid_response") {
@@ -2316,7 +2341,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
       return result;
     }
-    async #finalize(scope2, command, confirmation, source) {
+    async #finalize(scope2, command, confirmation, source, context) {
       if (confirmation.workKey !== command.workKey || !sameAccountScope(this.#ports.session.publicationScope(), scope2)) {
         return failure3("stale");
       }
@@ -2332,18 +2357,21 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (!sameAccountScope(this.#ports.session.publicationScope(), scope2)) {
         return failure3("stale");
       }
-      let receipt = "not_applicable";
-      if (command.intent === "ensure_saved") {
-        try {
-          receipt = await this.#ports.receipt.publishSaveReceipt({
-            hostKind: command.hostKind,
-            action: "quick_add",
-            at: this.#ports.clock.now(),
-            ...command.handoffId === void 0 ? {} : { handoffId: command.handoffId }
-          }) ? "published" : "unavailable";
-        } catch {
-          receipt = "unavailable";
-        }
+      let receipt;
+      try {
+        receipt = await this.#ports.receipt.publishSaveReceipt({
+          accountID: scope2.accountId,
+          entryID: confirmation.entryId,
+          workKey: confirmation.workKey,
+          source,
+          ...context === void 0 ? {} : { context },
+          hostKind: command.hostKind,
+          action: command.intent === "ensure_saved" ? "quick_add" : "read",
+          at: this.#ports.clock.now(),
+          ...command.handoffId === void 0 ? {} : { handoffId: command.handoffId }
+        }) ? "published" : "unavailable";
+      } catch {
+        receipt = "unavailable";
       }
       let handoff = "not_present";
       if (command.intent === "ensure_saved" && command.handoffId !== void 0) {
@@ -2797,14 +2825,15 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       promise.then((value) => finish(value), () => finish(null));
     });
   }
-  async function sendNativeMessageWithFallback(runtime, mode, message, timeoutMs = 5e3) {
+  async function sendNativeMessageWithFallback(runtime, mode, message, timeoutMs = 5e3, options) {
     if (typeof runtime.sendNativeMessage !== "function") return null;
     const attempts = [
       [message],
       ["com.tracefiction.trace", message]
     ];
     const deadline = Date.now() + Math.max(0, timeoutMs);
-    for (const args of attempts) {
+    for (const [index, args] of attempts.entries()) {
+      if (index > 0 && options?.mayFallback && !await options.mayFallback()) break;
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) break;
       const response = await withTimeout(
@@ -2814,7 +2843,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           args,
           runtime,
           mode
-        ),
+        ).then((response2) => {
+          options?.observeResponse?.(response2);
+          return response2;
+        }),
         remainingMs
       );
       if (response !== null) return response;
@@ -2860,11 +2892,36 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var NativeStorySaveReceiptPort = class {
     #runtime;
     #mode;
-    constructor(runtime, mode) {
+    #apiOrigin;
+    constructor(runtime, mode, apiOrigin = "") {
       this.#runtime = runtime;
       this.#mode = mode;
+      this.#apiOrigin = apiOrigin;
+    }
+    async prepareSaveReceipt(accountID) {
+      const response = await sendNativeMessageWithFallback(
+        this.#runtime,
+        this.#mode,
+        { type: "TRACE_IOS_SAVE_PREPARE", accountID, apiOrigin: this.#apiOrigin },
+        1e3
+      );
+      return isRecord5(response) && response.ok === true && isRecord5(response.context) ? response.context : void 0;
     }
     async publishSaveReceipt(receipt) {
+      let recorded = false;
+      if (receipt.context !== void 0) {
+        const saved = await sendNativeMessageWithFallback(this.#runtime, this.#mode, {
+          type: "TRACE_IOS_SAVE_CONFIRMED",
+          apiOrigin: this.#apiOrigin,
+          accountID: receipt.accountID,
+          entryID: receipt.entryID,
+          workKey: receipt.workKey,
+          source: receipt.source,
+          context: receipt.context
+        }, 1e3).catch(() => void 0);
+        recorded = isRecord5(saved) && saved.ok === true;
+      }
+      if (receipt.action === "read") return recorded;
       const response = await sendNativeMessageWithFallback(
         this.#runtime,
         this.#mode,
@@ -2876,7 +2933,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           ...receipt.handoffId === void 0 ? {} : { handoffId: receipt.handoffId }
         }
       );
-      return isRecord5(response) && (response.ok === true || response.ok === "true");
+      return recorded || isRecord5(response) && (response.ok === true || response.ok === "true");
     }
   };
   var NativePendingStoryHandoffPort = class {
@@ -3872,8 +3929,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     async refreshAndRead() {
       const refreshed = await this.#projection.refreshIfNeeded(true);
-      const failure4 = refreshFailure(refreshed);
-      if (failure4 !== null) return failure4;
+      const failure5 = refreshFailure(refreshed);
+      if (failure5 !== null) return failure5;
       const value = await this.#projection.read({ refresh: false });
       return value === null ? { kind: "unavailable" } : { kind: "value", value };
     }
@@ -4235,7 +4292,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#webOrigin = new URL(options.webOrigin).origin;
       this.#delay = options.delay ?? ((milliseconds) => new Promise((resolve) => globalThis.setTimeout(resolve, milliseconds)));
     }
-    async importActivePage() {
+    async importActivePage(nativeStage) {
       let tabs;
       try {
         tabs = await this.#call("query", [{
@@ -4267,6 +4324,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         const error = isRecord10(response) && response.error === "page_contains_password_field" ? "unsupported_page" : "collect_failed";
         return Object.freeze({ ok: false, error });
       }
+      if (nativeStage !== void 0) return nativeStage(encodeImportPayload(payload));
       const importUrl = `${this.#webOrigin}/import#U${encodeURIComponent(
         encodeImportPayload(payload)
       )}`;
@@ -5366,6 +5424,155 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     });
   }
 
+  // src/extension-runtime/native-import.mts
+  var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  var MESSAGE_ATTEMPT_MS = 2500;
+  var REQUEST_LIFETIME_MS = 6e5;
+  var failure4 = () => Object.freeze({ ok: false, error: "native_import_unavailable" });
+  var record = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+  var NativeLibraryImportProducer = class {
+    #runtime;
+    #mode;
+    #apiOrigin;
+    #randomID;
+    #now;
+    #active = false;
+    #reservation = null;
+    constructor(options) {
+      this.#runtime = options.runtime;
+      this.#mode = options.mode;
+      this.#apiOrigin = new URL(options.apiOrigin).origin;
+      this.#randomID = options.randomID;
+      this.#now = options.now ?? Date.now;
+    }
+    async run(scope2, isCurrent, collect) {
+      if (this.#active) return failure4();
+      this.#active = true;
+      let reservation = null;
+      let staged = false;
+      try {
+        const previous = this.#reservation;
+        if (previous !== null) {
+          previous.abandoned = true;
+          if (previous.handoffID === null) await this.#prepare(previous);
+          await this.#cancel(previous);
+          if (this.#reservation !== null) return failure4();
+        }
+        if (!scope2.accountId || new TextEncoder().encode(scope2.accountId).length > 256 || !Number.isSafeInteger(scope2.epoch) || scope2.epoch < 0 || !await isCurrent()) return failure4();
+        const requestID = this.#randomID();
+        const issued = this.#now();
+        if (!UUID.test(requestID) || !Number.isSafeInteger(issued)) return failure4();
+        reservation = {
+          requestID,
+          issued,
+          isCurrent,
+          handoffID: null,
+          // A request can first reach native just before its ten-minute admission
+          // deadline; that reservation then has its own ten-minute lifetime.
+          expiresAtMs: issued + 2 * REQUEST_LIFETIME_MS,
+          abandoned: false,
+          cancellation: null,
+          prepare: Object.freeze({
+            type: "TRACE_IOS_IMPORT_PREPARE",
+            protocolVersion: 1,
+            requestID,
+            requestIssuedAtMs: issued,
+            accountID: scope2.accountId,
+            accountEpoch: scope2.epoch,
+            apiOrigin: this.#apiOrigin
+          })
+        };
+        this.#reservation = reservation;
+        await this.#prepare(reservation);
+        const { handoffID, expiresAtMs } = reservation;
+        if (handoffID === null || !await isCurrent() || this.#now() >= expiresAtMs) return failure4();
+        const result = await collect(async (payloadBase64) => {
+          const current = async () => await isCurrent() && this.#now() < expiresAtMs;
+          if (payloadBase64.length > 699052 || !await current()) return failure4();
+          const ready = await this.#send({
+            type: "TRACE_IOS_IMPORT_STAGE",
+            protocolVersion: 1,
+            requestID,
+            handoffID,
+            payloadBase64
+          }, current);
+          if (!record(ready) || ready.type !== "TRACE_IOS_IMPORT_STAGE" || ready.protocolVersion !== 1 || ready.ok !== true || ready.state !== "ready_to_open" || ready.handoffID !== handoffID || ready.expiresAtMs !== expiresAtMs || !await current()) return failure4();
+          staged = true;
+          return Object.freeze({ ok: true, state: "ready_to_open", handoffID, expiresAtMs });
+        });
+        return result;
+      } catch {
+        return failure4();
+      } finally {
+        if (!staged && reservation !== null) {
+          reservation.abandoned = true;
+          await this.#cancel(reservation).catch(() => void 0);
+        }
+        this.#active = false;
+      }
+    }
+    async discardUnpublished(handoffID) {
+      const reservation = this.#reservation;
+      if (reservation?.handoffID !== handoffID) return;
+      reservation.abandoned = true;
+      await this.#cancel(reservation);
+    }
+    async #prepare(reservation) {
+      await this.#send(
+        reservation.prepare,
+        async () => await reservation.isCurrent() && this.#now() < reservation.issued + REQUEST_LIFETIME_MS,
+        (prepared) => {
+          if (!record(prepared) || prepared.type !== "TRACE_IOS_IMPORT_PREPARE" || prepared.protocolVersion !== 1 || prepared.ok !== true || prepared.state !== "prepared" || typeof prepared.handoffID !== "string" || !UUID.test(prepared.handoffID) || typeof prepared.expiresAtMs !== "number" || !Number.isSafeInteger(prepared.expiresAtMs) || prepared.expiresAtMs > reservation.issued + 2 * REQUEST_LIFETIME_MS || prepared.maximumPayloadBytes !== 524288 || prepared.maximumItems !== 250 || reservation.handoffID !== null && (reservation.handoffID !== prepared.handoffID || reservation.expiresAtMs !== prepared.expiresAtMs)) return;
+          reservation.handoffID = prepared.handoffID;
+          reservation.expiresAtMs = prepared.expiresAtMs;
+          if (reservation.abandoned) void this.#cancel(reservation).catch(() => void 0);
+        }
+      );
+    }
+    #cancel(reservation) {
+      if (this.#reservation !== reservation) return Promise.resolve();
+      if (reservation.cancellation !== null) return reservation.cancellation;
+      const operation = (async () => {
+        if (this.#now() >= reservation.expiresAtMs) {
+          if (this.#reservation === reservation) this.#reservation = null;
+          return;
+        }
+        if (reservation.handoffID === null) return;
+        const cancelled = await this.#send({
+          type: "TRACE_IOS_IMPORT_CANCEL",
+          protocolVersion: 1,
+          requestID: reservation.requestID,
+          handoffID: reservation.handoffID
+        });
+        if (record(cancelled) && cancelled.type === "TRACE_IOS_IMPORT_CANCEL" && cancelled.protocolVersion === 1 && (cancelled.ok === true && cancelled.state === "cancelled" || cancelled.ok === false && (cancelled.error === "expired" || cancelled.error === "replayed"))) {
+          if (this.#reservation === reservation) this.#reservation = null;
+        }
+      })();
+      reservation.cancellation = operation;
+      void operation.finally(() => {
+        reservation.cancellation = null;
+      }).catch(() => void 0);
+      return operation;
+    }
+    async #send(message, isCurrent = async () => true, observeResponse) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (!await isCurrent()) return null;
+        const response = await sendNativeMessageWithFallback(
+          this.#runtime,
+          this.#mode,
+          message,
+          MESSAGE_ATTEMPT_MS,
+          {
+            mayFallback: isCurrent,
+            ...observeResponse === void 0 ? {} : { observeResponse }
+          }
+        );
+        if (response !== null) return response;
+      }
+      return null;
+    }
+  };
+
   // src/extension-runtime/controller.mts
   var DEGRADED_STORAGE_SNAPSHOT = Object.freeze({
     state: "degraded",
@@ -5415,6 +5622,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #metadataContributions;
     #savedFilters;
     #savedFilterApi;
+    #nativeImportEnabled;
+    #nativeImport;
     #firstStoryInitiator;
     #traceWebNavigation;
     #traceWebStatus;
@@ -5432,7 +5641,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #retryAttempt = 0;
     #retryGeneration = 0;
     #retryTimer = null;
-    #isIos = null;
+    #platform = null;
     #nativeAuthorityPreparation = null;
     #accountTransitionTail = Promise.resolve();
     #savedFilterSyncInFlight = null;
@@ -5442,6 +5651,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #statusPublicationTail = Promise.resolve();
     constructor(environment) {
       this.#mode = environment.mode;
+      this.#nativeImportEnabled = environment.nativeImportHandoff === true;
+      this.#nativeImport = new NativeLibraryImportProducer({
+        runtime: environment.runtime,
+        mode: environment.storageMode,
+        apiOrigin: environment.apiBase,
+        randomID: environment.randomId
+      });
       const storage = new BrowserStorage(
         environment.storageArea,
         environment.runtime,
@@ -5569,7 +5785,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         projection: new AccountStoryProjectionPort(this.#accountData),
         receipt: new NativeStorySaveReceiptPort(
           environment.runtime,
-          environment.storageMode
+          environment.storageMode,
+          environment.apiBase
         ),
         handoff: new NativePendingStoryHandoffPort(
           environment.runtime,
@@ -5752,7 +5969,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           error: initiation.error
         }, void 0, initiation);
       }
-      const preparation = initiation.kind === "web_save" ? await this.#prepareNativeAuthority() : { ready: true };
+      const importPlatform = initiation.kind === "popup_import" && this.#nativeImportEnabled ? await this.#nativePlatform() : null;
+      if (importPlatform === "unknown") {
+        return this.#firstStoryResponse({ ok: false, error: "native_import_unavailable" }, void 0, initiation);
+      }
+      const nativeImport = importPlatform === "ios";
+      const preparation = initiation.kind === "web_save" || nativeImport ? await this.#prepareNativeAuthority() : { ready: true };
       const action = preparation.action;
       if (!preparation.ready || this.snapshot().state !== "connected") {
         return this.#firstStoryResponse(
@@ -5760,6 +5982,21 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           action,
           initiation
         );
+      }
+      if (nativeImport) {
+        let preparedHandoff = null;
+        const fenced = await this.#service.executeCurrentScope(async (scope2, isCurrent) => {
+          const result2 = await this.#nativeImport.run(scope2, async () => {
+            const current = await this.#prepareNativeAuthority();
+            return current.ready && await isCurrent();
+          }, (stage) => this.#firstStoryInitiator.importActivePage(stage));
+          if (result2.ok && result2.state === "ready_to_open") preparedHandoff = result2.handoffID;
+          return result2;
+        });
+        if (fenced.kind !== "published" && preparedHandoff !== null) {
+          await this.#nativeImport.discardUnpublished(preparedHandoff);
+        }
+        return this.#firstStoryResponse(fenced.kind === "published" ? fenced.value : { ok: false, error: "native_import_unavailable" }, action, initiation);
       }
       const result = initiation.kind === "popup_import" ? await this.#firstStoryInitiator.importActivePage() : await this.#firstStoryInitiator.saveFromTrace(initiation.url);
       return this.#firstStoryResponse(result, action, initiation);
@@ -6102,7 +6339,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       });
     }
     async #firstStoryResponse(result, action, initiation) {
-      if (initiation?.kind === "popup_import") {
+      if (initiation?.kind === "popup_import" && !(result.ok && result.state === "ready_to_open")) {
         await this.#recordImportReadiness(result);
       }
       this.#publishStatus();
@@ -6110,7 +6347,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         ok: result.ok,
         snapshot: toPublicSessionSnapshot(this.snapshot()),
         ...action === void 0 ? {} : { action },
-        ...result.ok ? { state: result.state } : { error: result.error }
+        ...result.ok ? { state: result.state } : { error: result.error },
+        ...result.ok && result.state === "ready_to_open" ? { handoffID: result.handoffID, expiresAtMs: result.expiresAtMs } : {}
       });
     }
     async #recordStoryReadiness(request, result) {
@@ -6354,10 +6592,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         }
       });
     }
-    #usesNativeAccountAuthority() {
-      this.#isIos ??= (async () => {
-        if (/iPhone|iPad|iPod/i.test(globalThis.navigator?.userAgent ?? "")) return true;
-        if (typeof this.#runtime.getPlatformInfo !== "function") return false;
+    async #usesNativeAccountAuthority() {
+      return await this.#nativePlatform() === "ios";
+    }
+    #nativePlatform() {
+      this.#platform ??= (async () => {
+        if (/iPhone|iPad|iPod/i.test(globalThis.navigator?.userAgent ?? "")) return "ios";
+        if (typeof this.#runtime.getPlatformInfo !== "function") return "unknown";
         try {
           let value;
           if (this.#storageMode === "promise") {
@@ -6371,12 +6612,18 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
               });
             });
           }
-          return isRecord18(value) && value.os === "ios";
+          if (isRecord18(value) && value.os === "ios") return "ios";
+          if (isRecord18(value) && ["mac", "win", "linux", "openbsd", "cros"].includes(value.os)) return "desktop";
+          return "unknown";
         } catch {
-          return false;
+          return "unknown";
         }
       })();
-      return this.#isIos;
+      const platform = this.#platform;
+      void platform.then((value) => {
+        if (value === "unknown" && this.#platform === platform) this.#platform = null;
+      });
+      return platform;
     }
   };
   function installSessionRuntime(environment) {
@@ -6802,6 +7049,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       storageMode,
       fetch: globalThis.fetch.bind(globalThis),
       apiBase: "https://api.tracefiction.com",
+      nativeImportHandoff: false,
       webOrigin: "https://www.tracefiction.com",
       randomId,
       archiveReadinessStatus

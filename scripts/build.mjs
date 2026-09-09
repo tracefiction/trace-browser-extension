@@ -107,6 +107,13 @@ if (!["legacy", "kernel", "disabled"].includes(requestedSessionMode)) {
   );
 }
 const SESSION_MODE = requestedSessionMode;
+const NATIVE_IMPORT_HANDOFF = env.TRACE_NATIVE_IMPORT_CONTRACT === "trace-native-library-import-v1";
+if (env.TRACE_NATIVE_IMPORT_CONTRACT && !NATIVE_IMPORT_HANDOFF) {
+  throw new Error("Unsupported TRACE_NATIVE_IMPORT_CONTRACT.");
+}
+if (NATIVE_IMPORT_HANDOFF && SESSION_MODE !== "kernel") {
+  throw new Error("Native Import requires the kernel paired package.");
+}
 const HAS_SESSION_RUNTIME = SESSION_MODE !== "legacy";
 if (IOS_ACTIVE_TAB_PROBE && SESSION_MODE !== "kernel") {
   throw new Error("TRACE_IOS_ACTIVE_TAB_PROBE requires TRACE_SESSION_MODE=kernel.");
@@ -251,6 +258,13 @@ const TRACE_WEB_ORIGIN = (
   env.TRACE_WEB_ORIGIN ?? "http://localhost:5173"
 ).replace(/\/$/, "");
 
+if (NATIVE_IMPORT_HANDOFF) {
+  const origin = new URL(TRACE_API_BASE);
+  if (origin.protocol !== "https:" || origin.origin !== TRACE_API_BASE || origin.port) {
+    throw new Error("Native Import requires an exact HTTPS API origin for its paired package.");
+  }
+}
+
 const savedFiltersScript = "ao3-saved-filters.js";
 const finishQualifyScript = "trace-finish-qualify.js";
 // Keep the optional-permission runtime and the generated Safari manifest on
@@ -344,6 +358,7 @@ if (HAS_SESSION_RUNTIME) {
       __TRACE_SESSION_MODE__: JSON.stringify(SESSION_MODE),
       __TRACE_API_BASE__: JSON.stringify(TRACE_API_BASE),
       __TRACE_WEB_ORIGIN__: JSON.stringify(TRACE_WEB_ORIGIN),
+      __TRACE_NATIVE_IMPORT_HANDOFF__: JSON.stringify(NATIVE_IMPORT_HANDOFF),
       __TRACE_IOS_EARNED_PERMISSION_CONFIG__: JSON.stringify(
         IOS_EARNED_PERMISSION_ONBOARDING
           ? earnedPermissionRuntimeConfig
