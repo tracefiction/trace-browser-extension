@@ -259,7 +259,8 @@ confirmed Library entry ID, canonical AO3/FFN work key, account ID, operation an
 attempt IDs, timestamps, API origin and a non-secret provider equality digest.
 It is stored in the app/extension shared container, never sent as telemetry.
 The containing app must verify the current account/provider and read that exact
-entry before displaying it. The first receipt is retained for the attempt and
-expires after 24 hours; no heartbeat or permission-scope claim is implied.
+entry before displaying it. A bounded batch retains the first and most recent confirmed stories (up to 32),
+deduplicated by entry ID; it is not a total-save count. Records expire as current
+evidence after 24 hours; no heartbeat or permission-scope claim is implied.
 No additional page permission, cookie access, story text or private-site data
 is introduced. Receipt failure does not replay or block a confirmed save.

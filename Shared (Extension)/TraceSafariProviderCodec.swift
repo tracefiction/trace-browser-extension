@@ -85,6 +85,8 @@ enum TraceSafariProviderCodec {
 enum TraceSafariOnboardingReceipt {
     static let attemptKey = "traceNativeOnboardingAttemptV1"
     static let receiptKey = "traceNativeOnboardingSaveV1"
+    static let maximumSaves = 32
+    struct Batch: Codable { let version: Int; let saves: [Save] }
     static let previousAttemptKey = "traceNativeOnboardingPreviousAttemptV1"
     struct Attempt: Codable, Equatable {
         let id: String
@@ -128,6 +130,13 @@ enum TraceSafariOnboardingReceipt {
         guard let data, data.count <= 8192 else { return nil }
         return try? JSONDecoder().decode(type, from: data)
     }
+    static func readSaves(_ data: Data?) -> [Save] {
+        guard let data, data.count <= 32768 else { return [] }
+        if let batch = try? JSONDecoder().decode(Batch.self, from: data),
+           batch.version == 1, batch.saves.count <= maximumSaves { return batch.saves }
+        // Compatibility with the initial internal single-save candidate.
+        return decode(Save.self, data: data).map { [$0] } ?? []
+    }
     static func handle(_ payload: [String: Any], defaults: UserDefaults,
                        provider: TraceSafariProviderCodec.ImportBinding?, now: Double) -> [String: Any] {
         let current = decode(Attempt.self, data: defaults.data(forKey: attemptKey))
@@ -152,11 +161,21 @@ enum TraceSafariOnboardingReceipt {
               let source = payload["source"] as? String else { return ["ok": false] }
         let save = Save(attempt: attempt, context: context, entryID: entryID,
             workKey: workKey, confirmedAt: now, source: source)
-        guard save.valid(now: now), let data = try? JSONEncoder().encode(save) else { return ["ok": false] }
-        // Retain the first confirmed record for this attempt, even if another
-        // story is saved while the containing app is suspended.
-        if let prior = decode(Save.self, data: defaults.data(forKey: receiptKey)),
-           prior.attempt == attempt, prior.valid(now: now) { return ["ok": true] }
+        guard save.valid(now: now) else { return ["ok": false] }
+        var saves = readSaves(defaults.data(forKey: receiptKey)).filter {
+            $0.valid(now: now) && $0.attempt.accountID == attempt.accountID &&
+            $0.attempt.apiOrigin == attempt.apiOrigin && $0.attempt.provider == attempt.provider
+        }
+        if let prior = saves.first(where: { $0.context.operationID == save.context.operationID }) {
+            // Native delivery retries neither change identity nor renew evidence.
+            return ["ok": prior.entryID == save.entryID && prior.workKey == save.workKey]
+        }
+        // One current record per story. Preserve the first arrival and the most
+        // recent activity in a bounded batch; this is never a total-save count.
+        if let index = saves.firstIndex(where: { $0.entryID == save.entryID }) { saves[index] = save }
+        else { saves.append(save) }
+        if saves.count > maximumSaves { saves.removeSubrange(1..<(saves.count - maximumSaves + 1)) }
+        guard let data = try? JSONEncoder().encode(Batch(version: 1, saves: saves)) else { return ["ok": false] }
         defaults.set(data, forKey: receiptKey)
         return ["ok": defaults.data(forKey: receiptKey) == data]
     }

@@ -99,11 +99,20 @@ struct TraceSafariProviderCodecContract {
         require(R.handle(payload, defaults: defaults, provider: provider, now: late + 1)["ok"] as? Bool == true, "Explicit restart retains old in-flight confirmation")
         defaults.set(try! JSONEncoder().encode(attempt), forKey: R.attemptKey)
         payload["entryID"] = UUID().uuidString
+        payload["context"] = ["attemptID": attempt.id, "operationID": UUID().uuidString, "initiatedAt": attempt.startedAt + 2]
         require(R.handle(payload, defaults: defaults, provider: provider, now: late + 1)["ok"] as? Bool == true, "Second confirmation accepted")
-        require(defaults.data(forKey: R.receiptKey) == original, "First story retained")
+        let batch = R.readSaves(defaults.data(forKey: R.receiptKey))
+        require(batch.count == 2 && batch[0].entryID == R.readSaves(original)[0].entryID, "Several stories retain first arrival")
         let reopened = UserDefaults(suiteName: suite)!
-        let saved = R.decode(R.Save.self, data: reopened.data(forKey: R.receiptKey))!
+        let saved = R.readSaves(reopened.data(forKey: R.receiptKey))[0]
         require(saved.valid(now: late + 1), "Exact persisted receipt survives reopening")
+        for _ in 0..<40 {
+            payload["context"] = ["attemptID": attempt.id, "operationID": UUID().uuidString, "initiatedAt": attempt.startedAt + 2]
+            payload["entryID"] = UUID().uuidString
+            _ = R.handle(payload, defaults: defaults, provider: provider, now: late + 2)
+        }
+        let bounded = R.readSaves(defaults.data(forKey: R.receiptKey))
+        require(bounded.count == R.maximumSaves && bounded[0].entryID == saved.entryID, "Bounded batch retains first and latest stories")
         require(!saved.valid(now: late + 86_400_001), "Expired receipt is not current evidence")
         payload["type"] = "TRACE_IOS_SAVE_PREPARE"
         require(R.handle(payload, defaults: defaults, provider: provider, now: late)["ok"] as? Bool == false, "Expired authority cannot start another operation")
