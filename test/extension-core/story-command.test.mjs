@@ -137,6 +137,7 @@ test("preflight confirmation avoids a repeated mutation after worker restart", a
   assert.equal(h.calls.track, 0);
   assert.equal(h.calls.projection, 1);
   assert.deepEqual(h.calls.receipt, [{
+    accountID: "account-a", entryID: confirmation.entryId, workKey: confirmation.workKey, source: "preflight",
     hostKind: "ffn",
     action: "quick_add",
     at: 1_721_390_400_000,

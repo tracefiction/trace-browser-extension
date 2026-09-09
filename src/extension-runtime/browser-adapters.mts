@@ -364,10 +364,19 @@ export class NativeArchiveReadinessReceiptPort implements ArchiveReadinessReceip
 export class NativeStorySaveReceiptPort implements StorySaveReceiptPort {
   readonly #runtime: RuntimePort;
   readonly #mode: "callback" | "promise";
+  readonly #apiOrigin: string;
 
-  constructor(runtime: RuntimePort, mode: "callback" | "promise") {
+  constructor(runtime: RuntimePort, mode: "callback" | "promise", apiOrigin = "") {
     this.#runtime = runtime;
     this.#mode = mode;
+    this.#apiOrigin = apiOrigin;
+  }
+
+  async prepareSaveReceipt(accountID: string): Promise<Readonly<Record<string, unknown>> | undefined> {
+    const response = await sendNativeMessageWithFallback(this.#runtime, this.#mode,
+      { type: "TRACE_IOS_SAVE_PREPARE", accountID, apiOrigin: this.#apiOrigin }, 1000);
+    return isRecord(response) && response.ok === true && isRecord(response.context)
+      ? response.context : undefined;
   }
 
   async publishSaveReceipt(receipt: Readonly<{
@@ -375,7 +384,22 @@ export class NativeStorySaveReceiptPort implements StorySaveReceiptPort {
     action: "quick_add";
     at: number;
     handoffId?: string;
+    accountID: string;
+    entryID: string;
+    workKey: string;
+    source: "preflight" | "mutation" | "reconciliation";
+    context?: Readonly<Record<string, unknown>>;
   }>): Promise<boolean> {
+    let recorded = false;
+    if (receipt.context !== undefined) {
+      // Independent of legacy heartbeat delivery; identity survives a missed run.
+      const saved = await sendNativeMessageWithFallback(this.#runtime, this.#mode, {
+        type: "TRACE_IOS_SAVE_CONFIRMED", apiOrigin: this.#apiOrigin,
+        accountID: receipt.accountID, entryID: receipt.entryID, workKey: receipt.workKey,
+        source: receipt.source, context: receipt.context,
+      }, 1000).catch(() => undefined);
+      recorded = isRecord(saved) && saved.ok === true;
+    }
     const response = await sendNativeMessageWithFallback(
       this.#runtime,
       this.#mode,
@@ -387,7 +411,7 @@ export class NativeStorySaveReceiptPort implements StorySaveReceiptPort {
         ...(receipt.handoffId === undefined ? {} : { handoffId: receipt.handoffId }),
       },
     );
-    return isRecord(response) && (response.ok === true || response.ok === "true");
+    return recorded || (isRecord(response) && (response.ok === true || response.ok === "true"));
   }
 }
 

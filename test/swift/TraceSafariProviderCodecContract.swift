@@ -57,7 +57,59 @@ struct TraceSafariProviderCodecContract {
             "arbitrary corrupt data must remain unavailable"
         )
 
+        checkOnboardingReceipts()
         print("TraceSafariProviderCodec contract passed")
+    }
+
+    private static func checkOnboardingReceipts() {
+        typealias R = TraceSafariOnboardingReceipt
+        let suite = "trace.onboarding.contract." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let provider = TraceSafariProviderCodec.ImportBinding(sessionID: UUID().uuidString,
+            recordDigest: String(repeating: "a", count: 64))
+        let attempt = R.Attempt(id: UUID().uuidString, accountID: "reader-a",
+            apiOrigin: "https://api.tracefiction.com", provider: provider,
+            startedAt: 1_700_000_000_000, expiresAt: 1_700_000_010_000)
+        defaults.set(try! JSONEncoder().encode(attempt), forKey: R.attemptKey)
+        var payload: [String: Any] = ["type": "TRACE_IOS_SAVE_PREPARE",
+            "accountID": attempt.accountID, "apiOrigin": attempt.apiOrigin]
+        let prepared = R.handle(payload, defaults: defaults, provider: provider, now: attempt.startedAt + 1)
+        require(prepared["ok"] as? Bool == true, "Current attempt prepares")
+        payload["context"] = prepared["context"]
+        payload["type"] = "TRACE_IOS_SAVE_CONFIRMED"
+        payload["entryID"] = UUID().uuidString
+        payload["workKey"] = "ffn:7038840"
+        payload["source"] = "mutation"
+        require(R.handle(payload, defaults: defaults, provider: nil, now: attempt.startedAt + 2)["ok"] as? Bool == false, "Missing provider rejects")
+        var mismatch = payload; mismatch["accountID"] = "reader-b"
+        require(R.handle(mismatch, defaults: defaults, provider: provider, now: attempt.startedAt + 2)["ok"] as? Bool == false, "Wrong account rejects")
+        mismatch = payload; mismatch["apiOrigin"] = "https://other.invalid"
+        require(R.handle(mismatch, defaults: defaults, provider: provider, now: attempt.startedAt + 2)["ok"] as? Bool == false, "Wrong environment rejects")
+        mismatch = payload; mismatch["entryID"] = "invalid"
+        require(R.handle(mismatch, defaults: defaults, provider: provider, now: attempt.startedAt + 2)["ok"] as? Bool == false, "Invalid identity rejects")
+        // A write begun inside the attempt may finish after its help/window ends.
+        let late = attempt.expiresAt + 1000
+        require(R.handle(payload, defaults: defaults, provider: provider, now: late)["ok"] as? Bool == true, "Late committed save survives without heartbeat")
+        let original = defaults.data(forKey: R.receiptKey)!
+        let next = R.Attempt(id: UUID().uuidString, accountID: attempt.accountID, apiOrigin: attempt.apiOrigin,
+            provider: provider, startedAt: late, expiresAt: late + 10000)
+        defaults.set(try! JSONEncoder().encode(attempt), forKey: R.previousAttemptKey)
+        defaults.set(try! JSONEncoder().encode(next), forKey: R.attemptKey)
+        require(R.handle(payload, defaults: defaults, provider: provider, now: late + 1)["ok"] as? Bool == true, "Explicit restart retains old in-flight confirmation")
+        defaults.set(try! JSONEncoder().encode(attempt), forKey: R.attemptKey)
+        payload["entryID"] = UUID().uuidString
+        require(R.handle(payload, defaults: defaults, provider: provider, now: late + 1)["ok"] as? Bool == true, "Second confirmation accepted")
+        require(defaults.data(forKey: R.receiptKey) == original, "First story retained")
+        let reopened = UserDefaults(suiteName: suite)!
+        let saved = R.decode(R.Save.self, data: reopened.data(forKey: R.receiptKey))!
+        require(saved.valid(now: late + 1), "Exact persisted receipt survives reopening")
+        require(!saved.valid(now: late + 86_400_001), "Expired receipt is not current evidence")
+        payload["type"] = "TRACE_IOS_SAVE_PREPARE"
+        require(R.handle(payload, defaults: defaults, provider: provider, now: late)["ok"] as? Bool == false, "Expired authority cannot start another operation")
+        let replacement = TraceSafariProviderCodec.ImportBinding(sessionID: provider.sessionID,
+            recordDigest: String(repeating: "b", count: 64))
+        require(R.handle(payload, defaults: defaults, provider: replacement, now: attempt.startedAt + 1)["ok"] as? Bool == false, "Replacement provider rejects")
     }
 
     private static func require(

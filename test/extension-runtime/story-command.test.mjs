@@ -243,3 +243,27 @@ test("lookup returns a targeted authoritative confirmation or exact absence", as
     value: { kind: "absent" },
   });
 });
+
+
+test("native exact receipt is independent of a failed heartbeat", async () => {
+  const { NativeStorySaveReceiptPort } = await import("../../.trace-build/extension-runtime/browser-adapters.mjs");
+  const context = { attemptID: "attempt", operationID: "operation", initiatedAt: 100 };
+  const messages = [];
+  const runtime = { async sendNativeMessage(message) {
+    messages.push(message);
+    if (message.type === "TRACE_IOS_SAVE_PREPARE") return { ok: true, context };
+    return { ok: message.type === "TRACE_IOS_SAVE_CONFIRMED" };
+  } };
+  const port = new NativeStorySaveReceiptPort(runtime, "promise", "https://api.tracefiction.com");
+  const prepared = await port.prepareSaveReceipt("account-a");
+  assert.deepEqual(prepared, context);
+  assert.equal(await port.publishSaveReceipt({ accountID: "account-a", entryID: entryId,
+    workKey: "ffn:7038840", source: "mutation", context: prepared,
+    hostKind: "ffn", action: "quick_add", at: 200 }), true);
+  assert.equal(messages[1].type, "TRACE_IOS_SAVE_CONFIRMED");
+  assert.equal(messages[1].entryID, entryId);
+  assert.equal(messages[1].accountID, "account-a");
+  assert.equal(messages[1].apiOrigin, "https://api.tracefiction.com");
+  assert.equal(messages[2].type, "TRACE_IOS_EXTENSION_HEARTBEAT");
+  assert.equal("entryID" in messages[2], false);
+});

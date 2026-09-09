@@ -617,12 +617,13 @@ test("iOS Connect and save adopts the containing app account before any story wr
   }]);
   assert.deepEqual(nativeMessages.map((message) => message.type), [
     "TRACE_IOS_AUTH_TOKEN_REQUEST",
+    "TRACE_IOS_SAVE_PREPARE",
     "TRACE_IOS_EXTENSION_HEARTBEAT",
     "TRACE_IOS_PENDING_FIRST_STORY_CLEAR",
   ]);
-  assert.equal(nativeMessages[1].action, "quick_add");
-  assert.equal(nativeMessages[1].handoffId, "handoff_7038840");
+  assert.equal(nativeMessages[2].action, "quick_add");
   assert.equal(nativeMessages[2].handoffId, "handoff_7038840");
+  assert.equal(nativeMessages[3].handoffId, "handoff_7038840");
   assert.equal(
     (await privateDatabase.get(PRIVATE_RECORD_KEYS.accountData)).scope.accountId,
     "account-b",

@@ -108,6 +108,17 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             case "TRACE_IOS_IMPORT_PREPARE", "TRACE_IOS_IMPORT_STAGE", "TRACE_IOS_IMPORT_CANCEL":
                 responseBody = Self.importResponse(payload, profileID: profile)
 
+            case "TRACE_IOS_SAVE_PREPARE", "TRACE_IOS_SAVE_CONFIRMED":
+                if let defaults = Self.pendingDefaults(),
+                   case let .ready(credential, kind, sessionID?, expiry?) = Self.readSharedTraceCredential(),
+                   kind == "device_session",
+                   let session = TraceSafariProviderCodec.deviceSession(sessionId: sessionID,
+                       credential: credential, expiresAt: expiry) {
+                    let now = Date()
+                    responseBody = TraceSafariOnboardingReceipt.handle(payload, defaults: defaults,
+                        provider: TraceSafariProviderCodec.importBinding(session: session, now: now),
+                        now: now.timeIntervalSince1970 * 1000)
+                } else { responseBody = ["ok": false] }
             case Self.traceIosAuthTokenRequest:
                 let credential = Self.readSharedTraceCredential()
                 Self.recordProviderReadHealth(credential)

@@ -161,3 +161,13 @@ Trace does not send AO3/FFN passwords, browser cookies, private messages, drafts
 ## Limitations
 
 Browser extensions run with page access granted by the browser, so users should review each release's manifest permissions before installing or updating. Public source review improves transparency, but it does not replace store review, release-tag verification, etc.
+
+For native first-story setup, an opt-in local save record carries only the
+confirmed Library entry ID, canonical AO3/FFN work key, account ID, operation and
+attempt IDs, timestamps, API origin and a non-secret provider equality digest.
+It is stored in the app/extension shared container, never sent as telemetry.
+The containing app must verify the current account/provider and read that exact
+entry before displaying it. The first receipt is retained for the attempt and
+expires after 24 hours; no heartbeat or permission-scope claim is implied.
+No additional page permission, cookie access, story text or private-site data
+is introduced. Receipt failure does not replay or block a confirmed save.

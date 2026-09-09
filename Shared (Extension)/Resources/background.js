@@ -2268,11 +2268,19 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     async #execute(command) {
       const scope2 = this.#ports.session.publicationScope();
       if (scope2 === null) return failure3("not_authenticated");
+      let context;
+      if (command.intent === "ensure_saved") {
+        try {
+          context = await this.#ports.receipt.prepareSaveReceipt?.(scope2.accountId);
+        } catch {
+        }
+        if (!sameAccountScope(this.#ports.session.publicationScope(), scope2)) return failure3("stale");
+      }
       if (command.intent === "ensure_saved") {
         const lookup = await this.#lookup(command.workKey, true);
         if (lookup.kind !== "published") return executionFailure3(lookup);
         if (lookup.value.kind === "found" && confirmationSatisfiesStoryCommand(command, lookup.value.confirmation)) {
-          return this.#finalize(scope2, command, lookup.value.confirmation, "preflight");
+          return this.#finalize(scope2, command, lookup.value.confirmation, "preflight", context);
         }
         if (lookup.value.kind === "invalid_response") return failure3("invalid_response");
         if (lookup.value.kind === "unavailable") return failure3("unavailable");
@@ -2285,7 +2293,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           const lookup = await this.#lookup(command.workKey, false);
           if (lookup.kind !== "published") return executionFailure3(lookup);
           if (lookup.value.kind === "found" && confirmationSatisfiesStoryCommand(command, lookup.value.confirmation)) {
-            return this.#finalize(scope2, command, lookup.value.confirmation, "preflight");
+            return this.#finalize(scope2, command, lookup.value.confirmation, "preflight", context);
           }
           if (lookup.value.kind === "invalid_response") return failure3("invalid_response");
           if (lookup.value.kind === "unavailable") return failure3("unavailable");
@@ -2299,7 +2307,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         if (!confirmationSatisfiesStoryCommand(command, mutation.value.confirmation)) {
           return failure3("confirmation_missing");
         }
-        return this.#finalize(scope2, command, mutation.value.confirmation, "mutation");
+        return this.#finalize(scope2, command, mutation.value.confirmation, "mutation", context);
       }
       if (mutation.value.kind === "rejected") return failure3(mutation.value.reason);
       if (mutation.value.kind === "invalid_response") return failure3("invalid_response");
@@ -2313,7 +2321,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           scope2,
           command,
           reconciliation.value.confirmation,
-          "reconciliation"
+          "reconciliation",
+          context
         );
       }
       if (reconciliation.value.kind === "invalid_response") {
@@ -2334,7 +2343,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
       return result;
     }
-    async #finalize(scope2, command, confirmation, source) {
+    async #finalize(scope2, command, confirmation, source, context) {
       if (confirmation.workKey !== command.workKey || !sameAccountScope(this.#ports.session.publicationScope(), scope2)) {
         return failure3("stale");
       }
@@ -2354,6 +2363,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (command.intent === "ensure_saved") {
         try {
           receipt = await this.#ports.receipt.publishSaveReceipt({
+            accountID: scope2.accountId,
+            entryID: confirmation.entryId,
+            workKey: confirmation.workKey,
+            source,
+            ...context === void 0 ? {} : { context },
             hostKind: command.hostKind,
             action: "quick_add",
             at: this.#ports.clock.now(),
@@ -2882,11 +2896,35 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var NativeStorySaveReceiptPort = class {
     #runtime;
     #mode;
-    constructor(runtime, mode) {
+    #apiOrigin;
+    constructor(runtime, mode, apiOrigin = "") {
       this.#runtime = runtime;
       this.#mode = mode;
+      this.#apiOrigin = apiOrigin;
+    }
+    async prepareSaveReceipt(accountID) {
+      const response = await sendNativeMessageWithFallback(
+        this.#runtime,
+        this.#mode,
+        { type: "TRACE_IOS_SAVE_PREPARE", accountID, apiOrigin: this.#apiOrigin },
+        1e3
+      );
+      return isRecord5(response) && response.ok === true && isRecord5(response.context) ? response.context : void 0;
     }
     async publishSaveReceipt(receipt) {
+      let recorded = false;
+      if (receipt.context !== void 0) {
+        const saved = await sendNativeMessageWithFallback(this.#runtime, this.#mode, {
+          type: "TRACE_IOS_SAVE_CONFIRMED",
+          apiOrigin: this.#apiOrigin,
+          accountID: receipt.accountID,
+          entryID: receipt.entryID,
+          workKey: receipt.workKey,
+          source: receipt.source,
+          context: receipt.context
+        }, 1e3).catch(() => void 0);
+        recorded = isRecord5(saved) && saved.ok === true;
+      }
       const response = await sendNativeMessageWithFallback(
         this.#runtime,
         this.#mode,
@@ -2898,7 +2936,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           ...receipt.handoffId === void 0 ? {} : { handoffId: receipt.handoffId }
         }
       );
-      return isRecord5(response) && (response.ok === true || response.ok === "true");
+      return recorded || isRecord5(response) && (response.ok === true || response.ok === "true");
     }
   };
   var NativePendingStoryHandoffPort = class {
@@ -5750,7 +5788,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         projection: new AccountStoryProjectionPort(this.#accountData),
         receipt: new NativeStorySaveReceiptPort(
           environment.runtime,
-          environment.storageMode
+          environment.storageMode,
+          environment.apiBase
         ),
         handoff: new NativePendingStoryHandoffPort(
           environment.runtime,

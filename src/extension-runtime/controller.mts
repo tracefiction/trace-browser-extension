@@ -397,6 +397,7 @@ export class SessionRuntimeController {
       receipt: new NativeStorySaveReceiptPort(
         environment.runtime,
         environment.storageMode,
+        environment.apiBase,
       ),
       handoff: new NativePendingStoryHandoffPort(
         environment.runtime,

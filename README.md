@@ -253,3 +253,13 @@ We do **not** currently accept feature pull requests. The PolyForm Noncommercial
 This repository is source-available under the PolyForm Noncommercial License 1.0.0.
 
 It is published for transparency so users can inspect how the Trace extension handles page data, browser permissions, and network requests. Commercial reuse is not permitted.
+
+For native first-story setup, an opt-in local save record carries only the
+confirmed Library entry ID, canonical AO3/FFN work key, account ID, operation and
+attempt IDs, timestamps, API origin and a non-secret provider equality digest.
+It is stored in the app/extension shared container, never sent as telemetry.
+The containing app must verify the current account/provider and read that exact
+entry before displaying it. The first receipt is retained for the attempt and
+expires after 24 hours; no heartbeat or permission-scope claim is implied.
+No additional page permission, cookie access, story text or private-site data
+is introduced. Receipt failure does not replay or block a confirmed save.

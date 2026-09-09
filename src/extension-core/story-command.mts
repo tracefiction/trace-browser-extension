@@ -104,11 +104,17 @@ export interface StoryProjectionPort {
 }
 
 export interface StorySaveReceiptPort {
+  prepareSaveReceipt?(accountID: string): Promise<Readonly<Record<string, unknown>> | undefined>;
   publishSaveReceipt(receipt: Readonly<{
     hostKind: StoryHostKind;
     action: "quick_add";
     at: number;
     handoffId?: string;
+    accountID: string;
+    entryID: string;
+    workKey: string;
+    source: "preflight" | "mutation" | "reconciliation";
+    context?: Readonly<Record<string, unknown>>;
   }>): Promise<boolean>;
 }
 
@@ -173,6 +179,12 @@ export class StoryCommandService {
     const scope = this.#ports.session.publicationScope();
     if (scope === null) return failure("not_authenticated");
 
+    let context: Readonly<Record<string, unknown>> | undefined;
+    if (command.intent === "ensure_saved") {
+      try { context = await this.#ports.receipt.prepareSaveReceipt?.(scope.accountId); }
+      catch { /* Receipt availability must never prevent a real save. */ }
+      if (!sameAccountScope(this.#ports.session.publicationScope(), scope)) return failure("stale");
+    }
     if (command.intent === "ensure_saved") {
       // Save preflight avoids duplicate first-save work and recovers a prior
       // committed POST after a worker restart. Progress writes are monotonic
@@ -184,7 +196,7 @@ export class StoryCommandService {
         lookup.value.kind === "found" &&
         confirmationSatisfiesStoryCommand(command, lookup.value.confirmation)
       ) {
-        return this.#finalize(scope, command, lookup.value.confirmation, "preflight");
+        return this.#finalize(scope, command, lookup.value.confirmation, "preflight", context);
       }
       if (lookup.value.kind === "invalid_response") return failure("invalid_response");
       if (lookup.value.kind === "unavailable") return failure("unavailable");
@@ -207,7 +219,7 @@ export class StoryCommandService {
           lookup.value.kind === "found" &&
           confirmationSatisfiesStoryCommand(command, lookup.value.confirmation)
         ) {
-          return this.#finalize(scope, command, lookup.value.confirmation, "preflight");
+          return this.#finalize(scope, command, lookup.value.confirmation, "preflight", context);
         }
         if (lookup.value.kind === "invalid_response") return failure("invalid_response");
         if (lookup.value.kind === "unavailable") return failure("unavailable");
@@ -221,7 +233,7 @@ export class StoryCommandService {
       if (!confirmationSatisfiesStoryCommand(command, mutation.value.confirmation)) {
         return failure("confirmation_missing");
       }
-      return this.#finalize(scope, command, mutation.value.confirmation, "mutation");
+      return this.#finalize(scope, command, mutation.value.confirmation, "mutation", context);
     }
     if (mutation.value.kind === "rejected") return failure(mutation.value.reason);
     if (mutation.value.kind === "invalid_response") return failure("invalid_response");
@@ -241,7 +253,7 @@ export class StoryCommandService {
         scope,
         command,
         reconciliation.value.confirmation,
-        "reconciliation",
+        "reconciliation", context,
       );
     }
     if (reconciliation.value.kind === "invalid_response") {
@@ -278,6 +290,7 @@ export class StoryCommandService {
     command: StoryTrackCommand,
     confirmation: ConfirmedStorySave,
     source: "preflight" | "mutation" | "reconciliation",
+    context?: Readonly<Record<string, unknown>>,
   ): Promise<StoryCommandResult> {
     if (
       confirmation.workKey !== command.workKey ||
@@ -303,6 +316,9 @@ export class StoryCommandService {
     if (command.intent === "ensure_saved") {
       try {
         receipt = await this.#ports.receipt.publishSaveReceipt({
+          accountID: scope.accountId, entryID: confirmation.entryId,
+          workKey: confirmation.workKey, source,
+          ...(context === undefined ? {} : { context }),
           hostKind: command.hostKind,
           action: "quick_add",
           at: this.#ports.clock.now(),
