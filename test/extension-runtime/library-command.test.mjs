@@ -189,7 +189,10 @@ test("finish qualification API sends source provenance through the scoped endpoi
     calls[0].options.headers.Authorization,
     "Bearer trd_v1_device-credential",
   );
-  assert.deepEqual(JSON.parse(calls[0].options.body), {
+  const {readingActivity, ...body}=JSON.parse(calls[0].options.body);
+  assert.match(readingActivity.calendarDate,/^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(readingActivity.operationId,undefined);
+  assert.deepEqual(body, {
     entryId,
     workKey: "ffn:7038840",
     source: "ffn",

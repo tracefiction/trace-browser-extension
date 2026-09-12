@@ -172,7 +172,8 @@ export class StoryCommandService {
   }
 
   execute(command: StoryTrackCommand): Promise<StoryCommandResult> {
-    return this.#withLock(() => this.#execute(command));
+    const ownedCommand = { ...command, payload: { ...command.payload } };
+    return this.#withLock(() => this.#execute(ownedCommand));
   }
 
   async #execute(command: StoryTrackCommand): Promise<StoryCommandResult> {

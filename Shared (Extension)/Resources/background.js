@@ -654,7 +654,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#ports = ports;
     }
     execute(command) {
-      return this.#withLock(() => this.#execute(command));
+      const ownedCommand = { ...command };
+      return this.#withLock(() => this.#execute(ownedCommand));
     }
     async #execute(command) {
       const scope2 = this.#ports.session.publicationScope();
@@ -2263,7 +2264,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#ports = ports;
     }
     execute(command) {
-      return this.#withLock(() => this.#execute(command));
+      const ownedCommand = { ...command, payload: { ...command.payload } };
+      return this.#withLock(() => this.#execute(ownedCommand));
     }
     async #execute(command) {
       const scope2 = this.#ports.session.publicationScope();
@@ -3463,6 +3465,26 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     return hostKind2 === "ao3" ? normalized === "ao3" || normalized === "archiveofourown.org" || normalized === "archiveofourown.gay" || normalized === "archive.transformativeworks.org" : normalized === "ffn" || normalized === "fanfiction.net";
   }
 
+  // src/extension-runtime/reading-activity.mts
+  var ReadingActivityCommands = class {
+    #contexts = /* @__PURE__ */ new WeakMap();
+    context(command, operationId) {
+      const previous = this.#contexts.get(command);
+      if (previous) return previous;
+      const now = /* @__PURE__ */ new Date();
+      const offset = -now.getTimezoneOffset();
+      const absolute = Math.abs(offset);
+      const context = {
+        operationId: operationId ?? crypto.randomUUID(),
+        occurredAt: now.toISOString(),
+        calendarDate: new Date(now.getTime() + offset * 6e4).toISOString().slice(0, 10),
+        timeZone: { kind: "OFFSET", value: `${offset < 0 ? "-" : "+"}${String(Math.floor(absolute / 60)).padStart(2, "0")}:${String(absolute % 60).padStart(2, "0")}` }
+      };
+      this.#contexts.set(command, context);
+      return context;
+    }
+  };
+
   // src/extension-runtime/story-command.mts
   var UUID_PATTERN4 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   var WORK_KEY_PATTERN2 = /^(ao3|ffn):[1-9][0-9]{0,19}$/;
@@ -3489,6 +3511,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     });
   }
   var StoryCommandApi = class {
+    #readingCommands = new ReadingActivityCommands();
     #fetch;
     #trackEndpoint;
     #overlayEndpoint;
@@ -3535,7 +3558,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       const response = await this.#request(this.#trackEndpoint, credential, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(command.payload)
+        body: JSON.stringify({ ...command.payload, readingActivity: this.#readingCommands.context(command) })
       });
       if (response === null) return { kind: "success", value: { kind: "uncertain" } };
       if (response.status === 401 || response.status === 403) return { kind: "auth_rejected" };
@@ -3742,6 +3765,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     return typeof value === "string" && value.length <= 64 && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
   }
   var LibraryCommandApi = class {
+    #readingCommands = new ReadingActivityCommands();
     #fetch;
     #libraryEndpoint;
     #preferenceEndpoint;
@@ -3759,7 +3783,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         method: command.kind === "entry_patch" ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(
-          command.kind === "entry_patch" ? command.patch : { key: command.workKey, hidden: command.hidden }
+          command.kind === "entry_patch" ? { ...command.patch, ...command.patch.progress ? { readingActivity: this.#readingCommands.context(command) } : {} } : { key: command.workKey, hidden: command.hidden }
         )
       });
       if (response === null) return { kind: "success", value: { kind: "uncertain" } };
@@ -3800,6 +3824,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           state: command.state,
           ...command.state === "resolved" ? {
             operationId: command.operationId,
+            readingActivity: (() => {
+              const { operationId: _, ...calendar } = this.#readingCommands.context(command, command.operationId);
+              return calendar;
+            })(),
             workStatus: command.workStatus,
             resolutionSource: command.resolutionSource
           } : {}
