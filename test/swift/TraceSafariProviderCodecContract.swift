@@ -132,6 +132,13 @@ struct TraceSafariProviderCodecContract {
             recordDigest: String(repeating: "b", count: 64))
         require(R.handle(payload, defaults: defaults, provider: replacement, now: attempt.startedAt + 1)["ok"] as? Bool == false, "Replacement provider rejects")
 
+        #if TRACE_INTERNAL_REVIEW && TRACE_NATIVE_DEVELOPMENT_API
+        let expected = ProcessInfo.processInfo.environment["EXPECTED_DEV_ORIGIN"]!
+        require(R.developmentAPIOrigin == expected, "Built bundle metadata selects the exact origin")
+        for invalid in ["http://api.example.test", "https://localhost", "https://127.0.0.1", "https://*.example.test", "https://user@api.example.test", "https://api.example.test/", "https://api.example.test?q=1", "https://api.example.test#x", "https://api.example.test:443", "https://bad..test"] {
+            require(R.validatedDevelopmentAPIOrigin(invalid) == nil, "Invalid origin rejected")
+        }
+        if expected.isEmpty { return }
         let dev = R.Attempt(id: UUID().uuidString, accountID: attempt.accountID,
             apiOrigin: R.developmentAPIOrigin, provider: provider,
             startedAt: attempt.startedAt, expiresAt: attempt.expiresAt)
@@ -153,6 +160,10 @@ struct TraceSafariProviderCodecContract {
         require(!devSaved[0].valid(now: dev.startedAt + 2), "Production consumer rejects development save")
         require(!attempt.valid(apiOrigin: R.developmentAPIOrigin), "Development consumer rejects production attempt")
         require(R.handle(prepare, defaults: defaults, provider: provider, now: dev.startedAt + 1, configuredAPIOrigin: "https://other.invalid")["ok"] as? Bool == false, "Unapproved package environment fails closed")
+        #else
+        require(!R.allowsAPIOrigin("https://api.synthetic.example.test"), "Production ignores bundle development metadata")
+        require(!R.allowsAPIOrigin(R.developmentAPIOrigin), "Production rejects fixture development origin")
+        #endif
     }
 
     private static func require(

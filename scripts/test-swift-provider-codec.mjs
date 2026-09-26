@@ -1,47 +1,34 @@
 #!/usr/bin/env node
-
 import { spawnSync } from "node:child_process";
-import { rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import process from "node:process";
-
 if (process.platform !== "darwin") {
   console.log("Skipping Swift provider codec contract outside macOS");
   process.exit(0);
 }
-
-const output = path.join(os.tmpdir(), `trace-provider-codec-${process.pid}`);
-const moduleCache = path.join(
-  os.tmpdir(),
-  `trace-provider-codec-module-cache-${process.pid}`,
-);
-let exitStatus = 1;
+const temporary = mkdtempSync(path.join(os.tmpdir(), "trace-provider-codec-"));
+const synthetic = "https://api.synthetic.example.test";
 try {
-  const compile = spawnSync(
-    "xcrun",
-    [
-      "swiftc",
-      "Shared (Extension)/TraceSafariProviderCodec.swift",
-      "test/swift/TraceSafariProviderCodecContract.swift",
-      "-module-cache-path",
-      moduleCache,
-      "-o",
-      output,
-    ],
-    { cwd: process.cwd(), encoding: "utf8" },
-  );
-  if (compile.status !== 0) {
-    process.stderr.write(compile.stderr || compile.stdout);
-    exitStatus = compile.status ?? 1;
-  } else {
-    const contract = spawnSync(output, [], { encoding: "utf8" });
-    process.stdout.write(contract.stdout);
-    process.stderr.write(contract.stderr);
-    exitStatus = contract.status ?? 1;
+  for (const [name, flags, metadata, expected] of [
+    ["production", [], synthetic, ""],
+    ["review-only", ["TRACE_INTERNAL_REVIEW"], synthetic, ""],
+    ["development-only", ["TRACE_NATIVE_DEVELOPMENT_API"], synthetic, ""],
+    ["default", ["TRACE_INTERNAL_REVIEW", "TRACE_NATIVE_DEVELOPMENT_API"], null, "https://api.development.example.test"],
+    ["paired", ["TRACE_INTERNAL_REVIEW", "TRACE_NATIVE_DEVELOPMENT_API"], synthetic, synthetic],
+    ["invalid", ["TRACE_INTERNAL_REVIEW", "TRACE_NATIVE_DEVELOPMENT_API"], "https://user@api.example.test", ""],
+  ]) {
+    const plist = path.join(temporary, `${name}.plist`);
+    writeFileSync(plist, `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>${metadata === null ? "" : `<key>TraceDevelopmentAPIOrigin</key><string>${metadata}</string>`}</dict></plist>`);
+    const output = path.join(temporary, name);
+    const compile = spawnSync("xcrun", ["swiftc", "Shared (Extension)/TraceSafariProviderCodec.swift",
+      "test/swift/TraceSafariProviderCodecContract.swift", ...flags.flatMap(flag => ["-D", flag]),
+      "-module-cache-path", path.join(temporary, "cache"),
+      "-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist", "-Xlinker", plist,
+      "-o", output], { encoding: "utf8" });
+    if (compile.status !== 0) throw new Error(compile.stderr || compile.stdout);
+    const contract = spawnSync(output, [], { encoding: "utf8", env: { ...process.env, EXPECTED_DEV_ORIGIN: expected } });
+    if (contract.status !== 0) throw new Error(`${name}: ${contract.stderr || contract.stdout}`);
+    console.log(`${name}: ${contract.stdout.trim()}`);
   }
-} finally {
-  rmSync(output, { force: true });
-  rmSync(moduleCache, { force: true, recursive: true });
-}
-process.exit(exitStatus);
+} finally { rmSync(temporary, { force: true, recursive: true }); }

@@ -84,7 +84,41 @@ enum TraceSafariProviderCodec {
 /// Library entry before presenting a success. A heartbeat is not a prerequisite.
 enum TraceSafariOnboardingReceipt {
     static let productionAPIOrigin = "https://api.tracefiction.com"
+    #if TRACE_INTERNAL_REVIEW && TRACE_NATIVE_DEVELOPMENT_API
+    static let developmentAPIOrigin: String = {
+        guard let value = Bundle.main.object(forInfoDictionaryKey: "TraceDevelopmentAPIOrigin") else {
+            return "https://api.development.example.test"
+        }
+        // Invalid supplied metadata fails closed; only absence uses the fixture.
+        return validatedDevelopmentAPIOrigin(value) ?? ""
+    }()
+
+    static func validatedDevelopmentAPIOrigin(_ value: Any) -> String? {
+        guard let value = value as? String, value.utf8.count <= 253,
+              value.range(of: "^https://[a-z0-9]+(?:[a-z0-9.-]*[a-z0-9])?$", options: .regularExpression) != nil,
+              let components = URLComponents(string: value), let host = components.host,
+              components.scheme == "https", components.user == nil, components.password == nil,
+              components.port == nil, components.path.isEmpty, components.query == nil, components.fragment == nil
+        else { return nil }
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.count >= 2, !labels.contains("localhost"),
+              host.range(of: "^[0-9.]+$", options: .regularExpression) == nil,
+              labels.allSatisfy({ $0.range(of: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", options: .regularExpression) != nil })
+        else { return nil }
+        return value
+    }
+    #else
     static let developmentAPIOrigin = "https://api.development.example.test"
+    #endif
+
+    static func allowsAPIOrigin(_ origin: String) -> Bool {
+        if origin == productionAPIOrigin { return true }
+        #if TRACE_INTERNAL_REVIEW && TRACE_NATIVE_DEVELOPMENT_API
+        return !developmentAPIOrigin.isEmpty && origin == developmentAPIOrigin
+        #else
+        return false
+        #endif
+    }
     static let attemptKey = "traceNativeOnboardingAttemptV1"
     static let receiptKey = "traceNativeOnboardingSaveV1"
     static let maximumSaves = 32
@@ -100,7 +134,7 @@ enum TraceSafariOnboardingReceipt {
         var measurementAttemptID: String? = nil
         func valid(apiOrigin expectedOrigin: String = productionAPIOrigin) -> Bool {
             UUID(uuidString: id) != nil && !accountID.isEmpty && accountID.utf8.count <= 256 &&
-            [productionAPIOrigin, developmentAPIOrigin].contains(expectedOrigin) &&
+            allowsAPIOrigin(expectedOrigin) &&
             apiOrigin == expectedOrigin && UUID(uuidString: provider.sessionID) != nil &&
             provider.recordDigest.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil &&
             startedAt.isFinite && expiresAt.isFinite && startedAt > 0 &&

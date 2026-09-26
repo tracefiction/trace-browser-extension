@@ -118,7 +118,9 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                     // The paired package owns the environment. A message can
                     // never select or broaden the receipt's accepted API origin.
                     var receiptOrigin = TraceSafariOnboardingReceipt.productionAPIOrigin
-#if TRACE_NATIVE_IMPORT_HANDOFF && os(iOS)
+#if TRACE_INTERNAL_REVIEW && TRACE_NATIVE_DEVELOPMENT_API
+                    receiptOrigin = TraceSafariOnboardingReceipt.developmentAPIOrigin
+#elseif TRACE_NATIVE_IMPORT_HANDOFF && os(iOS)
                     if Bundle.main.object(forInfoDictionaryKey: "TraceNativeImportContract") as? String
                         == TraceSafariImportInbox.contract,
                        let origin = Bundle.main.object(forInfoDictionaryKey: "TraceNativeImportAPIOrigin") as? String {

@@ -160,3 +160,29 @@ survives Safari restart and device reboot, all five host patterns work without
 extra grants, denial and partial coverage stay incomplete and retryable, and
 onboarding success is backed by both a fresh post-registration run and current
 account server confirmation.
+
+### Private development pairing
+
+Only `build:ios-earned-permission-onboarding:preview-release` accepts the optional
+`TRACE_EXTENSION_DEV_CONFIG` absolute path to a JSON file with exactly
+`apiOrigin` and `webOrigin`. Both must be canonical HTTPS DNS origins, without
+credentials, ports, paths (including a trailing slash), queries, fragments,
+wildcards, IP addresses, or localhost. Invalid supplied input fails the build.
+With no input, the package uses `https://api.development.example.test` and
+`https://web.development.example.test`. This pair supersedes ambient API/web
+variables; ordinary production release commands reject the JSON override and
+retain their exact production-origin checks.
+
+The containing native app and Safari extension must both compile with
+`TRACE_INTERNAL_REVIEW` and `TRACE_NATIVE_DEVELOPMENT_API`, and both built
+Info.plists must supply the same API origin as `TraceDevelopmentAPIOrigin`.
+The codec reads only its target's bundled metadata, never a message or network
+response. Missing metadata uses the public fixture; invalid metadata fails
+closed. Without both compile flags the key is ignored and only production
+receipts are accepted. Account/provider binding and receipt expiry still apply.
+The private build owner must check app, extension, worker, popup, sync matches,
+and native import metadata agree before signing or installing.
+
+Keep deployment values and generated development artifacts in private build
+storage. Restore committed resources with the ordinary production release
+build before preparing public history.
