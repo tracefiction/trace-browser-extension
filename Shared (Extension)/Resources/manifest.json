@@ -17,6 +17,7 @@
     "alarms",
     "tabs",
     "storage",
+    "scripting",
     "nativeMessaging"
   ],
   "host_permissions": [

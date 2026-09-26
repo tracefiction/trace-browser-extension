@@ -271,3 +271,37 @@ Production packages accept only the production API origin. An explicitly paired
 native development package uses its immutable Import API-origin metadata for
 receipt validation; page messages cannot choose the environment. Production and
 development attempts and receipts never mix.
+
+On iOS, the popup may ask the open story page for its visible title, author
+and site so it can name the story it is confirming. That reply goes only to
+the extension's own popup, is shown locally, and is never stored or sent. The
+one-time saved note keeps a tab-scoped `sessionStorage` marker holding only
+the work key and times, so a replaced page can finish the same note. Popup
+state includes the current account's confirmed record for the active tab's
+story from the local projection; no URL leaves the runtime.
+
+Popup story commands use a content-script-opened runtime port through the
+background worker, so an existing Safari tab can reconnect after the extension
+reloads. The worker selects the active tab and accepts only its own supported
+top-frame page port. Connections and request identifiers remain in memory;
+title replies are bounded and are neither stored nor sent to a server. A tab
+change, navigation, disconnect, or account transition invalidates a pending
+reply. Relayed saves and status changes retain the existing page validation,
+current-account scope, and authoritative library-entry checks. Missing ports
+keep the popup's existing unavailable/fallback state.
+
+## Reconnecting after an extension update
+
+On background start and installation/update, Trace attempts to reinject its
+manifest-declared archive scripts into already-open, granted story-site tabs.
+The scripting API permission enables this recovery; host permissions are
+unchanged and recovery never requests website access. Each tab is checked
+individually, credential paths remain excluded, and scripts guard against
+duplicate initialization. Failed or denied injections do not reload tabs.
+
+If the popup cannot reach the page, it shows “Trace needs to reconnect to this
+page” with “Reload page”. That action reloads the active archive tab and checks
+again. A cached library entry alone is not evidence that the page is connected.
+[Safari supports the scripting API](https://developer.apple.com/videos/play/wwdc2023/10119/), but recovery after app replacement must be
+verified separately on installed iOS Safari; API availability does not prove
+that an orphaned script context can be replaced.

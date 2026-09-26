@@ -1,3 +1,4 @@
+import { installArchiveRecovery } from "./archive-recovery.mjs";
 import { installSessionRuntime, type SessionMode } from "./controller.mjs";
 import { installArchiveReadinessRuntime } from "./archive-readiness.mjs";
 import { installEarnedPermissionRegistrationRuntime } from "./earned-permission-registration.mjs";
@@ -95,6 +96,7 @@ try {
     new BrowserStorage(extension.storage.local, extension.runtime, storageMode),
   );
   if (__TRACE_SESSION_MODE__ === "kernel") {
+    installArchiveRecovery({ runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, scripting: extension.scripting, mode: storageMode });
     installTraceFirstInstallActivation({
       runtime: extension.runtime,
       tabs: extension.tabs,

@@ -9,6 +9,7 @@
 </head>
 <body>
     <main class="popup">
+        <div id="popup-earned-result" class="popup-earned-internal" role="status" aria-live="polite" aria-atomic="true"></div>
         <header class="popup-brand">
             <img class="popup-brand-mark" src="images/trace-mark.svg" alt="" width="32" height="32" />
             <span class="popup-brand-name">trace</span>
@@ -48,7 +49,7 @@
                     <span class="popup-probe-check-value">Waiting</span>
                 </div>
             </div>
-            <div id="popup-probe-result" class="popup-probe-result" data-state="checking" role="status">
+            <div id="popup-probe-result" class="popup-probe-result" data-state="checking">
                 <p id="popup-probe-result-heading" class="popup-probe-result-heading">Running capability test…</p>
                 <p id="popup-probe-result-detail" class="popup-probe-result-detail">Keep this popup open for a moment.</p>
             </div>
@@ -60,70 +61,59 @@
                 access prompt before this screen, record the probe as failed.
             </p>
         </section>
-        <section
-            id="popup-earned-permission"
-            class="popup-probe popup-earned"
-            aria-labelledby="popup-earned-heading"
-            hidden
-        >
-            <p
-                id="popup-earned-kicker"
-                class="popup-earned-story-summary"
-                data-state="checking"
-            >
-                Checking this story…
-            </p>
-            <h1 id="popup-earned-heading" class="popup-probe-heading">
-                Checking this story…
-            </h1>
-            <p id="popup-earned-lead" class="popup-probe-lead">
-                Trace is checking what remains before it can save.
-            </p>
-            <div class="popup-earned-actions">
-                <button id="popup-earned-primary" class="popup-probe-retry" type="button" disabled>
-                    Allow access and add story
-                </button>
-                <button id="popup-earned-secondary" class="popup-earned-secondary" type="button" hidden>
-                    Close
-                </button>
+        <section id="popup-earned-permission" class="popup-earned" aria-labelledby="popup-earned-heading" hidden>
+            <div id="popup-earned-settings-header" class="popup-earned-settings-header" hidden>
+                <button id="popup-earned-settings-back" type="button">Back</button>
+                <h1 id="popup-earned-settings-title">Settings</h1>
             </div>
-            <details id="popup-earned-help" class="popup-earned-help" hidden>
-                <summary id="popup-earned-help-summary">Need another way?</summary>
-                <p id="popup-earned-disclosure" class="popup-probe-disclosure"></p>
-            </details>
-            <div
-                id="popup-earned-ledger"
-                class="popup-probe-ledger popup-earned-internal"
-                aria-label="First-story progress"
-                aria-hidden="true"
-            >
+            <div class="popup-earned-scroll">
+                <p id="popup-earned-kicker" class="popup-earned-story-summary" hidden><span id="popup-earned-kicker-icon" aria-hidden="true"></span><span id="popup-earned-kicker-text"></span></p>
+                <h1 id="popup-earned-heading" class="popup-probe-heading" tabindex="-1">Checking this story…</h1>
+                <div id="popup-earned-record" class="popup-earned-record" hidden>
+                    <p id="popup-earned-record-title" class="popup-earned-record-title" hidden></p>
+                    <p id="popup-earned-record-byline" class="popup-earned-record-byline"></p>
+                    <p class="popup-earned-record-state">
+                        <span id="popup-earned-record-dot" class="popup-earned-record-dot" aria-hidden="true"></span>
+                        <span id="popup-earned-record-label"></span>
+                    </p>
+                </div>
+                <p id="popup-earned-lead" class="popup-probe-lead"></p>
+                <div id="popup-earned-extras" class="popup-earned-extras" hidden>
+                    <button id="popup-earned-status-control" class="popup-earned-status-control" type="button" aria-haspopup="menu" aria-expanded="false" hidden></button>
+                    <div id="popup-earned-status-menu" class="popup-earned-status-menu" role="menu" hidden></div>
+                    <p id="popup-earned-status-error" class="popup-earned-status-error" hidden></p>
+                    <button id="popup-earned-settings-row" class="popup-earned-settings-row" type="button" hidden>
+                        Settings
+                        <svg viewBox="0 0 8 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 1.5 6.5 7l-5 5.5"/></svg>
+                    </button>
+                </div>
+                <details id="popup-earned-help" class="popup-earned-help" hidden>
+                    <summary id="popup-earned-help-summary">Need another way?</summary>
+                    <p id="popup-earned-disclosure" class="popup-probe-disclosure"></p>
+                </details>
+            </div>
+            <div id="popup-earned-pin" class="popup-earned-pin">
+                <p id="popup-earned-rule" class="popup-earned-rule" hidden></p>
+                <div class="popup-earned-actions">
+                    <button id="popup-earned-primary" class="popup-probe-retry" type="button" disabled>Allow story sites</button>
+                    <button id="popup-earned-secondary" class="popup-earned-secondary" type="button" hidden>Close</button>
+                </div>
+            </div>
+            <div id="popup-earned-ledger" class="popup-probe-ledger popup-earned-internal" aria-label="First-story progress" aria-hidden="true">
                 <div id="popup-earned-story" class="popup-probe-check" data-state="checking">
-                    <span class="popup-probe-check-label">Story page</span>
-                    <span class="popup-probe-check-value">Checking</span>
+                    <span class="popup-probe-check-label">Story page</span><span class="popup-probe-check-value">Checking</span>
                 </div>
                 <div id="popup-earned-access" class="popup-probe-check" data-state="waiting">
-                    <span class="popup-probe-check-label">Website access</span>
-                    <span class="popup-probe-check-value">Needed</span>
+                    <span class="popup-probe-check-label">Website access</span><span class="popup-probe-check-value">Needed</span>
                 </div>
                 <div id="popup-earned-save" class="popup-probe-check" data-state="waiting">
-                    <span class="popup-probe-check-label">Saved to Trace</span>
-                    <span class="popup-probe-check-value">Waiting</span>
+                    <span class="popup-probe-check-label">Saved to Trace</span><span class="popup-probe-check-value">Waiting</span>
                 </div>
-            </div>
-            <div
-                id="popup-earned-result"
-                class="popup-probe-result popup-earned-internal"
-                data-state="checking"
-                role="status"
-                aria-live="polite"
-            >
-                <p id="popup-earned-result-heading" class="popup-probe-result-heading">Checking setup…</p>
-                <p id="popup-earned-result-detail" class="popup-probe-result-detail">Nothing will be saved before website access is allowed.</p>
             </div>
         </section>
         <section class="popup-sheet" aria-labelledby="popup-status">
             <p class="popup-eyebrow" hidden></p>
-            <p id="popup-status" class="popup-status" role="status">Checking Trace connection…</p>
+            <p id="popup-status" class="popup-status">Checking Trace connection…</p>
             <p id="popup-lead" class="popup-lead">
                 Checking extension status…
             </p>
@@ -132,7 +122,7 @@
             <button id="popup-import" class="popup-import" type="button">
                 Import from this page
             </button>
-            <p id="popup-import-recovery-help" class="popup-import-recovery-help" role="status" hidden></p>
+            <p id="popup-import-recovery-help" class="popup-import-recovery-help" hidden></p>
             <a id="popup-import-open-native" class="popup-import" hidden>Open in Trace</a>
             <div id="popup-archive-links" class="popup-archive-links" hidden>
                 <a
@@ -154,24 +144,8 @@
                     Open FFN
                 </a>
             </div>
-            <a
-                id="popup-cta"
-                class="popup-cta"
-                href="#"
-                hidden
-            >
-                Continue
-            </a>
-            <a
-                id="popup-session-help"
-                class="popup-cta"
-                href="#"
-                target="_blank"
-                rel="noopener noreferrer"
-                hidden
-            >
-                Connection help
-            </a>
+            <button id="popup-cta" class="popup-cta" type="button" hidden>Continue</button>
+            <button id="popup-session-help" class="popup-cta" type="button" hidden>Connection help</button>
         </div>
         <details id="popup-preferences" class="popup-preferences" hidden>
             <summary class="popup-preferences-summary">

@@ -11,6 +11,16 @@ const {
 
 const FIXTURES = path.join(__dirname, "fixtures");
 
+// Tests can inspect private collector helpers without publishing them in the content world.
+function collectorTestSource(source) {
+  return source.replace(/\n\}\)\(\);\s*$/, `
+window.finishQualifyIsLastPostedChapter = finishQualifyIsLastPostedChapter;
+window.removeQuickAddElements = removeQuickAddElements;
+window.renderQuickAddButton = renderQuickAddButton;
+window.__traceTestHooks = { sendAutoTrackForStory };
+})();`);
+}
+
 function loadFixture(name) {
   return fs.readFileSync(path.join(FIXTURES, name), "utf8");
 }
@@ -196,7 +206,7 @@ test("finish qualification requires the exact latest posted chapter", () => {
       lastError: null,
     },
   });
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
 
   assert.equal(dom.window.finishQualifyIsLastPostedChapter({ chn: 12, chPub: 12 }), true);
   assert.equal(dom.window.finishQualifyIsLastPostedChapter({ chn: 11, chPub: 12 }), false);
@@ -1392,7 +1402,7 @@ test("FFN mobile story Add saves immediately without opening the sheet", () => {
   };
 
   installCollectorChrome(dom, chrome);
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
@@ -1410,7 +1420,7 @@ test("FFN mobile story Add saves immediately without opening the sheet", () => {
   assert.ok(sheet, "expected Trace story sheet");
   assert.notEqual(sheet.getAttribute("aria-hidden"), "false");
   assert.equal(handle.disabled, true);
-  assert.match(handle.textContent || "", /Adding\.\.\./);
+  assert.match(handle.textContent || "", /Adding…/);
   const spinnerSvg = handle.querySelector("svg");
   assert.ok(spinnerSvg, "expected pending story handle to render a spinner icon");
   assert.ok(spinnerSvg.querySelector("circle"), "expected spinner to include a centered ring");
@@ -1426,11 +1436,122 @@ test("FFN mobile story Add saves immediately without opening the sheet", () => {
   pendingCallback({ ok: true });
 });
 
+test("iOS story label points to the Trace app while the extension is not linked", async () => {
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    pendingFirstStoryResponse: { ok: true, url: "" },
+    mutateDom(dom) {
+      Object.defineProperty(dom.window.navigator, "userAgent", {
+        value: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+        configurable: true,
+      });
+    },
+    projectionResponse() {
+      return {
+        ok: true,
+        snapshot: { state: "signed_out", reason: "credential_absent", canExecuteAuthenticated: false },
+        projection: { entries: {}, workPreferences: {}, syncVersion: null },
+      };
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  const handle = h.dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle);
+  assert.match(handle.textContent || "", /Finish setup in Trace/);
+  assert.doesNotMatch(handle.textContent || "", /^Connect$/);
+});
+
+test("a save that failed before linking retries when the reader returns to the page", async () => {
+  const harness = createStoryAutoTrackPendingHarness({ holdAutoTrack: true });
+  const autoTracks = () => harness.sent.filter((message) => message.type === "TRACE_AUTO_TRACK").length;
+  // Every load-time attempt fails because Trace is not linked yet.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    harness.autoTrackCallback({ ok: false, error: "not_authenticated" });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+  const before = autoTracks();
+  assert.ok(before >= 1, "the page tries on load");
+
+  // Reader finishes setup in the Trace app, then comes back to Safari.
+  harness.dom.window.document.dispatchEvent(new harness.dom.window.Event("visibilitychange"));
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  assert.equal(autoTracks(), before + 1, "the page retries once without a reload");
+
+  // A later return does not keep retrying once the failure is handled.
+  harness.dom.window.document.dispatchEvent(new harness.dom.window.Event("visibilitychange"));
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  assert.equal(autoTracks(), before + 1);
+});
+
+test("saved note appears when linking happens after the page loaded", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000123";
+  let linked = false;
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    pendingFirstStoryResponse: { ok: true, url: "" },
+    projectionResponse() {
+      return linked
+        ? {
+            ok: true,
+            snapshot: { state: "connected", reason: "none", canExecuteAuthenticated: true },
+            projection: {
+              entries: { "ffn:7038840": { status: "PLANNING", readerStatus: "PLANNING", canonicalReaderStatus: "SAVED", entryId } },
+              workPreferences: {},
+              syncVersion: "v-linked",
+            },
+          }
+        : {
+            ok: true,
+            snapshot: { state: "signed_out", reason: "credential_absent", canExecuteAuthenticated: false },
+            projection: { entries: {}, workPreferences: {}, syncVersion: null },
+          };
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  // By the first linked read, the story has already been saved.
+  linked = true;
+  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(h.dom.window.document.querySelector("trace-saved-note"), "linking mid-visit still shows the note");
+});
+
+test("an unavailable FanFiction.net story page is never saved automatically", async () => {
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: true },
+    pendingFirstStoryResponse: { ok: true, url: "" },
+    mutateDom(dom) {
+      // "Story Not Found" keeps the /s/ URL but has no chapter text.
+      dom.window.document.getElementById("storycontent")?.remove();
+      dom.window.document.title = "FanFiction Mobile";
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.equal(
+    h.sent.some((message) => message.type === "TRACE_AUTO_TRACK"),
+    false,
+    "no automatic save without story text",
+  );
+  Object.defineProperty(h.dom.window.document, "readyState", {
+    configurable: true,
+    value: "complete",
+  });
+  const identity = await h.sendRuntimeMessage(
+    { type: "TRACE_STORY_IDENTITY_GET" },
+    { id: "trace-extension" },
+  );
+  assert.equal(identity.ok, false);
+  assert.equal(identity.unavailable, true, "the popup can distinguish an unavailable page from a save still in flight");
+});
+
 function createStoryAutoTrackPendingHarness(options = {}) {
   const dom = domFromFixture(
     "ffn_story_mobile.html",
     options.url || "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter",
   );
+  if (typeof options.mutateDom === "function") options.mutateDom(dom);
   Object.defineProperty(dom.window.document, "visibilityState", {
     value: "visible",
     configurable: true,
@@ -1476,6 +1597,8 @@ function createStoryAutoTrackPendingHarness(options = {}) {
   const storageChangeListeners = [];
   const chrome = {
     runtime: {
+      id: "trace-extension",
+      connect: options.connectPort,
       onMessage: {
         addListener(fn) {
           runtimeMessageListener = fn;
@@ -1526,6 +1649,10 @@ function createStoryAutoTrackPendingHarness(options = {}) {
         }
         if (msg.type === "TRACE_QUICK_ADD" && typeof cb === "function") {
           cb(options.quickAddResponse || { ok: true });
+          return;
+        }
+        if (msg.type === "TRACE_SET_READER_STATUS" && typeof cb === "function") {
+          cb(options.setReaderStatusResponse || { ok: true });
           return;
         }
         if (msg.type === "TRACE_IOS_PENDING_FIRST_STORY_GET") {
@@ -1620,7 +1747,7 @@ function createStoryAutoTrackPendingHarness(options = {}) {
     installCollectorChrome(dom, chrome);
   }
   dom.window.TRACE_SESSION_MODE = options.sessionMode || "legacy";
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   if (!options.skipDomContentLoaded) {
     dom.window.document.dispatchEvent(
       new dom.window.Event("DOMContentLoaded", { bubbles: true }),
@@ -1662,10 +1789,10 @@ function createStoryAutoTrackPendingHarness(options = {}) {
       pendingFirstStoryCallback = null;
       resolve(response || options.pendingFirstStoryResponse || { ok: true, url: "" });
     },
-    sendRuntimeMessage(message) {
+    sendRuntimeMessage(message, sender = {}) {
       return new Promise((resolve) => {
         assert.equal(typeof runtimeMessageListener, "function");
-        const asyncResponse = runtimeMessageListener(message, {}, resolve);
+        const asyncResponse = runtimeMessageListener(message, sender, resolve);
         if (asyncResponse !== true) {
           Promise.resolve().then(() => resolve(undefined));
         }
@@ -1695,7 +1822,7 @@ test("story page unknown work shows pending while auto-track is in flight and ig
   const handle = dom.window.document.querySelector("[data-trace-story-handle]");
   assert.ok(handle, "expected Trace story handle");
   assert.equal(handle.disabled, true);
-  assert.match(handle.textContent || "", /Adding\.\.\./);
+  assert.match(handle.textContent || "", /Adding…/);
 
   const sentBeforeClick = sent.length;
   handle.click();
@@ -1730,7 +1857,7 @@ test("story page keeps a confirmed cached saved state while auto-track reconcile
   assert.ok(handle, "expected Trace story handle");
   assert.equal(handle.disabled, false);
   assert.match(handle.textContent || "", /Saved/i);
-  assert.doesNotMatch(handle.textContent || "", /Adding\.\.\./);
+  assert.doesNotMatch(handle.textContent || "", /Adding…/);
 });
 
 test("story page confirmed overlay entry clears an older auto-track pending handle", () => {
@@ -1756,7 +1883,7 @@ test("story page confirmed overlay entry clears an older auto-track pending hand
   assert.ok(handle, "expected Trace story handle");
   assert.equal(handle.disabled, false);
   assert.match(handle.textContent || "", /Reading\s*3\/28/i);
-  assert.doesNotMatch(handle.textContent || "", /Adding\.\.\./);
+  assert.doesNotMatch(handle.textContent || "", /Adding…/);
 });
 
 test("story page projects a newly viewed chapter while auto-track confirms it", () => {
@@ -2020,7 +2147,7 @@ test("story page rehydrates pending work state from the background on load", () 
   const handle = dom.window.document.querySelector("[data-trace-story-handle]");
   assert.ok(handle, "expected Trace story handle");
   assert.equal(handle.disabled, true);
-  assert.match(handle.textContent || "", /Adding\.\.\./);
+  assert.match(handle.textContent || "", /Adding…/);
   assert.equal(sent.some((msg) => msg.type === "TRACE_WORK_STATE_GET"), true);
 });
 
@@ -2063,7 +2190,7 @@ test("story page does not synthesize saved from an unconfirmed auto-track ack", 
 
   const handle = dom.window.document.querySelector("[data-trace-story-handle]");
   assert.ok(handle, "expected Trace story handle");
-  assert.match(handle.textContent || "", /Adding\.\.\./);
+  assert.match(handle.textContent || "", /Adding…/);
   assert.equal(store.libraryOverlayCache.entries["ffn:7038840"], undefined);
   assert.equal(sent.some((msg) => msg.type === "TRACE_WORK_STATE_GET"), true);
 });
@@ -2426,6 +2553,160 @@ test("kernel story page re-queries its private projection after a confirmed-save
   assert.doesNotMatch(handle.textContent || "", /Add to Trace/i);
 });
 
+function savedNoteHarness(initiallyConfirmed, extraStore = {}) {
+  const entryId = "00000000-0000-4000-8000-000000000123";
+  const state = { confirmed: initiallyConfirmed };
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false, ...extraStore },
+    pendingFirstStoryResponse: { ok: true, url: "" },
+    projectionResponse() {
+      return {
+        ok: true,
+        snapshot: { state: "connected", reason: "none", canExecuteAuthenticated: true },
+        projection: {
+          entries: state.confirmed
+            ? { "ffn:7038840": { status: "PLANNING", readerStatus: "PLANNING", canonicalReaderStatus: "SAVED", entryId } }
+            : {},
+          workPreferences: {},
+          syncVersion: state.confirmed ? "2026-08-22T08:30:00.000Z" : null,
+        },
+      };
+    },
+  });
+  return { h, state };
+}
+
+test("saved note appears once with separate text and no duplicate live region when a story is confirmed", async () => {
+  const { h, state } = savedNoteHarness(false);
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  const doc = h.dom.window.document;
+  assert.equal(doc.querySelector("[data-trace-saved-note]"), null);
+
+  state.confirmed = true;
+  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const host = doc.querySelector("trace-saved-note");
+  assert.ok(host, "a newly confirmed story shows the note");
+  assert.equal(host.parentElement, doc.documentElement, "mounted outside <body>");
+  const note = host.__traceShadow.querySelector("[data-trace-saved-note]");
+  assert.ok(note);
+  assert.equal(note.hasAttribute("role"), false);
+  assert.equal(note.hasAttribute("aria-live"), false);
+  assert.match(note.style.cssText, /position:\s*fixed/);
+  assert.match(note.textContent, /Saved to your Library/);
+  const live = doc.querySelector("[data-trace-page-live-region]");
+  assert.ok(live);
+  assert.equal(live.parentElement, doc.body);
+  assert.equal(live.getAttribute("role"), "status");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.match(live.textContent, /Saved to your Library\. .*Trace keeps your place as you read\./);
+  assert.equal(doc.activeElement === note || note.contains(doc.activeElement), false, "the note never takes focus");
+
+  // A later revision for the same story does not repeat it.
+  note.querySelector("button[aria-label='Dismiss']").click();
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.equal(host.__traceShadow.querySelector("[data-trace-saved-note]"), null);
+  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 2);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(host.__traceShadow.querySelector("[data-trace-saved-note]"), null);
+});
+
+test("saved note continues on a replaced page for its window unless dismissed", async () => {
+  const first = savedNoteHarness(false);
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  first.state.confirmed = true;
+  first.h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(first.h.dom.window.document.querySelector("trace-saved-note"));
+  const marker = first.h.dom.window.sessionStorage.getItem("trace:saved-note:v1");
+  assert.ok(marker);
+  assert.equal(JSON.parse(marker).workKey, "ffn:7038840");
+  assert.equal(marker.includes("Chance"), false, "the marker never holds a title");
+});
+
+test("saved note is still shown three seconds after it appears", async () => {
+  const { h, state } = savedNoteHarness(false);
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  state.confirmed = true;
+  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  const host = h.dom.window.document.querySelector("trace-saved-note");
+  assert.ok(host);
+  await new Promise((resolve) => setTimeout(resolve, 3000));
+  const note = host.__traceShadow.querySelector("[data-trace-saved-note]");
+  assert.ok(note, "the note must survive its first seconds");
+  assert.notEqual(note.style.opacity, "0");
+});
+
+test("saved note is shown for the first saved story only", async () => {
+  const first = savedNoteHarness(false);
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  first.state.confirmed = true;
+  first.h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(first.h.dom.window.document.querySelector("trace-saved-note"));
+  assert.equal(first.h.store.traceSavedNoteFirstStoryShownV1, true);
+  assert.equal(JSON.stringify(first.h.store.traceSavedNoteFirstStoryShownV1), "true", "the flag holds no story data");
+
+  // A later newly saved story on this device stays quiet.
+  const second = savedNoteHarness(false, { traceSavedNoteFirstStoryShownV1: true });
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  second.state.confirmed = true;
+  second.h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(second.h.dom.window.document.querySelector("trace-saved-note"), null);
+});
+
+test("saved note yields to a visible end-of-story band", async () => {
+  const { h, state } = savedNoteHarness(false);
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  const doc = h.dom.window.document;
+  const band = doc.createElement("div");
+  band.setAttribute("data-trace-finish-qualify", "");
+  band.getBoundingClientRect = () => ({ top: 400, bottom: 600, height: 200 });
+  doc.body.appendChild(band);
+  state.confirmed = true;
+  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  const host = doc.querySelector("trace-saved-note");
+  assert.equal(host ? host.__traceShadow.querySelector("[data-trace-saved-note]") : null, null);
+});
+
+test("saved note leaves when the popup has already confirmed the story", async () => {
+  const { h, state } = savedNoteHarness(false);
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  state.confirmed = true;
+  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  const host = h.dom.window.document.querySelector("trace-saved-note");
+  assert.ok(host.__traceShadow.querySelector("[data-trace-saved-note]"));
+  const reply = await h.sendRuntimeMessage({ type: "TRACE_SAVED_NOTE_DISMISS" }, { id: "trace-extension" });
+  assert.equal(reply.ok, true);
+  assert.equal(host.__traceShadow.querySelector("[data-trace-saved-note]"), null);
+});
+
+test("saved note ignores a dismiss that does not come from the extension popup", async () => {
+  const { h, state } = savedNoteHarness(false);
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  state.confirmed = true;
+  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  const host = h.dom.window.document.querySelector("trace-saved-note");
+  const reply = await h.sendRuntimeMessage({ type: "TRACE_SAVED_NOTE_DISMISS" }, {});
+  assert.equal(reply.ok, false);
+  assert.ok(host.__traceShadow.querySelector("[data-trace-saved-note]"));
+});
+
+test("saved note never appears for a story already in the Library when the page loaded", async () => {
+  const { h } = savedNoteHarness(true);
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.dom.window.document.querySelector("trace-saved-note"), null);
+});
+
 test("kernel story projection retries a transient cold-worker read without retrying mutations", async () => {
   const entryId = "00000000-0000-4000-8000-000000000123";
   const h = createStoryAutoTrackPendingHarness({
@@ -2616,7 +2897,7 @@ test("story page auto-track success updates the pending handle to Reading progre
   });
 
   const handle = dom.window.document.querySelector("[data-trace-story-handle]");
-  assert.match(handle.textContent || "", /Adding\.\.\./);
+  assert.match(handle.textContent || "", /Adding…/);
 
   autoTrackCallback({
     ok: true,
@@ -2661,7 +2942,7 @@ test("story page auto-track failure uses existing compact error states", () => {
       holdAutoTrack: true,
     });
     const handle = dom.window.document.querySelector("[data-trace-story-handle]");
-    assert.match(handle.textContent || "", /Adding\.\.\./);
+    assert.match(handle.textContent || "", /Adding…/);
 
     autoTrackCallback(item.response);
 
@@ -2765,7 +3046,7 @@ test("first-story focus-add retries explicit quick-add after retryable auto-trac
     });
 
   const handle = dom.window.document.querySelector("[data-trace-story-handle]");
-  assert.match(handle.textContent || "", /Adding\.\.\./);
+  assert.match(handle.textContent || "", /Adding…/);
 
   autoTrackCallback({ ok: false, error: "confirmation_missing" });
 
@@ -2828,7 +3109,7 @@ test("AO3 story places compact Trace handle centered below title and byline", ()
   };
 
   installCollectorChrome(dom, chrome);
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
@@ -2914,7 +3195,7 @@ test("mobile story keeps Trace sheet as fixed bottom sheet", () => {
   };
 
   installCollectorChrome(dom, chrome);
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
@@ -2947,7 +3228,7 @@ test("mobile story keeps Trace sheet as fixed bottom sheet", () => {
 
 function createStorySheetModalHarness(options = {}) {
   const dom = new JSDOM(
-    "<!doctype html><html><body style='position:relative'><a id='before' href='#before'>Before</a><h2 class='title heading'>Accessible AO3 Work</h2><h3 class='byline heading'><a rel='author' href='/users/demo/pseuds/demo'>demo</a></h3><dl class='work meta group'><dt class='chapters'>Chapters:</dt><dd class='chapters'>4/12</dd></dl></body></html>",
+    "<!doctype html><html><body style='position:relative'><a id='before' href='#before'>Before</a><h2 class='title heading'>Accessible AO3 Work</h2><h3 class='byline heading'><a rel='author' href='/users/demo/pseuds/demo'>demo</a></h3><dl class='work meta group'><dt class='chapters'>Chapters:</dt><dd class='chapters'>4/12</dd></dl><div id='chapters'><div class='chapter' id='chapter-4'><p>Test chapter.</p></div></div></body></html>",
     {
       url: "https://archiveofourown.org/works/77890/chapters/4",
       contentType: "text/html",
@@ -3011,7 +3292,7 @@ function createStorySheetModalHarness(options = {}) {
     },
   };
   installCollectorChrome(dom, chrome);
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
@@ -3224,7 +3505,7 @@ test("story bottom sheet removes drag recovery motion when reduced motion is req
 
 test("FFN desktop story places compact Trace handle after profile header", () => {
   const dom = new JSDOM(
-    "<!doctype html><html><body><div id='profile_top'><b class='xcontrast_txt'>Demo FFN Work</b> by <a href='/u/1/demo'>demo</a><div class='xcontrast_txt'>A long enough story summary for Trace collection to ignore title-only nodes.</div><span class='xgray xcontrast_txt'>Rated: Fiction T - English - Chapters: 3 - Words: 12,345</span></div></body></html>",
+    "<!doctype html><html><body><div id='profile_top'><b class='xcontrast_txt'>Demo FFN Work</b> by <a href='/u/1/demo'>demo</a><div class='xcontrast_txt'>A long enough story summary for Trace collection to ignore title-only nodes.</div><span class='xgray xcontrast_txt'>Rated: Fiction T - English - Chapters: 3 - Words: 12,345</span></div><div id='storytext'>Test chapter.</div></body></html>",
     {
       url: "https://www.fanfiction.net/s/67890/1/Demo-FFN-Work",
       contentType: "text/html",
@@ -3267,7 +3548,7 @@ test("FFN desktop story places compact Trace handle after profile header", () =>
   };
 
   installCollectorChrome(dom, chrome);
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
@@ -3331,7 +3612,7 @@ test("FFN mobile story quick-add shows planning after chapter-one success", () =
     return 1;
   };
   installCollectorChrome(dom, chrome);
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
@@ -3395,7 +3676,7 @@ test("FFN mobile story quick-add shows reading progress after later-chapter succ
     return 1;
   };
   installCollectorChrome(dom, chrome);
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
@@ -3473,7 +3754,7 @@ test("FFN mobile story quick-add shows optional post-add status choices when ent
       return 1;
     };
     installCollectorChrome(dom, chrome);
-    dom.window.eval(collectorSrc);
+    dom.window.eval(collectorTestSource(collectorSrc));
     dom.window.document.dispatchEvent(
       new dom.window.Event("DOMContentLoaded", { bubbles: true }),
     );
@@ -3564,7 +3845,7 @@ test("story sheet shows status editing for cached entries with entryId and hides
     };
 
     installCollectorChrome(dom, chrome);
-    dom.window.eval(collectorSrc);
+    dom.window.eval(collectorTestSource(collectorSrc));
     dom.window.document.dispatchEvent(
       new dom.window.Event("DOMContentLoaded", { bubbles: true }),
     );
@@ -3679,7 +3960,7 @@ test("story sheet selected status choice uses the unified ink selection and stat
   };
 
   installCollectorChrome(dom, chrome);
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
@@ -3693,11 +3974,11 @@ test("story sheet selected status choice uses the unified ink selection and stat
   assert.equal(selected.getAttribute("data-trace-status-choice"), "PAUSED");
   assert.match(
     selected.getAttribute("style") || "",
-    /background:\s*(?:#151e1c|rgb\(21,\s*30,\s*28\))/i,
+    /background:\s*transparent/i,
   );
   assert.match(
     selected.getAttribute("style") || "",
-    /--sc:\s*#a8623a/i,
+    /--sc:\s*var\(--trace-page-status-paused\)/i,
   );
   assert.doesNotMatch(
     selected.getAttribute("style") || "",
@@ -3777,7 +4058,7 @@ test("story sheet Planning to Reading sends chapter progress 1 and displays 1/? 
   };
 
   installCollectorChrome(dom, chrome);
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
@@ -3907,7 +4188,7 @@ test("finish qualify watches AO3 chapter text and routes resolution through the 
     },
   };
   installCollectorChrome(dom, chrome);
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
@@ -4019,7 +4300,7 @@ test("one-shot finish evidence survives the initial Saved round-trip", async () 
     toast() {},
   };
   installCollectorChrome(dom, chrome);
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
@@ -4161,7 +4442,7 @@ test("finish qualify on AO3 Entire Work waits for crossing the final rendered ch
 
   installCollectorChrome(dom, chrome);
   dom.window.eval(finishSrc);
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(new dom.window.Event("DOMContentLoaded", { bubbles: true }));
 
   assert.equal(
@@ -4281,7 +4562,7 @@ test("finish qualify band marks an unknown ongoing FFN final chapter caught up t
   const onReachEnd = dom.window.TraceFinishQualify.onReachEnd;
   dom.window.TraceFinishQualify.onReachEnd = (body, callback) =>
     onReachEnd(body, callback, { dwellMs: 0 });
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
@@ -4428,7 +4709,7 @@ test("finish qualify inserts AO3 prompt after the final end notes and aligns to 
   const onReachEnd = dom.window.TraceFinishQualify.onReachEnd;
   dom.window.TraceFinishQualify.onReachEnd = (body, callback) =>
     onReachEnd(body, callback, { dwellMs: 0 });
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
@@ -4546,7 +4827,7 @@ test("finish qualify falls back to the AO3 chapters boundary when a work skin di
   const onReachEnd = dom.window.TraceFinishQualify.onReachEnd;
   dom.window.TraceFinishQualify.onReachEnd = (endElement, callback) =>
     onReachEnd(endElement, callback, { dwellMs: 0 });
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
@@ -4667,7 +4948,7 @@ test("finish qualify promotes caught-up known-complete work with promise runtime
   const onReachEnd = dom.window.TraceFinishQualify.onReachEnd;
   dom.window.TraceFinishQualify.onReachEnd = (body, callback) =>
     onReachEnd(body, callback, { dwellMs: 0 });
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
@@ -4804,7 +5085,7 @@ test("finish qualify open acknowledgement controls whether the manual prompt mou
     };
 
     installCollectorChrome(dom, chrome);
-    dom.window.eval(collectorSrc);
+    dom.window.eval(collectorTestSource(collectorSrc));
     dom.window.document.dispatchEvent(
       new dom.window.Event("DOMContentLoaded", { bubbles: true }),
     );
@@ -4899,7 +5180,7 @@ test("finish qualify ignores a delayed open response after the projection become
   };
 
   installCollectorChrome(dom, chrome);
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(new dom.window.Event("DOMContentLoaded", { bubbles: true }));
   assert.equal(typeof openCallback, "function");
 
@@ -5015,7 +5296,7 @@ test("known-source finish failures show a durable retry affordance and recover",
     callback();
     return function () {};
   };
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(new dom.window.Event("DOMContentLoaded", { bubbles: true }));
 
   const recovery = dom.window.document.querySelector("[data-trace-finish-recovery]");
@@ -5114,7 +5395,7 @@ test("terminal finish replay after deletion settles without recovery or stale pr
     callback();
     return function () {};
   };
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(new dom.window.Event("DOMContentLoaded", { bubbles: true }));
 
   assert.equal(attempts, 1);
@@ -5529,7 +5810,7 @@ test("story sheet position block shows unknown total without chapter stepper con
   };
 
   installCollectorChrome(dom, chrome);
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
@@ -5599,7 +5880,7 @@ test("FFN mobile story post-add status mutation failure keeps saved state", () =
     return 1;
   };
   installCollectorChrome(dom, chrome);
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
@@ -5682,7 +5963,7 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
   };
 
   installCollectorChrome(dom, chrome);
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
@@ -5719,7 +6000,7 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
   assert.ok(privateTagRow);
   assert.equal(privateTagRow.querySelectorAll(".x-utag").length, 4);
   for (const tag of privateTagRow.querySelectorAll(".x-utag")) {
-    assert.match(tag.getAttribute("style") || "", /border-bottom:\s*1px dotted/i);
+    assert.doesNotMatch(tag.getAttribute("style") || "", /border-bottom:\s*1px dotted/i);
     assert.match(tag.getAttribute("style") || "", /background:\s*transparent/i);
     assert.match(tag.getAttribute("style") || "", /padding:\s*2px 0px/i);
     assert.match(tag.getAttribute("style") || "", /max-width:\s*150px/i);
@@ -5849,7 +6130,7 @@ test("FFN mobile story sheet hidden preference auth failures become connect acti
 
     dom.window.setTimeout = () => 1;
     installCollectorChrome(dom, chrome);
-    dom.window.eval(collectorSrc);
+    dom.window.eval(collectorTestSource(collectorSrc));
     dom.window.document.dispatchEvent(
       new dom.window.Event("DOMContentLoaded", { bubbles: true }),
     );
@@ -5928,7 +6209,7 @@ test("FFN mobile story sheet hides mutation controls with stale token when auth 
     };
 
     installCollectorChrome(dom, chrome);
-    dom.window.eval(collectorSrc);
+    dom.window.eval(collectorTestSource(collectorSrc));
     dom.window.document.dispatchEvent(
       new dom.window.Event("DOMContentLoaded", { bubbles: true }),
     );
@@ -5993,7 +6274,7 @@ test("FFN mobile story sheet quick-add preserves free-limit and error states", (
 
     dom.window.setTimeout = () => 1;
     installCollectorChrome(dom, chrome);
-    dom.window.eval(collectorSrc);
+    dom.window.eval(collectorTestSource(collectorSrc));
     dom.window.document.dispatchEvent(
       new dom.window.Event("DOMContentLoaded", { bubbles: true }),
     );
@@ -6046,7 +6327,7 @@ test("collector story Trace sheet is not rendered on password pages", () => {
   };
 
   installCollectorChrome(dom, chrome);
-  dom.window.eval(collectorSrc);
+  dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(
     new dom.window.Event("DOMContentLoaded", { bubbles: true }),
   );
@@ -6118,7 +6399,7 @@ test("auto-track confirmed state keeps chapter-one stories as planning", () => {
 
   installCollectorChrome(dom, chrome);
   dom.window.eval(
-    collectorSrc + "\nwindow.__traceTestHooks = { sendAutoTrackForStory };",
+    collectorTestSource(collectorSrc),
   );
 
   dom.window.__traceTestHooks.sendAutoTrackForStory({
@@ -6200,7 +6481,7 @@ test("auto-track confirmed state promotes planning only after later chapters", (
 
   installCollectorChrome(dom, chrome);
   dom.window.eval(
-    collectorSrc + "\nwindow.__traceTestHooks = { sendAutoTrackForStory };",
+    collectorTestSource(collectorSrc),
   );
 
   dom.window.__traceTestHooks.sendAutoTrackForStory({
@@ -6790,3 +7071,198 @@ for (const fixture of [
     assert.equal(h.dom.window.document.querySelector("[data-trace-quick-add]"), null);
   });
 }
+
+
+test("page theme follows host body, html fallback, and a dark body", () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>");
+  const { traceHostPageTokens, traceRefreshPageTokens } = createCollectorBindings(dom);
+  assert.equal(traceHostPageTokens().teal, "#176E72");
+  dom.window.document.documentElement.style.backgroundColor = "rgb(17, 17, 17)";
+  assert.equal(traceHostPageTokens().teal, "#8BCDC8");
+  dom.window.document.body.style.backgroundColor = "white";
+  assert.equal(traceHostPageTokens().teal, "#176E72");
+  dom.window.document.body.style.backgroundColor = "#111";
+  traceRefreshPageTokens();
+  assert.equal(dom.window.document.body.style.getPropertyValue("--trace-page-surface"), "#19232D");
+});
+
+
+function chapterKeptHarness(count, { firstNote = true, autoTrack = true, hidden = false } = {}) {
+  const state = { chapter: 1 };
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: autoTrack,
+      traceSavedNoteFirstStoryShownV1: firstNote, traceChapterKeptNotesShownV1: count },
+    pendingFirstStoryResponse: { ok: true, url: "" },
+    projectionResponse() {
+      return { ok: true,
+        snapshot: { state: "connected", reason: "none", canExecuteAuthenticated: true },
+        projection: { entries: { "ffn:7038840": { entryId: "00000000-0000-4000-8000-000000000123",
+          status: "READING", canonicalReaderStatus: "READING",
+          chapters: { current: state.chapter, total: 12 } } },
+          workPreferences: hidden ? { "ffn:7038840": { hidden: true } } : {},
+          syncVersion: "2026-08-22T08:30:00.000Z" } };
+    },
+  });
+  return { h, state };
+}
+
+test("chapter-kept note shows only for the first three confirmed advances", async () => {
+  for (let prior = 0; prior < 4; prior += 1) {
+    const { h, state } = chapterKeptHarness(prior);
+    await delay(180);
+    state.chapter = 2;
+    h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
+    await delay(20);
+    const host = h.dom.window.document.querySelector("trace-saved-note");
+    const note = host?.__traceShadow.querySelector("[data-trace-saved-note]");
+    if (prior < 3) {
+      assert.ok(note, `advance ${prior + 1} shows N3`);
+      assert.match(note.textContent, /Chapter 2 kept/);
+      assert.equal(h.store.traceChapterKeptNotesShownV1, prior + 1);
+      const live = h.dom.window.document.querySelector("[data-trace-page-live-region]");
+      assert.match(live.textContent, /Chapter 2 kept\./);
+    } else {
+      assert.equal(note, undefined);
+      assert.equal(h.store.traceChapterKeptNotesShownV1, 3);
+    }
+    h.dom.window.close();
+  }
+});
+
+test("chapter-kept note waits for first note and skips hidden or disabled works", async () => {
+  for (const options of [{ firstNote: false }, { autoTrack: false }, { hidden: true }]) {
+    const { h, state } = chapterKeptHarness(0, options);
+    await delay(180);
+    state.chapter = 2;
+    h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
+    await delay(20);
+    assert.equal(h.dom.window.document.querySelector("trace-saved-note"), null);
+    assert.equal(h.store.traceChapterKeptNotesShownV1, 0);
+    h.dom.window.close();
+  }
+});
+
+
+test("popup quick-add and status messages use the page's existing commands", async () => {
+  const h = createStoryAutoTrackPendingHarness({ sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    pendingFirstStoryResponse: { ok: true, url: "" } });
+  await delay(180);
+  const sender = { id: "trace-extension" };
+  const saved = await h.sendRuntimeMessage({ type: "TRACE_POPUP_QUICK_ADD" }, sender);
+  assert.equal(saved.ok, true);
+  const quickAdds = h.sent.filter((message) => message.type === "TRACE_QUICK_ADD");
+  assert.equal(quickAdds.length, 1);
+  assert.equal(quickAdds[0].payload.s, "ffn");
+  assert.equal(quickAdds[0].payload.item.t, "A Chance Encounter");
+  const changed = await h.sendRuntimeMessage({ type: "TRACE_POPUP_SET_READER_STATUS",
+    status: "READING", entry: { entryId: "00000000-0000-4000-8000-000000000123",
+      canonicalReaderStatus: "SAVED", chapters: { current: 0, total: 12 } } }, sender);
+  assert.equal(changed.ok, true);
+  const updates = h.sent.filter((message) => message.type === "TRACE_SET_READER_STATUS");
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].payload.workKey, "ffn:7038840");
+  assert.equal(updates[0].payload.status, "READING");
+  h.dom.window.close();
+});
+
+
+test("page UI sources have no Quiet Margin literals or sub-12px text", () => {
+  for (const name of ["collector.js", "library-overlay.js"]) {
+    const source = fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", name), "utf8");
+    assert.doesNotMatch(source, /#2d4b43|#2a5d53|#bf8a1f|#fffdf8|Manrope|Geist/i, name);
+    for (const match of source.matchAll(/\bfont(?:-size)?\s*:\s*[^;"']*?\b(\d+(?:\.\d+)?)px\b/g)) {
+      assert.ok(Number(match[1]) >= 12, `${name}: ${match[0]}`);
+    }
+  }
+});
+
+
+test("unavailable FFN cannot offer or execute manual Add", async () => {
+  const h = createStoryAutoTrackPendingHarness({ sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    mutateDom(dom) { dom.window.document.querySelectorAll("#storytext, #storytextp, #storycontent").forEach(n => n.remove()); }
+  });
+  await delay(180);
+  assert.doesNotMatch(h.dom.window.document.querySelector("[data-trace-quick-add-wrap]")?.textContent || "", /Add to Trace/);
+  const response = await h.sendRuntimeMessage({ type: "TRACE_POPUP_QUICK_ADD" }, { id: "trace-extension" });
+  assert.equal(response.ok, false);
+  assert.equal(h.sent.filter(m => m.type === "TRACE_QUICK_ADD").length, 0);
+  h.dom.window.close();
+});
+
+
+test("enabling automatic saving collects the already open page", async () => {
+ const h = createStoryAutoTrackPendingHarness({ sessionMode: "kernel", store: { prefAutoTrackEnabled: false } });
+ await delay(180);
+ assert.equal(h.sent.filter(m => m.type === "TRACE_AUTO_TRACK").length, 0);
+ h.store.prefAutoTrackEnabled = true;
+ h.dispatchStorageChange("prefAutoTrackEnabled", true);
+ await delay(180);
+ assert.equal(h.sent.filter(m => m.type === "TRACE_AUTO_TRACK").length, 1);
+ h.dom.window.close();
+});
+
+
+test("chapter-kept feedback is visible without waiting for an animation frame", async () => {
+ const { h, state } = chapterKeptHarness(0);
+ await delay(180);
+ h.dom.window.requestAnimationFrame = () => 1; // Safari may defer frames while its popup is foreground
+ state.chapter = 2;
+ h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
+ await delay(20);
+ const note = h.dom.window.document.querySelector("trace-saved-note").__traceShadow.firstChild;
+ assert.equal(note.style.opacity, "1");
+ h.dom.window.close();
+});
+
+test("chapter-kept detects an advance already confirmed when the next page opens", async () => {
+ for (const previous of [0, 2]) {
+ const h = createStoryAutoTrackPendingHarness({ sessionMode: "kernel",
+  store: { traceSavedNoteFirstStoryShownV1: true, traceChapterKeptNotesShownV1: 1 },
+  mutateDom(dom) { dom.window.sessionStorage.setItem("trace:confirmed-chapter:v1", JSON.stringify({ workKey: "ffn:7038840", chapter: previous })); },
+  projectionResponse: { ok: true, snapshot: { state: "connected" }, projection: { entries: {
+   "ffn:7038840": { entryId: "00000000-0000-4000-8000-000000000123", canonicalReaderStatus: "READING", chapters: { current: 3, total: 12 } }
+  } } }
+ });
+ await delay(180);
+ const note = h.dom.window.document.querySelector("trace-saved-note")?.__traceShadow.firstChild;
+ assert.match(note?.textContent || "", /Chapter 3 kept/);
+ h.dom.window.close();
+ }
+});
+
+
+test("content script opens and reconnects its popup relay port after an extension reload", async () => {
+  const ports = [];
+  const h = createStoryAutoTrackPendingHarness({ sessionMode: "kernel", store: { prefAutoTrackEnabled: false },
+    connectPort(options) {
+      assert.equal(options.name, "trace-popup-page-v1");
+      const page = { sent: [], postMessage(message) { this.sent.push(message); },
+        onMessage: { addListener(fn) { page.receive = fn; } },
+        onDisconnect: { addListener(fn) { page.disconnected = fn; } }, disconnect() {} };
+      ports.push(page); return page;
+    },
+  });
+  assert.equal(ports.length, 1);
+  let extraListeners = 0;
+  h.dom.window.chrome.runtime.onMessage.addListener = () => { extraListeners++; };
+  h.dom.window.eval(fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"), "utf8"));
+  assert.equal(extraListeners, 0, "reinjection must not initialize another collector");
+  assert.equal(ports.length, 2, "reinjection replaces only the relay port");
+  ports[1].receive({ kind: "request", id: 1, command: { type: "TRACE_STORY_IDENTITY_GET" } });
+  assert.equal(ports[1].sent[0].response.ok, true);
+  assert.ok(ports[1].sent[0].response.title);
+  ports[1].disconnected();
+  await new Promise(resolve => setTimeout(resolve, 1_100));
+  assert.equal(ports.length, 3);
+  ports[2].receive({ kind: "request", id: 2, command: { type: "TRACE_POPUP_SET_READER_STATUS", status: "PAUSED", entry: { entryId: "entry" } } });
+  assert.equal(ports[2].sent[0].kind, "command");
+  assert.equal(ports[2].sent[0].command.type, "TRACE_SET_READER_STATUS");
+  assert.equal(h.sent.some(message => message.type === "TRACE_SET_READER_STATUS"), false, "relay mutations remain bound to the pending account-scoped request");
+  ports[2].receive({ kind: "commandResult", id: 2, response: { ok: true } });
+  assert.equal(ports[2].sent.at(-1).response.ok, true);
+  h.dom.window.dispatchEvent(new h.dom.window.Event("pagehide"));
+  h.dom.window.close();
+});

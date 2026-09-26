@@ -4,6 +4,8 @@
 // Does not read cookies or credentials, and exits on pages with password fields.
 (function () {
   "use strict";
+  if (globalThis.__traceLibraryOverlayInitialized) return;
+  globalThis.__traceLibraryOverlayInitialized = true;
   const ext = globalThis.browser ?? globalThis.chrome;
   const ATTR = "data-trace-library-overlay";
   const WRAP_ATTR = "data-trace-library-overlay-wrap";
@@ -179,13 +181,13 @@
   }
 
   function showCapacityRecoveryNotice(capacity, force) {
+  traceRefreshPageTokens();
     if (!force && !(capacity && capacity.blocked === true && capacity.prompt === true)) {
       return;
     }
     if (document.querySelector("[" + CAPACITY_NOTICE_ATTR + "]")) return;
     var notice = document.createElement("section");
     notice.setAttribute(CAPACITY_NOTICE_ATTR, "1");
-    notice.setAttribute("role", "status");
     notice.setAttribute("aria-label", "Trace library full");
     notice.style.cssText = [
       "position:fixed",
@@ -197,19 +199,16 @@
       "padding:16px",
       "border:1px solid rgba(28,39,34,0.16)",
       "border-radius:14px",
-      "background:#f6f1e4",
+      "background:var(--trace-page-surface)",
       "box-shadow:0 18px 46px rgba(28,39,34,0.22)",
-      "color:#1c2722",
+      "color:var(--trace-page-ink)",
     ].join(";");
-    var eyebrow = document.createElement("div");
-    eyebrow.textContent = "TRACE";
-    eyebrow.style.cssText = "font:600 9px/1 'Geist Mono',ui-monospace,monospace;letter-spacing:0.16em;color:#b54a30";
     var title = document.createElement("h2");
     title.textContent = "This story wasn’t added";
-    title.style.cssText = "margin:8px 0 0;font:500 20px/1.15 Georgia,'Times New Roman',serif;color:#1c2722";
+    title.style.cssText = "margin:8px 0 0;font:500 20px/1.15 -apple-system,system-ui,'Segoe UI',sans-serif;color:var(--trace-page-ink)";
     var copy = document.createElement("p");
     copy.textContent = "Your Trace library is full. Make room or get Trace Unlimited to keep adding stories.";
-    copy.style.cssText = "margin:8px 0 14px;font:500 13px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif;color:#5f665f";
+    copy.style.cssText = "margin:8px 0 14px;font:500 13px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif;color:var(--trace-page-secondary)";
     var actions = document.createElement("div");
     actions.style.cssText = "display:flex;align-items:center;gap:10px";
     actions.style.flexWrap = "wrap";
@@ -219,7 +218,7 @@
     upgrade.target = "_blank";
     upgrade.rel = "noopener noreferrer";
     upgrade.textContent = "Get Trace Unlimited";
-    upgrade.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 14px;border-radius:9px;background:#1c2722;color:#fff;text-decoration:none;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif";
+    upgrade.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 14px;border-radius:9px;background:transparent;color:var(--trace-page-teal);text-decoration:none;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif";
     bindTraceOpenLink(upgrade);
     var manage = document.createElement("a");
     manage.setAttribute("data-trace-open-trace", "1");
@@ -227,12 +226,12 @@
     manage.target = "_blank";
     manage.rel = "noopener noreferrer";
     manage.textContent = "Manage library";
-    manage.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 12px;border-radius:9px;border:1px solid rgba(28,39,34,0.2);color:#1c2722;text-decoration:none;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif";
+    manage.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 12px;border-radius:9px;border:0;color:var(--trace-page-teal);text-decoration:none;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif";
     bindTraceOpenLink(manage);
     var dismiss = document.createElement("button");
     dismiss.type = "button";
     dismiss.textContent = "Not now";
-    dismiss.style.cssText = "min-height:44px;padding:0 8px;border:0;background:transparent;color:#5f665f;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif;cursor:pointer";
+    dismiss.style.cssText = "min-height:44px;padding:0 8px;border:0;background:transparent;color:var(--trace-page-secondary);font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif;cursor:pointer";
     dismiss.addEventListener("click", function () {
       acknowledgeCapacityRecovery("dismissed");
       notice.remove();
@@ -240,7 +239,6 @@
     actions.appendChild(upgrade);
     actions.appendChild(manage);
     actions.appendChild(dismiss);
-    notice.appendChild(eyebrow);
     notice.appendChild(title);
     notice.appendChild(copy);
     notice.appendChild(actions);
@@ -290,24 +288,71 @@
     return false;
   }
 
+
+// Trace page UI follows the host page, including AO3 skins and FFN reading themes.
+// CSS variables let an already mounted surface change tone on its next render.
+function traceHostPageTokens() {
+  var light = {
+    ground: "#F8FAFC", surface: "#FFFFFF", raised: "#E9EEF3", rule: "#D8E0E7",
+    ink: "#18232D", secondary: "#5F6B76", tertiary: "#7B8792",
+    teal: "#176E72", warning: "#9B4146", authored: "#8A6420",
+    "status-saved": "#666E68", "status-reading": "#246DCC",
+    "status-caught-up": "#4C6F88", "status-paused": "#82651E",
+    "status-finished": "#197A5B", "status-dropped": "#7C5282",
+  };
+  var dark = {
+    ground: "#111922", surface: "#19232D", raised: "#24323F", rule: "#344451",
+    ink: "#F2F6FA", secondary: "#AEBBC5", tertiary: "#8D9AA5",
+    teal: "#8BCDC8", warning: "#E7A19F", authored: "#DCB976",
+    "status-saved": "#B4BDAF", "status-reading": "#7DB8FF",
+    "status-caught-up": "#91B4CE", "status-paused": "#D4B76C",
+    "status-finished": "#8BD8B6", "status-dropped": "#B99BC2",
+  };
+  function background(element) {
+    if (!element || typeof window.getComputedStyle !== "function") return null;
+    var value = window.getComputedStyle(element).backgroundColor;
+    var channels = value && value.match(/rgba?\(([^)]+)\)/i);
+    if (!channels) return null;
+    var parts = channels[1].split(",").map(Number);
+    if (parts.length > 3 && parts[3] === 0) return null;
+    return parts.slice(0, 3);
+  }
+  var rgb = background(document.body) || background(document.documentElement) || [255, 255, 255];
+  var linear = rgb.map(function (channel) {
+    var value = channel / 255;
+    return value <= 0.04045 ? value / 12.92 : Math.pow((value + 0.055) / 1.055, 2.4);
+  });
+  var luminance = linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
+  return luminance < 0.18 ? dark : light;
+}
+
+function traceRefreshPageTokens() {
+  if (!document.body) return;
+  var tokens = traceHostPageTokens();
+  Object.keys(tokens).forEach(function (name) {
+    document.documentElement.style.setProperty("--trace-page-" + name, tokens[name]);
+    document.body.style.setProperty("--trace-page-" + name, tokens[name]);
+  });
+}
+
   if (tracePageHasPasswordField()) return;
 
   const TRACE_UI = {
-    font: "Manrope,system-ui,-apple-system,'Segoe UI',sans-serif",
-    paper: "#fffdf8",
-    paperRaised: "#fbf7ee",
-    paperSoft: "#f6f1e7",
-    ink: "#1f2933",
-    muted: "#647067",
-    subtle: "#8a8171",
-    border: "rgba(65,72,70,0.16)",
-    borderStrong: "rgba(65,72,70,0.24)",
-    forest: "#2d4b43",
-    forestOn: "#c8eadf",
-    gold: "#f1d58a",
-    goldOn: "#594402",
-    rust: "#9a3412",
-    danger: "#ba1a1a",
+    font: "-apple-system,system-ui,'Segoe UI',sans-serif",
+    paper: "var(--trace-page-surface)",
+    paperRaised: "var(--trace-page-raised)",
+    paperSoft: "var(--trace-page-raised)",
+    ink: "var(--trace-page-ink)",
+    muted: "var(--trace-page-secondary)",
+    subtle: "var(--trace-page-tertiary)",
+    border: "var(--trace-page-rule)",
+    borderStrong: "var(--trace-page-rule)",
+    forest: "var(--trace-page-teal)",
+    forestOn: "var(--trace-page-surface)",
+    gold: "var(--trace-page-raised)",
+    goldOn: "var(--trace-page-ink)",
+    rust: "var(--trace-page-warning)",
+    danger: "var(--trace-page-warning)",
     radiusXs: "7px",
     radiusSm: "8px",
     radiusMd: "10px",
@@ -315,37 +360,36 @@
     shadowPopover: "0 18px 44px rgba(28,28,23,0.22)",
   };
   const TRACE_D1 = {
-    font: "Geist,ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif",
-    mono: "'Geist Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",
-    paper: "#fefcf7",
-    paper2: "#ece7dd",
-    card: "#f7f4ed",
-    card2: "#efeae1",
-    ink: "#151e1c",
-    ink2: "#27312e",
-    ink3: "#5b645f",
-    ink4: "#777f7a",
-    ink5: "#a5aaa6",
-    line: "#d4cdc0",
-    lineStrong: "#bbb3a5",
-    forest: "#2a5d53",
-    forestDeep: "#183f37",
-    rust: "#bc4329",
-    honey: "#996e29",
-    forestLine: "rgba(31,77,63,0.35)",
-    mutedLine: "rgba(110,106,91,0.3)",
-    rustLine: "rgba(181,74,48,0.36)",
-    honeyLine: "rgba(138,110,42,0.35)",
+    font: "-apple-system,system-ui,'Segoe UI',sans-serif",
+        paper: "var(--trace-page-surface)",
+    paper2: "var(--trace-page-raised)",
+    card: "var(--trace-page-surface)",
+    card2: "var(--trace-page-raised)",
+    ink: "var(--trace-page-ink)",
+    ink2: "var(--trace-page-ink)",
+    ink3: "var(--trace-page-secondary)",
+    ink4: "var(--trace-page-secondary)",
+    ink5: "var(--trace-page-secondary)",
+    line: "var(--trace-page-rule)",
+    lineStrong: "var(--trace-page-rule)",
+    forest: "var(--trace-page-teal)",
+    forestDeep: "var(--trace-page-teal)",
+    rust: "var(--trace-page-warning)",
+    honey: "var(--trace-page-warning)",
+    forestLine: "var(--trace-page-teal)",
+    mutedLine: "var(--trace-page-rule)",
+    rustLine: "var(--trace-page-rule)",
+    honeyLine: "var(--trace-page-rule)",
   };
   const PRIVATE_TAG_DISPLAY_LIMIT = 3;
 
   const STATUS_TOKENS = {
-    SAVED:     { accent: "#5b7488", container: "#e4e9ed", onContainer: "#3a566b", border: "#bfccd6" },
-    READING:   { accent: "#bf8a1f", container: "#f4e6c2", onContainer: "#7c5400", border: "#e1c886" },
-    CAUGHT_UP: { accent: "#1f8a7d", container: "#d6ece6", onContainer: "#136257", border: "#a3d2c9" },
-    PAUSED:    { accent: "#a8623a", container: "#efddcd", onContainer: "#79401f", border: "#dcbe9f" },
-    FINISHED:  { accent: "#4a8157", container: "#dcecde", onContainer: "#33603f", border: "#aacdb0" },
-    DROPPED:   { accent: "#83707b", container: "#e8e0e3", onContainer: "#574852", border: "#cdbfc5" },
+    SAVED:     { accent: "var(--trace-page-status-saved)", container: "var(--trace-page-raised)", onContainer: "var(--trace-page-ink)", border: "var(--trace-page-rule)" },
+    READING:   { accent: "var(--trace-page-status-reading)", container: "var(--trace-page-raised)", onContainer: "var(--trace-page-ink)", border: "var(--trace-page-rule)" },
+    CAUGHT_UP: { accent: "var(--trace-page-status-caught-up)", container: "var(--trace-page-raised)", onContainer: "var(--trace-page-ink)", border: "var(--trace-page-rule)" },
+    PAUSED:    { accent: "var(--trace-page-status-paused)", container: "var(--trace-page-raised)", onContainer: "var(--trace-page-ink)", border: "var(--trace-page-rule)" },
+    FINISHED:  { accent: "var(--trace-page-status-finished)", container: "var(--trace-page-raised)", onContainer: "var(--trace-page-ink)", border: "var(--trace-page-rule)" },
+    DROPPED:   { accent: "var(--trace-page-status-dropped)", container: "var(--trace-page-raised)", onContainer: "var(--trace-page-ink)", border: "var(--trace-page-rule)" },
   };
   STATUS_TOKENS.PLANNING = STATUS_TOKENS.SAVED;
   STATUS_TOKENS.COMPLETED = STATUS_TOKENS.FINISHED;
@@ -395,20 +439,20 @@
   };
 
   const UPDATED_THEME = {
-    bg: "#e8f4f2",
-    fg: "#0b4f6c",
+    bg: "var(--trace-page-surface)",
+    fg: "var(--trace-page-teal)",
     border: "rgba(11, 79, 108, 0.22)",
   };
 
   const HIDDEN_THEME = {
-    bg: "#eee7da",
-    fg: "#5b5142",
+    bg: "var(--trace-page-surface)",
+    fg: "var(--trace-page-ink)",
     border: "rgba(91, 81, 66, 0.28)",
   };
 
   const CONTEXT_THEME = {
-    bg: "#edf2ef",
-    fg: "#41504c",
+    bg: "var(--trace-page-surface)",
+    fg: "var(--trace-page-ink)",
     border: "rgba(65, 80, 76, 0.18)",
   };
 
@@ -475,16 +519,16 @@
   };
   const INLINE_HIDDEN_THEME = {
     bg: "rgba(91, 81, 66, 0.055)",
-    fg: "#5b5142",
+    fg: "var(--trace-page-ink)",
     border: "rgba(91, 81, 66, 0.16)",
-    accent: "#8a8171",
+    accent: "var(--trace-page-tertiary)",
   };
 
   const INLINE_CONTEXT_THEME = {
     bg: "rgba(65, 80, 76, 0.045)",
-    fg: "#41504c",
+    fg: "var(--trace-page-ink)",
     border: "rgba(65, 80, 76, 0.14)",
-    accent: "#647067",
+    accent: "var(--trace-page-secondary)",
   };
 
   const INLINE_ADD_THEME = {
@@ -530,13 +574,13 @@
     border: "rgba(22, 52, 45, 0.35)",
   };
   var ERROR_THEME = {
-    bg: "#fef2f2",
-    fg: "#dc2626",
+    bg: "var(--trace-page-surface)",
+    fg: "var(--trace-page-warning)",
     border: "rgba(220, 38, 38, 0.25)",
   };
   var HIDE_ACTION_THEME = {
     bg: "rgba(186, 26, 26, 0.045)",
-    fg: "#9f1d1d",
+    fg: "var(--trace-page-warning)",
     border: "rgba(186, 26, 26, 0.16)",
     hoverBg: "rgba(186, 26, 26, 0.075)",
   };
@@ -547,8 +591,8 @@
     accent: TRACE_UI.subtle,
   };
   var FULL_THEME = {
-    bg: "#fff7df",
-    fg: "#b45309",
+    bg: "var(--trace-page-surface)",
+    fg: "var(--trace-page-warning)",
     border: "rgba(180, 83, 9, 0.25)",
   };
 
@@ -561,7 +605,7 @@
     "min-height:20px",
     "border-radius:" + TRACE_UI.radiusXs,
     "vertical-align:middle",
-    "font:800 9px/1 " + TRACE_UI.font,
+    "font:800 12px/1 " + TRACE_UI.font,
     "letter-spacing:0.04em",
     "text-transform:uppercase",
     "white-space:nowrap",
@@ -578,8 +622,8 @@
     return (
       chipStyle(theme) +
       (isCompactOverlayLayout()
-        ? ";padding:3px 9px;min-height:28px;font:800 11px/1 " + TRACE_UI.font
-        : ";padding:2px 8px;min-height:22px;font:800 11px/1 " + TRACE_UI.font) +
+        ? ";padding:3px 9px;min-height:28px;font:800 12px/1 " + TRACE_UI.font
+        : ";padding:2px 8px;min-height:22px;font:800 12px/1 " + TRACE_UI.font) +
       ";border-color:" + theme.border +
       ";letter-spacing:0" +
       ";text-transform:none" +
@@ -605,12 +649,12 @@
     return [
       "display:inline-flex",
       "align-items:center",
-      "gap:5px",
+      "gap:4px",
       "box-sizing:border-box",
       "max-width:min(240px,100%)",
       "padding:2px 0",
       "border:0",
-      "border-bottom:1px " + (borderStyle || "solid") + " " + line,
+      "border-bottom:0",
       "border-radius:0",
       "background:transparent",
       "color:" + color,
@@ -661,6 +705,7 @@
     var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("viewBox", "0 0 14 14");
     svg.setAttribute("fill", "none");
+    svg.setAttribute("aria-hidden", "true");
     svg.setAttribute("stroke", "currentColor");
     svg.setAttribute("stroke-linecap", "round");
     svg.style.cssText = "width:12px;height:12px;flex:0 0 auto";
@@ -672,6 +717,7 @@
       return svg;
     }
     if (kind === "eyeoff") {
+      svg.style.cssText = "width:13px;height:13px;flex:0 0 auto";
       svg.setAttribute("stroke-width", "1.4");
       var a = document.createElementNS("http://www.w3.org/2000/svg", "path");
       a.setAttribute("d", "M1 7s2.2-4 6-4c1 0 1.9.3 2.7.6M13 7s-2.2 4-6 4c-1 0-1.9-.3-2.7-.6M2 2l10 10");
@@ -778,7 +824,7 @@
 
   function surfacePrimaryButtonStyle() {
     return surfaceButtonStyle(
-      { bg: TRACE_D1.ink, fg: TRACE_D1.paper, border: TRACE_D1.ink },
+      { bg: "transparent", fg: "var(--trace-page-teal)", border: "transparent" },
       true,
     );
   }
@@ -816,7 +862,7 @@
     return (
       ";padding:3px 7px" +
       ";min-height:18px" +
-      ";font:700 8px/1 Manrope,system-ui,-apple-system,'Segoe UI',sans-serif" +
+      ";font:700 12px/1 -apple-system,system-ui,'Segoe UI',sans-serif" +
       ";letter-spacing:0.05em"
     );
   }
@@ -829,6 +875,14 @@
       header.querySelector("h4.heading") ||
       anchor
     );
+  }
+
+  function isIosSafari() {
+    try {
+      return /iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+    } catch (_) {
+      return false;
+    }
   }
 
   function noticeSignature(authState, hasAuth) {
@@ -879,6 +933,9 @@
 
     var state = authState && authState.state ? authState.state : hasAuth ? "connected" : "signed_out";
     var helpUrl = usefulTraceUrl(authState && authState.helpUrl);
+    // On iPhone and iPad the Trace app links the extension; the website and a
+    // tab refresh cannot. Point to that one step instead.
+    var appLink = state !== "reconnect_required" && state !== "error" && isIosSafari();
     var heading =
       state === "reconnect_required"
         ? "Sign in again"
@@ -888,6 +945,10 @@
     var message =
       (authState && authState.message) ||
       "Open Trace and sign in once to connect the extension. Then refresh this AO3 or FFN tab to restore sync.";
+    if (appLink) {
+      heading = "Finish setup in the Trace app";
+      message = "Open Trace and finish Safari setup there, signing in first if asked. Then come back; nothing has been saved yet.";
+    }
 
     var existing = document.querySelector("[" + CONNECT_NOTICE_ATTR + "]");
     if (!existing) {
@@ -959,9 +1020,9 @@
         "min-height:42px",
         "padding:10px 14px",
         "border-radius:8px",
-        "background:" + TRACE_D1.ink,
-        "color:" + TRACE_D1.paper,
-        "border:1px solid " + TRACE_D1.ink,
+        "background:transparent",
+        "color:var(--trace-page-teal)",
+        "border:0",
         "text-decoration:none",
         "font:600 13.5px/1.15 " + TRACE_D1.font,
         "letter-spacing:0",
@@ -982,13 +1043,20 @@
       state === "error" ? TRACE_D1.rust : state === "reconnect_required" ? TRACE_D1.honey : TRACE_D1.ink;
     existing.querySelector("[data-trace-connect-notice-message]").textContent = message;
     var ctaEl = existing.querySelector("[data-trace-connect-notice-cta]");
-    ctaEl.href = helpUrl;
-    ctaEl.textContent =
-      state === "signed_out"
-        ? "Open Trace to connect"
-        : state === "error"
-          ? "Open Trace for help"
-          : "Open Trace to reconnect";
+    if (appLink) {
+      ctaEl.href = "traceauth://open?destination=extension-connect";
+      ctaEl.removeAttribute("target");
+      ctaEl.textContent = "Open Trace app";
+    } else {
+      ctaEl.href = helpUrl;
+      ctaEl.target = "_blank";
+      ctaEl.textContent =
+        state === "signed_out"
+          ? "Open Trace to connect"
+          : state === "error"
+            ? "Open Trace for help"
+            : "Open Trace to reconnect";
+    }
 
     var closeEl = existing.querySelector("button[aria-label='Dismiss Trace notice']");
     if (closeEl) {
@@ -1633,7 +1701,7 @@
       "min-height:16px",
       "border-radius:6px",
       "vertical-align:middle",
-      "font:700 8px/1 Manrope,system-ui,-apple-system,'Segoe UI',sans-serif",
+      "font:700 12px/1 -apple-system,system-ui,'Segoe UI',sans-serif",
       "letter-spacing:0.05em",
       "text-transform:uppercase",
       "white-space:nowrap",
@@ -1941,7 +2009,7 @@
       "border-radius:7px",
       "background:transparent",
       "color:" + (active ? TRACE_D1.honey : TRACE_D1.ink5),
-      "font:600 20px/1 Georgia,serif",
+      "font:600 20px/1 -apple-system,system-ui,'Segoe UI',sans-serif",
       "cursor:" + (disabled ? "wait" : "pointer"),
       disabled ? "opacity:0.62" : "",
     ].join(";");
@@ -1967,7 +2035,7 @@
     var message = document.createElement("span");
     message.setAttribute("data-trace-rating-message", "1");
     message.textContent = current > 0 ? current + " of 5" : "Not rated";
-    message.style.cssText = "display:block;margin-top:2px;font:500 10.5px/1.3 " + TRACE_D1.font + ";color:" + TRACE_D1.ink4;
+    message.style.cssText = "display:block;margin-top:2px;font:500 12px/1.3 " + TRACE_D1.font + ";color:" + TRACE_D1.ink4;
     labelWrap.appendChild(message);
 
     function renderStars(disabled) {
@@ -2050,10 +2118,10 @@
     text.style.cssText = "min-width:0";
     var title = document.createElement("div");
     title.textContent = "Catch up";
-    title.style.cssText = "font:600 11.5px/1.25 " + TRACE_D1.font + ";color:" + TRACE_D1.ink2;
+    title.style.cssText = "font:600 12px/1.25 " + TRACE_D1.font + ";color:" + TRACE_D1.ink2;
     var copy = document.createElement("div");
     copy.textContent = "Set progress to chapter " + patch.chapters.current + ".";
-    copy.style.cssText = "margin-top:2px;font:500 10.5px/1.35 " + TRACE_D1.font + ";color:" + TRACE_D1.ink3;
+    copy.style.cssText = "margin-top:2px;font:500 12px/1.35 " + TRACE_D1.font + ";color:" + TRACE_D1.ink3;
     text.appendChild(title);
     text.appendChild(copy);
     var button = document.createElement("button");
@@ -2106,7 +2174,7 @@
     style.setAttribute("data-trace-listing-modal-styles", "1");
     style.textContent =
       "[" + ACTION_SURFACE_ATTR + "] :focus-visible{" +
-        "outline:3px solid #2a5d53!important;outline-offset:2px!important}" +
+        "outline:3px solid var(--trace-page-teal)!important;outline-offset:2px!important}" +
       "@media (max-width:640px),(pointer:coarse){" +
         "[" + ACTION_SURFACE_CLOSE_ATTR + "]{min-width:44px!important;min-height:44px!important}}" +
       "@media (prefers-reduced-motion:reduce){" +
@@ -2117,20 +2185,27 @@
   }
 
   function ensureListingLiveRegion() {
-    var live = document.querySelector("[data-trace-listing-live-region]");
-    if (live) return live;
-    live = document.createElement("div");
+    if (!document.body) return null;
+    var live = document.querySelector("[data-trace-page-live-region]");
+    if (!live) {
+      live = document.createElement("div");
+      live.setAttribute("data-trace-page-live-region", "1");
+      live.setAttribute("role", "status");
+      live.setAttribute("aria-live", "polite");
+      live.setAttribute("aria-atomic", "true");
+      live.style.cssText = "position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap";
+    }
     live.setAttribute("data-trace-listing-live-region", "1");
-    live.setAttribute("role", "status");
-    live.setAttribute("aria-live", "polite");
-    live.setAttribute("aria-atomic", "true");
-    live.style.cssText = "position:fixed;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap";
-    document.documentElement.appendChild(live);
+    if (live.parentElement !== document.body || live !== document.body.lastElementChild) document.body.appendChild(live);
     return live;
   }
 
+  if (document.body) ensureListingLiveRegion();
+  else document.addEventListener("DOMContentLoaded", ensureListingLiveRegion, { once: true });
+
   function announceListingSurface(message) {
     var live = ensureListingLiveRegion();
+    if (!live) return;
     if (listingLiveAnnouncementTimer !== null) {
       clearTimeout(listingLiveAnnouncementTimer);
     }
@@ -2544,7 +2619,7 @@
     ].join(";");
     var labelEl = document.createElement("span");
     labelEl.textContent = label;
-    labelEl.style.cssText = "font:500 9px/1 " + TRACE_D1.mono + ";letter-spacing:0.18em;text-transform:uppercase;color:" + TRACE_D1.ink4;
+    labelEl.style.cssText = "font:500 12px/1.3 " + TRACE_D1.font + ";color:var(--trace-page-secondary)";
     var valueEl = document.createElement("span");
     valueEl.textContent = value;
     valueEl.style.cssText = "font:600 12.5px/1.3 " + TRACE_D1.font + ";color:" + (emphasis ? TRACE_D1.rust : TRACE_D1.ink2) + ";text-align:right";
@@ -2610,7 +2685,7 @@
 
     var side = document.createElement("span");
     side.className = "pct";
-    side.style.cssText = "font:600 11px/1.2 " + TRACE_D1.font + ";color:" + (entry && entry.catchupState === "BEHIND" ? TRACE_D1.rust : TRACE_D1.ink3) + ";text-align:right";
+    side.style.cssText = "font:600 12px/1.2 " + TRACE_D1.font + ";color:" + (entry && entry.catchupState === "BEHIND" ? TRACE_D1.rust : TRACE_D1.ink3) + ";text-align:right";
     var catchup = catchupLabel(entry);
     side.textContent = catchup || (percent == null ? "" : percent + "%");
     if (side.textContent) top.appendChild(side);
@@ -2640,11 +2715,11 @@
       "text-overflow:ellipsis",
       "vertical-align:middle",
       "padding:2px 0",
-      "border-bottom:1px dotted " + (collectionTone ? TRACE_D1.honey : TRACE_D1.forest),
-      "font:500 11.5px/1.15 " + TRACE_D1.font,
+      "border:0",
+      "font:500 12px/1.15 " + TRACE_D1.font,
       "white-space:nowrap",
       "background:transparent",
-      "color:" + (collectionTone ? TRACE_D1.honey : TRACE_D1.forest),
+      "color:var(--trace-page-authored)",
     ].join(";");
     return tag;
   }
@@ -2663,7 +2738,7 @@
     var label = document.createElement("div");
     label.className = "x-sheet-label";
     label.textContent = "Private context";
-    label.style.cssText = "font:500 9px/1 " + TRACE_D1.mono + ";letter-spacing:0.18em;text-transform:uppercase;color:" + TRACE_D1.ink4;
+    label.style.cssText = "font:500 12px/1.3 " + TRACE_D1.font + ";color:var(--trace-page-secondary)";
     meta.appendChild(label);
     if (context.hasNotes) {
       meta.appendChild(
@@ -2724,7 +2799,7 @@
     if (copy.detail) {
       var detail = document.createElement("span");
       detail.textContent = copy.detail;
-      detail.style.cssText = "font:500 11.5px/1.4 " + TRACE_D1.font + ";color:" + TRACE_D1.ink3;
+      detail.style.cssText = "font:500 12px/1.4 " + TRACE_D1.font + ";color:" + TRACE_D1.ink3;
       block.appendChild(detail);
     }
     surface.appendChild(block);
@@ -2816,9 +2891,9 @@
       "overflow:visible",
       "border-radius:7px",
       "border:1px solid " + (selected ? TRACE_D1.ink : TRACE_D1.line),
-      "background:" + (selected ? TRACE_D1.ink : TRACE_D1.paper),
-      "color:" + (selected ? TRACE_D1.paper : TRACE_D1.ink3),
-      "font:500 11px/1 " + TRACE_D1.font,
+      "background:transparent",
+      "color:var(--trace-page-ink)",
+      "font:500 12px/1 " + TRACE_D1.font,
       "letter-spacing:0",
       "text-transform:none",
       "cursor:pointer",
@@ -2835,7 +2910,7 @@
     label.className = "x-sheet-label";
     label.id = "trace-listing-status-label";
     label.textContent = "Reading status";
-    label.style.cssText = "font:500 9px/1 " + TRACE_D1.mono + ";letter-spacing:0.18em;text-transform:uppercase;color:" + TRACE_D1.ink4;
+    label.style.cssText = "font:500 12px/1.3 " + TRACE_D1.font + ";color:var(--trace-page-secondary)";
     var row = document.createElement("div");
     row.className = "x-seg";
     row.setAttribute("role", "group");
@@ -2863,7 +2938,7 @@
         "width:7px",
         "height:7px",
         "border-radius:999px",
-        "background:" + (selected ? D1_STATUS_ACCENT[status] || STATUS_TOKENS.READING.accent : TRACE_D1.ink5),
+        "background:" + (D1_STATUS_ACCENT[status] || STATUS_TOKENS.READING.accent),
       ].join(";");
       choice.appendChild(dot);
       choice.appendChild(document.createTextNode(statusControlChoiceLabel(status)));
@@ -2877,7 +2952,7 @@
       error.id = "trace-listing-status-error";
       error.setAttribute("data-trace-status-error-message", "1");
       error.textContent = "Could not save reading status. Try again.";
-      error.style.cssText = "color:" + TRACE_D1.rust + ";font:600 11.5px/1.35 " + TRACE_D1.font;
+      error.style.cssText = "color:" + TRACE_D1.rust + ";font:600 12px/1.35 " + TRACE_D1.font;
       wrap.appendChild(error);
     }
     surface.appendChild(wrap);
@@ -2964,7 +3039,7 @@
     var sourcePlatform = platform || String(workKey || "").split(":")[0];
     var listingMeta = surfaceListingMeta(sourcePlatform, anchor);
     source.textContent = "Trace · " + (sourcePlatform === "ffn" ? "FFN" : "AO3");
-    source.style.cssText = "font:650 9px/1 " + TRACE_D1.mono + ";letter-spacing:0.14em;text-transform:uppercase;color:" + TRACE_D1.rust;
+    source.style.cssText = "font:600 12px/1.3 " + TRACE_D1.font + ";color:var(--trace-page-warning)";
     var title = document.createElement("div");
     title.className = "ti";
     title.id = "trace-listing-sheet-title";
@@ -3056,7 +3131,7 @@
         entry.hidden = nextHidden;
         closeListingActionSurface();
         rerender();
-      }, true);
+      }, true, (anchor && anchor.textContent || "").trim());
       preference.className = "x-pbtn x-pbtn-ghost";
       preference.style.cssText = surfaceGhostButtonStyle(entry && entry.hidden === true ? HIDDEN_THEME : HIDE_ACTION_THEME) + ";min-width:72px;min-height:44px;border-radius:8px";
       if (!(entry && entry.hidden === true)) {
@@ -3094,6 +3169,7 @@
   }
 
   function lensEl(entry, workKey, showActions, rerender, platform, anchor) {
+    traceRefreshPageTokens();
     var theme = lensTheme(entry);
     var btn = document.createElement("button");
     btn.setAttribute(ATTR, "1");
@@ -3119,7 +3195,7 @@
       "border:0",
       "border-radius:0",
       "background:transparent",
-      "color:" + TRACE_D1.ink2,
+      "color:var(--trace-page-secondary)",
       "box-shadow:none",
       "font:500 12.5px/1.3 " + TRACE_D1.font,
       "letter-spacing:0",
@@ -3138,13 +3214,13 @@
     btn.appendChild(dot);
     var label = document.createElement("span");
     label.textContent = lensLabelText(entry);
-    label.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:" + TRACE_D1.ink2;
+    label.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--trace-page-secondary)";
     btn.appendChild(label);
     var progress = lensProgressText(entry);
     if (progress) {
       var progressEl = document.createElement("span");
       progressEl.textContent = progress;
-      progressEl.style.cssText = "flex:0 0 auto;font:500 11px/1.3 " + TRACE_D1.mono + ";color:" + TRACE_D1.ink3;
+      progressEl.style.cssText = "flex:0 0 auto;font:500 12.5px/1.3 " + TRACE_D1.font + ";font-variant-numeric:tabular-nums;color:var(--trace-page-secondary)";
       btn.appendChild(progressEl);
     }
     var workMark = workMarkCopy(entry);
@@ -3152,23 +3228,16 @@
       var markEl = document.createElement("span");
       markEl.textContent = entry.workMark.kind === "hiatus" ? "Hiatus" : "Abandoned";
       markEl.setAttribute("data-trace-inline-work-mark", entry.workMark.kind);
-      markEl.style.cssText = "flex:0 0 auto;padding-left:7px;border-left:1px solid " + TRACE_D1.lineStrong + ";font:600 10.5px/1.3 " + TRACE_D1.font + ";color:" + TRACE_D1.ink3;
+      markEl.style.cssText = "flex:0 0 auto;padding-left:7px;border-left:1px solid " + TRACE_D1.lineStrong + ";font:600 12px/1.3 " + TRACE_D1.font + ";color:" + TRACE_D1.ink3;
       btn.appendChild(markEl);
       if (entry.workMark.challenge) {
         var challengeEl = document.createElement("span");
         challengeEl.textContent = entry.workMark.challenge.chapterDelta ? "+" + entry.workMark.challenge.chapterDelta + " ch" : "Updated";
         challengeEl.setAttribute("data-trace-inline-work-mark-challenge", "1");
-        challengeEl.style.cssText = "flex:0 0 auto;font:700 10.5px/1.3 " + TRACE_D1.font + ";color:" + TRACE_D1.rust;
+        challengeEl.style.cssText = "flex:0 0 auto;font:600 12px/1.3 " + TRACE_D1.font + ";color:var(--trace-page-ink)";
         btn.appendChild(challengeEl);
       }
     }
-    btn.addEventListener("mouseenter", function () {
-      label.style.textDecoration = "underline";
-      label.style.textDecorationColor = TRACE_D1.ink4;
-    });
-    btn.addEventListener("mouseleave", function () {
-      label.style.textDecoration = "none";
-    });
     btn.addEventListener("click", function (e) {
       e.preventDefault();
       e.stopPropagation();
@@ -3217,18 +3286,20 @@
     } else {
       setButtonInlineContent(btn, hidden ? null : "eyeoff", hidden ? "Unhide" : "Hide");
     }
+    btn.setAttribute("aria-label", (hidden ? "Unhide " : "Hide ") + (btn.dataset.traceWorkTitle || "this story") + " in Trace");
     btn.title = hidden
       ? "Show this work in Trace browsing overlays"
       : "Hide this work in Trace browsing overlays";
     btn.disabled = false;
   }
 
-  function preferenceBtnEl(workKey, hidden, onSuccess, surfaceAction) {
+  function preferenceBtnEl(workKey, hidden, onSuccess, surfaceAction, title) {
     var btn = document.createElement("button");
     btn.setAttribute(ATTR, "1");
     btn.setAttribute("data-trace-hidden-action", hidden ? "undo" : "hide");
     if (surfaceAction) btn.setAttribute("data-trace-surface-action", "1");
     btn.type = "button";
+    btn.dataset.traceWorkTitle = title || "this story";
     resetPreferenceBtn(btn, hidden);
 
     btn.addEventListener("click", function (e) {
@@ -3436,7 +3507,7 @@
     ].join(";");
   }
 
-  function hiddenPlaceholderEl(workKey, entry, showActions, onUndo) {
+  function hiddenPlaceholderEl(workKey, entry, showActions, onUndo, title) {
     var box = document.createElement("span");
     box.setAttribute(ATTR, "1");
     box.setAttribute("data-trace-hidden-placeholder", "1");
@@ -3464,9 +3535,10 @@
     undo.type = "button";
     undo.setAttribute("data-trace-hidden-action", "undo");
     undo.textContent = "Unhide";
+    undo.setAttribute("aria-label", "Unhide " + (title || "this story") + " in Trace");
     undo.style.cssText = [
       "border:0",
-      "border-bottom:1px solid " + TRACE_D1.forestLine,
+      "border-bottom:0",
       "border-radius:0",
       "background:transparent",
       "color:" + TRACE_D1.forest,
@@ -3500,6 +3572,7 @@
   }
 
   function renderOverlayState(wrap, entry, platform, anchor, workKey, showActions) {
+    traceRefreshPageTokens();
     removeWrapChildren(wrap);
     var row = listingRowForAnchor(platform, anchor);
     var canMutate = showActions;
@@ -3513,7 +3586,7 @@
         hiddenPlaceholderEl(workKey, entry, canMutate, function () {
           restoreListingRow(row);
           renderOverlayState(wrap, entry, platform, anchor, workKey, showActions);
-        }),
+        }, (anchor && anchor.textContent || "").trim()),
       );
       if (row && wrap.isConnected) collapseListingRow(row, wrap);
       return true;
@@ -3538,7 +3611,7 @@
           preferenceBtnEl(workKey, false, function (nextHidden) {
             hiddenEntry.hidden = nextHidden;
             renderOverlayState(wrap, hiddenEntry, platform, anchor, workKey, showActions);
-          }),
+          }, false, (anchor && anchor.textContent || "").trim()),
         );
       }
       return true;
@@ -3548,24 +3621,16 @@
   }
 
   function quickAddBtnEl(platform, anchor, workKey) {
+    traceRefreshPageTokens();
     var btn = document.createElement("button");
     btn.setAttribute(ATTR, "1");
     btn.setAttribute("data-trace-quick-add", workKey);
     btn.type = "button";
-    setButtonInlineContent(btn, "plus", "Add to Trace");
+    btn.textContent = "+ Add to Trace";
     btn.title = "Add to your Trace library";
+    btn.setAttribute("aria-label", "Add " + ((anchor && anchor.textContent || "").trim() || "this story") + " to Trace");
     btn.style.cssText = d1QuickAddStyle("add") + ";cursor:pointer";
 
-    btn.addEventListener("mouseenter", function () {
-      if (!btn.disabled) {
-        btn.style.borderBottomColor = "rgba(31,77,63,0.55)";
-      }
-    });
-    btn.addEventListener("mouseleave", function () {
-      if (!btn.disabled) {
-        btn.style.borderBottomColor = TRACE_D1.forestLine;
-      }
-    });
 
     btn.addEventListener("click", function (e) {
       e.preventDefault();
@@ -3605,7 +3670,7 @@
             btn.disabled = false;
             setTimeout(function () {
               btn.style.cssText = d1QuickAddStyle("add") + ";cursor:pointer";
-              setButtonInlineContent(btn, "plus", "Add to Trace");
+              btn.textContent = "+ Add to Trace";
             }, 2500);
             return;
           }
@@ -3662,7 +3727,7 @@
             btn.disabled = false;
             setTimeout(function () {
               btn.style.cssText = d1QuickAddStyle("add") + ";cursor:pointer";
-              setButtonInlineContent(btn, "plus", "Add to Trace");
+              btn.textContent = "+ Add to Trace";
             }, 2500);
           }
         },
@@ -3747,7 +3812,7 @@
       position: "afterend",
       display: "display:flex",
       justify: "justify-content:flex-start",
-      margin: "margin:8px 0 10px 0",
+      margin: "margin:7px 0 10px 0",
       maxWidth: "max-width:100%",
       width: "width:100%",
       clear: "clear:both",
@@ -3767,7 +3832,7 @@
       position: "afterend",
       display: "display:flex",
       justify: "justify-content:flex-start",
-      margin: "margin:4px 0 0 0",
+      margin: "margin:7px 0 0 0",
       maxWidth: "max-width:100%",
     };
   }
@@ -3785,7 +3850,7 @@
           position: "afterend",
           display: "display:flex",
           justify: "justify-content:flex-start",
-          margin: "margin:4px 0 0 0",
+          margin: "margin:7px 0 0 0",
           maxWidth: "max-width:100%",
         };
       }
@@ -3795,7 +3860,7 @@
         position: "beforeend",
         display: "display:flex",
         justify: "justify-content:flex-start",
-        margin: "margin:4px 0 0 0",
+        margin: "margin:7px 0 0 0",
         maxWidth: "max-width:100%",
       };
     }
@@ -3875,7 +3940,7 @@
         "align-items:center",
         placement.justify,
         "flex-wrap:wrap",
-        "gap:14px",
+        "gap:16px",
         placement.margin,
         placement.clear || "",
         "vertical-align:middle",

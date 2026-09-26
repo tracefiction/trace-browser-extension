@@ -14,7 +14,11 @@ const fixtureRoot = path.join(repoRoot, "test", "visual-fixtures");
 const resourceRoot = path.join(repoRoot, "Shared (Extension)", "Resources");
 const outputRoot = process.env.TRACE_VISUAL_OUTPUT_DIR || "/tmp/trace-extension-visual-fixtures";
 const renderSource = "fixture-rendered";
-const visualMode = process.argv.includes("--capacity-only")
+const visualMode = process.argv.includes("--restyle-qa1")
+  ? "qa1"
+  : process.argv.includes("--restyle-matrix")
+  ? "matrix"
+  : process.argv.includes("--capacity-only")
   ? "capacity"
   : process.argv.includes("--corrective-only")
     ? "corrective"
@@ -273,6 +277,7 @@ function extensionMockSource(storageData, sessionSnapshot = null) {
         firstSaveSeen: storageData.traceFirstSaveSeen === true,
         libraryCount: typeof storageData.traceLibraryCount === "number" ? storageData.traceLibraryCount : null,
         activeTab: storageData.traceActiveTab || { kind: "unknown" },
+        activeWork: storageData.traceActiveWork || null,
         capacity: storageData.traceCapacityRecovery || null,
         pro: storageData.traceUserPro === true,
         autoTrackEnabled: storageData.prefAutoTrackEnabled !== false,
@@ -367,6 +372,9 @@ function extensionMockSource(storageData, sessionSnapshot = null) {
               if (!activeTabProbeInjected) throw new Error("No receiving end");
               return { ok: true, probe: true };
             }
+            if (message && message.type === "TRACE_STORY_IDENTITY_GET") {
+              return { ok: true, title: "Synthetic Archive Work", author: "Demo Author", site: "AO3" };
+            }
             if (message && message.type === "TRACE_ACTIVE_TAB_PROBE_SAVE") {
               return storageData.traceProbeSaveError
                 ? { ok: false, error: storageData.traceProbeSaveError }
@@ -383,6 +391,7 @@ function extensionMockSource(storageData, sessionSnapshot = null) {
             return { origins: [...grantedOrigins], permissions: [] };
           },
           async request(request) {
+            if (storageData.tracePermissionRequestPending === true) return new Promise(() => {});
             const allowed = storageData.tracePermissionRequestResult !== false;
             if (allowed) grantedOrigins = [...(request && request.origins || [])];
             return allowed;
@@ -676,7 +685,7 @@ async function renderPopupScreenshot(browser, definition, assets, manifest) {
   );
   await installPopupRoutes(page, assets.popupHtml, assets.popupCss, assets.popupJs, assets.markSvg);
   await page.goto("https://trace-extension.local/popup.html", { waitUntil: "domcontentloaded" });
-  await page.waitForSelector("#popup-connection[data-state]", { timeout: 10000 });
+  await page.waitForSelector("#popup-connection[data-state]", { state: "attached", timeout: 10000 });
   await page.waitForTimeout(250);
   if (definition.storageData?.traceActiveTabProbe === true) {
     await page.waitForFunction(
@@ -688,7 +697,8 @@ async function renderPopupScreenshot(browser, definition, assets, manifest) {
     await page.waitForFunction(
       () =>
         document.body.dataset.traceEarnedPermission !== "true" ||
-        document.querySelector("#popup-earned-result")?.dataset.state !== "checking",
+        Boolean(document.body.dataset.tracePopupStateCode) ||
+        !document.querySelector("#popup-earned-permission")?.hidden,
       { timeout: 10000 },
     );
   }
@@ -719,7 +729,7 @@ async function renderPopupScreenshot(browser, definition, assets, manifest) {
       };
     }, {
       selector: definition.firstViewportAction || "#popup-earned-primary",
-      maxHeight: definition.firstViewportMaxHeight,
+      maxHeight: Math.max(definition.firstViewportMaxHeight, viewport.height),
     });
     if (
       firstViewport.actionHidden ||
@@ -777,6 +787,371 @@ async function renderPopupScreenshot(browser, definition, assets, manifest) {
   });
 }
 
+const RESTYLE_ORIGINS = [
+  "https://*.archiveofourown.org/*",
+  "https://*.archiveofourown.gay/*",
+  "https://archive.transformativeworks.org/*",
+  "https://www.fanfiction.net/*",
+  "https://m.fanfiction.net/*",
+];
+const RESTYLE_STATES = ["P1", "P2", "P3", "P3-lapse", "P4", "P5", "P6", "P7", "P8", "P9", "P10", "P11", "P11-menu"];
+const RESTYLE_PAGE_STATES = ["N1-saved", "N1-reading", "N2", "N3", "N4-lens", "N4-add-hide"];
+const RESTYLE_DEVICES = [
+  { name: "17", width: 384, height: 386 },
+  { name: "se", width: 359, height: 283 },
+];
+const RESTYLE_SIZES = [
+  { name: "large", px: 17 },
+  { name: "xxxl", px: 26 },
+  { name: "ax5", px: 36 },
+];
+const RESTYLE_IOS_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 26_5 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1";
+
+function restylePopupStorage() {
+  return {
+    ...makeStorageData(),
+    traceEarnedPermissionOnboarding: true,
+    traceGrantedOrigins: RESTYLE_ORIGINS,
+    traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 60000, grantAt: Date.now() - 120000 },
+    traceRegisteredContentScripts: [
+      { id: "trace-archive-automation-v1" },
+      { id: "trace-ao3-saved-filters-v1" },
+    ],
+    traceProbeUrl: "https://archiveofourown.org/works/28534965",
+  };
+}
+
+async function renderRestylePopup(browser, assets, output, device, appearance, size, state) {
+  const page = await browser.newPage({
+    viewport: { width: device.width, height: device.height },
+    deviceScaleFactor: 2,
+    hasTouch: true,
+    userAgent: RESTYLE_IOS_UA,
+  });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.emulateMedia({ colorScheme: appearance });
+  await page.addInitScript(extensionMockSource(restylePopupStorage(), {
+    state: "connected", accountId: "visual-account", canExecuteAuthenticated: true, reason: "none",
+  }));
+  const previewApi = "\nwindow.__traceVisualRender = { renderEarnedAccessPending, renderEarnedSaved, renderEarnedPermissionInvitation, renderEarnedDelayed, renderEarnedConnectAccount, renderEarnedPermissionDeclined, renderEarnedSiteReady, renderEarnedUnavailable, renderReaderView, openPopupStatusMenu, setEarnedCopy, setEarnedResult, configureEarnedActions, refreshEarnedLayout };";
+  await installPopupRoutes(page, assets.popupHtml, assets.popupCss, assets.popupJs + previewApi, assets.markSvg);
+  await page.goto("https://trace-extension.local/popup.html", { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => Boolean(window.__traceVisualRender));
+  await page.addStyleTag({ content: `body[data-trace-platform="ios"] { font-size: ${size.px}px !important; }` });
+  await page.evaluate(async (code) => {
+    const { renderEarnedAccessPending, renderEarnedSaved, renderEarnedPermissionInvitation,
+      renderEarnedDelayed, renderEarnedConnectAccount, renderEarnedPermissionDeclined,
+      renderEarnedSiteReady, renderEarnedUnavailable, renderReaderView, openPopupStatusMenu,
+      setEarnedCopy, setEarnedResult, configureEarnedActions, refreshEarnedLayout } = window.__traceVisualRender;
+    const story = { ok: true, kind: "story", site: "AO3" };
+    const identity = { title: "Synthetic Archive Work", author: "A. Writer", site: "AO3" };
+    const saved = { status: "saved", entry: { entryId: "00000000-0000-4000-8000-000000285349",
+      canonicalReaderStatus: "SAVED", chapters: { current: 0, total: 12 } } };
+    const reader = { ok: true, authState: { state: "connected" }, firstSaveSeen: true,
+      activeTab: { kind: "supported_story", site: "ao3", canImport: true },
+      activeWork: { status: "saved", entry: { entryId: "00000000-0000-4000-8000-000000285349",
+        canonicalReaderStatus: "READING", chapters: { current: 6, total: 12 } } },
+      autoTrackEnabled: true };
+    document.body.dataset.traceEarnedPermission = "true";
+    document.getElementById("popup-earned-permission").hidden = false;
+    if (code === "P1") renderEarnedAccessPending(story);
+    if (code === "P2") renderEarnedSaved(story, saved, identity);
+    if (code === "P3") renderEarnedPermissionInvitation(story, false, { granted: 1, required: 5 });
+    if (code === "P3-lapse") renderEarnedPermissionInvitation(story, false, { granted: 1, required: 5 }, true);
+    if (code === "P4") {
+      configureEarnedActions({ label: "Waiting for Safari…", action: "", disabled: true, emphasis: "secondary" });
+      setEarnedCopy({ stateCode: "P4", headingMarkup: "Tap <b>Always Allow</b>, not the blue button.",
+        lead: "It lists 5 addresses. They’re all AO3 or FanFiction.net.",
+        ruleMarkup: "Tap <b>Always Allow</b>, not the blue button.", duplicateRule: true });
+      setEarnedResult("checking", "", "");
+    }
+    if (code === "P5") renderEarnedDelayed(story);
+    if (code === "P6") renderEarnedConnectAccount(story);
+    if (code === "P7") renderEarnedPermissionDeclined(story);
+    if (code === "P8") renderEarnedSiteReady();
+    if (code === "P9") renderEarnedUnavailable(story);
+    if (code === "P10") await renderReaderView({ ...reader, activeWork: null, autoTrackEnabled: false });
+    if (["P11", "P11-menu", "P11-menu-keyboard", "P11-settings"].includes(code)) {
+      await renderReaderView(reader);
+    }
+    refreshEarnedLayout();
+    window.dispatchEvent(new Event("resize"));
+  }, state);
+  if (state === "P11-menu") await page.locator("#popup-earned-status-control").tap();
+  if (state === "P11-menu-keyboard") {
+    await page.locator("#popup-earned-status-control").focus();
+    await page.keyboard.press("Enter");
+  }
+  if (state === "P11-settings") await page.locator("#popup-earned-settings-row").tap();
+  await page.waitForTimeout(80);
+  const metrics = await page.evaluate(() => {
+    const pin = document.getElementById("popup-earned-pin");
+    const primary = document.getElementById("popup-earned-primary");
+    const box = primary?.getBoundingClientRect();
+    const kicker = document.getElementById("popup-earned-kicker");
+    const menu = document.getElementById("popup-earned-status-menu");
+    const preferences = document.getElementById("popup-preferences");
+    const disconnect = document.getElementById("popup-session-secondary");
+    return {
+      state: document.body.dataset.tracePopupStateCode,
+      innerHeight: window.innerHeight,
+      bodyFontPx: getComputedStyle(document.body).fontSize,
+      horizontalOverflow: document.documentElement.scrollWidth > window.innerWidth,
+      pinnedRatio: pin && getComputedStyle(pin).position === "sticky" ? pin.getBoundingClientRect().height / window.innerHeight : 0,
+      primaryVisible: primary && !primary.hidden && getComputedStyle(primary).display !== "none",
+      primaryBottom: box ? Math.ceil(box.bottom) : null,
+      primaryText: primary?.textContent || "",
+      axFlow: document.getElementById("popup-earned-permission")?.classList.contains("popup-earned-ax"),
+      textAx: document.getElementById("popup-earned-permission")?.classList.contains("popup-earned-text-ax"),
+      kickerVisible: Boolean(kicker && !kicker.hidden && getComputedStyle(kicker).display !== "none" && kicker.getBoundingClientRect().height),
+      kickerText: kicker?.textContent?.trim() || "",
+      leadHyphens: getComputedStyle(document.getElementById("popup-earned-lead")).hyphens,
+      readerView: document.body.dataset.traceReaderView || null,
+      menuRows: menu && !menu.hidden ? [...menu.querySelectorAll("button")].map((item) => ({
+        label: item.textContent.replace("✓", "").trim(),
+        status: item.querySelector(".popup-earned-record-dot")?.dataset.status || null,
+        dotColor: item.querySelector(".popup-earned-record-dot") ? getComputedStyle(item.querySelector(".popup-earned-record-dot")).backgroundColor : null,
+        weight: getComputedStyle(item).fontWeight,
+        checked: item.getAttribute("aria-checked"),
+        checkVisible: Boolean(item.querySelector(".popup-earned-menu-check")),
+      })) : [],
+      menuFocusVisible: Boolean(menu?.contains(document.activeElement) && document.activeElement.matches(":focus-visible")),
+      settingsSwitches: preferences && !preferences.hidden ? [...preferences.querySelectorAll("input[type='checkbox']")].map((input) => ({
+        id: input.id, visible: Boolean(input.getBoundingClientRect().height && getComputedStyle(input.closest("section")).display !== "none"),
+      })) : [],
+      disconnectVisible: Boolean(disconnect && !disconnect.hidden && getComputedStyle(disconnect).display !== "none" && disconnect.getBoundingClientRect().height),
+      nestedSettingsScroll: Boolean(preferences?.querySelector(".popup-preferences-panel")?.scrollHeight > preferences?.querySelector(".popup-preferences-panel")?.clientHeight + 1),
+      ground: getComputedStyle(document.documentElement).backgroundColor,
+      bodyScrollHeight: document.body.scrollHeight,
+      sectionScrollHeight: document.getElementById("popup-earned-permission")?.scrollHeight,
+      scrollHeight: document.querySelector(".popup-earned-scroll")?.scrollHeight,
+      sectionClasses: document.getElementById("popup-earned-permission")?.className,
+    };
+  });
+  const file = `${device.name}-${appearance}-${size.name}__${state}.png`;
+  await page.screenshot({ path: path.join(output, file), fullPage: true, timeout: 120000 });
+  if (device.name === "se" && appearance === "light" && size.name === "xxxl" && state === "P2") {
+    metrics.scrollProbe = await page.evaluate(() => {
+      window.scrollTo(0, 200);
+      document.body.scrollTop = 200;
+      return { windowY: window.scrollY, bodyY: document.body.scrollTop,
+        scrollingElementY: document.scrollingElement?.scrollTop || 0 };
+    });
+    await page.screenshot({ path: path.join(output, "se-light-xxxl__P2-scrolled.png"), fullPage: false });
+  }
+  await page.close();
+  return { type: "popup", file, device: device.name, appearance, size: size.name, state, metrics, errors };
+}
+
+async function renderRestylePage(browser, scripts, output, device, size, host, state, phoneAppearance, supplement = false) {
+  const listing = state.startsWith("N4");
+  const fixture = listing ? "ao3_listing.html" : "ao3_story.html";
+  const url = listing ? "https://archiveofourown.org/works?tag_id=Harry+Potter"
+    : "https://archiveofourown.org/works/28534965/chapters/69925506";
+  const page = await browser.newPage({
+    viewport: { width: device.name === "17" ? 402 : 375, height: device.name === "17" ? 874 : 667 },
+    deviceScaleFactor: 2, userAgent: RESTYLE_IOS_UA,
+  });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.emulateMedia({ colorScheme: phoneAppearance });
+  const savedHandle = state === "N1-saved" || state === "N2";
+  const cache = makeOverlayCache(savedHandle ? "planning-zero" : "default");
+  cache.entries["ao3:28534965"] = {
+    status: savedHandle ? "PLANNING" : "READING",
+    readerStatus: savedHandle ? "PLANNING" : "READING",
+    canonicalReaderStatus: savedHandle ? "SAVED" : "READING",
+    entryId: "00000000-0000-4000-8000-000000285349",
+    chapters: { current: savedHandle ? 0 : 5, total: 12 },
+  };
+  const storage = { ...makeStorageData(), libraryOverlayCache: cache };
+  await page.addInitScript(extensionMockSource(storage));
+  await installFixtureRoutes(page, fixtureHtmlForRendering(await readText(fixtureRoot, fixture)), url);
+  await page.goto(url, { waitUntil: "domcontentloaded" });
+  await page.evaluate(({ host, px }) => {
+    const background = host === "dark" ? "#111111" : "#ffffff";
+    document.documentElement.style.background = background;
+    document.body.style.background = background;
+    document.body.style.color = host === "dark" ? "#f2f6fa" : "#18232d";
+    document.body.style.fontSize = `${px}px`;
+  }, { host, px: size.px });
+  await injectScripts(page, listing ? [scripts.keys, scripts.overlay] : [scripts.collector]);
+  await page.waitForTimeout(250);
+  if (state === "N2" || state === "N3") {
+    await page.evaluate((kind) => {
+      const card = createStoryPageNote(kind === "N2" ? "saved" : "kept", "Synthetic Archive Work", 5, false).note;
+      storySavedNoteMount(card);
+      activeStorySavedNote = card;
+      const note = document.querySelector("trace-saved-note");
+      if (note) {
+        const card = note.__traceShadow.querySelector("[data-trace-saved-note]");
+        if (card) { card.style.opacity = "1"; card.style.transform = "none"; }
+      }
+    }, state);
+  }
+  if (listing) {
+    const selector = state === "N4-lens" ? "#work_10404927" : "#work_25010857";
+    await page.locator(selector).scrollIntoViewIfNeeded();
+  }
+  const metrics = await page.evaluate(() => {
+    const handle = document.querySelector("[data-trace-story-handle]");
+    const chevron = handle?.querySelector("svg");
+    const mark = document.querySelector("[data-trace-inline-work-mark-challenge]");
+    return {
+      hostTone: document.documentElement.dataset.traceHostTone || document.body.dataset.traceHostTone || null,
+      surface: getComputedStyle(document.body).getPropertyValue("--trace-page-surface").trim(),
+      ink: getComputedStyle(document.body).getPropertyValue("--trace-page-ink").trim(),
+      teal: getComputedStyle(document.body).getPropertyValue("--trace-page-teal").trim(),
+      horizontalOverflow: document.documentElement.scrollWidth > window.innerWidth,
+      noteVisible: Boolean(document.querySelector("trace-saved-note")),
+      handleText: handle?.textContent?.trim() || null,
+      handleStatus: handle?.getAttribute("data-trace-story-status") || null,
+      chevron: chevron ? { width: chevron.getBoundingClientRect().width,
+        height: chevron.getBoundingClientRect().height,
+        viewBox: chevron.getAttribute("viewBox"), path: chevron.querySelector("path")?.getAttribute("d") } : null,
+      workMark: mark ? { text: mark.textContent?.trim(), color: getComputedStyle(mark).color,
+        weight: getComputedStyle(mark).fontWeight } : null,
+    };
+  });
+  const file = supplement
+    ? `${device.name}-${host}-phone-${phoneAppearance}-${size.name}__${state}.png`
+    : `${device.name}-${host}-${size.name}__${state}.png`;
+  await page.screenshot({ path: path.join(output, file), fullPage: false, timeout: 120000 });
+  await page.close();
+  return { type: supplement ? "page-supplement" : "page", file, device: device.name, host,
+    phoneAppearance, size: size.name, state, metrics, errors };
+}
+
+async function renderRestyleMatrix(browser, assets, scripts, manifest) {
+  const root = path.join(outputRoot, "matrix");
+  await fs.mkdir(root, { recursive: true });
+  const sample = process.argv.includes("--matrix-sample");
+  const states = sample ? ["P2", "P3", "P11-menu"] : RESTYLE_STATES;
+  const pageStates = sample ? ["N2", "N4-add-hide"] : RESTYLE_PAGE_STATES;
+  const devices = RESTYLE_DEVICES;
+  const sizes = RESTYLE_SIZES;
+  const appearances = sample ? ["light"] : ["light", "dark"];
+  const entries = [];
+  for (const device of devices) for (const size of sizes) for (const appearance of appearances) {
+    for (const state of states) {
+      console.error(`Popup ${device.name} ${appearance} ${size.name} ${state}`);
+      entries.push(await renderRestylePopup(browser, assets, root, device, appearance, size, state));
+    }
+  }
+  for (const device of devices) for (const size of sizes) for (const host of ["light", "dark"]) {
+    for (const state of pageStates) {
+      const phoneAppearance = host === "light" ? "dark" : "light";
+      console.error(`Page ${device.name} ${host} ${size.name} ${state}`);
+      entries.push(await renderRestylePage(browser, scripts, root, device, size, host, state, phoneAppearance));
+    }
+  }
+  if (!sample) {
+    for (const device of RESTYLE_DEVICES) for (const state of RESTYLE_PAGE_STATES) {
+      console.error(`Page ${device.name} light-host light-phone large ${state}`);
+      entries.push(await renderRestylePage(browser, scripts, root, device, RESTYLE_SIZES[0],
+        "light", state, "light", true));
+    }
+  }
+  manifest.matrix = {
+    method: "Chromium rendering through the repository preview harness; text sizes are 17/26/36 px proxies, not iOS Dynamic Type",
+    expectedPopup: sample ? 18 : 156,
+    expectedPage: sample ? 24 : 72,
+    supplementaryLightHostPhoneLight: sample ? 0 : 12,
+    entries,
+  };
+  await fs.writeFile(path.join(outputRoot, "index.json"), JSON.stringify(manifest, null, 2) + "\n");
+}
+
+async function renderRestyleQa1(browser, assets, scripts, manifest) {
+  const entries = [];
+  for (const device of RESTYLE_DEVICES) for (const size of RESTYLE_SIZES) {
+    for (const appearance of ["light", "dark"]) {
+      const states = ["P3", "P3-lapse"];
+      if (size.name !== "xxxl") states.push("P11-settings", "P11-menu");
+      if (device.name === "se" && size.name === "large") states.push("P11-menu-keyboard");
+      for (const state of states) {
+        console.error(`QA1 popup ${device.name} ${appearance} ${size.name} ${state}`);
+        entries.push(await renderRestylePopup(browser, assets, outputRoot, device, appearance, size, state));
+      }
+    }
+  }
+  for (const device of RESTYLE_DEVICES) for (const size of RESTYLE_SIZES) {
+    for (const host of ["light", "dark"]) {
+      const states = ["N2"];
+      if (size.name !== "xxxl") states.push("N1-saved", "N1-reading", "N4-lens", "N4-add-hide");
+      for (const state of states) {
+        console.error(`QA1 page ${device.name} ${host} ${size.name} ${state}`);
+        entries.push(await renderRestylePage(browser, scripts, outputRoot, device, size, host, state,
+          host === "light" ? "dark" : "light"));
+      }
+    }
+  }
+  const failures = [];
+  for (const entry of entries) {
+    const m = entry.metrics;
+    if (entry.errors.length) failures.push(`${entry.file}: ${entry.errors.join("; ")}`);
+    if (entry.state === "P3" || entry.state === "P3-lapse") {
+      const large = entry.size !== "ax5";
+      if (m.kickerVisible !== large || m.textAx === large || m.leadHyphens !== (large ? "none" : "auto")) {
+        failures.push(`${entry.file}: kicker or hyphenation differs from text-size rule`);
+      }
+    }
+    if (entry.state === "P11-settings") {
+      if (m.readerView !== "settings" || m.settingsSwitches.length !== 4 ||
+          m.settingsSwitches.some((switchRow) => !switchRow.visible) || !m.disconnectVisible || m.nestedSettingsScroll) {
+        failures.push(`${entry.file}: four switches and Disconnect must use the document scroll`);
+      }
+    }
+    if (entry.state === "P11-menu" || entry.state === "P11-menu-keyboard") {
+      if (m.menuRows.length !== 6 || m.menuRows.some((row) => !row.status || !row.dotColor || row.weight !== "400") ||
+          m.menuRows.filter((row) => row.checked === "true" && row.checkVisible).length !== 1 ||
+          m.menuFocusVisible !== (entry.state === "P11-menu-keyboard")) {
+        failures.push(`${entry.file}: status rows or input-modality focus differs from the contract`);
+      }
+    }
+    if (entry.state === "N1-saved" || entry.state === "N1-reading") {
+      if (m.chevron?.viewBox !== "0 0 10 7" || m.chevron?.width !== 10 || m.chevron?.height !== 7) {
+        failures.push(`${entry.file}: handle chevron is not 10 by 7`);
+      }
+    }
+    if (entry.state === "N4-lens" || entry.state === "N4-add-hide") {
+      if (!m.workMark || m.workMark.weight !== "600" ||
+          m.workMark.color === "rgb(155, 65, 70)" || m.workMark.color === "rgb(231, 161, 159)") {
+        failures.push(`${entry.file}: chapter work mark is missing or uses warning styling`);
+      }
+    }
+    if (entry.state === "N2" && (!m.noteVisible || m.handleStatus !== "SAVED" || !m.handleText?.includes("Saved"))) {
+      failures.push(`${entry.file}: first-save note must accompany a Saved handle`);
+    }
+  }
+  manifest.qa1 = {
+    method: "Targeted Chromium popup preview and injected page fixtures; 17/26/36 px text-size proxies",
+    counts: { popup: entries.filter((entry) => entry.type === "popup").length,
+      page: entries.filter((entry) => entry.type === "page").length },
+    failures,
+    entries,
+  };
+  await fs.writeFile(path.join(outputRoot, "index.json"), JSON.stringify(manifest, null, 2) + "\n");
+  const examples = ["se-light-large__P3.png", "se-dark-xxxl__P3-lapse.png", "se-light-ax5__P3.png",
+    "se-dark-large__P11-settings.png", "se-light-large__P11-menu.png", "se-light-large__P11-menu-keyboard.png",
+    "se-light-large__N1-saved.png", "se-dark-large__N4-lens.png", "17-light-large__N2.png"];
+  const index = [
+    "# Popup and page design QA 1",
+    "",
+    `Extension render source: ${manifest.generatedAt}. Targeted preview: ${manifest.qa1.counts.popup} popup and ${manifest.qa1.counts.page} page captures.`,
+    "Text sizes use 17/26/36 px proxies, not iOS Dynamic Type. The [JSON index](index.json) lists every capture and measured result.",
+    "N2 fixtures pair the first-save note with a confirmed Saved handle.",
+    "",
+    ...examples.map((file) => `- [${file}](${file})`),
+    "",
+    `Automated audit: ${failures.length} failure(s).`,
+  ].join("\n") + "\n";
+  await fs.writeFile(path.join(outputRoot, "index.md"), index);
+  if (failures.length) throw new Error(`QA1 capture audit failed:\n${failures.join("\n")}`);
+}
+
+
 async function main() {
   await fs.mkdir(outputRoot, { recursive: true });
   const { chromium } = await loadPlaywright();
@@ -812,6 +1187,18 @@ async function main() {
   };
 
   const browser = await launchChromium(chromium);
+  if (visualMode === "qa1") {
+    try { await renderRestyleQa1(browser, assets, scripts, manifest); }
+    finally { await browser.close(); }
+    console.log(`QA1 index: ${path.join(outputRoot, "index.md")}`);
+    return;
+  }
+  if (visualMode === "matrix") {
+    try { await renderRestyleMatrix(browser, assets, scripts, manifest); }
+    finally { await browser.close(); }
+    console.log(`Matrix index: ${path.join(outputRoot, "index.json")}`);
+    return;
+  }
   try {
     const fixtureScreenshots = [
       {
@@ -1267,7 +1654,7 @@ async function main() {
           tracePermissionRequestResult: false,
         },
         clickSelector: "#popup-earned-primary",
-        clickWaitForText: "Access wasn’t allowed",
+        clickWaitForText: "Nothing was saved",
         viewport: { width: 360, height: 680 },
         firstViewportMaxHeight: 360,
         userAgent:
@@ -1286,9 +1673,10 @@ async function main() {
         },
         storageData: {
           traceEarnedPermissionOnboarding: true,
+          tracePermissionRequestPending: true,
         },
         clickSelector: "#popup-earned-primary",
-        clickWaitForText: "Adding your story…",
+        clickWaitForText: "Tap Always Allow",
         viewport: { width: 360, height: 680 },
         firstViewportMaxHeight: 360,
         userAgent:
@@ -1374,8 +1762,15 @@ async function main() {
           canExecuteAuthenticated: true,
           reason: "none",
         },
-        storageData: postOnboardingPopupStorageData(),
-        clickSelector: "#popup-preferences > summary",
+        storageData: {
+          ...postOnboardingPopupStorageData(),
+          traceActiveTab: { kind: "supported_story", site: "ao3", canImport: true },
+          traceActiveWork: { status: "saved", entry: {
+            entryId: "00000000-0000-4000-8000-000000285349",
+            canonicalReaderStatus: "READING", chapters: { current: 6, total: 12 },
+          } },
+        },
+        clickSelector: "#popup-earned-settings-row",
         viewport: { width: 360, height: 680 },
         userAgent:
           "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",

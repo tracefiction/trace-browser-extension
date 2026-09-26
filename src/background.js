@@ -3382,6 +3382,7 @@ function handleAutoTrack(
 }
 
 async function executeAutoTrack(payload, sender, allowNativeAuthRetry = true) {
+  if (allowNativeAuthRetry) payload = { ...payload, readingActivity: readingActivityCommand() };
   if (!bearerToken) return;
   const workKey = externalStoryKeyFromItem(payload && payload.item);
   const workOperationId = await markWorkPending(workKey, "auto_track");
@@ -3643,6 +3644,7 @@ async function handleQuickAdd(
   allowNativeAuthRetry = true,
   nativeAuthPrepared = false,
 ) {
+  if (!nativeAuthPrepared && allowNativeAuthRetry) payload = { ...payload, readingActivity: readingActivityCommand() };
   const workKey = externalStoryKeyFromItem(payload && payload.item);
   // Match auto-track: a valid Safari token is not proof that it belongs to
   // the containing app's current account. Adopt the app token before writing.
@@ -4440,6 +4442,7 @@ async function handlePatchLibraryEntry(payload, sender, sendResponse) {
 
   const entryId = payload && typeof payload.entryId === "string" ? payload.entryId.trim() : "";
   const patch = normalizeLibraryEntryPatch(payload && payload.patch);
+  if (patch?.progress) patch.readingActivity = readingActivityCommand();
   if (!isValidUuid(entryId) || !patch) {
     if (sendResponse) sendResponse({ ok: false, error: "invalid_request" });
     return;
@@ -4513,7 +4516,7 @@ async function handleFinishQualificationSignal(payload, sender, sendResponse) {
   ]);
   const requestAccountId = currentAccountIdFromSnapshot(requestScope);
   const operationId = signal.state === "resolved" ? makeFinishOperationId() : null;
-  const requestSignal = operationId ? { ...signal, operationId } : signal;
+  const requestSignal = operationId ? { ...signal, operationId, readingActivity: (() => { const { operationId: _, ...calendar } = readingActivityCommand(); return calendar; })() } : signal;
   const request = {
     method: "POST",
     headers: {
@@ -4630,7 +4633,7 @@ async function handleSetReaderStatus(payload, sender, sendResponse) {
         "Content-Type": "application/json",
         Authorization: `Bearer ${bearerToken}`,
       },
-      body: JSON.stringify(progress ? { status, progress } : { status }),
+      body: JSON.stringify(progress ? { status, progress, readingActivity: readingActivityCommand() } : { status }),
     });
 
     if (response.ok) {
@@ -4784,4 +4787,14 @@ try {
   }
 } catch (_) {
   /* alarms optional */
+}
+
+function readingActivityCommand(now = new Date()) {
+  const offset = -now.getTimezoneOffset();
+  const absolute = Math.abs(offset);
+  return {
+    operationId: makeFinishOperationId(), occurredAt: now.toISOString(),
+    calendarDate: new Date(now.getTime()+offset*60000).toISOString().slice(0,10),
+    timeZone: { kind: "OFFSET", value: `${offset < 0 ? "-" : "+"}${String(Math.floor(absolute/60)).padStart(2,"0")}:${String(absolute%60).padStart(2,"0")}` },
+  };
 }

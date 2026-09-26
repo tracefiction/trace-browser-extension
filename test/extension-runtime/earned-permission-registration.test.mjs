@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import vm from "node:vm";
 
 import {
   EARNED_PERMISSION_REGISTRATION_MESSAGE,
@@ -308,4 +312,96 @@ test("unrelated runtime messages are ignored", () => {
       ).finally(resolve);
     });
   });
+});
+
+// The archive page gate lives in the generated popup-config.js content script.
+// Run the committed Safari bundle file against scripted background replies.
+const POPUP_CONFIG_PATH = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../Shared (Extension)/Resources/popup-config.js",
+);
+const COMPLETE_RESULT = Object.freeze({
+  ok: true,
+  completeGrant: true,
+  registered: true,
+  changed: false,
+  grantAt: 1,
+});
+
+function runArchivePageGate(replies, { promiseApi = true } = {}) {
+  const sent = [];
+  const timers = [];
+  const readyEvents = [];
+  const nextReply = () => (replies.length > 0 ? replies.shift() : undefined);
+  const runtime = promiseApi
+    ? {
+        sendMessage(message) {
+          sent.push(message);
+          const reply = nextReply();
+          return reply instanceof Error ? Promise.reject(reply) : Promise.resolve(reply);
+        },
+      }
+    : {
+        lastError: undefined,
+        sendMessage(message, callback) {
+          sent.push(message);
+          const reply = nextReply();
+          queueMicrotask(() => {
+            runtime.lastError = reply instanceof Error ? { message: reply.message } : undefined;
+            callback(reply instanceof Error ? undefined : reply);
+            runtime.lastError = undefined;
+          });
+        },
+      };
+  const context = {
+    location: { hostname: "archiveofourown.org" },
+    document: { dispatchEvent: (event) => readyEvents.push(event.type) },
+    CustomEvent: class { constructor(type) { this.type = type; } },
+    setTimeout: (callback, delay) => { timers.push({ callback, delay }); return timers.length; },
+    ...(promiseApi ? { browser: { runtime } } : { chrome: { runtime } }),
+  };
+  context.globalThis = context;
+  vm.runInNewContext(fs.readFileSync(POPUP_CONFIG_PATH, "utf8"), context);
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const drain = async () => {
+    await settle();
+    while (timers.length > 0) {
+      timers.shift().callback();
+      await settle();
+    }
+  };
+  return { context, sent, timers, readyEvents, drain };
+}
+
+for (const promiseApi of [true, false]) {
+  const api = promiseApi ? "promise" : "callback";
+
+  test(`archive page gate asks again when the background could not answer yet (${api} API)`, async () => {
+    // Safari re-injects content scripts into open tabs when the extension
+    // reloads; a reconcile sent before the background listens comes back empty.
+    const h = runArchivePageGate([undefined, new Error("no listener"), COMPLETE_RESULT], { promiseApi });
+    await h.drain();
+    assert.equal(h.context.TRACE_EARNED_PERMISSION_COMPLETE, true);
+    assert.deepEqual(h.readyEvents, ["trace-earned-permission-ready"]);
+    assert.equal(h.sent.length, 3);
+    assert.ok(h.sent.every((message) => message.type === EARNED_PERMISSION_REGISTRATION_MESSAGE));
+  });
+
+  test(`archive page gate treats a definite incomplete grant as final (${api} API)`, async () => {
+    const h = runArchivePageGate([
+      { ok: false, completeGrant: false, registered: false, changed: false, error: "permission_incomplete" },
+      COMPLETE_RESULT,
+    ], { promiseApi });
+    await h.drain();
+    assert.equal(h.context.TRACE_EARNED_PERMISSION_COMPLETE, false);
+    assert.deepEqual(h.readyEvents, []);
+    assert.equal(h.sent.length, 1);
+  });
+}
+
+test("archive page gate stops asking after a bounded number of empty replies", async () => {
+  const h = runArchivePageGate([]);
+  await h.drain();
+  assert.equal(h.context.TRACE_EARNED_PERMISSION_COMPLETE, false);
+  assert.ok(h.sent.length > 1 && h.sent.length <= 5, `sent ${h.sent.length}`);
 });

@@ -17,7 +17,7 @@
     "build:ios-active-tab-optional-hosts-probe:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel TRACE_IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE=1 node scripts/build.mjs",
     "build:ios-earned-permission-onboarding": "npm run build:core && TRACE_SESSION_MODE=kernel TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1 node scripts/build.mjs",
     "build:ios-earned-permission-onboarding:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1 TRACE_API_BASE=https://api.tracefiction.com TRACE_WEB_ORIGIN=https://www.tracefiction.com node scripts/build.mjs",
-    "build:ios-earned-permission-onboarding:preview-release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1 TRACE_IOS_EARNED_PERMISSION_PREVIEW_RELEASE=1 TRACE_API_BASE=https://ff-app-development.up.railway.app TRACE_WEB_ORIGIN=https://trace-git-dev-zacs-projects-378417c9.vercel.app node scripts/build.mjs",
+    "build:ios-earned-permission-onboarding:preview-release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1 TRACE_IOS_EARNED_PERMISSION_PREVIEW_RELEASE=1 TRACE_API_BASE=https://api.development.example.test TRACE_WEB_ORIGIN=https://web.development.example.test node scripts/build.mjs",
     "build:disabled": "npm run build:core && TRACE_SESSION_MODE=disabled node scripts/build.mjs",
     "build:disabled:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=disabled node scripts/build.mjs",
     "build:release": "npm run build:kernel:release",
@@ -28,7 +28,7 @@
     "screenshots:store": "node scripts/prepare-store-screenshots.mjs",
     "package:amo-source": "bash scripts/package-amo-source.sh",
     "test:core": "npm run build:core && node --test test/extension-core/*.test.mjs",
-    "test:runtime": "npm run build:core && node --test test/extension-runtime/billing-conversion.test.mjs test/extension-runtime/archive-readiness.test.mjs test/extension-runtime/archive-readiness-status.test.mjs test/extension-runtime/earned-permission-registration.test.mjs test/extension-runtime/story-command.test.mjs test/extension-runtime/library-command.test.mjs test/extension-runtime/metadata-contribution.test.mjs test/extension-runtime/saved-filter-sync.test.mjs test/extension-runtime/first-story-initiation.test.mjs test/extension-runtime/native-import.test.mjs test/extension-runtime/first-install-activation.test.mjs test/extension-runtime/trace-web-boundary.test.mjs test/extension-runtime/account-projection.test.mjs test/extension-runtime/runtime-adapters.test.mjs test/extension-runtime/private-database.test.mjs test/extension-runtime/account-data-repository.test.mjs test/extension-runtime/safari-provider-boundary.test.mjs",
+    "test:runtime": "npm run build:core && node --test test/extension-runtime/billing-conversion.test.mjs test/extension-runtime/archive-readiness.test.mjs test/extension-runtime/archive-readiness-status.test.mjs test/extension-runtime/earned-permission-registration.test.mjs test/extension-runtime/story-command.test.mjs test/extension-runtime/library-command.test.mjs test/extension-runtime/metadata-contribution.test.mjs test/extension-runtime/saved-filter-sync.test.mjs test/extension-runtime/first-story-initiation.test.mjs test/extension-runtime/native-import.test.mjs test/extension-runtime/first-install-activation.test.mjs test/extension-runtime/trace-web-boundary.test.mjs test/extension-runtime/account-projection.test.mjs test/extension-runtime/runtime-adapters.test.mjs test/extension-runtime/popup-page-relay.test.mjs test/extension-runtime/archive-recovery.test.mjs test/extension-runtime/private-database.test.mjs test/extension-runtime/account-data-repository.test.mjs test/extension-runtime/safari-provider-boundary.test.mjs",
     "test:swift-provider-codec": "node scripts/test-swift-provider-codec.mjs",
     "test:session:installed:chrome": "node scripts/test-extension-session-lifecycle.mjs",
     "test:session:installed:firefox": "node scripts/test-extension-session-firefox.mjs",
@@ -53,5 +53,11 @@
     "sharp": "^0.34.5",
     "typescript": "7.0.2",
     "web-ext": "9.2.0"
+  },
+  "overrides": {
+    "ajv@8.17.1": "8.18.0",
+    "image-size@2.0.2": "2.0.3",
+    "shell-quote@1.7.3": "1.9.0",
+    "tmp@0.2.5": "0.2.7"
   }
 }

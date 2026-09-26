@@ -84,7 +84,7 @@ enum TraceSafariProviderCodec {
 /// Library entry before presenting a success. A heartbeat is not a prerequisite.
 enum TraceSafariOnboardingReceipt {
     static let productionAPIOrigin = "https://api.tracefiction.com"
-    static let developmentAPIOrigin = "https://ff-app-development.up.railway.app"
+    static let developmentAPIOrigin = "https://api.development.example.test"
     static let attemptKey = "traceNativeOnboardingAttemptV1"
     static let receiptKey = "traceNativeOnboardingSaveV1"
     static let maximumSaves = 32
@@ -97,6 +97,7 @@ enum TraceSafariOnboardingReceipt {
         let provider: TraceSafariProviderCodec.ImportBinding
         let startedAt: Double
         let expiresAt: Double
+        var measurementAttemptID: String? = nil
         func valid(apiOrigin expectedOrigin: String = productionAPIOrigin) -> Bool {
             UUID(uuidString: id) != nil && !accountID.isEmpty && accountID.utf8.count <= 256 &&
             [productionAPIOrigin, developmentAPIOrigin].contains(expectedOrigin) &&
@@ -154,8 +155,13 @@ enum TraceSafariOnboardingReceipt {
               payload["apiOrigin"] as? String == attempt.apiOrigin else { return ["ok": false] }
         if payload["type"] as? String == "TRACE_IOS_SAVE_PREPARE" {
             guard now >= attempt.startedAt, now <= attempt.expiresAt else { return ["ok": false] }
-            return ["ok": true, "context": ["attemptID": attempt.id,
-                "operationID": UUID().uuidString.lowercased(), "initiatedAt": now]]
+            var context: [String: Any] = ["attemptID": attempt.id,
+                "operationID": UUID().uuidString.lowercased(), "initiatedAt": now]
+            if let measurementID = attempt.measurementAttemptID, UUID(uuidString: measurementID) != nil {
+                context["setupAttemptID"] = measurementID.lowercased()
+                context["setupAttemptExpiresAt"] = attempt.expiresAt
+            }
+            return ["ok": true, "context": context]
         }
         guard let raw = payload["context"] as? [String: Any],
               let bytes = try? JSONSerialization.data(withJSONObject: raw),

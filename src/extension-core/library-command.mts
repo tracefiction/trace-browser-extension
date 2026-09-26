@@ -333,7 +333,8 @@ export class LibraryMutationService {
   }
 
   execute(command: LibraryMutationCommand): Promise<LibraryMutationResult> {
-    return this.#withLock(() => this.#execute(command));
+    const ownedCommand = { ...command };
+    return this.#withLock(() => this.#execute(ownedCommand));
   }
 
   async #execute(command: LibraryMutationCommand): Promise<LibraryMutationResult> {

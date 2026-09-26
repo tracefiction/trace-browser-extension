@@ -1,6 +1,8 @@
 import {
   AccountProjectionService,
+  sameAccountScope,
   SessionService,
+  type AccountScope,
   type DiagnosticEvent,
   type DiagnosticsPort,
   FinishQualificationService,
@@ -34,6 +36,7 @@ import {
 } from "./browser-adapters.mjs";
 import {
   BrowserStorage,
+  extensionCall,
   type AlarmsPort,
   type RuntimePort,
   type StorageArea,
@@ -128,6 +131,7 @@ import {
 } from "./runtime-messages.mjs";
 
 import { NativeLibraryImportProducer } from "./native-import.mjs";
+import { PopupPageRelay, POPUP_PAGE_RELAY } from "./popup-page-relay.mjs";
 
 export {
   SESSION_MESSAGE_TYPES,
@@ -242,6 +246,7 @@ export class SessionRuntimeController {
   readonly #storage: BrowserStorage;
   readonly #runtime: RuntimePort;
   readonly #tabs: TabsPort;
+  readonly #popupRelay: PopupPageRelay;
   readonly #storageMode: "callback" | "promise";
   readonly #webOrigin: string;
   readonly #retryClock: RetryClock;
@@ -276,6 +281,11 @@ export class SessionRuntimeController {
       new BrowserArchiveReadinessStatus(storage);
     this.#runtime = environment.runtime;
     this.#tabs = environment.tabs;
+    this.#popupRelay = new PopupPageRelay({
+      runtime: environment.runtime, tabs: environment.tabs, mode: environment.storageMode,
+      scope: () => this.#service.publicationScope(),
+      execute: (message, sender, scope) => this.#executeRelayedCommand(message, sender, scope),
+    });
     this.#storageMode = environment.storageMode;
     this.#webOrigin = new URL(environment.webOrigin).origin;
     this.#database = environment.privateDatabase ?? new BrowserPrivateRecordDatabase(
@@ -423,6 +433,12 @@ export class SessionRuntimeController {
     sender?: RuntimeSender,
   ): Promise<RuntimeHandleResponse> {
     if (!isRecord(message) || typeof message.type !== "string") return null;
+    if (message.type === POPUP_PAGE_RELAY) {
+      if (this.#mode !== "kernel" || !this.#popupRelay.accepts(message, sender)) return null;
+      await this.start();
+      await this.#prepareNativeAuthority();
+      return await this.#popupRelay.request(message.tabId, message.command) as RuntimeHandleResponse;
+    }
     if (!Object.values(SESSION_MESSAGE_TYPES).includes(message.type as never)) return null;
     switch (message.type) {
       case SESSION_MESSAGE_TYPES.snapshot:
@@ -704,6 +720,26 @@ export class SessionRuntimeController {
       await this.#metadataContributions.execute(command),
       command,
     );
+  }
+
+  async #executeRelayedCommand(
+    message: unknown, sender: RuntimeSender, scope: AccountScope,
+  ): Promise<RuntimeResponse | null> {
+    await this.#prepareNativeAuthority();
+    // Keep the captured account through page extraction and command dispatch.
+    // The existing services additionally fence every asynchronous API effect.
+    return this.#withAccountTransitionLock(async () => {
+      if (!isRecord(message) || !sameAccountScope(scope, this.#service.publicationScope())) return null;
+      if (message.type === SESSION_MESSAGE_TYPES.setReaderStatus) {
+        const command = libraryMutationCommandFromMessage(message, sender);
+        return command === null ? null : this.#libraryCommandResponse(await this.#libraryMutations.execute(command));
+      }
+      if (message.type === SESSION_MESSAGE_TYPES.quickAdd) {
+        const command = storyTrackCommandFromMessage(message, sender);
+        return command === null ? null : this.#commandResponse(await this.#executeStoryCommand(command), undefined, command);
+      }
+      return null;
+    });
   }
 
   async #handleLibraryMessage(
@@ -1416,13 +1452,43 @@ export class SessionRuntimeController {
   }
 
   async #popupState(): Promise<PopupStateResponse> {
-    const [accountData, preferences, activeTab] = await Promise.all([
+    const [accountData, preferences, activeBrowserTab] = await Promise.all([
       this.#projection.read(),
       this.#storage
         .get(POPUP_PREFERENCE_KEYS)
         .catch((): Record<string, unknown> => ({})),
-      this.#activeTabContext(),
+      this.#activeTab(),
     ]);
+    const activeTabUrl = activeBrowserTab?.url;
+    const activeTab = classifyActiveTabUrl(activeTabUrl, this.#webOrigin);
+    const activeWorkKey = this.#storyWorkKey(activeTabUrl);
+    const connected = this.snapshot().state === "connected";
+    const activeWork = activeWorkKey === null || !connected
+      ? null
+      : publicWorkState(accountData, activeWorkKey);
+    let activeStoryUnavailable = false;
+    const activeTabId = activeBrowserTab?.id;
+    if (
+      connected &&
+      activeTab.kind === "supported_story" &&
+      activeWork === null &&
+      typeof activeTabId === "number" &&
+      Number.isInteger(activeTabId)
+    ) {
+      try {
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        const response = await Promise.race([
+          this.#popupRelay.request(activeTabId, { type: "TRACE_STORY_IDENTITY_GET" }),
+          new Promise<null>((resolve) => {
+            timeoutId = globalThis.setTimeout(() => resolve(null), 1_000);
+          }),
+        ]).finally(() => globalThis.clearTimeout(timeoutId));
+        activeStoryUnavailable =
+          isRecord(response) && response.ok === false && response.unavailable === true;
+      } catch {
+        // A missing receiver is not proof of story unavailability.
+      }
+    }
     return Object.freeze({
       ok: true,
       authState: toPublicSessionSnapshot(this.snapshot()),
@@ -1435,27 +1501,39 @@ export class SessionRuntimeController {
       libraryInlayEnabled: preferences.prefLibraryInlayEnabled !== false,
       ao3SavedFiltersEnabled: preferences.prefAo3SavedFiltersEnabled !== false,
       metadataImproveEnabled: preferences.prefMetadataImproveEnabled !== false,
+      activeWork,
+      activeStoryUnavailable,
     });
   }
 
-  async #activeTabContext(): Promise<Readonly<Record<string, unknown>>> {
+  async #activeTab(): Promise<{ readonly id?: number; readonly url?: string } | null> {
     try {
       const tabs = await this.#callTabsQuery({ active: true, currentWindow: true });
-      return classifyActiveTabUrl(tabs[0]?.url, this.#webOrigin);
+      return tabs[0] ?? null;
     } catch {
-      return Object.freeze({ kind: "unknown" });
+      return null;
     }
   }
 
+  /** Work key for a supported, non-credential story URL; null otherwise. */
+  #storyWorkKey(rawUrl: string | undefined): string | null {
+    if (rawUrl === undefined) return null;
+    const host = archiveHostKindFromSender({ url: rawUrl });
+    if (host === null || isBlockedArchivePath(rawUrl, host)) return null;
+    const workKey = workKeyFromArchiveUrl(rawUrl, host);
+    return workKey !== null && WORK_KEY_PATTERN.test(workKey) ? workKey : null;
+  }
+
   #callTabsQuery(query: Readonly<Record<string, unknown>>): Promise<readonly {
+    readonly id?: number;
     readonly url?: string;
   }[]> {
     if (this.#storageMode === "promise") {
       try {
         return Promise.resolve(
           this.#tabs.query(query) as
-            | readonly { readonly url?: string }[]
-            | PromiseLike<readonly { readonly url?: string }[]>,
+            | readonly { readonly id?: number; readonly url?: string }[]
+            | PromiseLike<readonly { readonly id?: number; readonly url?: string }[]>,
         );
       } catch (error) {
         return Promise.reject(error);
@@ -1463,7 +1541,7 @@ export class SessionRuntimeController {
     }
     return new Promise((resolve, reject) => {
       try {
-        this.#tabs.query(query, (tabs: readonly { readonly url?: string }[]) => {
+        this.#tabs.query(query, (tabs: readonly { readonly id?: number; readonly url?: string }[]) => {
           const message = this.#runtime.lastError?.message;
           if (message) reject(new Error(message));
           else resolve(tabs);
@@ -1519,7 +1597,7 @@ export function installSessionRuntime(environment: RuntimeEnvironment): SessionR
     );
   }
   environment.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (!isRecord(message) || !Object.values(SESSION_MESSAGE_TYPES).includes(message.type as never)) {
+    if (!isRecord(message) || (message.type !== POPUP_PAGE_RELAY && !Object.values(SESSION_MESSAGE_TYPES).includes(message.type as never))) {
       return false;
     }
     void controller.handle(message, sender).then(

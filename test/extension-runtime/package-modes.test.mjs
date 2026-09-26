@@ -129,9 +129,9 @@ async function assertArchiveReceiptSurvivesStorageFailure(bundle) {
   vm.runInNewContext(bundle, context);
   assert.equal(context.__traceSessionRuntimeBootFailed, true);
   assert.equal(listeners.length, 1);
-  assert.equal(installedListeners.length, 1);
+  assert.equal(installedListeners.length, 2);
 
-  installedListeners[0]({ reason: "install" });
+  for (const listener of installedListeners) listener({ reason: "install" });
   for (let attempt = 0; attempt < 8; attempt += 1) await Promise.resolve();
   assert.deepEqual(JSON.parse(JSON.stringify(createdTabs)), [{
     url: "https://www.tracefiction.com/?activation=extension-installed",
@@ -252,10 +252,11 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
       "alarms",
       "tabs",
       "storage",
+      "scripting",
       "nativeMessaging",
     ]);
     const earnedPermissionSurface = {
-      permissions: earnedSafariManifest.permissions,
+      permissions: earnedSafariManifest.permissions.filter(permission => permission !== "scripting"),
       host_permissions: earnedSafariManifest.host_permissions,
       content_scripts: earnedSafariManifest.content_scripts,
     };
@@ -265,7 +266,7 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
         .update(JSON.stringify(earnedPermissionSurface))
         .digest("hex"),
       "09aa341fbcaf4a92b430bc4faf4a04ae5635b7d458219ec24f6aebf53daf5d83",
-      "production onboarding must preserve the exact v0.6.5 Safari permission surface",
+      "recovery adds only scripting; existing host access and static scripts stay unchanged",
     );
     assert.deepEqual(
       earnedSafariManifest.host_permissions,
@@ -336,9 +337,9 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
       previewResult.stderr || previewResult.stdout,
     );
     const previewOrigin =
-      "https://trace-git-dev-zacs-projects-378417c9.vercel.app";
+      "https://web.development.example.test";
     const previewApiOrigin =
-      "https://ff-app-development.up.railway.app";
+      "https://api.development.example.test";
     assert.match(
       fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8"),
       new RegExp(previewOrigin.replaceAll(".", "\\.")),
@@ -354,7 +355,7 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
       const packaged = manifest(packageRoot);
       const packagedConfig = fs.readFileSync(path.join(packageRoot, "popup-config.js"), "utf8");
       assert.equal(Object.hasOwn(packaged, "optional_host_permissions"), false);
-      assert.equal(packaged.permissions.includes("scripting"), false);
+      assert.equal(packaged.permissions.includes("scripting"), true);
       assert.equal(packaged.permissions.includes("activeTab"), false);
       assert.ok(packaged.permissions.includes("tabs"));
       for (const origin of SITE_HOST_MATCHES) {

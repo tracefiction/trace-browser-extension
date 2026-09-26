@@ -21,11 +21,11 @@ test('native Import needs the exact paired package opt-in; ordinary generated pa
     assert.match(read('Shared (Extension)/Resources/background.js'), /nativeImportHandoff: false/);
     manifest = read('Shared (Extension)/Resources/manifest.json');
     const definition = JSON.parse(manifest);
-    const permissionSurface = { permissions: definition.permissions,
+    const permissionSurface = { permissions: definition.permissions.filter(permission => permission !== "scripting"),
       host_permissions: definition.host_permissions, content_scripts: definition.content_scripts };
     assert.equal(crypto.createHash('sha256').update(JSON.stringify(permissionSurface)).digest('hex'),
       '09aa341fbcaf4a92b430bc4faf4a04ae5635b7d458219ec24f6aebf53daf5d83',
-      'accepted earned-permission surface stays identical');
+      'existing website access stays identical apart from the scripting capability');
     const optedIn = build({ TRACE_NATIVE_IMPORT_CONTRACT: 'trace-native-library-import-v1' });
     assert.equal(optedIn.status, 0, optedIn.stderr);
     assert.match(read('Shared (Extension)/Resources/background.js'), /nativeImportHandoff: true/);

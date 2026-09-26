@@ -2,6 +2,8 @@
 // Stores AO3 filter query params in extension-local storage and applies them by URL navigation.
 (function () {
   "use strict";
+  if (globalThis.__traceSavedFiltersInitialized) return;
+  globalThis.__traceSavedFiltersInitialized = true;
 
   const ext = globalThis.browser ?? globalThis.chrome;
   const STORAGE_KEY = "traceAo3SavedFiltersV1";

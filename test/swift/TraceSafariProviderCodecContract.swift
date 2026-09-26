@@ -91,6 +91,18 @@ struct TraceSafariProviderCodecContract {
         // A write begun inside the attempt may finish after its help/window ends.
         let late = attempt.expiresAt + 1000
         require(R.handle(payload, defaults: defaults, provider: provider, now: late)["ok"] as? Bool == true, "Late committed save survives without heartbeat")
+        var measured = attempt
+        measured.measurementAttemptID = UUID().uuidString.lowercased()
+        defaults.set(try! JSONEncoder().encode(measured), forKey: R.attemptKey)
+        let prepareMeasurement: [String: Any] = ["type": "TRACE_IOS_SAVE_PREPARE", "accountID": attempt.accountID, "apiOrigin": attempt.apiOrigin]
+        let reply = R.handle(prepareMeasurement, defaults: defaults, provider: provider, now: attempt.startedAt + 1)
+        let measurementContext = reply["context"] as! [String: Any]
+        require(measurementContext["setupAttemptID"] as? String == measured.measurementAttemptID, "Carry opaque measurement ID")
+        require(measurementContext["setupAttemptExpiresAt"] as? Double == attempt.expiresAt, "Bound correlation to attempt lifetime")
+        require(R.handle(prepareMeasurement, defaults: defaults, provider: provider, now: attempt.expiresAt + 1)["ok"] as? Bool == false, "Expired correlation withheld")
+        defaults.set(try! JSONEncoder().encode(attempt), forKey: R.attemptKey)
+        let oldReply = R.handle(prepareMeasurement, defaults: defaults, provider: provider, now: attempt.startedAt + 1)
+        require((oldReply["context"] as? [String: Any])?["setupAttemptID"] == nil, "Old and flag-off records stay unattributed")
         let original = defaults.data(forKey: R.receiptKey)!
         let next = R.Attempt(id: UUID().uuidString, accountID: attempt.accountID, apiOrigin: attempt.apiOrigin,
             provider: provider, startedAt: late, expiresAt: late + 10000)

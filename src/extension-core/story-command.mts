@@ -172,7 +172,8 @@ export class StoryCommandService {
   }
 
   execute(command: StoryTrackCommand): Promise<StoryCommandResult> {
-    return this.#withLock(() => this.#execute(command));
+    const ownedCommand = { ...command, payload: { ...command.payload } };
+    return this.#withLock(() => this.#execute(ownedCommand));
   }
 
   async #execute(command: StoryTrackCommand): Promise<StoryCommandResult> {
@@ -202,9 +203,22 @@ export class StoryCommandService {
       if (lookup.value.kind === "unavailable") return failure("unavailable");
     }
 
-    let mutation = await this.#ports.session.executeAuthenticated((credential) =>
-      this.#ports.api.track(credential, command)
-    );
+    // Keep command identity stable for the reading-activity idempotency owner.
+    const trackCommand = { ...command };
+    const track = (credential: string) => {
+      // Do not forward caller/page-supplied correlation or retain it across accounts.
+      const { attempt_id: ignored, ...payload } = command.payload;
+      const id = context?.setupAttemptID;
+      const expiresAt = context?.setupAttemptExpiresAt;
+      const now = this.#ports.clock.now();
+      const valid = sameAccountScope(this.#ports.session.publicationScope(), scope) &&
+        typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id) &&
+        typeof expiresAt === "number" && Number.isFinite(expiresAt) &&
+        expiresAt > now && expiresAt - now <= 86_400_000;
+      trackCommand.payload = { ...payload, ...(valid ? { attempt_id: id.toLowerCase() } : {}) };
+      return this.#ports.api.track(credential, trackCommand);
+    };
+    let mutation = await this.#ports.session.executeAuthenticated(track);
     if (
       mutation.kind === "auth_rejected" &&
       mutation.recovery === "connected"
@@ -224,9 +238,7 @@ export class StoryCommandService {
         if (lookup.value.kind === "invalid_response") return failure("invalid_response");
         if (lookup.value.kind === "unavailable") return failure("unavailable");
       }
-      mutation = await this.#ports.session.executeAuthenticated((credential) =>
-        this.#ports.api.track(credential, command)
-      );
+      mutation = await this.#ports.session.executeAuthenticated(track);
     }
     if (mutation.kind !== "published") return executionFailure(mutation);
     if (mutation.value.kind === "confirmed") {
