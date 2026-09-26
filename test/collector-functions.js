@@ -24,7 +24,7 @@ function getCollectorCoreSource() {
       `Expected ${JSON.stringify(LISTENER_MARKER.trim())} in collector.js`
     );
   }
-  return src.slice(0, i);
+  return src.slice(src.indexOf("// COLLECTOR_CORE_START") + "// COLLECTOR_CORE_START".length, i);
 }
 
 function createChromeMock() {
@@ -91,6 +91,8 @@ function createCollectorBindings(dom, options = {}) {
   vm.createContext(globalScope);
   vm.runInContext(getCollectorCoreSource(), globalScope);
   return {
+    traceHostPageTokens: globalScope.traceHostPageTokens,
+    traceRefreshPageTokens: globalScope.traceRefreshPageTokens,
     collect: globalScope.collect,
     sendCollectorMessage: globalScope.sendCollectorMessage,
     shouldDisableTraceContentScript: globalScope.shouldDisableTraceContentScript,

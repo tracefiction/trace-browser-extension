@@ -1,94 +1,8 @@
 # iOS earned-permission onboarding
 
-Trace 0.6.4 builds 18–28 established the Safari capabilities needed for the
-production permission-first onboarding in build 29. Build 20 proved the Safari
-permission flow but failed authentication because its preview shell fell back
-to the custom-scheme OAuth return. Build 21 proved the verified HTTPS callback,
-but its per-branch Vercel origin was not in Auth0's origin allowlist. Build 22
-uses Trace's stable dev deployment so Auth0 needs only one persistent dev
-origin. Build 23 also opened Safari Settings with only the extension identifier
-actually embedded in the app; build 22 could include a retired probe identifier
-and make that recovery action appear to do nothing.
-
-Build 24 removed the previous hybrid deployment: its stable dev web shell,
-extension worker, and native API fallback all use Trace's Railway development
-API. Ordinary release builds remain pinned to the production web and API
-origins.
-
-Build 25 fixes the clean-install connection deadlock found in build 24. The
-earned-permission popup now invokes the existing atomic Connect-and-save path,
-which adopts and verifies the containing app's account before writing the first
-story. It no longer exits after a read-only snapshot reports the freshly
-installed extension as not connected.
-
-Build 26 fixes the post-grant registration failure found on device in build 25.
-Popup-only probe flags now remain in `popup-config.js`; persistently registered
-archive scripts load `content-config.js`, which enables the normal heartbeat,
-automatic tracking, and overlay behavior after the five-site grant. The
-registration configuration version is bumped so an install over build 25
-replaces its stale scripts before asking for a fresh verification reload.
-
-Build 27 makes that successful verification visible without another toolbar
-interaction. While the popup remains open across its requested story reload, it
-observes the locally persisted archive heartbeat and immediately changes the
-pending automatic-tracking row to **Run confirmed**. The timestamp still has to
-be newer than the permission grant; no success condition is weakened.
-
-Build 28 changes no onboarding behavior. It gives the embedded Safari extension
-the fresh identifier `com.tracefiction.trace.earned-v2` after device testing
-showed that deleting and reinstalling build 27 could preserve its granted host
-access and registered scripts. The identity reset prevents retained Safari state
-from producing a false clean-install pass. The containing app remains
-`com.tracefiction.trace`, and the embedded identifier has exactly one component
-below it as App Store Connect requires.
-
-Build 28 proved the API surface, exact five-origin grant, dynamic registration,
-fresh-run evidence, AO3 variants, FanFiction.net, Safari restart, and device
-reboot. The production decision on 2026-08-21 supersedes its save-first product
-ordering: active-tab access remains only a recovery bridge, and no story may be
-saved before the required Website Access grant.
-
-Build 29 implements that production ordering. It combines extension enablement
-and Website Access in one Settings visit, uses a literal Safari toolbar guide
-only when the automatic path does not start, requests the exact five-origin
-bundle before any save, and requires both a fresh post-registration run and a
-server-confirmed save. Its clean-install identifier is
-`com.tracefiction.trace.earned-v3` so retained build 28 permissions cannot
-produce a false pass.
-
-Build 32 changes no onboarding behavior from build 31. It gives the embedded
-Safari extension the fresh identifier `com.tracefiction.trace.earned-v4` after
-device testing showed that deleting and reinstalling the build 31 extension
-could restore its prior Website Access. The containing app remains
-`com.tracefiction.trace`; this reset prevents retained Safari state from
-producing a false clean-install result.
-
-Build 33 fixes a permission-flow reload race that could leave the confirmed
-first story labelled **Add to Trace** until Safari focused or reloaded the page.
-After the private account projection stores a confirmed save, the background
-now publishes a content-free revision signal so current story and listing pages
-immediately re-query and render **Saved**. The embedded extension uses the fresh
-identifier `com.tracefiction.trace.earned-v5` so build 32 Website Access cannot
-hide the clean-onboarding behavior during device testing.
-
-Build 34 is the first production-identity release candidate. It restores the
-embedded Safari extension identifier to the identifier used by 0.6.3,
-`com.tracefiction.trace.extension`, and binds the app, popup, and background
-worker to Trace's production web/API origins. This build must be installed over
-the public 0.6.3 app before any clean-onboarding reset: retained auth, Website
-Access, dynamic script reconciliation, existing overlays, manual add,
-automatic tracking, and server sync are release gates. The earlier disposable
-identities prove clean onboarding behavior only; they do not prove upgrade
-continuity.
-
-Trace 0.6.6 build 40 restores the complete permission-bearing manifest surface
-that shipped in 0.6.5 build 52. Build 39 came from the post-repository-split
-mainline and replaced the required host/static content-script declarations
-with `activeTab`, optional hosts, and dynamic registration. On Safari that can
-reset an existing reader's Website Access during an App Store update. Build 40
-therefore keeps the bounded AO3, FFN, and Trace declarations stable while
-retaining the permission-first behavior gate: static scripts do nothing until
-`permissions.contains()` confirms the complete five-origin archive bundle.
+The Safari extension requires complete Website Access before saving a story.
+Its permission-bearing manifest remains stable across upgrades; static content
+scripts stay inert until the complete five-origin archive bundle is allowed.
 
 ## User contract
 
@@ -96,13 +10,13 @@ When `TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1`:
 
 - the app first asks the user to enable Trace and set Website Access to Allow in
   one Safari Settings visit;
-- after the extension is enabled, the user chooses an AO3 or FanFiction.net
-  story; a complete Settings grant lets the normal content script start and
-  save automatically;
+- after the extension is enabled, the user may open any supported AO3 or
+  FanFiction.net page to request the five-site grant; on a story, a complete
+  Settings grant lets the normal content script start and save automatically;
 - if Trace does not start, the app shows a literal Safari extension-button
   guide plus Safari Settings as the alternate recovery;
 - opening Trace from Safari obtains only Safari's current-site interaction
-  needed to identify the supported story. It does not inject a collector or
+  needed to identify the supported page. It does not inject a collector or
   send a save command before complete Website Access;
 - one direct action requests exactly five supported origin patterns and tells
   the reader to choose **Always Allow**;
@@ -111,10 +25,15 @@ When `TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1`:
 - the background worker owns the complete-bundle readiness decision. Static
   content scripts remain inert when coverage is partial, so one working
   hostname cannot be presented as complete setup;
-- after the complete grant, the popup reloads the story. The normal pending-handoff
-  path then supplies the fresh run and server-confirmed save;
-- setup is complete only after both that fresh post-registration run and the
-  current app account's server confirmation;
+- after the complete grant on a story, the popup reloads it. The normal
+  pending-handoff path then supplies the fresh run and server-confirmed save;
+- after the complete grant and registration on a supported nonstory page,
+  permission setup completes without a reload or a save claim. The popup tells
+  the reader to open any story, where saving is confirmed separately;
+- a story is described as saved only after the current app account's confirmed
+  entry exists for that exact story. A loaded FanFiction.net `/s/` page without
+  chapter text is unavailable, so the popup shows that state rather than
+  waiting indefinitely for confirmation;
 - revoked or expired access returns to the same permission recovery on the next
   positive signal; inactivity alone is never treated as permission loss;
 - Chrome and Firefox packages remain production-shaped.
@@ -148,27 +67,15 @@ that its Xcode target and native Settings bridge use
 `com.tracefiction.trace.extension`, and verifies the archived app against this
 exact public source revision.
 
-The build 33 physical-device candidate is paired to the stable Vercel dev
-deployment of the web half with:
+The preview-release script exercises a paired development build using reserved,
+non-routable test origins (`https://web.development.example.test` and
+`https://api.development.example.test`). These are fixtures, not live services.
+A local development deployment must explicitly update the paired build origins
+and native receipt allowlist together with the containing app's configuration.
+Production builds remain pinned to Trace's production API and web origins.
 
-```bash
-npm run build:ios-earned-permission-onboarding:preview-release
-```
-
-That script accepts the compiled exact dev origins
-`https://trace-git-dev-zacs-projects-378417c9.vercel.app` and
-`https://ff-app-development.up.railway.app`. In Release, that exact dev web
-deployment is permitted to use `https://www.tracefiction.com/auth/callback`, so
-OAuth returns through the same verified HTTPS association as production rather
-than `traceauth://`.
-Normal release builds reset the generated Swift flag and remain hard-bound to
-Trace's production web origin. Ordinary Debug previews still use the custom
-scheme and cannot opt into the production callback accidentally.
-
-Build 33 is a development-only clean-state artifact and must never be submitted
-as a release. Archive the **Trace (iOS)** scheme only after the production
-earned-permission build, without running another extension build.
-`npm run build:release` restores the normal production resources.
+Run `npm run build:ios-earned-permission-onboarding:release` after any preview
+or generic build to restore the Safari resources for this onboarding variant.
 
 ## Physical-device protocol
 
@@ -177,12 +84,12 @@ earned-permission build, without running another extension build.
 Use a real iPhone or iPad. Do not uninstall, sign out, disable the extension,
 or change Website Access between the baseline and candidate.
 
-1. Install the public App Store 0.6.3 build and sign in to an existing Trace
+1. Install the current public App Store build and sign in to an existing Trace
    account.
 2. Confirm a known baseline on AO3 and FFN: existing overlays load, one manual
    add succeeds, one automatic story/progress update succeeds, and the server
    state appears in the Library.
-3. Install the production-identity build 34 through TestFlight over 0.6.3.
+3. Install the production-identity candidate through TestFlight over that baseline.
 4. Before opening the updated Trace app, open a supported story in Safari.
    Confirm Trace still runs and no enablement, Website Access, or reconnect
    prompt interrupts the reader.
@@ -203,7 +110,7 @@ candidate.
 
 After recording the upgrade result, use a clean device/identity when available.
 If Safari retains state on the only device, explicitly record the retained
-state and use the build-33 fresh-identity result as the clean permission proof;
+state and use a separately verified fresh-identity result as the clean permission proof;
 do not describe an uninstall as clean when Safari restored the grant.
 
 1. Delete the earlier Trace build, confirm its Safari extension has gone, and

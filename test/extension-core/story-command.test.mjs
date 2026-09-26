@@ -93,7 +93,8 @@ function createHarness(options = {}) {
       },
       async track(credential, actualCommand) {
         assert.equal(credential, "private-token");
-        assert.equal(actualCommand, expectedCommand);
+        if (options.checkTrack) options.checkTrack(actualCommand, calls.track);
+        else assert.deepStrictEqual(actualCommand, options.expectedTrack ?? expectedCommand);
         calls.track += 1;
         if (options.onTrack) await options.onTrack(state);
         const result = state.mutations.shift() ?? { kind: "uncertain" };
@@ -111,6 +112,7 @@ function createHarness(options = {}) {
       },
     },
     receipt: {
+      ...(options.prepare ? { prepareSaveReceipt: options.prepare } : {}),
       async publishSaveReceipt(receipt) {
         calls.receipt.push(receipt);
         return state.receipt;
@@ -122,7 +124,7 @@ function createHarness(options = {}) {
         return state.clear;
       },
     },
-    clock: { now: () => 1_721_390_400_000 },
+    clock: { now: options.now ?? (() => 1_721_390_400_000) },
   });
   return { service, state, calls };
 }
@@ -410,5 +412,48 @@ test("progress retries a definitive 401 directly after auth recovery", async () 
   assert.equal(result.kind, "confirmed");
   assert.equal(result.source, "mutation");
   assert.equal(h.calls.lookup, 0);
+  assert.equal(h.calls.track, 2);
+});
+
+const attemptID = "b7c2328b-0738-4389-8ec7-31f51783210e";
+const setupContext = { setupAttemptID: attemptID, setupAttemptExpiresAt: 1_721_390_401_000 };
+test("carries only a native prepared, unexpired setup UUID", async () => {
+  for (const intent of ["ensure_saved", "record_progress"]) {
+    const input = { ...command, intent };
+    const h = createHarness({ command: input, prepare: async () => setupContext,
+      expectedTrack: { ...input, payload: { ...input.payload, attempt_id: attemptID } } });
+    await h.service.execute(input);
+    assert.equal(h.calls.track, 1);
+  }
+});
+test("omits absent, expired, malformed and page-supplied attribution", async () => {
+  for (const context of [undefined, {}, { ...setupContext, setupAttemptID: "https://example.test/story" },
+    { ...setupContext, setupAttemptExpiresAt: 0 }, { ...setupContext, setupAttemptExpiresAt: Infinity }]) {
+    const input = { ...command, payload: { ...command.payload, attempt_id: attemptID } };
+    const h = createHarness({ command: input, prepare: async () => context, expectedTrack: command });
+    await h.service.execute(input);
+    assert.equal(h.calls.track, 1);
+  }
+});
+test("account change while native preparation is pending suppresses the write", async () => {
+  let h;
+  h = createHarness({ prepare: async () => { h.state.scope = { accountId: "account-b", epoch: 2 }; return setupContext; } });
+  assert.deepEqual(await h.service.execute(command), { kind: "failed", reason: "stale" });
+  assert.equal(h.calls.track, 0);
+});
+
+test("expiry is checked again for a definitive auth retry", async () => {
+  let now = 1_721_390_400_000;
+  let firstCommand;
+  const h = createHarness({ prepare: async () => setupContext, now: () => now,
+    lookup: [{ kind: "absent" }, { kind: "absent" }], authRecovery: "connected",
+    mutations: [{ kind: "auth_rejected" }, { kind: "confirmed", confirmation }],
+    checkTrack(actual, index) {
+      assert.equal(actual.payload.attempt_id, index === 0 ? attemptID : undefined);
+      if (index === 0) firstCommand = actual;
+      else assert.equal(actual, firstCommand, "preserve reading-activity retry identity");
+    },
+    onTrack() { now = setupContext.setupAttemptExpiresAt; } });
+  assert.equal((await h.service.execute(command)).kind, "confirmed");
   assert.equal(h.calls.track, 2);
 });

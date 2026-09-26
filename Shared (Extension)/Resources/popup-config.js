@@ -23,14 +23,41 @@ globalThis.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {"version":3,"registrationMo
       document.dispatchEvent(new CustomEvent("trace-earned-permission-ready"));
     } catch (_) {}
   };
-  try {
-    if (globalThis.browser && extension === globalThis.browser) {
-      Promise.resolve(extension.runtime.sendMessage({ type: "TRACE_EARNED_PERMISSION_RECONCILE" })).then(publish, function () {});
-    } else {
-      extension.runtime.sendMessage({ type: "TRACE_EARNED_PERMISSION_RECONCILE" }, function (response) {
-        if (extension.runtime.lastError) return;
-        publish(response);
-      });
+  // Safari injects into open tabs as soon as the extension (re)loads, which can
+  // be before the background has registered its listeners. That reply is
+  // empty, not a reconcile result, so ask again instead of leaving this page
+  // gated until a reload. A definite answer, complete or not, is final.
+  var retryDelaysMs = [250, 1000, 3000, 8000];
+  var attempt = 0;
+  var reconcile;
+  var retry = function () {
+    if (attempt >= retryDelaysMs.length) return;
+    setTimeout(reconcile, retryDelaysMs[attempt]);
+    attempt += 1;
+  };
+  var settle = function (response) {
+    if (!response || typeof response !== "object" || typeof response.completeGrant !== "boolean") {
+      retry();
+      return;
     }
-  } catch (_) {}
+    publish(response);
+  };
+  reconcile = function () {
+    try {
+      if (globalThis.browser && extension === globalThis.browser) {
+        Promise.resolve(extension.runtime.sendMessage({ type: "TRACE_EARNED_PERMISSION_RECONCILE" })).then(settle, retry);
+      } else {
+        extension.runtime.sendMessage({ type: "TRACE_EARNED_PERMISSION_RECONCILE" }, function (response) {
+          if (extension.runtime.lastError) {
+            retry();
+            return;
+          }
+          settle(response);
+        });
+      }
+    } catch (_) {
+      retry();
+    }
+  };
+  reconcile();
 })();

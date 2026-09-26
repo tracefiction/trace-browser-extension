@@ -163,7 +163,13 @@ test("track adapter accepts only exact authoritative entry confirmation", async 
   assert.equal(result.value.confirmation.entryId, entryId);
   assert.equal(calls[0].url, "https://api.tracefiction.com/api/extension/track");
   assert.equal(calls[0].options.headers.Authorization, "Bearer private-token");
-  assert.deepEqual(JSON.parse(calls[0].options.body), message.payload);
+  const {readingActivity, ...payload}=JSON.parse(calls[0].options.body);
+  assert.deepEqual(payload, message.payload);
+  assert.match(readingActivity.operationId,/^[0-9a-f-]{36}$/i);
+  await api.track("refreshed-token", command);
+  assert.equal(calls[0].options.body,calls[1].options.body);
+  await api.track("refreshed-token", {...command});
+  assert.notEqual(readingActivity.operationId,JSON.parse(calls[2].options.body).readingActivity.operationId);
 });
 
 test("malformed or mismatched 2xx track responses are uncertain, never confirmed", async () => {

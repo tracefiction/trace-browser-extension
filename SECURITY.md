@@ -181,3 +181,38 @@ The native handler selects the receipt environment from paired package metadata,
 never from a message. Only the production API and the explicit Trace development
 API are supported, with exact matching at preparation, confirmation and readback.
 An ordinary production package rejects development receipts and vice versa.
+
+On iOS, the popup may ask the open story page for its visible title, author
+and site so it can name the story it is confirming. That reply goes only to
+the extension's own popup, is shown locally, and is never stored or sent. The
+one-time saved note keeps a tab-scoped `sessionStorage` marker holding only
+the work key and times, so a replaced page can finish the same note. Popup
+state includes the current account's confirmed record for the active tab's
+story from the local projection; no URL leaves the runtime.
+
+### Optional native setup attribution
+
+When the Apple app explicitly enables its setup funnel, a save may include an
+opaque setup attempt UUID received through the existing native receipt channel.
+It expires with that account/provider/API-bound attempt. The background save owner
+checks current account scope and expiry before each request, never accepts a page's
+claimed attempt, and never logs the UUID with story URLs. No page access, host
+permissions, credentials, story text collection, or success UI rules are added.
+
+Popup story commands use a content-script-opened runtime port through the
+background worker, so an existing Safari tab can reconnect after the extension
+reloads. The worker selects the active tab and accepts only its own supported
+top-frame page port. Connections and request identifiers remain in memory;
+title replies are bounded and are neither stored nor sent to a server. A tab
+change, navigation, disconnect, or account transition invalidates a pending
+reply. Relayed saves and status changes retain the existing page validation,
+current-account scope, and authoritative library-entry checks. Missing ports
+keep the popup's existing unavailable/fallback state.
+
+## Update recovery
+
+The scripting capability restores existing archive content scripts after an
+update or background start. Recovery uses only manifest-matched top-frame
+archive URLs with a positive current host-grant check, respects excluded
+credential paths, and never requests permissions or persists the tab list.
+It adds no collection or credential route. Page reload remains a user action.

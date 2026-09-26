@@ -1,3 +1,4 @@
+import { ReadingActivityCommands } from "./reading-activity.mjs";
 import type {
   AccountDataV1,
   AccountScope,
@@ -36,6 +37,7 @@ function isIsoTimestamp(value: unknown): value is string {
 }
 
 export class LibraryCommandApi implements LibraryCommandApiPort {
+  readonly #readingCommands = new ReadingActivityCommands();
   readonly #fetch: typeof fetch;
   readonly #libraryEndpoint: string;
   readonly #preferenceEndpoint: string;
@@ -117,6 +119,7 @@ export class LibraryCommandApi implements LibraryCommandApiPort {
         ...(command.state === "resolved"
           ? {
               operationId: command.operationId,
+              readingActivity: (() => { const { operationId: _, ...calendar } = this.#readingCommands.context(command, command.operationId); return calendar; })(),
               workStatus: command.workStatus,
               resolutionSource: command.resolutionSource,
             }

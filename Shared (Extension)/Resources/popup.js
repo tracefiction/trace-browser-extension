@@ -17,6 +17,11 @@ const TRACE_HOME_URL = `${TRACE_WEB_ORIGIN}/`;
 const TRACE_UPGRADE_URL = `${TRACE_HOME_URL}?upgrade=1&source=extension_cap`;
 const TRACE_IOS_SETUP_URL = `${DEFAULT_TRACE_WEB_ORIGIN}/apps#safari-ios-setup`;
 const TRACE_IOS_APP_CONNECT_URL = "traceauth://open?destination=extension-connect";
+// Content-free link that only brings the Trace app forward; the app reconciles
+// any confirmed first story itself. It carries no account, story, or URL.
+const TRACE_IOS_APP_LIBRARY_URL = "traceauth://open?destination=library";
+const ACCOUNT_PROJECTION_REVISION_KEY = "traceAccountProjectionRevisionV1";
+const STORY_CONFIRMATION_PATIENCE_MS = 20000;
 const AO3_WORKS_URL = "https://archiveofourown.org/works";
 const FFN_HOME_URL = "https://www.fanfiction.net/";
 const IOS_SIGN_IN_GUIDANCE =
@@ -54,6 +59,7 @@ const isLikelyIosExtensionUi = (() => {
 
 if (isLikelyIosExtensionUi) {
   document.body.dataset.tracePlatform = "ios";
+  document.documentElement.dataset.tracePlatform = "ios";
 }
 
 const ACTIVE_TAB_PROBE = globalThis.TRACE_IOS_ACTIVE_TAB_PROBE === true;
@@ -72,9 +78,12 @@ const ACTIVE_TAB_PROBE_FILES = Object.freeze([
   "collector.js",
 ]);
 let earnedPreparedContext = null;
+let earnedAwaitingStory = null;
+let earnedCurrentPage = null;
 let kernelPopupInitialized = false;
 let nativeImportContinuation = null;
 let nativeImportGeneration = 0;
+let popupStorySavePending = false;
 
 const fallbackStatus = {
   state: "signed_out",
@@ -444,7 +453,8 @@ function renderStatus(patch) {
 
   if (ctaEl) {
     ctaEl.hidden = ui.ctaHidden;
-    ctaEl.href = usefulActionUrl(ui.ctaUrl);
+    ctaEl.dataset.externalUrl = usefulActionUrl(ui.ctaUrl);
+    delete ctaEl.dataset.sessionAction;
     ctaEl.textContent = ui.ctaLabel;
     ctaEl.dataset.emphasis = ui.ctaEmphasis;
   }
@@ -613,6 +623,34 @@ function classifyProbeStory(rawUrl) {
   return { ok: false, site: null };
 }
 
+function classifyEarnedPage(rawUrl) {
+  const story = classifyProbeStory(rawUrl);
+  if (story.ok) return { ...story, kind: "story" };
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== "https:") return { ok: false, site: null };
+    const host = url.hostname.toLowerCase();
+    const ao3Host =
+      host === "archiveofourown.org" ||
+      host.endsWith(".archiveofourown.org") ||
+      host === "archiveofourown.gay" ||
+      host.endsWith(".archiveofourown.gay") ||
+      host === "archive.transformativeworks.org";
+    if (ao3Host && !/^\/users\/(?:login|sign_up|password|auth\/|logout)/i.test(url.pathname)) {
+      return { ok: true, kind: "archive", site: "AO3" };
+    }
+    if (
+      (host === "www.fanfiction.net" || host === "m.fanfiction.net") &&
+      !/^\/(?:login\.php|signup\.php|account\/(?:login|signup)|auth\/)/i.test(url.pathname)
+    ) {
+      return { ok: true, kind: "archive", site: "FanFiction.net" };
+    }
+  } catch {
+    // A missing or hidden URL is not a supported-site capability signal.
+  }
+  return { ok: false, site: null };
+}
+
 async function probeQueryActiveTab() {
   if (!ext?.tabs?.query) throw new Error("active_tab_unavailable");
   if (USES_BROWSER_PROMISE_API) {
@@ -627,7 +665,16 @@ async function probeQueryActiveTab() {
   });
 }
 
+function isDirectProbeMessage(message) {
+  return ACTIVE_TAB_PROBE && ["TRACE_ACTIVE_TAB_PROBE_PING", "TRACE_ACTIVE_TAB_PROBE_SAVE"].includes(message.type);
+}
+
 async function probeSendTabMessage(tabId, message) {
+  if (KERNEL_SESSION_ACTIVE && !isDirectProbeMessage(message)) {
+    return extensionPromiseCall(ext.runtime, "sendMessage", [{
+      type: "TRACE_POPUP_PAGE_RELAY", tabId, command: message,
+    }]);
+  }
   if (!ext?.tabs?.sendMessage) throw new Error("message_unavailable");
   if (USES_BROWSER_PROMISE_API) return await ext.tabs.sendMessage(tabId, message);
   return await new Promise((resolve, reject) => {
@@ -850,41 +897,286 @@ function setEarnedCheck(id, state, label, rowLabel = null) {
   }
 }
 
+const POPUP_GLYPHS = Object.freeze({
+  check: { viewBox: "0 0 15 12", width: "2.2", path: ["M1.5 6.5 5.5 10.5 13.5 1.5"] },
+  globe: { viewBox: "0 0 16 16", width: "1.4", circle: ["8", "8", "6.5"],
+    path: ["M1.5 8h13M8 1.5c2 2 2 11 0 13M8 1.5c-2 2-2 11 0 13"] },
+  alert: { viewBox: "0 0 20 18", width: "1.6", path: [
+    "M8.7 1.8a1.5 1.5 0 0 1 2.6 0l7.4 13a1.5 1.5 0 0 1-1.3 2.2H2.6a1.5 1.5 0 0 1-1.3-2.2z",
+    "M10 6.3v4.6",
+  ], dot: ["10", "13.4", ".6"] },
+});
+
+function popupSvg(viewBox, width = "1.8") {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", viewBox);
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", width);
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  return svg;
+}
+
+function popupSvgShape(svg, name, attributes) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", name);
+  for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, value);
+  svg.appendChild(node);
+}
+
+function popupGlyph(name) {
+  const definition = POPUP_GLYPHS[name] || POPUP_GLYPHS.check;
+  const svg = popupSvg(definition.viewBox, definition.width);
+  if (definition.circle) {
+    const [cx, cy, r] = definition.circle;
+    popupSvgShape(svg, "circle", { cx, cy, r });
+  }
+  for (const d of definition.path) popupSvgShape(svg, "path", { d });
+  if (definition.dot) {
+    const [cx, cy, r] = definition.dot;
+    popupSvgShape(svg, "circle", { cx, cy, r, fill: "currentColor" });
+  }
+  return svg;
+}
+
+function setEarnedEmphasizedCopy(element, markup) {
+  element.replaceChildren();
+  const parts = String(markup).split(/(<b>[^<]*<\/b>)/g);
+  for (const part of parts) {
+    if (!part) continue;
+    if (part.startsWith("<b>") && part.endsWith("</b>")) {
+      const bold = document.createElement("b");
+      bold.textContent = part.slice(3, -4);
+      element.appendChild(bold);
+    } else {
+      element.appendChild(document.createTextNode(part));
+    }
+  }
+}
+
+let lastEarnedAnnouncement = "";
+let earnedAnnouncementTimer = null;
+
+function earnedAnnouncementForState(code, heading, detail) {
+  const title = document.getElementById("popup-earned-heading")?.textContent?.trim() || "Your story";
+  const byline = document.getElementById("popup-earned-record-byline")?.textContent?.trim() || "";
+  const author = byline.includes(" · ") ? byline.split(" · ")[0].trim() : "the author";
+  switch (code) {
+    case "P1": return "Trace is on this story. Saving your story. Keep reading; a note appears on the page when it’s saved.";
+    case "P2": return `${heading.startsWith("Already") ? "Already in your Library" : "Saved to your Library"}: ${title} by ${author}.${heading.startsWith("Already") ? "" : " Your chapter fills in as you read."}`;
+    case "P3": return "Allowed on this site only. Next, tap Always Allow, not the blue button. Safari will list all 5 story-site addresses.";
+    case "P3-lapse": return "Trace can’t save here right now. Next, tap Always Allow, not the blue button.";
+    case "P4": return "Waiting for Safari. Tap Always Allow, not the blue button.";
+    case "P5": return "Still confirming your story. Nothing to redo.";
+    case "P6": return "Finish setup in the Trace app.";
+    case "P7": return "Nothing was saved. When Safari asks again, tap Always Allow.";
+    case "P8": return "Open any story to save it.";
+    case "P9": return "This story isn’t available. Nothing was saved.";
+    case "P10": return `Automatic saving is off. ${document.getElementById("popup-earned-record-title")?.textContent?.trim() || "This story"} is not in your Library.`;
+    case "P11": return "";
+    default: return [heading, detail].filter(Boolean).join(" ");
+  }
+}
+
 function setEarnedResult(state, heading, detail) {
   const result = document.getElementById("popup-earned-result");
-  const headingEl = document.getElementById("popup-earned-result-heading");
-  const detailEl = document.getElementById("popup-earned-result-detail");
-  if (result) result.dataset.state = state;
-  if (headingEl) headingEl.textContent = heading;
-  if (detailEl) detailEl.textContent = detail;
+  if (!result) return;
+  result.dataset.state = state;
+  const code = document.body.dataset.tracePopupStateCode || "";
+  const announcement = earnedAnnouncementForState(code, heading || "", detail || "");
+  const signature = `${code}\u0000${announcement}`;
+  if (signature === lastEarnedAnnouncement) return;
+  lastEarnedAnnouncement = signature;
+  if (earnedAnnouncementTimer !== null) clearTimeout(earnedAnnouncementTimer);
+  result.textContent = "";
+  if (announcement) {
+    earnedAnnouncementTimer = setTimeout(() => {
+      earnedAnnouncementTimer = null;
+      result.textContent = announcement;
+    }, 0);
+  }
+}
+
+function focusEarnedHeadingIfLost(element) {
+  if (!element || element === document.body) return;
+  if (element.isConnected && !element.hidden && !element.disabled && !element.closest("[hidden]")) return;
+  document.getElementById("popup-earned-heading")?.focus({ preventScroll: true });
+}
+
+function refreshEarnedLayout() {
+  const section = document.getElementById("popup-earned-permission");
+  const pin = document.getElementById("popup-earned-pin");
+  if (!section || section.hidden || !pin) return;
+  section.classList.remove("popup-earned-fixed-pin");
+  const bodySize = parseFloat(window.getComputedStyle(document.body).fontSize) || 17;
+  const pinHeight = pin.getBoundingClientRect().height;
+  const textAx = bodySize >= 28;
+  const ax = textAx || pinHeight > window.innerHeight * 0.3;
+  section.classList.toggle("popup-earned-ax", ax);
+  section.classList.toggle("popup-earned-text-ax", textAx);
+  const scroll = section.querySelector(".popup-earned-scroll");
+  const needsPin = !ax && !pin.hidden && scroll &&
+    scroll.scrollHeight + pinHeight > window.innerHeight + 1;
+  section.style.setProperty("--trace-pin-height", `${Math.ceil(pinHeight)}px`);
+  section.classList.toggle("popup-earned-fixed-pin", Boolean(needsPin));
 }
 
 function setEarnedCopy({
-  kicker,
-  kickerState = "pass",
-  heading,
-  lead,
+  stateCode = "",
+  kicker = "",
+  kickerIcon = "check",
+  heading = "",
+  headingMarkup = "",
+  lead = "",
+  leadMarkup = "",
+  record = null,
+  ruleMarkup = "",
+  duplicateRule = false,
   helpLabel = "Need another way?",
   disclosure = "",
+  returning = false,
 }) {
+  const previouslyFocused = document.activeElement;
+  document.body.dataset.tracePopupStateCode = stateCode;
+  setEarnedRecord(record);
+  const section = document.getElementById("popup-earned-permission");
   const kickerEl = document.getElementById("popup-earned-kicker");
+  const kickerText = document.getElementById("popup-earned-kicker-text");
+  const kickerGlyph = document.getElementById("popup-earned-kicker-icon");
   const headingEl = document.getElementById("popup-earned-heading");
   const leadEl = document.getElementById("popup-earned-lead");
+  const ruleEl = document.getElementById("popup-earned-rule");
   const helpEl = document.getElementById("popup-earned-help");
+  const extrasEl = document.getElementById("popup-earned-extras");
+  if (kickerEl) kickerEl.hidden = !kicker;
+  if (kickerText) kickerText.textContent = kicker;
+  if (kickerGlyph) kickerGlyph.replaceChildren(popupGlyph(kickerIcon));
+  if (headingEl) {
+    if (headingMarkup) setEarnedEmphasizedCopy(headingEl, headingMarkup);
+    else headingEl.textContent = heading;
+    headingEl.dataset.recordTitle = record && record.heading ? "true" : "false";
+  }
+  if (leadEl) {
+    leadEl.hidden = !(lead || leadMarkup);
+    if (leadMarkup) setEarnedEmphasizedCopy(leadEl, leadMarkup);
+    else leadEl.textContent = lead;
+  }
+  if (ruleEl) {
+    ruleEl.hidden = !ruleMarkup;
+    setEarnedEmphasizedCopy(ruleEl, ruleMarkup);
+    if (duplicateRule) ruleEl.setAttribute("aria-hidden", "true");
+    else ruleEl.removeAttribute("aria-hidden");
+  }
+  if (extrasEl) extrasEl.hidden = !returning;
   const helpSummaryEl = document.getElementById("popup-earned-help-summary");
   const disclosureEl = document.getElementById("popup-earned-disclosure");
-  if (kickerEl) {
-    kickerEl.textContent = kicker;
-    kickerEl.dataset.state = kickerState;
-  }
-  if (headingEl) headingEl.textContent = heading;
-  if (leadEl) leadEl.textContent = lead;
   if (helpSummaryEl) helpSummaryEl.textContent = helpLabel;
   if (disclosureEl) disclosureEl.textContent = disclosure;
   if (helpEl) {
     helpEl.hidden = !disclosure;
     if (!disclosure) helpEl.open = false;
   }
+  if (section) section.hidden = false;
+  refreshEarnedLayout();
+  focusEarnedHeadingIfLost(previouslyFocused);
+}
+
+const POPUP_STATUS_CHOICES = Object.freeze(["SAVED", "READING", "CAUGHT_UP", "PAUSED", "FINISHED", "DROPPED"]);
+let popupStatusPending = false;
+
+const RECORD_STATUS_LABELS = Object.freeze({
+  PLANNING: "Saved",
+  SAVED: "Saved",
+  READING: "Reading",
+  CAUGHT_UP: "Caught up",
+  PAUSED: "Paused",
+  COMPLETED: "Finished",
+  FINISHED: "Finished",
+  DROPPED: "Dropped",
+});
+
+function recordStatusKey(entry) {
+  const raw =
+    entry?.canonicalReaderStatus || entry?.readerStatus || entry?.status || "SAVED";
+  const canonical = raw === "PLANNING" ? "SAVED" : raw === "COMPLETED" ? "FINISHED" : raw;
+  return RECORD_STATUS_LABELS[canonical] ? canonical : "SAVED";
+}
+
+/** The popup spells confirmed chapter progress out, while Saved has no suffix. */
+function recordLine(entry) {
+  const key = recordStatusKey(entry);
+  const label = RECORD_STATUS_LABELS[key];
+  const current = entry?.chapters?.current;
+  const total = entry?.chapters?.total;
+  if (!Number.isInteger(current) || current <= 0) return { key, label };
+  const place = Number.isInteger(total) && total > 0
+    ? `Chapter ${current} of ${total}`
+    : `Chapter ${current}`;
+  return { key, label: `${label} · ${place}` };
+}
+
+function setEarnedRecord(record) {
+  const box = document.getElementById("popup-earned-record");
+  if (!box) return;
+  box.hidden = !record;
+  if (!record) return;
+  const title = document.getElementById("popup-earned-record-title");
+  const byline = document.getElementById("popup-earned-record-byline");
+  const label = document.getElementById("popup-earned-record-label");
+  const dot = document.getElementById("popup-earned-record-dot");
+  if (title) {
+    title.hidden = !record.title;
+    title.textContent = record.title || "";
+  }
+  if (byline) {
+    byline.textContent = record.byline || "";
+    byline.hidden = !record.byline;
+  }
+  if (label) label.textContent = record.label || "";
+  if (dot) dot.dataset.status = record.status || "SAVED";
+}
+
+function earnedGrantCoverage(grantedOrigins) {
+  const granted = new Set(grantedOrigins || []);
+  const required = earnedOrigins();
+  const grantedCount = required.filter((origin) => granted.has(origin)).length;
+  return {
+    required: required.length,
+    granted: grantedCount,
+    complete: required.length > 0 && grantedCount === required.length,
+  };
+}
+
+async function readActiveStoryIdentity() {
+  let timer;
+  try {
+    const response = await Promise.race([
+      (async () => {
+        const tab = await probeQueryActiveTab();
+        if (!tab || !Number.isInteger(tab.id)) return { error: "page_unavailable" };
+        return probeSendTabMessage(tab.id, { type: "TRACE_STORY_IDENTITY_GET" });
+      })(),
+      new Promise(resolve => { timer = setTimeout(() => resolve({ error: "page_unavailable" }), 1500); }),
+    ]);
+    if (!response || response.error === "page_unavailable") return { pageUnavailable: true };
+    if (response.ok !== true || typeof response.title !== "string") return null;
+    return {
+      title: response.title,
+      author: typeof response.author === "string" ? response.author : null,
+      site: typeof response.site === "string" ? response.site : null,
+    };
+  } catch {
+    return { pageUnavailable: true };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function storyByline(identity, story) {
+  const rawSite = identity?.site || story?.site || "";
+  const site = rawSite === "ffn" || rawSite === "FFN" ? "FanFiction.net" : rawSite === "ao3" ? "AO3" : rawSite;
+  return identity?.author ? `${identity.author} · ${site}` : site;
 }
 
 function setEarnedConnection(state, label) {
@@ -895,20 +1187,28 @@ function setEarnedConnection(state, label) {
   if (labelEl) labelEl.textContent = label;
 }
 
-function setEarnedAction(button, { hidden = false, disabled = false, label, action }) {
+function setEarnedAction(button, { hidden = false, disabled = false, label = "", action = "", emphasis = "primary" }) {
   if (!button) return;
+  const hadFocus = document.activeElement === button;
   button.hidden = hidden;
   button.disabled = disabled;
+  if (hadFocus && (hidden || disabled)) focusEarnedHeadingIfLost(button);
   button.textContent = label;
-  button.dataset.earnedAction = action || "";
+  button.dataset.earnedAction = action;
+  button.dataset.emphasis = emphasis;
+  refreshEarnedLayout();
 }
 
 function configureEarnedActions(primary, secondary = null) {
   setEarnedAction(document.getElementById("popup-earned-primary"), primary);
   setEarnedAction(
     document.getElementById("popup-earned-secondary"),
-    secondary || { hidden: true, label: "", action: "" },
+    secondary || { hidden: true },
   );
+  const pin = document.getElementById("popup-earned-pin");
+  const rule = document.getElementById("popup-earned-rule");
+  if (pin) pin.hidden = Boolean(primary.hidden && (!secondary || secondary.hidden) && (!rule || rule.hidden));
+  refreshEarnedLayout();
 }
 
 function resetEarnedLedger() {
@@ -944,53 +1244,99 @@ async function reloadEarnedStory() {
   }
 }
 
-function renderEarnedPermissionInvitation(story, hasGrant) {
+function renderEarnedPermissionInvitation(story, hasGrant, coverage = null, lapse = false) {
+  const onStory = story.kind === "story";
   setEarnedConnection("warn", "Setup");
-  setEarnedCopy({
-    kicker: `${story.site} story found`,
-    heading: hasGrant
-      ? "Add this story to Trace"
-      : "Allow Trace on AO3 and FanFiction.net",
-    lead: hasGrant
-      ? "Website access is already allowed."
-      : "When Safari asks, choose Always Allow.",
+  const partial = !hasGrant && ((coverage && coverage.granted > 0) || isLikelyIosExtensionUi);
+  if (partial) {
+    setEarnedCopy({
+      stateCode: lapse ? "P3-lapse" : "P3",
+      kicker: lapse ? "Trace can’t save here right now" : "Allowed on this site only",
+      kickerIcon: lapse ? "alert" : "globe",
+      headingMarkup: "Next, tap <b>Always Allow</b>.",
+      lead: lapse
+        ? "Trace needs its story sites again. Safari will list AO3 and FanFiction.net’s 5 addresses."
+        : "Trace needs AO3 and FanFiction.net’s other addresses too. Safari will list all 5.",
+      ruleMarkup: "Then tap <b>Always Allow</b>, not the blue button. The blue one stops Trace tomorrow.",
+    });
+  } else {
+    setEarnedCopy({
+      kicker: story.site + (onStory ? " story" : " site"),
+      heading: hasGrant ? (onStory ? "Save this story" : "Open any story to save it")
+        : "Let Trace work on AO3 and FanFiction.net",
+      lead: hasGrant ? "Website access is already allowed." : "Nothing has been saved yet.",
+    });
+  }
+  setEarnedCheck("popup-earned-story", onStory ? "pass" : "waiting", onStory ? story.site : "Open a story", "Story page");
+  setEarnedCheck("popup-earned-access", hasGrant ? "pass" : "waiting", hasGrant ? "Allowed" : "Needed", "Website access");
+  setEarnedCheck("popup-earned-save", "waiting", "After access", "Saved to Trace");
+  setEarnedResult(hasGrant ? "checking" : "failure", hasGrant ? "Website access found." : "One permission remains.", "");
+  configureEarnedActions({
+    label: hasGrant ? (onStory ? "Save this story" : "Finish setup") : partial ? "Allow story sites" : "Continue",
+    action: "allow_and_add", emphasis: "primary",
   });
-  setEarnedCheck("popup-earned-story", "pass", story.site, "Story page");
-  setEarnedCheck(
-    "popup-earned-access",
-    hasGrant ? "pass" : "waiting",
-    hasGrant ? "Allowed" : "Needed",
-    "Website access",
-  );
-  setEarnedCheck(
-    "popup-earned-save",
-    "waiting",
-    "After access",
-    "Saved to Trace",
-  );
-  setEarnedResult(
-    hasGrant ? "checking" : "failure",
-    hasGrant ? "Website access found." : "One permission remains.",
-    hasGrant
-      ? "Tap below to add the story."
-      : "Trace will not save the story until access is allowed.",
-  );
-  configureEarnedActions(
-    {
-      label: hasGrant ? "Add story" : "Allow access and add story",
-      action: "allow_and_add",
-    },
-  );
+  if (partial) void recordEarnedEvent("website_access_partial_seen");
+}
+
+function renderEarnedSiteReady() {
+  setEarnedConnection("connected", "Ready");
+  setEarnedCopy({
+    stateCode: "P8",
+    heading: "Open any story to save it",
+    lead: "Tap a title on this page. Trace saves it when it opens.",
+  });
+  setEarnedCheck("popup-earned-story", "waiting", "Open a story", "Story page");
+  setEarnedCheck("popup-earned-access", "pass", "Allowed", "Website access");
+  setEarnedCheck("popup-earned-save", "waiting", "Not saved", "Saved to Trace");
+  setEarnedResult("success", "Open any story to save it.", "");
+  configureEarnedActions({ hidden: true });
 }
 
 function renderEarnedAccessPending(story) {
-  setEarnedConnection("warn", "Finishing");
+  setEarnedConnection("warn", "Saving");
   setEarnedCopy({
-    kicker: `${story.site} story found`,
-    heading: "Adding your story…",
-    lead: "Trace will reload this page once.",
+    stateCode: "P1",
+    kicker: "Trace is on this story",
+    heading: "Saving your story…",
+    lead: "Keep reading. A note appears on the page when it’s saved.",
   });
   setEarnedCheck("popup-earned-story", "pass", story.site, "Story page");
+  setEarnedCheck("popup-earned-access", "pass", "Allowed", "Website access");
+  setEarnedCheck("popup-earned-save", "checking", "Reloading", "Saved to Trace");
+  setEarnedResult("checking", "Saving your story.", "Keep reading; a note appears on the page when it’s saved.");
+  configureEarnedActions({ label: "Keep reading", action: "close", emphasis: "secondary" });
+}
+
+function renderEarnedPermissionDeclined(story) {
+  const onStory = story.kind === "story";
+  setEarnedConnection("error", "Access needed");
+  setEarnedCopy({
+    stateCode: "P7",
+    heading: "Nothing was saved",
+    leadMarkup: "Trace needs AO3 and FanFiction.net’s addresses to save stories. When Safari asks again, tap <b>Always Allow</b>, not the blue button.",
+  });
+  setEarnedCheck("popup-earned-story", onStory ? "pass" : "waiting", onStory ? story.site : "Open a story", "Story page");
+  setEarnedCheck("popup-earned-access", "fail", "Not allowed", "Website access");
+  setEarnedCheck("popup-earned-save", "waiting", "Not added", "Saved to Trace");
+  setEarnedResult("failure", "Nothing was saved.", "When Safari asks again, tap Always Allow.");
+  configureEarnedActions(
+    { label: "Try again", action: "allow_and_add", emphasis: "primary" },
+    { label: "Not now", action: "close", emphasis: "tertiary" },
+  );
+}
+
+function renderEarnedRegistrationFailure(story) {
+  const onStory = story.kind === "story";
+  setEarnedConnection("error", "Try again");
+  setEarnedCopy({
+    kicker: onStory ? `${story.site} story found` : `${story.site} page`,
+    heading: "Trace couldn’t finish setting up",
+    lead: "Website access is allowed. Trying again won’t ask for it again.",
+    helpLabel: "Still not working?",
+    disclosure:
+      onStory ? "Restart Safari, reopen this story, and open Trace again." : "Restart Safari, reopen this site, and open Trace again.",
+  });
+  setEarnedCheck("popup-earned-story", onStory ? "pass" : "waiting", onStory ? story.site : "Open a story", "Story page");
   setEarnedCheck(
     "popup-earned-access",
     "pass",
@@ -999,79 +1345,13 @@ function renderEarnedAccessPending(story) {
   );
   setEarnedCheck(
     "popup-earned-save",
-    "checking",
-    "Reloading",
-    "Saved to Trace",
-  );
-  setEarnedResult(
-    "checking",
-    "Adding your story…",
-    "Trace will reload this page once.",
-  );
-  configureEarnedActions({
-    label: "Adding story…",
-    action: "",
-    disabled: true,
-  });
-}
-
-function renderEarnedPermissionDeclined(story) {
-  setEarnedConnection("error", "Access needed");
-  setEarnedCopy({
-    kicker: `${story.site} story found`,
-    heading: "Access wasn’t allowed",
-    lead: "Try again, then choose Always Allow in Safari.",
-    helpLabel: "No prompt?",
-    disclosure:
-      "Open Settings > Apps > Safari > Extensions > Trace, then set Permissions to Allow.",
-  });
-  setEarnedCheck("popup-earned-story", "pass", story.site, "Story page");
-  setEarnedCheck(
-    "popup-earned-access",
     "fail",
-    "Not allowed",
-    "Website access",
-  );
-  setEarnedCheck(
-    "popup-earned-save",
-    "waiting",
     "Not added",
     "Saved to Trace",
   );
   setEarnedResult(
     "failure",
     "Nothing was saved.",
-    "You can retry without leaving this story.",
-  );
-  configureEarnedActions({ label: "Try again", action: "allow_and_add" });
-}
-
-function renderEarnedRegistrationFailure(story) {
-  setEarnedConnection("error", "Try again");
-  setEarnedCopy({
-    kicker: `${story.site} story found`,
-    heading: "Trace couldn’t finish setup",
-    lead: "Website access is allowed. Try again.",
-    helpLabel: "Still not working?",
-    disclosure:
-      "Restart Safari, reopen this story, and open Trace again.",
-  });
-  setEarnedCheck("popup-earned-story", "pass", story.site, "Story page");
-  setEarnedCheck(
-    "popup-earned-access",
-    "pass",
-    "Allowed",
-    "Website access",
-  );
-  setEarnedCheck(
-    "popup-earned-save",
-    "fail",
-    "Not added",
-    "Saved to Trace",
-  );
-  setEarnedResult(
-    "failure",
-    "The story was not saved.",
     "Retrying will not ask for website access again.",
   );
   configureEarnedActions({ label: "Try again", action: "allow_and_add" });
@@ -1080,10 +1360,10 @@ function renderEarnedRegistrationFailure(story) {
 function renderEarnedUnsupportedStory() {
   setEarnedConnection("error", "Story needed");
   setEarnedCopy({
-    kicker: "No supported story found",
-    kickerState: "error",
-    heading: "Open a story first",
-    lead: "Open an AO3 or FanFiction.net story in Safari, then open Trace again.",
+    kicker: "No story on this page",
+    kickerState: "checking",
+    heading: "Open a story to finish",
+    lead: "Go to any story on AO3 or FanFiction.net, then tap Trace in Safari’s page menu again.",
   });
   setEarnedCheck("popup-earned-story", "fail", "Not found", "Story page");
   setEarnedCheck(
@@ -1103,7 +1383,154 @@ function renderEarnedUnsupportedStory() {
     "This isn’t a supported story page.",
     "AO3 and FanFiction.net stories are supported.",
   );
-  configureEarnedActions({ label: "Close and open a story", action: "close" });
+  configureEarnedActions({ label: "Close", action: "close", emphasis: "tertiary" });
+}
+
+/**
+ * The popup just confirmed the reader's first story, so the page note would
+ * only repeat it (often hidden behind this sheet). Mark the one-time note as
+ * delivered and ask the page to drop any note already showing.
+ */
+async function deliverFirstStoryConfirmation() {
+  try {
+    await earnedStorageSet({ traceSavedNoteFirstStoryShownV1: true });
+  } catch {
+    // Best effort; the note is optional feedback.
+  }
+  try {
+    const tab = await probeQueryActiveTab();
+    if (tab && Number.isInteger(tab.id)) {
+      await probeSendTabMessage(tab.id, { type: "TRACE_SAVED_NOTE_DISMISS" });
+    }
+  } catch {
+    // The page may have no receiver yet; the stored flag still applies.
+  }
+}
+
+function renderEarnedSaved(story, work, identity, alreadyInLibrary = false) {
+  void deliverFirstStoryConfirmation();
+  const line = recordLine(work?.entry);
+  setEarnedConnection("connected", "Saved");
+  setEarnedCopy({
+    stateCode: "P2",
+    kicker: alreadyInLibrary ? "Already in your Library" : "Saved to your Library",
+    heading: identity?.title || "Your story",
+    record: { heading: true, byline: storyByline(identity, story), label: line.label, status: line.key },
+    lead: "Your chapter fills in as you read. Your story is waiting in Trace whenever you open it.",
+  });
+  setEarnedCheck("popup-earned-save", "pass", "Saved", "Saved to Trace");
+  setEarnedResult("success", alreadyInLibrary ? "Already in your Library:" : "Saved to your Library:",
+    (identity?.title || "Your story") + " by " + (identity?.author || "the author") + ". Your chapter fills in as you read.");
+  configureEarnedActions({ label: "Keep reading", action: "close", emphasis: "secondary" });
+}
+
+function renderEarnedDelayed(story) {
+  setEarnedConnection("warn", "Confirming");
+  setEarnedCopy({
+    stateCode: "P5",
+    heading: "Still confirming your story",
+    lead: "Nothing to redo. Keep reading; it’ll appear in Trace.",
+  });
+  setEarnedResult("checking", "Still confirming your story.", "Nothing to redo.");
+  configureEarnedActions(
+    { label: "Keep reading", action: "close", emphasis: "secondary" },
+    { label: "Check again", action: "check_story", emphasis: "tertiary" },
+  );
+}
+
+function renderEarnedUnavailable(story) {
+  setEarnedConnection("warn", "Unavailable");
+  setEarnedCopy({
+    stateCode: "P9",
+    heading: "This story isn’t available",
+    lead: "It may be deleted or locked. Nothing was saved.",
+  });
+  setEarnedCheck("popup-earned-story", "fail", "Unavailable", "Story page");
+  setEarnedCheck("popup-earned-access", "pass", "Allowed", "Website access");
+  setEarnedCheck("popup-earned-save", "waiting", "Not saved", "Saved to Trace");
+  setEarnedResult("failure", "This story isn’t available.", "Nothing was saved.");
+  configureEarnedActions({ label: "Close", action: "close", emphasis: "tertiary" });
+}
+
+function renderEarnedConnectAccount(story) {
+  setEarnedConnection("off", "Not linked");
+  setEarnedCopy({
+    stateCode: "P6",
+    heading: "Finish setup in the Trace app",
+    lead: `Create an account or sign in, then come back to ${story?.kind === "archive" ? "any story" : "this story"}. Trace saves it as you read.`,
+  });
+  setEarnedResult("failure", "Finish setup in the Trace app.", "");
+  configureEarnedActions({ label: "Open Trace", action: "open_connect", emphasis: "primary" });
+}
+
+let storyConfirmation = null;
+
+function stopStoryConfirmation() {
+  if (storyConfirmation?.timer) clearTimeout(storyConfirmation.timer);
+  storyConfirmation = null;
+}
+
+async function checkConfirmedStory() {
+  const watch = storyConfirmation;
+  if (!watch) return;
+  const state = await new Promise((resolve) =>
+    sendKernelRuntimeMessage({ type: "TRACE_POPUP_GET_STATE" }, resolve),
+  );
+  if (storyConfirmation !== watch) return;
+  if (!state || state.ok !== true) return;
+  if (state.authState?.state && state.authState.state !== "connected" && state.authState.state !== "connecting" && state.authState.state !== "verifying") {
+    watch.render.connect();
+    return;
+  }
+  if (state.activeWork && state.activeWork.status === "saved") {
+    const identity = watch.identity || (await readActiveStoryIdentity());
+    if (storyConfirmation !== watch) return;
+    stopStoryConfirmation();
+    void recordEarnedEvent("story_confirmed_in_popup");
+    watch.render.saved(state.activeWork, identity, watch.firstCheck);
+    return;
+  }
+  if (state.activeStoryUnavailable === true) {
+    stopStoryConfirmation();
+    watch.render.unavailable();
+    return;
+  }
+  watch.firstCheck = false;
+}
+
+/**
+ * Watches the account projection for the active story. Only a confirmed
+ * current-account entry for this exact tab's story ends the wait; a timeout
+ * shows a calm delayed state and never re-sends a save.
+ */
+function watchForConfirmedStory(story, render) {
+  stopStoryConfirmation();
+  storyConfirmation = { story, render, identity: null, timer: null, firstCheck: true };
+  const watch = storyConfirmation;
+  void readActiveStoryIdentity().then((identity) => {
+    if (storyConfirmation === watch) watch.identity = identity;
+  });
+  watch.timer = setTimeout(() => {
+    if (storyConfirmation !== watch) return;
+    void checkConfirmedStory().then(() => {
+      if (storyConfirmation !== watch) return;
+      void recordEarnedEvent("story_confirmation_delayed");
+      render.delayed();
+    });
+  }, STORY_CONFIRMATION_PATIENCE_MS);
+  void checkConfirmedStory();
+}
+
+function earnedStoryRender(story) {
+  return {
+    saved: (work, identity, already) => renderEarnedSaved(story, work, identity, already),
+    delayed: () => renderEarnedDelayed(story),
+    unavailable: () => renderEarnedUnavailable(story),
+    connect: () => {
+      stopStoryConfirmation();
+      renderEarnedConnectAccount(story);
+    },
+  };
 }
 
 function earnedRunVerified(onboarding, readiness) {
@@ -1132,24 +1559,42 @@ async function prepareEarnedPermissionFlow() {
     readGrantedOrigins(),
   ]);
   const hasGrant = await readCompleteEarnedGrant(grantedOrigins);
+  const tab = await probeQueryActiveTab().catch(() => null);
+  const story = classifyEarnedPage(tab?.url);
+  earnedCurrentPage = story.ok ? story : null;
+  if (onboarding.completedAt && story.ok && !hasGrant) {
+    earnedPreparedContext = Object.freeze({ story, hasGrant: false });
+    stopStoryConfirmation();
+    renderEarnedPermissionInvitation(story, false, earnedGrantCoverage(grantedOrigins), true);
+    return;
+  }
 
-  // The earned-permission screen is onboarding, not the extension's permanent
-  // popup. Completion is sticky: Safari can report permission snapshots late,
-  // and revoking access later must not resurrect a first-run experience.
-  if (onboarding.completedAt) {
+  // Completion stays sticky. Supported story sites still verify their earned
+  // grant above because a One Day Safari grant can expire after onboarding.
+  if (onboarding.completedAt && !earnedAwaitingStory) {
     activateKernelPopupAfterEarnedPermission();
     return;
   }
   // A successful archive heartbeat is stronger proof than a permission API
-  // snapshot: it means the installed content script actually executed.
-  if (earnedRunVerified(onboarding, readiness)) {
-    await writeEarnedState({ completedAt: onboarding.completedAt || Date.now() });
+  // snapshot: it means the installed content script actually executed. It is
+  // still not a save, so a popup that just granted access keeps waiting for
+  // the confirmed story instead of switching to the general view.
+  if (onboarding.completedAt || earnedRunVerified(onboarding, readiness)) {
+    if (!onboarding.completedAt) {
+      await writeEarnedState({ completedAt: Date.now() });
+    }
+    if (earnedAwaitingStory) {
+      if (!storyConfirmation) {
+        watchForConfirmedStory(earnedAwaitingStory, earnedStoryRender(earnedAwaitingStory));
+      } else {
+        void checkConfirmedStory();
+      }
+      return;
+    }
     activateKernelPopupAfterEarnedPermission();
     return;
   }
 
-  const tab = await probeQueryActiveTab().catch(() => null);
-  const story = classifyProbeStory(tab?.url);
   if (!tab || !Number.isInteger(tab.id) || !story.ok) {
     earnedPreparedContext = null;
     renderEarnedUnsupportedStory();
@@ -1157,14 +1602,30 @@ async function prepareEarnedPermissionFlow() {
   }
   earnedPreparedContext = Object.freeze({ story, hasGrant });
   if (hasGrant) {
+    if (earnedAwaitingStory) {
+      // This popup already asked for the reload; keep waiting for the run.
+      renderEarnedAccessPending(story);
+      return;
+    }
     const registration = await reconcileEarnedRegistration().catch(() => null);
     if (registration?.ok !== true || registration?.registered !== true) {
       renderEarnedRegistrationFailure(story);
       return;
     }
     void recordEarnedEvent("website_access_registration_ready");
+    if (story.kind === "archive") {
+      await writeEarnedState({ completedAt: Date.now() });
+      renderEarnedSiteReady();
+      return;
+    }
+    // Access is complete (for example, Safari's Every Website choice). There
+    // is no permission decision left, so continue without an extra tap.
+    earnedAwaitingStory = story;
+    renderEarnedAccessPending(story);
+    await reloadEarnedStory();
+    return;
   }
-  renderEarnedPermissionInvitation(story, hasGrant);
+  renderEarnedPermissionInvitation(story, hasGrant, earnedGrantCoverage(grantedOrigins));
 }
 
 async function allowAccessAndAddEarnedStory() {
@@ -1184,17 +1645,16 @@ async function allowAccessAndAddEarnedStory() {
     label: "Waiting for Safari…",
     action: "",
     disabled: true,
+    emphasis: "secondary",
   });
-  setEarnedResult(
-    "checking",
-    "Choose Always Allow in Safari.",
-    "Trace will not add the story unless the complete supported-site bundle is allowed.",
-  );
   setEarnedCopy({
-    kicker: `${prepared.story.site} story found`,
-    heading: "Allow website access",
-    lead: "Choose Always Allow in Safari.",
+    stateCode: "P4",
+    headingMarkup: "Tap <b>Always Allow</b>, not the blue button.",
+    lead: "It lists 5 addresses. They’re all AO3 or FanFiction.net.",
+    ruleMarkup: "Tap <b>Always Allow</b>, not the blue button.",
+    duplicateRule: true,
   });
+  setEarnedResult("checking", "", "");
   const story = prepared.story;
   void recordEarnedEvent("website_access_action_started");
   try {
@@ -1208,16 +1668,28 @@ async function allowAccessAndAddEarnedStory() {
       !(await readCompleteEarnedGrant(grantedOrigins))
     ) {
       await writeEarnedState({ promptResult: "declined" });
-      void recordEarnedEvent("website_access_not_allowed");
-      renderEarnedPermissionDeclined(story);
+      const coverage = earnedGrantCoverage(grantedOrigins);
+      if (coverage.granted > 0 && granted === true) {
+        void recordEarnedEvent("website_access_partial");
+        renderEarnedPermissionInvitation(story, false, coverage);
+      } else {
+        void recordEarnedEvent("website_access_not_allowed");
+        renderEarnedPermissionDeclined(story);
+      }
       return;
     }
     earnedPreparedContext = Object.freeze({ story, hasGrant: true });
+    earnedAwaitingStory = story;
     const registration = await reconcileEarnedRegistration();
     if (registration?.ok !== true || registration?.registered !== true) {
       throw new Error("registration_failed");
     }
     void recordEarnedEvent("website_access_registered");
+    if (story.kind === "archive") {
+      await writeEarnedState({ completedAt: Date.now() });
+      renderEarnedSiteReady();
+      return;
+    }
     renderEarnedAccessPending(story);
     await reloadEarnedStory();
   } catch {
@@ -1235,26 +1707,19 @@ async function initializeEarnedPermissionFlow() {
   document.body.dataset.traceEarnedPermission = "true";
   const section = document.getElementById("popup-earned-permission");
   const connection = document.getElementById("popup-connection");
-  if (section) section.hidden = false;
+  if (section) section.hidden = true;
   if (connection) {
     connection.dataset.state = "warn";
     const label = connection.querySelector(".popup-connection-label");
     if (label) label.textContent = "First story";
   }
-  for (const button of [
-    document.getElementById("popup-earned-primary"),
-    document.getElementById("popup-earned-secondary"),
-  ]) {
-    button?.addEventListener("click", () => {
-      const action = button.dataset.earnedAction;
-      if (action === "prepare") void prepareEarnedPermissionFlow();
-      if (action === "allow_and_add") void allowAccessAndAddEarnedStory();
-      if (action === "reload_to_verify") void reloadEarnedStory();
-      if (action === "close") window.close();
-    });
-  }
+  bindEarnedActionButtons();
   ext.storage?.onChanged?.addListener((changes, area) => {
-    if (area !== "local" || !changes[ARCHIVE_READINESS_KEY]) return;
+    if (area !== "local") return;
+    if (changes[ACCOUNT_PROJECTION_REVISION_KEY] && storyConfirmation) {
+      void checkConfirmedStory();
+    }
+    if (!changes[ARCHIVE_READINESS_KEY]) return;
     void prepareEarnedPermissionFlow();
   });
   void recordEarnedEvent("popup_opened");
@@ -1338,6 +1803,15 @@ function setArchiveLinks() {
 }
 
 setArchiveLinks();
+window.addEventListener("resize", refreshEarnedLayout);
+window.visualViewport?.addEventListener("resize", refreshEarnedLayout);
+if (typeof ResizeObserver !== "undefined") {
+  const earnedLayoutObserver = new ResizeObserver(refreshEarnedLayout);
+  for (const id of ["popup-earned-pin", "popup-earned-scroll"]) {
+    const element = document.getElementById(id);
+    if (element) earnedLayoutObserver.observe(element);
+  }
+}
 
 function renderNativeImportContinuation(snapshot) {
   const link = document.getElementById("popup-import-open-native");
@@ -1502,12 +1976,26 @@ function kernelActionsForState(state) {
   return { primary: null, secondary: null };
 }
 
+let kernelSessionState = "initializing";
+
 function renderKernelSnapshot(snapshot) {
+  kernelSessionState = snapshot?.state || "initializing";
   setImportRecoveryHelp();
   nativeImportGeneration += 1;
   nativeImportContinuation = null;
   const state = snapshot?.state || "initializing";
   const reason = snapshot?.reason || "none";
+  if (EARNED_PERMISSION_ONBOARDING && isLikelyIosExtensionUi && earnedCurrentPage?.ok &&
+      ["initializing", "connecting", "verifying"].includes(state)) {
+    document.body.dataset.traceEarnedPermission = "true";
+    document.body.dataset.tracePopupState = state;
+    const section = document.getElementById("popup-earned-permission");
+    if (section) section.hidden = false;
+    if (earnedCurrentPage.kind === "story") renderEarnedAccessPending(earnedCurrentPage);
+    else renderEarnedSiteReady();
+    return;
+  }
+  if (EARNED_PERMISSION_ONBOARDING && state === "connected") delete document.body.dataset.traceEarnedPermission;
   const statusEl = document.getElementById("popup-status");
   const leadEl = document.getElementById("popup-lead");
   const ctaEl = document.getElementById("popup-cta");
@@ -1583,6 +2071,20 @@ function renderKernelSnapshot(snapshot) {
   }
 
   document.body.dataset.tracePopupState = state;
+  if (
+    EARNED_PERMISSION_ONBOARDING &&
+    isLikelyIosExtensionUi &&
+    !SESSION_DISABLED &&
+    (state === "signed_out" || (state === "reconnect_required" && credentialRecovery))
+  ) {
+    renderAwaitingAppLink();
+    return;
+  }
+  if (document.body.dataset.traceReaderView === "link") {
+    delete document.body.dataset.traceReaderView;
+    const section = document.getElementById("popup-earned-permission");
+    if (section) section.hidden = true;
+  }
   if (statusEl) statusEl.textContent = SESSION_DISABLED ? "Trace unavailable" : headings[state] || "Trace";
   if (leadEl) {
     leadEl.hidden = false;
@@ -1595,10 +2097,10 @@ function renderKernelSnapshot(snapshot) {
   }
   if (ctaEl) {
     ctaEl.hidden = actions.primary == null;
-    ctaEl.href = "#";
+    delete ctaEl.dataset.externalUrl;
     ctaEl.textContent = actions.primary ? labels[actions.primary] : "";
     ctaEl.dataset.sessionAction = actions.primary || "";
-    ctaEl.dataset.emphasis = "primary";
+    ctaEl.dataset.emphasis = actions.primary === "cancel" ? "tertiary" : "primary";
   }
   if (secondaryActionEl) {
     secondaryActionEl.hidden = actions.secondary == null;
@@ -1609,7 +2111,7 @@ function renderKernelSnapshot(snapshot) {
   if (sessionHelpEl) {
     sessionHelpEl.hidden =
       SESSION_DISABLED || !credentialRecovery;
-    sessionHelpEl.href = isLikelyIosExtensionUi
+    sessionHelpEl.dataset.externalUrl = isLikelyIosExtensionUi
       ? TRACE_IOS_APP_CONNECT_URL
       : TRACE_HOME_URL;
     sessionHelpEl.textContent = isLikelyIosExtensionUi
@@ -1622,6 +2124,22 @@ function renderKernelSnapshot(snapshot) {
   if (importEl) importEl.hidden = true;
   if (archiveLinksEl) archiveLinksEl.hidden = true;
   renderNativeImportContinuation(snapshot);
+}
+
+/**
+ * iOS: the extension is on but not yet linked to the account in the Trace app.
+ * One step, one action: finish setup in the app, then come back.
+ */
+function renderAwaitingAppLink() {
+  const section = document.getElementById("popup-earned-permission");
+  if (!section) return;
+  document.body.dataset.traceReaderView = "link";
+  section.hidden = false;
+  for (const id of ["popup-import", "popup-cta", "popup-session-help", "popup-session-secondary", "popup-preferences"]) {
+    const el = document.getElementById(id);
+    if (el) el.hidden = true;
+  }
+  renderEarnedConnectAccount({ kind: "story" });
 }
 
 function sendKernelRuntimeMessage(message, onResponse) {
@@ -1647,7 +2165,9 @@ function sendKernelRuntimeMessage(message, onResponse) {
 }
 
 const KERNEL_SNAPSHOT_RETRY_DELAYS_MS = Object.freeze([180, 650]);
+const KERNEL_SNAPSHOT_TRANSIENT_RETRY_LIMIT = 31;
 let kernelSnapshotAttempt = 0;
+let kernelSnapshotTransientAttempt = 0;
 
 function requestKernelSnapshot() {
   sendKernelRuntimeMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" }, (response) => {
@@ -1663,7 +2183,16 @@ function requestKernelSnapshot() {
     }
     kernelSnapshotAttempt = 0;
     renderKernelSnapshot(response?.snapshot);
-    if (response?.snapshot?.state === "connected") requestKernelPopupState();
+    const state = response?.snapshot?.state;
+    if (state === "initializing" || state === "connecting" || state === "verifying") {
+      if (kernelSnapshotTransientAttempt < KERNEL_SNAPSHOT_TRANSIENT_RETRY_LIMIT) {
+        kernelSnapshotTransientAttempt += 1;
+        setTimeout(requestKernelSnapshot, kernelSnapshotTransientAttempt === 1 ? 250 : 1000);
+      }
+      return;
+    }
+    kernelSnapshotTransientAttempt = 0;
+    if (state === "connected") requestKernelPopupState();
   });
 }
 
@@ -1673,7 +2202,7 @@ function requestKernelPopupState() {
       !state ||
       state.ok !== true ||
       state.authState?.state !== "connected" ||
-      document.body.dataset.tracePopupState !== "connected"
+      kernelSessionState !== "connected"
     ) {
       return;
     }
@@ -1703,7 +2232,303 @@ function requestKernelPopupState() {
     if (preferences) preferences.hidden = false;
     if (importButton) restoreImportButton(importButton);
     updatePreferenceSummary();
+    if (EARNED_PERMISSION_ONBOARDING) void renderReaderView(state);
   });
+}
+
+function closePopupStatusMenu(returnFocus = false) {
+  const menu = document.getElementById("popup-earned-status-menu");
+  const control = document.getElementById("popup-earned-status-control");
+  if (menu) menu.hidden = true;
+  if (control) control.setAttribute("aria-expanded", "false");
+  if (returnFocus) control?.focus({ preventScroll: true });
+}
+
+function popupStatusErrorCopy(error) {
+  if (error === "auth_expired" || error === "not_authenticated") return "Reconnect Trace, then try again.";
+  if (error === "rate_limited") return "Trace is rate limiting updates. Try again soon.";
+  if (error === "free_limit_reached") return "Library limit reached.";
+  if (error === "finish_qualification_disabled") return "Automatic finish updates are temporarily unavailable. Open Trace to update this work.";
+  return "Could not update. Try again.";
+}
+
+function announcePopupStatusChange(message) {
+  const result = document.getElementById("popup-earned-result");
+  if (!result) return;
+  lastEarnedAnnouncement = `P11-status\u0000${message}`;
+  if (earnedAnnouncementTimer !== null) clearTimeout(earnedAnnouncementTimer);
+  result.textContent = "";
+  earnedAnnouncementTimer = setTimeout(() => {
+    earnedAnnouncementTimer = null;
+    result.textContent = message;
+  }, 0);
+}
+
+async function choosePopupReaderStatus(state, nextStatus) {
+  if (popupStatusPending) return;
+  const entry = state.activeWork?.entry || {};
+  const error = document.getElementById("popup-earned-status-error");
+  const control = document.getElementById("popup-earned-status-control");
+  const menu = document.getElementById("popup-earned-status-menu");
+  if (error) { error.hidden = true; error.textContent = ""; }
+  popupStatusPending = true;
+  if (control) control.disabled = true;
+  menu?.querySelectorAll("button").forEach((item) => { item.disabled = true; });
+  try {
+    const tab = await probeQueryActiveTab();
+    if (!tab || !Number.isInteger(tab.id) || !entry.entryId) throw new Error("invalid_status_request");
+    const response = await probeSendTabMessage(tab.id, {
+      type: "TRACE_POPUP_SET_READER_STATUS",
+      status: nextStatus,
+      entry: { entryId: entry.entryId, status: entry.status,
+        readerStatus: entry.readerStatus, canonicalReaderStatus: entry.canonicalReaderStatus,
+        chapters: entry.chapters },
+    });
+    if (!response || !response.ok) throw new Error(response?.error || "update_failed");
+    const chapters = entry.chapters ? { ...entry.chapters } : null;
+    if (nextStatus === "READING" && recordStatusKey(entry) === "SAVED" &&
+        chapters && (!Number.isInteger(chapters.current) || chapters.current <= 0)) chapters.current = 1;
+    state.activeWork = { ...state.activeWork, entry: { ...entry,
+      canonicalReaderStatus: nextStatus, readerStatus: nextStatus, status: nextStatus,
+      ...(chapters ? { chapters } : {}) } };
+    closePopupStatusMenu();
+    await renderReaderView(state);
+    announcePopupStatusChange(`Status changed to ${RECORD_STATUS_LABELS[nextStatus]}.`);
+  } catch (failure) {
+    closePopupStatusMenu(true);
+    const copy = popupStatusErrorCopy(failure?.message);
+    if (error) { error.textContent = copy; error.hidden = false; }
+    announcePopupStatusChange(copy);
+  } finally {
+    popupStatusPending = false;
+    if (control) control.disabled = false;
+    menu?.querySelectorAll("button").forEach((item) => { item.disabled = false; });
+  }
+}
+
+function openPopupStatusMenu(state, focusSelected = true) {
+  const menu = document.getElementById("popup-earned-status-menu");
+  const control = document.getElementById("popup-earned-status-control");
+  if (!menu || !control) return;
+  menu.replaceChildren();
+  const selected = recordStatusKey(state.activeWork?.entry);
+  for (const status of POPUP_STATUS_CHOICES) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.setAttribute("role", "menuitemradio");
+    item.setAttribute("aria-checked", String(status === selected));
+    const choice = document.createElement("span");
+    choice.className = "popup-earned-menu-choice";
+    const dot = document.createElement("span");
+    dot.className = "popup-earned-record-dot";
+    dot.dataset.status = status;
+    dot.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.textContent = RECORD_STATUS_LABELS[status];
+    choice.append(dot, label);
+    item.appendChild(choice);
+    if (status === selected) {
+      const check = document.createElement("span");
+      check.className = "popup-earned-menu-check";
+      check.setAttribute("aria-hidden", "true");
+      check.textContent = "✓";
+      item.appendChild(check);
+    }
+    item.addEventListener("click", (event) => {
+      if (status === selected) { closePopupStatusMenu(event.detail === 0); return; }
+      void choosePopupReaderStatus(state, status);
+    });
+    menu.appendChild(item);
+  }
+  menu.hidden = false;
+  control.setAttribute("aria-expanded", "true");
+  if (focusSelected) {
+    (menu.querySelector('[aria-checked="true"]') || menu.firstElementChild)?.focus({ preventScroll: true });
+  }
+}
+
+function showPopupSettings() {
+  closePopupStatusMenu();
+  document.body.dataset.traceReaderView = "settings";
+  const section = document.getElementById("popup-earned-permission");
+  const header = document.getElementById("popup-earned-settings-header");
+  const preferences = document.getElementById("popup-preferences");
+  const disconnect = document.getElementById("popup-session-secondary");
+  if (section) section.setAttribute("aria-labelledby", "popup-earned-settings-title");
+  if (header) header.hidden = false;
+  if (preferences) { preferences.hidden = false; preferences.open = true; }
+  if (disconnect) { disconnect.hidden = false; disconnect.dataset.sessionAction = "disconnect"; }
+  document.getElementById("popup-earned-settings-back")?.focus({ preventScroll: true });
+}
+
+function hidePopupSettings() {
+  document.body.dataset.traceReaderView = "true";
+  const section = document.getElementById("popup-earned-permission");
+  const header = document.getElementById("popup-earned-settings-header");
+  if (section) section.setAttribute("aria-labelledby", "popup-earned-heading");
+  if (header) header.hidden = true;
+  document.getElementById("popup-earned-settings-row")?.focus({ preventScroll: true });
+}
+
+document.getElementById("popup-earned-settings-back")?.addEventListener("click", hidePopupSettings);
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  const menu = document.getElementById("popup-earned-status-menu");
+  if (menu && !menu.hidden) { event.preventDefault(); closePopupStatusMenu(true); }
+  else if (document.body.dataset.traceReaderView === "settings") { event.preventDefault(); hidePopupSettings(); }
+});
+
+/**
+ * The ordinary popup for a connected reader: what Trace knows about the story
+ * in this tab, using the same grammar as setup. Settings stay in their
+ * disclosure below. Only a confirmed entry is described as saved.
+ */
+function renderPageReconnect() {
+  stopStoryConfirmation();
+  closePopupStatusMenu();
+  setEarnedCopy({ stateCode: "P18", heading: "Trace needs to reconnect to this page",
+    lead: "Reload the page to keep reading with Trace." });
+  setEarnedResult("checking", "", "");
+  configureEarnedActions({ label: "Reload page", action: "reconnect_page", emphasis: "primary" });
+  const importButton = document.getElementById("popup-import");
+  if (importButton) importButton.hidden = true;
+  const control = document.getElementById("popup-earned-status-control");
+  if (control) control.hidden = true;
+}
+
+async function reloadDisconnectedPage() {
+  configureEarnedActions({ label: "Reloading…", disabled: true });
+  try {
+    const tab = await probeQueryActiveTab();
+    if (!Number.isInteger(tab?.id) || !classifyEarnedPage(tab.url).ok) throw new Error("no_page");
+    await extensionPromiseCall(ext.tabs, "reload", [tab.id]);
+    requestKernelPopupState();
+    // Safari can keep the popup open while the new document connects.
+    for (const ms of [500, 1500, 3000]) setTimeout(requestKernelPopupState, ms);
+  } catch {
+    renderPageReconnect();
+    setEarnedResult("failure", "The page couldn’t reload. Try again.", "");
+  }
+}
+
+async function renderReaderView(state) {
+  const section = document.getElementById("popup-earned-permission");
+  if (!section) return;
+  document.body.dataset.traceReaderView = "true";
+  section.hidden = false;
+  // The setup announcement region would otherwise keep stale setup text for
+  // VoiceOver; the reader view speaks through its visible copy.
+  const setupResult = document.getElementById("popup-earned-result");
+  if (setupResult) setupResult.hidden = false;
+  const activeTab = state.activeTab || { kind: "unknown" };
+  const importButton = document.getElementById("popup-import");
+  const site = activeTab.site === "ffn" ? "FanFiction.net" : activeTab.site === "ao3" ? "AO3" : null;
+  const story = { ok: true, site: site || "AO3" };
+
+  if (state.capacity?.blocked === true) {
+    document.body.dataset.traceReaderView = "false";
+    section.hidden = true;
+    return;
+  }
+  const identity = ["supported_story", "supported_archive"].includes(activeTab.kind)
+    ? await readActiveStoryIdentity() : null;
+  if (identity?.pageUnavailable) { renderPageReconnect(); return; }
+  if (activeTab.kind === "supported_story") {
+    if (state.activeWork?.status === "saved") {
+      const line = recordLine(state.activeWork.entry);
+      setEarnedConnection("connected", "Connected");
+      setEarnedCopy({
+        stateCode: "P11",
+        heading: identity?.title || "This story",
+        record: { heading: true, byline: storyByline(identity, story), label: line.label, status: line.key },
+        returning: true,
+      });
+      setEarnedResult("success", "", "");
+      const control = document.getElementById("popup-earned-status-control");
+      const settings = document.getElementById("popup-earned-settings-row");
+      const status = RECORD_STATUS_LABELS[recordStatusKey(state.activeWork.entry)];
+      if (control) {
+        control.hidden = false;
+        control.setAttribute("aria-label", `Reading status: ${status}`);
+        const dot = document.createElement("span");
+        dot.className = "popup-earned-record-dot";
+        dot.dataset.status = line.key;
+        dot.setAttribute("aria-hidden", "true");
+        const label = document.createElement("span");
+        label.textContent = status;
+        const chevron = popupSvg("0 0 10 7");
+        popupSvgShape(chevron, "path", { d: "M1 1.5 5 5.5l4-4" });
+        control.replaceChildren(dot, label, chevron);
+      }
+      if (settings) settings.hidden = false;
+      const menu = document.getElementById("popup-earned-status-menu");
+      if (menu) menu.hidden = true;
+      if (control) {
+        control.setAttribute("aria-expanded", "false");
+        control.onclick = (event) => openPopupStatusMenu(state, event.detail === 0);
+      }
+      if (settings) settings.onclick = showPopupSettings;
+      configureEarnedActions({ hidden: true });
+      if (importButton) importButton.hidden = true;
+      return;
+    }
+    if (state.activeStoryUnavailable === true) {
+      stopStoryConfirmation();
+      renderEarnedUnavailable(story);
+      if (importButton) importButton.hidden = true;
+      return;
+    }
+    if (state.autoTrackEnabled !== false) {
+      renderEarnedAccessPending(story);
+      if (importButton) importButton.hidden = true;
+      watchForConfirmedStory(story, {
+        saved: (work, found, already) => renderEarnedSaved(story, work, found || identity, already),
+        delayed: () => renderEarnedDelayed(story),
+        unavailable: () => renderEarnedUnavailable(story),
+        connect: () => { stopStoryConfirmation(); renderEarnedConnectAccount({ kind: "story" }); },
+      });
+      return;
+    }
+    setEarnedConnection("connected", "Connected");
+    setEarnedCopy({
+      stateCode: "P10",
+      heading: "Automatic saving is off",
+      record: { title: identity?.title || "This story", byline: storyByline(identity, story),
+        label: "Not in your Library", status: "SAVED" },
+    });
+    setEarnedResult("checking", "", "");
+    configureEarnedActions(
+      { label: "Save this story", action: "save_story", emphasis: "primary" },
+      { label: "Turn automatic saving on", action: "enable_auto_track", emphasis: "tertiary" },
+    );
+    return;
+  }
+  setEarnedConnection("connected", "Connected");
+  const onArchive = activeTab.kind === "supported_archive" || activeTab.kind === "blocked_archive";
+  const awaitingFirstStory = activeTab.kind === "supported_archive" && state.firstSaveSeen !== true;
+  const heading = awaitingFirstStory
+    ? "Open any story to save it"
+    : onArchive ? "Trace is on here" : "Trace works on AO3 and FanFiction.net";
+  const lead = awaitingFirstStory
+    ? "Tap a title on this page. Trace saves it when it opens."
+    : onArchive
+      ? "Stories you open join your Library, and Trace keeps your place as you read. Lists show what you’ve read."
+      : "Open a story there and Trace keeps your place as you read.";
+  setEarnedCopy({
+    kicker: awaitingFirstStory ? "" : onArchive && site ? site : "Trace in Safari",
+    stateCode: awaitingFirstStory ? "P8" : "",
+    heading,
+    lead,
+  });
+  setEarnedResult("success", heading + ".", "");
+  configureEarnedActions(
+    awaitingFirstStory
+      ? { hidden: true }
+      : isLikelyIosExtensionUi
+        ? { label: "Open Trace app", action: "open_app" }
+        : { hidden: true, label: "", action: "" },
+  );
+  if (importButton && !onArchive) importButton.hidden = true;
 }
 
 function bindPreferenceControls() {
@@ -1723,9 +2548,73 @@ function bindPreferenceControls() {
   }
 }
 
+async function saveStoryFromPopup() {
+  if (popupStorySavePending) return;
+  popupStorySavePending = true;
+  const button = document.getElementById("popup-earned-primary");
+  if (button) button.disabled = true;
+  try {
+    const tab = await probeQueryActiveTab();
+    if (!tab || !Number.isInteger(tab.id)) throw new Error("no_active_tab");
+    const response = await probeSendTabMessage(tab.id, { type: "TRACE_POPUP_QUICK_ADD" });
+    if (!response || !response.ok) throw new Error(response?.error || "save_failed");
+    const story = classifyEarnedPage(tab.url);
+    watchForConfirmedStory(story, {
+      saved: () => { popupStorySavePending = false; requestKernelPopupState(); },
+      delayed: () => { popupStorySavePending = false; if (button) button.disabled = false; },
+      unavailable: () => { popupStorySavePending = false; renderEarnedUnavailable(story); },
+      connect: () => { popupStorySavePending = false; renderEarnedConnectAccount(story); },
+    });
+  } catch {
+    popupStorySavePending = false;
+    if (button) button.disabled = false;
+  }
+}
+
+async function enableAutomaticSavingFromPopup() {
+  await earnedStorageSet({ [PREF_AUTO_TRACK_KEY]: true });
+  const input = document.getElementById("pref-auto-track");
+  if (input) input.checked = true;
+  const tab = await probeQueryActiveTab();
+  if (Number.isInteger(tab?.id)) {
+    await probeSendTabMessage(tab.id, { type: "TRACE_SCHEDULE_AUTO_TRACK" });
+  }
+  requestKernelPopupState();
+}
+
+function bindEarnedActionButtons() {
+  for (const button of [
+    document.getElementById("popup-earned-primary"),
+    document.getElementById("popup-earned-secondary"),
+  ]) {
+    if (!button || button.dataset.traceBound === "true") continue;
+    button.dataset.traceBound = "true";
+    button.addEventListener("click", () => {
+      const action = button.dataset.earnedAction;
+      if (action === "prepare") void prepareEarnedPermissionFlow();
+      if (action === "allow_and_add") void allowAccessAndAddEarnedStory();
+      if (action === "reconnect_page") void reloadDisconnectedPage();
+      if (action === "reload_to_verify") void reloadEarnedStory();
+      if (action === "close") window.close();
+      if (action === "check_story") void checkConfirmedStory();
+      if (action === "save_story") void saveStoryFromPopup();
+      if (action === "enable_auto_track") void enableAutomaticSavingFromPopup();
+      if (action === "open_app") openTraceApp(TRACE_IOS_APP_LIBRARY_URL);
+      if (action === "open_connect") openTraceApp(TRACE_IOS_APP_CONNECT_URL);
+      if (action === "check_link") {
+        sendKernelRuntimeMessage({ type: "TRACE_SESSION_ACTION", action: "connect" }, (response) => {
+          if (response?.snapshot) renderKernelSnapshot(response.snapshot);
+          if (response?.snapshot?.state === "connected") requestKernelPopupState();
+        });
+      }
+    });
+  }
+}
+
 function initializeKernelPopup() {
   if (kernelPopupInitialized) return;
   kernelPopupInitialized = true;
+  if (EARNED_PERMISSION_ONBOARDING) bindEarnedActionButtons();
   renderKernelSnapshot({ state: "initializing", reason: "none" });
   for (const actionControl of [
     document.getElementById("popup-cta"),
@@ -1751,8 +2640,35 @@ function initializeKernelPopup() {
   requestKernelSnapshot();
 }
 
+for (const id of ["popup-cta", "popup-session-help"]) {
+  document.getElementById(id)?.addEventListener("click", (event) => {
+    const url = event.currentTarget.dataset.externalUrl;
+    if (!url) return;
+    event.preventDefault();
+    openTraceApp(url);
+  });
+}
+
+function openTraceApp(url) {
+  try {
+    if (ext.tabs?.create) {
+      void extensionPromiseCall(ext.tabs, "create", [{ url }]).catch(() => {
+        window.location.href = url;
+      });
+    } else {
+      window.location.href = url;
+    }
+  } catch {
+    // The app link is optional; the reader can always switch apps themselves.
+  }
+}
+
 function activateKernelPopupAfterEarnedPermission() {
   earnedPreparedContext = null;
+  earnedAwaitingStory = null;
+  // Once the general view owns the popup, later page heartbeats must not
+  // hide the reader view it renders into the shared section.
+  if (kernelPopupInitialized) return;
   delete document.body.dataset.traceEarnedPermission;
   const section = document.getElementById("popup-earned-permission");
   if (section) section.hidden = true;

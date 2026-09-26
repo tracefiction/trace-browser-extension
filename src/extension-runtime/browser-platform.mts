@@ -1,4 +1,13 @@
+export interface ContentPort {
+  readonly name: string;
+  readonly sender?: RuntimeMessageSender;
+  postMessage(message: unknown): void;
+  readonly onMessage: { addListener(listener: (message: unknown) => void): void };
+  readonly onDisconnect: { addListener(listener: () => void): void };
+}
+
 export interface RuntimePort {
+  readonly onConnect?: { addListener(listener: (port: ContentPort) => void): void };
   readonly id?: string;
   readonly lastError?: { readonly message?: string };
   readonly onInstalled?: {
@@ -7,6 +16,7 @@ export interface RuntimePort {
   readonly onMessage: {
     addListener(listener: RuntimeMessageListener): void;
   };
+  readonly getManifest?: () => { readonly content_scripts?: readonly { readonly matches?: readonly string[]; readonly exclude_matches?: readonly string[]; readonly js?: readonly string[] }[] };
   readonly getPlatformInfo?: (...args: unknown[]) => unknown;
   readonly getURL?: (...args: unknown[]) => unknown;
   readonly sendNativeMessage?: (...args: unknown[]) => unknown;
@@ -24,6 +34,7 @@ export interface PermissionsPort {
 }
 
 export interface ScriptingPort {
+  readonly executeScript?: (...args: unknown[]) => unknown;
   readonly getRegisteredContentScripts: (...args: unknown[]) => unknown;
   readonly registerContentScripts: (...args: unknown[]) => unknown;
   readonly unregisterContentScripts: (...args: unknown[]) => unknown;
@@ -32,7 +43,7 @@ export interface ScriptingPort {
 export interface RuntimeMessageSender {
   readonly id?: string;
   readonly url?: string;
-  readonly tab?: { readonly url?: string } | null;
+  readonly tab?: { readonly id?: number; readonly url?: string } | null;
   readonly frameId?: number;
   readonly documentLifecycle?: string;
 }

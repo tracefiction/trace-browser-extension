@@ -76,8 +76,14 @@ export class AccountProjectionApi implements AccountProjectionApiPort {
         : { kind: "invalid_response" };
     }
     const body = await responseJson(result.response);
+    const data = isRecord(body) && isRecord(body.data) ? body.data : null;
+    // The released API omits `workPreferences` when the account has no hidden
+    // works (LibraryOverlayResponseSchema marks it optional). Absent means none;
+    // rejecting it made every refresh "invalid" and blocked all library writes.
     const overlay = copyAccountOverlay(
-      isRecord(body) && isRecord(body.data) ? body.data : null,
+      data === null || Object.hasOwn(data, "workPreferences")
+        ? data
+        : { ...data, workPreferences: {} },
     );
     return overlay === null
       ? { kind: "invalid_response" }

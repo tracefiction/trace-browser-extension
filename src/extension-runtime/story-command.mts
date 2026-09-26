@@ -1,3 +1,4 @@
+import { ReadingActivityCommands } from "./reading-activity.mjs";
 import {
   copyLibraryOverlayEntry,
   type AuthenticatedEffectResult,
@@ -56,6 +57,7 @@ function confirmedStorySave(
 }
 
 export class StoryCommandApi implements StoryCommandApiPort {
+  readonly #readingCommands = new ReadingActivityCommands();
   readonly #fetch: typeof fetch;
   readonly #trackEndpoint: string;
   readonly #overlayEndpoint: string;
@@ -116,7 +118,7 @@ export class StoryCommandApi implements StoryCommandApiPort {
     const response = await this.#request(this.#trackEndpoint, credential, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(command.payload),
+      body: JSON.stringify({ ...command.payload, readingActivity: this.#readingCommands.context(command) }),
     });
     if (response === null) return { kind: "success", value: { kind: "uncertain" } };
     if (response.status === 401 || response.status === 403) return { kind: "auth_rejected" };

@@ -5,6 +5,167 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   // <define:__TRACE_IOS_EARNED_PERMISSION_CONFIG__>
   var define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default = { version: 3, registrationMode: "static", origins: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*", "https://www.fanfiction.net/*", "https://m.fanfiction.net/*"], registrations: [{ id: "trace-archive-automation-v1", matches: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*", "https://www.fanfiction.net/*", "https://m.fanfiction.net/*"], js: ["content-config.js", "trace-finish-qualify.js", "collector.js", "library-overlay-keys.js", "library-overlay.js"], runAt: "document_end", persistAcrossSessions: true, excludeMatches: ["https://archiveofourown.org/users/login*", "https://*.archiveofourown.org/users/login*", "https://archiveofourown.org/users/sign_up*", "https://*.archiveofourown.org/users/sign_up*", "https://archiveofourown.org/users/password*", "https://*.archiveofourown.org/users/password*", "https://archiveofourown.org/users/auth/*", "https://*.archiveofourown.org/users/auth/*", "https://archiveofourown.org/users/logout*", "https://*.archiveofourown.org/users/logout*", "https://archiveofourown.gay/users/login*", "https://*.archiveofourown.gay/users/login*", "https://archiveofourown.gay/users/sign_up*", "https://*.archiveofourown.gay/users/sign_up*", "https://archiveofourown.gay/users/password*", "https://*.archiveofourown.gay/users/password*", "https://archiveofourown.gay/users/auth/*", "https://*.archiveofourown.gay/users/auth/*", "https://archiveofourown.gay/users/logout*", "https://*.archiveofourown.gay/users/logout*", "https://archive.transformativeworks.org/users/login*", "https://archive.transformativeworks.org/users/sign_up*", "https://archive.transformativeworks.org/users/password*", "https://archive.transformativeworks.org/users/auth/*", "https://archive.transformativeworks.org/users/logout*", "https://ao3.org/users/login*", "https://*.ao3.org/users/login*", "https://ao3.org/users/sign_up*", "https://*.ao3.org/users/sign_up*", "https://ao3.org/users/password*", "https://*.ao3.org/users/password*", "https://ao3.org/users/auth/*", "https://*.ao3.org/users/auth/*", "https://ao3.org/users/logout*", "https://*.ao3.org/users/logout*", "https://www.fanfiction.net/login.php*", "https://www.fanfiction.net/signup.php*", "https://www.fanfiction.net/account/login*", "https://www.fanfiction.net/account/signup*", "https://www.fanfiction.net/auth/*", "https://m.fanfiction.net/login.php*", "https://m.fanfiction.net/signup.php*", "https://m.fanfiction.net/account/login*", "https://m.fanfiction.net/account/signup*", "https://m.fanfiction.net/auth/*"] }, { id: "trace-ao3-saved-filters-v1", matches: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*"], js: ["ao3-saved-filters.js"], runAt: "document_end", persistAcrossSessions: true, excludeMatches: ["https://archiveofourown.org/users/login*", "https://*.archiveofourown.org/users/login*", "https://archiveofourown.org/users/sign_up*", "https://*.archiveofourown.org/users/sign_up*", "https://archiveofourown.org/users/password*", "https://*.archiveofourown.org/users/password*", "https://archiveofourown.org/users/auth/*", "https://*.archiveofourown.org/users/auth/*", "https://archiveofourown.org/users/logout*", "https://*.archiveofourown.org/users/logout*", "https://archiveofourown.gay/users/login*", "https://*.archiveofourown.gay/users/login*", "https://archiveofourown.gay/users/sign_up*", "https://*.archiveofourown.gay/users/sign_up*", "https://archiveofourown.gay/users/password*", "https://*.archiveofourown.gay/users/password*", "https://archiveofourown.gay/users/auth/*", "https://*.archiveofourown.gay/users/auth/*", "https://archiveofourown.gay/users/logout*", "https://*.archiveofourown.gay/users/logout*", "https://archive.transformativeworks.org/users/login*", "https://archive.transformativeworks.org/users/sign_up*", "https://archive.transformativeworks.org/users/password*", "https://archive.transformativeworks.org/users/auth/*", "https://archive.transformativeworks.org/users/logout*", "https://ao3.org/users/login*", "https://*.ao3.org/users/login*", "https://ao3.org/users/sign_up*", "https://*.ao3.org/users/sign_up*", "https://ao3.org/users/password*", "https://*.ao3.org/users/password*", "https://ao3.org/users/auth/*", "https://*.ao3.org/users/auth/*", "https://ao3.org/users/logout*", "https://*.ao3.org/users/logout*"] }] };
 
+  // src/extension-runtime/archive-sender.mts
+  function isInactiveSender(sender) {
+    if (typeof sender?.frameId === "number" && sender.frameId !== 0) return true;
+    const lifecycle = typeof sender?.documentLifecycle === "string" ? sender.documentLifecycle.toLowerCase() : "";
+    return lifecycle === "prerender" || lifecycle === "pending_deletion";
+  }
+  function archiveHostKindFromSender(sender) {
+    if (isInactiveSender(sender)) return null;
+    const rawUrl = sender?.tab?.url ?? sender?.url;
+    if (typeof rawUrl !== "string") return null;
+    try {
+      const url = new URL(rawUrl);
+      if (url.protocol !== "https:") return null;
+      const host = url.hostname.toLowerCase();
+      if (host === "archiveofourown.org" || host.endsWith(".archiveofourown.org") || host === "archiveofourown.gay" || host.endsWith(".archiveofourown.gay") || host === "archive.transformativeworks.org" || host === "ao3.org" || host.endsWith(".ao3.org")) {
+        return "ao3";
+      }
+      if (host === "www.fanfiction.net" || host === "m.fanfiction.net") {
+        return "ffn";
+      }
+    } catch {
+    }
+    return null;
+  }
+  function isBlockedArchivePath(rawUrl, hostKind2) {
+    if (typeof rawUrl !== "string") return true;
+    try {
+      const pathname = new URL(rawUrl).pathname;
+      return hostKind2 === "ao3" ? /^\/users\/(?:login|sign_up|password|auth\/|logout)/i.test(pathname) : /^\/(?:login\.php|signup\.php|account\/(?:login|signup)|auth\/)/i.test(pathname);
+    } catch {
+      return true;
+    }
+  }
+  function workKeyFromArchiveUrl(rawUrl, expectedHost) {
+    if (typeof rawUrl !== "string" || rawUrl.length > 4096) return null;
+    try {
+      const url = new URL(rawUrl);
+      if (url.protocol !== "https:") return null;
+      const host = url.hostname.toLowerCase();
+      if (expectedHost === "ao3") {
+        const supported = host === "archiveofourown.org" || host.endsWith(".archiveofourown.org") || host === "archiveofourown.gay" || host.endsWith(".archiveofourown.gay") || host === "archive.transformativeworks.org" || host === "ao3.org" || host.endsWith(".ao3.org");
+        if (!supported) return null;
+        const match2 = url.pathname.match(/^\/works\/([1-9][0-9]{0,19})(?:\/|$)/);
+        return match2?.[1] ? `ao3:${match2[1]}` : null;
+      }
+      if (host !== "www.fanfiction.net" && host !== "m.fanfiction.net") return null;
+      const match = url.pathname.match(/^\/s\/([1-9][0-9]{0,19})(?:\/|$)/);
+      return match?.[1] ? `ffn:${match[1]}` : null;
+    } catch {
+      return null;
+    }
+  }
+  function sourceMatchesArchiveHost(source, hostKind2) {
+    if (typeof source !== "string") return false;
+    const normalized = source.trim().toLowerCase();
+    return hostKind2 === "ao3" ? normalized === "ao3" || normalized === "archiveofourown.org" || normalized === "archiveofourown.gay" || normalized === "archive.transformativeworks.org" : normalized === "ffn" || normalized === "fanfiction.net";
+  }
+
+  // src/extension-runtime/browser-platform.mts
+  var BrowserStorage = class {
+    #area;
+    #runtime;
+    #mode;
+    constructor(area, runtime, mode) {
+      this.#area = area;
+      this.#runtime = runtime;
+      this.#mode = mode;
+    }
+    get(keys) {
+      return this.#call("get", [keys]);
+    }
+    set(patch) {
+      return this.#call("set", [patch]);
+    }
+    remove(keys) {
+      return this.#call("remove", [keys]);
+    }
+    #call(method, args) {
+      if (this.#mode === "promise") {
+        try {
+          return Promise.resolve(this.#area[method](...args));
+        } catch (error) {
+          return Promise.reject(error);
+        }
+      }
+      return new Promise((resolve, reject) => {
+        try {
+          this.#area[method](...args, (value) => {
+            const message = this.#runtime.lastError?.message;
+            if (message) reject(new Error(message));
+            else resolve(value);
+          });
+        } catch (error) {
+          reject(error);
+        }
+      });
+    }
+  };
+  function extensionCall(target, method, args, runtime, mode) {
+    if (mode === "promise") {
+      try {
+        return Promise.resolve(target[method](...args));
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
+    return new Promise((resolve, reject) => {
+      try {
+        target[method](...args, (value) => {
+          const message = runtime.lastError?.message;
+          if (message) reject(new Error(message));
+          else resolve(value);
+        });
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  // src/extension-runtime/archive-recovery.mts
+  function matches(pattern, url) {
+    const match = /^https:\/\/(\*\.)?([^/]+)(\/.*)$/.exec(pattern);
+    if (!match || url.protocol !== "https:") return false;
+    if (url.hostname !== match[2] && !(match[1] && url.hostname.endsWith(`.${match[2]}`))) return false;
+    const path = match[3].split("*").map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*");
+    return new RegExp(`^${path}$`).test(url.pathname + url.search);
+  }
+  function installArchiveRecovery(environment) {
+    const { runtime, tabs, permissions, scripting, mode } = environment;
+    const call = (target, method, args) => extensionCall(target, method, args, runtime, mode);
+    let pending = null;
+    const recover = () => {
+      if (pending) return pending;
+      pending = (async () => {
+        if (!scripting?.executeScript || !permissions?.contains || !runtime.getManifest) return;
+        const scripts = runtime.getManifest().content_scripts ?? [];
+        const openTabs = await call(tabs, "query", [{}]);
+        await Promise.all(openTabs.map(async (tab) => {
+          try {
+            if (!Number.isInteger(tab.id) || !tab.url) return;
+            const host = archiveHostKindFromSender({ url: tab.url });
+            if (!host || isBlockedArchivePath(tab.url, host)) return;
+            const url = new URL(tab.url);
+            const files = scripts.filter((script) => script.matches?.some((pattern) => matches(pattern, url)) && !script.exclude_matches?.some((pattern) => matches(pattern, url))).flatMap((script) => script.js ?? []);
+            if (!files.length || !await call(permissions, "contains", [{ origins: [`${url.origin}/*`] }])) return;
+            await call(scripting, "executeScript", [{ target: { tabId: tab.id, frameIds: [0] }, files: [...new Set(files)] }]);
+          } catch {
+          }
+        }));
+      })().catch(() => void 0).finally(() => {
+        pending = null;
+      });
+      return pending;
+    };
+    runtime.onInstalled?.addListener((details) => {
+      if (details.reason === "install" || details.reason === "update") void recover();
+    });
+    void recover();
+    return recover;
+  }
+
   // src/extension-core/archive-readiness.mts
   var ARCHIVE_RUN_THROTTLE_MS = 5 * 60 * 1e3;
   var SYSTEM_CLOCK = Object.freeze({
@@ -654,7 +815,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#ports = ports;
     }
     execute(command) {
-      return this.#withLock(() => this.#execute(command));
+      const ownedCommand = { ...command };
+      return this.#withLock(() => this.#execute(ownedCommand));
     }
     async #execute(command) {
       const scope2 = this.#ports.session.publicationScope();
@@ -2263,7 +2425,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#ports = ports;
     }
     execute(command) {
-      return this.#withLock(() => this.#execute(command));
+      const ownedCommand = { ...command, payload: { ...command.payload } };
+      return this.#withLock(() => this.#execute(ownedCommand));
     }
     async #execute(command) {
       const scope2 = this.#ports.session.publicationScope();
@@ -2283,9 +2446,17 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         if (lookup.value.kind === "invalid_response") return failure3("invalid_response");
         if (lookup.value.kind === "unavailable") return failure3("unavailable");
       }
-      let mutation = await this.#ports.session.executeAuthenticated(
-        (credential) => this.#ports.api.track(credential, command)
-      );
+      const trackCommand = { ...command };
+      const track = (credential) => {
+        const { attempt_id: ignored, ...payload } = command.payload;
+        const id = context?.setupAttemptID;
+        const expiresAt = context?.setupAttemptExpiresAt;
+        const now = this.#ports.clock.now();
+        const valid = sameAccountScope(this.#ports.session.publicationScope(), scope2) && typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id) && typeof expiresAt === "number" && Number.isFinite(expiresAt) && expiresAt > now && expiresAt - now <= 864e5;
+        trackCommand.payload = { ...payload, ...valid ? { attempt_id: id.toLowerCase() } : {} };
+        return this.#ports.api.track(credential, trackCommand);
+      };
+      let mutation = await this.#ports.session.executeAuthenticated(track);
       if (mutation.kind === "auth_rejected" && mutation.recovery === "connected") {
         if (command.intent === "ensure_saved") {
           const lookup = await this.#lookup(command.workKey, false);
@@ -2296,9 +2467,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           if (lookup.value.kind === "invalid_response") return failure3("invalid_response");
           if (lookup.value.kind === "unavailable") return failure3("unavailable");
         }
-        mutation = await this.#ports.session.executeAuthenticated(
-          (credential) => this.#ports.api.track(credential, command)
-        );
+        mutation = await this.#ports.session.executeAuthenticated(track);
       }
       if (mutation.kind !== "published") return executionFailure3(mutation);
       if (mutation.value.kind === "confirmed") {
@@ -2573,67 +2742,6 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return cached;
     }
   };
-
-  // src/extension-runtime/browser-platform.mts
-  var BrowserStorage = class {
-    #area;
-    #runtime;
-    #mode;
-    constructor(area, runtime, mode) {
-      this.#area = area;
-      this.#runtime = runtime;
-      this.#mode = mode;
-    }
-    get(keys) {
-      return this.#call("get", [keys]);
-    }
-    set(patch) {
-      return this.#call("set", [patch]);
-    }
-    remove(keys) {
-      return this.#call("remove", [keys]);
-    }
-    #call(method, args) {
-      if (this.#mode === "promise") {
-        try {
-          return Promise.resolve(this.#area[method](...args));
-        } catch (error) {
-          return Promise.reject(error);
-        }
-      }
-      return new Promise((resolve, reject) => {
-        try {
-          this.#area[method](...args, (value) => {
-            const message = this.#runtime.lastError?.message;
-            if (message) reject(new Error(message));
-            else resolve(value);
-          });
-        } catch (error) {
-          reject(error);
-        }
-      });
-    }
-  };
-  function extensionCall(target, method, args, runtime, mode) {
-    if (mode === "promise") {
-      try {
-        return Promise.resolve(target[method](...args));
-      } catch (error) {
-        return Promise.reject(error);
-      }
-    }
-    return new Promise((resolve, reject) => {
-      try {
-        target[method](...args, (value) => {
-          const message = runtime.lastError?.message;
-          if (message) reject(new Error(message));
-          else resolve(value);
-        });
-      } catch (error) {
-        reject(error);
-      }
-    });
-  }
 
   // src/extension-runtime/browser-adapters.mts
   var LEGACY_SESSION_ENVELOPE_KEY = "traceSessionEnvelopeV1";
@@ -3405,63 +3513,25 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
   };
 
-  // src/extension-runtime/archive-sender.mts
-  function isInactiveSender(sender) {
-    if (typeof sender?.frameId === "number" && sender.frameId !== 0) return true;
-    const lifecycle = typeof sender?.documentLifecycle === "string" ? sender.documentLifecycle.toLowerCase() : "";
-    return lifecycle === "prerender" || lifecycle === "pending_deletion";
-  }
-  function archiveHostKindFromSender(sender) {
-    if (isInactiveSender(sender)) return null;
-    const rawUrl = sender?.tab?.url ?? sender?.url;
-    if (typeof rawUrl !== "string") return null;
-    try {
-      const url = new URL(rawUrl);
-      if (url.protocol !== "https:") return null;
-      const host = url.hostname.toLowerCase();
-      if (host === "archiveofourown.org" || host.endsWith(".archiveofourown.org") || host === "archiveofourown.gay" || host.endsWith(".archiveofourown.gay") || host === "archive.transformativeworks.org" || host === "ao3.org" || host.endsWith(".ao3.org")) {
-        return "ao3";
-      }
-      if (host === "www.fanfiction.net" || host === "m.fanfiction.net") {
-        return "ffn";
-      }
-    } catch {
+  // src/extension-runtime/reading-activity.mts
+  var ReadingActivityCommands = class {
+    #contexts = /* @__PURE__ */ new WeakMap();
+    context(command, operationId) {
+      const previous = this.#contexts.get(command);
+      if (previous) return previous;
+      const now = /* @__PURE__ */ new Date();
+      const offset = -now.getTimezoneOffset();
+      const absolute = Math.abs(offset);
+      const context = {
+        operationId: operationId ?? crypto.randomUUID(),
+        occurredAt: now.toISOString(),
+        calendarDate: new Date(now.getTime() + offset * 6e4).toISOString().slice(0, 10),
+        timeZone: { kind: "OFFSET", value: `${offset < 0 ? "-" : "+"}${String(Math.floor(absolute / 60)).padStart(2, "0")}:${String(absolute % 60).padStart(2, "0")}` }
+      };
+      this.#contexts.set(command, context);
+      return context;
     }
-    return null;
-  }
-  function isBlockedArchivePath(rawUrl, hostKind2) {
-    if (typeof rawUrl !== "string") return true;
-    try {
-      const pathname = new URL(rawUrl).pathname;
-      return hostKind2 === "ao3" ? /^\/users\/(?:login|sign_up|password|auth\/|logout)/i.test(pathname) : /^\/(?:login\.php|signup\.php|account\/(?:login|signup)|auth\/)/i.test(pathname);
-    } catch {
-      return true;
-    }
-  }
-  function workKeyFromArchiveUrl(rawUrl, expectedHost) {
-    if (typeof rawUrl !== "string" || rawUrl.length > 4096) return null;
-    try {
-      const url = new URL(rawUrl);
-      if (url.protocol !== "https:") return null;
-      const host = url.hostname.toLowerCase();
-      if (expectedHost === "ao3") {
-        const supported = host === "archiveofourown.org" || host.endsWith(".archiveofourown.org") || host === "archiveofourown.gay" || host.endsWith(".archiveofourown.gay") || host === "archive.transformativeworks.org" || host === "ao3.org" || host.endsWith(".ao3.org");
-        if (!supported) return null;
-        const match2 = url.pathname.match(/^\/works\/([1-9][0-9]{0,19})(?:\/|$)/);
-        return match2?.[1] ? `ao3:${match2[1]}` : null;
-      }
-      if (host !== "www.fanfiction.net" && host !== "m.fanfiction.net") return null;
-      const match = url.pathname.match(/^\/s\/([1-9][0-9]{0,19})(?:\/|$)/);
-      return match?.[1] ? `ffn:${match[1]}` : null;
-    } catch {
-      return null;
-    }
-  }
-  function sourceMatchesArchiveHost(source, hostKind2) {
-    if (typeof source !== "string") return false;
-    const normalized = source.trim().toLowerCase();
-    return hostKind2 === "ao3" ? normalized === "ao3" || normalized === "archiveofourown.org" || normalized === "archiveofourown.gay" || normalized === "archive.transformativeworks.org" : normalized === "ffn" || normalized === "fanfiction.net";
-  }
+  };
 
   // src/extension-runtime/story-command.mts
   var UUID_PATTERN4 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -3489,6 +3559,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     });
   }
   var StoryCommandApi = class {
+    #readingCommands = new ReadingActivityCommands();
     #fetch;
     #trackEndpoint;
     #overlayEndpoint;
@@ -3535,7 +3606,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       const response = await this.#request(this.#trackEndpoint, credential, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(command.payload)
+        body: JSON.stringify({ ...command.payload, readingActivity: this.#readingCommands.context(command) })
       });
       if (response === null) return { kind: "success", value: { kind: "uncertain" } };
       if (response.status === 401 || response.status === 403) return { kind: "auth_rejected" };
@@ -3649,8 +3720,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         return result.response.status === 429 || result.response.status >= 500 ? { kind: "unavailable" } : { kind: "invalid_response" };
       }
       const body = await responseJson(result.response);
+      const data = isRecord7(body) && isRecord7(body.data) ? body.data : null;
       const overlay = copyAccountOverlay(
-        isRecord7(body) && isRecord7(body.data) ? body.data : null
+        data === null || Object.hasOwn(data, "workPreferences") ? data : { ...data, workPreferences: {} }
       );
       return overlay === null ? { kind: "invalid_response" } : { kind: "value", value: overlay };
     }
@@ -3742,6 +3814,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     return typeof value === "string" && value.length <= 64 && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
   }
   var LibraryCommandApi = class {
+    #readingCommands = new ReadingActivityCommands();
     #fetch;
     #libraryEndpoint;
     #preferenceEndpoint;
@@ -3800,6 +3873,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           state: command.state,
           ...command.state === "resolved" ? {
             operationId: command.operationId,
+            readingActivity: (() => {
+              const { operationId: _, ...calendar } = this.#readingCommands.context(command, command.operationId);
+              return calendar;
+            })(),
             workStatus: command.workStatus,
             resolutionSource: command.resolutionSource
           } : {}
@@ -5573,6 +5650,122 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
   };
 
+  // src/extension-runtime/popup-page-relay.mts
+  var POPUP_PAGE_PORT = "trace-popup-page-v1";
+  var POPUP_PAGE_RELAY = "TRACE_POPUP_PAGE_RELAY";
+  var FAILURE = Object.freeze({ ok: false, error: "page_unavailable" });
+  var COMMANDS = /* @__PURE__ */ new Set(["TRACE_STORY_IDENTITY_GET", "TRACE_SAVED_NOTE_DISMISS", "TRACE_POPUP_QUICK_ADD", "TRACE_POPUP_SET_READER_STATUS", "TRACE_SCHEDULE_AUTO_TRACK"]);
+  var record2 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+  function pageUrl(value) {
+    try {
+      const url = new URL(String(value));
+      url.hash = "";
+      return url.href;
+    } catch {
+      return null;
+    }
+  }
+  var PopupPageRelay = class {
+    #pages = /* @__PURE__ */ new Map();
+    #options;
+    #sequence = 0;
+    constructor(options) {
+      this.#options = options;
+      options.runtime.onConnect?.addListener((port) => this.#connect(port));
+    }
+    accepts(message, sender) {
+      return record2(message) && message.type === POPUP_PAGE_RELAY && typeof this.#options.runtime.id === "string" && sender?.tab == null && sender?.id === this.#options.runtime.id && isPopupSender(sender, this.#options.runtime.id);
+    }
+    async request(tabId, command) {
+      if (!Number.isInteger(tabId) || !record2(command) || !COMMANDS.has(String(command.type))) return FAILURE;
+      const tab = await this.#activeTab();
+      const page = this.#pages.get(tabId);
+      if (!page || tab?.id !== tabId || pageUrl(tab?.url) !== page.url || page.pending.size >= 8) return FAILURE;
+      const id = ++this.#sequence;
+      const scope2 = this.#options.scope();
+      if ((command.type === "TRACE_POPUP_QUICK_ADD" || command.type === "TRACE_POPUP_SET_READER_STATUS") && scope2 === null) return FAILURE;
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => finish(FAILURE), this.#options.timeoutMs ?? (command.type === "TRACE_STORY_IDENTITY_GET" ? 1e3 : 22e3));
+        const finish = (value) => {
+          clearTimeout(timer);
+          page.pending.delete(id);
+          resolve(value);
+        };
+        page.pending.set(id, { command, scope: scope2, finish, executed: false });
+        try {
+          page.port.postMessage({ kind: "request", id, command });
+        } catch {
+          finish(FAILURE);
+        }
+      });
+    }
+    #connect(port) {
+      const sender = port.sender;
+      const tabId = sender?.tab?.id;
+      const host = archiveHostKindFromSender(sender);
+      const url = pageUrl(sender?.url);
+      if (port.name !== POPUP_PAGE_PORT || typeof this.#options.runtime.id !== "string" || sender?.id !== this.#options.runtime.id || sender?.frameId !== 0 || !Number.isInteger(tabId) || host === null || url === null || pageUrl(sender?.tab?.url) !== url || isBlockedArchivePath(url, host)) return;
+      const previous = this.#pages.get(tabId);
+      if (previous) this.#remove(tabId, previous);
+      const page = { port, sender, url, pending: /* @__PURE__ */ new Map() };
+      this.#pages.set(tabId, page);
+      port.onDisconnect.addListener(() => this.#remove(tabId, page));
+      port.onMessage.addListener((message) => {
+        void this.#receive(tabId, page, message).catch(() => this.#remove(tabId, page));
+      });
+    }
+    #remove(tabId, page) {
+      if (this.#pages.get(tabId) === page) this.#pages.delete(tabId);
+      for (const pending of page.pending.values()) pending.finish(FAILURE);
+    }
+    async #receive(tabId, page, message) {
+      if (!record2(message) || typeof message.id !== "number") return;
+      const pending = page.pending.get(message.id);
+      if (!pending) return;
+      const tab = await this.#activeTab();
+      if (page.pending.get(message.id) !== pending) return;
+      const scope2 = this.#options.scope();
+      if (this.#pages.get(tabId) !== page || tab?.id !== tabId || pageUrl(tab?.url) !== page.url || !(pending.scope === null && scope2 === null) && !sameAccountScope(pending.scope, scope2)) {
+        pending.finish(FAILURE);
+        return;
+      }
+      if (message.kind === "command") {
+        const expected = pending.command.type === "TRACE_POPUP_QUICK_ADD" ? "TRACE_QUICK_ADD" : pending.command.type === "TRACE_POPUP_SET_READER_STATUS" ? "TRACE_SET_READER_STATUS" : null;
+        if (pending.executed || !expected || !record2(message.command) || message.command.type !== expected || !pending.scope) {
+          pending.finish(FAILURE);
+          return;
+        }
+        pending.executed = true;
+        const response2 = await this.#options.execute(message.command, page.sender, pending.scope);
+        if (!page.pending.has(message.id)) return;
+        if (!sameAccountScope(pending.scope, this.#options.scope())) {
+          pending.finish(FAILURE);
+          return;
+        }
+        page.port.postMessage({ kind: "commandResult", id: message.id, response: this.#publicResult(response2) });
+        return;
+      }
+      if (message.kind !== "response") return;
+      const response = message.response;
+      if (pending.command.type === "TRACE_STORY_IDENTITY_GET" && record2(response)) {
+        pending.finish(response.ok === true && typeof response.title === "string" && ["AO3", "FanFiction.net"].includes(String(response.site)) ? { ok: true, title: response.title.slice(0, 300), author: typeof response.author === "string" ? response.author.slice(0, 200) : null, site: response.site } : { ok: false, unavailable: response.unavailable === true });
+      } else pending.finish(this.#publicResult(response));
+    }
+    #publicResult(response) {
+      if (!record2(response)) return FAILURE;
+      if (response.ok === true) return { ok: true };
+      const allowed = ["not_authenticated", "auth_expired", "free_limit_reached", "rate_limited", "unavailable", "save_pending", "website_access_incomplete"];
+      return { ok: false, error: allowed.includes(String(response.error)) ? response.error : "page_unavailable" };
+    }
+    async #activeTab() {
+      try {
+        return (await extensionCall(this.#options.tabs, "query", [{ active: true, currentWindow: true }], this.#options.runtime, this.#options.mode))[0] ?? null;
+      } catch {
+        return null;
+      }
+    }
+  };
+
   // src/extension-runtime/controller.mts
   var DEGRADED_STORAGE_SNAPSHOT = Object.freeze({
     state: "degraded",
@@ -5632,6 +5825,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #storage;
     #runtime;
     #tabs;
+    #popupRelay;
     #storageMode;
     #webOrigin;
     #retryClock;
@@ -5667,6 +5861,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#archiveReadinessStatus = environment.archiveReadinessStatus ?? new BrowserArchiveReadinessStatus(storage);
       this.#runtime = environment.runtime;
       this.#tabs = environment.tabs;
+      this.#popupRelay = new PopupPageRelay({
+        runtime: environment.runtime,
+        tabs: environment.tabs,
+        mode: environment.storageMode,
+        scope: () => this.#service.publicationScope(),
+        execute: (message, sender, scope2) => this.#executeRelayedCommand(message, sender, scope2)
+      });
       this.#storageMode = environment.storageMode;
       this.#webOrigin = new URL(environment.webOrigin).origin;
       this.#database = environment.privateDatabase ?? new BrowserPrivateRecordDatabase(
@@ -5806,6 +6007,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     async handle(message, sender) {
       if (!isRecord18(message) || typeof message.type !== "string") return null;
+      if (message.type === POPUP_PAGE_RELAY) {
+        if (this.#mode !== "kernel" || !this.#popupRelay.accepts(message, sender)) return null;
+        await this.start();
+        await this.#prepareNativeAuthority();
+        return await this.#popupRelay.request(message.tabId, message.command);
+      }
       if (!Object.values(SESSION_MESSAGE_TYPES).includes(message.type)) return null;
       switch (message.type) {
         case SESSION_MESSAGE_TYPES.snapshot:
@@ -6009,6 +6216,21 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         await this.#metadataContributions.execute(command),
         command
       );
+    }
+    async #executeRelayedCommand(message, sender, scope2) {
+      await this.#prepareNativeAuthority();
+      return this.#withAccountTransitionLock(async () => {
+        if (!isRecord18(message) || !sameAccountScope(scope2, this.#service.publicationScope())) return null;
+        if (message.type === SESSION_MESSAGE_TYPES.setReaderStatus) {
+          const command = libraryMutationCommandFromMessage(message, sender);
+          return command === null ? null : this.#libraryCommandResponse(await this.#libraryMutations.execute(command));
+        }
+        if (message.type === SESSION_MESSAGE_TYPES.quickAdd) {
+          const command = storyTrackCommandFromMessage(message, sender);
+          return command === null ? null : this.#commandResponse(await this.#executeStoryCommand(command), void 0, command);
+        }
+        return null;
+      });
     }
     async #handleLibraryMessage(message, sender) {
       const finishCommand = message.type === SESSION_MESSAGE_TYPES.finishQualification ? finishQualificationCommandFromMessage(message, sender) : null;
@@ -6543,11 +6765,31 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       });
     }
     async #popupState() {
-      const [accountData, preferences, activeTab] = await Promise.all([
+      const [accountData, preferences, activeBrowserTab] = await Promise.all([
         this.#projection.read(),
         this.#storage.get(POPUP_PREFERENCE_KEYS).catch(() => ({})),
-        this.#activeTabContext()
+        this.#activeTab()
       ]);
+      const activeTabUrl = activeBrowserTab?.url;
+      const activeTab = classifyActiveTabUrl(activeTabUrl, this.#webOrigin);
+      const activeWorkKey = this.#storyWorkKey(activeTabUrl);
+      const connected = this.snapshot().state === "connected";
+      const activeWork = activeWorkKey === null || !connected ? null : publicWorkState(accountData, activeWorkKey);
+      let activeStoryUnavailable = false;
+      const activeTabId = activeBrowserTab?.id;
+      if (connected && activeTab.kind === "supported_story" && activeWork === null && typeof activeTabId === "number" && Number.isInteger(activeTabId)) {
+        try {
+          let timeoutId;
+          const response = await Promise.race([
+            this.#popupRelay.request(activeTabId, { type: "TRACE_STORY_IDENTITY_GET" }),
+            new Promise((resolve) => {
+              timeoutId = globalThis.setTimeout(() => resolve(null), 1e3);
+            })
+          ]).finally(() => globalThis.clearTimeout(timeoutId));
+          activeStoryUnavailable = isRecord18(response) && response.ok === false && response.unavailable === true;
+        } catch {
+        }
+      }
       return Object.freeze({
         ok: true,
         authState: toPublicSessionSnapshot(this.snapshot()),
@@ -6559,16 +6801,26 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         autoTrackEnabled: preferences.prefAutoTrackEnabled !== false,
         libraryInlayEnabled: preferences.prefLibraryInlayEnabled !== false,
         ao3SavedFiltersEnabled: preferences.prefAo3SavedFiltersEnabled !== false,
-        metadataImproveEnabled: preferences.prefMetadataImproveEnabled !== false
+        metadataImproveEnabled: preferences.prefMetadataImproveEnabled !== false,
+        activeWork,
+        activeStoryUnavailable
       });
     }
-    async #activeTabContext() {
+    async #activeTab() {
       try {
         const tabs = await this.#callTabsQuery({ active: true, currentWindow: true });
-        return classifyActiveTabUrl(tabs[0]?.url, this.#webOrigin);
+        return tabs[0] ?? null;
       } catch {
-        return Object.freeze({ kind: "unknown" });
+        return null;
       }
+    }
+    /** Work key for a supported, non-credential story URL; null otherwise. */
+    #storyWorkKey(rawUrl) {
+      if (rawUrl === void 0) return null;
+      const host = archiveHostKindFromSender({ url: rawUrl });
+      if (host === null || isBlockedArchivePath(rawUrl, host)) return null;
+      const workKey = workKeyFromArchiveUrl(rawUrl, host);
+      return workKey !== null && WORK_KEY_PATTERN5.test(workKey) ? workKey : null;
     }
     #callTabsQuery(query) {
       if (this.#storageMode === "promise") {
@@ -6636,7 +6888,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       );
     }
     environment.runtime.onMessage.addListener((message, sender, sendResponse) => {
-      if (!isRecord18(message) || !Object.values(SESSION_MESSAGE_TYPES).includes(message.type)) {
+      if (!isRecord18(message) || message.type !== POPUP_PAGE_RELAY && !Object.values(SESSION_MESSAGE_TYPES).includes(message.type)) {
         return false;
       }
       void controller.handle(message, sender).then(
@@ -7004,6 +7256,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       new BrowserStorage(extension.storage.local, extension.runtime, storageMode)
     );
     if (true) {
+      installArchiveRecovery({ runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, scripting: extension.scripting, mode: storageMode });
       installTraceFirstInstallActivation({
         runtime: extension.runtime,
         tabs: extension.tabs,

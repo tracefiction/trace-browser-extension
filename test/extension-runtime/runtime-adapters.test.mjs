@@ -1438,12 +1438,98 @@ test("popup state is extension-page-only and contains sanitized summary plus loc
     site: "ffn",
     canImport: true,
   });
+  assert.equal(popup.activeWork, null, "no confirmed entry means no saved story");
   assert.equal(JSON.stringify(popup).includes("current-token"), false);
   assert.equal(JSON.stringify(popup).includes("account-a"), false);
   assert.equal(await controller.handle(
     { type: "TRACE_POPUP_GET_STATE" },
     archiveSender,
   ), null);
+});
+
+test("popup state names only the active tab's own confirmed story", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000123";
+  let activeUrl = "https://www.fanfiction.net/s/7038840/3/Story";
+  let unavailable = false;
+  let connectPage;
+  const databaseFactory = new IDBFactory();
+  const privateDatabase = await seedPrivateSession(databaseFactory, {
+    version: 1,
+    epoch: 1,
+    desired: "connected",
+    accountId: "account-a",
+    credentialRef: "credential-a",
+  }, {
+    version: 1,
+    entries: { "credential-a": "current-token" },
+  });
+  const controller = installTestRuntime({
+    mode: "kernel",
+    databaseFactory,
+    privateDatabase,
+    runtime: { id: "trace-extension", onMessage: { addListener() {} }, onConnect: { addListener(fn) { connectPage = fn; } } },
+    tabs: {
+      async query() { return [{ id: 7, url: activeUrl }]; },
+      async sendMessage() { throw new Error("broken Safari tab route"); },
+    },
+    storageArea: new PromiseStorageArea({}),
+    storageMode: "promise",
+    fetch: async (url) => {
+      if (url.endsWith("/api/extension/account")) {
+        return new Response(JSON.stringify({
+          account_id: "account-a",
+          pro: false,
+          library_count: 1,
+          first_story_completed_at: null,
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        success: true,
+        data: {
+          entries: {
+            "ffn:7038840": {
+              status: "PLANNING",
+              readerStatus: "PLANNING",
+              canonicalReaderStatus: "SAVED",
+              entryId,
+            },
+          },
+          workPreferences: {},
+          syncVersion: "2026-07-20T12:00:00.000Z",
+        },
+      }), { status: 200 });
+    },
+    apiBase: "https://api.tracefiction.com",
+    webOrigin: "https://www.tracefiction.com",
+    randomId: () => "id",
+  });
+  await controller.start();
+  const popupSender = { id: "trace-extension", url: "moz-extension://trace-extension/popup.html" };
+
+  const matching = await controller.handle({ type: "TRACE_POPUP_GET_STATE" }, popupSender);
+  assert.equal(matching.activeWork?.status, "saved");
+  assert.equal(matching.activeWork?.workKey, "ffn:7038840");
+  assert.equal(matching.activeWork?.entryId, entryId);
+  assert.equal(matching.activeStoryUnavailable, false);
+  assert.equal(JSON.stringify(matching).includes("fanfiction.net/s/"), false, "no URL leaves the runtime");
+
+  activeUrl = "https://www.fanfiction.net/s/1234567/1/Other";
+  unavailable = true;
+  let receive;
+  connectPage({ name: "trace-popup-page-v1",
+    sender: { id: "trace-extension", frameId: 0, tab: { id: 7, url: activeUrl }, url: activeUrl },
+    onDisconnect: { addListener() {} }, onMessage: { addListener(fn) { receive = fn; } },
+    postMessage(request) { receive({ kind: "response", id: request.id, response: { ok: false, unavailable } }); },
+  });
+  const other = await controller.handle({ type: "TRACE_POPUP_GET_STATE" }, popupSender);
+  assert.equal(other.activeWork, null, "another story's entry is never reused");
+  assert.equal(other.activeStoryUnavailable, true, "a page without story text is not pending a save");
+  assert.equal(JSON.stringify(other).includes("fanfiction.net/s/"), false);
+
+  activeUrl = "https://www.fanfiction.net/login.php";
+  const credentialPage = await controller.handle({ type: "TRACE_POPUP_GET_STATE" }, popupSender);
+  assert.equal(credentialPage.activeWork, null);
+  assert.equal(credentialPage.activeStoryUnavailable, false);
 });
 
 test("Connect and save does not claim a command handoff when acquisition fails", async () => {

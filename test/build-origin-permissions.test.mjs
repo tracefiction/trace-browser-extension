@@ -30,15 +30,15 @@ test("remote development builds declare only their active Trace origins", () => 
     browserHostPermissions,
     syncMatches,
   } = configuredOriginPermissions({
-    traceApiBase: "https://ff-app-development.up.railway.app",
-    traceWebOrigin: "https://trace-git-dev-zacs-projects-378417c9.vercel.app",
+    traceApiBase: "https://api.development.example.test",
+    traceWebOrigin: "https://web.development.example.test",
   });
 
-  assert.equal(safariHostPermissions.includes("https://ff-app-development.up.railway.app/*"), false);
-  assert.ok(safariHostPermissions.includes("https://trace-git-dev-zacs-projects-378417c9.vercel.app/*"));
-  assert.ok(browserHostPermissions.includes("https://ff-app-development.up.railway.app/*"));
-  assert.ok(browserHostPermissions.includes("https://trace-git-dev-zacs-projects-378417c9.vercel.app/*"));
-  assert.deepEqual(syncMatches, ["https://trace-git-dev-zacs-projects-378417c9.vercel.app/*"]);
+  assert.equal(safariHostPermissions.includes("https://api.development.example.test/*"), false);
+  assert.ok(safariHostPermissions.includes("https://web.development.example.test/*"));
+  assert.ok(browserHostPermissions.includes("https://api.development.example.test/*"));
+  assert.ok(browserHostPermissions.includes("https://web.development.example.test/*"));
+  assert.deepEqual(syncMatches, ["https://web.development.example.test/*"]);
   assert.equal(safariHostPermissions.includes("https://tracefiction.com/*"), false);
   assert.equal(safariHostPermissions.includes("https://www.tracefiction.com/*"), false);
   assert.equal(safariHostPermissions.includes("https://ao3.org/*"), false);

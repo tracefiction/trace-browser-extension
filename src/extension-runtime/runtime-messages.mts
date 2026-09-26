@@ -153,6 +153,14 @@ export interface PopupStateResponse {
   readonly libraryInlayEnabled: boolean;
   readonly ao3SavedFiltersEnabled: boolean;
   readonly metadataImproveEnabled: boolean;
+  /**
+   * The current account's confirmed record for the story in the active tab,
+   * read from the local projection. Null when the tab is not a supported story
+   * or the story has no confirmed entry. Never inferred from a pending write.
+   */
+  readonly activeWork: PublicWorkState | null;
+  /** True only when the active story page explicitly reports that no readable story exists. */
+  readonly activeStoryUnavailable: boolean;
 }
 
 export interface ExtensionStatusResponse {

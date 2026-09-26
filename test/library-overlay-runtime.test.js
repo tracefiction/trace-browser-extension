@@ -57,6 +57,7 @@ async function renderOverlayListing({
   scopeCache = true,
   sessionMode = "legacy",
   earnedPermissionComplete,
+  userAgent,
 }) {
   const keysSrc = fs.readFileSync(KEYS_PATH, "utf8");
   const overlaySrc = fs.readFileSync(OVERLAY_PATH, "utf8");
@@ -67,6 +68,9 @@ async function renderOverlayListing({
   });
 
   const { window } = dom;
+  if (userAgent) {
+    Object.defineProperty(window.navigator, "userAgent", { value: userAgent, configurable: true });
+  }
   const storageChangeListeners = [];
   const runtimeMessages = [];
   const storageState = {
@@ -754,7 +758,7 @@ test("library-overlay renders display-safe private note preview and dotted tag a
   const privateTags = Array.from(surface.querySelectorAll(".x-utag"));
   assert.equal(privateTags.length, 4);
   for (const tag of privateTags) {
-    assert.match(tag.getAttribute("style") || "", /border-bottom:\s*1px dotted/i);
+    assert.doesNotMatch(tag.getAttribute("style") || "", /border-bottom:\s*1px dotted/i);
     assert.match(tag.getAttribute("style") || "", /background:\s*transparent/i);
     assert.match(tag.getAttribute("style") || "", /padding:\s*2px 0px/i);
     assert.match(tag.getAttribute("style") || "", /max-width:\s*150px/i);
@@ -1672,7 +1676,7 @@ test("library-overlay unknown signed-in works show Add and Hide inline", async (
   assert.match(add.textContent || "", /Add to Trace/);
   assert.match(hide.textContent || "", /Hide/);
   assert.match(add.getAttribute("style") || "", /background:\s*transparent/i);
-  assert.match(hide.getAttribute("style") || "", /border-bottom:\s*1px solid/i);
+  assert.match(hide.getAttribute("style") || "", /border-bottom:\s*0/i);
   assert.doesNotMatch(hide.getAttribute("style") || "", /border-radius:\s*(?:7px|8px|9px|10px)/i);
   assert.equal(wrap.querySelector("[data-trace-library-lens]"), null);
 });
@@ -1724,7 +1728,7 @@ test("library-overlay AO3 desktop unknown works use action row without touching 
   assert.match(add.textContent || "", /Add to Trace/);
   assert.match(hide.textContent || "", /Hide/);
   assert.match(add.getAttribute("style") || "", /background:\s*transparent/i);
-  assert.match(hide.getAttribute("style") || "", /border-bottom:\s*1px solid/i);
+  assert.match(hide.getAttribute("style") || "", /border-bottom:\s*0/i);
 });
 
 test("library-overlay unknown AO3 mobile works show Add and Hide in the action row", async () => {
@@ -1754,7 +1758,7 @@ test("library-overlay unknown AO3 mobile works show Add and Hide in the action r
   assert.match(add.textContent || "", /Add to Trace/);
   assert.match(hide.textContent || "", /Hide/);
   assert.match(add.getAttribute("style") || "", /background:\s*transparent/i);
-  assert.match(hide.getAttribute("style") || "", /border-bottom:\s*1px solid/i);
+  assert.match(hide.getAttribute("style") || "", /border-bottom:\s*0/i);
   assert.doesNotMatch(hide.getAttribute("style") || "", /border-radius:\s*(?:7px|8px|9px|10px)/i);
 });
 
@@ -1776,7 +1780,7 @@ test("library-overlay unknown FFN signed-in works show same-height Add and Hide 
   assert.match(add.textContent || "", /Add to Trace/);
   assert.match(hide.textContent || "", /Hide/);
   assert.match(add.getAttribute("style") || "", /background:\s*transparent/i);
-  assert.match(hide.getAttribute("style") || "", /border-bottom:\s*1px solid/i);
+  assert.match(hide.getAttribute("style") || "", /border-bottom:\s*0/i);
   assert.doesNotMatch(hide.getAttribute("style") || "", /border-radius:\s*(?:7px|8px|9px|10px)/i);
 });
 
@@ -1896,6 +1900,25 @@ test("library-overlay known signed-out auth state does not offer fake Hide", asy
   const connect = window.document.querySelector("[data-trace-connect-notice-cta]");
   assert.ok(connect);
   assert.equal(connect.getAttribute("href"), "https://tracefiction.com/");
+});
+
+test("library-overlay on iPhone points an unlinked extension to the Trace app", async () => {
+  const window = await renderOverlayListing({
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/77782'>Signed Out Work</a></h4></li></ol></body></html>",
+    cache: { entries: {}, syncVersion: "v-empty" },
+    authToken: "stale-token",
+    authState: { state: "signed_out", helpUrl: "https://tracefiction.com/apps" },
+    userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+  });
+
+  const heading = window.document.querySelector("[data-trace-connect-notice-heading]");
+  const message = window.document.querySelector("[data-trace-connect-notice-message]");
+  const connect = window.document.querySelector("[data-trace-connect-notice-cta]");
+  assert.equal(heading.textContent, "Finish setup in the Trace app");
+  assert.doesNotMatch(message.textContent, /refresh/i);
+  assert.equal(connect.getAttribute("href"), "traceauth://open?destination=extension-connect");
+  assert.equal(connect.textContent, "Open Trace app");
 });
 
 test("library-overlay does not show a connection notice on story reading pages", async () => {

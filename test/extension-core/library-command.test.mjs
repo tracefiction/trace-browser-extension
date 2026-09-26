@@ -143,7 +143,7 @@ function harness(options = {}) {
     api: {
       async mutate(credential, command) {
         assert.equal(credential, "private-token");
-        assert.equal(command, patchCommand);
+        assert.deepStrictEqual(command, patchCommand);
         calls.mutate += 1;
         if (options.onMutate) options.onMutate(state);
         const value = state.mutations.shift() ?? { kind: "uncertain" };

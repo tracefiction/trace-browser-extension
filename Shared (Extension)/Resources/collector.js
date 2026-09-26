@@ -2,12 +2,21 @@
 // Reads story/listing metadata from the DOM the user is viewing; it does not fetch page HTML.
 // Sends metadata/progress to background.js via extension messages for import, quick-add, and auto-track.
 // Does not read cookies or credentials, and disables collection on pages with password fields.
+(function () {
+if (globalThis.__traceCollectorReconnect) {
+  globalThis.__traceCollectorReconnect(true);
+  return;
+}
+// COLLECTOR_CORE_START
 const ext = globalThis.browser ?? globalThis.chrome;
 const PRIVATE_TAG_DISPLAY_LIMIT = 3;
 const TRACE_FIRST_STORY_FOCUS_ADD_MESSAGE = "TRACE_FIRST_STORY_FOCUS_ADD";
+const TRACE_POPUP_QUICK_ADD_MESSAGE = "TRACE_POPUP_QUICK_ADD";
+const TRACE_POPUP_SET_READER_STATUS_MESSAGE = "TRACE_POPUP_SET_READER_STATUS";
 const TRACE_IOS_PENDING_FIRST_STORY_GET_MESSAGE = "TRACE_IOS_PENDING_FIRST_STORY_GET";
 const TRACE_IOS_PENDING_FIRST_STORY_CLEAR_MESSAGE = "TRACE_IOS_PENDING_FIRST_STORY_CLEAR";
 const TRACE_CONNECT_AND_SAVE_MESSAGE = "TRACE_CONNECT_AND_SAVE";
+const TRACE_STORY_IDENTITY_MESSAGE = "TRACE_STORY_IDENTITY_GET";
 const TRACE_IOS_AUTH_REFRESH_REQUEST_MESSAGE = "TRACE_IOS_AUTH_REFRESH_REQUEST";
 const TRACE_SESSION_MODE = globalThis.TRACE_SESSION_MODE || "legacy";
 const KERNEL_SESSION_ACTIVE = TRACE_SESSION_MODE === "kernel";
@@ -180,6 +189,7 @@ function acknowledgeCapacityRecovery(action) {
 }
 
 function showCapacityRecoveryNotice(capacity, force) {
+  traceRefreshPageTokens();
   if (!force && !(capacity && capacity.blocked === true && capacity.prompt === true)) {
     return;
   }
@@ -187,7 +197,6 @@ function showCapacityRecoveryNotice(capacity, force) {
 
   var notice = document.createElement("section");
   notice.setAttribute(TRACE_CAPACITY_NOTICE_ATTR, "1");
-  notice.setAttribute("role", "status");
   notice.setAttribute("aria-label", "Trace library full");
   notice.style.cssText = [
     "position:fixed",
@@ -199,20 +208,17 @@ function showCapacityRecoveryNotice(capacity, force) {
     "padding:16px",
     "border:1px solid rgba(28,39,34,0.16)",
     "border-radius:14px",
-    "background:#f6f1e4",
+    "background:var(--trace-page-surface)",
     "box-shadow:0 18px 46px rgba(28,39,34,0.22)",
-    "color:#1c2722",
+    "color:var(--trace-page-ink)",
   ].join(";");
 
-  var eyebrow = document.createElement("div");
-  eyebrow.textContent = "TRACE";
-  eyebrow.style.cssText = "font:600 9px/1 'Geist Mono',ui-monospace,monospace;letter-spacing:0.16em;color:#b54a30";
-  var title = document.createElement("h2");
+    var title = document.createElement("h2");
   title.textContent = "This story wasn’t added";
-  title.style.cssText = "margin:8px 0 0;font:500 20px/1.15 Georgia,'Times New Roman',serif;color:#1c2722";
+  title.style.cssText = "margin:8px 0 0;font:500 20px/1.15 -apple-system,system-ui,'Segoe UI',sans-serif;color:var(--trace-page-ink)";
   var copy = document.createElement("p");
   copy.textContent = "Your Trace library is full. Make room or get Trace Unlimited to keep adding stories.";
-  copy.style.cssText = "margin:8px 0 14px;font:500 13px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif;color:#5f665f";
+  copy.style.cssText = "margin:8px 0 14px;font:500 13px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif;color:var(--trace-page-secondary)";
   var actions = document.createElement("div");
   actions.style.cssText = "display:flex;align-items:center;gap:10px";
   actions.style.flexWrap = "wrap";
@@ -222,7 +228,7 @@ function showCapacityRecoveryNotice(capacity, force) {
   upgrade.target = "_blank";
   upgrade.rel = "noopener noreferrer";
   upgrade.textContent = "Get Trace Unlimited";
-  upgrade.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 14px;border-radius:9px;background:#1c2722;color:#fff;text-decoration:none;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif";
+  upgrade.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 14px;border-radius:9px;background:transparent;color:var(--trace-page-teal);text-decoration:none;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif";
   upgrade.addEventListener("click", function (event) {
     event.stopPropagation();
   });
@@ -232,14 +238,14 @@ function showCapacityRecoveryNotice(capacity, force) {
   manage.target = "_blank";
   manage.rel = "noopener noreferrer";
   manage.textContent = "Manage library";
-  manage.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 12px;border-radius:9px;border:1px solid rgba(28,39,34,0.2);color:#1c2722;text-decoration:none;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif";
+  manage.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 12px;border-radius:9px;border:0;color:var(--trace-page-teal);text-decoration:none;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif";
   manage.addEventListener("click", function (event) {
     event.stopPropagation();
   });
   var dismiss = document.createElement("button");
   dismiss.type = "button";
   dismiss.textContent = "Not now";
-  dismiss.style.cssText = "min-height:44px;padding:0 8px;border:0;background:transparent;color:#5f665f;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif;cursor:pointer";
+  dismiss.style.cssText = "min-height:44px;padding:0 8px;border:0;background:transparent;color:var(--trace-page-secondary);font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif;cursor:pointer";
   dismiss.addEventListener("click", function () {
     acknowledgeCapacityRecovery("dismissed");
     notice.remove();
@@ -247,7 +253,6 @@ function showCapacityRecoveryNotice(capacity, force) {
   actions.appendChild(upgrade);
   actions.appendChild(manage);
   actions.appendChild(dismiss);
-  notice.appendChild(eyebrow);
   notice.appendChild(title);
   notice.appendChild(copy);
   notice.appendChild(actions);
@@ -275,7 +280,8 @@ function stripTraceUiFromClone(el) {
       "[data-trace-bottom-sheet-grabber]",
       "[data-trace-finish-qualify]",
       "[data-trace-finish-toast]",
-      "[data-trace-capacity-notice]"
+      "[data-trace-capacity-notice]",
+      "[data-trace-saved-note]"
     ].join(",")
   )) {
     node.remove();
@@ -570,6 +576,7 @@ var ACCOUNT_PROJECTION_REVISION_KEY = "traceAccountProjectionRevisionV1";
 var WORK_STATE_GET_MESSAGE = "TRACE_WORK_STATE_GET";
 var ACCOUNT_PROJECTION_GET_MESSAGE = "TRACE_ACCOUNT_PROJECTION_GET";
 var optimisticStoryPageEntries = Object.create(null);
+var popupQuickAddPending = false;
 var storyQuickAddUiReady = false;
 var storyAuthRecoveryNeeded = false;
 var storyAuthRefreshInFlight = false;
@@ -1509,7 +1516,22 @@ function clearAutoTrackPendingForStory(item) {
   rerenderStoryHandleForWorkKey(workKey);
 }
 
+// A save that failed only because Trace was not linked yet is retried when the
+// reader returns to this page (typically from finishing setup in the app), so
+// they never need to reload.
+var autoTrackAwaitingLink = false;
+
+function retryAutoTrackAfterLink() {
+  if (!autoTrackAwaitingLink) return;
+  autoTrackAwaitingLink = false;
+  // Let the resume auth refresh adopt the app's account first.
+  setTimeout(scheduleAutoTrackForCurrentPage, 800);
+}
+
 function updateAutoTrackFailureForStory(item, error) {
+  if (error === "not_authenticated" || error === "auth_expired" || error === "reconnect_required") {
+    autoTrackAwaitingLink = true;
+  }
   var workKey = overlayWorkKeyFromItem(item);
   if (!workKey) return;
   var prev = optimisticStoryPageEntries[workKey] || {};
@@ -2874,8 +2896,54 @@ function shouldDelayAutoTrackUntilVisible() {
   return true;
 }
 
+// Trace page UI follows the host page, including AO3 skins and FFN reading themes.
+// CSS variables let an already mounted surface change tone on its next render.
+function traceHostPageTokens() {
+  var light = {
+    ground: "#F8FAFC", surface: "#FFFFFF", raised: "#E9EEF3", rule: "#D8E0E7",
+    ink: "#18232D", secondary: "#5F6B76", tertiary: "#7B8792",
+    teal: "#176E72", warning: "#9B4146", authored: "#8A6420",
+    "status-saved": "#666E68", "status-reading": "#246DCC",
+    "status-caught-up": "#4C6F88", "status-paused": "#82651E",
+    "status-finished": "#197A5B", "status-dropped": "#7C5282",
+  };
+  var dark = {
+    ground: "#111922", surface: "#19232D", raised: "#24323F", rule: "#344451",
+    ink: "#F2F6FA", secondary: "#AEBBC5", tertiary: "#8D9AA5",
+    teal: "#8BCDC8", warning: "#E7A19F", authored: "#DCB976",
+    "status-saved": "#B4BDAF", "status-reading": "#7DB8FF",
+    "status-caught-up": "#91B4CE", "status-paused": "#D4B76C",
+    "status-finished": "#8BD8B6", "status-dropped": "#B99BC2",
+  };
+  function background(element) {
+    if (!element || typeof window.getComputedStyle !== "function") return null;
+    var value = window.getComputedStyle(element).backgroundColor;
+    var channels = value && value.match(/rgba?\(([^)]+)\)/i);
+    if (!channels) return null;
+    var parts = channels[1].split(",").map(Number);
+    if (parts.length > 3 && parts[3] === 0) return null;
+    return parts.slice(0, 3);
+  }
+  var rgb = background(document.body) || background(document.documentElement) || [255, 255, 255];
+  var linear = rgb.map(function (channel) {
+    var value = channel / 255;
+    return value <= 0.04045 ? value / 12.92 : Math.pow((value + 0.055) / 1.055, 2.4);
+  });
+  var luminance = linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
+  return luminance < 0.18 ? dark : light;
+}
+
+function traceRefreshPageTokens() {
+  if (!document.body) return;
+  var tokens = traceHostPageTokens();
+  Object.keys(tokens).forEach(function (name) {
+    document.documentElement.style.setProperty("--trace-page-" + name, tokens[name]);
+    document.body.style.setProperty("--trace-page-" + name, tokens[name]);
+  });
+}
+
 // Listen for background requests
-ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+function handleCollectorMessage(msg, sender, sendResponse, relayCommand) {
   if (TRACE_ACTIVE_TAB_PROBE_MODE) {
     if (msg?.type === "TRACE_ACTIVE_TAB_PROBE_PING") {
       if (shouldDisableTraceContentScript()) {
@@ -2957,7 +3025,9 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (
       msg?.type === "TRACE_COLLECT" ||
       msg?.type === "TRACE_SCHEDULE_AUTO_TRACK" ||
-      msg?.type === TRACE_FIRST_STORY_FOCUS_ADD_MESSAGE
+      msg?.type === TRACE_FIRST_STORY_FOCUS_ADD_MESSAGE ||
+      msg?.type === TRACE_POPUP_QUICK_ADD_MESSAGE ||
+      msg?.type === TRACE_POPUP_SET_READER_STATUS_MESSAGE
     ) {
       sendResponse({ ok: false, error: "website_access_incomplete" });
     }
@@ -2968,9 +3038,59 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (
       msg?.type === "TRACE_COLLECT" ||
       msg?.type === "TRACE_SCHEDULE_AUTO_TRACK" ||
-      msg?.type === TRACE_FIRST_STORY_FOCUS_ADD_MESSAGE
+      msg?.type === TRACE_FIRST_STORY_FOCUS_ADD_MESSAGE ||
+      msg?.type === TRACE_POPUP_QUICK_ADD_MESSAGE ||
+      msg?.type === TRACE_POPUP_SET_READER_STATUS_MESSAGE
     ) {
       sendResponse({ ok: false, error: "page_contains_password_field" });
+    }
+    return false;
+  }
+
+  if (msg?.type === "TRACE_SAVED_NOTE_DISMISS") {
+    // The popup confirmed this story itself; the page note would repeat it.
+    if (sender && sender.id && sender.id === ext.runtime.id && !sender.tab) {
+      if (activeStorySavedNote) {
+        var dismissedWorkKey = activeStorySavedNote.getAttribute(TRACE_SAVED_NOTE_ATTR);
+        writeSavedNoteMarker({ workKey: dismissedWorkKey, until: 0, dismissed: true });
+        removeStorySavedNote(true);
+      }
+      sendResponse({ ok: true });
+    } else {
+      sendResponse({ ok: false });
+    }
+    return false;
+  }
+
+  if (msg?.type === TRACE_STORY_IDENTITY_MESSAGE) {
+    // The popup names the story it is confirming. Only the visible title,
+    // author and site go to the extension's own popup; nothing is stored or
+    // sent to the server by this reply.
+    if (!sender || !sender.id || sender.id !== ext.runtime.id || sender.tab) {
+      sendResponse({ ok: false });
+      return false;
+    }
+    try {
+      const story = collectStoryForAutoTrack();
+      sendResponse(
+        story && story.t
+          ? {
+              ok: true,
+              title: String(story.t).slice(0, 300),
+              author: story.a ? String(story.a).slice(0, 200) : null,
+              site: story.src === "ffn" ? "FanFiction.net" : "AO3",
+            }
+          : {
+              ok: false,
+              unavailable:
+                isFFN() &&
+                /\/s\/[1-9][0-9]*/.test(location.pathname) &&
+                document.readyState === "complete" &&
+                !one(document, "#storytext, #storytextp, #storycontent"),
+            },
+      );
+    } catch (_) {
+      sendResponse({ ok: false });
     }
     return false;
   }
@@ -2988,6 +3108,43 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     handleFirstStoryFocusAdd(sendResponse);
     return true;
   }
+  if (msg?.type === TRACE_POPUP_QUICK_ADD_MESSAGE) {
+    var popupWorkKey = getWorkKeyFromUrl();
+    if (!popupWorkKey) { sendResponse({ ok: false, error: "unsupported_page" }); return false; }
+    if (popupQuickAddPending) { sendResponse({ ok: false, error: "save_pending" }); return false; }
+    var popupPayload;
+    try { popupPayload = quickAddPayloadForCurrentPage(); }
+    catch (error) { sendResponse({ ok: false, error: String(error && error.message || error) }); return false; }
+    popupQuickAddPending = true;
+    (relayCommand || sendCollectorMessage)({ type: "TRACE_QUICK_ADD", payload: popupPayload }, function (response) {
+      popupQuickAddPending = false;
+      if (response && response.ok) renderQuickAddButton(popupWorkKey);
+      sendResponse(response || { ok: false, error: "runtime_error" });
+    });
+    return true;
+  }
+  if (msg?.type === TRACE_POPUP_SET_READER_STATUS_MESSAGE) {
+    var statusWorkKey = getWorkKeyFromUrl();
+    var status = msg.status;
+    var entry = msg.entry;
+    if (!statusWorkKey || !TRACE_READER_STATUS_CHOICES.includes(status) ||
+        !entry || typeof entry.entryId !== "string") {
+      sendResponse({ ok: false, error: "invalid_status_request" });
+      return false;
+    }
+    var patch = readerStatusProgressPatch(entry, status);
+    (relayCommand || sendCollectorMessage)({
+      type: "TRACE_SET_READER_STATUS",
+      payload: Object.assign(
+        { workKey: statusWorkKey, entryId: entry.entryId, status: status },
+        patch && patch.progress ? { progress: patch.progress } : {},
+      ),
+    }, function (response) {
+      if (response && response.ok) renderQuickAddButton(statusWorkKey);
+      sendResponse(response || { ok: false, error: "runtime_error" });
+    });
+    return true;
+  }
   if (msg?.type !== "TRACE_COLLECT") return false;
   try {
     const res = collect();
@@ -3002,7 +3159,90 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   // Synchronous sendResponse: must not return true (Chrome can drop the reply).
   return false;
+}
+ext.runtime.onMessage.addListener(handleCollectorMessage);
+
+// The page opens this channel: Safari may lose tabs.sendMessage/connect routes
+// for an existing tab after replacing the extension, while runtime.connect works.
+var popupPagePort = null;
+var popupPageReconnectTimer = null;
+var popupPageStopped = false;
+var popupPageCallbacks = new Map();
+function connectPopupPagePort() {
+  if (!KERNEL_SESSION_ACTIVE || TRACE_ACTIVE_TAB_PROBE_MODE || popupPageStopped ||
+      popupPagePort || !ext.runtime.connect || window.top !== window) return;
+  try {
+    var port = ext.runtime.connect({ name: "trace-popup-page-v1" });
+    popupPagePort = port;
+    port.onMessage.addListener(function (envelope) {
+      if (popupPagePort !== port || !envelope || !Number.isSafeInteger(envelope.id)) return;
+      if (envelope.kind === "commandResult") {
+        var callback = popupPageCallbacks.get(envelope.id);
+        popupPageCallbacks.delete(envelope.id);
+        if (callback) callback(envelope.response);
+        return;
+      }
+      if (envelope.kind !== "request" || ![
+        TRACE_STORY_IDENTITY_MESSAGE, "TRACE_SAVED_NOTE_DISMISS",
+        TRACE_POPUP_QUICK_ADD_MESSAGE, TRACE_POPUP_SET_READER_STATUS_MESSAGE, "TRACE_SCHEDULE_AUTO_TRACK",
+      ].includes(envelope.command && envelope.command.type)) return;
+      var reply = function (response) {
+        try { port.postMessage({ kind: "response", id: envelope.id, response: response }); } catch (_) {}
+      };
+      handleCollectorMessage(envelope.command, { id: ext.runtime.id }, reply,
+        function (command, callback) {
+          var timer = setTimeout(function () {
+            var pending = popupPageCallbacks.get(envelope.id);
+            popupPageCallbacks.delete(envelope.id);
+            if (pending) pending({ ok: false });
+          }, COLLECTOR_MESSAGE_TIMEOUT_MS);
+          var complete = function (response) { clearTimeout(timer); callback(response); };
+          popupPageCallbacks.set(envelope.id, complete);
+          try { port.postMessage({ kind: "command", id: envelope.id, command: command }); }
+          catch (_) { popupPageCallbacks.delete(envelope.id); complete({ ok: false }); }
+        });
+    });
+    port.onDisconnect.addListener(function () {
+      if (popupPagePort !== port) return;
+      popupPagePort = null;
+      for (var callback of popupPageCallbacks.values()) callback({ ok: false });
+      popupPageCallbacks.clear();
+      schedulePopupPageReconnect();
+    });
+  } catch (_) { schedulePopupPageReconnect(); }
+}
+function schedulePopupPageReconnect() {
+  if (popupPageStopped || popupPageReconnectTimer !== null) return;
+  popupPageReconnectTimer = setTimeout(function () {
+    popupPageReconnectTimer = null;
+    connectPopupPagePort();
+  }, 1_000);
+}
+window.addEventListener("pagehide", function () {
+  popupPageStopped = true;
+  clearTimeout(popupPageReconnectTimer);
+  popupPageReconnectTimer = null;
+  var port = popupPagePort;
+  popupPagePort = null;
+  for (var callback of popupPageCallbacks.values()) callback({ ok: false });
+  popupPageCallbacks.clear();
+  try { if (port) port.disconnect(); } catch (_) {}
 });
+globalThis.__traceCollectorReconnect = function (replacePort) {
+  if (replacePort === true) {
+    clearTimeout(popupPageReconnectTimer);
+    popupPageReconnectTimer = null;
+    var oldPort = popupPagePort;
+    popupPagePort = null;
+    for (var callback of popupPageCallbacks.values()) callback({ ok: false });
+    popupPageCallbacks.clear();
+    try { if (oldPort) oldPort.disconnect(); } catch (_) {}
+  }
+  popupPageStopped = false;
+  connectPopupPagePort();
+};
+window.addEventListener("pageshow", globalThis.__traceCollectorReconnect);
+connectPopupPagePort();
 
 /// =======================================================
 // AUTOMATIC TRACKING LOGIC
@@ -3024,6 +3264,9 @@ function collectStoryForAutoTrack() {
   }
   if (isFFN()) {
     if (!/\/s\/\d+/.test(location.href)) return null;
+    // A removed or unavailable story ("Story Not Found") keeps the /s/ URL but
+    // has no chapter text; never save it as a story.
+    if (!one(document, "#storytext, #storytextp, #storycontent")) return null;
     return collectFFNStory();
   }
   return null;
@@ -3149,6 +3392,7 @@ if (!TRACE_ACTIVE_TAB_PROBE_MODE && !shouldDisableTraceContentScript()) {
 // INLINE QUICK-ADD BUTTON (single story pages)
 // =======================================================
 
+
 var QUICK_ADD_ATTR = "data-trace-quick-add";
 var QUICK_ADD_WRAP_ATTR = "data-trace-quick-add-wrap";
 var TRACE_STORY_HANDLE_ATTR = "data-trace-story-handle";
@@ -3162,21 +3406,21 @@ var storySheetViewportFrame = null;
 var storySheetLiveAnnouncementTimer = null;
 
 var TRACE_UI = {
-  font: "Manrope,system-ui,-apple-system,'Segoe UI',sans-serif",
-  paper: "#fffdf8",
-  paperRaised: "#fbf7ee",
-  paperSoft: "#f6f1e7",
-  ink: "#1f2933",
-  muted: "#647067",
-  subtle: "#8a8171",
-  border: "rgba(65,72,70,0.16)",
-  borderStrong: "rgba(65,72,70,0.24)",
-  forest: "#2d4b43",
-  forestOn: "#c8eadf",
-  gold: "#f7e6b6",
-  goldOn: "#594402",
-  rust: "#9a3412",
-  danger: "#ba1a1a",
+  font: "-apple-system,system-ui,'Segoe UI',sans-serif",
+  paper: "var(--trace-page-surface)",
+  paperRaised: "var(--trace-page-raised)",
+  paperSoft: "var(--trace-page-raised)",
+  ink: "var(--trace-page-ink)",
+  muted: "var(--trace-page-secondary)",
+  subtle: "var(--trace-page-tertiary)",
+  border: "var(--trace-page-rule)",
+  borderStrong: "var(--trace-page-rule)",
+  forest: "var(--trace-page-teal)",
+  forestOn: "var(--trace-page-surface)",
+  gold: "var(--trace-page-raised)",
+  goldOn: "var(--trace-page-ink)",
+  rust: "var(--trace-page-warning)",
+  danger: "var(--trace-page-warning)",
   radiusXs: "7px",
   radiusSm: "8px",
   radiusMd: "10px",
@@ -3185,7 +3429,7 @@ var TRACE_UI = {
 };
 
 // Local Trace extension UI tokens; keep this independent from the web app bundle.
-var TRACE_FONT = "700 10px/1 " + TRACE_UI.font;
+var TRACE_FONT = "700 12px/1 " + TRACE_UI.font;
 var TRACE_CHIP_BASE = [
   "display:inline-flex",
   "align-items:center",
@@ -3201,30 +3445,31 @@ var TRACE_CHIP_BASE = [
 ].join(";");
 
 var TRACE_THEMES = {
-  add:     { bg: TRACE_UI.forest, fg: TRACE_UI.forestOn, border: "rgba(22,52,45,0.35)", hover: "#385d52" },
+  add:     { bg: TRACE_UI.forest, fg: TRACE_UI.forestOn, border: "rgba(22,52,45,0.35)", hover: "var(--trace-page-teal)" },
   adding:  { bg: TRACE_UI.paperSoft, fg: TRACE_UI.subtle, border: "rgba(148,163,184,0.3)" },
   status:  { bg: TRACE_UI.gold, fg: TRACE_UI.goldOn, border: "rgba(89,68,2,0.2)" },
   added:   { bg: TRACE_UI.forest, fg: TRACE_UI.forestOn, border: "rgba(22,52,45,0.35)" },
-  error:   { bg: "#fef2f2",     fg: "#dc2626", border: "rgba(220,38,38,0.25)" },
-  full:    { bg: "#fff7df",     fg: "#b45309", border: "rgba(180,83,9,0.25)" },
-  hidden:  { bg: "#eee7da",     fg: "#5b5142", border: "rgba(91,81,66,0.28)" },
-  muted:   { bg: "#edf2ef",     fg: "#41504c", border: "rgba(65,80,76,0.18)" },
-  mark:    { bg: "#f0e9dc",     fg: "#6f4d1f", border: "rgba(111,77,31,0.24)" },
+  error:   { bg: "var(--trace-page-surface)",     fg: "var(--trace-page-warning)", border: "rgba(220,38,38,0.25)" },
+  full:    { bg: "var(--trace-page-surface)",     fg: "var(--trace-page-warning)", border: "rgba(180,83,9,0.25)" },
+  hidden:  { bg: "var(--trace-page-surface)",     fg: "var(--trace-page-ink)", border: "rgba(91,81,66,0.28)" },
+  muted:   { bg: "var(--trace-page-surface)",     fg: "var(--trace-page-ink)", border: "rgba(65,80,76,0.18)" },
+  mark:    { bg: "var(--trace-page-surface)",     fg: "var(--trace-page-authored)", border: "rgba(111,77,31,0.24)" },
 };
 
 // App-aligned light archive status tokens from library-app.css.
 var TRACE_STATUS_TOKENS = {
-  SAVED:     { accent: "#5b7488", container: "#e4e9ed", onContainer: "#3a566b", border: "#bfccd6" },
-  READING:   { accent: "#bf8a1f", container: "#f4e6c2", onContainer: "#7c5400", border: "#e1c886" },
-  CAUGHT_UP: { accent: "#1f8a7d", container: "#d6ece6", onContainer: "#136257", border: "#a3d2c9" },
-  PAUSED:    { accent: "#a8623a", container: "#efddcd", onContainer: "#79401f", border: "#dcbe9f" },
-  FINISHED:  { accent: "#4a8157", container: "#dcecde", onContainer: "#33603f", border: "#aacdb0" },
-  DROPPED:   { accent: "#83707b", container: "#e8e0e3", onContainer: "#574852", border: "#cdbfc5" },
+  SAVED:     { accent: "var(--trace-page-status-saved)", container: "var(--trace-page-raised)", onContainer: "var(--trace-page-ink)", border: "var(--trace-page-rule)" },
+  READING:   { accent: "var(--trace-page-status-reading)", container: "var(--trace-page-raised)", onContainer: "var(--trace-page-ink)", border: "var(--trace-page-rule)" },
+  CAUGHT_UP: { accent: "var(--trace-page-status-caught-up)", container: "var(--trace-page-raised)", onContainer: "var(--trace-page-ink)", border: "var(--trace-page-rule)" },
+  PAUSED:    { accent: "var(--trace-page-status-paused)", container: "var(--trace-page-raised)", onContainer: "var(--trace-page-ink)", border: "var(--trace-page-rule)" },
+  FINISHED:  { accent: "var(--trace-page-status-finished)", container: "var(--trace-page-raised)", onContainer: "var(--trace-page-ink)", border: "var(--trace-page-rule)" },
+  DROPPED:   { accent: "var(--trace-page-status-dropped)", container: "var(--trace-page-raised)", onContainer: "var(--trace-page-ink)", border: "var(--trace-page-rule)" },
 };
 TRACE_STATUS_TOKENS.PLANNING = TRACE_STATUS_TOKENS.SAVED;
 TRACE_STATUS_TOKENS.COMPLETED = TRACE_STATUS_TOKENS.FINISHED;
 
 function traceStatusToken(status) {
+  traceRefreshPageTokens();
   return TRACE_STATUS_TOKENS[canonicalReaderStatus(status) || status] || TRACE_STATUS_TOKENS.READING;
 }
 
@@ -3240,21 +3485,21 @@ var TRACE_STATUS_THEMES = {
 };
 
 var TRACE_INLINE_THEMES = {
-  add: { fg: "#1f4d3f", label: "#1f4d3f", border: "rgba(31,77,63,0.35)", accent: "#1f4d3f", weight: 600 },
-  added: { fg: "#1f4d3f", label: "#1f4d3f", border: "transparent", accent: "#1f4d3f", weight: 500 },
-  muted: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: "#9a9583", weight: 500 },
-  hidden: { fg: "#6e6a5b", label: "#6e6a5b", border: "transparent", accent: "#9a9583", weight: 500 },
-  saving: { fg: "#6e6a5b", label: "#6e6a5b", border: "rgba(110,106,91,0.28)", accent: "#9a9583", weight: 500 },
-  error: { fg: "#b54a30", label: "#b54a30", border: "transparent", accent: "#b54a30", weight: 500 },
-  full: { fg: "#8a6e2a", label: "#8a6e2a", border: "transparent", accent: "#8a6e2a", weight: 500 },
-  READING: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: TRACE_STATUS_TOKENS.READING.accent, weight: 500 },
-  PLANNING: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: TRACE_STATUS_TOKENS.PLANNING.accent, weight: 500 },
-  PAUSED: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: TRACE_STATUS_TOKENS.PAUSED.accent, weight: 500 },
-  COMPLETED: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: TRACE_STATUS_TOKENS.COMPLETED.accent, weight: 500 },
-  DROPPED: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: TRACE_STATUS_TOKENS.DROPPED.accent, weight: 500 },
-  SAVED: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: TRACE_STATUS_TOKENS.SAVED.accent, weight: 500 },
-  CAUGHT_UP: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: TRACE_STATUS_TOKENS.CAUGHT_UP.accent, weight: 500 },
-  FINISHED: { fg: "#3a4339", label: "#3a4339", border: "transparent", accent: TRACE_STATUS_TOKENS.FINISHED.accent, weight: 500 },
+  add: { fg: "var(--trace-page-teal)", label: "var(--trace-page-teal)", border: "transparent", accent: "var(--trace-page-teal)", weight: 500 },
+  added: { fg: "var(--trace-page-teal)", label: "var(--trace-page-teal)", border: "transparent", accent: "var(--trace-page-teal)", weight: 500 },
+  muted: { fg: "var(--trace-page-ink)", label: "var(--trace-page-ink)", border: "transparent", accent: "var(--trace-page-secondary)", weight: 500 },
+  hidden: { fg: "var(--trace-page-secondary)", label: "var(--trace-page-secondary)", border: "transparent", accent: "var(--trace-page-secondary)", weight: 500 },
+  saving: { fg: "var(--trace-page-secondary)", label: "var(--trace-page-secondary)", border: "rgba(110,106,91,0.28)", accent: "var(--trace-page-secondary)", weight: 500 },
+  error: { fg: "var(--trace-page-warning)", label: "var(--trace-page-warning)", border: "transparent", accent: "var(--trace-page-warning)", weight: 500 },
+  full: { fg: "var(--trace-page-warning)", label: "var(--trace-page-warning)", border: "transparent", accent: "var(--trace-page-authored)", weight: 500 },
+  READING: { fg: "var(--trace-page-ink)", label: "var(--trace-page-ink)", border: "transparent", accent: TRACE_STATUS_TOKENS.READING.accent, weight: 500 },
+  PLANNING: { fg: "var(--trace-page-ink)", label: "var(--trace-page-ink)", border: "transparent", accent: TRACE_STATUS_TOKENS.PLANNING.accent, weight: 500 },
+  PAUSED: { fg: "var(--trace-page-ink)", label: "var(--trace-page-ink)", border: "transparent", accent: TRACE_STATUS_TOKENS.PAUSED.accent, weight: 500 },
+  COMPLETED: { fg: "var(--trace-page-ink)", label: "var(--trace-page-ink)", border: "transparent", accent: TRACE_STATUS_TOKENS.COMPLETED.accent, weight: 500 },
+  DROPPED: { fg: "var(--trace-page-ink)", label: "var(--trace-page-ink)", border: "transparent", accent: TRACE_STATUS_TOKENS.DROPPED.accent, weight: 500 },
+  SAVED: { fg: "var(--trace-page-ink)", label: "var(--trace-page-ink)", border: "transparent", accent: TRACE_STATUS_TOKENS.SAVED.accent, weight: 500 },
+  CAUGHT_UP: { fg: "var(--trace-page-ink)", label: "var(--trace-page-ink)", border: "transparent", accent: TRACE_STATUS_TOKENS.CAUGHT_UP.accent, weight: 500 },
+  FINISHED: { fg: "var(--trace-page-ink)", label: "var(--trace-page-ink)", border: "transparent", accent: TRACE_STATUS_TOKENS.FINISHED.accent, weight: 500 },
 };
 
 function traceChipCss(theme) {
@@ -3262,7 +3507,7 @@ function traceChipCss(theme) {
 }
 
 function traceActionCss(theme) {
-  return traceChipCss(theme) + ";min-height:42px;padding:0 14px;font:800 11px/1 " + TRACE_UI.font + ";cursor:pointer;box-shadow:" + TRACE_UI.shadowLow + ";transition:background-color 120ms ease,border-color 120ms ease,color 120ms ease,box-shadow 120ms ease";
+  return traceChipCss(theme) + ";min-height:42px;padding:0 14px;font:800 12px/1 " + TRACE_UI.font + ";cursor:pointer;box-shadow:" + TRACE_UI.shadowLow + ";transition:background-color 120ms ease,border-color 120ms ease,color 120ms ease,box-shadow 120ms ease";
 }
 
 function isCompactTraceInline() {
@@ -3288,20 +3533,20 @@ function isMobileStorySheet() {
 }
 
 function traceInlineHandleCss(theme) {
+  traceRefreshPageTokens();
   return [
     "display:inline-flex",
     "align-items:center",
     "justify-content:flex-start",
-    "gap:8px",
+    "gap:7px",
     "box-sizing:border-box",
-    "min-height:18px",
+    "min-height:44px",
     "padding:2px 0",
     "border:0",
     "border-radius:0",
-    "border-bottom:1px solid " + theme.border,
     "background:transparent",
     "color:" + theme.fg,
-    "font:" + (theme.weight || 500) + " 13px/1.25 " + TRACE_UI.font,
+    "font:500 14px/1.3 " + TRACE_UI.font,
     "letter-spacing:0",
     "text-transform:none",
     "white-space:nowrap",
@@ -3328,15 +3573,17 @@ function traceStoryHandleLabelCss(theme) {
     "display:inline-block",
     "color:" + theme.label,
     "font:inherit",
-    "line-height:1.25",
+    "line-height:1.3",
+    "margin-left:1px",
   ].join(";");
 }
 
 function traceStoryHandleProgressCss() {
   return [
     "display:inline-block",
-    "color:#6e6a5b",
-    "font:500 11.5px/1.2 'Geist Mono',ui-monospace,monospace",
+    "color:var(--trace-page-secondary)",
+    "font:500 14px/1.3 -apple-system,system-ui,'Segoe UI',sans-serif",
+    "font-variant-numeric:tabular-nums",
   ].join(";");
 }
 
@@ -3345,9 +3592,10 @@ function traceStoryHandleChevronCss() {
     "display:inline-flex",
     "align-items:center",
     "justify-content:center",
-    "width:11px",
-    "height:11px",
-    "color:#9a9583",
+    "width:10px",
+    "height:7px",
+    "margin-left:2px",
+    "color:var(--trace-page-tertiary)",
     "flex:0 0 auto",
   ].join(";");
 }
@@ -3361,15 +3609,16 @@ function traceStoryHandleSpinnerCss(theme) {
 
 function createTraceChevronSvg() {
   var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("viewBox", "0 0 10 7");
   svg.setAttribute("fill", "none");
   svg.setAttribute("stroke", "currentColor");
-  svg.setAttribute("stroke-width", "1.5");
+  svg.setAttribute("stroke-width", "1.8");
   svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
   var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  path.setAttribute("d", "M2 4l4 4 4-4");
+  path.setAttribute("d", "M1 1.5 5 5.5l4-4");
   svg.appendChild(path);
-  svg.style.cssText = "display:block;width:11px;height:11px";
+  svg.style.cssText = "display:block;width:10px;height:7px";
   return svg;
 }
 
@@ -3493,7 +3742,25 @@ function progressDisplay(entry) {
   return chapters.current + "/" + (chapters.total == null ? "?" : chapters.total);
 }
 
+// On iPhone and iPad the extension is linked by the Trace app's Safari setup.
+// Before that link exists, every surface points to that one step.
+var TRACE_IOS_APP_SETUP_URL = "traceauth://open?destination=extension-connect";
+
+function traceIsIosSafari() {
+  try {
+    return /iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+  } catch (_) {
+    return false;
+  }
+}
+
+function awaitingAppLink(view) {
+  return !view.hasAuth && traceIsIosSafari() &&
+    !(view.authState && (view.authState.state === "reconnect_required" || view.authState.state === "error"));
+}
+
 function storyHeadline(view) {
+  if (awaitingAppLink(view)) return "Finish setup in the Trace app";
   if (!view.hasAuth) {
     if (view.authState && view.authState.state === "reconnect_required") return "Reconnect Trace";
     if (view.authState && view.authState.state === "error") return "Trace unavailable";
@@ -3508,6 +3775,9 @@ function storyHeadline(view) {
 }
 
 function storyCaption(view) {
+  if (awaitingAppLink(view)) {
+    return "Open Trace and finish Safari setup there, signing in first if asked. Then come back; nothing has been saved yet.";
+  }
   if (!view.hasAuth) {
     if (view.authState && view.authState.state === "reconnect_required") {
       return "Your session needs a refresh.";
@@ -3533,6 +3803,7 @@ function storyCaption(view) {
 }
 
 function handleDisplay(view) {
+  if (awaitingAppLink(view)) return "Finish setup in Trace";
   if (!view.hasAuth) {
     if (view.authState && view.authState.state === "reconnect_required") return "Reconnect Trace";
     if (view.authState && view.authState.state === "error") return "Error";
@@ -3566,7 +3837,7 @@ function storyHandlePresentation(view) {
     return {
       kind: "auth",
       label: handleDisplay(view || {}),
-      theme: authTheme,
+      theme: awaitingAppLink(view || {}) ? Object.assign({}, authTheme, { label: "var(--trace-page-teal)" }) : authTheme,
       dot: false,
       spinner: false,
       status: null,
@@ -3589,7 +3860,7 @@ function storyHandlePresentation(view) {
     }
     return {
       kind: "adding",
-      label: "Adding...",
+      label: "Adding…",
       theme: TRACE_INLINE_THEMES.saving,
       dot: false,
       spinner: true,
@@ -3611,7 +3882,7 @@ function storyHandlePresentation(view) {
     return { kind: "error", label: "Error", theme: TRACE_INLINE_THEMES.error, dot: true, spinner: false, status: null, progress: null };
   }
   if (entry && entry.__traceStatusPending) {
-    return { kind: "saving", label: "Saving...", theme: TRACE_INLINE_THEMES.saving, dot: false, spinner: true, status: null, progress: null };
+    return { kind: "saving", label: "Saving…", theme: TRACE_INLINE_THEMES.saving, dot: false, spinner: true, status: null, progress: null };
   }
   if (entry && entry.__traceStatusError) {
     return { kind: "update-error", label: "Update failed", theme: TRACE_INLINE_THEMES.error, dot: true, spinner: false, status: null, progress: null };
@@ -3647,6 +3918,13 @@ function applyStoryInlineHandleState(handle, presentation) {
   var theme = (presentation && presentation.theme) || TRACE_INLINE_THEMES.muted;
   clearElement(handle);
   handle.style.cssText = traceInlineHandleCss(theme);
+  var accessible = "Trace: " + ((presentation && presentation.label) || "Story");
+  if (presentation && presentation.status === "SAVED") accessible = "Trace: Saved to your Library";
+  else if (presentation && presentation.status && presentation.progress) {
+    var chapters = String(presentation.progress).match(/^(\d+)\/(\d+|\?)$/);
+    if (chapters) accessible += ", chapter " + chapters[1] + (chapters[2] === "?" ? "" : " of " + chapters[2]);
+  }
+  handle.setAttribute("aria-label", accessible);
   handle.setAttribute("data-trace-story-handle-state", presentation && presentation.kind ? presentation.kind : "unknown");
   if (presentation && presentation.status) {
     handle.setAttribute("data-trace-story-status", presentation.status);
@@ -3683,7 +3961,7 @@ function applyStoryInlineHandleState(handle, presentation) {
     var mark = document.createElement("span");
     mark.setAttribute("data-trace-inline-work-mark", presentation.workMark.kind);
     mark.textContent = presentation.workMark.kind === "hiatus" ? "Hiatus" : "Abandoned";
-    mark.style.cssText = "padding-left:7px;border-left:1px solid #bbb3a5;color:#5b645f;font:600 10.5px/1.2 " + TRACE_UI.font;
+    mark.style.cssText = "padding-left:7px;border-left:1px solid var(--trace-page-rule);color:var(--trace-page-secondary);font:600 12px/1.2 " + TRACE_UI.font;
     handle.appendChild(mark);
     if (presentation.workMark.challenge) {
       var challenge = document.createElement("span");
@@ -3691,7 +3969,7 @@ function applyStoryInlineHandleState(handle, presentation) {
       challenge.textContent = presentation.workMark.challenge.chapterDelta
         ? "+" + presentation.workMark.challenge.chapterDelta + " ch"
         : "Updated";
-      challenge.style.cssText = "color:#bc4329;font:700 10.5px/1.2 " + TRACE_UI.font;
+      challenge.style.cssText = "color:var(--trace-page-ink);font:600 12px/1.2 " + TRACE_UI.font;
       handle.appendChild(challenge);
     }
   }
@@ -3714,7 +3992,7 @@ function ensureStorySheetModalStyles() {
   style.setAttribute("data-trace-story-modal-styles", "1");
   style.textContent =
     "[" + TRACE_STORY_SHEET_ATTR + "] :focus-visible{" +
-      "outline:3px solid #2a5d53!important;outline-offset:2px!important}" +
+      "outline:3px solid var(--trace-page-teal)!important;outline-offset:2px!important}" +
     "@media (max-width:640px),(pointer:coarse){" +
       "[" + TRACE_STORY_SHEET_CLOSE_ATTR + "]{min-width:44px!important;min-height:44px!important}}" +
     "@media (prefers-reduced-motion:reduce){" +
@@ -3725,20 +4003,27 @@ function ensureStorySheetModalStyles() {
 }
 
 function ensureStorySheetLiveRegion() {
-  var live = document.querySelector("[data-trace-story-live-region]");
-  if (live) return live;
-  live = document.createElement("div");
+  if (!document.body) return null;
+  var live = document.querySelector("[data-trace-page-live-region]");
+  if (!live) {
+    live = document.createElement("div");
+    live.setAttribute("data-trace-page-live-region", "1");
+    live.setAttribute("role", "status");
+    live.setAttribute("aria-live", "polite");
+    live.setAttribute("aria-atomic", "true");
+    live.style.cssText = "position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap";
+  }
   live.setAttribute("data-trace-story-live-region", "1");
-  live.setAttribute("role", "status");
-  live.setAttribute("aria-live", "polite");
-  live.setAttribute("aria-atomic", "true");
-  live.style.cssText = "position:fixed;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap";
-  document.documentElement.appendChild(live);
+  if (live.parentElement !== document.body || live !== document.body.lastElementChild) document.body.appendChild(live);
   return live;
 }
 
+if (document.body) ensureStorySheetLiveRegion();
+else document.addEventListener("DOMContentLoaded", ensureStorySheetLiveRegion, { once: true });
+
 function announceStorySheet(message) {
   var live = ensureStorySheetLiveRegion();
+  if (!live) return;
   if (storySheetLiveAnnouncementTimer !== null) {
     clearTimeout(storySheetLiveAnnouncementTimer);
   }
@@ -4062,7 +4347,7 @@ function createStoryBottomSheetGrabber() {
     "user-select:none",
   ].join(";");
   var bar = document.createElement("span");
-  bar.style.cssText = "display:block;width:38px;height:4px;border-radius:999px;background:#c4bea8";
+  bar.style.cssText = "display:block;width:38px;height:4px;border-radius:999px;background:var(--trace-page-tertiary)";
   zone.appendChild(bar);
   return zone;
 }
@@ -4142,9 +4427,9 @@ function storySheetCss(mobile) {
     "overscroll-behavior:contain",
     "padding:0",
     "border-radius:" + (mobile ? "16px 16px 0 0" : "12px"),
-    "border:1px solid #bbb3a5",
-    "background:#f7f4ed",
-    "color:#151e1c",
+    "border:1px solid var(--trace-page-rule)",
+    "background:var(--trace-page-surface)",
+    "color:var(--trace-page-ink)",
     "box-shadow:" + (mobile
       ? "0 -18px 50px -16px rgba(15,20,18,0.42)"
       : "0 22px 54px -20px rgba(15,20,18,0.42)"),
@@ -4261,11 +4546,11 @@ function storySheetAuthorLine(item) {
 }
 
 function storySheetLabelCss() {
-  return "font:650 9px/1 'Geist Mono',ui-monospace,monospace;letter-spacing:0.16em;text-transform:uppercase;color:#777f7a";
+  return "font:600 12px/1.3 -apple-system,system-ui,'Segoe UI',sans-serif;color:var(--trace-page-secondary)";
 }
 
 function storySheetSerifFont() {
-  return "'Fraunces',Georgia,'Times New Roman',serif";
+  return "-apple-system,system-ui,'Segoe UI',sans-serif";
 }
 
 function storySheetPrimaryButtonCss() {
@@ -4278,9 +4563,9 @@ function storySheetPrimaryButtonCss() {
     "min-height:42px",
     "padding:12px 16px",
     "border-radius:8px",
-    "border:1px solid #151e1c",
-    "background:#151e1c",
-    "color:#fefcf7",
+    "border:0",
+    "background:transparent",
+    "color:var(--trace-page-teal)",
     "font:600 13.5px/1 " + TRACE_UI.font,
     "text-decoration:none",
     "white-space:nowrap",
@@ -4298,9 +4583,9 @@ function storySheetGhostButtonCss() {
     "min-height:42px",
     "padding:12px 14px",
     "border-radius:8px",
-    "border:1px solid #bbb3a5",
+    "border:1px solid var(--trace-page-rule)",
     "background:transparent",
-    "color:#27312e",
+    "color:var(--trace-page-ink)",
     "font:600 13px/1 " + TRACE_UI.font,
     "text-decoration:none",
     "white-space:nowrap",
@@ -4360,7 +4645,7 @@ function storySheetNoteText(text) {
   var note = document.createElement("span");
   note.className = "note";
   note.textContent = text;
-  note.style.cssText = "display:block;flex:1;min-width:0;text-align:left;font:500 12.5px/1.5 " + TRACE_UI.font + ";color:#27312e";
+  note.style.cssText = "display:block;flex:1;min-width:0;text-align:left;font:500 12.5px/1.5 " + TRACE_UI.font + ";color:var(--trace-page-ink)";
   return note;
 }
 
@@ -4376,11 +4661,11 @@ function storySheetTagPill(text, collectionTone) {
     "overflow:hidden",
     "text-overflow:ellipsis",
     "padding:2px 0",
-    "border-bottom:1px dotted " + (collectionTone ? "#996e29" : "#2a5d53"),
-    "font:500 11.5px/1.15 " + TRACE_UI.font,
+    "border:0",
+    "font:500 12px/1.15 " + TRACE_UI.font,
     "white-space:nowrap",
     "background:transparent",
-    "color:" + (collectionTone ? "#996e29" : "#2a5d53"),
+    "color:var(--trace-page-authored)",
   ].join(";");
   return tag;
 }
@@ -4409,7 +4694,7 @@ function sheetRowEl(label, value, emphasis) {
   labelEl.style.cssText = storySheetLabelCss();
   var valueEl = document.createElement("span");
   valueEl.textContent = value;
-  valueEl.style.cssText = "font:600 12.5px/1.3 " + TRACE_UI.font + ";color:" + (emphasis ? "#b54a30" : "#3a4339") + ";text-align:right";
+  valueEl.style.cssText = "font:600 12.5px/1.3 " + TRACE_UI.font + ";color:" + (emphasis ? "var(--trace-page-warning)" : "var(--trace-page-ink)") + ";text-align:right";
   row.appendChild(labelEl);
   row.appendChild(valueEl);
   return row;
@@ -4485,8 +4770,8 @@ function storyRatingButtonStyle(active, disabled) {
     "border:0",
     "border-radius:7px",
     "background:transparent",
-    "color:" + (active ? "#8a6e2a" : "#9a9583"),
-    "font:600 21px/1 Georgia,serif",
+    "color:" + (active ? "var(--trace-page-authored)" : "var(--trace-page-secondary)"),
+    "font:600 21px/1 -apple-system,system-ui,'Segoe UI',sans-serif",
     "cursor:" + (disabled ? "wait" : "pointer"),
     disabled ? "opacity:0.62" : "",
   ].join(";");
@@ -4621,7 +4906,7 @@ function appendStoryRatingControls(body, view, workKey) {
   row.style.cssText = "display:flex;align-items:center;gap:2px";
   var message = document.createElement("span");
   message.setAttribute("data-trace-rating-message", "1");
-  message.style.cssText = "margin-left:8px;font:600 11.5px/1.3 " + TRACE_UI.font + ";color:#6e6a5b";
+  message.style.cssText = "margin-left:8px;font:600 12px/1.3 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
 
   function renderStars(disabled) {
     clearElement(row);
@@ -4704,10 +4989,10 @@ function appendStoryCatchupAction(body, view, workKey) {
   text.style.cssText = "min-width:0";
   var title = document.createElement("div");
   title.textContent = "Catch up";
-  title.style.cssText = "font:600 12.5px/1.25 " + TRACE_UI.font + ";color:#1c2722";
+  title.style.cssText = "font:600 12.5px/1.25 " + TRACE_UI.font + ";color:var(--trace-page-ink)";
   var copy = document.createElement("div");
   copy.textContent = "Set progress to chapter " + patch.chapters.current + ".";
-  copy.style.cssText = "margin-top:2px;font:500 11.5px/1.35 " + TRACE_UI.font + ";color:#6e6a5b";
+  copy.style.cssText = "margin-top:2px;font:500 12px/1.35 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
   text.appendChild(title);
   text.appendChild(copy);
 
@@ -4778,7 +5063,7 @@ function appendReaderStatusChoices(actions, view, workKey) {
     error.textContent = String(entry.__traceStatusError);
     row.setAttribute("aria-describedby", error.id);
   }
-  error.style.cssText = "min-height:16px;color:#b54a30;font:600 11.5px/1.3 " + TRACE_UI.font;
+  error.style.cssText = "min-height:16px;color:var(--trace-page-warning);font:600 12px/1.3 " + TRACE_UI.font;
 
   TRACE_READER_STATUS_CHOICES.forEach(function (status) {
     var choice = document.createElement("button");
@@ -4798,13 +5083,13 @@ function appendReaderStatusChoices(actions, view, workKey) {
       "box-sizing:border-box",
       "min-width:0",
       "min-height:48px",
-      "border:1px solid " + (selected ? "#151e1c" : "#d4cdc0"),
-      "background:" + (selected ? "#151e1c" : "#fefcf7"),
+      "border:1px solid " + (selected ? "var(--trace-page-ink)" : "var(--trace-page-rule)"),
+      "background:transparent",
       "border-radius:7px",
       "padding:8px 2px",
       "overflow:visible",
-      "font:500 11px/1 " + TRACE_UI.font,
-      "color:" + (selected ? "#fefcf7" : "#5b645f"),
+      "font:500 12px/1 " + TRACE_UI.font,
+      "color:var(--trace-page-ink)",
       "cursor:pointer",
       "display:flex",
       "flex-direction:column",
@@ -4820,7 +5105,7 @@ function appendReaderStatusChoices(actions, view, workKey) {
       "width:7px",
       "height:7px",
       "border-radius:999px",
-      "background:" + (selected ? storyStatusAccent(status) : "#c4bea8"),
+      "background:" + storyStatusAccent(status),
       "box-shadow:none",
     ].join(";");
     var text = document.createElement("span");
@@ -4931,27 +5216,23 @@ function applyQuickAddActionState(btn, addTheme, compact) {
   btn.disabled = false;
 }
 
+function quickAddPayloadForCurrentPage() {
+  if (!collectStoryForAutoTrack()) throw new Error("story_unavailable");
+  var collected = collect();
+  if (!collected.items.length) throw new Error("collect_failed");
+  return { s: collected.source, at: new Date().toISOString(), item: collected.items[0] };
+}
+
 function sendQuickAddAction(btn, workKey, addTheme, compact, done) {
   var notifyDone = function (result) {
     if (typeof done === "function") done(result);
   };
-  var collected;
-  try {
-    collected = collect();
-  } catch (e) {
+  var payload;
+  try { payload = quickAddPayloadForCurrentPage(); }
+  catch (e) {
     notifyDone({ ok: false, error: String(e && e.message ? e.message : e) });
     return;
   }
-  if (!collected.items.length) {
-    notifyDone({ ok: false, error: "collect_failed" });
-    return;
-  }
-
-  var payload = {
-    s: collected.source,
-    at: new Date().toISOString(),
-    item: collected.items[0],
-  };
 
   if (compact) {
     applyStoryInlineHandleState(btn, storyHandlePresentation({ hasAuth: true, entry: { __traceAutoTrackPending: true } }));
@@ -5549,7 +5830,7 @@ function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
       true,
       nextHidden ? "Hiding this work." : "Unhiding this work.",
     );
-    btn.style.cssText = storySheetGhostButtonCss() + ";cursor:wait;color:#6e6a5b";
+    btn.style.cssText = storySheetGhostButtonCss() + ";cursor:wait;color:var(--trace-page-secondary)";
     btn.textContent = "Saving...";
     btn.disabled = true;
     sendCollectorMessage(
@@ -5560,7 +5841,7 @@ function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
       function (response) {
         if (!response) {
           setStorySheetControlPending(btn, false, "Could not save the browsing preference. Try again.");
-          btn.style.cssText = storySheetGhostButtonCss() + ";cursor:pointer;color:#b54a30";
+          btn.style.cssText = storySheetGhostButtonCss() + ";cursor:pointer;color:var(--trace-page-warning)";
           btn.textContent = "Error";
           btn.disabled = false;
           setTimeout(function () {
@@ -5581,7 +5862,7 @@ function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
               ? "Trace is rate limited. Wait before trying again."
               : "Could not save the browsing preference. Try again.",
           );
-          btn.style.cssText = storySheetGhostButtonCss() + ";cursor:pointer;color:#b54a30";
+          btn.style.cssText = storySheetGhostButtonCss() + ";cursor:pointer;color:var(--trace-page-warning)";
           btn.textContent = response.error === "rate_limited" ? "Wait" : "Error";
           btn.disabled = false;
           setTimeout(function () {
@@ -5603,7 +5884,7 @@ function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
 
 function setStoryHiddenPreferenceAuthAction(btn, error) {
   var expired = error === "auth_expired";
-  btn.style.cssText = storySheetGhostButtonCss() + ";cursor:pointer;color:#b54a30";
+  btn.style.cssText = storySheetGhostButtonCss() + ";cursor:pointer;color:var(--trace-page-warning)";
   btn.textContent = expired ? "Sign in" : "Connect";
   btn.title = expired ? "Open Trace to sign in again" : "Open Trace to connect the extension";
   btn.setAttribute("data-trace-connect-action", "1");
@@ -5613,7 +5894,7 @@ function setStoryHiddenPreferenceAuthAction(btn, error) {
 }
 
 function setStoryHiddenPreferenceCheckingAction(btn) {
-  btn.style.cssText = storySheetGhostButtonCss() + ";cursor:wait;color:#6e6a5b";
+  btn.style.cssText = storySheetGhostButtonCss() + ";cursor:wait;color:var(--trace-page-secondary)";
   btn.textContent = "Checking";
   btn.title = "Checking Trace connection";
   btn.setAttribute("data-trace-connect-checking", "1");
@@ -5646,21 +5927,22 @@ function appendStoryWorkMark(body, entry) {
   if (!copy) return;
   var block = document.createElement("section");
   block.setAttribute("data-trace-work-mark", entry.workMark.kind);
-  block.style.cssText = "display:grid;gap:4px;padding:11px 13px;border:1px solid #d4cdc0;border-left:3px solid #bc4329;border-radius:7px;background:#fefcf7";
+  block.style.cssText = "display:grid;gap:4px;padding:11px 13px;border:1px solid var(--trace-page-rule);border-left:3px solid var(--trace-page-warning);border-radius:7px;background:var(--trace-page-surface)";
   var title = document.createElement("strong");
   title.textContent = copy.label;
-  title.style.cssText = "font:650 12px/1.25 " + TRACE_UI.font + ";color:#151e1c";
+  title.style.cssText = "font:650 12px/1.25 " + TRACE_UI.font + ";color:var(--trace-page-ink)";
   block.appendChild(title);
   if (copy.detail) {
     var detail = document.createElement("span");
     detail.textContent = copy.detail;
-    detail.style.cssText = "font:500 11.5px/1.4 " + TRACE_UI.font + ";color:#5b645f";
+    detail.style.cssText = "font:500 12px/1.4 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
     block.appendChild(detail);
   }
   body.appendChild(block);
 }
 
 function renderStorySheet(sheet, view, workKey) {
+  traceRefreshPageTokens();
   var wasOpen = sheet.getAttribute("data-trace-open") === "1";
   var wasPending = sheet.getAttribute("data-trace-modal-pending") === "1";
   var placement = sheet.getAttribute("data-trace-story-sheet-placement");
@@ -5696,24 +5978,24 @@ function renderStorySheet(sheet, view, workKey) {
     "gap:10px",
     "align-items:start",
     "padding:16px 16px 13px",
-    "border-bottom:1px solid #d4cdc0",
-    "background:#fefcf7",
+    "border-bottom:1px solid var(--trace-page-rule)",
+    "background:var(--trace-page-surface)",
   ].join(";");
   var headText = document.createElement("div");
   headText.style.cssText = "min-width:0";
   var source = document.createElement("div");
   source.className = "src";
   source.textContent = "Trace · " + storySheetSourceLine();
-  source.style.cssText = "font:650 9px/1 'Geist Mono',ui-monospace,monospace;letter-spacing:0.14em;text-transform:uppercase;color:#bc4329";
+  source.style.cssText = "font:600 12px/1.3 -apple-system,system-ui,'Segoe UI',sans-serif;color:var(--trace-page-warning)";
   var title = document.createElement("div");
   title.className = "ti";
   title.id = "trace-story-sheet-title";
   title.textContent = (item && item.t) || storyHeadline(view);
-  title.style.cssText = "margin-top:6px;font:700 17px/1.22 " + TRACE_UI.font + ";letter-spacing:0;color:#151e1c;overflow:hidden;text-overflow:ellipsis";
+  title.style.cssText = "margin-top:6px;font:700 17px/1.22 " + TRACE_UI.font + ";letter-spacing:0;color:var(--trace-page-ink);overflow:hidden;text-overflow:ellipsis";
   var author = document.createElement("div");
   author.className = "au";
   author.textContent = storySheetAuthorLine(item);
-  author.style.cssText = "margin-top:2px;font:500 12px/1.3 " + TRACE_UI.font + ";color:#5b645f;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+  author.style.cssText = "margin-top:2px;font:500 12px/1.3 " + TRACE_UI.font + ";color:var(--trace-page-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
   headText.appendChild(source);
   headText.appendChild(title);
   if (author.textContent) headText.appendChild(author);
@@ -5723,7 +6005,7 @@ function renderStorySheet(sheet, view, workKey) {
   close.className = "x-close";
   close.type = "button";
   close.textContent = "\u00d7";
-  close.style.cssText = "width:30px;height:30px;border-radius:8px;border:1px solid #d4cdc0;background:#ece7dd;color:#5b645f;font:600 16px/1 system-ui,-apple-system,'Segoe UI',sans-serif;cursor:pointer";
+  close.style.cssText = "width:30px;height:30px;border-radius:8px;border:1px solid var(--trace-page-rule);background:var(--trace-page-raised);color:var(--trace-page-secondary);font:600 16px/1 system-ui,-apple-system,'Segoe UI',sans-serif;cursor:pointer";
   close.addEventListener("click", function () {
     requestStorySheetClose(sheet);
   });
@@ -5739,17 +6021,22 @@ function renderStorySheet(sheet, view, workKey) {
     connect.style.cssText = "padding:18px 16px;display:flex;flex-direction:column;gap:10px";
     var connectTitle = document.createElement("h4");
     connectTitle.textContent = storyHeadline(view);
-    connectTitle.style.cssText = "margin:0;font:500 18px/1.2 " + storySheetSerifFont() + ";color:#1c2722";
+    connectTitle.style.cssText = "margin:0;font:500 18px/1.2 " + storySheetSerifFont() + ";color:var(--trace-page-ink)";
     var connectCopy = document.createElement("p");
     connectCopy.textContent = storyCaption(view);
-    connectCopy.style.cssText = "margin:0 0 4px;font:500 12.5px/1.5 " + TRACE_UI.font + ";color:#6e6a5b";
+    connectCopy.style.cssText = "margin:0 0 4px;font:500 12.5px/1.5 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
     var connectOpen = document.createElement("a");
     connectOpen.className = "x-pbtn x-pbtn-primary";
     connectOpen.setAttribute("data-trace-open-trace", "1");
-    connectOpen.href = storyTraceOpenUrl(view.authState, view.entry);
-    connectOpen.target = "_blank";
-    connectOpen.rel = "noopener noreferrer";
-    connectOpen.textContent = "Open Trace";
+    if (awaitingAppLink(view)) {
+      connectOpen.href = TRACE_IOS_APP_SETUP_URL;
+      connectOpen.textContent = "Open Trace app";
+    } else {
+      connectOpen.href = storyTraceOpenUrl(view.authState, view.entry);
+      connectOpen.target = "_blank";
+      connectOpen.rel = "noopener noreferrer";
+      connectOpen.textContent = "Open Trace";
+    }
     connectOpen.style.cssText = storySheetPrimaryButtonCss();
     bindTraceOpenLink(connectOpen);
     connect.appendChild(connectTitle);
@@ -5763,14 +6050,14 @@ function renderStorySheet(sheet, view, workKey) {
 
   var body = document.createElement("div");
   body.className = "x-sheet-body";
-  body.style.cssText = "padding:15px 16px;display:flex;flex-direction:column;gap:15px;background:#f7f4ed";
+  body.style.cssText = "padding:15px 16px;display:flex;flex-direction:column;gap:15px;background:var(--trace-page-surface)";
   if (view.entry && view.entry.__traceAutoTrackError === "free_limit_reached") {
     var capacityTitle = document.createElement("h4");
     capacityTitle.textContent = "This story wasn’t added";
-    capacityTitle.style.cssText = "margin:0;font:500 19px/1.2 " + storySheetSerifFont() + ";color:#1c2722";
+    capacityTitle.style.cssText = "margin:0;font:500 19px/1.2 " + storySheetSerifFont() + ";color:var(--trace-page-ink)";
     var capacityCopy = document.createElement("p");
     capacityCopy.textContent = "Your Trace library is full. Make room or get Trace Unlimited to keep adding stories.";
-    capacityCopy.style.cssText = "margin:0;font:500 12.5px/1.5 " + TRACE_UI.font + ";color:#6e6a5b";
+    capacityCopy.style.cssText = "margin:0;font:500 12.5px/1.5 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
     body.appendChild(capacityTitle);
     body.appendChild(capacityCopy);
     sheet.appendChild(body);
@@ -5795,7 +6082,7 @@ function renderStorySheet(sheet, view, workKey) {
     capacityManage.target = "_blank";
     capacityManage.rel = "noopener noreferrer";
     capacityManage.textContent = "Manage library";
-    capacityManage.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:0 12px;border:1px solid rgba(28,39,34,.22);border-radius:9px;color:#1c2722;text-decoration:none;font:650 12px/1 " + TRACE_UI.font + ";flex:1";
+    capacityManage.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:0 12px;border:1px solid rgba(28,39,34,.22);border-radius:9px;color:var(--trace-page-ink);text-decoration:none;font:650 12px/1 " + TRACE_UI.font + ";flex:1";
     bindTraceOpenLink(capacityManage);
     capacityActions.appendChild(capacityManage);
     sheet.appendChild(capacityActions);
@@ -5808,10 +6095,10 @@ function renderStorySheet(sheet, view, workKey) {
     notice.style.cssText = "border-top:1px solid rgba(28,39,34,0.10);padding-top:12px";
     var noticeLabel = document.createElement("div");
     noticeLabel.textContent = storyHeadline(view);
-    noticeLabel.style.cssText = "font:600 12.5px/1.3 " + TRACE_UI.font + ";color:" + (view.entry.__traceStatusError || view.entry.__traceAutoTrackError ? "#b54a30" : "#3a4339");
+    noticeLabel.style.cssText = "font:600 12.5px/1.3 " + TRACE_UI.font + ";color:" + (view.entry.__traceStatusError || view.entry.__traceAutoTrackError ? "var(--trace-page-warning)" : "var(--trace-page-ink)");
     var noticeCopy = document.createElement("div");
     noticeCopy.textContent = storyCaption(view);
-    noticeCopy.style.cssText = "margin-top:3px;font:500 12px/1.4 " + TRACE_UI.font + ";color:#6e6a5b";
+    noticeCopy.style.cssText = "margin-top:3px;font:500 12px/1.4 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
     notice.appendChild(noticeLabel);
     notice.appendChild(noticeCopy);
     body.appendChild(notice);
@@ -5820,7 +6107,7 @@ function renderStorySheet(sheet, view, workKey) {
   var position = document.createElement("section");
   position.className = "x-pos";
   position.setAttribute("data-trace-story-position", "1");
-  position.style.cssText = "display:grid;gap:7px;padding:13px 0;border-top:1px solid #d4cdc0;border-bottom:1px solid #d4cdc0";
+  position.style.cssText = "display:grid;gap:7px;padding:13px 0;border-top:1px solid var(--trace-page-rule);border-bottom:1px solid var(--trace-page-rule)";
   var chapters = displayChaptersForStatus(status, view.entry && view.entry.chapters);
   var positionPercent = null;
   if (
@@ -5836,13 +6123,13 @@ function renderStorySheet(sheet, view, workKey) {
   positionTop.style.cssText = "display:flex;align-items:baseline;justify-content:space-between;gap:10px";
   var positionValue = document.createElement("span");
   positionValue.className = "chap";
-  positionValue.style.cssText = "font:650 14px/1.25 " + TRACE_UI.font + ";letter-spacing:0;color:#151e1c";
+  positionValue.style.cssText = "font:650 14px/1.25 " + TRACE_UI.font + ";letter-spacing:0;color:var(--trace-page-ink)";
   var positionSmall = document.createElement("span");
   positionSmall.className = "sm";
-  positionSmall.style.cssText = "font-weight:500;color:#5b645f";
+  positionSmall.style.cssText = "font-weight:500;color:var(--trace-page-secondary)";
   var positionStatus = document.createElement("span");
   positionStatus.className = "pct";
-  positionStatus.style.cssText = "font:600 11px/1.2 " + TRACE_UI.font + ";color:#5b645f;text-align:right";
+  positionStatus.style.cssText = "font:600 12px/1.2 " + TRACE_UI.font + ";color:var(--trace-page-secondary);text-align:right";
   if (chapters && typeof chapters.current === "number") {
     var positionBig = document.createElement("span");
     positionBig.className = "big";
@@ -5864,11 +6151,11 @@ function renderStorySheet(sheet, view, workKey) {
 
   var meta = document.createElement("div");
   meta.className = "x-meta";
-  meta.style.cssText = "display:flex;flex-direction:column;gap:10px;padding:13px 14px;background:#efeae1;border-left:2px solid #996e29;border-radius:0 8px 8px 0";
+  meta.style.cssText = "display:flex;flex-direction:column;gap:10px;padding:13px 14px;background:var(--trace-page-raised);border-left:2px solid var(--trace-page-authored);border-radius:0 8px 8px 0";
   var privateContext = view.entry && view.entry.privateContext;
   var privateContextLabel = document.createElement("span");
   privateContextLabel.textContent = "Private context";
-  privateContextLabel.style.cssText = "font:500 9px/1 'Geist Mono',ui-monospace,monospace;letter-spacing:0.18em;text-transform:uppercase;color:#777f7a";
+  privateContextLabel.style.cssText = "font:500 12px/1.3 -apple-system,system-ui,'Segoe UI',sans-serif;color:var(--trace-page-secondary)";
   meta.appendChild(privateContextLabel);
   if (privateContext && privateContext.hasNotes) {
     meta.appendChild(storySheetNoteText(privateContext.notePreview || "Private note saved \u00b7 edit in Trace"));
@@ -5901,7 +6188,7 @@ function renderStorySheet(sheet, view, workKey) {
 
   var actions = document.createElement("div");
   actions.className = "x-sheet-foot";
-  actions.style.cssText = "display:flex;gap:8px;padding:13px 16px 16px;background:#f7f4ed;border-top:1px solid #d4cdc0";
+  actions.style.cssText = "display:flex;gap:8px;padding:13px 16px 16px;background:var(--trace-page-surface);border-top:1px solid var(--trace-page-rule)";
   var open = document.createElement("a");
   open.className = "x-pbtn x-pbtn-primary";
   open.setAttribute("data-trace-open-trace", "1");
@@ -6768,7 +7055,389 @@ function scheduleKernelProjectionRetry(workKey, attempt) {
   }, KERNEL_PROJECTION_RETRY_DELAYS_MS[attempt]);
 }
 
+// -------------------------------------------------------
+// Saved note: a one-time, page-level confirmation that a story which was not
+// in the reader's confirmed Library when this page loaded is now confirmed by
+// the account projection. It floats above the page (no layout shift), never
+// takes focus, and is announced politely. Progress updates never show it.
+// -------------------------------------------------------
+var TRACE_SAVED_NOTE_ATTR = "data-trace-saved-note";
+var TRACE_SAVED_NOTE_VISIBLE_MS = 15000;
+var TRACE_SAVED_NOTE_FIRST_KEY = "traceSavedNoteFirstStoryShownV1";
+var TRACE_CHAPTER_KEPT_COUNT_KEY = "traceChapterKeptNotesShownV1";
+var chapterKeptState = { workKey: null, lastChapter: null, shown: false, pending: false, n2Shown: false };
+var storySavedNoteState = { workKey: null, knownAtLoad: null, shown: false };
+
+// The page can be replaced right after its first load (a redirect or reload),
+// which would discard the note. A tab-scoped marker lets the replacement page
+// finish the same note. It holds only the work key and times, never a title.
+var TRACE_SAVED_NOTE_SESSION_KEY = "trace:saved-note:v1";
+
+function readSavedNoteMarker() {
+  try {
+    var raw = window.sessionStorage && window.sessionStorage.getItem(TRACE_SAVED_NOTE_SESSION_KEY);
+    var value = raw ? JSON.parse(raw) : null;
+    return value && typeof value.workKey === "string" && typeof value.until === "number" ? value : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeSavedNoteMarker(value) {
+  try {
+    if (!window.sessionStorage) return;
+    if (value) window.sessionStorage.setItem(TRACE_SAVED_NOTE_SESSION_KEY, JSON.stringify(value));
+    else window.sessionStorage.removeItem(TRACE_SAVED_NOTE_SESSION_KEY);
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+function showChapterKeptNote(workKey, chapter) {
+  traceRefreshPageTokens();
+  if (shouldDisableTraceContentScript() || getWorkKeyFromUrl() !== workKey || finishBandVisible() || activeStorySavedNote) return false;
+  var story = null;
+  try { story = collectStoryForAutoTrack(); } catch (_) { story = null; }
+  var title = story && story.t ? String(story.t) : "";
+  var reduced = storySavedNoteReducedMotion();
+  var note = createStoryPageNote("kept", title, chapter, reduced).note;
+  note.setAttribute(TRACE_SAVED_NOTE_ATTR, workKey);
+  storySavedNoteMount(note);
+  activeStorySavedNote = note;
+  announceStorySheet("Chapter " + chapter + " kept. " + title + ".");
+  note.__traceKeepTimer = setInterval(function () {
+    if (activeStorySavedNote !== note) { clearInterval(note.__traceKeepTimer); return; }
+    if (finishBandVisible()) { removeStorySavedNote(false); return; }
+    if (!note.isConnected || !storySavedNoteHost || !storySavedNoteHost.isConnected) storySavedNoteMount(note);
+  }, 400);
+  if (!reduced) {
+    var reveal = function () { note.style.opacity = "1"; note.style.transform = "none"; };
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(reveal);
+    else setTimeout(reveal, 16);
+  }
+  var remaining = 4000;
+  var started = Date.now();
+  var schedule = function () {
+    started = Date.now();
+    note.__traceHideTimer = setTimeout(function () { removeStorySavedNote(false); }, remaining);
+  };
+  note.addEventListener("focusin", function () {
+    if (note.__traceHideTimer) clearTimeout(note.__traceHideTimer);
+    remaining = Math.max(0, remaining - (Date.now() - started));
+  });
+  note.addEventListener("focusout", function (event) { if (!note.contains(event.relatedTarget)) schedule(); });
+  schedule();
+  return true;
+}
+
+function observeConfirmedChapter(workKey, entry, projection) {
+  var current = storyEntryChapterCurrent(entry);
+  if (chapterKeptState.workKey !== workKey) {
+    var previous = null;
+    try { previous = JSON.parse(window.sessionStorage.getItem("trace:confirmed-chapter:v1")); } catch (_) { /* no baseline */ }
+    chapterKeptState = { workKey: workKey,
+      lastChapter: previous && previous.workKey === workKey ? previous.chapter : current,
+      shown: false, pending: false, n2Shown: false };
+  }
+  if (Number.isInteger(current) && current >= 0) {
+    try { window.sessionStorage.setItem("trace:confirmed-chapter:v1", JSON.stringify({ workKey: workKey, chapter: current })); } catch (_) { /* optional feedback */ }
+  }
+  if (!Number.isInteger(current) || current < 1) return;
+  if (!Number.isInteger(chapterKeptState.lastChapter)) { chapterKeptState.lastChapter = current; return; }
+  var advanced = current > chapterKeptState.lastChapter;
+  chapterKeptState.lastChapter = current;
+  var pref = projection && projection.workPreferences && projection.workPreferences[workKey];
+  if (!advanced || chapterKeptState.shown || chapterKeptState.pending || chapterKeptState.n2Shown ||
+      (entry && entry.hidden) || (pref && pref.hidden) || finishBandVisible() || activeStorySavedNote) return;
+  chapterKeptState.pending = true;
+  try {
+    ext.storage.local.get([TRACE_SAVED_NOTE_FIRST_KEY, TRACE_CHAPTER_KEPT_COUNT_KEY, "prefAutoTrackEnabled"], function (res) {
+      chapterKeptState.pending = false;
+      if (ext.runtime.lastError || chapterKeptState.workKey !== workKey || chapterKeptState.shown ||
+          chapterKeptState.n2Shown || !res || res[TRACE_SAVED_NOTE_FIRST_KEY] !== true ||
+          res.prefAutoTrackEnabled === false || finishBandVisible() || activeStorySavedNote) return;
+      var count = res[TRACE_CHAPTER_KEPT_COUNT_KEY];
+      count = Number.isInteger(count) && count >= 0 ? count : 0;
+      if (count >= 3) return;
+      chapterKeptState.pending = true;
+      ext.storage.local.set({ [TRACE_CHAPTER_KEPT_COUNT_KEY]: count + 1 }, function () {
+        chapterKeptState.pending = false;
+        if (ext.runtime.lastError || chapterKeptState.workKey !== workKey || chapterKeptState.shown) return;
+        chapterKeptState.shown = showChapterKeptNote(workKey, current);
+      });
+    });
+  } catch (_) { chapterKeptState.pending = false; }
+}
+
+function noteStoryProjection(workKey, projection) {
+  var entries = projection && projection.entries ? projection.entries : {};
+  var entry = entries[workKey];
+  observeConfirmedChapter(workKey, entry, projection);
+  var known = !!entry;
+  if (storySavedNoteState.workKey !== workKey) {
+    storySavedNoteState = { workKey: workKey, knownAtLoad: known, shown: false };
+    var marker = readSavedNoteMarker();
+    if (known && marker && marker.workKey === workKey && !marker.dismissed && marker.until > Date.now()) {
+      storySavedNoteState.shown = true;
+      showStorySavedNote(workKey, entry, marker.until - Date.now());
+    }
+    return;
+  }
+  if (storySavedNoteState.knownAtLoad !== false || !known || storySavedNoteState.shown) return;
+  storySavedNoteState.shown = true;
+  // Only the reader's first saved story gets the note: it teaches what Trace
+  // does once, then Trace stays quiet. The flag holds no story information.
+  try {
+    ext.storage.local.get([TRACE_SAVED_NOTE_FIRST_KEY], function (res) {
+      if (ext.runtime.lastError || (res && res[TRACE_SAVED_NOTE_FIRST_KEY] === true)) return;
+      ext.storage.local.set({ [TRACE_SAVED_NOTE_FIRST_KEY]: true });
+      showStorySavedNote(workKey, entry);
+    });
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+// The end-of-story band asks the reader to decide; it takes precedence over
+// this informational note when both would share the bottom of the screen.
+function finishBandVisible() {
+  var band = document.querySelector("[data-trace-finish-qualify]");
+  if (!band || typeof band.getBoundingClientRect !== "function") return false;
+  var rect = band.getBoundingClientRect();
+  var height = window.innerHeight || document.documentElement.clientHeight || 0;
+  return rect.height > 0 && rect.bottom > 0 && rect.top < height;
+}
+
+function storySavedNoteReducedMotion() {
+  try {
+    return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  } catch (_) {
+    return false;
+  }
+}
+
+var activeStorySavedNote = null;
+var storySavedNoteHost = null;
+
+// The note lives in a closed shadow root on <html>, outside <body>, so host
+// scripts that manage body children or fixed elements cannot reach it.
+function storySavedNoteMount(note) {
+  var root = document.documentElement;
+  if (!storySavedNoteHost || !storySavedNoteHost.isConnected) {
+    storySavedNoteHost = document.createElement("trace-saved-note");
+    storySavedNoteHost.setAttribute(TRACE_SAVED_NOTE_ATTR, "");
+    storySavedNoteHost.style.cssText = "all:initial;position:fixed;inset:auto 0 0 0;z-index:2147483646;pointer-events:none;display:block";
+    storySavedNoteHost.__traceShadow = storySavedNoteHost.attachShadow
+      ? storySavedNoteHost.attachShadow({ mode: "closed" })
+      : storySavedNoteHost;
+    root.appendChild(storySavedNoteHost);
+  }
+  var tokens = traceHostPageTokens();
+  Object.keys(tokens).forEach(function (name) {
+    storySavedNoteHost.style.setProperty("--trace-page-" + name, tokens[name]);
+  });
+  note.style.pointerEvents = "auto";
+  storySavedNoteHost.__traceShadow.appendChild(note);
+}
+
+function removeStorySavedNote(immediate) {
+  var note = activeStorySavedNote;
+  activeStorySavedNote = null;
+  if (!note) {
+    var stale = document.querySelector("trace-saved-note");
+    if (stale) stale.remove();
+    return;
+  }
+  if (note.__traceHideTimer) clearTimeout(note.__traceHideTimer);
+  if (note.__traceKeepTimer) clearInterval(note.__traceKeepTimer);
+  if (immediate || storySavedNoteReducedMotion()) {
+    note.remove();
+    return;
+  }
+  note.style.opacity = "0";
+  note.style.transform = "translateY(8px)";
+  setTimeout(function () { note.remove(); }, 350);
+
+}
+
+function storyNoteCheckSvg(size) {
+  var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 20 20");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.8");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  svg.style.cssText = "display:block;flex:0 0 auto;width:" + size + "px;height:" + size + "px";
+  var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M3.5 10.5l4.2 4.2L16.5 5.8");
+  svg.appendChild(path);
+  return svg;
+}
+
+function storyNoteDismissSvg() {
+  var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.5");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("aria-hidden", "true");
+  svg.style.cssText = "display:block;width:12px;height:12px";
+  var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M1.5 1.5l9 9m0-9l-9 9");
+  svg.appendChild(path);
+  return svg;
+}
+
+function createStoryPageNote(kind, title, chapter, reduced) {
+  var compact = kind === "kept";
+  // Resolve Dynamic Type on Trace's own node; archive body sizes are fixed.
+  function noteFont(px) { return "clamp(" + px + "px," + (px / 17) + "em," + (px * 2) + "px)"; }
+  var note = document.createElement("div");
+  note.setAttribute(TRACE_SAVED_NOTE_ATTR, kind);
+  note.style.cssText = [
+    "position:fixed", "left:12px", "right:12px",
+    "bottom:max(66px,calc(50px + env(safe-area-inset-bottom)))",
+    "z-index:2147483646", "box-sizing:border-box",
+    compact ? "width:max-content" : "max-width:440px",
+    compact ? "max-width:calc(100vw - 24px)" : "",
+    "margin:0 auto", "display:flex", "align-items:center",
+    "gap:" + (compact ? "8px" : "12px"),
+    "padding:" + (compact ? "8px 14px" : "12px 6px 12px 16px"),
+    "background:var(--trace-page-surface)", "color:var(--trace-page-ink)",
+    "border:0", "border-radius:" + (compact ? "22px" : "18px"),
+    "box-shadow:0 0 0 1px color-mix(in srgb,var(--trace-page-rule) 70%,transparent),0 14px 30px -12px rgba(0,0,0,.35)",
+    "font:17px/1.3 -apple-system,system-ui,sans-serif",
+    "font: -apple-system-body",
+    "text-align:left",
+    "opacity:1",
+    "transform:" + (reduced ? "none" : "translateY(14px)"),
+    "transition:" + (reduced ? "opacity .4s ease" : "opacity .4s ease,transform .4s ease"),
+  ].filter(Boolean).join(";");
+  var mark = document.createElement("span");
+  mark.setAttribute("aria-hidden", "true");
+  mark.style.cssText = "align-self:flex-start;padding-top:" + (compact ? "2px" : "1px") + ";color:var(--trace-page-ink)";
+  mark.appendChild(storyNoteCheckSvg(compact ? 16 : 20));
+  note.appendChild(mark);
+
+  var copy = document.createElement("span");
+  copy.style.cssText = "flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px";
+  var heading = document.createElement("strong");
+  heading.textContent = compact ? "Chapter " + chapter + " kept" : "Saved to your Library";
+  heading.style.cssText = "font-weight:600;font-size:" + noteFont(compact ? 14 : 15) + ";line-height:1.3;color:var(--trace-page-ink)";
+  copy.appendChild(heading);
+  if (title) {
+    var titleLine = document.createElement("span");
+    titleLine.textContent = title;
+    titleLine.style.cssText = "font-weight:400;font-size:" + noteFont(compact ? 12.5 : 13) + ";line-height:1.35;color:var(--trace-page-secondary)";
+    copy.appendChild(titleLine);
+  }
+  if (!compact) {
+    var detail = document.createElement("span");
+    detail.textContent = "Trace keeps your place as you read.";
+    detail.style.cssText = "font-weight:400;font-size:" + noteFont(13) + ";line-height:1.35;color:var(--trace-page-secondary)";
+    copy.appendChild(detail);
+  }
+  note.appendChild(copy);
+  if (compact) return { note: note };
+
+  var details = document.createElement("button");
+  details.type = "button";
+  details.textContent = "Details";
+  details.setAttribute("aria-label", "Details: " + title + " in Trace");
+  details.style.cssText = "flex:0 0 auto;min-height:44px;padding:0 8px;border:0;background:transparent;color:var(--trace-page-teal);font-family:inherit;font-weight:500;font-size:" + noteFont(15) + ";line-height:1;cursor:pointer";
+  note.appendChild(details);
+
+  var dismiss = document.createElement("button");
+  dismiss.type = "button";
+  dismiss.setAttribute("aria-label", "Dismiss");
+  dismiss.style.cssText = "flex:0 0 44px;width:44px;height:44px;display:flex;align-items:center;justify-content:center;border:0;background:transparent;color:var(--trace-page-tertiary);cursor:pointer";
+  dismiss.appendChild(storyNoteDismissSvg());
+  note.appendChild(dismiss);
+  return { note: note, details: details, dismiss: dismiss };
+}
+
+function showStorySavedNote(workKey, entry, remainingMs) {
+  traceRefreshPageTokens();
+  if (shouldDisableTraceContentScript() || getWorkKeyFromUrl() !== workKey) return;
+  if (finishBandVisible()) return;
+  removeStorySavedNote(true);
+  var continued = typeof remainingMs === "number";
+  var visibleMs = continued ? Math.max(3000, remainingMs) : TRACE_SAVED_NOTE_VISIBLE_MS;
+  if (!continued) {
+    writeSavedNoteMarker({ workKey: workKey, until: Date.now() + visibleMs, dismissed: false });
+  }
+  var story = null;
+  try { story = collectStoryForAutoTrack(); } catch (_) { story = null; }
+  var title = story && story.t ? String(story.t) : "";
+  var reduced = storySavedNoteReducedMotion();
+
+  chapterKeptState.n2Shown = true;
+  var parts = createStoryPageNote("saved", title, 0, reduced);
+  var note = parts.note;
+  note.setAttribute(TRACE_SAVED_NOTE_ATTR, workKey);
+  parts.details.addEventListener("click", function (event) {
+    event.preventDefault();
+    event.stopPropagation();
+    writeSavedNoteMarker({ workKey: workKey, until: 0, dismissed: true });
+    removeStorySavedNote(true);
+    var handle = document.querySelector("[" + TRACE_STORY_HANDLE_ATTR + "]");
+    if (handle && typeof handle.__traceStoryHandleAction === "function") handle.__traceStoryHandleAction();
+  });
+  parts.dismiss.addEventListener("click", function (event) {
+    event.preventDefault();
+    event.stopPropagation();
+    writeSavedNoteMarker({ workKey: workKey, until: 0, dismissed: true });
+    removeStorySavedNote(false);
+  });
+  storySavedNoteMount(note);
+  activeStorySavedNote = note;
+  if (!continued) announceStorySheet("Saved to your Library. " + title + ". Trace keeps your place as you read.");
+  // Some archive pages rebuild or prune fixed elements (for example mobile ad
+  // layers). Keep the note attached for its visible window unless the reader
+  // dismissed it; it never moves or re-announces.
+  note.__traceKeepTimer = setInterval(function () {
+    if (activeStorySavedNote !== note) {
+      clearInterval(note.__traceKeepTimer);
+      return;
+    }
+    if (finishBandVisible()) {
+      removeStorySavedNote(false);
+      return;
+    }
+    if (!note.isConnected || !storySavedNoteHost || !storySavedNoteHost.isConnected) {
+      storySavedNoteMount(note);
+    }
+  }, 400);
+  if (!reduced) {
+    var reveal = function () {
+      note.style.opacity = "1";
+      note.style.transform = "none";
+    };
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(reveal);
+    else setTimeout(reveal, 16);
+  }
+  var remaining = visibleMs;
+  var started = Date.now();
+  var scheduleHide = function () {
+    if (note.__traceHideTimer) clearTimeout(note.__traceHideTimer);
+    started = Date.now();
+    note.__traceHideTimer = setTimeout(function () { removeStorySavedNote(false); }, remaining);
+  };
+  note.addEventListener("focusin", function () {
+    if (note.__traceHideTimer) clearTimeout(note.__traceHideTimer);
+    remaining = Math.max(0, remaining - (Date.now() - started));
+  });
+  note.addEventListener("focusout", function (event) {
+    if (!note.contains(event.relatedTarget)) scheduleHide();
+  });
+  scheduleHide();
+}
+
 function renderQuickAddButton(workKey, projectionAttempt) {
+  if (!collectStoryForAutoTrack()) { removeQuickAddElements(); return; }
   var anchor = findQuickAddAnchor();
   if (!anchor) {
     clearKernelProjectionRetry(workKey);
@@ -6806,6 +7475,11 @@ function renderQuickAddButton(workKey, projectionAttempt) {
         }
         clearKernelProjectionRetry(workKey);
         var snapshot = response.snapshot || { state: "signed_out" };
+        if (snapshot.state !== "connected" && storySavedNoteState.workKey !== workKey) {
+          // Not linked when the page loaded: Trace could not know this story
+          // was in the Library, so a save after linking counts as new here.
+          storySavedNoteState = { workKey: workKey, knownAtLoad: false, shown: false };
+        }
         showCapacityRecoveryNotice(
           response.projection && response.projection.capacity,
           false,
@@ -6819,6 +7493,14 @@ function renderQuickAddButton(workKey, projectionAttempt) {
           traceAuthState: snapshot,
           authToken: snapshot.state === "connected" ? "kernel-session" : null,
         });
+        if (snapshot.state === "connected") {
+          // The note is optional feedback; it must never block the handle.
+          try {
+            noteStoryProjection(workKey, response.projection);
+          } catch (_) {
+            /* ignore */
+          }
+        }
       },
     );
     return;
@@ -6860,6 +7542,13 @@ function initQuickAdd() {
   try {
     ext.storage.onChanged.addListener(function (changes, area) {
       if (area !== "local") return;
+      if (changes.authToken || changes.traceAuthState || changes[TRACE_ACCOUNT_ID_KEY]) {
+        try { window.sessionStorage.removeItem("trace:confirmed-chapter:v1"); } catch (_) { /* optional feedback */ }
+      }
+      if (changes.prefAutoTrackEnabled) {
+        if (changes.prefAutoTrackEnabled.newValue !== false) scheduleAutoTrackForCurrentPage();
+        renderQuickAddButton(workKey);
+      }
       if (
         !changes[OVERLAY_CACHE_KEY] &&
         !changes[WORK_STATE_STORAGE_KEY] &&
@@ -6873,6 +7562,9 @@ function initQuickAdd() {
         queryBackgroundWorkStateForStory(workKey);
       }
       renderQuickAddButton(workKey);
+      if ((changes.authToken || changes.traceAuthState || changes[TRACE_ACCOUNT_ID_KEY]) && !document.hidden) {
+        retryAutoTrackAfterLink();
+      }
     });
   } catch (_) {
     /* ignore */
@@ -6883,6 +7575,7 @@ function initQuickAdd() {
       requestStoryAuthRefreshOnResume(workKey);
       queryBackgroundWorkStateForStory(workKey);
       renderQuickAddButton(workKey);
+      retryAutoTrackAfterLink();
     });
     window.addEventListener("pageshow", function () {
       requestStoryAuthRefreshOnResume(workKey);
@@ -6894,6 +7587,7 @@ function initQuickAdd() {
         requestStoryAuthRefreshOnResume(workKey);
         queryBackgroundWorkStateForStory(workKey);
         renderQuickAddButton(workKey);
+        retryAutoTrackAfterLink();
       }
     });
   } catch (_) {
@@ -6935,3 +7629,5 @@ if (!TRACE_ACTIVE_TAB_PROBE_MODE && !shouldDisableTraceContentScript()) {
     announceArchivePageToBackground();
   });
 }
+
+})();

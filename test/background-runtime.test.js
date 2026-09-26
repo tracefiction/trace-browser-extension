@@ -3241,7 +3241,7 @@ test("TRACE_SET_READER_STATUS patches library entry status and overlay cache", a
       if (String(url).endsWith(`/api/extension/library/${entryId}`)) {
         assert.equal(init.method, "PATCH");
         assert.equal(init.headers.Authorization, "Bearer token-status-1");
-        assert.deepEqual(JSON.parse(init.body), {
+        assert.deepEqual(readingCommandBody(init.body), {
           status: "READING",
           progress: { unit: "CHAPTER", value: 1, total: 17 },
         });
@@ -3662,7 +3662,7 @@ test("TRACE_PATCH_LIBRARY_ENTRY patches catch-up progress and clears new chapter
       },
     },
     fetchImpl: async (_url, init) => {
-      assert.deepEqual(JSON.parse(init.body), {
+      assert.deepEqual(readingCommandBody(init.body), {
         progress: { unit: "CHAPTER", value: 6, total: 8 },
       });
       return createResponse({ json: { data: { entry_id: entryId } } });
@@ -3706,7 +3706,7 @@ test("TRACE_PATCH_LIBRARY_ENTRY accepts canonical finished status and work overr
       },
     },
     fetchImpl: async (_url, init) => {
-      assert.deepEqual(JSON.parse(init.body), {
+      assert.deepEqual(readingCommandBody(init.body), {
         status: "FINISHED",
         progress: { unit: "CHAPTER", value: 8, total: 8 },
         story_snapshot: { work_status_override: "abandoned" },
@@ -3850,7 +3850,9 @@ test("TRACE_FINISH_QUALIFICATION_SIGNAL posts unresolved and resolved finish evi
   assert.deepEqual(plainJson(resolvedResponse.data.entry), entry);
   assert.deepEqual(plainJson(h.store.libraryOverlayCache.entries["ao3:781"]), entry);
   assert.equal(h.store.libraryOverlayCache.accountId, "unknown");
-  assert.deepEqual(plainJson(seenBodies), [
+  assert.match(seenBodies[1].readingActivity.calendarDate, /^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(seenBodies[1].readingActivity.operationId, undefined);
+  assert.deepEqual(plainJson(seenBodies).map(({readingActivity, ...body}) => body), [
     {
       entryId,
       workKey: "ao3:781",
@@ -5396,3 +5398,11 @@ test("confirmed save actions bypass the heartbeat throttle and carry the action"
   assert.equal(beats[1].action, "quick_add");
   assert.equal(beats[1].hostKind, "ao3");
 });
+
+function readingCommandBody(serialized) {
+  const {readingActivity, ...body}=JSON.parse(serialized);
+  assert.match(readingActivity.operationId,/^[0-9a-f-]{36}$/i);
+  assert.match(readingActivity.calendarDate,/^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(readingActivity.timeZone.kind,"OFFSET");
+  return body;
+}
