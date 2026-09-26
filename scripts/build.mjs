@@ -177,6 +177,41 @@ const EARNED_PERMISSION_DEV_API_BASE =
   "https://api.development.example.test";
 const EARNED_PERMISSION_DEV_WEB_ORIGIN =
   "https://web.development.example.test";
+// This input belongs only to the deliberately opted-in development package.
+// Resolve it once so runtime URLs and exact release assertions cannot diverge.
+const devConfigPath = env.TRACE_EXTENSION_DEV_CONFIG;
+if (devConfigPath !== undefined && !IOS_EARNED_PERMISSION_PREVIEW_RELEASE) {
+  throw new Error("TRACE_EXTENSION_DEV_CONFIG requires the explicit earned-permission preview-release mode.");
+}
+function validatedDevelopmentOrigin(value) {
+  if (typeof value !== "string" || value.length > 253 ||
+      !/^https:\/\/[a-z0-9]+(?:[a-z0-9.-]*[a-z0-9])?$/.test(value)) {
+    throw new Error("Development configuration requires canonical HTTPS origins without credentials, ports, paths, query or fragment.");
+  }
+  const url = new URL(value);
+  const labels = url.hostname.split(".");
+  if (url.origin !== value || labels.length < 2 || labels.some(label =>
+      !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)) ||
+      labels.includes("localhost") || /^[0-9.]+$/.test(url.hostname)) {
+    throw new Error("Development configuration requires a non-local, exact DNS origin without wildcards.");
+  }
+  return value;
+}
+const developmentOrigins = (() => {
+  if (devConfigPath === undefined) return {
+    apiOrigin: EARNED_PERMISSION_DEV_API_BASE, webOrigin: EARNED_PERMISSION_DEV_WEB_ORIGIN,
+  };
+  if (!path.isAbsolute(devConfigPath)) throw new Error("TRACE_EXTENSION_DEV_CONFIG must be an absolute JSON file path.");
+  const config = JSON.parse(fs.readFileSync(devConfigPath, "utf8"));
+  if (!config || Array.isArray(config) || typeof config !== "object" ||
+      Object.keys(config).sort().join(",") !== "apiOrigin,webOrigin") {
+    throw new Error("Development configuration requires exactly apiOrigin and webOrigin.");
+  }
+  return {
+    apiOrigin: validatedDevelopmentOrigin(config.apiOrigin),
+    webOrigin: validatedDevelopmentOrigin(config.webOrigin),
+  };
+})();
 const FIREFOX_RELEASE_EXTENSION_ID = "trace@tracefiction.com";
 const FIREFOX_DEV_EXTENSION_ID = "trace-dev@tracefiction.com";
 const SAFARI_ONLY_PERMISSIONS = ["nativeMessaging"];
@@ -252,10 +287,10 @@ function browserStoreManifest(baseManifest, browserHostPermissions) {
 }
 
 const TRACE_API_BASE = (
-  env.TRACE_API_BASE ?? "http://localhost:3001"
+  IOS_EARNED_PERMISSION_PREVIEW_RELEASE ? developmentOrigins.apiOrigin : (env.TRACE_API_BASE ?? "http://localhost:3001")
 ).replace(/\/$/, "");
 const TRACE_WEB_ORIGIN = (
-  env.TRACE_WEB_ORIGIN ?? "http://localhost:5173"
+  IOS_EARNED_PERMISSION_PREVIEW_RELEASE ? developmentOrigins.webOrigin : (env.TRACE_WEB_ORIGIN ?? "http://localhost:5173")
 ).replace(/\/$/, "");
 
 if (NATIVE_IMPORT_HANDOFF) {
@@ -321,14 +356,14 @@ if (IS_RELEASE) {
     "TRACE_API_BASE",
     TRACE_API_BASE,
     IOS_EARNED_PERMISSION_PREVIEW_RELEASE
-      ? EARNED_PERMISSION_DEV_API_BASE
+      ? developmentOrigins.apiOrigin
       : RELEASE_TRACE_API_BASE,
   );
   assertReleaseUrl(
     "TRACE_WEB_ORIGIN",
     TRACE_WEB_ORIGIN,
     IOS_EARNED_PERMISSION_PREVIEW_RELEASE
-      ? EARNED_PERMISSION_DEV_WEB_ORIGIN
+      ? developmentOrigins.webOrigin
       : RELEASE_TRACE_WEB_ORIGIN,
   );
 } else if (isLocalLike(TRACE_API_BASE) || isLocalLike(TRACE_WEB_ORIGIN)) {

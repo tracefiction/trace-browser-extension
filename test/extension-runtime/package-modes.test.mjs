@@ -368,3 +368,51 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     runBuild("build:release");
   }
 });
+
+test("explicit development JSON pairs output and rejects invalid or production use", () => {
+  const temporary = fs.mkdtempSync(path.join(ROOT, ".trace-dev-config-test-"));
+  const config = path.join(temporary, "config.json");
+  const pair = { apiOrigin: "https://api.synthetic.example.test", webOrigin: "https://web.synthetic.example.test" };
+  const previewEnv = { ...RELEASE_ENV, TRACE_BUILD_MODE: "release", TRACE_SESSION_MODE: "kernel",
+    TRACE_IOS_EARNED_PERMISSION_ONBOARDING: "1", TRACE_IOS_EARNED_PERMISSION_PREVIEW_RELEASE: "1",
+    TRACE_EXTENSION_DEV_CONFIG: config };
+  const build = (env = previewEnv) => spawnSync(process.execPath, ["scripts/build.mjs"], { cwd: ROOT, env, encoding: "utf8" });
+  try {
+    fs.writeFileSync(config, JSON.stringify(pair));
+    const result = build();
+    assert.equal(result.status, 0, result.stderr);
+    const worker = fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8");
+    assert(worker.includes(pair.apiOrigin) && worker.includes(pair.webOrigin));
+    assert(!worker.includes("https://api.development.example.test"));
+    assert(fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8").includes(pair.webOrigin));
+    assert.deepEqual(manifest(RESOURCES).content_scripts.find(entry => entry.js.includes("sync.js")).matches, [`${pair.webOrigin}/*`]);
+    for (const invalid of [null, [], {}, { ...pair, extra: true }, { apiOrigin: pair.apiOrigin },
+      ...[null, 12, "http://api.example.test", "https://localhost", "https://foo.localhost", "https://127.0.0.1",
+        "https://[::1]", "https://*.example.test", "https://user:pass@api.example.test", "https://api.example.test/",
+        "https://api.example.test/path", "https://api.example.test?q=1", "https://api.example.test#x",
+        "https://api.example.test:443", "https://bad..test", " https://api.example.test"].flatMap(value => [
+          { ...pair, apiOrigin: value }, { ...pair, webOrigin: value }])]) {
+      fs.writeFileSync(config, JSON.stringify(invalid));
+      assert.notEqual(build().status, 0, JSON.stringify(invalid));
+    }
+    fs.writeFileSync(config, "{");
+    assert.notEqual(build().status, 0);
+    fs.unlinkSync(config);
+    assert.notEqual(build().status, 0, "Missing supplied file is not absence");
+    fs.writeFileSync(config, JSON.stringify(pair));
+    for (const env of [
+      { ...RELEASE_ENV, TRACE_BUILD_MODE: "release", TRACE_EXTENSION_DEV_CONFIG: config },
+      { ...previewEnv, TRACE_BUILD_MODE: "dev" },
+      { ...previewEnv, TRACE_IOS_EARNED_PERMISSION_ONBOARDING: "0" },
+    ]) assert.notEqual(build(env).status, 0, "Override requires the explicit preview mode");
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+    runBuild("build:release");
+  }
+  for (const root of [RESOURCES, path.join(ROOT, "dist/chrome"), path.join(ROOT, "dist/firefox")]) {
+    for (const file of ["background.js", "popup-config.js", "content-config.js", "manifest.json"]) {
+      const output = fs.readFileSync(path.join(root, file), "utf8");
+      assert(!output.includes("synthetic.example.test") && !output.includes("development.example.test"));
+    }
+  }
+});

@@ -69,3 +69,13 @@ test("release builds preserve all supported AO3 aliases and only release Trace o
   assert.equal(safariHostPermissions.includes("https://*.ao3.org/*"), false);
   assert.deepEqual(syncMatches, ["https://www.tracefiction.com/*"]);
 });
+
+test("synthetic paired development origins grant only the configured sync host", () => {
+  const permissions = configuredOriginPermissions({
+    traceApiBase: "https://api.synthetic.example.test",
+    traceWebOrigin: "https://web.synthetic.example.test",
+  });
+  assert.deepEqual(permissions.syncMatches, ["https://web.synthetic.example.test/*"]);
+  assert(!permissions.safariHostPermissions.includes("https://api.synthetic.example.test/*"));
+  assert(permissions.browserHostPermissions.includes("https://api.synthetic.example.test/*"));
+});
