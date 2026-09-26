@@ -224,3 +224,61 @@ enum TraceSafariOnboardingReceipt {
         return ["ok": defaults.data(forKey: receiptKey) == data]
     }
 }
+
+/// Local automatic-saving preference evidence. No access, activation or save
+/// is implied. Unknown/expired/other-account evidence must never mean off.
+enum TraceSafariTrackingPreference {
+    static let key = "traceSafariTrackingPreferenceV1"
+    static let maxAge: Double = 86_400_000
+    struct Snapshot: Codable, Equatable {
+        let version: Int
+        let accountID: String
+        let apiOrigin: String
+        let provider: TraceSafariProviderCodec.ImportBinding
+        let enabled: Bool
+        let setAt: Double
+        let observedAt: Double
+    }
+
+    static func read(defaults: UserDefaults, accountID: String, apiOrigin: String,
+                     provider: TraceSafariProviderCodec.ImportBinding?, now: Double) -> Snapshot? {
+        guard let data = defaults.data(forKey: key),
+              let value = try? JSONDecoder().decode(Snapshot.self, from: data),
+              value.version == 1, value.accountID == accountID, !accountID.isEmpty,
+              value.apiOrigin == apiOrigin, TraceSafariOnboardingReceipt.allowsAPIOrigin(apiOrigin),
+              let provider, value.provider == provider,
+              validTimes(setAt: value.setAt, observedAt: value.observedAt, now: now) else { return nil }
+        return value
+    }
+
+    private static func validTimes(setAt: Double, observedAt: Double, now: Double) -> Bool {
+        now.isFinite && setAt.isFinite && observedAt.isFinite && setAt > 0 &&
+        setAt <= observedAt && observedAt <= now && now - observedAt <= maxAge
+    }
+
+    static func handle(_ payload: [String: Any], defaults: UserDefaults,
+                       provider: TraceSafariProviderCodec.ImportBinding?, now: Double,
+                       configuredAPIOrigin: String) -> [String: Any] {
+        guard let provider, TraceSafariOnboardingReceipt.allowsAPIOrigin(configuredAPIOrigin),
+              payload["apiOrigin"] as? String == configuredAPIOrigin else { return ["ok": false] }
+        if payload["type"] as? String == "TRACE_IOS_TRACKING_PREFERENCE_PREPARE" {
+            return ["ok": true, "provider": ["sessionID": provider.sessionID, "recordDigest": provider.recordDigest]]
+        }
+        guard payload["type"] as? String == "TRACE_IOS_TRACKING_PREFERENCE",
+              let data = try? JSONSerialization.data(withJSONObject: payload),
+              let value = try? JSONDecoder().decode(Snapshot.self, from: data),
+              value.version == 1, !value.accountID.isEmpty, value.accountID.utf8.count <= 256,
+              value.provider == provider,
+              validTimes(setAt: value.setAt, observedAt: value.observedAt, now: now),
+              now - value.observedAt <= 300_000 else { return ["ok": false] }
+        if let previous = read(defaults: defaults, accountID: value.accountID,
+                               apiOrigin: configuredAPIOrigin, provider: provider, now: now),
+           previous.setAt > value.setAt || previous.observedAt > value.observedAt ||
+           (previous.setAt == value.setAt && previous.enabled != value.enabled) {
+            return ["ok": false]
+        }
+        guard let encoded = try? JSONEncoder().encode(value) else { return ["ok": false] }
+        defaults.set(encoded, forKey: key)
+        return ["ok": true]
+    }
+}

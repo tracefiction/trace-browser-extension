@@ -23,6 +23,7 @@ import {
   type StoryTrackCommand,
 } from "../extension-core/index.mjs";
 import {
+  sendNativeMessageWithFallback,
   BrowserCredentialPort,
   BrowserSessionStoragePort,
   ExplicitCredentialProvider,
@@ -220,6 +221,8 @@ class MemoryDiagnostics implements DiagnosticsPort {
 }
 
 export class SessionRuntimeController {
+  readonly #trackingAPIOrigin: string;
+  #trackingTail: Promise<void> = Promise.resolve();
   readonly #mode: SessionMode;
   readonly #sessionStorage: BrowserSessionStoragePort;
   readonly #credentials: BrowserCredentialPort;
@@ -266,6 +269,7 @@ export class SessionRuntimeController {
   #statusPublicationTail: Promise<void> = Promise.resolve();
 
   constructor(environment: RuntimeEnvironment) {
+    this.#trackingAPIOrigin = environment.apiBase;
     this.#mode = environment.mode;
     this.#nativeImportEnabled = environment.nativeImportHandoff === true;
     this.#nativeImport = new NativeLibraryImportProducer({ runtime: environment.runtime,
@@ -408,6 +412,7 @@ export class SessionRuntimeController {
         environment.runtime,
         environment.storageMode,
         environment.apiBase,
+        () => this.publishTrackingPreference(),
       ),
       handoff: new NativePendingStoryHandoffPort(
         environment.runtime,
@@ -420,6 +425,41 @@ export class SessionRuntimeController {
   start(): Promise<void> {
     this.#initialization ??= this.#startOnce();
     return this.#initialization;
+  }
+
+  // Best effort local evidence; never blocks run receipts or changes preferences.
+  publishTrackingPreference(): Promise<void> {
+    const operation = this.#trackingTail.then(async () => {
+      if (this.#mode !== "kernel" || !(await this.#usesNativeAccountAuthority())) return;
+      await this.start();
+      // Capture the native provider before adopting it; a replacement during
+      // verification or delivery makes the native write fail closed.
+      const context = await sendNativeMessageWithFallback(this.#runtime, this.#storageMode,
+        { type: "TRACE_IOS_TRACKING_PREFERENCE_PREPARE", apiOrigin: this.#trackingAPIOrigin });
+      if (!isRecord(context) || context.ok !== true || !isRecord(context.provider)) return;
+      const preparation = await this.#prepareNativeAuthority();
+      const scope = this.#service.publicationScope();
+      if (!preparation.ready || !scope) return;
+      let values = await this.#storage.get(["prefAutoTrackEnabled", "prefAutoTrackSetAt", "prefAutoTrackFirstObservedAt"]);
+      // An older installation has no change timestamp. Establish the first
+      // observation once; never restamp an unchanged preference on heartbeat.
+      let setAt = values.prefAutoTrackSetAt ?? values.prefAutoTrackFirstObservedAt;
+      if (typeof setAt !== "number" || !Number.isFinite(setAt) || setAt <= 0) {
+        setAt = Date.now();
+        // Never overwrite a popup change racing this first observation.
+        await this.#storage.set({ prefAutoTrackFirstObservedAt: setAt });
+        values = await this.#storage.get(["prefAutoTrackEnabled", "prefAutoTrackSetAt"]);
+        setAt = values.prefAutoTrackSetAt ?? setAt;
+      }
+      if (!sameAccountScope(scope, this.#service.publicationScope())) return;
+      await sendNativeMessageWithFallback(this.#runtime, this.#storageMode, {
+        type: "TRACE_IOS_TRACKING_PREFERENCE", version: 1,
+        apiOrigin: this.#trackingAPIOrigin, accountID: scope.accountId,
+        provider: context.provider, enabled: values.prefAutoTrackEnabled !== false, setAt, observedAt: Date.now(),
+      });
+    }).catch(() => { /* The next heartbeat retries; absence remains unknown. */ });
+    this.#trackingTail = operation;
+    return operation;
   }
 
   snapshot(): SessionSnapshot {

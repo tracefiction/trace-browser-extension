@@ -46,6 +46,7 @@ function createPromiseHarness(options = {}) {
     storageMode: "promise",
     clock: options.clock ?? { now: () => 5_000 },
     status: options.status,
+    publishTrackingPreference: options.publishTrackingPreference,
   });
   return { controller, listeners, nativeMessages, runtime };
 }
@@ -302,4 +303,19 @@ test("the installed listener keeps a cold worker alive only for the core receipt
 
   permissions.resolve({ origins: ["https://archiveofourown.org/*"] });
   await waitUntil(() => nativeMessages.length === 2, "diagnostic snapshot was not delivered");
+});
+
+
+test("each story heartbeat refreshes preference without delaying run receipt or claiming a save", async () => {
+  const pending = deferred();
+  let publications = 0;
+  const h = createPromiseHarness({ publishTrackingPreference: () => { publications++; return pending.promise; } });
+  const result = h.controller.handle({ type: "TRACE_ARCHIVE_SEEN" }, ao3Sender);
+  await waitUntil(() => h.nativeMessages.length === 1, "run receipt must not wait for preferences");
+  assert.equal(h.nativeMessages[0].action, undefined);
+  assert.equal(publications, 1);
+  pending.resolve();
+  await result;
+  await h.controller.handle({ type: "TRACE_ARCHIVE_SEEN" }, ao3Sender);
+  assert.equal(publications, 2, "Even a throttled run refreshes current preference evidence");
 });

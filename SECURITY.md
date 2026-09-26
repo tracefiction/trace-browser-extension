@@ -216,3 +216,24 @@ update or background start. Recovery uses only manifest-matched top-frame
 archive URLs with a positive current host-grant check, respects excluded
 credential paths, and never requests permissions or persists the tab list.
 It adds no collection or credential route. Page reload remains a user action.
+
+
+### Local Safari automatic-saving preference
+
+The Safari background worker publishes the installation's automatic-saving
+setting to the bundled app on preference changes and story-site heartbeats.
+This app-group snapshot contains a version, verified account ID, paired API
+origin, non-secret provider equality binding, boolean `enabled`, `setAt` and
+`observedAt` (epoch milliseconds). It contains no URLs or story data and is
+never sent to a server. Existing installations without a change timestamp use
+the first observation as `setAt`; later heartbeats preserve it. The preference
+remains installation-local; the snapshot is evidence scoped to the currently
+verified account, not account preference synchronization.
+
+The existing native provider boundary prepares the equality binding before
+account adoption and checks it again when storing. The app accepts only its
+current account, API origin and provider. Missing, malformed, future, replaced-
+provider or more-than-24-hour-old observations are unknown, never off. A late
+snapshot cannot replace a newer change. A preference is not proof of Safari
+access, activation or a successful save. Old app/extension versions can ignore
+the additive messages; absence leaves existing behavior intact.

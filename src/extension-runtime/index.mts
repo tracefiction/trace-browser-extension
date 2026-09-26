@@ -1,5 +1,5 @@
 import { installArchiveRecovery } from "./archive-recovery.mjs";
-import { installSessionRuntime, type SessionMode } from "./controller.mjs";
+import { installSessionRuntime, type SessionMode, type SessionRuntimeController } from "./controller.mjs";
 import { installArchiveReadinessRuntime } from "./archive-readiness.mjs";
 import { installEarnedPermissionRegistrationRuntime } from "./earned-permission-registration.mjs";
 import { installTraceFirstInstallActivation } from "./trace-web-navigation.mjs";
@@ -51,7 +51,7 @@ type EarnedPermissionRegistrationConfig = Readonly<{
 interface ExtensionApi {
   readonly runtime: RuntimePort;
   readonly alarms: AlarmsPort;
-  readonly storage: { readonly local: StorageArea };
+  readonly storage: { readonly local: StorageArea; readonly onChanged?: { addListener(listener: (changes: Record<string, unknown>, area: string) => void): void } };
   readonly tabs: TabsPort;
   readonly permissions?: PermissionsPort;
   readonly scripting?: ScriptingPort;
@@ -95,6 +95,7 @@ try {
   const archiveReadinessStatus = new BrowserArchiveReadinessStatus(
     new BrowserStorage(extension.storage.local, extension.runtime, storageMode),
   );
+  let session: SessionRuntimeController | undefined;
   if (__TRACE_SESSION_MODE__ === "kernel") {
     installArchiveRecovery({ runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, scripting: extension.scripting, mode: storageMode });
     installTraceFirstInstallActivation({
@@ -112,6 +113,7 @@ try {
         : { permissions: extension.permissions }),
       storageMode,
       status: archiveReadinessStatus,
+      publishTrackingPreference: () => session?.publishTrackingPreference() ?? Promise.resolve(),
     });
     if (
       __TRACE_IOS_EARNED_PERMISSION_CONFIG__ !== null &&
@@ -143,7 +145,7 @@ try {
     fallbackId += 1;
     return fallbackUuid(`${Date.now()}:${fallbackId}`);
   };
-  installSessionRuntime({
+  session = installSessionRuntime({
     mode: __TRACE_SESSION_MODE__,
     runtime: extension.runtime,
     tabs: extension.tabs,
@@ -157,6 +159,9 @@ try {
     webOrigin: __TRACE_WEB_ORIGIN__,
     randomId,
     archiveReadinessStatus,
+  });
+  extension.storage.onChanged?.addListener((changes, area) => {
+    if (area === "local" && "prefAutoTrackEnabled" in changes) void session?.publishTrackingPreference();
   });
 } catch {
   scope.__traceSessionRuntimeBootFailed = true;

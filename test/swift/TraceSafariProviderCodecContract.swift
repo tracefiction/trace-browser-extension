@@ -58,6 +58,7 @@ struct TraceSafariProviderCodecContract {
         )
 
         checkOnboardingReceipts()
+        trackingPreference()
         print("TraceSafariProviderCodec contract passed")
     }
 
@@ -164,6 +165,48 @@ struct TraceSafariProviderCodecContract {
         require(!R.allowsAPIOrigin("https://api.synthetic.example.test"), "Production ignores bundle development metadata")
         require(!R.allowsAPIOrigin(R.developmentAPIOrigin), "Production rejects fixture development origin")
         #endif
+    }
+
+    static func trackingPreference() {
+        typealias T = TraceSafariTrackingPreference
+        let suite = "tracking-test-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let provider = TraceSafariProviderCodec.ImportBinding(sessionID: UUID().uuidString,
+            recordDigest: String(repeating: "a", count: 64))
+        let now = 1_800_000_000_000.0
+        let origin = TraceSafariOnboardingReceipt.productionAPIOrigin
+        func read(_ account: String = "account-a", _ time: Double = now) -> T.Snapshot? {
+            T.read(defaults: defaults, accountID: account, apiOrigin: origin, provider: provider, now: time)
+        }
+        require(read() == nil, "Missing snapshot is unknown")
+        var payload: [String: Any] = ["type": "TRACE_IOS_TRACKING_PREFERENCE", "version": 1,
+            "apiOrigin": origin, "accountID": "account-a", "enabled": false,
+            "setAt": now - 1000, "observedAt": now,
+            "provider": ["sessionID": provider.sessionID, "recordDigest": provider.recordDigest]]
+        func write() -> Bool {
+            T.handle(payload, defaults: defaults, provider: provider, now: now, configuredAPIOrigin: origin)["ok"] as? Bool == true
+        }
+        require(write(), "Off snapshot accepted")
+        require(read()?.enabled == false, "Explicit off survives readback")
+        require(read("account-b") == nil, "Other account is unknown")
+        require(read("account-a", now + T.maxAge + 1) == nil, "Stale is unknown")
+        require(read("account-a", now - 1) == nil, "Future evidence is unknown")
+        require(T.read(defaults: defaults, accountID: "account-a", apiOrigin: origin, provider: nil, now: now) == nil, "Missing provider is unknown")
+        payload["enabled"] = true; payload["setAt"] = now
+        require(write() && read()?.enabled == true, "Newer on replaces off")
+        payload["setAt"] = now - 2000; payload["enabled"] = false
+        require(!write() && read()?.enabled == true, "Out of order off cannot replace on")
+        payload["setAt"] = now; payload["enabled"] = "false"
+        require(!write(), "String boolean rejected")
+        payload["enabled"] = 0
+        require(!write(), "Numeric boolean rejected")
+        payload["enabled"] = false; payload["observedAt"] = now + 1
+        require(!write(), "Future timestamps rejected")
+        payload["observedAt"] = now; payload["apiOrigin"] = "https://wrong.example"
+        require(!write(), "Other environment rejected")
+        payload["apiOrigin"] = origin; payload["provider"] = ["sessionID": UUID().uuidString, "recordDigest": provider.recordDigest]
+        require(!write(), "Replaced provider rejects in-flight snapshot")
     }
 
     private static func require(

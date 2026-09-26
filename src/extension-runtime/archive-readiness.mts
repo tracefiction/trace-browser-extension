@@ -25,6 +25,7 @@ interface ArchiveReadinessEnvironment {
   readonly storageMode: "callback" | "promise";
   readonly clock?: ArchiveReadinessClock;
   readonly status?: BrowserArchiveReadinessStatus;
+  readonly publishTrackingPreference?: () => Promise<void>;
 }
 
 interface ArchiveReadinessResponse {
@@ -43,11 +44,13 @@ function normalizeHandoffId(value: unknown): string | null {
 }
 
 export class ArchiveReadinessRuntimeController {
+  readonly #publishTrackingPreference: (() => Promise<void>) | undefined;
   readonly #service: ArchiveReadinessService;
   readonly #status: BrowserArchiveReadinessStatus | undefined;
 
   constructor(environment: ArchiveReadinessEnvironment) {
     this.#status = environment.status;
+    this.#publishTrackingPreference = environment.publishTrackingPreference;
     this.#service = new ArchiveReadinessService({
       receipts: new NativeArchiveReadinessReceiptPort(
         environment.runtime,
@@ -78,11 +81,13 @@ export class ArchiveReadinessRuntimeController {
       // Web onboarding evidence is best effort and cannot delay or replace the
       // native run receipt used by the iOS permission flow.
     });
+    const preference = this.#publishTrackingPreference?.().catch(() => {});
     const handoffId = normalizeHandoffId(message.handoffId);
     const result = await this.#service.recordRun({
       hostKind,
       ...(handoffId === null ? {} : { handoffId }),
     });
+    await preference; // Keep the worker alive, after the run receipt is delivered.
     return { ok: true, receipt: result.kind };
   }
 }

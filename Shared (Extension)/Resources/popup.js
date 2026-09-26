@@ -2542,7 +2542,8 @@ function bindPreferenceControls() {
     const input = document.getElementById(id);
     if (!input) continue;
     input.addEventListener("change", () => {
-      ext.storage.local.set({ [key]: input.checked });
+      ext.storage.local.set({ [key]: input.checked,
+        ...(key === PREF_AUTO_TRACK_KEY ? { prefAutoTrackSetAt: Date.now() } : {}) });
       updatePreferenceSummary();
     });
   }
@@ -2572,7 +2573,7 @@ async function saveStoryFromPopup() {
 }
 
 async function enableAutomaticSavingFromPopup() {
-  await earnedStorageSet({ [PREF_AUTO_TRACK_KEY]: true });
+  await earnedStorageSet({ [PREF_AUTO_TRACK_KEY]: true, prefAutoTrackSetAt: Date.now() });
   const input = document.getElementById("pref-auto-track");
   if (input) input.checked = true;
   const tab = await probeQueryActiveTab();
