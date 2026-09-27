@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /**
- * Rasterizes Shared (Extension)/Resources/images/trace-mark.svg into PNGs for manifest.icons.
- * Keep in sync with tracefiction.com public mark (client/public/trace-mark.svg).
+ * Rasterizes Shared (Extension)/Resources/images/trace-icon.svg into PNGs for manifest.icons.
+ * trace-icon.svg is Trace's accepted fingerprint app icon (forest #173B30, ivory
+ * #EDEFE5) on a rounded tile, so Safari's Page Menu and the toolbar match the
+ * Home Screen icon. Browsers draw extension icons without a platform mask.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -14,7 +16,7 @@ const SVG_PATH = path.join(
   "Shared (Extension)",
   "Resources",
   "images",
-  "trace-mark.svg",
+  "trace-icon.svg",
 );
 const OUT_DIR = path.dirname(SVG_PATH);
 const SIZES = [16, 32, 48, 96, 128, 256, 512];
