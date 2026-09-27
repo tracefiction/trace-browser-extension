@@ -366,7 +366,8 @@ export class NativeStorySaveReceiptPort implements StorySaveReceiptPort {
   readonly #mode: "callback" | "promise";
   readonly #apiOrigin: string;
 
-  constructor(runtime: RuntimePort, mode: "callback" | "promise", apiOrigin = "") {
+  constructor(runtime: RuntimePort, mode: "callback" | "promise", apiOrigin = "",
+    private readonly publishTrackingPreference?: () => Promise<void>) {
     this.#runtime = runtime;
     this.#mode = mode;
     this.#apiOrigin = apiOrigin;
@@ -400,9 +401,10 @@ export class NativeStorySaveReceiptPort implements StorySaveReceiptPort {
       }, 1000).catch(() => undefined);
       recorded = isRecord(saved) && saved.ok === true;
     }
+    const preference = this.publishTrackingPreference?.().catch(() => {});
     // A confirmed reading write can add a Library entry. It is not a manual
     // quick-add action and must not change the existing heartbeat semantics.
-    if (receipt.action === "read") return recorded;
+    if (receipt.action === "read") { await preference; return recorded; }
     const response = await sendNativeMessageWithFallback(
       this.#runtime,
       this.#mode,
@@ -414,6 +416,7 @@ export class NativeStorySaveReceiptPort implements StorySaveReceiptPort {
         ...(receipt.handoffId === undefined ? {} : { handoffId: receipt.handoffId }),
       },
     );
+    await preference;
     return recorded || (isRecord(response) && (response.ok === true || response.ok === "true"));
   }
 }

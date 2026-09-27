@@ -2998,14 +2998,15 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
   };
   var NativeStorySaveReceiptPort = class {
-    #runtime;
-    #mode;
-    #apiOrigin;
-    constructor(runtime, mode, apiOrigin = "") {
+    constructor(runtime, mode, apiOrigin = "", publishTrackingPreference) {
+      this.publishTrackingPreference = publishTrackingPreference;
       this.#runtime = runtime;
       this.#mode = mode;
       this.#apiOrigin = apiOrigin;
     }
+    #runtime;
+    #mode;
+    #apiOrigin;
     async prepareSaveReceipt(accountID) {
       const response = await sendNativeMessageWithFallback(
         this.#runtime,
@@ -3029,7 +3030,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         }, 1e3).catch(() => void 0);
         recorded = isRecord5(saved) && saved.ok === true;
       }
-      if (receipt.action === "read") return recorded;
+      const preference = this.publishTrackingPreference?.().catch(() => {
+      });
+      if (receipt.action === "read") {
+        await preference;
+        return recorded;
+      }
       const response = await sendNativeMessageWithFallback(
         this.#runtime,
         this.#mode,
@@ -3041,6 +3047,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           ...receipt.handoffId === void 0 ? {} : { handoffId: receipt.handoffId }
         }
       );
+      await preference;
       return recorded || isRecord5(response) && (response.ok === true || response.ok === "true");
     }
   };
@@ -5799,6 +5806,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
   };
   var SessionRuntimeController = class {
+    #trackingAPIOrigin;
+    #trackingTail = Promise.resolve();
     #mode;
     #sessionStorage;
     #credentials;
@@ -5844,6 +5853,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #lastPublishedStatusKey = null;
     #statusPublicationTail = Promise.resolve();
     constructor(environment) {
+      this.#trackingAPIOrigin = environment.apiBase;
       this.#mode = environment.mode;
       this.#nativeImportEnabled = environment.nativeImportHandoff === true;
       this.#nativeImport = new NativeLibraryImportProducer({
@@ -5987,7 +5997,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         receipt: new NativeStorySaveReceiptPort(
           environment.runtime,
           environment.storageMode,
-          environment.apiBase
+          environment.apiBase,
+          () => this.publishTrackingPreference()
         ),
         handoff: new NativePendingStoryHandoffPort(
           environment.runtime,
@@ -5999,6 +6010,44 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     start() {
       this.#initialization ??= this.#startOnce();
       return this.#initialization;
+    }
+    // Best effort local evidence; never blocks run receipts or changes preferences.
+    publishTrackingPreference() {
+      const operation = this.#trackingTail.then(async () => {
+        if (this.#mode !== "kernel" || !await this.#usesNativeAccountAuthority()) return;
+        await this.start();
+        const context = await sendNativeMessageWithFallback(
+          this.#runtime,
+          this.#storageMode,
+          { type: "TRACE_IOS_TRACKING_PREFERENCE_PREPARE", apiOrigin: this.#trackingAPIOrigin }
+        );
+        if (!isRecord18(context) || context.ok !== true || !isRecord18(context.provider)) return;
+        const preparation = await this.#prepareNativeAuthority();
+        const scope2 = this.#service.publicationScope();
+        if (!preparation.ready || !scope2) return;
+        let values = await this.#storage.get(["prefAutoTrackEnabled", "prefAutoTrackSetAt", "prefAutoTrackFirstObservedAt"]);
+        let setAt = values.prefAutoTrackSetAt ?? values.prefAutoTrackFirstObservedAt;
+        if (typeof setAt !== "number" || !Number.isFinite(setAt) || setAt <= 0) {
+          setAt = Date.now();
+          await this.#storage.set({ prefAutoTrackFirstObservedAt: setAt });
+          values = await this.#storage.get(["prefAutoTrackEnabled", "prefAutoTrackSetAt"]);
+          setAt = values.prefAutoTrackSetAt ?? setAt;
+        }
+        if (!sameAccountScope(scope2, this.#service.publicationScope())) return;
+        await sendNativeMessageWithFallback(this.#runtime, this.#storageMode, {
+          type: "TRACE_IOS_TRACKING_PREFERENCE",
+          version: 1,
+          apiOrigin: this.#trackingAPIOrigin,
+          accountID: scope2.accountId,
+          provider: context.provider,
+          enabled: values.prefAutoTrackEnabled !== false,
+          setAt,
+          observedAt: Date.now()
+        });
+      }).catch(() => {
+      });
+      this.#trackingTail = operation;
+      return operation;
     }
     snapshot() {
       if (this.#storageFailure) return DEGRADED_STORAGE_SNAPSHOT;
@@ -6918,10 +6967,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     return /^[A-Za-z0-9_-]{1,128}$/.test(trimmed) ? trimmed : null;
   }
   var ArchiveReadinessRuntimeController = class {
+    #publishTrackingPreference;
     #service;
     #status;
     constructor(environment) {
       this.#status = environment.status;
+      this.#publishTrackingPreference = environment.publishTrackingPreference;
       this.#service = new ArchiveReadinessService({
         receipts: new NativeArchiveReadinessReceiptPort(
           environment.runtime,
@@ -6943,11 +6994,14 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (hostKind2 === null) return { ok: true, receipt: "ignored" };
       void this.#status?.record({ hostKind: hostKind2 }).catch(() => {
       });
+      const preference = this.#publishTrackingPreference?.().catch(() => {
+      });
       const handoffId = normalizeHandoffId(message.handoffId);
       const result = await this.#service.recordRun({
         hostKind: hostKind2,
         ...handoffId === null ? {} : { handoffId }
       });
+      await preference;
       return { ok: true, receipt: result.kind };
     }
   };
@@ -7255,6 +7309,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     const archiveReadinessStatus = new BrowserArchiveReadinessStatus(
       new BrowserStorage(extension.storage.local, extension.runtime, storageMode)
     );
+    let session;
     if (true) {
       installArchiveRecovery({ runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, scripting: extension.scripting, mode: storageMode });
       installTraceFirstInstallActivation({
@@ -7267,7 +7322,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         runtime: extension.runtime,
         ...extension.permissions === void 0 ? {} : { permissions: extension.permissions },
         storageMode,
-        status: archiveReadinessStatus
+        status: archiveReadinessStatus,
+        publishTrackingPreference: () => session?.publishTrackingPreference() ?? Promise.resolve()
       });
       if (define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default !== null && extension.permissions !== void 0 && (define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.registrationMode === "static" || extension.scripting !== void 0)) {
         installEarnedPermissionRegistrationRuntime({
@@ -7292,7 +7348,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       fallbackId += 1;
       return fallbackUuid(`${Date.now()}:${fallbackId}`);
     };
-    installSessionRuntime({
+    session = installSessionRuntime({
       mode: "kernel",
       runtime: extension.runtime,
       tabs: extension.tabs,
@@ -7306,6 +7362,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       webOrigin: "https://www.tracefiction.com",
       randomId,
       archiveReadinessStatus
+    });
+    extension.storage.onChanged?.addListener((changes, area) => {
+      if (area === "local" && "prefAutoTrackEnabled" in changes) void session?.publishTrackingPreference();
     });
   } catch {
     scope.__traceSessionRuntimeBootFailed = true;

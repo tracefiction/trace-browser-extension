@@ -615,15 +615,15 @@ test("iOS Connect and save adopts the containing app account before any story wr
     path: "/api/extension/track",
     authorization: "Bearer current-app-token",
   }]);
-  assert.deepEqual(nativeMessages.map((message) => message.type), [
+  assert.deepEqual(nativeMessages.filter(({ type }) => !type.startsWith("TRACE_IOS_TRACKING_PREFERENCE")).map((message) => message.type), [
     "TRACE_IOS_AUTH_TOKEN_REQUEST",
     "TRACE_IOS_SAVE_PREPARE",
     "TRACE_IOS_EXTENSION_HEARTBEAT",
     "TRACE_IOS_PENDING_FIRST_STORY_CLEAR",
   ]);
-  assert.equal(nativeMessages[2].action, "quick_add");
-  assert.equal(nativeMessages[2].handoffId, "handoff_7038840");
-  assert.equal(nativeMessages[3].handoffId, "handoff_7038840");
+  assert.equal(nativeMessages.find(({ type }) => type === "TRACE_IOS_EXTENSION_HEARTBEAT").action, "quick_add");
+  assert.equal(nativeMessages.find(({ type }) => type === "TRACE_IOS_EXTENSION_HEARTBEAT").handoffId, "handoff_7038840");
+  assert.equal(nativeMessages.find(({ type }) => type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR").handoffId, "handoff_7038840");
   assert.equal(
     (await privateDatabase.get(PRIVATE_RECORD_KEYS.accountData)).scope.accountId,
     "account-b",
@@ -750,14 +750,14 @@ test("iOS auto-track adopts the app account, records progress, and hands its exa
   assert.deepEqual(writes.map(({ authorization }) => authorization), [
     "Bearer current-app-token",
   ]);
-  assert.deepEqual(nativeMessages.map(({ type }) => type), [
+  assert.deepEqual(nativeMessages.filter(({ type }) => !type.startsWith("TRACE_IOS_TRACKING_PREFERENCE")).map(({ type }) => type), [
     "TRACE_IOS_AUTH_TOKEN_REQUEST",
     "TRACE_IOS_AUTH_TOKEN_REQUEST",
     "TRACE_IOS_SAVE_PREPARE",
     "TRACE_IOS_SAVE_CONFIRMED",
   ]);
-  assert.equal(nativeMessages.at(-1).accountID, "account-b");
-  assert.equal(nativeMessages.at(-1).entryID, "00000000-0000-4000-8000-000000000123");
+  assert.equal(nativeMessages.findLast(({ type }) => type === "TRACE_IOS_SAVE_CONFIRMED").accountID, "account-b");
+  assert.equal(nativeMessages.findLast(({ type }) => type === "TRACE_IOS_SAVE_CONFIRMED").entryID, "00000000-0000-4000-8000-000000000123");
   assert.equal(
     (await privateDatabase.get(PRIVATE_RECORD_KEYS.accountData)).scope.accountId,
     "account-b",
@@ -863,7 +863,7 @@ test("iOS metadata contribution adopts the app account and invalidates without a
     "Bearer current-app-token",
   ]);
   assert.equal(metadataWrites[0].body.item.u, storyCommandMessage.payload.item.u);
-  assert.deepEqual(nativeMessages.map(({ type }) => type), [
+  assert.deepEqual(nativeMessages.filter(({ type }) => !type.startsWith("TRACE_IOS_TRACKING_PREFERENCE")).map(({ type }) => type), [
     "TRACE_IOS_AUTH_TOKEN_REQUEST",
   ]);
   assert.deepEqual(
@@ -1032,7 +1032,7 @@ test("concurrent iOS page mutations share same-account authority without clearin
   const [metadataResponse, autoTrackResponse] = await Promise.all([metadata, autoTrack]);
   assert.equal(metadataResponse.ok, true);
   assert.equal(autoTrackResponse.ok, true);
-  assert.deepEqual(nativeMessages.map(({ type }) => type), [
+  assert.deepEqual(nativeMessages.filter(({ type }) => !type.startsWith("TRACE_IOS_TRACKING_PREFERENCE")).map(({ type }) => type), [
     "TRACE_IOS_AUTH_TOKEN_REQUEST",
     "TRACE_IOS_SAVE_PREPARE",
   ]);
@@ -1117,7 +1117,7 @@ test("iOS archive projection adopts containing-app authority after delayed site 
 
   assert.equal(response.snapshot.state, "connected");
   assert.equal(response.projection.entries["ao3:123"].chapters.current, 2);
-  assert.deepEqual(nativeMessages.map(({ type }) => type), [
+  assert.deepEqual(nativeMessages.filter(({ type }) => !type.startsWith("TRACE_IOS_TRACKING_PREFERENCE")).map(({ type }) => type), [
     "TRACE_IOS_AUTH_TOKEN_REQUEST",
   ]);
   assert.ok(authorizations.length >= 2);
@@ -1823,4 +1823,48 @@ test("disabled mode deletes the private database, alarms, and complete legacy in
     canExecuteAuthenticated: false,
     reason: "none",
   });
+});
+
+test("native tracking snapshot follows the current account and preserves change time across heartbeats", async () => {
+  const sent = [];
+  const storage = new PromiseStorageArea({ prefAutoTrackEnabled: false, prefAutoTrackSetAt: 1000 });
+  let accountID = "account-a";
+  let providerAvailable = true;
+  const controller = installTestRuntime({
+    mode: "kernel", storageArea: storage, storageMode: "promise",
+    apiBase: "https://api.tracefiction.com", webOrigin: "https://www.tracefiction.com",
+    randomId: () => "tracking-test-credential",
+    runtime: {
+      onMessage: { addListener() {} },
+      async getPlatformInfo() { return { os: "ios" }; },
+      async sendNativeMessage(message) {
+        if (message.type === "TRACE_IOS_AUTH_TOKEN_REQUEST") return nativeCredentialResponse(accountID);
+        if (message.type === "TRACE_IOS_TRACKING_PREFERENCE_PREPARE") return providerAvailable
+          ? { ok: true, provider: { sessionID: "provider", recordDigest: "digest" } } : { ok: false };
+        if (message.type === "TRACE_IOS_TRACKING_PREFERENCE") sent.push(message);
+        return { ok: true };
+      },
+    },
+    tabs: { async query() { return []; }, async sendMessage() {} },
+    fetch: async (url) => new Response(JSON.stringify(url.endsWith("/account")
+      ? { account_id: accountID } : { success: true, data: {} }), { status: 200 }),
+  });
+  await controller.start();
+  await controller.publishTrackingPreference();
+  await controller.publishTrackingPreference();
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].accountID, "account-a");
+  assert.equal(sent[0].enabled, false);
+  assert.equal(sent[1].setAt, 1000);
+  assert.deepEqual(Object.keys(sent[0]).sort(), ["type", "version", "apiOrigin", "accountID", "provider", "enabled", "setAt", "observedAt"].sort());
+  storage.values.prefAutoTrackEnabled = true;
+  storage.values.prefAutoTrackSetAt = 2000;
+  accountID = "account-b";
+  await controller.publishTrackingPreference();
+  assert.equal(sent.at(-1).accountID, "account-b");
+  assert.equal(sent.at(-1).enabled, true);
+  assert.equal(sent.at(-1).setAt, 2000);
+  providerAvailable = false;
+  await controller.publishTrackingPreference();
+  assert.equal(sent.length, 3, "Missing native provider publishes nothing");
 });
