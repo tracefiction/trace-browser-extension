@@ -870,7 +870,7 @@ test("earned-permission onboarding confirms automation only from a post-grant ar
 
   assert.equal(h.document.body.dataset.traceEarnedPermission, undefined);
   assert.equal(h.document.getElementById("popup-earned-permission").hidden, true);
-  assert.equal(h.document.getElementById("popup-status").textContent, "Connected");
+  assert.equal(h.document.getElementById("popup-status").textContent, "Trace is on");
   assert.equal(h.store.traceEarnedPermissionOnboardingV1.completedAt > grantAt, true);
 });
 
@@ -905,7 +905,7 @@ test("earned-permission onboarding accepts semantically complete legacy grants",
 
   assert.equal(h.document.body.dataset.traceEarnedPermission, undefined);
   assert.equal(h.document.getElementById("popup-earned-permission").hidden, true);
-  assert.equal(h.document.getElementById("popup-status").textContent, "Connected");
+  assert.equal(h.document.getElementById("popup-status").textContent, "Trace is on");
   assert.equal(h.permissionRequests.length, 0);
 });
 
@@ -1148,7 +1148,7 @@ test("completed earned-permission onboarding opens normal controls away from sto
     h.document.getElementById("popup-earned-heading").textContent,
     "Trace works on AO3 and FanFiction.net",
   );
-  assert.equal(h.document.getElementById("popup-status").textContent, "Connected");
+  assert.equal(h.document.getElementById("popup-status").textContent, "Trace is on");
   assert.equal(h.document.getElementById("popup-local-settings").hidden, false);
   const savedFilters = h.document.getElementById("pref-ao3-saved-filters");
   savedFilters.checked = false;
@@ -1186,7 +1186,7 @@ test("completed earned-permission onboarding stays complete when Safari omits th
 
   assert.equal(h.document.body.dataset.traceEarnedPermission, undefined);
   assert.equal(h.document.getElementById("popup-earned-permission").hidden, true);
-  assert.equal(h.document.getElementById("popup-status").textContent, "Connected");
+  assert.equal(h.document.getElementById("popup-status").textContent, "Trace is on");
   assert.equal(h.permissionRequests.length, 0);
 });
 
@@ -1217,7 +1217,7 @@ test("archive heartbeat completes onboarding when legacy state has no grant time
 
   assert.equal(h.document.body.dataset.traceEarnedPermission, undefined);
   assert.equal(h.document.getElementById("popup-earned-permission").hidden, true);
-  assert.equal(h.document.getElementById("popup-status").textContent, "Connected");
+  assert.equal(h.document.getElementById("popup-status").textContent, "Trace is on");
   assert.equal(h.store.traceEarnedPermissionOnboardingV1.completedAt > lastArchiveSeenAt, true);
   assert.equal(h.permissionRequests.length, 0);
 });
@@ -1319,7 +1319,8 @@ test("kernel popup retries a missing session owner finitely and never spins fore
     h.document.getElementById("popup-status").textContent,
     "Trace is temporarily offline",
   );
-  assert.equal(h.document.getElementById("popup-cta").textContent, "Retry");
+  assert.equal(h.document.getElementById("popup-cta").textContent, "Try again");
+  assert.equal(h.document.getElementById("popup-cta").dataset.emphasis, "tertiary");
   assert.equal(h.document.body.dataset.tracePopupState, "degraded");
 });
 
@@ -1656,54 +1657,18 @@ test("popup signed-out CTA uses configured Trace web origin", async () => {
   );
 });
 
-test("popup connection indicator reflects D1 state labels", async () => {
+test("popup header is the plain Trace word with no connection label", async () => {
   const cases = [
-    {
-      name: "signed out",
-      authState: { state: "signed_out" },
-      firstSaveSeen: false,
-      expectedState: "off",
-      expectedLabel: "Not linked",
-    },
-    {
-      name: "reconnect",
-      authState: { state: "reconnect_required" },
-      firstSaveSeen: false,
-      expectedState: "warn",
-      expectedLabel: "Reconnect",
-    },
+    { name: "signed out", authState: { state: "signed_out" }, firstSaveSeen: false, expectedHeading: "Connect Trace" },
+    { name: "reconnect", authState: { state: "reconnect_required" }, firstSaveSeen: false, expectedHeading: "Sign in again" },
     {
       name: "checking",
-      authState: {
-        state: "unknown",
-        message: "Checking your Trace account connection. Retrying shortly.",
-      },
+      authState: { state: "unknown", message: "Checking your Trace account connection. Retrying shortly." },
       firstSaveSeen: false,
-      expectedState: "warn",
-      expectedLabel: "Checking",
-      expectedHeading: "Checking Trace",
+      expectedHeading: "Checking Trace…",
     },
-    {
-      name: "error",
-      authState: { state: "error" },
-      firstSaveSeen: false,
-      expectedState: "error",
-      expectedLabel: "Issue",
-    },
-    {
-      name: "upgrade",
-      authState: { state: "upgrade_required" },
-      firstSaveSeen: false,
-      expectedState: "warn",
-      expectedLabel: "Upgrade",
-    },
-    {
-      name: "connected",
-      authState: { state: "connected" },
-      firstSaveSeen: true,
-      expectedState: "connected",
-      expectedLabel: "Connected",
-    },
+    { name: "upgrade", authState: { state: "upgrade_required" }, firstSaveSeen: false, expectedHeading: "Your Library is full" },
+    { name: "connected", authState: { state: "connected" }, firstSaveSeen: true, expectedHeading: "Trace is on" },
   ];
 
   for (const item of cases) {
@@ -1722,21 +1687,11 @@ test("popup connection indicator reflects D1 state labels", async () => {
     });
     await flush();
 
-    const connection = h.document.getElementById("popup-connection");
-    assert.equal(connection.dataset.state, item.expectedState, item.name);
-    assert.equal(
-      connection.querySelector(".popup-connection-label").textContent,
-      item.expectedLabel,
-      item.name,
-    );
-    assert.ok(connection.querySelector(".popup-connection-dot[aria-hidden='true']"), item.name);
-    if (item.expectedHeading) {
-      assert.equal(
-        h.document.getElementById("popup-status").textContent,
-        item.expectedHeading,
-        item.name,
-      );
-    }
+    assert.equal(h.document.getElementById("popup-connection"), null, item.name);
+    assert.equal(h.document.querySelector(".popup-brand img"), null, item.name);
+    assert.equal(h.document.querySelector(".popup-brand-name").textContent, "Trace", item.name);
+    assert.doesNotMatch(h.document.body.textContent, /\bConnected\b/, item.name);
+    assert.equal(h.document.getElementById("popup-status").textContent, item.expectedHeading, item.name);
   }
 });
 
@@ -1804,7 +1759,7 @@ test("popup connected first-run story page makes import the primary action", asy
   });
   await flush();
 
-  assert.equal(h.document.querySelector(".popup-eyebrow").textContent, "First story");
+  assert.equal(h.document.querySelector(".popup-eyebrow").hidden, true);
   assert.equal(
     h.document.getElementById("popup-status").textContent,
     "Save this story",
@@ -1842,7 +1797,7 @@ test("popup switches to compact connected state after a local first-save signal"
     "local",
   );
 
-  assert.equal(h.document.getElementById("popup-status").textContent, "Connected");
+  assert.equal(h.document.getElementById("popup-status").textContent, "Trace is on");
   assert.equal(h.document.querySelector(".popup-eyebrow").hidden, true);
   assert.doesNotMatch(h.document.body.textContent, /Extension lens/i);
   assert.equal(h.document.getElementById("popup-lead").hidden, true);
@@ -1875,7 +1830,7 @@ test("popup treats account library count as first-save completion", async () => 
   });
   await flush();
 
-  assert.equal(h.document.getElementById("popup-status").textContent, "Connected");
+  assert.equal(h.document.getElementById("popup-status").textContent, "Trace is on");
   assert.equal(h.document.getElementById("popup-lead").hidden, true);
   assert.equal(
     h.document.getElementById("popup-cta").textContent,
@@ -2034,9 +1989,9 @@ test("popup keeps a durable library-capacity recovery action", async () => {
   await flush();
 
   assert.equal(h.document.body.dataset.tracePopupState, "upgrade_required");
-  assert.equal(h.document.getElementById("popup-status").textContent, "Library full");
-  assert.match(h.document.getElementById("popup-lead").textContent, /make room or get/i);
-  assert.equal(h.document.getElementById("popup-cta").textContent, "Get Trace Unlimited");
+  assert.equal(h.document.getElementById("popup-status").textContent, "Your Library is full");
+  assert.match(h.document.getElementById("popup-lead").textContent, /make room in Trace, or see Trace Unlimited/i);
+  assert.equal(h.document.getElementById("popup-cta").textContent, "See Trace Unlimited");
   assert.equal(
     h.document.getElementById("popup-cta").dataset.externalUrl,
     "https://tracefiction.com/?upgrade=1&source=extension_cap",
@@ -2116,7 +2071,7 @@ test("popup import failure re-enables the button and exposes the failure reason"
   button.click();
 
   assert.equal(button.disabled, false);
-  assert.equal(button.textContent, "Import failed — try again");
+  assert.equal(button.textContent, "Import failed. Try again.");
   assert.equal(button.title, "collect_failed");
   assert.equal(h.document.getElementById("popup-import-recovery-help").hidden, true);
   assert.equal(button.hasAttribute("aria-describedby"), false);
@@ -2160,7 +2115,7 @@ for (const promiseRuntime of [false, true]) {
     button.click();
     await flush();
 
-    assert.equal(button.textContent, "Import failed — try again");
+    assert.equal(button.textContent, "Import failed. Try again.");
     assert.equal(button.title, "collect_failed");
     assert.equal(help.hidden, false);
     assert.equal(help.hasAttribute("role"), false);
@@ -2183,14 +2138,14 @@ test("Safari collection recovery clears on a new intent and stays absent for oth
   const messageStart = h.messages.length;
   let importCount = 0;
   for (const [error, label] of [
-    ["native_import_unavailable", "Import unavailable — try again"],
-    ["permission_required", "Allow site access, then retry"],
-    ["not_authenticated", "Reconnect Trace, then retry"],
-    ["auth_expired", "Reconnect Trace, then retry"],
+    ["native_import_unavailable", "Import unavailable. Try again."],
+    ["permission_required", "Allow site access, then try again"],
+    ["not_authenticated", "Reconnect Trace, then try again"],
+    ["auth_expired", "Reconnect Trace, then try again"],
     ["unsupported_page", "Open a supported page"],
     ["no_active_tab", "Open a supported page"],
-    ["unavailable", "Import failed — try again"],
-    [undefined, "Import failed — try again"],
+    ["unavailable", "Import failed. Try again."],
+    [undefined, "Import failed. Try again."],
   ]) {
     response.error = "collect_failed";
     button.click();
@@ -2283,7 +2238,7 @@ test("popup import turns a missing site grant into actionable permission guidanc
   const button = h.document.getElementById("popup-import");
   button.click();
   assert.equal(button.disabled, false);
-  assert.equal(button.textContent, "Allow site access, then retry");
+  assert.equal(button.textContent, "Allow site access, then try again");
   assert.match(button.title, /extension settings/i);
   assert.match(button.title, /refresh/i);
 });
@@ -2425,7 +2380,10 @@ test("P11 status menu and Settings use relay with broken direct tab messaging", 
   for (let attempt = 0; attempt < 4; attempt += 1) await flush();
   assert.equal(h.tabMessages.some(({ message }) => message.type === "TRACE_POPUP_SET_READER_STATUS" && message.status === "READING"), true);
   assert.equal(control.getAttribute("aria-label"), "Reading status: Reading");
-  assert.match(h.document.getElementById("popup-earned-record-label").textContent, /Reading · Chapter 5 of 12/);
+  // Status appears once, in the control; the line beside it is progress only.
+  assert.equal(h.document.querySelector(".popup-earned-record-state").hidden, true);
+  assert.equal(h.document.getElementById("popup-earned-progress").textContent, "Chapter 5 of 12");
+  assert.equal(h.document.getElementById("popup-earned-progress").hidden, false);
   h.document.getElementById("popup-earned-settings-row").click();
   assert.equal(h.document.body.dataset.traceReaderView, "settings");
   assert.equal(h.document.getElementById("popup-session-secondary").textContent.trim(), "Disconnect");
@@ -2477,7 +2435,7 @@ test("disconnected cached story offers Reload page and re-queries after reload",
       activeTab: { kind: "supported_story", site: "ao3" },
       activeWork: { status: "saved", entry: { canonicalReaderStatus: "READING" } } } });
   for (let i = 0; i < 8; i++) await flush();
-  assert.equal(h.document.getElementById("popup-earned-heading").textContent, "Trace needs to reconnect to this page");
+  assert.equal(h.document.getElementById("popup-earned-heading").textContent, "Reload this page to keep going");
   const button = h.document.getElementById("popup-earned-primary");
   assert.equal(button.textContent, "Reload page");
   assert.equal(button.dataset.emphasis, "primary");
@@ -2496,4 +2454,93 @@ test("page identity deadline settles when Safari never answers", async () => {
   const pending = h.evaluate("readActiveStoryIdentity()");
   h.runTimeouts();
   assert.equal((await pending).pageUnavailable, true);
+});
+
+test("popup CSS keeps one system type ladder with no px fonts, stylistic sets or serif", () => {
+  const css = fs.readFileSync(POPUP_CSS_PATH, "utf8");
+  for (const [, selector, declarations] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    // Every rule can reach iOS, not only selectors that name the platform.
+    // The desktop base is the one px size; iOS replaces it with -apple-system-body.
+    if (selector.trim() === "body") continue;
+    // A px value inside min() is a cap on an em size, not a fixed size.
+    const scaled = declarations.replace(/min\([^)]*\)/g, "min()");
+    assert.doesNotMatch(scaled, /font(?:-size)?\s*:[^;]*\b\d+(?:\.\d+)?px\b/i, selector.trim());
+    assert.doesNotMatch(declarations, /outline:\s*\d+px solid/i, `${selector.trim()} uses the system focus ring`);
+  }
+  assert.doesNotMatch(css, /font-feature-settings|ss01/);
+  const cssWithoutComments = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.doesNotMatch(cssWithoutComments, /Georgia|New York|ui-serif|(?<!sans-)serif\b/i);
+  assert.doesNotMatch(css, /popup-connection|popup-brand-mark/);
+  assert.match(css, /body \{[^}]*font-size:\s*16px;/, "desktop popups use a 16 px base");
+  assert.match(css, /--switch-thumb:\s*#ffffff;/);
+  assert.doesNotMatch(css.match(/@media \(prefers-color-scheme: dark\) \{[\s\S]*?\n\}/)[0], /--switch-thumb/,
+    "the switch thumb stays white on the vermilion track in dark mode");
+  assert.match(css, /\.popup-earned-status-control \{[^}]*min-height:\s*44px;[^}]*border-radius:\s*12px;/);
+});
+
+test("identity conflict gets its own truthful state with one route out", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    earnedPermissionOnboarding: true,
+    userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+    grantedOrigins: [...FULL_EARNED_ORIGINS],
+    storageState: { traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 5_000 } },
+    sessionSnapshot: { state: "reconnect_required", accountId: null, canExecuteAuthenticated: false, reason: "identity_conflict" },
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "other-account");
+  assert.equal(h.document.getElementById("popup-earned-heading").textContent, "Safari was signed in to another account");
+  assert.match(h.document.getElementById("popup-earned-lead").textContent, /Nothing was saved\./);
+  assert.doesNotMatch(h.document.getElementById("popup-earned-lead").textContent, /Create an account/);
+  const primary = h.document.getElementById("popup-earned-primary");
+  assert.equal(primary.textContent, "Open Trace");
+  assert.equal(primary.dataset.earnedAction, "open_connect");
+  assert.equal(h.document.getElementById("popup-earned-secondary").hidden, true);
+});
+
+test("P10 save failure is stated in place and never silently re-enables", async () => {
+  const response = { ok: false, error: "save_failed" };
+  const h = createPopupHarness({ sessionMode: "kernel", promiseRuntime: true,
+    earnedPermissionOnboarding: true, grantedOrigins: [...FULL_EARNED_ORIGINS], probeSaveResponse: response,
+    storageState: { traceEarnedPermissionOnboardingV1: { completedAt: 1 } },
+    sessionSnapshot: { state: "connected", canExecuteAuthenticated: true },
+    popupState: { ok: true, authState: { state: "connected" }, firstSaveSeen: true,
+      activeTab: { kind: "supported_story", site: "ao3" }, activeWork: null, autoTrackEnabled: false } });
+  for (let i = 0; i < 8; i++) await flush();
+  // The identity lookup shares the stubbed tab response, so the page reads as reachable.
+  const primary = h.document.getElementById("popup-earned-primary");
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P10");
+  assert.equal(primary.textContent, "Save this story");
+  primary.click();
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P10-saving");
+  assert.equal(primary.textContent, "Saving…");
+  assert.equal(primary.disabled, true);
+  for (let i = 0; i < 8; i++) await flush();
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P10-failed");
+  const failure = h.document.getElementById("popup-earned-failure");
+  assert.ok(failure && !failure.hidden);
+  assert.match(failure.textContent, /Nothing was saved/);
+  assert.ok(failure.querySelector(".popup-earned-failure-glyph svg"));
+  assert.equal(primary.textContent, "Try again");
+  assert.equal(primary.disabled, false);
+});
+
+test("session handover shows a neutral check, not Saving, for a story already in the Library", async () => {
+  const snapshot = (state) => ({ ok: true, snapshot: { state, reason: "none" } });
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    earnedPermissionOnboarding: true,
+    userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+    grantedOrigins: [...FULL_EARNED_ORIGINS],
+    storageState: {
+      traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 5_000 },
+      libraryOverlayCache: { entries: { "ao3:123": { entryId: "00000000-0000-4000-8000-000000000123", status: "READING" } } },
+    },
+    sessionSnapshotResponses: [snapshot("initializing"), snapshot("connecting")],
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "checking");
+  assert.doesNotMatch(h.document.getElementById("popup-earned-heading").textContent, /Saving/);
+  assert.match(h.document.getElementById("popup-earned-record-label").textContent, /Checking your Library/);
+  assert.equal(h.document.getElementById("popup-earned-pin").hidden, true);
 });

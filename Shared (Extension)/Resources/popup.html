@@ -11,12 +11,7 @@
     <main class="popup">
         <div id="popup-earned-result" class="popup-earned-internal" role="status" aria-live="polite" aria-atomic="true"></div>
         <header class="popup-brand">
-            <img class="popup-brand-mark" src="images/trace-mark.svg" alt="" width="32" height="32" />
-            <span class="popup-brand-name">trace</span>
-            <span id="popup-connection" class="popup-connection" data-state="off">
-                <span class="popup-connection-dot" aria-hidden="true"></span>
-                <span class="popup-connection-label">Checking</span>
-            </span>
+            <span class="popup-brand-name">Trace</span>
         </header>
         <section
             id="popup-active-tab-probe"
@@ -63,12 +58,15 @@
         </section>
         <section id="popup-earned-permission" class="popup-earned" aria-labelledby="popup-earned-heading" hidden>
             <div id="popup-earned-settings-header" class="popup-earned-settings-header" hidden>
-                <button id="popup-earned-settings-back" type="button">Back</button>
+                <button id="popup-earned-settings-back" type="button"><svg viewBox="0 0 8 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 1.5 1.5 7l5 5.5"/></svg>Back</button>
                 <h1 id="popup-earned-settings-title">Settings</h1>
             </div>
             <div class="popup-earned-scroll">
                 <p id="popup-earned-kicker" class="popup-earned-story-summary" hidden><span id="popup-earned-kicker-icon" aria-hidden="true"></span><span id="popup-earned-kicker-text"></span></p>
-                <h1 id="popup-earned-heading" class="popup-probe-heading" tabindex="-1">Checking this story…</h1>
+                <div id="popup-earned-heading-row" class="popup-earned-heading-row">
+                    <span id="popup-earned-heading-glyph" class="popup-earned-heading-glyph" aria-hidden="true" hidden></span>
+                    <h1 id="popup-earned-heading" class="popup-probe-heading" tabindex="-1">Checking this story…</h1>
+                </div>
                 <div id="popup-earned-record" class="popup-earned-record" hidden>
                     <p id="popup-earned-record-title" class="popup-earned-record-title" hidden></p>
                     <p id="popup-earned-record-byline" class="popup-earned-record-byline"></p>
@@ -79,9 +77,12 @@
                 </div>
                 <p id="popup-earned-lead" class="popup-probe-lead"></p>
                 <div id="popup-earned-extras" class="popup-earned-extras" hidden>
-                    <button id="popup-earned-status-control" class="popup-earned-status-control" type="button" aria-haspopup="menu" aria-expanded="false" hidden></button>
-                    <div id="popup-earned-status-menu" class="popup-earned-status-menu" role="menu" hidden></div>
-                    <p id="popup-earned-status-error" class="popup-earned-status-error" hidden></p>
+                    <div class="popup-earned-status-row">
+                        <button id="popup-earned-status-control" class="popup-earned-status-control" type="button" aria-haspopup="menu" aria-expanded="false" hidden></button>
+                        <span id="popup-earned-progress" class="popup-earned-progress" hidden></span>
+                    </div>
+                    <div id="popup-earned-status-menu" class="popup-earned-status-menu" role="menu" aria-label="Reading status" hidden></div>
+                    <p id="popup-earned-status-error" class="popup-earned-status-error" hidden><span id="popup-earned-status-error-glyph" class="popup-earned-status-error-glyph" aria-hidden="true"></span><span id="popup-earned-status-error-text"></span></p>
                     <button id="popup-earned-settings-row" class="popup-earned-settings-row" type="button" hidden>
                         Settings
                         <svg viewBox="0 0 8 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 1.5 6.5 7l-5 5.5"/></svg>
@@ -113,7 +114,10 @@
         </section>
         <section class="popup-sheet" aria-labelledby="popup-status">
             <p class="popup-eyebrow" hidden></p>
-            <p id="popup-status" class="popup-status">Checking Trace connection…</p>
+            <div class="popup-status-row">
+                <span id="popup-status-glyph" class="popup-status-glyph" aria-hidden="true" hidden></span>
+                <p id="popup-status" class="popup-status">Checking Trace…</p>
+            </div>
             <p id="popup-lead" class="popup-lead">
                 Checking extension status…
             </p>

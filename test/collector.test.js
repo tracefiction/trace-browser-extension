@@ -747,7 +747,7 @@ test("sendAutoTrackForStory clears retryable failures but retains a capacity-blo
       const notice = dom.window.document.querySelector("[data-trace-capacity-notice]");
       assert.ok(notice);
       const upgrade = Array.from(notice.querySelectorAll("a")).find((link) =>
-        /Get Trace Unlimited/i.test(link.textContent || "")
+        /See Trace Unlimited/i.test(link.textContent || "")
       );
       assert.equal(
         upgrade?.href,
@@ -2954,7 +2954,7 @@ test("story page auto-track failure uses existing compact error states", () => {
       const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
       assert.equal(sheet.getAttribute("data-trace-open"), "1");
       assert.match(sheet.textContent || "", /wasn’t added/i);
-      assert.match(sheet.textContent || "", /Get Trace Unlimited/i);
+      assert.match(sheet.textContent || "", /See Trace Unlimited/i);
       assert.match(sheet.textContent || "", /Manage library/i);
     }
     if (item.response.error === "auth_expired") {
@@ -3322,7 +3322,7 @@ test("story sheet contains focus and restores the archive after Escape or outsid
   assert.match(title.textContent || "", /Accessible AO3 Work/i);
   assert.ok(description);
   assert.match(description.textContent || "", /reading status and private Trace actions/i);
-  const statusGroup = sheet.querySelector("[data-trace-status-choices] [role='group']");
+  const statusGroup = sheet.querySelector("[data-trace-status-choices] [role='radiogroup']");
   const ratingGroup = sheet.querySelector("[data-trace-rating-control] [role='group']");
   assert.equal(
     dom.window.document.getElementById(statusGroup.getAttribute("aria-labelledby")).textContent,
@@ -3875,7 +3875,9 @@ test("story sheet shows status editing for cached entries with entryId and hides
     const header = sheet.querySelector("[data-trace-management-header]");
     assert.ok(header);
     assert.match(header.className || "", /\bx-sheet-head\b/);
-    assert.match(header.textContent || "", /Trace\s*·\s*FFN/i);
+    // The site sits in the byline; the sheet has no "Trace ·" eyebrow.
+    assert.match(header.textContent || "", /·\s*FFN/i);
+    assert.doesNotMatch(header.textContent || "", /Trace\s*·/i);
     assert.ok(sheet.querySelector(".x-sheet-body"));
     assert.ok(sheet.querySelector(".x-sheet-foot"));
     const choices = sheet.querySelector("[data-trace-status-choices]");
@@ -3890,7 +3892,8 @@ test("story sheet shows status editing for cached entries with entryId and hides
     const selected = choices.querySelector("[data-trace-status-selected='1']");
     assert.ok(selected);
     assert.equal(selected.getAttribute("data-trace-status-choice"), "READING");
-    assert.equal(selected.getAttribute("aria-pressed"), "true");
+    assert.equal(selected.getAttribute("role"), "radio");
+    assert.equal(selected.getAttribute("aria-checked"), "true");
     assert.match(selected.className || "", /\bon\b/);
     assert.equal(sheet.querySelector("button[data-trace-quick-add]"), null);
     const hideBtn = sheet.querySelector("button[data-trace-hidden-action='hide']");
@@ -3912,7 +3915,7 @@ test("story sheet shows status editing for cached entries with entryId and hides
   }
 });
 
-test("story sheet selected status choice uses the unified ink selection and status accent", () => {
+test("story sheet selected status choice uses the B2 raised cell with an ink ring and status accent", () => {
   const dom = domFromFixture(
     "ffn_story_mobile.html",
     "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter"
@@ -3972,10 +3975,9 @@ test("story sheet selected status choice uses the unified ink selection and stat
   const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
   const selected = sheet.querySelector("[data-trace-status-selected='1']");
   assert.equal(selected.getAttribute("data-trace-status-choice"), "PAUSED");
-  assert.match(
-    selected.getAttribute("style") || "",
-    /background:\s*transparent/i,
-  );
+  assert.match(selected.getAttribute("style") || "", /background:\s*var\(--trace-page-raised\)/i);
+  assert.match(selected.getAttribute("style") || "", /box-shadow:\s*inset 0 0 0 2px var\(--trace-page-ink\)/i);
+  assert.match(selected.getAttribute("style") || "", /border-radius:\s*12px/i);
   assert.match(
     selected.getAttribute("style") || "",
     /--sc:\s*var\(--trace-page-status-paused\)/i,
@@ -4607,7 +4609,10 @@ test("finish qualify band marks an unknown ongoing FFN final chapter caught up t
     resolutionSource: "reader",
   });
   assert.match(band.textContent || "", /Caught up/i);
-  assert.match(band.textContent || "", /Work is ongoing/i);
+  assert.match(band.textContent || "", /Marked ongoing/i);
+  // Work-status choices are words; the resolved state confirms with an ink check.
+  assert.equal(band.querySelector("[data-trace-work-choice]"), null);
+  assert.doesNotMatch(band.getAttribute("style") || "", /Geist|Manrope|rgb\(255,\s*253,\s*248\)/);
 });
 
 test("finish qualify inserts AO3 prompt after the final end notes and aligns to content column", () => {
@@ -5983,7 +5988,7 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
   assert.match(sheet.textContent || "", /Hidden/i);
   assert.match(sheet.textContent || "", /Chapter 3\s*of\s*28/);
   assert.match(sheet.textContent || "", /11%/);
-  assert.match(sheet.textContent || "", /Set progress to chapter 5/i);
+  assert.match(sheet.textContent || "", /Catch up to 5/i);
   assert.equal(sheet.querySelector(".x-pos .bar"), null);
   assert.equal(sheet.querySelector(".x-pos .step"), null);
   assert.match(sheet.textContent || "", /Reading/i);
@@ -5998,13 +6003,19 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
   assert.doesNotMatch(sheet.textContent || "", /4 private tags/i);
   const privateTagRow = sheet.querySelector(".x-meta");
   assert.ok(privateTagRow);
-  assert.equal(privateTagRow.querySelectorAll(".x-utag").length, 4);
+  assert.equal(privateTagRow.querySelectorAll(".x-utag").length, 3);
+  assert.equal(privateTagRow.querySelector(".x-utag-more")?.textContent, "+1");
+  // Private tags are ink text with a brass # inside the Your record well.
+  assert.equal(privateTagRow.getAttribute("data-trace-record-well"), "1");
+  assert.match(privateTagRow.textContent || "", /Your record/);
+  assert.doesNotMatch(sheet.textContent || "", /Private context/);
   for (const tag of privateTagRow.querySelectorAll(".x-utag")) {
     assert.doesNotMatch(tag.getAttribute("style") || "", /border-bottom:\s*1px dotted/i);
     assert.match(tag.getAttribute("style") || "", /background:\s*transparent/i);
-    assert.match(tag.getAttribute("style") || "", /padding:\s*2px 0px/i);
-    assert.match(tag.getAttribute("style") || "", /max-width:\s*150px/i);
-    assert.match(tag.getAttribute("style") || "", /text-overflow:\s*ellipsis/i);
+    assert.match(tag.getAttribute("style") || "", /color:\s*var\(--trace-page-ink\)/i);
+    assert.doesNotMatch(tag.getAttribute("style") || "", /text-overflow:\s*ellipsis/i);
+    assert.equal(tag.firstChild.textContent, "#");
+    assert.match(tag.firstChild.getAttribute("style") || "", /var\(--trace-page-authored\)/);
   }
   assert.match(sheet.textContent || "", /Marked abandoned/i);
   assert.ok(sheet.querySelector("[data-trace-work-mark='abandoned']"));
@@ -6015,12 +6026,12 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
   assert.doesNotMatch(undoBtn.className || "", /\bicon-only\b/);
   const ratingControl = sheet.querySelector("[data-trace-rating-control]");
   assert.ok(ratingControl);
-  assert.equal(
-    Array.from(ratingControl.querySelectorAll("[data-trace-rating-choice]"))
-      .map((button) => button.textContent)
-      .join(""),
-    "★★★☆☆",
+  assert.deepEqual(
+    Array.from(ratingControl.querySelectorAll("[data-trace-rating-choice] svg"))
+      .map((star) => star.getAttribute("fill")),
+    ["currentColor", "currentColor", "currentColor", "none", "none"],
   );
+  assert.ok(ratingControl.closest("[data-trace-record-well]"));
   ratingControl.querySelector("[data-trace-rating-choice='5']").click();
   assert.deepEqual(plainJson(sent.at(-1)), {
     type: "TRACE_PATCH_LIBRARY_ENTRY",
@@ -7265,4 +7276,45 @@ test("content script opens and reconnects its popup relay port after an extensio
   assert.equal(ports[2].sent.at(-1).response.ok, true);
   h.dom.window.dispatchEvent(new h.dom.window.Event("pagehide"));
   h.dom.window.close();
+});
+
+test("page scripts stay on the page register: amber brass, no bars, no AO3 red, no ASCII ellipsis", () => {
+  const files = ["collector.js", "library-overlay.js", "trace-finish-qualify.js", "ao3-saved-filters.js"];
+  for (const file of files) {
+    const src = fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", file), "utf8");
+    assert.doesNotMatch(src, /#8A6420|#DCB976/i, `${file}: the retired brass`);
+    assert.doesNotMatch(src, /border-left:\s*(?:[2-9]|\d{2,})px/i, `${file}: coloured bars`);
+    assert.doesNotMatch(src, /text-transform:\s*uppercase/i, `${file}: uppercase labels`);
+    assert.doesNotMatch(src, /(?:textContent\s*=|return)\s*[^;\n]*\.\.\.["']/, `${file}: ASCII ellipsis in copy`);
+    assert.doesNotMatch(src, /#900\b|#990000|#700\b/i, `${file}: AO3-red fills`);
+    assert.doesNotMatch(src, /Georgia|Geist|Manrope/, `${file}: off-system faces`);
+    assert.doesNotMatch(src, /Get Trace Unlimited|Private context"/, `${file}: retired lexicon`);
+    for (const [, size] of src.matchAll(/font:\s*\d{3}\s+([\d.]+)px/g)) {
+      assert.ok(Number(size) >= 12, `${file}: ${size}px text is below the 12 px page floor`);
+    }
+  }
+  const collector = fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"), "utf8");
+  assert.match(collector, /authored: "#9C6212"/);
+  assert.match(collector, /authored: "#CF9630"/);
+  assert.match(collector, /"record-well": "#F1F4F7"/);
+  assert.match(collector, /"record-well": "#131C25"/);
+});
+
+test("finish band work-status choices are words in B2 cells, never status dots", () => {
+  const dom = new JSDOM("<!doctype html><html><body><div id='end'></div></body></html>", { runScripts: "outside-only" });
+  dom.window.eval(fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", "trace-finish-qualify.js"), "utf8"));
+  const band = dom.window.TraceFinishQualify.mount({
+    anchorEl: dom.window.document.getElementById("end"), placement: "inline", story: { src: "AO3" },
+    onQualify() { return false; },
+  }).node;
+  const choices = Array.from(band.querySelectorAll("[data-trace-work-choice]"));
+  assert.equal(choices.length, 4);
+  for (const choice of choices) {
+    assert.equal(choice.children.length, 0, "no dot or glyph inside a work-status choice");
+    assert.match(choice.getAttribute("style") || "", /border-radius:\s*12px/);
+    assert.match(choice.getAttribute("style") || "", /min-height:\s*44px/);
+  }
+  assert.notEqual(band.getAttribute("role"), "alert");
+  assert.match(band.getAttribute("style") || "", /--trace-page-surface:\s*#FFFFFF/i);
+  assert.doesNotMatch(band.getAttribute("style") || "", /rgb\(255,\s*253,\s*248\)|Geist|Manrope/);
 });

@@ -503,7 +503,7 @@ async function installPopupRoutes(page, popupHtml, popupCss, popupJs, markSvg) {
       await route.fulfill({ status: 200, contentType: "application/javascript", body: popupJs });
       return;
     }
-    if (requestUrl.pathname.endsWith("/images/trace-mark.svg")) {
+    if (requestUrl.pathname.endsWith("/images/trace-icon.svg")) {
       await route.fulfill({ status: 200, contentType: "image/svg+xml", body: markSvg });
       return;
     }
@@ -569,6 +569,15 @@ async function renderFixtureScreenshot(browser, definition, scripts, manifest) {
   );
   await installFixtureRoutes(page, html, definition.url);
   await page.goto(definition.url, { waitUntil: "domcontentloaded" });
+  if (definition.darkHost) {
+    // A dark reading skin (FFN dark theme, AO3 Reversi). Page UI takes its tone
+    // from the host's computed background, never the phone's appearance.
+    await page.evaluate(() => {
+      document.documentElement.style.background = "#111111";
+      document.body.style.background = "#111111";
+      document.body.style.color = "#dadada";
+    });
+  }
   await injectScripts(page, definition.contentScripts.map((name) => scripts[name]));
   if (definition.finishQualify) {
     await page.evaluate((finishQualify) => {
@@ -685,7 +694,12 @@ async function renderPopupScreenshot(browser, definition, assets, manifest) {
   );
   await installPopupRoutes(page, assets.popupHtml, assets.popupCss, assets.popupJs, assets.markSvg);
   await page.goto("https://trace-extension.local/popup.html", { waitUntil: "domcontentloaded" });
-  await page.waitForSelector("#popup-connection[data-state]", { state: "attached", timeout: 10000 });
+  await page.waitForFunction(() => Boolean(
+    document.body.dataset.tracePopupState ||
+    document.body.dataset.tracePopupStateCode ||
+    document.body.dataset.traceEarnedPermission ||
+    document.body.dataset.traceActiveTabProbe
+  ), null, { timeout: 10000 });
   await page.waitForTimeout(250);
   if (definition.storageData?.traceActiveTabProbe === true) {
     await page.waitForFunction(
@@ -795,6 +809,9 @@ const RESTYLE_ORIGINS = [
   "https://m.fanfiction.net/*",
 ];
 const RESTYLE_STATES = ["P1", "P2", "P3", "P3-lapse", "P4", "P5", "P6", "P7", "P8", "P9", "P10", "P11", "P11-menu"];
+// Recovery and truth states drawn by the design pass after the prototype.
+const RESTYLE_RECOVERY_STATES = ["P1-known-saved", "P10-saving", "P10-failed", "P11-settings", "P11-status-error",
+  "other-account", "registration-failure", "reload-page", "library-full", "no-story", "on-list"];
 const RESTYLE_PAGE_STATES = ["N1-saved", "N1-reading", "N2", "N3", "N4-lens", "N4-add-hide"];
 const RESTYLE_DEVICES = [
   { name: "17", width: 384, height: 386 },
@@ -834,7 +851,13 @@ async function renderRestylePopup(browser, assets, output, device, appearance, s
   await page.addInitScript(extensionMockSource(restylePopupStorage(), {
     state: "connected", accountId: "visual-account", canExecuteAuthenticated: true, reason: "none",
   }));
-  const previewApi = "\nwindow.__traceVisualRender = { renderEarnedAccessPending, renderEarnedSaved, renderEarnedPermissionInvitation, renderEarnedDelayed, renderEarnedConnectAccount, renderEarnedPermissionDeclined, renderEarnedSiteReady, renderEarnedUnavailable, renderReaderView, openPopupStatusMenu, setEarnedCopy, setEarnedResult, configureEarnedActions, refreshEarnedLayout };";
+  const previewApi = "\nwindow.__traceVisualRender = { renderEarnedAccessPending, renderEarnedSaved, renderEarnedPermissionInvitation, renderEarnedDelayed, renderEarnedConnectAccount, renderEarnedPermissionDeclined, renderEarnedSiteReady, renderEarnedUnavailable, renderReaderView, openPopupStatusMenu, setEarnedCopy, setEarnedResult, configureEarnedActions, refreshEarnedLayout," +
+    " renderEarnedOtherAccount: typeof renderEarnedOtherAccount === 'function' ? renderEarnedOtherAccount : null," +
+    " renderEarnedCheckingLibrary: typeof renderEarnedCheckingLibrary === 'function' ? renderEarnedCheckingLibrary : null," +
+    " renderEarnedLibraryFull: typeof renderEarnedLibraryFull === 'function' ? renderEarnedLibraryFull : null," +
+    " renderPopupSaveStory: typeof renderPopupSaveStory === 'function' ? renderPopupSaveStory : null," +
+    " setPopupStatusError: typeof setPopupStatusError === 'function' ? setPopupStatusError : null," +
+    " renderEarnedRegistrationFailure, renderEarnedUnsupportedStory, renderPageReconnect };";
   await installPopupRoutes(page, assets.popupHtml, assets.popupCss, assets.popupJs + previewApi, assets.markSvg);
   await page.goto("https://trace-extension.local/popup.html", { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => Boolean(window.__traceVisualRender));
@@ -843,7 +866,11 @@ async function renderRestylePopup(browser, assets, output, device, appearance, s
     const { renderEarnedAccessPending, renderEarnedSaved, renderEarnedPermissionInvitation,
       renderEarnedDelayed, renderEarnedConnectAccount, renderEarnedPermissionDeclined,
       renderEarnedSiteReady, renderEarnedUnavailable, renderReaderView, openPopupStatusMenu,
-      setEarnedCopy, setEarnedResult, configureEarnedActions, refreshEarnedLayout } = window.__traceVisualRender;
+      setEarnedCopy, setEarnedResult, configureEarnedActions, refreshEarnedLayout,
+      renderEarnedOtherAccount, renderEarnedCheckingLibrary, renderEarnedLibraryFull, renderPopupSaveStory,
+      setPopupStatusError, renderEarnedRegistrationFailure, renderEarnedUnsupportedStory,
+      renderPageReconnect } = window.__traceVisualRender;
+    const missing = (name) => { throw new Error(`${name} is not available in this popup build`); };
     const story = { ok: true, kind: "story", site: "AO3" };
     const identity = { title: "Synthetic Archive Work", author: "A. Writer", site: "AO3" };
     const saved = { status: "saved", entry: { entryId: "00000000-0000-4000-8000-000000285349",
@@ -872,9 +899,20 @@ async function renderRestylePopup(browser, assets, output, device, appearance, s
     if (code === "P8") renderEarnedSiteReady();
     if (code === "P9") renderEarnedUnavailable(story);
     if (code === "P10") await renderReaderView({ ...reader, activeWork: null, autoTrackEnabled: false });
-    if (["P11", "P11-menu", "P11-menu-keyboard", "P11-settings"].includes(code)) {
+    if (["P11", "P11-menu", "P11-menu-keyboard", "P11-settings", "P11-status-error"].includes(code)) {
       await renderReaderView(reader);
     }
+    if (code === "P11-status-error") (setPopupStatusError || missing("setPopupStatusError"))("Status wasn’t changed. Try again.");
+    const saveContext = { identity, story };
+    if (code === "P1-known-saved") (renderEarnedCheckingLibrary || missing("renderEarnedCheckingLibrary"))();
+    if (code === "P10-saving") (renderPopupSaveStory || missing("renderPopupSaveStory"))(saveContext, "saving");
+    if (code === "P10-failed") (renderPopupSaveStory || missing("renderPopupSaveStory"))(saveContext, "failed", "save_failed");
+    if (code === "other-account") (renderEarnedOtherAccount || missing("renderEarnedOtherAccount"))();
+    if (code === "registration-failure") renderEarnedRegistrationFailure(story);
+    if (code === "reload-page") renderPageReconnect();
+    if (code === "library-full") (renderEarnedLibraryFull || missing("renderEarnedLibraryFull"))(true);
+    if (code === "no-story") renderEarnedUnsupportedStory();
+    if (code === "on-list") await renderReaderView({ ...reader, activeTab: { kind: "supported_archive", site: "ao3" }, activeWork: null });
     refreshEarnedLayout();
     window.dispatchEvent(new Event("resize"));
   }, state);
@@ -944,6 +982,22 @@ async function renderRestylePopup(browser, assets, output, device, appearance, s
   return { type: "popup", file, device: device.name, appearance, size: size.name, state, metrics, errors };
 }
 
+// collector.js runs inside one IIFE, so its note helpers are not page globals.
+// Preview renders append a hook inside that scope; shipped code is unchanged.
+function collectorWithNotePreview(collector) {
+  const end = collector.source.lastIndexOf("})();");
+  if (end < 0) throw new Error("collector.js no longer ends with its IIFE; update the note preview hook");
+  // Chromium has no -apple-system-body, so the hook sets the note's own font
+  // size to the text-size proxy (capped at the note's 2x) before layout.
+  const hook = "\nglobalThis.__traceVisualNote = function (kind, title, chapter, textPx) {\n" +
+    "  var card = createStoryPageNote(kind, title, chapter, false).note;\n" +
+    "  if (textPx) card.style.fontSize = Math.min(textPx, 34) + 'px';\n" +
+    "  storySavedNoteMount(card);\n" +
+    "  if (typeof applyStoryNoteLayout === 'function') applyStoryNoteLayout(card);\n" +
+    "  activeStorySavedNote = card;\n  return card;\n};\n";
+  return { name: collector.name, source: collector.source.slice(0, end) + hook + collector.source.slice(end) };
+}
+
 async function renderRestylePage(browser, scripts, output, device, size, host, state, phoneAppearance, supplement = false) {
   const listing = state.startsWith("N4");
   const fixture = listing ? "ao3_listing.html" : "ao3_story.html";
@@ -976,19 +1030,19 @@ async function renderRestylePage(browser, scripts, output, device, size, host, s
     document.body.style.color = host === "dark" ? "#f2f6fa" : "#18232d";
     document.body.style.fontSize = `${px}px`;
   }, { host, px: size.px });
-  await injectScripts(page, listing ? [scripts.keys, scripts.overlay] : [scripts.collector]);
+  const pageNote = state === "N2" || state === "N3";
+  await injectScripts(page, listing ? [scripts.keys, scripts.overlay]
+    : [pageNote ? collectorWithNotePreview(scripts.collector) : scripts.collector]);
   await page.waitForTimeout(250);
-  if (state === "N2" || state === "N3") {
-    await page.evaluate((kind) => {
-      const card = createStoryPageNote(kind === "N2" ? "saved" : "kept", "Synthetic Archive Work", 5, false).note;
-      storySavedNoteMount(card);
-      activeStorySavedNote = card;
+  if (pageNote) {
+    await page.evaluate(({ kind, px }) => {
+      window.__traceVisualNote(kind === "N2" ? "saved" : "kept", "Synthetic Archive Work", 5, px);
       const note = document.querySelector("trace-saved-note");
       if (note) {
         const card = note.__traceShadow.querySelector("[data-trace-saved-note]");
         if (card) { card.style.opacity = "1"; card.style.transform = "none"; }
       }
-    }, state);
+    }, { kind: state, px: size.px });
   }
   if (listing) {
     const selector = state === "N4-lens" ? "#work_10404927" : "#work_25010857";
@@ -1027,8 +1081,11 @@ async function renderRestyleMatrix(browser, assets, scripts, manifest) {
   const root = path.join(outputRoot, "matrix");
   await fs.mkdir(root, { recursive: true });
   const sample = process.argv.includes("--matrix-sample");
-  const states = sample ? ["P2", "P3", "P11-menu"] : RESTYLE_STATES;
-  const pageStates = sample ? ["N2", "N4-add-hide"] : RESTYLE_PAGE_STATES;
+  const only = process.env.TRACE_MATRIX_STATES ? process.env.TRACE_MATRIX_STATES.split(",") : null;
+  const states = only ? only.filter((state) => !state.startsWith("N"))
+    : sample ? ["P2", "P3", "P11-menu"] : [...RESTYLE_STATES, ...RESTYLE_RECOVERY_STATES];
+  const pageStates = only ? only.filter((state) => state.startsWith("N"))
+    : sample ? ["N2", "N4-add-hide"] : RESTYLE_PAGE_STATES;
   const devices = RESTYLE_DEVICES;
   const sizes = RESTYLE_SIZES;
   const appearances = sample ? ["light"] : ["light", "dark"];
@@ -1046,7 +1103,7 @@ async function renderRestyleMatrix(browser, assets, scripts, manifest) {
       entries.push(await renderRestylePage(browser, scripts, root, device, size, host, state, phoneAppearance));
     }
   }
-  if (!sample) {
+  if (!sample && !only) {
     for (const device of RESTYLE_DEVICES) for (const state of RESTYLE_PAGE_STATES) {
       console.error(`Page ${device.name} light-host light-phone large ${state}`);
       entries.push(await renderRestylePage(browser, scripts, root, device, RESTYLE_SIZES[0],
@@ -1055,7 +1112,7 @@ async function renderRestyleMatrix(browser, assets, scripts, manifest) {
   }
   manifest.matrix = {
     method: "Chromium rendering through the repository preview harness; text sizes are 17/26/36 px proxies, not iOS Dynamic Type",
-    expectedPopup: sample ? 18 : 156,
+    expectedPopup: sample ? 18 : (RESTYLE_STATES.length + RESTYLE_RECOVERY_STATES.length) * 12,
     expectedPage: sample ? 24 : 72,
     supplementaryLightHostPhoneLight: sample ? 0 : 12,
     entries,
@@ -1164,7 +1221,7 @@ async function main() {
     popupHtml: await readText(resourceRoot, "popup.html"),
     popupCss: await readText(resourceRoot, "popup.css"),
     popupJs: await readText(resourceRoot, "popup.js"),
-    markSvg: await readText(resourceRoot, "images", "trace-mark.svg"),
+    markSvg: await readText(resourceRoot, "images", "trace-icon.svg"),
   };
   const scripts = {
     keys: assets.keys,
@@ -1581,6 +1638,18 @@ async function main() {
         corrective: true,
       },
     ];
+
+    // Dark-host twins for every surface family the contract covers.
+    const darkHostTwins = [
+      "Opened AO3 story sheet", "Opened AO3 listing action surface", "AO3 listing signed-out connect notice",
+      "AO3 listing capacity recovery notice", "AO3 finish status decision", "FFN automatic finish confirmation",
+      "AO3 saved-filter management tray", "AO3 story top", "AO3 listing desktop",
+    ];
+    for (const name of darkHostTwins) {
+      const base = fixtureScreenshots.find((definition) => definition.name === name);
+      if (!base) throw new Error(`Missing fixture ${name} for its dark-host twin`);
+      fixtureScreenshots.push({ ...base, name: `${name} (dark host)`, file: base.file.replace(/\.png$/, "-dark-host.png"), darkHost: true });
+    }
 
     if (visualMode === "all" || visualMode === "capacity" || visualMode === "corrective") {
       const selectedFixtures = visualMode === "capacity"
