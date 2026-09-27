@@ -496,8 +496,9 @@ test("AO3 saved filters shows global presets plus matching current-tag presets",
   const mount = root(window);
 
   assert.match(mount.textContent, /Naruto context filter/);
-  assert.match(mount.textContent, /Current tag/);
-  assert.match(mount.textContent, /Global/);
+  // Group labels are sentence case in the page register.
+  assert.match(mount.textContent, /This tag/);
+  assert.match(mount.textContent, /All tags/);
   assert.doesNotMatch(mount.textContent, /Avatar context filter/);
   assert.doesNotMatch(mount.textContent, /Reusable anywhere filter/);
   assert.equal(mount.querySelector(".trace-sf-group[data-group='context']").getAttribute("data-collapsed"), "false");
@@ -645,117 +646,28 @@ test("AO3 saved filters uses a compact AO3-native drawer section", async () => {
     mount.querySelector("[data-trace-sf-action='toggle-panel']").getAttribute("aria-expanded"),
     "false",
   );
-  assert.match(
-    style.textContent,
-    /@container \(max-width: 480px\) \{[\s\S]*?\.trace-sf-card \{[^}]*background:\s*transparent;[^}]*border:\s*0;[^}]*border-bottom:\s*1px solid #cfcec9;[^}]*border-radius:\s*0;[^}]*box-shadow:\s*none;/,
-  );
+  // Trace's page register, not AO3 mimicry.
+  assert.doesNotMatch(style.textContent, /Georgia|Lucida|(?<!sans-)serif\b/i);
+  assert.doesNotMatch(style.textContent, /#900\b|#990000|#700\b|#9a3412/i, "no AO3-red or rust fills");
+  assert.doesNotMatch(style.textContent, /#1f5c45|#2f7d5b|#b07d2a|#8a6e2a|#e9f2ec|#f8efe8|#fffdf8/i, "no forest, honey or paper literals");
+  assert.doesNotMatch(style.textContent, /linear-gradient/i, "no AO3 gradient buttons");
+  assert.doesNotMatch(style.textContent, /text-transform:\s*uppercase/i);
+  assert.doesNotMatch(style.textContent, /border-left:/i, "no coloured bars");
+  assert.doesNotMatch(style.textContent, /\boutline:\s*0\b/, "focus is never suppressed");
+  assert.match(style.textContent, /:focus-visible \{[^}]*outline:\s*3px solid var\(--trace-page-teal\)/);
+  assert.match(style.textContent, /\.trace-sf-group-body \{[^}]*border-radius:\s*14px;[^}]*box-shadow:\s*inset 0 0 0 1px var\(--trace-page-rule\)/);
+  assert.match(style.textContent, /\.trace-sf-btn \{[^}]*color:\s*var\(--trace-page-teal\);[^}]*min-height:\s*44px;/);
+  for (const [, size] of style.textContent.matchAll(/font-size:\s*([\d.]+)px/g)) {
+    assert.ok(Number(size) >= 12, `font-size ${size}px is below the 12 px page floor`);
+  }
   assert.match(
     style.textContent,
     /@container \(max-width: 480px\) \{[\s\S]*?\.trace-sf-card\[data-panel-collapsed='true'\] \.trace-sf-panel \{[^}]*display:\s*none;/,
   );
-  assert.match(
-    style.textContent,
-    /@container \(max-width: 480px\) \{[\s\S]*?\.trace-sf-list \{[^}]*background:\s*transparent;[^}]*border-top:\s*1px solid #dcdbd6;/,
-  );
-  assert.match(
-    style.textContent,
-    /@container \(max-width: 480px\) \{[\s\S]*?\.trace-sf-summary \{[^}]*font-size:\s*0\.66rem;[^}]*-webkit-line-clamp:\s*2;/,
-  );
-  assert.match(
-    style.textContent,
-    /@container \(max-width: 480px\) \{[\s\S]*?\.trace-sf-head \{[^}]*grid-template-columns:\s*0\.62rem 1\.18rem max-content minmax\(0, 1fr\);[^}]*grid-template-rows:\s*auto auto;/,
-  );
-  assert.match(
-    style.textContent,
-    /@container \(max-width: 480px\) \{[\s\S]*?\.trace-sf-panel-caret \{[^}]*display:\s*inline-flex;[^}]*grid-column:\s*1;/,
-  );
-  assert.match(
-    style.textContent,
-    /@container \(max-width: 480px\) \{[\s\S]*?\.trace-sf-head-text \{[^}]*display:\s*contents;/,
-  );
-  assert.match(
-    style.textContent,
-    /@container \(max-width: 480px\) \{[\s\S]*?\.trace-sf-title-line \{[^}]*grid-column:\s*3;[^}]*min-width:\s*max-content;/,
-  );
-  assert.match(
-    style.textContent,
-    /@container \(max-width: 480px\) \{[\s\S]*?\.trace-sf-head-actions \{[^}]*display:\s*none;/,
-  );
-  assert.match(
-    style.textContent,
-    /@container \(max-width: 480px\) \{[\s\S]*?\.trace-sf-head-meta \{[^}]*display:\s*block;[^}]*grid-column:\s*3 \/ 5;[^}]*grid-row:\s*2;/,
-  );
-  assert.match(
-    style.textContent,
-    /@container \(max-width: 480px\) \{[\s\S]*?\.trace-sf-title \{[^}]*overflow:\s*visible;[^}]*text-overflow:\s*clip;[^}]*white-space:\s*nowrap;/,
-  );
-  assert.match(
-    style.textContent,
-    /@media \(max-width: 720px\) \{[\s\S]*?\.trace-sf-status-main \{[^}]*white-space:\s*normal;/,
-  );
-  assert.match(
-    style.textContent,
-    /\.trace-sf-btn \{[^}]*background-image:\s*linear-gradient\(#fbfbfb, #e0e0dd\);[^}]*min-height:\s*2\.05rem;/,
-  );
-  assert.match(
-    style.textContent,
-    /button\.trace-sf-head:focus,[\s\S]*?\.trace-sf-group-head:focus,[\s\S]*?\.trace-sf-main:focus \{[^}]*outline:\s*0;/,
-    "Trace controls should suppress AO3/browser default dotted focus outlines",
-  );
-  assert.match(
-    style.textContent,
-    /button\.trace-sf-head:focus-visible,[\s\S]*?\.trace-sf-group-head:focus-visible,[\s\S]*?\.trace-sf-main:focus-visible \{[^}]*box-shadow:\s*inset 0 0 0 2px rgba\(31,92,69,0\.32\);[^}]*outline:\s*0;/,
-    "keyboard focus should use a controlled inset focus treatment instead of the dotted outline",
-  );
-  assert.match(
-    style.textContent,
-    /@container \(max-width: 480px\) \{[\s\S]*?\.trace-sf-status-actions \{[^}]*grid-template-columns:\s*repeat\(auto-fit, minmax\(7\.25rem, 1fr\)\);/,
-  );
-  assert.match(
-    style.textContent,
-    /@container \(max-width: 480px\) \{[\s\S]*?\.trace-sf-status-actions \.trace-sf-btn \{[^}]*min-height:\s*2\.55rem;/,
-  );
-  assert.match(
-    style.textContent,
-    /@container \(max-width: 480px\) \{[\s\S]*?\.trace-sf-name \{[^}]*font-size:\s*0\.82rem;[^}]*white-space:\s*normal;[^}]*-webkit-line-clamp:\s*2;/,
-  );
-  assert.match(
-    style.textContent,
-    /\.trace-sf-row:hover \{[^}]*background: #e7e6e1;/,
-    "desktop hover should apply to the full row, not just the inner text button",
-  );
-  assert.match(
-    style.textContent,
-    /\.trace-sf-row\[data-active='true'\] \{[^}]*background: #e9f2ec;/,
-    "desktop active row should use the same pale tint as the Claude native section",
-  );
-  const desktopActiveRowRule = style.textContent.match(/\.trace-sf-row\[data-active='true'\] \{([^}]*)\}/);
-  assert.ok(desktopActiveRowRule);
-  assert.doesNotMatch(
-    desktopActiveRowRule[1],
-    /box-shadow/,
-    "desktop active row should not bleed into AO3's framed filter-section edge",
-  );
-  const desktopActiveStatusRule = style.textContent.match(/\.trace-sf-status\[data-kind='active'\] \{([^}]*)\}/);
-  assert.ok(desktopActiveStatusRule);
-  assert.doesNotMatch(
-    desktopActiveStatusRule[1],
-    /box-shadow/,
-    "desktop active status strip should respect AO3's framed filter-section edge",
-  );
-  assert.match(
-    style.textContent,
-    /@media \(max-width: 720px\) \{[\s\S]*?\.trace-sf-row\[data-active='true'\] \{[^}]*box-shadow: -0\.86rem 0 0 #e9f2ec, 0\.86rem 0 0 #e9f2ec;/,
-    "mobile active row tint should keep the wider strip treatment",
-  );
-  assert.match(
-    style.textContent,
-    /@media \(max-width: 720px\) \{[\s\S]*?\.trace-sf-status\[data-kind='active'\] \{[^}]*box-shadow: -0\.86rem 0 0 #e9f2ec, 0\.86rem 0 0 #e9f2ec;/,
-    "mobile active status tint should keep the wider strip treatment",
-  );
+  assert.match(mount.getAttribute("style") || "", /--trace-page-teal:\s*#176E72/i, "light AO3 hosts get the light page tokens");
   assert.equal(
     mount.querySelector(".trace-sf-head-actions > .trace-sf-count").textContent,
-    "1",
+    "1 saved",
     "desktop saved-filter count should stay in the reserved header action cluster",
   );
   assert.match(
@@ -807,7 +719,7 @@ test("AO3 saved filters uses a compact AO3-native drawer section", async () => {
     "saved-filter title should remain intact in narrow headers",
   );
   assert.equal(mount.querySelector(".trace-sf-mark"), null);
-  assert.equal(mount.querySelector(".trace-sf-by").textContent, "by Trace");
+  assert.equal(mount.querySelector(".trace-sf-by"), null, "no Trace eyebrow in page UI");
   mount.querySelector("[data-trace-sf-action='toggle-panel']").click();
   await sleep(0);
   assert.equal(mount.querySelector(".trace-sf-card").getAttribute("data-panel-collapsed"), "false");
@@ -918,7 +830,8 @@ test("AO3 saved filters keeps large preset lists in an internal scroll region", 
   assert.equal(mount.querySelectorAll(".trace-sf-badge").length, 0);
   assert.match(style.textContent, /\.trace-sf-list \{[^}]*max-height: 22rem/s);
   assert.match(style.textContent, /\.trace-sf-list \{[^}]*overflow-y: auto/s);
-  assert.match(style.textContent, /\.trace-sf-row\[data-active='true'\] \.trace-sf-edge \{[^}]*background: #2f7d5b/s);
+  // The active filter is marked with an ink check, not a coloured edge.
+  assert.doesNotMatch(style.textContent, /\.trace-sf-edge \{[^}]*background/s);
   assert.doesNotMatch(
     style.textContent,
     /\.trace-sf-row\[data-scope='context'\] \.trace-sf-edge/,
@@ -1047,7 +960,8 @@ test("AO3 saved filters supports inline rename and delete", async () => {
   assert.equal(mount.querySelector(".trace-sf-menu-btn").getAttribute("aria-expanded"), "true");
   assert.match(window.document.getElementById("trace-ao3-saved-filters-style").textContent, /\.trace-sf-manage \{[^}]*display: flex/s);
   assert.doesNotMatch(window.document.getElementById("trace-ao3-saved-filters-style").textContent, /\.trace-sf-manage \{[^}]*position: absolute/s);
-  assert.match(window.document.getElementById("trace-ao3-saved-filters-style").textContent, /\.trace-sf-menu-btn:focus[^}]*outline: 0/s);
+  // The kebab keeps the page's visible teal focus ring.
+  assert.doesNotMatch(window.document.getElementById("trace-ao3-saved-filters-style").textContent, /\.trace-sf-menu-btn:focus[^}]*outline: 0/s);
   assert.equal(mount.querySelector(".trace-sf-menu-btn").textContent, "");
   assert.equal(mount.querySelectorAll(".trace-sf-menu-btn svg circle").length, 3);
   assert.equal(mount.querySelector(".trace-sf-manage").getAttribute("role"), "group");
@@ -1086,7 +1000,8 @@ test("AO3 saved filters supports inline rename and delete", async () => {
   mount.querySelector("[data-trace-sf-action='menu']").click();
   mount.querySelector("[data-trace-sf-action='delete-confirm']").click();
   await sleep(0);
-  assert.match(mount.textContent, /Delete\s+Comfort reads/);
+  assert.match(mount.textContent, /Delete\s+“Comfort reads”\?/);
+  assert.match(mount.textContent, /AO3 isn’t changed/);
   mount.querySelector("[data-trace-sf-action='delete']").click();
   await sleep(80);
   assert.deepEqual(plain(storageState[STORAGE_KEY]), []);
@@ -1107,7 +1022,8 @@ test("AO3 saved filters surfaces local storage failures inline", async () => {
   await sleep(80);
 
   assert.equal(storageState[STORAGE_KEY], undefined);
-  assert.match(mount.textContent, /Couldn't save/);
+  assert.match(mount.textContent, /Couldn’t save/);
+  assert.ok(mount.querySelector(".trace-sf-error .trace-sf-error-glyph svg"));
   assert.match(mount.textContent, /Local storage is full/);
 });
 

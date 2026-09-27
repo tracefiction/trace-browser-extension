@@ -756,13 +756,20 @@ test("library-overlay renders display-safe private note preview and dotted tag a
   assert.match(surface.textContent || "", /\+3/);
   assert.doesNotMatch(surface.textContent || "", /6 private tags/i);
   const privateTags = Array.from(surface.querySelectorAll(".x-utag"));
-  assert.equal(privateTags.length, 4);
+  assert.equal(privateTags.length, 3);
+  assert.equal(surface.querySelector(".x-utag-more")?.textContent, "+3");
+  // Your record well: ink tags with a brass # mark, no bars or dotted lines.
+  const well = surface.querySelector("[data-trace-record-well]");
+  assert.ok(well);
+  assert.match(well.textContent || "", /Your record/);
+  assert.doesNotMatch(surface.textContent || "", /Private context/);
+  assert.doesNotMatch(well.getAttribute("style") || "", /border-left/i);
   for (const tag of privateTags) {
     assert.doesNotMatch(tag.getAttribute("style") || "", /border-bottom:\s*1px dotted/i);
     assert.match(tag.getAttribute("style") || "", /background:\s*transparent/i);
-    assert.match(tag.getAttribute("style") || "", /padding:\s*2px 0px/i);
-    assert.match(tag.getAttribute("style") || "", /max-width:\s*150px/i);
-    assert.match(tag.getAttribute("style") || "", /text-overflow:\s*ellipsis/i);
+    assert.match(tag.getAttribute("style") || "", /color:\s*var\(--trace-page-ink\)/i);
+    assert.doesNotMatch(tag.getAttribute("style") || "", /text-overflow:\s*ellipsis/i);
+    assert.equal(tag.firstChild.textContent, "#");
   }
   assert.equal(privateTags[2].getAttribute("title"), "favorite private tag label that is too long");
 });
@@ -837,23 +844,20 @@ test("library-overlay renders optional WIP new-chapter context when present", as
 
   const ratingControl = surface.querySelector("[data-trace-rating-control]");
   assert.ok(ratingControl);
-  assert.match(ratingControl.getAttribute("style") || "", /display:\s*grid/i);
+  // Editable brass stars inside the Your record well.
+  assert.ok(ratingControl.closest("[data-trace-record-well]"));
   const ratingChoices = Array.from(
     ratingControl.querySelectorAll("[data-trace-rating-choice]"),
   );
-  const ratingRow = ratingChoices[0].parentElement;
-  assert.match(
-    ratingRow.getAttribute("style") || "",
-    /grid-template-columns:\s*repeat\(5,minmax\(0,1fr\)\)/i,
-  );
-  assert.match(ratingRow.getAttribute("style") || "", /width:\s*100%/i);
   for (const button of ratingChoices) {
-    assert.match(button.getAttribute("style") || "", /width:\s*100%/i);
-    assert.match(button.getAttribute("style") || "", /min-width:\s*0/i);
+    assert.match(button.getAttribute("style") || "", /width:\s*44px/i);
+    assert.match(button.getAttribute("style") || "", /height:\s*44px/i);
+    assert.match(button.getAttribute("style") || "", /color:\s*var\(--trace-page-authored\)/i);
+    assert.doesNotMatch(button.getAttribute("style") || "", /--trace-page-warning/i);
   }
-  assert.equal(
-    ratingChoices.map((button) => button.textContent).join(""),
-    "★★☆☆☆",
+  assert.deepEqual(
+    ratingChoices.map((button) => button.querySelector("svg").getAttribute("fill")),
+    ["currentColor", "currentColor", "none", "none", "none"],
   );
   ratingControl.querySelector("[data-trace-rating-choice='4']").click();
   assert.deepEqual(plainJson(sent.at(-1)), {
@@ -884,11 +888,10 @@ test("library-overlay renders optional WIP new-chapter context when present", as
   await sleep(100);
   const refreshedSurface = window.document.querySelector("[data-trace-action-surface]");
   assert.ok(refreshedSurface, "rating storage refresh should keep the action surface open");
-  assert.equal(
-    Array.from(refreshedSurface.querySelectorAll("[data-trace-rating-choice]"))
-      .map((button) => button.textContent)
-      .join(""),
-    "★★★★☆",
+  assert.deepEqual(
+    Array.from(refreshedSurface.querySelectorAll("[data-trace-rating-choice] svg"))
+      .map((star) => star.getAttribute("fill")),
+    ["currentColor", "currentColor", "currentColor", "currentColor", "none"],
   );
 
   const catchup = refreshedSurface.querySelector("[data-trace-catchup-action]");
@@ -969,7 +972,9 @@ test("library-overlay opened surface shows status editing only when entryId exis
   assert.match(surface.getAttribute("style") || "", /max-height:\s*\d+px/i);
   const header = surface.querySelector("[data-trace-management-header]");
   assert.ok(header);
-  assert.match(header.textContent || "", /Trace\s*·\s*AO3/i);
+  // The site sits in the byline; there is no "Trace ·" eyebrow.
+  assert.match(header.textContent || "", /AO3/);
+  assert.doesNotMatch(header.textContent || "", /Trace\s*·/i);
   const openInTrace = surface.querySelector("a");
   assert.equal(
     openInTrace.getAttribute("href"),
@@ -993,7 +998,8 @@ test("library-overlay opened surface shows status editing only when entryId exis
   const selected = choices.querySelector("[data-trace-status-selected='1']");
   assert.ok(selected);
   assert.equal(selected.getAttribute("data-trace-status-choice"), "READING");
-  assert.equal(selected.getAttribute("aria-pressed"), "true");
+  assert.equal(selected.getAttribute("role"), "radio");
+  assert.equal(selected.getAttribute("aria-checked"), "true");
   const position = surface.querySelector("[data-trace-action-position]");
   assert.ok(position);
   assert.match(position.textContent || "", /Chapter\s*3\s*of\s*17/);
@@ -2026,7 +2032,7 @@ test("library-overlay quick add immediately shows pending and ignores duplicate 
   assert.equal(messages.length, 1);
   assert.equal(messages[0].type, "TRACE_QUICK_ADD");
   assert.equal(button.disabled, true);
-  assert.match(button.textContent || "", /Adding\.\.\./);
+  assert.match(button.textContent || "", /Adding…/);
   const spinnerSvg = button.querySelector("svg");
   assert.ok(spinnerSvg, "expected add button to render a spinner icon");
   assert.ok(spinnerSvg.querySelector("circle"), "expected spinner to include a centered ring");
@@ -2065,7 +2071,7 @@ test("library-overlay pending quick add resolves to saved only with confirmed st
   button.click();
 
   assert.equal(messages.length, 1);
-  assert.match(button.textContent || "", /Adding\.\.\./);
+  assert.match(button.textContent || "", /Adding…/);
 
   pendingCallback({
     ok: true,
@@ -2471,10 +2477,10 @@ test("library-overlay quick-add maps free limit to a reusable recovery notice", 
   const notice = window.document.querySelector("[data-trace-capacity-notice]");
   assert.ok(notice);
   assert.match(notice.textContent || "", /wasn’t added/i);
-  assert.match(notice.textContent || "", /Get Trace Unlimited/i);
+  assert.match(notice.textContent || "", /See Trace Unlimited/i);
   assert.match(notice.textContent || "", /Manage library/i);
   const upgrade = Array.from(notice.querySelectorAll("a")).find((link) =>
-    /Get Trace Unlimited/i.test(link.textContent || "")
+    /See Trace Unlimited/i.test(link.textContent || "")
   );
   assert.equal(
     upgrade?.href,

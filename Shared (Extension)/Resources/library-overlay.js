@@ -196,29 +196,30 @@
       "z-index:2147483646",
       "box-sizing:border-box",
       "width:min(360px,calc(100vw - 32px))",
-      "padding:16px",
-      "border:1px solid rgba(28,39,34,0.16)",
+      "padding:14px 16px 6px",
+      "border:0",
       "border-radius:14px",
       "background:var(--trace-page-surface)",
-      "box-shadow:0 18px 46px rgba(28,39,34,0.22)",
+      "box-shadow:0 0 0 1px color-mix(in srgb,var(--trace-page-rule) 70%,transparent),0 14px 30px -12px rgba(0,0,0,.35)",
       "color:var(--trace-page-ink)",
+      "font-family:-apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif",
     ].join(";");
     var title = document.createElement("h2");
     title.textContent = "This story wasn’t added";
-    title.style.cssText = "margin:8px 0 0;font:500 20px/1.15 -apple-system,system-ui,'Segoe UI',sans-serif;color:var(--trace-page-ink)";
+    title.style.cssText = "margin:0;font:600 17px/1.3 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif;color:var(--trace-page-ink)";
     var copy = document.createElement("p");
-    copy.textContent = "Your Trace library is full. Make room or get Trace Unlimited to keep adding stories.";
-    copy.style.cssText = "margin:8px 0 14px;font:500 13px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif;color:var(--trace-page-secondary)";
+    copy.textContent = "Your Library is full. Make room in Trace, or see Trace Unlimited.";
+    copy.style.cssText = "margin:4px 0 2px;font:400 13px/1.4 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif;color:var(--trace-page-secondary)";
     var actions = document.createElement("div");
-    actions.style.cssText = "display:flex;align-items:center;gap:10px";
+    actions.style.cssText = "display:flex;align-items:center;gap:4px 16px";
     actions.style.flexWrap = "wrap";
     var upgrade = document.createElement("a");
     upgrade.setAttribute("data-trace-open-trace", "1");
     upgrade.href = TRACE_WEB_UPGRADE_URL;
     upgrade.target = "_blank";
     upgrade.rel = "noopener noreferrer";
-    upgrade.textContent = "Get Trace Unlimited";
-    upgrade.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 14px;border-radius:9px;background:transparent;color:var(--trace-page-teal);text-decoration:none;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif";
+    upgrade.textContent = "See Trace Unlimited";
+    upgrade.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 8px;margin-left:-8px;border-radius:8px;border:0;background:transparent;color:var(--trace-page-teal);text-decoration:none;font:500 14px/1.2 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif";
     bindTraceOpenLink(upgrade);
     var manage = document.createElement("a");
     manage.setAttribute("data-trace-open-trace", "1");
@@ -226,12 +227,12 @@
     manage.target = "_blank";
     manage.rel = "noopener noreferrer";
     manage.textContent = "Manage library";
-    manage.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 12px;border-radius:9px;border:0;color:var(--trace-page-teal);text-decoration:none;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif";
+    manage.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 8px;margin-left:-8px;border-radius:8px;border:0;background:transparent;color:var(--trace-page-teal);text-decoration:none;font:500 14px/1.2 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif";
     bindTraceOpenLink(manage);
     var dismiss = document.createElement("button");
     dismiss.type = "button";
     dismiss.textContent = "Not now";
-    dismiss.style.cssText = "min-height:44px;padding:0 8px;border:0;background:transparent;color:var(--trace-page-secondary);font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif;cursor:pointer";
+    dismiss.style.cssText = "min-height:44px;padding:0 8px;margin-left:auto;border:0;background:transparent;color:var(--trace-page-secondary);font:500 14px/1.2 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif;cursor:pointer";
     dismiss.addEventListener("click", function () {
       acknowledgeCapacityRecovery("dismissed");
       notice.remove();
@@ -243,6 +244,7 @@
     notice.appendChild(copy);
     notice.appendChild(actions);
     (document.body || document.documentElement).appendChild(notice);
+    if (typeof announceListingSurface === "function") announceListingSurface("This story wasn’t added. Your Library is full.");
     acknowledgeCapacityRecovery("shown");
   }
 
@@ -295,7 +297,8 @@ function traceHostPageTokens() {
   var light = {
     ground: "#F8FAFC", surface: "#FFFFFF", raised: "#E9EEF3", rule: "#D8E0E7",
     ink: "#18232D", secondary: "#5F6B76", tertiary: "#7B8792",
-    teal: "#176E72", warning: "#9B4146", authored: "#8A6420",
+    teal: "#176E72", warning: "#9B4146", authored: "#9C6212",
+    "record-well": "#F1F4F7", "record-well-edge": "#E4EAEF", "private-record": "#696D65",
     "status-saved": "#666E68", "status-reading": "#246DCC",
     "status-caught-up": "#4C6F88", "status-paused": "#82651E",
     "status-finished": "#197A5B", "status-dropped": "#7C5282",
@@ -303,7 +306,8 @@ function traceHostPageTokens() {
   var dark = {
     ground: "#111922", surface: "#19232D", raised: "#24323F", rule: "#344451",
     ink: "#F2F6FA", secondary: "#AEBBC5", tertiary: "#8D9AA5",
-    teal: "#8BCDC8", warning: "#E7A19F", authored: "#DCB976",
+    teal: "#8BCDC8", warning: "#E7A19F", authored: "#CF9630",
+    "record-well": "#131C25", "record-well-edge": "#0B1117", "private-record": "#B9BAAF",
     "status-saved": "#B4BDAF", "status-reading": "#7DB8FF",
     "status-caught-up": "#91B4CE", "status-paused": "#D4B76C",
     "status-finished": "#8BD8B6", "status-dropped": "#B99BC2",
@@ -338,7 +342,7 @@ function traceRefreshPageTokens() {
   if (tracePageHasPasswordField()) return;
 
   const TRACE_UI = {
-    font: "-apple-system,system-ui,'Segoe UI',sans-serif",
+    font: "-apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif",
     paper: "var(--trace-page-surface)",
     paperRaised: "var(--trace-page-raised)",
     paperSoft: "var(--trace-page-raised)",
@@ -360,7 +364,7 @@ function traceRefreshPageTokens() {
     shadowPopover: "0 18px 44px rgba(28,28,23,0.22)",
   };
   const TRACE_D1 = {
-    font: "-apple-system,system-ui,'Segoe UI',sans-serif",
+    font: "-apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif",
         paper: "var(--trace-page-surface)",
     paper2: "var(--trace-page-raised)",
     card: "var(--trace-page-surface)",
@@ -375,7 +379,7 @@ function traceRefreshPageTokens() {
     forest: "var(--trace-page-teal)",
     forestDeep: "var(--trace-page-teal)",
     rust: "var(--trace-page-warning)",
-    honey: "var(--trace-page-warning)",
+    honey: "var(--trace-page-authored)",
     forestLine: "var(--trace-page-teal)",
     mutedLine: "var(--trace-page-rule)",
     rustLine: "var(--trace-page-rule)",
@@ -568,21 +572,17 @@ function traceRefreshPageTokens() {
     fg: TRACE_UI.subtle,
     border: "rgba(148, 163, 184, 0.3)",
   };
-  var ADDED_THEME = {
-    bg: TRACE_UI.forest,
-    fg: TRACE_UI.forestOn,
-    border: "rgba(22, 52, 45, 0.35)",
-  };
   var ERROR_THEME = {
     bg: "var(--trace-page-surface)",
     fg: "var(--trace-page-warning)",
     border: "rgba(220, 38, 38, 0.25)",
   };
+  // Hide is a reversible preference: secondary text, never a warning.
   var HIDE_ACTION_THEME = {
-    bg: "rgba(186, 26, 26, 0.045)",
-    fg: "var(--trace-page-warning)",
-    border: "rgba(186, 26, 26, 0.16)",
-    hoverBg: "rgba(186, 26, 26, 0.075)",
+    bg: "transparent",
+    fg: "var(--trace-page-secondary)",
+    border: "transparent",
+    hoverBg: "transparent",
   };
   var SAVING_INLINE_THEME = {
     bg: "rgba(65, 80, 76, 0.045)",
@@ -595,42 +595,6 @@ function traceRefreshPageTokens() {
     fg: "var(--trace-page-warning)",
     border: "rgba(180, 83, 9, 0.25)",
   };
-
-  var CHIP_CSS = [
-    "display:inline-flex",
-    "align-items:center",
-    "justify-content:flex-start",
-    "box-sizing:border-box",
-    "padding:4px 8px",
-    "min-height:20px",
-    "border-radius:" + TRACE_UI.radiusXs,
-    "vertical-align:middle",
-    "font:800 12px/1 " + TRACE_UI.font,
-    "letter-spacing:0.04em",
-    "text-transform:uppercase",
-    "white-space:nowrap",
-    "max-width:min(240px,100%)",
-    "overflow:hidden",
-    "text-overflow:ellipsis",
-  ].join(";");
-
-  function chipStyle(theme) {
-    return CHIP_CSS + ";background:" + theme.bg + ";color:" + theme.fg + ";border:1px solid " + theme.border + compactChipOverrides();
-  }
-
-  function actionChipStyle(theme) {
-    return (
-      chipStyle(theme) +
-      (isCompactOverlayLayout()
-        ? ";padding:3px 9px;min-height:28px;font:800 12px/1 " + TRACE_UI.font
-        : ";padding:2px 8px;min-height:22px;font:800 12px/1 " + TRACE_UI.font) +
-      ";border-color:" + theme.border +
-      ";letter-spacing:0" +
-      ";text-transform:none" +
-      ";box-shadow:none" +
-      ";transition:background-color 120ms ease,border-color 120ms ease,color 120ms ease,box-shadow 120ms ease,transform 120ms ease"
-    );
-  }
 
   function preferenceActionStyle(theme) {
     return d1TextActionStyle(theme);
@@ -680,7 +644,7 @@ function traceRefreshPageTokens() {
       return { fg: TRACE_D1.rust, border: TRACE_D1.rustLine };
     }
     if (kind === "full") {
-      return { fg: TRACE_D1.honey, border: TRACE_D1.honeyLine };
+      return { fg: TRACE_D1.rust, border: TRACE_D1.rustLine };
     }
     if (kind === "saved") {
       return { fg: TRACE_D1.forest, border: TRACE_D1.forestLine };
@@ -799,21 +763,21 @@ function traceRefreshPageTokens() {
   }
 
   function surfaceButtonStyle(theme, filled) {
-    var bg = filled ? theme.bg : "transparent";
-    var color = filled ? theme.fg : theme.fg;
+    // Host pages have no filled or outlined buttons; every action is text.
+    var color = theme.fg;
     return [
       "display:inline-flex",
       "align-items:center",
       "justify-content:center",
       "gap:8px",
       "box-sizing:border-box",
-      "min-height:38px",
-      "padding:0 13px",
-      "border-radius:9px",
-      "border:1px solid " + theme.border,
-      "background:" + bg,
+      "min-height:44px",
+      "padding:0 8px",
+      "border-radius:8px",
+      "border:0",
+      "background:transparent",
       "color:" + color,
-      "font:600 12.5px/1 " + TRACE_D1.font,
+      "font:500 14px/1.2 " + TRACE_D1.font,
       "letter-spacing:0",
       "text-transform:none",
       "text-decoration:none",
@@ -855,16 +819,6 @@ function traceRefreshPageTokens() {
     } catch {
       return false;
     }
-  }
-
-  function compactChipOverrides() {
-    if (!isCompactOverlayLayout()) return "";
-    return (
-      ";padding:3px 7px" +
-      ";min-height:18px" +
-      ";font:700 12px/1 -apple-system,system-ui,'Segoe UI',sans-serif" +
-      ";letter-spacing:0.05em"
-    );
   }
 
   function compactAo3HeadingTarget(anchor) {
@@ -924,7 +878,23 @@ function traceRefreshPageTokens() {
     if (existing) existing.remove();
   }
 
+  // A 3 px teal focus ring, 2 px offset, on every Trace control on the page.
+  function ensureListingFocusStyles() {
+    if (document.querySelector("style[data-trace-listing-focus-styles]")) return;
+    var style = document.createElement("style");
+    style.setAttribute("data-trace-listing-focus-styles", "1");
+    style.textContent =
+      "[data-trace-library-overlay-wrap] :focus-visible,[data-trace-hidden-placeholder] :focus-visible," +
+      "[" + CONNECT_NOTICE_ATTR + "] :focus-visible,[" + CAPACITY_NOTICE_ATTR + "] :focus-visible{" +
+        "outline:3px solid var(--trace-page-teal)!important;outline-offset:2px!important}";
+    (document.head || document.documentElement).appendChild(style);
+  }
+
   function renderConnectNotice(authState, hasAuth) {
+    // The notice refreshes the page tokens itself, so it never renders
+    // transparent before another Trace surface has set them.
+    traceRefreshPageTokens();
+    ensureListingFocusStyles();
     var signature = noticeSignature(authState, hasAuth);
     if (!shouldShowConnectNotice(authState, hasAuth) || isConnectNoticeDismissed(signature)) {
       removeConnectNotice();
@@ -956,18 +926,18 @@ function traceRefreshPageTokens() {
       existing.setAttribute(CONNECT_NOTICE_ATTR, "1");
       existing.style.cssText = [
         "position:fixed",
-        "right:16px",
-        "bottom:16px",
+        "right:max(16px,env(safe-area-inset-right))",
+        "bottom:max(16px,env(safe-area-inset-bottom))",
         "z-index:2147483647",
         "box-sizing:border-box",
-        "width:min(340px,calc(100vw - 32px))",
-        "padding:16px",
-        "border-radius:10px",
-        "background:" + TRACE_D1.card,
+        "width:min(360px,calc(100vw - 32px))",
+        "padding:14px 16px 6px",
+        "border-radius:14px",
+        "background:var(--trace-page-surface)",
         "color:" + TRACE_D1.ink,
-        "border:1px solid " + TRACE_D1.lineStrong,
-        "box-shadow:0 18px 44px rgba(15,20,18,0.22)",
-        "font:500 13px/1.45 " + TRACE_D1.font,
+        "border:0",
+        "box-shadow:0 0 0 1px color-mix(in srgb,var(--trace-page-rule) 70%,transparent),0 14px 30px -12px rgba(0,0,0,.35)",
+        "font:400 13px/1.4 " + TRACE_D1.font,
       ].join(";");
 
       var closeBtn = document.createElement("button");
@@ -975,18 +945,24 @@ function traceRefreshPageTokens() {
       closeBtn.setAttribute("aria-label", "Dismiss Trace notice");
       closeBtn.style.cssText = [
         "position:absolute",
-        "top:8px",
-        "right:8px",
-        "width:28px",
-        "height:28px",
-        "border:1px solid " + TRACE_D1.line,
-        "border-radius:8px",
-        "background:" + TRACE_D1.card2,
-        "color:" + TRACE_D1.ink3,
-        "font:600 16px/1 " + TRACE_D1.font,
+        "top:4px",
+        "right:4px",
+        "width:44px",
+        "height:44px",
+        "display:inline-flex",
+        "align-items:center",
+        "justify-content:center",
+        "padding:0",
+        "border:0",
+        "border-radius:22px",
+        "background:transparent",
+        "color:var(--trace-page-tertiary)",
         "cursor:pointer",
       ].join(";");
-      closeBtn.textContent = "×";
+      var closeGlyph = traceSvgEl("0 0 12 12", { fill: "none", stroke: "currentColor", "stroke-width": "1.7", "stroke-linecap": "round" },
+        [["path", { d: "M1.5 1.5l9 9M10.5 1.5l-9 9" }]]);
+      closeGlyph.style.cssText = "display:block;width:12px;height:12px";
+      closeBtn.appendChild(closeGlyph);
       closeBtn.addEventListener("click", function () {
         dismissConnectNotice(signature);
         removeConnectNotice();
@@ -995,8 +971,8 @@ function traceRefreshPageTokens() {
       var headingEl = document.createElement("div");
       headingEl.setAttribute("data-trace-connect-notice-heading", "1");
       headingEl.style.cssText = [
-        "margin:0 32px 8px 0",
-        "font:700 17px/1.2 " + TRACE_D1.font,
+        "margin:0 36px 4px 0",
+        "font:600 17px/1.3 " + TRACE_D1.font,
         "letter-spacing:0",
         "color:" + TRACE_D1.ink,
       ].join(";");
@@ -1004,9 +980,9 @@ function traceRefreshPageTokens() {
       var messageEl = document.createElement("div");
       messageEl.setAttribute("data-trace-connect-notice-message", "1");
       messageEl.style.cssText = [
-        "margin:0 0 14px 0",
+        "margin:0 0 2px 0",
         "color:" + TRACE_D1.ink3,
-        "font:400 13px/1.5 " + TRACE_D1.font,
+        "font:400 13px/1.4 " + TRACE_D1.font,
       ].join(";");
 
       var cta = document.createElement("a");
@@ -1016,15 +992,15 @@ function traceRefreshPageTokens() {
         "align-items:center",
         "justify-content:center",
         "box-sizing:border-box",
-        "width:100%",
-        "min-height:42px",
-        "padding:10px 14px",
+        "min-height:44px",
+        "margin-left:-8px",
+        "padding:0 8px",
         "border-radius:8px",
         "background:transparent",
         "color:var(--trace-page-teal)",
         "border:0",
         "text-decoration:none",
-        "font:600 13.5px/1.15 " + TRACE_D1.font,
+        "font:500 14px/1.2 " + TRACE_D1.font,
         "letter-spacing:0",
         "text-transform:none",
       ].join(";");
@@ -1039,8 +1015,8 @@ function traceRefreshPageTokens() {
     }
 
     existing.querySelector("[data-trace-connect-notice-heading]").textContent = heading;
-    existing.querySelector("[data-trace-connect-notice-heading]").style.color =
-      state === "error" ? TRACE_D1.rust : state === "reconnect_required" ? TRACE_D1.honey : TRACE_D1.ink;
+    // The heading is ink in every state; the failure is in the words.
+    existing.querySelector("[data-trace-connect-notice-heading]").style.color = TRACE_D1.ink;
     existing.querySelector("[data-trace-connect-notice-message]").textContent = message;
     var ctaEl = existing.querySelector("[data-trace-connect-notice-cta]");
     if (appLink) {
@@ -1428,7 +1404,7 @@ function traceRefreshPageTokens() {
         ? raw.notePreview.replace(/\s+/g, " ").trim()
         : "";
     if (notePreview.length > 180) {
-      notePreview = notePreview.slice(0, 177).trimEnd() + "...";
+      notePreview = notePreview.slice(0, 177).trimEnd() + "…";
     }
     var tags = [];
     if (Array.isArray(raw.tags)) {
@@ -1671,47 +1647,6 @@ function traceRefreshPageTokens() {
     return pub - cap;
   }
 
-  function siteAheadHintEl(delta) {
-    if (delta == null || delta < 1) return null;
-    var th = UPDATED_THEME;
-    var span = document.createElement("span");
-    span.setAttribute(ATTR, "1");
-    span.setAttribute("data-trace-site-ahead", "1");
-    span.textContent = delta === 1 ? "UPDATED" : "+" + String(delta);
-    span.setAttribute(
-      "title",
-      delta === 1
-        ? "This work has more published chapters than your Trace progress total."
-        : "About " +
-            delta +
-            " more chapter(s) published on the site than reflected in your Trace total.",
-    );
-    span.setAttribute(
-      "aria-label",
-      delta === 1
-        ? "Site has new chapters versus Trace library total"
-        : String(delta) + " more chapters on site than Trace total",
-    );
-    span.style.cssText = [
-      "display:inline-flex",
-      "align-items:center",
-      "justify-content:center",
-      "box-sizing:border-box",
-      "padding:2px 6px",
-      "min-height:16px",
-      "border-radius:6px",
-      "vertical-align:middle",
-      "font:700 12px/1 -apple-system,system-ui,'Segoe UI',sans-serif",
-      "letter-spacing:0.05em",
-      "text-transform:uppercase",
-      "white-space:nowrap",
-      "background:" + th.bg,
-      "color:" + th.fg,
-      "border:1px solid " + th.border,
-    ].join(";");
-    return span;
-  }
-
   /**
    * Only decorate “main” story links — not AO3 chapters (/works/id/chapters/…), kudos,
    * comments, bookmarks, etc., and not every FFN chapter row for the same fic.
@@ -1758,7 +1693,7 @@ function traceRefreshPageTokens() {
 
   function lensHeadline(entry) {
     if (!entry) return "Trace";
-    if (entry.__traceStatusPending) return "Saving...";
+    if (entry.__traceStatusPending) return "Saving…";
     if (entry.__traceStatusError) return "Update failed";
     if (entry.hidden) return "Hidden";
     var display = statusDisplay(entry);
@@ -1785,7 +1720,7 @@ function traceRefreshPageTokens() {
       return parts.length ? parts.join(" \u00b7 ") : "New chapters available";
     }
     if (entry.privateContext && (entry.privateContext.hasNotes || entry.privateContext.tagCount > 0)) {
-      return "Private context saved";
+      return "Your record saved";
     }
     return "In your library";
   }
@@ -1899,8 +1834,9 @@ function traceRefreshPageTokens() {
   }
 
   function lensDotColor(entry, theme) {
-    if (entry && entry.__traceStatusError) return TRACE_D1.rust;
-    if (entry && entry.__traceStatusPending) return TRACE_D1.ink4;
+    // Only the six reader statuses carry a dot; Update failed, Saving and
+    // Hidden are words.
+    if (entry && (entry.__traceStatusError || entry.__traceStatusPending || entry.hidden)) return null;
     var status = entryDisplayStatusValue(entry);
     if (status && D1_STATUS_ACCENT[status]) return D1_STATUS_ACCENT[status];
     return theme && theme.accent ? theme.accent : TRACE_D1.ink3;
@@ -1908,7 +1844,7 @@ function traceRefreshPageTokens() {
 
   function lensLabelText(entry) {
     if (!entry) return "Trace";
-    if (entry.__traceStatusPending) return "Saving...";
+    if (entry.__traceStatusPending) return "Saving…";
     if (entry.__traceStatusError) return "Update failed";
     if (entry.hidden) return "Hidden";
     var status = statusOnlyDisplay(entry);
@@ -1926,75 +1862,6 @@ function traceRefreshPageTokens() {
     return chapters.current + "/" + (chapters.total == null ? "?" : chapters.total);
   }
 
-  function badgeEl(entry) {
-    var status = entryDisplayStatusValue(entry);
-    const theme = STATUS_THEME[status] || STATUS_THEME.PLANNING;
-    const label = LABEL[status] || status;
-    const suffix = chapterSuffix(status, entry.chapters);
-    const display = (label + suffix).toUpperCase();
-    const span = document.createElement("span");
-    span.setAttribute(ATTR, "1");
-    var titleBase = "In your Trace library: " + label + progressClause(status, entry.chapters);
-    span.setAttribute("title", titleBase);
-    span.setAttribute(
-      "aria-label",
-      "Trace library: " + label + progressClause(status, entry.chapters),
-    );
-    span.textContent = display;
-    span.style.cssText = chipStyle(theme) + ";box-shadow:0 1px 2px rgba(28,28,23,0.06)";
-    return span;
-  }
-
-  function smallBadgeEl(text, theme, title, attrName) {
-    var span = document.createElement("span");
-    span.setAttribute(ATTR, "1");
-    if (attrName) span.setAttribute(attrName, "1");
-    span.textContent = String(text || "").toUpperCase();
-    if (title) {
-      span.setAttribute("title", title);
-      span.setAttribute("aria-label", title);
-    }
-    span.style.cssText = chipStyle(theme);
-    return span;
-  }
-
-  function appendEntryBadges(wrap, entry) {
-    if (entry.hidden) {
-      wrap.appendChild(
-        smallBadgeEl(
-          "Hidden",
-          HIDDEN_THEME,
-          "Hidden in Trace browsing preferences",
-          "data-trace-browse-hidden",
-        ),
-      );
-    }
-    if (entryDisplayStatusValue(entry)) {
-      wrap.appendChild(badgeEl(entry));
-    }
-    var newChapterText = newChaptersDisplay(entry, true);
-    if (newChapterText) {
-      wrap.appendChild(
-        smallBadgeEl(
-          newChapterText,
-          UPDATED_THEME,
-          "New chapters available for this Trace library entry",
-          "data-trace-new-chapters",
-        ),
-      );
-    }
-  }
-
-  function appendWorkCatchupRows(surface, entry) {
-    if (!entry) return;
-    var catchup = catchupLabel(entry);
-    if (catchup) {
-      surface.appendChild(
-        surfaceRowEl("Catch-up", catchup, entry.catchupState === "BEHIND"),
-      );
-    }
-  }
-
   function ratingButtonStyle(active, disabled) {
     return [
       "appearance:none",
@@ -2002,14 +1869,15 @@ function traceRefreshPageTokens() {
       "align-items:center",
       "justify-content:center",
       "box-sizing:border-box",
-      "width:100%",
+      "width:44px",
       "min-width:0",
-      "height:40px",
+      "height:44px",
+      "margin:0 -6px",
+      "padding:0",
       "border:0",
-      "border-radius:7px",
+      "border-radius:8px",
       "background:transparent",
-      "color:" + (active ? TRACE_D1.honey : TRACE_D1.ink5),
-      "font:600 20px/1 -apple-system,system-ui,'Segoe UI',sans-serif",
+      "color:var(--trace-page-authored)",
       "cursor:" + (disabled ? "wait" : "pointer"),
       disabled ? "opacity:0.62" : "",
     ].join(";");
@@ -2020,22 +1888,25 @@ function traceRefreshPageTokens() {
     var current = entryRatingValue(entry);
     var wrap = document.createElement("div");
     wrap.setAttribute("data-trace-rating-control", "1");
-    wrap.style.cssText = "display:grid;gap:6px;min-width:0;padding-top:2px";
+    wrap.style.cssText = "display:flex;align-items:center;gap:14px;min-width:0;margin-top:2px";
 
     var labelWrap = document.createElement("div");
-    labelWrap.style.cssText = "display:flex;align-items:baseline;justify-content:space-between;gap:8px;min-width:0";
+    labelWrap.style.cssText = "order:2;display:flex;align-items:baseline;gap:8px;min-width:0";
     var label = document.createElement("div");
     label.className = "x-sheet-label";
+    label.id = "trace-listing-rating-label";
     label.textContent = "Your rating";
-    label.style.cssText = "font:600 12px/1.3 " + TRACE_D1.font + ";color:" + TRACE_D1.ink2;
+    label.style.cssText = "position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap";
     labelWrap.appendChild(label);
 
     var row = document.createElement("div");
-    row.style.cssText = "display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:2px;width:100%;min-width:0";
+    row.setAttribute("role", "group");
+    row.setAttribute("aria-labelledby", label.id);
+    row.style.cssText = "order:1;display:flex;align-items:center;padding-left:6px;min-width:0";
     var message = document.createElement("span");
     message.setAttribute("data-trace-rating-message", "1");
     message.textContent = current > 0 ? current + " of 5" : "Not rated";
-    message.style.cssText = "display:block;margin-top:2px;font:500 12px/1.3 " + TRACE_D1.font + ";color:" + TRACE_D1.ink4;
+    message.style.cssText = "display:block;font:500 12px/1.3 " + TRACE_D1.font + ";color:" + TRACE_D1.ink4;
     labelWrap.appendChild(message);
 
     function renderStars(disabled) {
@@ -2051,7 +1922,7 @@ function traceRefreshPageTokens() {
             : "Set rating to " + i + " out of 5",
         );
         star.setAttribute("aria-pressed", current === i ? "true" : "false");
-        star.textContent = i <= current ? "\u2605" : "\u2606";
+        star.appendChild(traceStarSvg(i <= current));
         star.style.cssText = ratingButtonStyle(i <= current, disabled);
         star.disabled = disabled === true;
         star.addEventListener("click", function (event) {
@@ -2065,7 +1936,7 @@ function traceRefreshPageTokens() {
           setListingControlPending(this, true, "Saving rating.");
           current = nextRating;
           entry.rating = nextRating;
-          message.textContent = "Saving...";
+          message.textContent = "Saving…";
           renderStars(true);
           ext.runtime.sendMessage(
             {
@@ -2081,7 +1952,7 @@ function traceRefreshPageTokens() {
                 setListingControlPending(message, false, "Could not save rating. Try again.");
                 current = previous;
                 entry.rating = previous;
-                message.textContent = "Could not save";
+                message.textContent = "Couldn’t save rating";
                 renderStars(false);
                 return;
               }
@@ -2113,28 +1984,21 @@ function traceRefreshPageTokens() {
     if (!patch) return;
     var wrap = document.createElement("div");
     wrap.setAttribute("data-trace-catchup-action", "1");
-    wrap.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px";
+    wrap.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:2px";
     var text = document.createElement("div");
-    text.style.cssText = "min-width:0";
-    var title = document.createElement("div");
-    title.textContent = "Catch up";
-    title.style.cssText = "font:600 12px/1.25 " + TRACE_D1.font + ";color:" + TRACE_D1.ink2;
-    var copy = document.createElement("div");
-    copy.textContent = "Set progress to chapter " + patch.chapters.current + ".";
-    copy.style.cssText = "margin-top:2px;font:500 12px/1.35 " + TRACE_D1.font + ";color:" + TRACE_D1.ink3;
-    text.appendChild(title);
-    text.appendChild(copy);
+    text.style.cssText = "min-width:0;font:400 13px/1.35 " + TRACE_D1.font + ";color:" + TRACE_D1.ink3;
+    text.textContent = "Set progress to chapter " + patch.chapters.current + ".";
     var button = document.createElement("button");
     button.type = "button";
     button.textContent = "Catch up to " + patch.chapters.current;
-    button.style.cssText = surfaceGhostButtonStyle(UPDATED_THEME) + ";flex:0 0 auto";
+    button.style.cssText = surfaceGhostButtonStyle(UPDATED_THEME) + ";flex:0 0 auto;margin-right:-8px;font-size:13px";
     button.addEventListener("click", function (event) {
       event.preventDefault();
       event.stopPropagation();
       if (listingMutationBlocked(button)) return;
       setListingControlPending(button, true, "Saving reading progress.");
       button.disabled = true;
-      button.textContent = "Saving...";
+      button.textContent = "Saving…";
       ext.runtime.sendMessage(
         {
           type: "TRACE_PATCH_LIBRARY_ENTRY",
@@ -2148,7 +2012,7 @@ function traceRefreshPageTokens() {
           if (ext.runtime.lastError || !response || !response.ok) {
             setListingControlPending(button, false, "Could not save reading progress. Try again.");
             button.disabled = false;
-            button.textContent = "Retry";
+            button.textContent = "Try again";
             return;
           }
           entry.chapters = patch.chapters;
@@ -2622,7 +2486,7 @@ function traceRefreshPageTokens() {
     labelEl.style.cssText = "font:500 12px/1.3 " + TRACE_D1.font + ";color:var(--trace-page-secondary)";
     var valueEl = document.createElement("span");
     valueEl.textContent = value;
-    valueEl.style.cssText = "font:600 12.5px/1.3 " + TRACE_D1.font + ";color:" + (emphasis ? TRACE_D1.rust : TRACE_D1.ink2) + ";text-align:right";
+    valueEl.style.cssText = "font:" + (emphasis ? "500" : "400") + " 13px/1.3 " + TRACE_D1.font + ";color:" + TRACE_D1.ink2 + ";text-align:right";
     row.appendChild(labelEl);
     row.appendChild(valueEl);
     return row;
@@ -2671,21 +2535,22 @@ function traceRefreshPageTokens() {
     top.style.cssText = "display:flex;align-items:baseline;justify-content:space-between;gap:10px";
     var value = document.createElement("span");
     value.className = "chap";
-    value.style.cssText = "font:650 14px/1.25 " + TRACE_D1.font + ";color:" + TRACE_D1.ink;
+    value.style.cssText = "font:500 14px/1.25 " + TRACE_D1.font + ";color:" + TRACE_D1.ink + ";font-variant-numeric:tabular-nums";
     var big = document.createElement("span");
     big.className = "big";
     big.textContent = "Chapter " + chapters.current;
     var small = document.createElement("span");
     small.className = "sm";
     small.textContent = " of " + (chapters.total == null ? "?" : chapters.total);
-    small.style.cssText = "font-weight:500;color:" + TRACE_D1.ink3;
+    small.style.cssText = "font-weight:400;color:" + TRACE_D1.ink3;
     value.appendChild(big);
     value.appendChild(small);
     top.appendChild(value);
 
     var side = document.createElement("span");
     side.className = "pct";
-    side.style.cssText = "font:600 12px/1.2 " + TRACE_D1.font + ";color:" + (entry && entry.catchupState === "BEHIND" ? TRACE_D1.rust : TRACE_D1.ink3) + ";text-align:right";
+    // News is not a failure: new chapters are ink, never warning.
+    side.style.cssText = "font:" + (entry && entry.catchupState === "BEHIND" ? "500" : "400") + " 13px/1.2 " + TRACE_D1.font + ";color:" + (entry && entry.catchupState === "BEHIND" ? TRACE_D1.ink : TRACE_D1.ink3) + ";text-align:right;font-variant-numeric:tabular-nums";
     var catchup = catchupLabel(entry);
     side.textContent = catchup || (percent == null ? "" : percent + "%");
     if (side.textContent) top.appendChild(side);
@@ -2694,34 +2559,117 @@ function traceRefreshPageTokens() {
     return position;
   }
 
+  function traceSvgEl(viewBox, attrs, shapes) {
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", viewBox);
+    svg.setAttribute("aria-hidden", "true");
+    Object.keys(attrs).forEach(function (name) { svg.setAttribute(name, attrs[name]); });
+    shapes.forEach(function (shape) {
+      var node = document.createElementNS("http://www.w3.org/2000/svg", shape[0]);
+      Object.keys(shape[1]).forEach(function (name) { node.setAttribute(name, shape[1][name]); });
+      svg.appendChild(node);
+    });
+    return svg;
+  }
+
+  // Brass marks only what the reader wrote.
+  function traceStarSvg(filled) {
+    var svg = traceSvgEl("0 0 24 24", {
+      fill: filled ? "currentColor" : "none", stroke: "currentColor",
+      "stroke-width": filled ? "0" : "1.6", "stroke-linejoin": "round",
+    }, [["path", { d: "M12 2.8l2.8 5.9 6.4.8-4.7 4.4 1.2 6.4L12 17.2l-5.7 3.1 1.2-6.4-4.7-4.4 6.4-.8z" }]]);
+    svg.style.cssText = "display:block;width:22px;height:22px";
+    return svg;
+  }
+
+  function traceLockSvg() {
+    var svg = traceSvgEl("0 0 12 12", { fill: "currentColor" }, [
+      ["rect", { x: "2", y: "5.2", width: "8", height: "5.8", rx: "1.3" }],
+      ["path", { d: "M3.8 5.4V4a2.2 2.2 0 0 1 4.4 0v1.4", fill: "none", stroke: "currentColor", "stroke-width": "1.3" }],
+    ]);
+    svg.style.cssText = "display:block;width:11px;height:11px;flex:0 0 auto";
+    return svg;
+  }
+
+  function traceFailureLine(text, attrs) {
+    var line = document.createElement("div");
+    if (attrs) Object.keys(attrs).forEach(function (name) { line.setAttribute(name, attrs[name]); });
+    line.style.cssText = "display:flex;align-items:flex-start;gap:6px;font:500 13px/1.35 " + TRACE_D1.font + ";color:var(--trace-page-ink)";
+    var glyph = document.createElement("span");
+    glyph.style.cssText = "display:inline-flex;margin-top:1px;color:var(--trace-page-warning)";
+    var svg = traceSvgEl("0 0 16 16", { fill: "none", stroke: "currentColor", "stroke-width": "1.5",
+      "stroke-linecap": "round", "stroke-linejoin": "round" }, [["path", { d: "M8 2l6.5 11.5h-13zM8 6.5v3.2M8 11.7v.2" }]]);
+    svg.style.cssText = "display:block;width:14px;height:14px";
+    glyph.appendChild(svg);
+    var copy = document.createElement("span");
+    copy.textContent = text;
+    line.appendChild(glyph);
+    line.appendChild(copy);
+    return line;
+  }
+
+  // The design-language record well: lock, "Your record" and "Only you".
+  function traceRecordWell() {
+    var well = document.createElement("div");
+    well.className = "x-meta";
+    well.setAttribute("data-trace-record-well", "1");
+    well.setAttribute("role", "group");
+    well.setAttribute("aria-label", "Your record, only you can see it");
+    well.style.cssText = "display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--trace-page-record-well);box-shadow:inset 0 0 0 1px var(--trace-page-record-well-edge)";
+    var head = document.createElement("div");
+    head.style.cssText = "display:flex;align-items:center;gap:5px;font:500 12px/1.3 " + TRACE_D1.font + ";color:var(--trace-page-private-record)";
+    head.appendChild(traceLockSvg());
+    var label = document.createElement("span");
+    label.textContent = "Your record";
+    var only = document.createElement("span");
+    only.textContent = "Only you";
+    only.style.cssText = "margin-left:auto;font-weight:400";
+    head.appendChild(label);
+    head.appendChild(only);
+    well.appendChild(head);
+    return well;
+  }
+
   function surfaceNoteText(text) {
     var note = document.createElement("span");
     note.className = "note";
     note.textContent = text;
-    note.style.cssText = "display:block;flex:1;min-width:0;text-align:left;font:500 12.5px/1.5 " + TRACE_D1.font + ";color:" + TRACE_D1.ink2;
+    note.style.cssText = "display:block;flex:1;min-width:0;text-align:left;padding-left:10px;box-shadow:inset 2px 0 0 var(--trace-page-authored);font:400 14px/1.4 " + TRACE_D1.font + ";color:var(--trace-page-ink);overflow-wrap:anywhere";
     return note;
   }
 
+  // Private tags: ink text with a brass # mark.
   function surfaceTagPill(text, collectionTone) {
     var tag = document.createElement("span");
     tag.className = collectionTone ? "x-utag coll" : "x-utag";
-    tag.textContent = text;
     if (text && String(text).length > 24) tag.title = text;
     tag.style.cssText = [
       "display:inline-block",
       "box-sizing:border-box",
-      "max-width:150px",
-      "overflow:hidden",
-      "text-overflow:ellipsis",
+      "max-width:100%",
       "vertical-align:middle",
       "padding:2px 0",
       "border:0",
-      "font:500 12px/1.15 " + TRACE_D1.font,
-      "white-space:nowrap",
+      "font:500 13px/1.25 " + TRACE_D1.font,
+      "overflow-wrap:anywhere",
       "background:transparent",
-      "color:var(--trace-page-authored)",
+      "color:var(--trace-page-ink)",
     ].join(";");
+    var mark = document.createElement("span");
+    mark.setAttribute("aria-hidden", "true");
+    mark.textContent = "#";
+    mark.style.cssText = "font-weight:600;color:var(--trace-page-authored)";
+    tag.appendChild(mark);
+    tag.appendChild(document.createTextNode(text));
     return tag;
+  }
+
+  function surfaceTagMore(text) {
+    var more = document.createElement("span");
+    more.className = "x-utag-more";
+    more.textContent = text;
+    more.style.cssText = "display:inline-block;padding:2px 0;font:500 13px/1.25 " + TRACE_D1.font + ";color:var(--trace-page-secondary)";
+    return more;
   }
 
   function visiblePrivateTags(context) {
@@ -2729,17 +2677,18 @@ function traceRefreshPageTokens() {
     return context.tags.slice(0, PRIVATE_TAG_DISPLAY_LIMIT);
   }
 
-  function appendPrivateContextRows(surface, entry) {
+  // Your record: the reader's own rating, note and tags in the record well
+  //. Stars are the editable control when the entry exists.
+  function appendPrivateContextRows(surface, entry, workKey) {
     var context = entry && entry.privateContext;
-    if (!context || (!context.hasNotes && !context.tagCount)) return;
-    var meta = document.createElement("div");
-    meta.className = "x-meta";
-    meta.style.cssText = "display:flex;flex-direction:column;gap:9px;padding:13px 14px;background:" + TRACE_D1.card2 + ";border-left:2px solid " + TRACE_D1.honey + ";border-radius:0 8px 8px 0";
-    var label = document.createElement("div");
-    label.className = "x-sheet-label";
-    label.textContent = "Private context";
-    label.style.cssText = "font:500 12px/1.3 " + TRACE_D1.font + ";color:var(--trace-page-secondary)";
-    meta.appendChild(label);
+    var canRate = !!(entry && entry.entryId);
+    if (!canRate && (!context || (!context.hasNotes && !context.tagCount))) return;
+    var meta = traceRecordWell();
+    if (canRate) appendRatingControls(meta, entry, workKey);
+    if (!context) {
+      surface.appendChild(meta);
+      return;
+    }
     if (context.hasNotes) {
       meta.appendChild(
         surfaceNoteText(context.notePreview || "Private note saved \u00b7 edit in Trace"),
@@ -2748,24 +2697,23 @@ function traceRefreshPageTokens() {
     if (context.tagCount > 0) {
       var tags = document.createElement("span");
       tags.className = "tags";
-      tags.style.cssText = "display:flex;flex:1;min-width:0;flex-wrap:wrap;column-gap:12px;row-gap:5px;text-align:left";
+      tags.style.cssText = "display:flex;flex:1;min-width:0;flex-wrap:wrap;column-gap:12px;row-gap:4px;text-align:left";
       if (context.tags && context.tags.length) {
         var visibleTags = visiblePrivateTags(context);
         visibleTags.forEach(function (tag) {
           tags.appendChild(surfaceTagPill(tag, false));
         });
         if (context.tagCount > visibleTags.length) {
-          tags.appendChild(surfaceTagPill("+" + (context.tagCount - visibleTags.length), false));
+          tags.appendChild(surfaceTagMore("+" + (context.tagCount - visibleTags.length)));
         }
       } else {
-        tags.appendChild(surfaceTagPill(
+        tags.appendChild(surfaceTagMore(
           context.tagCount === 1 ? "1 private tag" : context.tagCount + " private tags",
-          false,
         ));
       }
       meta.appendChild(tags);
     }
-    if (meta.childNodes.length > 0) surface.appendChild(meta);
+    surface.appendChild(meta);
   }
 
   function workMarkCopy(entry) {
@@ -2791,17 +2739,13 @@ function traceRefreshPageTokens() {
     if (!copy) return;
     var block = document.createElement("section");
     block.setAttribute("data-trace-work-mark", entry.workMark.kind);
-    block.style.cssText = "display:grid;gap:4px;padding:11px 13px;border:1px solid " + TRACE_D1.line + ";border-left:3px solid " + TRACE_D1.rust + ";border-radius:7px;background:" + TRACE_D1.paper;
+    // Work marks are one secondary line: no box, no bar, no warning ink.
+    block.style.cssText = "display:block;font:400 13px/1.35 " + TRACE_D1.font + ";color:var(--trace-page-secondary)";
     var title = document.createElement("strong");
     title.textContent = copy.label;
-    title.style.cssText = "font:650 12px/1.25 " + TRACE_D1.font + ";color:" + TRACE_D1.ink;
+    title.style.cssText = "font-weight:500;color:var(--trace-page-ink)";
     block.appendChild(title);
-    if (copy.detail) {
-      var detail = document.createElement("span");
-      detail.textContent = copy.detail;
-      detail.style.cssText = "font:500 12px/1.4 " + TRACE_D1.font + ";color:" + TRACE_D1.ink3;
-      block.appendChild(detail);
-    }
+    if (copy.detail) block.appendChild(document.createTextNode(" · " + copy.detail));
     surface.appendChild(block);
   }
 
@@ -2876,24 +2820,27 @@ function traceRefreshPageTokens() {
     });
   }
 
+  // Design-language B2 cells: surface with a rule ring; the chosen cell is
+  // raised with a 2 px ink ring. Status colour stays on the dot.
   function statusChoiceStyle(status, selected) {
-    var accent = D1_STATUS_ACCENT[status] || STATUS_TOKENS.READING.accent;
     return [
       "display:flex",
-      "flex-direction:column",
+      "flex-direction:row",
       "align-items:center",
       "justify-content:center",
-      "gap:5px",
+      "gap:6px",
       "box-sizing:border-box",
       "min-width:0",
-      "min-height:54px",
-      "padding:8px 3px",
+      "min-height:44px",
+      "padding:6px 4px",
       "overflow:visible",
-      "border-radius:7px",
-      "border:1px solid " + (selected ? TRACE_D1.ink : TRACE_D1.line),
-      "background:transparent",
+      "border-radius:12px",
+      "border:0",
+      "box-shadow:inset 0 0 0 " + (selected ? "2px " + TRACE_D1.ink : "1px " + TRACE_D1.line),
+      "background:" + (selected ? "var(--trace-page-raised)" : "var(--trace-page-surface)"),
       "color:var(--trace-page-ink)",
-      "font:500 12px/1 " + TRACE_D1.font,
+      "font:" + (selected ? "600" : "500") + " 13px/1.15 " + TRACE_D1.font,
+      "text-align:center",
       "letter-spacing:0",
       "text-transform:none",
       "cursor:pointer",
@@ -2910,27 +2857,25 @@ function traceRefreshPageTokens() {
     label.className = "x-sheet-label";
     label.id = "trace-listing-status-label";
     label.textContent = "Reading status";
-    label.style.cssText = "font:500 12px/1.3 " + TRACE_D1.font + ";color:var(--trace-page-secondary)";
+    label.style.cssText = "font:600 12px/1.3 " + TRACE_D1.font + ";color:var(--trace-page-secondary)";
     var row = document.createElement("div");
     row.className = "x-seg";
-    row.setAttribute("role", "group");
+    row.setAttribute("role", "radiogroup");
     row.setAttribute("aria-labelledby", label.id);
     if (entry.__traceStatusError) {
       row.setAttribute("aria-describedby", "trace-listing-status-error");
     }
-    row.style.cssText = "display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px";
+    row.style.cssText = "display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px";
     MANAGEMENT_STATUS_CHOICES.forEach(function (status) {
       var choice = document.createElement("button");
       choice.type = "button";
       choice.setAttribute("data-trace-status-choice", status);
       choice.disabled = entry.__traceStatusPending === true;
       var selected = entryDisplayStatusValue(entry) === status;
-      if (selected) {
-        choice.setAttribute("data-trace-status-selected", "1");
-        choice.setAttribute("aria-pressed", "true");
-      } else {
-        choice.setAttribute("aria-pressed", "false");
-      }
+      choice.setAttribute("role", "radio");
+      choice.setAttribute("aria-checked", selected ? "true" : "false");
+      choice.tabIndex = selected || (!entryDisplayStatusValue(entry) && status === MANAGEMENT_STATUS_CHOICES[0]) ? 0 : -1;
+      if (selected) choice.setAttribute("data-trace-status-selected", "1");
       choice.style.cssText = statusChoiceStyle(status, selected);
       var dot = document.createElement("span");
       dot.setAttribute("aria-hidden", "true");
@@ -2945,14 +2890,24 @@ function traceRefreshPageTokens() {
       bindStatusChoice(choice, entry, workKey, status, rerender, refreshSurface);
       row.appendChild(choice);
     });
+    row.addEventListener("keydown", function (event) {
+      var keys = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 };
+      if (!keys[event.key]) return;
+      var radios = Array.prototype.slice.call(row.querySelectorAll("[role='radio']"));
+      var index = radios.indexOf(document.activeElement);
+      if (index < 0) return;
+      event.preventDefault();
+      var next = radios[(index + keys[event.key] + radios.length) % radios.length];
+      radios.forEach(function (radio) { radio.tabIndex = radio === next ? 0 : -1; });
+      next.focus();
+    });
     wrap.appendChild(label);
     wrap.appendChild(row);
     if (entry.__traceStatusError) {
-      var error = document.createElement("div");
-      error.id = "trace-listing-status-error";
-      error.setAttribute("data-trace-status-error-message", "1");
-      error.textContent = "Could not save reading status. Try again.";
-      error.style.cssText = "color:" + TRACE_D1.rust + ";font:600 12px/1.35 " + TRACE_D1.font;
+      var error = traceFailureLine("Status wasn’t changed. Try again.", {
+        id: "trace-listing-status-error",
+        "data-trace-status-error-message": "1",
+      });
       wrap.appendChild(error);
     }
     surface.appendChild(wrap);
@@ -2991,11 +2946,11 @@ function traceRefreshPageTokens() {
       "width:" + (mobile ? "100%" : "min(376px,calc(100vw - 24px))"),
       "max-width:" + (mobile ? "430px" : "376px"),
       "padding:0",
-      "border-radius:" + (mobile ? "16px 16px 0 0" : "12px"),
-      "border:1px solid " + TRACE_D1.lineStrong,
+      "border-radius:" + (mobile ? "20px 20px 0 0" : "20px"),
+      "border:0",
       "background:" + TRACE_D1.card,
       "color:" + TRACE_D1.ink,
-      "box-shadow:0 22px 54px -20px rgba(15,20,18,0.42)",
+      "box-shadow:0 0 0 1px color-mix(in srgb,var(--trace-page-rule) 70%,transparent),0 14px 30px -12px rgba(0,0,0,.35)",
       "font:500 13px/1.4 " + TRACE_D1.font,
       "overflow:auto",
       "overscroll-behavior:contain",
@@ -3027,31 +2982,27 @@ function traceRefreshPageTokens() {
     header.style.cssText = [
       "display:grid",
       "grid-template-columns:1fr auto",
-      "gap:12px",
+      "gap:10px",
       "align-items:start",
-      "padding:17px 18px 15px",
-      "border-bottom:1px solid " + TRACE_D1.line,
+      "padding:16px 16px 12px",
     ].join(";");
     var text = document.createElement("div");
     text.style.cssText = "min-width:0";
-    var source = document.createElement("div");
-    source.className = "src";
     var sourcePlatform = platform || String(workKey || "").split(":")[0];
     var listingMeta = surfaceListingMeta(sourcePlatform, anchor);
-    source.textContent = "Trace · " + (sourcePlatform === "ffn" ? "FFN" : "AO3");
-    source.style.cssText = "font:600 12px/1.3 " + TRACE_D1.font + ";color:var(--trace-page-warning)";
+    var siteName = sourcePlatform === "ffn" ? "FFN" : "AO3";
+    // Title and byline wrap; the site sits in the byline. No Trace eyebrow.
     var title = document.createElement("div");
     title.className = "ti";
     title.id = "trace-listing-sheet-title";
     title.textContent = listingMeta.title || lensHeadline(entry);
-    title.style.cssText = "margin-top:6px;font:700 17px/1.22 " + TRACE_D1.font + ";color:" + TRACE_D1.ink + ";overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+    title.style.cssText = "font:600 17px/1.25 " + TRACE_D1.font + ";color:" + TRACE_D1.ink + ";overflow-wrap:anywhere";
     var caption = document.createElement("div");
     caption.className = "au";
     caption.textContent = listingMeta.author
-      ? (/^by\s+/i.test(listingMeta.author) ? listingMeta.author : "by " + listingMeta.author)
-      : lensCaption(entry);
-    caption.style.cssText = "margin-top:2px;color:" + TRACE_D1.ink3 + ";font:500 12px/1.35 " + TRACE_D1.font;
-    text.appendChild(source);
+      ? String(listingMeta.author).replace(/^by\s+/i, "") + " · " + siteName
+      : siteName;
+    caption.style.cssText = "margin-top:2px;color:" + TRACE_D1.ink3 + ";font:400 13px/1.35 " + TRACE_D1.font + ";overflow-wrap:anywhere";
     text.appendChild(title);
     text.appendChild(caption);
     header.appendChild(text);
@@ -3060,20 +3011,28 @@ function traceRefreshPageTokens() {
     close.setAttribute(ACTION_SURFACE_CLOSE_ATTR, "1");
     close.setAttribute("aria-label", "Close Trace actions");
     close.type = "button";
-    close.textContent = "\u00d7";
     close.style.cssText = [
       "display:inline-flex",
       "align-items:center",
       "justify-content:center",
-      "width:30px",
-      "height:30px",
-      "border-radius:9px",
-      "border:1px solid " + TRACE_D1.line,
-      "background:" + TRACE_D1.paper2,
+      "width:44px",
+      "height:44px",
+      "margin:-7px -7px 0 0",
+      "padding:0",
+      "border-radius:22px",
+      "border:0",
+      "background:transparent",
       "color:" + TRACE_D1.ink3,
-      "font:600 16px/1 system-ui,-apple-system,'Segoe UI',sans-serif",
       "cursor:pointer",
     ].join(";");
+    var closeDisc = document.createElement("span");
+    closeDisc.setAttribute("aria-hidden", "true");
+    closeDisc.style.cssText = "display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:15px;background:" + TRACE_D1.paper2;
+    var closeGlyph = traceSvgEl("0 0 12 12", { fill: "none", stroke: "currentColor", "stroke-width": "1.7", "stroke-linecap": "round" },
+      [["path", { d: "M1.5 1.5l9 9M10.5 1.5l-9 9" }]]);
+    closeGlyph.style.cssText = "display:block;width:10px;height:10px";
+    closeDisc.appendChild(closeGlyph);
+    close.appendChild(closeDisc);
     close.addEventListener("click", function (e) {
       e.preventDefault();
       requestCloseListingActionSurface();
@@ -3084,7 +3043,7 @@ function traceRefreshPageTokens() {
     var body = document.createElement("div");
     body.className = "x-sheet-body";
     body.setAttribute("data-trace-action-body", "1");
-    body.style.cssText = "display:flex;flex-direction:column;gap:15px;padding:16px 18px 15px;background:" + TRACE_D1.card;
+    body.style.cssText = "display:flex;flex-direction:column;gap:14px;padding:4px 16px 16px;background:" + TRACE_D1.card;
     function refreshSurface() {
       var latestTrigger = trigger;
       var lenses = document.querySelectorAll("[" + LENS_ATTR + "]");
@@ -3108,22 +3067,21 @@ function traceRefreshPageTokens() {
     } else {
       appendCatchupAction(body, entry, workKey, rerender, refreshSurface);
     }
-    appendRatingControls(body, entry, workKey);
-    appendPrivateContextRows(body, entry);
     appendWorkMarkSurface(body, entry);
+    appendPrivateContextRows(body, entry, workKey);
     surface.appendChild(body);
 
     var actions = document.createElement("div");
     actions.className = "x-sheet-foot";
-    actions.style.cssText = "display:grid;grid-template-columns:1fr auto;gap:8px;padding:13px 18px 18px;background:" + TRACE_D1.card + ";border-top:1px solid " + TRACE_D1.line;
+    actions.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;background:" + TRACE_D1.card + ";border-top:1px solid " + TRACE_D1.line;
     var open = document.createElement("a");
     open.href = traceEntryOpenUrl(entry);
     open.className = "x-pbtn x-pbtn-primary";
     open.target = "_blank";
     open.rel = "noopener noreferrer";
-    open.appendChild(traceIconEl("open"));
     open.appendChild(document.createTextNode("Open in Trace"));
-    open.style.cssText = surfacePrimaryButtonStyle() + ";min-height:44px;border-radius:8px";
+    open.appendChild(traceIconEl("open"));
+    open.style.cssText = surfacePrimaryButtonStyle();
     bindTraceOpenLink(open);
     actions.appendChild(open);
     if (showActions) {
@@ -3133,13 +3091,13 @@ function traceRefreshPageTokens() {
         rerender();
       }, true, (anchor && anchor.textContent || "").trim());
       preference.className = "x-pbtn x-pbtn-ghost";
-      preference.style.cssText = surfaceGhostButtonStyle(entry && entry.hidden === true ? HIDDEN_THEME : HIDE_ACTION_THEME) + ";min-width:72px;min-height:44px;border-radius:8px";
+      preference.style.cssText = surfaceGhostButtonStyle(entry && entry.hidden === true ? UPDATED_THEME : HIDE_ACTION_THEME);
       if (!(entry && entry.hidden === true)) {
         removeWrapChildren(preference);
         preference.setAttribute("aria-label", "Hide this work");
         preference.appendChild(traceIconEl("eyeoff"));
         preference.appendChild(document.createTextNode("Hide"));
-        preference.style.cssText = surfaceGhostButtonStyle(HIDE_ACTION_THEME) + ";min-width:72px;min-height:44px;border-radius:8px";
+        preference.style.cssText = surfaceGhostButtonStyle(HIDE_ACTION_THEME);
       }
       actions.appendChild(preference);
     }
@@ -3170,6 +3128,7 @@ function traceRefreshPageTokens() {
 
   function lensEl(entry, workKey, showActions, rerender, platform, anchor) {
     traceRefreshPageTokens();
+    ensureListingFocusStyles();
     var theme = lensTheme(entry);
     var btn = document.createElement("button");
     btn.setAttribute(ATTR, "1");
@@ -3202,19 +3161,26 @@ function traceRefreshPageTokens() {
       "cursor:pointer",
       "vertical-align:middle",
     ].join(";");
-    var dot = document.createElement("span");
-    dot.setAttribute("aria-hidden", "true");
-    dot.style.cssText = [
-      "width:7px",
-      "height:7px",
-      "border-radius:999px",
-      "background:" + lensDotColor(entry, theme),
-      "flex:0 0 auto",
-    ].join(";");
-    btn.appendChild(dot);
+    var dotColor = lensDotColor(entry, theme);
+    if (dotColor) {
+      var dot = document.createElement("span");
+      dot.setAttribute("aria-hidden", "true");
+      dot.style.cssText = [
+        "width:7px",
+        "height:7px",
+        "border-radius:999px",
+        "background:" + dotColor,
+        "flex:0 0 auto",
+      ].join(";");
+      btn.appendChild(dot);
+    }
     var label = document.createElement("span");
     label.textContent = lensLabelText(entry);
-    label.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--trace-page-secondary)";
+    // The status label is always ink; the colour belongs to the dot.
+    var labelColor = entry && entry.__traceStatusError
+      ? "var(--trace-page-warning)"
+      : entry && (entry.__traceStatusPending || entry.hidden) ? "var(--trace-page-secondary)" : "var(--trace-page-ink)";
+    label.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:" + labelColor;
     btn.appendChild(label);
     var progress = lensProgressText(entry);
     if (progress) {
@@ -3328,9 +3294,9 @@ function traceRefreshPageTokens() {
       }
       btn.style.cssText = preferenceButtonStyle(btn, ADDING_THEME) + ";cursor:wait";
       if (btn.getAttribute("data-trace-surface-action") === "1") {
-        btn.textContent = "Saving...";
+        btn.textContent = "Saving…";
       } else {
-        setButtonInlineContent(btn, "spin", "Saving...");
+        setButtonInlineContent(btn, "spin", "Saving…");
       }
       btn.disabled = true;
 
@@ -3399,7 +3365,7 @@ function traceRefreshPageTokens() {
 
   function setPreferenceAuthAction(btn, error) {
     var expired = error === "auth_expired";
-    btn.style.cssText = preferenceButtonStyle(btn, ERROR_THEME) + ";cursor:pointer";
+    btn.style.cssText = preferenceButtonStyle(btn, null) + ";cursor:pointer;color:" + TRACE_D1.forest;
     btn.textContent = expired ? "Sign in" : "Connect";
     btn.title = expired ? "Open Trace to sign in again" : "Open Trace to connect the extension";
     btn.setAttribute("data-trace-connect-action", "1");
@@ -3550,7 +3516,7 @@ function traceRefreshPageTokens() {
       e.preventDefault();
       e.stopPropagation();
       undo.disabled = true;
-      undo.textContent = "...";
+      undo.textContent = "Unhiding…";
       ext.runtime.sendMessage(
         {
           type: "TRACE_SET_HIDDEN_WORK",
@@ -3559,7 +3525,7 @@ function traceRefreshPageTokens() {
         function (response) {
           if (ext.runtime.lastError || !response || !response.ok) {
             undo.disabled = false;
-            undo.textContent = "Retry";
+            undo.textContent = "Try again";
             return;
           }
           entry.hidden = false;
@@ -3657,7 +3623,7 @@ function traceRefreshPageTokens() {
       if (!item) return;
 
       btn.style.cssText = d1QuickAddStyle("busy") + ";cursor:wait";
-      setButtonInlineContent(btn, "spin", "Adding...");
+      setButtonInlineContent(btn, "spin", "Adding…");
       btn.disabled = true;
 
       var payload = { s: item.src, at: new Date().toISOString(), item: item };
@@ -3739,7 +3705,7 @@ function traceRefreshPageTokens() {
 
   function setQuickAddAuthAction(btn, error) {
     var expired = error === "auth_expired";
-    btn.style.cssText = d1QuickAddStyle("error") + ";cursor:pointer";
+    btn.style.cssText = d1QuickAddStyle("add") + ";cursor:pointer";
     btn.textContent = expired ? "Sign in" : "Connect";
     btn.title = expired ? "Open Trace to sign in again" : "Open Trace to connect the extension";
     btn.setAttribute("data-trace-connect-action", "1");

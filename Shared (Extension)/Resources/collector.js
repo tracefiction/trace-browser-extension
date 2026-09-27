@@ -205,30 +205,31 @@ function showCapacityRecoveryNotice(capacity, force) {
     "z-index:2147483646",
     "box-sizing:border-box",
     "width:min(360px,calc(100vw - 32px))",
-    "padding:16px",
-    "border:1px solid rgba(28,39,34,0.16)",
+    "padding:14px 16px 6px",
+    "border:0",
     "border-radius:14px",
     "background:var(--trace-page-surface)",
-    "box-shadow:0 18px 46px rgba(28,39,34,0.22)",
+    "box-shadow:0 0 0 1px color-mix(in srgb,var(--trace-page-rule) 70%,transparent),0 14px 30px -12px rgba(0,0,0,.35)",
     "color:var(--trace-page-ink)",
+    "font-family:-apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif",
   ].join(";");
 
     var title = document.createElement("h2");
   title.textContent = "This story wasn’t added";
-  title.style.cssText = "margin:8px 0 0;font:500 20px/1.15 -apple-system,system-ui,'Segoe UI',sans-serif;color:var(--trace-page-ink)";
+  title.style.cssText = "margin:0;font:600 17px/1.3 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif;color:var(--trace-page-ink)";
   var copy = document.createElement("p");
-  copy.textContent = "Your Trace library is full. Make room or get Trace Unlimited to keep adding stories.";
-  copy.style.cssText = "margin:8px 0 14px;font:500 13px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif;color:var(--trace-page-secondary)";
+  copy.textContent = "Your Library is full. Make room in Trace, or see Trace Unlimited.";
+  copy.style.cssText = "margin:4px 0 2px;font:400 13px/1.4 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif;color:var(--trace-page-secondary)";
   var actions = document.createElement("div");
-  actions.style.cssText = "display:flex;align-items:center;gap:10px";
+  actions.style.cssText = "display:flex;align-items:center;gap:4px 16px";
   actions.style.flexWrap = "wrap";
   var upgrade = document.createElement("a");
   upgrade.setAttribute("data-trace-open-trace", "1");
   upgrade.href = TRACE_WEB_UPGRADE_URL;
   upgrade.target = "_blank";
   upgrade.rel = "noopener noreferrer";
-  upgrade.textContent = "Get Trace Unlimited";
-  upgrade.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 14px;border-radius:9px;background:transparent;color:var(--trace-page-teal);text-decoration:none;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif";
+  upgrade.textContent = "See Trace Unlimited";
+  upgrade.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 8px;margin-left:-8px;border-radius:8px;border:0;background:transparent;color:var(--trace-page-teal);text-decoration:none;font:500 14px/1.2 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif";
   upgrade.addEventListener("click", function (event) {
     event.stopPropagation();
   });
@@ -238,14 +239,14 @@ function showCapacityRecoveryNotice(capacity, force) {
   manage.target = "_blank";
   manage.rel = "noopener noreferrer";
   manage.textContent = "Manage library";
-  manage.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 12px;border-radius:9px;border:0;color:var(--trace-page-teal);text-decoration:none;font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif";
+  manage.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 8px;margin-left:-8px;border-radius:8px;border:0;background:transparent;color:var(--trace-page-teal);text-decoration:none;font:500 14px/1.2 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif";
   manage.addEventListener("click", function (event) {
     event.stopPropagation();
   });
   var dismiss = document.createElement("button");
   dismiss.type = "button";
   dismiss.textContent = "Not now";
-  dismiss.style.cssText = "min-height:44px;padding:0 8px;border:0;background:transparent;color:var(--trace-page-secondary);font:650 12.5px/1 system-ui,-apple-system,'Segoe UI',sans-serif;cursor:pointer";
+  dismiss.style.cssText = "min-height:44px;padding:0 8px;margin-left:auto;border:0;background:transparent;color:var(--trace-page-secondary);font:500 14px/1.2 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif;cursor:pointer";
   dismiss.addEventListener("click", function () {
     acknowledgeCapacityRecovery("dismissed");
     notice.remove();
@@ -257,6 +258,7 @@ function showCapacityRecoveryNotice(capacity, force) {
   notice.appendChild(copy);
   notice.appendChild(actions);
   (document.body || document.documentElement).appendChild(notice);
+  if (typeof announceStorySheet === "function") announceStorySheet("This story wasn’t added. Your Library is full.");
   acknowledgeCapacityRecovery("shown");
 }
 
@@ -713,7 +715,7 @@ function normalizeOverlayPrivateContext(raw) {
       ? raw.notePreview.replace(/\s+/g, " ").trim()
       : "";
   if (notePreview.length > 180) {
-    notePreview = notePreview.slice(0, 177).trimEnd() + "...";
+    notePreview = notePreview.slice(0, 177).trimEnd() + "…";
   }
   var tags = [];
   if (Array.isArray(raw.tags)) {
@@ -2902,7 +2904,8 @@ function traceHostPageTokens() {
   var light = {
     ground: "#F8FAFC", surface: "#FFFFFF", raised: "#E9EEF3", rule: "#D8E0E7",
     ink: "#18232D", secondary: "#5F6B76", tertiary: "#7B8792",
-    teal: "#176E72", warning: "#9B4146", authored: "#8A6420",
+    teal: "#176E72", warning: "#9B4146", authored: "#9C6212",
+    "record-well": "#F1F4F7", "record-well-edge": "#E4EAEF", "private-record": "#696D65",
     "status-saved": "#666E68", "status-reading": "#246DCC",
     "status-caught-up": "#4C6F88", "status-paused": "#82651E",
     "status-finished": "#197A5B", "status-dropped": "#7C5282",
@@ -2910,7 +2913,8 @@ function traceHostPageTokens() {
   var dark = {
     ground: "#111922", surface: "#19232D", raised: "#24323F", rule: "#344451",
     ink: "#F2F6FA", secondary: "#AEBBC5", tertiary: "#8D9AA5",
-    teal: "#8BCDC8", warning: "#E7A19F", authored: "#DCB976",
+    teal: "#8BCDC8", warning: "#E7A19F", authored: "#CF9630",
+    "record-well": "#131C25", "record-well-edge": "#0B1117", "private-record": "#B9BAAF",
     "status-saved": "#B4BDAF", "status-reading": "#7DB8FF",
     "status-caught-up": "#91B4CE", "status-paused": "#D4B76C",
     "status-finished": "#8BD8B6", "status-dropped": "#B99BC2",
@@ -3405,8 +3409,13 @@ var storySheetOpener = null;
 var storySheetViewportFrame = null;
 var storySheetLiveAnnouncementTimer = null;
 
+// Sheets, notes and notices share one shadow: a rule ring that follows the
+// host tone plus a soft drop.
+var TRACE_PAGE_SHEET_SHADOW =
+  "0 0 0 1px color-mix(in srgb,var(--trace-page-rule) 70%,transparent),0 14px 30px -12px rgba(0,0,0,.35)";
+
 var TRACE_UI = {
-  font: "-apple-system,system-ui,'Segoe UI',sans-serif",
+  font: "-apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif",
   paper: "var(--trace-page-surface)",
   paperRaised: "var(--trace-page-raised)",
   paperSoft: "var(--trace-page-raised)",
@@ -3428,32 +3437,10 @@ var TRACE_UI = {
   shadowSheet: "0 18px 48px rgba(28,28,23,0.24)",
 };
 
-// Local Trace extension UI tokens; keep this independent from the web app bundle.
-var TRACE_FONT = "700 12px/1 " + TRACE_UI.font;
-var TRACE_CHIP_BASE = [
-  "display:inline-flex",
-  "align-items:center",
-  "justify-content:center",
-  "box-sizing:border-box",
-  "padding:5px 10px",
-  "min-height:28px",
-  "border-radius:" + TRACE_UI.radiusSm,
-  "font:" + TRACE_FONT,
-  "letter-spacing:0.04em",
-  "text-transform:uppercase",
-  "white-space:nowrap",
-].join(";");
-
+// Quick add passes a theme token through sendQuickAddAction; page actions
+// are teal text and carry no fills or chips.
 var TRACE_THEMES = {
-  add:     { bg: TRACE_UI.forest, fg: TRACE_UI.forestOn, border: "rgba(22,52,45,0.35)", hover: "var(--trace-page-teal)" },
-  adding:  { bg: TRACE_UI.paperSoft, fg: TRACE_UI.subtle, border: "rgba(148,163,184,0.3)" },
-  status:  { bg: TRACE_UI.gold, fg: TRACE_UI.goldOn, border: "rgba(89,68,2,0.2)" },
-  added:   { bg: TRACE_UI.forest, fg: TRACE_UI.forestOn, border: "rgba(22,52,45,0.35)" },
-  error:   { bg: "var(--trace-page-surface)",     fg: "var(--trace-page-warning)", border: "rgba(220,38,38,0.25)" },
-  full:    { bg: "var(--trace-page-surface)",     fg: "var(--trace-page-warning)", border: "rgba(180,83,9,0.25)" },
-  hidden:  { bg: "var(--trace-page-surface)",     fg: "var(--trace-page-ink)", border: "rgba(91,81,66,0.28)" },
-  muted:   { bg: "var(--trace-page-surface)",     fg: "var(--trace-page-ink)", border: "rgba(65,80,76,0.18)" },
-  mark:    { bg: "var(--trace-page-surface)",     fg: "var(--trace-page-authored)", border: "rgba(111,77,31,0.24)" },
+  add: { fg: "var(--trace-page-teal)" },
 };
 
 // App-aligned light archive status tokens from library-app.css.
@@ -3473,25 +3460,15 @@ function traceStatusToken(status) {
   return TRACE_STATUS_TOKENS[canonicalReaderStatus(status) || status] || TRACE_STATUS_TOKENS.READING;
 }
 
-var TRACE_STATUS_THEMES = {
-  READING:   { bg: TRACE_STATUS_TOKENS.READING.container, fg: TRACE_STATUS_TOKENS.READING.onContainer, border: TRACE_STATUS_TOKENS.READING.border },
-  PLANNING:  { bg: TRACE_STATUS_TOKENS.PLANNING.container, fg: TRACE_STATUS_TOKENS.PLANNING.onContainer, border: TRACE_STATUS_TOKENS.PLANNING.border },
-  PAUSED:    { bg: TRACE_STATUS_TOKENS.PAUSED.container, fg: TRACE_STATUS_TOKENS.PAUSED.onContainer, border: TRACE_STATUS_TOKENS.PAUSED.border },
-  COMPLETED: { bg: TRACE_STATUS_TOKENS.COMPLETED.container, fg: TRACE_STATUS_TOKENS.COMPLETED.onContainer, border: TRACE_STATUS_TOKENS.COMPLETED.border },
-  DROPPED:   { bg: TRACE_STATUS_TOKENS.DROPPED.container, fg: TRACE_STATUS_TOKENS.DROPPED.onContainer, border: TRACE_STATUS_TOKENS.DROPPED.border },
-  SAVED:     { bg: TRACE_STATUS_TOKENS.SAVED.container, fg: TRACE_STATUS_TOKENS.SAVED.onContainer, border: TRACE_STATUS_TOKENS.SAVED.border },
-  CAUGHT_UP: { bg: TRACE_STATUS_TOKENS.CAUGHT_UP.container, fg: TRACE_STATUS_TOKENS.CAUGHT_UP.onContainer, border: TRACE_STATUS_TOKENS.CAUGHT_UP.border },
-  FINISHED:  { bg: TRACE_STATUS_TOKENS.FINISHED.container, fg: TRACE_STATUS_TOKENS.FINISHED.onContainer, border: TRACE_STATUS_TOKENS.FINISHED.border },
-};
-
 var TRACE_INLINE_THEMES = {
   add: { fg: "var(--trace-page-teal)", label: "var(--trace-page-teal)", border: "transparent", accent: "var(--trace-page-teal)", weight: 500 },
-  added: { fg: "var(--trace-page-teal)", label: "var(--trace-page-teal)", border: "transparent", accent: "var(--trace-page-teal)", weight: 500 },
+  added: { fg: "var(--trace-page-ink)", label: "var(--trace-page-ink)", border: "transparent", accent: "var(--trace-page-status-saved)", weight: 500 },
   muted: { fg: "var(--trace-page-ink)", label: "var(--trace-page-ink)", border: "transparent", accent: "var(--trace-page-secondary)", weight: 500 },
+  action: { fg: "var(--trace-page-teal)", label: "var(--trace-page-teal)", border: "transparent", accent: "var(--trace-page-teal)", weight: 500 },
   hidden: { fg: "var(--trace-page-secondary)", label: "var(--trace-page-secondary)", border: "transparent", accent: "var(--trace-page-secondary)", weight: 500 },
-  saving: { fg: "var(--trace-page-secondary)", label: "var(--trace-page-secondary)", border: "rgba(110,106,91,0.28)", accent: "var(--trace-page-secondary)", weight: 500 },
+  saving: { fg: "var(--trace-page-secondary)", label: "var(--trace-page-secondary)", border: "transparent", accent: "var(--trace-page-secondary)", weight: 500 },
   error: { fg: "var(--trace-page-warning)", label: "var(--trace-page-warning)", border: "transparent", accent: "var(--trace-page-warning)", weight: 500 },
-  full: { fg: "var(--trace-page-warning)", label: "var(--trace-page-warning)", border: "transparent", accent: "var(--trace-page-authored)", weight: 500 },
+  full: { fg: "var(--trace-page-warning)", label: "var(--trace-page-warning)", border: "transparent", accent: "var(--trace-page-warning)", weight: 500 },
   READING: { fg: "var(--trace-page-ink)", label: "var(--trace-page-ink)", border: "transparent", accent: TRACE_STATUS_TOKENS.READING.accent, weight: 500 },
   PLANNING: { fg: "var(--trace-page-ink)", label: "var(--trace-page-ink)", border: "transparent", accent: TRACE_STATUS_TOKENS.PLANNING.accent, weight: 500 },
   PAUSED: { fg: "var(--trace-page-ink)", label: "var(--trace-page-ink)", border: "transparent", accent: TRACE_STATUS_TOKENS.PAUSED.accent, weight: 500 },
@@ -3501,14 +3478,6 @@ var TRACE_INLINE_THEMES = {
   CAUGHT_UP: { fg: "var(--trace-page-ink)", label: "var(--trace-page-ink)", border: "transparent", accent: TRACE_STATUS_TOKENS.CAUGHT_UP.accent, weight: 500 },
   FINISHED: { fg: "var(--trace-page-ink)", label: "var(--trace-page-ink)", border: "transparent", accent: TRACE_STATUS_TOKENS.FINISHED.accent, weight: 500 },
 };
-
-function traceChipCss(theme) {
-  return TRACE_CHIP_BASE + ";background:" + theme.bg + ";color:" + theme.fg + ";border:1px solid " + theme.border;
-}
-
-function traceActionCss(theme) {
-  return traceChipCss(theme) + ";min-height:42px;padding:0 14px;font:800 12px/1 " + TRACE_UI.font + ";cursor:pointer;box-shadow:" + TRACE_UI.shadowLow + ";transition:background-color 120ms ease,border-color 120ms ease,color 120ms ease,box-shadow 120ms ease";
-}
 
 function isCompactTraceInline() {
   try {
@@ -3600,10 +3569,11 @@ function traceStoryHandleChevronCss() {
   ].join(";");
 }
 
-function traceStoryHandleSpinnerCss(theme) {
+function traceStoryHandleSpinnerCss() {
+  // Spinners are state feedback in secondary ink, never a status hue.
   return [
     traceStoryHandleChevronCss(),
-    "color:" + theme.accent,
+    "color:var(--trace-page-secondary)",
   ].join(";");
 }
 
@@ -3766,7 +3736,7 @@ function storyHeadline(view) {
     if (view.authState && view.authState.state === "error") return "Trace unavailable";
     return "Connect Trace";
   }
-  if (view.entry && view.entry.__traceStatusPending) return "Saving...";
+  if (view.entry && view.entry.__traceStatusPending) return "Saving…";
   if (view.entry && view.entry.__traceStatusError) return "Update failed";
   if (view.entry && view.entry.hidden) return "Hidden";
   var status = entryStatus(view.entry);
@@ -3809,7 +3779,7 @@ function handleDisplay(view) {
     if (view.authState && view.authState.state === "error") return "Error";
     return "Connect";
   }
-  if (view.entry && view.entry.__traceAutoTrackPending) return "Adding...";
+  if (view.entry && view.entry.__traceAutoTrackPending) return "Adding…";
   if (view.entry && view.entry.__traceAutoTrackError === "free_limit_reached") return "Full";
   if (
     view.entry &&
@@ -3819,7 +3789,7 @@ function handleDisplay(view) {
     return "Reconnect";
   }
   if (view.entry && view.entry.__traceAutoTrackError) return "Error";
-  if (view.entry && view.entry.__traceStatusPending) return "Saving...";
+  if (view.entry && view.entry.__traceStatusPending) return "Saving…";
   if (view.entry && view.entry.__traceStatusError) return "Update failed";
   if (view.entry && view.entry.hidden) return "Hidden";
   var status = entryStatus(view.entry);
@@ -3830,14 +3800,15 @@ function handleDisplay(view) {
 function storyHandlePresentation(view) {
   var entry = view && view.entry;
   if (!view || !view.hasAuth) {
+    // Connect, Reconnect and Finish setup are Trace actions: teal text.
     var authTheme =
       view && view.authState && view.authState.state === "error"
         ? TRACE_INLINE_THEMES.error
-        : TRACE_INLINE_THEMES.muted;
+        : TRACE_INLINE_THEMES.action;
     return {
       kind: "auth",
       label: handleDisplay(view || {}),
-      theme: awaitingAppLink(view || {}) ? Object.assign({}, authTheme, { label: "var(--trace-page-teal)" }) : authTheme,
+      theme: authTheme,
       dot: false,
       spinner: false,
       status: null,
@@ -3869,26 +3840,26 @@ function storyHandlePresentation(view) {
     };
   }
   if (entry && entry.__traceAutoTrackError === "free_limit_reached") {
-    return { kind: "full", label: "Full", theme: TRACE_INLINE_THEMES.full, dot: true, spinner: false, status: null, progress: null };
+    return { kind: "full", label: "Full", theme: TRACE_INLINE_THEMES.full, dot: false, spinner: false, status: null, progress: null };
   }
   if (
     entry &&
     (entry.__traceAutoTrackError === "auth_expired" ||
       entry.__traceAutoTrackError === "not_authenticated")
   ) {
-    return { kind: "auth-expired", label: "Reconnect", theme: TRACE_INLINE_THEMES.error, dot: true, spinner: false, status: null, progress: null };
+    return { kind: "auth-expired", label: "Reconnect", theme: TRACE_INLINE_THEMES.action, dot: false, spinner: false, status: null, progress: null };
   }
   if (entry && entry.__traceAutoTrackError) {
-    return { kind: "error", label: "Error", theme: TRACE_INLINE_THEMES.error, dot: true, spinner: false, status: null, progress: null };
+    return { kind: "error", label: "Error", theme: TRACE_INLINE_THEMES.error, dot: false, spinner: false, status: null, progress: null };
   }
   if (entry && entry.__traceStatusPending) {
     return { kind: "saving", label: "Saving…", theme: TRACE_INLINE_THEMES.saving, dot: false, spinner: true, status: null, progress: null };
   }
   if (entry && entry.__traceStatusError) {
-    return { kind: "update-error", label: "Update failed", theme: TRACE_INLINE_THEMES.error, dot: true, spinner: false, status: null, progress: null };
+    return { kind: "update-error", label: "Update failed", theme: TRACE_INLINE_THEMES.error, dot: false, spinner: false, status: null, progress: null };
   }
   if (entry && entry.hidden) {
-    return { kind: "hidden", label: "Hidden", theme: TRACE_INLINE_THEMES.hidden, dot: true, spinner: false, status: null, progress: null };
+    return { kind: "hidden", label: "Hidden", theme: TRACE_INLINE_THEMES.hidden, dot: false, spinner: false, status: null, progress: null };
   }
   var status = entryStatus(entry);
   if (status) {
@@ -3935,7 +3906,7 @@ function applyStoryInlineHandleState(handle, presentation) {
   if (presentation && presentation.spinner) {
     var spin = document.createElement("span");
     spin.setAttribute("aria-hidden", "true");
-    spin.style.cssText = traceStoryHandleSpinnerCss(theme);
+    spin.style.cssText = traceStoryHandleSpinnerCss();
     spin.appendChild(createTraceSpinnerSvg());
     handle.appendChild(spin);
   } else if (presentation && presentation.dot) {
@@ -3974,11 +3945,30 @@ function applyStoryInlineHandleState(handle, presentation) {
     }
   }
 
-  var chev = document.createElement("span");
-  chev.setAttribute("aria-hidden", "true");
-  chev.style.cssText = traceStoryHandleChevronCss();
-  chev.appendChild(createTraceChevronSvg());
-  handle.appendChild(chev);
+  // The chevron marks a handle that opens the story sheet. Add, Connect,
+  // Finish setup and in-flight states are plain words.
+  var kind = presentation && presentation.kind;
+  if (["status", "saved", "hidden", "full", "error", "update-error"].indexOf(kind) >= 0) {
+    var chev = document.createElement("span");
+    chev.setAttribute("aria-hidden", "true");
+    chev.style.cssText = traceStoryHandleChevronCss();
+    chev.appendChild(createTraceChevronSvg());
+    handle.appendChild(chev);
+  }
+  ensureTracePageFocusStyles();
+}
+
+// A 3 px teal focus ring, 2 px offset, on every Trace control on the page.
+function ensureTracePageFocusStyles() {
+  if (document.querySelector("style[data-trace-page-focus-styles]")) return;
+  var style = document.createElement("style");
+  style.setAttribute("data-trace-page-focus-styles", "1");
+  style.textContent =
+    "[data-trace-story-handle]:focus-visible,[data-trace-quick-add]:focus-visible," +
+    "[data-trace-capacity-notice] :focus-visible,[data-trace-finish-qualify] :focus-visible," +
+    "[data-trace-finish-recovery] :focus-visible,[data-trace-finish-toast] :focus-visible{" +
+      "outline:3px solid var(--trace-page-teal)!important;outline-offset:2px!important}";
+  (document.head || document.documentElement).appendChild(style);
 }
 
 function autoTrackHandleDisabled(entry) {
@@ -4426,13 +4416,11 @@ function storySheetCss(mobile) {
     "overflow:auto",
     "overscroll-behavior:contain",
     "padding:0",
-    "border-radius:" + (mobile ? "16px 16px 0 0" : "12px"),
-    "border:1px solid var(--trace-page-rule)",
+    "border-radius:" + (mobile ? "20px 20px 0 0" : "20px"),
+    "border:0",
     "background:var(--trace-page-surface)",
     "color:var(--trace-page-ink)",
-    "box-shadow:" + (mobile
-      ? "0 -18px 50px -16px rgba(15,20,18,0.42)"
-      : "0 22px 54px -20px rgba(15,20,18,0.42)"),
+    "box-shadow:" + TRACE_PAGE_SHEET_SHADOW,
     "font:500 13px/1.4 " + TRACE_UI.font,
     "-webkit-font-smoothing:antialiased",
   ];
@@ -4540,57 +4528,67 @@ function storySheetCurrentItem() {
   }
 }
 
-function storySheetAuthorLine(item) {
-  if (!item || !item.a) return "";
-  return /^by\s+/i.test(String(item.a)) ? String(item.a) : "by " + item.a;
+function storySheetBylineText(item) {
+  var author = item && item.a ? String(item.a).replace(/^by\s+/i, "") : "";
+  return author ? author + " · " + storySheetSourceLine() : storySheetSourceLine();
+}
+
+// A 44 pt close target around a 30 pt raised disc with a secondary ×.
+function storySheetCloseButton() {
+  var close = document.createElement("button");
+  close.className = "x-close";
+  close.type = "button";
+  close.style.cssText = "display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;margin:-7px -7px 0 0;padding:0;border:0;border-radius:22px;background:transparent;color:var(--trace-page-secondary);cursor:pointer";
+  var disc = document.createElement("span");
+  disc.setAttribute("aria-hidden", "true");
+  disc.style.cssText = "display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:15px;background:var(--trace-page-raised)";
+  var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.7");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.style.cssText = "display:block;width:10px;height:10px";
+  var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M1.5 1.5l9 9M10.5 1.5l-9 9");
+  svg.appendChild(path);
+  disc.appendChild(svg);
+  close.appendChild(disc);
+  return close;
 }
 
 function storySheetLabelCss() {
   return "font:600 12px/1.3 -apple-system,system-ui,'Segoe UI',sans-serif;color:var(--trace-page-secondary)";
 }
 
-function storySheetSerifFont() {
-  return "-apple-system,system-ui,'Segoe UI',sans-serif";
-}
-
-function storySheetPrimaryButtonCss() {
+// Host pages have no filled or outlined buttons: Trace actions are teal
+// text and dismissals are secondary text, each with a 44 pt target.
+function storySheetTextActionCss(color) {
   return [
     "display:inline-flex",
     "align-items:center",
     "justify-content:center",
-    "gap:8px",
+    "gap:6px",
     "box-sizing:border-box",
-    "min-height:42px",
-    "padding:12px 16px",
+    "min-height:44px",
+    "padding:0 8px",
     "border-radius:8px",
     "border:0",
     "background:transparent",
-    "color:var(--trace-page-teal)",
-    "font:600 13.5px/1 " + TRACE_UI.font,
+    "color:" + (color || "var(--trace-page-teal)"),
+    "font:500 14px/1.2 " + TRACE_UI.font,
     "text-decoration:none",
     "white-space:nowrap",
     "cursor:pointer",
   ].join(";");
 }
 
+function storySheetPrimaryButtonCss() {
+  return storySheetTextActionCss("var(--trace-page-teal)");
+}
+
 function storySheetGhostButtonCss() {
-  return [
-    "display:inline-flex",
-    "align-items:center",
-    "justify-content:center",
-    "gap:8px",
-    "box-sizing:border-box",
-    "min-height:42px",
-    "padding:12px 14px",
-    "border-radius:8px",
-    "border:1px solid var(--trace-page-rule)",
-    "background:transparent",
-    "color:var(--trace-page-ink)",
-    "font:600 13px/1 " + TRACE_UI.font,
-    "text-decoration:none",
-    "white-space:nowrap",
-    "cursor:pointer",
-  ].join(";");
+  return storySheetTextActionCss("var(--trace-page-secondary)");
 }
 
 function storySheetIconButtonCss() {
@@ -4641,33 +4639,86 @@ function storySheetSvgIcon(kind) {
   return svg;
 }
 
+// The note preview carries a 2 px brass rule: it is what the reader wrote.
 function storySheetNoteText(text) {
   var note = document.createElement("span");
   note.className = "note";
   note.textContent = text;
-  note.style.cssText = "display:block;flex:1;min-width:0;text-align:left;font:500 12.5px/1.5 " + TRACE_UI.font + ";color:var(--trace-page-ink)";
+  note.style.cssText = "display:block;flex:1;min-width:0;text-align:left;padding-left:10px;box-shadow:inset 2px 0 0 var(--trace-page-authored);font:400 14px/1.4 " + TRACE_UI.font + ";color:var(--trace-page-ink);overflow-wrap:anywhere";
   return note;
 }
 
+// Private tags: ink text with a brass # mark.
 function storySheetTagPill(text, collectionTone) {
   var tag = document.createElement("span");
   tag.className = collectionTone ? "x-utag coll" : "x-utag";
-  tag.textContent = text;
   if (text && String(text).length > 24) tag.title = text;
   tag.style.cssText = [
     "display:inline-block",
     "box-sizing:border-box",
-    "max-width:150px",
-    "overflow:hidden",
-    "text-overflow:ellipsis",
+    "max-width:100%",
     "padding:2px 0",
     "border:0",
-    "font:500 12px/1.15 " + TRACE_UI.font,
-    "white-space:nowrap",
+    "font:500 13px/1.25 " + TRACE_UI.font,
+    "overflow-wrap:anywhere",
     "background:transparent",
-    "color:var(--trace-page-authored)",
+    "color:var(--trace-page-ink)",
   ].join(";");
+  var mark = document.createElement("span");
+  mark.setAttribute("aria-hidden", "true");
+  mark.textContent = "#";
+  mark.style.cssText = "font-weight:600;color:var(--trace-page-authored)";
+  tag.appendChild(mark);
+  tag.appendChild(document.createTextNode(text));
   return tag;
+}
+
+function storySheetTagMore(text) {
+  var more = document.createElement("span");
+  more.className = "x-utag-more";
+  more.textContent = text;
+  more.style.cssText = "display:inline-block;padding:2px 0;font:500 13px/1.25 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
+  return more;
+}
+
+// The design-language record well: fill, edge inset, radius 14, with a lock,
+// "Your record" and "Only you" in the private-record ink.
+function traceRecordWell() {
+  var well = document.createElement("div");
+  well.className = "x-meta";
+  well.setAttribute("data-trace-record-well", "1");
+  well.setAttribute("role", "group");
+  well.setAttribute("aria-label", "Your record, only you can see it");
+  well.style.cssText = "display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--trace-page-record-well);box-shadow:inset 0 0 0 1px var(--trace-page-record-well-edge)";
+  var head = document.createElement("div");
+  head.style.cssText = "display:flex;align-items:center;gap:5px;font:500 12px/1.3 " + TRACE_UI.font + ";color:var(--trace-page-private-record)";
+  head.appendChild(traceLockSvg());
+  var label = document.createElement("span");
+  label.textContent = "Your record";
+  var only = document.createElement("span");
+  only.textContent = "Only you";
+  only.style.cssText = "margin-left:auto;font-weight:400";
+  head.appendChild(label);
+  head.appendChild(only);
+  well.appendChild(head);
+  return well;
+}
+
+// A read-only rating is stated, with the brass star as its mark.
+function traceStatedRating(rating) {
+  var line = document.createElement("div");
+  line.setAttribute("data-trace-rating-stated", String(rating));
+  line.style.cssText = "display:flex;align-items:center;gap:6px;font:500 14px/1.3 " + TRACE_UI.font + ";color:var(--trace-page-ink)";
+  var star = document.createElement("span");
+  star.setAttribute("aria-hidden", "true");
+  star.style.cssText = "color:var(--trace-page-authored)";
+  var svg = traceStarSvg(true);
+  svg.style.width = "14px";
+  svg.style.height = "14px";
+  star.appendChild(svg);
+  line.appendChild(star);
+  line.appendChild(document.createTextNode("Rated " + rating + " of 5"));
+  return line;
 }
 
 function visiblePrivateTags(context) {
@@ -4759,22 +4810,91 @@ function storyCatchupProgressPatch(entry) {
   };
 }
 
+// Brass marks only what the reader wrote: filled and outline stars both
+// take the authored ink, inside the Your record well.
 function storyRatingButtonStyle(active, disabled) {
   return [
     "appearance:none",
     "display:inline-flex",
     "align-items:center",
     "justify-content:center",
-    "width:32px",
-    "height:32px",
+    "width:44px",
+    "height:44px",
+    "margin:0 -6px",
+    "padding:0",
     "border:0",
-    "border-radius:7px",
+    "border-radius:8px",
     "background:transparent",
-    "color:" + (active ? "var(--trace-page-authored)" : "var(--trace-page-secondary)"),
-    "font:600 21px/1 -apple-system,system-ui,'Segoe UI',sans-serif",
+    "color:var(--trace-page-authored)",
     "cursor:" + (disabled ? "wait" : "pointer"),
     disabled ? "opacity:0.62" : "",
   ].join(";");
+}
+
+function traceStarSvg(filled) {
+  var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("fill", filled ? "currentColor" : "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", filled ? "0" : "1.6");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.style.cssText = "display:block;width:22px;height:22px";
+  var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M12 2.8l2.8 5.9 6.4.8-4.7 4.4 1.2 6.4L12 17.2l-5.7 3.1 1.2-6.4-4.7-4.4 6.4-.8z");
+  svg.appendChild(path);
+  return svg;
+}
+
+function traceLockSvg() {
+  var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("fill", "currentColor");
+  svg.style.cssText = "display:block;width:11px;height:11px;flex:0 0 auto";
+  var body = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  body.setAttribute("x", "2"); body.setAttribute("y", "5.2");
+  body.setAttribute("width", "8"); body.setAttribute("height", "5.8"); body.setAttribute("rx", "1.3");
+  svg.appendChild(body);
+  var shackle = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  shackle.setAttribute("d", "M3.8 5.4V4a2.2 2.2 0 0 1 4.4 0v1.4");
+  shackle.setAttribute("fill", "none");
+  shackle.setAttribute("stroke", "currentColor");
+  shackle.setAttribute("stroke-width", "1.3");
+  svg.appendChild(shackle);
+  return svg;
+}
+
+function traceAlertSvg(size) {
+  var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.5");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.style.cssText = "display:block;flex:0 0 auto;width:" + (size || 14) + "px;height:" + (size || 14) + "px";
+  var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M8 2l6.5 11.5h-13zM8 6.5v3.2M8 11.7v.2");
+  svg.appendChild(path);
+  return svg;
+}
+
+// One failure line: a warning-ink glyph beside ink text.
+function traceFailureLine(text, attrs) {
+  var line = document.createElement("div");
+  if (attrs) Object.keys(attrs).forEach(function (name) { line.setAttribute(name, attrs[name]); });
+  line.style.cssText = "display:flex;align-items:flex-start;gap:6px;font:500 13px/1.35 " + TRACE_UI.font + ";color:var(--trace-page-ink)";
+  var glyph = document.createElement("span");
+  glyph.setAttribute("aria-hidden", "true");
+  glyph.style.cssText = "display:inline-flex;margin-top:1px;color:var(--trace-page-warning)";
+  glyph.appendChild(traceAlertSvg(14));
+  var copy = document.createElement("span");
+  copy.textContent = text;
+  line.appendChild(glyph);
+  line.appendChild(copy);
+  return line;
 }
 
 function applyOptimisticLibraryEntryPatch(workKey, entry, patch, nextChapters) {
@@ -4891,22 +5011,22 @@ function appendStoryRatingControls(body, view, workKey) {
   var current = storyEntryRatingValue(entry);
   var wrap = document.createElement("div");
   wrap.setAttribute("data-trace-rating-control", "1");
-  wrap.style.cssText = "display:flex;flex-direction:column;gap:8px;border-top:1px solid rgba(28,39,34,0.10);padding-top:12px";
+  wrap.style.cssText = "display:flex;flex-direction:column;gap:0;margin-top:2px";
 
   var label = document.createElement("div");
   label.className = "x-sheet-label";
   label.id = "trace-story-rating-label";
   label.textContent = "Your rating";
-  label.style.cssText = storySheetLabelCss();
+  label.style.cssText = "position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap";
   wrap.appendChild(label);
 
   var row = document.createElement("div");
   row.setAttribute("role", "group");
   row.setAttribute("aria-labelledby", label.id);
-  row.style.cssText = "display:flex;align-items:center;gap:2px";
+  row.style.cssText = "display:flex;align-items:center;gap:0;padding-left:6px";
   var message = document.createElement("span");
   message.setAttribute("data-trace-rating-message", "1");
-  message.style.cssText = "margin-left:8px;font:600 12px/1.3 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
+  message.style.cssText = "margin-left:14px;font:500 12px/1.3 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
 
   function renderStars(disabled) {
     clearElement(row);
@@ -4921,7 +5041,7 @@ function appendStoryRatingControls(body, view, workKey) {
           : "Set rating to " + i + " out of 5",
       );
       star.setAttribute("aria-pressed", current === i ? "true" : "false");
-      star.textContent = i <= current ? "\u2605" : "\u2606";
+      star.appendChild(traceStarSvg(i <= current));
       star.style.cssText = storyRatingButtonStyle(i <= current, disabled);
       star.disabled = disabled === true;
       star.addEventListener("click", function (event) {
@@ -4935,7 +5055,7 @@ function appendStoryRatingControls(body, view, workKey) {
         setStorySheetControlPending(this, true, "Saving rating.");
         current = nextRating;
         entry.rating = nextRating;
-        message.textContent = "Saving...";
+        message.textContent = "Saving…";
         renderStars(true);
         sendCollectorMessage(
           {
@@ -4951,7 +5071,8 @@ function appendStoryRatingControls(body, view, workKey) {
               setStorySheetControlPending(message, false, "Could not save rating. Try again.");
               current = previous;
               entry.rating = previous;
-              message.textContent = "Could not save";
+              message.textContent = "Couldn’t save rating";
+              message.style.color = "var(--trace-page-warning)";
               renderStars(false);
               return;
             }
@@ -4962,6 +5083,7 @@ function appendStoryRatingControls(body, view, workKey) {
               false,
               nextRating > 0 ? "Rating saved as " + nextRating + " of 5." : "Rating cleared.",
             );
+            message.style.color = "var(--trace-page-secondary)";
             message.textContent = nextRating > 0 ? "Saved" : "Cleared";
             renderStars(false);
           },
@@ -4984,29 +5106,28 @@ function appendStoryCatchupAction(body, view, workKey) {
   if (!patch) return;
   var wrap = document.createElement("div");
   wrap.setAttribute("data-trace-catchup-action", "1");
-  wrap.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid rgba(28,39,34,0.10);padding-top:12px";
+  wrap.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:-8px";
   var text = document.createElement("div");
-  text.style.cssText = "min-width:0";
-  var title = document.createElement("div");
-  title.textContent = "Catch up";
-  title.style.cssText = "font:600 12.5px/1.25 " + TRACE_UI.font + ";color:var(--trace-page-ink)";
-  var copy = document.createElement("div");
-  copy.textContent = "Set progress to chapter " + patch.chapters.current + ".";
-  copy.style.cssText = "margin-top:2px;font:500 12px/1.35 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
+  text.style.cssText = "min-width:0;font:400 13px/1.35 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
+  var count = Number(entry.newChapterCount);
+  var title = document.createElement("span");
+  title.textContent = count === 1 ? "1 new chapter" : count + " new chapters";
+  title.style.cssText = "font-weight:500;color:var(--trace-page-ink)";
   text.appendChild(title);
-  text.appendChild(copy);
+  text.appendChild(document.createTextNode(" since you last read"));
 
   var button = document.createElement("button");
   button.type = "button";
-  button.textContent = "Mark caught up";
-  button.style.cssText = storySheetGhostButtonCss() + ";flex:0 0 auto";
+  button.textContent = "Catch up to " + patch.chapters.current;
+  button.setAttribute("aria-label", "Catch up: set progress to chapter " + patch.chapters.current);
+  button.style.cssText = storySheetPrimaryButtonCss() + ";flex:0 0 auto;margin-right:-8px;font-size:13px";
   button.addEventListener("click", function (event) {
     event.preventDefault();
     event.stopPropagation();
     if (storySheetMutationBlocked(button)) return;
     setStorySheetControlPending(button, true, "Saving reading progress.");
     button.disabled = true;
-    button.textContent = "Saving...";
+    button.textContent = "Saving…";
     sendCollectorMessage(
       {
         type: "TRACE_PATCH_LIBRARY_ENTRY",
@@ -5020,7 +5141,7 @@ function appendStoryCatchupAction(body, view, workKey) {
         if (!response || !response.ok) {
           setStorySheetControlPending(button, false, "Could not save reading progress. Try again.");
           button.disabled = false;
-          button.textContent = "Retry";
+          button.textContent = "Try again";
           return;
         }
         setStorySheetControlPending(button, false, "Reading progress saved.");
@@ -5053,17 +5174,19 @@ function appendReaderStatusChoices(actions, view, workKey) {
 
   var row = document.createElement("div");
   row.className = "x-seg";
-  row.setAttribute("role", "group");
+  row.setAttribute("role", "radiogroup");
   row.setAttribute("aria-labelledby", label.id);
-  row.style.cssText = "display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px";
+  row.style.cssText = "display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px";
   var error = document.createElement("div");
   error.setAttribute(TRACE_STATUS_CHOICE_ERROR_ATTR, "1");
   error.id = "trace-story-status-error";
+  error.style.cssText = "min-height:0";
   if (entry.__traceStatusError) {
-    error.textContent = String(entry.__traceStatusError);
+    var errorLine = traceFailureLine(String(entry.__traceStatusError));
+    errorLine.style.marginTop = "2px";
+    error.appendChild(errorLine);
     row.setAttribute("aria-describedby", error.id);
   }
-  error.style.cssText = "min-height:16px;color:var(--trace-page-warning);font:600 12px/1.3 " + TRACE_UI.font;
 
   TRACE_READER_STATUS_CHOICES.forEach(function (status) {
     var choice = document.createElement("button");
@@ -5072,30 +5195,32 @@ function appendReaderStatusChoices(actions, view, workKey) {
     choice.disabled = entry.__traceStatusPending === true;
     var selected = entryStatus(entry) === status;
     choice.className = selected ? "on" : "";
-    if (entryStatus(entry) === status) {
-      choice.setAttribute("data-trace-status-selected", "1");
-      choice.setAttribute("aria-pressed", "true");
-    } else {
-      choice.setAttribute("aria-pressed", "false");
-    }
+    choice.setAttribute("role", "radio");
+    choice.setAttribute("aria-checked", selected ? "true" : "false");
+    choice.tabIndex = selected || (!entryStatus(entry) && status === TRACE_READER_STATUS_CHOICES[0]) ? 0 : -1;
+    if (selected) choice.setAttribute("data-trace-status-selected", "1");
+    // Design-language B2 cells: surface with a rule ring; the chosen cell is
+    // raised with a 2 px ink ring. Status colour stays on the dot.
     choice.style.cssText = [
       "--sc:" + storyStatusAccent(status),
       "box-sizing:border-box",
       "min-width:0",
-      "min-height:48px",
-      "border:1px solid " + (selected ? "var(--trace-page-ink)" : "var(--trace-page-rule)"),
-      "background:transparent",
-      "border-radius:7px",
-      "padding:8px 2px",
+      "min-height:44px",
+      "border:0",
+      "box-shadow:inset 0 0 0 " + (selected ? "2px var(--trace-page-ink)" : "1px var(--trace-page-rule)"),
+      "background:" + (selected ? "var(--trace-page-raised)" : "var(--trace-page-surface)"),
+      "border-radius:12px",
+      "padding:6px 4px",
       "overflow:visible",
-      "font:500 12px/1 " + TRACE_UI.font,
+      "font:" + (selected ? "600" : "500") + " 13px/1.15 " + TRACE_UI.font,
       "color:var(--trace-page-ink)",
       "cursor:pointer",
       "display:flex",
-      "flex-direction:column",
+      "flex-direction:row",
       "align-items:center",
       "justify-content:center",
-      "gap:5px",
+      "gap:6px",
+      "text-align:center",
     ].join(";");
     var dot = document.createElement("span");
     dot.setAttribute("aria-hidden", "true");
@@ -5115,9 +5240,26 @@ function appendReaderStatusChoices(actions, view, workKey) {
     bindReaderStatusChoice(choice, workKey, entry, status, error);
     row.appendChild(choice);
   });
+  bindTraceRadioGroupKeys(row);
   wrap.appendChild(row);
   wrap.appendChild(error);
   actions.appendChild(wrap);
+}
+
+// Arrow keys move focus between radio choices; Space or Enter chooses one,
+// so a stray arrow never writes a status.
+function bindTraceRadioGroupKeys(group) {
+  group.addEventListener("keydown", function (event) {
+    var keys = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 };
+    if (!keys[event.key]) return;
+    var radios = Array.prototype.slice.call(group.querySelectorAll("[role='radio']"));
+    var index = radios.indexOf(document.activeElement);
+    if (index < 0) return;
+    event.preventDefault();
+    var next = radios[(index + keys[event.key] + radios.length) % radios.length];
+    radios.forEach(function (radio) { radio.tabIndex = radio === next ? 0 : -1; });
+    next.focus();
+  });
 }
 
 function ensureQuickAddElements(workKey, anchor) {
@@ -5200,18 +5342,9 @@ function removeQuickAddElements() {
   }
 }
 
-function applyQuickAddLibraryState(btn, info) {
-  var status = entryStatus(info) || "READING";
-  var statusTheme = TRACE_STATUS_THEMES[status] || TRACE_STATUS_THEMES.READING;
-  btn.style.cssText = traceActionCss(statusTheme);
-  btn.textContent = quickAddStatusDisplay(info);
-  btn.title = "This story is in your Trace library";
-  btn.disabled = true;
-}
-
 function applyQuickAddActionState(btn, addTheme, compact) {
-  btn.style.cssText = traceActionCss(addTheme);
-  btn.textContent = "Add to Trace";
+  btn.style.cssText = storySheetTextActionCss("var(--trace-page-teal)");
+  btn.textContent = "+ Add to Trace";
   btn.title = "Add this story to your Trace library";
   btn.disabled = false;
 }
@@ -5238,8 +5371,8 @@ function sendQuickAddAction(btn, workKey, addTheme, compact, done) {
     applyStoryInlineHandleState(btn, storyHandlePresentation({ hasAuth: true, entry: { __traceAutoTrackPending: true } }));
     btn.style.cursor = "wait";
   } else {
-    btn.style.cssText = traceActionCss(TRACE_THEMES.adding) + ";cursor:wait";
-    btn.textContent = "Adding...";
+    btn.style.cssText = storySheetTextActionCss("var(--trace-page-secondary)") + ";cursor:wait";
+    btn.textContent = "Adding…";
   }
   btn.disabled = true;
 
@@ -5252,13 +5385,13 @@ function sendQuickAddAction(btn, workKey, addTheme, compact, done) {
             kind: "error",
             label: "Error",
             theme: TRACE_INLINE_THEMES.error,
-            dot: true,
+            dot: false,
             spinner: false,
           });
           btn.style.cursor = "pointer";
         } else {
-          btn.style.cssText = traceActionCss(TRACE_THEMES.error) + ";cursor:pointer";
-          btn.textContent = "ERROR";
+          btn.style.cssText = storySheetTextActionCss("var(--trace-page-warning)");
+          btn.textContent = "Couldn’t add";
         }
         btn.disabled = false;
         setTimeout(function () {
@@ -5282,8 +5415,9 @@ function sendQuickAddAction(btn, workKey, addTheme, compact, done) {
             spinner: false,
           });
         } else {
-          btn.style.cssText = traceActionCss(TRACE_THEMES.added);
-          btn.textContent = "ADDED \u2713";
+          // Confirmation is ink, never a teal chip.
+          btn.style.cssText = storySheetTextActionCss("var(--trace-page-ink)") + ";cursor:default";
+          btn.textContent = "Saved to your Library";
         }
         btn.disabled = true;
         setTimeout(function () {
@@ -5328,7 +5462,7 @@ function sendQuickAddAction(btn, workKey, addTheme, compact, done) {
         if (compact) {
           applyStoryInlineHandleState(btn, storyHandlePresentation({ hasAuth: true, entry: { __traceAutoTrackError: "free_limit_reached" } }));
         } else {
-          btn.style.cssText = traceActionCss(TRACE_THEMES.full);
+          btn.style.cssText = storySheetTextActionCss("var(--trace-page-warning)");
           btn.textContent = "Library full";
         }
         btn.title = "Free library limit reached \u2014 upgrade for unlimited";
@@ -5352,7 +5486,7 @@ function sendQuickAddAction(btn, workKey, addTheme, compact, done) {
         if (compact) {
           applyStoryInlineHandleState(btn, storyHandlePresentation({ hasAuth: true, entry: { __traceAutoTrackError: response.error } }));
         } else {
-          btn.style.cssText = traceActionCss(TRACE_THEMES.error);
+          btn.style.cssText = storySheetTextActionCss("var(--trace-page-teal)");
           btn.textContent = "Reconnect";
         }
         btn.disabled = false;
@@ -5364,13 +5498,13 @@ function sendQuickAddAction(btn, workKey, addTheme, compact, done) {
             kind: "error",
             label: "Error",
             theme: TRACE_INLINE_THEMES.error,
-            dot: true,
+            dot: false,
             spinner: false,
           });
           btn.style.cursor = "pointer";
         } else {
-          btn.style.cssText = traceActionCss(TRACE_THEMES.error) + ";cursor:pointer";
-          btn.textContent = "Error";
+          btn.style.cssText = storySheetTextActionCss("var(--trace-page-warning)");
+          btn.textContent = "Couldn’t add";
         }
         btn.disabled = false;
         setTimeout(function () {
@@ -5758,22 +5892,6 @@ function handleFirstStoryFocusAdd(sendResponse, attempt) {
   }, FIRST_STORY_FOCUS_RETRY_MS);
 }
 
-function bindQuickAddAction(btn, workKey, addTheme, compact) {
-  btn.addEventListener("mouseenter", function () {
-    if (!btn.disabled) btn.style.background = addTheme.hover;
-  });
-  btn.addEventListener("mouseleave", function () {
-    if (!btn.disabled) btn.style.background = addTheme.bg;
-  });
-
-  btn.addEventListener("click", function (e) {
-    e.preventDefault();
-    e.stopPropagation();
-    if (btn.disabled) return;
-    sendQuickAddAction(btn, workKey, addTheme, compact);
-  });
-}
-
 function resetStoryHiddenPreferenceBtn(btn, hidden) {
   clearElement(btn);
   btn.className = "x-pbtn x-pbtn-ghost";
@@ -5831,7 +5949,7 @@ function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
       nextHidden ? "Hiding this work." : "Unhiding this work.",
     );
     btn.style.cssText = storySheetGhostButtonCss() + ";cursor:wait;color:var(--trace-page-secondary)";
-    btn.textContent = "Saving...";
+    btn.textContent = "Saving…";
     btn.disabled = true;
     sendCollectorMessage(
       {
@@ -5884,7 +6002,7 @@ function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
 
 function setStoryHiddenPreferenceAuthAction(btn, error) {
   var expired = error === "auth_expired";
-  btn.style.cssText = storySheetGhostButtonCss() + ";cursor:pointer;color:var(--trace-page-warning)";
+  btn.style.cssText = storySheetPrimaryButtonCss();
   btn.textContent = expired ? "Sign in" : "Connect";
   btn.title = expired ? "Open Trace to sign in again" : "Open Trace to connect the extension";
   btn.setAttribute("data-trace-connect-action", "1");
@@ -5925,18 +6043,16 @@ function storyWorkMarkCopy(entry) {
 function appendStoryWorkMark(body, entry) {
   var copy = storyWorkMarkCopy(entry);
   if (!copy) return;
+  // Work marks are one secondary line: no box, no bar, no warning ink.
   var block = document.createElement("section");
   block.setAttribute("data-trace-work-mark", entry.workMark.kind);
-  block.style.cssText = "display:grid;gap:4px;padding:11px 13px;border:1px solid var(--trace-page-rule);border-left:3px solid var(--trace-page-warning);border-radius:7px;background:var(--trace-page-surface)";
+  block.style.cssText = "display:block;margin-top:-6px;font:400 13px/1.35 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
   var title = document.createElement("strong");
   title.textContent = copy.label;
-  title.style.cssText = "font:650 12px/1.25 " + TRACE_UI.font + ";color:var(--trace-page-ink)";
+  title.style.cssText = "font-weight:500;color:var(--trace-page-ink)";
   block.appendChild(title);
   if (copy.detail) {
-    var detail = document.createElement("span");
-    detail.textContent = copy.detail;
-    detail.style.cssText = "font:500 12px/1.4 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
-    block.appendChild(detail);
+    block.appendChild(document.createTextNode(" · " + copy.detail));
   }
   body.appendChild(block);
 }
@@ -5977,35 +6093,26 @@ function renderStorySheet(sheet, view, workKey) {
     "grid-template-columns:1fr auto",
     "gap:10px",
     "align-items:start",
-    "padding:16px 16px 13px",
-    "border-bottom:1px solid var(--trace-page-rule)",
+    "padding:16px 16px 12px",
     "background:var(--trace-page-surface)",
   ].join(";");
   var headText = document.createElement("div");
   headText.style.cssText = "min-width:0";
-  var source = document.createElement("div");
-  source.className = "src";
-  source.textContent = "Trace · " + storySheetSourceLine();
-  source.style.cssText = "font:600 12px/1.3 -apple-system,system-ui,'Segoe UI',sans-serif;color:var(--trace-page-warning)";
+  // Title and byline wrap; the site sits in the byline. No Trace eyebrow.
   var title = document.createElement("div");
   title.className = "ti";
   title.id = "trace-story-sheet-title";
   title.textContent = (item && item.t) || storyHeadline(view);
-  title.style.cssText = "margin-top:6px;font:700 17px/1.22 " + TRACE_UI.font + ";letter-spacing:0;color:var(--trace-page-ink);overflow:hidden;text-overflow:ellipsis";
+  title.style.cssText = "font:600 17px/1.25 " + TRACE_UI.font + ";letter-spacing:0;color:var(--trace-page-ink);overflow-wrap:anywhere";
   var author = document.createElement("div");
   author.className = "au";
-  author.textContent = storySheetAuthorLine(item);
-  author.style.cssText = "margin-top:2px;font:500 12px/1.3 " + TRACE_UI.font + ";color:var(--trace-page-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
-  headText.appendChild(source);
+  author.textContent = storySheetBylineText(item);
+  author.style.cssText = "margin-top:2px;font:400 13px/1.35 " + TRACE_UI.font + ";color:var(--trace-page-secondary);overflow-wrap:anywhere";
   headText.appendChild(title);
   if (author.textContent) headText.appendChild(author);
-  var close = document.createElement("button");
+  var close = storySheetCloseButton();
   close.setAttribute(TRACE_STORY_SHEET_CLOSE_ATTR, "1");
   close.setAttribute("aria-label", "Close Trace sheet");
-  close.className = "x-close";
-  close.type = "button";
-  close.textContent = "\u00d7";
-  close.style.cssText = "width:30px;height:30px;border-radius:8px;border:1px solid var(--trace-page-rule);background:var(--trace-page-raised);color:var(--trace-page-secondary);font:600 16px/1 system-ui,-apple-system,'Segoe UI',sans-serif;cursor:pointer";
   close.addEventListener("click", function () {
     requestStorySheetClose(sheet);
   });
@@ -6018,13 +6125,13 @@ function renderStorySheet(sheet, view, workKey) {
   if (!view.hasAuth) {
     var connect = document.createElement("div");
     connect.className = "x-sheet-connect";
-    connect.style.cssText = "padding:18px 16px;display:flex;flex-direction:column;gap:10px";
+    connect.style.cssText = "padding:4px 16px 12px;display:flex;flex-direction:column;gap:4px";
     var connectTitle = document.createElement("h4");
     connectTitle.textContent = storyHeadline(view);
-    connectTitle.style.cssText = "margin:0;font:500 18px/1.2 " + storySheetSerifFont() + ";color:var(--trace-page-ink)";
+    connectTitle.style.cssText = "margin:0;font:600 15px/1.3 " + TRACE_UI.font + ";color:var(--trace-page-ink)";
     var connectCopy = document.createElement("p");
     connectCopy.textContent = storyCaption(view);
-    connectCopy.style.cssText = "margin:0 0 4px;font:500 12.5px/1.5 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
+    connectCopy.style.cssText = "margin:0;font:400 13px/1.4 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
     var connectOpen = document.createElement("a");
     connectOpen.className = "x-pbtn x-pbtn-primary";
     connectOpen.setAttribute("data-trace-open-trace", "1");
@@ -6037,7 +6144,7 @@ function renderStorySheet(sheet, view, workKey) {
       connectOpen.rel = "noopener noreferrer";
       connectOpen.textContent = "Open Trace";
     }
-    connectOpen.style.cssText = storySheetPrimaryButtonCss();
+    connectOpen.style.cssText = storySheetPrimaryButtonCss() + ";align-self:flex-start;margin-left:-8px";
     bindTraceOpenLink(connectOpen);
     connect.appendChild(connectTitle);
     connect.appendChild(connectCopy);
@@ -6050,29 +6157,29 @@ function renderStorySheet(sheet, view, workKey) {
 
   var body = document.createElement("div");
   body.className = "x-sheet-body";
-  body.style.cssText = "padding:15px 16px;display:flex;flex-direction:column;gap:15px;background:var(--trace-page-surface)";
+  body.style.cssText = "padding:4px 16px 16px;display:flex;flex-direction:column;gap:14px;background:var(--trace-page-surface)";
   if (view.entry && view.entry.__traceAutoTrackError === "free_limit_reached") {
     var capacityTitle = document.createElement("h4");
     capacityTitle.textContent = "This story wasn’t added";
-    capacityTitle.style.cssText = "margin:0;font:500 19px/1.2 " + storySheetSerifFont() + ";color:var(--trace-page-ink)";
+    capacityTitle.style.cssText = "margin:0;font:600 17px/1.3 " + TRACE_UI.font + ";color:var(--trace-page-ink)";
     var capacityCopy = document.createElement("p");
-    capacityCopy.textContent = "Your Trace library is full. Make room or get Trace Unlimited to keep adding stories.";
-    capacityCopy.style.cssText = "margin:0;font:500 12.5px/1.5 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
+    capacityCopy.textContent = "Your Library is full. Make room in Trace, or see Trace Unlimited.";
+    capacityCopy.style.cssText = "margin:0;font:400 13px/1.4 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
     body.appendChild(capacityTitle);
     body.appendChild(capacityCopy);
     sheet.appendChild(body);
 
     var capacityActions = document.createElement("div");
     capacityActions.className = "x-sheet-foot";
-    capacityActions.style.cssText = "display:flex;gap:8px;padding:0 16px 16px";
+    capacityActions.style.cssText = "display:flex;flex-wrap:wrap;gap:4px 12px;padding:0 8px 10px";
     var capacityUpgrade = document.createElement("a");
     capacityUpgrade.className = "x-pbtn x-pbtn-primary";
     capacityUpgrade.setAttribute("data-trace-open-trace", "1");
     capacityUpgrade.href = TRACE_WEB_UPGRADE_URL;
     capacityUpgrade.target = "_blank";
     capacityUpgrade.rel = "noopener noreferrer";
-    capacityUpgrade.textContent = "Get Trace Unlimited";
-    capacityUpgrade.style.cssText = storySheetPrimaryButtonCss() + ";flex:1";
+    capacityUpgrade.textContent = "See Trace Unlimited";
+    capacityUpgrade.style.cssText = storySheetPrimaryButtonCss();
     bindTraceOpenLink(capacityUpgrade);
     capacityActions.appendChild(capacityUpgrade);
     var capacityManage = document.createElement("a");
@@ -6082,7 +6189,7 @@ function renderStorySheet(sheet, view, workKey) {
     capacityManage.target = "_blank";
     capacityManage.rel = "noopener noreferrer";
     capacityManage.textContent = "Manage library";
-    capacityManage.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:0 12px;border:1px solid rgba(28,39,34,.22);border-radius:9px;color:var(--trace-page-ink);text-decoration:none;font:650 12px/1 " + TRACE_UI.font + ";flex:1";
+    capacityManage.style.cssText = storySheetPrimaryButtonCss();
     bindTraceOpenLink(capacityManage);
     capacityActions.appendChild(capacityManage);
     sheet.appendChild(capacityActions);
@@ -6090,24 +6197,33 @@ function renderStorySheet(sheet, view, workKey) {
     return;
   }
   appendReaderStatusChoices(body, view, workKey);
-  if (view.entry && (view.entry.__traceStatusPending || view.entry.__traceStatusError || view.entry.__traceAutoTrackError)) {
-    var notice = document.createElement("div");
-    notice.style.cssText = "border-top:1px solid rgba(28,39,34,0.10);padding-top:12px";
-    var noticeLabel = document.createElement("div");
-    noticeLabel.textContent = storyHeadline(view);
-    noticeLabel.style.cssText = "font:600 12.5px/1.3 " + TRACE_UI.font + ";color:" + (view.entry.__traceStatusError || view.entry.__traceAutoTrackError ? "var(--trace-page-warning)" : "var(--trace-page-ink)");
-    var noticeCopy = document.createElement("div");
-    noticeCopy.textContent = storyCaption(view);
-    noticeCopy.style.cssText = "margin-top:3px;font:500 12px/1.4 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
-    notice.appendChild(noticeLabel);
-    notice.appendChild(noticeCopy);
-    body.appendChild(notice);
+  var gridShown = !!(view.canMutate && view.entry && view.entry.entryId);
+  if (view.entry && view.entry.__traceAutoTrackError) {
+    // A failed automatic save says what didn't happen; it never invites a
+    // "one tap saves this" that already failed.
+    var autoError = view.entry.__traceAutoTrackError;
+    var authFailure = autoError === "auth_expired" || autoError === "not_authenticated";
+    body.appendChild(traceFailureLine(
+      authFailure
+        ? "This story wasn’t saved. Reconnect Trace, then try again."
+        : "This story wasn’t saved. Trace couldn’t reach your Library.",
+      { "data-trace-story-sheet-notice": "auto-track-error" },
+    ));
+  } else if (view.entry && view.entry.__traceStatusError && !gridShown) {
+    body.appendChild(traceFailureLine("Status wasn’t changed. " + String(view.entry.__traceStatusError),
+      { "data-trace-story-sheet-notice": "status-error" }));
+  } else if (view.entry && view.entry.__traceStatusPending) {
+    var pendingNotice = document.createElement("div");
+    pendingNotice.setAttribute("data-trace-story-sheet-notice", "status-pending");
+    pendingNotice.textContent = storyCaption(view) + "…";
+    pendingNotice.style.cssText = "font:400 13px/1.35 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
+    body.appendChild(pendingNotice);
   }
 
   var position = document.createElement("section");
   position.className = "x-pos";
   position.setAttribute("data-trace-story-position", "1");
-  position.style.cssText = "display:grid;gap:7px;padding:13px 0;border-top:1px solid var(--trace-page-rule);border-bottom:1px solid var(--trace-page-rule)";
+  position.style.cssText = "display:grid;gap:7px;padding:12px 0;border-top:1px solid var(--trace-page-rule);border-bottom:1px solid var(--trace-page-rule)";
   var chapters = displayChaptersForStatus(status, view.entry && view.entry.chapters);
   var positionPercent = null;
   if (
@@ -6123,13 +6239,13 @@ function renderStorySheet(sheet, view, workKey) {
   positionTop.style.cssText = "display:flex;align-items:baseline;justify-content:space-between;gap:10px";
   var positionValue = document.createElement("span");
   positionValue.className = "chap";
-  positionValue.style.cssText = "font:650 14px/1.25 " + TRACE_UI.font + ";letter-spacing:0;color:var(--trace-page-ink)";
+  positionValue.style.cssText = "font:500 14px/1.25 " + TRACE_UI.font + ";letter-spacing:0;color:var(--trace-page-ink);font-variant-numeric:tabular-nums";
   var positionSmall = document.createElement("span");
   positionSmall.className = "sm";
-  positionSmall.style.cssText = "font-weight:500;color:var(--trace-page-secondary)";
+  positionSmall.style.cssText = "font-weight:400;color:var(--trace-page-secondary)";
   var positionStatus = document.createElement("span");
   positionStatus.className = "pct";
-  positionStatus.style.cssText = "font:600 12px/1.2 " + TRACE_UI.font + ";color:var(--trace-page-secondary);text-align:right";
+  positionStatus.style.cssText = "font:400 13px/1.2 " + TRACE_UI.font + ";color:var(--trace-page-secondary);text-align:right;font-variant-numeric:tabular-nums";
   if (chapters && typeof chapters.current === "number") {
     var positionBig = document.createElement("span");
     positionBig.className = "big";
@@ -6146,58 +6262,61 @@ function renderStorySheet(sheet, view, workKey) {
   if (positionStatus.textContent) positionTop.appendChild(positionStatus);
   position.appendChild(positionTop);
   body.appendChild(position);
+  appendStoryWorkMark(body, view.entry);
   appendStoryCatchupAction(body, view, workKey);
-  appendStoryRatingControls(body, view, workKey);
 
-  var meta = document.createElement("div");
-  meta.className = "x-meta";
-  meta.style.cssText = "display:flex;flex-direction:column;gap:10px;padding:13px 14px;background:var(--trace-page-raised);border-left:2px solid var(--trace-page-authored);border-radius:0 8px 8px 0";
+  // Your record: the reader's own marks in the record well.
+  var meta = traceRecordWell();
+  var wellHeaderCount = meta.childNodes.length;
   var privateContext = view.entry && view.entry.privateContext;
-  var privateContextLabel = document.createElement("span");
-  privateContextLabel.textContent = "Private context";
-  privateContextLabel.style.cssText = "font:500 12px/1.3 -apple-system,system-ui,'Segoe UI',sans-serif;color:var(--trace-page-secondary)";
-  meta.appendChild(privateContextLabel);
+  appendStoryRatingControls(meta, view, workKey);
+  if (!meta.querySelector("[data-trace-rating-control]")) {
+    var statedRating = storyEntryRatingValue(view.entry);
+    if (statedRating > 0) meta.appendChild(traceStatedRating(statedRating));
+  }
   if (privateContext && privateContext.hasNotes) {
     meta.appendChild(storySheetNoteText(privateContext.notePreview || "Private note saved \u00b7 edit in Trace"));
   }
   if (privateContext && privateContext.tagCount) {
     var tags = document.createElement("span");
-    tags.style.cssText = "display:flex;flex:1;min-width:0;flex-wrap:wrap;column-gap:12px;row-gap:5px;text-align:left";
+    tags.className = "tags";
+    tags.style.cssText = "display:flex;flex:1;min-width:0;flex-wrap:wrap;column-gap:12px;row-gap:4px;text-align:left";
     if (privateContext.tags && privateContext.tags.length) {
       var visibleTags = visiblePrivateTags(privateContext);
       visibleTags.forEach(function (tag) {
         tags.appendChild(storySheetTagPill(tag, false));
       });
       if (privateContext.tagCount > visibleTags.length) {
-        tags.appendChild(storySheetTagPill("+" + (privateContext.tagCount - visibleTags.length), false));
+        tags.appendChild(storySheetTagMore("+" + (privateContext.tagCount - visibleTags.length)));
       }
     } else {
-      tags.appendChild(storySheetTagPill(
+      tags.appendChild(storySheetTagMore(
         privateContext.tagCount === 1 ? "1 private tag" : privateContext.tagCount + " private tags",
-        false,
       ));
     }
     meta.appendChild(tags);
   }
   if (view.entry && view.entry.hidden) {
-    meta.appendChild(storySheetNoteText("Hidden from future listings"));
+    var hiddenLine = document.createElement("span");
+    hiddenLine.textContent = "Hidden from future listings";
+    hiddenLine.style.cssText = "font:400 13px/1.35 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
+    meta.appendChild(hiddenLine);
   }
-  if (meta.childNodes.length > 1) body.appendChild(meta);
-  appendStoryWorkMark(body, view.entry);
+  if (meta.childNodes.length > wellHeaderCount) body.appendChild(meta);
   sheet.appendChild(body);
 
   var actions = document.createElement("div");
   actions.className = "x-sheet-foot";
-  actions.style.cssText = "display:flex;gap:8px;padding:13px 16px 16px;background:var(--trace-page-surface);border-top:1px solid var(--trace-page-rule)";
+  actions.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px 6px 8px;background:var(--trace-page-surface);border-top:1px solid var(--trace-page-rule)";
   var open = document.createElement("a");
   open.className = "x-pbtn x-pbtn-primary";
   open.setAttribute("data-trace-open-trace", "1");
   open.href = storyTraceOpenUrl(view.authState, view.entry);
   open.target = "_blank";
   open.rel = "noopener noreferrer";
-  open.appendChild(storySheetSvgIcon("open"));
   open.appendChild(document.createTextNode("Open in Trace"));
-  open.style.cssText = storySheetPrimaryButtonCss() + ";flex:1";
+  open.appendChild(storySheetSvgIcon("open"));
+  open.style.cssText = storySheetPrimaryButtonCss() + ";margin-right:auto";
   bindTraceOpenLink(open);
   actions.appendChild(open);
 
@@ -6206,9 +6325,9 @@ function renderStorySheet(sheet, view, workKey) {
     addBtn.className = "x-pbtn x-pbtn-ghost";
     addBtn.setAttribute(QUICK_ADD_ATTR, workKey);
     addBtn.type = "button";
-    addBtn.textContent = "Add";
+    addBtn.textContent = "+ Add to Trace";
     addBtn.title = "Add this story to your Trace library";
-    addBtn.style.cssText = storySheetGhostButtonCss() + ";flex:0 0 auto";
+    addBtn.style.cssText = storySheetPrimaryButtonCss() + ";flex:0 0 auto";
     addBtn.addEventListener("click", function (e) {
       e.preventDefault();
       e.stopPropagation();
@@ -6675,6 +6794,7 @@ function finishQualifyStoryDescriptor(decision) {
 function showFinishQualifyToast(decision, view, result) {
   if (!window.TraceFinishQualify || typeof window.TraceFinishQualify.toast !== "function") return;
   var authoritativeStatus = entryStatus(result && result.entry);
+  traceRefreshPageTokens();
   window.TraceFinishQualify.toast({
     kind: authoritativeStatus === "FINISHED" ? "finished" : "caughtup",
     story: finishQualifyStoryDescriptor(decision),
@@ -6687,6 +6807,7 @@ function showFinishQualifyToast(decision, view, result) {
 function mountFinishQualifyBand(decision, view, workKey, flowState) {
   if (!finishQualifyFlowIsCurrent(workKey, flowState)) return;
   finishQualifyRemoveBand(workKey);
+  traceRefreshPageTokens();
   finishQualifyBandState[workKey] = window.TraceFinishQualify.mount({
     anchorEl: decision.anchorEl,
     placement: "inline",
@@ -6734,11 +6855,12 @@ function mountFinishQualifyRecovery(decision, view, workKey, flowState, message)
     typeof window.TraceFinishQualify.recovery !== "function"
   ) return;
   finishQualifyRemoveBand(workKey);
+  traceRefreshPageTokens();
   finishQualifyBandState[workKey] = window.TraceFinishQualify.recovery({
     anchorEl: decision.anchorEl,
     align: isAO3() ? "start" : "center",
     story: finishQualifyStoryDescriptor(decision),
-    message: message || "Could not update. Retry here or open Trace.",
+    message: message || "Your status wasn’t changed.",
     onRetry: function (controls) {
       if (!finishQualifyFlowIsCurrent(workKey, flowState)) {
         controls.fail("This page state changed. Reopen the story to try again.");
@@ -7110,11 +7232,7 @@ function showChapterKeptNote(workKey, chapter) {
     if (finishBandVisible()) { removeStorySavedNote(false); return; }
     if (!note.isConnected || !storySavedNoteHost || !storySavedNoteHost.isConnected) storySavedNoteMount(note);
   }, 400);
-  if (!reduced) {
-    var reveal = function () { note.style.opacity = "1"; note.style.transform = "none"; };
-    if (typeof requestAnimationFrame === "function") requestAnimationFrame(reveal);
-    else setTimeout(reveal, 16);
-  }
+  revealStoryPageNote(note);
   var remaining = 4000;
   var started = Date.now();
   var schedule = function () {
@@ -7250,12 +7368,13 @@ function removeStorySavedNote(immediate) {
   }
   if (note.__traceHideTimer) clearTimeout(note.__traceHideTimer);
   if (note.__traceKeepTimer) clearInterval(note.__traceKeepTimer);
-  if (immediate || storySavedNoteReducedMotion()) {
+  if (immediate) {
     note.remove();
     return;
   }
+  // Reduce Motion keeps the fade and drops the movement.
   note.style.opacity = "0";
-  note.style.transform = "translateY(8px)";
+  if (!storySavedNoteReducedMotion()) note.style.transform = "translateY(8px)";
   setTimeout(function () { note.remove(); }, 350);
 
 }
@@ -7303,26 +7422,32 @@ function createStoryPageNote(kind, title, chapter, reduced) {
     "z-index:2147483646", "box-sizing:border-box",
     compact ? "width:max-content" : "max-width:440px",
     compact ? "max-width:calc(100vw - 24px)" : "",
-    "margin:0 auto", "display:flex", "align-items:center",
-    "gap:" + (compact ? "8px" : "12px"),
+    "margin:0 auto",
+    compact ? "display:flex" : "display:grid",
+    compact ? "align-items:center" : "grid-template-columns:auto minmax(0,1fr) auto",
+    compact ? "" : "align-items:center",
+    "gap:" + (compact ? "8px" : "4px 12px"),
     "padding:" + (compact ? "8px 14px" : "12px 6px 12px 16px"),
     "background:var(--trace-page-surface)", "color:var(--trace-page-ink)",
-    "border:0", "border-radius:" + (compact ? "22px" : "18px"),
-    "box-shadow:0 0 0 1px color-mix(in srgb,var(--trace-page-rule) 70%,transparent),0 14px 30px -12px rgba(0,0,0,.35)",
+    "border:0", "border-radius:14px",
+    "box-shadow:" + TRACE_PAGE_SHEET_SHADOW,
     "font:17px/1.3 -apple-system,system-ui,sans-serif",
     "font: -apple-system-body",
     "text-align:left",
+    // Visible without waiting for a frame; the entry animation is layered on.
     "opacity:1",
-    "transform:" + (reduced ? "none" : "translateY(14px)"),
-    "transition:" + (reduced ? "opacity .4s ease" : "opacity .4s ease,transform .4s ease"),
+    "transform:none",
+    "transition:" + (reduced ? "opacity .2s ease" : "opacity .35s ease,transform .35s ease"),
   ].filter(Boolean).join(";");
   var mark = document.createElement("span");
   mark.setAttribute("aria-hidden", "true");
-  mark.style.cssText = "align-self:flex-start;padding-top:" + (compact ? "2px" : "1px") + ";color:var(--trace-page-ink)";
+  mark.setAttribute("data-trace-note-mark", "1");
+  mark.style.cssText = "align-self:start;padding-top:" + (compact ? "2px" : "1px") + ";color:var(--trace-page-ink)";
   mark.appendChild(storyNoteCheckSvg(compact ? 16 : 20));
   note.appendChild(mark);
 
   var copy = document.createElement("span");
+  copy.setAttribute("data-trace-note-copy", "1");
   copy.style.cssText = "flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px";
   var heading = document.createElement("strong");
   heading.textContent = compact ? "Chapter " + chapter + " kept" : "Saved to your Library";
@@ -7331,7 +7456,7 @@ function createStoryPageNote(kind, title, chapter, reduced) {
   if (title) {
     var titleLine = document.createElement("span");
     titleLine.textContent = title;
-    titleLine.style.cssText = "font-weight:400;font-size:" + noteFont(compact ? 12.5 : 13) + ";line-height:1.35;color:var(--trace-page-secondary)";
+    titleLine.style.cssText = "font-weight:400;font-size:" + noteFont(compact ? 12.5 : 13) + ";line-height:1.35;color:var(--trace-page-secondary);overflow-wrap:anywhere";
     copy.appendChild(titleLine);
   }
   if (!compact) {
@@ -7343,20 +7468,61 @@ function createStoryPageNote(kind, title, chapter, reduced) {
   note.appendChild(copy);
   if (compact) return { note: note };
 
+  var actions = document.createElement("span");
+  actions.setAttribute("data-trace-note-actions", "1");
+  actions.style.cssText = "display:flex;align-items:center;justify-content:flex-end";
   var details = document.createElement("button");
   details.type = "button";
   details.textContent = "Details";
   details.setAttribute("aria-label", "Details: " + title + " in Trace");
   details.style.cssText = "flex:0 0 auto;min-height:44px;padding:0 8px;border:0;background:transparent;color:var(--trace-page-teal);font-family:inherit;font-weight:500;font-size:" + noteFont(15) + ";line-height:1;cursor:pointer";
-  note.appendChild(details);
+  actions.appendChild(details);
 
   var dismiss = document.createElement("button");
   dismiss.type = "button";
   dismiss.setAttribute("aria-label", "Dismiss");
   dismiss.style.cssText = "flex:0 0 44px;width:44px;height:44px;display:flex;align-items:center;justify-content:center;border:0;background:transparent;color:var(--trace-page-tertiary);cursor:pointer";
   dismiss.appendChild(storyNoteDismissSvg());
-  note.appendChild(dismiss);
+  actions.appendChild(dismiss);
+  note.appendChild(actions);
   return { note: note, details: details, dismiss: dismiss };
+}
+
+// From 1.75x text the saved note stacks its actions under the text so the
+// title keeps the full width. Measured after mounting,
+// because the note resolves Dynamic Type on its own node.
+var TRACE_NOTE_STACK_SCALE = 1.75;
+
+function applyStoryNoteLayout(note) {
+  var actions = note && note.querySelector ? note.querySelector("[data-trace-note-actions]") : null;
+  if (!actions || typeof window.getComputedStyle !== "function") return false;
+  var size = parseFloat(window.getComputedStyle(note).fontSize) || 17;
+  var stacked = size / 17 >= TRACE_NOTE_STACK_SCALE;
+  note.setAttribute("data-trace-note-layout", stacked ? "stacked" : "inline");
+  note.style.gridTemplateColumns = stacked ? "auto minmax(0,1fr)" : "auto minmax(0,1fr) auto";
+  note.style.padding = stacked ? "14px 16px 6px" : "12px 6px 12px 16px";
+  actions.style.gridColumn = stacked ? "1 / -1" : "";
+  actions.style.justifyContent = stacked ? "space-between" : "flex-end";
+  actions.style.margin = stacked ? "0 -10px 0 -8px" : "";
+  return stacked;
+}
+
+// Enter: rise 14 px and fade over 0.4 s; Reduce Motion fades only. The Web
+// Animations API runs without a JS frame callback, and the note's resting
+// style is already visible if animation is unavailable.
+function revealStoryPageNote(note) {
+  if (!note || typeof note.animate !== "function") return;
+  var reduced = storySavedNoteReducedMotion();
+  try {
+    note.animate(
+      reduced
+        ? [{ opacity: 0 }, { opacity: 1 }]
+        : [{ opacity: 0, transform: "translateY(14px)" }, { opacity: 1, transform: "none" }],
+      { duration: reduced ? 200 : 400, easing: "ease-out" },
+    );
+  } catch (_) {
+    /* visible either way */
+  }
 }
 
 function showStorySavedNote(workKey, entry, remainingMs) {
@@ -7393,6 +7559,7 @@ function showStorySavedNote(workKey, entry, remainingMs) {
     removeStorySavedNote(false);
   });
   storySavedNoteMount(note);
+  applyStoryNoteLayout(note);
   activeStorySavedNote = note;
   if (!continued) announceStorySheet("Saved to your Library. " + title + ". Trace keeps your place as you read.");
   // Some archive pages rebuild or prune fixed elements (for example mobile ad
@@ -7411,14 +7578,7 @@ function showStorySavedNote(workKey, entry, remainingMs) {
       storySavedNoteMount(note);
     }
   }, 400);
-  if (!reduced) {
-    var reveal = function () {
-      note.style.opacity = "1";
-      note.style.transform = "none";
-    };
-    if (typeof requestAnimationFrame === "function") requestAnimationFrame(reveal);
-    else setTimeout(reveal, 16);
-  }
+  revealStoryPageNote(note);
   var remaining = visibleMs;
   var started = Date.now();
   var scheduleHide = function () {
