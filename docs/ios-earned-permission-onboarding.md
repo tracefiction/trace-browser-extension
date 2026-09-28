@@ -147,6 +147,11 @@ do not describe an uninstall as clean when Safari restored the grant.
     returns to recovery without being saved first.
 13. Open Trace on an unrelated site. It must not inject, read, or request
     access to that site.
+14. Leave Safari in the background long enough for the extension to be
+    suspended. Return, go Back to an AO3 listing, then open a story. Confirm
+    the listing overlay returns, the story handle appears, and the story is
+    saved without restarting Safari. The page gate asks again on `pageshow`,
+    focus, and visibility; the background bounds each permission reconcile.
 
 Record the iOS version, tested host family, prompt wording, first failing row,
 visible Safari Settings state, and whether each server-confirmed entry exists.

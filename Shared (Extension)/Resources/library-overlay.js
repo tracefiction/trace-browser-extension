@@ -4095,6 +4095,21 @@ function traceRefreshPageTokens() {
     return entries;
   }
 
+  // Safari may not answer while it wakes the extension background, including
+  // right after a back-forward cache restore. Ask again a few times rather
+  // than leaving the listing bare until the next focus or storage change.
+  // The budget belongs to a page visit: only a load or a back-forward
+  // restore starts a new one, never DOM churn or other reruns.
+  var PROJECTION_RETRY_DELAYS_MS = [250, 1000, 3000, 8000];
+  var projectionRetryAttempt = 0;
+
+  function scheduleProjectionRetry() {
+    if (projectionRetryAttempt >= PROJECTION_RETRY_DELAYS_MS.length) return;
+    var delay = PROJECTION_RETRY_DELAYS_MS[projectionRetryAttempt];
+    projectionRetryAttempt += 1;
+    scheduleRun(delay);
+  }
+
   function run() {
     try {
       if (KERNEL_SESSION_ACTIVE) {
@@ -4106,7 +4121,11 @@ function traceRefreshPageTokens() {
               workKeys: visibleWorkKeys(),
             },
             function (response) {
-              if (ext.runtime.lastError || !response || response.ok !== true) return;
+              if (ext.runtime.lastError || !response || response.ok !== true) {
+                scheduleProjectionRetry();
+                return;
+              }
+              projectionRetryAttempt = 0;
               var snapshot = response.snapshot || { state: "signed_out" };
               showCapacityRecoveryNotice(
                 response.projection && response.projection.capacity,
@@ -4155,6 +4174,7 @@ function traceRefreshPageTokens() {
 
     try {
       window.addEventListener("pageshow", function () {
+        projectionRetryAttempt = 0;
         scheduleRun(60);
       });
       window.addEventListener("focus", function () {

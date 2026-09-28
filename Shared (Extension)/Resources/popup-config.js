@@ -26,23 +26,47 @@ globalThis.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {"version":3,"registrationMo
   // Safari injects into open tabs as soon as the extension (re)loads, which can
   // be before the background has registered its listeners. That reply is
   // empty, not a reconcile result, so ask again instead of leaving this page
-  // gated until a reload. A definite answer, complete or not, is final.
+  // gated until a reload. A background that could not read its permission
+  // state answers registration_failed, which is also transient. A definite
+  // answer, complete or not, ends this round of asking.
   var retryDelaysMs = [250, 1000, 3000, 8000];
+  var replyTimeoutMs = 10000;
   var attempt = 0;
+  var request = 0;
+  var inFlight = false;
+  var timer = null;
   var reconcile;
-  var retry = function () {
-    if (attempt >= retryDelaysMs.length) return;
-    setTimeout(reconcile, retryDelaysMs[attempt]);
-    attempt += 1;
+  var retryFor = function (id) {
+    return function () {
+      if (id !== request || !inFlight) return;
+      inFlight = false;
+      if (attempt >= retryDelaysMs.length) return;
+      timer = setTimeout(reconcile, retryDelaysMs[attempt]);
+      attempt += 1;
+    };
   };
-  var settle = function (response) {
-    if (!response || typeof response !== "object" || typeof response.completeGrant !== "boolean") {
-      retry();
-      return;
-    }
-    publish(response);
+  var settleFor = function (id) {
+    var retry = retryFor(id);
+    return function (response) {
+      if (id !== request || !inFlight) return;
+      if (!response || typeof response !== "object" || typeof response.completeGrant !== "boolean" ||
+          (response.ok !== true && response.error === "registration_failed")) {
+        retry();
+        return;
+      }
+      inFlight = false;
+      publish(response);
+    };
   };
   reconcile = function () {
+    timer = null;
+    if (globalThis.TRACE_EARNED_PERMISSION_COMPLETE === true) return;
+    request += 1;
+    inFlight = true;
+    var retry = retryFor(request);
+    var settle = settleFor(request);
+    // A reply Safari never delivers must not hold the page gated.
+    setTimeout(retry, replyTimeoutMs);
     try {
       if (globalThis.browser && extension === globalThis.browser) {
         Promise.resolve(extension.runtime.sendMessage({ type: "TRACE_EARNED_PERMISSION_RECONCILE" })).then(settle, retry);
@@ -59,5 +83,21 @@ globalThis.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {"version":3,"registrationMo
       retry();
     }
   };
+  // A page restored from the back-forward cache, or brought back to the
+  // foreground, may have spent its bounded retries while Safari had the
+  // background asleep, or the grant may have changed meanwhile. Start a fresh
+  // round instead of leaving the page without Trace until Safari restarts.
+  var resume = function (event) {
+    if (globalThis.TRACE_EARNED_PERMISSION_COMPLETE === true || inFlight) return;
+    if (event && event.type === "visibilitychange" && globalThis.document && globalThis.document.hidden) return;
+    if (timer !== null) clearTimeout(timer);
+    attempt = 0;
+    reconcile();
+  };
+  try {
+    globalThis.addEventListener("pageshow", resume);
+    globalThis.addEventListener("focus", resume);
+    globalThis.document.addEventListener("visibilitychange", resume);
+  } catch (_) {}
   reconcile();
 })();

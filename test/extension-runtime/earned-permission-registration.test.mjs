@@ -353,11 +353,21 @@ function runArchivePageGate(replies, { promiseApi = true } = {}) {
           });
         },
       };
+  const listeners = new Map();
+  const listen = (type, listener) => {
+    listeners.set(type, [...(listeners.get(type) ?? []), listener]);
+  };
   const context = {
     location: { hostname: "archiveofourown.org" },
-    document: { dispatchEvent: (event) => readyEvents.push(event.type) },
+    document: {
+      hidden: false,
+      dispatchEvent: (event) => readyEvents.push(event.type),
+      addEventListener: listen,
+    },
+    addEventListener: listen,
     CustomEvent: class { constructor(type) { this.type = type; } },
     setTimeout: (callback, delay) => { timers.push({ callback, delay }); return timers.length; },
+    clearTimeout: (id) => { if (timers[id - 1]) timers[id - 1].callback = () => {}; },
     ...(promiseApi ? { browser: { runtime } } : { chrome: { runtime } }),
   };
   context.globalThis = context;
@@ -370,7 +380,10 @@ function runArchivePageGate(replies, { promiseApi = true } = {}) {
       await settle();
     }
   };
-  return { context, sent, timers, readyEvents, drain };
+  const fire = (type, init = {}) => {
+    for (const listener of listeners.get(type) ?? []) listener({ type, ...init });
+  };
+  return { context, sent, timers, readyEvents, drain, fire };
 }
 
 for (const promiseApi of [true, false]) {
@@ -404,4 +417,150 @@ test("archive page gate stops asking after a bounded number of empty replies", a
   await h.drain();
   assert.equal(h.context.TRACE_EARNED_PERMISSION_COMPLETE, false);
   assert.ok(h.sent.length > 1 && h.sent.length <= 5, `sent ${h.sent.length}`);
+});
+
+test("archive page gate asks again when a back-forward cache restore resumes a page that ran out of retries", async () => {
+  // The background was asleep for the whole bounded round of asking; Safari
+  // then restores the page from memory, so no content script runs again.
+  const replies = [undefined, undefined, undefined, undefined, undefined];
+  const h = runArchivePageGate(replies);
+  await h.drain();
+  assert.equal(h.context.TRACE_EARNED_PERMISSION_COMPLETE, false);
+  assert.equal(h.sent.length, 5);
+  replies.push(COMPLETE_RESULT);
+  h.fire("pageshow", { persisted: true });
+  await h.drain();
+  assert.equal(h.context.TRACE_EARNED_PERMISSION_COMPLETE, true);
+  assert.deepEqual(h.readyEvents, ["trace-earned-permission-ready"]);
+  h.fire("pageshow", { persisted: true });
+  h.fire("visibilitychange");
+  await h.drain();
+  assert.equal(h.sent.length, 6, "a ready page never asks again");
+});
+
+test("archive page gate re-checks a definite incomplete grant when the reader returns", async () => {
+  const replies = [{ ok: false, completeGrant: false, registered: false, changed: false, error: "permission_incomplete" }];
+  const h = runArchivePageGate(replies);
+  await h.drain();
+  assert.equal(h.sent.length, 1);
+  h.context.document.hidden = true;
+  h.fire("visibilitychange");
+  await h.drain();
+  assert.equal(h.sent.length, 1, "a hidden page does not ask");
+  h.context.document.hidden = false;
+  replies.push(COMPLETE_RESULT);
+  h.fire("visibilitychange");
+  await h.drain();
+  assert.equal(h.context.TRACE_EARNED_PERMISSION_COMPLETE, true);
+});
+
+test("archive page gate treats a background that could not read permissions as transient", async () => {
+  const h = runArchivePageGate([
+    { ok: false, completeGrant: false, registered: false, changed: false, error: "registration_failed" },
+    COMPLETE_RESULT,
+  ]);
+  await h.drain();
+  assert.equal(h.context.TRACE_EARNED_PERMISSION_COMPLETE, true);
+  assert.equal(h.sent.length, 2);
+});
+
+test("archive page gate does not wait forever on a reply Safari never delivers", async () => {
+  const replies = [new Promise(() => {}), COMPLETE_RESULT];
+  const sent = [];
+  const h = runArchivePageGate([]);
+  // Replace the scripted runtime with one whose first reply never settles.
+  h.context.browser.runtime.sendMessage = (message) => {
+    sent.push(message);
+    const reply = replies.shift();
+    return reply instanceof Promise ? reply : Promise.resolve(reply);
+  };
+  h.fire("pageshow", { persisted: true });
+  await h.drain();
+  assert.equal(h.context.TRACE_EARNED_PERMISSION_COMPLETE, true);
+  assert.ok(sent.length >= 2);
+});
+
+test("a hung browser call cannot wedge later reconciles until Safari restarts", async () => {
+  const h = createHarness({ origins: [...ORIGINS], config: { ...CONFIG, registrationMode: "static" } });
+  const getAll = h.environment.permissions.getAll;
+  const contains = h.environment.permissions.contains;
+  h.environment.permissions.getAll = () => new Promise(() => {});
+  h.environment.permissions.contains = () => new Promise(() => {});
+  const controller = new EarnedPermissionRegistrationController({
+    ...h.environment,
+    reconcileTimeoutMs: 20,
+  });
+  await assert.rejects(controller.reconcile(), /reconcile_timeout/);
+  h.environment.permissions.getAll = getAll;
+  h.environment.permissions.contains = contains;
+  const recovered = await controller.reconcile();
+  assert.equal(recovered.ok, true);
+  assert.equal(recovered.completeGrant, true);
+});
+
+test("an unreadable permission state is reported as transient, never as a partial grant", async () => {
+  const h = createHarness({ origins: [...ORIGINS], registrations: REGISTRATIONS });
+  h.environment.permissions.getAll = async () => { throw new Error("unavailable"); };
+  h.environment.permissions.contains = async () => { throw new Error("unavailable"); };
+  installEarnedPermissionRegistrationRuntime(h.environment);
+  const response = await h.dispatch({ type: EARNED_PERMISSION_REGISTRATION_MESSAGE });
+  assert.equal(response.ok, false);
+  assert.equal(response.error, "registration_failed");
+  assert.deepEqual(h.unregistered, [], "registered scripts survive a failed permission read");
+});
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+test("a slow static check that finishes after a newer one cannot erase newer onboarding state", async () => {
+  const h = createHarness({ origins: [...ORIGINS], config: { ...CONFIG, registrationMode: "static" } });
+  const get = h.environment.storage.get;
+  const slowRead = deferred();
+  let reads = 0;
+  h.environment.storage.get = (key) => {
+    reads += 1;
+    return reads === 1 ? slowRead.promise : get(key);
+  };
+  const controller = new EarnedPermissionRegistrationController({ ...h.environment, reconcileTimeoutMs: 20 });
+  await assert.rejects(controller.reconcile(), /reconcile_timeout/);
+  const current = await controller.reconcile();
+  assert.equal(current.ok, true);
+  // The popup records completed onboarding after the newer check.
+  h.store[EARNED_PERMISSION_STATE_KEY] = { ...h.store[EARNED_PERMISSION_STATE_KEY], completedAt: 42 };
+  const expected = structuredClone(h.store);
+  // The slow check now sees its stale, empty state and would write it back.
+  slowRead.resolve({});
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(h.store, expected, "the late check changed nothing");
+});
+
+test("a slow dynamic check that finds an incomplete grant late cannot unregister newer scripts", async () => {
+  const h = createHarness({ origins: [...ORIGINS] });
+  const contains = h.environment.permissions.contains;
+  const slowContains = deferred();
+  let calls = 0;
+  h.environment.permissions.contains = (request) => {
+    calls += 1;
+    return calls === 1 ? slowContains.promise : contains(request);
+  };
+  const controller = new EarnedPermissionRegistrationController({ ...h.environment, reconcileTimeoutMs: 20 });
+  await assert.rejects(controller.reconcile(), /reconcile_timeout/);
+  const current = await controller.reconcile();
+  assert.equal(current.registered, true);
+  slowContains.resolve(false);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(h.unregistered, [], "the late incomplete result unregistered nothing");
+  assert.deepEqual(h.registrations.map(({ id }) => id), REGISTRATIONS.map(({ id }) => id));
+});
+
+test("a failed getAll with a positive contains answer is still a complete grant", async () => {
+  const h = createHarness({ origins: [...ORIGINS], config: { ...CONFIG, registrationMode: "static" } });
+  h.environment.permissions.getAll = async () => { throw new Error("unavailable"); };
+  h.environment.permissions.contains = async () => true;
+  const result = await new EarnedPermissionRegistrationController(h.environment).reconcile();
+  assert.equal(result.ok, true);
+  assert.equal(result.completeGrant, true);
 });

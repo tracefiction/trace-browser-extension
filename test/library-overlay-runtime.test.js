@@ -58,6 +58,7 @@ async function renderOverlayListing({
   sessionMode = "legacy",
   earnedPermissionComplete,
   userAgent,
+  beforeEval,
 }) {
   const keysSrc = fs.readFileSync(KEYS_PATH, "utf8");
   const overlaySrc = fs.readFileSync(OVERLAY_PATH, "utf8");
@@ -156,6 +157,7 @@ async function renderOverlayListing({
       return false;
     },
   });
+  if (typeof beforeEval === "function") beforeEval(window);
   window.eval(keysSrc);
   window.eval(overlaySrc);
   window.document.dispatchEvent(
@@ -372,6 +374,92 @@ test("kernel listing re-queries its private projection after a confirmed-save re
     window.document.querySelector("[data-trace-library-overlay-wrap]").textContent || "",
     /Saved/i,
   );
+});
+
+test("kernel listing asks again when the background is waking, including after a back-forward cache restore", async () => {
+  let unanswered = 2;
+  let projectionReads = 0;
+  const window = await renderOverlayListing({
+    sessionMode: "kernel",
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/12345'>Demo Work</a></h4></li></ol></body></html>",
+    cache: { entries: {}, workPreferences: {}, syncVersion: null },
+    sendMessage(message, cb) {
+      if (message.type !== "TRACE_ACCOUNT_PROJECTION_GET") {
+        if (typeof cb === "function") cb({ ok: true });
+        return;
+      }
+      projectionReads += 1;
+      if (unanswered > 0) {
+        unanswered -= 1;
+        // Called as runtime.sendMessage, so `this` is the runtime.
+        this.lastError = { message: "Could not establish connection. Receiving end does not exist." };
+        cb(undefined);
+        this.lastError = null;
+        return;
+      }
+      cb({
+        ok: true,
+        snapshot: { state: "connected", reason: "none", canExecuteAuthenticated: true },
+        projection: { entries: {}, workPreferences: {}, syncVersion: null },
+      });
+    },
+  });
+  assert.equal(window.document.querySelector("button[data-trace-quick-add='ao3:12345']"), null);
+  await sleep(1_400);
+  assert.equal(projectionReads, 3);
+  assert.ok(
+    window.document.querySelector("button[data-trace-quick-add='ao3:12345']"),
+    "the listing renders once the background answers",
+  );
+
+  // Restored from memory while the background is asleep again.
+  unanswered = 1;
+  const event = new window.Event("pageshow");
+  Object.defineProperty(event, "persisted", { value: true });
+  window.dispatchEvent(event);
+  await sleep(450);
+  assert.equal(projectionReads, 5, "one unanswered read on restore, then one retry");
+  assert.ok(window.document.querySelector("button[data-trace-quick-add='ao3:12345']"));
+});
+
+test("kernel listing retry budget belongs to the page visit, not to DOM churn", async () => {
+  let projectionReads = 0;
+  const window = await renderOverlayListing({
+    sessionMode: "kernel",
+    html:
+      "<!doctype html><html><body><ol id='works'><li class='work blurb group'><h4 class='heading'><a href='/works/12345'>Demo Work</a></h4></li></ol></body></html>",
+    cache: { entries: {}, workPreferences: {}, syncVersion: null },
+    beforeEval(window) {
+      // Compress the overlay's retry waits so the whole budget fits the test.
+      const original = window.setTimeout.bind(window);
+      window.setTimeout = (callback, ms, ...args) => original(callback, ms >= 250 ? Math.ceil(ms / 50) : ms, ...args);
+    },
+    sendMessage(message, cb) {
+      if (message.type !== "TRACE_ACCOUNT_PROJECTION_GET") {
+        if (typeof cb === "function") cb({ ok: true });
+        return;
+      }
+      projectionReads += 1;
+      cb(undefined); // the background never answers
+    },
+  });
+  await sleep(400);
+  assert.equal(projectionReads, 5, "the first read plus four retries");
+  const list = window.document.getElementById("works");
+  for (const id of [23456, 34567, 45678]) {
+    const item = window.document.createElement("li");
+    item.className = "work blurb group";
+    item.innerHTML = `<h4 class='heading'><a href='/works/${id}'>Another Work</a></h4>`;
+    list.appendChild(item);
+    await sleep(250);
+  }
+  assert.equal(projectionReads, 8, "each inserted work reads once; none earns a new retry budget");
+  const restored = new window.Event("pageshow");
+  Object.defineProperty(restored, "persisted", { value: true });
+  window.dispatchEvent(restored);
+  await sleep(400);
+  assert.equal(projectionReads, 13, "a back-forward restore is a new visit with a fresh budget");
 });
 
 test("kernel listing allows add and migrated hide commands for unknown works", async () => {

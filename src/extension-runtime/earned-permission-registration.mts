@@ -50,7 +50,12 @@ type Environment = Readonly<{
   storageMode: "callback" | "promise";
   config: EarnedPermissionRegistrationConfig;
   clock?: () => number;
+  /** Upper bound for one reconcile; a hung browser call must not wedge the queue. */
+  reconcileTimeoutMs?: number;
 }>;
+
+const DEFAULT_RECONCILE_TIMEOUT_MS = 5_000;
+const UNKNOWN_PERMISSION_STATE = Symbol("unknown permission state");
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -104,6 +109,7 @@ function storedState(value: unknown): StoredState {
 
 export class EarnedPermissionRegistrationController {
   readonly #environment: Environment;
+  #generation = 0;
   #tail: Promise<EarnedPermissionRegistrationResult> = Promise.resolve({
     ok: false,
     completeGrant: false,
@@ -118,14 +124,44 @@ export class EarnedPermissionRegistrationController {
 
   reconcile(): Promise<EarnedPermissionRegistrationResult> {
     const next = this.#tail.then(
-      () => this.#reconcile(),
-      () => this.#reconcile(),
+      () => this.#bounded(),
+      () => this.#bounded(),
     );
     this.#tail = next;
     return next;
   }
 
-  async #reconcile(): Promise<EarnedPermissionRegistrationResult> {
+  // Safari can leave an extension API call unanswered after it suspends and
+  // wakes the background. Serialized reconciles would then wait behind it for
+  // the rest of the worker's life, and every archive page would stay gated
+  // until Safari restarts. Settle each run so the next one can proceed.
+  //
+  // Settling does not cancel the slow run, so every run carries a generation.
+  // A run applies side effects (state writes, script registration changes)
+  // only while it is still the latest; once it times out or a newer run has
+  // started, whatever it finds later is dropped.
+  #bounded(): Promise<EarnedPermissionRegistrationResult> {
+    this.#generation += 1;
+    const generation = this.#generation;
+    const timeoutMs =
+      this.#environment.reconcileTimeoutMs ?? DEFAULT_RECONCILE_TIMEOUT_MS;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        if (this.#generation === generation) this.#generation += 1;
+        reject(new Error("reconcile_timeout"));
+      }, timeoutMs);
+    });
+    return Promise.race([this.#reconcile(generation), timeout]).finally(() => {
+      clearTimeout(timer);
+    });
+  }
+
+  #assertCurrent(generation: number): void {
+    if (this.#generation !== generation) throw new Error("reconcile_superseded");
+  }
+
+  async #reconcile(generation: number): Promise<EarnedPermissionRegistrationResult> {
     const { config, permissions, runtime, scripting, storageMode, storage } =
       this.#environment;
     const [permissionSnapshot, semanticGrant, stored] = await Promise.all([
@@ -135,7 +171,7 @@ export class EarnedPermissionRegistrationController {
         [],
         runtime,
         storageMode,
-      ).catch(() => Object.freeze({ origins: [] })),
+      ).catch(() => UNKNOWN_PERMISSION_STATE),
       typeof permissions.contains === "function"
         ? callExtensionApi<boolean>(
             permissions as unknown as Record<
@@ -153,11 +189,22 @@ export class EarnedPermissionRegistrationController {
         .then((value) => storedState(value[EARNED_PERMISSION_STATE_KEY]))
         .catch(() => Object.freeze({}) as StoredState),
     ]);
+    // Neither permission read answered: that is not evidence of a partial
+    // grant. Report a transient failure so pages ask again and dynamic
+    // registrations are not removed over a failed read.
+    if (
+      permissionSnapshot === UNKNOWN_PERMISSION_STATE &&
+      typeof semanticGrant !== "boolean"
+    ) {
+      throw new Error("permission_state_unavailable");
+    }
+    const snapshotOrigins =
+      typeof permissionSnapshot === "symbol"
+        ? undefined
+        : permissionSnapshot.origins;
     const granted = new Set<string>(
-      Array.isArray(permissionSnapshot.origins)
-        ? permissionSnapshot.origins.filter(
-            (origin) => typeof origin === "string",
-          )
+      Array.isArray(snapshotOrigins)
+        ? snapshotOrigins.filter((origin) => typeof origin === "string")
         : [],
     );
     const completeGrant =
@@ -185,6 +232,7 @@ export class EarnedPermissionRegistrationController {
         stored.registrationVersion !== config.version ||
         stored.promptResult !== "granted"
       ) {
+        this.#assertCurrent(generation);
         await storage.set({
           [EARNED_PERMISSION_STATE_KEY]: {
             ...stored,
@@ -229,6 +277,7 @@ export class EarnedPermissionRegistrationController {
     if (!completeGrant) {
       const staleIds = configuredIds.filter((id) => currentIds.has(id));
       if (staleIds.length > 0) {
+        this.#assertCurrent(generation);
         await callExtensionApi<void>(
           scripting as unknown as Record<string, (...args: unknown[]) => unknown>,
           "unregisterContentScripts",
@@ -253,6 +302,7 @@ export class EarnedPermissionRegistrationController {
           ? stored.grantAt
           : (this.#environment.clock?.() ?? Date.now());
       if (stored.grantAt !== grantAt || stored.promptResult !== "granted") {
+        this.#assertCurrent(generation);
         await storage.set({
           [EARNED_PERMISSION_STATE_KEY]: {
             ...stored,
@@ -274,6 +324,7 @@ export class EarnedPermissionRegistrationController {
     try {
       const staleIds = configuredIds.filter((id) => currentIds.has(id));
       if (staleIds.length > 0) {
+        this.#assertCurrent(generation);
         await callExtensionApi<void>(
           scripting as unknown as Record<string, (...args: unknown[]) => unknown>,
           "unregisterContentScripts",
@@ -282,6 +333,7 @@ export class EarnedPermissionRegistrationController {
           storageMode,
         );
       }
+      this.#assertCurrent(generation);
       await callExtensionApi<void>(
         scripting as unknown as Record<string, (...args: unknown[]) => unknown>,
         "registerContentScripts",
@@ -307,6 +359,7 @@ export class EarnedPermissionRegistrationController {
         throw new Error("registration_not_confirmed");
       }
       const grantAt = this.#environment.clock?.() ?? Date.now();
+      this.#assertCurrent(generation);
       await storage.set({
         [EARNED_PERMISSION_STATE_KEY]: {
           ...stored,
@@ -360,16 +413,16 @@ export function installEarnedPermissionRegistrationRuntime(
     return true;
   });
   environment.permissions.onAdded?.addListener(() => {
-    void controller.reconcile();
+    void controller.reconcile().catch(() => undefined);
   });
   environment.permissions.onRemoved?.addListener(() => {
-    void controller.reconcile();
+    void controller.reconcile().catch(() => undefined);
   });
   environment.runtime.onInstalled?.addListener((details) => {
     if (details.reason === "install" || details.reason === "update") {
-      void controller.reconcile();
+      void controller.reconcile().catch(() => undefined);
     }
   });
-  void controller.reconcile();
+  void controller.reconcile().catch(() => undefined);
   return controller;
 }

@@ -7081,6 +7081,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   // src/extension-runtime/earned-permission-registration.mts
   var EARNED_PERMISSION_REGISTRATION_MESSAGE = "TRACE_EARNED_PERMISSION_RECONCILE";
   var EARNED_PERMISSION_STATE_KEY = "traceEarnedPermissionOnboardingV1";
+  var DEFAULT_RECONCILE_TIMEOUT_MS = 5e3;
+  var UNKNOWN_PERMISSION_STATE = Symbol("unknown permission state");
   function isRecord20(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
@@ -7115,6 +7117,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   }
   var EarnedPermissionRegistrationController = class {
     #environment;
+    #generation = 0;
     #tail = Promise.resolve({
       ok: false,
       completeGrant: false,
@@ -7127,13 +7130,40 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     reconcile() {
       const next = this.#tail.then(
-        () => this.#reconcile(),
-        () => this.#reconcile()
+        () => this.#bounded(),
+        () => this.#bounded()
       );
       this.#tail = next;
       return next;
     }
-    async #reconcile() {
+    // Safari can leave an extension API call unanswered after it suspends and
+    // wakes the background. Serialized reconciles would then wait behind it for
+    // the rest of the worker's life, and every archive page would stay gated
+    // until Safari restarts. Settle each run so the next one can proceed.
+    //
+    // Settling does not cancel the slow run, so every run carries a generation.
+    // A run applies side effects (state writes, script registration changes)
+    // only while it is still the latest; once it times out or a newer run has
+    // started, whatever it finds later is dropped.
+    #bounded() {
+      this.#generation += 1;
+      const generation = this.#generation;
+      const timeoutMs = this.#environment.reconcileTimeoutMs ?? DEFAULT_RECONCILE_TIMEOUT_MS;
+      let timer;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          if (this.#generation === generation) this.#generation += 1;
+          reject(new Error("reconcile_timeout"));
+        }, timeoutMs);
+      });
+      return Promise.race([this.#reconcile(generation), timeout]).finally(() => {
+        clearTimeout(timer);
+      });
+    }
+    #assertCurrent(generation) {
+      if (this.#generation !== generation) throw new Error("reconcile_superseded");
+    }
+    async #reconcile(generation) {
       const { config, permissions, runtime, scripting, storageMode, storage } = this.#environment;
       const [permissionSnapshot, semanticGrant, stored] = await Promise.all([
         callExtensionApi(
@@ -7142,7 +7172,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           [],
           runtime,
           storageMode
-        ).catch(() => Object.freeze({ origins: [] })),
+        ).catch(() => UNKNOWN_PERMISSION_STATE),
         typeof permissions.contains === "function" ? callExtensionApi(
           permissions,
           "contains",
@@ -7152,10 +7182,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         ).catch(() => null) : Promise.resolve(null),
         storage.get(EARNED_PERMISSION_STATE_KEY).then((value) => storedState(value[EARNED_PERMISSION_STATE_KEY])).catch(() => Object.freeze({}))
       ]);
+      if (permissionSnapshot === UNKNOWN_PERMISSION_STATE && typeof semanticGrant !== "boolean") {
+        throw new Error("permission_state_unavailable");
+      }
+      const snapshotOrigins = typeof permissionSnapshot === "symbol" ? void 0 : permissionSnapshot.origins;
       const granted = new Set(
-        Array.isArray(permissionSnapshot.origins) ? permissionSnapshot.origins.filter(
-          (origin) => typeof origin === "string"
-        ) : []
+        Array.isArray(snapshotOrigins) ? snapshotOrigins.filter((origin) => typeof origin === "string") : []
       );
       const completeGrant = config.origins.length > 0 && (typeof semanticGrant === "boolean" ? semanticGrant : config.origins.every((origin) => granted.has(origin)));
       const staticRegistration = config.registrationMode === "static";
@@ -7171,6 +7203,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         }
         const grantAt = typeof stored.grantAt === "number" ? stored.grantAt : this.#environment.clock?.() ?? Date.now();
         if (stored.grantAt !== grantAt || stored.registrationVersion !== config.version || stored.promptResult !== "granted") {
+          this.#assertCurrent(generation);
           await storage.set({
             [EARNED_PERMISSION_STATE_KEY]: {
               ...stored,
@@ -7212,6 +7245,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (!completeGrant) {
         const staleIds = configuredIds.filter((id) => currentIds.has(id));
         if (staleIds.length > 0) {
+          this.#assertCurrent(generation);
           await callExtensionApi(
             scripting,
             "unregisterContentScripts",
@@ -7232,6 +7266,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (registered && versionCurrent) {
         const grantAt = typeof stored.grantAt === "number" ? stored.grantAt : this.#environment.clock?.() ?? Date.now();
         if (stored.grantAt !== grantAt || stored.promptResult !== "granted") {
+          this.#assertCurrent(generation);
           await storage.set({
             [EARNED_PERMISSION_STATE_KEY]: {
               ...stored,
@@ -7252,6 +7287,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       try {
         const staleIds = configuredIds.filter((id) => currentIds.has(id));
         if (staleIds.length > 0) {
+          this.#assertCurrent(generation);
           await callExtensionApi(
             scripting,
             "unregisterContentScripts",
@@ -7260,6 +7296,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
             storageMode
           );
         }
+        this.#assertCurrent(generation);
         await callExtensionApi(
           scripting,
           "registerContentScripts",
@@ -7281,6 +7318,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           throw new Error("registration_not_confirmed");
         }
         const grantAt = this.#environment.clock?.() ?? Date.now();
+        this.#assertCurrent(generation);
         await storage.set({
           [EARNED_PERMISSION_STATE_KEY]: {
             ...stored,
@@ -7327,17 +7365,17 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return true;
     });
     environment.permissions.onAdded?.addListener(() => {
-      void controller.reconcile();
+      void controller.reconcile().catch(() => void 0);
     });
     environment.permissions.onRemoved?.addListener(() => {
-      void controller.reconcile();
+      void controller.reconcile().catch(() => void 0);
     });
     environment.runtime.onInstalled?.addListener((details) => {
       if (details.reason === "install" || details.reason === "update") {
-        void controller.reconcile();
+        void controller.reconcile().catch(() => void 0);
       }
     });
-    void controller.reconcile();
+    void controller.reconcile().catch(() => void 0);
     return controller;
   }
 
