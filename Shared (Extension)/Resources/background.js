@@ -3521,22 +3521,77 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   };
 
   // src/extension-runtime/reading-activity.mts
+  var READING_ACTIVITY_CLOCK_AHEAD = "READING_ACTIVITY_CLOCK_AHEAD";
+  var MAX_CLOCK_LEAD_MS = 3e5;
+  function readingActivityContext(now, operationId) {
+    const offset = -now.getTimezoneOffset();
+    const absolute = Math.abs(offset);
+    const hours = String(Math.floor(absolute / 60)).padStart(2, "0");
+    const minutes = String(absolute % 60).padStart(2, "0");
+    return {
+      operationId,
+      occurredAt: now.toISOString(),
+      calendarDate: new Date(now.getTime() + offset * 6e4).toISOString().slice(0, 10),
+      timeZone: { kind: "OFFSET", value: `${offset < 0 ? "-" : "+"}${hours}:${minutes}` }
+    };
+  }
+  function readingActivityClockAheadServerTime(body) {
+    if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
+    const { code, server_time: serverTime } = body;
+    if (code !== READING_ACTIVITY_CLOCK_AHEAD || typeof serverTime !== "string") return null;
+    const parsed = new Date(serverTime);
+    return Number.isFinite(parsed.getTime()) ? parsed : null;
+  }
   var ReadingActivityCommands = class {
     #contexts = /* @__PURE__ */ new WeakMap();
+    #reanchored = /* @__PURE__ */ new WeakSet();
+    #now;
+    constructor(now = () => /* @__PURE__ */ new Date()) {
+      this.#now = now;
+    }
     context(command, operationId) {
       const previous = this.#contexts.get(command);
       if (previous) return previous;
-      const now = /* @__PURE__ */ new Date();
-      const offset = -now.getTimezoneOffset();
-      const absolute = Math.abs(offset);
-      const context = {
-        operationId: operationId ?? crypto.randomUUID(),
-        occurredAt: now.toISOString(),
-        calendarDate: new Date(now.getTime() + offset * 6e4).toISOString().slice(0, 10),
-        timeZone: { kind: "OFFSET", value: `${offset < 0 ? "-" : "+"}${String(Math.floor(absolute / 60)).padStart(2, "0")}:${String(absolute % 60).padStart(2, "0")}` }
-      };
+      const context = readingActivityContext(this.#now(), operationId ?? crypto.randomUUID());
       this.#contexts.set(command, context);
       return context;
+    }
+    /**
+     * Re-anchor a command the API rejected as ahead of its clock. The rejected
+     * command committed nothing, so it keeps its operation id; the device offset
+     * at the server instant derives the local date. Returns false when the
+     * command was already re-anchored (including before an authentication
+     * retry) or its context was one the API could have accepted, so an exact
+     * retry still replays.
+     */
+    reanchor(command, serverTime) {
+      const context = this.#contexts.get(command);
+      if (!context || this.#reanchored.has(command) || !(Date.parse(context.occurredAt) > serverTime.getTime() + MAX_CLOCK_LEAD_MS)) {
+        return false;
+      }
+      this.#reanchored.add(command);
+      this.#contexts.set(
+        command,
+        readingActivityContext(new Date(serverTime.getTime()), context.operationId)
+      );
+      return true;
+    }
+    /**
+     * Send one reading command. On a clock-ahead rejection, re-anchor it and
+     * send it exactly once more; `send` rebuilds its body from `context`.
+     */
+    async send(command, send) {
+      const response = await send();
+      if (response?.status !== 400) return response;
+      let body = null;
+      try {
+        body = await response.clone().json();
+      } catch {
+        return response;
+      }
+      const serverTime = readingActivityClockAheadServerTime(body);
+      if (serverTime === null || !this.reanchor(command, serverTime)) return response;
+      return send();
     }
   };
 
@@ -3610,11 +3665,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       };
     }
     async track(credential, command) {
-      const response = await this.#request(this.#trackEndpoint, credential, {
+      const response = await this.#readingCommands.send(command, () => this.#request(this.#trackEndpoint, credential, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...command.payload, readingActivity: this.#readingCommands.context(command) })
-      });
+      }));
       if (response === null) return { kind: "success", value: { kind: "uncertain" } };
       if (response.status === 401 || response.status === 403) return { kind: "auth_rejected" };
       if (response.status === 400) {
@@ -3835,13 +3890,15 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     async mutate(credential, command) {
       const url = command.kind === "entry_patch" ? `${this.#libraryEndpoint}/${encodeURIComponent(command.entryId)}` : this.#preferenceEndpoint;
-      const response = await this.#request(url, credential, {
+      const reading = command.kind === "entry_patch" && (command.patch.progress !== void 0 || command.patch.status !== void 0);
+      const send = () => this.#request(url, credential, {
         method: command.kind === "entry_patch" ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(
-          command.kind === "entry_patch" ? command.patch : { key: command.workKey, hidden: command.hidden }
+          command.kind === "entry_patch" ? reading ? { ...command.patch, readingActivity: this.#readingCommands.context(command) } : command.patch : { key: command.workKey, hidden: command.hidden }
         )
       });
+      const response = reading ? await this.#readingCommands.send(command, send) : await send();
       if (response === null) return { kind: "success", value: { kind: "uncertain" } };
       if (response.status === 401 || response.status === 403) return { kind: "auth_rejected" };
       if (response.status === 400 || response.status === 404) {
@@ -3866,7 +3923,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       };
     }
     async qualifyFinish(credential, command) {
-      const response = await this.#request(this.#finishEndpoint, credential, {
+      const send = () => this.#request(this.#finishEndpoint, credential, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -3889,6 +3946,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           } : {}
         })
       });
+      const response = command.state === "resolved" ? await this.#readingCommands.send(command, send) : await send();
       if (response === null) return { kind: "success", value: { kind: "uncertain" } };
       if (response.status === 401 || response.status === 403) return { kind: "auth_rejected" };
       if (response.status === 400 || response.status === 404 || response.status === 409) {

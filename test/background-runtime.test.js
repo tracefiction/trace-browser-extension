@@ -264,6 +264,7 @@ globalThis.__testHooks = {
   handleSetReaderStatus,
   handlePatchLibraryEntry,
   handleFinishQualificationSignal,
+  readingActivityCommand,
   syncAo3SavedFilters,
   scheduleAo3SavedFiltersSync,
   sanitizeAo3SavedFilterPresets,
@@ -5406,3 +5407,307 @@ function readingCommandBody(serialized) {
   assert.equal(readingActivity.timeZone.kind,"OFFSET");
   return body;
 }
+
+// =======================================================
+// Reading activity write context (legacy owner)
+// =======================================================
+
+const READING_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function assertReadingContext(context) {
+  assert.deepEqual(Object.keys(context).sort(), [
+    "calendarDate", "occurredAt", "operationId", "timeZone",
+  ]);
+  assert.match(context.operationId, READING_UUID);
+  assert.equal(new Date(context.occurredAt).toISOString(), context.occurredAt);
+  assert.equal(context.timeZone.kind, "OFFSET");
+  const [, sign, hours, minutes] = /^([+-])(\d{2}):(\d{2})$/.exec(context.timeZone.value);
+  const offset = (sign === "-" ? -1 : 1) * (Number(hours) * 60 + Number(minutes));
+  assert.ok(Math.abs(offset) <= 14 * 60);
+  assert.equal(
+    new Date(Date.parse(context.occurredAt) + offset * 60_000).toISOString().slice(0, 10),
+    context.calendarDate,
+  );
+}
+
+function clockAheadResponse(serverTime) {
+  return createResponse({
+    ok: false,
+    status: 400,
+    json: {
+      error: "Reading occurrence time is ahead of the server clock",
+      code: "READING_ACTIVITY_CLOCK_AHEAD",
+      server_time: serverTime,
+      error_id: "e",
+    },
+  });
+}
+
+test("legacy reading context derives the local date from the instant's own offset", () => {
+  const h = createBackgroundHarness();
+  const id = "00000000-0000-4000-8000-0000000000bb";
+  for (const [iso, offset, calendarDate, value] of [
+    ["2026-09-27T23:59:59.999Z", 0, "2026-09-27", "+00:00"],
+    ["2026-09-27T23:30:00.000Z", 60, "2026-09-28", "+01:00"],
+    ["2026-09-28T00:30:00.000Z", -60, "2026-09-27", "-01:00"],
+    ["2026-09-27T10:00:00.000Z", 840, "2026-09-28", "+14:00"],
+    ["2026-09-27T09:59:59.999Z", 840, "2026-09-27", "+14:00"],
+    ["2026-09-27T13:59:59.999Z", -840, "2026-09-26", "-14:00"],
+    ["2026-09-27T14:00:00.000Z", -840, "2026-09-27", "-14:00"],
+    ["2026-09-27T18:15:00.000Z", 345, "2026-09-28", "+05:45"],
+    ["2026-09-28T02:29:59.999Z", -150, "2026-09-27", "-02:30"],
+  ]) {
+    const now = new Date(iso);
+    now.getTimezoneOffset = () => -offset;
+    assert.deepEqual(plainJson(h.hooks.readingActivityCommand(now, id)), {
+      operationId: id,
+      occurredAt: iso,
+      calendarDate,
+      timeZone: { kind: "OFFSET", value },
+    }, `${iso} at ${value}`);
+  }
+  assertReadingContext(h.hooks.readingActivityCommand());
+});
+
+test("legacy status-only writes carry the reading context; rating-only does not", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000901";
+  const bodies = [];
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-context" },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith(`/api/extension/library/${entryId}`)) {
+        bodies.push(JSON.parse(init.body));
+        return createResponse({ json: { data: { entry_id: entryId } } });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.hooks.setBearerToken("token-context");
+
+  for (const msg of [
+    { type: "TRACE_SET_READER_STATUS", payload: { entryId, status: "PAUSED" } },
+    { type: "TRACE_PATCH_LIBRARY_ENTRY", payload: { entryId, patch: { status: "DROPPED" } } },
+    { type: "TRACE_PATCH_LIBRARY_ENTRY", payload: { entryId, patch: { rating: 3 } } },
+    {
+      type: "TRACE_PATCH_LIBRARY_ENTRY",
+      payload: { entryId, patch: { story_snapshot: { work_status_override: "complete" } } },
+    },
+  ]) {
+    const response = await h.dispatchMessage(msg);
+    assert.equal(response.ok, true, JSON.stringify(response));
+  }
+
+  assert.equal(bodies.length, 4);
+  const [statusOnly, patchStatus, rating, override] = bodies;
+  assertReadingContext(statusOnly.readingActivity);
+  assertReadingContext(patchStatus.readingActivity);
+  assert.notEqual(statusOnly.readingActivity.operationId, patchStatus.readingActivity.operationId);
+  assert.equal(statusOnly.status, "PAUSED");
+  assert.equal(patchStatus.status, "DROPPED");
+  assert.deepEqual(rating, { rating: 3 });
+  assert.deepEqual(override, { story_snapshot: { work_status_override: "complete" } });
+});
+
+test("legacy library PATCH re-anchors a clock-ahead rejection exactly once", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000902";
+  const serverTime = new Date(Date.now() - 10 * 60_000).toISOString();
+  const bodies = [];
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-clock" },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith(`/api/extension/library/${entryId}`)) {
+        bodies.push(JSON.parse(init.body));
+        // A second rejection reports an even earlier clock; it must not be
+        // re-anchored again.
+        return clockAheadResponse(bodies.length === 1 ? serverTime : new Date(0).toISOString());
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.hooks.setBearerToken("token-clock");
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_PATCH_LIBRARY_ENTRY",
+    payload: { entryId, patch: { progress: { unit: "CHAPTER", value: 4, total: 9 } } },
+  });
+
+  assert.deepEqual(plainJson(response), { ok: false, error: "http_400" });
+  assert.equal(bodies.length, 2);
+  const [first, second] = bodies.map((body) => body.readingActivity);
+  assertReadingContext(second);
+  assert.equal(second.operationId, first.operationId);
+  assert.equal(second.occurredAt, serverTime);
+  assert.deepEqual(bodies[1].progress, { unit: "CHAPTER", value: 4, total: 9 });
+});
+
+test("legacy set-reader-status re-anchors to server time and then succeeds", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000903";
+  const serverTime = new Date(Date.now() - 10 * 60_000).toISOString();
+  const bodies = [];
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-status-clock" },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith(`/api/extension/library/${entryId}`)) {
+        bodies.push(JSON.parse(init.body));
+        return bodies.length === 1
+          ? clockAheadResponse(serverTime)
+          : createResponse({ json: { data: { entry_id: entryId } } });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.hooks.setBearerToken("token-status-clock");
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_SET_READER_STATUS",
+    payload: { entryId, status: "FINISHED" },
+  });
+
+  assert.equal(response.ok, true, JSON.stringify(response));
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[1].readingActivity.operationId, bodies[0].readingActivity.operationId);
+  assert.equal(bodies[1].readingActivity.occurredAt, serverTime);
+  assert.equal(bodies[1].status, "FINISHED");
+});
+
+test("legacy non-clock 400 responses are not retried", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000904";
+  let calls = 0;
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-400" },
+    fetchImpl: async (url) => {
+      if (!String(url).endsWith(`/api/extension/library/${entryId}`)) {
+        return createResponse({ ok: false, status: 404 });
+      }
+      calls += 1;
+      return createResponse({
+        ok: false,
+        status: 400,
+        json: { code: "READING_ACTIVITY_CALENDAR_INVALID" },
+      });
+    },
+  });
+  h.hooks.setBearerToken("token-400");
+  const response = await h.dispatchMessage({
+    type: "TRACE_SET_READER_STATUS",
+    payload: { entryId, status: "READING" },
+  });
+  assert.equal(response.ok, false);
+  assert.equal(calls, 1);
+});
+
+test("legacy quick add keeps the re-anchored command through the auth retry", async () => {
+  const serverTime = new Date(Date.now() - 10 * 60_000).toISOString();
+  const bodies = [];
+  const h = createBackgroundHarness({
+    sendNativeMessageImpl(message, callback) {
+      if (
+        message.type === "TRACE_IOS_AUTH_TOKEN_REQUEST" &&
+        message.reason === "quick_add_auth_failure"
+      ) {
+        callback({ ok: true, token: "native-clock-token" });
+        return;
+      }
+      callback({ ok: false, error: "missing_token" });
+    },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/api/extension/account")) {
+        return createResponse({ json: { pro: false, library_count: 0 } });
+      }
+      if (String(url).endsWith("/api/extension/track")) {
+        bodies.push(JSON.parse(init.body));
+        if (bodies.length === 1) return clockAheadResponse(serverTime);
+        if (bodies.length === 2) return createResponse({ ok: false, status: 401 });
+        return clockAheadResponse(new Date(0).toISOString());
+      }
+      if (String(url).endsWith("/api/extension/library-overlay")) {
+        return createResponse({
+          json: { success: true, data: { entries: {}, syncVersion: "clock-v1" } },
+        });
+      }
+      return createResponse({ ok: false, status: 404 });
+    },
+  });
+  h.hooks.setBearerToken("stale-clock-token");
+
+  const response = await h.dispatchMessage(
+    {
+      type: "TRACE_QUICK_ADD",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: { t: "Test", u: "https://archiveofourown.org/works/104" },
+      },
+    },
+    { tab: { id: 90 } },
+  );
+
+  assert.equal(response.ok, false);
+  assert.equal(bodies.length, 3);
+  const [first, second, third] = bodies.map((body) => body.readingActivity);
+  assertReadingContext(first);
+  assert.equal(second.operationId, first.operationId);
+  assert.equal(second.occurredAt, serverTime);
+  assert.deepEqual(third, second);
+});
+
+test("legacy resolved finish re-anchors once and keeps its transport retry", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000905";
+  const serverTime = new Date(Date.now() - 10 * 60_000).toISOString();
+  const entry = {
+    status: "COMPLETED",
+    readerStatus: "COMPLETED",
+    canonicalReaderStatus: "FINISHED",
+    entryId,
+    chapters: { current: 5, total: 5 },
+  };
+  const bodies = [];
+  const h = createBackgroundHarness({
+    storageState: { authToken: "token-finish-clock" },
+    fetchImpl: async (url, init) => {
+      if (!String(url).endsWith("/api/extension/finish-qualification")) {
+        return createResponse({ ok: false, status: 404 });
+      }
+      bodies.push(JSON.parse(init.body));
+      if (bodies.length === 1) return clockAheadResponse(serverTime);
+      if (bodies.length === 2) return createResponse({ ok: false, status: 503 });
+      return createResponse({
+        json: {
+          success: true,
+          data: {
+            state: "resolved",
+            eventId: null,
+            operationId: bodies.at(-1).operationId,
+            workKey: "ao3:905",
+            entry,
+            syncVersion: "2026-09-27T08:00:00.000Z",
+          },
+        },
+      });
+    },
+  });
+  h.hooks.setBearerToken("token-finish-clock");
+
+  const response = await h.dispatchMessage({
+    type: "TRACE_FINISH_QUALIFICATION_SIGNAL",
+    payload: {
+      entryId,
+      workKey: "ao3:905",
+      source: "ao3",
+      chapter: 5,
+      total: 5,
+      state: "resolved",
+      workStatus: "complete",
+      resolutionSource: "source",
+    },
+  });
+
+  assert.equal(response.ok, true, JSON.stringify(response));
+  assert.equal(bodies.length, 3);
+  assert.match(bodies[0].operationId, READING_UUID);
+  assert.ok(bodies.every((body) => body.operationId === bodies[0].operationId));
+  assert.ok(bodies.every((body) => body.readingActivity.operationId === undefined));
+  assert.equal(bodies[1].readingActivity.occurredAt, serverTime);
+  assert.deepEqual(bodies[2], bodies[1]);
+  assertReadingContext({ operationId: bodies[0].operationId, ...bodies[1].readingActivity });
+});

@@ -58,15 +58,22 @@ export class LibraryCommandApi implements LibraryCommandApiPort {
     const url = command.kind === "entry_patch"
       ? `${this.#libraryEndpoint}/${encodeURIComponent(command.entryId)}`
       : this.#preferenceEndpoint;
-    const response = await this.#request(url, credential, {
+    // Progress and status changes are reading commands; rating, work-status
+    // overrides and preferences keep their plain bodies.
+    const reading = command.kind === "entry_patch" &&
+      (command.patch.progress !== undefined || command.patch.status !== undefined);
+    const send = () => this.#request(url, credential, {
       method: command.kind === "entry_patch" ? "PATCH" : "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(
         command.kind === "entry_patch"
-          ? command.patch
+          ? reading
+            ? { ...command.patch, readingActivity: this.#readingCommands.context(command) }
+            : command.patch
           : { key: command.workKey, hidden: command.hidden },
       ),
     });
+    const response = reading ? await this.#readingCommands.send(command, send) : await send();
     if (response === null) return { kind: "success", value: { kind: "uncertain" } };
     if (response.status === 401 || response.status === 403) return { kind: "auth_rejected" };
     if (response.status === 400 || response.status === 404) {
@@ -104,7 +111,7 @@ export class LibraryCommandApi implements LibraryCommandApiPort {
     credential: string,
     command: FinishQualificationOperation,
   ): Promise<AuthenticatedEffectResult<FinishQualificationOutcome>> {
-    const response = await this.#request(this.#finishEndpoint, credential, {
+    const send = () => this.#request(this.#finishEndpoint, credential, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -126,6 +133,10 @@ export class LibraryCommandApi implements LibraryCommandApiPort {
           : {}),
       }),
     });
+    // An open prompt is observational and carries no reading context.
+    const response = command.state === "resolved"
+      ? await this.#readingCommands.send(command, send)
+      : await send();
     if (response === null) return { kind: "success", value: { kind: "uncertain" } };
     if (response.status === 401 || response.status === 403) return { kind: "auth_rejected" };
     if (response.status === 400 || response.status === 404 || response.status === 409) {
