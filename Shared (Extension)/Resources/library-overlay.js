@@ -3985,10 +3985,7 @@ function traceRefreshPageTokens() {
     return false;
   }
 
-  function scheduleRun(delayMs, isProjectionRetry) {
-    // A fresh signal (pageshow, focus, a storage change) earns a fresh round
-    // of projection retries.
-    if (isProjectionRetry !== true) projectionRetryAttempt = 0;
+  function scheduleRun(delayMs) {
     var delay = typeof delayMs === "number" ? delayMs : 120;
     if (rerunTimer) {
       clearTimeout(rerunTimer);
@@ -4101,6 +4098,8 @@ function traceRefreshPageTokens() {
   // Safari may not answer while it wakes the extension background, including
   // right after a back-forward cache restore. Ask again a few times rather
   // than leaving the listing bare until the next focus or storage change.
+  // The budget belongs to a page visit: only a load or a back-forward
+  // restore starts a new one, never DOM churn or other reruns.
   var PROJECTION_RETRY_DELAYS_MS = [250, 1000, 3000, 8000];
   var projectionRetryAttempt = 0;
 
@@ -4108,7 +4107,7 @@ function traceRefreshPageTokens() {
     if (projectionRetryAttempt >= PROJECTION_RETRY_DELAYS_MS.length) return;
     var delay = PROJECTION_RETRY_DELAYS_MS[projectionRetryAttempt];
     projectionRetryAttempt += 1;
-    scheduleRun(delay, true);
+    scheduleRun(delay);
   }
 
   function run() {
@@ -4175,6 +4174,7 @@ function traceRefreshPageTokens() {
 
     try {
       window.addEventListener("pageshow", function () {
+        projectionRetryAttempt = 0;
         scheduleRun(60);
       });
       window.addEventListener("focus", function () {

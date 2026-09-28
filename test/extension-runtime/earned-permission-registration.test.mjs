@@ -508,3 +508,59 @@ test("an unreadable permission state is reported as transient, never as a partia
   assert.equal(response.error, "registration_failed");
   assert.deepEqual(h.unregistered, [], "registered scripts survive a failed permission read");
 });
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+test("a slow static check that finishes after a newer one cannot erase newer onboarding state", async () => {
+  const h = createHarness({ origins: [...ORIGINS], config: { ...CONFIG, registrationMode: "static" } });
+  const get = h.environment.storage.get;
+  const slowRead = deferred();
+  let reads = 0;
+  h.environment.storage.get = (key) => {
+    reads += 1;
+    return reads === 1 ? slowRead.promise : get(key);
+  };
+  const controller = new EarnedPermissionRegistrationController({ ...h.environment, reconcileTimeoutMs: 20 });
+  await assert.rejects(controller.reconcile(), /reconcile_timeout/);
+  const current = await controller.reconcile();
+  assert.equal(current.ok, true);
+  // The popup records completed onboarding after the newer check.
+  h.store[EARNED_PERMISSION_STATE_KEY] = { ...h.store[EARNED_PERMISSION_STATE_KEY], completedAt: 42 };
+  const expected = structuredClone(h.store);
+  // The slow check now sees its stale, empty state and would write it back.
+  slowRead.resolve({});
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(h.store, expected, "the late check changed nothing");
+});
+
+test("a slow dynamic check that finds an incomplete grant late cannot unregister newer scripts", async () => {
+  const h = createHarness({ origins: [...ORIGINS] });
+  const contains = h.environment.permissions.contains;
+  const slowContains = deferred();
+  let calls = 0;
+  h.environment.permissions.contains = (request) => {
+    calls += 1;
+    return calls === 1 ? slowContains.promise : contains(request);
+  };
+  const controller = new EarnedPermissionRegistrationController({ ...h.environment, reconcileTimeoutMs: 20 });
+  await assert.rejects(controller.reconcile(), /reconcile_timeout/);
+  const current = await controller.reconcile();
+  assert.equal(current.registered, true);
+  slowContains.resolve(false);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(h.unregistered, [], "the late incomplete result unregistered nothing");
+  assert.deepEqual(h.registrations.map(({ id }) => id), REGISTRATIONS.map(({ id }) => id));
+});
+
+test("a failed getAll with a positive contains answer is still a complete grant", async () => {
+  const h = createHarness({ origins: [...ORIGINS], config: { ...CONFIG, registrationMode: "static" } });
+  h.environment.permissions.getAll = async () => { throw new Error("unavailable"); };
+  h.environment.permissions.contains = async () => true;
+  const result = await new EarnedPermissionRegistrationController(h.environment).reconcile();
+  assert.equal(result.ok, true);
+  assert.equal(result.completeGrant, true);
+});

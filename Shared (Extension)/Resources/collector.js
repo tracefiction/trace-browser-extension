@@ -64,9 +64,16 @@ function traceUpgradeUrl() {
 // callback. Keep every collector command on this boundary so feature code
 // never has to infer which API shape is active.
 // A missing reply arrives as null. The second argument says why, when that is
-// known: `undelivered` only when the browser reports that no background was
-// listening (so nothing ran), `timedOut` when the background may still be
-// working on it. Any other failure is treated as an unknown outcome.
+// known: `undelivered` only when the message provably never reached a
+// listener, `timedOut` when the background may still be working on it. Any
+// other failure is treated as an unknown outcome and must not be re-sent.
+//
+// Provably undelivered: sendMessage threw synchronously (nothing was handed
+// to the browser), or Chromium reported that no receiver exists. WebKit's
+// implementation wakes the background before dispatching and resolves with
+// no value both when nothing listens and when a listener never replied (for
+// example because the background exited mid-command), so an empty Safari
+// reply is not proof that nothing ran and is never classed as undelivered.
 var COLLECTOR_UNDELIVERED = Object.freeze({ undelivered: true, timedOut: false });
 var COLLECTOR_TIMED_OUT = Object.freeze({ undelivered: false, timedOut: true });
 var COLLECTOR_ANSWERED = Object.freeze({ undelivered: false, timedOut: false });
@@ -101,17 +108,19 @@ function sendCollectorMessage(message, onResponse, timeoutMs) {
     }, timeout);
   };
   if (typeof globalThis.browser !== "undefined" && ext === globalThis.browser) {
+    var pending;
     try {
-      var pending = ext.runtime.sendMessage(message);
-      armTimeout();
-      Promise.resolve(pending).then(function (response) {
-        finish(response);
-      }, function (error) {
-        finish(null, collectorDeliveryFromError(error));
-      });
-    } catch (error) {
-      finish(null, collectorDeliveryFromError(error));
+      pending = ext.runtime.sendMessage(message);
+    } catch (_) {
+      finish(null, COLLECTOR_UNDELIVERED);
+      return;
     }
+    armTimeout();
+    Promise.resolve(pending).then(function (response) {
+      finish(response);
+    }, function (error) {
+      finish(null, collectorDeliveryFromError(error));
+    });
     return;
   }
   try {
@@ -120,10 +129,11 @@ function sendCollectorMessage(message, onResponse, timeoutMs) {
       if (lastError) finish(null, collectorDeliveryFromError(lastError));
       else finish(response);
     });
-    armTimeout();
-  } catch (error) {
-    finish(null, collectorDeliveryFromError(error));
+  } catch (_) {
+    finish(null, COLLECTOR_UNDELIVERED);
+    return;
   }
+  armTimeout();
 }
 
 function sendCollectorMessageBestEffort(message) {
@@ -3218,19 +3228,31 @@ var popupPageReconnectTimer = null;
 var popupPageStopped = false;
 var popupPageCallbacks = new Map();
 // A port Safari drops straight away (background asleep or restarting) backs
-// off instead of waking the background every second; traffic resets it.
+// off instead of waking the background every second, and gives up after a
+// bounded number of attempts. A hidden page does not reconnect at all; the
+// reader returning (visibility, focus, pageshow) starts a fresh round. A port
+// that stayed up, or carried traffic, resets the backoff.
 var POPUP_PAGE_RECONNECT_BASE_MS = 1_000;
 var POPUP_PAGE_RECONNECT_MAX_MS = 30_000;
+var POPUP_PAGE_RECONNECT_MAX_ATTEMPTS = 6;
+var POPUP_PAGE_PORT_STABLE_MS = 5_000;
 var popupPageReconnectDelayMs = POPUP_PAGE_RECONNECT_BASE_MS;
+var popupPageReconnectAttempts = 0;
+var popupPagePortOpenedAt = 0;
+function resetPopupPageReconnectBackoff() {
+  popupPageReconnectDelayMs = POPUP_PAGE_RECONNECT_BASE_MS;
+  popupPageReconnectAttempts = 0;
+}
 function connectPopupPagePort() {
   if (!KERNEL_SESSION_ACTIVE || TRACE_ACTIVE_TAB_PROBE_MODE || popupPageStopped ||
       popupPagePort || !ext.runtime.connect || window.top !== window) return;
   try {
     var port = ext.runtime.connect({ name: "trace-popup-page-v1" });
     popupPagePort = port;
+    popupPagePortOpenedAt = Date.now();
     port.onMessage.addListener(function (envelope) {
       if (popupPagePort !== port || !envelope || !Number.isSafeInteger(envelope.id)) return;
-      popupPageReconnectDelayMs = POPUP_PAGE_RECONNECT_BASE_MS;
+      resetPopupPageReconnectBackoff();
       if (envelope.kind === "commandResult") {
         var callback = popupPageCallbacks.get(envelope.id);
         popupPageCallbacks.delete(envelope.id);
@@ -3260,6 +3282,9 @@ function connectPopupPagePort() {
     port.onDisconnect.addListener(function () {
       if (popupPagePort !== port) return;
       popupPagePort = null;
+      if (Date.now() - popupPagePortOpenedAt >= POPUP_PAGE_PORT_STABLE_MS) {
+        resetPopupPageReconnectBackoff();
+      }
       for (var callback of popupPageCallbacks.values()) callback({ ok: false });
       popupPageCallbacks.clear();
       schedulePopupPageReconnect();
@@ -3268,13 +3293,25 @@ function connectPopupPagePort() {
 }
 function schedulePopupPageReconnect() {
   if (popupPageStopped || popupPageReconnectTimer !== null) return;
+  if (document.hidden || popupPageReconnectAttempts >= POPUP_PAGE_RECONNECT_MAX_ATTEMPTS) return;
   var delayMs = popupPageReconnectDelayMs;
+  popupPageReconnectAttempts += 1;
   popupPageReconnectDelayMs = Math.min(delayMs * 2, POPUP_PAGE_RECONNECT_MAX_MS);
   popupPageReconnectTimer = setTimeout(function () {
     popupPageReconnectTimer = null;
+    if (document.hidden) return;
     connectPopupPagePort();
   }, delayMs);
 }
+function resumePopupPagePort() {
+  if (document.hidden || popupPageStopped || popupPagePort) return;
+  clearTimeout(popupPageReconnectTimer);
+  popupPageReconnectTimer = null;
+  resetPopupPageReconnectBackoff();
+  connectPopupPagePort();
+}
+document.addEventListener("visibilitychange", resumePopupPagePort);
+window.addEventListener("focus", resumePopupPagePort);
 window.addEventListener("pagehide", function () {
   popupPageStopped = true;
   clearTimeout(popupPageReconnectTimer);
@@ -3297,7 +3334,7 @@ globalThis.__traceCollectorReconnect = function (replacePort) {
     try { if (oldPort) oldPort.disconnect(); } catch (_) {}
   }
   popupPageStopped = false;
-  popupPageReconnectDelayMs = POPUP_PAGE_RECONNECT_BASE_MS;
+  resetPopupPageReconnectBackoff();
   connectPopupPagePort();
 };
 // A back-forward cache restore resumes this script without re-running it. A

@@ -109,6 +109,7 @@ function storedState(value: unknown): StoredState {
 
 export class EarnedPermissionRegistrationController {
   readonly #environment: Environment;
+  #generation = 0;
   #tail: Promise<EarnedPermissionRegistrationResult> = Promise.resolve({
     ok: false,
     completeGrant: false,
@@ -134,22 +135,33 @@ export class EarnedPermissionRegistrationController {
   // wakes the background. Serialized reconciles would then wait behind it for
   // the rest of the worker's life, and every archive page would stay gated
   // until Safari restarts. Settle each run so the next one can proceed.
+  //
+  // Settling does not cancel the slow run, so every run carries a generation.
+  // A run applies side effects (state writes, script registration changes)
+  // only while it is still the latest; once it times out or a newer run has
+  // started, whatever it finds later is dropped.
   #bounded(): Promise<EarnedPermissionRegistrationResult> {
+    this.#generation += 1;
+    const generation = this.#generation;
     const timeoutMs =
       this.#environment.reconcileTimeoutMs ?? DEFAULT_RECONCILE_TIMEOUT_MS;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new Error("reconcile_timeout")),
-        timeoutMs,
-      );
+      timer = setTimeout(() => {
+        if (this.#generation === generation) this.#generation += 1;
+        reject(new Error("reconcile_timeout"));
+      }, timeoutMs);
     });
-    return Promise.race([this.#reconcile(), timeout]).finally(() => {
+    return Promise.race([this.#reconcile(generation), timeout]).finally(() => {
       clearTimeout(timer);
     });
   }
 
-  async #reconcile(): Promise<EarnedPermissionRegistrationResult> {
+  #assertCurrent(generation: number): void {
+    if (this.#generation !== generation) throw new Error("reconcile_superseded");
+  }
+
+  async #reconcile(generation: number): Promise<EarnedPermissionRegistrationResult> {
     const { config, permissions, runtime, scripting, storageMode, storage } =
       this.#environment;
     const [permissionSnapshot, semanticGrant, stored] = await Promise.all([
@@ -220,6 +232,7 @@ export class EarnedPermissionRegistrationController {
         stored.registrationVersion !== config.version ||
         stored.promptResult !== "granted"
       ) {
+        this.#assertCurrent(generation);
         await storage.set({
           [EARNED_PERMISSION_STATE_KEY]: {
             ...stored,
@@ -264,6 +277,7 @@ export class EarnedPermissionRegistrationController {
     if (!completeGrant) {
       const staleIds = configuredIds.filter((id) => currentIds.has(id));
       if (staleIds.length > 0) {
+        this.#assertCurrent(generation);
         await callExtensionApi<void>(
           scripting as unknown as Record<string, (...args: unknown[]) => unknown>,
           "unregisterContentScripts",
@@ -288,6 +302,7 @@ export class EarnedPermissionRegistrationController {
           ? stored.grantAt
           : (this.#environment.clock?.() ?? Date.now());
       if (stored.grantAt !== grantAt || stored.promptResult !== "granted") {
+        this.#assertCurrent(generation);
         await storage.set({
           [EARNED_PERMISSION_STATE_KEY]: {
             ...stored,
@@ -309,6 +324,7 @@ export class EarnedPermissionRegistrationController {
     try {
       const staleIds = configuredIds.filter((id) => currentIds.has(id));
       if (staleIds.length > 0) {
+        this.#assertCurrent(generation);
         await callExtensionApi<void>(
           scripting as unknown as Record<string, (...args: unknown[]) => unknown>,
           "unregisterContentScripts",
@@ -317,6 +333,7 @@ export class EarnedPermissionRegistrationController {
           storageMode,
         );
       }
+      this.#assertCurrent(generation);
       await callExtensionApi<void>(
         scripting as unknown as Record<string, (...args: unknown[]) => unknown>,
         "registerContentScripts",
@@ -342,6 +359,7 @@ export class EarnedPermissionRegistrationController {
         throw new Error("registration_not_confirmed");
       }
       const grantAt = this.#environment.clock?.() ?? Date.now();
+      this.#assertCurrent(generation);
       await storage.set({
         [EARNED_PERMISSION_STATE_KEY]: {
           ...stored,

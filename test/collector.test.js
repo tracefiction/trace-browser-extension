@@ -1642,6 +1642,13 @@ function createStoryAutoTrackPendingHarness(options = {}) {
         }
         if (msg.type === "TRACE_AUTO_TRACK") {
           autoTrackCallback = cb;
+          if (typeof cb !== "function" && Array.isArray(options.autoTrackPromiseReplies)) {
+            const reply = options.autoTrackPromiseReplies.shift();
+            if (reply && reply.throw) throw new Error(reply.throw);
+            if (reply && reply.reject) return Promise.reject(new Error(reply.reject));
+            if (reply && Object.hasOwn(reply, "resolve")) return Promise.resolve(reply.resolve);
+            return Promise.resolve(options.autoTrackResponse || { ok: true });
+          }
           if (Array.isArray(options.autoTrackLastErrors) && options.autoTrackLastErrors.length > 0) {
             chrome.runtime.lastError = { message: options.autoTrackLastErrors.shift() };
             cb();
@@ -7390,6 +7397,146 @@ test("a story save with an unknown outcome is never re-sent automatically", asyn
   await delay(1_100);
   assert.equal(saves(), initial, "no delayed re-send of a save that may have landed");
   assert.match(h.dom.window.document.querySelector("[data-trace-story-handle]").textContent || "", /Error|Reconnect|Try/i);
+  h.dom.window.close();
+});
+
+const NO_RECEIVER = "Could not establish connection. Receiving end does not exist.";
+
+function autoTrackSends(h) {
+  return h.sent.filter(message => message.type === "TRACE_AUTO_TRACK").length;
+}
+
+test("browser.* promise path: a save the browser provably never dispatched is re-sent", async () => {
+  for (const refusal of [{ throw: "sendMessage unavailable" }, { reject: NO_RECEIVER }]) {
+    const h = createStoryAutoTrackPendingHarness({
+      scopedStorageContext: false,
+      autoTrackPromiseReplies: [refusal],
+    });
+    await delay(50);
+    assert.equal(autoTrackSends(h), 1, JSON.stringify(refusal));
+    await delay(1_100);
+    assert.equal(autoTrackSends(h), 2, `${JSON.stringify(refusal)} is re-sent once the wait passes`);
+    h.dom.window.close();
+  }
+});
+
+test("browser.* promise path: an empty reply or an unrecognised rejection is never re-sent", async () => {
+  // WebKit resolves with no value both when nothing listens and when a
+  // listener never replied, so an empty reply is not proof nothing ran.
+  for (const outcome of [{ resolve: undefined }, { reject: "The operation couldn't be completed." }]) {
+    const h = createStoryAutoTrackPendingHarness({
+      scopedStorageContext: false,
+      autoTrackPromiseReplies: [outcome, outcome, outcome, outcome],
+    });
+    await delay(50);
+    const initial = autoTrackSends(h);
+    assert.ok(initial >= 1);
+    await delay(1_100);
+    assert.equal(autoTrackSends(h), initial, `${JSON.stringify(outcome)} is not re-sent`);
+    h.dom.window.close();
+  }
+});
+
+test("a timed-out story save is never re-sent", async () => {
+  const h = createStoryAutoTrackPendingHarness({
+    holdAutoTrack: true,
+    mutateDom(dom) {
+      // Shorten only the collector's reply deadline.
+      const original = dom.window.setTimeout.bind(dom.window);
+      dom.window.setTimeout = (callback, ms, ...args) => original(callback, ms === 20_000 ? 10 : ms, ...args);
+    },
+  });
+  await delay(1_200);
+  assert.equal(autoTrackSends(h), 1);
+  assert.match(h.dom.window.document.querySelector("[data-trace-story-handle]").textContent || "", /Error|Reconnect|Try/i);
+  h.dom.window.close();
+});
+
+test("re-sends of a refused story save stop at the cap", async () => {
+  const h = createStoryAutoTrackPendingHarness({ autoTrackLastErrors: Array(6).fill(NO_RECEIVER) });
+  await delay(4_300);
+  assert.equal(autoTrackSends(h), 3, "the first send plus two re-sends");
+  await delay(3_200);
+  assert.equal(autoTrackSends(h), 3, "no further re-send after the cap");
+  h.dom.window.close();
+});
+
+function setHidden(window, hidden) {
+  Object.defineProperty(window.document, "hidden", { value: hidden, configurable: true });
+  Object.defineProperty(window.document, "visibilityState", { value: hidden ? "hidden" : "visible", configurable: true });
+}
+
+test("relay port reconnects stop at a cap and resume when the reader returns", async () => {
+  const ports = [];
+  const scheduled = [];
+  const h = createStoryAutoTrackPendingHarness({ sessionMode: "kernel", store: { prefAutoTrackEnabled: false },
+    connectPort: relayPortRecorder(ports),
+    mutateDom(dom) {
+      const original = dom.window.setTimeout.bind(dom.window);
+      // Run reconnect waits at once so the whole round fits in the test.
+      dom.window.setTimeout = (callback, ms, ...args) => {
+        if (ms >= 1_000 && ms <= 30_000 && ms !== 20_000) { scheduled.push(ms); return original(callback, 0, ...args); }
+        return original(callback, ms, ...args);
+      };
+    },
+  });
+  scheduled.length = 0;
+  for (let index = 0; index < 10; index += 1) {
+    ports.at(-1).disconnected();
+    await delay(5);
+  }
+  assert.deepEqual(scheduled, [1_000, 2_000, 4_000, 8_000, 16_000, 30_000]);
+  assert.equal(ports.length, 7, "one initial port plus six capped reconnects");
+  h.dom.window.dispatchEvent(new h.dom.window.Event("focus"));
+  assert.equal(ports.length, 8, "the reader returning starts a fresh round");
+  ports.at(-1).disconnected();
+  assert.equal(scheduled.at(-1), 1_000);
+  h.dom.window.dispatchEvent(new h.dom.window.Event("pagehide"));
+  h.dom.window.close();
+});
+
+test("a hidden page does not reconnect its relay port until it is visible again", async () => {
+  const ports = [];
+  const h = createStoryAutoTrackPendingHarness({ sessionMode: "kernel", store: { prefAutoTrackEnabled: false },
+    connectPort: relayPortRecorder(ports) });
+  setHidden(h.dom.window, true);
+  ports[0].disconnected();
+  await delay(1_100);
+  assert.equal(ports.length, 1, "no reconnect while hidden");
+  h.dom.window.document.dispatchEvent(new h.dom.window.Event("visibilitychange"));
+  assert.equal(ports.length, 1);
+  setHidden(h.dom.window, false);
+  h.dom.window.document.dispatchEvent(new h.dom.window.Event("visibilitychange"));
+  assert.equal(ports.length, 2, "visible again: reconnect at once");
+  h.dom.window.dispatchEvent(new h.dom.window.Event("pagehide"));
+  h.dom.window.close();
+});
+
+test("a relay port that stayed up resets the reconnect backoff", async () => {
+  const ports = [];
+  const delays = [];
+  let now = 1_000_000;
+  const h = createStoryAutoTrackPendingHarness({ sessionMode: "kernel", store: { prefAutoTrackEnabled: false },
+    connectPort: relayPortRecorder(ports),
+    mutateDom(dom) {
+      dom.window.Date.now = () => now;
+      const original = dom.window.setTimeout.bind(dom.window);
+      dom.window.setTimeout = (callback, ms, ...args) => {
+        if (ms >= 1_000 && ms <= 30_000 && ms !== 20_000) { delays.push(ms); return original(callback, 0, ...args); }
+        return original(callback, ms, ...args);
+      };
+    },
+  });
+  delays.length = 0;
+  ports.at(-1).disconnected();
+  await delay(5);
+  ports.at(-1).disconnected();
+  await delay(5);
+  assert.deepEqual(delays, [1_000, 2_000]);
+  now += 6_000; // the reconnected port stays up
+  ports.at(-1).disconnected();
+  assert.equal(delays.at(-1), 1_000, "a successful reconnect starts over at the base delay");
+  h.dom.window.dispatchEvent(new h.dom.window.Event("pagehide"));
   h.dom.window.close();
 });
 
