@@ -28,6 +28,16 @@ const authoritativeEntry = Object.freeze({
   workStatus: "wip",
   workStatusProvenance: "source",
 });
+function assertReadingActivity(context) {
+  assert.deepEqual(Object.keys(context ?? {}).sort(), [
+    "calendarDate", "occurredAt", "operationId", "timeZone",
+  ]);
+  assert.match(context.operationId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  assert.equal(new Date(context.occurredAt).toISOString(), context.occurredAt);
+  assert.match(context.calendarDate, /^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(context.timeZone.kind, "OFFSET");
+  assert.match(context.timeZone.value, /^[+-]\d{2}:\d{2}$/);
+}
 const storySender = {
   frameId: 0,
   tab: { url: "https://www.fanfiction.net/s/7038840/4/A-Chance-Encounter" },
@@ -755,8 +765,9 @@ test("reader status and progress match the strict released extension PATCH contr
   assert.equal(new URL(url).pathname, `/api/extension/library/${entryId}`);
   assert.equal(options.headers.Authorization, "Bearer trd_v1_device");
   const body = JSON.parse(options.body);
-  const supported = ["status", "progress", "rating", "story_snapshot"];
+  const supported = ["status", "progress", "rating", "readingActivity", "story_snapshot"];
   if (Object.keys(body).some(k => !supported.includes(k))) return new Response("unknown field", { status: 400 });
+  assertReadingActivity(body.readingActivity);
   return new Response(JSON.stringify({ data: { entry_id: entryId } }), { status: 200 });
  }, "https://api.tracefiction.com");
  for (const status of ["READING", "SAVED", "CAUGHT_UP", "PAUSED", "FINISHED", "DROPPED"]) {
@@ -770,7 +781,8 @@ test("reader status and progress match the strict released extension PATCH contr
 // server contract exactly: GET /library-overlay omits `workPreferences` when the
 // account has no hidden works (LibraryOverlayResponseSchema marks it optional),
 // POST /track creates the entry, and PATCH /library/:entryId accepts only the
-// strict extension patch body.
+// strict extension patch body. Recorded patch bodies omit the per-command
+// reading context after checking its shape.
 function releasedTraceApi({ entries = {} } = {}) {
   const rows = new Map(Object.entries(entries));
   const patches = [];
@@ -831,7 +843,12 @@ function releasedTraceApi({ entries = {} } = {}) {
     }
     const patchPath = /^\/api\/extension\/library\/([0-9a-f-]{36})$/.exec(path);
     if (patchPath && method === "PATCH") {
-      const body = JSON.parse(options.body);
+      const { readingActivity, ...body } = JSON.parse(options.body);
+      if (body.status !== undefined || body.progress !== undefined) {
+        assertReadingActivity(readingActivity);
+      } else {
+        assert.equal(readingActivity, undefined);
+      }
       patches.push({ entryId: patchPath[1], body });
       const allowed = ["status", "progress", "rating", "story_snapshot"];
       if (Object.keys(body).some((key) => !allowed.includes(key))) {

@@ -15,6 +15,13 @@ const LIBRARY_OVERLAY_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/exten
 const WORK_PREFERENCES_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/work-preferences`;
 const AO3_SAVED_FILTERS_SYNC_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/ao3-saved-filters/sync`;
 const LIBRARY_ENTRY_ENDPOINT_BASE = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/library`;
+// The API rejects a reading command whose occurrence time leads its clock by
+// more than this; the writer re-anchors that command to the server time once.
+const READING_ACTIVITY_CLOCK_AHEAD = "READING_ACTIVITY_CLOCK_AHEAD";
+const READING_ACTIVITY_MAX_CLOCK_LEAD_MS = 300000;
+// Contexts produced by a re-anchor. The same object travels with its command
+// through authentication retries, so a command is re-anchored at most once.
+const reanchoredReadingActivities = new WeakSet();
 const ACCOUNT_ME_ENDPOINT = `${TRACE_API_BASE.replace(/\/$/, "")}/api/extension/account`;
 const IMPORT_BASE = `${TRACE_WEB_ORIGIN.replace(/\/$/, "")}/import`;
 const TRACE_HOME_URL = `${TRACE_WEB_ORIGIN.replace(/\/$/, "")}/`;
@@ -3388,14 +3395,15 @@ async function executeAutoTrack(payload, sender, allowNativeAuthRetry = true) {
   const workOperationId = await markWorkPending(workKey, "auto_track");
   recordOptimisticChapterFloor(payload && payload.item);
   try {
-    const response = await fetchWithTimeout(API_ENDPOINT, {
+    const sent = await sendReadingActivityCommand(API_ENDPOINT, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${bearerToken}`,
       },
-      body: JSON.stringify(payload),
-    });
+    }, payload);
+    const response = sent.response;
+    payload = sent.body;
 
     if (!response.ok) {
       const authError = await applyAuthFailureResponse(response, {
@@ -3692,14 +3700,15 @@ async function handleQuickAdd(
   let workOperationId = null;
   try {
     workOperationId = await markWorkPending(workKey, "quick_add");
-    const response = await fetchWithTimeout(API_ENDPOINT, {
+    const sent = await sendReadingActivityCommand(API_ENDPOINT, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${bearerToken}`,
       },
-      body: JSON.stringify(payload),
-    });
+    }, payload);
+    const response = sent.response;
+    payload = sent.body;
 
     if (response.ok) {
       const json = await response.json().catch(() => null);
@@ -4442,21 +4451,23 @@ async function handlePatchLibraryEntry(payload, sender, sendResponse) {
 
   const entryId = payload && typeof payload.entryId === "string" ? payload.entryId.trim() : "";
   const patch = normalizeLibraryEntryPatch(payload && payload.patch);
-  if (patch?.progress) patch.readingActivity = readingActivityCommand();
   if (!isValidUuid(entryId) || !patch) {
     if (sendResponse) sendResponse({ ok: false, error: "invalid_request" });
     return;
   }
+  // Progress and status changes are reading commands (status-only included);
+  // rating and work-status overrides keep their plain bodies.
+  if (patch.progress || patch.status) patch.readingActivity = readingActivityCommand();
 
   try {
-    const response = await fetchWithTimeout(`${LIBRARY_ENTRY_ENDPOINT_BASE}/${encodeURIComponent(entryId)}`, {
+    const { response, body } = await sendReadingActivityCommand(`${LIBRARY_ENTRY_ENDPOINT_BASE}/${encodeURIComponent(entryId)}`, {
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${bearerToken}`,
       },
-      body: JSON.stringify(patch),
-    });
+    }, patch);
+    if (body.readingActivity) patch.readingActivity = body.readingActivity;
 
     if (response.ok) {
       markFirstSaveSeen();
@@ -4516,7 +4527,13 @@ async function handleFinishQualificationSignal(payload, sender, sendResponse) {
   ]);
   const requestAccountId = currentAccountIdFromSnapshot(requestScope);
   const operationId = signal.state === "resolved" ? makeFinishOperationId() : null;
-  const requestSignal = operationId ? { ...signal, operationId, readingActivity: (() => { const { operationId: _, ...calendar } = readingActivityCommand(); return calendar; })() } : signal;
+  // A resolved finish keeps its operation id at the top level and only the
+  // temporal fields under readingActivity; an open prompt carries neither.
+  let requestSignal = signal;
+  if (operationId) {
+    const { operationId: _, ...calendar } = readingActivityCommand(new Date(), operationId);
+    requestSignal = { ...signal, operationId, readingActivity: calendar };
+  }
   const request = {
     method: "POST",
     headers: {
@@ -4525,6 +4542,7 @@ async function handleFinishQualificationSignal(payload, sender, sendResponse) {
     },
     body: JSON.stringify(requestSignal),
   };
+  let reanchored = false;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     let response;
     try {
@@ -4592,6 +4610,23 @@ async function handleFinishQualificationSignal(payload, sender, sendResponse) {
     ) {
       continue;
     }
+    const serverTime = operationId && !reanchored
+      ? await readingActivityClockAheadServerTime(response)
+      : null;
+    if (serverTime) {
+      const context = { operationId, ...requestSignal.readingActivity };
+      const next = reanchorReadingActivity(context, serverTime);
+      if (next !== context) {
+        // The rejected command committed nothing: re-anchor it once, keeping
+        // its operation id, without spending the transport retry.
+        const { operationId: _, ...calendar } = next;
+        reanchored = true;
+        requestSignal = { ...requestSignal, readingActivity: calendar };
+        request.body = JSON.stringify(requestSignal);
+        attempt -= 1;
+        continue;
+      }
+    }
     const authError = await applyAuthFailureResponse(response, {
       actionAtKey: "lastFinishQualificationAt",
     });
@@ -4627,14 +4662,16 @@ async function handleSetReaderStatus(payload, sender, sendResponse) {
   }
 
   try {
-    const response = await fetchWithTimeout(`${LIBRARY_ENTRY_ENDPOINT_BASE}/${encodeURIComponent(entryId)}`, {
+    // Every reader-status change is a reading command, status-only included.
+    const { response } = await sendReadingActivityCommand(`${LIBRARY_ENTRY_ENDPOINT_BASE}/${encodeURIComponent(entryId)}`, {
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${bearerToken}`,
       },
-      body: JSON.stringify(progress ? { status, progress, readingActivity: readingActivityCommand() } : { status }),
-    });
+    }, progress
+      ? { status, progress, readingActivity: readingActivityCommand() }
+      : { status, readingActivity: readingActivityCommand() });
 
     if (response.ok) {
       markFirstSaveSeen();
@@ -4789,12 +4826,77 @@ try {
   /* alarms optional */
 }
 
-function readingActivityCommand(now = new Date()) {
+// One reading command's context: one instant, that instant's numeric UTC
+// offset, and the local calendar date derived from both. Created once per
+// intent and reused by every retry of that intent.
+function readingActivityCommand(now = new Date(), operationId = makeFinishOperationId()) {
   const offset = -now.getTimezoneOffset();
   const absolute = Math.abs(offset);
   return {
-    operationId: makeFinishOperationId(), occurredAt: now.toISOString(),
+    operationId, occurredAt: now.toISOString(),
     calendarDate: new Date(now.getTime()+offset*60000).toISOString().slice(0,10),
     timeZone: { kind: "OFFSET", value: `${offset < 0 ? "-" : "+"}${String(Math.floor(absolute/60)).padStart(2,"0")}:${String(absolute%60).padStart(2,"0")}` },
   };
+}
+
+// The server clock from a clock-ahead rejection, or null for any other response.
+async function readingActivityClockAheadServerTime(response) {
+  if (!response || response.status !== 400) return null;
+  const payload = await readResponseJson(response);
+  if (
+    !payload ||
+    typeof payload !== "object" ||
+    payload.code !== READING_ACTIVITY_CLOCK_AHEAD ||
+    typeof payload.server_time !== "string"
+  ) {
+    return null;
+  }
+  const serverTime = new Date(payload.server_time);
+  return Number.isFinite(serverTime.getTime()) ? serverTime : null;
+}
+
+// Re-anchor a context the server rejected as ahead of its clock: same
+// operation id, the server instant, and the local date at that instant. A
+// context already re-anchored, or one the server could have accepted, is
+// returned unchanged (identity) so an exact retry still replays.
+function reanchorReadingActivity(context, serverTime) {
+  if (!context || typeof context !== "object" || reanchoredReadingActivities.has(context)) {
+    return context;
+  }
+  const occurredAt = typeof context.occurredAt === "string"
+    ? Date.parse(context.occurredAt)
+    : Number.NaN;
+  if (!(occurredAt > serverTime.getTime() + READING_ACTIVITY_MAX_CLOCK_LEAD_MS)) {
+    return context;
+  }
+  const next = readingActivityCommand(
+    new Date(serverTime.getTime()),
+    context.operationId || makeFinishOperationId(),
+  );
+  reanchoredReadingActivities.add(next);
+  return next;
+}
+
+// Body re-anchor for commands that carry the whole context under readingActivity.
+function reanchorReadingActivityBody(body, serverTime) {
+  const readingActivity = reanchorReadingActivity(body.readingActivity, serverTime);
+  return readingActivity === body.readingActivity ? body : { ...body, readingActivity };
+}
+
+// Send one reading command. After a clock-ahead rejection it is re-anchored and
+// sent exactly once more. Returns the final response and the body it carried so
+// callers keep that same command through any later authentication retry.
+async function sendReadingActivityCommand(
+  url,
+  init,
+  body,
+  reanchor = reanchorReadingActivityBody,
+) {
+  const send = (next) => fetchWithTimeout(url, { ...init, body: JSON.stringify(next) });
+  const response = await send(body);
+  const serverTime = await readingActivityClockAheadServerTime(response);
+  if (!serverTime) return { response, body };
+  const next = reanchor(body, serverTime);
+  if (next === body) return { response, body };
+  return { response: await send(next), body: next };
 }

@@ -115,11 +115,12 @@ export class StoryCommandApi implements StoryCommandApiPort {
     credential: string,
     command: StoryTrackCommand,
   ): Promise<AuthenticatedEffectResult<StoryMutationOutcome>> {
-    const response = await this.#request(this.#trackEndpoint, credential, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...command.payload, readingActivity: this.#readingCommands.context(command) }),
-    });
+    const response = await this.#readingCommands.send(command, () =>
+      this.#request(this.#trackEndpoint, credential, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...command.payload, readingActivity: this.#readingCommands.context(command) }),
+      }));
     if (response === null) return { kind: "success", value: { kind: "uncertain" } };
     if (response.status === 401 || response.status === 403) return { kind: "auth_rejected" };
     if (response.status === 400) {
