@@ -50,7 +50,12 @@ type Environment = Readonly<{
   storageMode: "callback" | "promise";
   config: EarnedPermissionRegistrationConfig;
   clock?: () => number;
+  /** Upper bound for one reconcile; a hung browser call must not wedge the queue. */
+  reconcileTimeoutMs?: number;
 }>;
+
+const DEFAULT_RECONCILE_TIMEOUT_MS = 5_000;
+const UNKNOWN_PERMISSION_STATE = Symbol("unknown permission state");
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -118,11 +123,30 @@ export class EarnedPermissionRegistrationController {
 
   reconcile(): Promise<EarnedPermissionRegistrationResult> {
     const next = this.#tail.then(
-      () => this.#reconcile(),
-      () => this.#reconcile(),
+      () => this.#bounded(),
+      () => this.#bounded(),
     );
     this.#tail = next;
     return next;
+  }
+
+  // Safari can leave an extension API call unanswered after it suspends and
+  // wakes the background. Serialized reconciles would then wait behind it for
+  // the rest of the worker's life, and every archive page would stay gated
+  // until Safari restarts. Settle each run so the next one can proceed.
+  #bounded(): Promise<EarnedPermissionRegistrationResult> {
+    const timeoutMs =
+      this.#environment.reconcileTimeoutMs ?? DEFAULT_RECONCILE_TIMEOUT_MS;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error("reconcile_timeout")),
+        timeoutMs,
+      );
+    });
+    return Promise.race([this.#reconcile(), timeout]).finally(() => {
+      clearTimeout(timer);
+    });
   }
 
   async #reconcile(): Promise<EarnedPermissionRegistrationResult> {
@@ -135,7 +159,7 @@ export class EarnedPermissionRegistrationController {
         [],
         runtime,
         storageMode,
-      ).catch(() => Object.freeze({ origins: [] })),
+      ).catch(() => UNKNOWN_PERMISSION_STATE),
       typeof permissions.contains === "function"
         ? callExtensionApi<boolean>(
             permissions as unknown as Record<
@@ -153,11 +177,22 @@ export class EarnedPermissionRegistrationController {
         .then((value) => storedState(value[EARNED_PERMISSION_STATE_KEY]))
         .catch(() => Object.freeze({}) as StoredState),
     ]);
+    // Neither permission read answered: that is not evidence of a partial
+    // grant. Report a transient failure so pages ask again and dynamic
+    // registrations are not removed over a failed read.
+    if (
+      permissionSnapshot === UNKNOWN_PERMISSION_STATE &&
+      typeof semanticGrant !== "boolean"
+    ) {
+      throw new Error("permission_state_unavailable");
+    }
+    const snapshotOrigins =
+      typeof permissionSnapshot === "symbol"
+        ? undefined
+        : permissionSnapshot.origins;
     const granted = new Set<string>(
-      Array.isArray(permissionSnapshot.origins)
-        ? permissionSnapshot.origins.filter(
-            (origin) => typeof origin === "string",
-          )
+      Array.isArray(snapshotOrigins)
+        ? snapshotOrigins.filter((origin) => typeof origin === "string")
         : [],
     );
     const completeGrant =
@@ -360,16 +395,16 @@ export function installEarnedPermissionRegistrationRuntime(
     return true;
   });
   environment.permissions.onAdded?.addListener(() => {
-    void controller.reconcile();
+    void controller.reconcile().catch(() => undefined);
   });
   environment.permissions.onRemoved?.addListener(() => {
-    void controller.reconcile();
+    void controller.reconcile().catch(() => undefined);
   });
   environment.runtime.onInstalled?.addListener((details) => {
     if (details.reason === "install" || details.reason === "update") {
-      void controller.reconcile();
+      void controller.reconcile().catch(() => undefined);
     }
   });
-  void controller.reconcile();
+  void controller.reconcile().catch(() => undefined);
   return controller;
 }

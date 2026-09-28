@@ -7081,6 +7081,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   // src/extension-runtime/earned-permission-registration.mts
   var EARNED_PERMISSION_REGISTRATION_MESSAGE = "TRACE_EARNED_PERMISSION_RECONCILE";
   var EARNED_PERMISSION_STATE_KEY = "traceEarnedPermissionOnboardingV1";
+  var DEFAULT_RECONCILE_TIMEOUT_MS = 5e3;
+  var UNKNOWN_PERMISSION_STATE = Symbol("unknown permission state");
   function isRecord20(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
@@ -7127,11 +7129,28 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     reconcile() {
       const next = this.#tail.then(
-        () => this.#reconcile(),
-        () => this.#reconcile()
+        () => this.#bounded(),
+        () => this.#bounded()
       );
       this.#tail = next;
       return next;
+    }
+    // Safari can leave an extension API call unanswered after it suspends and
+    // wakes the background. Serialized reconciles would then wait behind it for
+    // the rest of the worker's life, and every archive page would stay gated
+    // until Safari restarts. Settle each run so the next one can proceed.
+    #bounded() {
+      const timeoutMs = this.#environment.reconcileTimeoutMs ?? DEFAULT_RECONCILE_TIMEOUT_MS;
+      let timer;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("reconcile_timeout")),
+          timeoutMs
+        );
+      });
+      return Promise.race([this.#reconcile(), timeout]).finally(() => {
+        clearTimeout(timer);
+      });
     }
     async #reconcile() {
       const { config, permissions, runtime, scripting, storageMode, storage } = this.#environment;
@@ -7142,7 +7161,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           [],
           runtime,
           storageMode
-        ).catch(() => Object.freeze({ origins: [] })),
+        ).catch(() => UNKNOWN_PERMISSION_STATE),
         typeof permissions.contains === "function" ? callExtensionApi(
           permissions,
           "contains",
@@ -7152,10 +7171,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         ).catch(() => null) : Promise.resolve(null),
         storage.get(EARNED_PERMISSION_STATE_KEY).then((value) => storedState(value[EARNED_PERMISSION_STATE_KEY])).catch(() => Object.freeze({}))
       ]);
+      if (permissionSnapshot === UNKNOWN_PERMISSION_STATE && typeof semanticGrant !== "boolean") {
+        throw new Error("permission_state_unavailable");
+      }
+      const snapshotOrigins = typeof permissionSnapshot === "symbol" ? void 0 : permissionSnapshot.origins;
       const granted = new Set(
-        Array.isArray(permissionSnapshot.origins) ? permissionSnapshot.origins.filter(
-          (origin) => typeof origin === "string"
-        ) : []
+        Array.isArray(snapshotOrigins) ? snapshotOrigins.filter((origin) => typeof origin === "string") : []
       );
       const completeGrant = config.origins.length > 0 && (typeof semanticGrant === "boolean" ? semanticGrant : config.origins.every((origin) => granted.has(origin)));
       const staticRegistration = config.registrationMode === "static";
@@ -7327,17 +7348,17 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return true;
     });
     environment.permissions.onAdded?.addListener(() => {
-      void controller.reconcile();
+      void controller.reconcile().catch(() => void 0);
     });
     environment.permissions.onRemoved?.addListener(() => {
-      void controller.reconcile();
+      void controller.reconcile().catch(() => void 0);
     });
     environment.runtime.onInstalled?.addListener((details) => {
       if (details.reason === "install" || details.reason === "update") {
-        void controller.reconcile();
+        void controller.reconcile().catch(() => void 0);
       }
     });
-    void controller.reconcile();
+    void controller.reconcile().catch(() => void 0);
     return controller;
   }
 

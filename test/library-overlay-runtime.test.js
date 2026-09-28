@@ -374,6 +374,53 @@ test("kernel listing re-queries its private projection after a confirmed-save re
   );
 });
 
+test("kernel listing asks again when the background is waking, including after a back-forward cache restore", async () => {
+  let unanswered = 2;
+  let projectionReads = 0;
+  const window = await renderOverlayListing({
+    sessionMode: "kernel",
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/12345'>Demo Work</a></h4></li></ol></body></html>",
+    cache: { entries: {}, workPreferences: {}, syncVersion: null },
+    sendMessage(message, cb) {
+      if (message.type !== "TRACE_ACCOUNT_PROJECTION_GET") {
+        if (typeof cb === "function") cb({ ok: true });
+        return;
+      }
+      projectionReads += 1;
+      if (unanswered > 0) {
+        unanswered -= 1;
+        // Called as runtime.sendMessage, so `this` is the runtime.
+        this.lastError = { message: "Could not establish connection. Receiving end does not exist." };
+        cb(undefined);
+        this.lastError = null;
+        return;
+      }
+      cb({
+        ok: true,
+        snapshot: { state: "connected", reason: "none", canExecuteAuthenticated: true },
+        projection: { entries: {}, workPreferences: {}, syncVersion: null },
+      });
+    },
+  });
+  assert.equal(window.document.querySelector("button[data-trace-quick-add='ao3:12345']"), null);
+  await sleep(1_400);
+  assert.equal(projectionReads, 3);
+  assert.ok(
+    window.document.querySelector("button[data-trace-quick-add='ao3:12345']"),
+    "the listing renders once the background answers",
+  );
+
+  // Restored from memory while the background is asleep again.
+  unanswered = 1;
+  const event = new window.Event("pageshow");
+  Object.defineProperty(event, "persisted", { value: true });
+  window.dispatchEvent(event);
+  await sleep(450);
+  assert.equal(projectionReads, 5, "one unanswered read on restore, then one retry");
+  assert.ok(window.document.querySelector("button[data-trace-quick-add='ao3:12345']"));
+});
+
 test("kernel listing allows add and migrated hide commands for unknown works", async () => {
   const window = await renderOverlayListing({
     sessionMode: "kernel",

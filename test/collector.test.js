@@ -1642,6 +1642,12 @@ function createStoryAutoTrackPendingHarness(options = {}) {
         }
         if (msg.type === "TRACE_AUTO_TRACK") {
           autoTrackCallback = cb;
+          if (Array.isArray(options.autoTrackLastErrors) && options.autoTrackLastErrors.length > 0) {
+            chrome.runtime.lastError = { message: options.autoTrackLastErrors.shift() };
+            cb();
+            chrome.runtime.lastError = null;
+            return;
+          }
           if (!options.holdAutoTrack && typeof cb === "function") {
             cb(options.autoTrackResponse || { ok: true });
           }
@@ -7275,6 +7281,115 @@ test("content script opens and reconnects its popup relay port after an extensio
   ports[2].receive({ kind: "commandResult", id: 2, response: { ok: true } });
   assert.equal(ports[2].sent.at(-1).response.ok, true);
   h.dom.window.dispatchEvent(new h.dom.window.Event("pagehide"));
+  h.dom.window.close();
+});
+
+function relayPortRecorder(ports) {
+  return function connectPort(options) {
+    assert.equal(options.name, "trace-popup-page-v1");
+    const page = { sent: [], disconnectCalls: 0, postMessage(message) { this.sent.push(message); },
+      onMessage: { addListener(fn) { page.receive = fn; } },
+      onDisconnect: { addListener(fn) { page.disconnected = fn; } }, disconnect() { page.disconnectCalls++; } };
+    ports.push(page); return page;
+  };
+}
+
+function pageshowEvent(window, persisted) {
+  const event = new window.Event("pageshow");
+  Object.defineProperty(event, "persisted", { value: persisted });
+  return event;
+}
+
+test("back-forward cache restore replaces a relay port that outlived the page and re-runs story work", async () => {
+  const ports = [];
+  const h = createStoryAutoTrackPendingHarness({ sessionMode: "kernel", store: { prefAutoTrackEnabled: false },
+    connectPort: relayPortRecorder(ports) });
+  assert.equal(ports.length, 1);
+  const projectionReadsBefore = h.sent.filter(message => message.type === "TRACE_ACCOUNT_PROJECTION_GET").length;
+
+  // Safari restored the page from memory without delivering pagehide, and the
+  // background that owned the old port is gone. The port never reported it.
+  h.dom.window.dispatchEvent(pageshowEvent(h.dom.window, true));
+  assert.equal(ports.length, 2, "a restored page opens a fresh relay port");
+  assert.equal(ports[0].disconnectCalls, 1, "the stale port is released, never reused");
+  ports[1].receive({ kind: "request", id: 1, command: { type: "TRACE_STORY_IDENTITY_GET" } });
+  assert.equal(ports[1].sent[0].response.ok, true);
+  ports[0].receive({ kind: "request", id: 2, command: { type: "TRACE_STORY_IDENTITY_GET" } });
+  assert.equal(ports[0].sent.length, 0, "the replaced port no longer answers");
+  await delay(20);
+  assert.ok(
+    h.sent.filter(message => message.type === "TRACE_ACCOUNT_PROJECTION_GET").length > projectionReadsBefore,
+    "the story handle asks the background again after the restore",
+  );
+
+  // An ordinary first pageshow keeps a healthy port.
+  h.dom.window.dispatchEvent(pageshowEvent(h.dom.window, false));
+  assert.equal(ports.length, 2);
+  h.dom.window.dispatchEvent(new h.dom.window.Event("pagehide"));
+  h.dom.window.close();
+});
+
+test("a relay port Safari keeps dropping reconnects with growing backoff, reset by traffic", async () => {
+  const ports = [];
+  const delays = [];
+  const h = createStoryAutoTrackPendingHarness({ sessionMode: "kernel", store: { prefAutoTrackEnabled: false },
+    connectPort: relayPortRecorder(ports),
+    mutateDom(dom) {
+      const original = dom.window.setTimeout.bind(dom.window);
+      dom.window.setTimeout = (callback, ms, ...args) => { delays.push(ms); return original(callback, ms, ...args); };
+    },
+  });
+  delays.length = 0;
+  ports[0].disconnected();
+  assert.deepEqual(delays, [1_000]);
+  await delay(1_050);
+  assert.equal(ports.length, 2);
+  delays.length = 0;
+  ports[1].disconnected();
+  assert.deepEqual(delays, [2_000], "a second immediate drop waits longer");
+  h.dom.window.dispatchEvent(pageshowEvent(h.dom.window, false));
+  assert.equal(ports.length, 3, "pageshow reconnects at once");
+  ports[2].receive({ kind: "request", id: 1, command: { type: "TRACE_STORY_IDENTITY_GET" } });
+  delays.length = 0;
+  ports[2].disconnected();
+  assert.deepEqual(delays, [1_000], "a port that carried traffic starts over at the base delay");
+  h.dom.window.dispatchEvent(new h.dom.window.Event("pagehide"));
+  h.dom.window.close();
+});
+
+test("a story save refused while the background wakes is re-sent and saved", async () => {
+  const entryId = "00000000-0000-4000-8000-000000000704";
+  const savedState = { accountId: "acct-story", workKey: "ffn:7038840", operation: "auto_track", status: "saved", entryId,
+    entry: { status: "READING", readerStatus: "READING", canonicalReaderStatus: "READING", entryId } };
+  const h = createStoryAutoTrackPendingHarness({
+    autoTrackLastErrors: ["Could not establish connection. Receiving end does not exist."],
+    autoTrackResponse: { ok: true, state: savedState },
+    workStateResponse: { ok: true, state: savedState },
+  });
+  await delay(20);
+  assert.equal(h.sent.filter(message => message.type === "TRACE_AUTO_TRACK").length, 1);
+  const pending = h.dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.doesNotMatch(pending.textContent || "", /Error/, "an undelivered save is not reported as failed yet");
+  await delay(1_100);
+  const saves = h.sent.filter(message => message.type === "TRACE_AUTO_TRACK");
+  assert.equal(saves.length, 2, "the save is sent once more after the background wakes");
+  assert.deepEqual(plainJson(saves[1].payload.item), plainJson(saves[0].payload.item));
+  const handle = h.dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.match(handle.textContent || "", /Reading|Saved/);
+  h.dom.window.close();
+});
+
+test("a story save with an unknown outcome is never re-sent automatically", async () => {
+  const h = createStoryAutoTrackPendingHarness({
+    autoTrackLastErrors: Array(4).fill("The message port closed before a response was received."),
+  });
+  await delay(20);
+  const saves = () => h.sent.filter(message => message.type === "TRACE_AUTO_TRACK").length;
+  const initial = saves();
+  assert.ok(initial >= 1);
+  await delay(1_100);
+  assert.equal(saves(), initial, "no delayed re-send of a save that may have landed");
+  assert.match(h.dom.window.document.querySelector("[data-trace-story-handle]").textContent || "", /Error|Reconnect|Try/i);
   h.dom.window.close();
 });
 

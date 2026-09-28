@@ -33,7 +33,7 @@ const FIRST_STORY_FOCUS_MAX_ATTEMPTS = 30;
 const FIRST_STORY_FOCUS_RETRY_MS = 150;
 const FIRST_STORY_SAVE_TIMEOUT_MS = 18_000;
 const COLLECTOR_MESSAGE_TIMEOUT_MS = 20_000;
-const KERNEL_PROJECTION_RETRY_DELAYS_MS = [250, 750, 2_000];
+const KERNEL_PROJECTION_RETRY_DELAYS_MS = [250, 750, 2_000, 5_000];
 const TRACE_CAPACITY_NOTICE_ATTR = "data-trace-capacity-notice";
 
 function configuredTraceWebHomeUrl() {
@@ -63,6 +63,24 @@ function traceUpgradeUrl() {
 // while Chromium and the Safari wrapper's compatibility surface may require a
 // callback. Keep every collector command on this boundary so feature code
 // never has to infer which API shape is active.
+// A missing reply arrives as null. The second argument says why, when that is
+// known: `undelivered` only when the browser reports that no background was
+// listening (so nothing ran), `timedOut` when the background may still be
+// working on it. Any other failure is treated as an unknown outcome.
+var COLLECTOR_UNDELIVERED = Object.freeze({ undelivered: true, timedOut: false });
+var COLLECTOR_TIMED_OUT = Object.freeze({ undelivered: false, timedOut: true });
+var COLLECTOR_ANSWERED = Object.freeze({ undelivered: false, timedOut: false });
+function collectorDeliveryFromError(error) {
+  var text = "";
+  try {
+    text = String(error && typeof error.message === "string" ? error.message : error || "");
+  } catch (_) {
+    text = "";
+  }
+  return /receiving end does not exist|could not establish connection/i.test(text)
+    ? COLLECTOR_UNDELIVERED
+    : COLLECTOR_ANSWERED;
+}
 function sendCollectorMessage(message, onResponse, timeoutMs) {
   var expectsResponse = typeof onResponse === "function";
   var respond = expectsResponse ? onResponse : function () {};
@@ -70,37 +88,41 @@ function sendCollectorMessage(message, onResponse, timeoutMs) {
   if (!Number.isFinite(timeout) || timeout <= 0) timeout = COLLECTOR_MESSAGE_TIMEOUT_MS;
   var settled = false;
   var timer = null;
-  var finish = function (response) {
+  var finish = function (response, delivery) {
     if (settled) return;
     settled = true;
     if (timer !== null) clearTimeout(timer);
-    respond(response == null ? null : response);
+    respond(response == null ? null : response, delivery || COLLECTOR_ANSWERED);
   };
   var armTimeout = function () {
     if (settled || !expectsResponse) return;
     timer = setTimeout(function () {
-      finish(null);
+      finish(null, COLLECTOR_TIMED_OUT);
     }, timeout);
   };
   if (typeof globalThis.browser !== "undefined" && ext === globalThis.browser) {
     try {
       var pending = ext.runtime.sendMessage(message);
       armTimeout();
-      Promise.resolve(pending).then(finish, function () {
-        finish(null);
+      Promise.resolve(pending).then(function (response) {
+        finish(response);
+      }, function (error) {
+        finish(null, collectorDeliveryFromError(error));
       });
-    } catch (_) {
-      finish(null);
+    } catch (error) {
+      finish(null, collectorDeliveryFromError(error));
     }
     return;
   }
   try {
     ext.runtime.sendMessage(message, function (response) {
-      finish(ext.runtime.lastError ? null : response);
+      var lastError = ext.runtime.lastError;
+      if (lastError) finish(null, collectorDeliveryFromError(lastError));
+      else finish(response);
     });
     armTimeout();
-  } catch (_) {
-    finish(null);
+  } catch (error) {
+    finish(null, collectorDeliveryFromError(error));
   }
 }
 
@@ -1223,7 +1245,16 @@ function forgetRecentAutoTrack(item) {
   }
 }
 
+// A save sent while the extension background is asleep or restarting can be
+// refused because nothing is listening yet. Nothing was written, so it is sent
+// again after a short wait instead of leaving the story unsaved until the
+// reader comes back. A timed-out or otherwise failed save may still land, so
+// it is never re-sent here.
+var AUTO_TRACK_UNDELIVERED_RETRY_MS = [1_000, 3_000];
+
 function sendAutoTrackForStory(validStory, options) {
+  var deliveryAttempt =
+    options && Number.isInteger(options.deliveryAttempt) ? options.deliveryAttempt : 0;
   rememberRecentAutoTrack(validStory);
   if (!options || options.pendingAlreadySet !== true) {
     updateAutoTrackPendingForStory(validStory);
@@ -1237,8 +1268,22 @@ function sendAutoTrackForStory(validStory, options) {
         item: validStory,
       },
     },
-    function (response) {
+    function (response, delivery) {
       if (!response) {
+        if (
+          delivery && delivery.undelivered === true &&
+          deliveryAttempt < AUTO_TRACK_UNDELIVERED_RETRY_MS.length
+        ) {
+          var sentFromUrl = location.href;
+          setTimeout(function () {
+            if (location.href !== sentFromUrl) return;
+            sendAutoTrackForStory(validStory, {
+              pendingAlreadySet: true,
+              deliveryAttempt: deliveryAttempt + 1,
+            });
+          }, AUTO_TRACK_UNDELIVERED_RETRY_MS[deliveryAttempt]);
+          return;
+        }
         forgetRecentAutoTrack(validStory);
         updateAutoTrackFailureForStory(validStory, "network_error");
         return;
@@ -3172,6 +3217,11 @@ var popupPagePort = null;
 var popupPageReconnectTimer = null;
 var popupPageStopped = false;
 var popupPageCallbacks = new Map();
+// A port Safari drops straight away (background asleep or restarting) backs
+// off instead of waking the background every second; traffic resets it.
+var POPUP_PAGE_RECONNECT_BASE_MS = 1_000;
+var POPUP_PAGE_RECONNECT_MAX_MS = 30_000;
+var popupPageReconnectDelayMs = POPUP_PAGE_RECONNECT_BASE_MS;
 function connectPopupPagePort() {
   if (!KERNEL_SESSION_ACTIVE || TRACE_ACTIVE_TAB_PROBE_MODE || popupPageStopped ||
       popupPagePort || !ext.runtime.connect || window.top !== window) return;
@@ -3180,6 +3230,7 @@ function connectPopupPagePort() {
     popupPagePort = port;
     port.onMessage.addListener(function (envelope) {
       if (popupPagePort !== port || !envelope || !Number.isSafeInteger(envelope.id)) return;
+      popupPageReconnectDelayMs = POPUP_PAGE_RECONNECT_BASE_MS;
       if (envelope.kind === "commandResult") {
         var callback = popupPageCallbacks.get(envelope.id);
         popupPageCallbacks.delete(envelope.id);
@@ -3217,10 +3268,12 @@ function connectPopupPagePort() {
 }
 function schedulePopupPageReconnect() {
   if (popupPageStopped || popupPageReconnectTimer !== null) return;
+  var delayMs = popupPageReconnectDelayMs;
+  popupPageReconnectDelayMs = Math.min(delayMs * 2, POPUP_PAGE_RECONNECT_MAX_MS);
   popupPageReconnectTimer = setTimeout(function () {
     popupPageReconnectTimer = null;
     connectPopupPagePort();
-  }, 1_000);
+  }, delayMs);
 }
 window.addEventListener("pagehide", function () {
   popupPageStopped = true;
@@ -3233,9 +3286,10 @@ window.addEventListener("pagehide", function () {
   try { if (port) port.disconnect(); } catch (_) {}
 });
 globalThis.__traceCollectorReconnect = function (replacePort) {
+  // Connecting now supersedes any backoff wait still pending.
+  clearTimeout(popupPageReconnectTimer);
+  popupPageReconnectTimer = null;
   if (replacePort === true) {
-    clearTimeout(popupPageReconnectTimer);
-    popupPageReconnectTimer = null;
     var oldPort = popupPagePort;
     popupPagePort = null;
     for (var callback of popupPageCallbacks.values()) callback({ ok: false });
@@ -3243,9 +3297,16 @@ globalThis.__traceCollectorReconnect = function (replacePort) {
     try { if (oldPort) oldPort.disconnect(); } catch (_) {}
   }
   popupPageStopped = false;
+  popupPageReconnectDelayMs = POPUP_PAGE_RECONNECT_BASE_MS;
   connectPopupPagePort();
 };
-window.addEventListener("pageshow", globalThis.__traceCollectorReconnect);
+// A back-forward cache restore resumes this script without re-running it. A
+// port that outlived the pagehide (Safari does not always deliver it, or the
+// background went away meanwhile without a disconnect) is replaced, never
+// trusted.
+window.addEventListener("pageshow", function (event) {
+  globalThis.__traceCollectorReconnect(!!(event && event.persisted === true));
+});
 connectPopupPagePort();
 
 /// =======================================================

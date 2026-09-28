@@ -3985,7 +3985,10 @@ function traceRefreshPageTokens() {
     return false;
   }
 
-  function scheduleRun(delayMs) {
+  function scheduleRun(delayMs, isProjectionRetry) {
+    // A fresh signal (pageshow, focus, a storage change) earns a fresh round
+    // of projection retries.
+    if (isProjectionRetry !== true) projectionRetryAttempt = 0;
     var delay = typeof delayMs === "number" ? delayMs : 120;
     if (rerunTimer) {
       clearTimeout(rerunTimer);
@@ -4095,6 +4098,19 @@ function traceRefreshPageTokens() {
     return entries;
   }
 
+  // Safari may not answer while it wakes the extension background, including
+  // right after a back-forward cache restore. Ask again a few times rather
+  // than leaving the listing bare until the next focus or storage change.
+  var PROJECTION_RETRY_DELAYS_MS = [250, 1000, 3000, 8000];
+  var projectionRetryAttempt = 0;
+
+  function scheduleProjectionRetry() {
+    if (projectionRetryAttempt >= PROJECTION_RETRY_DELAYS_MS.length) return;
+    var delay = PROJECTION_RETRY_DELAYS_MS[projectionRetryAttempt];
+    projectionRetryAttempt += 1;
+    scheduleRun(delay, true);
+  }
+
   function run() {
     try {
       if (KERNEL_SESSION_ACTIVE) {
@@ -4106,7 +4122,11 @@ function traceRefreshPageTokens() {
               workKeys: visibleWorkKeys(),
             },
             function (response) {
-              if (ext.runtime.lastError || !response || response.ok !== true) return;
+              if (ext.runtime.lastError || !response || response.ok !== true) {
+                scheduleProjectionRetry();
+                return;
+              }
+              projectionRetryAttempt = 0;
               var snapshot = response.snapshot || { state: "signed_out" };
               showCapacityRecoveryNotice(
                 response.projection && response.projection.capacity,
