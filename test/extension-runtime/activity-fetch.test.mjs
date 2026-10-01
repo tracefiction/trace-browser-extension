@@ -49,3 +49,15 @@ test("adds version metadata only to authenticated Trace extension API requests",
   assert.equal(seen[1][1].headers["X-Trace-Extension-Version"], undefined);
   assert.equal(seen[2][1], undefined);
 });
+
+
+test("rejects arbitrary version strings and bounds missing platform callbacks", async () => {
+  const invalid={...runtime,getManifest:()=>({version:"PRIVATE_VERSION_CONTEXT"}),getPlatformInfo:()=>undefined};
+  assert.equal(activityHeaders(invalid,'mac','PRIVATE_UA')["X-Trace-Extension-Version"],undefined);
+  const seen=[];
+  const send=createActivityFetch(async(...args)=>{seen.push(args);return new Response('{}');},invalid,'callback','https://api.tracefiction.com');
+  await send('https://api.tracefiction.com/api/extension/track',{headers:{Authorization:'Bearer fixture'}});
+  assert.equal(seen.length,1);
+  assert.equal(seen[0][1].headers.has('X-Trace-Extension-Version'),false);
+  assert.equal(seen[0][1].headers.has('X-Trace-Extension-Browser'),false);
+});
