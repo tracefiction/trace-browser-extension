@@ -254,6 +254,7 @@ function createBackgroundHarness({
 
   const expose = `
 globalThis.__testHooks = {
+  fetchWithTimeout,
   handleAutoTrack,
   executeAutoTrack,
   handleImportTrigger,
@@ -5710,4 +5711,18 @@ test("legacy resolved finish re-anchors once and keeps its transport retry", asy
   assert.equal(bodies[1].readingActivity.occurredAt, serverTime);
   assert.deepEqual(bodies[2], bodies[1]);
   assertReadingContext({ operationId: bodies[0].operationId, ...bodies[1].readingActivity });
+});
+
+test("legacy API requests report validated release and Safari OS without raw user agent", async () => {
+  const h = createBackgroundHarness({ apiBase: "https://api.tracefiction.com", fetchImpl: async () => createResponse({ ok: true, status: 200 }) });
+  h.context.navigator = { userAgent: "Macintosh PRIVATE_USER_AGENT" };
+  h.context.chrome.runtime.getPlatformInfo = (done) => done({ os: "ios" });
+  h.context.chrome.runtime.getURL = () => "safari-web-extension://fixture/";
+  h.context.chrome.runtime.getManifest = () => ({ version: "0.7.0" });
+  await h.context.__testHooks.fetchWithTimeout("https://api.tracefiction.com/api/extension/track", { headers: { Authorization: "Bearer fixture" } });
+  const headers = h.fetchCalls.at(-1).init.headers;
+  assert.equal(headers["X-Trace-Extension-Browser"], "safari_ios");
+  assert.equal(headers["X-Trace-Extension-Version"], "0.7.0");
+  assert.equal(headers["X-Trace-Platform"], "web_mobile");
+  assert.ok(!JSON.stringify(headers).includes("PRIVATE_USER_AGENT"));
 });

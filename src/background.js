@@ -116,6 +116,20 @@ class TraceRequestTimeoutError extends Error {
   }
 }
 
+let activityPlatformPromise;
+function activityPlatform() {
+  activityPlatformPromise ??= new Promise((resolve) => {
+    if (typeof ext.runtime?.getPlatformInfo !== "function") { resolve("unknown"); return; }
+    const timer = setTimeout(() => resolve("unknown"), 250);
+    const done = (info) => { clearTimeout(timer); resolve(info?.os || "unknown"); };
+    try {
+      if (typeof browser !== "undefined") Promise.resolve(ext.runtime.getPlatformInfo()).then(done, () => done(null));
+      else ext.runtime.getPlatformInfo(done);
+    } catch (_) { done(null); }
+  });
+  return activityPlatformPromise;
+}
+
 async function fetchWithTimeout(
   url,
   init = {},
@@ -123,6 +137,22 @@ async function fetchWithTimeout(
 ) {
   let controller = null;
   const requestInit = { ...init };
+  // Coarse release attribution; never transmit the user agent or page context.
+  if (String(url).startsWith(`${TRACE_API_BASE.replace(/\/$/, "")}/api/`)) {
+    const headers = { ...(init.headers || {}) };
+    if (headers.Authorization || headers.authorization) {
+      const ua = globalThis.navigator?.userAgent || "";
+      const os = await activityPlatform();
+      const ios = os === "ios" || /iPhone|iPad|iPod/i.test(ua);
+      headers["X-Trace-Platform"] = ios || os === "android" || /Android/i.test(ua) ? "web_mobile" : "web_desktop";
+      const kind = detectBrowserKind();
+      const browser = kind === "safari" ? (ios ? "safari_ios" : os === "mac" ? "safari_macos" : null) : kind === "chrome" && /Edg\//.test(ua) ? "edge" : kind;
+      if (["safari_ios", "safari_macos", "chrome", "firefox", "edge"].includes(browser)) headers["X-Trace-Extension-Browser"] = browser;
+      const version = ext.runtime?.getManifest?.().version;
+      if (typeof version === "string" && /^[0-9]{1,4}(\.[0-9]{1,4}){0,3}$/.test(version)) headers["X-Trace-Extension-Version"] = version;
+      requestInit.headers = headers;
+    }
+  }
   if (
     !requestInit.signal &&
     typeof AbortController !== "undefined"

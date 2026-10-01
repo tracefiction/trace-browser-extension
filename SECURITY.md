@@ -237,3 +237,14 @@ provider or more-than-24-hour-old observations are unknown, never off. A late
 snapshot cannot replace a newer change. A preference is not proof of Safari
 access, activation or a successful save. Old app/extension versions can ignore
 the additive messages; absence leaves existing behavior intact.
+
+## Aggregate release and browser diagnostics
+
+Authenticated requests to the configured Trace API now include the installed
+extension version and coarse browser/OS categories (Safari iOS/macOS, Chrome,
+Firefox or Edge; mobile/desktop). Trace uses these to measure release adoption
+and diagnose rejected writes by version. The server records a throttled activity
+event per account/surface and exposes aggregates only in its admin overview.
+No page content, URL, raw user agent, browsing history, hardware identifier,
+extra permission or new destination is added. Missing metadata on older clients
+remains unknown. This does not alter authentication or tracking confirmations.

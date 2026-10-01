@@ -5,64 +5,6 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   // <define:__TRACE_IOS_EARNED_PERMISSION_CONFIG__>
   var define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default = { version: 3, registrationMode: "static", origins: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*", "https://www.fanfiction.net/*", "https://m.fanfiction.net/*"], registrations: [{ id: "trace-archive-automation-v1", matches: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*", "https://www.fanfiction.net/*", "https://m.fanfiction.net/*"], js: ["content-config.js", "trace-finish-qualify.js", "collector.js", "library-overlay-keys.js", "library-overlay.js"], runAt: "document_end", persistAcrossSessions: true, excludeMatches: ["https://archiveofourown.org/users/login*", "https://*.archiveofourown.org/users/login*", "https://archiveofourown.org/users/sign_up*", "https://*.archiveofourown.org/users/sign_up*", "https://archiveofourown.org/users/password*", "https://*.archiveofourown.org/users/password*", "https://archiveofourown.org/users/auth/*", "https://*.archiveofourown.org/users/auth/*", "https://archiveofourown.org/users/logout*", "https://*.archiveofourown.org/users/logout*", "https://archiveofourown.gay/users/login*", "https://*.archiveofourown.gay/users/login*", "https://archiveofourown.gay/users/sign_up*", "https://*.archiveofourown.gay/users/sign_up*", "https://archiveofourown.gay/users/password*", "https://*.archiveofourown.gay/users/password*", "https://archiveofourown.gay/users/auth/*", "https://*.archiveofourown.gay/users/auth/*", "https://archiveofourown.gay/users/logout*", "https://*.archiveofourown.gay/users/logout*", "https://archive.transformativeworks.org/users/login*", "https://archive.transformativeworks.org/users/sign_up*", "https://archive.transformativeworks.org/users/password*", "https://archive.transformativeworks.org/users/auth/*", "https://archive.transformativeworks.org/users/logout*", "https://ao3.org/users/login*", "https://*.ao3.org/users/login*", "https://ao3.org/users/sign_up*", "https://*.ao3.org/users/sign_up*", "https://ao3.org/users/password*", "https://*.ao3.org/users/password*", "https://ao3.org/users/auth/*", "https://*.ao3.org/users/auth/*", "https://ao3.org/users/logout*", "https://*.ao3.org/users/logout*", "https://www.fanfiction.net/login.php*", "https://www.fanfiction.net/signup.php*", "https://www.fanfiction.net/account/login*", "https://www.fanfiction.net/account/signup*", "https://www.fanfiction.net/auth/*", "https://m.fanfiction.net/login.php*", "https://m.fanfiction.net/signup.php*", "https://m.fanfiction.net/account/login*", "https://m.fanfiction.net/account/signup*", "https://m.fanfiction.net/auth/*"] }, { id: "trace-ao3-saved-filters-v1", matches: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*"], js: ["ao3-saved-filters.js"], runAt: "document_end", persistAcrossSessions: true, excludeMatches: ["https://archiveofourown.org/users/login*", "https://*.archiveofourown.org/users/login*", "https://archiveofourown.org/users/sign_up*", "https://*.archiveofourown.org/users/sign_up*", "https://archiveofourown.org/users/password*", "https://*.archiveofourown.org/users/password*", "https://archiveofourown.org/users/auth/*", "https://*.archiveofourown.org/users/auth/*", "https://archiveofourown.org/users/logout*", "https://*.archiveofourown.org/users/logout*", "https://archiveofourown.gay/users/login*", "https://*.archiveofourown.gay/users/login*", "https://archiveofourown.gay/users/sign_up*", "https://*.archiveofourown.gay/users/sign_up*", "https://archiveofourown.gay/users/password*", "https://*.archiveofourown.gay/users/password*", "https://archiveofourown.gay/users/auth/*", "https://*.archiveofourown.gay/users/auth/*", "https://archiveofourown.gay/users/logout*", "https://*.archiveofourown.gay/users/logout*", "https://archive.transformativeworks.org/users/login*", "https://archive.transformativeworks.org/users/sign_up*", "https://archive.transformativeworks.org/users/password*", "https://archive.transformativeworks.org/users/auth/*", "https://archive.transformativeworks.org/users/logout*", "https://ao3.org/users/login*", "https://*.ao3.org/users/login*", "https://ao3.org/users/sign_up*", "https://*.ao3.org/users/sign_up*", "https://ao3.org/users/password*", "https://*.ao3.org/users/password*", "https://ao3.org/users/auth/*", "https://*.ao3.org/users/auth/*", "https://ao3.org/users/logout*", "https://*.ao3.org/users/logout*"] }] };
 
-  // src/extension-runtime/archive-sender.mts
-  function isInactiveSender(sender) {
-    if (typeof sender?.frameId === "number" && sender.frameId !== 0) return true;
-    const lifecycle = typeof sender?.documentLifecycle === "string" ? sender.documentLifecycle.toLowerCase() : "";
-    return lifecycle === "prerender" || lifecycle === "pending_deletion";
-  }
-  function archiveHostKindFromSender(sender) {
-    if (isInactiveSender(sender)) return null;
-    const rawUrl = sender?.tab?.url ?? sender?.url;
-    if (typeof rawUrl !== "string") return null;
-    try {
-      const url = new URL(rawUrl);
-      if (url.protocol !== "https:") return null;
-      const host = url.hostname.toLowerCase();
-      if (host === "archiveofourown.org" || host.endsWith(".archiveofourown.org") || host === "archiveofourown.gay" || host.endsWith(".archiveofourown.gay") || host === "archive.transformativeworks.org" || host === "ao3.org" || host.endsWith(".ao3.org")) {
-        return "ao3";
-      }
-      if (host === "www.fanfiction.net" || host === "m.fanfiction.net") {
-        return "ffn";
-      }
-    } catch {
-    }
-    return null;
-  }
-  function isBlockedArchivePath(rawUrl, hostKind2) {
-    if (typeof rawUrl !== "string") return true;
-    try {
-      const pathname = new URL(rawUrl).pathname;
-      return hostKind2 === "ao3" ? /^\/users\/(?:login|sign_up|password|auth\/|logout)/i.test(pathname) : /^\/(?:login\.php|signup\.php|account\/(?:login|signup)|auth\/)/i.test(pathname);
-    } catch {
-      return true;
-    }
-  }
-  function workKeyFromArchiveUrl(rawUrl, expectedHost) {
-    if (typeof rawUrl !== "string" || rawUrl.length > 4096) return null;
-    try {
-      const url = new URL(rawUrl);
-      if (url.protocol !== "https:") return null;
-      const host = url.hostname.toLowerCase();
-      if (expectedHost === "ao3") {
-        const supported = host === "archiveofourown.org" || host.endsWith(".archiveofourown.org") || host === "archiveofourown.gay" || host.endsWith(".archiveofourown.gay") || host === "archive.transformativeworks.org" || host === "ao3.org" || host.endsWith(".ao3.org");
-        if (!supported) return null;
-        const match2 = url.pathname.match(/^\/works\/([1-9][0-9]{0,19})(?:\/|$)/);
-        return match2?.[1] ? `ao3:${match2[1]}` : null;
-      }
-      if (host !== "www.fanfiction.net" && host !== "m.fanfiction.net") return null;
-      const match = url.pathname.match(/^\/s\/([1-9][0-9]{0,19})(?:\/|$)/);
-      return match?.[1] ? `ffn:${match[1]}` : null;
-    } catch {
-      return null;
-    }
-  }
-  function sourceMatchesArchiveHost(source, hostKind2) {
-    if (typeof source !== "string") return false;
-    const normalized = source.trim().toLowerCase();
-    return hostKind2 === "ao3" ? normalized === "ao3" || normalized === "archiveofourown.org" || normalized === "archiveofourown.gay" || normalized === "archive.transformativeworks.org" : normalized === "ffn" || normalized === "fanfiction.net";
-  }
-
   // src/extension-runtime/browser-platform.mts
   var BrowserStorage = class {
     #area;
@@ -122,6 +64,130 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         reject(error);
       }
     });
+  }
+
+  // src/extension-runtime/activity-fetch.mts
+  function activityHeaders(runtime, os, userAgent) {
+    const ios = os === "ios" || /iPhone|iPad|iPod/i.test(userAgent);
+    const mobile = ios || os === "android" || /Android/i.test(userAgent);
+    const headers = {
+      "X-Trace-Platform": mobile ? "web_mobile" : "web_desktop"
+    };
+    const scheme = String(runtime.getURL?.("") ?? "");
+    const browser = scheme.startsWith("moz-extension:") ? "firefox" : scheme.startsWith("chrome-extension:") ? /Edg\//.test(userAgent) ? "edge" : "chrome" : scheme.startsWith("safari-web-extension:") ? ios ? "safari_ios" : os === "mac" ? "safari_macos" : null : null;
+    if (browser) headers["X-Trace-Extension-Browser"] = browser;
+    const version = runtime.getManifest?.().version;
+    if (typeof version === "string" && /^[0-9]{1,4}(\.[0-9]{1,4}){0,3}$/.test(version))
+      headers["X-Trace-Extension-Version"] = version;
+    return headers;
+  }
+  function createActivityFetch(fetchImpl, runtime, mode, apiBase) {
+    let dimensions;
+    const metadata = () => dimensions ??= (async () => {
+      let os = "unknown";
+      let timer;
+      try {
+        if (runtime.getPlatformInfo) {
+          const info = await Promise.race([
+            extensionCall(
+              runtime,
+              "getPlatformInfo",
+              [],
+              runtime,
+              mode
+            ),
+            new Promise((resolve) => {
+              timer = setTimeout(() => resolve(null), 250);
+            })
+          ]);
+          os = info?.os ?? "unknown";
+        }
+      } catch {
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      try {
+        return activityHeaders(
+          runtime,
+          os,
+          globalThis.navigator?.userAgent ?? ""
+        );
+      } catch {
+        return {};
+      }
+    })();
+    return async (input, init) => {
+      const url = new URL(
+        typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+      );
+      const headers = new Headers(
+        init?.headers ?? (input instanceof Request ? input.headers : void 0)
+      );
+      if (url.origin === new URL(apiBase).origin && url.pathname.startsWith("/api/extension/") && headers.has("Authorization")) {
+        for (const [name, value] of Object.entries(await metadata()))
+          headers.set(name, value);
+        return fetchImpl(input, { ...init, headers });
+      }
+      return fetchImpl(input, init);
+    };
+  }
+
+  // src/extension-runtime/archive-sender.mts
+  function isInactiveSender(sender) {
+    if (typeof sender?.frameId === "number" && sender.frameId !== 0) return true;
+    const lifecycle = typeof sender?.documentLifecycle === "string" ? sender.documentLifecycle.toLowerCase() : "";
+    return lifecycle === "prerender" || lifecycle === "pending_deletion";
+  }
+  function archiveHostKindFromSender(sender) {
+    if (isInactiveSender(sender)) return null;
+    const rawUrl = sender?.tab?.url ?? sender?.url;
+    if (typeof rawUrl !== "string") return null;
+    try {
+      const url = new URL(rawUrl);
+      if (url.protocol !== "https:") return null;
+      const host = url.hostname.toLowerCase();
+      if (host === "archiveofourown.org" || host.endsWith(".archiveofourown.org") || host === "archiveofourown.gay" || host.endsWith(".archiveofourown.gay") || host === "archive.transformativeworks.org" || host === "ao3.org" || host.endsWith(".ao3.org")) {
+        return "ao3";
+      }
+      if (host === "www.fanfiction.net" || host === "m.fanfiction.net") {
+        return "ffn";
+      }
+    } catch {
+    }
+    return null;
+  }
+  function isBlockedArchivePath(rawUrl, hostKind2) {
+    if (typeof rawUrl !== "string") return true;
+    try {
+      const pathname = new URL(rawUrl).pathname;
+      return hostKind2 === "ao3" ? /^\/users\/(?:login|sign_up|password|auth\/|logout)/i.test(pathname) : /^\/(?:login\.php|signup\.php|account\/(?:login|signup)|auth\/)/i.test(pathname);
+    } catch {
+      return true;
+    }
+  }
+  function workKeyFromArchiveUrl(rawUrl, expectedHost) {
+    if (typeof rawUrl !== "string" || rawUrl.length > 4096) return null;
+    try {
+      const url = new URL(rawUrl);
+      if (url.protocol !== "https:") return null;
+      const host = url.hostname.toLowerCase();
+      if (expectedHost === "ao3") {
+        const supported = host === "archiveofourown.org" || host.endsWith(".archiveofourown.org") || host === "archiveofourown.gay" || host.endsWith(".archiveofourown.gay") || host === "archive.transformativeworks.org" || host === "ao3.org" || host.endsWith(".ao3.org");
+        if (!supported) return null;
+        const match2 = url.pathname.match(/^\/works\/([1-9][0-9]{0,19})(?:\/|$)/);
+        return match2?.[1] ? `ao3:${match2[1]}` : null;
+      }
+      if (host !== "www.fanfiction.net" && host !== "m.fanfiction.net") return null;
+      const match = url.pathname.match(/^\/s\/([1-9][0-9]{0,19})(?:\/|$)/);
+      return match?.[1] ? `ffn:${match[1]}` : null;
+    } catch {
+      return null;
+    }
+  }
+  function sourceMatchesArchiveHost(source, hostKind2) {
+    if (typeof source !== "string") return false;
+    const normalized = source.trim().toLowerCase();
+    return hostKind2 === "ao3" ? normalized === "ao3" || normalized === "archiveofourown.org" || normalized === "archiveofourown.gay" || normalized === "archive.transformativeworks.org" : normalized === "ffn" || normalized === "fanfiction.net";
   }
 
   // src/extension-runtime/archive-recovery.mts
@@ -7452,7 +7518,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       storageArea: extension.storage.local,
       databaseFactory: scope.indexedDB,
       storageMode,
-      fetch: globalThis.fetch.bind(globalThis),
+      fetch: createActivityFetch(globalThis.fetch.bind(globalThis), extension.runtime, storageMode, "https://api.tracefiction.com"),
       apiBase: "https://api.tracefiction.com",
       nativeImportHandoff: false,
       webOrigin: "https://www.tracefiction.com",

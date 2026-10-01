@@ -1,3 +1,4 @@
+import { createActivityFetch } from "./activity-fetch.mjs";
 import { installArchiveRecovery } from "./archive-recovery.mjs";
 import { installSessionRuntime, type SessionMode, type SessionRuntimeController } from "./controller.mjs";
 import { installArchiveReadinessRuntime } from "./archive-readiness.mjs";
@@ -153,7 +154,7 @@ try {
     storageArea: extension.storage.local,
     databaseFactory: scope.indexedDB,
     storageMode,
-    fetch: globalThis.fetch.bind(globalThis),
+    fetch: createActivityFetch(globalThis.fetch.bind(globalThis),extension.runtime,storageMode,__TRACE_API_BASE__),
     apiBase: __TRACE_API_BASE__,
     nativeImportHandoff: __TRACE_NATIVE_IMPORT_HANDOFF__,
     webOrigin: __TRACE_WEB_ORIGIN__,
