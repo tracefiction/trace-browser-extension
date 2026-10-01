@@ -130,6 +130,51 @@ function activityPlatform() {
   return activityPlatformPromise;
 }
 
+// A failed OPTIONS probe disables optional telemetry for this worker lifetime.
+let activityHeadersDisabled = false;
+const ACTIVITY_HEADER_NAMES = ["x-trace-platform", "x-trace-app-version", "x-trace-extension-browser", "x-trace-extension-version"];
+
+async function fetchWithActivity(url, init) {
+  if (!String(url).startsWith(`${TRACE_API_BASE.replace(/\/$/, "")}/api/`)) return fetch(url, init);
+  const headers = { ...(init.headers || {}) };
+  if (!headers.Authorization && !headers.authorization) return fetch(url, init);
+  for (const name of Object.keys(headers)) if (ACTIVITY_HEADER_NAMES.includes(name.toLowerCase())) delete headers[name];
+  const baseline = { ...headers };
+  const kind = detectBrowserKind();
+  // No Firefox technical/interaction opt-in exists, so send none of these fields.
+  if (activityHeadersDisabled || !["chrome", "safari"].includes(kind)) return fetch(url, { ...init, headers: baseline });
+  try {
+    const ua = globalThis.navigator?.userAgent || "";
+    const os = await activityPlatform();
+    const ios = os === "ios" || /iPhone|iPad|iPod/i.test(ua);
+    headers["X-Trace-Platform"] = ios || os === "android" || /Android/i.test(ua) ? "web_mobile" : "web_desktop";
+    const browser = kind === "safari" ? (ios ? "safari_ios" : os === "mac" ? "safari_macos" : null) : /Edg\//.test(ua) ? "edge" : "chrome";
+    if (browser) headers["X-Trace-Extension-Browser"] = browser;
+    const version = ext.runtime?.getManifest?.().version;
+    if (typeof version === "string" && /^[0-9]{1,4}(\.[0-9]{1,4}){0,3}$/.test(version)) headers["X-Trace-Extension-Version"] = version;
+  } catch (_) { return fetch(url, { ...init, headers: baseline }); }
+  init.signal?.throwIfAborted();
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const abort = () => controller?.abort(init.signal?.reason);
+  init.signal?.addEventListener("abort", abort, { once: true });
+  let probeTimer;
+  let allowed;
+  try {
+    allowed = await Promise.race([
+      fetch(url, { method: "OPTIONS", headers, mode: "cors", redirect: "error", credentials: init.credentials, signal: controller?.signal })
+        .then(response => response.ok, () => false),
+      new Promise(resolve => { probeTimer = setTimeout(() => { controller?.abort(); resolve(false); }, 1000); }),
+    ]);
+  } finally {
+    if (probeTimer != null) clearTimeout(probeTimer);
+    init.signal?.removeEventListener("abort", abort);
+  }
+  init.signal?.throwIfAborted();
+  if (!allowed) activityHeadersDisabled = true;
+  // Only the harmless probe failed. Never replay a possibly committed save.
+  return fetch(url, { ...init, headers: allowed ? headers : baseline });
+}
+
 async function fetchWithTimeout(
   url,
   init = {},
@@ -137,22 +182,6 @@ async function fetchWithTimeout(
 ) {
   let controller = null;
   const requestInit = { ...init };
-  // Coarse release attribution; never transmit the user agent or page context.
-  if (String(url).startsWith(`${TRACE_API_BASE.replace(/\/$/, "")}/api/`)) {
-    const headers = { ...(init.headers || {}) };
-    if (headers.Authorization || headers.authorization) {
-      const ua = globalThis.navigator?.userAgent || "";
-      const os = await activityPlatform();
-      const ios = os === "ios" || /iPhone|iPad|iPod/i.test(ua);
-      headers["X-Trace-Platform"] = ios || os === "android" || /Android/i.test(ua) ? "web_mobile" : "web_desktop";
-      const kind = detectBrowserKind();
-      const browser = kind === "safari" ? (ios ? "safari_ios" : os === "mac" ? "safari_macos" : null) : kind === "chrome" && /Edg\//.test(ua) ? "edge" : kind;
-      if (["safari_ios", "safari_macos", "chrome", "firefox", "edge"].includes(browser)) headers["X-Trace-Extension-Browser"] = browser;
-      const version = ext.runtime?.getManifest?.().version;
-      if (typeof version === "string" && /^[0-9]{1,4}(\.[0-9]{1,4}){0,3}$/.test(version)) headers["X-Trace-Extension-Version"] = version;
-      requestInit.headers = headers;
-    }
-  }
   if (
     !requestInit.signal &&
     typeof AbortController !== "undefined"
@@ -174,7 +203,7 @@ async function fetchWithTimeout(
   });
 
   try {
-    return await Promise.race([fetch(url, requestInit), timeout]);
+    return await Promise.race([fetchWithActivity(url, requestInit), timeout]);
   } finally {
     if (timeoutId != null) clearTimeout(timeoutId);
   }

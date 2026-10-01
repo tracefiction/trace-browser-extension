@@ -68,12 +68,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 
   // src/extension-runtime/activity-fetch.mts
   function activityHeaders(runtime, os, userAgent) {
+    const scheme = String(runtime.getURL?.("") ?? "");
+    if (!/^(chrome|safari-web)-extension:/.test(scheme)) return {};
     const ios = os === "ios" || /iPhone|iPad|iPod/i.test(userAgent);
     const mobile = ios || os === "android" || /Android/i.test(userAgent);
     const headers = {
       "X-Trace-Platform": mobile ? "web_mobile" : "web_desktop"
     };
-    const scheme = String(runtime.getURL?.("") ?? "");
     const browser = scheme.startsWith("moz-extension:") ? "firefox" : scheme.startsWith("chrome-extension:") ? /Edg\//.test(userAgent) ? "edge" : "chrome" : scheme.startsWith("safari-web-extension:") ? ios ? "safari_ios" : os === "mac" ? "safari_macos" : null : null;
     if (browser) headers["X-Trace-Extension-Browser"] = browser;
     const version = runtime.getManifest?.().version;
@@ -82,8 +83,17 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     return headers;
   }
   function createActivityFetch(fetchImpl, runtime, mode, apiBase) {
+    let metadataDisabled = false;
     let dimensions;
     const metadata = () => dimensions ??= (async () => {
+      try {
+        if (!/^(chrome|safari-web)-extension:/.test(
+          String(runtime.getURL?.("") ?? "")
+        ))
+          return {};
+      } catch {
+        return {};
+      }
       let os = "unknown";
       let timer;
       try {
@@ -124,12 +134,68 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         init?.headers ?? (input instanceof Request ? input.headers : void 0)
       );
       if (url.origin === new URL(apiBase).origin && url.pathname.startsWith("/api/extension/") && headers.has("Authorization")) {
-        for (const [name, value] of Object.entries(await metadata()))
-          headers.set(name, value);
+        for (const name of ACTIVITY_HEADERS) headers.delete(name);
+        const baseline = new Headers(headers);
+        const extra = metadataDisabled ? {} : await metadata();
+        if (Object.keys(extra).length) {
+          for (const [name, value] of Object.entries(extra))
+            headers.set(name, value);
+          const signal = init?.signal ?? (input instanceof Request ? input.signal : void 0);
+          const credentials = init?.credentials ?? (input instanceof Request ? input.credentials : void 0);
+          if (!await acceptsActivityHeaders(
+            fetchImpl,
+            url.href,
+            headers,
+            signal,
+            credentials
+          )) {
+            metadataDisabled = true;
+            return fetchImpl(input, { ...init, headers: baseline });
+          }
+        }
         return fetchImpl(input, { ...init, headers });
       }
       return fetchImpl(input, init);
     };
+  }
+  var ACTIVITY_HEADERS = [
+    "X-Trace-Platform",
+    "X-Trace-App-Version",
+    "X-Trace-Extension-Browser",
+    "X-Trace-Extension-Version"
+  ];
+  async function acceptsActivityHeaders(send, url, headers, signal, credentials) {
+    signal?.throwIfAborted();
+    const controller = new AbortController();
+    const abort = () => controller.abort(signal?.reason);
+    signal?.addEventListener("abort", abort, { once: true });
+    let timer;
+    try {
+      const allowed = await Promise.race([
+        send(url, {
+          method: "OPTIONS",
+          headers,
+          mode: "cors",
+          redirect: "error",
+          ...credentials ? { credentials } : {},
+          signal: controller.signal
+        }).then(
+          (response) => response.ok,
+          () => false
+        ),
+        new Promise((resolve) => {
+          timer = setTimeout(() => {
+            controller.abort();
+            resolve(false);
+          }, 1e3);
+        })
+      ]);
+      signal?.throwIfAborted();
+      return allowed;
+    } finally {
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+    }
   }
 
   // src/extension-runtime/archive-sender.mts

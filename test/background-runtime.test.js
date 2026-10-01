@@ -62,6 +62,7 @@ function createBackgroundHarness({
   webOrigin = "https://tracefiction.com",
   storageState = {},
   fetchImpl,
+  corsProbeImpl,
   activeTabs = [{ id: 11 }],
   sendMessageImpl,
   sendNativeMessageImpl,
@@ -85,6 +86,7 @@ function createBackgroundHarness({
   const updatedTabs = [];
   const nativeMessages = [];
   const fetchCalls = [];
+  const corsProbeCalls = [];
   const timers = [];
   const storageChangeListeners = [];
   const storageSetCalls = [];
@@ -222,6 +224,10 @@ function createBackgroundHarness({
     chrome: ext,
     browser: undefined,
     fetch: async (url, init) => {
+      if (init?.method === "OPTIONS") {
+        corsProbeCalls.push({ url, init });
+        return corsProbeImpl ? corsProbeImpl(url, init) : createResponse({ok:true,status:204});
+      }
       fetchCalls.push({ url, init });
       if (fetchImpl) return fetchImpl(url, init);
       return createResponse({ ok: false, status: 500 });
@@ -298,6 +304,7 @@ globalThis.__testHooks = {
     updatedTabs,
     nativeMessages,
     fetchCalls,
+    corsProbeCalls,
     storageSetCalls,
     timers,
     get hooks() {
@@ -5725,4 +5732,28 @@ test("legacy API requests report validated release and Safari OS without raw use
   assert.equal(headers["X-Trace-Extension-Version"], "0.7.0");
   assert.equal(headers["X-Trace-Platform"], "web_mobile");
   assert.ok(!JSON.stringify(headers).includes("PRIVATE_USER_AGENT"));
+});
+
+
+test("legacy CORS rejection downgrades once before sending a save, preserving auth/body", async () => {
+  const h=createBackgroundHarness({runtimeUrl:"safari-web-extension://fixture/",corsProbeImpl:async()=>{throw new TypeError("Failed to fetch");},fetchImpl:async()=>createResponse({ok:true,status:200})});
+  h.context.chrome.runtime.getManifest=()=>({version:"0.7.0"});
+  const init={method:"POST",headers:{Authorization:"Bearer fixture","Content-Type":"application/json"},body:'{"operationId":"same-save"}'};
+  await h.hooks.fetchWithTimeout("https://tracefiction.com/api/extension/track",init);
+  await h.hooks.fetchWithTimeout("https://tracefiction.com/api/extension/track",init);
+  assert.equal(h.corsProbeCalls.length,1);
+  assert.equal(h.fetchCalls.length,2);
+  for(const {init:sent} of h.fetchCalls) {assert.deepEqual(plainJson(sent.headers),init.headers);assert.equal(sent.body,init.body);assert.equal(sent.method,'POST');}
+});
+test("legacy Firefox sends no optional telemetry and does not probe", async () => {
+  const h=createBackgroundHarness({runtimeUrl:"moz-extension://fixture/",fetchImpl:async()=>createResponse({ok:true,status:200})});
+  h.context.chrome.runtime.getManifest=()=>{throw new Error('must not read release');};
+  await h.hooks.fetchWithTimeout("https://tracefiction.com/api/extension/track",{headers:{Authorization:"Bearer fixture","X-Trace-Platform":"web_desktop","X-Trace-Extension-Version":"0.7.0"}});
+  assert.equal(h.corsProbeCalls.length,0);
+  assert.deepEqual(Object.keys(h.fetchCalls[0].init.headers),['Authorization']);
+});
+test("legacy never replays a save after an ambiguous network failure", async () => {
+  const h=createBackgroundHarness({runtimeUrl:"chrome-extension://fixture/",fetchImpl:async()=>{throw new TypeError('Failed to fetch');}});
+  await assert.rejects(h.hooks.fetchWithTimeout("https://tracefiction.com/api/extension/track",{method:'POST',headers:{Authorization:'Bearer fixture'},body:'same-save'}));
+  assert.equal(h.corsProbeCalls.length,1);assert.equal(h.fetchCalls.length,1);
 });

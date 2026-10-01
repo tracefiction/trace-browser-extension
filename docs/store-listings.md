@@ -56,9 +56,32 @@ reliable setup and browsing:
 - Makes library status, reading progress, metadata contribution, and AO3 saved
   filters more consistent across account and network changes.
 
-Privacy boundary unchanged: Trace still reads story metadata and reading
-progress from supported pages, not AO3/FFN credentials, cookies, private
-account pages, story text, or unrelated browsing history.
+For this historical 0.6.1 release, the reading-data boundary remained unchanged.
+For builds containing aggregate activity attribution, use the additional current
+privacy disclosure below; do not describe the telemetry collection as unchanged.
+
+## Privacy disclosure for builds with aggregate activity attribution
+
+Safari and Chrome/Edge send coarse browser, mobile/desktop and installed
+extension-version fields on authenticated requests to Trace. Trace uses these
+for aggregate release adoption and reliability diagnostics. No raw user agent,
+story text, unrelated browsing history, cookie, device identifier or new
+permission is collected by this feature. The API may receive a bodyless OPTIONS
+compatibility check before an attributed request. If that check fails, the call
+continues without optional metadata; saves are not replayed by the metadata
+adapter. Store privacy disclosures must include these diagnostics for Safari
+and Chrome/Edge when this feature ships.
+
+Firefox excludes this feature entirely: no activity headers and no capability
+probe. Its existing `authenticationInfo` and `websiteContent` declarations remain
+unchanged. Do not claim optional technical/interaction collection is enabled or
+that consent was obtained. Enabling it later requires an explicit consent design
+and updated Mozilla declaration, not just changing the browser detection.
+
+Release/pin gate: deploy ff-app #319's API CORS allow-list BEFORE releasing or
+pinning a build with this change. Old servers reject the extra header names in
+preflight. The defensive fallback does not waive server-first deployment or the
+owner's privacy review. This document change is not a store submission.
 
 ## Chrome / Firefox Submission Notes
 

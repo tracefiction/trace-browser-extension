@@ -329,11 +329,27 @@ the additive messages; absence leaves existing behavior intact.
 
 ## Aggregate release and browser diagnostics
 
-Authenticated requests to the configured Trace API now include the installed
-extension version and coarse browser/OS categories (Safari iOS/macOS, Chrome,
-Firefox or Edge; mobile/desktop). Trace uses these to measure release adoption
-and diagnose rejected writes by version. The server records a throttled activity
-event per account/surface and exposes aggregates only in its admin overview.
-No page content, URL, raw user agent, browsing history, hardware identifier,
-extra permission or new destination is added. Missing metadata on older clients
-remains unknown. This does not alter authentication or tracking confirmations.
+Safari and Chromium-family clients may attach installed extension version and
+coarse mobile/desktop and browser categories to authenticated Trace API calls.
+The server uses these for aggregate release adoption and failure diagnostics.
+Firefox sends **none** of these optional activity headers: this release does not
+request `technicalAndInteraction` consent and does not enable that collection.
+
+Before adding headers, the extension checks the exact API URL/header set with a
+bodyless, side-effect-free OPTIONS request, bounded to one second. If the probe
+fails (including CORS rejection) or times out, the actual request is sent once
+with its original authorization/body and without the optional headers. Added
+telemetry remains disabled for that worker's lifetime. An HTTP error or ambiguous
+network failure on the actual save is never replayed by this adapter. Existing
+save reconciliation/retry ownership remains unchanged. Firefox sends no probe.
+
+No permission, destination, raw user agent, page content, unrelated browsing
+history or installation identifier is added. OPTIONS is additional API traffic,
+not an additional activity event. Existing clients remain unattributed.
+
+**Release dependency:** ff-app #319's CORS allow-list must be deployed to the API
+BEFORE any extension build containing this change is released or pinned into the
+Apple app. Older allow-lists reject these headers during preflight; they do not
+silently ignore them. The compatibility fallback is defensive, not permission
+to reverse deployment order. Owner privacy review is required before merge or
+release; no merge, pin update or store submission is authorized here.
