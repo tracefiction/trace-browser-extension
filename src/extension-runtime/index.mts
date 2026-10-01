@@ -154,7 +154,10 @@ try {
     storageArea: extension.storage.local,
     databaseFactory: scope.indexedDB,
     storageMode,
-    fetch: createActivityFetch(globalThis.fetch.bind(globalThis),extension.runtime,storageMode,__TRACE_API_BASE__),
+    fetch: createActivityFetch(
+      globalThis.fetch.bind(globalThis), extension.runtime, storageMode, __TRACE_API_BASE__,
+      new BrowserStorage(extension.storage.local, extension.runtime, storageMode),
+    ),
     apiBase: __TRACE_API_BASE__,
     nativeImportHandoff: __TRACE_NATIVE_IMPORT_HANDOFF__,
     webOrigin: __TRACE_WEB_ORIGIN__,

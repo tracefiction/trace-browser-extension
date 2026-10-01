@@ -132,6 +132,48 @@ function activityPlatform() {
 
 // A failed OPTIONS probe disables optional telemetry for this worker lifetime.
 let activityHeadersDisabled = false;
+const ACTIVITY_CORS_CACHE_KEY = `traceActivityCorsV1:${new URL(TRACE_API_BASE).origin}`;
+const ACTIVITY_CORS_TTL = 60 * 60_000;
+let activityAcceptedUntil = 0;
+let activityCacheLoaded = false;
+let activityProbe;
+async function optionalActivityCache(operation) {
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(operation).catch(() => undefined),
+      new Promise(resolve => { timer = setTimeout(resolve, 250); }),
+    ]);
+  } finally { if (timer != null) clearTimeout(timer); }
+}
+const rememberActivityCapability = until => optionalActivityCache(() => storageSetLocal({ [ACTIVITY_CORS_CACHE_KEY]: until }));
+function acceptsActivityHeaders(url, headers, credentials) {
+  if (activityAcceptedUntil > Date.now()) return Promise.resolve(true);
+  return activityProbe ??= (async () => {
+    if (!activityCacheLoaded) {
+      activityCacheLoaded = true;
+      const snapshot = await optionalActivityCache(() => storageGetLocal([ACTIVITY_CORS_CACHE_KEY]));
+      const until = snapshot?.[ACTIVITY_CORS_CACHE_KEY];
+      if (typeof until === "number" && until > Date.now() && until <= Date.now() + ACTIVITY_CORS_TTL) activityAcceptedUntil = until;
+    }
+    if (activityAcceptedUntil > Date.now()) return true;
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    let timer;
+    let allowed;
+    try {
+      allowed = await Promise.race([
+        fetch(url, { method: "OPTIONS", headers, mode: "cors", redirect: "error", credentials, signal: controller?.signal })
+          .then(response => response.ok, () => false),
+        new Promise(resolve => { timer = setTimeout(() => { controller?.abort(); resolve(false); }, 1000); }),
+      ]);
+    } finally { if (timer != null) clearTimeout(timer); }
+    if (allowed) {
+      activityAcceptedUntil = Date.now() + ACTIVITY_CORS_TTL;
+      await rememberActivityCapability(activityAcceptedUntil);
+    } else activityHeadersDisabled = true;
+    return allowed;
+  })().finally(() => { activityProbe = undefined; });
+}
 const ACTIVITY_HEADER_NAMES = ["x-trace-platform", "x-trace-app-version", "x-trace-extension-browser", "x-trace-extension-version"];
 
 async function fetchWithActivity(url, init) {
@@ -154,25 +196,23 @@ async function fetchWithActivity(url, init) {
     if (typeof version === "string" && /^[0-9]{1,4}(\.[0-9]{1,4}){0,3}$/.test(version)) headers["X-Trace-Extension-Version"] = version;
   } catch (_) { return fetch(url, { ...init, headers: baseline }); }
   init.signal?.throwIfAborted();
-  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
-  const abort = () => controller?.abort(init.signal?.reason);
-  init.signal?.addEventListener("abort", abort, { once: true });
-  let probeTimer;
-  let allowed;
-  try {
-    allowed = await Promise.race([
-      fetch(url, { method: "OPTIONS", headers, mode: "cors", redirect: "error", credentials: init.credentials, signal: controller?.signal })
-        .then(response => response.ok, () => false),
-      new Promise(resolve => { probeTimer = setTimeout(() => { controller?.abort(); resolve(false); }, 1000); }),
-    ]);
-  } finally {
-    if (probeTimer != null) clearTimeout(probeTimer);
-    init.signal?.removeEventListener("abort", abort);
-  }
+  const allowed = await acceptsActivityHeaders(url, headers, init.credentials);
   init.signal?.throwIfAborted();
-  if (!allowed) activityHeadersDisabled = true;
-  // Only the harmless probe failed. Never replay a possibly committed save.
-  return fetch(url, { ...init, headers: allowed ? headers : baseline });
+  // Only the harmless probe can downgrade. Never replay a possibly committed save.
+  try {
+    const response = await fetch(url, { ...init, headers: allowed ? headers : baseline });
+    if (allowed && !response.ok) {
+      activityAcceptedUntil = 0;
+      await rememberActivityCapability(0);
+    }
+    return response;
+  } catch (error) {
+    if (allowed && !init.signal?.aborted) {
+      activityAcceptedUntil = 0;
+      await rememberActivityCapability(0);
+    }
+    throw error;
+  }
 }
 
 async function fetchWithTimeout(

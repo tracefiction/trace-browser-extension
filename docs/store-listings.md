@@ -67,21 +67,26 @@ extension-version fields on authenticated requests to Trace. Trace uses these
 for aggregate release adoption and reliability diagnostics. No raw user agent,
 story text, unrelated browsing history, cookie, device identifier or new
 permission is collected by this feature. The API may receive a bodyless OPTIONS
-compatibility check before an attributed request. If that check fails, the call
-continues without optional metadata; saves are not replayed by the metadata
-adapter. Store privacy disclosures must include these diagnostics for Safari
-and Chrome/Edge when this feature ships.
+compatibility check before the first attributed request. A successful check is
+cached per API origin for one hour across worker restarts, so steady-state saves
+add no compatibility round trip. Expiry or request failure invalidates the
+check; only the origin key and expiry timestamp are cached locally. If the check
+fails, the call continues without optional metadata; saves are not replayed by
+the metadata adapter. Store privacy disclosures must include these diagnostics
+for Safari and Chrome/Edge when this feature ships.
 
 Firefox excludes this feature entirely: no activity headers and no capability
-probe. Its existing `authenticationInfo` and `websiteContent` declarations remain
-unchanged. Do not claim optional technical/interaction collection is enabled or
-that consent was obtained. Enabling it later requires an explicit consent design
-and updated Mozilla declaration, not just changing the browser detection.
+probe. Its existing `authenticationInfo` and `websiteContent` declarations
+remain unchanged. Do not claim optional technical/interaction collection is
+enabled or that consent was obtained. Enabling it later requires an explicit
+consent design and updated Mozilla declaration, not just changing the browser
+detection.
 
-Release/pin gate: deploy ff-app #319's API CORS allow-list BEFORE releasing or
-pinning a build with this change. Old servers reject the extra header names in
-preflight. The defensive fallback does not waive server-first deployment or the
-owner's privacy review. This document change is not a store submission.
+Release/pin gate: requires a Trace API version that accepts these headers.
+Deploy the compatible API BEFORE releasing or pinning a build with this change.
+Old servers reject the extra header names in preflight. The defensive fallback
+does not waive server-first deployment or the owner's privacy review. This
+document change is not a store submission.
 
 ## Chrome / Firefox Submission Notes
 

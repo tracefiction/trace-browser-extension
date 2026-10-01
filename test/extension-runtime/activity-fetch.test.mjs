@@ -210,3 +210,126 @@ test("a failed probe preserves a Request body for its single real send", async (
   await send(original);
   assert.deepEqual(bodies, [init.body]);
 });
+
+test("successful probe is shared by concurrent saves and reused across endpoint paths", async () => {
+  const seen = [];
+  const send = createActivityFetch(async (_, request) => {
+    seen.push(request);
+    return response();
+  }, runtime, "promise", api);
+  await Promise.all(Array.from({ length: 25 }, (_, i) => send(api + "/api/extension/track?save=" + i, init)));
+  await send(api + "/api/extension/account", { headers: init.headers });
+  assert.equal(seen.filter(r => r.method === "OPTIONS").length, 1);
+  assert.equal(seen.filter(r => r.method === "POST").length, 25);
+  assert.equal(seen.length, 27);
+  assert.ok(seen.every(r => r.headers.get("X-Trace-Extension-Version") === "2.3.1"));
+});
+
+function memoryCache() {
+  const data = {};
+  return { data, get: async key => ({ [key]: data[key] }), set: async patch => { Object.assign(data, patch); } };
+}
+
+test("origin cache survives worker restart, expires after an hour and cannot authorize another origin", async t => {
+  let now = 1_800_000_000_000;
+  t.mock.method(Date, "now", () => now);
+  const storage = memoryCache();
+  const seen = [];
+  const fetchImpl = async (url, request) => { seen.push({ url, request }); return response(); };
+  const worker = (base = api) => createActivityFetch(fetchImpl, runtime, "promise", base, storage);
+  await worker()(api + "/api/extension/track", init);
+  now += 1_000;
+  const restarted = worker();
+  await restarted(api + "/api/extension/track", init);
+  assert.equal(seen.filter(r => r.request.method === "OPTIONS").length, 1);
+  assert.deepEqual(storage.data, { [`traceActivityCorsV1:${api}`]: 1_800_003_600_000 });
+  const other = "https://other.example";
+  await worker(other)(other + "/api/extension/track", init);
+  assert.equal(seen.filter(r => r.request.method === "OPTIONS").length, 2);
+  now = 1_800_003_600_000;
+  await restarted(api + "/api/extension/track", init);
+  assert.equal(seen.filter(r => r.request.method === "OPTIONS").length, 3);
+});
+
+test("HTTP and network failures invalidate a successful cache for the next call without replay", async () => {
+  for (const failure of [401, 500, "network"]) {
+    const storage = memoryCache();
+    const seen = [];
+    let fail = false;
+    const fetchImpl = async (_, request) => {
+      seen.push(request);
+      if (request.method === "OPTIONS") return response();
+      if (fail) {
+        if (failure === "network") throw new TypeError("Failed to fetch");
+        return new Response("{}", { status: failure });
+      }
+      return response();
+    };
+    const send = createActivityFetch(fetchImpl, runtime, "promise", api, storage);
+    await send(api + "/api/extension/track", init);
+    fail = true;
+    if (failure === "network") await assert.rejects(send(api + "/api/extension/track", init));
+    else assert.equal((await send(api + "/api/extension/track", init)).status, failure);
+    assert.deepEqual(seen.map(r => r.method), ["OPTIONS", "POST", "POST"]);
+    assert.equal(storage.data[`traceActivityCorsV1:${api}`], 0);
+    fail = false;
+    await createActivityFetch(fetchImpl, runtime, "promise", api, storage)(api + "/api/extension/track", init);
+    assert.deepEqual(seen.map(r => r.method), ["OPTIONS", "POST", "POST", "OPTIONS", "POST"]);
+  }
+});
+
+test("a re-probe after server capability loss downgrades before the next mutation", async () => {
+  let serverAccepts = true;
+  const methods = [];
+  const send = createActivityFetch(async (_, request) => {
+    methods.push(request.method);
+    if (!serverAccepts && request.headers.has("X-Trace-Platform")) throw new TypeError("Failed to fetch");
+    return response();
+  }, runtime, "promise", api);
+  await send(api + "/api/extension/track", init);
+  serverAccepts = false;
+  await assert.rejects(send(api + "/api/extension/track", init));
+  await send(api + "/api/extension/track", init);
+  await send(api + "/api/extension/track", init);
+  assert.deepEqual(methods, ["OPTIONS", "POST", "POST", "OPTIONS", "POST", "POST"]);
+});
+
+test("cancelling one caller does not cancel the shared probe or send its mutation", async () => {
+  let finish;
+  let start;
+  const probeStarted = new Promise(resolve => { start = resolve; });
+  const probeResponse = new Promise(resolve => { finish = resolve; });
+  const controller = new AbortController();
+  const sent = [];
+  const send = createActivityFetch(async (_, request) => {
+    sent.push(request);
+    if (request.method === "OPTIONS") { start(); return probeResponse; }
+    return response();
+  }, runtime, "promise", api);
+  const cancelled = assert.rejects(send(api + "/api/extension/track", { ...init, signal: controller.signal }), { name: "AbortError" });
+  const survivor = send(api + "/api/extension/track", init);
+  await probeStarted;
+  controller.abort();
+  finish(response());
+  await Promise.all([cancelled, survivor]);
+  assert.deepEqual(sent.map(r => r.method), ["OPTIONS", "POST"]);
+  await send(api + "/api/extension/track", init);
+  assert.equal(sent.length, 3);
+});
+
+test("cache storage failures never block a save or cause repeat steady-state probes", async () => {
+  const methods = [];
+  const storage = { get: async () => { throw Error("unavailable"); }, set: async () => { throw Error("unavailable"); } };
+  const send = createActivityFetch(async (_, request) => { methods.push(request.method); return response(); }, runtime, "promise", api, storage);
+  await send(api + "/api/extension/track", init);
+  await send(api + "/api/extension/track", init);
+  assert.deepEqual(methods, ["OPTIONS", "POST", "POST"]);
+});
+
+test("Firefox does not read or write the capability cache", async () => {
+  const storage = { get: () => assert.fail("cache read"), set: () => assert.fail("cache write") };
+  const methods = [];
+  const send = createActivityFetch(async (_, request) => { methods.push(request.method); return response(); }, { ...runtime, getURL: () => "moz-extension://fixture/" }, "promise", api, storage);
+  await send(api + "/api/extension/track", init);
+  assert.deepEqual(methods, ["POST"]);
+});

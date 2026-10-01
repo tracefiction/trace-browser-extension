@@ -5757,3 +5757,48 @@ test("legacy never replays a save after an ambiguous network failure", async () 
   await assert.rejects(h.hooks.fetchWithTimeout("https://tracefiction.com/api/extension/track",{method:'POST',headers:{Authorization:'Bearer fixture'},body:'same-save'}));
   assert.equal(h.corsProbeCalls.length,1);assert.equal(h.fetchCalls.length,1);
 });
+
+test("legacy successful capability probe is shared and survives worker restart", async () => {
+  const options = { runtimeUrl: "safari-web-extension://fixture/", fetchImpl: async () => createResponse() };
+  const h = createBackgroundHarness(options);
+  const init = { method: "POST", headers: { Authorization: "Bearer fixture" }, body: "same-save" };
+  await Promise.all(Array.from({ length: 20 }, () => h.hooks.fetchWithTimeout("https://tracefiction.com/api/extension/track", init)));
+  await h.hooks.fetchWithTimeout("https://tracefiction.com/api/extension/account", { headers: init.headers });
+  assert.equal(h.corsProbeCalls.length, 1);
+  assert.equal(h.fetchCalls.length, 21);
+  const key = "traceActivityCorsV1:https://tracefiction.com";
+  const saved = h.storageSetCalls.find(patch => patch[key]);
+  assert.ok(saved[key] > Date.now());
+  const restarted = createBackgroundHarness({ ...options, storageState: saved });
+  await restarted.hooks.fetchWithTimeout("https://tracefiction.com/api/extension/track", init);
+  assert.equal(restarted.corsProbeCalls.length, 0);
+  assert.equal(restarted.fetchCalls.length, 1);
+});
+
+test("legacy failures invalidate capability without replay; next call re-probes", async () => {
+  let fail = false;
+  const h = createBackgroundHarness({ runtimeUrl: "chrome-extension://fixture/", fetchImpl: async () => {
+    if (fail) throw new TypeError("Failed to fetch");
+    return createResponse();
+  } });
+  const init = { method: "POST", headers: { Authorization: "Bearer fixture" }, body: "same-save" };
+  await h.hooks.fetchWithTimeout("https://tracefiction.com/api/extension/track", init);
+  fail = true;
+  await assert.rejects(h.hooks.fetchWithTimeout("https://tracefiction.com/api/extension/track", init));
+  assert.equal(h.corsProbeCalls.length, 1);
+  assert.equal(h.fetchCalls.length, 2);
+  fail = false;
+  await h.hooks.fetchWithTimeout("https://tracefiction.com/api/extension/track", init);
+  assert.equal(h.corsProbeCalls.length, 2);
+  assert.equal(h.fetchCalls.length, 3);
+});
+
+test("legacy expired and different-origin cached capabilities require a fresh probe", async () => {
+  const key = "traceActivityCorsV1:https://tracefiction.com";
+  for (const storageState of [{ [key]: Date.now() - 1 }, { "traceActivityCorsV1:https://other.example": Date.now() + 1000 }]) {
+    const h = createBackgroundHarness({ runtimeUrl: "chrome-extension://fixture/", storageState, fetchImpl: async () => createResponse() });
+    await h.hooks.fetchWithTimeout("https://tracefiction.com/api/extension/track", { headers: { Authorization: "Bearer fixture" } });
+    assert.equal(h.corsProbeCalls.length, 1);
+    assert.equal(h.fetchCalls.length, 1);
+  }
+});

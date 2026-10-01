@@ -1,4 +1,8 @@
-import { extensionCall, type RuntimePort } from "./browser-platform.mjs";
+import {
+  extensionCall,
+  type BrowserStorage,
+  type RuntimePort,
+} from "./browser-platform.mjs";
 
 /** Only coarse browser/OS and release number leave the worker. */
 export function activityHeaders(
@@ -43,7 +47,53 @@ export function createActivityFetch(
   runtime: RuntimePort,
   mode: "callback" | "promise",
   apiBase: string,
+  storage?: Pick<BrowserStorage, "get" | "set">,
 ): typeof fetch {
+  const apiOrigin = new URL(apiBase).origin;
+  const cacheKey = `traceActivityCorsV1:${apiOrigin}`;
+  // A persisted expiry avoids probing again whenever an MV3 worker wakes.
+  // This is origin-wide API compatibility, never auth or permission evidence.
+  const ttl = 60 * 60_000;
+  let acceptedUntil = 0;
+  let loaded = false;
+  let probe: Promise<boolean> | undefined;
+  const remember = (until: number) =>
+    optionalCache(() => storage?.set({ [cacheKey]: until }));
+  const accepts = (
+    url: string,
+    headers: Headers,
+    credentials?: RequestCredentials,
+  ) => {
+    if (acceptedUntil > Date.now()) return Promise.resolve(true);
+    return (probe ??= (async () => {
+      if (!loaded) {
+        loaded = true;
+        const snapshot = await optionalCache(() => storage?.get(cacheKey));
+        const until = snapshot?.[cacheKey];
+        if (
+          typeof until === "number" &&
+          until > Date.now() &&
+          until <= Date.now() + ttl
+        ) acceptedUntil = until;
+      }
+      if (acceptedUntil > Date.now()) return true;
+      // Shared by concurrent callers; one caller cancelling must not abort it.
+      const allowed = await acceptsActivityHeaders(
+        fetchImpl, url, headers, credentials,
+      );
+      if (allowed) {
+        acceptedUntil = Date.now() + ttl;
+        await remember(acceptedUntil);
+      } else metadataDisabled = true;
+      return allowed;
+    })().finally(() => {
+      probe = undefined;
+    }));
+  };
+  const invalidate = async () => {
+    acceptedUntil = 0;
+    await remember(0);
+  };
   let metadataDisabled = false;
   let dimensions: Promise<Record<string, string>> | undefined;
   const metadata = () =>
@@ -106,7 +156,7 @@ export function createActivityFetch(
       init?.headers ?? (input instanceof Request ? input.headers : undefined),
     );
     if (
-      url.origin === new URL(apiBase).origin &&
+      url.origin === apiOrigin &&
       url.pathname.startsWith("/api/extension/") &&
       headers.has("Authorization")
     ) {
@@ -123,22 +173,27 @@ export function createActivityFetch(
         const credentials =
           init?.credentials ??
           (input instanceof Request ? input.credentials : undefined);
-        if (
-          !(await acceptsActivityHeaders(
-            fetchImpl,
-            url.href,
-            headers,
-            signal,
-            credentials,
-          ))
-        ) {
+        signal?.throwIfAborted();
+        const allowed = await accepts(url.href, headers, credentials);
+        signal?.throwIfAborted();
+        if (!allowed) {
           metadataDisabled = true;
           // The failed attempt was OPTIONS only; send the actual request once
           // without optional headers, then stay downgraded for this worker.
           return fetchImpl(input, { ...init, headers: baseline });
         }
       }
-      return fetchImpl(input, { ...init, headers });
+      try {
+        const response = await fetchImpl(input, { ...init, headers });
+        if (Object.keys(extra).length && !response.ok) await invalidate();
+        return response;
+      } catch (error) {
+        // Invalidate for the NEXT call only. The failed write may have committed.
+        const signal =
+          init?.signal ?? (input instanceof Request ? input.signal : undefined);
+        if (Object.keys(extra).length && !signal?.aborted) await invalidate();
+        throw error;
+      }
     }
     return fetchImpl(input, init);
   };
@@ -158,13 +213,9 @@ async function acceptsActivityHeaders(
   send: typeof fetch,
   url: string,
   headers: Headers,
-  signal?: AbortSignal | null,
   credentials?: RequestCredentials,
 ): Promise<boolean> {
-  signal?.throwIfAborted();
   const controller = new AbortController();
-  const abort = () => controller.abort(signal?.reason);
-  signal?.addEventListener("abort", abort, { once: true });
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const allowed = await Promise.race([
@@ -186,10 +237,25 @@ async function acceptsActivityHeaders(
         }, 1000);
       }),
     ]);
-    signal?.throwIfAborted();
     return allowed;
   } finally {
     if (timer) clearTimeout(timer);
-    signal?.removeEventListener("abort", abort);
+  }
+}
+
+/** Optional cache storage must not hold up saves when unavailable or stalled. */
+async function optionalCache<T>(
+  operation: () => Promise<T> | undefined,
+): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(operation).catch(() => undefined),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(resolve, 250);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }

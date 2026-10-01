@@ -5,8 +5,8 @@ import { build } from "esbuild";
 import { chromium } from "playwright";
 
 // A real cross-origin browser fetch, with no API host permission exemption.
-// The API models the old/new ff allow-list. Count actual mutations, not fetch mocks.
-test("real CORS: legacy/new allow-lists preserve one save; Firefox sends no metadata", async () => {
+// The API models the old/new API allow-list. Count actual mutations, not fetch mocks.
+test("real CORS: one write per call, successful capability is cached and Firefox sends no metadata", async () => {
   const bundle = await build({
     entryPoints: ["src/extension-runtime/activity-fetch.mts"],
     bundle: true,
@@ -17,6 +17,7 @@ test("real CORS: legacy/new allow-lists preserve one save; Firefox sends no meta
   });
   let mode = "old";
   const writes = [];
+  let explicitProbes = 0;
   const api = createServer(async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader(
@@ -30,6 +31,7 @@ test("real CORS: legacy/new allow-lists preserve one save; Firefox sends no meta
         : "Content-Type,Authorization,X-Trace-Platform,X-Trace-Extension-Browser,X-Trace-Extension-Version",
     );
     if (req.method === "OPTIONS") {
+      if (!req.headers["access-control-request-method"]) explicitProbes++;
       res.writeHead(204);
       res.end();
       return;
@@ -63,6 +65,7 @@ test("real CORS: legacy/new allow-lists preserve one save; Firefox sends no meta
     for (const scenario of ["old", "new", "firefox"]) {
       mode = scenario === "old" ? "old" : "new";
       writes.length = 0;
+      explicitProbes = 0;
       const result = await page.evaluate(
         async ({ apiBase, scenario }) => {
           const runtime = {
@@ -79,7 +82,8 @@ test("real CORS: legacy/new allow-lists preserve one save; Firefox sends no meta
             "promise",
             apiBase,
           );
-          return (
+          const results = [];
+          for (let i = 0; i < 3; i++) results.push(await (
             await send(apiBase + "/api/extension/track?case=" + scenario, {
               method: "POST",
               headers: {
@@ -88,12 +92,14 @@ test("real CORS: legacy/new allow-lists preserve one save; Firefox sends no meta
               },
               body: '{"operationId":"one-save"}',
             })
-          ).json();
+          ).json());
+          return results;
         },
         { apiBase, scenario },
       );
-      assert.deepEqual(result, { saved: true });
-      assert.equal(writes.length, 1, scenario);
+      assert.deepEqual(result, Array.from({ length: 3 }, () => ({ saved: true })));
+      assert.equal(writes.length, 3, scenario);
+      assert.equal(explicitProbes, scenario === "new" ? 1 : 0, "no repeated compatibility probes");
       assert.equal(writes[0].body, '{"operationId":"one-save"}');
       assert.equal(writes[0].headers.authorization, "Bearer test");
       assert.equal(

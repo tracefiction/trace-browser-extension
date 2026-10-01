@@ -82,7 +82,43 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       headers["X-Trace-Extension-Version"] = version;
     return headers;
   }
-  function createActivityFetch(fetchImpl, runtime, mode, apiBase) {
+  function createActivityFetch(fetchImpl, runtime, mode, apiBase, storage) {
+    const apiOrigin = new URL(apiBase).origin;
+    const cacheKey = `traceActivityCorsV1:${apiOrigin}`;
+    const ttl = 60 * 6e4;
+    let acceptedUntil = 0;
+    let loaded = false;
+    let probe;
+    const remember = (until) => optionalCache(() => storage?.set({ [cacheKey]: until }));
+    const accepts = (url, headers, credentials) => {
+      if (acceptedUntil > Date.now()) return Promise.resolve(true);
+      return probe ??= (async () => {
+        if (!loaded) {
+          loaded = true;
+          const snapshot = await optionalCache(() => storage?.get(cacheKey));
+          const until = snapshot?.[cacheKey];
+          if (typeof until === "number" && until > Date.now() && until <= Date.now() + ttl) acceptedUntil = until;
+        }
+        if (acceptedUntil > Date.now()) return true;
+        const allowed = await acceptsActivityHeaders(
+          fetchImpl,
+          url,
+          headers,
+          credentials
+        );
+        if (allowed) {
+          acceptedUntil = Date.now() + ttl;
+          await remember(acceptedUntil);
+        } else metadataDisabled = true;
+        return allowed;
+      })().finally(() => {
+        probe = void 0;
+      });
+    };
+    const invalidate = async () => {
+      acceptedUntil = 0;
+      await remember(0);
+    };
     let metadataDisabled = false;
     let dimensions;
     const metadata = () => dimensions ??= (async () => {
@@ -133,7 +169,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       const headers = new Headers(
         init?.headers ?? (input instanceof Request ? input.headers : void 0)
       );
-      if (url.origin === new URL(apiBase).origin && url.pathname.startsWith("/api/extension/") && headers.has("Authorization")) {
+      if (url.origin === apiOrigin && url.pathname.startsWith("/api/extension/") && headers.has("Authorization")) {
         for (const name of ACTIVITY_HEADERS) headers.delete(name);
         const baseline = new Headers(headers);
         const extra = metadataDisabled ? {} : await metadata();
@@ -142,18 +178,23 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
             headers.set(name, value);
           const signal = init?.signal ?? (input instanceof Request ? input.signal : void 0);
           const credentials = init?.credentials ?? (input instanceof Request ? input.credentials : void 0);
-          if (!await acceptsActivityHeaders(
-            fetchImpl,
-            url.href,
-            headers,
-            signal,
-            credentials
-          )) {
+          signal?.throwIfAborted();
+          const allowed = await accepts(url.href, headers, credentials);
+          signal?.throwIfAborted();
+          if (!allowed) {
             metadataDisabled = true;
             return fetchImpl(input, { ...init, headers: baseline });
           }
         }
-        return fetchImpl(input, { ...init, headers });
+        try {
+          const response = await fetchImpl(input, { ...init, headers });
+          if (Object.keys(extra).length && !response.ok) await invalidate();
+          return response;
+        } catch (error) {
+          const signal = init?.signal ?? (input instanceof Request ? input.signal : void 0);
+          if (Object.keys(extra).length && !signal?.aborted) await invalidate();
+          throw error;
+        }
       }
       return fetchImpl(input, init);
     };
@@ -164,11 +205,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     "X-Trace-Extension-Browser",
     "X-Trace-Extension-Version"
   ];
-  async function acceptsActivityHeaders(send, url, headers, signal, credentials) {
-    signal?.throwIfAborted();
+  async function acceptsActivityHeaders(send, url, headers, credentials) {
     const controller = new AbortController();
-    const abort = () => controller.abort(signal?.reason);
-    signal?.addEventListener("abort", abort, { once: true });
     let timer;
     try {
       const allowed = await Promise.race([
@@ -190,11 +228,22 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           }, 1e3);
         })
       ]);
-      signal?.throwIfAborted();
       return allowed;
     } finally {
       if (timer) clearTimeout(timer);
-      signal?.removeEventListener("abort", abort);
+    }
+  }
+  async function optionalCache(operation) {
+    let timer;
+    try {
+      return await Promise.race([
+        Promise.resolve().then(operation).catch(() => void 0),
+        new Promise((resolve) => {
+          timer = setTimeout(resolve, 250);
+        })
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -7584,7 +7633,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       storageArea: extension.storage.local,
       databaseFactory: scope.indexedDB,
       storageMode,
-      fetch: createActivityFetch(globalThis.fetch.bind(globalThis), extension.runtime, storageMode, "https://api.tracefiction.com"),
+      fetch: createActivityFetch(
+        globalThis.fetch.bind(globalThis),
+        extension.runtime,
+        storageMode,
+        "https://api.tracefiction.com",
+        new BrowserStorage(extension.storage.local, extension.runtime, storageMode)
+      ),
       apiBase: "https://api.tracefiction.com",
       nativeImportHandoff: false,
       webOrigin: "https://www.tracefiction.com",
