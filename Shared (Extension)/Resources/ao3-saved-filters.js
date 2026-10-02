@@ -651,8 +651,8 @@
       secondary: "#5F6B76", tertiary: "#7B8792", teal: "#176E72", warning: "#9B4146",
     };
     var dark = {
-      surface: "#19232D", raised: "#24323F", rule: "#344451", ink: "#F2F6FA",
-      secondary: "#AEBBC5", tertiary: "#8D9AA5", teal: "#8BCDC8", warning: "#E7A19F",
+      surface: "#121418", raised: "#181A1E", rule: "#212429", ink: "#F2F5F8",
+      secondary: "#B4BCC6", tertiary: "#9AA3AE", teal: "#8BCDC8", warning: "#E7A19F",
     };
     function background(element) {
       if (!element || typeof window.getComputedStyle !== "function") return null;

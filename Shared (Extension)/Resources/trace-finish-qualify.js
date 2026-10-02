@@ -99,8 +99,8 @@
   var TONES = {
     light: { surface: '#FFFFFF', raised: '#E9EEF3', rule: '#D8E0E7', ink: '#18232D', secondary: '#5F6B76',
       tertiary: '#7B8792', teal: '#176E72', warning: '#9B4146', 'status-finished': '#197A5B', 'status-caught-up': '#4C6F88' },
-    dark: { surface: '#19232D', raised: '#24323F', rule: '#344451', ink: '#F2F6FA', secondary: '#AEBBC5',
-      tertiary: '#8D9AA5', teal: '#8BCDC8', warning: '#E7A19F', 'status-finished': '#8BD8B6', 'status-caught-up': '#91B4CE' }
+    dark: { surface: '#121418', raised: '#181A1E', rule: '#212429', ink: '#F2F5F8', secondary: '#B4BCC6',
+      tertiary: '#9AA3AE', teal: '#8BCDC8', warning: '#E7A19F', 'status-finished': '#8ACDB2', 'status-caught-up': '#93BCCB' }
   };
   function hostTone() {
     function background(element) {

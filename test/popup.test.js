@@ -48,14 +48,52 @@ test("dark popup keeps Story Ink tokens instead of legacy forest aliases", () =>
     /^@media\s*\(prefers-color-scheme:\s*dark\)\s*\{\s*:root\s*\{([^}]*)\}\s*\}/,
   )?.[1];
   assert.ok(darkRoot, "dark mode should define the Story Ink palette");
-  assert.match(darkRoot, /--action:\s*#ff986b;/);
+  assert.match(darkRoot, /--action:\s*#ff8458;/);
   assert.doesNotMatch(darkRoot, /--(?:paper|card|ink|line|forest|rust|honey)(?:-[\w-]+)?:/);
   assert.match(css, /--paper:\s*var\(--surface\);/);
   assert.match(css, /--forest-deep:\s*var\(--action\);/);
   assert.doesNotMatch(css, /--(?:confirm|attention|problem|rule-strong)(?:-soft)?:/);
-  assert.match(darkRoot, /--surface:\s*#19232d;/);
-  assert.match(darkRoot, /--rule:\s*#344451;/);
+  assert.match(darkRoot, /--surface:\s*#121418;/);
+  assert.match(darkRoot, /--rule:\s*#212429;/);
   assert.match(css, /\.popup-earned-actions button\[data-emphasis="primary"\]\s*\{[^}]*background:\s*var\(--action\);/s);
+});
+
+function contrastRatio(a, b) {
+  const luminance = (hex) => {
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+      .map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+test("dark text roles keep WCAG AA on Trace's dark surfaces and AO3's dark skin", () => {
+  const css = fs.readFileSync(POPUP_CSS_PATH, "utf8");
+  const darkRoot = css.match(/@media\s*\(prefers-color-scheme:\s*dark\)\s*\{\s*:root\s*\{([^}]*)\}/)[1];
+  const popup = Object.fromEntries([...darkRoot.matchAll(/--([\w-]+):\s*(#[0-9a-f]{6});/gi)].map((m) => [m[1], m[2]]));
+  for (const text of ["text", "text-2", "text-3", "action", "warning", "status-saved", "status-reading",
+    "status-caught-up", "status-paused", "status-finished", "status-dropped"]) {
+    for (const surface of ["ground", "surface", "raised"]) {
+      const ratio = contrastRatio(popup[text], popup[surface]);
+      assert.ok(ratio >= 4.5, `popup ${text} on ${surface} is ${ratio.toFixed(2)}:1`);
+    }
+  }
+  assert.ok(contrastRatio(popup["action-ink"], popup.action) >= 4.5, "popup action ink on action");
+
+  // Page marks sit on the host page itself, so check AO3 Reversi (#333, #222) too.
+  const overlay = fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", "library-overlay.js"), "utf8");
+  const darkBlock = overlay.match(/var dark = \{([^}]*)\}/)[1];
+  const page = Object.fromEntries([...darkBlock.matchAll(/"?([\w-]+)"?:\s*"(#[0-9A-F]{6})"/gi)].map((m) => [m[1], m[2]]));
+  const grounds = { surface: page.surface, raised: page.raised, "record-well": page["record-well"],
+    "AO3 Reversi": "#333333", "AO3 Reversi listbox": "#222222" };
+  for (const text of ["ink", "secondary", "tertiary", "teal", "warning", "authored", "private-record", "status-saved",
+    "status-reading", "status-caught-up", "status-paused", "status-finished", "status-dropped"]) {
+    for (const [name, ground] of Object.entries(grounds)) {
+      const ratio = contrastRatio(page[text], ground);
+      assert.ok(ratio >= 4.5, `page ${text} on ${name} is ${ratio.toFixed(2)}:1`);
+    }
+  }
 });
 
 function flush() {

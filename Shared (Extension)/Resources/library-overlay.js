@@ -304,13 +304,13 @@ function traceHostPageTokens() {
     "status-finished": "#197A5B", "status-dropped": "#7C5282",
   };
   var dark = {
-    ground: "#111922", surface: "#19232D", raised: "#24323F", rule: "#344451",
-    ink: "#F2F6FA", secondary: "#AEBBC5", tertiary: "#8D9AA5",
-    teal: "#8BCDC8", warning: "#E7A19F", authored: "#CF9630",
-    "record-well": "#131C25", "record-well-edge": "#0B1117", "private-record": "#B9BAAF",
-    "status-saved": "#B4BDAF", "status-reading": "#7DB8FF",
-    "status-caught-up": "#91B4CE", "status-paused": "#D4B76C",
-    "status-finished": "#8BD8B6", "status-dropped": "#B99BC2",
+    ground: "#07090C", surface: "#121418", raised: "#181A1E", rule: "#212429",
+    ink: "#F2F5F8", secondary: "#B4BCC6", tertiary: "#9AA3AE",
+    teal: "#8BCDC8", warning: "#E7A19F", authored: "#DDA74E",
+    "record-well": "#0D0F12", "record-well-edge": "#212429", "private-record": "#B4BCC6",
+    "status-saved": "#B5B9C0", "status-reading": "#86B8EC",
+    "status-caught-up": "#93BCCB", "status-paused": "#C9BE96",
+    "status-finished": "#8ACDB2", "status-dropped": "#BBA6CB",
   };
   function background(element) {
     if (!element || typeof window.getComputedStyle !== "function") return null;

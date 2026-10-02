@@ -7107,7 +7107,7 @@ test("page theme follows host body, html fallback, and a dark body", () => {
   assert.equal(traceHostPageTokens().teal, "#176E72");
   dom.window.document.body.style.backgroundColor = "#111";
   traceRefreshPageTokens();
-  assert.equal(dom.window.document.body.style.getPropertyValue("--trace-page-surface"), "#19232D");
+  assert.equal(dom.window.document.body.style.getPropertyValue("--trace-page-surface"), "#121418");
 });
 
 
@@ -7557,9 +7557,9 @@ test("page scripts stay on the page register: amber brass, no bars, no AO3 red, 
   }
   const collector = fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"), "utf8");
   assert.match(collector, /authored: "#9C6212"/);
-  assert.match(collector, /authored: "#CF9630"/);
+  assert.match(collector, /authored: "#DDA74E"/);
   assert.match(collector, /"record-well": "#F1F4F7"/);
-  assert.match(collector, /"record-well": "#131C25"/);
+  assert.match(collector, /"record-well": "#0D0F12"/);
 });
 
 test("finish band work-status choices are words in B2 cells, never status dots", () => {

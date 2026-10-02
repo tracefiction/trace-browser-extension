@@ -50,22 +50,22 @@
 
 @media (prefers-color-scheme: dark) {
     :root {
-        --ground: #111922;
-        --surface: #19232d;
-        --raised: #24323f;
-        --rule: #344451;
-        --text: #f2f6fa;
-        --text-2: #aebbc5;
-        --text-3: #8d9aa5;
-        --action: #ff986b;
-        --action-ink: #111922;
+        --ground: #07090c;
+        --surface: #121418;
+        --raised: #181a1e;
+        --rule: #212429;
+        --text: #f2f5f8;
+        --text-2: #b4bcc6;
+        --text-3: #9aa3ae;
+        --action: #ff8458;
+        --action-ink: #07090c;
         --warning: #e7a19f;
-        --status-saved: #b4bdaf;
-        --status-reading: #7db8ff;
-        --status-caught-up: #91b4ce;
-        --status-paused: #d4b76c;
-        --status-finished: #8bd8b6;
-        --status-dropped: #b99bc2;
+        --status-saved: #b5b9c0;
+        --status-reading: #86b8ec;
+        --status-caught-up: #93bccb;
+        --status-paused: #c9be96;
+        --status-finished: #8acdb2;
+        --status-dropped: #bba6cb;
         --lift: 0 1px 0 rgba(0,0,0,.3), 0 14px 32px -14px rgba(0,0,0,.7);
     }
 }
