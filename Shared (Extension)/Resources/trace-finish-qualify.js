@@ -41,6 +41,7 @@
   function tok(name, light) { return 'var(--trace-page-' + name + ',' + light + ')'; }
   var T = {
     surface: tok('surface', '#FFFFFF'), raised: tok('raised', '#E9EEF3'), rule: tok('rule', '#D8E0E7'),
+    control: tok('control', '#D8E0E7'),
     ink: tok('ink', '#18232D'), secondary: tok('secondary', '#5F6B76'), tertiary: tok('tertiary', '#7B8792'),
     teal: tok('teal', '#176E72'), warning: tok('warning', '#9B4146'),
     finished: tok('status-finished', '#197A5B'), caughtup: tok('status-caught-up', '#4C6F88'),
@@ -97,10 +98,10 @@
   // Each finish surface resolves the host tone itself, so it is correct even
   // when it is the first Trace surface on the page.
   var TONES = {
-    light: { surface: '#FFFFFF', raised: '#E9EEF3', rule: '#D8E0E7', ink: '#18232D', secondary: '#5F6B76',
+    light: { surface: '#FFFFFF', raised: '#E9EEF3', rule: '#D8E0E7', control: '#D8E0E7', ink: '#18232D', secondary: '#5F6B76',
       tertiary: '#7B8792', teal: '#176E72', warning: '#9B4146', 'status-finished': '#197A5B', 'status-caught-up': '#4C6F88' },
-    dark: { surface: '#19232D', raised: '#24323F', rule: '#344451', ink: '#F2F6FA', secondary: '#AEBBC5',
-      tertiary: '#8D9AA5', teal: '#8BCDC8', warning: '#E7A19F', 'status-finished': '#8BD8B6', 'status-caught-up': '#91B4CE' }
+    dark: { surface: '#121418', raised: '#1D1F23', rule: '#212429', control: '#686D75', ink: '#F2F5F8', secondary: '#B4BCC6',
+      tertiary: '#9AA3AE', teal: '#8BCDC8', warning: '#E7A19F', 'status-finished': '#8ACDB2', 'status-caught-up': '#93BCCB' }
   };
   function hostTone() {
     function background(element) {
@@ -181,14 +182,14 @@
     sub.textContent = s.src ? 'Is this work finished on ' + s.src + '?' : 'What is the work’s current status?';
     pad.appendChild(sub);
 
-    // B2-style cells: surface with a rule ring, text only, 44 pt targets.
+    // B2-style cells: surface with a control-edge ring (3:1), text only, 44 pt targets.
     var opt = el('div', 'display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:12px;');
     opt.setAttribute('role', 'group');
     opt.setAttribute('aria-label', 'Work status');
     WORK.forEach(function (w) {
       var b = el('button',
         'display:flex;align-items:center;cursor:pointer;min-width:0;min-height:44px;'
-        + 'background:' + T.surface + ';box-shadow:inset 0 0 0 1px ' + T.rule + ';border-radius:12px;'
+        + 'background:' + T.surface + ';box-shadow:inset 0 0 0 1px ' + T.control + ';border-radius:12px;'
         + 'padding:6px 12px;font:500 14px/1.2 ' + T.sans + ';color:' + T.ink + ';');
       b.type = 'button';
       b.setAttribute('data-trace-work-choice', w[0]);

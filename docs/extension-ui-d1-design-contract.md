@@ -10,27 +10,35 @@ shared token updates.
 
 | Token | Light | Dark |
 | --- | --- | --- |
-| Ground | `#F8FAFC` | `#111922` |
-| Surface | `#FFFFFF` | `#19232D` |
-| Raised | `#E9EEF3` | `#24323F` |
-| Rule | `#D8E0E7` | `#344451` |
-| Ink | `#18232D` | `#F2F6FA` |
-| Secondary | `#5F6B76` | `#AEBBC5` |
-| Tertiary | `#7A8590` | `#8D9AA5` |
-| Popup action | `#C24C22` | `#FF986B` |
+| Ground | `#F8FAFC` | `#07090C` |
+| Surface | `#FFFFFF` | `#121418` |
+| Raised (the app's `lifted` in dark) | `#E9EEF3` | `#1D1F23` |
+| Rule (decorative hairlines and container edges only) | `#D8E0E7` | `#212429` |
+| Control edge (the ring that bounds a control: status cells, inputs, scope buttons, the off switch track, the Site settings disclosure) | `#D8E0E7` | `#686D75` |
+| Ink | `#18232D` | `#F2F5F8` |
+| Secondary | `#5F6B76` | `#B4BCC6` |
+| Tertiary | `#7A8590` | `#9AA3AE` |
+| Popup action | `#C24C22` | `#FF8458` |
 | Page action | `#176E72` | `#8BCDC8` |
 | Warning ink | `#9B4146` | `#E7A19F` |
+
+In dark, a control edge is at least 3:1 against the ground, well, surface, raised and lifted surfaces (WCAG 1.4.11). It is 3.17:1 against lifted, the lowest of these. Decorative rules stay faint. The light values are unchanged: the light control edge still equals the light rule (1.33:1 on white), and lifting it to 3:1 is a separate light-mode decision.
 
 Page UI adds the private-record tokens:
 
 | Page token | Light | Dark | Use |
 | --- | --- | --- | --- |
-| `authored` (brass) | `#9C6212` | `#CF9630` | Stars, the `#` on private tags and the note rule. **Only** what the reader wrote. |
-| `record-well` / `record-well-edge` | `#F1F4F7` / `#E4EAEF` | `#131C25` / `#0B1117` | The Your record well |
-| `private-record` | `#696D65` | `#B9BAAF` | The “Your record” label and lock |
-| `tertiary` (non-text) | popup `#7A8590`, page `#7B8792` | `#8D9AA5` | Chevrons and the × glyph. **Never text.** |
+| `authored` (brass) | `#9C6212` | `#DDA74E` | Stars, the `#` on private tags and the note rule. **Only** what the reader wrote. |
+| `record-well` / `record-well-edge` | `#F1F4F7` / `#E4EAEF` | `#0D0F12` / `#212429` | The Your record well |
+| `private-record` | `#696D65` | `#B4BCC6` | The “Your record” label and lock |
+| `tertiary` (non-text) | popup `#7A8590`, page `#7B8792` | `#9AA3AE` | Chevrons and the × glyph. **Never text.** |
 
 The earlier brass `#8A6420` / `#DCB976` is retired.
+
+The dark column is the native app's B · Ink palette (`TraceDarkPalette.reviewInk`):
+a blue-black near-black ground, near-white primary text, stepped greys, brass
+only for what the reader wrote, and no brown or glow. The earlier navy Story
+Ink dark (`#111922` ground) is retired.
 
 The iOS popup inherits `-apple-system-body`; its type, spacing and buttons
 scale with the user's text setting on one em ladder. The desktop toolbar
@@ -46,12 +54,12 @@ controls 8.
 
 | Status | Light dot | Dark dot |
 | --- | --- | --- |
-| Saved | `#666E68` | `#B4BDAF` |
-| Reading | `#246DCC` | `#7DB8FF` |
-| Caught up | `#4C6F88` | `#91B4CE` |
-| Paused | `#82651E` | `#D4B76C` |
-| Finished | `#197A5B` | `#8BD8B6` |
-| Dropped | `#7C5282` | `#B99BC2` |
+| Saved | `#666E68` | `#B5B9C0` |
+| Reading | `#246DCC` | `#86B8EC` |
+| Caught up | `#4C6F88` | `#93BCCB` |
+| Paused | `#82651E` | `#C9BE96` |
+| Finished | `#197A5B` | `#8ACDB2` |
+| Dropped | `#7C5282` | `#BBA6CB` |
 
 Page tone follows the host page's computed background, including a transparent
 body resolved through `<html>`. It does not follow the phone's appearance.
@@ -197,7 +205,7 @@ Dotted underlines and “Private context” are retired.
 - Radius 20.
 - Title SF 600 17 and author, both wrapping; the site goes in the byline.
 - A 44 pt ×.
-- The status grid: radius 12 cells on `surface` with a 1 px `rule` inset; the
+- The status grid: radius 12 cells on `surface` with a 1 px `control` inset; the
   chosen cell `raised` with a 2 px ink ring; 44 pt cells with radio-group
   semantics.
 - Work marks and “n new chapters” sit on one secondary line; Catch up is teal

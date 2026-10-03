@@ -2957,7 +2957,7 @@ function shouldDelayAutoTrackUntilVisible() {
 // CSS variables let an already mounted surface change tone on its next render.
 function traceHostPageTokens() {
   var light = {
-    ground: "#F8FAFC", surface: "#FFFFFF", raised: "#E9EEF3", rule: "#D8E0E7",
+    ground: "#F8FAFC", surface: "#FFFFFF", raised: "#E9EEF3", rule: "#D8E0E7", control: "#D8E0E7",
     ink: "#18232D", secondary: "#5F6B76", tertiary: "#7B8792",
     teal: "#176E72", warning: "#9B4146", authored: "#9C6212",
     "record-well": "#F1F4F7", "record-well-edge": "#E4EAEF", "private-record": "#696D65",
@@ -2966,13 +2966,13 @@ function traceHostPageTokens() {
     "status-finished": "#197A5B", "status-dropped": "#7C5282",
   };
   var dark = {
-    ground: "#111922", surface: "#19232D", raised: "#24323F", rule: "#344451",
-    ink: "#F2F6FA", secondary: "#AEBBC5", tertiary: "#8D9AA5",
-    teal: "#8BCDC8", warning: "#E7A19F", authored: "#CF9630",
-    "record-well": "#131C25", "record-well-edge": "#0B1117", "private-record": "#B9BAAF",
-    "status-saved": "#B4BDAF", "status-reading": "#7DB8FF",
-    "status-caught-up": "#91B4CE", "status-paused": "#D4B76C",
-    "status-finished": "#8BD8B6", "status-dropped": "#B99BC2",
+    ground: "#07090C", surface: "#121418", raised: "#1D1F23", rule: "#212429", control: "#686D75",
+    ink: "#F2F5F8", secondary: "#B4BCC6", tertiary: "#9AA3AE",
+    teal: "#8BCDC8", warning: "#E7A19F", authored: "#DDA74E",
+    "record-well": "#0D0F12", "record-well-edge": "#212429", "private-record": "#B4BCC6",
+    "status-saved": "#B5B9C0", "status-reading": "#86B8EC",
+    "status-caught-up": "#93BCCB", "status-paused": "#C9BE96",
+    "status-finished": "#8ACDB2", "status-dropped": "#BBA6CB",
   };
   function background(element) {
     if (!element || typeof window.getComputedStyle !== "function") return null;
@@ -5297,7 +5297,7 @@ function appendReaderStatusChoices(actions, view, workKey) {
     choice.setAttribute("aria-checked", selected ? "true" : "false");
     choice.tabIndex = selected || (!entryStatus(entry) && status === TRACE_READER_STATUS_CHOICES[0]) ? 0 : -1;
     if (selected) choice.setAttribute("data-trace-status-selected", "1");
-    // Design-language B2 cells: surface with a rule ring; the chosen cell is
+    // Design-language B2 cells: surface with a control-edge ring (3:1); the chosen cell is
     // raised with a 2 px ink ring. Status colour stays on the dot.
     choice.style.cssText = [
       "--sc:" + storyStatusAccent(status),
@@ -5305,7 +5305,7 @@ function appendReaderStatusChoices(actions, view, workKey) {
       "min-width:0",
       "min-height:44px",
       "border:0",
-      "box-shadow:inset 0 0 0 " + (selected ? "2px var(--trace-page-ink)" : "1px var(--trace-page-rule)"),
+      "box-shadow:inset 0 0 0 " + (selected ? "2px var(--trace-page-ink)" : "1px var(--trace-page-control)"),
       "background:" + (selected ? "var(--trace-page-raised)" : "var(--trace-page-surface)"),
       "border-radius:12px",
       "padding:6px 4px",
