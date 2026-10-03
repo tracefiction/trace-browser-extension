@@ -12,14 +12,17 @@ shared token updates.
 | --- | --- | --- |
 | Ground | `#F8FAFC` | `#07090C` |
 | Surface | `#FFFFFF` | `#121418` |
-| Raised | `#E9EEF3` | `#181A1E` |
-| Rule | `#D8E0E7` | `#212429` |
+| Raised (the app's `lifted` in dark) | `#E9EEF3` | `#1D1F23` |
+| Rule (decorative hairlines and container edges only) | `#D8E0E7` | `#212429` |
+| Control edge (the ring that bounds a control: status cells, inputs, scope buttons, the off switch track, the Site settings disclosure) | `#D8E0E7` | `#686D75` |
 | Ink | `#18232D` | `#F2F5F8` |
 | Secondary | `#5F6B76` | `#B4BCC6` |
 | Tertiary | `#7A8590` | `#9AA3AE` |
 | Popup action | `#C24C22` | `#FF8458` |
 | Page action | `#176E72` | `#8BCDC8` |
 | Warning ink | `#9B4146` | `#E7A19F` |
+
+In dark, a control edge is at least 3:1 against the ground, well, surface, raised and lifted surfaces (WCAG 1.4.11). It is 3.17:1 against lifted, the lowest of these. Decorative rules stay faint. The light values are unchanged: the light control edge still equals the light rule (1.33:1 on white), and lifting it to 3:1 is a separate light-mode decision.
 
 Page UI adds the private-record tokens:
 
@@ -202,7 +205,7 @@ Dotted underlines and “Private context” are retired.
 - Radius 20.
 - Title SF 600 17 and author, both wrapping; the site goes in the byline.
 - A 44 pt ×.
-- The status grid: radius 12 cells on `surface` with a 1 px `rule` inset; the
+- The status grid: radius 12 cells on `surface` with a 1 px `control` inset; the
   chosen cell `raised` with a 2 px ink ring; 44 pt cells with radio-group
   semantics.
 - Work marks and “n new chapters” sit on one secondary line; Catch up is teal

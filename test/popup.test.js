@@ -55,6 +55,8 @@ test("dark popup keeps Story Ink tokens instead of legacy forest aliases", () =>
   assert.doesNotMatch(css, /--(?:confirm|attention|problem|rule-strong)(?:-soft)?:/);
   assert.match(darkRoot, /--surface:\s*#121418;/);
   assert.match(darkRoot, /--rule:\s*#212429;/);
+  assert.match(darkRoot, /--raised:\s*#1d1f23;/);
+  assert.match(darkRoot, /--control-edge:\s*#686d75;/);
   assert.match(css, /\.popup-earned-actions button\[data-emphasis="primary"\]\s*\{[^}]*background:\s*var\(--action\);/s);
 });
 
@@ -81,19 +83,51 @@ test("dark text roles keep WCAG AA on Trace's dark surfaces and AO3's dark skin"
   }
   assert.ok(contrastRatio(popup["action-ink"], popup.action) >= 4.5, "popup action ink on action");
 
-  // Page marks sit on the host page itself, so check AO3 Reversi (#333, #222) too.
-  const overlay = fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", "library-overlay.js"), "utf8");
-  const darkBlock = overlay.match(/var dark = \{([^}]*)\}/)[1];
-  const page = Object.fromEntries([...darkBlock.matchAll(/"?([\w-]+)"?:\s*"(#[0-9A-F]{6})"/gi)].map((m) => [m[1], m[2]]));
-  const grounds = { surface: page.surface, raised: page.raised, "record-well": page["record-well"],
-    "AO3 Reversi": "#333333", "AO3 Reversi listbox": "#222222" };
-  for (const text of ["ink", "secondary", "tertiary", "teal", "warning", "authored", "private-record", "status-saved",
-    "status-reading", "status-caught-up", "status-paused", "status-finished", "status-dropped"]) {
-    for (const [name, ground] of Object.entries(grounds)) {
-      const ratio = contrastRatio(page[text], ground);
-      assert.ok(ratio >= 4.5, `page ${text} on ${name} is ${ratio.toFixed(2)}:1`);
+  // Controls are bounded by a ring: WCAG 1.4.11 asks 3:1 against what they sit on.
+  for (const ground of ["ground", "surface", "raised"]) {
+    const ratio = contrastRatio(popup["control-edge"], popup[ground]);
+    assert.ok(ratio >= 3, `popup control edge on ${ground} is ${ratio.toFixed(2)}:1`);
+  }
+
+  // Every page surface carries its own copy of the dark tokens. Read all four
+  // and check each one, so a copy can't drift away from the others.
+  const resources = path.join(__dirname, "..", "Shared (Extension)", "Resources");
+  const pageCopies = {
+    "library-overlay.js": /var dark = \{([^}]*)\}/,
+    "collector.js": /var dark = \{([^}]*)\}/,
+    "ao3-saved-filters.js": /var dark = \{([^}]*)\}/,
+    "trace-finish-qualify.js": /dark: \{([^}]*)\}/,
+  };
+  const reference = {};
+  for (const [file, pattern] of Object.entries(pageCopies)) {
+    const block = fs.readFileSync(path.join(resources, file), "utf8").match(pattern)?.[1];
+    assert.ok(block, `${file} should define a dark page palette`);
+    const page = Object.fromEntries([...block.matchAll(/["']?([\w-]+)["']?:\s*["'](#[0-9A-F]{6})["']/gi)]
+      .map((m) => [m[1], m[2].toUpperCase()]));
+    for (const [key, value] of Object.entries(page)) {
+      if (key in reference) assert.equal(value, reference[key], `${file} dark ${key} differs from the other copies`);
+      else reference[key] = value;
+    }
+    assert.equal(page.raised, "#1D1F23", `${file} dark raised uses the app's lifted`);
+    // Page marks sit on the host page itself, so check AO3 Reversi (#333, #222) too.
+    const grounds = { surface: page.surface, raised: page.raised, "AO3 Reversi": "#333333",
+      "AO3 Reversi listbox": "#222222", ...(page["record-well"] ? { "record-well": page["record-well"] } : {}) };
+    for (const text of ["ink", "secondary", "tertiary", "teal", "warning", "authored", "private-record", "status-saved",
+      "status-reading", "status-caught-up", "status-paused", "status-finished", "status-dropped"]) {
+      if (!page[text]) continue;
+      for (const [name, ground] of Object.entries(grounds)) {
+        const ratio = contrastRatio(page[text], ground);
+        assert.ok(ratio >= 4.5, `${file} ${text} on ${name} is ${ratio.toFixed(2)}:1`);
+      }
+    }
+    assert.ok(page.control, `${file} should define a dark control edge`);
+    for (const ground of ["ground", "surface", "raised", "record-well"]) {
+      if (!page[ground]) continue;
+      const ratio = contrastRatio(page.control, page[ground]);
+      assert.ok(ratio >= 3, `${file} control edge on ${ground} is ${ratio.toFixed(2)}:1`);
     }
   }
+  assert.ok(contrastRatio(reference.control, popup.lifted ?? popup.raised) >= 3);
 });
 
 function flush() {

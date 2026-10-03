@@ -647,11 +647,11 @@
   // active filter and teal text actions. No AO3 red, bars or serif.
   function pageTokens() {
     var light = {
-      surface: "#FFFFFF", raised: "#E9EEF3", rule: "#D8E0E7", ink: "#18232D",
+      surface: "#FFFFFF", raised: "#E9EEF3", rule: "#D8E0E7", control: "#D8E0E7", ink: "#18232D",
       secondary: "#5F6B76", tertiary: "#7B8792", teal: "#176E72", warning: "#9B4146",
     };
     var dark = {
-      surface: "#121418", raised: "#181A1E", rule: "#212429", ink: "#F2F5F8",
+      surface: "#121418", raised: "#1D1F23", rule: "#212429", control: "#686D75", ink: "#F2F5F8",
       secondary: "#B4BCC6", tertiary: "#9AA3AE", teal: "#8BCDC8", warning: "#E7A19F",
     };
     function background(element) {
@@ -745,7 +745,7 @@
       "." + ROOT_ATTR + " .trace-sf-form, ." + ROOT_ATTR + " .trace-sf-empty, ." + ROOT_ATTR + " .trace-sf-note, ." + ROOT_ATTR + " .trace-sf-error { padding: 8px 0; }",
       "." + ROOT_ATTR + " .trace-sf-label { color: var(--trace-page-secondary); font-size: 12px; font-weight: 600; margin-bottom: 6px; }",
       "." + ROOT_ATTR + " .trace-sf-input-row { display: block; position: relative; }",
-      "." + ROOT_ATTR + " .trace-sf-input { background: var(--trace-page-surface); border: 0; border-radius: 12px; box-shadow: inset 0 0 0 1px var(--trace-page-rule); color: var(--trace-page-ink); font-size: 14px; min-height: 44px; padding: 10px 12px; width: 100%; }",
+      "." + ROOT_ATTR + " .trace-sf-input { background: var(--trace-page-surface); border: 0; border-radius: 12px; box-shadow: inset 0 0 0 1px var(--trace-page-control); color: var(--trace-page-ink); font-size: 14px; min-height: 44px; padding: 10px 12px; width: 100%; }",
       "." + ROOT_ATTR + " .trace-sf-input-row .trace-sf-input { padding-right: 44px; }",
       "." + ROOT_ATTR + " .trace-sf-input::placeholder { color: var(--trace-page-secondary); }",
       "." + ROOT_ATTR + " .trace-sf-clear-name { align-items: center; color: var(--trace-page-tertiary); display: inline-flex; font-size: 18px; font-weight: 500; height: 44px; justify-content: center; line-height: 1; padding: 0; position: absolute; right: 0; top: 50%; transform: translateY(-50%); width: 44px; }",
@@ -753,7 +753,7 @@
       "." + ROOT_ATTR + " .trace-sf-preview { color: var(--trace-page-secondary); font-size: 12.5px; line-height: 1.4; margin-top: 6px; }",
       "." + ROOT_ATTR + " .trace-sf-capacity { color: var(--trace-page-secondary); font-size: 12.5px; line-height: 1.35; margin-top: 6px; }",
       "." + ROOT_ATTR + " .trace-sf-scope { display: grid; gap: 6px; grid-template-columns: 1fr; margin-top: 10px; }",
-      "." + ROOT_ATTR + " .trace-sf-scope button { background: var(--trace-page-surface); border-radius: 12px; box-shadow: inset 0 0 0 1px var(--trace-page-rule); color: var(--trace-page-ink); min-height: 44px; min-width: 0; overflow: visible; padding: 8px 12px; text-align: left; white-space: normal; }",
+      "." + ROOT_ATTR + " .trace-sf-scope button { background: var(--trace-page-surface); border-radius: 12px; box-shadow: inset 0 0 0 1px var(--trace-page-control); color: var(--trace-page-ink); min-height: 44px; min-width: 0; overflow: visible; padding: 8px 12px; text-align: left; white-space: normal; }",
       "." + ROOT_ATTR + " .trace-sf-scope button[data-active='true'] { background: var(--trace-page-raised); box-shadow: inset 0 0 0 2px var(--trace-page-ink); }",
       "." + ROOT_ATTR + " .trace-sf-scope button:disabled { cursor: default; opacity: 0.55; }",
       "." + ROOT_ATTR + " .trace-sf-scope-title { display: block; font-size: 14px; font-weight: 500; }",

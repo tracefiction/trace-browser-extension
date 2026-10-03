@@ -13,6 +13,7 @@
     --surface: #ffffff;
     --raised: #e9eef3;
     --rule: #d8e0e7;
+    --control-edge: #d8e0e7;
     --text: #18232d;
     --text-2: #5f6b76;
     --text-3: #7a8590;
@@ -52,8 +53,9 @@
     :root {
         --ground: #07090c;
         --surface: #121418;
-        --raised: #181a1e;
+        --raised: #1d1f23;
         --rule: #212429;
+        --control-edge: #686d75;
         --text: #f2f5f8;
         --text-2: #b4bcc6;
         --text-3: #9aa3ae;
@@ -422,7 +424,7 @@ body[data-trace-popup-state="connected_saved"] .popup-sheet {
     font: 400 0.765em/1.35 var(--trace-font);
 }
 
-/* System switch anatomy: raised track with a rule ring when off, the action
+/* System switch anatomy: raised track with a control-edge ring (3:1) when off, the action
    tint when on, and a white thumb in both appearances. */
 .popup-switch-row input {
     appearance: none;
@@ -436,7 +438,7 @@ body[data-trace-popup-state="connected_saved"] .popup-sheet {
     border-radius: 13px;
     background-color: var(--raised);
     background-image: radial-gradient(circle at 13px 50%, var(--switch-thumb) 0 10.5px, transparent 11px);
-    box-shadow: inset 0 0 0 1px var(--rule);
+    box-shadow: inset 0 0 0 1px var(--control-edge);
     cursor: pointer;
 }
 
@@ -550,7 +552,7 @@ body[data-trace-popup-state="connected_saved"] .popup-sheet {
     overflow: hidden;
     border-radius: 14px;
     background: var(--surface);
-    box-shadow: inset 0 0 0 1px var(--rule);
+    box-shadow: inset 0 0 0 1px var(--control-edge);
 }
 
 .popup-preferences[hidden] {
