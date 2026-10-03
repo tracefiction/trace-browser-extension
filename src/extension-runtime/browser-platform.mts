@@ -16,7 +16,7 @@ export interface RuntimePort {
   readonly onMessage: {
     addListener(listener: RuntimeMessageListener): void;
   };
-  readonly getManifest?: () => { readonly content_scripts?: readonly { readonly matches?: readonly string[]; readonly exclude_matches?: readonly string[]; readonly js?: readonly string[] }[] };
+  readonly getManifest?: () => { readonly version?: string; readonly content_scripts?: readonly { readonly matches?: readonly string[]; readonly exclude_matches?: readonly string[]; readonly js?: readonly string[] }[] };
   readonly getPlatformInfo?: (...args: unknown[]) => unknown;
   readonly getURL?: (...args: unknown[]) => unknown;
   readonly sendNativeMessage?: (...args: unknown[]) => unknown;
