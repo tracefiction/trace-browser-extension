@@ -1,5 +1,7 @@
 # Extension Store Copy - Browser 0.6.1 / iOS 0.6.4
 
+> **Historical.** Browser 0.6.1 was never published to the Chrome Web Store or Firefox Add-ons. Both still listed 0.5.14 when 0.7.0 was prepared. The release notes are in [`CHANGELOG.md`](../CHANGELOG.md).
+
 Use this copy for Chrome Web Store, Firefox Add-ons, App Store Connect, and
 public release notes. Keep evergreen store descriptions separate from
 version-specific "What's New" copy.

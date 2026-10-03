@@ -207,7 +207,15 @@ TRACE_API_BASE=https://api.tracefiction.com TRACE_WEB_ORIGIN=https://www.tracefi
 ```
 
 `build:release` packages the kernel session owner and rejects missing,
-localhost, non-HTTPS, and non-production Trace origins. The explicit
+localhost, non-HTTPS, and non-production Trace origins. `npm run agent:check` runs
+`build:release`, so run it with the same two variables, as CI does:
+
+```bash
+TRACE_API_BASE=https://api.tracefiction.com TRACE_WEB_ORIGIN=https://www.tracefiction.com npm run agent:check
+```
+
+Without them the release step stops at the localhost default from `.env`
+or the build script. That is the guard working, not a test failure. The explicit
 `build:legacy:release` command remains available as the bounded rollback path;
 it is not used by the store packaging commands.
 

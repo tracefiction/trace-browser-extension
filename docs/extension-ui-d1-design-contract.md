@@ -35,7 +35,7 @@ Page UI adds the private-record tokens:
 
 The earlier brass `#8A6420` / `#DCB976` is retired.
 
-The dark column is the native app's B · Ink palette (`TraceDarkPalette.reviewInk`):
+The dark column is the native app's B · Ink palette:
 a blue-black near-black ground, near-white primary text, stepped greys, brass
 only for what the reader wrote, and no brown or glow. The earlier navy Story
 Ink dark (`#111922` ground) is retired.

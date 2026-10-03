@@ -228,12 +228,16 @@ function isLocalLike(value) {
   return /localhost|127\.0\.0\.1/i.test(value);
 }
 
+const RELEASE_ORIGINS_HINT =
+  "Release builds (including npm run agent:check) need the production origins, as CI sets them: " +
+  "TRACE_API_BASE=https://api.tracefiction.com TRACE_WEB_ORIGIN=https://www.tracefiction.com";
+
 function assertReleaseUrl(name, value, expected) {
   if (!value) {
-    throw new Error(`${name} must be set for release builds.`);
+    throw new Error(`${name} must be set for release builds. ${RELEASE_ORIGINS_HINT}`);
   }
   if (!/^https:\/\//i.test(value)) {
-    throw new Error(`${name} must use https:// for release builds. Received: ${value}`);
+    throw new Error(`${name} must use https:// for release builds. Received: ${value}. ${RELEASE_ORIGINS_HINT}`);
   }
   if (isLocalLike(value)) {
     throw new Error(`${name} cannot point at localhost for release builds. Received: ${value}`);
