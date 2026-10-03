@@ -4,7 +4,17 @@ This file is included in the **source code zip** submitted to addons.mozilla.org
 
 ## What you are reviewing
 
-The **Trace** browser extension: MV3 JavaScript under `src/` and `Shared (Extension)/Resources/`. There is **no** minifier, transpiler, or Webpack-style bundler. The only machine-generated extension file produced by our build is **`Shared (Extension)/Resources/background.js`**, generated from **`src/background.js`** by literal string substitution of API/web origins (see `scripts/build.mjs`). All other shipped `.js` files are human-authored source as committed.
+The **Trace** browser extension (Manifest V3). Most shipped files under `Shared (Extension)/Resources/` are human-authored JavaScript, HTML and CSS, committed as-is and copied into the package unchanged.
+
+The build generates four shipped files:
+
+| Shipped file | How it is produced |
+|--------------|--------------------|
+| `background.js` | **Bundled.** `scripts/build.mjs` uses **esbuild** to bundle the TypeScript sources in `src/extension-runtime/` and `src/extension-core/` (entry: `src/extension-runtime/index.mts`) into one **unminified** IIFE. It also prepends the two configured Trace origins. There is no minification, obfuscation or remote code. |
+| `manifest.json` | `scripts/build.mjs` sets `version` from `package.json` and the permissions, host permissions and content scripts for the release origins. The Firefox package adds `browser_specific_settings`. |
+| `popup-config.js`, `content-config.js` | Small generated configuration files holding the Trace origins and build flags. |
+
+`npm run build:core` first type-checks and compiles the same TypeScript with `tsc` (`tsconfig.extension-core.json`) into `.trace-build/`, which is not shipped.
 
 ## Environment
 
@@ -42,10 +52,14 @@ Edit `.env` and set **HTTPS** production origins (no trailing slashes) to match 
 
 ```bash
 TRACE_API_BASE=https://api.tracefiction.com
-TRACE_WEB_ORIGIN=https://tracefiction.com
+TRACE_WEB_ORIGIN=https://www.tracefiction.com
 ```
 
-**`build:release` rejects non-production, non-HTTPS, and localhost values** for these variables.
+**`build:release` accepts exactly these two values.** It rejects any other origin, including `https://tracefiction.com` without `www`, non-HTTPS values and localhost. You can also pass the two variables on the command line instead of creating `.env`:
+
+```bash
+TRACE_API_BASE=https://api.tracefiction.com TRACE_WEB_ORIGIN=https://www.tracefiction.com npm run build:release
+```
 
 ### 3. Run the release build (executes all extension build steps)
 
@@ -55,11 +69,19 @@ The **build entrypoint** is:
 npm run build:release
 ```
 
-This runs `TRACE_BUILD_MODE=release node scripts/build.mjs`, which:
+This runs `npm run build:core` (the `tsc` compile described above), then `TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel node scripts/build.mjs`. That step:
 
-1. Reads `src/background.js`, replaces `__TRACE_API_BASE__` and `__TRACE_WEB_ORIGIN__`, writes `Shared (Extension)/Resources/background.js`.
-2. Syncs `Shared (Extension)/Resources/manifest.json` (version from `package.json`, host permissions from env).
-3. Writes **`dist/chrome`** and **`dist/firefox`** (Firefox manifest includes `browser_specific_settings` for AMO).
+1. Bundles `src/extension-runtime/index.mts` with esbuild into `Shared (Extension)/Resources/background.js`. The bundle is unminified.
+2. Writes `Shared (Extension)/Resources/manifest.json`, `popup-config.js` and `content-config.js`. The version comes from `package.json`, and the origins come from the environment.
+3. Writes **`dist/chrome`** and **`dist/firefox`**. The Firefox manifest includes `browser_specific_settings` for AMO.
+
+The result should match the submitted package file for file. To check:
+
+```bash
+npm run zip:firefox
+mkdir -p /tmp/trace-rebuilt && unzip -o -q dist/trace-firefox-store.zip -d /tmp/trace-rebuilt
+diff -r /tmp/trace-rebuilt <unzipped submitted package>
+```
 
 ### 4. (Optional) Produce the same zip layout as store upload
 
@@ -74,7 +96,8 @@ Output: **`dist/trace-firefox-store.zip`**. Unzip it: `manifest.json` must be at
 | Script | Purpose |
 |--------|---------|
 | `npm run build` | Development build (allows localhost in manifest when dev rules apply). |
-| `npm run build:release` | **Store / AMO** build; validates HTTPS production URLs. |
+| `npm run build:core` | Type-checks and compiles the TypeScript sources with `tsc` into `.trace-build/` (not shipped). |
+| `npm run build:release` | **Store / AMO** build: `build:core`, then the esbuild bundle and the manifests. It accepts only the production Trace origins. |
 | `npm run zip:firefox` | Zips `dist/firefox` contents for AMO (excludes macOS Finder junk). |
 | `npm run zip:chrome` | Zips `dist/chrome` for Chrome Web Store. |
 
