@@ -2918,3 +2918,50 @@ if (importBtn && NORMAL_POPUP_CONTROLS_AVAILABLE) {
 }
 
 if (NORMAL_POPUP_CONTROLS_AVAILABLE) bindPreferenceControls();
+
+// Durable archive access is separate from the Trace account and current-tab access.
+if (KERNEL_SESSION_ACTIVE && !isLikelyIosExtensionUi && !EARNED_PERMISSION_ONBOARDING && !ACTIVE_TAB_PROBE && globalThis.TraceArchiveAccess) {
+  const section = document.getElementById("popup-host-access");
+  const button = document.getElementById("popup-host-access-allow");
+  const result = document.getElementById("popup-host-access-result");
+  let access = [];
+  let preferredSite = null;
+  let selected = null;
+  let requesting = false;
+  const renderAccess = items => {
+    access = Array.isArray(items) ? items : [];
+    const missing = access.filter(item => item.granted === false);
+    selected = missing.find(item => item.label === preferredSite) || missing[0] || null;
+    section.hidden = !selected;
+    if (!selected) {
+      delete document.body.dataset.traceHostAccess;
+      return;
+    }
+    document.body.dataset.traceHostAccess = "missing";
+    document.getElementById("popup-host-access-lead").textContent = `Allow site access so Trace can save stories and keep your place on ${selected.label} without opening this popup each time.`;
+    button.textContent = `Allow Trace on ${selected.label}`;
+    button.disabled = requesting;
+  };
+  TraceArchiveAccess.onChanged(items => renderAccess(items));
+  void probeQueryActiveTab().then(tab => { preferredSite = classifyEarnedPage(tab?.url).site; renderAccess(access); }, () => {});
+  void TraceArchiveAccess.read().then(response => { if (response?.ok) renderAccess(response.access); }, () => {});
+  button.addEventListener("click", () => {
+    if (!selected || requesting) return;
+    const requestedSite = selected.site;
+    const pending = TraceArchiveAccess.request(selected);
+    requesting = true;
+    button.disabled = true;
+    result.textContent = "";
+    pending.then(response => {
+      requesting = false;
+      renderAccess(response.access || access);
+      result.textContent = response.access?.find(item => item.site === requestedSite)?.granted === true
+        ? "" : "Site access is still off. Try Allow again.";
+      requestKernelSnapshot();
+    }, () => {
+      requesting = false;
+      renderAccess(access);
+      result.textContent = "Site access could not be allowed. Try again.";
+    });
+  });
+}

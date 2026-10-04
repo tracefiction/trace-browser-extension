@@ -1,4 +1,5 @@
 import { createActivityFetch } from "./activity-fetch.mjs";
+import { installArchiveHostAccess } from "./archive-host-access.mjs";
 import { installArchiveRecovery } from "./archive-recovery.mjs";
 import { installSessionRuntime, type SessionMode, type SessionRuntimeController } from "./controller.mjs";
 import { installArchiveReadinessRuntime } from "./archive-readiness.mjs";
@@ -99,7 +100,8 @@ try {
   );
   let session: SessionRuntimeController | undefined;
   if (__TRACE_SESSION_MODE__ === "kernel") {
-    installArchiveRecovery({ runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, scripting: extension.scripting, mode: storageMode });
+    const recover = installArchiveRecovery({ runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, scripting: extension.scripting, mode: storageMode });
+    installArchiveHostAccess({ runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, mode: storageMode, recover });
     installTraceFirstInstallActivation({
       runtime: extension.runtime,
       tabs: extension.tabs,

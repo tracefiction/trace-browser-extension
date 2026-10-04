@@ -40,6 +40,7 @@ export function installArchiveRecovery(environment: Environment): () => Promise<
   runtime.onInstalled?.addListener(details => {
     if (details.reason === "install" || details.reason === "update") void recover();
   });
+  runtime.onStartup?.addListener(() => { void recover(); });
   void recover();
   return recover;
 }

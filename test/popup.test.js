@@ -175,6 +175,7 @@ function createPopupHarness({
   registrationReconcileResult = null,
   sessionSnapshotResponses = null,
   directTabUnavailable = false,
+  archiveAccess = null,
 } = {}) {
   const html = fs.readFileSync(POPUP_HTML_PATH, "utf8");
   const js = fs.readFileSync(POPUP_JS_PATH, "utf8");
@@ -208,6 +209,11 @@ function createPopupHarness({
       sendMessage(message, callback) {
         messages.push(message);
         let response;
+        if (message.type === "TRACE_ARCHIVE_HOST_ACCESS_GET" || message.type === "TRACE_ARCHIVE_HOST_ACCESS_REFRESH") {
+          response = { ok: true, access: (archiveAccess || []).map(item => ({ ...item,
+            granted: item.origins.every(origin => grantedOrigins.includes(origin)),
+          })) };
+        }
         if (message.type === "TRACE_POPUP_PAGE_RELAY") {
           tabMessages.push({ tabId: message.tabId, message: message.command });
           response = probeSaveResponse;
@@ -329,7 +335,7 @@ function createPopupHarness({
           return;
         }
         if (permissionRequestResult) {
-          grantedOrigins.splice(0, grantedOrigins.length, ...(request.origins || []));
+          grantedOrigins.splice(0, grantedOrigins.length, ...new Set([...(archiveAccess ? grantedOrigins : []), ...(request.origins || [])]));
         }
         if (promiseRuntime) return Promise.resolve(permissionRequestResult);
         callback?.(permissionRequestResult);
@@ -425,6 +431,7 @@ function createPopupHarness({
   };
 
   vm.createContext(context);
+  if (archiveAccess) vm.runInContext(fs.readFileSync(path.join(path.dirname(POPUP_JS_PATH), "archive-access-client.js"), "utf8"), context);
   vm.runInContext(js, context);
 
   return {
@@ -2615,4 +2622,53 @@ test("session handover shows a neutral check, not Saving, for a story already in
   assert.doesNotMatch(h.document.getElementById("popup-earned-heading").textContent, /Saving/);
   assert.match(h.document.getElementById("popup-earned-record-label").textContent, /Checking your Library/);
   assert.equal(h.document.getElementById("popup-earned-pin").hidden, true);
+});
+
+const DESKTOP_ARCHIVE_ACCESS = [
+  { site: "ao3", label: "AO3", origins: ["https://archiveofourown.org/*", "https://*.archiveofourown.org/*"] },
+  { site: "ffn", label: "FanFiction.net", origins: ["https://www.fanfiction.net/*", "https://m.fanfiction.net/*"] },
+];
+for (const promiseRuntime of [true, false]) {
+  test(`missing host access is explained before account state and requested directly on click (${promiseRuntime})`, async () => {
+    const h = createPopupHarness({ sessionMode: "kernel", promiseRuntime,
+      archiveAccess: DESKTOP_ARCHIVE_ACCESS, grantedOrigins: [...DESKTOP_ARCHIVE_ACCESS[1].origins],
+      sessionSnapshot: { state: "connected", reason: "none" },
+    });
+    await flush();
+    const button = h.document.getElementById("popup-host-access-allow");
+    assert.equal(h.document.getElementById("popup-host-access").hidden, false);
+    assert.equal(h.document.body.dataset.traceHostAccess, "missing");
+    assert.equal(button.textContent, "Allow Trace on AO3");
+    assert.match(h.document.getElementById("popup-host-access-lead").textContent, /without opening this popup each time/);
+    assert.equal(h.permissionRequests.length, 0);
+    button.click();
+    assert.equal(h.permissionRequests.length, 1, "request starts in the same click, before awaiting");
+    assert.deepEqual(Array.from(h.permissionRequests[0].origins), DESKTOP_ARCHIVE_ACCESS[0].origins);
+    await flush();
+    assert.equal(h.document.getElementById("popup-host-access").hidden, true);
+    assert.equal(h.document.body.dataset.traceHostAccess, undefined);
+  });
+  test(`denied and rejected host requests leave an actionable explanation (${promiseRuntime})`, async () => {
+    for (const permissionRequestError of [null, "user gesture rejected"]) {
+      const h = createPopupHarness({ sessionMode: "kernel", promiseRuntime, archiveAccess: DESKTOP_ARCHIVE_ACCESS,
+        permissionRequestResult: false, permissionRequestError });
+      await flush(); h.document.getElementById("popup-host-access-allow").click(); await flush();
+      assert.equal(h.document.getElementById("popup-host-access").hidden, false);
+      assert.equal(h.document.getElementById("popup-host-access-allow").disabled, false);
+      assert.match(h.document.getElementById("popup-host-access-result").textContent, /Try.*again/i);
+    }
+  });
+}
+test("granted desktop hosts and Safari keep their normal popup", async () => {
+  for (const userAgent of ["Firefox/145.0", "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X)"]) {
+    const h = createPopupHarness({ sessionMode: "kernel", promiseRuntime: true, archiveAccess: DESKTOP_ARCHIVE_ACCESS,
+      grantedOrigins: DESKTOP_ARCHIVE_ACCESS.flatMap(item => item.origins), userAgent });
+    await flush(); assert.equal(h.document.getElementById("popup-host-access").hidden, true);
+    assert.equal(h.permissionRequests.length, 0);
+  }
+});
+test("popup selects FanFiction.net first when both grants are missing on that tab", async () => {
+  const h = createPopupHarness({ sessionMode: "kernel", archiveAccess: DESKTOP_ARCHIVE_ACCESS,
+    activeTab: { id: 7, url: "https://www.fanfiction.net/s/123/1" } });
+  await flush(); assert.equal(h.document.getElementById("popup-host-access-allow").textContent, "Allow Trace on FanFiction.net");
 });

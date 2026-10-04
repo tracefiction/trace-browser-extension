@@ -60,6 +60,7 @@ async function renderOverlayListing({
   userAgent,
   maxTouchPoints,
   beforeEval,
+  hostAccess = null,
 }) {
   const keysSrc = fs.readFileSync(KEYS_PATH, "utf8");
   const overlaySrc = fs.readFileSync(OVERLAY_PATH, "utf8");
@@ -78,6 +79,7 @@ async function renderOverlayListing({
   }
   const storageChangeListeners = [];
   const runtimeMessages = [];
+  const runtimeListeners = [];
   const storageState = {
     authToken,
     traceApiBase: "https://trace.test",
@@ -101,11 +103,17 @@ async function renderOverlayListing({
     },
     runtime: {
       lastError: null,
+      getURL: resource => "moz-extension://trace-test/" + resource,
+      onMessage: { addListener(fn) { runtimeListeners.push(fn); } },
       sendMessage:
         sendMessage ||
         ((msg, cb) => {
           runtimeMessages.push(msg);
           if (typeof cb !== "function") return;
+          if (msg.type === "TRACE_ARCHIVE_HOST_ACCESS_GET") {
+            cb({ ok: true, access: hostAccess ? [hostAccess] : [] });
+            return;
+          }
           if (msg.type === "TRACE_ACCOUNT_PROJECTION_GET") {
             cb({
               ok: true,
@@ -133,6 +141,7 @@ async function renderOverlayListing({
     window.TRACE_EARNED_PERMISSION_COMPLETE = earnedPermissionComplete;
   }
   window.__traceRuntimeMessages = runtimeMessages;
+  window.__traceEmitRuntime = message => runtimeListeners.forEach(fn => fn(message));
   window.__traceSetStorage = function (next) {
     const changes = {};
     for (const [key, value] of Object.entries(next || {})) {
@@ -2984,4 +2993,32 @@ test("on a Mac without touch the kernel notice runs the browser connect", async 
   const cta = window.document.querySelector("[data-trace-connect-notice-cta]");
   assert.notEqual(cta.getAttribute("href"), "traceauth://open?destination=extension-connect");
   assert.equal(cta.textContent, "Connect");
+});
+
+for (const [site, label, url, fixture] of [
+  ["ao3", "AO3", "https://archiveofourown.org/works?tag_id=example", "ao3_listing.html"],
+  ["ffn", "FanFiction.net", "https://www.fanfiction.net/book/", "ffn_listing.html"],
+]) {
+  test(`${label} notice explains missing durable access even when the account is connected`, async () => {
+    const access = { site, label, origins: [], granted: false };
+    const win = await renderOverlayListing({ html: loadFixture(fixture), url, sessionMode: "kernel", hostAccess: access });
+    const notice = win.document.querySelector("[data-trace-connect-notice]");
+    assert.ok(notice);
+    assert.equal(notice.querySelector("[data-trace-connect-notice-heading]").textContent, "Site access is off");
+    assert.match(notice.textContent, /without opening the toolbar popup each time/);
+    assert.equal(notice.querySelector("[data-trace-connect-notice-cta]").hidden, true);
+    const frame = notice.querySelector("iframe");
+    assert.equal(frame.title, `Allow Trace on ${label}`);
+    assert.equal(frame.src, `moz-extension://trace-test/archive-access.html?site=${site}`);
+    win.__traceEmitRuntime({ type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED", access: [{ ...access, granted: true }] });
+    assert.equal(win.document.querySelector("[data-trace-connect-notice]"), null);
+    win.close();
+  });
+}
+test("a story page can show the same host-access notice without a listing or account failure", async () => {
+  const win = await renderOverlayListing({ html: '<html><body><h1>Story</h1></body></html>',
+    url: "https://archiveofourown.org/works/123", sessionMode: "kernel",
+    hostAccess: { site: "ao3", label: "AO3", granted: false } });
+  assert.ok(win.document.querySelector("[data-trace-host-access-control]"));
+  win.close();
 });
