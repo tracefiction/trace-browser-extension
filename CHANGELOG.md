@@ -4,6 +4,14 @@ Trace is in beta. This file lists the changes that matter to people using the
 Chrome, Edge and Firefox extension. The Safari extension ships inside the Trace
 iPhone app, and its notes go with each app release.
 
+## 0.7.1
+
+### Connecting
+
+- **Connect on AO3 and FanFiction.net now connects.** The Connect button in Trace's notice, on a story and on listing rows works like Connect in the toolbar popup. If you're signed in to Trace in an open tab, Trace connects straight away. If not, Trace opens so you can sign in, and the extension connects as soon as you do.
+- **No refresh needed.** Open AO3 and FanFiction.net tabs update as soon as the extension connects or disconnects.
+- **Signing in after installing always connects.** Before, the extension connected only if you signed in on the exact setup page it opened. Now signing in anywhere on Trace within 30 minutes of installing connects it.
+
 ## 0.7.0
 
 This is the first Chrome Web Store and Firefox Add-ons release since 0.5.14, published in July 2026.

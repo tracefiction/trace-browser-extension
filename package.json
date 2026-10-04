@@ -1,6 +1,6 @@
 {
   "name": "trace-browser-extension",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "private": true,
   "description": "Trace browser and Safari Web Extension source",
   "scripts": {
