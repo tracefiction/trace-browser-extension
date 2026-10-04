@@ -1,4 +1,0 @@
-/* The permission tab uses the popup's existing type, spacing and action tokens. */
-html, body { width: auto; min-width: 0; max-width: none; }
-body { padding: 24px 16px; overflow: auto; }
-.archive-access-page { width: 360px; max-width: 100%; margin: 0 auto; }

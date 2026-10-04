@@ -250,20 +250,20 @@ revision by the private Apple client.
 On Firefox, installation or connection to your Trace account does not guarantee
 that AO3/FanFiction.net host access is granted. Trace checks the declared archive
 hosts with `permissions.contains` on install/update, startup, permission changes,
-and popup opening. If access is off, the popup and already-running page notices
-show an Allow action. The popup requests access directly from its click handler.
+and popup opening. Firefox, Chrome and Edge show a **!** toolbar badge and the
+**Site access is off — click to allow** tooltip while either archive is missing
+access. Click the icon, then **Allow Trace on AO3** or **Allow Trace on
+FanFiction.net** in the popup to confirm that archive's declared hosts in the
+browser permission prompt. The badge clears once both archives are allowed.
+Declining leaves a retryable button.
 
-The notice opens a small bundled extension tab, whose own Allow button requests
-only that archive's declared hosts. Firefox gives a web-accessible extension
-iframe embedded in an HTTP(S) page a restricted API set without
-`browser.permissions`; requesting there fails before a prompt can appear. A
-background message from a page click also does not preserve the permission API's
-required user gesture. The extension tab supplies both the privileged context
-and a direct click. After Firefox confirms access, Trace restores scripts on
-supported open archive pages, returns to the originating tab if it is still on
-that archive, and closes the permission tab. Declining leaves a retryable button.
-No additional hosts or collected data are introduced. Safari keeps its existing
-Website Access flow.
+Without host access, content scripts cannot run to show an in-page notice. The
+popup requests access directly from its click handler: Firefox's restricted API
+set in a web-accessible extension iframe on an HTTP(S) page does not expose
+`browser.permissions`, and a background message hop does not preserve the
+required user gesture. After approval, Trace restores scripts on supported open
+archive pages. No additional hosts or collected data are introduced. Safari
+keeps its existing Website Access flow.
 
 ## Repo Layout
 

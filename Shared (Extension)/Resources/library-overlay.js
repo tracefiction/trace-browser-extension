@@ -29,8 +29,6 @@
   const TRACE_ACCOUNT_ID_KEY = "traceAccountId";
   const TRACE_API_BASE_STORAGE_KEY = "traceApiBase";
   var currentTraceAuthState = null;
-  var currentTraceHasAuth = false;
-  var archiveHostAccess = null;
   var confirmedQuickAddEntries = new Map();
   var listingActionSurfaceOpener = null;
   var listingActionSurfaceTrigger = null;
@@ -895,7 +893,6 @@ function traceRefreshPageTokens() {
       updatedAt: authState && authState.updatedAt ? authState.updatedAt : null,
       message: authState && authState.message ? authState.message : null,
       hasAuth: !!hasAuth,
-      hostAccess: archiveHostAccess && archiveHostAccess.granted,
     });
   }
 
@@ -947,8 +944,7 @@ function traceRefreshPageTokens() {
     traceRefreshPageTokens();
     ensureListingFocusStyles();
     var signature = noticeSignature(authState, hasAuth);
-    var missingAccess = archiveHostAccess && archiveHostAccess.granted === false;
-    if ((!missingAccess && (isSingleWorkPage() || !shouldShowConnectNotice(authState, hasAuth))) || isConnectNoticeDismissed(signature)) {
+    if (!shouldShowConnectNotice(authState, hasAuth) || isConnectNoticeDismissed(signature)) {
       removeConnectNotice();
       return;
     }
@@ -976,11 +972,6 @@ function traceRefreshPageTokens() {
     if (appLink) {
       heading = "Finish setup in the Trace app";
       message = "Open Trace and finish Safari setup there, signing in first if asked. Then come back; nothing has been saved yet.";
-    }
-
-    if (missingAccess) {
-      heading = "Site access is off";
-      message = "Allow site access so Trace can save stories and keep your place on " + archiveHostAccess.label + " without opening the toolbar popup each time.";
     }
 
     var existing = document.querySelector("[" + CONNECT_NOTICE_ATTR + "]");
@@ -1084,34 +1075,7 @@ function traceRefreshPageTokens() {
     var ctaEl = existing.querySelector("[data-trace-connect-notice-cta]");
     ctaEl.onclick = null;
     ctaEl.removeAttribute("aria-disabled");
-    ctaEl.hidden = false;
-    ctaEl.style.display = "inline-flex";
-    if (missingAccess) {
-      ctaEl.href = "#";
-      ctaEl.removeAttribute("target");
-      ctaEl.textContent = "Allow Trace on " + archiveHostAccess.label;
-      ctaEl.onclick = function (event) {
-        event.preventDefault();
-        event.stopPropagation();
-        if (ctaEl.getAttribute("aria-disabled") === "true") return;
-        ctaEl.setAttribute("aria-disabled", "true");
-        var settled = false;
-        var finish = function (response) {
-          if (settled) return;
-          settled = true;
-          ctaEl.removeAttribute("aria-disabled");
-          existing.querySelector("[data-trace-connect-notice-message]").textContent = response && response.ok
-            ? "In the Trace tab, click Allow to confirm site access. This page updates when access is allowed."
-            : "The site access tab could not open. Try Allow again or open the Trace toolbar popup.";
-        };
-        try {
-          var pending = ext.runtime.sendMessage({ type: "TRACE_ARCHIVE_HOST_ACCESS_OPEN" }, function (response) {
-            finish(ext.runtime.lastError ? null : response);
-          });
-          if (pending && typeof pending.then === "function") pending.then(finish, function () { finish(null); });
-        } catch (_) { finish(null); }
-      };
-    } else if (appLink) {
+    if (appLink) {
       ctaEl.href = "traceauth://open?destination=extension-connect";
       ctaEl.removeAttribute("target");
       ctaEl.textContent = "Open Trace app";
@@ -4164,14 +4128,13 @@ function traceRefreshPageTokens() {
   function renderProjection(res, cache) {
     var hasAuth = !!res.authToken;
     currentTraceAuthState = (res && res.traceAuthState) || null;
-    currentTraceHasAuth = hasAuth;
     if (!authStateAllowsActions(currentTraceAuthState, hasAuth)) {
       confirmedQuickAddEntries.clear();
     } else if (archiveConnectState !== "connecting") {
       archiveConnectState = null;
     }
     if (isSingleWorkPage()) {
-      renderConnectNotice(currentTraceAuthState, hasAuth);
+      removeConnectNotice();
       clearBadges();
       return;
     }
@@ -4256,32 +4219,7 @@ function traceRefreshPageTokens() {
     scheduleRun(delay);
   }
 
-  function acceptHostAccess(items) {
-    if (!Array.isArray(items)) return;
-    var next = items.find(function (item) { return item.site === (location.hostname.indexOf("fanfiction.net") >= 0 ? "ffn" : "ao3"); }) || null;
-    if (JSON.stringify(next) === JSON.stringify(archiveHostAccess)) return;
-    archiveHostAccess = next;
-    renderConnectNotice(currentTraceAuthState, currentTraceHasAuth);
-  }
-
-  function checkHostAccess() {
-    if (!KERNEL_SESSION_ACTIVE) return;
-    var settled = false;
-    function finish(response) {
-      if (settled) return;
-      settled = true;
-      if (response && response.ok) acceptHostAccess(response.access);
-    }
-    try {
-      var pending = ext.runtime.sendMessage({ type: "TRACE_ARCHIVE_HOST_ACCESS_GET" }, function (response) {
-        finish(ext.runtime.lastError ? null : response);
-      });
-      if (pending && typeof pending.then === "function") pending.then(finish, function () { finish(null); });
-    } catch (_) { /* Existing browser flows own unavailable permission APIs. */ }
-  }
-
   function run() {
-    checkHostAccess();
     try {
       if (KERNEL_SESSION_ACTIVE) {
         ext.storage.local.get(["prefLibraryInlayEnabled"], function (preferences) {
@@ -4336,9 +4274,6 @@ function traceRefreshPageTokens() {
   }
 
   runWhenTraceEarnedPermissionReady(function () {
-    ext.runtime.onMessage?.addListener(function (message) {
-      if (message && message.type === "TRACE_ARCHIVE_HOST_ACCESS_CHANGED") acceptHostAccess(message.access);
-    });
     if (document.readyState === "loading") {
       document.addEventListener("DOMContentLoaded", run, { once: true });
     } else {

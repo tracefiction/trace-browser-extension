@@ -21,6 +21,7 @@ export * from "./story-command-sender.mjs";
 export * from "./trace-web-navigation.mjs";
 export * from "./trace-web-status.mjs";
 import type {
+  ActionPort,
   AlarmsPort,
   PermissionsPort,
   RuntimePort,
@@ -52,6 +53,7 @@ type EarnedPermissionRegistrationConfig = Readonly<{
 }>;
 
 interface ExtensionApi {
+  readonly action?: ActionPort;
   readonly runtime: RuntimePort;
   readonly alarms: AlarmsPort;
   readonly storage: { readonly local: StorageArea; readonly onChanged?: { addListener(listener: (changes: Record<string, unknown>, area: string) => void): void } };
@@ -101,7 +103,7 @@ try {
   let session: SessionRuntimeController | undefined;
   if (__TRACE_SESSION_MODE__ === "kernel") {
     const recover = installArchiveRecovery({ runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, scripting: extension.scripting, mode: storageMode });
-    installArchiveHostAccess({ runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, mode: storageMode, recover });
+    installArchiveHostAccess({ runtime: extension.runtime, action: extension.action, permissions: extension.permissions, mode: storageMode, recover });
     installTraceFirstInstallActivation({
       runtime: extension.runtime,
       tabs: extension.tabs,

@@ -33,6 +33,7 @@
     "test:session:installed:chrome": "node scripts/test-extension-session-lifecycle.mjs",
     "test:connect:installed:chrome": "node scripts/test-extension-connect-flow.mjs",
     "test:progress:installed:chrome": "node scripts/test-extension-chapter-progress.mjs",
+    "test:host-access:headless:chrome": "node scripts/test-extension-host-access-chrome.mjs",
     "test:host-access:headless:firefox": "node scripts/test-extension-host-access-firefox.mjs",
     "test:session:installed:firefox": "node scripts/test-extension-session-firefox.mjs",
     "test:session:packages": "node --test test/extension-runtime/package-modes.test.mjs",

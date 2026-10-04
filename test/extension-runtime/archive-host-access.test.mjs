@@ -5,10 +5,12 @@ import { declaredArchiveAccess, installArchiveHostAccess } from "../../.trace-bu
 const AO3 = ["https://archiveofourown.org/*", "https://*.archiveofourown.org/*", "https://archiveofourown.gay/*", "https://archive.transformativeworks.org/*"];
 const FFN = ["https://www.fanfiction.net/*", "https://m.fanfiction.net/*"];
 const hosts = [...AO3, ...FFN, "https://www.tracefiction.com/*", "https://api.tracefiction.com/*"];
+const warning = "Site access is off — click to allow";
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
-function harness(mode, scheme = "moz-extension", contains = () => false) {
-  const events = {}, listeners = [], checked = [], pushed = [], created = [], activated = [];
+function harness(mode, scheme = "moz-extension", contains = () => false, actionFailure = false) {
+  const events = {}, listeners = [], checked = [], pushed = [], writes = [];
+  const badge = { text: "", title: "Trace fixture" };
   let recovered = 0;
   const api = fn => (...args) => {
     const callback = mode === "callback" ? args.pop() : null;
@@ -24,20 +26,21 @@ function harness(mode, scheme = "moz-extension", contains = () => false) {
   const event = name => ({ addListener(fn) { events[name] = fn; } });
   const runtime = {
     id: "trace-test", getURL: path => `${scheme}://trace-test/${path}`,
-    getManifest: () => ({ host_permissions: hosts }),
+    getManifest: () => ({ host_permissions: hosts, action: { default_title: "Trace fixture" } }),
     onInstalled: event("installed"), onStartup: event("startup"),
     onMessage: { addListener(fn) { listeners.push(fn); } },
     sendMessage: api(message => pushed.push(message)),
   };
-  const refresh = installArchiveHostAccess({ runtime, mode,
+  const action = Object.fromEntries(["setBadgeText", "setTitle", "setBadgeBackgroundColor", "setBadgeTextColor"].map(method => [method, api(details => {
+    writes.push({ method, ...details });
+    if (actionFailure) throw Error("action unavailable");
+    if (method === "setBadgeText") badge.text = details.text;
+    if (method === "setTitle") badge.title = details.title;
+    if (method === "setBadgeBackgroundColor") badge.background = details.color;
+    if (method === "setBadgeTextColor") badge.color = details.color;
+  })]));
+  const refresh = installArchiveHostAccess({ runtime, action, mode,
     permissions: { contains: api(request => { checked.push(request); return contains(request); }), onAdded: event("added"), onRemoved: event("removed"), request() { assert.fail("lifecycle must not request access"); } },
-    tabs: { query: api(() => [
-      { id: 1, url: "https://archiveofourown.org/works/123" },
-      { id: 2, url: "https://www.fanfiction.net/s/123/1" },
-      { id: 3, url: "https://archiveofourown.org/users/login" },
-      { id: 4, url: "https://www.tracefiction.com/" },
-      { id: 5, url: "https://ao3.org/works/123" },
-    ]), create: api(options => created.push(options)), update: api((id, options) => activated.push({ id, options })), sendMessage: api((id, message, options) => pushed.push({ id, message, options })) },
     recover: async () => { recovered++; },
   });
   const popup = { id: runtime.id, url: runtime.getURL("popup.html") };
@@ -45,7 +48,13 @@ function harness(mode, scheme = "moz-extension", contains = () => false) {
     const result = listeners[0]({ type, origins: ["https://evil.test/*"] }, sender, resolve);
     if (result !== true) resolve(undefined);
   });
-  return { runtime, events, checked, pushed, created, activated, refresh, send, popup, get recovered() { return recovered; } };
+  return { runtime, action, events, checked, pushed, writes, badge, refresh, send, popup, get recovered() { return recovered; } };
+}
+
+function assertBadge(h, missing) {
+  assert.equal(h.badge.text, missing ? "!" : "");
+  assert.equal(h.badge.title, missing ? warning : "Trace fixture");
+  assert.ok(h.writes.every(write => !Object.hasOwn(write, "tabId")), "badge is discoverable on any tab");
 }
 
 test("permission groups contain only the archive hosts declared by this package", () => {
@@ -54,81 +63,90 @@ test("permission groups contain only the archive hosts declared by this package"
   ]);
 });
 
-for (const mode of ["promise", "callback"]) {
-  test(`startup/install/update and revocation recheck without prompting (${mode})`, async () => {
+for (const [mode, scheme] of [["promise", "moz-extension"], ["callback", "chrome-extension"]]) {
+  test(`boot/install/update/startup/permission changes update the toolbar without prompting (${mode})`, async () => {
     let granted = false;
-    const h = harness(mode, "moz-extension", () => granted);
-    await h.refresh();
-    assert.ok(h.checked.length >= 2);
+    const h = harness(mode, scheme, () => granted);
+    await tick(); assertBadge(h, true);
     for (const origin of h.checked.flatMap(item => item.origins)) assert.ok([...AO3, ...FFN].includes(origin));
-    for (const [name, details] of [["installed", { reason: "install" }], ["installed", { reason: "update" }], ["startup"], ["removed"]]) {
+    for (const [name, details] of [["installed", { reason: "install" }], ["installed", { reason: "update" }], ["startup"]]) {
+      granted = true;
       const before = h.checked.length; h.events[name](details); await tick();
-      assert.equal(h.checked.length, before + 2);
+      assert.equal(h.checked.length, before + 2); assertBadge(h, false);
+      granted = false; h.events.removed(); await tick(); assertBadge(h, true);
     }
     granted = true; h.events.added(); await tick();
-    assert.equal(h.recovered, 1);
+    assert.equal(h.recovered, 1); assertBadge(h, false);
     const state = await h.send("TRACE_ARCHIVE_HOST_ACCESS_GET");
     assert.equal(state.ok, true); assert.ok(state.access.every(item => item.granted));
     granted = false;
     assert.ok((await h.send("TRACE_ARCHIVE_HOST_ACCESS_GET")).access.every(item => item.granted === false));
+    assertBadge(h, true, "opening the popup also rechecks the badge");
     await h.send("TRACE_ARCHIVE_HOST_ACCESS_REFRESH"); assert.equal(h.recovered, 2);
-    assert.deepEqual([...new Set(h.pushed.filter(item => item.id).map(item => item.id))], [1, 2]);
-    assert.ok(h.pushed.filter(item => item.id).every(item => item.options.frameId === 0 && item.message.access.length === 1));
+    assert.ok(h.pushed.every(item => item.type === "TRACE_ARCHIVE_HOST_ACCESS_CHANGED"));
   });
-  test(`status reads are sender-bound; only bundled UI can refresh recovery (${mode})`, async () => {
-    const h = harness(mode); await h.refresh();
+  test(`either archive keeps the badge until all declared archive hosts are granted (${mode})`, async () => {
+    const granted = new Set();
+    const h = harness(mode, scheme, ({ origins }) => origins.every(origin => granted.has(origin)));
+    await h.refresh(); assertBadge(h, true);
+    for (const origin of AO3) granted.add(origin);
+    await h.refresh(); assertBadge(h, true);
+    for (const origin of FFN) granted.add(origin);
+    await h.refresh(); assertBadge(h, false);
+    granted.delete(AO3[1]); await h.refresh(); assertBadge(h, true);
+    granted.add(AO3[1]); granted.delete(FFN[0]); await h.refresh(); assertBadge(h, true);
+  });
+  test(`status and recovery accept only the toolbar popup; obsolete page flows are removed (${mode})`, async () => {
+    const h = harness(mode, scheme); await h.refresh();
     const archive = { id: h.runtime.id, url: "https://archiveofourown.org/works/123", tab: { id: 1, url: "https://archiveofourown.org/works/123" }, frameId: 0 };
-    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_GET", archive)).access.length, 1);
     for (const sender of [
-      { ...archive, id: "other" }, { ...archive, frameId: 1 }, { ...archive, documentLifecycle: "prerender" },
-      { ...archive, tab: { id: 1, url: "https://archiveofourown.org/users/login" } },
-      { ...archive, tab: { id: 1, url: "https://example.org/works/1" } },
+      archive, { ...archive, frameId: 1 }, { ...h.popup, id: "other" },
       { ...h.popup, url: h.runtime.getURL("options.html") },
-    ]) assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_GET", sender)).ok, false);
-    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_REFRESH", archive)).ok, false);
-    const url = h.runtime.getURL("archive-access.html") + "?site=ao3&returnTab=1";
-    const frame = { ...h.popup, url, tab: archive.tab, frameId: 2 };
-    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_GET", frame)).ok, false);
-    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_REFRESH", frame)).ok, false);
-    const page = { ...frame, tab: { id: 6, url }, frameId: 0 };
-    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_GET", page)).ok, true);
-    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_REFRESH", page)).ok, true);
-  });
-  test(`notice opens only sender-bound archive UI; return requires a real grant (${mode})`, async () => {
-    let granted = false;
-    const h = harness(mode, "moz-extension", () => granted);
-    const archive = { id: h.runtime.id, url: "https://archiveofourown.org/works/123", tab: { id: 1, url: "https://archiveofourown.org/works/123" }, frameId: 0 };
-    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_OPEN", archive)).ok, true);
-    assert.deepEqual(h.created, [{ url: h.runtime.getURL("archive-access.html") + "?site=ao3&returnTab=1" }]);
-    for (const sender of [h.popup, { ...archive, frameId: 2 }, { ...archive, id: "other" }, { ...archive, tab: { id: 1, url: "https://archiveofourown.org/users/login" } }]) {
-      assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_OPEN", sender)).ok, false);
-      assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_FINISH", sender)).ok, false);
+      { ...h.popup, url: h.runtime.getURL("archive-access.html"), tab: { id: 2, url: h.runtime.getURL("archive-access.html") }, frameId: 0 },
+    ]) {
+      assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_GET", sender)).ok, false);
+      assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_REFRESH", sender)).ok, false);
     }
-    const url = h.created[0].url;
-    const page = { id: h.runtime.id, url, tab: { id: 6, url }, frameId: 0 };
-    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_FINISH", page)).ok, false);
-    assert.equal(h.activated.length, 0);
-    granted = true;
-    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_FINISH", page)).ok, true);
-    assert.deepEqual(h.activated, [{ id: 1, options: { active: true } }]);
-    const otherUrl = url.replace("returnTab=1", "returnTab=4");
-    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_FINISH", { ...page, url: otherUrl, tab: { id: 6, url: otherUrl } })).ok, true);
-    assert.equal(h.activated.length, 1, "never focus a non-archive tab");
+    assert.equal(await h.send("TRACE_ARCHIVE_HOST_ACCESS_OPEN", archive), undefined);
+    assert.equal(await h.send("TRACE_ARCHIVE_HOST_ACCESS_FINISH"), undefined);
+    assert.equal(h.recovered, 0);
+    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_GET")).ok, true);
   });
-  test(`permission read errors remain unknown, never a false grant or denial (${mode})`, async () => {
-    const h = harness(mode, "moz-extension", () => { throw Error("unavailable"); });
+  test(`unknown evidence cannot claim a denial or clear an existing warning (${mode})`, async () => {
+    let unavailable = false;
+    const h = harness(mode, scheme, () => { if (unavailable) throw Error("unavailable"); return false; });
+    await h.refresh(); assertBadge(h, true);
+    unavailable = true;
     const result = await h.send("TRACE_ARCHIVE_HOST_ACCESS_GET");
-    assert.ok(result.access.every(item => item.granted === null));
+    assert.ok(result.access.every(item => item.granted === null)); assertBadge(h, true);
+    const unknown = harness(mode, scheme, () => { throw Error("unavailable"); });
+    await unknown.refresh(); assert.equal(unknown.writes.length, 0);
+  });
+  test(`action failures do not block the popup permission flow (${mode})`, async () => {
+    const h = harness(mode, scheme, () => false, true);
+    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_REFRESH")).ok, true);
+    assert.equal(h.recovered, 1);
   });
 }
 
-test("Safari does not install the desktop host recovery flow", () => {
-  const h = harness("promise", "safari-web-extension");
-  assert.equal(h.refresh, null); assert.equal(h.checked.length, 0);
+test("stale permission reads cannot restore a badge after a newer grant", async () => {
+  const pending = [];
+  const h = harness("promise", "moz-extension", () => new Promise(resolve => pending.push(resolve)));
+  const newest = h.refresh();
+  pending.slice(2).forEach(resolve => resolve(true)); await newest; assertBadge(h, false);
+  pending.slice(0, 2).forEach(resolve => resolve(false)); await tick(); assertBadge(h, false);
 });
-test("Chrome exposes a recovery only when a host check finds the same gap", async () => {
-  for (const granted of [true, false]) {
-    const h = harness("callback", "chrome-extension", () => granted);
-    assert.ok((await h.send("TRACE_ARCHIVE_HOST_ACCESS_GET")).access.every(item => item.granted === granted));
-  }
+
+test("warning badge text has WCAG AA contrast against its background", async () => {
+  const h = harness("promise"); await h.refresh();
+  const luminance = hex => {
+    const rgb = hex.slice(1).match(/../g).map(n => parseInt(n, 16) / 255).map(c => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+    return rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+  };
+  assert.ok((luminance(h.badge.color) + 0.05) / (luminance(h.badge.background) + 0.05) >= 4.5);
+});
+
+test("Safari does not install or write the desktop toolbar recovery flow", () => {
+  const h = harness("promise", "safari-web-extension");
+  assert.equal(h.refresh, null); assert.equal(h.checked.length, 0); assert.equal(h.writes.length, 0);
 });

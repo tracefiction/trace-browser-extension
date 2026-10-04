@@ -318,27 +318,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     })).filter((access) => access.origins.length > 0);
   }
   function installArchiveHostAccess(environment) {
-    const { runtime, tabs, permissions, mode, recover } = environment;
+    const { runtime, action, permissions, mode, recover } = environment;
     const root = runtime.getURL?.("");
     if (typeof root !== "string" || !/^(?:moz|chrome)-extension:\/\//.test(root) || !permissions?.contains) return null;
     const sites = declaredArchiveAccess(runtime);
+    const defaultTitle = runtime.getManifest?.().action?.default_title ?? "Trace";
     const call = (target, method, args) => extensionCall(target, method, args, runtime, mode);
-    const isUi = (sender) => {
-      if (sender.id !== runtime.id) return false;
-      return !sender.tab && sender.url === runtime.getURL?.("popup.html") || sender.frameId === 0 && sender.tab?.url === sender.url && sender.url?.split("?")[0] === runtime.getURL?.("archive-access.html");
-    };
-    const siteFor = (sender) => {
-      if (sender.id !== runtime.id) return null;
-      const site = archiveHostKindFromSender(sender);
-      if (!site || isBlockedArchivePath(sender.tab?.url ?? sender.url, site)) return null;
-      const raw = sender.tab?.url ?? sender.url;
-      if (!raw) return null;
-      const host = new URL(raw).hostname;
-      return sites.some((access) => access.site === site && access.origins.some((pattern) => {
-        const declared = /^https:\/\/(\*\.)?([^/]+)\//.exec(pattern);
-        return declared && (host === declared[2] || declared[1] && host.endsWith(`.${declared[2]}`));
-      })) ? site : null;
-    };
+    const isPopup = (sender) => sender.id === runtime.id && !sender.tab && sender.url === runtime.getURL?.("popup.html");
     const read = async () => Promise.all(sites.map(async (access) => {
       try {
         return { ...access, granted: await call(permissions, "contains", [{ origins: access.origins }]) === true };
@@ -347,75 +333,41 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
     }));
     let generation = 0;
+    let badgeUpdate = Promise.resolve();
     const refresh = async () => {
       const current = ++generation;
       const access = await read();
       if (current !== generation) return access;
-      const message = { type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED", access };
-      if (runtime.sendMessage) void call(runtime, "sendMessage", [message]).catch(() => void 0);
-      try {
-        const openTabs = await call(tabs, "query", [{}]);
-        if (current !== generation) return access;
-        await Promise.all(openTabs.map(async (tab) => {
-          if (!Number.isInteger(tab.id)) return;
-          const site = siteFor({ id: runtime.id, tab: { id: tab.id, ...tab.url ? { url: tab.url } : {} }, frameId: 0 });
-          if (!site) return;
-          await call(tabs, "sendMessage", [tab.id, { ...message, access: access.filter((item) => item.site === site) }, { frameId: 0 }]).catch(() => void 0);
-        }));
-      } catch {
+      const missing = access.some((item) => item.granted === false);
+      badgeUpdate = badgeUpdate.then(async () => {
+        if (!action || current !== generation || !access.length) return;
+        if (!missing && access.some((item) => item.granted === null)) return;
+        const write = (method, details) => call(action, method, [details]).catch(() => void 0);
+        if (missing) {
+          await write("setBadgeBackgroundColor", { color: "#9B4146" });
+          if (action.setBadgeTextColor) await write("setBadgeTextColor", { color: "#FFFFFF" });
+        }
+        if (current !== generation) return;
+        await write("setBadgeText", { text: missing ? "!" : "" });
+        await write("setTitle", { title: missing ? "Site access is off \u2014 click to allow" : defaultTitle });
+      });
+      await badgeUpdate;
+      if (current === generation && runtime.sendMessage) {
+        void call(runtime, "sendMessage", [{ type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED", access }]).catch(() => void 0);
       }
       return access;
     };
     runtime.onMessage.addListener((raw, sender, respond) => {
       const type = raw?.type;
-      if (type === "TRACE_ARCHIVE_HOST_ACCESS_OPEN") {
-        const site2 = siteFor(sender);
-        if (!site2 || !Number.isInteger(sender.tab?.id)) {
-          respond({ ok: false });
-          return;
-        }
-        void call(tabs, "create", [{ url: `${runtime.getURL?.("archive-access.html")}?site=${site2}&returnTab=${sender.tab.id}` }]).then(
-          () => respond({ ok: true }),
-          () => respond({ ok: false })
-        );
-        return true;
-      }
-      if (type === "TRACE_ARCHIVE_HOST_ACCESS_FINISH") {
-        if (!isUi(sender) || !sender.tab || !sender.url) {
-          respond({ ok: false });
-          return;
-        }
-        const parameters = new URL(sender.url).searchParams;
-        const site2 = parameters.get("site");
-        const returnTab = Number(parameters.get("returnTab"));
-        void refresh().then(async (access) => {
-          if (!access.some((item) => item.site === site2 && item.granted === true)) return { ok: false };
-          await recover();
-          const openTabs = await call(tabs, "query", [{}]);
-          const target = openTabs.find((tab) => tab.id === returnTab && siteFor({ id: runtime.id, tab, frameId: 0 }) === site2);
-          if (target && tabs.update) await call(tabs, "update", [target.id, { active: true }]);
-          return { ok: true };
-        }).then(respond, () => respond({ ok: false }));
-        return true;
-      }
       if (type !== "TRACE_ARCHIVE_HOST_ACCESS_GET" && type !== "TRACE_ARCHIVE_HOST_ACCESS_REFRESH") return;
-      const ui = isUi(sender);
-      const site = siteFor(sender);
-      if (!ui && !site) {
+      if (!isPopup(sender)) {
         respond({ ok: false });
         return;
       }
-      if (type === "TRACE_ARCHIVE_HOST_ACCESS_REFRESH" && !ui) {
-        respond({ ok: false });
-        return;
-      }
-      void (type === "TRACE_ARCHIVE_HOST_ACCESS_REFRESH" ? refresh().then(async (access) => {
-        await recover();
-        return access;
-      }) : read()).then(
-        (access) => respond({ ok: true, access: ui ? access : access.filter((item) => item.site === site) }),
-        () => respond({ ok: false })
-      );
+      void refresh().then(async (access) => {
+        if (type === "TRACE_ARCHIVE_HOST_ACCESS_REFRESH") await recover();
+        return { ok: true, access };
+      }).then(respond, () => respond({ ok: false }));
       return true;
     });
     runtime.onInstalled?.addListener((details) => {
@@ -425,7 +377,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       void refresh();
     });
     permissions.onAdded?.addListener(() => {
-      void refresh().then(recover);
+      void refresh().then(recover).catch(() => void 0);
     });
     permissions.onRemoved?.addListener(() => {
       void refresh();
@@ -7839,7 +7791,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     let session;
     if (true) {
       const recover = installArchiveRecovery({ runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, scripting: extension.scripting, mode: storageMode });
-      installArchiveHostAccess({ runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, mode: storageMode, recover });
+      installArchiveHostAccess({ runtime: extension.runtime, action: extension.action, permissions: extension.permissions, mode: storageMode, recover });
       installTraceFirstInstallActivation({
         runtime: extension.runtime,
         tabs: extension.tabs,

@@ -74,6 +74,7 @@ try {
   assert.ok(fs.existsSync(path.join(ROOT, "dist/firefox/manifest.json")), "Run npm run build:release first");
   fs.cpSync(path.join(ROOT, "dist/firefox"), fixture, { recursive: true });
   assert.ok(!fs.readFileSync(path.join(fixture, "popup-config.js"), "utf8").includes("TRACE_IOS_EARNED_PERMISSION_ONBOARDING"), "Build the desktop release without Safari onboarding flags first");
+  assert.equal(fs.existsSync(path.join(fixture, "archive-access.html")), false, "obsolete permission tab removed from the package");
   const manifest = JSON.parse(fs.readFileSync(path.join(fixture, "manifest.json"), "utf8"));
   fs.writeFileSync(path.join(fixture, "host-access-test-control.html"), '<!doctype html><title>Headless extension test control</title>');
   // Suppress only the first-install setup tab in this disposable fixture.
@@ -119,6 +120,19 @@ try {
   const ao3 = allPermissions.origins.filter(origin => /archiveofourown|transformativeworks/.test(origin));
   const ffn = allPermissions.origins.filter(origin => /fanfiction/.test(origin));
   assert.ok(ao3.length && ffn.length);
+  const badge = () => api("Promise.all([api.action.getBadgeText({}),api.action.getTitle({}),api.action.getBadgeBackgroundColor({}),api.action.getBadgeTextColor({})]).then(([text,title,background,color])=>({text,title,background,color}))");
+  const expectBadge = async missing => {
+    await switchHandle(controlHandle);
+    const title = missing ? "Site access is off — click to allow" : manifest.action.default_title;
+    await until(async () => { const state = await badge(); return state.text === (missing ? "!" : "") && state.title === title; }, "toolbar badge and title");
+    if (missing) {
+      const state = await badge();
+      assert.deepEqual(state.background, [155, 65, 70, 255]);
+      assert.deepEqual(state.color, [255, 255, 255, 255]);
+    }
+  };
+  // Revoke before opening the HTTPS archive: no injected notice can supply discovery.
+  assert.equal(await api(`api.permissions.remove({origins:${JSON.stringify([...ao3, ...ffn])}})`), true);
   const created = await api(`api.tabs.create({url:${JSON.stringify(archiveURL)}})`);
   assert.ok(created.id);
   const switchHandle = async handle => { await context("content"); await driver.send("WebDriver:SwitchToWindow", { handle }); };
@@ -133,45 +147,15 @@ try {
   };
   const archiveHandle = await until(() => tabHandle(archiveURL), "archive tab");
   await switchHandle(archiveHandle);
-  const noticeSelector = "[data-trace-connect-notice]";
-  await until(() => execute(`return !!document.querySelector('${noticeSelector}');`), "running archive notice");
-  const click = async selector => {
-    const el = (await driver.send("WebDriver:FindElement", { using: "css selector", value: selector })).value;
-    await driver.send("WebDriver:ElementClick", { id: el["element-6066-11e4-a52e-4f735466cecf"] });
-  };
+  await until(() => execute("return document.readyState === 'complete';"), "local HTTPS archive loaded");
+  await delay(300);
+  assert.equal(await execute("return !!document.querySelector('[data-trace-connect-notice]');"), false, "no content-script notice without host access");
   const save = (name, base64) => fs.writeFileSync(path.join(screenshots, name), Buffer.from(base64, "base64"));
-  const screenshot = async (name, selector) => {
-    const el = (await driver.send("WebDriver:FindElement", { using: "css selector", value: selector })).value;
-    save(name, value(await driver.send("WebDriver:TakeScreenshot", { id: el["element-6066-11e4-a52e-4f735466cecf"], full: false })));
-  };
   const theme = async dark => {
     await context("chrome"); await execute(`Services.prefs.setIntPref("ui.systemUsesDarkTheme", ${dark ? 1 : 0});`);
-    await context("content");
-    await execute(`document.documentElement.style.backgroundColor=${JSON.stringify(dark ? "#07090c" : "#ffffff")}; document.body.style.backgroundColor=${JSON.stringify(dark ? "#07090c" : "#ffffff")}; document.body.style.color=${JSON.stringify(dark ? "#f2f5f8" : "#18232d")}; window.dispatchEvent(new Event('pageshow'));`);
   };
-  await theme(false);
-  const normalStyle = await execute(`const s=getComputedStyle(document.querySelector('[data-trace-connect-notice-cta]')); return {height:s.minHeight,radius:s.borderRadius,background:s.backgroundColor,color:s.color,font:s.font};`);
-  await switchHandle(controlHandle); assert.equal(await api(`api.permissions.remove({origins:${JSON.stringify(ao3)}})`), true);
+  await expectBadge(true);
   await switchHandle(archiveHandle);
-  await until(() => execute("return document.querySelector('[data-trace-connect-notice-heading]')?.textContent === 'Site access is off';"), "revoked AO3 notice");
-  assert.equal(await execute("return document.querySelector('iframe') !== null;"), false);
-  for (const dark of [false, true]) {
-    await theme(dark);
-    await until(() => execute(`return getComputedStyle(document.querySelector('${noticeSelector}')).backgroundColor === ${JSON.stringify(dark ? "rgb(18, 20, 24)" : "rgb(255, 255, 255)")};`), "notice theme");
-    const style = await execute("const s=getComputedStyle(document.querySelector('[data-trace-connect-notice-cta]')); return {height:s.minHeight,radius:s.borderRadius,background:s.backgroundColor,color:s.color,font:s.font};");
-    assert.equal(style.height, normalStyle.height); assert.equal(style.radius, normalStyle.radius);
-    assert.equal(style.background, normalStyle.background); assert.equal(style.font, normalStyle.font);
-    assert.equal(style.color, dark ? "rgb(139, 205, 200)" : normalStyle.color);
-    await screenshot(`notice-${dark ? "ink" : "light"}.png`, noticeSelector);
-  }
-  await click("[data-trace-connect-notice-cta]");
-  const permissionHandle = await until(() => tabHandle(base + "archive-access.html?"), "permission tab from notice");
-  await switchHandle(permissionHandle);
-  await until(() => execute("return document.querySelector('#archive-access-allow')?.disabled === false;"), "permission-tab Allow");
-  for (const dark of [false, true]) {
-    await theme(dark);
-    await screenshot(`permission-tab-${dark ? "ink" : "light"}.png`, ".archive-access-page");
-  }
   const answerPrompt = async accept => {
     await context("chrome");
     await until(() => execute("return PopupNotifications.panel.state === 'open' && !!document.querySelector('#addon-webext-permissions-notification');"), "real Firefox permission prompt");
@@ -186,17 +170,6 @@ try {
     await execute(`document.querySelector('#addon-webext-permissions-notification').${accept ? "button" : "secondaryButton"}.click();`);
     await context("content");
   };
-  await click("#archive-access-allow"); await answerPrompt(false);
-  await until(() => execute("return document.querySelector('#archive-access-result')?.textContent.includes('still off');"), "denial and retry");
-  await click("#archive-access-allow"); await answerPrompt(true);
-  await until(async () => { await context("chrome"); return execute(`return ![...gBrowser.tabs].some(t=>t.linkedBrowser.currentURI.spec.startsWith(${JSON.stringify(base + "archive-access.html?")}));`); }, "permission tab closes");
-  assert.equal(await execute(`return gBrowser.selectedBrowser.currentURI.spec;`), archiveURL, "success returns to the originating AO3 tab");
-  await switchHandle(archiveHandle);
-  await until(() => execute("return document.querySelector('[data-trace-connect-notice-heading]')?.textContent !== 'Site access is off';"), "archive notice updates after grant");
-  await switchHandle(controlHandle); assert.equal(await api(`api.permissions.contains({origins:${JSON.stringify(ao3)}})`), true);
-  assert.equal(await api(`api.permissions.remove({origins:${JSON.stringify(ao3)}})`), true);
-  await switchHandle(archiveHandle);
-
   // Marionette's actor drives the actual remote toolbar popup, which is not a tab.
   const popupQuery = async body => {
     await context("chrome");
@@ -204,11 +177,11 @@ try {
     assert.ok(!result?.error, result?.error); return result;
   };
   const popupScript = script => popupQuery(`return actor.executeScript(${JSON.stringify(script)},[],{sandboxName:'default',newSandbox:false,async:false});`);
-  const openPopup = async () => {
+  const openPopup = async (label = "AO3") => {
     await context("chrome"); await execute("window.focus(); window.__traceAction.openPopup(window);");
     await until(() => execute("return !!document.querySelector('browser[webextension-view-type=popup]')?.browsingContext.currentWindowGlobal;"), "actual toolbar popup");
     await until(async () => {
-      try { return await popupScript("return document.querySelector('#popup-host-access-allow')?.textContent;") === "Allow Trace on AO3"; }
+      try { return await popupScript("return document.querySelector('#popup-host-access-allow')?.textContent;") === `Allow Trace on ${label}`; }
       catch (error) {
         // The browser replaces its initial about:blank popup actor on load.
         if (/destroyed before query|b is null/.test(error.message)) return false;
@@ -227,17 +200,32 @@ try {
     save(`popup-${dark ? "ink" : "light"}.png`, await popupQuery("const el=await actor.findElement('css selector','.popup',{}); return actor.takeScreenshot(el,0,false,true);"));
     await closePopup();
   }
-  await openPopup();
-  await popupQuery(`const el=await actor.findElement('css selector','#popup-host-access-allow',{}); return actor.sendQuery('MarionetteCommandsParent:clickElement',{elem:el,capabilities:${JSON.stringify(session.capabilities)}});`);
-  await answerPrompt(true);
+  const clickAllow = () => popupQuery(`const el=await actor.findElement('css selector','#popup-host-access-allow',{}); return actor.sendQuery('MarionetteCommandsParent:clickElement',{elem:el,capabilities:${JSON.stringify(session.capabilities)}});`);
+  await openPopup(); await clickAllow(); await answerPrompt(false); await closePopup();
+  await expectBadge(true);
+  assert.equal(await api(`api.permissions.contains({origins:${JSON.stringify(ao3)}})`), false, "declining keeps access off");
+  await switchHandle(archiveHandle); await openPopup();
+  assert.equal(await popupScript("return document.querySelector('#popup-host-access-allow').disabled;"), false, "popup remains retryable");
+  await clickAllow(); await answerPrompt(true); await closePopup();
   await switchHandle(controlHandle);
-  assert.equal(await api(`api.permissions.contains({origins:${JSON.stringify(ao3)}})`), true);
-  assert.equal(await api(`api.permissions.remove({origins:${JSON.stringify(ffn)}})`), true);
-  await driver.send("WebDriver:Navigate", { url: `${base}archive-access.html?site=ffn` });
-  await until(() => execute("return document.querySelector('#archive-access-allow')?.disabled === false;"), "FFN Allow button");
-  await click("#archive-access-allow"); await answerPrompt(true);
+  await until(async () => await api(`api.permissions.contains({origins:${JSON.stringify(ao3)}})`) === true, "durable AO3 grant");
+  await expectBadge(true); // FFN is still off.
+  await switchHandle(archiveHandle);
+  await until(() => execute("return !!document.querySelector('[data-trace-connect-notice]');"), "archive scripts restored after grant");
+  assert.notEqual(await execute("return document.querySelector('[data-trace-connect-notice-heading]')?.textContent;"), "Site access is off");
+  await openPopup("FanFiction.net"); await clickAllow(); await answerPrompt(true); await closePopup();
+  await switchHandle(controlHandle);
   await until(async () => await api(`api.permissions.contains({origins:${JSON.stringify(ffn)}})`) === true, "durable FFN grant");
-  console.log(`Headless Firefox passed: actual HTTPS notice flow, native permission prompts, denial/retry, tab return/close, real toolbar popup, AO3/FFN grants, light/Ink screenshot checks. Screenshots: ${screenshots}`);
+  await expectBadge(false);
+  // A later revocation sets the badge again without any popup or page message.
+  assert.equal(await api(`api.permissions.remove({origins:${JSON.stringify(ffn)}})`), true);
+  await expectBadge(true);
+  await switchHandle(archiveHandle); await openPopup("FanFiction.net"); await clickAllow(); await answerPrompt(true); await closePopup();
+  await expectBadge(false);
+  await context("chrome");
+  assert.equal(await execute(`return window.__traceRequests.length;`), 4, "only Allow clicks prompt");
+  assert.equal(await execute(`return [...gBrowser.tabs].some(t=>t.linkedBrowser.currentURI.spec.startsWith(${JSON.stringify(base + "archive-access.html")}));`), false, "no redundant permission tab");
+  console.log(`Headless Firefox passed: toolbar badge before HTTPS archive scripts, real popup/native prompts, denial/retry, AO3/FFN grants, badge clears/reappears, light/Ink popup screenshots. Screenshots: ${screenshots}`);
 } finally {
   webServer?.close(); driver?.close();
   if (Number.isInteger(firefoxPid)) { try { process.kill(firefoxPid, "SIGTERM"); } catch {} }
