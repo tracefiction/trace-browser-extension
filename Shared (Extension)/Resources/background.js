@@ -5423,6 +5423,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       void (async () => {
         if (await platformIsIos(options.runtime, options.mode)) return;
         try {
+          void Promise.resolve(options.onActivation?.()).catch(() => void 0);
+        } catch {
+        }
+        try {
           const tabs = await extensionCall(
             options.tabs,
             "query",
@@ -5458,6 +5462,35 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         }
       })();
     });
+  }
+
+  // src/extension-runtime/connect-intent.mts
+  var CONNECT_INTENT_KEY = "traceConnectIntentV1";
+  var CONNECT_INTENT_TTL_MS = 30 * 6e4;
+  async function rememberConnectIntent(storage, now = Date.now()) {
+    try {
+      await storage.set({ [CONNECT_INTENT_KEY]: now + CONNECT_INTENT_TTL_MS });
+    } catch {
+    }
+  }
+  async function hasConnectIntent(storage, now = Date.now()) {
+    try {
+      const values = await storage.get(CONNECT_INTENT_KEY);
+      const expiresAt = values[CONNECT_INTENT_KEY];
+      if (typeof expiresAt === "number" && expiresAt > now && expiresAt <= now + CONNECT_INTENT_TTL_MS) {
+        return true;
+      }
+      if (expiresAt !== void 0) await clearConnectIntent(storage);
+      return false;
+    } catch {
+      return false;
+    }
+  }
+  async function clearConnectIntent(storage) {
+    try {
+      await storage.remove(CONNECT_INTENT_KEY);
+    } catch {
+    }
   }
 
   // src/extension-runtime/trace-web-status.mts
@@ -5621,6 +5654,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var SESSION_MESSAGE_TYPES = Object.freeze({
     snapshot: "TRACE_SESSION_GET_SNAPSHOT",
     action: "TRACE_SESSION_ACTION",
+    // Connect from an AO3/FFN page: the popup's Connect, plus opening Trace
+    // when no signed-in Trace page can answer.
+    archiveConnect: "TRACE_ARCHIVE_CONNECT",
+    // A Trace page is signed in. Carries no credential; the background asks
+    // the page for one only while a connect request is waiting.
+    traceWebReady: "TRACE_WEB_READY",
     connectAndSave: "TRACE_CONNECT_AND_SAVE",
     quickAdd: "TRACE_QUICK_ADD",
     autoTrack: "TRACE_AUTO_TRACK",
@@ -6037,6 +6076,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   function isSupportedArchiveSender(sender) {
     return archiveHostKindFromSender(sender) !== null;
   }
+  function connectActionForState(state) {
+    if (state === "signed_out") return "connect";
+    if (state === "reconnect_required") return "reconnect";
+    if (state === "degraded") return "retry";
+    return null;
+  }
   var MemoryDiagnostics = class {
     #events = [];
     record(event) {
@@ -6308,6 +6353,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           return this.#handleSessionMessage(message, sender);
         case SESSION_MESSAGE_TYPES.status:
           return this.#handleStatusMessage(message, sender);
+        case SESSION_MESSAGE_TYPES.archiveConnect:
+          return this.#handleArchiveConnectMessage(message, sender);
+        case SESSION_MESSAGE_TYPES.traceWebReady:
+          return this.#handleTraceWebReadyMessage(message, sender);
         case SESSION_MESSAGE_TYPES.openTraceUrl:
           return this.#handleTraceNavigationMessage(message, sender);
         case SESSION_MESSAGE_TYPES.pendingFirstStory:
@@ -6348,7 +6397,44 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       await this.start();
       if (message.type === SESSION_MESSAGE_TYPES.snapshot) return this.#response();
       if (!isSessionAction(message.action)) return this.#response({ kind: "ignored" });
+      if (message.action === "disconnect" || message.action === "cancel") {
+        await clearConnectIntent(this.#storage);
+      }
       return this.#response(await this.#runManualAction(message.action, true));
+    }
+    // An AO3/FFN page's Connect runs the popup's Connect. When no signed-in
+    // Trace page answered, it opens Trace and remembers the request, so signing
+    // in there finishes the connection without another click.
+    async #handleArchiveConnectMessage(message, sender) {
+      const host = archiveHostKindFromSender(sender);
+      if (Object.keys(message).length !== 1 || host === null || isBlockedArchivePath(sender?.tab?.url ?? sender?.url, host)) {
+        return null;
+      }
+      await this.start();
+      if (this.#mode === "disabled") return this.#response(void 0, "commands_unavailable");
+      const action = await this.#connectForCurrentState();
+      const state = this.snapshot().state;
+      if (state === "connected" || state === "degraded" || action === null || await this.#usesNativeAccountAuthority()) {
+        return this.#response(action ?? void 0);
+      }
+      await rememberConnectIntent(this.#storage);
+      const traceOpened = await this.#traceWebNavigation.open(`${this.#webOrigin}/`);
+      return Object.freeze({ ...this.#response(action), traceOpened });
+    }
+    // A Trace page is signed in while a connect request is waiting.
+    async #handleTraceWebReadyMessage(message, sender) {
+      if (Object.keys(message).length !== 1 || !isTraceWebSender(sender, this.#runtime.id, this.#webOrigin)) {
+        return null;
+      }
+      await this.start();
+      if (this.#mode !== "kernel" || !await hasConnectIntent(this.#storage)) {
+        return this.#response();
+      }
+      if (this.snapshot().state === "connected") {
+        await clearConnectIntent(this.#storage);
+        return this.#response();
+      }
+      return this.#response(await this.#connectForCurrentState() ?? void 0);
     }
     async #handleStatusMessage(message, sender) {
       await this.start();
@@ -6693,14 +6779,46 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         this.#savedFilters.cancel();
         this.#savedFilterApi.cancelPending();
       }
+      const previousState = this.snapshot().state;
       const result = await this.#withAccountTransitionLock(
         () => this.#runManualActionUnlocked(action)
       );
       this.#publishStatus();
+      await this.#settleSessionTransition(previousState, action === "reconnect");
       if (scheduleSavedFilters && result.kind === "completed" && result.state === "connected") {
         this.#queueSavedFilterSync(true);
       }
       return result;
+    }
+    // Runs the connect action that fits the state when the lock is taken, so a
+    // request queued behind another connect never disconnects its result.
+    async #connectForCurrentState() {
+      if (connectActionForState(this.snapshot().state) === null) return null;
+      if (this.#savedFilterSyncInFlight !== null) {
+        this.#savedFilters.cancel();
+        this.#savedFilterApi.cancelPending();
+      }
+      const previousState = this.snapshot().state;
+      const ran = await this.#withAccountTransitionLock(async () => {
+        const action = connectActionForState(this.snapshot().state);
+        return action === null ? null : { action, result: await this.#runManualActionUnlocked(action) };
+      });
+      if (ran === null) return null;
+      this.#publishStatus();
+      await this.#settleSessionTransition(previousState, ran.action === "reconnect");
+      if (ran.result.kind === "completed" && ran.result.state === "connected") {
+        this.#queueSavedFilterSync(true);
+      }
+      return ran.result;
+    }
+    // Archive pages re-read their account view when this content-free revision
+    // changes, so they show the new connection state without a reload.
+    async #settleSessionTransition(previousState, accountMayHaveChanged) {
+      const state = this.snapshot().state;
+      if (state === "connected") await clearConnectIntent(this.#storage);
+      if (state !== previousState || accountMayHaveChanged) {
+        await this.#publishAccountProjectionRevision();
+      }
     }
     async #runManualActionUnlocked(action) {
       this.#cancelAutomaticRetry(true);
@@ -7593,7 +7711,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         runtime: extension.runtime,
         tabs: extension.tabs,
         mode: storageMode,
-        webOrigin: "https://www.tracefiction.com"
+        webOrigin: "https://www.tracefiction.com",
+        // Signing in anywhere on Trace after installing finishes the connect,
+        // not only on the setup page's own address.
+        onActivation: () => rememberConnectIntent(
+          new BrowserStorage(extension.storage.local, extension.runtime, storageMode)
+        )
       });
       installArchiveReadinessRuntime({
         runtime: extension.runtime,

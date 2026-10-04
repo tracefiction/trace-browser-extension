@@ -151,6 +151,20 @@ On desktop first install, the activation page's authenticated status handshake
 and token-free activation-readiness signal cause one explicit kernel Connect or
 Reconnect action; they do not restore the legacy ambient-token path.
 
+On desktop browsers, Connect in an archive page's notice, story sheet, or
+listing controls runs the same kernel action as the popup's Connect. If no
+signed-in Trace page answers, the extension opens the Trace website and stores
+a content-free connect request (an expiry time only, at most 30 minutes) in
+extension storage; first install stores the same request. While it is pending,
+a Trace page that shows it is signed in triggers one Connect through the
+normal request-ID credential grant. `sync.js` learns this by asking the page
+once on load for its token and sending the background a token-free hint when
+the page posts it; the posted token itself is never forwarded or accepted.
+Disconnect withdraws the request. After a connection change the background
+bumps the content-free projection revision, so open archive pages update
+without a reload. iPhone and iPad keep linking the extension through the Trace
+app.
+
 For a tagged release, confirm `package.json` version matches the generated manifest version. Safari consumes checked-in files under `Shared (Extension)/Resources`; Chromium and Firefox packages are generated into `dist/`, which is intentionally not committed.
 
 `Shared (Extension)/Resources/background.js` is a committed build artifact.

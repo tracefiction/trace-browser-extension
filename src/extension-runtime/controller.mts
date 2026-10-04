@@ -98,6 +98,11 @@ import {
   traceWebNavigationRequestFromMessage,
 } from "./trace-web-navigation.mjs";
 import {
+  clearConnectIntent,
+  hasConnectIntent,
+  rememberConnectIntent,
+} from "./connect-intent.mjs";
+import {
   TraceWebStatusNotification,
 } from "./trace-web-status.mjs";
 import {
@@ -209,6 +214,14 @@ type RuntimeSender = Parameters<Parameters<RuntimePort["onMessage"]["addListener
 
 function isSupportedArchiveSender(sender: RuntimeSender | undefined): boolean {
   return archiveHostKindFromSender(sender) !== null;
+}
+
+/** The popup's primary action for a state that is not yet connected. */
+function connectActionForState(state: SessionSnapshot["state"]): SessionAction | null {
+  if (state === "signed_out") return "connect";
+  if (state === "reconnect_required") return "reconnect";
+  if (state === "degraded") return "retry";
+  return null;
 }
 
 class MemoryDiagnostics implements DiagnosticsPort {
@@ -486,6 +499,10 @@ export class SessionRuntimeController {
         return this.#handleSessionMessage(message, sender);
       case SESSION_MESSAGE_TYPES.status:
         return this.#handleStatusMessage(message, sender);
+      case SESSION_MESSAGE_TYPES.archiveConnect:
+        return this.#handleArchiveConnectMessage(message, sender);
+      case SESSION_MESSAGE_TYPES.traceWebReady:
+        return this.#handleTraceWebReadyMessage(message, sender);
       case SESSION_MESSAGE_TYPES.openTraceUrl:
         return this.#handleTraceNavigationMessage(message, sender);
       case SESSION_MESSAGE_TYPES.pendingFirstStory:
@@ -538,7 +555,64 @@ export class SessionRuntimeController {
     await this.start();
     if (message.type === SESSION_MESSAGE_TYPES.snapshot) return this.#response();
     if (!isSessionAction(message.action)) return this.#response({ kind: "ignored" });
+    if (message.action === "disconnect" || message.action === "cancel") {
+      await clearConnectIntent(this.#storage);
+    }
     return this.#response(await this.#runManualAction(message.action, true));
+  }
+
+  // An AO3/FFN page's Connect runs the popup's Connect. When no signed-in
+  // Trace page answered, it opens Trace and remembers the request, so signing
+  // in there finishes the connection without another click.
+  async #handleArchiveConnectMessage(
+    message: Record<string, unknown>,
+    sender: RuntimeSender | undefined,
+  ): Promise<RuntimeResponse | null> {
+    const host = archiveHostKindFromSender(sender);
+    if (
+      Object.keys(message).length !== 1 ||
+      host === null ||
+      isBlockedArchivePath(sender?.tab?.url ?? sender?.url, host)
+    ) {
+      return null;
+    }
+    await this.start();
+    if (this.#mode === "disabled") return this.#response(undefined, "commands_unavailable");
+    const action = await this.#connectForCurrentState();
+    const state = this.snapshot().state;
+    if (
+      state === "connected" ||
+      state === "degraded" ||
+      action === null ||
+      (await this.#usesNativeAccountAuthority())
+    ) {
+      return this.#response(action ?? undefined);
+    }
+    await rememberConnectIntent(this.#storage);
+    const traceOpened = await this.#traceWebNavigation.open(`${this.#webOrigin}/`);
+    return Object.freeze({ ...this.#response(action), traceOpened });
+  }
+
+  // A Trace page is signed in while a connect request is waiting.
+  async #handleTraceWebReadyMessage(
+    message: Record<string, unknown>,
+    sender: RuntimeSender | undefined,
+  ): Promise<RuntimeResponse | null> {
+    if (
+      Object.keys(message).length !== 1 ||
+      !isTraceWebSender(sender, this.#runtime.id, this.#webOrigin)
+    ) {
+      return null;
+    }
+    await this.start();
+    if (this.#mode !== "kernel" || !(await hasConnectIntent(this.#storage))) {
+      return this.#response();
+    }
+    if (this.snapshot().state === "connected") {
+      await clearConnectIntent(this.#storage);
+      return this.#response();
+    }
+    return this.#response(await this.#connectForCurrentState() ?? undefined);
   }
 
   async #handleStatusMessage(
@@ -1002,10 +1076,12 @@ export class SessionRuntimeController {
       this.#savedFilters.cancel();
       this.#savedFilterApi.cancelPending();
     }
+    const previousState = this.snapshot().state;
     const result = await this.#withAccountTransitionLock(
       () => this.#runManualActionUnlocked(action),
     );
     this.#publishStatus();
+    await this.#settleSessionTransition(previousState, action === "reconnect");
     if (
       scheduleSavedFilters &&
       result.kind === "completed" &&
@@ -1014,6 +1090,43 @@ export class SessionRuntimeController {
       this.#queueSavedFilterSync(true);
     }
     return result;
+  }
+
+  // Runs the connect action that fits the state when the lock is taken, so a
+  // request queued behind another connect never disconnects its result.
+  async #connectForCurrentState(): Promise<SessionActionResult | null> {
+    if (connectActionForState(this.snapshot().state) === null) return null;
+    if (this.#savedFilterSyncInFlight !== null) {
+      this.#savedFilters.cancel();
+      this.#savedFilterApi.cancelPending();
+    }
+    const previousState = this.snapshot().state;
+    const ran = await this.#withAccountTransitionLock(async () => {
+      const action = connectActionForState(this.snapshot().state);
+      return action === null
+        ? null
+        : { action, result: await this.#runManualActionUnlocked(action) };
+    });
+    if (ran === null) return null;
+    this.#publishStatus();
+    await this.#settleSessionTransition(previousState, ran.action === "reconnect");
+    if (ran.result.kind === "completed" && ran.result.state === "connected") {
+      this.#queueSavedFilterSync(true);
+    }
+    return ran.result;
+  }
+
+  // Archive pages re-read their account view when this content-free revision
+  // changes, so they show the new connection state without a reload.
+  async #settleSessionTransition(
+    previousState: SessionSnapshot["state"],
+    accountMayHaveChanged: boolean,
+  ): Promise<void> {
+    const state = this.snapshot().state;
+    if (state === "connected") await clearConnectIntent(this.#storage);
+    if (state !== previousState || accountMayHaveChanged) {
+      await this.#publishAccountProjectionRevision();
+    }
   }
 
   async #runManualActionUnlocked(action: SessionAction): Promise<SessionActionResult> {

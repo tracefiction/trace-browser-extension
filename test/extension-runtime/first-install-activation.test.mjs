@@ -160,3 +160,60 @@ test("a failed tab query falls back to a fresh activation tab", async () => {
   await flush();
   assert.equal(creates.length, 1);
 });
+
+test("first install records the connect request before opening the setup page", async () => {
+  const h = promiseRuntime();
+  const order = [];
+  installTraceFirstInstallActivation({
+    runtime: h.runtime,
+    tabs: {
+      async query() { return []; },
+      async create(options) {
+        order.push(["create", options.url]);
+        return { id: 9, url: options.url };
+      },
+      async sendMessage() {},
+    },
+    mode: "promise",
+    webOrigin: "https://www.tracefiction.com",
+    onActivation: async () => {
+      order.push(["intent"]);
+    },
+  });
+
+  h.listeners[0]({ reason: "update" });
+  await flush();
+  assert.deepEqual(order, []);
+
+  h.listeners[0]({ reason: "install" });
+  await flush();
+  assert.deepEqual(order, [
+    ["intent"],
+    ["create", "https://www.tracefiction.com/?activation=extension-installed"],
+  ]);
+});
+
+test("a failed connect-request record never blocks the setup page", async () => {
+  const h = promiseRuntime();
+  const creates = [];
+  installTraceFirstInstallActivation({
+    runtime: h.runtime,
+    tabs: {
+      async query() { return []; },
+      async create(options) {
+        creates.push(options.url);
+        return { id: 9, url: options.url };
+      },
+      async sendMessage() {},
+    },
+    mode: "promise",
+    webOrigin: "https://www.tracefiction.com",
+    onActivation: async () => {
+      throw new Error("storage unavailable");
+    },
+  });
+
+  h.listeners[0]({ reason: "install" });
+  await flush();
+  assert.deepEqual(creates, ["https://www.tracefiction.com/?activation=extension-installed"]);
+});

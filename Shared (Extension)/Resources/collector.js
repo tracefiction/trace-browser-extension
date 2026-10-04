@@ -192,6 +192,24 @@ function traceEarnedPermissionReady() {
   );
 }
 
+// Chrome can prerender the page a link leads to before the reader opens it;
+// AO3 asks for this on its Next Chapter link. The extension ignores messages
+// from a prerendered page, so whatever the page sent then is sent again once
+// the reader opens it. Opening it fires prerenderingchange, and not always a
+// visibilitychange or pageshow after the page stopped prerendering.
+function tracePageIsPrerendering() {
+  try {
+    return document.prerendering === true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function whenTracePageActivates(callback) {
+  if (!tracePageIsPrerendering()) return;
+  document.addEventListener("prerenderingchange", callback, { once: true });
+}
+
 function runWhenTraceEarnedPermissionReady(start) {
   if (traceEarnedPermissionReady()) {
     start();
@@ -3245,7 +3263,8 @@ function resetPopupPageReconnectBackoff() {
 }
 function connectPopupPagePort() {
   if (!KERNEL_SESSION_ACTIVE || TRACE_ACTIVE_TAB_PROBE_MODE || popupPageStopped ||
-      popupPagePort || !ext.runtime.connect || window.top !== window) return;
+      popupPagePort || !ext.runtime.connect || window.top !== window ||
+      tracePageIsPrerendering()) return;
   try {
     var port = ext.runtime.connect({ name: "trace-popup-page-v1" });
     popupPagePort = port;
@@ -3344,6 +3363,9 @@ globalThis.__traceCollectorReconnect = function (replacePort) {
 window.addEventListener("pageshow", function (event) {
   globalThis.__traceCollectorReconnect(!!(event && event.persisted === true));
 });
+whenTracePageActivates(function () {
+  globalThis.__traceCollectorReconnect(true);
+});
 connectPopupPagePort();
 
 /// =======================================================
@@ -3389,11 +3411,15 @@ function queueAutoTrackWhenVisible(attempt) {
     if (shouldDelayAutoTrackUntilVisible()) return;
     autoTrackVisibilityWaitAttached = false;
     document.removeEventListener("visibilitychange", resume);
+    document.removeEventListener("prerenderingchange", resume);
     window.removeEventListener("pageshow", resume);
     startDwellTimer(attempt);
   };
 
   document.addEventListener("visibilitychange", resume);
+  // A prerendered page becomes visible while still prerendering, so its
+  // visibilitychange comes too early; opening it is prerenderingchange.
+  document.addEventListener("prerenderingchange", resume);
   window.addEventListener("pageshow", resume);
 }
 
@@ -3487,6 +3513,7 @@ if (!TRACE_ACTIVE_TAB_PROBE_MODE && !shouldDisableTraceContentScript()) {
       scheduleAutoTrackForCurrentPage();
       scheduleListingMetadataRefreshForCurrentPage();
     });
+    whenTracePageActivates(scheduleListingMetadataRefreshForCurrentPage);
   });
 }
 
@@ -3784,6 +3811,37 @@ function openTraceUrlInBrowserTab(url) {
   });
 }
 
+// The story page's Connect runs the popup's Connect: it uses a signed-in
+// Trace tab when one is open, otherwise the background opens Trace and
+// signing in there finishes the connection. Never used on iPhone or iPad,
+// where the Trace app links the extension.
+var storyArchiveConnectState = null; // null, "connecting", or "opened"
+var STORY_ARCHIVE_CONNECT_TIMEOUT_MS = 45_000;
+
+function storyUsesArchiveConnect() {
+  return KERNEL_SESSION_ACTIVE && !traceIsIosSafari();
+}
+
+function requestStoryArchiveConnect(workKey, onSettled) {
+  if (storyArchiveConnectState === "connecting") return;
+  storyArchiveConnectState = "connecting";
+  rerenderStoryHandleForWorkKey(workKey);
+  sendCollectorMessage({ type: "TRACE_ARCHIVE_CONNECT" }, function (response) {
+    var connected = !!(
+      response &&
+      response.snapshot &&
+      response.snapshot.state === "connected"
+    );
+    storyArchiveConnectState = !connected && response && response.traceOpened === true
+      ? "opened"
+      : null;
+    if (!response) openTraceUrlInBrowserTab(storyTraceOpenUrl(null, null));
+    if (typeof onSettled === "function") onSettled(connected);
+    rerenderStoryHandleForWorkKey(workKey);
+    if (connected) retryAutoTrackAfterLink();
+  }, STORY_ARCHIVE_CONNECT_TIMEOUT_MS);
+}
+
 function bindTraceOpenLink(link) {
   if (!link) return;
   link.addEventListener("click", function (event) {
@@ -3816,7 +3874,10 @@ var TRACE_IOS_APP_SETUP_URL = "traceauth://open?destination=extension-connect";
 
 function traceIsIosSafari() {
   try {
-    return /iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+    var ua = navigator.userAgent || "";
+    // iPadOS Safari reports a Mac user agent; only touch tells them apart.
+    return /iPhone|iPad|iPod/i.test(ua) ||
+      (/Macintosh/i.test(ua) && (navigator.maxTouchPoints || 0) > 1);
   } catch (_) {
     return false;
   }
@@ -3852,6 +3913,11 @@ function storyCaption(view) {
     }
     if (view.authState && view.authState.state === "error") {
       return "Last sync failed. Source reading stays usable.";
+    }
+    if (storyUsesArchiveConnect()) {
+      return storyArchiveConnectState === "opened"
+        ? "Sign in to Trace in the tab that opened. This page updates once you’re connected."
+        : "Connect the extension to your Trace account to save this story.";
     }
     return "Sign in to show your library lens here.";
   }
@@ -4231,13 +4297,26 @@ function scheduleStorySheetPosition() {
   });
 }
 
+// The page keeps scrolling under the popover; once its handle has scrolled
+// fully out of view the popover closes.
+function storySheetAnchorScroll() {
+  var sheet = document.querySelector("[" + TRACE_STORY_SHEET_ATTR + "]");
+  if (!sheet || sheet.getAttribute("data-trace-open") !== "1") return;
+  if (sheet.getAttribute("data-trace-story-sheet-placement") !== "popover") return;
+  var handle = document.querySelector("[" + TRACE_STORY_HANDLE_ATTR + "]");
+  if (!handle || !handle.getBoundingClientRect) return;
+  var rect = handle.getBoundingClientRect();
+  var height = window.innerHeight || document.documentElement.clientHeight || 0;
+  if (rect.bottom <= 0 || (height > 0 && rect.top >= height)) requestStorySheetClose(sheet);
+}
+
 function addStorySheetModalListeners() {
   document.addEventListener("click", storySheetOutsideClick, true);
   document.addEventListener("keydown", storySheetKeydown, true);
   window.addEventListener("resize", scheduleStorySheetPosition);
+  window.addEventListener("scroll", storySheetAnchorScroll, { passive: true });
   if (window.visualViewport) {
     window.visualViewport.addEventListener("resize", scheduleStorySheetPosition);
-    window.visualViewport.addEventListener("scroll", scheduleStorySheetPosition);
   }
 }
 
@@ -4245,9 +4324,9 @@ function removeStorySheetModalListeners() {
   document.removeEventListener("click", storySheetOutsideClick, true);
   document.removeEventListener("keydown", storySheetKeydown, true);
   window.removeEventListener("resize", scheduleStorySheetPosition);
+  window.removeEventListener("scroll", storySheetAnchorScroll, { passive: true });
   if (window.visualViewport) {
     window.visualViewport.removeEventListener("resize", scheduleStorySheetPosition);
-    window.visualViewport.removeEventListener("scroll", scheduleStorySheetPosition);
   }
 }
 
@@ -4256,14 +4335,17 @@ function applySheetVisibility(sheet, open) {
   var wasOpen = sheet.getAttribute("data-trace-open") === "1";
   var handle = document.querySelector("[" + TRACE_STORY_HANDLE_ATTR + "]");
   if (open) {
+    // Only the phone bottom sheet is modal. The desktop popover leaves the
+    // page scrollable and interactive.
+    var bottomSheet = sheet.getAttribute("data-trace-story-sheet-placement") === "bottom";
     sheet.style.display = "block";
     sheet.setAttribute("aria-hidden", "false");
-    sheet.setAttribute("aria-modal", "true");
+    sheet.setAttribute("aria-modal", bottomSheet ? "true" : "false");
     sheet.setAttribute("data-trace-open", "1");
     setStoryHandleDialogTrigger(handle, sheet, true);
     if (!wasOpen) {
       storySheetOpener = handle || document.activeElement;
-      lockStoryBottomSheetPageScroll();
+      if (bottomSheet) lockStoryBottomSheetPageScroll();
       addStorySheetModalListeners();
     }
     if (sheet.getAttribute("data-trace-story-sheet-placement") === "popover") {
@@ -4535,8 +4617,10 @@ function storySheetCss(mobile) {
       "padding-bottom:env(safe-area-inset-bottom,0px)",
     ].concat(base).join(";");
   }
+  // The desktop popover sits in the document beside its handle and scrolls
+  // with the page; it never fixes itself to the viewport.
   return [
-    "position:fixed",
+    "position:absolute",
     "margin:0",
     "max-width:360px",
     "text-align:left",
@@ -4590,8 +4674,9 @@ function positionDesktopStorySheet(sheet, handle) {
     Math.min(left, viewport.left + viewport.width - panelWidth - margin),
   );
 
-  sheet.style.left = Math.round(left) + "px";
-  sheet.style.top = Math.round(top) + "px";
+  // Viewport coordinates become document coordinates for an absolute popover.
+  sheet.style.left = Math.round(left + (window.scrollX || 0)) + "px";
+  sheet.style.top = Math.round(top + (window.scrollY || 0)) + "px";
   sheet.style.right = "auto";
   sheet.style.bottom = "auto";
   sheet.setAttribute("data-trace-popover-side", side);
@@ -6030,6 +6115,14 @@ function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
     e.stopPropagation();
     if (btn.getAttribute("data-trace-connect-action") === "1") {
       setStoryHiddenPreferenceCheckingAction(btn);
+      if (storyUsesArchiveConnect()) {
+        requestStoryArchiveConnect(workKey, function (connected) {
+          if (!connected) {
+            setStoryHiddenPreferenceAuthAction(btn, btn.getAttribute("data-trace-connect-error") || "not_authenticated");
+          }
+        });
+        return;
+      }
       openTraceUrlInBrowserTab(storyTraceOpenUrl(null, entry));
       setTimeout(function () {
         if (btn.getAttribute("data-trace-connect-checking") === "1") {
@@ -6102,7 +6195,9 @@ function setStoryHiddenPreferenceAuthAction(btn, error) {
   var expired = error === "auth_expired";
   btn.style.cssText = storySheetPrimaryButtonCss();
   btn.textContent = expired ? "Sign in" : "Connect";
-  btn.title = expired ? "Open Trace to sign in again" : "Open Trace to connect the extension";
+  btn.title = storyUsesArchiveConnect()
+    ? "Connect the extension to your Trace account"
+    : expired ? "Open Trace to sign in again" : "Open Trace to connect the extension";
   btn.setAttribute("data-trace-connect-action", "1");
   btn.setAttribute("data-trace-connect-error", error || "not_authenticated");
   btn.removeAttribute("data-trace-connect-checking");
@@ -6233,7 +6328,24 @@ function renderStorySheet(sheet, view, workKey) {
     var connectOpen = document.createElement("a");
     connectOpen.className = "x-pbtn x-pbtn-primary";
     connectOpen.setAttribute("data-trace-open-trace", "1");
-    if (awaitingAppLink(view)) {
+    if (!awaitingAppLink(view) && storyUsesArchiveConnect() &&
+        !(view.authState && view.authState.state === "error")) {
+      connectOpen = document.createElement("button");
+      connectOpen.type = "button";
+      connectOpen.className = "x-pbtn x-pbtn-primary";
+      connectOpen.setAttribute("data-trace-story-connect", "1");
+      connectOpen.textContent = storyArchiveConnectState === "connecting"
+        ? "Connecting…"
+        : view.authState && view.authState.state === "reconnect_required"
+          ? "Reconnect"
+          : "Connect";
+      connectOpen.disabled = storyArchiveConnectState === "connecting";
+      connectOpen.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        requestStoryArchiveConnect(workKey);
+      });
+    } else if (awaitingAppLink(view)) {
       connectOpen.href = TRACE_IOS_APP_SETUP_URL;
       connectOpen.textContent = "Open Trace app";
     } else {
@@ -6243,7 +6355,7 @@ function renderStorySheet(sheet, view, workKey) {
       connectOpen.textContent = "Open Trace";
     }
     connectOpen.style.cssText = storySheetPrimaryButtonCss() + ";align-self:flex-start;margin-left:-8px";
-    bindTraceOpenLink(connectOpen);
+    if (connectOpen.tagName === "A") bindTraceOpenLink(connectOpen);
     connect.appendChild(connectTitle);
     connect.appendChild(connectCopy);
     connect.appendChild(connectOpen);
@@ -7125,6 +7237,9 @@ function renderQuickAddFromSnapshot(workKey, anchor, res) {
         info.__traceAutoTrackError === "not_authenticated")
     );
     storyAuthRecoveryNeeded = !view.hasAuth || hasEntryAuthError;
+    if (view.hasAuth && storyArchiveConnectState !== "connecting") {
+      storyArchiveConnectState = null;
+    }
 
     if (KERNEL_SESSION_ACTIVE && kernelFirstStoryLookupPending) {
       applyStoryInlineHandleState(handle, {
@@ -7282,7 +7397,22 @@ function scheduleKernelProjectionRetry(workKey, attempt) {
 // takes focus, and is announced politely. Progress updates never show it.
 // -------------------------------------------------------
 var TRACE_SAVED_NOTE_ATTR = "data-trace-saved-note";
-var TRACE_SAVED_NOTE_VISIBLE_MS = 15000;
+var TRACE_SAVED_NOTE_VISIBLE_MS = 5000;
+// Nothing makes a page note leave sooner than this.
+var TRACE_SAVED_NOTE_MIN_VISIBLE_MS = 3000;
+// Once the reader scrolls, the note leaves about a second later.
+var TRACE_SAVED_NOTE_SCROLL_DISMISS_MS = 1000;
+// A scroll in progress when a note appears has ended once the page has been
+// still this long (or the browser reports scrollend).
+var TRACE_SAVED_NOTE_SCROLL_SETTLE_MS = 200;
+var traceLastPageScrollAt = 0;
+try {
+  window.addEventListener("scroll", function () {
+    traceLastPageScrollAt = Date.now();
+  }, { capture: true, passive: true });
+} catch (_) {
+  /* notes then treat every scroll as the reader's */
+}
 var TRACE_SAVED_NOTE_FIRST_KEY = "traceSavedNoteFirstStoryShownV1";
 var TRACE_CHAPTER_KEPT_COUNT_KEY = "traceChapterKeptNotesShownV1";
 var chapterKeptState = { workKey: null, lastChapter: null, shown: false, pending: false, n2Shown: false };
@@ -7331,18 +7461,7 @@ function showChapterKeptNote(workKey, chapter) {
     if (!note.isConnected || !storySavedNoteHost || !storySavedNoteHost.isConnected) storySavedNoteMount(note);
   }, 400);
   revealStoryPageNote(note);
-  var remaining = 4000;
-  var started = Date.now();
-  var schedule = function () {
-    started = Date.now();
-    note.__traceHideTimer = setTimeout(function () { removeStorySavedNote(false); }, remaining);
-  };
-  note.addEventListener("focusin", function () {
-    if (note.__traceHideTimer) clearTimeout(note.__traceHideTimer);
-    remaining = Math.max(0, remaining - (Date.now() - started));
-  });
-  note.addEventListener("focusout", function (event) { if (!note.contains(event.relatedTarget)) schedule(); });
-  schedule();
+  scheduleStoryNoteAutoDismiss(note, TRACE_SAVED_NOTE_VISIBLE_MS);
   return true;
 }
 
@@ -7466,13 +7585,14 @@ function removeStorySavedNote(immediate) {
   }
   if (note.__traceHideTimer) clearTimeout(note.__traceHideTimer);
   if (note.__traceKeepTimer) clearInterval(note.__traceKeepTimer);
-  if (immediate) {
+  if (typeof note.__traceDetach === "function") note.__traceDetach();
+  // Reduce Motion hides the note at once, without a fade.
+  if (immediate || storySavedNoteReducedMotion()) {
     note.remove();
     return;
   }
-  // Reduce Motion keeps the fade and drops the movement.
   note.style.opacity = "0";
-  if (!storySavedNoteReducedMotion()) note.style.transform = "translateY(8px)";
+  note.style.transform = "translateY(8px)";
   setTimeout(function () { note.remove(); }, 350);
 
 }
@@ -7535,7 +7655,7 @@ function createStoryPageNote(kind, title, chapter, reduced) {
     // Visible without waiting for a frame; the entry animation is layered on.
     "opacity:1",
     "transform:none",
-    "transition:" + (reduced ? "opacity .2s ease" : "opacity .35s ease,transform .35s ease"),
+    reduced ? "" : "transition:opacity .35s ease,transform .35s ease",
   ].filter(Boolean).join(";");
   var mark = document.createElement("span");
   mark.setAttribute("aria-hidden", "true");
@@ -7605,18 +7725,16 @@ function applyStoryNoteLayout(note) {
   return stacked;
 }
 
-// Enter: rise 14 px and fade over 0.4 s; Reduce Motion fades only. The Web
-// Animations API runs without a JS frame callback, and the note's resting
+// Enter: rise 14 px and fade over 0.4 s; Reduce Motion shows it at once. The
+// Web Animations API runs without a JS frame callback, and the note's resting
 // style is already visible if animation is unavailable.
 function revealStoryPageNote(note) {
   if (!note || typeof note.animate !== "function") return;
-  var reduced = storySavedNoteReducedMotion();
+  if (storySavedNoteReducedMotion()) return;
   try {
     note.animate(
-      reduced
-        ? [{ opacity: 0 }, { opacity: 1 }]
-        : [{ opacity: 0, transform: "translateY(14px)" }, { opacity: 1, transform: "none" }],
-      { duration: reduced ? 200 : 400, easing: "ease-out" },
+      [{ opacity: 0, transform: "translateY(14px)" }, { opacity: 1, transform: "none" }],
+      { duration: 400, easing: "ease-out" },
     );
   } catch (_) {
     /* visible either way */
@@ -7629,7 +7747,9 @@ function showStorySavedNote(workKey, entry, remainingMs) {
   if (finishBandVisible()) return;
   removeStorySavedNote(true);
   var continued = typeof remainingMs === "number";
-  var visibleMs = continued ? Math.max(3000, remainingMs) : TRACE_SAVED_NOTE_VISIBLE_MS;
+  var visibleMs = continued
+    ? Math.min(TRACE_SAVED_NOTE_VISIBLE_MS, Math.max(TRACE_SAVED_NOTE_MIN_VISIBLE_MS, remainingMs))
+    : TRACE_SAVED_NOTE_VISIBLE_MS;
   if (!continued) {
     writeSavedNoteMarker({ workKey: workKey, until: Date.now() + visibleMs, dismissed: false });
   }
@@ -7677,21 +7797,95 @@ function showStorySavedNote(workKey, entry, remainingMs) {
     }
   }, 400);
   revealStoryPageNote(note);
-  var remaining = visibleMs;
-  var started = Date.now();
-  var scheduleHide = function () {
+  scheduleStoryNoteAutoDismiss(note, visibleMs);
+}
+
+// A page note leaves on its own. It stays at least three seconds, whatever
+// happens. After that, scrolling makes it leave about a second later;
+// without scrolling it leaves at five seconds. A scroll still moving when it
+// appears (a flick's momentum, or the page restoring its position) does not
+// count; only a scroll that starts after that does. Hovering or focusing it
+// pauses the countdown so its buttons stay usable. A prerendered page starts
+// counting only once the reader opens it.
+function scheduleStoryNoteAutoDismiss(note, visibleMs) {
+  var total = Math.max(0, visibleMs);
+  var minimum = Math.min(TRACE_SAVED_NOTE_MIN_VISIBLE_MS, total);
+  var elapsed = 0;
+  var runningSince = 0;
+  var hovered = false;
+  var focused = false;
+  var scrolledAt = null;
+  var settling = Date.now() - traceLastPageScrollAt < TRACE_SAVED_NOTE_SCROLL_SETTLE_MS;
+  var settleTimer = null;
+  function shownFor() {
+    return elapsed + (runningSince ? Date.now() - runningSince : 0);
+  }
+  function hideAt() {
+    if (scrolledAt === null) return total;
+    return Math.min(total, Math.max(minimum, scrolledAt) + TRACE_SAVED_NOTE_SCROLL_DISMISS_MS);
+  }
+  function stop() {
     if (note.__traceHideTimer) clearTimeout(note.__traceHideTimer);
-    started = Date.now();
-    note.__traceHideTimer = setTimeout(function () { removeStorySavedNote(false); }, remaining);
-  };
-  note.addEventListener("focusin", function () {
-    if (note.__traceHideTimer) clearTimeout(note.__traceHideTimer);
-    remaining = Math.max(0, remaining - (Date.now() - started));
+    note.__traceHideTimer = null;
+    if (runningSince) elapsed += Date.now() - runningSince;
+    runningSince = 0;
+  }
+  function run(atLeastMs) {
+    stop();
+    if (hovered || focused || tracePageIsPrerendering()) return;
+    runningSince = Date.now();
+    note.__traceHideTimer = setTimeout(function () {
+      note.__traceHideTimer = null;
+      if (activeStorySavedNote === note) removeStorySavedNote(false);
+    }, Math.max(hideAt() - elapsed, atLeastMs || 0));
+  }
+  function stillSettling() {
+    clearTimeout(settleTimer);
+    settleTimer = setTimeout(settled, TRACE_SAVED_NOTE_SCROLL_SETTLE_MS);
+  }
+  function settled() {
+    clearTimeout(settleTimer);
+    settleTimer = null;
+    settling = false;
+  }
+  function onScroll() {
+    if (activeStorySavedNote !== note) {
+      detach();
+      return;
+    }
+    if (settling) {
+      stillSettling();
+      return;
+    }
+    if (scrolledAt !== null) return;
+    scrolledAt = shownFor();
+    window.removeEventListener("scroll", onScroll, true);
+    window.removeEventListener("scrollend", settled, true);
+    if (runningSince) run();
+  }
+  function detach() {
+    clearTimeout(settleTimer);
+    settleTimer = null;
+    window.removeEventListener("scroll", onScroll, true);
+    window.removeEventListener("scrollend", settled, true);
+  }
+  note.addEventListener("mouseenter", function () { hovered = true; stop(); });
+  note.addEventListener("mouseleave", function () {
+    hovered = false;
+    run(TRACE_SAVED_NOTE_SCROLL_DISMISS_MS);
   });
+  note.addEventListener("focusin", function () { focused = true; stop(); });
   note.addEventListener("focusout", function (event) {
-    if (!note.contains(event.relatedTarget)) scheduleHide();
+    if (note.contains(event.relatedTarget)) return;
+    focused = false;
+    run(TRACE_SAVED_NOTE_SCROLL_DISMISS_MS);
   });
-  scheduleHide();
+  if (settling) stillSettling();
+  window.addEventListener("scroll", onScroll, { capture: true, passive: true });
+  window.addEventListener("scrollend", settled, { capture: true, passive: true });
+  note.__traceDetach = detach;
+  whenTracePageActivates(function () { run(); });
+  run();
 }
 
 function renderQuickAddButton(workKey, projectionAttempt) {
@@ -7820,7 +8014,13 @@ function initQuickAdd() {
         queryBackgroundWorkStateForStory(workKey);
       }
       renderQuickAddButton(workKey);
-      if ((changes.authToken || changes.traceAuthState || changes[TRACE_ACCOUNT_ID_KEY]) && !document.hidden) {
+      if (
+        (changes.authToken ||
+          changes.traceAuthState ||
+          changes[TRACE_ACCOUNT_ID_KEY] ||
+          (KERNEL_SESSION_ACTIVE && changes[ACCOUNT_PROJECTION_REVISION_KEY])) &&
+        !document.hidden
+      ) {
         retryAutoTrackAfterLink();
       }
     });
@@ -7847,6 +8047,12 @@ function initQuickAdd() {
         renderQuickAddButton(workKey);
         retryAutoTrackAfterLink();
       }
+    });
+    // Lookups sent while prerendering were ignored; ask again once opened.
+    whenTracePageActivates(function () {
+      requestStoryAuthRefreshOnResume(workKey);
+      queryBackgroundWorkStateForStory(workKey);
+      renderQuickAddButton(workKey);
     });
   } catch (_) {
     /* ignore */
@@ -7885,6 +8091,7 @@ function announceArchivePageToBackground(handoffId) {
 if (!TRACE_ACTIVE_TAB_PROBE_MODE && !shouldDisableTraceContentScript()) {
   runWhenTraceEarnedPermissionReady(function () {
     announceArchivePageToBackground();
+    whenTracePageActivates(function () { announceArchivePageToBackground(); });
   });
 }
 

@@ -4,6 +4,7 @@ import { installSessionRuntime, type SessionMode, type SessionRuntimeController 
 import { installArchiveReadinessRuntime } from "./archive-readiness.mjs";
 import { installEarnedPermissionRegistrationRuntime } from "./earned-permission-registration.mjs";
 import { installTraceFirstInstallActivation } from "./trace-web-navigation.mjs";
+import { rememberConnectIntent } from "./connect-intent.mjs";
 export * from "./account-projection.mjs";
 export * from "./billing-conversion.mjs";
 export * from "./archive-readiness-status.mjs";
@@ -104,6 +105,11 @@ try {
       tabs: extension.tabs,
       mode: storageMode,
       webOrigin: __TRACE_WEB_ORIGIN__,
+      // Signing in anywhere on Trace after installing finishes the connect,
+      // not only on the setup page's own address.
+      onActivation: () => rememberConnectIntent(
+        new BrowserStorage(extension.storage.local, extension.runtime, storageMode),
+      ),
     });
     // Install positive archive-run evidence before any IndexedDB, credential,
     // account-projection, or session-restoration work can stall the worker.

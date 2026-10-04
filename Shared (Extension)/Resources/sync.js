@@ -21,6 +21,9 @@ const FIRST_STORY_ADD_MESSAGE = "TRACE_FIRST_STORY_ADD";
 const FIRST_STORY_ADD_RESPONSE_MESSAGE = "TRACE_FIRST_STORY_ADD_RESPONSE";
 const CREDENTIAL_GRANT_REQUEST_MESSAGE = "TRACE_CREDENTIAL_GRANT_REQUEST";
 const SESSION_ACTION_MESSAGE = "TRACE_SESSION_ACTION";
+// Content-free hint that this Trace page is signed in. The background uses
+// it only to finish a connect the reader already asked for.
+const TRACE_WEB_READY_MESSAGE = "TRACE_WEB_READY";
 const FIRST_INSTALL_READY_MESSAGE = "TRACE_EXTENSION_FIRST_INSTALL_READY";
 const FIRST_INSTALL_ACTIVATION = "extension-installed";
 const SESSION_MODE = globalThis.TRACE_SESSION_MODE || "legacy";
@@ -373,6 +376,10 @@ window.addEventListener("message", (event) => {
       event.data.protocolVersion === 1 && typeof event.data.requestId === "string"
         ? event.data.requestId
         : "";
+    if (!requestId) {
+      if (token && token.trim()) handleTracePageSignedIn();
+      return;
+    }
     const pending = requestId ? pendingCredentialGrants.get(requestId) : null;
     if (!pending) return;
     pendingCredentialGrants.delete(requestId);
@@ -393,6 +400,24 @@ window.addEventListener("message", (event) => {
     "[Trace Sync] Failed to update auth state",
   );
 });
+
+// The signed-in page posts its token on its own when it finishes signing in.
+// The token itself is ignored here: a credential grant still needs the
+// background's request ID. A grant asked before sign-in finished is asked
+// again, so the page can answer it now.
+function handleTracePageSignedIn() {
+  for (const requestId of pendingCredentialGrants.keys()) {
+    requestTraceToken("credential_grant", requestId);
+  }
+  announceTracePageReady();
+}
+
+function announceTracePageReady() {
+  sendRuntimeMessage(
+    { type: TRACE_WEB_READY_MESSAGE },
+    "[Trace Sync] Failed to announce the Trace page",
+  );
+}
 
 if (!KERNEL_SESSION_ACTIVE) {
   requestTraceTokenIfVisible("sync_ready");
@@ -459,6 +484,21 @@ try {
   });
 } catch (error) {
   console.error("[Trace Sync] Failed to bind library invalidation bridge", error);
+}
+
+// A page that signed in before this script loaded has already posted its
+// token. Ask once, so a signed-in page says so again; a signed-out page has
+// nothing to answer. The reply only triggers the readiness hint above.
+function isAppleMobileBrowser() {
+  const nav = globalThis.navigator || {};
+  const ua = nav.userAgent || "";
+  // iPadOS Safari reports a Mac user agent; only touch tells them apart.
+  return /iPhone|iPad|iPod/i.test(ua) ||
+    (/Macintosh/i.test(ua) && (nav.maxTouchPoints || 0) > 1);
+}
+
+if (KERNEL_SESSION_ACTIVE && !isAppleMobileBrowser()) {
+  requestTraceToken("sync_ready");
 }
 
 // Announce after listeners are bound so a page that already gave up on its

@@ -35,6 +35,12 @@ export type SessionAction = "connect" | "cancel" | "disconnect" | "retry" | "rec
 export const SESSION_MESSAGE_TYPES = Object.freeze({
   snapshot: "TRACE_SESSION_GET_SNAPSHOT",
   action: "TRACE_SESSION_ACTION",
+  // Connect from an AO3/FFN page: the popup's Connect, plus opening Trace
+  // when no signed-in Trace page can answer.
+  archiveConnect: "TRACE_ARCHIVE_CONNECT",
+  // A Trace page is signed in. Carries no credential; the background asks
+  // the page for one only while a connect request is waiting.
+  traceWebReady: "TRACE_WEB_READY",
   connectAndSave: "TRACE_CONNECT_AND_SAVE",
   quickAdd: "TRACE_QUICK_ADD",
   autoTrack: "TRACE_AUTO_TRACK",
@@ -98,6 +104,8 @@ export interface RuntimeResponse {
   readonly entryId?: string;
   readonly state?: PublicWorkState;
   readonly capacity?: PublicCapacityRecovery | null;
+  /** Connect opened Trace so the reader can sign in there. */
+  readonly traceOpened?: boolean;
   readonly error?:
     | "commands_unavailable"
     | "runtime_unavailable"

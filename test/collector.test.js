@@ -1606,6 +1606,12 @@ function createStoryAutoTrackPendingHarness(options = {}) {
       },
       sendMessage(msg, cb) {
         sent.push(msg);
+        if (
+          typeof options.onSendMessage === "function" &&
+          options.onSendMessage(msg, cb) === true
+        ) {
+          return;
+        }
         if (msg.type === "TRACE_WORK_STATE_GET") {
           if (options.holdWorkStateRead) {
             deferredWorkStateRead = cb;
@@ -2653,6 +2659,103 @@ test("saved note is still shown three seconds after it appears", async () => {
   assert.notEqual(note.style.opacity, "0");
 });
 
+async function showSavedNote(options = {}) {
+  const { h, state } = savedNoteHarness(false);
+  if (options.reducedMotion) {
+    h.dom.window.matchMedia = (query) => ({
+      matches: String(query).includes("prefers-reduced-motion"),
+      media: String(query),
+      addListener() {},
+      removeListener() {},
+      addEventListener() {},
+      removeEventListener() {},
+    });
+  }
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  if (typeof options.beforeShow === "function") options.beforeShow(h);
+  state.confirmed = true;
+  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  const host = h.dom.window.document.querySelector("trace-saved-note");
+  assert.ok(host);
+  const note = host.__traceShadow.querySelector("[data-trace-saved-note]");
+  assert.ok(note);
+  return { h, host, note };
+}
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("saved note leaves on its own five seconds after it appears", async () => {
+  const { h, host, note } = await showSavedNote({ reducedMotion: true });
+  assert.equal(note.style.transition, "", "reduced motion has no fade");
+  await wait(4600);
+  assert.ok(host.__traceShadow.querySelector("[data-trace-saved-note]"));
+  await wait(600);
+  assert.equal(host.__traceShadow.querySelector("[data-trace-saved-note]"), null, "reduced motion hides it at once");
+  h.dom.window.close();
+});
+
+test("saved note stays three seconds even when the reader scrolls at once, then leaves a second later", async () => {
+  const { h, host } = await showSavedNote({ reducedMotion: true });
+  const present = () => host.__traceShadow.querySelector("[data-trace-saved-note]") !== null;
+  await wait(250);
+  h.dom.window.dispatchEvent(new h.dom.window.Event("scroll"));
+  await wait(2600);
+  assert.ok(present(), "nothing shortens the first three seconds");
+  await wait(850);
+  assert.ok(present(), "it leaves a second after the minimum, not at it");
+  await wait(400);
+  assert.equal(present(), false, "scrolling made it leave before five seconds");
+  h.dom.window.close();
+});
+
+test("saved note ignores a scroll already moving when it appears and counts the reader's next one", async () => {
+  let momentum = null;
+  const { h, host } = await showSavedNote({
+    reducedMotion: true,
+    beforeShow(harness) {
+      const fire = () => harness.dom.window.dispatchEvent(new harness.dom.window.Event("scroll"));
+      fire();
+      momentum = setInterval(fire, 50);
+    },
+  });
+  const present = () => host.__traceShadow.querySelector("[data-trace-saved-note]") !== null;
+  await wait(1200);
+  clearInterval(momentum);
+  await wait(2300);
+  assert.ok(present(), "momentum in progress at appearance does not count");
+  h.dom.window.dispatchEvent(new h.dom.window.Event("scroll"));
+  await wait(800);
+  assert.ok(present());
+  await wait(400);
+  assert.equal(present(), false, "a scroll after it appeared makes it leave a second later");
+  h.dom.window.close();
+});
+
+test("saved note waits while hovered or focused, then leaves about a second later", async () => {
+  const { h, host, note } = await showSavedNote();
+  const present = () => host.__traceShadow.querySelector("[data-trace-saved-note]") !== null;
+  await wait(350);
+  note.dispatchEvent(new h.dom.window.MouseEvent("mouseenter"));
+  h.dom.window.dispatchEvent(new h.dom.window.Event("scroll"));
+  await wait(3000);
+  assert.ok(present(), "hovering keeps the note");
+  note.dispatchEvent(new h.dom.window.MouseEvent("mouseleave"));
+  const details = note.querySelector("button");
+  details.dispatchEvent(new h.dom.window.FocusEvent("focusin", { bubbles: true }));
+  await wait(2500);
+  assert.ok(present(), "focus keeps the note");
+  details.dispatchEvent(new h.dom.window.FocusEvent("focusout", { bubbles: true, relatedTarget: null }));
+  await wait(600);
+  assert.notEqual(note.style.opacity, "0", "it stays a moment after focus leaves");
+  await wait(3200);
+  assert.equal(note.style.opacity, "0", "it then fades");
+  assert.ok(note.querySelector("button[aria-label='Dismiss']"), "the close button stays");
+  await wait(500);
+  assert.equal(present(), false);
+  h.dom.window.close();
+});
+
 test("saved note is shown for the first saved story only", async () => {
   const first = savedNoteHarness(false);
   await new Promise((resolve) => setTimeout(resolve, 180));
@@ -3138,7 +3241,7 @@ test("AO3 story places compact Trace handle centered below title and byline", ()
   assert.ok(sheet);
   assert.equal(sheet.parentElement, dom.window.document.documentElement);
   assert.equal(sheet.getAttribute("data-trace-story-sheet-placement"), "popover");
-  assert.match(sheet.getAttribute("style") || "", /position:\s*fixed/i);
+  assert.match(sheet.getAttribute("style") || "", /position:\s*absolute/i);
   assert.match(sheet.getAttribute("style") || "", /top:/i);
   assert.match(sheet.getAttribute("style") || "", /left:/i);
   assert.match(sheet.getAttribute("style") || "", /bottom:\s*auto/i);
@@ -3312,8 +3415,8 @@ function createStorySheetModalHarness(options = {}) {
   return { dom, entry };
 }
 
-test("story sheet contains focus and restores the archive after Escape or outside click", async () => {
-  const { dom } = createStorySheetModalHarness();
+test("story bottom sheet contains focus and restores the archive after Escape or outside click", async () => {
+  const { dom } = createStorySheetModalHarness({ mobile: true });
   Object.defineProperty(dom.window, "scrollX", { value: 8, configurable: true });
   Object.defineProperty(dom.window, "scrollY", { value: 360, configurable: true });
   const restoredScroll = [];
@@ -3386,7 +3489,7 @@ test("story sheet contains focus and restores the archive after Escape or outsid
 });
 
 test("story sheet teardown restores the host page when its anchor disappears", async () => {
-  const { dom } = createStorySheetModalHarness();
+  const { dom } = createStorySheetModalHarness({ mobile: true });
   const handle = dom.window.document.querySelector("[data-trace-story-handle]");
   handle.click();
   await delay(20);
@@ -3399,6 +3502,53 @@ test("story sheet teardown restores the host page when its anchor disappears", a
   assert.equal(dom.window.document.body.hasAttribute("inert"), false);
   assert.equal(dom.window.document.body.style.position, "relative");
   assert.equal(dom.window.document.documentElement.style.overflow, "");
+});
+
+test("story desktop popover scrolls with the page and closes when its handle leaves view", async () => {
+  const { dom } = createStorySheetModalHarness();
+  Object.defineProperty(dom.window, "innerWidth", { value: 1000, configurable: true });
+  Object.defineProperty(dom.window, "innerHeight", { value: 700, configurable: true });
+  Object.defineProperty(dom.window, "scrollY", { value: 600, configurable: true });
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+  let handleTop = 100;
+  handle.getBoundingClientRect = () => ({
+    top: handleTop, bottom: handleTop + 30, left: 460, right: 540, width: 80, height: 30,
+  });
+  handle.focus();
+  handle.click();
+  await delay(20);
+
+  assert.equal(sheet.getAttribute("data-trace-story-sheet-placement"), "popover");
+  assert.equal(sheet.getAttribute("aria-modal"), "false");
+  assert.match(sheet.getAttribute("style") || "", /position:\s*absolute/i);
+  assert.equal(sheet.style.top, "738px", "placed in document coordinates below the handle");
+  const body = dom.window.document.body;
+  assert.equal(body.hasAttribute("inert"), false);
+  assert.equal(body.style.overflow, "");
+  assert.equal(body.style.position, "relative");
+  assert.equal(dom.window.document.documentElement.style.overflow, "");
+  assert.ok(sheet.contains(dom.window.document.activeElement), "focus moves into the popover");
+
+  handleTop = -10;
+  dom.window.dispatchEvent(new dom.window.Event("scroll"));
+  assert.equal(sheet.getAttribute("aria-hidden"), "false", "a partly visible handle keeps it open");
+
+  handleTop = 720;
+  dom.window.dispatchEvent(new dom.window.Event("scroll"));
+  assert.equal(sheet.getAttribute("aria-hidden"), "true");
+  assert.equal(handle.getAttribute("aria-expanded"), "false");
+  assert.equal(dom.window.document.activeElement, handle);
+
+  handleTop = 100;
+  handle.click();
+  await delay(20);
+  dom.window.document.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  assert.equal(sheet.getAttribute("aria-hidden"), "true");
+  handle.click();
+  await delay(20);
+  dom.window.document.body.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  assert.equal(sheet.getAttribute("aria-hidden"), "true");
 });
 
 test("story desktop popover chooses the visible side of its trigger", () => {
@@ -7461,6 +7611,55 @@ test("re-sends of a refused story save stop at the cap", async () => {
   h.dom.window.close();
 });
 
+// Chrome prerenders the next chapter when AO3 asks for it. The extension
+// ignores a prerendered page; opening it makes the page visible while it is
+// still prerendering, and only then fires prerenderingchange.
+function setPrerendering(window, prerendering) {
+  Object.defineProperty(window.document, "prerendering", { value: prerendering, configurable: true });
+}
+
+test("a prerendered chapter records progress as soon as the reader opens it", async () => {
+  const ports = [];
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    connectPort: relayPortRecorder(ports),
+    mutateDom(dom) { setPrerendering(dom.window, true); },
+  });
+  await delay(50);
+  assert.equal(autoTrackSends(h), 0, "nothing is saved while the page is only prerendered");
+  assert.equal(ports.length, 0, "no relay port from a prerendered page");
+  const seenBefore = h.sent.filter(message => message.type === "TRACE_ARCHIVE_SEEN").length;
+  const lookupsBefore = h.sent.filter(message => message.type === "TRACE_WORK_STATE_GET").length;
+
+  // Opening it: visible first, still prerendering.
+  h.dom.window.document.dispatchEvent(new h.dom.window.Event("visibilitychange"));
+  await delay(20);
+  assert.equal(autoTrackSends(h), 0);
+
+  setPrerendering(h.dom.window, false);
+  h.dom.window.document.dispatchEvent(new h.dom.window.Event("prerenderingchange"));
+  await delay(50);
+  assert.equal(autoTrackSends(h), 1, "the chapter is recorded without the reader leaving the tab");
+  assert.equal(ports.length, 1, "the relay port opens once the page is opened");
+  assert.ok(h.sent.filter(message => message.type === "TRACE_ARCHIVE_SEEN").length > seenBefore);
+  assert.ok(h.sent.filter(message => message.type === "TRACE_WORK_STATE_GET").length > lookupsBefore);
+
+  // Later visibility changes do not record it again.
+  h.dom.window.document.dispatchEvent(new h.dom.window.Event("visibilitychange"));
+  h.dom.window.dispatchEvent(new h.dom.window.Event("focus"));
+  await delay(20);
+  assert.equal(autoTrackSends(h), 1);
+  h.dom.window.dispatchEvent(new h.dom.window.Event("pagehide"));
+  h.dom.window.close();
+});
+
+test("an ordinary page load records progress without waiting for any event", async () => {
+  const h = createStoryAutoTrackPendingHarness({ sessionMode: "kernel" });
+  await delay(50);
+  assert.equal(autoTrackSends(h), 1);
+  h.dom.window.close();
+});
+
 function setHidden(window, hidden) {
   Object.defineProperty(window.document, "hidden", { value: hidden, configurable: true });
   Object.defineProperty(window.document, "visibilityState", { value: hidden ? "hidden" : "visible", configurable: true });
@@ -7579,4 +7778,76 @@ test("finish band work-status choices are words in B2 cells, never status dots",
   assert.notEqual(band.getAttribute("role"), "alert");
   assert.match(band.getAttribute("style") || "", /--trace-page-surface:\s*#FFFFFF/i);
   assert.doesNotMatch(band.getAttribute("style") || "", /rgb\(255,\s*253,\s*248\)|Geist|Manrope/);
+});
+
+test("kernel story Connect runs the extension's connect, then the story can be saved", async () => {
+  let state = "signed_out";
+  const harness = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    projectionResponse: () => ({
+      ok: true,
+      snapshot: { state, reason: "none", canExecuteAuthenticated: state === "connected" },
+      projection: { entries: {}, workPreferences: {}, syncVersion: null },
+    }),
+    onSendMessage(msg, cb) {
+      if (msg.type !== "TRACE_ARCHIVE_CONNECT") return false;
+      state = "connected";
+      setTimeout(() => cb({
+        ok: true,
+        snapshot: { state, reason: "none", canExecuteAuthenticated: true },
+        action: { kind: "completed", state: "connected" },
+      }), 5);
+      return true;
+    },
+  });
+  const document = harness.dom.window.document;
+  await delay(30);
+  const handle = document.querySelector("[data-trace-story-handle]");
+  assert.match(handle.textContent || "", /Connect/);
+  handle.click();
+  await delay(20);
+  const connect = document.querySelector("[data-trace-story-connect]");
+  assert.ok(connect, "the story sheet offers Connect, not only a Trace link");
+  assert.equal(connect.tagName, "BUTTON");
+  assert.equal(connect.textContent, "Connect");
+  connect.click();
+  assert.deepEqual(
+    plainJson(harness.sent.filter((msg) => msg.type === "TRACE_ARCHIVE_CONNECT")),
+    [{ type: "TRACE_ARCHIVE_CONNECT" }],
+  );
+  await delay(60);
+  assert.match(handle.textContent || "", /Add to Trace/i);
+  handle.click();
+  assert.equal(harness.sent.at(-1).type, "TRACE_QUICK_ADD");
+});
+
+test("kernel story Connect says where to sign in when it opened Trace", async () => {
+  const harness = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    projectionResponse: () => ({
+      ok: true,
+      snapshot: { state: "signed_out", reason: "none", canExecuteAuthenticated: false },
+      projection: { entries: {}, workPreferences: {}, syncVersion: null },
+    }),
+    onSendMessage(msg, cb) {
+      if (msg.type !== "TRACE_ARCHIVE_CONNECT") return false;
+      setTimeout(() => cb({
+        ok: true,
+        snapshot: { state: "signed_out", reason: "provider_unavailable", canExecuteAuthenticated: false },
+        action: { kind: "unavailable" },
+        traceOpened: true,
+      }), 5);
+      return true;
+    },
+  });
+  const document = harness.dom.window.document;
+  await delay(30);
+  document.querySelector("[data-trace-story-handle]").click();
+  await delay(20);
+  document.querySelector("[data-trace-story-connect]").click();
+  await delay(60);
+  const sheet = document.querySelector("[data-trace-story-sheet]");
+  assert.match(sheet.textContent || "", /Sign in to Trace in the tab that opened/);
 });
