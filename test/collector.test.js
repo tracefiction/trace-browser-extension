@@ -2672,6 +2672,7 @@ async function showSavedNote(options = {}) {
     });
   }
   await new Promise((resolve) => setTimeout(resolve, 180));
+  if (typeof options.beforeShow === "function") options.beforeShow(h);
   state.confirmed = true;
   h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
   await new Promise((resolve) => setImmediate(resolve));
@@ -2682,34 +2683,75 @@ async function showSavedNote(options = {}) {
   return { h, host, note };
 }
 
-test("saved note leaves on its own about four seconds after it appears", async () => {
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("saved note leaves on its own five seconds after it appears", async () => {
   const { h, host, note } = await showSavedNote({ reducedMotion: true });
   assert.equal(note.style.transition, "", "reduced motion has no fade");
-  await new Promise((resolve) => setTimeout(resolve, 3600));
+  await wait(4600);
   assert.ok(host.__traceShadow.querySelector("[data-trace-saved-note]"));
-  await new Promise((resolve) => setTimeout(resolve, 600));
+  await wait(600);
   assert.equal(host.__traceShadow.querySelector("[data-trace-saved-note]"), null, "reduced motion hides it at once");
   h.dom.window.close();
 });
 
-test("saved note leaves about a second after scrolling, and waits while hovered or focused", async () => {
+test("saved note stays three seconds even when the reader scrolls at once, then leaves a second later", async () => {
+  const { h, host } = await showSavedNote({ reducedMotion: true });
+  const present = () => host.__traceShadow.querySelector("[data-trace-saved-note]") !== null;
+  await wait(250);
+  h.dom.window.dispatchEvent(new h.dom.window.Event("scroll"));
+  await wait(2600);
+  assert.ok(present(), "nothing shortens the first three seconds");
+  await wait(850);
+  assert.ok(present(), "it leaves a second after the minimum, not at it");
+  await wait(400);
+  assert.equal(present(), false, "scrolling made it leave before five seconds");
+  h.dom.window.close();
+});
+
+test("saved note ignores a scroll already moving when it appears and counts the reader's next one", async () => {
+  let momentum = null;
+  const { h, host } = await showSavedNote({
+    reducedMotion: true,
+    beforeShow(harness) {
+      const fire = () => harness.dom.window.dispatchEvent(new harness.dom.window.Event("scroll"));
+      fire();
+      momentum = setInterval(fire, 50);
+    },
+  });
+  const present = () => host.__traceShadow.querySelector("[data-trace-saved-note]") !== null;
+  await wait(1200);
+  clearInterval(momentum);
+  await wait(2300);
+  assert.ok(present(), "momentum in progress at appearance does not count");
+  h.dom.window.dispatchEvent(new h.dom.window.Event("scroll"));
+  await wait(800);
+  assert.ok(present());
+  await wait(400);
+  assert.equal(present(), false, "a scroll after it appeared makes it leave a second later");
+  h.dom.window.close();
+});
+
+test("saved note waits while hovered or focused, then leaves about a second later", async () => {
   const { h, host, note } = await showSavedNote();
   const present = () => host.__traceShadow.querySelector("[data-trace-saved-note]") !== null;
-  await new Promise((resolve) => setTimeout(resolve, 350));
+  await wait(350);
   note.dispatchEvent(new h.dom.window.MouseEvent("mouseenter"));
   h.dom.window.dispatchEvent(new h.dom.window.Event("scroll"));
-  await new Promise((resolve) => setTimeout(resolve, 1300));
+  await wait(3000);
   assert.ok(present(), "hovering keeps the note");
   note.dispatchEvent(new h.dom.window.MouseEvent("mouseleave"));
   const details = note.querySelector("button");
   details.dispatchEvent(new h.dom.window.FocusEvent("focusin", { bubbles: true }));
-  await new Promise((resolve) => setTimeout(resolve, 1300));
+  await wait(2500);
   assert.ok(present(), "focus keeps the note");
   details.dispatchEvent(new h.dom.window.FocusEvent("focusout", { bubbles: true, relatedTarget: null }));
-  await new Promise((resolve) => setTimeout(resolve, 1150));
-  assert.equal(note.style.opacity, "0", "it fades a second after the reader moves on");
+  await wait(600);
+  assert.notEqual(note.style.opacity, "0", "it stays a moment after focus leaves");
+  await wait(3200);
+  assert.equal(note.style.opacity, "0", "it then fades");
   assert.ok(note.querySelector("button[aria-label='Dismiss']"), "the close button stays");
-  await new Promise((resolve) => setTimeout(resolve, 500));
+  await wait(500);
   assert.equal(present(), false);
   h.dom.window.close();
 });

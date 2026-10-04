@@ -7397,12 +7397,22 @@ function scheduleKernelProjectionRetry(workKey, attempt) {
 // takes focus, and is announced politely. Progress updates never show it.
 // -------------------------------------------------------
 var TRACE_SAVED_NOTE_ATTR = "data-trace-saved-note";
-var TRACE_SAVED_NOTE_VISIBLE_MS = 4000;
+var TRACE_SAVED_NOTE_VISIBLE_MS = 5000;
+// Nothing makes a page note leave sooner than this.
+var TRACE_SAVED_NOTE_MIN_VISIBLE_MS = 3000;
 // Once the reader scrolls, the note leaves about a second later.
 var TRACE_SAVED_NOTE_SCROLL_DISMISS_MS = 1000;
-// Scrolls this soon after the note appears are the page settling (for
-// example scroll restoration), not the reader moving on.
-var TRACE_SAVED_NOTE_SCROLL_GRACE_MS = 300;
+// A scroll in progress when a note appears has ended once the page has been
+// still this long (or the browser reports scrollend).
+var TRACE_SAVED_NOTE_SCROLL_SETTLE_MS = 200;
+var traceLastPageScrollAt = 0;
+try {
+  window.addEventListener("scroll", function () {
+    traceLastPageScrollAt = Date.now();
+  }, { capture: true, passive: true });
+} catch (_) {
+  /* notes then treat every scroll as the reader's */
+}
 var TRACE_SAVED_NOTE_FIRST_KEY = "traceSavedNoteFirstStoryShownV1";
 var TRACE_CHAPTER_KEPT_COUNT_KEY = "traceChapterKeptNotesShownV1";
 var chapterKeptState = { workKey: null, lastChapter: null, shown: false, pending: false, n2Shown: false };
@@ -7738,7 +7748,7 @@ function showStorySavedNote(workKey, entry, remainingMs) {
   removeStorySavedNote(true);
   var continued = typeof remainingMs === "number";
   var visibleMs = continued
-    ? Math.min(TRACE_SAVED_NOTE_VISIBLE_MS, Math.max(1500, remainingMs))
+    ? Math.min(TRACE_SAVED_NOTE_VISIBLE_MS, Math.max(TRACE_SAVED_NOTE_MIN_VISIBLE_MS, remainingMs))
     : TRACE_SAVED_NOTE_VISIBLE_MS;
   if (!continued) {
     writeSavedNoteMarker({ workKey: workKey, until: Date.now() + visibleMs, dismissed: false });
@@ -7790,56 +7800,91 @@ function showStorySavedNote(workKey, entry, remainingMs) {
   scheduleStoryNoteAutoDismiss(note, visibleMs);
 }
 
-// A page note leaves on its own: after its visible time, or about a second
-// after the reader starts scrolling, whichever comes first. Hovering or
-// focusing it pauses the countdown so its buttons stay usable.
+// A page note leaves on its own. It stays at least three seconds, whatever
+// happens. After that, scrolling makes it leave about a second later;
+// without scrolling it leaves at five seconds. A scroll still moving when it
+// appears (a flick's momentum, or the page restoring its position) does not
+// count; only a scroll that starts after that does. Hovering or focusing it
+// pauses the countdown so its buttons stay usable. A prerendered page starts
+// counting only once the reader opens it.
 function scheduleStoryNoteAutoDismiss(note, visibleMs) {
-  var remaining = Math.max(0, visibleMs);
-  var started = Date.now();
-  var shownAt = started;
+  var total = Math.max(0, visibleMs);
+  var minimum = Math.min(TRACE_SAVED_NOTE_MIN_VISIBLE_MS, total);
+  var elapsed = 0;
+  var runningSince = 0;
   var hovered = false;
   var focused = false;
-  var scrolled = false;
-  function stop() {
-    if (!note.__traceHideTimer) return;
-    clearTimeout(note.__traceHideTimer);
-    note.__traceHideTimer = null;
-    remaining = Math.max(0, remaining - (Date.now() - started));
+  var scrolledAt = null;
+  var settling = Date.now() - traceLastPageScrollAt < TRACE_SAVED_NOTE_SCROLL_SETTLE_MS;
+  var settleTimer = null;
+  function shownFor() {
+    return elapsed + (runningSince ? Date.now() - runningSince : 0);
   }
-  function run() {
+  function hideAt() {
+    if (scrolledAt === null) return total;
+    return Math.min(total, Math.max(minimum, scrolledAt) + TRACE_SAVED_NOTE_SCROLL_DISMISS_MS);
+  }
+  function stop() {
+    if (note.__traceHideTimer) clearTimeout(note.__traceHideTimer);
+    note.__traceHideTimer = null;
+    if (runningSince) elapsed += Date.now() - runningSince;
+    runningSince = 0;
+  }
+  function run(atLeastMs) {
     stop();
-    if (hovered || focused) return;
-    started = Date.now();
+    if (hovered || focused || tracePageIsPrerendering()) return;
+    runningSince = Date.now();
     note.__traceHideTimer = setTimeout(function () {
       note.__traceHideTimer = null;
       if (activeStorySavedNote === note) removeStorySavedNote(false);
-    }, remaining);
+    }, Math.max(hideAt() - elapsed, atLeastMs || 0));
+  }
+  function stillSettling() {
+    clearTimeout(settleTimer);
+    settleTimer = setTimeout(settled, TRACE_SAVED_NOTE_SCROLL_SETTLE_MS);
+  }
+  function settled() {
+    clearTimeout(settleTimer);
+    settleTimer = null;
+    settling = false;
   }
   function onScroll() {
     if (activeStorySavedNote !== note) {
       detach();
       return;
     }
-    if (scrolled || Date.now() - shownAt < TRACE_SAVED_NOTE_SCROLL_GRACE_MS) return;
-    scrolled = true;
+    if (settling) {
+      stillSettling();
+      return;
+    }
+    if (scrolledAt !== null) return;
+    scrolledAt = shownFor();
     window.removeEventListener("scroll", onScroll, true);
-    stop();
-    remaining = Math.min(remaining, TRACE_SAVED_NOTE_SCROLL_DISMISS_MS);
-    run();
+    window.removeEventListener("scrollend", settled, true);
+    if (runningSince) run();
   }
   function detach() {
+    clearTimeout(settleTimer);
+    settleTimer = null;
     window.removeEventListener("scroll", onScroll, true);
+    window.removeEventListener("scrollend", settled, true);
   }
   note.addEventListener("mouseenter", function () { hovered = true; stop(); });
-  note.addEventListener("mouseleave", function () { hovered = false; run(); });
+  note.addEventListener("mouseleave", function () {
+    hovered = false;
+    run(TRACE_SAVED_NOTE_SCROLL_DISMISS_MS);
+  });
   note.addEventListener("focusin", function () { focused = true; stop(); });
   note.addEventListener("focusout", function (event) {
     if (note.contains(event.relatedTarget)) return;
     focused = false;
-    run();
+    run(TRACE_SAVED_NOTE_SCROLL_DISMISS_MS);
   });
+  if (settling) stillSettling();
   window.addEventListener("scroll", onScroll, { capture: true, passive: true });
+  window.addEventListener("scrollend", settled, { capture: true, passive: true });
   note.__traceDetach = detach;
+  whenTracePageActivates(function () { run(); });
   run();
 }
 
