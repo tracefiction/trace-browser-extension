@@ -193,9 +193,15 @@ test("sync requests a Trace token when ready and on page lifecycle events", asyn
   ]);
 });
 
+function credentialGrantRequestMessages(h) {
+  return tokenRequestMessages(h).filter(
+    (item) => item.data.reason === "credential_grant",
+  );
+}
+
 test("kernel sync accepts only a correlated explicit credential grant", async () => {
   const h = createSyncHarness("https://tracefiction.com", { sessionMode: "kernel" });
-  assert.deepEqual(tokenRequestMessages(h), []);
+  assert.deepEqual(credentialGrantRequestMessages(h), []);
   const responses = [];
 
   assert.equal(
@@ -211,7 +217,7 @@ test("kernel sync accepts only a correlated explicit credential grant", async ()
     ),
     true,
   );
-  const explicitRequests = tokenRequestMessages(h);
+  const explicitRequests = credentialGrantRequestMessages(h);
   assert.deepEqual(explicitRequests, [
     {
       data: {
@@ -254,18 +260,70 @@ test("kernel sync accepts only a correlated explicit credential grant", async ()
   assert.deepEqual(h.messages, []);
 });
 
-test("kernel sync ignores ambient token and lifecycle pushes", async () => {
+test("kernel sync asks a loaded page once whether it is signed in", async () => {
   const h = createSyncHarness("https://tracefiction.com", { sessionMode: "kernel" });
-  h.window.dispatchEvent(
-    new h.window.MessageEvent("message", {
-      data: { type: "TRACE_FICTION_TOKEN", token: "ambient-token" },
-      origin: "https://tracefiction.com",
-    }),
-  );
   h.window.dispatchEvent(new h.window.Event("pageshow"));
+  h.window.dispatchEvent(new h.window.Event("focus"));
+  await flush();
+  const requests = tokenRequestMessages(h);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].data.reason, "sync_ready");
+  assert.equal(Object.hasOwn(requests[0].data, "requestId"), false);
+  assert.deepEqual(h.messages, []);
+});
+
+test("kernel sync turns a signed-in page's own token into a content-free hint", async () => {
+  const h = createSyncHarness("https://tracefiction.com", { sessionMode: "kernel" });
+  dispatchPageMessage(h, { type: "TRACE_FICTION_TOKEN", token: null });
+  dispatchPageMessage(h, { type: "TRACE_FICTION_TOKEN", token: "   " });
+  dispatchPageMessage(h, { type: "TRACE_FICTION_TOKEN", token: "ambient-token" }, "https://evil.example");
   await flush();
   assert.deepEqual(h.messages, []);
-  assert.deepEqual(tokenRequestMessages(h), []);
+
+  dispatchPageMessage(h, { type: "TRACE_FICTION_TOKEN", token: "ambient-token" });
+  await flush();
+  assert.deepEqual(plainJson(h.messages), [{ type: "TRACE_WEB_READY" }]);
+  assert.equal(JSON.stringify(h.messages).includes("ambient-token"), false);
+});
+
+test("kernel sync asks again for a grant the page could not answer before signing in", async () => {
+  const h = createSyncHarness("https://tracefiction.com", { sessionMode: "kernel" });
+  const responses = [];
+  h.emitRuntimeMessage(
+    {
+      type: "TRACE_CREDENTIAL_GRANT_REQUEST",
+      protocolVersion: 1,
+      requestId: "grant-early",
+      purpose: "connect",
+    },
+    {},
+    (response) => responses.push(response),
+  );
+  assert.equal(credentialGrantRequestMessages(h).length, 1);
+
+  // The page finishes signing in and posts its token on its own.
+  dispatchPageMessage(h, { type: "TRACE_FICTION_TOKEN", token: "ambient-token" });
+  const repeated = credentialGrantRequestMessages(h);
+  assert.equal(repeated.length, 2);
+  assert.equal(repeated[1].data.requestId, "grant-early");
+  assert.deepEqual(responses, [], "an uncorrelated token never answers a grant");
+
+  dispatchPageMessage(h, {
+    type: "TRACE_FICTION_TOKEN",
+    token: "current-token",
+    protocolVersion: 1,
+    requestId: "grant-early",
+  });
+  assert.deepEqual(plainJson(responses), [
+    { ok: true, requestId: "grant-early", token: "current-token" },
+  ]);
+});
+
+test("legacy sync never sends the kernel readiness hint", async () => {
+  const h = createSyncHarness();
+  dispatchPageMessage(h, { type: "TRACE_FICTION_TOKEN", token: "legacy-token" });
+  await flush();
+  assert.equal(h.messages.some((message) => message.type === "TRACE_WEB_READY"), false);
 });
 
 test("sync ignores unrelated or cross-origin messages", () => {

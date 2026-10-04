@@ -490,9 +490,10 @@ test("Connect and save mutates only after current-worker verification and author
   assert.equal(response.command.projection, "published");
   assert.equal(response.command.receipt, "unavailable");
   assert.equal(response.entryId, entryId);
+  // One revision for the new connection, one for the confirmed save.
   assert.deepEqual(
     area.sets.filter((patch) => Object.hasOwn(patch, ACCOUNT_PROJECTION_REVISION_KEY)),
-    [{ [ACCOUNT_PROJECTION_REVISION_KEY]: 1 }],
+    [{ [ACCOUNT_PROJECTION_REVISION_KEY]: 1 }, { [ACCOUNT_PROJECTION_REVISION_KEY]: 2 }],
   );
   assert.deepEqual(fetches.map(({ url }) => new URL(url).pathname), [
     "/api/extension/account",
@@ -1867,4 +1868,181 @@ test("native tracking snapshot follows the current account and preserves change 
   providerAvailable = false;
   await controller.publishTrackingPreference();
   assert.equal(sent.length, 3, "Missing native provider publishes nothing");
+});
+
+const CONNECT_INTENT_KEY = "traceConnectIntentV1";
+
+function connectFlowRuntime({ area, traceTabs, creates, grants = [], platform = "mac" }) {
+  return installTestRuntime({
+    mode: "kernel",
+    runtime: {
+      onMessage: { addListener() {} },
+      async getPlatformInfo() {
+        return { os: platform };
+      },
+    },
+    tabs: {
+      async query(filter) {
+        assert.deepEqual(filter, { url: ["https://www.tracefiction.com/*"] });
+        return traceTabs();
+      },
+      async sendMessage(tabId, message) {
+        if (message.type !== "TRACE_CREDENTIAL_GRANT_REQUEST") return undefined;
+        grants.push(tabId);
+        const tab = traceTabs().find((candidate) => candidate.id === tabId);
+        return tab?.signedIn
+          ? { ok: true, requestId: message.requestId, token: "explicit-token" }
+          : { ok: false, requestId: message.requestId, token: null };
+      },
+      async create(options) {
+        creates.push(options);
+        return { id: 99, url: options.url };
+      },
+    },
+    storageArea: area,
+    storageMode: "promise",
+    fetch: async (url) => {
+      if (url.endsWith("/api/extension/account")) {
+        return new Response(JSON.stringify({ account_id: "account-a" }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        success: true,
+        data: { entries: {}, workPreferences: {}, syncVersion: "1970-01-01T00:00:00.000Z" },
+      }), { status: 200 });
+    },
+    apiBase: "https://api.tracefiction.com",
+    webOrigin: "https://www.tracefiction.com",
+    randomId: () => "id",
+  });
+}
+
+function revisions(area) {
+  return area.sets.filter((patch) => Object.hasOwn(patch, ACCOUNT_PROJECTION_REVISION_KEY));
+}
+
+test("an archive page's Connect uses a signed-in Trace tab and tells archive pages", async () => {
+  const area = new PromiseStorageArea();
+  const creates = [];
+  const controller = connectFlowRuntime({
+    area,
+    creates,
+    traceTabs: () => [{ id: 7, url: "https://www.tracefiction.com/", signedIn: true }],
+  });
+
+  const response = await controller.handle({ type: "TRACE_ARCHIVE_CONNECT" }, archiveSender);
+
+  assert.equal(response.snapshot.state, "connected");
+  assert.deepEqual(response.action, { kind: "completed", state: "connected" });
+  assert.equal(response.traceOpened, undefined);
+  assert.deepEqual(creates, [], "an open signed-in Trace tab must be used, not a new one");
+  assert.equal(revisions(area).length, 1, "archive pages re-read their state without a reload");
+  assert.equal(Object.hasOwn(area.values, CONNECT_INTENT_KEY), false);
+});
+
+test("without a signed-in Trace page, Connect opens Trace and signing in there finishes it", async () => {
+  const area = new PromiseStorageArea();
+  const creates = [];
+  let tabs = [];
+  const controller = connectFlowRuntime({ area, creates, traceTabs: () => tabs });
+
+  const response = await controller.handle({ type: "TRACE_ARCHIVE_CONNECT" }, archiveSender);
+  assert.equal(response.snapshot.state, "signed_out");
+  assert.equal(response.traceOpened, true);
+  assert.deepEqual(creates, [{ url: "https://www.tracefiction.com/" }]);
+  assert.equal(typeof area.values[CONNECT_INTENT_KEY], "number");
+
+  tabs = [{ id: 99, url: "https://www.tracefiction.com/", signedIn: true }];
+  const ready = await controller.handle({ type: "TRACE_WEB_READY" }, traceWebSender);
+  assert.equal(ready.snapshot.state, "connected");
+  assert.equal(Object.hasOwn(area.values, CONNECT_INTENT_KEY), false);
+  assert.ok(revisions(area).length >= 1);
+});
+
+test("a signed-in Trace page never connects unless the reader asked to", async () => {
+  const area = new PromiseStorageArea();
+  const creates = [];
+  const grants = [];
+  const controller = connectFlowRuntime({
+    area,
+    creates,
+    grants,
+    traceTabs: () => [{ id: 7, url: "https://www.tracefiction.com/", signedIn: true }],
+  });
+
+  const ready = await controller.handle({ type: "TRACE_WEB_READY" }, traceWebSender);
+  assert.equal(ready.snapshot.state, "signed_out");
+  assert.deepEqual(grants, [], "no credential request without a pending connect");
+
+  area.values[CONNECT_INTENT_KEY] = Date.now() + 60_000;
+  await controller.handle({ type: "TRACE_SESSION_ACTION", action: "disconnect" }, popupSender);
+  assert.equal(Object.hasOwn(area.values, CONNECT_INTENT_KEY), false, "Disconnect withdraws the request");
+  const afterDisconnect = await controller.handle({ type: "TRACE_WEB_READY" }, traceWebSender);
+  assert.equal(afterDisconnect.snapshot.state, "signed_out");
+  assert.deepEqual(grants, []);
+
+  area.values[CONNECT_INTENT_KEY] = Date.now() - 1;
+  const expired = await controller.handle({ type: "TRACE_WEB_READY" }, traceWebSender);
+  assert.equal(expired.snapshot.state, "signed_out");
+  assert.deepEqual(grants, [], "an expired request is ignored");
+});
+
+test("archive Connect and Trace readiness accept only their own senders and shapes", async () => {
+  const area = new PromiseStorageArea();
+  const creates = [];
+  const controller = connectFlowRuntime({
+    area,
+    creates,
+    traceTabs: () => [{ id: 7, url: "https://www.tracefiction.com/", signedIn: true }],
+  });
+  await controller.start();
+
+  assert.equal(await controller.handle({ type: "TRACE_ARCHIVE_CONNECT" }, traceWebSender), null);
+  assert.equal(await controller.handle({ type: "TRACE_ARCHIVE_CONNECT", action: "disconnect" }, archiveSender), null);
+  assert.equal(
+    await controller.handle({ type: "TRACE_ARCHIVE_CONNECT" }, {
+      tab: { url: "https://archiveofourown.org/users/login" },
+    }),
+    null,
+  );
+  assert.equal(await controller.handle({ type: "TRACE_WEB_READY" }, archiveSender), null);
+  assert.equal(await controller.handle({ type: "TRACE_WEB_READY", token: "x" }, traceWebSender), null);
+  assert.equal(controller.snapshot().state, "signed_out");
+  assert.deepEqual(creates, []);
+});
+
+test("on iPhone and iPad, archive Connect never opens the Trace website", async () => {
+  const area = new PromiseStorageArea();
+  const creates = [];
+  const controller = installTestRuntime({
+    mode: "kernel",
+    runtime: {
+      onMessage: { addListener() {} },
+      async getPlatformInfo() {
+        return { os: "ios" };
+      },
+      async sendNativeMessage() {
+        return { ok: false, error: "missing_token" };
+      },
+    },
+    tabs: {
+      async query() { return []; },
+      async sendMessage() { return null; },
+      async create(options) {
+        creates.push(options);
+        return { id: 99 };
+      },
+    },
+    storageArea: area,
+    storageMode: "promise",
+    fetch: async () => new Response("{}", { status: 500 }),
+    apiBase: "https://api.tracefiction.com",
+    webOrigin: "https://www.tracefiction.com",
+    randomId: () => "id",
+  });
+
+  const response = await controller.handle({ type: "TRACE_ARCHIVE_CONNECT" }, archiveSender);
+  assert.notEqual(response.snapshot.state, "connected");
+  assert.equal(response.traceOpened, undefined);
+  assert.deepEqual(creates, []);
+  assert.equal(Object.hasOwn(area.values, CONNECT_INTENT_KEY), false);
 });

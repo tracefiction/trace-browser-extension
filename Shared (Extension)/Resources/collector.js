@@ -3784,6 +3784,37 @@ function openTraceUrlInBrowserTab(url) {
   });
 }
 
+// The story page's Connect runs the popup's Connect: it uses a signed-in
+// Trace tab when one is open, otherwise the background opens Trace and
+// signing in there finishes the connection. Never used on iPhone or iPad,
+// where the Trace app links the extension.
+var storyArchiveConnectState = null; // null, "connecting", or "opened"
+var STORY_ARCHIVE_CONNECT_TIMEOUT_MS = 45_000;
+
+function storyUsesArchiveConnect() {
+  return KERNEL_SESSION_ACTIVE && !traceIsIosSafari();
+}
+
+function requestStoryArchiveConnect(workKey, onSettled) {
+  if (storyArchiveConnectState === "connecting") return;
+  storyArchiveConnectState = "connecting";
+  rerenderStoryHandleForWorkKey(workKey);
+  sendCollectorMessage({ type: "TRACE_ARCHIVE_CONNECT" }, function (response) {
+    var connected = !!(
+      response &&
+      response.snapshot &&
+      response.snapshot.state === "connected"
+    );
+    storyArchiveConnectState = !connected && response && response.traceOpened === true
+      ? "opened"
+      : null;
+    if (!response) openTraceUrlInBrowserTab(storyTraceOpenUrl(null, null));
+    if (typeof onSettled === "function") onSettled(connected);
+    rerenderStoryHandleForWorkKey(workKey);
+    if (connected) retryAutoTrackAfterLink();
+  }, STORY_ARCHIVE_CONNECT_TIMEOUT_MS);
+}
+
 function bindTraceOpenLink(link) {
   if (!link) return;
   link.addEventListener("click", function (event) {
@@ -3852,6 +3883,11 @@ function storyCaption(view) {
     }
     if (view.authState && view.authState.state === "error") {
       return "Last sync failed. Source reading stays usable.";
+    }
+    if (storyUsesArchiveConnect()) {
+      return storyArchiveConnectState === "opened"
+        ? "Sign in to Trace in the tab that opened. This page updates once you’re connected."
+        : "Connect the extension to your Trace account to save this story.";
     }
     return "Sign in to show your library lens here.";
   }
@@ -6030,6 +6066,14 @@ function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
     e.stopPropagation();
     if (btn.getAttribute("data-trace-connect-action") === "1") {
       setStoryHiddenPreferenceCheckingAction(btn);
+      if (storyUsesArchiveConnect()) {
+        requestStoryArchiveConnect(workKey, function (connected) {
+          if (!connected) {
+            setStoryHiddenPreferenceAuthAction(btn, btn.getAttribute("data-trace-connect-error") || "not_authenticated");
+          }
+        });
+        return;
+      }
       openTraceUrlInBrowserTab(storyTraceOpenUrl(null, entry));
       setTimeout(function () {
         if (btn.getAttribute("data-trace-connect-checking") === "1") {
@@ -6102,7 +6146,9 @@ function setStoryHiddenPreferenceAuthAction(btn, error) {
   var expired = error === "auth_expired";
   btn.style.cssText = storySheetPrimaryButtonCss();
   btn.textContent = expired ? "Sign in" : "Connect";
-  btn.title = expired ? "Open Trace to sign in again" : "Open Trace to connect the extension";
+  btn.title = storyUsesArchiveConnect()
+    ? "Connect the extension to your Trace account"
+    : expired ? "Open Trace to sign in again" : "Open Trace to connect the extension";
   btn.setAttribute("data-trace-connect-action", "1");
   btn.setAttribute("data-trace-connect-error", error || "not_authenticated");
   btn.removeAttribute("data-trace-connect-checking");
@@ -6233,7 +6279,24 @@ function renderStorySheet(sheet, view, workKey) {
     var connectOpen = document.createElement("a");
     connectOpen.className = "x-pbtn x-pbtn-primary";
     connectOpen.setAttribute("data-trace-open-trace", "1");
-    if (awaitingAppLink(view)) {
+    if (!awaitingAppLink(view) && storyUsesArchiveConnect() &&
+        !(view.authState && view.authState.state === "error")) {
+      connectOpen = document.createElement("button");
+      connectOpen.type = "button";
+      connectOpen.className = "x-pbtn x-pbtn-primary";
+      connectOpen.setAttribute("data-trace-story-connect", "1");
+      connectOpen.textContent = storyArchiveConnectState === "connecting"
+        ? "Connecting…"
+        : view.authState && view.authState.state === "reconnect_required"
+          ? "Reconnect"
+          : "Connect";
+      connectOpen.disabled = storyArchiveConnectState === "connecting";
+      connectOpen.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        requestStoryArchiveConnect(workKey);
+      });
+    } else if (awaitingAppLink(view)) {
       connectOpen.href = TRACE_IOS_APP_SETUP_URL;
       connectOpen.textContent = "Open Trace app";
     } else {
@@ -6243,7 +6306,7 @@ function renderStorySheet(sheet, view, workKey) {
       connectOpen.textContent = "Open Trace";
     }
     connectOpen.style.cssText = storySheetPrimaryButtonCss() + ";align-self:flex-start;margin-left:-8px";
-    bindTraceOpenLink(connectOpen);
+    if (connectOpen.tagName === "A") bindTraceOpenLink(connectOpen);
     connect.appendChild(connectTitle);
     connect.appendChild(connectCopy);
     connect.appendChild(connectOpen);
@@ -7125,6 +7188,9 @@ function renderQuickAddFromSnapshot(workKey, anchor, res) {
         info.__traceAutoTrackError === "not_authenticated")
     );
     storyAuthRecoveryNeeded = !view.hasAuth || hasEntryAuthError;
+    if (view.hasAuth && storyArchiveConnectState !== "connecting") {
+      storyArchiveConnectState = null;
+    }
 
     if (KERNEL_SESSION_ACTIVE && kernelFirstStoryLookupPending) {
       applyStoryInlineHandleState(handle, {
@@ -7820,7 +7886,13 @@ function initQuickAdd() {
         queryBackgroundWorkStateForStory(workKey);
       }
       renderQuickAddButton(workKey);
-      if ((changes.authToken || changes.traceAuthState || changes[TRACE_ACCOUNT_ID_KEY]) && !document.hidden) {
+      if (
+        (changes.authToken ||
+          changes.traceAuthState ||
+          changes[TRACE_ACCOUNT_ID_KEY] ||
+          (KERNEL_SESSION_ACTIVE && changes[ACCOUNT_PROJECTION_REVISION_KEY])) &&
+        !document.hidden
+      ) {
         retryAutoTrackAfterLink();
       }
     });

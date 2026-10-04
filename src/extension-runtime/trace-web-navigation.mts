@@ -170,6 +170,11 @@ export function installTraceFirstInstallActivation(options: {
   tabs: TabsPort;
   mode: "callback" | "promise";
   webOrigin: string;
+  /**
+   * Starts as the setup page opens. The reader may sign in there, or
+   * anywhere else on the Trace site, after the page has loaded.
+   */
+  onActivation?: () => Promise<void> | void;
 }): void {
   const target = activationTarget(options.webOrigin);
   if (!target || !options.runtime.onInstalled) return;
@@ -178,6 +183,12 @@ export function installTraceFirstInstallActivation(options: {
     if (details.reason !== "install") return;
     void (async () => {
       if (await platformIsIos(options.runtime, options.mode)) return;
+      // Started, not awaited: opening the setup page never waits on storage.
+      try {
+        void Promise.resolve(options.onActivation?.()).catch(() => undefined);
+      } catch {
+        // Opening the setup page matters more than remembering the request.
+      }
 
       try {
         const tabs = await extensionCall<readonly unknown[]>(

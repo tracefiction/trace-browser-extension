@@ -1606,6 +1606,12 @@ function createStoryAutoTrackPendingHarness(options = {}) {
       },
       sendMessage(msg, cb) {
         sent.push(msg);
+        if (
+          typeof options.onSendMessage === "function" &&
+          options.onSendMessage(msg, cb) === true
+        ) {
+          return;
+        }
         if (msg.type === "TRACE_WORK_STATE_GET") {
           if (options.holdWorkStateRead) {
             deferredWorkStateRead = cb;
@@ -7579,4 +7585,76 @@ test("finish band work-status choices are words in B2 cells, never status dots",
   assert.notEqual(band.getAttribute("role"), "alert");
   assert.match(band.getAttribute("style") || "", /--trace-page-surface:\s*#FFFFFF/i);
   assert.doesNotMatch(band.getAttribute("style") || "", /rgb\(255,\s*253,\s*248\)|Geist|Manrope/);
+});
+
+test("kernel story Connect runs the extension's connect, then the story can be saved", async () => {
+  let state = "signed_out";
+  const harness = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    projectionResponse: () => ({
+      ok: true,
+      snapshot: { state, reason: "none", canExecuteAuthenticated: state === "connected" },
+      projection: { entries: {}, workPreferences: {}, syncVersion: null },
+    }),
+    onSendMessage(msg, cb) {
+      if (msg.type !== "TRACE_ARCHIVE_CONNECT") return false;
+      state = "connected";
+      setTimeout(() => cb({
+        ok: true,
+        snapshot: { state, reason: "none", canExecuteAuthenticated: true },
+        action: { kind: "completed", state: "connected" },
+      }), 5);
+      return true;
+    },
+  });
+  const document = harness.dom.window.document;
+  await delay(30);
+  const handle = document.querySelector("[data-trace-story-handle]");
+  assert.match(handle.textContent || "", /Connect/);
+  handle.click();
+  await delay(20);
+  const connect = document.querySelector("[data-trace-story-connect]");
+  assert.ok(connect, "the story sheet offers Connect, not only a Trace link");
+  assert.equal(connect.tagName, "BUTTON");
+  assert.equal(connect.textContent, "Connect");
+  connect.click();
+  assert.deepEqual(
+    plainJson(harness.sent.filter((msg) => msg.type === "TRACE_ARCHIVE_CONNECT")),
+    [{ type: "TRACE_ARCHIVE_CONNECT" }],
+  );
+  await delay(60);
+  assert.match(handle.textContent || "", /Add to Trace/i);
+  handle.click();
+  assert.equal(harness.sent.at(-1).type, "TRACE_QUICK_ADD");
+});
+
+test("kernel story Connect says where to sign in when it opened Trace", async () => {
+  const harness = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    projectionResponse: () => ({
+      ok: true,
+      snapshot: { state: "signed_out", reason: "none", canExecuteAuthenticated: false },
+      projection: { entries: {}, workPreferences: {}, syncVersion: null },
+    }),
+    onSendMessage(msg, cb) {
+      if (msg.type !== "TRACE_ARCHIVE_CONNECT") return false;
+      setTimeout(() => cb({
+        ok: true,
+        snapshot: { state: "signed_out", reason: "provider_unavailable", canExecuteAuthenticated: false },
+        action: { kind: "unavailable" },
+        traceOpened: true,
+      }), 5);
+      return true;
+    },
+  });
+  const document = harness.dom.window.document;
+  await delay(30);
+  document.querySelector("[data-trace-story-handle]").click();
+  await delay(20);
+  document.querySelector("[data-trace-story-connect]").click();
+  await delay(60);
+  const sheet = document.querySelector("[data-trace-story-sheet]");
+  assert.match(sheet.textContent || "", /Sign in to Trace in the tab that opened/);
 });

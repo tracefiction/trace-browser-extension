@@ -2813,3 +2813,87 @@ test("library-overlay FFN fallback quick-add includes desktop listing summary", 
   assert.equal(sentPayload.item.ctx, "listing");
   assert.match(sentPayload.item.sm || "", /abandoned at a young age/i);
 });
+
+function kernelConnectListing({ connectResponse, userAgent }) {
+  let state = "signed_out";
+  const messages = [];
+  return renderOverlayListing({
+    sessionMode: "kernel",
+    userAgent,
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/77790'>Connect Work</a></h4></li></ol></body></html>",
+    cache: { entries: {}, workPreferences: {}, syncVersion: "v-empty" },
+    authToken: null,
+    sendMessage(msg, cb) {
+      messages.push(msg);
+      if (msg.type === "TRACE_ACCOUNT_PROJECTION_GET") {
+        cb({
+          ok: true,
+          snapshot: { state, reason: "none", canExecuteAuthenticated: state === "connected" },
+          projection: { entries: {}, workPreferences: {}, syncVersion: "v-empty" },
+        });
+        return;
+      }
+      if (msg.type === "TRACE_ARCHIVE_CONNECT") {
+        const response = connectResponse();
+        state = response.snapshot.state;
+        setTimeout(() => cb(response), 5);
+        return;
+      }
+      if (typeof cb === "function") cb({ ok: true });
+    },
+  }).then((window) => ({ window, messages }));
+}
+
+test("kernel notice Connect runs the extension's connect and updates in place", async () => {
+  const { window, messages } = await kernelConnectListing({
+    connectResponse: () => ({
+      ok: true,
+      snapshot: { state: "connected", reason: "none", canExecuteAuthenticated: true },
+      action: { kind: "completed", state: "connected" },
+    }),
+  });
+  const cta = window.document.querySelector("[data-trace-connect-notice-cta]");
+  assert.equal(cta.textContent, "Connect");
+  assert.doesNotMatch(
+    window.document.querySelector("[data-trace-connect-notice-message]").textContent,
+    /refresh/i,
+  );
+
+  const click = new window.MouseEvent("click", { bubbles: true, cancelable: true });
+  cta.dispatchEvent(click);
+  assert.equal(click.defaultPrevented, true, "Connect must not just open a Trace link");
+  assert.deepEqual(
+    plainJson(messages.filter((message) => message.type === "TRACE_ARCHIVE_CONNECT")),
+    [{ type: "TRACE_ARCHIVE_CONNECT" }],
+  );
+  await sleep(150);
+  assert.equal(window.document.querySelector("[data-trace-connect-notice]"), null);
+  assert.ok(window.document.querySelector("button[data-trace-quick-add]"));
+});
+
+test("kernel notice explains where to sign in when Connect opened Trace", async () => {
+  const { window } = await kernelConnectListing({
+    connectResponse: () => ({
+      ok: true,
+      snapshot: { state: "signed_out", reason: "provider_unavailable", canExecuteAuthenticated: false },
+      action: { kind: "unavailable" },
+      traceOpened: true,
+    }),
+  });
+  window.document.querySelector("[data-trace-connect-notice-cta]").click();
+  await sleep(150);
+  const message = window.document.querySelector("[data-trace-connect-notice-message]");
+  assert.match(message.textContent, /Sign in to Trace in the tab that opened/);
+  assert.equal(window.document.querySelector("[data-trace-connect-notice-cta]").textContent, "Connect");
+});
+
+test("on iPhone the kernel notice still points to the Trace app, not the connect flow", async () => {
+  const { window, messages } = await kernelConnectListing({
+    userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+    connectResponse: () => assert.fail("iPhone must not run the browser connect"),
+  });
+  const cta = window.document.querySelector("[data-trace-connect-notice-cta]");
+  assert.equal(cta.getAttribute("href"), "traceauth://open?destination=extension-connect");
+  assert.equal(messages.some((message) => message.type === "TRACE_ARCHIVE_CONNECT"), false);
+});

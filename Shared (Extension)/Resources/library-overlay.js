@@ -35,6 +35,8 @@
   var listingViewportFrame = null;
   var listingLiveAnnouncementTimer = null;
   var listingActionSurfacePending = false;
+  // null, "connecting", or "opened" (Trace opened so the reader can sign in).
+  var archiveConnectState = null;
 
   function runWhenTraceEarnedPermissionReady(start) {
     if (
@@ -150,6 +152,49 @@
       });
     } catch {
       /* The background worker handles Trace tab creation when available. */
+    }
+  }
+
+  // Runs the popup's Connect from this page. It uses a signed-in Trace tab
+  // when one is open; otherwise the background opens Trace, and signing in
+  // there finishes the connection. The page re-reads its state either way.
+  function usesArchiveConnect() {
+    return KERNEL_SESSION_ACTIVE && !isIosSafari();
+  }
+
+  function requestArchiveConnect(onSettled) {
+    if (archiveConnectState === "connecting") return;
+    archiveConnectState = "connecting";
+    scheduleRun(0);
+    var settled = false;
+    var finish = function (response) {
+      if (settled) return;
+      settled = true;
+      var connected = !!(
+        response &&
+        response.snapshot &&
+        response.snapshot.state === "connected"
+      );
+      archiveConnectState = !connected && response && response.traceOpened === true
+        ? "opened"
+        : null;
+      if (!response) openTraceUrlInBrowserTab(traceOpenUrl());
+      if (typeof onSettled === "function") onSettled(connected);
+      projectionRetryAttempt = 0;
+      scheduleRun(0);
+    };
+    try {
+      var pending = ext.runtime.sendMessage(
+        { type: "TRACE_ARCHIVE_CONNECT" },
+        function (response) {
+          finish(ext.runtime.lastError ? null : response);
+        },
+      );
+      if (pending && typeof pending.then === "function") {
+        pending.then(finish, function () { finish(null); });
+      }
+    } catch (_) {
+      finish(null);
     }
   }
 
@@ -912,9 +957,15 @@ function traceRefreshPageTokens() {
         : state === "error"
           ? "Check Trace connection"
           : "Connect Trace";
+    var connectFlow = usesArchiveConnect() && state !== "error";
     var message =
       (authState && authState.message) ||
-      "Open Trace and sign in once to connect the extension. Then refresh this AO3 or FFN tab to restore sync.";
+      (connectFlow
+        ? "Connect the extension to your Trace account to see your library here and save stories."
+        : "Open Trace and sign in once to connect the extension. Then refresh this AO3 or FFN tab to restore sync.");
+    if (connectFlow && archiveConnectState === "opened") {
+      message = "Sign in to Trace in the tab that opened. This page updates once you’re connected.";
+    }
     if (appLink) {
       heading = "Finish setup in the Trace app";
       message = "Open Trace and finish Safari setup there, signing in first if asked. Then come back; nothing has been saved yet.";
@@ -1019,10 +1070,28 @@ function traceRefreshPageTokens() {
     existing.querySelector("[data-trace-connect-notice-heading]").style.color = TRACE_D1.ink;
     existing.querySelector("[data-trace-connect-notice-message]").textContent = message;
     var ctaEl = existing.querySelector("[data-trace-connect-notice-cta]");
+    ctaEl.onclick = null;
+    ctaEl.removeAttribute("aria-disabled");
     if (appLink) {
       ctaEl.href = "traceauth://open?destination=extension-connect";
       ctaEl.removeAttribute("target");
       ctaEl.textContent = "Open Trace app";
+    } else if (connectFlow) {
+      // The link still opens Trace if the extension cannot answer.
+      ctaEl.href = helpUrl;
+      ctaEl.target = "_blank";
+      ctaEl.textContent =
+        archiveConnectState === "connecting"
+          ? "Connecting…"
+          : state === "reconnect_required"
+            ? "Reconnect"
+            : "Connect";
+      if (archiveConnectState === "connecting") ctaEl.setAttribute("aria-disabled", "true");
+      ctaEl.onclick = function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        requestArchiveConnect();
+      };
     } else {
       ctaEl.href = helpUrl;
       ctaEl.target = "_blank";
@@ -3273,6 +3342,14 @@ function traceRefreshPageTokens() {
       e.stopPropagation();
       if (btn.getAttribute("data-trace-connect-action") === "1") {
         setPreferenceCheckingAction(btn);
+        if (usesArchiveConnect()) {
+          requestArchiveConnect(function (connected) {
+            if (!connected) {
+              setPreferenceAuthAction(btn, btn.getAttribute("data-trace-connect-error") || "not_authenticated");
+            }
+          });
+          return;
+        }
         openTraceUrlInBrowserTab(traceOpenUrl());
         scheduleRun(350);
         setTimeout(function () {
@@ -3367,7 +3444,9 @@ function traceRefreshPageTokens() {
     var expired = error === "auth_expired";
     btn.style.cssText = preferenceButtonStyle(btn, null) + ";cursor:pointer;color:" + TRACE_D1.forest;
     btn.textContent = expired ? "Sign in" : "Connect";
-    btn.title = expired ? "Open Trace to sign in again" : "Open Trace to connect the extension";
+    btn.title = usesArchiveConnect()
+      ? "Connect the extension to your Trace account"
+      : expired ? "Open Trace to sign in again" : "Open Trace to connect the extension";
     btn.setAttribute("data-trace-connect-action", "1");
     btn.setAttribute("data-trace-connect-error", error || "not_authenticated");
     btn.removeAttribute("data-trace-connect-checking");
@@ -3609,6 +3688,14 @@ function traceRefreshPageTokens() {
 
       if (btn.getAttribute("data-trace-connect-action") === "1") {
         setQuickAddCheckingAction(btn);
+        if (usesArchiveConnect()) {
+          requestArchiveConnect(function (connected) {
+            if (!connected) {
+              setQuickAddAuthAction(btn, btn.getAttribute("data-trace-connect-error") || "not_authenticated");
+            }
+          });
+          return;
+        }
         window.open(traceOpenUrl(), "_blank", "noopener,noreferrer");
         scheduleRun(350);
         setTimeout(function () {
@@ -3707,7 +3794,9 @@ function traceRefreshPageTokens() {
     var expired = error === "auth_expired";
     btn.style.cssText = d1QuickAddStyle("add") + ";cursor:pointer";
     btn.textContent = expired ? "Sign in" : "Connect";
-    btn.title = expired ? "Open Trace to sign in again" : "Open Trace to connect the extension";
+    btn.title = usesArchiveConnect()
+      ? "Connect the extension to your Trace account"
+      : expired ? "Open Trace to sign in again" : "Open Trace to connect the extension";
     btn.setAttribute("data-trace-connect-action", "1");
     btn.setAttribute("data-trace-connect-error", error || "not_authenticated");
     btn.removeAttribute("data-trace-connect-checking");
@@ -4023,6 +4112,8 @@ function traceRefreshPageTokens() {
     currentTraceAuthState = (res && res.traceAuthState) || null;
     if (!authStateAllowsActions(currentTraceAuthState, hasAuth)) {
       confirmedQuickAddEntries.clear();
+    } else if (archiveConnectState !== "connecting") {
+      archiveConnectState = null;
     }
     if (isSingleWorkPage()) {
       removeConnectNotice();
