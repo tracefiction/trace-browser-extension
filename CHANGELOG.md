@@ -12,6 +12,11 @@ iPhone app, and its notes go with each app release.
 - **No refresh needed.** Open AO3 and FanFiction.net tabs update as soon as the extension connects or disconnects.
 - **Signing in after installing always connects.** Before, the extension connected only if you signed in on the exact setup page it opened. Now signing in anywhere on Trace within 30 minutes of installing connects it.
 
+### On the page
+
+- **The saved note gets out of the way.** The note that confirms a save now leaves on its own about four seconds after it appears, or about a second after you start scrolling. It waits while you point at it or use its buttons, and it still has its close button. With Reduce Motion on, it disappears without fading.
+- **The page keeps scrolling with a story's Trace panel open.** The panel opens next to the story and scrolls with the page. It closes when you click elsewhere, press Escape, or scroll the story out of view. On phones, the bottom sheet is unchanged.
+
 ## 0.7.0
 
 This is the first Chrome Web Store and Firefox Add-ons release since 0.5.14, published in July 2026.
