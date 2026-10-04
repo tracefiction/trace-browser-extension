@@ -14,7 +14,8 @@ iPhone app, and its notes go with each app release.
 
 ### On the page
 
-- **The saved note gets out of the way.** The note that confirms a save now leaves on its own about four seconds after it appears, or about a second after you start scrolling. It waits while you point at it or use its buttons, and it still has its close button. With Reduce Motion on, it disappears without fading.
+- **The saved note gets out of the way, after you've had time to read it.** The note that confirms a save stays for at least three seconds. After that it leaves about a second after you start scrolling, or at five seconds if you don't scroll. Scrolling that was already under way when it appeared doesn't count. It waits while you point at it or use its buttons, and it still has its close button. With Reduce Motion on, it disappears without fading.
+- **Moving to the next chapter in Chrome updates your progress straight away.** AO3 asks Chrome to load the next chapter ahead of time. Trace missed that chapter until you switched tabs and came back; it now records it as soon as you open it.
 - **The page keeps scrolling with a story's Trace panel open.** The panel opens next to the story and scrolls with the page. It closes when you click elsewhere, press Escape, or scroll the story out of view. On phones, the bottom sheet is unchanged.
 
 ## 0.7.0
