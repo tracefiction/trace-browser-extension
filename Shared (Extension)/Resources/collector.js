@@ -3847,7 +3847,10 @@ var TRACE_IOS_APP_SETUP_URL = "traceauth://open?destination=extension-connect";
 
 function traceIsIosSafari() {
   try {
-    return /iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+    var ua = navigator.userAgent || "";
+    // iPadOS Safari reports a Mac user agent; only touch tells them apart.
+    return /iPhone|iPad|iPod/i.test(ua) ||
+      (/Macintosh/i.test(ua) && (navigator.maxTouchPoints || 0) > 1);
   } catch (_) {
     return false;
   }
@@ -4267,13 +4270,26 @@ function scheduleStorySheetPosition() {
   });
 }
 
+// The page keeps scrolling under the popover; once its handle has scrolled
+// fully out of view the popover closes.
+function storySheetAnchorScroll() {
+  var sheet = document.querySelector("[" + TRACE_STORY_SHEET_ATTR + "]");
+  if (!sheet || sheet.getAttribute("data-trace-open") !== "1") return;
+  if (sheet.getAttribute("data-trace-story-sheet-placement") !== "popover") return;
+  var handle = document.querySelector("[" + TRACE_STORY_HANDLE_ATTR + "]");
+  if (!handle || !handle.getBoundingClientRect) return;
+  var rect = handle.getBoundingClientRect();
+  var height = window.innerHeight || document.documentElement.clientHeight || 0;
+  if (rect.bottom <= 0 || (height > 0 && rect.top >= height)) requestStorySheetClose(sheet);
+}
+
 function addStorySheetModalListeners() {
   document.addEventListener("click", storySheetOutsideClick, true);
   document.addEventListener("keydown", storySheetKeydown, true);
   window.addEventListener("resize", scheduleStorySheetPosition);
+  window.addEventListener("scroll", storySheetAnchorScroll, { passive: true });
   if (window.visualViewport) {
     window.visualViewport.addEventListener("resize", scheduleStorySheetPosition);
-    window.visualViewport.addEventListener("scroll", scheduleStorySheetPosition);
   }
 }
 
@@ -4281,9 +4297,9 @@ function removeStorySheetModalListeners() {
   document.removeEventListener("click", storySheetOutsideClick, true);
   document.removeEventListener("keydown", storySheetKeydown, true);
   window.removeEventListener("resize", scheduleStorySheetPosition);
+  window.removeEventListener("scroll", storySheetAnchorScroll, { passive: true });
   if (window.visualViewport) {
     window.visualViewport.removeEventListener("resize", scheduleStorySheetPosition);
-    window.visualViewport.removeEventListener("scroll", scheduleStorySheetPosition);
   }
 }
 
@@ -4292,14 +4308,17 @@ function applySheetVisibility(sheet, open) {
   var wasOpen = sheet.getAttribute("data-trace-open") === "1";
   var handle = document.querySelector("[" + TRACE_STORY_HANDLE_ATTR + "]");
   if (open) {
+    // Only the phone bottom sheet is modal. The desktop popover leaves the
+    // page scrollable and interactive.
+    var bottomSheet = sheet.getAttribute("data-trace-story-sheet-placement") === "bottom";
     sheet.style.display = "block";
     sheet.setAttribute("aria-hidden", "false");
-    sheet.setAttribute("aria-modal", "true");
+    sheet.setAttribute("aria-modal", bottomSheet ? "true" : "false");
     sheet.setAttribute("data-trace-open", "1");
     setStoryHandleDialogTrigger(handle, sheet, true);
     if (!wasOpen) {
       storySheetOpener = handle || document.activeElement;
-      lockStoryBottomSheetPageScroll();
+      if (bottomSheet) lockStoryBottomSheetPageScroll();
       addStorySheetModalListeners();
     }
     if (sheet.getAttribute("data-trace-story-sheet-placement") === "popover") {
@@ -4571,8 +4590,10 @@ function storySheetCss(mobile) {
       "padding-bottom:env(safe-area-inset-bottom,0px)",
     ].concat(base).join(";");
   }
+  // The desktop popover sits in the document beside its handle and scrolls
+  // with the page; it never fixes itself to the viewport.
   return [
-    "position:fixed",
+    "position:absolute",
     "margin:0",
     "max-width:360px",
     "text-align:left",
@@ -4626,8 +4647,9 @@ function positionDesktopStorySheet(sheet, handle) {
     Math.min(left, viewport.left + viewport.width - panelWidth - margin),
   );
 
-  sheet.style.left = Math.round(left) + "px";
-  sheet.style.top = Math.round(top) + "px";
+  // Viewport coordinates become document coordinates for an absolute popover.
+  sheet.style.left = Math.round(left + (window.scrollX || 0)) + "px";
+  sheet.style.top = Math.round(top + (window.scrollY || 0)) + "px";
   sheet.style.right = "auto";
   sheet.style.bottom = "auto";
   sheet.setAttribute("data-trace-popover-side", side);
@@ -7348,7 +7370,12 @@ function scheduleKernelProjectionRetry(workKey, attempt) {
 // takes focus, and is announced politely. Progress updates never show it.
 // -------------------------------------------------------
 var TRACE_SAVED_NOTE_ATTR = "data-trace-saved-note";
-var TRACE_SAVED_NOTE_VISIBLE_MS = 15000;
+var TRACE_SAVED_NOTE_VISIBLE_MS = 4000;
+// Once the reader scrolls, the note leaves about a second later.
+var TRACE_SAVED_NOTE_SCROLL_DISMISS_MS = 1000;
+// Scrolls this soon after the note appears are the page settling (for
+// example scroll restoration), not the reader moving on.
+var TRACE_SAVED_NOTE_SCROLL_GRACE_MS = 300;
 var TRACE_SAVED_NOTE_FIRST_KEY = "traceSavedNoteFirstStoryShownV1";
 var TRACE_CHAPTER_KEPT_COUNT_KEY = "traceChapterKeptNotesShownV1";
 var chapterKeptState = { workKey: null, lastChapter: null, shown: false, pending: false, n2Shown: false };
@@ -7397,18 +7424,7 @@ function showChapterKeptNote(workKey, chapter) {
     if (!note.isConnected || !storySavedNoteHost || !storySavedNoteHost.isConnected) storySavedNoteMount(note);
   }, 400);
   revealStoryPageNote(note);
-  var remaining = 4000;
-  var started = Date.now();
-  var schedule = function () {
-    started = Date.now();
-    note.__traceHideTimer = setTimeout(function () { removeStorySavedNote(false); }, remaining);
-  };
-  note.addEventListener("focusin", function () {
-    if (note.__traceHideTimer) clearTimeout(note.__traceHideTimer);
-    remaining = Math.max(0, remaining - (Date.now() - started));
-  });
-  note.addEventListener("focusout", function (event) { if (!note.contains(event.relatedTarget)) schedule(); });
-  schedule();
+  scheduleStoryNoteAutoDismiss(note, TRACE_SAVED_NOTE_VISIBLE_MS);
   return true;
 }
 
@@ -7532,13 +7548,14 @@ function removeStorySavedNote(immediate) {
   }
   if (note.__traceHideTimer) clearTimeout(note.__traceHideTimer);
   if (note.__traceKeepTimer) clearInterval(note.__traceKeepTimer);
-  if (immediate) {
+  if (typeof note.__traceDetach === "function") note.__traceDetach();
+  // Reduce Motion hides the note at once, without a fade.
+  if (immediate || storySavedNoteReducedMotion()) {
     note.remove();
     return;
   }
-  // Reduce Motion keeps the fade and drops the movement.
   note.style.opacity = "0";
-  if (!storySavedNoteReducedMotion()) note.style.transform = "translateY(8px)";
+  note.style.transform = "translateY(8px)";
   setTimeout(function () { note.remove(); }, 350);
 
 }
@@ -7601,7 +7618,7 @@ function createStoryPageNote(kind, title, chapter, reduced) {
     // Visible without waiting for a frame; the entry animation is layered on.
     "opacity:1",
     "transform:none",
-    "transition:" + (reduced ? "opacity .2s ease" : "opacity .35s ease,transform .35s ease"),
+    reduced ? "" : "transition:opacity .35s ease,transform .35s ease",
   ].filter(Boolean).join(";");
   var mark = document.createElement("span");
   mark.setAttribute("aria-hidden", "true");
@@ -7671,18 +7688,16 @@ function applyStoryNoteLayout(note) {
   return stacked;
 }
 
-// Enter: rise 14 px and fade over 0.4 s; Reduce Motion fades only. The Web
-// Animations API runs without a JS frame callback, and the note's resting
+// Enter: rise 14 px and fade over 0.4 s; Reduce Motion shows it at once. The
+// Web Animations API runs without a JS frame callback, and the note's resting
 // style is already visible if animation is unavailable.
 function revealStoryPageNote(note) {
   if (!note || typeof note.animate !== "function") return;
-  var reduced = storySavedNoteReducedMotion();
+  if (storySavedNoteReducedMotion()) return;
   try {
     note.animate(
-      reduced
-        ? [{ opacity: 0 }, { opacity: 1 }]
-        : [{ opacity: 0, transform: "translateY(14px)" }, { opacity: 1, transform: "none" }],
-      { duration: reduced ? 200 : 400, easing: "ease-out" },
+      [{ opacity: 0, transform: "translateY(14px)" }, { opacity: 1, transform: "none" }],
+      { duration: 400, easing: "ease-out" },
     );
   } catch (_) {
     /* visible either way */
@@ -7695,7 +7710,9 @@ function showStorySavedNote(workKey, entry, remainingMs) {
   if (finishBandVisible()) return;
   removeStorySavedNote(true);
   var continued = typeof remainingMs === "number";
-  var visibleMs = continued ? Math.max(3000, remainingMs) : TRACE_SAVED_NOTE_VISIBLE_MS;
+  var visibleMs = continued
+    ? Math.min(TRACE_SAVED_NOTE_VISIBLE_MS, Math.max(1500, remainingMs))
+    : TRACE_SAVED_NOTE_VISIBLE_MS;
   if (!continued) {
     writeSavedNoteMarker({ workKey: workKey, until: Date.now() + visibleMs, dismissed: false });
   }
@@ -7743,21 +7760,60 @@ function showStorySavedNote(workKey, entry, remainingMs) {
     }
   }, 400);
   revealStoryPageNote(note);
-  var remaining = visibleMs;
+  scheduleStoryNoteAutoDismiss(note, visibleMs);
+}
+
+// A page note leaves on its own: after its visible time, or about a second
+// after the reader starts scrolling, whichever comes first. Hovering or
+// focusing it pauses the countdown so its buttons stay usable.
+function scheduleStoryNoteAutoDismiss(note, visibleMs) {
+  var remaining = Math.max(0, visibleMs);
   var started = Date.now();
-  var scheduleHide = function () {
-    if (note.__traceHideTimer) clearTimeout(note.__traceHideTimer);
-    started = Date.now();
-    note.__traceHideTimer = setTimeout(function () { removeStorySavedNote(false); }, remaining);
-  };
-  note.addEventListener("focusin", function () {
-    if (note.__traceHideTimer) clearTimeout(note.__traceHideTimer);
+  var shownAt = started;
+  var hovered = false;
+  var focused = false;
+  var scrolled = false;
+  function stop() {
+    if (!note.__traceHideTimer) return;
+    clearTimeout(note.__traceHideTimer);
+    note.__traceHideTimer = null;
     remaining = Math.max(0, remaining - (Date.now() - started));
-  });
+  }
+  function run() {
+    stop();
+    if (hovered || focused) return;
+    started = Date.now();
+    note.__traceHideTimer = setTimeout(function () {
+      note.__traceHideTimer = null;
+      if (activeStorySavedNote === note) removeStorySavedNote(false);
+    }, remaining);
+  }
+  function onScroll() {
+    if (activeStorySavedNote !== note) {
+      detach();
+      return;
+    }
+    if (scrolled || Date.now() - shownAt < TRACE_SAVED_NOTE_SCROLL_GRACE_MS) return;
+    scrolled = true;
+    window.removeEventListener("scroll", onScroll, true);
+    stop();
+    remaining = Math.min(remaining, TRACE_SAVED_NOTE_SCROLL_DISMISS_MS);
+    run();
+  }
+  function detach() {
+    window.removeEventListener("scroll", onScroll, true);
+  }
+  note.addEventListener("mouseenter", function () { hovered = true; stop(); });
+  note.addEventListener("mouseleave", function () { hovered = false; run(); });
+  note.addEventListener("focusin", function () { focused = true; stop(); });
   note.addEventListener("focusout", function (event) {
-    if (!note.contains(event.relatedTarget)) scheduleHide();
+    if (note.contains(event.relatedTarget)) return;
+    focused = false;
+    run();
   });
-  scheduleHide();
+  window.addEventListener("scroll", onScroll, { capture: true, passive: true });
+  note.__traceDetach = detach;
+  run();
 }
 
 function renderQuickAddButton(workKey, projectionAttempt) {

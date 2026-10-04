@@ -489,10 +489,15 @@ try {
 // A page that signed in before this script loaded has already posted its
 // token. Ask once, so a signed-in page says so again; a signed-out page has
 // nothing to answer. The reply only triggers the readiness hint above.
-if (
-  KERNEL_SESSION_ACTIVE &&
-  !/iPhone|iPad|iPod/i.test((globalThis.navigator && globalThis.navigator.userAgent) || "")
-) {
+function isAppleMobileBrowser() {
+  const nav = globalThis.navigator || {};
+  const ua = nav.userAgent || "";
+  // iPadOS Safari reports a Mac user agent; only touch tells them apart.
+  return /iPhone|iPad|iPod/i.test(ua) ||
+    (/Macintosh/i.test(ua) && (nav.maxTouchPoints || 0) > 1);
+}
+
+if (KERNEL_SESSION_ACTIVE && !isAppleMobileBrowser()) {
   requestTraceToken("sync_ready");
 }
 

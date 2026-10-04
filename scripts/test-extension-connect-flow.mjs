@@ -242,8 +242,11 @@ try {
   if (process.env.TRACE_CONNECT_FLOW_SKIP_BUILD !== "1") buildKernel(origin);
 
   userDataDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "trace-connect-chrome-"));
+  // Full Chromium's new headless mode loads extensions, so the run stays off
+  // screen. TRACE_CONNECT_FLOW_HEADED=1 shows the browser for debugging.
   context = await chromium.launchPersistentContext(userDataDirectory, {
-    headless: false,
+    channel: "chromium",
+    headless: process.env.TRACE_CONNECT_FLOW_HEADED !== "1",
     serviceWorkers: "allow",
     args: [
       `--disable-extensions-except=${DIST}`,

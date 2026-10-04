@@ -878,7 +878,10 @@ function traceRefreshPageTokens() {
 
   function isIosSafari() {
     try {
-      return /iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+      var ua = navigator.userAgent || "";
+      // iPadOS Safari reports a Mac user agent; only touch tells them apart.
+      return /iPhone|iPad|iPod/i.test(ua) ||
+        (/Macintosh/i.test(ua) && (navigator.maxTouchPoints || 0) > 1);
     } catch (_) {
       return false;
     }
@@ -2231,8 +2234,9 @@ function traceRefreshPageTokens() {
       viewport.left + margin,
       Math.min(left, viewport.left + viewport.width - surfaceWidth - margin),
     );
-    surface.style.top = Math.round(top) + "px";
-    surface.style.left = Math.round(left) + "px";
+    // Viewport coordinates become document coordinates for an absolute popover.
+    surface.style.top = Math.round(top + (window.scrollY || 0)) + "px";
+    surface.style.left = Math.round(left + (window.scrollX || 0)) + "px";
     surface.style.right = "auto";
     surface.style.bottom = "auto";
     surface.setAttribute("data-trace-popover-side", side);
@@ -2251,19 +2255,31 @@ function traceRefreshPageTokens() {
     });
   }
 
+  // The page keeps scrolling under the popover; once its lens has scrolled
+  // fully out of view the popover closes.
+  function listingSurfaceAnchorScroll() {
+    var surface = document.querySelector("[" + ACTION_SURFACE_ATTR + "]");
+    if (!surface || surface.getAttribute("data-trace-action-surface-placement") !== "popover") return;
+    var trigger = listingActionSurfaceTrigger;
+    if (!trigger || !trigger.getBoundingClientRect) return;
+    var rect = trigger.getBoundingClientRect();
+    var height = window.innerHeight || document.documentElement.clientHeight || 0;
+    if (rect.bottom <= 0 || (height > 0 && rect.top >= height)) requestCloseListingActionSurface();
+  }
+
   function addListingViewportListeners() {
     window.addEventListener("resize", scheduleListingSurfacePosition);
+    window.addEventListener("scroll", listingSurfaceAnchorScroll, { passive: true });
     if (window.visualViewport) {
       window.visualViewport.addEventListener("resize", scheduleListingSurfacePosition);
-      window.visualViewport.addEventListener("scroll", scheduleListingSurfacePosition);
     }
   }
 
   function removeListingViewportListeners() {
     window.removeEventListener("resize", scheduleListingSurfacePosition);
+    window.removeEventListener("scroll", listingSurfaceAnchorScroll, { passive: true });
     if (window.visualViewport) {
       window.visualViewport.removeEventListener("resize", scheduleListingSurfacePosition);
-      window.visualViewport.removeEventListener("scroll", scheduleListingSurfacePosition);
     }
   }
 
@@ -2995,7 +3011,6 @@ function traceRefreshPageTokens() {
     surface.setAttribute(ACTION_SURFACE_ATTR, "1");
     surface.setAttribute("data-trace-action-surface-key", workKey);
     surface.setAttribute("role", "dialog");
-    surface.setAttribute("aria-modal", "true");
     surface.setAttribute("aria-labelledby", "trace-listing-sheet-title");
     surface.setAttribute("aria-describedby", "trace-listing-sheet-description");
     if (inheritedPending || (entry && entry.__traceStatusPending)) {
@@ -3007,8 +3022,11 @@ function traceRefreshPageTokens() {
 
     var mobile = isCompactOverlayLayout();
     surface.setAttribute("data-trace-action-surface-placement", mobile ? "bottom" : "popover");
+    // Only the phone bottom sheet is modal. The desktop popover sits in the
+    // document beside its lens and scrolls with the page.
+    surface.setAttribute("aria-modal", mobile ? "true" : "false");
     var css = [
-      "position:fixed",
+      mobile ? "position:fixed" : "position:absolute",
       "z-index:2147483647",
       "box-sizing:border-box",
       "display:block",
@@ -3184,8 +3202,8 @@ function traceRefreshPageTokens() {
     trigger.setAttribute("aria-haspopup", "dialog");
     trigger.setAttribute("aria-controls", ACTION_SURFACE_ID);
     trigger.setAttribute("aria-expanded", "true");
-    lockListingBottomSheetPageScroll();
-    if (!mobile) positionDesktopListingSurface(surface, trigger);
+    if (mobile) lockListingBottomSheetPageScroll();
+    else positionDesktopListingSurface(surface, trigger);
     addListingViewportListeners();
     setTimeout(function () {
       if (!surface.isConnected) return;

@@ -58,6 +58,7 @@ async function renderOverlayListing({
   sessionMode = "legacy",
   earnedPermissionComplete,
   userAgent,
+  maxTouchPoints,
   beforeEval,
 }) {
   const keysSrc = fs.readFileSync(KEYS_PATH, "utf8");
@@ -71,6 +72,9 @@ async function renderOverlayListing({
   const { window } = dom;
   if (userAgent) {
     Object.defineProperty(window.navigator, "userAgent", { value: userAgent, configurable: true });
+  }
+  if (typeof maxTouchPoints === "number") {
+    Object.defineProperty(window.navigator, "maxTouchPoints", { value: maxTouchPoints, configurable: true });
   }
   const storageChangeListeners = [];
   const runtimeMessages = [];
@@ -1056,7 +1060,7 @@ test("library-overlay opened surface shows status editing only when entryId exis
   });
 
   const surface = openTraceLens(withEntryId).surface;
-  assert.match(surface.getAttribute("style") || "", /position:\s*fixed/i);
+  assert.match(surface.getAttribute("style") || "", /position:\s*absolute/i);
   assert.match(surface.getAttribute("style") || "", /max-height:\s*\d+px/i);
   const header = surface.querySelector("[data-trace-management-header]");
   assert.ok(header);
@@ -1188,8 +1192,9 @@ test("library-overlay bottom sheet removes drag recovery motion when reduced mot
   assert.equal(surface.style.transform, "");
 });
 
-test("library-overlay action surface contains focus and restores the archive after close", async () => {
+test("library-overlay bottom sheet contains focus and restores the archive after close", async () => {
   const window = await renderOverlayListing({
+    mobile: true,
     html:
       "<!doctype html><html><body style='position:relative'><a id='before' href='#before'>Before</a><ol><li class='work blurb group'><h4 class='heading'><a href='/works/77890'>Accessible Work</a></h4></li></ol></body></html>",
     cache: {
@@ -1260,6 +1265,63 @@ test("library-overlay action surface contains focus and restores the archive aft
   const outsideDispatched = window.document.body.dispatchEvent(outsideClick);
   assert.equal(outsideDispatched, false);
   assert.equal(outsideClick.defaultPrevented, true);
+  assert.equal(window.document.querySelector("[data-trace-action-surface]"), null);
+});
+
+test("library-overlay desktop popover scrolls with the page and closes when its lens leaves view", async () => {
+  const window = await renderOverlayListing({
+    html:
+      "<!doctype html><html><body><a id='before' href='#before'>Before</a><ol><li class='work blurb group'><h4 class='heading'><a href='/works/77895'>Scrolling Work</a></h4></li></ol></body></html>",
+    cache: {
+      entries: {
+        "ao3:77895": {
+          status: "READING",
+          readerStatus: "READING",
+          entryId: "entry-scrolling-popover",
+          chapters: { current: 4, total: 12 },
+        },
+      },
+      syncVersion: "v-scrolling-popover",
+    },
+  });
+  Object.defineProperty(window, "innerWidth", { value: 1000, configurable: true });
+  Object.defineProperty(window, "innerHeight", { value: 700, configurable: true });
+  Object.defineProperty(window, "scrollY", { value: 900, configurable: true });
+  let lensTop = 100;
+  const lens = window.document.querySelector("[data-trace-library-lens]");
+  lens.getBoundingClientRect = () => ({
+    top: lensTop, bottom: lensTop + 30, left: 40, right: 120, width: 80, height: 30,
+  });
+  lens.focus();
+  const { surface } = openTraceLens(window);
+  await sleep(20);
+
+  assert.equal(surface.getAttribute("data-trace-action-surface-placement"), "popover");
+  assert.equal(surface.getAttribute("aria-modal"), "false");
+  assert.match(surface.getAttribute("style") || "", /position:\s*absolute/i);
+  assert.equal(surface.style.top, "1038px", "placed in document coordinates below the lens");
+  assert.equal(window.document.body.hasAttribute("inert"), false);
+  assert.equal(window.document.body.style.overflow, "");
+  assert.equal(window.document.documentElement.style.overflow, "");
+  assert.ok(surface.contains(window.document.activeElement), "focus moves into the popover");
+
+  // Scrolling while the lens is still visible keeps it open.
+  lensTop = -20;
+  window.dispatchEvent(new window.Event("scroll"));
+  assert.ok(window.document.querySelector("[data-trace-action-surface]"));
+
+  // Scrolling the lens fully out of view closes it.
+  lensTop = -40;
+  window.dispatchEvent(new window.Event("scroll"));
+  assert.equal(window.document.querySelector("[data-trace-action-surface]"), null);
+  assert.equal(lens.getAttribute("aria-expanded"), "false");
+  assert.equal(window.document.activeElement, lens);
+
+  // Escape closes it too.
+  lensTop = 100;
+  openTraceLens(window);
+  await sleep(20);
+  window.document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
   assert.equal(window.document.querySelector("[data-trace-action-surface]"), null);
 });
 
@@ -1359,7 +1421,7 @@ test("library-overlay keeps a pending mutation open and announces its result", a
   const refreshedPendingSurface = window.document.querySelector("[data-trace-action-surface]");
   assert.ok(refreshedPendingSurface);
   assert.equal(refreshedPendingSurface.getAttribute("data-trace-modal-pending"), "1");
-  assert.equal(window.document.body.hasAttribute("inert"), true);
+  assert.equal(window.document.body.hasAttribute("inert"), false, "the desktop popover never locks the page");
 
   pendingCallback({ ok: true, status: "FINISHED" });
   await sleep(30);
@@ -1462,8 +1524,8 @@ test("library-overlay lens click toggles same surface and switches to another le
   assert.match(surface.textContent || "", /Paused/i);
   assert.equal(lenses[0].getAttribute("aria-expanded"), "false");
   assert.equal(lenses[1].getAttribute("aria-expanded"), "true");
-  assert.equal(window.document.body.style.position, "fixed");
-  assert.equal(window.document.body.style.top, "-280px");
+  assert.equal(window.document.body.style.position, "", "the desktop popover never locks page scrolling");
+  assert.equal(window.document.body.style.top, "");
   assert.deepEqual(restoredScroll, []);
 });
 
@@ -2814,12 +2876,13 @@ test("library-overlay FFN fallback quick-add includes desktop listing summary", 
   assert.match(sentPayload.item.sm || "", /abandoned at a young age/i);
 });
 
-function kernelConnectListing({ connectResponse, userAgent }) {
+function kernelConnectListing({ connectResponse, userAgent, maxTouchPoints }) {
   let state = "signed_out";
   const messages = [];
   return renderOverlayListing({
     sessionMode: "kernel",
     userAgent,
+    maxTouchPoints,
     html:
       "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/77790'>Connect Work</a></h4></li></ol></body></html>",
     cache: { entries: {}, workPreferences: {}, syncVersion: "v-empty" },
@@ -2896,4 +2959,29 @@ test("on iPhone the kernel notice still points to the Trace app, not the connect
   const cta = window.document.querySelector("[data-trace-connect-notice-cta]");
   assert.equal(cta.getAttribute("href"), "traceauth://open?destination=extension-connect");
   assert.equal(messages.some((message) => message.type === "TRACE_ARCHIVE_CONNECT"), false);
+});
+
+const MAC_SAFARI_USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
+
+test("on iPad, which reports a Mac user agent, the kernel notice still points to the Trace app", async () => {
+  const { window, messages } = await kernelConnectListing({
+    userAgent: MAC_SAFARI_USER_AGENT,
+    maxTouchPoints: 5,
+    connectResponse: () => assert.fail("iPad must not run the browser connect"),
+  });
+  const cta = window.document.querySelector("[data-trace-connect-notice-cta]");
+  assert.equal(cta.getAttribute("href"), "traceauth://open?destination=extension-connect");
+  assert.equal(messages.some((message) => message.type === "TRACE_ARCHIVE_CONNECT"), false);
+});
+
+test("on a Mac without touch the kernel notice runs the browser connect", async () => {
+  const { window } = await kernelConnectListing({
+    userAgent: MAC_SAFARI_USER_AGENT,
+    maxTouchPoints: 0,
+    connectResponse: () => ({ ok: true, snapshot: { state: "signed_out" }, traceOpened: true }),
+  });
+  const cta = window.document.querySelector("[data-trace-connect-notice-cta]");
+  assert.notEqual(cta.getAttribute("href"), "traceauth://open?destination=extension-connect");
+  assert.equal(cta.textContent, "Connect");
 });

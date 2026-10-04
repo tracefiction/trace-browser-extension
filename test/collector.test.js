@@ -2659,6 +2659,61 @@ test("saved note is still shown three seconds after it appears", async () => {
   assert.notEqual(note.style.opacity, "0");
 });
 
+async function showSavedNote(options = {}) {
+  const { h, state } = savedNoteHarness(false);
+  if (options.reducedMotion) {
+    h.dom.window.matchMedia = (query) => ({
+      matches: String(query).includes("prefers-reduced-motion"),
+      media: String(query),
+      addListener() {},
+      removeListener() {},
+      addEventListener() {},
+      removeEventListener() {},
+    });
+  }
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  state.confirmed = true;
+  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  const host = h.dom.window.document.querySelector("trace-saved-note");
+  assert.ok(host);
+  const note = host.__traceShadow.querySelector("[data-trace-saved-note]");
+  assert.ok(note);
+  return { h, host, note };
+}
+
+test("saved note leaves on its own about four seconds after it appears", async () => {
+  const { h, host, note } = await showSavedNote({ reducedMotion: true });
+  assert.equal(note.style.transition, "", "reduced motion has no fade");
+  await new Promise((resolve) => setTimeout(resolve, 3600));
+  assert.ok(host.__traceShadow.querySelector("[data-trace-saved-note]"));
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  assert.equal(host.__traceShadow.querySelector("[data-trace-saved-note]"), null, "reduced motion hides it at once");
+  h.dom.window.close();
+});
+
+test("saved note leaves about a second after scrolling, and waits while hovered or focused", async () => {
+  const { h, host, note } = await showSavedNote();
+  const present = () => host.__traceShadow.querySelector("[data-trace-saved-note]") !== null;
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  note.dispatchEvent(new h.dom.window.MouseEvent("mouseenter"));
+  h.dom.window.dispatchEvent(new h.dom.window.Event("scroll"));
+  await new Promise((resolve) => setTimeout(resolve, 1300));
+  assert.ok(present(), "hovering keeps the note");
+  note.dispatchEvent(new h.dom.window.MouseEvent("mouseleave"));
+  const details = note.querySelector("button");
+  details.dispatchEvent(new h.dom.window.FocusEvent("focusin", { bubbles: true }));
+  await new Promise((resolve) => setTimeout(resolve, 1300));
+  assert.ok(present(), "focus keeps the note");
+  details.dispatchEvent(new h.dom.window.FocusEvent("focusout", { bubbles: true, relatedTarget: null }));
+  await new Promise((resolve) => setTimeout(resolve, 1150));
+  assert.equal(note.style.opacity, "0", "it fades a second after the reader moves on");
+  assert.ok(note.querySelector("button[aria-label='Dismiss']"), "the close button stays");
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(present(), false);
+  h.dom.window.close();
+});
+
 test("saved note is shown for the first saved story only", async () => {
   const first = savedNoteHarness(false);
   await new Promise((resolve) => setTimeout(resolve, 180));
@@ -3144,7 +3199,7 @@ test("AO3 story places compact Trace handle centered below title and byline", ()
   assert.ok(sheet);
   assert.equal(sheet.parentElement, dom.window.document.documentElement);
   assert.equal(sheet.getAttribute("data-trace-story-sheet-placement"), "popover");
-  assert.match(sheet.getAttribute("style") || "", /position:\s*fixed/i);
+  assert.match(sheet.getAttribute("style") || "", /position:\s*absolute/i);
   assert.match(sheet.getAttribute("style") || "", /top:/i);
   assert.match(sheet.getAttribute("style") || "", /left:/i);
   assert.match(sheet.getAttribute("style") || "", /bottom:\s*auto/i);
@@ -3318,8 +3373,8 @@ function createStorySheetModalHarness(options = {}) {
   return { dom, entry };
 }
 
-test("story sheet contains focus and restores the archive after Escape or outside click", async () => {
-  const { dom } = createStorySheetModalHarness();
+test("story bottom sheet contains focus and restores the archive after Escape or outside click", async () => {
+  const { dom } = createStorySheetModalHarness({ mobile: true });
   Object.defineProperty(dom.window, "scrollX", { value: 8, configurable: true });
   Object.defineProperty(dom.window, "scrollY", { value: 360, configurable: true });
   const restoredScroll = [];
@@ -3392,7 +3447,7 @@ test("story sheet contains focus and restores the archive after Escape or outsid
 });
 
 test("story sheet teardown restores the host page when its anchor disappears", async () => {
-  const { dom } = createStorySheetModalHarness();
+  const { dom } = createStorySheetModalHarness({ mobile: true });
   const handle = dom.window.document.querySelector("[data-trace-story-handle]");
   handle.click();
   await delay(20);
@@ -3405,6 +3460,53 @@ test("story sheet teardown restores the host page when its anchor disappears", a
   assert.equal(dom.window.document.body.hasAttribute("inert"), false);
   assert.equal(dom.window.document.body.style.position, "relative");
   assert.equal(dom.window.document.documentElement.style.overflow, "");
+});
+
+test("story desktop popover scrolls with the page and closes when its handle leaves view", async () => {
+  const { dom } = createStorySheetModalHarness();
+  Object.defineProperty(dom.window, "innerWidth", { value: 1000, configurable: true });
+  Object.defineProperty(dom.window, "innerHeight", { value: 700, configurable: true });
+  Object.defineProperty(dom.window, "scrollY", { value: 600, configurable: true });
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+  let handleTop = 100;
+  handle.getBoundingClientRect = () => ({
+    top: handleTop, bottom: handleTop + 30, left: 460, right: 540, width: 80, height: 30,
+  });
+  handle.focus();
+  handle.click();
+  await delay(20);
+
+  assert.equal(sheet.getAttribute("data-trace-story-sheet-placement"), "popover");
+  assert.equal(sheet.getAttribute("aria-modal"), "false");
+  assert.match(sheet.getAttribute("style") || "", /position:\s*absolute/i);
+  assert.equal(sheet.style.top, "738px", "placed in document coordinates below the handle");
+  const body = dom.window.document.body;
+  assert.equal(body.hasAttribute("inert"), false);
+  assert.equal(body.style.overflow, "");
+  assert.equal(body.style.position, "relative");
+  assert.equal(dom.window.document.documentElement.style.overflow, "");
+  assert.ok(sheet.contains(dom.window.document.activeElement), "focus moves into the popover");
+
+  handleTop = -10;
+  dom.window.dispatchEvent(new dom.window.Event("scroll"));
+  assert.equal(sheet.getAttribute("aria-hidden"), "false", "a partly visible handle keeps it open");
+
+  handleTop = 720;
+  dom.window.dispatchEvent(new dom.window.Event("scroll"));
+  assert.equal(sheet.getAttribute("aria-hidden"), "true");
+  assert.equal(handle.getAttribute("aria-expanded"), "false");
+  assert.equal(dom.window.document.activeElement, handle);
+
+  handleTop = 100;
+  handle.click();
+  await delay(20);
+  dom.window.document.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  assert.equal(sheet.getAttribute("aria-hidden"), "true");
+  handle.click();
+  await delay(20);
+  dom.window.document.body.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  assert.equal(sheet.getAttribute("aria-hidden"), "true");
 });
 
 test("story desktop popover chooses the visible side of its trigger", () => {
