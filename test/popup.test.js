@@ -2672,3 +2672,60 @@ test("popup selects FanFiction.net first when both grants are missing on that ta
     activeTab: { id: 7, url: "https://www.fanfiction.net/s/123/1" } });
   await flush(); assert.equal(h.document.getElementById("popup-host-access-allow").textContent, "Allow Trace on FanFiction.net");
 });
+
+for (const promiseRuntime of [false, true]) {
+  test(`permission tab asks on its own click, survives denial/error, and closes only after a confirmed grant (${promiseRuntime})`, async () => {
+    const directory = path.dirname(POPUP_HTML_PATH);
+    const dom = new JSDOM(fs.readFileSync(path.join(directory, "archive-access.html"), "utf8"), {
+      url: "moz-extension://trace-test/archive-access.html?site=ao3&returnTab=12", runScripts: "outside-only",
+    });
+    const win = dom.window;
+    let granted = false, decision = false, requested = 0;
+    const messages = [], removed = [];
+    const origins = ["https://archiveofourown.org/*"];
+    const response = () => ({ ok: true, access: [{ site: "ao3", label: "AO3", origins, granted }] });
+    const wrap = fn => (...args) => {
+      const callback = promiseRuntime ? null : args.pop();
+      try {
+        const value = fn(...args);
+        if (callback) { callback(value); return; }
+        return Promise.resolve(value);
+      } catch (error) {
+        if (!callback) return Promise.reject(error);
+        api.runtime.lastError = { message: error.message }; callback(); delete api.runtime.lastError;
+      }
+    };
+    const api = {
+      runtime: { onMessage: { addListener() {} }, sendMessage: wrap(message => {
+        messages.push(message.type);
+        return message.type === "TRACE_ARCHIVE_HOST_ACCESS_FINISH" ? { ok: granted } : response();
+      }) },
+      permissions: { request: wrap(permission => {
+        requested++;
+        assert.deepEqual(Array.from(permission.origins), origins);
+        if (decision === "error") throw Error("request failed");
+        granted = decision;
+        return granted;
+      }) },
+      tabs: { getCurrent: wrap(() => ({ id: 99 })), remove: wrap(id => removed.push(id)) },
+    };
+    win[promiseRuntime ? "browser" : "chrome"] = api;
+    win.eval(fs.readFileSync(path.join(directory, "archive-access-client.js"), "utf8"));
+    win.eval(fs.readFileSync(path.join(directory, "archive-access.js"), "utf8"));
+    await flush();
+    const button = win.document.getElementById("archive-access-allow");
+    assert.equal(requested, 0, "opening a tab never prompts automatically");
+    button.click(); assert.equal(requested, 1, "request starts synchronously in the click"); await flush();
+    assert.equal(button.disabled, false);
+    assert.match(win.document.getElementById("archive-access-result").textContent, /still off/);
+    assert.deepEqual(removed, []);
+    decision = "error"; button.click(); await flush();
+    assert.equal(button.disabled, false);
+    assert.match(win.document.getElementById("archive-access-result").textContent, /Try again/);
+    assert.deepEqual(removed, []);
+    decision = true; button.click(); await flush();
+    assert.deepEqual(removed, [99]);
+    assert.ok(messages.includes("TRACE_ARCHIVE_HOST_ACCESS_FINISH"));
+    dom.window.close();
+  });
+}

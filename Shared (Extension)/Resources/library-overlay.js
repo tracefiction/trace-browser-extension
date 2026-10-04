@@ -1084,22 +1084,33 @@ function traceRefreshPageTokens() {
     var ctaEl = existing.querySelector("[data-trace-connect-notice-cta]");
     ctaEl.onclick = null;
     ctaEl.removeAttribute("aria-disabled");
-    var accessFrame = existing.querySelector("[data-trace-host-access-control]");
-    ctaEl.hidden = !!missingAccess;
-    ctaEl.style.display = missingAccess ? "none" : "inline-flex";
+    ctaEl.hidden = false;
+    ctaEl.style.display = "inline-flex";
     if (missingAccess) {
-      if (!accessFrame) {
-        accessFrame = document.createElement("iframe");
-        accessFrame.setAttribute("data-trace-host-access-control", "1");
-        accessFrame.title = "Allow Trace on " + archiveHostAccess.label;
-        accessFrame.src = ext.runtime.getURL("archive-access.html") + "?site=" + archiveHostAccess.site;
-        accessFrame.style.cssText = "display:block;border:0;width:100%;height:90px;background:transparent";
-        existing.appendChild(accessFrame);
-      }
-    } else if (accessFrame) accessFrame.remove();
-    if (missingAccess) {
-      ctaEl.removeAttribute("href");
-      ctaEl.textContent = "";
+      ctaEl.href = "#";
+      ctaEl.removeAttribute("target");
+      ctaEl.textContent = "Allow Trace on " + archiveHostAccess.label;
+      ctaEl.onclick = function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (ctaEl.getAttribute("aria-disabled") === "true") return;
+        ctaEl.setAttribute("aria-disabled", "true");
+        var settled = false;
+        var finish = function (response) {
+          if (settled) return;
+          settled = true;
+          ctaEl.removeAttribute("aria-disabled");
+          existing.querySelector("[data-trace-connect-notice-message]").textContent = response && response.ok
+            ? "In the Trace tab, click Allow to confirm site access. This page updates when access is allowed."
+            : "The site access tab could not open. Try Allow again or open the Trace toolbar popup.";
+        };
+        try {
+          var pending = ext.runtime.sendMessage({ type: "TRACE_ARCHIVE_HOST_ACCESS_OPEN" }, function (response) {
+            finish(ext.runtime.lastError ? null : response);
+          });
+          if (pending && typeof pending.then === "function") pending.then(finish, function () { finish(null); });
+        } catch (_) { finish(null); }
+      };
     } else if (appLink) {
       ctaEl.href = "traceauth://open?destination=extension-connect";
       ctaEl.removeAttribute("target");

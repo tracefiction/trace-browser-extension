@@ -3,12 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Allow site access — Trace</title>
+  <link rel="stylesheet" href="popup.css">
   <link rel="stylesheet" href="archive-access.css">
   <script src="archive-access-client.js"></script>
   <script src="archive-access.js" defer></script>
 </head>
 <body>
-  <button id="archive-access-allow" type="button" disabled>Checking site access…</button>
-  <p id="archive-access-result" role="status" aria-live="polite"></p>
+  <main class="popup archive-access-page">
+    <header class="popup-brand"><p class="popup-brand-name">Trace</p></header>
+    <section class="popup-host-access" aria-labelledby="archive-access-heading">
+      <h1 id="archive-access-heading" class="popup-status">Allow site access</h1>
+      <p class="popup-lead">Allow Trace to save stories and keep your place on this site. Your browser will ask you to confirm. Then this tab closes and you return to your story.</p>
+      <button id="archive-access-allow" class="popup-cta" data-emphasis="primary" type="button" disabled>Checking site access…</button>
+      <p id="archive-access-result" class="popup-lead" role="status" aria-live="polite"></p>
+    </section>
+  </main>
 </body>
 </html>

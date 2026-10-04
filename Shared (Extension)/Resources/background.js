@@ -325,7 +325,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     const call = (target, method, args) => extensionCall(target, method, args, runtime, mode);
     const isUi = (sender) => {
       if (sender.id !== runtime.id) return false;
-      return !sender.tab && sender.url === runtime.getURL?.("popup.html") || sender.url?.split("?")[0] === runtime.getURL?.("archive-access.html");
+      return !sender.tab && sender.url === runtime.getURL?.("popup.html") || sender.frameId === 0 && sender.tab?.url === sender.url && sender.url?.split("?")[0] === runtime.getURL?.("archive-access.html");
     };
     const siteFor = (sender) => {
       if (sender.id !== runtime.id) return null;
@@ -368,6 +368,36 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     };
     runtime.onMessage.addListener((raw, sender, respond) => {
       const type = raw?.type;
+      if (type === "TRACE_ARCHIVE_HOST_ACCESS_OPEN") {
+        const site2 = siteFor(sender);
+        if (!site2 || !Number.isInteger(sender.tab?.id)) {
+          respond({ ok: false });
+          return;
+        }
+        void call(tabs, "create", [{ url: `${runtime.getURL?.("archive-access.html")}?site=${site2}&returnTab=${sender.tab.id}` }]).then(
+          () => respond({ ok: true }),
+          () => respond({ ok: false })
+        );
+        return true;
+      }
+      if (type === "TRACE_ARCHIVE_HOST_ACCESS_FINISH") {
+        if (!isUi(sender) || !sender.tab || !sender.url) {
+          respond({ ok: false });
+          return;
+        }
+        const parameters = new URL(sender.url).searchParams;
+        const site2 = parameters.get("site");
+        const returnTab = Number(parameters.get("returnTab"));
+        void refresh().then(async (access) => {
+          if (!access.some((item) => item.site === site2 && item.granted === true)) return { ok: false };
+          await recover();
+          const openTabs = await call(tabs, "query", [{}]);
+          const target = openTabs.find((tab) => tab.id === returnTab && siteFor({ id: runtime.id, tab, frameId: 0 }) === site2);
+          if (target && tabs.update) await call(tabs, "update", [target.id, { active: true }]);
+          return { ok: true };
+        }).then(respond, () => respond({ ok: false }));
+        return true;
+      }
       if (type !== "TRACE_ARCHIVE_HOST_ACCESS_GET" && type !== "TRACE_ARCHIVE_HOST_ACCESS_REFRESH") return;
       const ui = isUi(sender);
       const site = siteFor(sender);

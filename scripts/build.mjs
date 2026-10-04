@@ -281,10 +281,6 @@ function browserStoreManifest(baseManifest, browserHostPermissions) {
   const safariOnlyPermissions = new Set(SAFARI_ONLY_PERMISSIONS);
   return {
     ...baseManifest,
-    web_accessible_resources: [{
-      resources: ["archive-access.html"],
-      matches: SITE_HOST_MATCHES,
-    }],
     host_permissions: browserHostPermissions,
     permissions: unique(
       (baseManifest.permissions || []).filter(

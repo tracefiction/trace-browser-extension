@@ -1,13 +1,22 @@
 (() => {
-  const site = new URL(location.href).searchParams.get("site");
+  const parameters = new URL(location.href).searchParams;
+  const site = parameters.get("site");
   const button = document.getElementById("archive-access-allow");
   const result = document.getElementById("archive-access-result");
   let access = null;
   let requesting = false;
+  let finishing = false;
+  const finish = () => {
+    if (!parameters.has("returnTab") || finishing) return;
+    finishing = true;
+    const stayOpen = () => { result.textContent = "Site access is allowed. You can close this tab and return to your story."; };
+    TraceArchiveAccess.finish().then(closed => { if (!closed) stayOpen(); }, stayOpen);
+  };
   const render = items => {
     access = items?.find(item => item.site === site) ?? null;
     button.disabled = requesting || !access || access.granted !== false;
     button.textContent = access?.granted === true ? "Site access allowed" : `Allow Trace on ${site === "ffn" ? "FanFiction.net" : "AO3"}`;
+    if (access?.granted === true && !requesting) finish();
   };
   TraceArchiveAccess.onChanged(render);
   TraceArchiveAccess.read().then(response => render(response?.access), () => { result.textContent = "Open the Trace toolbar popup to check site access."; });

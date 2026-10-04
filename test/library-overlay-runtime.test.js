@@ -3006,10 +3006,16 @@ for (const [site, label, url, fixture] of [
     assert.ok(notice);
     assert.equal(notice.querySelector("[data-trace-connect-notice-heading]").textContent, "Site access is off");
     assert.match(notice.textContent, /without opening the toolbar popup each time/);
-    assert.equal(notice.querySelector("[data-trace-connect-notice-cta]").hidden, true);
-    const frame = notice.querySelector("iframe");
-    assert.equal(frame.title, `Allow Trace on ${label}`);
-    assert.equal(frame.src, `moz-extension://trace-test/archive-access.html?site=${site}`);
+    const cta = notice.querySelector("[data-trace-connect-notice-cta]");
+    assert.equal(cta.hidden, false);
+    assert.equal(cta.textContent, `Allow Trace on ${label}`);
+    assert.equal(cta.style.minHeight, "44px");
+    assert.equal(cta.style.background, "transparent");
+    assert.equal(notice.querySelector("iframe"), null);
+    cta.click();
+    await sleep(10);
+    assert.equal(cta.hasAttribute("aria-disabled"), false);
+    assert.match(notice.textContent, /Try Allow again|In the Trace tab/);
     win.__traceEmitRuntime({ type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED", access: [{ ...access, granted: true }] });
     assert.equal(win.document.querySelector("[data-trace-connect-notice]"), null);
     win.close();
@@ -3019,6 +3025,6 @@ test("a story page can show the same host-access notice without a listing or acc
   const win = await renderOverlayListing({ html: '<html><body><h1>Story</h1></body></html>',
     url: "https://archiveofourown.org/works/123", sessionMode: "kernel",
     hostAccess: { site: "ao3", label: "AO3", granted: false } });
-  assert.ok(win.document.querySelector("[data-trace-host-access-control]"));
+  assert.equal(win.document.querySelector("[data-trace-connect-notice-cta]").textContent, "Allow Trace on AO3");
   win.close();
 });

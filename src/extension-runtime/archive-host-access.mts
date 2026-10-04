@@ -28,7 +28,8 @@ export function installArchiveHostAccess(environment: Environment): (() => Promi
   const isUi = (sender: RuntimeMessageSender) => {
     if (sender.id !== runtime.id) return false;
     return (!sender.tab && sender.url === runtime.getURL?.("popup.html")) ||
-      sender.url?.split("?")[0] === runtime.getURL?.("archive-access.html");
+      (sender.frameId === 0 && sender.tab?.url === sender.url &&
+        sender.url?.split("?")[0] === runtime.getURL?.("archive-access.html"));
   };
   const siteFor = (sender: RuntimeMessageSender): Site | null => {
     if (sender.id !== runtime.id) return null;
@@ -71,6 +72,31 @@ export function installArchiveHostAccess(environment: Environment): (() => Promi
   };
   runtime.onMessage.addListener((raw, sender, respond) => {
     const type = (raw as { type?: unknown } | null)?.type;
+    if (type === "TRACE_ARCHIVE_HOST_ACCESS_OPEN") {
+      const site = siteFor(sender);
+      if (!site || !Number.isInteger(sender.tab?.id)) { respond({ ok: false }); return; }
+      // A Firefox extension iframe on a web page has no permissions API.
+      // Open privileged UI; its own click will request access without a hop.
+      void call(tabs, "create", [{ url: `${runtime.getURL?.("archive-access.html")}?site=${site}&returnTab=${sender.tab!.id}` }]).then(
+        () => respond({ ok: true }), () => respond({ ok: false }),
+      );
+      return true;
+    }
+    if (type === "TRACE_ARCHIVE_HOST_ACCESS_FINISH") {
+      if (!isUi(sender) || !sender.tab || !sender.url) { respond({ ok: false }); return; }
+      const parameters = new URL(sender.url).searchParams;
+      const site = parameters.get("site");
+      const returnTab = Number(parameters.get("returnTab"));
+      void refresh().then(async access => {
+        if (!access.some(item => item.site === site && item.granted === true)) return { ok: false };
+        await recover();
+        const openTabs = await call<readonly BrowserTab[]>(tabs, "query", [{}]);
+        const target = openTabs.find(tab => tab.id === returnTab && siteFor({ id: runtime.id!, tab, frameId: 0 }) === site);
+        if (target && tabs.update) await call(tabs, "update", [target.id, { active: true }]);
+        return { ok: true };
+      }).then(respond, () => respond({ ok: false }));
+      return true;
+    }
     if (type !== "TRACE_ARCHIVE_HOST_ACCESS_GET" && type !== "TRACE_ARCHIVE_HOST_ACCESS_REFRESH") return;
     const ui = isUi(sender);
     const site = siteFor(sender);

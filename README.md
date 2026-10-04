@@ -245,6 +245,26 @@ app project. The extension sources under `Shared (Extension)/`, plus the iOS
 and macOS extension property lists and entitlements, are consumed at a pinned
 revision by the private Apple client.
 
+### Restoring archive site access
+
+On Firefox, installation or connection to your Trace account does not guarantee
+that AO3/FanFiction.net host access is granted. Trace checks the declared archive
+hosts with `permissions.contains` on install/update, startup, permission changes,
+and popup opening. If access is off, the popup and already-running page notices
+show an Allow action. The popup requests access directly from its click handler.
+
+The notice opens a small bundled extension tab, whose own Allow button requests
+only that archive's declared hosts. Firefox gives a web-accessible extension
+iframe embedded in an HTTP(S) page a restricted API set without
+`browser.permissions`; requesting there fails before a prompt can appear. A
+background message from a page click also does not preserve the permission API's
+required user gesture. The extension tab supplies both the privileged context
+and a direct click. After Firefox confirms access, Trace restores scripts on
+supported open archive pages, returns to the originating tab if it is still on
+that archive, and closes the permission tab. Declining leaves a retryable button.
+No additional hosts or collected data are introduced. Safari keeps its existing
+Website Access flow.
+
 ## Repo Layout
 
 - `src/background.js` - source for the extension service worker. The build injects configured Trace origins and writes `Shared (Extension)/Resources/background.js`.

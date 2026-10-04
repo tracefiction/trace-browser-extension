@@ -8,7 +8,7 @@ const hosts = [...AO3, ...FFN, "https://www.tracefiction.com/*", "https://api.tr
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 function harness(mode, scheme = "moz-extension", contains = () => false) {
-  const events = {}, listeners = [], checked = [], pushed = [];
+  const events = {}, listeners = [], checked = [], pushed = [], created = [], activated = [];
   let recovered = 0;
   const api = fn => (...args) => {
     const callback = mode === "callback" ? args.pop() : null;
@@ -37,7 +37,7 @@ function harness(mode, scheme = "moz-extension", contains = () => false) {
       { id: 3, url: "https://archiveofourown.org/users/login" },
       { id: 4, url: "https://www.tracefiction.com/" },
       { id: 5, url: "https://ao3.org/works/123" },
-    ]), sendMessage: api((id, message, options) => pushed.push({ id, message, options })) },
+    ]), create: api(options => created.push(options)), update: api((id, options) => activated.push({ id, options })), sendMessage: api((id, message, options) => pushed.push({ id, message, options })) },
     recover: async () => { recovered++; },
   });
   const popup = { id: runtime.id, url: runtime.getURL("popup.html") };
@@ -45,7 +45,7 @@ function harness(mode, scheme = "moz-extension", contains = () => false) {
     const result = listeners[0]({ type, origins: ["https://evil.test/*"] }, sender, resolve);
     if (result !== true) resolve(undefined);
   });
-  return { runtime, events, checked, pushed, refresh, send, popup, get recovered() { return recovered; } };
+  return { runtime, events, checked, pushed, created, activated, refresh, send, popup, get recovered() { return recovered; } };
 }
 
 test("permission groups contain only the archive hosts declared by this package", () => {
@@ -86,9 +86,34 @@ for (const mode of ["promise", "callback"]) {
       { ...h.popup, url: h.runtime.getURL("options.html") },
     ]) assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_GET", sender)).ok, false);
     assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_REFRESH", archive)).ok, false);
-    const frame = { ...h.popup, url: h.runtime.getURL("archive-access.html") + "?site=ao3", tab: archive.tab, frameId: 2 };
-    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_GET", frame)).ok, true);
-    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_REFRESH", frame)).ok, true);
+    const url = h.runtime.getURL("archive-access.html") + "?site=ao3&returnTab=1";
+    const frame = { ...h.popup, url, tab: archive.tab, frameId: 2 };
+    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_GET", frame)).ok, false);
+    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_REFRESH", frame)).ok, false);
+    const page = { ...frame, tab: { id: 6, url }, frameId: 0 };
+    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_GET", page)).ok, true);
+    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_REFRESH", page)).ok, true);
+  });
+  test(`notice opens only sender-bound archive UI; return requires a real grant (${mode})`, async () => {
+    let granted = false;
+    const h = harness(mode, "moz-extension", () => granted);
+    const archive = { id: h.runtime.id, url: "https://archiveofourown.org/works/123", tab: { id: 1, url: "https://archiveofourown.org/works/123" }, frameId: 0 };
+    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_OPEN", archive)).ok, true);
+    assert.deepEqual(h.created, [{ url: h.runtime.getURL("archive-access.html") + "?site=ao3&returnTab=1" }]);
+    for (const sender of [h.popup, { ...archive, frameId: 2 }, { ...archive, id: "other" }, { ...archive, tab: { id: 1, url: "https://archiveofourown.org/users/login" } }]) {
+      assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_OPEN", sender)).ok, false);
+      assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_FINISH", sender)).ok, false);
+    }
+    const url = h.created[0].url;
+    const page = { id: h.runtime.id, url, tab: { id: 6, url }, frameId: 0 };
+    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_FINISH", page)).ok, false);
+    assert.equal(h.activated.length, 0);
+    granted = true;
+    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_FINISH", page)).ok, true);
+    assert.deepEqual(h.activated, [{ id: 1, options: { active: true } }]);
+    const otherUrl = url.replace("returnTab=1", "returnTab=4");
+    assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_FINISH", { ...page, url: otherUrl, tab: { id: 6, url: otherUrl } })).ok, true);
+    assert.equal(h.activated.length, 1, "never focus a non-archive tab");
   });
   test(`permission read errors remain unknown, never a false grant or denial (${mode})`, async () => {
     const h = harness(mode, "moz-extension", () => { throw Error("unavailable"); });

@@ -24,5 +24,12 @@
     onChanged: listener => extension.runtime.onMessage?.addListener(message => {
       if (message?.type === "TRACE_ARCHIVE_HOST_ACCESS_CHANGED") listener(message.access);
     }),
+    finish: async () => {
+      const response = await call(extension.runtime, "sendMessage", [{ type: "TRACE_ARCHIVE_HOST_ACCESS_FINISH" }]);
+      if (!response?.ok) return false;
+      const tab = await call(extension.tabs, "getCurrent", []);
+      if (Number.isInteger(tab?.id)) await call(extension.tabs, "remove", [tab.id]);
+      return true;
+    },
   });
 })();

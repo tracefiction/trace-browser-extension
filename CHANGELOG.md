@@ -4,6 +4,11 @@ Trace is in beta. This file lists the changes that matter to people using the
 Chrome, Edge and Firefox extension. The Safari extension ships inside the Trace
 iPhone app, and its notes go with each app release.
 
+## 0.7.2
+
+- **Trace explains when AO3 or FanFiction.net site access is off.** The toolbar popup and notices already running on archive pages offer **Allow Trace on AO3** or **Allow Trace on FanFiction.net**. In-page Allow opens a small Trace tab; click Allow there to confirm in Firefox. After approval, it closes and returns you to the archive, where Trace restores its controls. You can try again if you decline.
+- **Site access is checked when Trace installs, updates, starts, and when you open its popup.** Existing Safari setup is unchanged. Chrome and Edge show the recovery action only when site access is missing.
+
 ## 0.7.1
 
 ### Connecting
