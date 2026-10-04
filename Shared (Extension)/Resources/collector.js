@@ -192,6 +192,24 @@ function traceEarnedPermissionReady() {
   );
 }
 
+// Chrome can prerender the page a link leads to before the reader opens it;
+// AO3 asks for this on its Next Chapter link. The extension ignores messages
+// from a prerendered page, so whatever the page sent then is sent again once
+// the reader opens it. Opening it fires prerenderingchange, and not always a
+// visibilitychange or pageshow after the page stopped prerendering.
+function tracePageIsPrerendering() {
+  try {
+    return document.prerendering === true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function whenTracePageActivates(callback) {
+  if (!tracePageIsPrerendering()) return;
+  document.addEventListener("prerenderingchange", callback, { once: true });
+}
+
 function runWhenTraceEarnedPermissionReady(start) {
   if (traceEarnedPermissionReady()) {
     start();
@@ -3245,7 +3263,8 @@ function resetPopupPageReconnectBackoff() {
 }
 function connectPopupPagePort() {
   if (!KERNEL_SESSION_ACTIVE || TRACE_ACTIVE_TAB_PROBE_MODE || popupPageStopped ||
-      popupPagePort || !ext.runtime.connect || window.top !== window) return;
+      popupPagePort || !ext.runtime.connect || window.top !== window ||
+      tracePageIsPrerendering()) return;
   try {
     var port = ext.runtime.connect({ name: "trace-popup-page-v1" });
     popupPagePort = port;
@@ -3344,6 +3363,9 @@ globalThis.__traceCollectorReconnect = function (replacePort) {
 window.addEventListener("pageshow", function (event) {
   globalThis.__traceCollectorReconnect(!!(event && event.persisted === true));
 });
+whenTracePageActivates(function () {
+  globalThis.__traceCollectorReconnect(true);
+});
 connectPopupPagePort();
 
 /// =======================================================
@@ -3389,11 +3411,15 @@ function queueAutoTrackWhenVisible(attempt) {
     if (shouldDelayAutoTrackUntilVisible()) return;
     autoTrackVisibilityWaitAttached = false;
     document.removeEventListener("visibilitychange", resume);
+    document.removeEventListener("prerenderingchange", resume);
     window.removeEventListener("pageshow", resume);
     startDwellTimer(attempt);
   };
 
   document.addEventListener("visibilitychange", resume);
+  // A prerendered page becomes visible while still prerendering, so its
+  // visibilitychange comes too early; opening it is prerenderingchange.
+  document.addEventListener("prerenderingchange", resume);
   window.addEventListener("pageshow", resume);
 }
 
@@ -3487,6 +3513,7 @@ if (!TRACE_ACTIVE_TAB_PROBE_MODE && !shouldDisableTraceContentScript()) {
       scheduleAutoTrackForCurrentPage();
       scheduleListingMetadataRefreshForCurrentPage();
     });
+    whenTracePageActivates(scheduleListingMetadataRefreshForCurrentPage);
   });
 }
 
@@ -7976,6 +8003,12 @@ function initQuickAdd() {
         retryAutoTrackAfterLink();
       }
     });
+    // Lookups sent while prerendering were ignored; ask again once opened.
+    whenTracePageActivates(function () {
+      requestStoryAuthRefreshOnResume(workKey);
+      queryBackgroundWorkStateForStory(workKey);
+      renderQuickAddButton(workKey);
+    });
   } catch (_) {
     /* ignore */
   }
@@ -8013,6 +8046,7 @@ function announceArchivePageToBackground(handoffId) {
 if (!TRACE_ACTIVE_TAB_PROBE_MODE && !shouldDisableTraceContentScript()) {
   runWhenTraceEarnedPermissionReady(function () {
     announceArchivePageToBackground();
+    whenTracePageActivates(function () { announceArchivePageToBackground(); });
   });
 }
 

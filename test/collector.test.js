@@ -7569,6 +7569,55 @@ test("re-sends of a refused story save stop at the cap", async () => {
   h.dom.window.close();
 });
 
+// Chrome prerenders the next chapter when AO3 asks for it. The extension
+// ignores a prerendered page; opening it makes the page visible while it is
+// still prerendering, and only then fires prerenderingchange.
+function setPrerendering(window, prerendering) {
+  Object.defineProperty(window.document, "prerendering", { value: prerendering, configurable: true });
+}
+
+test("a prerendered chapter records progress as soon as the reader opens it", async () => {
+  const ports = [];
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    connectPort: relayPortRecorder(ports),
+    mutateDom(dom) { setPrerendering(dom.window, true); },
+  });
+  await delay(50);
+  assert.equal(autoTrackSends(h), 0, "nothing is saved while the page is only prerendered");
+  assert.equal(ports.length, 0, "no relay port from a prerendered page");
+  const seenBefore = h.sent.filter(message => message.type === "TRACE_ARCHIVE_SEEN").length;
+  const lookupsBefore = h.sent.filter(message => message.type === "TRACE_WORK_STATE_GET").length;
+
+  // Opening it: visible first, still prerendering.
+  h.dom.window.document.dispatchEvent(new h.dom.window.Event("visibilitychange"));
+  await delay(20);
+  assert.equal(autoTrackSends(h), 0);
+
+  setPrerendering(h.dom.window, false);
+  h.dom.window.document.dispatchEvent(new h.dom.window.Event("prerenderingchange"));
+  await delay(50);
+  assert.equal(autoTrackSends(h), 1, "the chapter is recorded without the reader leaving the tab");
+  assert.equal(ports.length, 1, "the relay port opens once the page is opened");
+  assert.ok(h.sent.filter(message => message.type === "TRACE_ARCHIVE_SEEN").length > seenBefore);
+  assert.ok(h.sent.filter(message => message.type === "TRACE_WORK_STATE_GET").length > lookupsBefore);
+
+  // Later visibility changes do not record it again.
+  h.dom.window.document.dispatchEvent(new h.dom.window.Event("visibilitychange"));
+  h.dom.window.dispatchEvent(new h.dom.window.Event("focus"));
+  await delay(20);
+  assert.equal(autoTrackSends(h), 1);
+  h.dom.window.dispatchEvent(new h.dom.window.Event("pagehide"));
+  h.dom.window.close();
+});
+
+test("an ordinary page load records progress without waiting for any event", async () => {
+  const h = createStoryAutoTrackPendingHarness({ sessionMode: "kernel" });
+  await delay(50);
+  assert.equal(autoTrackSends(h), 1);
+  h.dom.window.close();
+});
+
 function setHidden(window, hidden) {
   Object.defineProperty(window.document, "hidden", { value: hidden, configurable: true });
   Object.defineProperty(window.document, "visibilityState", { value: hidden ? "hidden" : "visible", configurable: true });
