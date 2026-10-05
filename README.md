@@ -245,6 +245,39 @@ app project. The extension sources under `Shared (Extension)/`, plus the iOS
 and macOS extension property lists and entitlements, are consumed at a pinned
 revision by the private Apple client.
 
+### Restoring site access
+
+Trace checks all declared host permissions with `permissions.contains` on
+install/update, startup, permission changes, and popup opening. This includes
+all AO3 origins and mirrors, both FanFiction.net origins, and the configured
+Trace web/API origins needed to connect. Firefox, Chrome and Edge show a **!**
+toolbar badge and **Site access is off — click to allow** tooltip while any
+of those hosts is missing access.
+
+Click the icon, then **Allow Trace on AO3 and FanFiction.net** in the popup.
+That direct click requests every declared host together and closes the popup
+immediately, leaving Firefox's single permission prompt unobstructed.
+Approval restores Trace on supported open archive pages;
+the badge clears only when the full host set is granted. Declining leaves
+Allow available to try again.
+
+A toolbar click may activate Trace on the current archive page without granting
+persistent access. While the popup is closed, that page keeps a non-dismissable
+line: **Trace is only on
+for this page. Allow it on AO3 to keep it on — click the Trace icon.**
+FanFiction.net pages name FanFiction.net instead. The line remains through
+Connect-notice dismissal and account-state changes, and disappears when the
+full permission grant arrives, without reloading the page. Opening the toolbar
+popup hides the line; closing it without granting access shows the line again.
+The background handles approval even after the popup closes.
+
+Without even one-page access, content scripts cannot run to show a notice. The
+popup requests directly from its own click handler: Firefox's restricted API
+set in a web-accessible extension iframe on an HTTP(S) page does not expose
+`browser.permissions`, and a background message hop does not preserve the
+required user gesture. No additional hosts or collected data are introduced.
+Safari keeps its existing Website Access flow.
+
 ## Repo Layout
 
 - `src/background.js` - source for the extension service worker. The build injects configured Trace origins and writes `Shared (Extension)/Resources/background.js`.

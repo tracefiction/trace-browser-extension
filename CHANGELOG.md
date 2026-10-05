@@ -4,6 +4,12 @@ Trace is in beta. This file lists the changes that matter to people using the
 Chrome, Edge and Firefox extension. The Safari extension ships inside the Trace
 iPhone app, and its notes go with each app release.
 
+## 0.7.2
+
+- **Trace makes missing site access visible on its toolbar icon.** A **!** badge and **Site access is off — click to allow** tooltip lead to **Allow Trace on AO3 and FanFiction.net** in the popup. One click requests all declared hosts together: AO3 and its mirrors, FanFiction.net, and Trace's web/API origins needed to connect. The popup closes immediately so Firefox's permission prompt is unobstructed. The badge clears only when all are granted; declining leaves Allow available when you reopen the popup.
+- **One-page activation explains its limits.** If clicking the toolbar activates Trace on the current page while persistent access is missing, a non-dismissable line says **Trace is only on for this page. Allow it on AO3 to keep it on — click the Trace icon.** FFN pages name FanFiction.net. The line stays hidden while the toolbar popup is open, returns when it closes without a grant, and disappears as soon as the full grant arrives, without a reload.
+- **Site access is checked when Trace installs, updates, starts, and when you open its popup, and after permission changes.** Firefox, Chrome and Edge show recovery only when access is missing. Existing Safari setup is unchanged.
+
 ## 0.7.1
 
 ### Connecting

@@ -10,16 +10,25 @@ export interface RuntimePort {
   readonly onConnect?: { addListener(listener: (port: ContentPort) => void): void };
   readonly id?: string;
   readonly lastError?: { readonly message?: string };
+  readonly sendMessage?: (...args: unknown[]) => unknown;
+  readonly onStartup?: { addListener(listener: () => void): void };
   readonly onInstalled?: {
     addListener(listener: (details: { readonly reason?: string }) => void): void;
   };
   readonly onMessage: {
     addListener(listener: RuntimeMessageListener): void;
   };
-  readonly getManifest?: () => { readonly version?: string; readonly content_scripts?: readonly { readonly matches?: readonly string[]; readonly exclude_matches?: readonly string[]; readonly js?: readonly string[] }[] };
+  readonly getManifest?: () => { readonly version?: string; readonly action?: { readonly default_title?: string }; readonly host_permissions?: readonly string[]; readonly content_scripts?: readonly { readonly matches?: readonly string[]; readonly exclude_matches?: readonly string[]; readonly js?: readonly string[] }[] };
   readonly getPlatformInfo?: (...args: unknown[]) => unknown;
   readonly getURL?: (...args: unknown[]) => unknown;
   readonly sendNativeMessage?: (...args: unknown[]) => unknown;
+}
+
+export interface ActionPort {
+  readonly setBadgeText: (...args: unknown[]) => unknown;
+  readonly setBadgeBackgroundColor: (...args: unknown[]) => unknown;
+  readonly setBadgeTextColor?: (...args: unknown[]) => unknown;
+  readonly setTitle: (...args: unknown[]) => unknown;
 }
 
 export interface PermissionsPort {

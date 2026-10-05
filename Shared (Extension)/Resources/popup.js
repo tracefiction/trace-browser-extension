@@ -2918,3 +2918,43 @@ if (importBtn && NORMAL_POPUP_CONTROLS_AVAILABLE) {
 }
 
 if (NORMAL_POPUP_CONTROLS_AVAILABLE) bindPreferenceControls();
+
+// Durable archive access is separate from the Trace account and current-tab access.
+if (KERNEL_SESSION_ACTIVE && !isLikelyIosExtensionUi && !EARNED_PERMISSION_ONBOARDING && !ACTIVE_TAB_PROBE && globalThis.TraceArchiveAccess) {
+  const section = document.getElementById("popup-host-access");
+  const button = document.getElementById("popup-host-access-allow");
+  const result = document.getElementById("popup-host-access-result");
+  let access = [];
+  let selected = null;
+  let requesting = false;
+  TraceArchiveAccess.watchPopup();
+  const renderAccess = items => {
+    access = Array.isArray(items) ? items : [];
+    const missing = access.filter(item => item.granted === false);
+    selected = missing[0] || null;
+    section.hidden = !selected;
+    if (!selected) {
+      delete document.body.dataset.traceHostAccess;
+      return;
+    }
+    document.body.dataset.traceHostAccess = "missing";
+    document.getElementById("popup-host-access-lead").textContent = `Allow site access so Trace can save stories and keep your place on ${selected.label} without opening this popup each time.`;
+    button.textContent = `Allow Trace on ${selected.label}`;
+    button.disabled = requesting;
+  };
+  TraceArchiveAccess.onChanged(items => renderAccess(items));
+  void TraceArchiveAccess.read().then(response => { if (response?.ok) renderAccess(response.access); }, () => {});
+  button.addEventListener("click", () => {
+    if (!selected || requesting) return;
+    const pending = TraceArchiveAccess.request();
+    requesting = true;
+    button.disabled = true;
+    result.textContent = "";
+    // Firefox anchors its permission doorhanger behind this popup. Start the
+    // request synchronously in the click, then uncover the browser's prompt.
+    // onAdded in the background clears the badge/page line and restores pages;
+    // a decline leaves access off, so reopening this popup offers Allow again.
+    void pending.catch(() => {});
+    window.close();
+  });
+}
