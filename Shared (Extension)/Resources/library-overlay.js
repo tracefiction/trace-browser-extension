@@ -9,6 +9,9 @@
   const ext = globalThis.browser ?? globalThis.chrome;
   const ATTR = "data-trace-library-overlay";
   const WRAP_ATTR = "data-trace-library-overlay-wrap";
+  const PAGE_ONLY_ACCESS_ATTR = "data-trace-page-only-access";
+  var persistentAccessMissing = false;
+  var hostAccessRevision = 0;
   const CONNECT_NOTICE_ATTR = "data-trace-connect-notice";
   const CONNECT_NOTICE_DISMISS_KEY = "trace:connect-notice:dismissed";
   const CAPACITY_NOTICE_ATTR = "data-trace-capacity-notice";
@@ -289,6 +292,7 @@
     notice.appendChild(copy);
     notice.appendChild(actions);
     (document.body || document.documentElement).appendChild(notice);
+    positionPageNotices();
     if (typeof announceListingSurface === "function") announceListingSurface("This story wasn’t added. Your Library is full.");
     acknowledgeCapacityRecovery("shown");
   }
@@ -926,6 +930,67 @@ function traceRefreshPageTokens() {
     if (existing) existing.remove();
   }
 
+  function positionPageNotices() {
+    var line = document.querySelector("[" + PAGE_ONLY_ACCESS_ATTR + "]");
+    var bottom = line
+      ? "calc(max(16px,env(safe-area-inset-bottom)) + " + (line.getBoundingClientRect().height + 8) + "px)"
+      : "max(16px,env(safe-area-inset-bottom))";
+    document.querySelectorAll("[" + CONNECT_NOTICE_ATTR + "],[" + CAPACITY_NOTICE_ATTR + "]").forEach(function (notice) {
+      notice.style.bottom = bottom;
+    });
+  }
+
+  function renderPageOnlyAccess() {
+    var line = document.querySelector("[" + PAGE_ONLY_ACCESS_ATTR + "]");
+    if (!persistentAccessMissing) {
+      if (line) line.remove();
+      positionPageNotices();
+      return;
+    }
+    traceRefreshPageTokens();
+    if (!line) {
+      line = document.createElement("aside");
+      line.setAttribute(PAGE_ONLY_ACCESS_ATTR, "1");
+      line.setAttribute("role", "status");
+      line.style.cssText = [
+        "position:fixed", "right:max(16px,env(safe-area-inset-right))",
+        "bottom:max(16px,env(safe-area-inset-bottom))", "z-index:2147483647",
+        "box-sizing:border-box", "width:min(360px,calc(100vw - 32px))",
+        "padding:14px 16px", "border-radius:14px", "border:0",
+        "background:var(--trace-page-surface)", "color:var(--trace-page-ink)",
+        "box-shadow:0 0 0 1px color-mix(in srgb,var(--trace-page-rule) 70%,transparent),0 14px 30px -12px rgba(0,0,0,.35)",
+        "font:400 13px/1.4 " + TRACE_D1.font,
+      ].join(";");
+      var label = location.hostname.indexOf("fanfiction.net") >= 0 ? "FanFiction.net" : "AO3";
+      line.textContent = "Trace is only on for this page. Allow it on " + label + " to keep it on — click the Trace icon.";
+      document.documentElement.appendChild(line);
+    }
+    // This line has no dismiss control, timeout or connection-state lifetime.
+    positionPageNotices();
+  }
+
+  function acceptPersistentAccess(granted) {
+    if (typeof granted !== "boolean") return;
+    persistentAccessMissing = !granted;
+    renderPageOnlyAccess();
+  }
+
+  function checkPersistentAccess() {
+    var revision = hostAccessRevision;
+    var settled = false;
+    function finish(response) {
+      if (settled) return;
+      settled = true;
+      if (revision === hostAccessRevision && response && response.ok) acceptPersistentAccess(response.granted);
+    }
+    try {
+      var pending = ext.runtime.sendMessage({ type: "TRACE_ARCHIVE_HOST_ACCESS_GET" }, function (response) {
+        finish(ext.runtime.lastError ? null : response);
+      });
+      if (pending && typeof pending.then === "function") pending.then(finish, function () { finish(null); });
+    } catch (_) { /* Unknown access never claims that the page is temporary. */ }
+  }
+
   // A 3 px teal focus ring, 2 px offset, on every Trace control on the page.
   function ensureListingFocusStyles() {
     if (document.querySelector("style[data-trace-listing-focus-styles]")) return;
@@ -1113,6 +1178,7 @@ function traceRefreshPageTokens() {
         removeConnectNotice();
       };
     }
+    positionPageNotices();
   }
 
   /** Is this a single-work page (not a listing)? collector.js handles quick-add there. */
@@ -4112,7 +4178,9 @@ function traceRefreshPageTokens() {
         var m = mutations[i];
         if (!m || !m.addedNodes || m.addedNodes.length === 0) continue;
         for (var j = 0; j < m.addedNodes.length; j++) {
-          if (needsRerunFromNode(m.addedNodes[j])) {
+          var added = m.addedNodes[j];
+          if (added.matches && added.matches("[" + CAPACITY_NOTICE_ATTR + "]")) positionPageNotices();
+          if (needsRerunFromNode(added)) {
             scheduleRun(90);
             return;
           }
@@ -4220,6 +4288,7 @@ function traceRefreshPageTokens() {
   }
 
   function run() {
+    renderPageOnlyAccess();
     try {
       if (KERNEL_SESSION_ACTIVE) {
         ext.storage.local.get(["prefLibraryInlayEnabled"], function (preferences) {
@@ -4274,6 +4343,22 @@ function traceRefreshPageTokens() {
   }
 
   runWhenTraceEarnedPermissionReady(function () {
+    // Safari owns Website Access. Desktop status comes from the background;
+    // web-accessible Firefox iframes cannot call the permissions API directly.
+    var root = ext.runtime.getURL && ext.runtime.getURL("");
+    var desktopAccess = KERNEL_SESSION_ACTIVE && /^(?:moz|chrome)-extension:\/\//.test(root || "");
+    if (desktopAccess) {
+      ext.runtime.onMessage?.addListener(function (message) {
+        if (message && message.type === "TRACE_ARCHIVE_HOST_ACCESS_CHANGED") {
+          hostAccessRevision += 1;
+          acceptPersistentAccess(message.granted);
+        }
+      });
+      checkPersistentAccess();
+      window.addEventListener("pageshow", checkPersistentAccess);
+      window.addEventListener("focus", checkPersistentAccess);
+      window.addEventListener("resize", renderPageOnlyAccess);
+    }
     if (document.readyState === "loading") {
       document.addEventListener("DOMContentLoaded", run, { once: true });
     } else {

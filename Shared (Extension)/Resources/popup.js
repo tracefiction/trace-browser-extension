@@ -2925,13 +2925,12 @@ if (KERNEL_SESSION_ACTIVE && !isLikelyIosExtensionUi && !EARNED_PERMISSION_ONBOA
   const button = document.getElementById("popup-host-access-allow");
   const result = document.getElementById("popup-host-access-result");
   let access = [];
-  let preferredSite = null;
   let selected = null;
   let requesting = false;
   const renderAccess = items => {
     access = Array.isArray(items) ? items : [];
     const missing = access.filter(item => item.granted === false);
-    selected = missing.find(item => item.label === preferredSite) || missing[0] || null;
+    selected = missing[0] || null;
     section.hidden = !selected;
     if (!selected) {
       delete document.body.dataset.traceHostAccess;
@@ -2943,12 +2942,11 @@ if (KERNEL_SESSION_ACTIVE && !isLikelyIosExtensionUi && !EARNED_PERMISSION_ONBOA
     button.disabled = requesting;
   };
   TraceArchiveAccess.onChanged(items => renderAccess(items));
-  void probeQueryActiveTab().then(tab => { preferredSite = classifyEarnedPage(tab?.url).site; renderAccess(access); }, () => {});
   void TraceArchiveAccess.read().then(response => { if (response?.ok) renderAccess(response.access); }, () => {});
   button.addEventListener("click", () => {
     if (!selected || requesting) return;
     const requestedSite = selected.site;
-    const pending = TraceArchiveAccess.request(selected);
+    const pending = TraceArchiveAccess.request();
     requesting = true;
     button.disabled = true;
     result.textContent = "";

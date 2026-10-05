@@ -103,7 +103,7 @@ try {
   let session: SessionRuntimeController | undefined;
   if (__TRACE_SESSION_MODE__ === "kernel") {
     const recover = installArchiveRecovery({ runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, scripting: extension.scripting, mode: storageMode });
-    installArchiveHostAccess({ runtime: extension.runtime, action: extension.action, permissions: extension.permissions, mode: storageMode, recover });
+    installArchiveHostAccess({ runtime: extension.runtime, tabs: extension.tabs, action: extension.action, permissions: extension.permissions, mode: storageMode, recover });
     installTraceFirstInstallActivation({
       runtime: extension.runtime,
       tabs: extension.tabs,

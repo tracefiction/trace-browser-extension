@@ -116,7 +116,8 @@ try {
   await driver.send("WebDriver:Navigate", { url: `${base}host-access-test-control.html` });
   const controlHandle = value(await driver.send("WebDriver:GetWindowHandle"));
   const api = expression => asyncScript(`const done=arguments[arguments.length-1]; const api=(window.wrappedJSObject||window).browser; (${expression}).then(done,e=>done({error:String(e)}));`);
-  const allPermissions = await api("api.permissions.getAll()");
+  const allPermissions = { origins: manifest.host_permissions };
+  const allHosts = manifest.host_permissions;
   const ao3 = allPermissions.origins.filter(origin => /archiveofourown|transformativeworks/.test(origin));
   const ffn = allPermissions.origins.filter(origin => /fanfiction/.test(origin));
   assert.ok(ao3.length && ffn.length);
@@ -132,7 +133,7 @@ try {
     }
   };
   // Revoke before opening the HTTPS archive: no injected notice can supply discovery.
-  assert.equal(await api(`api.permissions.remove({origins:${JSON.stringify([...ao3, ...ffn])}})`), true);
+  assert.equal(await api(`api.permissions.remove({origins:${JSON.stringify(allHosts)}})`), true);
   const created = await api(`api.tabs.create({url:${JSON.stringify(archiveURL)}})`);
   assert.ok(created.id);
   const switchHandle = async handle => { await context("content"); await driver.send("WebDriver:SwitchToWindow", { handle }); };
@@ -160,9 +161,9 @@ try {
     await context("chrome");
     await until(() => execute("return PopupNotifications.panel.state === 'open' && !!document.querySelector('#addon-webext-permissions-notification');"), "real Firefox permission prompt");
     const origins = await execute("return window.__traceRequests.at(-1);");
-    assert.ok(origins.length); assert.ok(origins.every(origin => [...ao3, ...ffn].includes(origin)));
+    assert.ok(origins.length); assert.ok(origins.every(origin => allHosts.includes(origin)));
     const prompt = await execute("const p=document.querySelector('#addon-webext-permissions-notification'); return {text:p.textContent,button:p.button.label||p.button.textContent};");
-    assert.match(prompt.text, /archiveofourown|fanfiction/i);
+    assert.match(prompt.text, /archiveofourown|fanfiction|tracefiction/i);
     // Click the native browser UI, never replace the permission decision callback.
     await until(() => execute(`return !document.querySelector('#addon-webext-permissions-notification').${accept ? "button" : "secondaryButton"}.disabled;`), "native prompt button");
     // Firefox's native moz-button is not scrollable by WebDriver in headless
@@ -177,11 +178,14 @@ try {
     assert.ok(!result?.error, result?.error); return result;
   };
   const popupScript = script => popupQuery(`return actor.executeScript(${JSON.stringify(script)},[],{sandboxName:'default',newSandbox:false,async:false});`);
-  const openPopup = async (label = "AO3") => {
-    await context("chrome"); await execute("window.focus(); window.__traceAction.openPopup(window);");
+  const openPopup = async () => {
+    await context("chrome"); await execute("window.focus();");
+    const widget = await execute("return window.__traceAction.id;");
+    const button = (await driver.send("WebDriver:FindElement", { using: "css selector", value: "#" + widget + " .unified-extensions-item-action-button" })).value;
+    await driver.send("WebDriver:ElementClick", { id: button["element-6066-11e4-a52e-4f735466cecf"] });
     await until(() => execute("return !!document.querySelector('browser[webextension-view-type=popup]')?.browsingContext.currentWindowGlobal;"), "actual toolbar popup");
     await until(async () => {
-      try { return await popupScript("return document.querySelector('#popup-host-access-allow')?.textContent;") === `Allow Trace on ${label}`; }
+      try { return await popupScript("return document.querySelector('#popup-host-access-allow')?.textContent;") === "Allow Trace on AO3 and FanFiction.net"; }
       catch (error) {
         // The browser replaces its initial about:blank popup actor on load.
         if (/destroyed before query|b is null/.test(error.message)) return false;
@@ -199,6 +203,17 @@ try {
     assert.equal(styles.background, dark ? "rgb(255, 132, 88)" : "rgb(194, 76, 34)");
     save(`popup-${dark ? "ink" : "light"}.png`, await popupQuery("const el=await actor.findElement('css selector','.popup',{}); return actor.takeScreenshot(el,0,false,true);"));
     await closePopup();
+    await switchHandle(archiveHandle);
+    await until(() => execute("return !!document.querySelector('[data-trace-page-only-access]');"), "toolbar activates the page-only warning");
+    const selector = "[data-trace-page-only-access]";
+    assert.equal(await execute(`return document.querySelector('${selector}').textContent;`), "Trace is only on for this page. Allow it on AO3 to keep it on — click the Trace icon.");
+    assert.equal(await execute(`return document.querySelector('${selector}').querySelector('button,a');`), null);
+    await execute(`document.documentElement.style.backgroundColor=${JSON.stringify(dark ? "#07090c" : "#ffffff")}; document.body.style.backgroundColor=${JSON.stringify(dark ? "#07090c" : "#ffffff")}; window.dispatchEvent(new Event('pageshow'));`);
+    await until(() => execute(`return getComputedStyle(document.querySelector('${selector}')).backgroundColor === ${JSON.stringify(dark ? "rgb(18, 20, 24)" : "rgb(255, 255, 255)")};`), "page-only theme");
+    const line = (await driver.send("WebDriver:FindElement", { using: "css selector", value: selector })).value;
+    save(`page-only-${dark ? "ink" : "light"}.png`, value(await driver.send("WebDriver:TakeScreenshot", { id: line["element-6066-11e4-a52e-4f735466cecf"], full: false })));
+    await expectBadge(true);
+    await switchHandle(archiveHandle);
   }
   const clickAllow = () => popupQuery(`const el=await actor.findElement('css selector','#popup-host-access-allow',{}); return actor.sendQuery('MarionetteCommandsParent:clickElement',{elem:el,capabilities:${JSON.stringify(session.capabilities)}});`);
   await openPopup(); await clickAllow(); await answerPrompt(false); await closePopup();
@@ -208,24 +223,26 @@ try {
   assert.equal(await popupScript("return document.querySelector('#popup-host-access-allow').disabled;"), false, "popup remains retryable");
   await clickAllow(); await answerPrompt(true); await closePopup();
   await switchHandle(controlHandle);
-  await until(async () => await api(`api.permissions.contains({origins:${JSON.stringify(ao3)}})`) === true, "durable AO3 grant");
-  await expectBadge(true); // FFN is still off.
+  await until(async () => await api(`api.permissions.contains({origins:${JSON.stringify(allHosts)}})`) === true, "all declared hosts granted in one prompt");
+  await expectBadge(false);
   await switchHandle(archiveHandle);
   await until(() => execute("return !!document.querySelector('[data-trace-connect-notice]');"), "archive scripts restored after grant");
-  assert.notEqual(await execute("return document.querySelector('[data-trace-connect-notice-heading]')?.textContent;"), "Site access is off");
-  await openPopup("FanFiction.net"); await clickAllow(); await answerPrompt(true); await closePopup();
+  await until(() => execute("return !document.querySelector('[data-trace-page-only-access]');"), "grant removes the page-only line");
+  // Trace-site access is required too, even when both archives remain allowed.
   await switchHandle(controlHandle);
-  await until(async () => await api(`api.permissions.contains({origins:${JSON.stringify(ffn)}})`) === true, "durable FFN grant");
-  await expectBadge(false);
-  // A later revocation sets the badge again without any popup or page message.
-  assert.equal(await api(`api.permissions.remove({origins:${JSON.stringify(ffn)}})`), true);
+  const traceHosts = allHosts.filter(origin => /tracefiction/.test(origin));
+  assert.equal(await api(`api.permissions.remove({origins:${JSON.stringify(traceHosts)}})`), true);
   await expectBadge(true);
-  await switchHandle(archiveHandle); await openPopup("FanFiction.net"); await clickAllow(); await answerPrompt(true); await closePopup();
+  await switchHandle(archiveHandle);
+  await until(() => execute("return !!document.querySelector('[data-trace-page-only-access]');"), "Trace-only gap restores the persistent line");
+  await openPopup(); await clickAllow(); await answerPrompt(true); await closePopup();
   await expectBadge(false);
+  await switchHandle(archiveHandle);
+  await until(() => execute("return !document.querySelector('[data-trace-page-only-access]');"), "onAdded clears line without reload");
   await context("chrome");
-  assert.equal(await execute(`return window.__traceRequests.length;`), 4, "only Allow clicks prompt");
+  assert.equal(await execute(`return window.__traceRequests.length;`), 3, "one native prompt per Allow click, including retry");
   assert.equal(await execute(`return [...gBrowser.tabs].some(t=>t.linkedBrowser.currentURI.spec.startsWith(${JSON.stringify(base + "archive-access.html")}));`), false, "no redundant permission tab");
-  console.log(`Headless Firefox passed: toolbar badge before HTTPS archive scripts, real popup/native prompts, denial/retry, AO3/FFN grants, badge clears/reappears, light/Ink popup screenshots. Screenshots: ${screenshots}`);
+  console.log(`Headless Firefox passed: real toolbar one-page activation, non-dismissable warning, single all-host native prompt, denial/retry, Trace-only gaps, badge and line clear on grant, light/Ink screenshots. Screenshots: ${screenshots}`);
 } finally {
   webServer?.close(); driver?.close();
   if (Number.isInteger(firefoxPid)) { try { process.kill(firefoxPid, "SIGTERM"); } catch {} }

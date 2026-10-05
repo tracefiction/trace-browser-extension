@@ -13,12 +13,13 @@
   };
   globalThis.TraceArchiveAccess = Object.freeze({
     read: () => call(extension.runtime, "sendMessage", [{ type: "TRACE_ARCHIVE_HOST_ACCESS_GET" }]),
-    request: access => {
+    request: () => {
       // Firefox exposes no permissions API to a web-accessible extension iframe
       // embedded on an HTTP(S) page. A background message hop also loses the
       // required user gesture. Request directly in the toolbar popup click,
       // before any awaited permission, storage, or tab reads.
-      const pending = call(extension.permissions, "request", [{ origins: access.origins }]);
+      const origins = [...new Set(extension.runtime.getManifest().host_permissions || [])];
+      const pending = call(extension.permissions, "request", [{ origins }]);
       return pending.then(async granted => ({
         granted: granted === true,
         ...(await call(extension.runtime, "sendMessage", [{ type: "TRACE_ARCHIVE_HOST_ACCESS_REFRESH" }])),

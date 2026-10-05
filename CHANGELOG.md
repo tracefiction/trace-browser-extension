@@ -6,8 +6,9 @@ iPhone app, and its notes go with each app release.
 
 ## 0.7.2
 
-- **Trace makes missing AO3 or FanFiction.net site access visible on its toolbar icon.** A **!** badge and **Site access is off — click to allow** tooltip lead to the popup's **Allow Trace on AO3** or **Allow Trace on FanFiction.net** button. Click Allow to confirm access in the browser prompt; you can try again if you decline. The badge clears once both archives are allowed.
-- **Site access is checked when Trace installs, updates, starts, and when you open its popup, and after permission changes.** Firefox, Chrome and Edge show the badge only when archive access is missing. Existing Safari setup is unchanged.
+- **Trace makes missing site access visible on its toolbar icon.** A **!** badge and **Site access is off — click to allow** tooltip lead to **Allow Trace on AO3 and FanFiction.net** in the popup. One click requests all declared hosts together: AO3 and its mirrors, FanFiction.net, and Trace's web/API origins needed to connect. The badge clears only when all are granted; declining leaves Allow available to try again.
+- **One-page activation explains its limits.** If clicking the toolbar activates Trace on the current page while persistent access is missing, a non-dismissable line says **Trace is only on for this page. Allow it on AO3 to keep it on — click the Trace icon.** FFN pages name FanFiction.net. It disappears as soon as the full grant arrives, without a reload.
+- **Site access is checked when Trace installs, updates, starts, and when you open its popup, and after permission changes.** Firefox, Chrome and Edge show recovery only when access is missing. Existing Safari setup is unchanged.
 
 ## 0.7.1
 

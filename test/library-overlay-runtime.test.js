@@ -60,6 +60,9 @@ async function renderOverlayListing({
   userAgent,
   maxTouchPoints,
   beforeEval,
+  hostAccess,
+  extensionScheme = "moz-extension",
+  promiseHostStatus = false,
 }) {
   const keysSrc = fs.readFileSync(KEYS_PATH, "utf8");
   const overlaySrc = fs.readFileSync(OVERLAY_PATH, "utf8");
@@ -78,6 +81,7 @@ async function renderOverlayListing({
   }
   const storageChangeListeners = [];
   const runtimeMessages = [];
+  const runtimeListeners = [];
   const storageState = {
     authToken,
     traceApiBase: "https://trace.test",
@@ -101,10 +105,17 @@ async function renderOverlayListing({
     },
     runtime: {
       lastError: null,
+      ...(hostAccess !== undefined ? { getURL: resource => extensionScheme + "://trace-test/" + resource } : {}),
+      onMessage: { addListener(fn) { runtimeListeners.push(fn); } },
       sendMessage:
         sendMessage ||
         ((msg, cb) => {
           runtimeMessages.push(msg);
+          if (msg.type === "TRACE_ARCHIVE_HOST_ACCESS_GET") {
+            const result = { ok: true, granted: hostAccess };
+            if (promiseHostStatus) return Promise.resolve(result);
+            cb?.(result); return;
+          }
           if (typeof cb !== "function") return;
           if (msg.type === "TRACE_ACCOUNT_PROJECTION_GET") {
             cb({
@@ -133,6 +144,7 @@ async function renderOverlayListing({
     window.TRACE_EARNED_PERMISSION_COMPLETE = earnedPermissionComplete;
   }
   window.__traceRuntimeMessages = runtimeMessages;
+  window.__traceEmitRuntime = message => runtimeListeners.forEach(fn => fn(message));
   window.__traceSetStorage = function (next) {
     const changes = {};
     for (const [key, value] of Object.entries(next || {})) {
@@ -2984,4 +2996,68 @@ test("on a Mac without touch the kernel notice runs the browser connect", async 
   const cta = window.document.querySelector("[data-trace-connect-notice-cta]");
   assert.notEqual(cta.getAttribute("href"), "traceauth://open?destination=extension-connect");
   assert.equal(cta.textContent, "Connect");
+});
+
+for (const [site, url, fixture] of [
+  ["AO3", "https://archiveofourown.org/works?tag_id=example", "ao3_listing.html"],
+  ["FanFiction.net", "https://www.fanfiction.net/book/", "ffn_listing.html"],
+]) {
+  for (const promiseHostStatus of [false, true]) {
+    test(`${site} page-only line persists after notice dismissal and account changes (${promiseHostStatus})`, async () => {
+      const win = await renderOverlayListing({ html: loadFixture(fixture), url, sessionMode: "kernel", authToken: null, hostAccess: false, promiseHostStatus });
+      const selector = "[data-trace-page-only-access]";
+      const line = win.document.querySelector(selector);
+      assert.ok(line);
+      assert.equal(line.textContent, `Trace is only on for this page. Allow it on ${site} to keep it on — click the Trace icon.`);
+      assert.equal(line.querySelector("button,a"), null, "no dismiss control or redundant Allow action");
+      assert.equal(line.getAttribute("role"), "status");
+      win.document.querySelector("button[aria-label='Dismiss Trace notice']").click();
+      assert.equal(win.document.querySelector(selector), line);
+      win.__traceSetStorage({ authToken: "test-token", traceAuthState: { state: "connected" } });
+      await sleep(100);
+      assert.equal(win.document.querySelector(selector), line);
+      win.__traceEmitRuntime({ type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED", granted: null });
+      assert.equal(win.document.querySelector(selector), line, "unknown never clears a warning");
+      win.__traceEmitRuntime({ type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED", granted: true });
+      assert.equal(win.document.querySelector(selector), null, "grant immediately removes the line");
+      win.__traceEmitRuntime({ type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED", granted: false });
+      assert.ok(win.document.querySelector(selector), "revocation restores it");
+      win.close();
+    });
+  }
+}
+test("the page-only line covers story pages even when listing controls are disabled", async () => {
+  const win = await renderOverlayListing({ html: "<html><body><h1>Story</h1></body></html>", url: "https://archiveofourown.org/works/123", sessionMode: "kernel", hostAccess: false });
+  assert.ok(win.document.querySelector("[data-trace-page-only-access]"));
+  win.__traceSetStorage({ prefLibraryInlayEnabled: false }); await sleep(100);
+  assert.ok(win.document.querySelector("[data-trace-page-only-access]")); win.close();
+});
+test("Safari, existing full grants, unknown evidence and credential pages never show the desktop line", async () => {
+  for (const options of [
+    { hostAccess: false, extensionScheme: "safari-web-extension" },
+    { hostAccess: true }, { hostAccess: null },
+    { hostAccess: false, url: "https://archiveofourown.org/users/login", html: '<html><body><input type="password"></body></html>' },
+  ]) {
+    const win = await renderOverlayListing({ html: loadFixture("ao3_listing.html"), sessionMode: "kernel", ...options });
+    assert.equal(win.document.querySelector("[data-trace-page-only-access]"), null);
+    if (options.extensionScheme) assert.ok(!win.__traceRuntimeMessages.some(msg => msg.type === "TRACE_ARCHIVE_HOST_ACCESS_GET"));
+    win.close();
+  }
+});
+
+test("the persistent access line keeps capacity notice controls above it", async () => {
+  const win = await renderOverlayListing({ html: loadFixture("ao3_listing.html"), sessionMode: "kernel", hostAccess: false,
+    cache: { entries: {}, capacity: { blocked: true, prompt: true } },
+    beforeEval(win) {
+      const original = win.HTMLElement.prototype.getBoundingClientRect;
+      win.HTMLElement.prototype.getBoundingClientRect = function () {
+        return this.hasAttribute("data-trace-page-only-access") ? { height: 64 } : original.call(this);
+      };
+    } });
+  const capacity = win.document.querySelector("[data-trace-capacity-notice]");
+  assert.ok(capacity);
+  assert.match(capacity.style.bottom, /72px/);
+  capacity.querySelector("button").click();
+  assert.ok(win.document.querySelector("[data-trace-page-only-access]"));
+  win.close();
 });

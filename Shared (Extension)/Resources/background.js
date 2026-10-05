@@ -307,24 +307,28 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 
   // src/extension-runtime/archive-host-access.mts
   function declaredArchiveAccess(runtime) {
-    const hosts = runtime.getManifest?.().host_permissions ?? [];
-    return ["ao3", "ffn"].map((site) => ({
-      site,
-      label: site === "ao3" ? "AO3" : "FanFiction.net",
-      origins: hosts.filter((pattern) => {
-        const url = pattern.replace("*.", "");
-        return archiveHostKindFromSender({ url }) === site;
-      })
-    })).filter((access) => access.origins.length > 0);
+    const origins = [...new Set(runtime.getManifest?.().host_permissions ?? [])];
+    return origins.length ? [{ site: "all", label: "AO3 and FanFiction.net", origins }] : [];
   }
   function installArchiveHostAccess(environment) {
-    const { runtime, action, permissions, mode, recover } = environment;
+    const { runtime, tabs, action, permissions, mode, recover } = environment;
     const root = runtime.getURL?.("");
     if (typeof root !== "string" || !/^(?:moz|chrome)-extension:\/\//.test(root) || !permissions?.contains) return null;
     const sites = declaredArchiveAccess(runtime);
     const defaultTitle = runtime.getManifest?.().action?.default_title ?? "Trace";
     const call = (target, method, args) => extensionCall(target, method, args, runtime, mode);
     const isPopup = (sender) => sender.id === runtime.id && !sender.tab && sender.url === runtime.getURL?.("popup.html");
+    const archiveSite = (sender) => {
+      if (sender.id !== runtime.id || !Number.isInteger(sender.tab?.id)) return null;
+      const site = archiveHostKindFromSender(sender);
+      const raw = sender.tab?.url ?? sender.url;
+      if (!site || !raw || isBlockedArchivePath(raw, site)) return null;
+      const host = new URL(raw).hostname;
+      return sites[0]?.origins.some((pattern) => {
+        const match = /^https:\/\/(\*\.)?([^/]+)\//.exec(pattern);
+        return match && (host === match[2] || match[1] && host.endsWith(`.${match[2]}`));
+      }) ? site : null;
+    };
     const read = async () => Promise.all(sites.map(async (access) => {
       try {
         return { ...access, granted: await call(permissions, "contains", [{ origins: access.origins }]) === true };
@@ -355,18 +359,32 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (current === generation && runtime.sendMessage) {
         void call(runtime, "sendMessage", [{ type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED", access }]).catch(() => void 0);
       }
+      if (current === generation) {
+        try {
+          const openTabs = await call(tabs, "query", [{}]);
+          if (current === generation) await Promise.all(openTabs.map(async (tab) => {
+            if (!archiveSite({ id: runtime.id, tab, frameId: 0 })) return;
+            await call(tabs, "sendMessage", [tab.id, {
+              type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED",
+              granted: access[0]?.granted ?? null
+            }, { frameId: 0 }]).catch(() => void 0);
+          }));
+        } catch {
+        }
+      }
       return access;
     };
     runtime.onMessage.addListener((raw, sender, respond) => {
       const type = raw?.type;
       if (type !== "TRACE_ARCHIVE_HOST_ACCESS_GET" && type !== "TRACE_ARCHIVE_HOST_ACCESS_REFRESH") return;
-      if (!isPopup(sender)) {
+      const popup = isPopup(sender);
+      if (!popup && (!archiveSite(sender) || type !== "TRACE_ARCHIVE_HOST_ACCESS_GET")) {
         respond({ ok: false });
         return;
       }
       void refresh().then(async (access) => {
         if (type === "TRACE_ARCHIVE_HOST_ACCESS_REFRESH") await recover();
-        return { ok: true, access };
+        return popup ? { ok: true, access } : { ok: true, granted: access[0]?.granted ?? null };
       }).then(respond, () => respond({ ok: false }));
       return true;
     });
@@ -7791,7 +7809,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     let session;
     if (true) {
       const recover = installArchiveRecovery({ runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, scripting: extension.scripting, mode: storageMode });
-      installArchiveHostAccess({ runtime: extension.runtime, action: extension.action, permissions: extension.permissions, mode: storageMode, recover });
+      installArchiveHostAccess({ runtime: extension.runtime, tabs: extension.tabs, action: extension.action, permissions: extension.permissions, mode: storageMode, recover });
       installTraceFirstInstallActivation({
         runtime: extension.runtime,
         tabs: extension.tabs,
