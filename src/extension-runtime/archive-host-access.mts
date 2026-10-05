@@ -1,5 +1,5 @@
 import { archiveHostKindFromSender, isBlockedArchivePath } from "./archive-sender.mjs";
-import { extensionCall, type ActionPort, type BrowserTab, type PermissionsPort, type RuntimeMessageSender, type RuntimePort, type TabsPort } from "./browser-platform.mjs";
+import { extensionCall, type ActionPort, type BrowserTab, type ContentPort, type PermissionsPort, type RuntimeMessageSender, type RuntimePort, type TabsPort } from "./browser-platform.mjs";
 
 type Access = Readonly<{ site: "all"; label: string; origins: readonly string[]; granted: boolean | null }>;
 type Environment = { runtime: RuntimePort; tabs: TabsPort; action: ActionPort | undefined; permissions: PermissionsPort | undefined; mode: "promise" | "callback"; recover: () => Promise<void> };
@@ -40,6 +40,7 @@ export function installArchiveHostAccess(environment: Environment): (() => Promi
   }));
   let generation = 0;
   let badgeUpdate = Promise.resolve();
+  const popups = new Set<ContentPort>();
   const refresh = async (): Promise<readonly Access[]> => {
     const current = ++generation;
     const access = await read();
@@ -71,7 +72,7 @@ export function installArchiveHostAccess(environment: Environment): (() => Promi
           if (!archiveSite({ id: runtime.id!, tab, frameId: 0 })) return;
           // Pages need only grant evidence, never the manifest origin inventory.
           await call(tabs, "sendMessage", [tab.id, {
-            type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED", granted: access[0]?.granted ?? null,
+            type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED", granted: access[0]?.granted ?? null, popupOpen: popups.size > 0,
           }, { frameId: 0 }]).catch(() => undefined);
         }));
       } catch { /* Closed or unavailable tabs recheck when their overlay starts. */ }
@@ -85,9 +86,21 @@ export function installArchiveHostAccess(environment: Environment): (() => Promi
     if (!popup && (!archiveSite(sender) || type !== "TRACE_ARCHIVE_HOST_ACCESS_GET")) { respond({ ok: false }); return; }
     void refresh().then(async access => {
       if (type === "TRACE_ARCHIVE_HOST_ACCESS_REFRESH") await recover();
-      return popup ? { ok: true, access } : { ok: true, granted: access[0]?.granted ?? null };
+      return popup ? { ok: true, access } : { ok: true, granted: access[0]?.granted ?? null, popupOpen: popups.size > 0 };
     }).then(respond, () => respond({ ok: false }));
     return true;
+  });
+  runtime.onConnect?.addListener(port => {
+    if (port.name !== "trace-archive-access-popup" || !port.sender || !isPopup(port.sender)
+      || (port.sender.frameId !== undefined && port.sender.frameId !== 0)) return;
+    // Port lifetime follows the actual toolbar document, including window.close
+    // and browser dismissal. No popup continuation is needed after a grant.
+    popups.add(port);
+    void refresh();
+    port.onDisconnect.addListener(() => {
+      popups.delete(port);
+      void refresh();
+    });
   });
   runtime.onInstalled?.addListener(details => {
     if (details.reason === "install" || details.reason === "update") void refresh();

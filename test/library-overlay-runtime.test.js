@@ -61,6 +61,7 @@ async function renderOverlayListing({
   maxTouchPoints,
   beforeEval,
   hostAccess,
+  popupOpen = false,
   extensionScheme = "moz-extension",
   promiseHostStatus = false,
 }) {
@@ -112,7 +113,7 @@ async function renderOverlayListing({
         ((msg, cb) => {
           runtimeMessages.push(msg);
           if (msg.type === "TRACE_ARCHIVE_HOST_ACCESS_GET") {
-            const result = { ok: true, granted: hostAccess };
+            const result = { ok: true, granted: hostAccess, popupOpen };
             if (promiseHostStatus) return Promise.resolve(result);
             cb?.(result); return;
           }
@@ -3022,10 +3023,25 @@ for (const [site, url, fixture] of [
       assert.equal(win.document.querySelector(selector), null, "grant immediately removes the line");
       win.__traceEmitRuntime({ type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED", granted: false });
       assert.ok(win.document.querySelector(selector), "revocation restores it");
+      win.__traceEmitRuntime({ type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED", granted: false, popupOpen: true });
+      assert.equal(win.document.querySelector(selector), null, "opening the popup hides redundant page evidence");
+      win.__traceEmitRuntime({ type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED", granted: null, popupOpen: false });
+      assert.ok(win.document.querySelector(selector), "closing restores the line even if permission evidence is temporarily unavailable");
+      win.__traceEmitRuntime({ type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED", granted: true, popupOpen: true });
+      win.__traceEmitRuntime({ type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED", granted: true, popupOpen: false });
+      assert.equal(win.document.querySelector(selector), null, "grant during the popup prevents the line returning on close");
       win.close();
     });
   }
 }
+test("an archive first activated while the popup is open shows its line only on close", async () => {
+  const win = await renderOverlayListing({ html: loadFixture("ao3_listing.html"), sessionMode: "kernel", hostAccess: false, popupOpen: true });
+  const selector = "[data-trace-page-only-access]";
+  assert.equal(win.document.querySelector(selector), null);
+  win.__traceEmitRuntime({ type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED", granted: false, popupOpen: false });
+  assert.ok(win.document.querySelector(selector));
+  win.close();
+});
 test("the page-only line covers story pages even when listing controls are disabled", async () => {
   const win = await renderOverlayListing({ html: "<html><body><h1>Story</h1></body></html>", url: "https://archiveofourown.org/works/123", sessionMode: "kernel", hostAccess: false });
   assert.ok(win.document.querySelector("[data-trace-page-only-access]"));

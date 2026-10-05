@@ -953,7 +953,12 @@ body[data-trace-reader-view="settings"] .popup-privacy { display: none; }
 body[data-trace-reader-view="settings"] #popup-session-secondary { display: block; min-height: 44px; margin: 4px auto 0; }
 
 .popup-host-access { gap: 12px; padding-bottom: 18px; }
-.popup-host-access .popup-cta:disabled { opacity: 0.55; cursor: default; }
+.popup-host-access .popup-cta:disabled {
+    background: var(--raised);
+    color: var(--text-2);
+    opacity: 1;
+    cursor: default;
+}
 .popup-host-access [role="status"]:empty { display: none; }
 #popup-host-access[hidden] { display: none; }
 body[data-trace-host-access="missing"] .popup-sheet,

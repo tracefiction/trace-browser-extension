@@ -108,6 +108,20 @@ try {
     window.__traceAction=e.apiManager.getAPI("browserAction",e,"addon_parent");
     const {CustomizableUI}=ChromeUtils.importESModule("moz-src:///browser/components/customizableui/CustomizableUI.sys.mjs");
     CustomizableUI.addWidgetToArea(window.__traceAction.id, CustomizableUI.AREA_NAVBAR);
+    // Observe the native parent API's promise, whose lifetime outlasts the popup
+    // context. Delegate unchanged to Firefox; do not fake a request or decision.
+    const permissions=e.apiManager.getAPI("permissions",e,"addon_parent");
+    const getAPI=permissions.getAPI.bind(permissions);
+    window.__traceRequestResults=[];
+    permissions.getAPI=context=>{
+      const api=getAPI(context), request=api.permissions.request;
+      api.permissions.request=(...args)=>{
+        const pending=request(...args);
+        pending.then(granted=>window.__traceRequestResults.push(granted));
+        return pending;
+      };
+      return api;
+    };
     window.__traceRequests=[];
     window.__traceHostObserver={observe(subject){window.__traceRequests.push(subject.wrappedJSObject.permissions.origins);}};
     Services.obs.addObserver(window.__traceHostObserver,"webextension-optional-permission-prompt");`);
@@ -116,6 +130,7 @@ try {
   await driver.send("WebDriver:Navigate", { url: `${base}host-access-test-control.html` });
   const controlHandle = value(await driver.send("WebDriver:GetWindowHandle"));
   const api = expression => asyncScript(`const done=arguments[arguments.length-1]; const api=(window.wrappedJSObject||window).browser; (${expression}).then(done,e=>done({error:String(e)}));`);
+  await execute("const page=window.wrappedJSObject||window; window.__traceAdded=[]; page.browser.permissions.onAdded.addListener(p=>window.__traceAdded.push([...p.origins]));");
   const allPermissions = { origins: manifest.host_permissions };
   const allHosts = manifest.host_permissions;
   const ao3 = allPermissions.origins.filter(origin => /archiveofourown|transformativeworks/.test(origin));
@@ -178,6 +193,11 @@ try {
     assert.ok(!result?.error, result?.error); return result;
   };
   const popupScript = script => popupQuery(`return actor.executeScript(${JSON.stringify(script)},[],{sandboxName:'default',newSandbox:false,async:false});`);
+  const archiveScript = async script => {
+    await context("chrome");
+    const result = await asyncScript(`const done=arguments[arguments.length-1]; const b=[...gBrowser.browsers].find(b=>b.currentURI.spec===${JSON.stringify(archiveURL)}); const actor=b.browsingContext.currentWindowGlobal.getActor('MarionetteCommands'); actor.executeScript(${JSON.stringify(script)},[],{sandboxName:'default',newSandbox:false,async:false}).then(done,e=>done({error:String(e)}));`);
+    assert.ok(!result?.error, result?.error); return result;
+  };
   const openPopup = async () => {
     await context("chrome"); await execute("window.focus();");
     const widget = await execute("return window.__traceAction.id;");
@@ -192,6 +212,7 @@ try {
         throw error;
       }
     }, "popup missing-access state");
+    await until(async () => await archiveScript("return !document.querySelector('[data-trace-page-only-access]');"), "page line hidden while real popup is open");
   };
   const closePopup = async () => {
     await context("chrome"); await execute("const {ViewPopup}=ChromeUtils.importESModule('resource:///modules/ExtensionPopups.sys.mjs'); ViewPopup.for(window.__traceAction.extension,window)?.closePopup();");
@@ -202,6 +223,11 @@ try {
     assert.equal(styles.padding, "18px"); assert.equal(styles.right, "18px"); assert.equal(styles.radius, "12px"); assert.equal(styles.overflow, false);
     assert.equal(styles.background, dark ? "rgb(255, 132, 88)" : "rgb(194, 76, 34)");
     save(`popup-${dark ? "ink" : "light"}.png`, await popupQuery("const el=await actor.findElement('css selector','.popup',{}); return actor.takeScreenshot(el,0,false,true);"));
+    // Inspect the fleeting disabled state without requesting or mocking access.
+    await popupScript("document.querySelector('#popup-host-access-allow').disabled=true;");
+    const disabled = await popupScript("const s=getComputedStyle(document.querySelector('#popup-host-access-allow')); return {background:s.backgroundColor,color:s.color,opacity:s.opacity};");
+    assert.deepEqual(disabled, { background: dark ? "rgb(29, 31, 35)" : "rgb(233, 238, 243)", color: dark ? "rgb(180, 188, 198)" : "rgb(95, 107, 118)", opacity: "1" });
+    save(`popup-disabled-${dark ? "ink" : "light"}.png`, await popupQuery("const el=await actor.findElement('css selector','.popup',{}); return actor.takeScreenshot(el,0,false,true);"));
     await closePopup();
     await switchHandle(archiveHandle);
     await until(() => execute("return !!document.querySelector('[data-trace-page-only-access]');"), "toolbar activates the page-only warning");
@@ -215,15 +241,28 @@ try {
     await expectBadge(true);
     await switchHandle(archiveHandle);
   }
-  const clickAllow = () => popupQuery(`const el=await actor.findElement('css selector','#popup-host-access-allow',{}); return actor.sendQuery('MarionetteCommandsParent:clickElement',{elem:el,capabilities:${JSON.stringify(session.capabilities)}});`);
-  await openPopup(); await clickAllow(); await answerPrompt(false); await closePopup();
+  const clickAllow = async () => {
+    await popupQuery(`const el=await actor.findElement('css selector','#popup-host-access-allow',{}); return actor.sendQuery('MarionetteCommandsParent:clickElement',{elem:el,capabilities:${JSON.stringify(session.capabilities)}});`);
+    await context("chrome");
+    await until(() => execute("return !document.querySelector('browser[webextension-view-type=popup]');"), "Allow destroys the popup before the native decision");
+    await until(() => execute("return PopupNotifications.panel.state==='open' && !!document.querySelector('#addon-webext-permissions-notification');"), "unobstructed native prompt survives popup destruction");
+    assert.equal(await archiveScript("return !!document.querySelector('[data-trace-page-only-access]');"), true, "line returns while the native decision is pending");
+  };
+  await openPopup(); await clickAllow(); await answerPrompt(false);
+  await context("chrome");
+  await until(() => execute("return window.__traceRequestResults.length===1;"), "native request resolves after closed popup and decline");
+  assert.deepEqual(await execute("return window.__traceRequestResults;"), [false]);
   await expectBadge(true);
   assert.equal(await api(`api.permissions.contains({origins:${JSON.stringify(ao3)}})`), false, "declining keeps access off");
   await switchHandle(archiveHandle); await openPopup();
   assert.equal(await popupScript("return document.querySelector('#popup-host-access-allow').disabled;"), false, "popup remains retryable");
-  await clickAllow(); await answerPrompt(true); await closePopup();
+  await clickAllow(); await answerPrompt(true);
+  await context("chrome");
+  await until(() => execute("return window.__traceRequestResults.length===2;"), "native request resolves after closed popup and grant");
+  assert.deepEqual(await execute("return window.__traceRequestResults;"), [false, true]);
   await switchHandle(controlHandle);
   await until(async () => await api(`api.permissions.contains({origins:${JSON.stringify(allHosts)}})`) === true, "all declared hosts granted in one prompt");
+  await until(() => execute("return window.__traceAdded.length===1;"), "real onAdded fires after requesting popup is destroyed");
   await expectBadge(false);
   await switchHandle(archiveHandle);
   await until(() => execute("return !!document.querySelector('[data-trace-connect-notice]');"), "archive scripts restored after grant");
@@ -235,14 +274,16 @@ try {
   await expectBadge(true);
   await switchHandle(archiveHandle);
   await until(() => execute("return !!document.querySelector('[data-trace-page-only-access]');"), "Trace-only gap restores the persistent line");
-  await openPopup(); await clickAllow(); await answerPrompt(true); await closePopup();
+  await openPopup(); await clickAllow(); await answerPrompt(true);
   await expectBadge(false);
+  await until(() => execute("return window.__traceAdded.length===2;"), "second real onAdded after popup destruction");
   await switchHandle(archiveHandle);
   await until(() => execute("return !document.querySelector('[data-trace-page-only-access]');"), "onAdded clears line without reload");
   await context("chrome");
+  assert.deepEqual(await execute("return window.__traceRequestResults;"), [false, true, true], "native requests resolve with their real decisions after popup destruction");
   assert.equal(await execute(`return window.__traceRequests.length;`), 3, "one native prompt per Allow click, including retry");
   assert.equal(await execute(`return [...gBrowser.tabs].some(t=>t.linkedBrowser.currentURI.spec.startsWith(${JSON.stringify(base + "archive-access.html")}));`), false, "no redundant permission tab");
-  console.log(`Headless Firefox passed: real toolbar one-page activation, non-dismissable warning, single all-host native prompt, denial/retry, Trace-only gaps, badge and line clear on grant, light/Ink screenshots. Screenshots: ${screenshots}`);
+  console.log(`Headless Firefox passed: real popup hides page line, Allow destroys popup before native decision, unobstructed all-host prompt survives close, denial/retry, onAdded and grant after popup destruction, badge/line recovery, Trace-only gaps, light/Ink enabled and neutral disabled screenshots. Screenshots: ${screenshots}`);
 } finally {
   webServer?.close(); driver?.close();
   if (Number.isInteger(firefoxPid)) { try { process.kill(firefoxPid, "SIGTERM"); } catch {} }

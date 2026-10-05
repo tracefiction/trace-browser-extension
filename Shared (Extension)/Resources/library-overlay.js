@@ -11,6 +11,7 @@
   const WRAP_ATTR = "data-trace-library-overlay-wrap";
   const PAGE_ONLY_ACCESS_ATTR = "data-trace-page-only-access";
   var persistentAccessMissing = false;
+  var accessPopupOpen = false;
   var hostAccessRevision = 0;
   const CONNECT_NOTICE_ATTR = "data-trace-connect-notice";
   const CONNECT_NOTICE_DISMISS_KEY = "trace:connect-notice:dismissed";
@@ -942,7 +943,7 @@ function traceRefreshPageTokens() {
 
   function renderPageOnlyAccess() {
     var line = document.querySelector("[" + PAGE_ONLY_ACCESS_ATTR + "]");
-    if (!persistentAccessMissing) {
+    if (!persistentAccessMissing || accessPopupOpen) {
       if (line) line.remove();
       positionPageNotices();
       return;
@@ -969,9 +970,9 @@ function traceRefreshPageTokens() {
     positionPageNotices();
   }
 
-  function acceptPersistentAccess(granted) {
-    if (typeof granted !== "boolean") return;
-    persistentAccessMissing = !granted;
+  function acceptPersistentAccess(granted, popupOpen) {
+    if (typeof popupOpen === "boolean") accessPopupOpen = popupOpen;
+    if (typeof granted === "boolean") persistentAccessMissing = !granted;
     renderPageOnlyAccess();
   }
 
@@ -981,7 +982,7 @@ function traceRefreshPageTokens() {
     function finish(response) {
       if (settled) return;
       settled = true;
-      if (revision === hostAccessRevision && response && response.ok) acceptPersistentAccess(response.granted);
+      if (revision === hostAccessRevision && response && response.ok) acceptPersistentAccess(response.granted, response.popupOpen);
     }
     try {
       var pending = ext.runtime.sendMessage({ type: "TRACE_ARCHIVE_HOST_ACCESS_GET" }, function (response) {
@@ -4351,7 +4352,7 @@ function traceRefreshPageTokens() {
       ext.runtime.onMessage?.addListener(function (message) {
         if (message && message.type === "TRACE_ARCHIVE_HOST_ACCESS_CHANGED") {
           hostAccessRevision += 1;
-          acceptPersistentAccess(message.granted);
+          acceptPersistentAccess(message.granted, message.popupOpen);
         }
       });
       checkPersistentAccess();

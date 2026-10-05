@@ -2927,6 +2927,7 @@ if (KERNEL_SESSION_ACTIVE && !isLikelyIosExtensionUi && !EARNED_PERMISSION_ONBOA
   let access = [];
   let selected = null;
   let requesting = false;
+  TraceArchiveAccess.watchPopup();
   const renderAccess = items => {
     access = Array.isArray(items) ? items : [];
     const missing = access.filter(item => item.granted === false);
@@ -2945,21 +2946,15 @@ if (KERNEL_SESSION_ACTIVE && !isLikelyIosExtensionUi && !EARNED_PERMISSION_ONBOA
   void TraceArchiveAccess.read().then(response => { if (response?.ok) renderAccess(response.access); }, () => {});
   button.addEventListener("click", () => {
     if (!selected || requesting) return;
-    const requestedSite = selected.site;
     const pending = TraceArchiveAccess.request();
     requesting = true;
     button.disabled = true;
     result.textContent = "";
-    pending.then(response => {
-      requesting = false;
-      renderAccess(response.access || access);
-      result.textContent = response.access?.find(item => item.site === requestedSite)?.granted === true
-        ? "" : "Site access is still off. Try Allow again.";
-      requestKernelSnapshot();
-    }, () => {
-      requesting = false;
-      renderAccess(access);
-      result.textContent = "Site access could not be allowed. Try again.";
-    });
+    // Firefox anchors its permission doorhanger behind this popup. Start the
+    // request synchronously in the click, then uncover the browser's prompt.
+    // onAdded in the background clears the badge/page line and restores pages;
+    // a decline leaves access off, so reopening this popup offers Allow again.
+    void pending.catch(() => {});
+    window.close();
   });
 }

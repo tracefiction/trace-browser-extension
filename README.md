@@ -255,17 +255,21 @@ toolbar badge and **Site access is off — click to allow** tooltip while any
 of those hosts is missing access.
 
 Click the icon, then **Allow Trace on AO3 and FanFiction.net** in the popup.
-That direct click requests every declared host together, so Firefox shows one
-permission prompt. Approval restores Trace on supported open archive pages;
+That direct click requests every declared host together and closes the popup
+immediately, leaving Firefox's single permission prompt unobstructed.
+Approval restores Trace on supported open archive pages;
 the badge clears only when the full host set is granted. Declining leaves
 Allow available to try again.
 
 A toolbar click may activate Trace on the current archive page without granting
-persistent access. That page keeps a non-dismissable line: **Trace is only on
+persistent access. While the popup is closed, that page keeps a non-dismissable
+line: **Trace is only on
 for this page. Allow it on AO3 to keep it on — click the Trace icon.**
 FanFiction.net pages name FanFiction.net instead. The line remains through
 Connect-notice dismissal and account-state changes, and disappears when the
-full permission grant arrives, without reloading the page.
+full permission grant arrives, without reloading the page. Opening the toolbar
+popup hides the line; closing it without granting access shows the line again.
+The background handles approval even after the popup closes.
 
 Without even one-page access, content scripts cannot run to show a notice. The
 popup requests directly from its own click handler: Firefox's restricted API

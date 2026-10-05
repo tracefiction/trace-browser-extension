@@ -338,6 +338,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }));
     let generation = 0;
     let badgeUpdate = Promise.resolve();
+    const popups = /* @__PURE__ */ new Set();
     const refresh = async () => {
       const current = ++generation;
       const access = await read();
@@ -366,7 +367,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
             if (!archiveSite({ id: runtime.id, tab, frameId: 0 })) return;
             await call(tabs, "sendMessage", [tab.id, {
               type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED",
-              granted: access[0]?.granted ?? null
+              granted: access[0]?.granted ?? null,
+              popupOpen: popups.size > 0
             }, { frameId: 0 }]).catch(() => void 0);
           }));
         } catch {
@@ -384,9 +386,18 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
       void refresh().then(async (access) => {
         if (type === "TRACE_ARCHIVE_HOST_ACCESS_REFRESH") await recover();
-        return popup ? { ok: true, access } : { ok: true, granted: access[0]?.granted ?? null };
+        return popup ? { ok: true, access } : { ok: true, granted: access[0]?.granted ?? null, popupOpen: popups.size > 0 };
       }).then(respond, () => respond({ ok: false }));
       return true;
+    });
+    runtime.onConnect?.addListener((port) => {
+      if (port.name !== "trace-archive-access-popup" || !port.sender || !isPopup(port.sender) || port.sender.frameId !== void 0 && port.sender.frameId !== 0) return;
+      popups.add(port);
+      void refresh();
+      port.onDisconnect.addListener(() => {
+        popups.delete(port);
+        void refresh();
+      });
     });
     runtime.onInstalled?.addListener((details) => {
       if (details.reason === "install" || details.reason === "update") void refresh();

@@ -28,6 +28,7 @@ function harness(mode, scheme = "moz-extension", contains = () => false, actionF
     id: "trace-test", getURL: path => `${scheme}://trace-test/${path}`,
     getManifest: () => ({ host_permissions: hosts, action: { default_title: "Trace fixture" } }),
     onInstalled: event("installed"), onStartup: event("startup"),
+    onConnect: event("connect"),
     onMessage: { addListener(fn) { listeners.push(fn); } },
     sendMessage: api(message => pushed.push(message)),
   };
@@ -51,11 +52,17 @@ function harness(mode, scheme = "moz-extension", contains = () => false, actionF
     recover: async () => { recovered++; },
   });
   const popup = { id: runtime.id, url: runtime.getURL("popup.html") };
+  const connect = (sender = popup, name = "trace-archive-access-popup") => {
+    const disconnects = [];
+    const port = { name, sender, onDisconnect: { addListener(fn) { disconnects.push(fn); } } };
+    events.connect(port);
+    return () => disconnects.forEach(fn => fn());
+  };
   const send = (type, sender = popup) => new Promise(resolve => {
     const result = listeners[0]({ type, origins: ["https://evil.test/*"] }, sender, resolve);
     if (result !== true) resolve(undefined);
   });
-  return { runtime, action, events, checked, pushed, pageMessages, writes, badge, refresh, send, popup, get recovered() { return recovered; } };
+  return { runtime, action, events, checked, pushed, pageMessages, writes, badge, refresh, send, popup, connect, get recovered() { return recovered; } };
 }
 
 function assertBadge(h, missing) {
@@ -123,7 +130,7 @@ for (const [mode, scheme] of [["promise", "moz-extension"], ["callback", "chrome
     }
     assert.equal(await h.send("TRACE_ARCHIVE_HOST_ACCESS_OPEN", archive), undefined);
     assert.equal(await h.send("TRACE_ARCHIVE_HOST_ACCESS_FINISH"), undefined);
-    assert.deepEqual(await h.send("TRACE_ARCHIVE_HOST_ACCESS_GET", archive), { ok: true, granted: false });
+    assert.deepEqual(await h.send("TRACE_ARCHIVE_HOST_ACCESS_GET", archive), { ok: true, granted: false, popupOpen: false });
     assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_REFRESH", archive)).ok, false);
     assert.equal(h.recovered, 0);
     assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_GET")).ok, true);
@@ -133,7 +140,7 @@ for (const [mode, scheme] of [["promise", "moz-extension"], ["callback", "chrome
     const h = harness(mode, scheme, () => granted); await h.refresh();
     h.pageMessages.length = 0;
     granted = true; h.events.added(); await tick();
-    assert.deepEqual(h.pageMessages, [1, 2].map(id => ({ id, message: { type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED", granted: true }, options: { frameId: 0 } })));
+    assert.deepEqual(h.pageMessages, [1, 2].map(id => ({ id, message: { type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED", granted: true, popupOpen: false }, options: { frameId: 0 } })));
     h.pageMessages.length = 0;
     granted = false; h.events.removed(); await tick();
     assert.ok(h.pageMessages.every(item => item.message.granted === false));
@@ -152,6 +159,33 @@ for (const [mode, scheme] of [["promise", "moz-extension"], ["callback", "chrome
     const h = harness(mode, scheme, () => false, true);
     assert.equal((await h.send("TRACE_ARCHIVE_HOST_ACCESS_REFRESH")).ok, true);
     assert.equal(h.recovered, 1);
+  });
+  test(`popup lifetime hides page evidence; closing and onAdded work independently of the popup (${mode})`, async () => {
+    let granted = false;
+    const h = harness(mode, scheme, () => granted); await h.refresh();
+    const archive = { id: h.runtime.id, tab: { id: 1, url: "https://archiveofourown.org/works/123" }, frameId: 0 };
+    const closeFirst = h.connect(); await tick();
+    assert.ok(h.pageMessages.at(-1).message.popupOpen);
+    assert.deepEqual(await h.send("TRACE_ARCHIVE_HOST_ACCESS_GET", archive), { ok: true, granted: false, popupOpen: true }, "newly activated content sees the open popup");
+    const closeSecond = h.connect(); closeFirst(); await tick();
+    assert.equal(h.pageMessages.at(-1).message.popupOpen, true, "another popup is still open");
+    closeSecond(); await tick();
+    assert.deepEqual(h.pageMessages.at(-1).message, { type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED", granted: false, popupOpen: false });
+    assertBadge(h, true, "closing or declining never clears the badge");
+    granted = true; h.events.added(); await tick();
+    assert.equal(h.recovered, 1); assertBadge(h, false);
+    assert.deepEqual(h.pageMessages.at(-1).message, { type: "TRACE_ARCHIVE_HOST_ACCESS_CHANGED", granted: true, popupOpen: false });
+  });
+  test(`only a genuine top-frame toolbar popup can hide page evidence (${mode})`, async () => {
+    const h = harness(mode, scheme); await h.refresh();
+    for (const sender of [
+      { ...h.popup, id: "other" }, { ...h.popup, frameId: 1 },
+      { ...h.popup, tab: { id: 1, url: h.popup.url } },
+      { ...h.popup, url: h.runtime.getURL("options.html") },
+    ]) h.connect(sender);
+    h.connect(h.popup, "trace-unrelated-port");
+    await tick();
+    assert.equal(h.pageMessages.at(-1).message.popupOpen, false);
   });
 }
 
