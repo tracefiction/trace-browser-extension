@@ -73,7 +73,18 @@ if (isLikelyIosExtensionUi) {
 
 // Where "See Trace Unlimited" goes. iPadOS can report a Mac user agent, so
 // touch and Safari's own platform report decide too; a desktop browser keeps
-// the web plan page.
+// the web plan page. Every Unlimited action waits for `upgradePlatformReady`
+// before it opens anything.
+function isSafariExtensionUi() {
+  try {
+    if (typeof location !== "undefined" && location.protocol === "safari-web-extension:") return true;
+    const ua = navigator.userAgent || "";
+    return /AppleWebKit/i.test(ua) && !/Chrome|Chromium|CriOS|Edg|OPR|Firefox|FxiOS/i.test(ua);
+  } catch {
+    return false;
+  }
+}
+
 let upgradeOpensTraceApp = (() => {
   if (isLikelyIosExtensionUi) return true;
   try {
@@ -83,14 +94,25 @@ let upgradeOpensTraceApp = (() => {
   }
 })();
 const upgradePlatformReady = (async () => {
-  if (upgradeOpensTraceApp || typeof ext?.runtime?.getPlatformInfo !== "function") return;
-  try {
-    const info = await extensionPromiseCall(ext.runtime, "getPlatformInfo");
-    if (info?.os === "ios") upgradeOpensTraceApp = true;
-  } catch {
-    // Without a platform report the user agent decides.
+  if (upgradeOpensTraceApp) return;
+  let os = null;
+  if (typeof ext?.runtime?.getPlatformInfo === "function") {
+    try {
+      const info = await extensionPromiseCall(ext.runtime, "getPlatformInfo");
+      os = typeof info?.os === "string" ? info.os : null;
+    } catch {
+      os = null;
+    }
   }
+  // Safari without a platform report never falls back to the web plan page.
+  if (os === "ios" || (os === null && isSafariExtensionUi())) upgradeOpensTraceApp = true;
 })();
+
+/** Opens an Unlimited action once the platform is known. */
+function openUnlimited(webUrl = TRACE_UPGRADE_URL) {
+  return upgradePlatformReady.then(() =>
+    openTraceApp(upgradeOpensTraceApp ? TRACE_IOS_APP_UNLIMITED_URL : webUrl));
+}
 
 function upgradeDestinationUrl() {
   return upgradeOpensTraceApp ? TRACE_IOS_APP_UNLIMITED_URL : TRACE_UPGRADE_URL;
@@ -359,6 +381,7 @@ function buildPopupUi(model) {
       ctaHidden: false,
       ctaLabel: "See Trace Unlimited",
       ctaUrl: upgradeDestinationUrl(),
+      ctaUnlimited: true,
       ctaEmphasis: "primary",
       archiveLinksHidden: true,
       importHidden: true,
@@ -380,6 +403,7 @@ function buildPopupUi(model) {
       ctaHidden: false,
       ctaLabel: recoveryCtaLabel(auth),
       ctaUrl: recoveryCtaUrl(auth, authState.helpUrl),
+      ctaUnlimited: auth === "upgrade_required",
       ctaEmphasis: "primary",
       archiveLinksHidden: true,
       importHidden: true,
@@ -528,6 +552,8 @@ function renderStatus(patch) {
   if (ctaEl) {
     ctaEl.hidden = ui.ctaHidden;
     ctaEl.dataset.externalUrl = usefulActionUrl(ui.ctaUrl);
+    if (ui.ctaUnlimited) ctaEl.dataset.unlimited = "1";
+    else delete ctaEl.dataset.unlimited;
     delete ctaEl.dataset.sessionAction;
     ctaEl.textContent = ui.ctaLabel;
     ctaEl.dataset.emphasis = ui.ctaEmphasis;
@@ -2321,6 +2347,7 @@ function renderKernelSnapshot(snapshot) {
   if (ctaEl) {
     ctaEl.hidden = actions.primary == null;
     delete ctaEl.dataset.externalUrl;
+    delete ctaEl.dataset.unlimited;
     ctaEl.textContent = actions.primary ? labels[actions.primary] : "";
     ctaEl.dataset.sessionAction = actions.primary || "";
     // A retry or a cancel is never the task; only connecting is.
@@ -2903,7 +2930,7 @@ function bindEarnedActionButtons() {
       if (action === "save_story") void saveStoryFromPopup();
       if (action === "enable_auto_track") void enableAutomaticSavingFromPopup();
       if (action === "open_app") openTraceApp(isLikelyIosExtensionUi ? TRACE_IOS_APP_LIBRARY_URL : TRACE_HOME_URL);
-      if (action === "open_upgrade") void upgradePlatformReady.then(() => openTraceApp(upgradeDestinationUrl()));
+      if (action === "open_upgrade") void openUnlimited();
       if (action === "open_connect") openTraceApp(TRACE_IOS_APP_CONNECT_URL);
       if (action === "check_link") {
         sendKernelRuntimeMessage({ type: "TRACE_SESSION_ACTION", action: "connect" }, (response) => {
@@ -2946,10 +2973,12 @@ function initializeKernelPopup() {
 
 for (const id of ["popup-cta", "popup-session-help"]) {
   document.getElementById(id)?.addEventListener("click", (event) => {
-    const url = event.currentTarget.dataset.externalUrl;
+    const control = event.currentTarget;
+    const url = control.dataset.externalUrl;
     if (!url) return;
     event.preventDefault();
-    openTraceApp(url);
+    if (control.dataset.unlimited === "1") void openUnlimited(url);
+    else openTraceApp(url);
   });
 }
 

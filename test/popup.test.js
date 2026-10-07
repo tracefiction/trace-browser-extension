@@ -2813,6 +2813,38 @@ test("the full-Library sheet routes its Unlimited action by platform", async () 
   }
 });
 
+function libraryFullSheetHarness(options = {}) {
+  const connected = { state: "connected", message: "Connected" };
+  return createPopupHarness({
+    storageState: { traceAuthState: connected, traceFirstSaveSeen: true, traceLibraryCount: 100 },
+    popupState: { pro: false, authState: connected, firstSaveSeen: true, libraryCount: 100,
+      capacity: { blocked: true, prompt: false }, activeTab: { kind: "supported_story", site: "ao3" } },
+    ...options,
+  });
+}
+
+const MAC_WEBKIT_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Safari/605.1.15";
+
+for (const [name, options, expected] of [
+  ["an iPad known only from Safari's platform info",
+    { userAgent: MAC_WEBKIT_USER_AGENT, platformOs: "ios", maxTouchPoints: 0 }, IOS_APP_UNLIMITED_URL],
+  ["Safari without a platform report",
+    { userAgent: MAC_WEBKIT_USER_AGENT, maxTouchPoints: 0 }, IOS_APP_UNLIMITED_URL],
+  ["Safari on a Mac", { userAgent: MAC_WEBKIT_USER_AGENT, platformOs: "mac" }, WEB_UPGRADE_URL],
+  ["Chrome without a platform report",
+    { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/141.0" }, WEB_UPGRADE_URL],
+]) {
+  test(`the full-Library sheet's Unlimited action waits for the platform on ${name}`, async () => {
+    const h = libraryFullSheetHarness(options);
+    const cta = h.document.getElementById("popup-cta");
+    // Click before the platform report has settled.
+    cta.click();
+    for (let attempt = 0; attempt < 4; attempt += 1) await flush();
+    assert.equal(cta.textContent, "See Trace Unlimited");
+    assert.deepEqual(h.createdTabs, [expected]);
+  });
+}
+
 test("Free plan line: the count, a heads-up at 80% for a day, nothing for Unlimited", () => {
   const h = createPopupHarness();
   const line = (args) => JSON.parse(JSON.stringify(h.evaluate(`freePlanLine(${JSON.stringify(args)})`)));
