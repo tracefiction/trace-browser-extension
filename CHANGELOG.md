@@ -4,6 +4,11 @@ Trace is in beta. This file lists the changes that matter to people using the
 Chrome, Edge and Firefox extension. The Safari extension ships inside the Trace
 iPhone app, and its notes go with each app release.
 
+## Unreleased
+
+- **The popup shows how full a Free Library is.** It reads, for example, **64 of 100 stories kept**. At 80% it says **You’re at 80 of 100 stories. Unlimited keeps every story.** for a day, then goes back to the count. Nothing is shown for Unlimited.
+- **The Library full notice no longer follows every new story.** After an automatic save is refused, the notice appears at most once a day, and **Not now** quiets it for a week. Adding a story yourself still explains why it wasn't added.
+
 ## 0.7.2
 
 - **Trace makes missing site access visible on its toolbar icon.** A **!** badge and **Site access is off — click to allow** tooltip lead to **Allow Trace on AO3 and FanFiction.net** in the popup. One click requests all declared hosts together: AO3 and its mirrors, FanFiction.net, and Trace's web/API origins needed to connect. The popup closes immediately so Firefox's permission prompt is unobstructed. The badge clears only when all are granted; declining leaves Allow available when you reopen the popup.

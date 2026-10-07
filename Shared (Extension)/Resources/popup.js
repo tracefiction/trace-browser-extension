@@ -20,6 +20,15 @@ const TRACE_IOS_APP_CONNECT_URL = "traceauth://open?destination=extension-connec
 // Content-free link that only brings the Trace app forward; the app reconciles
 // any confirmed first story itself. It carries no account, story, or URL.
 const TRACE_IOS_APP_LIBRARY_URL = "traceauth://open?destination=library";
+// On iPhone and iPad, Unlimited is offered only inside the Trace app: this
+// fixed link opens its Unlimited sheet and carries no account or page data.
+const TRACE_IOS_APP_UNLIMITED_URL = "traceauth://open?destination=unlimited";
+// The Free plan's Library size. The account summary the extension reads
+// reports the count but not the limit, so this mirrors the server default.
+const FREE_LIBRARY_LIMIT = 100;
+const FREE_LIMIT_HEADS_UP_KEY = "traceFreeLimitHeadsUpV1";
+const FREE_LIMIT_HEADS_UP_SHARE = 0.8;
+const FREE_LIMIT_HEADS_UP_WINDOW_MS = 24 * 60 * 60 * 1000;
 const ACCOUNT_PROJECTION_REVISION_KEY = "traceAccountProjectionRevisionV1";
 const STORY_CONFIRMATION_PATIENCE_MS = 20000;
 const AO3_WORKS_URL = "https://archiveofourown.org/works";
@@ -62,6 +71,121 @@ if (isLikelyIosExtensionUi) {
   document.documentElement.dataset.tracePlatform = "ios";
 }
 
+// Where "See Trace Unlimited" goes. iPadOS can report a Mac user agent, so
+// touch and Safari's own platform report decide too; a desktop browser keeps
+// the web plan page. Every Unlimited action waits for `upgradePlatformReady`
+// before it opens anything.
+function isSafariExtensionUi() {
+  try {
+    if (typeof location !== "undefined" && location.protocol === "safari-web-extension:") return true;
+    const ua = navigator.userAgent || "";
+    return /AppleWebKit/i.test(ua) && !/Chrome|Chromium|CriOS|Edg|OPR|Firefox|FxiOS/i.test(ua);
+  } catch {
+    return false;
+  }
+}
+
+let upgradeOpensTraceApp = (() => {
+  if (isLikelyIosExtensionUi) return true;
+  try {
+    return /Macintosh/i.test(navigator.userAgent || "") && (navigator.maxTouchPoints || 0) > 1;
+  } catch {
+    return false;
+  }
+})();
+const upgradePlatformReady = (async () => {
+  if (upgradeOpensTraceApp) return;
+  let os = null;
+  if (typeof ext?.runtime?.getPlatformInfo === "function") {
+    try {
+      const info = await extensionPromiseCall(ext.runtime, "getPlatformInfo");
+      os = typeof info?.os === "string" ? info.os : null;
+    } catch {
+      os = null;
+    }
+  }
+  // Safari without a platform report never falls back to the web plan page.
+  if (os === "ios" || (os === null && isSafariExtensionUi())) upgradeOpensTraceApp = true;
+})();
+
+/** Opens an Unlimited action once the platform is known. */
+function openUnlimited(webUrl = TRACE_UPGRADE_URL) {
+  return upgradePlatformReady.then(() =>
+    openTraceApp(upgradeOpensTraceApp ? TRACE_IOS_APP_UNLIMITED_URL : webUrl));
+}
+
+function upgradeDestinationUrl() {
+  return upgradeOpensTraceApp ? TRACE_IOS_APP_UNLIMITED_URL : TRACE_UPGRADE_URL;
+}
+
+/**
+ * The Free plan line: the Library count, and once at 80% a calm heads-up.
+ * The heads-up shows for a day from first sight, then the plain count
+ * returns; it can show again only after the Library drops back below 80%.
+ * Nothing shows for Unlimited, or while the plan or count is unknown.
+ */
+function freePlanLine({ pro, libraryCount, limit = FREE_LIBRARY_LIMIT, headsUpShownAt = null, now = Date.now() }) {
+  if (pro !== false || !Number.isSafeInteger(libraryCount) || libraryCount < 0) return null;
+  if (!Number.isSafeInteger(limit) || limit <= 0) return null;
+  const nearLimit = libraryCount >= Math.ceil(limit * FREE_LIMIT_HEADS_UP_SHARE) && libraryCount < limit;
+  const headsUp = nearLimit &&
+    (headsUpShownAt == null || (now >= headsUpShownAt && now - headsUpShownAt < FREE_LIMIT_HEADS_UP_WINDOW_MS));
+  return {
+    text: headsUp
+      ? `You’re at ${libraryCount} of ${limit} stories. Unlimited keeps every story.`
+      : `${libraryCount} of ${limit} stories kept`,
+    headsUp,
+    nearLimit,
+  };
+}
+
+// `undefined` until the stored heads-up record has been read.
+let freeLimitHeadsUpShownAt;
+// Which surfaces may show the plan line: the "Trace is on" sheet, and the
+// reader view's settled states (a saved story, a list or another site).
+const freePlanSlots = { sheet: false, reader: false };
+
+/** Resolves the line for this popup opening and records the heads-up once. */
+function currentFreePlanLine(model) {
+  if (freeLimitHeadsUpShownAt === undefined) return null;
+  const line = freePlanLine({ pro: model.pro, libraryCount: model.libraryCount, headsUpShownAt: freeLimitHeadsUpShownAt });
+  if (!line) return null;
+  if (line.headsUp && freeLimitHeadsUpShownAt === null) {
+    freeLimitHeadsUpShownAt = Date.now();
+    void extensionPromiseCall(ext.storage?.local, "set",
+      [{ [FREE_LIMIT_HEADS_UP_KEY]: { shownAt: freeLimitHeadsUpShownAt } }]).catch(() => {});
+  } else if (!line.nearLimit && freeLimitHeadsUpShownAt !== null && model.libraryCount < FREE_LIBRARY_LIMIT) {
+    freeLimitHeadsUpShownAt = null;
+    void extensionPromiseCall(ext.storage?.local, "set", [{ [FREE_LIMIT_HEADS_UP_KEY]: null }]).catch(() => {});
+  }
+  return line;
+}
+
+function renderFreePlanLines() {
+  const visible = freePlanSlots.sheet || freePlanSlots.reader;
+  const line = visible ? currentFreePlanLine(popupModel) : null;
+  for (const [id, slot] of [["popup-plan", "sheet"], ["popup-earned-plan", "reader"]]) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    const shown = Boolean(line && freePlanSlots[slot]);
+    el.hidden = !shown;
+    el.textContent = shown ? line.text : "";
+    if (shown) el.dataset.headsUp = String(line.headsUp);
+    else delete el.dataset.headsUp;
+  }
+}
+
+void (async () => {
+  try {
+    const stored = await extensionPromiseCall(ext.storage?.local, "get", [[FREE_LIMIT_HEADS_UP_KEY]]);
+    const shownAt = stored?.[FREE_LIMIT_HEADS_UP_KEY]?.shownAt;
+    freeLimitHeadsUpShownAt = Number.isSafeInteger(shownAt) ? shownAt : null;
+  } catch {
+    freeLimitHeadsUpShownAt = null;
+  }
+  renderFreePlanLines();
+})();
+
 const ACTIVE_TAB_PROBE = globalThis.TRACE_IOS_ACTIVE_TAB_PROBE === true;
 const EARNED_PERMISSION_ONBOARDING =
   globalThis.TRACE_IOS_EARNED_PERMISSION_ONBOARDING &&
@@ -99,6 +223,7 @@ const popupModel = {
   authState: fallbackStatus,
   firstSaveSeen: false,
   libraryCount: null,
+  pro: null,
   activeTab: { kind: "unknown" },
   capacity: null,
 };
@@ -182,6 +307,7 @@ function recoveryLead(auth, message) {
 }
 
 function recoveryCtaUrl(auth, helpUrl) {
+  if (auth === "upgrade_required" && upgradeOpensTraceApp) return TRACE_IOS_APP_UNLIMITED_URL;
   if (
     isLikelyIosExtensionUi &&
     (auth === "signed_out" ||
@@ -254,7 +380,8 @@ function buildPopupUi(model) {
       leadHidden: false,
       ctaHidden: false,
       ctaLabel: "See Trace Unlimited",
-      ctaUrl: TRACE_UPGRADE_URL,
+      ctaUrl: upgradeDestinationUrl(),
+      ctaUnlimited: true,
       ctaEmphasis: "primary",
       archiveLinksHidden: true,
       importHidden: true,
@@ -276,6 +403,7 @@ function buildPopupUi(model) {
       ctaHidden: false,
       ctaLabel: recoveryCtaLabel(auth),
       ctaUrl: recoveryCtaUrl(auth, authState.helpUrl),
+      ctaUnlimited: auth === "upgrade_required",
       ctaEmphasis: "primary",
       archiveLinksHidden: true,
       importHidden: true,
@@ -424,6 +552,8 @@ function renderStatus(patch) {
   if (ctaEl) {
     ctaEl.hidden = ui.ctaHidden;
     ctaEl.dataset.externalUrl = usefulActionUrl(ui.ctaUrl);
+    if (ui.ctaUnlimited) ctaEl.dataset.unlimited = "1";
+    else delete ctaEl.dataset.unlimited;
     delete ctaEl.dataset.sessionAction;
     ctaEl.textContent = ui.ctaLabel;
     ctaEl.dataset.emphasis = ui.ctaEmphasis;
@@ -443,6 +573,8 @@ function renderStatus(patch) {
   if (settingsEl && ui.statusState !== "connected") {
     settingsEl.classList.add("hidden");
   }
+  freePlanSlots.sheet = ui.visualState === "connected_saved";
+  renderFreePlanLines();
   if (preferencesEl) preferencesEl.hidden = ui.statusState !== "connected";
   renderNativeImportContinuation(popupModel.authState);
 }
@@ -489,6 +621,7 @@ function fetchPopupState() {
       firstSaveSeen: s.firstSaveSeen === true,
       libraryCount:
         typeof s.libraryCount === "number" ? s.libraryCount : undefined,
+      pro: typeof s.pro === "boolean" ? s.pro : undefined,
       activeTab: s.activeTab || undefined,
       capacity: s.capacity ?? null,
     });
@@ -1036,6 +1169,10 @@ function setEarnedCopy({
 }) {
   const previouslyFocused = document.activeElement;
   document.body.dataset.tracePopupStateCode = stateCode;
+  // Only the reader view's settled states show the plan line; they turn it
+  // back on after their copy is set.
+  freePlanSlots.reader = false;
+  renderFreePlanLines();
   setEarnedRecord(record);
   const section = document.getElementById("popup-earned-permission");
   const kickerEl = document.getElementById("popup-earned-kicker");
@@ -2210,6 +2347,7 @@ function renderKernelSnapshot(snapshot) {
   if (ctaEl) {
     ctaEl.hidden = actions.primary == null;
     delete ctaEl.dataset.externalUrl;
+    delete ctaEl.dataset.unlimited;
     ctaEl.textContent = actions.primary ? labels[actions.primary] : "";
     ctaEl.dataset.sessionAction = actions.primary || "";
     // A retry or a cancel is never the task; only connecting is.
@@ -2327,6 +2465,7 @@ function requestKernelPopupState() {
       firstSaveSeen: state.firstSaveSeen === true,
       libraryCount:
         typeof state.libraryCount === "number" ? state.libraryCount : undefined,
+      pro: typeof state.pro === "boolean" ? state.pro : undefined,
       activeTab: state.activeTab || undefined,
       capacity: state.capacity ?? null,
     });
@@ -2618,6 +2757,8 @@ async function renderReaderView(state) {
       if (settings) settings.onclick = showPopupSettings;
       configureEarnedActions({ hidden: true });
       if (importButton) importButton.hidden = true;
+      freePlanSlots.reader = true;
+      renderFreePlanLines();
       return;
     }
     if (state.activeStoryUnavailable === true) {
@@ -2670,6 +2811,9 @@ async function renderReaderView(state) {
   setEarnedResult("success", heading + ".", "");
   configureEarnedActions({ hidden: true });
   if (importButton && !onArchive) importButton.hidden = true;
+  // A first-story prompt stays one task; settled pages show the plan line.
+  freePlanSlots.reader = !awaitingFirstStory;
+  renderFreePlanLines();
 }
 
 function bindPreferenceControls() {
@@ -2786,7 +2930,7 @@ function bindEarnedActionButtons() {
       if (action === "save_story") void saveStoryFromPopup();
       if (action === "enable_auto_track") void enableAutomaticSavingFromPopup();
       if (action === "open_app") openTraceApp(isLikelyIosExtensionUi ? TRACE_IOS_APP_LIBRARY_URL : TRACE_HOME_URL);
-      if (action === "open_upgrade") openTraceApp(TRACE_UPGRADE_URL);
+      if (action === "open_upgrade") void openUnlimited();
       if (action === "open_connect") openTraceApp(TRACE_IOS_APP_CONNECT_URL);
       if (action === "check_link") {
         sendKernelRuntimeMessage({ type: "TRACE_SESSION_ACTION", action: "connect" }, (response) => {
@@ -2829,10 +2973,12 @@ function initializeKernelPopup() {
 
 for (const id of ["popup-cta", "popup-session-help"]) {
   document.getElementById(id)?.addEventListener("click", (event) => {
-    const url = event.currentTarget.dataset.externalUrl;
+    const control = event.currentTarget;
+    const url = control.dataset.externalUrl;
     if (!url) return;
     event.preventDefault();
-    openTraceApp(url);
+    if (control.dataset.unlimited === "1") void openUnlimited(url);
+    else openTraceApp(url);
   });
 }
 

@@ -27,6 +27,10 @@
     "static";
   const TRACE_WEB_HOME_URL = configuredTraceWebHomeUrl();
   const TRACE_WEB_UPGRADE_URL = traceUpgradeUrl();
+  // On iPhone and iPad, Unlimited is offered only inside the Trace app. These
+  // fixed links carry no account, story or page data.
+  const TRACE_IOS_APP_UNLIMITED_URL = "traceauth://open?destination=unlimited";
+  const TRACE_IOS_APP_LIBRARY_URL = "traceauth://open?destination=library";
   const ACCOUNT_PROJECTION_GET_MESSAGE = "TRACE_ACCOUNT_PROJECTION_GET";
   const ACCOUNT_PROJECTION_REVISION_KEY = "traceAccountProjectionRevisionV1";
   const MAX_PROJECTION_WORK_KEYS = 250;
@@ -229,6 +233,20 @@
     }
   }
 
+  // "See Trace Unlimited" and "Manage library" open the Trace app on iPhone
+  // and iPad, and the Trace website everywhere else.
+  function configureCapacityLink(link, kind) {
+    if (isIosSafari()) {
+      link.href = kind === "upgrade" ? TRACE_IOS_APP_UNLIMITED_URL : TRACE_IOS_APP_LIBRARY_URL;
+      link.removeAttribute("target");
+      link.removeAttribute("rel");
+      return;
+    }
+    link.href = kind === "upgrade" ? TRACE_WEB_UPGRADE_URL : TRACE_WEB_HOME_URL;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+  }
+
   function showCapacityRecoveryNotice(capacity, force) {
   traceRefreshPageTokens();
     if (!force && !(capacity && capacity.blocked === true && capacity.prompt === true)) {
@@ -264,17 +282,13 @@
     actions.style.flexWrap = "wrap";
     var upgrade = document.createElement("a");
     upgrade.setAttribute("data-trace-open-trace", "1");
-    upgrade.href = TRACE_WEB_UPGRADE_URL;
-    upgrade.target = "_blank";
-    upgrade.rel = "noopener noreferrer";
+    configureCapacityLink(upgrade, "upgrade");
     upgrade.textContent = "See Trace Unlimited";
     upgrade.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 8px;margin-left:-8px;border-radius:8px;border:0;background:transparent;color:var(--trace-page-teal);text-decoration:none;font:500 14px/1.2 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif";
     bindTraceOpenLink(upgrade);
     var manage = document.createElement("a");
     manage.setAttribute("data-trace-open-trace", "1");
-    manage.href = TRACE_WEB_HOME_URL;
-    manage.target = "_blank";
-    manage.rel = "noopener noreferrer";
+    configureCapacityLink(manage, "manage");
     manage.textContent = "Manage library";
     manage.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 8px;margin-left:-8px;border-radius:8px;border:0;background:transparent;color:var(--trace-page-teal);text-decoration:none;font:500 14px/1.2 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif";
     bindTraceOpenLink(manage);
