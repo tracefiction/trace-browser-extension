@@ -177,6 +177,8 @@ function createPopupHarness({
   directTabUnavailable = false,
   archiveAccess = null,
   deferredHostRequest = false,
+  platformOs = null,
+  maxTouchPoints = 0,
 } = {}) {
   const html = fs.readFileSync(POPUP_HTML_PATH, "utf8");
   const js = fs.readFileSync(POPUP_JS_PATH, "utf8");
@@ -205,6 +207,7 @@ function createPopupHarness({
   let closeCalled = false;
   const hostLifecycle = [];
   const popupDisconnects = [];
+  const createdTabs = [];
   let finishHostRequest;
 
   const ext = {
@@ -216,6 +219,12 @@ function createPopupHarness({
         return { onDisconnect: { addListener(fn) { popupDisconnects.push(fn); } } };
       },
       getManifest: () => ({ host_permissions: (archiveAccess || []).flatMap(item => item.origins) }),
+      ...(platformOs ? {
+        getPlatformInfo(callback) {
+          if (promiseRuntime) return Promise.resolve({ os: platformOs });
+          callback?.({ os: platformOs });
+        },
+      } : {}),
       sendMessage(message, callback) {
         messages.push(message);
         let response;
@@ -292,6 +301,11 @@ function createPopupHarness({
       },
     },
     tabs: {
+      create(properties, callback) {
+        createdTabs.push(properties.url);
+        if (promiseRuntime) return Promise.resolve({ id: 99 });
+        callback?.({ id: 99 });
+      },
       query(_query, callback) {
         if (promiseRuntime) return Promise.resolve([activeTab]);
         callback?.([activeTab]);
@@ -399,7 +413,7 @@ function createPopupHarness({
     window,
     self: window,
     /** popup.js reads `navigator.userAgent` at load; must match test device. */
-    navigator: { userAgent },
+    navigator: { userAgent, maxTouchPoints },
     globalThis: null,
     setTimeout(fn, ms) {
       timeouts.push({ fn, ms });
@@ -456,6 +470,7 @@ function createPopupHarness({
     store,
     messages,
     tabMessages,
+    createdTabs,
     injections,
     permissionRequests,
     hostLifecycle,
@@ -2727,4 +2742,170 @@ test("Trace-only gaps and either archive tab offer the same full-host request", 
     assert.equal(h.permissionRequests.length, 1);
     assert.equal(h.closeCalled, true);
   }
+});
+
+const IOS_APP_UNLIMITED_URL = "traceauth://open?destination=unlimited";
+const WEB_UPGRADE_URL = "https://tracefiction.com/?upgrade=1&source=extension_cap";
+
+function libraryFullReaderHarness(options = {}) {
+  return createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    grantedOrigins: [...FULL_EARNED_ORIGINS],
+    storageState: { traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 5_000 } },
+    sessionSnapshot: { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" },
+    popupState: {
+      ok: true,
+      authState: { state: "connected" },
+      firstSaveSeen: true,
+      libraryCount: 100,
+      pro: false,
+      capacity: { blocked: true, prompt: false },
+      activeTab: { kind: "supported_story", site: "ao3", canImport: true },
+      activeWork: null,
+      autoTrackEnabled: true,
+    },
+    ...options,
+  });
+}
+
+for (const device of [
+  { name: "iPhone", userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148" },
+  { name: "iPad with a desktop user agent", userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15", maxTouchPoints: 5 },
+  { name: "iPad reported by Safari's platform info", userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15", platformOs: "ios" },
+]) {
+  test(`See Trace Unlimited opens the Trace app's Unlimited sheet on ${device.name}`, async () => {
+    const h = libraryFullReaderHarness(device);
+    for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+    assert.equal(h.document.body.dataset.tracePopupStateCode, "library-full");
+    const primary = h.document.getElementById("popup-earned-primary");
+    assert.equal(primary.textContent, "See Trace Unlimited");
+    primary.click();
+    for (let attempt = 0; attempt < 4; attempt += 1) await flush();
+    assert.deepEqual(h.createdTabs, [IOS_APP_UNLIMITED_URL]);
+  });
+}
+
+test("See Trace Unlimited keeps the web plan page in desktop browsers", async () => {
+  const h = libraryFullReaderHarness({ userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", platformOs: "mac" });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  h.document.getElementById("popup-earned-primary").click();
+  for (let attempt = 0; attempt < 4; attempt += 1) await flush();
+  assert.deepEqual(h.createdTabs, [WEB_UPGRADE_URL]);
+});
+
+test("the full-Library sheet routes its Unlimited action by platform", async () => {
+  for (const [userAgent, expected] of [
+    ["Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X)", IOS_APP_UNLIMITED_URL],
+    ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/141.0", WEB_UPGRADE_URL],
+  ]) {
+    const connected = { state: "connected", message: "Connected" };
+    const h = createPopupHarness({
+      userAgent,
+      storageState: { traceAuthState: connected, traceFirstSaveSeen: true, traceLibraryCount: 100 },
+      popupState: { pro: false, authState: connected, firstSaveSeen: true, libraryCount: 100,
+        capacity: { blocked: true, prompt: false }, activeTab: { kind: "supported_story", site: "ao3" } },
+    });
+    await flush();
+    assert.equal(h.document.getElementById("popup-cta").textContent, "See Trace Unlimited");
+    assert.equal(h.document.getElementById("popup-cta").dataset.externalUrl, expected);
+  }
+});
+
+test("Free plan line: the count, a heads-up at 80% for a day, nothing for Unlimited", () => {
+  const h = createPopupHarness();
+  const line = (args) => JSON.parse(JSON.stringify(h.evaluate(`freePlanLine(${JSON.stringify(args)})`)));
+  const now = 1_800_000_000_000;
+  assert.equal(line({ pro: true, libraryCount: 64, now }), null);
+  assert.equal(line({ pro: null, libraryCount: 64, now }), null);
+  assert.equal(line({ pro: false, libraryCount: null, now }), null);
+  assert.deepEqual(line({ pro: false, libraryCount: 64, now }),
+    { text: "64 of 100 stories kept", headsUp: false, nearLimit: false });
+  assert.deepEqual(line({ pro: false, libraryCount: 80, headsUpShownAt: null, now }),
+    { text: "You’re at 80 of 100 stories. Unlimited keeps every story.", headsUp: true, nearLimit: true });
+  assert.equal(line({ pro: false, libraryCount: 92, headsUpShownAt: now - 60_000, now }).headsUp, true);
+  assert.deepEqual(line({ pro: false, libraryCount: 92, headsUpShownAt: now - 25 * 3_600_000, now }),
+    { text: "92 of 100 stories kept", headsUp: false, nearLimit: true });
+  assert.deepEqual(line({ pro: false, libraryCount: 100, now }),
+    { text: "100 of 100 stories kept", headsUp: false, nearLimit: false });
+  assert.equal(line({ pro: false, libraryCount: 79, limit: 100, now }).headsUp, false);
+});
+
+function savedStoryReaderHarness({ libraryCount, pro = false, storageState = {} }) {
+  return createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+    grantedOrigins: [...FULL_EARNED_ORIGINS],
+    storageState: { traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 5_000 }, ...storageState },
+    sessionSnapshot: { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" },
+    popupState: {
+      ok: true,
+      authState: { state: "connected" },
+      firstSaveSeen: true,
+      libraryCount,
+      pro,
+      activeTab: { kind: "supported_story", site: "ao3", canImport: true },
+      activeWork: { status: "saved", entry: { status: "READING", canonicalReaderStatus: "READING" } },
+      autoTrackEnabled: true,
+    },
+  });
+}
+
+test("the reader view shows the Free count on a saved story, and nothing for Unlimited", async () => {
+  const free = savedStoryReaderHarness({ libraryCount: 64 });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  assert.equal(free.document.body.dataset.tracePopupStateCode, "P11");
+  const plan = free.document.getElementById("popup-earned-plan");
+  assert.equal(plan.hidden, false);
+  assert.equal(plan.textContent, "64 of 100 stories kept");
+  assert.equal(free.store.traceFreeLimitHeadsUpV1, undefined);
+
+  const unlimited = savedStoryReaderHarness({ libraryCount: 640, pro: true });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  assert.equal(unlimited.document.body.dataset.tracePopupStateCode, "P11");
+  assert.equal(unlimited.document.getElementById("popup-earned-plan").hidden, true);
+});
+
+test("the 80% heads-up is recorded once, then gives way to the plain count", async () => {
+  const first = savedStoryReaderHarness({ libraryCount: 84 });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  const plan = first.document.getElementById("popup-earned-plan");
+  assert.equal(plan.textContent, "You’re at 84 of 100 stories. Unlimited keeps every story.");
+  assert.equal(plan.dataset.headsUp, "true");
+  const shownAt = first.store.traceFreeLimitHeadsUpV1?.shownAt;
+  assert.ok(Number.isSafeInteger(shownAt));
+
+  const sameDay = savedStoryReaderHarness({ libraryCount: 85,
+    storageState: { traceFreeLimitHeadsUpV1: { shownAt } } });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  assert.equal(sameDay.document.getElementById("popup-earned-plan").dataset.headsUp, "true");
+  assert.equal(sameDay.store.traceFreeLimitHeadsUpV1.shownAt, shownAt);
+
+  const later = savedStoryReaderHarness({ libraryCount: 86,
+    storageState: { traceFreeLimitHeadsUpV1: { shownAt: Date.now() - 2 * 86_400_000 } } });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  assert.equal(later.document.getElementById("popup-earned-plan").textContent, "86 of 100 stories kept");
+
+  const madeRoom = savedStoryReaderHarness({ libraryCount: 40,
+    storageState: { traceFreeLimitHeadsUpV1: { shownAt: Date.now() - 2 * 86_400_000 } } });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  assert.equal(madeRoom.document.getElementById("popup-earned-plan").textContent, "40 of 100 stories kept");
+  assert.equal(madeRoom.store.traceFreeLimitHeadsUpV1, null);
+});
+
+test("the Trace is on sheet shows the Free count in desktop browsers", async () => {
+  const connected = { state: "connected", message: "Connected" };
+  const h = createPopupHarness({
+    storageState: { traceAuthState: connected, traceFirstSaveSeen: true, traceLibraryCount: 64 },
+    popupState: { pro: false, authState: connected, firstSaveSeen: true, libraryCount: 64,
+      activeTab: { kind: "supported_story", site: "ao3", canImport: true } },
+  });
+  for (let attempt = 0; attempt < 4; attempt += 1) await flush();
+  assert.equal(h.document.body.dataset.tracePopupState, "connected_saved");
+  const plan = h.document.getElementById("popup-plan");
+  assert.equal(plan.hidden, false);
+  assert.equal(plan.textContent, "64 of 100 stories kept");
 });

@@ -74,6 +74,7 @@ function createCollectorBindings(dom, options = {}) {
     console,
     document: window.document,
     location: window.location,
+    navigator: window.navigator,
     window,
     self: window,
     globalThis: null,

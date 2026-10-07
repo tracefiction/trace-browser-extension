@@ -707,6 +707,12 @@ function createAutoTrackCollectorHarness(response, options = {}) {
       onChanged: { addListener() {} },
     },
   };
+  if (options.userAgent) {
+    Object.defineProperty(dom.window.navigator, "userAgent", {
+      value: options.userAgent,
+      configurable: true,
+    });
+  }
   const bindings = createCollectorBindings(dom, { chrome });
   return { dom, store, sentMessages, bindings };
 }
@@ -715,7 +721,7 @@ test("sendAutoTrackForStory clears retryable failures but retains a capacity-blo
   const failures = [
     undefined,
     { ok: false, error: "auth_expired" },
-    { ok: false, error: "free_limit_reached" },
+    { ok: false, error: "free_limit_reached", capacity: { blocked: true, prompt: true } },
     { ok: false, error: "http_503" },
     { ok: false, error: "network_error" },
     { ok: false, error: "auto_track_disabled" },
@@ -764,6 +770,104 @@ test("sendAutoTrackForStory clears retryable failures but retains a capacity-blo
         },
       );
     }
+  }
+});
+
+test("an automatic save at the Free limit shows the notice only when the background's spacing allows it", () => {
+  const item = {
+    src: "ao3",
+    ctx: "story",
+    u: "https://archiveofourown.org/works/28534965",
+    t: "Redivider",
+    chn: 3,
+    cht: 17,
+  };
+  for (const [capacity, shown] of [
+    [{ blocked: true, prompt: true }, true],
+    // Shown within the last day, or "Not now" within the last week.
+    [{ blocked: true, prompt: false }, false],
+    // No capacity state: nothing to space the notice by, so it stays quiet.
+    [undefined, false],
+  ]) {
+    const { dom, sentMessages, bindings } = createAutoTrackCollectorHarness({
+      ok: false,
+      error: "free_limit_reached",
+      ...(capacity ? { capacity } : {}),
+    });
+    bindings.sendAutoTrackForStory(item);
+    const notice = dom.window.document.querySelector("[data-trace-capacity-notice]");
+    assert.equal(Boolean(notice), shown, JSON.stringify(capacity));
+    assert.equal(
+      sentMessages.some((message) => message.type === "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE"),
+      shown,
+    );
+  }
+});
+
+test("Not now on the Library full notice is acknowledged as a dismissal", () => {
+  const { dom, sentMessages, bindings } = createAutoTrackCollectorHarness({
+    ok: false,
+    error: "free_limit_reached",
+    capacity: { blocked: true, prompt: true },
+  });
+  bindings.sendAutoTrackForStory({
+    src: "ao3",
+    ctx: "story",
+    u: "https://archiveofourown.org/works/28534965",
+    t: "Redivider",
+    chn: 3,
+    cht: 17,
+  });
+  const notice = dom.window.document.querySelector("[data-trace-capacity-notice]");
+  const dismiss = Array.from(notice.querySelectorAll("button")).find((button) =>
+    button.textContent === "Not now"
+  );
+  dismiss.click();
+  assert.equal(dom.window.document.querySelector("[data-trace-capacity-notice]"), null);
+  assert.deepEqual(
+    plainJson(sentMessages.filter((message) => message.type === "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE")),
+    [
+      { type: "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE", action: "shown", surface: "story" },
+      { type: "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE", action: "dismissed", surface: "story" },
+    ],
+  );
+});
+
+test("the Library full notice opens the Trace app on iPhone and iPad, and the website elsewhere", () => {
+  for (const [userAgent, upgradeUrl, manageUrl, target] of [
+    [
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+      "traceauth://open?destination=unlimited",
+      "traceauth://open?destination=library",
+      null,
+    ],
+    [
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15",
+      "https://tracefiction.com/?upgrade=1&source=extension_cap",
+      "https://tracefiction.com/",
+      "_blank",
+    ],
+  ]) {
+    const { dom, bindings } = createAutoTrackCollectorHarness(
+      { ok: false, error: "free_limit_reached", capacity: { blocked: true, prompt: true } },
+      { userAgent },
+    );
+    bindings.sendAutoTrackForStory({
+      src: "ao3",
+      ctx: "story",
+      u: "https://archiveofourown.org/works/28534965",
+      t: "Redivider",
+      chn: 3,
+      cht: 17,
+    });
+    const links = Array.from(
+      dom.window.document.querySelectorAll("[data-trace-capacity-notice] a"),
+    );
+    const upgrade = links.find((link) => link.textContent === "See Trace Unlimited");
+    const manage = links.find((link) => link.textContent === "Manage library");
+    assert.equal(upgrade.getAttribute("href"), upgradeUrl);
+    assert.equal(manage.getAttribute("href"), manageUrl);
+    assert.equal(upgrade.getAttribute("target"), target);
   }
 });
 

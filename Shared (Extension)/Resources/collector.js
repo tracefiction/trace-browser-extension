@@ -29,6 +29,11 @@ const TRACE_EARNED_PERMISSION_READY_EVENT =
   "trace-earned-permission-ready";
 const TRACE_WEB_HOME_URL = configuredTraceWebHomeUrl();
 const TRACE_WEB_UPGRADE_URL = traceUpgradeUrl();
+// On iPhone and iPad, Unlimited is offered only inside the Trace app. These
+// fixed links carry no account, story or page data; they bring the app
+// forward on its Unlimited sheet or its Library.
+const TRACE_IOS_APP_UNLIMITED_URL = "traceauth://open?destination=unlimited";
+const TRACE_IOS_APP_LIBRARY_URL = "traceauth://open?destination=library";
 const FIRST_STORY_FOCUS_MAX_ATTEMPTS = 30;
 const FIRST_STORY_FOCUS_RETRY_MS = 150;
 const FIRST_STORY_SAVE_TIMEOUT_MS = 18_000;
@@ -238,6 +243,34 @@ function acknowledgeCapacityRecovery(action) {
   });
 }
 
+function traceIsIosSafari() {
+  try {
+    var ua = navigator.userAgent || "";
+    // iPadOS Safari reports a Mac user agent; only touch tells them apart.
+    return /iPhone|iPad|iPod/i.test(ua) ||
+      (/Macintosh/i.test(ua) && (navigator.maxTouchPoints || 0) > 1);
+  } catch (_) {
+    return false;
+  }
+}
+
+// "See Trace Unlimited" and "Manage library" open the Trace app on iPhone and
+// iPad, and the Trace website everywhere else.
+function configureCapacityLink(link, kind) {
+  if (traceIsIosSafari()) {
+    link.href = kind === "upgrade" ? TRACE_IOS_APP_UNLIMITED_URL : TRACE_IOS_APP_LIBRARY_URL;
+    link.removeAttribute("target");
+    link.removeAttribute("rel");
+    return;
+  }
+  link.href = kind === "upgrade" ? TRACE_WEB_UPGRADE_URL : TRACE_WEB_HOME_URL;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+}
+
+// `force` is for a save the reader asked for. Automatic saves pass the
+// background's capacity state, which spaces the notice out: at most once a
+// day, and not for a week after "Not now".
 function showCapacityRecoveryNotice(capacity, force) {
   traceRefreshPageTokens();
   if (!force && !(capacity && capacity.blocked === true && capacity.prompt === true)) {
@@ -275,9 +308,7 @@ function showCapacityRecoveryNotice(capacity, force) {
   actions.style.flexWrap = "wrap";
   var upgrade = document.createElement("a");
   upgrade.setAttribute("data-trace-open-trace", "1");
-  upgrade.href = TRACE_WEB_UPGRADE_URL;
-  upgrade.target = "_blank";
-  upgrade.rel = "noopener noreferrer";
+  configureCapacityLink(upgrade, "upgrade");
   upgrade.textContent = "See Trace Unlimited";
   upgrade.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 8px;margin-left:-8px;border-radius:8px;border:0;background:transparent;color:var(--trace-page-teal);text-decoration:none;font:500 14px/1.2 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif";
   upgrade.addEventListener("click", function (event) {
@@ -285,9 +316,7 @@ function showCapacityRecoveryNotice(capacity, force) {
   });
   var manage = document.createElement("a");
   manage.setAttribute("data-trace-open-trace", "1");
-  manage.href = TRACE_WEB_HOME_URL;
-  manage.target = "_blank";
-  manage.rel = "noopener noreferrer";
+  configureCapacityLink(manage, "manage");
   manage.textContent = "Manage library";
   manage.style.cssText = "display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 8px;margin-left:-8px;border-radius:8px;border:0;background:transparent;color:var(--trace-page-teal);text-decoration:none;font:500 14px/1.2 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif";
   manage.addEventListener("click", function (event) {
@@ -1325,7 +1354,7 @@ function sendAutoTrackForStory(validStory, options) {
         }
         updateAutoTrackFailureForStory(validStory, response && response.error);
         if (response && response.error === "free_limit_reached") {
-          showCapacityRecoveryNotice(response.capacity, true);
+          showCapacityRecoveryNotice(response.capacity, false);
         }
         return;
       }
@@ -3872,17 +3901,6 @@ function progressDisplay(entry) {
 // Before that link exists, every surface points to that one step.
 var TRACE_IOS_APP_SETUP_URL = "traceauth://open?destination=extension-connect";
 
-function traceIsIosSafari() {
-  try {
-    var ua = navigator.userAgent || "";
-    // iPadOS Safari reports a Mac user agent; only touch tells them apart.
-    return /iPhone|iPad|iPod/i.test(ua) ||
-      (/Macintosh/i.test(ua) && (navigator.maxTouchPoints || 0) > 1);
-  } catch (_) {
-    return false;
-  }
-}
-
 function awaitingAppLink(view) {
   return !view.hasAuth && traceIsIosSafari() &&
     !(view.authState && (view.authState.state === "reconnect_required" || view.authState.state === "error"));
@@ -6385,9 +6403,7 @@ function renderStorySheet(sheet, view, workKey) {
     var capacityUpgrade = document.createElement("a");
     capacityUpgrade.className = "x-pbtn x-pbtn-primary";
     capacityUpgrade.setAttribute("data-trace-open-trace", "1");
-    capacityUpgrade.href = TRACE_WEB_UPGRADE_URL;
-    capacityUpgrade.target = "_blank";
-    capacityUpgrade.rel = "noopener noreferrer";
+    configureCapacityLink(capacityUpgrade, "upgrade");
     capacityUpgrade.textContent = "See Trace Unlimited";
     capacityUpgrade.style.cssText = storySheetPrimaryButtonCss();
     bindTraceOpenLink(capacityUpgrade);
@@ -6395,9 +6411,7 @@ function renderStorySheet(sheet, view, workKey) {
     var capacityManage = document.createElement("a");
     capacityManage.className = "x-pbtn";
     capacityManage.setAttribute("data-trace-open-trace", "1");
-    capacityManage.href = TRACE_WEB_HOME_URL;
-    capacityManage.target = "_blank";
-    capacityManage.rel = "noopener noreferrer";
+    configureCapacityLink(capacityManage, "manage");
     capacityManage.textContent = "Manage library";
     capacityManage.style.cssText = storySheetPrimaryButtonCss();
     bindTraceOpenLink(capacityManage);

@@ -815,6 +815,14 @@ body[data-trace-popup-state="connected_saved"] .popup-sheet {
 }
 .popup-earned-actions button:disabled { opacity: 0.55; cursor: default; }
 .popup-earned-actions button:active:not(:disabled) { transform: scale(0.985); opacity: 0.8; }
+/* The Free plan line: a quiet count, or the one-time heads-up near the limit. */
+.popup-plan {
+    margin: 12px 0 0;
+    color: var(--text-2);
+    font: 400 0.765em/1.4 var(--trace-font);
+}
+.popup-plan[hidden] { display: none; }
+.popup-plan[data-heads-up="true"] { color: var(--text); }
 .popup-earned-help { margin-top: 12px; color: var(--text-2); font-size: 0.765em; }
 .popup-earned-help summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; color: var(--action); font-weight: 500; }
 .popup-earned-help .popup-probe-disclosure { margin-top: 4px; font-size: 1em; }
