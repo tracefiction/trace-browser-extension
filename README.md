@@ -414,3 +414,20 @@ headers during preflight; they do not silently ignore them. The compatibility
 fallback is defensive, not permission to reverse deployment order. Owner privacy
 review is required before merge or release; no merge, pin update or store
 submission is authorized here.
+
+## Browser connection continuity
+
+Chrome, Firefox (including Android), and desktop Safari exchange a Trace
+website sign-in grant for a scoped installation credential in the background.
+It stays in extension-private IndexedDB and authorizes only extension API
+routes. Tracking does not require an open Trace tab after connecting. Existing
+valid website tokens migrate when next loaded. An already expired connection
+may require one reconnect after upgrading. Disconnect clears local authority
+and attempts server revocation; offline revocation is best effort. Server idle
+and absolute expiry still apply. iOS continues to use the app-owned provider.
+
+When reconnect opens Trace from a story, successful sign-in returns to the
+existing reading tab without reloading it. Only browser tab IDs and a bounded
+expiry are retained for that return; no reading URL or page content is stored.
+If the tab closed or the reader moved away from the sign-in tab, connection
+still succeeds without changing the selected tab.

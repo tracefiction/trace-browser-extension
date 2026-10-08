@@ -3,6 +3,8 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
+import net from "node:net";
+import { connectFirefox } from "./firefox-test-driver.mjs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -12,7 +14,7 @@ import { firefox as playwrightFirefox } from "playwright";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLAYWRIGHT_FIREFOX = playwrightFirefox.executablePath();
 const FIREFOX = process.env.TRACE_FIREFOX_BINARY ?? PLAYWRIGHT_FIREFOX;
-const WEB_EXT = path.join(ROOT, "node_modules", ".bin", "web-ext");
+
 
 function deferred() {
   let resolve;
@@ -35,6 +37,7 @@ function listen(server) {
 }
 
 function closeServer(server) {
+  server.closeAllConnections();
   return new Promise((resolve) => server.close(resolve));
 }
 
@@ -63,36 +66,46 @@ function makeInstalledFixture(origin, fixtureRoot) {
     run_at: "document_idle",
   });
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-  fs.writeFileSync(
-    path.join(fixtureRoot, "session-installed-test-driver.js"),
-    `(() => {
-  if (sessionStorage.getItem("trace-firefox-session-test") === "running") return;
-  sessionStorage.setItem("trace-firefox-session-test", "running");
-  const run = async () => {
-    const initial = await browser.runtime.sendMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" });
-    const connected = await browser.runtime.sendMessage({
-      type: "TRACE_SESSION_ACTION",
-      action: "connect",
+  manifest.background.scripts.push("session-probe-background.js");
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+  fs.writeFileSync(path.join(fixtureRoot, "session-installed-test-driver.js"), `
+    if (!sessionStorage.getItem("trace-session-proof")) {
+      sessionStorage.setItem("trace-session-proof", "running");
+      (async () => {
+        const initial = await browser.runtime.sendMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" });
+        const connected = await browser.runtime.sendMessage({ type: "TRACE_SESSION_ACTION", action: "connect" });
+        await browser.runtime.sendMessage({ type: "TRACE_TEST_RESTART", initial, connected });
+      })().catch(error => fetch(${JSON.stringify(`${origin}/__trace_extension_result`)}, { method: "POST", body: JSON.stringify({ error: String(error) }) }));
+    }
+  `);
+  fs.writeFileSync(path.join(fixtureRoot, "session-probe-background.js"), `
+    browser.runtime.onMessage.addListener((message) => {
+      if (message.type !== "TRACE_TEST_RESTART") return;
+      return (async () => {
+        await browser.storage.local.set({ traceTestProof: { initial: message.initial, connected: message.connected, phase: "restart" } });
+        await fetch(${JSON.stringify(`${origin}/__expire_access_token`)}, { method: "POST" });
+        const tabs = await browser.tabs.query({ url: ${JSON.stringify(origin + '/*')} });
+        await browser.tabs.remove(tabs.map(tab => tab.id));
+        browser.runtime.reload();
+      })();
     });
-    const disconnected = await browser.runtime.sendMessage({
-      type: "TRACE_SESSION_ACTION",
-      action: "disconnect",
-    });
-    await fetch(${JSON.stringify(`${origin}/__trace_extension_result`)}, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ initial, connected, disconnected }),
-    });
-  };
-  void run().catch(async (error) => {
-    await fetch(${JSON.stringify(`${origin}/__trace_extension_result`)}, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ error: String(error?.stack || error) }),
-    });
-  });
-})();\n`,
-  );
+    (async () => {
+      const { traceTestProof } = await browser.storage.local.get("traceTestProof");
+      if (traceTestProof?.phase !== "restart") return;
+      await browser.storage.local.set({ traceTestProof: { ...traceTestProof, phase: "probe" } });
+      await browser.tabs.create({ url: browser.runtime.getURL("popup.html") });
+    })();
+  `);
+  fs.writeFileSync(path.join(fixtureRoot, "popup.html"), '<!doctype html><script src="session-probe-popup.js"></script>');
+  fs.writeFileSync(path.join(fixtureRoot, "session-probe-popup.js"), `
+    (async () => {
+      const { traceTestProof } = await browser.storage.local.get("traceTestProof");
+      const tabs = await browser.tabs.query({ url: ${JSON.stringify(origin + '/*')} });
+      const restarted = await browser.runtime.sendMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" });
+      const disconnected = await browser.runtime.sendMessage({ type: "TRACE_SESSION_ACTION", action: "disconnect" });
+      await fetch(${JSON.stringify(`${origin}/__trace_extension_result`)}, { method: "POST", body: JSON.stringify({ ...traceTestProof, restarted, disconnected, providerTabs: tabs.length }) });
+    })().catch(error => fetch(${JSON.stringify(`${origin}/__trace_extension_result`)}, { method: "POST", body: JSON.stringify({ error: String(error) }) }));
+  `);
 }
 
 function waitForExit(child, timeoutMs = 5_000) {
@@ -108,14 +121,31 @@ assert.equal(
   true,
   `Firefox binary not found: ${FIREFOX}. Run npx playwright install firefox.`,
 );
-assert.equal(fs.existsSync(WEB_EXT), true, "web-ext is missing; run npm install");
+
 
 const result = deferred();
 let verificationReads = 0;
+let accessExpired = false;
+let issuanceCount = 0;
+const deviceCredential = `trd_v1_${"a".repeat(43)}`;
 const server = http.createServer((request, response) => {
+  if (request.url === "/__expire_access_token") { accessExpired = true; response.writeHead(204); response.end(); return; }
+  if (request.url === "/api/extension/session") { response.writeHead(200); response.end('{"ok":true}'); return; }
+  if (request.url === "/api/extension/device-sessions") {
+    if (accessExpired || request.headers.authorization !== "Bearer firefox-kernel-token") { response.writeHead(401); response.end(); return; }
+    let body = "";
+    request.on("data", chunk => body += chunk);
+    request.on("end", () => {
+      const { installationId, platform } = JSON.parse(body);
+      assert.equal(platform, "browser"); issuanceCount++;
+      response.writeHead(201, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ status: "issued", credential: deviceCredential, session: { installationId, id: "00000000-0000-4000-8000-000000000002", absoluteExpiresAt: "2099-01-01T00:00:00.000Z" } }));
+    });
+    return;
+  }
   if (request.url === "/api/extension/account") {
     verificationReads += 1;
-    if (request.headers.authorization !== "Bearer firefox-kernel-token") {
+    if (request.headers.authorization !== `Bearer ${deviceCredential}`) {
       response.writeHead(401, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ error: "unauthorized" }));
       return;
@@ -161,7 +191,7 @@ const server = http.createServer((request, response) => {
     </script>`);
 });
 
-let webExt = null;
+let webExt = null, driver = null, firefoxPid = null;
 let fixtureParent = null;
 try {
   await listen(server);
@@ -170,33 +200,29 @@ try {
   const origin = `http://127.0.0.1:${address.port}`;
   buildKernel(origin);
 
-  fixtureParent = fs.mkdtempSync(path.join(os.tmpdir(), "trace-kernel-firefox-"));
+  fixtureParent = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "trace-kernel-firefox-")));
   const fixtureRoot = path.join(fixtureParent, "extension");
   makeInstalledFixture(origin, fixtureRoot);
 
-  webExt = spawn(WEB_EXT, [
-    "run",
-    "--source-dir", fixtureRoot,
-    "--firefox", FIREFOX,
-    "--no-reload",
-    "--no-input",
-    "--verbose",
-    "--start-url", origin,
-  ], {
-    cwd: ROOT,
-    env: process.env,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const profile = path.join(fixtureParent, "profile");
+  fs.mkdirSync(profile);
+  const portServer = net.createServer();
+  await new Promise(resolve => portServer.listen(0, "127.0.0.1", resolve));
+  const port = portServer.address().port;
+  await new Promise(resolve => portServer.close(resolve));
+  fs.writeFileSync(path.join(profile, "user.js"), `user_pref("marionette.port", ${port});\nuser_pref("browser.shell.checkDefaultBrowser", false);\n`);
+  const args = ["-headless", "-no-remote", "-profile", profile, "-marionette", "about:blank"];
+  const appBundle = process.platform === "darwin" ? FIREFOX.match(/^(.+\.app)\//)?.[1] : null;
+  webExt = spawn(appBundle ? "/usr/bin/open" : FIREFOX,
+    appBundle ? ["-n", "-g", "-W", "-a", appBundle, "--args", ...args] : args,
+    { env: { ...process.env, MOZ_HEADLESS: "1" }, stdio: ["ignore", "pipe", "pipe"] });
   let webExtOutput = "";
-  for (const stream of [webExt.stdout, webExt.stderr]) {
-    stream.setEncoding("utf8");
-    stream.on("data", (chunk) => { webExtOutput += chunk; });
-  }
-  webExt.once("exit", (code, signal) => {
-    result.reject(new Error(
-      `web-ext exited before the installed result (code=${code}, signal=${signal})\n${webExtOutput}`,
-    ));
-  });
+  for (const stream of [webExt.stdout, webExt.stderr]) stream.on("data", chunk => { webExtOutput += chunk; });
+  try { driver = await connectFirefox(port); } catch (error) { throw Error(`${error.message}\n${webExtOutput}`); }
+  const session = await driver.send("WebDriver:NewSession", { acceptInsecureCerts: true });
+  firefoxPid = session.capabilities["moz:processID"];
+  await driver.send("Addon:Install", { path: fixtureRoot, temporary: true });
+  // The production first-install listener opens the Trace fixture tab.
 
   const installedResult = await Promise.race([
     result.promise,
@@ -213,9 +239,16 @@ try {
   assert.equal(installedResult.disconnected.action.kind, "completed");
   assert.equal(installedResult.disconnected.snapshot.state, "signed_out");
   assert.equal(installedResult.disconnected.snapshot.canExecuteAuthenticated, false);
-  assert.equal(verificationReads, 1);
-  console.log("Firefox installed kernel Connect/Disconnect passed");
+  assert.equal(installedResult.providerTabs, 0);
+  assert.equal(installedResult.restarted.snapshot.state, "connected");
+  assert.equal(installedResult.restarted.snapshot.canExecuteAuthenticated, true);
+  assert.equal(accessExpired, true);
+  assert.equal(issuanceCount, 1);
+  assert.equal(verificationReads, 2);
+  console.log("Firefox installed: Connect, close Trace, expire website token, reload extension, remain connected, Disconnect passed");
 } finally {
+  if (driver) { await driver.send("Marionette:Quit", { flags: ["eForceQuit"] }).catch(() => {}); driver.close(); }
+  if (firefoxPid) { try { process.kill(firefoxPid, "SIGTERM"); } catch {} }
   if (webExt && webExt.exitCode === null && webExt.signalCode === null) {
     webExt.kill("SIGTERM");
     await waitForExit(webExt);

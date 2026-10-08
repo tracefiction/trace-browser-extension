@@ -5,6 +5,7 @@ import type { BrowserStorage } from "./browser-platform.mjs";
 // content-free marker is fresh, a Trace page that reports it is signed in
 // finishes that connect. It never holds a credential or account detail.
 export const CONNECT_INTENT_KEY = "traceConnectIntentV1";
+export const CONNECT_RETURN_KEY = "traceConnectReturnV1";
 export const CONNECT_INTENT_TTL_MS = 30 * 60_000;
 
 type IntentStorage = Pick<BrowserStorage, "get" | "set" | "remove">;
@@ -43,8 +44,24 @@ export async function hasConnectIntent(
 
 export async function clearConnectIntent(storage: IntentStorage): Promise<void> {
   try {
-    await storage.remove(CONNECT_INTENT_KEY);
+    await storage.remove([CONNECT_INTENT_KEY, CONNECT_RETURN_KEY]);
   } catch {
     // An unremoved marker still expires on its own.
   }
+}
+
+export async function rememberConnectReturn(storage: IntentStorage, sourceTabId: number, connectTabId: number): Promise<void> {
+  try { await storage.set({ [CONNECT_RETURN_KEY]: { sourceTabId, connectTabId, expiresAt: Date.now() + CONNECT_INTENT_TTL_MS } }); }
+  catch { /* Connection still works when return storage is unavailable. */ }
+}
+
+export async function readConnectReturn(storage: IntentStorage): Promise<{ sourceTabId: number; connectTabId: number } | null> {
+  try {
+    const value = (await storage.get(CONNECT_RETURN_KEY))[CONNECT_RETURN_KEY] as Record<string, unknown> | undefined;
+    if (value && Number.isInteger(value.sourceTabId) && Number.isInteger(value.connectTabId) &&
+        typeof value.expiresAt === "number" && value.expiresAt > Date.now() && value.expiresAt <= Date.now() + CONNECT_INTENT_TTL_MS) {
+      return { sourceTabId: value.sourceTabId as number, connectTabId: value.connectTabId as number };
+    }
+  } catch { /* No return target. */ }
+  return null;
 }

@@ -3,6 +3,7 @@ export const PRIVATE_DATABASE_VERSION = 1 as const;
 export const PRIVATE_RECORD_STORE = "records" as const;
 
 export const PRIVATE_RECORD_KEYS = Object.freeze({
+  browserInstallationId: "browser-installation-id",
   sessionEnvelope: "session-envelope",
   sessionCredentials: "session-credentials",
   accountData: "account-data",
