@@ -121,6 +121,8 @@ function parseCredentialStore(raw: unknown): Record<string, string> {
 export interface CredentialProvider {
   acquire(purpose: "connect" | "refresh"): Promise<CredentialAcquisition>;
   cancel(): void;
+  upgrade?(credential: string): Promise<string>;
+  release?(credential: string): Promise<void>;
 }
 
 export class BrowserCredentialPort implements CredentialPort {
@@ -150,7 +152,15 @@ export class BrowserCredentialPort implements CredentialPort {
   load(reference: string): Promise<string | null> {
     return this.#withLock(async () => {
       const entries = await this.#readEntries();
-      return entries[reference] ?? null;
+      const credential = entries[reference];
+      if (credential === undefined) return null;
+      const upgraded = await this.#provider.upgrade?.(credential) ?? credential;
+      if (upgraded !== credential) {
+        entries[reference] = upgraded;
+        try { await this.#writeEntries(entries); }
+        catch (error) { void this.#provider.release?.(upgraded); throw error; }
+      }
+      return upgraded;
     });
   }
 
@@ -161,7 +171,8 @@ export class BrowserCredentialPort implements CredentialPort {
       const reference = `session:${epoch}:${suffix}`;
       const entries = await this.#readEntries();
       entries[reference] = credential;
-      await this.#writeEntries(entries);
+      try { await this.#writeEntries(entries); }
+      catch (error) { void this.#provider.release?.(credential); throw error; }
       return reference;
     });
   }
@@ -169,12 +180,14 @@ export class BrowserCredentialPort implements CredentialPort {
   delete(reference: string): Promise<void> {
     return this.#withLock(async () => {
       const entries = await this.#readEntries();
+      const removed = entries[reference];
       delete entries[reference];
       if (Object.keys(entries).length === 0) {
         await this.#database.delete(PRIVATE_RECORD_KEYS.sessionCredentials);
       } else {
         await this.#writeEntries(entries);
       }
+      if (removed && !Object.values(entries).includes(removed)) void this.#provider.release?.(removed);
     });
   }
 
@@ -182,7 +195,9 @@ export class BrowserCredentialPort implements CredentialPort {
     // #withLock mutates #tail synchronously, which is the ordering guarantee
     // SessionService relies on when it detaches cleanup before a later Connect.
     return this.#withLock(async () => {
+      const entries = await this.#readEntries();
       await this.#database.delete(PRIVATE_RECORD_KEYS.sessionCredentials);
+      for (const credential of new Set(Object.values(entries))) void this.#provider.release?.(credential);
     });
   }
 
@@ -524,6 +539,8 @@ export class ExplicitCredentialProvider implements CredentialProvider {
   cancel(): void {
     this.#generation += 1;
   }
+
+  isNative(): Promise<boolean> { return this.#detectIos(); }
 
   async #detectIos(): Promise<boolean> {
     this.#isIos ??= (async () => {

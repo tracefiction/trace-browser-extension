@@ -1,3 +1,4 @@
+import { BrowserDeviceSessionProvider } from "./browser-device-session.mjs";
 import {
   AccountProjectionService,
   sameAccountScope,
@@ -101,6 +102,8 @@ import {
   clearConnectIntent,
   hasConnectIntent,
   rememberConnectIntent,
+  rememberConnectReturn,
+  readConnectReturn,
 } from "./connect-intent.mjs";
 import {
   TraceWebStatusNotification,
@@ -158,6 +161,7 @@ interface RuntimeEnvironment {
   readonly webOrigin: string;
   readonly randomId: () => string;
   readonly retryClock?: RetryClock;
+  readonly browserDeviceSessions?: boolean;
   readonly nativeImportHandoff?: boolean;
   readonly firstStoryDelay?: (milliseconds: number) => Promise<void>;
   readonly archiveReadinessStatus?: BrowserArchiveReadinessStatus;
@@ -269,6 +273,8 @@ export class SessionRuntimeController {
   #initialization: Promise<void> | null = null;
   #storageFailure = false;
   #automaticVerificationRetry = false;
+  #archiveConnectFlight: Promise<RuntimeResponse | null> | null = null;
+  #openingConnectTab: Promise<void> | null = null;
   #retryAttempt = 0;
   #retryGeneration = 0;
   #retryTimer: unknown | null = null;
@@ -320,17 +326,16 @@ export class SessionRuntimeController {
       environment.storageMode,
     );
     this.#retryClock = environment.retryClock ?? DEFAULT_RETRY_CLOCK;
-    this.#credentials = new BrowserCredentialPort(
-      this.#database,
-      new ExplicitCredentialProvider({
-        runtime: environment.runtime,
-        tabs: environment.tabs,
-        mode: environment.storageMode,
-        webOrigin: environment.webOrigin,
-        randomId: environment.randomId,
-      }),
-      environment.randomId,
-    );
+    const pageProvider = new ExplicitCredentialProvider({
+      runtime: environment.runtime, tabs: environment.tabs, mode: environment.storageMode,
+      webOrigin: environment.webOrigin, randomId: environment.randomId,
+    });
+    const provider = environment.browserDeviceSessions ? new BrowserDeviceSessionProvider({
+      provider: pageProvider, isNative: () => pageProvider.isNative(), database: this.#database,
+      fetch: environment.fetch, apiBase: environment.apiBase,
+      ...(environment.runtime.getManifest?.().version ? { clientVersion: environment.runtime.getManifest!().version! } : {}),
+    }) : pageProvider;
+    this.#credentials = new BrowserCredentialPort(this.#database, provider, environment.randomId);
     this.#service = new SessionService({
       storage: this.#sessionStorage,
       credentials: this.#credentials,
@@ -576,6 +581,14 @@ export class SessionRuntimeController {
     ) {
       return null;
     }
+    if (this.#archiveConnectFlight) return this.#archiveConnectFlight;
+    const flight = this.#connectFromArchive(sender);
+    this.#archiveConnectFlight = flight;
+    try { return await flight; }
+    finally { if (this.#archiveConnectFlight === flight) this.#archiveConnectFlight = null; }
+  }
+
+  async #connectFromArchive(sender: RuntimeSender | undefined): Promise<RuntimeResponse> {
     await this.start();
     if (this.#mode === "disabled") return this.#response(undefined, "commands_unavailable");
     const action = await this.#connectForCurrentState();
@@ -584,12 +597,22 @@ export class SessionRuntimeController {
       state === "connected" ||
       state === "degraded" ||
       action === null ||
+      action.kind === "stale" || action.kind === "ignored" || action.kind === "storage_error" ||
       (await this.#usesNativeAccountAuthority())
     ) {
       return this.#response(action ?? undefined);
     }
     await rememberConnectIntent(this.#storage);
-    const traceOpened = await this.#traceWebNavigation.open(`${this.#webOrigin}/`);
+    let traceOpened = false;
+    const opening = (async () => {
+      const tab = await this.#traceWebNavigation.openTab(`${this.#webOrigin}/`);
+      traceOpened = tab !== null;
+      if (typeof sender?.tab?.id === "number" && typeof tab?.id === "number" && await hasConnectIntent(this.#storage)) {
+        await rememberConnectReturn(this.#storage, sender.tab.id, tab.id);
+      }
+    })();
+    this.#openingConnectTab = opening;
+    try { await opening; } finally { if (this.#openingConnectTab === opening) this.#openingConnectTab = null; }
     return Object.freeze({ ...this.#response(action), traceOpened });
   }
 
@@ -605,6 +628,7 @@ export class SessionRuntimeController {
       return null;
     }
     await this.start();
+    await this.#openingConnectTab;
     if (this.#mode !== "kernel" || !(await hasConnectIntent(this.#storage))) {
       return this.#response();
     }
@@ -612,7 +636,12 @@ export class SessionRuntimeController {
       await clearConnectIntent(this.#storage);
       return this.#response();
     }
-    return this.#response(await this.#connectForCurrentState() ?? undefined);
+    const returnTarget = await readConnectReturn(this.#storage);
+    const action = await this.#connectForCurrentState();
+    if (this.snapshot().state === "connected" && returnTarget !== null && returnTarget.connectTabId === sender?.tab?.id) {
+      await this.#traceWebNavigation.returnToArchive(returnTarget.sourceTabId, returnTarget.connectTabId);
+    }
+    return this.#response(action ?? undefined);
   }
 
   async #handleStatusMessage(

@@ -157,6 +157,7 @@ try {
     return fallbackUuid(`${Date.now()}:${fallbackId}`);
   };
   session = installSessionRuntime({
+    browserDeviceSessions: true,
     mode: __TRACE_SESSION_MODE__,
     runtime: extension.runtime,
     tabs: extension.tabs,

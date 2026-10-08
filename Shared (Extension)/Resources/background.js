@@ -460,6 +460,243 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     return recover;
   }
 
+  // src/extension-runtime/private-database.mts
+  var PRIVATE_DATABASE_NAME = "traceKernelPrivateV1";
+  var PRIVATE_DATABASE_VERSION = 1;
+  var PRIVATE_RECORD_STORE = "records";
+  var PRIVATE_RECORD_KEYS = Object.freeze({
+    browserInstallationId: "browser-installation-id",
+    sessionEnvelope: "session-envelope",
+    sessionCredentials: "session-credentials",
+    accountData: "account-data"
+  });
+  function databaseError(message, error = null) {
+    const detail = error?.message?.trim();
+    return new Error(detail ? `${message}: ${detail}` : message, { cause: error ?? void 0 });
+  }
+  var BrowserPrivateRecordDatabase = class {
+    #factory;
+    #openPromise = null;
+    constructor(factory) {
+      this.#factory = factory;
+    }
+    get(key) {
+      return this.#runTransaction("readonly", (store) => store.get(key), (request) => request.result === void 0 ? null : request.result);
+    }
+    put(key, value) {
+      return this.#runTransaction("readwrite", (store) => store.put(value, key), () => void 0);
+    }
+    delete(key) {
+      return this.#runTransaction("readwrite", (store) => store.delete(key), () => void 0);
+    }
+    async deleteDatabase() {
+      const pending = this.#openPromise;
+      this.#openPromise = null;
+      if (pending !== null) {
+        try {
+          (await pending).close();
+        } catch {
+        }
+      }
+      await new Promise((resolve, reject) => {
+        let settled = false;
+        const request = this.#factory.deleteDatabase(PRIVATE_DATABASE_NAME);
+        const finish = (result, error) => {
+          if (settled) return;
+          settled = true;
+          if (result === "resolve") resolve();
+          else reject(error);
+        };
+        request.onsuccess = () => finish("resolve");
+        request.onerror = () => finish(
+          "reject",
+          databaseError("private database deletion failed", request.error)
+        );
+        request.onblocked = () => finish(
+          "reject",
+          databaseError("private database deletion blocked")
+        );
+      });
+    }
+    async #runTransaction(mode, start, readResult) {
+      const database = await this.#open();
+      return new Promise((resolve, reject) => {
+        let request;
+        let result;
+        let requestSucceeded = false;
+        let settled = false;
+        const transaction = database.transaction(PRIVATE_RECORD_STORE, mode);
+        const finishReject = (message, error = null) => {
+          if (settled) return;
+          settled = true;
+          reject(databaseError(message, error));
+        };
+        try {
+          request = start(transaction.objectStore(PRIVATE_RECORD_STORE));
+        } catch (error) {
+          try {
+            transaction.abort();
+          } catch {
+          }
+          finishReject(
+            "private database request failed",
+            error instanceof DOMException ? error : null
+          );
+          return;
+        }
+        request.onsuccess = () => {
+          try {
+            result = readResult(request);
+            requestSucceeded = true;
+          } catch (error) {
+            try {
+              transaction.abort();
+            } catch {
+            }
+            finishReject(
+              "private database result invalid",
+              error instanceof DOMException ? error : null
+            );
+          }
+        };
+        request.onerror = () => finishReject(
+          "private database request failed",
+          request.error
+        );
+        transaction.onabort = () => finishReject(
+          "private database transaction aborted",
+          transaction.error
+        );
+        transaction.onerror = () => {
+        };
+        transaction.oncomplete = () => {
+          if (settled) return;
+          if (!requestSucceeded) {
+            finishReject("private database request completed without a result");
+            return;
+          }
+          settled = true;
+          resolve(result);
+        };
+      });
+    }
+    #open() {
+      if (this.#openPromise !== null) return this.#openPromise;
+      const opening = new Promise((resolve, reject) => {
+        let settled = false;
+        const request = this.#factory.open(PRIVATE_DATABASE_NAME, PRIVATE_DATABASE_VERSION);
+        const finishReject = (message, error = null) => {
+          if (settled) return;
+          settled = true;
+          reject(databaseError(message, error));
+        };
+        request.onupgradeneeded = (event) => {
+          const database = request.result;
+          if (event.oldVersion !== 0 || database.objectStoreNames.length !== 0) {
+            request.transaction?.abort();
+            return;
+          }
+          database.createObjectStore(PRIVATE_RECORD_STORE);
+        };
+        request.onerror = () => finishReject("private database open failed", request.error);
+        request.onblocked = () => finishReject("private database open blocked");
+        request.onsuccess = () => {
+          const database = request.result;
+          if (settled) {
+            database.close();
+            return;
+          }
+          if (database.version !== PRIVATE_DATABASE_VERSION || !database.objectStoreNames.contains(PRIVATE_RECORD_STORE) || database.objectStoreNames.length !== 1) {
+            database.close();
+            finishReject("private database schema invalid");
+            return;
+          }
+          settled = true;
+          database.onversionchange = () => {
+            database.close();
+            if (this.#openPromise === cached) this.#openPromise = null;
+          };
+          resolve(database);
+        };
+      });
+      const cached = opening.catch((error) => {
+        if (this.#openPromise === cached) this.#openPromise = null;
+        throw error;
+      });
+      this.#openPromise = cached;
+      return cached;
+    }
+  };
+
+  // src/extension-runtime/browser-device-session.mts
+  var DEVICE_TOKEN = /^trd_v1_[A-Za-z0-9_-]{43}$/;
+  var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  var BrowserDeviceSessionProvider = class {
+    constructor(options) {
+      this.options = options;
+    }
+    #generation = 0;
+    cancel() {
+      this.#generation += 1;
+      this.options.provider.cancel();
+    }
+    async acquire(purpose) {
+      const generation = this.#generation;
+      const native = await this.options.isNative();
+      const grant = await this.options.provider.acquire(purpose);
+      if (grant.kind !== "credential" || native) return grant;
+      if (generation !== this.#generation) return { kind: "cancelled" };
+      return this.#exchange(grant.credential, generation);
+    }
+    async upgrade(credential) {
+      if (DEVICE_TOKEN.test(credential) || await this.options.isNative()) return credential;
+      const result = await this.#exchange(credential, this.#generation);
+      return result.kind === "credential" ? result.credential : credential;
+    }
+    async release(credential) {
+      if (!DEVICE_TOKEN.test(credential) || await this.options.isNative()) return;
+      try {
+        await this.options.fetch(`${this.options.apiBase}/api/extension/session`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${credential}` },
+          credentials: "omit",
+          redirect: "error",
+          signal: AbortSignal.timeout(1e4)
+        });
+      } catch {
+      }
+    }
+    async #exchange(accessToken, generation) {
+      try {
+        let installationId = await this.options.database.get(PRIVATE_RECORD_KEYS.browserInstallationId);
+        if (typeof installationId !== "string" || !UUID.test(installationId)) {
+          installationId = crypto.randomUUID();
+          await this.options.database.put(PRIVATE_RECORD_KEYS.browserInstallationId, installationId);
+        }
+        if (generation !== this.#generation) return { kind: "cancelled" };
+        const response = await this.options.fetch(`${this.options.apiBase}/api/extension/device-sessions`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ installationId, platform: "browser", ...this.options.clientVersion ? { clientVersion: this.options.clientVersion } : {} }),
+          cache: "no-store",
+          credentials: "omit",
+          redirect: "error",
+          signal: AbortSignal.timeout(1e4)
+        });
+        if (!response.ok) return { kind: "unavailable" };
+        const body = await response.json();
+        if (body?.status !== "issued" || typeof body.credential !== "string" || !DEVICE_TOKEN.test(body.credential)) return { kind: "unavailable" };
+        if (generation !== this.#generation || body.session?.installationId !== installationId || typeof body.session?.id !== "string" || !UUID.test(body.session.id) || typeof body.session?.absoluteExpiresAt !== "string" || !(Date.parse(body.session.absoluteExpiresAt) > Date.now())) {
+          void this.release(body.credential);
+          return { kind: generation !== this.#generation ? "cancelled" : "unavailable" };
+        }
+        return { kind: "credential", credential: body.credential };
+      } catch {
+        return { kind: "unavailable" };
+      }
+    }
+  };
+
   // src/extension-core/archive-readiness.mts
   var ARCHIVE_RUN_THROTTLE_MS = 5 * 60 * 1e3;
   var SYSTEM_CLOCK = Object.freeze({
@@ -2870,173 +3107,6 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
   };
 
-  // src/extension-runtime/private-database.mts
-  var PRIVATE_DATABASE_NAME = "traceKernelPrivateV1";
-  var PRIVATE_DATABASE_VERSION = 1;
-  var PRIVATE_RECORD_STORE = "records";
-  var PRIVATE_RECORD_KEYS = Object.freeze({
-    sessionEnvelope: "session-envelope",
-    sessionCredentials: "session-credentials",
-    accountData: "account-data"
-  });
-  function databaseError(message, error = null) {
-    const detail = error?.message?.trim();
-    return new Error(detail ? `${message}: ${detail}` : message, { cause: error ?? void 0 });
-  }
-  var BrowserPrivateRecordDatabase = class {
-    #factory;
-    #openPromise = null;
-    constructor(factory) {
-      this.#factory = factory;
-    }
-    get(key) {
-      return this.#runTransaction("readonly", (store) => store.get(key), (request) => request.result === void 0 ? null : request.result);
-    }
-    put(key, value) {
-      return this.#runTransaction("readwrite", (store) => store.put(value, key), () => void 0);
-    }
-    delete(key) {
-      return this.#runTransaction("readwrite", (store) => store.delete(key), () => void 0);
-    }
-    async deleteDatabase() {
-      const pending = this.#openPromise;
-      this.#openPromise = null;
-      if (pending !== null) {
-        try {
-          (await pending).close();
-        } catch {
-        }
-      }
-      await new Promise((resolve, reject) => {
-        let settled = false;
-        const request = this.#factory.deleteDatabase(PRIVATE_DATABASE_NAME);
-        const finish = (result, error) => {
-          if (settled) return;
-          settled = true;
-          if (result === "resolve") resolve();
-          else reject(error);
-        };
-        request.onsuccess = () => finish("resolve");
-        request.onerror = () => finish(
-          "reject",
-          databaseError("private database deletion failed", request.error)
-        );
-        request.onblocked = () => finish(
-          "reject",
-          databaseError("private database deletion blocked")
-        );
-      });
-    }
-    async #runTransaction(mode, start, readResult) {
-      const database = await this.#open();
-      return new Promise((resolve, reject) => {
-        let request;
-        let result;
-        let requestSucceeded = false;
-        let settled = false;
-        const transaction = database.transaction(PRIVATE_RECORD_STORE, mode);
-        const finishReject = (message, error = null) => {
-          if (settled) return;
-          settled = true;
-          reject(databaseError(message, error));
-        };
-        try {
-          request = start(transaction.objectStore(PRIVATE_RECORD_STORE));
-        } catch (error) {
-          try {
-            transaction.abort();
-          } catch {
-          }
-          finishReject(
-            "private database request failed",
-            error instanceof DOMException ? error : null
-          );
-          return;
-        }
-        request.onsuccess = () => {
-          try {
-            result = readResult(request);
-            requestSucceeded = true;
-          } catch (error) {
-            try {
-              transaction.abort();
-            } catch {
-            }
-            finishReject(
-              "private database result invalid",
-              error instanceof DOMException ? error : null
-            );
-          }
-        };
-        request.onerror = () => finishReject(
-          "private database request failed",
-          request.error
-        );
-        transaction.onabort = () => finishReject(
-          "private database transaction aborted",
-          transaction.error
-        );
-        transaction.onerror = () => {
-        };
-        transaction.oncomplete = () => {
-          if (settled) return;
-          if (!requestSucceeded) {
-            finishReject("private database request completed without a result");
-            return;
-          }
-          settled = true;
-          resolve(result);
-        };
-      });
-    }
-    #open() {
-      if (this.#openPromise !== null) return this.#openPromise;
-      const opening = new Promise((resolve, reject) => {
-        let settled = false;
-        const request = this.#factory.open(PRIVATE_DATABASE_NAME, PRIVATE_DATABASE_VERSION);
-        const finishReject = (message, error = null) => {
-          if (settled) return;
-          settled = true;
-          reject(databaseError(message, error));
-        };
-        request.onupgradeneeded = (event) => {
-          const database = request.result;
-          if (event.oldVersion !== 0 || database.objectStoreNames.length !== 0) {
-            request.transaction?.abort();
-            return;
-          }
-          database.createObjectStore(PRIVATE_RECORD_STORE);
-        };
-        request.onerror = () => finishReject("private database open failed", request.error);
-        request.onblocked = () => finishReject("private database open blocked");
-        request.onsuccess = () => {
-          const database = request.result;
-          if (settled) {
-            database.close();
-            return;
-          }
-          if (database.version !== PRIVATE_DATABASE_VERSION || !database.objectStoreNames.contains(PRIVATE_RECORD_STORE) || database.objectStoreNames.length !== 1) {
-            database.close();
-            finishReject("private database schema invalid");
-            return;
-          }
-          settled = true;
-          database.onversionchange = () => {
-            database.close();
-            if (this.#openPromise === cached) this.#openPromise = null;
-          };
-          resolve(database);
-        };
-      });
-      const cached = opening.catch((error) => {
-        if (this.#openPromise === cached) this.#openPromise = null;
-        throw error;
-      });
-      this.#openPromise = cached;
-      return cached;
-    }
-  };
-
   // src/extension-runtime/browser-adapters.mts
   var LEGACY_SESSION_ENVELOPE_KEY = "traceSessionEnvelopeV1";
   var LEGACY_SESSION_CREDENTIALS_KEY = "traceSessionCredentialsV1";
@@ -3118,7 +3188,19 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     load(reference) {
       return this.#withLock(async () => {
         const entries = await this.#readEntries();
-        return entries[reference] ?? null;
+        const credential = entries[reference];
+        if (credential === void 0) return null;
+        const upgraded = await this.#provider.upgrade?.(credential) ?? credential;
+        if (upgraded !== credential) {
+          entries[reference] = upgraded;
+          try {
+            await this.#writeEntries(entries);
+          } catch (error) {
+            void this.#provider.release?.(upgraded);
+            throw error;
+          }
+        }
+        return upgraded;
       });
     }
     storeUnique(credential, epoch) {
@@ -3128,24 +3210,33 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         const reference = `session:${epoch}:${suffix}`;
         const entries = await this.#readEntries();
         entries[reference] = credential;
-        await this.#writeEntries(entries);
+        try {
+          await this.#writeEntries(entries);
+        } catch (error) {
+          void this.#provider.release?.(credential);
+          throw error;
+        }
         return reference;
       });
     }
     delete(reference) {
       return this.#withLock(async () => {
         const entries = await this.#readEntries();
+        const removed = entries[reference];
         delete entries[reference];
         if (Object.keys(entries).length === 0) {
           await this.#database.delete(PRIVATE_RECORD_KEYS.sessionCredentials);
         } else {
           await this.#writeEntries(entries);
         }
+        if (removed && !Object.values(entries).includes(removed)) void this.#provider.release?.(removed);
       });
     }
     clearAll() {
       return this.#withLock(async () => {
+        const entries = await this.#readEntries();
         await this.#database.delete(PRIVATE_RECORD_KEYS.sessionCredentials);
+        for (const credential of new Set(Object.values(entries))) void this.#provider.release?.(credential);
       });
     }
     async #readEntries() {
@@ -3418,6 +3509,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     cancel() {
       this.#generation += 1;
+    }
+    isNative() {
+      return this.#detectIos();
     }
     async #detectIos() {
       this.#isIos ??= (async () => {
@@ -5471,17 +5565,33 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#mode = options.mode;
     }
     async open(url) {
+      return await this.openTab(url) !== null;
+    }
+    async openTab(url) {
       try {
-        await extensionCall(
+        return await extensionCall(
           this.#tabs,
           "create",
           [{ url }],
           this.#runtime,
           this.#mode
-        );
-        return true;
+        ) ?? {};
       } catch {
-        return false;
+        return null;
+      }
+    }
+    async returnToArchive(sourceTabId, connectTabId) {
+      if (!this.#tabs.get || !this.#tabs.update || sourceTabId === connectTabId) return;
+      const tabs = this.#tabs;
+      try {
+        const [source, connect] = await Promise.all([
+          extensionCall(tabs, "get", [sourceTabId], this.#runtime, this.#mode),
+          extensionCall(tabs, "get", [connectTabId], this.#runtime, this.#mode)
+        ]);
+        const host = archiveHostKindFromSender({ tab: source });
+        if (connect?.active !== true || host === null || isBlockedArchivePath(source?.url, host)) return;
+        await extensionCall(tabs, "update", [sourceTabId, { active: true }], this.#runtime, this.#mode);
+      } catch {
       }
     }
   };
@@ -5579,6 +5689,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 
   // src/extension-runtime/connect-intent.mts
   var CONNECT_INTENT_KEY = "traceConnectIntentV1";
+  var CONNECT_RETURN_KEY = "traceConnectReturnV1";
   var CONNECT_INTENT_TTL_MS = 30 * 6e4;
   async function rememberConnectIntent(storage, now = Date.now()) {
     try {
@@ -5601,9 +5712,25 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   }
   async function clearConnectIntent(storage) {
     try {
-      await storage.remove(CONNECT_INTENT_KEY);
+      await storage.remove([CONNECT_INTENT_KEY, CONNECT_RETURN_KEY]);
     } catch {
     }
+  }
+  async function rememberConnectReturn(storage, sourceTabId, connectTabId) {
+    try {
+      await storage.set({ [CONNECT_RETURN_KEY]: { sourceTabId, connectTabId, expiresAt: Date.now() + CONNECT_INTENT_TTL_MS } });
+    } catch {
+    }
+  }
+  async function readConnectReturn(storage) {
+    try {
+      const value = (await storage.get(CONNECT_RETURN_KEY))[CONNECT_RETURN_KEY];
+      if (value && Number.isInteger(value.sourceTabId) && Number.isInteger(value.connectTabId) && typeof value.expiresAt === "number" && value.expiresAt > Date.now() && value.expiresAt <= Date.now() + CONNECT_INTENT_TTL_MS) {
+        return { sourceTabId: value.sourceTabId, connectTabId: value.connectTabId };
+      }
+    } catch {
+    }
+    return null;
   }
 
   // src/extension-runtime/trace-web-status.mts
@@ -5900,7 +6027,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   }
 
   // src/extension-runtime/native-import.mts
-  var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  var UUID2 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   var MESSAGE_ATTEMPT_MS = 2500;
   var REQUEST_LIFETIME_MS = 6e5;
   var failure4 = () => Object.freeze({ ok: false, error: "native_import_unavailable" });
@@ -5936,7 +6063,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         if (!scope2.accountId || new TextEncoder().encode(scope2.accountId).length > 256 || !Number.isSafeInteger(scope2.epoch) || scope2.epoch < 0 || !await isCurrent()) return failure4();
         const requestID = this.#randomID();
         const issued = this.#now();
-        if (!UUID.test(requestID) || !Number.isSafeInteger(issued)) return failure4();
+        if (!UUID2.test(requestID) || !Number.isSafeInteger(issued)) return failure4();
         reservation = {
           requestID,
           issued,
@@ -5997,7 +6124,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         reservation.prepare,
         async () => await reservation.isCurrent() && this.#now() < reservation.issued + REQUEST_LIFETIME_MS,
         (prepared) => {
-          if (!record(prepared) || prepared.type !== "TRACE_IOS_IMPORT_PREPARE" || prepared.protocolVersion !== 1 || prepared.ok !== true || prepared.state !== "prepared" || typeof prepared.handoffID !== "string" || !UUID.test(prepared.handoffID) || typeof prepared.expiresAtMs !== "number" || !Number.isSafeInteger(prepared.expiresAtMs) || prepared.expiresAtMs > reservation.issued + 2 * REQUEST_LIFETIME_MS || prepared.maximumPayloadBytes !== 524288 || prepared.maximumItems !== 250 || reservation.handoffID !== null && (reservation.handoffID !== prepared.handoffID || reservation.expiresAtMs !== prepared.expiresAtMs)) return;
+          if (!record(prepared) || prepared.type !== "TRACE_IOS_IMPORT_PREPARE" || prepared.protocolVersion !== 1 || prepared.ok !== true || prepared.state !== "prepared" || typeof prepared.handoffID !== "string" || !UUID2.test(prepared.handoffID) || typeof prepared.expiresAtMs !== "number" || !Number.isSafeInteger(prepared.expiresAtMs) || prepared.expiresAtMs > reservation.issued + 2 * REQUEST_LIFETIME_MS || prepared.maximumPayloadBytes !== 524288 || prepared.maximumItems !== 250 || reservation.handoffID !== null && (reservation.handoffID !== prepared.handoffID || reservation.expiresAtMs !== prepared.expiresAtMs)) return;
           reservation.handoffID = prepared.handoffID;
           reservation.expiresAtMs = prepared.expiresAtMs;
           if (reservation.abandoned) void this.#cancel(reservation).catch(() => void 0);
@@ -6238,6 +6365,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #initialization = null;
     #storageFailure = false;
     #automaticVerificationRetry = false;
+    #archiveConnectFlight = null;
+    #openingConnectTab = null;
     #retryAttempt = 0;
     #retryGeneration = 0;
     #retryTimer = null;
@@ -6292,17 +6421,22 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         environment.storageMode
       );
       this.#retryClock = environment.retryClock ?? DEFAULT_RETRY_CLOCK;
-      this.#credentials = new BrowserCredentialPort(
-        this.#database,
-        new ExplicitCredentialProvider({
-          runtime: environment.runtime,
-          tabs: environment.tabs,
-          mode: environment.storageMode,
-          webOrigin: environment.webOrigin,
-          randomId: environment.randomId
-        }),
-        environment.randomId
-      );
+      const pageProvider = new ExplicitCredentialProvider({
+        runtime: environment.runtime,
+        tabs: environment.tabs,
+        mode: environment.storageMode,
+        webOrigin: environment.webOrigin,
+        randomId: environment.randomId
+      });
+      const provider = environment.browserDeviceSessions ? new BrowserDeviceSessionProvider({
+        provider: pageProvider,
+        isNative: () => pageProvider.isNative(),
+        database: this.#database,
+        fetch: environment.fetch,
+        apiBase: environment.apiBase,
+        ...environment.runtime.getManifest?.().version ? { clientVersion: environment.runtime.getManifest().version } : {}
+      }) : pageProvider;
+      this.#credentials = new BrowserCredentialPort(this.#database, provider, environment.randomId);
       this.#service = new SessionService({
         storage: this.#sessionStorage,
         credentials: this.#credentials,
@@ -6523,15 +6657,38 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (Object.keys(message).length !== 1 || host === null || isBlockedArchivePath(sender?.tab?.url ?? sender?.url, host)) {
         return null;
       }
+      if (this.#archiveConnectFlight) return this.#archiveConnectFlight;
+      const flight = this.#connectFromArchive(sender);
+      this.#archiveConnectFlight = flight;
+      try {
+        return await flight;
+      } finally {
+        if (this.#archiveConnectFlight === flight) this.#archiveConnectFlight = null;
+      }
+    }
+    async #connectFromArchive(sender) {
       await this.start();
       if (this.#mode === "disabled") return this.#response(void 0, "commands_unavailable");
       const action = await this.#connectForCurrentState();
       const state = this.snapshot().state;
-      if (state === "connected" || state === "degraded" || action === null || await this.#usesNativeAccountAuthority()) {
+      if (state === "connected" || state === "degraded" || action === null || action.kind === "stale" || action.kind === "ignored" || action.kind === "storage_error" || await this.#usesNativeAccountAuthority()) {
         return this.#response(action ?? void 0);
       }
       await rememberConnectIntent(this.#storage);
-      const traceOpened = await this.#traceWebNavigation.open(`${this.#webOrigin}/`);
+      let traceOpened = false;
+      const opening = (async () => {
+        const tab = await this.#traceWebNavigation.openTab(`${this.#webOrigin}/`);
+        traceOpened = tab !== null;
+        if (typeof sender?.tab?.id === "number" && typeof tab?.id === "number" && await hasConnectIntent(this.#storage)) {
+          await rememberConnectReturn(this.#storage, sender.tab.id, tab.id);
+        }
+      })();
+      this.#openingConnectTab = opening;
+      try {
+        await opening;
+      } finally {
+        if (this.#openingConnectTab === opening) this.#openingConnectTab = null;
+      }
       return Object.freeze({ ...this.#response(action), traceOpened });
     }
     // A Trace page is signed in while a connect request is waiting.
@@ -6540,6 +6697,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         return null;
       }
       await this.start();
+      await this.#openingConnectTab;
       if (this.#mode !== "kernel" || !await hasConnectIntent(this.#storage)) {
         return this.#response();
       }
@@ -6547,7 +6705,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         await clearConnectIntent(this.#storage);
         return this.#response();
       }
-      return this.#response(await this.#connectForCurrentState() ?? void 0);
+      const returnTarget = await readConnectReturn(this.#storage);
+      const action = await this.#connectForCurrentState();
+      if (this.snapshot().state === "connected" && returnTarget !== null && returnTarget.connectTabId === sender?.tab?.id) {
+        await this.#traceWebNavigation.returnToArchive(returnTarget.sourceTabId, returnTarget.connectTabId);
+      }
+      return this.#response(action ?? void 0);
     }
     async #handleStatusMessage(message, sender) {
       await this.start();
@@ -7863,6 +8026,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return fallbackUuid(`${Date.now()}:${fallbackId}`);
     };
     session = installSessionRuntime({
+      browserDeviceSessions: true,
       mode: "kernel",
       runtime: extension.runtime,
       tabs: extension.tabs,

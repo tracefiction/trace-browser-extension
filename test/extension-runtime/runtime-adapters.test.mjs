@@ -1872,7 +1872,7 @@ test("native tracking snapshot follows the current account and preserves change 
 
 const CONNECT_INTENT_KEY = "traceConnectIntentV1";
 
-function connectFlowRuntime({ area, traceTabs, creates, grants = [], platform = "mac" }) {
+function connectFlowRuntime({ area, traceTabs, creates, grants = [], platform = "mac", updates = [], beforeCreate = async () => {}, sourceAvailable = () => true, connectActive = () => true }) {
   return installTestRuntime({
     mode: "kernel",
     runtime: {
@@ -1896,8 +1896,15 @@ function connectFlowRuntime({ area, traceTabs, creates, grants = [], platform = 
       },
       async create(options) {
         creates.push(options);
+        await beforeCreate();
         return { id: 99, url: options.url };
       },
+      async get(id) {
+        if (id === 99) return { id, url: "https://www.tracefiction.com/", active: connectActive() };
+        if (!sourceAvailable()) throw new Error("tab closed");
+        return { id, url: "https://www.fanfiction.net/s/7038840/1/A-Chance-Encounter" };
+      },
+      async update(id, options) { updates.push({ id, ...options }); },
     },
     storageArea: area,
     storageMode: "promise",
@@ -2045,4 +2052,47 @@ test("on iPhone and iPad, archive Connect never opens the Trace website", async 
   assert.equal(response.traceOpened, undefined);
   assert.deepEqual(creates, []);
   assert.equal(Object.hasOwn(area.values, CONNECT_INTENT_KEY), false);
+});
+
+
+test("Android reconnect returns to the existing reading tab without reloading", async () => {
+  const area = new PromiseStorageArea(), creates = [], updates = [];
+  let tabs = [];
+  const controller = connectFlowRuntime({ area, creates, updates, platform: "android", traceTabs: () => tabs });
+  await controller.handle({ type: "TRACE_ARCHIVE_CONNECT" }, { ...archiveSender, tab: { ...archiveSender.tab, id: 42 } });
+  assert.deepEqual(creates, [{ url: "https://www.tracefiction.com/" }]);
+  tabs = [{ id: 99, url: "https://www.tracefiction.com/", signedIn: true }];
+  await controller.handle({ type: "TRACE_WEB_READY" }, { ...traceWebSender, tab: { ...traceWebSender.tab, id: 99 } });
+  assert.equal(controller.snapshot().state, "connected");
+  assert.deepEqual(updates, [{ id: 42, active: true }]);
+  assert.equal(area.values.traceConnectReturnV1, undefined);
+});
+
+for (const condition of ["closed", "left-auth-tab"]) test(`reconnect remains successful when source is ${condition}`, async () => {
+  const area = new PromiseStorageArea(), creates = [], updates = [];
+  let tabs = [];
+  const controller = connectFlowRuntime({ area, creates, updates, traceTabs: () => tabs,
+    sourceAvailable: () => condition !== "closed", connectActive: () => condition !== "left-auth-tab" });
+  await controller.handle({ type: "TRACE_ARCHIVE_CONNECT" }, { ...archiveSender, tab: { ...archiveSender.tab, id: 42 } });
+  tabs = [{ id: 99, url: "https://www.tracefiction.com/", signedIn: true }];
+  await controller.handle({ type: "TRACE_WEB_READY" }, { ...traceWebSender, tab: { ...traceWebSender.tab, id: 99 } });
+  assert.equal(controller.snapshot().state, "connected");
+  assert.deepEqual(updates, []);
+});
+
+test("duplicate reconnect clicks share a tab and fast readiness waits for its return identity", async () => {
+  const area = new PromiseStorageArea(), creates = [], updates = [];
+  const creation = deferred();
+  let tabs = [];
+  const controller = connectFlowRuntime({ area, creates, updates, traceTabs: () => tabs, beforeCreate: () => creation.promise });
+  const sender = { ...archiveSender, tab: { ...archiveSender.tab, id: 42 } };
+  const first = controller.handle({ type: "TRACE_ARCHIVE_CONNECT" }, sender);
+  const second = controller.handle({ type: "TRACE_ARCHIVE_CONNECT" }, sender);
+  await waitUntil(() => creates.length === 1, "connect did not open");
+  tabs = [{ id: 99, url: "https://www.tracefiction.com/", signedIn: true }];
+  const ready = controller.handle({ type: "TRACE_WEB_READY" }, { ...traceWebSender, tab: { ...traceWebSender.tab, id: 99 } });
+  creation.resolve();
+  await Promise.all([first, second, ready]);
+  assert.equal(creates.length, 1);
+  assert.deepEqual(updates, [{ id: 42, active: true }]);
 });

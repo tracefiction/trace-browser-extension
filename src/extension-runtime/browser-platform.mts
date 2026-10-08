@@ -58,6 +58,7 @@ export interface RuntimeMessageSender {
 }
 
 export interface TabsPort {
+  readonly get?: (...args: unknown[]) => unknown;
   readonly query: (...args: unknown[]) => unknown;
   readonly sendMessage: (...args: unknown[]) => unknown;
   readonly create: (...args: unknown[]) => unknown;

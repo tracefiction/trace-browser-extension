@@ -1,5 +1,6 @@
 import type {
   RuntimeMessageSender,
+  BrowserTab,
   RuntimePort,
   TabsPort,
 } from "./browser-platform.mjs";
@@ -80,20 +81,33 @@ export class BrowserTraceWebNavigation {
     this.#mode = options.mode;
   }
 
-  async open(url: string): Promise<boolean> {
+  async open(url: string): Promise<boolean> { return (await this.openTab(url)) !== null; }
+
+  async openTab(url: string): Promise<BrowserTab | null> {
     try {
-      await extensionCall<unknown>(
+      return await extensionCall<BrowserTab>(
         this.#tabs as unknown as Record<string, (...args: unknown[]) => unknown>,
-        "create",
-        [{ url }],
-        this.#runtime,
-        this.#mode,
-      );
-      return true;
-    } catch {
-      return false;
-    }
+        "create", [{ url }], this.#runtime, this.#mode,
+      ) ?? {};
+    } catch { return null; }
   }
+
+  async returnToArchive(sourceTabId: number, connectTabId: number): Promise<void> {
+    if (!this.#tabs.get || !this.#tabs.update || sourceTabId === connectTabId) return;
+    const tabs = this.#tabs as unknown as Record<string, (...args: unknown[]) => unknown>;
+    try {
+      const [source, connect] = await Promise.all([
+        extensionCall<BrowserTab>(tabs, "get", [sourceTabId], this.#runtime, this.#mode),
+        extensionCall<BrowserTab>(tabs, "get", [connectTabId], this.#runtime, this.#mode),
+      ]);
+      // Do not steal focus if the reader has already moved elsewhere. Never
+      // reload the reading URL: activating the existing tab preserves position.
+      const host = archiveHostKindFromSender({ tab: source });
+      if (connect?.active !== true || host === null || isBlockedArchivePath(source?.url, host)) return;
+      await extensionCall(tabs, "update", [sourceTabId, { active: true }], this.#runtime, this.#mode);
+    } catch { /* A closed tab does not invalidate a successful connection. */ }
+  }
+
 }
 
 function activationTarget(webOrigin: string): Readonly<{

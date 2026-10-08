@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
+import { deviceSessionFixture } from "./device-session-test-fixture.mjs";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -169,7 +170,9 @@ let savedFilterSyncCount = 0;
 let installedRating = 0;
 const installedEntryId = "00000000-0000-4000-8000-000000000123";
 
+const deviceSessions = deviceSessionFixture();
 const server = http.createServer(async (request, response) => {
+  if (await deviceSessions(request, response)) return;
   if (request.url === "/api/extension/account") {
     verificationCount += 1;
     const authorization = request.headers.authorization ?? "";

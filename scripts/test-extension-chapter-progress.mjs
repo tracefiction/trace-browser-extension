@@ -13,6 +13,7 @@
 // account or site is used.
 
 import assert from "node:assert/strict";
+import { deviceSessionFixture } from "./device-session-test-fixture.mjs";
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
@@ -193,7 +194,9 @@ const SIGNED_IN_TRACE_PAGE = `<!doctype html><title>Trace</title><body><script>
 
 const entries = new Map();
 
+const deviceSessions = deviceSessionFixture();
 const traceServer = http.createServer(async (request, response) => {
+  if (await deviceSessions(request, response)) return;
   const authorized = (request.headers.authorization ?? "").startsWith("Bearer kernel-");
   if (request.url === "/__state") return json(response, 200, { connected });
   if (request.url === "/api/extension/account") {

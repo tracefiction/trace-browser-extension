@@ -270,3 +270,18 @@ headers during preflight; they do not silently ignore them. The compatibility
 fallback is defensive, not permission to reverse deployment order. Owner privacy
 review is required before merge or release; no merge, pin update or store
 submission is authorized here.
+
+## Browser installation credentials
+
+Only the extension background exchanges an explicitly acquired Trace Auth0
+grant for a scoped device credential. The credential is never posted back to
+Trace web content or archive content scripts. Installation IDs are random
+UUIDs, not browser fingerprints. The API stores only credential digests; device
+credentials cannot issue other credentials or access general account APIs.
+The existing 90-day rolling idle / 365-day absolute session limits also apply
+to browser installations. A rejected or revoked scoped credential fails closed.
+Disconnect clears extension authority immediately and attempts self-revocation
+without retaining the discarded credential for an offline retry queue. Native
+iOS provider credentials are never revoked by this browser cleanup path.
+The pending reconnect return stores only source/connection tab IDs and expires
+with the user's Connect intent; Disconnect withdraws it.

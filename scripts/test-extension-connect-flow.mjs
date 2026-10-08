@@ -6,6 +6,7 @@
 // its usual signed-in announcement. No real account or credential is used.
 
 import assert from "node:assert/strict";
+import { deviceSessionFixture } from "./device-session-test-fixture.mjs";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -175,7 +176,9 @@ function tracePage(request) {
   };
 }
 
+const deviceSessions = deviceSessionFixture();
 const server = http.createServer(async (request, response) => {
+  if (await deviceSessions(request, response)) return;
   const authorized = (request.headers.authorization ?? "").startsWith("Bearer kernel-");
   if (request.url === "/api/extension/account") {
     if (!authorized) return json(response, 401, { error: "unauthorized" });
@@ -321,6 +324,9 @@ try {
   );
   const openedTracePages = context.pages().filter((page) => page.url().startsWith(origin));
   assert.ok(context.pages().length > pagesBefore, "Connect must open Trace when no Trace tab is open");
+  await waitFor(async () => controlPage.evaluate(() => new Promise(resolve => {
+    chrome.tabs.query({ active: true, currentWindow: true }, tabs => resolve(tabs[0]?.url?.includes("/tags/Naruto/works")));
+  })), "return to the originating archive tab");
   console.log(`notice (no Trace tab): connected without a refresh; ${openedTracePages.length} Trace tab open`);
 
   // 3. Disconnected again, a signed-in Trace tab already open: Connect uses it
@@ -347,16 +353,32 @@ try {
   await controlPage.evaluate(() => new Promise((resolve) => {
     chrome.storage.local.set({ prefAutoTrackEnabled: false }, resolve);
   }));
+  for (const page of context.pages().filter(page => page.url().startsWith(origin))) await page.close();
   const storyPage = await context.newPage();
   await storyPage.goto("https://archiveofourown.org/works/28534965", { waitUntil: "domcontentloaded" });
   const handle = storyPage.locator("[data-trace-story-handle]");
   await handle.waitFor({ state: "visible", timeout: 15_000 });
   await waitFor(async () => /connect/i.test(await handle.innerText()), "story handle offering Connect");
+  await storyPage.evaluate(() => {
+    document.body.style.minHeight = "5000px";
+    window.traceReadingMarker = "same-document";
+    window.scrollTo(0, 900);
+    document.addEventListener("click", event => {
+      if (event.target.closest("[data-trace-story-connect]")) window.traceBeforeConnectScroll = window.scrollY;
+    }, true);
+  });
   await handle.click();
   const sheetConnect = storyPage.locator("[data-trace-story-connect]");
   await sheetConnect.waitFor({ state: "visible", timeout: 10_000 });
   await sheetConnect.click();
   await waitFor(async () => (await sessionState(controlPage)) === "connected", "connection from the story page");
+  await waitFor(async () => controlPage.evaluate(() => new Promise(resolve => {
+    chrome.tabs.query({ active: true, currentWindow: true }, tabs => resolve(tabs[0]?.url?.includes("/works/28534965")));
+  })), "return to the existing story tab");
+  assert.equal(await storyPage.evaluate(() => window.traceReadingMarker), "same-document");
+  const position = await storyPage.evaluate(() => ({ before: window.traceBeforeConnectScroll, after: window.scrollY }));
+  assert.ok(position.before > 0, "the story was scrolled when Connect was pressed");
+  assert.equal(position.after, position.before);
   await waitFor(async () => /add to trace/i.test(await handle.innerText()), "story handle offering Add after connecting");
   await handle.click();
   await waitFor(() => trackCount === 2, "story save after connecting");
