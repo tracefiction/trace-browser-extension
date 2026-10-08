@@ -1,18 +1,20 @@
 /* ============================================================================
  * trace-finish-qualify.js
- * Drop-in, style-isolated "you reached the end" qualify band for AO3 / FFN.
+ * Drop-in, style-isolated end-of-story notes for AO3 / FFN.
  * Vanilla DOM, no framework, no shadow root; matches collector.js style.
  *
- * The reader hits the bottom of the LAST POSTED chapter:
- *   - work-state KNOWN (e.g. AO3 dd.status "Completed:")  -> set silently, NO band
- *   - work-state UNKNOWN                                  -> show this band, ask
+ * The last few lines of the LAST POSTED chapter stay in view for a short
+ * dwell after the reader's own navigation (scrolling past does not count):
+ *   - work-state KNOWN (e.g. AO3 "Complete Work")  -> set silently, then a
+ *     quiet inline note with Undo right after the text (`done`)
+ *   - work-state UNKNOWN                           -> ask with this band
  * Answer records work status and derives reader status: complete/abandoned => Finished, else => Caught up.
  *
  * USAGE (wire into your content scripts):
  *   const band = TraceFinishQualify.mount({
  *     anchorEl,                       // insert AFTER this (see anchors below)
  *     placement: 'inline',            // 'inline' (in flow) | 'corner' (fixed)
- *     align: 'center'|'start',        // inline only; start aligns with the host content column
+ *     align: 'center'|'start',        // inline only; start aligns with the host text column
  *     story: { src:'AO3', title:'…', chapter:33, total:33 },
  *     onQualify(workState){…},        // 'complete'|'wip'|'hiatus'|'abandoned'
  *     onDismiss(){…},
@@ -20,14 +22,16 @@
  *   });
  *   band.remove();
  *
- *   // Silent path (work-state known) — no band, just a confirmation toast:
- *   TraceFinishQualify.toast({ kind:'finished'|'caughtup', story, onOpenInTrace });
+ *   // Silent path (work-state known) — inline note after the text, with Undo:
+ *   TraceFinishQualify.done({ anchorEl, align, kind:'finished'|'caughtup', story,
+ *     previousLabel:'Reading', onUndo(controls){…}, onOpenInTrace });
  *
- * SCROLL TRIGGER helper (optional):
+ * END TRIGGER helper:
  *   TraceFinishQualify.onReachEnd(chapterBodyEl, () => { …decide silent vs band… });
  *
- * ANCHORS (host pages):
- *   AO3 chapter : insertAfter the last AO3 end-notes block, else #chapters
+ * ANCHORS (host pages) — every note sits right after the final chapter's
+ * text, before end notes, kudos and comments:
+ *   AO3 chapter : insertAfter the last chapter-text article, else #chapters
  *   FFN desktop : insertAfter #storytextp
  *   FFN mobile  : insertAfter #storycontent's wrapper (before bottom <hr>)
  * ========================================================================== */
@@ -140,13 +144,15 @@
     return b;
   }
 
+  // The end-of-story note is quiet: a surface with a hairline ring, no drop
+  // shadow, sitting in the story's own column right after the final lines.
+  // The fixed corner variant keeps its shadow because it floats over content.
   function surfaceStyle(corner) {
     return 'display:block;background:' + T.surface + ';border:0;border-radius:14px;overflow:hidden;'
-      + 'box-shadow:' + SHADOW + ';'
       + '-webkit-font-smoothing:antialiased;animation:traceFinishArrive .3s ease-out both;'
       + (corner
-          ? 'position:fixed;z-index:' + Z + ';width:340px;max-width:calc(100vw - 24px);right:max(18px,env(safe-area-inset-right));bottom:max(18px,env(safe-area-inset-bottom));'
-          : 'position:relative;width:100%;max-width:520px;margin:22px auto;');
+          ? 'box-shadow:' + SHADOW + ';position:fixed;z-index:' + Z + ';width:340px;max-width:calc(100vw - 24px);right:max(18px,env(safe-area-inset-right));bottom:max(18px,env(safe-area-inset-bottom));'
+          : 'box-shadow:inset 0 0 0 1px ' + T.rule + ';position:relative;width:100%;max-width:520px;margin:16px auto;');
   }
 
   function ensureMotionStyle() {
@@ -155,42 +161,90 @@
     style.id = 'trace-finish-motion';
     style.textContent = '@keyframes traceFinishArrive{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:translateY(0)}}'
       + '@media(prefers-reduced-motion:reduce){@keyframes traceFinishArrive{from{opacity:0}to{opacity:1}}}'
-      + '[data-trace-finish-qualify] :focus-visible,[data-trace-finish-recovery] :focus-visible,[data-trace-finish-toast] :focus-visible{'
+      + '[data-trace-finish-qualify] :focus-visible,[data-trace-finish-recovery] :focus-visible,'
+      + '[data-trace-finish-done] :focus-visible,[data-trace-finish-toast] :focus-visible{'
       + 'outline:3px solid ' + T.teal + '!important;outline-offset:2px!important}';
     (document.head || document.documentElement).appendChild(style);
   }
 
+  // Inline notes sit in the host's text column: `start` aligns with the
+  // anchor's own text inset (AO3 pads its chapter article), `center` centres.
+  function alignInline(node, opts) {
+    if (opts.placement === 'corner' || opts.align !== 'start') return;
+    var inset = 0;
+    try {
+      if (opts.anchorEl && typeof window.getComputedStyle === 'function') {
+        inset = parseFloat(window.getComputedStyle(opts.anchorEl).paddingLeft) || 0;
+      }
+    } catch (_) { inset = 0; }
+    node.style.margin = '16px 0';
+    // Auto width fills the column after the inset, still capped at 520.
+    node.style.width = 'auto';
+    if (inset > 0) node.style.marginLeft = Math.min(inset, 64) + 'px';
+  }
+
+  function statusLine(prefix, accent, label, suffix) {
+    var line = el('div', 'display:flex;flex-wrap:wrap;align-items:center;gap:0 6px;font:400 13px/1.4 ' + T.sans + ';color:' + T.secondary + ';margin-top:1px;');
+    line.setAttribute('data-trace-finish-status-line', '1');
+    if (prefix) line.appendChild(el('span', 'font:inherit;color:inherit;', prefix));
+    var status = el('span', 'display:inline-flex;align-items:center;gap:6px;font:inherit;color:inherit;');
+    status.appendChild(statusDot(accent));
+    status.appendChild(el('span', 'font:500 13px/1.4 ' + T.sans + ';color:' + T.ink + ';', label));
+    line.appendChild(status);
+    if (suffix) line.appendChild(el('span', 'font:inherit;color:inherit;', suffix));
+    return line;
+  }
+
   // ---- the qualify band -----------------------------------------------------
+  // Shown only when the archive does not say whether the work is complete.
+  // It never says "the end": the reader is at the latest posted chapter.
   function buildBand(opts) {
     var s = opts.story || {};
     var corner = opts.placement === 'corner';
-    var inlineStart = !corner && opts.align === 'start';
 
     ensureMotionStyle();
     var wrap = el('aside', surfaceStyle(corner));
-    if (inlineStart) wrap.style.margin = '22px 0';
     wrap.setAttribute('data-trace-finish-qualify', s.handle || '1');
     wrap.setAttribute('role', 'group');
-    wrap.setAttribute('aria-label', 'Trace: you reached the end');
+    wrap.setAttribute('aria-label', 'Trace: latest chapter');
 
-    var pad = el('div', 'padding:14px 16px 4px;');
-    var head = el('div', 'font:600 17px/1.3 ' + T.sans + ';color:' + T.ink + ';');
-    head.textContent = 'You reached the end';
-    pad.appendChild(head);
+    var pad = el('div', 'padding:10px 4px 12px 14px;');
+    var headRow = el('div', 'display:flex;align-items:flex-start;gap:4px;');
+    var headText = el('div', 'min-width:0;flex:1;padding-top:2px;');
+    var head = el('div', 'font:600 15px/1.3 ' + T.sans + ';color:' + T.ink + ';');
+    head.textContent = 'You’ve reached the latest chapter';
+    headText.appendChild(head);
+    var sub = el('div', 'font:400 13px/1.4 ' + T.sans + ';color:' + T.secondary + ';margin-top:1px;');
+    sub.textContent = s.src ? 'Is this story complete on ' + s.src + '?' : 'Is this story complete?';
+    headText.appendChild(sub);
+    headRow.appendChild(headText);
 
-    var sub = el('div', 'font:400 13px/1.4 ' + T.sans + ';color:' + T.secondary + ';margin-top:2px;');
-    sub.textContent = s.src ? 'Is this work finished on ' + s.src + '?' : 'What is the work’s current status?';
-    pad.appendChild(sub);
+    // A dismissal never spends teal: a tertiary × with a spoken action.
+    var dis = el('button',
+      'display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;cursor:pointer;'
+      + 'width:44px;height:44px;margin:-8px 0 0;background:transparent;border:0;border-radius:12px;color:' + T.tertiary + ';');
+    dis.type = 'button';
+    dis.setAttribute('aria-label', corner ? 'Dismiss' : 'Decide later');
+    dis.setAttribute('data-trace-finish-dismiss', '1');
+    dis.appendChild(svg('0 0 16 16', ['M4 4l8 8M12 4l-8 8'], 14));
+    dis.addEventListener('click', function () {
+      if (typeof opts.onDismiss === 'function') opts.onDismiss();
+      removeNode(wrap);
+    });
+    headRow.appendChild(dis);
+    pad.appendChild(headRow);
 
-    // B2-style cells: surface with a control-edge ring (3:1), text only, 44 pt targets.
-    var opt = el('div', 'display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:12px;');
+    // B2-style cells: surface with a control-edge ring (3:1), text only, 44 pt
+    // targets. One row on a desktop column, wrapping to two on a phone.
+    var opt = el('div', 'display:grid;grid-template-columns:repeat(4,auto);gap:6px;margin-top:10px;padding-right:10px;');
+    opt.setAttribute('data-trace-work-choices', '1');
     opt.setAttribute('role', 'group');
     opt.setAttribute('aria-label', 'Work status');
     WORK.forEach(function (w) {
       var b = el('button',
-        'display:flex;align-items:center;cursor:pointer;min-width:0;min-height:44px;'
+        'display:flex;align-items:center;justify-content:center;cursor:pointer;min-width:0;min-height:44px;'
         + 'background:' + T.surface + ';box-shadow:inset 0 0 0 1px ' + T.control + ';border-radius:12px;'
-        + 'padding:6px 12px;font:500 14px/1.2 ' + T.sans + ';color:' + T.ink + ';');
+        + 'padding:6px 12px;font:500 14px/1.2 ' + T.sans + ';color:' + T.ink + ';text-align:center;');
       b.type = 'button';
       b.setAttribute('data-trace-work-choice', w[0]);
       b.textContent = w[1];
@@ -212,30 +266,19 @@
     });
     pad.appendChild(opt);
 
-    // A dismissal never spends teal.
-    var dis = textAction(corner ? 'Dismiss' : 'Decide later', T.secondary);
-    dis.style.marginTop = '2px';
-    dis.addEventListener('click', function () {
-      if (typeof opts.onDismiss === 'function') opts.onDismiss();
-      removeNode(wrap);
-    });
-    pad.appendChild(dis);
-
     wrap.appendChild(pad);
     return wrap;
   }
 
   function buildRecoveryBand(opts) {
     var s = opts.story || {};
-    var inlineStart = opts.align === 'start';
     ensureMotionStyle();
     var wrap = el('aside', surfaceStyle(false));
-    if (inlineStart) wrap.style.margin = '22px 0';
     wrap.setAttribute('data-trace-finish-recovery', s.handle || '1');
     wrap.setAttribute('role', 'group');
     wrap.setAttribute('aria-label', 'Trace couldn’t save the update');
 
-    var pad = el('div', 'padding:14px 16px 4px;display:flex;gap:8px;align-items:flex-start;');
+    var pad = el('div', 'padding:10px 14px 2px;display:flex;gap:8px;align-items:flex-start;');
     var glyph = el('span', 'display:inline-flex;margin-top:2px;color:' + T.warning + ';');
     glyph.appendChild(alertGlyph(16));
     pad.appendChild(glyph);
@@ -243,7 +286,7 @@
     body.appendChild(el('div',
       'font:600 15px/1.3 ' + T.sans + ';color:' + T.ink + ';',
       'Trace couldn’t save the update'));
-    var message = el('div', 'font:400 13px/1.4 ' + T.sans + ';color:' + T.secondary + ';margin-top:2px;',
+    var message = el('div', 'font:400 13px/1.4 ' + T.sans + ';color:' + T.secondary + ';margin-top:1px;',
       opts.message || 'Your status wasn’t changed.');
     message.setAttribute('data-trace-finish-recovery-message', '1');
     body.appendChild(message);
@@ -300,14 +343,19 @@
   }
 
   // A failure is a warning-ink glyph beside ink text.
-  function showError(pad, message) {
-    var prev = pad.querySelector('[data-trace-finish-qualify-error]');
-    if (prev && prev.parentNode) prev.parentNode.removeChild(prev);
+  function errorRow(message) {
     var err = el('div', 'display:flex;gap:6px;align-items:flex-start;margin-top:4px;font:500 13px/1.35 ' + T.sans + ';color:' + T.ink + ';');
     var glyph = el('span', 'display:inline-flex;margin-top:1px;color:' + T.warning + ';');
     glyph.appendChild(alertGlyph(14));
     err.appendChild(glyph);
     err.appendChild(el('span', '', message));
+    return err;
+  }
+
+  function showError(pad, message) {
+    var prev = pad.querySelector('[data-trace-finish-qualify-error]');
+    if (prev && prev.parentNode) prev.parentNode.removeChild(prev);
+    var err = errorRow(message);
     err.setAttribute('data-trace-finish-qualify-error', '1');
     pad.appendChild(err);
     announce(message);
@@ -321,37 +369,40 @@
     return { accent: T.caughtup, reader: 'Caught up', title: 'Work status saved' };
   }
 
+  function openInTraceAction(opts) {
+    var link = el('a',
+      'display:inline-flex;align-items:center;min-height:44px;padding:0 8px;margin-left:-8px;cursor:pointer;'
+      + 'font:500 14px/1.2 ' + T.sans + ';color:' + T.teal + ';text-decoration:none;');
+    link.href = opts.traceHref || '#';
+    link.textContent = 'Open in Trace';
+    link.setAttribute('data-trace-finish-open', '1');
+    link.addEventListener('click', function (e) {
+      if (!opts.traceHref) e.preventDefault();
+      opts.onOpenInTrace();
+    });
+    return link;
+  }
+
   // ---- resolved confirmation (replaces band body in place) ------------------
   // Confirmation is an ink check; the only colour is the reader-status dot.
   function showResolved(wrap, pad, workState, opts) {
     var result = workStatusResult(workState);
     pad.textContent = '';
-    pad.style.padding = '14px 16px 4px';
+    pad.style.padding = '10px 14px 2px';
+    wrap.setAttribute('aria-label', 'Trace: ' + result.title);
     var row = el('div', 'display:flex;align-items:flex-start;gap:10px;');
-    var ic = el('span', 'display:inline-flex;color:' + T.ink + ';margin-top:1px;');
-    ic.appendChild(checkGlyph(20));
+    var ic = el('span', 'display:inline-flex;color:' + T.ink + ';margin-top:2px;');
+    ic.appendChild(checkGlyph(16));
     var txt = el('div', 'min-width:0;flex:1;');
     var t1 = el('div', 'font:600 15px/1.3 ' + T.sans + ';color:' + T.ink + ';');
     t1.textContent = result.title;
-    var t2 = el('div', 'display:flex;align-items:center;gap:6px;font:400 13px/1.4 ' + T.sans + ';color:' + T.secondary + ';margin-top:2px;');
-    t2.appendChild(document.createTextNode('Your status is now'));
-    t2.appendChild(statusDot(result.accent));
-    t2.appendChild(el('span', 'font:500 13px/1.4 ' + T.sans + ';color:' + T.ink + ';', result.reader));
-    txt.appendChild(t1); txt.appendChild(t2);
+    txt.appendChild(t1);
+    txt.appendChild(statusLine('Your status is now', result.accent, result.reader));
 
     if (typeof opts.onOpenInTrace === 'function') {
-      var link = el('a',
-        'display:inline-flex;align-items:center;min-height:44px;padding:0 8px;margin-left:-8px;cursor:pointer;'
-        + 'font:500 14px/1.2 ' + T.sans + ';color:' + T.teal + ';text-decoration:none;');
-      link.href = opts.traceHref || '#';
-      link.textContent = 'Open in Trace';
-      link.addEventListener('click', function (e) {
-        if (!opts.traceHref) e.preventDefault();
-        opts.onOpenInTrace();
-      });
-      txt.appendChild(link);
+      txt.appendChild(openInTraceAction(opts));
     } else {
-      txt.style.paddingBottom = '10px';
+      txt.style.paddingBottom = '8px';
     }
     row.appendChild(ic); row.appendChild(txt);
     pad.appendChild(row);
@@ -362,6 +413,98 @@
     }
   }
 
+  // ---- automatic finish note (work state known) -----------------------------
+  // The archive said whether the work is complete, so Trace already saved the
+  // result. The note confirms it in the story column and offers Undo; it stays
+  // until the reader leaves the page so Undo is never on a timer.
+  var DONE_COPY = {
+    finished: {
+      title: 'You’ve reached the end', reader: 'Finished', accent: T.finished, suffix: null
+    },
+    caughtup: {
+      title: 'You’re caught up', reader: 'Caught up', accent: T.caughtup, suffix: '· More chapters may follow'
+    }
+  };
+
+  function buildDone(opts) {
+    var s = opts.story || {};
+    var copy = DONE_COPY[opts.kind === 'finished' ? 'finished' : 'caughtup'];
+    ensureMotionStyle();
+    var wrap = el('aside', surfaceStyle(false));
+    wrap.setAttribute('data-trace-finish-done', opts.kind === 'finished' ? 'finished' : 'caughtup');
+    wrap.setAttribute('role', 'group');
+    wrap.setAttribute('aria-label', 'Trace: marked ' + copy.reader);
+
+    var pad = el('div', 'padding:10px 14px 2px;display:flex;flex-wrap:wrap;align-items:flex-start;column-gap:16px;');
+    var lead = el('div', 'display:flex;align-items:flex-start;gap:10px;min-width:0;flex:1 1 220px;padding-bottom:8px;');
+    var ic = el('span', 'display:inline-flex;color:' + T.ink + ';margin-top:2px;');
+    ic.appendChild(checkGlyph(16));
+    lead.appendChild(ic);
+    var txt = el('div', 'min-width:0;flex:1;');
+    var title = el('div', 'font:600 15px/1.3 ' + T.sans + ';color:' + T.ink + ';', copy.title);
+    title.setAttribute('data-trace-finish-done-title', '1');
+    txt.appendChild(title);
+    var line = statusLine('Marked', copy.accent, copy.reader, copy.suffix);
+    txt.appendChild(line);
+    lead.appendChild(txt);
+    pad.appendChild(lead);
+
+    var actions = el('div', 'display:flex;flex-wrap:wrap;align-items:center;gap:0 16px;margin:-4px 0 0 34px;');
+    var undo = null;
+    if (typeof opts.onUndo === 'function') {
+      undo = textAction('Undo');
+      undo.setAttribute('data-trace-finish-undo', '1');
+      undo.setAttribute('aria-label', 'Undo, keep this story as ' + (opts.previousLabel || 'it was'));
+      actions.appendChild(undo);
+    }
+    if (typeof opts.onOpenInTrace === 'function') actions.appendChild(openInTraceAction(opts));
+    if (actions.childNodes.length) pad.appendChild(actions);
+    wrap.appendChild(pad);
+
+    announce(copy.title + '. Marked ' + copy.reader + (s.title ? ': ' + s.title : '') + '.');
+
+    if (undo) {
+      undo.addEventListener('click', function () {
+        if (undo.disabled) return;
+        undo.disabled = true;
+        undo.style.cursor = 'wait';
+        undo.textContent = 'Undoing…';
+        var prevErr = pad.querySelector('[data-trace-finish-undo-error]');
+        if (prevErr && prevErr.parentNode) prevErr.parentNode.removeChild(prevErr);
+        opts.onUndo({
+          resolve: function (restoredLabel, restoredAccent) {
+            var label = restoredLabel || opts.previousLabel || 'Reading';
+            title.textContent = 'Undone';
+            line.parentNode.replaceChild(
+              statusLine('Your status is', restoredAccent || T.secondary, label), line);
+            if (actions.parentNode) actions.parentNode.removeChild(actions);
+            wrap.setAttribute('aria-label', 'Trace: undone');
+            // Keep focus inside the note so a keyboard reader is not dropped
+            // to the top of the page when the Undo button disappears.
+            // The note is not a control, so it draws no ring of its own.
+            wrap.setAttribute('tabindex', '-1');
+            wrap.style.outline = 'none';
+            try { wrap.focus({ preventScroll: true }); } catch (_) { /* ignore */ }
+            announce('Undone. Your status is ' + label + '.');
+            setTimeout(function () { removeNode(wrap); }, opts.undoneDismissMs || 6000);
+          },
+          fail: function (message) {
+            undo.disabled = false;
+            undo.style.cursor = 'pointer';
+            undo.textContent = 'Undo';
+            var err = errorRow(message || 'Couldn’t undo. Try again.');
+            err.setAttribute('data-trace-finish-undo-error', '1');
+            err.style.flexBasis = '100%';
+            err.style.margin = '0 0 8px 26px';
+            pad.appendChild(err);
+            announce(message || 'Couldn’t undo. Try again.');
+          }
+        });
+      });
+    }
+    return wrap;
+  }
+
   function removeNode(n) {
     if (!n || !n.parentNode) return;
     n.style.transition = 'opacity .2s ease';
@@ -369,7 +512,7 @@
     setTimeout(function () { if (n.parentNode) n.parentNode.removeChild(n); }, 220);
   }
 
-  // ---- silent-path confirmation toast (work-state known) --------------------
+  // ---- fixed confirmation toast (fallback when no story anchor exists) ------
   // The chapter-note anatomy: an ink check, the result and the story, with a
   // real, focusable Open in Trace button.
   function toast(opts) {
@@ -407,15 +550,25 @@
     return { remove: function () { removeNode(t); } };
   }
 
-  // ---- scroll-to-end trigger ------------------------------------------------
+  // ---- end-of-text trigger --------------------------------------------------
+  // The reader qualifies when the last few lines of the final chapter's text
+  // have stayed in view for a short visible dwell. Scrolling straight past
+  // the end, a browser restoring scroll position, or a deep link below the
+  // story never qualifies on its own: the arrival must follow the reader's own
+  // navigation in the story, and the end must then stay on screen.
+  var END_ZONE_PX = 96;
+  var END_DWELL_MS = 2000;
+
   function onReachEnd(bodyEl, cb, options) {
     if (!bodyEl) return function () {};
     var config = typeof options === 'number' ? { thresholdPx: options } : (options || {});
     var th = typeof config.thresholdPx === 'number' ? config.thresholdPx : 60;
-    var defaultDwell = 2000;
+    var endZonePx = typeof config.endZonePx === 'number' && config.endZonePx >= 0
+      ? config.endZonePx
+      : END_ZONE_PX;
     var dwellMs = typeof config.dwellMs === 'number' && config.dwellMs >= 0
       ? config.dwellMs
-      : defaultDwell;
+      : END_DWELL_MS;
     var now = typeof config.now === 'function' ? config.now : function () { return Date.now(); };
     var setTimer = typeof config.setTimer === 'function' ? config.setTimer : setTimeout;
     var clearTimer = typeof config.clearTimer === 'function' ? config.clearTimer : clearTimeout;
@@ -424,22 +577,13 @@
         ? config.navigationEvidenceWindowMs
         : 5000;
     var fired = false, cleaned = false, interactionAt = null, dwellTimer = null;
-    var visibleElapsedMs = 0, visibleSince = null;
-    var initial = bodyEl.getBoundingClientRect();
-    var initialBottom = typeof initial.bottom === 'number' ? initial.bottom : Infinity;
-    var sawEndBelowViewport = initialBottom - window.innerHeight > th;
-    var lastBottom = initialBottom;
-    var requiresRestorationEvidence = !sawEndBelowViewport;
+    // Visible time the end zone has spent on screen in its current stay.
+    var inViewElapsedMs = 0, inViewSince = null;
+    // Whether the current stay is the reader's own doing.
+    var attributed = false;
 
     function documentIsVisible() {
       return typeof document.visibilityState !== 'string' || document.visibilityState === 'visible';
-    }
-
-    visibleSince = documentIsVisible() ? now() : null;
-
-    function visibleDwellElapsed() {
-      if (visibleSince === null) return visibleElapsedMs;
-      return visibleElapsedMs + Math.max(0, now() - visibleSince);
     }
 
     function targetIsEditable(target) {
@@ -464,8 +608,23 @@
       return rect.bottom >= -th && rect.top <= window.innerHeight + th;
     }
 
-    function bodyIsAtVisibleEnd(rect) {
-      return bodyIntersectsViewport(rect) && rect.bottom - window.innerHeight <= th;
+    // The last lines are in view when the text's bottom edge sits on screen
+    // (within the threshold) and the final `endZonePx` of text has not yet
+    // scrolled above the top edge. A short body counts as all end zone.
+    function endZoneInView(rect) {
+      var bottom = typeof rect.bottom === 'number' ? rect.bottom : Infinity;
+      var top = typeof rect.top === 'number' ? rect.top : bottom;
+      var zone = Math.min(endZonePx, Math.max(0, bottom - top));
+      return bottom - window.innerHeight <= th && bottom - zone >= 0;
+    }
+
+    function inViewDwell() {
+      if (inViewSince === null) return inViewElapsedMs;
+      return inViewElapsedMs + Math.max(0, now() - inViewSince);
+    }
+
+    function hasRecentNavigationEvidence() {
+      return interactionAt !== null && now() - interactionAt <= navigationEvidenceWindowMs;
     }
 
     function documentReadingContext(event, rect) {
@@ -480,80 +639,64 @@
       return target === document || target === document.body || target === document.documentElement;
     }
 
-    function evidenceReady() {
-      return interactionAt !== null && visibleDwellElapsed() >= dwellMs;
+    function cancelDwellTimer() {
+      if (dwellTimer !== null) {
+        clearTimer(dwellTimer);
+        dwellTimer = null;
+      }
     }
 
-    function hasRecentNavigationEvidence() {
-      return interactionAt !== null && now() - interactionAt <= navigationEvidenceWindowMs;
+    function leaveEndZone() {
+      inViewElapsedMs = 0;
+      inViewSince = null;
+      attributed = false;
+      cancelDwellTimer();
     }
 
-    function check(cause) {
+    function check() {
       if (fired || cleaned || !documentIsVisible()) return;
       var rect = bodyEl.getBoundingClientRect();
-      var bottom = typeof rect.bottom === 'number' ? rect.bottom : Infinity;
-      var wasBeforeEnd = lastBottom - window.innerHeight > th;
-      var isBeforeEnd = bottom - window.innerHeight > th;
-      var isAtVisibleEnd = bodyIsAtVisibleEnd(rect);
-      var crossedVisibleEnd = sawEndBelowViewport && wasBeforeEnd && isAtVisibleEnd;
-      var crossedPastEnd =
-        sawEndBelowViewport &&
-        wasBeforeEnd &&
-        bottom < -th;
-
-      if (isBeforeEnd) sawEndBelowViewport = true;
-      lastBottom = bottom;
-
-      var crossedEnd = crossedVisibleEnd || crossedPastEnd;
-      var crossedByScroll =
-        cause === 'scroll' && crossedEnd && hasRecentNavigationEvidence();
-      if (cause === 'scroll' && crossedEnd && !crossedByScroll) {
-        // A browser can restore scroll position after the content script has
-        // installed. Treat an unattributed arrival as restored state rather
-        // than consuming it as proof that the reader traversed the story.
-        requiresRestorationEvidence = true;
+      if (!endZoneInView(rect)) {
+        // Scrolling past (or back above) the last lines ends this stay.
+        leaveEndZone();
+        return;
       }
-      var restoredWithEvidence =
-        requiresRestorationEvidence && isAtVisibleEnd && evidenceReady();
-      if (!crossedByScroll && !restoredWithEvidence) return;
+      if (inViewSince === null) inViewSince = now();
+      if (!attributed && hasRecentNavigationEvidence()) attributed = true;
+      // An unattributed stay (scroll restoration, a script) keeps counting
+      // dwell, but only the reader's own story interaction can qualify it.
+      if (!attributed) return;
+      var remaining = dwellMs - inViewDwell();
+      if (remaining > 0) {
+        if (dwellTimer === null) {
+          dwellTimer = setTimer(function () {
+            dwellTimer = null;
+            check();
+          }, remaining);
+        }
+        return;
+      }
       fired = true;
       cleanup();
       cb();
     }
 
-    function scheduleDwellCheck() {
-      if (
-        interactionAt === null ||
-        dwellTimer !== null ||
-        !documentIsVisible()
-      ) return;
-      var remaining = Math.max(0, dwellMs - visibleDwellElapsed());
-      if (remaining === 0) {
-        check('evidence');
-        return;
-      }
-      dwellTimer = setTimer(function () {
-        dwellTimer = null;
-        check('evidence');
-      }, remaining);
-    }
-
     function handleVisibilityChange() {
       var timestamp = now();
       if (documentIsVisible()) {
-        if (visibleSince === null) visibleSince = timestamp;
-        scheduleDwellCheck();
-        check('visibility');
+        check();
         return;
       }
-      if (visibleSince !== null) {
-        visibleElapsedMs += Math.max(0, timestamp - visibleSince);
-        visibleSince = null;
+      if (inViewSince !== null) {
+        inViewElapsedMs += Math.max(0, timestamp - inViewSince);
+        inViewSince = null;
       }
-      if (dwellTimer !== null) {
-        clearTimer(dwellTimer);
-        dwellTimer = null;
-      }
+      cancelDwellTimer();
+    }
+
+    function recordEvidence() {
+      interactionAt = now();
+      check();
     }
 
     function recordPointerEvidence(event) {
@@ -563,9 +706,7 @@
         !bodyIntersectsViewport(rect) ||
         !targetIsInsideStory(event && event.target)
       ) return;
-      interactionAt = now();
-      scheduleDwellCheck();
-      check('evidence');
+      recordEvidence();
     }
 
     function recordKeyboardEvidence(event) {
@@ -575,38 +716,17 @@
         !documentReadingContext(event, rect) ||
         !isReadingNavigationKey(event)
       ) return;
-      interactionAt = now();
-      scheduleDwellCheck();
-      check('evidence');
+      recordEvidence();
     }
 
     function recordWheelEvidence(event) {
       var rect = bodyEl.getBoundingClientRect();
       if (!documentIsVisible() || !documentReadingContext(event, rect)) return;
-      interactionAt = now();
-      scheduleDwellCheck();
-      check('evidence');
+      recordEvidence();
     }
 
-    function recordFocusEvidence(event) {
-      var rect = bodyEl.getBoundingClientRect();
-      if (
-        !documentIsVisible() ||
-        !bodyIntersectsViewport(rect) ||
-        !targetIsInsideStory(event && event.target)
-      ) return;
-      interactionAt = now();
-      scheduleDwellCheck();
-      check('evidence');
-    }
-
-    function handleScroll() {
-      check('scroll');
-    }
-
-    function handleResize() {
-      check('resize');
-    }
+    function handleScroll() { check(); }
+    function handleResize() { check(); }
 
     function cleanup() {
       if (cleaned) return;
@@ -622,11 +742,8 @@
       document.removeEventListener('wheel', recordWheelEvidence, true);
       document.removeEventListener('keydown', recordKeyboardEvidence, true);
       document.removeEventListener('keyup', recordKeyboardEvidence, true);
-      document.removeEventListener('focusin', recordFocusEvidence, true);
-      if (dwellTimer !== null) {
-        clearTimer(dwellTimer);
-        dwellTimer = null;
-      }
+      document.removeEventListener('focusin', recordPointerEvidence, true);
+      cancelDwellTimer();
     }
     window.addEventListener('scroll', handleScroll, true);
     window.addEventListener('resize', handleResize);
@@ -642,29 +759,60 @@
     document.addEventListener('wheel', recordWheelEvidence, true);
     document.addEventListener('keydown', recordKeyboardEvidence, true);
     document.addEventListener('keyup', recordKeyboardEvidence, true);
-    document.addEventListener('focusin', recordFocusEvidence, true);
-    check('install');
+    document.addEventListener('focusin', recordPointerEvidence, true);
+    check();
     return cleanup;
   }
 
   // ---- public mount ---------------------------------------------------------
+  function place(node, opts) {
+    if (opts.anchorEl && opts.anchorEl.parentNode && opts.placement !== 'corner') {
+      alignInline(node, opts);
+      // If the story text has already scrolled above the viewport (the AO3
+      // chapter-wrapper fallback), keep what the reader is looking at still:
+      // Safari has no scroll anchoring, so offset the inserted height.
+      var anchorBottom = opts.anchorEl.getBoundingClientRect().bottom;
+      insertAfter(opts.anchorEl, node);
+      if (typeof anchorBottom === 'number' && anchorBottom < 0 && typeof window.scrollBy === 'function') {
+        var shift = node.getBoundingClientRect().bottom - anchorBottom;
+        if (shift > 0) {
+          try { window.scrollBy(0, shift); } catch (_) { /* ignore */ }
+        }
+      }
+    } else {
+      document.body.appendChild(node);
+    }
+    return { node: node, remove: function () { removeNode(node); } };
+  }
+
+  // Four choices fit one row in a desktop column; a phone column gets 2 × 2
+  // rather than an orphaned fourth cell.
+  function layoutChoices(node) {
+    var grid = node.querySelector('[data-trace-work-choices]');
+    if (!grid) return;
+    var width = node.getBoundingClientRect().width;
+    grid.style.gridTemplateColumns = width && width < 470 ? 'repeat(2,minmax(0,1fr))' : 'repeat(4,auto)';
+  }
+
   function mount(opts) {
-    var band = applyTone(buildBand(opts));
-    if (opts.anchorEl && opts.placement !== 'corner') insertAfter(opts.anchorEl, band);
-    else document.body.appendChild(band);
-    return { node: band, remove: function () { removeNode(band); } };
+    var handle = place(applyTone(buildBand(opts)), opts);
+    layoutChoices(handle.node);
+    return handle;
   }
 
   function recovery(opts) {
-    var band = applyTone(buildRecoveryBand(opts));
-    if (opts.anchorEl) insertAfter(opts.anchorEl, band);
-    else document.body.appendChild(band);
-    return { node: band, remove: function () { removeNode(band); } };
+    return place(applyTone(buildRecoveryBand(opts)), opts);
+  }
+
+  function done(opts) {
+    if (!opts || !opts.anchorEl || !opts.anchorEl.parentNode) return toast(opts || {});
+    return place(applyTone(buildDone(opts)), opts);
   }
 
   root.TraceFinishQualify = {
     mount: mount,
     recovery: recovery,
+    done: done,
     toast: toast,
     onReachEnd: onReachEnd,
     _palette: T

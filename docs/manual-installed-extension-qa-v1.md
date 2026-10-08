@@ -428,14 +428,23 @@ text in evidence.
 
 - AO3 complete multi-chapter work, normal chapter view:
   - Begin on the penultimate chapter in `Reading` and advance normally.
-  - Pass: progress advances, crossing the final chapter end marks `Finished`,
-    and refresh shows the same authoritative status.
+  - Pass: progress advances; keeping the final chapter's last lines on screen
+    for about two seconds marks `Finished`, and refresh shows the same
+    authoritative status.
+  - Pass: the confirmation note appears right after the final chapter's text,
+    before the chapter end notes, work end notes, kudos and comments. It does
+    not float over the page or take focus.
+  - Pass: Undo on that note restores the previous status (for example
+    `Reading`), and staying on the page does not finish the work again.
+  - Pass: flicking straight from mid-chapter to the comments does not finish
+    the work; scrolling back to the last lines and staying there does.
 - AO3 ongoing multi-chapter work, normal chapter view:
-  - Pass: crossing the last posted chapter end marks `Caught up`, not
-    `Finished`, and the work-status display remains ongoing rather than unknown.
+  - Pass: staying on the last posted chapter's last lines marks `Caught up`,
+    not `Finished`, the note says more chapters may follow, and the
+    work-status display remains ongoing rather than unknown.
 - AO3 one-chapter work:
   - Pass: opening an initially short/fully visible page does not finish it.
-  - Interact with the story, satisfy the visible dwell, and cross/reach its end.
+  - Interact with the story and keep its last lines on screen for the dwell.
     Pass: the authoritative status becomes `Finished` or `Caught up` according
     to source state.
 - AO3 Entire Work (`view_full_work=true`):
@@ -444,7 +453,8 @@ text in evidence.
     A newly saved work may intentionally remain at the safe chapter-1 baseline
     until the reader provides end-of-work evidence.
   - Read/scroll through the rendered chapters to the final work end. Pass: only
-    that crossing qualifies the exact published chapter count.
+    a dwell on the final chapter's last lines qualifies the exact published
+    chapter count, and the note sits before that chapter's end notes.
 - AO3 deep links and restoration:
   - Open `#comments`, `#work_endnotes`, and another target below the story.
     Pass: none auto-finishes a story that began above the viewport.

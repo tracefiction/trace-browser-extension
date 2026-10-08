@@ -31,7 +31,7 @@ On supported AO3 and FanFiction.net story/listing pages, Trace reads visible sto
 - chapter and word counts
 - current chapter / reading-progress metadata
 
-Trace uses this to import a story, update reading progress, show whether stories are already in your Trace library, let you change reading status from supported overlay surfaces, and hide works from Trace's browsing overlay when you explicitly choose to. Trace can also detect when you reach the last posted chapter of a supported story page so it can ask whether the work is complete, ongoing, on hiatus, or abandoned before marking your library entry finished or caught up.
+Trace uses this to import a story, update reading progress, show whether stories are already in your Trace library, let you change reading status from supported overlay surfaces, and hide works from Trace's browsing overlay when you explicitly choose to. Trace can also detect when the last lines of the last posted chapter have stayed on screen for a moment, so it can mark your library entry finished or caught up (with Undo), or ask whether the work is complete, ongoing, on hiatus, or abandoned when the site does not say. This uses only the page's layout and your scrolling on that page; it does not read or send story text.
 
 When you explicitly save an AO3 saved filter, Trace stores that AO3 filter query state in extension storage so it can reapply the filter later. If you are signed in to Trace, saved filters sync to your Trace account so they can appear on your other devices. Signed-out or offline saved filters remain local until a later signed-in sync.
 You can hide the saved filters surface from AO3 filter pages in the extension popup; this local preference does not delete saved presets.

@@ -218,7 +218,7 @@ Dotted underlines and “Private context” are retired.
 | --- | --- |
 | Capacity notice | Radius 14, `surface`, rule ring. SF 600 17 title. Teal “See Trace Unlimited” and “Manage library”; secondary “Not now”. Announced once. |
 | Connect / reconnect notice | As above. Refreshes page tokens itself. Safe-area inset; 44 pt ×. Heading in ink. |
-| Finish band, resolved, recovery, toast (`trace-finish-qualify.js`) | Page tokens and host tone. Text-only work-status choices. Ink check on resolve; warning glyph only on failure. Teal text actions. The toast link is a real button. Announced through the one body live region. |
+| End-of-story notes: finish band, automatic finish note, resolved, recovery (`trace-finish-qualify.js`) | Inline, right after the final chapter's text and before end notes, kudos and comments; never fixed over the page. Radius 14, `surface`, rule ring, no drop shadow, at most 520 wide in the text column. Page tokens and host tone. The automatic note is an ink check, “You’ve reached the end” (or “You’re caught up · More chapters may follow” for an ongoing work) and the status dot, with teal Undo and Open in Trace; it stays until the reader leaves so Undo is never timed. The band asks “Is this story complete on ‹site›?” with text-only work-status choices and a tertiary × (“Decide later”). Warning glyph only on failure. Never takes focus; announced through the one body live region. The fixed toast remains only as a fallback when no story anchor exists. |
 | Saved filters (`ao3-saved-filters.js`) | Trace's page register, not AO3's look: Story Ink groups, sentence-case labels, an ink check for the active filter, teal text actions, and an inline confirmation for Delete whose confirm word is warning ink. |
 
 N2 appears once when the first newly saved story is confirmed. N2 and N3 are
@@ -236,7 +236,7 @@ delivered, the next three confirmed chapter rises may show it, once per page
 load and never on the page that showed N2. The per-install local counter
 `traceChapterKeptNotesShownV1` stops at three. No note appears for an
 optimistic update, hidden work, disabled automatic progress, or while N2 or
-the finish band is visible. N3 lasts four seconds. N2 and N3 pause their
+an end-of-story note is visible. N3 lasts four seconds. N2 and N3 pause their
 timers while focused. They enter with a 14 px rise and fade over 0.4 s and
 leave with a fade; under Reduce Motion they fade only.
 
@@ -293,8 +293,8 @@ The regular visual fixture manifest also covers `popup-connected.png`,
 `ao3-unknown-add-hide.png`, `ao3-listing-action-surface.png` and the
 saved-filter and connection-notice fixtures. Each page surface family also has
 a `-dark-host.png` twin rendered on a `#111` host background: the story top
-and sheet, the listing line and action surface, both notices, the finish band
-and toast, and saved filters. The matrix adds the recovery states
+and sheet, the listing line and action surface, both notices, the end-of-story
+notes, and saved filters. The matrix adds the recovery states
 (`P1-known-saved`, `P10-saving`, `P10-failed`, `P11-settings`,
 `P11-status-error`, `other-account`, `registration-failure`, `reload-page`,
 `library-full`, `no-story`, `on-list`).
