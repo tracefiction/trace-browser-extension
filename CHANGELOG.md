@@ -4,8 +4,10 @@ Trace is in beta. This file lists the changes that matter to people using the
 Chrome, Edge and Firefox extension. The Safari extension ships inside the Trace
 iPhone app, and its notes go with each app release.
 
-## Unreleased
+## 0.7.3
 
+- **Trace stays connected.** The extension now keeps its own sign-in instead of borrowing a short-lived one from an open Trace tab. You no longer need a Trace tab open, and Firefox on Android no longer asks you to reconnect several times a day. After updating, you may need to connect once more; after that the connection lasts until you choose **Disconnect** or stop using Trace for 90 days.
+- **Connecting takes you back to your story.** When you connect from Trace's notice on AO3 or FanFiction.net, Trace returns you to the tab you were reading, at the same place on the page, once you've signed in.
 - **The end-of-story note now sits right after the last line.** On the last posted chapter, Trace's note appears directly after the chapter text, before end notes, kudos and comments, on AO3 (chapter view, **Entire Work** and one-shots) and FanFiction.net. It appears once the last few lines have stayed on screen for about two seconds; scrolling straight past the end no longer counts. When the site says a work is complete, the note reads **You’ve reached the end · Marked Finished** with **Undo**, which returns the story to its previous status. An ongoing work reads **You’re caught up**. If the site doesn't say, Trace asks **Is this story complete?** as before. The corner toast is gone.
 - **The popup shows how full a Free Library is.** It reads, for example, **64 of 100 stories kept**. At 80% it says **You’re at 80 of 100 stories. Unlimited keeps every story.** for a day, then goes back to the count. Nothing is shown for Unlimited.
 - **The Library full notice no longer follows every new story.** After an automatic save is refused, the notice appears at most once a day, and **Not now** quiets it for a week. Adding a story yourself still explains why it wasn't added.
