@@ -2167,7 +2167,12 @@ function collectAO3Work() {
   const categories = ddTags("dd.category.tags");
   const series = parseAO3Series(meta);
 
-  const summary = txt(one(document, ".summary blockquote.userstuff")) || null;
+  // Only the work preface carries the work summary. On chapter 2+ pages it is
+  // absent and the first `.summary` is the chapter's own summary, which must
+  // never be reported as the work's.
+  const summary =
+    txt(one(document, "#workskin > .preface.group:not(.chapter) > .summary blockquote.userstuff")) ||
+    null;
   const relParts = relPartsFromAO3(relationships);
   const charsUnion = dedup((characters || []).concat(relParts || []));
   const romanticRels = relationships.filter(r => r.includes("/"));

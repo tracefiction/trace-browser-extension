@@ -258,6 +258,48 @@ test("collectAO3Work (ao3_story.html) extracts full metadata", () => {
   assert.equal(item.s, null, "bare chapters 17/? does not over-infer work status");
 });
 
+const WORK_SUMMARY = "A lamplighter keeps a ledger of every fog that crosses Baker Street.";
+
+function collectSummaryFixture(name, url) {
+  const dom = domFromFixture(path.join("ao3-work-summary", name), url);
+  const { collectAO3Work } = createCollectorBindings(dom);
+  return collectAO3Work();
+}
+
+test("collectAO3Work reads the work summary from the work preface on chapter 1", () => {
+  const item = collectSummaryFixture(
+    "chapter-1.html",
+    "https://archiveofourown.org/works/7700201/chapters/9900001",
+  );
+  assert.equal(item.chn, 1);
+  assert.equal(item.sm, WORK_SUMMARY);
+});
+
+test("collectAO3Work never reports a chapter 2+ summary as the work summary", () => {
+  const item = collectSummaryFixture(
+    "chapter-2.html",
+    "https://archiveofourown.org/works/7700201/chapters/9900002",
+  );
+  assert.equal(item.chn, 2);
+  assert.equal(item.sm, null, "the work preface has no summary on later chapters");
+});
+
+test("collectAO3Work keeps the work summary on the Entire Work view", () => {
+  const item = collectSummaryFixture(
+    "entire-work.html",
+    "https://archiveofourown.org/works/7700201?view_full_work=true",
+  );
+  assert.equal(item.sm, WORK_SUMMARY, "chapter summaries further down are ignored");
+});
+
+test("collectAO3Work reads a one-shot's summary", () => {
+  const item = collectSummaryFixture(
+    "one-shot.html",
+    "https://archiveofourown.org/works/7700202",
+  );
+  assert.equal(item.sm, "One evening, one lamp, one detective.");
+});
+
 test("collectAO3Work emits current chapter URL without query or hash", () => {
   const dom = domFromFixture(
     "ao3_story.html",
