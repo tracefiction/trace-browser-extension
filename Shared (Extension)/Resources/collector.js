@@ -360,6 +360,8 @@ function stripTraceUiFromClone(el) {
       "[data-trace-open-trace]",
       "[data-trace-bottom-sheet-grabber]",
       "[data-trace-finish-qualify]",
+      "[data-trace-finish-done]",
+      "[data-trace-finish-recovery]",
       "[data-trace-finish-toast]",
       "[data-trace-capacity-notice]",
       "[data-trace-saved-note]"
@@ -674,6 +676,9 @@ var FINISH_QUALIFY_DISMISS_KEY = "trace:finish-qualify:dismissed";
 var finishQualifyEvidenceState = Object.create(null);
 var finishQualifyWatchState = Object.create(null);
 var finishQualifyBandState = Object.create(null);
+// Settled confirmations (automatic finish note, answered band) outlive the
+// watch flow so a projection re-render cannot fade them while Undo is offered.
+var finishQualifyDoneState = Object.create(null);
 var finishQualifyGeneration = 0;
 
 function count(s) {
@@ -4148,7 +4153,8 @@ function ensureTracePageFocusStyles() {
   style.textContent =
     "[data-trace-story-handle]:focus-visible,[data-trace-quick-add]:focus-visible," +
     "[data-trace-capacity-notice] :focus-visible,[data-trace-finish-qualify] :focus-visible," +
-    "[data-trace-finish-recovery] :focus-visible,[data-trace-finish-toast] :focus-visible{" +
+    "[data-trace-finish-recovery] :focus-visible,[data-trace-finish-done] :focus-visible," +
+    "[data-trace-finish-toast] :focus-visible{" +
       "outline:3px solid var(--trace-page-teal)!important;outline-offset:2px!important}";
   (document.head || document.documentElement).appendChild(style);
 }
@@ -6594,17 +6600,11 @@ function finishQualifyAo3FallbackEndElement(bodyEl) {
   return chapters && chapters !== bodyEl ? chapters : null;
 }
 
+// End-of-story notes sit right after the final chapter's text, before the
+// chapter and work end notes, kudos and comments: readers often stop at the
+// last line and never scroll through the notes.
 function finishQualifyAo3AnchorElement() {
-  var endNotes = qsa(
-    document,
-    [
-      "#work_endnotes",
-      ".afterword .end.notes.module",
-      "#chapters .end.notes.module",
-    ].join(",")
-  );
-  if (endNotes.length) return endNotes[endNotes.length - 1];
-  return one(document, "#chapters") || finishQualifyAo3BodyElement();
+  return finishQualifyAo3BodyElement();
 }
 
 function finishQualifyBodyElement() {
@@ -7015,17 +7015,89 @@ function finishQualifyStoryDescriptor(decision) {
   };
 }
 
-function showFinishQualifyToast(decision, view, result) {
-  if (!window.TraceFinishQualify || typeof window.TraceFinishQualify.toast !== "function") return;
-  var authoritativeStatus = entryStatus(result && result.entry);
-  traceRefreshPageTokens();
-  window.TraceFinishQualify.toast({
-    kind: authoritativeStatus === "FINISHED" ? "finished" : "caughtup",
-    story: finishQualifyStoryDescriptor(decision),
-    onOpenInTrace: function () {
-      openTraceUrlInBrowserTab(storyTraceOpenUrl(view.authState, decision.entry));
+function finishQualifyRemoveDone(workKey) {
+  var current = finishQualifyDoneState[workKey];
+  if (current && typeof current.remove === "function") current.remove();
+  finishQualifyDoneState[workKey] = null;
+}
+
+// Undo restores the reader status the entry had before the automatic finish.
+function finishQualifyPreviousStatus(decision) {
+  var status = entryStatus(decision && decision.entry);
+  if (
+    status &&
+    TRACE_READER_STATUS_CHOICES.indexOf(status) >= 0 &&
+    status !== "FINISHED" &&
+    status !== "DROPPED"
+  ) {
+    return status;
+  }
+  return "READING";
+}
+
+function undoFinishQualify(decision, workKey, previousStatus, controls) {
+  var entryId = decision && decision.entry && decision.entry.entryId;
+  if (!entryId || getWorkKeyFromUrl() !== workKey) {
+    controls.fail("This page changed. Open Trace to change the status.");
+    return;
+  }
+  // The end evidence on this page is spent: the re-render after Undo must not
+  // re-arm the automatic finish for the same chapter in this session.
+  finishQualifyRememberDismissed(decision.sessionKey);
+  sendCollectorMessage(
+    {
+      type: "TRACE_SET_READER_STATUS",
+      payload: { workKey: workKey, entryId: entryId, status: previousStatus },
     },
-  });
+    function (response) {
+      if (!response || !response.ok) {
+        var generic = "Couldn’t undo. Try again.";
+        var specific = readerStatusChoiceErrorCopy(response && response.error);
+        controls.fail(specific === readerStatusChoiceErrorCopy(null) ? generic : specific);
+        return;
+      }
+      updateOptimisticReaderStatus(workKey, previousStatus);
+      var tokens = TRACE_STATUS_TOKENS[previousStatus];
+      controls.resolve(readerStatusChoiceLabel(previousStatus), tokens && tokens.accent);
+      renderQuickAddButton(workKey);
+    },
+  );
+}
+
+function showFinishQualifyDone(decision, view, workKey, result) {
+  if (!window.TraceFinishQualify) return;
+  var authoritativeStatus = entryStatus(result && result.entry);
+  var kind = authoritativeStatus === "FINISHED" ? "finished" : "caughtup";
+  var previousStatus = finishQualifyPreviousStatus(decision);
+  var openInTrace = function () {
+    openTraceUrlInBrowserTab(storyTraceOpenUrl(view.authState, decision.entry));
+  };
+  traceRefreshPageTokens();
+  if (typeof window.TraceFinishQualify.done !== "function") {
+    if (typeof window.TraceFinishQualify.toast === "function") {
+      window.TraceFinishQualify.toast({
+        kind: kind,
+        story: finishQualifyStoryDescriptor(decision),
+        onOpenInTrace: openInTrace,
+      });
+    }
+    return;
+  }
+  var options = {
+    anchorEl: decision.anchorEl,
+    align: isAO3() ? "start" : "center",
+    kind: kind,
+    story: finishQualifyStoryDescriptor(decision),
+    previousLabel: readerStatusChoiceLabel(previousStatus),
+    onOpenInTrace: openInTrace,
+  };
+  if (authoritativeStatus && previousStatus !== authoritativeStatus) {
+    options.onUndo = function (controls) {
+      undoFinishQualify(decision, workKey, previousStatus, controls);
+    };
+  }
+  finishQualifyRemoveDone(workKey);
+  finishQualifyDoneState[workKey] = window.TraceFinishQualify.done(options);
 }
 
 function mountFinishQualifyBand(decision, view, workKey, flowState) {
@@ -7050,6 +7122,9 @@ function mountFinishQualifyBand(decision, view, workKey, flowState) {
           finishQualifyRememberDismissed(decision.sessionKey);
           if (result && result.state === "resolved" && result.entry && controls && typeof controls.resolve === "function") {
             controls.resolve();
+            finishQualifyRemoveDone(workKey);
+            finishQualifyDoneState[workKey] = finishQualifyBandState[workKey];
+            finishQualifyBandState[workKey] = null;
           } else {
             finishQualifyRemoveBand(workKey);
           }
@@ -7101,9 +7176,10 @@ function mountFinishQualifyRecovery(decision, view, workKey, flowState, message)
           }
           controls.resolve();
           finishQualifyBandState[workKey] = null;
+          finishQualifyRememberDismissed(decision.sessionKey);
           finishQualifySettleFlow(workKey, flowState, false);
           refreshFinishQualifyProjection(decision, result);
-          if (result.state === "resolved" && result.entry) showFinishQualifyToast(decision, view, result);
+          if (result.state === "resolved" && result.entry) showFinishQualifyDone(decision, view, workKey, result);
         },
       );
     },
@@ -7149,9 +7225,12 @@ function setupFinishQualify(view, workKey) {
           mountFinishQualifyRecovery(decision, view, workKey, watchState, message);
           return;
         }
+        // A later status change on this page (Undo, the story sheet) is the
+        // reader's call; the spent end evidence must not finish it again.
+        finishQualifyRememberDismissed(decision.sessionKey);
         finishQualifySettleFlow(workKey, watchState, true);
         refreshFinishQualifyProjection(decision, result);
-        if (result.state === "resolved" && result.entry) showFinishQualifyToast(decision, view, result);
+        if (result.state === "resolved" && result.entry) showFinishQualifyDone(decision, view, workKey, result);
       });
       return;
     }
@@ -7550,7 +7629,9 @@ function noteStoryProjection(workKey, projection) {
 // The end-of-story band asks the reader to decide; it takes precedence over
 // this informational note when both would share the bottom of the screen.
 function finishBandVisible() {
-  var band = document.querySelector("[data-trace-finish-qualify]");
+  var band = document.querySelector(
+    "[data-trace-finish-qualify],[data-trace-finish-done],[data-trace-finish-recovery]",
+  );
   if (!band || typeof band.getBoundingClientRect !== "function") return false;
   var rect = band.getBoundingClientRect();
   var height = window.innerHeight || document.documentElement.clientHeight || 0;

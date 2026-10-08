@@ -4711,6 +4711,10 @@ test("finish qualify on AO3 Entire Work waits for crossing the final rendered ch
 
   installCollectorChrome(dom, chrome);
   dom.window.eval(finishSrc);
+  // The dwell itself is covered in end-of-story.test.js.
+  const onReachEnd = dom.window.TraceFinishQualify.onReachEnd;
+  dom.window.TraceFinishQualify.onReachEnd = (body, callback) =>
+    onReachEnd(body, callback, { dwellMs: 0 });
   dom.window.eval(collectorTestSource(collectorSrc));
   dom.window.document.dispatchEvent(new dom.window.Event("DOMContentLoaded", { bubbles: true }));
 
@@ -4841,7 +4845,7 @@ test("finish qualify band marks an unknown ongoing FFN final chapter caught up t
 
   const band = dom.window.document.querySelector("[data-trace-finish-qualify]");
   assert.ok(band);
-  assert.match(band.textContent || "", /reached the end/i);
+  assert.match(band.textContent || "", /reached the latest chapter/i);
   const openSignal = sent.find(
     (msg) => msg.type === "TRACE_FINISH_QUALIFICATION_SIGNAL" && msg.payload.state === "open",
   );
@@ -4882,7 +4886,7 @@ test("finish qualify band marks an unknown ongoing FFN final chapter caught up t
   assert.doesNotMatch(band.getAttribute("style") || "", /Geist|Manrope|rgb\(255,\s*253,\s*248\)/);
 });
 
-test("finish qualify inserts AO3 prompt after the final end notes and aligns to content column", () => {
+test("finish qualify inserts AO3 prompt right after the chapter text, before end notes, aligned to the text column", () => {
   const collectorSrc = fs.readFileSync(
     path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
     "utf8",
@@ -4990,11 +4994,15 @@ test("finish qualify inserts AO3 prompt after the final end notes and aligns to 
   );
 
   const band = dom.window.document.querySelector("[data-trace-finish-qualify]");
+  const article = dom.window.document.querySelector("[role='article']");
+  const chapterEndNotes = dom.window.document.querySelector("#chapter_1_endnotes");
   const workEndNotes = dom.window.document.querySelector("#work_endnotes");
   assert.ok(band);
-  assert.equal(workEndNotes.nextElementSibling, band);
+  assert.equal(article.nextElementSibling, band);
+  assert.ok(band.compareDocumentPosition(chapterEndNotes) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING);
+  assert.ok(band.compareDocumentPosition(workEndNotes) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING);
   assert.match(band.getAttribute("style") || "", /max-width:\s*520px/);
-  assert.match(band.getAttribute("style") || "", /margin:\s*22px 0/);
+  assert.match(band.getAttribute("style") || "", /margin:\s*16px 0/);
 });
 
 test("finish qualify falls back to the AO3 chapters boundary when a work skin distorts article geometry", () => {
@@ -5243,7 +5251,10 @@ test("finish qualify promotes caught-up known-complete work with promise runtime
     workStatus: "complete",
     resolutionSource: "source",
   });
-  assert.ok(dom.window.document.querySelector("[data-trace-finish-toast]"));
+  const done = dom.window.document.querySelector("[data-trace-finish-done]");
+  assert.ok(done, "the automatic finish is confirmed inline after the text");
+  assert.equal(dom.window.document.querySelector("#storytextp").nextElementSibling, done);
+  assert.equal(dom.window.document.querySelector("[data-trace-finish-toast]"), null);
 });
 
 test("finish qualify open acknowledgement controls whether the manual prompt mounts", () => {
@@ -5578,7 +5589,8 @@ test("known-source finish failures show a durable retry affordance and recover",
   recovery.querySelector("[data-trace-finish-retry]").click();
 
   assert.equal(attempts, 2);
-  assert.ok(dom.window.document.querySelector("[data-trace-finish-toast]"));
+  assert.ok(dom.window.document.querySelector("[data-trace-finish-done]"));
+  assert.ok(dom.window.document.querySelector("[data-trace-finish-undo]"));
 });
 
 test("terminal finish replay after deletion settles without recovery or stale projection", () => {
@@ -5867,7 +5879,7 @@ test("finish end detection pauses short-story dwell while the document is hidden
   cleanup();
 });
 
-test("finish end detection preserves scroll-to-end behavior for a long story", () => {
+test("finish end detection qualifies a long story once its last lines stay in view for the dwell", () => {
   const finishSrc = fs.readFileSync(
     path.join(__dirname, "..", "Shared (Extension)", "Resources", "trace-finish-qualify.js"),
     "utf8",
@@ -5886,15 +5898,30 @@ test("finish end detection preserves scroll-to-end behavior for a long story", (
     configurable: true,
   });
   let fired = 0;
+  let now = 0;
+  let timer = null;
 
   dom.window.eval(finishSrc);
   const cleanup = dom.window.TraceFinishQualify.onReachEnd(body, () => {
     fired += 1;
+  }, {
+    now: () => now,
+    setTimer(fn) {
+      timer = fn;
+      return 1;
+    },
+    clearTimer() {
+      timer = null;
+    },
   });
   assert.equal(fired, 0);
   body.dispatchEvent(new dom.window.WheelEvent("wheel", { bubbles: true }));
   bottom = 850;
   dom.window.dispatchEvent(new dom.window.Event("scroll"));
+  assert.equal(fired, 0, "arriving at the end starts the dwell");
+  assert.equal(typeof timer, "function");
+  now = 2_000;
+  timer();
   assert.equal(fired, 1);
   cleanup();
 });
@@ -5997,7 +6024,7 @@ test("finish end detection accepts guarded document-level keyboard evidence for 
   cleanup();
 });
 
-test("finish end detection requires explicit navigation evidence for a large scroll step past the end", () => {
+test("finish end detection never treats a large scroll step past the end as reading it", () => {
   const finishSrc = fs.readFileSync(
     path.join(__dirname, "..", "Shared (Extension)", "Resources", "trace-finish-qualify.js"),
     "utf8",
@@ -6030,7 +6057,7 @@ test("finish end detection requires explicit navigation evidence for a large scr
     }
     rect = { top: -900, bottom: -100 };
     dom.window.dispatchEvent(new dom.window.Event("scroll"));
-    assert.equal(fired, withEvidence ? 1 : 0);
+    assert.equal(fired, 0, "scrolling past the last lines does not count, with or without evidence");
     cleanup();
   }
 });
