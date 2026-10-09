@@ -8379,3 +8379,81 @@ test("AO3 History dates normalise to YYYY-MM-DD and reject impossible dates", ()
   assert.equal(parseAO3HistoryDate(""), null);
   assert.equal(parseAO3HistoryDate(null), null);
 });
+
+test("the page answers the background's Import request over its own channel", async () => {
+  const ports = [];
+  const h = createStoryAutoTrackPendingHarness({ sessionMode: "kernel", store: { prefAutoTrackEnabled: false },
+    connectPort: relayPortRecorder(ports) });
+  assert.equal(ports.length, 1);
+  ports[0].receive({ kind: "request", id: 1, command: { type: "TRACE_COLLECT" } });
+  const reply = ports[0].sent.at(-1);
+  assert.equal(reply.kind, "response");
+  assert.equal(reply.id, 1);
+  assert.equal(reply.response.ok, true);
+  assert.equal(reply.response.payload.s, "ffn");
+  assert.equal(reply.response.payload.items.length, 1);
+  assert.equal(reply.response.payload.items[0].u, "https://www.fanfiction.net/s/7038840/");
+  // Anything else is still ignored.
+  ports[0].receive({ kind: "request", id: 2, command: { type: "TRACE_AUTO_TRACK" } });
+  assert.equal(ports[0].sent.at(-1), reply);
+  h.dom.window.dispatchEvent(new h.dom.window.Event("pagehide"));
+  h.dom.window.close();
+});
+
+function accountSwitchHarness(options = {}) {
+  const account = { binding: "1.first", entries: {} };
+  const reply = (extra) => ({ ok: true, binding: account.binding,
+    snapshot: { state: "connected", reason: "none", canExecuteAuthenticated: true }, ...extra });
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    pendingFirstStoryResponse: { ok: true, url: "" },
+    projectionResponse: () => reply({ projection: { entries: account.entries, workPreferences: {},
+      syncVersion: "2026-10-09T12:00:00.000Z" } }),
+    workStateResponse: reply({ state: null }),
+    ...options,
+  });
+  return { h, account };
+}
+
+test("a save refused while the background wakes is not re-sent once another account is connected", async () => {
+  const { h, account } = accountSwitchHarness({ autoTrackLastErrors: [NO_RECEIVER], holdAutoTrack: true });
+  await delay(50);
+  assert.equal(autoTrackSends(h), 1);
+  // Another reader's account is connected before the retry is due.
+  account.binding = "2.second";
+  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 2);
+  await delay(1_200);
+  assert.equal(autoTrackSends(h), 1, "the first account's pending save is not carried to the second");
+  h.dom.window.close();
+
+  // The same account keeps its retry.
+  const same = accountSwitchHarness({ autoTrackLastErrors: [NO_RECEIVER], holdAutoTrack: true });
+  await delay(50);
+  same.h.dispatchStorageChange("traceAccountProjectionRevisionV1", 2);
+  await delay(1_200);
+  assert.equal(autoTrackSends(same.h), 2);
+  same.h.dom.window.close();
+});
+
+test("a story page drops what it showed for the previous account when the account changes", async () => {
+  const firstEntry = { entryId: "00000000-0000-4000-8000-0000000a0001", status: "READING",
+    readerStatus: "READING", canonicalReaderStatus: "READING", chapters: { current: 1, total: 12 } };
+  const { h, account } = accountSwitchHarness({
+    // The first reader's automatic save is confirmed to the page directly.
+    autoTrackResponse: { ok: true, binding: "1.first", snapshot: { state: "connected" },
+      state: { workKey: "ffn:7038840", status: "saved", entryId: firstEntry.entryId, entry: firstEntry,
+        syncVersion: "2026-10-09T12:00:00.000Z" } },
+  });
+  await delay(100);
+  assert.equal(autoTrackSends(h), 1);
+  const handle = () => h.dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.match(handle().textContent || "", /Reading/, "the first reader sees their saved story");
+
+  // The second reader has not saved this story.
+  account.binding = "2.second";
+  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 2);
+  await delay(50);
+  assert.doesNotMatch(handle().textContent || "", /Reading/,
+    "the first reader's status is not shown to the second reader");
+  h.dom.window.close();
+});

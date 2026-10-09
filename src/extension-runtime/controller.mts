@@ -115,6 +115,7 @@ import {
 } from "./archive-readiness-status.mjs";
 import {
   ACCOUNT_PROJECTION_REVISION_KEY,
+  PAGE_BINDING_PATTERN,
   POPUP_PREFERENCE_KEYS,
   SESSION_MESSAGE_TYPES,
   WORK_KEY_PATTERN,
@@ -122,6 +123,7 @@ import {
   browserKind,
   isRecord,
   isSessionAction,
+  pageAccountBinding,
   publicCapacityRecovery,
   publicProjection,
   publicWorkState,
@@ -411,6 +413,9 @@ export class SessionRuntimeController {
       ...(environment.firstStoryDelay === undefined
         ? {}
         : { delay: environment.firstStoryDelay }),
+      ...(environment.mode === "kernel"
+        ? { collectFromPage: (tabId: number) => this.#popupRelay.collect(tabId) }
+        : {}),
     });
     this.#traceWebNavigation = new BrowserTraceWebNavigation({
       runtime: environment.runtime,
@@ -488,6 +493,31 @@ export class SessionRuntimeController {
   }
 
   async handle(
+    message: unknown,
+    sender?: RuntimeSender,
+  ): Promise<RuntimeHandleResponse> {
+    const response = await this.#dispatch(message, sender);
+    // An AO3 or FanFiction.net page keeps reading evidence and unconfirmed
+    // state between replies. Every reply tells it which account session
+    // answered, so it can drop that state as soon as the account changes.
+    if (
+      this.#mode !== "kernel" ||
+      !isRecord(response) ||
+      !isRecord(response.snapshot) ||
+      !isSupportedArchiveSender(sender)
+    ) {
+      return response;
+    }
+    return Object.freeze({ ...response, binding: this.#pageBinding() }) as RuntimeHandleResponse;
+  }
+
+  /** The account session a page reply came from; see `pageAccountBinding`. */
+  #pageBinding(): string | null {
+    if (this.#storageFailure || this.#mode !== "kernel") return null;
+    return pageAccountBinding(this.#service.displayScope());
+  }
+
+  async #dispatch(
     message: unknown,
     sender?: RuntimeSender,
   ): Promise<RuntimeHandleResponse> {
@@ -929,6 +959,15 @@ export class SessionRuntimeController {
             action,
           );
     }
+    if (finishCommand !== null && this.#pageBindingIsStale(message.binding)) {
+      // The page gathered its end-of-story evidence under another account
+      // session. Nothing is sent; the reply's binding tells the page to drop
+      // that evidence and read the current account.
+      return this.#finishQualificationResponse(
+        { kind: "failed", reason: "stale" },
+        action,
+      );
+    }
     return finishCommand === null
       ? this.#libraryCommandResponse(
           await this.#libraryMutations.execute(libraryCommand!),
@@ -938,6 +977,18 @@ export class SessionRuntimeController {
           await this.#finishQualification.execute(finishCommand),
           action,
         );
+  }
+
+  /**
+   * A page that names the account session it observed is refused once that
+   * session is no longer the current one. A page that names none (an older
+   * content script still running in an open tab) is not fenced here.
+   */
+  #pageBindingIsStale(claimed: unknown): boolean {
+    if (claimed === undefined) return false;
+    return typeof claimed !== "string" ||
+      !PAGE_BINDING_PATTERN.test(claimed) ||
+      claimed !== this.#pageBinding();
   }
 
   async #handleStoryMessage(
@@ -1553,6 +1604,10 @@ export class SessionRuntimeController {
         // hygiene and must not weaken the durable session transition.
       }
       this.#projection.invalidate();
+      // The app's account changed under open AO3 and FanFiction.net pages.
+      // Tell them to read the account again, so no page keeps the previous
+      // account's marks or reading state.
+      await this.#publishAccountProjectionRevision();
     }
 
     return Object.freeze({
@@ -1665,6 +1720,8 @@ export class SessionRuntimeController {
     ]);
     const activeTabUrl = activeBrowserTab?.url;
     const activeTab = classifyActiveTabUrl(activeTabUrl, this.#webOrigin);
+    const nativeImport = this.#nativeImportEnabled &&
+      await this.#nativePlatform() !== "desktop";
     const activeWorkKey = this.#storyWorkKey(activeTabUrl);
     const connected = this.snapshot().state === "connected";
     const activeWork = activeWorkKey === null || !connected
@@ -1708,6 +1765,7 @@ export class SessionRuntimeController {
       metadataImproveEnabled: preferences.prefMetadataImproveEnabled !== false,
       activeWork,
       activeStoryUnavailable,
+      nativeImport,
     });
   }
 

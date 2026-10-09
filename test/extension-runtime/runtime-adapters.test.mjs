@@ -20,6 +20,7 @@ import {
 } from "../../.trace-build/extension-runtime/controller.mjs";
 import {
   ACCOUNT_PROJECTION_REVISION_KEY,
+  pageAccountBinding,
 } from "../../.trace-build/extension-runtime/runtime-messages.mjs";
 
 function deferred() {
@@ -763,6 +764,173 @@ test("iOS auto-track adopts the app account, records progress, and hands its exa
     (await privateDatabase.get(PRIVATE_RECORD_KEYS.accountData)).scope.accountId,
     "account-b",
   );
+});
+
+test("the page binding names no account, survives restarts and changes with the account or its connection", () => {
+  const first = pageAccountBinding({ accountId: "account-a", epoch: 1 });
+  assert.match(first, /^[0-9a-z]{1,12}\.[0-9a-z]{1,8}$/);
+  assert.equal(first.includes("account"), false);
+  assert.equal(pageAccountBinding({ accountId: "account-a", epoch: 1 }), first, "the same session after a restart");
+  assert.notEqual(pageAccountBinding({ accountId: "account-b", epoch: 1 }), first);
+  assert.notEqual(pageAccountBinding({ accountId: "account-a", epoch: 2 }), first);
+  assert.equal(pageAccountBinding(null), null);
+});
+
+test("iOS account change under open pages: replies name the new session, pages are told, and the old session's finish is refused", async () => {
+  const databaseFactory = new IDBFactory();
+  const privateDatabase = await seedPrivateSession(databaseFactory, {
+    version: 1,
+    epoch: 1,
+    desired: "connected",
+    accountId: "account-a",
+    credentialRef: "credential-a",
+  }, {
+    version: 1,
+    entries: { "credential-a": "first-reader-token" },
+  });
+  const storageArea = new PromiseStorageArea();
+  const finishRequests = [];
+  let saved = false;
+  const secondReaderEntry = {
+    status: "READING",
+    readerStatus: "READING",
+    canonicalReaderStatus: "READING",
+    entryId: "00000000-0000-4000-8000-0000000b0002",
+    chapters: { current: 12, total: 12 },
+  };
+  const controller = installTestRuntime({
+    mode: "kernel",
+    databaseFactory,
+    privateDatabase,
+    runtime: {
+      onMessage: { addListener() {} },
+      async getPlatformInfo() {
+        return { os: "ios" };
+      },
+      async sendNativeMessage(message) {
+        // The Trace app is now signed in to the second reader's account.
+        if (message.type === "TRACE_IOS_AUTH_TOKEN_REQUEST") return nativeCredentialResponse("second-reader-token");
+        if (message.type === "TRACE_IOS_SAVE_PREPARE") return { ok: true,
+          context: { attemptID: "attempt", operationID: "operation", initiatedAt: 100 } };
+        return { ok: true };
+      },
+    },
+    tabs: {
+      async query() { return []; },
+      async sendMessage() { return null; },
+    },
+    storageArea,
+    storageMode: "promise",
+    fetch: async (url, options) => {
+      const authorization = options.headers.Authorization;
+      if (url.endsWith("/api/extension/account")) {
+        return new Response(JSON.stringify({
+          account_id: authorization === "Bearer first-reader-token" ? "account-a" : "account-b",
+        }), { status: 200 });
+      }
+      if (url.endsWith("/api/extension/library-overlay")) {
+        return new Response(JSON.stringify({
+          success: true,
+          data: { entries: saved ? { "ffn:7038840": secondReaderEntry } : {}, workPreferences: {},
+            syncVersion: "2026-10-09T12:00:00.000Z" },
+        }), { status: 200 });
+      }
+      if (url.endsWith("/api/extension/finish-qualification")) {
+        finishRequests.push({ authorization, body: JSON.parse(options.body) });
+        return new Response("", { status: 404 });
+      }
+      saved = true;
+      return new Response(JSON.stringify({
+        success: true,
+        data: {
+          entry_id: secondReaderEntry.entryId,
+          type: "created",
+          work_key: "ffn:7038840",
+          entry: secondReaderEntry,
+          syncVersion: "2026-10-09T12:00:01.000Z",
+        },
+      }), { status: 200 });
+    },
+    apiBase: "https://api.tracefiction.com",
+    webOrigin: "https://www.tracefiction.com",
+    randomId: (() => {
+      let id = 0;
+      return () => `id-${++id}`;
+    })(),
+  });
+  await controller.start();
+
+  // A tab the first reader left open reads its account.
+  const before = await controller.handle(
+    { type: "TRACE_WORK_STATE_GET", workKey: "ffn:7038840" },
+    archiveSender,
+  );
+  assert.equal(before.binding, pageAccountBinding({ accountId: "account-a", epoch: 1 }));
+  assert.equal(JSON.stringify(before).includes("account-a"), false);
+  const revisionBefore = storageArea.values[ACCOUNT_PROJECTION_REVISION_KEY];
+
+  // The second reader opens the story in another tab; that save adopts the
+  // app's account.
+  const save = await controller.handle({
+    ...storyCommandMessage,
+    type: "TRACE_AUTO_TRACK",
+    payload: {
+      ...storyCommandMessage.payload,
+      item: { ...storyCommandMessage.payload.item, chn: 12 },
+    },
+  }, archiveSender);
+  assert.equal(save.ok, true);
+  assert.equal(typeof save.binding, "string");
+  assert.notEqual(save.binding, before.binding, "the reply names the new account session");
+  assert.notEqual(storageArea.values[ACCOUNT_PROJECTION_REVISION_KEY], revisionBefore,
+    "open pages are told to read the account again");
+  const after = await controller.handle(
+    { type: "TRACE_ACCOUNT_PROJECTION_GET", workKeys: ["ffn:7038840"] },
+    archiveSender,
+  );
+  assert.equal(after.binding, save.binding);
+  assert.equal(after.projection.entries["ffn:7038840"].entryId, secondReaderEntry.entryId);
+
+  // The stale tab, still at the story's end, tries to finish the second
+  // reader's story with the first reader's reading.
+  const finish = {
+    type: "TRACE_FINISH_QUALIFICATION_SIGNAL",
+    payload: {
+      entryId: secondReaderEntry.entryId,
+      workKey: "ffn:7038840",
+      source: "ffn",
+      chapter: 12,
+      total: 12,
+      state: "resolved",
+      workStatus: "complete",
+      resolutionSource: "source",
+    },
+  };
+  for (const binding of [before.binding, "not a binding", 7, null]) {
+    const refused = await controller.handle({ ...finish, binding }, archiveSender);
+    assert.equal(refused.ok, false);
+    assert.equal(refused.error, "stale");
+    assert.deepEqual(refused.command, { kind: "failed", reason: "stale" });
+    assert.equal(refused.binding, save.binding, "the refusal tells the page which session is current");
+  }
+  assert.deepEqual(finishRequests, [], "nothing is sent for another account session's reading");
+
+  // The second reader's own page, which read the account, is not fenced.
+  const { workStatus: _status, resolutionSource: _source, ...openPayload } = finish.payload;
+  const open = { type: finish.type, payload: { ...openPayload, state: "open" } };
+  assert.equal((await controller.handle({ ...open, binding: before.binding }, archiveSender)).error, "stale");
+  assert.deepEqual(finishRequests, []);
+  await controller.handle({ ...open, binding: save.binding }, archiveSender);
+  assert.equal(finishRequests.length, 1);
+  assert.equal(finishRequests[0].body.entryId, secondReaderEntry.entryId);
+  // A page running an older content script names no session and is not fenced.
+  await controller.handle(open, archiveSender);
+  assert.equal(finishRequests.length, 2);
+  assert.equal(finishRequests.every(({ authorization }) => authorization === "Bearer second-reader-token"), true);
+
+  // The popup and Trace pages are never given the binding.
+  const popup = await controller.handle({ type: "TRACE_SESSION_GET_SNAPSHOT" }, popupSender);
+  assert.equal(Object.hasOwn(popup, "binding"), false);
 });
 
 test("iOS metadata contribution adopts the app account and invalidates without a story receipt", async () => {
@@ -1533,6 +1701,57 @@ test("popup state is extension-page-only and contains sanitized summary plus loc
     { type: "TRACE_POPUP_GET_STATE" },
     archiveSender,
   ), null);
+});
+
+test("popup state says Import is offered only in a package paired with the Trace app, off confirmed desktops", async () => {
+  const stateFor = async ({ nativeImportHandoff, os }) => {
+    const databaseFactory = new IDBFactory();
+    const privateDatabase = await seedPrivateSession(databaseFactory, {
+      version: 1, epoch: 1, desired: "connected", accountId: "account-a", credentialRef: "credential-a",
+    }, { version: 1, entries: { "credential-a": "current-token" } });
+    const controller = installTestRuntime({
+      mode: "kernel",
+      databaseFactory,
+      privateDatabase,
+      nativeImportHandoff,
+      runtime: {
+        id: "trace-extension",
+        onMessage: { addListener() {} },
+        ...(os === undefined ? {} : { async getPlatformInfo() { return { os }; } }),
+        async sendNativeMessage(message) {
+          return message.type === "TRACE_IOS_AUTH_TOKEN_REQUEST"
+            ? nativeCredentialResponse("current-token")
+            : { ok: true };
+        },
+      },
+      tabs: {
+        async query() { return [{ url: "https://archiveofourown.org/users/lanternwright/readings" }]; },
+        async sendMessage() { return null; },
+      },
+      storageArea: new PromiseStorageArea(),
+      storageMode: "promise",
+      fetch: async (url) => new Response(JSON.stringify(url.endsWith("/api/extension/account")
+        ? { account_id: "account-a", pro: false, library_count: 3 }
+        : { success: true, data: { entries: {}, workPreferences: {}, syncVersion: "2026-10-09T12:00:00.000Z" } }),
+      { status: 200 }),
+      apiBase: "https://api.tracefiction.com",
+      webOrigin: "https://www.tracefiction.com",
+      randomId: () => "id",
+    });
+    await controller.start();
+    return controller.handle({ type: "TRACE_POPUP_GET_STATE" },
+      { id: "trace-extension", url: "safari-web-extension://trace-extension/popup.html" });
+  };
+
+  assert.equal((await stateFor({ nativeImportHandoff: true, os: "ios" })).nativeImport, true);
+  // An iPad with a desktop-style user agent and no platform answer: Import
+  // stays offered, and a click reports a recoverable failure.
+  assert.equal((await stateFor({ nativeImportHandoff: true })).nativeImport, true);
+  assert.equal((await stateFor({ nativeImportHandoff: true, os: "mac" })).nativeImport, false);
+  assert.equal((await stateFor({ nativeImportHandoff: false, os: "ios" })).nativeImport, false);
+  assert.equal((await stateFor({ os: "ios" })).nativeImport, false);
+  assert.deepEqual((await stateFor({ nativeImportHandoff: true, os: "ios" })).activeTab,
+    { kind: "supported_archive", site: "ao3", canImport: true });
 });
 
 test("a session needing recovery says whether this browser ever verified an account", async () => {

@@ -1,5 +1,6 @@
 import type {
   AccountDataV1,
+  AccountScope,
   LibraryCommandFailure,
   LibraryMutationResult,
   LibraryOverlayEntry,
@@ -101,6 +102,8 @@ export interface PublicCapacityRecovery {
 export interface RuntimeResponse {
   readonly ok: boolean;
   readonly snapshot: PublicSessionSnapshot;
+  /** Present only in replies to AO3 and FanFiction.net pages. */
+  readonly binding?: string | null;
   readonly action?: SessionActionResult;
   readonly command?:
     | StoryCommandResult
@@ -124,12 +127,14 @@ export interface RuntimeResponse {
 export interface ProjectionResponse {
   readonly ok: true;
   readonly snapshot: PublicSessionSnapshot;
+  readonly binding?: string | null;
   readonly projection: PublicProjection;
 }
 
 export interface WorkStateResponse {
   readonly ok: true;
   readonly snapshot: PublicSessionSnapshot;
+  readonly binding?: string | null;
   readonly state: PublicWorkState | null;
 }
 
@@ -177,6 +182,12 @@ export interface PopupStateResponse {
   readonly activeWork: PublicWorkState | null;
   /** True only when the active story page explicitly reports that no readable story exists. */
   readonly activeStoryUnavailable: boolean;
+  /**
+   * True only in a package paired with the Trace app for Import, on a platform
+   * that is not a confirmed desktop. The popup's reader view offers Import
+   * only then.
+   */
+  readonly nativeImport: boolean;
 }
 
 export interface ExtensionStatusResponse {
@@ -216,6 +227,26 @@ export function isSessionAction(value: unknown): value is SessionAction {
     value === "reconnect"
   );
 }
+
+/**
+ * An opaque token an AO3 or FanFiction.net page uses to notice that the
+ * account session behind it has changed. It names no account: it is the
+ * session epoch and a short non-cryptographic hash, compared only for
+ * equality. It is the same across background restarts and changes whenever
+ * the account, or its connection, is replaced. Null means no account.
+ */
+export function pageAccountBinding(scope: AccountScope | null): string | null {
+  if (scope === null) return null;
+  let hash = 0x811c9dc5;
+  const input = `${scope.epoch}:${scope.accountId}`;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `${scope.epoch.toString(36)}.${hash.toString(36)}`;
+}
+
+export const PAGE_BINDING_PATTERN = /^[0-9a-z]{1,12}\.[0-9a-z]{1,8}$/;
 
 export function toPublicSessionSnapshot(
   snapshot: SessionSnapshot,
