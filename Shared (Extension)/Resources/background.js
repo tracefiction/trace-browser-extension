@@ -935,16 +935,17 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     return Object.freeze({ accountId: value.accountId, epoch: value.epoch });
   }
   function copySummary(value) {
-    if (!isRecord2(value) || !hasOnlyKeys(value, ["pro", "libraryCount", "firstStoryCompleted"])) {
+    if (!isRecord2(value) || !hasOnlyKeys(value, ["pro", "libraryCount", "firstStoryCompleted", "libraryLimit"])) {
       return null;
     }
-    if (typeof value.pro !== "boolean" || !isSafeInteger(value.libraryCount) || typeof value.firstStoryCompleted !== "boolean") {
+    if (typeof value.pro !== "boolean" || !isSafeInteger(value.libraryCount) || typeof value.firstStoryCompleted !== "boolean" || value.libraryLimit !== void 0 && !isSafeInteger(value.libraryLimit, 1)) {
       return null;
     }
     return Object.freeze({
       pro: value.pro,
       libraryCount: value.libraryCount,
-      firstStoryCompleted: value.firstStoryCompleted
+      firstStoryCompleted: value.firstStoryCompleted,
+      ...value.libraryLimit === void 0 ? {} : { libraryLimit: value.libraryLimit }
     });
   }
   function copyCapacityRecovery(value) {
@@ -2081,6 +2082,14 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     snapshot() {
       return toSessionSnapshot(this.#model);
+    }
+    /**
+     * Whether the stored session remembers an account it has verified. A
+     * session that needs recovery before any account was verified belongs to a
+     * reader who is still connecting for the first time.
+     */
+    hasVerifiedAccount() {
+      return this.#envelope.accountId !== null;
     }
     publicationScope() {
       return this.#copyScope(this.#model.publicationScope);
@@ -4186,10 +4195,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         return { kind: "invalid_response" };
       }
       const libraryCount = body.library_count;
+      const libraryLimit = isRecord7(body.cap) ? body.cap.limit : void 0;
       const summary = copyAccountSummary({
         pro: body.pro,
         libraryCount,
-        firstStoryCompleted: typeof body.first_story_completed_at === "string" && body.first_story_completed_at.trim().length > 0 || Number.isSafeInteger(libraryCount) && libraryCount > 0
+        firstStoryCompleted: typeof body.first_story_completed_at === "string" && body.first_story_completed_at.trim().length > 0 || Number.isSafeInteger(libraryCount) && libraryCount > 0,
+        ...Number.isSafeInteger(libraryLimit) && libraryLimit > 0 ? { libraryLimit } : {}
       });
       return summary === null ? { kind: "invalid_response" } : {
         kind: "value",
@@ -5935,11 +5946,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   function isSessionAction(value) {
     return value === "connect" || value === "cancel" || value === "disconnect" || value === "retry" || value === "reconnect";
   }
-  function toPublicSessionSnapshot(snapshot) {
+  function toPublicSessionSnapshot(snapshot, options = {}) {
     return Object.freeze({
       state: snapshot.state,
       reason: snapshot.reason,
-      canExecuteAuthenticated: snapshot.canExecuteAuthenticated
+      canExecuteAuthenticated: snapshot.canExecuteAuthenticated,
+      ...snapshot.state === "reconnect_required" && options.hasVerifiedAccount === false ? { neverConnected: true } : {}
     });
   }
   function toExtensionStatus(snapshot, options = {}) {
@@ -6754,7 +6766,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         const accountData = await this.#projection.read();
         return Object.freeze({
           ok: true,
-          snapshot: toPublicSessionSnapshot(this.snapshot()),
+          snapshot: this.#publicSnapshot(),
           projection: publicProjection(accountData, workKeys)
         });
       }
@@ -6769,7 +6781,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         const accountData = await this.#projection.read();
         return Object.freeze({
           ok: true,
-          snapshot: toPublicSessionSnapshot(this.snapshot()),
+          snapshot: this.#publicSnapshot(),
           state: publicWorkState(accountData, workKey)
         });
       }
@@ -6812,7 +6824,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
       return Object.freeze({
         ok: result.kind === "published",
-        snapshot: toPublicSessionSnapshot(this.snapshot()),
+        snapshot: this.#publicSnapshot(),
         ...preparation.action === void 0 ? {} : { action: preparation.action },
         capacity: publicCapacityRecovery(accountData),
         ...result.kind === "published" ? {} : { error: "unavailable" }
@@ -7153,10 +7165,15 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       } catch {
       }
     }
+    #publicSnapshot() {
+      return toPublicSessionSnapshot(this.snapshot(), {
+        hasVerifiedAccount: this.#service.hasVerifiedAccount()
+      });
+    }
     #response(action, error) {
       return Object.freeze({
         ok: true,
-        snapshot: toPublicSessionSnapshot(this.snapshot()),
+        snapshot: this.#publicSnapshot(),
         ...action === void 0 ? {} : { action },
         ...error === void 0 ? {} : { error }
       });
@@ -7183,7 +7200,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#publishStatus();
       return Object.freeze({
         ok: command.kind === "confirmed",
-        snapshot: toPublicSessionSnapshot(this.snapshot()),
+        snapshot: this.#publicSnapshot(),
         ...action === void 0 ? {} : { action },
         command,
         capacity: publicCapacityRecovery(accountData),
@@ -7212,7 +7229,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#publishStatus();
       return Object.freeze({
         ok: command.kind === "confirmed",
-        snapshot: toPublicSessionSnapshot(this.snapshot()),
+        snapshot: this.#publicSnapshot(),
         ...action === void 0 ? {} : { action },
         command,
         ...command.kind === "confirmed" ? {
@@ -7224,7 +7241,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#publishStatus();
       return Object.freeze({
         ok: command.kind === "acknowledged",
-        snapshot: toPublicSessionSnapshot(this.snapshot()),
+        snapshot: this.#publicSnapshot(),
         ...action === void 0 ? {} : { action },
         command,
         ...command.kind === "failed" ? { error: command.reason } : {}
@@ -7235,7 +7252,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#publishStatus();
       return Object.freeze({
         ok: command.kind !== "failed",
-        snapshot: toPublicSessionSnapshot(this.snapshot()),
+        snapshot: this.#publicSnapshot(),
         command,
         ...command.kind === "failed" ? { error: command.reason } : {}
       });
@@ -7244,7 +7261,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#publishStatus();
       return Object.freeze({
         ok: sync.kind !== "failed",
-        snapshot: toPublicSessionSnapshot(this.snapshot()),
+        snapshot: this.#publicSnapshot(),
         sync,
         ...sync.kind === "failed" ? { error: sync.reason } : {}
       });
@@ -7256,7 +7273,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#publishStatus();
       return Object.freeze({
         ok: result.ok,
-        snapshot: toPublicSessionSnapshot(this.snapshot()),
+        snapshot: this.#publicSnapshot(),
         ...action === void 0 ? {} : { action },
         ...result.ok ? { state: result.state } : { error: result.error },
         ...result.ok && result.state === "ready_to_open" ? { handoffID: result.handoffID, expiresAtMs: result.expiresAtMs } : {}
@@ -7481,9 +7498,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
       return Object.freeze({
         ok: true,
-        authState: toPublicSessionSnapshot(this.snapshot()),
+        authState: this.#publicSnapshot(),
         firstSaveSeen: accountData?.summary?.firstStoryCompleted === true,
         libraryCount: accountData?.summary?.libraryCount ?? null,
+        libraryLimit: accountData?.summary?.libraryLimit ?? null,
         activeTab,
         pro: accountData?.summary?.pro === true,
         capacity: publicCapacityRecovery(accountData),
