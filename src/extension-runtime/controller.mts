@@ -131,6 +131,7 @@ import {
   type FirstStoryResponse,
   type PopupStateResponse,
   type ProjectionResponse,
+  type PublicSessionSnapshot,
   type RuntimeResponse,
   type SavedFilterRuntimeResponse,
   type SessionAction,
@@ -558,7 +559,22 @@ export class SessionRuntimeController {
       return null;
     }
     await this.start();
-    if (message.type === SESSION_MESSAGE_TYPES.snapshot) return this.#response();
+    if (message.type === SESSION_MESSAGE_TYPES.snapshot) {
+      // On iPhone and iPad the containing app owns the account. A fresh or
+      // signed-out worker has not read the app's credential yet, so the popup
+      // adopts it first and shows "sign in" only once the app has none. An
+      // unavailable read is returned so the popup can keep checking.
+      const state = this.snapshot().state;
+      if (
+        isPopupSender(sender, this.#runtime.id) &&
+        (state === "signed_out" || state === "reconnect_required") &&
+        (await this.#usesNativeAccountAuthority())
+      ) {
+        const preparation = await this.#prepareNativeAuthority();
+        return this.#response(preparation.action);
+      }
+      return this.#response();
+    }
     if (!isSessionAction(message.action)) return this.#response({ kind: "ignored" });
     if (message.action === "disconnect" || message.action === "cancel") {
       await clearConnectIntent(this.#storage);
@@ -705,7 +721,7 @@ export class SessionRuntimeController {
       const accountData = await this.#projection.read();
       return Object.freeze({
         ok: true,
-        snapshot: toPublicSessionSnapshot(this.snapshot()),
+        snapshot: this.#publicSnapshot(),
         projection: publicProjection(accountData, workKeys),
       });
     }
@@ -725,7 +741,7 @@ export class SessionRuntimeController {
       const accountData = await this.#projection.read();
       return Object.freeze({
         ok: true,
-        snapshot: toPublicSessionSnapshot(this.snapshot()),
+        snapshot: this.#publicSnapshot(),
         state: publicWorkState(accountData, workKey),
       });
     }
@@ -788,7 +804,7 @@ export class SessionRuntimeController {
     }
     return Object.freeze({
       ok: result.kind === "published",
-      snapshot: toPublicSessionSnapshot(this.snapshot()),
+      snapshot: this.#publicSnapshot(),
       ...(preparation.action === undefined ? {} : { action: preparation.action }),
       capacity: publicCapacityRecovery(accountData),
       ...(result.kind === "published" ? {} : { error: "unavailable" as const }),
@@ -1224,10 +1240,16 @@ export class SessionRuntimeController {
     }
   }
 
+  #publicSnapshot(): PublicSessionSnapshot {
+    return toPublicSessionSnapshot(this.snapshot(), {
+      hasVerifiedAccount: this.#service.hasVerifiedAccount(),
+    });
+  }
+
   #response(action?: SessionActionResult, error?: RuntimeResponse["error"]): RuntimeResponse {
     return Object.freeze({
       ok: true as const,
-      snapshot: toPublicSessionSnapshot(this.snapshot()),
+      snapshot: this.#publicSnapshot(),
       ...(action === undefined ? {} : { action }),
       ...(error === undefined ? {} : { error }),
     });
@@ -1268,7 +1290,7 @@ export class SessionRuntimeController {
     this.#publishStatus();
     return Object.freeze({
       ok: command.kind === "confirmed",
-      snapshot: toPublicSessionSnapshot(this.snapshot()),
+      snapshot: this.#publicSnapshot(),
       ...(action === undefined ? {} : { action }),
       command,
       capacity: publicCapacityRecovery(accountData),
@@ -1312,7 +1334,7 @@ export class SessionRuntimeController {
     this.#publishStatus();
     return Object.freeze({
       ok: command.kind === "confirmed",
-      snapshot: toPublicSessionSnapshot(this.snapshot()),
+      snapshot: this.#publicSnapshot(),
       ...(action === undefined ? {} : { action }),
       command,
       ...(command.kind === "confirmed"
@@ -1330,7 +1352,7 @@ export class SessionRuntimeController {
     this.#publishStatus();
     return Object.freeze({
       ok: command.kind === "acknowledged",
-      snapshot: toPublicSessionSnapshot(this.snapshot()),
+      snapshot: this.#publicSnapshot(),
       ...(action === undefined ? {} : { action }),
       command,
       ...(command.kind === "failed" ? { error: command.reason } : {}),
@@ -1345,7 +1367,7 @@ export class SessionRuntimeController {
     this.#publishStatus();
     return Object.freeze({
       ok: command.kind !== "failed",
-      snapshot: toPublicSessionSnapshot(this.snapshot()),
+      snapshot: this.#publicSnapshot(),
       command,
       ...(command.kind === "failed" ? { error: command.reason } : {}),
     });
@@ -1355,7 +1377,7 @@ export class SessionRuntimeController {
     this.#publishStatus();
     return Object.freeze({
       ok: sync.kind !== "failed",
-      snapshot: toPublicSessionSnapshot(this.snapshot()),
+      snapshot: this.#publicSnapshot(),
       sync,
       ...(sync.kind === "failed" ? { error: sync.reason } : {}),
     });
@@ -1372,7 +1394,7 @@ export class SessionRuntimeController {
     this.#publishStatus();
     return Object.freeze({
       ok: result.ok,
-      snapshot: toPublicSessionSnapshot(this.snapshot()),
+      snapshot: this.#publicSnapshot(),
       ...(action === undefined ? {} : { action }),
       ...(result.ok ? { state: result.state } : { error: result.error }),
       ...(result.ok && result.state === "ready_to_open"
@@ -1673,9 +1695,10 @@ export class SessionRuntimeController {
     }
     return Object.freeze({
       ok: true,
-      authState: toPublicSessionSnapshot(this.snapshot()),
+      authState: this.#publicSnapshot(),
       firstSaveSeen: accountData?.summary?.firstStoryCompleted === true,
       libraryCount: accountData?.summary?.libraryCount ?? null,
+      libraryLimit: accountData?.summary?.libraryLimit ?? null,
       activeTab,
       pro: accountData?.summary?.pro === true,
       capacity: publicCapacityRecovery(accountData),

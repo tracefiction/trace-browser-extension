@@ -1,8 +1,32 @@
 # Changelog
 
-Trace is in beta. This file lists the changes that matter to people using the
-Chrome, Edge and Firefox extension. The Safari extension ships inside the Trace
-iPhone app, and its notes go with each app release.
+This file lists the changes that matter to people using the Chrome, Edge and
+Firefox extension. The Safari extension ships inside the Trace iPhone app, and
+its notes go with each app release.
+
+## 1.0
+
+### Your Library
+
+- **Stories you start part-way through get their description.** AO3 shows a story's summary only on its first chapter. If you're on a later chapter when Trace first sees a story, Trace now quietly reads the summary from the first chapter in the background, so the story's description is filled in. It never reads a chapter's own summary as the story's.
+- **Importing from your AO3 History keeps when you last read each story.** On your own AO3 History page, Trace now reads each story's **Last visited** date. When you import from that page, Trace uses it as the story's last-read date, unless it has seen you read the story more recently. If you choose, it can also stand in as an approximate finish date for finished stories that have none. Stories marked for later are left out, and the visit count isn't kept.
+
+### On the page
+
+- **No more bare “Error”.** When a story can't be saved automatically, the page now says **Not saved**. A story you tried to add says **Couldn’t add**, and a connection problem says **Try again**.
+- **A save that didn't go through gets a second chance.** If Trace couldn't check your Library at that moment, it quietly tries the save once more before saying anything. If the page does show **Not saved** and the story turns out to be saved after all, the page corrects itself.
+
+### The popup
+
+- **Connecting for the first time says Connect.** If a first attempt to connect doesn't go through, the popup and Trace's notes on the page read **Connect Trace**, not **Reconnect Trace**. Reconnect is only for a browser that was connected before.
+- **The Free count comes from your account.** The Library size in **64 of 100 stories kept** is read from your Trace account instead of being fixed in the extension. Until the account has reported it, the line stays hidden.
+- **One way of saying your Library is full.** The popup and the notices on AO3 and FanFiction.net now use the same words as the Trace app. Under **Your Library is full**, the popup reads **100 stories on Free. Everything saved stays. See Trace Unlimited, or remove a story to make room.** The page notices say the same without the number. They still appear at most once a day, and **Not now** still quiets them for a week.
+- **Plainer words.** **Improve story metadata** is now **Improve story details**, and the extension's description says what it does: save stories, keep your place as you read, and see your Library while you browse.
+
+### iPhone and iPad
+
+- **The popup checks the Trace app before asking you to sign in.** A reader who is signed in to the app is no longer told to create an account or sign in while Safari is still starting the extension.
+- **A tab left open across an app update picks Trace back up.** The next scroll or tap brings Trace back on that page, without a reload.
 
 ## 0.7.3
 

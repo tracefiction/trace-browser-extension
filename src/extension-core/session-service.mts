@@ -226,6 +226,15 @@ export class SessionService {
     return toSessionSnapshot(this.#model);
   }
 
+  /**
+   * Whether the stored session remembers an account it has verified. A
+   * session that needs recovery before any account was verified belongs to a
+   * reader who is still connecting for the first time.
+   */
+  hasVerifiedAccount(): boolean {
+    return this.#envelope.accountId !== null;
+  }
+
   publicationScope(): AccountScope | null {
     return this.#copyScope(this.#model.publicationScope);
   }

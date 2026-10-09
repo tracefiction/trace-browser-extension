@@ -1331,7 +1331,7 @@ async function main() {
         contentScripts: ["keys", "overlay"],
         authState: {
           state: "signed_out",
-          message: "Open Trace and sign in once to connect the extension. Then refresh this AO3 tab to restore sync.",
+          message: "Open Trace and sign in once to connect the extension. Then refresh this AO3 tab.",
           helpUrl: "https://tracefiction.com/apps",
         },
         waitFor: "[data-trace-connect-notice]",
@@ -1444,7 +1444,7 @@ async function main() {
         contentScripts: ["collector"],
         authState: {
           state: "signed_out",
-          message: "Open Trace and sign in once to connect the extension. Then refresh this AO3 tab to restore sync.",
+          message: "Open Trace and sign in once to connect the extension. Then refresh this AO3 tab.",
           helpUrl: "https://tracefiction.com/apps",
         },
         waitFor: "[data-trace-story-handle][data-trace-story-handle-state='auth']",

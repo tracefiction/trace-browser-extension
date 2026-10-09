@@ -4,7 +4,7 @@
         "description": "The display name for the extension."
     },
     "extension_description": {
-        "message": "Save AO3 and FanFiction.net stories to Trace, sync progress, and see library status while browsing.",
+        "message": "Save AO3 and FanFiction.net stories to Trace, keep your place as you read, and see your Library while you browse.",
         "description": "Description of what the extension does."
     }
 }

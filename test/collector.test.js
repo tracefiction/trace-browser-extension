@@ -17,7 +17,7 @@ function collectorTestSource(source) {
 window.finishQualifyIsLastPostedChapter = finishQualifyIsLastPostedChapter;
 window.removeQuickAddElements = removeQuickAddElements;
 window.renderQuickAddButton = renderQuickAddButton;
-window.__traceTestHooks = { sendAutoTrackForStory };
+window.__traceTestHooks = { sendAutoTrackForStory, storyHandlePresentation, handleDisplay, storyHeadline, storyCaption };
 })();`);
 }
 
@@ -256,6 +256,158 @@ test("collectAO3Work (ao3_story.html) extracts full metadata", () => {
     url: "https://archiveofourown.org/series/1637290",
   });
   assert.equal(item.s, null, "bare chapters 17/? does not over-infer work status");
+});
+
+const WORK_SUMMARY = "A lamplighter keeps a ledger of every fog that crosses Baker Street.";
+
+function collectSummaryFixture(name, url) {
+  const dom = domFromFixture(path.join("ao3-work-summary", name), url);
+  const { collectAO3Work } = createCollectorBindings(dom);
+  return collectAO3Work();
+}
+
+test("collectAO3Work reads the work summary from the work preface on chapter 1", () => {
+  const item = collectSummaryFixture(
+    "chapter-1.html",
+    "https://archiveofourown.org/works/7700201/chapters/9900001",
+  );
+  assert.equal(item.chn, 1);
+  assert.equal(item.sm, WORK_SUMMARY);
+});
+
+test("collectAO3Work never reports a chapter 2+ summary as the work summary", () => {
+  const item = collectSummaryFixture(
+    "chapter-2.html",
+    "https://archiveofourown.org/works/7700201/chapters/9900002",
+  );
+  assert.equal(item.chn, 2);
+  assert.equal(item.sm, null, "the work preface has no summary on later chapters");
+});
+
+test("collectAO3Work keeps the work summary on the Entire Work view", () => {
+  const item = collectSummaryFixture(
+    "entire-work.html",
+    "https://archiveofourown.org/works/7700201?view_full_work=true",
+  );
+  assert.equal(item.sm, WORK_SUMMARY, "chapter summaries further down are ignored");
+});
+
+test("collectAO3Work reads a one-shot's summary", () => {
+  const item = collectSummaryFixture(
+    "one-shot.html",
+    "https://archiveofourown.org/works/7700202",
+  );
+  assert.equal(item.sm, "One evening, one lamp, one detective.");
+});
+
+const CHAPTER_2_URL = "https://archiveofourown.org/works/7700201/chapters/9900002";
+
+function backfillHarness({ fetchImpl, prefs = {} } = {}) {
+  const dom = domFromFixture(path.join("ao3-work-summary", "chapter-2.html"), CHAPTER_2_URL);
+  const sent = [];
+  const fetchCalls = [];
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(message, cb) {
+        sent.push(message);
+        if (typeof cb === "function") cb({ ok: true });
+      },
+      lastError: null,
+    },
+    storage: { local: { get(keys, cb) { cb({ ...prefs }); } } },
+  };
+  const fetch = (url, init) => {
+    fetchCalls.push({ url, init });
+    return fetchImpl(url, init);
+  };
+  const bindings = createCollectorBindings(dom, { chrome, fetch, scopeStorageContext: false });
+  return { ...bindings, sent, fetchCalls, item: bindings.collectAO3Work() };
+}
+
+function okHtml(name) {
+  const html = loadFixture(path.join("ao3-work-summary", name));
+  return () => Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(html) });
+}
+
+test("work summary backfill only targets AO3 chapter 2+ pages without a work summary", () => {
+  const { workSummaryBackfillWorkId, item } = backfillHarness({ fetchImpl: okHtml("chapter-1.html") });
+  assert.equal(workSummaryBackfillWorkId(item), "7700201");
+  assert.equal(workSummaryBackfillWorkId({ ...item, sm: "Known" }), null, "a page with a work summary needs nothing");
+  assert.equal(workSummaryBackfillWorkId({ ...item, chn: 1 }), null, "chapter 1 carries the summary itself");
+  assert.equal(workSummaryBackfillWorkId({ ...item, chu: null }), null, "Entire Work has no chapter URL");
+  assert.equal(
+    workSummaryBackfillWorkId({ ...item, chu: "https://archiveofourown.org/works/1/chapters/2" }),
+    null,
+    "the chapter URL must belong to the same work",
+  );
+  assert.equal(workSummaryBackfillWorkId({ ...item, src: "ffn" }), null);
+  assert.equal(workSummaryBackfillWorkId({ ...item, ctx: "listing" }), null);
+});
+
+test("work summary backfill parses only the work preface of a fetched page", () => {
+  const { parseAo3WorkSummaryFromHtml } = backfillHarness({ fetchImpl: okHtml("chapter-1.html") });
+  assert.equal(parseAo3WorkSummaryFromHtml(loadFixture(path.join("ao3-work-summary", "chapter-1.html"))), WORK_SUMMARY);
+  assert.equal(parseAo3WorkSummaryFromHtml(loadFixture(path.join("ao3-work-summary", "chapter-2.html"))), null);
+  assert.equal(parseAo3WorkSummaryFromHtml("<html><body>Retry later</body></html>"), null);
+});
+
+test("work summary backfill reports the summary as the work's first page", () => {
+  const { workSummaryBackfillItem, item } = backfillHarness({ fetchImpl: okHtml("chapter-1.html") });
+  const out = workSummaryBackfillItem(item, WORK_SUMMARY);
+  assert.equal(out.sm, WORK_SUMMARY);
+  assert.equal(out.chn, 1);
+  assert.equal(out.chu, null);
+  assert.equal(out.u, item.u);
+  assert.equal(out.t, item.t);
+  assert.equal(item.sm, null, "the collected item is not changed");
+  assert.equal(item.chn, 2);
+});
+
+test("work summary backfill fetches chapter 1 once, past the adult notice, then broadcasts it", async () => {
+  const h = backfillHarness({ fetchImpl: okHtml("chapter-1.html") });
+  assert.equal(h.maybeBackfillWorkSummary(h.item), true);
+  assert.equal(h.maybeBackfillWorkSummary(h.item), false, "a second save of the same work does not fetch again");
+  await delay(1_800);
+  assert.equal(h.fetchCalls.length, 1);
+  assert.equal(h.fetchCalls[0].url, "https://archiveofourown.org/works/7700201?view_adult=true");
+  assert.equal(h.fetchCalls[0].init.credentials, "include");
+  const broadcasts = h.sent.filter((m) => m && m.type === "TRACE_METADATA_BROADCAST");
+  assert.equal(broadcasts.length, 1);
+  assert.equal(broadcasts[0].payload.item.sm, WORK_SUMMARY);
+  assert.equal(broadcasts[0].payload.item.chn, 1);
+  assert.equal(broadcasts[0].payload.item.chu, null);
+  assert.equal(h.maybeBackfillWorkSummary(h.item), false, "remembered for the rest of the day");
+});
+
+test("work summary backfill respects the reader's metadata setting", async () => {
+  const h = backfillHarness({
+    fetchImpl: okHtml("chapter-1.html"),
+    prefs: { prefMetadataImproveEnabled: false },
+  });
+  h.maybeBackfillWorkSummary(h.item);
+  await delay(1_800);
+  assert.equal(h.fetchCalls.length, 0);
+  assert.equal(h.sent.filter((m) => m && m.type === "TRACE_METADATA_BROADCAST").length, 0);
+});
+
+test("work summary backfill stays silent and backs off when AO3 refuses", async () => {
+  const h = backfillHarness({
+    fetchImpl: () => Promise.resolve({ ok: false, status: 429, text: () => Promise.resolve("") }),
+  });
+  assert.equal(h.maybeBackfillWorkSummary(h.item), true);
+  await delay(1_800);
+  assert.equal(h.fetchCalls.length, 1);
+  assert.equal(h.sent.filter((m) => m && m.type === "TRACE_METADATA_BROADCAST").length, 0);
+  const another = { ...h.item, u: "https://archiveofourown.org/works/7700299", chu: "https://archiveofourown.org/works/7700299/chapters/5" };
+  assert.equal(h.maybeBackfillWorkSummary(another), false, "no new requests during the back-off");
+});
+
+test("work summary backfill fails silently when the request throws", async () => {
+  const h = backfillHarness({ fetchImpl: () => Promise.reject(new Error("offline")) });
+  assert.equal(h.maybeBackfillWorkSummary(h.item), true);
+  await delay(1_800);
+  assert.equal(h.sent.filter((m) => m && m.type === "TRACE_METADATA_BROADCAST").length, 0);
 });
 
 test("collectAO3Work emits current chapter URL without query or hash", () => {
@@ -929,6 +1081,180 @@ test("sendAutoTrackForStory does not synthesize saved state from entryId-only ac
   assert.notEqual(dom.window.sessionStorage.getItem("trace:auto-track:last"), null);
   assert.deepEqual(plainJson(store.libraryOverlayCache.entries), {});
 });
+
+function createScriptedAutoTrackHarness(replies) {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://archiveofourown.org/works/28534965",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  const store = { authToken: "test-token", libraryOverlayCache: { entries: {}, syncVersion: "v0" } };
+  const sentMessages = [];
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      lastError: null,
+      sendMessage(message, cb) {
+        sentMessages.push(message);
+        const reply = replies[message.type];
+        const next = Array.isArray(reply) ? reply.shift() : reply;
+        if (typeof cb === "function") cb(next);
+      },
+    },
+    storage: {
+      local: {
+        get(keys, cb) {
+          const list = Array.isArray(keys) ? keys : [keys];
+          const out = {};
+          for (const key of list) if (Object.prototype.hasOwnProperty.call(store, key)) out[key] = store[key];
+          cb(out);
+        },
+        set(value, cb) {
+          Object.assign(store, value || {});
+          if (typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+  const bindings = createCollectorBindings(dom, { chrome });
+  return { dom, sentMessages, bindings };
+}
+
+const SCRIPTED_STORY = Object.freeze({
+  src: "ao3",
+  ctx: "story",
+  u: "https://archiveofourown.org/works/28534965",
+  t: "Redivider",
+  chn: 1,
+  cht: 1,
+});
+const SCRIPTED_ENTRY_ID = "00000000-0000-4000-8000-000000285349";
+const SCRIPTED_SAVED_STATE = Object.freeze({
+  workKey: "ao3:28534965",
+  status: "saved",
+  entryId: SCRIPTED_ENTRY_ID,
+  entry: {
+    status: "PLANNING",
+    readerStatus: "PLANNING",
+    canonicalReaderStatus: "SAVED",
+    entryId: SCRIPTED_ENTRY_ID,
+    chapters: { current: 1, total: 1 },
+  },
+});
+
+test("an automatic save the background couldn't check is sent once more before the page says it wasn't saved", async () => {
+  const { sentMessages, bindings } = createScriptedAutoTrackHarness({
+    TRACE_AUTO_TRACK: [
+      { ok: false, error: "unavailable" },
+      { ok: true, entryId: SCRIPTED_ENTRY_ID, state: SCRIPTED_SAVED_STATE },
+    ],
+  });
+  bindings.sendAutoTrackForStory({ ...SCRIPTED_STORY });
+  const autoTracks = () => sentMessages.filter((message) => message.type === "TRACE_AUTO_TRACK").length;
+  assert.equal(autoTracks(), 1);
+  const pending = bindings.optimisticStoryPageEntries()["ao3:28534965"];
+  assert.equal(pending.__traceAutoTrackError ?? null, null, "no failure is shown before the retry");
+  assert.equal(pending.__traceAutoTrackPending, true);
+  await delay(1_700);
+  assert.equal(autoTracks(), 2);
+  const saved = bindings.optimisticStoryPageEntries()["ao3:28534965"];
+  assert.equal(saved.__traceAutoTrackError, null);
+  assert.equal(saved.entryId, SCRIPTED_ENTRY_ID);
+});
+
+test("an automatic save is retried at most once for a background that couldn't check", async () => {
+  const { sentMessages, bindings } = createScriptedAutoTrackHarness({
+    TRACE_AUTO_TRACK: [{ ok: false, error: "unavailable" }, { ok: false, error: "unavailable" }],
+  });
+  bindings.sendAutoTrackForStory({ ...SCRIPTED_STORY });
+  await delay(1_700);
+  assert.equal(sentMessages.filter((message) => message.type === "TRACE_AUTO_TRACK").length, 2);
+  assert.equal(bindings.optimisticStoryPageEntries()["ao3:28534965"].__traceAutoTrackError, "unavailable");
+});
+
+test("a failed automatic save gives way to the story's saved state when it is checked again", () => {
+  const { sentMessages, bindings } = createScriptedAutoTrackHarness({
+    TRACE_AUTO_TRACK: [{ ok: false, error: "http_503" }],
+    TRACE_WORK_STATE_GET: [{ ok: true, state: SCRIPTED_SAVED_STATE }],
+  });
+  bindings.sendAutoTrackForStory({ ...SCRIPTED_STORY });
+  assert.equal(bindings.optimisticStoryPageEntries()["ao3:28534965"].__traceAutoTrackError, "http_503");
+  bindings.recheckAutoTrackFailureForStory("ao3:28534965");
+  assert.equal(sentMessages.filter((message) => message.type === "TRACE_WORK_STATE_GET").length, 1);
+  const entry = bindings.optimisticStoryPageEntries()["ao3:28534965"];
+  assert.equal(entry.__traceAutoTrackError, null);
+  assert.equal(entry.entryId, SCRIPTED_ENTRY_ID);
+  bindings.recheckAutoTrackFailureForStory("ao3:28534965");
+  assert.equal(
+    sentMessages.filter((message) => message.type === "TRACE_WORK_STATE_GET").length,
+    1,
+    "a page without a failure doesn't ask again",
+  );
+});
+
+test("the story handle asks only a reader who was connected before to reconnect", () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://archiveofourown.org/works/28534965",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  installCollectorChrome(dom, createChromeMockForHooks());
+  dom.window.eval(collectorTestSource(fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"), "utf8")));
+  const hooks = dom.window.__traceTestHooks;
+  const returning = { hasAuth: false, authState: { state: "reconnect_required", reason: "credential_rejected" } };
+  const firstTime = { hasAuth: false, authState: { ...returning.authState, neverConnected: true } };
+
+  assert.equal(hooks.storyHeadline(returning), "Reconnect Trace");
+  assert.equal(hooks.handleDisplay(returning), "Reconnect Trace");
+  assert.equal(hooks.storyCaption(returning), "Your session needs a refresh.");
+
+  assert.equal(hooks.storyHeadline(firstTime), "Connect Trace");
+  assert.equal(hooks.handleDisplay(firstTime), "Connect Trace");
+  assert.doesNotMatch(hooks.storyCaption(firstTime), /reconnect|refresh/i);
+  dom.window.close();
+});
+
+test("the Library-full page notices use the Trace app's words", () => {
+  const sentence = "Your Library is full. Everything saved stays. See Trace Unlimited, or remove a story to make room.";
+  for (const [file, count] of [["collector.js", 2], ["library-overlay.js", 1]]) {
+    const source = fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", file), "utf8");
+    assert.equal(source.split(sentence).length - 1, count, file);
+    assert.doesNotMatch(source, /Make room in Trace, or see Trace Unlimited/, file);
+  }
+});
+
+test("the story handle never shows a bare Error", () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://archiveofourown.org/works/28534965",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  installCollectorChrome(dom, createChromeMockForHooks());
+  dom.window.eval(collectorTestSource(fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"), "utf8")));
+  const hooks = dom.window.__traceTestHooks;
+  for (const error of ["network_error", "unavailable", "http_503", "reconnect_required"]) {
+    const view = { hasAuth: true, entry: { __traceAutoTrackError: error } };
+    assert.equal(hooks.storyHandlePresentation(view).label, "Not saved");
+    assert.equal(hooks.handleDisplay(view), "Not saved");
+  }
+  assert.notEqual(hooks.handleDisplay({ hasAuth: false, authState: { state: "error" } }), "Error");
+  for (const file of ["collector.js", "library-overlay.js"]) {
+    const source = fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", file), "utf8");
+    assert.doesNotMatch(source, /(?:textContent = |label: |return )"Error"/, file);
+  }
+  dom.window.close();
+});
+
+function createChromeMockForHooks() {
+  return {
+    runtime: { onMessage: { addListener() {} }, lastError: null, sendMessage() {} },
+    storage: {
+      local: { get(_keys, cb) { cb({}); }, set(_value, cb) { if (typeof cb === "function") cb(); } },
+      onChanged: { addListener() {} },
+    },
+  };
+}
 
 test("detectAo3CurrentChapterNumber prefers the visible chapter heading text", () => {
   const html = `<!doctype html><html><body>
@@ -2040,7 +2366,7 @@ test("story page projects a newly viewed chapter while auto-track confirms it", 
   assert.ok(handle.querySelector("svg"), "expected pending progress to retain a spinner");
 
   harness.autoTrackCallback({ ok: false, error: "network_error" });
-  assert.match(handle.textContent || "", /Error/i);
+  assert.match(handle.textContent || "", /^Not saved$/);
   assert.doesNotMatch(handle.textContent || "", /4\/28/);
 });
 
@@ -2083,7 +2409,7 @@ test("story page projects Saved to Reading on chapter two while auto-track confi
   assert.ok(handle.querySelector("svg"), "expected pending transition to retain a spinner");
 
   harness.autoTrackCallback({ ok: false, error: "network_error" });
-  assert.match(handle.textContent || "", /Error/i);
+  assert.match(handle.textContent || "", /^Not saved$/);
   assert.doesNotMatch(handle.textContent || "", /Reading\s*2\/28/i);
 });
 
@@ -2124,7 +2450,7 @@ test("story page projects pending progress before the auto-track preference read
   assert.ok(handle.querySelector("svg"), "expected pending progress to show a spinner");
 
   harness.autoTrackCallback({ ok: false, error: "network_error" });
-  assert.match(handle.textContent || "", /Error/i);
+  assert.match(handle.textContent || "", /^Not saved$/);
   assert.doesNotMatch(handle.textContent || "", /Reading\s*3\/28/i);
 });
 
@@ -3154,7 +3480,7 @@ test("story page auto-track failure uses existing compact error states", () => {
       disabled: false,
     },
     { response: { ok: false, error: "auth_expired" }, expected: /Reconnect/i, disabled: false },
-    { response: { ok: false, error: "http_503" }, expected: /ERROR/i, disabled: false },
+    { response: { ok: false, error: "http_503" }, expected: /^Not saved$/, disabled: false },
   ];
 
   for (const item of cases) {
@@ -3270,7 +3596,7 @@ test("first-story focus-add retries explicit quick-add after retryable auto-trac
 
   autoTrackCallback({ ok: false, error: "confirmation_missing" });
 
-  assert.match(handle.textContent || "", /Error/i);
+  assert.match(handle.textContent || "", /^Not saved$/);
   assert.equal(handle.disabled, false);
 
   const response = await sendRuntimeMessage({
@@ -6533,7 +6859,7 @@ test("FFN mobile story sheet hides mutation controls with stale token when auth 
 test("FFN mobile story sheet quick-add preserves free-limit and error states", () => {
   const responses = [
     { response: { ok: false, error: "free_limit_reached" }, text: /Full/i },
-    { response: { ok: false, error: "http_500" }, text: /ERROR/i },
+    { response: { ok: false, error: "http_500" }, text: /Couldn’t add/ },
     { response: { ok: false, error: "auth_expired" }, text: /Reconnect/i },
   ];
 
@@ -7677,7 +8003,7 @@ test("a story save with an unknown outcome is never re-sent automatically", asyn
   assert.ok(initial >= 1);
   await delay(1_100);
   assert.equal(saves(), initial, "no delayed re-send of a save that may have landed");
-  assert.match(h.dom.window.document.querySelector("[data-trace-story-handle]").textContent || "", /Error|Reconnect|Try/i);
+  assert.match(h.dom.window.document.querySelector("[data-trace-story-handle]").textContent || "", /Not saved|Reconnect|Try/i);
   h.dom.window.close();
 });
 
@@ -7729,7 +8055,7 @@ test("a timed-out story save is never re-sent", async () => {
   });
   await delay(1_200);
   assert.equal(autoTrackSends(h), 1);
-  assert.match(h.dom.window.document.querySelector("[data-trace-story-handle]").textContent || "", /Error|Reconnect|Try/i);
+  assert.match(h.dom.window.document.querySelector("[data-trace-story-handle]").textContent || "", /Not saved|Reconnect|Try/i);
   h.dom.window.close();
 });
 
@@ -7981,4 +8307,75 @@ test("kernel story Connect says where to sign in when it opened Trace", async ()
   await delay(60);
   const sheet = document.querySelector("[data-trace-story-sheet]");
   assert.match(sheet.textContent || "", /Sign in to Trace in the tab that opened/);
+});
+
+test("AO3 History rows carry the last-visited date and visit count", () => {
+  const dom = domFromFixture(
+    "ao3_history.html",
+    "https://archiveofourown.org/users/Ink_Reader_Test/readings",
+  );
+  const { collect } = createCollectorBindings(dom);
+  const res = plainJson(collect());
+  assert.equal(res.source, "ao3");
+  // The deleted-work row has no work id and is skipped.
+  assert.deepEqual(res.items.map((i) => i.u), [
+    "https://archiveofourown.org/works/41000001",
+    "https://archiveofourown.org/works/41000002",
+    "https://archiveofourown.org/works/41000003",
+    "https://archiveofourown.org/works/41000004",
+  ]);
+  const [ledger, letter, fog, rain] = res.items;
+  assert.equal(ledger.ctx, "listing");
+  assert.equal(ledger.t, "The Lamplighter's Ledger");
+  assert.equal(ledger.lv, "2026-10-08");
+  assert.equal(ledger.vc, 3);
+  assert.equal(ledger.s, "complete");
+  assert.equal(letter.lv, "2024-02-29");
+  assert.equal(letter.vc, 1);
+  // Marked for Later records an intent to read, not a read.
+  assert.equal("lv" in fog, false);
+  assert.equal("vc" in fog, false);
+  assert.equal(rain.lv, "2019-03-17");
+  assert.equal(rain.vc, 1204);
+});
+
+test("AO3 Marked for Later and ordinary listings carry no visit fields", () => {
+  const later = domFromFixture(
+    "ao3_history.html",
+    "https://archiveofourown.org/users/Ink_Reader_Test/readings?show=to-read",
+  );
+  const laterItems = plainJson(createCollectorBindings(later).collect().items);
+  assert.equal(laterItems.length, 4);
+  assert.ok(laterItems.every((i) => !("lv" in i) && !("vc" in i)));
+
+  const listing = domFromFixture(
+    "ao3_history.html",
+    "https://archiveofourown.org/tags/Sherlock%20Holmes/works",
+  );
+  const listingItems = plainJson(createCollectorBindings(listing).collect().items);
+  assert.equal(listingItems.length, 4);
+  assert.ok(listingItems.every((i) => !("lv" in i) && !("vc" in i)));
+
+  const bookmarks = domFromFixture(
+    "ao3_bookmarks.html",
+    "https://archiveofourown.org/users/Ink_Reader_Test/bookmarks",
+  );
+  const bookmarkItems = plainJson(createCollectorBindings(bookmarks).collect().items);
+  assert.ok(bookmarkItems.length > 0);
+  assert.ok(bookmarkItems.every((i) => !("lv" in i) && !("vc" in i)));
+});
+
+test("AO3 History dates normalise to YYYY-MM-DD and reject impossible dates", () => {
+  const dom = domFromFixture("ao3_history.html", "https://archiveofourown.org/users/Ink_Reader_Test/readings");
+  const { parseAO3HistoryDate } = createCollectorBindings(dom);
+  assert.equal(parseAO3HistoryDate("08 Oct 2026"), "2026-10-08");
+  assert.equal(parseAO3HistoryDate("8 Oct 2026"), "2026-10-08");
+  assert.equal(parseAO3HistoryDate(" 01 Sept 2025 "), "2025-09-01");
+  assert.equal(parseAO3HistoryDate("29 Feb 2024"), "2024-02-29");
+  assert.equal(parseAO3HistoryDate("29 Feb 2025"), null);
+  assert.equal(parseAO3HistoryDate("31 Apr 2025"), null);
+  assert.equal(parseAO3HistoryDate("08 Foo 2026"), null);
+  assert.equal(parseAO3HistoryDate("08 Oct 1999"), null);
+  assert.equal(parseAO3HistoryDate(""), null);
+  assert.equal(parseAO3HistoryDate(null), null);
 });

@@ -1691,6 +1691,92 @@ test("iOS: enabled but not yet linked points to one step in the Trace app", asyn
   assert.equal(h.document.getElementById("popup-import").hidden, true);
 });
 
+for (const reason of [
+  "credential_absent",
+  "credential_rejected",
+  "account_unavailable",
+  "invalid_account_response",
+  "storage_write_failed",
+  "malformed_envelope",
+  "identity_conflict",
+]) {
+  test(`a reader who has never connected is not told to reconnect (${reason})`, async () => {
+    const h = createPopupHarness({
+      sessionMode: "kernel",
+      sessionSnapshot: {
+        state: "reconnect_required",
+        canExecuteAuthenticated: false,
+        reason,
+        neverConnected: true,
+      },
+    });
+    await flush();
+
+    const primary = h.document.getElementById("popup-cta");
+    assert.equal(primary.textContent, "Connect");
+    assert.equal(primary.dataset.sessionAction, "reconnect");
+    if (reason !== "identity_conflict") {
+      assert.equal(h.document.getElementById("popup-status").textContent, "Connect Trace");
+    }
+    assert.match(h.document.getElementById("popup-lead").textContent, /Connect/);
+    assert.doesNotMatch(h.document.querySelector(".popup-shell, main, body").textContent, /reconnect/i);
+  });
+}
+
+test("a reader who was connected before is still asked to reconnect", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    sessionSnapshot: {
+      state: "reconnect_required",
+      canExecuteAuthenticated: false,
+      reason: "credential_rejected",
+    },
+  });
+  await flush();
+
+  assert.equal(h.document.getElementById("popup-status").textContent, "Reconnect Trace");
+  assert.equal(h.document.getElementById("popup-cta").textContent, "Reconnect");
+  assert.match(h.document.getElementById("popup-lead").textContent, /then press Reconnect\./);
+});
+
+for (const [label, finalResponse, finalHeading] of [
+  ["adopts the app account", { ok: true, snapshot: { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" } }, null],
+  ["confirms signed out", { ok: true, snapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "provider_unavailable" }, action: { kind: "unavailable" } }, "Finish setup in the Trace app"],
+]) {
+  test(`iOS: an unreadable app account keeps checking before it asks to sign in (${label})`, async () => {
+    const unreadable = {
+      ok: true,
+      snapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "provider_unavailable" },
+      action: { kind: "unavailable" },
+    };
+    const h = createPopupHarness({
+      grantedOrigins: [...FULL_EARNED_ORIGINS],
+      sessionMode: "kernel",
+      earnedPermissionOnboarding: true,
+      userAgent:
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+      storageState: { traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 5000 } },
+      sessionSnapshotResponses: [unreadable, unreadable, finalResponse],
+    });
+    for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+    const heading = () => h.document.getElementById("popup-earned-heading")?.textContent;
+    assert.notEqual(heading(), "Finish setup in the Trace app");
+    assert.notEqual(h.document.body.dataset.traceReaderView, "link");
+    h.runTimeouts();
+    for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+    assert.notEqual(heading(), "Finish setup in the Trace app");
+    h.runTimeouts();
+    for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+    assert.equal(h.messages.filter(({ type }) => type === "TRACE_SESSION_GET_SNAPSHOT").length, 3);
+    if (finalHeading) {
+      assert.equal(heading(), finalHeading);
+    } else {
+      assert.notEqual(heading(), "Finish setup in the Trace app");
+      assert.equal(h.messages.some(({ type }) => type === "TRACE_POPUP_GET_STATE"), true);
+    }
+  });
+}
+
 test("kernel iOS account-response failures are not mislabeled as an app sign-in problem", async () => {
   const h = createPopupHarness({
     sessionMode: "kernel",
@@ -2093,7 +2179,8 @@ test("popup keeps a durable library-capacity recovery action", async () => {
       metadataImproveEnabled: true,
       authState: connected,
       firstSaveSeen: true,
-      libraryCount: 100,
+      libraryCount: 50,
+      libraryLimit: 50,
       capacity: { blocked: true, prompt: false },
       activeTab: { kind: "supported_story", site: "ao3", canImport: true },
     },
@@ -2102,7 +2189,14 @@ test("popup keeps a durable library-capacity recovery action", async () => {
 
   assert.equal(h.document.body.dataset.tracePopupState, "upgrade_required");
   assert.equal(h.document.getElementById("popup-status").textContent, "Your Library is full");
-  assert.match(h.document.getElementById("popup-lead").textContent, /make room in Trace, or see Trace Unlimited/i);
+  assert.equal(
+    h.document.getElementById("popup-lead").textContent,
+    "50 stories on Free. Everything saved stays. See Trace Unlimited, or remove a story to make room.",
+  );
+  assert.equal(
+    h.document.getElementById("popup-import").title,
+    "Your Library is full. 50 stories on Free. Everything saved stays. See Trace Unlimited, or remove a story to make room.",
+  );
   assert.equal(h.document.getElementById("popup-cta").textContent, "See Trace Unlimited");
   assert.equal(
     h.document.getElementById("popup-cta").dataset.externalUrl,
@@ -2747,7 +2841,7 @@ test("Trace-only gaps and either archive tab offer the same full-host request", 
 const IOS_APP_UNLIMITED_URL = "traceauth://open?destination=unlimited";
 const WEB_UPGRADE_URL = "https://tracefiction.com/?upgrade=1&source=extension_cap";
 
-function libraryFullReaderHarness(options = {}) {
+function libraryFullReaderHarness(options = {}, popupState = {}) {
   return createPopupHarness({
     sessionMode: "kernel",
     promiseRuntime: true,
@@ -2760,15 +2854,37 @@ function libraryFullReaderHarness(options = {}) {
       authState: { state: "connected" },
       firstSaveSeen: true,
       libraryCount: 100,
+      libraryLimit: 100,
       pro: false,
       capacity: { blocked: true, prompt: false },
       activeTab: { kind: "supported_story", site: "ao3", canImport: true },
       activeWork: null,
       autoTrackEnabled: true,
+      ...popupState,
     },
     ...options,
   });
 }
+
+test("the full-Library reader view names the account's limit without repeating its heading", async () => {
+  const h = libraryFullReaderHarness({}, { libraryCount: 50, libraryLimit: 50 });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "library-full");
+  assert.equal(h.document.getElementById("popup-earned-heading").textContent, "Your Library is full");
+  assert.equal(
+    h.document.getElementById("popup-earned-lead").textContent,
+    "50 stories on Free. Everything saved stays. See Trace Unlimited, or remove a story to make room. This story wasn’t added.",
+  );
+});
+
+test("a full Library names no size until the account has reported one", async () => {
+  const h = libraryFullReaderHarness({}, { libraryLimit: null });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  assert.equal(
+    h.document.getElementById("popup-earned-lead").textContent,
+    "Everything saved stays. See Trace Unlimited, or remove a story to make room. This story wasn’t added.",
+  );
+});
 
 for (const device of [
   { name: "iPhone", userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148" },
@@ -2804,7 +2920,7 @@ test("the full-Library sheet routes its Unlimited action by platform", async () 
     const h = createPopupHarness({
       userAgent,
       storageState: { traceAuthState: connected, traceFirstSaveSeen: true, traceLibraryCount: 100 },
-      popupState: { pro: false, authState: connected, firstSaveSeen: true, libraryCount: 100,
+      popupState: { pro: false, authState: connected, firstSaveSeen: true, libraryCount: 100, libraryLimit: 100,
         capacity: { blocked: true, prompt: false }, activeTab: { kind: "supported_story", site: "ao3" } },
     });
     await flush();
@@ -2817,7 +2933,7 @@ function libraryFullSheetHarness(options = {}) {
   const connected = { state: "connected", message: "Connected" };
   return createPopupHarness({
     storageState: { traceAuthState: connected, traceFirstSaveSeen: true, traceLibraryCount: 100 },
-    popupState: { pro: false, authState: connected, firstSaveSeen: true, libraryCount: 100,
+    popupState: { pro: false, authState: connected, firstSaveSeen: true, libraryCount: 100, libraryLimit: 100,
       capacity: { blocked: true, prompt: false }, activeTab: { kind: "supported_story", site: "ao3" } },
     ...options,
   });
@@ -2847,8 +2963,16 @@ for (const [name, options, expected] of [
 
 test("Free plan line: the count, a heads-up at 80% for a day, nothing for Unlimited", () => {
   const h = createPopupHarness();
-  const line = (args) => JSON.parse(JSON.stringify(h.evaluate(`freePlanLine(${JSON.stringify(args)})`)));
+  const raw = (args) => JSON.parse(JSON.stringify(h.evaluate(`freePlanLine(${JSON.stringify(args)})`)));
+  const line = (args) => raw({ limit: 100, ...args });
   const now = 1_800_000_000_000;
+  // The Library size is the account's; without it nothing is claimed.
+  assert.equal(raw({ pro: false, libraryCount: 64, now }), null);
+  assert.equal(raw({ pro: false, libraryCount: 64, limit: null, now }), null);
+  assert.deepEqual(raw({ pro: false, libraryCount: 40, limit: 50, now }),
+    { text: "You’re at 40 of 50 stories. Unlimited keeps every story.", headsUp: true, nearLimit: true });
+  assert.deepEqual(raw({ pro: false, libraryCount: 12, limit: 50, now }),
+    { text: "12 of 50 stories kept", headsUp: false, nearLimit: false });
   assert.equal(line({ pro: true, libraryCount: 64, now }), null);
   assert.equal(line({ pro: null, libraryCount: 64, now }), null);
   assert.equal(line({ pro: false, libraryCount: null, now }), null);
@@ -2864,7 +2988,7 @@ test("Free plan line: the count, a heads-up at 80% for a day, nothing for Unlimi
   assert.equal(line({ pro: false, libraryCount: 79, limit: 100, now }).headsUp, false);
 });
 
-function savedStoryReaderHarness({ libraryCount, pro = false, storageState = {} }) {
+function savedStoryReaderHarness({ libraryCount, libraryLimit = 100, pro = false, storageState = {} }) {
   return createPopupHarness({
     sessionMode: "kernel",
     promiseRuntime: true,
@@ -2878,6 +3002,7 @@ function savedStoryReaderHarness({ libraryCount, pro = false, storageState = {} 
       authState: { state: "connected" },
       firstSaveSeen: true,
       libraryCount,
+      libraryLimit,
       pro,
       activeTab: { kind: "supported_story", site: "ao3", canImport: true },
       activeWork: { status: "saved", entry: { status: "READING", canonicalReaderStatus: "READING" } },
@@ -2894,6 +3019,15 @@ test("the reader view shows the Free count on a saved story, and nothing for Unl
   assert.equal(plan.hidden, false);
   assert.equal(plan.textContent, "64 of 100 stories kept");
   assert.equal(free.store.traceFreeLimitHeadsUpV1, undefined);
+
+  const smaller = savedStoryReaderHarness({ libraryCount: 12, libraryLimit: 50 });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  assert.equal(smaller.document.getElementById("popup-earned-plan").textContent, "12 of 50 stories kept");
+
+  const unknown = savedStoryReaderHarness({ libraryCount: 64, libraryLimit: null });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  assert.equal(unknown.document.body.dataset.tracePopupStateCode, "P11");
+  assert.equal(unknown.document.getElementById("popup-earned-plan").hidden, true);
 
   const unlimited = savedStoryReaderHarness({ libraryCount: 640, pro: true });
   for (let attempt = 0; attempt < 8; attempt += 1) await flush();
@@ -2932,7 +3066,7 @@ test("the Trace is on sheet shows the Free count in desktop browsers", async () 
   const connected = { state: "connected", message: "Connected" };
   const h = createPopupHarness({
     storageState: { traceAuthState: connected, traceFirstSaveSeen: true, traceLibraryCount: 64 },
-    popupState: { pro: false, authState: connected, firstSaveSeen: true, libraryCount: 64,
+    popupState: { pro: false, authState: connected, firstSaveSeen: true, libraryCount: 64, libraryLimit: 100,
       activeTab: { kind: "supported_story", site: "ao3", canImport: true } },
   });
   for (let attempt = 0; attempt < 4; attempt += 1) await flush();

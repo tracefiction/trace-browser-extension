@@ -301,7 +301,7 @@ function showCapacityRecoveryNotice(capacity, force) {
   title.textContent = "This story wasn’t added";
   title.style.cssText = "margin:0;font:600 17px/1.3 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif;color:var(--trace-page-ink)";
   var copy = document.createElement("p");
-  copy.textContent = "Your Library is full. Make room in Trace, or see Trace Unlimited.";
+  copy.textContent = "Your Library is full. Everything saved stays. See Trace Unlimited, or remove a story to make room.";
   copy.style.cssText = "margin:4px 0 2px;font:400 13px/1.4 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif;color:var(--trace-page-secondary)";
   var actions = document.createElement("div");
   actions.style.cssText = "display:flex;align-items:center;gap:4px 16px";
@@ -1057,6 +1057,186 @@ function rememberMetadataBroadcast(item) {
   }
 }
 
+// AO3 shows a work's summary only on chapter 1, one-shots and the Entire Work
+// view. When a reader is on chapter 2 or later, Trace fetches the work's first
+// page once in the background and reports its summary, so a story first seen
+// mid-way still gets its description. The reader is already reading this work,
+// so the adult-content notice is skipped. One request at a time, at most one
+// per work per day in this tab, a back-off after any refusal, and failures stay
+// silent; the save itself never waits for it.
+var WORK_SUMMARY_BACKFILL_KEY = "trace:work-summary-backfill:v1";
+var WORK_SUMMARY_BACKFILL_DELAY_MS = 1_500;
+var WORK_SUMMARY_BACKFILL_TIMEOUT_MS = 8_000;
+var WORK_SUMMARY_BACKFILL_BACKOFF_MS = 10 * 60 * 1000;
+var WORK_SUMMARY_SELECTOR = "#workskin > .preface.group:not(.chapter) > .summary blockquote.userstuff";
+var workSummaryBackfillInFlight = false;
+var workSummaryBackfillBackoffUntil = 0;
+
+function workSummaryBackfillWorkId(item) {
+  if (!item || item.src !== "ao3" || item.ctx !== "story") return null;
+  if (item.sm) return null;
+  if (!(typeof item.chn === "number" && item.chn > 1)) return null;
+  var chapter = String(item.chu || "").match(/\/works\/(\d+)\/chapters\/\d+/);
+  var work = String(item.u || "").match(/\/works\/(\d+)/);
+  if (!chapter || !work || chapter[1] !== work[1]) return null;
+  return work[1];
+}
+
+function workSummaryBackfillDay() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function workSummaryBackfillTriedToday(workId) {
+  try {
+    if (!window.sessionStorage) return false;
+    var parsed = JSON.parse(window.sessionStorage.getItem(WORK_SUMMARY_BACKFILL_KEY) || "{}");
+    return !!parsed && parsed[workId] === workSummaryBackfillDay();
+  } catch (_) {
+    return false;
+  }
+}
+
+function rememberWorkSummaryBackfill(workId) {
+  try {
+    if (!window.sessionStorage) return;
+    var today = workSummaryBackfillDay();
+    var parsed = JSON.parse(window.sessionStorage.getItem(WORK_SUMMARY_BACKFILL_KEY) || "{}");
+    var next = {};
+    if (parsed && typeof parsed === "object") {
+      for (var key in parsed) {
+        if (parsed[key] === today) next[key] = today;
+      }
+    }
+    next[workId] = today;
+    window.sessionStorage.setItem(WORK_SUMMARY_BACKFILL_KEY, JSON.stringify(next));
+  } catch (_) {
+    /* optional */
+  }
+}
+
+function parseAo3WorkSummaryFromHtml(html) {
+  try {
+    if (typeof DOMParser !== "function") return null;
+    var doc = new DOMParser().parseFromString(String(html || ""), "text/html");
+    return txt(one(doc, WORK_SUMMARY_SELECTOR)) || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function workSummaryBackfillFetch() {
+  // Firefox content scripts make page-origin requests through content.fetch.
+  if (typeof content !== "undefined" && content && typeof content.fetch === "function") {
+    return content.fetch.bind(content);
+  }
+  return typeof fetch === "function" ? fetch : null;
+}
+
+// Calls done(summary, ok): ok is false when AO3 refused or the request failed.
+function fetchAo3WorkSummary(workId, done) {
+  var fetchFn = workSummaryBackfillFetch();
+  if (!fetchFn) {
+    done(null, false);
+    return;
+  }
+  var settled = false;
+  var controller = typeof AbortController === "function" ? new AbortController() : null;
+  var finish = function (summary, ok) {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    done(summary, ok);
+  };
+  var timer = setTimeout(function () {
+    if (controller) controller.abort();
+    finish(null, false);
+  }, WORK_SUMMARY_BACKFILL_TIMEOUT_MS);
+  var url = location.origin + "/works/" + workId + "?view_adult=true";
+  Promise.resolve()
+    .then(function () {
+      return fetchFn(url, {
+        credentials: "include",
+        redirect: "follow",
+        headers: { Accept: "text/html" },
+        signal: controller ? controller.signal : undefined,
+      });
+    })
+    .then(function (response) {
+      if (!response || !response.ok) {
+        finish(null, false);
+        return null;
+      }
+      return response.text();
+    })
+    .then(function (html) {
+      if (html == null) return;
+      finish(parseAo3WorkSummaryFromHtml(html), true);
+    })
+    .catch(function () {
+      finish(null, false);
+    });
+}
+
+function workSummaryBackfillItem(item, summary) {
+  var out = {};
+  for (var key in item) {
+    if (Object.prototype.hasOwnProperty.call(item, key)) out[key] = item[key];
+  }
+  // The summary comes from the work's first page, so it is reported as that
+  // page: chapter 1 and no chapter URL. Progress is never taken from metadata.
+  out.sm = summary;
+  out.chn = 1;
+  out.chu = null;
+  return out;
+}
+
+function backfillWorkSummaryNow(item, workId) {
+  workSummaryBackfillInFlight = true;
+  fetchAo3WorkSummary(workId, function (summary, ok) {
+    workSummaryBackfillInFlight = false;
+    if (!ok) {
+      workSummaryBackfillBackoffUntil = Date.now() + WORK_SUMMARY_BACKFILL_BACKOFF_MS;
+      return;
+    }
+    if (!summary) return;
+    sendCollectorMessageBestEffort({
+      type: "TRACE_METADATA_BROADCAST",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: workSummaryBackfillItem(item, summary),
+      },
+    });
+  });
+}
+
+// Returns true when a background fetch was scheduled.
+function maybeBackfillWorkSummary(item) {
+  var workId = workSummaryBackfillWorkId(item);
+  if (!workId) return false;
+  if (workSummaryBackfillInFlight) return false;
+  if (Date.now() < workSummaryBackfillBackoffUntil) return false;
+  if (workSummaryBackfillTriedToday(workId)) return false;
+  rememberWorkSummaryBackfill(workId);
+  workSummaryBackfillInFlight = true;
+  var start = function () {
+    backfillWorkSummaryNow(item, workId);
+  };
+  try {
+    ext.storage.local.get(["prefMetadataImproveEnabled"], function (res) {
+      var enabled = !(res && res.prefMetadataImproveEnabled === false);
+      if (!enabled || (ext.runtime && ext.runtime.lastError)) {
+        workSummaryBackfillInFlight = false;
+        return;
+      }
+      setTimeout(start, WORK_SUMMARY_BACKFILL_DELAY_MS);
+    });
+  } catch (_) {
+    workSummaryBackfillInFlight = false;
+  }
+  return true;
+}
+
 function sourceStoryIdFromItem(item) {
   var workKey = overlayWorkKeyFromItem(item);
   if (!workKey) return null;
@@ -1314,6 +1494,20 @@ function forgetRecentAutoTrack(item) {
 // it is never re-sent here.
 var AUTO_TRACK_UNDELIVERED_RETRY_MS = [1_000, 3_000];
 
+// A save the background answered with "couldn't check just now" (the account
+// was still being adopted, or the Library couldn't be read) is safe to ask
+// for again: a first save looks the story up before it writes, and progress
+// only ever moves forward. It is sent once more, quietly, before the page
+// says it wasn't saved. An answer that a write went out but couldn't be
+// confirmed is never re-sent here.
+var AUTO_TRACK_TRANSIENT_ERRORS = ["unavailable", "stale"];
+var AUTO_TRACK_TRANSIENT_RETRY_MS = 1_500;
+
+// Another path (the popup, a second tab, a late answer) can still save the
+// story after this page gave up. Ask for the story's state once more so a
+// failure the reader can see is never left over a saved story.
+var AUTO_TRACK_FAILURE_RECHECK_MS = 4_000;
+
 function sendAutoTrackForStory(validStory, options) {
   var deliveryAttempt =
     options && Number.isInteger(options.deliveryAttempt) ? options.deliveryAttempt : 0;
@@ -1348,6 +1542,22 @@ function sendAutoTrackForStory(validStory, options) {
         }
         forgetRecentAutoTrack(validStory);
         updateAutoTrackFailureForStory(validStory, "network_error");
+        return;
+      }
+      if (
+        response.ok !== true &&
+        AUTO_TRACK_TRANSIENT_ERRORS.indexOf(response.error) >= 0 &&
+        !(options && options.transientRetried === true)
+      ) {
+        var retryFromUrl = location.href;
+        setTimeout(function () {
+          if (location.href !== retryFromUrl) return;
+          sendAutoTrackForStory(validStory, {
+            pendingAlreadySet: true,
+            deliveryAttempt: deliveryAttempt,
+            transientRetried: true,
+          });
+        }, AUTO_TRACK_TRANSIENT_RETRY_MS);
         return;
       }
       if (!response || response.ok !== true) {
@@ -1658,6 +1868,21 @@ function updateAutoTrackFailureForStory(item, error) {
   }
   optimisticStoryPageEntries[workKey] = failed;
   rerenderStoryHandleForWorkKey(workKey);
+  if (error !== "free_limit_reached") {
+    var failedFromUrl = location.href;
+    setTimeout(function () {
+      if (location.href !== failedFromUrl) return;
+      recheckAutoTrackFailureForStory(workKey);
+    }, AUTO_TRACK_FAILURE_RECHECK_MS);
+  }
+}
+
+// Re-reads the story's state only while the page still shows a failed
+// automatic save; a confirmed save replaces the failure.
+function recheckAutoTrackFailureForStory(workKey) {
+  var shown = optimisticStoryPageEntries[workKey];
+  if (!shown || !shown.__traceAutoTrackError) return;
+  queryBackgroundWorkStateForStory(workKey);
 }
 
 function isAO3() {
@@ -2167,7 +2392,12 @@ function collectAO3Work() {
   const categories = ddTags("dd.category.tags");
   const series = parseAO3Series(meta);
 
-  const summary = txt(one(document, ".summary blockquote.userstuff")) || null;
+  // Only the work preface carries the work summary. On chapter 2+ pages it is
+  // absent and the first `.summary` is the chapter's own summary, which must
+  // never be reported as the work's.
+  const summary =
+    txt(one(document, "#workskin > .preface.group:not(.chapter) > .summary blockquote.userstuff")) ||
+    null;
   const relParts = relPartsFromAO3(relationships);
   const charsUnion = dedup((characters || []).concat(relParts || []));
   const romanticRels = relationships.filter(r => r.includes("/"));
@@ -2281,6 +2511,59 @@ function extractAO3BlurbData(row, id, ctx) {
   };
 }
 
+const AO3_MONTHS = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12
+};
+
+/** The reader's own AO3 History page, not its Marked for Later view. */
+function isAO3HistoryPage() {
+  if (!/^\/users\/[^/]+\/readings\/?$/.test(location.pathname || "")) return false;
+  return !/[?&]show=to-read(?:&|$)/.test(location.search || "");
+}
+
+/** AO3 date text such as "08 Oct 2026" to "2026-10-08"; null when it is not a real date. */
+function parseAO3HistoryDate(text) {
+  const m = String(text || "").match(/\b(\d{1,2})\s+([A-Za-z]{3,9})\.?\s+(\d{4})\b/);
+  if (!m) return null;
+  const month = AO3_MONTHS[m[2].slice(0, 3).toLowerCase()];
+  const day = parseInt(m[1], 10);
+  const year = parseInt(m[3], 10);
+  if (!month || year < 2000) return null;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    return null;
+  }
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+/**
+ * History rows end with "Last visited: 08 Oct 2026 (Update available.) Visited 3 times".
+ * Rows marked for later record an intent to read, not a read, so they carry no visit fields.
+ */
+function ao3HistoryVisit(row) {
+  if (!isAO3HistoryPage()) return null;
+  const heading = one(row, "h4.viewed");
+  if (!heading) return null;
+  const text = (heading.textContent || "").replace(/\s+/g, " ").trim();
+  if (/Marked for Later/i.test(text)) return null;
+  const visited = text.match(/Last visited:\s*(.+?)(?:\(|\bVisited\b|$)/i);
+  const lv = visited ? parseAO3HistoryDate(visited[1]) : null;
+  let vc = null;
+  if (/\bVisited once\b/i.test(text)) {
+    vc = 1;
+  } else {
+    const count = text.match(/\bVisited\s+([\d,]+)\s+times?\b/i);
+    const n = count ? num(count[1]) : null;
+    if (n != null && n > 0) vc = n;
+  }
+  if (!lv && vc == null) return null;
+  const visit = {};
+  if (lv) visit.lv = lv;
+  if (vc != null) visit.vc = vc;
+  return visit;
+}
+
 function collectAO3Listings() {
   const rows = qsa(document, 'li.work.blurb[id^="work_"], li.work[id^="work_"], .work.blurb[id^="work_"]');
   if (!rows.length) return [];
@@ -2289,7 +2572,10 @@ function collectAO3Listings() {
     const idm = (row.id || "").match(/work_(\d+)/);
     const id = idm ? idm[1] : null;
     if (!id) continue;
-    items.push(extractAO3BlurbData(row, id, "listing"));
+    const item = extractAO3BlurbData(row, id, "listing");
+    const visit = ao3HistoryVisit(row);
+    if (visit) Object.assign(item, visit);
+    items.push(item);
   }
   return items;
 }
@@ -3265,6 +3551,9 @@ function handleCollectorMessage(msg, sender, sendResponse, relayCommand) {
       items: res.items
     };
     sendResponse({ ok: true, payload });
+    if (Array.isArray(res.items) && res.items.length === 1) {
+      maybeBackfillWorkSummary(res.items[0]);
+    }
   } catch (e) {
     sendResponse({ ok: false, error: String(e?.message || e) });
   }
@@ -3487,6 +3776,7 @@ function startDwellTimer(attempt) {
       },
     });
   }
+  maybeBackfillWorkSummary(validStory);
   if (shouldSkipRecentAutoTrack(validStory)) {
     return;
   }
@@ -3906,6 +4196,13 @@ function progressDisplay(entry) {
 // Before that link exists, every surface points to that one step.
 var TRACE_IOS_APP_SETUP_URL = "traceauth://open?destination=extension-connect";
 
+// A session that needs recovery before any account was ever verified belongs
+// to a reader who is still connecting for the first time, so only a reader
+// who was connected before is asked to reconnect.
+function needsReconnect(authState) {
+  return Boolean(authState && authState.state === "reconnect_required" && authState.neverConnected !== true);
+}
+
 function awaitingAppLink(view) {
   return !view.hasAuth && traceIsIosSafari() &&
     !(view.authState && (view.authState.state === "reconnect_required" || view.authState.state === "error"));
@@ -3914,7 +4211,7 @@ function awaitingAppLink(view) {
 function storyHeadline(view) {
   if (awaitingAppLink(view)) return "Finish setup in the Trace app";
   if (!view.hasAuth) {
-    if (view.authState && view.authState.state === "reconnect_required") return "Reconnect Trace";
+    if (needsReconnect(view.authState)) return "Reconnect Trace";
     if (view.authState && view.authState.state === "error") return "Trace unavailable";
     return "Connect Trace";
   }
@@ -3931,11 +4228,11 @@ function storyCaption(view) {
     return "Open Trace and finish Safari setup there, signing in first if asked. Then come back; nothing has been saved yet.";
   }
   if (!view.hasAuth) {
-    if (view.authState && view.authState.state === "reconnect_required") {
+    if (needsReconnect(view.authState)) {
       return "Your session needs a refresh.";
     }
     if (view.authState && view.authState.state === "error") {
-      return "Last sync failed. Source reading stays usable.";
+      return "Trace couldn’t update just now. You can keep reading here.";
     }
     if (storyUsesArchiveConnect()) {
       return storyArchiveConnectState === "opened"
@@ -3962,8 +4259,9 @@ function storyCaption(view) {
 function handleDisplay(view) {
   if (awaitingAppLink(view)) return "Finish setup in Trace";
   if (!view.hasAuth) {
-    if (view.authState && view.authState.state === "reconnect_required") return "Reconnect Trace";
-    if (view.authState && view.authState.state === "error") return "Error";
+    if (needsReconnect(view.authState)) return "Reconnect Trace";
+    if (view.authState && view.authState.state === "reconnect_required") return "Connect Trace";
+    if (view.authState && view.authState.state === "error") return "Try again";
     return "Connect";
   }
   if (view.entry && view.entry.__traceAutoTrackPending) return "Adding…";
@@ -3975,7 +4273,7 @@ function handleDisplay(view) {
   ) {
     return "Reconnect";
   }
-  if (view.entry && view.entry.__traceAutoTrackError) return "Error";
+  if (view.entry && view.entry.__traceAutoTrackError) return "Not saved";
   if (view.entry && view.entry.__traceStatusPending) return "Saving…";
   if (view.entry && view.entry.__traceStatusError) return "Update failed";
   if (view.entry && view.entry.hidden) return "Hidden";
@@ -4037,7 +4335,7 @@ function storyHandlePresentation(view) {
     return { kind: "auth-expired", label: "Reconnect", theme: TRACE_INLINE_THEMES.action, dot: false, spinner: false, status: null, progress: null };
   }
   if (entry && entry.__traceAutoTrackError) {
-    return { kind: "error", label: "Error", theme: TRACE_INLINE_THEMES.error, dot: false, spinner: false, status: null, progress: null };
+    return { kind: "error", label: "Not saved", theme: TRACE_INLINE_THEMES.error, dot: false, spinner: false, status: null, progress: null };
   }
   if (entry && entry.__traceStatusPending) {
     return { kind: "saving", label: "Saving…", theme: TRACE_INLINE_THEMES.saving, dot: false, spinner: true, status: null, progress: null };
@@ -5590,7 +5888,7 @@ function sendQuickAddAction(btn, workKey, addTheme, compact, done) {
         if (compact) {
           applyStoryInlineHandleState(btn, {
             kind: "error",
-            label: "Error",
+            label: "Couldn’t add",
             theme: TRACE_INLINE_THEMES.error,
             dot: false,
             spinner: false,
@@ -5703,7 +6001,7 @@ function sendQuickAddAction(btn, workKey, addTheme, compact, done) {
         if (compact) {
           applyStoryInlineHandleState(btn, {
             kind: "error",
-            label: "Error",
+            label: "Couldn’t add",
             theme: TRACE_INLINE_THEMES.error,
             dot: false,
             spinner: false,
@@ -6175,7 +6473,7 @@ function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
         if (!response) {
           setStorySheetControlPending(btn, false, "Could not save the browsing preference. Try again.");
           btn.style.cssText = storySheetGhostButtonCss() + ";cursor:pointer;color:var(--trace-page-warning)";
-          btn.textContent = "Error";
+          btn.textContent = "Not saved";
           btn.disabled = false;
           setTimeout(function () {
             resetStoryHiddenPreferenceBtn(btn, hidden);
@@ -6196,7 +6494,7 @@ function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
               : "Could not save the browsing preference. Try again.",
           );
           btn.style.cssText = storySheetGhostButtonCss() + ";cursor:pointer;color:var(--trace-page-warning)";
-          btn.textContent = response.error === "rate_limited" ? "Wait" : "Error";
+          btn.textContent = response.error === "rate_limited" ? "Wait" : "Not saved";
           btn.disabled = false;
           setTimeout(function () {
             resetStoryHiddenPreferenceBtn(btn, hidden);
@@ -6360,7 +6658,7 @@ function renderStorySheet(sheet, view, workKey) {
       connectOpen.setAttribute("data-trace-story-connect", "1");
       connectOpen.textContent = storyArchiveConnectState === "connecting"
         ? "Connecting…"
-        : view.authState && view.authState.state === "reconnect_required"
+        : needsReconnect(view.authState)
           ? "Reconnect"
           : "Connect";
       connectOpen.disabled = storyArchiveConnectState === "connecting";
@@ -6397,7 +6695,7 @@ function renderStorySheet(sheet, view, workKey) {
     capacityTitle.textContent = "This story wasn’t added";
     capacityTitle.style.cssText = "margin:0;font:600 17px/1.3 " + TRACE_UI.font + ";color:var(--trace-page-ink)";
     var capacityCopy = document.createElement("p");
-    capacityCopy.textContent = "Your Library is full. Make room in Trace, or see Trace Unlimited.";
+    capacityCopy.textContent = "Your Library is full. Everything saved stays. See Trace Unlimited, or remove a story to make room.";
     capacityCopy.style.cssText = "margin:0;font:400 13px/1.4 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
     body.appendChild(capacityTitle);
     body.appendChild(capacityCopy);
@@ -8107,6 +8405,10 @@ function initQuickAdd() {
       ) return;
       if (changes[WORK_STATE_STORAGE_KEY]) {
         queryBackgroundWorkStateForStory(workKey);
+      } else if (changes[ACCOUNT_PROJECTION_REVISION_KEY] || changes[OVERLAY_CACHE_KEY]) {
+        // The Library changed. If this page still shows a failed automatic
+        // save, ask whether the story was saved after all.
+        recheckAutoTrackFailureForStory(workKey);
       }
       renderQuickAddButton(workKey);
       if (

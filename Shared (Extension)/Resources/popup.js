@@ -23,9 +23,6 @@ const TRACE_IOS_APP_LIBRARY_URL = "traceauth://open?destination=library";
 // On iPhone and iPad, Unlimited is offered only inside the Trace app: this
 // fixed link opens its Unlimited sheet and carries no account or page data.
 const TRACE_IOS_APP_UNLIMITED_URL = "traceauth://open?destination=unlimited";
-// The Free plan's Library size. The account summary the extension reads
-// reports the count but not the limit, so this mirrors the server default.
-const FREE_LIBRARY_LIMIT = 100;
 const FREE_LIMIT_HEADS_UP_KEY = "traceFreeLimitHeadsUpV1";
 const FREE_LIMIT_HEADS_UP_SHARE = 0.8;
 const FREE_LIMIT_HEADS_UP_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -118,13 +115,28 @@ function upgradeDestinationUrl() {
   return upgradeOpensTraceApp ? TRACE_IOS_APP_UNLIMITED_URL : TRACE_UPGRADE_URL;
 }
 
+/** The Free Library size the account reports, or null while it is unknown. */
+function accountLibraryLimit(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+/**
+ * What follows the "Your Library is full" heading, in the Trace app's words.
+ * The size is named only when the account has reported it.
+ */
+function libraryFullLead(limit) {
+  const size = accountLibraryLimit(limit);
+  return `${size === null ? "" : `${size} stories on Free. `}Everything saved stays. See Trace Unlimited, or remove a story to make room.`;
+}
+
 /**
  * The Free plan line: the Library count, and once at 80% a calm heads-up.
  * The heads-up shows for a day from first sight, then the plain count
  * returns; it can show again only after the Library drops back below 80%.
- * Nothing shows for Unlimited, or while the plan or count is unknown.
+ * The Library size comes from the account. Nothing shows for Unlimited, or
+ * while the plan, the count or the size is unknown.
  */
-function freePlanLine({ pro, libraryCount, limit = FREE_LIBRARY_LIMIT, headsUpShownAt = null, now = Date.now() }) {
+function freePlanLine({ pro, libraryCount, limit, headsUpShownAt = null, now = Date.now() }) {
   if (pro !== false || !Number.isSafeInteger(libraryCount) || libraryCount < 0) return null;
   if (!Number.isSafeInteger(limit) || limit <= 0) return null;
   const nearLimit = libraryCount >= Math.ceil(limit * FREE_LIMIT_HEADS_UP_SHARE) && libraryCount < limit;
@@ -148,13 +160,18 @@ const freePlanSlots = { sheet: false, reader: false };
 /** Resolves the line for this popup opening and records the heads-up once. */
 function currentFreePlanLine(model) {
   if (freeLimitHeadsUpShownAt === undefined) return null;
-  const line = freePlanLine({ pro: model.pro, libraryCount: model.libraryCount, headsUpShownAt: freeLimitHeadsUpShownAt });
+  const line = freePlanLine({
+    pro: model.pro,
+    libraryCount: model.libraryCount,
+    limit: model.libraryLimit,
+    headsUpShownAt: freeLimitHeadsUpShownAt,
+  });
   if (!line) return null;
   if (line.headsUp && freeLimitHeadsUpShownAt === null) {
     freeLimitHeadsUpShownAt = Date.now();
     void extensionPromiseCall(ext.storage?.local, "set",
       [{ [FREE_LIMIT_HEADS_UP_KEY]: { shownAt: freeLimitHeadsUpShownAt } }]).catch(() => {});
-  } else if (!line.nearLimit && freeLimitHeadsUpShownAt !== null && model.libraryCount < FREE_LIBRARY_LIMIT) {
+  } else if (!line.nearLimit && freeLimitHeadsUpShownAt !== null && model.libraryCount < model.libraryLimit) {
     freeLimitHeadsUpShownAt = null;
     void extensionPromiseCall(ext.storage?.local, "set", [{ [FREE_LIMIT_HEADS_UP_KEY]: null }]).catch(() => {});
   }
@@ -223,6 +240,7 @@ const popupModel = {
   authState: fallbackStatus,
   firstSaveSeen: false,
   libraryCount: null,
+  libraryLimit: null,
   pro: null,
   activeTab: { kind: "unknown" },
   capacity: null,
@@ -376,7 +394,7 @@ function buildPopupUi(model) {
       eyebrow: "",
       heading: "Your Library is full",
       glyph: "tray",
-      lead: "New stories won’t be added until you make room in Trace, or see Trace Unlimited.",
+      lead: libraryFullLead(model.libraryLimit),
       leadHidden: false,
       ctaHidden: false,
       ctaLabel: "See Trace Unlimited",
@@ -387,7 +405,7 @@ function buildPopupUi(model) {
       importHidden: true,
       importDisabled: true,
       importLabel: "Import from this page",
-      importTitle: "Make room in Trace, or see Trace Unlimited, before importing new stories.",
+      importTitle: `Your Library is full. ${libraryFullLead(model.libraryLimit)}`,
     };
   }
 
@@ -398,7 +416,9 @@ function buildPopupUi(model) {
       eyebrow: "",
       heading: recoveryHeading(auth),
       glyph: auth === "unknown" ? "" : auth === "upgrade_required" ? "tray" : "person",
-      lead: recoveryLead(auth, authState.message),
+      lead: auth === "upgrade_required"
+        ? libraryFullLead(model.libraryLimit)
+        : recoveryLead(auth, authState.message),
       leadHidden: false,
       ctaHidden: false,
       ctaLabel: recoveryCtaLabel(auth),
@@ -621,6 +641,7 @@ function fetchPopupState() {
       firstSaveSeen: s.firstSaveSeen === true,
       libraryCount:
         typeof s.libraryCount === "number" ? s.libraryCount : undefined,
+      libraryLimit: accountLibraryLimit(s.libraryLimit),
       pro: typeof s.pro === "boolean" ? s.pro : undefined,
       activeTab: s.activeTab || undefined,
       capacity: s.capacity ?? null,
@@ -1675,8 +1696,8 @@ function renderEarnedLibraryFull(onUnsavedStory) {
     glyph: "tray",
     heading: "Your Library is full",
     lead: onUnsavedStory
-      ? "This story wasn’t added. Make room in Trace, or see Trace Unlimited."
-      : "New stories won’t be added until you make room in Trace, or see Trace Unlimited.",
+      ? `${libraryFullLead(popupModel.libraryLimit)} This story wasn’t added.`
+      : libraryFullLead(popupModel.libraryLimit),
   });
   setEarnedResult("failure", "Your Library is full.", onUnsavedStory ? "This story wasn’t added." : "");
   configureEarnedActions(
@@ -2258,12 +2279,15 @@ function renderKernelSnapshot(snapshot) {
     state === "signed_out" ||
     (state === "reconnect_required" &&
       ["credential_absent", "credential_rejected", "identity_conflict"].includes(reason));
+  // A reader who has never connected is connecting, not reconnecting, even
+  // when a first attempt left the session needing another go.
+  const connectVerb = snapshot?.neverConnected === true ? "Connect" : "Reconnect";
   const labels = {
     connect: "Connect",
     cancel: "Cancel",
     disconnect: "Disconnect",
     retry: "Try again",
-    reconnect: "Reconnect",
+    reconnect: connectVerb,
   };
   const otherAccount = state === "reconnect_required" && reason === "identity_conflict";
   const headings = {
@@ -2273,7 +2297,7 @@ function renderKernelSnapshot(snapshot) {
     verifying: "Checking Trace…",
     connected: "Trace is on",
     degraded: "Trace is temporarily offline",
-    reconnect_required: otherAccount ? "This browser was signed in to another account" : "Reconnect Trace",
+    reconnect_required: otherAccount ? "This browser was signed in to another account" : `${connectVerb} Trace`,
   };
   const glyphs = {
     signed_out: ["person", ""],
@@ -2287,22 +2311,22 @@ function renderKernelSnapshot(snapshot) {
     lead =
       "Open the Trace app and sign in there. Signing in on tracefiction.com in Safari does not connect this extension. Return to Safari and press Connect.";
   } else if (otherAccount) {
-    lead = "Trace signed it out so nothing mixes. Sign in to Trace in this browser with the account you use, then press Reconnect. Nothing was saved.";
+    lead = `Trace signed it out so nothing mixes. Sign in to Trace in this browser with the account you use, then press ${connectVerb}. Nothing was saved.`;
   } else if (state === "reconnect_required" && isLikelyIosExtensionUi && credentialRecovery) {
     lead =
-      "Open the Trace app and sign in there. Signing in on tracefiction.com in Safari does not connect this extension. Return to Safari and press Reconnect.";
+      `Open the Trace app and sign in there. Signing in on tracefiction.com in Safari does not connect this extension. Return to Safari and press ${connectVerb}.`;
   } else if (state === "signed_out") {
     lead =
       "Open Trace in this browser and sign in, then return here and press Connect.";
   } else if (state === "reconnect_required") {
     if (reason === "storage_write_failed" || reason === "storage_unavailable") {
-      lead = "Trace could not update extension storage. Retry Reconnect after local storage recovers.";
+      lead = `Trace could not update extension storage. Press ${connectVerb} after local storage recovers.`;
     } else if (reason === "account_unavailable" || reason === "invalid_account_response") {
-      lead = "Trace could not safely verify this account. Press Reconnect to try again.";
+      lead = `Trace could not safely verify this account. Press ${connectVerb} to try again.`;
     } else if (reason === "malformed_envelope" || reason === "unsupported_envelope") {
-      lead = "Trace found unsupported local session data. Reconnect will safely replace it.";
+      lead = `Trace found unsupported local session data. Pressing ${connectVerb} will safely replace it.`;
     } else {
-      lead = "Sign in to Trace in this browser if needed, then press Reconnect.";
+      lead = `Sign in to Trace in this browser if needed, then press ${connectVerb}.`;
     }
   } else if (state === "degraded") {
     if (reason === "storage_unavailable") {
@@ -2420,6 +2444,11 @@ const KERNEL_SNAPSHOT_RETRY_DELAYS_MS = Object.freeze([180, 650]);
 const KERNEL_SNAPSHOT_TRANSIENT_RETRY_LIMIT = 31;
 let kernelSnapshotAttempt = 0;
 let kernelSnapshotTransientAttempt = 0;
+// The worker can't tell an app with no account from one it couldn't read,
+// so this stays short: a signed-out reader waits about a second longer.
+const KERNEL_SNAPSHOT_PROVIDER_RETRY_LIMIT = 2;
+const KERNEL_SNAPSHOT_PROVIDER_RETRY_MS = 600;
+let kernelSnapshotProviderAttempt = 0;
 
 function requestKernelSnapshot() {
   sendKernelRuntimeMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" }, (response) => {
@@ -2434,8 +2463,22 @@ function requestKernelSnapshot() {
       return;
     }
     kernelSnapshotAttempt = 0;
-    renderKernelSnapshot(response?.snapshot);
     const state = response?.snapshot?.state;
+    // The app's account couldn't be read just now (Safari can still be
+    // starting the extension). Signed out isn't confirmed, so keep checking
+    // briefly instead of asking a signed-in reader to sign in.
+    if (
+      response?.action?.kind === "unavailable" &&
+      (state === "signed_out" || state === "reconnect_required") &&
+      kernelSnapshotProviderAttempt < KERNEL_SNAPSHOT_PROVIDER_RETRY_LIMIT
+    ) {
+      kernelSnapshotProviderAttempt += 1;
+      renderKernelSnapshot({ state: "initializing", reason: "none" });
+      setTimeout(requestKernelSnapshot, KERNEL_SNAPSHOT_PROVIDER_RETRY_MS);
+      return;
+    }
+    kernelSnapshotProviderAttempt = 0;
+    renderKernelSnapshot(response?.snapshot);
     if (state === "initializing" || state === "connecting" || state === "verifying") {
       if (kernelSnapshotTransientAttempt < KERNEL_SNAPSHOT_TRANSIENT_RETRY_LIMIT) {
         kernelSnapshotTransientAttempt += 1;
@@ -2465,6 +2508,7 @@ function requestKernelPopupState() {
       firstSaveSeen: state.firstSaveSeen === true,
       libraryCount:
         typeof state.libraryCount === "number" ? state.libraryCount : undefined,
+      libraryLimit: accountLibraryLimit(state.libraryLimit),
       pro: typeof state.pro === "boolean" ? state.pro : undefined,
       activeTab: state.activeTab || undefined,
       capacity: state.capacity ?? null,

@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "default_locale": "en",
   "name": "Trace",
-  "description": "Track fanfiction reading: import AO3/FFN metadata into Trace and sync progress.",
-  "version": "0.7.3",
+  "description": "Save AO3 and FanFiction.net stories to Trace, keep your place as you read, and see your Library while you browse.",
+  "version": "1.0",
   "action": {
     "default_title": "Trace",
     "default_popup": "popup.html",

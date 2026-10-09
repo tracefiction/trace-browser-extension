@@ -2167,7 +2167,7 @@ test("library-overlay Add does not show saved from unconfirmed ok response", asy
   button.click();
 
   assert.equal(messages.at(-1).type, "TRACE_QUICK_ADD");
-  assert.match(button.textContent || "", /^Error$/);
+  assert.match(button.textContent || "", /^Couldn’t add$/);
   assert.equal(button.disabled, false);
   assert.equal(button.querySelector("span[aria-hidden='true']"), null);
 });
@@ -2208,7 +2208,7 @@ test("library-overlay quick add immediately shows pending and ignores duplicate 
   assert.equal(messages.length, 1);
 
   pendingCallback({ ok: true });
-  assert.match(button.textContent || "", /^Error$/);
+  assert.match(button.textContent || "", /^Couldn’t add$/);
   assert.equal(button.disabled, false);
   assert.equal(button.querySelector("span[aria-hidden='true']"), null);
 });
@@ -2558,7 +2558,7 @@ test("library-overlay hide failure keeps existing badge and offers retry", async
 
   assert.match(wrap.textContent || "", /Reading\s*2\/9/);
   assert.doesNotMatch(wrap.textContent || "", /Hidden/);
-  assert.match(hide.textContent || "", /Error/i);
+  assert.match(hide.textContent || "", /^Not saved$/);
   assert.equal(hide.disabled, false);
 });
 
@@ -2889,8 +2889,8 @@ test("library-overlay FFN fallback quick-add includes desktop listing summary", 
   assert.match(sentPayload.item.sm || "", /abandoned at a young age/i);
 });
 
-function kernelConnectListing({ connectResponse, userAgent, maxTouchPoints }) {
-  let state = "signed_out";
+function kernelConnectListing({ connectResponse, userAgent, maxTouchPoints, initialState = "signed_out", snapshotExtra = {} }) {
+  let state = initialState;
   const messages = [];
   return renderOverlayListing({
     sessionMode: "kernel",
@@ -2905,7 +2905,7 @@ function kernelConnectListing({ connectResponse, userAgent, maxTouchPoints }) {
       if (msg.type === "TRACE_ACCOUNT_PROJECTION_GET") {
         cb({
           ok: true,
-          snapshot: { state, reason: "none", canExecuteAuthenticated: state === "connected" },
+          snapshot: { state, reason: "none", canExecuteAuthenticated: state === "connected", ...snapshotExtra },
           projection: { entries: {}, workPreferences: {}, syncVersion: "v-empty" },
         });
         return;
@@ -2920,6 +2920,23 @@ function kernelConnectListing({ connectResponse, userAgent, maxTouchPoints }) {
     },
   }).then((window) => ({ window, messages }));
 }
+
+test("the listing notice asks only a reader who was connected before to reconnect", async () => {
+  const notice = async (snapshotExtra) => {
+    const { window } = await kernelConnectListing({
+      connectResponse: () => ({ ok: true, snapshot: { state: "reconnect_required" } }),
+      initialState: "reconnect_required",
+      snapshotExtra,
+    });
+    return [
+      window.document.querySelector("[data-trace-connect-notice-heading]").textContent,
+      window.document.querySelector("[data-trace-connect-notice-cta]").textContent,
+    ];
+  };
+
+  assert.deepEqual(await notice({}), ["Sign in again", "Reconnect"]);
+  assert.deepEqual(await notice({ neverConnected: true }), ["Connect Trace", "Connect"]);
+});
 
 test("kernel notice Connect runs the extension's connect and updates in place", async () => {
   const { window, messages } = await kernelConnectListing({

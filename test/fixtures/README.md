@@ -10,3 +10,8 @@ Fixtures may include surrounding page markup because real archive pages include 
 end-of-story placement tests and design renders. They use public-domain
 fandoms, invented titles and original prose; they are not snapshots of live
 pages.
+
+`ao3-work-summary/` holds synthetic AO3-shaped work pages (chapter 1, a
+chapter 2+ page with a chapter summary, the Entire Work view and a one-shot)
+for the work-summary selector tests. They use a public-domain fandom, invented
+titles and original prose; they are not snapshots of live pages.

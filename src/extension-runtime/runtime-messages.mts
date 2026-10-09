@@ -70,7 +70,13 @@ export const ACCOUNT_PROJECTION_REVISION_KEY = "traceAccountProjectionRevisionV1
 export type PublicSessionSnapshot = Pick<
   SessionSnapshot,
   "state" | "reason" | "canExecuteAuthenticated"
->;
+> & {
+  /**
+   * Present only when the session needs recovery and this browser has never
+   * verified an account, so surfaces say "Connect" rather than "Reconnect".
+   */
+  readonly neverConnected?: true;
+};
 
 export interface PublicWorkState {
   readonly workKey: string;
@@ -154,6 +160,8 @@ export interface PopupStateResponse {
   readonly authState: PublicSessionSnapshot;
   readonly firstSaveSeen: boolean;
   readonly libraryCount: number | null;
+  /** The Free Library size the account reports; null while unknown. */
+  readonly libraryLimit: number | null;
   readonly activeTab: Readonly<Record<string, unknown>>;
   readonly pro: boolean;
   readonly capacity: PublicCapacityRecovery | null;
@@ -209,11 +217,17 @@ export function isSessionAction(value: unknown): value is SessionAction {
   );
 }
 
-export function toPublicSessionSnapshot(snapshot: SessionSnapshot): PublicSessionSnapshot {
+export function toPublicSessionSnapshot(
+  snapshot: SessionSnapshot,
+  options: { readonly hasVerifiedAccount?: boolean } = {},
+): PublicSessionSnapshot {
   return Object.freeze({
     state: snapshot.state,
     reason: snapshot.reason,
     canExecuteAuthenticated: snapshot.canExecuteAuthenticated,
+    ...(snapshot.state === "reconnect_required" && options.hasVerifiedAccount === false
+      ? { neverConnected: true as const }
+      : {}),
   });
 }
 

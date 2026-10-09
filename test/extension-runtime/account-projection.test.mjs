@@ -51,6 +51,24 @@ test("projection API fetches overlay and summary without exposing the credential
   ));
 });
 
+test("projection API reads the Free Library size from the account and assumes none", async () => {
+  const summaryFor = async (account) => {
+    const api = new AccountProjectionApi(async (url) =>
+      url.endsWith("/api/extension/library-overlay")
+        ? jsonResponse({ success: true, data: { entries: {}, workPreferences: {}, syncVersion: "2026-07-20T12:00:00.000Z" } })
+        : jsonResponse({ account_id: "account-a", pro: false, library_count: 3, first_story_completed_at: null, ...account }),
+    "https://api.tracefiction.com");
+    return (await api.load("token")).value.summary.value.value;
+  };
+
+  assert.deepEqual(await summaryFor({ cap: { limit: 50, remaining: 47, over: false } }),
+    { pro: false, libraryCount: 3, firstStoryCompleted: true, libraryLimit: 50 });
+  for (const account of [{}, { cap: null }, { cap: {} }, { cap: { limit: 0 } }, { cap: { limit: "100" } }, { cap: { limit: 12.5 } }]) {
+    assert.deepEqual(await summaryFor(account),
+      { pro: false, libraryCount: 3, firstStoryCompleted: true });
+  }
+});
+
 test("projection API preserves a valid part when the other endpoint is unavailable", async () => {
   const api = new AccountProjectionApi(async (url) => {
     if (url.endsWith("/api/extension/library-overlay")) throw new Error("offline");
