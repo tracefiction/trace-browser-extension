@@ -4,6 +4,10 @@ Trace is in beta. This file lists the changes that matter to people using the
 Chrome, Edge and Firefox extension. The Safari extension ships inside the Trace
 iPhone app, and its notes go with each app release.
 
+## Unreleased
+
+- **Stories you start part-way through get their description.** AO3 shows a story's summary only on its first chapter. If you're on a later chapter when Trace first sees a story, Trace now quietly reads the summary from the first chapter in the background, so the story's description is filled in. It never reads a chapter's own summary as the story's.
+
 ## 0.7.3
 
 - **Trace stays connected.** The extension now keeps its own sign-in instead of borrowing a short-lived one from an open Trace tab. You no longer need a Trace tab open, and Firefox on Android no longer asks you to reconnect several times a day. After updating, you may need to connect once more; after that the connection lasts until you choose **Disconnect** or stop using Trace for 90 days.

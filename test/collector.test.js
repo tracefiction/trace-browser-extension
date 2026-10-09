@@ -258,6 +258,158 @@ test("collectAO3Work (ao3_story.html) extracts full metadata", () => {
   assert.equal(item.s, null, "bare chapters 17/? does not over-infer work status");
 });
 
+const WORK_SUMMARY = "A lamplighter keeps a ledger of every fog that crosses Baker Street.";
+
+function collectSummaryFixture(name, url) {
+  const dom = domFromFixture(path.join("ao3-work-summary", name), url);
+  const { collectAO3Work } = createCollectorBindings(dom);
+  return collectAO3Work();
+}
+
+test("collectAO3Work reads the work summary from the work preface on chapter 1", () => {
+  const item = collectSummaryFixture(
+    "chapter-1.html",
+    "https://archiveofourown.org/works/7700201/chapters/9900001",
+  );
+  assert.equal(item.chn, 1);
+  assert.equal(item.sm, WORK_SUMMARY);
+});
+
+test("collectAO3Work never reports a chapter 2+ summary as the work summary", () => {
+  const item = collectSummaryFixture(
+    "chapter-2.html",
+    "https://archiveofourown.org/works/7700201/chapters/9900002",
+  );
+  assert.equal(item.chn, 2);
+  assert.equal(item.sm, null, "the work preface has no summary on later chapters");
+});
+
+test("collectAO3Work keeps the work summary on the Entire Work view", () => {
+  const item = collectSummaryFixture(
+    "entire-work.html",
+    "https://archiveofourown.org/works/7700201?view_full_work=true",
+  );
+  assert.equal(item.sm, WORK_SUMMARY, "chapter summaries further down are ignored");
+});
+
+test("collectAO3Work reads a one-shot's summary", () => {
+  const item = collectSummaryFixture(
+    "one-shot.html",
+    "https://archiveofourown.org/works/7700202",
+  );
+  assert.equal(item.sm, "One evening, one lamp, one detective.");
+});
+
+const CHAPTER_2_URL = "https://archiveofourown.org/works/7700201/chapters/9900002";
+
+function backfillHarness({ fetchImpl, prefs = {} } = {}) {
+  const dom = domFromFixture(path.join("ao3-work-summary", "chapter-2.html"), CHAPTER_2_URL);
+  const sent = [];
+  const fetchCalls = [];
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(message, cb) {
+        sent.push(message);
+        if (typeof cb === "function") cb({ ok: true });
+      },
+      lastError: null,
+    },
+    storage: { local: { get(keys, cb) { cb({ ...prefs }); } } },
+  };
+  const fetch = (url, init) => {
+    fetchCalls.push({ url, init });
+    return fetchImpl(url, init);
+  };
+  const bindings = createCollectorBindings(dom, { chrome, fetch, scopeStorageContext: false });
+  return { ...bindings, sent, fetchCalls, item: bindings.collectAO3Work() };
+}
+
+function okHtml(name) {
+  const html = loadFixture(path.join("ao3-work-summary", name));
+  return () => Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(html) });
+}
+
+test("work summary backfill only targets AO3 chapter 2+ pages without a work summary", () => {
+  const { workSummaryBackfillWorkId, item } = backfillHarness({ fetchImpl: okHtml("chapter-1.html") });
+  assert.equal(workSummaryBackfillWorkId(item), "7700201");
+  assert.equal(workSummaryBackfillWorkId({ ...item, sm: "Known" }), null, "a page with a work summary needs nothing");
+  assert.equal(workSummaryBackfillWorkId({ ...item, chn: 1 }), null, "chapter 1 carries the summary itself");
+  assert.equal(workSummaryBackfillWorkId({ ...item, chu: null }), null, "Entire Work has no chapter URL");
+  assert.equal(
+    workSummaryBackfillWorkId({ ...item, chu: "https://archiveofourown.org/works/1/chapters/2" }),
+    null,
+    "the chapter URL must belong to the same work",
+  );
+  assert.equal(workSummaryBackfillWorkId({ ...item, src: "ffn" }), null);
+  assert.equal(workSummaryBackfillWorkId({ ...item, ctx: "listing" }), null);
+});
+
+test("work summary backfill parses only the work preface of a fetched page", () => {
+  const { parseAo3WorkSummaryFromHtml } = backfillHarness({ fetchImpl: okHtml("chapter-1.html") });
+  assert.equal(parseAo3WorkSummaryFromHtml(loadFixture(path.join("ao3-work-summary", "chapter-1.html"))), WORK_SUMMARY);
+  assert.equal(parseAo3WorkSummaryFromHtml(loadFixture(path.join("ao3-work-summary", "chapter-2.html"))), null);
+  assert.equal(parseAo3WorkSummaryFromHtml("<html><body>Retry later</body></html>"), null);
+});
+
+test("work summary backfill reports the summary as the work's first page", () => {
+  const { workSummaryBackfillItem, item } = backfillHarness({ fetchImpl: okHtml("chapter-1.html") });
+  const out = workSummaryBackfillItem(item, WORK_SUMMARY);
+  assert.equal(out.sm, WORK_SUMMARY);
+  assert.equal(out.chn, 1);
+  assert.equal(out.chu, null);
+  assert.equal(out.u, item.u);
+  assert.equal(out.t, item.t);
+  assert.equal(item.sm, null, "the collected item is not changed");
+  assert.equal(item.chn, 2);
+});
+
+test("work summary backfill fetches chapter 1 once, past the adult notice, then broadcasts it", async () => {
+  const h = backfillHarness({ fetchImpl: okHtml("chapter-1.html") });
+  assert.equal(h.maybeBackfillWorkSummary(h.item), true);
+  assert.equal(h.maybeBackfillWorkSummary(h.item), false, "a second save of the same work does not fetch again");
+  await delay(1_800);
+  assert.equal(h.fetchCalls.length, 1);
+  assert.equal(h.fetchCalls[0].url, "https://archiveofourown.org/works/7700201?view_adult=true");
+  assert.equal(h.fetchCalls[0].init.credentials, "include");
+  const broadcasts = h.sent.filter((m) => m && m.type === "TRACE_METADATA_BROADCAST");
+  assert.equal(broadcasts.length, 1);
+  assert.equal(broadcasts[0].payload.item.sm, WORK_SUMMARY);
+  assert.equal(broadcasts[0].payload.item.chn, 1);
+  assert.equal(broadcasts[0].payload.item.chu, null);
+  assert.equal(h.maybeBackfillWorkSummary(h.item), false, "remembered for the rest of the day");
+});
+
+test("work summary backfill respects the reader's metadata setting", async () => {
+  const h = backfillHarness({
+    fetchImpl: okHtml("chapter-1.html"),
+    prefs: { prefMetadataImproveEnabled: false },
+  });
+  h.maybeBackfillWorkSummary(h.item);
+  await delay(1_800);
+  assert.equal(h.fetchCalls.length, 0);
+  assert.equal(h.sent.filter((m) => m && m.type === "TRACE_METADATA_BROADCAST").length, 0);
+});
+
+test("work summary backfill stays silent and backs off when AO3 refuses", async () => {
+  const h = backfillHarness({
+    fetchImpl: () => Promise.resolve({ ok: false, status: 429, text: () => Promise.resolve("") }),
+  });
+  assert.equal(h.maybeBackfillWorkSummary(h.item), true);
+  await delay(1_800);
+  assert.equal(h.fetchCalls.length, 1);
+  assert.equal(h.sent.filter((m) => m && m.type === "TRACE_METADATA_BROADCAST").length, 0);
+  const another = { ...h.item, u: "https://archiveofourown.org/works/7700299", chu: "https://archiveofourown.org/works/7700299/chapters/5" };
+  assert.equal(h.maybeBackfillWorkSummary(another), false, "no new requests during the back-off");
+});
+
+test("work summary backfill fails silently when the request throws", async () => {
+  const h = backfillHarness({ fetchImpl: () => Promise.reject(new Error("offline")) });
+  assert.equal(h.maybeBackfillWorkSummary(h.item), true);
+  await delay(1_800);
+  assert.equal(h.sent.filter((m) => m && m.type === "TRACE_METADATA_BROADCAST").length, 0);
+});
+
 test("collectAO3Work emits current chapter URL without query or hash", () => {
   const dom = domFromFixture(
     "ao3_story.html",

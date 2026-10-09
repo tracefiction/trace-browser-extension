@@ -1057,6 +1057,186 @@ function rememberMetadataBroadcast(item) {
   }
 }
 
+// AO3 shows a work's summary only on chapter 1, one-shots and the Entire Work
+// view. When a reader is on chapter 2 or later, Trace fetches the work's first
+// page once in the background and reports its summary, so a story first seen
+// mid-way still gets its description. The reader is already reading this work,
+// so the adult-content notice is skipped. One request at a time, at most one
+// per work per day in this tab, a back-off after any refusal, and failures stay
+// silent; the save itself never waits for it.
+var WORK_SUMMARY_BACKFILL_KEY = "trace:work-summary-backfill:v1";
+var WORK_SUMMARY_BACKFILL_DELAY_MS = 1_500;
+var WORK_SUMMARY_BACKFILL_TIMEOUT_MS = 8_000;
+var WORK_SUMMARY_BACKFILL_BACKOFF_MS = 10 * 60 * 1000;
+var WORK_SUMMARY_SELECTOR = "#workskin > .preface.group:not(.chapter) > .summary blockquote.userstuff";
+var workSummaryBackfillInFlight = false;
+var workSummaryBackfillBackoffUntil = 0;
+
+function workSummaryBackfillWorkId(item) {
+  if (!item || item.src !== "ao3" || item.ctx !== "story") return null;
+  if (item.sm) return null;
+  if (!(typeof item.chn === "number" && item.chn > 1)) return null;
+  var chapter = String(item.chu || "").match(/\/works\/(\d+)\/chapters\/\d+/);
+  var work = String(item.u || "").match(/\/works\/(\d+)/);
+  if (!chapter || !work || chapter[1] !== work[1]) return null;
+  return work[1];
+}
+
+function workSummaryBackfillDay() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function workSummaryBackfillTriedToday(workId) {
+  try {
+    if (!window.sessionStorage) return false;
+    var parsed = JSON.parse(window.sessionStorage.getItem(WORK_SUMMARY_BACKFILL_KEY) || "{}");
+    return !!parsed && parsed[workId] === workSummaryBackfillDay();
+  } catch (_) {
+    return false;
+  }
+}
+
+function rememberWorkSummaryBackfill(workId) {
+  try {
+    if (!window.sessionStorage) return;
+    var today = workSummaryBackfillDay();
+    var parsed = JSON.parse(window.sessionStorage.getItem(WORK_SUMMARY_BACKFILL_KEY) || "{}");
+    var next = {};
+    if (parsed && typeof parsed === "object") {
+      for (var key in parsed) {
+        if (parsed[key] === today) next[key] = today;
+      }
+    }
+    next[workId] = today;
+    window.sessionStorage.setItem(WORK_SUMMARY_BACKFILL_KEY, JSON.stringify(next));
+  } catch (_) {
+    /* optional */
+  }
+}
+
+function parseAo3WorkSummaryFromHtml(html) {
+  try {
+    if (typeof DOMParser !== "function") return null;
+    var doc = new DOMParser().parseFromString(String(html || ""), "text/html");
+    return txt(one(doc, WORK_SUMMARY_SELECTOR)) || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function workSummaryBackfillFetch() {
+  // Firefox content scripts make page-origin requests through content.fetch.
+  if (typeof content !== "undefined" && content && typeof content.fetch === "function") {
+    return content.fetch.bind(content);
+  }
+  return typeof fetch === "function" ? fetch : null;
+}
+
+// Calls done(summary, ok): ok is false when AO3 refused or the request failed.
+function fetchAo3WorkSummary(workId, done) {
+  var fetchFn = workSummaryBackfillFetch();
+  if (!fetchFn) {
+    done(null, false);
+    return;
+  }
+  var settled = false;
+  var controller = typeof AbortController === "function" ? new AbortController() : null;
+  var finish = function (summary, ok) {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    done(summary, ok);
+  };
+  var timer = setTimeout(function () {
+    if (controller) controller.abort();
+    finish(null, false);
+  }, WORK_SUMMARY_BACKFILL_TIMEOUT_MS);
+  var url = location.origin + "/works/" + workId + "?view_adult=true";
+  Promise.resolve()
+    .then(function () {
+      return fetchFn(url, {
+        credentials: "include",
+        redirect: "follow",
+        headers: { Accept: "text/html" },
+        signal: controller ? controller.signal : undefined,
+      });
+    })
+    .then(function (response) {
+      if (!response || !response.ok) {
+        finish(null, false);
+        return null;
+      }
+      return response.text();
+    })
+    .then(function (html) {
+      if (html == null) return;
+      finish(parseAo3WorkSummaryFromHtml(html), true);
+    })
+    .catch(function () {
+      finish(null, false);
+    });
+}
+
+function workSummaryBackfillItem(item, summary) {
+  var out = {};
+  for (var key in item) {
+    if (Object.prototype.hasOwnProperty.call(item, key)) out[key] = item[key];
+  }
+  // The summary comes from the work's first page, so it is reported as that
+  // page: chapter 1 and no chapter URL. Progress is never taken from metadata.
+  out.sm = summary;
+  out.chn = 1;
+  out.chu = null;
+  return out;
+}
+
+function backfillWorkSummaryNow(item, workId) {
+  workSummaryBackfillInFlight = true;
+  fetchAo3WorkSummary(workId, function (summary, ok) {
+    workSummaryBackfillInFlight = false;
+    if (!ok) {
+      workSummaryBackfillBackoffUntil = Date.now() + WORK_SUMMARY_BACKFILL_BACKOFF_MS;
+      return;
+    }
+    if (!summary) return;
+    sendCollectorMessageBestEffort({
+      type: "TRACE_METADATA_BROADCAST",
+      payload: {
+        s: "ao3",
+        at: new Date().toISOString(),
+        item: workSummaryBackfillItem(item, summary),
+      },
+    });
+  });
+}
+
+// Returns true when a background fetch was scheduled.
+function maybeBackfillWorkSummary(item) {
+  var workId = workSummaryBackfillWorkId(item);
+  if (!workId) return false;
+  if (workSummaryBackfillInFlight) return false;
+  if (Date.now() < workSummaryBackfillBackoffUntil) return false;
+  if (workSummaryBackfillTriedToday(workId)) return false;
+  rememberWorkSummaryBackfill(workId);
+  workSummaryBackfillInFlight = true;
+  var start = function () {
+    backfillWorkSummaryNow(item, workId);
+  };
+  try {
+    ext.storage.local.get(["prefMetadataImproveEnabled"], function (res) {
+      var enabled = !(res && res.prefMetadataImproveEnabled === false);
+      if (!enabled || (ext.runtime && ext.runtime.lastError)) {
+        workSummaryBackfillInFlight = false;
+        return;
+      }
+      setTimeout(start, WORK_SUMMARY_BACKFILL_DELAY_MS);
+    });
+  } catch (_) {
+    workSummaryBackfillInFlight = false;
+  }
+  return true;
+}
+
 function sourceStoryIdFromItem(item) {
   var workKey = overlayWorkKeyFromItem(item);
   if (!workKey) return null;
@@ -2167,7 +2347,12 @@ function collectAO3Work() {
   const categories = ddTags("dd.category.tags");
   const series = parseAO3Series(meta);
 
-  const summary = txt(one(document, ".summary blockquote.userstuff")) || null;
+  // Only the work preface carries the work summary. On chapter 2+ pages it is
+  // absent and the first `.summary` is the chapter's own summary, which must
+  // never be reported as the work's.
+  const summary =
+    txt(one(document, "#workskin > .preface.group:not(.chapter) > .summary blockquote.userstuff")) ||
+    null;
   const relParts = relPartsFromAO3(relationships);
   const charsUnion = dedup((characters || []).concat(relParts || []));
   const romanticRels = relationships.filter(r => r.includes("/"));
@@ -3265,6 +3450,9 @@ function handleCollectorMessage(msg, sender, sendResponse, relayCommand) {
       items: res.items
     };
     sendResponse({ ok: true, payload });
+    if (Array.isArray(res.items) && res.items.length === 1) {
+      maybeBackfillWorkSummary(res.items[0]);
+    }
   } catch (e) {
     sendResponse({ ok: false, error: String(e?.message || e) });
   }
@@ -3487,6 +3675,7 @@ function startDwellTimer(attempt) {
       },
     });
   }
+  maybeBackfillWorkSummary(validStory);
   if (shouldSkipRecentAutoTrack(validStory)) {
     return;
   }
