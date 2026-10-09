@@ -7982,3 +7982,74 @@ test("kernel story Connect says where to sign in when it opened Trace", async ()
   const sheet = document.querySelector("[data-trace-story-sheet]");
   assert.match(sheet.textContent || "", /Sign in to Trace in the tab that opened/);
 });
+
+test("AO3 History rows carry the last-visited date and visit count", () => {
+  const dom = domFromFixture(
+    "ao3_history.html",
+    "https://archiveofourown.org/users/Ink_Reader_Test/readings",
+  );
+  const { collect } = createCollectorBindings(dom);
+  const res = plainJson(collect());
+  assert.equal(res.source, "ao3");
+  // The deleted-work row has no work id and is skipped.
+  assert.deepEqual(res.items.map((i) => i.u), [
+    "https://archiveofourown.org/works/41000001",
+    "https://archiveofourown.org/works/41000002",
+    "https://archiveofourown.org/works/41000003",
+    "https://archiveofourown.org/works/41000004",
+  ]);
+  const [ledger, letter, fog, rain] = res.items;
+  assert.equal(ledger.ctx, "listing");
+  assert.equal(ledger.t, "The Lamplighter's Ledger");
+  assert.equal(ledger.lv, "2026-10-08");
+  assert.equal(ledger.vc, 3);
+  assert.equal(ledger.s, "complete");
+  assert.equal(letter.lv, "2024-02-29");
+  assert.equal(letter.vc, 1);
+  // Marked for Later records an intent to read, not a read.
+  assert.equal("lv" in fog, false);
+  assert.equal("vc" in fog, false);
+  assert.equal(rain.lv, "2019-03-17");
+  assert.equal(rain.vc, 1204);
+});
+
+test("AO3 Marked for Later and ordinary listings carry no visit fields", () => {
+  const later = domFromFixture(
+    "ao3_history.html",
+    "https://archiveofourown.org/users/Ink_Reader_Test/readings?show=to-read",
+  );
+  const laterItems = plainJson(createCollectorBindings(later).collect().items);
+  assert.equal(laterItems.length, 4);
+  assert.ok(laterItems.every((i) => !("lv" in i) && !("vc" in i)));
+
+  const listing = domFromFixture(
+    "ao3_history.html",
+    "https://archiveofourown.org/tags/Sherlock%20Holmes/works",
+  );
+  const listingItems = plainJson(createCollectorBindings(listing).collect().items);
+  assert.equal(listingItems.length, 4);
+  assert.ok(listingItems.every((i) => !("lv" in i) && !("vc" in i)));
+
+  const bookmarks = domFromFixture(
+    "ao3_bookmarks.html",
+    "https://archiveofourown.org/users/Ink_Reader_Test/bookmarks",
+  );
+  const bookmarkItems = plainJson(createCollectorBindings(bookmarks).collect().items);
+  assert.ok(bookmarkItems.length > 0);
+  assert.ok(bookmarkItems.every((i) => !("lv" in i) && !("vc" in i)));
+});
+
+test("AO3 History dates normalise to YYYY-MM-DD and reject impossible dates", () => {
+  const dom = domFromFixture("ao3_history.html", "https://archiveofourown.org/users/Ink_Reader_Test/readings");
+  const { parseAO3HistoryDate } = createCollectorBindings(dom);
+  assert.equal(parseAO3HistoryDate("08 Oct 2026"), "2026-10-08");
+  assert.equal(parseAO3HistoryDate("8 Oct 2026"), "2026-10-08");
+  assert.equal(parseAO3HistoryDate(" 01 Sept 2025 "), "2025-09-01");
+  assert.equal(parseAO3HistoryDate("29 Feb 2024"), "2024-02-29");
+  assert.equal(parseAO3HistoryDate("29 Feb 2025"), null);
+  assert.equal(parseAO3HistoryDate("31 Apr 2025"), null);
+  assert.equal(parseAO3HistoryDate("08 Foo 2026"), null);
+  assert.equal(parseAO3HistoryDate("08 Oct 1999"), null);
+  assert.equal(parseAO3HistoryDate(""), null);
+  assert.equal(parseAO3HistoryDate(null), null);
+});

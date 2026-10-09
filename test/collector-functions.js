@@ -99,6 +99,7 @@ function createCollectorBindings(dom, options = {}) {
     shouldDisableTraceContentScript: globalScope.shouldDisableTraceContentScript,
     collectAO3Work: globalScope.collectAO3Work,
     collectAO3Listings: globalScope.collectAO3Listings,
+    parseAO3HistoryDate: globalScope.parseAO3HistoryDate,
     detectAo3CurrentChapterNumber: globalScope.detectAo3CurrentChapterNumber,
     hasStableAo3ChapterSignal: globalScope.hasStableAo3ChapterSignal,
     shouldDelayAutoTrackUntilVisible: globalScope.shouldDelayAutoTrackUntilVisible,

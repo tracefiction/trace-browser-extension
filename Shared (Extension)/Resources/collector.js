@@ -2281,6 +2281,59 @@ function extractAO3BlurbData(row, id, ctx) {
   };
 }
 
+const AO3_MONTHS = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12
+};
+
+/** The reader's own AO3 History page, not its Marked for Later view. */
+function isAO3HistoryPage() {
+  if (!/^\/users\/[^/]+\/readings\/?$/.test(location.pathname || "")) return false;
+  return !/[?&]show=to-read(?:&|$)/.test(location.search || "");
+}
+
+/** AO3 date text such as "08 Oct 2026" to "2026-10-08"; null when it is not a real date. */
+function parseAO3HistoryDate(text) {
+  const m = String(text || "").match(/\b(\d{1,2})\s+([A-Za-z]{3,9})\.?\s+(\d{4})\b/);
+  if (!m) return null;
+  const month = AO3_MONTHS[m[2].slice(0, 3).toLowerCase()];
+  const day = parseInt(m[1], 10);
+  const year = parseInt(m[3], 10);
+  if (!month || year < 2000) return null;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    return null;
+  }
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+/**
+ * History rows end with "Last visited: 08 Oct 2026 (Update available.) Visited 3 times".
+ * Rows marked for later record an intent to read, not a read, so they carry no visit fields.
+ */
+function ao3HistoryVisit(row) {
+  if (!isAO3HistoryPage()) return null;
+  const heading = one(row, "h4.viewed");
+  if (!heading) return null;
+  const text = (heading.textContent || "").replace(/\s+/g, " ").trim();
+  if (/Marked for Later/i.test(text)) return null;
+  const visited = text.match(/Last visited:\s*(.+?)(?:\(|\bVisited\b|$)/i);
+  const lv = visited ? parseAO3HistoryDate(visited[1]) : null;
+  let vc = null;
+  if (/\bVisited once\b/i.test(text)) {
+    vc = 1;
+  } else {
+    const count = text.match(/\bVisited\s+([\d,]+)\s+times?\b/i);
+    const n = count ? num(count[1]) : null;
+    if (n != null && n > 0) vc = n;
+  }
+  if (!lv && vc == null) return null;
+  const visit = {};
+  if (lv) visit.lv = lv;
+  if (vc != null) visit.vc = vc;
+  return visit;
+}
+
 function collectAO3Listings() {
   const rows = qsa(document, 'li.work.blurb[id^="work_"], li.work[id^="work_"], .work.blurb[id^="work_"]');
   if (!rows.length) return [];
@@ -2289,7 +2342,10 @@ function collectAO3Listings() {
     const idm = (row.id || "").match(/work_(\d+)/);
     const id = idm ? idm[1] : null;
     if (!id) continue;
-    items.push(extractAO3BlurbData(row, id, "listing"));
+    const item = extractAO3BlurbData(row, id, "listing");
+    const visit = ao3HistoryVisit(row);
+    if (visit) Object.assign(item, visit);
+    items.push(item);
   }
   return items;
 }
