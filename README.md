@@ -30,6 +30,7 @@ On supported AO3 and FanFiction.net story/listing pages, Trace reads visible sto
 - fandoms, tags, warnings, ratings, characters, and relationships when present
 - chapter and word counts
 - current chapter / reading-progress metadata
+- on your own AO3 History page only: each work's "Last visited" date and visit count, so an import can keep when you last read it (works marked for later are left out)
 
 Trace uses this to import a story, update reading progress, show whether stories are already in your Trace library, let you change reading status from supported overlay surfaces, and hide works from Trace's browsing overlay when you explicitly choose to. Trace can also detect when the last lines of the last posted chapter have stayed on screen for a moment, so it can mark your library entry finished or caught up (with Undo), or ask whether the work is complete, ongoing, on hiatus, or abandoned when the site does not say. This uses only the page's layout and your scrolling on that page; it does not read or send story text.
 
@@ -45,6 +46,7 @@ Trace may send this data to the Trace API when you import, quick-add, auto-track
 - fandoms/tags and related story metadata
 - chapter and word counts
 - reading-progress metadata
+- when you import from your AO3 History page: each work's last-visited date, which Trace uses as its last-read date unless it has seen you read the story later and, if you choose, as an approximate ("around") finish date for finished stories that have none (the visit count stays in the import and is not stored)
 - reading-status updates you explicitly choose in the Trace overlay: Saved, Reading, Caught up, Paused, Finished, or Dropped
 - finish/caught-up decisions you explicitly choose at the end of a supported story, including whether you identify the work as complete, ongoing, on hiatus, or abandoned
 - last-posted-chapter finish-qualification signals for stories already in your Trace library, so Trace can recover or improve work-status metadata
