@@ -55,6 +55,19 @@ test("account record parser copies a bounded, immutable V1 model", () => {
   assert.equal(parsed.value.capacityRecovery, null);
 });
 
+test("account summary keeps the Free Library size once the account has reported it", () => {
+  const without = parseAccountData(validRoot());
+  assert.equal(without.kind, "valid");
+  assert.equal(Object.hasOwn(without.value.summary, "libraryLimit"), false);
+
+  const withLimit = parseAccountData(validRoot({
+    summary: { pro: false, libraryCount: 12, firstStoryCompleted: true, libraryLimit: 50 },
+  }));
+  assert.equal(withLimit.kind, "valid");
+  assert.deepEqual(withLimit.value.summary,
+    { pro: false, libraryCount: 12, firstStoryCompleted: true, libraryLimit: 50 });
+});
+
 test("account parser accepts legacy records and validates capacity recovery state", () => {
   const legacy = parseAccountData(validRoot());
   assert.equal(legacy.kind, "valid");
@@ -89,6 +102,8 @@ test("account parser fails closed for wrong roots, scopes, and private bounds", 
     { ...validRoot(), scope: { accountId: "", epoch: 4 } },
     { ...validRoot(), scope: { accountId: "account-a", epoch: -1 } },
     { ...validRoot(), summary: { pro: true, libraryCount: -1, firstStoryCompleted: true } },
+    { ...validRoot(), summary: { pro: false, libraryCount: 1, firstStoryCompleted: true, libraryLimit: 0 } },
+    { ...validRoot(), summary: { pro: false, libraryCount: 1, firstStoryCompleted: true, libraryLimit: "100" } },
     {
       ...validRoot(),
       overlay: {

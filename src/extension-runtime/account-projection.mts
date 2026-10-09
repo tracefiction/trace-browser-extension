@@ -108,6 +108,9 @@ export class AccountProjectionApi implements AccountProjectionApiPort {
       return { kind: "invalid_response" };
     }
     const libraryCount = body.library_count;
+    // The account reports the Free Library size as `cap.limit`. An API that
+    // does not report it leaves the limit unknown rather than assumed.
+    const libraryLimit = isRecord(body.cap) ? body.cap.limit : undefined;
     const summary = copyAccountSummary({
       pro: body.pro,
       libraryCount,
@@ -115,6 +118,9 @@ export class AccountProjectionApi implements AccountProjectionApiPort {
         (typeof body.first_story_completed_at === "string" &&
           body.first_story_completed_at.trim().length > 0) ||
         (Number.isSafeInteger(libraryCount) && (libraryCount as number) > 0),
+      ...(Number.isSafeInteger(libraryLimit) && (libraryLimit as number) > 0
+        ? { libraryLimit }
+        : {}),
     });
     return summary === null
       ? { kind: "invalid_response" }

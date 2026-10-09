@@ -40,6 +40,11 @@ export interface AccountSummary {
   readonly pro: boolean;
   readonly libraryCount: number;
   readonly firstStoryCompleted: boolean;
+  /**
+   * How many stories a Free Library holds, as the account reports it.
+   * Absent until the account has reported one.
+   */
+  readonly libraryLimit?: number;
 }
 
 export interface LibraryOverlayEntry {
@@ -123,13 +128,17 @@ function copyScope(value: unknown): AccountScope | null {
 }
 
 function copySummary(value: unknown): AccountSummary | null {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["pro", "libraryCount", "firstStoryCompleted"])) {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ["pro", "libraryCount", "firstStoryCompleted", "libraryLimit"])
+  ) {
     return null;
   }
   if (
     typeof value.pro !== "boolean" ||
     !isSafeInteger(value.libraryCount) ||
-    typeof value.firstStoryCompleted !== "boolean"
+    typeof value.firstStoryCompleted !== "boolean" ||
+    (value.libraryLimit !== undefined && !isSafeInteger(value.libraryLimit, 1))
   ) {
     return null;
   }
@@ -137,6 +146,7 @@ function copySummary(value: unknown): AccountSummary | null {
     pro: value.pro,
     libraryCount: value.libraryCount,
     firstStoryCompleted: value.firstStoryCompleted,
+    ...(value.libraryLimit === undefined ? {} : { libraryLimit: value.libraryLimit }),
   });
 }
 

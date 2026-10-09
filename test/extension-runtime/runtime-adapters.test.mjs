@@ -1403,6 +1403,7 @@ test("popup state is extension-page-only and contains sanitized summary plus loc
           pro: true,
           library_count: 8,
           first_story_completed_at: "2026-07-19T12:00:00.000Z",
+          cap: { limit: 50, remaining: null, over: false },
         }), { status: 200 });
       }
       return new Response(JSON.stringify({
@@ -1431,6 +1432,7 @@ test("popup state is extension-page-only and contains sanitized summary plus loc
   assert.equal(popup.pro, true);
   assert.equal(popup.capacity, null);
   assert.equal(popup.libraryCount, 8);
+  assert.equal(popup.libraryLimit, 50);
   assert.equal(popup.firstSaveSeen, true);
   assert.equal(popup.autoTrackEnabled, false);
   assert.equal(popup.ao3SavedFiltersEnabled, false);
@@ -1446,6 +1448,52 @@ test("popup state is extension-page-only and contains sanitized summary plus loc
     { type: "TRACE_POPUP_GET_STATE" },
     archiveSender,
   ), null);
+});
+
+test("a session needing recovery says whether this browser ever verified an account", async () => {
+  const snapshotFor = async (accountId) => {
+    const databaseFactory = new IDBFactory();
+    const privateDatabase = await seedPrivateSession(databaseFactory, {
+      version: 1,
+      epoch: 1,
+      desired: "connected",
+      accountId,
+      credentialRef: "credential-a",
+    }, {
+      version: 1,
+      entries: { "credential-a": "stale-token" },
+    });
+    const controller = installTestRuntime({
+      mode: "kernel",
+      databaseFactory,
+      privateDatabase,
+      runtime: { id: "trace-extension-id", onMessage: { addListener() {} } },
+      tabs: { async query() { return []; }, async sendMessage() { return null; } },
+      storageArea: new PromiseStorageArea(),
+      storageMode: "promise",
+      provider: unavailableProvider,
+      fetch: async () => new Response("", { status: 401 }),
+      apiBase: "https://api.tracefiction.com",
+      webOrigin: "https://www.tracefiction.com",
+      randomId: () => "id",
+    });
+    await controller.start();
+    return (await controller.handle({ type: "TRACE_SESSION_GET_SNAPSHOT" }, popupSender)).snapshot;
+  };
+
+  // A first Connect whose credential was refused: never connected.
+  assert.deepEqual(await snapshotFor(null), {
+    state: "reconnect_required",
+    reason: "credential_rejected",
+    canExecuteAuthenticated: false,
+    neverConnected: true,
+  });
+  // The same refusal for a browser that had verified an account.
+  assert.deepEqual(await snapshotFor("account-a"), {
+    state: "reconnect_required",
+    reason: "credential_rejected",
+    canExecuteAuthenticated: false,
+  });
 });
 
 test("popup state names only the active tab's own confirmed story", async () => {
