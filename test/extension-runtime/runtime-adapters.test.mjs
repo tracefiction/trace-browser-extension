@@ -1130,6 +1130,91 @@ test("iOS archive projection adopts containing-app authority after delayed site 
   assert.equal(accountData.scope.accountId, "account-a");
 });
 
+function iosPopupSnapshotController(nativeReplies) {
+  const nativeMessages = [];
+  const controller = installTestRuntime({
+    mode: "kernel",
+    databaseFactory: new IDBFactory(),
+    runtime: {
+      onMessage: { addListener() {} },
+      async getPlatformInfo() {
+        return { os: "ios" };
+      },
+      async sendNativeMessage(message) {
+        nativeMessages.push(message);
+        if (message.type !== "TRACE_IOS_AUTH_TOKEN_REQUEST") return { ok: true };
+        return nativeReplies.length > 0 ? nativeReplies.shift() : { ok: false, error: "missing_token" };
+      },
+    },
+    tabs: {
+      async query() {
+        assert.fail("iOS credentials must not come from a browser tab");
+      },
+      async sendMessage() {
+        assert.fail("iOS credentials must not come from a browser tab");
+      },
+    },
+    storageArea: new PromiseStorageArea(),
+    storageMode: "promise",
+    fetch: async (url) => {
+      if (url.endsWith("/api/extension/account")) {
+        return new Response(JSON.stringify({ account_id: "account-a", pro: false, library_count: 1 }), { status: 200 });
+      }
+      if (url.endsWith("/api/extension/library-overlay")) {
+        return new Response(JSON.stringify({
+          success: true,
+          data: { entries: {}, workPreferences: {}, syncVersion: "2026-10-09T10:00:00.000Z" },
+        }), { status: 200 });
+      }
+      return new Response("", { status: 404 });
+    },
+    apiBase: "https://api.tracefiction.com",
+    webOrigin: "https://www.tracefiction.com",
+    randomId: () => "popup-snapshot-id",
+  });
+  const authRequests = () => nativeMessages.filter(({ type }) => type === "TRACE_IOS_AUTH_TOKEN_REQUEST").length;
+  return { controller, authRequests };
+}
+
+test("the iOS popup snapshot adopts the Trace app's account before it can say signed out", async () => {
+  const { controller, authRequests } = iosPopupSnapshotController([nativeCredentialResponse()]);
+  await controller.start();
+  assert.equal(controller.snapshot().state, "signed_out");
+
+  const response = await controller.handle({ type: "TRACE_SESSION_GET_SNAPSHOT" }, popupSender);
+
+  assert.equal(response.snapshot.state, "connected");
+  assert.equal(authRequests(), 1);
+  const again = await controller.handle({ type: "TRACE_SESSION_GET_SNAPSHOT" }, popupSender);
+  assert.equal(again.snapshot.state, "connected");
+  assert.equal(authRequests(), 1, "a connected popup does not read the app again");
+});
+
+test("the iOS popup snapshot stays signed out only when the Trace app has no account", async () => {
+  const { controller } = iosPopupSnapshotController([{ ok: false, error: "missing_token" }]);
+  await controller.start();
+  const response = await controller.handle({ type: "TRACE_SESSION_GET_SNAPSHOT" }, popupSender);
+  assert.equal(response.snapshot.state, "signed_out");
+});
+
+test("the iOS popup snapshot reports an unreadable app account as unavailable, not signed out", async () => {
+  const { controller } = iosPopupSnapshotController([
+    { ok: false, error: "provider_unavailable" },
+    { ok: false, error: "provider_unavailable" },
+  ]);
+  await controller.start();
+  const response = await controller.handle({ type: "TRACE_SESSION_GET_SNAPSHOT" }, popupSender);
+  assert.equal(response.action?.kind, "unavailable");
+});
+
+test("a Trace page snapshot never reads the app's account", async () => {
+  const { controller, authRequests } = iosPopupSnapshotController([nativeCredentialResponse()]);
+  await controller.start();
+  const response = await controller.handle({ type: "TRACE_SESSION_GET_SNAPSHOT" }, traceWebSender);
+  assert.equal(response.snapshot.state, "signed_out");
+  assert.equal(authRequests(), 0);
+});
+
 test("archive projection and work-state reads return only requested current-account records", async () => {
   const databaseFactory = new IDBFactory();
   const privateDatabase = await seedPrivateSession(databaseFactory, {

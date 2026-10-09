@@ -2420,6 +2420,11 @@ const KERNEL_SNAPSHOT_RETRY_DELAYS_MS = Object.freeze([180, 650]);
 const KERNEL_SNAPSHOT_TRANSIENT_RETRY_LIMIT = 31;
 let kernelSnapshotAttempt = 0;
 let kernelSnapshotTransientAttempt = 0;
+// The worker can't tell an app with no account from one it couldn't read,
+// so this stays short: a signed-out reader waits about a second longer.
+const KERNEL_SNAPSHOT_PROVIDER_RETRY_LIMIT = 2;
+const KERNEL_SNAPSHOT_PROVIDER_RETRY_MS = 600;
+let kernelSnapshotProviderAttempt = 0;
 
 function requestKernelSnapshot() {
   sendKernelRuntimeMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" }, (response) => {
@@ -2434,8 +2439,22 @@ function requestKernelSnapshot() {
       return;
     }
     kernelSnapshotAttempt = 0;
-    renderKernelSnapshot(response?.snapshot);
     const state = response?.snapshot?.state;
+    // The app's account couldn't be read just now (Safari can still be
+    // starting the extension). Signed out isn't confirmed, so keep checking
+    // briefly instead of asking a signed-in reader to sign in.
+    if (
+      response?.action?.kind === "unavailable" &&
+      (state === "signed_out" || state === "reconnect_required") &&
+      kernelSnapshotProviderAttempt < KERNEL_SNAPSHOT_PROVIDER_RETRY_LIMIT
+    ) {
+      kernelSnapshotProviderAttempt += 1;
+      renderKernelSnapshot({ state: "initializing", reason: "none" });
+      setTimeout(requestKernelSnapshot, KERNEL_SNAPSHOT_PROVIDER_RETRY_MS);
+      return;
+    }
+    kernelSnapshotProviderAttempt = 0;
+    renderKernelSnapshot(response?.snapshot);
     if (state === "initializing" || state === "connecting" || state === "verifying") {
       if (kernelSnapshotTransientAttempt < KERNEL_SNAPSHOT_TRANSIENT_RETRY_LIMIT) {
         kernelSnapshotTransientAttempt += 1;

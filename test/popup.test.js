@@ -1691,6 +1691,44 @@ test("iOS: enabled but not yet linked points to one step in the Trace app", asyn
   assert.equal(h.document.getElementById("popup-import").hidden, true);
 });
 
+for (const [label, finalResponse, finalHeading] of [
+  ["adopts the app account", { ok: true, snapshot: { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" } }, null],
+  ["confirms signed out", { ok: true, snapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "provider_unavailable" }, action: { kind: "unavailable" } }, "Finish setup in the Trace app"],
+]) {
+  test(`iOS: an unreadable app account keeps checking before it asks to sign in (${label})`, async () => {
+    const unreadable = {
+      ok: true,
+      snapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "provider_unavailable" },
+      action: { kind: "unavailable" },
+    };
+    const h = createPopupHarness({
+      grantedOrigins: [...FULL_EARNED_ORIGINS],
+      sessionMode: "kernel",
+      earnedPermissionOnboarding: true,
+      userAgent:
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+      storageState: { traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 5000 } },
+      sessionSnapshotResponses: [unreadable, unreadable, finalResponse],
+    });
+    for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+    const heading = () => h.document.getElementById("popup-earned-heading")?.textContent;
+    assert.notEqual(heading(), "Finish setup in the Trace app");
+    assert.notEqual(h.document.body.dataset.traceReaderView, "link");
+    h.runTimeouts();
+    for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+    assert.notEqual(heading(), "Finish setup in the Trace app");
+    h.runTimeouts();
+    for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+    assert.equal(h.messages.filter(({ type }) => type === "TRACE_SESSION_GET_SNAPSHOT").length, 3);
+    if (finalHeading) {
+      assert.equal(heading(), finalHeading);
+    } else {
+      assert.notEqual(heading(), "Finish setup in the Trace app");
+      assert.equal(h.messages.some(({ type }) => type === "TRACE_POPUP_GET_STATE"), true);
+    }
+  });
+}
+
 test("kernel iOS account-response failures are not mislabeled as an app sign-in problem", async () => {
   const h = createPopupHarness({
     sessionMode: "kernel",

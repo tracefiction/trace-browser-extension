@@ -31,6 +31,12 @@ globalThis.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {"version":3,"registrationMo
   // answer, complete or not, ends this round of asking.
   var retryDelaysMs = [250, 1000, 3000, 8000];
   var replyTimeoutMs = 10000;
+  // After an app update Safari can take longer than every bounded retry to
+  // wake the new background, and a reader who keeps reading never leaves the
+  // tab. Their next touch or scroll asks again, at most this often.
+  var interactionAskIntervalMs = 10000;
+  var lastAskAt = 0;
+  var unanswered = false;
   var attempt = 0;
   var request = 0;
   var inFlight = false;
@@ -40,7 +46,10 @@ globalThis.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {"version":3,"registrationMo
     return function () {
       if (id !== request || !inFlight) return;
       inFlight = false;
-      if (attempt >= retryDelaysMs.length) return;
+      if (attempt >= retryDelaysMs.length) {
+        unanswered = true;
+        return;
+      }
       timer = setTimeout(reconcile, retryDelaysMs[attempt]);
       attempt += 1;
     };
@@ -63,6 +72,8 @@ globalThis.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {"version":3,"registrationMo
     if (globalThis.TRACE_EARNED_PERMISSION_COMPLETE === true) return;
     request += 1;
     inFlight = true;
+    lastAskAt = Date.now();
+    unanswered = false;
     var retry = retryFor(request);
     var settle = settleFor(request);
     // A reply Safari never delivers must not hold the page gated.
@@ -94,10 +105,21 @@ globalThis.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {"version":3,"registrationMo
     attempt = 0;
     reconcile();
   };
+  var nudge = function () {
+    // Only a page whose questions all went unanswered asks again; a definite
+    // answer (for example, access not allowed) is not repeated.
+    if (!unanswered || globalThis.TRACE_EARNED_PERMISSION_COMPLETE === true || inFlight || timer !== null) return;
+    if (Date.now() - lastAskAt < interactionAskIntervalMs) return;
+    attempt = 0;
+    reconcile();
+  };
   try {
     globalThis.addEventListener("pageshow", resume);
     globalThis.addEventListener("focus", resume);
     globalThis.document.addEventListener("visibilitychange", resume);
+    globalThis.addEventListener("scroll", nudge, { passive: true });
+    globalThis.addEventListener("touchstart", nudge, { passive: true });
+    globalThis.addEventListener("pointerdown", nudge, { passive: true });
   } catch (_) {}
   reconcile();
 })();

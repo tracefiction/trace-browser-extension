@@ -112,6 +112,8 @@ function createCollectorBindings(dom, options = {}) {
     rememberRecentAutoTrack: globalScope.rememberRecentAutoTrack,
     forgetRecentAutoTrack: globalScope.forgetRecentAutoTrack,
     sendAutoTrackForStory: globalScope.sendAutoTrackForStory,
+    recheckAutoTrackFailureForStory: globalScope.recheckAutoTrackFailureForStory,
+    optimisticStoryPageEntries: () => globalScope.optimisticStoryPageEntries,
     applyConfirmedOverlayUpdateForStory: globalScope.applyConfirmedOverlayUpdateForStory,
     clearStoryOverlayTransientState: globalScope.clearStoryOverlayTransientState,
     mergeStoryOverlayEntries: globalScope.mergeStoryOverlayEntries,
