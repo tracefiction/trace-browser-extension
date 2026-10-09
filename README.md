@@ -46,7 +46,7 @@ Trace may send this data to the Trace API when you import, quick-add, auto-track
 - fandoms/tags and related story metadata
 - chapter and word counts
 - reading-progress metadata
-- when you import from your AO3 History page: each work's last-visited date, which Trace uses as its last-read date only when it has no later one (the visit count stays in the import and is not stored)
+- when you import from your AO3 History page: each work's last-visited date, which Trace uses as its last-read date unless it has seen you read the story later and, if you choose, as an approximate ("around") finish date for finished stories that have none (the visit count stays in the import and is not stored)
 - reading-status updates you explicitly choose in the Trace overlay: Saved, Reading, Caught up, Paused, Finished, or Dropped
 - finish/caught-up decisions you explicitly choose at the end of a supported story, including whether you identify the work as complete, ongoing, on hiatus, or abandoned
 - last-posted-chapter finish-qualification signals for stories already in your Trace library, so Trace can recover or improve work-status metadata
