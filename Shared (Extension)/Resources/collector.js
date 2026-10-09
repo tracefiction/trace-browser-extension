@@ -4180,7 +4180,7 @@ function storyCaption(view) {
       return "Your session needs a refresh.";
     }
     if (view.authState && view.authState.state === "error") {
-      return "Last sync failed. Source reading stays usable.";
+      return "Trace couldn’t update just now. You can keep reading here.";
     }
     if (storyUsesArchiveConnect()) {
       return storyArchiveConnectState === "opened"

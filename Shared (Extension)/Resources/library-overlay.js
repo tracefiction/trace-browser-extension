@@ -1045,7 +1045,7 @@ function traceRefreshPageTokens() {
       (authState && authState.message) ||
       (connectFlow
         ? "Connect the extension to your Trace account to see your library here and save stories."
-        : "Open Trace and sign in once to connect the extension. Then refresh this AO3 or FFN tab to restore sync.");
+        : "Open Trace and sign in once to connect the extension. Then refresh this AO3 or FFN tab.");
     if (connectFlow && archiveConnectState === "opened") {
       message = "Sign in to Trace in the tab that opened. This page updates once you’re connected.";
     }

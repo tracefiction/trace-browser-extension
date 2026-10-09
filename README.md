@@ -75,7 +75,7 @@ telemetry and contains no URLs, story or account identity, page content, or
 browsing history. See
 [`docs/ios-earned-permission-onboarding.md`](docs/ios-earned-permission-onboarding.md).
 
-The metadata-improvement preference is separate from automatic progress tracking and can be turned off in the extension popup.
+The **Improve story details** preference is separate from automatic progress tracking and can be turned off in the extension popup.
 Hidden-work preferences affect Trace browsing overlays only; they are separate from reading status and do not hide or change the source site itself.
 Saved AO3 filters sync only when you are signed in. They do not include AO3 credentials, cookies, page HTML, or story text.
 
@@ -303,7 +303,7 @@ This repository is published for transparency. The following are welcome via [Gi
 - **Bug reports** for the extension's behavior in any supported browser. Use the "Bug report" template.
 - **Security or privacy concerns**: please follow `SECURITY.md` rather than filing a public issue.
 
-We do **not** currently accept feature pull requests. The PolyForm Noncommercial License is intended for inspection and personal use; accepting outside contributions complicates the licensing terms. Bug-fix PRs that come with a clear issue and a small surface area may be considered case by case — please open an issue first to discuss.
+Feature pull requests are **not** currently accepted. The PolyForm Noncommercial License is intended for inspection and personal use; accepting outside contributions complicates the licensing terms. Bug-fix PRs that come with a clear issue and a small surface area may be considered case by case — please open an issue first to discuss.
 
 ## License
 
