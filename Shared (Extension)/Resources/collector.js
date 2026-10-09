@@ -1494,6 +1494,20 @@ function forgetRecentAutoTrack(item) {
 // it is never re-sent here.
 var AUTO_TRACK_UNDELIVERED_RETRY_MS = [1_000, 3_000];
 
+// A save the background answered with "couldn't check just now" (the account
+// was still being adopted, or the Library couldn't be read) is safe to ask
+// for again: a first save looks the story up before it writes, and progress
+// only ever moves forward. It is sent once more, quietly, before the page
+// says it wasn't saved. An answer that a write went out but couldn't be
+// confirmed is never re-sent here.
+var AUTO_TRACK_TRANSIENT_ERRORS = ["unavailable", "stale"];
+var AUTO_TRACK_TRANSIENT_RETRY_MS = 1_500;
+
+// Another path (the popup, a second tab, a late answer) can still save the
+// story after this page gave up. Ask for the story's state once more so a
+// failure the reader can see is never left over a saved story.
+var AUTO_TRACK_FAILURE_RECHECK_MS = 4_000;
+
 function sendAutoTrackForStory(validStory, options) {
   var deliveryAttempt =
     options && Number.isInteger(options.deliveryAttempt) ? options.deliveryAttempt : 0;
@@ -1528,6 +1542,22 @@ function sendAutoTrackForStory(validStory, options) {
         }
         forgetRecentAutoTrack(validStory);
         updateAutoTrackFailureForStory(validStory, "network_error");
+        return;
+      }
+      if (
+        response.ok !== true &&
+        AUTO_TRACK_TRANSIENT_ERRORS.indexOf(response.error) >= 0 &&
+        !(options && options.transientRetried === true)
+      ) {
+        var retryFromUrl = location.href;
+        setTimeout(function () {
+          if (location.href !== retryFromUrl) return;
+          sendAutoTrackForStory(validStory, {
+            pendingAlreadySet: true,
+            deliveryAttempt: deliveryAttempt,
+            transientRetried: true,
+          });
+        }, AUTO_TRACK_TRANSIENT_RETRY_MS);
         return;
       }
       if (!response || response.ok !== true) {
@@ -1838,6 +1868,21 @@ function updateAutoTrackFailureForStory(item, error) {
   }
   optimisticStoryPageEntries[workKey] = failed;
   rerenderStoryHandleForWorkKey(workKey);
+  if (error !== "free_limit_reached") {
+    var failedFromUrl = location.href;
+    setTimeout(function () {
+      if (location.href !== failedFromUrl) return;
+      recheckAutoTrackFailureForStory(workKey);
+    }, AUTO_TRACK_FAILURE_RECHECK_MS);
+  }
+}
+
+// Re-reads the story's state only while the page still shows a failed
+// automatic save; a confirmed save replaces the failure.
+function recheckAutoTrackFailureForStory(workKey) {
+  var shown = optimisticStoryPageEntries[workKey];
+  if (!shown || !shown.__traceAutoTrackError) return;
+  queryBackgroundWorkStateForStory(workKey);
 }
 
 function isAO3() {
@@ -4208,7 +4253,7 @@ function handleDisplay(view) {
   if (awaitingAppLink(view)) return "Finish setup in Trace";
   if (!view.hasAuth) {
     if (view.authState && view.authState.state === "reconnect_required") return "Reconnect Trace";
-    if (view.authState && view.authState.state === "error") return "Error";
+    if (view.authState && view.authState.state === "error") return "Try again";
     return "Connect";
   }
   if (view.entry && view.entry.__traceAutoTrackPending) return "Adding…";
@@ -4220,7 +4265,7 @@ function handleDisplay(view) {
   ) {
     return "Reconnect";
   }
-  if (view.entry && view.entry.__traceAutoTrackError) return "Error";
+  if (view.entry && view.entry.__traceAutoTrackError) return "Not saved";
   if (view.entry && view.entry.__traceStatusPending) return "Saving…";
   if (view.entry && view.entry.__traceStatusError) return "Update failed";
   if (view.entry && view.entry.hidden) return "Hidden";
@@ -4282,7 +4327,7 @@ function storyHandlePresentation(view) {
     return { kind: "auth-expired", label: "Reconnect", theme: TRACE_INLINE_THEMES.action, dot: false, spinner: false, status: null, progress: null };
   }
   if (entry && entry.__traceAutoTrackError) {
-    return { kind: "error", label: "Error", theme: TRACE_INLINE_THEMES.error, dot: false, spinner: false, status: null, progress: null };
+    return { kind: "error", label: "Not saved", theme: TRACE_INLINE_THEMES.error, dot: false, spinner: false, status: null, progress: null };
   }
   if (entry && entry.__traceStatusPending) {
     return { kind: "saving", label: "Saving…", theme: TRACE_INLINE_THEMES.saving, dot: false, spinner: true, status: null, progress: null };
@@ -5835,7 +5880,7 @@ function sendQuickAddAction(btn, workKey, addTheme, compact, done) {
         if (compact) {
           applyStoryInlineHandleState(btn, {
             kind: "error",
-            label: "Error",
+            label: "Couldn’t add",
             theme: TRACE_INLINE_THEMES.error,
             dot: false,
             spinner: false,
@@ -5948,7 +5993,7 @@ function sendQuickAddAction(btn, workKey, addTheme, compact, done) {
         if (compact) {
           applyStoryInlineHandleState(btn, {
             kind: "error",
-            label: "Error",
+            label: "Couldn’t add",
             theme: TRACE_INLINE_THEMES.error,
             dot: false,
             spinner: false,
@@ -6420,7 +6465,7 @@ function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
         if (!response) {
           setStorySheetControlPending(btn, false, "Could not save the browsing preference. Try again.");
           btn.style.cssText = storySheetGhostButtonCss() + ";cursor:pointer;color:var(--trace-page-warning)";
-          btn.textContent = "Error";
+          btn.textContent = "Not saved";
           btn.disabled = false;
           setTimeout(function () {
             resetStoryHiddenPreferenceBtn(btn, hidden);
@@ -6441,7 +6486,7 @@ function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
               : "Could not save the browsing preference. Try again.",
           );
           btn.style.cssText = storySheetGhostButtonCss() + ";cursor:pointer;color:var(--trace-page-warning)";
-          btn.textContent = response.error === "rate_limited" ? "Wait" : "Error";
+          btn.textContent = response.error === "rate_limited" ? "Wait" : "Not saved";
           btn.disabled = false;
           setTimeout(function () {
             resetStoryHiddenPreferenceBtn(btn, hidden);
@@ -8352,6 +8397,10 @@ function initQuickAdd() {
       ) return;
       if (changes[WORK_STATE_STORAGE_KEY]) {
         queryBackgroundWorkStateForStory(workKey);
+      } else if (changes[ACCOUNT_PROJECTION_REVISION_KEY] || changes[OVERLAY_CACHE_KEY]) {
+        // The Library changed. If this page still shows a failed automatic
+        // save, ask whether the story was saved after all.
+        recheckAutoTrackFailureForStory(workKey);
       }
       renderQuickAddButton(workKey);
       if (

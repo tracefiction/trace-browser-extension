@@ -3487,7 +3487,7 @@ function traceRefreshPageTokens() {
               setListingControlPending(btn, false, "Could not save the browsing preference. Try again.");
             }
             btn.style.cssText = preferenceButtonStyle(btn, ERROR_THEME) + ";cursor:pointer";
-            btn.textContent = "Error";
+            btn.textContent = "Not saved";
             btn.disabled = false;
             setTimeout(function () {
               resetPreferenceBtn(btn, hidden);
@@ -3526,7 +3526,7 @@ function traceRefreshPageTokens() {
             btn.textContent = "Wait";
           } else {
             btn.style.cssText = preferenceButtonStyle(btn, ERROR_THEME) + ";cursor:pointer";
-            btn.textContent = "Error";
+            btn.textContent = "Not saved";
           }
           btn.disabled = false;
           setTimeout(function () {
@@ -3818,7 +3818,7 @@ function traceRefreshPageTokens() {
         function (response) {
           if (ext.runtime.lastError || !response) {
             btn.style.cssText = d1QuickAddStyle("error") + ";cursor:pointer";
-            btn.textContent = "Error";
+            btn.textContent = "Couldn’t add";
             btn.disabled = false;
             setTimeout(function () {
               btn.style.cssText = d1QuickAddStyle("add") + ";cursor:pointer";
@@ -3836,7 +3836,7 @@ function traceRefreshPageTokens() {
                 : null;
             if (!confirmedEntry || !entryDisplayStatusValue(confirmedEntry)) {
               btn.style.cssText = d1QuickAddStyle("error") + ";cursor:pointer";
-              btn.textContent = "Error";
+              btn.textContent = "Couldn’t add";
               btn.title = "Trace did not confirm this story in your library. Try again.";
               btn.disabled = false;
               scheduleRun(250);
@@ -3875,7 +3875,7 @@ function traceRefreshPageTokens() {
             setQuickAddAuthAction(btn, response.error);
           } else {
             btn.style.cssText = d1QuickAddStyle("error") + ";cursor:pointer";
-            btn.textContent = "Error";
+            btn.textContent = "Couldn’t add";
             btn.disabled = false;
             setTimeout(function () {
               btn.style.cssText = d1QuickAddStyle("add") + ";cursor:pointer";

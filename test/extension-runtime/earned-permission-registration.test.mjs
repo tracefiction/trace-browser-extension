@@ -328,7 +328,7 @@ const COMPLETE_RESULT = Object.freeze({
   grantAt: 1,
 });
 
-function runArchivePageGate(replies, { promiseApi = true } = {}) {
+function runArchivePageGate(replies, { promiseApi = true, clock = null } = {}) {
   const sent = [];
   const timers = [];
   const readyEvents = [];
@@ -366,6 +366,7 @@ function runArchivePageGate(replies, { promiseApi = true } = {}) {
     },
     addEventListener: listen,
     CustomEvent: class { constructor(type) { this.type = type; } },
+    ...(clock ? { Date: { now: () => clock.now } } : {}),
     setTimeout: (callback, delay) => { timers.push({ callback, delay }); return timers.length; },
     clearTimeout: (id) => { if (timers[id - 1]) timers[id - 1].callback = () => {}; },
     ...(promiseApi ? { browser: { runtime } } : { chrome: { runtime } }),
@@ -436,6 +437,49 @@ test("archive page gate asks again when a back-forward cache restore resumes a p
   h.fire("visibilitychange");
   await h.drain();
   assert.equal(h.sent.length, 6, "a ready page never asks again");
+});
+
+test("archive page gate asks again on the reader's next scroll or touch after every retry went unanswered", async () => {
+  // After an app update Safari can wake the new background later than every
+  // bounded retry. The reader keeps reading the same tab, so neither pageshow
+  // nor focus fires; their next interaction must open the page.
+  const clock = { now: 1_000 };
+  const replies = [undefined, undefined, undefined, undefined, undefined];
+  const h = runArchivePageGate(replies, { clock });
+  await h.drain();
+  assert.equal(h.context.TRACE_EARNED_PERMISSION_COMPLETE, false);
+  assert.equal(h.sent.length, 5);
+
+  h.fire("scroll");
+  await h.drain();
+  assert.equal(h.sent.length, 5, "an interaction right after the last ask waits");
+
+  clock.now += 10_000;
+  replies.push(COMPLETE_RESULT);
+  h.fire("touchstart");
+  await h.drain();
+  assert.equal(h.context.TRACE_EARNED_PERMISSION_COMPLETE, true);
+  assert.deepEqual(h.readyEvents, ["trace-earned-permission-ready"]);
+
+  clock.now += 60_000;
+  h.fire("scroll");
+  h.fire("pointerdown");
+  await h.drain();
+  assert.equal(h.sent.length, 6, "a ready page never asks again");
+});
+
+test("archive page gate does not repeat a definite answer on scroll", async () => {
+  const clock = { now: 1_000 };
+  const h = runArchivePageGate([
+    { ok: false, completeGrant: false, registered: false, changed: false, error: "permission_incomplete" },
+  ], { clock });
+  await h.drain();
+  assert.equal(h.sent.length, 1);
+  clock.now += 60_000;
+  h.fire("scroll");
+  h.fire("touchstart");
+  await h.drain();
+  assert.equal(h.sent.length, 1);
 });
 
 test("archive page gate re-checks a definite incomplete grant when the reader returns", async () => {

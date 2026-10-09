@@ -2167,7 +2167,7 @@ test("library-overlay Add does not show saved from unconfirmed ok response", asy
   button.click();
 
   assert.equal(messages.at(-1).type, "TRACE_QUICK_ADD");
-  assert.match(button.textContent || "", /^Error$/);
+  assert.match(button.textContent || "", /^Couldn’t add$/);
   assert.equal(button.disabled, false);
   assert.equal(button.querySelector("span[aria-hidden='true']"), null);
 });
@@ -2208,7 +2208,7 @@ test("library-overlay quick add immediately shows pending and ignores duplicate 
   assert.equal(messages.length, 1);
 
   pendingCallback({ ok: true });
-  assert.match(button.textContent || "", /^Error$/);
+  assert.match(button.textContent || "", /^Couldn’t add$/);
   assert.equal(button.disabled, false);
   assert.equal(button.querySelector("span[aria-hidden='true']"), null);
 });
@@ -2558,7 +2558,7 @@ test("library-overlay hide failure keeps existing badge and offers retry", async
 
   assert.match(wrap.textContent || "", /Reading\s*2\/9/);
   assert.doesNotMatch(wrap.textContent || "", /Hidden/);
-  assert.match(hide.textContent || "", /Error/i);
+  assert.match(hide.textContent || "", /^Not saved$/);
   assert.equal(hide.disabled, false);
 });
 

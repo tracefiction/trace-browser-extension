@@ -17,7 +17,7 @@ function collectorTestSource(source) {
 window.finishQualifyIsLastPostedChapter = finishQualifyIsLastPostedChapter;
 window.removeQuickAddElements = removeQuickAddElements;
 window.renderQuickAddButton = renderQuickAddButton;
-window.__traceTestHooks = { sendAutoTrackForStory };
+window.__traceTestHooks = { sendAutoTrackForStory, storyHandlePresentation, handleDisplay };
 })();`);
 }
 
@@ -1081,6 +1081,149 @@ test("sendAutoTrackForStory does not synthesize saved state from entryId-only ac
   assert.notEqual(dom.window.sessionStorage.getItem("trace:auto-track:last"), null);
   assert.deepEqual(plainJson(store.libraryOverlayCache.entries), {});
 });
+
+function createScriptedAutoTrackHarness(replies) {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://archiveofourown.org/works/28534965",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  const store = { authToken: "test-token", libraryOverlayCache: { entries: {}, syncVersion: "v0" } };
+  const sentMessages = [];
+  const chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      lastError: null,
+      sendMessage(message, cb) {
+        sentMessages.push(message);
+        const reply = replies[message.type];
+        const next = Array.isArray(reply) ? reply.shift() : reply;
+        if (typeof cb === "function") cb(next);
+      },
+    },
+    storage: {
+      local: {
+        get(keys, cb) {
+          const list = Array.isArray(keys) ? keys : [keys];
+          const out = {};
+          for (const key of list) if (Object.prototype.hasOwnProperty.call(store, key)) out[key] = store[key];
+          cb(out);
+        },
+        set(value, cb) {
+          Object.assign(store, value || {});
+          if (typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+  const bindings = createCollectorBindings(dom, { chrome });
+  return { dom, sentMessages, bindings };
+}
+
+const SCRIPTED_STORY = Object.freeze({
+  src: "ao3",
+  ctx: "story",
+  u: "https://archiveofourown.org/works/28534965",
+  t: "Redivider",
+  chn: 1,
+  cht: 1,
+});
+const SCRIPTED_ENTRY_ID = "00000000-0000-4000-8000-000000285349";
+const SCRIPTED_SAVED_STATE = Object.freeze({
+  workKey: "ao3:28534965",
+  status: "saved",
+  entryId: SCRIPTED_ENTRY_ID,
+  entry: {
+    status: "PLANNING",
+    readerStatus: "PLANNING",
+    canonicalReaderStatus: "SAVED",
+    entryId: SCRIPTED_ENTRY_ID,
+    chapters: { current: 1, total: 1 },
+  },
+});
+
+test("an automatic save the background couldn't check is sent once more before the page says it wasn't saved", async () => {
+  const { sentMessages, bindings } = createScriptedAutoTrackHarness({
+    TRACE_AUTO_TRACK: [
+      { ok: false, error: "unavailable" },
+      { ok: true, entryId: SCRIPTED_ENTRY_ID, state: SCRIPTED_SAVED_STATE },
+    ],
+  });
+  bindings.sendAutoTrackForStory({ ...SCRIPTED_STORY });
+  const autoTracks = () => sentMessages.filter((message) => message.type === "TRACE_AUTO_TRACK").length;
+  assert.equal(autoTracks(), 1);
+  const pending = bindings.optimisticStoryPageEntries()["ao3:28534965"];
+  assert.equal(pending.__traceAutoTrackError ?? null, null, "no failure is shown before the retry");
+  assert.equal(pending.__traceAutoTrackPending, true);
+  await delay(1_700);
+  assert.equal(autoTracks(), 2);
+  const saved = bindings.optimisticStoryPageEntries()["ao3:28534965"];
+  assert.equal(saved.__traceAutoTrackError, null);
+  assert.equal(saved.entryId, SCRIPTED_ENTRY_ID);
+});
+
+test("an automatic save is retried at most once for a background that couldn't check", async () => {
+  const { sentMessages, bindings } = createScriptedAutoTrackHarness({
+    TRACE_AUTO_TRACK: [{ ok: false, error: "unavailable" }, { ok: false, error: "unavailable" }],
+  });
+  bindings.sendAutoTrackForStory({ ...SCRIPTED_STORY });
+  await delay(1_700);
+  assert.equal(sentMessages.filter((message) => message.type === "TRACE_AUTO_TRACK").length, 2);
+  assert.equal(bindings.optimisticStoryPageEntries()["ao3:28534965"].__traceAutoTrackError, "unavailable");
+});
+
+test("a failed automatic save gives way to the story's saved state when it is checked again", () => {
+  const { sentMessages, bindings } = createScriptedAutoTrackHarness({
+    TRACE_AUTO_TRACK: [{ ok: false, error: "http_503" }],
+    TRACE_WORK_STATE_GET: [{ ok: true, state: SCRIPTED_SAVED_STATE }],
+  });
+  bindings.sendAutoTrackForStory({ ...SCRIPTED_STORY });
+  assert.equal(bindings.optimisticStoryPageEntries()["ao3:28534965"].__traceAutoTrackError, "http_503");
+  bindings.recheckAutoTrackFailureForStory("ao3:28534965");
+  assert.equal(sentMessages.filter((message) => message.type === "TRACE_WORK_STATE_GET").length, 1);
+  const entry = bindings.optimisticStoryPageEntries()["ao3:28534965"];
+  assert.equal(entry.__traceAutoTrackError, null);
+  assert.equal(entry.entryId, SCRIPTED_ENTRY_ID);
+  bindings.recheckAutoTrackFailureForStory("ao3:28534965");
+  assert.equal(
+    sentMessages.filter((message) => message.type === "TRACE_WORK_STATE_GET").length,
+    1,
+    "a page without a failure doesn't ask again",
+  );
+});
+
+test("the story handle never shows a bare Error", () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://archiveofourown.org/works/28534965",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  installCollectorChrome(dom, createChromeMockForHooks());
+  dom.window.eval(collectorTestSource(fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"), "utf8")));
+  const hooks = dom.window.__traceTestHooks;
+  for (const error of ["network_error", "unavailable", "http_503", "reconnect_required"]) {
+    const view = { hasAuth: true, entry: { __traceAutoTrackError: error } };
+    assert.equal(hooks.storyHandlePresentation(view).label, "Not saved");
+    assert.equal(hooks.handleDisplay(view), "Not saved");
+  }
+  assert.notEqual(hooks.handleDisplay({ hasAuth: false, authState: { state: "error" } }), "Error");
+  for (const file of ["collector.js", "library-overlay.js"]) {
+    const source = fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", file), "utf8");
+    assert.doesNotMatch(source, /(?:textContent = |label: |return )"Error"/, file);
+  }
+  dom.window.close();
+});
+
+function createChromeMockForHooks() {
+  return {
+    runtime: { onMessage: { addListener() {} }, lastError: null, sendMessage() {} },
+    storage: {
+      local: { get(_keys, cb) { cb({}); }, set(_value, cb) { if (typeof cb === "function") cb(); } },
+      onChanged: { addListener() {} },
+    },
+  };
+}
 
 test("detectAo3CurrentChapterNumber prefers the visible chapter heading text", () => {
   const html = `<!doctype html><html><body>
@@ -2192,7 +2335,7 @@ test("story page projects a newly viewed chapter while auto-track confirms it", 
   assert.ok(handle.querySelector("svg"), "expected pending progress to retain a spinner");
 
   harness.autoTrackCallback({ ok: false, error: "network_error" });
-  assert.match(handle.textContent || "", /Error/i);
+  assert.match(handle.textContent || "", /^Not saved$/);
   assert.doesNotMatch(handle.textContent || "", /4\/28/);
 });
 
@@ -2235,7 +2378,7 @@ test("story page projects Saved to Reading on chapter two while auto-track confi
   assert.ok(handle.querySelector("svg"), "expected pending transition to retain a spinner");
 
   harness.autoTrackCallback({ ok: false, error: "network_error" });
-  assert.match(handle.textContent || "", /Error/i);
+  assert.match(handle.textContent || "", /^Not saved$/);
   assert.doesNotMatch(handle.textContent || "", /Reading\s*2\/28/i);
 });
 
@@ -2276,7 +2419,7 @@ test("story page projects pending progress before the auto-track preference read
   assert.ok(handle.querySelector("svg"), "expected pending progress to show a spinner");
 
   harness.autoTrackCallback({ ok: false, error: "network_error" });
-  assert.match(handle.textContent || "", /Error/i);
+  assert.match(handle.textContent || "", /^Not saved$/);
   assert.doesNotMatch(handle.textContent || "", /Reading\s*3\/28/i);
 });
 
@@ -3306,7 +3449,7 @@ test("story page auto-track failure uses existing compact error states", () => {
       disabled: false,
     },
     { response: { ok: false, error: "auth_expired" }, expected: /Reconnect/i, disabled: false },
-    { response: { ok: false, error: "http_503" }, expected: /ERROR/i, disabled: false },
+    { response: { ok: false, error: "http_503" }, expected: /^Not saved$/, disabled: false },
   ];
 
   for (const item of cases) {
@@ -3422,7 +3565,7 @@ test("first-story focus-add retries explicit quick-add after retryable auto-trac
 
   autoTrackCallback({ ok: false, error: "confirmation_missing" });
 
-  assert.match(handle.textContent || "", /Error/i);
+  assert.match(handle.textContent || "", /^Not saved$/);
   assert.equal(handle.disabled, false);
 
   const response = await sendRuntimeMessage({
@@ -6685,7 +6828,7 @@ test("FFN mobile story sheet hides mutation controls with stale token when auth 
 test("FFN mobile story sheet quick-add preserves free-limit and error states", () => {
   const responses = [
     { response: { ok: false, error: "free_limit_reached" }, text: /Full/i },
-    { response: { ok: false, error: "http_500" }, text: /ERROR/i },
+    { response: { ok: false, error: "http_500" }, text: /Couldn’t add/ },
     { response: { ok: false, error: "auth_expired" }, text: /Reconnect/i },
   ];
 
@@ -7829,7 +7972,7 @@ test("a story save with an unknown outcome is never re-sent automatically", asyn
   assert.ok(initial >= 1);
   await delay(1_100);
   assert.equal(saves(), initial, "no delayed re-send of a save that may have landed");
-  assert.match(h.dom.window.document.querySelector("[data-trace-story-handle]").textContent || "", /Error|Reconnect|Try/i);
+  assert.match(h.dom.window.document.querySelector("[data-trace-story-handle]").textContent || "", /Not saved|Reconnect|Try/i);
   h.dom.window.close();
 });
 
@@ -7881,7 +8024,7 @@ test("a timed-out story save is never re-sent", async () => {
   });
   await delay(1_200);
   assert.equal(autoTrackSends(h), 1);
-  assert.match(h.dom.window.document.querySelector("[data-trace-story-handle]").textContent || "", /Error|Reconnect|Try/i);
+  assert.match(h.dom.window.document.querySelector("[data-trace-story-handle]").textContent || "", /Not saved|Reconnect|Try/i);
   h.dom.window.close();
 });
 
