@@ -3075,3 +3075,204 @@ test("the Trace is on sheet shows the Free count in desktop browsers", async () 
   assert.equal(plan.hidden, false);
   assert.equal(plan.textContent, "64 of 100 stories kept");
 });
+
+// Import in the iPhone reader view. The ordinary popup's action area is not
+// part of that view, so these check what is displayed, not only `hidden`.
+const IPHONE_USER_AGENT =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148";
+const LISTING = { kind: "supported_archive", site: "ao3", canImport: true };
+const STORY = { kind: "supported_story", site: "ao3", canImport: true };
+const SAVED_STORY = { status: "saved", entry: { entryId: "00000000-0000-4000-8000-000000000123",
+  status: "READING", canonicalReaderStatus: "READING", chapters: { current: 3, total: 3 } } };
+const HANDOFF_ID = "00000000-0000-4000-8000-000000000001";
+
+function isDisplayed(h, element) {
+  for (let node = element; node && node.nodeType === 1; node = node.parentElement) {
+    if (h.window.getComputedStyle(node).display === "none") return false;
+  }
+  return Boolean(element && element.isConnected);
+}
+
+async function iosReaderImportHarness(popupState = {}, options = {}) {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    userAgent: IPHONE_USER_AGENT,
+    popupUrl: "safari-web-extension://trace/popup.html",
+    grantedOrigins: [...FULL_EARNED_ORIGINS],
+    storageState: { traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 5_000 } },
+    sessionSnapshot: { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" },
+    activeTab: { id: 7, url: "https://archiveofourown.org/users/lanternwright/readings" },
+    popupState: {
+      ok: true,
+      authState: { state: "connected" },
+      firstSaveSeen: true,
+      libraryCount: 12,
+      libraryLimit: 100,
+      pro: false,
+      capacity: null,
+      activeTab: LISTING,
+      activeWork: null,
+      autoTrackEnabled: true,
+      nativeImport: true,
+      ...popupState,
+    },
+    ...options,
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  return h;
+}
+
+// The popup's messages belong to its own realm, so compare their shape here.
+function importTriggers(h) {
+  return h.messages.filter(({ type }) => type === "TRACE_IMPORT_TRIGGER")
+    .map((message) => JSON.stringify(message));
+}
+const ONE_IMPORT = ['{"type":"TRACE_IMPORT_TRIGGER"}'];
+
+test("the iPhone reader view shows Import from this page on a listing and starts the import", async () => {
+  const h = await iosReaderImportHarness({}, {
+    importResponse: { ok: true, state: "ready_to_open", handoffID: HANDOFF_ID,
+      expiresAtMs: Date.now() + 600_000, snapshot: { state: "connected" } },
+  });
+  assert.equal(h.document.body.dataset.traceReaderView, "true");
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "on-list");
+  // The ordinary popup's action area stays out of the reader view.
+  assert.equal(h.window.getComputedStyle(h.document.querySelector(".popup-actions")).display, "none");
+
+  const button = h.document.getElementById("popup-import");
+  assert.equal(button.textContent.trim(), "Import from this page");
+  assert.equal(button.hidden, false);
+  assert.equal(button.disabled, false);
+  assert.equal(isDisplayed(h, button), true, "the control is displayed, not only un-hidden");
+  const settings = h.document.getElementById("popup-earned-settings-row");
+  assert.equal(isDisplayed(h, settings), true);
+  assert.ok(button.compareDocumentPosition(settings) & h.window.Node.DOCUMENT_POSITION_FOLLOWING,
+    "Import sits above Settings");
+  assert.equal(h.document.getElementById("popup-earned-primary").hidden, true, "Import is not made the task");
+
+  assert.deepEqual(importTriggers(h), []);
+  button.click();
+  for (let attempt = 0; attempt < 4; attempt += 1) await flush();
+  assert.deepEqual(importTriggers(h), ONE_IMPORT);
+
+  // Trace has the page: one tap opens the Trace app on its Import review.
+  const link = h.document.getElementById("popup-import-open-native");
+  assert.equal(button.hidden, true);
+  assert.equal(link.textContent, "Open in Trace");
+  assert.equal(isDisplayed(h, link), true);
+  assert.equal(link.getAttribute("href"), `traceauth://open?destination=library-import&handoff=${HANDOFF_ID}`);
+  assert.deepEqual(h.createdTabs, [], "nothing opens without the reader's own tap");
+  link.click();
+  for (let attempt = 0; attempt < 4; attempt += 1) await flush();
+  assert.deepEqual(h.createdTabs, [`traceauth://open?destination=library-import&handoff=${HANDOFF_ID}`]);
+  assert.equal(h.closeCalled, false);
+});
+
+for (const page of [
+  { name: "a listing, History or Bookmarks page", state: {}, code: "on-list" },
+  { name: "a listing before the first story is saved", state: { firstSaveSeen: false, libraryCount: 0 }, code: "P8" },
+  { name: "a FanFiction.net listing", state: { activeTab: { kind: "supported_archive", site: "ffn", canImport: true } },
+    code: "on-list" },
+  { name: "a saved story", state: { activeTab: STORY, activeWork: SAVED_STORY }, code: "P11",
+    options: { activeTab: { id: 7, url: "https://archiveofourown.org/works/5550001/chapters/7770003" } } },
+]) {
+  test(`Import from this page shows in the iPhone reader view on ${page.name}, only with the Trace app's Import`, async () => {
+    const on = await iosReaderImportHarness(page.state, page.options);
+    assert.equal(on.document.body.dataset.tracePopupStateCode, page.code);
+    const button = on.document.getElementById("popup-import");
+    assert.equal(button.textContent.trim(), "Import from this page");
+    assert.equal(isDisplayed(on, button), true);
+    button.click();
+    for (let attempt = 0; attempt < 4; attempt += 1) await flush();
+    assert.deepEqual(importTriggers(on), ONE_IMPORT);
+
+    for (const nativeImport of [false, undefined]) {
+      const off = await iosReaderImportHarness({ ...page.state, nativeImport }, page.options);
+      assert.equal(off.document.body.dataset.tracePopupStateCode, page.code);
+      const hiddenButton = off.document.getElementById("popup-import");
+      assert.equal(isDisplayed(off, hiddenButton), false, "a build without the Trace app's Import shows no control");
+      assert.equal(isDisplayed(off, off.document.getElementById("popup-import-open-native")), false);
+      hiddenButton.click();
+      for (let attempt = 0; attempt < 4; attempt += 1) await flush();
+      assert.deepEqual(importTriggers(off), [], "and can start nothing");
+    }
+  });
+}
+
+for (const page of [
+  { name: "another website", state: { activeTab: { kind: "unsupported" } }, code: "other-site" },
+  { name: "an archive sign-in page", state: { activeTab: { kind: "blocked_archive", site: "ao3", canImport: false } },
+    code: "on-list" },
+  { name: "a story still being saved", state: { activeTab: STORY }, code: null },
+  { name: "a story with automatic saving off", state: { activeTab: STORY, autoTrackEnabled: false }, code: "P10" },
+  { name: "a full Library", state: { capacity: { blocked: true, prompt: false }, libraryCount: 100 }, code: "library-full" },
+  { name: "a page that lost its connection to Trace", state: {}, code: "P18",
+    options: { probeSaveResponse: { ok: false, error: "page_unavailable" } } },
+]) {
+  test(`Import is not offered in the iPhone reader view on ${page.name}`, async () => {
+    const h = await iosReaderImportHarness(page.state, page.options);
+    if (page.code) assert.equal(h.document.body.dataset.tracePopupStateCode, page.code);
+    const button = h.document.getElementById("popup-import");
+    assert.equal(isDisplayed(h, button), false);
+    assert.equal(isDisplayed(h, h.document.getElementById("popup-import-open-native")), false);
+    button.click();
+    for (let attempt = 0; attempt < 4; attempt += 1) await flush();
+    assert.deepEqual(importTriggers(h), []);
+  });
+}
+
+test("Import leaves the iPhone reader view for Settings and for a reader who is not connected", async () => {
+  const h = await iosReaderImportHarness();
+  const button = h.document.getElementById("popup-import");
+  assert.equal(isDisplayed(h, button), true);
+  h.document.getElementById("popup-earned-settings-row").click();
+  assert.equal(h.document.body.dataset.traceReaderView, "settings");
+  assert.equal(isDisplayed(h, button), false);
+  h.document.getElementById("popup-earned-settings-back").click();
+  assert.equal(isDisplayed(h, button), true);
+
+  const signedOut = await iosReaderImportHarness({}, {
+    sessionSnapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "none" },
+  });
+  assert.equal(signedOut.document.body.dataset.traceReaderView, "link");
+  assert.equal(isDisplayed(signedOut, signedOut.document.getElementById("popup-import")), false);
+});
+
+test("a failed import in the iPhone reader view says so, in words for the page, and can be tried again", async () => {
+  const response = { ok: false, error: "collect_failed" };
+  const h = await iosReaderImportHarness({}, { importResponse: response });
+  const button = h.document.getElementById("popup-import");
+  const help = h.document.getElementById("popup-import-recovery-help");
+  button.click();
+  for (let attempt = 0; attempt < 4; attempt += 1) await flush();
+  assert.equal(button.textContent, "Import failed. Try again.");
+  assert.equal(button.disabled, false);
+  assert.equal(isDisplayed(h, button), true);
+  assert.equal(isDisplayed(h, help), true);
+  assert.equal(help.textContent, "Reload this page. If importing still fails, restart Safari and reopen the page.");
+
+  response.error = "native_import_unavailable";
+  button.click();
+  for (let attempt = 0; attempt < 4; attempt += 1) await flush();
+  assert.equal(button.textContent, "Import unavailable. Try again.");
+  assert.equal(help.hidden, true);
+  assert.equal(importTriggers(h).length, 2);
+});
+
+test("the ordinary popup keeps its Import control and labels", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    sessionSnapshot: { state: "connected", reason: "none", canExecuteAuthenticated: true },
+    popupState: { ok: true, authState: { state: "connected" }, firstSaveSeen: true, activeTab: LISTING },
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  const button = h.document.getElementById("popup-import");
+  assert.equal(h.document.body.dataset.traceReaderView, undefined);
+  assert.equal(button.parentElement.className, "popup-actions");
+  assert.equal(button.textContent, "Import this page");
+  assert.equal(isDisplayed(h, button), true);
+  button.click();
+  assert.deepEqual(importTriggers(h), ONE_IMPORT);
+});

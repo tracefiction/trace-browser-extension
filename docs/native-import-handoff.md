@@ -65,13 +65,31 @@ or chunking. Additional metadata and private reader choices stay inside the
 bounded payload; the native Import DTO performs the consumer's detailed field
 validation before review/save.
 
-The popup displays a direct `Open in Trace` anchor only after a valid STAGE ack:
+## Popup control
+
+The popup learns from its state reply (`nativeImport`) whether the package is
+paired and the platform is not a confirmed desktop. The iOS reader view offers
+**Import from this page** only then, on a settled importable page: a list,
+History or Bookmarks page, or a saved story. It is not offered while a story is
+still being saved, when the Library is full, when the page lost its connection,
+on sign-in pages or on other sites. An unpaired package shows no Import control
+in the reader view. The ordinary desktop popup is unchanged.
+
+The background asks the active page for its Import data with a direct tab
+message. If that request never arrives (Safari can lose the direct route for a
+tab that was open when the extension was replaced), it asks once more over the
+channel the page itself opened. Only the Import controller can ask for this
+data; a popup relay message cannot. The payload is bounded identically either
+way.
+
+The popup displays an `Open in Trace` link only after a valid STAGE ack:
 
 ```
 traceauth://open?destination=library-import&handoff=<canonical-lowercase-UUID>
 ```
 
-It requires a fresh user click. `ready_to_open` does not mean the app opened or a
+It requires a fresh user click, which opens that exact address the way the
+popup's other Trace app links open. `ready_to_open` does not mean the app opened or a
 story saved. The link is removed on expiry or observed session refresh/departure.
 The containing app must reject stale account/provider binding even when a later
 account switch has the same public connected appearance.

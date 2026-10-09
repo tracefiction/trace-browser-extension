@@ -104,6 +104,9 @@ function sendCollectorMessage(message, onResponse, timeoutMs) {
     if (settled) return;
     settled = true;
     if (timer !== null) clearTimeout(timer);
+    // Before anything acts on this reply, notice whether another account
+    // answered it than the one this page last heard from.
+    noteStoryAccountBinding(response);
     respond(response == null ? null : response, delivery || COLLECTOR_ANSWERED);
   };
   var armTimeout = function () {
@@ -680,6 +683,69 @@ var finishQualifyBandState = Object.create(null);
 // watch flow so a projection re-render cannot fade them while Undo is offered.
 var finishQualifyDoneState = Object.create(null);
 var finishQualifyGeneration = 0;
+// The account session the background last answered this page for: an opaque
+// token, null while no account is connected, `undefined` until the first
+// reply. Everything the page remembers between replies (end-of-story
+// evidence, a pending finish, unconfirmed saves) belongs to that session.
+var storyAccountBinding;
+// Counts account changes, so a timer set under one account can tell that it
+// has outlived it.
+var storyAccountGeneration = 0;
+
+function noteStoryAccountBinding(response) {
+  if (
+    !KERNEL_SESSION_ACTIVE ||
+    !response ||
+    typeof response !== "object" ||
+    !Object.prototype.hasOwnProperty.call(response, "binding")
+  ) return false;
+  var binding = typeof response.binding === "string" ? response.binding : null;
+  var previous = storyAccountBinding;
+  storyAccountBinding = binding;
+  if (previous === undefined || previous === binding) return false;
+  resetStoryAccountState();
+  return true;
+}
+
+// The account behind this page changed (another reader signed in on this
+// device, or this one signed out). Nothing the page gathered for the previous
+// account may be written, or shown, for the next one: the caller reads the
+// current account before it does anything else.
+function resetStoryAccountState() {
+  storyAccountGeneration += 1;
+  Object.keys(finishQualifyWatchState).forEach(function (key) {
+    finishQualifyClearFlow(key, true);
+    delete finishQualifyWatchState[key];
+  });
+  Object.keys(finishQualifyBandState).forEach(function (key) {
+    finishQualifyRemoveBand(key);
+    delete finishQualifyBandState[key];
+  });
+  Object.keys(finishQualifyDoneState).forEach(function (key) {
+    finishQualifyRemoveDone(key);
+    delete finishQualifyDoneState[key];
+  });
+  Object.keys(finishQualifyEvidenceState).forEach(function (key) {
+    var evidence = finishQualifyEvidenceState[key];
+    if (evidence && typeof evidence.cleanup === "function") evidence.cleanup();
+    delete finishQualifyEvidenceState[key];
+  });
+  Object.keys(optimisticStoryPageEntries).forEach(function (key) {
+    delete optimisticStoryPageEntries[key];
+  });
+  try {
+    if (window.sessionStorage) {
+      window.sessionStorage.removeItem(AUTO_TRACK_DEDUPE_KEY);
+      window.sessionStorage.removeItem("trace:confirmed-chapter:v1");
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  // Reading evidence starts again from nothing: it needs the current
+  // reader's own interaction and a fresh stay on the last lines.
+  var workKey = storyQuickAddUiReady ? getWorkKeyFromUrl() : null;
+  if (workKey) ensureFinishQualifyEvidenceWatch(workKey);
+}
 
 function count(s) {
   // Handles: "12,148" -> 12148, "127k+" -> 127000, "1.2m" -> 1200000
@@ -1511,6 +1577,8 @@ var AUTO_TRACK_FAILURE_RECHECK_MS = 4_000;
 function sendAutoTrackForStory(validStory, options) {
   var deliveryAttempt =
     options && Number.isInteger(options.deliveryAttempt) ? options.deliveryAttempt : 0;
+  // A retry belongs to the account it was first sent for.
+  var accountGeneration = storyAccountGeneration;
   rememberRecentAutoTrack(validStory);
   if (!options || options.pendingAlreadySet !== true) {
     updateAutoTrackPendingForStory(validStory);
@@ -1532,7 +1600,7 @@ function sendAutoTrackForStory(validStory, options) {
         ) {
           var sentFromUrl = location.href;
           setTimeout(function () {
-            if (location.href !== sentFromUrl) return;
+            if (location.href !== sentFromUrl || accountGeneration !== storyAccountGeneration) return;
             sendAutoTrackForStory(validStory, {
               pendingAlreadySet: true,
               deliveryAttempt: deliveryAttempt + 1,
@@ -1551,7 +1619,7 @@ function sendAutoTrackForStory(validStory, options) {
       ) {
         var retryFromUrl = location.href;
         setTimeout(function () {
-          if (location.href !== retryFromUrl) return;
+          if (location.href !== retryFromUrl || accountGeneration !== storyAccountGeneration) return;
           sendAutoTrackForStory(validStory, {
             pendingAlreadySet: true,
             deliveryAttempt: deliveryAttempt,
@@ -3604,6 +3672,7 @@ function connectPopupPagePort() {
       if (envelope.kind !== "request" || ![
         TRACE_STORY_IDENTITY_MESSAGE, "TRACE_SAVED_NOTE_DISMISS",
         TRACE_POPUP_QUICK_ADD_MESSAGE, TRACE_POPUP_SET_READER_STATUS_MESSAGE, "TRACE_SCHEDULE_AUTO_TRACK",
+        "TRACE_COLLECT",
       ].includes(envelope.command && envelope.command.type)) return;
       var reply = function (response) {
         try { port.postMessage({ kind: "response", id: envelope.id, response: response }); } catch (_) {}
@@ -7046,10 +7115,19 @@ function sendFinishQualifySignal(decision, state, workState, done) {
     if (typeof done === "function") done(false, "invalid_request");
     return;
   }
-  sendCollectorMessage({
-      type: "TRACE_FINISH_QUALIFICATION_SIGNAL",
-      payload: payload,
-    }, function (response) {
+  var message = {
+    type: "TRACE_FINISH_QUALIFICATION_SIGNAL",
+    payload: payload,
+  };
+  // Name the account session this reading belongs to. The background writes
+  // nothing if another account is connected by the time this arrives.
+  if (typeof decision.binding === "string") message.binding = decision.binding;
+  sendCollectorMessage(message, function (response) {
+      if (response && response.ok !== true && response.error === "stale") {
+        // Refused as out of date: read the current account again. If the
+        // account changed, this page's finish state is already gone.
+        rerenderStoryHandleForWorkKey(decision.workKey);
+      }
       if (typeof done !== "function") return;
       if (!response || response.ok !== true) {
         done(false, response && response.error);
@@ -7233,6 +7311,7 @@ function finishQualifyDecision(view, workKey) {
   return Object.assign({}, candidate, {
     entry: entry,
     accountId: view.accountId || null,
+    binding: typeof storyAccountBinding === "string" ? storyAccountBinding : null,
     sessionKey: finishQualifySessionKey(workKey, entry.entryId, candidate.item),
   });
 }

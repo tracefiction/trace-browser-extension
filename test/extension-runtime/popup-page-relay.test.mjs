@@ -104,3 +104,29 @@ test("a command whose active-tab lookup outlives its request cannot execute", as
   releaseQuery([{ id: 5, url }]); await tick();
   assert.equal(executed, 0);
 });
+
+test("Import data is read over the page's channel by the background only, and never across accounts", async () => {
+  const payload = { s: "ao3", at: "2026-10-09T12:00:00.000Z",
+    items: [{ src: "ao3", ctx: "listing", u: "https://archiveofourown.org/works/5550001", t: "The Lanterns at Netherfield" }] };
+  const h = harness(), page = h.connect();
+  // A popup relay message cannot ask a page for Import data.
+  assert.deepEqual(await h.relay.request(5, { type: "TRACE_COLLECT" }), { ok: false, error: "page_unavailable" });
+  assert.deepEqual(page.sent, []);
+
+  const collected = h.relay.collect(5); await tick();
+  assert.deepEqual(page.sent[0].command, { type: "TRACE_COLLECT" });
+  page.receive({ kind: "response", id: page.sent[0].id, response: { ok: true, payload } });
+  assert.deepEqual(await collected, { ok: true, payload });
+
+  const refused = h.relay.collect(5); await tick();
+  page.receive({ kind: "response", id: page.sent[1].id, response: { ok: false, error: "page_contains_password_field" } });
+  assert.deepEqual(await refused, { ok: false, error: "page_contains_password_field" });
+
+  const stale = h.relay.collect(5); await tick();
+  h.setScope({ accountId: "account-b", epoch: 2 });
+  page.receive({ kind: "response", id: page.sent[2].id, response: { ok: true, payload } });
+  assert.deepEqual(await stale, { ok: false, error: "page_unavailable" });
+
+  assert.deepEqual(await h.relay.collect(6), { ok: false, error: "page_unavailable" });
+  assert.deepEqual(await harness().relay.collect(5), { ok: false, error: "page_unavailable" });
+});

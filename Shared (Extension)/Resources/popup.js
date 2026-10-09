@@ -224,6 +224,9 @@ let earnedCurrentPage = null;
 let kernelPopupInitialized = false;
 let nativeImportContinuation = null;
 let nativeImportGeneration = 0;
+// Reader view only: whether the state on screen offers Import. Null in the
+// ordinary popup, where the kind of page alone decides.
+let readerImportOffered = null;
 let popupStorySavePending = false;
 
 const fallbackStatus = {
@@ -244,6 +247,8 @@ const popupModel = {
   pro: null,
   activeTab: { kind: "unknown" },
   capacity: null,
+  // True only in a package paired with the Trace app for Import.
+  nativeImport: false,
 };
 
 function usefulActionUrl(rawUrl) {
@@ -539,10 +544,26 @@ function buildPopupUi(model) {
   };
 }
 
+/**
+ * The Import control for the view on screen. The ordinary popup follows the
+ * kind of page. The reader view also needs its current state to offer Import,
+ * and always uses the label the Trace app points readers to.
+ */
+function importUiFor(model) {
+  const ui = buildPopupUi(model);
+  if (readerImportOffered === null) return ui;
+  return {
+    ...ui,
+    importHidden: ui.importHidden || readerImportOffered !== true,
+    importLabel: "Import from this page",
+  };
+}
+
 function renderStatus(patch) {
   setImportRecoveryHelp();
   mergePopupModel(patch);
   const ui = buildPopupUi(popupModel);
+  const importUi = importUiFor(popupModel);
   const statusEl = document.getElementById("popup-status");
   const leadEl = document.getElementById("popup-lead");
   const ctaEl = document.getElementById("popup-cta");
@@ -584,10 +605,10 @@ function renderStatus(patch) {
   }
 
   if (importEl) {
-    importEl.hidden = ui.importHidden;
-    importEl.disabled = ui.importDisabled;
-    importEl.textContent = ui.importLabel;
-    importEl.title = ui.importTitle || "";
+    importEl.hidden = importUi.importHidden;
+    importEl.disabled = importUi.importDisabled;
+    importEl.textContent = importUi.importLabel;
+    importEl.title = importUi.importTitle || "";
   }
 
   if (settingsEl && ui.statusState !== "connected") {
@@ -703,21 +724,21 @@ function resetImportButtonAfterFailure(button, error) {
 }
 
 function currentImportLabel() {
-  return buildPopupUi(popupModel).importLabel || "Import from this page";
+  return importUiFor(popupModel).importLabel || "Import from this page";
 }
 
 function currentImportTitle() {
-  return buildPopupUi(popupModel).importTitle || "";
+  return importUiFor(popupModel).importTitle || "";
 }
 
 function isImportCurrentlyAvailable() {
-  const ui = buildPopupUi(popupModel);
+  const ui = importUiFor(popupModel);
   return !ui.importHidden && !ui.importDisabled;
 }
 
 function restoreImportButton(button) {
   setImportRecoveryHelp();
-  const ui = buildPopupUi(popupModel);
+  const ui = importUiFor(popupModel);
   button.hidden = ui.importHidden;
   button.disabled = ui.importDisabled;
   button.textContent = ui.importLabel;
@@ -1170,6 +1191,45 @@ function refreshEarnedLayout() {
   section.classList.toggle("popup-earned-fixed-pin", Boolean(needsPin));
 }
 
+/**
+ * The reader view replaces the ordinary popup's action area, so Import moves
+ * into it: one control and one set of handlers, shown above Settings.
+ */
+function placeImportInReaderView() {
+  const extras = document.getElementById("popup-earned-extras");
+  const settings = document.getElementById("popup-earned-settings-row");
+  if (!extras || !settings || settings.parentNode !== extras) return;
+  for (const id of ["popup-import", "popup-import-recovery-help", "popup-import-open-native"]) {
+    const element = document.getElementById(id);
+    if (element && element.parentNode !== extras) extras.insertBefore(element, settings);
+  }
+}
+
+/**
+ * Says whether the reader view's current state offers Import, and returns
+ * whether anything of Import is showing. It is offered only on a settled,
+ * importable page, in a package paired with the Trace app.
+ */
+function setReaderImport(offered) {
+  placeImportInReaderView();
+  const next = offered === true && popupModel.nativeImport === true;
+  const changed = readerImportOffered !== next;
+  readerImportOffered = next;
+  const button = document.getElementById("popup-import");
+  const link = document.getElementById("popup-import-open-native");
+  if (!button) return false;
+  if (!next) {
+    setImportRecoveryHelp();
+    button.hidden = true;
+  } else if (changed || (button.hidden && (!link || link.hidden))) {
+    // Rendering the same state again leaves the control as it is, so a
+    // request in flight or its outcome stays on screen.
+    restoreImportButton(button);
+  }
+  renderNativeImportContinuation(popupModel.authState);
+  return !button.hidden || Boolean(link && !link.hidden);
+}
+
 function setEarnedCopy({
   stateCode = "",
   kicker = "",
@@ -1187,6 +1247,7 @@ function setEarnedCopy({
   helpLabel = "Need another way?",
   disclosure = "",
   returning = false,
+  importable = false,
 }) {
   const previouslyFocused = document.activeElement;
   document.body.dataset.tracePopupStateCode = stateCode;
@@ -1227,7 +1288,8 @@ function setEarnedCopy({
     if (duplicateRule) ruleEl.setAttribute("aria-hidden", "true");
     else ruleEl.removeAttribute("aria-hidden");
   }
-  if (extrasEl) extrasEl.hidden = !returning;
+  const importShowing = setReaderImport(importable);
+  if (extrasEl) extrasEl.hidden = !(returning || importShowing);
   const helpSummaryEl = document.getElementById("popup-earned-help-summary");
   const disclosureEl = document.getElementById("popup-earned-disclosure");
   if (helpSummaryEl) helpSummaryEl.textContent = helpLabel;
@@ -2113,7 +2175,12 @@ function showNativeImportContinuation(response, generation) {
 
 document.getElementById("popup-import-open-native")?.addEventListener("click", (event) => {
   renderNativeImportContinuation(popupModel.authState);
-  if (!nativeImportContinuation) event.preventDefault();
+  event.preventDefault();
+  if (!nativeImportContinuation) return;
+  // Each tap opens the Trace app the way this popup's other app links do.
+  // Following the link inside the popup itself is not something Safari on
+  // iPhone is known to hand to the app.
+  openTraceApp(event.currentTarget.href);
 });
 
 function setImportBusy(button) {
@@ -2171,9 +2238,12 @@ function setImportRecoveryHelp(error) {
   const visible = error === "collect_failed" &&
     (isLikelyIosExtensionUi || window.location.protocol === "safari-web-extension:");
   help.hidden = !visible;
-  help.textContent = visible
-    ? "Reload this story. If importing still fails, restart Safari and reopen the story."
-    : "";
+  const onStory = (popupModel.activeTab || {}).kind !== "supported_archive";
+  help.textContent = !visible
+    ? ""
+    : onStory
+      ? "Reload this story. If importing still fails, restart Safari and reopen the story."
+      : "Reload this page. If importing still fails, restart Safari and reopen the page.";
   if (visible) button.setAttribute("aria-describedby", help.id);
   else button.removeAttribute("aria-describedby");
 }
@@ -2512,6 +2582,7 @@ function requestKernelPopupState() {
       pro: typeof state.pro === "boolean" ? state.pro : undefined,
       activeTab: state.activeTab || undefined,
       capacity: state.capacity ?? null,
+      nativeImport: state.nativeImport === true,
     });
     applyLocalUi(state.ao3SavedFiltersEnabled);
     applyProUi(
@@ -2768,6 +2839,7 @@ async function renderReaderView(state) {
         // Status appears once, in the control; the record keeps the byline.
         record: { heading: true, byline: storyByline(identity, story), label: "", status: line.key },
         returning: true,
+        importable: true,
       });
       const progressEl = document.getElementById("popup-earned-progress");
       if (progressEl) {
@@ -2800,7 +2872,6 @@ async function renderReaderView(state) {
       }
       if (settings) settings.onclick = showPopupSettings;
       configureEarnedActions({ hidden: true });
-      if (importButton) importButton.hidden = true;
       freePlanSlots.reader = true;
       renderFreePlanLines();
       return;
@@ -2836,12 +2907,14 @@ async function renderReaderView(state) {
       ? "Stories you open join your Library. Lists show what you’ve read."
       : "Open a story there and Trace keeps your place as you read.";
   // Nothing here is the task, so there is no primary action. A list page
-  // keeps the Settings row; another site needs only Safari's Done.
+  // keeps the Settings row; another site needs only Safari's Done. A list,
+  // History or Bookmarks page can be imported, so it offers Import.
   setEarnedCopy({
     stateCode: awaitingFirstStory ? "P8" : onArchive ? "on-list" : "other-site",
     heading,
     lead,
     returning: onArchive && !awaitingFirstStory,
+    importable: activeTab.kind === "supported_archive",
   });
   const listControl = document.getElementById("popup-earned-status-control");
   if (listControl) listControl.hidden = true;
@@ -2854,7 +2927,6 @@ async function renderReaderView(state) {
   }
   setEarnedResult("success", heading + ".", "");
   configureEarnedActions({ hidden: true });
-  if (importButton && !onArchive) importButton.hidden = true;
   // A first-story prompt stays one task; settled pages show the plan line.
   freePlanSlots.reader = !awaitingFirstStory;
   renderFreePlanLines();

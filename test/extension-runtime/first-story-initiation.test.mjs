@@ -172,6 +172,99 @@ test("missing archive receiver becomes an actionable permission result", async (
   );
 });
 
+const historyPayload = {
+  s: "ao3",
+  at: "2026-10-09T12:00:00.000Z",
+  items: [{
+    src: "ao3",
+    ctx: "listing",
+    u: "https://archiveofourown.org/works/5550001",
+    t: "The Lanterns at Netherfield",
+    lv: "2026-10-08",
+  }],
+};
+
+function relayedImport({ direct, relayed }) {
+  const asked = [];
+  const staged = [];
+  const initiator = new BrowserFirstStoryInitiator({
+    runtime: { id: runtimeId, onMessage: { addListener() {} } },
+    tabs: {
+      async query() {
+        return [{ id: 7, url: "https://archiveofourown.org/users/lanternwright/readings" }];
+      },
+      async sendMessage() {
+        return direct();
+      },
+      async create() {
+        assert.fail("a paired Import never opens the Trace website");
+      },
+    },
+    mode: "promise",
+    webOrigin,
+    async collectFromPage(tabId) {
+      asked.push(tabId);
+      return relayed();
+    },
+  });
+  const run = () => initiator.importActivePage(async (payloadBase64) => {
+    staged.push(JSON.parse(Buffer.from(payloadBase64, "base64").toString("utf8")));
+    return { ok: true, state: "ready_to_open", handoffID: "00000000-0000-4000-8000-000000000001", expiresAtMs: 1 };
+  });
+  return { run, asked, staged };
+}
+
+test("Import reads the page over its own channel when Safari drops the direct request", async () => {
+  for (const direct of [
+    () => { throw new Error("Could not establish connection. Receiving end does not exist."); },
+    () => { throw new Error("Safari direct route unavailable"); },
+    () => undefined,
+  ]) {
+    const h = relayedImport({ direct, relayed: () => ({ ok: true, payload: historyPayload }) });
+    assert.equal((await h.run()).state, "ready_to_open");
+    assert.deepEqual(h.asked, [7]);
+    assert.deepEqual(h.staged, [historyPayload]);
+  }
+});
+
+test("Import keeps the page's own answer and the direct failure when the channel has nothing better", async () => {
+  // The page answered: its answer stands and the channel is not asked.
+  const answered = relayedImport({
+    direct: () => ({ ok: false, error: "page_contains_password_field" }),
+    relayed: () => assert.fail("an answered request is not asked twice"),
+  });
+  assert.deepEqual(await answered.run(), { ok: false, error: "unsupported_page" });
+  assert.deepEqual(answered.asked, []);
+
+  // No channel either: the direct outcome is reported as before.
+  for (const [message, error] of [
+    ["Could not establish connection. Receiving end does not exist.", "permission_required"],
+    ["Safari direct route unavailable", "collect_failed"],
+  ]) {
+    const missing = relayedImport({
+      direct: () => { throw new Error(message); },
+      relayed: () => ({ ok: false, error: "page_unavailable" }),
+    });
+    assert.deepEqual(await missing.run(), { ok: false, error });
+    assert.deepEqual(missing.staged, []);
+  }
+
+  // The channel's page says access isn't complete: that is the answer.
+  const gated = relayedImport({
+    direct: () => undefined,
+    relayed: () => ({ ok: false, error: "website_access_incomplete" }),
+  });
+  assert.deepEqual(await gated.run(), { ok: false, error: "collect_failed" });
+
+  // A payload from the channel is bounded exactly like a direct one.
+  const foreign = relayedImport({
+    direct: () => undefined,
+    relayed: () => ({ ok: true, payload: { ...historyPayload, s: "ffn" } }),
+  });
+  assert.deepEqual(await foreign.run(), { ok: false, error: "collect_failed" });
+  assert.deepEqual(foreign.staged, []);
+});
+
 test("popup import uses the callback browser contract without changing its boundary", async () => {
   const runtime = {
     id: runtimeId,

@@ -16,6 +16,8 @@ its notes go with each app release.
 - **No more bare “Error”.** When a story can't be saved automatically, the page now says **Not saved**. A story you tried to add says **Couldn’t add**, and a connection problem says **Try again**.
 - **A save that didn't go through gets a second chance.** If Trace couldn't check your Library at that moment, it quietly tries the save once more before saying anything. If the page does show **Not saved** and the story turns out to be saved after all, the page corrects itself.
 
+- **A story is only marked Finished for the reader who read it.** If a different Trace account is connected while a story page is open, the page forgets the previous account's reading: its end-of-story note and **Undo** go away, nothing unconfirmed is carried over, and the page shows the new account's Library. The story is marked Finished only once the connected reader reaches the end themselves. Lists that were already open show the new account's marks too.
+
 ### The popup
 
 - **Connecting for the first time says Connect.** If a first attempt to connect doesn't go through, the popup and Trace's notes on the page read **Connect Trace**, not **Reconnect Trace**. Reconnect is only for a browser that was connected before.
@@ -27,6 +29,7 @@ its notes go with each app release.
 
 - **The popup checks the Trace app before asking you to sign in.** A reader who is signed in to the app is no longer told to create an account or sign in while Safari is still starting the extension.
 - **A tab left open across an app update picks Trace back up.** The next scroll or tap brings Trace back on that page, without a reload.
+- **Import from this page.** On an AO3 or FanFiction.net list, your History or Bookmarks, or a saved story, the popup shows **Import from this page** above **Settings**. Tap it, then **Open in Trace** to choose what to import. It also works in a tab that was open during an app update.
 
 ## 0.7.3
 

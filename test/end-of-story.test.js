@@ -43,11 +43,15 @@ function openStory({
   finishResponder,
   statusResponder,
   prepare,
+  // Kernel session mode: the page reads the account from the background. The
+  // object is live, so a test can change the account under an open page.
+  background = null,
 }) {
   const html = fs.readFileSync(path.join(FIXTURES, fixture), "utf8");
   const dom = new JSDOM(html, { url, contentType: "text/html", runScripts: "outside-only" });
   const { window } = dom;
   const sent = [];
+  const storageListeners = [];
   const clock = { now: 10_000, timers: new Map(), nextId: 1 };
   let rect = Object.assign({}, initialRect);
   const geometry = {
@@ -85,11 +89,32 @@ function openStory({
       sendMessage(message, callback) {
         sent.push(message);
         if (message.type === "TRACE_FINISH_QUALIFICATION_SIGNAL" && callback) {
-          callback(finishResponder(message.payload));
+          callback(finishResponder(message.payload, message));
           return;
         }
         if (message.type === "TRACE_SET_READER_STATUS" && callback) {
           callback(statusResponder ? statusResponder(message.payload) : { ok: true });
+          return;
+        }
+        if (!background || !callback) return;
+        const snapshot = { state: "connected", reason: "none", canExecuteAuthenticated: true };
+        const saved = background.entry
+          ? { workKey, status: "saved", entryId: background.entry.entryId, entry: background.entry,
+              syncVersion: background.syncVersion }
+          : null;
+        if (message.type === "TRACE_ACCOUNT_PROJECTION_GET") {
+          callback({ ok: true, snapshot, binding: background.binding, projection: {
+            entries: background.entry ? { [workKey]: background.entry } : {},
+            workPreferences: {}, syncVersion: background.syncVersion, capacity: null } });
+        } else if (message.type === "TRACE_WORK_STATE_GET") {
+          callback({ ok: true, snapshot, binding: background.binding, state: saved });
+        } else if (message.type === "TRACE_AUTO_TRACK") {
+          callback({ ok: true, snapshot, binding: background.binding,
+            command: { kind: "confirmed" }, state: saved });
+        } else if (message.type === "TRACE_IOS_PENDING_FIRST_STORY_GET") {
+          callback({ ok: false, error: "native_unavailable" });
+        } else {
+          callback(undefined);
         }
       },
     },
@@ -102,11 +127,12 @@ function openStory({
           if (callback) callback();
         },
       },
-      onChanged: { addListener() {} },
+      onChanged: { addListener(listener) { storageListeners.push(listener); } },
     },
   };
   window.chrome = withDefaultScopedStorageContext(chrome);
   delete window.browser;
+  if (background) window.TRACE_SESSION_MODE = "kernel";
 
   window.eval(FINISH_SRC);
   const onReachEnd = window.TraceFinishQualify.onReachEnd;
@@ -161,7 +187,17 @@ function openStory({
     );
   }
 
-  return { dom, window, document: window.document, body, sent, advance, wheel, touch, scrollTo, finishSignals };
+  // The background's content-free "read the account again" signal.
+  let revision = 1;
+  function accountChanged() {
+    revision += 1;
+    for (const listener of storageListeners) {
+      listener({ traceAccountProjectionRevisionV1: { newValue: revision } }, "local");
+    }
+  }
+
+  return { dom, window, document: window.document, body, sent, advance, wheel, touch, scrollTo, finishSignals,
+    accountChanged };
 }
 
 function resolvedResponder(entryId, workKey, status, chapters) {
@@ -576,4 +612,143 @@ test("end-of-story surfaces keep the page grammar and a reduced-motion fallback"
   assert.doesNotMatch(FINISH_SRC, /text-transform:\s*uppercase/);
   assert.doesNotMatch(FINISH_SRC, /\.\.\./);
   assert.doesNotMatch(FINISH_SRC, /role', 'status'|aria-live/, "finish notes speak through the one page live region");
+});
+
+// One iPhone, two Trace accounts. The first reader finishes a story; the
+// second signs in while that tab is still open at the story's end.
+function twoAccountPage(firstAccount) {
+  const background = Object.assign({}, firstAccount);
+  const acknowledged = [];
+  const page = openStory({
+    fixture: "ao3_last_chapter.html",
+    url: "https://archiveofourown.org/works/5550001/chapters/7770003",
+    workKey: "ao3:5550001",
+    entry: null,
+    bodySelector: "[data-fixture-final-text]",
+    initialRect: BELOW,
+    background,
+    finishResponder(payload, message) {
+      // The background refuses a page that names another account session.
+      if (message.binding !== undefined && message.binding !== background.binding) {
+        return { ok: false, error: "stale", binding: background.binding,
+          snapshot: { state: "connected" }, command: { kind: "failed", reason: "stale" } };
+      }
+      acknowledged.push(payload.entryId);
+      const entry = entryFor(payload.entryId, "FINISHED", { current: 3, total: 3 });
+      if (background.entry && background.entry.entryId === payload.entryId) background.entry = entry;
+      return { ok: true, binding: background.binding, snapshot: { state: "connected" },
+        command: { kind: "acknowledged", state: payload.state, eventId: null, workKey: "ao3:5550001", entry } };
+    },
+  });
+  return { page, background, acknowledged };
+}
+
+// A note being removed fades out before it leaves the page.
+function shownFinishNote(page) {
+  return [...page.document.querySelectorAll("[data-trace-finish-done]")]
+    .find((note) => note.style.opacity !== "0") || null;
+}
+
+const FIRST_READER = "00000000-0000-4000-8000-0000000a0001";
+const SECOND_READER = "00000000-0000-4000-8000-0000000b0002";
+
+test("two accounts on one device: a tab left at the story's end never finishes it for the next account", () => {
+  const { page, background, acknowledged } = twoAccountPage({
+    binding: "1.first",
+    syncVersion: "2026-10-09T12:00:00.000Z",
+    entry: entryFor(FIRST_READER, "READING", { current: 3, total: 3 }),
+  });
+
+  // The first reader reads to the end; their story is marked Finished.
+  page.wheel();
+  page.scrollTo(END_IN_VIEW);
+  page.advance(DWELL_MS);
+  assert.deepEqual(acknowledged, [FIRST_READER]);
+  assert.equal(page.finishSignals("resolved")[0].binding, "1.first", "the finish names the account session it was read under");
+  assert.ok(shownFinishNote(page));
+
+  // They sign out and another reader signs in. Nothing is saved for them yet.
+  background.binding = "2.second";
+  background.syncVersion = "2026-10-09T13:00:00.000Z";
+  background.entry = null;
+  page.accountChanged();
+  assert.equal(shownFinishNote(page), null, "the first reader's note and its Undo leave with their account");
+
+  // The second reader opens the same story in another tab, at the top of its
+  // last chapter. That saves it for them as Reading and tells open pages.
+  background.entry = entryFor(SECOND_READER, "READING", { current: 3, total: 3 });
+  page.accountChanged();
+  page.advance(DWELL_MS * 10);
+  assert.deepEqual(acknowledged, [FIRST_READER], "the stale tab writes nothing for the second reader");
+  assert.equal(page.finishSignals().filter((signal) => signal.payload.entryId === SECOND_READER).length, 0,
+    "the first reader's end-of-story evidence is not spent on the second reader's story");
+  assert.equal(shownFinishNote(page), null);
+
+  // Only the second reader's own reading of the last lines finishes it.
+  page.wheel();
+  page.advance(DWELL_MS);
+  assert.deepEqual(acknowledged, [FIRST_READER, SECOND_READER]);
+  const own = page.finishSignals("resolved").at(-1);
+  assert.equal(own.payload.entryId, SECOND_READER);
+  assert.equal(own.binding, "2.second");
+});
+
+test("two accounts on one device: a direct switch drops the previous account's evidence too", () => {
+  const { page, background, acknowledged } = twoAccountPage({
+    binding: "1.first",
+    syncVersion: "2026-10-09T12:00:00.000Z",
+    entry: entryFor(FIRST_READER, "PAUSED", { current: 3, total: 3 }),
+  });
+  page.wheel();
+  page.scrollTo(END_IN_VIEW);
+  page.advance(DWELL_MS);
+  assert.deepEqual(acknowledged, [FIRST_READER]);
+
+  background.binding = "2.second";
+  background.syncVersion = "2026-10-09T13:00:00.000Z";
+  background.entry = entryFor(SECOND_READER, "READING", { current: 3, total: 3 });
+  page.accountChanged();
+  page.advance(DWELL_MS * 10);
+  assert.deepEqual(acknowledged, [FIRST_READER]);
+  assert.equal(page.finishSignals().length, 1);
+});
+
+test("a finish the background refuses as another account's is dropped, not offered for retry", () => {
+  const { page, background, acknowledged } = twoAccountPage({
+    binding: "1.first",
+    syncVersion: "2026-10-09T12:00:00.000Z",
+    entry: entryFor(FIRST_READER, "READING", { current: 3, total: 3 }),
+  });
+  // The account changes while the first reader's page has not heard of it.
+  background.binding = "2.second";
+  background.entry = null;
+  page.wheel();
+  page.scrollTo(END_IN_VIEW);
+  page.advance(DWELL_MS);
+
+  assert.equal(page.finishSignals().length, 1);
+  assert.equal(page.finishSignals()[0].binding, "1.first");
+  assert.deepEqual(acknowledged, [], "nothing was written");
+  assert.equal(shownFinishNote(page), null);
+  assert.equal(page.document.querySelector("[data-trace-finish-recovery]"), null,
+    "no retry is offered for another account's story");
+  page.advance(DWELL_MS * 10);
+  assert.equal(page.finishSignals().length, 1, "the page read the account again and stopped");
+});
+
+test("the same account keeps its end-of-story evidence across re-reads of the account", () => {
+  const { page, background, acknowledged } = twoAccountPage({
+    binding: "1.first",
+    syncVersion: "2026-10-09T12:00:00.000Z",
+    entry: null,
+  });
+  // A short story read to its end while the first save is still on its way.
+  page.wheel();
+  page.scrollTo(END_IN_VIEW);
+  page.advance(DWELL_MS);
+  assert.equal(page.finishSignals().length, 0, "nothing to finish before the story is saved");
+
+  background.entry = entryFor(FIRST_READER, "READING", { current: 3, total: 3 });
+  page.accountChanged();
+  assert.deepEqual(acknowledged, [FIRST_READER], "the same reader's reading still counts once the save lands");
 });

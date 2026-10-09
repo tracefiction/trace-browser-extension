@@ -64,6 +64,12 @@ interface FirstStoryInitiatorOptions {
   readonly mode: "callback" | "promise";
   readonly webOrigin: string;
   readonly delay?: (milliseconds: number) => Promise<void>;
+  /**
+   * A second way to ask the page for its Import data, over the channel the
+   * page itself opened. Safari can lose the direct tab route for a tab that
+   * was open when the extension was replaced, while this one still works.
+   */
+  readonly collectFromPage?: (tabId: number) => Promise<unknown>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -317,8 +323,10 @@ export class BrowserFirstStoryInitiator {
   readonly #mode: "callback" | "promise";
   readonly #webOrigin: string;
   readonly #delay: (milliseconds: number) => Promise<void>;
+  readonly #collectFromPage: ((tabId: number) => Promise<unknown>) | null;
 
   constructor(options: FirstStoryInitiatorOptions) {
+    this.#collectFromPage = options.collectFromPage ?? null;
     this.#runtime = options.runtime;
     this.#tabs = options.tabs;
     this.#mode = options.mode;
@@ -352,12 +360,30 @@ export class BrowserFirstStoryInitiator {
     }
 
     let response: unknown;
+    let directError: unknown = null;
     try {
       response = await this.#call("sendMessage", [tab.id, { type: "TRACE_COLLECT" }]);
     } catch (error) {
+      directError = error ?? new Error("collect_failed");
+    }
+    // The page answers every direct request it receives, so a thrown error or
+    // an empty reply means the request did not arrive. Ask once more over the
+    // page's own channel before reporting a failure.
+    if ((directError !== null || !isRecord(response)) && this.#collectFromPage !== null) {
+      try {
+        const relayed = await this.#collectFromPage(tab.id);
+        if (isRecord(relayed) && (relayed.ok === true || relayed.error !== "page_unavailable")) {
+          response = relayed;
+          directError = null;
+        }
+      } catch {
+        // The direct outcome below stays authoritative.
+      }
+    }
+    if (directError !== null) {
       return Object.freeze({
         ok: false,
-        error: isMissingReceiverError(error) ? "permission_required" : "collect_failed",
+        error: isMissingReceiverError(directError) ? "permission_required" : "collect_failed",
       });
     }
     const payload = boundedImportPayload(response, context.site);

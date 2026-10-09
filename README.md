@@ -120,6 +120,15 @@ story-page save through the existing story-command owner. A missing archive
 content script is reported as a site-permission problem instead of a generic
 import failure.
 
+Replies to AO3 and FanFiction.net pages carry an opaque account-session token:
+the session epoch and a short non-cryptographic hash, compared only for
+equality. It names no account and is never stored or sent to a server. A page
+that sees it change drops its end-of-story evidence, any pending finish and
+its unconfirmed state, then reads the current account before it writes. A
+finish signal names the token it was gathered under, and the background
+refuses it once another account session is current. When the account changes,
+open pages are told to read it again.
+
 Kernel metadata contribution keeps page extraction in the AO3/FFN collector
 but moves preference enforcement, authenticated API access, account fencing,
 and projection invalidation into one background owner. Story metadata must
