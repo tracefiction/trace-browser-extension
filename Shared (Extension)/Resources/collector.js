@@ -301,7 +301,7 @@ function showCapacityRecoveryNotice(capacity, force) {
   title.textContent = "This story wasn’t added";
   title.style.cssText = "margin:0;font:600 17px/1.3 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif;color:var(--trace-page-ink)";
   var copy = document.createElement("p");
-  copy.textContent = "Your Library is full. Make room in Trace, or see Trace Unlimited.";
+  copy.textContent = "Your Library is full. Everything saved stays. See Trace Unlimited, or remove a story to make room.";
   copy.style.cssText = "margin:4px 0 2px;font:400 13px/1.4 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif;color:var(--trace-page-secondary)";
   var actions = document.createElement("div");
   actions.style.cssText = "display:flex;align-items:center;gap:4px 16px";
@@ -4196,6 +4196,13 @@ function progressDisplay(entry) {
 // Before that link exists, every surface points to that one step.
 var TRACE_IOS_APP_SETUP_URL = "traceauth://open?destination=extension-connect";
 
+// A session that needs recovery before any account was ever verified belongs
+// to a reader who is still connecting for the first time, so only a reader
+// who was connected before is asked to reconnect.
+function needsReconnect(authState) {
+  return Boolean(authState && authState.state === "reconnect_required" && authState.neverConnected !== true);
+}
+
 function awaitingAppLink(view) {
   return !view.hasAuth && traceIsIosSafari() &&
     !(view.authState && (view.authState.state === "reconnect_required" || view.authState.state === "error"));
@@ -4204,7 +4211,7 @@ function awaitingAppLink(view) {
 function storyHeadline(view) {
   if (awaitingAppLink(view)) return "Finish setup in the Trace app";
   if (!view.hasAuth) {
-    if (view.authState && view.authState.state === "reconnect_required") return "Reconnect Trace";
+    if (needsReconnect(view.authState)) return "Reconnect Trace";
     if (view.authState && view.authState.state === "error") return "Trace unavailable";
     return "Connect Trace";
   }
@@ -4221,7 +4228,7 @@ function storyCaption(view) {
     return "Open Trace and finish Safari setup there, signing in first if asked. Then come back; nothing has been saved yet.";
   }
   if (!view.hasAuth) {
-    if (view.authState && view.authState.state === "reconnect_required") {
+    if (needsReconnect(view.authState)) {
       return "Your session needs a refresh.";
     }
     if (view.authState && view.authState.state === "error") {
@@ -4252,7 +4259,8 @@ function storyCaption(view) {
 function handleDisplay(view) {
   if (awaitingAppLink(view)) return "Finish setup in Trace";
   if (!view.hasAuth) {
-    if (view.authState && view.authState.state === "reconnect_required") return "Reconnect Trace";
+    if (needsReconnect(view.authState)) return "Reconnect Trace";
+    if (view.authState && view.authState.state === "reconnect_required") return "Connect Trace";
     if (view.authState && view.authState.state === "error") return "Try again";
     return "Connect";
   }
@@ -6650,7 +6658,7 @@ function renderStorySheet(sheet, view, workKey) {
       connectOpen.setAttribute("data-trace-story-connect", "1");
       connectOpen.textContent = storyArchiveConnectState === "connecting"
         ? "Connecting…"
-        : view.authState && view.authState.state === "reconnect_required"
+        : needsReconnect(view.authState)
           ? "Reconnect"
           : "Connect";
       connectOpen.disabled = storyArchiveConnectState === "connecting";
@@ -6687,7 +6695,7 @@ function renderStorySheet(sheet, view, workKey) {
     capacityTitle.textContent = "This story wasn’t added";
     capacityTitle.style.cssText = "margin:0;font:600 17px/1.3 " + TRACE_UI.font + ";color:var(--trace-page-ink)";
     var capacityCopy = document.createElement("p");
-    capacityCopy.textContent = "Your Library is full. Make room in Trace, or see Trace Unlimited.";
+    capacityCopy.textContent = "Your Library is full. Everything saved stays. See Trace Unlimited, or remove a story to make room.";
     capacityCopy.style.cssText = "margin:0;font:400 13px/1.4 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
     body.appendChild(capacityTitle);
     body.appendChild(capacityCopy);

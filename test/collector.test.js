@@ -17,7 +17,7 @@ function collectorTestSource(source) {
 window.finishQualifyIsLastPostedChapter = finishQualifyIsLastPostedChapter;
 window.removeQuickAddElements = removeQuickAddElements;
 window.renderQuickAddButton = renderQuickAddButton;
-window.__traceTestHooks = { sendAutoTrackForStory, storyHandlePresentation, handleDisplay };
+window.__traceTestHooks = { sendAutoTrackForStory, storyHandlePresentation, handleDisplay, storyHeadline, storyCaption };
 })();`);
 }
 
@@ -1191,6 +1191,37 @@ test("a failed automatic save gives way to the story's saved state when it is ch
     1,
     "a page without a failure doesn't ask again",
   );
+});
+
+test("the story handle asks only a reader who was connected before to reconnect", () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://archiveofourown.org/works/28534965",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  installCollectorChrome(dom, createChromeMockForHooks());
+  dom.window.eval(collectorTestSource(fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"), "utf8")));
+  const hooks = dom.window.__traceTestHooks;
+  const returning = { hasAuth: false, authState: { state: "reconnect_required", reason: "credential_rejected" } };
+  const firstTime = { hasAuth: false, authState: { ...returning.authState, neverConnected: true } };
+
+  assert.equal(hooks.storyHeadline(returning), "Reconnect Trace");
+  assert.equal(hooks.handleDisplay(returning), "Reconnect Trace");
+  assert.equal(hooks.storyCaption(returning), "Your session needs a refresh.");
+
+  assert.equal(hooks.storyHeadline(firstTime), "Connect Trace");
+  assert.equal(hooks.handleDisplay(firstTime), "Connect Trace");
+  assert.doesNotMatch(hooks.storyCaption(firstTime), /reconnect|refresh/i);
+  dom.window.close();
+});
+
+test("the Library-full page notices use the Trace app's words", () => {
+  const sentence = "Your Library is full. Everything saved stays. See Trace Unlimited, or remove a story to make room.";
+  for (const [file, count] of [["collector.js", 2], ["library-overlay.js", 1]]) {
+    const source = fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", file), "utf8");
+    assert.equal(source.split(sentence).length - 1, count, file);
+    assert.doesNotMatch(source, /Make room in Trace, or see Trace Unlimited/, file);
+  }
 });
 
 test("the story handle never shows a bare Error", () => {

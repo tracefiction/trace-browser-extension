@@ -121,12 +121,12 @@ function accountLibraryLimit(value) {
 }
 
 /**
- * The one way of saying a Free Library is full, matching the Trace app. The
- * size is named only when the account has reported it.
+ * What follows the "Your Library is full" heading, in the Trace app's words.
+ * The size is named only when the account has reported it.
  */
-function libraryFullSentence(limit) {
+function libraryFullLead(limit) {
   const size = accountLibraryLimit(limit);
-  return `Your Library is full${size === null ? "" : ` (${size} stories on Free)`}. Everything saved stays. See Trace Unlimited, or remove a story to make room.`;
+  return `${size === null ? "" : `${size} stories on Free. `}Everything saved stays. See Trace Unlimited, or remove a story to make room.`;
 }
 
 /**
@@ -394,7 +394,7 @@ function buildPopupUi(model) {
       eyebrow: "",
       heading: "Your Library is full",
       glyph: "tray",
-      lead: libraryFullSentence(model.libraryLimit),
+      lead: libraryFullLead(model.libraryLimit),
       leadHidden: false,
       ctaHidden: false,
       ctaLabel: "See Trace Unlimited",
@@ -405,7 +405,7 @@ function buildPopupUi(model) {
       importHidden: true,
       importDisabled: true,
       importLabel: "Import from this page",
-      importTitle: libraryFullSentence(model.libraryLimit),
+      importTitle: `Your Library is full. ${libraryFullLead(model.libraryLimit)}`,
     };
   }
 
@@ -417,7 +417,7 @@ function buildPopupUi(model) {
       heading: recoveryHeading(auth),
       glyph: auth === "unknown" ? "" : auth === "upgrade_required" ? "tray" : "person",
       lead: auth === "upgrade_required"
-        ? libraryFullSentence(model.libraryLimit)
+        ? libraryFullLead(model.libraryLimit)
         : recoveryLead(auth, authState.message),
       leadHidden: false,
       ctaHidden: false,
@@ -1696,8 +1696,8 @@ function renderEarnedLibraryFull(onUnsavedStory) {
     glyph: "tray",
     heading: "Your Library is full",
     lead: onUnsavedStory
-      ? `${libraryFullSentence(popupModel.libraryLimit)} This story wasn’t added.`
-      : libraryFullSentence(popupModel.libraryLimit),
+      ? `${libraryFullLead(popupModel.libraryLimit)} This story wasn’t added.`
+      : libraryFullLead(popupModel.libraryLimit),
   });
   setEarnedResult("failure", "Your Library is full.", onUnsavedStory ? "This story wasn’t added." : "");
   configureEarnedActions(

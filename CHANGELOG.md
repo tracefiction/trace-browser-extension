@@ -1,8 +1,8 @@
 # Changelog
 
-Trace is in beta. This file lists the changes that matter to people using the
-Chrome, Edge and Firefox extension. The Safari extension ships inside the Trace
-iPhone app, and its notes go with each app release.
+This file lists the changes that matter to people using the Chrome, Edge and
+Firefox extension. The Safari extension ships inside the Trace iPhone app, and
+its notes go with each app release.
 
 ## 1.0
 
@@ -18,9 +18,9 @@ iPhone app, and its notes go with each app release.
 
 ### The popup
 
-- **Connecting for the first time says Connect.** If a first attempt to connect doesn't go through, the popup reads **Connect Trace**, not **Reconnect Trace**. Reconnect is only for a browser that was connected before.
+- **Connecting for the first time says Connect.** If a first attempt to connect doesn't go through, the popup and Trace's notes on the page read **Connect Trace**, not **Reconnect Trace**. Reconnect is only for a browser that was connected before.
 - **The Free count comes from your account.** The Library size in **64 of 100 stories kept** is read from your Trace account instead of being fixed in the extension. Until the account has reported it, the line stays hidden.
-- **One way of saying your Library is full.** The popup now uses the same words as the Trace app: **Your Library is full (100 stories on Free). Everything saved stays. See Trace Unlimited, or remove a story to make room.**
+- **One way of saying your Library is full.** The popup and the notices on AO3 and FanFiction.net now use the same words as the Trace app. Under **Your Library is full**, the popup reads **100 stories on Free. Everything saved stays. See Trace Unlimited, or remove a story to make room.** The page notices say the same without the number. They still appear at most once a day, and **Not now** still quiets them for a week.
 - **Plainer words.** **Improve story metadata** is now **Improve story details**, and the extension's description says what it does: save stories, keep your place as you read, and see your Library while you browse.
 
 ### iPhone and iPad

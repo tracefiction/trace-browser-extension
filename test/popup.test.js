@@ -2191,7 +2191,11 @@ test("popup keeps a durable library-capacity recovery action", async () => {
   assert.equal(h.document.getElementById("popup-status").textContent, "Your Library is full");
   assert.equal(
     h.document.getElementById("popup-lead").textContent,
-    "Your Library is full (50 stories on Free). Everything saved stays. See Trace Unlimited, or remove a story to make room.",
+    "50 stories on Free. Everything saved stays. See Trace Unlimited, or remove a story to make room.",
+  );
+  assert.equal(
+    h.document.getElementById("popup-import").title,
+    "Your Library is full. 50 stories on Free. Everything saved stays. See Trace Unlimited, or remove a story to make room.",
   );
   assert.equal(h.document.getElementById("popup-cta").textContent, "See Trace Unlimited");
   assert.equal(
@@ -2862,14 +2866,14 @@ function libraryFullReaderHarness(options = {}, popupState = {}) {
   });
 }
 
-test("the full-Library reader view uses the Trace app's sentence with the account's limit", async () => {
+test("the full-Library reader view names the account's limit without repeating its heading", async () => {
   const h = libraryFullReaderHarness({}, { libraryCount: 50, libraryLimit: 50 });
   for (let attempt = 0; attempt < 8; attempt += 1) await flush();
   assert.equal(h.document.body.dataset.tracePopupStateCode, "library-full");
   assert.equal(h.document.getElementById("popup-earned-heading").textContent, "Your Library is full");
   assert.equal(
     h.document.getElementById("popup-earned-lead").textContent,
-    "Your Library is full (50 stories on Free). Everything saved stays. See Trace Unlimited, or remove a story to make room. This story wasn’t added.",
+    "50 stories on Free. Everything saved stays. See Trace Unlimited, or remove a story to make room. This story wasn’t added.",
   );
 });
 
@@ -2878,7 +2882,7 @@ test("a full Library names no size until the account has reported one", async ()
   for (let attempt = 0; attempt < 8; attempt += 1) await flush();
   assert.equal(
     h.document.getElementById("popup-earned-lead").textContent,
-    "Your Library is full. Everything saved stays. See Trace Unlimited, or remove a story to make room. This story wasn’t added.",
+    "Everything saved stays. See Trace Unlimited, or remove a story to make room. This story wasn’t added.",
   );
 });
 

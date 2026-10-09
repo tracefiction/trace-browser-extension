@@ -275,7 +275,7 @@
     title.textContent = "This story wasn’t added";
     title.style.cssText = "margin:0;font:600 17px/1.3 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif;color:var(--trace-page-ink)";
     var copy = document.createElement("p");
-    copy.textContent = "Your Library is full. Make room in Trace, or see Trace Unlimited.";
+    copy.textContent = "Your Library is full. Everything saved stays. See Trace Unlimited, or remove a story to make room.";
     copy.style.cssText = "margin:4px 0 2px;font:400 13px/1.4 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif;color:var(--trace-page-secondary)";
     var actions = document.createElement("div");
     actions.style.cssText = "display:flex;align-items:center;gap:4px 16px";
@@ -1034,8 +1034,12 @@ function traceRefreshPageTokens() {
     // On iPhone and iPad the Trace app links the extension; the website and a
     // tab refresh cannot. Point to that one step instead.
     var appLink = state !== "reconnect_required" && state !== "error" && isIosSafari();
+    // Only a reader who was connected before is asked to sign in again; a
+    // session that needs recovery before any account was verified is a first
+    // connection.
+    var reconnect = state === "reconnect_required" && !(authState && authState.neverConnected === true);
     var heading =
-      state === "reconnect_required"
+      reconnect
         ? "Sign in again"
         : state === "error"
           ? "Check Trace connection"
@@ -1166,7 +1170,7 @@ function traceRefreshPageTokens() {
       ctaEl.textContent =
         archiveConnectState === "connecting"
           ? "Connecting…"
-          : state === "reconnect_required"
+          : reconnect
             ? "Reconnect"
             : "Connect";
       if (archiveConnectState === "connecting") ctaEl.setAttribute("aria-disabled", "true");
