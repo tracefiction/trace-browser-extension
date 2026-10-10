@@ -58,7 +58,12 @@ export type SessionEvent =
   | {
       readonly type: "signed_out";
       readonly epoch: number;
-      readonly reason?: "none" | "provider_unavailable";
+      /**
+       * `credential_absent`: the credential provider answered that it holds no
+       * account. `provider_unavailable`: it could not be read, so whether an
+       * account exists is not known.
+       */
+      readonly reason?: "none" | "credential_absent" | "provider_unavailable";
     }
   | { readonly type: "connecting"; readonly epoch: number }
   | {

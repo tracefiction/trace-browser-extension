@@ -197,6 +197,14 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
       assert.match(bundle, /traceSessionCredentialsV1/);
       assert.match(bundle, /traceKernelPrivateV1/);
       assert.match(bundle, /indexedDB/);
+      // The setup page's questions belong to the build that ships beside the
+      // Trace app. Chrome and Firefox packages do not carry them at all.
+      for (const root of [chromeRoot, firefoxRoot]) {
+        assert.doesNotMatch(
+          fs.readFileSync(path.join(root, "background.js"), "utf8"),
+          /TRACE_SETUP_PAGE_REQUEST|TRACE_SETUP_ACCESS_PUSH|safari-setup|setup-page\.mts/,
+        );
+      }
       if (mode === "kernel") {
         await assertArchiveReceiptSurvivesStorageFailure(bundle);
       }
@@ -246,6 +254,7 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     assert.match(optionalSafariConfig, /TRACE_IOS_ACTIVE_TAB_PROBE = true/);
 
     runBuild("build:ios-earned-permission-onboarding:release");
+    assert.match(fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8"), /TRACE_SETUP_PAGE_REQUEST/);
     const earnedSafariManifest = manifest(RESOURCES);
     const earnedSafariConfig = fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8");
     assert.deepEqual(earnedSafariManifest.permissions, [

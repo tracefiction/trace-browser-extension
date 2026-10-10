@@ -99,7 +99,8 @@ Start with these files:
 - `Shared (Extension)/Resources/manifest.json` - permissions, host permissions, content-script matches, and excluded login/auth pages.
 - `Shared (Extension)/Resources/collector.js` - AO3/FFN metadata extraction and auto-track messages.
 - `Shared (Extension)/Resources/library-overlay.js` - on-page library status and quick-add UI.
-- `Shared (Extension)/Resources/sync.js` - Trace-site auth token bridge.
+- `Shared (Extension)/Resources/sync.js` - Trace-site auth token bridge, and the setup page's questions.
+- `src/extension-runtime/setup-page.mts` - what Trace's setup page may ask the background, and the checks on it.
 - `src/background.js` - network requests to the Trace API.
 - `src/extension-core/` and `src/extension-runtime/` - the modular session,
   archive-readiness, account-projection, and authenticated story-command
@@ -373,6 +374,62 @@ verified separately on installed iOS Safari; API availability does not prove
 that an orphaned script context can be replaced.
 
 
+### Trace's setup page
+
+On Trace's setup page (`/safari-setup` on Trace's own site), in Safari on
+iPhone and iPad, and nowhere else, the page script (`sync.js`) answers a small
+fixed set of questions from the page, so that page can tell a reader what to
+do next. Page and script talk with `window.postMessage` on the page's own
+origin; the script hears only the top-level page itself (it checks
+`event.source === window`, `event.origin`, that it is not inside a frame, and
+that the path is exactly the setup page's), and the background checks again
+that the request came from a top-level page at that path on Trace's origin.
+Every other page on Trace's site (the signed-in app included), a story site,
+any other site and any frame get no answer. Neither does any page in Chrome,
+Firefox or Safari on a Mac: the page script forwards nothing there. The Chrome
+and Firefox packages do not contain the background half at all; `sync.js` and
+`popup.js` are shared files, so those packages carry their halves, inert.
+
+What the page can learn:
+
+- whether the five story-site addresses are allowed, and how broadly: every
+  site, the story sites, or only Trace's own page. It is told again when that
+  changes, and only while Trace's own site is allowed: without that, this
+  notice does not look for or message a Trace tab;
+- the open story tabs in its own window: for up to five tabs that are story
+  pages on AO3 or FanFiction.net, a tab id, the tab's title (one line, at most
+  120 characters) and which site it is on. Nothing is listed while the story
+  sites are not allowed. A tab in Private Browsing or in another window is
+  never listed, and a setup page that is itself in Private Browsing is given
+  no tabs. A title that is the tab's address, contains it, or is shaped like
+  an address, is sent as no title, and characters that hide or reorder text
+  are removed. The tabs are asked for by story-site address, so listing
+  them never touches another site that is open in that window.
+
+What the page can do: ask for one of those tabs to be brought to the front. It
+must be a tab from the most recent list given to that same tab, no more than
+two minutes earlier; the list is dropped if that tab is seen anywhere but the
+setup page. The story tab is checked again at that moment to still be a story
+page, in the same window, and not in Private Browsing.
+
+What the page cannot do or learn: any address; anything about a tab that is
+not a story page; open, close, reload or navigate a tab; make the browser ask
+for access (there is no such message). Requests are limited to 20 in any 10
+seconds per page, in the page script and again in the background. Nothing here
+is sent to a server, and it adds no permission. The popup shown over that page
+uses the same list and the same switch, under the same rules, for the window
+of the tab it is open over.
+
+What the path check is, and is not. It keeps the signed-in app and every other
+Trace page from using these questions by accident. It is not a defence against
+hostile script already running on Trace's own origin: such a script can move
+its page to `/safari-setup` without loading it and then ask. The limits above
+are therefore what count. The most such a script could learn is whether the
+story sites are allowed and the titles of up to five story tabs in that
+window; the most it could do is bring one of those story tabs to the front. It
+could learn nothing about any other tab and no address, and it could not make
+the browser ask for access.
+
 ### Local Safari automatic-saving preference
 
 The Safari background worker publishes the installation's automatic-saving
@@ -392,6 +449,37 @@ provider or more-than-24-hour-old observations are unknown, never off. A late
 snapshot cannot replace a newer change. A preference is not proof of Safari
 access, activation or a successful save. Old app/extension versions can ignore
 the additive messages; absence leaves existing behavior intact.
+
+### Local Safari story-site access reading
+
+On iPhone and iPad the Safari background worker tells the bundled app which
+story-site addresses Safari currently lets Trace run on. A page run already
+publishes this beside its run receipt. The same message is also sent on its
+own when the popup opens, when Safari reports that the grant changed, and
+about once a day, because once access ends (for example, when an Allow for One
+Day grant runs out) no page script runs to say so. It reuses the existing
+`TRACE_IOS_EXTENSION_HEARTBEAT` permission snapshot: a timestamp and a list of
+granted origin patterns, stored in the app/extension shared container. It
+contains no URLs, story or account data, is never sent to a server, and adds
+no permission.
+
+The reading is built to avoid a false alarm. It exists to catch access that
+ended, so an install that has never held the full grant sends nothing: not at
+first start, and not part-way through setup. After that, missing access is
+reported only when `permissions.contains` says so twice, two seconds apart,
+and `permissions.getAll` also answered; when Safari confirms the five required
+origins they are listed by name, since a broader grant need not spell them
+out. If Safari does not answer, nothing is sent.
+
+It is also quiet. A reading equal to the last one delivered is not sent again
+within five minutes, and a delivery the app did not take is left alone for
+one minute, then five, then thirty at most; opening the popup tries once
+straight away. To do this the extension keeps, in its own storage, when a
+reading was last delivered, whether the grant has ever been seen, a hash of
+the last reading (not the origins themselves) and the delivery back-off.
+Chrome and Firefox install none of this. Safari on Mac cannot be told from an
+iPad until Safari reports its platform, so its listeners are registered, but
+they do nothing: no reading is sent and no alarm is set.
 
 ## Aggregate release and browser diagnostics
 

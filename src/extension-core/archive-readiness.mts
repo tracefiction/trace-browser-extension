@@ -7,7 +7,8 @@ export interface ArchiveRunReceipt {
 }
 
 export interface ArchivePermissionSnapshot {
-  readonly hostKind: ArchiveHostKind;
+  /** The archive whose run this snapshot follows; absent for a reading taken on its own. */
+  readonly hostKind?: ArchiveHostKind;
   readonly at: number;
   readonly grantedOrigins: readonly string[];
 }
@@ -19,6 +20,11 @@ export interface ArchiveReadinessReceiptPort {
 
 export interface ArchivePermissionSnapshotPort {
   readGrantedOrigins(): Promise<readonly string[] | null>;
+  /**
+   * Whether every listed origin is granted, however the grant is spelled.
+   * `null` means there was no answer.
+   */
+  containsOrigins?(origins: readonly string[]): Promise<boolean | null>;
 }
 
 export interface ArchiveReadinessClock {
@@ -30,7 +36,63 @@ export type ArchiveRunResult =
   | { readonly kind: "throttled" }
   | { readonly kind: "unavailable" };
 
+export type ArchiveAccessReportResult =
+  | { readonly kind: "published"; readonly complete: boolean }
+  /** The current access could not be read; nothing was sent. */
+  | { readonly kind: "unknown" }
+  /** Access is incomplete, but this install has never held it; nothing was sent. */
+  | { readonly kind: "withheld" }
+  /** The same reading was delivered moments ago; nothing was sent. */
+  | { readonly kind: "current" }
+  /** An earlier delivery failed and it is too soon to try again. */
+  | { readonly kind: "deferred" }
+  | { readonly kind: "unavailable" };
+
+/** What an install remembers about its access readings. No origins, no account. */
+export interface ArchiveAccessLedger {
+  /** A reading has found every required origin granted at least once. */
+  readonly grantSeen: boolean;
+  readonly deliveredAt?: number;
+  /** A fingerprint of the reading delivered at `deliveredAt`. */
+  readonly delivered?: string;
+  /** Deliveries that have failed in a row. */
+  readonly failures?: number;
+  /** No delivery is attempted before this time. */
+  readonly retryAt?: number;
+}
+
+export interface ArchiveAccessLedgerPort {
+  read(): Promise<ArchiveAccessLedger>;
+  write(ledger: ArchiveAccessLedger): Promise<void>;
+}
+
 export const ARCHIVE_RUN_THROTTLE_MS = 5 * 60 * 1_000;
+/** A reading that access is missing is taken twice, this far apart. */
+export const ARCHIVE_ACCESS_CONFIRM_DELAY_MS = 2_000;
+/** A reading equal to the last one delivered is not sent again this soon. */
+export const ARCHIVE_ACCESS_REPEAT_AFTER_MS = 5 * 60 * 1_000;
+/**
+ * How long to leave a failed delivery alone: longer after each failure in a
+ * row, and never so long that a reading waits hours behind an app that has
+ * recovered.
+ */
+export const ARCHIVE_ACCESS_RETRY_DELAYS_MS = Object.freeze([
+  60_000, 5 * 60_000, 30 * 60_000,
+]);
+const ARCHIVE_ACCESS_REPORT_MAX_PASSES = 3;
+
+/**
+ * Tells two readings apart without keeping what they listed: whether access
+ * was complete, how many origins were granted, and a hash of them.
+ */
+function accessFingerprint(complete: boolean, origins: readonly string[]): string {
+  let hash = 0x811c9dc5;
+  for (const character of [...origins].sort().join(" ")) {
+    hash ^= character.codePointAt(0)!;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `${complete ? "complete" : "incomplete"}:${origins.length}:${hash.toString(16)}`;
+}
 
 const SYSTEM_CLOCK: ArchiveReadinessClock = Object.freeze({
   now: () => Date.now(),
@@ -48,15 +110,34 @@ export class ArchiveReadinessService {
   readonly #permissions: ArchivePermissionSnapshotPort;
   readonly #clock: ArchiveReadinessClock;
   readonly #lastRunAttemptByHost = new Map<ArchiveHostKind, number>();
+  readonly #requiredOrigins: readonly string[];
+  readonly #wait: (ms: number) => Promise<void>;
+  readonly #ledger: ArchiveAccessLedgerPort;
+  #accessReport: Promise<ArchiveAccessReportResult> | null = null;
+  #accessReportRequestedAgain = false;
+  #accessReportReaderPresent = false;
 
   constructor(options: {
     receipts: ArchiveReadinessReceiptPort;
     permissions: ArchivePermissionSnapshotPort;
     clock?: ArchiveReadinessClock;
+    /** The origins automatic saving needs; without them no access reading is taken. */
+    requiredOrigins?: readonly string[];
+    wait?: (ms: number) => Promise<void>;
+    /** Where the access ledger is kept; in memory when absent. */
+    accessLedger?: ArchiveAccessLedgerPort;
   }) {
     this.#receipts = options.receipts;
     this.#permissions = options.permissions;
     this.#clock = options.clock ?? SYSTEM_CLOCK;
+    this.#requiredOrigins = Object.freeze([...(options.requiredOrigins ?? [])]);
+    this.#wait = options.wait ??
+      ((ms) => new Promise((resolve) => { setTimeout(resolve, ms); }));
+    let remembered: ArchiveAccessLedger = Object.freeze({ grantSeen: false });
+    this.#ledger = options.accessLedger ?? {
+      read: async () => remembered,
+      write: async (ledger) => { remembered = ledger; },
+    };
   }
 
   async recordRun(input: {
@@ -103,6 +184,147 @@ export class ArchiveReadinessService {
     // positive run receipt and never delays the caller's receipt result.
     void this.#publishPermissionSnapshot(input.hostKind);
     return { kind: "published" };
+  }
+
+  /**
+   * Publishes what access is granted right now, on its own rather than
+   * after a run. A run can only ever prove access; this is the reading that
+   * can show access has ended (for example, a one-day grant running out),
+   * because no page script runs to say so.
+   *
+   * It must not raise a false alarm. Access is reported missing only when
+   * this install has held the grant before, two readings in a row say it is
+   * gone, and the list of what is granted came with them. An install that
+   * has never held the grant has nothing to lose, so it sends nothing. When
+   * the required origins are confirmed they are listed by name, since a
+   * broader grant need not spell them out.
+   *
+   * It is also quiet: a reading equal to the last one delivered is not sent
+   * again within a few minutes, and a failed delivery is left alone for
+   * longer after each failure in a row. `readerPresent` (the popup is open)
+   * skips that wait: the reader is here and the app is very likely reachable.
+   */
+  reportAccess(options: { readonly readerPresent?: boolean } = {}): Promise<ArchiveAccessReportResult> {
+    if (options.readerPresent === true) this.#accessReportReaderPresent = true;
+    if (this.#accessReport !== null) {
+      // Access may have changed since the running report read it.
+      this.#accessReportRequestedAgain = true;
+      return this.#accessReport;
+    }
+    const report = (async () => {
+      let result: ArchiveAccessReportResult = { kind: "unknown" };
+      for (let pass = 0; pass < ARCHIVE_ACCESS_REPORT_MAX_PASSES; pass += 1) {
+        this.#accessReportRequestedAgain = false;
+        const readerPresent = this.#accessReportReaderPresent;
+        this.#accessReportReaderPresent = false;
+        result = await this.#reportAccessOnce(readerPresent);
+        if (!this.#accessReportRequestedAgain) break;
+      }
+      return result;
+    })().finally(() => {
+      this.#accessReport = null;
+    });
+    this.#accessReport = report;
+    return report;
+  }
+
+  async #reportAccessOnce(readerPresent: boolean): Promise<ArchiveAccessReportResult> {
+    const ledger = await this.#readLedger();
+    const startedAt = this.#clock.now();
+    const longestWait = ARCHIVE_ACCESS_RETRY_DELAYS_MS.at(-1)!;
+    if (
+      !readerPresent &&
+      typeof ledger.retryAt === "number" &&
+      startedAt < ledger.retryAt &&
+      // A clock that moved backwards must not silence readings for good.
+      ledger.retryAt - startedAt <= longestWait
+    ) {
+      return { kind: "deferred" };
+    }
+    let reading = await this.#readAccess();
+    if (reading === null) return { kind: "unknown" };
+    if (!reading.complete) {
+      // This reading exists to catch access that ended. Before the grant has
+      // ever been seen, "incomplete" is only setup not being finished yet.
+      if (!ledger.grantSeen) return { kind: "withheld" };
+      await this.#wait(ARCHIVE_ACCESS_CONFIRM_DELAY_MS);
+      reading = await this.#readAccess();
+      if (reading === null) return { kind: "unknown" };
+    }
+    // Past this point the grant has been seen: either this reading found it
+    // complete, or the ledger already said so.
+    const grantSeen = true;
+    const fingerprint = accessFingerprint(reading.complete, reading.grantedOrigins);
+    const now = this.#clock.now();
+    if (
+      ledger.delivered === fingerprint &&
+      typeof ledger.deliveredAt === "number" &&
+      now >= ledger.deliveredAt &&
+      now - ledger.deliveredAt < ARCHIVE_ACCESS_REPEAT_AFTER_MS
+    ) {
+      if (!ledger.grantSeen) await this.#writeLedger({ ...ledger, grantSeen });
+      return { kind: "current" };
+    }
+    let published = false;
+    try {
+      published = await this.#receipts.publishPermissionSnapshot(Object.freeze({
+        at: now,
+        grantedOrigins: reading.grantedOrigins,
+      }));
+    } catch {
+      published = false;
+    }
+    if (published) {
+      await this.#writeLedger({ grantSeen, deliveredAt: now, delivered: fingerprint });
+      return { kind: "published", complete: reading.complete };
+    }
+    const failures = (ledger.failures ?? 0) + 1;
+    const retryAfter = ARCHIVE_ACCESS_RETRY_DELAYS_MS[
+      Math.min(failures, ARCHIVE_ACCESS_RETRY_DELAYS_MS.length) - 1
+    ]!;
+    await this.#writeLedger({ ...ledger, grantSeen, failures, retryAt: now + retryAfter });
+    return { kind: "unavailable" };
+  }
+
+  async #readLedger(): Promise<ArchiveAccessLedger> {
+    try {
+      return await this.#ledger.read();
+    } catch {
+      // An unreadable ledger is treated as an install that never held the grant.
+      return { grantSeen: false };
+    }
+  }
+
+  async #writeLedger(ledger: ArchiveAccessLedger): Promise<void> {
+    try {
+      await this.#ledger.write(Object.freeze(ledger));
+    } catch {
+      // The next reading works from whatever was last stored.
+    }
+  }
+
+  async #readAccess(): Promise<{
+    readonly complete: boolean;
+    readonly grantedOrigins: readonly string[];
+  } | null> {
+    const contains = this.#permissions.containsOrigins;
+    if (this.#requiredOrigins.length === 0 || contains === undefined) return null;
+    const [listed, complete] = await Promise.all([
+      this.#permissions.readGrantedOrigins().catch(() => null),
+      contains.call(this.#permissions, this.#requiredOrigins).catch(() => null),
+    ]);
+    if (typeof complete !== "boolean") return null;
+    if (complete) {
+      return {
+        complete: true,
+        grantedOrigins: Object.freeze(
+          Array.from(new Set([...this.#requiredOrigins, ...(listed ?? [])])),
+        ),
+      };
+    }
+    // Missing access is only reported together with what is granted.
+    if (listed === null) return null;
+    return { complete: false, grantedOrigins: Object.freeze([...listed]) };
   }
 
   async #publishPermissionSnapshot(hostKind: ArchiveHostKind): Promise<void> {

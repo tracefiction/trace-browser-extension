@@ -52,7 +52,12 @@ export interface ScriptingPort {
 export interface RuntimeMessageSender {
   readonly id?: string;
   readonly url?: string;
-  readonly tab?: { readonly id?: number; readonly url?: string } | null;
+  readonly tab?: {
+    readonly id?: number;
+    readonly url?: string;
+    readonly windowId?: number;
+    readonly incognito?: boolean;
+  } | null;
   readonly frameId?: number;
   readonly documentLifecycle?: string;
 }
@@ -68,6 +73,7 @@ export interface TabsPort {
 export interface AlarmsPort {
   readonly clear: (...args: unknown[]) => unknown;
   readonly create?: (...args: unknown[]) => unknown;
+  readonly get?: (...args: unknown[]) => unknown;
   readonly onAlarm?: {
     addListener(listener: (alarm: { readonly name?: string }) => void): void;
   };
@@ -88,8 +94,11 @@ export interface StorageArea {
 export interface BrowserTab {
   readonly id?: number;
   readonly url?: string;
+  readonly title?: string;
   readonly active?: boolean;
   readonly lastAccessed?: number;
+  readonly windowId?: number;
+  readonly incognito?: boolean;
 }
 
 export class BrowserStorage {

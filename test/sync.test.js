@@ -49,7 +49,7 @@ function statusReadyMessages(h) {
 
 function createSyncHarness(
   origin = "https://tracefiction.com",
-  { sendMessageImpl, sessionMode = "legacy" } = {},
+  { sendMessageImpl, sessionMode = "legacy", now = null, framed = false, navigator = null } = {},
 ) {
   const js = fs.readFileSync(SYNC_JS_PATH, "utf8");
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -65,6 +65,9 @@ function createSyncHarness(
     postedMessages.push({ data, targetOrigin });
     return originalPostMessage(data, targetOrigin, transfer);
   };
+  // `framed`: the script finds itself, at this same address, in a frame of
+  // some other page. Its window is its own in every way but `top`.
+  const scriptWindow = framed ? framedWindow(dom.window) : dom.window;
   let onRuntimeMessage = null;
   const context = {
     console: {
@@ -73,9 +76,11 @@ function createSyncHarness(
         consoleErrors.push(args);
       },
     },
-    window: dom.window,
+    window: scriptWindow,
     document: dom.window.document,
-    self: dom.window,
+    self: scriptWindow,
+    ...(now ? { Date: { now } } : {}),
+    ...(navigator ? { navigator } : {}),
     chrome: {
       runtime: {
         sendMessage(message, callback) {
@@ -106,6 +111,27 @@ function createSyncHarness(
       return onRuntimeMessage?.(message, sender, sendResponse);
     },
   };
+}
+
+/** A window that is not the top of its tab; messages from itself still name it as their source. */
+function framedWindow(real) {
+  const framed = new Proxy(real, {
+    get(target, property) {
+      if (property === "top") return {};
+      if (property === "addEventListener") {
+        return (type, listener, options) => target.addEventListener(type, (event) => listener(new Proxy(event, {
+          get(inner, key) {
+            if (key === "source") return inner.source === target ? framed : inner.source;
+            const value = Reflect.get(inner, key);
+            return typeof value === "function" ? value.bind(inner) : value;
+          },
+        })), options);
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return framed;
 }
 
 function dispatchPageMessage(h, data, origin = "https://tracefiction.com") {
@@ -906,4 +932,394 @@ test("sync forwards malformed status pushes as a safe disconnected state", async
     connected: false,
     authState: "unknown",
   });
+});
+
+// ---- Setup page requests ----
+
+const SETUP_ORIGIN = "https://www.tracefiction.com";
+const SETUP_PAGE_URL = `${SETUP_ORIGIN}/safari-setup`;
+
+const IPHONE = { userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1", maxTouchPoints: 5 };
+const MAC_SAFARI_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
+
+/** The script on Trace's setup page in Safari on an iPhone, unless told otherwise. */
+function setupHarness(replies = {}, { url = SETUP_PAGE_URL, ...options } = {}) {
+  return createSyncHarness(url, {
+    sessionMode: "kernel",
+    navigator: IPHONE,
+    sendMessageImpl(message, callback) {
+      if (message.type !== "TRACE_SETUP_PAGE_REQUEST") return callback?.(undefined);
+      const reply = replies[message.request];
+      callback?.(typeof reply === "function" ? reply(message) : reply);
+    },
+    ...options,
+  });
+}
+
+function setupMessages(h) {
+  return plainJson(h.messages.filter((message) => message.type === "TRACE_SETUP_PAGE_REQUEST"));
+}
+
+function setupAnswers(h) {
+  return plainJson(h.postedMessages.filter((item) =>
+    item?.data?.type === "TRACE_SETUP_RESPONSE" || item?.data?.type === "TRACE_SETUP_ACCESS_CHANGED"));
+}
+
+function askSetup(h, data, { origin = SETUP_ORIGIN, source } = {}) {
+  h.window.dispatchEvent(new h.window.MessageEvent("message", {
+    data: { type: "TRACE_SETUP_REQUEST", ...data },
+    origin,
+    source: source === undefined ? h.window : source,
+  }));
+}
+
+test("setup: the page learns whether the story sites are allowed", async () => {
+  for (const result of [
+    { storySitesAllowed: true, scope: "all" },
+    { storySitesAllowed: true, scope: "story-sites" },
+    { storySitesAllowed: false, scope: "this-site" },
+  ]) {
+    const h = setupHarness({ access: { ok: true, result: { ...result, origins: ["*://*/*"], secret: "x" } } });
+    askSetup(h, { id: "q1", request: "access" });
+    await flush();
+    assert.deepEqual(setupMessages(h), [{ type: "TRACE_SETUP_PAGE_REQUEST", request: "access" }]);
+    assert.deepEqual(setupAnswers(h), [{
+      data: { type: "TRACE_SETUP_RESPONSE", id: "q1", ok: true, result },
+      targetOrigin: SETUP_ORIGIN,
+    }], "exactly the two fields, to this page's own origin");
+  }
+});
+
+test("setup: the page is given story tabs by id, title and site, and nothing else about them", async () => {
+  const h = setupHarness({
+    "story-tabs": {
+      ok: true,
+      result: {
+        tabs: [
+          { tabId: 12, title: "The Other Road | FanFiction", site: "ffn", url: "https://www.fanfiction.net/s/4821/2/", windowId: 3, active: true },
+          { tabId: 11, title: "x".repeat(400), site: "ao3", favIconUrl: "https://archiveofourown.org/favicon.ico" },
+        ],
+        everyTab: [{ url: "https://bank.example/" }],
+      },
+    },
+  });
+  askSetup(h, { id: "q2", request: "story-tabs" });
+  await flush();
+  assert.deepEqual(setupMessages(h), [{ type: "TRACE_SETUP_PAGE_REQUEST", request: "story-tabs" }]);
+  const [answer] = setupAnswers(h);
+  assert.deepEqual(answer.data, {
+    type: "TRACE_SETUP_RESPONSE",
+    id: "q2",
+    ok: true,
+    result: {
+      tabs: [
+        { tabId: 12, title: "The Other Road | FanFiction", site: "ffn" },
+        { tabId: 11, title: "x".repeat(120), site: "ao3" },
+      ],
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(answer), /https?:\/\/(?!www\.tracefiction\.com")|bank|favicon|windowId/);
+
+  // More than five, or anything not shaped like a story tab, is not passed on.
+  const many = setupHarness({
+    "story-tabs": { ok: true, result: { tabs: Array.from({ length: 9 }, (_, index) => ({ tabId: index, title: `Story ${index}`, site: "ao3" })) } },
+  });
+  askSetup(many, { id: "q3", request: "story-tabs" });
+  await flush();
+  assert.equal(setupAnswers(many)[0].data.result.tabs.length, 5);
+
+  for (const tabs of [
+    [{ tabId: "12", title: "A", site: "ao3" }],
+    [{ tabId: 12, title: "A", site: "bank" }],
+    [{ tabId: 12, site: "ao3" }],
+    [{ tabId: -1, title: "A", site: "ao3" }],
+    [null],
+    "all of them",
+  ]) {
+    const bad = setupHarness({ "story-tabs": { ok: true, result: { tabs } } });
+    askSetup(bad, { id: "q4", request: "story-tabs" });
+    await flush();
+    assert.deepEqual(setupAnswers(bad)[0].data, { type: "TRACE_SETUP_RESPONSE", id: "q4", ok: false, error: "unavailable" }, JSON.stringify(tabs));
+  }
+});
+
+test("setup: the page can ask for one of its story tabs to be brought forward, by id only", async () => {
+  const h = setupHarness({ "switch-to-tab": { ok: true, tab: { url: "https://archiveofourown.org/works/123" } } });
+  askSetup(h, { id: "q5", request: "switch-to-tab", tabId: 11, url: "https://bank.example/", active: false, windowId: 9 });
+  await flush();
+  assert.deepEqual(setupMessages(h), [{ type: "TRACE_SETUP_PAGE_REQUEST", request: "switch-to-tab", tabId: 11 }],
+    "nothing but the id travels: no address, no other change to the tab");
+  assert.deepEqual(setupAnswers(h)[0].data, { type: "TRACE_SETUP_RESPONSE", id: "q5", ok: true });
+
+  for (const [reply, error] of [
+    [{ ok: false, error: "not_listed" }, "not_listed"],
+    [{ ok: false, error: "not_a_story" }, "not_a_story"],
+    [{ ok: false, error: "not_allowed" }, "not_allowed"],
+    [{ ok: false, error: "switch_failed" }, "switch_failed"],
+    [{ ok: false, error: "rate_limited" }, "rate_limited"],
+    [{ ok: false, error: "forbidden" }, "forbidden"],
+    [{ ok: false, error: "Error: No tab with id 11 at https://archiveofourown.org/works/123" }, "unavailable"],
+    [{ ok: false }, "unavailable"],
+    [undefined, "unavailable"],
+    ["ok", "unavailable"],
+  ]) {
+    const refused = setupHarness({ "switch-to-tab": reply });
+    askSetup(refused, { id: "q6", request: "switch-to-tab", tabId: 11 });
+    await flush();
+    assert.deepEqual(setupAnswers(refused)[0].data, { type: "TRACE_SETUP_RESPONSE", id: "q6", ok: false, error }, JSON.stringify(reply));
+  }
+
+  for (const tabId of [undefined, "11", 1.5, -1, null, Number.MAX_SAFE_INTEGER + 1]) {
+    const invalid = setupHarness({ "switch-to-tab": { ok: true } });
+    askSetup(invalid, { id: "q7", request: "switch-to-tab", tabId });
+    await flush();
+    assert.deepEqual(setupAnswers(invalid)[0].data, { type: "TRACE_SETUP_RESPONSE", id: "q7", ok: false, error: "invalid_request" }, String(tabId));
+    assert.deepEqual(setupMessages(invalid), [], "a malformed request never reaches the background");
+  }
+});
+
+test("setup: only the named fields are forwarded; the page cannot say which tab or window it is", async () => {
+  const extras = { overTab: 7, windowId: 9, incognito: false, url: "https://bank.example/", sender: { tab: { id: 7 } } };
+  const h = setupHarness(SETUP_REPLIES);
+  askSetup(h, { id: "a", request: "access", ...extras });
+  askSetup(h, { id: "b", request: "story-tabs", ...extras });
+  askSetup(h, { id: "c", request: "switch-to-tab", tabId: 11, ...extras });
+  await flush();
+  assert.deepEqual(setupMessages(h), [
+    { type: "TRACE_SETUP_PAGE_REQUEST", request: "access" },
+    { type: "TRACE_SETUP_PAGE_REQUEST", request: "story-tabs" },
+    { type: "TRACE_SETUP_PAGE_REQUEST", request: "switch-to-tab", tabId: 11 },
+  ]);
+  assert.doesNotMatch(JSON.stringify(setupMessages(h)), /overTab|windowId|incognito|bank|sender/);
+  assert.deepEqual(setupAnswers(h).map(({ data }) => [data.id, data.ok]), [["a", true], ["b", true], ["c", true]]);
+});
+
+test("setup: a request this script does not know is refused by name, without asking the background", async () => {
+  const h = setupHarness({ access: { ok: true, result: { storySitesAllowed: true, scope: "all" } } });
+  for (const [request, error] of [
+    ["request-access", "unknown_request"],
+    ["permissions", "unknown_request"],
+    ["open-tab", "unknown_request"],
+    ["", "unknown_request"],
+    [undefined, "invalid_request"],
+    [7, "invalid_request"],
+    [["access"], "invalid_request"],
+  ]) {
+    h.postedMessages.length = 0;
+    askSetup(h, { id: "q8", request });
+    await flush();
+    assert.deepEqual(setupAnswers(h).map(({ data }) => data), [{ type: "TRACE_SETUP_RESPONSE", id: "q8", ok: false, error }], String(request));
+  }
+  assert.deepEqual(setupMessages(h), []);
+});
+
+test("setup: only this page's own top-level window, speaking to itself, is heard", async () => {
+  const reply = { access: { ok: true, result: { storySitesAllowed: true, scope: "all" } } };
+
+  // Another origin's message, as a frame or an opener would send it.
+  const h = setupHarness(reply);
+  for (const origin of ["https://archiveofourown.org", "https://www.fanfiction.net", "https://example.com", "https://tracefiction.com", "http://www.tracefiction.com", "null", ""]) {
+    askSetup(h, { id: "q9", request: "access" }, { origin });
+  }
+  // The right origin, from a different window: a same-origin frame, or no window at all.
+  const frame = h.window.document.createElement("iframe");
+  h.window.document.body.appendChild(frame);
+  askSetup(h, { id: "q9", request: "access" }, { source: frame.contentWindow });
+  askSetup(h, { id: "q9", request: "access" }, { source: null });
+  await flush();
+  assert.deepEqual(setupMessages(h), []);
+  assert.deepEqual(setupAnswers(h), [], "and it gets no answer at all");
+
+  // The setup page's own address inside a frame hears nothing either, even
+  // from that frame's own window on that frame's own origin.
+  const framed = setupHarness(reply, { framed: true });
+  askSetup(framed, { id: "q9", request: "access" });
+  await flush();
+  assert.deepEqual(setupMessages(framed), []);
+  assert.deepEqual(setupAnswers(framed), []);
+  framed.emitRuntimeMessage({ type: "TRACE_SETUP_ACCESS_PUSH", storySitesAllowed: true, scope: "all" });
+  assert.deepEqual(setupAnswers(framed), [], "nor is it told when access changes");
+
+  // The same request from the page itself is answered.
+  askSetup(h, { id: "q9", request: "access" });
+  await flush();
+  assert.equal(setupAnswers(h).length, 1);
+});
+
+const SETUP_REPLIES = {
+  access: { ok: true, result: { storySitesAllowed: true, scope: "story-sites" } },
+  "story-tabs": { ok: true, result: { tabs: [{ tabId: 11, title: "A story", site: "ao3" }] } },
+  "switch-to-tab": { ok: true },
+};
+
+/** Ask all three questions and push a change; report what reached the background and the page. */
+async function trySetupSurface(h) {
+  askSetup(h, { id: "a", request: "access" });
+  askSetup(h, { id: "b", request: "story-tabs" });
+  askSetup(h, { id: "c", request: "switch-to-tab", tabId: 11 });
+  askSetup(h, { id: "d", request: "nonsense" });
+  await flush();
+  h.emitRuntimeMessage({ type: "TRACE_SETUP_ACCESS_PUSH", storySitesAllowed: true, scope: "all" });
+  return { forwarded: setupMessages(h).length, told: setupAnswers(h).length };
+}
+
+test("setup: every other Trace page gets silence, exactly like a foreign site", async () => {
+  for (const path of [
+    "/", "/library", "/login", "/safari-setup-old", "/safari-setup/x", "/safari-setup/x/", "/safari-setup.html",
+    "/x/safari-setup", "/Safari-Setup", "/safari-setu", "/safari-setup//", "/library?next=/safari-setup", "/library#/safari-setup",
+  ]) {
+    const h = setupHarness(SETUP_REPLIES, { url: `${SETUP_ORIGIN}${path}` });
+    assert.deepEqual(await trySetupSurface(h), { forwarded: 0, told: 0 }, path);
+  }
+  // The setup page itself, however it was reached, is answered: three requests
+  // forwarded, four answers and one push passed on.
+  for (const path of ["/safari-setup", "/safari-setup/", "/safari-setup?from=app", "/safari-setup/?from=app", "/safari-setup#step-2"]) {
+    const h = setupHarness(SETUP_REPLIES, { url: `${SETUP_ORIGIN}${path}` });
+    assert.deepEqual(await trySetupSurface(h), { forwarded: 3, told: 5 }, path);
+  }
+});
+
+test("setup: a page that leaves the setup path without loading stops being heard at once", async () => {
+  const h = setupHarness(SETUP_REPLIES);
+  askSetup(h, { id: "a", request: "story-tabs" });
+  await flush();
+  assert.equal(setupMessages(h).length, 1);
+
+  h.window.history.pushState({}, "", "/library");
+  askSetup(h, { id: "b", request: "switch-to-tab", tabId: 11 });
+  askSetup(h, { id: "c", request: "access" });
+  await flush();
+  h.emitRuntimeMessage({ type: "TRACE_SETUP_ACCESS_PUSH", storySitesAllowed: false, scope: "this-site" });
+  assert.equal(setupMessages(h).length, 1, "nothing more is forwarded");
+  assert.deepEqual(setupAnswers(h).map(({ data }) => data.id), ["a"], "and nothing more is said");
+
+  h.window.history.pushState({}, "", "/safari-setup");
+  askSetup(h, { id: "d", request: "access" });
+  await flush();
+  assert.deepEqual(setupAnswers(h).map(({ data }) => data.id), ["a", "d"]);
+});
+
+test("setup: only Safari on iPhone and iPad; every other browser forwards nothing", async () => {
+  const elsewhere = {
+    "Safari on a Mac": { userAgent: MAC_SAFARI_UA, maxTouchPoints: 0 },
+    "Safari on a Mac that reports no touch count": { userAgent: MAC_SAFARI_UA },
+    "Chrome on a Mac": { userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36", maxTouchPoints: 0 },
+    "Chrome on a touch-screen PC": { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36", maxTouchPoints: 10 },
+    "Firefox": { userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:143.0) Gecko/20100101 Firefox/143.0", maxTouchPoints: 0 },
+    "Firefox on Android": { userAgent: "Mozilla/5.0 (Android 15; Mobile; rv:143.0) Gecko/143.0 Firefox/143.0", maxTouchPoints: 5 },
+    "a browser that says nothing about itself": {},
+  };
+  for (const [name, navigator] of Object.entries(elsewhere)) {
+    const h = setupHarness(SETUP_REPLIES, { navigator });
+    assert.deepEqual(await trySetupSurface(h), { forwarded: 0, told: 0 }, name);
+  }
+  // An iPad calls itself a Mac; only touch tells them apart.
+  for (const navigator of [IPHONE, { userAgent: MAC_SAFARI_UA, maxTouchPoints: 5 }, { userAgent: IPHONE.userAgent.replace("iPhone;", "iPad;"), maxTouchPoints: 5 }]) {
+    const h = setupHarness(SETUP_REPLIES, { navigator });
+    assert.deepEqual(await trySetupSurface(h), { forwarded: 3, told: 5 }, navigator.userAgent);
+  }
+});
+
+test("setup: a request that cannot be addressed, and any other message type, is ignored silently", async () => {
+  const h = setupHarness({ access: { ok: true, result: { storySitesAllowed: true, scope: "all" } } });
+  for (const id of [undefined, "", 7, null, {}, "x".repeat(65)]) {
+    askSetup(h, { id, request: "access" });
+  }
+  for (const type of ["TRACE_SETUP_RESPONSE", "TRACE_SETUP_ACCESS_CHANGED", "TRACE_SETUP_PAGE_REQUEST", "TRACE_SETUP_ACCESS_PUSH", "TRACE_SETUP", "trace_setup_request", "SOMETHING_ELSE"]) {
+    h.window.dispatchEvent(new h.window.MessageEvent("message", {
+      data: { type, id: "q10", request: "access", storySitesAllowed: true, scope: "all" },
+      origin: SETUP_ORIGIN,
+      source: h.window,
+    }));
+  }
+  for (const data of [null, undefined, "TRACE_SETUP_REQUEST", 7, ["TRACE_SETUP_REQUEST"]]) {
+    h.window.dispatchEvent(new h.window.MessageEvent("message", { data, origin: SETUP_ORIGIN, source: h.window }));
+  }
+  await flush();
+  assert.deepEqual(setupMessages(h), []);
+  assert.deepEqual(setupAnswers(h), []);
+  assert.deepEqual(h.consoleErrors, []);
+});
+
+test("setup: a page that asks too fast is answered here, without waking the background", async () => {
+  let time = 1_000_000;
+  const h = setupHarness({ access: { ok: true, result: { storySitesAllowed: true, scope: "all" } } }, { now: () => time });
+  for (let request = 0; request < 20; request += 1) askSetup(h, { id: `a${request}`, request: "access" });
+  await flush();
+  assert.equal(setupMessages(h).length, 20);
+  assert.equal(setupAnswers(h).filter(({ data }) => data.ok === true).length, 20);
+
+  h.postedMessages.length = 0;
+  for (let request = 0; request < 300; request += 1) {
+    askSetup(h, { id: `b${request}`, request: ["access", "story-tabs", "switch-to-tab"][request % 3], tabId: 11 });
+  }
+  await flush();
+  assert.equal(setupMessages(h).length, 20, "three hundred more requests send nothing to the background");
+  assert.equal(setupAnswers(h).length, 300);
+  assert.ok(setupAnswers(h).every(({ data }) => data.ok === false && data.error === "rate_limited"));
+
+  time += 9_999;
+  askSetup(h, { id: "c1", request: "access" });
+  await flush();
+  assert.equal(setupMessages(h).length, 20);
+  time += 1;
+  askSetup(h, { id: "c2", request: "access" });
+  await flush();
+  assert.equal(setupMessages(h).length, 21, "the limit is a window, not a ban");
+});
+
+test("setup: a change in access is passed to the page as it happens", async () => {
+  const h = setupHarness();
+  h.emitRuntimeMessage({ type: "TRACE_SETUP_ACCESS_PUSH", storySitesAllowed: true, scope: "story-sites", origins: ["x"], at: 1 });
+  h.emitRuntimeMessage({ type: "TRACE_SETUP_ACCESS_PUSH", storySitesAllowed: false, scope: "this-site" });
+  assert.deepEqual(setupAnswers(h), [
+    { data: { type: "TRACE_SETUP_ACCESS_CHANGED", storySitesAllowed: true, scope: "story-sites" }, targetOrigin: SETUP_ORIGIN },
+    { data: { type: "TRACE_SETUP_ACCESS_CHANGED", storySitesAllowed: false, scope: "this-site" }, targetOrigin: SETUP_ORIGIN },
+  ]);
+
+  // Anything that is not a well-formed, self-consistent reading is dropped.
+  h.postedMessages.length = 0;
+  for (const push of [
+    { storySitesAllowed: "yes", scope: "all" },
+    { storySitesAllowed: true, scope: "everything" },
+    { storySitesAllowed: true, scope: "this-site" },
+    { storySitesAllowed: false, scope: "all" },
+    { scope: "all" },
+    {},
+  ]) {
+    h.emitRuntimeMessage({ type: "TRACE_SETUP_ACCESS_PUSH", ...push });
+  }
+  assert.deepEqual(setupAnswers(h), []);
+});
+
+test("setup: an answer the background did not give in the agreed shape is not passed on", async () => {
+  for (const reply of [
+    { ok: true },
+    { ok: true, result: null },
+    { ok: true, result: { storySitesAllowed: true } },
+    { ok: true, result: { storySitesAllowed: true, scope: "this-site" } },
+    { ok: true, result: { storySitesAllowed: 1, scope: "all" } },
+    { ok: "true", result: { storySitesAllowed: true, scope: "all" } },
+    undefined,
+    null,
+  ]) {
+    const h = setupHarness({ access: reply });
+    askSetup(h, { id: "q11", request: "access" });
+    await flush();
+    assert.deepEqual(setupAnswers(h)[0].data, { type: "TRACE_SETUP_RESPONSE", id: "q11", ok: false, error: "unavailable" }, JSON.stringify(reply));
+  }
+
+  // A build without the background that answers these says so, and asks nothing.
+  const legacy = createSyncHarness(SETUP_PAGE_URL, { sessionMode: "legacy", navigator: IPHONE });
+  askSetup(legacy, { id: "q12", request: "access" });
+  await flush();
+  assert.deepEqual(setupAnswers(legacy)[0].data, { type: "TRACE_SETUP_RESPONSE", id: "q12", ok: false, error: "unavailable" });
+  assert.deepEqual(legacy.messages.filter(({ type }) => type === "TRACE_SETUP_PAGE_REQUEST"), []);
+});
+
+test("setup: the script still announces itself exactly as before", async () => {
+  const h = setupHarness();
+  assert.deepEqual(statusReadyMessages(h).map(({ data, targetOrigin }) => [data.type, Object.keys(data).sort(), targetOrigin]), [
+    ["TRACE_EXTENSION_STATUS_READY", ["at", "type"], SETUP_ORIGIN],
+  ]);
 });

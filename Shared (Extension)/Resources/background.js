@@ -423,6 +423,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     const path = match[3].split("*").map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*");
     return new RegExp(`^${path}$`).test(url.pathname + url.search);
   }
+  function storySitePattern(pattern) {
+    const match = /^https:\/\/(?:\*\.)?([^/*]+)\//.exec(pattern);
+    return match !== null && archiveHostKindFromSender({ url: `https://${match[1]}/` }) !== null;
+  }
   function installArchiveRecovery(environment) {
     const { runtime, tabs, permissions, scripting, mode } = environment;
     const call = (target, method, args) => extensionCall(target, method, args, runtime, mode);
@@ -432,7 +436,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       pending = (async () => {
         if (!scripting?.executeScript || !permissions?.contains || !runtime.getManifest) return;
         const scripts = runtime.getManifest().content_scripts ?? [];
-        const openTabs = await call(tabs, "query", [{}]);
+        const storySites = [...new Set(scripts.flatMap((script) => script.matches ?? []))].filter(storySitePattern);
+        if (!storySites.length) return;
+        const openTabs = await call(tabs, "query", [{ url: storySites }]);
         await Promise.all(openTabs.map(async (tab) => {
           try {
             if (!Number.isInteger(tab.id) || !tab.url) return;
@@ -699,6 +705,22 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 
   // src/extension-core/archive-readiness.mts
   var ARCHIVE_RUN_THROTTLE_MS = 5 * 60 * 1e3;
+  var ARCHIVE_ACCESS_CONFIRM_DELAY_MS = 2e3;
+  var ARCHIVE_ACCESS_REPEAT_AFTER_MS = 5 * 60 * 1e3;
+  var ARCHIVE_ACCESS_RETRY_DELAYS_MS = Object.freeze([
+    6e4,
+    5 * 6e4,
+    30 * 6e4
+  ]);
+  var ARCHIVE_ACCESS_REPORT_MAX_PASSES = 3;
+  function accessFingerprint(complete, origins) {
+    let hash = 2166136261;
+    for (const character of [...origins].sort().join(" ")) {
+      hash ^= character.codePointAt(0);
+      hash = Math.imul(hash, 16777619) >>> 0;
+    }
+    return `${complete ? "complete" : "incomplete"}:${origins.length}:${hash.toString(16)}`;
+  }
   var SYSTEM_CLOCK = Object.freeze({
     now: () => Date.now()
   });
@@ -707,10 +729,27 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #permissions;
     #clock;
     #lastRunAttemptByHost = /* @__PURE__ */ new Map();
+    #requiredOrigins;
+    #wait;
+    #ledger;
+    #accessReport = null;
+    #accessReportRequestedAgain = false;
+    #accessReportReaderPresent = false;
     constructor(options) {
       this.#receipts = options.receipts;
       this.#permissions = options.permissions;
       this.#clock = options.clock ?? SYSTEM_CLOCK;
+      this.#requiredOrigins = Object.freeze([...options.requiredOrigins ?? []]);
+      this.#wait = options.wait ?? ((ms) => new Promise((resolve) => {
+        setTimeout(resolve, ms);
+      }));
+      let remembered = Object.freeze({ grantSeen: false });
+      this.#ledger = options.accessLedger ?? {
+        read: async () => remembered,
+        write: async (ledger) => {
+          remembered = ledger;
+        }
+      };
     }
     async recordRun(input) {
       const at = this.#clock.now();
@@ -738,6 +777,119 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
       void this.#publishPermissionSnapshot(input.hostKind);
       return { kind: "published" };
+    }
+    /**
+     * Publishes what access is granted right now, on its own rather than
+     * after a run. A run can only ever prove access; this is the reading that
+     * can show access has ended (for example, a one-day grant running out),
+     * because no page script runs to say so.
+     *
+     * It must not raise a false alarm. Access is reported missing only when
+     * this install has held the grant before, two readings in a row say it is
+     * gone, and the list of what is granted came with them. An install that
+     * has never held the grant has nothing to lose, so it sends nothing. When
+     * the required origins are confirmed they are listed by name, since a
+     * broader grant need not spell them out.
+     *
+     * It is also quiet: a reading equal to the last one delivered is not sent
+     * again within a few minutes, and a failed delivery is left alone for
+     * longer after each failure in a row. `readerPresent` (the popup is open)
+     * skips that wait: the reader is here and the app is very likely reachable.
+     */
+    reportAccess(options = {}) {
+      if (options.readerPresent === true) this.#accessReportReaderPresent = true;
+      if (this.#accessReport !== null) {
+        this.#accessReportRequestedAgain = true;
+        return this.#accessReport;
+      }
+      const report = (async () => {
+        let result = { kind: "unknown" };
+        for (let pass = 0; pass < ARCHIVE_ACCESS_REPORT_MAX_PASSES; pass += 1) {
+          this.#accessReportRequestedAgain = false;
+          const readerPresent = this.#accessReportReaderPresent;
+          this.#accessReportReaderPresent = false;
+          result = await this.#reportAccessOnce(readerPresent);
+          if (!this.#accessReportRequestedAgain) break;
+        }
+        return result;
+      })().finally(() => {
+        this.#accessReport = null;
+      });
+      this.#accessReport = report;
+      return report;
+    }
+    async #reportAccessOnce(readerPresent) {
+      const ledger = await this.#readLedger();
+      const startedAt = this.#clock.now();
+      const longestWait = ARCHIVE_ACCESS_RETRY_DELAYS_MS.at(-1);
+      if (!readerPresent && typeof ledger.retryAt === "number" && startedAt < ledger.retryAt && // A clock that moved backwards must not silence readings for good.
+      ledger.retryAt - startedAt <= longestWait) {
+        return { kind: "deferred" };
+      }
+      let reading = await this.#readAccess();
+      if (reading === null) return { kind: "unknown" };
+      if (!reading.complete) {
+        if (!ledger.grantSeen) return { kind: "withheld" };
+        await this.#wait(ARCHIVE_ACCESS_CONFIRM_DELAY_MS);
+        reading = await this.#readAccess();
+        if (reading === null) return { kind: "unknown" };
+      }
+      const grantSeen = true;
+      const fingerprint = accessFingerprint(reading.complete, reading.grantedOrigins);
+      const now = this.#clock.now();
+      if (ledger.delivered === fingerprint && typeof ledger.deliveredAt === "number" && now >= ledger.deliveredAt && now - ledger.deliveredAt < ARCHIVE_ACCESS_REPEAT_AFTER_MS) {
+        if (!ledger.grantSeen) await this.#writeLedger({ ...ledger, grantSeen });
+        return { kind: "current" };
+      }
+      let published = false;
+      try {
+        published = await this.#receipts.publishPermissionSnapshot(Object.freeze({
+          at: now,
+          grantedOrigins: reading.grantedOrigins
+        }));
+      } catch {
+        published = false;
+      }
+      if (published) {
+        await this.#writeLedger({ grantSeen, deliveredAt: now, delivered: fingerprint });
+        return { kind: "published", complete: reading.complete };
+      }
+      const failures = (ledger.failures ?? 0) + 1;
+      const retryAfter = ARCHIVE_ACCESS_RETRY_DELAYS_MS[Math.min(failures, ARCHIVE_ACCESS_RETRY_DELAYS_MS.length) - 1];
+      await this.#writeLedger({ ...ledger, grantSeen, failures, retryAt: now + retryAfter });
+      return { kind: "unavailable" };
+    }
+    async #readLedger() {
+      try {
+        return await this.#ledger.read();
+      } catch {
+        return { grantSeen: false };
+      }
+    }
+    async #writeLedger(ledger) {
+      try {
+        await this.#ledger.write(Object.freeze(ledger));
+      } catch {
+      }
+    }
+    async #readAccess() {
+      const contains = this.#permissions.containsOrigins;
+      if (this.#requiredOrigins.length === 0 || contains === void 0) return null;
+      const [listed, complete] = await Promise.all([
+        this.#permissions.readGrantedOrigins().catch(() => null),
+        contains.call(this.#permissions, this.#requiredOrigins).catch(() => null)
+      ]);
+      if (typeof complete !== "boolean") return null;
+      if (complete) {
+        return {
+          complete: true,
+          grantedOrigins: Object.freeze(
+            Array.from(/* @__PURE__ */ new Set([...this.#requiredOrigins, ...listed ?? []]))
+          )
+        };
+      }
+      if (listed === null) return null;
+      return { complete: false, grantedOrigins: Object.freeze([...listed]) };
     }
     async #publishPermissionSnapshot(hostKind2) {
       let grantedOrigins = null;
@@ -2130,14 +2282,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         return this.#disconnectInternal(true, start.epoch);
       }
       if (acquisition.kind !== "credential") {
+        const reason = acquisition.kind === "absent" ? "credential_absent" : "provider_unavailable";
         return this.#withLock(async () => {
           if (!this.#isCurrentAcquisition(start.epoch)) return { kind: "stale" };
           this.#activeAcquisitionEpoch = null;
-          this.#transition({
-            type: "signed_out",
-            epoch: start.epoch,
-            reason: "provider_unavailable"
-          });
+          this.#transition({ type: "signed_out", epoch: start.epoch, reason });
           return { kind: "unavailable" };
         });
       }
@@ -3122,6 +3271,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var UUID_PATTERN3 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   var ACCOUNT_DATA_ALARM = "traceAccountDataRefresh";
   var SAVED_FILTER_SYNC_ALARM = "traceAo3SavedFiltersSync";
+  var ARCHIVE_ACCESS_REPORT_ALARM = "traceArchiveAccessReport";
   var LEGACY_ACCOUNT_ALARMS = Object.freeze([
     "traceLibraryOverlay"
   ]);
@@ -3148,7 +3298,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var DISABLED_LOCAL_KEYS = Object.freeze([
     ...LEGACY_ACCOUNT_KEYS,
     ...Object.values(SAVED_FILTER_LOCAL_KEYS),
-    "traceArchiveReadiness"
+    "traceArchiveReadiness",
+    "traceArchiveAccessReportedAtV1",
+    "traceArchiveAccessStateV1"
   ]);
   var BrowserSessionStoragePort = class {
     #database;
@@ -3302,6 +3454,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     async clearAll() {
       await this.#clear(ACCOUNT_DATA_ALARM);
       await this.#clear(SAVED_FILTER_SYNC_ALARM);
+      await this.#clear(ARCHIVE_ACCESS_REPORT_ALARM);
       await this.clearRetired();
     }
     async #clear(name) {
@@ -3376,7 +3529,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     publishPermissionSnapshot(snapshot) {
       return this.#publish({
         type: "TRACE_IOS_EXTENSION_HEARTBEAT",
-        hostKind: snapshot.hostKind,
+        ...snapshot.hostKind === void 0 ? {} : { hostKind: snapshot.hostKind },
         at: snapshot.at,
         permissionSnapshot: true,
         grantedOrigins: [...snapshot.grantedOrigins]
@@ -3491,6 +3644,22 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           response.origins.filter((origin) => typeof origin === "string").map((origin) => origin.trim().slice(0, 256)).filter(Boolean)
         )).slice(0, 64)
       );
+    }
+    async containsOrigins(origins) {
+      if (this.#permissions === void 0 || typeof this.#permissions.contains !== "function") {
+        return null;
+      }
+      const response = await withTimeout(
+        extensionCall(
+          this.#permissions,
+          "contains",
+          [{ origins: [...origins] }],
+          this.#runtime,
+          this.#mode
+        ),
+        2e3
+      );
+      return typeof response === "boolean" ? response : null;
     }
   };
   var ExplicitCredentialProvider = class {
@@ -7683,8 +7852,46 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 
   // src/extension-runtime/archive-readiness.mts
   var ARCHIVE_READINESS_MESSAGE_TYPES = Object.freeze({
-    archiveSeen: "TRACE_ARCHIVE_SEEN"
+    archiveSeen: "TRACE_ARCHIVE_SEEN",
+    accessReport: "TRACE_ARCHIVE_ACCESS_REPORT"
   });
+  var ARCHIVE_ACCESS_REPORTED_AT_KEY = "traceArchiveAccessReportedAtV1";
+  var ARCHIVE_ACCESS_STATE_KEY = "traceArchiveAccessStateV1";
+  var ARCHIVE_ACCESS_REPORT_PERIOD_MINUTES = 24 * 60;
+  var ARCHIVE_ACCESS_REPORT_STALE_MS = 20 * 60 * 60 * 1e3;
+  var BrowserArchiveAccessLedger = class {
+    #storage;
+    constructor(storage) {
+      this.#storage = storage;
+    }
+    async read() {
+      const stored = await this.#storage.get([
+        ARCHIVE_ACCESS_REPORTED_AT_KEY,
+        ARCHIVE_ACCESS_STATE_KEY
+      ]);
+      const deliveredAt = stored[ARCHIVE_ACCESS_REPORTED_AT_KEY];
+      const state = isRecord19(stored[ARCHIVE_ACCESS_STATE_KEY]) ? stored[ARCHIVE_ACCESS_STATE_KEY] : {};
+      const time = (value) => typeof value === "number" && Number.isFinite(value) && value > 0;
+      return Object.freeze({
+        grantSeen: state.grantSeen === true,
+        ...time(deliveredAt) ? { deliveredAt } : {},
+        ...typeof state.delivered === "string" ? { delivered: state.delivered.slice(0, 64) } : {},
+        ...Number.isInteger(state.failures) && state.failures > 0 ? { failures: state.failures } : {},
+        ...time(state.retryAt) ? { retryAt: state.retryAt } : {}
+      });
+    }
+    async write(ledger) {
+      await this.#storage.set({
+        ...ledger.deliveredAt === void 0 ? {} : { [ARCHIVE_ACCESS_REPORTED_AT_KEY]: ledger.deliveredAt },
+        [ARCHIVE_ACCESS_STATE_KEY]: {
+          grantSeen: ledger.grantSeen,
+          ...ledger.delivered === void 0 ? {} : { delivered: ledger.delivered },
+          ...ledger.failures === void 0 ? {} : { failures: ledger.failures },
+          ...ledger.retryAt === void 0 ? {} : { retryAt: ledger.retryAt }
+        }
+      });
+    }
+  };
   function isRecord19(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
@@ -7710,8 +7917,15 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           environment.runtime,
           environment.storageMode
         ),
-        ...environment.clock === void 0 ? {} : { clock: environment.clock }
+        ...environment.clock === void 0 ? {} : { clock: environment.clock },
+        ...environment.requiredOrigins === void 0 ? {} : { requiredOrigins: environment.requiredOrigins },
+        ...environment.accessConfirmWait === void 0 ? {} : { wait: environment.accessConfirmWait },
+        ...environment.accessLedger === void 0 ? {} : { accessLedger: environment.accessLedger }
       });
+    }
+    /** See `ArchiveReadinessService.reportAccess`. */
+    reportAccess(options = {}) {
+      return this.#service.reportAccess(options);
     }
     async handle(message, sender) {
       if (!isRecord19(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.archiveSeen) {
@@ -7745,6 +7959,84 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return true;
     });
     return controller;
+  }
+  function runsBesideTraceApp(runtime, mode, userAgent) {
+    if (typeof runtime.sendNativeMessage !== "function") return false;
+    if (/iPhone|iPad|iPod/i.test(userAgent)) return true;
+    if (!/Macintosh/i.test(userAgent) || typeof runtime.getPlatformInfo !== "function") {
+      return false;
+    }
+    return extensionCall(
+      runtime,
+      "getPlatformInfo",
+      [],
+      runtime,
+      mode
+    ).then((info) => info?.os === "ios", () => false);
+  }
+  function installArchiveAccessReport(controller, environment) {
+    const { accessLedger, alarms, permissions, runtime, storageMode } = environment;
+    const now = () => environment.clock?.now() ?? Date.now();
+    const beside = runsBesideTraceApp(
+      runtime,
+      storageMode,
+      environment.platform?.userAgent ?? globalThis.navigator?.userAgent ?? ""
+    );
+    if (beside === false) return { report: async () => ({ kind: "unknown" }) };
+    const supported = Promise.resolve(beside);
+    const report = async (options = {}) => await supported ? controller.reportAccess(options) : { kind: "unknown" };
+    const reportQuietly = () => {
+      void report().catch(() => void 0);
+    };
+    runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (!isRecord19(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport) {
+        return false;
+      }
+      if (Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
+        sendResponse({ ok: false });
+        return false;
+      }
+      void report({ readerPresent: true }).then(
+        (result) => sendResponse({ ok: true, report: result.kind }),
+        () => sendResponse({ ok: true, report: "unavailable" })
+      );
+      return true;
+    });
+    permissions?.onAdded?.addListener(reportQuietly);
+    permissions?.onRemoved?.addListener(reportQuietly);
+    alarms?.onAlarm?.addListener((alarm) => {
+      if (alarm?.name === ARCHIVE_ACCESS_REPORT_ALARM) reportQuietly();
+    });
+    void supported.then(async (yes) => {
+      if (!yes) return;
+      const existing = typeof alarms?.get === "function" ? await extensionCall(
+        alarms,
+        "get",
+        [ARCHIVE_ACCESS_REPORT_ALARM],
+        runtime,
+        storageMode
+      ).catch(() => void 0) : void 0;
+      if (!isRecord19(existing)) {
+        try {
+          const created = alarms?.create?.(ARCHIVE_ACCESS_REPORT_ALARM, {
+            periodInMinutes: ARCHIVE_ACCESS_REPORT_PERIOD_MINUTES
+          });
+          if (created && typeof created.then === "function") {
+            await Promise.resolve(created).catch(() => void 0);
+          }
+        } catch {
+          void runtime.lastError;
+        }
+      }
+      const ledger = await accessLedger.read().catch(() => null);
+      if (ledger === null) return;
+      const deliveredAt = ledger.deliveredAt;
+      if (typeof deliveredAt === "number" && deliveredAt <= now() && now() - deliveredAt < ARCHIVE_ACCESS_REPORT_STALE_MS) {
+        return;
+      }
+      reportQuietly();
+    }).catch(() => void 0);
+    return { report };
   }
 
   // src/extension-runtime/earned-permission-registration.mts
@@ -8048,6 +8340,355 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     return controller;
   }
 
+  // src/extension-runtime/setup-page.mts
+  var SETUP_PAGE_MESSAGE = "TRACE_SETUP_PAGE_REQUEST";
+  var SETUP_ACCESS_PUSH_MESSAGE = "TRACE_SETUP_ACCESS_PUSH";
+  var SETUP_STORY_TAB_LIMIT = 5;
+  var SETUP_TAB_TITLE_MAX_LENGTH = 120;
+  var SETUP_STORY_LIST_LIFE_MS = 12e4;
+  var SETUP_REQUEST_LIMIT = 20;
+  var SETUP_REQUEST_WINDOW_MS = 1e4;
+  var SETUP_REQUESTER_LIMIT = 32;
+  var STORY_SITE_ORIGINS = /* @__PURE__ */ Object.freeze([
+    "https://*.archiveofourown.org/*",
+    "https://*.archiveofourown.gay/*",
+    "https://archive.transformativeworks.org/*",
+    "https://www.fanfiction.net/*",
+    "https://m.fanfiction.net/*"
+  ]);
+  var EVERY_SITE_ORIGINS = /* @__PURE__ */ new Set(["<all_urls>", "*://*/*", "https://*/*"]);
+  function ownWindow(tab) {
+    if (!isRecord21(tab) || tab.incognito === true) return null;
+    return typeof tab.windowId === "number" && Number.isSafeInteger(tab.windowId) ? tab.windowId : null;
+  }
+  function isRecord21(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function refused(error) {
+    return Object.freeze({ ok: false, error });
+  }
+  function isSetupPagePath(pathname) {
+    return /^\/safari-setup\/?$/.test(pathname);
+  }
+  function storyPageSite(rawUrl, webOrigin) {
+    if (typeof rawUrl !== "string") return null;
+    const site = archiveHostKindFromSender({ url: rawUrl });
+    if (site === null || isBlockedArchivePath(rawUrl, site)) return null;
+    if (workKeyFromArchiveUrl(rawUrl, site) === null) return null;
+    return classifyActiveTabUrl(rawUrl, webOrigin).kind === "supported_story" ? site : null;
+  }
+  var CONTROL_CHARACTERS = /* @__PURE__ */ new RegExp("[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+", "g");
+  var HIDDEN_CHARACTERS = /* @__PURE__ */ new RegExp(
+    "[\\u061c\\u200b\\u200e\\u200f\\u202a-\\u202e\\u2060-\\u2064\\u2066-\\u2069\\ufeff]",
+    "g"
+  );
+  function isAddressLike(line) {
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(line)) return true;
+    if (line === "" || /\s/.test(line)) return false;
+    if (/^[a-z][a-z0-9+.-]*:/i.test(line)) {
+      try {
+        return Boolean(new URL(line));
+      } catch {
+        return false;
+      }
+    }
+    try {
+      const host = new URL(`https://${line}`).hostname;
+      return archiveHostKindFromSender({ url: `https://${host}/` }) !== null;
+    } catch {
+      return false;
+    }
+  }
+  function ownAddress(tabUrl) {
+    if (typeof tabUrl !== "string") return null;
+    try {
+      const url = new URL(tabUrl);
+      const path = url.pathname.replace(/\/+$/, "");
+      return path === "" ? null : (url.hostname.replace(/^(?:www|m)\./, "") + path).toLowerCase();
+    } catch {
+      return null;
+    }
+  }
+  function tabTitle(value, tabUrl) {
+    if (typeof value !== "string") return "";
+    const line = value.replace(CONTROL_CHARACTERS, " ").replace(HIDDEN_CHARACTERS, "").replace(/\s+/g, " ").trim();
+    if (isAddressLike(line)) return "";
+    const own = ownAddress(tabUrl);
+    if (own !== null && line.toLowerCase().includes(own)) return "";
+    return Array.from(line).slice(0, SETUP_TAB_TITLE_MAX_LENGTH).join("");
+  }
+  var SetupPageController = class {
+    #runtime;
+    #tabs;
+    #mode;
+    #webOrigin;
+    #webTabPattern;
+    #webAccessPattern;
+    #storyOrigins;
+    #storyTabPatterns;
+    #access;
+    #now;
+    /** Per requester: the story tabs it was last given, in which window, and when. */
+    #listed = /* @__PURE__ */ new Map();
+    #requests = /* @__PURE__ */ new Map();
+    #push = null;
+    #pushAgain = false;
+    constructor(environment) {
+      this.#runtime = environment.runtime;
+      this.#tabs = environment.tabs;
+      this.#mode = environment.mode;
+      const webUrl = new URL(environment.webOrigin);
+      this.#webOrigin = webUrl.origin;
+      this.#webTabPattern = `${webUrl.protocol}//${webUrl.hostname}/safari-setup*`;
+      this.#webAccessPattern = `${webUrl.protocol}//${webUrl.hostname}/*`;
+      this.#storyOrigins = Object.freeze([...environment.storyOrigins ?? STORY_SITE_ORIGINS]);
+      this.#storyTabPatterns = Object.freeze([.../* @__PURE__ */ new Set([...this.#storyOrigins, "https://*.ao3.org/*"])]);
+      this.#access = new BrowserArchivePermissionSnapshotPort(
+        environment.permissions,
+        environment.runtime,
+        environment.mode
+      );
+      this.#now = () => environment.clock?.now() ?? Date.now();
+    }
+    /** `null`: not this controller's message. */
+    async handle(message, sender) {
+      if (!isRecord21(message) || message.type !== SETUP_PAGE_MESSAGE) return null;
+      const requester = this.#requester(sender);
+      if (requester === null) {
+        const tabId = sender?.tab?.id;
+        if (typeof tabId === "number") this.#listed.delete(`page:${tabId}`);
+        return refused("forbidden");
+      }
+      if (!this.#admit(requester.key)) return refused("rate_limited");
+      const request = message.request;
+      const keys = Object.keys(message).length;
+      if (request === "access") {
+        if (keys !== 2) return refused("invalid_request");
+        const access = await this.#readAccess();
+        return access === null ? refused("unavailable") : Object.freeze({ ok: true, result: access });
+      }
+      if (request === "story-tabs") {
+        const overTab = message.overTab;
+        if (requester.tab === null) {
+          if (keys !== 3 || typeof overTab !== "number" || !Number.isSafeInteger(overTab) || overTab < 0) {
+            return refused("invalid_request");
+          }
+        } else if (keys !== 2) {
+          return refused("invalid_request");
+        }
+        const tabs = await this.#storyTabs(requester, requester.tab === null ? overTab : null);
+        return tabs === null ? refused("unavailable") : Object.freeze({ ok: true, result: Object.freeze({ tabs }) });
+      }
+      if (request === "switch-to-tab") {
+        const tabId = message.tabId;
+        if (keys !== 3 || typeof tabId !== "number" || !Number.isSafeInteger(tabId) || tabId < 0) {
+          return refused("invalid_request");
+        }
+        return this.#switchToTab(requester, tabId);
+      }
+      return refused(typeof request === "string" ? "unknown_request" : "invalid_request");
+    }
+    /** Story-site access changed: tell every open setup page. */
+    accessChanged() {
+      if (this.#push !== null) {
+        this.#pushAgain = true;
+        return this.#push;
+      }
+      const push = (async () => {
+        do {
+          this.#pushAgain = false;
+          await this.#pushAccess();
+        } while (this.#pushAgain);
+      })().finally(() => {
+        this.#push = null;
+      });
+      this.#push = push;
+      return push;
+    }
+    /** Who is asking: the setup page (by tab) or this extension's popup. */
+    #requester(sender) {
+      if (isPopupSender(sender, this.#runtime.id)) {
+        return this.#runtime.id !== void 0 && sender?.id === this.#runtime.id ? { key: "popup", tab: null } : null;
+      }
+      if (!isTraceWebSender(sender, this.#runtime.id, this.#webOrigin)) return null;
+      const tabId = sender?.tab?.id;
+      if (typeof tabId !== "number" || !Number.isSafeInteger(tabId)) return null;
+      const addresses = [sender?.url, sender?.tab?.url].filter((address) => address !== void 0);
+      if (addresses.length === 0) return null;
+      if (!addresses.every((address) => this.#isSetupPage(address))) return null;
+      return { key: `page:${tabId}`, tab: sender?.tab ?? null };
+    }
+    #isSetupPage(rawUrl) {
+      if (typeof rawUrl !== "string") return false;
+      try {
+        const url = new URL(rawUrl);
+        return url.origin === this.#webOrigin && isSetupPagePath(url.pathname);
+      } catch {
+        return false;
+      }
+    }
+    #admit(requester) {
+      const now = this.#now();
+      const recent = (this.#requests.get(requester) ?? []).filter(
+        (at) => at <= now && now - at < SETUP_REQUEST_WINDOW_MS
+      );
+      if (recent.length >= SETUP_REQUEST_LIMIT) {
+        this.#requests.set(requester, recent);
+        return false;
+      }
+      recent.push(now);
+      this.#requests.delete(requester);
+      this.#requests.set(requester, recent);
+      while (this.#requests.size > SETUP_REQUESTER_LIMIT) {
+        const oldest = this.#requests.keys().next().value;
+        this.#requests.delete(oldest);
+        this.#listed.delete(oldest);
+      }
+      return true;
+    }
+    async #readAccess() {
+      const [allowed, listed] = await Promise.all([
+        this.#access.containsOrigins(this.#storyOrigins).catch(() => null),
+        this.#access.readGrantedOrigins().catch(() => null)
+      ]);
+      if (typeof allowed !== "boolean") return null;
+      if (!allowed) return Object.freeze({ storySitesAllowed: false, scope: "this-site" });
+      const everySite = (listed ?? []).some((origin) => EVERY_SITE_ORIGINS.has(origin));
+      return Object.freeze({
+        storySitesAllowed: true,
+        scope: everySite ? "all" : "story-sites"
+      });
+    }
+    /** The tab the popup says it is open over, when that tab is the setup page. */
+    async #setupTab(tabId) {
+      if (typeof this.#tabs.get !== "function") return null;
+      try {
+        const tab = await this.#call("get", [tabId]);
+        return isRecord21(tab) && tab.id === tabId && this.#isSetupPage(tab.url) ? tab : null;
+      } catch {
+        return null;
+      }
+    }
+    async #storyTabs(requester, overTab) {
+      this.#listed.delete(requester.key);
+      const access = await this.#readAccess();
+      if (access === null) return null;
+      if (!access.storySitesAllowed) return Object.freeze([]);
+      const windowId = ownWindow(requester.tab ?? (overTab === null ? null : await this.#setupTab(overTab)));
+      if (windowId === null) return Object.freeze([]);
+      let tabs;
+      try {
+        tabs = await this.#call("query", [{ windowId, url: [...this.#storyTabPatterns] }]);
+      } catch {
+        return null;
+      }
+      const stories = [];
+      (Array.isArray(tabs) ? tabs : []).forEach((tab, order) => {
+        if (!isRecord21(tab) || typeof tab.id !== "number" || !Number.isSafeInteger(tab.id) || tab.id < 0) return;
+        if (ownWindow(tab) !== windowId) return;
+        const site = storyPageSite(tab.url, this.#webOrigin);
+        if (site !== null) stories.push({ tab, site, order });
+      });
+      const used = (tab) => typeof tab.lastAccessed === "number" && Number.isFinite(tab.lastAccessed) ? tab.lastAccessed : 0;
+      stories.sort(
+        (left, right) => used(right.tab) - used(left.tab) || Number(right.tab.active === true) - Number(left.tab.active === true) || left.order - right.order
+      );
+      const answer = stories.slice(0, SETUP_STORY_TAB_LIMIT).map(
+        ({ tab, site }) => Object.freeze({ tabId: tab.id, title: tabTitle(tab.title, tab.url), site })
+      );
+      this.#listed.set(requester.key, {
+        ids: new Set(answer.map(({ tabId }) => tabId)),
+        windowId,
+        at: this.#now()
+      });
+      return Object.freeze(answer);
+    }
+    async #switchToTab(requester, tabId) {
+      const listed = this.#listed.get(requester.key);
+      if (listed === void 0 || !listed.ids.has(tabId)) return refused("not_listed");
+      const age = this.#now() - listed.at;
+      const moved = requester.tab !== null && ownWindow(requester.tab) !== listed.windowId;
+      if (age < 0 || age > SETUP_STORY_LIST_LIFE_MS || moved) {
+        this.#listed.delete(requester.key);
+        return refused("not_listed");
+      }
+      if (typeof this.#tabs.get !== "function" || typeof this.#tabs.update !== "function") {
+        return refused("unavailable");
+      }
+      const access = await this.#readAccess();
+      if (access === null) return refused("unavailable");
+      if (!access.storySitesAllowed) return refused("not_allowed");
+      let tab;
+      try {
+        tab = await this.#call("get", [tabId]);
+      } catch {
+        tab = null;
+      }
+      if (!isRecord21(tab) || tab.id !== tabId || ownWindow(tab) !== listed.windowId || storyPageSite(tab.url, this.#webOrigin) === null) {
+        return refused("not_a_story");
+      }
+      try {
+        await this.#call("update", [tabId, { active: true }]);
+      } catch {
+        return refused("switch_failed");
+      }
+      return Object.freeze({ ok: true });
+    }
+    async #pushAccess() {
+      const held = await this.#access.containsOrigins([this.#webAccessPattern]).catch(() => null);
+      if (held !== true) return;
+      const access = await this.#readAccess();
+      if (access === null) return;
+      let tabs;
+      try {
+        tabs = await this.#call("query", [{ url: [this.#webTabPattern] }]);
+      } catch {
+        return;
+      }
+      const message = Object.freeze({ type: SETUP_ACCESS_PUSH_MESSAGE, ...access });
+      for (const tab of Array.isArray(tabs) ? tabs : []) {
+        if (typeof tab?.id !== "number" || !this.#isSetupPage(tab.url)) continue;
+        try {
+          await this.#call("sendMessage", [tab.id, message]);
+        } catch {
+        }
+      }
+    }
+    #call(method, args) {
+      return extensionCall(
+        this.#tabs,
+        method,
+        args,
+        this.#runtime,
+        this.#mode
+      );
+    }
+  };
+  function installSetupPageRuntime(environment) {
+    const beside = runsBesideTraceApp(
+      environment.runtime,
+      environment.mode,
+      environment.platform?.userAgent ?? globalThis.navigator?.userAgent ?? ""
+    );
+    if (beside === false) return null;
+    const supported = Promise.resolve(beside);
+    const controller = new SetupPageController(environment);
+    environment.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (!isRecord21(message) || message.type !== SETUP_PAGE_MESSAGE) return false;
+      void supported.then((yes) => yes ? controller.handle(message, sender) : refused("unavailable")).then(
+        (response) => sendResponse(response ?? refused("unavailable")),
+        () => sendResponse(refused("unavailable"))
+      );
+      return true;
+    });
+    const changed = () => {
+      void supported.then((yes) => yes ? controller.accessChanged() : void 0).catch(() => void 0);
+    };
+    environment.permissions?.onAdded?.addListener(changed);
+    environment.permissions?.onRemoved?.addListener(changed);
+    return controller;
+  }
+
   // src/extension-runtime/index.mts
   var UUID_PATTERN7 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   function fallbackUuid(seed) {
@@ -8089,13 +8730,27 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           new BrowserStorage(extension.storage.local, extension.runtime, storageMode)
         )
       });
-      installArchiveReadinessRuntime({
+      const accessLedger = new BrowserArchiveAccessLedger(
+        new BrowserStorage(extension.storage.local, extension.runtime, storageMode)
+      );
+      const archiveReadiness = installArchiveReadinessRuntime({
         runtime: extension.runtime,
         ...extension.permissions === void 0 ? {} : { permissions: extension.permissions },
         storageMode,
         status: archiveReadinessStatus,
-        publishTrackingPreference: () => session?.publishTrackingPreference() ?? Promise.resolve()
+        publishTrackingPreference: () => session?.publishTrackingPreference() ?? Promise.resolve(),
+        ...define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default === null ? {} : { requiredOrigins: define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.origins },
+        accessLedger
       });
+      if (define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default !== null && extension.permissions !== void 0) {
+        installArchiveAccessReport(archiveReadiness, {
+          runtime: extension.runtime,
+          permissions: extension.permissions,
+          alarms: extension.alarms,
+          accessLedger,
+          storageMode
+        });
+      }
       if (define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default !== null && extension.permissions !== void 0 && (define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.registrationMode === "static" || extension.scripting !== void 0)) {
         installEarnedPermissionRegistrationRuntime({
           runtime: extension.runtime,
@@ -8144,6 +8799,16 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     extension.storage.onChanged?.addListener((changes, area) => {
       if (area === "local" && "prefAutoTrackEnabled" in changes) void session?.publishTrackingPreference();
     });
+    if (define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default !== null) {
+      installSetupPageRuntime({
+        runtime: extension.runtime,
+        tabs: extension.tabs,
+        ...extension.permissions === void 0 ? {} : { permissions: extension.permissions },
+        mode: storageMode,
+        webOrigin: "https://www.tracefiction.com",
+        storyOrigins: define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.origins
+      });
+    }
   } catch {
     scope.__traceSessionRuntimeBootFailed = true;
   }

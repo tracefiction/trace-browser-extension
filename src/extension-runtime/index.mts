@@ -2,8 +2,13 @@ import { createActivityFetch } from "./activity-fetch.mjs";
 import { installArchiveHostAccess } from "./archive-host-access.mjs";
 import { installArchiveRecovery } from "./archive-recovery.mjs";
 import { installSessionRuntime, type SessionMode, type SessionRuntimeController } from "./controller.mjs";
-import { installArchiveReadinessRuntime } from "./archive-readiness.mjs";
+import {
+  BrowserArchiveAccessLedger,
+  installArchiveAccessReport,
+  installArchiveReadinessRuntime,
+} from "./archive-readiness.mjs";
 import { installEarnedPermissionRegistrationRuntime } from "./earned-permission-registration.mjs";
+import { installSetupPageRuntime } from "./setup-page.mjs";
 import { installTraceFirstInstallActivation } from "./trace-web-navigation.mjs";
 import { rememberConnectIntent } from "./connect-intent.mjs";
 export * from "./account-projection.mjs";
@@ -117,7 +122,10 @@ try {
     });
     // Install positive archive-run evidence before any IndexedDB, credential,
     // account-projection, or session-restoration work can stall the worker.
-    installArchiveReadinessRuntime({
+    const accessLedger = new BrowserArchiveAccessLedger(
+      new BrowserStorage(extension.storage.local, extension.runtime, storageMode),
+    );
+    const archiveReadiness = installArchiveReadinessRuntime({
       runtime: extension.runtime,
       ...(extension.permissions === undefined
         ? {}
@@ -125,7 +133,23 @@ try {
       storageMode,
       status: archiveReadinessStatus,
       publishTrackingPreference: () => session?.publishTrackingPreference() ?? Promise.resolve(),
+      ...(__TRACE_IOS_EARNED_PERMISSION_CONFIG__ === null
+        ? {}
+        : { requiredOrigins: __TRACE_IOS_EARNED_PERMISSION_CONFIG__.origins }),
+      accessLedger,
     });
+    if (
+      __TRACE_IOS_EARNED_PERMISSION_CONFIG__ !== null &&
+      extension.permissions !== undefined
+    ) {
+      installArchiveAccessReport(archiveReadiness, {
+        runtime: extension.runtime,
+        permissions: extension.permissions,
+        alarms: extension.alarms,
+        accessLedger,
+        storageMode,
+      });
+    }
     if (
       __TRACE_IOS_EARNED_PERMISSION_CONFIG__ !== null &&
       extension.permissions !== undefined &&
@@ -178,6 +202,21 @@ try {
   extension.storage.onChanged?.addListener((changes, area) => {
     if (area === "local" && "prefAutoTrackEnabled" in changes) void session?.publishTrackingPreference();
   });
+  if (__TRACE_SESSION_MODE__ === "kernel" && __TRACE_IOS_EARNED_PERMISSION_CONFIG__ !== null) {
+    // Trace's own setup page, and the popup over it, ask about story-site
+    // access and open story tabs. Only the build that ships beside the Trace
+    // app carries this; it decides for itself that it is on iPhone or iPad.
+    // Its listeners are added in this same first turn, so a permission change
+    // that wakes the background still reaches an open page.
+    installSetupPageRuntime({
+      runtime: extension.runtime,
+      tabs: extension.tabs,
+      ...(extension.permissions === undefined ? {} : { permissions: extension.permissions }),
+      mode: storageMode,
+      webOrigin: __TRACE_WEB_ORIGIN__,
+      storyOrigins: __TRACE_IOS_EARNED_PERMISSION_CONFIG__.origins,
+    });
+  }
 } catch {
   scope.__traceSessionRuntimeBootFailed = true;
 }

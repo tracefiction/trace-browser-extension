@@ -46,6 +46,7 @@ const UUID_PATTERN =
 
 export const ACCOUNT_DATA_ALARM = "traceAccountDataRefresh" as const;
 export const SAVED_FILTER_SYNC_ALARM = "traceAo3SavedFiltersSync" as const;
+export const ARCHIVE_ACCESS_REPORT_ALARM = "traceArchiveAccessReport" as const;
 export const LEGACY_ACCOUNT_ALARMS = Object.freeze([
   "traceLibraryOverlay",
 ] as const);
@@ -76,6 +77,8 @@ export const DISABLED_LOCAL_KEYS = Object.freeze([
   ...LEGACY_ACCOUNT_KEYS,
   ...Object.values(SAVED_FILTER_LOCAL_KEYS),
   "traceArchiveReadiness",
+  "traceArchiveAccessReportedAtV1",
+  "traceArchiveAccessStateV1",
 ] as const);
 
 export class BrowserSessionStoragePort implements SessionStoragePort {
@@ -268,6 +271,7 @@ export class KernelAlarmState {
   async clearAll(): Promise<void> {
     await this.#clear(ACCOUNT_DATA_ALARM);
     await this.#clear(SAVED_FILTER_SYNC_ALARM);
+    await this.#clear(ARCHIVE_ACCESS_REPORT_ALARM);
     await this.clearRetired();
   }
 
@@ -359,7 +363,7 @@ export class NativeArchiveReadinessReceiptPort implements ArchiveReadinessReceip
   publishPermissionSnapshot(snapshot: ArchivePermissionSnapshot): Promise<boolean> {
     return this.#publish({
       type: "TRACE_IOS_EXTENSION_HEARTBEAT",
-      hostKind: snapshot.hostKind,
+      ...(snapshot.hostKind === undefined ? {} : { hostKind: snapshot.hostKind }),
       at: snapshot.at,
       permissionSnapshot: true,
       grantedOrigins: [...snapshot.grantedOrigins],
@@ -499,6 +503,23 @@ export class BrowserArchivePermissionSnapshotPort implements ArchivePermissionSn
           .filter(Boolean),
       )).slice(0, 64),
     );
+  }
+
+  async containsOrigins(origins: readonly string[]): Promise<boolean | null> {
+    if (this.#permissions === undefined || typeof this.#permissions.contains !== "function") {
+      return null;
+    }
+    const response = await withTimeout(
+      extensionCall<unknown>(
+        this.#permissions as unknown as Record<string, (...args: unknown[]) => unknown>,
+        "contains",
+        [{ origins: [...origins] }],
+        this.#runtime,
+        this.#mode,
+      ),
+      2_000,
+    );
+    return typeof response === "boolean" ? response : null;
   }
 }
 
