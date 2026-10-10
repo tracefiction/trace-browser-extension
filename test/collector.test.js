@@ -8439,26 +8439,45 @@ test("a save refused while the background wakes is not re-sent once another acco
 // first save at once, before the background has an account to save it for.
 // The harness lets a test choose which account the background answers for,
 // hold the replies that would tell the page about it, and answer each save.
-function owedSaveHarness({ binding = null } = {}) {
-  const account = { binding };
+function owedSaveHarness({ binding = null, tab = null, storyTextLater = false } = {}) {
+  // What outlives a page in its tab: the account the background answers for,
+  // the account the story is saved in, and the tab's session storage.
+  const world = tab || { binding, savedFor: null, marker: null };
   const held = [];
   const neverLeaves = [];
   let holding = false;
-  const snapshot = () => account.binding === null
+  let storyText = null;
+  const entryId = "00000000-0000-4000-8000-0000000a0002";
+  const snapshot = () => world.binding === null
     ? { state: "signed_out", reason: "provider_unavailable", canExecuteAuthenticated: false }
     : { state: "connected", reason: "none", canExecuteAuthenticated: true };
-  const reply = (extra) => ({ ok: true, binding: account.binding, snapshot: snapshot(), ...extra });
+  const reply = (extra) => ({ ok: true, binding: world.binding, snapshot: snapshot(), ...extra });
   const projection = () => reply({ projection: { entries: {}, workPreferences: {},
     syncVersion: "2026-10-09T12:00:00.000Z" } });
+  const savedState = () => ({ workKey: "ffn:7038840", status: "saved", entryId,
+    entry: { entryId, status: "PLANNING", readerStatus: "PLANNING", canonicalReaderStatus: "SAVED",
+      chapters: { current: 1, total: 12 } },
+    syncVersion: "2026-10-09T12:00:00.000Z" });
+  const workState = () => reply({
+    state: world.binding !== null && world.savedFor === world.binding ? savedState() : null,
+  });
   const h = createStoryAutoTrackPendingHarness({
     sessionMode: "kernel",
     holdAutoTrack: true,
     autoTrackLastErrors: neverLeaves,
     pendingFirstStoryResponse: { ok: true, url: "" },
+    mutateDom(dom) {
+      if (world.marker !== null) dom.window.sessionStorage.setItem(AUTO_TRACK_MARKER, world.marker);
+      if (storyTextLater) {
+        const node = dom.window.document.querySelector("#storytext, #storytextp, #storycontent");
+        storyText = { node, parent: node.parentNode, next: node.nextSibling };
+        node.remove();
+      }
+    },
     onSendMessage(message, respond) {
       if (message.type === "TRACE_WORK_STATE_GET") {
-        if (holding) held.push(() => respond(reply({ state: null })));
-        else if (typeof respond === "function") respond(reply({ state: null }));
+        if (holding) held.push(() => respond(workState()));
+        else if (typeof respond === "function") respond(workState());
         return true;
       }
       if (message.type === "TRACE_ACCOUNT_PROJECTION_GET") {
@@ -8469,25 +8488,24 @@ function owedSaveHarness({ binding = null } = {}) {
       return false;
     },
   });
-  const entryId = "00000000-0000-4000-8000-0000000a0002";
   return {
     h,
     sends: () => autoTrackSends(h),
     // The background's next answers come from this account (null: none).
-    answerAs(next) { account.binding = next; },
+    answerAs(next) { world.binding = next; },
     // The storage change that tells an open page to read the account again.
     announce() { h.dispatchStorageChange("traceAccountProjectionRevisionV1", Date.now()); },
     hold() { holding = true; },
     release() { holding = false; held.splice(0).forEach((send) => send()); },
     refuse(error = "unavailable") {
-      h.autoTrackCallback({ ok: false, error, binding: account.binding, snapshot: snapshot() });
+      h.autoTrackCallback({ ok: false, error, binding: world.binding, snapshot: snapshot() });
     },
     confirm() {
-      h.autoTrackCallback(reply({ state: { workKey: "ffn:7038840", status: "saved", entryId,
-        entry: { entryId, status: "PLANNING", readerStatus: "PLANNING", canonicalReaderStatus: "SAVED",
-          chapters: { current: 1, total: 12 } },
-        syncVersion: "2026-10-09T12:00:00.000Z" } }));
+      world.savedFor = world.binding;
+      h.autoTrackCallback(reply({ state: savedState() }));
     },
+    // The background wrote a request whose page was gone before the answer.
+    savedWithoutAnswer() { world.savedFor = world.binding; },
     // The next save request fails before it reaches the background.
     nextSaveNeverLeaves() { neverLeaves.push(NO_RECEIVER); },
     show(visible) {
@@ -8503,9 +8521,25 @@ function owedSaveHarness({ binding = null } = {}) {
       this.show(true);
       h.dom.window.dispatchEvent(new h.dom.window.Event("focus"));
     },
+    // The chapter text arrives after the page first looked for it.
+    storyTextArrives() {
+      storyText.parent.insertBefore(storyText.node, storyText.next);
+      this.pageshow();
+    },
+    // The page is shown again without being loaded again.
+    pageshow() { h.dom.window.dispatchEvent(new h.dom.window.Event("pageshow")); },
+    marker() { return JSON.parse(h.dom.window.sessionStorage.getItem(AUTO_TRACK_MARKER) || "null"); },
+    // The tab is reloaded: this page is gone and a new one takes its place.
+    reload(options = {}) {
+      world.marker = h.dom.window.sessionStorage.getItem(AUTO_TRACK_MARKER);
+      h.dom.window.close();
+      return owedSaveHarness({ tab: world, ...options });
+    },
+    handle: () => h.dom.window.document.querySelector("[data-trace-story-handle]").textContent || "",
     close() { h.dom.window.close(); },
   };
 }
+const AUTO_TRACK_MARKER = "trace:auto-track:last";
 
 // However the page comes to learn that an account has connected, a save that
 // was refused for want of one ends as one confirmed save and no further
@@ -8761,6 +8795,199 @@ test("an owed save outlives a request that never reached the background", async 
   p.confirm();
   await delay(3_500);
   assert.equal(p.sends(), 3, "and the earlier attempt is not repeated as well");
+  p.close();
+});
+
+// The popup reloads the story tab when it opens before the page has reported
+// in, and always on the route that allows one website first. The page that
+// asked for the first save is gone; the page that takes its place must still
+// end with one confirmed save, and must not send a second if the first one
+// was written after all. `sends` counts what the reloaded page itself sends.
+const INHERITED_GRACE_MS = 4_000;
+const RELOAD_ORDERINGS = [
+  { name: "reloaded after the refusal, and the account connects later", sends: 1,
+    async run(p) {
+      p.refuse(); await delay(100);
+      const q = p.reload(); await delay(300);
+      assert.equal(q.sends(), 0, "nothing is asked while no account is connected");
+      q.answerAs("1.first"); q.announce(); await delay(INHERITED_GRACE_MS + 800);
+      return q;
+    } },
+  { name: "reloaded while the first request is unanswered (the reload that follows allowing one website), and the account connects later",
+    sends: 1,
+    async run(p) {
+      const q = p.reload(); await delay(300);
+      assert.equal(q.sends(), 0);
+      q.answerAs("1.first"); q.announce(); await delay(1_000);
+      assert.equal(q.sends(), 0, "the earlier request is given time to show up as saved");
+      await delay(INHERITED_GRACE_MS);
+      return q;
+    } },
+  { name: "reloaded twice before the account connects", sends: 1,
+    async run(p) {
+      let q = p.reload(); await delay(200);
+      q = q.reload(); await delay(200);
+      q.answerAs("1.first"); q.announce(); await delay(INHERITED_GRACE_MS + 800);
+      return q;
+    } },
+  { name: "reloaded while unanswered, and the account connects in time to write the first request", sends: 0,
+    async run(p) {
+      const q = p.reload(); await delay(300);
+      q.answerAs("1.first"); q.announce(); await delay(1_500);
+      // The background finishes the first request; the page that sent it is gone.
+      q.savedWithoutAnswer(); q.announce(); q.pageshow();
+      await delay(INHERITED_GRACE_MS);
+      return q;
+    } },
+  { name: "the account connected before the reloaded page heard anything, after the first request was refused", sends: 1,
+    async run(p) {
+      p.refuse(); await delay(100);
+      p.answerAs("1.first");
+      const q = p.reload(); await delay(1_000);
+      assert.equal(q.sends(), 0);
+      await delay(INHERITED_GRACE_MS);
+      return q;
+    } },
+  { name: "the account connected before the reloaded page heard anything, and wrote the first request", sends: 0,
+    async run(p) {
+      p.answerAs("1.first"); p.savedWithoutAnswer();
+      const q = p.reload(); await delay(INHERITED_GRACE_MS + 800);
+      return q;
+    } },
+  { name: "the reloaded page learns of the account before it can read the story", sends: 1,
+    async run(p) {
+      p.refuse(); await delay(100);
+      p.answerAs("1.first");
+      const q = p.reload({ storyTextLater: true }); await delay(500);
+      q.storyTextArrives(); await delay(INHERITED_GRACE_MS + 800);
+      return q;
+    } },
+  { name: "the account connects while the reloaded page is hidden", sends: 1,
+    async run(p) {
+      const q = p.reload(); await delay(300);
+      q.show(false);
+      q.answerAs("1.first"); q.announce(); await delay(INHERITED_GRACE_MS + 800);
+      assert.equal(q.sends(), 0, "nothing is sent from a hidden page");
+      q.show(true); await delay(INHERITED_GRACE_MS + 800);
+      return q;
+    } },
+];
+
+for (const ordering of RELOAD_ORDERINGS) {
+  test(`a first save left open by a reloaded page is made once: ${ordering.name}`, async () => {
+    const p = owedSaveHarness();
+    await delay(50);
+    assert.equal(p.sends(), 1, "the first page asks once on load");
+    assert.equal(p.marker().open, true, "and leaves its request marked as open");
+    const q = await ordering.run(p);
+    assert.equal(q.sends(), ordering.sends, "what the reloaded page sends for the connected account");
+    if (ordering.sends > 0) q.confirm();
+    // Past the quiet retry and the wait, with a repeated announcement, a
+    // return to the tab and the page being shown again.
+    await delay(1_800);
+    q.announce();
+    q.returnToTab();
+    q.pageshow();
+    await delay(INHERITED_GRACE_MS + 1_200);
+    assert.equal(q.sends(), ordering.sends, "nothing more is asked");
+    assert.match(q.handle(), /Saved/, "the page shows the story as saved");
+    q.close();
+  });
+}
+
+test("a reloaded page asks for nothing while no account connects", async () => {
+  const p = owedSaveHarness();
+  await delay(50);
+  p.refuse();
+  await delay(100);
+  const q = p.reload();
+  for (let visit = 0; visit < 3; visit += 1) {
+    await delay(400);
+    q.returnToTab();
+    q.pageshow();
+    q.announce();
+    await delay(1_600);
+  }
+  assert.equal(q.sends(), 0);
+  q.close();
+});
+
+test("a save inherited by a reloaded page is not sent for an account that replaces the first one it hears of", async () => {
+  const p = owedSaveHarness();
+  await delay(50);
+  const q = p.reload();
+  await delay(300);
+  q.answerAs("1.first");
+  q.announce();
+  await delay(1_000);
+  q.answerAs("2.second");
+  q.announce();
+  await delay(INHERITED_GRACE_MS + 1_500);
+  q.returnToTab();
+  await delay(INHERITED_GRACE_MS + 1_500);
+  assert.equal(q.sends(), 0);
+  q.close();
+});
+
+test("a save inherited by a reloaded page is dropped when the first account it hears of leaves", async () => {
+  const p = owedSaveHarness();
+  await delay(50);
+  const q = p.reload();
+  await delay(300);
+  q.answerAs("1.first");
+  q.announce();
+  await delay(1_000);
+  q.answerAs(null);
+  q.announce();
+  await delay(500);
+  q.answerAs("2.second");
+  q.announce();
+  await delay(INHERITED_GRACE_MS + 1_500);
+  q.returnToTab();
+  await delay(INHERITED_GRACE_MS + 1_500);
+  assert.equal(q.sends(), 0);
+  q.close();
+});
+
+test("a save sent while an account was connected is not inherited by a reloaded page", async () => {
+  for (const viaNone of [false, true]) {
+    const p = owedSaveHarness({ binding: "1.first" });
+    await delay(50);
+    assert.equal(p.marker().open, undefined, "the page knows its account, so the request is not open");
+    p.refuse();
+    await delay(100);
+    // Another account is connected by the time the tab is reloaded.
+    p.answerAs(viaNone ? null : "2.second");
+    const q = p.reload();
+    await delay(500);
+    q.answerAs("2.second");
+    q.announce();
+    await delay(INHERITED_GRACE_MS + 1_500);
+    q.returnToTab();
+    await delay(INHERITED_GRACE_MS + 1_500);
+    assert.equal(q.sends(), 0, viaNone ? "through no account" : "directly");
+    q.close();
+  }
+});
+
+test("a page shown again without a reload does not ask a second time while its first request is open", async () => {
+  const p = owedSaveHarness();
+  await delay(50);
+  p.pageshow();
+  await delay(300);
+  assert.equal(p.sends(), 1, "unanswered");
+  p.refuse();
+  await delay(300);
+  p.pageshow();
+  await delay(300);
+  assert.equal(p.sends(), 1, "refused, before the quiet retry");
+  p.answerAs("1.first");
+  p.announce();
+  await delay(600);
+  assert.equal(p.sends(), 2, "one save once the account connects, without the wait a reloaded page needs");
+  p.confirm();
+  await delay(INHERITED_GRACE_MS + 2_000);
+  assert.equal(p.sends(), 2);
   p.close();
 });
 

@@ -702,6 +702,12 @@ function noteStoryAccountBinding(response) {
   var binding = typeof response.binding === "string" ? response.binding : null;
   var previous = storyAccountBinding;
   storyAccountBinding = binding;
+  if (previous === undefined) {
+    // The first word on which account this page has. A save sent just before
+    // it went out for that account, so its marker stands like any other.
+    if (binding !== null) settleRecentAutoTrack();
+    payOwedAutoTrack();
+  }
   if (previous === undefined || previous === binding) return false;
   resetStoryAccountState();
   payOwedAutoTrack();
@@ -1512,29 +1518,58 @@ function scheduleListingMetadataRefreshForCurrentPage() {
   }, 250);
 }
 
-function shouldSkipRecentAutoTrack(item) {
+// The marker a save leaves in this tab, if it is recent and for this story.
+function recentAutoTrackMarker(key) {
   try {
-    if (!window.sessionStorage) return false;
+    if (!window.sessionStorage) return null;
     var raw = window.sessionStorage.getItem(AUTO_TRACK_DEDUPE_KEY);
-    if (!raw) return false;
+    if (!raw) return null;
     var parsed = JSON.parse(raw);
-    if (!parsed || parsed.key !== autoTrackFingerprint(item)) return false;
+    if (!parsed || parsed.key !== key) return null;
     var at = Number(parsed.at || 0);
-    return Number.isFinite(at) && Date.now() - at < AUTO_TRACK_DEDUPE_WINDOW_MS;
+    return Number.isFinite(at) && Date.now() - at < AUTO_TRACK_DEDUPE_WINDOW_MS ? parsed : null;
   } catch (_) {
-    return false;
+    return null;
   }
 }
 
-function rememberRecentAutoTrack(item) {
+function shouldSkipRecentAutoTrack(item) {
+  var key = autoTrackFingerprint(item);
+  // A save taken over from the page this one replaced is asked for through
+  // what is owed, once, and not by anything else while an account is connected.
+  if (autoTrackOwed && autoTrackOwed.inherited === key && typeof storyAccountBinding === "string") {
+    return true;
+  }
+  return recentAutoTrackMarker(key) !== null;
+}
+
+// The last save this page itself sent, so it never rewrites a marker left by
+// the page it replaced.
+var autoTrackSentHere = null;
+
+// `open` marks a save that went out before the page knew of any connected
+// account and has had no answer yet that could mean it was written.
+function rememberRecentAutoTrack(item, open) {
   try {
+    autoTrackSentHere = autoTrackFingerprint(item);
     if (!window.sessionStorage) return;
+    var marker = { key: autoTrackSentHere, at: Date.now() };
+    if (open === true) marker.open = true;
+    window.sessionStorage.setItem(AUTO_TRACK_DEDUPE_KEY, JSON.stringify(marker));
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+// This page's own save turns out to have gone out for a connected account.
+function settleRecentAutoTrack() {
+  try {
+    if (autoTrackSentHere === null) return;
+    var marker = recentAutoTrackMarker(autoTrackSentHere);
+    if (!marker || marker.open !== true) return;
     window.sessionStorage.setItem(
       AUTO_TRACK_DEDUPE_KEY,
-      JSON.stringify({
-        key: autoTrackFingerprint(item),
-        at: Date.now(),
-      }),
+      JSON.stringify({ key: marker.key, at: marker.at }),
     );
   } catch (_) {
     /* ignore */
@@ -1585,7 +1620,7 @@ function sendAutoTrackForStory(validStory, options) {
   // A save that goes out for a connected account settles what was owed.
   if (sentWithAccount) autoTrackOwed = null;
   autoTrackInFlight += 1;
-  rememberRecentAutoTrack(validStory);
+  rememberRecentAutoTrack(validStory, !sentWithAccount);
   if (!options || options.pendingAlreadySet !== true) {
     updateAutoTrackPendingForStory(validStory);
   }
@@ -1933,8 +1968,17 @@ var autoTrackAwaitingLink = false;
 // the request went out, from none to an account. A save sent for a known
 // account is never owed, so nothing passes from one account to another.
 // (A page that is never told which account it has never pays.)
-var autoTrackOwed = null; // { href, generation } while a save is owed
+//
+// A page can also be replaced while such a save is still open: the tab is
+// reloaded before the answer comes, or before the account connects. The page
+// that takes its place finds the open marker and inherits the debt. It asks
+// nothing at once, because the earlier request may still be answered. Once
+// the first account it hears of is connected it gives that request a moment
+// to show up as saved, asks the background, and sends one save only if the
+// story is not there.
+var autoTrackOwed = null; // { href, generation } or { href, inherited, account }
 var autoTrackInFlight = 0;
+var AUTO_TRACK_INHERITED_GRACE_MS = 4_000;
 
 function noteAutoTrackOwed(response, delivery, sent) {
   var refused = !!response && response.ok !== true && response.error === "unavailable";
@@ -1954,12 +1998,36 @@ function noteAutoTrackOwed(response, delivery, sent) {
   payOwedAutoTrack();
 }
 
+// Called when a save is skipped because this tab recently asked for it.
+function inheritOpenAutoTrack(item) {
+  if (autoTrackOwed) return;
+  var key = autoTrackFingerprint(item);
+  var marker = recentAutoTrackMarker(key);
+  if (!marker || marker.open !== true) return;
+  autoTrackOwed = { href: location.href, inherited: key, account: null };
+  payOwedAutoTrack();
+}
+
 function payOwedAutoTrack() {
-  if (!autoTrackOwed || typeof storyAccountBinding !== "string") return;
-  if (
-    autoTrackOwed.href !== location.href ||
-    storyAccountGeneration !== autoTrackOwed.generation + 1
-  ) {
+  var owed = autoTrackOwed;
+  if (!owed) return;
+  if (owed.inherited) {
+    // Owed to the first account this page hears of, and to no other.
+    if (owed.account === null) {
+      if (typeof storyAccountBinding !== "string") return;
+      owed.account = storyAccountBinding;
+    } else if (storyAccountBinding !== owed.account) {
+      autoTrackOwed = null;
+      return;
+    }
+  } else {
+    if (typeof storyAccountBinding !== "string") return;
+    if (storyAccountGeneration !== owed.generation + 1) {
+      autoTrackOwed = null;
+      return;
+    }
+  }
+  if (owed.href !== location.href) {
     autoTrackOwed = null;
     return;
   }
@@ -1968,7 +2036,46 @@ function payOwedAutoTrack() {
   // A hidden page asks when the reader comes back to it, if the save is still
   // owed then. The debt stands until a save has gone out for the account.
   if (shouldDelayAutoTrackUntilVisible()) return;
+  if (owed.inherited) {
+    confirmInheritedAutoTrack(owed);
+    return;
+  }
   scheduleAutoTrackForCurrentPage();
+}
+
+function confirmInheritedAutoTrack(owed) {
+  setTimeout(function () {
+    if (autoTrackOwed !== owed) return;
+    sendCollectorMessage(
+      { type: WORK_STATE_GET_MESSAGE, workKey: getWorkKeyFromUrl() },
+      function (response) {
+        if (autoTrackOwed !== owed) return;
+        var saved = !!response && !!response.state && response.state.status === "saved";
+        try {
+          if (saved) {
+            // The earlier request was written after all, so it stands in this
+            // tab like any confirmed save.
+            window.sessionStorage.setItem(
+              AUTO_TRACK_DEDUPE_KEY,
+              JSON.stringify({ key: owed.inherited, at: Date.now() }),
+            );
+          } else if (recentAutoTrackMarker(owed.inherited)) {
+            // The earlier page's marker no longer stands in the way.
+            window.sessionStorage.removeItem(AUTO_TRACK_DEDUPE_KEY);
+          }
+        } catch (_) {
+          /* ignore */
+        }
+        if (saved) {
+          autoTrackOwed = null;
+          return;
+        }
+        // From here it is an ordinary debt to the account that is connected.
+        autoTrackOwed = { href: owed.href, generation: storyAccountGeneration - 1 };
+        payOwedAutoTrack();
+      },
+    );
+  }, AUTO_TRACK_INHERITED_GRACE_MS);
 }
 
 function retryAutoTrackAfterLink() {
@@ -3910,6 +4017,7 @@ function startDwellTimer(attempt) {
   }
   maybeBackfillWorkSummary(validStory);
   if (shouldSkipRecentAutoTrack(validStory)) {
+    inheritOpenAutoTrack(validStory);
     return;
   }
   var preferenceReadSettled = false;
