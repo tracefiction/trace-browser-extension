@@ -704,9 +704,7 @@ function noteStoryAccountBinding(response) {
   storyAccountBinding = binding;
   if (previous === undefined || previous === binding) return false;
   resetStoryAccountState();
-  // An account connected where none was. A save this page could not make
-  // without one is asked for again, for that account, without a reload.
-  if (previous === null) retryAutoTrackAfterLink();
+  payOwedAutoTrack();
   return true;
 }
 
@@ -1582,6 +1580,11 @@ function sendAutoTrackForStory(validStory, options) {
     options && Number.isInteger(options.deliveryAttempt) ? options.deliveryAttempt : 0;
   // A retry belongs to the account it was first sent for.
   var accountGeneration = storyAccountGeneration;
+  var sentWithAccount = typeof storyAccountBinding === "string";
+  var sentFromPage = location.href;
+  // A save that goes out for a connected account settles what was owed.
+  if (sentWithAccount) autoTrackOwed = null;
+  autoTrackInFlight += 1;
   rememberRecentAutoTrack(validStory);
   if (!options || options.pendingAlreadySet !== true) {
     updateAutoTrackPendingForStory(validStory);
@@ -1596,6 +1599,12 @@ function sendAutoTrackForStory(validStory, options) {
       },
     },
     function (response, delivery) {
+      autoTrackInFlight = Math.max(0, autoTrackInFlight - 1);
+      noteAutoTrackOwed(response, delivery, {
+        withAccount: sentWithAccount,
+        generation: accountGeneration,
+        href: sentFromPage,
+      });
       if (!response) {
         if (
           delivery && delivery.undelivered === true &&
@@ -1620,9 +1629,6 @@ function sendAutoTrackForStory(validStory, options) {
         AUTO_TRACK_TRANSIENT_ERRORS.indexOf(response.error) >= 0 &&
         !(options && options.transientRetried === true)
       ) {
-        // The quiet retry below is dropped if the account connects before it
-        // is due, so that connection must be able to ask again itself.
-        if (autoTrackRefusedBeforeAccount(response.error)) autoTrackAwaitingLink = true;
         var retryFromUrl = location.href;
         setTimeout(function () {
           if (location.href !== retryFromUrl || accountGeneration !== storyAccountGeneration) return;
@@ -1647,10 +1653,6 @@ function sendAutoTrackForStory(validStory, options) {
         }
         return;
       }
-      // This reply can be the first the page hears from a newly connected
-      // account, which clears what it remembered and asks for a waiting save
-      // again. The save just confirmed is that account's own.
-      rememberRecentAutoTrack(validStory);
       applyConfirmedOverlayUpdateForStory(validStory, response);
     },
   );
@@ -1918,12 +1920,55 @@ function clearAutoTrackPendingForStory(item) {
 // they never need to reload.
 var autoTrackAwaitingLink = false;
 
-// The background answers "couldn't check just now" while it is still adopting
-// the Trace app's account. Until an account is connected that answer is the
-// same wait as not being linked: the save belongs to the account that
-// connects next, not to a retry timed against the moment it was refused.
-function autoTrackRefusedBeforeAccount(error) {
-  return KERNEL_SESSION_ACTIVE && error === "unavailable" && storyAccountBinding === null;
+// A save that went out before the page knew of any connected account, and
+// was answered "couldn't check just now", is owed to the account that
+// connects next. The background gives that answer both while it is still
+// reading the Trace app's account and when the app has none, so nothing is
+// asked again until an account is actually connected: then exactly one save
+// is sent for it, however the page learns of it (a reply naming the account,
+// before or after the quiet retry comes due), and never while an earlier
+// request is still unanswered. Returning to the tab alone asks for nothing.
+//
+// "Next" is exact: the debt is paid only if the account changed once since
+// the request went out, from none to an account. A save sent for a known
+// account is never owed, so nothing passes from one account to another.
+// (A page that is never told which account it has never pays.)
+var autoTrackOwed = null; // { href, generation } while a save is owed
+var autoTrackInFlight = 0;
+
+function noteAutoTrackOwed(response, delivery, sent) {
+  var refused = !!response && response.ok !== true && response.error === "unavailable";
+  var neverLeft = !response && !!delivery && delivery.undelivered === true;
+  if (!refused && !neverLeft) {
+    // Saved, or answered some other way: an outcome that may mean a write
+    // went out is never asked for again, and a sign-in refusal has its own
+    // retry once an account is linked.
+    autoTrackOwed = null;
+    return;
+  }
+  if (refused && !sent.withAccount) {
+    autoTrackOwed = { href: sent.href, generation: sent.generation };
+  }
+  // The account may have connected while this request was out, which leaves
+  // its quiet retry belonging to no account.
+  payOwedAutoTrack();
+}
+
+function payOwedAutoTrack() {
+  if (!autoTrackOwed || typeof storyAccountBinding !== "string") return;
+  if (
+    autoTrackOwed.href !== location.href ||
+    storyAccountGeneration !== autoTrackOwed.generation + 1
+  ) {
+    autoTrackOwed = null;
+    return;
+  }
+  // One request at a time: the answer to the one still out decides.
+  if (autoTrackInFlight > 0) return;
+  // A hidden page asks when the reader comes back to it, if the save is still
+  // owed then. The debt stands until a save has gone out for the account.
+  if (shouldDelayAutoTrackUntilVisible()) return;
+  scheduleAutoTrackForCurrentPage();
 }
 
 function retryAutoTrackAfterLink() {
@@ -1934,10 +1979,7 @@ function retryAutoTrackAfterLink() {
 }
 
 function updateAutoTrackFailureForStory(item, error) {
-  if (
-    error === "not_authenticated" || error === "auth_expired" || error === "reconnect_required" ||
-    autoTrackRefusedBeforeAccount(error)
-  ) {
+  if (error === "not_authenticated" || error === "auth_expired" || error === "reconnect_required") {
     autoTrackAwaitingLink = true;
   }
   var workKey = overlayWorkKeyFromItem(item);
@@ -8543,6 +8585,7 @@ function initQuickAdd() {
         queryBackgroundWorkStateForStory(workKey);
         renderQuickAddButton(workKey);
         retryAutoTrackAfterLink();
+        payOwedAutoTrack();
       }
     });
     // Lookups sent while prerendering were ignored; ask again once opened.

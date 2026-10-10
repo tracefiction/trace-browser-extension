@@ -8435,88 +8435,346 @@ test("a save refused while the background wakes is not re-sent once another acco
   same.h.dom.window.close();
 });
 
-// A page that was already open when website access is allowed asks for its
-// first save at once, while the background is still adopting the app's
-// account: every reply says no account is connected (binding null).
-function accountAdoptionHarness() {
-  const account = { binding: null };
-  const reply = (extra) => ({ ok: true, binding: account.binding,
-    snapshot: account.binding === null
-      ? { state: "connecting", reason: "none", canExecuteAuthenticated: false }
-      : { state: "connected", reason: "none", canExecuteAuthenticated: true }, ...extra });
+// A page that is already open when website access is allowed asks for its
+// first save at once, before the background has an account to save it for.
+// The harness lets a test choose which account the background answers for,
+// hold the replies that would tell the page about it, and answer each save.
+function owedSaveHarness({ binding = null } = {}) {
+  const account = { binding };
+  const held = [];
+  const neverLeaves = [];
+  let holding = false;
+  const snapshot = () => account.binding === null
+    ? { state: "signed_out", reason: "provider_unavailable", canExecuteAuthenticated: false }
+    : { state: "connected", reason: "none", canExecuteAuthenticated: true };
+  const reply = (extra) => ({ ok: true, binding: account.binding, snapshot: snapshot(), ...extra });
+  const projection = () => reply({ projection: { entries: {}, workPreferences: {},
+    syncVersion: "2026-10-09T12:00:00.000Z" } });
   const h = createStoryAutoTrackPendingHarness({
     sessionMode: "kernel",
     holdAutoTrack: true,
+    autoTrackLastErrors: neverLeaves,
     pendingFirstStoryResponse: { ok: true, url: "" },
-    projectionResponse: () => reply({ projection: { entries: {}, workPreferences: {},
-      syncVersion: "2026-10-09T12:00:00.000Z" } }),
     onSendMessage(message, respond) {
-      if (message.type !== "TRACE_WORK_STATE_GET") return false;
-      if (typeof respond === "function") respond(reply({ state: null }));
-      return true;
+      if (message.type === "TRACE_WORK_STATE_GET") {
+        if (holding) held.push(() => respond(reply({ state: null })));
+        else if (typeof respond === "function") respond(reply({ state: null }));
+        return true;
+      }
+      if (message.type === "TRACE_ACCOUNT_PROJECTION_GET") {
+        if (holding) held.push(() => respond(projection()));
+        else if (typeof respond === "function") respond(projection());
+        return true;
+      }
+      return false;
     },
   });
-  const refuse = () => h.autoTrackCallback({ ok: false, error: "unavailable", binding: account.binding });
-  // `announce: false` connects the account without the storage change that
-  // normally tells the page, so the next reply is the first it hears of it.
-  const connect = ({ announce = true } = {}) => {
-    account.binding = "1.first";
-    if (announce) h.dispatchStorageChange("traceAccountProjectionRevisionV1", 2);
+  const entryId = "00000000-0000-4000-8000-0000000a0002";
+  return {
+    h,
+    sends: () => autoTrackSends(h),
+    // The background's next answers come from this account (null: none).
+    answerAs(next) { account.binding = next; },
+    // The storage change that tells an open page to read the account again.
+    announce() { h.dispatchStorageChange("traceAccountProjectionRevisionV1", Date.now()); },
+    hold() { holding = true; },
+    release() { holding = false; held.splice(0).forEach((send) => send()); },
+    refuse(error = "unavailable") {
+      h.autoTrackCallback({ ok: false, error, binding: account.binding, snapshot: snapshot() });
+    },
+    confirm() {
+      h.autoTrackCallback(reply({ state: { workKey: "ffn:7038840", status: "saved", entryId,
+        entry: { entryId, status: "PLANNING", readerStatus: "PLANNING", canonicalReaderStatus: "SAVED",
+          chapters: { current: 1, total: 12 } },
+        syncVersion: "2026-10-09T12:00:00.000Z" } }));
+    },
+    // The next save request fails before it reaches the background.
+    nextSaveNeverLeaves() { neverLeaves.push(NO_RECEIVER); },
+    show(visible) {
+      const doc = h.dom.window.document;
+      Object.defineProperty(doc, "visibilityState", { value: visible ? "visible" : "hidden", configurable: true });
+      Object.defineProperty(doc, "hidden", { value: !visible, configurable: true });
+      doc.hasFocus = () => visible;
+      doc.dispatchEvent(new h.dom.window.Event("visibilitychange"));
+    },
+    // The reader goes to another tab or app and comes back.
+    returnToTab() {
+      this.show(false);
+      this.show(true);
+      h.dom.window.dispatchEvent(new h.dom.window.Event("focus"));
+    },
+    close() { h.dom.window.close(); },
   };
-  return { h, refuse, connect };
 }
 
-test("a save refused while the app's account is still being adopted is made once that account connects", async () => {
-  const { h, refuse, connect } = accountAdoptionHarness();
+// However the page comes to learn that an account has connected, a save that
+// was refused for want of one ends as one confirmed save and no further
+// request. Each row replays one order of the three things that race: the
+// storage change, a reply naming the account, and the page's own quiet retry
+// (due 1.5 s after the refusal). `sends` is the total once the account is known.
+const OWED_SAVE_ORDERINGS = [
+  { name: "a reply names the account before the quiet retry is due", sends: 2,
+    async run(p) { p.refuse(); await delay(300); p.answerAs("1.first"); p.announce(); await delay(400); } },
+  { name: "the storage change comes first and the reply late, still before the quiet retry", sends: 2,
+    async run(p) {
+      p.refuse(); await delay(300); p.hold(); p.answerAs("1.first"); p.announce();
+      await delay(900); p.release(); await delay(300);
+    } },
+  { name: "the storage change comes first and the reply after the quiet retry has gone out", sends: 2,
+    async run(p) {
+      p.refuse(); await delay(300); p.hold(); p.answerAs("1.first"); p.announce();
+      await delay(1_500); p.release(); await delay(400);
+    } },
+  { name: "the quiet retry goes out first and a reply names the account while it is unanswered", sends: 2,
+    async run(p) { p.refuse(); await delay(1_700); p.answerAs("1.first"); p.announce(); await delay(400); } },
+  { name: "the quiet retry's own answer is the first reply to name the account", sends: 2,
+    async run(p) { p.refuse(); await delay(1_700); p.answerAs("1.first"); } },
+  { name: "the quiet retry is refused too, and the account connects later", sends: 3,
+    async run(p) {
+      p.refuse(); await delay(1_700); p.refuse(); await delay(200);
+      p.answerAs("1.first"); p.announce(); await delay(400);
+    } },
+  { name: "the account is named while the quiet retry is unanswered, and that retry is then refused", sends: 3,
+    async run(p) {
+      p.refuse(); await delay(1_700); p.answerAs("1.first"); p.announce(); await delay(300);
+      p.refuse(); await delay(400);
+    } },
+  { name: "the refusal itself is the first reply to name the account", sends: 2,
+    async run(p) { p.answerAs("1.first"); p.refuse(); await delay(400); } },
+];
+
+for (const ordering of OWED_SAVE_ORDERINGS) {
+  test(`a save refused before any account connected is made once: ${ordering.name}`, async () => {
+    const p = owedSaveHarness();
+    await delay(50);
+    assert.equal(p.sends(), 1, "the page asks once on load");
+    await ordering.run(p);
+    assert.equal(p.sends(), ordering.sends, "one save is outstanding for the connected account");
+    p.confirm();
+    // Past the quiet retry, a repeated announcement and a return to the tab.
+    await delay(1_800);
+    p.announce();
+    p.returnToTab();
+    await delay(1_200);
+    assert.equal(p.sends(), ordering.sends, "nothing more is asked once that save is confirmed");
+    const handle = p.h.dom.window.document.querySelector("[data-trace-story-handle]");
+    assert.match(handle.textContent || "", /Saved/, "the page shows the story as saved");
+    p.close();
+  });
+}
+
+test("a reader with no account is not asked for again on returning to the tab", async () => {
+  const p = owedSaveHarness();
   await delay(50);
-  assert.equal(autoTrackSends(h), 1);
-  refuse();
-  // The account connects before the page's own quiet retry is due.
+  p.refuse();
+  await delay(1_700);
+  assert.equal(p.sends(), 2, "the one quiet retry");
+  p.refuse();
+  for (let visit = 0; visit < 3; visit += 1) {
+    await delay(400);
+    p.returnToTab();
+    p.announce();
+    await delay(1_200);
+  }
+  assert.equal(p.sends(), 2, "no account has connected, so nothing more is sent");
+  p.close();
+});
+
+test("a transient refusal while an account is connected is not asked for again on returning to the tab", async () => {
+  const p = owedSaveHarness({ binding: "1.first" });
+  await delay(50);
+  p.refuse();
+  await delay(1_700);
+  p.refuse();
   await delay(300);
-  connect();
-  await delay(1_000);
-  assert.equal(autoTrackSends(h), 2, "the save is asked for again without a reload");
-  h.autoTrackCallback({ ok: true, binding: "1.first", snapshot: { state: "connected" },
-    state: { workKey: "ffn:7038840", status: "saved", entryId: "00000000-0000-4000-8000-0000000a0002",
-      entry: { entryId: "00000000-0000-4000-8000-0000000a0002", status: "PLANNING", readerStatus: "PLANNING",
-        canonicalReaderStatus: "SAVED", chapters: { current: 1, total: 12 } },
-      syncVersion: "2026-10-09T12:00:00.000Z" } });
-  await delay(1_800);
-  assert.equal(autoTrackSends(h), 2, "the retry timed against the refusal is not sent as well");
-  h.dom.window.close();
-});
-
-test("a save refused twice before any account is connected is still made when the account connects", async () => {
-  const { h, refuse, connect } = accountAdoptionHarness();
-  await delay(50);
-  refuse();
-  await delay(1_700);
-  assert.equal(autoTrackSends(h), 2, "the quiet retry is sent while no account has connected");
-  refuse();
-  await delay(100);
-  connect();
-  await delay(1_000);
-  assert.equal(autoTrackSends(h), 3);
-  h.dom.window.close();
-});
-
-test("a quiet retry that the newly connected account answers is not followed by another save", async () => {
-  const { h, refuse, connect } = accountAdoptionHarness();
-  await delay(50);
-  refuse();
-  await delay(1_700);
-  assert.equal(autoTrackSends(h), 2);
-  // The account connected while the retry was on its way; its reply is the
-  // first the page hears from that account.
-  connect({ announce: false });
-  h.autoTrackCallback({ ok: true, binding: "1.first", snapshot: { state: "connected" },
-    state: { workKey: "ffn:7038840", status: "saved", entryId: "00000000-0000-4000-8000-0000000a0003",
-      entry: { entryId: "00000000-0000-4000-8000-0000000a0003", status: "PLANNING", readerStatus: "PLANNING",
-        canonicalReaderStatus: "SAVED", chapters: { current: 1, total: 12 } },
-      syncVersion: "2026-10-09T12:00:00.000Z" } });
+  p.returnToTab();
   await delay(1_200);
-  assert.equal(autoTrackSends(h), 2, "a confirmed save is not asked for again");
-  h.dom.window.close();
+  assert.equal(p.sends(), 2);
+  p.close();
+});
+
+test("a save refused under one account is not asked for again when another account replaces it", async () => {
+  const p = owedSaveHarness({ binding: "1.first" });
+  await delay(50);
+  p.refuse();
+  await delay(300);
+  p.answerAs("2.second");
+  p.announce();
+  await delay(2_500);
+  assert.equal(p.sends(), 1, "neither the quiet retry nor a new request is sent for the second account");
+  p.close();
+});
+
+test("a save re-asked for the account that connected is not carried to the account that replaces it", async () => {
+  const p = owedSaveHarness();
+  await delay(50);
+  p.refuse();
+  await delay(200);
+  p.answerAs("1.first");
+  p.announce();
+  await delay(1_000);
+  assert.equal(p.sends(), 2, "asked again for the first account");
+  // That request is refused in turn, and then another account takes over.
+  p.refuse();
+  await delay(200);
+  p.answerAs("2.second");
+  p.announce();
+  await delay(2_500);
+  assert.equal(p.sends(), 2);
+  p.close();
+});
+
+test("a save sent for a known account is never owed to the account that replaces it", async () => {
+  const p = owedSaveHarness({ binding: "1.first" });
+  await delay(50);
+  // The first answer tells the page which account it has; its quiet retry
+  // therefore goes out for that account.
+  p.refuse();
+  await delay(1_700);
+  assert.equal(p.sends(), 2);
+  // The second account's first word to the page is a refusal of that retry.
+  p.answerAs("2.second");
+  p.refuse();
+  await delay(2_500);
+  assert.equal(p.sends(), 2);
+  p.close();
+});
+
+test("an account that connects and leaves again does not pass the save on to the next account", async () => {
+  const p = owedSaveHarness();
+  await delay(50);
+  p.refuse();
+  await delay(1_700);
+  assert.equal(p.sends(), 2, "the quiet retry is out, unanswered");
+  p.answerAs("1.first");
+  p.announce();
+  await delay(300);
+  p.answerAs(null);
+  p.announce();
+  await delay(300);
+  p.answerAs("2.second");
+  p.announce();
+  await delay(300);
+  p.refuse();
+  await delay(2_500);
+  assert.equal(p.sends(), 2);
+  p.close();
+});
+
+test("an account that connects while the page is hidden gets its save when the reader comes back", async () => {
+  const p = owedSaveHarness();
+  await delay(50);
+  p.refuse();
+  await delay(100);
+  p.show(false);
+  p.answerAs("1.first");
+  p.announce();
+  await delay(2_500);
+  assert.equal(p.sends(), 1, "nothing is sent from a hidden page");
+  p.show(true);
+  await delay(1_200);
+  assert.equal(p.sends(), 2);
+  p.close();
+});
+
+test("an account that connects and is replaced while the page is hidden leaves nothing to send", async () => {
+  const p = owedSaveHarness();
+  await delay(50);
+  p.refuse();
+  await delay(100);
+  p.show(false);
+  p.answerAs("1.first");
+  p.announce();
+  await delay(300);
+  p.answerAs("2.second");
+  p.announce();
+  await delay(300);
+  p.show(true);
+  await delay(2_000);
+  assert.equal(p.sends(), 1);
+  p.close();
+});
+
+test("once the save has gone out for the connected account, its refusal is handled like any other", async () => {
+  const p = owedSaveHarness();
+  await delay(50);
+  p.refuse();
+  await delay(200);
+  p.answerAs("1.first");
+  p.announce();
+  await delay(600);
+  assert.equal(p.sends(), 2, "asked again for the account that connected");
+  p.refuse();
+  await delay(1_700);
+  assert.equal(p.sends(), 3, "the usual single quiet retry");
+  p.refuse();
+  await delay(300);
+  p.returnToTab();
+  p.announce();
+  await delay(1_500);
+  assert.equal(p.sends(), 3, "and nothing after it, however often the reader returns");
+  p.close();
+});
+
+test("only an answer that nothing was written is owed: an unknown outcome is not asked for again", async () => {
+  const p = owedSaveHarness();
+  await delay(50);
+  p.refuse("http_503");
+  await delay(300);
+  p.answerAs("1.first");
+  p.announce();
+  await delay(2_500);
+  assert.equal(p.sends(), 1);
+  p.close();
+});
+
+test("an owed save is dropped when a later request ends with an unknown outcome", async () => {
+  const p = owedSaveHarness();
+  await delay(50);
+  p.refuse();
+  await delay(1_700);
+  assert.equal(p.sends(), 2, "the quiet retry is out");
+  // The account connects while that retry is unanswered, and the retry then
+  // ends in an answer that may mean a write went out.
+  p.answerAs("1.first");
+  p.announce();
+  await delay(300);
+  p.refuse("http_503");
+  await delay(2_500);
+  p.returnToTab();
+  await delay(1_200);
+  assert.equal(p.sends(), 2, "a save that may have landed is not asked for again");
+  p.close();
+});
+
+test("an owed save outlives a request that never reached the background", async () => {
+  const p = owedSaveHarness();
+  await delay(50);
+  p.refuse();
+  p.nextSaveNeverLeaves();
+  await delay(1_700);
+  assert.equal(p.sends(), 2, "the quiet retry was tried and never left the page");
+  p.answerAs("1.first");
+  p.announce();
+  await delay(600);
+  assert.equal(p.sends(), 3, "the account that connected is asked");
+  p.confirm();
+  await delay(3_500);
+  assert.equal(p.sends(), 3, "and the earlier attempt is not repeated as well");
+  p.close();
+});
+
+test("a save owed for one page is not sent after the page has moved on", async () => {
+  const p = owedSaveHarness();
+  await delay(50);
+  p.refuse();
+  await delay(100);
+  p.h.dom.window.history.pushState({}, "", "/s/7038840/2/A-Chance-Encounter");
+  p.answerAs("1.first");
+  p.announce();
+  await delay(2_500);
+  assert.equal(p.sends(), 1);
+  p.close();
 });
 
 test("a story page drops what it showed for the previous account when the account changes", async () => {
