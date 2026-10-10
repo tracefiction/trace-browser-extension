@@ -755,7 +755,11 @@ function classifyProbeStory(rawUrl) {
       host === "archiveofourown.gay" ||
       host.endsWith(".archiveofourown.gay") ||
       host === "archive.transformativeworks.org";
-    if (ao3Host && /^\/works\/[1-9][0-9]*(?:\/chapters\/[1-9][0-9]*)?\/?$/.test(url.pathname)) {
+    // AO3 also serves a work through a collection, at
+    // /collections/<name>/works/<id>. That one prefix is removed, as the
+    // background removes it, and the work path is judged as it always was.
+    const ao3Path = url.pathname.replace(/^\/collections\/[A-Za-z0-9_]{1,255}(?=\/works\/)/, "");
+    if (ao3Host && /^\/works\/[1-9][0-9]*(?:\/chapters\/[1-9][0-9]*)?\/?$/.test(ao3Path)) {
       return { ok: true, site: "AO3" };
     }
     const ffnHost = host === "www.fanfiction.net" || host === "m.fanfiction.net";

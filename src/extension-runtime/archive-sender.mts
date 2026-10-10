@@ -54,6 +54,28 @@ export function isBlockedArchivePath(
   }
 }
 
+// A collection's name is letters, digits and underscores: one whole path
+// segment, with no slash, dot or percent sign that could stand in for another.
+const AO3_COLLECTION_PREFIX = /^\/collections\/[A-Za-z0-9_]{1,255}(?=\/works\/)/;
+
+/**
+ * AO3 serves a work at `/works/<id>` and, when it is reached through a
+ * collection, at `/collections/<name>/works/<id>`: the same work. This
+ * removes that one prefix, and only directly in front of `/works/`, so every
+ * rule about work paths is written once, for the plain form.
+ *
+ * Nothing else is rewritten. A tag's, a user's or a collection's list of
+ * works, and any path with more or fewer segments, comes back unchanged and
+ * is judged as it always was.
+ */
+export function ao3WorkPath(pathname: string): string {
+  return pathname.replace(AO3_COLLECTION_PREFIX, "");
+}
+
+/**
+ * The work a supported archive URL belongs to. This decides which tab may
+ * read and write for which work, so it accepts only the shapes it names.
+ */
 export function workKeyFromArchiveUrl(
   rawUrl: unknown,
   expectedHost: ArchiveHostKind,
@@ -73,7 +95,7 @@ export function workKeyFromArchiveUrl(
         host === "ao3.org" ||
         host.endsWith(".ao3.org");
       if (!supported) return null;
-      const match = url.pathname.match(/^\/works\/([1-9][0-9]{0,19})(?:\/|$)/);
+      const match = ao3WorkPath(url.pathname).match(/^\/works\/([1-9][0-9]{0,19})(?:\/|$)/);
       return match?.[1] ? `ao3:${match[1]}` : null;
     }
     if (host !== "www.fanfiction.net" && host !== "m.fanfiction.net") return null;
