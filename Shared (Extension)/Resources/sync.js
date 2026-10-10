@@ -25,6 +25,35 @@ const SESSION_ACTION_MESSAGE = "TRACE_SESSION_ACTION";
 // it only to finish a connect the reader already asked for.
 const TRACE_WEB_READY_MESSAGE = "TRACE_WEB_READY";
 const FIRST_INSTALL_READY_MESSAGE = "TRACE_EXTENSION_FIRST_INSTALL_READY";
+// Trace's setup page asks a small fixed set of questions about story-site
+// access and open story tabs. See the setup section below.
+const SETUP_REQUEST_MESSAGE = "TRACE_SETUP_REQUEST";
+const SETUP_RESPONSE_MESSAGE = "TRACE_SETUP_RESPONSE";
+const SETUP_ACCESS_CHANGED_MESSAGE = "TRACE_SETUP_ACCESS_CHANGED";
+// Content script <-> background forms of the same.
+const SETUP_PAGE_MESSAGE = "TRACE_SETUP_PAGE_REQUEST";
+const SETUP_ACCESS_PUSH_MESSAGE = "TRACE_SETUP_ACCESS_PUSH";
+const SETUP_REQUESTS = new Set(["access", "story-tabs", "switch-to-tab"]);
+const SETUP_SCOPES = new Set(["all", "story-sites", "this-site"]);
+const SETUP_SITES = new Set(["ao3", "ffn"]);
+const SETUP_ERRORS = new Set([
+  "forbidden",
+  "invalid_request",
+  "unknown_request",
+  "rate_limited",
+  "unavailable",
+  "not_listed",
+  "not_allowed",
+  "not_a_story",
+  "switch_failed",
+]);
+const SETUP_ID_MAX_LENGTH = 64;
+const SETUP_STORY_TAB_LIMIT = 5;
+const SETUP_TAB_TITLE_MAX_LENGTH = 120;
+// A page that asks faster than this is answered here, without waking the background.
+const SETUP_REQUEST_LIMIT = 20;
+const SETUP_REQUEST_WINDOW_MS = 10_000;
+const setupRequestTimes = [];
 const FIRST_INSTALL_ACTIVATION = "extension-installed";
 const SESSION_MODE = globalThis.TRACE_SESSION_MODE || "legacy";
 const KERNEL_SESSION_ACTIVE = SESSION_MODE === "kernel";
@@ -401,6 +430,121 @@ window.addEventListener("message", (event) => {
   );
 });
 
+// ---- Setup page ----
+//
+// Trace's own setup page may ask three things, and nothing else:
+//   access         are the story sites allowed, and how broadly
+//   story-tabs     the reader's open story pages (tab id, title, site)
+//   switch-to-tab  bring one of those tabs to the front
+// The page is an ordinary web page, so every request is checked here and
+// again in the background, and every answer is rebuilt field by field. The
+// page never learns an address, or anything about a tab that is not a story
+// page, and it cannot make Safari ask for access.
+
+function isTopLevelPage() {
+  try {
+    return window.top === window;
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeSetupAccess(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  if (typeof raw.storySitesAllowed !== "boolean" || !SETUP_SCOPES.has(raw.scope)) return null;
+  // The two fields cannot disagree.
+  if (raw.storySitesAllowed !== (raw.scope !== "this-site")) return null;
+  return { storySitesAllowed: raw.storySitesAllowed, scope: raw.scope };
+}
+
+function sanitizeSetupStoryTabs(raw) {
+  if (!raw || typeof raw !== "object" || !Array.isArray(raw.tabs)) return null;
+  const tabs = [];
+  for (const tab of raw.tabs.slice(0, SETUP_STORY_TAB_LIMIT)) {
+    if (
+      !tab || typeof tab !== "object" ||
+      !Number.isSafeInteger(tab.tabId) || tab.tabId < 0 ||
+      typeof tab.title !== "string" ||
+      !SETUP_SITES.has(tab.site)
+    ) {
+      return null;
+    }
+    tabs.push({
+      tabId: tab.tabId,
+      title: Array.from(tab.title).slice(0, SETUP_TAB_TITLE_MAX_LENGTH).join(""),
+      site: tab.site,
+    });
+  }
+  return { tabs };
+}
+
+function setupResult(request, response) {
+  if (!response || typeof response !== "object" || response.ok !== true) {
+    const error = response && SETUP_ERRORS.has(response.error) ? response.error : "unavailable";
+    return { ok: false, error };
+  }
+  if (request === "switch-to-tab") return { ok: true };
+  const result = request === "access"
+    ? sanitizeSetupAccess(response.result)
+    : sanitizeSetupStoryTabs(response.result);
+  return result ? { ok: true, result } : { ok: false, error: "unavailable" };
+}
+
+function admitSetupRequest() {
+  const now = Date.now();
+  while (setupRequestTimes.length > 0 && now - setupRequestTimes[0] >= SETUP_REQUEST_WINDOW_MS) {
+    setupRequestTimes.shift();
+  }
+  if (setupRequestTimes.length >= SETUP_REQUEST_LIMIT) return false;
+  setupRequestTimes.push(now);
+  return true;
+}
+
+async function handleSetupRequest(data) {
+  // A request that cannot be addressed gets no answer.
+  const id = typeof data.id === "string" ? data.id : "";
+  if (!id || id.length > SETUP_ID_MAX_LENGTH) return;
+  const answer = (body) => {
+    window.postMessage({ type: SETUP_RESPONSE_MESSAGE, id, ...body }, window.location.origin);
+  };
+  const request = data.request;
+  if (typeof request !== "string" || !SETUP_REQUESTS.has(request)) {
+    answer({ ok: false, error: typeof request === "string" ? "unknown_request" : "invalid_request" });
+    return;
+  }
+  const message = { type: SETUP_PAGE_MESSAGE, request };
+  if (request === "switch-to-tab") {
+    if (!Number.isSafeInteger(data.tabId) || data.tabId < 0) {
+      answer({ ok: false, error: "invalid_request" });
+      return;
+    }
+    message.tabId = data.tabId;
+  }
+  if (!admitSetupRequest()) {
+    answer({ ok: false, error: "rate_limited" });
+    return;
+  }
+  if (!KERNEL_SESSION_ACTIVE) {
+    answer({ ok: false, error: "unavailable" });
+    return;
+  }
+  const response = await requestRuntimeMessage(
+    message,
+    "[Trace Sync] Failed to ask about setup",
+  );
+  answer(setupResult(request, response));
+}
+
+window.addEventListener("message", (event) => {
+  // Stricter than the listener above: only this page's own top-level window,
+  // speaking to itself. A frame, an opener or another origin is not heard.
+  if (event.source !== window || event.origin !== window.location.origin) return;
+  if (!isTopLevelPage()) return;
+  const data = event.data;
+  if (!data || typeof data !== "object" || data.type !== SETUP_REQUEST_MESSAGE) return;
+  void handleSetupRequest(data);
+});
+
 // The signed-in page posts its token on its own when it finishes signing in.
 // The token itself is ignored here: a credential grant still needs the
 // background's request ID. A grant asked before sign-in finished is asked
@@ -459,6 +603,16 @@ try {
       pendingCredentialGrants.set(requestId, { timeout, sendResponse });
       requestTraceToken("credential_grant", requestId);
       return true;
+    }
+    if (message?.type === SETUP_ACCESS_PUSH_MESSAGE) {
+      const access = sanitizeSetupAccess(message);
+      if (access && isTopLevelPage()) {
+        window.postMessage(
+          { type: SETUP_ACCESS_CHANGED_MESSAGE, ...access },
+          window.location.origin,
+        );
+      }
+      return false;
     }
     if (message?.type === STATUS_PUSH_MESSAGE) {
       window.postMessage(

@@ -99,7 +99,8 @@ Start with these files:
 - `Shared (Extension)/Resources/manifest.json` - permissions, host permissions, content-script matches, and excluded login/auth pages.
 - `Shared (Extension)/Resources/collector.js` - AO3/FFN metadata extraction and auto-track messages.
 - `Shared (Extension)/Resources/library-overlay.js` - on-page library status and quick-add UI.
-- `Shared (Extension)/Resources/sync.js` - Trace-site auth token bridge.
+- `Shared (Extension)/Resources/sync.js` - Trace-site auth token bridge, and the setup page's questions.
+- `src/extension-runtime/setup-page.mts` - what Trace's setup page may ask the background, and the checks on it.
 - `src/background.js` - network requests to the Trace API.
 - `src/extension-core/` and `src/extension-runtime/` - the modular session,
   archive-readiness, account-projection, and authenticated story-command
@@ -372,6 +373,37 @@ again. A cached library entry alone is not evidence that the page is connected.
 verified separately on installed iOS Safari; API availability does not prove
 that an orphaned script context can be replaced.
 
+
+### Trace's setup page
+
+On Trace's own site, and nowhere else, the page script (`sync.js`) answers a
+small fixed set of questions from the page, so a setup page there can tell a
+reader what to do next. Page and script talk with `window.postMessage` on the
+page's own origin; the script hears only the top-level page itself (it checks
+`event.source === window`, `event.origin`, and that it is not inside a frame),
+and the background checks again that the request came from a top-level page on
+Trace's origin. A story site, any other site and any frame get no answer.
+
+What the page can learn:
+
+- whether the five story-site addresses are allowed, and how broadly: every
+  site, the story sites, or only Trace's own page. It is told again when that
+  changes;
+- its open story tabs: for up to five tabs that are story pages on AO3 or
+  FanFiction.net, a tab id, the tab's title as the browser reports it (one
+  line, at most 120 characters) and which site it is on. Nothing is listed
+  while the story sites are not allowed.
+
+What the page can do: ask for one of those tabs to be brought to the front. It
+must be a tab from the most recent list given to that same page, and it is
+checked again at that moment to still be a story page.
+
+What the page cannot do or learn: any address; anything about a tab that is
+not a story page; open, close, reload or navigate a tab; make the browser ask
+for access (there is no such message). Requests are limited to 20 in any 10
+seconds per page, in the page script and again in the background. Nothing here
+is sent to a server, and it adds no permission. The popup shown over that page
+uses the same list and the same switch, under the same rules.
 
 ### Local Safari automatic-saving preference
 

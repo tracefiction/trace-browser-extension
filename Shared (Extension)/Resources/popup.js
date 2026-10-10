@@ -799,6 +799,19 @@ function classifyEarnedPage(rawUrl) {
   return { ok: false, site: null };
 }
 
+// Trace's own setup page: the one page that is neither a story nor a story
+// site, where the popup still has something to say.
+const TRACE_SETUP_PAGE = Object.freeze({ ok: true, kind: "setup", site: null });
+
+function isTraceSetupPage(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    return url.origin === TRACE_WEB_ORIGIN && /^\/safari-setup\/?$/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
 async function probeQueryActiveTab() {
   if (!ext?.tabs?.query) throw new Error("active_tab_unavailable");
   if (USES_BROWSER_PROMISE_API) {
@@ -1265,6 +1278,7 @@ function setEarnedCopy({
   disclosure = "",
   returning = false,
   importable = false,
+  storyTabs = null,
 }) {
   const previouslyFocused = document.activeElement;
   document.body.dataset.tracePopupStateCode = stateCode;
@@ -1294,6 +1308,7 @@ function setEarnedCopy({
     headingEl.dataset.recordTitle = record && record.heading ? "true" : "false";
   }
   setEarnedFailure(failure);
+  setEarnedStoryTabs(storyTabs);
   if (leadEl) {
     leadEl.hidden = !(lead || leadMarkup);
     if (leadMarkup) setEarnedEmphasizedCopy(leadEl, leadMarkup);
@@ -1516,8 +1531,20 @@ async function reloadEarnedStory() {
 
 function renderEarnedPermissionInvitation(story, hasGrant, coverage = null, lapse = false) {
   const onStory = story.kind === "story";
-  const partial = !hasGrant && ((coverage && coverage.granted > 0) || isLikelyIosExtensionUi);
-  if (partial) {
+  const onSetupPage = story.kind === "setup";
+  const partial = !hasGrant && (onSetupPage || (coverage && coverage.granted > 0) || isLikelyIosExtensionUi);
+  if (partial && onSetupPage) {
+    // Trace was allowed on its own page and nowhere else (Safari's blue
+    // button, or This Website). The same request, in this page's words.
+    setEarnedCopy({
+      stateCode: "P3",
+      kicker: "Allowed on this page only",
+      kickerIcon: "globe",
+      headingMarkup: "Next, tap <b>Always Allow</b>.",
+      lead: "Trace needs AO3 and FanFiction.net’s addresses to save your stories. Safari will list all 5.",
+      ruleMarkup: "Then tap <b>Always Allow</b>, not the blue button. The blue one stops Trace tomorrow.",
+    });
+  } else if (partial) {
     setEarnedCopy({
       stateCode: lapse ? "P3-lapse" : "P3",
       kicker: lapse ? "Trace can’t save here right now" : "Allowed on this site only",
@@ -1558,6 +1585,102 @@ function renderEarnedSiteReady() {
   setEarnedCheck("popup-earned-save", "waiting", "Not saved", "Saved to Trace");
   setEarnedResult("success", "Open any story.", "Trace saves it when it opens.");
   configureEarnedActions({ hidden: true });
+}
+
+/** The setup page, story sites allowed, before the open story tabs are known. */
+function renderSetupPageOn(tabs = []) {
+  const going = tabs.length > 0;
+  setEarnedCopy({
+    stateCode: going ? "setup-go" : "setup-open",
+    kicker: "Trace is on",
+    kickerIcon: "check",
+    heading: going ? "Go to your story" : "Open any story",
+    lead: going ? "" : "Trace saves it when it opens.",
+    storyTabs: tabs,
+  });
+  setEarnedResult("success", going ? "Trace is on. Go to your story." : "Trace is on. Open any story.",
+    going ? "" : "Trace saves it when it opens.");
+  configureEarnedActions({ hidden: true });
+}
+
+function setupStoryTabs(response) {
+  const tabs = response?.ok === true && Array.isArray(response.result?.tabs) ? response.result.tabs : [];
+  return tabs
+    .filter((tab) => Number.isSafeInteger(tab?.tabId) && (tab.site === "ao3" || tab.site === "ffn"))
+    .slice(0, 5)
+    .map((tab) => ({ tabId: tab.tabId, site: tab.site, title: typeof tab.title === "string" ? tab.title.trim() : "" }));
+}
+
+let setupPageRender = 0;
+
+/**
+ * The popup over Trace's setup page. With the story sites allowed it offers
+ * the reader's open story tabs; with only this page allowed it asks for the
+ * story sites. The list and the switch are the background's, under the same
+ * rules it applies to the page itself.
+ */
+async function renderSetupPage() {
+  const render = (setupPageRender += 1);
+  const grantedOrigins = await readGrantedOrigins();
+  const hasGrant = await readCompleteEarnedGrant(grantedOrigins);
+  if (render !== setupPageRender) return;
+  if (!hasGrant) {
+    earnedPreparedContext = Object.freeze({ story: TRACE_SETUP_PAGE, hasGrant: false });
+    renderEarnedPermissionInvitation(TRACE_SETUP_PAGE, false, earnedGrantCoverage(grantedOrigins));
+    return;
+  }
+  const response = await new Promise((resolve) =>
+    sendKernelRuntimeMessage({ type: "TRACE_SETUP_PAGE_REQUEST", request: "story-tabs" }, resolve));
+  if (render !== setupPageRender) return;
+  renderSetupPageOn(setupStoryTabs(response));
+}
+
+function goToStoryTab(tabId) {
+  sendKernelRuntimeMessage({ type: "TRACE_SETUP_PAGE_REQUEST", request: "switch-to-tab", tabId }, (response) => {
+    if (response?.ok === true) {
+      window.close();
+      return;
+    }
+    // The tab has gone or is no longer a story. Show what is open now.
+    void renderSetupPage();
+  });
+}
+
+/** One row per open story tab, in the Settings row's form. */
+function setEarnedStoryTabs(tabs) {
+  const scroll = document.querySelector("#popup-earned-permission .popup-earned-scroll");
+  let list = document.getElementById("popup-earned-story-tabs");
+  if (!tabs || tabs.length === 0) {
+    if (list) {
+      list.hidden = true;
+      list.replaceChildren();
+    }
+    return;
+  }
+  if (!list && scroll) {
+    list = document.createElement("div");
+    list.id = "popup-earned-story-tabs";
+    list.className = "popup-earned-story-tabs";
+    const lead = document.getElementById("popup-earned-lead");
+    scroll.insertBefore(list, lead ? lead.nextSibling : null);
+  }
+  if (!list) return;
+  list.replaceChildren(...tabs.map((tab) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "popup-earned-settings-row popup-earned-story-tab";
+    const name = tab.title || (tab.site === "ffn" ? "Story on FanFiction.net" : "Story on AO3");
+    const label = document.createElement("span");
+    label.className = "popup-earned-story-tab-label";
+    label.textContent = name;
+    const chevron = popupSvg("0 0 8 14", "2");
+    popupSvgShape(chevron, "path", { d: "M1.5 1.5 6.5 7l-5 5.5" });
+    row.setAttribute("aria-label", `Go to ${name}`);
+    row.addEventListener("click", () => goToStoryTab(tab.tabId));
+    row.append(label, chevron);
+    return row;
+  }));
+  list.hidden = false;
 }
 
 function renderEarnedAccessPending(story) {
@@ -2209,7 +2332,7 @@ async function prepareEarnedPermissionFlow() {
   ]);
   const hasGrant = await readCompleteEarnedGrant(grantedOrigins);
   const tab = await probeQueryActiveTab().catch(() => null);
-  const story = classifyEarnedPage(tab?.url);
+  const story = isTraceSetupPage(tab?.url) ? TRACE_SETUP_PAGE : classifyEarnedPage(tab?.url);
   earnedCurrentPage = story.ok ? story : null;
   if (earnedCurrentPage?.kind === "story") {
     earnedCurrentPage = { ...earnedCurrentPage, knownInLibrary: await readKnownInLibrary(tab?.url) };
@@ -2219,6 +2342,15 @@ async function prepareEarnedPermissionFlow() {
     stopStoryConfirmation();
     endAccountWait();
     renderEarnedPermissionInvitation(story, false, earnedGrantCoverage(grantedOrigins), true);
+    return;
+  }
+  // On the setup page, access that is not complete is the one thing to fix,
+  // whatever an earlier story-site run may have recorded.
+  if (story.kind === "setup" && !hasGrant) {
+    earnedPreparedContext = Object.freeze({ story, hasGrant: false });
+    stopStoryConfirmation();
+    endAccountWait();
+    renderEarnedPermissionInvitation(story, false, earnedGrantCoverage(grantedOrigins));
     return;
   }
 
@@ -2271,6 +2403,11 @@ async function prepareEarnedPermissionFlow() {
       return;
     }
     void recordEarnedEvent("website_access_registration_ready");
+    if (story.kind === "setup") {
+      await writeEarnedState({ completedAt: Date.now() });
+      showSetupPageAfterAccess();
+      return;
+    }
     if (story.kind === "archive") {
       await writeEarnedState({ completedAt: Date.now() });
       renderEarnedSiteReady();
@@ -2345,6 +2482,11 @@ async function allowAccessAndAddEarnedStory() {
       throw new Error("registration_failed");
     }
     void recordEarnedEvent("website_access_registered");
+    if (story.kind === "setup") {
+      await writeEarnedState({ completedAt: Date.now() });
+      showSetupPageAfterAccess();
+      return;
+    }
     if (story.kind === "archive") {
       await writeEarnedState({ completedAt: Date.now() });
       renderEarnedSiteReady();
@@ -2659,6 +2801,7 @@ function renderKernelSnapshot(snapshot) {
     if (section) section.hidden = false;
     if (earnedCurrentPage.kind === "story" && earnedCurrentPage.knownInLibrary) renderEarnedCheckingLibrary();
     else if (earnedCurrentPage.kind === "story") renderEarnedAccessPending(earnedCurrentPage);
+    else if (earnedCurrentPage.kind === "setup") renderSetupPageOn();
     else renderEarnedSiteReady();
     return;
   }
@@ -3203,6 +3346,13 @@ async function renderReaderView(state) {
     if (importButton) importButton.hidden = true;
     return;
   }
+  if (earnedCurrentPage?.kind === "setup") {
+    // Trace's own setup page: the account is connected, so say where to go.
+    stopStoryConfirmation();
+    if (importButton) importButton.hidden = true;
+    await renderSetupPage();
+    return;
+  }
   if (activeTab.kind === "supported_story") {
     if (state.activeWork?.status === "saved" && earnedSetupFinishedOnStory) {
       // Setup finished in this popup and the page saved the story before the
@@ -3494,6 +3644,20 @@ function openTraceApp(url) {
   } catch {
     // The app link is optional; the reader can always switch apps themselves.
   }
+}
+
+/**
+ * Story-site access has just been confirmed on the setup page. The general
+ * view takes over, so the account states come first, exactly as elsewhere.
+ */
+function showSetupPageAfterAccess() {
+  if (!kernelPopupInitialized) {
+    activateKernelPopupAfterEarnedPermission();
+    return;
+  }
+  earnedPreparedContext = null;
+  renderSetupPageOn();
+  requestKernelSnapshot();
 }
 
 function activateKernelPopupAfterEarnedPermission() {

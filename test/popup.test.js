@@ -187,6 +187,7 @@ function createPopupHarness({
   platformOs = null,
   maxTouchPoints = 0,
   tabResponse = null,
+  runtimeResponse = null,
 } = {}) {
   const html = fs.readFileSync(POPUP_HTML_PATH, "utf8");
   const js = fs.readFileSync(POPUP_JS_PATH, "utf8");
@@ -278,6 +279,10 @@ function createPopupHarness({
         }
         if (message.type === "TRACE_SESSION_ACTION") {
           response = { ok: true, snapshot: sessionSnapshot, action: { kind: "ignored" } };
+        }
+        if (runtimeResponse) {
+          const custom = runtimeResponse(message);
+          if (custom !== undefined) response = custom;
         }
         if (message.type === "TRACE_EARNED_PERMISSION_RECONCILE") {
           reconcileRequests.push(message);
@@ -4170,4 +4175,250 @@ test("a page that answers with a blank title is asked a few more times, not for 
   assert.equal(asks(), before + 3, "and then it stops");
   assert.match(earnedHeading(h), /in your Library$/);
   assert.notEqual(earnedHeading(h).trim(), "");
+});
+
+// ---- The popup over Trace's own setup page ----
+
+const SETUP_PAGE = "https://www.tracefiction.com/safari-setup";
+const OPEN_STORIES = [
+  { tabId: 12, title: "The Other Road Chapter 2, a fanfic | FanFiction", site: "ffn" },
+  { tabId: 11, title: "The Long Way Round - Chapter 3 - quillfeather [Archive of Our Own]", site: "ao3" },
+];
+
+/** The popup opened over the setup page. `stories` is what the background lists. */
+function setupPagePopup({ stories = OPEN_STORIES, granted = FULL_EARNED_ORIGINS, switchReply = { ok: true }, url = SETUP_PAGE, ...options } = {}) {
+  const state = { stories: [...stories], switchReply };
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    userAgent: IPHONE_UA,
+    traceWebOrigin: "https://www.tracefiction.com",
+    activeTab: { id: 1, url },
+    grantedOrigins: [...granted],
+    sessionSnapshot: CONNECTED_AUTH,
+    popupState: {
+      ok: true,
+      authState: CONNECTED_AUTH,
+      firstSaveSeen: false,
+      activeTab: { kind: "trace" },
+      activeWork: null,
+      autoTrackEnabled: true,
+    },
+    runtimeResponse(message) {
+      if (message.type !== "TRACE_SETUP_PAGE_REQUEST") return undefined;
+      if (message.request === "story-tabs") return { ok: true, result: { tabs: state.stories } };
+      if (message.request === "switch-to-tab") return state.switchReply;
+      return { ok: false, error: "unknown_request" };
+    },
+    ...options,
+  });
+  // Rows on screen: in a list that is not hidden, inside a section that is not hidden.
+  const rows = () => [...h.document.querySelectorAll("#popup-earned-story-tabs .popup-earned-story-tab")]
+    .filter((row) => !row.closest("[hidden]"));
+  const setupRequests = (request) => h.messages.filter((message) =>
+    message.type === "TRACE_SETUP_PAGE_REQUEST" && message.request === request);
+  return { h, state, rows, setupRequests };
+}
+
+test("setup page: with the story sites allowed the popup says Trace is on and offers each open story", async () => {
+  const { h, rows, setupRequests } = setupPagePopup();
+  await settle(h, 16);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "setup-go");
+  assert.equal(h.document.getElementById("popup-earned-kicker-text").textContent, "Trace is on");
+  assert.equal(earnedHeading(h), "Go to your story");
+  assert.deepEqual(rows().map((row) => row.textContent.trim()), OPEN_STORIES.map(({ title }) => title));
+  assert.deepEqual(rows().map((row) => row.getAttribute("aria-label")), OPEN_STORIES.map(({ title }) => `Go to ${title}`));
+  assert.equal(h.document.getElementById("popup-earned-pin").hidden, true, "the stories are the only actions");
+  assert.equal(isDisplayed(h, h.document.getElementById("popup-import")), false);
+  assert.doesNotMatch(earnedText(h), /Open a story to finish|Trace works on AO3/);
+  assert.equal(setupRequests("story-tabs").length, 1);
+
+  // A tap asks the background to bring that tab forward, by id, and the popup gets out of the way.
+  rows()[1].click();
+  await settle(h);
+  assert.equal(JSON.stringify(setupRequests("switch-to-tab")),
+    JSON.stringify([{ type: "TRACE_SETUP_PAGE_REQUEST", request: "switch-to-tab", tabId: 11 }]));
+  assert.equal(h.closeCalled, true);
+  assert.deepEqual(h.reloads, [], "Trace's own page is never reloaded");
+  assert.equal(h.permissionRequests.length, 0);
+  assert.equal(h.store.traceSavedNoteFirstStoryShownV1, undefined, "nothing is claimed as saved");
+});
+
+test("setup page: with no story open it says to open any story", async () => {
+  const { h, rows } = setupPagePopup({ stories: [] });
+  await settle(h, 16);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "setup-open");
+  assert.equal(h.document.getElementById("popup-earned-kicker-text").textContent, "Trace is on");
+  assert.equal(earnedHeading(h), "Open any story");
+  assert.equal(h.document.getElementById("popup-earned-lead").textContent, "Trace saves it when it opens.");
+  assert.deepEqual(rows(), []);
+  assert.equal(h.document.getElementById("popup-earned-pin").hidden, true);
+
+  // The same when the background cannot say.
+  const silent = setupPagePopup({ runtimeResponse: () => undefined });
+  await settle(silent.h, 16);
+  assert.equal(earnedHeading(silent.h), "Open any story");
+});
+
+test("setup page: a story tab with no title still gets a row, named for its site", async () => {
+  const { h, rows } = setupPagePopup({
+    stories: [{ tabId: 5, title: "", site: "ao3" }, { tabId: 6, title: "   ", site: "ffn" }, { tabId: "7", title: "No id", site: "ao3" }, { tabId: 8, title: "Elsewhere", site: "bank" }],
+  });
+  await settle(h, 16);
+  assert.deepEqual(rows().map((row) => row.textContent.trim()), ["Story on AO3", "Story on FanFiction.net"]);
+});
+
+test("setup page: when only that page was allowed, the popup asks for the story sites in its own words", async () => {
+  const granted = [];
+  const { h, rows, setupRequests } = setupPagePopup({ granted, grantedOrigins: granted });
+  await settle(h, 16);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P3");
+  assert.equal(h.document.getElementById("popup-earned-kicker-text").textContent, "Allowed on this page only");
+  assert.equal(earnedHeading(h), "Next, tap Always Allow.");
+  assert.equal(h.document.getElementById("popup-earned-lead").textContent,
+    "Trace needs AO3 and FanFiction.net’s addresses to save your stories. Safari will list all 5.");
+  assert.match(h.document.getElementById("popup-earned-rule").textContent, /^Then tap Always Allow, not the blue button\./);
+  const primary = h.document.getElementById("popup-earned-primary");
+  assert.equal(primary.textContent, "Allow story sites");
+  assert.equal(primary.dataset.emphasis, "primary");
+  assert.deepEqual(rows(), []);
+  assert.equal(setupRequests("story-tabs").length, 0, "no tabs are asked about before access");
+  assert.doesNotMatch(earnedText(h), /Open a story to finish|this site only|other addresses/);
+
+  // The request is the popup's own, for exactly the five story-site addresses.
+  primary.click();
+  assert.equal(earnedHeading(h), "Tap Always Allow, not the blue button.", "these words stay under Safari's alert");
+  await settle(h, 16);
+  assert.equal(h.permissionRequests.length, 1);
+  assert.deepEqual([...h.permissionRequests[0].origins].sort(), [...FULL_EARNED_ORIGINS].sort());
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "setup-go");
+  assert.equal(earnedHeading(h), "Go to your story");
+  assert.equal(rows().length, 2);
+  assert.ok(h.store.traceEarnedPermissionOnboardingV1.completedAt > 0);
+  assert.deepEqual(h.reloads, [], "the setup page is not reloaded after access is given");
+});
+
+test("setup page: declining Safari's request says so and offers Try again", async () => {
+  const granted = [];
+  const { h } = setupPagePopup({ granted, grantedOrigins: granted, permissionRequestResult: false });
+  await settle(h, 16);
+  h.document.getElementById("popup-earned-primary").click();
+  await settle(h, 16);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P7");
+  assert.equal(earnedHeading(h), "Nothing was saved");
+  assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Try again");
+  assert.deepEqual(h.reloads, []);
+});
+
+test("setup page: access that has since lapsed is asked for in the same words", async () => {
+  const granted = [];
+  const { h } = setupPagePopup({
+    granted,
+    grantedOrigins: granted,
+    storageState: { traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 86_400_000 } },
+  });
+  await settle(h, 16);
+  assert.equal(h.document.getElementById("popup-earned-kicker-text").textContent, "Allowed on this page only");
+  assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Allow story sites");
+  assert.doesNotMatch(earnedText(h), /can’t save here/);
+});
+
+test("setup page: the account comes first, in the same states as everywhere else", async () => {
+  const none = setupPagePopup({ sessionSnapshotResponses: [NO_ACCOUNT_REPLY, NO_ACCOUNT_REPLY] });
+  await settle(none.h, 16);
+  assert.equal(none.h.document.body.dataset.tracePopupStateCode, "P6");
+  assert.equal(earnedHeading(none.h), NO_ACCOUNT);
+  assert.match(none.h.document.getElementById("popup-earned-lead").textContent, /^Create an account or sign in, then come back to any story\./);
+  assert.deepEqual(none.rows(), []);
+
+  const arriving = setupPagePopup({ sessionSnapshotResponses: [UNREADABLE_REPLY, UNREADABLE_REPLY, CONNECTED_REPLY] });
+  await settle(arriving.h, 16);
+  assert.equal(earnedHeading(arriving.h), CONNECTING);
+  assert.deepEqual(arriving.rows(), [], "no story is offered before the account is there");
+  await pass(arriving.h, 1000);
+  assert.equal(earnedHeading(arriving.h), CONNECTING);
+  await pass(arriving.h, 2000);
+  assert.equal(earnedHeading(arriving.h), "Go to your story");
+  assert.equal(arriving.rows().length, 2);
+
+  const unreachable = setupPagePopup({ sessionSnapshotResponses: Array(6).fill(UNREADABLE_REPLY) });
+  await settle(unreachable.h, 16);
+  for (const wait of [1000, 2000, 4000]) await pass(unreachable.h, wait);
+  assert.equal(earnedHeading(unreachable.h), COULD_NOT_CONNECT);
+  assert.match(unreachable.h.document.getElementById("popup-earned-lead").textContent, /then come back to any story\.$/);
+});
+
+test("setup page: a story tab that has gone is dropped from the list, and the popup stays", async () => {
+  const { h, state, rows, setupRequests } = setupPagePopup({ switchReply: { ok: false, error: "not_a_story" } });
+  await settle(h, 16);
+  state.stories = [OPEN_STORIES[1]];
+  rows()[0].click();
+  await settle(h, 16);
+  assert.equal(h.closeCalled, false);
+  assert.equal(setupRequests("story-tabs").length, 2, "it asks what is open now");
+  assert.deepEqual(rows().map((row) => row.textContent.trim()), [OPEN_STORIES[1].title]);
+
+  state.stories = [];
+  rows()[0].click();
+  await settle(h, 16);
+  assert.equal(earnedHeading(h), "Open any story");
+  assert.deepEqual(rows(), []);
+});
+
+test("setup page: access is asked for first, whatever an earlier run recorded and whatever the account says", async () => {
+  // A story page reported in once, before access ended; no account is connected.
+  const { h, setupRequests } = setupPagePopup({
+    grantedOrigins: [],
+    storageState: { traceArchiveReadiness: { lastArchiveSeenAt: Date.now() - 60_000 } },
+    sessionSnapshotResponses: [NO_ACCOUNT_REPLY, NO_ACCOUNT_REPLY],
+  });
+  await settle(h, 16);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P3");
+  assert.equal(h.document.getElementById("popup-earned-kicker-text").textContent, "Allowed on this page only");
+  assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Allow story sites");
+  assert.equal(setupRequests("story-tabs").length, 0);
+  assert.equal(h.store.traceEarnedPermissionOnboardingV1?.completedAt, undefined, "setup is not called finished without access");
+});
+
+test("setup page: access that ends while the popup is open is asked for again, not papered over", async () => {
+  const live = [...FULL_EARNED_ORIGINS];
+  const { h, rows, setupRequests } = setupPagePopup({ grantedOrigins: live, switchReply: { ok: false, error: "not_allowed" } });
+  await settle(h, 16);
+  assert.equal(rows().length, 2);
+  live.length = 0;
+  rows()[0].click();
+  await settle(h, 16);
+  assert.equal(h.closeCalled, false);
+  assert.equal(h.document.getElementById("popup-earned-kicker-text").textContent, "Allowed on this page only");
+  assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Allow story sites");
+  assert.deepEqual(rows(), []);
+  assert.equal(setupRequests("story-tabs").length, 1, "no list is asked for without access");
+});
+
+test("setup page: only that page gets these words", async () => {
+  for (const url of [
+    "https://www.tracefiction.com/",
+    "https://www.tracefiction.com/library",
+    "https://www.tracefiction.com/safari-setup/more",
+    "https://www.tracefiction.com/safari-setup-2",
+    "https://www.tracefiction.com/x/safari-setup",
+    "https://example.com/safari-setup",
+    "https://www.tracefiction.com.example.com/safari-setup",
+    "http://www.tracefiction.com/safari-setup",
+    "https://archiveofourown.org/safari-setup",
+  ]) {
+    const { h, rows, setupRequests } = setupPagePopup({ url });
+    await settle(h, 16);
+    assert.deepEqual(rows(), [], url);
+    assert.equal(setupRequests("story-tabs").length, 0, url);
+    assert.notEqual(earnedHeading(h), "Go to your story", url);
+    assert.notEqual(h.document.getElementById("popup-earned-kicker-text").textContent, "Allowed on this page only", url);
+  }
+  // With a query string, a fragment or a trailing slash it is still the setup page.
+  for (const url of [`${SETUP_PAGE}/`, `${SETUP_PAGE}?from=app`, `${SETUP_PAGE}#step-2`]) {
+    const { h, rows } = setupPagePopup({ url });
+    await settle(h, 16);
+    assert.equal(rows().length, 2, url);
+  }
 });

@@ -897,6 +897,20 @@ body[data-trace-popup-state="connected_saved"] .popup-sheet {
     cursor: pointer;
 }
 .popup-earned-settings-row[hidden] { display: none; }
+/* Open story tabs on Trace's setup page: the same row, one per tab, with the
+   tab's title in ink on a single line. */
+.popup-earned-story-tabs { margin-top: 14px; }
+.popup-earned-story-tabs[hidden] { display: none; }
+.popup-earned-story-tab { margin-top: 0; gap: 12px; color: var(--text); }
+.popup-earned-story-tab:last-child { border-bottom: 1px solid var(--rule); }
+.popup-earned-story-tab-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.popup-earned-story-tab svg { flex: none; }
 .popup-earned-settings-row svg { width: 7px; height: 12px; color: var(--text-3); }
 /* Import in the reader view: a quiet action row above Settings. Once Trace
    has the page, Open in Trace is the one thing left to do. */

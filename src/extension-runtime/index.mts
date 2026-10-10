@@ -8,6 +8,7 @@ import {
   installArchiveReadinessRuntime,
 } from "./archive-readiness.mjs";
 import { installEarnedPermissionRegistrationRuntime } from "./earned-permission-registration.mjs";
+import { installSetupPageRuntime } from "./setup-page.mjs";
 import { installTraceFirstInstallActivation } from "./trace-web-navigation.mjs";
 import { rememberConnectIntent } from "./connect-intent.mjs";
 export * from "./account-projection.mjs";
@@ -201,6 +202,22 @@ try {
   extension.storage.onChanged?.addListener((changes, area) => {
     if (area === "local" && "prefAutoTrackEnabled" in changes) void session?.publishTrackingPreference();
   });
+  if (__TRACE_SESSION_MODE__ === "kernel") {
+    // Trace's own setup page, and the popup over it, ask about story-site
+    // access and open story tabs. Its listeners are added in this same first
+    // turn, so a permission change that wakes the background still reaches
+    // an open page.
+    installSetupPageRuntime({
+      runtime: extension.runtime,
+      tabs: extension.tabs,
+      ...(extension.permissions === undefined ? {} : { permissions: extension.permissions }),
+      mode: storageMode,
+      webOrigin: __TRACE_WEB_ORIGIN__,
+      ...(__TRACE_IOS_EARNED_PERMISSION_CONFIG__ === null
+        ? {}
+        : { storyOrigins: __TRACE_IOS_EARNED_PERMISSION_CONFIG__.origins }),
+    });
+  }
 } catch {
   scope.__traceSessionRuntimeBootFailed = true;
 }

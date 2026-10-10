@@ -89,6 +89,7 @@ export interface StorageArea {
 export interface BrowserTab {
   readonly id?: number;
   readonly url?: string;
+  readonly title?: string;
   readonly active?: boolean;
   readonly lastAccessed?: number;
 }

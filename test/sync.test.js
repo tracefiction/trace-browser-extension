@@ -49,21 +49,25 @@ function statusReadyMessages(h) {
 
 function createSyncHarness(
   origin = "https://tracefiction.com",
-  { sendMessageImpl, sessionMode = "legacy" } = {},
+  { sendMessageImpl, sessionMode = "legacy", now = null, framed = false } = {},
 ) {
   const js = fs.readFileSync(SYNC_JS_PATH, "utf8");
-  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+  const outer = new JSDOM(`<!doctype html><html><body>${framed ? "<iframe></iframe>" : ""}</body></html>`, {
     url: origin,
     runScripts: "outside-only",
     contentType: "text/html",
   });
+  // `framed`: the script finds itself in a frame inside some other page.
+  const dom = { window: framed ? outer.window.frames[0] : outer.window };
   const messages = [];
   const postedMessages = [];
   const consoleErrors = [];
   const originalPostMessage = dom.window.postMessage.bind(dom.window);
   dom.window.postMessage = (data, targetOrigin, transfer) => {
     postedMessages.push({ data, targetOrigin });
-    return originalPostMessage(data, targetOrigin, transfer);
+    // The test frame has no address of its own, so its origin reads "null",
+    // which cannot be posted to by name.
+    return originalPostMessage(data, framed && targetOrigin === "null" ? "*" : targetOrigin, transfer);
   };
   let onRuntimeMessage = null;
   const context = {
@@ -76,6 +80,7 @@ function createSyncHarness(
     window: dom.window,
     document: dom.window.document,
     self: dom.window,
+    ...(now ? { Date: { now } } : {}),
     chrome: {
       runtime: {
         sendMessage(message, callback) {
@@ -906,4 +911,304 @@ test("sync forwards malformed status pushes as a safe disconnected state", async
     connected: false,
     authState: "unknown",
   });
+});
+
+// ---- Setup page requests ----
+
+const SETUP_ORIGIN = "https://www.tracefiction.com";
+const SETUP_PAGE_URL = `${SETUP_ORIGIN}/safari-setup`;
+
+function setupHarness(replies = {}, options = {}) {
+  return createSyncHarness(SETUP_PAGE_URL, {
+    sessionMode: "kernel",
+    sendMessageImpl(message, callback) {
+      if (message.type !== "TRACE_SETUP_PAGE_REQUEST") return callback?.(undefined);
+      const reply = replies[message.request];
+      callback?.(typeof reply === "function" ? reply(message) : reply);
+    },
+    ...options,
+  });
+}
+
+function setupMessages(h) {
+  return plainJson(h.messages.filter((message) => message.type === "TRACE_SETUP_PAGE_REQUEST"));
+}
+
+function setupAnswers(h) {
+  return plainJson(h.postedMessages.filter((item) =>
+    item?.data?.type === "TRACE_SETUP_RESPONSE" || item?.data?.type === "TRACE_SETUP_ACCESS_CHANGED"));
+}
+
+function askSetup(h, data, { origin = SETUP_ORIGIN, source } = {}) {
+  h.window.dispatchEvent(new h.window.MessageEvent("message", {
+    data: { type: "TRACE_SETUP_REQUEST", ...data },
+    origin,
+    source: source === undefined ? h.window : source,
+  }));
+}
+
+test("setup: the page learns whether the story sites are allowed", async () => {
+  for (const result of [
+    { storySitesAllowed: true, scope: "all" },
+    { storySitesAllowed: true, scope: "story-sites" },
+    { storySitesAllowed: false, scope: "this-site" },
+  ]) {
+    const h = setupHarness({ access: { ok: true, result: { ...result, origins: ["*://*/*"], secret: "x" } } });
+    askSetup(h, { id: "q1", request: "access" });
+    await flush();
+    assert.deepEqual(setupMessages(h), [{ type: "TRACE_SETUP_PAGE_REQUEST", request: "access" }]);
+    assert.deepEqual(setupAnswers(h), [{
+      data: { type: "TRACE_SETUP_RESPONSE", id: "q1", ok: true, result },
+      targetOrigin: SETUP_ORIGIN,
+    }], "exactly the two fields, to this page's own origin");
+  }
+});
+
+test("setup: the page is given story tabs by id, title and site, and nothing else about them", async () => {
+  const h = setupHarness({
+    "story-tabs": {
+      ok: true,
+      result: {
+        tabs: [
+          { tabId: 12, title: "The Other Road | FanFiction", site: "ffn", url: "https://www.fanfiction.net/s/4821/2/", windowId: 3, active: true },
+          { tabId: 11, title: "x".repeat(400), site: "ao3", favIconUrl: "https://archiveofourown.org/favicon.ico" },
+        ],
+        everyTab: [{ url: "https://bank.example/" }],
+      },
+    },
+  });
+  askSetup(h, { id: "q2", request: "story-tabs" });
+  await flush();
+  assert.deepEqual(setupMessages(h), [{ type: "TRACE_SETUP_PAGE_REQUEST", request: "story-tabs" }]);
+  const [answer] = setupAnswers(h);
+  assert.deepEqual(answer.data, {
+    type: "TRACE_SETUP_RESPONSE",
+    id: "q2",
+    ok: true,
+    result: {
+      tabs: [
+        { tabId: 12, title: "The Other Road | FanFiction", site: "ffn" },
+        { tabId: 11, title: "x".repeat(120), site: "ao3" },
+      ],
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(answer), /https?:\/\/(?!www\.tracefiction\.com")|bank|favicon|windowId/);
+
+  // More than five, or anything not shaped like a story tab, is not passed on.
+  const many = setupHarness({
+    "story-tabs": { ok: true, result: { tabs: Array.from({ length: 9 }, (_, index) => ({ tabId: index, title: `Story ${index}`, site: "ao3" })) } },
+  });
+  askSetup(many, { id: "q3", request: "story-tabs" });
+  await flush();
+  assert.equal(setupAnswers(many)[0].data.result.tabs.length, 5);
+
+  for (const tabs of [
+    [{ tabId: "12", title: "A", site: "ao3" }],
+    [{ tabId: 12, title: "A", site: "bank" }],
+    [{ tabId: 12, site: "ao3" }],
+    [{ tabId: -1, title: "A", site: "ao3" }],
+    [null],
+    "all of them",
+  ]) {
+    const bad = setupHarness({ "story-tabs": { ok: true, result: { tabs } } });
+    askSetup(bad, { id: "q4", request: "story-tabs" });
+    await flush();
+    assert.deepEqual(setupAnswers(bad)[0].data, { type: "TRACE_SETUP_RESPONSE", id: "q4", ok: false, error: "unavailable" }, JSON.stringify(tabs));
+  }
+});
+
+test("setup: the page can ask for one of its story tabs to be brought forward, by id only", async () => {
+  const h = setupHarness({ "switch-to-tab": { ok: true, tab: { url: "https://archiveofourown.org/works/123" } } });
+  askSetup(h, { id: "q5", request: "switch-to-tab", tabId: 11, url: "https://bank.example/", active: false, windowId: 9 });
+  await flush();
+  assert.deepEqual(setupMessages(h), [{ type: "TRACE_SETUP_PAGE_REQUEST", request: "switch-to-tab", tabId: 11 }],
+    "nothing but the id travels: no address, no other change to the tab");
+  assert.deepEqual(setupAnswers(h)[0].data, { type: "TRACE_SETUP_RESPONSE", id: "q5", ok: true });
+
+  for (const [reply, error] of [
+    [{ ok: false, error: "not_listed" }, "not_listed"],
+    [{ ok: false, error: "not_a_story" }, "not_a_story"],
+    [{ ok: false, error: "not_allowed" }, "not_allowed"],
+    [{ ok: false, error: "switch_failed" }, "switch_failed"],
+    [{ ok: false, error: "rate_limited" }, "rate_limited"],
+    [{ ok: false, error: "forbidden" }, "forbidden"],
+    [{ ok: false, error: "Error: No tab with id 11 at https://archiveofourown.org/works/123" }, "unavailable"],
+    [{ ok: false }, "unavailable"],
+    [undefined, "unavailable"],
+    ["ok", "unavailable"],
+  ]) {
+    const refused = setupHarness({ "switch-to-tab": reply });
+    askSetup(refused, { id: "q6", request: "switch-to-tab", tabId: 11 });
+    await flush();
+    assert.deepEqual(setupAnswers(refused)[0].data, { type: "TRACE_SETUP_RESPONSE", id: "q6", ok: false, error }, JSON.stringify(reply));
+  }
+
+  for (const tabId of [undefined, "11", 1.5, -1, null, Number.MAX_SAFE_INTEGER + 1]) {
+    const invalid = setupHarness({ "switch-to-tab": { ok: true } });
+    askSetup(invalid, { id: "q7", request: "switch-to-tab", tabId });
+    await flush();
+    assert.deepEqual(setupAnswers(invalid)[0].data, { type: "TRACE_SETUP_RESPONSE", id: "q7", ok: false, error: "invalid_request" }, String(tabId));
+    assert.deepEqual(setupMessages(invalid), [], "a malformed request never reaches the background");
+  }
+});
+
+test("setup: a request this script does not know is refused by name, without asking the background", async () => {
+  const h = setupHarness({ access: { ok: true, result: { storySitesAllowed: true, scope: "all" } } });
+  for (const [request, error] of [
+    ["request-access", "unknown_request"],
+    ["permissions", "unknown_request"],
+    ["open-tab", "unknown_request"],
+    ["", "unknown_request"],
+    [undefined, "invalid_request"],
+    [7, "invalid_request"],
+    [["access"], "invalid_request"],
+  ]) {
+    h.postedMessages.length = 0;
+    askSetup(h, { id: "q8", request });
+    await flush();
+    assert.deepEqual(setupAnswers(h).map(({ data }) => data), [{ type: "TRACE_SETUP_RESPONSE", id: "q8", ok: false, error }], String(request));
+  }
+  assert.deepEqual(setupMessages(h), []);
+});
+
+test("setup: only this page's own top-level window, speaking to itself, is heard", async () => {
+  const reply = { access: { ok: true, result: { storySitesAllowed: true, scope: "all" } } };
+
+  // Another origin's message, as a frame or an opener would send it.
+  const h = setupHarness(reply);
+  for (const origin of ["https://archiveofourown.org", "https://www.fanfiction.net", "https://example.com", "https://tracefiction.com", "http://www.tracefiction.com", "null", ""]) {
+    askSetup(h, { id: "q9", request: "access" }, { origin });
+  }
+  // The right origin, from a different window: a same-origin frame, or no window at all.
+  const frame = h.window.document.createElement("iframe");
+  h.window.document.body.appendChild(frame);
+  askSetup(h, { id: "q9", request: "access" }, { source: frame.contentWindow });
+  askSetup(h, { id: "q9", request: "access" }, { source: null });
+  await flush();
+  assert.deepEqual(setupMessages(h), []);
+  assert.deepEqual(setupAnswers(h), [], "and it gets no answer at all");
+
+  // The script running inside a frame hears nothing either, even from that
+  // frame's own window on that frame's own origin.
+  const framed = setupHarness(reply, { framed: true });
+  assert.notEqual(framed.window.top, framed.window, "the script's window is a frame");
+  framed.window.dispatchEvent(new framed.window.MessageEvent("message", {
+    data: { type: "TRACE_SETUP_REQUEST", id: "q9", request: "access" },
+    origin: framed.window.location.origin,
+    source: framed.window,
+  }));
+  await flush();
+  assert.deepEqual(setupMessages(framed), []);
+  assert.deepEqual(setupAnswers(framed), []);
+  framed.emitRuntimeMessage({ type: "TRACE_SETUP_ACCESS_PUSH", storySitesAllowed: true, scope: "all" });
+  assert.deepEqual(setupAnswers(framed), [], "nor is it told when access changes");
+
+  // The same request from the page itself is answered.
+  askSetup(h, { id: "q9", request: "access" });
+  await flush();
+  assert.equal(setupAnswers(h).length, 1);
+});
+
+test("setup: a request that cannot be addressed, and any other message type, is ignored silently", async () => {
+  const h = setupHarness({ access: { ok: true, result: { storySitesAllowed: true, scope: "all" } } });
+  for (const id of [undefined, "", 7, null, {}, "x".repeat(65)]) {
+    askSetup(h, { id, request: "access" });
+  }
+  for (const type of ["TRACE_SETUP_RESPONSE", "TRACE_SETUP_ACCESS_CHANGED", "TRACE_SETUP_PAGE_REQUEST", "TRACE_SETUP_ACCESS_PUSH", "TRACE_SETUP", "trace_setup_request", "SOMETHING_ELSE"]) {
+    h.window.dispatchEvent(new h.window.MessageEvent("message", {
+      data: { type, id: "q10", request: "access", storySitesAllowed: true, scope: "all" },
+      origin: SETUP_ORIGIN,
+      source: h.window,
+    }));
+  }
+  for (const data of [null, undefined, "TRACE_SETUP_REQUEST", 7, ["TRACE_SETUP_REQUEST"]]) {
+    h.window.dispatchEvent(new h.window.MessageEvent("message", { data, origin: SETUP_ORIGIN, source: h.window }));
+  }
+  await flush();
+  assert.deepEqual(setupMessages(h), []);
+  assert.deepEqual(setupAnswers(h), []);
+  assert.deepEqual(h.consoleErrors, []);
+});
+
+test("setup: a page that asks too fast is answered here, without waking the background", async () => {
+  let time = 1_000_000;
+  const h = setupHarness({ access: { ok: true, result: { storySitesAllowed: true, scope: "all" } } }, { now: () => time });
+  for (let request = 0; request < 20; request += 1) askSetup(h, { id: `a${request}`, request: "access" });
+  await flush();
+  assert.equal(setupMessages(h).length, 20);
+  assert.equal(setupAnswers(h).filter(({ data }) => data.ok === true).length, 20);
+
+  h.postedMessages.length = 0;
+  for (let request = 0; request < 300; request += 1) {
+    askSetup(h, { id: `b${request}`, request: ["access", "story-tabs", "switch-to-tab"][request % 3], tabId: 11 });
+  }
+  await flush();
+  assert.equal(setupMessages(h).length, 20, "three hundred more requests send nothing to the background");
+  assert.equal(setupAnswers(h).length, 300);
+  assert.ok(setupAnswers(h).every(({ data }) => data.ok === false && data.error === "rate_limited"));
+
+  time += 9_999;
+  askSetup(h, { id: "c1", request: "access" });
+  await flush();
+  assert.equal(setupMessages(h).length, 20);
+  time += 1;
+  askSetup(h, { id: "c2", request: "access" });
+  await flush();
+  assert.equal(setupMessages(h).length, 21, "the limit is a window, not a ban");
+});
+
+test("setup: a change in access is passed to the page as it happens", async () => {
+  const h = setupHarness();
+  h.emitRuntimeMessage({ type: "TRACE_SETUP_ACCESS_PUSH", storySitesAllowed: true, scope: "story-sites", origins: ["x"], at: 1 });
+  h.emitRuntimeMessage({ type: "TRACE_SETUP_ACCESS_PUSH", storySitesAllowed: false, scope: "this-site" });
+  assert.deepEqual(setupAnswers(h), [
+    { data: { type: "TRACE_SETUP_ACCESS_CHANGED", storySitesAllowed: true, scope: "story-sites" }, targetOrigin: SETUP_ORIGIN },
+    { data: { type: "TRACE_SETUP_ACCESS_CHANGED", storySitesAllowed: false, scope: "this-site" }, targetOrigin: SETUP_ORIGIN },
+  ]);
+
+  // Anything that is not a well-formed, self-consistent reading is dropped.
+  h.postedMessages.length = 0;
+  for (const push of [
+    { storySitesAllowed: "yes", scope: "all" },
+    { storySitesAllowed: true, scope: "everything" },
+    { storySitesAllowed: true, scope: "this-site" },
+    { storySitesAllowed: false, scope: "all" },
+    { scope: "all" },
+    {},
+  ]) {
+    h.emitRuntimeMessage({ type: "TRACE_SETUP_ACCESS_PUSH", ...push });
+  }
+  assert.deepEqual(setupAnswers(h), []);
+});
+
+test("setup: an answer the background did not give in the agreed shape is not passed on", async () => {
+  for (const reply of [
+    { ok: true },
+    { ok: true, result: null },
+    { ok: true, result: { storySitesAllowed: true } },
+    { ok: true, result: { storySitesAllowed: true, scope: "this-site" } },
+    { ok: true, result: { storySitesAllowed: 1, scope: "all" } },
+    { ok: "true", result: { storySitesAllowed: true, scope: "all" } },
+    undefined,
+    null,
+  ]) {
+    const h = setupHarness({ access: reply });
+    askSetup(h, { id: "q11", request: "access" });
+    await flush();
+    assert.deepEqual(setupAnswers(h)[0].data, { type: "TRACE_SETUP_RESPONSE", id: "q11", ok: false, error: "unavailable" }, JSON.stringify(reply));
+  }
+
+  // A build without the background that answers these says so, and asks nothing.
+  const legacy = createSyncHarness(SETUP_PAGE_URL, { sessionMode: "legacy" });
+  askSetup(legacy, { id: "q12", request: "access" });
+  await flush();
+  assert.deepEqual(setupAnswers(legacy)[0].data, { type: "TRACE_SETUP_RESPONSE", id: "q12", ok: false, error: "unavailable" });
+  assert.deepEqual(legacy.messages.filter(({ type }) => type === "TRACE_SETUP_PAGE_REQUEST"), []);
+});
+
+test("setup: the script still announces itself exactly as before", async () => {
+  const h = setupHarness();
+  assert.deepEqual(statusReadyMessages(h).map(({ data, targetOrigin }) => [data.type, Object.keys(data).sort(), targetOrigin]), [
+    ["TRACE_EXTENSION_STATUS_READY", ["at", "type"], SETUP_ORIGIN],
+  ]);
 });

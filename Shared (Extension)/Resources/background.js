@@ -8334,6 +8334,270 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     return controller;
   }
 
+  // src/extension-runtime/setup-page.mts
+  var SETUP_PAGE_MESSAGE = "TRACE_SETUP_PAGE_REQUEST";
+  var SETUP_ACCESS_PUSH_MESSAGE = "TRACE_SETUP_ACCESS_PUSH";
+  var SETUP_STORY_TAB_LIMIT = 5;
+  var SETUP_TAB_TITLE_MAX_LENGTH = 120;
+  var SETUP_REQUEST_LIMIT = 20;
+  var SETUP_REQUEST_WINDOW_MS = 1e4;
+  var SETUP_REQUESTER_LIMIT = 32;
+  var STORY_SITE_ORIGINS = Object.freeze([
+    "https://*.archiveofourown.org/*",
+    "https://*.archiveofourown.gay/*",
+    "https://archive.transformativeworks.org/*",
+    "https://www.fanfiction.net/*",
+    "https://m.fanfiction.net/*"
+  ]);
+  var EVERY_SITE_ORIGINS = /* @__PURE__ */ new Set(["<all_urls>", "*://*/*", "https://*/*"]);
+  function isRecord21(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function refused(error) {
+    return Object.freeze({ ok: false, error });
+  }
+  function storyPageSite(rawUrl, webOrigin) {
+    if (typeof rawUrl !== "string") return null;
+    const site = archiveHostKindFromSender({ url: rawUrl });
+    if (site === null || isBlockedArchivePath(rawUrl, site)) return null;
+    if (workKeyFromArchiveUrl(rawUrl, site) === null) return null;
+    return classifyActiveTabUrl(rawUrl, webOrigin).kind === "supported_story" ? site : null;
+  }
+  var CONTROL_CHARACTERS = new RegExp("[\\u0000-\\u001f\\u007f\\u2028\\u2029]+", "g");
+  function tabTitle(value) {
+    if (typeof value !== "string") return "";
+    const line = value.replace(CONTROL_CHARACTERS, " ").replace(/\s+/g, " ").trim();
+    return Array.from(line).slice(0, SETUP_TAB_TITLE_MAX_LENGTH).join("");
+  }
+  var SetupPageController = class {
+    #runtime;
+    #tabs;
+    #mode;
+    #webOrigin;
+    #webTabPattern;
+    #storyOrigins;
+    #access;
+    #now;
+    /** Per requester: the story tabs it was last given, and from which page. */
+    #listed = /* @__PURE__ */ new Map();
+    #requests = /* @__PURE__ */ new Map();
+    #push = null;
+    #pushAgain = false;
+    constructor(environment) {
+      this.#runtime = environment.runtime;
+      this.#tabs = environment.tabs;
+      this.#mode = environment.mode;
+      const webUrl = new URL(environment.webOrigin);
+      this.#webOrigin = webUrl.origin;
+      this.#webTabPattern = `${webUrl.protocol}//${webUrl.hostname}/*`;
+      this.#storyOrigins = Object.freeze([...environment.storyOrigins ?? STORY_SITE_ORIGINS]);
+      this.#access = new BrowserArchivePermissionSnapshotPort(
+        environment.permissions,
+        environment.runtime,
+        environment.mode
+      );
+      this.#now = () => environment.clock?.now() ?? Date.now();
+    }
+    /** `null`: not this controller's message. */
+    async handle(message, sender) {
+      if (!isRecord21(message) || message.type !== SETUP_PAGE_MESSAGE) return null;
+      const requester = this.#requester(sender);
+      if (requester === null) return refused("forbidden");
+      if (!this.#admit(requester.key)) return refused("rate_limited");
+      const request = message.request;
+      const keys = Object.keys(message).length;
+      if (request === "access") {
+        if (keys !== 2) return refused("invalid_request");
+        const access = await this.#readAccess();
+        return access === null ? refused("unavailable") : Object.freeze({ ok: true, result: access });
+      }
+      if (request === "story-tabs") {
+        if (keys !== 2) return refused("invalid_request");
+        const tabs = await this.#storyTabs(requester);
+        return tabs === null ? refused("unavailable") : Object.freeze({ ok: true, result: Object.freeze({ tabs }) });
+      }
+      if (request === "switch-to-tab") {
+        const tabId = message.tabId;
+        if (keys !== 3 || typeof tabId !== "number" || !Number.isSafeInteger(tabId) || tabId < 0) {
+          return refused("invalid_request");
+        }
+        return this.#switchToTab(requester, tabId);
+      }
+      return refused(typeof request === "string" ? "unknown_request" : "invalid_request");
+    }
+    /** Story-site access changed: tell every open Trace page. */
+    accessChanged() {
+      if (this.#push !== null) {
+        this.#pushAgain = true;
+        return this.#push;
+      }
+      const push = (async () => {
+        do {
+          this.#pushAgain = false;
+          await this.#pushAccess();
+        } while (this.#pushAgain);
+      })().finally(() => {
+        this.#push = null;
+      });
+      this.#push = push;
+      return push;
+    }
+    /** Who is asking: a top-level Trace page (by tab) or this extension's popup. */
+    #requester(sender) {
+      if (isPopupSender(sender, this.#runtime.id)) return { key: "popup", page: "popup" };
+      if (!isTraceWebSender(sender, this.#runtime.id, this.#webOrigin)) return null;
+      const tabId = sender?.tab?.id;
+      if (typeof tabId !== "number" || !Number.isSafeInteger(tabId)) return null;
+      const frame = sender?.url === void 0 ? void 0 : this.#tracePage(sender.url);
+      const tab = sender?.tab?.url === void 0 ? void 0 : this.#tracePage(sender.tab.url);
+      if (frame === null || tab === null) return null;
+      const page = frame ?? tab;
+      return page === void 0 ? null : { key: `page:${tabId}`, page };
+    }
+    #tracePage(rawUrl) {
+      if (typeof rawUrl !== "string") return null;
+      try {
+        const url = new URL(rawUrl);
+        return url.origin === this.#webOrigin ? url.origin + url.pathname : null;
+      } catch {
+        return null;
+      }
+    }
+    #admit(requester) {
+      const now = this.#now();
+      const recent = (this.#requests.get(requester) ?? []).filter(
+        (at) => at <= now && now - at < SETUP_REQUEST_WINDOW_MS
+      );
+      if (recent.length >= SETUP_REQUEST_LIMIT) {
+        this.#requests.set(requester, recent);
+        return false;
+      }
+      recent.push(now);
+      this.#requests.delete(requester);
+      this.#requests.set(requester, recent);
+      while (this.#requests.size > SETUP_REQUESTER_LIMIT) {
+        const oldest = this.#requests.keys().next().value;
+        this.#requests.delete(oldest);
+        this.#listed.delete(oldest);
+      }
+      return true;
+    }
+    async #readAccess() {
+      const [allowed, listed] = await Promise.all([
+        this.#access.containsOrigins(this.#storyOrigins).catch(() => null),
+        this.#access.readGrantedOrigins().catch(() => null)
+      ]);
+      if (typeof allowed !== "boolean") return null;
+      if (!allowed) return Object.freeze({ storySitesAllowed: false, scope: "this-site" });
+      const everySite = (listed ?? []).some((origin) => EVERY_SITE_ORIGINS.has(origin));
+      return Object.freeze({
+        storySitesAllowed: true,
+        scope: everySite ? "all" : "story-sites"
+      });
+    }
+    async #storyTabs(requester) {
+      this.#listed.delete(requester.key);
+      const access = await this.#readAccess();
+      if (access === null) return null;
+      if (!access.storySitesAllowed) return Object.freeze([]);
+      let tabs;
+      try {
+        tabs = await this.#call("query", [{}]);
+      } catch {
+        return null;
+      }
+      const stories = [];
+      (Array.isArray(tabs) ? tabs : []).forEach((tab, order) => {
+        if (!isRecord21(tab) || typeof tab.id !== "number" || !Number.isSafeInteger(tab.id) || tab.id < 0) return;
+        const site = storyPageSite(tab.url, this.#webOrigin);
+        if (site !== null) stories.push({ tab, site, order });
+      });
+      const used = (tab) => typeof tab.lastAccessed === "number" && Number.isFinite(tab.lastAccessed) ? tab.lastAccessed : 0;
+      stories.sort(
+        (left, right) => used(right.tab) - used(left.tab) || Number(right.tab.active === true) - Number(left.tab.active === true) || left.order - right.order
+      );
+      const answer = stories.slice(0, SETUP_STORY_TAB_LIMIT).map(
+        ({ tab, site }) => Object.freeze({ tabId: tab.id, title: tabTitle(tab.title), site })
+      );
+      this.#listed.set(requester.key, {
+        ids: new Set(answer.map(({ tabId }) => tabId)),
+        page: requester.page
+      });
+      return Object.freeze(answer);
+    }
+    async #switchToTab(requester, tabId) {
+      const listed = this.#listed.get(requester.key);
+      if (listed === void 0 || listed.page !== requester.page || !listed.ids.has(tabId)) {
+        return refused("not_listed");
+      }
+      if (typeof this.#tabs.get !== "function" || typeof this.#tabs.update !== "function") {
+        return refused("unavailable");
+      }
+      const access = await this.#readAccess();
+      if (access === null) return refused("unavailable");
+      if (!access.storySitesAllowed) return refused("not_allowed");
+      let tab;
+      try {
+        tab = await this.#call("get", [tabId]);
+      } catch {
+        tab = null;
+      }
+      if (!isRecord21(tab) || tab.id !== tabId || storyPageSite(tab.url, this.#webOrigin) === null) {
+        return refused("not_a_story");
+      }
+      try {
+        await this.#call("update", [tabId, { active: true }]);
+      } catch {
+        return refused("switch_failed");
+      }
+      return Object.freeze({ ok: true });
+    }
+    async #pushAccess() {
+      const access = await this.#readAccess();
+      if (access === null) return;
+      let tabs;
+      try {
+        tabs = await this.#call("query", [{ url: [this.#webTabPattern] }]);
+      } catch {
+        return;
+      }
+      const message = Object.freeze({ type: SETUP_ACCESS_PUSH_MESSAGE, ...access });
+      for (const tab of Array.isArray(tabs) ? tabs : []) {
+        if (typeof tab?.id !== "number" || this.#tracePage(tab.url) === null) continue;
+        try {
+          await this.#call("sendMessage", [tab.id, message]);
+        } catch {
+        }
+      }
+    }
+    #call(method, args) {
+      return extensionCall(
+        this.#tabs,
+        method,
+        args,
+        this.#runtime,
+        this.#mode
+      );
+    }
+  };
+  function installSetupPageRuntime(environment) {
+    const controller = new SetupPageController(environment);
+    environment.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (!isRecord21(message) || message.type !== SETUP_PAGE_MESSAGE) return false;
+      void controller.handle(message, sender).then(
+        (response) => sendResponse(response ?? refused("unavailable")),
+        () => sendResponse(refused("unavailable"))
+      );
+      return true;
+    });
+    const changed = () => {
+      void controller.accessChanged().catch(() => void 0);
+    };
+    environment.permissions?.onAdded?.addListener(changed);
+    environment.permissions?.onRemoved?.addListener(changed);
+    return controller;
+  }
+
   // src/extension-runtime/index.mts
   var UUID_PATTERN7 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   function fallbackUuid(seed) {
@@ -8444,6 +8708,16 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     extension.storage.onChanged?.addListener((changes, area) => {
       if (area === "local" && "prefAutoTrackEnabled" in changes) void session?.publishTrackingPreference();
     });
+    if (true) {
+      installSetupPageRuntime({
+        runtime: extension.runtime,
+        tabs: extension.tabs,
+        ...extension.permissions === void 0 ? {} : { permissions: extension.permissions },
+        mode: storageMode,
+        webOrigin: "https://www.tracefiction.com",
+        ...define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default === null ? {} : { storyOrigins: define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.origins }
+      });
+    }
   } catch {
     scope.__traceSessionRuntimeBootFailed = true;
   }

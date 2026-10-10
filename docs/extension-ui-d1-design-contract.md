@@ -141,6 +141,9 @@ filled only when the state is the task. Retries are tertiary.
 | No story on this page | Open a story to finish | Text Close |
 | List page after first save | Trace is on here | Settings row; no action |
 | Another site | Trace works on AO3 and FanFiction.net | None |
+| Trace's setup page, story open | Kicker “Trace is on”; Go to your story | One row per open story tab |
+| Trace's setup page, no story open | Kicker “Trace is on”; Open any story | None |
+| Trace's setup page, only that page allowed | Kicker “Allowed on this page only”; Next, tap **Always Allow**. | Filled Allow story sites |
 | Offline (desktop) | Trace is temporarily offline | Text Try again |
 
 P5 tells the reader to keep reading and, if the story hasn't appeared after a
@@ -174,6 +177,21 @@ None of these is final while the popup is open. A read that comes back late
 is still taken, and whenever the background publishes that an account
 connected the popup asks once more and carries on by itself. A reply that
 brings no answer leaves a settled view as it is and starts no timer.
+
+On Trace's own setup page (`/safari-setup` on Trace's origin) the popup has
+three things to say, in existing anatomy. With the story sites allowed and the
+account connected: the kicker “Trace is on”, the headline “Go to your story”
+and one row per open story tab, in the Settings row's form, labelled with the
+tab's title on a single line (“Story on AO3” or “Story on FanFiction.net” when
+the tab has none). A tap brings that tab to the front and closes the popup;
+a tab that has gone is dropped from the list. With no story open: “Open any
+story” and “Trace saves it when it opens.” With only that page allowed
+(Safari's blue button, or This Website): the P3 request in this page's words,
+“Allowed on this page only”, “Next, tap **Always Allow**.”, the same rule line
+and Allow story sites, then P4 while Safari asks and P7 if it is declined.
+The setup page is never reloaded and nothing is claimed as saved there. Access
+is asked for first; once it is given, the account states come before the list,
+exactly as on every other page.
 
 The other-account state never names either account and never claims a save.
 A failed P10 save states what didn't happen; the button never quietly
