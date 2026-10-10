@@ -853,6 +853,34 @@ test("failed account-switch credential storage leaves a durable signed-out fence
   );
 });
 
+test("Connect keeps a provider with no account apart from one that could not be read", async () => {
+  const absent = createHarness();
+  await absent.service.start();
+  absent.credentials.queueAcquisition({ kind: "absent" });
+  assert.deepEqual(await absent.service.connect(), { kind: "unavailable" });
+  assert.deepEqual(
+    { state: absent.service.snapshot().state, reason: absent.service.snapshot().reason },
+    { state: "signed_out", reason: "credential_absent" },
+    "the provider answered: it holds no account",
+  );
+
+  const unreadable = createHarness();
+  await unreadable.service.start();
+  unreadable.credentials.queueAcquisition({ kind: "unavailable" });
+  assert.deepEqual(await unreadable.service.connect(), { kind: "unavailable" });
+  assert.deepEqual(
+    { state: unreadable.service.snapshot().state, reason: unreadable.service.snapshot().reason },
+    { state: "signed_out", reason: "provider_unavailable" },
+    "whether an account exists is not known",
+  );
+
+  // A later successful read connects from either state.
+  for (const harness of [absent, unreadable]) {
+    await connectAccount(harness);
+    assert.equal(harness.service.snapshot().reason, "none");
+  }
+});
+
 test("provider synchronization treats a definitively absent native account as disconnect", async () => {
   const harness = createHarness();
   await harness.service.start();

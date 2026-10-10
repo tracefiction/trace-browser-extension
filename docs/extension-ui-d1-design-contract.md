@@ -111,13 +111,14 @@ and Settings row.
 | --- | --- | --- |
 | P1 Saving | Saving your story… | Raised Keep reading |
 | P2 Saved | Story title, byline, Saved record | Raised Keep reading |
+| P2 Saved, title not read yet | Saved to your Library, with an ink check; site and Saved record | Raised Keep reading |
 | P3 More access | Next, tap **Always Allow**. | Filled Allow story sites |
 | P3 lapse | Next, tap **Always Allow**. | Filled Allow story sites |
 | P4 Safari prompt | Tap **Always Allow**, not the blue button. | Disabled Waiting for Safari… |
 | P5 Delayed | Still confirming your story | Raised Keep reading; text Check again |
-| P6 Unlinked | Finish setup in the Trace app | Filled Open Trace |
+| P6 No account | Finish setup in the Trace app | Filled Open Trace |
 | P7 Denied | Nothing was saved | Filled Try again; text Not now |
-| P8 Listing | Open any story to save it | None |
+| P8 No story open | Open any story | None |
 | P9 Unavailable | This story isn’t available | Text Close |
 | P10 Tracking off | Automatic saving is off; unsaved story record | Filled Save this story; text Turn automatic saving on |
 | P10 saving | As P10 | Disabled Saving…; text Turn automatic saving on |
@@ -132,6 +133,8 @@ filled only when the state is the task. Retries are tertiary.
 | State | Heading | Actions |
 | --- | --- | --- |
 | Other account (`identity_conflict`) | Safari was signed in to another account | Filled Open Trace |
+| Connecting to the account | Connecting to your account… | None |
+| Account not reached | Trace couldn’t connect to your account | Filled Open Trace; text Try again |
 | Registration failure | Trace couldn’t finish setting up | Filled Try again |
 | Page needs a reload | Reload this page to keep going | Filled Reload page |
 | Library full | Your Library is full | Filled See Trace Unlimited; text Manage library |
@@ -139,6 +142,38 @@ filled only when the state is the task. Retries are tertiary.
 | List page after first save | Trace is on here | Settings row; no action |
 | Another site | Trace works on AO3 and FanFiction.net | None |
 | Offline (desktop) | Trace is temporarily offline | Text Try again |
+
+P5 tells the reader to keep reading and, if the story hasn't appeared after a
+minute, to reload the page. P8 covers every supported page with no story open,
+including a site's home page, so it never points at titles on the page; a page
+with no story never waits on one.
+
+P2 never shows a stand-in for a title or author. Until the page has named the
+story, the confirmation itself is the headline; the title, byline and kicker
+replace it when the page answers. The popup that finishes setup on a story
+shows P2 for that story even when the save landed before the popup first
+looked, on AO3 and FanFiction.net alike.
+
+On iPhone and iPad the Trace app holds the account, and the popup can learn
+one of three things about it: the app has none (`signed_out` with
+`credential_absent`), it is connected, or it could not be read
+(`signed_out` with any other reason, a session still reading, or no reply).
+Only the first shows P6.
+
+A popup has one wait for the account, shared by the general view and the
+setup flow; anything that needs the account while it is under way joins it.
+While the answer is not known the popup shows “Connecting to your account…”
+and asks again 1, 2 and 4 seconds after each answer. Ten seconds after the
+wait began, however slow the reads were, it shows “Trace couldn’t connect to
+your account” with its buttons, as it does straight away when Trace refuses
+the account the app holds. P6 is followed by one quiet second look 1.2 seconds
+later, for a reader who has only just signed up. Neither “Connecting…” nor
+“couldn’t connect” mentions creating an account.
+
+None of these is final while the popup is open. A read that comes back late
+is still taken, and whenever the background publishes that an account
+connected the popup asks once more and carries on by itself. A reply that
+brings no answer leaves a settled view as it is and starts no timer.
 
 The other-account state never names either account and never claims a save.
 A failed P10 save states what didn't happen; the button never quietly
@@ -159,8 +194,9 @@ the record. Disconnect is not part of first run.
 After a complete five-origin grant, an unconfirmed story remains in P1
 through session `initializing`, `connecting` and `verifying`; an archive page
 shows P8. A confirmed account entry produces P2 on first save and P11 on a
-later visit. An unavailable story produces P9. A credential failure produces
-P6. On each supported site popup open, `permissions.contains` rechecks the
+later visit. An unavailable story produces P9. An app with no account produces
+P6; an account that cannot be read or is refused produces the connecting and
+account-not-reached states above. On each supported site popup open, `permissions.contains` rechecks the
 five earned origins. An incomplete grant after prior completion produces P3
 lapse before any saving or connected copy; completion time remains stored.
 Allow story sites makes the synchronous Safari permission request and then
