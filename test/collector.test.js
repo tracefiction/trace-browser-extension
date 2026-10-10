@@ -8435,6 +8435,90 @@ test("a save refused while the background wakes is not re-sent once another acco
   same.h.dom.window.close();
 });
 
+// A page that was already open when website access is allowed asks for its
+// first save at once, while the background is still adopting the app's
+// account: every reply says no account is connected (binding null).
+function accountAdoptionHarness() {
+  const account = { binding: null };
+  const reply = (extra) => ({ ok: true, binding: account.binding,
+    snapshot: account.binding === null
+      ? { state: "connecting", reason: "none", canExecuteAuthenticated: false }
+      : { state: "connected", reason: "none", canExecuteAuthenticated: true }, ...extra });
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    holdAutoTrack: true,
+    pendingFirstStoryResponse: { ok: true, url: "" },
+    projectionResponse: () => reply({ projection: { entries: {}, workPreferences: {},
+      syncVersion: "2026-10-09T12:00:00.000Z" } }),
+    onSendMessage(message, respond) {
+      if (message.type !== "TRACE_WORK_STATE_GET") return false;
+      if (typeof respond === "function") respond(reply({ state: null }));
+      return true;
+    },
+  });
+  const refuse = () => h.autoTrackCallback({ ok: false, error: "unavailable", binding: account.binding });
+  // `announce: false` connects the account without the storage change that
+  // normally tells the page, so the next reply is the first it hears of it.
+  const connect = ({ announce = true } = {}) => {
+    account.binding = "1.first";
+    if (announce) h.dispatchStorageChange("traceAccountProjectionRevisionV1", 2);
+  };
+  return { h, refuse, connect };
+}
+
+test("a save refused while the app's account is still being adopted is made once that account connects", async () => {
+  const { h, refuse, connect } = accountAdoptionHarness();
+  await delay(50);
+  assert.equal(autoTrackSends(h), 1);
+  refuse();
+  // The account connects before the page's own quiet retry is due.
+  await delay(300);
+  connect();
+  await delay(1_000);
+  assert.equal(autoTrackSends(h), 2, "the save is asked for again without a reload");
+  h.autoTrackCallback({ ok: true, binding: "1.first", snapshot: { state: "connected" },
+    state: { workKey: "ffn:7038840", status: "saved", entryId: "00000000-0000-4000-8000-0000000a0002",
+      entry: { entryId: "00000000-0000-4000-8000-0000000a0002", status: "PLANNING", readerStatus: "PLANNING",
+        canonicalReaderStatus: "SAVED", chapters: { current: 1, total: 12 } },
+      syncVersion: "2026-10-09T12:00:00.000Z" } });
+  await delay(1_800);
+  assert.equal(autoTrackSends(h), 2, "the retry timed against the refusal is not sent as well");
+  h.dom.window.close();
+});
+
+test("a save refused twice before any account is connected is still made when the account connects", async () => {
+  const { h, refuse, connect } = accountAdoptionHarness();
+  await delay(50);
+  refuse();
+  await delay(1_700);
+  assert.equal(autoTrackSends(h), 2, "the quiet retry is sent while no account has connected");
+  refuse();
+  await delay(100);
+  connect();
+  await delay(1_000);
+  assert.equal(autoTrackSends(h), 3);
+  h.dom.window.close();
+});
+
+test("a quiet retry that the newly connected account answers is not followed by another save", async () => {
+  const { h, refuse, connect } = accountAdoptionHarness();
+  await delay(50);
+  refuse();
+  await delay(1_700);
+  assert.equal(autoTrackSends(h), 2);
+  // The account connected while the retry was on its way; its reply is the
+  // first the page hears from that account.
+  connect({ announce: false });
+  h.autoTrackCallback({ ok: true, binding: "1.first", snapshot: { state: "connected" },
+    state: { workKey: "ffn:7038840", status: "saved", entryId: "00000000-0000-4000-8000-0000000a0003",
+      entry: { entryId: "00000000-0000-4000-8000-0000000a0003", status: "PLANNING", readerStatus: "PLANNING",
+        canonicalReaderStatus: "SAVED", chapters: { current: 1, total: 12 } },
+      syncVersion: "2026-10-09T12:00:00.000Z" } });
+  await delay(1_200);
+  assert.equal(autoTrackSends(h), 2, "a confirmed save is not asked for again");
+  h.dom.window.close();
+});
+
 test("a story page drops what it showed for the previous account when the account changes", async () => {
   const firstEntry = { entryId: "00000000-0000-4000-8000-0000000a0001", status: "READING",
     readerStatus: "READING", canonicalReaderStatus: "READING", chapters: { current: 1, total: 12 } };

@@ -704,6 +704,9 @@ function noteStoryAccountBinding(response) {
   storyAccountBinding = binding;
   if (previous === undefined || previous === binding) return false;
   resetStoryAccountState();
+  // An account connected where none was. A save this page could not make
+  // without one is asked for again, for that account, without a reload.
+  if (previous === null) retryAutoTrackAfterLink();
   return true;
 }
 
@@ -1617,6 +1620,9 @@ function sendAutoTrackForStory(validStory, options) {
         AUTO_TRACK_TRANSIENT_ERRORS.indexOf(response.error) >= 0 &&
         !(options && options.transientRetried === true)
       ) {
+        // The quiet retry below is dropped if the account connects before it
+        // is due, so that connection must be able to ask again itself.
+        if (autoTrackRefusedBeforeAccount(response.error)) autoTrackAwaitingLink = true;
         var retryFromUrl = location.href;
         setTimeout(function () {
           if (location.href !== retryFromUrl || accountGeneration !== storyAccountGeneration) return;
@@ -1641,6 +1647,10 @@ function sendAutoTrackForStory(validStory, options) {
         }
         return;
       }
+      // This reply can be the first the page hears from a newly connected
+      // account, which clears what it remembered and asks for a waiting save
+      // again. The save just confirmed is that account's own.
+      rememberRecentAutoTrack(validStory);
       applyConfirmedOverlayUpdateForStory(validStory, response);
     },
   );
@@ -1908,6 +1918,14 @@ function clearAutoTrackPendingForStory(item) {
 // they never need to reload.
 var autoTrackAwaitingLink = false;
 
+// The background answers "couldn't check just now" while it is still adopting
+// the Trace app's account. Until an account is connected that answer is the
+// same wait as not being linked: the save belongs to the account that
+// connects next, not to a retry timed against the moment it was refused.
+function autoTrackRefusedBeforeAccount(error) {
+  return KERNEL_SESSION_ACTIVE && error === "unavailable" && storyAccountBinding === null;
+}
+
 function retryAutoTrackAfterLink() {
   if (!autoTrackAwaitingLink) return;
   autoTrackAwaitingLink = false;
@@ -1916,7 +1934,10 @@ function retryAutoTrackAfterLink() {
 }
 
 function updateAutoTrackFailureForStory(item, error) {
-  if (error === "not_authenticated" || error === "auth_expired" || error === "reconnect_required") {
+  if (
+    error === "not_authenticated" || error === "auth_expired" || error === "reconnect_required" ||
+    autoTrackRefusedBeforeAccount(error)
+  ) {
     autoTrackAwaitingLink = true;
   }
   var workKey = overlayWorkKeyFromItem(item);
