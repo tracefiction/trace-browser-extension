@@ -155,8 +155,8 @@ export class ArchiveReadinessRuntimeController {
   }
 
   /** See `ArchiveReadinessService.reportAccess`. */
-  reportAccess(): Promise<ArchiveAccessReportResult> {
-    return this.#service.reportAccess();
+  reportAccess(options: { readonly readerPresent?: boolean } = {}): Promise<ArchiveAccessReportResult> {
+    return this.#service.reportAccess(options);
   }
 
   async handle(
@@ -239,8 +239,11 @@ function runsBesideTraceApp(
  * access ends it cannot tell a reader whose one-day grant ran out from one
  * who simply has not opened a story.
  *
- * iPhone and iPad only: anywhere else nothing is installed, not a listener
- * and not the alarm. It adds no permission and sends nothing to a server.
+ * iPhone and iPad only. Where the platform is known not to be one, nothing is
+ * installed. Where it is not known yet (an iPad can call itself a Mac), the
+ * listeners are registered at once, so an event that woke the background is
+ * not missed, and each decides when it runs; a Mac then sends nothing and
+ * gets no alarm. It adds no permission and sends nothing to a server.
  */
 export function installArchiveAccessReport(
   controller: ArchiveReadinessRuntimeController,
@@ -248,88 +251,84 @@ export function installArchiveAccessReport(
 ): { report(): Promise<ArchiveAccessReportResult> } {
   const { accessLedger, alarms, permissions, runtime, storageMode } = environment;
   const now = (): number => environment.clock?.now() ?? Date.now();
-  let installed = false;
-  const report = async (): Promise<ArchiveAccessReportResult> =>
-    installed ? controller.reportAccess() : { kind: "unknown" };
-  const reportQuietly = (): void => {
-    void report().catch(() => undefined);
-  };
-
-  const install = (): void => {
-    installed = true;
-    runtime.onMessage.addListener((message, sender, sendResponse) => {
-      if (
-        !isRecord(message) ||
-        message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport
-      ) {
-        return false;
-      }
-      if (Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
-        sendResponse({ ok: false });
-        return false;
-      }
-      // Keep the background alive until the reading has been delivered.
-      void report().then(
-        (result) => sendResponse({ ok: true, report: result.kind }),
-        () => sendResponse({ ok: true, report: "unavailable" }),
-      );
-      return true;
-    });
-    permissions?.onAdded?.addListener(reportQuietly);
-    permissions?.onRemoved?.addListener(reportQuietly);
-    alarms?.onAlarm?.addListener((alarm) => {
-      if (alarm?.name === ARCHIVE_ACCESS_REPORT_ALARM) reportQuietly();
-    });
-    try {
-      // An existing alarm keeps its schedule; creating it again would push the
-      // next reading a full day past every background start.
-      const existing = typeof alarms?.get === "function"
-        ? extensionCall<unknown>(
-            alarms as unknown as Record<string, (...args: unknown[]) => unknown>,
-            "get",
-            [ARCHIVE_ACCESS_REPORT_ALARM],
-            runtime,
-            storageMode,
-          ).catch(() => undefined)
-        : Promise.resolve(undefined);
-      void existing.then((alarm) => {
-        if (isRecord(alarm)) return;
-        const created = alarms?.create?.(ARCHIVE_ACCESS_REPORT_ALARM, {
-          periodInMinutes: ARCHIVE_ACCESS_REPORT_PERIOD_MINUTES,
-        });
-        if (created && typeof (created as PromiseLike<unknown>).then === "function") {
-          void Promise.resolve(created).catch(() => undefined);
-        }
-      }).catch(() => {
-        void runtime.lastError;
-      });
-    } catch {
-      void runtime.lastError;
-    }
-    // Safari may not wake a sleeping background for an alarm. Whatever starts
-    // it next takes the overdue reading.
-    void accessLedger.read().then((ledger) => {
-      const deliveredAt = ledger.deliveredAt;
-      if (
-        typeof deliveredAt === "number" &&
-        deliveredAt <= now() &&
-        now() - deliveredAt < ARCHIVE_ACCESS_REPORT_STALE_MS
-      ) {
-        return;
-      }
-      reportQuietly();
-    }).catch(() => undefined);
-  };
-
   const beside = runsBesideTraceApp(
     runtime,
     storageMode,
     environment.platform?.userAgent ?? globalThis.navigator?.userAgent ?? "",
   );
-  // An iPhone is known at once, so its listeners exist before any event that
-  // woke the background is delivered. An iPad that calls itself a Mac is
-  // known a moment later; a Mac never installs anything.
-  if (beside === true) install();
-  else if (beside !== false) void beside.then((yes) => { if (yes) install(); });
+  if (beside === false) return { report: async () => ({ kind: "unknown" }) };
+  const supported = Promise.resolve(beside);
+  const report = async (
+    options: { readonly readerPresent?: boolean } = {},
+  ): Promise<ArchiveAccessReportResult> =>
+    (await supported) ? controller.reportAccess(options) : { kind: "unknown" };
+  const reportQuietly = (): void => {
+    void report().catch(() => undefined);
+  };
+
+  runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (
+      !isRecord(message) ||
+      message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport
+    ) {
+      return false;
+    }
+    if (Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
+      sendResponse({ ok: false });
+      return false;
+    }
+    // Keep the background alive until the reading has been delivered. An
+    // open popup means the reader is here, so a delivery back-off is skipped.
+    void report({ readerPresent: true }).then(
+      (result) => sendResponse({ ok: true, report: result.kind }),
+      () => sendResponse({ ok: true, report: "unavailable" }),
+    );
+    return true;
+  });
+  permissions?.onAdded?.addListener(reportQuietly);
+  permissions?.onRemoved?.addListener(reportQuietly);
+  alarms?.onAlarm?.addListener((alarm) => {
+    if (alarm?.name === ARCHIVE_ACCESS_REPORT_ALARM) reportQuietly();
+  });
+
+  void supported.then(async (yes) => {
+    if (!yes) return;
+    // An existing alarm keeps its schedule; creating it again would push the
+    // next reading a full day past every background start.
+    const existing = typeof alarms?.get === "function"
+      ? await extensionCall<unknown>(
+          alarms as unknown as Record<string, (...args: unknown[]) => unknown>,
+          "get",
+          [ARCHIVE_ACCESS_REPORT_ALARM],
+          runtime,
+          storageMode,
+        ).catch(() => undefined)
+      : undefined;
+    if (!isRecord(existing)) {
+      try {
+        const created = alarms?.create?.(ARCHIVE_ACCESS_REPORT_ALARM, {
+          periodInMinutes: ARCHIVE_ACCESS_REPORT_PERIOD_MINUTES,
+        });
+        if (created && typeof (created as PromiseLike<unknown>).then === "function") {
+          await Promise.resolve(created).catch(() => undefined);
+        }
+      } catch {
+        void runtime.lastError;
+      }
+    }
+    // Safari may not wake a sleeping background for an alarm. Whatever starts
+    // it next takes the overdue reading.
+    const ledger = await accessLedger.read().catch(() => null);
+    if (ledger === null) return;
+    const deliveredAt = ledger.deliveredAt;
+    if (
+      typeof deliveredAt === "number" &&
+      deliveredAt <= now() &&
+      now() - deliveredAt < ARCHIVE_ACCESS_REPORT_STALE_MS
+    ) {
+      return;
+    }
+    reportQuietly();
+  }).catch(() => undefined);
   return { report };
 }

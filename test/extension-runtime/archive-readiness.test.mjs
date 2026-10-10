@@ -605,29 +605,47 @@ test("an access reading is never sent when Safari did not answer", async () => {
   assert.deepEqual(h.snapshots(), []);
 });
 
-test("a delivery the app does not take is left alone for a while, then tried again", async () => {
+test("a delivery the app does not take is left alone by the background, but not by an open popup", async () => {
   const h = createAccessReportHarness({ nativeResponse: { ok: false, error: "shared_storage_unavailable" } });
   await settleAccess();
   assert.equal(h.snapshots().length, 1, "the overdue reading at start");
   assert.equal(ARCHIVE_ACCESS_REPORTED_AT_KEY in h.stored, false, "it is not recorded as delivered");
 
-  // Popup opens and restarts in the next minute do not hammer the app.
-  for (let open = 0; open < 3; open += 1) {
-    assert.deepEqual(await h.sendFromPopup(OPEN_POPUP), { ok: true, report: "deferred" });
-  }
+  // Restarts, alarms and permission events in the next minute do not hammer the app.
   const restarted = createAccessReportHarness({ nativeResponse: { ok: false }, stored: h.stored });
+  await settleAccess();
+  for (const listener of h.alarmListeners) listener({ name: "traceArchiveAccessReport" });
+  for (const listener of h.removedListeners) listener();
   await settleAccess();
   assert.equal(h.snapshots().length + restarted.snapshots().length, 1);
 
-  h.setNow(50_000_000 + 60_000);
+  // The reader opens the popup: that is worth one try, back-off or not.
+  assert.deepEqual(await h.sendFromPopup(OPEN_POPUP), { ok: true, report: "unavailable" });
+  assert.equal(h.snapshots().length, 2);
   h.setNativeResponse({ ok: true });
   assert.deepEqual(await h.sendFromPopup(OPEN_POPUP), { ok: true, report: "published" });
-  assert.equal(h.stored[ARCHIVE_ACCESS_REPORTED_AT_KEY], 50_000_000 + 60_000);
+  assert.equal(h.stored[ARCHIVE_ACCESS_REPORTED_AT_KEY], 50_000_000);
   assert.equal("failures" in h.stored[ARCHIVE_ACCESS_STATE_KEY], false);
+  assert.equal("retryAt" in h.stored[ARCHIVE_ACCESS_STATE_KEY], false);
 });
 
-test("Safari on a Mac installs nothing: no listener, no alarm, no reading", async () => {
-  for (const options of [{ os: "mac" }, { withoutNativeMessaging: true }, { os: "mac", userAgent: "" }]) {
+test("Safari on a Mac sends nothing and holds no alarm", async () => {
+  const mac = createAccessReportHarness({ os: "mac", granted: [], stored: GRANT_SEEN });
+  await settleAccess();
+  // It cannot be told from an iPad until Safari answers, so its listeners
+  // exist; every one of them then does nothing.
+  for (const listener of mac.alarmListeners) listener({ name: "traceArchiveAccessReport" });
+  for (const listener of mac.removedListeners) listener();
+  for (const listener of mac.addedListeners) listener();
+  await settleAccess();
+  assert.deepEqual(await mac.sendFromPopup(OPEN_POPUP), { ok: true, report: "unknown" });
+  assert.deepEqual(await mac.access.report(), { kind: "unknown" });
+  assert.deepEqual(mac.createdAlarms, []);
+  assert.deepEqual(mac.snapshots(), []);
+  assert.deepEqual(mac.stored, GRANT_SEEN, "and records nothing");
+
+  // A browser with no Trace app beside it, or one that is plainly not Apple's, installs nothing at all.
+  for (const options of [{ withoutNativeMessaging: true }, { os: "mac", userAgent: "Mozilla/5.0 (X11; Linux x86_64) Chrome/140.0" }]) {
     const h = createAccessReportHarness({ ...options, granted: [], stored: GRANT_SEEN });
     await settleAccess();
     assert.deepEqual(
@@ -642,19 +660,23 @@ test("Safari on a Mac installs nothing: no listener, no alarm, no reading", asyn
   }
 });
 
-test("an iPhone installs at once; an iPad that calls itself a Mac installs once Safari says what it is", async () => {
+test("an iPad that calls itself a Mac hears the event that woke the background", async () => {
+  const listeners = (h) =>
+    [h.messageListeners.length, h.alarmListeners.length, h.addedListeners.length, h.removedListeners.length];
   const iphone = createAccessReportHarness({ stored: DELIVERED_RECENTLY });
+  const ipad = createAccessReportHarness({ os: "ios", userAgent: MAC_UA, stored: GRANT_SEEN });
   // Before anything asynchronous has run: an event that woke the background
-  // is delivered to listeners that exist in its first turn.
-  assert.deepEqual(
-    [iphone.messageListeners.length, iphone.alarmListeners.length, iphone.addedListeners.length, iphone.removedListeners.length],
-    [1, 1, 1, 1],
-  );
+  // is delivered only to listeners that exist in its first turn.
+  assert.deepEqual(listeners(iphone), [1, 1, 1, 1]);
+  assert.deepEqual(listeners(ipad), [1, 1, 1, 1]);
+  assert.deepEqual(ipad.createdAlarms, [], "the alarm waits until Safari says what this is");
 
-  const ipad = createAccessReportHarness({ os: "ios", userAgent: MAC_UA, stored: DELIVERED_RECENTLY });
-  assert.equal(ipad.messageListeners.length, 0);
+  // Safari wakes the iPad's background because access was removed. The
+  // listener is already there; the reading goes out once the platform is known.
+  ipad.setGranted(["https://www.tracefiction.com/*"]);
+  for (const listener of ipad.removedListeners) listener();
   await settleAccess();
-  assert.equal(ipad.messageListeners.length, 1);
+  assert.deepEqual(ipad.snapshots().map(({ grantedOrigins }) => grantedOrigins), [["https://www.tracefiction.com/*"]]);
   assert.equal(ipad.createdAlarms.length, 1);
-  assert.deepEqual(await ipad.sendFromPopup(OPEN_POPUP), { ok: true, report: "published" });
+  assert.deepEqual(await ipad.sendFromPopup(OPEN_POPUP), { ok: true, report: "current" });
 });

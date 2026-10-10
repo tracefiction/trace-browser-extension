@@ -2185,6 +2185,7 @@ test("disabled mode deletes the private database, alarms, and complete legacy in
     traceAo3SavedFiltersActiveV1: { id: "old" },
     traceArchiveReadiness: { lastArchiveSeenAt: 1, lastArchiveHostKind: "ao3" },
     traceArchiveAccessReportedAtV1: 1,
+    traceArchiveAccessStateV1: { grantSeen: true, delivered: "complete:5:0" },
   });
   const alarms = new PromiseAlarms();
   const databaseFactory = new IDBFactory();

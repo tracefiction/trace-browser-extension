@@ -704,9 +704,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var ARCHIVE_ACCESS_RETRY_DELAYS_MS = Object.freeze([
     6e4,
     5 * 6e4,
-    30 * 6e4,
-    2 * 60 * 6e4,
-    6 * 60 * 6e4
+    30 * 6e4
   ]);
   var ARCHIVE_ACCESS_REPORT_MAX_PASSES = 3;
   function accessFingerprint(complete, origins) {
@@ -730,6 +728,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #ledger;
     #accessReport = null;
     #accessReportRequestedAgain = false;
+    #accessReportReaderPresent = false;
     constructor(options) {
       this.#receipts = options.receipts;
       this.#permissions = options.permissions;
@@ -788,9 +787,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
      *
      * It is also quiet: a reading equal to the last one delivered is not sent
      * again within a few minutes, and a failed delivery is left alone for
-     * longer after each failure in a row.
+     * longer after each failure in a row. `readerPresent` (the popup is open)
+     * skips that wait: the reader is here and the app is very likely reachable.
      */
-    reportAccess() {
+    reportAccess(options = {}) {
+      if (options.readerPresent === true) this.#accessReportReaderPresent = true;
       if (this.#accessReport !== null) {
         this.#accessReportRequestedAgain = true;
         return this.#accessReport;
@@ -799,7 +800,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         let result = { kind: "unknown" };
         for (let pass = 0; pass < ARCHIVE_ACCESS_REPORT_MAX_PASSES; pass += 1) {
           this.#accessReportRequestedAgain = false;
-          result = await this.#reportAccessOnce();
+          const readerPresent = this.#accessReportReaderPresent;
+          this.#accessReportReaderPresent = false;
+          result = await this.#reportAccessOnce(readerPresent);
           if (!this.#accessReportRequestedAgain) break;
         }
         return result;
@@ -809,11 +812,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#accessReport = report;
       return report;
     }
-    async #reportAccessOnce() {
+    async #reportAccessOnce(readerPresent) {
       const ledger = await this.#readLedger();
       const startedAt = this.#clock.now();
       const longestWait = ARCHIVE_ACCESS_RETRY_DELAYS_MS.at(-1);
-      if (typeof ledger.retryAt === "number" && startedAt < ledger.retryAt && // A clock that moved backwards must not silence readings for good.
+      if (!readerPresent && typeof ledger.retryAt === "number" && startedAt < ledger.retryAt && // A clock that moved backwards must not silence readings for good.
       ledger.retryAt - startedAt <= longestWait) {
         return { kind: "deferred" };
       }
@@ -7915,8 +7918,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       });
     }
     /** See `ArchiveReadinessService.reportAccess`. */
-    reportAccess() {
-      return this.#service.reportAccess();
+    reportAccess(options = {}) {
+      return this.#service.reportAccess(options);
     }
     async handle(message, sender) {
       if (!isRecord19(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.archiveSeen) {
@@ -7968,71 +7971,65 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   function installArchiveAccessReport(controller, environment) {
     const { accessLedger, alarms, permissions, runtime, storageMode } = environment;
     const now = () => environment.clock?.now() ?? Date.now();
-    let installed = false;
-    const report = async () => installed ? controller.reportAccess() : { kind: "unknown" };
-    const reportQuietly = () => {
-      void report().catch(() => void 0);
-    };
-    const install = () => {
-      installed = true;
-      runtime.onMessage.addListener((message, sender, sendResponse) => {
-        if (!isRecord19(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport) {
-          return false;
-        }
-        if (Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
-          sendResponse({ ok: false });
-          return false;
-        }
-        void report().then(
-          (result) => sendResponse({ ok: true, report: result.kind }),
-          () => sendResponse({ ok: true, report: "unavailable" })
-        );
-        return true;
-      });
-      permissions?.onAdded?.addListener(reportQuietly);
-      permissions?.onRemoved?.addListener(reportQuietly);
-      alarms?.onAlarm?.addListener((alarm) => {
-        if (alarm?.name === ARCHIVE_ACCESS_REPORT_ALARM) reportQuietly();
-      });
-      try {
-        const existing = typeof alarms?.get === "function" ? extensionCall(
-          alarms,
-          "get",
-          [ARCHIVE_ACCESS_REPORT_ALARM],
-          runtime,
-          storageMode
-        ).catch(() => void 0) : Promise.resolve(void 0);
-        void existing.then((alarm) => {
-          if (isRecord19(alarm)) return;
-          const created = alarms?.create?.(ARCHIVE_ACCESS_REPORT_ALARM, {
-            periodInMinutes: ARCHIVE_ACCESS_REPORT_PERIOD_MINUTES
-          });
-          if (created && typeof created.then === "function") {
-            void Promise.resolve(created).catch(() => void 0);
-          }
-        }).catch(() => {
-          void runtime.lastError;
-        });
-      } catch {
-        void runtime.lastError;
-      }
-      void accessLedger.read().then((ledger) => {
-        const deliveredAt = ledger.deliveredAt;
-        if (typeof deliveredAt === "number" && deliveredAt <= now() && now() - deliveredAt < ARCHIVE_ACCESS_REPORT_STALE_MS) {
-          return;
-        }
-        reportQuietly();
-      }).catch(() => void 0);
-    };
     const beside = runsBesideTraceApp(
       runtime,
       storageMode,
       environment.platform?.userAgent ?? globalThis.navigator?.userAgent ?? ""
     );
-    if (beside === true) install();
-    else if (beside !== false) void beside.then((yes) => {
-      if (yes) install();
+    if (beside === false) return { report: async () => ({ kind: "unknown" }) };
+    const supported = Promise.resolve(beside);
+    const report = async (options = {}) => await supported ? controller.reportAccess(options) : { kind: "unknown" };
+    const reportQuietly = () => {
+      void report().catch(() => void 0);
+    };
+    runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (!isRecord19(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport) {
+        return false;
+      }
+      if (Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
+        sendResponse({ ok: false });
+        return false;
+      }
+      void report({ readerPresent: true }).then(
+        (result) => sendResponse({ ok: true, report: result.kind }),
+        () => sendResponse({ ok: true, report: "unavailable" })
+      );
+      return true;
     });
+    permissions?.onAdded?.addListener(reportQuietly);
+    permissions?.onRemoved?.addListener(reportQuietly);
+    alarms?.onAlarm?.addListener((alarm) => {
+      if (alarm?.name === ARCHIVE_ACCESS_REPORT_ALARM) reportQuietly();
+    });
+    void supported.then(async (yes) => {
+      if (!yes) return;
+      const existing = typeof alarms?.get === "function" ? await extensionCall(
+        alarms,
+        "get",
+        [ARCHIVE_ACCESS_REPORT_ALARM],
+        runtime,
+        storageMode
+      ).catch(() => void 0) : void 0;
+      if (!isRecord19(existing)) {
+        try {
+          const created = alarms?.create?.(ARCHIVE_ACCESS_REPORT_ALARM, {
+            periodInMinutes: ARCHIVE_ACCESS_REPORT_PERIOD_MINUTES
+          });
+          if (created && typeof created.then === "function") {
+            await Promise.resolve(created).catch(() => void 0);
+          }
+        } catch {
+          void runtime.lastError;
+        }
+      }
+      const ledger = await accessLedger.read().catch(() => null);
+      if (ledger === null) return;
+      const deliveredAt = ledger.deliveredAt;
+      if (typeof deliveredAt === "number" && deliveredAt <= now() && now() - deliveredAt < ARCHIVE_ACCESS_REPORT_STALE_MS) {
+        return;
+      }
+      reportQuietly();
+    }).catch(() => void 0);
     return { report };
   }
 

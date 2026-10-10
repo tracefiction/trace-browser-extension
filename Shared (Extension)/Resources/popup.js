@@ -2021,6 +2021,8 @@ function takeAccountAnswer(wait, response) {
  * showing, ask now; this is an event, not a poll.
  */
 function accountMayHaveConnected() {
+  // A publish is not one of the wait's own attempts, so it uses none up.
+  if (accountWait && !accountWait.asking && !accountWaitSettled(accountWait) && accountWait.attempt > 0) accountWait.attempt -= 1;
   if (accountWait) askForAppAccount(accountWait);
 }
 

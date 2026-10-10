@@ -71,9 +71,13 @@ export const ARCHIVE_RUN_THROTTLE_MS = 5 * 60 * 1_000;
 export const ARCHIVE_ACCESS_CONFIRM_DELAY_MS = 2_000;
 /** A reading equal to the last one delivered is not sent again this soon. */
 export const ARCHIVE_ACCESS_REPEAT_AFTER_MS = 5 * 60 * 1_000;
-/** How long to leave a failed delivery alone: longer after each failure in a row. */
+/**
+ * How long to leave a failed delivery alone: longer after each failure in a
+ * row, and never so long that a reading waits hours behind an app that has
+ * recovered.
+ */
 export const ARCHIVE_ACCESS_RETRY_DELAYS_MS = Object.freeze([
-  60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000, 6 * 60 * 60_000,
+  60_000, 5 * 60_000, 30 * 60_000,
 ]);
 const ARCHIVE_ACCESS_REPORT_MAX_PASSES = 3;
 
@@ -111,6 +115,7 @@ export class ArchiveReadinessService {
   readonly #ledger: ArchiveAccessLedgerPort;
   #accessReport: Promise<ArchiveAccessReportResult> | null = null;
   #accessReportRequestedAgain = false;
+  #accessReportReaderPresent = false;
 
   constructor(options: {
     receipts: ArchiveReadinessReceiptPort;
@@ -196,9 +201,11 @@ export class ArchiveReadinessService {
    *
    * It is also quiet: a reading equal to the last one delivered is not sent
    * again within a few minutes, and a failed delivery is left alone for
-   * longer after each failure in a row.
+   * longer after each failure in a row. `readerPresent` (the popup is open)
+   * skips that wait: the reader is here and the app is very likely reachable.
    */
-  reportAccess(): Promise<ArchiveAccessReportResult> {
+  reportAccess(options: { readonly readerPresent?: boolean } = {}): Promise<ArchiveAccessReportResult> {
+    if (options.readerPresent === true) this.#accessReportReaderPresent = true;
     if (this.#accessReport !== null) {
       // Access may have changed since the running report read it.
       this.#accessReportRequestedAgain = true;
@@ -208,7 +215,9 @@ export class ArchiveReadinessService {
       let result: ArchiveAccessReportResult = { kind: "unknown" };
       for (let pass = 0; pass < ARCHIVE_ACCESS_REPORT_MAX_PASSES; pass += 1) {
         this.#accessReportRequestedAgain = false;
-        result = await this.#reportAccessOnce();
+        const readerPresent = this.#accessReportReaderPresent;
+        this.#accessReportReaderPresent = false;
+        result = await this.#reportAccessOnce(readerPresent);
         if (!this.#accessReportRequestedAgain) break;
       }
       return result;
@@ -219,11 +228,12 @@ export class ArchiveReadinessService {
     return report;
   }
 
-  async #reportAccessOnce(): Promise<ArchiveAccessReportResult> {
+  async #reportAccessOnce(readerPresent: boolean): Promise<ArchiveAccessReportResult> {
     const ledger = await this.#readLedger();
     const startedAt = this.#clock.now();
     const longestWait = ARCHIVE_ACCESS_RETRY_DELAYS_MS.at(-1)!;
     if (
+      !readerPresent &&
       typeof ledger.retryAt === "number" &&
       startedAt < ledger.retryAt &&
       // A clock that moved backwards must not silence readings for good.

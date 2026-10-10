@@ -416,11 +416,13 @@ out. If Safari does not answer, nothing is sent.
 
 It is also quiet. A reading equal to the last one delivered is not sent again
 within five minutes, and a delivery the app did not take is left alone for
-one minute, then five, thirty, two hours and six hours. To do this the
-extension keeps, in its own storage, when a reading was last delivered,
-whether the grant has ever been seen, a hash of the last reading (not the
-origins themselves) and the delivery back-off. Chrome, Firefox and Safari on Mac install none of
-this: no listener, no alarm, no reading.
+one minute, then five, then thirty at most; opening the popup tries once
+straight away. To do this the extension keeps, in its own storage, when a
+reading was last delivered, whether the grant has ever been seen, a hash of
+the last reading (not the origins themselves) and the delivery back-off.
+Chrome and Firefox install none of this. Safari on Mac cannot be told from an
+iPad until Safari reports its platform, so its listeners are registered, but
+they do nothing: no reading is sent and no alarm is set.
 
 ## Aggregate release and browser diagnostics
 

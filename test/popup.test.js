@@ -2041,6 +2041,63 @@ test("an iPad that reports a desktop user agent keeps the general view's own cop
   assert.equal(snapshotRequests(h), 4);
 });
 
+test("iOS: publishes that bring no account while it says Connecting do not use up the wait", async () => {
+  const h = iosLinkedPopupHarness(Array(20).fill(UNREADABLE_REPLY));
+  await settle(h);
+  await pass(h, 500);
+  for (let publish = 1; publish <= 5; publish += 1) {
+    h.emitStorageChange({ traceAccountProjectionRevisionV1: { newValue: `r${publish}` } });
+    await settle(h);
+    assert.equal(snapshotRequests(h), 1 + publish, "each publish is one question");
+    assert.equal(earnedHeading(h), CONNECTING, "and none of them is a reason to give up");
+  }
+  // The wait's own next question comes a second after the last answer, and
+  // the ten-second cap still ends it.
+  await pass(h, 999);
+  assert.equal(snapshotRequests(h), 6);
+  await pass(h, 1);
+  assert.equal(snapshotRequests(h), 7);
+  assert.equal(earnedHeading(h), CONNECTING);
+  await pass(h, 8500);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+});
+
+test("iOS: only one question about the account is out at a time", async () => {
+  // The second read is slow. Nothing that happens meanwhile sends another.
+  const h = iosLinkedPopupHarness([UNREADABLE_REPLY, SLOW_REPLY, CONNECTED_REPLY]);
+  await settle(h);
+  await pass(h, 1000);
+  assert.equal(snapshotRequests(h), 2);
+  for (let publish = 1; publish <= 3; publish += 1) {
+    h.emitStorageChange({ traceAccountProjectionRevisionV1: { newValue: `r${publish}` } });
+    await settle(h);
+  }
+  await pass(h, 5000);
+  assert.equal(snapshotRequests(h), 2, "the read that is out is waited for");
+  h.answerSnapshot(CONNECTED_REPLY);
+  await settle(h);
+  assert.equal(h.document.body.dataset.tracePopupState, "connected");
+});
+
+test("iOS: Try again gets a fresh ten seconds, then gives way to buttons again", async () => {
+  const h = iosLinkedPopupHarness([...Array(4).fill(UNREADABLE_REPLY), UNREADABLE_REPLY, SLOW_REPLY]);
+  await settle(h);
+  await pass(h, 7000);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+
+  // The second round's follow-up read never comes back.
+  h.document.getElementById("popup-earned-secondary").click();
+  await settle(h);
+  assert.equal(earnedHeading(h), CONNECTING);
+  await pass(h, 1000);
+  assert.equal(snapshotRequests(h), 6);
+  await pass(h, 8999);
+  assert.equal(earnedHeading(h), CONNECTING);
+  await pass(h, 1);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT, "ten seconds after Try again, not never");
+  assert.equal(h.document.getElementById("popup-earned-secondary").textContent, "Try again");
+});
+
 test("iOS: Connecting gives way to buttons after ten seconds however slow the reads are", async () => {
   // The first read fails; the second never comes back.
   const h = iosLinkedPopupHarness([UNREADABLE_REPLY, SLOW_REPLY, CONNECTED_REPLY]);
@@ -2242,6 +2299,32 @@ test("setup: anything else that needs the account joins the wait under way", asy
   await pass(h, 2000);
   assert.equal(snapshotRequests(h), 3);
   assert.equal(earnedHeading(h), "Saving your story…", "and it carries on with the story it began for");
+});
+
+test("setup: access that lapses during the wait hands the popup to the access prompt, for good", async () => {
+  const granted = [...FULL_EARNED_ORIGINS];
+  const { h, pageRan } = await setupPopupWaitingOnAccount(
+    [UNREADABLE_REPLY, UNREADABLE_REPLY, CONNECTED_REPLY, CONNECTED_REPLY],
+    { grantedOrigins: granted },
+  );
+  assert.equal(earnedHeading(h), CONNECTING);
+
+  // Safari stops allowing the story sites, and the page reports in again.
+  granted.splice(0, granted.length);
+  pageRan();
+  await settle(h, 12);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P3-lapse");
+  assert.equal(earnedHeading(h), "Next, tap Always Allow.");
+
+  // The account wait is over: neither its timers nor an account connecting
+  // may write over the prompt.
+  for (const wait of [1000, 2000, 4000, 10_000]) await pass(h, wait);
+  h.emitStorageChange(ACCOUNT_CONNECTED);
+  await settle(h, 12);
+  assert.equal(snapshotRequests(h), 1);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P3-lapse");
+  assert.equal(earnedHeading(h), "Next, tap Always Allow.");
+  assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Allow story sites");
 });
 
 test("setup: an account that connects on the first re-ask is not lost to page reports", async () => {

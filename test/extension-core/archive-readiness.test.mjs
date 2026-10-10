@@ -373,6 +373,78 @@ test("a delivery that keeps failing is tried less and less often", async () => {
   assert.deepEqual(await skewed.service.reportAccess(), { kind: "published", complete: true });
 });
 
+test("an open popup is not made to wait behind a failed delivery", async () => {
+  let delivers = false;
+  const h = createAccessHarness({
+    listed: [REQUIRED_ORIGINS],
+    contains: [true],
+    publish: () => delivers,
+  });
+  // Six failures in a row, each as soon as the back-off allows.
+  for (let failure = 0; failure < 6; failure += 1) {
+    assert.deepEqual(await h.service.reportAccess(), { kind: "unavailable" });
+    h.advance(ARCHIVE_ACCESS_RETRY_DELAYS_MS.at(-1));
+  }
+  assert.deepEqual(await h.service.reportAccess(), { kind: "unavailable" });
+  const attempts = h.published.length;
+
+  // The app is healthy again a minute later. A background trigger still
+  // waits; a reader opening the popup does not.
+  delivers = true;
+  h.advance(60_000);
+  assert.deepEqual(await h.service.reportAccess(), { kind: "deferred" });
+  assert.equal(h.published.length, attempts);
+  assert.deepEqual(await h.service.reportAccess({ readerPresent: true }), { kind: "published", complete: true });
+  assert.equal(h.ledger().retryAt, undefined, "and the back-off is over");
+
+  // Access that ends during a back-off is delivered when the popup opens.
+  delivers = false;
+  h.advance(ARCHIVE_ACCESS_REPEAT_AFTER_MS);
+  assert.deepEqual(await h.service.reportAccess(), { kind: "unavailable" });
+  h.setAccess(["https://www.tracefiction.com/*"], false);
+  delivers = true;
+  assert.deepEqual(await h.service.reportAccess(), { kind: "deferred" });
+  assert.deepEqual(await h.service.reportAccess({ readerPresent: true }), { kind: "published", complete: false });
+
+  // A popup open that fails is still one attempt, and still backs off the rest.
+  delivers = false;
+  h.advance(ARCHIVE_ACCESS_REPEAT_AFTER_MS);
+  const before = h.published.length;
+  assert.deepEqual(await h.service.reportAccess({ readerPresent: true }), { kind: "unavailable" });
+  assert.equal(h.published.length, before + 1);
+  assert.deepEqual(await h.service.reportAccess(), { kind: "deferred" });
+});
+
+test("a popup open that arrives while a deferred reading is under way still gets past the back-off", async () => {
+  const h = createAccessHarness({
+    ledger: { grantSeen: true, failures: 2, retryAt: 2_000_000 + 60_000 },
+    listed: [REQUIRED_ORIGINS],
+    contains: [true],
+  });
+  // A background trigger starts first and will be deferred; the popup opens
+  // before it has finished. Both get the popup's answer.
+  const background = h.service.reportAccess();
+  const popup = h.service.reportAccess({ readerPresent: true });
+  assert.deepEqual(await popup, { kind: "published", complete: true });
+  assert.equal(await background, await popup);
+  assert.equal(h.published.length, 1);
+
+  // The reader's presence is used once; it does not leak into a later trigger.
+  const later = createAccessHarness({
+    ledger: { grantSeen: true, failures: 2, retryAt: 2_000_000 + 60_000 },
+    listed: [REQUIRED_ORIGINS],
+    contains: [true],
+    publish: () => false,
+  });
+  assert.deepEqual(await later.service.reportAccess({ readerPresent: true }), { kind: "unavailable" });
+  assert.deepEqual(await later.service.reportAccess(), { kind: "deferred" });
+  assert.equal(later.published.length, 1);
+});
+
+test("a failed delivery is never left alone for more than thirty minutes", () => {
+  assert.deepEqual([...ARCHIVE_ACCESS_RETRY_DELAYS_MS], [60_000, 5 * 60_000, 30 * 60_000]);
+});
+
 test("a delivery that throws is reported as unavailable", async () => {
   const h = createAccessHarness({
     listed: [REQUIRED_ORIGINS],
