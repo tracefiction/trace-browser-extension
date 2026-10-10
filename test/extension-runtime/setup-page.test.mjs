@@ -666,6 +666,33 @@ test("story tabs: a title that is an address, or shaped like one, is sent as no 
   }
   assert.equal(await titleFor("m.fanfiction.net/s/4821/2/", "https://m.fanfiction.net/s/4821/2/"), "");
 
+  // A longer title with the tab's own host and path in it, as a loading tab shows.
+  for (const [title, url] of [
+    ["Loading https://archiveofourown.org/works/123/chapters/456", story],
+    ["archiveofourown.org/works/123/chapters/456 - Loading", story],
+    ["Loading archiveofourown.org/works/123/chapters/456…", story],
+    ["Loading ARCHIVEOFOUROWN.ORG/Works/123/chapters/456", story],
+    ["Opening archiveofourown.org/works/123/chapters/456?view_adult=true", story],
+    ["Loading archiveofourown.org/works/9", "https://www.archiveofourown.org/works/9/"],
+    ["Loading www.archiveofourown.org/works/9", "https://www.archiveofourown.org/works/9"],
+    ["fanfiction.net/s/4821/2/The-Other-Road is loading", "https://m.fanfiction.net/s/4821/2/The-Other-Road"],
+    ["Loading m.fanfiction.net/s/4821/2/The-Other-Road", "https://m.fanfiction.net/s/4821/2/The-Other-Road"],
+    ["Loading fanfiction.net/s/4821", "https://www.fanfiction.net/s/4821"],
+  ]) {
+    assert.equal(await titleFor(title, url), "", title);
+  }
+  // The site's name in a title's usual ending, or a path with no host, is not the tab's address.
+  for (const [title, url] of [
+    ["The Long Way Round - Chapter 3 - quillfeather [Archive of Our Own]", story],
+    ["The Other Road Chapter 2, a fanfic | FanFiction", "https://www.fanfiction.net/s/4821/2/The-Other-Road"],
+    ["The Other Road Chapter 2, a fanfic | FanFiction.net", "https://m.fanfiction.net/s/4821/2/The-Other-Road"],
+    ["archiveofourown.org is down again - Chapter 1", story],
+    ["A story about /works/123/chapters/456", story],
+    ["Works 123 chapters 456 [archiveofourown.org]", story],
+  ]) {
+    assert.equal(await titleFor(title, url), title, title);
+  }
+
   // Ordinary titles are left as they are, colons, dots and slashes included.
   for (const title of [
     "The Long Way Round - Chapter 3 - quillfeather [Archive of Our Own]",
@@ -689,7 +716,7 @@ test("story tabs: characters that hide or reorder text are taken out of titles",
     ["‪one‫ two‬ ‭three‮", "one two three"],
     ["⁦iso⁧lat⁨es⁩", "isolates"],
     ["left‎right‏mark؜", "leftrightmark"],
-    ["zero​width‌space⁠joiner﻿", "zerowidthspacejoiner"],
+    ["zero​width​space⁠joiner﻿", "zerowidthspacejoiner"],
     ["in⁡vis⁢ib⁣le⁤", "invisible"],
     ["​​", ""],
     ["‎ ‏", ""],
@@ -698,8 +725,11 @@ test("story tabs: characters that hide or reorder text are taken out of titles",
   ]) {
     assert.equal(await titleFor(given), sent, JSON.stringify(given));
   }
-  // The zero-width joiner stays: emoji are built with it. So do accents and other scripts.
-  for (const title of ["family \u{1f468}‍\u{1f469}‍\u{1f467} time", "\u{1f3f3}️‍\u{1f308} flag", "café über naïve", "物語 مرحبا שלום"]) {
+  // The zero-width joiner and non-joiner stay: emoji are built with the first, and
+  // Persian and Indic spelling needs both. So do accents and other scripts.
+  for (const title of [
+    "می‌خواهم خانه‌ها - Chapter 1 [Archive of Our Own]",
+    "क्‌ष and क्‍ष","family \u{1f468}‍\u{1f469}‍\u{1f467} time", "\u{1f3f3}️‍\u{1f308} flag", "café über naïve", "物語 مرحبا שלום"]) {
     assert.equal(await titleFor(title), title, JSON.stringify(title));
   }
   // The cap counts what is left, in whole characters.

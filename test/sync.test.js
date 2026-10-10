@@ -1078,6 +1078,22 @@ test("setup: the page can ask for one of its story tabs to be brought forward, b
   }
 });
 
+test("setup: only the named fields are forwarded; the page cannot say which tab or window it is", async () => {
+  const extras = { overTab: 7, windowId: 9, incognito: false, url: "https://bank.example/", sender: { tab: { id: 7 } } };
+  const h = setupHarness(SETUP_REPLIES);
+  askSetup(h, { id: "a", request: "access", ...extras });
+  askSetup(h, { id: "b", request: "story-tabs", ...extras });
+  askSetup(h, { id: "c", request: "switch-to-tab", tabId: 11, ...extras });
+  await flush();
+  assert.deepEqual(setupMessages(h), [
+    { type: "TRACE_SETUP_PAGE_REQUEST", request: "access" },
+    { type: "TRACE_SETUP_PAGE_REQUEST", request: "story-tabs" },
+    { type: "TRACE_SETUP_PAGE_REQUEST", request: "switch-to-tab", tabId: 11 },
+  ]);
+  assert.doesNotMatch(JSON.stringify(setupMessages(h)), /overTab|windowId|incognito|bank|sender/);
+  assert.deepEqual(setupAnswers(h).map(({ data }) => [data.id, data.ok]), [["a", true], ["b", true], ["c", true]]);
+});
+
 test("setup: a request this script does not know is refused by name, without asking the background", async () => {
   const h = setupHarness({ access: { ok: true, result: { storySitesAllowed: true, scope: "all" } } });
   for (const [request, error] of [

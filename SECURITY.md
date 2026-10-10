@@ -244,8 +244,9 @@ What the page can learn:
   120 characters) and which site it is on. Nothing is listed while the story
   sites are not allowed. A tab in Private Browsing or in another window is
   never listed, and a setup page that is itself in Private Browsing is given
-  no tabs. A title that is the tab's address, or is shaped like an address,
-  is sent as no title, and characters that hide or reorder text are removed.
+  no tabs. A title that is the tab's address, contains it, or is shaped like
+  an address, is sent as no title, and characters that hide or reorder text
+  are removed.
 
 What the page can do: ask for one of those tabs to be brought to the front. It
 must be a tab from the most recent list given to that same tab, no more than

@@ -8373,7 +8373,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   }
   var CONTROL_CHARACTERS = /* @__PURE__ */ new RegExp("[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+", "g");
   var HIDDEN_CHARACTERS = /* @__PURE__ */ new RegExp(
-    "[\\u061c\\u200b\\u200c\\u200e\\u200f\\u202a-\\u202e\\u2060-\\u2064\\u2066-\\u2069\\ufeff]",
+    "[\\u061c\\u200b\\u200e\\u200f\\u202a-\\u202e\\u2060-\\u2064\\u2066-\\u2069\\ufeff]",
     "g"
   );
   function isAddressLike(line) {
@@ -8393,10 +8393,22 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return false;
     }
   }
-  function tabTitle(value) {
+  function ownAddress(tabUrl) {
+    if (typeof tabUrl !== "string") return null;
+    try {
+      const url = new URL(tabUrl);
+      const path = url.pathname.replace(/\/+$/, "");
+      return path === "" ? null : (url.hostname.replace(/^(?:www|m)\./, "") + path).toLowerCase();
+    } catch {
+      return null;
+    }
+  }
+  function tabTitle(value, tabUrl) {
     if (typeof value !== "string") return "";
     const line = value.replace(CONTROL_CHARACTERS, " ").replace(HIDDEN_CHARACTERS, "").replace(/\s+/g, " ").trim();
     if (isAddressLike(line)) return "";
+    const own = ownAddress(tabUrl);
+    if (own !== null && line.toLowerCase().includes(own)) return "";
     return Array.from(line).slice(0, SETUP_TAB_TITLE_MAX_LENGTH).join("");
   }
   var SetupPageController = class {
@@ -8572,7 +8584,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         (left, right) => used(right.tab) - used(left.tab) || Number(right.tab.active === true) - Number(left.tab.active === true) || left.order - right.order
       );
       const answer = stories.slice(0, SETUP_STORY_TAB_LIMIT).map(
-        ({ tab, site }) => Object.freeze({ tabId: tab.id, title: tabTitle(tab.title), site })
+        ({ tab, site }) => Object.freeze({ tabId: tab.id, title: tabTitle(tab.title, tab.url), site })
       );
       this.#listed.set(requester.key, {
         ids: new Set(answer.map(({ tabId }) => tabId)),

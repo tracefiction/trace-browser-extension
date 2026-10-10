@@ -143,10 +143,11 @@ export function storyPageSite(rawUrl: unknown, webOrigin: string): "ao3" | "ffn"
 // Written as escapes. Control characters and line breaks become a space.
 const CONTROL_CHARACTERS = /* @__PURE__ */ new RegExp("[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+", "g");
 // Characters that reorder or hide text are dropped: the directional marks,
-// embeddings, overrides and isolates, and the zero-width ones. The zero-width
-// joiner (200d) stays, because emoji are built with it.
+// embeddings, overrides and isolates, and the zero-width space and marks. The
+// zero-width joiner (200d) and non-joiner (200c) stay: emoji are built with
+// the first, and Persian and Indic spelling needs both. Neither reorders text.
 const HIDDEN_CHARACTERS = /* @__PURE__ */ new RegExp(
-  "[\\u061c\\u200b\\u200c\\u200e\\u200f\\u202a-\\u202e\\u2060-\\u2064\\u2066-\\u2069\\ufeff]",
+  "[\\u061c\\u200b\\u200e\\u200f\\u202a-\\u202e\\u2060-\\u2064\\u2066-\\u2069\\ufeff]",
   "g",
 );
 
@@ -175,8 +176,23 @@ function isAddressLike(line: string): boolean {
   }
 }
 
+/**
+ * The tab's own host and path as a title would show them: lower case, without
+ * a leading `www.` or `m.`, without a trailing slash.
+ */
+function ownAddress(tabUrl: unknown): string | null {
+  if (typeof tabUrl !== "string") return null;
+  try {
+    const url = new URL(tabUrl);
+    const path = url.pathname.replace(/\/+$/, "");
+    return path === "" ? null : (url.hostname.replace(/^(?:www|m)\./, "") + path).toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
 /** A tab's title as the browser reports it: one line, capped, never an address. */
-function tabTitle(value: unknown): string {
+function tabTitle(value: unknown, tabUrl: unknown): string {
   if (typeof value !== "string") return "";
   const line = value
     .replace(CONTROL_CHARACTERS, " ")
@@ -184,6 +200,10 @@ function tabTitle(value: unknown): string {
     .replace(/\s+/g, " ")
     .trim();
   if (isAddressLike(line)) return "";
+  // Nor a longer title that has the tab's own address in it, such as a
+  // loading title. The site's name in a title's usual ending is not that.
+  const own = ownAddress(tabUrl);
+  if (own !== null && line.toLowerCase().includes(own)) return "";
   return Array.from(line).slice(0, SETUP_TAB_TITLE_MAX_LENGTH).join("");
 }
 
@@ -385,7 +405,7 @@ export class SetupPageController {
       left.order - right.order,
     );
     const answer = stories.slice(0, SETUP_STORY_TAB_LIMIT).map(({ tab, site }) =>
-      Object.freeze({ tabId: tab.id as number, title: tabTitle(tab.title), site }),
+      Object.freeze({ tabId: tab.id as number, title: tabTitle(tab.title, tab.url), site }),
     );
     this.#listed.set(requester.key, {
       ids: new Set(answer.map(({ tabId }) => tabId)),
