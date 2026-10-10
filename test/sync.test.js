@@ -49,26 +49,25 @@ function statusReadyMessages(h) {
 
 function createSyncHarness(
   origin = "https://tracefiction.com",
-  { sendMessageImpl, sessionMode = "legacy", now = null, framed = false } = {},
+  { sendMessageImpl, sessionMode = "legacy", now = null, framed = false, navigator = null } = {},
 ) {
   const js = fs.readFileSync(SYNC_JS_PATH, "utf8");
-  const outer = new JSDOM(`<!doctype html><html><body>${framed ? "<iframe></iframe>" : ""}</body></html>`, {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url: origin,
     runScripts: "outside-only",
     contentType: "text/html",
   });
-  // `framed`: the script finds itself in a frame inside some other page.
-  const dom = { window: framed ? outer.window.frames[0] : outer.window };
   const messages = [];
   const postedMessages = [];
   const consoleErrors = [];
   const originalPostMessage = dom.window.postMessage.bind(dom.window);
   dom.window.postMessage = (data, targetOrigin, transfer) => {
     postedMessages.push({ data, targetOrigin });
-    // The test frame has no address of its own, so its origin reads "null",
-    // which cannot be posted to by name.
-    return originalPostMessage(data, framed && targetOrigin === "null" ? "*" : targetOrigin, transfer);
+    return originalPostMessage(data, targetOrigin, transfer);
   };
+  // `framed`: the script finds itself, at this same address, in a frame of
+  // some other page. Its window is its own in every way but `top`.
+  const scriptWindow = framed ? framedWindow(dom.window) : dom.window;
   let onRuntimeMessage = null;
   const context = {
     console: {
@@ -77,10 +76,11 @@ function createSyncHarness(
         consoleErrors.push(args);
       },
     },
-    window: dom.window,
+    window: scriptWindow,
     document: dom.window.document,
-    self: dom.window,
+    self: scriptWindow,
     ...(now ? { Date: { now } } : {}),
+    ...(navigator ? { navigator } : {}),
     chrome: {
       runtime: {
         sendMessage(message, callback) {
@@ -111,6 +111,27 @@ function createSyncHarness(
       return onRuntimeMessage?.(message, sender, sendResponse);
     },
   };
+}
+
+/** A window that is not the top of its tab; messages from itself still name it as their source. */
+function framedWindow(real) {
+  const framed = new Proxy(real, {
+    get(target, property) {
+      if (property === "top") return {};
+      if (property === "addEventListener") {
+        return (type, listener, options) => target.addEventListener(type, (event) => listener(new Proxy(event, {
+          get(inner, key) {
+            if (key === "source") return inner.source === target ? framed : inner.source;
+            const value = Reflect.get(inner, key);
+            return typeof value === "function" ? value.bind(inner) : value;
+          },
+        })), options);
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return framed;
 }
 
 function dispatchPageMessage(h, data, origin = "https://tracefiction.com") {
@@ -918,9 +939,14 @@ test("sync forwards malformed status pushes as a safe disconnected state", async
 const SETUP_ORIGIN = "https://www.tracefiction.com";
 const SETUP_PAGE_URL = `${SETUP_ORIGIN}/safari-setup`;
 
-function setupHarness(replies = {}, options = {}) {
-  return createSyncHarness(SETUP_PAGE_URL, {
+const IPHONE = { userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1", maxTouchPoints: 5 };
+const MAC_SAFARI_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
+
+/** The script on Trace's setup page in Safari on an iPhone, unless told otherwise. */
+function setupHarness(replies = {}, { url = SETUP_PAGE_URL, ...options } = {}) {
+  return createSyncHarness(url, {
     sessionMode: "kernel",
+    navigator: IPHONE,
     sendMessageImpl(message, callback) {
       if (message.type !== "TRACE_SETUP_PAGE_REQUEST") return callback?.(undefined);
       const reply = replies[message.request];
@@ -1088,15 +1114,10 @@ test("setup: only this page's own top-level window, speaking to itself, is heard
   assert.deepEqual(setupMessages(h), []);
   assert.deepEqual(setupAnswers(h), [], "and it gets no answer at all");
 
-  // The script running inside a frame hears nothing either, even from that
-  // frame's own window on that frame's own origin.
+  // The setup page's own address inside a frame hears nothing either, even
+  // from that frame's own window on that frame's own origin.
   const framed = setupHarness(reply, { framed: true });
-  assert.notEqual(framed.window.top, framed.window, "the script's window is a frame");
-  framed.window.dispatchEvent(new framed.window.MessageEvent("message", {
-    data: { type: "TRACE_SETUP_REQUEST", id: "q9", request: "access" },
-    origin: framed.window.location.origin,
-    source: framed.window,
-  }));
+  askSetup(framed, { id: "q9", request: "access" });
   await flush();
   assert.deepEqual(setupMessages(framed), []);
   assert.deepEqual(setupAnswers(framed), []);
@@ -1107,6 +1128,80 @@ test("setup: only this page's own top-level window, speaking to itself, is heard
   askSetup(h, { id: "q9", request: "access" });
   await flush();
   assert.equal(setupAnswers(h).length, 1);
+});
+
+const SETUP_REPLIES = {
+  access: { ok: true, result: { storySitesAllowed: true, scope: "story-sites" } },
+  "story-tabs": { ok: true, result: { tabs: [{ tabId: 11, title: "A story", site: "ao3" }] } },
+  "switch-to-tab": { ok: true },
+};
+
+/** Ask all three questions and push a change; report what reached the background and the page. */
+async function trySetupSurface(h) {
+  askSetup(h, { id: "a", request: "access" });
+  askSetup(h, { id: "b", request: "story-tabs" });
+  askSetup(h, { id: "c", request: "switch-to-tab", tabId: 11 });
+  askSetup(h, { id: "d", request: "nonsense" });
+  await flush();
+  h.emitRuntimeMessage({ type: "TRACE_SETUP_ACCESS_PUSH", storySitesAllowed: true, scope: "all" });
+  return { forwarded: setupMessages(h).length, told: setupAnswers(h).length };
+}
+
+test("setup: every other Trace page gets silence, exactly like a foreign site", async () => {
+  for (const path of [
+    "/", "/library", "/login", "/safari-setup-old", "/safari-setup/x", "/safari-setup/x/", "/safari-setup.html",
+    "/x/safari-setup", "/Safari-Setup", "/safari-setu", "/safari-setup//", "/library?next=/safari-setup", "/library#/safari-setup",
+  ]) {
+    const h = setupHarness(SETUP_REPLIES, { url: `${SETUP_ORIGIN}${path}` });
+    assert.deepEqual(await trySetupSurface(h), { forwarded: 0, told: 0 }, path);
+  }
+  // The setup page itself, however it was reached, is answered: three requests
+  // forwarded, four answers and one push passed on.
+  for (const path of ["/safari-setup", "/safari-setup/", "/safari-setup?from=app", "/safari-setup/?from=app", "/safari-setup#step-2"]) {
+    const h = setupHarness(SETUP_REPLIES, { url: `${SETUP_ORIGIN}${path}` });
+    assert.deepEqual(await trySetupSurface(h), { forwarded: 3, told: 5 }, path);
+  }
+});
+
+test("setup: a page that leaves the setup path without loading stops being heard at once", async () => {
+  const h = setupHarness(SETUP_REPLIES);
+  askSetup(h, { id: "a", request: "story-tabs" });
+  await flush();
+  assert.equal(setupMessages(h).length, 1);
+
+  h.window.history.pushState({}, "", "/library");
+  askSetup(h, { id: "b", request: "switch-to-tab", tabId: 11 });
+  askSetup(h, { id: "c", request: "access" });
+  await flush();
+  h.emitRuntimeMessage({ type: "TRACE_SETUP_ACCESS_PUSH", storySitesAllowed: false, scope: "this-site" });
+  assert.equal(setupMessages(h).length, 1, "nothing more is forwarded");
+  assert.deepEqual(setupAnswers(h).map(({ data }) => data.id), ["a"], "and nothing more is said");
+
+  h.window.history.pushState({}, "", "/safari-setup");
+  askSetup(h, { id: "d", request: "access" });
+  await flush();
+  assert.deepEqual(setupAnswers(h).map(({ data }) => data.id), ["a", "d"]);
+});
+
+test("setup: only Safari on iPhone and iPad; every other browser forwards nothing", async () => {
+  const elsewhere = {
+    "Safari on a Mac": { userAgent: MAC_SAFARI_UA, maxTouchPoints: 0 },
+    "Safari on a Mac that reports no touch count": { userAgent: MAC_SAFARI_UA },
+    "Chrome on a Mac": { userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36", maxTouchPoints: 0 },
+    "Chrome on a touch-screen PC": { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36", maxTouchPoints: 10 },
+    "Firefox": { userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:143.0) Gecko/20100101 Firefox/143.0", maxTouchPoints: 0 },
+    "Firefox on Android": { userAgent: "Mozilla/5.0 (Android 15; Mobile; rv:143.0) Gecko/143.0 Firefox/143.0", maxTouchPoints: 5 },
+    "a browser that says nothing about itself": {},
+  };
+  for (const [name, navigator] of Object.entries(elsewhere)) {
+    const h = setupHarness(SETUP_REPLIES, { navigator });
+    assert.deepEqual(await trySetupSurface(h), { forwarded: 0, told: 0 }, name);
+  }
+  // An iPad calls itself a Mac; only touch tells them apart.
+  for (const navigator of [IPHONE, { userAgent: MAC_SAFARI_UA, maxTouchPoints: 5 }, { userAgent: IPHONE.userAgent.replace("iPhone;", "iPad;"), maxTouchPoints: 5 }]) {
+    const h = setupHarness(SETUP_REPLIES, { navigator });
+    assert.deepEqual(await trySetupSurface(h), { forwarded: 3, told: 5 }, navigator.userAgent);
+  }
 });
 
 test("setup: a request that cannot be addressed, and any other message type, is ignored silently", async () => {
@@ -1199,7 +1294,7 @@ test("setup: an answer the background did not give in the agreed shape is not pa
   }
 
   // A build without the background that answers these says so, and asks nothing.
-  const legacy = createSyncHarness(SETUP_PAGE_URL, { sessionMode: "legacy" });
+  const legacy = createSyncHarness(SETUP_PAGE_URL, { sessionMode: "legacy", navigator: IPHONE });
   askSetup(legacy, { id: "q12", request: "access" });
   await flush();
   assert.deepEqual(setupAnswers(legacy)[0].data, { type: "TRACE_SETUP_RESPONSE", id: "q12", ok: false, error: "unavailable" });

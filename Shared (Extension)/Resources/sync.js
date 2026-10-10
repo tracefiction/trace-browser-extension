@@ -432,7 +432,8 @@ window.addEventListener("message", (event) => {
 
 // ---- Setup page ----
 //
-// Trace's own setup page may ask three things, and nothing else:
+// Trace's own setup page, in Safari on iPhone and iPad, may ask three things,
+// and nothing else. No other page on Trace's site is heard:
 //   access         are the story sites allowed, and how broadly
 //   story-tabs     the reader's open story pages (tab id, title, site)
 //   switch-to-tab  bring one of those tabs to the front
@@ -447,6 +448,15 @@ function isTopLevelPage() {
   } catch {
     return false;
   }
+}
+
+// The one page these questions are for: the top-level page at exactly
+// /safari-setup (a trailing slash allowed), in Safari on iPhone or iPad. It
+// is looked at each time, because a page can change its path without loading.
+function isSetupPage() {
+  return isTopLevelPage() &&
+    /^\/safari-setup\/?$/.test(window.location.pathname) &&
+    isAppleMobileBrowser();
 }
 
 function sanitizeSetupAccess(raw) {
@@ -539,7 +549,9 @@ window.addEventListener("message", (event) => {
   // Stricter than the listener above: only this page's own top-level window,
   // speaking to itself. A frame, an opener or another origin is not heard.
   if (event.source !== window || event.origin !== window.location.origin) return;
-  if (!isTopLevelPage()) return;
+  // And only the setup page, on iPhone or iPad. Every other Trace page, and
+  // every other browser, gets silence.
+  if (!isSetupPage()) return;
   const data = event.data;
   if (!data || typeof data !== "object" || data.type !== SETUP_REQUEST_MESSAGE) return;
   void handleSetupRequest(data);
@@ -606,7 +618,7 @@ try {
     }
     if (message?.type === SETUP_ACCESS_PUSH_MESSAGE) {
       const access = sanitizeSetupAccess(message);
-      if (access && isTopLevelPage()) {
+      if (access && isSetupPage()) {
         window.postMessage(
           { type: SETUP_ACCESS_CHANGED_MESSAGE, ...access },
           window.location.origin,

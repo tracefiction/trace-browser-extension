@@ -376,13 +376,18 @@ that an orphaned script context can be replaced.
 
 ### Trace's setup page
 
-On Trace's own site, and nowhere else, the page script (`sync.js`) answers a
-small fixed set of questions from the page, so a setup page there can tell a
-reader what to do next. Page and script talk with `window.postMessage` on the
-page's own origin; the script hears only the top-level page itself (it checks
-`event.source === window`, `event.origin`, and that it is not inside a frame),
-and the background checks again that the request came from a top-level page on
-Trace's origin. A story site, any other site and any frame get no answer.
+On Trace's setup page (`/safari-setup` on Trace's own site), in Safari on
+iPhone and iPad, and nowhere else, the page script (`sync.js`) answers a small
+fixed set of questions from the page, so that page can tell a reader what to
+do next. Page and script talk with `window.postMessage` on the page's own
+origin; the script hears only the top-level page itself (it checks
+`event.source === window`, `event.origin`, that it is not inside a frame, and
+that the path is exactly the setup page's), and the background checks again
+that the request came from a top-level page at that path on Trace's origin.
+Every other page on Trace's site (the signed-in app included), a story site,
+any other site and any frame get no answer. Neither does any page in Chrome,
+Firefox or Safari on a Mac: the page script forwards nothing there, and the
+Chrome and Firefox packages do not contain the background half at all.
 
 What the page can learn:
 

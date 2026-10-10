@@ -1,3 +1,4 @@
+import { runsBesideTraceApp } from "./archive-readiness.mjs";
 import { BrowserArchivePermissionSnapshotPort } from "./browser-adapters.mjs";
 import {
   extensionCall,
@@ -22,8 +23,10 @@ import {
  * What Trace's own setup page, and the popup shown over it, may ask the
  * background. The page is an ordinary web page, so this is a boundary:
  *
- * - Only a top-level page on Trace's own origin, or this extension's popup,
- *   is answered. A story site, any other site and any frame get nothing.
+ * - Only the setup page itself (a top-level page at `/safari-setup` on
+ *   Trace's own origin), or this extension's popup, is answered. Every other
+ *   Trace page, a story site, any other site and any frame get nothing.
+ * - Only on iPhone and iPad, where that page exists to be used.
  * - It can learn whether the story sites are allowed, and the titles of open
  *   story pages on those sites. Nothing about any other tab, and never an
  *   address.
@@ -43,7 +46,7 @@ export const SETUP_REQUEST_LIMIT = 20;
 export const SETUP_REQUEST_WINDOW_MS = 10_000;
 const SETUP_REQUESTER_LIMIT = 32;
 
-export const STORY_SITE_ORIGINS = Object.freeze([
+export const STORY_SITE_ORIGINS = /* @__PURE__ */ Object.freeze([
   "https://*.archiveofourown.org/*",
   "https://*.archiveofourown.gay/*",
   "https://archive.transformativeworks.org/*",
@@ -89,6 +92,8 @@ interface SetupPageEnvironment {
   /** The origins automatic saving needs. */
   readonly storyOrigins?: readonly string[];
   readonly clock?: { now(): number };
+  /** Defaults to this context's `navigator`. */
+  readonly platform?: { readonly userAgent?: string };
 }
 
 type SetupTab = BrowserTab & { readonly title?: unknown };
@@ -99,6 +104,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function refused(error: SetupPageError): SetupPageResponse {
   return Object.freeze({ ok: false as const, error });
+}
+
+/** The setup page's path: exactly `/safari-setup`, with or without a trailing slash. */
+export function isSetupPagePath(pathname: string): boolean {
+  return /^\/safari-setup\/?$/.test(pathname);
 }
 
 /** The site of a story page's address, or null when it is not a story page. */
@@ -113,7 +123,7 @@ export function storyPageSite(rawUrl: unknown, webOrigin: string): "ao3" | "ffn"
 }
 
 // Control characters and the two Unicode line breaks, written as escapes.
-const CONTROL_CHARACTERS = new RegExp("[\\u0000-\\u001f\\u007f\\u2028\\u2029]+", "g");
+const CONTROL_CHARACTERS = /* @__PURE__ */ new RegExp("[\\u0000-\\u001f\\u007f\\u2028\\u2029]+", "g");
 
 /** A tab's title as the browser reports it: one line, capped, never an address. */
 function tabTitle(value: unknown): string {
@@ -131,8 +141,8 @@ export class SetupPageController {
   readonly #storyOrigins: readonly string[];
   readonly #access: BrowserArchivePermissionSnapshotPort;
   readonly #now: () => number;
-  /** Per requester: the story tabs it was last given, and from which page. */
-  readonly #listed = new Map<string, { readonly ids: ReadonlySet<number>; readonly page: string }>();
+  /** Per requester: the story tabs it was last given. */
+  readonly #listed = new Map<string, ReadonlySet<number>>();
   readonly #requests = new Map<string, number[]>();
   #push: Promise<void> | null = null;
   #pushAgain = false;
@@ -143,7 +153,7 @@ export class SetupPageController {
     this.#mode = environment.mode;
     const webUrl = new URL(environment.webOrigin);
     this.#webOrigin = webUrl.origin;
-    this.#webTabPattern = `${webUrl.protocol}//${webUrl.hostname}/*`;
+    this.#webTabPattern = `${webUrl.protocol}//${webUrl.hostname}/safari-setup*`;
     this.#storyOrigins = Object.freeze([...(environment.storyOrigins ?? STORY_SITE_ORIGINS)]);
     this.#access = new BrowserArchivePermissionSnapshotPort(
       environment.permissions,
@@ -158,7 +168,7 @@ export class SetupPageController {
     if (!isRecord(message) || message.type !== SETUP_PAGE_MESSAGE) return null;
     const requester = this.#requester(sender);
     if (requester === null) return refused("forbidden");
-    if (!this.#admit(requester.key)) return refused("rate_limited");
+    if (!this.#admit(requester)) return refused("rate_limited");
 
     const request = message.request;
     const keys = Object.keys(message).length;
@@ -184,7 +194,7 @@ export class SetupPageController {
     return refused(typeof request === "string" ? "unknown_request" : "invalid_request");
   }
 
-  /** Story-site access changed: tell every open Trace page. */
+  /** Story-site access changed: tell every open setup page. */
   accessChanged(): Promise<void> {
     if (this.#push !== null) {
       this.#pushAgain = true;
@@ -202,28 +212,27 @@ export class SetupPageController {
     return push;
   }
 
-  /** Who is asking: a top-level Trace page (by tab) or this extension's popup. */
-  #requester(sender: RuntimeMessageSender | undefined): { key: string; page: string } | null {
-    if (isPopupSender(sender, this.#runtime.id)) return { key: "popup", page: "popup" };
+  /** Who is asking: the setup page (by tab) or this extension's popup. */
+  #requester(sender: RuntimeMessageSender | undefined): string | null {
+    if (isPopupSender(sender, this.#runtime.id)) return "popup";
     if (!isTraceWebSender(sender, this.#runtime.id, this.#webOrigin)) return null;
     const tabId = sender?.tab?.id;
     if (typeof tabId !== "number" || !Number.isSafeInteger(tabId)) return null;
-    // Every address the sender carries must be Trace's own: the frame that
-    // sent the message and the tab it sits in.
-    const frame = sender?.url === undefined ? undefined : this.#tracePage(sender.url);
-    const tab = sender?.tab?.url === undefined ? undefined : this.#tracePage(sender.tab.url);
-    if (frame === null || tab === null) return null;
-    const page = frame ?? tab;
-    return page === undefined ? null : { key: `page:${tabId}`, page };
+    // Every address the sender carries must be the setup page's: the frame
+    // that sent the message and the tab it sits in.
+    const addresses = [sender?.url, sender?.tab?.url].filter((address) => address !== undefined);
+    if (addresses.length === 0) return null;
+    if (!addresses.every((address) => this.#isSetupPage(address))) return null;
+    return `page:${tabId}`;
   }
 
-  #tracePage(rawUrl: unknown): string | null {
-    if (typeof rawUrl !== "string") return null;
+  #isSetupPage(rawUrl: unknown): boolean {
+    if (typeof rawUrl !== "string") return false;
     try {
       const url = new URL(rawUrl);
-      return url.origin === this.#webOrigin ? url.origin + url.pathname : null;
+      return url.origin === this.#webOrigin && isSetupPagePath(url.pathname);
     } catch {
-      return null;
+      return false;
     }
   }
 
@@ -261,9 +270,9 @@ export class SetupPageController {
     });
   }
 
-  async #storyTabs(requester: { key: string; page: string }): Promise<readonly SetupStoryTab[] | null> {
+  async #storyTabs(requester: string): Promise<readonly SetupStoryTab[] | null> {
     // Whatever happens next, an earlier list is no longer the most recent.
-    this.#listed.delete(requester.key);
+    this.#listed.delete(requester);
     const access = await this.#readAccess();
     if (access === null) return null;
     if (!access.storySitesAllowed) return Object.freeze([]);
@@ -289,23 +298,14 @@ export class SetupPageController {
     const answer = stories.slice(0, SETUP_STORY_TAB_LIMIT).map(({ tab, site }) =>
       Object.freeze({ tabId: tab.id as number, title: tabTitle(tab.title), site }),
     );
-    this.#listed.set(requester.key, {
-      ids: new Set(answer.map(({ tabId }) => tabId)),
-      page: requester.page,
-    });
+    this.#listed.set(requester, new Set(answer.map(({ tabId }) => tabId)));
     return Object.freeze(answer);
   }
 
-  async #switchToTab(
-    requester: { key: string; page: string },
-    tabId: number,
-  ): Promise<SetupPageResponse> {
-    // Only a tab this same page was just given. A page that has moved on, or
-    // another page in the same tab, starts again with a new list.
-    const listed = this.#listed.get(requester.key);
-    if (listed === undefined || listed.page !== requester.page || !listed.ids.has(tabId)) {
-      return refused("not_listed");
-    }
+  async #switchToTab(requester: string, tabId: number): Promise<SetupPageResponse> {
+    // Only a tab this same requester was just given. A tab that has left the
+    // setup page is no longer a requester at all.
+    if (this.#listed.get(requester)?.has(tabId) !== true) return refused("not_listed");
     if (typeof this.#tabs.get !== "function" || typeof this.#tabs.update !== "function") {
       return refused("unavailable");
     }
@@ -341,11 +341,11 @@ export class SetupPageController {
     }
     const message = Object.freeze({ type: SETUP_ACCESS_PUSH_MESSAGE, ...access });
     for (const tab of Array.isArray(tabs) ? tabs : []) {
-      if (typeof tab?.id !== "number" || this.#tracePage(tab.url) === null) continue;
+      if (typeof tab?.id !== "number" || !this.#isSetupPage(tab.url)) continue;
       try {
         await this.#call<unknown>("sendMessage", [tab.id, message]);
       } catch {
-        // A Trace tab without the page script simply does not hear it.
+        // A setup page without the page script simply does not hear it.
       }
     }
   }
@@ -361,18 +361,37 @@ export class SetupPageController {
   }
 }
 
-export function installSetupPageRuntime(environment: SetupPageEnvironment): SetupPageController {
+/**
+ * iPhone and iPad only, by the same decision the access report makes. Where
+ * the platform is known not to be one, nothing is installed. Where it is not
+ * known yet (an iPad can call itself a Mac), the listeners are registered at
+ * once, so an event that woke the background is not missed, and each decides
+ * when it runs: a Mac then answers "unavailable" without looking at access or
+ * at any tab, and pushes nothing.
+ */
+export function installSetupPageRuntime(environment: SetupPageEnvironment): SetupPageController | null {
+  const beside = runsBesideTraceApp(
+    environment.runtime,
+    environment.mode,
+    environment.platform?.userAgent ?? globalThis.navigator?.userAgent ?? "",
+  );
+  if (beside === false) return null;
+  const supported = Promise.resolve(beside);
   const controller = new SetupPageController(environment);
   environment.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!isRecord(message) || message.type !== SETUP_PAGE_MESSAGE) return false;
-    void controller.handle(message, sender).then(
-      (response) => sendResponse(response ?? refused("unavailable")),
-      () => sendResponse(refused("unavailable")),
-    );
+    void supported
+      .then((yes) => (yes ? controller.handle(message, sender) : refused("unavailable")))
+      .then(
+        (response) => sendResponse(response ?? refused("unavailable")),
+        () => sendResponse(refused("unavailable")),
+      );
     return true;
   });
   const changed = (): void => {
-    void controller.accessChanged().catch(() => undefined);
+    void supported
+      .then((yes) => (yes ? controller.accessChanged() : undefined))
+      .catch(() => undefined);
   };
   environment.permissions?.onAdded?.addListener(changed);
   environment.permissions?.onRemoved?.addListener(changed);

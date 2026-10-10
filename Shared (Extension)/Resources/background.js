@@ -8342,7 +8342,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var SETUP_REQUEST_LIMIT = 20;
   var SETUP_REQUEST_WINDOW_MS = 1e4;
   var SETUP_REQUESTER_LIMIT = 32;
-  var STORY_SITE_ORIGINS = Object.freeze([
+  var STORY_SITE_ORIGINS = /* @__PURE__ */ Object.freeze([
     "https://*.archiveofourown.org/*",
     "https://*.archiveofourown.gay/*",
     "https://archive.transformativeworks.org/*",
@@ -8356,6 +8356,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   function refused(error) {
     return Object.freeze({ ok: false, error });
   }
+  function isSetupPagePath(pathname) {
+    return /^\/safari-setup\/?$/.test(pathname);
+  }
   function storyPageSite(rawUrl, webOrigin) {
     if (typeof rawUrl !== "string") return null;
     const site = archiveHostKindFromSender({ url: rawUrl });
@@ -8363,7 +8366,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     if (workKeyFromArchiveUrl(rawUrl, site) === null) return null;
     return classifyActiveTabUrl(rawUrl, webOrigin).kind === "supported_story" ? site : null;
   }
-  var CONTROL_CHARACTERS = new RegExp("[\\u0000-\\u001f\\u007f\\u2028\\u2029]+", "g");
+  var CONTROL_CHARACTERS = /* @__PURE__ */ new RegExp("[\\u0000-\\u001f\\u007f\\u2028\\u2029]+", "g");
   function tabTitle(value) {
     if (typeof value !== "string") return "";
     const line = value.replace(CONTROL_CHARACTERS, " ").replace(/\s+/g, " ").trim();
@@ -8378,7 +8381,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #storyOrigins;
     #access;
     #now;
-    /** Per requester: the story tabs it was last given, and from which page. */
+    /** Per requester: the story tabs it was last given. */
     #listed = /* @__PURE__ */ new Map();
     #requests = /* @__PURE__ */ new Map();
     #push = null;
@@ -8389,7 +8392,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#mode = environment.mode;
       const webUrl = new URL(environment.webOrigin);
       this.#webOrigin = webUrl.origin;
-      this.#webTabPattern = `${webUrl.protocol}//${webUrl.hostname}/*`;
+      this.#webTabPattern = `${webUrl.protocol}//${webUrl.hostname}/safari-setup*`;
       this.#storyOrigins = Object.freeze([...environment.storyOrigins ?? STORY_SITE_ORIGINS]);
       this.#access = new BrowserArchivePermissionSnapshotPort(
         environment.permissions,
@@ -8403,7 +8406,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (!isRecord21(message) || message.type !== SETUP_PAGE_MESSAGE) return null;
       const requester = this.#requester(sender);
       if (requester === null) return refused("forbidden");
-      if (!this.#admit(requester.key)) return refused("rate_limited");
+      if (!this.#admit(requester)) return refused("rate_limited");
       const request = message.request;
       const keys = Object.keys(message).length;
       if (request === "access") {
@@ -8425,7 +8428,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
       return refused(typeof request === "string" ? "unknown_request" : "invalid_request");
     }
-    /** Story-site access changed: tell every open Trace page. */
+    /** Story-site access changed: tell every open setup page. */
     accessChanged() {
       if (this.#push !== null) {
         this.#pushAgain = true;
@@ -8442,25 +8445,24 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#push = push;
       return push;
     }
-    /** Who is asking: a top-level Trace page (by tab) or this extension's popup. */
+    /** Who is asking: the setup page (by tab) or this extension's popup. */
     #requester(sender) {
-      if (isPopupSender(sender, this.#runtime.id)) return { key: "popup", page: "popup" };
+      if (isPopupSender(sender, this.#runtime.id)) return "popup";
       if (!isTraceWebSender(sender, this.#runtime.id, this.#webOrigin)) return null;
       const tabId = sender?.tab?.id;
       if (typeof tabId !== "number" || !Number.isSafeInteger(tabId)) return null;
-      const frame = sender?.url === void 0 ? void 0 : this.#tracePage(sender.url);
-      const tab = sender?.tab?.url === void 0 ? void 0 : this.#tracePage(sender.tab.url);
-      if (frame === null || tab === null) return null;
-      const page = frame ?? tab;
-      return page === void 0 ? null : { key: `page:${tabId}`, page };
+      const addresses = [sender?.url, sender?.tab?.url].filter((address) => address !== void 0);
+      if (addresses.length === 0) return null;
+      if (!addresses.every((address) => this.#isSetupPage(address))) return null;
+      return `page:${tabId}`;
     }
-    #tracePage(rawUrl) {
-      if (typeof rawUrl !== "string") return null;
+    #isSetupPage(rawUrl) {
+      if (typeof rawUrl !== "string") return false;
       try {
         const url = new URL(rawUrl);
-        return url.origin === this.#webOrigin ? url.origin + url.pathname : null;
+        return url.origin === this.#webOrigin && isSetupPagePath(url.pathname);
       } catch {
-        return null;
+        return false;
       }
     }
     #admit(requester) {
@@ -8496,7 +8498,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       });
     }
     async #storyTabs(requester) {
-      this.#listed.delete(requester.key);
+      this.#listed.delete(requester);
       const access = await this.#readAccess();
       if (access === null) return null;
       if (!access.storySitesAllowed) return Object.freeze([]);
@@ -8519,17 +8521,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       const answer = stories.slice(0, SETUP_STORY_TAB_LIMIT).map(
         ({ tab, site }) => Object.freeze({ tabId: tab.id, title: tabTitle(tab.title), site })
       );
-      this.#listed.set(requester.key, {
-        ids: new Set(answer.map(({ tabId }) => tabId)),
-        page: requester.page
-      });
+      this.#listed.set(requester, new Set(answer.map(({ tabId }) => tabId)));
       return Object.freeze(answer);
     }
     async #switchToTab(requester, tabId) {
-      const listed = this.#listed.get(requester.key);
-      if (listed === void 0 || listed.page !== requester.page || !listed.ids.has(tabId)) {
-        return refused("not_listed");
-      }
+      if (this.#listed.get(requester)?.has(tabId) !== true) return refused("not_listed");
       if (typeof this.#tabs.get !== "function" || typeof this.#tabs.update !== "function") {
         return refused("unavailable");
       }
@@ -8563,7 +8559,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
       const message = Object.freeze({ type: SETUP_ACCESS_PUSH_MESSAGE, ...access });
       for (const tab of Array.isArray(tabs) ? tabs : []) {
-        if (typeof tab?.id !== "number" || this.#tracePage(tab.url) === null) continue;
+        if (typeof tab?.id !== "number" || !this.#isSetupPage(tab.url)) continue;
         try {
           await this.#call("sendMessage", [tab.id, message]);
         } catch {
@@ -8581,17 +8577,24 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
   };
   function installSetupPageRuntime(environment) {
+    const beside = runsBesideTraceApp(
+      environment.runtime,
+      environment.mode,
+      environment.platform?.userAgent ?? globalThis.navigator?.userAgent ?? ""
+    );
+    if (beside === false) return null;
+    const supported = Promise.resolve(beside);
     const controller = new SetupPageController(environment);
     environment.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (!isRecord21(message) || message.type !== SETUP_PAGE_MESSAGE) return false;
-      void controller.handle(message, sender).then(
+      void supported.then((yes) => yes ? controller.handle(message, sender) : refused("unavailable")).then(
         (response) => sendResponse(response ?? refused("unavailable")),
         () => sendResponse(refused("unavailable"))
       );
       return true;
     });
     const changed = () => {
-      void controller.accessChanged().catch(() => void 0);
+      void supported.then((yes) => yes ? controller.accessChanged() : void 0).catch(() => void 0);
     };
     environment.permissions?.onAdded?.addListener(changed);
     environment.permissions?.onRemoved?.addListener(changed);
@@ -8708,14 +8711,14 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     extension.storage.onChanged?.addListener((changes, area) => {
       if (area === "local" && "prefAutoTrackEnabled" in changes) void session?.publishTrackingPreference();
     });
-    if (true) {
+    if (define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default !== null) {
       installSetupPageRuntime({
         runtime: extension.runtime,
         tabs: extension.tabs,
         ...extension.permissions === void 0 ? {} : { permissions: extension.permissions },
         mode: storageMode,
         webOrigin: "https://www.tracefiction.com",
-        ...define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default === null ? {} : { storyOrigins: define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.origins }
+        storyOrigins: define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.origins
       });
     }
   } catch {

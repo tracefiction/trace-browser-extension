@@ -213,7 +213,7 @@ export function installArchiveReadinessRuntime(
  * `true` or `false` when the user agent settles it, otherwise a promise,
  * because an iPad can present itself as a Mac.
  */
-function runsBesideTraceApp(
+export function runsBesideTraceApp(
   runtime: RuntimePort,
   mode: "callback" | "promise",
   userAgent: string,

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 
 import {
@@ -11,6 +12,7 @@ import {
   STORY_SITE_ORIGINS,
   SetupPageController,
   installSetupPageRuntime,
+  isSetupPagePath,
   storyPageSite,
 } from "../../.trace-build/extension-runtime/setup-page.mjs";
 import { workKeyFromArchiveUrl } from "../../.trace-build/extension-runtime/archive-sender.mjs";
@@ -19,6 +21,8 @@ import { classifyActiveTabUrl } from "../../.trace-build/extension-runtime/first
 const WEB = "https://www.tracefiction.com";
 const SETUP_URL = `${WEB}/safari-setup`;
 const EXTENSION_ID = "trace-extension";
+const IPHONE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1";
+const MAC_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
 const AO3 = "https://archiveofourown.org";
 const FFN = "https://www.fanfiction.net";
 
@@ -48,9 +52,23 @@ function createHarness(options = {}) {
   const added = [];
   const removed = [];
   const listeners = [];
+  const platformAsked = [];
   const runtime = {
     id: EXTENSION_ID,
     onMessage: { addListener: (listener) => listeners.push(listener) },
+    // Present wherever Trace ships beside its app. The setup surface never uses it.
+    ...(options.withoutNativeMessaging ? {} : {
+      sendNativeMessage() {
+        assert.fail("the setup surface sends nothing to the app");
+      },
+    }),
+    ...(options.os === undefined ? {} : {
+      getPlatformInfo() {
+        platformAsked.push(true);
+        if (options.os === "unreadable") return Promise.reject(new Error("no answer"));
+        return options.platformAnswer ?? Promise.resolve({ os: options.os });
+      },
+    }),
   };
   const tabsApi = {
     async query(filter) {
@@ -58,7 +76,14 @@ function createHarness(options = {}) {
       if (options.queryFails) throw new Error("tabs unavailable");
       const patterns = filter?.url;
       if (!patterns || options.queryIgnoresFilter) return tabs.map((tab) => ({ ...tab }));
-      return tabs.filter((tab) => typeof tab.url === "string" && tab.url.startsWith(`${WEB}/`)).map((tab) => ({ ...tab }));
+      // As the browser applies a match pattern ending in a wildcard.
+      const prefixes = patterns.map((pattern) => {
+        assert.ok(pattern.endsWith("*"), pattern);
+        return pattern.slice(0, -1);
+      });
+      return tabs
+        .filter((tab) => typeof tab.url === "string" && prefixes.some((prefix) => tab.url.startsWith(prefix)))
+        .map((tab) => ({ ...tab }));
     },
     async get(tabId) {
       calls.push(["get", tabId]);
@@ -106,10 +131,11 @@ function createHarness(options = {}) {
     webOrigin: WEB,
     storyOrigins: STORY_SITE_ORIGINS,
     clock: { now: () => now },
+    platform: { userAgent: options.userAgent ?? IPHONE_UA },
   };
   const controller = options.install ? installSetupPageRuntime(environment) : new SetupPageController(environment);
   return {
-    controller, calls, sent, added, removed, listeners,
+    controller, calls, sent, added, removed, listeners, platformAsked,
     browserCalls: () => calls.filter(([name]) => name !== "contains" && name !== "getAll"),
     setGranted(value) { granted = value; },
     setTabs(value) { tabs = value; },
@@ -132,6 +158,10 @@ const OTHER_TABS = [
   { id: 25, url: `${FFN}/book/Some-Fandom/`, title: "Some Fandom | FanFiction", lastAccessed: 630 },
   { id: 26, title: "A tab Safari tells Trace nothing about", lastAccessed: 620 },
   { id: 27, url: `${WEB}/library`, title: "Library", lastAccessed: 610 },
+  { id: 29, url: `${WEB}/safari-setup-old`, title: "An older page", lastAccessed: 590 },
+  { id: 30, url: `${WEB}/safari-setup/x`, title: "A page under it", lastAccessed: 580 },
+  { id: 31, url: `${WEB}/safari-setup/?from=app#step-2`, title: "Set up Trace", lastAccessed: 570 },
+  { id: 32, url: `${WEB}/`, title: "Trace", lastAccessed: 560 },
   { id: 28, url: "https://archiveofourown.org.example.com/works/123", title: "Not AO3", lastAccessed: 600 },
 ];
 
@@ -154,8 +184,24 @@ test("access: whether the story sites are allowed, and how broadly", async () =>
   assert.deepEqual(await silent.controller.handle(ask("access"), pageSender()), { ok: false, error: "unavailable" });
 });
 
-test("only a top-level page on Trace's own origin, or the popup, is answered", async () => {
+const at = (url, tabUrl = url) => pageSender({ url, tab: { id: 1, url: tabUrl } });
+
+test("only the setup page itself, top-level on Trace's own origin, or the popup, is answered", async () => {
   const refusedSenders = {
+    "Trace's home page": at(`${WEB}/`),
+    "the signed-in Trace app": at(`${WEB}/library`),
+    "a Trace page whose path only starts the same": at(`${WEB}/safari-setup-old`),
+    "a Trace page under the setup path": at(`${WEB}/safari-setup/x`),
+    "a Trace page under the setup path, with a slash": at(`${WEB}/safari-setup/x/`),
+    "a Trace page with the setup path further in": at(`${WEB}/x/safari-setup`),
+    "a Trace page naming the setup path in its query": at(`${WEB}/library?next=/safari-setup`),
+    "a Trace page naming the setup path in its fragment": at(`${WEB}/library#/safari-setup`),
+    "the setup path in another case": at(`${WEB}/Safari-Setup`),
+    "the setup path with a file ending": at(`${WEB}/safari-setup.html`),
+    "the setup page in a frame of another Trace page": pageSender({ frameId: 3, tab: { id: 1, url: `${WEB}/library` } }),
+    "the setup page reported as top-level inside another Trace page's tab": at(SETUP_URL, `${WEB}/library`),
+    "another Trace page reported as top-level inside the setup page's tab": at(`${WEB}/library`, SETUP_URL),
+    "the setup page in a frame of the setup page": pageSender({ frameId: 2 }),
     "an AO3 page": pageSender({ url: `${AO3}/works/123`, tab: { id: 11, url: `${AO3}/works/123` } }),
     "a FanFiction.net page": pageSender({ url: `${FFN}/s/4821/1/`, tab: { id: 12, url: `${FFN}/s/4821/1/` } }),
     "any other site": pageSender({ url: "https://example.com/safari-setup", tab: { id: 3, url: "https://example.com/safari-setup" } }),
@@ -175,6 +221,7 @@ test("only a top-level page on Trace's own origin, or the popup, is answered", a
     "another extension": pageSender({ id: "another-extension" }),
     "a sender with no tab": { id: EXTENSION_ID, url: SETUP_URL, frameId: 0 },
     "a sender with no address": { id: EXTENSION_ID, tab: { id: 1 }, frameId: 0 },
+    "a sender whose tab has no id": { id: EXTENSION_ID, url: SETUP_URL, tab: { url: SETUP_URL }, frameId: 0 },
     "no sender at all": undefined,
   };
   for (const [name, sender] of Object.entries(refusedSenders)) {
@@ -184,10 +231,29 @@ test("only a top-level page on Trace's own origin, or the popup, is answered", a
     }
     assert.deepEqual(h.calls, [], `${name}: nothing was read on its behalf`);
   }
-  // The same questions from Trace's own page and from the popup are answered.
+  // The same questions from the setup page, however it was reached, and from the popup are answered.
   const h = createHarness({ tabs: [...STORY_TABS, ...OTHER_TABS] });
-  for (const sender of [pageSender(), pageSender({ url: `${WEB}/library`, tab: { id: 2, url: `${WEB}/library` } }), popupSender]) {
-    assert.equal((await h.controller.handle(ask("story-tabs"), sender)).ok, true);
+  for (const sender of [
+    pageSender(),
+    at(`${SETUP_URL}/`),
+    at(`${SETUP_URL}?from=app`),
+    at(`${SETUP_URL}/?from=app#step-2`),
+    at(`${SETUP_URL}#step-2`, SETUP_URL),
+    { id: EXTENSION_ID, url: SETUP_URL, tab: { id: 4 }, frameId: 0 },
+    { id: EXTENSION_ID, tab: { id: 5, url: SETUP_URL }, frameId: 0 },
+    popupSender,
+  ]) {
+    assert.equal((await h.controller.handle(ask("story-tabs"), sender)).ok, true, sender.url ?? sender.tab.url);
+  }
+});
+
+test("the setup page's path is exactly that, with or without a trailing slash", () => {
+  for (const path of ["/safari-setup", "/safari-setup/"]) assert.equal(isSetupPagePath(path), true, path);
+  for (const path of [
+    "", "/", "/library", "/safari-setup-old", "/safari-setup/x", "/safari-setup//", "/safari-setup.html", "/x/safari-setup",
+    "/Safari-Setup", "/safari-setu", "safari-setup", "/safari-setup\n", "/safari-setup?x", "/safari-setup#x", " /safari-setup",
+  ]) {
+    assert.equal(isSetupPagePath(path), false, JSON.stringify(path));
   }
 });
 
@@ -331,16 +397,25 @@ test("switch to tab: the list belongs to the page that asked, and only its most 
   const second = pageSender({ tab: { id: 2, url: SETUP_URL } });
   await h.controller.handle(ask("story-tabs"), first);
 
-  // Another Trace page, and the popup, have their own lists.
+  // A setup page in any other tab, and the popup, have their own lists.
   assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 11 }), second), { ok: false, error: "not_listed" });
+  for (const id of [0, 3, 21, 101]) {
+    const other = pageSender({ tab: { id, url: SETUP_URL } });
+    assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 11 }), other), { ok: false, error: "not_listed" }, `tab ${id}`);
+  }
   assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 11 }), popupSender), { ok: false, error: "not_listed" });
   await h.controller.handle(ask("story-tabs"), popupSender);
   assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 11 }), popupSender), { ok: true });
 
-  // The same tab showing a different Trace page starts again.
-  const moved = pageSender({ url: `${WEB}/library`, tab: { id: 1, url: `${WEB}/library` } });
-  assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 11 }), moved), { ok: false, error: "not_listed" });
-  assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 11 }), first), { ok: true }, "the page that asked still can");
+  // A setup page that has navigated away since it was given its list is no
+  // longer the setup page: the same tab, now elsewhere on Trace, is refused.
+  h.calls.length = 0;
+  for (const elsewhere of [`${WEB}/library`, `${WEB}/safari-setup/x`, `${WEB}/safari-setup-old`, `${WEB}/`]) {
+    assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 11 }), at(elsewhere)), { ok: false, error: "forbidden" }, elsewhere);
+    assert.deepEqual(await h.controller.handle(ask("story-tabs"), at(elsewhere)), { ok: false, error: "forbidden" }, elsewhere);
+  }
+  assert.deepEqual(h.calls, [], "and no tab was looked at or touched for it");
+  assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 11 }), first), { ok: true }, "the setup page itself still can");
 
   // A newer list replaces the older one, even when it is shorter.
   h.setTabs(STORY_TABS.filter((tab) => tab.id !== 13));
@@ -402,7 +477,7 @@ async function settled() {
   for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
 }
 
-test("when access changes, every open Trace page is told, and no other tab", async () => {
+test("when access changes, every open setup page is told, and no other tab", async () => {
   const h = createHarness({ install: true, granted: [`${WEB}/*`], tabs: [...OTHER_TABS, ...STORY_TABS] });
   assert.equal(h.added.length, 1);
   assert.equal(h.removed.length, 1);
@@ -415,8 +490,10 @@ test("when access changes, every open Trace page is told, and no other tab", asy
   await settled();
   assert.deepEqual(h.sent, [
     { tabId: 1, message: { type: SETUP_ACCESS_PUSH_MESSAGE, storySitesAllowed: true, scope: "story-sites" } },
-    { tabId: 27, message: { type: SETUP_ACCESS_PUSH_MESSAGE, storySitesAllowed: true, scope: "story-sites" } },
+    { tabId: 31, message: { type: SETUP_ACCESS_PUSH_MESSAGE, storySitesAllowed: true, scope: "story-sites" } },
   ]);
+  assert.deepEqual(h.calls.filter(([name]) => name === "query"), [["query", { url: [`${WEB}/safari-setup*`] }]],
+    "only tabs at the setup page's address are asked for");
 
   // Access ends.
   h.sent.length = 0;
@@ -425,7 +502,7 @@ test("when access changes, every open Trace page is told, and no other tab", asy
   await settled();
   assert.deepEqual(h.sent.map(({ tabId, message }) => [tabId, message.storySitesAllowed, message.scope]), [
     [1, false, "this-site"],
-    [27, false, "this-site"],
+    [31, false, "this-site"],
   ]);
 
   // A burst of changes is one look and one message per page, plus one more for whatever came last.
@@ -437,11 +514,12 @@ test("when access changes, every open Trace page is told, and no other tab", asy
   assert.deepEqual(h.sent.at(-1).message, { type: SETUP_ACCESS_PUSH_MESSAGE, storySitesAllowed: true, scope: "all" });
   assert.equal(h.calls.some(([name]) => name === "update" || name === "get" || name === "create"), false);
 
-  // Should the browser hand back more tabs than were asked for, still only Trace's are told.
+  // Should the browser hand back more tabs than were asked for, still only setup pages are told:
+  // not the Trace app, not a path that merely starts the same, not a story.
   const loose = createHarness({ install: true, queryIgnoresFilter: true, tabs: [...OTHER_TABS, ...STORY_TABS] });
   loose.added[0]();
   await settled();
-  assert.deepEqual(loose.sent.map(({ tabId }) => tabId), [1, 27]);
+  assert.deepEqual(loose.sent.map(({ tabId }) => tabId), [1, 31]);
 });
 
 test("a change Safari will not describe is not pushed", async () => {
@@ -463,6 +541,98 @@ test("the installed listener answers its own message and leaves every other one 
   assert.equal(await deliver({ type: "TRACE_SESSION_GET_SNAPSHOT" }, popupSender), "not handled");
   assert.deepEqual(await deliver(ask("access"), pageSender()), { ok: true, result: { storySitesAllowed: true, scope: "story-sites" } });
   assert.deepEqual(await deliver(ask("access"), pageSender({ url: `${AO3}/works/1`, tab: { id: 9, url: `${AO3}/works/1` } })), { ok: false, error: "forbidden" });
+});
+
+test("the page script, the popup and the background name the setup page's path the same way", () => {
+  const matcher = String.raw`/^\/safari-setup\/?$/`;
+  for (const file of [
+    "../../Shared (Extension)/Resources/sync.js",
+    "../../Shared (Extension)/Resources/popup.js",
+    "../../src/extension-runtime/setup-page.mts",
+  ]) {
+    const source = fs.readFileSync(new URL(file, import.meta.url), "utf8");
+    assert.equal(source.split(matcher).length - 1, 1, file);
+  }
+});
+
+// ---- where it runs ----
+
+const deliverTo = (h) => (message, sender) => new Promise((resolve) => {
+  let kept = false;
+  for (const listener of h.listeners) kept = listener(message, sender, resolve) === true || kept;
+  if (!kept) setImmediate(() => resolve("not handled"));
+});
+
+test("platform: where Trace is known not to be beside its app, nothing is installed at all", async () => {
+  for (const [name, options] of Object.entries({
+    "a browser without the app's channel (Chrome, Firefox)": { withoutNativeMessaging: true },
+    "a browser without it that looks like an iPhone": { withoutNativeMessaging: true, userAgent: IPHONE_UA },
+    "a browser without it that would answer ios": { withoutNativeMessaging: true, userAgent: MAC_UA, os: "ios" },
+    "Windows": { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36", os: "ios" },
+    "Android": { userAgent: "Mozilla/5.0 (Android 15; Mobile; rv:143.0) Gecko/143.0 Firefox/143.0", os: "ios" },
+    "a Mac that cannot be asked what it is": { userAgent: MAC_UA },
+    "no user agent": { userAgent: "", os: "ios" },
+  })) {
+    const h = createHarness({ install: true, tabs: [...STORY_TABS, ...OTHER_TABS], ...options });
+    assert.equal(h.controller, null, name);
+    assert.deepEqual([h.listeners.length, h.added.length, h.removed.length], [0, 0, 0], name);
+    assert.equal(await deliverTo(h)(ask("access"), pageSender()), "not handled", name);
+    assert.deepEqual([h.calls, h.sent, h.platformAsked], [[], [], []], name);
+  }
+});
+
+test("platform: Safari on a Mac registers at once, then does nothing", async () => {
+  for (const os of ["mac", "unreadable", "linux", "IOS", ""]) {
+    const h = createHarness({ install: true, userAgent: MAC_UA, os, granted: ["*://*/*"], tabs: [...STORY_TABS, ...OTHER_TABS] });
+    assert.deepEqual([h.listeners.length, h.added.length, h.removed.length], [1, 1, 1], "registered in the first turn");
+    for (const [message, sender] of [
+      [ask("access"), pageSender()],
+      [ask("story-tabs"), pageSender()],
+      [ask("switch-to-tab", { tabId: 11 }), pageSender()],
+      [ask("story-tabs"), popupSender],
+      [ask("access"), at(`${AO3}/works/1`)],
+    ]) {
+      assert.deepEqual(await deliverTo(h)(message, sender), { ok: false, error: "unavailable" }, `${os}: ${message.request}`);
+    }
+    assert.equal(await deliverTo(h)({ type: "TRACE_ARCHIVE_SEEN" }, pageSender()), "not handled");
+    h.added[0]();
+    h.removed[0]();
+    await settled();
+    assert.deepEqual(h.calls, [], `${os}: access was not read and no tab was looked at`);
+    assert.deepEqual(h.sent, [], `${os}: and nothing was pushed`);
+    assert.equal(h.platformAsked.length, 1, "the platform is asked once");
+  }
+});
+
+test("platform: an iPad that calls itself a Mac is served, and an early event is not lost", async () => {
+  let answerPlatform;
+  const platformAnswer = new Promise((resolve) => { answerPlatform = resolve; });
+  const h = createHarness({
+    install: true, userAgent: MAC_UA, os: "ios", platformAnswer,
+    granted: [`${WEB}/*`], tabs: [...STORY_TABS, ...OTHER_TABS],
+  });
+  assert.deepEqual([h.listeners.length, h.added.length, h.removed.length], [1, 1, 1], "registered before the platform is known");
+
+  // A request and a permission change arrive before Safari has said what this is.
+  const early = deliverTo(h)(ask("access"), pageSender());
+  h.setGranted([...STORY_SITE_ORIGINS, `${WEB}/*`]);
+  h.added[0]();
+  await settled();
+  assert.deepEqual([h.calls, h.sent], [[], []], "nothing is done until it is known");
+
+  answerPlatform({ os: "ios" });
+  assert.deepEqual(await early, { ok: true, result: { storySitesAllowed: true, scope: "story-sites" } });
+  await settled();
+  assert.deepEqual(h.sent.map(({ tabId, message }) => [tabId, message.scope]), [[1, "story-sites"], [31, "story-sites"]]);
+  assert.equal((await deliverTo(h)(ask("story-tabs"), pageSender())).result.tabs.length, 3);
+  assert.equal(h.platformAsked.length, 1);
+
+  // An iPhone, and an iPad that says so, are served without asking.
+  for (const userAgent of [IPHONE_UA, IPHONE_UA.replace("iPhone;", "iPad;")]) {
+    const named = createHarness({ install: true, userAgent, os: "mac", tabs: [...STORY_TABS] });
+    assert.equal((await deliverTo(named)(ask("access"), pageSender())).ok, true);
+    assert.deepEqual(named.platformAsked, []);
+  }
 });
 
 // ---- which addresses count as a story page ----

@@ -202,20 +202,19 @@ try {
   extension.storage.onChanged?.addListener((changes, area) => {
     if (area === "local" && "prefAutoTrackEnabled" in changes) void session?.publishTrackingPreference();
   });
-  if (__TRACE_SESSION_MODE__ === "kernel") {
+  if (__TRACE_SESSION_MODE__ === "kernel" && __TRACE_IOS_EARNED_PERMISSION_CONFIG__ !== null) {
     // Trace's own setup page, and the popup over it, ask about story-site
-    // access and open story tabs. Its listeners are added in this same first
-    // turn, so a permission change that wakes the background still reaches
-    // an open page.
+    // access and open story tabs. Only the build that ships beside the Trace
+    // app carries this; it decides for itself that it is on iPhone or iPad.
+    // Its listeners are added in this same first turn, so a permission change
+    // that wakes the background still reaches an open page.
     installSetupPageRuntime({
       runtime: extension.runtime,
       tabs: extension.tabs,
       ...(extension.permissions === undefined ? {} : { permissions: extension.permissions }),
       mode: storageMode,
       webOrigin: __TRACE_WEB_ORIGIN__,
-      ...(__TRACE_IOS_EARNED_PERMISSION_CONFIG__ === null
-        ? {}
-        : { storyOrigins: __TRACE_IOS_EARNED_PERMISSION_CONFIG__.origins }),
+      storyOrigins: __TRACE_IOS_EARNED_PERMISSION_CONFIG__.origins,
     });
   }
 } catch {
