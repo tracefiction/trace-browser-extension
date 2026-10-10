@@ -235,6 +235,35 @@ test("iOS credential acquisition retries one transient provider read but not exp
   assert.equal(nativeReads, 5);
 });
 
+test("a native reply that says nothing is an unreadable account, never a missing one", async () => {
+  // Safari can hand back nothing at all while the app's handler is starting.
+  // Only an explicit "missing_token" means the app holds no account.
+  for (const silent of [undefined, null, "busy", 0, []]) {
+    const provider = new ExplicitCredentialProvider({
+      runtime: {
+        async getPlatformInfo() {
+          return { os: "ios" };
+        },
+        async sendNativeMessage() {
+          return silent;
+        },
+      },
+      tabs: {
+        async query() {
+          assert.fail("iOS credentials must not come from a browser tab");
+        },
+        async sendMessage() {
+          assert.fail("iOS credentials must not come from a browser tab");
+        },
+      },
+      mode: "promise",
+      webOrigin: "https://www.tracefiction.com",
+      randomId: () => "credential-id",
+    });
+    assert.deepEqual(await provider.acquire("connect"), { kind: "unavailable" }, JSON.stringify(silent));
+  }
+});
+
 test("iOS credential retry is cancelled before a second native read", async () => {
   let nativeReads = 0;
   const provider = new ExplicitCredentialProvider({
@@ -1376,6 +1405,14 @@ test("the iOS popup snapshot reports an unreadable app account as unavailable, n
   const response = await controller.handle({ type: "TRACE_SESSION_GET_SNAPSHOT" }, popupSender);
   assert.equal(response.action?.kind, "unavailable");
   // The popup must be able to tell this from "the app has no account".
+  assert.equal(response.snapshot.state, "signed_out");
+  assert.equal(response.snapshot.reason, "provider_unavailable");
+});
+
+test("the iOS popup snapshot does not read a silent app as having no account", async () => {
+  const { controller } = iosPopupSnapshotController([undefined, undefined]);
+  await controller.start();
+  const response = await controller.handle({ type: "TRACE_SESSION_GET_SNAPSHOT" }, popupSender);
   assert.equal(response.snapshot.state, "signed_out");
   assert.equal(response.snapshot.reason, "provider_unavailable");
 });

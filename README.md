@@ -406,12 +406,21 @@ granted origin patterns, stored in the app/extension shared container. It
 contains no URLs, story or account data, is never sent to a server, and adds
 no permission.
 
-The reading is built to avoid a false alarm. Missing access is reported only
-when `permissions.contains` says so twice, two seconds apart,
+The reading is built to avoid a false alarm. It exists to catch access that
+ended, so an install that has never held the full grant sends nothing: not at
+first start, and not part-way through setup. After that, missing access is
+reported only when `permissions.contains` says so twice, two seconds apart,
 and `permissions.getAll` also answered; when Safari confirms the five required
 origins they are listed by name, since a broader grant need not spell them
-out. If Safari does not answer, nothing is sent. Chrome, Firefox and Safari on
-Mac send nothing.
+out. If Safari does not answer, nothing is sent.
+
+It is also quiet. A reading equal to the last one delivered is not sent again
+within five minutes, and a delivery the app did not take is left alone for
+one minute, then five, thirty, two hours and six hours. To do this the
+extension keeps, in its own storage, when a reading was last delivered,
+whether the grant has ever been seen, a hash of the last reading (not the
+origins themselves) and the delivery back-off. Chrome, Firefox and Safari on Mac install none of
+this: no listener, no alarm, no reading.
 
 ## Aggregate release and browser diagnostics
 

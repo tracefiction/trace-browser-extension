@@ -27,7 +27,7 @@ its notes go with each app release.
 
 ### iPhone and iPad
 
-- **The popup checks the Trace app before asking you to sign in.** While it reads your account from the app it says **Connecting to your account…**. It asks you to create an account or sign in only when the app has none. If it still can't connect after a few seconds it says so, with **Open Trace** and **Try again**.
+- **The popup checks the Trace app before asking you to sign in.** While it reads your account from the app it says **Connecting to your account…**. It asks you to create an account or sign in only when the app has none. If it still can't connect after about ten seconds it says so, with **Open Trace** and **Try again**. Whichever of these it is showing, it carries on by itself as soon as your account connects.
 - **A story that's slow to save says what to do.** **Still confirming your story** now reads **Keep reading; it’ll appear in Trace. If it hasn’t after a minute, reload this page.**
 - **Open any story.** On a page with no story open, including a site's home page, the popup reads **Open any story. Trace saves it when it opens.** and no longer points at titles that may not be there. It also stays on that message instead of changing to **Still confirming your story** after a while.
 - **A first save is confirmed on FanFiction.net too.** When the popup that finishes setup finds your story already saved, it shows **Saved to your Library** with the story, on AO3 and FanFiction.net alike, instead of opening on the everyday view.

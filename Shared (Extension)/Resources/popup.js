@@ -1695,10 +1695,15 @@ function lookUpSavedTitle(story, work, alreadyInLibrary, attempt = 0) {
   lookup.timer = setTimeout(() => {
     void readActiveStoryIdentity().then((identity) => {
       if (savedTitleLookup !== lookup || document.body.dataset.tracePopupStateCode !== "P2") return;
-      if (identity?.title) renderEarnedSaved(story, work, identity, alreadyInLibrary);
+      // A blank title is no title: it counts against the same few tries.
+      if (storyTitle(identity)) renderEarnedSaved(story, work, identity, alreadyInLibrary);
       else lookUpSavedTitle(story, work, alreadyInLibrary, attempt + 1);
     });
   }, delay);
+}
+
+function storyTitle(identity) {
+  return typeof identity?.title === "string" ? identity.title.trim() : "";
 }
 
 function renderEarnedSaved(story, work, identity, alreadyInLibrary = false) {
@@ -1706,7 +1711,7 @@ function renderEarnedSaved(story, work, identity, alreadyInLibrary = false) {
   void deliverFirstStoryConfirmation();
   const line = recordLine(work?.entry);
   const confirmation = alreadyInLibrary ? "Already in your Library" : "Saved to your Library";
-  const title = typeof identity?.title === "string" ? identity.title.trim() : "";
+  const title = storyTitle(identity);
   const lead = "Your chapter fills in as you read. Your story is waiting in Trace whenever you open it.";
   if (title) {
     setEarnedCopy({
@@ -1869,6 +1874,12 @@ function renderEarnedLibraryFull(onUnsavedStory) {
 // the app has no account, the account is connected, or it could not be read
 // just now. Only the first of those may ask the reader to create an account.
 const APP_ACCOUNT_RETRY_DELAYS_MS = Object.freeze([1000, 2000, 4000]);
+// "No account" is read once more, quietly: a reader who has just signed up
+// can be a moment ahead of the app storing their account.
+const APP_ACCOUNT_RECHECK_MS = 1200;
+// However long each read takes, "Connecting…" gives way to an answer, and to
+// something the reader can tap, by this long after the wait began.
+const APP_ACCOUNT_WAIT_LIMIT_MS = 10000;
 
 /** What a session snapshot says about the account behind this extension. */
 function appAccountAnswer(snapshot) {
@@ -1886,91 +1897,180 @@ function appAccountAnswer(snapshot) {
   return state ? "other" : "unknown";
 }
 
-let appAccountCheck = null;
+// The one wait for the account this popup has, from the first question
+// until an account connects. It outlives its timers: a view that has settled
+// on "no account" or "couldn't connect" still moves on when one connects.
+let accountWait = null;
 
-function stopAppAccountCheck() {
-  if (appAccountCheck?.timer) clearTimeout(appAccountCheck.timer);
-  appAccountCheck = null;
+function accountWaitSettled(wait) {
+  return wait.view === "none" || wait.view === "unreachable" || wait.view === "other_account";
+}
+
+function clearAccountWaitTimers(wait) {
+  if (wait.timer !== null) clearTimeout(wait.timer);
+  if (wait.limit !== null) clearTimeout(wait.limit);
+  wait.timer = null;
+  wait.limit = null;
+}
+
+function endAccountWait() {
+  if (accountWait) clearAccountWaitTimers(accountWait);
+  accountWait = null;
+}
+
+function showAccountWaitView(wait, view) {
+  wait.view = view;
+  if (wait.generalView && !showAppLinkView()) return;
+  if (view === "connecting") renderEarnedConnectingAccount();
+  else if (view === "none") renderEarnedConnectAccount(wait.story);
+  else if (view === "other_account") renderEarnedOtherAccount();
+  else renderEarnedAccountUnreachable(wait.story);
+}
+
+/** A definite answer, or the end of the wait: nothing more is scheduled. */
+function settleAccountWait(wait, view) {
+  clearAccountWaitTimers(wait);
+  showAccountWaitView(wait, view);
+}
+
+function armAccountWaitLimit(wait) {
+  if (wait.limit !== null) clearTimeout(wait.limit);
+  wait.limit = setTimeout(() => {
+    wait.limit = null;
+    if (accountWait !== wait) return;
+    // A read still in flight is left to finish; its answer is still taken.
+    if (!accountWaitSettled(wait)) settleAccountWait(wait, "unreachable");
+  }, APP_ACCOUNT_WAIT_LIMIT_MS);
 }
 
 /**
- * Asks for the app's account, and asks again after each delay while the
- * answer is still unknown. The wait is bounded: after the last delay the
- * reader is told Trace couldn't connect. `onConnected` runs once the account
- * is there.
+ * Starts this popup's wait for the app's account, or joins the one under
+ * way. While the answer is unknown it shows "Connecting…" and asks again
+ * after each delay; the whole wait is capped in time. `connected` runs once
+ * an account is there, however late. `firstReply` is a snapshot reply the
+ * caller already has, so it is not asked for twice.
  */
-function checkAppAccount(story, onConnected) {
-  stopAppAccountCheck();
-  const check = { story, onConnected, attempt: 0, timer: null, asking: false };
-  appAccountCheck = check;
-  askForAppAccount(check);
+function waitForAppAccount(story, { connected, other = null, generalView = false, settled = null }, firstReply) {
+  // The wait under way already knows how to carry on; a joiner changes nothing.
+  if (accountWait) return;
+  const wait = {
+    story, connected, other, generalView,
+    attempt: 0, timer: null, limit: null, asking: false, recheckedNone: false, view: null,
+  };
+  accountWait = wait;
+  if (settled) {
+    settleAccountWait(wait, settled);
+    return;
+  }
+  armAccountWaitLimit(wait);
+  if (firstReply !== undefined) takeAccountAnswer(wait, firstReply);
+  else askForAppAccount(wait);
 }
 
-function askForAppAccount(check) {
-  if (appAccountCheck !== check || check.asking) return;
-  if (check.timer) clearTimeout(check.timer);
-  check.timer = null;
-  check.asking = true;
+function askForAppAccount(wait) {
+  if (accountWait !== wait || wait.asking) return;
+  if (wait.timer !== null) clearTimeout(wait.timer);
+  wait.timer = null;
+  wait.asking = true;
   sendKernelRuntimeMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" }, (response) => {
-    if (appAccountCheck !== check) return;
-    check.asking = false;
-    const answer = appAccountAnswer(response?.snapshot);
-    if (answer === "unknown" || answer === "pending") {
-      const delay = APP_ACCOUNT_RETRY_DELAYS_MS[check.attempt];
-      if (delay !== undefined) {
-        check.attempt += 1;
-        renderEarnedConnectingAccount();
-        check.timer = setTimeout(() => askForAppAccount(check), delay);
-        return;
-      }
-    }
-    appAccountCheck = null;
-    if (answer === "connected") check.onConnected();
-    else if (answer === "none") renderEarnedConnectAccount(check.story);
-    else if (answer === "other_account") renderEarnedOtherAccount();
-    else renderEarnedAccountUnreachable(check.story);
+    if (accountWait !== wait) return;
+    wait.asking = false;
+    takeAccountAnswer(wait, response);
   });
 }
 
-let lastAccountNeed = null;
-// A popup resolves the account for its story a couple of times at most. If
-// the story still reports no account after that, it says so and stops.
+function takeAccountAnswer(wait, response) {
+  const answer = appAccountAnswer(response?.snapshot);
+  if (answer === "connected") {
+    endAccountWait();
+    wait.connected(response);
+    return;
+  }
+  if (answer === "other" && wait.other) {
+    endAccountWait();
+    wait.other(response);
+    return;
+  }
+  if (answer === "unknown" || answer === "pending") {
+    // Not an answer. A view that already says something definite keeps it,
+    // which includes "couldn't connect" once the wait has run out of time.
+    if (accountWaitSettled(wait)) return;
+    const delay = APP_ACCOUNT_RETRY_DELAYS_MS[wait.attempt];
+    if (delay === undefined) {
+      settleAccountWait(wait, "unreachable");
+      return;
+    }
+    wait.attempt += 1;
+    showAccountWaitView(wait, "connecting");
+    wait.timer = setTimeout(() => askForAppAccount(wait), delay);
+    return;
+  }
+  if (answer === "none") {
+    settleAccountWait(wait, "none");
+    if (!wait.recheckedNone) {
+      wait.recheckedNone = true;
+      wait.timer = setTimeout(() => askForAppAccount(wait), APP_ACCOUNT_RECHECK_MS);
+    }
+    return;
+  }
+  settleAccountWait(wait, answer === "other_account" ? "other_account" : "unreachable");
+}
+
+/**
+ * The background published that an account connected. Whatever the wait is
+ * showing, ask now; this is an event, not a poll.
+ */
+function accountMayHaveConnected() {
+  if (accountWait) askForAppAccount(accountWait);
+}
+
+// A wait that ends connected can be followed by the story still reporting
+// no account. A popup starts over a couple of times at most, then says so.
 const ACCOUNT_RESOLUTION_LIMIT = 2;
 let accountResolutions = 0;
 
 /**
  * A story is waiting on an account that is not connected. Find out what is
- * known before saying anything about signing in.
+ * known before saying anything about signing in. Called again while a wait
+ * is under way, it joins that wait and spends nothing.
  */
 function resolveAccountForStory(story, onConnected) {
   stopStoryConfirmation();
-  lastAccountNeed = { story, onConnected };
+  if (accountWait) return;
+  const general = kernelPopupInitialized;
+  const handlers = general
+    ? { connected: kernelAccountConnected, other: kernelAccountOther, generalView: true }
+    : { connected: onConnected };
   accountResolutions += 1;
   if (accountResolutions > ACCOUNT_RESOLUTION_LIMIT) {
-    stopAppAccountCheck();
-    if (kernelPopupInitialized) showAppLinkView();
-    renderEarnedAccountUnreachable(story);
+    waitForAppAccount(story, { ...handlers, settled: "unreachable" });
     return;
   }
-  if (kernelPopupInitialized) {
+  if (general) {
     // The general view already follows the session; let it ask.
     kernelSnapshotProviderAttempt = 0;
     requestKernelSnapshot();
     return;
   }
-  checkAppAccount(story, onConnected);
+  waitForAppAccount(story, handlers);
 }
 
-/** "Try again" on the couldn't-connect state: one more bounded check. */
+/** "Try again" on the couldn't-connect state: one more bounded wait. */
 function retryAppAccount() {
   accountResolutions = 0;
-  renderEarnedConnectingAccount();
-  if (kernelPopupInitialized || !lastAccountNeed) {
+  const wait = accountWait;
+  if (!wait) {
+    renderEarnedConnectingAccount();
     kernelSnapshotProviderAttempt = 0;
     requestKernelSnapshot();
     return;
   }
-  checkAppAccount(lastAccountNeed.story, lastAccountNeed.onConnected);
+  clearAccountWaitTimers(wait);
+  wait.attempt = 0;
+  wait.recheckedNone = false;
+  showAccountWaitView(wait, "connecting");
+  armAccountWaitLimit(wait);
+  askForAppAccount(wait);
 }
 
 let storyConfirmation = null;
@@ -2115,6 +2215,7 @@ async function prepareEarnedPermissionFlow() {
   if (onboarding.completedAt && story.ok && !hasGrant) {
     earnedPreparedContext = Object.freeze({ story, hasGrant: false });
     stopStoryConfirmation();
+    endAccountWait();
     renderEarnedPermissionInvitation(story, false, earnedGrantCoverage(grantedOrigins), true);
     return;
   }
@@ -2135,6 +2236,10 @@ async function prepareEarnedPermissionFlow() {
       if (story.ok && story.kind === "story") earnedSetupFinishedOnStory = true;
     }
     if (earnedAwaitingStory) {
+      // The page reports in several times per load. While this popup is
+      // waiting on the account, that wait owns the screen and resumes the
+      // story itself; starting the watch again would only ask it twice.
+      if (accountWait) return;
       if (!storyConfirmation) {
         watchForConfirmedStory(earnedAwaitingStory, earnedStoryRender(earnedAwaitingStory));
       } else {
@@ -2267,9 +2372,10 @@ async function initializeEarnedPermissionFlow() {
       void checkConfirmedStory();
     }
     // The background publishes this when an account connects. A popup that is
-    // waiting on the account asks again now instead of at its next delay.
+    // waiting on the account, or has settled on "no account" or "couldn't
+    // connect", asks again now and moves on by itself.
     if (changes[ACCOUNT_PROJECTION_REVISION_KEY]) {
-      if (appAccountCheck?.timer) askForAppAccount(appAccountCheck);
+      if (accountWait) accountMayHaveConnected();
       else if (kernelSnapshotTimer !== null && kernelSnapshotProviderAttempt > 0) requestKernelSnapshot();
     }
     if (!changes[ARCHIVE_READINESS_KEY]) return;
@@ -2759,6 +2865,18 @@ function requestKernelSnapshotAfter(delayMs) {
   }, delayMs);
 }
 
+/** The account wait ended in the general view: carry on from its reply. */
+function kernelAccountConnected(response) {
+  kernelSnapshotProviderAttempt = 0;
+  renderKernelSnapshot(response?.snapshot);
+  requestKernelPopupState();
+}
+
+function kernelAccountOther(response) {
+  kernelSnapshotProviderAttempt = 0;
+  renderKernelSnapshot(response?.snapshot);
+}
+
 function requestKernelSnapshot() {
   if (kernelSnapshotTimer !== null) clearTimeout(kernelSnapshotTimer);
   kernelSnapshotTimer = null;
@@ -2781,15 +2899,21 @@ function requestKernelSnapshot() {
     // say only that Trace is connecting and ask again a few times, further
     // apart each time. Signed out is shown only once the app says so.
     const accountRead = isLikelyIosExtensionUi || response?.action !== undefined;
-    if (accountRead && !SESSION_DISABLED && appAccountAnswer(response?.snapshot) === "unknown") {
+    const answer = accountRead && !SESSION_DISABLED ? appAccountAnswer(response?.snapshot) : "other";
+    if (EARNED_PERMISSION_ONBOARDING && isLikelyIosExtensionUi &&
+        ["unknown", "none", "refused", "other_account"].includes(answer)) {
+      // The same wait the setup flow uses, started from this reply.
+      const story = { kind: earnedCurrentPage?.kind === "story" ? "story" : "archive" };
+      waitForAppAccount(story,
+        { connected: kernelAccountConnected, other: kernelAccountOther, generalView: true }, response);
+      return;
+    }
+    if (answer === "unknown") {
+      // A build without the one-step account view keeps its own copy.
       const retryDelay = APP_ACCOUNT_RETRY_DELAYS_MS[kernelSnapshotProviderAttempt];
       if (retryDelay !== undefined) {
         kernelSnapshotProviderAttempt += 1;
-        if (EARNED_PERMISSION_ONBOARDING && isLikelyIosExtensionUi && showAppLinkView()) {
-          renderEarnedConnectingAccount();
-        } else {
-          renderKernelSnapshot({ state: "initializing", reason: "none" });
-        }
+        renderKernelSnapshot({ state: "initializing", reason: "none" });
         requestKernelSnapshotAfter(retryDelay);
         return;
       }

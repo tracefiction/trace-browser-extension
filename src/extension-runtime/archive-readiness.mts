@@ -1,5 +1,7 @@
 import {
   ArchiveReadinessService,
+  type ArchiveAccessLedger,
+  type ArchiveAccessLedgerPort,
   type ArchiveAccessReportResult,
   type ArchiveReadinessClock,
   type ArchiveRunResult,
@@ -28,6 +30,11 @@ export const ARCHIVE_READINESS_MESSAGE_TYPES = Object.freeze({
 
 /** When the last access reading reached the Trace app (epoch milliseconds). */
 export const ARCHIVE_ACCESS_REPORTED_AT_KEY = "traceArchiveAccessReportedAtV1";
+/**
+ * The rest of the access ledger: whether the grant has ever been seen, a
+ * fingerprint of the reading last delivered, and the delivery back-off.
+ */
+export const ARCHIVE_ACCESS_STATE_KEY = "traceArchiveAccessStateV1";
 export const ARCHIVE_ACCESS_REPORT_PERIOD_MINUTES = 24 * 60;
 /** A background that starts this long after the last reading takes another. */
 export const ARCHIVE_ACCESS_REPORT_STALE_MS = 20 * 60 * 60 * 1_000;
@@ -42,15 +49,63 @@ interface ArchiveReadinessEnvironment {
   /** The origins automatic saving needs. Access readings need them. */
   readonly requiredOrigins?: readonly string[];
   readonly accessConfirmWait?: (ms: number) => Promise<void>;
+  readonly accessLedger?: ArchiveAccessLedgerPort;
 }
 
 interface ArchiveAccessReportEnvironment {
   readonly runtime: RuntimePort;
   readonly permissions?: PermissionsPort;
   readonly alarms?: AlarmsPort;
-  readonly storage: BrowserStorage;
+  readonly accessLedger: ArchiveAccessLedgerPort;
   readonly storageMode: "callback" | "promise";
   readonly clock?: ArchiveReadinessClock;
+  /** Defaults to this context's `navigator`. */
+  readonly platform?: { readonly userAgent?: string };
+}
+
+/** The access ledger in extension storage. It holds no origins and no account. */
+export class BrowserArchiveAccessLedger implements ArchiveAccessLedgerPort {
+  readonly #storage: BrowserStorage;
+
+  constructor(storage: BrowserStorage) {
+    this.#storage = storage;
+  }
+
+  async read(): Promise<ArchiveAccessLedger> {
+    const stored = await this.#storage.get([
+      ARCHIVE_ACCESS_REPORTED_AT_KEY,
+      ARCHIVE_ACCESS_STATE_KEY,
+    ]);
+    const deliveredAt = stored[ARCHIVE_ACCESS_REPORTED_AT_KEY];
+    const state = isRecord(stored[ARCHIVE_ACCESS_STATE_KEY])
+      ? stored[ARCHIVE_ACCESS_STATE_KEY]
+      : {};
+    const time = (value: unknown): value is number =>
+      typeof value === "number" && Number.isFinite(value) && value > 0;
+    return Object.freeze({
+      grantSeen: state.grantSeen === true,
+      ...(time(deliveredAt) ? { deliveredAt } : {}),
+      ...(typeof state.delivered === "string" ? { delivered: state.delivered.slice(0, 64) } : {}),
+      ...(Number.isInteger(state.failures) && (state.failures as number) > 0
+        ? { failures: state.failures as number }
+        : {}),
+      ...(time(state.retryAt) ? { retryAt: state.retryAt } : {}),
+    });
+  }
+
+  async write(ledger: ArchiveAccessLedger): Promise<void> {
+    await this.#storage.set({
+      ...(ledger.deliveredAt === undefined
+        ? {}
+        : { [ARCHIVE_ACCESS_REPORTED_AT_KEY]: ledger.deliveredAt }),
+      [ARCHIVE_ACCESS_STATE_KEY]: {
+        grantSeen: ledger.grantSeen,
+        ...(ledger.delivered === undefined ? {} : { delivered: ledger.delivered }),
+        ...(ledger.failures === undefined ? {} : { failures: ledger.failures }),
+        ...(ledger.retryAt === undefined ? {} : { retryAt: ledger.retryAt }),
+      },
+    });
+  }
 }
 
 interface ArchiveReadinessResponse {
@@ -93,6 +148,9 @@ export class ArchiveReadinessRuntimeController {
       ...(environment.accessConfirmWait === undefined
         ? {}
         : { wait: environment.accessConfirmWait }),
+      ...(environment.accessLedger === undefined
+        ? {}
+        : { accessLedger: environment.accessLedger }),
     });
   }
 
@@ -150,25 +208,28 @@ export function installArchiveReadinessRuntime(
   return controller;
 }
 
-async function runsInsideTraceApp(
+/**
+ * Whether this background runs beside the Trace app on iPhone or iPad:
+ * `true` or `false` when the user agent settles it, otherwise a promise,
+ * because an iPad can present itself as a Mac.
+ */
+function runsBesideTraceApp(
   runtime: RuntimePort,
   mode: "callback" | "promise",
-): Promise<boolean> {
+  userAgent: string,
+): boolean | Promise<boolean> {
   if (typeof runtime.sendNativeMessage !== "function") return false;
-  if (/iPhone|iPad|iPod/i.test(globalThis.navigator?.userAgent ?? "")) return true;
-  if (typeof runtime.getPlatformInfo !== "function") return false;
-  try {
-    const info = await extensionCall<{ readonly os?: string }>(
-      runtime as unknown as Record<string, (...args: unknown[]) => unknown>,
-      "getPlatformInfo",
-      [],
-      runtime,
-      mode,
-    );
-    return info?.os === "ios";
-  } catch {
+  if (/iPhone|iPad|iPod/i.test(userAgent)) return true;
+  if (!/Macintosh/i.test(userAgent) || typeof runtime.getPlatformInfo !== "function") {
     return false;
   }
+  return extensionCall<{ readonly os?: string }>(
+    runtime as unknown as Record<string, (...args: unknown[]) => unknown>,
+    "getPlatformInfo",
+    [],
+    runtime,
+    mode,
+  ).then((info) => info?.os === "ios", () => false);
 }
 
 /**
@@ -178,91 +239,97 @@ async function runsInsideTraceApp(
  * access ends it cannot tell a reader whose one-day grant ran out from one
  * who simply has not opened a story.
  *
- * iPhone and iPad only. It adds no permission and sends nothing to a server.
+ * iPhone and iPad only: anywhere else nothing is installed, not a listener
+ * and not the alarm. It adds no permission and sends nothing to a server.
  */
 export function installArchiveAccessReport(
   controller: ArchiveReadinessRuntimeController,
   environment: ArchiveAccessReportEnvironment,
 ): { report(): Promise<ArchiveAccessReportResult> } {
-  const { alarms, permissions, runtime, storage, storageMode } = environment;
+  const { accessLedger, alarms, permissions, runtime, storageMode } = environment;
   const now = (): number => environment.clock?.now() ?? Date.now();
-  let supported: Promise<boolean> | null = null;
-  const report = async (): Promise<ArchiveAccessReportResult> => {
-    supported ??= runsInsideTraceApp(runtime, storageMode);
-    if (!(await supported)) return { kind: "unknown" };
-    const result = await controller.reportAccess();
-    if (result.kind === "published") {
-      await storage
-        .set({ [ARCHIVE_ACCESS_REPORTED_AT_KEY]: now() })
-        .catch(() => undefined);
-    }
-    return result;
-  };
+  let installed = false;
+  const report = async (): Promise<ArchiveAccessReportResult> =>
+    installed ? controller.reportAccess() : { kind: "unknown" };
   const reportQuietly = (): void => {
     void report().catch(() => undefined);
   };
 
-  runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (
-      !isRecord(message) ||
-      message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport
-    ) {
-      return false;
-    }
-    if (Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
-      sendResponse({ ok: false });
-      return false;
-    }
-    // Keep the background alive until the reading has been delivered.
-    void report().then(
-      (result) => sendResponse({ ok: true, report: result.kind }),
-      () => sendResponse({ ok: true, report: "unavailable" }),
-    );
-    return true;
-  });
-  permissions?.onAdded?.addListener(reportQuietly);
-  permissions?.onRemoved?.addListener(reportQuietly);
-  alarms?.onAlarm?.addListener((alarm) => {
-    if (alarm?.name === ARCHIVE_ACCESS_REPORT_ALARM) reportQuietly();
-  });
-  try {
-    // An existing alarm keeps its schedule; creating it again would push the
-    // next reading a full day past every background start.
-    const existing = typeof alarms?.get === "function"
-      ? extensionCall<unknown>(
-          alarms as unknown as Record<string, (...args: unknown[]) => unknown>,
-          "get",
-          [ARCHIVE_ACCESS_REPORT_ALARM],
-          runtime,
-          storageMode,
-        ).catch(() => undefined)
-      : Promise.resolve(undefined);
-    void existing.then((alarm) => {
-      if (isRecord(alarm)) return;
-      const created = alarms?.create?.(ARCHIVE_ACCESS_REPORT_ALARM, {
-        periodInMinutes: ARCHIVE_ACCESS_REPORT_PERIOD_MINUTES,
-      });
-      if (created && typeof (created as PromiseLike<unknown>).then === "function") {
-        void Promise.resolve(created).catch(() => undefined);
+  const install = (): void => {
+    installed = true;
+    runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (
+        !isRecord(message) ||
+        message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport
+      ) {
+        return false;
       }
-    }).catch(() => {
-      void runtime.lastError;
+      if (Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
+        sendResponse({ ok: false });
+        return false;
+      }
+      // Keep the background alive until the reading has been delivered.
+      void report().then(
+        (result) => sendResponse({ ok: true, report: result.kind }),
+        () => sendResponse({ ok: true, report: "unavailable" }),
+      );
+      return true;
     });
-  } catch {
-    void runtime.lastError;
-  }
-  // Safari may not wake a sleeping background for an alarm. Whatever starts
-  // it next takes the overdue reading.
-  void storage.get(ARCHIVE_ACCESS_REPORTED_AT_KEY).then((stored) => {
-    const reportedAt = stored[ARCHIVE_ACCESS_REPORTED_AT_KEY];
-    if (
-      typeof reportedAt === "number" &&
-      reportedAt <= now() &&
-      now() - reportedAt < ARCHIVE_ACCESS_REPORT_STALE_MS
-    ) {
-      return;
+    permissions?.onAdded?.addListener(reportQuietly);
+    permissions?.onRemoved?.addListener(reportQuietly);
+    alarms?.onAlarm?.addListener((alarm) => {
+      if (alarm?.name === ARCHIVE_ACCESS_REPORT_ALARM) reportQuietly();
+    });
+    try {
+      // An existing alarm keeps its schedule; creating it again would push the
+      // next reading a full day past every background start.
+      const existing = typeof alarms?.get === "function"
+        ? extensionCall<unknown>(
+            alarms as unknown as Record<string, (...args: unknown[]) => unknown>,
+            "get",
+            [ARCHIVE_ACCESS_REPORT_ALARM],
+            runtime,
+            storageMode,
+          ).catch(() => undefined)
+        : Promise.resolve(undefined);
+      void existing.then((alarm) => {
+        if (isRecord(alarm)) return;
+        const created = alarms?.create?.(ARCHIVE_ACCESS_REPORT_ALARM, {
+          periodInMinutes: ARCHIVE_ACCESS_REPORT_PERIOD_MINUTES,
+        });
+        if (created && typeof (created as PromiseLike<unknown>).then === "function") {
+          void Promise.resolve(created).catch(() => undefined);
+        }
+      }).catch(() => {
+        void runtime.lastError;
+      });
+    } catch {
+      void runtime.lastError;
     }
-    reportQuietly();
-  }).catch(() => undefined);
+    // Safari may not wake a sleeping background for an alarm. Whatever starts
+    // it next takes the overdue reading.
+    void accessLedger.read().then((ledger) => {
+      const deliveredAt = ledger.deliveredAt;
+      if (
+        typeof deliveredAt === "number" &&
+        deliveredAt <= now() &&
+        now() - deliveredAt < ARCHIVE_ACCESS_REPORT_STALE_MS
+      ) {
+        return;
+      }
+      reportQuietly();
+    }).catch(() => undefined);
+  };
+
+  const beside = runsBesideTraceApp(
+    runtime,
+    storageMode,
+    environment.platform?.userAgent ?? globalThis.navigator?.userAgent ?? "",
+  );
+  // An iPhone is known at once, so its listeners exist before any event that
+  // woke the background is delivered. An iPad that calls itself a Mac is
+  // known a moment later; a Mac never installs anything.
+  if (beside === true) install();
+  else if (beside !== false) void beside.then((yes) => { if (yes) install(); });
   return { report };
 }

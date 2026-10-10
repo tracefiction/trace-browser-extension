@@ -700,7 +700,23 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   // src/extension-core/archive-readiness.mts
   var ARCHIVE_RUN_THROTTLE_MS = 5 * 60 * 1e3;
   var ARCHIVE_ACCESS_CONFIRM_DELAY_MS = 2e3;
+  var ARCHIVE_ACCESS_REPEAT_AFTER_MS = 5 * 60 * 1e3;
+  var ARCHIVE_ACCESS_RETRY_DELAYS_MS = Object.freeze([
+    6e4,
+    5 * 6e4,
+    30 * 6e4,
+    2 * 60 * 6e4,
+    6 * 60 * 6e4
+  ]);
   var ARCHIVE_ACCESS_REPORT_MAX_PASSES = 3;
+  function accessFingerprint(complete, origins) {
+    let hash = 2166136261;
+    for (const character of [...origins].sort().join(" ")) {
+      hash ^= character.codePointAt(0);
+      hash = Math.imul(hash, 16777619) >>> 0;
+    }
+    return `${complete ? "complete" : "incomplete"}:${origins.length}:${hash.toString(16)}`;
+  }
   var SYSTEM_CLOCK = Object.freeze({
     now: () => Date.now()
   });
@@ -711,6 +727,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #lastRunAttemptByHost = /* @__PURE__ */ new Map();
     #requiredOrigins;
     #wait;
+    #ledger;
     #accessReport = null;
     #accessReportRequestedAgain = false;
     constructor(options) {
@@ -721,6 +738,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#wait = options.wait ?? ((ms) => new Promise((resolve) => {
         setTimeout(resolve, ms);
       }));
+      let remembered = Object.freeze({ grantSeen: false });
+      this.#ledger = options.accessLedger ?? {
+        read: async () => remembered,
+        write: async (ledger) => {
+          remembered = ledger;
+        }
+      };
     }
     async recordRun(input) {
       const at = this.#clock.now();
@@ -756,9 +780,15 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
      * because no page script runs to say so.
      *
      * It must not raise a false alarm. Access is reported missing only when
-     * two readings in a row say so, and only together with the list of what is
-     * granted. When the required origins are confirmed they are listed by
-     * name, since a broader grant need not spell them out.
+     * this install has held the grant before, two readings in a row say it is
+     * gone, and the list of what is granted came with them. An install that
+     * has never held the grant has nothing to lose, so it sends nothing. When
+     * the required origins are confirmed they are listed by name, since a
+     * broader grant need not spell them out.
+     *
+     * It is also quiet: a reading equal to the last one delivered is not sent
+     * again within a few minutes, and a failed delivery is left alone for
+     * longer after each failure in a row.
      */
     reportAccess() {
       if (this.#accessReport !== null) {
@@ -780,22 +810,58 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return report;
     }
     async #reportAccessOnce() {
+      const ledger = await this.#readLedger();
+      const startedAt = this.#clock.now();
+      const longestWait = ARCHIVE_ACCESS_RETRY_DELAYS_MS.at(-1);
+      if (typeof ledger.retryAt === "number" && startedAt < ledger.retryAt && // A clock that moved backwards must not silence readings for good.
+      ledger.retryAt - startedAt <= longestWait) {
+        return { kind: "deferred" };
+      }
       let reading = await this.#readAccess();
-      if (reading !== null && !reading.complete) {
+      if (reading === null) return { kind: "unknown" };
+      if (!reading.complete) {
+        if (!ledger.grantSeen) return { kind: "withheld" };
         await this.#wait(ARCHIVE_ACCESS_CONFIRM_DELAY_MS);
         reading = await this.#readAccess();
+        if (reading === null) return { kind: "unknown" };
       }
-      if (reading === null) return { kind: "unknown" };
+      const grantSeen = true;
+      const fingerprint = accessFingerprint(reading.complete, reading.grantedOrigins);
+      const now = this.#clock.now();
+      if (ledger.delivered === fingerprint && typeof ledger.deliveredAt === "number" && now >= ledger.deliveredAt && now - ledger.deliveredAt < ARCHIVE_ACCESS_REPEAT_AFTER_MS) {
+        if (!ledger.grantSeen) await this.#writeLedger({ ...ledger, grantSeen });
+        return { kind: "current" };
+      }
       let published = false;
       try {
         published = await this.#receipts.publishPermissionSnapshot(Object.freeze({
-          at: this.#clock.now(),
+          at: now,
           grantedOrigins: reading.grantedOrigins
         }));
       } catch {
         published = false;
       }
-      return published ? { kind: "published", complete: reading.complete } : { kind: "unavailable" };
+      if (published) {
+        await this.#writeLedger({ grantSeen, deliveredAt: now, delivered: fingerprint });
+        return { kind: "published", complete: reading.complete };
+      }
+      const failures = (ledger.failures ?? 0) + 1;
+      const retryAfter = ARCHIVE_ACCESS_RETRY_DELAYS_MS[Math.min(failures, ARCHIVE_ACCESS_RETRY_DELAYS_MS.length) - 1];
+      await this.#writeLedger({ ...ledger, grantSeen, failures, retryAt: now + retryAfter });
+      return { kind: "unavailable" };
+    }
+    async #readLedger() {
+      try {
+        return await this.#ledger.read();
+      } catch {
+        return { grantSeen: false };
+      }
+    }
+    async #writeLedger(ledger) {
+      try {
+        await this.#ledger.write(Object.freeze(ledger));
+      } catch {
+      }
     }
     async #readAccess() {
       const contains = this.#permissions.containsOrigins;
@@ -3224,7 +3290,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     ...LEGACY_ACCOUNT_KEYS,
     ...Object.values(SAVED_FILTER_LOCAL_KEYS),
     "traceArchiveReadiness",
-    "traceArchiveAccessReportedAtV1"
+    "traceArchiveAccessReportedAtV1",
+    "traceArchiveAccessStateV1"
   ]);
   var BrowserSessionStoragePort = class {
     #database;
@@ -7780,8 +7847,42 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     accessReport: "TRACE_ARCHIVE_ACCESS_REPORT"
   });
   var ARCHIVE_ACCESS_REPORTED_AT_KEY = "traceArchiveAccessReportedAtV1";
+  var ARCHIVE_ACCESS_STATE_KEY = "traceArchiveAccessStateV1";
   var ARCHIVE_ACCESS_REPORT_PERIOD_MINUTES = 24 * 60;
   var ARCHIVE_ACCESS_REPORT_STALE_MS = 20 * 60 * 60 * 1e3;
+  var BrowserArchiveAccessLedger = class {
+    #storage;
+    constructor(storage) {
+      this.#storage = storage;
+    }
+    async read() {
+      const stored = await this.#storage.get([
+        ARCHIVE_ACCESS_REPORTED_AT_KEY,
+        ARCHIVE_ACCESS_STATE_KEY
+      ]);
+      const deliveredAt = stored[ARCHIVE_ACCESS_REPORTED_AT_KEY];
+      const state = isRecord19(stored[ARCHIVE_ACCESS_STATE_KEY]) ? stored[ARCHIVE_ACCESS_STATE_KEY] : {};
+      const time = (value) => typeof value === "number" && Number.isFinite(value) && value > 0;
+      return Object.freeze({
+        grantSeen: state.grantSeen === true,
+        ...time(deliveredAt) ? { deliveredAt } : {},
+        ...typeof state.delivered === "string" ? { delivered: state.delivered.slice(0, 64) } : {},
+        ...Number.isInteger(state.failures) && state.failures > 0 ? { failures: state.failures } : {},
+        ...time(state.retryAt) ? { retryAt: state.retryAt } : {}
+      });
+    }
+    async write(ledger) {
+      await this.#storage.set({
+        ...ledger.deliveredAt === void 0 ? {} : { [ARCHIVE_ACCESS_REPORTED_AT_KEY]: ledger.deliveredAt },
+        [ARCHIVE_ACCESS_STATE_KEY]: {
+          grantSeen: ledger.grantSeen,
+          ...ledger.delivered === void 0 ? {} : { delivered: ledger.delivered },
+          ...ledger.failures === void 0 ? {} : { failures: ledger.failures },
+          ...ledger.retryAt === void 0 ? {} : { retryAt: ledger.retryAt }
+        }
+      });
+    }
+  };
   function isRecord19(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
@@ -7809,7 +7910,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         ),
         ...environment.clock === void 0 ? {} : { clock: environment.clock },
         ...environment.requiredOrigins === void 0 ? {} : { requiredOrigins: environment.requiredOrigins },
-        ...environment.accessConfirmWait === void 0 ? {} : { wait: environment.accessConfirmWait }
+        ...environment.accessConfirmWait === void 0 ? {} : { wait: environment.accessConfirmWait },
+        ...environment.accessLedger === void 0 ? {} : { accessLedger: environment.accessLedger }
       });
     }
     /** See `ArchiveReadinessService.reportAccess`. */
@@ -7849,87 +7951,88 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     });
     return controller;
   }
-  async function runsInsideTraceApp(runtime, mode) {
+  function runsBesideTraceApp(runtime, mode, userAgent) {
     if (typeof runtime.sendNativeMessage !== "function") return false;
-    if (/iPhone|iPad|iPod/i.test(globalThis.navigator?.userAgent ?? "")) return true;
-    if (typeof runtime.getPlatformInfo !== "function") return false;
-    try {
-      const info = await extensionCall(
-        runtime,
-        "getPlatformInfo",
-        [],
-        runtime,
-        mode
-      );
-      return info?.os === "ios";
-    } catch {
+    if (/iPhone|iPad|iPod/i.test(userAgent)) return true;
+    if (!/Macintosh/i.test(userAgent) || typeof runtime.getPlatformInfo !== "function") {
       return false;
     }
+    return extensionCall(
+      runtime,
+      "getPlatformInfo",
+      [],
+      runtime,
+      mode
+    ).then((info) => info?.os === "ios", () => false);
   }
   function installArchiveAccessReport(controller, environment) {
-    const { alarms, permissions, runtime, storage, storageMode } = environment;
+    const { accessLedger, alarms, permissions, runtime, storageMode } = environment;
     const now = () => environment.clock?.now() ?? Date.now();
-    let supported = null;
-    const report = async () => {
-      supported ??= runsInsideTraceApp(runtime, storageMode);
-      if (!await supported) return { kind: "unknown" };
-      const result = await controller.reportAccess();
-      if (result.kind === "published") {
-        await storage.set({ [ARCHIVE_ACCESS_REPORTED_AT_KEY]: now() }).catch(() => void 0);
-      }
-      return result;
-    };
+    let installed = false;
+    const report = async () => installed ? controller.reportAccess() : { kind: "unknown" };
     const reportQuietly = () => {
       void report().catch(() => void 0);
     };
-    runtime.onMessage.addListener((message, sender, sendResponse) => {
-      if (!isRecord19(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport) {
-        return false;
-      }
-      if (Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
-        sendResponse({ ok: false });
-        return false;
-      }
-      void report().then(
-        (result) => sendResponse({ ok: true, report: result.kind }),
-        () => sendResponse({ ok: true, report: "unavailable" })
-      );
-      return true;
-    });
-    permissions?.onAdded?.addListener(reportQuietly);
-    permissions?.onRemoved?.addListener(reportQuietly);
-    alarms?.onAlarm?.addListener((alarm) => {
-      if (alarm?.name === ARCHIVE_ACCESS_REPORT_ALARM) reportQuietly();
-    });
-    try {
-      const existing = typeof alarms?.get === "function" ? extensionCall(
-        alarms,
-        "get",
-        [ARCHIVE_ACCESS_REPORT_ALARM],
-        runtime,
-        storageMode
-      ).catch(() => void 0) : Promise.resolve(void 0);
-      void existing.then((alarm) => {
-        if (isRecord19(alarm)) return;
-        const created = alarms?.create?.(ARCHIVE_ACCESS_REPORT_ALARM, {
-          periodInMinutes: ARCHIVE_ACCESS_REPORT_PERIOD_MINUTES
-        });
-        if (created && typeof created.then === "function") {
-          void Promise.resolve(created).catch(() => void 0);
+    const install = () => {
+      installed = true;
+      runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (!isRecord19(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport) {
+          return false;
         }
-      }).catch(() => {
-        void runtime.lastError;
+        if (Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
+          sendResponse({ ok: false });
+          return false;
+        }
+        void report().then(
+          (result) => sendResponse({ ok: true, report: result.kind }),
+          () => sendResponse({ ok: true, report: "unavailable" })
+        );
+        return true;
       });
-    } catch {
-      void runtime.lastError;
-    }
-    void storage.get(ARCHIVE_ACCESS_REPORTED_AT_KEY).then((stored) => {
-      const reportedAt = stored[ARCHIVE_ACCESS_REPORTED_AT_KEY];
-      if (typeof reportedAt === "number" && reportedAt <= now() && now() - reportedAt < ARCHIVE_ACCESS_REPORT_STALE_MS) {
-        return;
+      permissions?.onAdded?.addListener(reportQuietly);
+      permissions?.onRemoved?.addListener(reportQuietly);
+      alarms?.onAlarm?.addListener((alarm) => {
+        if (alarm?.name === ARCHIVE_ACCESS_REPORT_ALARM) reportQuietly();
+      });
+      try {
+        const existing = typeof alarms?.get === "function" ? extensionCall(
+          alarms,
+          "get",
+          [ARCHIVE_ACCESS_REPORT_ALARM],
+          runtime,
+          storageMode
+        ).catch(() => void 0) : Promise.resolve(void 0);
+        void existing.then((alarm) => {
+          if (isRecord19(alarm)) return;
+          const created = alarms?.create?.(ARCHIVE_ACCESS_REPORT_ALARM, {
+            periodInMinutes: ARCHIVE_ACCESS_REPORT_PERIOD_MINUTES
+          });
+          if (created && typeof created.then === "function") {
+            void Promise.resolve(created).catch(() => void 0);
+          }
+        }).catch(() => {
+          void runtime.lastError;
+        });
+      } catch {
+        void runtime.lastError;
       }
-      reportQuietly();
-    }).catch(() => void 0);
+      void accessLedger.read().then((ledger) => {
+        const deliveredAt = ledger.deliveredAt;
+        if (typeof deliveredAt === "number" && deliveredAt <= now() && now() - deliveredAt < ARCHIVE_ACCESS_REPORT_STALE_MS) {
+          return;
+        }
+        reportQuietly();
+      }).catch(() => void 0);
+    };
+    const beside = runsBesideTraceApp(
+      runtime,
+      storageMode,
+      environment.platform?.userAgent ?? globalThis.navigator?.userAgent ?? ""
+    );
+    if (beside === true) install();
+    else if (beside !== false) void beside.then((yes) => {
+      if (yes) install();
+    });
     return { report };
   }
 
@@ -8275,20 +8378,24 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           new BrowserStorage(extension.storage.local, extension.runtime, storageMode)
         )
       });
+      const accessLedger = new BrowserArchiveAccessLedger(
+        new BrowserStorage(extension.storage.local, extension.runtime, storageMode)
+      );
       const archiveReadiness = installArchiveReadinessRuntime({
         runtime: extension.runtime,
         ...extension.permissions === void 0 ? {} : { permissions: extension.permissions },
         storageMode,
         status: archiveReadinessStatus,
         publishTrackingPreference: () => session?.publishTrackingPreference() ?? Promise.resolve(),
-        ...define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default === null ? {} : { requiredOrigins: define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.origins }
+        ...define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default === null ? {} : { requiredOrigins: define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.origins },
+        accessLedger
       });
       if (define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default !== null && extension.permissions !== void 0) {
         installArchiveAccessReport(archiveReadiness, {
           runtime: extension.runtime,
           permissions: extension.permissions,
           alarms: extension.alarms,
-          storage: new BrowserStorage(extension.storage.local, extension.runtime, storageMode),
+          accessLedger,
           storageMode
         });
       }

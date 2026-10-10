@@ -78,6 +78,7 @@ export const DISABLED_LOCAL_KEYS = Object.freeze([
   ...Object.values(SAVED_FILTER_LOCAL_KEYS),
   "traceArchiveReadiness",
   "traceArchiveAccessReportedAtV1",
+  "traceArchiveAccessStateV1",
 ] as const);
 
 export class BrowserSessionStoragePort implements SessionStoragePort {

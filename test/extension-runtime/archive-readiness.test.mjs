@@ -4,7 +4,9 @@ import test from "node:test";
 import {
   ARCHIVE_ACCESS_REPORTED_AT_KEY,
   ARCHIVE_ACCESS_REPORT_STALE_MS,
+  ARCHIVE_ACCESS_STATE_KEY,
   ArchiveReadinessRuntimeController,
+  BrowserArchiveAccessLedger,
   installArchiveAccessReport,
   installArchiveReadinessRuntime,
 } from "../../.trace-build/extension-runtime/archive-readiness.mjs";
@@ -332,15 +334,27 @@ const REQUIRED_ORIGINS = [
   "https://m.fanfiction.net/*",
 ];
 const popupSender = { id: "trace-extension", url: "safari-web-extension://trace/popup.html" };
+const IPHONE_UA =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148";
+// Safari on a Mac, and Safari on an iPad asking for desktop sites, both say this.
+const MAC_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
+const DAY_MS = 24 * 60 * 60 * 1_000;
+// A reading reached the app a minute ago, so a start alone takes no new one.
+const DELIVERED_RECENTLY = { [ARCHIVE_ACCESS_REPORTED_AT_KEY]: 50_000_000 - 60_000 };
+// The same, for an install that has held the grant.
+const GRANT_SEEN = { ...DELIVERED_RECENTLY, [ARCHIVE_ACCESS_STATE_KEY]: { grantSeen: true } };
 
 /**
- * The background as Safari on iPhone runs it. `granted` is what Safari
- * currently allows; changing it is the reader allowing access or a one-day
- * grant running out.
+ * The background as Safari runs it. `granted` is what Safari currently
+ * allows; changing it is the reader allowing access or a one-day grant
+ * running out. `os` is what Safari reports the platform to be.
  */
 function createAccessReportHarness(options = {}) {
   let now = options.now ?? 50_000_000;
   let granted = options.granted ?? [...REQUIRED_ORIGINS];
+  let nativeResponse = options.nativeResponse ?? { ok: true };
+  const os = options.os ?? "ios";
   const nativeMessages = [];
   const messageListeners = [];
   const alarmListeners = [];
@@ -352,12 +366,12 @@ function createAccessReportHarness(options = {}) {
     id: "trace-extension",
     onMessage: { addListener: (listener) => messageListeners.push(listener) },
     async getPlatformInfo() {
-      return { os: options.os ?? "ios" };
+      return { os };
     },
     ...(options.withoutNativeMessaging ? {} : {
       async sendNativeMessage(...args) {
         nativeMessages.push(args.find((value) => value && typeof value === "object"));
-        return options.nativeResponse ?? { ok: true };
+        return nativeResponse;
       },
     }),
   };
@@ -383,14 +397,16 @@ function createAccessReportHarness(options = {}) {
     onAlarm: { addListener: (listener) => alarmListeners.push(listener) },
   };
   const storageArea = {
-    async get(key) {
-      return key in stored ? { [key]: stored[key] } : {};
+    async get(keys) {
+      const list = Array.isArray(keys) ? keys : [keys];
+      return Object.fromEntries(list.filter((key) => key in stored).map((key) => [key, stored[key]]));
     },
     async set(patch) {
       Object.assign(stored, patch);
     },
     async remove() {},
   };
+  const accessLedger = new BrowserArchiveAccessLedger(new BrowserStorage(storageArea, runtime, "promise"));
   const controller = new ArchiveReadinessRuntimeController({
     runtime,
     permissions,
@@ -398,14 +414,16 @@ function createAccessReportHarness(options = {}) {
     clock: { now: () => now },
     requiredOrigins: REQUIRED_ORIGINS,
     accessConfirmWait: async () => {},
+    accessLedger,
   });
   const access = installArchiveAccessReport(controller, {
     runtime,
     permissions,
     alarms,
-    storage: new BrowserStorage(storageArea, runtime, "promise"),
+    accessLedger,
     storageMode: "promise",
     clock: { now: () => now },
+    platform: { userAgent: options.userAgent ?? (os === "ios" ? IPHONE_UA : MAC_UA) },
   });
   const snapshots = () => nativeMessages.filter((message) => message.permissionSnapshot === true);
   const sendFromPopup = (message, sender = popupSender) => new Promise((resolve) => {
@@ -416,10 +434,11 @@ function createAccessReportHarness(options = {}) {
     if (!handled) setImmediate(() => resolve(undefined));
   });
   return {
-    access, alarmListeners, addedListeners, removedListeners, createdAlarms, stored, snapshots,
+    access, messageListeners, alarmListeners, addedListeners, removedListeners, createdAlarms, stored, snapshots,
     sendFromPopup,
     setGranted(value) { granted = value; },
     setNow(value) { now = value; },
+    setNativeResponse(value) { nativeResponse = value; },
   };
 }
 
@@ -429,19 +448,15 @@ async function settleAccess() {
   }
 }
 
+const OPEN_POPUP = { type: "TRACE_ARCHIVE_ACCESS_REPORT" };
+
 test("an opening popup has the current story-site access sent to the Trace app", async () => {
-  const h = createAccessReportHarness({
-    granted: ["*://*/*"],
-    stored: { [ARCHIVE_ACCESS_REPORTED_AT_KEY]: 50_000_000 - 60_000 },
-  });
+  const h = createAccessReportHarness({ granted: ["*://*/*"], stored: DELIVERED_RECENTLY });
   await settleAccess();
   assert.deepEqual(h.snapshots(), [], "a recent reading is not repeated just because the background started");
 
   h.setNow(50_000_500);
-  assert.deepEqual(
-    await h.sendFromPopup({ type: "TRACE_ARCHIVE_ACCESS_REPORT" }),
-    { ok: true, report: "published" },
-  );
+  assert.deepEqual(await h.sendFromPopup(OPEN_POPUP), { ok: true, report: "published" });
   // The existing native message and fields; no page, account or story data.
   assert.deepEqual(h.snapshots(), [{
     type: "TRACE_IOS_EXTENSION_HEARTBEAT",
@@ -450,25 +465,82 @@ test("an opening popup has the current story-site access sent to the Trace app",
     grantedOrigins: [...REQUIRED_ORIGINS, "*://*/*"],
   }]);
   assert.equal(h.stored[ARCHIVE_ACCESS_REPORTED_AT_KEY], 50_000_500);
+  assert.equal(h.stored[ARCHIVE_ACCESS_STATE_KEY].grantSeen, true);
+  assert.deepEqual(Object.keys(h.stored[ARCHIVE_ACCESS_STATE_KEY]).sort(), ["delivered", "grantSeen"],
+    "what is kept: that a grant was seen, and a fingerprint of the reading");
+});
+
+test("opening the popup again and again sends one reading, not one each time", async () => {
+  const h = createAccessReportHarness({ stored: DELIVERED_RECENTLY });
+  await settleAccess();
+  const replies = [];
+  for (let open = 0; open < 5; open += 1) {
+    h.setNow(50_000_000 + open * 20_000);
+    replies.push((await h.sendFromPopup(OPEN_POPUP)).report);
+  }
+  assert.deepEqual(replies, ["published", "current", "current", "current", "current"]);
+  assert.equal(h.snapshots().length, 1);
+
+  // A burst of permission events is one reading too.
+  for (let event = 0; event < 10; event += 1) for (const listener of h.addedListeners) listener();
+  await settleAccess();
+  assert.equal(h.snapshots().length, 1);
+
+  // Once it is no longer recent, or access has changed, it is sent again.
+  h.setNow(50_000_000 + 6 * 60_000);
+  assert.deepEqual(await h.sendFromPopup(OPEN_POPUP), { ok: true, report: "published" });
+  h.setGranted([...REQUIRED_ORIGINS, "*://*/*"]);
+  assert.deepEqual(await h.sendFromPopup(OPEN_POPUP), { ok: true, report: "published" });
+  assert.equal(h.snapshots().length, 3);
+});
+
+test("a background that has never seen the grant reports nothing, however often it looks", async () => {
+  // First start after install: no reading yet, no access yet.
+  const first = createAccessReportHarness({ granted: [] });
+  await settleAccess();
+  assert.deepEqual(first.snapshots(), []);
+  assert.deepEqual(first.stored, {}, "and it records nothing");
+  assert.deepEqual(await first.sendFromPopup(OPEN_POPUP), { ok: true, report: "withheld" });
+
+  // Part-way through setup: one site allowed, or sites listed another way.
+  for (const granted of [
+    ["https://*.archiveofourown.org/*"],
+    ["*://*.archiveofourown.org/*", "*://*.fanfiction.net/*"],
+    ["https://www.tracefiction.com/*"],
+  ]) {
+    const h = createAccessReportHarness({ granted, stored: DELIVERED_RECENTLY });
+    await settleAccess();
+    for (const listener of h.addedListeners) listener();
+    for (const listener of h.alarmListeners) listener({ name: "traceArchiveAccessReport" });
+    await settleAccess();
+    assert.deepEqual(await h.sendFromPopup(OPEN_POPUP), { ok: true, report: "withheld" });
+    assert.deepEqual(h.snapshots(), [], JSON.stringify(granted));
+  }
+
+  // The moment the grant is complete, that is reported and remembered.
+  first.setGranted([...REQUIRED_ORIGINS]);
+  for (const listener of first.addedListeners) listener();
+  await settleAccess();
+  assert.deepEqual(first.snapshots().map(({ grantedOrigins }) => grantedOrigins), [REQUIRED_ORIGINS]);
+  assert.equal(first.stored[ARCHIVE_ACCESS_STATE_KEY].grantSeen, true);
 });
 
 test("a one-day grant that has run out is reported the next time anything looks", async () => {
-  const h = createAccessReportHarness({
-    stored: { [ARCHIVE_ACCESS_REPORTED_AT_KEY]: 50_000_000 - 60_000 },
-  });
+  const h = createAccessReportHarness({ stored: GRANT_SEEN });
   await settleAccess();
+  assert.deepEqual(h.snapshots(), []);
 
   // Safari ends the grant. No page script runs any more to say so.
   h.setGranted(["https://www.tracefiction.com/*"]);
-  h.setNow(50_000_000 + 24 * 60 * 60 * 1_000);
+  h.setNow(50_000_000 + DAY_MS);
   for (const listener of h.removedListeners) listener();
   await settleAccess();
-  assert.deepEqual(h.snapshots().at(-1), {
+  assert.deepEqual(h.snapshots(), [{
     type: "TRACE_IOS_EXTENSION_HEARTBEAT",
-    at: 50_000_000 + 24 * 60 * 60 * 1_000,
+    at: 50_000_000 + DAY_MS,
     permissionSnapshot: true,
     grantedOrigins: ["https://www.tracefiction.com/*"],
-  });
+  }]);
 
   // Allowing again is reported too, so the app can stop warning.
   h.setGranted([...REQUIRED_ORIGINS]);
@@ -478,9 +550,7 @@ test("a one-day grant that has run out is reported the next time anything looks"
 });
 
 test("the daily alarm takes a reading and is not pushed back by a background restart", async () => {
-  const fresh = createAccessReportHarness({
-    stored: { [ARCHIVE_ACCESS_REPORTED_AT_KEY]: 50_000_000 - 60_000 },
-  });
+  const fresh = createAccessReportHarness({ stored: DELIVERED_RECENTLY });
   await settleAccess();
   assert.deepEqual(fresh.createdAlarms, [{
     name: "traceArchiveAccessReport",
@@ -493,10 +563,7 @@ test("the daily alarm takes a reading and is not pushed back by a background res
   await settleAccess();
   assert.equal(fresh.snapshots().length, 1);
 
-  const restarted = createAccessReportHarness({
-    existingAlarm: true,
-    stored: { [ARCHIVE_ACCESS_REPORTED_AT_KEY]: 50_000_000 - 60_000 },
-  });
+  const restarted = createAccessReportHarness({ existingAlarm: true, stored: DELIVERED_RECENTLY });
   await settleAccess();
   assert.deepEqual(restarted.createdAlarms, []);
 });
@@ -516,14 +583,12 @@ test("a background that starts with no recent reading takes one", async () => {
 });
 
 test("only the extension's own popup can ask for an access reading", async () => {
-  const h = createAccessReportHarness({
-    stored: { [ARCHIVE_ACCESS_REPORTED_AT_KEY]: 50_000_000 - 60_000 },
-  });
+  const h = createAccessReportHarness({ stored: DELIVERED_RECENTLY });
   await settleAccess();
   for (const [message, sender] of [
-    [{ type: "TRACE_ARCHIVE_ACCESS_REPORT" }, ao3Sender],
-    [{ type: "TRACE_ARCHIVE_ACCESS_REPORT" }, { id: "another-extension" }],
-    [{ type: "TRACE_ARCHIVE_ACCESS_REPORT", grantedOrigins: ["*://*/*"] }, popupSender],
+    [OPEN_POPUP, ao3Sender],
+    [OPEN_POPUP, { id: "another-extension" }],
+    [{ ...OPEN_POPUP, grantedOrigins: ["*://*/*"] }, popupSender],
   ]) {
     assert.deepEqual(await h.sendFromPopup(message, sender), { ok: false });
   }
@@ -531,25 +596,65 @@ test("only the extension's own popup can ask for an access reading", async () =>
   assert.deepEqual(h.snapshots(), []);
 });
 
-test("an access reading is never sent when it would not be true or has nowhere to go", async () => {
-  // Safari did not answer: missing access must not be inferred from silence.
-  const unanswered = createAccessReportHarness({ containsUnavailable: true, granted: [] });
+test("an access reading is never sent when Safari did not answer", async () => {
+  // Missing access must not be inferred from silence, even after a grant.
+  const h = createAccessReportHarness({ containsUnavailable: true, granted: [], stored: GRANT_SEEN });
   await settleAccess();
-  assert.deepEqual(await unanswered.access.report(), { kind: "unknown" });
-  assert.deepEqual(unanswered.snapshots(), []);
-  assert.equal(ARCHIVE_ACCESS_REPORTED_AT_KEY in unanswered.stored, false);
+  assert.deepEqual(await h.access.report(), { kind: "unknown" });
+  assert.deepEqual(await h.sendFromPopup(OPEN_POPUP), { ok: true, report: "unknown" });
+  assert.deepEqual(h.snapshots(), []);
+});
 
-  // Other browsers have no Trace app beside them.
-  for (const options of [{ os: "mac" }, { withoutNativeMessaging: true }]) {
-    const h = createAccessReportHarness({ ...options, granted: [] });
+test("a delivery the app does not take is left alone for a while, then tried again", async () => {
+  const h = createAccessReportHarness({ nativeResponse: { ok: false, error: "shared_storage_unavailable" } });
+  await settleAccess();
+  assert.equal(h.snapshots().length, 1, "the overdue reading at start");
+  assert.equal(ARCHIVE_ACCESS_REPORTED_AT_KEY in h.stored, false, "it is not recorded as delivered");
+
+  // Popup opens and restarts in the next minute do not hammer the app.
+  for (let open = 0; open < 3; open += 1) {
+    assert.deepEqual(await h.sendFromPopup(OPEN_POPUP), { ok: true, report: "deferred" });
+  }
+  const restarted = createAccessReportHarness({ nativeResponse: { ok: false }, stored: h.stored });
+  await settleAccess();
+  assert.equal(h.snapshots().length + restarted.snapshots().length, 1);
+
+  h.setNow(50_000_000 + 60_000);
+  h.setNativeResponse({ ok: true });
+  assert.deepEqual(await h.sendFromPopup(OPEN_POPUP), { ok: true, report: "published" });
+  assert.equal(h.stored[ARCHIVE_ACCESS_REPORTED_AT_KEY], 50_000_000 + 60_000);
+  assert.equal("failures" in h.stored[ARCHIVE_ACCESS_STATE_KEY], false);
+});
+
+test("Safari on a Mac installs nothing: no listener, no alarm, no reading", async () => {
+  for (const options of [{ os: "mac" }, { withoutNativeMessaging: true }, { os: "mac", userAgent: "" }]) {
+    const h = createAccessReportHarness({ ...options, granted: [], stored: GRANT_SEEN });
     await settleAccess();
+    assert.deepEqual(
+      [h.messageListeners.length, h.alarmListeners.length, h.addedListeners.length, h.removedListeners.length],
+      [0, 0, 0, 0],
+      JSON.stringify(options),
+    );
+    assert.deepEqual(h.createdAlarms, []);
+    assert.equal(await h.sendFromPopup(OPEN_POPUP), undefined, "the message has no handler here");
     assert.deepEqual(await h.access.report(), { kind: "unknown" });
     assert.deepEqual(h.snapshots(), []);
   }
+});
 
-  // A reading the app did not take is not recorded as delivered.
-  const undelivered = createAccessReportHarness({ nativeResponse: { ok: false } });
+test("an iPhone installs at once; an iPad that calls itself a Mac installs once Safari says what it is", async () => {
+  const iphone = createAccessReportHarness({ stored: DELIVERED_RECENTLY });
+  // Before anything asynchronous has run: an event that woke the background
+  // is delivered to listeners that exist in its first turn.
+  assert.deepEqual(
+    [iphone.messageListeners.length, iphone.alarmListeners.length, iphone.addedListeners.length, iphone.removedListeners.length],
+    [1, 1, 1, 1],
+  );
+
+  const ipad = createAccessReportHarness({ os: "ios", userAgent: MAC_UA, stored: DELIVERED_RECENTLY });
+  assert.equal(ipad.messageListeners.length, 0);
   await settleAccess();
-  assert.deepEqual(await undelivered.access.report(), { kind: "unavailable" });
-  assert.equal(ARCHIVE_ACCESS_REPORTED_AT_KEY in undelivered.stored, false);
+  assert.equal(ipad.messageListeners.length, 1);
+  assert.equal(ipad.createdAlarms.length, 1);
+  assert.deepEqual(await ipad.sendFromPopup(OPEN_POPUP), { ok: true, report: "published" });
 });

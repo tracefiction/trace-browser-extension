@@ -157,12 +157,23 @@ looked, on AO3 and FanFiction.net alike.
 On iPhone and iPad the Trace app holds the account, and the popup can learn
 one of three things about it: the app has none (`signed_out` with
 `credential_absent`), it is connected, or it could not be read
-(`signed_out` with any other reason, or no reply). Only the first shows P6.
-While it is not known, the popup shows “Connecting to your account…” and asks
-again after 1, 2 and 4 seconds, or at once when the background reports that an
-account connected. After that it shows “Trace couldn’t connect to your
-account”, as it does straight away when Trace refuses the account the app
-holds. Neither state mentions creating an account.
+(`signed_out` with any other reason, a session still reading, or no reply).
+Only the first shows P6.
+
+A popup has one wait for the account, shared by the general view and the
+setup flow; anything that needs the account while it is under way joins it.
+While the answer is not known the popup shows “Connecting to your account…”
+and asks again 1, 2 and 4 seconds after each answer. Ten seconds after the
+wait began, however slow the reads were, it shows “Trace couldn’t connect to
+your account” with its buttons, as it does straight away when Trace refuses
+the account the app holds. P6 is followed by one quiet second look 1.2 seconds
+later, for a reader who has only just signed up. Neither “Connecting…” nor
+“couldn’t connect” mentions creating an account.
+
+None of these is final while the popup is open. A read that comes back late
+is still taken, and whenever the background publishes that an account
+connected the popup asks once more and carries on by itself. A reply that
+brings no answer leaves a settled view as it is and starts no timer.
 
 The other-account state never names either account and never claims a save.
 A failed P10 save states what didn't happen; the button never quietly
