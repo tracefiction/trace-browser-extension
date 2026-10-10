@@ -61,6 +61,7 @@ const PATHS = [
   { path: "/collections/some_collection/works?page=2", key: null, story: false, collects: null },
   { path: "/collections/some_collection/works/new", key: null, story: false, collects: null },
   { path: "/collections/some_collection/bookmarks", key: null, story: false, collects: null },
+  { path: "/collections/some_collection/tags/Some%20Tag/works", key: null, story: false, collects: null },
   { path: "/series/123", key: null, story: false, collects: null },
   { path: "/", key: null, story: false, collects: null },
 ];
@@ -75,6 +76,11 @@ const REFUSED = [
   "/collections/works/999",
   "/collections/a/collections/b/works/999",
   "/tags/x/collections/a/works/999",
+  // A collection's own list of works for a tag, and anything shaped like a work under it.
+  "/collections/a/tags/x/works",
+  "/collections/a/tags/x/works/999",
+  "/collections/a/tags/Some%20Tag/works/999",
+  "/collections/a/tags/x/works/999/chapters/1",
   "/users/someone/works/999",
   "/x/works/999",
   // A name that tries to carry a path: encoded slashes, dots, anything not a letter, digit or underscore.
