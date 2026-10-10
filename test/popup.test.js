@@ -4232,7 +4232,9 @@ test("setup page: with the story sites allowed the popup says Trace is on and of
   assert.equal(h.document.getElementById("popup-earned-pin").hidden, true, "the stories are the only actions");
   assert.equal(isDisplayed(h, h.document.getElementById("popup-import")), false);
   assert.doesNotMatch(earnedText(h), /Open a story to finish|Trace works on AO3/);
-  assert.equal(setupRequests("story-tabs").length, 1);
+  // It names the tab it is open over, so the background lists that window's stories only.
+  assert.equal(JSON.stringify(setupRequests("story-tabs")),
+    JSON.stringify([{ type: "TRACE_SETUP_PAGE_REQUEST", request: "story-tabs", overTab: 1 }]));
 
   // A tap asks the background to bring that tab forward, by id, and the popup gets out of the way.
   rows()[1].click();
@@ -4267,6 +4269,37 @@ test("setup page: a story tab with no title still gets a row, named for its site
   });
   await settle(h, 16);
   assert.deepEqual(rows().map((row) => row.textContent.trim()), ["Story on AO3", "Story on FanFiction.net"]);
+});
+
+test("setup page: a story tab's title is shown as text, whatever it contains", async () => {
+  const titles = [
+    "<img src=x onerror=alert(1)>",
+    "<b>Bold</b> &amp; <script>alert(1)</script> <a href=\"https://example.com\">link</a>",
+    "\"><svg onload=alert(1)>",
+  ];
+  const { h, rows } = setupPagePopup({ stories: titles.map((title, index) => ({ tabId: 20 + index, title, site: "ao3" })) });
+  await settle(h, 16);
+  assert.equal(rows().length, titles.length);
+  rows().forEach((row, index) => {
+    const label = row.querySelector(".popup-earned-story-tab-label");
+    assert.equal(label.textContent, titles[index]);
+    assert.equal(label.children.length, 0, "the title made no elements");
+    assert.equal(label.childNodes.length, 1);
+    assert.equal(label.firstChild.nodeType, 3, "one text node");
+    assert.equal(row.getAttribute("aria-label"), `Go to ${titles[index]}`);
+  });
+  assert.equal(h.document.querySelectorAll("#popup-earned-story-tabs :is(img, b, a, script, svg:not([aria-hidden]))").length, 0);
+});
+
+test("setup page: over a tab it cannot name, the popup asks for no list", async () => {
+  const { h, rows, setupRequests } = setupPagePopup({
+    activeTab: { url: SETUP_PAGE },
+    storageState: { traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 86_400_000 } },
+  });
+  await settle(h, 16);
+  assert.equal(earnedHeading(h), "Open any story");
+  assert.deepEqual(rows(), []);
+  assert.equal(setupRequests("story-tabs").length, 0);
 });
 
 test("setup page: when only that page was allowed, the popup asks for the story sites in its own words", async () => {

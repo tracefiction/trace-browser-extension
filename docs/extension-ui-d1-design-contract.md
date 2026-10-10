@@ -181,10 +181,12 @@ brings no answer leaves a settled view as it is and starts no timer.
 On Trace's own setup page (`/safari-setup` on Trace's origin) the popup has
 three things to say, in existing anatomy. With the story sites allowed and the
 account connected: the kicker “Trace is on”, the headline “Go to your story”
-and one row per open story tab, in the Settings row's form, labelled with the
-tab's title on a single line (“Story on AO3” or “Story on FanFiction.net” when
-the tab has none). A tap brings that tab to the front and closes the popup;
-a tab that has gone is dropped from the list. With no story open: “Open any
+and one row per open story tab in the same window, in the Settings row's form,
+labelled with the tab's title on a single line (“Story on AO3” or “Story on
+FanFiction.net” when the tab has none, or when its title is only its address).
+The title is always shown as text. Tabs in Private Browsing and in other
+windows are never rows. A tap brings that tab to the front and closes the
+popup; a tab that has gone is dropped from the list. With no story open: “Open any
 story” and “Trace saves it when it opens.” With only that page allowed
 (Safari's blue button, or This Website): the P3 request in this page's words,
 “Allowed on this page only”, “Next, tap **Always Allow**.”, the same rule line

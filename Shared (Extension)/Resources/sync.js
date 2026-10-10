@@ -440,7 +440,11 @@ window.addEventListener("message", (event) => {
 // The page is an ordinary web page, so every request is checked here and
 // again in the background, and every answer is rebuilt field by field. The
 // page never learns an address, or anything about a tab that is not a story
-// page, and it cannot make Safari ask for access.
+// page in its own window, and it cannot make Safari ask for access.
+//
+// The path check keeps other Trace pages from using this by accident. It is
+// not a defence against script already running on this origin, which can move
+// its page to the setup path without loading; the limits above are.
 
 function isTopLevelPage() {
   try {

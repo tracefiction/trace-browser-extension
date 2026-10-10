@@ -1612,6 +1612,8 @@ function setupStoryTabs(response) {
 }
 
 let setupPageRender = 0;
+/** The setup page's tab this popup is open over, when it is. */
+let setupPageTabId = null;
 
 /**
  * The popup over Trace's setup page. With the story sites allowed it offers
@@ -1629,8 +1631,13 @@ async function renderSetupPage() {
     renderEarnedPermissionInvitation(TRACE_SETUP_PAGE, false, earnedGrantCoverage(grantedOrigins));
     return;
   }
-  const response = await new Promise((resolve) =>
-    sendKernelRuntimeMessage({ type: "TRACE_SETUP_PAGE_REQUEST", request: "story-tabs" }, resolve));
+  // The background lists only story tabs in the same window as the setup
+  // page this popup is open over, and none in Private Browsing.
+  const response = setupPageTabId === null ? null : await new Promise((resolve) =>
+    sendKernelRuntimeMessage(
+      { type: "TRACE_SETUP_PAGE_REQUEST", request: "story-tabs", overTab: setupPageTabId },
+      resolve,
+    ));
   if (render !== setupPageRender) return;
   renderSetupPageOn(setupStoryTabs(response));
 }
@@ -2333,6 +2340,7 @@ async function prepareEarnedPermissionFlow() {
   const hasGrant = await readCompleteEarnedGrant(grantedOrigins);
   const tab = await probeQueryActiveTab().catch(() => null);
   const story = isTraceSetupPage(tab?.url) ? TRACE_SETUP_PAGE : classifyEarnedPage(tab?.url);
+  setupPageTabId = story.kind === "setup" && Number.isInteger(tab?.id) && tab.id >= 0 ? tab.id : null;
   earnedCurrentPage = story.ok ? story : null;
   if (earnedCurrentPage?.kind === "story") {
     earnedCurrentPage = { ...earnedCurrentPage, knownInLibrary: await readKnownInLibrary(tab?.url) };

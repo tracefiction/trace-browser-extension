@@ -386,29 +386,46 @@ that the path is exactly the setup page's), and the background checks again
 that the request came from a top-level page at that path on Trace's origin.
 Every other page on Trace's site (the signed-in app included), a story site,
 any other site and any frame get no answer. Neither does any page in Chrome,
-Firefox or Safari on a Mac: the page script forwards nothing there, and the
-Chrome and Firefox packages do not contain the background half at all.
+Firefox or Safari on a Mac: the page script forwards nothing there. The Chrome
+and Firefox packages do not contain the background half at all; `sync.js` and
+`popup.js` are shared files, so those packages carry their halves, inert.
 
 What the page can learn:
 
 - whether the five story-site addresses are allowed, and how broadly: every
   site, the story sites, or only Trace's own page. It is told again when that
   changes;
-- its open story tabs: for up to five tabs that are story pages on AO3 or
-  FanFiction.net, a tab id, the tab's title as the browser reports it (one
-  line, at most 120 characters) and which site it is on. Nothing is listed
-  while the story sites are not allowed.
+- the open story tabs in its own window: for up to five tabs that are story
+  pages on AO3 or FanFiction.net, a tab id, the tab's title (one line, at most
+  120 characters) and which site it is on. Nothing is listed while the story
+  sites are not allowed. A tab in Private Browsing or in another window is
+  never listed, and a setup page that is itself in Private Browsing is given
+  no tabs. A title that is the tab's address, or is shaped like an address,
+  is sent as no title, and characters that hide or reorder text are removed.
 
 What the page can do: ask for one of those tabs to be brought to the front. It
-must be a tab from the most recent list given to that same page, and it is
-checked again at that moment to still be a story page.
+must be a tab from the most recent list given to that same tab, no more than
+two minutes earlier; the list is dropped if that tab is seen anywhere but the
+setup page. The story tab is checked again at that moment to still be a story
+page, in the same window, and not in Private Browsing.
 
 What the page cannot do or learn: any address; anything about a tab that is
 not a story page; open, close, reload or navigate a tab; make the browser ask
 for access (there is no such message). Requests are limited to 20 in any 10
 seconds per page, in the page script and again in the background. Nothing here
 is sent to a server, and it adds no permission. The popup shown over that page
-uses the same list and the same switch, under the same rules.
+uses the same list and the same switch, under the same rules, for the window
+of the tab it is open over.
+
+What the path check is, and is not. It keeps the signed-in app and every other
+Trace page from using these questions by accident. It is not a defence against
+hostile script already running on Trace's own origin: such a script can move
+its page to `/safari-setup` without loading it and then ask. The limits above
+are therefore what count. The most such a script could learn is whether the
+story sites are allowed and the titles of up to five story tabs in that
+window; the most it could do is bring one of those story tabs to the front. It
+could learn nothing about any other tab and no address, and it could not make
+the browser ask for access.
 
 ### Local Safari automatic-saving preference
 

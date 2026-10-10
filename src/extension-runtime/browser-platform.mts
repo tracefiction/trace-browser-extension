@@ -52,7 +52,12 @@ export interface ScriptingPort {
 export interface RuntimeMessageSender {
   readonly id?: string;
   readonly url?: string;
-  readonly tab?: { readonly id?: number; readonly url?: string } | null;
+  readonly tab?: {
+    readonly id?: number;
+    readonly url?: string;
+    readonly windowId?: number;
+    readonly incognito?: boolean;
+  } | null;
   readonly frameId?: number;
   readonly documentLifecycle?: string;
 }
@@ -92,6 +97,8 @@ export interface BrowserTab {
   readonly title?: string;
   readonly active?: boolean;
   readonly lastAccessed?: number;
+  readonly windowId?: number;
+  readonly incognito?: boolean;
 }
 
 export class BrowserStorage {

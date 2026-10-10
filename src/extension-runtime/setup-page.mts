@@ -28,11 +28,16 @@ import {
  *   Trace page, a story site, any other site and any frame get nothing.
  * - Only on iPhone and iPad, where that page exists to be used.
  * - It can learn whether the story sites are allowed, and the titles of open
- *   story pages on those sites. Nothing about any other tab, and never an
- *   address.
- * - It can bring one of those story tabs to the front, and only one it was
- *   just given, re-checked at that moment. It cannot open, close, reload or
- *   navigate a tab, and it cannot raise a permission request.
+ *   story pages on those sites in its own window. Nothing about any other
+ *   tab, nothing in Private Browsing or another window, and never an address.
+ * - It can bring one of those story tabs to the front, and only one that same
+ *   tab was just given, re-checked at that moment. It cannot open, close,
+ *   reload or navigate a tab, and it cannot raise a permission request.
+ *
+ * The path check keeps every other Trace page from using this by accident. It
+ * is not a defence against script already running on Trace's own origin,
+ * which can move its page to the setup path without loading; what is written
+ * above is therefore the most such script could learn or do.
  * - It is rate-limited per requester.
  */
 export const SETUP_PAGE_MESSAGE = "TRACE_SETUP_PAGE_REQUEST";
@@ -41,6 +46,8 @@ export const SETUP_ACCESS_PUSH_MESSAGE = "TRACE_SETUP_ACCESS_PUSH";
 
 export const SETUP_STORY_TAB_LIMIT = 5;
 export const SETUP_TAB_TITLE_MAX_LENGTH = 120;
+/** How long a list of story tabs may be acted on. */
+export const SETUP_STORY_LIST_LIFE_MS = 120_000;
 /** Requests one requester may make inside one window before it is refused. */
 export const SETUP_REQUEST_LIMIT = 20;
 export const SETUP_REQUEST_WINDOW_MS = 10_000;
@@ -98,6 +105,17 @@ interface SetupPageEnvironment {
 
 type SetupTab = BrowserTab & { readonly title?: unknown };
 
+/** Who is asking. `tab` is the setup page's own tab; the popup has none. */
+type Requester = Readonly<{ key: string; tab: SetupTab | null }>;
+
+type ListedTabs = Readonly<{ ids: ReadonlySet<number>; windowId: number; at: number }>;
+
+/** The window a tab is in, or null when it is in Private Browsing or does not say. */
+function ownWindow(tab: unknown): number | null {
+  if (!isRecord(tab) || tab.incognito === true) return null;
+  return typeof tab.windowId === "number" && Number.isSafeInteger(tab.windowId) ? tab.windowId : null;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -122,13 +140,50 @@ export function storyPageSite(rawUrl: unknown, webOrigin: string): "ao3" | "ffn"
   return classifyActiveTabUrl(rawUrl, webOrigin).kind === "supported_story" ? site : null;
 }
 
-// Control characters and the two Unicode line breaks, written as escapes.
-const CONTROL_CHARACTERS = /* @__PURE__ */ new RegExp("[\\u0000-\\u001f\\u007f\\u2028\\u2029]+", "g");
+// Written as escapes. Control characters and line breaks become a space.
+const CONTROL_CHARACTERS = /* @__PURE__ */ new RegExp("[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+", "g");
+// Characters that reorder or hide text are dropped: the directional marks,
+// embeddings, overrides and isolates, and the zero-width ones. The zero-width
+// joiner (200d) stays, because emoji are built with it.
+const HIDDEN_CHARACTERS = /* @__PURE__ */ new RegExp(
+  "[\\u061c\\u200b\\u200c\\u200e\\u200f\\u202a-\\u202e\\u2060-\\u2064\\u2066-\\u2069\\ufeff]",
+  "g",
+);
+
+/**
+ * A tab that has no title yet is commonly given its address as one. An
+ * address is never passed on, so such a title counts as none.
+ */
+function isAddressLike(line: string): boolean {
+  // Anything that opens like an address with an authority.
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(line)) return true;
+  if (line === "" || /\s/.test(line)) return false;
+  // One word with a scheme, when it parses as an address.
+  if (/^[a-z][a-z0-9+.-]*:/i.test(line)) {
+    try {
+      return Boolean(new URL(line));
+    } catch {
+      return false;
+    }
+  }
+  // A bare host, or host and path, of a story site: every listed tab is on one.
+  try {
+    const host = new URL(`https://${line}`).hostname;
+    return archiveHostKindFromSender({ url: `https://${host}/` }) !== null;
+  } catch {
+    return false;
+  }
+}
 
 /** A tab's title as the browser reports it: one line, capped, never an address. */
 function tabTitle(value: unknown): string {
   if (typeof value !== "string") return "";
-  const line = value.replace(CONTROL_CHARACTERS, " ").replace(/\s+/g, " ").trim();
+  const line = value
+    .replace(CONTROL_CHARACTERS, " ")
+    .replace(HIDDEN_CHARACTERS, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (isAddressLike(line)) return "";
   return Array.from(line).slice(0, SETUP_TAB_TITLE_MAX_LENGTH).join("");
 }
 
@@ -141,8 +196,8 @@ export class SetupPageController {
   readonly #storyOrigins: readonly string[];
   readonly #access: BrowserArchivePermissionSnapshotPort;
   readonly #now: () => number;
-  /** Per requester: the story tabs it was last given. */
-  readonly #listed = new Map<string, ReadonlySet<number>>();
+  /** Per requester: the story tabs it was last given, in which window, and when. */
+  readonly #listed = new Map<string, ListedTabs>();
   readonly #requests = new Map<string, number[]>();
   #push: Promise<void> | null = null;
   #pushAgain = false;
@@ -167,8 +222,13 @@ export class SetupPageController {
   async handle(message: unknown, sender?: RuntimeMessageSender): Promise<SetupPageResponse | null> {
     if (!isRecord(message) || message.type !== SETUP_PAGE_MESSAGE) return null;
     const requester = this.#requester(sender);
-    if (requester === null) return refused("forbidden");
-    if (!this.#admit(requester)) return refused("rate_limited");
+    if (requester === null) {
+      // A tab seen anywhere but the setup page keeps no list.
+      const tabId = sender?.tab?.id;
+      if (typeof tabId === "number") this.#listed.delete(`page:${tabId}`);
+      return refused("forbidden");
+    }
+    if (!this.#admit(requester.key)) return refused("rate_limited");
 
     const request = message.request;
     const keys = Object.keys(message).length;
@@ -178,8 +238,16 @@ export class SetupPageController {
       return access === null ? refused("unavailable") : Object.freeze({ ok: true as const, result: access });
     }
     if (request === "story-tabs") {
-      if (keys !== 2) return refused("invalid_request");
-      const tabs = await this.#storyTabs(requester);
+      // The popup has no tab of its own; it names the tab it is open over.
+      const overTab = message.overTab;
+      if (requester.tab === null) {
+        if (keys !== 3 || typeof overTab !== "number" || !Number.isSafeInteger(overTab) || overTab < 0) {
+          return refused("invalid_request");
+        }
+      } else if (keys !== 2) {
+        return refused("invalid_request");
+      }
+      const tabs = await this.#storyTabs(requester, requester.tab === null ? (overTab as number) : null);
       return tabs === null
         ? refused("unavailable")
         : Object.freeze({ ok: true as const, result: Object.freeze({ tabs }) });
@@ -213,8 +281,13 @@ export class SetupPageController {
   }
 
   /** Who is asking: the setup page (by tab) or this extension's popup. */
-  #requester(sender: RuntimeMessageSender | undefined): string | null {
-    if (isPopupSender(sender, this.#runtime.id)) return "popup";
+  #requester(sender: RuntimeMessageSender | undefined): Requester | null {
+    if (isPopupSender(sender, this.#runtime.id)) {
+      // A popup's address alone is not enough: it must be this extension's.
+      return this.#runtime.id !== undefined && sender?.id === this.#runtime.id
+        ? { key: "popup", tab: null }
+        : null;
+    }
     if (!isTraceWebSender(sender, this.#runtime.id, this.#webOrigin)) return null;
     const tabId = sender?.tab?.id;
     if (typeof tabId !== "number" || !Number.isSafeInteger(tabId)) return null;
@@ -223,7 +296,7 @@ export class SetupPageController {
     const addresses = [sender?.url, sender?.tab?.url].filter((address) => address !== undefined);
     if (addresses.length === 0) return null;
     if (!addresses.every((address) => this.#isSetupPage(address))) return null;
-    return `page:${tabId}`;
+    return { key: `page:${tabId}`, tab: sender?.tab ?? null };
   }
 
   #isSetupPage(rawUrl: unknown): boolean {
@@ -270,21 +343,37 @@ export class SetupPageController {
     });
   }
 
-  async #storyTabs(requester: string): Promise<readonly SetupStoryTab[] | null> {
+  /** The tab the popup says it is open over, when that tab is the setup page. */
+  async #setupTab(tabId: number): Promise<SetupTab | null> {
+    if (typeof this.#tabs.get !== "function") return null;
+    try {
+      const tab = await this.#call<SetupTab | null>("get", [tabId]);
+      return isRecord(tab) && tab.id === tabId && this.#isSetupPage(tab.url) ? tab : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async #storyTabs(requester: Requester, overTab: number | null): Promise<readonly SetupStoryTab[] | null> {
     // Whatever happens next, an earlier list is no longer the most recent.
-    this.#listed.delete(requester);
+    this.#listed.delete(requester.key);
     const access = await this.#readAccess();
     if (access === null) return null;
     if (!access.storySitesAllowed) return Object.freeze([]);
+    // Only the asking tab's own window, and never Private Browsing: a setup
+    // page in a private tab, or one whose window is not known, is given nothing.
+    const windowId = ownWindow(requester.tab ?? (overTab === null ? null : await this.#setupTab(overTab)));
+    if (windowId === null) return Object.freeze([]);
     let tabs: readonly SetupTab[];
     try {
-      tabs = await this.#call<readonly SetupTab[]>("query", [{}]);
+      tabs = await this.#call<readonly SetupTab[]>("query", [{ windowId }]);
     } catch {
       return null;
     }
     const stories: { tab: SetupTab; site: "ao3" | "ffn"; order: number }[] = [];
     (Array.isArray(tabs) ? tabs : []).forEach((tab, order) => {
       if (!isRecord(tab) || typeof tab.id !== "number" || !Number.isSafeInteger(tab.id) || tab.id < 0) return;
+      if (ownWindow(tab) !== windowId) return;
       const site = storyPageSite(tab.url, this.#webOrigin);
       if (site !== null) stories.push({ tab, site, order });
     });
@@ -298,14 +387,26 @@ export class SetupPageController {
     const answer = stories.slice(0, SETUP_STORY_TAB_LIMIT).map(({ tab, site }) =>
       Object.freeze({ tabId: tab.id as number, title: tabTitle(tab.title), site }),
     );
-    this.#listed.set(requester, new Set(answer.map(({ tabId }) => tabId)));
+    this.#listed.set(requester.key, {
+      ids: new Set(answer.map(({ tabId }) => tabId)),
+      windowId,
+      at: this.#now(),
+    });
     return Object.freeze(answer);
   }
 
-  async #switchToTab(requester: string, tabId: number): Promise<SetupPageResponse> {
+  async #switchToTab(requester: Requester, tabId: number): Promise<SetupPageResponse> {
     // Only a tab this same requester was just given. A tab that has left the
-    // setup page is no longer a requester at all.
-    if (this.#listed.get(requester)?.has(tabId) !== true) return refused("not_listed");
+    // setup page is no longer a requester at all, and its list is dropped.
+    const listed = this.#listed.get(requester.key);
+    if (listed === undefined || !listed.ids.has(tabId)) return refused("not_listed");
+    // A list is good for a short while, and for the window it was made in.
+    const age = this.#now() - listed.at;
+    const moved = requester.tab !== null && ownWindow(requester.tab) !== listed.windowId;
+    if (age < 0 || age > SETUP_STORY_LIST_LIFE_MS || moved) {
+      this.#listed.delete(requester.key);
+      return refused("not_listed");
+    }
     if (typeof this.#tabs.get !== "function" || typeof this.#tabs.update !== "function") {
       return refused("unavailable");
     }
@@ -319,7 +420,12 @@ export class SetupPageController {
     } catch {
       tab = null;
     }
-    if (!isRecord(tab) || tab.id !== tabId || storyPageSite(tab.url, this.#webOrigin) === null) {
+    if (
+      !isRecord(tab) ||
+      tab.id !== tabId ||
+      ownWindow(tab) !== listed.windowId ||
+      storyPageSite(tab.url, this.#webOrigin) === null
+    ) {
       return refused("not_a_story");
     }
     try {

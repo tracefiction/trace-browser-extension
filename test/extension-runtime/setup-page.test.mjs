@@ -7,6 +7,7 @@ import {
   SETUP_PAGE_MESSAGE,
   SETUP_REQUEST_LIMIT,
   SETUP_REQUEST_WINDOW_MS,
+  SETUP_STORY_LIST_LIFE_MS,
   SETUP_STORY_TAB_LIMIT,
   SETUP_TAB_TITLE_MAX_LENGTH,
   STORY_SITE_ORIGINS,
@@ -26,10 +27,11 @@ const MAC_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.
 const AO3 = "https://archiveofourown.org";
 const FFN = "https://www.fanfiction.net";
 
-const pageSender = (overrides = {}) => ({
+/** The setup page in tab 1 of window 1, unless told otherwise. A tab given here is in window 1 unless it says. */
+const pageSender = ({ tab, ...overrides } = {}) => ({
   id: EXTENSION_ID,
   url: SETUP_URL,
-  tab: { id: 1, url: SETUP_URL },
+  tab: tab === undefined ? { id: 1, url: SETUP_URL, windowId: 1 } : { windowId: 1, ...tab },
   frameId: 0,
   documentLifecycle: "active",
   ...overrides,
@@ -37,6 +39,9 @@ const pageSender = (overrides = {}) => ({
 const popupSender = { id: EXTENSION_ID, url: "safari-web-extension://trace/popup.html" };
 
 const ask = (request, extra = {}) => ({ type: SETUP_PAGE_MESSAGE, request, ...extra });
+/** The popup has no tab of its own: it names the tab it is open over. */
+const askFromPopup = (overTab = 1) => ask("story-tabs", { overTab });
+const SETUP_TAB = { id: 1, url: SETUP_URL, title: "Set up Trace", lastAccessed: 900 };
 
 /**
  * The background's view of the browser. `granted` is what Safari allows;
@@ -45,7 +50,11 @@ const ask = (request, extra = {}) => ({ type: SETUP_PAGE_MESSAGE, request, ...ex
 function createHarness(options = {}) {
   let now = 1_000_000;
   let granted = options.granted ?? [...STORY_SITE_ORIGINS, `${WEB}/*`];
-  let tabs = options.tabs ?? [];
+  // Every tab is in window 1 unless it says otherwise, and the setup page is
+  // open in tab 1 unless that id is taken.
+  const inWindows = (list) => (list.some((tab) => tab.id === 1) ? list : [SETUP_TAB, ...list])
+    .map((tab) => (Object.hasOwn(tab, "windowId") ? { ...tab } : { windowId: 1, ...tab }));
+  let tabs = inWindows(options.tabs ?? []);
   let silent = options.permissionsSilent === true;
   const calls = [];
   const sent = [];
@@ -54,7 +63,7 @@ function createHarness(options = {}) {
   const listeners = [];
   const platformAsked = [];
   const runtime = {
-    id: EXTENSION_ID,
+    ...(options.withoutRuntimeId ? {} : { id: EXTENSION_ID }),
     onMessage: { addListener: (listener) => listeners.push(listener) },
     // Present wherever Trace ships beside its app. The setup surface never uses it.
     ...(options.withoutNativeMessaging ? {} : {
@@ -75,7 +84,11 @@ function createHarness(options = {}) {
       calls.push(["query", filter]);
       if (options.queryFails) throw new Error("tabs unavailable");
       const patterns = filter?.url;
-      if (!patterns || options.queryIgnoresFilter) return tabs.map((tab) => ({ ...tab }));
+      if (options.queryIgnoresFilter) return tabs.map((tab) => ({ ...tab }));
+      if (!patterns) {
+        assert.deepEqual(Object.keys(filter), ["windowId"], "story tabs are asked for one window at a time");
+        return tabs.filter((tab) => tab.windowId === filter.windowId).map((tab) => ({ ...tab }));
+      }
       // As the browser applies a match pattern ending in a wildcard.
       const prefixes = patterns.map((pattern) => {
         assert.ok(pattern.endsWith("*"), pattern);
@@ -138,7 +151,7 @@ function createHarness(options = {}) {
     controller, calls, sent, added, removed, listeners, platformAsked,
     browserCalls: () => calls.filter(([name]) => name !== "contains" && name !== "getAll"),
     setGranted(value) { granted = value; },
-    setTabs(value) { tabs = value; },
+    setTabs(value) { tabs = inWindows(value); },
     setPermissionsSilent(value) { silent = value; },
     advance(ms) { now += ms; },
   };
@@ -241,9 +254,38 @@ test("only the setup page itself, top-level on Trace's own origin, or the popup,
     at(`${SETUP_URL}#step-2`, SETUP_URL),
     { id: EXTENSION_ID, url: SETUP_URL, tab: { id: 4 }, frameId: 0 },
     { id: EXTENSION_ID, tab: { id: 5, url: SETUP_URL }, frameId: 0 },
-    popupSender,
   ]) {
     assert.equal((await h.controller.handle(ask("story-tabs"), sender)).ok, true, sender.url ?? sender.tab.url);
+  }
+  assert.equal((await h.controller.handle(askFromPopup(), popupSender)).result.tabs.length, 3);
+});
+
+test("the popup is this extension's own, by id as well as by address", async () => {
+  const address = popupSender.url;
+  const refusedSenders = {
+    "another extension's popup": { id: "another-extension", url: address },
+    "another extension's popup at this extension's address": { id: "another-extension", url: `safari-web-extension://${EXTENSION_ID}/popup.html` },
+    "a popup address with no id": { url: address },
+    "a popup address with an empty id": { id: "", url: address },
+    "another extension with no address": { id: "another-extension" },
+  };
+  for (const [name, sender] of Object.entries(refusedSenders)) {
+    const h = createHarness({ tabs: [...STORY_TABS] });
+    for (const message of [ask("access"), askFromPopup(), ask("switch-to-tab", { tabId: 11 })]) {
+      assert.deepEqual(await h.controller.handle(message, sender), { ok: false, error: "forbidden" }, `${name}: ${message.request}`);
+    }
+    assert.deepEqual(h.calls, [], `${name}: nothing was read on its behalf`);
+  }
+  // A background that does not know its own id answers no popup at all.
+  const unnamed = createHarness({ tabs: [...STORY_TABS], withoutRuntimeId: true });
+  for (const sender of [popupSender, { url: address }, { id: undefined, url: address }]) {
+    assert.deepEqual(await unnamed.controller.handle(askFromPopup(), sender), { ok: false, error: "forbidden" });
+  }
+  assert.deepEqual(unnamed.calls, []);
+  // This extension's popup, with or without an address, is answered.
+  const h = createHarness({ tabs: [...STORY_TABS] });
+  for (const sender of [popupSender, { id: EXTENSION_ID }]) {
+    assert.equal((await h.controller.handle(askFromPopup(), sender)).result.tabs.length, 3);
   }
 });
 
@@ -267,6 +309,8 @@ test("a request it does not know, or one that is malformed, is refused by name",
     [ask(7), "invalid_request"],
     [ask("access", { origins: ["*://*/*"] }), "invalid_request"],
     [ask("story-tabs", { url: "*" }), "invalid_request"],
+    [ask("story-tabs", { overTab: 1 }), "invalid_request"],
+    [ask("story-tabs", { windowId: 2 }), "invalid_request"],
     [ask("switch-to-tab"), "invalid_request"],
     [ask("switch-to-tab", { tabId: "11" }), "invalid_request"],
     [ask("switch-to-tab", { tabId: 1.5 }), "invalid_request"],
@@ -279,6 +323,15 @@ test("a request it does not know, or one that is malformed, is refused by name",
   // Another message type is not this controller's at all.
   assert.equal(await h.controller.handle({ type: "TRACE_SOMETHING_ELSE", request: "access" }, pageSender()), null);
   assert.equal(await h.controller.handle("TRACE_SETUP_PAGE_REQUEST", pageSender()), null);
+
+  // The popup must name the tab it is open over, and nothing more.
+  for (const message of [
+    ask("story-tabs"), askFromPopup("1"), askFromPopup(1.5), askFromPopup(-1), askFromPopup(null),
+    ask("story-tabs", { overTab: 1, windowId: 2 }), ask("story-tabs", { tabId: 1 }),
+  ]) {
+    assert.deepEqual(await h.controller.handle(message, popupSender), { ok: false, error: "invalid_request" }, JSON.stringify(message));
+  }
+  assert.deepEqual(h.browserCalls(), []);
 });
 
 test("story tabs: only story pages, most recently used first, by title, never by address", async () => {
@@ -297,13 +350,15 @@ test("story tabs: only story pages, most recently used first, by title, never by
   const text = JSON.stringify(answer);
   assert.doesNotMatch(text, /https?:|archiveofourown\.org|fanfiction\.net|bank|12345|Library|Log In|Bookmarks/, "no address, and nothing about any other tab");
   assert.deepEqual(Object.keys(answer.result.tabs[0]).sort(), ["site", "tabId", "title"]);
-  assert.deepEqual(h.browserCalls(), [["query", {}]], "one look at the open tabs; nothing is changed");
+  assert.deepEqual(h.browserCalls(), [["query", { windowId: 1 }]], "one look at this window's tabs; nothing is changed");
 });
 
 test("story tabs: at most five, titles kept to one capped line, order settled without a last-used time", async () => {
   const many = Array.from({ length: 9 }, (_, index) => ({
     id: 100 + index, url: `${AO3}/works/${index + 1}`, title: `Story ${index + 1}`, active: index === 6,
   }));
+  assert.equal(SETUP_STORY_TAB_LIMIT, 5);
+  assert.equal(SETUP_TAB_TITLE_MAX_LENGTH, 120);
   const h = createHarness({ tabs: many });
   const listed = (await h.controller.handle(ask("story-tabs"), pageSender())).result.tabs;
   assert.equal(listed.length, SETUP_STORY_TAB_LIMIT);
@@ -404,7 +459,7 @@ test("switch to tab: the list belongs to the page that asked, and only its most 
     assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 11 }), other), { ok: false, error: "not_listed" }, `tab ${id}`);
   }
   assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 11 }), popupSender), { ok: false, error: "not_listed" });
-  await h.controller.handle(ask("story-tabs"), popupSender);
+  await h.controller.handle(askFromPopup(), popupSender);
   assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 11 }), popupSender), { ok: true });
 
   // A setup page that has navigated away since it was given its list is no
@@ -415,7 +470,23 @@ test("switch to tab: the list belongs to the page that asked, and only its most 
     assert.deepEqual(await h.controller.handle(ask("story-tabs"), at(elsewhere)), { ok: false, error: "forbidden" }, elsewhere);
   }
   assert.deepEqual(h.calls, [], "and no tab was looked at or touched for it");
-  assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 11 }), first), { ok: true }, "the setup page itself still can");
+  // Having been seen elsewhere, that tab has no list left when it comes back.
+  assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 11 }), first), { ok: false, error: "not_listed" });
+  assert.deepEqual(h.browserCalls(), []);
+  await h.controller.handle(ask("story-tabs"), first);
+  assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 11 }), first), { ok: true }, "until it asks again");
+
+  // Another tab seen elsewhere, or a sender with no tab, costs this tab nothing.
+  for (const stranger of [
+    pageSender({ url: `${WEB}/library`, tab: { id: 2, url: `${WEB}/library` } }),
+    pageSender({ url: `${AO3}/works/123`, tab: { id: 11, url: `${AO3}/works/123` } }),
+    { id: "another-extension" },
+    { id: EXTENSION_ID, url: `${WEB}/library`, frameId: 0 },
+    undefined,
+  ]) {
+    assert.deepEqual(await h.controller.handle(ask("access"), stranger), { ok: false, error: "forbidden" });
+  }
+  assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 11 }), first), { ok: true });
 
   // A newer list replaces the older one, even when it is shorter.
   h.setTabs(STORY_TABS.filter((tab) => tab.id !== 13));
@@ -436,6 +507,204 @@ test("switch to tab: the list belongs to the page that asked, and only its most 
   assert.deepEqual(await h.controller.handle(ask("story-tabs"), first), { ok: false, error: "unavailable" });
   h.setPermissionsSilent(false);
   assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 12 }), first), { ok: false, error: "not_listed" });
+});
+
+test("switch to tab: a list is good for two minutes", async () => {
+  assert.equal(SETUP_STORY_LIST_LIFE_MS, 120_000);
+  for (const [sender, list] of [[pageSender(), ask("story-tabs")], [popupSender, askFromPopup()]]) {
+    const h = createHarness({ tabs: [...STORY_TABS] });
+    await h.controller.handle(list, sender);
+    h.advance(SETUP_STORY_LIST_LIFE_MS);
+    assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 11 }), sender), { ok: true }, "still good at two minutes");
+    h.advance(1);
+    h.calls.length = 0;
+    assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 11 }), sender), { ok: false, error: "not_listed" });
+    assert.deepEqual(h.calls, [], "an old list is not even checked against the tabs");
+    // It is gone, not waiting: a clock set back does not bring it back.
+    h.advance(-1);
+    assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 11 }), sender), { ok: false, error: "not_listed" });
+    await h.controller.handle(list, sender);
+    assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 11 }), sender), { ok: true }, "a new list starts a new two minutes");
+
+    // A list dated in the future (the clock went back) is not trusted either.
+    h.advance(-5_000);
+    assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 11 }), sender), { ok: false, error: "not_listed" });
+  }
+});
+
+// ---- Private Browsing and other windows ----
+
+const WINDOW_TABS = [
+  { id: 41, url: `${AO3}/works/1`, title: "Private story [Archive of Our Own]", incognito: true, windowId: 9, lastAccessed: 900 },
+  { id: 42, url: `${AO3}/works/2`, title: "Other-window story", windowId: 2, lastAccessed: 800 },
+  { id: 43, url: `${FFN}/s/3/1/x`, title: "Grouped story", groupId: 7, windowId: 1, lastAccessed: 700 },
+  { id: 44, url: `${AO3}/works/4`, title: "Discarded story", discarded: true, windowId: 1, incognito: false, lastAccessed: 600 },
+  { id: 45, url: `${AO3}/works/5`, title: "Private story said to be in this window", incognito: true, windowId: 1, lastAccessed: 950 },
+  { id: 46, url: `${AO3}/works/6`, title: "A story whose window is not known", windowId: undefined, lastAccessed: 940 },
+  { id: 47, url: `${AO3}/works/7`, title: "A story whose window is not a number", windowId: "1", lastAccessed: 930 },
+  { id: 2, url: SETUP_URL, title: "Set up Trace", windowId: 2 },
+  { id: 9, url: SETUP_URL, title: "Set up Trace", windowId: 9, incognito: true },
+];
+const listedIds = (answer) => answer.result.tabs.map(({ tabId }) => tabId);
+
+test("story tabs: only the asking tab's own window, and never Private Browsing", async () => {
+  for (const queryIgnoresFilter of [false, true]) {
+    const h = createHarness({ tabs: WINDOW_TABS, queryIgnoresFilter });
+    const page = pageSender();
+    const answer = await h.controller.handle(ask("story-tabs"), page);
+    assert.deepEqual(listedIds(answer), [43, 44]);
+    assert.doesNotMatch(JSON.stringify(answer), /Private|Other-window|not known|not a number/);
+    assert.deepEqual(h.browserCalls(), [["query", { windowId: 1 }]]);
+    // The others were not listed, so they cannot be switched to.
+    h.calls.length = 0;
+    for (const tabId of [41, 42, 45, 46, 47]) {
+      assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId }), page), { ok: false, error: "not_listed" }, String(tabId));
+    }
+    assert.deepEqual(h.calls, []);
+
+    // The setup page in another window sees that window's stories, and only those.
+    const elsewhere = pageSender({ tab: { id: 2, url: SETUP_URL, windowId: 2 } });
+    assert.deepEqual(listedIds(await h.controller.handle(ask("story-tabs"), elsewhere)), [42]);
+    assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 43 }), elsewhere), { ok: false, error: "not_listed" });
+  }
+});
+
+test("story tabs: a setup page in Private Browsing, or in a window Safari does not name, is given nothing", async () => {
+  for (const [name, tab] of Object.entries({
+    "a private tab": { id: 9, url: SETUP_URL, windowId: 9, incognito: true },
+    "a private tab said to be in the ordinary window": { id: 9, url: SETUP_URL, windowId: 1, incognito: true },
+    "a tab with no window": { id: 1, url: SETUP_URL, windowId: undefined },
+    "a tab whose window is not a number": { id: 1, url: SETUP_URL, windowId: "1" },
+    "a tab whose window is not a whole number": { id: 1, url: SETUP_URL, windowId: 1.5 },
+  })) {
+    const h = createHarness({ tabs: WINDOW_TABS, queryIgnoresFilter: true });
+    const page = pageSender({ tab });
+    assert.deepEqual(await h.controller.handle(ask("story-tabs"), page), { ok: true, result: { tabs: [] } }, name);
+    assert.deepEqual(h.browserCalls(), [], `${name}: no tab is looked at`);
+    for (const tabId of [41, 43, 45]) {
+      assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId }), page), { ok: false, error: "not_listed" }, name);
+    }
+    // It can still learn whether the story sites are allowed.
+    assert.equal((await h.controller.handle(ask("access"), page)).ok, true, name);
+  }
+});
+
+test("switch to tab: a listed tab that has since gone private or to another window is left alone", async () => {
+  for (const [name, change] of Object.entries({
+    "now in Private Browsing": { incognito: true },
+    "now in another window": { windowId: 2 },
+    "now in a private window": { windowId: 9, incognito: true },
+    "its window no longer known": { windowId: undefined },
+  })) {
+    const h = createHarness({ tabs: WINDOW_TABS });
+    await h.controller.handle(ask("story-tabs"), pageSender());
+    h.setTabs(WINDOW_TABS.map((tab) => (tab.id === 43 ? { ...tab, ...change } : tab)));
+    assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 43 }), pageSender()), { ok: false, error: "not_a_story" }, name);
+    assert.equal(h.calls.some(([call]) => call === "update"), false, `${name}: the tab is left alone`);
+  }
+
+  // The asking tab itself has moved: its list was for the window it was in.
+  for (const [name, tab] of Object.entries({
+    "to another window": { id: 1, url: SETUP_URL, windowId: 2 },
+    "to Private Browsing": { id: 1, url: SETUP_URL, windowId: 1, incognito: true },
+    "to a window Safari does not name": { id: 1, url: SETUP_URL, windowId: undefined },
+  })) {
+    const h = createHarness({ tabs: WINDOW_TABS });
+    await h.controller.handle(ask("story-tabs"), pageSender());
+    h.calls.length = 0;
+    assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 43 }), pageSender({ tab })), { ok: false, error: "not_listed" }, name);
+    assert.deepEqual(h.calls, [], name);
+    assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 43 }), pageSender()), { ok: false, error: "not_listed" }, `${name}: and the list is gone`);
+  }
+});
+
+test("the popup's rows follow the same rule, from the tab it is open over", async () => {
+  const h = createHarness({ tabs: [...WINDOW_TABS, { id: 27, url: `${WEB}/library`, windowId: 1 }], queryIgnoresFilter: true });
+  assert.deepEqual(listedIds(await h.controller.handle(askFromPopup(1), popupSender)), [43, 44]);
+  assert.deepEqual(h.browserCalls(), [["get", 1], ["query", { windowId: 1 }]]);
+  assert.deepEqual(listedIds(await h.controller.handle(askFromPopup(2), popupSender)), [42]);
+
+  // Open over anything but an ordinary setup page, it is given nothing, and no window is read.
+  for (const [name, overTab] of Object.entries({
+    "the setup page in Private Browsing": 9,
+    "a story": 43,
+    "another Trace page": 27,
+    "a private story": 41,
+    "a tab that is not there": 999,
+  })) {
+    h.calls.length = 0;
+    assert.deepEqual(await h.controller.handle(askFromPopup(overTab), popupSender), { ok: true, result: { tabs: [] } }, name);
+    assert.deepEqual(h.browserCalls(), [["get", overTab]], name);
+    assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 43 }), popupSender), { ok: false, error: "not_listed" }, name);
+  }
+
+  // A listed tab that has gone private by the time of the tap is left alone.
+  await h.controller.handle(askFromPopup(1), popupSender);
+  h.setTabs(WINDOW_TABS.map((tab) => (tab.id === 43 ? { ...tab, incognito: true } : tab)));
+  assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 43 }), popupSender), { ok: false, error: "not_a_story" });
+  assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 44 }), popupSender), { ok: true });
+});
+
+// ---- titles ----
+
+test("story tabs: a title that is an address, or shaped like one, is sent as no title", async () => {
+  const story = `${AO3}/works/123/chapters/456?view_adult=true#workskin`;
+  const titleFor = async (title, url = story) => {
+    const h = createHarness({ tabs: [{ id: 50, url, title }] });
+    return (await h.controller.handle(ask("story-tabs"), pageSender())).result.tabs[0].title;
+  };
+  for (const title of [
+    story, ` ${story} `, story.toUpperCase(), `${AO3}/works/123`, "https://archiveofourown.org", "http://archiveofourown.org/works/123",
+    "https://archiveofourown.org/works/123?secret=1", "https://bank.example/accounts/12345", "https://archiveofourown.org/works/1 2 3",
+    "archiveofourown.org", "archiveofourown.org/works/123", "www.archiveofourown.org/works/123/chapters/456", "ARCHIVEOFOUROWN.ORG/works/123",
+    "archiveofourown.org:443/works/123", "download.archiveofourown.org/x", "www.fanfiction.net/s/4821/2/", "m.fanfiction.net",
+    "javascript:alert(1)", "data:text/html,<b>x</b>", "about:blank", "blob:https://archiveofourown.org/1", "file:///works/123",
+    "safari-web-extension://trace/popup.html", "view-source:https://archiveofourown.org/works/123",
+    "​https://archiveofourown.org/works/123", "https://archiveofourown.org/‮works/123", "archiveofourown.org​/works/123",
+  ]) {
+    assert.equal(await titleFor(title), "", JSON.stringify(title));
+  }
+  assert.equal(await titleFor("m.fanfiction.net/s/4821/2/", "https://m.fanfiction.net/s/4821/2/"), "");
+
+  // Ordinary titles are left as they are, colons, dots and slashes included.
+  for (const title of [
+    "The Long Way Round - Chapter 3 - quillfeather [Archive of Our Own]",
+    "Re:Zero - Chapter 1 - someone [Archive of Our Own]",
+    "Fate: Stay the Night Chapter 2, a fanfic | FanFiction",
+    "archiveofourown.org is down again - Chapter 1",
+    "Why https://example.com is not a title",
+    "Untitled", "Chapter1", "12.5", "and/or", "a.b", "Draft v1.2", "Q&A", "100%", "[Archive of Our Own]",
+  ]) {
+    assert.equal(await titleFor(title), title, title);
+  }
+});
+
+test("story tabs: characters that hide or reorder text are taken out of titles", async () => {
+  const titleFor = async (title) => {
+    const h = createHarness({ tabs: [{ id: 50, url: `${AO3}/works/123`, title }] });
+    return (await h.controller.handle(ask("story-tabs"), pageSender())).result.tabs[0].title;
+  };
+  for (const [given, sent] of [
+    ["a‮b reversed", "ab reversed"],
+    ["‪one‫ two‬ ‭three‮", "one two three"],
+    ["⁦iso⁧lat⁨es⁩", "isolates"],
+    ["left‎right‏mark؜", "leftrightmark"],
+    ["zero​width‌space⁠joiner﻿", "zerowidthspacejoiner"],
+    ["in⁡vis⁢ib⁣le⁤", "invisible"],
+    ["​​", ""],
+    ["‎ ‏", ""],
+    ["c1\u0085control\u009f", "c1 control"],
+    ["line one\nline two\ttab sep arated", "line one line two tab sep arated"],
+  ]) {
+    assert.equal(await titleFor(given), sent, JSON.stringify(given));
+  }
+  // The zero-width joiner stays: emoji are built with it. So do accents and other scripts.
+  for (const title of ["family \u{1f468}‍\u{1f469}‍\u{1f467} time", "\u{1f3f3}️‍\u{1f308} flag", "café über naïve", "物語 مرحبا שלום"]) {
+    assert.equal(await titleFor(title), title, JSON.stringify(title));
+  }
+  // The cap counts what is left, in whole characters.
+  assert.equal(Array.from(await titleFor("‮" + "\u{1f600}".repeat(200))).length, SETUP_TAB_TITLE_MAX_LENGTH);
+  assert.equal(await titleFor("​".repeat(500) + "kept"), "kept");
 });
 
 test("a flood of requests is refused without reaching the browser", async () => {
@@ -589,7 +858,7 @@ test("platform: Safari on a Mac registers at once, then does nothing", async () 
       [ask("access"), pageSender()],
       [ask("story-tabs"), pageSender()],
       [ask("switch-to-tab", { tabId: 11 }), pageSender()],
-      [ask("story-tabs"), popupSender],
+      [askFromPopup(), popupSender],
       [ask("access"), at(`${AO3}/works/1`)],
     ]) {
       assert.deepEqual(await deliverTo(h)(message, sender), { ok: false, error: "unavailable" }, `${os}: ${message.request}`);
@@ -724,9 +993,18 @@ test("fuzz: whatever the open tabs are, only story pages are ever listed, and ne
   for (let round = 0; round < 400; round += 1) {
     const tabs = Array.from({ length: 12 }, (_, index) => {
       const url = address();
-      return { id: index + 1, url, title: `tab ${index + 1}`, lastAccessed: Math.floor(random() * 1000) };
+      return {
+        id: index + 1,
+        url,
+        // Some tabs have no title yet, and Safari shows their address instead.
+        title: random() < 0.15 ? url : `tab ${index + 1}`,
+        lastAccessed: Math.floor(random() * 1000),
+        // Most are in the asking tab's window; some are elsewhere, private, or do not say.
+        windowId: pick([1, 1, 1, 1, 2, undefined]),
+        ...(random() < 0.15 ? { incognito: true } : random() < 0.2 ? { incognito: false } : {}),
+      };
     });
-    const h = createHarness({ tabs });
+    const h = createHarness({ tabs, queryIgnoresFilter: round % 2 === 1 });
     const answer = await h.controller.handle(ask("story-tabs"), pageSender());
     assert.equal(answer.ok, true);
     const listed = answer.result.tabs;
@@ -736,8 +1014,10 @@ test("fuzz: whatever the open tabs are, only story pages are ever listed, and ne
     listedTotal += listed.length;
 
     const eligible = tabs.filter((tab) => {
-      // Stated on its own, not through the function under test: a story host,
-      // a work key, and a story-page classification, for the same site.
+      // Stated on its own, not through the function under test: in the asking
+      // tab's window and not private; a story host, a work key, and a
+      // story-page classification, for the same site.
+      if (tab.windowId !== 1 || tab.incognito === true) return false;
       let host;
       try { host = new URL(tab.url); } catch { return false; }
       if (host.protocol !== "https:") return false;
@@ -762,5 +1042,5 @@ test("fuzz: whatever the open tabs are, only story pages are ever listed, and ne
     }
     assert.equal(h.calls.some(([name]) => name === "update"), false);
   }
-  assert.ok(consideredTotal === 4800 && listedTotal > 100, `the fuzz reached story pages (${listedTotal} listed of ${consideredTotal})`);
+  assert.ok(consideredTotal === 4800 && listedTotal > 60, `the fuzz reached story pages (${listedTotal} listed of ${consideredTotal})`);
 });
