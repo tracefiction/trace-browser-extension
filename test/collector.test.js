@@ -8439,7 +8439,7 @@ test("a save refused while the background wakes is not re-sent once another acco
 // first save at once, before the background has an account to save it for.
 // The harness lets a test choose which account the background answers for,
 // hold the replies that would tell the page about it, and answer each save.
-function owedSaveHarness({ binding = null, tab = null, storyTextLater = false } = {}) {
+function owedSaveHarness({ binding = null, tab = null, storyTextLater = false, stateReplyMs = 0 } = {}) {
   // What outlives a page in its tab: the account the background answers for,
   // the account the story is saved in, and the tab's session storage.
   const world = tab || { binding, savedFor: null, marker: null };
@@ -8477,7 +8477,9 @@ function owedSaveHarness({ binding = null, tab = null, storyTextLater = false } 
     onSendMessage(message, respond) {
       if (message.type === "TRACE_WORK_STATE_GET") {
         if (holding) held.push(() => respond(workState()));
-        else if (typeof respond === "function") respond(workState());
+        else if (typeof respond !== "function") return true;
+        else if (stateReplyMs > 0) setTimeout(() => respond(workState()), stateReplyMs);
+        else respond(workState());
         return true;
       }
       if (message.type === "TRACE_ACCOUNT_PROJECTION_GET") {
@@ -8491,6 +8493,7 @@ function owedSaveHarness({ binding = null, tab = null, storyTextLater = false } 
   return {
     h,
     sends: () => autoTrackSends(h),
+    stateReads: () => h.sent.filter((message) => message.type === "TRACE_WORK_STATE_GET").length,
     // The background's next answers come from this account (null: none).
     answerAs(next) { world.binding = next; },
     // The storage change that tells an open page to read the account again.
@@ -8577,6 +8580,7 @@ const OWED_SAVE_ORDERINGS = [
     async run(p) { p.answerAs("1.first"); p.refuse(); await delay(400); } },
 ];
 
+test.describe("a save refused before any account connected", { concurrency: true }, () => {
 for (const ordering of OWED_SAVE_ORDERINGS) {
   test(`a save refused before any account connected is made once: ${ordering.name}`, async () => {
     const p = owedSaveHarness();
@@ -8596,6 +8600,7 @@ for (const ordering of OWED_SAVE_ORDERINGS) {
     p.close();
   });
 }
+});
 
 test("a reader with no account is not asked for again on returning to the tab", async () => {
   const p = owedSaveHarness();
@@ -8818,8 +8823,10 @@ const RELOAD_ORDERINGS = [
     async run(p) {
       const q = p.reload(); await delay(300);
       assert.equal(q.sends(), 0);
+      assert.doesNotMatch(q.handle(), /Adding/, "nothing is being saved while no account is connected");
       q.answerAs("1.first"); q.announce(); await delay(1_000);
       assert.equal(q.sends(), 0, "the earlier request is given time to show up as saved");
+      assert.match(q.handle(), /Adding/, "the page shows the save as under way during the wait");
       await delay(INHERITED_GRACE_MS);
       return q;
     } },
@@ -8834,8 +8841,10 @@ const RELOAD_ORDERINGS = [
     async run(p) {
       const q = p.reload(); await delay(300);
       q.answerAs("1.first"); q.announce(); await delay(1_500);
-      // The background finishes the first request; the page that sent it is gone.
-      q.savedWithoutAnswer(); q.announce(); q.pageshow();
+      q.pageshow(); await delay(300);
+      // The background finishes the first request; the page that sent it is
+      // gone, and nothing tells this page before it asks.
+      q.savedWithoutAnswer();
       await delay(INHERITED_GRACE_MS);
       return q;
     } },
@@ -8873,6 +8882,7 @@ const RELOAD_ORDERINGS = [
     } },
 ];
 
+test.describe("a first save left open by a reloaded page", { concurrency: true }, () => {
 for (const ordering of RELOAD_ORDERINGS) {
   test(`a first save left open by a reloaded page is made once: ${ordering.name}`, async () => {
     const p = owedSaveHarness();
@@ -8882,6 +8892,7 @@ for (const ordering of RELOAD_ORDERINGS) {
     const q = await ordering.run(p);
     assert.equal(q.sends(), ordering.sends, "what the reloaded page sends for the connected account");
     if (ordering.sends > 0) q.confirm();
+    else assert.match(q.handle(), /Saved/, "the first request's save shows on the page");
     // Past the quiet retry and the wait, with a repeated announcement, a
     // return to the tab and the page being shown again.
     await delay(1_800);
@@ -8894,6 +8905,7 @@ for (const ordering of RELOAD_ORDERINGS) {
     q.close();
   });
 }
+});
 
 test("a reloaded page asks for nothing while no account connects", async () => {
   const p = owedSaveHarness();
@@ -8926,6 +8938,7 @@ test("a save inherited by a reloaded page is not sent for an account that replac
   q.returnToTab();
   await delay(INHERITED_GRACE_MS + 1_500);
   assert.equal(q.sends(), 0);
+  assert.doesNotMatch(q.handle(), /Adding/, "and the page does not go on showing a save under way");
   q.close();
 });
 
@@ -8949,11 +8962,40 @@ test("a save inherited by a reloaded page is dropped when the first account it h
   q.close();
 });
 
-test("a save sent while an account was connected is not inherited by a reloaded page", async () => {
+test("a save sent for an account the page knows is not inherited by a reloaded page", async () => {
+  await Promise.all([[true, false], [false, false], [true, true]].map(async ([confirmed, viaNone]) => {
+    const p = owedSaveHarness();
+    await delay(50);
+    p.refuse();
+    await delay(100);
+    p.answerAs("1.first");
+    p.announce();
+    await delay(500);
+    assert.equal(p.sends(), 2, "the save that is owed goes out, and the page knows which account it is for");
+    assert.equal(p.marker().open, undefined, "so it is not marked open");
+    if (confirmed) p.confirm();
+    await delay(100);
+    // Another account is connected by the time the tab is reloaded.
+    p.answerAs(viaNone ? null : "2.second");
+    const q = p.reload();
+    await delay(500);
+    q.answerAs("2.second");
+    q.announce();
+    await delay(INHERITED_GRACE_MS + 1_500);
+    q.returnToTab();
+    await delay(INHERITED_GRACE_MS + 1_500);
+    const how = `${confirmed ? "confirmed" : "unanswered"}, ${viaNone ? "through no account" : "directly"}`;
+    assert.equal(q.sends(), 0, how);
+    assert.doesNotMatch(q.handle(), /Adding/, how);
+    q.close();
+  }));
+});
+
+test("a save sent just before the page heard which account it has is not inherited once it has heard", async () => {
   for (const viaNone of [false, true]) {
     const p = owedSaveHarness({ binding: "1.first" });
     await delay(50);
-    assert.equal(p.marker().open, undefined, "the page knows its account, so the request is not open");
+    assert.equal(p.marker().open, undefined, "the first answer named the account, so the request is no longer open");
     p.refuse();
     await delay(100);
     // Another account is connected by the time the tab is reloaded.
@@ -8968,6 +9010,32 @@ test("a save sent while an account was connected is not inherited by a reloaded 
     assert.equal(q.sends(), 0, viaNone ? "through no account" : "directly");
     q.close();
   }
+});
+
+test("the wait for an inherited save is armed once, however often the page is shown during it", async () => {
+  const p = owedSaveHarness();
+  await delay(50);
+  // The background answers a question about the story a moment later, as it does outside a test.
+  const q = p.reload({ stateReplyMs: 300 });
+  await delay(300);
+  q.answerAs("1.first");
+  q.announce();
+  for (let visit = 0; visit < 5; visit += 1) {
+    await delay(200);
+    q.returnToTab();
+    q.pageshow();
+  }
+  await delay(1_500);
+  const readsBefore = q.stateReads();
+  assert.equal(q.sends(), 0);
+  await delay(INHERITED_GRACE_MS);
+  assert.equal(q.stateReads() - readsBefore, 1, "the background is asked once whether the story is saved");
+  assert.equal(q.sends(), 1, "and one save is sent");
+  q.confirm();
+  await delay(1_800);
+  assert.equal(q.sends(), 1);
+  assert.match(q.handle(), /Saved/);
+  q.close();
 });
 
 test("a page shown again without a reload does not ask a second time while its first request is open", async () => {

@@ -1976,7 +1976,7 @@ var autoTrackAwaitingLink = false;
 // the first account it hears of is connected it gives that request a moment
 // to show up as saved, asks the background, and sends one save only if the
 // story is not there.
-var autoTrackOwed = null; // { href, generation } or { href, inherited, account }
+var autoTrackOwed = null; // { href, generation } or { href, inherited, account, item }
 var autoTrackInFlight = 0;
 var AUTO_TRACK_INHERITED_GRACE_MS = 4_000;
 
@@ -2004,7 +2004,7 @@ function inheritOpenAutoTrack(item) {
   var key = autoTrackFingerprint(item);
   var marker = recentAutoTrackMarker(key);
   if (!marker || marker.open !== true) return;
-  autoTrackOwed = { href: location.href, inherited: key, account: null };
+  autoTrackOwed = { href: location.href, inherited: key, account: null, item: item };
   payOwedAutoTrack();
 }
 
@@ -2044,10 +2044,16 @@ function payOwedAutoTrack() {
 }
 
 function confirmInheritedAutoTrack(owed) {
+  // The wait is armed once, however often the page asks what it owes.
+  if (owed.waiting === true) return;
+  owed.waiting = true;
+  // The page is saving from here on, as the popup says, not offering to add.
+  updateAutoTrackPendingForStory(owed.item);
   setTimeout(function () {
     if (autoTrackOwed !== owed) return;
+    var workKey = getWorkKeyFromUrl();
     sendCollectorMessage(
-      { type: WORK_STATE_GET_MESSAGE, workKey: getWorkKeyFromUrl() },
+      { type: WORK_STATE_GET_MESSAGE, workKey: workKey },
       function (response) {
         if (autoTrackOwed !== owed) return;
         var saved = !!response && !!response.state && response.state.status === "saved";
@@ -2068,6 +2074,9 @@ function confirmInheritedAutoTrack(owed) {
         }
         if (saved) {
           autoTrackOwed = null;
+          if (applyBackgroundWorkStateForStory(workKey, response.state)) {
+            rerenderStoryHandleForWorkKey(workKey);
+          }
           return;
         }
         // From here it is an ordinary debt to the account that is connected.
