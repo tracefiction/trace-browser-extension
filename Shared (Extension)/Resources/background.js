@@ -280,6 +280,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return true;
     }
   }
+  var AO3_COLLECTION_PREFIX = /^\/collections\/[A-Za-z0-9_]{1,255}(?=\/works\/)/;
+  function ao3WorkPath(pathname) {
+    return pathname.replace(AO3_COLLECTION_PREFIX, "");
+  }
   function workKeyFromArchiveUrl(rawUrl, expectedHost) {
     if (typeof rawUrl !== "string" || rawUrl.length > 4096) return null;
     try {
@@ -289,7 +293,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (expectedHost === "ao3") {
         const supported = host === "archiveofourown.org" || host.endsWith(".archiveofourown.org") || host === "archiveofourown.gay" || host.endsWith(".archiveofourown.gay") || host === "archive.transformativeworks.org" || host === "ao3.org" || host.endsWith(".ao3.org");
         if (!supported) return null;
-        const match2 = url.pathname.match(/^\/works\/([1-9][0-9]{0,19})(?:\/|$)/);
+        const match2 = ao3WorkPath(url.pathname).match(/^\/works\/([1-9][0-9]{0,19})(?:\/|$)/);
         return match2?.[1] ? `ao3:${match2[1]}` : null;
       }
       if (host !== "www.fanfiction.net" && host !== "m.fanfiction.net") return null;
@@ -4688,7 +4692,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           return Object.freeze({ kind: "blocked_archive", site: "ao3", canImport: false });
         }
         return Object.freeze({
-          kind: /^\/works\/\d+(?:\/chapters\/\d+)?\/?$/i.test(url.pathname) ? "supported_story" : "supported_archive",
+          // A work's own page or one of its chapters, directly or through a collection.
+          kind: /^\/works\/\d+(?:\/chapters\/\d+)?\/?$/i.test(ao3WorkPath(url.pathname)) ? "supported_story" : "supported_archive",
           site: "ao3",
           canImport: true
         });

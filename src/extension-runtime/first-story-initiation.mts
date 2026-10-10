@@ -5,6 +5,7 @@ import type {
   TabsPort,
 } from "./browser-platform.mjs";
 import { extensionCall } from "./browser-platform.mjs";
+import { ao3WorkPath } from "./archive-sender.mjs";
 
 const MAX_IMPORT_PAYLOAD_BYTES = 512 * 1_024;
 const MAX_IMPORT_ITEMS = 250;
@@ -114,7 +115,8 @@ export function classifyActiveTabUrl(
         return Object.freeze({ kind: "blocked_archive", site: "ao3", canImport: false });
       }
       return Object.freeze({
-        kind: /^\/works\/\d+(?:\/chapters\/\d+)?\/?$/i.test(url.pathname)
+        // A work's own page or one of its chapters, directly or through a collection.
+        kind: /^\/works\/\d+(?:\/chapters\/\d+)?\/?$/i.test(ao3WorkPath(url.pathname))
           ? "supported_story"
           : "supported_archive",
         site: "ao3",
