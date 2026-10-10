@@ -213,6 +213,7 @@ export class SetupPageController {
   readonly #mode: "callback" | "promise";
   readonly #webOrigin: string;
   readonly #webTabPattern: string;
+  readonly #webAccessPattern: string;
   readonly #storyOrigins: readonly string[];
   readonly #access: BrowserArchivePermissionSnapshotPort;
   readonly #now: () => number;
@@ -229,6 +230,7 @@ export class SetupPageController {
     const webUrl = new URL(environment.webOrigin);
     this.#webOrigin = webUrl.origin;
     this.#webTabPattern = `${webUrl.protocol}//${webUrl.hostname}/safari-setup*`;
+    this.#webAccessPattern = `${webUrl.protocol}//${webUrl.hostname}/*`;
     this.#storyOrigins = Object.freeze([...(environment.storyOrigins ?? STORY_SITE_ORIGINS)]);
     this.#access = new BrowserArchivePermissionSnapshotPort(
       environment.permissions,
@@ -457,6 +459,12 @@ export class SetupPageController {
   }
 
   async #pushAccess(): Promise<void> {
+    // Looking for Trace's own tabs, or messaging one, while Safari has not
+    // allowed Trace's site makes Safari ask the reader for that site, over
+    // whatever they are reading. So nothing here names Trace's origin unless
+    // access to it is already held; without it no setup page could hear this.
+    const held = await this.#access.containsOrigins([this.#webAccessPattern]).catch(() => null);
+    if (held !== true) return;
     const access = await this.#readAccess();
     if (access === null) return;
     let tabs: readonly BrowserTab[];

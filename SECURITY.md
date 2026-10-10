@@ -238,7 +238,8 @@ What the page can learn:
 
 - whether the five story-site addresses are allowed, and how broadly: every
   site, the story sites, or only Trace's own page. It is told again when that
-  changes;
+  changes, and only while Trace's own site is allowed: without that, the
+  extension does not look for or message a Trace tab at all;
 - the open story tabs in its own window: for up to five tabs that are story
   pages on AO3 or FanFiction.net, a tab id, the tab's title (one line, at most
   120 characters) and which site it is on. Nothing is listed while the story

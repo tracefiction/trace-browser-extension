@@ -4039,7 +4039,8 @@ test("a title that never arrives leaves the confirmation as it is and stops aski
   h.runTimeouts();
   await settle(h, 12);
   assert.equal(identityAsks(), asked, "the lookup is bounded");
-  assert.match(h.document.getElementById("popup-earned-heading").textContent, /in your Library$/);
+  assert.equal(h.document.getElementById("popup-earned-heading").textContent, "Saved to your Library",
+    "this popup started the page, so the save is new");
   assert.doesNotMatch(earnedText(h), /Your story by|the author/);
 });
 
@@ -4173,8 +4174,129 @@ test("a page that answers with a blank title is asked a few more times, not for 
   assert.equal(asks(), before + 3, "three more tries");
   await pass(h, 10 * 60_000);
   assert.equal(asks(), before + 3, "and then it stops");
-  assert.match(earnedHeading(h), /in your Library$/);
+  assert.equal(earnedHeading(h), "Saved to your Library", "this popup started the page, so the save is new");
   assert.notEqual(earnedHeading(h).trim(), "");
+});
+
+// ---- A save this popup started, and one it only found ----
+
+const SAVED_WORK = { workKey: "ao3:123", status: "saved", entry: { status: "PLANNING", canonicalReaderStatus: "SAVED" }, syncVersion: "v1" };
+
+/** The popup on a story with a connected account. `granted` is what Safari allows when it opens. */
+function popupOnStoryWithAccount({ granted, activeWork = null, storageState = {}, ...options }) {
+  const popupState = {
+    ok: true,
+    authState: CONNECTED_AUTH,
+    activeTab: { kind: "supported_story", site: "ao3", canImport: true },
+    activeWork,
+    autoTrackEnabled: true,
+  };
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    userAgent: IPHONE_UA,
+    sessionSnapshot: CONNECTED_AUTH,
+    grantedOrigins: [...granted],
+    storageState,
+    popupState,
+    tabResponse: namedStory,
+    ...options,
+  });
+  // The page reports in after it runs: the background writes this.
+  const pageRan = () => h.emitStorageChange({ traceArchiveReadiness: { newValue: { lastArchiveSeenAt: Date.now() + 1_000 } } });
+  const kicker = () => h.document.getElementById("popup-earned-kicker-text").textContent;
+  return { h, popupState, pageRan, kicker };
+}
+
+test("a story saved after this popup asked for the story sites reads Saved, not Already", async () => {
+  // Only this site was allowed from Safari's menu, so nothing has been saved yet.
+  const { h, popupState, pageRan, kicker } = popupOnStoryWithAccount({ granted: ["https://*.archiveofourown.org/*"] });
+  await settle(h, 16);
+  const primary = h.document.getElementById("popup-earned-primary");
+  assert.equal(primary.textContent, "Allow story sites");
+  primary.click();
+  await settle(h, 16);
+  assert.equal(h.permissionRequests.length, 1);
+  assert.equal(earnedHeading(h), "Saving your story…");
+  assert.equal(h.reloads.length, 1);
+
+  // The page runs with full access and saves the story before the popup first looks.
+  popupState.activeWork = SAVED_WORK;
+  pageRan();
+  await settle(h, 16);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P2");
+  assert.equal(kicker(), "Saved to your Library");
+  assert.equal(earnedHeading(h), "The Long Way Round");
+  assert.doesNotMatch(earnedText(h), /Already in your Library/);
+});
+
+test("a story saved after this popup reloaded it for its first run reads Saved too", async () => {
+  // Access was already complete (Safari's Every Website); the popup only has to start the page.
+  const { h, popupState, pageRan, kicker } = popupOnStoryWithAccount({ granted: FULL_EARNED_ORIGINS });
+  await settle(h, 16);
+  assert.equal(h.permissionRequests.length, 0);
+  assert.equal(earnedHeading(h), "Saving your story…");
+  assert.equal(h.reloads.length, 1);
+  popupState.activeWork = SAVED_WORK;
+  pageRan();
+  await settle(h, 16);
+  assert.equal(kicker(), "Saved to your Library");
+});
+
+test("a popup opened later on a story that is already saved does not call it newly saved", async () => {
+  // Setup finished in an earlier popup. The page is still saving when this one
+  // opens, and has finished by the time it first looks: found there, not seen saved.
+  let looks = 0;
+  const { h, kicker } = popupOnStoryWithAccount({
+    granted: FULL_EARNED_ORIGINS,
+    storageState: { traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 86_400_000 } },
+    runtimeResponse(message) {
+      if (message.type !== "TRACE_POPUP_GET_STATE") return undefined;
+      looks += 1;
+      return {
+        ok: true,
+        authState: CONNECTED_AUTH,
+        firstSaveSeen: true,
+        activeTab: { kind: "supported_story", site: "ao3", canImport: true },
+        activeWork: looks === 1 ? null : SAVED_WORK,
+        autoTrackEnabled: true,
+      };
+    },
+  });
+  await settle(h, 16);
+  assert.equal(h.permissionRequests.length, 0);
+  assert.deepEqual(h.reloads, [], "this popup started nothing");
+  assert.equal(looks, 2);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P2");
+  assert.equal(kicker(), "Already in your Library");
+  assert.equal(earnedHeading(h), "The Long Way Round");
+
+  // One that opens after the save is done shows the everyday view, with no claim at all.
+  const later = popupOnStoryWithAccount({
+    granted: FULL_EARNED_ORIGINS,
+    activeWork: SAVED_WORK,
+    storageState: { traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 86_400_000 } },
+  });
+  await settle(later.h, 16);
+  assert.equal(later.h.document.body.dataset.tracePopupStateCode, "P11");
+  assert.doesNotMatch(earnedText(later.h), /Saved to your Library|Already in your Library/);
+});
+
+test("asking again for a story the Library already lists does not call it newly saved", async () => {
+  // Access lapsed on a story Trace saved before; the last page sync still lists it.
+  const { h, popupState, pageRan, kicker } = popupOnStoryWithAccount({
+    granted: ["https://*.archiveofourown.org/*"],
+    storageState: { libraryOverlayCache: { entries: { "ao3:123": { entryId: "entry-1" } } } },
+  });
+  await settle(h, 16);
+  h.document.getElementById("popup-earned-primary").click();
+  await settle(h, 16);
+  assert.equal(h.permissionRequests.length, 1);
+  popupState.activeWork = SAVED_WORK;
+  pageRan();
+  await settle(h, 16);
+  assert.equal(kicker(), "Already in your Library");
 });
 
 // ---- The popup over Trace's own setup page ----

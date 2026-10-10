@@ -220,6 +220,11 @@ const ACTIVE_TAB_PROBE_FILES = Object.freeze([
 ]);
 let earnedPreparedContext = null;
 let earnedAwaitingStory = null;
+// This popup started this story's first save (it asked for the story sites,
+// or reloaded the page for its first run) and the Library did not already
+// list the story. A save found after that happened now, however late the
+// popup first looks.
+let earnedSaveStartedHere = false;
 let earnedCurrentPage = null;
 // True in the popup that finished setup on a story page. That story's save
 // is confirmed here even when it landed before this popup first looked.
@@ -2233,7 +2238,7 @@ async function checkConfirmedStory() {
     if (storyConfirmation !== watch) return;
     stopStoryConfirmation();
     void recordEarnedEvent("story_confirmed_in_popup");
-    watch.render.saved(state.activeWork, identity, watch.firstCheck);
+    watch.render.saved(state.activeWork, identity, watch.firstCheck && !earnedSaveStartedHere);
     return;
   }
   if (state.activeStoryUnavailable === true) {
@@ -2423,12 +2428,18 @@ async function prepareEarnedPermissionFlow() {
     }
     // Access is complete (for example, Safari's Every Website choice). There
     // is no permission decision left, so continue without an extra tap.
-    earnedAwaitingStory = story;
+    awaitEarnedStory(story);
     renderEarnedAccessPending(story);
     await reloadEarnedStory();
     return;
   }
   renderEarnedPermissionInvitation(story, hasGrant, earnedGrantCoverage(grantedOrigins));
+}
+
+/** Start waiting for this story's save, which this popup is about to set going. */
+function awaitEarnedStory(story) {
+  earnedAwaitingStory = story;
+  earnedSaveStartedHere = Boolean(story) && earnedCurrentPage?.knownInLibrary !== true;
 }
 
 async function allowAccessAndAddEarnedStory() {
@@ -2484,7 +2495,7 @@ async function allowAccessAndAddEarnedStory() {
     earnedPreparedContext = Object.freeze({ story, hasGrant: true });
     // Only a story page has a story to wait for. A list or the site's home
     // page keeps its open-any-story prompt.
-    earnedAwaitingStory = story.kind === "story" ? story : null;
+    awaitEarnedStory(story.kind === "story" ? story : null);
     const registration = await reconcileEarnedRegistration();
     if (registration?.ok !== true || registration?.registered !== true) {
       throw new Error("registration_failed");

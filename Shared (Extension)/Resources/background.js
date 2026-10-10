@@ -8417,6 +8417,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #mode;
     #webOrigin;
     #webTabPattern;
+    #webAccessPattern;
     #storyOrigins;
     #access;
     #now;
@@ -8432,6 +8433,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       const webUrl = new URL(environment.webOrigin);
       this.#webOrigin = webUrl.origin;
       this.#webTabPattern = `${webUrl.protocol}//${webUrl.hostname}/safari-setup*`;
+      this.#webAccessPattern = `${webUrl.protocol}//${webUrl.hostname}/*`;
       this.#storyOrigins = Object.freeze([...environment.storyOrigins ?? STORY_SITE_ORIGINS]);
       this.#access = new BrowserArchivePermissionSnapshotPort(
         environment.permissions,
@@ -8625,6 +8627,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return Object.freeze({ ok: true });
     }
     async #pushAccess() {
+      const held = await this.#access.containsOrigins([this.#webAccessPattern]).catch(() => null);
+      if (held !== true) return;
       const access = await this.#readAccess();
       if (access === null) return;
       let tabs;

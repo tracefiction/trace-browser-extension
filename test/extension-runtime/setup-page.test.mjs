@@ -127,6 +127,10 @@ function createHarness(options = {}) {
     async contains({ origins }) {
       calls.push(["contains"]);
       if (silent) throw new Error("no answer");
+      if (options.traceAccessUnknown && origins.includes(`${WEB}/*`)) {
+        if (options.traceAccessUnknown === "silent") return undefined;
+        throw new Error("no answer");
+      }
       return granted.includes("*://*/*") || origins.every((origin) => granted.includes(origin));
     },
     request() {
@@ -819,6 +823,53 @@ test("when access changes, every open setup page is told, and no other tab", asy
   loose.added[0]();
   await settled();
   assert.deepEqual(loose.sent.map(({ tabId }) => tabId), [1, 31]);
+});
+
+test("without access to Trace's own site, a change in access touches nothing of Trace's", async () => {
+  const setupTabs = [...OTHER_TABS, ...STORY_TABS];
+  const namesTrace = (h) => JSON.stringify([h.browserCalls(), h.sent]).includes("tracefiction");
+  for (const [name, granted] of Object.entries({
+    "one story site only, from Safari's menu": ["https://*.archiveofourown.org/*"],
+    "that site by its own address": ["https://archiveofourown.org/*"],
+    "all five story sites": [...STORY_SITE_ORIGINS],
+    "another Trace host": [...STORY_SITE_ORIGINS, "https://app.tracefiction.com/*"],
+    "Trace's site over plain http": [...STORY_SITE_ORIGINS, "http://www.tracefiction.com/*"],
+    "nothing at all": [],
+  })) {
+    const h = createHarness({ install: true, granted: [], tabs: setupTabs });
+    h.setGranted(granted);
+    h.added[0]();
+    h.removed[0]();
+    for (let event = 0; event < 5; event += 1) h.added[0]();
+    await settled();
+    assert.deepEqual(h.browserCalls(), [], `${name}: no tab is looked for, by address or at all`);
+    assert.deepEqual(h.sent, [], `${name}: and none is messaged`);
+    assert.equal(namesTrace(h), false, name);
+  }
+
+  // Not knowing is not holding: Safari gives no answer about Trace's site.
+  for (const traceAccessUnknown of [true, "silent"]) {
+    const h = createHarness({ install: true, traceAccessUnknown, tabs: setupTabs });
+    h.added[0]();
+    await settled();
+    assert.deepEqual([h.browserCalls(), h.sent], [[], []], String(traceAccessUnknown));
+  }
+
+  // With Trace's site allowed, the same partial grant is told to the open setup pages.
+  const h = createHarness({ install: true, granted: [`${WEB}/*`], tabs: setupTabs });
+  h.setGranted(["https://*.archiveofourown.org/*", `${WEB}/*`]);
+  h.added[0]();
+  await settled();
+  assert.deepEqual(h.sent.map(({ tabId, message }) => [tabId, message.storySitesAllowed, message.scope]), [
+    [1, false, "this-site"],
+    [31, false, "this-site"],
+  ]);
+  assert.deepEqual(h.browserCalls(), [["query", { url: [`${WEB}/safari-setup*`] }]]);
+
+  // Access to Trace's site is asked about first, before any tab is named.
+  const order = h.calls.map(([call]) => call);
+  assert.equal(order[0], "contains");
+  assert.ok(order.indexOf("contains") < order.indexOf("query"));
 });
 
 test("a change Safari will not describe is not pushed", async () => {
