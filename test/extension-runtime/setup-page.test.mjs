@@ -43,6 +43,24 @@ const ask = (request, extra = {}) => ({ type: SETUP_PAGE_MESSAGE, request, ...ex
 const askFromPopup = (overTab = 1) => ask("story-tabs", { overTab });
 const SETUP_TAB = { id: 1, url: SETUP_URL, title: "Set up Trace", lastAccessed: 900 };
 
+/** Whether an address is covered by any of these match patterns. */
+function matchesAny(patterns, address) {
+  return patterns.some((pattern) => {
+    if (pattern === "*://*/*" || pattern === "<all_urls>") return /^https?:\/\//.test(address);
+    const parts = /^(\*|https?):\/\/(\*\.)?([^/]+)(\/.*)$/.exec(pattern);
+    if (!parts) return false;
+    const escape = (text) => text.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+    const scheme = parts[1] === "*" ? "https?" : parts[1];
+    const host = `${parts[2] ? "(?:[^/]+\\.)?" : ""}${escape(parts[3])}`;
+    const path = parts[4].split("*").map(escape).join(".*");
+    return new RegExp(`^${scheme}://${host}(?::\\d+)?${path}$`).test(address);
+  });
+}
+
+const STORY_TAB_PATTERNS = [...STORY_SITE_ORIGINS, "https://*.ao3.org/*"];
+/** The one question asked about a window's tabs: its story-site tabs, by address. */
+const storyTabQuery = (windowId) => ["query", { windowId, url: STORY_TAB_PATTERNS }];
+
 /**
  * The background's view of the browser. `granted` is what Safari allows;
  * `tabs` is every open tab, as the tabs API would return it.
@@ -83,19 +101,15 @@ function createHarness(options = {}) {
     async query(filter) {
       calls.push(["query", filter]);
       if (options.queryFails) throw new Error("tabs unavailable");
-      const patterns = filter?.url;
+      // Safari treats a query with no address filter as a wish to read every
+      // tab it covers, and may ask the reader about any of them.
+      assert.ok(Array.isArray(filter?.url) && filter.url.length > 0, "every tab query names the addresses it is for");
       if (options.queryIgnoresFilter) return tabs.map((tab) => ({ ...tab }));
-      if (!patterns) {
-        assert.deepEqual(Object.keys(filter), ["windowId"], "story tabs are asked for one window at a time");
-        return tabs.filter((tab) => tab.windowId === filter.windowId).map((tab) => ({ ...tab }));
-      }
-      // As the browser applies a match pattern ending in a wildcard.
-      const prefixes = patterns.map((pattern) => {
-        assert.ok(pattern.endsWith("*"), pattern);
-        return pattern.slice(0, -1);
-      });
+      // As Safari answers: with an address filter, only tabs the extension may
+      // already read can match.
       return tabs
-        .filter((tab) => typeof tab.url === "string" && prefixes.some((prefix) => tab.url.startsWith(prefix)))
+        .filter((tab) => (filter.windowId === undefined || tab.windowId === filter.windowId) &&
+          typeof tab.url === "string" && matchesAny(granted, tab.url) && matchesAny(filter.url, tab.url))
         .map((tab) => ({ ...tab }));
     },
     async get(tabId) {
@@ -354,7 +368,7 @@ test("story tabs: only story pages, most recently used first, by title, never by
   const text = JSON.stringify(answer);
   assert.doesNotMatch(text, /https?:|archiveofourown\.org|fanfiction\.net|bank|12345|Library|Log In|Bookmarks/, "no address, and nothing about any other tab");
   assert.deepEqual(Object.keys(answer.result.tabs[0]).sort(), ["site", "tabId", "title"]);
-  assert.deepEqual(h.browserCalls(), [["query", { windowId: 1 }]], "one look at this window's tabs; nothing is changed");
+  assert.deepEqual(h.browserCalls(), [storyTabQuery(1)], "one look at this window's story-site tabs; nothing is changed");
 });
 
 test("story tabs: at most five, titles kept to one capped line, order settled without a last-used time", async () => {
@@ -558,7 +572,7 @@ test("story tabs: only the asking tab's own window, and never Private Browsing",
     const answer = await h.controller.handle(ask("story-tabs"), page);
     assert.deepEqual(listedIds(answer), [43, 44]);
     assert.doesNotMatch(JSON.stringify(answer), /Private|Other-window|not known|not a number/);
-    assert.deepEqual(h.browserCalls(), [["query", { windowId: 1 }]]);
+    assert.deepEqual(h.browserCalls(), [storyTabQuery(1)]);
     // The others were not listed, so they cannot be switched to.
     h.calls.length = 0;
     for (const tabId of [41, 42, 45, 46, 47]) {
@@ -571,6 +585,34 @@ test("story tabs: only the asking tab's own window, and never Private Browsing",
     assert.deepEqual(listedIds(await h.controller.handle(ask("story-tabs"), elsewhere)), [42]);
     assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 43 }), elsewhere), { ok: false, error: "not_listed" });
   }
+});
+
+test("story tabs: only story-site tabs are asked for, so no other open site is ever touched", async () => {
+  const tabs = [
+    ...STORY_TABS,
+    { id: 21, url: "https://bank.example/accounts/12345", title: "My accounts" },
+    { id: 22, url: "https://unrelated.example/", title: "Something else" },
+    { id: 27, url: `${WEB}/library`, title: "Library" },
+    { id: 60, url: "https://ao3.org/works/60", title: "By the short address", lastAccessed: 50 },
+  ];
+  // Safari allows the story sites and nothing else.
+  const h = createHarness({ tabs, granted: [...STORY_SITE_ORIGINS] });
+  assert.deepEqual(listedIds(await h.controller.handle(ask("story-tabs"), pageSender())), [12, 11, 13]);
+  assert.deepEqual(await h.controller.handle(ask("switch-to-tab", { tabId: 12 }), pageSender()), { ok: true });
+  const queries = h.calls.filter(([name]) => name === "query").map(([, filter]) => filter);
+  assert.deepEqual(queries, [{ windowId: 1, url: STORY_TAB_PATTERNS }]);
+  for (const filter of queries) {
+    for (const pattern of filter.url) assert.match(pattern, /archiveofourown|transformativeworks|fanfiction\.net|ao3\.org/, pattern);
+  }
+  assert.deepEqual(STORY_TAB_PATTERNS, [
+    "https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*",
+    "https://www.fanfiction.net/*", "https://m.fanfiction.net/*", "https://*.ao3.org/*",
+  ]);
+
+  // The filter loses nothing: every story host is covered, AO3's short address included.
+  const every = createHarness({ tabs, granted: ["*://*/*"] });
+  assert.deepEqual(listedIds(await every.controller.handle(ask("story-tabs"), pageSender())), [12, 11, 13, 60]);
+  for (const [url] of ALWAYS_STORY) assert.equal(matchesAny(STORY_TAB_PATTERNS, url), true, url);
 });
 
 test("story tabs: a setup page in Private Browsing, or in a window Safari does not name, is given nothing", async () => {
@@ -625,7 +667,7 @@ test("switch to tab: a listed tab that has since gone private or to another wind
 test("the popup's rows follow the same rule, from the tab it is open over", async () => {
   const h = createHarness({ tabs: [...WINDOW_TABS, { id: 27, url: `${WEB}/library`, windowId: 1 }], queryIgnoresFilter: true });
   assert.deepEqual(listedIds(await h.controller.handle(askFromPopup(1), popupSender)), [43, 44]);
-  assert.deepEqual(h.browserCalls(), [["get", 1], ["query", { windowId: 1 }]]);
+  assert.deepEqual(h.browserCalls(), [["get", 1], storyTabQuery(1)]);
   assert.deepEqual(listedIds(await h.controller.handle(askFromPopup(2), popupSender)), [42]);
 
   // Open over anything but an ordinary setup page, it is given nothing, and no window is read.

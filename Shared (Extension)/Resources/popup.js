@@ -220,11 +220,17 @@ const ACTIVE_TAB_PROBE_FILES = Object.freeze([
 ]);
 let earnedPreparedContext = null;
 let earnedAwaitingStory = null;
-// This popup started this story's first save (it asked for the story sites,
-// or reloaded the page for its first run) and the Library did not already
-// list the story. A save found after that happened now, however late the
-// popup first looks.
+// This popup set this story's save going (it asked for the story sites, or
+// reloaded the page for its first run) and the account did not already have
+// the story. A save found after that happened now, however late the popup
+// first looks.
 let earnedSaveStartedHere = false;
+// Whether the account already had this story before this popup started
+// anything, as the background's account projection said then. When it could
+// not say (no account connected yet, or no answer), the story is taken as new.
+let storySavedBeforePopup = false;
+let storySavedBeforePopupRead = null;
+const STORY_SAVED_BEFORE_WAIT_MS = 1500;
 let earnedCurrentPage = null;
 // True in the popup that finished setup on a story page. That story's save
 // is confirmed here even when it landed before this popup first looked.
@@ -2320,9 +2326,11 @@ function earnedWorkKey(rawUrl) {
 }
 
 /**
- * Whether the last page sync already listed this story in the Library. It
- * only chooses between "Saving your story…" and a neutral "Checking your
- * Library…" during session handover; it is never described as a save.
+ * Whether a stored Library listing names this story. It only chooses between
+ * "Saving your story…" and a neutral "Checking your Library…" during session
+ * handover; it is never described as a save. The page does not write that
+ * listing in this build and the background clears it at every start, so
+ * today this answers no and the neutral line does not appear.
  */
 async function readKnownInLibrary(rawUrl) {
   const workKey = earnedWorkKey(rawUrl);
@@ -2428,6 +2436,7 @@ async function prepareEarnedPermissionFlow() {
     }
     // Access is complete (for example, Safari's Every Website choice). There
     // is no permission decision left, so continue without an extra tap.
+    await readStorySavedBeforePopup();
     awaitEarnedStory(story);
     renderEarnedAccessPending(story);
     await reloadEarnedStory();
@@ -2436,10 +2445,30 @@ async function prepareEarnedPermissionFlow() {
   renderEarnedPermissionInvitation(story, hasGrant, earnedGrantCoverage(grantedOrigins));
 }
 
+/**
+ * Asks the background, once per popup, whether the account already has the
+ * story on this tab. Asked before this popup's request or reload can lead to
+ * a save, so a story saved later was saved because of this popup.
+ */
+function readStorySavedBeforePopup() {
+  storySavedBeforePopupRead ??= new Promise((resolve) => {
+    // The reader is waiting on this: a background that does not answer in
+    // time counts as one that could not say.
+    const timer = setTimeout(() => resolve(null), STORY_SAVED_BEFORE_WAIT_MS);
+    sendKernelRuntimeMessage({ type: "TRACE_POPUP_GET_STATE" }, (state) => {
+      clearTimeout(timer);
+      resolve(state);
+    });
+  }).then((state) => {
+    storySavedBeforePopup = state?.ok === true && state.activeWork?.status === "saved";
+  });
+  return storySavedBeforePopupRead;
+}
+
 /** Start waiting for this story's save, which this popup is about to set going. */
 function awaitEarnedStory(story) {
   earnedAwaitingStory = story;
-  earnedSaveStartedHere = Boolean(story) && earnedCurrentPage?.knownInLibrary !== true;
+  earnedSaveStartedHere = Boolean(story) && !storySavedBeforePopup;
 }
 
 async function allowAccessAndAddEarnedStory() {
@@ -2470,6 +2499,9 @@ async function allowAccessAndAddEarnedStory() {
   });
   setEarnedResult("checking", "", "");
   const story = prepared.story;
+  // Asked now, while Safari's question is still up: before access is given
+  // nothing can have been saved because of this popup.
+  const savedBefore = story.kind === "story" ? readStorySavedBeforePopup() : null;
   void recordEarnedEvent("website_access_action_started");
   try {
     if (permissionRequest) {
@@ -2495,6 +2527,7 @@ async function allowAccessAndAddEarnedStory() {
     earnedPreparedContext = Object.freeze({ story, hasGrant: true });
     // Only a story page has a story to wait for. A list or the site's home
     // page keeps its open-any-story prompt.
+    await savedBefore;
     awaitEarnedStory(story.kind === "story" ? story : null);
     const registration = await reconcileEarnedRegistration();
     if (registration?.ok !== true || registration?.registered !== true) {
@@ -3440,7 +3473,9 @@ async function renderReaderView(state) {
         delayed: () => renderEarnedDelayed(story),
         unavailable: () => renderEarnedUnavailable(story),
         connect: () => resolveAccountForStory({ kind: "story" }, requestKernelPopupState),
-      });
+        // This popup has just seen the story not saved, with the account
+        // connected. If the next look finds it saved, it was saved now.
+      }, { firstCheck: state.authState?.state !== "connected" });
       return;
     }
     renderPopupSaveStory({ identity, story }, "ready");

@@ -11,6 +11,12 @@ function matches(pattern: string, url: URL): boolean {
   return new RegExp(`^${path}$`).test(url.pathname + url.search);
 }
 
+/** A manifest pattern for a story site, as opposed to Trace's own site. */
+function storySitePattern(pattern: string): boolean {
+  const match = /^https:\/\/(?:\*\.)?([^/*]+)\//.exec(pattern);
+  return match !== null && archiveHostKindFromSender({ url: `https://${match[1]}/` }) !== null;
+}
+
 /** Restore only existing grants. No permission prompts, tab navigation, or URL storage. */
 export function installArchiveRecovery(environment: Environment): () => Promise<void> {
   const { runtime, tabs, permissions, scripting, mode } = environment;
@@ -21,7 +27,13 @@ export function installArchiveRecovery(environment: Environment): () => Promise<
     pending = (async () => {
       if (!scripting?.executeScript || !permissions?.contains || !runtime.getManifest) return;
       const scripts = runtime.getManifest().content_scripts ?? [];
-      const openTabs = await call<readonly BrowserTab[]>(tabs, "query", [{}]);
+      // Ask only for story-site tabs. Safari treats a query with no address
+      // filter as a wish to read every open tab, and may ask the reader about
+      // a site that has nothing to do with this. With a filter, only tabs
+      // Trace may already read can match.
+      const storySites = [...new Set(scripts.flatMap(script => script.matches ?? []))].filter(storySitePattern);
+      if (!storySites.length) return;
+      const openTabs = await call<readonly BrowserTab[]>(tabs, "query", [{ url: storySites }]);
       await Promise.all(openTabs.map(async tab => {
         try {
           if (!Number.isInteger(tab.id) || !tab.url) return;

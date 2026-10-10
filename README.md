@@ -394,8 +394,8 @@ What the page can learn:
 
 - whether the five story-site addresses are allowed, and how broadly: every
   site, the story sites, or only Trace's own page. It is told again when that
-  changes, and only while Trace's own site is allowed: without that, the
-  extension does not look for or message a Trace tab at all;
+  changes, and only while Trace's own site is allowed: without that, this
+  notice does not look for or message a Trace tab;
 - the open story tabs in its own window: for up to five tabs that are story
   pages on AO3 or FanFiction.net, a tab id, the tab's title (one line, at most
   120 characters) and which site it is on. Nothing is listed while the story
@@ -403,7 +403,8 @@ What the page can learn:
   never listed, and a setup page that is itself in Private Browsing is given
   no tabs. A title that is the tab's address, contains it, or is shaped like
   an address, is sent as no title, and characters that hide or reorder text
-  are removed.
+  are removed. The tabs are asked for by story-site address, so listing
+  them never touches another site that is open in that window.
 
 What the page can do: ask for one of those tabs to be brought to the front. It
 must be a tab from the most recent list given to that same tab, no more than

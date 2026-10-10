@@ -423,6 +423,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     const path = match[3].split("*").map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*");
     return new RegExp(`^${path}$`).test(url.pathname + url.search);
   }
+  function storySitePattern(pattern) {
+    const match = /^https:\/\/(?:\*\.)?([^/*]+)\//.exec(pattern);
+    return match !== null && archiveHostKindFromSender({ url: `https://${match[1]}/` }) !== null;
+  }
   function installArchiveRecovery(environment) {
     const { runtime, tabs, permissions, scripting, mode } = environment;
     const call = (target, method, args) => extensionCall(target, method, args, runtime, mode);
@@ -432,7 +436,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       pending = (async () => {
         if (!scripting?.executeScript || !permissions?.contains || !runtime.getManifest) return;
         const scripts = runtime.getManifest().content_scripts ?? [];
-        const openTabs = await call(tabs, "query", [{}]);
+        const storySites = [...new Set(scripts.flatMap((script) => script.matches ?? []))].filter(storySitePattern);
+        if (!storySites.length) return;
+        const openTabs = await call(tabs, "query", [{ url: storySites }]);
         await Promise.all(openTabs.map(async (tab) => {
           try {
             if (!Number.isInteger(tab.id) || !tab.url) return;
@@ -8419,6 +8425,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #webTabPattern;
     #webAccessPattern;
     #storyOrigins;
+    #storyTabPatterns;
     #access;
     #now;
     /** Per requester: the story tabs it was last given, in which window, and when. */
@@ -8435,6 +8442,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#webTabPattern = `${webUrl.protocol}//${webUrl.hostname}/safari-setup*`;
       this.#webAccessPattern = `${webUrl.protocol}//${webUrl.hostname}/*`;
       this.#storyOrigins = Object.freeze([...environment.storyOrigins ?? STORY_SITE_ORIGINS]);
+      this.#storyTabPatterns = Object.freeze([.../* @__PURE__ */ new Set([...this.#storyOrigins, "https://*.ao3.org/*"])]);
       this.#access = new BrowserArchivePermissionSnapshotPort(
         environment.permissions,
         environment.runtime,
@@ -8570,7 +8578,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (windowId === null) return Object.freeze([]);
       let tabs;
       try {
-        tabs = await this.#call("query", [{ windowId }]);
+        tabs = await this.#call("query", [{ windowId, url: [...this.#storyTabPatterns] }]);
       } catch {
         return null;
       }

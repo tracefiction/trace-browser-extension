@@ -215,6 +215,7 @@ export class SetupPageController {
   readonly #webTabPattern: string;
   readonly #webAccessPattern: string;
   readonly #storyOrigins: readonly string[];
+  readonly #storyTabPatterns: readonly string[];
   readonly #access: BrowserArchivePermissionSnapshotPort;
   readonly #now: () => number;
   /** Per requester: the story tabs it was last given, in which window, and when. */
@@ -232,6 +233,9 @@ export class SetupPageController {
     this.#webTabPattern = `${webUrl.protocol}//${webUrl.hostname}/safari-setup*`;
     this.#webAccessPattern = `${webUrl.protocol}//${webUrl.hostname}/*`;
     this.#storyOrigins = Object.freeze([...(environment.storyOrigins ?? STORY_SITE_ORIGINS)]);
+    // Every host a story page can be on: the origins saving needs, and AO3's
+    // short address.
+    this.#storyTabPatterns = Object.freeze([...new Set([...this.#storyOrigins, "https://*.ao3.org/*"])]);
     this.#access = new BrowserArchivePermissionSnapshotPort(
       environment.permissions,
       environment.runtime,
@@ -386,9 +390,13 @@ export class SetupPageController {
     // page in a private tab, or one whose window is not known, is given nothing.
     const windowId = ownWindow(requester.tab ?? (overTab === null ? null : await this.#setupTab(overTab)));
     if (windowId === null) return Object.freeze([]);
+    // Ask only for story-site tabs in that window. Safari treats a query with
+    // no address filter as a wish to read every tab it covers, and may ask the
+    // reader about an unrelated site that happens to be open there. With a
+    // filter, only tabs Trace may already read can match.
     let tabs: readonly SetupTab[];
     try {
-      tabs = await this.#call<readonly SetupTab[]>("query", [{ windowId }]);
+      tabs = await this.#call<readonly SetupTab[]>("query", [{ windowId, url: [...this.#storyTabPatterns] }]);
     } catch {
       return null;
     }
@@ -459,10 +467,8 @@ export class SetupPageController {
   }
 
   async #pushAccess(): Promise<void> {
-    // Looking for Trace's own tabs, or messaging one, while Safari has not
-    // allowed Trace's site makes Safari ask the reader for that site, over
-    // whatever they are reading. So nothing here names Trace's origin unless
-    // access to it is already held; without it no setup page could hear this.
+    // Nothing here names Trace's origin unless access to it is already held.
+    // Without that access no setup page could hear this anyway.
     const held = await this.#access.containsOrigins([this.#webAccessPattern]).catch(() => null);
     if (held !== true) return;
     const access = await this.#readAccess();

@@ -4039,8 +4039,7 @@ test("a title that never arrives leaves the confirmation as it is and stops aski
   h.runTimeouts();
   await settle(h, 12);
   assert.equal(identityAsks(), asked, "the lookup is bounded");
-  assert.equal(h.document.getElementById("popup-earned-heading").textContent, "Saved to your Library",
-    "this popup started the page, so the save is new");
+  assert.match(h.document.getElementById("popup-earned-heading").textContent, /in your Library$/);
   assert.doesNotMatch(earnedText(h), /Your story by|the author/);
 });
 
@@ -4174,23 +4173,22 @@ test("a page that answers with a blank title is asked a few more times, not for 
   assert.equal(asks(), before + 3, "three more tries");
   await pass(h, 10 * 60_000);
   assert.equal(asks(), before + 3, "and then it stops");
-  assert.equal(earnedHeading(h), "Saved to your Library", "this popup started the page, so the save is new");
+  assert.match(earnedHeading(h), /in your Library$/);
   assert.notEqual(earnedHeading(h).trim(), "");
 });
 
 // ---- A save this popup started, and one it only found ----
 
 const SAVED_WORK = { workKey: "ao3:123", status: "saved", entry: { status: "PLANNING", canonicalReaderStatus: "SAVED" }, syncVersion: "v1" };
+const ONE_SITE = ["https://*.archiveofourown.org/*"];
+const A_DAY_AGO = { traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 86_400_000 } };
 
-/** The popup on a story with a connected account. `granted` is what Safari allows when it opens. */
-function popupOnStoryWithAccount({ granted, activeWork = null, storageState = {}, ...options }) {
-  const popupState = {
-    ok: true,
-    authState: CONNECTED_AUTH,
-    activeTab: { kind: "supported_story", site: "ao3", canImport: true },
-    activeWork,
-    autoTrackEnabled: true,
-  };
+/**
+ * The popup on a story. `granted` is what Safari allows when it opens; `inLibrary` is whether
+ * the account already has the story. Unless it does, the page saves it as soon as it is reloaded.
+ */
+function popupOnStory({ granted, inLibrary = false, storageState = {}, account = () => CONNECTED_AUTH, ...options }) {
+  const looks = [];
   const h = createPopupHarness({
     sessionMode: "kernel",
     promiseRuntime: true,
@@ -4199,104 +4197,215 @@ function popupOnStoryWithAccount({ granted, activeWork = null, storageState = {}
     sessionSnapshot: CONNECTED_AUTH,
     grantedOrigins: [...granted],
     storageState,
-    popupState,
     tabResponse: namedStory,
+    runtimeResponse(message) {
+      if (message.type !== "TRACE_POPUP_GET_STATE") return undefined;
+      const authState = account(looks.length);
+      const connected = authState.state === "connected";
+      const saved = connected && (inLibrary || h.reloads.length > 0);
+      looks.push({ connected, saved, reloads: h.reloads.length, asked: h.permissionRequests.length });
+      return {
+        ok: true,
+        authState,
+        firstSaveSeen: saved,
+        activeTab: { kind: "supported_story", site: "ao3", canImport: true },
+        activeWork: saved ? SAVED_WORK : null,
+        autoTrackEnabled: true,
+      };
+    },
     ...options,
   });
   // The page reports in after it runs: the background writes this.
   const pageRan = () => h.emitStorageChange({ traceArchiveReadiness: { newValue: { lastArchiveSeenAt: Date.now() + 1_000 } } });
   const kicker = () => h.document.getElementById("popup-earned-kicker-text").textContent;
-  return { h, popupState, pageRan, kicker };
+  const allowStorySites = async () => {
+    const primary = h.document.getElementById("popup-earned-primary");
+    assert.equal(primary.textContent, "Allow story sites");
+    primary.click();
+    await settle(h, 16);
+    assert.equal(h.permissionRequests.length, 1);
+    assert.equal(h.reloads.length, 1);
+  };
+  return { h, looks, pageRan, kicker, allowStorySites };
 }
 
 test("a story saved after this popup asked for the story sites reads Saved, not Already", async () => {
   // Only this site was allowed from Safari's menu, so nothing has been saved yet.
-  const { h, popupState, pageRan, kicker } = popupOnStoryWithAccount({ granted: ["https://*.archiveofourown.org/*"] });
+  const { h, looks, pageRan, kicker, allowStorySites } = popupOnStory({ granted: ONE_SITE });
   await settle(h, 16);
-  const primary = h.document.getElementById("popup-earned-primary");
-  assert.equal(primary.textContent, "Allow story sites");
-  primary.click();
-  await settle(h, 16);
-  assert.equal(h.permissionRequests.length, 1);
+  assert.deepEqual(looks, [], "nothing is asked until the reader acts");
+  await allowStorySites();
+  assert.deepEqual(looks[0], { connected: true, saved: false, reloads: 0, asked: 1 },
+    "the account is asked once the request is up, before the page is reloaded");
   assert.equal(earnedHeading(h), "Saving your story…");
-  assert.equal(h.reloads.length, 1);
 
-  // The page runs with full access and saves the story before the popup first looks.
-  popupState.activeWork = SAVED_WORK;
+  // The page runs with full access and has saved the story before the popup next looks.
   pageRan();
   await settle(h, 16);
   assert.equal(h.document.body.dataset.tracePopupStateCode, "P2");
   assert.equal(kicker(), "Saved to your Library");
   assert.equal(earnedHeading(h), "The Long Way Round");
   assert.doesNotMatch(earnedText(h), /Already in your Library/);
+  assert.equal(looks.filter(({ reloads }) => reloads === 0).length, 1, "the account is asked about before once only");
 });
 
 test("a story saved after this popup reloaded it for its first run reads Saved too", async () => {
   // Access was already complete (Safari's Every Website); the popup only has to start the page.
-  const { h, popupState, pageRan, kicker } = popupOnStoryWithAccount({ granted: FULL_EARNED_ORIGINS });
+  const { h, looks, pageRan, kicker } = popupOnStory({ granted: FULL_EARNED_ORIGINS });
   await settle(h, 16);
   assert.equal(h.permissionRequests.length, 0);
   assert.equal(earnedHeading(h), "Saving your story…");
   assert.equal(h.reloads.length, 1);
-  popupState.activeWork = SAVED_WORK;
+  assert.deepEqual(looks[0], { connected: true, saved: false, reloads: 0, asked: 0 }, "asked before the reload");
   pageRan();
   await settle(h, 16);
   assert.equal(kicker(), "Saved to your Library");
 });
 
-test("a popup opened later on a story that is already saved does not call it newly saved", async () => {
-  // Setup finished in an earlier popup. The page is still saving when this one
-  // opens, and has finished by the time it first looks: found there, not seen saved.
-  let looks = 0;
-  const { h, kicker } = popupOnStoryWithAccount({
-    granted: FULL_EARNED_ORIGINS,
-    storageState: { traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 86_400_000 } },
-    runtimeResponse(message) {
-      if (message.type !== "TRACE_POPUP_GET_STATE") return undefined;
-      looks += 1;
-      return {
-        ok: true,
-        authState: CONNECTED_AUTH,
-        firstSaveSeen: true,
-        activeTab: { kind: "supported_story", site: "ao3", canImport: true },
-        activeWork: looks === 1 ? null : SAVED_WORK,
-        autoTrackEnabled: true,
-      };
-    },
-  });
-  await settle(h, 16);
-  assert.equal(h.permissionRequests.length, 0);
-  assert.deepEqual(h.reloads, [], "this popup started nothing");
-  assert.equal(looks, 2);
-  assert.equal(h.document.body.dataset.tracePopupStateCode, "P2");
-  assert.equal(kicker(), "Already in your Library");
-  assert.equal(earnedHeading(h), "The Long Way Round");
+test("a story the account already had reads Already, whichever way this popup starts it", async () => {
+  // One site was allowed from Safari's menu; the story was saved on this account before.
+  const oneSite = popupOnStory({ granted: ONE_SITE, inLibrary: true });
+  await settle(oneSite.h, 16);
+  await oneSite.allowStorySites();
+  oneSite.pageRan();
+  await settle(oneSite.h, 16);
+  assert.equal(oneSite.h.document.body.dataset.tracePopupStateCode, "P2");
+  assert.equal(oneSite.kicker(), "Already in your Library");
+  assert.equal(earnedHeading(oneSite.h), "The Long Way Round");
 
-  // One that opens after the save is done shows the everyday view, with no claim at all.
-  const later = popupOnStoryWithAccount({
-    granted: FULL_EARNED_ORIGINS,
-    activeWork: SAVED_WORK,
-    storageState: { traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 86_400_000 } },
-  });
-  await settle(later.h, 16);
-  assert.equal(later.h.document.body.dataset.tracePopupStateCode, "P11");
-  assert.doesNotMatch(earnedText(later.h), /Saved to your Library|Already in your Library/);
+  // Access lapsed a day after setup, and is given again from the popup.
+  const lapsed = popupOnStory({ granted: ONE_SITE, inLibrary: true, storageState: A_DAY_AGO });
+  await settle(lapsed.h, 16);
+  await lapsed.allowStorySites();
+  lapsed.pageRan();
+  await settle(lapsed.h, 16);
+  assert.equal(lapsed.kicker(), "Already in your Library");
+
+  // A first run on this phone for a story saved from another device: access is complete, the popup reloads.
+  const firstRun = popupOnStory({ granted: FULL_EARNED_ORIGINS, inLibrary: true });
+  await settle(firstRun.h, 16);
+  assert.equal(firstRun.h.reloads.length, 1);
+  firstRun.pageRan();
+  await settle(firstRun.h, 16);
+  assert.equal(firstRun.kicker(), "Already in your Library");
+  assert.doesNotMatch(earnedText(firstRun.h), /Saved to your Library/);
 });
 
-test("asking again for a story the Library already lists does not call it newly saved", async () => {
-  // Access lapsed on a story Trace saved before; the last page sync still lists it.
-  const { h, popupState, pageRan, kicker } = popupOnStoryWithAccount({
-    granted: ["https://*.archiveofourown.org/*"],
-    storageState: { libraryOverlayCache: { entries: { "ao3:123": { entryId: "entry-1" } } } },
+test("the page is not reloaded until the account has answered about before", async () => {
+  // The background is slow to answer. Nothing that could save the story starts until it has.
+  let answer;
+  const slow = new Promise((resolve) => { answer = resolve; });
+  let asked = 0;
+  const { h, pageRan, kicker } = popupOnStory({
+    granted: ONE_SITE,
+    runtimeResponse(message) {
+      if (message.type !== "TRACE_POPUP_GET_STATE") return undefined;
+      asked += 1;
+      const state = {
+        ok: true,
+        authState: CONNECTED_AUTH,
+        activeTab: { kind: "supported_story", site: "ao3", canImport: true },
+        activeWork: SAVED_WORK,
+        autoTrackEnabled: true,
+      };
+      return asked === 1 ? slow.then(() => state) : state;
+    },
   });
   await settle(h, 16);
   h.document.getElementById("popup-earned-primary").click();
   await settle(h, 16);
   assert.equal(h.permissionRequests.length, 1);
-  popupState.activeWork = SAVED_WORK;
+  assert.equal(asked, 1);
+  assert.deepEqual(h.reloads, [], "access is given, but the page waits for the answer");
+  answer();
+  await settle(h, 16);
+  assert.equal(h.reloads.length, 1);
   pageRan();
   await settle(h, 16);
   assert.equal(kicker(), "Already in your Library");
+});
+
+test("a background that never answers about before does not hold the reader up", async () => {
+  let asked = 0;
+  const { h, pageRan, kicker } = popupOnStory({
+    granted: ONE_SITE,
+    runtimeResponse(message) {
+      if (message.type !== "TRACE_POPUP_GET_STATE") return undefined;
+      asked += 1;
+      if (asked === 1) return new Promise(() => {});
+      return {
+        ok: true,
+        authState: CONNECTED_AUTH,
+        activeTab: { kind: "supported_story", site: "ao3", canImport: true },
+        activeWork: SAVED_WORK,
+        autoTrackEnabled: true,
+      };
+    },
+  });
+  await settle(h, 16);
+  h.document.getElementById("popup-earned-primary").click();
+  await settle(h, 16);
+  await pass(h, 1499);
+  assert.deepEqual(h.reloads, []);
+  await pass(h, 1);
+  await settle(h, 16);
+  assert.equal(h.reloads.length, 1, "after a second and a half it carries on");
+  pageRan();
+  await settle(h, 16);
+  assert.equal(kicker(), "Saved to your Library");
+});
+
+test("when the account could not be asked before, a save found afterwards reads Saved", async () => {
+  // No account is connected when the popup asks; it has arrived by the time the page saves.
+  const connecting = { state: "connecting", accountId: null, canExecuteAuthenticated: false, reason: "none" };
+  for (const inLibrary of [false, true]) {
+    const { h, looks, pageRan, kicker, allowStorySites } = popupOnStory({
+      granted: ONE_SITE,
+      inLibrary,
+      account: (look) => (look === 0 ? connecting : CONNECTED_AUTH),
+    });
+    await settle(h, 16);
+    await allowStorySites();
+    assert.equal(looks[0].connected, false);
+    pageRan();
+    await settle(h, 16);
+    assert.equal(kicker(), "Saved to your Library", "not knowing is not the same as already there");
+  }
+});
+
+test("a popup that started nothing reads Saved for a save it sees happen, and makes no claim for one it only finds", async () => {
+  // Setup finished in an earlier popup. The page is still saving when this one
+  // opens: the first look finds the story not saved, the next finds it saved.
+  let seen = 0;
+  const watching = popupOnStory({
+    granted: FULL_EARNED_ORIGINS,
+    storageState: A_DAY_AGO,
+    runtimeResponse(message) {
+      if (message.type !== "TRACE_POPUP_GET_STATE") return undefined;
+      seen += 1;
+      return {
+        ok: true,
+        authState: CONNECTED_AUTH,
+        firstSaveSeen: true,
+        activeTab: { kind: "supported_story", site: "ao3", canImport: true },
+        activeWork: seen === 1 ? null : SAVED_WORK,
+        autoTrackEnabled: true,
+      };
+    },
+  });
+  await settle(watching.h, 16);
+  assert.equal(watching.h.permissionRequests.length, 0);
+  assert.deepEqual(watching.h.reloads, [], "this popup started nothing");
+  assert.equal(seen, 2);
+  assert.equal(watching.h.document.body.dataset.tracePopupStateCode, "P2");
+  assert.equal(watching.kicker(), "Saved to your Library");
+  assert.equal(earnedHeading(watching.h), "The Long Way Round");
+
+  // One that opens after the save is done shows the everyday view, with no claim at all.
+  const later = popupOnStory({ granted: FULL_EARNED_ORIGINS, inLibrary: true, storageState: A_DAY_AGO });
+  await settle(later.h, 16);
+  assert.equal(later.h.document.body.dataset.tracePopupStateCode, "P11");
+  assert.doesNotMatch(earnedText(later.h), /Saved to your Library|Already in your Library/);
 });
 
 // ---- The popup over Trace's own setup page ----
