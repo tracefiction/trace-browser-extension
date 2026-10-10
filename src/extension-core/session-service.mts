@@ -280,14 +280,16 @@ export class SessionService {
       return this.#disconnectInternal(true, start.epoch);
     }
     if (acquisition.kind !== "credential") {
+      // Both answers leave the session signed out, but they are not the same
+      // fact. Keep them apart so a surface never tells a reader whose account
+      // could not be read that they have none.
+      const reason = acquisition.kind === "absent"
+        ? "credential_absent" as const
+        : "provider_unavailable" as const;
       return this.#withLock(async () => {
         if (!this.#isCurrentAcquisition(start.epoch)) return { kind: "stale" };
         this.#activeAcquisitionEpoch = null;
-        this.#transition({
-          type: "signed_out",
-          epoch: start.epoch,
-          reason: "provider_unavailable",
-        });
+        this.#transition({ type: "signed_out", epoch: start.epoch, reason });
         return { kind: "unavailable" };
       });
     }

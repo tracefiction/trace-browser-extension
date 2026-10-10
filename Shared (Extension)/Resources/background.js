@@ -699,6 +699,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 
   // src/extension-core/archive-readiness.mts
   var ARCHIVE_RUN_THROTTLE_MS = 5 * 60 * 1e3;
+  var ARCHIVE_ACCESS_CONFIRM_DELAY_MS = 2e3;
+  var ARCHIVE_ACCESS_REPORT_MAX_PASSES = 3;
   var SYSTEM_CLOCK = Object.freeze({
     now: () => Date.now()
   });
@@ -707,10 +709,18 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #permissions;
     #clock;
     #lastRunAttemptByHost = /* @__PURE__ */ new Map();
+    #requiredOrigins;
+    #wait;
+    #accessReport = null;
+    #accessReportRequestedAgain = false;
     constructor(options) {
       this.#receipts = options.receipts;
       this.#permissions = options.permissions;
       this.#clock = options.clock ?? SYSTEM_CLOCK;
+      this.#requiredOrigins = Object.freeze([...options.requiredOrigins ?? []]);
+      this.#wait = options.wait ?? ((ms) => new Promise((resolve) => {
+        setTimeout(resolve, ms);
+      }));
     }
     async recordRun(input) {
       const at = this.#clock.now();
@@ -738,6 +748,73 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
       void this.#publishPermissionSnapshot(input.hostKind);
       return { kind: "published" };
+    }
+    /**
+     * Publishes what access is granted right now, on its own rather than
+     * after a run. A run can only ever prove access; this is the reading that
+     * can show access has ended (for example, a one-day grant running out),
+     * because no page script runs to say so.
+     *
+     * It must not raise a false alarm. Access is reported missing only when
+     * two readings in a row say so, and only together with the list of what is
+     * granted. When the required origins are confirmed they are listed by
+     * name, since a broader grant need not spell them out.
+     */
+    reportAccess() {
+      if (this.#accessReport !== null) {
+        this.#accessReportRequestedAgain = true;
+        return this.#accessReport;
+      }
+      const report = (async () => {
+        let result = { kind: "unknown" };
+        for (let pass = 0; pass < ARCHIVE_ACCESS_REPORT_MAX_PASSES; pass += 1) {
+          this.#accessReportRequestedAgain = false;
+          result = await this.#reportAccessOnce();
+          if (!this.#accessReportRequestedAgain) break;
+        }
+        return result;
+      })().finally(() => {
+        this.#accessReport = null;
+      });
+      this.#accessReport = report;
+      return report;
+    }
+    async #reportAccessOnce() {
+      let reading = await this.#readAccess();
+      if (reading !== null && !reading.complete) {
+        await this.#wait(ARCHIVE_ACCESS_CONFIRM_DELAY_MS);
+        reading = await this.#readAccess();
+      }
+      if (reading === null) return { kind: "unknown" };
+      let published = false;
+      try {
+        published = await this.#receipts.publishPermissionSnapshot(Object.freeze({
+          at: this.#clock.now(),
+          grantedOrigins: reading.grantedOrigins
+        }));
+      } catch {
+        published = false;
+      }
+      return published ? { kind: "published", complete: reading.complete } : { kind: "unavailable" };
+    }
+    async #readAccess() {
+      const contains = this.#permissions.containsOrigins;
+      if (this.#requiredOrigins.length === 0 || contains === void 0) return null;
+      const [listed, complete] = await Promise.all([
+        this.#permissions.readGrantedOrigins().catch(() => null),
+        contains.call(this.#permissions, this.#requiredOrigins).catch(() => null)
+      ]);
+      if (typeof complete !== "boolean") return null;
+      if (complete) {
+        return {
+          complete: true,
+          grantedOrigins: Object.freeze(
+            Array.from(/* @__PURE__ */ new Set([...this.#requiredOrigins, ...listed ?? []]))
+          )
+        };
+      }
+      if (listed === null) return null;
+      return { complete: false, grantedOrigins: Object.freeze([...listed]) };
     }
     async #publishPermissionSnapshot(hostKind2) {
       let grantedOrigins = null;
@@ -2130,14 +2207,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         return this.#disconnectInternal(true, start.epoch);
       }
       if (acquisition.kind !== "credential") {
+        const reason = acquisition.kind === "absent" ? "credential_absent" : "provider_unavailable";
         return this.#withLock(async () => {
           if (!this.#isCurrentAcquisition(start.epoch)) return { kind: "stale" };
           this.#activeAcquisitionEpoch = null;
-          this.#transition({
-            type: "signed_out",
-            epoch: start.epoch,
-            reason: "provider_unavailable"
-          });
+          this.#transition({ type: "signed_out", epoch: start.epoch, reason });
           return { kind: "unavailable" };
         });
       }
@@ -3122,6 +3196,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var UUID_PATTERN3 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   var ACCOUNT_DATA_ALARM = "traceAccountDataRefresh";
   var SAVED_FILTER_SYNC_ALARM = "traceAo3SavedFiltersSync";
+  var ARCHIVE_ACCESS_REPORT_ALARM = "traceArchiveAccessReport";
   var LEGACY_ACCOUNT_ALARMS = Object.freeze([
     "traceLibraryOverlay"
   ]);
@@ -3148,7 +3223,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var DISABLED_LOCAL_KEYS = Object.freeze([
     ...LEGACY_ACCOUNT_KEYS,
     ...Object.values(SAVED_FILTER_LOCAL_KEYS),
-    "traceArchiveReadiness"
+    "traceArchiveReadiness",
+    "traceArchiveAccessReportedAtV1"
   ]);
   var BrowserSessionStoragePort = class {
     #database;
@@ -3302,6 +3378,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     async clearAll() {
       await this.#clear(ACCOUNT_DATA_ALARM);
       await this.#clear(SAVED_FILTER_SYNC_ALARM);
+      await this.#clear(ARCHIVE_ACCESS_REPORT_ALARM);
       await this.clearRetired();
     }
     async #clear(name) {
@@ -3376,7 +3453,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     publishPermissionSnapshot(snapshot) {
       return this.#publish({
         type: "TRACE_IOS_EXTENSION_HEARTBEAT",
-        hostKind: snapshot.hostKind,
+        ...snapshot.hostKind === void 0 ? {} : { hostKind: snapshot.hostKind },
         at: snapshot.at,
         permissionSnapshot: true,
         grantedOrigins: [...snapshot.grantedOrigins]
@@ -3491,6 +3568,22 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           response.origins.filter((origin) => typeof origin === "string").map((origin) => origin.trim().slice(0, 256)).filter(Boolean)
         )).slice(0, 64)
       );
+    }
+    async containsOrigins(origins) {
+      if (this.#permissions === void 0 || typeof this.#permissions.contains !== "function") {
+        return null;
+      }
+      const response = await withTimeout(
+        extensionCall(
+          this.#permissions,
+          "contains",
+          [{ origins: [...origins] }],
+          this.#runtime,
+          this.#mode
+        ),
+        2e3
+      );
+      return typeof response === "boolean" ? response : null;
     }
   };
   var ExplicitCredentialProvider = class {
@@ -7683,8 +7776,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 
   // src/extension-runtime/archive-readiness.mts
   var ARCHIVE_READINESS_MESSAGE_TYPES = Object.freeze({
-    archiveSeen: "TRACE_ARCHIVE_SEEN"
+    archiveSeen: "TRACE_ARCHIVE_SEEN",
+    accessReport: "TRACE_ARCHIVE_ACCESS_REPORT"
   });
+  var ARCHIVE_ACCESS_REPORTED_AT_KEY = "traceArchiveAccessReportedAtV1";
+  var ARCHIVE_ACCESS_REPORT_PERIOD_MINUTES = 24 * 60;
+  var ARCHIVE_ACCESS_REPORT_STALE_MS = 20 * 60 * 60 * 1e3;
   function isRecord19(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
@@ -7710,8 +7807,14 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           environment.runtime,
           environment.storageMode
         ),
-        ...environment.clock === void 0 ? {} : { clock: environment.clock }
+        ...environment.clock === void 0 ? {} : { clock: environment.clock },
+        ...environment.requiredOrigins === void 0 ? {} : { requiredOrigins: environment.requiredOrigins },
+        ...environment.accessConfirmWait === void 0 ? {} : { wait: environment.accessConfirmWait }
       });
+    }
+    /** See `ArchiveReadinessService.reportAccess`. */
+    reportAccess() {
+      return this.#service.reportAccess();
     }
     async handle(message, sender) {
       if (!isRecord19(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.archiveSeen) {
@@ -7745,6 +7848,89 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return true;
     });
     return controller;
+  }
+  async function runsInsideTraceApp(runtime, mode) {
+    if (typeof runtime.sendNativeMessage !== "function") return false;
+    if (/iPhone|iPad|iPod/i.test(globalThis.navigator?.userAgent ?? "")) return true;
+    if (typeof runtime.getPlatformInfo !== "function") return false;
+    try {
+      const info = await extensionCall(
+        runtime,
+        "getPlatformInfo",
+        [],
+        runtime,
+        mode
+      );
+      return info?.os === "ios";
+    } catch {
+      return false;
+    }
+  }
+  function installArchiveAccessReport(controller, environment) {
+    const { alarms, permissions, runtime, storage, storageMode } = environment;
+    const now = () => environment.clock?.now() ?? Date.now();
+    let supported = null;
+    const report = async () => {
+      supported ??= runsInsideTraceApp(runtime, storageMode);
+      if (!await supported) return { kind: "unknown" };
+      const result = await controller.reportAccess();
+      if (result.kind === "published") {
+        await storage.set({ [ARCHIVE_ACCESS_REPORTED_AT_KEY]: now() }).catch(() => void 0);
+      }
+      return result;
+    };
+    const reportQuietly = () => {
+      void report().catch(() => void 0);
+    };
+    runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (!isRecord19(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport) {
+        return false;
+      }
+      if (Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
+        sendResponse({ ok: false });
+        return false;
+      }
+      void report().then(
+        (result) => sendResponse({ ok: true, report: result.kind }),
+        () => sendResponse({ ok: true, report: "unavailable" })
+      );
+      return true;
+    });
+    permissions?.onAdded?.addListener(reportQuietly);
+    permissions?.onRemoved?.addListener(reportQuietly);
+    alarms?.onAlarm?.addListener((alarm) => {
+      if (alarm?.name === ARCHIVE_ACCESS_REPORT_ALARM) reportQuietly();
+    });
+    try {
+      const existing = typeof alarms?.get === "function" ? extensionCall(
+        alarms,
+        "get",
+        [ARCHIVE_ACCESS_REPORT_ALARM],
+        runtime,
+        storageMode
+      ).catch(() => void 0) : Promise.resolve(void 0);
+      void existing.then((alarm) => {
+        if (isRecord19(alarm)) return;
+        const created = alarms?.create?.(ARCHIVE_ACCESS_REPORT_ALARM, {
+          periodInMinutes: ARCHIVE_ACCESS_REPORT_PERIOD_MINUTES
+        });
+        if (created && typeof created.then === "function") {
+          void Promise.resolve(created).catch(() => void 0);
+        }
+      }).catch(() => {
+        void runtime.lastError;
+      });
+    } catch {
+      void runtime.lastError;
+    }
+    void storage.get(ARCHIVE_ACCESS_REPORTED_AT_KEY).then((stored) => {
+      const reportedAt = stored[ARCHIVE_ACCESS_REPORTED_AT_KEY];
+      if (typeof reportedAt === "number" && reportedAt <= now() && now() - reportedAt < ARCHIVE_ACCESS_REPORT_STALE_MS) {
+        return;
+      }
+      reportQuietly();
+    }).catch(() => void 0);
+    return { report };
   }
 
   // src/extension-runtime/earned-permission-registration.mts
@@ -8089,13 +8275,23 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           new BrowserStorage(extension.storage.local, extension.runtime, storageMode)
         )
       });
-      installArchiveReadinessRuntime({
+      const archiveReadiness = installArchiveReadinessRuntime({
         runtime: extension.runtime,
         ...extension.permissions === void 0 ? {} : { permissions: extension.permissions },
         storageMode,
         status: archiveReadinessStatus,
-        publishTrackingPreference: () => session?.publishTrackingPreference() ?? Promise.resolve()
+        publishTrackingPreference: () => session?.publishTrackingPreference() ?? Promise.resolve(),
+        ...define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default === null ? {} : { requiredOrigins: define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.origins }
       });
+      if (define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default !== null && extension.permissions !== void 0) {
+        installArchiveAccessReport(archiveReadiness, {
+          runtime: extension.runtime,
+          permissions: extension.permissions,
+          alarms: extension.alarms,
+          storage: new BrowserStorage(extension.storage.local, extension.runtime, storageMode),
+          storageMode
+        });
+      }
       if (define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default !== null && extension.permissions !== void 0 && (define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.registrationMode === "static" || extension.scripting !== void 0)) {
         installEarnedPermissionRegistrationRuntime({
           runtime: extension.runtime,

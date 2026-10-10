@@ -27,7 +27,12 @@ its notes go with each app release.
 
 ### iPhone and iPad
 
-- **The popup checks the Trace app before asking you to sign in.** A reader who is signed in to the app is no longer told to create an account or sign in while Safari is still starting the extension.
+- **The popup checks the Trace app before asking you to sign in.** While it reads your account from the app it says **Connecting to your account…**. It asks you to create an account or sign in only when the app has none. If it still can't connect after a few seconds it says so, with **Open Trace** and **Try again**.
+- **A story that's slow to save says what to do.** **Still confirming your story** now reads **Keep reading; it’ll appear in Trace. If it hasn’t after a minute, reload this page.**
+- **Open any story.** On a page with no story open, including a site's home page, the popup reads **Open any story. Trace saves it when it opens.** and no longer points at titles that may not be there. It also stays on that message instead of changing to **Still confirming your story** after a while.
+- **A first save is confirmed on FanFiction.net too.** When the popup that finishes setup finds your story already saved, it shows **Saved to your Library** with the story, on AO3 and FanFiction.net alike, instead of opening on the everyday view.
+- **No stand-in titles.** If the page hasn't named your story yet, the popup says **Saved to your Library** on its own and adds the title when it has it.
+- **Trace tells its app when Safari stops allowing it.** If an **Allow for One Day** grant runs out, the extension lets the Trace app know when its popup next opens, when Safari reports the change, and about once a day, so the app can say so. Nothing leaves your iPhone for this.
 - **A tab left open across an app update picks Trace back up.** The next scroll or tap brings Trace back on that page, without a reload.
 - **Import from this page.** On an AO3 or FanFiction.net list, your History or Bookmarks, or a saved story, the popup shows **Import from this page** above **Settings**. Tap it, then **Open in Trace** to choose what to import. It also works in a tab that was open during an app update.
 

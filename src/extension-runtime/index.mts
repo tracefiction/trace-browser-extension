@@ -2,7 +2,7 @@ import { createActivityFetch } from "./activity-fetch.mjs";
 import { installArchiveHostAccess } from "./archive-host-access.mjs";
 import { installArchiveRecovery } from "./archive-recovery.mjs";
 import { installSessionRuntime, type SessionMode, type SessionRuntimeController } from "./controller.mjs";
-import { installArchiveReadinessRuntime } from "./archive-readiness.mjs";
+import { installArchiveAccessReport, installArchiveReadinessRuntime } from "./archive-readiness.mjs";
 import { installEarnedPermissionRegistrationRuntime } from "./earned-permission-registration.mjs";
 import { installTraceFirstInstallActivation } from "./trace-web-navigation.mjs";
 import { rememberConnectIntent } from "./connect-intent.mjs";
@@ -117,7 +117,7 @@ try {
     });
     // Install positive archive-run evidence before any IndexedDB, credential,
     // account-projection, or session-restoration work can stall the worker.
-    installArchiveReadinessRuntime({
+    const archiveReadiness = installArchiveReadinessRuntime({
       runtime: extension.runtime,
       ...(extension.permissions === undefined
         ? {}
@@ -125,7 +125,22 @@ try {
       storageMode,
       status: archiveReadinessStatus,
       publishTrackingPreference: () => session?.publishTrackingPreference() ?? Promise.resolve(),
+      ...(__TRACE_IOS_EARNED_PERMISSION_CONFIG__ === null
+        ? {}
+        : { requiredOrigins: __TRACE_IOS_EARNED_PERMISSION_CONFIG__.origins }),
     });
+    if (
+      __TRACE_IOS_EARNED_PERMISSION_CONFIG__ !== null &&
+      extension.permissions !== undefined
+    ) {
+      installArchiveAccessReport(archiveReadiness, {
+        runtime: extension.runtime,
+        permissions: extension.permissions,
+        alarms: extension.alarms,
+        storage: new BrowserStorage(extension.storage.local, extension.runtime, storageMode),
+        storageMode,
+      });
+    }
     if (
       __TRACE_IOS_EARNED_PERMISSION_CONFIG__ !== null &&
       extension.permissions !== undefined &&

@@ -221,6 +221,9 @@ const ACTIVE_TAB_PROBE_FILES = Object.freeze([
 let earnedPreparedContext = null;
 let earnedAwaitingStory = null;
 let earnedCurrentPage = null;
+// True in the popup that finished setup on a story page. That story's save
+// is confirmed here even when it landed before this popup first looked.
+let earnedSetupFinishedOnStory = false;
 let kernelPopupInitialized = false;
 let nativeImportContinuation = null;
 let nativeImportGeneration = 0;
@@ -1127,20 +1130,34 @@ function setEarnedEmphasizedCopy(element, markup) {
 let lastEarnedAnnouncement = "";
 let earnedAnnouncementTimer = null;
 
-function earnedAnnouncementForState(code, heading, detail) {
-  const title = document.getElementById("popup-earned-heading")?.textContent?.trim() || "Your story";
+/** "Title by Author", either part alone, or nothing: never a stand-in. */
+function storyNameForAnnouncement() {
+  const headingEl = document.getElementById("popup-earned-heading");
+  const title = headingEl?.dataset.recordTitle === "true" ? headingEl.textContent?.trim() || "" : "";
   const byline = document.getElementById("popup-earned-record-byline")?.textContent?.trim() || "";
-  const author = byline.includes(" · ") ? byline.split(" · ")[0].trim() : "the author";
+  const author = byline.includes(" · ") ? byline.split(" · ")[0].trim() : "";
+  if (!title) return "";
+  return author ? `${title} by ${author}` : title;
+}
+
+function earnedAnnouncementForState(code, heading, detail) {
   switch (code) {
     case "P1": return "Trace is on this story. Saving your story. Keep reading; a note appears on the page when it’s saved.";
-    case "P2": return `${heading.startsWith("Already") ? "Already in your Library" : "Saved to your Library"}: ${title} by ${author}.${heading.startsWith("Already") ? "" : " Your chapter fills in as you read."}`;
+    case "P2": {
+      const already = heading.startsWith("Already");
+      const name = storyNameForAnnouncement();
+      const said = `${already ? "Already in your Library" : "Saved to your Library"}${name ? `: ${name}` : ""}.`;
+      return already ? said : `${said} Your chapter fills in as you read.`;
+    }
     case "P3": return "Allowed on this site only. Next, tap Always Allow, not the blue button. Safari will list all 5 story-site addresses.";
     case "P3-lapse": return "Trace can’t save here right now. Next, tap Always Allow, not the blue button.";
     case "P4": return "Waiting for Safari. Tap Always Allow, not the blue button.";
-    case "P5": return "Still confirming your story. Nothing to redo.";
-    case "P6": return "Finish setup in the Trace app.";
+    case "P5": return "Still confirming your story. Keep reading; it’ll appear in Trace. If it hasn’t after a minute, reload this page.";
+    case "P6": return "Finish setup in the Trace app. Create an account or sign in, then come back.";
+    case "connecting-account": return "Connecting to your account.";
+    case "account-unreachable": return "Trace couldn’t connect to your account. Open Trace, then come back.";
     case "P7": return "Nothing was saved. When Safari asks again, tap Always Allow.";
-    case "P8": return "Open any story to save it.";
+    case "P8": return "Open any story. Trace saves it when it opens.";
     case "P9": return "This story isn’t available. Nothing was saved.";
     case "P10": return `Automatic saving is off. ${document.getElementById("popup-earned-record-title")?.textContent?.trim() || "This story"} is not in your Library.`;
     case "P11": return "";
@@ -1533,13 +1550,13 @@ function renderEarnedPermissionInvitation(story, hasGrant, coverage = null, laps
 function renderEarnedSiteReady() {
   setEarnedCopy({
     stateCode: "P8",
-    heading: "Open any story to save it",
-    lead: "Tap a title on this page. Trace saves it when it opens.",
+    heading: "Open any story",
+    lead: "Trace saves it when it opens.",
   });
   setEarnedCheck("popup-earned-story", "waiting", "Open a story", "Story page");
   setEarnedCheck("popup-earned-access", "pass", "Allowed", "Website access");
   setEarnedCheck("popup-earned-save", "waiting", "Not saved", "Saved to Trace");
-  setEarnedResult("success", "Open any story to save it.", "");
+  setEarnedResult("success", "Open any story.", "Trace saves it when it opens.");
   configureEarnedActions({ hidden: true });
 }
 
@@ -1657,20 +1674,63 @@ async function deliverFirstStoryConfirmation() {
   }
 }
 
+// A page that has just reloaded can take a moment to name its story.
+const SAVED_TITLE_RETRY_DELAYS_MS = Object.freeze([400, 1200, 2500]);
+let savedTitleLookup = null;
+
+function stopSavedTitleLookup() {
+  if (savedTitleLookup?.timer) clearTimeout(savedTitleLookup.timer);
+  savedTitleLookup = null;
+}
+
+/**
+ * The saved confirmation is on screen without the story's name. Ask the page
+ * for it a few more times and fill it in; until then nothing stands in.
+ */
+function lookUpSavedTitle(story, work, alreadyInLibrary, attempt = 0) {
+  const delay = SAVED_TITLE_RETRY_DELAYS_MS[attempt];
+  if (delay === undefined) return;
+  const lookup = { timer: null };
+  savedTitleLookup = lookup;
+  lookup.timer = setTimeout(() => {
+    void readActiveStoryIdentity().then((identity) => {
+      if (savedTitleLookup !== lookup || document.body.dataset.tracePopupStateCode !== "P2") return;
+      if (identity?.title) renderEarnedSaved(story, work, identity, alreadyInLibrary);
+      else lookUpSavedTitle(story, work, alreadyInLibrary, attempt + 1);
+    });
+  }, delay);
+}
+
 function renderEarnedSaved(story, work, identity, alreadyInLibrary = false) {
+  stopSavedTitleLookup();
   void deliverFirstStoryConfirmation();
   const line = recordLine(work?.entry);
-  setEarnedCopy({
-    stateCode: "P2",
-    kicker: alreadyInLibrary ? "Already in your Library" : "Saved to your Library",
-    kickerIcon: "check",
-    heading: identity?.title || "Your story",
-    record: { heading: true, byline: storyByline(identity, story), label: line.label, status: line.key },
-    lead: "Your chapter fills in as you read. Your story is waiting in Trace whenever you open it.",
-  });
+  const confirmation = alreadyInLibrary ? "Already in your Library" : "Saved to your Library";
+  const title = typeof identity?.title === "string" ? identity.title.trim() : "";
+  const lead = "Your chapter fills in as you read. Your story is waiting in Trace whenever you open it.";
+  if (title) {
+    setEarnedCopy({
+      stateCode: "P2",
+      kicker: confirmation,
+      kickerIcon: "check",
+      heading: title,
+      record: { heading: true, byline: storyByline(identity, story), label: line.label, status: line.key },
+      lead,
+    });
+  } else {
+    // The page has not named the story yet. The confirmation stands on its
+    // own, as the headline, rather than over a made-up title.
+    setEarnedCopy({
+      stateCode: "P2",
+      glyph: "check",
+      heading: confirmation,
+      record: { byline: storyByline(null, story), label: line.label, status: line.key },
+      lead,
+    });
+    lookUpSavedTitle(story, work, alreadyInLibrary);
+  }
   setEarnedCheck("popup-earned-save", "pass", "Saved", "Saved to Trace");
-  setEarnedResult("success", alreadyInLibrary ? "Already in your Library:" : "Saved to your Library:",
-    (identity?.title || "Your story") + " by " + (identity?.author || "the author") + ". Your chapter fills in as you read.");
+  setEarnedResult("success", `${confirmation}.`, "Your chapter fills in as you read.");
   configureEarnedActions({ label: "Keep reading", action: "close", emphasis: "secondary" });
 }
 
@@ -1678,9 +1738,10 @@ function renderEarnedDelayed(story) {
   setEarnedCopy({
     stateCode: "P5",
     heading: "Still confirming your story",
-    lead: "Nothing to redo. Keep reading; it’ll appear in Trace.",
+    lead: "Keep reading; it’ll appear in Trace. If it hasn’t after a minute, reload this page.",
   });
-  setEarnedResult("checking", "Still confirming your story.", "Nothing to redo.");
+  setEarnedResult("checking", "Still confirming your story.",
+    "Keep reading; it’ll appear in Trace. If it hasn’t after a minute, reload this page.");
   configureEarnedActions(
     { label: "Keep reading", action: "close", emphasis: "secondary" },
     { label: "Check again", action: "check_story", emphasis: "tertiary" },
@@ -1700,6 +1761,7 @@ function renderEarnedUnavailable(story) {
   configureEarnedActions({ label: "Close", action: "close", emphasis: "tertiary" });
 }
 
+/** Only for a reader the Trace app has no account for. */
 function renderEarnedConnectAccount(story) {
   setEarnedCopy({
     stateCode: "P6",
@@ -1708,6 +1770,40 @@ function renderEarnedConnectAccount(story) {
   });
   setEarnedResult("failure", "Finish setup in the Trace app.", "");
   configureEarnedActions({ label: "Open Trace", action: "open_connect", emphasis: "primary" });
+}
+
+/**
+ * The Trace app's account has not been read yet, so it is not known whether
+ * the reader has one. Say only that Trace is connecting.
+ */
+function renderEarnedConnectingAccount() {
+  setEarnedCopy({
+    stateCode: "connecting-account",
+    heading: "Connecting to your account…",
+    lead: "Checking the Trace app for your account.",
+  });
+  setEarnedResult("checking", "Connecting to your account.", "");
+  configureEarnedActions({ hidden: true });
+}
+
+/**
+ * The account still could not be read, or Trace refused the one the app
+ * holds. That is not the same as having no account, so nothing here asks the
+ * reader to create one.
+ */
+function renderEarnedAccountUnreachable(story) {
+  setEarnedCopy({
+    stateCode: "account-unreachable",
+    glyph: "alert",
+    glyphTone: "warning",
+    heading: "Trace couldn’t connect to your account",
+    lead: `Your Library is safe. Open Trace and check you’re signed in, then come back to ${story?.kind === "archive" ? "any story" : "this story"}.`,
+  });
+  setEarnedResult("failure", "Trace couldn’t connect to your account.", "");
+  configureEarnedActions(
+    { label: "Open Trace", action: "open_connect", emphasis: "primary" },
+    { label: "Try again", action: "connect_account", emphasis: "tertiary" },
+  );
 }
 
 /**
@@ -1768,6 +1864,115 @@ function renderEarnedLibraryFull(onUnsavedStory) {
   );
 }
 
+// On iPhone and iPad the Trace app holds the account. The background reads
+// it when the popup asks for a session snapshot, and the answer is one of:
+// the app has no account, the account is connected, or it could not be read
+// just now. Only the first of those may ask the reader to create an account.
+const APP_ACCOUNT_RETRY_DELAYS_MS = Object.freeze([1000, 2000, 4000]);
+
+/** What a session snapshot says about the account behind this extension. */
+function appAccountAnswer(snapshot) {
+  const state = snapshot?.state;
+  const reason = snapshot?.reason || "none";
+  if (state === "connected") return "connected";
+  if (state === "initializing" || state === "connecting" || state === "verifying") return "pending";
+  if (state === "signed_out") return reason === "credential_absent" ? "none" : "unknown";
+  if (state === "reconnect_required") {
+    if (reason === "identity_conflict") return "other_account";
+    if (reason === "credential_absent" || reason === "credential_rejected") return "refused";
+  }
+  // No answer at all is unknown too. Storage and account-response problems
+  // keep the copy they already have.
+  return state ? "other" : "unknown";
+}
+
+let appAccountCheck = null;
+
+function stopAppAccountCheck() {
+  if (appAccountCheck?.timer) clearTimeout(appAccountCheck.timer);
+  appAccountCheck = null;
+}
+
+/**
+ * Asks for the app's account, and asks again after each delay while the
+ * answer is still unknown. The wait is bounded: after the last delay the
+ * reader is told Trace couldn't connect. `onConnected` runs once the account
+ * is there.
+ */
+function checkAppAccount(story, onConnected) {
+  stopAppAccountCheck();
+  const check = { story, onConnected, attempt: 0, timer: null, asking: false };
+  appAccountCheck = check;
+  askForAppAccount(check);
+}
+
+function askForAppAccount(check) {
+  if (appAccountCheck !== check || check.asking) return;
+  if (check.timer) clearTimeout(check.timer);
+  check.timer = null;
+  check.asking = true;
+  sendKernelRuntimeMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" }, (response) => {
+    if (appAccountCheck !== check) return;
+    check.asking = false;
+    const answer = appAccountAnswer(response?.snapshot);
+    if (answer === "unknown" || answer === "pending") {
+      const delay = APP_ACCOUNT_RETRY_DELAYS_MS[check.attempt];
+      if (delay !== undefined) {
+        check.attempt += 1;
+        renderEarnedConnectingAccount();
+        check.timer = setTimeout(() => askForAppAccount(check), delay);
+        return;
+      }
+    }
+    appAccountCheck = null;
+    if (answer === "connected") check.onConnected();
+    else if (answer === "none") renderEarnedConnectAccount(check.story);
+    else if (answer === "other_account") renderEarnedOtherAccount();
+    else renderEarnedAccountUnreachable(check.story);
+  });
+}
+
+let lastAccountNeed = null;
+// A popup resolves the account for its story a couple of times at most. If
+// the story still reports no account after that, it says so and stops.
+const ACCOUNT_RESOLUTION_LIMIT = 2;
+let accountResolutions = 0;
+
+/**
+ * A story is waiting on an account that is not connected. Find out what is
+ * known before saying anything about signing in.
+ */
+function resolveAccountForStory(story, onConnected) {
+  stopStoryConfirmation();
+  lastAccountNeed = { story, onConnected };
+  accountResolutions += 1;
+  if (accountResolutions > ACCOUNT_RESOLUTION_LIMIT) {
+    stopAppAccountCheck();
+    if (kernelPopupInitialized) showAppLinkView();
+    renderEarnedAccountUnreachable(story);
+    return;
+  }
+  if (kernelPopupInitialized) {
+    // The general view already follows the session; let it ask.
+    kernelSnapshotProviderAttempt = 0;
+    requestKernelSnapshot();
+    return;
+  }
+  checkAppAccount(story, onConnected);
+}
+
+/** "Try again" on the couldn't-connect state: one more bounded check. */
+function retryAppAccount() {
+  accountResolutions = 0;
+  renderEarnedConnectingAccount();
+  if (kernelPopupInitialized || !lastAccountNeed) {
+    kernelSnapshotProviderAttempt = 0;
+    requestKernelSnapshot();
+    return;
+  }
+  checkAppAccount(lastAccountNeed.story, lastAccountNeed.onConnected);
+}
+
 let storyConfirmation = null;
 
 function stopStoryConfirmation() {
@@ -1784,11 +1989,15 @@ async function checkConfirmedStory() {
   if (storyConfirmation !== watch) return;
   if (!state || state.ok !== true) return;
   if (state.authState?.state && state.authState.state !== "connected" && state.authState.state !== "connecting" && state.authState.state !== "verifying") {
+    // Not connected is not yet "no account": this reply never reads the
+    // Trace app's account. The account check does, and decides what to say.
     watch.render.connect();
     return;
   }
   if (state.activeWork && state.activeWork.status === "saved") {
-    const identity = watch.identity || (await readActiveStoryIdentity());
+    // An identity read while the page was still reloading has no title; ask
+    // again now that the page has saved the story.
+    const identity = watch.identity?.title ? watch.identity : await readActiveStoryIdentity();
     if (storyConfirmation !== watch) return;
     stopStoryConfirmation();
     void recordEarnedEvent("story_confirmed_in_popup");
@@ -1808,9 +2017,9 @@ async function checkConfirmedStory() {
  * current-account entry for this exact tab's story ends the wait; a timeout
  * shows a calm delayed state and never re-sends a save.
  */
-function watchForConfirmedStory(story, render) {
+function watchForConfirmedStory(story, render, { firstCheck = true } = {}) {
   stopStoryConfirmation();
-  storyConfirmation = { story, render, identity: null, timer: null, firstCheck: true };
+  storyConfirmation = { story, render, identity: null, timer: null, firstCheck };
   const watch = storyConfirmation;
   void readActiveStoryIdentity().then((identity) => {
     if (storyConfirmation === watch) watch.identity = identity;
@@ -1831,10 +2040,12 @@ function earnedStoryRender(story) {
     saved: (work, identity, already) => renderEarnedSaved(story, work, identity, already),
     delayed: () => renderEarnedDelayed(story),
     unavailable: () => renderEarnedUnavailable(story),
-    connect: () => {
-      stopStoryConfirmation();
-      renderEarnedConnectAccount(story);
-    },
+    connect: () => resolveAccountForStory(story, () => {
+      // The account connected while this popup waited, so a story found
+      // saved now was saved now, not already there.
+      renderEarnedAccessPending(story);
+      watchForConfirmedStory(story, earnedStoryRender(story), { firstCheck: false });
+    }),
   };
 }
 
@@ -1921,6 +2132,7 @@ async function prepareEarnedPermissionFlow() {
   if (onboarding.completedAt || earnedRunVerified(onboarding, readiness)) {
     if (!onboarding.completedAt) {
       await writeEarnedState({ completedAt: Date.now() });
+      if (story.ok && story.kind === "story") earnedSetupFinishedOnStory = true;
     }
     if (earnedAwaitingStory) {
       if (!storyConfirmation) {
@@ -2018,7 +2230,9 @@ async function allowAccessAndAddEarnedStory() {
       return;
     }
     earnedPreparedContext = Object.freeze({ story, hasGrant: true });
-    earnedAwaitingStory = story;
+    // Only a story page has a story to wait for. A list or the site's home
+    // page keeps its open-any-story prompt.
+    earnedAwaitingStory = story.kind === "story" ? story : null;
     const registration = await reconcileEarnedRegistration();
     if (registration?.ok !== true || registration?.registered !== true) {
       throw new Error("registration_failed");
@@ -2052,10 +2266,19 @@ async function initializeEarnedPermissionFlow() {
     if (changes[ACCOUNT_PROJECTION_REVISION_KEY] && storyConfirmation) {
       void checkConfirmedStory();
     }
+    // The background publishes this when an account connects. A popup that is
+    // waiting on the account asks again now instead of at its next delay.
+    if (changes[ACCOUNT_PROJECTION_REVISION_KEY]) {
+      if (appAccountCheck?.timer) askForAppAccount(appAccountCheck);
+      else if (kernelSnapshotTimer !== null && kernelSnapshotProviderAttempt > 0) requestKernelSnapshot();
+    }
     if (!changes[ARCHIVE_READINESS_KEY]) return;
     void prepareEarnedPermissionFlow();
   });
   void recordEarnedEvent("popup_opened");
+  // Tell the Trace app what story-site access Safari grants right now. Once
+  // a one-day grant runs out no page script runs to say so; an open popup can.
+  sendKernelRuntimeMessage({ type: "TRACE_ARCHIVE_ACCESS_REPORT" }, () => {});
   await prepareEarnedPermissionFlow();
 }
 
@@ -2423,7 +2646,7 @@ function renderKernelSnapshot(snapshot) {
     !SESSION_DISABLED &&
     (state === "signed_out" || (state === "reconnect_required" && credentialRecovery))
   ) {
-    renderAwaitingAppLink(reason);
+    renderAwaitingAppLink(snapshot);
     return;
   }
   if (document.body.dataset.traceReaderView === "link") {
@@ -2471,21 +2694,32 @@ function renderKernelSnapshot(snapshot) {
   renderNativeImportContinuation(snapshot);
 }
 
-/**
- * iOS: the extension is on but not yet linked to the account in the Trace app.
- * One step, one action: finish setup in the app, then come back.
- */
-function renderAwaitingAppLink(reason = "none") {
+/** Shows the one-step account view in place of the general popup. */
+function showAppLinkView() {
   const section = document.getElementById("popup-earned-permission");
-  if (!section) return;
+  if (!section) return false;
   document.body.dataset.traceReaderView = "link";
   section.hidden = false;
   for (const id of ["popup-import", "popup-cta", "popup-session-help", "popup-session-secondary", "popup-preferences"]) {
     const el = document.getElementById(id);
     if (el) el.hidden = true;
   }
-  if (reason === "identity_conflict") renderEarnedOtherAccount();
-  else renderEarnedConnectAccount({ kind: "story" });
+  return true;
+}
+
+/**
+ * iOS: the extension is on but not linked to the account in the Trace app.
+ * One step, one action. "Create an account or sign in" is only for a reader
+ * the app has no account for; any other answer says Trace couldn't connect.
+ */
+function renderAwaitingAppLink(snapshot) {
+  if (!showAppLinkView()) return;
+  const answer = appAccountAnswer(snapshot);
+  // Only a story page can be told to come back to "this story".
+  const story = { kind: earnedCurrentPage?.kind === "story" ? "story" : "archive" };
+  if (answer === "other_account") renderEarnedOtherAccount();
+  else if (answer === "none") renderEarnedConnectAccount(story);
+  else renderEarnedAccountUnreachable(story);
 }
 
 function sendKernelRuntimeMessage(message, onResponse) {
@@ -2514,19 +2748,26 @@ const KERNEL_SNAPSHOT_RETRY_DELAYS_MS = Object.freeze([180, 650]);
 const KERNEL_SNAPSHOT_TRANSIENT_RETRY_LIMIT = 31;
 let kernelSnapshotAttempt = 0;
 let kernelSnapshotTransientAttempt = 0;
-// The worker can't tell an app with no account from one it couldn't read,
-// so this stays short: a signed-out reader waits about a second longer.
-const KERNEL_SNAPSHOT_PROVIDER_RETRY_LIMIT = 2;
-const KERNEL_SNAPSHOT_PROVIDER_RETRY_MS = 600;
 let kernelSnapshotProviderAttempt = 0;
+let kernelSnapshotTimer = null;
+
+function requestKernelSnapshotAfter(delayMs) {
+  if (kernelSnapshotTimer !== null) clearTimeout(kernelSnapshotTimer);
+  kernelSnapshotTimer = setTimeout(() => {
+    kernelSnapshotTimer = null;
+    requestKernelSnapshot();
+  }, delayMs);
+}
 
 function requestKernelSnapshot() {
+  if (kernelSnapshotTimer !== null) clearTimeout(kernelSnapshotTimer);
+  kernelSnapshotTimer = null;
   sendKernelRuntimeMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" }, (response) => {
     if (!response) {
       const retryDelay = KERNEL_SNAPSHOT_RETRY_DELAYS_MS[kernelSnapshotAttempt];
       kernelSnapshotAttempt += 1;
       if (retryDelay !== undefined) {
-        setTimeout(requestKernelSnapshot, retryDelay);
+        requestKernelSnapshotAfter(retryDelay);
         return;
       }
       renderKernelSnapshot({ state: "degraded", reason: "runtime_unavailable" });
@@ -2534,25 +2775,31 @@ function requestKernelSnapshot() {
     }
     kernelSnapshotAttempt = 0;
     const state = response?.snapshot?.state;
-    // The app's account couldn't be read just now (Safari can still be
-    // starting the extension). Signed out isn't confirmed, so keep checking
-    // briefly instead of asking a signed-in reader to sign in.
-    if (
-      response?.action?.kind === "unavailable" &&
-      (state === "signed_out" || state === "reconnect_required") &&
-      kernelSnapshotProviderAttempt < KERNEL_SNAPSHOT_PROVIDER_RETRY_LIMIT
-    ) {
-      kernelSnapshotProviderAttempt += 1;
-      renderKernelSnapshot({ state: "initializing", reason: "none" });
-      setTimeout(requestKernelSnapshot, KERNEL_SNAPSHOT_PROVIDER_RETRY_MS);
-      return;
+    // On iPhone and iPad this reply follows a read of the Trace app's
+    // account. A read that failed (Safari can still be starting the
+    // extension) leaves it unknown whether the reader has an account, so
+    // say only that Trace is connecting and ask again a few times, further
+    // apart each time. Signed out is shown only once the app says so.
+    const accountRead = isLikelyIosExtensionUi || response?.action !== undefined;
+    if (accountRead && !SESSION_DISABLED && appAccountAnswer(response?.snapshot) === "unknown") {
+      const retryDelay = APP_ACCOUNT_RETRY_DELAYS_MS[kernelSnapshotProviderAttempt];
+      if (retryDelay !== undefined) {
+        kernelSnapshotProviderAttempt += 1;
+        if (EARNED_PERMISSION_ONBOARDING && isLikelyIosExtensionUi && showAppLinkView()) {
+          renderEarnedConnectingAccount();
+        } else {
+          renderKernelSnapshot({ state: "initializing", reason: "none" });
+        }
+        requestKernelSnapshotAfter(retryDelay);
+        return;
+      }
     }
     kernelSnapshotProviderAttempt = 0;
     renderKernelSnapshot(response?.snapshot);
     if (state === "initializing" || state === "connecting" || state === "verifying") {
       if (kernelSnapshotTransientAttempt < KERNEL_SNAPSHOT_TRANSIENT_RETRY_LIMIT) {
         kernelSnapshotTransientAttempt += 1;
-        setTimeout(requestKernelSnapshot, kernelSnapshotTransientAttempt === 1 ? 250 : 1000);
+        requestKernelSnapshotAfter(kernelSnapshotTransientAttempt === 1 ? 250 : 1000);
       }
       return;
     }
@@ -2831,6 +3078,14 @@ async function renderReaderView(state) {
     return;
   }
   if (activeTab.kind === "supported_story") {
+    if (state.activeWork?.status === "saved" && earnedSetupFinishedOnStory) {
+      // Setup finished in this popup and the page saved the story before the
+      // popup first looked. Confirm it the way a save seen happening is
+      // confirmed, on either site, instead of opening on the everyday view.
+      stopStoryConfirmation();
+      renderEarnedSaved(story, state.activeWork, identity, false);
+      return;
+    }
     if (state.activeWork?.status === "saved") {
       const line = recordLine(state.activeWork.entry);
       setEarnedCopy({
@@ -2886,10 +3141,10 @@ async function renderReaderView(state) {
       renderEarnedAccessPending(story);
       if (importButton) importButton.hidden = true;
       watchForConfirmedStory(story, {
-        saved: (work, found, already) => renderEarnedSaved(story, work, found || identity, already),
+        saved: (work, found, already) => renderEarnedSaved(story, work, found?.title ? found : identity, already),
         delayed: () => renderEarnedDelayed(story),
         unavailable: () => renderEarnedUnavailable(story),
-        connect: () => { stopStoryConfirmation(); renderEarnedConnectAccount({ kind: "story" }); },
+        connect: () => resolveAccountForStory({ kind: "story" }, requestKernelPopupState),
       });
       return;
     }
@@ -2898,11 +3153,13 @@ async function renderReaderView(state) {
   }
   const onArchive = activeTab.kind === "supported_archive" || activeTab.kind === "blocked_archive";
   const awaitingFirstStory = activeTab.kind === "supported_archive" && state.firstSaveSeen !== true;
+  // The page may be a list of stories or the site's home page, which has
+  // no titles to tap, so the first-story prompt names neither.
   const heading = awaitingFirstStory
-    ? "Open any story to save it"
+    ? "Open any story"
     : onArchive ? "Trace is on here" : "Trace works on AO3 and FanFiction.net";
   const lead = awaitingFirstStory
-    ? "Tap a title on this page. Trace saves it when it opens."
+    ? "Trace saves it when it opens."
     : onArchive
       ? "Stories you open join your Library. Lists show what you’ve read."
       : "Open a story there and Trace keeps your place as you read.";
@@ -3009,7 +3266,7 @@ async function saveStoryFromPopup() {
       // the same button again.
       delayed: () => { popupStorySavePending = false; renderEarnedDelayed(story); },
       unavailable: () => { popupStorySavePending = false; renderEarnedUnavailable(story); },
-      connect: () => { popupStorySavePending = false; renderEarnedConnectAccount(story); },
+      connect: () => { popupStorySavePending = false; resolveAccountForStory(story, requestKernelPopupState); },
     });
   } catch (failure) {
     popupStorySavePending = false;
@@ -3048,6 +3305,7 @@ function bindEarnedActionButtons() {
       if (action === "open_app") openTraceApp(isLikelyIosExtensionUi ? TRACE_IOS_APP_LIBRARY_URL : TRACE_HOME_URL);
       if (action === "open_upgrade") void openUnlimited();
       if (action === "open_connect") openTraceApp(TRACE_IOS_APP_CONNECT_URL);
+      if (action === "connect_account") retryAppAccount();
       if (action === "check_link") {
         sendKernelRuntimeMessage({ type: "TRACE_SESSION_ACTION", action: "connect" }, (response) => {
           if (response?.snapshot) renderKernelSnapshot(response.snapshot);

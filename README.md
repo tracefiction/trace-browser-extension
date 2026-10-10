@@ -393,6 +393,26 @@ snapshot cannot replace a newer change. A preference is not proof of Safari
 access, activation or a successful save. Old app/extension versions can ignore
 the additive messages; absence leaves existing behavior intact.
 
+### Local Safari story-site access reading
+
+On iPhone and iPad the Safari background worker tells the bundled app which
+story-site addresses Safari currently lets Trace run on. A page run already
+publishes this beside its run receipt. The same message is also sent on its
+own when the popup opens, when Safari reports that the grant changed, and
+about once a day, because once access ends (for example, when an Allow for One
+Day grant runs out) no page script runs to say so. It reuses the existing
+`TRACE_IOS_EXTENSION_HEARTBEAT` permission snapshot: a timestamp and a list of
+granted origin patterns, stored in the app/extension shared container. It
+contains no URLs, story or account data, is never sent to a server, and adds
+no permission.
+
+The reading is built to avoid a false alarm. Missing access is reported only
+when `permissions.contains` says so twice, two seconds apart,
+and `permissions.getAll` also answered; when Safari confirms the five required
+origins they are listed by name, since a broader grant need not spell them
+out. If Safari does not answer, nothing is sent. Chrome, Firefox and Safari on
+Mac send nothing.
+
 ## Aggregate release and browser diagnostics
 
 Safari and Chromium-family clients may attach installed extension version and
