@@ -3732,6 +3732,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return this.#isIos;
     }
     async #acquireFromTraceTab(purpose) {
+      if (!declaresHostPattern(this.#runtime, this.#webTabPattern)) {
+        return { kind: "unavailable" };
+      }
       let tabs;
       try {
         tabs = await extensionCall(
@@ -5864,6 +5867,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (details.reason !== "install") return;
       void (async () => {
         if (await platformIsIos(options.runtime, options.mode)) return;
+        if (!declaresHostPattern(options.runtime, target.queryPattern)) return;
         try {
           void Promise.resolve(options.onActivation?.()).catch(() => void 0);
         } catch {
@@ -8066,6 +8070,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   // src/extension-runtime/earned-permission-registration.mts
   var EARNED_PERMISSION_REGISTRATION_MESSAGE = "TRACE_EARNED_PERMISSION_RECONCILE";
   var EARNED_PERMISSION_STATE_KEY = "traceEarnedPermissionOnboardingV1";
+  var POPUP_OPENED_MESSAGE = "TRACE_ARCHIVE_ACCESS_REPORT";
+  var EARNED_PERMISSION_RETRY_ALARM = "traceEarnedPermissionRetry";
+  var EARNED_PERMISSION_RETRY_KEY = "traceEarnedPermissionRetryV1";
+  var EARNED_PERMISSION_RETRY_DELAYS_MINUTES = Object.freeze([1, 5, 30, 180]);
   var DEFAULT_RECONCILE_TIMEOUT_MS = 5e3;
   var DEFAULT_ENDED_GRANT_CONFIRM_DELAY_MS = 2e3;
   var UNKNOWN_PERMISSION_STATE = Symbol("unknown permission state");
@@ -8255,10 +8263,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       const registered = configuredIds.every((id) => currentIds.has(id));
       if (!completeGrant) {
         const staleIds = configuredIds.filter((id) => currentIds.has(id));
+        const hadGrant = staleIds.length > 0 || stored.promptResult === "granted" || typeof stored.completedAt === "number";
+        if (hadGrant && !await this.#grantHasEnded(reading, generation)) {
+          throw new Error("permission_state_unconfirmed");
+        }
         if (staleIds.length > 0) {
-          if (!await this.#grantHasEnded(reading, generation)) {
-            throw new Error("permission_state_unconfirmed");
-          }
           this.#assertCurrent(generation);
           await callExtensionApi(
             scripting,
@@ -8363,11 +8372,60 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   };
   function installEarnedPermissionRegistrationRuntime(environment) {
     const controller = new EarnedPermissionRegistrationController(environment);
-    environment.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-      if (!isRecord20(message) || message.type !== EARNED_PERMISSION_REGISTRATION_MESSAGE) {
+    const { alarms, runtime, storage, storageMode } = environment;
+    const alarm = (method, args) => alarms === void 0 ? Promise.resolve() : callExtensionApi(
+      alarms,
+      method,
+      args,
+      runtime,
+      storageMode
+    ).catch(() => void 0);
+    const retriesUsed = async () => {
+      const stored = await storage.get(EARNED_PERMISSION_RETRY_KEY).catch(() => null);
+      const used = stored?.[EARNED_PERMISSION_RETRY_KEY];
+      return typeof used === "number" && Number.isInteger(used) && used > 0 ? used : 0;
+    };
+    let unfinished = false;
+    const finished = async (registered, changed) => {
+      const late = unfinished;
+      unfinished = false;
+      if (registered && (changed || late)) environment.onScriptsRegistered?.();
+      await alarm("clear", [EARNED_PERMISSION_RETRY_ALARM]);
+      if (await retriesUsed() > 0) {
+        await storage.remove(EARNED_PERMISSION_RETRY_KEY).catch(() => void 0);
+      }
+    };
+    const tryLater = async () => {
+      unfinished = true;
+      if (typeof alarms?.create !== "function") return;
+      const delayInMinutes = EARNED_PERMISSION_RETRY_DELAYS_MINUTES[await retriesUsed()];
+      if (delayInMinutes === void 0) return;
+      await alarm("create", [EARNED_PERMISSION_RETRY_ALARM, { delayInMinutes }]);
+    };
+    const reconcile = () => {
+      const result = controller.reconcile();
+      void result.then(
+        (value) => value.ok || value.error === "permission_incomplete" ? finished(value.ok, value.changed) : tryLater(),
+        () => tryLater()
+      ).catch(() => void 0);
+      return result;
+    };
+    alarms?.onAlarm?.addListener((fired) => {
+      if (fired?.name !== EARNED_PERMISSION_RETRY_ALARM) return;
+      void (async () => {
+        const used = await retriesUsed();
+        await storage.set({ [EARNED_PERMISSION_RETRY_KEY]: used + 1 }).catch(() => void 0);
+        await reconcile().catch(() => void 0);
+      })();
+    });
+    runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (!isRecord20(message)) return false;
+      if (message.type === POPUP_OPENED_MESSAGE && isPopupSender(sender, runtime.id)) {
+        void reconcile().catch(() => void 0);
         return false;
       }
-      void controller.reconcile().then(
+      if (message.type !== EARNED_PERMISSION_REGISTRATION_MESSAGE) return false;
+      void reconcile().then(
         (response) => sendResponse(response),
         () => sendResponse({
           ok: false,
@@ -8380,17 +8438,17 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return true;
     });
     environment.permissions.onAdded?.addListener(() => {
-      void controller.reconcile().catch(() => void 0);
+      void reconcile().catch(() => void 0);
     });
     environment.permissions.onRemoved?.addListener(() => {
-      void controller.reconcile().catch(() => void 0);
+      void reconcile().catch(() => void 0);
     });
-    environment.runtime.onInstalled?.addListener((details) => {
+    runtime.onInstalled?.addListener((details) => {
       if (details.reason === "install" || details.reason === "update") {
-        void controller.reconcile().catch(() => void 0);
+        void reconcile().catch(() => void 0);
       }
     });
-    void controller.reconcile().catch(() => void 0);
+    void reconcile().catch(() => void 0);
     return controller;
   }
 
@@ -8476,7 +8534,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
             storageMode
           ),
           storageMode,
-          config: define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default
+          config: define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default,
+          alarms: extension.alarms,
+          // Story tabs that are already open get the scripts too, whether the
+          // reader allowed the sites from the popup or in Safari's settings.
+          onScriptsRegistered: () => {
+            void recover();
+          }
         });
       }
     }

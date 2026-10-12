@@ -159,6 +159,89 @@ async function assertArchiveReceiptSurvivesStorageFailure(bundle) {
   assert.equal(Object.hasOwn(nativeMessages[0], "permissionSnapshot"), false);
 }
 
+// Runs the built iPhone background as Safari would: no story site allowed at
+// first, one story tab and one unrelated tab open, then the reader allows the
+// five sites in Safari's settings while the background is awake.
+async function assertIphoneBundleFollowsTheGrant(bundle, builtManifest) {
+  let allowed = false;
+  let registrations = [];
+  const queries = [];
+  const injected = [];
+  const created = [];
+  const added = [];
+  const stored = {};
+  const event = (listeners = []) => ({ listeners, addListener(listener) { listeners.push(listener); } });
+  const context = {
+    URL, Date, Promise, console, setTimeout, clearTimeout,
+    crypto: { randomUUID: () => "package-proof-id" },
+    browser: {
+      runtime: {
+        id: "trace-iphone-proof",
+        onInstalled: event(), onStartup: event(), onMessage: event(),
+        getManifest: () => builtManifest,
+        getURL: (resource) => `safari-web-extension://trace-iphone-proof/${resource}`,
+        // An iPad can report itself as a Mac.
+        async getPlatformInfo() { return { os: "mac" }; },
+      },
+      alarms: { async clear() { return true; }, async create() {}, async get() {}, onAlarm: event() },
+      storage: { local: {
+        async get(key) { return Object.hasOwn(stored, key) ? { [key]: stored[key] } : {}; },
+        async set(patch) { Object.assign(stored, patch); },
+        async remove(key) { delete stored[key]; },
+      } },
+      permissions: {
+        async contains() { return allowed; },
+        async getAll() { return { origins: allowed ? [...builtManifest.optional_host_permissions] : [] }; },
+        request() { assert.fail("the background never asks for website access"); },
+        onAdded: event(added), onRemoved: event(),
+      },
+      scripting: {
+        async getRegisteredContentScripts() { return registrations; },
+        async registerContentScripts(next) { registrations = [...registrations, ...next]; },
+        async unregisterContentScripts() { registrations = []; },
+        async executeScript(injection) { injected.push(injection); },
+      },
+      tabs: {
+        async query(filter) {
+          queries.push(filter);
+          return [{ id: 11, url: "https://archiveofourown.org/works/123" }];
+        },
+        async create(options) { created.push(options); return { id: 12, url: options.url }; },
+        async sendMessage() { return null; },
+      },
+    },
+  };
+  const turns = async () => { for (let turn = 0; turn < 40; turn += 1) await new Promise((resolve) => setImmediate(resolve)); };
+  vm.runInNewContext(bundle, context);
+  for (const listener of context.browser.runtime.onInstalled.listeners) listener({ reason: "install" });
+  await turns();
+  assert.deepEqual(queries, [], "with no story site allowed the background asks for no tab at all");
+  assert.deepEqual(injected, []);
+  assert.deepEqual(registrations, []);
+  assert.deepEqual(created, [], "it opens no page of its own");
+
+  allowed = true;
+  for (const listener of added) listener({ origins: builtManifest.optional_host_permissions });
+  await turns();
+  assert.deepEqual(registrations.map(({ id }) => id), ["trace-archive-automation-v1", "trace-ao3-saved-filters-v1"]);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(queries)),
+    [{ url: builtManifest.optional_host_permissions }],
+    "then it asks only for story-site tabs, by address",
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(injected)), [{
+    target: { tabId: 11, frameIds: [0] },
+    files: [
+      "content-config.js",
+      "trace-finish-qualify.js",
+      "collector.js",
+      "library-overlay-keys.js",
+      "library-overlay.js",
+      "ao3-saved-filters.js",
+    ],
+  }], "and the story tab that was already open gets the registered scripts");
+}
+
 test("legacy, kernel, and disabled packages have one deterministic classic owner", async () => {
   try {
     runBuild("build:legacy:release");
@@ -401,11 +484,16 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
       for (const file of registration.js) {
         assert.ok(fs.existsSync(path.join(RESOURCES, file)), `${file} ships in the bundle`);
         assert.notEqual(file, "popup-config.js", "registered pages do not load the popup's setup");
+        // Nothing of Trace's runs on Trace's own site in this build, so no
+        // message from that site, and none of what such a message starts,
+        // can reach the background.
+        assert.notEqual(file, "sync.js");
       }
     }
     const iphoneBackground = fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8");
     assert.match(iphoneBackground, /registrationMode: "dynamic"/);
     assert.doesNotMatch(iphoneBackground, /registrationMode: "static"/);
+    await assertIphoneBundleFollowsTheGrant(iphoneBackground, iphoneManifest);
     // The Chrome and Firefox packages built beside it do not follow it.
     assert.deepEqual(
       ["chrome", "firefox"].map((browser) =>

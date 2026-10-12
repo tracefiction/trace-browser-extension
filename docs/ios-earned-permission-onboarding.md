@@ -21,9 +21,16 @@ before the five story sites are allowed.
 The background worker registers the two page scripts
 (`trace-archive-automation-v1`, `trace-ao3-saved-filters-v1`) when
 `permissions.contains` confirms all five patterns. It checks on worker start,
-on install and update, and when website access is added or removed. Story tabs
-that are already open get the same scripts back after an update, under the same
-complete grant.
+on install and update, when website access is added or removed, and each time
+the popup opens. Story tabs that are already open get the same scripts, under
+the same complete grant: after an update, and when the reader allows the sites
+from the popup or in Safari's settings.
+
+A check that cannot finish (Safari did not answer, the registration was
+refused, or a reader who had the grant read once as not having it) is tried
+again by alarm after 1, 5, 30 and 180 minutes, then left to the next worker
+start, permission change or popup. A complete registration or a settled "not
+allowed" ends the retries.
 
 The scripts are removed when that access ends. Because nothing on a story page
 can wake the worker once they are gone, an ending is acted on only when two
@@ -38,7 +45,8 @@ recovery as before.
 
 Background code asks Safari only for tabs at story-site addresses, and only
 under the complete grant. It never asks for every open tab and, in this build,
-never for a tab of Trace's own website.
+never for a tab of Trace's own website, and it never opens Trace's setup page;
+that holds on an iPad that reports itself as a Mac.
 
 Mac Safari, Chrome and Firefox are built with `npm run build:release` and keep
 required story sites, `tabs`, and manifest-declared scripts.

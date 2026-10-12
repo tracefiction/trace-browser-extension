@@ -7,6 +7,9 @@ import vm from "node:vm";
 
 import {
   EARNED_PERMISSION_REGISTRATION_MESSAGE,
+  EARNED_PERMISSION_RETRY_ALARM,
+  EARNED_PERMISSION_RETRY_DELAYS_MINUTES,
+  EARNED_PERMISSION_RETRY_KEY,
   EARNED_PERMISSION_STATE_KEY,
   EarnedPermissionRegistrationController,
   installEarnedPermissionRegistrationRuntime,
@@ -58,7 +61,17 @@ function createHarness({
   let removedListener = null;
   let installedListener = null;
   let messageListener = null;
+  let alarmListener = null;
+  let scriptsRegistered = 0;
+  const alarms = {
+    created: [],
+    cleared: [],
+    async create(name, info) { alarms.created.push({ name, ...info }); },
+    async clear(name) { alarms.cleared.push(name); return true; },
+    onAlarm: { addListener(listener) { alarmListener = listener; } },
+  };
   const runtime = {
+    id: "trace-test",
     onInstalled: {
       addListener(listener) {
         installedListener = listener;
@@ -113,6 +126,9 @@ function createHarness({
     async set(patch) {
       Object.assign(store, patch);
     },
+    async remove(key) {
+      delete store[key];
+    },
   };
   const environment = {
     runtime,
@@ -125,6 +141,8 @@ function createHarness({
     // The pause between the two readings that end a grant; tests that are
     // about that pause set their own.
     endedGrantConfirmDelayMs: 0,
+    alarms,
+    onScriptsRegistered: () => { scriptsRegistered += 1; },
   };
   return {
     environment,
@@ -147,12 +165,29 @@ function createHarness({
     clearRegistrations() {
       currentRegistrations = [];
     },
+    alarms,
+    get scriptsRegistered() {
+      return scriptsRegistered;
+    },
+    /** The retry alarm goes off, as it would in a worker Safari had put to sleep. */
+    async fireRetryAlarm() {
+      alarmListener({ name: EARNED_PERMISSION_RETRY_ALARM });
+      await settled();
+    },
+    /** A message the registration runtime may act on without answering. */
+    send(message, sender) {
+      return messageListener(message, sender, () => assert.fail("another listener answers this message"));
+    },
     async dispatch(message) {
       return await new Promise((resolve) => {
         assert.equal(messageListener?.(message, {}, resolve), true);
       });
     },
   };
+}
+
+async function settled() {
+  for (let turn = 0; turn < 6; turn += 1) await new Promise((resolve) => setImmediate(resolve));
 }
 
 test("complete grant registers the canonical scripts and is idempotent", async () => {
@@ -803,4 +838,132 @@ test("a page or popup that asks during an unconfirmed ending is told to ask agai
   assert.equal(response.ok, false);
   assert.equal(response.error, "registration_failed");
   assert.deepEqual(h.unregistered, []);
+});
+
+// --- A reconcile that could not finish is tried again ------------------------
+
+function unreadablePermissions(h) {
+  const { getAll, contains } = h.environment.permissions;
+  h.environment.permissions.getAll = async () => { throw new Error("unavailable"); };
+  h.environment.permissions.contains = async () => { throw new Error("unavailable"); };
+  return () => Object.assign(h.environment.permissions, { getAll, contains });
+}
+
+test("update: a first reconcile that cannot read permissions is tried again by alarm, and open tabs get the scripts", async () => {
+  const h = upgradeHarness({ origins: [...ORIGINS] });
+  const answerAgain = unreadablePermissions(h);
+  installEarnedPermissionRegistrationRuntime(h.environment);
+  await settled();
+
+  assert.deepEqual(h.registered, []);
+  assert.deepEqual(h.alarms.created, [{ name: EARNED_PERMISSION_RETRY_ALARM, delayInMinutes: 1 }]);
+  assert.equal(h.scriptsRegistered, 0);
+
+  answerAgain();
+  await h.fireRetryAlarm();
+
+  assert.deepEqual(h.registrations.map(({ id }) => id), REGISTRATIONS.map(({ id }) => id));
+  assert.equal(h.scriptsRegistered, 1, "story tabs already open are given the scripts");
+  assert.equal(h.alarms.cleared.at(-1), EARNED_PERMISSION_RETRY_ALARM);
+  assert.equal(Object.hasOwn(h.store, EARNED_PERMISSION_RETRY_KEY), false);
+  assert.equal(h.alarms.created.length, 1, "nothing further is scheduled once it has worked");
+  assert.equal(h.store[EARNED_PERMISSION_STATE_KEY].completedAt, STORE_BUILD_STATE.completedAt);
+});
+
+test("retries come further apart each time and stop after the last", async () => {
+  const h = upgradeHarness({ origins: [...ORIGINS] });
+  unreadablePermissions(h);
+  installEarnedPermissionRegistrationRuntime(h.environment);
+  await settled();
+  for (let fired = 0; fired < EARNED_PERMISSION_RETRY_DELAYS_MINUTES.length + 3; fired += 1) {
+    await h.fireRetryAlarm();
+  }
+
+  assert.deepEqual(
+    h.alarms.created.map(({ delayInMinutes }) => delayInMinutes),
+    [1, 5, 30, 180],
+  );
+  assert.deepEqual(h.registered, []);
+});
+
+test("a registration the browser refuses is tried again the same way", async () => {
+  const h = upgradeHarness({ origins: [...ORIGINS] });
+  const register = h.environment.scripting.registerContentScripts;
+  h.environment.scripting.registerContentScripts = async () => { throw new Error("refused"); };
+  installEarnedPermissionRegistrationRuntime(h.environment);
+  await settled();
+  assert.deepEqual(h.alarms.created.map(({ delayInMinutes }) => delayInMinutes), [1]);
+
+  h.environment.scripting.registerContentScripts = register;
+  await h.fireRetryAlarm();
+  assert.equal(h.registrations.length, 2);
+  assert.equal(h.scriptsRegistered, 1);
+});
+
+test("update: one reading that the grant is incomplete is asked again, not taken as the answer", async () => {
+  const h = upgradeHarness({ origins: [...ORIGINS] });
+  scriptedReadings(h, [{ contains: false }, { contains: true }]);
+  installEarnedPermissionRegistrationRuntime(h.environment);
+  await settled();
+
+  assert.deepEqual(h.registered, [], "the first reconcile did not finish");
+  assert.deepEqual(h.alarms.created.map(({ delayInMinutes }) => delayInMinutes), [1]);
+
+  await h.fireRetryAlarm();
+  assert.equal(h.registrations.length, 2);
+});
+
+test("a settled answer that the sites are not allowed schedules nothing and ends any retry", async () => {
+  for (const state of [null, STORE_BUILD_STATE]) {
+    const h = createHarness({ origins: [], config: CURRENT_CONFIG, state });
+    const answerAgain = unreadablePermissions(h);
+    installEarnedPermissionRegistrationRuntime(h.environment);
+    await settled();
+    assert.equal(h.alarms.created.length, 1);
+
+    answerAgain();
+    await h.fireRetryAlarm();
+
+    assert.equal(h.alarms.created.length, 1, "not allowed is an answer, not a failure");
+    assert.equal(h.alarms.cleared.at(-1), EARNED_PERMISSION_RETRY_ALARM);
+    assert.equal(Object.hasOwn(h.store, EARNED_PERMISSION_RETRY_KEY), false);
+    assert.deepEqual(h.registered, []);
+    assert.equal(h.scriptsRegistered, 0);
+  }
+});
+
+test("the popup opening reconciles for a reader whose setup is finished, and only the popup can ask that way", async () => {
+  const h = upgradeHarness({ origins: [...ORIGINS] });
+  const answerAgain = unreadablePermissions(h);
+  installEarnedPermissionRegistrationRuntime(h.environment);
+  await settled();
+  answerAgain();
+  const opened = { type: "TRACE_ARCHIVE_ACCESS_REPORT" };
+
+  assert.equal(h.send(opened, { id: "trace-test", tab: { id: 3 }, url: "https://archiveofourown.org/works/1" }), false);
+  await settled();
+  assert.deepEqual(h.registered, [], "a page cannot start it");
+
+  assert.equal(h.send(opened, { id: "trace-test" }), false, "the message is left for its own listener to answer");
+  await settled();
+  assert.equal(h.registrations.length, 2);
+  assert.equal(h.scriptsRegistered, 1);
+});
+
+test("allowing the story sites while the worker is awake gives open story tabs the scripts", async () => {
+  const h = createHarness({ origins: [], config: CURRENT_CONFIG });
+  installEarnedPermissionRegistrationRuntime(h.environment);
+  await settled();
+  assert.equal(h.scriptsRegistered, 0);
+
+  h.origins.push(...ORIGINS);
+  h.addedListener();
+  await settled();
+
+  assert.equal(h.registrations.length, 2);
+  assert.equal(h.scriptsRegistered, 1);
+
+  h.addedListener();
+  await settled();
+  assert.equal(h.scriptsRegistered, 1, "an unchanged registration injects nothing again");
 });

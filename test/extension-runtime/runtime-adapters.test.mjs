@@ -2506,3 +2506,23 @@ test("duplicate reconnect clicks share a tab and fast readiness waits for its re
   assert.equal(creates.length, 1);
   assert.deepEqual(updates, [{ id: 42, active: true }]);
 });
+
+test("a build that does not declare Trace's site never reads a credential from a tab, whatever platform it reports", async () => {
+  for (const getPlatformInfo of [async () => ({ os: "mac" }), async () => { throw new Error("unavailable"); }]) {
+    let lookups = 0;
+    const provider = new ExplicitCredentialProvider({
+      runtime: { getPlatformInfo, getManifest: () => ({ host_permissions: [] }) },
+      tabs: {
+        async query() { lookups += 1; return [{ id: 1, url: "https://www.tracefiction.com/" }]; },
+        async sendMessage() { lookups += 1; return null; },
+      },
+      mode: "promise",
+      webOrigin: "https://www.tracefiction.com",
+      randomId: () => "credential-id",
+    });
+    assert.deepEqual(await provider.acquire("connect"), { kind: "unavailable" });
+    assert.deepEqual(await provider.acquire("refresh"), { kind: "unavailable" });
+    assert.equal(lookups, 0, "no tab of Trace's site is looked for or asked");
+  }
+});
+

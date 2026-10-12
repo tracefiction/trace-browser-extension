@@ -217,3 +217,36 @@ test("a failed connect-request record never blocks the setup page", async () => 
   await flush();
   assert.deepEqual(creates, ["https://www.tracefiction.com/?activation=extension-installed"]);
 });
+
+test("a build that does not declare Trace's site opens no setup page and looks for none, whatever platform it reports", async () => {
+  // An iPad can call itself a Mac, and the platform question can go unanswered.
+  for (const getPlatformInfo of [
+    async () => ({ os: "mac" }),
+    async () => { throw new Error("unavailable"); },
+    undefined,
+  ]) {
+    const h = promiseRuntime();
+    let remembered = 0;
+    const touched = [];
+    installTraceFirstInstallActivation({
+      runtime: {
+        ...h.runtime,
+        getPlatformInfo,
+        getManifest: () => ({ host_permissions: [] }),
+      },
+      tabs: {
+        async query() { touched.push("query"); return []; },
+        async update() { touched.push("update"); },
+        async create() { touched.push("create"); return { id: 1 }; },
+      },
+      mode: "promise",
+      webOrigin: "https://www.tracefiction.com",
+      onActivation: () => { remembered += 1; },
+    });
+    h.listeners[0]({ reason: "install" });
+    await flush();
+    assert.deepEqual(touched, [], "no tab is looked for, changed or opened");
+    assert.equal(remembered, 0);
+  }
+});
+

@@ -80,26 +80,43 @@ for (const [name, complete] of [["incomplete", false], ["unreadable", new Error(
 
 // --- The rule every background tab query follows ----------------------------
 
-test("no background code asks the browser for tabs without an address or the tab the reader just used", async () => {
+test("every tab lookup in the background is for the tab just used, for sites it established, or by an id it was handed", async () => {
   const fs = await import("node:fs");
   const path = await import("node:path");
   const root = path.join(process.cwd(), "src", "extension-runtime");
   const found = [];
   for (const file of fs.readdirSync(root).filter(name => name.endsWith(".mts"))) {
     const source = fs.readFileSync(path.join(root, file), "utf8");
-    // Every spelling of a tabs query in this runtime: a helper handed "query"
-    // with its argument list, or the controller's own wrapper.
-    const calls = [
+    // Every spelling of a tab lookup in this runtime: a helper handed "query"
+    // or "get" with its argument list, or the controller's own wrapper.
+    for (const call of [
       ...source.matchAll(/"query",\s*\[\s*(\{[\s\S]*?\})\s*\]/g),
       ...source.matchAll(/#callTabsQuery\((\{[^)]*\})\)/g),
-    ];
-    for (const call of calls) found.push({ file, argument: call[1].replace(/\s+/g, " ").trim() });
+    ]) found.push({ file, source, at: call.index, kind: "query", argument: call[1].replace(/\s+/g, " ").trim() });
+    for (const call of source.matchAll(/\btabs, "get",\s*\[([^\]]*)\]/g)) {
+      found.push({ file, source, at: call.index, kind: "get", argument: call[1].trim() });
+    }
   }
-  assert.ok(found.length >= 8, `expected to find the runtime's tab queries, found ${found.length}`);
-  for (const { file, argument } of found) {
-    const byAddress = /^\{ url: \S/.test(argument);
-    const tabJustUsed = /^\{ active: true, currentWindow: true,? \}$/.test(argument);
-    assert.ok(byAddress || tabJustUsed, `${file} asks for tabs with ${argument}`);
+  assert.ok(found.filter(({ kind }) => kind === "query").length >= 8, "the runtime's tab queries were found");
+  assert.ok(found.some(({ kind }) => kind === "get"), "the runtime's lookups by tab id were found");
+  for (const { file, source, at, kind, argument } of found) {
+    const where = `${file} looks up tabs with ${argument}`;
+    if (kind === "get") {
+      // One tab, by an id a message or the browser handed over; never a search.
+      assert.match(argument, /^(?:source|connect)TabId$/, where);
+      continue;
+    }
+    if (/^\{ active: true, currentWindow: true,? \}$/.test(argument)) continue;
+    const filter = /^\{ url: (.+) \}$/.exec(argument)?.[1];
+    assert.ok(filter, where);
+    if (filter === "storySites") {
+      // Story sites only, and the list is built from nothing else.
+      assert.match(source.slice(0, at), /const storySites = [^;]*\.filter\(isStorySitePattern\)/, where);
+    } else {
+      // Trace's own site, and only after the build is known to declare it.
+      assert.match(filter, /^\[(?:this\.#queryPattern|this\.#webTabPattern|target\.queryPattern)\]$/, where);
+      const guard = source.lastIndexOf("declaresHostPattern(", at);
+      assert.ok(guard !== -1 && at - guard < 1_200, `${where} without first checking the build declares that site`);
+    }
   }
 });
-

@@ -4,7 +4,7 @@ import type {
   RuntimePort,
   TabsPort,
 } from "./browser-platform.mjs";
-import { extensionCall } from "./browser-platform.mjs";
+import { declaresHostPattern, extensionCall } from "./browser-platform.mjs";
 import {
   archiveHostKindFromSender,
   isBlockedArchivePath,
@@ -197,6 +197,10 @@ export function installTraceFirstInstallActivation(options: {
     if (details.reason !== "install") return;
     void (async () => {
       if (await platformIsIos(options.runtime, options.mode)) return;
+      // A build that does not declare Trace's own site sets up in the app.
+      // It opens no setup page and looks for none, even where the platform
+      // could not be told (an iPad can call itself a Mac).
+      if (!declaresHostPattern(options.runtime, target.queryPattern)) return;
       // Started, not awaited: opening the setup page never waits on storage.
       try {
         void Promise.resolve(options.onActivation?.()).catch(() => undefined);

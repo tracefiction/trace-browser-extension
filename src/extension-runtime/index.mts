@@ -176,6 +176,10 @@ try {
         ),
         storageMode,
         config: __TRACE_IOS_EARNED_PERMISSION_CONFIG__,
+        alarms: extension.alarms,
+        // Story tabs that are already open get the scripts too, whether the
+        // reader allowed the sites from the popup or in Safari's settings.
+        onScriptsRegistered: () => { void recover(); },
       });
     }
   }
