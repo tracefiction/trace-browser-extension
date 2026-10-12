@@ -28,9 +28,14 @@ from the popup or in Safari's settings.
 
 A check that cannot finish (Safari did not answer, the registration was
 refused, or a reader who had the grant read once as not having it) is tried
-again by alarm after 1, 5, 30 and 180 minutes, then left to the next worker
-start, permission change or popup. A complete registration or a settled "not
-allowed" ends the retries.
+again by alarm after 1, 5, 30 and 180 minutes, then once a day. The alarm's
+name carries how far the retries have got, so the bound holds even when
+nothing can be stored. An update or a new grant starts the count afresh; a
+complete registration or a settled "not allowed" ends the retries.
+
+A reader whose access has ended pays the pause between two readings once: the
+confirmed ending is recorded, and until access returns or Safari reports a new
+grant, one incomplete reading with no script left to remove needs no second.
 
 The scripts are removed when that access ends. Because nothing on a story page
 can wake the worker once they are gone, an ending is acted on only when two
@@ -50,6 +55,51 @@ that holds on an iPad that reports itself as a Mac.
 
 Mac Safari, Chrome and Firefox are built with `npm run build:release` and keep
 required story sites, `tabs`, and manifest-declared scripts.
+
+### Saving on the first tap (development switch)
+
+`TRACE_IOS_FIRST_TAP_SAVE=1` turns on a save made when the reader opens Trace
+on a story before the story sites are allowed. It is off in every package made
+for a store, and the build refuses to make one with it on while any of its
+sheet states still shows a placeholder instead of wording. Only the paired
+development build may carry it. It asks Safari for nothing more: the manifest
+is the same.
+
+With it on, opening Trace on a story page does this:
+
+1. The popup opens a port to the background. Only Trace's own popup can.
+2. The background reads the tab the reader tapped, and the account, for this
+   open. An account it could not read is reported as not known, never as
+   signed out. With automatic saving off, nothing is saved until the reader
+   asks.
+3. The background injects `page-manual-mode.js` and the page script into that
+   one tab, under `activeTab`. In manual mode the page script starts nothing by
+   itself: no automatic save, no report that it ran, no story details sent. It
+   reads the mode each time it is about to send, so lifting the mode later
+   lets the same script carry on.
+4. The page hands the background the story's details. The background checks
+   them exactly as a save the page had sent, and makes the save through the
+   same guarded path as every other: look first, write only if absent, look
+   again if the write's answer is uncertain.
+5. The background holds the one result. The popup draws it; the page shows its
+   mark from the same result, once the popup has closed. A popup reopened on
+   the page gets the same result, without a second save. If the account
+   changes while the save is out, the result is discarded.
+
+What a result says:
+
+- **Saved, already there, or found.** From the save's own outcome: its write
+  was confirmed; the story was found before anything was written; or it is in
+  the Library and whether this tap put it there is not known.
+- **Never sent, refused, or sent and unconfirmed.** Recorded around the write
+  itself. Only "never sent" supports saying nothing was sent.
+- **Check again** only looks. It can report a story found or say it does not
+  know; it has no path to a save and never reports a story as missing, because
+  the Library read it uses is not guaranteed complete.
+- **Manual or automatic.** Stamped by the background when it admits a save:
+  manual when it injected that page itself and the story sites were not
+  allowed, automatic when they were allowed and the page scripts registered.
+  A page's own claim is never read. The stamp stays in the extension for now.
 
 ## User contract
 

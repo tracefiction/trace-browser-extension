@@ -532,6 +532,45 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
       encoding: "utf8",
     });
     assert.notEqual(misuse.status, 0, "the required-hosts switch belongs to the iPhone build only");
+
+    // The first-tap save is off in every package made for a store: its sheet
+    // states still show placeholders where the wording will go.
+    assert.equal(Object.hasOwn(iphoneOnboarding, "firstTapSave"), false);
+    assert.doesNotMatch(iphoneBackground, /firstTapSave: true/);
+    assert.ok(fs.existsSync(path.join(RESOURCES, "page-manual-mode.js")), "the manual-mode script ships, unused until injected");
+    const firstTapBuild = (extra) => spawnSync("node", ["scripts/build.mjs"], {
+      cwd: ROOT,
+      env: {
+        ...RELEASE_ENV, TRACE_BUILD_MODE: "release", TRACE_SESSION_MODE: "kernel",
+        TRACE_IOS_EARNED_PERMISSION_ONBOARDING: "1", TRACE_IOS_FIRST_TAP_SAVE: "1", ...extra,
+      },
+      encoding: "utf8",
+    });
+    const refused = firstTapBuild({});
+    assert.notEqual(refused.status, 0, "a store build with unworded sheet states does not build");
+    assert.match(refused.stderr, /cannot be built for release while sheet states have no wording: .*SH-13b-h.*SH-13u-h/);
+    for (const extra of [
+      { TRACE_IOS_EARNED_PERMISSION_REQUIRED_HOSTS: "1" },
+      { TRACE_IOS_EARNED_PERMISSION_ONBOARDING: "0" },
+    ]) {
+      const elsewhere = firstTapBuild(extra);
+      assert.notEqual(elsewhere.status, 0, "the first-tap save exists only in the optional-sites iPhone build");
+      assert.match(elsewhere.stderr, /requires the iPhone build with optional story sites/);
+    }
+    // The paired development build, which cannot ship, may carry it.
+    const paired = firstTapBuild({ TRACE_IOS_EARNED_PERMISSION_PREVIEW_RELEASE: "1" });
+    assert.equal(paired.status, 0, paired.stderr);
+    const pairedContext = {};
+    vm.runInNewContext(fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8"), pairedContext);
+    assert.equal(pairedContext.TRACE_IOS_EARNED_PERMISSION_ONBOARDING.firstTapSave, true);
+    assert.match(fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8"), /firstTapSave: true/);
+    assert.deepEqual(
+      manifest(RESOURCES).permissions,
+      iphoneManifest.permissions,
+      "turning it on asks Safari for nothing more",
+    );
+    assert.deepEqual(manifest(RESOURCES).optional_host_permissions, iphoneManifest.optional_host_permissions);
+    runBuild("build:ios-earned-permission-onboarding:release");
     const previewResult = spawnSync(
       "npm",
       ["run", "build:ios-earned-permission-onboarding:preview-release"],

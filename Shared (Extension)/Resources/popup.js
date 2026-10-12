@@ -1710,11 +1710,12 @@ function storyTitle(identity) {
   return typeof identity?.title === "string" ? identity.title.trim() : "";
 }
 
-function renderEarnedSaved(story, work, identity, alreadyInLibrary = false) {
+function renderEarnedSaved(story, work, identity, alreadyInLibrary = false, confirmationText = null) {
   stopSavedTitleLookup();
   void deliverFirstStoryConfirmation();
   const line = recordLine(work?.entry);
-  const confirmation = alreadyInLibrary ? "Already in your Library" : "Saved to your Library";
+  const confirmation = confirmationText ??
+    (alreadyInLibrary ? "Already in your Library" : "Saved to your Library");
   const title = storyTitle(identity);
   const lead = "Your chapter fills in as you read. Your story is waiting in Trace whenever you open it.";
   if (title) {
@@ -2205,6 +2206,188 @@ async function readKnownInLibrary(rawUrl) {
   }
 }
 
+// ── First-tap save: the sheet's states ─────────────────────────────────────────
+//
+// SEAM. The background owns the save and sends this popup one machine state at
+// a time. Each is drawn here as one sheet state of the design, named by its
+// identifier there (SH-1, SH-2, …) in `data-trace-sheet-state`. Where this
+// popup already has the words for a state, that renderer is used unchanged.
+// Where it does not, a `firstTapPlaceholder` call shows the identifier
+// itself, always with that identifier written out in the call, and the build
+// refuses to make a store package while any such call remains.
+// Wording and layout for these states replace what is between the two rules.
+const FIRST_TAP_SAVE = EARNED_PERMISSION_ONBOARDING?.firstTapSave === true;
+const FIRST_TAP_POPUP_PORT = "trace-first-tap-popup-v1";
+let firstTapPort = null;
+let firstTapStory = null;
+let firstTapPatienceTimer = null;
+let firstTapSetAside = false;
+
+function firstTapPlaceholder(id) {
+  return `[${id}]`;
+}
+
+function firstTapSend(command) {
+  try {
+    firstTapPort?.postMessage({ command });
+  } catch {
+    firstTapPort = null;
+  }
+}
+
+function setFirstTapSheetState(id) {
+  document.body.dataset.traceSheetState = id;
+}
+
+function renderFirstTapUnworded(id, { heading, lead = null, primary, secondary = null, checking = false }) {
+  setEarnedCopy({ stateCode: id, heading, lead: lead ?? "" });
+  setEarnedResult(checking ? "checking" : "failure", heading, "");
+  configureEarnedActions(primary, secondary);
+}
+
+/** After a confirmed save. The ask itself is the existing one until its own states land. */
+function configureFirstTapConfirmedActions() {
+  configureEarnedActions(
+    { label: "Keep reading", action: "close", emphasis: "secondary" },
+    { label: "Allow story sites", action: "allow_and_add", emphasis: "tertiary" },
+  );
+}
+
+function renderFirstTapView(view) {
+  const story = firstTapStory;
+  if (!view || !story) return;
+  if (firstTapPatienceTimer !== null) {
+    clearTimeout(firstTapPatienceTimer);
+    firstTapPatienceTimer = null;
+  }
+  stopStoryConfirmation();
+  const identity = view.story ? { ok: true, ...view.story } : null;
+  switch (view.state) {
+    case "opening":
+      setFirstTapSheetState("SH-7");
+      renderEarnedConnectingAccount();
+      return;
+    case "account_missing":
+      setFirstTapSheetState("SH-8");
+      renderEarnedConnectAccount(story);
+      configureEarnedActions({ label: "Try again", action: "first_tap_open", emphasis: "primary" });
+      return;
+    case "account_reconnect_required":
+    case "account_unknown":
+      // Not known is never drawn as signed out.
+      setFirstTapSheetState("SH-8b");
+      renderEarnedAccountUnreachable(story);
+      configureEarnedActions({ label: "Try again", action: "first_tap_open", emphasis: "primary" });
+      return;
+    case "awaiting_request":
+      setFirstTapSheetState(view.preference === "off" ? "SH-14" : "SH-0");
+      renderFirstTapUnworded(view.preference === "off" ? "SH-14" : "SH-0", {
+        heading: view.preference === "off" ? firstTapPlaceholder("SH-14-h") : firstTapPlaceholder("SH-0"),
+        primary: { label: "Save this story", action: "first_tap_save", emphasis: "primary" },
+        checking: true,
+      });
+      return;
+    case "saving":
+      setFirstTapSheetState("SH-1");
+      renderEarnedAccessPending(story);
+      // The design leaves this wait to be set from measured saves. None have
+      // been measured, so it is the popup's existing patience.
+      firstTapPatienceTimer = setTimeout(() => {
+        firstTapPatienceTimer = null;
+        setFirstTapSheetState("SH-9");
+        renderEarnedDelayed(story);
+        configureEarnedActions(
+          { label: "Keep reading", action: "close", emphasis: "secondary" },
+          { label: "Check again", action: "first_tap_check", emphasis: "tertiary" },
+        );
+      }, STORY_CONFIRMATION_PATIENCE_MS);
+      return;
+    case "confirmed":
+      if (view.provenance === "saved_now") {
+        setFirstTapSheetState("SH-2");
+        renderEarnedSaved(story, { entry: view.entry }, identity, false);
+      } else if (view.provenance === "already") {
+        setFirstTapSheetState("SH-10");
+        renderEarnedSaved(story, { entry: view.entry }, identity, true);
+      } else {
+        // In the Library; whether this tap put it there is not known.
+        setFirstTapSheetState("SH-2f");
+        renderEarnedSaved(story, { entry: view.entry }, identity, true, firstTapPlaceholder("SH-13c-k"));
+      }
+      configureFirstTapConfirmedActions();
+      return;
+    case "failed":
+      if (view.reason === "story_unavailable") {
+        setFirstTapSheetState("SH-12");
+        renderEarnedUnavailable(story);
+        return;
+      }
+      if (view.reason === "free_limit_reached") {
+        setFirstTapSheetState("library-full");
+        renderEarnedLibraryFull(true);
+        return;
+      }
+      if (view.dispatch === "sent_unconfirmed") {
+        setFirstTapSheetState("SH-13b");
+        renderFirstTapUnworded("SH-13b", {
+          heading: firstTapPlaceholder("SH-13b-h"), lead: firstTapPlaceholder("SH-13b-b"),
+          primary: { label: "Check again", action: "first_tap_check", emphasis: "primary" },
+        });
+        return;
+      }
+      // `never_sent` is the only failure that may say nothing was sent; a
+      // refusal is Trace's answer. Neither has a sheet state drawn yet.
+      setFirstTapSheetState(view.dispatch === "never_sent" ? "not-sent" : "refused");
+      renderFirstTapUnworded(view.dispatch === "never_sent" ? "not-sent" : "refused", {
+        heading: view.dispatch === "never_sent"
+          ? firstTapPlaceholder("CX-21-not-sent-h")
+          : firstTapPlaceholder("refused-h"),
+        primary: { label: "Try again", action: "first_tap_save", emphasis: "primary" },
+        secondary: { label: "Not now", action: "close", emphasis: "tertiary" },
+      });
+      return;
+    case "presence_unknown":
+      setFirstTapSheetState("SH-13u");
+      renderFirstTapUnworded("SH-13u", {
+        heading: firstTapPlaceholder("SH-13u-h"), lead: firstTapPlaceholder("SH-13u-b"),
+        primary: { label: "Check again", action: "first_tap_check", emphasis: "primary" },
+      });
+      return;
+    default:
+      // The story sites are allowed, or this is not a page to save from: the
+      // popup's usual flow takes over and the first-tap save stands aside.
+      firstTapSetAside = true;
+      delete document.body.dataset.traceSheetState;
+      void prepareEarnedPermissionFlow();
+  }
+}
+// ── end of the first-tap seam ──────────────────────────────────────────────────
+
+/** Opens the first-tap save for this story. False when it cannot be reached. */
+function startFirstTap(story) {
+  firstTapStory = story;
+  if (!firstTapPort) {
+    try {
+      firstTapPort = ext.runtime.connect({ name: FIRST_TAP_POPUP_PORT });
+    } catch {
+      firstTapPort = null;
+    }
+    if (!firstTapPort?.postMessage || !firstTapPort.onMessage) {
+      firstTapPort = null;
+      return false;
+    }
+    firstTapPort.onMessage.addListener((message) => {
+      if (message && message.view) renderFirstTapView(message.view);
+    });
+    firstTapPort.onDisconnect?.addListener(() => {
+      firstTapPort = null;
+    });
+    renderFirstTapView({ state: "opening" });
+  }
+  firstTapSend("open");
+  return true;
+}
+
 async function prepareEarnedPermissionFlow() {
   resetEarnedLedger();
   const [{ onboarding, readiness }, grantedOrigins] = await Promise.all([
@@ -2217,6 +2400,13 @@ async function prepareEarnedPermissionFlow() {
   earnedCurrentPage = story.ok ? story : null;
   if (earnedCurrentPage?.kind === "story") {
     earnedCurrentPage = { ...earnedCurrentPage, knownInLibrary: await readKnownInLibrary(tab?.url) };
+  }
+  // Opened on a story before the story sites are allowed: the background
+  // saves this one story now. The existing ask stays reachable afterwards.
+  if (FIRST_TAP_SAVE && !firstTapSetAside && !hasGrant && story.ok && story.kind === "story") {
+    earnedPreparedContext = Object.freeze({ story, hasGrant: false });
+    endAccountWait();
+    if (startFirstTap(story)) return;
   }
   if (onboarding.completedAt && story.ok && !hasGrant) {
     earnedPreparedContext = Object.freeze({ story, hasGrant: false });
@@ -2381,6 +2571,10 @@ async function initializeEarnedPermissionFlow() {
     // waiting on the account, or has settled on "no account" or "couldn't
     // connect", asks again now and moves on by itself.
     if (changes[ACCOUNT_PROJECTION_REVISION_KEY]) {
+      // A first-tap sheet that is waiting on the account asks again by itself.
+      if (firstTapPort && ["SH-7", "SH-8", "SH-8b"].includes(document.body.dataset.traceSheetState)) {
+        firstTapSend("open");
+      }
       if (accountWait) accountMayHaveConnected();
       else if (kernelSnapshotTimer !== null && kernelSnapshotProviderAttempt > 0) requestKernelSnapshot();
     }
@@ -3430,6 +3624,9 @@ function bindEarnedActionButtons() {
       if (action === "reload_to_verify") void reloadEarnedStory();
       if (action === "close") window.close();
       if (action === "check_story") void checkConfirmedStory();
+      if (action === "first_tap_open") firstTapSend("open");
+      if (action === "first_tap_save") firstTapSend("save");
+      if (action === "first_tap_check") firstTapSend("check");
       if (action === "save_story") void saveStoryFromPopup();
       if (action === "enable_auto_track") void enableAutomaticSavingFromPopup();
       if (action === "open_app") openTraceApp(isLikelyIosExtensionUi ? TRACE_IOS_APP_LIBRARY_URL : TRACE_HOME_URL);

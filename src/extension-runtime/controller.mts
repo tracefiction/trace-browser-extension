@@ -19,8 +19,11 @@ import {
   type SessionActionResult,
   type SessionSnapshot,
   StoryCommandService,
+  type StoryCommandEvidence,
   type StoryCommandFailure,
   type StoryCommandResult,
+  type StoryPresence,
+  type StorySaveMode,
   type StoryTrackCommand,
 } from "../extension-core/index.mjs";
 import {
@@ -254,6 +257,7 @@ export class SessionRuntimeController {
   readonly #accountData: AccountDataRepository;
   readonly #capacityEvents: ExtensionCapacityEventApi;
   readonly #storyCommands: StoryCommandService;
+  #storyAdmission: StoryAdmissionHooks | null = null;
   readonly #libraryMutations: LibraryMutationService;
   readonly #finishQualification: FinishQualificationService;
   readonly #metadataContributions: MetadataContributionService;
@@ -995,9 +999,17 @@ export class SessionRuntimeController {
     message: Record<string, unknown>,
     sender: RuntimeSender | undefined,
   ): Promise<RuntimeResponse | null> {
-    const command = storyTrackCommandFromMessage(message, sender);
-    if (command === null) return null;
+    const admitted = storyTrackCommandFromMessage(message, sender);
+    if (admitted === null) return null;
     await this.start();
+    // How this save came about is established here, by the background, and
+    // stamped on the command. Nothing the page says about itself is read.
+    const tabId = sender?.tab?.id;
+    const mode = this.#storyAdmission === null || typeof tabId !== "number"
+      ? null
+      : await this.#storyAdmission.modeFor(tabId, admitted.workKey).catch(() => null);
+    if (typeof tabId === "number") this.#storyAdmission?.pageSaveAdmitted(tabId, admitted.workKey);
+    const command = mode === null ? admitted : Object.freeze({ ...admitted, mode });
     if (message.type === SESSION_MESSAGE_TYPES.connectAndSave) {
       const preparation = await this.#prepareNativeAuthority();
       const action = preparation.action ??
@@ -1077,6 +1089,10 @@ export class SessionRuntimeController {
   }
 
   async #executeStoryCommand(command: StoryTrackCommand): Promise<StoryCommandResult> {
+    return (await this.#executeStoryCommandWithEvidence(command)).result;
+  }
+
+  async #executeStoryCommandWithEvidence(command: StoryTrackCommand): Promise<StoryCommandEvidence> {
     let accountData = await this.#accountData.read().catch(() => null);
     if (
       accountData?.capacityRecovery !== null &&
@@ -1091,9 +1107,75 @@ export class SessionRuntimeController {
       accountData.overlay !== null &&
       accountData.overlay.entries[command.workKey] === undefined
     ) {
-      return Object.freeze({ kind: "failed", reason: "free_limit_reached" });
+      // The Library is known to be full, so nothing is handed to the network.
+      return Object.freeze({
+        result: Object.freeze({ kind: "failed", reason: "free_limit_reached" }),
+        dispatch: "never_sent",
+      });
     }
-    return this.#storyCommands.execute(command);
+    return this.#storyCommands.executeWithEvidence(command);
+  }
+
+  // --- What the first-tap save needs from the session -------------------------
+
+  /** Hooks called as a page's own save is admitted. Absent on builds without the first-tap save. */
+  attachStoryAdmission(hooks: StoryAdmissionHooks): void {
+    this.#storyAdmission = hooks;
+  }
+
+  /** The tab the reader opened Trace on. Only asked for after that tap. */
+  tappedTab(): Promise<{ readonly id?: number; readonly url?: string } | null> {
+    return this.#activeTab();
+  }
+
+  pageBinding(): string | null {
+    return this.#pageBinding();
+  }
+
+  /** The account, read for this call and never from a kept snapshot. */
+  async accountForThisOpen(): Promise<
+    | { readonly state: "verified"; readonly binding: string }
+    | { readonly state: "missing" | "reconnect_required" | "unknown" }
+  > {
+    await this.start();
+    const preparation = await this.#prepareNativeAuthority();
+    const binding = this.#pageBinding();
+    if (preparation.ready && this.snapshot().state === "connected" && binding !== null) {
+      return Object.freeze({ state: "verified", binding });
+    }
+    // The read just made leaves its own reason on the snapshot. "No account"
+    // only when the app answered that it holds none; a read that could not be
+    // made says so, and leaves the account not known.
+    const snapshot = this.snapshot();
+    if (snapshot.state === "signed_out" && snapshot.reason === "credential_absent") {
+      return Object.freeze({ state: "missing" });
+    }
+    if (snapshot.state === "reconnect_required") {
+      return Object.freeze({ state: "reconnect_required" });
+    }
+    // Unreadable, pending, or a state this read did not settle: not known.
+    return Object.freeze({ state: "unknown" });
+  }
+
+  /** The automatic-saving preference: a failed read is unknown, never "on". */
+  async automaticSaving(): Promise<"on" | "off" | "unknown"> {
+    try {
+      const stored = await this.#storage.get("prefAutoTrackEnabled");
+      return stored.prefAutoTrackEnabled === false ? "off" : "on";
+    } catch {
+      return "unknown";
+    }
+  }
+
+  async saveStoryWithEvidence(command: StoryTrackCommand): Promise<StoryCommandEvidence> {
+    await this.start();
+    return this.#executeStoryCommandWithEvidence(command);
+  }
+
+  /** Looks for one story in the Library. It cannot save. */
+  async storyPresence(workKey: string): Promise<StoryPresence> {
+    await this.start();
+    return this.#storyCommands.presence(workKey);
   }
 
   async #startOnce(): Promise<void> {
@@ -1848,6 +1930,12 @@ export class SessionRuntimeController {
     void platform.then((value) => { if (value === "unknown" && this.#platform === platform) this.#platform = null; });
     return platform;
   }
+}
+
+/** Called as a page's own save is admitted; see `attachStoryAdmission`. */
+export interface StoryAdmissionHooks {
+  modeFor(tabId: number, workKey: string): Promise<StorySaveMode | null>;
+  pageSaveAdmitted(tabId: number, workKey: string): void;
 }
 
 export function installSessionRuntime(environment: RuntimeEnvironment): SessionRuntimeController {

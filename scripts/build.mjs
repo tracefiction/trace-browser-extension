@@ -106,6 +106,16 @@ if (IOS_EARNED_PERMISSION_REQUIRED_HOSTS && !IOS_EARNED_PERMISSION_ONBOARDING) {
 }
 const IOS_OPTIONAL_STORY_SITE_ACCESS =
   IOS_EARNED_PERMISSION_ONBOARDING && !IOS_EARNED_PERMISSION_REQUIRED_HOSTS;
+// Saving the story the reader opens Trace on, before lasting access. Off
+// unless asked for: its sheet states still show placeholders, not wording.
+const IOS_FIRST_TAP_SAVE = /^(?:1|true)$/i.test(
+  String(env.TRACE_IOS_FIRST_TAP_SAVE ?? ""),
+);
+if (IOS_FIRST_TAP_SAVE && !IOS_OPTIONAL_STORY_SITE_ACCESS) {
+  throw new Error(
+    "TRACE_IOS_FIRST_TAP_SAVE requires the iPhone build with optional story sites.",
+  );
+}
 if (
   IOS_EARNED_PERMISSION_PREVIEW_RELEASE &&
   (!IOS_EARNED_PERMISSION_ONBOARDING || !IS_RELEASE)
@@ -372,9 +382,31 @@ const earnedPermissionRuntimeConfig = {
   // registration left by anything earlier is replaced once, not trusted by id.
   version: IOS_OPTIONAL_STORY_SITE_ACCESS ? 4 : 3,
   registrationMode: IOS_OPTIONAL_STORY_SITE_ACCESS ? "dynamic" : "static",
+  ...(IOS_FIRST_TAP_SAVE ? { firstTapSave: true } : {}),
   origins: MINIMIZED_SITE_HOST_MATCHES,
   registrations: earnedPermissionRegistrations,
 };
+
+// A first-tap sheet state with no agreed wording shows a placeholder. None may
+// reach a build made for a store: the build stops while any remains. The
+// paired development build, which cannot ship, may carry them.
+const FIRST_TAP_PLACEHOLDER_PATTERN = /firstTapPlaceholder\(\s*"([^"]+)"/g;
+const firstTapPlaceholders = Array.from(
+  fs.readFileSync(path.join(RES, "popup.js"), "utf8").matchAll(FIRST_TAP_PLACEHOLDER_PATTERN),
+  (match) => match[1],
+);
+if (
+  IOS_FIRST_TAP_SAVE &&
+  IS_RELEASE &&
+  !IOS_EARNED_PERMISSION_PREVIEW_RELEASE &&
+  firstTapPlaceholders.length > 0
+) {
+  throw new Error(
+    `TRACE_IOS_FIRST_TAP_SAVE cannot be built for release while sheet states have no wording: ${
+      [...new Set(firstTapPlaceholders)].join(", ")
+    }.`,
+  );
+}
 
 if (IS_RELEASE) {
   assertReleaseUrl(
@@ -780,6 +812,7 @@ console.log(
   "TRACE_IOS_EARNED_PERMISSION_REQUIRED_HOSTS=" +
     IOS_EARNED_PERMISSION_REQUIRED_HOSTS,
 );
+console.log("TRACE_IOS_FIRST_TAP_SAVE=" + IOS_FIRST_TAP_SAVE);
 console.log(
   "TRACE_IOS_EARNED_PERMISSION_PREVIEW_RELEASE=" +
     IOS_EARNED_PERMISSION_PREVIEW_RELEASE,

@@ -11,7 +11,40 @@ import type { LibraryOverlayEntry } from "./account-data.mjs";
 export type StoryHostKind = "ao3" | "ffn";
 export type StoryTrackIntent = "ensure_saved" | "record_progress";
 
+/**
+ * How a save came about, as the background established it when it admitted
+ * the command: the reader opened Trace on that one page, or a page script
+ * running under lasting website access sent it. Never taken from a page.
+ */
+export type StorySaveMode = "bounded_manual" | "normal_automatic";
+
+/**
+ * What is known about a save's write to Trace when the command ends.
+ * `never_sent`: the write was not handed to the network at all.
+ * `refused`: Trace answered and did not take it.
+ * `sent_unconfirmed`: it was handed over and no answer settles whether it
+ * landed. Only `never_sent` supports saying that nothing was sent.
+ */
+export type StoryDispatch =
+  | "never_sent"
+  | "refused"
+  | "sent_unconfirmed"
+  | "confirmed";
+
+export interface StoryCommandEvidence {
+  readonly result: StoryCommandResult;
+  readonly dispatch: StoryDispatch;
+}
+
+/** A read of one story's place in the Library that can change nothing. */
+export type StoryPresence =
+  | { readonly kind: "found"; readonly confirmation: ConfirmedStorySave }
+  // Not found is not offered: the Library read this uses is not guaranteed
+  // complete, so a missing entry cannot establish absence.
+  | { readonly kind: "unknown" };
+
 export interface StoryTrackCommand {
+  readonly mode?: StorySaveMode;
   readonly intent: StoryTrackIntent;
   readonly hostKind: StoryHostKind;
   readonly workKey: string;
@@ -114,6 +147,7 @@ export interface StorySaveReceiptPort {
     entryID: string;
     workKey: string;
     source: "preflight" | "mutation" | "reconciliation";
+    mode?: StorySaveMode;
     context?: Readonly<Record<string, unknown>>;
   }>): Promise<boolean>;
 }
@@ -172,11 +206,58 @@ export class StoryCommandService {
   }
 
   execute(command: StoryTrackCommand): Promise<StoryCommandResult> {
-    const ownedCommand = { ...command, payload: { ...command.payload } };
-    return this.#withLock(() => this.#execute(ownedCommand));
+    return this.executeWithEvidence(command).then(({ result }) => result);
   }
 
-  async #execute(command: StoryTrackCommand): Promise<StoryCommandResult> {
+  /** The same save, with what is known about its write to Trace. */
+  executeWithEvidence(command: StoryTrackCommand): Promise<StoryCommandEvidence> {
+    const ownedCommand = { ...command, payload: { ...command.payload } };
+    return this.#withLock(async () => {
+      // Set the moment the write is handed to the network, and never unset:
+      // from then on only an answer from Trace can say what became of it.
+      const write = { handedOver: false, refused: false };
+      const result = await this.#execute(ownedCommand, write);
+      const dispatch: StoryDispatch = result.kind === "confirmed"
+        ? "confirmed"
+        : !write.handedOver
+          ? "never_sent"
+          : write.refused
+            ? "refused"
+            : "sent_unconfirmed";
+      return Object.freeze({ result, dispatch });
+    });
+  }
+
+  /**
+   * Whether the story is in the current account's Library right now. It reads
+   * and nothing else: no save is sent, nothing is published, no receipt goes
+   * to the app. An answer for an account that changed meanwhile is unknown.
+   */
+  async presence(workKey: string): Promise<StoryPresence> {
+    const unknown: StoryPresence = Object.freeze({ kind: "unknown" });
+    const scope = this.#ports.session.publicationScope();
+    if (scope === null) return unknown;
+    let lookup: AuthenticatedExecutionResult<StoryLookupOutcome>;
+    try {
+      lookup = await this.#lookup(workKey, true);
+    } catch {
+      return unknown;
+    }
+    if (
+      lookup.kind !== "published" ||
+      lookup.value.kind !== "found" ||
+      lookup.value.confirmation.workKey !== workKey ||
+      !sameAccountScope(this.#ports.session.publicationScope(), scope)
+    ) {
+      return unknown;
+    }
+    return Object.freeze({ kind: "found", confirmation: lookup.value.confirmation });
+  }
+
+  async #execute(
+    command: StoryTrackCommand,
+    write: { handedOver: boolean; refused: boolean },
+  ): Promise<StoryCommandResult> {
     const scope = this.#ports.session.publicationScope();
     if (scope === null) return failure("not_authenticated");
 
@@ -204,7 +285,11 @@ export class StoryCommandService {
     }
 
     // Keep command identity stable for the reading-activity idempotency owner.
-    const trackCommand = { ...command };
+    // The mode is this extension's own record of how the save came about; it
+    // is not part of what is sent to Trace.
+    const { mode: stampedMode, ...unstamped } = command;
+    void stampedMode;
+    const trackCommand = { ...unstamped };
     const track = (credential: string) => {
       // Do not forward caller/page-supplied correlation or retain it across accounts.
       const { attempt_id: ignored, ...payload } = command.payload;
@@ -216,7 +301,16 @@ export class StoryCommandService {
         typeof expiresAt === "number" && Number.isFinite(expiresAt) &&
         expiresAt > now && expiresAt - now <= 86_400_000;
       trackCommand.payload = { ...payload, ...(valid ? { attempt_id: id.toLowerCase() } : {}) };
-      return this.#ports.api.track(credential, trackCommand);
+      write.handedOver = true;
+      write.refused = false;
+      return this.#ports.api.track(credential, trackCommand).then((outcome) => {
+        // A refusal is an answer: sign-in rejected, or Trace declined the
+        // story. Anything else leaves the write's fate open.
+        write.refused =
+          outcome.kind === "auth_rejected" ||
+          (outcome.kind === "success" && outcome.value.kind === "rejected");
+        return outcome;
+      });
     };
     let mutation = await this.#ports.session.executeAuthenticated(track);
     if (
@@ -329,6 +423,7 @@ export class StoryCommandService {
       receipt = await this.#ports.receipt.publishSaveReceipt({
         accountID: scope.accountId, entryID: confirmation.entryId,
         workKey: confirmation.workKey, source,
+        ...(command.mode === undefined ? {} : { mode: command.mode }),
         ...(context === undefined ? {} : { context }),
         hostKind: command.hostKind,
         action: command.intent === "ensure_saved" ? "quick_add" : "read",

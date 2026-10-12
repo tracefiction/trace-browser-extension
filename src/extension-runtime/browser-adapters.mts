@@ -409,6 +409,9 @@ export class NativeStorySaveReceiptPort implements StorySaveReceiptPort {
     entryID: string;
     workKey: string;
     source: "preflight" | "mutation" | "reconciliation";
+    // Held by the extension for now. The app's messages keep their agreed
+    // shape until its side can read a mode, so it is not sent.
+    mode?: "bounded_manual" | "normal_automatic";
     context?: Readonly<Record<string, unknown>>;
   }>): Promise<boolean> {
     let recorded = false;

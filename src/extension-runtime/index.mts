@@ -8,6 +8,7 @@ import {
   installArchiveReadinessRuntime,
 } from "./archive-readiness.mjs";
 import { installEarnedPermissionRegistrationRuntime } from "./earned-permission-registration.mjs";
+import { installFirstTapSave } from "./first-tap-runtime.mjs";
 import { installTraceFirstInstallActivation } from "./trace-web-navigation.mjs";
 import { rememberConnectIntent } from "./connect-intent.mjs";
 export * from "./account-projection.mjs";
@@ -45,6 +46,8 @@ declare const __TRACE_IOS_EARNED_PERMISSION_CONFIG__: EarnedPermissionRegistrati
 type EarnedPermissionRegistrationConfig = Readonly<{
   version: number;
   registrationMode?: "dynamic" | "static";
+  /** Save the story the reader opens Trace on, before lasting access. */
+  firstTapSave?: boolean;
   origins: readonly string[];
   registrations: readonly Readonly<{
     id: string;
@@ -210,6 +213,26 @@ try {
     randomId,
     archiveReadinessStatus,
   });
+  if (
+    __TRACE_SESSION_MODE__ === "kernel" &&
+    __TRACE_IOS_EARNED_PERMISSION_CONFIG__ !== null &&
+    __TRACE_IOS_EARNED_PERMISSION_CONFIG__.firstTapSave === true &&
+    __TRACE_IOS_EARNED_PERMISSION_CONFIG__.registrationMode !== "static" &&
+    extension.permissions !== undefined &&
+    extension.scripting !== undefined
+  ) {
+    installFirstTapSave({
+      runtime: extension.runtime,
+      tabs: extension.tabs,
+      permissions: extension.permissions,
+      scripting: extension.scripting,
+      storage: new BrowserStorage(extension.storage.local, extension.runtime, storageMode),
+      mode: storageMode,
+      origins: __TRACE_IOS_EARNED_PERMISSION_CONFIG__.origins,
+      registrationIds: __TRACE_IOS_EARNED_PERMISSION_CONFIG__.registrations.map(({ id }) => id),
+      session,
+    });
+  }
   extension.storage.onChanged?.addListener((changes, area) => {
     if (area === "local" && "prefAutoTrackEnabled" in changes) void session?.publishTrackingPreference();
   });
