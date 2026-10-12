@@ -117,16 +117,33 @@ the request returned is passed along as evidence and is never the answer:
 
 | State | When |
 | --- | --- |
-| waiting | The request is out. |
+| waiting | The request is out. While it is, the popup reads what Safari allows again every 2 seconds, and when it comes back into view. |
 | allowed | All five story sites read back as allowed just now, and the page scripts are registered. It carries what was read of the account and of the automatic-saving preference, so the popup claims saving is automatic only when both were read as so. |
 | registration failed / not known | The sites are allowed; the page scripts are not registered, or that could not be read. Trying again asks Safari for nothing. |
 | partly allowed | Fewer than five. Never drawn as allowed. |
-| declined | The request said no, and the sites do not read as allowed. |
-| could not ask | The request threw, or said no faster than a person could have answered (400 ms, not yet measured). |
-| not known | What Safari allows could not be read, or the request said yes and the read says no. Never drawn as declined. |
+| not allowed | The request came back false, and the sites do not read as allowed. |
+| could not ask | The request threw. |
+| not known | What Safari allows could not be read; the request came back true and the read says no; it came back with neither; or it did not come back within a minute. Never drawn as not allowed. The reader can ask again. |
+| not asked | Not allowed, with no request made by this popup. The save is shown with the ask. |
 
 No state says how long the access lasts. Safari reports a grant for one day
-and a lasting one the same way, so Trace cannot tell them apart.
+and a lasting one the same way, so Trace cannot tell them apart. Nor can it
+tell a reader who answered "no" from Safari answering "no" without showing its
+question: both are a request that came back false. Nothing is read into how
+long a request took.
+
+The wait does not depend on the request ever coming back. If the sites read as
+allowed while it is out, the popup goes on as allowed. After 60 seconds with
+neither an answer nor the sites allowed it says it does not know, and offers
+the ask again; a request that comes back later is still passed to the
+background. A minute is far longer than Safari's question takes to answer, and
+since a later answer is still read, the deadline costs a slow reader nothing.
+No wait, however long, is taken as "no".
+
+While the sheet is open the popup listens for Safari adding or removing
+website access, and has the background read again when it does or when the
+popup comes back into view, so "allowed" is not left on show after the access
+it describes has gone.
 
 A popup closed while Safari's question is up loses nothing. Nothing about the
 ask is kept; the next popup reads what holds. Opened on a story with the sites
@@ -168,8 +185,9 @@ What a record says:
   read, or after a record in doubt had to be dropped, a story found is never
   called already there. A doubt outlives the account session it arose under:
   the same reader may have signed out and in again, so a story with a write
-  in doubt from an ended session is found, not already there, until Trace has
-  confirmed it for the session now signed in.
+  in doubt from an ended session of an account is found, not already there,
+  for that account, until Trace has confirmed it for that account. Another
+  account saving the same story neither raises nor clears it.
 - **Never sent, refused, or sent and unconfirmed.** Recorded around the write
   itself. Only "never sent" supports saying nothing was sent.
 - **Check again** only looks. It can report a story found or say it does not
@@ -188,16 +206,19 @@ account's session, one of that and the story's key), a time, whether a write is
 in doubt, and the outcome with the Library entry's status and chapter numbers.
 It holds no work key, address, title or author. A settled record is dropped
 after 24 hours; one still in doubt is kept until the limit forces it out.
-A record in doubt also holds a digest of the story alone. When its account
-session ends, that digest is what stays (at most 20), so that the doubt can
-still be placed on its story; the session's records go.
+A record in doubt also holds a digest, salted the same way, of the account
+itself and the story. When its account session ends, that digest is what
+stays (at most 20), so that the doubt can still be placed on that account's
+story; the session's records go.
 
 Nothing about a story is kept for a tab in Private Browsing, or for a tab the
 browser did not report as an ordinary one. While a write from such a tab is
-out and unanswered, a count of such writes is kept: a number, with no story,
-tab or account. A background that starts and finds the count above zero knows
-a write of unknown fate went missing with the one before it, and from then on
-calls no story on this install already there.
+out and unanswered, a count of such writes and the time of the last are kept:
+two numbers, with no story, tab or account. A background that starts and finds
+the count above zero knows a write of unknown fate went missing with the one
+before it, and calls no story on this install already there until 30 days
+after that write. The same 30 days apply to any other doubt that can no longer
+be placed on an account and a story.
 
 ## User contract
 

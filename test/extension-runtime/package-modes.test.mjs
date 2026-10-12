@@ -34,6 +34,8 @@ const FIRST_TAP_WIRING = [
   "access_asking",
   "access_answered",
   "access_check",
+  "access_waiting",
+  "access_unanswered",
   "could_not_ask",
   "HAND_OVER_BY_RELOADING_THE_PAGE",
   "traceFirstTapSaveV2",

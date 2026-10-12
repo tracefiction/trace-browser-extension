@@ -50,7 +50,11 @@ export const FIRST_TAP_PAGE_FILES: readonly string[] = Object.freeze([
 
 /** What the first-tap save asks of the session that owns the account. */
 export interface FirstTapSession {
-  accountForThisOpen(): Promise<FirstTapAccount>;
+  accountForThisOpen(): Promise<
+    | { readonly state: "verified"; readonly binding: string }
+    | { readonly state: "missing" | "reconnect_required" | "unknown" }
+  >;
+  snapshot(): { readonly accountId: string | null };
   pageBinding(): string | null;
   automaticSaving(): Promise<"on" | "off" | "unknown">;
   saveStoryWithEvidence(
@@ -136,9 +140,23 @@ export function installFirstTapSave(environment: Environment): () => Promise<voi
     });
   };
 
+  /**
+   * The account for this open, with the account itself beside its session, so
+   * that a doubt about one account's write is never matched or cleared by
+   * another's. An account that changed while it was read is not known.
+   */
+  const account = async (): Promise<FirstTapAccount> => {
+    const read = await session.accountForThisOpen();
+    if (read.state !== "verified") return read;
+    const owner = session.snapshot().accountId;
+    return typeof owner === "string" && owner.length > 0 && session.pageBinding() === read.binding
+      ? Object.freeze({ state: "verified", binding: read.binding, owner })
+      : Object.freeze({ state: "unknown" });
+  };
+
   const firstTap = new FirstTapSave({
     grantComplete,
-    account: () => session.accountForThisOpen(),
+    account,
     binding: () => session.pageBinding(),
     automaticSaving: () => session.automaticSaving(),
     async inject(tabId) {
@@ -239,7 +257,7 @@ export function installFirstTapSave(environment: Environment): () => Promise<voi
   const siteAccess = new StorySiteAccess({
     access,
     registered,
-    account: () => session.accountForThisOpen(),
+    account,
     automaticSaving: () => session.automaticSaving(),
     handOver,
   });
@@ -278,7 +296,6 @@ export function installFirstTapSave(environment: Environment): () => Promise<voi
         ? message as {
             readonly command?: unknown; readonly tabId?: unknown; readonly url?: unknown;
             readonly private?: unknown; readonly returned?: unknown; readonly threw?: unknown;
-            readonly elapsedMs?: unknown;
           }
         : {};
       if (tapped === null && Number.isInteger(request.tabId) && typeof request.url === "string") {
@@ -297,17 +314,17 @@ export function installFirstTapSave(environment: Environment): () => Promise<voi
         if (waiting !== null) showAccess(waiting);
         return;
       }
-      if (request.command === "access_answered" || request.command === "access_check") {
-        const ask: StorySiteAsk = request.command === "access_check"
-          ? { kind: "none" }
-          : request.threw === true
-            ? { kind: "threw" }
-            : {
-                kind: "returned",
-                value: request.returned,
-                elapsedMs: typeof request.elapsedMs === "number" && Number.isFinite(request.elapsedMs) &&
-                  request.elapsedMs >= 0 ? request.elapsedMs : null,
-              };
+      const ask: StorySiteAsk | null =
+        // A look with no request made, for a popup that shows a state of the ask.
+        request.command === "access_check" ? { kind: "none" }
+        // A look while the request is out, and the popup's word that it has
+        // stopped waiting on it.
+        : request.command === "access_waiting" ? { kind: "waiting" }
+        : request.command === "access_unanswered" ? { kind: "unanswered" }
+        : request.command !== "access_answered" ? null
+        : request.threw === true ? { kind: "threw" }
+        : { kind: "returned", value: request.returned };
+      if (ask !== null) {
         void siteAccess.answered(show, ask).then(showAccess, () => showAccess(Object.freeze({ state: "not_known" })));
         return;
       }

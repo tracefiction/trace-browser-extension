@@ -7,6 +7,7 @@ import {
   FIRST_TAP_RECORD_LIMIT,
   FIRST_TAP_RECORD_TTL_MS,
   FIRST_TAP_RESULT_FRESH_MS,
+  FIRST_TAP_UNPLACED_DOUBT_TTL_MS,
   FirstTapSave,
   storySaveModeAtAdmission,
 } from "../../.trace-build/extension-runtime/first-tap-save.mjs";
@@ -42,10 +43,18 @@ async function turns() {
  * it wakes the extension; everything held only in memory starts empty.
  */
 function install(options = {}) {
+  // Each account has its own Library on the server. `library` is the first
+  // account's, the one most tests are about.
   const library = new Map(options.library ?? []);
+  const libraries = new Map([["account-a", library]]);
+  const libraryNow = () => {
+    const accountId = world.scope?.accountId ?? "account-a";
+    if (!libraries.has(accountId)) libraries.set(accountId, new Map());
+    return libraries.get(accountId);
+  };
   const net = { lookups: 0, writes: 0, lookup: null, track: null };
   const world = {
-    library, net,
+    library, libraries, net,
     scope: { accountId: "account-a", epoch: 1 },
     grant: false,
     account: null,
@@ -58,7 +67,7 @@ function install(options = {}) {
   };
   const binding = () => world.scope === null ? null : `${world.scope.epoch}.${world.scope.accountId}`;
   const confirmationFor = (workKey) => ({
-    workKey, entryId: ENTRY_ID, entry: library.get(workKey), syncVersion: "2026-10-12T12:00:00.000Z",
+    workKey, entryId: ENTRY_ID, entry: libraryNow().get(workKey), syncVersion: "2026-10-12T12:00:00.000Z",
   });
   world.binding = binding;
   world.worker = () => {
@@ -85,14 +94,16 @@ function install(options = {}) {
           if (scripted) return scripted;
           return {
             kind: "success",
-            value: library.has(workKey) ? { kind: "found", confirmation: confirmationFor(workKey) } : { kind: "absent" },
+            value: libraryNow().has(workKey) ? { kind: "found", confirmation: confirmationFor(workKey) } : { kind: "absent" },
           };
         },
         async track(_credential, command) {
           net.writes += 1;
+          // A write lands in the Library of the account that sent it.
+          const mine = libraryNow();
           const scripted = net.track ? await net.track(command) : null;
           if (scripted) return scripted;
-          library.set(command.workKey, ENTRY);
+          mine.set(command.workKey, ENTRY);
           return { kind: "success", value: { kind: "confirmed", confirmation: confirmationFor(command.workKey) } };
         },
       },
@@ -103,7 +114,7 @@ function install(options = {}) {
     });
     const firstTap = new FirstTapSave({
       async grantComplete() { return world.grant; },
-      async account() { return world.account ?? { state: "verified", binding: binding() }; },
+      async account() { return world.account ?? { state: "verified", binding: binding(), owner: world.scope.accountId }; },
       binding,
       async automaticSaving() { return world.automaticSaving; },
       async inject(tabId) { world.calls.inject.push(tabId); return world.page.injects; },
@@ -404,6 +415,7 @@ test("a doubt that cannot be placed on a story after a session change is carried
   await turns();
   assert.equal(popup.last.provenance, "found");
   assert.equal(world.storage.value.forgot.includes(forgotten), false, "the ended session is not named");
+  assert.equal(world.storage.value.unplacedAt, world.now, "only that a doubt was lost, and when");
   assert.equal(world.storage.value.doubts.length <= FIRST_TAP_RECORD_LIMIT, true);
 });
 
@@ -417,7 +429,11 @@ test("a write in doubt from a private tab, then a new background: the same story
   assert.deepEqual(world.storage.value.records, [], "no record is kept for the private tab");
   assert.deepEqual(world.storage.value.doubts, [], "nor its story's digest");
   assert.equal(world.storage.value.unkept, 1, "only that a write is out, for no story and no account");
-  assert.deepEqual(Object.keys(world.storage.value).sort(), ["doubts", "forgot", "records", "salt", "unkept"]);
+  assert.equal(world.storage.value.unkeptAt, world.now, "and when");
+  assert.deepEqual(
+    Object.keys(world.storage.value).sort(),
+    ["doubts", "forgot", "records", "salt", "unkept", "unkeptAt", "unplacedAt"],
+  );
 
   // Safari puts the background to sleep. The reader opens the same story in
   // an ordinary tab.
@@ -429,6 +445,105 @@ test("a write in doubt from a private tab, then a new background: the same story
   assert.equal(popup.last.state, "confirmed");
   assert.equal(popup.last.provenance, "found", "the private tab's write may be what added it");
   assert.equal(world.net.writes, 1);
+});
+
+test("a doubt that can no longer be placed holds for thirty days from the write, and no longer", async () => {
+  const DAY = 24 * 60 * 60 * 1_000;
+  assert.equal(FIRST_TAP_UNPLACED_DOUBT_TTL_MS, 30 * DAY);
+  for (const [later, expected] of [
+    [DAY, "found"],
+    [30 * DAY - 1, "found"],
+    [30 * DAY, "already"],
+    [400 * DAY, "already"],
+    // A clock set back does not end it early.
+    [-5 * DAY, "found"],
+  ]) {
+    // A save cut off in a private tab, and its background gone: nothing says
+    // which story or account it was for.
+    const world = install({ library: [[B, ENTRY]] });
+    world.tabs.set(7, { id: 7, url: urlOf(A), incognito: true });
+    world.net.track = () => new Promise(() => {});
+    await world.worker().popup().open();
+    await turns();
+    assert.equal(world.storage.value.unkept, 1);
+
+    // Another story, in the Library all along, in an ordinary tab.
+    world.net.track = null;
+    world.now += later;
+    world.tabs.set(7, { id: 7, url: urlOf(B), incognito: false });
+    const popup = world.worker().popup();
+    await popup.open();
+    await turns();
+    assert.equal(popup.last.provenance, expected, `${later / DAY} days on`);
+    assert.equal(world.storage.value.unkept, 0, "the count itself is settled by the background that found it");
+  }
+
+  // The thirty days run from the write, not from when a background noticed.
+  const world = install({ library: [[B, ENTRY]] });
+  world.tabs.set(7, { id: 7, url: urlOf(A), incognito: true });
+  world.net.track = () => new Promise(() => {});
+  await world.worker().popup().open();
+  await turns();
+  world.net.track = null;
+  world.tabs.set(7, { id: 7, url: urlOf(B), incognito: false });
+  world.now += 20 * DAY;
+  const noticed = world.worker().popup();
+  await noticed.open();
+  await turns();
+  assert.equal(noticed.last.provenance, "found");
+  world.goTo("ao3:777");
+  world.library.set("ao3:777", ENTRY);
+  world.now += 11 * DAY;
+  const after = world.worker().popup();
+  await after.open();
+  await turns();
+  assert.equal(after.last.provenance, "already", "thirty-one days after the write");
+});
+
+test("another account's save of the same story neither raises nor clears a doubt", async () => {
+  // Reader A's write for the story reaches Trace; its answer never comes.
+  const world = install();
+  landsUnanswered(world);
+  await world.worker().popup().open();
+  await turns();
+  assert.equal(world.library.has(A), true);
+
+  // Reader B signs in on the same phone and saves the same story. It was not
+  // in B's Library, and nothing about A's write concerns B.
+  world.net.track = null;
+  world.scope = { accountId: "account-b", epoch: 2 };
+  const b = world.worker().popup();
+  await b.open();
+  await turns();
+  assert.equal(b.last.provenance, "saved_now");
+  b.close();
+  world.now += FIRST_TAP_RESULT_FRESH_MS + 60_000;
+  const bAgain = world.worker().popup();
+  await bAgain.open();
+  await turns();
+  assert.equal(bAgain.last.provenance, "already", "B's own Library is known: A's doubt is not B's");
+  bAgain.close();
+
+  // A signs back in. B's confirmed save said nothing about A's write.
+  world.scope = { accountId: "account-a", epoch: 3 };
+  const a = world.worker().popup();
+  await a.open();
+  await turns();
+  assert.equal(a.last.state, "confirmed");
+  assert.equal(a.last.provenance, "found", "A's own cut-off write may be what added it");
+  assert.equal(world.net.writes, 2, "one write each, and none now");
+  a.close();
+
+  // Trace has now confirmed it for A, and only that clears A's doubt.
+  world.now += FIRST_TAP_RESULT_FRESH_MS + 60_000;
+  const aLater = world.worker().popup();
+  await aLater.open();
+  await turns();
+  assert.equal(aLater.last.provenance, "already");
+  const kept = JSON.stringify(world.storage.value);
+  for (const readable of ["account-a", "account-b", "ao3", "works"]) {
+    assert.equal(kept.includes(readable), false, `${readable} is not kept`);
+  }
 });
 
 test("a private tab's write that is answered leaves nothing behind", async () => {

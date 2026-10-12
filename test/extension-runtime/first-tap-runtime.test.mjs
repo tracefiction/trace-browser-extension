@@ -43,7 +43,7 @@ const REGISTERED = ["trace-archive-automation-v1", "trace-ao3-saved-filters-v1"]
  */
 function install({ granted = false, registered = [], crypto = steadyCrypto } = {}) {
   const state = {
-    granted, registered, binding: "1.aaa",
+    granted, registered, binding: "1.aaa", accountId: "account-a",
     /** What `permissions.getAll` lists; null to list exactly what `granted` says. */
     listed: null,
     account: { state: "verified" },
@@ -134,6 +134,7 @@ function install({ granted = false, registered = [], crypto = steadyCrypto } = {
           return state.account.state === "verified" ? { state: "verified", binding: state.binding } : state.account;
         },
         pageBinding() { return state.binding; },
+        snapshot() { return { accountId: state.accountId }; },
         async automaticSaving() { return state.automaticSaving; },
         async saveStoryWithEvidence(command, observer) {
           await observer.beforeWrite();
@@ -413,7 +414,7 @@ test("the ask: waiting while Safari's question is up, then allowed only from a f
   // The reader allows the sites; the registration puts the scripts in.
   h.state.granted = true;
   h.state.registered = REGISTERED;
-  port.send("access_answered", { returned: true, elapsedMs: 4_000 });
+  port.send("access_answered", { returned: true });
   await turns();
   assert.deepEqual(port.access.at(-1), ALLOWED);
   assert.equal(h.state.tabs[7].page, "normal", "and the page it saved from carries on by itself");
@@ -428,13 +429,13 @@ test("the ask: what the request returned is never the outcome", async () => {
   const yes = await savedSheet();
   yes.h.state.granted = true;
   yes.h.state.registered = REGISTERED;
-  yes.port.send("access_answered", { returned: false, elapsedMs: 4_000 });
+  yes.port.send("access_answered", { returned: false });
   await turns();
   assert.deepEqual(yes.port.access.at(-1), ALLOWED);
 
   // It returned true, and the sites do not read as allowed.
   const no = await savedSheet();
-  no.port.send("access_answered", { returned: true, elapsedMs: 4_000 });
+  no.port.send("access_answered", { returned: true });
   await turns();
   assert.deepEqual(no.port.access.at(-1), { state: "not_known" });
   assert.equal(no.h.state.tabs[7].page, "manual");
@@ -448,31 +449,108 @@ test("the ask: what the request returned is never the outcome", async () => {
   assert.deepEqual(threw.port.access.at(-1), ALLOWED);
 });
 
-test("the ask: declined, and Safari not having asked at all, are told apart", async () => {
-  const declined = await savedSheet();
-  declined.port.send("access_asking");
-  declined.port.send("access_answered", { returned: false, elapsedMs: 2_500 });
-  await turns();
-  assert.deepEqual(declined.port.access, [{ state: "waiting" }, { state: "declined" }]);
-  assert.equal(declined.h.state.tabs[7].page, "manual", "a decline changes nothing on the page");
-  assert.deepEqual(declined.h.calls.queries, [], "and no tab is asked for");
-
-  for (const answer of [
-    { threw: true },
-    // Back before anyone could have answered: no question was shown.
-    { returned: false, elapsedMs: 30 },
-  ]) {
-    const { port } = await savedSheet();
-    port.send("access_answered", answer);
+test("the ask: a request that came back false is not allowed, however long it took; only one that threw could not ask", async () => {
+  // Trace cannot tell a reader who said no from a browser that said no for
+  // them without asking, so nothing is read into how long the answer took.
+  for (const detail of [{}, { elapsedMs: 30 }, { elapsedMs: 350 }, { elapsedMs: 2_500 }, { elapsedMs: 900_000 }]) {
+    const { h, port } = await savedSheet();
+    port.send("access_asking");
+    port.send("access_answered", { returned: false, ...detail });
     await turns();
-    assert.deepEqual(port.access.at(-1), { state: "could_not_ask" }, JSON.stringify(answer));
+    assert.deepEqual(port.access, [{ state: "waiting" }, { state: "not_allowed" }], JSON.stringify(detail));
+    assert.equal(h.state.tabs[7].page, "manual", "nothing changes on the page");
+    assert.deepEqual(h.calls.queries, [], "and no tab is asked for");
   }
 
-  // With no timing to go on, "no" is taken as the reader's answer.
-  const untimed = await savedSheet();
-  untimed.port.send("access_answered", { returned: false });
+  const threw = await savedSheet();
+  threw.port.send("access_answered", { threw: true });
   await turns();
-  assert.deepEqual(untimed.port.access.at(-1), { state: "declined" });
+  assert.deepEqual(threw.port.access.at(-1), { state: "could_not_ask" });
+});
+
+test("the ask: a request that came back with no answer is not known, never not allowed", async () => {
+  for (const returned of [undefined, null, "", 0, "false", {}]) {
+    const { port } = await savedSheet();
+    port.send("access_answered", { returned });
+    await turns();
+    assert.deepEqual(port.access.at(-1), { state: "not_known" }, JSON.stringify(returned));
+  }
+});
+
+test("the ask: while the request is out, looking again ends the wait only when the story sites are allowed", async () => {
+  const { h, port } = await savedSheet();
+  port.send("access_asking");
+  // Looked at again and again, with nothing allowed: still waiting, for as
+  // long as the popup goes on asking. No number of looks becomes an answer.
+  for (let look = 0; look < 40; look += 1) port.send("access_waiting");
+  await turns();
+  assert.deepEqual([...new Set(port.access.map(({ state }) => state))], ["waiting"]);
+  assert.equal(h.state.tabs[7].page, "manual");
+
+  // The request never comes back, and the sites are now allowed.
+  h.state.granted = true;
+  h.state.registered = REGISTERED;
+  port.send("access_waiting");
+  await turns();
+  assert.deepEqual(port.access.at(-1), ALLOWED, "allowed, from the read alone");
+  assert.equal(h.state.tabs[7].page, "normal");
+  // The wait is over: the reader could ask again from this popup.
+  h.state.granted = false;
+  h.state.registered = [];
+  port.send("access_asking");
+  await turns();
+  assert.deepEqual(port.access.at(-1), { state: "waiting" });
+});
+
+test("the ask: a request the popup stopped waiting on is not known, never not allowed, and the reader can ask again", async () => {
+  const { h, port } = await savedSheet();
+  port.send("access_asking");
+  port.send("access_unanswered");
+  await turns();
+  assert.deepEqual(port.access, [{ state: "waiting" }, { state: "not_known" }]);
+  assert.equal(h.state.tabs[7].page, "manual");
+  port.send("access_asking");
+  await turns();
+  assert.deepEqual(port.access.at(-1), { state: "waiting" }, "a new ask is not blocked by the old one");
+
+  // Given up on, with the sites allowed after all, or some of them.
+  const allowed = await savedSheet();
+  allowed.h.state.granted = true;
+  allowed.h.state.registered = REGISTERED;
+  allowed.port.send("access_unanswered");
+  await turns();
+  assert.deepEqual(allowed.port.access.at(-1), ALLOWED);
+  const partly = await savedSheet();
+  partly.h.state.listed = FIVE.slice(0, 2);
+  partly.port.send("access_unanswered");
+  await turns();
+  assert.deepEqual(partly.port.access.at(-1), { state: "partial", granted: 2, total: 5 });
+});
+
+test("the ask: allowed does not outlive the access: looked at again after it is removed, it is no longer allowed", async () => {
+  const { h, port } = await savedSheet();
+  h.state.granted = true;
+  h.state.registered = REGISTERED;
+  port.send("access_answered", { returned: true });
+  await turns();
+  assert.deepEqual(port.access.at(-1), ALLOWED);
+
+  // The reader removes the story sites in Safari's settings.
+  h.state.granted = false;
+  port.send("access_check");
+  await turns();
+  assert.deepEqual(port.access.at(-1), { state: "not_asked" });
+
+  // Some left, and the read failing, are each their own state too.
+  h.state.listed = FIVE.slice(0, 4);
+  port.send("access_check");
+  await turns();
+  assert.deepEqual(port.access.at(-1), { state: "partial", granted: 4, total: 5 });
+  h.state.granted = new Error("unavailable");
+  h.state.listed = new Error("unavailable");
+  port.send("access_check");
+  await turns();
+  assert.deepEqual(port.access.at(-1), { state: "not_known" });
 });
 
 test("the ask: fewer than all the story sites is partly allowed, never allowed", async () => {
@@ -480,7 +558,7 @@ test("the ask: fewer than all the story sites is partly allowed, never allowed",
     const { h, port } = await savedSheet();
     h.state.listed = FIVE.slice(0, 3);
     h.state.registered = REGISTERED;
-    port.send("access_answered", { returned, elapsedMs: 4_000 });
+    port.send("access_answered", { returned });
     await turns();
     assert.deepEqual(port.access.at(-1), { state: "partial", granted: 3, total: 5 });
     assert.equal(h.state.tabs[7].page, "manual", "the page is not handed over on a partial grant");
@@ -497,7 +575,7 @@ test("the ask: sites allowed with the scripts not registered, or unreadable, is 
     const { h, port } = await savedSheet();
     h.state.granted = true;
     h.state.registered = registered;
-    port.send("access_answered", { returned: true, elapsedMs: 4_000 });
+    port.send("access_answered", { returned: true });
     await turns();
     assert.deepEqual(port.access.at(-1), expected);
     assert.equal(h.state.tabs[7].page, "manual");
@@ -511,11 +589,11 @@ test("the ask: sites allowed with the scripts not registered, or unreadable, is 
   }
 });
 
-test("the ask: access that cannot be read is not known, never declined", async () => {
+test("the ask: access that cannot be read is not known, never not allowed", async () => {
   const { h, port } = await savedSheet();
   h.state.granted = new Error("unavailable");
   h.state.listed = new Error("unavailable");
-  port.send("access_answered", { returned: false, elapsedMs: 4_000 });
+  port.send("access_answered", { returned: false });
   await turns();
   assert.deepEqual(port.access.at(-1), { state: "not_known" });
   port.send("access_check");
@@ -527,7 +605,7 @@ test("the ask: access that cannot be read is not known, never declined", async (
   h.state.granted = false;
   port.send("access_check");
   await turns();
-  assert.deepEqual(port.access.at(-1), { state: "not_allowed" });
+  assert.deepEqual(port.access.at(-1), { state: "not_asked" });
 });
 
 test("the ask: allowed says what else was read, and claims nothing it did not read", async () => {
@@ -542,7 +620,7 @@ test("the ask: allowed says what else was read, and claims nothing it did not re
     h.state.granted = true;
     h.state.registered = REGISTERED;
     arrange(h.state);
-    port.send("access_answered", { returned: true, elapsedMs: 4_000 });
+    port.send("access_answered", { returned: true });
     await turns();
     assert.deepEqual(port.access.at(-1), expected);
     assert.deepEqual(Object.keys(port.access.at(-1)).sort(), ["account", "automaticSaving", "handOver", "state"],
@@ -559,12 +637,12 @@ test("the ask: a second tap while one is out does nothing", async () => {
   assert.deepEqual(port.access, [{ state: "waiting" }]);
   assert.deepEqual(h.calls.queries, []);
 
-  port.send("access_answered", { returned: false, elapsedMs: 2_500 });
+  port.send("access_answered", { returned: false });
   await turns();
   // Once it has come back, the reader may ask again.
   port.send("access_asking");
   await turns();
-  assert.deepEqual(port.access, [{ state: "waiting" }, { state: "declined" }, { state: "waiting" }]);
+  assert.deepEqual(port.access, [{ state: "waiting" }, { state: "not_allowed" }, { state: "waiting" }]);
 });
 
 test("the ask: a sheet closed while Safari's question is up loses nothing, and the next one looks afresh", async () => {

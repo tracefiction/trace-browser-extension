@@ -227,6 +227,7 @@ function createPopupHarness({
   const popupDisconnects = [];
   const heldSnapshotReplies = [];
   const createdTabs = [];
+  const permissionListeners = { added: [], removed: [] };
   // The background's side of the first-tap port: what the popup asked for,
   // and a way to send it a state.
   const firstTap = {
@@ -377,6 +378,8 @@ function createPopupHarness({
       },
     },
     permissions: {
+      onAdded: { addListener(fn) { permissionListeners.added.push(fn); } },
+      onRemoved: { addListener(fn) { permissionListeners.removed.push(fn); } },
       getAll(callback) {
         const response = { origins: [...grantedOrigins], permissions: [] };
         if (promiseRuntime) return Promise.resolve(response);
@@ -524,6 +527,8 @@ function createPopupHarness({
     hostLifecycle,
     firstTap,
     disconnectPopup: () => popupDisconnects.at(-1)(),
+    /** Safari reports that website access was added or removed. */
+    emitPermissionChange(kind) { for (const fn of permissionListeners[kind]) fn({ origins: [] }); },
     answerSnapshot: (reply) => heldSnapshotReplies.shift()?.(reply),
     finishHostRequest: result => finishHostRequest(result),
     registrationRequests,
@@ -4405,10 +4410,9 @@ test("first tap: the ask is made by the tap itself, for the five story sites, an
   // returned and draws nothing from it.
   h.finishHostRequest(true);
   for (let attempt = 0; attempt < 6; attempt += 1) await flush();
-  const answered = h.firstTap.messages.at(-1);
-  assert.equal(answered.command, "access_answered");
-  assert.equal(answered.returned, true);
-  assert.equal(typeof answered.elapsedMs, "number");
+  assert.deepEqual(plain(h.firstTap.messages.at(-1)), {
+    command: "access_answered", tabId: 7, url: "https://archiveofourown.org/works/123", private: null, returned: true,
+  }, "what it returned, and nothing about how long it took");
   assert.equal(shown(), "access-waiting", "still waiting on the background's word");
   assert.deepEqual(h.reloads, [], "the page is not reloaded");
   assert.deepEqual(h.injections, []);
@@ -4429,7 +4433,9 @@ test("first tap: a second tap on the ask while Safari's question is up does noth
   // Once it has come back, the reader can ask again.
   h.finishHostRequest(false);
   for (let attempt = 0; attempt < 6; attempt += 1) await flush();
-  h.firstTap.showAccess({ state: "declined" });
+  await click("popup-earned-primary");
+  assert.equal(h.permissionRequests.length, 1, "nor until the background has said what came of it");
+  h.firstTap.showAccess({ state: "not_allowed" });
   await click("popup-earned-secondary");
   await click("popup-earned-secondary");
   assert.equal(h.permissionRequests.length, 2);
@@ -4475,9 +4481,9 @@ test("first tap: each outcome of the ask is drawn from the background's word, an
     [{ state: "registration_failed" }, "access-registration-failed", "Try again", "Not now"],
     [{ state: "registration_unknown" }, "access-registration-unknown", "Try again", "Not now"],
     [{ state: "partial", granted: 3, total: 5 }, "access-partial", "Allow story sites", "Not now"],
-    [{ state: "declined" }, "access-declined", "Keep reading", "Try again"],
+    [{ state: "not_allowed" }, "access-not-allowed", "Keep reading", "Try again"],
     [{ state: "could_not_ask" }, "access-could-not-ask", "Try again", "Not now"],
-    [{ state: "not_known" }, "access-not-known", "Check again", "Not now"],
+    [{ state: "not_known" }, "access-not-known", "Allow story sites", "Check again"],
   ]) {
     const { h, text, shown } = await openSavedFirstTapPopup();
     h.firstTap.showAccess(access);
@@ -4493,31 +4499,187 @@ test("first tap: each outcome of the ask is drawn from the background's word, an
   }
 });
 
-test("first tap: after a decline the reader is taken back to the ask; a failed registration or an unread answer is looked at again without asking Safari", async () => {
+test("first tap: after a no the reader is taken back to the ask; a failed registration or an unread answer is looked at again without asking Safari", async () => {
   const declined = await openSavedFirstTapPopup({ permissionRequestResult: false });
-  declined.h.firstTap.showAccess({ state: "declined" });
+  declined.h.firstTap.showAccess({ state: "not_allowed" });
   await declined.click("popup-earned-secondary");
   assert.equal(declined.shown(), "saved", "back to the save, with the ask under it");
   assert.equal(declined.text("popup-earned-secondary"), "Allow story sites");
   assert.deepEqual(declined.h.permissionRequests, [], "returning to the ask is not asking");
 
-  for (const state of ["registration_failed", "registration_unknown", "not_known"]) {
+  for (const [state, button] of [
+    ["registration_failed", "popup-earned-primary"],
+    ["registration_unknown", "popup-earned-primary"],
+    ["not_known", "popup-earned-secondary"],
+  ]) {
     const { h, click } = await openSavedFirstTapPopup({ grantedOrigins: [...FIVE_STORY_SITES] });
     h.firstTap.showAccess({ state });
-    await click("popup-earned-primary");
+    await click(button);
     for (let attempt = 0; attempt < 6; attempt += 1) await flush();
     assert.equal(h.firstTap.commands.at(-1), "access_check", state);
     assert.deepEqual(h.permissionRequests, [], state);
     assert.deepEqual(h.reloads, [], state);
   }
 
-  // "Safari could not ask" and "partly allowed" ask again, from the tap.
-  for (const access of [{ state: "could_not_ask" }, { state: "partial", granted: 2, total: 5 }]) {
+  // "Could not ask", "partly allowed" and "not known" ask again, from the tap.
+  for (const access of [{ state: "could_not_ask" }, { state: "partial", granted: 2, total: 5 }, { state: "not_known" }]) {
     const { h, click } = await openSavedFirstTapPopup({ deferredHostRequest: true });
     h.firstTap.showAccess(access);
     await click("popup-earned-primary");
     assert.equal(h.permissionRequests.length, 1, access.state);
   }
+});
+
+// The wait on Safari. Every time below is the popup's own clock, moved by the test.
+
+/** A saved sheet whose ask has just been tapped, with Safari's answer held back. */
+async function askingFirstTapPopup(options = {}) {
+  const granted = [];
+  const opened = await openSavedFirstTapPopup({ deferredHostRequest: true, grantedOrigins: granted, ...options });
+  await opened.click("popup-earned-secondary");
+  opened.h.firstTap.showAccess({ state: "waiting" });
+  const settle = async () => { for (let attempt = 0; attempt < 8; attempt += 1) await flush(); };
+  /** Moves the popup's clock on, letting each look that comes due finish. */
+  const pass = async (ms) => {
+    for (let moved = 0; moved < ms; moved += 1_000) {
+      opened.h.advance(Math.min(1_000, ms - moved));
+      await settle();
+    }
+  };
+  const sent = () => opened.h.firstTap.commands.filter((command) => command.startsWith("access_"));
+  return { ...opened, granted, settle, pass, sent };
+}
+
+test("first tap: a request Safari never answers does not hold the sheet: after a minute it is not known, the reader can ask again, and it is never a no", async () => {
+  const { h, text, shown, click, pass, sent } = await askingFirstTapPopup();
+  const seen = new Set();
+  for (let second = 0; second < 59; second += 1) {
+    await pass(1_000);
+    seen.add(shown());
+  }
+  assert.deepEqual([...seen], ["access-waiting"], "waiting, for all of the first 59 seconds");
+  assert.equal(h.document.getElementById("popup-earned-primary").disabled, true);
+  assert.deepEqual(sent(), ["access_asking"], "with nothing allowed there is nothing to tell the background");
+
+  await pass(1_000);
+  assert.equal(shown(), "access-not-known", "at the minute: not known");
+  assert.equal(sent().at(-1), "access_unanswered", "and the background is asked to read for itself");
+  assert.equal(text("popup-earned-primary"), "Allow story sites", "the ask is there again");
+  assert.equal(h.document.getElementById("popup-earned-primary").disabled, false);
+  assert.equal(text("popup-earned-secondary"), "Check again");
+
+  // However much longer, it is never drawn as a no, and nothing more is sent.
+  const count = sent().length;
+  for (let minute = 0; minute < 10; minute += 1) {
+    await pass(60_000);
+    assert.equal(shown(), "access-not-known");
+  }
+  assert.equal(sent().length, count);
+  assert.equal(h.permissionRequests.length, 1, "and Safari is not asked again by itself");
+
+  // The reader asks again, from a tap.
+  await click("popup-earned-primary");
+  assert.equal(h.permissionRequests.length, 2);
+  assert.equal(sent().at(-1), "access_asking");
+});
+
+test("first tap: while Safari's answer is out the popup reads again, and goes on as allowed once the sites are, whether or not the request ever comes back", async () => {
+  const { h, shown, granted, pass, sent } = await askingFirstTapPopup();
+  await pass(8_000);
+  assert.deepEqual(sent(), ["access_asking"]);
+  assert.equal(h.reconcileRequests.length, 0);
+
+  // The sites become allowed. The request still has not come back.
+  granted.push(...FIVE_STORY_SITES);
+  await pass(2_000);
+  assert.equal(sent().at(-1), "access_waiting", "the background is asked to read, within one look");
+  assert.equal(h.reconcileRequests.length, 1, "after the page scripts were registered");
+  assert.equal(shown(), "access-waiting", "and the popup still draws only what the background says");
+  h.firstTap.showAccess({ state: "allowed", account: "connected", automaticSaving: "on", handOver: "in_place" });
+  assert.equal(shown(), "access-allowed");
+
+  // The wait is over: the deadline that would have come changes nothing.
+  const count = sent().length;
+  await pass(120_000);
+  assert.equal(shown(), "access-allowed");
+  assert.equal(sent().length, count);
+  assert.deepEqual(h.reloads, []);
+});
+
+test("first tap: the popup coming back into view while Safari's answer is out reads at once", async () => {
+  const { h, granted, settle, sent } = await askingFirstTapPopup();
+  granted.push(...FIVE_STORY_SITES);
+  Object.defineProperty(h.document, "hidden", { value: false, configurable: true });
+  h.document.dispatchEvent(new h.window.Event("visibilitychange"));
+  await settle();
+  assert.equal(sent().at(-1), "access_waiting", "without waiting for the next look to come due");
+
+  // With nothing allowed, coming back into view tells the background nothing.
+  const idle = await askingFirstTapPopup();
+  idle.h.window.dispatchEvent(new idle.h.window.Event("focus"));
+  await idle.settle();
+  assert.deepEqual(idle.sent(), ["access_asking"]);
+});
+
+test("first tap: an answer that comes after the minute is still passed on, and one with neither yes nor no is looked at once more", async () => {
+  const late = await askingFirstTapPopup();
+  await late.pass(60_000);
+  assert.equal(late.shown(), "access-not-known");
+  late.h.finishHostRequest(false);
+  await late.settle();
+  assert.equal(late.h.firstTap.messages.at(-1).command, "access_answered");
+  assert.equal(late.h.firstTap.messages.at(-1).returned, false, "the background reads, and then says what came of it");
+
+  // Safari returns nothing at all.
+  const empty = await openSavedFirstTapPopup({ permissionRequestResult: null });
+  await empty.click("popup-earned-secondary");
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  assert.equal(empty.h.firstTap.messages.at(-1).command, "access_answered");
+  assert.equal(empty.h.firstTap.messages.at(-1).returned, null);
+  empty.h.firstTap.showAccess({ state: "not_known" });
+  assert.equal(empty.shown(), "access-not-known");
+  empty.h.advance(2_000);
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  assert.equal(empty.h.firstTap.commands.at(-1), "access_unanswered", "a look that can find allowed, and never a no");
+});
+
+test("first tap: allowed does not outlive the access: when Safari reports a change the popup has the background read again", async () => {
+  const granted = [...FIVE_STORY_SITES];
+  const { h, shown, text } = await openSavedFirstTapPopup({ grantedOrigins: granted });
+  h.firstTap.showAccess({ state: "allowed", account: "connected", automaticSaving: "on", handOver: "in_place" });
+  assert.equal(shown(), "access-allowed");
+
+  // The reader removes the story sites while the sheet is open.
+  granted.length = 0;
+  h.emitPermissionChange("removed");
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  assert.equal(h.firstTap.commands.at(-1), "access_check");
+  h.firstTap.showAccess({ state: "not_asked" });
+  assert.equal(shown(), "saved", "allowed is gone; the save and the ask are what is left");
+  assert.equal(text("popup-earned-secondary"), "Allow story sites");
+  assert.deepEqual(h.permissionRequests, [], "and Safari was asked nothing");
+
+  // Allowed elsewhere while the sheet shows the save and its ask.
+  const before = h.firstTap.commands.length;
+  granted.push(...FIVE_STORY_SITES);
+  h.emitPermissionChange("added");
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  assert.equal(h.firstTap.commands.length, before + 1);
+  assert.equal(h.firstTap.commands.at(-1), "access_check");
+
+  // Coming back into view with allowed on show reads again too.
+  h.firstTap.showAccess({ state: "allowed", account: "connected", automaticSaving: "on", handOver: "in_place" });
+  h.window.dispatchEvent(new h.window.Event("focus"));
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  assert.equal(h.firstTap.commands.length, before + 2);
+  assert.equal(h.firstTap.commands.at(-1), "access_check");
+
+  // A look that finds nothing to show leaves a sheet that shows nothing of the ask alone.
+  const plainSheet = await openSavedFirstTapPopup();
+  plainSheet.h.firstTap.showAccess({ state: "not_asked" });
+  assert.equal(plainSheet.shown(), "saved");
+  plainSheet.h.firstTap.showAccess({ state: "waiting" });
+  assert.equal(plainSheet.shown(), "saved", "and waiting is only ever shown for a request this popup has out");
 });
 
 test("first tap: opened on a story with the sites allowed but setup not finished, the popup shows what the background read and reloads nothing", async () => {
@@ -4558,7 +4720,7 @@ test("first tap: every state without agreed wording is a written-out placeholder
   assert.deepEqual(calls.filter((argument) => !/^"[^"]+"$/.test(argument)), ["id"]);
   assert.deepEqual([...new Set(written)].sort(), [
     "access-allowed-automatic-saving-off-heading", "access-allowed-body", "access-allowed-heading",
-    "access-allowed-unconfirmed-heading", "access-could-not-ask-heading", "access-declined-heading",
+    "access-allowed-unconfirmed-heading", "access-could-not-ask-heading", "access-not-allowed-heading",
     "access-not-known-heading", "access-partial-heading", "access-registration-failed-heading",
     "access-registration-unknown-heading",
     "automatic-saving-off-heading", "in-library-kicker", "save-not-sent-heading", "save-on-request-heading",

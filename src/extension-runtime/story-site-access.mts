@@ -11,7 +11,10 @@ import type { FirstTapAccount } from "./first-tap-save.mjs";
  * page scripts registered.
  *
  * Nothing here can tell a grant that lasts from one that ends tomorrow. The
- * browser reports both the same way, so no state says which it was.
+ * browser reports both the same way, so no state says which it was. Nor can
+ * it tell a reader who answered "no" from a browser that answered "no" for
+ * them without asking: both are a request that came back false, and one state.
+ * Nothing is guessed from how long a request took.
  */
 
 /**
@@ -22,12 +25,6 @@ import type { FirstTapAccount } from "./first-tap-save.mjs";
  * document. This is the only switch between the two.
  */
 export const HAND_OVER_BY_RELOADING_THE_PAGE = false;
-
-/**
- * A request answered "no" faster than this was not answered by a person: the
- * browser returned without showing its question. Not yet measured.
- */
-export const ASK_ANSWERED_WITHOUT_A_QUESTION_MS = 400;
 
 /** One fresh look at the browser's website access for the story sites. */
 export type StorySiteAccessReading = Readonly<{
@@ -42,7 +39,11 @@ export type StorySiteAccessReading = Readonly<{
 export type StorySiteAsk =
   /** No request was made: this is a look, for a popup just opened. */
   | Readonly<{ kind: "none" }>
-  | Readonly<{ kind: "returned"; value: unknown; elapsedMs: number | null }>
+  /** The request is still out: a look while waiting on it. */
+  | Readonly<{ kind: "waiting" }>
+  /** The request is still out and the popup has stopped waiting on it. */
+  | Readonly<{ kind: "unanswered" }>
+  | Readonly<{ kind: "returned"; value: unknown }>
   | Readonly<{ kind: "threw" }>;
 
 /** What the popup is given. Machine values only; wording belongs to the popup. */
@@ -50,7 +51,7 @@ export type StorySiteAccessView =
   /** The request is out and the browser's question may be up. */
   | Readonly<{ state: "waiting" }>
   /** Not allowed, and nothing was asked just now: the ask is offered. */
-  | Readonly<{ state: "not_allowed" }>
+  | Readonly<{ state: "not_asked" }>
   /**
    * Every story site is allowed and the page scripts are registered. The
    * other two readings are for the popup to decide how much it may say:
@@ -68,10 +69,18 @@ export type StorySiteAccessView =
   | Readonly<{ state: "registration_unknown" }>
   /** Some of the story sites are allowed, not all. Never drawn as allowed. */
   | Readonly<{ state: "partial"; granted: number; total: number }>
-  | Readonly<{ state: "declined" }>
-  /** The request failed, or came back without the browser having asked. */
+  /**
+   * The request came back false and the story sites do not read as allowed.
+   * Whether the reader said no, or the browser did without asking, is not known.
+   */
+  | Readonly<{ state: "not_allowed" }>
+  /** The request itself failed: it threw. */
   | Readonly<{ state: "could_not_ask" }>
-  /** What the browser allows could not be established. Never "declined". */
+  /**
+   * What came of the ask could not be established: access could not be read,
+   * the request came back with no answer or with one the read contradicts, or
+   * it never came back. Never "not allowed".
+   */
   | Readonly<{ state: "not_known" }>;
 
 export interface StorySiteAccessPorts {
@@ -106,12 +115,18 @@ export class StorySiteAccess {
     return view({ state: "waiting" });
   }
 
-  /** The popup's request came back. The outcome is read, not taken from it. */
+  /**
+   * The popup has word of its request, or looks while it waits. The outcome
+   * is read, not taken from that word. A look that finds the request still
+   * out and the sites not yet allowed leaves the popup waiting.
+   */
   async answered(popup: unknown, ask: StorySiteAsk): Promise<StorySiteAccessView> {
+    let outcome: StorySiteAccessView | null = null;
     try {
-      return await this.observe(ask);
+      outcome = await this.observe(ask);
+      return outcome;
     } finally {
-      this.#asking.delete(popup);
+      if (outcome?.state !== "waiting") this.#asking.delete(popup);
     }
   }
 
@@ -144,14 +159,16 @@ export class StorySiteAccess {
     if (reading !== null && reading.granted > 0) {
       return view({ state: "partial", granted: reading.granted, total: reading.total });
     }
+    // Still out, and nothing allowed yet: only the sites being allowed, or
+    // the popup giving up, ends the wait. Time alone decides nothing here.
+    if (ask.kind === "waiting") return view({ state: "waiting" });
     if (ask.kind === "threw") return view({ state: "could_not_ask" });
     if (reading === null) return view({ state: "not_known" });
-    if (ask.kind === "none") return view({ state: "not_allowed" });
-    // The browser said yes and reads back no. Neither is taken over the other.
-    if (ask.value === true) return view({ state: "not_known" });
-    if (ask.elapsedMs !== null && ask.elapsedMs < ASK_ANSWERED_WITHOUT_A_QUESTION_MS) {
-      return view({ state: "could_not_ask" });
-    }
-    return view({ state: "declined" });
+    if (ask.kind === "none") return view({ state: "not_asked" });
+    // A request that never came back says nothing, and so is never "no".
+    if (ask.kind === "unanswered") return view({ state: "not_known" });
+    // Only an answer of exactly "no" is one. "Yes" with the sites reading as
+    // not allowed, or no answer at all, leaves it not known.
+    return view({ state: ask.value === false ? "not_allowed" : "not_known" });
   }
 }

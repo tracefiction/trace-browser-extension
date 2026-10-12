@@ -2226,7 +2226,17 @@ let firstTapSetAside = false;
 // for lasting access. Both are drawn from these and from nothing else.
 let firstTapLastView = null;
 let firstTapAccess = null;
-let firstTapAsking = false;
+// The request now out, if any. A wait on it ends when the background says
+// what holds, never because the request's own promise is trusted to settle.
+let firstTapAsk = null;
+let firstTapAccessWatched = false;
+// While a request is out, what Safari allows is read again this often.
+const FIRST_TAP_ASK_REREAD_MS = 2_000;
+// How long the popup waits on a request before saying it does not know. A
+// reader answers Safari's question in seconds; a minute is past any reading
+// of it. Nothing is lost at the deadline: a request that comes back later, a
+// permission change, and the popup coming back into view are each still read.
+const FIRST_TAP_ASK_DEADLINE_MS = 60_000;
 
 function firstTapPlaceholder(id) {
   return `[${id}]`;
@@ -2335,16 +2345,19 @@ function renderFirstTapAccess(access) {
         secondary: notNow,
       });
       return;
-    case "declined":
-      setFirstTapState("access-declined");
-      renderFirstTapUnworded("access-declined", {
-        heading: firstTapPlaceholder("access-declined-heading"),
+    case "not_allowed":
+      // The request came back "no". Whether the reader said so, or Safari
+      // did without asking, is not something Trace can tell.
+      setFirstTapState("access-not-allowed");
+      renderFirstTapUnworded("access-not-allowed", {
+        heading: firstTapPlaceholder("access-not-allowed-heading"),
         primary: keepReading,
         // Back to the ask; the request is made by the reader's tap there.
         secondary: { label: "Try again", action: "first_tap_show_ask", emphasis: "tertiary" },
       });
       return;
     case "could_not_ask":
+      // The request itself failed.
       setFirstTapState("access-could-not-ask");
       renderFirstTapUnworded("access-could-not-ask", {
         heading: firstTapPlaceholder("access-could-not-ask-heading"),
@@ -2353,12 +2366,14 @@ function renderFirstTapAccess(access) {
       });
       return;
     default:
-      // What Safari allows could not be read. Never drawn as declined.
+      // What came of the ask is not known: Safari's answer could not be
+      // read, or never came. Never drawn as not allowed. The reader can ask
+      // again, or have Trace look again.
       setFirstTapState("access-not-known");
       renderFirstTapUnworded("access-not-known", {
         heading: firstTapPlaceholder("access-not-known-heading"),
-        primary: { label: "Check again", action: "first_tap_access_check", emphasis: "primary" },
-        secondary: notNow,
+        primary: ask,
+        secondary: { label: "Check again", action: "first_tap_access_check", emphasis: "tertiary" },
         checking: true,
       });
   }
@@ -2491,9 +2506,9 @@ function renderFirstTapView(view) {
 function drawFirstTap() {
   const view = firstTapLastView;
   const access = firstTapAccess;
-  // Nothing asked, or not allowed with nothing asked: the save's own state,
-  // which offers the ask where there is one to offer.
-  if (!access || access.state === "not_allowed") {
+  // Nothing asked: the save's own state, which offers the ask where there
+  // is one to offer.
+  if (!access || access.state === "not_asked") {
     firstTapAccess = null;
     if (view) renderFirstTapView(view);
     return;
@@ -2503,30 +2518,80 @@ function drawFirstTap() {
   renderFirstTapAccess(access);
 }
 
+/** The wait on a request is over. The request itself may still be out. */
+function endFirstTapAsk(ask) {
+  if (ask.timer !== null) clearTimeout(ask.timer);
+  ask.timer = null;
+  if (firstTapAsk === ask) firstTapAsk = null;
+}
+
 /**
  * The ask for lasting access to the story sites. Safari raises its question
  * only for a request made in the reader's tap itself, so the request is made
  * first, before anything is read or awaited. What it returns is passed to the
  * background as evidence; the background reads what Safari now allows and
  * says what came of it.
+ *
+ * The wait does not depend on the request ever coming back. While it is out
+ * what Safari allows is read again on a schedule, and the wait ends as
+ * allowed the moment the story sites are. After the deadline the popup says
+ * it does not know, and the reader can ask again. No amount of waiting is
+ * ever taken as "no".
  */
 function askForStorySites() {
   // One request at a time: a second tap while Safari's question is up does nothing.
-  if (firstTapAsking) return;
-  firstTapAsking = true;
-  const startedAt = Date.now();
+  if (firstTapAsk) return;
+  const ask = { timer: null, waitedMs: 0 };
+  firstTapAsk = ask;
   const request = extensionPromiseCall(ext.permissions, "request", [{ origins: earnedOrigins() }]);
   firstTapSend("access_asking");
   void recordEarnedEvent("website_access_requested");
+
+  const lookAgain = () => {
+    ask.timer = null;
+    if (firstTapAsk !== ask) return;
+    ask.waitedMs += FIRST_TAP_ASK_REREAD_MS;
+    if (ask.waitedMs >= FIRST_TAP_ASK_DEADLINE_MS) {
+      // Not known, said here so that it does not itself wait on anything;
+      // the background's own read can then only improve on it.
+      endFirstTapAsk(ask);
+      firstTapAccess = { state: "not_known" };
+      drawFirstTap();
+      void observeStorySiteAccess("access_unanswered");
+      return;
+    }
+    void observeStorySiteAccess("access_waiting", {}, { onlyIfAllowed: true });
+    ask.timer = setTimeout(lookAgain, FIRST_TAP_ASK_REREAD_MS);
+  };
+  ask.timer = setTimeout(lookAgain, FIRST_TAP_ASK_REREAD_MS);
+
   void request
     .then(
-      (returned) => ({ returned, elapsedMs: Date.now() - startedAt }),
+      (returned) => ({ returned }),
       () => ({ threw: true }),
     )
-    .then((answer) => observeStorySiteAccess("access_answered", answer))
-    .finally(() => {
-      firstTapAsking = false;
-    });
+    .then((answer) => {
+      // Another request is out by now: this one's word is not about it, and
+      // only the sites being allowed ends that wait.
+      if (firstTapAsk && firstTapAsk !== ask) {
+        return observeStorySiteAccess("access_waiting", {}, { onlyIfAllowed: true });
+      }
+      // A request that came back with neither yes nor no has told nothing.
+      // The background will say it does not know; look once more shortly,
+      // which can find the sites allowed and can never find "no".
+      if (answer.threw !== true && answer.returned !== true && answer.returned !== false) {
+        setTimeout(() => {
+          if (!firstTapAsk && firstTapAccess?.state === "not_known") {
+            void observeStorySiteAccess("access_unanswered");
+          }
+        }, FIRST_TAP_ASK_REREAD_MS);
+      }
+      // Passed on even when it comes after this wait ran out: it is still
+      // evidence, and the background still reads before it says anything.
+      // The wait itself ends when the background answers, or at the deadline.
+      return observeStorySiteAccess("access_answered", answer);
+    })
+    .catch(() => undefined);
 }
 
 /**
@@ -2534,13 +2599,66 @@ function askForStorySites() {
  * allowed, Trace's page scripts are registered first, so that the background
  * reads them in place. Nothing here asks Safari for anything.
  */
-async function observeStorySiteAccess(command, answer = {}) {
+async function observeStorySiteAccess(command, answer = {}, { onlyIfAllowed = false } = {}) {
   if (await readCompleteEarnedGrant().catch(() => false)) {
     await reconcileEarnedRegistration().catch(() => null);
+  } else if (onlyIfAllowed) {
+    return;
   }
   // The background may have been restarted while Safari's question was up.
   if (!firstTapPort && firstTapStory && firstTapTab) startFirstTap(firstTapStory, firstTapTab);
   firstTapSend(command, answer);
+}
+
+/**
+ * What Safari allows may have changed under the sheet: a permission was added
+ * or removed, or the popup has come back into view. What is shown of the ask
+ * is read again, so that "allowed" never outlives the access it describes and
+ * a wait does not miss a grant made elsewhere.
+ */
+function reobserveStorySiteAccess(permissionChanged) {
+  if (!firstTapPort || firstTapSetAside) return;
+  if (firstTapAsk) {
+    void observeStorySiteAccess("access_waiting", {}, { onlyIfAllowed: true });
+    return;
+  }
+  const state = firstTapAccess?.state ?? null;
+  // Not known can only improve by looking: it is never looked into "no".
+  if (state === "not_known") {
+    void observeStorySiteAccess("access_unanswered");
+  } else if (state === "allowed" || state === "registration_failed" || state === "registration_unknown") {
+    void observeStorySiteAccess("access_check");
+  } else if (permissionChanged && (state !== null || firstTapLastView?.state === "confirmed")) {
+    void observeStorySiteAccess("access_check");
+  }
+}
+
+function watchStorySiteAccess() {
+  if (firstTapAccessWatched) return;
+  firstTapAccessWatched = true;
+  try {
+    ext.permissions?.onAdded?.addListener(() => reobserveStorySiteAccess(true));
+    ext.permissions?.onRemoved?.addListener(() => reobserveStorySiteAccess(true));
+  } catch {
+    // The popup coming back into view still looks again.
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) reobserveStorySiteAccess(false);
+  });
+  window.addEventListener("focus", () => reobserveStorySiteAccess(false));
+}
+
+/** The background's word on the ask. Any word but "waiting" ends the wait. */
+function receiveStorySiteAccess(access) {
+  const asked = firstTapAsk;
+  // "Waiting" is only ever true of a request this popup still has out.
+  if (!asked && access.state === "waiting") return false;
+  if (asked && access.state !== "waiting") endFirstTapAsk(asked);
+  // A look made for a popup that shows nothing of the ask, finding nothing
+  // to show: what is on screen is left as it is.
+  if (access.state === "not_asked" && firstTapAccess === null) return false;
+  firstTapAccess = access;
+  return true;
 }
 
 /** Opens the first-tap save for the story on this tab. False when it cannot be reached. */
@@ -2561,10 +2679,11 @@ function startFirstTap(story, tab) {
     }
     firstTapPort.onMessage.addListener((message) => {
       if (!message) return;
-      if (message.access) firstTapAccess = message.access;
+      const accessChanged = message.access ? receiveStorySiteAccess(message.access) : false;
       if (message.view) firstTapLastView = message.view;
-      if (message.access || message.view) drawFirstTap();
+      if (accessChanged || message.view) drawFirstTap();
     });
+    watchStorySiteAccess();
     firstTapPort.onDisconnect?.addListener(() => {
       firstTapPort = null;
     });
