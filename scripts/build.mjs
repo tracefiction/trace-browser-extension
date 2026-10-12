@@ -458,6 +458,26 @@ console.log("Wrote", outBg);
 const manifestPath = path.join(RES, "manifest.json");
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 manifest.version = version;
+// The description is written once, in the English locale file, and copied
+// into every manifest. Apple refuses a Safari extension whose description is
+// longer than 112 characters, in the manifest or in a locale.
+const SAFARI_DESCRIPTION_LIMIT = 112;
+const localeMessages = JSON.parse(
+  fs.readFileSync(path.join(RES, "_locales", "en", "messages.json"), "utf8"),
+);
+const extensionDescription = localeMessages.extension_description?.message;
+if (
+  typeof extensionDescription !== "string" ||
+  extensionDescription.length === 0 ||
+  extensionDescription.length > SAFARI_DESCRIPTION_LIMIT
+) {
+  throw new Error(
+    `_locales/en/messages.json extension_description must be 1 to ${SAFARI_DESCRIPTION_LIMIT} characters. Received ${
+      typeof extensionDescription === "string" ? extensionDescription.length : "no text"
+    }.`,
+  );
+}
+manifest.description = extensionDescription;
 manifest.permissions = IOS_ACTIVE_TAB_PERMISSIONS
   ? [...IOS_ACTIVE_TAB_PROBE_PERMISSIONS]
   : [...NORMAL_SAFARI_PERMISSIONS];

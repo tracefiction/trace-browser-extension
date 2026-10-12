@@ -4,7 +4,7 @@
         "description": "The display name for the extension."
     },
     "extension_description": {
-        "message": "Save AO3 and FanFiction.net stories to Trace, keep your place as you read, and see your Library while you browse.",
+        "message": "Save stories from AO3 and FanFiction.net, keep your place as you read, and see your Library while you browse.",
         "description": "Description of what the extension does."
     }
 }

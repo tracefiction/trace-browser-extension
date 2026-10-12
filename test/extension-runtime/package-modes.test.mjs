@@ -33,6 +33,29 @@ function manifest(root) {
   return JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
 }
 
+// Apple refuses a Safari extension whose description is over 112 characters
+// or whose name is over 40. Chrome documents 132 and 75; the Firefox package
+// is held to Chrome's figures, which are the tighter.
+function assertStoreText() {
+  for (const [root, descriptionLimit, nameLimit] of [
+    [RESOURCES, 112, 40],
+    [path.join(ROOT, "dist", "chrome"), 132, 75],
+    [path.join(ROOT, "dist", "firefox"), 132, 75],
+  ]) {
+    const { description, name } = manifest(root);
+    assert.equal(typeof description, "string");
+    assert.ok(
+      description.length > 0 && description.length <= descriptionLimit,
+      `${root} description is ${description.length} characters; the limit is ${descriptionLimit}`,
+    );
+    assert.ok(name.length > 0 && name.length <= nameLimit, `${root} name is ${name.length} characters`);
+  }
+  const messages = JSON.parse(
+    fs.readFileSync(path.join(RESOURCES, "_locales", "en", "messages.json"), "utf8"),
+  );
+  assert.equal(manifest(RESOURCES).description, messages.extension_description.message);
+}
+
 function hasSavedFilterScript(value) {
   return value.content_scripts.some((entry) => entry.js?.includes("ao3-saved-filters.js"));
 }
@@ -292,6 +315,7 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     assertCollectorModeConfig(path.join(ROOT, "dist", "firefox"), "kernel");
     // Mac Safari, Chrome and Firefox keep required story sites, `tabs` and
     // manifest-declared page scripts. Only the iPhone build below differs.
+    assertStoreText();
     const desktopSafariManifest = manifest(RESOURCES);
     assert.deepEqual(desktopSafariManifest.permissions, [
       "alarms",
@@ -357,6 +381,7 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
 
     // The earlier iPhone shape stays buildable, unchanged to the byte.
     runBuild("build:ios-earned-permission-onboarding:required-hosts:release");
+    assertStoreText();
     const earnedSafariManifest = manifest(RESOURCES);
     const earnedSafariConfig = fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8");
     assert.deepEqual(earnedSafariManifest.permissions, [
@@ -442,6 +467,7 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
 
     // The iPhone and iPad build: nothing is asked before the first tap.
     runBuild("build:ios-earned-permission-onboarding:release");
+    assertStoreText();
     const iphoneManifest = manifest(RESOURCES);
     assert.deepEqual(iphoneManifest.permissions, [
       "alarms",
