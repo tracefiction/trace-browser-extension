@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import nodeCrypto from "node:crypto";
 import test from "node:test";
 
 import {
@@ -17,10 +18,22 @@ const CONFIRMATION = {
 };
 
 async function turns() {
-  for (let turn = 0; turn < 10; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+  for (let turn = 0; turn < 40; turn += 1) await new Promise((resolve) => setImmediate(resolve));
 }
 
-function harness({ granted = false, registered = [] } = {}) {
+// The same digest and random bytes the browser gives, answered at once so the
+// tests do not depend on how long a real digest takes.
+const steadyCrypto = {
+  getRandomValues: (bytes) => nodeCrypto.randomFillSync(bytes),
+  subtle: {
+    async digest(_algorithm, bytes) {
+      const digest = nodeCrypto.createHash("sha256").update(bytes).digest();
+      return digest.buffer.slice(digest.byteOffset, digest.byteOffset + digest.byteLength);
+    },
+  },
+};
+
+function harness({ granted = false, registered = [], crypto = steadyCrypto } = {}) {
   const state = {
     granted, registered, binding: "1.aaa",
     tabs: { 7: { id: 7, url: STORY_URL, active: true }, 9: { id: 9, url: "https://www.fanfiction.net/s/999/1/Other", active: false } },
@@ -78,6 +91,7 @@ function harness({ granted = false, registered = [] } = {}) {
       attachStoryAdmission(hooks) { admission = hooks; },
     },
     now: () => 1_800_000_000_000,
+    ...(crypto === null ? {} : { crypto }),
   });
   const openPort = (sender = { id: "trace-test", url: "safari-web-extension://trace-test/popup.html" }, name = "trace-first-tap-popup-v1") => {
     const posted = [];
@@ -264,5 +278,29 @@ test("a sheet closed the moment it opened still lets the page show its mark for 
     h.calls.tabMessages.at(-1).message,
     { type: "TRACE_FIRST_TAP_MARK", workKey: WORK_KEY },
   );
+});
+
+test("with the browser's own digest, the same story is found again under the same key", async () => {
+  const h = harness({ crypto: null });
+  const port = h.openPort();
+  port.send("open");
+  // A real digest answers in its own time, so wait for the result itself.
+  for (let waited = 0; waited < 400 && port.posted.at(-1)?.state !== "confirmed"; waited += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(port.posted.at(-1)?.state, "confirmed");
+  const kept = h.calls.store.traceFirstTapSaveV2;
+  assert.match(kept.salt, /^[0-9a-f]{32}$/);
+  assert.match(kept.records[0].k, /^[0-9a-f]{32}$/);
+  assert.notEqual(kept.records[0].k, kept.records[0].s);
+
+  // Reopened: the same record answers, and nothing is saved again.
+  const again = h.openPort();
+  again.send("open");
+  for (let waited = 0; waited < 400 && again.posted.length === 0; waited += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(again.posted[0].state, "confirmed");
+  assert.equal(h.calls.saves.length, 1);
 });
 
