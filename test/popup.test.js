@@ -134,6 +134,13 @@ function flush() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+/** A page that can name its story. */
+function namedStory(message) {
+  return message.type === "TRACE_STORY_IDENTITY_GET"
+    ? { ok: true, title: "The Long Way Round", author: "quillfeather", site: "ao3" }
+    : undefined;
+}
+
 function createPopupHarness({
   storageState = {},
   popupState = {
@@ -179,6 +186,7 @@ function createPopupHarness({
   deferredHostRequest = false,
   platformOs = null,
   maxTouchPoints = 0,
+  tabResponse = null,
 } = {}) {
   const html = fs.readFileSync(POPUP_HTML_PATH, "utf8");
   const js = fs.readFileSync(POPUP_JS_PATH, "utf8");
@@ -196,7 +204,17 @@ function createPopupHarness({
   const store = { ...storageState };
   const messages = [];
   const storageChangeListeners = [];
+  // Timers run on a clock the test moves, so delays and limits are real.
   const timeouts = [];
+  let clock = 0;
+  let timerSequence = 0;
+  const runTimer = (timer) => {
+    const index = timeouts.indexOf(timer);
+    if (index < 0) return;
+    timeouts.splice(index, 1);
+    clock = Math.max(clock, timer.at);
+    timer.fn();
+  };
   const tabMessages = [];
   const injections = [];
   const permissionRequests = [];
@@ -207,6 +225,7 @@ function createPopupHarness({
   let closeCalled = false;
   const hostLifecycle = [];
   const popupDisconnects = [];
+  const heldSnapshotReplies = [];
   const createdTabs = [];
   let finishHostRequest;
 
@@ -235,7 +254,7 @@ function createPopupHarness({
         }
         if (message.type === "TRACE_POPUP_PAGE_RELAY") {
           tabMessages.push({ tabId: message.tabId, message: message.command });
-          response = probeSaveResponse;
+          response = tabResponse?.(message.command) ?? probeSaveResponse;
         }
         if (message.type === "TRACE_POPUP_OPEN") {
           response = { ok: true };
@@ -250,6 +269,12 @@ function createPopupHarness({
           response = Array.isArray(sessionSnapshotResponses)
             ? sessionSnapshotResponses.shift()
             : { ok: true, snapshot: sessionSnapshot };
+          if (response && response.held === true) {
+            // A slow read: the test answers it later with answerSnapshot().
+            if (promiseRuntime) return new Promise((resolve) => heldSnapshotReplies.push(resolve));
+            heldSnapshotReplies.push(callback);
+            return;
+          }
         }
         if (message.type === "TRACE_SESSION_ACTION") {
           response = { ok: true, snapshot: sessionSnapshot, action: { kind: "ignored" } };
@@ -323,7 +348,7 @@ function createPopupHarness({
         }
         const response = message.type === "TRACE_ACTIVE_TAB_PROBE_PING"
           ? { ok: true, probe: true }
-          : probeSaveResponse;
+          : tabResponse?.(message) ?? probeSaveResponse;
         if (promiseRuntime) return Promise.resolve(response);
         callback?.(response);
       },
@@ -416,10 +441,14 @@ function createPopupHarness({
     navigator: { userAgent, maxTouchPoints },
     globalThis: null,
     setTimeout(fn, ms) {
-      timeouts.push({ fn, ms });
-      return timeouts.length;
+      timerSequence += 1;
+      timeouts.push({ id: timerSequence, fn, ms, at: clock + (Number(ms) || 0) });
+      return timerSequence;
     },
-    clearTimeout() {},
+    clearTimeout(id) {
+      const index = timeouts.findIndex((timer) => timer.id === id);
+      if (index >= 0) timeouts.splice(index, 1);
+    },
     TRACE_SESSION_MODE: sessionMode,
   };
   if (traceWebOrigin !== undefined) {
@@ -475,6 +504,7 @@ function createPopupHarness({
     permissionRequests,
     hostLifecycle,
     disconnectPopup: () => popupDisconnects.at(-1)(),
+    answerSnapshot: (reply) => heldSnapshotReplies.shift()?.(reply),
     finishHostRequest: result => finishHostRequest(result),
     registrationRequests,
     reconcileRequests,
@@ -482,10 +512,25 @@ function createPopupHarness({
     get closeCalled() {
       return closeCalled;
     },
+    /**
+     * Moves the clock to the last timer now pending, running every timer
+     * that comes due on the way in order, including ones set meanwhile.
+     */
     runTimeouts() {
-      const pending = timeouts.splice(0, timeouts.length);
-      for (const item of pending) item.fn();
+      if (timeouts.length === 0) return;
+      this.advance(Math.max(...timeouts.map((timer) => timer.at)) - clock);
     },
+    /** Moves the clock forward, running each timer as it comes due. */
+    advance(ms) {
+      const end = clock + ms;
+      for (;;) {
+        const next = timeouts.filter((timer) => timer.at <= end).sort((a, b) => a.at - b.at || a.id - b.id)[0];
+        if (!next) break;
+        runTimer(next);
+      }
+      clock = end;
+    },
+    pendingTimers: () => timeouts.map((timer) => timer.at - clock).sort((a, b) => a - b),
     emitStorageChange(changes, area = "local") {
       if (area === "local") {
         for (const [key, change] of Object.entries(changes || {})) {
@@ -772,10 +817,13 @@ test("a supported site page can grant all five story sites before opening a stor
     assert.equal(h.permissionRequests.length, 1, url);
     assert.equal(h.permissionRequests[0].origins.length, 5, url);
     assert.equal(h.reconcileRequests.length, 1, url);
+    // The site's home page has no story titles, so the prompt names none.
     assert.equal(h.document.getElementById("popup-earned-heading").textContent,
-      "Open any story to save it", url);
-    assert.match(h.document.getElementById("popup-earned-lead").textContent,
-      /Tap a title on this page/, url);
+      "Open any story", url);
+    assert.equal(h.document.getElementById("popup-earned-lead").textContent,
+      "Trace saves it when it opens.", url);
+    assert.doesNotMatch(h.document.getElementById("popup-earned-permission").textContent,
+      /Tap a title/, url);
     assert.equal(h.document.getElementById("popup-earned-record").hidden, true, url);
     assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "waiting", url);
     assert.equal(h.document.getElementById("popup-earned-primary").hidden, true, url);
@@ -801,7 +849,7 @@ test("a complete Safari grant on a supported site page gives the first-story nex
   });
   for (let attempt = 0; attempt < 8; attempt += 1) await flush();
   assert.equal(h.document.getElementById("popup-earned-heading").textContent,
-    "Open any story to save it");
+    "Open any story");
   assert.equal(h.store.traceEarnedPermissionOnboardingV1.completedAt > 0, true);
   assert.equal(h.permissionRequests.length, 0);
   assert.deepEqual(h.reloads, []);
@@ -826,9 +874,9 @@ test("a later popup on a supported listing still points to the first story", asy
   });
   for (let attempt = 0; attempt < 8; attempt += 1) await flush();
   assert.equal(h.document.getElementById("popup-earned-heading").textContent,
-    "Open any story to save it");
-  assert.match(h.document.getElementById("popup-earned-lead").textContent,
-    /Tap a title on this page/);
+    "Open any story");
+  assert.equal(h.document.getElementById("popup-earned-lead").textContent,
+    "Trace saves it when it opens.");
   assert.equal(h.document.getElementById("popup-earned-record").hidden, true);
   assert.equal(h.document.getElementById("popup-earned-primary").hidden, true);
   assert.equal(h.permissionRequests.length, 0);
@@ -843,8 +891,11 @@ for (const [page, url, returnTo] of [
       sessionMode: "kernel",
       promiseRuntime: true,
       earnedPermissionOnboarding: true,
+      userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
       activeTab: { id: 7, url },
       popupState: { ok: true, authState: { state: "signed_out" } },
+      // The Trace app answered that it holds no account.
+      sessionSnapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "credential_absent" },
     });
     for (let attempt = 0; attempt < 8; attempt += 1) await flush();
     h.document.getElementById("popup-earned-primary").click();
@@ -1119,12 +1170,14 @@ test("a popup that confirms the first story makes the page note unnecessary", as
       },
       autoTrackEnabled: true,
     },
+    tabResponse: namedStory,
   });
   for (let attempt = 0; attempt < 8; attempt += 1) await flush();
   h.emitStorageChange({ traceArchiveReadiness: { newValue: { lastArchiveSeenAt: grantAt + 1_000 } } });
   for (let attempt = 0; attempt < 12; attempt += 1) await flush();
 
   assert.match(h.document.getElementById("popup-earned-kicker").textContent, /Library/);
+  assert.equal(h.document.getElementById("popup-earned-heading").textContent, "The Long Way Round");
   assert.equal(h.store.traceSavedNoteFirstStoryShownV1, true);
   assert.ok(h.tabMessages.some(({ message }) => message.type === "TRACE_SAVED_NOTE_DISMISS"));
 });
@@ -1739,43 +1792,585 @@ test("a reader who was connected before is still asked to reconnect", async () =
   assert.match(h.document.getElementById("popup-lead").textContent, /then press Reconnect\./);
 });
 
-for (const [label, finalResponse, finalHeading] of [
-  ["adopts the app account", { ok: true, snapshot: { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" } }, null],
-  ["confirms signed out", { ok: true, snapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "provider_unavailable" }, action: { kind: "unavailable" } }, "Finish setup in the Trace app"],
-]) {
-  test(`iOS: an unreadable app account keeps checking before it asks to sign in (${label})`, async () => {
-    const unreadable = {
-      ok: true,
-      snapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "provider_unavailable" },
-      action: { kind: "unavailable" },
-    };
-    const h = createPopupHarness({
-      grantedOrigins: [...FULL_EARNED_ORIGINS],
-      sessionMode: "kernel",
-      earnedPermissionOnboarding: true,
-      userAgent:
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
-      storageState: { traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 5000 } },
-      sessionSnapshotResponses: [unreadable, unreadable, finalResponse],
-    });
-    for (let attempt = 0; attempt < 8; attempt += 1) await flush();
-    const heading = () => h.document.getElementById("popup-earned-heading")?.textContent;
-    assert.notEqual(heading(), "Finish setup in the Trace app");
-    assert.notEqual(h.document.body.dataset.traceReaderView, "link");
-    h.runTimeouts();
-    for (let attempt = 0; attempt < 8; attempt += 1) await flush();
-    assert.notEqual(heading(), "Finish setup in the Trace app");
-    h.runTimeouts();
-    for (let attempt = 0; attempt < 8; attempt += 1) await flush();
-    assert.equal(h.messages.filter(({ type }) => type === "TRACE_SESSION_GET_SNAPSHOT").length, 3);
-    if (finalHeading) {
-      assert.equal(heading(), finalHeading);
-    } else {
-      assert.notEqual(heading(), "Finish setup in the Trace app");
-      assert.equal(h.messages.some(({ type }) => type === "TRACE_POPUP_GET_STATE"), true);
-    }
+const IPHONE_UA =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148";
+const CONNECTED_REPLY = { ok: true, snapshot: { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" } };
+// The Trace app's account could not be read: whether one exists is unknown.
+const UNREADABLE_REPLY = {
+  ok: true,
+  snapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "provider_unavailable" },
+  action: { kind: "unavailable" },
+};
+// The Trace app answered that it holds no account.
+const NO_ACCOUNT_REPLY = {
+  ok: true,
+  snapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "credential_absent" },
+  action: { kind: "unavailable" },
+};
+// Trace refused the account the app holds.
+const REFUSED_REPLY = {
+  ok: true,
+  snapshot: { state: "reconnect_required", accountId: null, canExecuteAuthenticated: false, reason: "credential_rejected" },
+  action: { kind: "completed", state: "reconnect_required" },
+};
+// The background is still reading or verifying the account.
+const STILL_READING_REPLY = {
+  ok: true,
+  snapshot: { state: "connecting", accountId: null, canExecuteAuthenticated: false, reason: "none" },
+};
+// A read that has not come back yet; see answerSnapshot().
+const SLOW_REPLY = { held: true };
+const CONNECTED_AUTH = { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" };
+const ACCOUNT_CONNECTED = { traceAccountProjectionRevisionV1: { newValue: "account-connected" } };
+
+function iosLinkedPopupHarness(sessionSnapshotResponses, options = {}) {
+  return createPopupHarness({
+    grantedOrigins: [...FULL_EARNED_ORIGINS],
+    sessionMode: "kernel",
+    earnedPermissionOnboarding: true,
+    userAgent: IPHONE_UA,
+    storageState: { traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 5000 } },
+    sessionSnapshotResponses,
+    ...options,
   });
 }
+
+async function settle(h, rounds = 8) {
+  for (let attempt = 0; attempt < rounds; attempt += 1) await flush();
+}
+
+/** Lets `ms` pass on the popup's clock, then lets its replies arrive. */
+async function pass(h, ms) {
+  h.advance(ms);
+  await settle(h, 12);
+}
+
+function snapshotRequests(h) {
+  return h.messages.filter(({ type }) => type === "TRACE_SESSION_GET_SNAPSHOT").length;
+}
+
+function earnedText(h) {
+  return h.document.getElementById("popup-earned-permission").textContent;
+}
+
+function earnedHeading(h) {
+  return h.document.getElementById("popup-earned-heading").textContent;
+}
+
+const CONNECTING = "Connecting to your account…";
+const COULD_NOT_CONNECT = "Trace couldn’t connect to your account";
+const NO_ACCOUNT = "Finish setup in the Trace app";
+
+/** The account is asked for at 0, 1, 3 and 7 seconds, and not otherwise. */
+async function assertBackOff(h) {
+  for (const [wait, requests] of [[999, 1], [1, 2], [1999, 2], [1, 3], [3999, 3]]) {
+    await pass(h, wait);
+    assert.equal(snapshotRequests(h), requests);
+    assert.equal(earnedHeading(h), CONNECTING);
+    assert.doesNotMatch(earnedText(h), /Create an account|Finish setup|couldn’t connect/);
+  }
+  await pass(h, 1);
+  assert.equal(snapshotRequests(h), 4);
+}
+
+test("iOS: an unreadable app account says Connecting, never Create an account, then says it couldn't connect", async () => {
+  const h = iosLinkedPopupHarness(Array(8).fill(UNREADABLE_REPLY));
+  await settle(h);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "connecting-account");
+  assert.equal(h.document.getElementById("popup-earned-pin").hidden, true, "nothing to tap while connecting");
+  await assertBackOff(h);
+
+  // Three follow-ups, further apart each time, then an honest stop.
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "account-unreachable");
+  assert.doesNotMatch(earnedText(h), /Create an account|Finish setup/);
+  const primary = h.document.getElementById("popup-earned-primary");
+  assert.equal(primary.textContent, "Open Trace");
+  assert.equal(primary.dataset.earnedAction, "open_connect");
+  assert.equal(primary.dataset.emphasis, "primary");
+  const secondary = h.document.getElementById("popup-earned-secondary");
+  assert.equal(secondary.textContent, "Try again");
+  assert.equal(secondary.dataset.emphasis, "tertiary");
+
+  await pass(h, 10 * 60_000);
+  assert.equal(snapshotRequests(h), 4, "the wait is bounded: nothing keeps asking");
+});
+
+test("iOS: the wait for the app's account backs off, re-reads no-account once, and is capped", () => {
+  const h = createPopupHarness();
+  assert.deepEqual([...h.evaluate("APP_ACCOUNT_RETRY_DELAYS_MS")], [1000, 2000, 4000]);
+  assert.equal(h.evaluate("APP_ACCOUNT_RECHECK_MS"), 1200);
+  assert.equal(h.evaluate("APP_ACCOUNT_WAIT_LIMIT_MS"), 10000);
+});
+
+test("iOS: an account that connects during the wait opens the reader view", async () => {
+  const h = iosLinkedPopupHarness([UNREADABLE_REPLY, UNREADABLE_REPLY, CONNECTED_REPLY]);
+  await settle(h);
+  assert.equal(earnedHeading(h), CONNECTING);
+  await pass(h, 1000);
+  await pass(h, 2000);
+  assert.equal(snapshotRequests(h), 3);
+  assert.doesNotMatch(earnedText(h), /Create an account|Finish setup|couldn’t connect/);
+  assert.equal(h.messages.some(({ type }) => type === "TRACE_POPUP_GET_STATE"), true);
+  assert.notEqual(h.document.body.dataset.traceReaderView, "link");
+});
+
+test("iOS: Create an account or sign in is shown at once when the app has no account, and re-read once", async () => {
+  const h = iosLinkedPopupHarness(Array(8).fill(NO_ACCOUNT_REPLY));
+  await settle(h);
+  assert.equal(snapshotRequests(h), 1);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P6");
+  assert.equal(earnedHeading(h), NO_ACCOUNT);
+  assert.match(h.document.getElementById("popup-earned-lead").textContent, /^Create an account or sign in, then come back to this story\./);
+  assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Open Trace");
+  assert.equal(h.document.getElementById("popup-earned-secondary").hidden, true);
+
+  // One quiet look a moment later, for a reader who has only just signed up.
+  await pass(h, 1199);
+  assert.equal(snapshotRequests(h), 1);
+  await pass(h, 1);
+  assert.equal(snapshotRequests(h), 2);
+  assert.equal(earnedHeading(h), NO_ACCOUNT);
+  await pass(h, 10 * 60_000);
+  assert.equal(snapshotRequests(h), 2, "a definite answer is not polled");
+});
+
+test("iOS: a reader who has just signed up is connected by the quiet second look", async () => {
+  const h = iosLinkedPopupHarness([NO_ACCOUNT_REPLY, CONNECTED_REPLY]);
+  await settle(h);
+  assert.equal(earnedHeading(h), NO_ACCOUNT);
+  await pass(h, 1200);
+  assert.equal(snapshotRequests(h), 2);
+  assert.notEqual(h.document.body.dataset.traceReaderView, "link");
+  assert.equal(h.document.body.dataset.tracePopupState, "connected");
+  assert.equal(h.messages.some(({ type }) => type === "TRACE_POPUP_GET_STATE"), true);
+});
+
+test("iOS: an account Trace refused is not described as having no account", async () => {
+  const h = iosLinkedPopupHarness(Array(8).fill(REFUSED_REPLY));
+  await settle(h);
+  assert.equal(snapshotRequests(h), 1);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+  assert.doesNotMatch(earnedText(h), /Create an account|Finish setup/);
+  assert.equal(h.document.getElementById("popup-earned-primary").dataset.earnedAction, "open_connect");
+  await pass(h, 10 * 60_000);
+  assert.equal(snapshotRequests(h), 1);
+});
+
+test("iOS: Try again makes one more bounded attempt to connect", async () => {
+  const h = iosLinkedPopupHarness([...Array(6).fill(UNREADABLE_REPLY), CONNECTED_REPLY]);
+  await settle(h);
+  await pass(h, 7000);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+  assert.equal(snapshotRequests(h), 4);
+
+  h.document.getElementById("popup-earned-secondary").click();
+  await settle(h);
+  assert.equal(earnedHeading(h), CONNECTING);
+  assert.equal(snapshotRequests(h), 5);
+  await pass(h, 999);
+  assert.equal(snapshotRequests(h), 5, "the second round backs off like the first");
+  await pass(h, 1);
+  assert.equal(snapshotRequests(h), 6);
+  await pass(h, 2000);
+  assert.equal(snapshotRequests(h), 7);
+  assert.doesNotMatch(earnedText(h), /Create an account/);
+  assert.equal(h.document.body.dataset.tracePopupState, "connected");
+});
+
+for (const [name, replies, lead, heading] of [
+  ["Connecting", [UNREADABLE_REPLY], 0, CONNECTING],
+  ["no account", [NO_ACCOUNT_REPLY, NO_ACCOUNT_REPLY], 5000, NO_ACCOUNT],
+  ["couldn't connect", Array(4).fill(UNREADABLE_REPLY), 7000, COULD_NOT_CONNECT],
+  ["a refused account", [REFUSED_REPLY], 5000, COULD_NOT_CONNECT],
+]) {
+  test(`iOS: a popup showing ${name} moves on by itself when the background says an account connected`, async () => {
+    const h = iosLinkedPopupHarness([...replies, CONNECTED_REPLY]);
+    await settle(h);
+    await pass(h, lead);
+    assert.equal(earnedHeading(h), heading);
+    assert.equal(snapshotRequests(h), replies.length);
+
+    h.emitStorageChange(ACCOUNT_CONNECTED);
+    await settle(h);
+    assert.equal(snapshotRequests(h), replies.length + 1, "asked at once, with no timer run");
+    assert.notEqual(h.document.body.dataset.traceReaderView, "link", "the account view has gone");
+    assert.equal(h.document.body.dataset.tracePopupState, "connected");
+    assert.equal(h.messages.some(({ type }) => type === "TRACE_POPUP_GET_STATE"), true);
+  });
+}
+
+test("iOS: a published change that brings no account leaves a settled view alone", async () => {
+  const h = iosLinkedPopupHarness(Array(12).fill(UNREADABLE_REPLY));
+  await settle(h);
+  await pass(h, 7000);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+  for (let change = 1; change <= 3; change += 1) {
+    h.emitStorageChange({ traceAccountProjectionRevisionV1: { newValue: `r${change}` } });
+    await settle(h);
+    assert.equal(snapshotRequests(h), 4 + change, "one question per published change, no more");
+    assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+  }
+  await pass(h, 10 * 60_000);
+  assert.equal(snapshotRequests(h), 7, "and no timer was started by them");
+
+  const none = iosLinkedPopupHarness([NO_ACCOUNT_REPLY, NO_ACCOUNT_REPLY, UNREADABLE_REPLY]);
+  await settle(none);
+  await pass(none, 1200);
+  none.emitStorageChange(ACCOUNT_CONNECTED);
+  await settle(none);
+  assert.equal(earnedHeading(none), NO_ACCOUNT, "a failed read does not replace a definite answer");
+});
+
+test("an iPad that reports a desktop user agent keeps the general view's own copy, and its wait is bounded", async () => {
+  const h = iosLinkedPopupHarness(Array(12).fill(UNREADABLE_REPLY), {
+    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/17.0 Safari/605.1.15",
+  });
+  await settle(h);
+  const status = () => h.document.getElementById("popup-status").textContent;
+  for (const [wait, requests] of [[0, 1], [1000, 2], [2000, 3]]) {
+    await pass(h, wait);
+    assert.equal(snapshotRequests(h), requests);
+    assert.equal(status(), "Checking Trace…");
+  }
+  await pass(h, 4000);
+  assert.equal(snapshotRequests(h), 4);
+  assert.equal(status(), "Connect Trace");
+  assert.notEqual(h.document.body.dataset.traceReaderView, "link");
+  await pass(h, 10 * 60_000);
+  assert.equal(snapshotRequests(h), 4);
+});
+
+test("iOS: publishes that bring no account while it says Connecting do not use up the wait", async () => {
+  const h = iosLinkedPopupHarness(Array(20).fill(UNREADABLE_REPLY));
+  await settle(h);
+  await pass(h, 500);
+  for (let publish = 1; publish <= 5; publish += 1) {
+    h.emitStorageChange({ traceAccountProjectionRevisionV1: { newValue: `r${publish}` } });
+    await settle(h);
+    assert.equal(snapshotRequests(h), 1 + publish, "each publish is one question");
+    assert.equal(earnedHeading(h), CONNECTING, "and none of them is a reason to give up");
+  }
+  // The wait's own next question comes a second after the last answer, and
+  // the ten-second cap still ends it.
+  await pass(h, 999);
+  assert.equal(snapshotRequests(h), 6);
+  await pass(h, 1);
+  assert.equal(snapshotRequests(h), 7);
+  assert.equal(earnedHeading(h), CONNECTING);
+  await pass(h, 8500);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+});
+
+test("iOS: only one question about the account is out at a time", async () => {
+  // The second read is slow. Nothing that happens meanwhile sends another.
+  const h = iosLinkedPopupHarness([UNREADABLE_REPLY, SLOW_REPLY, CONNECTED_REPLY]);
+  await settle(h);
+  await pass(h, 1000);
+  assert.equal(snapshotRequests(h), 2);
+  for (let publish = 1; publish <= 3; publish += 1) {
+    h.emitStorageChange({ traceAccountProjectionRevisionV1: { newValue: `r${publish}` } });
+    await settle(h);
+  }
+  await pass(h, 5000);
+  assert.equal(snapshotRequests(h), 2, "the read that is out is waited for");
+  h.answerSnapshot(CONNECTED_REPLY);
+  await settle(h);
+  assert.equal(h.document.body.dataset.tracePopupState, "connected");
+});
+
+test("iOS: Try again gets a fresh ten seconds, then gives way to buttons again", async () => {
+  const h = iosLinkedPopupHarness([...Array(4).fill(UNREADABLE_REPLY), UNREADABLE_REPLY, SLOW_REPLY]);
+  await settle(h);
+  await pass(h, 7000);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+
+  // The second round's follow-up read never comes back.
+  h.document.getElementById("popup-earned-secondary").click();
+  await settle(h);
+  assert.equal(earnedHeading(h), CONNECTING);
+  await pass(h, 1000);
+  assert.equal(snapshotRequests(h), 6);
+  await pass(h, 8999);
+  assert.equal(earnedHeading(h), CONNECTING);
+  await pass(h, 1);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT, "ten seconds after Try again, not never");
+  assert.equal(h.document.getElementById("popup-earned-secondary").textContent, "Try again");
+});
+
+test("iOS: Connecting gives way to buttons after ten seconds however slow the reads are", async () => {
+  // The first read fails; the second never comes back.
+  const h = iosLinkedPopupHarness([UNREADABLE_REPLY, SLOW_REPLY, CONNECTED_REPLY]);
+  await settle(h);
+  await pass(h, 1000);
+  assert.equal(snapshotRequests(h), 2);
+  await pass(h, 8999);
+  assert.equal(earnedHeading(h), CONNECTING);
+  await pass(h, 1);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+  assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Open Trace");
+  assert.equal(h.document.getElementById("popup-earned-secondary").textContent, "Try again");
+  assert.equal(snapshotRequests(h), 2, "it does not ask again on top of a read still out");
+
+  // A late answer is still taken: failure changes nothing, success moves on.
+  h.answerSnapshot(UNREADABLE_REPLY);
+  await settle(h);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+  await pass(h, 60_000);
+  assert.equal(snapshotRequests(h), 2);
+
+  const late = iosLinkedPopupHarness([UNREADABLE_REPLY, SLOW_REPLY]);
+  await settle(late);
+  await pass(late, 10_000);
+  assert.equal(earnedHeading(late), COULD_NOT_CONNECT);
+  late.answerSnapshot(CONNECTED_REPLY);
+  await settle(late);
+  assert.equal(late.document.body.dataset.tracePopupState, "connected");
+  assert.notEqual(late.document.body.dataset.traceReaderView, "link");
+});
+
+function setupPopupOnStory(options = {}) {
+  const grantAt = Date.now() - 5_000;
+  const popupState = {
+    ok: true,
+    authState: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "none" },
+    activeTab: { kind: "supported_story", site: "ao3", canImport: true },
+    activeWork: null,
+    autoTrackEnabled: true,
+  };
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    userAgent: IPHONE_UA,
+    grantedOrigins: [...FULL_EARNED_ORIGINS],
+    storageState: {
+      traceEarnedPermissionOnboardingV1: { grantAt, registrationVersion: 3, promptResult: "granted" },
+      traceArchiveReadiness: { lastArchiveSeenAt: grantAt - 1_000 },
+    },
+    popupState,
+    tabResponse: namedStory,
+    ...options,
+  });
+  let runs = 0;
+  // The page reports in: the background writes this for a page run, and again
+  // for a save or a details request that failed.
+  const pageRan = () => {
+    runs += 1;
+    h.emitStorageChange({ traceArchiveReadiness: { newValue: { lastArchiveSeenAt: grantAt + runs * 1_000 } } });
+  };
+  return { h, popupState, pageRan };
+}
+
+/** A setup popup on a story whose page has reported in once. */
+async function setupPopupWaitingOnAccount(sessionSnapshotResponses, options = {}) {
+  const setup = setupPopupOnStory({ sessionSnapshotResponses, ...options });
+  await settle(setup.h);
+  assert.equal(earnedHeading(setup.h), "Saving your story…");
+  setup.pageRan();
+  await settle(setup.h, 12);
+  return setup;
+}
+
+test("setup: a signed-in reader whose account is still arriving is never told to create one", async () => {
+  // The extension does not hold the app's account yet when access is allowed.
+  const { h, popupState } = await setupPopupWaitingOnAccount([UNREADABLE_REPLY, CONNECTED_REPLY]);
+  assert.equal(earnedHeading(h), CONNECTING);
+  assert.doesNotMatch(earnedText(h), /Create an account|Finish setup/);
+  assert.equal(snapshotRequests(h), 1, "the popup asks the background to read the app's account");
+
+  // The account arrives and the page saves the story.
+  popupState.authState = CONNECTED_AUTH;
+  h.emitStorageChange(ACCOUNT_CONNECTED);
+  await settle(h, 12);
+  assert.equal(snapshotRequests(h), 2);
+  assert.equal(earnedHeading(h), "Saving your story…");
+
+  popupState.activeWork = { workKey: "ao3:123", status: "saved", entry: { canonicalReaderStatus: "SAVED" }, syncVersion: "v1" };
+  h.emitStorageChange({ traceAccountProjectionRevisionV1: { newValue: "r3" } });
+  await settle(h, 12);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P2");
+  assert.equal(h.document.getElementById("popup-earned-kicker-text").textContent, "Saved to your Library");
+  assert.equal(earnedHeading(h), "The Long Way Round");
+});
+
+test("setup: Create an account or sign in appears only when the app has no account", async () => {
+  const { h } = await setupPopupWaitingOnAccount([NO_ACCOUNT_REPLY, NO_ACCOUNT_REPLY]);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P6");
+  assert.equal(earnedHeading(h), NO_ACCOUNT);
+  assert.match(h.document.getElementById("popup-earned-lead").textContent, /Create an account or sign in/);
+});
+
+test("setup: no account, then the account appears: the popup carries on with the story", async () => {
+  const { h, popupState } = await setupPopupWaitingOnAccount([NO_ACCOUNT_REPLY, CONNECTED_REPLY]);
+  assert.equal(earnedHeading(h), NO_ACCOUNT);
+  popupState.authState = CONNECTED_AUTH;
+  await pass(h, 1200);
+  assert.equal(snapshotRequests(h), 2);
+  assert.equal(earnedHeading(h), "Saving your story…");
+
+  // The same when it is the background that says so, after the quiet look.
+  const later = await setupPopupWaitingOnAccount([NO_ACCOUNT_REPLY, NO_ACCOUNT_REPLY, CONNECTED_REPLY]);
+  await pass(later.h, 5000);
+  assert.equal(earnedHeading(later.h), NO_ACCOUNT);
+  later.popupState.authState = CONNECTED_AUTH;
+  later.h.emitStorageChange(ACCOUNT_CONNECTED);
+  await settle(later.h, 12);
+  assert.equal(earnedHeading(later.h), "Saving your story…");
+});
+
+test("setup: an account that never arrives ends in an honest stop with Open Trace", async () => {
+  const { h } = await setupPopupWaitingOnAccount(Array(8).fill(UNREADABLE_REPLY));
+  await assertBackOff(h);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+  assert.match(h.document.getElementById("popup-earned-lead").textContent, /^Your Library is safe\. Open Trace and check you’re signed in, then come back to this story\.$/);
+  assert.doesNotMatch(earnedText(h), /Create an account|Finish setup|Still confirming/);
+  assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Open Trace");
+  await pass(h, 10 * 60_000);
+  assert.equal(snapshotRequests(h), 4);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+});
+
+test("setup: page reports arriving while it says Connecting do not use up the wait", async () => {
+  // A story load makes the page report in several times within a second or
+  // two. Each one re-enters the setup flow; none may ask again or give up.
+  const { h, pageRan } = await setupPopupWaitingOnAccount(Array(8).fill(UNREADABLE_REPLY));
+  assert.equal(earnedHeading(h), CONNECTING);
+  const stateReads = () => h.messages.filter(({ type }) => type === "TRACE_POPUP_GET_STATE").length;
+  const stateReadsBefore = stateReads();
+  for (const wait of [200, 300, 400]) {
+    await pass(h, wait);
+    pageRan();
+    await settle(h, 12);
+    assert.equal(snapshotRequests(h), 1, "a page report is not a reason to ask again");
+    assert.equal(earnedHeading(h), CONNECTING);
+  }
+  pageRan();
+  await settle(h, 12);
+  assert.equal(snapshotRequests(h), 1);
+  assert.equal(stateReads(), stateReadsBefore, "nor to start watching the story again under the wait");
+
+  // 0.9 s have passed. The 1, 2, 4 s back-off still holds from the start.
+  await pass(h, 99);
+  assert.equal(snapshotRequests(h), 1);
+  await pass(h, 1);
+  assert.equal(snapshotRequests(h), 2);
+  pageRan();
+  await settle(h, 12);
+  await pass(h, 1999);
+  assert.equal(snapshotRequests(h), 2);
+  await pass(h, 1);
+  assert.equal(snapshotRequests(h), 3);
+  assert.equal(earnedHeading(h), CONNECTING);
+  pageRan();
+  await settle(h, 12);
+  await pass(h, 4000);
+  assert.equal(snapshotRequests(h), 4);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+  pageRan();
+  await settle(h, 12);
+  assert.equal(snapshotRequests(h), 4);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT, "and a later report does not restart it");
+});
+
+test("setup: anything else that needs the account joins the wait under way", async () => {
+  const { h, popupState } = await setupPopupWaitingOnAccount([UNREADABLE_REPLY, UNREADABLE_REPLY, CONNECTED_REPLY]);
+  assert.equal(earnedHeading(h), CONNECTING);
+  assert.equal(h.evaluate("accountResolutions"), 1);
+
+  // The story asks for its account again, three times, half a second in.
+  await pass(h, 500);
+  for (let again = 0; again < 3; again += 1) {
+    h.evaluate("resolveAccountForStory({ ok: true, kind: 'story', site: 'AO3' }, () => {})");
+  }
+  // And a reply meant for the general view turns up as well.
+  h.evaluate(`waitForAppAccount({ kind: "story" }, { connected() {} }, ${JSON.stringify(UNREADABLE_REPLY)})`);
+  await settle(h, 12);
+  assert.equal(snapshotRequests(h), 1, "none of them asks");
+  assert.equal(h.evaluate("accountResolutions"), 1, "or spends the popup's budget");
+  assert.equal(earnedHeading(h), CONNECTING);
+
+  // The one wait keeps its schedule: the next question is still at one second.
+  await pass(h, 499);
+  assert.equal(snapshotRequests(h), 1);
+  await pass(h, 1);
+  assert.equal(snapshotRequests(h), 2);
+  popupState.authState = CONNECTED_AUTH;
+  await pass(h, 2000);
+  assert.equal(snapshotRequests(h), 3);
+  assert.equal(earnedHeading(h), "Saving your story…", "and it carries on with the story it began for");
+});
+
+test("setup: access that lapses during the wait hands the popup to the access prompt, for good", async () => {
+  const granted = [...FULL_EARNED_ORIGINS];
+  const { h, pageRan } = await setupPopupWaitingOnAccount(
+    [UNREADABLE_REPLY, UNREADABLE_REPLY, CONNECTED_REPLY, CONNECTED_REPLY],
+    { grantedOrigins: granted },
+  );
+  assert.equal(earnedHeading(h), CONNECTING);
+
+  // Safari stops allowing the story sites, and the page reports in again.
+  granted.splice(0, granted.length);
+  pageRan();
+  await settle(h, 12);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P3-lapse");
+  assert.equal(earnedHeading(h), "Next, tap Always Allow.");
+
+  // The account wait is over: neither its timers nor an account connecting
+  // may write over the prompt.
+  for (const wait of [1000, 2000, 4000, 10_000]) await pass(h, wait);
+  h.emitStorageChange(ACCOUNT_CONNECTED);
+  await settle(h, 12);
+  assert.equal(snapshotRequests(h), 1);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P3-lapse");
+  assert.equal(earnedHeading(h), "Next, tap Always Allow.");
+  assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Allow story sites");
+});
+
+test("setup: an account that connects on the first re-ask is not lost to page reports", async () => {
+  const { h, popupState, pageRan } = await setupPopupWaitingOnAccount([UNREADABLE_REPLY, CONNECTED_REPLY]);
+  for (let report = 0; report < 3; report += 1) {
+    pageRan();
+    await settle(h, 12);
+  }
+  assert.equal(earnedHeading(h), CONNECTING);
+  popupState.authState = CONNECTED_AUTH;
+  await pass(h, 1000);
+  assert.equal(snapshotRequests(h), 2);
+  assert.equal(earnedHeading(h), "Saving your story…");
+});
+
+test("setup: a background that does not answer is not read as having no account", async () => {
+  const { h } = await setupPopupWaitingOnAccount([]);
+  assert.equal(snapshotRequests(h), 1);
+  assert.equal(earnedHeading(h), CONNECTING);
+  assert.doesNotMatch(earnedText(h), /Create an account|Finish setup/);
+  for (const wait of [1000, 2000, 4000]) await pass(h, wait);
+  assert.equal(snapshotRequests(h), 4);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+});
+
+test("setup: a background still reading the account is asked again, not given up on", async () => {
+  const { h, popupState } = await setupPopupWaitingOnAccount([STILL_READING_REPLY, STILL_READING_REPLY, CONNECTED_REPLY]);
+  assert.equal(earnedHeading(h), CONNECTING);
+  await pass(h, 1000);
+  assert.equal(snapshotRequests(h), 2);
+  assert.equal(earnedHeading(h), CONNECTING);
+  popupState.authState = CONNECTED_AUTH;
+  await pass(h, 2000);
+  assert.equal(snapshotRequests(h), 3);
+  assert.equal(earnedHeading(h), "Saving your story…");
+});
+
+test("setup: a story that keeps reporting no account after it connects stops after two rounds", async () => {
+  // The snapshot says connected while the story's own state never agrees.
+  const { h } = await setupPopupWaitingOnAccount(Array(6).fill(CONNECTED_REPLY));
+  await settle(h, 24);
+  assert.equal(snapshotRequests(h), 2, "it does not go round for ever");
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+  await pass(h, 10 * 60_000);
+  assert.equal(snapshotRequests(h), 2);
+});
 
 test("kernel iOS account-response failures are not mislabeled as an app sign-in problem", async () => {
   const h = createPopupHarness({
@@ -3275,4 +3870,304 @@ test("the ordinary popup keeps its Import control and labels", async () => {
   assert.equal(isDisplayed(h, button), true);
   button.click();
   assert.deepEqual(importTriggers(h), ONE_IMPORT);
+});
+
+test("the still-waiting state says to keep reading and when to reload, not that there is nothing to redo", async () => {
+  const { h, popupState, pageRan } = setupPopupOnStory({ sessionSnapshotResponses: [] });
+  popupState.authState = { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" };
+  await settle(h);
+  pageRan();
+  await settle(h, 12);
+  assert.equal(h.document.getElementById("popup-earned-heading").textContent, "Saving your story…");
+
+  // The story is still not confirmed when the popup's patience runs out.
+  h.runTimeouts();
+  await settle(h, 12);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P5");
+  assert.equal(h.document.getElementById("popup-earned-heading").textContent, "Still confirming your story");
+  assert.equal(h.document.getElementById("popup-earned-lead").textContent,
+    "Keep reading; it’ll appear in Trace. If it hasn’t after a minute, reload this page.");
+  h.runTimeouts();
+  await settle(h);
+  const announced = h.document.getElementById("popup-earned-result").textContent;
+  assert.match(announced, /If it hasn’t after a minute, reload this page\./);
+  assert.doesNotMatch(earnedText(h) + announced, /Nothing to redo/);
+  assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Keep reading");
+  assert.equal(h.document.getElementById("popup-earned-secondary").textContent, "Check again");
+});
+
+for (const page of [
+  { name: "FanFiction.net", url: "https://m.fanfiction.net/s/4821/1/The-Long-Way-Round", site: "ffn", byline: "quillfeather · FanFiction.net" },
+  { name: "AO3", url: "https://archiveofourown.org/works/123", site: "ao3", byline: "quillfeather · AO3" },
+]) {
+  test(`the popup that finishes setup confirms a first save that already landed on ${page.name}`, async () => {
+    // Safari put Trace on the open story when access was allowed, and the page
+    // saved it before the popup first looked.
+    const h = createPopupHarness({
+      sessionMode: "kernel",
+      promiseRuntime: true,
+      earnedPermissionOnboarding: true,
+      userAgent: IPHONE_UA,
+      activeTab: { id: 7, url: page.url },
+      grantedOrigins: [...FULL_EARNED_ORIGINS],
+      storageState: { traceArchiveReadiness: { lastArchiveSeenAt: Date.now() - 500 } },
+      sessionSnapshot: { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" },
+      popupState: {
+        ok: true,
+        authState: { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" },
+        firstSaveSeen: true,
+        libraryCount: 1,
+        libraryLimit: 100,
+        activeTab: { kind: "supported_story", site: page.site, canImport: true },
+        activeWork: { workKey: "story", status: "saved", entry: { canonicalReaderStatus: "SAVED" }, syncVersion: "v1" },
+        autoTrackEnabled: true,
+        nativeImport: true,
+      },
+      tabResponse: (message) => message.type === "TRACE_STORY_IDENTITY_GET"
+        ? { ok: true, title: "The Long Way Round", author: "quillfeather", site: page.site }
+        : undefined,
+    });
+    await settle(h, 16);
+
+    assert.ok(h.store.traceEarnedPermissionOnboardingV1.completedAt > 0, "setup finished in this popup");
+    assert.equal(h.document.body.dataset.tracePopupStateCode, "P2");
+    assert.equal(h.document.getElementById("popup-earned-kicker-text").textContent, "Saved to your Library");
+    assert.equal(h.document.getElementById("popup-earned-heading").textContent, "The Long Way Round");
+    assert.equal(h.document.getElementById("popup-earned-record-byline").textContent, page.byline);
+    assert.match(h.document.getElementById("popup-earned-lead").textContent, /Your chapter fills in as you read\./);
+    assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Keep reading");
+    assert.equal(isDisplayed(h, h.document.getElementById("popup-import")), false, "the confirmation is one thing");
+    assert.equal(h.store.traceSavedNoteFirstStoryShownV1, true, "the page note need not repeat it");
+    assert.ok(h.tabMessages.some(({ message }) => message.type === "TRACE_SAVED_NOTE_DISMISS"));
+  });
+}
+
+test("a later popup on a saved story still opens on the everyday view", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    userAgent: IPHONE_UA,
+    activeTab: { id: 7, url: "https://m.fanfiction.net/s/4821/1/The-Long-Way-Round" },
+    grantedOrigins: [...FULL_EARNED_ORIGINS],
+    storageState: {
+      traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 60_000 },
+      traceArchiveReadiness: { lastArchiveSeenAt: Date.now() - 500 },
+    },
+    sessionSnapshot: { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" },
+    popupState: {
+      ok: true,
+      authState: { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" },
+      firstSaveSeen: true,
+      activeTab: { kind: "supported_story", site: "ffn", canImport: true },
+      activeWork: { workKey: "ffn:4821", status: "saved", entry: { canonicalReaderStatus: "SAVED" }, syncVersion: "v1" },
+      autoTrackEnabled: true,
+    },
+    tabResponse: namedStory,
+  });
+  await settle(h, 16);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P11");
+  assert.equal(h.document.getElementById("popup-earned-status-control").hidden, false);
+});
+
+test("a saved story the page has not named yet is confirmed without a made-up title", async () => {
+  // After the reload that follows "Allow", the page can save the story before
+  // it can answer with its title.
+  let named = false;
+  const { h, popupState, pageRan } = setupPopupOnStory({
+    sessionSnapshotResponses: [],
+    tabResponse: (message) => {
+      if (message.type !== "TRACE_STORY_IDENTITY_GET") return undefined;
+      return named ? { ok: true, title: "The Long Way Round", author: "quillfeather", site: "ao3" } : { ok: false };
+    },
+  });
+  popupState.authState = { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" };
+  await settle(h);
+  pageRan();
+  await settle(h, 12);
+  popupState.activeWork = { workKey: "ao3:123", status: "saved", entry: { canonicalReaderStatus: "SAVED" }, syncVersion: "v1" };
+  h.emitStorageChange({ traceAccountProjectionRevisionV1: { newValue: "r2" } });
+  await settle(h, 12);
+
+  const heading = h.document.getElementById("popup-earned-heading");
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P2");
+  assert.equal(heading.textContent, "Saved to your Library");
+  assert.equal(h.document.getElementById("popup-earned-kicker").hidden, true, "the confirmation is not said twice");
+  assert.equal(h.document.getElementById("popup-earned-record-byline").textContent, "AO3");
+  assert.equal(h.document.getElementById("popup-earned-record-label").textContent, "Saved");
+  h.runTimeouts();
+  await settle(h, 12);
+  const announced = h.document.getElementById("popup-earned-result").textContent;
+  assert.equal(announced, "Saved to your Library. Your chapter fills in as you read.");
+  assert.doesNotMatch(earnedText(h) + announced, /Your story by|the author/);
+  assert.notEqual(heading.textContent, "Your story");
+
+  // The page can name the story now; the popup fills it in.
+  named = true;
+  h.runTimeouts();
+  await settle(h, 12);
+  assert.equal(heading.textContent, "The Long Way Round");
+  assert.equal(h.document.getElementById("popup-earned-kicker-text").textContent, "Saved to your Library");
+  assert.equal(h.document.getElementById("popup-earned-record-byline").textContent, "quillfeather · AO3");
+  h.runTimeouts();
+  await settle(h);
+  assert.equal(h.document.getElementById("popup-earned-result").textContent,
+    "Saved to your Library: The Long Way Round by quillfeather. Your chapter fills in as you read.");
+});
+
+test("a title that never arrives leaves the confirmation as it is and stops asking", async () => {
+  const { h, popupState, pageRan } = setupPopupOnStory({
+    sessionSnapshotResponses: [],
+    tabResponse: (message) => (message.type === "TRACE_STORY_IDENTITY_GET" ? { ok: false } : undefined),
+  });
+  popupState.authState = { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" };
+  popupState.activeWork = { workKey: "ao3:123", status: "saved", entry: { canonicalReaderStatus: "SAVED" }, syncVersion: "v1" };
+  await settle(h);
+  pageRan();
+  await settle(h, 12);
+  const identityAsks = () => h.tabMessages.filter(({ message }) => message.type === "TRACE_STORY_IDENTITY_GET").length;
+  for (let round = 0; round < 6; round += 1) {
+    h.runTimeouts();
+    await settle(h, 12);
+  }
+  const asked = identityAsks();
+  h.runTimeouts();
+  await settle(h, 12);
+  assert.equal(identityAsks(), asked, "the lookup is bounded");
+  assert.match(h.document.getElementById("popup-earned-heading").textContent, /in your Library$/);
+  assert.doesNotMatch(earnedText(h), /Your story by|the author/);
+});
+
+test("the iPhone popup reports story-site access once each time it opens", async () => {
+  const h = iosLinkedPopupHarness([CONNECTED_REPLY]);
+  await settle(h);
+  assert.equal(
+    JSON.stringify(h.messages.filter(({ type }) => type === "TRACE_ARCHIVE_ACCESS_REPORT")),
+    JSON.stringify([{ type: "TRACE_ARCHIVE_ACCESS_REPORT" }]),
+  );
+  h.emitStorageChange({ traceArchiveReadiness: { newValue: { lastArchiveSeenAt: Date.now() } } });
+  await settle(h);
+  assert.equal(h.messages.filter(({ type }) => type === "TRACE_ARCHIVE_ACCESS_REPORT").length, 1);
+
+  // Also when access has ended, which is when the reading matters most.
+  const lapsed = iosLinkedPopupHarness([CONNECTED_REPLY], { permissionContainsResult: false });
+  await settle(lapsed);
+  assert.equal(lapsed.document.body.dataset.tracePopupStateCode, "P3-lapse");
+  assert.equal(lapsed.messages.filter(({ type }) => type === "TRACE_ARCHIVE_ACCESS_REPORT").length, 1);
+
+  const desktop = createPopupHarness({ sessionMode: "kernel" });
+  await settle(desktop);
+  assert.equal(desktop.messages.some(({ type }) => type === "TRACE_ARCHIVE_ACCESS_REPORT"), false);
+});
+
+test("a site's home page keeps the open-any-story prompt after access is allowed there", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    userAgent: IPHONE_UA,
+    activeTab: { id: 7, url: "https://archiveofourown.org/" },
+    sessionSnapshot: { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" },
+    popupState: {
+      ok: true,
+      authState: { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" },
+      firstSaveSeen: false,
+      activeTab: { kind: "supported_archive", site: "ao3", canImport: true },
+      activeWork: null,
+      autoTrackEnabled: true,
+    },
+  });
+  await settle(h);
+  h.document.getElementById("popup-earned-primary").click();
+  await settle(h, 12);
+  assert.equal(h.document.getElementById("popup-earned-heading").textContent, "Open any story");
+
+  // Safari puts Trace on the open page, which reports in. There is no story
+  // here to wait for, however long the popup stays open.
+  h.emitStorageChange({ traceArchiveReadiness: { newValue: { lastArchiveSeenAt: Date.now() + 1_000 } } });
+  await settle(h, 12);
+  for (let round = 0; round < 3; round += 1) {
+    h.runTimeouts();
+    await settle(h, 12);
+  }
+  assert.equal(h.document.getElementById("popup-earned-heading").textContent, "Open any story");
+  assert.equal(h.document.getElementById("popup-earned-lead").textContent, "Trace saves it when it opens.");
+  assert.doesNotMatch(earnedText(h), /Still confirming your story|Saving your story/);
+});
+
+test("the popup that finishes setup on a story that is not saved yet says Saving, not Saved", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    userAgent: IPHONE_UA,
+    activeTab: { id: 7, url: "https://archiveofourown.org/works/123" },
+    grantedOrigins: [...FULL_EARNED_ORIGINS],
+    storageState: { traceArchiveReadiness: { lastArchiveSeenAt: Date.now() - 500 } },
+    sessionSnapshot: CONNECTED_AUTH,
+    popupState: {
+      ok: true,
+      authState: CONNECTED_AUTH,
+      firstSaveSeen: false,
+      activeTab: { kind: "supported_story", site: "ao3", canImport: true },
+      activeWork: null,
+      autoTrackEnabled: true,
+    },
+    tabResponse: namedStory,
+  });
+  await settle(h, 16);
+  assert.ok(h.store.traceEarnedPermissionOnboardingV1.completedAt > 0, "setup finished in this popup");
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P1");
+  assert.equal(earnedHeading(h), "Saving your story…");
+  assert.doesNotMatch(earnedText(h), /Saved to your Library/);
+  assert.equal(h.store.traceSavedNoteFirstStoryShownV1, undefined, "nothing was confirmed");
+});
+
+test("a popup that finishes setup on a list page does not confirm a save", async () => {
+  // Setup completes on a list. Only a popup that finished it on a story may
+  // open on that story's confirmation.
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    userAgent: IPHONE_UA,
+    activeTab: { id: 7, url: "https://archiveofourown.org/works" },
+    grantedOrigins: [...FULL_EARNED_ORIGINS],
+    storageState: { traceArchiveReadiness: { lastArchiveSeenAt: Date.now() - 500 } },
+    sessionSnapshot: CONNECTED_AUTH,
+    popupState: {
+      ok: true,
+      authState: CONNECTED_AUTH,
+      firstSaveSeen: true,
+      activeTab: { kind: "supported_story", site: "ao3", canImport: true },
+      activeWork: { workKey: "ao3:123", status: "saved", entry: { canonicalReaderStatus: "SAVED" }, syncVersion: "v1" },
+      autoTrackEnabled: true,
+    },
+    tabResponse: namedStory,
+  });
+  await settle(h, 16);
+  assert.ok(h.store.traceEarnedPermissionOnboardingV1.completedAt > 0, "setup finished in this popup");
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P11");
+  assert.equal(h.document.getElementById("popup-earned-kicker").hidden, true);
+});
+
+test("a page that answers with a blank title is asked a few more times, not for ever", async () => {
+  const { h, popupState, pageRan } = setupPopupOnStory({
+    sessionSnapshotResponses: [],
+    tabResponse: (message) => (message.type === "TRACE_STORY_IDENTITY_GET"
+      ? { ok: true, title: "   ", author: null, site: "ao3" } : undefined),
+  });
+  popupState.authState = CONNECTED_AUTH;
+  popupState.activeWork = { workKey: "ao3:123", status: "saved", entry: { canonicalReaderStatus: "SAVED" }, syncVersion: "v1" };
+  await settle(h);
+  pageRan();
+  await settle(h, 12);
+  const asks = () => h.tabMessages.filter(({ message }) => message.type === "TRACE_STORY_IDENTITY_GET").length;
+  const before = asks();
+  for (const wait of [400, 1200, 2500]) await pass(h, wait);
+  assert.equal(asks(), before + 3, "three more tries");
+  await pass(h, 10 * 60_000);
+  assert.equal(asks(), before + 3, "and then it stops");
+  assert.match(earnedHeading(h), /in your Library$/);
+  assert.notEqual(earnedHeading(h).trim(), "");
 });

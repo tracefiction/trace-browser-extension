@@ -6,6 +6,7 @@ import {
   BrowserCredentialPort,
   ExplicitCredentialProvider,
   ACCOUNT_DATA_ALARM,
+  ARCHIVE_ACCESS_REPORT_ALARM,
   LEGACY_ACCOUNT_KEYS,
   LEGACY_ACCOUNT_ALARMS,
   SAVED_FILTER_SYNC_ALARM,
@@ -232,6 +233,35 @@ test("iOS credential acquisition retries one transient provider read but not exp
   assert.equal(nativeReads, 3);
   assert.deepEqual(await provider.acquire("refresh"), { kind: "unavailable" });
   assert.equal(nativeReads, 5);
+});
+
+test("a native reply that says nothing is an unreadable account, never a missing one", async () => {
+  // Safari can hand back nothing at all while the app's handler is starting.
+  // Only an explicit "missing_token" means the app holds no account.
+  for (const silent of [undefined, null, "busy", 0, []]) {
+    const provider = new ExplicitCredentialProvider({
+      runtime: {
+        async getPlatformInfo() {
+          return { os: "ios" };
+        },
+        async sendNativeMessage() {
+          return silent;
+        },
+      },
+      tabs: {
+        async query() {
+          assert.fail("iOS credentials must not come from a browser tab");
+        },
+        async sendMessage() {
+          assert.fail("iOS credentials must not come from a browser tab");
+        },
+      },
+      mode: "promise",
+      webOrigin: "https://www.tracefiction.com",
+      randomId: () => "credential-id",
+    });
+    assert.deepEqual(await provider.acquire("connect"), { kind: "unavailable" }, JSON.stringify(silent));
+  }
 });
 
 test("iOS credential retry is cancelled before a second native read", async () => {
@@ -1363,6 +1393,7 @@ test("the iOS popup snapshot stays signed out only when the Trace app has no acc
   await controller.start();
   const response = await controller.handle({ type: "TRACE_SESSION_GET_SNAPSHOT" }, popupSender);
   assert.equal(response.snapshot.state, "signed_out");
+  assert.equal(response.snapshot.reason, "credential_absent", "the app answered that it holds no account");
 });
 
 test("the iOS popup snapshot reports an unreadable app account as unavailable, not signed out", async () => {
@@ -1373,6 +1404,30 @@ test("the iOS popup snapshot reports an unreadable app account as unavailable, n
   await controller.start();
   const response = await controller.handle({ type: "TRACE_SESSION_GET_SNAPSHOT" }, popupSender);
   assert.equal(response.action?.kind, "unavailable");
+  // The popup must be able to tell this from "the app has no account".
+  assert.equal(response.snapshot.state, "signed_out");
+  assert.equal(response.snapshot.reason, "provider_unavailable");
+});
+
+test("the iOS popup snapshot does not read a silent app as having no account", async () => {
+  const { controller } = iosPopupSnapshotController([undefined, undefined]);
+  await controller.start();
+  const response = await controller.handle({ type: "TRACE_SESSION_GET_SNAPSHOT" }, popupSender);
+  assert.equal(response.snapshot.state, "signed_out");
+  assert.equal(response.snapshot.reason, "provider_unavailable");
+});
+
+test("the popup's state reply never reads the app's account, so it cannot say there is none", async () => {
+  const { controller, authRequests } = iosPopupSnapshotController([nativeCredentialResponse()]);
+  await controller.start();
+  const state = await controller.handle({ type: "TRACE_POPUP_GET_STATE" }, popupSender);
+  assert.equal(state.authState.state, "signed_out");
+  assert.equal(state.authState.reason, "none", "not yet asked, which is not an answer");
+  assert.equal(authRequests(), 0);
+
+  const snapshot = await controller.handle({ type: "TRACE_SESSION_GET_SNAPSHOT" }, popupSender);
+  assert.equal(snapshot.snapshot.state, "connected");
+  assert.equal(authRequests(), 1);
 });
 
 test("a Trace page snapshot never reads the app's account", async () => {
@@ -2129,6 +2184,8 @@ test("disabled mode deletes the private database, alarms, and complete legacy in
     authToken: "secret",
     traceAo3SavedFiltersActiveV1: { id: "old" },
     traceArchiveReadiness: { lastArchiveSeenAt: 1, lastArchiveHostKind: "ao3" },
+    traceArchiveAccessReportedAtV1: 1,
+    traceArchiveAccessStateV1: { grantSeen: true, delivered: "complete:5:0" },
   });
   const alarms = new PromiseAlarms();
   const databaseFactory = new IDBFactory();
@@ -2168,6 +2225,7 @@ test("disabled mode deletes the private database, alarms, and complete legacy in
   assert.deepEqual(alarms.cleared, [
     ACCOUNT_DATA_ALARM,
     SAVED_FILTER_SYNC_ALARM,
+    ARCHIVE_ACCESS_REPORT_ALARM,
     ...LEGACY_ACCOUNT_ALARMS,
   ]);
   assert.deepEqual(controller.snapshot(), {
