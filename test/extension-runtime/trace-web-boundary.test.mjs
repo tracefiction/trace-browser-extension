@@ -132,3 +132,28 @@ test("status publication targets only exact configured Trace tabs and is best ef
     { tabId: 9, message: { type: "TRACE_EXTENSION_STATUS_PUSH", state } },
   ]);
 });
+
+test("a build that does not declare Trace's own site never looks for a tab of it", async () => {
+  for (const [hostPermissions, looks] of [
+    [[], false],
+    [["https://*.archiveofourown.org/*"], false],
+    [["https://www.tracefiction.com/*"], true],
+  ]) {
+    let queries = 0;
+    const notification = new TraceWebStatusNotification({
+      runtime: { onMessage: { addListener() {} }, getManifest: () => ({ host_permissions: hostPermissions }) },
+      tabs: {
+        async query() { queries += 1; return []; },
+        async sendMessage() { assert.fail("no tab to tell"); },
+      },
+      mode: "promise",
+      webOrigin,
+    });
+    assert.equal(
+      await notification.publish({ installed: true, connected: true, authState: "connected" }),
+      looks,
+    );
+    assert.equal(queries, looks ? 1 : 0);
+  }
+});
+

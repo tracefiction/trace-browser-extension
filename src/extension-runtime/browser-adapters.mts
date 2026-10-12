@@ -19,6 +19,7 @@ import {
 } from "./private-database.mjs";
 import {
   BrowserStorage,
+  declaresHostPattern,
   extensionCall,
   type AlarmsPort,
   type BrowserTab,
@@ -586,6 +587,11 @@ export class ExplicitCredentialProvider implements CredentialProvider {
   async #acquireFromTraceTab(
     purpose: "connect" | "refresh",
   ): Promise<CredentialAcquisition> {
+    // A build that does not declare Trace's own site has no tab of it to
+    // read a credential from, whatever platform it believes it is on.
+    if (!declaresHostPattern(this.#runtime, this.#webTabPattern)) {
+      return { kind: "unavailable" };
+    }
     let tabs: readonly BrowserTab[];
     try {
       tabs = await extensionCall<readonly BrowserTab[]>(

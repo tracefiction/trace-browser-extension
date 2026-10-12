@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
@@ -21,11 +20,15 @@ test('native Import needs the exact paired package opt-in; ordinary generated pa
     assert.match(read('Shared (Extension)/Resources/background.js'), /nativeImportHandoff: false/);
     manifest = read('Shared (Extension)/Resources/manifest.json');
     const definition = JSON.parse(manifest);
-    const permissionSurface = { permissions: definition.permissions.filter(permission => permission !== "scripting"),
-      host_permissions: definition.host_permissions, content_scripts: definition.content_scripts };
-    assert.equal(crypto.createHash('sha256').update(JSON.stringify(permissionSurface)).digest('hex'),
-      '09aa341fbcaf4a92b430bc4faf4a04ae5635b7d458219ec24f6aebf53daf5d83',
-      'existing website access stays identical apart from the scripting capability');
+    // The iPhone package's own permission model, which the opt-in below must
+    // leave exactly as it is: no required website, no tabs permission, five
+    // optional story-site patterns, no declared page script.
+    assert.deepEqual(definition.permissions, ['alarms', 'storage', 'nativeMessaging', 'activeTab', 'scripting']);
+    assert.deepEqual(definition.host_permissions, []);
+    assert.deepEqual(definition.optional_host_permissions, ['https://*.archiveofourown.org/*',
+      'https://*.archiveofourown.gay/*', 'https://archive.transformativeworks.org/*',
+      'https://www.fanfiction.net/*', 'https://m.fanfiction.net/*']);
+    assert.equal(Object.hasOwn(definition, 'content_scripts'), false);
     const optedIn = build({ TRACE_NATIVE_IMPORT_CONTRACT: 'trace-native-library-import-v1' });
     assert.equal(optedIn.status, 0, optedIn.stderr);
     assert.match(read('Shared (Extension)/Resources/background.js'), /nativeImportHandoff: true/);

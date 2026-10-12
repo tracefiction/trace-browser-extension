@@ -211,3 +211,18 @@ test("Trace invalidation notifies only exact configured-origin tabs", async () =
   assert.equal(sent[0].message.type, "TRACE_LIBRARY_INVALIDATED");
   assert.equal(sent[0].message.reason, "metadata");
 });
+
+test("a build that does not declare Trace's own site never looks for a tab of it to refresh", async () => {
+  for (const [hostPermissions, looks] of [[[], false], [["https://www.tracefiction.com/*"], true]]) {
+    let queries = 0;
+    const notifier = new TraceWebMetadataNotificationPort({
+      runtime: { getManifest: () => ({ host_permissions: hostPermissions }) },
+      tabs: { async query() { queries += 1; return []; }, async sendMessage() {} },
+      mode: "promise",
+      webOrigin: "https://www.tracefiction.com",
+    });
+    assert.equal(await notifier.publish(), looks);
+    assert.equal(queries, looks ? 1 : 0);
+  }
+});
+

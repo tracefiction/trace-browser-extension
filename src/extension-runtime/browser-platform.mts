@@ -164,3 +164,15 @@ export function extensionCall<T>(
     }
   });
 }
+
+/**
+ * Whether this build declares website access for an address pattern. A build
+ * that does not declare a site can never be allowed it, so there is no tab of
+ * it to find, and looking for one may make Safari offer the reader that site.
+ * A runtime that cannot read its manifest keeps the address-filtered query.
+ */
+export function declaresHostPattern(runtime: RuntimePort, pattern: string): boolean {
+  const manifest = runtime.getManifest?.();
+  if (!manifest) return true;
+  return (manifest.host_permissions ?? []).includes(pattern);
+}

@@ -8,6 +8,7 @@ import type {
 } from "../extension-core/index.mjs";
 import {
   BrowserStorage,
+  declaresHostPattern,
   extensionCall,
   type BrowserTab,
   type RuntimePort,
@@ -159,6 +160,9 @@ export class TraceWebMetadataNotificationPort implements MetadataNotificationPor
   }
 
   async publish(): Promise<boolean> {
+    // The iPhone build does not declare Trace's own site, so it never looks
+    // for a tab of it.
+    if (!declaresHostPattern(this.#runtime, this.#queryPattern)) return false;
     let tabs: readonly BrowserTab[];
     try {
       tabs = await extensionCall<readonly BrowserTab[]>(

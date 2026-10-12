@@ -7,6 +7,9 @@ import vm from "node:vm";
 
 import {
   EARNED_PERMISSION_REGISTRATION_MESSAGE,
+  EARNED_PERMISSION_RETRY_ALARM,
+  EARNED_PERMISSION_RETRY_DELAYS_MINUTES,
+  EARNED_PERMISSION_RETRY_KEY,
   EARNED_PERMISSION_STATE_KEY,
   EarnedPermissionRegistrationController,
   installEarnedPermissionRegistrationRuntime,
@@ -58,7 +61,17 @@ function createHarness({
   let removedListener = null;
   let installedListener = null;
   let messageListener = null;
+  let alarmListener = null;
+  let scriptsRegistered = 0;
+  const alarms = {
+    created: [],
+    cleared: [],
+    async create(name, info) { alarms.created.push({ name, ...info }); },
+    async clear(name) { alarms.cleared.push(name); return true; },
+    onAlarm: { addListener(listener) { alarmListener = listener; } },
+  };
   const runtime = {
+    id: "trace-test",
     onInstalled: {
       addListener(listener) {
         installedListener = listener;
@@ -113,6 +126,9 @@ function createHarness({
     async set(patch) {
       Object.assign(store, patch);
     },
+    async remove(key) {
+      delete store[key];
+    },
   };
   const environment = {
     runtime,
@@ -122,6 +138,11 @@ function createHarness({
     storageMode: "promise",
     config,
     clock: () => now,
+    // The pause between the two readings that end a grant; tests that are
+    // about that pause set their own.
+    endedGrantConfirmDelayMs: 0,
+    alarms,
+    onScriptsRegistered: () => { scriptsRegistered += 1; },
   };
   return {
     environment,
@@ -144,12 +165,29 @@ function createHarness({
     clearRegistrations() {
       currentRegistrations = [];
     },
+    alarms,
+    get scriptsRegistered() {
+      return scriptsRegistered;
+    },
+    /** The retry alarm goes off, as it would in a worker Safari had put to sleep. */
+    async fireRetryAlarm() {
+      alarmListener({ name: EARNED_PERMISSION_RETRY_ALARM });
+      await settled();
+    },
+    /** A message the registration runtime may act on without answering. */
+    send(message, sender) {
+      return messageListener(message, sender, () => assert.fail("another listener answers this message"));
+    },
     async dispatch(message) {
       return await new Promise((resolve) => {
         assert.equal(messageListener?.(message, {}, resolve), true);
       });
     },
   };
+}
+
+async function settled() {
+  for (let turn = 0; turn < 6; turn += 1) await new Promise((resolve) => setImmediate(resolve));
 }
 
 test("complete grant registers the canonical scripts and is idempotent", async () => {
@@ -328,6 +366,19 @@ const COMPLETE_RESULT = Object.freeze({
   grantAt: 1,
 });
 
+// The committed bundle is the iPhone build, which registers its page scripts
+// after the grant and leaves this gate idle. The gate still ships for the
+// required-hosts build, so run it the way that build configures it.
+function requiredHostsPopupConfig() {
+  const source = fs.readFileSync(POPUP_CONFIG_PATH, "utf8");
+  const configured = source.replace(
+    /("registrationMode":)"(?:dynamic|static)"/,
+    '$1"static"',
+  );
+  assert.match(configured, /"registrationMode":"static"/);
+  return configured;
+}
+
 function runArchivePageGate(replies, { promiseApi = true, clock = null } = {}) {
   const sent = [];
   const timers = [];
@@ -372,7 +423,7 @@ function runArchivePageGate(replies, { promiseApi = true, clock = null } = {}) {
     ...(promiseApi ? { browser: { runtime } } : { chrome: { runtime } }),
   };
   context.globalThis = context;
-  vm.runInNewContext(fs.readFileSync(POPUP_CONFIG_PATH, "utf8"), context);
+  vm.runInNewContext(requiredHostsPopupConfig(), context);
   const settle = () => new Promise((resolve) => setImmediate(resolve));
   const drain = async () => {
     await settle();
@@ -607,4 +658,312 @@ test("a failed getAll with a positive contains answer is still a complete grant"
   const result = await new EarnedPermissionRegistrationController(h.environment).reconcile();
   assert.equal(result.ok, true);
   assert.equal(result.completeGrant, true);
+});
+
+// --- Readers who arrive from the build that required its story sites -------
+//
+// That build declared its page scripts in the manifest and recorded a finished
+// setup as { grantAt, registrationVersion: 3, promptResult, completedAt }. It
+// never registered a script. None of these cases may ask the reader anything.
+
+const STORE_BUILD_STATE = Object.freeze({
+  grantAt: 1_770_000_000_000,
+  registrationVersion: 3,
+  promptResult: "granted",
+  completedAt: 1_770_000_600_000,
+});
+const CURRENT_CONFIG = Object.freeze({ ...CONFIG, version: 4, registrationMode: "dynamic" });
+
+function upgradeHarness(options) {
+  const h = createHarness({ config: CURRENT_CONFIG, state: STORE_BUILD_STATE, ...options });
+  h.environment.permissions.request = () => assert.fail("an update must never ask for website access");
+  return h;
+}
+
+test("update: a reader with the five story sites allowed keeps saving and is not sent through setup again", async () => {
+  const h = upgradeHarness({ origins: [...ORIGINS] });
+  installEarnedPermissionRegistrationRuntime(h.environment);
+  h.installedListener({ reason: "update" });
+  const result = await h.dispatch({ type: EARNED_PERMISSION_REGISTRATION_MESSAGE });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.registered, true);
+  assert.deepEqual(h.registrations.map(({ id }) => id), REGISTRATIONS.map(({ id }) => id));
+  assert.equal(h.registered.length, 1, "registered once, not once per trigger");
+  assert.deepEqual(h.store[EARNED_PERMISSION_STATE_KEY], {
+    ...STORE_BUILD_STATE,
+    registrationVersion: 4,
+  }, "the finished setup and the time of the grant are kept");
+});
+
+test("update: a reader who allowed every website is carried over the same way", async () => {
+  // Safari lists one broad pattern, none of the five; only `contains` knows.
+  const h = upgradeHarness({ origins: ["*://*/*"], containsResult: true });
+  const result = await new EarnedPermissionRegistrationController(h.environment).reconcile();
+
+  assert.equal(result.registered, true);
+  assert.equal(h.registered.length, 1);
+  assert.equal(h.store[EARNED_PERMISSION_STATE_KEY].completedAt, STORE_BUILD_STATE.completedAt);
+});
+
+for (const [name, origins] of [
+  ["one story site", ["https://m.fanfiction.net/*"]],
+  ["four of the five story sites", ORIGINS.slice(0, 4)],
+  ["no story site", []],
+]) {
+  test(`update: a reader with ${name} allowed gets no script, no question and an untouched record`, async () => {
+    const h = upgradeHarness({ origins });
+    const result = await new EarnedPermissionRegistrationController(h.environment).reconcile();
+
+    assert.deepEqual(result, {
+      ok: false,
+      completeGrant: false,
+      registered: false,
+      changed: false,
+      error: "permission_incomplete",
+    });
+    assert.deepEqual(h.registered, []);
+    assert.deepEqual(h.unregistered, []);
+    assert.deepEqual(h.store[EARNED_PERMISSION_STATE_KEY], STORE_BUILD_STATE);
+  });
+}
+
+test("update: scripts registered by an earlier generation are replaced once and setup stays finished", async () => {
+  const older = REGISTRATIONS.map((item) => ({ ...item, js: ["popup-config.js", "collector.js"] }));
+  const h = upgradeHarness({ origins: [...ORIGINS], registrations: older });
+  const controller = new EarnedPermissionRegistrationController(h.environment);
+
+  const first = await controller.reconcile();
+  const second = await controller.reconcile();
+
+  assert.equal(first.changed, true);
+  assert.equal(second.changed, false);
+  assert.deepEqual(h.unregistered, [REGISTRATIONS.map(({ id }) => id)]);
+  assert.equal(h.registered.length, 1);
+  assert.deepEqual(h.registrations.map(({ js }) => js), REGISTRATIONS.map(({ js }) => js));
+  assert.equal(h.store[EARNED_PERMISSION_STATE_KEY].completedAt, STORE_BUILD_STATE.completedAt);
+});
+
+test("a reader who never finished setup still gets a fresh grant time when scripts are registered", async () => {
+  const h = createHarness({
+    origins: [...ORIGINS],
+    config: CURRENT_CONFIG,
+    state: { grantAt: 1_770_000_000_000, registrationVersion: 3, promptResult: "declined" },
+  });
+  await new EarnedPermissionRegistrationController(h.environment).reconcile();
+
+  assert.deepEqual(h.store[EARNED_PERMISSION_STATE_KEY], {
+    grantAt: 1_780_000_000_000,
+    registrationVersion: 4,
+    promptResult: "granted",
+    completedAt: null,
+  });
+});
+
+// --- A grant ends only when two readings agree ------------------------------
+
+function scriptedReadings(h, readings) {
+  let reads = 0;
+  h.environment.permissions.contains = async () => {
+    const reading = readings[Math.min(reads, readings.length - 1)];
+    reads += 1;
+    if (reading.contains instanceof Error) throw reading.contains;
+    return reading.contains;
+  };
+  let lists = 0;
+  h.environment.permissions.getAll = async () => {
+    const reading = readings[Math.min(lists, readings.length - 1)];
+    lists += 1;
+    if (reading.listed === false) throw new Error("unavailable");
+    return { origins: reading.contains === true ? [...ORIGINS] : [] };
+  };
+  return { get reads() { return reads; } };
+}
+
+test("one reading that the grant is incomplete removes nothing when the next reading says it is complete", async () => {
+  const h = createHarness({ origins: [...ORIGINS], registrations: REGISTRATIONS, config: CURRENT_CONFIG });
+  const readings = scriptedReadings(h, [{ contains: false }, { contains: true }]);
+  const controller = new EarnedPermissionRegistrationController(h.environment);
+
+  await assert.rejects(controller.reconcile(), /permission_state_unconfirmed/);
+
+  assert.equal(readings.reads, 2);
+  assert.deepEqual(h.unregistered, []);
+  assert.deepEqual(h.registrations.map(({ id }) => id), REGISTRATIONS.map(({ id }) => id));
+});
+
+test("an incomplete reading the browser could not back with a list of what is granted removes nothing", async () => {
+  for (const readings of [
+    [{ contains: false, listed: false }, { contains: false }],
+    [{ contains: false }, { contains: false, listed: false }],
+    [{ contains: false }, { contains: new Error("unavailable"), listed: false }],
+  ]) {
+    const h = createHarness({ origins: [...ORIGINS], registrations: REGISTRATIONS, config: CURRENT_CONFIG });
+    scriptedReadings(h, readings);
+    await assert.rejects(
+      new EarnedPermissionRegistrationController(h.environment).reconcile(),
+      /permission_state_unconfirmed/,
+    );
+    assert.deepEqual(h.unregistered, []);
+  }
+});
+
+test("two readings that agree the grant has ended remove the scripts, and only after the pause between them", async () => {
+  const h = createHarness({ origins: [], registrations: REGISTRATIONS, config: CURRENT_CONFIG });
+  const readings = scriptedReadings(h, [{ contains: false }, { contains: false }]);
+  const controller = new EarnedPermissionRegistrationController({
+    ...h.environment,
+    endedGrantConfirmDelayMs: 40,
+  });
+
+  const pending = controller.reconcile();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(h.unregistered, [], "nothing is removed on the first reading");
+  const result = await pending;
+
+  assert.equal(readings.reads, 2);
+  assert.equal(result.error, "permission_incomplete");
+  assert.equal(result.changed, true);
+  assert.deepEqual(h.unregistered, [REGISTRATIONS.map(({ id }) => id)]);
+});
+
+test("a page or popup that asks during an unconfirmed ending is told to ask again, and the scripts stay", async () => {
+  const h = createHarness({ origins: [...ORIGINS], registrations: REGISTRATIONS, config: CURRENT_CONFIG });
+  // The start-up reconcile and the asked-for one each read twice.
+  scriptedReadings(h, [{ contains: false }, { contains: true }, { contains: false }, { contains: true }]);
+  installEarnedPermissionRegistrationRuntime(h.environment);
+
+  const response = await h.dispatch({ type: EARNED_PERMISSION_REGISTRATION_MESSAGE });
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, "registration_failed");
+  assert.deepEqual(h.unregistered, []);
+});
+
+// --- A reconcile that could not finish is tried again ------------------------
+
+function unreadablePermissions(h) {
+  const { getAll, contains } = h.environment.permissions;
+  h.environment.permissions.getAll = async () => { throw new Error("unavailable"); };
+  h.environment.permissions.contains = async () => { throw new Error("unavailable"); };
+  return () => Object.assign(h.environment.permissions, { getAll, contains });
+}
+
+test("update: a first reconcile that cannot read permissions is tried again by alarm, and open tabs get the scripts", async () => {
+  const h = upgradeHarness({ origins: [...ORIGINS] });
+  const answerAgain = unreadablePermissions(h);
+  installEarnedPermissionRegistrationRuntime(h.environment);
+  await settled();
+
+  assert.deepEqual(h.registered, []);
+  assert.deepEqual(h.alarms.created, [{ name: EARNED_PERMISSION_RETRY_ALARM, delayInMinutes: 1 }]);
+  assert.equal(h.scriptsRegistered, 0);
+
+  answerAgain();
+  await h.fireRetryAlarm();
+
+  assert.deepEqual(h.registrations.map(({ id }) => id), REGISTRATIONS.map(({ id }) => id));
+  assert.equal(h.scriptsRegistered, 1, "story tabs already open are given the scripts");
+  assert.equal(h.alarms.cleared.at(-1), EARNED_PERMISSION_RETRY_ALARM);
+  assert.equal(Object.hasOwn(h.store, EARNED_PERMISSION_RETRY_KEY), false);
+  assert.equal(h.alarms.created.length, 1, "nothing further is scheduled once it has worked");
+  assert.equal(h.store[EARNED_PERMISSION_STATE_KEY].completedAt, STORE_BUILD_STATE.completedAt);
+});
+
+test("retries come further apart each time and stop after the last", async () => {
+  const h = upgradeHarness({ origins: [...ORIGINS] });
+  unreadablePermissions(h);
+  installEarnedPermissionRegistrationRuntime(h.environment);
+  await settled();
+  for (let fired = 0; fired < EARNED_PERMISSION_RETRY_DELAYS_MINUTES.length + 3; fired += 1) {
+    await h.fireRetryAlarm();
+  }
+
+  assert.deepEqual(
+    h.alarms.created.map(({ delayInMinutes }) => delayInMinutes),
+    [1, 5, 30, 180],
+  );
+  assert.deepEqual(h.registered, []);
+});
+
+test("a registration the browser refuses is tried again the same way", async () => {
+  const h = upgradeHarness({ origins: [...ORIGINS] });
+  const register = h.environment.scripting.registerContentScripts;
+  h.environment.scripting.registerContentScripts = async () => { throw new Error("refused"); };
+  installEarnedPermissionRegistrationRuntime(h.environment);
+  await settled();
+  assert.deepEqual(h.alarms.created.map(({ delayInMinutes }) => delayInMinutes), [1]);
+
+  h.environment.scripting.registerContentScripts = register;
+  await h.fireRetryAlarm();
+  assert.equal(h.registrations.length, 2);
+  assert.equal(h.scriptsRegistered, 1);
+});
+
+test("update: one reading that the grant is incomplete is asked again, not taken as the answer", async () => {
+  const h = upgradeHarness({ origins: [...ORIGINS] });
+  scriptedReadings(h, [{ contains: false }, { contains: true }]);
+  installEarnedPermissionRegistrationRuntime(h.environment);
+  await settled();
+
+  assert.deepEqual(h.registered, [], "the first reconcile did not finish");
+  assert.deepEqual(h.alarms.created.map(({ delayInMinutes }) => delayInMinutes), [1]);
+
+  await h.fireRetryAlarm();
+  assert.equal(h.registrations.length, 2);
+});
+
+test("a settled answer that the sites are not allowed schedules nothing and ends any retry", async () => {
+  for (const state of [null, STORE_BUILD_STATE]) {
+    const h = createHarness({ origins: [], config: CURRENT_CONFIG, state });
+    const answerAgain = unreadablePermissions(h);
+    installEarnedPermissionRegistrationRuntime(h.environment);
+    await settled();
+    assert.equal(h.alarms.created.length, 1);
+
+    answerAgain();
+    await h.fireRetryAlarm();
+
+    assert.equal(h.alarms.created.length, 1, "not allowed is an answer, not a failure");
+    assert.equal(h.alarms.cleared.at(-1), EARNED_PERMISSION_RETRY_ALARM);
+    assert.equal(Object.hasOwn(h.store, EARNED_PERMISSION_RETRY_KEY), false);
+    assert.deepEqual(h.registered, []);
+    assert.equal(h.scriptsRegistered, 0);
+  }
+});
+
+test("the popup opening reconciles for a reader whose setup is finished, and only the popup can ask that way", async () => {
+  const h = upgradeHarness({ origins: [...ORIGINS] });
+  const answerAgain = unreadablePermissions(h);
+  installEarnedPermissionRegistrationRuntime(h.environment);
+  await settled();
+  answerAgain();
+  const opened = { type: "TRACE_ARCHIVE_ACCESS_REPORT" };
+
+  assert.equal(h.send(opened, { id: "trace-test", tab: { id: 3 }, url: "https://archiveofourown.org/works/1" }), false);
+  await settled();
+  assert.deepEqual(h.registered, [], "a page cannot start it");
+
+  assert.equal(h.send(opened, { id: "trace-test" }), false, "the message is left for its own listener to answer");
+  await settled();
+  assert.equal(h.registrations.length, 2);
+  assert.equal(h.scriptsRegistered, 1);
+});
+
+test("allowing the story sites while the worker is awake gives open story tabs the scripts", async () => {
+  const h = createHarness({ origins: [], config: CURRENT_CONFIG });
+  installEarnedPermissionRegistrationRuntime(h.environment);
+  await settled();
+  assert.equal(h.scriptsRegistered, 0);
+
+  h.origins.push(...ORIGINS);
+  h.addedListener();
+  await settled();
+
+  assert.equal(h.registrations.length, 2);
+  assert.equal(h.scriptsRegistered, 1);
+
+  h.addedListener();
+  await settled();
+  assert.equal(h.scriptsRegistered, 1, "an unchanged registration injects nothing again");
 });

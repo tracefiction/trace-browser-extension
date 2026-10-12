@@ -106,7 +106,15 @@ try {
   );
   let session: SessionRuntimeController | undefined;
   if (__TRACE_SESSION_MODE__ === "kernel") {
-    const recover = installArchiveRecovery({ runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, scripting: extension.scripting, mode: storageMode });
+    const recover = installArchiveRecovery({
+      runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, scripting: extension.scripting, mode: storageMode,
+      // A build that registers its page scripts after the grant has none in
+      // its manifest for recovery to read.
+      ...(__TRACE_IOS_EARNED_PERMISSION_CONFIG__ !== null &&
+        __TRACE_IOS_EARNED_PERMISSION_CONFIG__.registrationMode !== "static"
+        ? { registered: __TRACE_IOS_EARNED_PERMISSION_CONFIG__ }
+        : {}),
+    });
     installArchiveHostAccess({ runtime: extension.runtime, tabs: extension.tabs, action: extension.action, permissions: extension.permissions, mode: storageMode, recover });
     installTraceFirstInstallActivation({
       runtime: extension.runtime,
@@ -168,6 +176,10 @@ try {
         ),
         storageMode,
         config: __TRACE_IOS_EARNED_PERMISSION_CONFIG__,
+        alarms: extension.alarms,
+        // Story tabs that are already open get the scripts too, whether the
+        // reader allowed the sites from the popup or in Safari's settings.
+        onScriptsRegistered: () => { void recover(); },
       });
     }
   }

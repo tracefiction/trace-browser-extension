@@ -1,8 +1,55 @@
 # iOS earned-permission onboarding
 
 The Safari extension requires complete Website Access before saving a story.
-Its permission-bearing manifest remains stable across upgrades; static content
-scripts stay inert until the complete five-origin archive bundle is allowed.
+
+## Permission model
+
+The iPhone and iPad build declares:
+
+- `permissions`: `alarms`, `storage`, `nativeMessaging`, `activeTab`,
+  `scripting`. There is no `tabs` permission.
+- `host_permissions`: none.
+- `optional_host_permissions`: the five story-site patterns listed below.
+  Trace's own website is not named.
+- no `content_scripts`.
+
+With no required website and no `tabs`, opening Trace from Safari raises no
+website question. `activeTab` covers only the tab Trace was opened on, and is
+used to read that tab's address. Nothing is injected and nothing is saved
+before the five story sites are allowed.
+
+The background worker registers the two page scripts
+(`trace-archive-automation-v1`, `trace-ao3-saved-filters-v1`) when
+`permissions.contains` confirms all five patterns. It checks on worker start,
+on install and update, when website access is added or removed, and each time
+the popup opens. Story tabs that are already open get the same scripts, under
+the same complete grant: after an update, and when the reader allows the sites
+from the popup or in Safari's settings.
+
+A check that cannot finish (Safari did not answer, the registration was
+refused, or a reader who had the grant read once as not having it) is tried
+again by alarm after 1, 5, 30 and 180 minutes, then left to the next worker
+start, permission change or popup. A complete registration or a settled "not
+allowed" ends the retries.
+
+The scripts are removed when that access ends. Because nothing on a story page
+can wake the worker once they are gone, an ending is acted on only when two
+readings two seconds apart both report incomplete access and Safari listed
+what is granted both times. A reading that cannot be taken removes nothing.
+
+A reader who finished setup under an earlier build keeps that record when the
+scripts are registered for them: an update never asks for website access and
+never sends them through setup again. A reader whose access is incomplete after
+an update gets no script and no question; opening Trace offers the same
+recovery as before.
+
+Background code asks Safari only for tabs at story-site addresses, and only
+under the complete grant. It never asks for every open tab and, in this build,
+never for a tab of Trace's own website, and it never opens Trace's setup page;
+that holds on an iPad that reports itself as a Mac.
+
+Mac Safari, Chrome and Firefox are built with `npm run build:release` and keep
+required story sites, `tabs`, and manifest-declared scripts.
 
 ## User contract
 
@@ -22,8 +69,8 @@ When `TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1`:
   the reader to choose **Always Allow**;
 - denial/cancel or an incomplete grant saves nothing and remains retryable;
 - a complete existing grant skips the prompt;
-- the background worker owns the complete-bundle readiness decision. Static
-  content scripts remain inert when coverage is partial, so one working
+- the background worker owns the complete-bundle readiness decision. No
+  page script is registered when coverage is partial, so one working
   hostname cannot be presented as complete setup;
 - after the complete grant on a story, the popup reloads it. The normal
   pending-handoff path then supplies the fresh run and server-confirmed save;
@@ -48,7 +95,7 @@ set:
 - `https://m.fanfiction.net/*`
 
 Archive login, signup, password, authentication, and logout routes are excluded
-from the static scripts. The flow stores only a bounded local
+from the registered scripts. The flow stores only a bounded local
 list of coarse event names and timestamps for device-side diagnosis. It adds no
 network telemetry, URLs, story identity, account identity, page HTML, story
 text, cookies, or credentials.
@@ -60,6 +107,11 @@ The normal production-origin build is:
 ```bash
 npm run build:ios-earned-permission-onboarding:release
 ```
+
+`npm run build:ios-earned-permission-onboarding:required-hosts:release` builds
+the earlier shape instead: the story sites and Trace's website required,
+`tabs`, and three manifest-declared scripts that stay inert until the five
+patterns are allowed.
 
 The script pins both production origins and writes the public extension
 resources consumed by Safari. The private Apple client separately verifies
@@ -83,6 +135,23 @@ or generic build to restore the Safari resources for this onboarding variant.
 
 Use a real iPhone or iPad. Do not uninstall, sign out, disable the extension,
 or change Website Access between the baseline and candidate.
+
+The candidate's manifest differs from the public build's: the story sites move
+from required to optional, `tabs` goes, and `activeTab` and `scripting` arrive.
+Whether Safari keeps a reader's Website Access across that change is decided by
+Safari, not by this code, so run the whole gate once for each starting state:
+
+- the five story sites allowed with **Always Allow**;
+- **Always Allow on Every Website**;
+- one story site only;
+- nothing allowed;
+- **Allow for One Day**, not yet expired.
+
+For the first two, saving must continue with no prompt. For the next two,
+nothing may be saved and no prompt may appear until the reader opens Trace. In
+every case the extension must still be enabled after the update, and a story
+tab left open across it must record the next chapter. Record what Safari's
+settings show for Trace before and after.
 
 1. Install the current public App Store build and sign in to an existing Trace
    account.

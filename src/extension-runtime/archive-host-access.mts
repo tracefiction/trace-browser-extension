@@ -1,4 +1,4 @@
-import { archiveHostKindFromSender, isBlockedArchivePath } from "./archive-sender.mjs";
+import { archiveHostKindFromSender, isBlockedArchivePath, isStorySitePattern } from "./archive-sender.mjs";
 import { extensionCall, type ActionPort, type BrowserTab, type ContentPort, type PermissionsPort, type RuntimeMessageSender, type RuntimePort, type TabsPort } from "./browser-platform.mjs";
 
 type Access = Readonly<{ site: "all"; label: string; origins: readonly string[]; granted: boolean | null }>;
@@ -67,7 +67,12 @@ export function installArchiveHostAccess(environment: Environment): (() => Promi
     }
     if (current === generation) {
       try {
-        const openTabs = await call<readonly BrowserTab[]>(tabs, "query", [{}]);
+        // Only story-site tabs can hear this, so only they are asked for. A
+        // query with no address filter reads as a wish to see every open tab.
+        const storySites = (sites[0]?.origins ?? []).filter(isStorySitePattern);
+        const openTabs = storySites.length
+          ? await call<readonly BrowserTab[]>(tabs, "query", [{ url: storySites }])
+          : [];
         if (current === generation) await Promise.all(openTabs.map(async tab => {
           if (!archiveSite({ id: runtime.id!, tab, frameId: 0 })) return;
           // Pages need only grant evidence, never the manifest origin inventory.

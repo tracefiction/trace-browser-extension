@@ -92,6 +92,20 @@ const IOS_EARNED_PERMISSION_PREVIEW_RELEASE = /^(?:1|true)$/i.test(
 const IOS_ACTIVE_TAB_PROBE = IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE || /^(?:1|true)$/i.test(
   String(env.TRACE_IOS_ACTIVE_TAB_PROBE ?? ""),
 );
+// The iPhone and iPad build declares its story sites as optional, so the first
+// tap on Trace opens it without a website question, and registers its page
+// scripts once the reader allows those sites. The earlier shape, with the
+// sites required and the scripts declared in the manifest, stays buildable.
+const IOS_EARNED_PERMISSION_REQUIRED_HOSTS = /^(?:1|true)$/i.test(
+  String(env.TRACE_IOS_EARNED_PERMISSION_REQUIRED_HOSTS ?? ""),
+);
+if (IOS_EARNED_PERMISSION_REQUIRED_HOSTS && !IOS_EARNED_PERMISSION_ONBOARDING) {
+  throw new Error(
+    "TRACE_IOS_EARNED_PERMISSION_REQUIRED_HOSTS requires the earned-permission build.",
+  );
+}
+const IOS_OPTIONAL_STORY_SITE_ACCESS =
+  IOS_EARNED_PERMISSION_ONBOARDING && !IOS_EARNED_PERMISSION_REQUIRED_HOSTS;
 if (
   IOS_EARNED_PERMISSION_PREVIEW_RELEASE &&
   (!IOS_EARNED_PERMISSION_ONBOARDING || !IS_RELEASE)
@@ -216,6 +230,9 @@ const FIREFOX_RELEASE_EXTENSION_ID = "trace@tracefiction.com";
 const FIREFOX_DEV_EXTENSION_ID = "trace-dev@tracefiction.com";
 const SAFARI_ONLY_PERMISSIONS = ["nativeMessaging"];
 const NORMAL_SAFARI_PERMISSIONS = ["alarms", "tabs", "storage", ...(SESSION_MODE === "kernel" ? ["scripting"] : []), ...SAFARI_ONLY_PERMISSIONS];
+// No `tabs`: with it, or with required story sites, Safari asks about the
+// site before Trace opens. `activeTab` covers the one tab the reader tapped
+// Trace on; `scripting` registers the page scripts after the grant.
 const IOS_ACTIVE_TAB_PROBE_PERMISSIONS = [
   "alarms",
   "storage",
@@ -223,6 +240,8 @@ const IOS_ACTIVE_TAB_PROBE_PERMISSIONS = [
   "activeTab",
   "scripting",
 ];
+const IOS_ACTIVE_TAB_PERMISSIONS =
+  IOS_ACTIVE_TAB_PROBE || IOS_OPTIONAL_STORY_SITE_ACCESS;
 
 function isLocalLike(value) {
   return /localhost|127\.0\.0\.1/i.test(value);
@@ -349,8 +368,10 @@ const earnedPermissionRegistrations = [
   },
 ];
 const earnedPermissionRuntimeConfig = {
-  version: 3,
-  registrationMode: IOS_EARNED_PERMISSION_ONBOARDING ? "static" : "dynamic",
+  // 4 is the first generation registered at runtime in a released build. A
+  // registration left by anything earlier is replaced once, not trusted by id.
+  version: IOS_OPTIONAL_STORY_SITE_ACCESS ? 4 : 3,
+  registrationMode: IOS_OPTIONAL_STORY_SITE_ACCESS ? "dynamic" : "static",
   origins: MINIMIZED_SITE_HOST_MATCHES,
   registrations: earnedPermissionRegistrations,
 };
@@ -437,7 +458,7 @@ console.log("Wrote", outBg);
 const manifestPath = path.join(RES, "manifest.json");
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 manifest.version = version;
-manifest.permissions = IOS_ACTIVE_TAB_PROBE
+manifest.permissions = IOS_ACTIVE_TAB_PERMISSIONS
   ? [...IOS_ACTIVE_TAB_PROBE_PERMISSIONS]
   : [...NORMAL_SAFARI_PERMISSIONS];
 
@@ -450,10 +471,11 @@ const {
   traceWebOrigin: TRACE_WEB_ORIGIN,
 });
 
-// Preserve the permission-bearing Safari manifest shipped in 0.6.5 so an
-// App Store update does not reset existing AO3/FFN Website Access grants.
-manifest.host_permissions = IOS_ACTIVE_TAB_PROBE ? [] : safariHostPermissions;
-if (IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE) {
+// The required-hosts build preserves the permission-bearing Safari manifest
+// shipped in 0.6.5. The iPhone build names the same story sites as optional,
+// and no longer names Trace's own site: the app, not a page, connects it.
+manifest.host_permissions = IOS_ACTIVE_TAB_PERMISSIONS ? [] : safariHostPermissions;
+if (IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE || IOS_OPTIONAL_STORY_SITE_ACCESS) {
   manifest.optional_host_permissions = [...MINIMIZED_SITE_HOST_MATCHES];
 } else {
   delete manifest.optional_host_permissions;
@@ -625,10 +647,16 @@ manifest.content_scripts = SESSION_MODE === "disabled" || IOS_ACTIVE_TAB_PROBE
   : IOS_EARNED_PERMISSION_ONBOARDING
     ? earnedCompatibilityContentScripts
     : normalContentScripts;
+// The iPhone build declares no page scripts at all; the background registers
+// them after the grant. Safari rejects an explicitly empty declaration, so the
+// key is left out.
+if (IOS_OPTIONAL_STORY_SITE_ACCESS) delete manifest.content_scripts;
 
 fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
 console.log("Set manifest version to", version);
 
+// The Chrome and Firefox packages keep their own permission model whichever
+// Safari variant was built beside them.
 const packagedSourceManifest = IOS_ACTIVE_TAB_PROBE
   ? {
       ...manifest,
@@ -636,7 +664,14 @@ const packagedSourceManifest = IOS_ACTIVE_TAB_PROBE
       host_permissions: safariHostPermissions,
       content_scripts: normalContentScripts,
     }
-  : manifest;
+  : IOS_OPTIONAL_STORY_SITE_ACCESS
+    ? {
+        ...manifest,
+        permissions: [...NORMAL_SAFARI_PERMISSIONS],
+        host_permissions: safariHostPermissions,
+        content_scripts: earnedCompatibilityContentScripts,
+      }
+    : manifest;
 delete packagedSourceManifest.optional_host_permissions;
 const packagedManifest = browserStoreManifest(
   packagedSourceManifest,
@@ -720,6 +755,10 @@ console.log(
 console.log(
   "TRACE_IOS_EARNED_PERMISSION_ONBOARDING=" +
     IOS_EARNED_PERMISSION_ONBOARDING,
+);
+console.log(
+  "TRACE_IOS_EARNED_PERMISSION_REQUIRED_HOSTS=" +
+    IOS_EARNED_PERMISSION_REQUIRED_HOSTS,
 );
 console.log(
   "TRACE_IOS_EARNED_PERMISSION_PREVIEW_RELEASE=" +

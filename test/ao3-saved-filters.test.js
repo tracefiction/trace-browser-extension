@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 const { JSDOM } = require("jsdom");
 
 const SCRIPT_PATH = path.join(
@@ -185,10 +186,24 @@ test("AO3 saved filters remain inert until the complete Safari grant", async () 
 
 test("manifest loads AO3 saved filters with the generated archive content scripts", () => {
   const manifest = JSON.parse(fs.readFileSync(MANIFEST_PATH, "utf8"));
-  const archiveEntry = manifest.content_scripts.find((entry) =>
+  // The iPhone build declares no page scripts in its manifest: the background
+  // registers the ones listed in the generated config once the reader allows
+  // the story sites. Either way the same two bundles must be described.
+  let pageScripts = manifest.content_scripts;
+  if (!pageScripts) {
+    const config = {};
+    vm.runInNewContext(
+      fs.readFileSync(path.join(path.dirname(MANIFEST_PATH), "popup-config.js"), "utf8"),
+      config,
+    );
+    pageScripts = config.TRACE_IOS_EARNED_PERMISSION_ONBOARDING.registrations.map(
+      (registration) => ({ js: Array.from(registration.js), matches: Array.from(registration.matches) }),
+    );
+  }
+  const archiveEntry = pageScripts.find((entry) =>
     (entry.js || []).includes("collector.js"),
   );
-  const savedFiltersEntry = manifest.content_scripts.find((entry) =>
+  const savedFiltersEntry = pageScripts.find((entry) =>
     (entry.js || []).includes("ao3-saved-filters.js"),
   );
   assert.ok(archiveEntry, "expected archive content script entry");
