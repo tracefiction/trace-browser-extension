@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -79,3 +81,28 @@ test("synthetic paired development origins grant only the configured sync host",
   assert(!permissions.safariHostPermissions.includes("https://api.synthetic.example.test/*"));
   assert(permissions.browserHostPermissions.includes("https://api.synthetic.example.test/*"));
 });
+
+// Apple refuses an upload whose Safari extension description is longer than
+// 112 characters, or whose name is longer than 40, in the manifest or in a
+// locale's messages. The description has one source, the English locale file.
+test("the committed Safari manifest and locale keep their store text within Apple's limits", () => {
+  const resources = path.join(process.cwd(), "Shared (Extension)", "Resources");
+  const manifest = JSON.parse(fs.readFileSync(path.join(resources, "manifest.json"), "utf8"));
+  const messages = JSON.parse(
+    fs.readFileSync(path.join(resources, "_locales", manifest.default_locale, "messages.json"), "utf8"),
+  );
+  const description = messages.extension_description.message;
+  assert.equal(typeof description, "string");
+  assert.ok(description.length > 0 && description.length <= 112, `description is ${description.length} characters`);
+  assert.equal(manifest.description, description, "the manifest carries the locale's description");
+  assert.ok(manifest.name.length > 0 && manifest.name.length <= 40);
+  assert.equal(messages.extension_name.message, manifest.name);
+  for (const [key, entry] of Object.entries(messages)) {
+    assert.equal(typeof entry.message, "string", `${key} has a message`);
+    assert.ok(entry.message.length <= 112, `${key} is ${entry.message.length} characters`);
+  }
+  for (const reference of JSON.stringify(manifest).matchAll(/__MSG_([A-Za-z0-9_@]+)__/g)) {
+    assert.ok(Object.hasOwn(messages, reference[1]), `${reference[0]} has a message`);
+  }
+});
+
