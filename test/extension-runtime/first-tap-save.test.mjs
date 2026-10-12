@@ -51,10 +51,10 @@ function install(options = {}) {
     account: null,
     automaticSaving: "on",
     tabs: new Map([[7, { id: 7, url: urlOf(A), active: true, incognito: false }]]),
-    page: { injects: true, collected: null },
+    page: { injects: true, collected: null, private: undefined, story: null, names: null },
     storage: { value: undefined, readable: true, writes: 0 },
     now: 1_800_000_000_000,
-    calls: { inject: [], collect: [], mark: [], end: [], receipts: [] },
+    calls: { inject: [], collect: [], mark: [], receipts: [] },
   };
   const binding = () => world.scope === null ? null : `${world.scope.epoch}.${world.scope.accountId}`;
   const confirmationFor = (workKey) => ({
@@ -102,7 +102,6 @@ function install(options = {}) {
       clock: { now: () => world.now },
     });
     const firstTap = new FirstTapSave({
-      async tab(tabId) { return world.tabs.get(tabId) ?? null; },
       async grantComplete() { return world.grant; },
       async account() { return world.account ?? { state: "verified", binding: binding() }; },
       binding,
@@ -111,10 +110,12 @@ function install(options = {}) {
       async collect(tabId) {
         world.calls.collect.push(tabId);
         if (world.page.collected !== null) return world.page.collected;
-        const tab = world.tabs.get(tabId);
-        const story = new URL(tab.url).pathname.split("/")[2];
+        // The page answers for the story it is on, which the reader may have
+        // changed since the popup read the tab.
+        const story = world.page.story ?? new URL(world.tabs.get(tabId).url).pathname.split("/")[2];
         return {
-          ok: true, title: "The Long Way", author: "someone",
+          ok: true, workKey: world.page.names ?? `ao3:${story}`, title: "The Long Way", author: "someone",
+          ...(world.page.private === undefined ? {} : { private: world.page.private }),
           payload: {
             s: "ao3", at: "2026-10-12T12:00:00.000Z",
             item: { src: "ao3", ctx: "story", u: `https://archiveofourown.org/works/${story}`, t: "The Long Way" },
@@ -124,7 +125,6 @@ function install(options = {}) {
       save: (command, observer) => service.executeWithEvidence(command, observer),
       presence: (workKey) => service.presence(workKey),
       async mark(tabId, workKey) { world.calls.mark.push({ tabId, workKey }); },
-      async endManualMode(tabId) { world.calls.end.push(tabId); },
       async readStore() {
         if (!world.storage.readable) throw new Error("storage unavailable");
         return world.storage.value;
@@ -144,12 +144,17 @@ function install(options = {}) {
       return {
         views, listener, tabId,
         get last() { return views.at(-1); },
-        open: async (opts) => { const view = await firstTap.opened(listener, tabId, opts); views.push(view); return view; },
+        open: async (opts) => { const view = await firstTap.opened(listener, world.tapped(tabId), opts); views.push(view); return view; },
         check: async () => { const view = await firstTap.check(listener); views.push(view); return view; },
         close: () => firstTap.closed(listener),
       };
     };
     return { firstTap, service, popup };
+  };
+  /** What the popup read, in the reader's tap, of the tab it was opened on. */
+  world.tapped = (tabId) => {
+    const tab = world.tabs.get(tabId);
+    return { tabId, url: tab?.url, private: typeof tab?.incognito === "boolean" ? tab.incognito : null };
   };
   /** Points tab 7 at another story, as the reader moving on. */
   world.goTo = (workKey) => world.tabs.set(7, { ...world.tabs.get(7), url: urlOf(workKey) });
@@ -184,14 +189,12 @@ test("opening Trace on a story saves it once, through the guarded save, before a
   assert.equal(world.calls.receipts[0].mode, "bounded_manual");
 });
 
-test("nothing is injected or saved off a story page, on a tab that is not the one on show, or once the sites are allowed", async () => {
+test("nothing is injected or saved off a story page, for a tab the popup could not read, or once the sites are allowed", async () => {
   for (const [change, expected] of [
-    [(world) => world.tabs.set(7, { id: 7, url: "https://archiveofourown.org/works", active: true }), "not_applicable"],
-    [(world) => world.tabs.set(7, { id: 7, url: "https://archiveofourown.org/users/login", active: true }), "not_applicable"],
-    [(world) => world.tabs.set(7, { id: 7, url: "https://example.com/works/123", active: true }), "not_applicable"],
-    [(world) => world.tabs.set(7, { id: 7, active: true }), "not_applicable"],
-    [(world) => world.tabs.set(7, { id: 7, url: urlOf(A), active: false }), "not_applicable"],
-    [(world) => world.tabs.set(7, { id: 8, url: urlOf(A), active: true }), "not_applicable"],
+    [(world) => world.tabs.set(7, { id: 7, url: "https://archiveofourown.org/works", incognito: false }), "not_applicable"],
+    [(world) => world.tabs.set(7, { id: 7, url: "https://archiveofourown.org/users/login", incognito: false }), "not_applicable"],
+    [(world) => world.tabs.set(7, { id: 7, url: "https://example.com/works/123", incognito: false }), "not_applicable"],
+    [(world) => world.tabs.set(7, { id: 7, incognito: false }), "not_applicable"],
     [(world) => world.tabs.delete(7), "not_applicable"],
     [(world) => { world.grant = true; }, "automatic"],
   ]) {
@@ -319,6 +322,171 @@ test("when a record still in doubt had to be dropped, a story found with no reco
   await popup.open();
   await turns();
   assert.equal(popup.last.provenance, "found");
+});
+
+test("a write in doubt, then a new session for the same reader: the same story found is found, never already there", async () => {
+  // Same background, and a background that started after the sign-in.
+  for (const restart of [false, true]) {
+    const world = install({ library: [[B, ENTRY]] });
+    // The write reaches Trace. Its answer comes too late, or never.
+    const late = deferred();
+    world.net.track = (command) => {
+      world.library.set(command.workKey, ENTRY);
+      return late.promise;
+    };
+    const first = world.worker();
+    await first.popup().open();
+    await turns();
+    assert.equal(world.net.writes, 1, "the write went out");
+
+    // The reader signs out and in again. Trace sees a new session, and cannot
+    // know it is the same reader.
+    world.net.track = null;
+    world.scope = { accountId: "account-a", epoch: 2 };
+    if (!restart) {
+      late.resolve({ kind: "success", value: { kind: "uncertain" } });
+      await turns();
+    }
+    const worker = restart ? world.worker() : first;
+    const again = worker.popup();
+    await again.open();
+    await turns();
+    assert.equal(again.last.state, "confirmed");
+    assert.equal(again.last.provenance, "found", "the earlier session's write may be what added it");
+    assert.equal(world.net.writes, 1, "and it is not written again");
+    again.close();
+
+    const kept = JSON.stringify(world.storage.value);
+    for (const readable of ["ao3", "works", "archiveofourown", "account-a"]) {
+      assert.equal(kept.includes(readable), false, `${readable} is not kept`);
+    }
+    assert.equal(world.storage.value.records.every(({ s }) => s === world.storage.value.records[0].s), true,
+      "the ended session's records are gone");
+
+    // The doubt was about that one story. Another, in the Library all along,
+    // is still already there.
+    world.goTo(B);
+    const other = worker.popup();
+    await other.open();
+    await turns();
+    assert.equal(other.last.provenance, "already");
+    other.close();
+
+    // Once Trace has itself confirmed the story for this session, the doubt
+    // has no more to say.
+    assert.deepEqual(world.storage.value.doubts, []);
+    world.goTo(A);
+    world.now += FIRST_TAP_RESULT_FRESH_MS + 60_000;
+    const later = world.worker().popup();
+    await later.open();
+    await turns();
+    assert.equal(later.last.provenance, "already");
+  }
+});
+
+test("a doubt that cannot be placed on a story after a session change is carried as one about every story", async () => {
+  const world = install({ library: [[B, ENTRY]] });
+  // More cut-off saves than the store keeps, so one is dropped in doubt.
+  world.net.track = () => new Promise(() => {});
+  for (let story = 1; story <= FIRST_TAP_RECORD_LIMIT + 1; story += 1) {
+    world.goTo(`ao3:${1000 + story}`);
+    await world.worker().popup().open();
+    await turns();
+  }
+  assert.equal(world.storage.value.forgot.length, 1);
+  const forgotten = world.storage.value.forgot[0];
+
+  world.net.track = null;
+  world.scope = { accountId: "account-a", epoch: 2 };
+  world.goTo(B);
+  const popup = world.worker().popup();
+  await popup.open();
+  await turns();
+  assert.equal(popup.last.provenance, "found");
+  assert.equal(world.storage.value.forgot.includes(forgotten), false, "the ended session is not named");
+  assert.equal(world.storage.value.doubts.length <= FIRST_TAP_RECORD_LIMIT, true);
+});
+
+test("a write in doubt from a private tab, then a new background: the same story in an ordinary tab is found, never already there", async () => {
+  const world = install();
+  world.tabs.set(7, { id: 7, url: urlOf(A), incognito: true });
+  landsUnanswered(world);
+  await world.worker().popup().open();
+  await turns();
+  assert.equal(world.net.writes, 1, "the write went out; its answer never came");
+  assert.deepEqual(world.storage.value.records, [], "no record is kept for the private tab");
+  assert.deepEqual(world.storage.value.doubts, [], "nor its story's digest");
+  assert.equal(world.storage.value.unkept, 1, "only that a write is out, for no story and no account");
+  assert.deepEqual(Object.keys(world.storage.value).sort(), ["doubts", "forgot", "records", "salt", "unkept"]);
+
+  // Safari puts the background to sleep. The reader opens the same story in
+  // an ordinary tab.
+  world.net.track = null;
+  world.tabs.set(7, { id: 7, url: urlOf(A), incognito: false });
+  const popup = world.worker().popup();
+  await popup.open();
+  await turns();
+  assert.equal(popup.last.state, "confirmed");
+  assert.equal(popup.last.provenance, "found", "the private tab's write may be what added it");
+  assert.equal(world.net.writes, 1);
+});
+
+test("a private tab's write that is answered leaves nothing behind", async () => {
+  const world = install({ library: [[B, ENTRY]] });
+  world.tabs.set(7, { id: 7, url: urlOf(A), incognito: true });
+  const held = deferred();
+  world.net.track = async () => { await held.promise; return null; };
+  const popup = world.worker().popup();
+  await popup.open();
+  await turns();
+  assert.equal(world.storage.value.unkept, 1, "counted while it is out");
+  held.resolve();
+  await turns();
+  assert.equal(popup.last.provenance, "saved_now");
+  assert.equal(world.storage.value.unkept, 0, "and no longer once it is answered");
+  assert.deepEqual(world.storage.value.records, []);
+
+  world.net.track = null;
+  world.tabs.set(7, { id: 7, url: urlOf(B), incognito: false });
+  const other = world.worker().popup();
+  await other.open();
+  await turns();
+  assert.equal(other.last.provenance, "already", "so what came before is still known");
+});
+
+test("a tab the browser did not call ordinary is treated as private; so is one the page itself says is private", async () => {
+  for (const arrange of [
+    (world) => world.tabs.set(7, { id: 7, url: urlOf(A) }),
+    (world) => { world.page.private = true; },
+  ]) {
+    const world = install({ library: [[A, ENTRY]] });
+    arrange(world);
+    const popup = world.worker().popup();
+    await popup.open();
+    await turns();
+    assert.equal(popup.last.provenance, "found", "never already there");
+    assert.deepEqual(world.storage.value?.records ?? [], [], "and nothing about the story is kept");
+  }
+});
+
+test("the page reached must name the story the popup named, or nothing is sent", async () => {
+  for (const arrange of [
+    // The tab moved on to another story between the popup's read and the page's answer.
+    (world) => { world.page.story = "456"; },
+    // The page names another story than the one it hands over.
+    (world) => { world.page.names = B; },
+    (world) => { world.page.names = undefined; world.page.collected = { ok: true, title: "The Long Way", payload: {} }; },
+  ]) {
+    const world = install();
+    arrange(world);
+    const popup = world.worker().popup();
+    await popup.open();
+    await turns();
+    assert.equal(popup.last.state, "failed");
+    assert.equal(popup.last.dispatch, "never_sent");
+    assert.equal(world.net.lookups, 0);
+    assert.equal(world.net.writes, 0);
+  }
 });
 
 test("with storage unreadable nothing earlier is known, so a story found is found", async () => {
@@ -676,6 +844,8 @@ test("what is kept names no story: no work key, title, author or address, only d
   assert.match(world.storage.value.salt, /^[0-9a-f]{32}$/);
   assert.match(world.storage.value.records[0].k, /^[0-9a-f]{32}$/);
   assert.deepEqual(Object.keys(world.storage.value.records[0]).sort(), ["at", "inDoubt", "k", "outcome", "s"]);
+  assert.deepEqual(world.storage.value.doubts, []);
+  assert.equal(world.storage.value.unkept, 0);
 
   const elsewhere = install();
   const other = elsewhere.worker().popup();
@@ -686,19 +856,25 @@ test("what is kept names no story: no work key, title, author or address, only d
 
 test("nothing is kept for a private tab, and a story found there is never called already there", async () => {
   const world = install({ library: [[A, ENTRY]] });
-  world.tabs.set(7, { id: 7, url: urlOf(A), active: true, incognito: true });
+  world.tabs.set(7, { id: 7, url: urlOf(A), incognito: true });
   const popup = world.worker().popup();
   await popup.open();
   await turns();
   assert.equal(popup.last.provenance, "found");
   assert.deepEqual(world.storage.value?.records ?? [], []);
 
-  world.tabs.set(7, { id: 7, url: urlOf(B), active: true, incognito: true });
+  world.tabs.set(7, { id: 7, url: urlOf(B), incognito: true });
   const saved = world.worker().popup();
   await saved.open();
   await turns();
   assert.equal(saved.last.provenance, "saved_now");
   assert.deepEqual(world.storage.value?.records ?? [], []);
+  assert.deepEqual(world.storage.value?.doubts ?? [], []);
+  assert.equal(world.storage.value?.unkept ?? 0, 0);
+  const kept = JSON.stringify(world.storage.value ?? {});
+  for (const readable of ["ao3", "works", "archiveofourown", "The Long Way", "someone", "account-a"]) {
+    assert.equal(kept.includes(readable), false, `${readable} is not kept`);
+  }
 });
 
 test("settled records age out; no more than the limit is kept", async () => {
@@ -756,15 +932,13 @@ test("a first tap whose grant could not be read is saved without a claimed mode"
 
 // --- After the grant -------------------------------------------------------------
 
-test("pages put into manual mode are told to carry on, and only those", async () => {
+test("the background knows which tabs it injected only while it stays awake", async () => {
   const world = install();
   const worker = world.worker();
-  await worker.firstTap.leaveManualMode();
-  assert.deepEqual(world.calls.end, [], "nothing was injected, so nothing is told");
-
+  assert.deepEqual(worker.firstTap.injectedTabs(), []);
   const popup = worker.popup();
   await popup.open();
   await turns();
-  await worker.firstTap.leaveManualMode();
-  assert.deepEqual(world.calls.end, [7]);
+  assert.deepEqual(worker.firstTap.injectedTabs(), [7]);
+  assert.deepEqual(world.worker().firstTap.injectedTabs(), [], "a new background starts with none");
 });

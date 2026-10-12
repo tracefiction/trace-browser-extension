@@ -2219,39 +2219,149 @@ const FIRST_TAP_SAVE = EARNED_PERMISSION_ONBOARDING?.firstTapSave === true;
 const FIRST_TAP_POPUP_PORT = "trace-first-tap-popup-v1";
 let firstTapPort = null;
 let firstTapStory = null;
-let firstTapTabId = null;
+let firstTapTab = null;
 let firstTapPatienceTimer = null;
 let firstTapSetAside = false;
+// What the background last sent: the save's state, and the state of the ask
+// for lasting access. Both are drawn from these and from nothing else.
+let firstTapLastView = null;
+let firstTapAccess = null;
+let firstTapAsking = false;
 
 function firstTapPlaceholder(id) {
   return `[${id}]`;
 }
 
-function firstTapSend(command) {
+function firstTapSend(command, detail = {}) {
   try {
-    // The tab this popup was opened on goes with every request.
-    firstTapPort?.postMessage({ command, tabId: firstTapTabId });
+    // The tab this popup was opened on goes with every request: its id, its
+    // address and whether it is private, as read when the reader opened Trace.
+    firstTapPort?.postMessage({ command, ...firstTapTab, ...detail });
   } catch {
     firstTapPort = null;
   }
+}
+
+/** Whether the tab is a private one; null when the browser does not say. */
+function firstTapTabIsPrivate(tab) {
+  const said = [tab?.incognito, ext.extension?.inIncognitoContext].filter(
+    (value) => typeof value === "boolean",
+  );
+  return said.length === 0 ? null : said.includes(true);
 }
 
 function setFirstTapState(name) {
   document.body.dataset.traceFirstTapState = name;
 }
 
-function renderFirstTapUnworded(name, { heading, lead = null, primary, secondary = null, checking = false }) {
+function renderFirstTapUnworded(name, { heading, lead = null, primary, secondary = null, checking = false, result = null }) {
   setEarnedCopy({ stateCode: name, heading, lead: lead ?? "" });
-  setEarnedResult(checking ? "checking" : "failure", heading, "");
+  setEarnedResult(result ?? (checking ? "checking" : "failure"), heading, "");
   configureEarnedActions(primary, secondary);
 }
 
-/** After a confirmed save. The ask itself is the existing one until its own states land. */
+/** After a confirmed save: the ask for lasting access is offered. */
 function configureFirstTapConfirmedActions() {
   configureEarnedActions(
     { label: "Keep reading", action: "close", emphasis: "secondary" },
-    { label: "Allow story sites", action: "allow_and_add", emphasis: "tertiary" },
+    { label: "Allow story sites", action: "first_tap_allow", emphasis: "tertiary" },
   );
+}
+
+/**
+ * The ask for lasting access, as the background reports it. The background
+ * reads what Safari allows after the request; nothing here is drawn from what
+ * the request itself returned. No state says how long the access lasts:
+ * Safari does not tell an extension that.
+ */
+function renderFirstTapAccess(access) {
+  const keepReading = { label: "Keep reading", action: "close", emphasis: "secondary" };
+  const notNow = { label: "Not now", action: "close", emphasis: "tertiary" };
+  const ask = { label: "Allow story sites", action: "first_tap_allow", emphasis: "primary" };
+  switch (access.state) {
+    case "waiting":
+      // Safari's question is up. What is shown of the save stays; only the
+      // ask's own button changes, and it cannot be tapped again.
+      setFirstTapState("access-waiting");
+      configureEarnedActions({ label: "Waiting for Safari…", action: "", disabled: true, emphasis: "secondary" });
+      return;
+    case "allowed":
+      // Every story site is allowed and the page scripts are registered.
+      // Saving by itself also needs an account and the preference on, and
+      // the fullest state is drawn only when both were read as so just now.
+      if (access.account === "connected" && access.automaticSaving === "on") {
+        setFirstTapState("access-allowed");
+        renderFirstTapUnworded("access-allowed", {
+          heading: firstTapPlaceholder("access-allowed-heading"),
+          lead: firstTapPlaceholder("access-allowed-body"),
+          primary: keepReading,
+          result: "success",
+        });
+      } else if (access.automaticSaving === "off") {
+        setFirstTapState("access-allowed-automatic-saving-off");
+        renderFirstTapUnworded("access-allowed-automatic-saving-off", {
+          heading: firstTapPlaceholder("access-allowed-automatic-saving-off-heading"),
+          primary: keepReading,
+        });
+      } else {
+        // Allowed; the account or the preference could not be vouched for.
+        setFirstTapState("access-allowed-unconfirmed");
+        renderFirstTapUnworded("access-allowed-unconfirmed", {
+          heading: firstTapPlaceholder("access-allowed-unconfirmed-heading"),
+          primary: keepReading,
+          checking: true,
+        });
+      }
+      return;
+    case "registration_failed":
+    case "registration_unknown":
+      // Safari allows the story sites; Trace's page scripts are not in place,
+      // or could not be read. Trying again asks Safari for nothing.
+      setFirstTapState(access.state === "registration_failed" ? "access-registration-failed" : "access-registration-unknown");
+      renderFirstTapUnworded(access.state === "registration_failed" ? "access-registration-failed" : "access-registration-unknown", {
+        heading: access.state === "registration_failed"
+          ? firstTapPlaceholder("access-registration-failed-heading")
+          : firstTapPlaceholder("access-registration-unknown-heading"),
+        primary: { label: "Try again", action: "first_tap_access_check", emphasis: "primary" },
+        secondary: notNow,
+      });
+      return;
+    case "partial":
+      // Some of the story sites, not all: never drawn as allowed.
+      setFirstTapState("access-partial");
+      renderFirstTapUnworded("access-partial", {
+        heading: firstTapPlaceholder("access-partial-heading"),
+        primary: ask,
+        secondary: notNow,
+      });
+      return;
+    case "declined":
+      setFirstTapState("access-declined");
+      renderFirstTapUnworded("access-declined", {
+        heading: firstTapPlaceholder("access-declined-heading"),
+        primary: keepReading,
+        // Back to the ask; the request is made by the reader's tap there.
+        secondary: { label: "Try again", action: "first_tap_show_ask", emphasis: "tertiary" },
+      });
+      return;
+    case "could_not_ask":
+      setFirstTapState("access-could-not-ask");
+      renderFirstTapUnworded("access-could-not-ask", {
+        heading: firstTapPlaceholder("access-could-not-ask-heading"),
+        primary: { label: "Try again", action: "first_tap_allow", emphasis: "primary" },
+        secondary: notNow,
+      });
+      return;
+    default:
+      // What Safari allows could not be read. Never drawn as declined.
+      setFirstTapState("access-not-known");
+      renderFirstTapUnworded("access-not-known", {
+        heading: firstTapPlaceholder("access-not-known-heading"),
+        primary: { label: "Check again", action: "first_tap_access_check", emphasis: "primary" },
+        secondary: notNow,
+        checking: true,
+      });
+  }
 }
 
 function renderFirstTapView(view) {
@@ -2377,10 +2487,68 @@ function renderFirstTapView(view) {
 }
 // ── end of the first-tap seam ──────────────────────────────────────────────────
 
+/** Draws the save's state and, over it, the state of the ask. */
+function drawFirstTap() {
+  const view = firstTapLastView;
+  const access = firstTapAccess;
+  // Nothing asked, or not allowed with nothing asked: the save's own state,
+  // which offers the ask where there is one to offer.
+  if (!access || access.state === "not_allowed") {
+    firstTapAccess = null;
+    if (view) renderFirstTapView(view);
+    return;
+  }
+  // While Safari's question is up, the confirmed save stays on show under it.
+  if (access.state === "waiting" && view?.state === "confirmed") renderFirstTapView(view);
+  renderFirstTapAccess(access);
+}
+
+/**
+ * The ask for lasting access to the story sites. Safari raises its question
+ * only for a request made in the reader's tap itself, so the request is made
+ * first, before anything is read or awaited. What it returns is passed to the
+ * background as evidence; the background reads what Safari now allows and
+ * says what came of it.
+ */
+function askForStorySites() {
+  // One request at a time: a second tap while Safari's question is up does nothing.
+  if (firstTapAsking) return;
+  firstTapAsking = true;
+  const startedAt = Date.now();
+  const request = extensionPromiseCall(ext.permissions, "request", [{ origins: earnedOrigins() }]);
+  firstTapSend("access_asking");
+  void recordEarnedEvent("website_access_requested");
+  void request
+    .then(
+      (returned) => ({ returned, elapsedMs: Date.now() - startedAt }),
+      () => ({ threw: true }),
+    )
+    .then((answer) => observeStorySiteAccess("access_answered", answer))
+    .finally(() => {
+      firstTapAsking = false;
+    });
+}
+
+/**
+ * Asks the background what Safari allows now. Where the story sites are
+ * allowed, Trace's page scripts are registered first, so that the background
+ * reads them in place. Nothing here asks Safari for anything.
+ */
+async function observeStorySiteAccess(command, answer = {}) {
+  if (await readCompleteEarnedGrant().catch(() => false)) {
+    await reconcileEarnedRegistration().catch(() => null);
+  }
+  // The background may have been restarted while Safari's question was up.
+  if (!firstTapPort && firstTapStory && firstTapTab) startFirstTap(firstTapStory, firstTapTab);
+  firstTapSend(command, answer);
+}
+
 /** Opens the first-tap save for the story on this tab. False when it cannot be reached. */
-function startFirstTap(story, tabId) {
+function startFirstTap(story, tab) {
   firstTapStory = story;
-  firstTapTabId = tabId;
+  firstTapTab = Number.isInteger(tab?.tabId)
+    ? tab
+    : { tabId: tab.id, url: tab.url, private: firstTapTabIsPrivate(tab) };
   if (!firstTapPort) {
     try {
       firstTapPort = ext.runtime.connect({ name: FIRST_TAP_POPUP_PORT });
@@ -2392,7 +2560,10 @@ function startFirstTap(story, tabId) {
       return false;
     }
     firstTapPort.onMessage.addListener((message) => {
-      if (message && message.view) renderFirstTapView(message.view);
+      if (!message) return;
+      if (message.access) firstTapAccess = message.access;
+      if (message.view) firstTapLastView = message.view;
+      if (message.access || message.view) drawFirstTap();
     });
     firstTapPort.onDisconnect?.addListener(() => {
       firstTapPort = null;
@@ -2417,11 +2588,18 @@ async function prepareEarnedPermissionFlow() {
     earnedCurrentPage = { ...earnedCurrentPage, knownInLibrary: await readKnownInLibrary(tab?.url) };
   }
   // Opened on a story before the story sites are allowed: the background
-  // saves this one story now. The existing ask stays reachable afterwards.
-  if (FIRST_TAP_SAVE && !firstTapSetAside && !hasGrant && story.ok && story.kind === "story") {
-    earnedPreparedContext = Object.freeze({ story, hasGrant: false });
+  // saves this one story now, and the ask follows the save. Opened on one
+  // with the sites allowed but no page yet seen running under them (allowed
+  // in Safari's settings, or from a sheet that closed before it heard): the
+  // background says what holds. Neither reloads the page.
+  if (
+    FIRST_TAP_SAVE && !firstTapSetAside && story.ok && story.kind === "story" &&
+    (!hasGrant || (!onboarding.completedAt && !earnedRunVerified(onboarding, readiness)))
+  ) {
+    earnedPreparedContext = Object.freeze({ story, hasGrant });
     endAccountWait();
-    if (Number.isInteger(tab?.id) && startFirstTap(story, tab.id)) return;
+    if (hasGrant) await reconcileEarnedRegistration().catch(() => null);
+    if (Number.isInteger(tab?.id) && typeof tab?.url === "string" && startFirstTap(story, tab)) return;
   }
   if (onboarding.completedAt && story.ok && !hasGrant) {
     earnedPreparedContext = Object.freeze({ story, hasGrant: false });
@@ -2594,6 +2772,10 @@ async function initializeEarnedPermissionFlow() {
       else if (kernelSnapshotTimer !== null && kernelSnapshotProviderAttempt > 0) requestKernelSnapshot();
     }
     if (!changes[ARCHIVE_READINESS_KEY]) return;
+    // A first-tap sheet draws what the background sends it. A page reporting
+    // in, as one does once it saves by itself, does not start setup over
+    // under what the sheet is showing.
+    if (firstTapPort && !firstTapSetAside) return;
     void prepareEarnedPermissionFlow();
   });
   void recordEarnedEvent("popup_opened");
@@ -3642,6 +3824,13 @@ function bindEarnedActionButtons() {
       if (action === "first_tap_open") firstTapSend("open");
       if (action === "first_tap_save") firstTapSend("save");
       if (action === "first_tap_check") firstTapSend("check");
+      // The request has to be made in this tap itself; see askForStorySites.
+      if (action === "first_tap_allow") askForStorySites();
+      if (action === "first_tap_access_check") void observeStorySiteAccess("access_check");
+      if (action === "first_tap_show_ask") {
+        firstTapAccess = null;
+        drawFirstTap();
+      }
       if (action === "save_story") void saveStoryFromPopup();
       if (action === "enable_auto_track") void enableAutomaticSavingFromPopup();
       if (action === "open_app") openTraceApp(isLikelyIosExtensionUi ? TRACE_IOS_APP_LIBRARY_URL : TRACE_HOME_URL);

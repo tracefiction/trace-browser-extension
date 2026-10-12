@@ -176,6 +176,56 @@ function sendCollectorMessageBestEffort(message) {
   sendCollectorMessage(message);
 }
 
+// The story sites are allowed. This same script carries on as on any page:
+// everything that waited on the mode starts now, once, and nothing is
+// injected or started a second time. Where the background says the page is
+// to be reloaded instead, it is reloaded once, and the scripts registered
+// under the grant start in the new document.
+function traceLeaveManualMode(reload) {
+  if (!tracePageManualMode()) return;
+  if (reload === true) {
+    try {
+      location.reload();
+    } catch (_) {
+      /* The reader's own next load starts the registered scripts. */
+    }
+    return;
+  }
+  globalThis.TRACE_PAGE_MANUAL_MODE = false;
+  try {
+    document.dispatchEvent(new CustomEvent(TRACE_EARNED_PERMISSION_READY_EVENT));
+  } catch (_) {
+    /* The waiting start-ups also run on the next page load. */
+  }
+}
+
+// A page in manual mode asks for itself whether the story sites are allowed
+// yet, each time the reader comes back to it. The background that put it in
+// manual mode may have gone to sleep since, and the reader may have allowed
+// the sites in the browser's settings, where no one is told.
+var TRACE_MANUAL_MODE_ASK_GAP_MS = 2000;
+var traceManualModeAskedAt = 0;
+
+function traceAskWhetherManualModeEnded() {
+  if (!tracePageManualMode()) return;
+  var now = Date.now();
+  if (now - traceManualModeAskedAt < TRACE_MANUAL_MODE_ASK_GAP_MS) return;
+  traceManualModeAskedAt = now;
+  sendCollectorMessage({ type: "TRACE_PAGE_MANUAL_MODE_QUERY" }, function (response) {
+    if (response && response.ok === true && response.manual === false) {
+      traceLeaveManualMode(response.reload === true);
+    }
+  });
+}
+
+if (tracePageManualMode()) {
+  window.addEventListener("pageshow", traceAskWhetherManualModeEnded);
+  window.addEventListener("focus", traceAskWhetherManualModeEnded);
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) traceAskWhetherManualModeEnded();
+  });
+}
+
 var kernelPendingFirstStory = null;
 var kernelFirstStoryLookupPending = KERNEL_SESSION_ACTIVE;
 var kernelProjectionRetryTimer = null;
@@ -3633,15 +3683,7 @@ function handleCollectorMessage(msg, sender, sendResponse, relayCommand) {
       return false;
     }
     if (msg.type === "TRACE_PAGE_MANUAL_MODE_END") {
-      // The story sites are allowed. This same script carries on as on any
-      // page: everything that waited on the mode starts now, once, and
-      // nothing is injected or started a second time.
-      globalThis.TRACE_PAGE_MANUAL_MODE = false;
-      try {
-        document.dispatchEvent(new CustomEvent(TRACE_EARNED_PERMISSION_READY_EVENT));
-      } catch (_) {
-        /* The waiting start-ups also run on the next page load. */
-      }
+      traceLeaveManualMode(msg.reload === true);
       sendResponse({ ok: true });
       return false;
     }
@@ -3688,9 +3730,20 @@ function handleCollectorMessage(msg, sender, sendResponse, relayCommand) {
       sendResponse({ ok: false, error: "story_unavailable" });
       return false;
     }
+    var firstTapPrivate = null;
+    try {
+      // The page's own word on whether this is a private tab, where it has one.
+      firstTapPrivate =
+        ext.extension && typeof ext.extension.inIncognitoContext === "boolean"
+          ? ext.extension.inIncognitoContext
+          : null;
+    } catch (_) {
+      firstTapPrivate = null;
+    }
     sendResponse({
       ok: true,
       workKey: firstTapWorkKey,
+      private: firstTapPrivate,
       title: firstTapItem.t ? String(firstTapItem.t).slice(0, 300) : null,
       author: firstTapItem.a ? String(firstTapItem.a).slice(0, 200) : null,
       payload: {

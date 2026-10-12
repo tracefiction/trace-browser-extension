@@ -33,85 +33,158 @@ const steadyCrypto = {
   },
 };
 
-function harness({ granted = false, registered = [], crypto = steadyCrypto } = {}) {
+const REGISTERED = ["trace-archive-automation-v1", "trace-ao3-saved-filters-v1"];
+
+/**
+ * One install: what Safari allows, the open tabs with the page script each
+ * holds, storage and the account. `worker()` starts a background over it, as
+ * Safari does each time it wakes the extension; what a background holds only
+ * in memory starts empty.
+ */
+function install({ granted = false, registered = [], crypto = steadyCrypto } = {}) {
   const state = {
     granted, registered, binding: "1.aaa",
-    tabs: { 7: { id: 7, url: STORY_URL, active: true }, 9: { id: 9, url: "https://www.fanfiction.net/s/999/1/Other", active: false } },
-  };
-  const calls = { injections: [], tabMessages: [], saves: [], presence: [], store: {}, gets: [] };
-  let connect = null;
-  let admission = null;
-  const runtime = { id: "trace-test", onConnect: { addListener(fn) { connect = fn; } } };
-  const afterScriptsRegistered = installFirstTapSave({
-    runtime,
-    mode: "promise",
-    origins: FIVE,
-    registrationIds: ["trace-archive-automation-v1", "trace-ao3-saved-filters-v1"],
-    permissions: {
-      async contains({ origins }) { assert.deepEqual(origins, FIVE); return state.granted; },
-      request() { assert.fail("the background never asks for website access"); },
-    },
-    scripting: {
-      async executeScript(injection) { calls.injections.push(injection); },
-      async getRegisteredContentScripts() { return state.registered.map((id) => ({ id })); },
-      async registerContentScripts() { assert.fail("a first tap registers nothing"); },
-      async unregisterContentScripts() { assert.fail("a first tap unregisters nothing"); },
-    },
+    /** What `permissions.getAll` lists; null to list exactly what `granted` says. */
+    listed: null,
+    account: { state: "verified" },
+    automaticSaving: "on",
+    // `page` is the page script in the tab: none, one in manual mode, or one
+    // running as on any story page.
     tabs: {
-      async query() { assert.fail("no tab is searched for: the popup names the one it was opened on"); },
-      async get(tabId) { calls.gets.push(tabId); return state.tabs[tabId] ?? null; },
-      async create() { assert.fail("no tab is opened"); },
-      async sendMessage(tabId, message, options) {
-        calls.tabMessages.push({ tabId, message, options });
-        if (message.type !== "TRACE_FIRST_TAP_COLLECT") return { ok: true };
-        return {
-          ok: true, workKey: WORK_KEY, title: "A Chance Encounter", author: "someone",
-          payload: { s: "ffn", at: "2026-10-12T12:00:00.000Z", item: { src: "ffn", ctx: "story", u: STORY_URL, t: "A Chance Encounter" } },
-        };
-      },
+      7: { id: 7, url: STORY_URL, page: null },
+      9: { id: 9, url: "https://www.fanfiction.net/s/999/1/Other", page: "normal" },
+      11: { id: 11, url: "https://example.com/", page: null },
     },
-    storage: {
-      async get(key) { return Object.hasOwn(calls.store, key) ? { [key]: calls.store[key] } : {}; },
-      async set(patch) { Object.assign(calls.store, patch); },
-      async remove(key) { delete calls.store[key]; },
-    },
-    session: {
-      async accountForThisOpen() { return { state: "verified", binding: state.binding }; },
-      pageBinding() { return state.binding; },
-      async automaticSaving() { return "on"; },
-      async saveStoryWithEvidence(command, observer) {
-        await observer.beforeWrite();
-        calls.saves.push(command);
-        return {
-          result: { kind: "confirmed", intent: "ensure_saved", confirmation: CONFIRMATION, source: "mutation", projection: "published", receipt: "published", handoff: "not_present" },
-          dispatch: "confirmed",
-        };
-      },
-      async storyPresence(workKey) { calls.presence.push(workKey); return { kind: "unknown" }; },
-      attachStoryAdmission(hooks) { admission = hooks; },
-    },
-    now: () => 1_800_000_000_000,
-    ...(crypto === null ? {} : { crypto }),
-  });
-  const openPort = (sender = { id: "trace-test", url: "safari-web-extension://trace-test/popup.html" }, name = "trace-first-tap-popup-v1") => {
-    const posted = [];
-    let onMessage = null;
-    let onDisconnect = null;
-    connect({
-      name, sender,
-      postMessage(message) { posted.push(message.view); },
-      onMessage: { addListener(fn) { onMessage = fn; } },
-      onDisconnect: { addListener(fn) { onDisconnect = fn; } },
-    });
-    return {
-      posted,
-      send: (command, ...tab) => onMessage?.({ command, tabId: tab.length > 0 ? tab[0] : 7 }),
-      close: () => onDisconnect?.(),
-      attached: onMessage !== null,
-    };
   };
-  return { state, calls, openPort, admission: () => admission, afterScriptsRegistered };
+  const calls = { injections: [], tabMessages: [], saves: [], presence: [], store: {}, queries: [], reloads: [] };
+  const worker = () => {
+    let connect = null;
+    let admission = null;
+    let pageMessage = null;
+    const runtime = {
+      id: "trace-test",
+      onConnect: { addListener(fn) { connect = fn; } },
+      onMessage: { addListener(fn) { pageMessage = fn; } },
+    };
+    const afterScriptsRegistered = installFirstTapSave({
+      runtime,
+      mode: "promise",
+      origins: FIVE,
+      registrationIds: REGISTERED,
+      permissions: {
+        async contains({ origins }) {
+          assert.deepEqual(origins, FIVE);
+          if (state.granted instanceof Error) throw state.granted;
+          return state.granted;
+        },
+        async getAll() {
+          if (state.listed instanceof Error) throw state.listed;
+          return { origins: state.listed ?? (state.granted === true ? [...FIVE] : []) };
+        },
+        request() { assert.fail("the background never asks for website access"); },
+      },
+      scripting: {
+        async executeScript(injection) {
+          calls.injections.push(injection);
+          const tab = state.tabs[injection.target.tabId];
+          if (tab.page === null) tab.page = "manual";
+        },
+        async getRegisteredContentScripts() {
+          if (state.registered instanceof Error) throw state.registered;
+          return state.registered.map((id) => ({ id }));
+        },
+        async registerContentScripts() { assert.fail("a first tap registers nothing"); },
+        async unregisterContentScripts() { assert.fail("a first tap unregisters nothing"); },
+      },
+      tabs: {
+        async query(filter) {
+          calls.queries.push(filter);
+          assert.deepEqual(filter, { url: FIVE }, "only story-site tabs are ever asked for");
+          assert.equal(state.granted, true, "and only once the reader has allowed those sites");
+          return Object.values(state.tabs)
+            .filter(({ url }) => /fanfiction\.net|archiveofourown/.test(url))
+            .map(({ id, url }) => ({ id, url }));
+        },
+        async get() { assert.fail("no tab is looked up: the popup says which tab it was opened on"); },
+        async create() { assert.fail("no tab is opened"); },
+        async reload(tabId) { calls.reloads.push(tabId); },
+        async sendMessage(tabId, message, options) {
+          calls.tabMessages.push({ tabId, message, options });
+          const tab = state.tabs[tabId];
+          if (!tab || tab.page === null) throw new Error("no page script in that tab");
+          if (message.type === "TRACE_PAGE_MANUAL_MODE_END") {
+            if (tab.page !== "manual") return { ok: false, error: "refused" };
+            tab.page = "normal";
+            return { ok: true };
+          }
+          if (message.type !== "TRACE_FIRST_TAP_COLLECT") return { ok: true };
+          return {
+            ok: true, workKey: WORK_KEY, title: "A Chance Encounter", author: "someone",
+            payload: { s: "ffn", at: "2026-10-12T12:00:00.000Z", item: { src: "ffn", ctx: "story", u: STORY_URL, t: "A Chance Encounter" } },
+          };
+        },
+      },
+      storage: {
+        async get(key) { return Object.hasOwn(calls.store, key) ? { [key]: calls.store[key] } : {}; },
+        async set(patch) { Object.assign(calls.store, patch); },
+        async remove(key) { delete calls.store[key]; },
+      },
+      session: {
+        async accountForThisOpen() {
+          return state.account.state === "verified" ? { state: "verified", binding: state.binding } : state.account;
+        },
+        pageBinding() { return state.binding; },
+        async automaticSaving() { return state.automaticSaving; },
+        async saveStoryWithEvidence(command, observer) {
+          await observer.beforeWrite();
+          calls.saves.push(command);
+          return {
+            result: { kind: "confirmed", intent: "ensure_saved", confirmation: CONFIRMATION, source: "mutation", projection: "published", receipt: "published", handoff: "not_present" },
+            dispatch: "confirmed",
+          };
+        },
+        async storyPresence(workKey) { calls.presence.push(workKey); return { kind: "unknown" }; },
+        attachStoryAdmission(hooks) { admission = hooks; },
+      },
+      now: () => 1_800_000_000_000,
+      ...(crypto === null ? {} : { crypto }),
+    });
+    const openPort = (sender = { id: "trace-test", url: "safari-web-extension://trace-test/popup.html" }, name = "trace-first-tap-popup-v1") => {
+      const messages = [];
+      let onMessage = null;
+      let onDisconnect = null;
+      connect({
+        name, sender,
+        postMessage(message) { messages.push(message); },
+        onMessage: { addListener(fn) { onMessage = fn; } },
+        onDisconnect: { addListener(fn) { onDisconnect = fn; } },
+      });
+      return {
+        messages,
+        /** The save states sent, and the states of the ask. */
+        get posted() { return messages.filter(({ view }) => view).map(({ view }) => view); },
+        get access() { return messages.filter(({ access }) => access).map(({ access }) => access); },
+        send: (command, tab = {}) => onMessage?.({ command, tabId: 7, url: state.tabs[7].url, private: false, ...tab }),
+        close: () => onDisconnect?.(),
+        attached: onMessage !== null,
+      };
+    };
+    /** A page script's own message to the background, and its answer. */
+    const fromPage = (message, sender) => new Promise((resolve) => {
+      if (pageMessage(message, sender, resolve) !== true) resolve(undefined);
+    });
+    return { openPort, fromPage, admission: () => admission, afterScriptsRegistered };
+  };
+  return { state, calls, worker };
 }
+
+function harness(options) {
+  const world = install(options);
+  return { state: world.state, calls: world.calls, world, ...world.worker() };
+}
+
+/** Tab messages of one kind, as `tab:type`. */
+const told = (calls, type) => calls.tabMessages.filter(({ message }) => message.type === type).map(({ tabId }) => tabId);
 
 test("the sheet's port saves the tapped story: manual-mode script first, one save, the mark after the sheet closes", async () => {
   const h = harness();
@@ -170,35 +243,47 @@ test("Check again over the port looks and cannot save; an unknown command does n
   assert.equal(h.calls.injections.length, 1);
 });
 
-test("the popup names its tab once; the background reads that tab by id and saves nothing on any other", async () => {
+test("the popup names the tab it was opened on, once; the background looks no tab up, and reaches no other", async () => {
   const h = harness();
   const port = h.openPort();
-  port.send("open", 7);
+  port.send("open");
   await turns();
-  assert.deepEqual(h.calls.gets, [7]);
   assert.equal(h.calls.saves.length, 1);
+  assert.deepEqual(h.calls.queries, [], "no tab is searched for");
 
   // A later message naming another tab is still about the first.
-  port.send("save", 9);
+  port.send("save", { tabId: 9, url: "https://www.fanfiction.net/s/999/1/Other" });
   await turns();
-  assert.deepEqual([...new Set(h.calls.gets)], [7]);
+  assert.deepEqual([...new Set(h.calls.injections.map(({ target }) => target.tabId))], [7]);
 
-  // A tab that is not the one on show in its window is not saved from.
+  // An address that is not a story saves nothing and reaches no page.
   const elsewhere = harness();
   const other = elsewhere.openPort();
-  other.send("open", 9);
+  other.send("open", { tabId: 11, url: "https://example.com/" });
   await turns();
   assert.deepEqual(other.posted, [{ state: "not_applicable" }]);
   assert.deepEqual(elsewhere.calls.injections, []);
 
-  // No tab named: nothing happens at all.
+  // No tab named, or no address for it: nothing happens at all.
   const unnamed = harness();
   const silent = unnamed.openPort();
-  silent.send("open", undefined);
-  silent.send("open", "7");
+  silent.send("open", { tabId: undefined });
+  silent.send("open", { tabId: "7" });
+  silent.send("open", { url: undefined });
   await turns();
-  assert.deepEqual(silent.posted, []);
-  assert.deepEqual(unnamed.calls.gets, []);
+  assert.deepEqual(silent.messages, []);
+  assert.deepEqual(unnamed.calls.injections, []);
+});
+
+test("a private tab, or one the popup could not call ordinary, leaves no record behind", async () => {
+  for (const tab of [{ private: true }, { private: undefined }, { private: "no" }]) {
+    const h = harness();
+    const port = h.openPort();
+    port.send("open", tab);
+    await turns();
+    assert.equal(port.posted.at(-1).state, "confirmed");
+    assert.deepEqual(h.calls.store.traceFirstTapSaveV2?.records ?? [], []);
+  }
 });
 
 test("what the background keeps is a salted digest, never the story", async () => {
@@ -213,29 +298,304 @@ test("what the background keeps is a salted digest, never the story", async () =
   }
 });
 
-test("once the sites are allowed and the scripts registered, injected pages are told to leave manual mode", async () => {
+// --- From the first manual save to automatic saving -----------------------------
+
+test("once the sites are allowed and the scripts registered, the page saved on a first tap is told to carry on, with no reload", async () => {
   const h = harness();
   const port = h.openPort();
   port.send("open");
   await turns();
   port.close();
   await turns();
-  const before = h.calls.tabMessages.length;
+  assert.equal(h.state.tabs[7].page, "manual");
 
   await h.afterScriptsRegistered();
-  assert.equal(h.calls.tabMessages.length, before, "not while the sites are not allowed");
+  assert.deepEqual(told(h.calls, "TRACE_PAGE_MANUAL_MODE_END"), [], "not while the sites are not allowed");
   h.state.granted = true;
   await h.afterScriptsRegistered();
-  assert.equal(h.calls.tabMessages.length, before, "not until the scripts are registered");
+  assert.deepEqual(told(h.calls, "TRACE_PAGE_MANUAL_MODE_END"), [], "not until the scripts are registered");
+  assert.deepEqual(h.calls.queries, [], "and no tab is asked for until then");
 
-  h.state.registered = ["trace-archive-automation-v1", "trace-ao3-saved-filters-v1"];
+  h.state.registered = REGISTERED;
   await h.afterScriptsRegistered();
+  assert.equal(h.state.tabs[7].page, "normal", "the same page script carries on");
   assert.deepEqual(
-    h.calls.tabMessages.slice(before),
-    [{ tabId: 7, message: { type: "TRACE_PAGE_MANUAL_MODE_END" }, options: { frameId: 0 } }],
+    h.calls.tabMessages.find(({ message }) => message.type === "TRACE_PAGE_MANUAL_MODE_END"),
+    { tabId: 7, message: { type: "TRACE_PAGE_MANUAL_MODE_END", reload: false }, options: { frameId: 0 } },
   );
+  assert.deepEqual(h.calls.reloads, [], "nothing is reloaded");
+  assert.equal(h.calls.injections.length, 1, "and no second page script is put in");
+  assert.equal(h.calls.saves.length, 1, "nor the story saved again");
   // Whatever that page sends from now on is stamped by what holds now.
   assert.equal(await h.admission().modeFor(7, WORK_KEY), "normal_automatic");
+
+  // Told again, it has nothing to do: the page is no longer in manual mode.
+  await h.afterScriptsRegistered();
+  assert.equal(h.state.tabs[7].page, "normal");
+});
+
+test("a background that slept since the first tap still hands the page over: allowed from the sheet, or in Safari's settings", async () => {
+  for (const [how, wake] of [
+    // The reader allowed the sites and the registration told the new background.
+    ["told the scripts were registered", (worker) => worker.afterScriptsRegistered()],
+    // Nothing tells it: the sites were allowed in Safari's settings and the
+    // scripts registered by a background that then went away.
+    ["started with the sites already allowed", () => turns()],
+  ]) {
+    const world = install();
+    const first = world.worker();
+    const port = first.openPort();
+    port.send("open");
+    await turns();
+    port.close();
+    await turns();
+    assert.equal(world.state.tabs[7].page, "manual", how);
+
+    // Safari puts the background to sleep; the reader allows the story sites.
+    world.state.granted = true;
+    world.state.registered = REGISTERED;
+    const second = world.worker();
+    await wake(second);
+    await turns();
+    assert.equal(world.state.tabs[7].page, "normal", `${how}: the page was told with nothing remembered`);
+    assert.deepEqual(world.calls.queries.at(-1), { url: FIVE });
+    assert.equal(world.calls.injections.length, 1, "no second page script");
+    assert.equal(world.calls.saves.length, 1, "no second save");
+    assert.equal(await second.admission().modeFor(7, WORK_KEY), "normal_automatic");
+  }
+});
+
+test("a page in manual mode that asks is told when the story sites are allowed, and only its own extension's page is answered", async () => {
+  const h = harness();
+  const page = { id: "trace-test", tab: { id: 7 }, frameId: 0 };
+  const ask = { type: "TRACE_PAGE_MANUAL_MODE_QUERY" };
+  assert.deepEqual(await h.fromPage(ask, page), { ok: true, manual: true, reload: false });
+  h.state.granted = true;
+  assert.deepEqual(await h.fromPage(ask, page), { ok: true, manual: true, reload: false }, "allowed, scripts not registered");
+  h.state.registered = REGISTERED;
+  assert.deepEqual(await h.fromPage(ask, page), { ok: true, manual: false, reload: false });
+  // A background started by the page's own question answers the same.
+  assert.deepEqual(await h.world.worker().fromPage(ask, page), { ok: true, manual: false, reload: false });
+
+  h.state.registered = new Error("unavailable");
+  assert.deepEqual(await h.fromPage(ask, page), { ok: true, manual: true, reload: false }, "unreadable is not allowed");
+
+  for (const sender of [
+    { id: "another-extension", tab: { id: 7 }, frameId: 0 },
+    { id: "trace-test", frameId: 0 },
+    { id: "trace-test", tab: { id: 7 }, frameId: 3 },
+  ]) {
+    assert.deepEqual(await h.fromPage(ask, sender), { ok: false });
+  }
+  assert.equal(await h.fromPage({ type: "TRACE_SOMETHING_ELSE" }, page), undefined, "other messages are left to their owners");
+});
+
+// --- The ask for lasting access ---------------------------------------------------
+
+/** A sheet with a confirmed first-tap save, about to ask. */
+async function savedSheet(options) {
+  const h = harness(options);
+  const port = h.openPort();
+  port.send("open");
+  await turns();
+  assert.equal(port.posted.at(-1).state, "confirmed");
+  return { h, port };
+}
+const ALLOWED = { state: "allowed", account: "connected", automaticSaving: "on", handOver: "in_place" };
+
+test("the ask: waiting while Safari's question is up, then allowed only from a fresh read of all the story sites with the scripts registered", async () => {
+  const { h, port } = await savedSheet();
+  port.send("access_asking");
+  await turns();
+  assert.deepEqual(port.access, [{ state: "waiting" }]);
+  assert.equal(h.state.tabs[7].page, "manual", "nothing changes on the page while Safari asks");
+
+  // The reader allows the sites; the registration puts the scripts in.
+  h.state.granted = true;
+  h.state.registered = REGISTERED;
+  port.send("access_answered", { returned: true, elapsedMs: 4_000 });
+  await turns();
+  assert.deepEqual(port.access.at(-1), ALLOWED);
+  assert.equal(h.state.tabs[7].page, "normal", "and the page it saved from carries on by itself");
+  assert.deepEqual(h.calls.reloads, []);
+  assert.equal(h.calls.injections.length, 1, "one page script throughout");
+  assert.equal(h.calls.saves.length, 1, "one save throughout");
+  assert.deepEqual(port.posted.map(({ state }) => state), ["saving", "confirmed"], "the save shown is not taken back");
+});
+
+test("the ask: what the request returned is never the outcome", async () => {
+  // It returned false, and the sites read as allowed.
+  const yes = await savedSheet();
+  yes.h.state.granted = true;
+  yes.h.state.registered = REGISTERED;
+  yes.port.send("access_answered", { returned: false, elapsedMs: 4_000 });
+  await turns();
+  assert.deepEqual(yes.port.access.at(-1), ALLOWED);
+
+  // It returned true, and the sites do not read as allowed.
+  const no = await savedSheet();
+  no.port.send("access_answered", { returned: true, elapsedMs: 4_000 });
+  await turns();
+  assert.deepEqual(no.port.access.at(-1), { state: "not_known" });
+  assert.equal(no.h.state.tabs[7].page, "manual");
+
+  // It threw, and the sites read as allowed (allowed in settings meanwhile).
+  const threw = await savedSheet();
+  threw.h.state.granted = true;
+  threw.h.state.registered = REGISTERED;
+  threw.port.send("access_answered", { threw: true });
+  await turns();
+  assert.deepEqual(threw.port.access.at(-1), ALLOWED);
+});
+
+test("the ask: declined, and Safari not having asked at all, are told apart", async () => {
+  const declined = await savedSheet();
+  declined.port.send("access_asking");
+  declined.port.send("access_answered", { returned: false, elapsedMs: 2_500 });
+  await turns();
+  assert.deepEqual(declined.port.access, [{ state: "waiting" }, { state: "declined" }]);
+  assert.equal(declined.h.state.tabs[7].page, "manual", "a decline changes nothing on the page");
+  assert.deepEqual(declined.h.calls.queries, [], "and no tab is asked for");
+
+  for (const answer of [
+    { threw: true },
+    // Back before anyone could have answered: no question was shown.
+    { returned: false, elapsedMs: 30 },
+  ]) {
+    const { port } = await savedSheet();
+    port.send("access_answered", answer);
+    await turns();
+    assert.deepEqual(port.access.at(-1), { state: "could_not_ask" }, JSON.stringify(answer));
+  }
+
+  // With no timing to go on, "no" is taken as the reader's answer.
+  const untimed = await savedSheet();
+  untimed.port.send("access_answered", { returned: false });
+  await turns();
+  assert.deepEqual(untimed.port.access.at(-1), { state: "declined" });
+});
+
+test("the ask: fewer than all the story sites is partly allowed, never allowed", async () => {
+  for (const returned of [true, false]) {
+    const { h, port } = await savedSheet();
+    h.state.listed = FIVE.slice(0, 3);
+    h.state.registered = REGISTERED;
+    port.send("access_answered", { returned, elapsedMs: 4_000 });
+    await turns();
+    assert.deepEqual(port.access.at(-1), { state: "partial", granted: 3, total: 5 });
+    assert.equal(h.state.tabs[7].page, "manual", "the page is not handed over on a partial grant");
+    assert.deepEqual(h.calls.queries, []);
+  }
+});
+
+test("the ask: sites allowed with the scripts not registered, or unreadable, is not allowed", async () => {
+  for (const [registered, expected] of [
+    [[], { state: "registration_failed" }],
+    [["trace-archive-automation-v1"], { state: "registration_failed" }],
+    [new Error("unavailable"), { state: "registration_unknown" }],
+  ]) {
+    const { h, port } = await savedSheet();
+    h.state.granted = true;
+    h.state.registered = registered;
+    port.send("access_answered", { returned: true, elapsedMs: 4_000 });
+    await turns();
+    assert.deepEqual(port.access.at(-1), expected);
+    assert.equal(h.state.tabs[7].page, "manual");
+
+    // Looking again, with no new request, finds it once the scripts are in.
+    h.state.registered = REGISTERED;
+    port.send("access_check");
+    await turns();
+    assert.deepEqual(port.access.at(-1), ALLOWED);
+    assert.equal(h.state.tabs[7].page, "normal");
+  }
+});
+
+test("the ask: access that cannot be read is not known, never declined", async () => {
+  const { h, port } = await savedSheet();
+  h.state.granted = new Error("unavailable");
+  h.state.listed = new Error("unavailable");
+  port.send("access_answered", { returned: false, elapsedMs: 4_000 });
+  await turns();
+  assert.deepEqual(port.access.at(-1), { state: "not_known" });
+  port.send("access_check");
+  await turns();
+  assert.deepEqual(port.access.at(-1), { state: "not_known" });
+
+  // One of the two reads is enough to know.
+  h.state.listed = null;
+  h.state.granted = false;
+  port.send("access_check");
+  await turns();
+  assert.deepEqual(port.access.at(-1), { state: "not_allowed" });
+});
+
+test("the ask: allowed says what else was read, and claims nothing it did not read", async () => {
+  for (const [arrange, expected] of [
+    [(state) => { state.account = { state: "missing" }; }, { ...ALLOWED, account: "missing" }],
+    [(state) => { state.account = { state: "unknown" }; }, { ...ALLOWED, account: "unknown" }],
+    [(state) => { state.account = { state: "reconnect_required" }; }, { ...ALLOWED, account: "reconnect_required" }],
+    [(state) => { state.automaticSaving = "off"; }, { ...ALLOWED, automaticSaving: "off" }],
+    [(state) => { state.automaticSaving = "unknown"; }, { ...ALLOWED, automaticSaving: "unknown" }],
+  ]) {
+    const { h, port } = await savedSheet();
+    h.state.granted = true;
+    h.state.registered = REGISTERED;
+    arrange(h.state);
+    port.send("access_answered", { returned: true, elapsedMs: 4_000 });
+    await turns();
+    assert.deepEqual(port.access.at(-1), expected);
+    assert.deepEqual(Object.keys(port.access.at(-1)).sort(), ["account", "automaticSaving", "handOver", "state"],
+      "nothing says how long the access lasts");
+  }
+});
+
+test("the ask: a second tap while one is out does nothing", async () => {
+  const { h, port } = await savedSheet();
+  port.send("access_asking");
+  port.send("access_asking");
+  port.send("access_asking");
+  await turns();
+  assert.deepEqual(port.access, [{ state: "waiting" }]);
+  assert.deepEqual(h.calls.queries, []);
+
+  port.send("access_answered", { returned: false, elapsedMs: 2_500 });
+  await turns();
+  // Once it has come back, the reader may ask again.
+  port.send("access_asking");
+  await turns();
+  assert.deepEqual(port.access, [{ state: "waiting" }, { state: "declined" }, { state: "waiting" }]);
+});
+
+test("the ask: a sheet closed while Safari's question is up loses nothing, and the next one looks afresh", async () => {
+  // Allowed while the sheet was closed.
+  const granted = await savedSheet();
+  granted.port.send("access_asking");
+  granted.port.close();
+  await turns();
+  granted.h.state.granted = true;
+  granted.h.state.registered = REGISTERED;
+  const reopened = granted.h.openPort();
+  reopened.send("open");
+  await turns();
+  assert.deepEqual(reopened.messages, [{ view: { state: "automatic" }, access: ALLOWED }]);
+  assert.equal(granted.h.state.tabs[7].page, "normal", "the page is handed over on that open");
+  assert.equal(granted.h.calls.saves.length, 1, "and nothing is saved again");
+
+  // Not allowed while it was closed: the save is still shown, the ask is
+  // offered again, and it is not stuck waiting.
+  const declined = await savedSheet();
+  declined.port.send("access_asking");
+  declined.port.close();
+  await turns();
+  const again = declined.h.openPort();
+  again.send("open");
+  await turns();
+  assert.deepEqual(again.messages.map(({ view, access }) => [view?.state, access?.state]), [["confirmed", undefined]]);
+  again.send("access_asking");
+  await turns();
+  assert.deepEqual(again.access, [{ state: "waiting" }], "a new sheet can ask");
+  assert.equal(declined.h.calls.saves.length, 1);
 });
 
 test("a page's own save is stamped by what holds when it is admitted", async () => {
@@ -261,7 +621,6 @@ test("once the story sites are allowed the port saves nothing", async () => {
   port.send("open");
   await turns();
   assert.deepEqual(port.posted, [{ state: "automatic" }]);
-  assert.deepEqual(h.calls.gets, [7]);
   assert.deepEqual(h.calls.injections, []);
   assert.deepEqual(h.calls.saves, []);
 });

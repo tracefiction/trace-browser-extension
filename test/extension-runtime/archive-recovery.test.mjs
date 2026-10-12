@@ -96,14 +96,27 @@ test("every tab lookup in the background is for the tab just used, for sites it 
     for (const call of source.matchAll(/\btabs, "get",\s*\[([^\]]*)\]/g)) {
       found.push({ file, source, at: call.index, kind: "get", argument: call[1].trim() });
     }
+    // No other spelling slips past the two above: nothing calls the browser's
+    // tab lookups directly, or names one that returns tabs wholesale.
+    assert.equal(/(?<!#)\btabs\??\.(?:get|query|getCurrent|getAllInWindow)\s*\(/.test(source), false, `${file} looks tabs up directly`);
+    assert.equal(/"(?:getCurrent|getAllInWindow|getSelected)"/.test(source), false, `${file} looks tabs up wholesale`);
+    // The controller's wrapper is the one place that calls through, with the
+    // filter each caller above handed it.
+    for (const direct of source.matchAll(/#tabs\.(?:get|query)\(([^,)]*)/g)) {
+      assert.equal(direct[1], "query", `${file} looks tabs up directly`);
+    }
   }
-  assert.ok(found.filter(({ kind }) => kind === "query").length >= 8, "the runtime's tab queries were found");
+  assert.ok(found.filter(({ kind }) => kind === "query").length >= 9, "the runtime's tab queries were found");
+  assert.ok(found.some(({ file, kind }) => file === "first-tap-runtime.mts" && kind === "query"), "the hand-over's query was found");
   assert.ok(found.some(({ kind }) => kind === "get"), "the runtime's lookups by tab id were found");
   for (const { file, source, at, kind, argument } of found) {
     const where = `${file} looks up tabs with ${argument}`;
     if (kind === "get") {
       // One tab, by an id a message or the browser handed over; never a search.
-      assert.match(argument, /^(?:source|connect|tapped)TabId$/, where);
+      // The save made when the reader opens Trace is not among them: it is
+      // told which tab by the popup, and looks none up.
+      assert.match(argument, /^(?:source|connect)TabId$/, where);
+      assert.doesNotMatch(file, /^(?:first-tap|story-site)/, where);
       continue;
     }
     if (/^\{ active: true, currentWindow: true,? \}$/.test(argument)) continue;
@@ -112,6 +125,14 @@ test("every tab lookup in the background is for the tab just used, for sites it 
     if (filter === "storySites") {
       // Story sites only, and the list is built from nothing else.
       assert.match(source.slice(0, at), /const storySites = [^;]*\.filter\(isStorySitePattern\)/, where);
+      if (file === "first-tap-runtime.mts") {
+        // This one runs with no tap behind it (a background starting, a
+        // registration finishing), in a build that declares no story site.
+        // It is reached only once the reader has allowed them all.
+        const guard = source.lastIndexOf("if (!(await savesByItself())) return;", at);
+        assert.ok(guard !== -1 && at - guard < 900, `${where} without first establishing the complete grant`);
+        assert.match(source, /const savesByItself = async \(\): Promise<boolean> => \{\s*const \[grant, scripts\] = await Promise\.all\(\[grantComplete\(\), registered\(\)\]\);\s*return grant === true && scripts === true;/);
+      }
     } else {
       // Trace's own site, and only after the build is known to declare it.
       assert.match(filter, /^\[(?:this\.#queryPattern|this\.#webTabPattern|target\.queryPattern)\]$/, where);
