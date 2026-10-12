@@ -545,3 +545,18 @@ test("presence never reports a story as missing, and cannot reach the write", as
   assert.deepEqual(await lookup, { kind: "unknown" });
 });
 
+test("a caller is told just before each write goes out, and only then; what it does cannot stop the save", async () => {
+  const order = [];
+  const h = createHarness({ checkTrack() { order.push("write"); } });
+  const { dispatch } = await h.service.executeWithEvidence(command, {
+    async beforeWrite() { order.push("before"); throw new Error("could not record it"); },
+  });
+  assert.deepEqual(order, ["before", "write"]);
+  assert.equal(dispatch, "confirmed");
+
+  const found = createHarness({ lookup: [{ kind: "found", confirmation }] });
+  let told = 0;
+  await found.service.executeWithEvidence(command, { beforeWrite() { told += 1; } });
+  assert.equal(told, 0, "a story found first has no write to announce");
+});
+

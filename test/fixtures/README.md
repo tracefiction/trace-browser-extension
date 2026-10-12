@@ -15,3 +15,8 @@ pages.
 chapter 2+ page with a chapter summary, the Entire Work view and a one-shot)
 for the work-summary selector tests. They use a public-domain fandom, invented
 titles and original prose; they are not snapshots of live pages.
+
+`ao3_adult_content_notice.html` is a synthetic AO3-shaped page for the notice
+AO3 shows before a work that may have adult content: the caution, its
+choices, and a summary of the work where the story will be. Invented title and
+author; not a snapshot of a live page.

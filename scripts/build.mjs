@@ -106,14 +106,35 @@ if (IOS_EARNED_PERMISSION_REQUIRED_HOSTS && !IOS_EARNED_PERMISSION_ONBOARDING) {
 }
 const IOS_OPTIONAL_STORY_SITE_ACCESS =
   IOS_EARNED_PERMISSION_ONBOARDING && !IOS_EARNED_PERMISSION_REQUIRED_HOSTS;
-// Saving the story the reader opens Trace on, before lasting access. Off
-// unless asked for: its sheet states still show placeholders, not wording.
+// Saving the story the reader opens Trace on, before lasting access. It is
+// not finished: some of its states show placeholders where wording will go.
+// So it is a development switch, and three rules keep it one.
+//  1. No release build can turn it on, whatever else is set. Shipping it is a
+//     change to this file, made on purpose, not a setting.
+//  2. A development build that talks to the production service can turn it on
+//     only with a second switch, named for what it is, given on the command
+//     line. A line in `.env` is never enough.
+//  3. With it off, its background wiring and its page file are left out of
+//     the package.
 const IOS_FIRST_TAP_SAVE = /^(?:1|true)$/i.test(
   String(env.TRACE_IOS_FIRST_TAP_SAVE ?? ""),
+);
+const IOS_FIRST_TAP_PRODUCTION_PROOF = /^(?:1|true)$/i.test(
+  String(process.env.TRACE_IOS_FIRST_TAP_PRODUCTION_PROOF ?? ""),
 );
 if (IOS_FIRST_TAP_SAVE && !IOS_OPTIONAL_STORY_SITE_ACCESS) {
   throw new Error(
     "TRACE_IOS_FIRST_TAP_SAVE requires the iPhone build with optional story sites.",
+  );
+}
+if (IOS_FIRST_TAP_SAVE && IS_RELEASE) {
+  throw new Error(
+    "TRACE_IOS_FIRST_TAP_SAVE cannot be turned on in a release build.",
+  );
+}
+if (IOS_FIRST_TAP_PRODUCTION_PROOF && !IOS_FIRST_TAP_SAVE) {
+  throw new Error(
+    "TRACE_IOS_FIRST_TAP_PRODUCTION_PROOF is only for a build with TRACE_IOS_FIRST_TAP_SAVE.",
   );
 }
 if (
@@ -387,24 +408,15 @@ const earnedPermissionRuntimeConfig = {
   registrations: earnedPermissionRegistrations,
 };
 
-// A first-tap sheet state with no agreed wording shows a placeholder. None may
-// reach a build made for a store: the build stops while any remains. The
-// paired development build, which cannot ship, may carry them.
-const FIRST_TAP_PLACEHOLDER_PATTERN = /firstTapPlaceholder\(\s*"([^"]+)"/g;
-const firstTapPlaceholders = Array.from(
-  fs.readFileSync(path.join(RES, "popup.js"), "utf8").matchAll(FIRST_TAP_PLACEHOLDER_PATTERN),
-  (match) => match[1],
-);
+// Rule 2 above. The proof build is for trying the first-tap save against the
+// real service before it ships; it is a development build in every other way.
 if (
   IOS_FIRST_TAP_SAVE &&
-  IS_RELEASE &&
-  !IOS_EARNED_PERMISSION_PREVIEW_RELEASE &&
-  firstTapPlaceholders.length > 0
+  (TRACE_API_BASE === RELEASE_TRACE_API_BASE || TRACE_WEB_ORIGIN === RELEASE_TRACE_WEB_ORIGIN) &&
+  !IOS_FIRST_TAP_PRODUCTION_PROOF
 ) {
   throw new Error(
-    `TRACE_IOS_FIRST_TAP_SAVE cannot be built for release while sheet states have no wording: ${
-      [...new Set(firstTapPlaceholders)].join(", ")
-    }.`,
+    "TRACE_IOS_FIRST_TAP_SAVE with the production service needs TRACE_IOS_FIRST_TAP_PRODUCTION_PROOF=1 on the command line.",
   );
 }
 
@@ -451,6 +463,7 @@ if (HAS_SESSION_RUNTIME) {
       __TRACE_API_BASE__: JSON.stringify(TRACE_API_BASE),
       __TRACE_WEB_ORIGIN__: JSON.stringify(TRACE_WEB_ORIGIN),
       __TRACE_NATIVE_IMPORT_HANDOFF__: JSON.stringify(NATIVE_IMPORT_HANDOFF),
+      __TRACE_IOS_FIRST_TAP_SAVE__: JSON.stringify(IOS_FIRST_TAP_SAVE),
       __TRACE_IOS_EARNED_PERMISSION_CONFIG__: JSON.stringify(
         IOS_EARNED_PERMISSION_ONBOARDING
           ? earnedPermissionRuntimeConfig
@@ -472,6 +485,13 @@ const contentConfigPath = path.join(RES, "content-config.js");
 // Firefox execute the same ordered artifact.
 fs.rmSync(path.join(RES, "extension-session-runtime.js"), { force: true });
 fs.rmSync(path.join(RES, "legacy-background.js"), { force: true });
+// The first-tap save's page file is part of the package only with it on.
+const pageManualModePath = path.join(RES, "page-manual-mode.js");
+if (IOS_FIRST_TAP_SAVE) {
+  fs.copyFileSync(path.join(ROOT, "src", "page-manual-mode.js"), pageManualModePath);
+} else {
+  fs.rmSync(pageManualModePath, { force: true });
+}
 if (HAS_SESSION_RUNTIME) {
   const runtimeHeader = `// Generated ${SESSION_MODE} runtime. Do not edit by hand.
 const TRACE_API_BASE = ${JSON.stringify(TRACE_API_BASE)};
@@ -510,6 +530,13 @@ if (
   );
 }
 manifest.description = extensionDescription;
+// A build with the unfinished first-tap save on carries that in its name, so
+// it cannot be mistaken for the extension that ships.
+const extensionName = localeMessages.extension_name?.message;
+if (typeof extensionName !== "string" || extensionName.length === 0) {
+  throw new Error("_locales/en/messages.json extension_name must be set.");
+}
+manifest.name = IOS_FIRST_TAP_SAVE ? `${extensionName} (first-tap proof)` : extensionName;
 manifest.permissions = IOS_ACTIVE_TAB_PERMISSIONS
   ? [...IOS_ACTIVE_TAB_PROBE_PERMISSIONS]
   : [...NORMAL_SAFARI_PERMISSIONS];
@@ -813,6 +840,13 @@ console.log(
     IOS_EARNED_PERMISSION_REQUIRED_HOSTS,
 );
 console.log("TRACE_IOS_FIRST_TAP_SAVE=" + IOS_FIRST_TAP_SAVE);
+if (IOS_FIRST_TAP_SAVE) {
+  console.warn(
+    IOS_FIRST_TAP_PRODUCTION_PROOF
+      ? "[Trace build] FIRST-TAP PROOF BUILD against the production service. Not for release."
+      : "[Trace build] First-tap save is ON in this development build. Not for release.",
+  );
+}
 console.log(
   "TRACE_IOS_EARNED_PERMISSION_PREVIEW_RELEASE=" +
     IOS_EARNED_PERMISSION_PREVIEW_RELEASE,

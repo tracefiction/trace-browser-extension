@@ -18,6 +18,7 @@
     "build:ios-earned-permission-onboarding": "npm run build:core && TRACE_SESSION_MODE=kernel TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1 node scripts/build.mjs",
     "build:ios-earned-permission-onboarding:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1 TRACE_API_BASE=https://api.tracefiction.com TRACE_WEB_ORIGIN=https://www.tracefiction.com node scripts/build.mjs",
     "build:ios-earned-permission-onboarding:required-hosts:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1 TRACE_IOS_EARNED_PERMISSION_REQUIRED_HOSTS=1 TRACE_API_BASE=https://api.tracefiction.com TRACE_WEB_ORIGIN=https://www.tracefiction.com node scripts/build.mjs",
+    "build:ios-first-tap-proof": "npm run build:core && TRACE_SESSION_MODE=kernel TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1 TRACE_IOS_FIRST_TAP_SAVE=1 TRACE_IOS_FIRST_TAP_PRODUCTION_PROOF=1 TRACE_API_BASE=https://api.tracefiction.com TRACE_WEB_ORIGIN=https://www.tracefiction.com node scripts/build.mjs",
     "build:ios-earned-permission-onboarding:preview-release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel TRACE_IOS_EARNED_PERMISSION_ONBOARDING=1 TRACE_IOS_EARNED_PERMISSION_PREVIEW_RELEASE=1 node scripts/build.mjs",
     "build:disabled": "npm run build:core && TRACE_SESSION_MODE=disabled node scripts/build.mjs",
     "build:disabled:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=disabled node scripts/build.mjs",

@@ -21,12 +21,15 @@ async function turns() {
 }
 
 function harness({ granted = false, registered = [] } = {}) {
-  const state = { granted, registered, binding: "1.aaa" };
-  const calls = { injections: [], tabMessages: [], saves: [], presence: [], store: {} };
+  const state = {
+    granted, registered, binding: "1.aaa",
+    tabs: { 7: { id: 7, url: STORY_URL, active: true }, 9: { id: 9, url: "https://www.fanfiction.net/s/999/1/Other", active: false } },
+  };
+  const calls = { injections: [], tabMessages: [], saves: [], presence: [], store: {}, gets: [] };
   let connect = null;
   let admission = null;
   const runtime = { id: "trace-test", onConnect: { addListener(fn) { connect = fn; } } };
-  installFirstTapSave({
+  const afterScriptsRegistered = installFirstTapSave({
     runtime,
     mode: "promise",
     origins: FIVE,
@@ -42,7 +45,8 @@ function harness({ granted = false, registered = [] } = {}) {
       async unregisterContentScripts() { assert.fail("a first tap unregisters nothing"); },
     },
     tabs: {
-      async query() { assert.fail("the tapped tab comes from the session, after the tap"); },
+      async query() { assert.fail("no tab is searched for: the popup names the one it was opened on"); },
+      async get(tabId) { calls.gets.push(tabId); return state.tabs[tabId] ?? null; },
       async create() { assert.fail("no tab is opened"); },
       async sendMessage(tabId, message, options) {
         calls.tabMessages.push({ tabId, message, options });
@@ -59,11 +63,11 @@ function harness({ granted = false, registered = [] } = {}) {
       async remove(key) { delete calls.store[key]; },
     },
     session: {
-      async tappedTab() { return { id: 7, url: STORY_URL }; },
       async accountForThisOpen() { return { state: "verified", binding: state.binding }; },
       pageBinding() { return state.binding; },
       async automaticSaving() { return "on"; },
-      async saveStoryWithEvidence(command) {
+      async saveStoryWithEvidence(command, observer) {
+        await observer.beforeWrite();
         calls.saves.push(command);
         return {
           result: { kind: "confirmed", intent: "ensure_saved", confirmation: CONFIRMATION, source: "mutation", projection: "published", receipt: "published", handoff: "not_present" },
@@ -85,9 +89,14 @@ function harness({ granted = false, registered = [] } = {}) {
       onMessage: { addListener(fn) { onMessage = fn; } },
       onDisconnect: { addListener(fn) { onDisconnect = fn; } },
     });
-    return { posted, send: (command) => onMessage?.({ command }), close: () => onDisconnect?.(), attached: onMessage !== null };
+    return {
+      posted,
+      send: (command, ...tab) => onMessage?.({ command, tabId: tab.length > 0 ? tab[0] : 7 }),
+      close: () => onDisconnect?.(),
+      attached: onMessage !== null,
+    };
   };
-  return { state, calls, openPort, admission: () => admission };
+  return { state, calls, openPort, admission: () => admission, afterScriptsRegistered };
 }
 
 test("the sheet's port saves the tapped story: manual-mode script first, one save, the mark after the sheet closes", async () => {
@@ -134,14 +143,85 @@ test("only Trace's own sheet can open that port", async () => {
 test("Check again over the port looks and cannot save; an unknown command does nothing", async () => {
   const h = harness();
   const port = h.openPort();
+  port.send("open");
+  await turns();
+  const saves = h.calls.saves.length;
+  // The story is confirmed, so the look has nothing to add; it still only looks.
   port.send("check");
   port.send("mutate");
   port.send(undefined);
   await turns();
   assert.deepEqual(h.calls.presence, [WORK_KEY]);
-  assert.deepEqual(h.calls.saves, []);
-  assert.deepEqual(h.calls.injections, []);
-  assert.deepEqual(port.posted.map(({ state }) => state), ["presence_unknown"]);
+  assert.equal(h.calls.saves.length, saves);
+  assert.equal(h.calls.injections.length, 1);
+});
+
+test("the popup names its tab once; the background reads that tab by id and saves nothing on any other", async () => {
+  const h = harness();
+  const port = h.openPort();
+  port.send("open", 7);
+  await turns();
+  assert.deepEqual(h.calls.gets, [7]);
+  assert.equal(h.calls.saves.length, 1);
+
+  // A later message naming another tab is still about the first.
+  port.send("save", 9);
+  await turns();
+  assert.deepEqual([...new Set(h.calls.gets)], [7]);
+
+  // A tab that is not the one on show in its window is not saved from.
+  const elsewhere = harness();
+  const other = elsewhere.openPort();
+  other.send("open", 9);
+  await turns();
+  assert.deepEqual(other.posted, [{ state: "not_applicable" }]);
+  assert.deepEqual(elsewhere.calls.injections, []);
+
+  // No tab named: nothing happens at all.
+  const unnamed = harness();
+  const silent = unnamed.openPort();
+  silent.send("open", undefined);
+  silent.send("open", "7");
+  await turns();
+  assert.deepEqual(silent.posted, []);
+  assert.deepEqual(unnamed.calls.gets, []);
+});
+
+test("what the background keeps is a salted digest, never the story", async () => {
+  const h = harness();
+  const port = h.openPort();
+  port.send("open");
+  await turns();
+  const kept = JSON.stringify(h.calls.store);
+  assert.match(kept, /traceFirstTapSaveV2/);
+  for (const readable of ["ffn", "7038840", "fanfiction", "A Chance Encounter", "someone"]) {
+    assert.equal(kept.includes(readable), false, `${readable} is not kept`);
+  }
+});
+
+test("once the sites are allowed and the scripts registered, injected pages are told to leave manual mode", async () => {
+  const h = harness();
+  const port = h.openPort();
+  port.send("open");
+  await turns();
+  port.close();
+  await turns();
+  const before = h.calls.tabMessages.length;
+
+  await h.afterScriptsRegistered();
+  assert.equal(h.calls.tabMessages.length, before, "not while the sites are not allowed");
+  h.state.granted = true;
+  await h.afterScriptsRegistered();
+  assert.equal(h.calls.tabMessages.length, before, "not until the scripts are registered");
+
+  h.state.registered = ["trace-archive-automation-v1", "trace-ao3-saved-filters-v1"];
+  await h.afterScriptsRegistered();
+  assert.deepEqual(
+    h.calls.tabMessages.slice(before),
+    [{ tabId: 7, message: { type: "TRACE_PAGE_MANUAL_MODE_END" }, options: { frameId: 0 } }],
+  );
+  // Whatever that page sends from now on is stamped by what holds now.
+  assert.equal(await h.admission().modeFor(7, WORK_KEY), "normal_automatic");
 });
 
 test("a page's own save is stamped by what holds when it is admitted", async () => {
@@ -167,6 +247,7 @@ test("once the story sites are allowed the port saves nothing", async () => {
   port.send("open");
   await turns();
   assert.deepEqual(port.posted, [{ state: "automatic" }]);
+  assert.deepEqual(h.calls.gets, [7]);
   assert.deepEqual(h.calls.injections, []);
   assert.deepEqual(h.calls.saves, []);
 });

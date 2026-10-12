@@ -2606,6 +2606,15 @@ test("a save reports what became of its write, and looking for a story never wri
   assert.equal(unconfirmed.dispatch, "sent_unconfirmed");
   assert.equal(lost.writes().length, 1);
 
+  const watched = firstTapSessionController([nativeCredentialResponse()], { trackStatus: 503 });
+  await watched.controller.accountForThisOpen();
+  let writesWhenTold = null;
+  await watched.controller.saveStoryWithEvidence(firstTapCommand, {
+    beforeWrite() { writesWhenTold = watched.writes().length; },
+  });
+  assert.equal(writesWhenTold, 0, "the caller is told before the write leaves");
+  assert.equal(watched.writes().length, 1);
+
   const refused = firstTapSessionController([nativeCredentialResponse()], { trackStatus: 429 });
   await refused.controller.accountForThisOpen();
   assert.equal((await refused.controller.saveStoryWithEvidence(firstTapCommand)).dispatch, "refused");

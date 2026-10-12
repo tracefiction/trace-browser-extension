@@ -1092,7 +1092,10 @@ export class SessionRuntimeController {
     return (await this.#executeStoryCommandWithEvidence(command)).result;
   }
 
-  async #executeStoryCommandWithEvidence(command: StoryTrackCommand): Promise<StoryCommandEvidence> {
+  async #executeStoryCommandWithEvidence(
+    command: StoryTrackCommand,
+    observer?: { beforeWrite?(): Promise<void> | void },
+  ): Promise<StoryCommandEvidence> {
     let accountData = await this.#accountData.read().catch(() => null);
     if (
       accountData?.capacityRecovery !== null &&
@@ -1113,7 +1116,7 @@ export class SessionRuntimeController {
         dispatch: "never_sent",
       });
     }
-    return this.#storyCommands.executeWithEvidence(command);
+    return this.#storyCommands.executeWithEvidence(command, observer);
   }
 
   // --- What the first-tap save needs from the session -------------------------
@@ -1121,11 +1124,6 @@ export class SessionRuntimeController {
   /** Hooks called as a page's own save is admitted. Absent on builds without the first-tap save. */
   attachStoryAdmission(hooks: StoryAdmissionHooks): void {
     this.#storyAdmission = hooks;
-  }
-
-  /** The tab the reader opened Trace on. Only asked for after that tap. */
-  tappedTab(): Promise<{ readonly id?: number; readonly url?: string } | null> {
-    return this.#activeTab();
   }
 
   pageBinding(): string | null {
@@ -1167,9 +1165,12 @@ export class SessionRuntimeController {
     }
   }
 
-  async saveStoryWithEvidence(command: StoryTrackCommand): Promise<StoryCommandEvidence> {
+  async saveStoryWithEvidence(
+    command: StoryTrackCommand,
+    observer?: { beforeWrite?(): Promise<void> | void },
+  ): Promise<StoryCommandEvidence> {
     await this.start();
-    return this.#executeStoryCommandWithEvidence(command);
+    return this.#executeStoryCommandWithEvidence(command, observer);
   }
 
   /** Looks for one story in the Library. It cannot save. */

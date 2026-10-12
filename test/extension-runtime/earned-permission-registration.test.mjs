@@ -921,6 +921,22 @@ test("the bound does not depend on anything being stored", async () => {
   assert.deepEqual(fresh.alarms.created, []);
 });
 
+test("when the waiting alarms cannot be read, no retry is set; one that fired still leads to the next", async () => {
+  const h = upgradeHarness({ origins: [...ORIGINS] });
+  unreadablePermissions(h);
+  h.alarms.getAll = async () => { throw new Error("alarms unavailable"); };
+  installEarnedPermissionRegistrationRuntime(h.environment);
+  await settled();
+  h.send({ type: "TRACE_ARCHIVE_ACCESS_REPORT" }, { id: "trace-test" });
+  await settled();
+  assert.deepEqual(h.alarms.created, [], "a count that cannot be read is never taken to be zero");
+
+  // A retry alarm that does fire carries its own place in the sequence.
+  h.alarms.waiting.set(`${EARNED_PERMISSION_RETRY_ALARM}:1`, {});
+  await h.fireRetryAlarm();
+  assert.deepEqual(h.retryDelays, [30], "the next one only, and not a second first one beside it");
+});
+
 test("an update or a new grant starts the retries afresh", async () => {
   for (const trigger of ["update", "grant"]) {
     const h = upgradeHarness({ origins: [...ORIGINS] });

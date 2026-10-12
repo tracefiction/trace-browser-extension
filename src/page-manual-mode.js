@@ -2,5 +2,6 @@
 // before Safari has been asked for lasting access. In this mode the page
 // script reads the story when Trace asks and shows its mark when told; it
 // starts nothing by itself. The page script reads this each time it is about
-// to act, so turning it off later takes effect without a reload.
+// to act, and the background turns it off once the story sites are allowed,
+// so the same script carries on without a reload.
 globalThis.TRACE_PAGE_MANUAL_MODE = true;

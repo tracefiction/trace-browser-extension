@@ -31,9 +31,10 @@ The iOS earned-permission build requires no website and has no `tabs`
 permission; its five story-site patterns are optional, and Trace's own website
 is not among them. It uses `activeTab` only to identify the current
 supported story during recovery; it does not inject or save before Website
-Access. A development switch, refused by the build for store packages, lets
-the background inject the page script into the one tab the reader opened Trace
-on and save that story first; see
+Access. A development switch, which no release build can turn on, lets the
+background inject the page script into the one tab the reader opened Trace on
+and save that story first; with it off its background wiring is not in the
+package. See
 [`docs/ios-earned-permission-onboarding.md`](docs/ios-earned-permission-onboarding.md).
 Its background asks Safari for tabs only at story-site addresses and
 only once all five patterns are allowed, and removes its registered page

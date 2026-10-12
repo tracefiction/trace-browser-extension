@@ -42,6 +42,7 @@ declare const __TRACE_API_BASE__: string;
 declare const __TRACE_WEB_ORIGIN__: string;
 declare const __TRACE_NATIVE_IMPORT_HANDOFF__: boolean;
 declare const __TRACE_IOS_EARNED_PERMISSION_CONFIG__: EarnedPermissionRegistrationConfig | null;
+declare const __TRACE_IOS_FIRST_TAP_SAVE__: boolean;
 
 type EarnedPermissionRegistrationConfig = Readonly<{
   version: number;
@@ -108,6 +109,7 @@ try {
     new BrowserStorage(extension.storage.local, extension.runtime, storageMode),
   );
   let session: SessionRuntimeController | undefined;
+  let afterScriptsRegistered: (() => Promise<void>) | null = null;
   if (__TRACE_SESSION_MODE__ === "kernel") {
     const recover = installArchiveRecovery({
       runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, scripting: extension.scripting, mode: storageMode,
@@ -182,7 +184,11 @@ try {
         alarms: extension.alarms,
         // Story tabs that are already open get the scripts too, whether the
         // reader allowed the sites from the popup or in Safari's settings.
-        onScriptsRegistered: () => { void recover(); },
+        // A page that was saved on a first tap is told to carry on by itself.
+        onScriptsRegistered: () => {
+          void recover();
+          void afterScriptsRegistered?.().catch(() => undefined);
+        },
       });
     }
   }
@@ -214,6 +220,9 @@ try {
     archiveReadinessStatus,
   });
   if (
+    // A build-time constant: with the first-tap save off, this block and the
+    // modules only it uses are left out of the bundle altogether.
+    __TRACE_IOS_FIRST_TAP_SAVE__ &&
     __TRACE_SESSION_MODE__ === "kernel" &&
     __TRACE_IOS_EARNED_PERMISSION_CONFIG__ !== null &&
     __TRACE_IOS_EARNED_PERMISSION_CONFIG__.firstTapSave === true &&
@@ -221,7 +230,7 @@ try {
     extension.permissions !== undefined &&
     extension.scripting !== undefined
   ) {
-    installFirstTapSave({
+    afterScriptsRegistered = installFirstTapSave({
       runtime: extension.runtime,
       tabs: extension.tabs,
       permissions: extension.permissions,

@@ -59,47 +59,81 @@ required story sites, `tabs`, and manifest-declared scripts.
 ### Saving on the first tap (development switch)
 
 `TRACE_IOS_FIRST_TAP_SAVE=1` turns on a save made when the reader opens Trace
-on a story before the story sites are allowed. It is off in every package made
-for a store, and the build refuses to make one with it on while any of its
-sheet states still shows a placeholder instead of wording. Only the paired
-development build may carry it. It asks Safari for nothing more: the manifest
-is the same.
+on a story before the story sites are allowed. It is unfinished: some of its
+popup states show a placeholder where wording will go. Three rules keep it a
+development switch:
+
+- No release build can turn it on, whatever else is set. Shipping it is a
+  change to `scripts/build.mjs`, made on purpose.
+- A development build that talks to the production service can turn it on only
+  with `TRACE_IOS_FIRST_TAP_PRODUCTION_PROOF=1` given on the command line. A
+  line in `.env` is not enough. `npm run build:ios-first-tap-proof` is that
+  build. Any build with the switch on names itself "Trace (first-tap proof)"
+  in its manifest and says so in the build log.
+- With it off, its background wiring and `page-manual-mode.js` are left out of
+  the package. The popup's and the page script's own code for it stays in
+  `popup.js` and `collector.js`, which are shipped as written; it does nothing
+  without the build's configuration or the injected file.
+
+It asks Safari for nothing more: the manifest is the same.
 
 With it on, opening Trace on a story page does this:
 
-1. The popup opens a port to the background. Only Trace's own popup can.
-2. The background reads the tab the reader tapped, and the account, for this
-   open. An account it could not read is reported as not known, never as
-   signed out. With automatic saving off, nothing is saved until the reader
-   asks.
+1. The popup opens a port to the background and names the tab it was opened
+   on. Only Trace's own popup can open that port. The background reads that
+   one tab by its id; it searches for no tab, and saves nothing from a tab
+   that is not the one on show in its window. Injection itself works only in
+   the tab the reader opened Trace on, because that is all `activeTab` covers.
+2. The background reads the account for this open. An account it could not
+   read is reported as not known, never as signed out. With automatic saving
+   off, nothing is saved until the reader asks.
 3. The background injects `page-manual-mode.js` and the page script into that
-   one tab, under `activeTab`. In manual mode the page script starts nothing by
-   itself: no automatic save, no report that it ran, no story details sent. It
-   reads the mode each time it is about to send, so lifting the mode later
-   lets the same script carry on.
+   one tab. In manual mode the page script starts nothing by itself: no
+   automatic save, no report that it ran, no story details sent. It reads the
+   mode each time it is about to send.
 4. The page hands the background the story's details. The background checks
    them exactly as a save the page had sent, and makes the save through the
    same guarded path as every other: look first, write only if absent, look
    again if the write's answer is uncertain.
-5. The background holds the one result. The popup draws it; the page shows its
-   mark from the same result, once the popup has closed. A popup reopened on
-   the page gets the same result, without a second save. If the account
-   changes while the save is out, the result is discarded.
+5. When the story sites are later allowed and the page scripts registered, the
+   background tells the pages it injected to leave manual mode. The same
+   script carries on as on any page; no second one is started.
 
-What a result says:
+There is one record for each account and story, held by the background. The
+popup draws it and the page shows its mark from it, once no popup is open over
+the page. Within one attempt a later answer for the same account and story can
+only improve the record: a confirmation is never replaced by a failure, and a
+known origin is never replaced by an unknown one. A change of account is its
+own state, and nothing held for the old account is shown or kept.
+
+What a record says:
 
 - **Saved, already there, or found.** From the save's own outcome: its write
-  was confirmed; the story was found before anything was written; or it is in
-  the Library and whether this tap put it there is not known.
+  was confirmed; the story was found before anything was written, with nothing
+  earlier in doubt; or it is in the Library and whether this reader's tap put
+  it there is not known. A write is recorded as in doubt before it goes out.
+  While one is in doubt for a story, in a private tab, when storage cannot be
+  read, or after a record in doubt had to be dropped, a story found is never
+  called already there.
 - **Never sent, refused, or sent and unconfirmed.** Recorded around the write
   itself. Only "never sent" supports saying nothing was sent.
 - **Check again** only looks. It can report a story found or say it does not
   know; it has no path to a save and never reports a story as missing, because
-  the Library read it uses is not guaranteed complete.
+  the Library read it uses is not guaranteed complete. A popup reopened after
+  a write in doubt looks first, and does not offer to save a story that may be
+  saved.
 - **Manual or automatic.** Stamped by the background when it admits a save:
   manual when it injected that page itself and the story sites were not
   allowed, automatic when they were allowed and the page scripts registered.
   A page's own claim is never read. The stamp stays in the extension for now.
+
+What is kept in extension storage for this: one random salt for the install,
+and at most 20 records. A record holds two digests salted with it (one of the
+account's session, one of that and the story's key), a time, whether a write is
+in doubt, and the outcome with the Library entry's status and chapter numbers.
+It holds no work key, address, title or author. A settled record is dropped
+after 24 hours; one still in doubt is kept until the limit forces it out.
+Nothing is kept for a tab in Private Browsing.
 
 ## User contract
 
@@ -145,9 +179,10 @@ set:
 - `https://m.fanfiction.net/*`
 
 Archive login, signup, password, authentication, and logout routes are excluded
-from the registered scripts. The flow stores only a bounded local
-list of coarse event names and timestamps for device-side diagnosis. It adds no
-network telemetry, URLs, story identity, account identity, page HTML, story
+from the registered scripts. The flow stores a bounded local
+list of coarse event names and timestamps for device-side diagnosis and, with
+the first-tap switch on, the records described above. It adds no
+network telemetry, URLs, readable story identity, account identity, page HTML, story
 text, cookies, or credentials.
 
 ## Build

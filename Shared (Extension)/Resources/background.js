@@ -1796,9 +1796,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     if (!Array.isArray(value) || value.length > 5) return null;
     const summary = [];
     for (const item of value) {
-      const text2 = cleanText(item, 64);
-      if (!text2 || text2 !== item) return null;
-      summary.push(text2);
+      const text = cleanText(item, 64);
+      if (!text || text !== item) return null;
+      summary.push(text);
     }
     return Object.freeze(summary);
   }
@@ -3137,11 +3137,24 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     execute(command) {
       return this.executeWithEvidence(command).then(({ result }) => result);
     }
-    /** The same save, with what is known about its write to Trace. */
-    executeWithEvidence(command) {
+    /**
+     * The same save, with what is known about its write to Trace. `beforeWrite`
+     * is awaited just before each write is handed to the network, so a caller
+     * can record that a write is going out; what it does cannot stop the save.
+     */
+    executeWithEvidence(command, observer) {
       const ownedCommand = { ...command, payload: { ...command.payload } };
       return this.#withLock(async () => {
-        const write = { handedOver: false, refused: false };
+        const write = {
+          handedOver: false,
+          refused: false,
+          before: async () => {
+            try {
+              await observer?.beforeWrite?.();
+            } catch {
+            }
+          }
+        };
         const result = await this.#execute(ownedCommand, write);
         const dispatch = result.kind === "confirmed" ? "confirmed" : !write.handedOver ? "never_sent" : write.refused ? "refused" : "sent_unconfirmed";
         return Object.freeze({ result, dispatch });
@@ -3188,7 +3201,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       const { mode: stampedMode, ...unstamped } = command;
       void stampedMode;
       const trackCommand = { ...unstamped };
-      const track = (credential) => {
+      const track = async (credential) => {
         const { attempt_id: ignored, ...payload } = command.payload;
         const id = context?.setupAttemptID;
         const expiresAt = context?.setupAttemptExpiresAt;
@@ -3197,6 +3210,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         trackCommand.payload = { ...payload, ...valid ? { attempt_id: id.toLowerCase() } : {} };
         write.handedOver = true;
         write.refused = false;
+        await write.before();
         return this.#ports.api.track(credential, trackCommand).then((outcome) => {
           write.refused = outcome.kind === "auth_rejected" || outcome.kind === "success" && outcome.value.kind === "rejected";
           return outcome;
@@ -7306,7 +7320,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     async #executeStoryCommand(command) {
       return (await this.#executeStoryCommandWithEvidence(command)).result;
     }
-    async #executeStoryCommandWithEvidence(command) {
+    async #executeStoryCommandWithEvidence(command, observer) {
       let accountData = await this.#accountData.read().catch(() => null);
       if (accountData?.capacityRecovery !== null && accountData?.capacityRecovery !== void 0 && accountData.overlay === null) {
         accountData = await this.#projection.read().catch(() => accountData);
@@ -7317,16 +7331,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           dispatch: "never_sent"
         });
       }
-      return this.#storyCommands.executeWithEvidence(command);
+      return this.#storyCommands.executeWithEvidence(command, observer);
     }
     // --- What the first-tap save needs from the session -------------------------
     /** Hooks called as a page's own save is admitted. Absent on builds without the first-tap save. */
     attachStoryAdmission(hooks) {
       this.#storyAdmission = hooks;
-    }
-    /** The tab the reader opened Trace on. Only asked for after that tap. */
-    tappedTab() {
-      return this.#activeTab();
     }
     pageBinding() {
       return this.#pageBinding();
@@ -7357,9 +7367,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         return "unknown";
       }
     }
-    async saveStoryWithEvidence(command) {
+    async saveStoryWithEvidence(command, observer) {
       await this.start();
-      return this.#executeStoryCommandWithEvidence(command);
+      return this.#executeStoryCommandWithEvidence(command, observer);
     }
     /** Looks for one story in the Library. It cannot save. */
     async storyPresence(workKey) {
@@ -8527,7 +8537,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       let next = nextRetry;
       nextRetry = null;
       if (next === null) {
-        if ((await waitingRetries() ?? []).length > 0) return;
+        const waiting = await waitingRetries();
+        if (waiting === null || waiting.length > 0) return;
         next = 0;
       }
       await alarm("create", next < RETRIES ? [`${RETRY_PREFIX}${next}`, { delayInMinutes: EARNED_PERMISSION_RETRY_DELAYS_MINUTES[next] }] : [REST_ALARM, { delayInMinutes: EARNED_PERMISSION_RETRY_REST_MINUTES }]);
@@ -8586,303 +8597,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   }
 
   // src/extension-runtime/first-tap-save.mts
-  var FIRST_TAP_POPUP_PORT = "trace-first-tap-popup-v1";
-  var FIRST_TAP_COLLECT_MESSAGE = "TRACE_FIRST_TAP_COLLECT";
-  var FIRST_TAP_MARK_MESSAGE = "TRACE_FIRST_TAP_MARK";
-  var FIRST_TAP_RECORD_KEY = "traceFirstTapSaveV1";
-  var FIRST_TAP_RECORD_TTL_MS = 10 * 60 * 1e3;
-  function isRecord21(value) {
-    return typeof value === "object" && value !== null && !Array.isArray(value);
-  }
-  function text(value, limit) {
-    return typeof value === "string" && value.trim() ? value.trim().slice(0, limit) : null;
-  }
-  function storyFrom(collected, hostKind2) {
-    return Object.freeze({
-      title: text(collected.title, 300),
-      author: text(collected.author, 200),
-      site: hostKind2 === "ffn" ? "FanFiction.net" : "AO3"
-    });
-  }
-  function entryFrom(confirmation) {
-    const entry = confirmation.entry;
-    return Object.freeze({
-      status: text(entry.status, 40),
-      readerStatus: text(entry.readerStatus, 40),
-      canonicalReaderStatus: text(entry.canonicalReaderStatus, 40),
-      chapters: entry.chapters === void 0 ? null : Object.freeze({ current: entry.chapters.current, total: entry.chapters.total })
-    });
-  }
-  function storedRecord(value) {
-    if (!isRecord21(value) || !Number.isInteger(value.tabId) || typeof value.workKey !== "string" || typeof value.binding !== "string" || typeof value.at !== "number" || !["started", "confirmed", "failed"].includes(String(value.phase))) {
-      return null;
-    }
-    return value;
-  }
-  function storySaveModeAtAdmission(evidence) {
-    if (evidence.grantComplete === true && evidence.registered === true) {
-      return "normal_automatic";
-    }
-    if (evidence.injectedForFirstTap && evidence.grantComplete === false) {
-      return "bounded_manual";
-    }
-    return null;
-  }
-  var FirstTapSave = class {
-    #ports;
-    #operations = /* @__PURE__ */ new Map();
-    #listeners = /* @__PURE__ */ new Map();
-    #listenerTabs = /* @__PURE__ */ new Map();
-    /** Tabs whose page script this background injected for a first tap. */
-    #injected = /* @__PURE__ */ new Map();
-    constructor(ports) {
-      this.#ports = ports;
-    }
-    /** Whether the background injected this tab's page script for this story. */
-    injectedFor(tabId, workKey) {
-      return this.#injected.get(tabId) === workKey;
-    }
-    /**
-     * The reader opened Trace. Returns what is known now; later changes reach
-     * `listener` until `closed` is called for it.
-     */
-    async opened(listener, options = {}) {
-      const tab = await this.#ports.activeTab().catch(() => null);
-      const page = this.#storyPage(tab);
-      if (page === null) return Object.freeze({ state: "not_applicable" });
-      this.#listen(page.tabId, listener);
-      const grant = await this.#ports.grantComplete().catch(() => null);
-      if (grant === true) return Object.freeze({ state: "automatic" });
-      const account = await this.#ports.account().catch(
-        () => Object.freeze({ state: "unknown" })
-      );
-      if (account.state !== "verified") {
-        this.#discard(page.tabId);
-        return Object.freeze({
-          state: account.state === "missing" ? "account_missing" : account.state === "reconnect_required" ? "account_reconnect_required" : "account_unknown",
-          workKey: page.workKey
-        });
-      }
-      const current = this.#operations.get(page.tabId);
-      if (current && current.workKey === page.workKey && current.binding === account.binding) {
-        const retry = options.requested === true && current.view.state !== "saving" && current.view.state !== "confirmed";
-        if (!retry) return current.view;
-      } else if (current) {
-        this.#discard(page.tabId);
-      }
-      let stored = storedRecord(await this.#ports.readRecord().catch(() => null));
-      if (stored !== null && !(this.#ports.now() - stored.at >= 0 && this.#ports.now() - stored.at < FIRST_TAP_RECORD_TTL_MS)) {
-        await this.#ports.writeRecord(null).catch(() => void 0);
-        stored = null;
-      }
-      const sameAttempt = stored !== null && stored.workKey === page.workKey && stored.binding === account.binding;
-      if (options.requested !== true && sameAttempt && stored !== null && stored.tabId === page.tabId && stored.view !== void 0 && stored.phase !== "started") {
-        const operation2 = {
-          tabId: page.tabId,
-          workKey: page.workKey,
-          binding: account.binding,
-          view: stored.view,
-          marked: false
-        };
-        this.#operations.set(page.tabId, operation2);
-        return operation2.view;
-      }
-      if (options.requested !== true) {
-        const preference = await this.#ports.automaticSaving().catch(() => "unknown");
-        if (preference !== "on") {
-          return Object.freeze({ state: "awaiting_request", workKey: page.workKey, preference });
-        }
-      }
-      const earlierAttemptOpen = sameAttempt && stored !== null && (stored.phase === "started" || stored.view?.state === "failed" && stored.view.dispatch === "sent_unconfirmed");
-      const operation = {
-        tabId: page.tabId,
-        workKey: page.workKey,
-        binding: account.binding,
-        view: Object.freeze({ state: "saving", workKey: page.workKey, startedAt: this.#ports.now() }),
-        marked: false
-      };
-      this.#operations.set(page.tabId, operation);
-      void this.#run(operation, page.url, grant, earlierAttemptOpen);
-      return operation.view;
-    }
-    /**
-     * "Check again": looks, and can do nothing else. It has no path to a save.
-     * Only a story it finds changes what is shown.
-     */
-    async check() {
-      const tab = await this.#ports.activeTab().catch(() => null);
-      const page = this.#storyPage(tab);
-      if (page === null) return Object.freeze({ state: "not_applicable" });
-      const binding = this.#ports.binding();
-      const unknown = Object.freeze({ state: "presence_unknown", workKey: page.workKey });
-      if (binding === null) return unknown;
-      const presence = await this.#ports.presence(page.workKey).catch(
-        () => ({ kind: "unknown" })
-      );
-      if (presence.kind !== "found" || this.#ports.binding() !== binding) return unknown;
-      const before = this.#operations.get(page.tabId);
-      const story = before && before.workKey === page.workKey && (before.view.state === "confirmed" || before.view.state === "failed") ? before.view.story : null;
-      const operation = {
-        tabId: page.tabId,
-        workKey: page.workKey,
-        binding,
-        view: Object.freeze({
-          state: "confirmed",
-          workKey: page.workKey,
-          provenance: "found",
-          mode: null,
-          story,
-          entry: entryFrom(presence.confirmation)
-        }),
-        marked: false
-      };
-      this.#operations.set(page.tabId, operation);
-      await this.#settle(operation);
-      return operation.view;
-    }
-    /** Trace's sheet closed. The page it was over may now show its mark. */
-    closed(listener) {
-      const tabId = this.#listenerTabs.get(listener);
-      if (tabId === void 0) return;
-      this.#listenerTabs.delete(listener);
-      const listeners = this.#listeners.get(tabId);
-      listeners?.delete(listener);
-      if (listeners?.size === 0) this.#listeners.delete(tabId);
-      const operation = this.#operations.get(tabId);
-      if (operation) void this.#markIfDue(operation);
-    }
-    /**
-     * A page script's own save for this tab and story was admitted. Whatever a
-     * first tap said that was not a confirmation no longer describes the story:
-     * a save the sheet called unsent may be paid by the page a moment later.
-     */
-    pageSaveAdmitted(tabId, workKey) {
-      const operation = this.#operations.get(tabId);
-      if (!operation || operation.workKey !== workKey || operation.view.state === "confirmed") return;
-      this.#discard(tabId);
-      void this.#ports.writeRecord(null).catch(() => void 0);
-    }
-    #storyPage(tab) {
-      if (!tab || !Number.isInteger(tab.id) || typeof tab.url !== "string") return null;
-      const hostKind2 = archiveHostKindFromSender({ url: tab.url });
-      if (hostKind2 === null || isBlockedArchivePath(tab.url, hostKind2)) return null;
-      const workKey = workKeyFromArchiveUrl(tab.url, hostKind2);
-      return workKey === null ? null : { tabId: tab.id, workKey, url: tab.url, hostKind: hostKind2 };
-    }
-    #listen(tabId, listener) {
-      const listeners = this.#listeners.get(tabId) ?? /* @__PURE__ */ new Set();
-      listeners.add(listener);
-      this.#listeners.set(tabId, listeners);
-      this.#listenerTabs.set(listener, tabId);
-    }
-    #discard(tabId) {
-      this.#operations.delete(tabId);
-    }
-    #current(operation) {
-      return this.#operations.get(operation.tabId) === operation && this.#ports.binding() === operation.binding;
-    }
-    async #run(operation, url, grantAtStart, earlierAttemptOpen) {
-      const fail = (reason, dispatch, story) => {
-        operation.view = Object.freeze({ state: "failed", workKey: operation.workKey, reason, dispatch, story });
-        return this.#settle(operation);
-      };
-      try {
-        await this.#ports.writeRecord({
-          tabId: operation.tabId,
-          workKey: operation.workKey,
-          binding: operation.binding,
-          at: this.#ports.now(),
-          phase: "started"
-        }).catch(() => void 0);
-        if (!await this.#ports.inject(operation.tabId).catch(() => false)) {
-          return await fail("page_unreachable", "never_sent", null);
-        }
-        this.#injected.set(operation.tabId, operation.workKey);
-        const collected = await this.#ports.collect(operation.tabId).catch(() => null);
-        const hostKind2 = archiveHostKindFromSender({ url });
-        if (!isRecord21(collected) || hostKind2 === null) {
-          return await fail("page_unreachable", "never_sent", null);
-        }
-        const story = storyFrom(collected, hostKind2);
-        if (collected.ok !== true) {
-          return await fail(
-            collected.error === "story_unavailable" ? "story_unavailable" : "page_unreachable",
-            "never_sent",
-            story
-          );
-        }
-        const command = storyTrackCommandFromMessage(
-          { type: "TRACE_CONNECT_AND_SAVE", workKey: operation.workKey, payload: collected.payload },
-          { tab: { url }, url, frameId: 0 }
-        );
-        if (command === null || command.workKey !== operation.workKey) {
-          return await fail("page_unreachable", "never_sent", story);
-        }
-        if (!this.#current(operation)) return this.#superseded(operation);
-        const mode = storySaveModeAtAdmission({
-          injectedForFirstTap: true,
-          grantComplete: grantAtStart,
-          registered: null
-        });
-        const { result, dispatch } = await this.#ports.save(
-          mode === null ? command : { ...command, mode }
-        );
-        if (!this.#current(operation)) return this.#superseded(operation);
-        if (result.kind === "confirmed") {
-          const provenance = result.source === "mutation" ? "saved_now" : result.source === "preflight" && !earlierAttemptOpen ? "already" : "found";
-          operation.view = Object.freeze({
-            state: "confirmed",
-            workKey: operation.workKey,
-            provenance,
-            mode,
-            story,
-            entry: entryFrom(result.confirmation)
-          });
-          return await this.#settle(operation);
-        }
-        const reason = result.reason === "free_limit_reached" || result.reason === "rate_limited" ? result.reason : result.reason === "not_authenticated" || result.reason === "auth_expired" ? "not_authenticated" : "unavailable";
-        return await fail(reason, dispatch === "confirmed" ? "sent_unconfirmed" : dispatch, story);
-      } catch {
-        if (this.#current(operation)) await fail("unavailable", "sent_unconfirmed", null);
-      }
-    }
-    /** The result is no longer this reader's: say only that the page should be opened again. */
-    #superseded(operation) {
-      if (this.#operations.get(operation.tabId) === operation) this.#discard(operation.tabId);
-      this.#publish(operation.tabId, Object.freeze({ state: "account_unknown", workKey: operation.workKey }));
-    }
-    async #settle(operation) {
-      if (!this.#current(operation)) return this.#superseded(operation);
-      await this.#ports.writeRecord({
-        tabId: operation.tabId,
-        workKey: operation.workKey,
-        binding: operation.binding,
-        at: this.#ports.now(),
-        phase: operation.view.state === "confirmed" ? "confirmed" : "failed",
-        // The story's title and author are shown, never kept.
-        view: "story" in operation.view ? Object.freeze({ ...operation.view, story: null }) : operation.view
-      }).catch(() => void 0);
-      this.#publish(operation.tabId, operation.view);
-      await this.#markIfDue(operation);
-    }
-    #publish(tabId, view) {
-      for (const listener of this.#listeners.get(tabId) ?? []) {
-        try {
-          listener(view);
-        } catch {
-        }
-      }
-    }
-    // The page shows its mark only for a confirmed story, and only once Trace's
-    // sheet is no longer over it. Both read the same held result.
-    async #markIfDue(operation) {
-      if (operation.marked || operation.view.state !== "confirmed" || (this.#listeners.get(operation.tabId)?.size ?? 0) > 0 || !this.#current(operation)) {
-        return;
-      }
-      operation.marked = true;
-      await this.#ports.mark(operation.tabId, operation.workKey).catch(() => void 0);
-    }
-  };
+  var FIRST_TAP_RESULT_FRESH_MS = 10 * 60 * 1e3;
+  var FIRST_TAP_RECORD_TTL_MS = 24 * 60 * 60 * 1e3;
 
   // src/extension-runtime/first-tap-runtime.mts
   var FIRST_TAP_PAGE_FILES = Object.freeze([
@@ -8891,94 +8607,6 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     "trace-finish-qualify.js",
     "collector.js"
   ]);
-  function installFirstTapSave(environment) {
-    const { runtime, tabs, permissions, scripting, storage, mode, origins, session } = environment;
-    const call = (target, method, args) => extensionCall(target, method, args, runtime, mode);
-    const grantComplete = async () => {
-      if (origins.length === 0 || typeof permissions.contains !== "function") return null;
-      try {
-        const answer = await call(permissions, "contains", [{ origins: [...origins] }]);
-        return typeof answer === "boolean" ? answer : null;
-      } catch {
-        return null;
-      }
-    };
-    const registered = async () => {
-      try {
-        const current = await call(scripting, "getRegisteredContentScripts", []);
-        const ids = new Set(current.map(({ id }) => id));
-        return environment.registrationIds.every((id) => ids.has(id));
-      } catch {
-        return null;
-      }
-    };
-    const firstTap = new FirstTapSave({
-      activeTab: () => session.tappedTab(),
-      grantComplete,
-      account: () => session.accountForThisOpen(),
-      binding: () => session.pageBinding(),
-      automaticSaving: () => session.automaticSaving(),
-      async inject(tabId) {
-        if (typeof scripting.executeScript !== "function") return false;
-        await call(scripting, "executeScript", [{
-          target: { tabId, frameIds: [0] },
-          files: [...FIRST_TAP_PAGE_FILES]
-        }]);
-        return true;
-      },
-      collect: (tabId) => call(tabs, "sendMessage", [tabId, { type: FIRST_TAP_COLLECT_MESSAGE }, { frameId: 0 }]),
-      save: (command) => session.saveStoryWithEvidence(command),
-      presence: (workKey) => session.storyPresence(workKey),
-      async mark(tabId, workKey) {
-        await call(tabs, "sendMessage", [tabId, { type: FIRST_TAP_MARK_MESSAGE, workKey }, { frameId: 0 }]);
-      },
-      async readRecord() {
-        return (await storage.get(FIRST_TAP_RECORD_KEY))[FIRST_TAP_RECORD_KEY];
-      },
-      async writeRecord(record3) {
-        if (record3 === null) await storage.remove(FIRST_TAP_RECORD_KEY);
-        else await storage.set({ [FIRST_TAP_RECORD_KEY]: record3 });
-      },
-      now: environment.now ?? (() => Date.now())
-    });
-    session.attachStoryAdmission({
-      async modeFor(tabId, workKey) {
-        const [grant, scripts] = await Promise.all([grantComplete(), registered()]);
-        return storySaveModeAtAdmission({
-          injectedForFirstTap: firstTap.injectedFor(tabId, workKey),
-          grantComplete: grant,
-          registered: scripts
-        });
-      },
-      pageSaveAdmitted: (tabId, workKey) => firstTap.pageSaveAdmitted(tabId, workKey)
-    });
-    runtime.onConnect?.addListener((port) => {
-      if (port.name !== FIRST_TAP_POPUP_PORT || !port.sender || port.sender.id !== runtime.id || port.sender.tab !== void 0 && port.sender.tab !== null || !isPopupSender(port.sender, runtime.id) || port.sender.frameId !== void 0 && port.sender.frameId !== 0) {
-        return;
-      }
-      let open = true;
-      const show = (view) => {
-        if (!open) return;
-        try {
-          port.postMessage({ view });
-        } catch {
-        }
-      };
-      port.onDisconnect.addListener(() => {
-        open = false;
-        firstTap.closed(show);
-      });
-      port.onMessage.addListener((message) => {
-        const command = typeof message === "object" && message !== null ? message.command : void 0;
-        const work = command === "open" ? firstTap.opened(show) : command === "save" ? firstTap.opened(show, { requested: true }) : command === "check" ? firstTap.check() : null;
-        if (work === null) return;
-        void work.then(show, () => show(Object.freeze({ state: "not_applicable" }))).then(() => {
-          if (!open) firstTap.closed(show);
-        });
-      });
-    });
-    return firstTap;
-  }
 
   // src/extension-runtime/index.mts
   var UUID_PATTERN7 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -9007,6 +8635,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       new BrowserStorage(extension.storage.local, extension.runtime, storageMode)
     );
     let session;
+    let afterScriptsRegistered = null;
     if (true) {
       const recover = installArchiveRecovery({
         runtime: extension.runtime,
@@ -9066,8 +8695,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           alarms: extension.alarms,
           // Story tabs that are already open get the scripts too, whether the
           // reader allowed the sites from the popup or in Safari's settings.
+          // A page that was saved on a first tap is told to carry on by itself.
           onScriptsRegistered: () => {
             void recover();
+            void afterScriptsRegistered?.().catch(() => void 0);
           }
         });
       }
@@ -9102,8 +8733,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       randomId,
       archiveReadinessStatus
     });
-    if (define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default !== null && define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.firstTapSave === true && define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.registrationMode !== "static" && extension.permissions !== void 0 && extension.scripting !== void 0) {
-      installFirstTapSave({
+    if (
+      // A build-time constant: with the first-tap save off, this block and the
+      // modules only it uses are left out of the bundle altogether.
+      false
+    ) {
+      afterScriptsRegistered = installFirstTapSave({
         runtime: extension.runtime,
         tabs: extension.tabs,
         permissions: extension.permissions,

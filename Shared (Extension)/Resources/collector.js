@@ -3618,7 +3618,11 @@ function traceRefreshPageTokens() {
 
 // Listen for background requests
 function handleCollectorMessage(msg, sender, sendResponse, relayCommand) {
-  if (msg?.type === "TRACE_FIRST_TAP_COLLECT" || msg?.type === "TRACE_FIRST_TAP_MARK") {
+  if (
+    msg?.type === "TRACE_FIRST_TAP_COLLECT" ||
+    msg?.type === "TRACE_FIRST_TAP_MARK" ||
+    msg?.type === "TRACE_PAGE_MANUAL_MODE_END"
+  ) {
     // Only the extension's own background, and only for a page it put into
     // manual mode itself.
     if (
@@ -3626,6 +3630,19 @@ function handleCollectorMessage(msg, sender, sendResponse, relayCommand) {
       !tracePageManualMode()
     ) {
       sendResponse({ ok: false, error: "refused" });
+      return false;
+    }
+    if (msg.type === "TRACE_PAGE_MANUAL_MODE_END") {
+      // The story sites are allowed. This same script carries on as on any
+      // page: everything that waited on the mode starts now, once, and
+      // nothing is injected or started a second time.
+      globalThis.TRACE_PAGE_MANUAL_MODE = false;
+      try {
+        document.dispatchEvent(new CustomEvent(TRACE_EARNED_PERMISSION_READY_EVENT));
+      } catch (_) {
+        /* The waiting start-ups also run on the next page load. */
+      }
+      sendResponse({ ok: true });
       return false;
     }
     if (shouldDisableTraceContentScript()) {

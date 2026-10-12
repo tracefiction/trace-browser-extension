@@ -209,13 +209,26 @@ export class StoryCommandService {
     return this.executeWithEvidence(command).then(({ result }) => result);
   }
 
-  /** The same save, with what is known about its write to Trace. */
-  executeWithEvidence(command: StoryTrackCommand): Promise<StoryCommandEvidence> {
+  /**
+   * The same save, with what is known about its write to Trace. `beforeWrite`
+   * is awaited just before each write is handed to the network, so a caller
+   * can record that a write is going out; what it does cannot stop the save.
+   */
+  executeWithEvidence(
+    command: StoryTrackCommand,
+    observer?: { beforeWrite?(): Promise<void> | void },
+  ): Promise<StoryCommandEvidence> {
     const ownedCommand = { ...command, payload: { ...command.payload } };
     return this.#withLock(async () => {
       // Set the moment the write is handed to the network, and never unset:
       // from then on only an answer from Trace can say what became of it.
-      const write = { handedOver: false, refused: false };
+      const write = {
+        handedOver: false,
+        refused: false,
+        before: async (): Promise<void> => {
+          try { await observer?.beforeWrite?.(); } catch { /* Recording it is best effort. */ }
+        },
+      };
       const result = await this.#execute(ownedCommand, write);
       const dispatch: StoryDispatch = result.kind === "confirmed"
         ? "confirmed"
@@ -256,7 +269,7 @@ export class StoryCommandService {
 
   async #execute(
     command: StoryTrackCommand,
-    write: { handedOver: boolean; refused: boolean },
+    write: { handedOver: boolean; refused: boolean; before(): Promise<void> },
   ): Promise<StoryCommandResult> {
     const scope = this.#ports.session.publicationScope();
     if (scope === null) return failure("not_authenticated");
@@ -290,7 +303,7 @@ export class StoryCommandService {
     const { mode: stampedMode, ...unstamped } = command;
     void stampedMode;
     const trackCommand = { ...unstamped };
-    const track = (credential: string) => {
+    const track = async (credential: string) => {
       // Do not forward caller/page-supplied correlation or retain it across accounts.
       const { attempt_id: ignored, ...payload } = command.payload;
       const id = context?.setupAttemptID;
@@ -301,8 +314,10 @@ export class StoryCommandService {
         typeof expiresAt === "number" && Number.isFinite(expiresAt) &&
         expiresAt > now && expiresAt - now <= 86_400_000;
       trackCommand.payload = { ...payload, ...(valid ? { attempt_id: id.toLowerCase() } : {}) };
+      // From here the write counts as out, whatever becomes of it.
       write.handedOver = true;
       write.refused = false;
+      await write.before();
       return this.#ports.api.track(credential, trackCommand).then((outcome) => {
         // A refusal is an answer: sign-in rejected, or Trace declined the
         // story. Anything else leaves the write's fate open.

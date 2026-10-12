@@ -558,7 +558,10 @@ export function installEarnedPermissionRegistrationRuntime(
     if (next === null) {
       // No retry alarm led here. One already waiting, or the rest after the
       // last, is left as it is; only a first failure starts the sequence.
-      if (((await waitingRetries()) ?? []).length > 0) return;
+      // When the waiting alarms cannot be read, nothing is set: a count that
+      // is not known is never taken to be zero.
+      const waiting = await waitingRetries();
+      if (waiting === null || waiting.length > 0) return;
       next = 0;
     }
     await alarm("create", next < RETRIES
