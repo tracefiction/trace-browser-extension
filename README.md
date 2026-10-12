@@ -63,8 +63,12 @@ The private containing app also exposes its app version, build number, and
 release channel to the Trace web app. That app-owned diagnostic does not
 include story URLs, archive browsing history, or account email.
 
-The iOS earned-permission build asks for Website Access before any first-story
-write. If access was missed in Settings, an explicit Safari toolbar tap lets the
+The iOS earned-permission build declares its five story-site patterns as
+optional, declares no required website, and has no `tabs` permission, so
+opening Trace from Safari raises no website question; `activeTab` covers only
+the tab it was opened on. Its page scripts are registered when all five
+patterns are allowed and removed when that access ends. It asks for Website
+Access before any first-story write. If access was missed in Settings, an explicit Safari toolbar tap lets the
 popup identify the current supported story, request exactly five optional
 AO3/FanFiction.net origin patterns, register the production scripts, and reload
 the story. The normal content-script handoff then supplies the fresh run and
@@ -359,7 +363,9 @@ keep the popup's existing unavailable/fallback state.
 ## Reconnecting after an extension update
 
 On background start and installation/update, Trace attempts to reinject its
-manifest-declared archive scripts into already-open, granted story-site tabs.
+archive scripts (manifest-declared, or on iPhone and iPad the ones it
+registered) into already-open, granted story-site tabs. It asks the browser
+for story-site tabs by address, never for every open tab.
 The scripting API permission enables this recovery; host permissions are
 unchanged and recovery never requests website access. Each tab is checked
 individually, credential paths remain excluded, and scripts guard against

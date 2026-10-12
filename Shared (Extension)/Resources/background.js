@@ -3,7 +3,7 @@ const TRACE_API_BASE = "https://api.tracefiction.com";
 const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 (() => {
   // <define:__TRACE_IOS_EARNED_PERMISSION_CONFIG__>
-  var define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default = { version: 3, registrationMode: "static", origins: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*", "https://www.fanfiction.net/*", "https://m.fanfiction.net/*"], registrations: [{ id: "trace-archive-automation-v1", matches: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*", "https://www.fanfiction.net/*", "https://m.fanfiction.net/*"], js: ["content-config.js", "trace-finish-qualify.js", "collector.js", "library-overlay-keys.js", "library-overlay.js"], runAt: "document_end", persistAcrossSessions: true, excludeMatches: ["https://archiveofourown.org/users/login*", "https://*.archiveofourown.org/users/login*", "https://archiveofourown.org/users/sign_up*", "https://*.archiveofourown.org/users/sign_up*", "https://archiveofourown.org/users/password*", "https://*.archiveofourown.org/users/password*", "https://archiveofourown.org/users/auth/*", "https://*.archiveofourown.org/users/auth/*", "https://archiveofourown.org/users/logout*", "https://*.archiveofourown.org/users/logout*", "https://archiveofourown.gay/users/login*", "https://*.archiveofourown.gay/users/login*", "https://archiveofourown.gay/users/sign_up*", "https://*.archiveofourown.gay/users/sign_up*", "https://archiveofourown.gay/users/password*", "https://*.archiveofourown.gay/users/password*", "https://archiveofourown.gay/users/auth/*", "https://*.archiveofourown.gay/users/auth/*", "https://archiveofourown.gay/users/logout*", "https://*.archiveofourown.gay/users/logout*", "https://archive.transformativeworks.org/users/login*", "https://archive.transformativeworks.org/users/sign_up*", "https://archive.transformativeworks.org/users/password*", "https://archive.transformativeworks.org/users/auth/*", "https://archive.transformativeworks.org/users/logout*", "https://ao3.org/users/login*", "https://*.ao3.org/users/login*", "https://ao3.org/users/sign_up*", "https://*.ao3.org/users/sign_up*", "https://ao3.org/users/password*", "https://*.ao3.org/users/password*", "https://ao3.org/users/auth/*", "https://*.ao3.org/users/auth/*", "https://ao3.org/users/logout*", "https://*.ao3.org/users/logout*", "https://www.fanfiction.net/login.php*", "https://www.fanfiction.net/signup.php*", "https://www.fanfiction.net/account/login*", "https://www.fanfiction.net/account/signup*", "https://www.fanfiction.net/auth/*", "https://m.fanfiction.net/login.php*", "https://m.fanfiction.net/signup.php*", "https://m.fanfiction.net/account/login*", "https://m.fanfiction.net/account/signup*", "https://m.fanfiction.net/auth/*"] }, { id: "trace-ao3-saved-filters-v1", matches: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*"], js: ["ao3-saved-filters.js"], runAt: "document_end", persistAcrossSessions: true, excludeMatches: ["https://archiveofourown.org/users/login*", "https://*.archiveofourown.org/users/login*", "https://archiveofourown.org/users/sign_up*", "https://*.archiveofourown.org/users/sign_up*", "https://archiveofourown.org/users/password*", "https://*.archiveofourown.org/users/password*", "https://archiveofourown.org/users/auth/*", "https://*.archiveofourown.org/users/auth/*", "https://archiveofourown.org/users/logout*", "https://*.archiveofourown.org/users/logout*", "https://archiveofourown.gay/users/login*", "https://*.archiveofourown.gay/users/login*", "https://archiveofourown.gay/users/sign_up*", "https://*.archiveofourown.gay/users/sign_up*", "https://archiveofourown.gay/users/password*", "https://*.archiveofourown.gay/users/password*", "https://archiveofourown.gay/users/auth/*", "https://*.archiveofourown.gay/users/auth/*", "https://archiveofourown.gay/users/logout*", "https://*.archiveofourown.gay/users/logout*", "https://archive.transformativeworks.org/users/login*", "https://archive.transformativeworks.org/users/sign_up*", "https://archive.transformativeworks.org/users/password*", "https://archive.transformativeworks.org/users/auth/*", "https://archive.transformativeworks.org/users/logout*", "https://ao3.org/users/login*", "https://*.ao3.org/users/login*", "https://ao3.org/users/sign_up*", "https://*.ao3.org/users/sign_up*", "https://ao3.org/users/password*", "https://*.ao3.org/users/password*", "https://ao3.org/users/auth/*", "https://*.ao3.org/users/auth/*", "https://ao3.org/users/logout*", "https://*.ao3.org/users/logout*"] }] };
+  var define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default = { version: 4, registrationMode: "dynamic", origins: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*", "https://www.fanfiction.net/*", "https://m.fanfiction.net/*"], registrations: [{ id: "trace-archive-automation-v1", matches: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*", "https://www.fanfiction.net/*", "https://m.fanfiction.net/*"], js: ["content-config.js", "trace-finish-qualify.js", "collector.js", "library-overlay-keys.js", "library-overlay.js"], runAt: "document_end", persistAcrossSessions: true, excludeMatches: ["https://archiveofourown.org/users/login*", "https://*.archiveofourown.org/users/login*", "https://archiveofourown.org/users/sign_up*", "https://*.archiveofourown.org/users/sign_up*", "https://archiveofourown.org/users/password*", "https://*.archiveofourown.org/users/password*", "https://archiveofourown.org/users/auth/*", "https://*.archiveofourown.org/users/auth/*", "https://archiveofourown.org/users/logout*", "https://*.archiveofourown.org/users/logout*", "https://archiveofourown.gay/users/login*", "https://*.archiveofourown.gay/users/login*", "https://archiveofourown.gay/users/sign_up*", "https://*.archiveofourown.gay/users/sign_up*", "https://archiveofourown.gay/users/password*", "https://*.archiveofourown.gay/users/password*", "https://archiveofourown.gay/users/auth/*", "https://*.archiveofourown.gay/users/auth/*", "https://archiveofourown.gay/users/logout*", "https://*.archiveofourown.gay/users/logout*", "https://archive.transformativeworks.org/users/login*", "https://archive.transformativeworks.org/users/sign_up*", "https://archive.transformativeworks.org/users/password*", "https://archive.transformativeworks.org/users/auth/*", "https://archive.transformativeworks.org/users/logout*", "https://ao3.org/users/login*", "https://*.ao3.org/users/login*", "https://ao3.org/users/sign_up*", "https://*.ao3.org/users/sign_up*", "https://ao3.org/users/password*", "https://*.ao3.org/users/password*", "https://ao3.org/users/auth/*", "https://*.ao3.org/users/auth/*", "https://ao3.org/users/logout*", "https://*.ao3.org/users/logout*", "https://www.fanfiction.net/login.php*", "https://www.fanfiction.net/signup.php*", "https://www.fanfiction.net/account/login*", "https://www.fanfiction.net/account/signup*", "https://www.fanfiction.net/auth/*", "https://m.fanfiction.net/login.php*", "https://m.fanfiction.net/signup.php*", "https://m.fanfiction.net/account/login*", "https://m.fanfiction.net/account/signup*", "https://m.fanfiction.net/auth/*"] }, { id: "trace-ao3-saved-filters-v1", matches: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*"], js: ["ao3-saved-filters.js"], runAt: "document_end", persistAcrossSessions: true, excludeMatches: ["https://archiveofourown.org/users/login*", "https://*.archiveofourown.org/users/login*", "https://archiveofourown.org/users/sign_up*", "https://*.archiveofourown.org/users/sign_up*", "https://archiveofourown.org/users/password*", "https://*.archiveofourown.org/users/password*", "https://archiveofourown.org/users/auth/*", "https://*.archiveofourown.org/users/auth/*", "https://archiveofourown.org/users/logout*", "https://*.archiveofourown.org/users/logout*", "https://archiveofourown.gay/users/login*", "https://*.archiveofourown.gay/users/login*", "https://archiveofourown.gay/users/sign_up*", "https://*.archiveofourown.gay/users/sign_up*", "https://archiveofourown.gay/users/password*", "https://*.archiveofourown.gay/users/password*", "https://archiveofourown.gay/users/auth/*", "https://*.archiveofourown.gay/users/auth/*", "https://archiveofourown.gay/users/logout*", "https://*.archiveofourown.gay/users/logout*", "https://archive.transformativeworks.org/users/login*", "https://archive.transformativeworks.org/users/sign_up*", "https://archive.transformativeworks.org/users/password*", "https://archive.transformativeworks.org/users/auth/*", "https://archive.transformativeworks.org/users/logout*", "https://ao3.org/users/login*", "https://*.ao3.org/users/login*", "https://ao3.org/users/sign_up*", "https://*.ao3.org/users/sign_up*", "https://ao3.org/users/password*", "https://*.ao3.org/users/password*", "https://ao3.org/users/auth/*", "https://*.ao3.org/users/auth/*", "https://ao3.org/users/logout*", "https://*.ao3.org/users/logout*"] }] };
 
   // src/extension-runtime/browser-platform.mts
   var BrowserStorage = class {
@@ -64,6 +64,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         reject(error);
       }
     });
+  }
+  function declaresHostPattern(runtime, pattern) {
+    const manifest = runtime.getManifest?.();
+    if (!manifest) return true;
+    return (manifest.host_permissions ?? []).includes(pattern);
   }
 
   // src/extension-runtime/activity-fetch.mts
@@ -271,6 +276,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     return null;
   }
+  function isStorySitePattern(pattern) {
+    const match = /^https:\/\/(?:\*\.)?([^/*]+)\/\*$/.exec(pattern);
+    return match !== null && archiveHostKindFromSender({ url: `https://${match[1]}/` }) !== null;
+  }
   function isBlockedArchivePath(rawUrl, hostKind2) {
     if (typeof rawUrl !== "string") return true;
     try {
@@ -366,7 +375,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
       if (current === generation) {
         try {
-          const openTabs = await call(tabs, "query", [{}]);
+          const storySites = (sites[0]?.origins ?? []).filter(isStorySitePattern);
+          const openTabs = storySites.length ? await call(tabs, "query", [{ url: storySites }]) : [];
           if (current === generation) await Promise.all(openTabs.map(async (tab) => {
             if (!archiveSite({ id: runtime.id, tab, frameId: 0 })) return;
             await call(tabs, "sendMessage", [tab.id, {
@@ -428,15 +438,28 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     return new RegExp(`^${path}$`).test(url.pathname + url.search);
   }
   function installArchiveRecovery(environment) {
-    const { runtime, tabs, permissions, scripting, mode } = environment;
+    const { runtime, tabs, permissions, scripting, mode, registered } = environment;
     const call = (target, method, args) => extensionCall(target, method, args, runtime, mode);
     let pending = null;
     const recover = () => {
       if (pending) return pending;
       pending = (async () => {
-        if (!scripting?.executeScript || !permissions?.contains || !runtime.getManifest) return;
-        const scripts = runtime.getManifest().content_scripts ?? [];
-        const openTabs = await call(tabs, "query", [{}]);
+        if (!scripting?.executeScript || !permissions?.contains) return;
+        let scripts;
+        if (registered) {
+          if (!registered.origins.length || await call(permissions, "contains", [{ origins: [...registered.origins] }]) !== true) return;
+          scripts = registered.registrations.map(({ matches: matches2, js, excludeMatches }) => ({
+            matches: matches2,
+            js,
+            ...excludeMatches === void 0 ? {} : { exclude_matches: excludeMatches }
+          }));
+        } else {
+          if (!runtime.getManifest) return;
+          scripts = runtime.getManifest().content_scripts ?? [];
+        }
+        const storySites = [...new Set(scripts.flatMap((script) => script.matches ?? []))].filter(isStorySitePattern);
+        if (!storySites.length) return;
+        const openTabs = await call(tabs, "query", [{ url: storySites }]);
         await Promise.all(openTabs.map(async (tab) => {
           try {
             if (!Number.isInteger(tab.id) || !tab.url) return;
@@ -5217,6 +5240,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#queryPattern = `${webUrl.protocol}//${webUrl.hostname}/*`;
     }
     async publish() {
+      if (!declaresHostPattern(this.#runtime, this.#queryPattern)) return false;
       let tabs;
       try {
         tabs = await extensionCall(
@@ -5944,6 +5968,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#queryPattern = `${webUrl.protocol}//${webUrl.hostname}/*`;
     }
     async publish(state) {
+      if (!declaresHostPattern(this.#runtime, this.#queryPattern)) return false;
       let tabs;
       try {
         tabs = await extensionCall(
@@ -8042,6 +8067,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var EARNED_PERMISSION_REGISTRATION_MESSAGE = "TRACE_EARNED_PERMISSION_RECONCILE";
   var EARNED_PERMISSION_STATE_KEY = "traceEarnedPermissionOnboardingV1";
   var DEFAULT_RECONCILE_TIMEOUT_MS = 5e3;
+  var DEFAULT_ENDED_GRANT_CONFIRM_DELAY_MS = 2e3;
   var UNKNOWN_PERMISSION_STATE = Symbol("unknown permission state");
   function isRecord20(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -8123,9 +8149,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #assertCurrent(generation) {
       if (this.#generation !== generation) throw new Error("reconcile_superseded");
     }
-    async #reconcile(generation) {
-      const { config, permissions, runtime, scripting, storageMode, storage } = this.#environment;
-      const [permissionSnapshot, semanticGrant, stored] = await Promise.all([
+    async #readGrant() {
+      const { config, permissions, runtime, storageMode } = this.#environment;
+      const [permissionSnapshot, semanticGrant] = await Promise.all([
         callExtensionApi(
           permissions,
           "getAll",
@@ -8139,8 +8165,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           [{ origins: config.origins }],
           runtime,
           storageMode
-        ).catch(() => null) : Promise.resolve(null),
-        storage.get(EARNED_PERMISSION_STATE_KEY).then((value) => storedState(value[EARNED_PERMISSION_STATE_KEY])).catch(() => Object.freeze({}))
+        ).catch(() => null) : Promise.resolve(null)
       ]);
       if (permissionSnapshot === UNKNOWN_PERMISSION_STATE && typeof semanticGrant !== "boolean") {
         throw new Error("permission_state_unavailable");
@@ -8149,7 +8174,33 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       const granted = new Set(
         Array.isArray(snapshotOrigins) ? snapshotOrigins.filter((origin) => typeof origin === "string") : []
       );
-      const completeGrant = config.origins.length > 0 && (typeof semanticGrant === "boolean" ? semanticGrant : config.origins.every((origin) => granted.has(origin)));
+      return Object.freeze({
+        complete: config.origins.length > 0 && (typeof semanticGrant === "boolean" ? semanticGrant : config.origins.every((origin) => granted.has(origin))),
+        listed: typeof permissionSnapshot !== "symbol"
+      });
+    }
+    // Once the scripts are gone, nothing on a story page wakes this worker, so
+    // a grant wrongly read as ended would stop saving without a word until
+    // something else started the worker. Take the reading again after a pause,
+    // and end the grant only when both readings say so and the browser listed
+    // what is granted both times.
+    async #grantHasEnded(first, generation) {
+      if (first.complete || !first.listed) return false;
+      const delayMs = this.#environment.endedGrantConfirmDelayMs ?? DEFAULT_ENDED_GRANT_CONFIRM_DELAY_MS;
+      if (delayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+      this.#assertCurrent(generation);
+      const second = await this.#readGrant().catch(() => null);
+      return second !== null && !second.complete && second.listed;
+    }
+    async #reconcile(generation) {
+      const { config, runtime, scripting, storageMode, storage } = this.#environment;
+      const [reading, stored] = await Promise.all([
+        this.#readGrant(),
+        storage.get(EARNED_PERMISSION_STATE_KEY).then((value) => storedState(value[EARNED_PERMISSION_STATE_KEY])).catch(() => Object.freeze({}))
+      ]);
+      const completeGrant = reading.complete;
       const staticRegistration = config.registrationMode === "static";
       if (staticRegistration) {
         if (!completeGrant) {
@@ -8205,6 +8256,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (!completeGrant) {
         const staleIds = configuredIds.filter((id) => currentIds.has(id));
         if (staleIds.length > 0) {
+          if (!await this.#grantHasEnded(reading, generation)) {
+            throw new Error("permission_state_unconfirmed");
+          }
           this.#assertCurrent(generation);
           await callExtensionApi(
             scripting,
@@ -8277,7 +8331,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         if (!configuredIds.every((id) => confirmedIds.has(id))) {
           throw new Error("registration_not_confirmed");
         }
-        const grantAt = this.#environment.clock?.() ?? Date.now();
+        const completedAt = typeof stored.completedAt === "number" ? stored.completedAt : null;
+        const grantAt = completedAt !== null && typeof stored.grantAt === "number" ? stored.grantAt : this.#environment.clock?.() ?? Date.now();
         this.#assertCurrent(generation);
         await storage.set({
           [EARNED_PERMISSION_STATE_KEY]: {
@@ -8285,7 +8340,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
             grantAt,
             registrationVersion: config.version,
             promptResult: "granted",
-            completedAt: null
+            completedAt
           }
         });
         return Object.freeze({
@@ -8367,7 +8422,16 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     );
     let session;
     if (true) {
-      const recover = installArchiveRecovery({ runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, scripting: extension.scripting, mode: storageMode });
+      const recover = installArchiveRecovery({
+        runtime: extension.runtime,
+        tabs: extension.tabs,
+        permissions: extension.permissions,
+        scripting: extension.scripting,
+        mode: storageMode,
+        // A build that registers its page scripts after the grant has none in
+        // its manifest for recovery to read.
+        ...define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default !== null && define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.registrationMode !== "static" ? { registered: define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default } : {}
+      });
       installArchiveHostAccess({ runtime: extension.runtime, tabs: extension.tabs, action: extension.action, permissions: extension.permissions, mode: storageMode, recover });
       installTraceFirstInstallActivation({
         runtime: extension.runtime,

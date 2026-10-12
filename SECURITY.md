@@ -27,9 +27,13 @@ data type or token path and does not run automatic tracking, overlays, saved
 filters, Trace-site sync, or archive heartbeats. Normal builds retain the
 release permission model described above.
 
-The iOS earned-permission build uses `activeTab` only to identify the current
+The iOS earned-permission build requires no website and has no `tabs`
+permission; its five story-site patterns are optional, and Trace's own website
+is not among them. It uses `activeTab` only to identify the current
 supported story during recovery; it does not inject or save before Website
-Access. One explicit action requests exactly five optional supported-origin
+Access. Its background asks Safari for tabs only at story-site addresses and
+only once all five patterns are allowed, and removes its registered page
+scripts when two readings agree that access has ended. One explicit action requests exactly five optional supported-origin
 patterns. Only after Safari reports the complete grant does the background
 worker register the production archive scripts and reload the story. Login,
 signup, password, authentication, and logout paths remain excluded. The fresh

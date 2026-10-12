@@ -207,6 +207,33 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     runBuild("build:release");
     assertCollectorModeConfig(path.join(ROOT, "dist", "chrome"), "kernel");
     assertCollectorModeConfig(path.join(ROOT, "dist", "firefox"), "kernel");
+    // Mac Safari, Chrome and Firefox keep required story sites, `tabs` and
+    // manifest-declared page scripts. Only the iPhone build below differs.
+    const desktopSafariManifest = manifest(RESOURCES);
+    assert.deepEqual(desktopSafariManifest.permissions, [
+      "alarms",
+      "tabs",
+      "storage",
+      "scripting",
+      "nativeMessaging",
+    ]);
+    assert.deepEqual(
+      desktopSafariManifest.host_permissions,
+      [...SITE_HOST_MATCHES, "https://www.tracefiction.com/*"],
+    );
+    assert.equal(Object.hasOwn(desktopSafariManifest, "optional_host_permissions"), false);
+    assert.equal(desktopSafariManifest.content_scripts.length, 3);
+    for (const browser of ["chrome", "firefox"]) {
+      const packaged = manifest(path.join(ROOT, "dist", browser));
+      assert.deepEqual(packaged.permissions, ["alarms", "tabs", "storage", "scripting"]);
+      assert.deepEqual(packaged.host_permissions, [
+        ...SITE_HOST_MATCHES,
+        "https://api.tracefiction.com/*",
+        "https://www.tracefiction.com/*",
+      ]);
+      assert.equal(Object.hasOwn(packaged, "optional_host_permissions"), false);
+      assert.equal(packaged.content_scripts.length, 3);
+    }
 
     runBuild("build");
     assertCollectorModeConfig(path.join(ROOT, "dist", "chrome"), "kernel");
@@ -245,7 +272,8 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     assert.deepEqual(optionalSafariManifest.content_scripts, []);
     assert.match(optionalSafariConfig, /TRACE_IOS_ACTIVE_TAB_PROBE = true/);
 
-    runBuild("build:ios-earned-permission-onboarding:release");
+    // The earlier iPhone shape stays buildable, unchanged to the byte.
+    runBuild("build:ios-earned-permission-onboarding:required-hosts:release");
     const earnedSafariManifest = manifest(RESOURCES);
     const earnedSafariConfig = fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8");
     assert.deepEqual(earnedSafariManifest.permissions, [
@@ -326,6 +354,70 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
       earnedContentContext.TRACE_IOS_EARNED_PERMISSION_ONBOARDING,
       undefined,
     );
+    const requiredHostsPackages = ["chrome", "firefox"].map((browser) =>
+      fs.readFileSync(path.join(ROOT, "dist", browser, "manifest.json"), "utf8"));
+
+    // The iPhone and iPad build: nothing is asked before the first tap.
+    runBuild("build:ios-earned-permission-onboarding:release");
+    const iphoneManifest = manifest(RESOURCES);
+    assert.deepEqual(iphoneManifest.permissions, [
+      "alarms",
+      "storage",
+      "nativeMessaging",
+      "activeTab",
+      "scripting",
+    ], "no `tabs`; `activeTab` covers only the tab the reader tapped Trace on");
+    assert.deepEqual(iphoneManifest.host_permissions, [], "no story site is required");
+    assert.deepEqual(
+      iphoneManifest.optional_host_permissions,
+      MINIMIZED_SITE_HOST_MATCHES,
+      "the five story-site patterns are optional, and Trace's own site is not named",
+    );
+    assert.equal(
+      Object.hasOwn(iphoneManifest, "content_scripts"),
+      false,
+      "no page script is declared, and the key is absent rather than empty",
+    );
+    const iphoneContext = {};
+    vm.runInNewContext(
+      fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8"),
+      iphoneContext,
+    );
+    const iphoneOnboarding = iphoneContext.TRACE_IOS_EARNED_PERMISSION_ONBOARDING;
+    assert.equal(iphoneOnboarding.version, 4);
+    assert.equal(iphoneOnboarding.registrationMode, "dynamic");
+    assert.deepEqual(Array.from(iphoneOnboarding.origins), MINIMIZED_SITE_HOST_MATCHES);
+    assert.equal(iphoneOnboarding.registrations.length, 2);
+    for (const registration of iphoneOnboarding.registrations) {
+      assert.equal(registration.persistAcrossSessions, true);
+      assert.equal(registration.runAt, "document_end");
+      for (const match of registration.matches) {
+        assert.ok(
+          MINIMIZED_SITE_HOST_MATCHES.includes(match),
+          `${registration.id} runs only where the reader can allow it`,
+        );
+      }
+      assert.ok(registration.excludeMatches.length > 0, "sign-in pages stay excluded");
+      for (const file of registration.js) {
+        assert.ok(fs.existsSync(path.join(RESOURCES, file)), `${file} ships in the bundle`);
+        assert.notEqual(file, "popup-config.js", "registered pages do not load the popup's setup");
+      }
+    }
+    const iphoneBackground = fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8");
+    assert.match(iphoneBackground, /registrationMode: "dynamic"/);
+    assert.doesNotMatch(iphoneBackground, /registrationMode: "static"/);
+    // The Chrome and Firefox packages built beside it do not follow it.
+    assert.deepEqual(
+      ["chrome", "firefox"].map((browser) =>
+        fs.readFileSync(path.join(ROOT, "dist", browser, "manifest.json"), "utf8")),
+      requiredHostsPackages,
+    );
+    const misuse = spawnSync("node", ["scripts/build.mjs"], {
+      cwd: ROOT,
+      env: { ...RELEASE_ENV, TRACE_SESSION_MODE: "kernel", TRACE_IOS_EARNED_PERMISSION_REQUIRED_HOSTS: "1" },
+      encoding: "utf8",
+    });
+    assert.notEqual(misuse.status, 0, "the required-hosts switch belongs to the iPhone build only");
     const previewResult = spawnSync(
       "npm",
       ["run", "build:ios-earned-permission-onboarding:preview-release"],
@@ -385,7 +477,11 @@ test("explicit development JSON pairs output and rejects invalid or production u
     assert(worker.includes(pair.apiOrigin) && worker.includes(pair.webOrigin));
     assert(!worker.includes("https://api.development.example.test"));
     assert(fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8").includes(pair.webOrigin));
-    assert.deepEqual(manifest(RESOURCES).content_scripts.find(entry => entry.js.includes("sync.js")).matches, [`${pair.webOrigin}/*`]);
+    // The iPhone build names no Trace site of its own; the packages built
+    // beside it pair their Trace-site script with the same web origin.
+    assert.equal(Object.hasOwn(manifest(RESOURCES), "content_scripts"), false);
+    assert(!JSON.stringify(manifest(RESOURCES)).includes(pair.webOrigin));
+    assert.deepEqual(manifest(path.join(ROOT, "dist/chrome")).content_scripts.find(entry => entry.js.includes("sync.js")).matches, [`${pair.webOrigin}/*`]);
     for (const invalid of [null, [], {}, { ...pair, extra: true }, { apiOrigin: pair.apiOrigin },
       ...[null, 12, "http://api.example.test", "https://localhost", "https://foo.localhost", "https://127.0.0.1",
         "https://[::1]", "https://*.example.test", "https://user:pass@api.example.test", "https://api.example.test/",

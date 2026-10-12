@@ -39,6 +39,12 @@ export function archiveHostKindFromSender(
   return null;
 }
 
+/** Whether a host pattern names a story site, as opposed to Trace's own site. */
+export function isStorySitePattern(pattern: string): boolean {
+  const match = /^https:\/\/(?:\*\.)?([^/*]+)\/\*$/.exec(pattern);
+  return match !== null && archiveHostKindFromSender({ url: `https://${match[1]}/` }) !== null;
+}
+
 export function isBlockedArchivePath(
   rawUrl: unknown,
   hostKind: ArchiveHostKind,

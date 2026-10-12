@@ -42,6 +42,13 @@ export type EarnedPermissionRegistrationResult = Readonly<{
   error?: "permission_incomplete" | "registration_failed";
 }>;
 
+/** One look at the browser's website access for the configured origins. */
+type GrantReading = Readonly<{
+  complete: boolean;
+  /** Whether the browser also listed what is granted. */
+  listed: boolean;
+}>;
+
 type Environment = Readonly<{
   runtime: RuntimePort;
   permissions: PermissionsPort;
@@ -52,9 +59,12 @@ type Environment = Readonly<{
   clock?: () => number;
   /** Upper bound for one reconcile; a hung browser call must not wedge the queue. */
   reconcileTimeoutMs?: number;
+  /** How far apart the two readings are that end a grant and remove its scripts. */
+  endedGrantConfirmDelayMs?: number;
 }>;
 
 const DEFAULT_RECONCILE_TIMEOUT_MS = 5_000;
+const DEFAULT_ENDED_GRANT_CONFIRM_DELAY_MS = 2_000;
 const UNKNOWN_PERMISSION_STATE = Symbol("unknown permission state");
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -161,10 +171,9 @@ export class EarnedPermissionRegistrationController {
     if (this.#generation !== generation) throw new Error("reconcile_superseded");
   }
 
-  async #reconcile(generation: number): Promise<EarnedPermissionRegistrationResult> {
-    const { config, permissions, runtime, scripting, storageMode, storage } =
-      this.#environment;
-    const [permissionSnapshot, semanticGrant, stored] = await Promise.all([
+  async #readGrant(): Promise<GrantReading> {
+    const { config, permissions, runtime, storageMode } = this.#environment;
+    const [permissionSnapshot, semanticGrant] = await Promise.all([
       callExtensionApi<{ readonly origins?: readonly string[] }>(
         permissions as unknown as Record<string, (...args: unknown[]) => unknown>,
         "getAll",
@@ -184,10 +193,6 @@ export class EarnedPermissionRegistrationController {
             storageMode,
           ).catch(() => null)
         : Promise.resolve(null),
-      storage
-        .get(EARNED_PERMISSION_STATE_KEY)
-        .then((value) => storedState(value[EARNED_PERMISSION_STATE_KEY]))
-        .catch(() => Object.freeze({}) as StoredState),
     ]);
     // Neither permission read answered: that is not evidence of a partial
     // grant. Report a transient failure so pages ask again and dynamic
@@ -207,11 +212,45 @@ export class EarnedPermissionRegistrationController {
         ? snapshotOrigins.filter((origin) => typeof origin === "string")
         : [],
     );
-    const completeGrant =
-      config.origins.length > 0 &&
-      (typeof semanticGrant === "boolean"
-        ? semanticGrant
-        : config.origins.every((origin) => granted.has(origin)));
+    return Object.freeze({
+      complete:
+        config.origins.length > 0 &&
+        (typeof semanticGrant === "boolean"
+          ? semanticGrant
+          : config.origins.every((origin) => granted.has(origin))),
+      listed: typeof permissionSnapshot !== "symbol",
+    });
+  }
+
+  // Once the scripts are gone, nothing on a story page wakes this worker, so
+  // a grant wrongly read as ended would stop saving without a word until
+  // something else started the worker. Take the reading again after a pause,
+  // and end the grant only when both readings say so and the browser listed
+  // what is granted both times.
+  async #grantHasEnded(first: GrantReading, generation: number): Promise<boolean> {
+    if (first.complete || !first.listed) return false;
+    const delayMs =
+      this.#environment.endedGrantConfirmDelayMs ??
+      DEFAULT_ENDED_GRANT_CONFIRM_DELAY_MS;
+    if (delayMs > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+    }
+    this.#assertCurrent(generation);
+    const second = await this.#readGrant().catch(() => null);
+    return second !== null && !second.complete && second.listed;
+  }
+
+  async #reconcile(generation: number): Promise<EarnedPermissionRegistrationResult> {
+    const { config, runtime, scripting, storageMode, storage } =
+      this.#environment;
+    const [reading, stored] = await Promise.all([
+      this.#readGrant(),
+      storage
+        .get(EARNED_PERMISSION_STATE_KEY)
+        .then((value) => storedState(value[EARNED_PERMISSION_STATE_KEY]))
+        .catch(() => Object.freeze({}) as StoredState),
+    ]);
+    const completeGrant = reading.complete;
     const staticRegistration = config.registrationMode === "static";
     if (staticRegistration) {
       if (!completeGrant) {
@@ -277,6 +316,10 @@ export class EarnedPermissionRegistrationController {
     if (!completeGrant) {
       const staleIds = configuredIds.filter((id) => currentIds.has(id));
       if (staleIds.length > 0) {
+        if (!(await this.#grantHasEnded(reading, generation))) {
+          // Not established: the scripts stay, and the next reconcile decides.
+          throw new Error("permission_state_unconfirmed");
+        }
         this.#assertCurrent(generation);
         await callExtensionApi<void>(
           scripting as unknown as Record<string, (...args: unknown[]) => unknown>,
@@ -358,7 +401,16 @@ export class EarnedPermissionRegistrationController {
       if (!configuredIds.every((id) => confirmedIds.has(id))) {
         throw new Error("registration_not_confirmed");
       }
-      const grantAt = this.#environment.clock?.() ?? Date.now();
+      // A reader who finished setup before, under a build that declared its
+      // scripts in the manifest or under an earlier registration, is carried
+      // over as they were: putting their scripts back is not a new grant, and
+      // must not send them through setup again.
+      const completedAt =
+        typeof stored.completedAt === "number" ? stored.completedAt : null;
+      const grantAt =
+        completedAt !== null && typeof stored.grantAt === "number"
+          ? stored.grantAt
+          : (this.#environment.clock?.() ?? Date.now());
       this.#assertCurrent(generation);
       await storage.set({
         [EARNED_PERMISSION_STATE_KEY]: {
@@ -366,7 +418,7 @@ export class EarnedPermissionRegistrationController {
           grantAt,
           registrationVersion: config.version,
           promptResult: "granted",
-          completedAt: null,
+          completedAt,
         },
       });
       return Object.freeze({

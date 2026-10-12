@@ -3,7 +3,7 @@ import type {
   RuntimePort,
   TabsPort,
 } from "./browser-platform.mjs";
-import { extensionCall } from "./browser-platform.mjs";
+import { declaresHostPattern, extensionCall } from "./browser-platform.mjs";
 
 export interface TraceWebStatus {
   readonly installed: true;
@@ -38,6 +38,9 @@ export class TraceWebStatusNotification {
   }
 
   async publish(state: TraceWebStatus): Promise<boolean> {
+    // The iPhone build does not declare Trace's own site, so it never looks
+    // for a tab of it.
+    if (!declaresHostPattern(this.#runtime, this.#queryPattern)) return false;
     let tabs: readonly BrowserTab[];
     try {
       tabs = await extensionCall<readonly BrowserTab[]>(

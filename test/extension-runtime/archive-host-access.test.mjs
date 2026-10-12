@@ -9,7 +9,7 @@ const warning = "Site access is off — click to allow";
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 function harness(mode, scheme = "moz-extension", contains = () => false, actionFailure = false) {
-  const events = {}, listeners = [], checked = [], pushed = [], writes = [], pageMessages = [];
+  const events = {}, listeners = [], checked = [], pushed = [], writes = [], pageMessages = [], tabQueries = [];
   const badge = { text: "", title: "Trace fixture" };
   let recovered = 0;
   const api = fn => (...args) => {
@@ -42,13 +42,13 @@ function harness(mode, scheme = "moz-extension", contains = () => false, actionF
   })]));
   const refresh = installArchiveHostAccess({ runtime, action, mode,
     permissions: { contains: api(request => { checked.push(request); return contains(request); }), onAdded: event("added"), onRemoved: event("removed"), request() { assert.fail("lifecycle must not request access"); } },
-    tabs: { query: api(() => [
+    tabs: { query: api(filter => { tabQueries.push(filter); return [
       { id: 1, url: "https://archiveofourown.org/works/123" },
       { id: 2, url: "https://www.fanfiction.net/s/123/1" },
       { id: 3, url: "https://archiveofourown.org/users/login" },
       { id: 4, url: "https://www.tracefiction.com/" },
       { id: 5, url: "https://ao3.org/works/123" },
-    ]), sendMessage: api((id, message, options) => pageMessages.push({ id, message, options })) },
+    ]; }), sendMessage: api((id, message, options) => pageMessages.push({ id, message, options })) },
     recover: async () => { recovered++; },
   });
   const popup = { id: runtime.id, url: runtime.getURL("popup.html") };
@@ -62,7 +62,7 @@ function harness(mode, scheme = "moz-extension", contains = () => false, actionF
     const result = listeners[0]({ type, origins: ["https://evil.test/*"] }, sender, resolve);
     if (result !== true) resolve(undefined);
   });
-  return { runtime, action, events, checked, pushed, pageMessages, writes, badge, refresh, send, popup, connect, get recovered() { return recovered; } };
+  return { runtime, action, events, checked, pushed, pageMessages, tabQueries, writes, badge, refresh, send, popup, connect, get recovered() { return recovered; } };
 }
 
 function assertBadge(h, missing) {
@@ -144,6 +144,10 @@ for (const [mode, scheme] of [["promise", "moz-extension"], ["callback", "chrome
     h.pageMessages.length = 0;
     granted = false; h.events.removed(); await tick();
     assert.ok(h.pageMessages.every(item => item.message.granted === false));
+    // Story sites by address, granted or not: never every open tab, never
+    // Trace's own site or API.
+    assert.ok(h.tabQueries.length > 0);
+    for (const query of h.tabQueries) assert.deepEqual(query, { url: [...AO3, ...FFN] });
   });
   test(`unknown evidence cannot claim a denial or clear an existing warning (${mode})`, async () => {
     let unavailable = false;
