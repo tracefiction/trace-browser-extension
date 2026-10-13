@@ -950,6 +950,52 @@ body[data-trace-platform="ios"] .popup { overflow: visible; }
 body[data-trace-platform="ios"] .popup-brand { display: none; }
 body[data-trace-platform="ios"] .popup-privacy { display: none; }
 body[data-trace-platform="ios"] .popup-footer { padding-top: 6px; }
+/* The sheet a first tap opens: a second headline under the story's record,
+   a quiet mark while Trace connects, and buttons whose labels may wrap. */
+.popup-earned-ask {
+    margin-top: 14px;
+    padding-top: 13px;
+    border-top: 1px solid var(--rule);
+}
+.popup-earned-ask[hidden] { display: none; }
+.popup-earned-ask-heading {
+    margin: 0;
+    color: var(--text);
+    font: 600 1.176em/1.22 var(--trace-font);
+    letter-spacing: -0.01em;
+    overflow-wrap: anywhere;
+}
+.popup-earned-ask-body {
+    margin: 6px 0 0;
+    color: var(--text-2);
+    font: 400 0.882em/1.4 var(--trace-font);
+    overflow-wrap: anywhere;
+}
+.popup-earned-text-ax .popup-earned-ask-heading,
+.popup-earned-text-ax .popup-earned-ask-body,
+body[data-trace-first-tap-state] .popup-earned-text-ax .popup-earned-record-title { hyphens: auto; }
+.popup-earned-heading-glyph[data-tone="progress"] { color: var(--text-2); }
+.popup-earned-heading-glyph[data-tone="progress"] svg { animation: popup-spin 0.9s linear infinite; }
+body[data-trace-first-tap-state="connecting"] .popup-earned-heading-row { font-size: 0.882em; }
+body[data-trace-first-tap-state="connecting"] .popup-earned .popup-probe-heading {
+    color: var(--text-2);
+    font-weight: 500;
+    letter-spacing: 0;
+}
+body[data-trace-first-tap-state] .popup-earned-actions button {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-wrap: balance;
+}
+body[data-trace-first-tap-state] .popup-earned-actions button:not([data-emphasis="tertiary"]) + button:not([data-emphasis="tertiary"]) {
+    margin-top: 6px;
+}
+/* Here the kicker is the news, so it stays at every text size. */
+body[data-trace-first-tap-state] .popup-earned-text-ax .popup-earned-story-summary { display: flex; }
+@keyframes popup-first-tap-fade { from { opacity: 0; } }
+@keyframes popup-first-tap-rise { from { opacity: 0; transform: translateY(14px); } }
+.popup-earned .popup-first-tap-fade { animation: popup-first-tap-fade 0.4s ease-out both; }
+.popup-earned .popup-first-tap-rise { animation: popup-first-tap-rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both; }
 @media (max-height: 300px) {
     .popup-earned-pin { padding-bottom: 10px; }
 }
@@ -957,6 +1003,11 @@ body[data-trace-platform="ios"] .popup-footer { padding-top: 6px; }
     * { transition: none !important; animation: none !important; }
     /* Pressed state is opacity only. */
     button:active, a:active { transform: none !important; }
+}
+@media (prefers-reduced-motion: reduce) {
+    /* An arrival is a short cross-fade: nothing slides, grows or spins. */
+    .popup-earned .popup-first-tap-fade,
+    .popup-earned .popup-first-tap-rise { animation: popup-first-tap-fade 0.15s linear both !important; }
 }
 
 .popup-earned-settings-header[hidden], .popup-earned-status-error[hidden] { display: none; }
