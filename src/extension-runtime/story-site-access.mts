@@ -72,10 +72,12 @@ export type StorySiteAccessView =
   /**
    * The request came back false and the story sites do not read as allowed.
    * Whether the reader said no, or the browser did without asking, is not known.
+   * `automaticSaving` is the preference as read just now: with it off, opening
+   * Trace on a story does not save that story until the reader asks.
    */
-  | Readonly<{ state: "not_allowed" }>
+  | Readonly<{ state: "not_allowed"; automaticSaving: "on" | "off" | "unknown" }>
   /** The request itself failed: it threw. */
-  | Readonly<{ state: "could_not_ask" }>
+  | Readonly<{ state: "could_not_ask"; automaticSaving: "on" | "off" | "unknown" }>
   /**
    * What came of the ask could not be established: access could not be read,
    * the request came back with no answer or with one the read contradicts, or
@@ -162,13 +164,20 @@ export class StorySiteAccess {
     // Still out, and nothing allowed yet: only the sites being allowed, or
     // the popup giving up, ends the wait. Time alone decides nothing here.
     if (ask.kind === "waiting") return view({ state: "waiting" });
-    if (ask.kind === "threw") return view({ state: "could_not_ask" });
+    if (ask.kind === "threw") {
+      return view({ state: "could_not_ask", automaticSaving: await this.#automaticSaving() });
+    }
     if (reading === null) return view({ state: "not_known" });
     if (ask.kind === "none") return view({ state: "not_asked" });
     // A request that never came back says nothing, and so is never "no".
     if (ask.kind === "unanswered") return view({ state: "not_known" });
     // Only an answer of exactly "no" is one. "Yes" with the sites reading as
     // not allowed, or no answer at all, leaves it not known.
-    return view({ state: ask.value === false ? "not_allowed" : "not_known" });
+    if (ask.value !== false) return view({ state: "not_known" });
+    return view({ state: "not_allowed", automaticSaving: await this.#automaticSaving() });
+  }
+
+  #automaticSaving(): Promise<"on" | "off" | "unknown"> {
+    return this.#ports.automaticSaving().catch(() => "unknown" as const);
   }
 }

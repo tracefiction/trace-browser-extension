@@ -1,4 +1,5 @@
 import type {
+  AuthenticatedStoryCommandPort,
   StoryCommandEvidence,
   StoryPresence,
   StorySaveMode,
@@ -29,6 +30,7 @@ import {
   type FirstTapTapped,
   type FirstTapView,
 } from "./first-tap-save.mjs";
+import { readStoryMembership, StoryMembershipApi } from "./story-membership.mjs";
 import {
   HAND_OVER_BY_RELOADING_THE_PAGE,
   StorySiteAccess,
@@ -49,7 +51,7 @@ export const FIRST_TAP_PAGE_FILES: readonly string[] = Object.freeze([
 ]);
 
 /** What the first-tap save asks of the session that owns the account. */
-export interface FirstTapSession {
+export interface FirstTapSession extends AuthenticatedStoryCommandPort {
   accountForThisOpen(): Promise<
     | { readonly state: "verified"; readonly binding: string }
     | { readonly state: "missing" | "reconnect_required" | "unknown" }
@@ -80,6 +82,9 @@ type Environment = Readonly<{
   /** The ids of the page scripts registered under that grant. */
   registrationIds: readonly string[];
   session: FirstTapSession;
+  /** How a request reaches Trace, and where Trace is: as for every other request. */
+  fetch: typeof fetch;
+  apiBase: string;
   now?: () => number;
   /** Random bytes for this install's salt, and a one-way digest. */
   crypto?: Pick<Crypto, "getRandomValues" | "subtle">;
@@ -154,6 +159,10 @@ export function installFirstTapSave(environment: Environment): () => Promise<voi
       : Object.freeze({ state: "unknown" });
   };
 
+  // The one request to Trace that only this build makes: asked for by the
+  // reader's "Check again", once for each tap.
+  const membershipApi = new StoryMembershipApi(environment.fetch, environment.apiBase);
+
   const firstTap = new FirstTapSave({
     grantComplete,
     account,
@@ -170,6 +179,7 @@ export function installFirstTapSave(environment: Environment): () => Promise<voi
     collect: (tabId) => call(tabs, "sendMessage", [tabId, { type: FIRST_TAP_COLLECT_MESSAGE }, { frameId: 0 }]),
     save: (command, observer) => session.saveStoryWithEvidence(command, observer),
     presence: (workKey) => session.storyPresence(workKey),
+    membership: (workKey) => readStoryMembership(session, membershipApi, workKey),
     async mark(tabId, workKey) {
       await call(tabs, "sendMessage", [tabId, { type: FIRST_TAP_MARK_MESSAGE, workKey }, { frameId: 0 }]);
     },

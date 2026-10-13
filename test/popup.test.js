@@ -187,6 +187,7 @@ function createPopupHarness({
   platformOs = null,
   maxTouchPoints = 0,
   tabResponse = null,
+  storageWritesFail = false,
 } = {}) {
   const html = fs.readFileSync(POPUP_HTML_PATH, "utf8");
   const js = fs.readFileSync(POPUP_JS_PATH, "utf8");
@@ -333,6 +334,13 @@ function createPopupHarness({
           callback?.(out);
         },
         set(obj, callback) {
+          if (typeof storageWritesFail === "function" ? storageWritesFail(obj || {}) : storageWritesFail) {
+            if (promiseRuntime) return Promise.reject(new Error("storage unavailable"));
+            ext.runtime.lastError = { message: "storage unavailable" };
+            callback?.();
+            ext.runtime.lastError = null;
+            return;
+          }
           Object.assign(store, obj || {});
           if (promiseRuntime) return Promise.resolve();
           callback?.();
@@ -4366,8 +4374,8 @@ test("first tap: no account, an unread account and a refused account each say on
 
   h.firstTap.show({ state: "account_reconnect_required", workKey: "ao3:123" });
   assert.deepEqual(sheet(), {
-    state: "account-sign-in-again", kicker: null, heading: "Sign in again in the Trace app",
-    body: "Trace in Safari needs you to sign in once more. Open the Trace app, sign in, then come back and tap Trace again.",
+    state: "account-reconnect", kicker: null, heading: "Open the Trace app to reconnect",
+    body: "Trace in Safari needs your account again. Open the Trace app, then come back and tap Trace again.",
     record: null, second: null, rule: null, primary: "Try again", secondary: null,
   });
   await click("popup-earned-primary");
@@ -4375,7 +4383,8 @@ test("first tap: no account, an unread account and a refused account each say on
   h.emitStorageChange({ traceAccountProjectionRevisionV1: { newValue: "r3" } });
   for (let attempt = 0; attempt < 4; attempt += 1) await flush();
   assert.equal(h.firstTap.commands.length, 5, "and so does an account that connects");
-  assert.equal(shown(), "account-sign-in-again");
+  assert.equal(shown(), "account-reconnect");
+  assert.doesNotMatch(words(), /sign in/i, "the app may be signed in already, so signing in is not what is asked");
 });
 
 test("first tap: only a save that was never sent may be drawn as unsent; an unconfirmed one offers a look, not another save", async () => {
@@ -4420,12 +4429,23 @@ test("first tap: only a save that was never sent may be drawn as unsent; an unco
     primary: "Try again", secondary: "Not now",
   });
 
-  // Trace turned the account down: the reader signs in again, then saves.
+  // Trace's own word, asked for by the reader, that the story is not in the
+  // Library: the same screen, with the same way to save.
+  h.firstTap.show(failed("unavailable", "not_in_library"));
+  assert.deepEqual(sheet(), {
+    state: "save-not-sent", kicker: null, heading: "The save wasn’t sent",
+    body: "This tap added nothing to your Library.", record: null, second: null, rule: null,
+    primary: "Try again", secondary: "Not now",
+  });
+  await click("popup-earned-primary");
+  assert.equal(h.firstTap.commands.at(-1), "save");
+
+  // Trace turned the account down: the reader reconnects, then saves.
   for (const dispatch of ["refused", "never_sent"]) {
     h.firstTap.show(failed("not_authenticated", dispatch));
     assert.deepEqual(sheet(), {
-      state: "save-sign-in-again", kicker: null, heading: "Sign in again in the Trace app",
-      body: "Trace in Safari needs you to sign in once more. Open the Trace app, sign in, then come back and tap Trace again.",
+      state: "save-reconnect", kicker: null, heading: "Open the Trace app to reconnect",
+      body: "Trace in Safari needs your account again. Open the Trace app, then come back and tap Trace again.",
       record: null, second: null, rule: null, primary: "Try again", secondary: null,
     });
     await click("popup-earned-primary");
@@ -4449,25 +4469,65 @@ test("first tap: only a save that was never sent may be drawn as unsent; an unco
   assert.equal(sheet().primary, "See Trace Unlimited");
 });
 
-test("first tap: a save still out after the popup's patience says so and offers a look", async () => {
-  const { h, element, shown, click, sheet } = await openFirstTapPopup();
+test("first tap: a save still out after the popup's patience says so, offers a look, and asks for lasting access under it", async () => {
+  const { h, element, text, shown, click, announced, sheet } = await openFirstTapPopup({ deferredHostRequest: true });
   h.firstTap.show({ state: "saving", workKey: "ao3:123", startedAt: 0 });
   h.advance(19_999);
   assert.equal(shown(), "saving");
   h.advance(1);
+  // The story, the news of the save with a look to ask for, and under it the
+  // ask for lasting access with its rule line and button.
   assert.deepEqual(sheet(), {
     state: "still-confirming", kicker: null, heading: "This story", body: null, record: "AO3",
-    second: "Still confirming your storyTrace hasn’t heard back yet. It may already be saved.",
-    rule: null, primary: "Check again", secondary: null,
+    second: ASK_UNDER_THE_SAVE, rule: RULE_LINE, primary: ALLOW_BUTTON, secondary: "Keep reading",
   });
-  assert.equal(element("popup-earned-primary").dataset.emphasis, "tertiary", "looking again is offered quietly");
-  await click("popup-earned-primary");
+  assert.equal(text("popup-earned-note"), "Still confirming your storyTrace hasn’t heard back yet. It may already be saved.Check again");
+  assert.equal(element("popup-earned-note-heading").tagName, "H2");
+  assert.equal(await announced(), "Still confirming your story. Trace hasn’t heard back yet. It may already be saved.");
+  const order = ["popup-earned-heading", "popup-earned-record", "popup-earned-note", "popup-earned-ask", "popup-earned-rule", "popup-earned-primary", "popup-earned-secondary"]
+    .map((id) => element(id));
+  for (let index = 1; index < order.length; index += 1) {
+    assert.ok(order[index - 1].compareDocumentPosition(order[index]) & h.window.Node.DOCUMENT_POSITION_FOLLOWING, order[index].id);
+  }
+  const look = element("popup-earned-note-action");
+  assert.equal(look.tagName, "BUTTON");
+  assert.equal(look.dataset.emphasis, "tertiary", "looking again is offered quietly");
+  assert.equal(element("popup-earned-primary").dataset.emphasis, "primary");
+  assert.equal(element("popup-earned-secondary").dataset.emphasis, "secondary", "Keep reading is raised");
+  assert.equal(element("popup-earned-secondary").dataset.earnedAction, "close");
+  await click("popup-earned-note-action");
   assert.equal(h.firstTap.commands.at(-1), "check");
 
-  h.firstTap.show({ state: "saving", workKey: "ao3:123", startedAt: 0 });
+  // The same save's state arriving again does not start the wait over, and
+  // brings the story's title once the page has named it.
+  h.firstTap.show({ state: "saving", workKey: "ao3:123", startedAt: 0, story: FIRST_TAP_STORY });
+  assert.equal(shown(), "still-confirming");
+  assert.equal(sheet().heading, "The Long Way");
+  assert.equal(sheet().record, "someone · AO3");
+
+  // The ask can be made without waiting on the save; Safari's question leaves the rest as it was.
+  await click("popup-earned-primary");
+  assert.equal(h.permissionRequests.length, 1);
+  h.firstTap.showAccess({ state: "waiting" });
+  assert.deepEqual(sheet(), {
+    state: "access-waiting", kicker: null, heading: "The Long Way", body: null, record: "someone · AO3",
+    second: ASK_UNDER_THE_SAVE, rule: RULE_LINE, primary: "Waiting for Safari…", secondary: "Keep reading",
+  });
+  assert.equal(text("popup-earned-note-heading"), "Still confirming your story");
+  assert.equal(element("popup-earned-primary").disabled, true);
+
+  h.firstTap.showAccess({ state: "not_asked" });
   h.firstTap.show({ state: "confirmed", workKey: "ao3:123", provenance: "saved_now", mode: "bounded_manual", story: FIRST_TAP_STORY, entry: FIRST_TAP_ENTRY });
   h.advance(60_000);
   assert.equal(shown(), "saved", "a result that arrives ends the wait");
+  assert.equal(text("popup-earned-note"), null, "and nothing of the wait is left on show");
+
+  // A new save has a wait of its own.
+  h.firstTap.show({ state: "saving", workKey: "ao3:123", startedAt: 90_000, story: FIRST_TAP_STORY });
+  assert.equal(shown(), "saving");
+  assert.equal(sheet().heading, "The Long Way", "named from the start when the background knows the story");
+  h.advance(20_000);
+  assert.equal(shown(), "still-confirming");
 });
 
 test("first tap: with automatic saving off the popup saves only when asked", async () => {
@@ -4703,8 +4763,23 @@ test("first tap: each outcome of the ask is drawn from the background's word, in
     // Allowed, with something else not vouched for: allowed, and no more.
     [{ ...allowed, automaticSaving: "unknown" }, { state: "access-allowed-unconfirmed", ...justAllowed, secondary: null }],
     [{ ...allowed, account: "unknown" }, { state: "access-allowed-unconfirmed", ...justAllowed, secondary: null }],
-    [{ ...allowed, account: "missing" }, { state: "access-allowed-unconfirmed", ...justAllowed, secondary: null }],
-    [{ ...allowed, account: "reconnect_required" }, { state: "access-allowed-unconfirmed", ...justAllowed, secondary: null }],
+    // Allowed, with no account to save to: what to do about the account, in that state's own words.
+    [{ ...allowed, account: "missing" }, {
+      state: "access-allowed-account-missing", kicker: allowedKicker, heading: "Trace couldn’t connect to your account",
+      body: "Trace in Safari doesn’t have your account yet. Open the Trace app, then come back and tap Trace again.",
+      record: null, second: null, rule: null, primary: "Try again", secondary: "Keep reading",
+    }],
+    [{ ...allowed, account: "reconnect_required" }, {
+      state: "access-allowed-account-reconnect", kicker: allowedKicker, heading: "Open the Trace app to reconnect",
+      body: "Trace in Safari needs your account again. Open the Trace app, then come back and tap Trace again.",
+      record: null, second: null, rule: null, primary: "Try again", secondary: "Keep reading",
+    }],
+    // The account outranks the preference: with no account, nothing saves either way.
+    [{ ...allowed, account: "missing", automaticSaving: "off" }, {
+      state: "access-allowed-account-missing", kicker: allowedKicker, heading: "Trace couldn’t connect to your account",
+      body: "Trace in Safari doesn’t have your account yet. Open the Trace app, then come back and tap Trace again.",
+      record: null, second: null, rule: null, primary: "Try again", secondary: "Keep reading",
+    }],
     [{ state: "registration_unknown" }, { state: "access-registration-unknown", ...justAllowed, secondary: "Check again" }],
     [{ state: "registration_failed" }, {
       state: "access-registration-failed", kicker: allowedKicker,
@@ -4714,10 +4789,27 @@ test("first tap: each outcome of the ask is drawn from the background's word, in
     }],
     [{ state: "partial", granted: 3, total: 5 }, {
       state: "access-partial", kicker: savedKicker, heading: "Safari allowed only some addresses",
-      body: "Trace needs all 5 of AO3 and FanFiction.net’s addresses to save by itself. Safari asks again.",
+      body: "Trace needs all 5 of AO3 and FanFiction.net’s addresses to save by itself.",
       record: null, second: null, rule: RULE_LINE, primary: ALLOW_BUTTON, secondary: "Not now",
     }],
-    [{ state: "not_allowed" }, {
+    [{ state: "not_allowed", automaticSaving: "on" }, {
+      state: "access-not-allowed", kicker: savedKicker, heading: "Trace will save when you tap it",
+      body: "To save another story, open Trace from the Page Menu on it. You can let it save by itself any time.",
+      record: null, second: null, rule: null, primary: "Keep reading", secondary: "Try again",
+    }],
+    // With automatic saving off a tap opens Trace and saves nothing by itself.
+    [{ state: "not_allowed", automaticSaving: "off" }, {
+      state: "access-not-allowed", kicker: savedKicker, heading: "Trace saves when you ask",
+      body: "To save another story, open Trace from the Page Menu on it and tap Save this story.",
+      record: null, second: null, rule: null, primary: "Keep reading", secondary: "Try again",
+    }],
+    [{ state: "could_not_ask", automaticSaving: "off" }, {
+      state: "access-not-allowed", kicker: savedKicker, heading: "Trace saves when you ask",
+      body: "To save another story, open Trace from the Page Menu on it and tap Save this story.",
+      record: null, second: null, rule: null, primary: "Keep reading", secondary: "Try again",
+    }],
+    // A preference that could not be read claims neither.
+    [{ state: "not_allowed", automaticSaving: "unknown" }, {
       state: "access-not-allowed", kicker: savedKicker, heading: "Trace will save when you tap it",
       body: "To save another story, open Trace from the Page Menu on it. You can let it save by itself any time.",
       record: null, second: null, rule: null, primary: "Keep reading", secondary: "Try again",
@@ -4734,6 +4826,8 @@ test("first tap: each outcome of the ask is drawn from the background's word, in
     assert.deepEqual(drawn, expected, expected.state);
     const outcome = [drawn.kicker, drawn.heading, drawn.body, drawn.primary, drawn.secondary].join(" ");
     assert.doesNotMatch(outcome, /always|one day|tomorrow|for good|permanent|from now on|until/i, expected.state);
+    // Pressing the ask's button only makes a request: nothing says what Safari will then do.
+    if (drawn.state === "access-partial") assert.doesNotMatch(outcome, /asks again/i);
     assert.deepEqual(h.reloads, [], "no outcome reloads the page from the popup");
     assert.deepEqual(h.permissionRequests, [], "and drawing one asks Safari for nothing");
   }
@@ -5032,7 +5126,7 @@ const FIRST_TAP_STATES = (() => {
     ["connecting", { view: { state: "opening" } }],
     ["account-missing", { view: { state: "account_missing", workKey: "ao3:123" } }],
     ["account-unreachable", { view: { state: "account_unknown", workKey: "ao3:123" } }],
-    ["account-sign-in-again", { view: { state: "account_reconnect_required", workKey: "ao3:123" } }],
+    ["account-reconnect", { view: { state: "account_reconnect_required", workKey: "ao3:123" } }],
     ["save-on-request", { view: { state: "awaiting_request", workKey: "ao3:123", preference: "unknown" } }],
     ["automatic-saving-off", { view: { state: "awaiting_request", workKey: "ao3:123", preference: "off" } }],
     ["saving", { view: { state: "saving", workKey: "ao3:123", startedAt: 0 } }],
@@ -5045,17 +5139,21 @@ const FIRST_TAP_STATES = (() => {
     ["story-unavailable", { view: failed("story_unavailable", "never_sent") }],
     ["library-full", { view: failed("free_limit_reached", "refused") }],
     ["save-not-sent", { view: failed("page_unreachable", "never_sent") }],
+    ["save-not-sent", { view: failed("unavailable", "not_in_library") }],
     ["save-refused", { view: failed("rate_limited", "refused") }],
-    ["save-sign-in-again", { view: failed("not_authenticated", "refused") }],
+    ["save-reconnect", { view: failed("not_authenticated", "refused") }],
     ["access-waiting", { view: confirmed("saved_now"), after: 1_100, tap: "popup-earned-primary", access: { state: "waiting" } }],
     ["access-allowed", { view: confirmed("saved_now"), access: allowed }],
     ["access-allowed-automatic-saving-off", { view: confirmed("saved_now"), access: { ...allowed, automaticSaving: "off" } }],
     ["access-allowed-unconfirmed", { view: confirmed("saved_now"), access: { ...allowed, account: "unknown" } }],
+    ["access-allowed-account-missing", { view: confirmed("saved_now"), access: { ...allowed, account: "missing" } }],
+    ["access-allowed-account-reconnect", { view: confirmed("saved_now"), access: { ...allowed, account: "reconnect_required" } }],
     ["access-registration-unknown", { view: confirmed("saved_now"), access: { state: "registration_unknown" } }],
     ["access-registration-failed", { view: confirmed("saved_now"), access: { state: "registration_failed" } }],
     ["access-partial", { view: confirmed("saved_now"), access: { state: "partial", granted: 1, total: 5 } }],
-    ["access-not-allowed", { view: confirmed("saved_now"), access: { state: "not_allowed" } }],
-    ["access-not-allowed", { view: confirmed("saved_now"), access: { state: "could_not_ask" } }],
+    ["access-not-allowed", { view: confirmed("saved_now"), access: { state: "not_allowed", automaticSaving: "on" } }],
+    ["access-not-allowed", { view: confirmed("saved_now"), access: { state: "could_not_ask", automaticSaving: "on" } }],
+    ["access-not-allowed", { view: confirmed("saved_now"), access: { state: "not_allowed", automaticSaving: "off" } }],
     ["access-not-known", { view: confirmed("saved_now"), access: { state: "not_known" } }],
   ];
 })();
@@ -5087,6 +5185,7 @@ test("first tap: every state is reachable, has one headline, says its news aloud
     assert.ok(sheet().heading, name);
     assert.doesNotMatch(Object.values(sheet()).join(" "), /\[[a-z-]+\]/, `${name}: no stand-in for words is left`);
     if (sheet().second !== null) assert.equal(element("popup-earned-ask-heading").tagName, "H2", name);
+    assert.equal(shownText(element("popup-earned-note")) !== null, name === "still-confirming", `${name}: news of a save still out`);
 
     // The result is said through one polite live region, and is never empty.
     const live = element("popup-earned-result");
@@ -5103,9 +5202,9 @@ test("first tap: every state is reachable, has one headline, says its news aloud
     }
 
     // Every action on show is a button with a label and something to do.
-    for (const id of ["popup-earned-primary", "popup-earned-secondary"]) {
+    for (const id of ["popup-earned-primary", "popup-earned-secondary", "popup-earned-note-action"]) {
       const button = element(id);
-      if (button.hidden || button.closest("[hidden]")) continue;
+      if (!button || button.hidden || button.closest("[hidden]")) continue;
       assert.equal(button.tagName, "BUTTON", name);
       assert.ok(button.textContent.trim(), name);
       assert.ok(button.disabled || button.dataset.earnedAction, `${name}: ${id} does something`);
@@ -5124,7 +5223,7 @@ test("first tap: every state is reachable, has one headline, says its news aloud
     }
     assert.deepEqual(h.reloads, [], name);
   }
-  assert.equal(reached.size, FIRST_TAP_STATES.length - 1, "every state, the two requests that came to nothing being one");
+  assert.equal(reached.size, FIRST_TAP_STATES.length - 3, "every state: a request that came to nothing is one state however it did, and so is a tap that added nothing");
 });
 
 test("first tap: the wording keeps to the rules for Trace's copy", async () => {
@@ -5154,19 +5253,22 @@ test("first tap: the wording keeps to the rules for Trace's copy", async () => {
   assert.equal(words.rule, "Tap <b>Always Allow</b>, not the blue <b>Allow for One Day</b>.");
   assert.equal(words.tryAgain, "Try again");
 
-  // Wording that has not been reviewed yet is marked as such, and nothing else is.
+  assert.equal(words.checking, "Checking…");
+  assert.equal(words.reconnectHeading, "Open the Trace app to reconnect");
+  assert.equal(words.reconnectBody, "Trace in Safari needs your account again. Open the Trace app, then come back and tap Trace again.");
+  assert.equal(words.partialBody, "Trace needs all {count} of AO3 and FanFiction.net’s addresses to save by itself.");
+  assert.equal(words.notAllowedOnRequestHeading, "Trace saves when you ask");
+  assert.equal(words.notAllowedOnRequestBody, "To save another story, open Trace from the Page Menu on it and tap Save this story.");
+  // Whether Safari shows its question again is not something Trace can know.
+  for (const [key, line] of lines) {
+    if (key !== "askBody") assert.doesNotMatch(line, /Safari asks/i, key);
+    assert.doesNotMatch(line, /sign in/i, `${key}: the app may be signed in already`);
+  }
+
+  // Wording that has not been reviewed yet is marked as such. None is left.
   const popup = fs.readFileSync(POPUP_JS_PATH, "utf8");
   const table = popup.slice(popup.indexOf("const FIRST_TAP_WORDS = Object.freeze({"), popup.indexOf("function firstTapSend("));
-  // Each mark stands over one headline and its body.
-  const pending = Array.from(
-    table.matchAll(/\/\/ Wording pending review\.\n  (\w+)Heading: .*\n  (\w+)Body: .*\n/g),
-    (match) => [`${match[1]}Heading`, `${match[2]}Body`],
-  ).flat();
-  assert.deepEqual(pending, [
-    "signInAgainHeading", "signInAgainBody", "notSentHeading", "notSentBody", "refusedHeading", "refusedBody",
-    "partialHeading", "partialBody", "notKnownHeading", "notKnownBody",
-  ]);
-  assert.equal((table.match(/Wording pending review/g) || []).length, 5);
+  assert.equal((table.match(/Wording pending review/g) || []).length, 0);
   assert.doesNotMatch(popup, /firstTapPlaceholder|renderFirstTapUnworded/);
 });
 
@@ -5262,4 +5364,355 @@ test("first tap: at the largest text sizes nothing is pinned, so the rule line a
   for (let index = 1; index < order.length; index += 1) {
     assert.ok(order[index - 1].compareDocumentPosition(order[index]) & h.window.Node.DOCUMENT_POSITION_FOLLOWING, order[index].id);
   }
+});
+
+// --- Buttons that wait on an answer -------------------------------------------------
+
+/** Taps a button even where the browser would not deliver the tap. */
+async function tapRegardless(opened, id, action) {
+  const button = opened.element(id);
+  button.disabled = false;
+  button.dataset.earnedAction = action;
+  await opened.click(id);
+}
+
+test("first tap: Check again and Try again wait on their answer, send one request a tap, and say the answer aloud even when nothing changed", async () => {
+  const failed = { state: "failed", workKey: "ao3:123", reason: "unavailable", dispatch: "sent_unconfirmed", story: FIRST_TAP_STORY };
+  const allowed = { state: "allowed", account: "reconnect_required", automaticSaving: "on", handOver: "in_place" };
+  for (const [name, arrive, button, command, restored, said] of [
+    ["an unconfirmed save", (h) => h.firstTap.show(failed), "popup-earned-primary", "check", "Check again",
+      "Trace couldn’t confirm this save. It may have saved anyway. Check again to find out."],
+    ["a look that could not tell", (h) => h.firstTap.show({ state: "presence_unknown", workKey: "ao3:123" }), "popup-earned-primary", "check", "Check again",
+      "Trace still couldn’t check. Look for it in your Library in the Trace app, or check again later."],
+    ["no account", (h) => h.firstTap.show({ state: "account_missing", workKey: "ao3:123" }), "popup-earned-primary", "open", "Try again",
+      "Trace couldn’t connect to your account. Trace in Safari doesn’t have your account yet. Open the Trace app, then come back and tap Trace again."],
+    ["a failed registration", (h) => h.firstTap.showAccess({ state: "registration_failed" }), "popup-earned-primary", "access_check", "Try again",
+      "Trace couldn’t finish turning on automatic saving. Safari allowed AO3 and FanFiction.net, but Trace’s part didn’t start."],
+    ["an unread answer", (h) => h.firstTap.showAccess({ state: "not_known" }), "popup-earned-secondary", "access_check", "Check again",
+      "Trace couldn’t check with Safari. AO3 and FanFiction.net may be allowed already. Check again, or ask once more."],
+    ["allowed with an account to reconnect", (h) => h.firstTap.showAccess(allowed), "popup-earned-primary", "access_check", "Try again",
+      "Allowed on AO3 and FanFiction.net. Open the Trace app to reconnect. Trace in Safari needs your account again. Open the Trace app, then come back and tap Trace again."],
+  ]) {
+    const opened = await openSavedFirstTapPopup({ grantedOrigins: command === "access_check" ? [...FIVE_STORY_SITES] : [] });
+    const { h, element, click, announced, sheet } = opened;
+    const settle = async () => { for (let attempt = 0; attempt < 6; attempt += 1) await flush(); };
+    arrive(h);
+    assert.equal(await announced(), said, name);
+    const drawn = sheet();
+    const action = element(button).dataset.earnedAction;
+    const before = h.firstTap.commands.length;
+
+    await click(button);
+    await settle();
+    assert.equal(shownText(element(button)), "Checking…", name);
+    assert.equal(element(button).disabled, true, name);
+    assert.equal(element(button).dataset.earnedAction, "", name);
+    assert.equal(await announced(), "Checking.", name);
+    assert.deepEqual(h.firstTap.commands.slice(before), [command], name);
+    // A second tap that still arrives sends nothing more.
+    await tapRegardless(opened, button, action);
+    await settle();
+    assert.deepEqual(h.firstTap.commands.slice(before), [command], `${name}: one request for one tap`);
+    assert.deepEqual(h.permissionRequests, [], `${name}: and Safari is asked nothing`);
+
+    // The same answer comes back. The sheet is as it was, and says so again.
+    arrive(h);
+    assert.deepEqual(sheet(), drawn, name);
+    assert.equal(shownText(element(button)), restored, name);
+    assert.equal(element(button).disabled, false, name);
+    assert.equal(element("popup-earned-result").textContent, "", `${name}: the live region is cleared`);
+    assert.equal(await announced(), said, `${name}: and given the same words again`);
+
+    // And the reader can ask again.
+    await click(button);
+    await settle();
+    assert.deepEqual(h.firstTap.commands.slice(before), [command, command], name);
+  }
+});
+
+test("first tap: a look that is never answered gives its button back, and one asked of a background that has gone opens on the story again", async () => {
+  const unconfirmed = { state: "failed", workKey: "ao3:123", reason: "unavailable", dispatch: "sent_unconfirmed", story: FIRST_TAP_STORY };
+  const { h, element, text, click, announced, sheet } = await openFirstTapPopup();
+  h.firstTap.show(unconfirmed);
+  const drawn = sheet();
+  await click("popup-earned-primary");
+  h.advance(14_999);
+  assert.equal(text("popup-earned-primary"), "Checking…");
+  h.advance(1);
+  assert.deepEqual(sheet(), drawn, "the sheet as it stood");
+  assert.equal(element("popup-earned-primary").disabled, false);
+  assert.equal(await announced(), "Trace couldn’t confirm this save. It may have saved anyway. Check again to find out.");
+
+  // The background was restarted under the sheet: its port is gone.
+  h.disconnectPopup();
+  const before = h.firstTap.commands.length;
+  await click("popup-earned-primary");
+  assert.equal(h.hostLifecycle.filter((name) => name === "trace-first-tap-popup-v1").length, 2, "the port is opened again");
+  assert.deepEqual(h.firstTap.commands.slice(before), ["open"], "and the story is opened on afresh, which looks before it saves");
+});
+
+test("first tap: the still-confirming look waits and answers aloud like any other, and a result that arrives meanwhile is simply shown", async () => {
+  const saving = { state: "saving", workKey: "ao3:123", startedAt: 0, story: FIRST_TAP_STORY };
+  const { h, element, text, shown, click, announced } = await openFirstTapPopup();
+  h.firstTap.show(saving);
+  h.advance(20_000);
+  assert.equal(shown(), "still-confirming");
+  await announced();
+  await click("popup-earned-note-action");
+  assert.equal(text("popup-earned-note-action"), "Checking…");
+  assert.equal(element("popup-earned-note-action").disabled, true);
+  assert.equal(text("popup-earned-primary"), ALLOW_BUTTON, "the ask is left as it was");
+  assert.equal(await announced(), "Checking.");
+
+  // Trace does not have the story yet and the save is still out: the same state, said again.
+  h.firstTap.show(saving);
+  assert.equal(shown(), "still-confirming");
+  assert.equal(text("popup-earned-note-action"), "Check again");
+  assert.equal(element("popup-earned-note-action").disabled, false);
+  assert.equal(await announced(), "Still confirming your story. Trace hasn’t heard back yet. It may already be saved.");
+
+  // Trace has it after all: what a found entry always gets, with the entry's own status.
+  await click("popup-earned-note-action");
+  h.firstTap.show({
+    state: "confirmed", workKey: "ao3:123", provenance: "found", mode: null, story: FIRST_TAP_STORY,
+    entry: { status: "PLANNING", readerStatus: "PLANNING", canonicalReaderStatus: "SAVED", chapters: null },
+  });
+  assert.equal(shown(), "in-library");
+  assert.equal(text("popup-earned-kicker"), "In your Library");
+  assert.equal(text("popup-earned-record"), "someone · AO3Saved");
+  assert.equal(await announced(), "In your Library. The Long Way, by someone, on AO3. Saved.");
+});
+
+test("first tap: Check again answered by Trace's own word draws not in the Library, an account to reconnect, or still not known", async () => {
+  const { h, shown, click, sheet } = await openFirstTapPopup();
+  h.firstTap.show({ state: "failed", workKey: "ao3:123", reason: "unavailable", dispatch: "sent_unconfirmed", story: FIRST_TAP_STORY });
+  await click("popup-earned-primary");
+  h.firstTap.show({ state: "presence_unknown", workKey: "ao3:123" });
+  assert.equal(shown(), "still-unknown", "a request that could not be made or read is never drawn as absent");
+  assert.doesNotMatch(`${sheet().heading} ${sheet().body}`, /added nothing|wasn.t sent|isn.t in/i);
+
+  await click("popup-earned-primary");
+  h.firstTap.show({ state: "account_reconnect_required", workKey: "ao3:123" });
+  assert.equal(shown(), "account-reconnect");
+  assert.equal(sheet().heading, "Open the Trace app to reconnect");
+
+  h.firstTap.show({ state: "presence_unknown", workKey: "ao3:123" });
+  await click("popup-earned-primary");
+  h.firstTap.show({ state: "failed", workKey: "ao3:123", reason: "unavailable", dispatch: "not_in_library", story: FIRST_TAP_STORY });
+  assert.deepEqual(sheet(), {
+    state: "save-not-sent", kicker: null, heading: "The save wasn’t sent",
+    body: "This tap added nothing to your Library.", record: null, second: null, rule: null,
+    primary: "Try again", secondary: "Not now",
+  });
+  assert.deepEqual(h.firstTap.commands, ["open", "check", "check", "check"], "one request for each tap, and no save among them");
+});
+
+// --- Automatic saving, turned on from the sheet -----------------------------------------
+
+test("first tap: Turn automatic saving on is one change and one request however often it is tapped, and it saves the story the reader is on", async () => {
+  const opened = await openFirstTapPopup({ storageState: { prefAutoTrackEnabled: false } });
+  const { h, element, text, shown, click } = opened;
+  const settle = async () => { for (let attempt = 0; attempt < 6; attempt += 1) await flush(); };
+  h.firstTap.show({ state: "awaiting_request", workKey: "ao3:123", preference: "off" });
+  await click("popup-earned-secondary");
+  assert.equal(text("popup-earned-secondary"), "Turn automatic saving on", "the button waits under its own name");
+  assert.equal(element("popup-earned-secondary").disabled, true);
+  assert.equal(text("popup-earned-primary"), "Save this story");
+  // Tapped again before anything has come back.
+  await tapRegardless(opened, "popup-earned-secondary", "first_tap_automatic_saving_on");
+  await settle();
+  assert.equal(h.store.prefAutoTrackEnabled, true);
+  assert.equal(h.document.getElementById("pref-auto-track").checked, true);
+  assert.deepEqual(h.firstTap.commands, ["open", "open"], "one open: the background then saves this story, once");
+
+  h.firstTap.show({ state: "saving", workKey: "ao3:123", startedAt: 5, story: null });
+  assert.equal(shown(), "saving");
+
+  // From the allowed state it is the same: one read of what holds.
+  const granted = await openSavedFirstTapPopup({ grantedOrigins: [...FIVE_STORY_SITES], storageState: { prefAutoTrackEnabled: false } });
+  granted.h.firstTap.showAccess({ state: "allowed", account: "connected", automaticSaving: "off", handOver: "in_place" });
+  const before = granted.h.firstTap.commands.length;
+  await granted.click("popup-earned-primary");
+  assert.equal(granted.element("popup-earned-primary").disabled, true);
+  await tapRegardless(granted, "popup-earned-primary", "first_tap_automatic_saving_on");
+  for (let attempt = 0; attempt < 6; attempt += 1) await flush();
+  assert.deepEqual(granted.h.firstTap.commands.slice(before), ["access_check"]);
+});
+
+test("first tap: a preference that could not be stored leaves the settings control as it was, sends nothing and claims nothing", async () => {
+  for (const view of [
+    { state: "awaiting_request", workKey: "ao3:123", preference: "off" },
+    null,
+  ]) {
+    const opened = await openSavedFirstTapPopup({
+      grantedOrigins: view ? [] : [...FIVE_STORY_SITES],
+      storageState: { prefAutoTrackEnabled: false },
+      storageWritesFail: (patch) => "prefAutoTrackEnabled" in patch,
+    });
+    const { h, element, click, announced, sheet } = opened;
+    if (view) h.firstTap.show(view);
+    else h.firstTap.showAccess({ state: "allowed", account: "connected", automaticSaving: "off", handOver: "in_place" });
+    const button = view ? "popup-earned-secondary" : "popup-earned-primary";
+    const control = h.document.getElementById("pref-auto-track");
+    control.checked = false;
+    const drawn = sheet();
+    const said = await announced();
+    const before = h.firstTap.commands.length;
+
+    await click(button);
+    for (let attempt = 0; attempt < 6; attempt += 1) await flush();
+    assert.equal(h.store.prefAutoTrackEnabled, false, "nothing was stored");
+    assert.equal(control.checked, false, "and the control shows what is stored, not what was asked for");
+    assert.deepEqual(h.firstTap.commands.slice(before), [], "the background is asked nothing");
+    assert.deepEqual(sheet(), drawn, "the sheet is as it was, in the words it already had");
+    assert.equal(element(button).disabled, false, "with its button back");
+    assert.equal(element(button).dataset.earnedAction, "first_tap_automatic_saving_on");
+    assert.equal(await announced(), said, "and what it says is said again");
+  }
+});
+
+// --- Coming back to the ask ---------------------------------------------------------------
+
+test("first tap: after Try again on the not-allowed state, focus is on the ask's headline, not on the button that became Not now", async () => {
+  const { h, element, text, shown, click } = await openSavedFirstTapPopup();
+  h.firstTap.showAccess({ state: "not_allowed", automaticSaving: "on" });
+  const tapped = element("popup-earned-secondary");
+  tapped.focus();
+  assert.equal(h.document.activeElement, tapped);
+  assert.equal(text("popup-earned-secondary"), "Try again");
+
+  await click("popup-earned-secondary");
+  assert.equal(shown(), "saved");
+  assert.equal(text("popup-earned-secondary"), "Not now", "the same button now closes the sheet");
+  assert.equal(tapped.dataset.earnedAction, "close");
+  const heading = element("popup-earned-ask-heading");
+  assert.equal(h.document.activeElement, heading);
+  assert.equal(heading.textContent, "Let Trace save the next one by itself");
+  assert.equal(heading.getAttribute("tabindex"), "-1", "it takes focus without joining the tab order");
+  assert.equal(h.closeCalled, false);
+});
+
+// --- A sheet too short for the state ---------------------------------------------------------
+
+/**
+ * Gives the sheet a layout: the height of the sheet, how far down its content
+ * ends, and the heights of the pinned area's parts.
+ */
+function layOutFirstTapSheet(opened, { sheetHeight, contentEnds, ruleAndButton = 92, second = 44, between = 2 }) {
+  const { h, element } = opened;
+  const scroll = h.document.querySelector(".popup-earned-scroll");
+  const pin = element("popup-earned-pin");
+  const primary = element("popup-earned-primary");
+  const secondary = element("popup-earned-secondary");
+  const home = pin.querySelector(".popup-earned-actions");
+  const give = (node, name, read) => Object.defineProperty(node, name, { get: read, configurable: true });
+  const secondShown = () => !secondary.hidden && secondary.parentNode === home;
+  h.window.innerHeight = sheetHeight;
+  give(scroll, "offsetTop", () => 0);
+  for (const child of scroll.children) {
+    give(child, "offsetTop", () => 0);
+    give(child, "offsetHeight", () => child.id === "popup-earned-scroll-actions" ? second : contentEnds);
+  }
+  give(primary, "offsetTop", () => 30);
+  give(primary, "offsetHeight", () => 48);
+  give(secondary, "offsetTop", () => 78 + between);
+  give(secondary, "offsetHeight", () => second);
+  const pinHeight = () => ruleAndButton + (secondShown() ? between + second : 0);
+  give(pin, "offsetHeight", pinHeight);
+  pin.getBoundingClientRect = () => ({ height: pinHeight(), top: 0, bottom: pinHeight() });
+  h.window.dispatchEvent(new h.window.Event("resize"));
+  return { scroll, pin, primary, secondary, home, section: element("popup-earned-permission") };
+}
+
+test("first tap: on a sheet too short for the ask, the rule line and the button stay pinned and Not now scrolls with the content", async () => {
+  const opened = await openSavedFirstTapPopup();
+  const { h, element } = opened;
+  // The ask on a sheet 283 high, with content that ends below that.
+  const { scroll, pin, primary, secondary, home, section } = layOutFirstTapSheet(opened, { sheetHeight: 283, contentEnds: 240 });
+  assert.equal(section.classList.contains("popup-earned-fixed-pin"), true, "the action area is pinned");
+  assert.equal(section.classList.contains("popup-earned-ax"), false);
+  assert.equal(section.style.getPropertyValue("--trace-pin-height"), "92px", "and the content is given room to scroll clear of it");
+  assert.equal(secondary.parentNode.id, "popup-earned-scroll-actions");
+  assert.equal(secondary.parentNode.parentNode, scroll, "Not now joins what scrolls");
+  assert.equal(secondary.parentNode.hidden, false);
+  assert.deepEqual([...pin.querySelectorAll("p, button")].filter((node) => !node.hidden).map((node) => node.id),
+    ["popup-earned-rule", "popup-earned-primary"], "only the rule line and the main button are pinned");
+  assert.equal(element("popup-earned-rule").nextElementSibling.contains(primary), true, "the rule line is the last thing above the button");
+  const order = ["popup-earned-ask", "popup-earned-secondary", "popup-earned-rule", "popup-earned-primary"].map((id) => element(id));
+  for (let index = 1; index < order.length; index += 1) {
+    assert.ok(order[index - 1].compareDocumentPosition(order[index]) & h.window.Node.DOCUMENT_POSITION_FOLLOWING, order[index].id);
+  }
+
+  // Laid out again, it is the same: the button does not go back and forth.
+  secondary.focus();
+  for (let pass = 0; pass < 3; pass += 1) h.window.dispatchEvent(new h.window.Event("resize"));
+  assert.equal(secondary.parentNode.id, "popup-earned-scroll-actions");
+  assert.equal(h.document.activeElement, secondary, "and focus stays on a button that was moved");
+  h.firstTap.show(FIRST_TAP_CONFIRMED);
+  assert.equal(secondary.parentNode.id, "popup-earned-scroll-actions", "a redraw of the state leaves it there");
+  assert.equal(section.classList.contains("popup-earned-fixed-pin"), true);
+
+  // A sheet tall enough for all of it has both buttons together again.
+  layOutFirstTapSheet(opened, { sheetHeight: 700, contentEnds: 240 });
+  assert.equal(secondary.parentNode, home);
+  assert.equal(primary.nextElementSibling, secondary);
+  assert.equal(element("popup-earned-scroll-actions").hidden, true);
+  assert.equal(section.classList.contains("popup-earned-fixed-pin"), false);
+
+  // Short again, then the first-tap sheet stands aside: the popup that takes over has its buttons where they were.
+  layOutFirstTapSheet(opened, { sheetHeight: 283, contentEnds: 240 });
+  assert.equal(secondary.parentNode.id, "popup-earned-scroll-actions");
+  h.firstTap.show({ state: "automatic" });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  assert.equal(secondary.parentNode, home);
+});
+
+test("first tap: on a short sheet at the largest text sizes, or where the button alone would take most of it, nothing is pinned", async () => {
+  const large = await openSavedFirstTapPopup();
+  large.h.document.body.style.fontSize = "53px";
+  const atLargest = layOutFirstTapSheet(large, { sheetHeight: 283, contentEnds: 900, ruleAndButton: 330, second: 120 });
+  assert.equal(atLargest.secondary.parentNode, atLargest.home);
+  assert.equal(atLargest.section.classList.contains("popup-earned-ax"), true);
+  assert.equal(atLargest.section.classList.contains("popup-earned-fixed-pin"), false);
+
+  const tall = await openSavedFirstTapPopup();
+  const tooTall = layOutFirstTapSheet(tall, { sheetHeight: 283, contentEnds: 320, ruleAndButton: 180 });
+  assert.equal(tooTall.secondary.parentNode, tooTall.home, "everything flows in reading order instead");
+  assert.equal(tooTall.section.classList.contains("popup-earned-ax"), true);
+  assert.equal(tooTall.section.classList.contains("popup-earned-fixed-pin"), false);
+
+  // A state with one button and room for it is left exactly as it was.
+  const fits = await openSavedFirstTapPopup();
+  const roomy = layOutFirstTapSheet(fits, { sheetHeight: 386, contentEnds: 190 });
+  assert.equal(roomy.secondary.parentNode, roomy.home);
+  assert.equal(roomy.section.classList.contains("popup-earned-fixed-pin"), false);
+});
+
+test("first tap: with the switch off, a short sheet is laid out as it always was and none of the sheet's own markup is made", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel", promiseRuntime: true, earnedPermissionOnboarding: true,
+    sessionSnapshot: { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" },
+  });
+  for (let attempt = 0; attempt < 10; attempt += 1) await flush();
+  const element = (id) => h.document.getElementById(id);
+  const laid = layOutFirstTapSheet({ h, element }, { sheetHeight: 283, contentEnds: 240 });
+  assert.equal(laid.secondary.parentNode, laid.home);
+  assert.equal(element("popup-earned-scroll-actions"), null);
+  assert.equal(element("popup-earned-note"), null);
+  assert.equal(element("popup-earned-ask"), null);
+  assert.equal(laid.section.classList.contains("popup-earned-ax"), true, "a pinned area over thirty percent of the sheet is not pinned, as before");
+  assert.equal(laid.section.classList.contains("popup-earned-fixed-pin"), false);
+  assert.deepEqual(h.firstTap.commands, []);
+});
+
+test("first tap: the sheet's styles pin the action area on a short sheet and mark where the content passes under it", () => {
+  const css = fs.readFileSync(POPUP_CSS_PATH, "utf8");
+  assert.match(css, /\.popup-earned-fixed-pin \.popup-earned-pin \{ position: fixed; left: 0; right: 0; bottom: 0;/);
+  assert.match(css, /\.popup-earned-fixed-pin \.popup-earned-scroll \{[^}]*padding-bottom: calc\(8px \+ var\(--trace-pin-height, 0px\)\);/);
+  assert.match(css, /body\[data-trace-first-tap-state\] \.popup-earned-fixed-pin \.popup-earned-pin \{ border-top: 1px solid var\(--rule\); \}/);
+  assert.match(css, /\.popup-earned-scroll > \.popup-earned-actions \{ margin-top: 8px; \}/);
+  assert.match(css, /\.popup-earned-ax \.popup-earned-pin \{ position: static;/, "and at the largest sizes it is not pinned at all");
+  // The news of a save still out has a button big enough to tap, and its own disabled look.
+  assert.match(css, /\.popup-earned-note button \{[^}]*min-height: 44px;/);
+  assert.match(css, /\.popup-earned-note button:disabled \{ opacity: 0\.55;/);
 });

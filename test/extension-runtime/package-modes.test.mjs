@@ -39,6 +39,9 @@ const FIRST_TAP_WIRING = [
   "could_not_ask",
   "HAND_OVER_BY_RELOADING_THE_PAGE",
   "traceFirstTapSaveV2",
+  // The exact-story read that "Check again" makes: no other build asks it.
+  "library-membership",
+  "not_in_library",
 ];
 
 function assertNoFirstTapWiring(root, what) {
@@ -734,6 +737,7 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     // The ask and the hand-over are part of the same switch.
     assert.match(proofBackground, /TRACE_PAGE_MANUAL_MODE_QUERY/, "a page in manual mode can ask for itself");
     assert.match(proofBackground, /access_asking/, "the ask is wired");
+    assert.match(proofBackground, /\/api\/extension\/library-membership/, "and so is the exact-story read for Check again");
     assert.match(proofBackground, /HAND_OVER_BY_RELOADING_THE_PAGE = false/, "handing over without a reload");
     assert.doesNotMatch(proofBackground, /tabs, "get", \[tapped/, "and no tab is looked up for a tap");
     assert.match(proofBackground, /"page-manual-mode\.js"/, "and the manual-mode file is what it injects first");

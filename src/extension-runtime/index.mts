@@ -225,6 +225,10 @@ try {
     fallbackId += 1;
     return fallbackUuid(`${Date.now()}:${fallbackId}`);
   };
+  const apiFetch = createActivityFetch(
+    globalThis.fetch.bind(globalThis), extension.runtime, storageMode, __TRACE_API_BASE__,
+    new BrowserStorage(extension.storage.local, extension.runtime, storageMode),
+  );
   session = installSessionRuntime({
     browserDeviceSessions: true,
     mode: __TRACE_SESSION_MODE__,
@@ -234,10 +238,7 @@ try {
     storageArea: extension.storage.local,
     databaseFactory: scope.indexedDB,
     storageMode,
-    fetch: createActivityFetch(
-      globalThis.fetch.bind(globalThis), extension.runtime, storageMode, __TRACE_API_BASE__,
-      new BrowserStorage(extension.storage.local, extension.runtime, storageMode),
-    ),
+    fetch: apiFetch,
     apiBase: __TRACE_API_BASE__,
     nativeImportHandoff: __TRACE_NATIVE_IMPORT_HANDOFF__,
     webOrigin: __TRACE_WEB_ORIGIN__,
@@ -265,6 +266,8 @@ try {
       origins: __TRACE_IOS_EARNED_PERMISSION_CONFIG__.origins,
       registrationIds: __TRACE_IOS_EARNED_PERMISSION_CONFIG__.registrations.map(({ id }) => id),
       session,
+      fetch: apiFetch,
+      apiBase: __TRACE_API_BASE__,
     });
   }
   extension.storage.onChanged?.addListener((changes, area) => {

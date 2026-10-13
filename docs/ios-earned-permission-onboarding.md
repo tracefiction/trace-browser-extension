@@ -60,7 +60,10 @@ required story sites, `tabs`, and manifest-declared scripts.
 
 `TRACE_IOS_FIRST_TAP_SAVE=1` turns on a save made when the reader opens Trace
 on a story before the story sites are allowed. Every state of it has its
-wording; it has not yet been proven end to end in Safari. Three rules keep it
+wording; it has not yet been proven end to end in Safari. On a sheet too
+short to show a state whole, the rule line and the main button stay pinned
+and the quieter button scrolls with the content; at the largest text sizes
+nothing is pinned. Three rules keep it
 a development switch:
 
 - No release build can turn it on, whatever else is set. Shipping it is a
@@ -224,11 +227,24 @@ What a record says:
   account saving the same story neither raises nor clears it.
 - **Never sent, refused, or sent and unconfirmed.** Recorded around the write
   itself. Only "never sent" supports saying nothing was sent.
-- **Check again** only looks. It can report a story found or say it does not
-  know; it has no path to a save and never reports a story as missing, because
-  the Library read it uses is not guaranteed complete. A popup reopened after
-  a write in doubt looks first, and does not offer to save a story that may be
-  saved.
+- **Check again** only looks, and has no path to a save. Each tap makes one
+  request from the background: `GET /api/extension/library-membership` with
+  the story's key (`ao3:<id>` or `ffn:<id>`, the key the save was made under)
+  as its only parameter, under the same sign-in as the extension's other
+  Library reads. Trace answers for that one story, so unlike the whole-Library
+  read its "absent" is an answer. Found improves the record. Absent is
+  reported as a tap that added nothing, with the way to save again, and only
+  when no save of the story is still out; the write that went unanswered
+  stays in doubt, so a story found later is still not called already there. A
+  sign-in Trace turns down is reported as an account to reconnect. A request
+  that fails, is turned away as too many, meets a server error or comes back
+  unreadable or about another story leaves the story's place not known, never
+  absent. Nothing is answered from a kept copy of the Library. Only a build
+  with the switch on contains this request. A popup reopened after a write in
+  doubt looks first, and does not offer to save a story that may be saved.
+- **One save for one story.** Opens of the same account and story are worked
+  out one at a time, so two that arrive together (a double tap on a button
+  that opens, or two popups) start one save and are both shown it.
 - **Manual or automatic.** Stamped by the background when it admits a save:
   manual when it injected that page itself and the story sites were not
   allowed, automatic when they were allowed and the page scripts registered.

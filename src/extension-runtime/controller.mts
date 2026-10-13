@@ -4,6 +4,8 @@ import {
   sameAccountScope,
   SessionService,
   type AccountScope,
+  type AuthenticatedEffectResult,
+  type AuthenticatedExecutionResult,
   type DiagnosticEvent,
   type DiagnosticsPort,
   FinishQualificationService,
@@ -1177,6 +1179,19 @@ export class SessionRuntimeController {
   async storyPresence(workKey: string): Promise<StoryPresence> {
     await this.start();
     return this.#storyCommands.presence(workKey);
+  }
+
+  /** The account an answer from Trace belongs to, or null for none. */
+  publicationScope(): AccountScope | null {
+    return this.#service.publicationScope();
+  }
+
+  /** Runs one request to Trace as the account now signed in. */
+  async executeAuthenticated<T>(
+    effect: (credential: string) => Promise<AuthenticatedEffectResult<T>>,
+  ): Promise<AuthenticatedExecutionResult<T>> {
+    await this.start();
+    return this.#service.executeAuthenticated(effect);
   }
 
   async #startOnce(): Promise<void> {
