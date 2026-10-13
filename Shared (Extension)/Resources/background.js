@@ -1758,6 +1758,134 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
   };
 
+  // src/extension-core/safari-readiness.mts
+  var SAFARI_READINESS_REPORT_VERSION = 1;
+  var ANSWERS = Object.freeze({
+    allowed: "positive",
+    not_allowed: "blocker",
+    partly_allowed: "blocker",
+    registered: "positive",
+    declared: "positive",
+    not_registered: "blocker",
+    registration_failed: "blocker",
+    connected: "positive",
+    no_account: "blocker",
+    reconnect_required: "blocker",
+    on: "positive",
+    off: "blocker"
+  });
+  function component(reason, observedAt) {
+    return Object.freeze({ answer: ANSWERS[reason] ?? "unknown", reason, observedAt });
+  }
+  function safariReadinessResult(components) {
+    if (components.account.reason === "changed") return "unknown";
+    const answers = [
+      components.websiteAccess,
+      components.scriptRegistration,
+      components.account,
+      components.automaticSaving
+    ].map(({ answer }) => answer);
+    if (answers.every((answer) => answer === "positive")) return "ready";
+    return answers.includes("blocker") ? "not_ready" : "unknown";
+  }
+  var MAX_PASSES = 3;
+  var SafariReadinessService = class {
+    #ports;
+    #running = null;
+    #askedAgain = false;
+    constructor(ports) {
+      this.#ports = ports;
+    }
+    /**
+     * Reads the four things and sends the app one report. A request that
+     * arrives while one is being read is answered by reading again afterwards,
+     * since what it was asked about may have changed since.
+     */
+    report() {
+      if (this.#running !== null) {
+        this.#askedAgain = true;
+        return this.#running;
+      }
+      const running = (async () => {
+        let outcome = { kind: "no_provider" };
+        for (let pass = 0; pass < MAX_PASSES; pass += 1) {
+          this.#askedAgain = false;
+          const once = await this.#reportOnce();
+          outcome = once.outcome;
+          if (!once.again && !this.#askedAgain) break;
+        }
+        return outcome;
+      })().finally(() => {
+        this.#running = null;
+      });
+      this.#running = running;
+      return running;
+    }
+    async #reportOnce() {
+      const preparation = await this.#ports.prepare().catch(() => null);
+      if (preparation === null) return { outcome: { kind: "no_provider" }, again: false };
+      const account = await this.#ports.account().catch(
+        () => ({ state: "unreachable" })
+      );
+      const accountAt = this.#ports.now();
+      const session = this.#ports.session();
+      const [websiteAccess, scriptRegistration, automaticSaving] = await Promise.all([
+        this.#websiteAccess(),
+        this.#ports.scriptRegistration().then(
+          (reason) => component(reason, this.#ports.now()),
+          () => component("unreadable", this.#ports.now())
+        ),
+        this.#ports.automaticSaving().then(
+          (value) => component(value === "unknown" ? "unreadable" : value, this.#ports.now()),
+          () => component("unreadable", this.#ports.now())
+        )
+      ]);
+      let accountReason = account.state;
+      if (this.#ports.session() !== session || account.state === "connected" && account.session !== session) {
+        accountReason = "changed";
+      } else if (account.state === "connected" && preparation.cycle !== null && preparation.cycle.accountId !== null && preparation.cycle.accountId !== account.accountId) {
+        accountReason = "mismatch";
+      }
+      const components = Object.freeze({
+        websiteAccess,
+        scriptRegistration,
+        account: component(accountReason, accountReason === account.state ? accountAt : this.#ports.now()),
+        automaticSaving
+      });
+      const report = Object.freeze({
+        version: SAFARI_READINESS_REPORT_VERSION,
+        observedAt: this.#ports.now(),
+        result: safariReadinessResult(components),
+        components,
+        ...accountReason === "connected" && account.state === "connected" ? { accountId: account.accountId } : {}
+      });
+      const delivered = await this.#ports.deliver(report, preparation).catch(() => "refused");
+      const again = accountReason === "changed" || delivered === "stale_cycle";
+      return {
+        outcome: delivered === "stored" ? { kind: "delivered", report } : { kind: "refused", report },
+        again
+      };
+    }
+    /**
+     * Allowed on one fresh reading. Not allowed only on two readings a moment
+     * apart that both say so, with Safari listing what is allowed both
+     * times: a single reading, or one without the list, is not an answer.
+     */
+    async #websiteAccess() {
+      const read = () => this.#ports.websiteAccess().catch(() => ({ complete: null, granted: null }));
+      const done = (reason) => component(reason, this.#ports.now());
+      const first = await read();
+      if (first.complete === true) return done("allowed");
+      if (first.complete === null) return done("unreadable");
+      if (first.granted === null) return done("unconfirmed");
+      await this.#ports.wait(ARCHIVE_ACCESS_CONFIRM_DELAY_MS);
+      const second = await read();
+      if (second.complete === true) return done("allowed");
+      if (second.complete === null || second.granted === null) return done("unconfirmed");
+      return done(second.granted > 0 ? "partly_allowed" : "not_allowed");
+    }
+  };
+
   // src/extension-core/saved-filter-sync.mts
   var SAVED_FILTER_ACTIVE_LIMIT = 250;
   var SAVED_FILTER_SYNC_BATCH_LIMIT = 100;
@@ -3645,7 +3773,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           entryID: receipt.entryID,
           workKey: receipt.workKey,
           source: receipt.source,
-          context: receipt.context
+          context: receipt.context,
+          ...receipt.mode === void 0 ? {} : { mode: receipt.mode }
         }, 1e3).catch(() => void 0);
         recorded = isRecord5(saved) && saved.ok === true;
       }
@@ -7983,195 +8112,6 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     return controller;
   }
 
-  // src/extension-runtime/archive-readiness.mts
-  var ARCHIVE_READINESS_MESSAGE_TYPES = Object.freeze({
-    archiveSeen: "TRACE_ARCHIVE_SEEN",
-    accessReport: "TRACE_ARCHIVE_ACCESS_REPORT"
-  });
-  var ARCHIVE_ACCESS_REPORTED_AT_KEY = "traceArchiveAccessReportedAtV1";
-  var ARCHIVE_ACCESS_STATE_KEY = "traceArchiveAccessStateV1";
-  var ARCHIVE_ACCESS_REPORT_PERIOD_MINUTES = 24 * 60;
-  var ARCHIVE_ACCESS_REPORT_STALE_MS = 20 * 60 * 60 * 1e3;
-  var BrowserArchiveAccessLedger = class {
-    #storage;
-    constructor(storage) {
-      this.#storage = storage;
-    }
-    async read() {
-      const stored = await this.#storage.get([
-        ARCHIVE_ACCESS_REPORTED_AT_KEY,
-        ARCHIVE_ACCESS_STATE_KEY
-      ]);
-      const deliveredAt = stored[ARCHIVE_ACCESS_REPORTED_AT_KEY];
-      const state = isRecord19(stored[ARCHIVE_ACCESS_STATE_KEY]) ? stored[ARCHIVE_ACCESS_STATE_KEY] : {};
-      const time = (value) => typeof value === "number" && Number.isFinite(value) && value > 0;
-      return Object.freeze({
-        grantSeen: state.grantSeen === true,
-        ...time(deliveredAt) ? { deliveredAt } : {},
-        ...typeof state.delivered === "string" ? { delivered: state.delivered.slice(0, 64) } : {},
-        ...Number.isInteger(state.failures) && state.failures > 0 ? { failures: state.failures } : {},
-        ...time(state.retryAt) ? { retryAt: state.retryAt } : {}
-      });
-    }
-    async write(ledger) {
-      await this.#storage.set({
-        ...ledger.deliveredAt === void 0 ? {} : { [ARCHIVE_ACCESS_REPORTED_AT_KEY]: ledger.deliveredAt },
-        [ARCHIVE_ACCESS_STATE_KEY]: {
-          grantSeen: ledger.grantSeen,
-          ...ledger.delivered === void 0 ? {} : { delivered: ledger.delivered },
-          ...ledger.failures === void 0 ? {} : { failures: ledger.failures },
-          ...ledger.retryAt === void 0 ? {} : { retryAt: ledger.retryAt }
-        }
-      });
-    }
-  };
-  function isRecord19(value) {
-    return typeof value === "object" && value !== null && !Array.isArray(value);
-  }
-  function normalizeHandoffId(value) {
-    if (typeof value !== "string") return null;
-    const trimmed = value.trim();
-    return /^[A-Za-z0-9_-]{1,128}$/.test(trimmed) ? trimmed : null;
-  }
-  var ArchiveReadinessRuntimeController = class {
-    #publishTrackingPreference;
-    #service;
-    #status;
-    constructor(environment) {
-      this.#status = environment.status;
-      this.#publishTrackingPreference = environment.publishTrackingPreference;
-      this.#service = new ArchiveReadinessService({
-        receipts: new NativeArchiveReadinessReceiptPort(
-          environment.runtime,
-          environment.storageMode
-        ),
-        permissions: new BrowserArchivePermissionSnapshotPort(
-          environment.permissions,
-          environment.runtime,
-          environment.storageMode
-        ),
-        ...environment.clock === void 0 ? {} : { clock: environment.clock },
-        ...environment.requiredOrigins === void 0 ? {} : { requiredOrigins: environment.requiredOrigins },
-        ...environment.accessConfirmWait === void 0 ? {} : { wait: environment.accessConfirmWait },
-        ...environment.accessLedger === void 0 ? {} : { accessLedger: environment.accessLedger }
-      });
-    }
-    /** See `ArchiveReadinessService.reportAccess`. */
-    reportAccess(options = {}) {
-      return this.#service.reportAccess(options);
-    }
-    async handle(message, sender) {
-      if (!isRecord19(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.archiveSeen) {
-        return null;
-      }
-      const hostKind2 = archiveHostKindFromSender(sender);
-      if (hostKind2 === null) return { ok: true, receipt: "ignored" };
-      void this.#status?.record({ hostKind: hostKind2 }).catch(() => {
-      });
-      const preference = this.#publishTrackingPreference?.().catch(() => {
-      });
-      const handoffId = normalizeHandoffId(message.handoffId);
-      const result = await this.#service.recordRun({
-        hostKind: hostKind2,
-        ...handoffId === null ? {} : { handoffId }
-      });
-      await preference;
-      return { ok: true, receipt: result.kind };
-    }
-  };
-  function installArchiveReadinessRuntime(environment) {
-    const controller = new ArchiveReadinessRuntimeController(environment);
-    environment.runtime.onMessage.addListener((message, sender, sendResponse) => {
-      if (!isRecord19(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.archiveSeen) {
-        return false;
-      }
-      void controller.handle(message, sender).then(
-        (response) => sendResponse(response),
-        () => sendResponse({ ok: true, receipt: "unavailable" })
-      );
-      return true;
-    });
-    return controller;
-  }
-  function runsBesideTraceApp(runtime, mode, userAgent) {
-    if (typeof runtime.sendNativeMessage !== "function") return false;
-    if (/iPhone|iPad|iPod/i.test(userAgent)) return true;
-    if (!/Macintosh/i.test(userAgent) || typeof runtime.getPlatformInfo !== "function") {
-      return false;
-    }
-    return extensionCall(
-      runtime,
-      "getPlatformInfo",
-      [],
-      runtime,
-      mode
-    ).then((info) => info?.os === "ios", () => false);
-  }
-  function installArchiveAccessReport(controller, environment) {
-    const { accessLedger, alarms, permissions, runtime, storageMode } = environment;
-    const now = () => environment.clock?.now() ?? Date.now();
-    const beside = runsBesideTraceApp(
-      runtime,
-      storageMode,
-      environment.platform?.userAgent ?? globalThis.navigator?.userAgent ?? ""
-    );
-    if (beside === false) return { report: async () => ({ kind: "unknown" }) };
-    const supported = Promise.resolve(beside);
-    const report = async (options = {}) => await supported ? controller.reportAccess(options) : { kind: "unknown" };
-    const reportQuietly = () => {
-      void report().catch(() => void 0);
-    };
-    runtime.onMessage.addListener((message, sender, sendResponse) => {
-      if (!isRecord19(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport) {
-        return false;
-      }
-      if (Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
-        sendResponse({ ok: false });
-        return false;
-      }
-      void report({ readerPresent: true }).then(
-        (result) => sendResponse({ ok: true, report: result.kind }),
-        () => sendResponse({ ok: true, report: "unavailable" })
-      );
-      return true;
-    });
-    permissions?.onAdded?.addListener(reportQuietly);
-    permissions?.onRemoved?.addListener(reportQuietly);
-    alarms?.onAlarm?.addListener((alarm) => {
-      if (alarm?.name === ARCHIVE_ACCESS_REPORT_ALARM) reportQuietly();
-    });
-    void supported.then(async (yes) => {
-      if (!yes) return;
-      const existing = typeof alarms?.get === "function" ? await extensionCall(
-        alarms,
-        "get",
-        [ARCHIVE_ACCESS_REPORT_ALARM],
-        runtime,
-        storageMode
-      ).catch(() => void 0) : void 0;
-      if (!isRecord19(existing)) {
-        try {
-          const created = alarms?.create?.(ARCHIVE_ACCESS_REPORT_ALARM, {
-            periodInMinutes: ARCHIVE_ACCESS_REPORT_PERIOD_MINUTES
-          });
-          if (created && typeof created.then === "function") {
-            await Promise.resolve(created).catch(() => void 0);
-          }
-        } catch {
-          void runtime.lastError;
-        }
-      }
-      const ledger = await accessLedger.read().catch(() => null);
-      if (ledger === null) return;
-      const deliveredAt = ledger.deliveredAt;
-      if (typeof deliveredAt === "number" && deliveredAt <= now() && now() - deliveredAt < ARCHIVE_ACCESS_REPORT_STALE_MS) {
-        return;
-      }
-      reportQuietly();
-    }).catch(() => void 0);
-    return { report };
-  }
-
   // src/extension-runtime/earned-permission-registration.mts
   var EARNED_PERMISSION_REGISTRATION_MESSAGE = "TRACE_EARNED_PERMISSION_RECONCILE";
   var EARNED_PERMISSION_STATE_KEY = "traceEarnedPermissionOnboardingV1";
@@ -8183,7 +8123,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var DEFAULT_RECONCILE_TIMEOUT_MS = 5e3;
   var DEFAULT_ENDED_GRANT_CONFIRM_DELAY_MS = 2e3;
   var UNKNOWN_PERMISSION_STATE = Symbol("unknown permission state");
-  function isRecord20(value) {
+  function isRecord19(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
   function callExtensionApi(target, method, args, runtime, mode) {
@@ -8207,7 +8147,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     });
   }
   function storedState(value) {
-    if (!isRecord20(value)) return Object.freeze({});
+    if (!isRecord19(value)) return Object.freeze({});
     return Object.freeze({
       ...typeof value.grantAt === "number" && value.grantAt > 0 ? { grantAt: value.grantAt } : {},
       ...Number.isInteger(value.registrationVersion) && Number(value.registrationVersion) > 0 ? { registrationVersion: Number(value.registrationVersion) } : {},
@@ -8227,6 +8167,14 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     });
     constructor(environment) {
       this.#environment = environment;
+    }
+    /** Resolves once no reconcile is under way or waiting its turn. */
+    idle() {
+      const tail = this.#tail;
+      return tail.then(
+        () => this.#tail === tail ? void 0 : this.idle(),
+        () => this.#tail === tail ? void 0 : this.idle()
+      );
     }
     reconcile() {
       const next = this.#tail.then(
@@ -8545,9 +8493,21 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     };
     const reconcile = () => {
       const result = controller.reconcile();
+      const ended = (value) => {
+        try {
+          environment.onReconcileEnded?.(value);
+        } catch {
+        }
+      };
       void result.then(
-        (value) => value.ok || value.error === "permission_incomplete" ? finished(value.ok, value.changed) : tryLater(),
-        () => tryLater()
+        (value) => {
+          ended(value);
+          return value.ok || value.error === "permission_incomplete" ? finished(value.ok, value.changed) : tryLater();
+        },
+        () => {
+          ended(null);
+          return tryLater();
+        }
       ).catch(() => void 0);
       return result;
     };
@@ -8563,7 +8523,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       void reconcile().catch(() => void 0);
     });
     runtime.onMessage.addListener((message, sender, sendResponse) => {
-      if (!isRecord20(message)) return false;
+      if (!isRecord19(message)) return false;
       if (message.type === POPUP_OPENED_MESSAGE && isPopupSender(sender, runtime.id)) {
         void reconcile().catch(() => void 0);
         return false;
@@ -8596,6 +8556,198 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     return controller;
   }
 
+  // src/extension-runtime/archive-readiness.mts
+  var ARCHIVE_READINESS_MESSAGE_TYPES = Object.freeze({
+    archiveSeen: "TRACE_ARCHIVE_SEEN",
+    accessReport: "TRACE_ARCHIVE_ACCESS_REPORT"
+  });
+  var ARCHIVE_ACCESS_REPORTED_AT_KEY = "traceArchiveAccessReportedAtV1";
+  var ARCHIVE_ACCESS_STATE_KEY = "traceArchiveAccessStateV1";
+  var ARCHIVE_ACCESS_REPORT_PERIOD_MINUTES = 24 * 60;
+  var ARCHIVE_ACCESS_REPORT_STALE_MS = 20 * 60 * 60 * 1e3;
+  var BrowserArchiveAccessLedger = class {
+    #storage;
+    constructor(storage) {
+      this.#storage = storage;
+    }
+    async read() {
+      const stored = await this.#storage.get([
+        ARCHIVE_ACCESS_REPORTED_AT_KEY,
+        ARCHIVE_ACCESS_STATE_KEY,
+        EARNED_PERMISSION_STATE_KEY
+      ]);
+      const deliveredAt = stored[ARCHIVE_ACCESS_REPORTED_AT_KEY];
+      const state = isRecord20(stored[ARCHIVE_ACCESS_STATE_KEY]) ? stored[ARCHIVE_ACCESS_STATE_KEY] : {};
+      const setup = isRecord20(stored[EARNED_PERMISSION_STATE_KEY]) ? stored[EARNED_PERMISSION_STATE_KEY] : {};
+      const grantedBefore = setup.promptResult === "granted" || typeof setup.completedAt === "number" && setup.completedAt > 0;
+      const time = (value) => typeof value === "number" && Number.isFinite(value) && value > 0;
+      return Object.freeze({
+        grantSeen: state.grantSeen === true || grantedBefore,
+        ...time(deliveredAt) ? { deliveredAt } : {},
+        ...typeof state.delivered === "string" ? { delivered: state.delivered.slice(0, 64) } : {},
+        ...Number.isInteger(state.failures) && state.failures > 0 ? { failures: state.failures } : {},
+        ...time(state.retryAt) ? { retryAt: state.retryAt } : {}
+      });
+    }
+    async write(ledger) {
+      await this.#storage.set({
+        ...ledger.deliveredAt === void 0 ? {} : { [ARCHIVE_ACCESS_REPORTED_AT_KEY]: ledger.deliveredAt },
+        [ARCHIVE_ACCESS_STATE_KEY]: {
+          grantSeen: ledger.grantSeen,
+          ...ledger.delivered === void 0 ? {} : { delivered: ledger.delivered },
+          ...ledger.failures === void 0 ? {} : { failures: ledger.failures },
+          ...ledger.retryAt === void 0 ? {} : { retryAt: ledger.retryAt }
+        }
+      });
+    }
+  };
+  function isRecord20(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function normalizeHandoffId(value) {
+    if (typeof value !== "string") return null;
+    const trimmed = value.trim();
+    return /^[A-Za-z0-9_-]{1,128}$/.test(trimmed) ? trimmed : null;
+  }
+  var ArchiveReadinessRuntimeController = class {
+    #publishTrackingPreference;
+    #service;
+    #status;
+    constructor(environment) {
+      this.#status = environment.status;
+      this.#publishTrackingPreference = environment.publishTrackingPreference;
+      this.#service = new ArchiveReadinessService({
+        receipts: new NativeArchiveReadinessReceiptPort(
+          environment.runtime,
+          environment.storageMode
+        ),
+        permissions: new BrowserArchivePermissionSnapshotPort(
+          environment.permissions,
+          environment.runtime,
+          environment.storageMode
+        ),
+        ...environment.clock === void 0 ? {} : { clock: environment.clock },
+        ...environment.requiredOrigins === void 0 ? {} : { requiredOrigins: environment.requiredOrigins },
+        ...environment.accessConfirmWait === void 0 ? {} : { wait: environment.accessConfirmWait },
+        ...environment.accessLedger === void 0 ? {} : { accessLedger: environment.accessLedger }
+      });
+    }
+    /** See `ArchiveReadinessService.reportAccess`. */
+    reportAccess(options = {}) {
+      return this.#service.reportAccess(options);
+    }
+    async handle(message, sender) {
+      if (!isRecord20(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.archiveSeen) {
+        return null;
+      }
+      const hostKind2 = archiveHostKindFromSender(sender);
+      if (hostKind2 === null) return { ok: true, receipt: "ignored" };
+      void this.#status?.record({ hostKind: hostKind2 }).catch(() => {
+      });
+      const preference = this.#publishTrackingPreference?.().catch(() => {
+      });
+      const handoffId = normalizeHandoffId(message.handoffId);
+      const result = await this.#service.recordRun({
+        hostKind: hostKind2,
+        ...handoffId === null ? {} : { handoffId }
+      });
+      await preference;
+      return { ok: true, receipt: result.kind };
+    }
+  };
+  function installArchiveReadinessRuntime(environment) {
+    const controller = new ArchiveReadinessRuntimeController(environment);
+    environment.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (!isRecord20(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.archiveSeen) {
+        return false;
+      }
+      void controller.handle(message, sender).then(
+        (response) => sendResponse(response),
+        () => sendResponse({ ok: true, receipt: "unavailable" })
+      );
+      return true;
+    });
+    return controller;
+  }
+  function runsBesideTraceApp(runtime, mode, userAgent) {
+    if (typeof runtime.sendNativeMessage !== "function") return false;
+    if (/iPhone|iPad|iPod/i.test(userAgent)) return true;
+    if (!/Macintosh/i.test(userAgent) || typeof runtime.getPlatformInfo !== "function") {
+      return false;
+    }
+    return extensionCall(
+      runtime,
+      "getPlatformInfo",
+      [],
+      runtime,
+      mode
+    ).then((info) => info?.os === "ios", () => false);
+  }
+  function installArchiveAccessReport(controller, environment) {
+    const { accessLedger, alarms, permissions, runtime, storageMode } = environment;
+    const now = () => environment.clock?.now() ?? Date.now();
+    const beside = runsBesideTraceApp(
+      runtime,
+      storageMode,
+      environment.platform?.userAgent ?? globalThis.navigator?.userAgent ?? ""
+    );
+    if (beside === false) return { report: async () => ({ kind: "unknown" }) };
+    const supported = Promise.resolve(beside);
+    const report = async (options = {}) => await supported ? controller.reportAccess(options) : { kind: "unknown" };
+    const reportQuietly = () => {
+      void report().catch(() => void 0);
+    };
+    runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (!isRecord20(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport) {
+        return false;
+      }
+      if (Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
+        sendResponse({ ok: false });
+        return false;
+      }
+      void report({ readerPresent: true }).then(
+        (result) => sendResponse({ ok: true, report: result.kind }),
+        () => sendResponse({ ok: true, report: "unavailable" })
+      );
+      return true;
+    });
+    permissions?.onAdded?.addListener(reportQuietly);
+    permissions?.onRemoved?.addListener(reportQuietly);
+    alarms?.onAlarm?.addListener((alarm) => {
+      if (alarm?.name === ARCHIVE_ACCESS_REPORT_ALARM) reportQuietly();
+    });
+    void supported.then(async (yes) => {
+      if (!yes) return;
+      const existing = typeof alarms?.get === "function" ? await extensionCall(
+        alarms,
+        "get",
+        [ARCHIVE_ACCESS_REPORT_ALARM],
+        runtime,
+        storageMode
+      ).catch(() => void 0) : void 0;
+      if (!isRecord20(existing)) {
+        try {
+          const created = alarms?.create?.(ARCHIVE_ACCESS_REPORT_ALARM, {
+            periodInMinutes: ARCHIVE_ACCESS_REPORT_PERIOD_MINUTES
+          });
+          if (created && typeof created.then === "function") {
+            await Promise.resolve(created).catch(() => void 0);
+          }
+        } catch {
+          void runtime.lastError;
+        }
+      }
+      const ledger = await accessLedger.read().catch(() => null);
+      if (ledger === null) return;
+      const deliveredAt = ledger.deliveredAt;
+      if (typeof deliveredAt === "number" && deliveredAt <= now() && now() - deliveredAt < ARCHIVE_ACCESS_REPORT_STALE_MS) {
+        return;
+      }
+      reportQuietly();
+    }).catch(() => void 0);
+    return { report };
+  }
+
   // src/extension-runtime/first-tap-save.mts
   var FIRST_TAP_RESULT_FRESH_MS = 10 * 60 * 1e3;
   var FIRST_TAP_RECORD_TTL_MS = 24 * 60 * 60 * 1e3;
@@ -8607,6 +8759,190 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     "trace-finish-qualify.js",
     "collector.js"
   ]);
+
+  // src/extension-runtime/safari-readiness-report.mts
+  var SAFARI_READINESS_MESSAGES = Object.freeze({
+    /** Which provider does the app hold, and which cycle has it open? */
+    prepare: "TRACE_IOS_SAFARI_READINESS_PREPARE",
+    /** One report, bound to that provider and that cycle. */
+    report: "TRACE_IOS_SAFARI_READINESS_REPORT"
+  });
+  var SAFARI_READINESS_SESSION_KEY = "traceSafariReadinessSessionV1";
+  var NATIVE_TIMEOUT_MS = 2e3;
+  var BROWSER_READ_TIMEOUT_MS = 2e3;
+  function isRecord21(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function bounded(work, ms) {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(null), ms);
+      work.then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        () => {
+          clearTimeout(timer);
+          resolve(null);
+        }
+      );
+    });
+  }
+  function installSafariReadinessReport(environment) {
+    const { runtime, permissions, scripting, storage, storageMode, apiOrigin, config } = environment;
+    const now = environment.now ?? (() => Date.now());
+    const call = (target, method, args) => extensionCall(target, method, args, runtime, storageMode);
+    const beside = runsBesideTraceApp(
+      runtime,
+      storageMode,
+      environment.platform?.userAgent ?? globalThis.navigator?.userAgent ?? ""
+    );
+    if (beside === false) {
+      return Object.freeze({
+        report: async () => ({ kind: "no_provider" }),
+        registrationEnded() {
+        },
+        preferenceChanged() {
+        },
+        accountMayHaveChanged() {
+        }
+      });
+    }
+    const supported = Promise.resolve(beside);
+    let registrationFailed = false;
+    const websiteAccess = async () => {
+      if (config.origins.length === 0) return { complete: null, granted: null };
+      const [complete, listed] = await Promise.all([
+        typeof permissions.contains !== "function" ? Promise.resolve(null) : bounded(call(permissions, "contains", [{ origins: [...config.origins] }]), BROWSER_READ_TIMEOUT_MS),
+        bounded(call(permissions, "getAll", []), BROWSER_READ_TIMEOUT_MS)
+      ]);
+      const origins = isRecord21(listed) && Array.isArray(listed.origins) ? new Set(listed.origins) : null;
+      const granted = origins === null ? null : config.origins.filter((origin) => origins.has(origin)).length;
+      return {
+        // The browser's own answer where it gives one: a broader grant need not
+        // list the story sites by name.
+        complete: typeof complete === "boolean" ? complete : granted === null ? null : granted === config.origins.length,
+        granted
+      };
+    };
+    const scriptRegistration = async () => {
+      if (config.registrationMode === "static") {
+        const declared = runtime.getManifest?.().content_scripts;
+        return Array.isArray(declared) && declared.length > 0 ? "declared" : "not_registered";
+      }
+      if (scripting === void 0) return "registration_failed";
+      await bounded(environment.registrationIdle?.() ?? Promise.resolve(), 6e3);
+      const [current, stored] = await Promise.all([
+        bounded(call(scripting, "getRegisteredContentScripts", []), BROWSER_READ_TIMEOUT_MS),
+        bounded(storage.get(EARNED_PERMISSION_STATE_KEY), BROWSER_READ_TIMEOUT_MS)
+      ]);
+      if (!Array.isArray(current) || stored === null) return "unreadable";
+      const ids = new Set(current.map((script) => isRecord21(script) ? script.id : void 0));
+      const state = stored[EARNED_PERMISSION_STATE_KEY];
+      const generation = isRecord21(state) ? state.registrationVersion : void 0;
+      if (config.registrations.every(({ id }) => ids.has(id)) && generation === config.version) {
+        return "registered";
+      }
+      return registrationFailed ? "registration_failed" : "not_registered";
+    };
+    const account = async () => {
+      const session = environment.session();
+      if (session === void 0) return { state: "pending" };
+      const read = await session.accountForThisOpen();
+      if (read.state === "verified") {
+        const accountId = session.snapshot().accountId;
+        return typeof accountId === "string" && accountId.length > 0 && session.pageBinding() === read.binding ? { state: "connected", session: read.binding, accountId } : { state: "changed" };
+      }
+      if (read.state === "missing") return { state: "no_account" };
+      if (read.state === "reconnect_required") return { state: "reconnect_required" };
+      const state = session.snapshot().state;
+      return {
+        state: state === "initializing" || state === "connecting" || state === "verifying" ? "pending" : "unreachable"
+      };
+    };
+    const prepare = async () => {
+      const response = await sendNativeMessageWithFallback(
+        runtime,
+        storageMode,
+        { type: SAFARI_READINESS_MESSAGES.prepare, apiOrigin },
+        NATIVE_TIMEOUT_MS
+      );
+      if (!isRecord21(response) || response.ok !== true || !isRecord21(response.provider)) return null;
+      const cycle = isRecord21(response.cycle) && typeof response.cycle.id === "string" ? {
+        id: response.cycle.id,
+        accountId: typeof response.cycle.accountID === "string" ? response.cycle.accountID : null
+      } : null;
+      return { provider: response.provider, cycle };
+    };
+    const deliver = async (report2, preparation) => {
+      const response = await sendNativeMessageWithFallback(runtime, storageMode, {
+        type: SAFARI_READINESS_MESSAGES.report,
+        version: report2.version,
+        apiOrigin,
+        provider: preparation.provider,
+        ...preparation.cycle === null ? {} : { cycleID: preparation.cycle.id },
+        ...report2.accountId === void 0 ? {} : { accountID: report2.accountId },
+        observedAt: report2.observedAt,
+        result: report2.result,
+        components: report2.components
+      }, NATIVE_TIMEOUT_MS);
+      if (isRecord21(response) && response.ok === true) return "stored";
+      return isRecord21(response) && response.error === "stale_cycle" ? "stale_cycle" : "refused";
+    };
+    const service = new SafariReadinessService({
+      prepare,
+      deliver,
+      websiteAccess,
+      scriptRegistration,
+      account,
+      session: () => environment.session()?.pageBinding() ?? null,
+      automaticSaving: async () => await environment.session()?.automaticSaving() ?? "unknown",
+      wait: environment.wait ?? ((ms) => new Promise((resolve) => {
+        setTimeout(resolve, ms);
+      })),
+      now
+    });
+    const report = async () => await supported ? service.report() : { kind: "no_provider" };
+    const reportQuietly = () => {
+      void report().catch(() => void 0);
+    };
+    runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (!isRecord21(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport || Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
+        return false;
+      }
+      void report().then(() => sendResponse({ ok: true }), () => sendResponse({ ok: true }));
+      return true;
+    });
+    permissions.onAdded?.addListener(reportQuietly);
+    permissions.onRemoved?.addListener(reportQuietly);
+    let lastSession;
+    return Object.freeze({
+      report,
+      registrationEnded(result) {
+        const failed2 = result !== null && result.error === "registration_failed";
+        const changed = failed2 !== registrationFailed || result !== null && result.changed;
+        registrationFailed = failed2;
+        if (changed || failed2) reportQuietly();
+      },
+      preferenceChanged: reportQuietly,
+      accountMayHaveChanged() {
+        const session = environment.session();
+        if (session === void 0) return;
+        const state = session.snapshot().state;
+        if (state === "initializing" || state === "connecting" || state === "verifying") return;
+        const token = session.pageBinding() ?? "";
+        if (token === lastSession) return;
+        lastSession = token;
+        void (async () => {
+          if (!await supported) return;
+          const stored = await storage.get(SAFARI_READINESS_SESSION_KEY);
+          if (stored[SAFARI_READINESS_SESSION_KEY] === token) return;
+          await storage.set({ [SAFARI_READINESS_SESSION_KEY]: token });
+          await report();
+        })().catch(() => void 0);
+      }
+    });
+  }
 
   // src/extension-runtime/index.mts
   var UUID_PATTERN7 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -8636,6 +8972,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     );
     let session;
     let afterScriptsRegistered = null;
+    let readiness = null;
     if (true) {
       const recover = installArchiveRecovery({
         runtime: extension.runtime,
@@ -8681,7 +9018,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         });
       }
       if (define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default !== null && extension.permissions !== void 0 && (define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.registrationMode === "static" || extension.scripting !== void 0)) {
-        installEarnedPermissionRegistrationRuntime({
+        const registration = installEarnedPermissionRegistrationRuntime({
           runtime: extension.runtime,
           permissions: extension.permissions,
           ...extension.scripting === void 0 ? {} : { scripting: extension.scripting },
@@ -8699,7 +9036,19 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           onScriptsRegistered: () => {
             void recover();
             void afterScriptsRegistered?.().catch(() => void 0);
-          }
+          },
+          onReconcileEnded: (result) => readiness?.registrationEnded(result)
+        });
+        readiness = installSafariReadinessReport({
+          runtime: extension.runtime,
+          permissions: extension.permissions,
+          ...extension.scripting === void 0 ? {} : { scripting: extension.scripting },
+          storage: new BrowserStorage(extension.storage.local, extension.runtime, storageMode),
+          storageMode,
+          apiOrigin: "https://api.tracefiction.com",
+          config: define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default,
+          registrationIdle: () => registration.idle(),
+          session: () => session
         });
       }
     }
@@ -8752,6 +9101,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     extension.storage.onChanged?.addListener((changes, area) => {
       if (area === "local" && "prefAutoTrackEnabled" in changes) void session?.publishTrackingPreference();
+      if (area !== "local" || readiness === null) return;
+      if ("prefAutoTrackEnabled" in changes) readiness.preferenceChanged();
+      if (ACCOUNT_PROJECTION_REVISION_KEY in changes) readiness.accountMayHaveChanged();
     });
   } catch {
     scope.__traceSessionRuntimeBootFailed = true;

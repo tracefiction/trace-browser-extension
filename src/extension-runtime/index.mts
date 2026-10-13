@@ -9,6 +9,8 @@ import {
 } from "./archive-readiness.mjs";
 import { installEarnedPermissionRegistrationRuntime } from "./earned-permission-registration.mjs";
 import { installFirstTapSave } from "./first-tap-runtime.mjs";
+import { installSafariReadinessReport, type SafariReadinessReporter } from "./safari-readiness-report.mjs";
+import { ACCOUNT_PROJECTION_REVISION_KEY } from "./runtime-messages.mjs";
 import { installTraceFirstInstallActivation } from "./trace-web-navigation.mjs";
 import { rememberConnectIntent } from "./connect-intent.mjs";
 export * from "./account-projection.mjs";
@@ -110,6 +112,7 @@ try {
   );
   let session: SessionRuntimeController | undefined;
   let afterScriptsRegistered: (() => Promise<void>) | null = null;
+  let readiness: SafariReadinessReporter | null = null;
   if (__TRACE_SESSION_MODE__ === "kernel") {
     const recover = installArchiveRecovery({
       runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, scripting: extension.scripting, mode: storageMode,
@@ -168,7 +171,7 @@ try {
       (__TRACE_IOS_EARNED_PERMISSION_CONFIG__.registrationMode === "static" ||
         extension.scripting !== undefined)
     ) {
-      installEarnedPermissionRegistrationRuntime({
+      const registration = installEarnedPermissionRegistrationRuntime({
         runtime: extension.runtime,
         permissions: extension.permissions,
         ...(extension.scripting === undefined
@@ -189,6 +192,21 @@ try {
           void recover();
           void afterScriptsRegistered?.().catch(() => undefined);
         },
+        onReconcileEnded: (result) => readiness?.registrationEnded(result),
+      });
+      // Whether Trace in Safari is ready to save by itself, for the Trace
+      // app beside it on iPhone and iPad. It reads and reports; it changes
+      // nothing, runs nothing on a page and asks Safari for nothing.
+      readiness = installSafariReadinessReport({
+        runtime: extension.runtime,
+        permissions: extension.permissions,
+        ...(extension.scripting === undefined ? {} : { scripting: extension.scripting }),
+        storage: new BrowserStorage(extension.storage.local, extension.runtime, storageMode),
+        storageMode,
+        apiOrigin: __TRACE_API_BASE__,
+        config: __TRACE_IOS_EARNED_PERMISSION_CONFIG__,
+        registrationIdle: () => registration.idle(),
+        session: () => session,
       });
     }
   }
@@ -244,6 +262,9 @@ try {
   }
   extension.storage.onChanged?.addListener((changes, area) => {
     if (area === "local" && "prefAutoTrackEnabled" in changes) void session?.publishTrackingPreference();
+    if (area !== "local" || readiness === null) return;
+    if ("prefAutoTrackEnabled" in changes) readiness.preferenceChanged();
+    if (ACCOUNT_PROJECTION_REVISION_KEY in changes) readiness.accountMayHaveChanged();
   });
 } catch {
   scope.__traceSessionRuntimeBootFailed = true;

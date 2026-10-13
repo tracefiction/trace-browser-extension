@@ -85,6 +85,8 @@ type Environment = Readonly<{
   alarms?: AlarmsPort;
   /** Called when page scripts were just registered, or registered late. */
   onScriptsRegistered?: () => void;
+  /** Called as each reconcile ends, with its result, or null when it could not finish. */
+  onReconcileEnded?: (result: EarnedPermissionRegistrationResult | null) => void;
 }>;
 
 const DEFAULT_RECONCILE_TIMEOUT_MS = 5_000;
@@ -154,6 +156,15 @@ export class EarnedPermissionRegistrationController {
 
   constructor(environment: Environment) {
     this.#environment = environment;
+  }
+
+  /** Resolves once no reconcile is under way or waiting its turn. */
+  idle(): Promise<void> {
+    const tail = this.#tail;
+    return tail.then(
+      () => (this.#tail === tail ? undefined : this.idle()),
+      () => (this.#tail === tail ? undefined : this.idle()),
+    );
   }
 
   reconcile(): Promise<EarnedPermissionRegistrationResult> {
@@ -570,13 +581,21 @@ export function installEarnedPermissionRegistrationRuntime(
   };
   const reconcile = (): Promise<EarnedPermissionRegistrationResult> => {
     const result = controller.reconcile();
+    const ended = (value: EarnedPermissionRegistrationResult | null): void => {
+      try { environment.onReconcileEnded?.(value); } catch { /* Telling is best effort. */ }
+    };
     void result
       .then(
-        (value) =>
-          value.ok || value.error === "permission_incomplete"
+        (value) => {
+          ended(value);
+          return value.ok || value.error === "permission_incomplete"
             ? finished(value.ok, value.changed)
-            : tryLater(),
-        () => tryLater(),
+            : tryLater();
+        },
+        () => {
+          ended(null);
+          return tryLater();
+        },
       )
       .catch(() => undefined);
     return result;
