@@ -13,15 +13,22 @@ export const EARNED_PERMISSION_STATE_KEY =
   "traceEarnedPermissionOnboardingV1";
 /** The popup sends this each time it opens. */
 const POPUP_OPENED_MESSAGE = "TRACE_ARCHIVE_ACCESS_REPORT";
+/**
+ * Retry alarms are named `<this>:<n>` for the n-th further try, and
+ * `<this>:rest` once those have run out. The names themselves carry how far
+ * the retries have got, so the bound holds without anything being stored.
+ */
 export const EARNED_PERMISSION_RETRY_ALARM = "traceEarnedPermissionRetry";
-export const EARNED_PERMISSION_RETRY_KEY = "traceEarnedPermissionRetryV1";
 /**
  * Minutes before each further try after a reconcile that could not finish.
- * After the last one, only a worker start, a permission change or the popup
- * opening tries again.
+ * After the last one a single resting alarm is left, and nothing more is
+ * scheduled until it fires, an update, a new grant, or a success clears it.
  */
 export const EARNED_PERMISSION_RETRY_DELAYS_MINUTES: readonly number[] =
   Object.freeze([1, 5, 30, 180]);
+export const EARNED_PERMISSION_RETRY_REST_MINUTES = 24 * 60;
+/** Set once an ended grant has been confirmed; cleared when access returns. */
+export const EARNED_PERMISSION_ENDED_KEY = "traceEarnedPermissionEndedV1";
 
 export type EarnedPermissionRegistration = Readonly<{
   id: string;
@@ -260,13 +267,21 @@ export class EarnedPermissionRegistrationController {
   async #reconcile(generation: number): Promise<EarnedPermissionRegistrationResult> {
     const { config, runtime, scripting, storageMode, storage } =
       this.#environment;
-    const [reading, stored] = await Promise.all([
+    const [reading, stored, endedConfirmed] = await Promise.all([
       this.#readGrant(),
       storage
         .get(EARNED_PERMISSION_STATE_KEY)
         .then((value) => storedState(value[EARNED_PERMISSION_STATE_KEY]))
         .catch(() => Object.freeze({}) as StoredState),
+      storage
+        .get(EARNED_PERMISSION_ENDED_KEY)
+        .then((value) => typeof value[EARNED_PERMISSION_ENDED_KEY] === "number")
+        .catch(() => false),
     ]);
+    if (reading.complete && endedConfirmed) {
+      // Access is back: an ending confirmed earlier says nothing about now.
+      await storage.remove(EARNED_PERMISSION_ENDED_KEY).catch(() => undefined);
+    }
     const completeGrant = reading.complete;
     const staticRegistration = config.registrationMode === "static";
     if (staticRegistration) {
@@ -338,8 +353,19 @@ export class EarnedPermissionRegistrationController {
         staleIds.length > 0 ||
         stored.promptResult === "granted" ||
         typeof stored.completedAt === "number";
-      if (hadGrant && !(await this.#grantHasEnded(reading, generation))) {
-        throw new Error("permission_state_unconfirmed");
+      // The pause between two readings is paid once per ending. After it
+      // has been confirmed and recorded, and with no script left to lose,
+      // one more incomplete reading changes nothing and needs no second look.
+      // A new grant clears the record, so the next ending is confirmed again.
+      const alreadyConfirmed = endedConfirmed && staleIds.length === 0;
+      if (hadGrant && !alreadyConfirmed) {
+        if (!(await this.#grantHasEnded(reading, generation))) {
+          throw new Error("permission_state_unconfirmed");
+        }
+        this.#assertCurrent(generation);
+        await storage
+          .set({ [EARNED_PERMISSION_ENDED_KEY]: this.#environment.clock?.() ?? Date.now() })
+          .catch(() => undefined);
       }
       if (staleIds.length > 0) {
         this.#assertCurrent(generation);
@@ -477,10 +503,39 @@ export function installEarnedPermissionRegistrationRuntime(
           runtime,
           storageMode,
         ).catch(() => undefined);
-  const retriesUsed = async (): Promise<number> => {
-    const stored = await storage.get(EARNED_PERMISSION_RETRY_KEY).catch(() => null);
-    const used = stored?.[EARNED_PERMISSION_RETRY_KEY];
-    return typeof used === "number" && Number.isInteger(used) && used > 0 ? used : 0;
+  const RETRY_PREFIX = `${EARNED_PERMISSION_RETRY_ALARM}:`;
+  const REST_ALARM = `${RETRY_PREFIX}rest`;
+  const RETRIES = EARNED_PERMISSION_RETRY_DELAYS_MINUTES.length;
+  const ALL_RETRY_ALARMS = [
+    ...EARNED_PERMISSION_RETRY_DELAYS_MINUTES.map((_, index) => `${RETRY_PREFIX}${index}`),
+    REST_ALARM,
+  ];
+  /** The retry alarms now waiting; null when the browser cannot say. */
+  const waitingRetries = async (): Promise<readonly string[] | null> => {
+    if (typeof alarms?.getAll !== "function") return null;
+    try {
+      const all = await callExtensionApi<readonly { readonly name?: string }[]>(
+        alarms as unknown as Record<string, (...args: unknown[]) => unknown>,
+        "getAll",
+        [],
+        runtime,
+        storageMode,
+      );
+      return all
+        .map(({ name }) => name)
+        .filter((name): name is string => typeof name === "string" && name.startsWith(RETRY_PREFIX));
+    } catch {
+      return null;
+    }
+  };
+  // How far the retries have got is carried by the alarm that fired, never by
+  // a stored count: a storage write that fails cannot lift the bound.
+  let nextRetry: number | null = null;
+  const clearRetries = async (): Promise<void> => {
+    nextRetry = null;
+    for (const name of (await waitingRetries()) ?? ALL_RETRY_ALARMS) {
+      await alarm("clear", [name]);
+    }
   };
   // A reconcile that could not finish (an unreadable permission state, a
   // registration that failed, a browser call that never answered, a grant
@@ -493,18 +548,25 @@ export function installEarnedPermissionRegistrationRuntime(
     const late = unfinished;
     unfinished = false;
     if (registered && (changed || late)) environment.onScriptsRegistered?.();
-    await alarm("clear", [EARNED_PERMISSION_RETRY_ALARM]);
-    if ((await retriesUsed()) > 0) {
-      await storage.remove(EARNED_PERMISSION_RETRY_KEY).catch(() => undefined);
-    }
+    await clearRetries();
   };
   const tryLater = async (): Promise<void> => {
     unfinished = true;
     if (typeof alarms?.create !== "function") return;
-    const delayInMinutes =
-      EARNED_PERMISSION_RETRY_DELAYS_MINUTES[await retriesUsed()];
-    if (delayInMinutes === undefined) return;
-    await alarm("create", [EARNED_PERMISSION_RETRY_ALARM, { delayInMinutes }]);
+    let next = nextRetry;
+    nextRetry = null;
+    if (next === null) {
+      // No retry alarm led here. One already waiting, or the rest after the
+      // last, is left as it is; only a first failure starts the sequence.
+      // When the waiting alarms cannot be read, nothing is set: a count that
+      // is not known is never taken to be zero.
+      const waiting = await waitingRetries();
+      if (waiting === null || waiting.length > 0) return;
+      next = 0;
+    }
+    await alarm("create", next < RETRIES
+      ? [`${RETRY_PREFIX}${next}`, { delayInMinutes: EARNED_PERMISSION_RETRY_DELAYS_MINUTES[next] }]
+      : [REST_ALARM, { delayInMinutes: EARNED_PERMISSION_RETRY_REST_MINUTES }]);
   };
   const reconcile = (): Promise<EarnedPermissionRegistrationResult> => {
     const result = controller.reconcile();
@@ -519,15 +581,20 @@ export function installEarnedPermissionRegistrationRuntime(
       .catch(() => undefined);
     return result;
   };
+  // An update, or the reader allowing sites, starts the count afresh; a new
+  // grant also means the next ending has to be confirmed again.
+  const reconcileAfresh = async (newGrant: boolean): Promise<void> => {
+    await clearRetries();
+    if (newGrant) await storage.remove(EARNED_PERMISSION_ENDED_KEY).catch(() => undefined);
+    await reconcile().catch(() => undefined);
+  };
   alarms?.onAlarm?.addListener((fired) => {
-    if (fired?.name !== EARNED_PERMISSION_RETRY_ALARM) return;
-    void (async () => {
-      const used = await retriesUsed();
-      await storage
-        .set({ [EARNED_PERMISSION_RETRY_KEY]: used + 1 })
-        .catch(() => undefined);
-      await reconcile().catch(() => undefined);
-    })();
+    const name = fired?.name;
+    if (typeof name !== "string" || !ALL_RETRY_ALARMS.includes(name)) return;
+    // The alarm that fired says which try this is. After the rest, the count
+    // stays at its end: one try, then rest again.
+    nextRetry = name === REST_ALARM ? RETRIES : Number(name.slice(RETRY_PREFIX.length)) + 1;
+    void reconcile().catch(() => undefined);
   });
   runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!isRecord(message)) return false;
@@ -556,14 +623,14 @@ export function installEarnedPermissionRegistrationRuntime(
     return true;
   });
   environment.permissions.onAdded?.addListener(() => {
-    void reconcile().catch(() => undefined);
+    void reconcileAfresh(true);
   });
   environment.permissions.onRemoved?.addListener(() => {
     void reconcile().catch(() => undefined);
   });
   runtime.onInstalled?.addListener((details) => {
     if (details.reason === "install" || details.reason === "update") {
-      void reconcile().catch(() => undefined);
+      void reconcileAfresh(false);
     }
   });
   void reconcile().catch(() => undefined);

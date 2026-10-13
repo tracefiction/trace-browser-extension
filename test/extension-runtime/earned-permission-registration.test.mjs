@@ -7,9 +7,10 @@ import vm from "node:vm";
 
 import {
   EARNED_PERMISSION_REGISTRATION_MESSAGE,
+  EARNED_PERMISSION_ENDED_KEY,
   EARNED_PERMISSION_RETRY_ALARM,
   EARNED_PERMISSION_RETRY_DELAYS_MINUTES,
-  EARNED_PERMISSION_RETRY_KEY,
+  EARNED_PERMISSION_RETRY_REST_MINUTES,
   EARNED_PERMISSION_STATE_KEY,
   EarnedPermissionRegistrationController,
   installEarnedPermissionRegistrationRuntime,
@@ -66,8 +67,10 @@ function createHarness({
   const alarms = {
     created: [],
     cleared: [],
-    async create(name, info) { alarms.created.push({ name, ...info }); },
-    async clear(name) { alarms.cleared.push(name); return true; },
+    waiting: new Map(),
+    async create(name, info) { alarms.created.push({ name, ...info }); alarms.waiting.set(name, info); },
+    async clear(name) { alarms.cleared.push(name); return alarms.waiting.delete(name); },
+    async getAll() { return [...alarms.waiting.keys()].map((name) => ({ name })); },
     onAlarm: { addListener(listener) { alarmListener = listener; } },
   };
   const runtime = {
@@ -169,10 +172,18 @@ function createHarness({
     get scriptsRegistered() {
       return scriptsRegistered;
     },
-    /** The retry alarm goes off, as it would in a worker Safari had put to sleep. */
+    /** The waiting retry alarm goes off. False when none is waiting. */
     async fireRetryAlarm() {
-      alarmListener({ name: EARNED_PERMISSION_RETRY_ALARM });
+      const name = [...alarms.waiting.keys()].find((waiting) => waiting.startsWith(EARNED_PERMISSION_RETRY_ALARM));
+      if (name === undefined) return false;
+      alarms.waiting.delete(name);
+      alarmListener({ name });
       await settled();
+      return true;
+    },
+    /** The delays of the retries scheduled so far, in order. */
+    get retryDelays() {
+      return alarms.created.map(({ delayInMinutes }) => delayInMinutes);
     },
     /** A message the registration runtime may act on without answering. */
     send(message, sender) {
@@ -856,34 +867,91 @@ test("update: a first reconcile that cannot read permissions is tried again by a
   await settled();
 
   assert.deepEqual(h.registered, []);
-  assert.deepEqual(h.alarms.created, [{ name: EARNED_PERMISSION_RETRY_ALARM, delayInMinutes: 1 }]);
+  assert.deepEqual(h.alarms.created, [{ name: `${EARNED_PERMISSION_RETRY_ALARM}:0`, delayInMinutes: 1 }]);
   assert.equal(h.scriptsRegistered, 0);
 
   answerAgain();
-  await h.fireRetryAlarm();
+  assert.equal(await h.fireRetryAlarm(), true);
 
   assert.deepEqual(h.registrations.map(({ id }) => id), REGISTRATIONS.map(({ id }) => id));
   assert.equal(h.scriptsRegistered, 1, "story tabs already open are given the scripts");
-  assert.equal(h.alarms.cleared.at(-1), EARNED_PERMISSION_RETRY_ALARM);
-  assert.equal(Object.hasOwn(h.store, EARNED_PERMISSION_RETRY_KEY), false);
-  assert.equal(h.alarms.created.length, 1, "nothing further is scheduled once it has worked");
+  assert.equal(h.alarms.waiting.size, 0, "nothing further is waiting once it has worked");
+  assert.equal(h.alarms.created.length, 1);
   assert.equal(h.store[EARNED_PERMISSION_STATE_KEY].completedAt, STORE_BUILD_STATE.completedAt);
 });
 
-test("retries come further apart each time and stop after the last", async () => {
+test("retries come further apart each time, then rest for a day at a time, one try each", async () => {
   const h = upgradeHarness({ origins: [...ORIGINS] });
   unreadablePermissions(h);
   installEarnedPermissionRegistrationRuntime(h.environment);
   await settled();
-  for (let fired = 0; fired < EARNED_PERMISSION_RETRY_DELAYS_MINUTES.length + 3; fired += 1) {
+  for (let fired = 0; fired < 7; fired += 1) {
+    assert.equal(h.alarms.waiting.size, 1, "never more than one retry waiting");
     await h.fireRetryAlarm();
   }
-
-  assert.deepEqual(
-    h.alarms.created.map(({ delayInMinutes }) => delayInMinutes),
-    [1, 5, 30, 180],
-  );
+  assert.deepEqual(h.retryDelays, [
+    1, 5, 30, 180,
+    EARNED_PERMISSION_RETRY_REST_MINUTES, EARNED_PERMISSION_RETRY_REST_MINUTES,
+    EARNED_PERMISSION_RETRY_REST_MINUTES, EARNED_PERMISSION_RETRY_REST_MINUTES,
+  ]);
   assert.deepEqual(h.registered, []);
+});
+
+test("the bound does not depend on anything being stored", async () => {
+  const h = upgradeHarness({ origins: [...ORIGINS] });
+  unreadablePermissions(h);
+  h.environment.storage.set = async () => { throw new Error("storage full"); };
+  h.environment.storage.remove = async () => { throw new Error("storage full"); };
+  installEarnedPermissionRegistrationRuntime(h.environment);
+  await settled();
+  for (let fired = 0; fired < 5; fired += 1) await h.fireRetryAlarm();
+  assert.deepEqual(h.retryDelays, [
+    1, 5, 30, 180, EARNED_PERMISSION_RETRY_REST_MINUTES, EARNED_PERMISSION_RETRY_REST_MINUTES,
+  ]);
+
+  // A worker started some other way while a retry waits adds nothing to it,
+  // whether that retry is the first or the rest after the last.
+  const fresh = upgradeHarness({ origins: [...ORIGINS] });
+  unreadablePermissions(fresh);
+  fresh.alarms.waiting.set(`${EARNED_PERMISSION_RETRY_ALARM}:rest`, {});
+  installEarnedPermissionRegistrationRuntime(fresh.environment);
+  await settled();
+  fresh.send({ type: "TRACE_ARCHIVE_ACCESS_REPORT" }, { id: "trace-test" });
+  await settled();
+  assert.deepEqual(fresh.alarms.created, []);
+});
+
+test("when the waiting alarms cannot be read, no retry is set; one that fired still leads to the next", async () => {
+  const h = upgradeHarness({ origins: [...ORIGINS] });
+  unreadablePermissions(h);
+  h.alarms.getAll = async () => { throw new Error("alarms unavailable"); };
+  installEarnedPermissionRegistrationRuntime(h.environment);
+  await settled();
+  h.send({ type: "TRACE_ARCHIVE_ACCESS_REPORT" }, { id: "trace-test" });
+  await settled();
+  assert.deepEqual(h.alarms.created, [], "a count that cannot be read is never taken to be zero");
+
+  // A retry alarm that does fire carries its own place in the sequence.
+  h.alarms.waiting.set(`${EARNED_PERMISSION_RETRY_ALARM}:1`, {});
+  await h.fireRetryAlarm();
+  assert.deepEqual(h.retryDelays, [30], "the next one only, and not a second first one beside it");
+});
+
+test("an update or a new grant starts the retries afresh", async () => {
+  for (const trigger of ["update", "grant"]) {
+    const h = upgradeHarness({ origins: [...ORIGINS] });
+    unreadablePermissions(h);
+    installEarnedPermissionRegistrationRuntime(h.environment);
+    await settled();
+    for (let fired = 0; fired < 4; fired += 1) await h.fireRetryAlarm();
+    assert.deepEqual([...h.alarms.waiting.keys()], [`${EARNED_PERMISSION_RETRY_ALARM}:rest`]);
+
+    if (trigger === "update") h.installedListener({ reason: "update" });
+    else h.addedListener();
+    await settled();
+    assert.deepEqual([...h.alarms.waiting.keys()], [`${EARNED_PERMISSION_RETRY_ALARM}:0`], trigger);
+    assert.equal(h.retryDelays.at(-1), 1);
+  }
 });
 
 test("a registration the browser refuses is tried again the same way", async () => {
@@ -892,7 +960,7 @@ test("a registration the browser refuses is tried again the same way", async () 
   h.environment.scripting.registerContentScripts = async () => { throw new Error("refused"); };
   installEarnedPermissionRegistrationRuntime(h.environment);
   await settled();
-  assert.deepEqual(h.alarms.created.map(({ delayInMinutes }) => delayInMinutes), [1]);
+  assert.deepEqual(h.retryDelays, [1]);
 
   h.environment.scripting.registerContentScripts = register;
   await h.fireRetryAlarm();
@@ -907,7 +975,8 @@ test("update: one reading that the grant is incomplete is asked again, not taken
   await settled();
 
   assert.deepEqual(h.registered, [], "the first reconcile did not finish");
-  assert.deepEqual(h.alarms.created.map(({ delayInMinutes }) => delayInMinutes), [1]);
+  assert.deepEqual(h.retryDelays, [1]);
+  assert.equal(Object.hasOwn(h.store, EARNED_PERMISSION_ENDED_KEY), false, "an unconfirmed ending is not recorded");
 
   await h.fireRetryAlarm();
   assert.equal(h.registrations.length, 2);
@@ -925,11 +994,60 @@ test("a settled answer that the sites are not allowed schedules nothing and ends
     await h.fireRetryAlarm();
 
     assert.equal(h.alarms.created.length, 1, "not allowed is an answer, not a failure");
-    assert.equal(h.alarms.cleared.at(-1), EARNED_PERMISSION_RETRY_ALARM);
-    assert.equal(Object.hasOwn(h.store, EARNED_PERMISSION_RETRY_KEY), false);
+    assert.equal(h.alarms.waiting.size, 0);
     assert.deepEqual(h.registered, []);
     assert.equal(h.scriptsRegistered, 0);
   }
+});
+
+// --- A reader whose access has ended pays the pause once ---------------------
+
+test("an ended grant is confirmed once; after that an incomplete reading needs no second look", async () => {
+  const h = upgradeHarness({ origins: [] });
+  let reads = 0;
+  const contains = h.environment.permissions.contains;
+  h.environment.permissions.contains = async (request) => { reads += 1; return contains(request); };
+  const controller = new EarnedPermissionRegistrationController(h.environment);
+
+  assert.equal((await controller.reconcile()).error, "permission_incomplete");
+  assert.equal(reads, 2, "the first ending is read twice");
+  assert.equal(typeof h.store[EARNED_PERMISSION_ENDED_KEY], "number");
+
+  assert.equal((await controller.reconcile()).error, "permission_incomplete");
+  assert.equal((await controller.reconcile()).error, "permission_incomplete");
+  assert.equal(reads, 4, "each later reconcile reads once");
+  assert.deepEqual(h.store[EARNED_PERMISSION_STATE_KEY], STORE_BUILD_STATE);
+});
+
+test("scripts still registered are never removed on one reading, whatever was confirmed before", async () => {
+  const h = upgradeHarness({ origins: [...ORIGINS], registrations: REGISTRATIONS });
+  h.store[EARNED_PERMISSION_ENDED_KEY] = 1_779_000_000_000;
+  scriptedReadings(h, [{ contains: false }, { contains: true }]);
+  await assert.rejects(
+    new EarnedPermissionRegistrationController(h.environment).reconcile(),
+    /permission_state_unconfirmed/,
+  );
+  assert.deepEqual(h.unregistered, []);
+});
+
+test("access coming back, or a new grant, means the next ending is confirmed again", async () => {
+  const back = upgradeHarness({ origins: [...ORIGINS] });
+  back.store[EARNED_PERMISSION_ENDED_KEY] = 1_779_000_000_000;
+  await new EarnedPermissionRegistrationController(back.environment).reconcile();
+  assert.equal(Object.hasOwn(back.store, EARNED_PERMISSION_ENDED_KEY), false);
+
+  const granted = upgradeHarness({ origins: [] });
+  granted.store[EARNED_PERMISSION_ENDED_KEY] = 1_779_000_000_000;
+  let reads = 0;
+  const contains = granted.environment.permissions.contains;
+  granted.environment.permissions.contains = async (request) => { reads += 1; return contains(request); };
+  installEarnedPermissionRegistrationRuntime(granted.environment);
+  await settled();
+  assert.equal(reads, 1, "a recorded ending is not read twice");
+  // Safari reports a grant, but the reading that follows still says incomplete.
+  granted.addedListener();
+  await settled();
+  assert.equal(reads, 3, "after a grant event the ending is confirmed again");
 });
 
 test("the popup opening reconciles for a reader whose setup is finished, and only the popup can ask that way", async () => {

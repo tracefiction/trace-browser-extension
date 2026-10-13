@@ -103,7 +103,7 @@ test("every tab lookup in the background is for the tab just used, for sites it 
     const where = `${file} looks up tabs with ${argument}`;
     if (kind === "get") {
       // One tab, by an id a message or the browser handed over; never a search.
-      assert.match(argument, /^(?:source|connect)TabId$/, where);
+      assert.match(argument, /^(?:source|connect|tapped)TabId$/, where);
       continue;
     }
     if (/^\{ active: true, currentWindow: true,? \}$/.test(argument)) continue;

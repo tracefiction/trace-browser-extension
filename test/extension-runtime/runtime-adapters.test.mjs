@@ -2526,3 +2526,158 @@ test("a build that does not declare Trace's site never reads a credential from a
   }
 });
 
+// --- What the first-tap save asks of the session -------------------------------
+
+function firstTapSessionController(nativeReplies, { overlayEntries = {}, trackStatus = 404 } = {}) {
+  const requests = [];
+  const controller = installTestRuntime({
+    mode: "kernel",
+    databaseFactory: new IDBFactory(),
+    runtime: {
+      onMessage: { addListener() {} },
+      async getPlatformInfo() { return { os: "ios" }; },
+      async sendNativeMessage(message) {
+        if (message.type !== "TRACE_IOS_AUTH_TOKEN_REQUEST") return { ok: true };
+        // The app keeps giving the same answer each time it is asked.
+        return nativeReplies.length > 1 ? nativeReplies.shift() : nativeReplies[0];
+      },
+    },
+    tabs: { async query() { return []; }, async sendMessage() { return null; } },
+    storageArea: new PromiseStorageArea(),
+    storageMode: "promise",
+    fetch: async (url, options = {}) => {
+      requests.push({ url, method: options.method ?? "GET" });
+      if (url.endsWith("/api/extension/account")) {
+        return new Response(JSON.stringify({ account_id: "account-a", pro: false, library_count: 1 }), { status: 200 });
+      }
+      if (url.endsWith("/api/extension/library-overlay")) {
+        return new Response(JSON.stringify({
+          success: true,
+          data: { entries: overlayEntries, workPreferences: {}, syncVersion: "2026-10-09T10:00:00.000Z" },
+        }), { status: 200 });
+      }
+      return new Response("", { status: url.endsWith("/api/extension/track") ? trackStatus : 404 });
+    },
+    apiBase: "https://api.tracefiction.com",
+    webOrigin: "https://www.tracefiction.com",
+    randomId: () => "first-tap-id",
+  });
+  const writes = () => requests.filter(({ method }) => method !== "GET");
+  return { controller, requests, writes };
+}
+
+const firstTapCommand = Object.freeze({
+  intent: "ensure_saved",
+  hostKind: "ffn",
+  workKey: "ffn:7038840",
+  payload: storyCommandMessage.payload,
+});
+
+test("the account for a first tap is read for that open, and an unreadable one is not known rather than missing", async () => {
+  const connected = firstTapSessionController([nativeCredentialResponse()]);
+  const verified = await connected.controller.accountForThisOpen();
+  assert.equal(verified.state, "verified");
+  assert.match(verified.binding, /^[0-9a-z]+\.[0-9a-z]+$/);
+  assert.equal(connected.controller.pageBinding(), verified.binding);
+
+  const none = firstTapSessionController([{ ok: false, error: "missing_token" }]);
+  assert.deepEqual(await none.controller.accountForThisOpen(), { state: "missing" });
+
+  for (const replies of [
+    [{ ok: false, error: "provider_unavailable" }, { ok: false, error: "provider_unavailable" }],
+    [undefined, undefined],
+  ]) {
+    const unreadable = firstTapSessionController(replies);
+    assert.deepEqual(await unreadable.controller.accountForThisOpen(), { state: "unknown" });
+  }
+});
+
+test("a save reports what became of its write, and looking for a story never writes", async () => {
+  const signedOut = firstTapSessionController([{ ok: false, error: "missing_token" }]);
+  const unsent = await signedOut.controller.saveStoryWithEvidence(firstTapCommand);
+  assert.equal(unsent.result.kind, "failed");
+  assert.equal(unsent.dispatch, "never_sent");
+  assert.deepEqual(signedOut.writes(), []);
+
+  const lost = firstTapSessionController([nativeCredentialResponse()], { trackStatus: 503 });
+  await lost.controller.accountForThisOpen();
+  const unconfirmed = await lost.controller.saveStoryWithEvidence(firstTapCommand);
+  assert.equal(unconfirmed.result.kind, "failed");
+  assert.equal(unconfirmed.dispatch, "sent_unconfirmed");
+  assert.equal(lost.writes().length, 1);
+
+  const watched = firstTapSessionController([nativeCredentialResponse()], { trackStatus: 503 });
+  await watched.controller.accountForThisOpen();
+  let writesWhenTold = null;
+  await watched.controller.saveStoryWithEvidence(firstTapCommand, {
+    beforeWrite() { writesWhenTold = watched.writes().length; },
+  });
+  assert.equal(writesWhenTold, 0, "the caller is told before the write leaves");
+  assert.equal(watched.writes().length, 1);
+
+  const refused = firstTapSessionController([nativeCredentialResponse()], { trackStatus: 429 });
+  await refused.controller.accountForThisOpen();
+  assert.equal((await refused.controller.saveStoryWithEvidence(firstTapCommand)).dispatch, "refused");
+
+  const looking = firstTapSessionController([nativeCredentialResponse()]);
+  await looking.controller.accountForThisOpen();
+  assert.deepEqual(await looking.controller.storyPresence("ffn:7038840"), { kind: "unknown" });
+  assert.deepEqual(looking.writes(), [], "a look sends no write, found or not");
+
+  const present = firstTapSessionController([nativeCredentialResponse()], {
+    overlayEntries: { "ffn:7038840": {
+      status: "READING", readerStatus: "READING", canonicalReaderStatus: "READING",
+      entryId: "00000000-0000-4000-8000-000000000999",
+    } },
+  });
+  await present.controller.accountForThisOpen();
+  assert.equal((await present.controller.storyPresence("ffn:7038840")).kind, "found");
+  assert.deepEqual(present.writes(), []);
+});
+
+test("the automatic-saving preference is on, off, or not known when it cannot be read", async () => {
+  const area = new PromiseStorageArea();
+  const controller = installTestRuntime({
+    mode: "kernel",
+    runtime: { onMessage: { addListener() {} } },
+    tabs: { async query() { return []; }, async sendMessage() { return null; } },
+    storageArea: area,
+    storageMode: "promise",
+    fetch: async () => new Response("", { status: 404 }),
+    apiBase: "https://api.tracefiction.com",
+    webOrigin: "https://www.tracefiction.com",
+    randomId: () => "id",
+  });
+  assert.equal(await controller.automaticSaving(), "on", "never set");
+  await area.set({ prefAutoTrackEnabled: false });
+  assert.equal(await controller.automaticSaving(), "off");
+  await area.set({ prefAutoTrackEnabled: true });
+  assert.equal(await controller.automaticSaving(), "on");
+  area.get = async () => { throw new Error("unavailable"); };
+  assert.equal(await controller.automaticSaving(), "unknown", "a failed read is not taken as on");
+});
+
+test("a page's save is stamped with the mode the background established, and one without hooks is untouched", async () => {
+  const stamped = firstTapSessionController([nativeCredentialResponse()], { trackStatus: 503 });
+  await stamped.controller.accountForThisOpen();
+  const asked = [];
+  const admitted = [];
+  stamped.controller.attachStoryAdmission({
+    async modeFor(tabId, workKey) { asked.push({ tabId, workKey }); return "normal_automatic"; },
+    pageSaveAdmitted(tabId, workKey) { admitted.push({ tabId, workKey }); },
+  });
+  const sender = { tab: { id: 12, url: archiveSender.tab.url } };
+  // A page that claims a mode of its own is not believed: only the hook decides.
+  await stamped.controller.handle({ ...storyCommandMessage, type: "TRACE_QUICK_ADD", mode: "bounded_manual" }, sender);
+  assert.deepEqual(asked, [{ tabId: 12, workKey: "ffn:7038840" }]);
+  assert.deepEqual(admitted, [{ tabId: 12, workKey: "ffn:7038840" }]);
+  const sent = stamped.requests.find(({ url, method }) => method === "POST" && url.endsWith("/api/extension/track"));
+  assert.ok(sent, "the save went through the usual guarded path");
+
+  const plain = firstTapSessionController([nativeCredentialResponse()], { trackStatus: 503 });
+  await plain.controller.accountForThisOpen();
+  const response = await plain.controller.handle({ ...storyCommandMessage, type: "TRACE_QUICK_ADD" }, sender);
+  assert.equal(response.ok, false);
+  assert.equal(plain.writes().length, 1);
+});
+

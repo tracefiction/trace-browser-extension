@@ -3135,10 +3135,52 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#ports = ports;
     }
     execute(command) {
-      const ownedCommand = { ...command, payload: { ...command.payload } };
-      return this.#withLock(() => this.#execute(ownedCommand));
+      return this.executeWithEvidence(command).then(({ result }) => result);
     }
-    async #execute(command) {
+    /**
+     * The same save, with what is known about its write to Trace. `beforeWrite`
+     * is awaited just before each write is handed to the network, so a caller
+     * can record that a write is going out; what it does cannot stop the save.
+     */
+    executeWithEvidence(command, observer) {
+      const ownedCommand = { ...command, payload: { ...command.payload } };
+      return this.#withLock(async () => {
+        const write = {
+          handedOver: false,
+          refused: false,
+          before: async () => {
+            try {
+              await observer?.beforeWrite?.();
+            } catch {
+            }
+          }
+        };
+        const result = await this.#execute(ownedCommand, write);
+        const dispatch = result.kind === "confirmed" ? "confirmed" : !write.handedOver ? "never_sent" : write.refused ? "refused" : "sent_unconfirmed";
+        return Object.freeze({ result, dispatch });
+      });
+    }
+    /**
+     * Whether the story is in the current account's Library right now. It reads
+     * and nothing else: no save is sent, nothing is published, no receipt goes
+     * to the app. An answer for an account that changed meanwhile is unknown.
+     */
+    async presence(workKey) {
+      const unknown = Object.freeze({ kind: "unknown" });
+      const scope2 = this.#ports.session.publicationScope();
+      if (scope2 === null) return unknown;
+      let lookup;
+      try {
+        lookup = await this.#lookup(workKey, true);
+      } catch {
+        return unknown;
+      }
+      if (lookup.kind !== "published" || lookup.value.kind !== "found" || lookup.value.confirmation.workKey !== workKey || !sameAccountScope(this.#ports.session.publicationScope(), scope2)) {
+        return unknown;
+      }
+      return Object.freeze({ kind: "found", confirmation: lookup.value.confirmation });
+    }
+    async #execute(command, write) {
       const scope2 = this.#ports.session.publicationScope();
       if (scope2 === null) return failure3("not_authenticated");
       let context;
@@ -3156,15 +3198,23 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         if (lookup.value.kind === "invalid_response") return failure3("invalid_response");
         if (lookup.value.kind === "unavailable") return failure3("unavailable");
       }
-      const trackCommand = { ...command };
-      const track = (credential) => {
+      const { mode: stampedMode, ...unstamped } = command;
+      void stampedMode;
+      const trackCommand = { ...unstamped };
+      const track = async (credential) => {
         const { attempt_id: ignored, ...payload } = command.payload;
         const id = context?.setupAttemptID;
         const expiresAt = context?.setupAttemptExpiresAt;
         const now = this.#ports.clock.now();
         const valid = sameAccountScope(this.#ports.session.publicationScope(), scope2) && typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id) && typeof expiresAt === "number" && Number.isFinite(expiresAt) && expiresAt > now && expiresAt - now <= 864e5;
         trackCommand.payload = { ...payload, ...valid ? { attempt_id: id.toLowerCase() } : {} };
-        return this.#ports.api.track(credential, trackCommand);
+        write.handedOver = true;
+        write.refused = false;
+        await write.before();
+        return this.#ports.api.track(credential, trackCommand).then((outcome) => {
+          write.refused = outcome.kind === "auth_rejected" || outcome.kind === "success" && outcome.value.kind === "rejected";
+          return outcome;
+        });
       };
       let mutation = await this.#ports.session.executeAuthenticated(track);
       if (mutation.kind === "auth_rejected" && mutation.recovery === "connected") {
@@ -3243,6 +3293,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           entryID: confirmation.entryId,
           workKey: confirmation.workKey,
           source,
+          ...command.mode === void 0 ? {} : { mode: command.mode },
           ...context === void 0 ? {} : { context },
           hostKind: command.hostKind,
           action: command.intent === "ensure_saved" ? "quick_add" : "read",
@@ -6590,6 +6641,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #accountData;
     #capacityEvents;
     #storyCommands;
+    #storyAdmission = null;
     #libraryMutations;
     #finishQualification;
     #metadataContributions;
@@ -7190,9 +7242,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return typeof claimed !== "string" || !PAGE_BINDING_PATTERN.test(claimed) || claimed !== this.#pageBinding();
     }
     async #handleStoryMessage(message, sender) {
-      const command = storyTrackCommandFromMessage(message, sender);
-      if (command === null) return null;
+      const admitted = storyTrackCommandFromMessage(message, sender);
+      if (admitted === null) return null;
       await this.start();
+      const tabId = sender?.tab?.id;
+      const mode = this.#storyAdmission === null || typeof tabId !== "number" ? null : await this.#storyAdmission.modeFor(tabId, admitted.workKey).catch(() => null);
+      if (typeof tabId === "number") this.#storyAdmission?.pageSaveAdmitted(tabId, admitted.workKey);
+      const command = mode === null ? admitted : Object.freeze({ ...admitted, mode });
       if (message.type === SESSION_MESSAGE_TYPES.connectAndSave) {
         const preparation2 = await this.#prepareNativeAuthority();
         const action2 = preparation2.action ?? await this.#runManualAction(
@@ -7262,14 +7318,63 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       );
     }
     async #executeStoryCommand(command) {
+      return (await this.#executeStoryCommandWithEvidence(command)).result;
+    }
+    async #executeStoryCommandWithEvidence(command, observer) {
       let accountData = await this.#accountData.read().catch(() => null);
       if (accountData?.capacityRecovery !== null && accountData?.capacityRecovery !== void 0 && accountData.overlay === null) {
         accountData = await this.#projection.read().catch(() => accountData);
       }
       if (accountData?.capacityRecovery !== null && accountData?.capacityRecovery !== void 0 && accountData.overlay !== null && accountData.overlay.entries[command.workKey] === void 0) {
-        return Object.freeze({ kind: "failed", reason: "free_limit_reached" });
+        return Object.freeze({
+          result: Object.freeze({ kind: "failed", reason: "free_limit_reached" }),
+          dispatch: "never_sent"
+        });
       }
-      return this.#storyCommands.execute(command);
+      return this.#storyCommands.executeWithEvidence(command, observer);
+    }
+    // --- What the first-tap save needs from the session -------------------------
+    /** Hooks called as a page's own save is admitted. Absent on builds without the first-tap save. */
+    attachStoryAdmission(hooks) {
+      this.#storyAdmission = hooks;
+    }
+    pageBinding() {
+      return this.#pageBinding();
+    }
+    /** The account, read for this call and never from a kept snapshot. */
+    async accountForThisOpen() {
+      await this.start();
+      const preparation = await this.#prepareNativeAuthority();
+      const binding = this.#pageBinding();
+      if (preparation.ready && this.snapshot().state === "connected" && binding !== null) {
+        return Object.freeze({ state: "verified", binding });
+      }
+      const snapshot = this.snapshot();
+      if (snapshot.state === "signed_out" && snapshot.reason === "credential_absent") {
+        return Object.freeze({ state: "missing" });
+      }
+      if (snapshot.state === "reconnect_required") {
+        return Object.freeze({ state: "reconnect_required" });
+      }
+      return Object.freeze({ state: "unknown" });
+    }
+    /** The automatic-saving preference: a failed read is unknown, never "on". */
+    async automaticSaving() {
+      try {
+        const stored = await this.#storage.get("prefAutoTrackEnabled");
+        return stored.prefAutoTrackEnabled === false ? "off" : "on";
+      } catch {
+        return "unknown";
+      }
+    }
+    async saveStoryWithEvidence(command, observer) {
+      await this.start();
+      return this.#executeStoryCommandWithEvidence(command, observer);
+    }
+    /** Looks for one story in the Library. It cannot save. */
+    async storyPresence(workKey) {
+      await this.start();
+      return this.#storyCommands.presence(workKey);
     }
     async #startOnce() {
       try {
@@ -8072,8 +8177,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var EARNED_PERMISSION_STATE_KEY = "traceEarnedPermissionOnboardingV1";
   var POPUP_OPENED_MESSAGE = "TRACE_ARCHIVE_ACCESS_REPORT";
   var EARNED_PERMISSION_RETRY_ALARM = "traceEarnedPermissionRetry";
-  var EARNED_PERMISSION_RETRY_KEY = "traceEarnedPermissionRetryV1";
   var EARNED_PERMISSION_RETRY_DELAYS_MINUTES = Object.freeze([1, 5, 30, 180]);
+  var EARNED_PERMISSION_RETRY_REST_MINUTES = 24 * 60;
+  var EARNED_PERMISSION_ENDED_KEY = "traceEarnedPermissionEndedV1";
   var DEFAULT_RECONCILE_TIMEOUT_MS = 5e3;
   var DEFAULT_ENDED_GRANT_CONFIRM_DELAY_MS = 2e3;
   var UNKNOWN_PERMISSION_STATE = Symbol("unknown permission state");
@@ -8204,10 +8310,14 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     async #reconcile(generation) {
       const { config, runtime, scripting, storageMode, storage } = this.#environment;
-      const [reading, stored] = await Promise.all([
+      const [reading, stored, endedConfirmed] = await Promise.all([
         this.#readGrant(),
-        storage.get(EARNED_PERMISSION_STATE_KEY).then((value) => storedState(value[EARNED_PERMISSION_STATE_KEY])).catch(() => Object.freeze({}))
+        storage.get(EARNED_PERMISSION_STATE_KEY).then((value) => storedState(value[EARNED_PERMISSION_STATE_KEY])).catch(() => Object.freeze({})),
+        storage.get(EARNED_PERMISSION_ENDED_KEY).then((value) => typeof value[EARNED_PERMISSION_ENDED_KEY] === "number").catch(() => false)
       ]);
+      if (reading.complete && endedConfirmed) {
+        await storage.remove(EARNED_PERMISSION_ENDED_KEY).catch(() => void 0);
+      }
       const completeGrant = reading.complete;
       const staticRegistration = config.registrationMode === "static";
       if (staticRegistration) {
@@ -8264,8 +8374,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (!completeGrant) {
         const staleIds = configuredIds.filter((id) => currentIds.has(id));
         const hadGrant = staleIds.length > 0 || stored.promptResult === "granted" || typeof stored.completedAt === "number";
-        if (hadGrant && !await this.#grantHasEnded(reading, generation)) {
-          throw new Error("permission_state_unconfirmed");
+        const alreadyConfirmed = endedConfirmed && staleIds.length === 0;
+        if (hadGrant && !alreadyConfirmed) {
+          if (!await this.#grantHasEnded(reading, generation)) {
+            throw new Error("permission_state_unconfirmed");
+          }
+          this.#assertCurrent(generation);
+          await storage.set({ [EARNED_PERMISSION_ENDED_KEY]: this.#environment.clock?.() ?? Date.now() }).catch(() => void 0);
         }
         if (staleIds.length > 0) {
           this.#assertCurrent(generation);
@@ -8380,27 +8495,53 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       runtime,
       storageMode
     ).catch(() => void 0);
-    const retriesUsed = async () => {
-      const stored = await storage.get(EARNED_PERMISSION_RETRY_KEY).catch(() => null);
-      const used = stored?.[EARNED_PERMISSION_RETRY_KEY];
-      return typeof used === "number" && Number.isInteger(used) && used > 0 ? used : 0;
+    const RETRY_PREFIX = `${EARNED_PERMISSION_RETRY_ALARM}:`;
+    const REST_ALARM = `${RETRY_PREFIX}rest`;
+    const RETRIES = EARNED_PERMISSION_RETRY_DELAYS_MINUTES.length;
+    const ALL_RETRY_ALARMS = [
+      ...EARNED_PERMISSION_RETRY_DELAYS_MINUTES.map((_, index) => `${RETRY_PREFIX}${index}`),
+      REST_ALARM
+    ];
+    const waitingRetries = async () => {
+      if (typeof alarms?.getAll !== "function") return null;
+      try {
+        const all = await callExtensionApi(
+          alarms,
+          "getAll",
+          [],
+          runtime,
+          storageMode
+        );
+        return all.map(({ name }) => name).filter((name) => typeof name === "string" && name.startsWith(RETRY_PREFIX));
+      } catch {
+        return null;
+      }
+    };
+    let nextRetry = null;
+    const clearRetries = async () => {
+      nextRetry = null;
+      for (const name of await waitingRetries() ?? ALL_RETRY_ALARMS) {
+        await alarm("clear", [name]);
+      }
     };
     let unfinished = false;
     const finished = async (registered, changed) => {
       const late = unfinished;
       unfinished = false;
       if (registered && (changed || late)) environment.onScriptsRegistered?.();
-      await alarm("clear", [EARNED_PERMISSION_RETRY_ALARM]);
-      if (await retriesUsed() > 0) {
-        await storage.remove(EARNED_PERMISSION_RETRY_KEY).catch(() => void 0);
-      }
+      await clearRetries();
     };
     const tryLater = async () => {
       unfinished = true;
       if (typeof alarms?.create !== "function") return;
-      const delayInMinutes = EARNED_PERMISSION_RETRY_DELAYS_MINUTES[await retriesUsed()];
-      if (delayInMinutes === void 0) return;
-      await alarm("create", [EARNED_PERMISSION_RETRY_ALARM, { delayInMinutes }]);
+      let next = nextRetry;
+      nextRetry = null;
+      if (next === null) {
+        const waiting = await waitingRetries();
+        if (waiting === null || waiting.length > 0) return;
+        next = 0;
+      }
+      await alarm("create", next < RETRIES ? [`${RETRY_PREFIX}${next}`, { delayInMinutes: EARNED_PERMISSION_RETRY_DELAYS_MINUTES[next] }] : [REST_ALARM, { delayInMinutes: EARNED_PERMISSION_RETRY_REST_MINUTES }]);
     };
     const reconcile = () => {
       const result = controller.reconcile();
@@ -8410,13 +8551,16 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       ).catch(() => void 0);
       return result;
     };
+    const reconcileAfresh = async (newGrant) => {
+      await clearRetries();
+      if (newGrant) await storage.remove(EARNED_PERMISSION_ENDED_KEY).catch(() => void 0);
+      await reconcile().catch(() => void 0);
+    };
     alarms?.onAlarm?.addListener((fired) => {
-      if (fired?.name !== EARNED_PERMISSION_RETRY_ALARM) return;
-      void (async () => {
-        const used = await retriesUsed();
-        await storage.set({ [EARNED_PERMISSION_RETRY_KEY]: used + 1 }).catch(() => void 0);
-        await reconcile().catch(() => void 0);
-      })();
+      const name = fired?.name;
+      if (typeof name !== "string" || !ALL_RETRY_ALARMS.includes(name)) return;
+      nextRetry = name === REST_ALARM ? RETRIES : Number(name.slice(RETRY_PREFIX.length)) + 1;
+      void reconcile().catch(() => void 0);
     });
     runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (!isRecord20(message)) return false;
@@ -8438,19 +8582,31 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return true;
     });
     environment.permissions.onAdded?.addListener(() => {
-      void reconcile().catch(() => void 0);
+      void reconcileAfresh(true);
     });
     environment.permissions.onRemoved?.addListener(() => {
       void reconcile().catch(() => void 0);
     });
     runtime.onInstalled?.addListener((details) => {
       if (details.reason === "install" || details.reason === "update") {
-        void reconcile().catch(() => void 0);
+        void reconcileAfresh(false);
       }
     });
     void reconcile().catch(() => void 0);
     return controller;
   }
+
+  // src/extension-runtime/first-tap-save.mts
+  var FIRST_TAP_RESULT_FRESH_MS = 10 * 60 * 1e3;
+  var FIRST_TAP_RECORD_TTL_MS = 24 * 60 * 60 * 1e3;
+
+  // src/extension-runtime/first-tap-runtime.mts
+  var FIRST_TAP_PAGE_FILES = Object.freeze([
+    "page-manual-mode.js",
+    "content-config.js",
+    "trace-finish-qualify.js",
+    "collector.js"
+  ]);
 
   // src/extension-runtime/index.mts
   var UUID_PATTERN7 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -8479,6 +8635,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       new BrowserStorage(extension.storage.local, extension.runtime, storageMode)
     );
     let session;
+    let afterScriptsRegistered = null;
     if (true) {
       const recover = installArchiveRecovery({
         runtime: extension.runtime,
@@ -8538,8 +8695,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           alarms: extension.alarms,
           // Story tabs that are already open get the scripts too, whether the
           // reader allowed the sites from the popup or in Safari's settings.
+          // A page that was saved on a first tap is told to carry on by itself.
           onScriptsRegistered: () => {
             void recover();
+            void afterScriptsRegistered?.().catch(() => void 0);
           }
         });
       }
@@ -8574,6 +8733,23 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       randomId,
       archiveReadinessStatus
     });
+    if (
+      // A build-time constant: with the first-tap save off, this block and the
+      // modules only it uses are left out of the bundle altogether.
+      false
+    ) {
+      afterScriptsRegistered = installFirstTapSave({
+        runtime: extension.runtime,
+        tabs: extension.tabs,
+        permissions: extension.permissions,
+        scripting: extension.scripting,
+        storage: new BrowserStorage(extension.storage.local, extension.runtime, storageMode),
+        mode: storageMode,
+        origins: define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.origins,
+        registrationIds: define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.registrations.map(({ id }) => id),
+        session
+      });
+    }
     extension.storage.onChanged?.addListener((changes, area) => {
       if (area === "local" && "prefAutoTrackEnabled" in changes) void session?.publishTrackingPreference();
     });

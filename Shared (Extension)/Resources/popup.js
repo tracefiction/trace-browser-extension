@@ -1710,11 +1710,12 @@ function storyTitle(identity) {
   return typeof identity?.title === "string" ? identity.title.trim() : "";
 }
 
-function renderEarnedSaved(story, work, identity, alreadyInLibrary = false) {
+function renderEarnedSaved(story, work, identity, alreadyInLibrary = false, confirmationText = null) {
   stopSavedTitleLookup();
   void deliverFirstStoryConfirmation();
   const line = recordLine(work?.entry);
-  const confirmation = alreadyInLibrary ? "Already in your Library" : "Saved to your Library";
+  const confirmation = confirmationText ??
+    (alreadyInLibrary ? "Already in your Library" : "Saved to your Library");
   const title = storyTitle(identity);
   const lead = "Your chapter fills in as you read. Your story is waiting in Trace whenever you open it.";
   if (title) {
@@ -2205,6 +2206,203 @@ async function readKnownInLibrary(rawUrl) {
   }
 }
 
+// ── First-tap save: what the popup draws ───────────────────────────────────────
+//
+// SEAM. The background owns the save and sends this popup one machine state at
+// a time. Each is drawn here as one popup state, named in
+// `data-trace-first-tap-state`. Where this popup already has the words for a
+// state, that renderer is used unchanged. Where it does not, a
+// `firstTapPlaceholder` call shows a name for the missing text, always with
+// that name written out in the call. Wording and layout for these states
+// replace what is between the two rules.
+const FIRST_TAP_SAVE = EARNED_PERMISSION_ONBOARDING?.firstTapSave === true;
+const FIRST_TAP_POPUP_PORT = "trace-first-tap-popup-v1";
+let firstTapPort = null;
+let firstTapStory = null;
+let firstTapTabId = null;
+let firstTapPatienceTimer = null;
+let firstTapSetAside = false;
+
+function firstTapPlaceholder(id) {
+  return `[${id}]`;
+}
+
+function firstTapSend(command) {
+  try {
+    // The tab this popup was opened on goes with every request.
+    firstTapPort?.postMessage({ command, tabId: firstTapTabId });
+  } catch {
+    firstTapPort = null;
+  }
+}
+
+function setFirstTapState(name) {
+  document.body.dataset.traceFirstTapState = name;
+}
+
+function renderFirstTapUnworded(name, { heading, lead = null, primary, secondary = null, checking = false }) {
+  setEarnedCopy({ stateCode: name, heading, lead: lead ?? "" });
+  setEarnedResult(checking ? "checking" : "failure", heading, "");
+  configureEarnedActions(primary, secondary);
+}
+
+/** After a confirmed save. The ask itself is the existing one until its own states land. */
+function configureFirstTapConfirmedActions() {
+  configureEarnedActions(
+    { label: "Keep reading", action: "close", emphasis: "secondary" },
+    { label: "Allow story sites", action: "allow_and_add", emphasis: "tertiary" },
+  );
+}
+
+function renderFirstTapView(view) {
+  const story = firstTapStory;
+  if (!view || !story) return;
+  if (firstTapPatienceTimer !== null) {
+    clearTimeout(firstTapPatienceTimer);
+    firstTapPatienceTimer = null;
+  }
+  stopStoryConfirmation();
+  const identity = view.story ? { ok: true, ...view.story } : null;
+  switch (view.state) {
+    case "opening":
+      setFirstTapState("connecting");
+      renderEarnedConnectingAccount();
+      return;
+    case "account_changed":
+      // What was shown belonged to another account. Ask again for this one.
+      setFirstTapState("connecting");
+      renderEarnedConnectingAccount();
+      firstTapSend("open");
+      return;
+    case "account_missing":
+      setFirstTapState("account-missing");
+      renderEarnedConnectAccount(story);
+      configureEarnedActions({ label: "Try again", action: "first_tap_open", emphasis: "primary" });
+      return;
+    case "account_reconnect_required":
+    case "account_unknown":
+      // Not known is never drawn as signed out.
+      setFirstTapState("account-unreachable");
+      renderEarnedAccountUnreachable(story);
+      configureEarnedActions({ label: "Try again", action: "first_tap_open", emphasis: "primary" });
+      return;
+    case "awaiting_request":
+      setFirstTapState(view.preference === "off" ? "automatic-saving-off" : "save-on-request");
+      renderFirstTapUnworded(view.preference === "off" ? "automatic-saving-off" : "save-on-request", {
+        heading: view.preference === "off"
+          ? firstTapPlaceholder("automatic-saving-off-heading")
+          : firstTapPlaceholder("save-on-request-heading"),
+        primary: { label: "Save this story", action: "first_tap_save", emphasis: "primary" },
+        checking: true,
+      });
+      return;
+    case "saving":
+      setFirstTapState("saving");
+      renderEarnedAccessPending(story);
+      // How long to wait before saying so has not been measured from real
+      // saves; until it is, this is the popup's existing patience.
+      firstTapPatienceTimer = setTimeout(() => {
+        firstTapPatienceTimer = null;
+        setFirstTapState("still-confirming");
+        renderEarnedDelayed(story);
+        configureEarnedActions(
+          { label: "Keep reading", action: "close", emphasis: "secondary" },
+          { label: "Check again", action: "first_tap_check", emphasis: "tertiary" },
+        );
+      }, STORY_CONFIRMATION_PATIENCE_MS);
+      return;
+    case "confirmed":
+      if (view.provenance === "saved_now") {
+        setFirstTapState("saved");
+        renderEarnedSaved(story, { entry: view.entry }, identity, false);
+      } else if (view.provenance === "already") {
+        setFirstTapState("already-in-library");
+        renderEarnedSaved(story, { entry: view.entry }, identity, true);
+      } else {
+        // In the Library; whether this reader's tap put it there is not known.
+        setFirstTapState("in-library");
+        renderEarnedSaved(story, { entry: view.entry }, identity, true, firstTapPlaceholder("in-library-kicker"));
+      }
+      configureFirstTapConfirmedActions();
+      return;
+    case "failed":
+      if (view.reason === "story_unavailable") {
+        setFirstTapState("story-unavailable");
+        renderEarnedUnavailable(story);
+        return;
+      }
+      if (view.reason === "free_limit_reached") {
+        setFirstTapState("library-full");
+        renderEarnedLibraryFull(true);
+        return;
+      }
+      if (view.dispatch === "sent_unconfirmed") {
+        setFirstTapState("save-unconfirmed");
+        renderFirstTapUnworded("save-unconfirmed", {
+          heading: firstTapPlaceholder("save-unconfirmed-heading"),
+          lead: firstTapPlaceholder("save-unconfirmed-body"),
+          primary: { label: "Check again", action: "first_tap_check", emphasis: "primary" },
+        });
+        return;
+      }
+      // `never_sent` is the only failure that may say nothing was sent; a
+      // refusal is Trace's answer. Neither has its own words yet.
+      setFirstTapState(view.dispatch === "never_sent" ? "save-not-sent" : "save-refused");
+      renderFirstTapUnworded(view.dispatch === "never_sent" ? "save-not-sent" : "save-refused", {
+        heading: view.dispatch === "never_sent"
+          ? firstTapPlaceholder("save-not-sent-heading")
+          : firstTapPlaceholder("save-refused-heading"),
+        primary: { label: "Try again", action: "first_tap_save", emphasis: "primary" },
+        secondary: { label: "Not now", action: "close", emphasis: "tertiary" },
+      });
+      return;
+    case "presence_unknown":
+      // Looking found nothing it could rely on. The reader may look again,
+      // or choose to save again; that choice is theirs, never made for them.
+      setFirstTapState("still-unknown");
+      renderFirstTapUnworded("still-unknown", {
+        heading: firstTapPlaceholder("still-unknown-heading"),
+        lead: firstTapPlaceholder("still-unknown-body"),
+        primary: { label: "Check again", action: "first_tap_check", emphasis: "primary" },
+        secondary: { label: "Try again", action: "first_tap_save", emphasis: "tertiary" },
+      });
+      return;
+    default:
+      // The story sites are allowed, or this is not a page to save from: the
+      // popup's usual flow takes over and the first-tap save stands aside.
+      firstTapSetAside = true;
+      delete document.body.dataset.traceFirstTapState;
+      void prepareEarnedPermissionFlow();
+  }
+}
+// ── end of the first-tap seam ──────────────────────────────────────────────────
+
+/** Opens the first-tap save for the story on this tab. False when it cannot be reached. */
+function startFirstTap(story, tabId) {
+  firstTapStory = story;
+  firstTapTabId = tabId;
+  if (!firstTapPort) {
+    try {
+      firstTapPort = ext.runtime.connect({ name: FIRST_TAP_POPUP_PORT });
+    } catch {
+      firstTapPort = null;
+    }
+    if (!firstTapPort?.postMessage || !firstTapPort.onMessage) {
+      firstTapPort = null;
+      return false;
+    }
+    firstTapPort.onMessage.addListener((message) => {
+      if (message && message.view) renderFirstTapView(message.view);
+    });
+    firstTapPort.onDisconnect?.addListener(() => {
+      firstTapPort = null;
+    });
+    renderFirstTapView({ state: "opening" });
+  }
+  firstTapSend("open");
+  return true;
+}
+
 async function prepareEarnedPermissionFlow() {
   resetEarnedLedger();
   const [{ onboarding, readiness }, grantedOrigins] = await Promise.all([
@@ -2217,6 +2415,13 @@ async function prepareEarnedPermissionFlow() {
   earnedCurrentPage = story.ok ? story : null;
   if (earnedCurrentPage?.kind === "story") {
     earnedCurrentPage = { ...earnedCurrentPage, knownInLibrary: await readKnownInLibrary(tab?.url) };
+  }
+  // Opened on a story before the story sites are allowed: the background
+  // saves this one story now. The existing ask stays reachable afterwards.
+  if (FIRST_TAP_SAVE && !firstTapSetAside && !hasGrant && story.ok && story.kind === "story") {
+    earnedPreparedContext = Object.freeze({ story, hasGrant: false });
+    endAccountWait();
+    if (Number.isInteger(tab?.id) && startFirstTap(story, tab.id)) return;
   }
   if (onboarding.completedAt && story.ok && !hasGrant) {
     earnedPreparedContext = Object.freeze({ story, hasGrant: false });
@@ -2381,6 +2586,10 @@ async function initializeEarnedPermissionFlow() {
     // waiting on the account, or has settled on "no account" or "couldn't
     // connect", asks again now and moves on by itself.
     if (changes[ACCOUNT_PROJECTION_REVISION_KEY]) {
+      // A first-tap sheet that is waiting on the account asks again by itself.
+      if (firstTapPort && ["connecting", "account-missing", "account-unreachable"].includes(document.body.dataset.traceFirstTapState)) {
+        firstTapSend("open");
+      }
       if (accountWait) accountMayHaveConnected();
       else if (kernelSnapshotTimer !== null && kernelSnapshotProviderAttempt > 0) requestKernelSnapshot();
     }
@@ -3430,6 +3639,9 @@ function bindEarnedActionButtons() {
       if (action === "reload_to_verify") void reloadEarnedStory();
       if (action === "close") window.close();
       if (action === "check_story") void checkConfirmedStory();
+      if (action === "first_tap_open") firstTapSend("open");
+      if (action === "first_tap_save") firstTapSend("save");
+      if (action === "first_tap_check") firstTapSend("check");
       if (action === "save_story") void saveStoryFromPopup();
       if (action === "enable_auto_track") void enableAutomaticSavingFromPopup();
       if (action === "open_app") openTraceApp(isLikelyIosExtensionUi ? TRACE_IOS_APP_LIBRARY_URL : TRACE_HOME_URL);

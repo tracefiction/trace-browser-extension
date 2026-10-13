@@ -93,9 +93,37 @@ function collectorDeliveryFromError(error) {
     ? COLLECTOR_UNDELIVERED
     : COLLECTOR_ANSWERED;
 }
+// Manual mode: the reader opened Trace on this page before Safari was asked
+// for lasting access, and the background put this script here for that one
+// save. The script reads the story when Trace asks and shows its mark when
+// told. It is read each time something is about to be sent, never kept from
+// start-up, so the same script carries on normally once the mode is lifted.
+function tracePageManualMode() {
+  return globalThis.TRACE_PAGE_MANUAL_MODE === true;
+}
+
+// What the page would send by itself. In manual mode none of it goes out.
+var TRACE_MANUAL_MODE_HELD_MESSAGES = [
+  "TRACE_AUTO_TRACK",
+  "TRACE_ARCHIVE_SEEN",
+  "TRACE_METADATA_BROADCAST",
+  "TRACE_LIBRARY_METADATA_REFRESH",
+  "TRACE_FINISH_QUALIFICATION_SIGNAL",
+];
+
 function sendCollectorMessage(message, onResponse, timeoutMs) {
   var expectsResponse = typeof onResponse === "function";
   var respond = expectsResponse ? onResponse : function () {};
+  if (
+    tracePageManualMode() &&
+    message &&
+    TRACE_MANUAL_MODE_HELD_MESSAGES.indexOf(message.type) !== -1
+  ) {
+    // Answered as a message that never left, which every sender already
+    // treats as something to try again later.
+    if (expectsResponse) respond(null, COLLECTOR_UNDELIVERED);
+    return;
+  }
   var timeout = Number(timeoutMs);
   if (!Number.isFinite(timeout) || timeout <= 0) timeout = COLLECTOR_MESSAGE_TIMEOUT_MS;
   var settled = false;
@@ -194,10 +222,10 @@ function shouldDisableTraceContentScript() {
 }
 
 function traceEarnedPermissionReady() {
-  return (
-    !TRACE_EARNED_PERMISSION_GATE_ACTIVE ||
-    globalThis.TRACE_EARNED_PERMISSION_COMPLETE === true
-  );
+  if (globalThis.TRACE_EARNED_PERMISSION_COMPLETE === true) return true;
+  // Manual mode holds everything the page starts by itself, the same way the
+  // gate does for a build that waits on its website access.
+  return !TRACE_EARNED_PERMISSION_GATE_ACTIVE && !tracePageManualMode();
 }
 
 // Chrome can prerender the page a link leads to before the reader opens it;
@@ -1611,6 +1639,8 @@ var AUTO_TRACK_TRANSIENT_RETRY_MS = 1_500;
 var AUTO_TRACK_FAILURE_RECHECK_MS = 4_000;
 
 function sendAutoTrackForStory(validStory, options) {
+  // Nothing is saved or owed by itself in manual mode.
+  if (tracePageManualMode()) return;
   var deliveryAttempt =
     options && Number.isInteger(options.deliveryAttempt) ? options.deliveryAttempt : 0;
   // A retry belongs to the account it was first sent for.
@@ -3588,6 +3618,90 @@ function traceRefreshPageTokens() {
 
 // Listen for background requests
 function handleCollectorMessage(msg, sender, sendResponse, relayCommand) {
+  if (
+    msg?.type === "TRACE_FIRST_TAP_COLLECT" ||
+    msg?.type === "TRACE_FIRST_TAP_MARK" ||
+    msg?.type === "TRACE_PAGE_MANUAL_MODE_END"
+  ) {
+    // Only the extension's own background, and only for a page it put into
+    // manual mode itself.
+    if (
+      !sender || !sender.id || sender.id !== ext.runtime.id || sender.tab ||
+      !tracePageManualMode()
+    ) {
+      sendResponse({ ok: false, error: "refused" });
+      return false;
+    }
+    if (msg.type === "TRACE_PAGE_MANUAL_MODE_END") {
+      // The story sites are allowed. This same script carries on as on any
+      // page: everything that waited on the mode starts now, once, and
+      // nothing is injected or started a second time.
+      globalThis.TRACE_PAGE_MANUAL_MODE = false;
+      try {
+        document.dispatchEvent(new CustomEvent(TRACE_EARNED_PERMISSION_READY_EVENT));
+      } catch (_) {
+        /* The waiting start-ups also run on the next page load. */
+      }
+      sendResponse({ ok: true });
+      return false;
+    }
+    if (shouldDisableTraceContentScript()) {
+      sendResponse({ ok: false, error: "blocked_page" });
+      return false;
+    }
+    var firstTapWorkKey = null;
+    try {
+      firstTapWorkKey = getWorkKeyFromUrl();
+    } catch (_) {
+      firstTapWorkKey = null;
+    }
+    if (msg.type === "TRACE_FIRST_TAP_MARK") {
+      // The save is confirmed and Trace's sheet has closed. The mark reads
+      // the story's state from the background, as it does on any page.
+      if (!firstTapWorkKey || firstTapWorkKey !== msg.workKey) {
+        sendResponse({ ok: false, error: "refused" });
+        return false;
+      }
+      initQuickAdd();
+      sendResponse({ ok: true });
+      return false;
+    }
+    // Reads the story the reader is on, for the background to save. Nothing
+    // is sent to Trace from here.
+    var firstTapCollected = null;
+    var firstTapStory = null;
+    try {
+      // The same reading of the page that decides whether it gets a mark.
+      firstTapStory = collectStoryForAutoTrack();
+      firstTapCollected = firstTapStory ? collect() : null;
+    } catch (_) {
+      firstTapCollected = null;
+    }
+    var firstTapItem =
+      firstTapCollected && firstTapCollected.items && firstTapCollected.items.length === 1
+        ? firstTapCollected.items[0]
+        : null;
+    if (
+      !firstTapWorkKey || !firstTapStory || !firstTapStory.t ||
+      !firstTapItem || firstTapItem.ctx !== "story"
+    ) {
+      sendResponse({ ok: false, error: "story_unavailable" });
+      return false;
+    }
+    sendResponse({
+      ok: true,
+      workKey: firstTapWorkKey,
+      title: firstTapItem.t ? String(firstTapItem.t).slice(0, 300) : null,
+      author: firstTapItem.a ? String(firstTapItem.a).slice(0, 200) : null,
+      payload: {
+        s: firstTapCollected.source,
+        at: new Date().toISOString(),
+        item: firstTapItem,
+      },
+    });
+    return false;
+  }
+
   if (TRACE_ACTIVE_TAB_PROBE_MODE) {
     if (msg?.type === "TRACE_ACTIVE_TAB_PROBE_PING") {
       if (shouldDisableTraceContentScript()) {

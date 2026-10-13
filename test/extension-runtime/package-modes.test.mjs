@@ -532,6 +532,85 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
       encoding: "utf8",
     });
     assert.notEqual(misuse.status, 0, "the required-hosts switch belongs to the iPhone build only");
+
+    // The first-tap save is a development switch. With it off, its wiring
+    // and its page file are not in the package at all.
+    assert.equal(Object.hasOwn(iphoneOnboarding, "firstTapSave"), false);
+    assert.doesNotMatch(iphoneBackground, /firstTapSave: true/);
+    assert.doesNotMatch(iphoneBackground, /trace-first-tap-popup-v1/);
+    assert.doesNotMatch(iphoneBackground, /TRACE_FIRST_TAP_COLLECT/);
+    assert.equal(fs.existsSync(path.join(RESOURCES, "page-manual-mode.js")), false);
+    for (const browser of ["chrome", "firefox"]) {
+      assert.equal(fs.existsSync(path.join(ROOT, "dist", browser, "page-manual-mode.js")), false);
+    }
+    const firstTapBuild = (extra) => {
+      const env = {
+        ...RELEASE_ENV, TRACE_SESSION_MODE: "kernel",
+        TRACE_IOS_EARNED_PERMISSION_ONBOARDING: "1", TRACE_IOS_FIRST_TAP_SAVE: "1", ...extra,
+      };
+      for (const [key, value] of Object.entries(env)) if (value === undefined) delete env[key];
+      return spawnSync("node", ["scripts/build.mjs"], { cwd: ROOT, env, encoding: "utf8" });
+    };
+    // No release build can turn it on, whatever else is set.
+    for (const extra of [
+      { TRACE_BUILD_MODE: "release" },
+      { TRACE_BUILD_MODE: "release", TRACE_IOS_FIRST_TAP_PRODUCTION_PROOF: "1" },
+      { TRACE_BUILD_MODE: "release", TRACE_IOS_EARNED_PERMISSION_PREVIEW_RELEASE: "1" },
+    ]) {
+      const refused = firstTapBuild(extra);
+      assert.notEqual(refused.status, 0, JSON.stringify(extra));
+      assert.match(refused.stderr, /cannot be turned on in a release build/);
+    }
+    // It exists only in the optional-sites iPhone build.
+    for (const extra of [
+      { TRACE_IOS_EARNED_PERMISSION_REQUIRED_HOSTS: "1" },
+      { TRACE_IOS_EARNED_PERMISSION_ONBOARDING: "0" },
+    ]) {
+      const elsewhere = firstTapBuild(extra);
+      assert.notEqual(elsewhere.status, 0);
+      assert.match(elsewhere.stderr, /requires the iPhone build with optional story sites/);
+    }
+    // A development build that talks to the production service needs the
+    // second switch, and that switch is read from the command line only.
+    const unproven = firstTapBuild({});
+    assert.notEqual(unproven.status, 0);
+    assert.match(unproven.stderr, /needs TRACE_IOS_FIRST_TAP_PRODUCTION_PROOF=1 on the command line/);
+    const buildSource = fs.readFileSync(path.join(ROOT, "scripts", "build.mjs"), "utf8");
+    assert.match(buildSource, /process\.env\.TRACE_IOS_FIRST_TAP_PRODUCTION_PROOF/);
+    assert.doesNotMatch(buildSource, /(?<!process\.)env\.TRACE_IOS_FIRST_TAP_PRODUCTION_PROOF/);
+    const proofAlone = spawnSync("node", ["scripts/build.mjs"], {
+      cwd: ROOT,
+      env: { ...RELEASE_ENV, TRACE_SESSION_MODE: "kernel", TRACE_IOS_EARNED_PERMISSION_ONBOARDING: "1", TRACE_IOS_FIRST_TAP_PRODUCTION_PROOF: "1" },
+      encoding: "utf8",
+    });
+    assert.notEqual(proofAlone.status, 0, "the proof switch does nothing by itself");
+
+    // The proof build: the switch on, against the production service.
+    runBuild("build:ios-first-tap-proof");
+    const proofContext = {};
+    vm.runInNewContext(fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8"), proofContext);
+    assert.equal(proofContext.TRACE_IOS_EARNED_PERMISSION_ONBOARDING.firstTapSave, true);
+    const proofBackground = fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8");
+    assert.match(proofBackground, /firstTapSave: true/);
+    assert.match(proofBackground, /trace-first-tap-popup-v1/, "the popup's port is wired");
+    assert.match(proofBackground, /TRACE_FIRST_TAP_COLLECT/);
+    assert.match(proofBackground, /TRACE_PAGE_MANUAL_MODE_END/);
+    assert.match(proofBackground, /"page-manual-mode\.js"/, "and the manual-mode file is what it injects first");
+    assert.match(
+      fs.readFileSync(path.join(RESOURCES, "page-manual-mode.js"), "utf8"),
+      /TRACE_PAGE_MANUAL_MODE = true/,
+    );
+    assert.equal(manifest(RESOURCES).name, "Trace (first-tap proof)", "the build names itself for what it is");
+    assert.equal(iphoneManifest.name, "Trace");
+    assert.deepEqual(manifest(RESOURCES).permissions, iphoneManifest.permissions, "turning it on asks Safari for nothing more");
+    assert.deepEqual(manifest(RESOURCES).host_permissions, []);
+    assert.deepEqual(manifest(RESOURCES).optional_host_permissions, iphoneManifest.optional_host_permissions);
+    // A development build with local origins needs no proof switch.
+    const local = firstTapBuild({ TRACE_API_BASE: "http://localhost:3001", TRACE_WEB_ORIGIN: "http://localhost:5173" });
+    assert.equal(local.status, 0, local.stderr);
+    runBuild("build:ios-earned-permission-onboarding:release");
+    assert.equal(fs.existsSync(path.join(RESOURCES, "page-manual-mode.js")), false, "a later store build removes the file again");
+    assert.equal(manifest(RESOURCES).name, "Trace", "and the name is the shipping one again");
     const previewResult = spawnSync(
       "npm",
       ["run", "build:ios-earned-permission-onboarding:preview-release"],

@@ -69,6 +69,7 @@ export interface AlarmsPort {
   readonly clear: (...args: unknown[]) => unknown;
   readonly create?: (...args: unknown[]) => unknown;
   readonly get?: (...args: unknown[]) => unknown;
+  readonly getAll?: (...args: unknown[]) => unknown;
   readonly onAlarm?: {
     addListener(listener: (alarm: { readonly name?: string }) => void): void;
   };

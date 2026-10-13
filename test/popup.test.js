@@ -227,6 +227,14 @@ function createPopupHarness({
   const popupDisconnects = [];
   const heldSnapshotReplies = [];
   const createdTabs = [];
+  // The background's side of the first-tap port: what the popup asked for,
+  // and a way to send it a state.
+  const firstTap = {
+    commands: [],
+    tabIds: [],
+    listeners: [],
+    show(view) { for (const listener of firstTap.listeners) listener({ view }); },
+  };
   let finishHostRequest;
 
   const ext = {
@@ -235,6 +243,13 @@ function createPopupHarness({
       getURL: resource => `${popupUrl.startsWith("safari-web-extension:") ? "safari-web-extension" : promiseRuntime ? "moz-extension" : "chrome-extension"}://trace-test/${resource}`,
       connect({ name }) {
         hostLifecycle.push(name);
+        if (name === "trace-first-tap-popup-v1") {
+          return {
+            postMessage(message) { firstTap.commands.push(message.command); firstTap.tabIds.push(message.tabId); },
+            onMessage: { addListener(fn) { firstTap.listeners.push(fn); } },
+            onDisconnect: { addListener(fn) { popupDisconnects.push(fn); } },
+          };
+        }
         return { onDisconnect: { addListener(fn) { popupDisconnects.push(fn); } } };
       },
       getManifest: () => ({ host_permissions: (archiveAccess || []).flatMap(item => item.origins) }),
@@ -458,6 +473,7 @@ function createPopupHarness({
   if (earnedPermissionOnboarding) {
     context.TRACE_IOS_ACTIVE_TAB_PROBE = true;
     context.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {
+      ...(earnedPermissionOnboarding === true ? {} : earnedPermissionOnboarding),
       version: 3,
       origins: [
         "https://*.archiveofourown.org/*",
@@ -503,6 +519,7 @@ function createPopupHarness({
     injections,
     permissionRequests,
     hostLifecycle,
+    firstTap,
     disconnectPopup: () => popupDisconnects.at(-1)(),
     answerSnapshot: (reply) => heldSnapshotReplies.shift()?.(reply),
     finishHostRequest: result => finishHostRequest(result),
@@ -4170,4 +4187,178 @@ test("a page that answers with a blank title is asked a few more times, not for 
   assert.equal(asks(), before + 3, "and then it stops");
   assert.match(earnedHeading(h), /in your Library$/);
   assert.notEqual(earnedHeading(h).trim(), "");
+});
+
+// --- First-tap save: the popup draws what the background sends ----------------
+
+const FIRST_TAP_STORY = { title: "The Long Way", author: "someone", site: "AO3" };
+const FIRST_TAP_ENTRY = { status: "READING", readerStatus: "READING", canonicalReaderStatus: "READING", chapters: { current: 3, total: 40 } };
+
+async function openFirstTapPopup(options = {}) {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: { firstTapSave: true },
+    sessionSnapshot: { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" },
+    ...options,
+  });
+  for (let attempt = 0; attempt < 10; attempt += 1) await flush();
+  const text = (id) => h.document.getElementById(id).textContent;
+  const shown = () => h.document.body.dataset.traceFirstTapState;
+  const click = async (id) => {
+    h.document.getElementById(id).dispatchEvent(new h.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+    for (let attempt = 0; attempt < 4; attempt += 1) await flush();
+  };
+  return { h, text, shown, click };
+}
+
+test("first tap: opening Trace on a story asks the background to save it, and asks Safari for nothing", async () => {
+  const { h, text, shown } = await openFirstTapPopup();
+  assert.deepEqual(h.firstTap.commands, ["open"]);
+  assert.deepEqual(h.firstTap.tabIds, [7], "it names the tab it was opened on");
+  assert.equal(shown(), "connecting");
+  assert.equal(text("popup-earned-heading"), "Connecting to your account…");
+  assert.deepEqual(h.permissionRequests, [], "no website question is raised by opening Trace");
+  assert.deepEqual(h.injections, [], "the popup injects nothing itself");
+  assert.deepEqual(h.reloads, []);
+
+  h.firstTap.show({ state: "saving", workKey: "ao3:123", startedAt: 0 });
+  assert.equal(shown(), "saving");
+  assert.equal(text("popup-earned-heading"), "Saving your story…");
+});
+
+test("first tap: saved, already there and found are drawn from the background's word alone", async () => {
+  for (const [provenance, state, words] of [
+    ["saved_now", "saved", "Saved to your Library"],
+    ["already", "already-in-library", "Already in your Library"],
+    ["found", "in-library", "[in-library-kicker]"],
+  ]) {
+    const { h, text, shown } = await openFirstTapPopup({
+      // A page cache that says otherwise is not consulted.
+      storageState: { libraryOverlayCache: { entries: provenance === "saved_now" ? { "ao3:123": { entryId: "e" } } : {} } },
+    });
+    h.firstTap.show({ state: "confirmed", workKey: "ao3:123", provenance, mode: "bounded_manual", story: FIRST_TAP_STORY, entry: FIRST_TAP_ENTRY });
+    assert.equal(shown(), state);
+    assert.equal(text("popup-earned-kicker").trim(), words);
+    assert.equal(text("popup-earned-heading"), "The Long Way");
+    assert.match(h.document.getElementById("popup-earned-record").textContent, /Chapter 3 of 40/);
+    assert.equal(text("popup-earned-primary"), "Keep reading");
+  }
+});
+
+test("first tap: an account that could not be read is never drawn as signed out, and the popup asks again by itself", async () => {
+  const { h, text, shown, click } = await openFirstTapPopup();
+  h.firstTap.show({ state: "account_unknown", workKey: "ao3:123" });
+  assert.equal(shown(), "account-unreachable");
+  assert.equal(text("popup-earned-heading"), "Trace couldn’t connect to your account");
+  assert.doesNotMatch((h.document.getElementById("popup-earned-heading").textContent + " " + h.document.getElementById("popup-earned-lead").textContent), /sign in|Create an account/i);
+
+  await click("popup-earned-primary");
+  assert.deepEqual(h.firstTap.commands, ["open", "open"]);
+
+  h.firstTap.show({ state: "account_missing", workKey: "ao3:123" });
+  assert.equal(shown(), "account-missing");
+  h.emitStorageChange({ traceAccountProjectionRevisionV1: { newValue: "r2" } });
+  for (let attempt = 0; attempt < 4; attempt += 1) await flush();
+  assert.equal(h.firstTap.commands.at(-1), "open", "an account that connects is asked about without a tap");
+  assert.equal(h.firstTap.commands.length, 3);
+});
+
+test("first tap: only a save that was never sent may be drawn as unsent; an unconfirmed one offers a look, not another save", async () => {
+  const { h, text, shown, click } = await openFirstTapPopup();
+  h.firstTap.show({ state: "failed", workKey: "ao3:123", reason: "unavailable", dispatch: "sent_unconfirmed", story: FIRST_TAP_STORY });
+  assert.equal(shown(), "save-unconfirmed");
+  assert.doesNotMatch((h.document.getElementById("popup-earned-heading").textContent + " " + h.document.getElementById("popup-earned-lead").textContent), /Nothing was saved|wasn.t added|not saved/i);
+  assert.equal(text("popup-earned-primary"), "Check again");
+  await click("popup-earned-primary");
+  assert.equal(h.firstTap.commands.at(-1), "check", "Check again looks; it cannot ask for a save");
+
+  h.firstTap.show({ state: "presence_unknown", workKey: "ao3:123" });
+  assert.equal(shown(), "still-unknown");
+  await click("popup-earned-primary");
+  assert.equal(h.firstTap.commands.at(-1), "check");
+  assert.equal(h.firstTap.commands.includes("save"), false);
+
+  h.firstTap.show({ state: "failed", workKey: "ao3:123", reason: "unavailable", dispatch: "never_sent", story: FIRST_TAP_STORY });
+  assert.equal(shown(), "save-not-sent");
+  assert.equal(text("popup-earned-primary"), "Try again");
+  await click("popup-earned-primary");
+  assert.equal(h.firstTap.commands.at(-1), "save", "Try again is a new save the reader chose");
+
+  h.firstTap.show({ state: "failed", workKey: "ao3:123", reason: "rate_limited", dispatch: "refused", story: FIRST_TAP_STORY });
+  assert.equal(shown(), "save-refused");
+  h.firstTap.show({ state: "failed", workKey: "ao3:123", reason: "story_unavailable", dispatch: "never_sent", story: null });
+  assert.equal(shown(), "story-unavailable");
+  assert.equal(text("popup-earned-heading"), "This story isn’t available");
+});
+
+test("first tap: a save still out after the popup's patience says so and offers a look", async () => {
+  const { h, text, shown, click } = await openFirstTapPopup();
+  h.firstTap.show({ state: "saving", workKey: "ao3:123", startedAt: 0 });
+  h.advance(19_999);
+  assert.equal(shown(), "saving");
+  h.advance(1);
+  assert.equal(shown(), "still-confirming");
+  assert.equal(text("popup-earned-heading"), "Still confirming your story");
+  await click("popup-earned-secondary");
+  assert.equal(h.firstTap.commands.at(-1), "check");
+
+  h.firstTap.show({ state: "saving", workKey: "ao3:123", startedAt: 0 });
+  h.firstTap.show({ state: "confirmed", workKey: "ao3:123", provenance: "saved_now", mode: "bounded_manual", story: FIRST_TAP_STORY, entry: FIRST_TAP_ENTRY });
+  h.advance(60_000);
+  assert.equal(shown(), "saved", "a result that arrives ends the wait");
+});
+
+test("first tap: with automatic saving off the popup saves only when asked", async () => {
+  const { h, text, shown, click } = await openFirstTapPopup();
+  h.firstTap.show({ state: "awaiting_request", workKey: "ao3:123", preference: "off" });
+  assert.equal(shown(), "automatic-saving-off");
+  assert.equal(text("popup-earned-primary"), "Save this story");
+  assert.deepEqual(h.firstTap.commands, ["open"]);
+  await click("popup-earned-primary");
+  assert.deepEqual(h.firstTap.commands, ["open", "save"]);
+});
+
+test("first tap: once the story sites are allowed, or on a build without it, the popup's usual flow is unchanged", async () => {
+  const allowed = await openFirstTapPopup();
+  allowed.h.firstTap.show({ state: "automatic" });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  assert.equal(allowed.shown(), undefined);
+  assert.equal(allowed.text("popup-earned-primary"), "Continue", "the existing ask is shown");
+  assert.deepEqual(allowed.h.firstTap.commands, ["open"], "and the first-tap save is not asked for again");
+
+  const without = createPopupHarness({
+    sessionMode: "kernel", promiseRuntime: true, earnedPermissionOnboarding: true,
+    sessionSnapshot: { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" },
+  });
+  for (let attempt = 0; attempt < 10; attempt += 1) await flush();
+  assert.deepEqual(without.firstTap.commands, []);
+  assert.equal(without.hostLifecycle.includes("trace-first-tap-popup-v1"), false);
+  assert.equal(without.document.body.dataset.traceFirstTapState, undefined);
+  assert.equal(without.document.getElementById("popup-earned-primary").textContent, "Continue");
+
+  const onList = await openFirstTapPopup({ activeTab: { id: 7, url: "https://archiveofourown.org/works" } });
+  assert.deepEqual(onList.h.firstTap.commands, [], "a list or home page saves nothing and keeps the existing ask");
+});
+
+test("first tap: an account that changed under the popup is asked about again, never drawn as unreachable", async () => {
+  const { h, text, shown } = await openFirstTapPopup();
+  h.firstTap.show({ state: "confirmed", workKey: "ao3:123", provenance: "found", mode: null, story: FIRST_TAP_STORY, entry: FIRST_TAP_ENTRY });
+  h.firstTap.show({ state: "account_changed", workKey: "ao3:123" });
+  assert.equal(shown(), "connecting");
+  assert.equal(text("popup-earned-heading"), "Connecting to your account…");
+  assert.deepEqual(h.firstTap.commands, ["open", "open"]);
+});
+
+test("first tap: every state without agreed wording is a written-out placeholder, named for what it will say", () => {
+  const popup = fs.readFileSync(POPUP_JS_PATH, "utf8");
+  const calls = Array.from(popup.matchAll(/firstTapPlaceholder\(([^)]*)\)/g), (match) => match[1].trim());
+  const written = calls.filter((argument) => /^"[^"]+"$/.test(argument)).map((argument) => argument.slice(1, -1));
+  // Its own definition, and nothing else, takes a name instead of a literal.
+  assert.deepEqual(calls.filter((argument) => !/^"[^"]+"$/.test(argument)), ["id"]);
+  assert.deepEqual([...new Set(written)].sort(), [
+    "automatic-saving-off-heading", "in-library-kicker", "save-not-sent-heading", "save-on-request-heading",
+    "save-refused-heading", "save-unconfirmed-body", "save-unconfirmed-heading", "still-unknown-body",
+    "still-unknown-heading",
+  ]);
 });

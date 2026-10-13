@@ -7704,6 +7704,229 @@ for (const fixture of [
 }
 
 
+// --- Manual mode: the reader opened Trace before lasting access ---------------
+
+function createManualModeCollectorHarness(fixture, url, { manual = true, html = null } = {}) {
+  const dom = html === null
+    ? domFromFixture(fixture, url)
+    : new JSDOM(html, { url, runScripts: "outside-only" });
+  const sent = [];
+  let listener = null;
+  if (manual) {
+    dom.window.eval(fs.readFileSync(path.join(__dirname, "..", "src", "page-manual-mode.js"), "utf8"));
+  }
+  dom.window.TRACE_SESSION_MODE = "kernel";
+  installCollectorChrome(dom, {
+    runtime: {
+      id: "trace-test",
+      lastError: null,
+      onMessage: { addListener(fn) { listener = fn; } },
+      sendMessage(message, callback) {
+        sent.push(message);
+        callback?.({ ok: true });
+      },
+    },
+    storage: {
+      local: {
+        get(_keys, callback) {
+          callback?.({
+            prefAutoTrackEnabled: true,
+            prefLibraryInlayEnabled: true,
+            traceAuthState: { state: "connected" },
+          });
+        },
+        set(_values, callback) { callback?.(); },
+      },
+      onChanged: { addListener() {} },
+    },
+  });
+  dom.window.eval(fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  ));
+  assert.equal(typeof listener, "function");
+  const background = { id: "trace-test" };
+  const ask = (message, sender = background) => new Promise((resolve) => {
+    assert.equal(listener(message, sender, resolve), false);
+  });
+  const stir = async () => {
+    dom.window.document.dispatchEvent(new dom.window.Event("DOMContentLoaded", { bubbles: true }));
+    dom.window.dispatchEvent(new dom.window.Event("focus"));
+    dom.window.dispatchEvent(new dom.window.Event("pageshow"));
+    dom.window.document.dispatchEvent(new dom.window.Event("visibilitychange"));
+    dom.window.dispatchEvent(new dom.window.Event("scroll"));
+    await delay(120);
+  };
+  return { dom, sent, listener, ask, stir, background, currentListener: () => listener };
+}
+
+const SENT_BY_ITSELF = [
+  "TRACE_AUTO_TRACK",
+  "TRACE_ARCHIVE_SEEN",
+  "TRACE_METADATA_BROADCAST",
+  "TRACE_LIBRARY_METADATA_REFRESH",
+  "TRACE_FINISH_QUALIFICATION_SIGNAL",
+  "TRACE_CONNECT_AND_SAVE",
+  "TRACE_QUICK_ADD",
+];
+
+for (const fixture of [
+  {
+    name: "AO3",
+    file: "ao3_story.html",
+    url: "https://archiveofourown.org/works/28534965/chapters/69925506",
+    source: "ao3",
+    workKey: "ao3:28534965",
+  },
+  {
+    name: "FFN",
+    file: "ffn_story.html",
+    url: "https://www.fanfiction.net/s/7038840/1/A-Chance-Encounter",
+    source: "ffn",
+    workKey: "ffn:7038840",
+  },
+]) {
+  test(`in manual mode an ${fixture.name} story page starts nothing, hands over the story when asked, and shows its mark when told`, async () => {
+    const h = createManualModeCollectorHarness(fixture.file, fixture.url);
+    await h.stir();
+    assert.deepEqual(h.sent.filter(({ type }) => SENT_BY_ITSELF.includes(type)), [], "nothing is sent by itself");
+    assert.equal(h.dom.window.document.querySelector("[data-trace-quick-add-wrap]"), null, "no mark yet");
+
+    const collected = plainJson(await h.ask({ type: "TRACE_FIRST_TAP_COLLECT" }));
+    assert.equal(collected.ok, true);
+    assert.equal(collected.workKey, fixture.workKey);
+    assert.equal(typeof collected.title, "string");
+    assert.equal(collected.payload.s, fixture.source);
+    assert.equal(collected.payload.item.ctx, "story");
+    assert.equal(collected.payload.item.src, fixture.source);
+    assert.deepEqual(h.sent.filter(({ type }) => SENT_BY_ITSELF.includes(type)), [], "reading the story sends nothing to Trace");
+    assert.equal(h.dom.window.document.querySelector("[data-trace-quick-add-wrap]"), null, "and draws nothing");
+
+    assert.deepEqual(
+      plainJson(await h.ask({ type: "TRACE_FIRST_TAP_MARK", workKey: "ao3:1" })),
+      { ok: false, error: "refused" },
+      "a mark for another story is refused",
+    );
+    assert.deepEqual(plainJson(await h.ask({ type: "TRACE_FIRST_TAP_MARK", workKey: fixture.workKey })), { ok: true });
+    await h.stir();
+    assert.ok(h.dom.window.document.querySelector("[data-trace-quick-add-wrap]"), "the mark is on the page");
+    assert.deepEqual(
+      h.sent.filter(({ type }) => ["TRACE_AUTO_TRACK", "TRACE_ARCHIVE_SEEN", "TRACE_METADATA_BROADCAST",
+        "TRACE_LIBRARY_METADATA_REFRESH", "TRACE_FINISH_QUALIFICATION_SIGNAL"].includes(type)),
+      [],
+      "the page still saves and reports nothing by itself",
+    );
+  });
+}
+
+test("the manual-mode messages are answered only to the extension's own background, and only in manual mode", async () => {
+  const url = "https://archiveofourown.org/works/28534965/chapters/69925506";
+  const manual = createManualModeCollectorHarness("ao3_story.html", url);
+  for (const sender of [
+    {},
+    { id: "another-extension" },
+    { id: "trace-test", tab: { id: 4, url } },
+  ]) {
+    for (const type of ["TRACE_FIRST_TAP_COLLECT", "TRACE_FIRST_TAP_MARK"]) {
+      assert.deepEqual(
+        plainJson(await manual.ask({ type, workKey: "ao3:28534965" }, sender)),
+        { ok: false, error: "refused" },
+      );
+    }
+  }
+  assert.equal(manual.dom.window.document.querySelector("[data-trace-quick-add-wrap]"), null);
+
+  const normal = createManualModeCollectorHarness("ao3_story.html", url, { manual: false });
+  assert.deepEqual(plainJson(await normal.ask({ type: "TRACE_FIRST_TAP_COLLECT" })), { ok: false, error: "refused" });
+});
+
+test("a page with no readable story says so instead of handing over something else", async () => {
+  for (const [url, html] of [
+    ["https://archiveofourown.org/works/28534965", "<!doctype html><html><body><h2>Error 404</h2><p>The page you were looking for doesn't exist.</p></body></html>"],
+    ["https://www.fanfiction.net/s/7038840/1/A-Chance-Encounter", "<!doctype html><html><body><span>Story Not Found</span></body></html>"],
+  ]) {
+    const h = createManualModeCollectorHarness(null, url, { html });
+    assert.deepEqual(plainJson(await h.ask({ type: "TRACE_FIRST_TAP_COLLECT" })), { ok: false, error: "story_unavailable" });
+    assert.deepEqual(h.sent.filter(({ type }) => SENT_BY_ITSELF.includes(type)), []);
+  }
+});
+
+test("AO3's adult-content notice is not a story to save: nothing is handed over and nothing is sent", async () => {
+  // The notice stands where the story will be, and carries a summary of the
+  // work. The reader has not opened the story, so there is nothing to read.
+  const h = createManualModeCollectorHarness(
+    "ao3_adult_content_notice.html",
+    "https://archiveofourown.org/works/28534965",
+  );
+  await h.stir();
+  assert.deepEqual(plainJson(await h.ask({ type: "TRACE_FIRST_TAP_COLLECT" })), { ok: false, error: "story_unavailable" });
+  assert.deepEqual(h.sent.filter(({ type }) => SENT_BY_ITSELF.includes(type)), []);
+  assert.equal(h.dom.window.document.querySelector("[data-trace-quick-add-wrap]"), null);
+});
+
+test("when the story sites are allowed, the same page script carries on: one script, one mark, nothing sent twice", async () => {
+  const url = "https://archiveofourown.org/works/28534965/chapters/69925506";
+  const h = createManualModeCollectorHarness("ao3_story.html", url);
+  const collectorSource = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  const listenerBefore = h.listener;
+  await h.ask({ type: "TRACE_FIRST_TAP_COLLECT" });
+  assert.deepEqual(plainJson(await h.ask({ type: "TRACE_FIRST_TAP_MARK", workKey: "ao3:28534965" })), { ok: true });
+  await h.stir();
+  assert.deepEqual(h.sent.filter(({ type }) => SENT_BY_ITSELF.includes(type)), [], "manual mode: nothing by itself");
+
+  // The background says the sites are allowed, and puts the registered
+  // scripts into the open tab as it does after any grant.
+  assert.deepEqual(plainJson(await h.ask({ type: "TRACE_PAGE_MANUAL_MODE_END" })), { ok: true });
+  h.dom.window.eval(collectorSource);
+  h.dom.window.eval(collectorSource);
+  await h.stir();
+  await h.stir();
+
+  assert.equal(h.dom.window.TRACE_PAGE_MANUAL_MODE, false);
+  assert.equal(h.currentListener(), listenerBefore, "the same script answers: no second one was started");
+  assert.equal(h.dom.window.document.querySelectorAll("[data-trace-quick-add-wrap]").length, 1, "one mark");
+  const seen = h.sent.filter(({ type }) => type === "TRACE_ARCHIVE_SEEN");
+  assert.ok(seen.length >= 1, "the page now reports itself");
+  assert.equal(
+    h.sent.filter(({ type }) => type === "TRACE_CONNECT_AND_SAVE" || type === "TRACE_QUICK_ADD").length,
+    0,
+    "the story is not saved a second time",
+  );
+  assert.ok(
+    h.sent.filter(({ type }) => type === "TRACE_AUTO_TRACK").length <= 1,
+    "reading progress goes out once at most, as on any story page",
+  );
+  assert.deepEqual(
+    plainJson(await h.ask({ type: "TRACE_PAGE_MANUAL_MODE_END" })),
+    { ok: false, error: "refused" },
+    "and the page is no longer in manual mode to be told twice",
+  );
+});
+
+test("the mode is read when something is about to be sent: lifting it lets the same page script carry on", async () => {
+  const h = createManualModeCollectorHarness(
+    "ao3_story.html",
+    "https://archiveofourown.org/works/28534965/chapters/69925506",
+  );
+  await h.stir();
+  assert.equal(h.sent.some(({ type }) => type === "TRACE_ARCHIVE_SEEN"), false);
+
+  h.dom.window.TRACE_PAGE_MANUAL_MODE = false;
+  h.dom.window.document.dispatchEvent(new h.dom.window.CustomEvent("trace-earned-permission-ready"));
+  await h.stir();
+
+  assert.ok(h.sent.some(({ type }) => type === "TRACE_ARCHIVE_SEEN"), "the page reports itself once the mode is lifted");
+  assert.ok(h.dom.window.document.querySelector("[data-trace-quick-add-wrap]"), "and draws its mark as on any story");
+  assert.deepEqual(
+    plainJson(await h.ask({ type: "TRACE_FIRST_TAP_COLLECT" })),
+    { ok: false, error: "refused" },
+    "and no longer answers the manual-mode messages",
+  );
+});
+
 test("page theme follows host body, html fallback, and a dark body", () => {
   const dom = new JSDOM("<!doctype html><html><body></body></html>");
   const { traceHostPageTokens, traceRefreshPageTokens } = createCollectorBindings(dom);
