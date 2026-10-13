@@ -153,6 +153,14 @@ enum TraceSafariOnboardingReceipt {
         let workKey: String
         let confirmedAt: Double
         let source: String
+        /// How the save came about, as the extension's background established
+        /// it: `bounded_manual` (the reader opened Trace on the story before
+        /// the story sites were allowed) or `normal_automatic` (the sites were
+        /// allowed and the page scripts registered). Absent when neither was
+        /// established. A reader of this record that predates the field
+        /// decodes the record unchanged.
+        var mode: String? = nil
+        static let modes: Set<String> = ["bounded_manual", "normal_automatic"]
         func valid(now: Double, apiOrigin: String = productionAPIOrigin) -> Bool {
             attempt.valid(apiOrigin: apiOrigin) && context.attemptID == attempt.id &&
             UUID(uuidString: context.operationID) != nil && UUID(uuidString: entryID) != nil &&
@@ -203,8 +211,10 @@ enum TraceSafariOnboardingReceipt {
               let entryID = payload["entryID"] as? String,
               let workKey = payload["workKey"] as? String,
               let source = payload["source"] as? String else { return ["ok": false] }
+        // An unrecognised mode is dropped, not refused: the save is still a save.
+        let mode = (payload["mode"] as? String).flatMap { Save.modes.contains($0) ? $0 : nil }
         let save = Save(attempt: attempt, context: context, entryID: entryID,
-            workKey: workKey, confirmedAt: now, source: source)
+            workKey: workKey, confirmedAt: now, source: source, mode: mode)
         guard save.valid(now: now, apiOrigin: configuredAPIOrigin) else { return ["ok": false] }
         var saves = readSaves(defaults.data(forKey: receiptKey)).filter {
             $0.valid(now: now, apiOrigin: configuredAPIOrigin) && $0.attempt.accountID == attempt.accountID &&
@@ -280,5 +290,276 @@ enum TraceSafariTrackingPreference {
         guard let encoded = try? JSONEncoder().encode(value) else { return ["ok": false] }
         defaults.set(encoded, forKey: key)
         return ["ok": true]
+    }
+}
+
+/// Whether Trace in Safari is ready to save by itself, as the extension last
+/// established it for the app's open cycle. Four things are answered apart:
+/// website access, the page scripts, the account and the automatic-saving
+/// preference; each is positive, a known blocker or not known, with a reason
+/// and the time it was read.
+///
+/// A report never says how long the reader's website access lasts, that a
+/// story was saved, that the next save will work, that an open page was taken
+/// over, or anything about Private Browsing. It holds no credential, address
+/// or story. A missing, other-cycle or other-provider report is not known; it
+/// is never "not ready".
+///
+/// The app opens a cycle (`startCycle`) before it sends the reader to Safari,
+/// and looks at it with `state`: answered, still waiting, or ended. Nothing
+/// here expires by age: a report is current for the cycle it answers and
+/// history for any other, and it says what held at `observedAt`, not now.
+///
+/// A cycle belongs to the provider it was opened under. When the app replaces
+/// or refreshes that provider the cycle has ended, and no answer will come for
+/// it: the provider record names no account, so this side cannot tell a
+/// refresh for the same account from another account's provider, and does not
+/// carry a cycle across. The app opens a new cycle.
+enum TraceSafariReadinessReport {
+    static let cycleKey = "traceSafariReadinessCycleV1"
+    static let reportKey = "traceSafariReadinessReportV1"
+    static let endedKey = "traceSafariReadinessCycleEndedV1"
+    static let prepareMessage = "TRACE_IOS_SAFARI_READINESS_PREPARE"
+    static let reportMessage = "TRACE_IOS_SAFARI_READINESS_REPORT"
+
+    struct Cycle: Codable, Equatable {
+        let version: Int
+        let id: String
+        let accountID: String
+        let apiOrigin: String
+        let provider: TraceSafariProviderCodec.ImportBinding
+        let startedAt: Double
+        func valid(apiOrigin expected: String) -> Bool {
+            version == 1 && UUID(uuidString: id) != nil && !accountID.isEmpty && accountID.utf8.count <= 256 &&
+            apiOrigin == expected && TraceSafariOnboardingReceipt.allowsAPIOrigin(expected) &&
+            startedAt.isFinite && startedAt > 0
+        }
+    }
+    /// Why a cycle is no longer open.
+    enum EndReason: String, Codable {
+        /// The provider it was opened under is no longer the one issued.
+        case providerChanged = "provider_changed"
+        /// The app has opened another cycle since.
+        case replaced
+        /// No cycle is stored.
+        case missing
+    }
+    /// The handler's own word that a cycle ended, left for the app.
+    struct Ended: Codable, Equatable {
+        let version: Int
+        let id: String
+        let reason: EndReason
+        let at: Double
+    }
+    /// What the app finds when it looks at a cycle it opened.
+    enum CycleState: Equatable {
+        /// The extension has answered this cycle.
+        case answered(Report)
+        /// Open and not yet answered. Not known; never "not ready".
+        case waiting
+        /// No longer open. No answer will come: open a new cycle.
+        case ended(EndReason)
+    }
+    enum Answer: String, Codable { case positive, blocker, unknown }
+    enum Result: String, Codable { case ready, notReady = "not_ready", unknown }
+    struct Component: Codable, Equatable {
+        let answer: Answer
+        /// A short token; see the public contract for the ones in use. An
+        /// unrecognised reason leaves the answer as stated.
+        let reason: String
+        let observedAt: Double
+    }
+    struct Components: Codable, Equatable {
+        let websiteAccess: Component
+        let scriptRegistration: Component
+        let account: Component
+        let automaticSaving: Component
+        var all: [Component] { [websiteAccess, scriptRegistration, account, automaticSaving] }
+    }
+    struct Report: Codable, Equatable {
+        let version: Int
+        let apiOrigin: String
+        let provider: TraceSafariProviderCodec.ImportBinding
+        /// The cycle this answers; absent when the app had none open.
+        let cycleID: String?
+        /// Present only when the account component is positive.
+        let accountID: String?
+        let observedAt: Double
+        let result: Result
+        let components: Components
+    }
+
+    /// Ready only when all four are positive; not ready when at least one is
+    /// a known blocker; otherwise not known. A report whose account changed
+    /// while it was read is not known whatever else it found.
+    static func result(of components: Components) -> Result {
+        if components.account.reason == "changed" { return .unknown }
+        let answers = components.all.map(\.answer)
+        if answers.allSatisfy({ $0 == .positive }) { return .ready }
+        return answers.contains(.blocker) ? .notReady : .unknown
+    }
+
+    private static func coherent(_ report: Report, now: Double) -> Bool {
+        report.version == 1 && report.result == result(of: report.components) &&
+        report.observedAt.isFinite && report.observedAt > 0 && report.observedAt <= now &&
+        report.components.all.allSatisfy {
+            $0.observedAt.isFinite && $0.observedAt > 0 && $0.observedAt <= report.observedAt &&
+            $0.reason.range(of: "^[a-z_]{1,48}$", options: .regularExpression) != nil
+        } &&
+        (report.components.account.answer == .positive
+            ? !(report.accountID ?? "").isEmpty && (report.accountID ?? "").utf8.count <= 256
+            : report.accountID == nil) &&
+        (report.cycleID == nil || UUID(uuidString: report.cycleID ?? "") != nil)
+    }
+
+    /// The app: opens a new cycle for the account and provider it holds. Any
+    /// report already stored answers an earlier cycle and becomes history.
+    @discardableResult
+    static func startCycle(defaults: UserDefaults, accountID: String, apiOrigin: String,
+                           provider: TraceSafariProviderCodec.ImportBinding, now: Double) -> Cycle? {
+        let cycle = Cycle(version: 1, id: UUID().uuidString.lowercased(), accountID: accountID,
+            apiOrigin: apiOrigin, provider: provider, startedAt: now)
+        guard cycle.valid(apiOrigin: apiOrigin), let data = try? JSONEncoder().encode(cycle) else { return nil }
+        defaults.set(data, forKey: cycleKey)
+        return defaults.data(forKey: cycleKey) == data ? cycle : nil
+    }
+
+    /// The cycle now open for this provider and environment, if any.
+    static func currentCycle(defaults: UserDefaults, apiOrigin: String,
+                             provider: TraceSafariProviderCodec.ImportBinding?) -> Cycle? {
+        guard let provider, let data = defaults.data(forKey: cycleKey), data.count <= 4096,
+              let cycle = try? JSONDecoder().decode(Cycle.self, from: data),
+              cycle.valid(apiOrigin: apiOrigin), cycle.provider == provider else { return nil }
+        return cycle
+    }
+
+    /// The app: the answer to `cycle`, or nil when there is none yet. Nil is
+    /// not known. A report for another cycle, provider, environment or
+    /// account, or one read before the cycle began, is never returned here.
+    static func read(defaults: UserDefaults, cycle: Cycle,
+                     provider: TraceSafariProviderCodec.ImportBinding?, now: Double) -> Report? {
+        guard let report = latest(defaults: defaults, apiOrigin: cycle.apiOrigin, provider: provider, now: now),
+              cycle.valid(apiOrigin: cycle.apiOrigin), cycle.provider == report.provider,
+              report.cycleID == cycle.id,
+              report.accountID == nil || report.accountID == cycle.accountID,
+              report.components.all.allSatisfy({ $0.observedAt >= cycle.startedAt }) else { return nil }
+        return report
+    }
+
+    /// The app: where a cycle it opened stands. `ended` is said when the
+    /// provider is no longer the one the cycle was opened under, when another
+    /// cycle has replaced it, or when the handler has recorded its end.
+    static func state(defaults: UserDefaults, cycle: Cycle,
+                      provider: TraceSafariProviderCodec.ImportBinding?, now: Double) -> CycleState {
+        guard let provider, cycle.provider == provider else { return .ended(.providerChanged) }
+        if let data = defaults.data(forKey: endedKey), data.count <= 1024,
+           let ended = try? JSONDecoder().decode(Ended.self, from: data),
+           ended.version == 1, ended.id == cycle.id { return .ended(ended.reason) }
+        guard let data = defaults.data(forKey: cycleKey), data.count <= 4096,
+              let stored = try? JSONDecoder().decode(Cycle.self, from: data) else { return .ended(.missing) }
+        guard stored.id == cycle.id else { return .ended(.replaced) }
+        if let report = read(defaults: defaults, cycle: cycle, provider: provider, now: now) {
+            return .answered(report)
+        }
+        return .waiting
+    }
+
+    /// A cycle is stored for this environment under a provider that is no
+    /// longer the one issued: it has ended, and the app is left word of it.
+    private static func noteEndedCycle(defaults: UserDefaults, apiOrigin: String,
+                                       provider: TraceSafariProviderCodec.ImportBinding, now: Double) {
+        guard let data = defaults.data(forKey: cycleKey), data.count <= 4096,
+              let stored = try? JSONDecoder().decode(Cycle.self, from: data),
+              stored.valid(apiOrigin: apiOrigin), stored.provider != provider else { return }
+        if let previous = defaults.data(forKey: endedKey),
+           let ended = try? JSONDecoder().decode(Ended.self, from: previous), ended.id == stored.id { return }
+        if let encoded = try? JSONEncoder().encode(
+            Ended(version: 1, id: stored.id, reason: .providerChanged, at: now)) {
+            defaults.set(encoded, forKey: endedKey)
+        }
+    }
+
+    /// The last report stored for this provider and environment, whichever
+    /// cycle it answered. History: it says what was observed then, not now,
+    /// and must never be treated as the answer to a cycle or as current.
+    static func latest(defaults: UserDefaults, apiOrigin: String,
+                       provider: TraceSafariProviderCodec.ImportBinding?, now: Double) -> Report? {
+        guard let provider, let data = defaults.data(forKey: reportKey), data.count <= 8192,
+              let report = try? JSONDecoder().decode(Report.self, from: data),
+              report.apiOrigin == apiOrigin, TraceSafariOnboardingReceipt.allowsAPIOrigin(apiOrigin),
+              report.provider == provider, coherent(report, now: now) else { return nil }
+        return report
+    }
+
+    /// The extension's two messages. `provider` is the one the app issued,
+    /// read now; a report bound to any other is refused.
+    static func handle(_ payload: [String: Any], defaults: UserDefaults,
+                       provider: TraceSafariProviderCodec.ImportBinding?, now: Double,
+                       configuredAPIOrigin: String) -> [String: Any] {
+        guard let provider, TraceSafariOnboardingReceipt.allowsAPIOrigin(configuredAPIOrigin),
+              payload["apiOrigin"] as? String == configuredAPIOrigin else { return ["ok": false] }
+        noteEndedCycle(defaults: defaults, apiOrigin: configuredAPIOrigin, provider: provider, now: now)
+        let cycle = currentCycle(defaults: defaults, apiOrigin: configuredAPIOrigin, provider: provider)
+        if payload["type"] as? String == prepareMessage {
+            var response: [String: Any] = ["ok": true,
+                "provider": ["sessionID": provider.sessionID, "recordDigest": provider.recordDigest]]
+            if let cycle { response["cycle"] = ["id": cycle.id, "accountID": cycle.accountID] }
+            return response
+        }
+        guard payload["type"] as? String == reportMessage,
+              let data = try? JSONSerialization.data(withJSONObject: payload),
+              let report = try? JSONDecoder().decode(Report.self, from: data),
+              report.provider == provider, coherent(report, now: now) else { return ["ok": false] }
+        // An answer belongs to the cycle that was open when its reading began.
+        // If the app has opened another since, or closed it, the extension is
+        // told so and reads again.
+        guard report.cycleID == cycle?.id else { return ["ok": false, "error": "stale_cycle"] }
+        if let cycle {
+            guard report.accountID == nil || report.accountID == cycle.accountID,
+                  report.components.all.allSatisfy({ $0.observedAt >= cycle.startedAt })
+            else { return ["ok": false] }
+        }
+        // A later reading is never replaced by an earlier one for the same cycle.
+        if let previous = latest(defaults: defaults, apiOrigin: configuredAPIOrigin, provider: provider, now: now),
+           previous.cycleID == report.cycleID, previous.observedAt > report.observedAt {
+            return ["ok": false]
+        }
+        // Stored from the decoded value, so nothing the message carried beyond
+        // these fields is kept.
+        guard let encoded = try? JSONEncoder().encode(report) else { return ["ok": false] }
+        defaults.set(encoded, forKey: reportKey)
+        return ["ok": defaults.data(forKey: reportKey) == encoded]
+    }
+}
+
+/// The native messages answered only for the provider the app issued, as it
+/// is read at that moment: the save receipt, the automatic-saving preference
+/// and the readiness report. The handler reads the provider and the paired
+/// environment; which of the three answers is decided here, where it can be
+/// tested without the extension's host.
+enum TraceSafariProviderBoundMessages {
+    static let types: Set<String> = [
+        "TRACE_IOS_SAVE_PREPARE", "TRACE_IOS_SAVE_CONFIRMED",
+        "TRACE_IOS_TRACKING_PREFERENCE_PREPARE", "TRACE_IOS_TRACKING_PREFERENCE",
+        TraceSafariReadinessReport.prepareMessage, TraceSafariReadinessReport.reportMessage,
+    ]
+
+    static func respond(to payload: [String: Any], type: String, defaults: UserDefaults,
+                        session: TraceSafariProviderCodec.DeviceSession, now: Date,
+                        configuredAPIOrigin: String) -> [String: Any] {
+        guard types.contains(type) else { return ["ok": false] }
+        // A message can never select the provider it is answered for.
+        let provider = TraceSafariProviderCodec.importBinding(session: session, now: now)
+        let milliseconds = now.timeIntervalSince1970 * 1000
+        if type.hasPrefix("TRACE_IOS_SAFARI_READINESS") {
+            return TraceSafariReadinessReport.handle(payload, defaults: defaults, provider: provider,
+                now: milliseconds, configuredAPIOrigin: configuredAPIOrigin)
+        }
+        if type.hasPrefix("TRACE_IOS_TRACKING_PREFERENCE") {
+            return TraceSafariTrackingPreference.handle(payload, defaults: defaults, provider: provider,
+                now: milliseconds, configuredAPIOrigin: configuredAPIOrigin)
+        }
+        return TraceSafariOnboardingReceipt.handle(payload, defaults: defaults, provider: provider,
+            now: milliseconds, configuredAPIOrigin: configuredAPIOrigin)
     }
 }

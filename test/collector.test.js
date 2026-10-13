@@ -7706,10 +7706,16 @@ for (const fixture of [
 
 // --- Manual mode: the reader opened Trace before lasting access ---------------
 
-function createManualModeCollectorHarness(fixture, url, { manual = true, html = null } = {}) {
-  const dom = html === null
-    ? domFromFixture(fixture, url)
-    : new JSDOM(html, { url, runScripts: "outside-only" });
+function createManualModeCollectorHarness(fixture, url, { manual = true, html = null, reply = null, privateTab } = {}) {
+  // A reload is the one thing a test page cannot do; asking for one is seen here.
+  const reloads = [];
+  const virtualConsole = new (require("jsdom").VirtualConsole)();
+  virtualConsole.on("jsdomError", (error) => {
+    if (/navigation/i.test(String(error && error.message))) reloads.push(error.message);
+  });
+  const dom = new JSDOM(html === null ? loadFixture(fixture) : html, {
+    url, contentType: "text/html", runScripts: "outside-only", virtualConsole,
+  });
   const sent = [];
   let listener = null;
   if (manual) {
@@ -7723,9 +7729,10 @@ function createManualModeCollectorHarness(fixture, url, { manual = true, html = 
       onMessage: { addListener(fn) { listener = fn; } },
       sendMessage(message, callback) {
         sent.push(message);
-        callback?.({ ok: true });
+        callback?.((reply && reply(message)) ?? { ok: true });
       },
     },
+    ...(privateTab === undefined ? {} : { extension: { inIncognitoContext: privateTab } }),
     storage: {
       local: {
         get(_keys, callback) {
@@ -7757,7 +7764,18 @@ function createManualModeCollectorHarness(fixture, url, { manual = true, html = 
     dom.window.dispatchEvent(new dom.window.Event("scroll"));
     await delay(120);
   };
-  return { dom, sent, listener, ask, stir, background, currentListener: () => listener };
+  /** The reader comes back to the page: each way a browser may say so. */
+  const wake = async (how) => {
+    if (how === "visibilitychange") {
+      Object.defineProperty(dom.window.document, "hidden", { value: false, configurable: true });
+      dom.window.document.dispatchEvent(new dom.window.Event(how));
+    } else {
+      dom.window.dispatchEvent(new dom.window.Event(how));
+    }
+    await delay(20);
+  };
+  const of = (type) => sent.filter((message) => message.type === type);
+  return { dom, sent, listener, ask, stir, wake, of, reloads, background, currentListener: () => listener };
 }
 
 const SENT_BY_ITSELF = [
@@ -7895,15 +7913,98 @@ test("when the story sites are allowed, the same page script carries on: one scr
     0,
     "the story is not saved a second time",
   );
-  assert.ok(
-    h.sent.filter(({ type }) => type === "TRACE_AUTO_TRACK").length <= 1,
-    "reading progress goes out once at most, as on any story page",
+  assert.equal(
+    h.sent.filter(({ type }) => type === "TRACE_AUTO_TRACK").length,
+    1,
+    "its place in the story goes out once, as on any story page",
   );
+  assert.deepEqual(h.reloads, [], "nothing was reloaded");
   assert.deepEqual(
     plainJson(await h.ask({ type: "TRACE_PAGE_MANUAL_MODE_END" })),
     { ok: false, error: "refused" },
     "and the page is no longer in manual mode to be told twice",
   );
+});
+
+test("a page in manual mode asks, when the reader comes back to it, whether the story sites are allowed, and carries on when they are", async () => {
+  const url = "https://archiveofourown.org/works/28534965/chapters/69925506";
+  for (const how of ["pageshow", "focus", "visibilitychange"]) {
+    let allowed = false;
+    const h = createManualModeCollectorHarness("ao3_story.html", url, {
+      reply: (message) => message.type === "TRACE_PAGE_MANUAL_MODE_QUERY"
+        ? { ok: true, manual: !allowed, reload: false }
+        : null,
+    });
+    const listenerBefore = h.listener;
+    await h.ask({ type: "TRACE_FIRST_TAP_COLLECT" });
+    await h.ask({ type: "TRACE_FIRST_TAP_MARK", workKey: "ao3:28534965" });
+
+    await h.wake(how);
+    assert.deepEqual(plainJson(h.of("TRACE_PAGE_MANUAL_MODE_QUERY")), [{ type: "TRACE_PAGE_MANUAL_MODE_QUERY" }],
+      `${how}: it asks, and says nothing of the page or the story`);
+    assert.equal(h.dom.window.TRACE_PAGE_MANUAL_MODE, true, "not allowed yet: it stays as it was");
+    assert.deepEqual(h.sent.filter(({ type }) => SENT_BY_ITSELF.includes(type)), []);
+
+    // Coming back again at once does not ask again.
+    await h.wake(how);
+    assert.equal(h.of("TRACE_PAGE_MANUAL_MODE_QUERY").length, 1);
+
+    // The reader allows the story sites in Safari's settings. No background
+    // was awake to be told, and none remembers this page.
+    allowed = true;
+    h.dom.window.Date.now = () => Date.now() + 60_000;
+    await h.wake(how);
+    await h.stir();
+    assert.equal(h.dom.window.TRACE_PAGE_MANUAL_MODE, false, `${how}: the page carries on by itself`);
+    assert.equal(h.currentListener(), listenerBefore, "the same script: no second one was started");
+    assert.equal(h.dom.window.document.querySelectorAll("[data-trace-quick-add-wrap]").length, 1, "one mark");
+    assert.ok(h.of("TRACE_ARCHIVE_SEEN").length >= 1, "the page now reports itself");
+    assert.equal(h.of("TRACE_AUTO_TRACK").length, 1, "its place in the story goes out, once");
+    assert.equal(h.of("TRACE_CONNECT_AND_SAVE").length + h.of("TRACE_QUICK_ADD").length, 0, "the story is not saved a second time");
+    assert.deepEqual(h.reloads, [], "and nothing was reloaded");
+
+    // No longer in manual mode, it no longer asks.
+    const asked = h.of("TRACE_PAGE_MANUAL_MODE_QUERY").length;
+    h.dom.window.Date.now = () => Date.now() + 120_000;
+    await h.wake(how);
+    assert.equal(h.of("TRACE_PAGE_MANUAL_MODE_QUERY").length, asked);
+  }
+});
+
+test("a page that was never in manual mode never asks about it", async () => {
+  const h = createManualModeCollectorHarness(
+    "ao3_story.html",
+    "https://archiveofourown.org/works/28534965/chapters/69925506",
+    { manual: false },
+  );
+  await h.stir();
+  for (const how of ["pageshow", "focus", "visibilitychange"]) await h.wake(how);
+  assert.deepEqual(h.of("TRACE_PAGE_MANUAL_MODE_QUERY"), []);
+});
+
+test("told to reload instead, a page in manual mode reloads once and starts nothing in the old document", async () => {
+  const url = "https://archiveofourown.org/works/28534965/chapters/69925506";
+  // Told by the background, and told in answer to its own question.
+  const pushed = createManualModeCollectorHarness("ao3_story.html", url);
+  assert.deepEqual(plainJson(await pushed.ask({ type: "TRACE_PAGE_MANUAL_MODE_END", reload: true })), { ok: true });
+  const asked = createManualModeCollectorHarness("ao3_story.html", url, {
+    reply: (message) => message.type === "TRACE_PAGE_MANUAL_MODE_QUERY" ? { ok: true, manual: false, reload: true } : null,
+  });
+  await asked.wake("pageshow");
+  for (const h of [pushed, asked]) {
+    await delay(20);
+    assert.equal(h.reloads.length, 1, "the reload was asked for");
+    assert.equal(h.dom.window.TRACE_PAGE_MANUAL_MODE, true, "the old document stays as it was");
+    assert.deepEqual(h.sent.filter(({ type }) => SENT_BY_ITSELF.includes(type)), [], "and sends nothing by itself");
+  }
+});
+
+test("the page says whether its tab is private when it hands the story over, where the browser tells it", async () => {
+  const url = "https://archiveofourown.org/works/28534965/chapters/69925506";
+  for (const [privateTab, expected] of [[true, true], [false, false], [undefined, null]]) {
+    const h = createManualModeCollectorHarness("ao3_story.html", url, { privateTab });
+    assert.equal(plainJson(await h.ask({ type: "TRACE_FIRST_TAP_COLLECT" })).private, expected);
+  }
 });
 
 test("the mode is read when something is about to be sent: lifting it lets the same page script carry on", async () => {

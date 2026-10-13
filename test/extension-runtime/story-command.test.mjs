@@ -274,6 +274,37 @@ test("native exact receipt is independent of a failed heartbeat", async () => {
   assert.equal("entryID" in messages[2], false);
 });
 
+test("the save confirmation carries how the save came about when the background established it, and nothing otherwise", async () => {
+  const { NativeStorySaveReceiptPort } = await import("../../.trace-build/extension-runtime/browser-adapters.mjs");
+  const context = { attemptID: "attempt", operationID: "operation", initiatedAt: 100 };
+  const messages = [];
+  const runtime = { async sendNativeMessage(message) { messages.push(message); return { ok: true }; } };
+  const port = new NativeStorySaveReceiptPort(runtime, "promise", "https://api.tracefiction.com");
+  const receipt = { accountID: "account-a", entryID: entryId, workKey: "ffn:5782108", source: "mutation",
+    context, hostKind: "ffn", action: "read", at: 200 };
+
+  await port.publishSaveReceipt(receipt);
+  const plain = messages.at(-1);
+  assert.deepEqual(Object.keys(plain).sort(),
+    ["accountID", "apiOrigin", "context", "entryID", "source", "type", "workKey"],
+    "with no mode established the message is exactly what it was");
+
+  for (const mode of ["bounded_manual", "normal_automatic"]) {
+    await port.publishSaveReceipt({ ...receipt, mode });
+    const stamped = messages.at(-1);
+    assert.equal(stamped.type, "TRACE_IOS_SAVE_CONFIRMED");
+    assert.equal(stamped.mode, mode);
+    // Everything an app that predates the field reads is unchanged beside it.
+    const { mode: _mode, ...rest } = stamped;
+    assert.deepEqual(rest, plain);
+  }
+  // The mode goes with the confirmation only: the heartbeat is as it was.
+  await port.publishSaveReceipt({ ...receipt, action: "quick_add", mode: "bounded_manual" });
+  const heartbeat = messages.at(-1);
+  assert.equal(heartbeat.type, "TRACE_IOS_EXTENSION_HEARTBEAT");
+  assert.equal("mode" in heartbeat, false);
+});
+
 test("confirmed automatic reading reaches native without becoming a quick-add heartbeat", async () => {
   const { NativeStorySaveReceiptPort } = await import("../../.trace-build/extension-runtime/browser-adapters.mjs");
   const context = { attemptID: "attempt", operationID: "operation", initiatedAt: 100 };
