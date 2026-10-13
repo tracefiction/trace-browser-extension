@@ -324,6 +324,44 @@ test("Check again after an unanswered save asks Trace about that one story, once
   assert.deepEqual(h.calls.presence, [], "and none read the whole Library");
 });
 
+test("the answer to what the reader's own tap asked for carries that tap's number, and nothing else does", async () => {
+  const h = harness();
+  h.state.saveEnds = "unanswered";
+  const port = h.openPort();
+  port.send("open");
+  await turns();
+  assert.equal(port.messages.some((message) => "answered" in message), false, "an open with no number is answered with none");
+
+  port.send("check", { look: 4 });
+  await turns();
+  const afterCheck = port.messages.filter((message) => "answered" in message);
+  assert.deepEqual(afterCheck.map(({ answered, view }) => [answered, view.dispatch]), [[4, "not_in_library"]]);
+
+  port.send("access_check", { look: 5 });
+  await turns();
+  assert.deepEqual(port.messages.at(-1), { access: { state: "not_asked" }, answered: 5 });
+
+  port.send("open", { look: 6 });
+  await turns();
+  assert.equal(port.messages.at(-1).answered, 6);
+  assert.equal(port.messages.at(-1).view.state, "failed");
+
+  // A number that is not one is not sent back.
+  for (const look of ["7", 1.5, null, {}]) {
+    port.send("check", { look });
+    await turns();
+    assert.equal("answered" in port.messages.at(-1), false, JSON.stringify(look));
+  }
+  // A look asked for with the story sites allowed is answered under its number too.
+  h.state.granted = true;
+  h.state.registered = REGISTERED;
+  port.send("open", { look: 9 });
+  await turns();
+  assert.equal(port.messages.at(-1).answered, 9);
+  assert.equal(port.messages.at(-1).view.state, "automatic");
+  assert.equal(port.messages.at(-1).access.state, "allowed");
+});
+
 test("the popup names the tab it was opened on, once; the background looks no tab up, and reaches no other", async () => {
   const h = harness();
   const port = h.openPort();

@@ -184,6 +184,8 @@ type Record = {
    * between, so two opens that arrive together start one save.
    */
   deciding: Promise<void>;
+  /** The look now asking Trace about this story, if one is: a second joins it. */
+  checking: Promise<FirstTapView> | null;
   story: FirstTapStory | null;
   /** Tabs that may show the mark for this attempt. */
   tabs: Set<number>;
@@ -494,6 +496,7 @@ export class FirstTapSave {
    * the record. One Trace says it does not have is said to be absent only
    * when no save of it is still out. A request that could not be made or
    * read, or that Trace turned away, leaves the story's place not known.
+   * A look asked for while one is still out joins it: one request, one answer.
    */
   async check(listener: Listener): Promise<FirstTapView> {
     const sheet = this.#sheets.get(listener);
@@ -503,6 +506,17 @@ export class FirstTapSave {
     if (record === null || record.binding !== this.#ports.binding()) return unknown;
     // A confirmation is never taken back by a later look.
     if (record.outcome?.kind === "confirmed") return this.#view(record);
+    if (record.checking !== null) return record.checking;
+    const asking = this.#askTrace(record, unknown);
+    record.checking = asking;
+    const done = (): void => {
+      if (record.checking === asking) record.checking = null;
+    };
+    void asking.then(done, done);
+    return asking;
+  }
+
+  async #askTrace(record: Record, unknown: FirstTapView): Promise<FirstTapView> {
     // The same key the save itself was made under.
     const membership = await this.#ports.membership(record.workKey).catch(
       (): StoryMembership => ({ kind: "unknown" }),
@@ -651,6 +665,7 @@ export class FirstTapSave {
       priorKnown,
       running: false,
       deciding: Promise.resolve(),
+      checking: null,
       story: null,
       tabs: new Set([page.tabId]),
       marked: new Set(),

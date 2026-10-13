@@ -290,7 +290,7 @@ export function installFirstTapSave(environment: Environment): () => Promise<voi
     // tap. Every later command on this port is about that tab and no other.
     // The background looks no tab up for itself.
     let tapped: FirstTapTapped | null = null;
-    const post = (message: { view?: FirstTapView; access?: StorySiteAccessView }): void => {
+    const post = (message: { view?: FirstTapView; access?: StorySiteAccessView; answered?: number }): void => {
       if (!open) return;
       try { port.postMessage(message); } catch { /* The popup has gone. */ }
     };
@@ -306,8 +306,13 @@ export function installFirstTapSave(environment: Environment): () => Promise<voi
         ? message as {
             readonly command?: unknown; readonly tabId?: unknown; readonly url?: unknown;
             readonly private?: unknown; readonly returned?: unknown; readonly threw?: unknown;
+            readonly look?: unknown;
           }
         : {};
+      // A request the reader's own tap made carries a number. Its answer goes
+      // back under the same number, so the popup can tell that answer from
+      // anything else this port sends it meanwhile.
+      const answered = Number.isSafeInteger(request.look) ? { answered: request.look as number } : {};
       if (tapped === null && Number.isInteger(request.tabId) && typeof request.url === "string") {
         tapped = Object.freeze({
           tabId: request.tabId as number,
@@ -335,7 +340,10 @@ export function installFirstTapSave(environment: Environment): () => Promise<voi
         : request.threw === true ? { kind: "threw" }
         : { kind: "returned", value: request.returned };
       if (ask !== null) {
-        void siteAccess.answered(show, ask).then(showAccess, () => showAccess(Object.freeze({ state: "not_known" })));
+        void siteAccess.answered(show, ask).then(
+          (access) => post({ access, ...answered }),
+          () => post({ access: Object.freeze({ state: "not_known" }), ...answered }),
+        );
         return;
       }
 
@@ -351,13 +359,13 @@ export function installFirstTapSave(environment: Environment): () => Promise<voi
         async (view) => {
           // Opened with the story sites already allowed: nothing is saved
           // from here, and the popup is told what holds, read now.
-          if (view.state !== "automatic") return show(view);
+          if (view.state !== "automatic") return post({ view, ...answered });
           const allowed = await siteAccess.observe().catch(
             (): StorySiteAccessView => Object.freeze({ state: "not_known" }),
           );
-          post({ view, access: allowed });
+          post({ view, access: allowed, ...answered });
         },
-        () => show(Object.freeze({ state: "not_applicable" })),
+        () => post({ view: Object.freeze({ state: "not_applicable" }), ...answered }),
       ).then(() => {
         // A popup that closed while this was being worked out is closed for
         // the result too, so the page is not left waiting on it.

@@ -239,6 +239,11 @@ function createPopupHarness({
     show(view) { for (const listener of firstTap.listeners) listener({ view }); },
     /** The state of the ask for lasting access, with or without a save state. */
     showAccess(access, view) { for (const listener of firstTap.listeners) listener(view ? { view, access } : { access }); },
+    /** The background's answer to the last thing the reader's own tap asked for. */
+    answer(message) {
+      const answered = firstTap.messages.filter(({ look }) => look !== undefined).at(-1)?.look;
+      for (const listener of firstTap.listeners) listener({ ...message, answered });
+    },
   };
   let finishHostRequest;
 
@@ -4361,7 +4366,7 @@ test("first tap: no account, an unread account and a refused account each say on
   await click("popup-earned-primary");
   assert.deepEqual(h.firstTap.commands, ["open", "open"]);
 
-  h.firstTap.show({ state: "account_missing", workKey: "ao3:123" });
+  h.firstTap.answer({ view: { state: "account_missing", workKey: "ao3:123" } });
   assert.deepEqual(sheet(), {
     state: "account-missing", kicker: null, heading: "Trace couldn’t connect to your account",
     body: "Trace in Safari doesn’t have your account yet. Open the Trace app, then come back and tap Trace again.",
@@ -4388,7 +4393,7 @@ test("first tap: no account, an unread account and a refused account each say on
 });
 
 test("first tap: only a save that was never sent may be drawn as unsent; an unconfirmed one offers a look, not another save", async () => {
-  const { h, shown, click, sheet } = await openFirstTapPopup();
+  const { h, shown, click, announced, sheet } = await openFirstTapPopup();
   const failed = (reason, dispatch) => ({ state: "failed", workKey: "ao3:123", reason, dispatch, story: FIRST_TAP_STORY });
   const words = () => `${sheet().heading} ${sheet().body}`;
 
@@ -4402,7 +4407,7 @@ test("first tap: only a save that was never sent may be drawn as unsent; an unco
   await click("popup-earned-primary");
   assert.equal(h.firstTap.commands.at(-1), "check", "Check again looks; it cannot ask for a save");
 
-  h.firstTap.show({ state: "presence_unknown", workKey: "ao3:123" });
+  h.firstTap.answer({ view: { state: "presence_unknown", workKey: "ao3:123" } });
   assert.deepEqual(sheet(), {
     state: "still-unknown", kicker: null, heading: "Trace still couldn’t check",
     body: "Look for it in your Library in the Trace app, or check again later.", record: null, second: null,
@@ -4413,7 +4418,7 @@ test("first tap: only a save that was never sent may be drawn as unsent; an unco
   assert.equal(h.firstTap.commands.at(-1), "check");
   assert.equal(h.firstTap.commands.includes("save"), false);
 
-  h.firstTap.show(failed("unavailable", "never_sent"));
+  h.firstTap.answer({ view: failed("unavailable", "never_sent") });
   assert.deepEqual(sheet(), {
     state: "save-not-sent", kicker: null, heading: "The save wasn’t sent",
     body: "This tap added nothing to your Library.", record: null, second: null, rule: null,
@@ -4430,15 +4435,17 @@ test("first tap: only a save that was never sent may be drawn as unsent; an unco
   });
 
   // Trace's own word, asked for by the reader, that the story is not in the
-  // Library: the same screen, with the same way to save.
+  // Library, has its own words: the save was sent, so it is not called unsent.
   h.firstTap.show(failed("unavailable", "not_in_library"));
   assert.deepEqual(sheet(), {
-    state: "save-not-sent", kicker: null, heading: "The save wasn’t sent",
-    body: "This tap added nothing to your Library.", record: null, second: null, rule: null,
-    primary: "Try again", secondary: "Not now",
+    state: "save-not-in-library", kicker: null, heading: "This story isn’t in your Library",
+    body: "Trace checked and didn’t find it.", record: null, second: null, rule: null,
+    primary: "Try again", secondary: null,
   });
+  assert.doesNotMatch(words(), /wasn.t sent|added nothing/i);
+  assert.equal(await announced(), "This story isn’t in your Library. Trace checked and didn’t find it.");
   await click("popup-earned-primary");
-  assert.equal(h.firstTap.commands.at(-1), "save");
+  assert.equal(h.firstTap.commands.at(-1), "save", "Try again is a new save the reader chose");
 
   // Trace turned the account down: the reader reconnects, then saves.
   for (const dispatch of ["refused", "never_sent"]) {
@@ -5139,7 +5146,7 @@ const FIRST_TAP_STATES = (() => {
     ["story-unavailable", { view: failed("story_unavailable", "never_sent") }],
     ["library-full", { view: failed("free_limit_reached", "refused") }],
     ["save-not-sent", { view: failed("page_unreachable", "never_sent") }],
-    ["save-not-sent", { view: failed("unavailable", "not_in_library") }],
+    ["save-not-in-library", { view: failed("unavailable", "not_in_library") }],
     ["save-refused", { view: failed("rate_limited", "refused") }],
     ["save-reconnect", { view: failed("not_authenticated", "refused") }],
     ["access-waiting", { view: confirmed("saved_now"), after: 1_100, tap: "popup-earned-primary", access: { state: "waiting" } }],
@@ -5223,7 +5230,7 @@ test("first tap: every state is reachable, has one headline, says its news aloud
     }
     assert.deepEqual(h.reloads, [], name);
   }
-  assert.equal(reached.size, FIRST_TAP_STATES.length - 3, "every state: a request that came to nothing is one state however it did, and so is a tap that added nothing");
+  assert.equal(reached.size, FIRST_TAP_STATES.length - 2, "every state, a request that came to nothing being one state however it did");
 });
 
 test("first tap: the wording keeps to the rules for Trace's copy", async () => {
@@ -5254,6 +5261,9 @@ test("first tap: the wording keeps to the rules for Trace's copy", async () => {
   assert.equal(words.tryAgain, "Try again");
 
   assert.equal(words.checking, "Checking…");
+  assert.equal(words.notSentHeading, "The save wasn’t sent");
+  assert.equal(words.notInLibraryHeading, "This story isn’t in your Library");
+  assert.equal(words.notInLibraryBody, "Trace checked and didn’t find it.");
   assert.equal(words.reconnectHeading, "Open the Trace app to reconnect");
   assert.equal(words.reconnectBody, "Trace in Safari needs your account again. Open the Trace app, then come back and tap Trace again.");
   assert.equal(words.partialBody, "Trace needs all {count} of AO3 and FanFiction.net’s addresses to save by itself.");
@@ -5379,24 +5389,24 @@ async function tapRegardless(opened, id, action) {
 test("first tap: Check again and Try again wait on their answer, send one request a tap, and say the answer aloud even when nothing changed", async () => {
   const failed = { state: "failed", workKey: "ao3:123", reason: "unavailable", dispatch: "sent_unconfirmed", story: FIRST_TAP_STORY };
   const allowed = { state: "allowed", account: "reconnect_required", automaticSaving: "on", handOver: "in_place" };
-  for (const [name, arrive, button, command, restored, said] of [
-    ["an unconfirmed save", (h) => h.firstTap.show(failed), "popup-earned-primary", "check", "Check again",
+  for (const [name, message, button, command, restored, said] of [
+    ["an unconfirmed save", { view: failed }, "popup-earned-primary", "check", "Check again",
       "Trace couldn’t confirm this save. It may have saved anyway. Check again to find out."],
-    ["a look that could not tell", (h) => h.firstTap.show({ state: "presence_unknown", workKey: "ao3:123" }), "popup-earned-primary", "check", "Check again",
+    ["a look that could not tell", { view: { state: "presence_unknown", workKey: "ao3:123" } }, "popup-earned-primary", "check", "Check again",
       "Trace still couldn’t check. Look for it in your Library in the Trace app, or check again later."],
-    ["no account", (h) => h.firstTap.show({ state: "account_missing", workKey: "ao3:123" }), "popup-earned-primary", "open", "Try again",
+    ["no account", { view: { state: "account_missing", workKey: "ao3:123" } }, "popup-earned-primary", "open", "Try again",
       "Trace couldn’t connect to your account. Trace in Safari doesn’t have your account yet. Open the Trace app, then come back and tap Trace again."],
-    ["a failed registration", (h) => h.firstTap.showAccess({ state: "registration_failed" }), "popup-earned-primary", "access_check", "Try again",
+    ["a failed registration", { access: { state: "registration_failed" } }, "popup-earned-primary", "access_check", "Try again",
       "Trace couldn’t finish turning on automatic saving. Safari allowed AO3 and FanFiction.net, but Trace’s part didn’t start."],
-    ["an unread answer", (h) => h.firstTap.showAccess({ state: "not_known" }), "popup-earned-secondary", "access_check", "Check again",
+    ["an unread answer", { access: { state: "not_known" } }, "popup-earned-secondary", "access_check", "Check again",
       "Trace couldn’t check with Safari. AO3 and FanFiction.net may be allowed already. Check again, or ask once more."],
-    ["allowed with an account to reconnect", (h) => h.firstTap.showAccess(allowed), "popup-earned-primary", "access_check", "Try again",
+    ["allowed with an account to reconnect", { access: allowed }, "popup-earned-primary", "access_check", "Try again",
       "Allowed on AO3 and FanFiction.net. Open the Trace app to reconnect. Trace in Safari needs your account again. Open the Trace app, then come back and tap Trace again."],
   ]) {
     const opened = await openSavedFirstTapPopup({ grantedOrigins: command === "access_check" ? [...FIVE_STORY_SITES] : [] });
     const { h, element, click, announced, sheet } = opened;
     const settle = async () => { for (let attempt = 0; attempt < 6; attempt += 1) await flush(); };
-    arrive(h);
+    for (const listener of h.firstTap.listeners) listener(message);
     assert.equal(await announced(), said, name);
     const drawn = sheet();
     const action = element(button).dataset.earnedAction;
@@ -5409,14 +5419,27 @@ test("first tap: Check again and Try again wait on their answer, send one reques
     assert.equal(element(button).dataset.earnedAction, "", name);
     assert.equal(await announced(), "Checking.", name);
     assert.deepEqual(h.firstTap.commands.slice(before), [command], name);
+    assert.equal(Number.isSafeInteger(h.firstTap.messages.at(-1).look), true, `${name}: the request carries the tap's number`);
     // A second tap that still arrives sends nothing more.
     await tapRegardless(opened, button, action);
     await settle();
     assert.deepEqual(h.firstTap.commands.slice(before), [command], `${name}: one request for one tap`);
     assert.deepEqual(h.permissionRequests, [], `${name}: and Safari is asked nothing`);
 
-    // The same answer comes back. The sheet is as it was, and says so again.
-    arrive(h);
+    // Something else the background sends meanwhile is drawn, and is not the
+    // answer: the button goes on waiting, and a tap on it still sends nothing.
+    for (const listener of h.firstTap.listeners) listener(message);
+    for (const listener of h.firstTap.listeners) listener({ ...message, answered: -1 });
+    assert.equal(shownText(element(button)), "Checking…", `${name}: still waiting on its own answer`);
+    assert.equal(element(button).disabled, true, name);
+    await tapRegardless(opened, button, action);
+    await settle();
+    assert.deepEqual(h.firstTap.commands.slice(before), [command], name);
+    assert.equal(shownText(element(button)), "Checking…", name);
+    await announced();
+
+    // Its own answer comes back the same. The sheet is as it was, and says so again.
+    h.firstTap.answer(message);
     assert.deepEqual(sheet(), drawn, name);
     assert.equal(shownText(element(button)), restored, name);
     assert.equal(element(button).disabled, false, name);
@@ -5436,8 +5459,10 @@ test("first tap: a look that is never answered gives its button back, and one as
   h.firstTap.show(unconfirmed);
   const drawn = sheet();
   await click("popup-earned-primary");
-  h.advance(14_999);
+  // Longer than the slowest answer: a read refused, reconnected and made again.
+  h.advance(29_999);
   assert.equal(text("popup-earned-primary"), "Checking…");
+  assert.equal(element("popup-earned-primary").disabled, true);
   h.advance(1);
   assert.deepEqual(sheet(), drawn, "the sheet as it stood");
   assert.equal(element("popup-earned-primary").disabled, false);
@@ -5465,7 +5490,7 @@ test("first tap: the still-confirming look waits and answers aloud like any othe
   assert.equal(await announced(), "Checking.");
 
   // Trace does not have the story yet and the save is still out: the same state, said again.
-  h.firstTap.show(saving);
+  h.firstTap.answer({ view: saving });
   assert.equal(shown(), "still-confirming");
   assert.equal(text("popup-earned-note-action"), "Check again");
   assert.equal(element("popup-earned-note-action").disabled, false);
@@ -5473,10 +5498,10 @@ test("first tap: the still-confirming look waits and answers aloud like any othe
 
   // Trace has it after all: what a found entry always gets, with the entry's own status.
   await click("popup-earned-note-action");
-  h.firstTap.show({
+  h.firstTap.answer({ view: {
     state: "confirmed", workKey: "ao3:123", provenance: "found", mode: null, story: FIRST_TAP_STORY,
     entry: { status: "PLANNING", readerStatus: "PLANNING", canonicalReaderStatus: "SAVED", chapters: null },
-  });
+  } });
   assert.equal(shown(), "in-library");
   assert.equal(text("popup-earned-kicker"), "In your Library");
   assert.equal(text("popup-earned-record"), "someone · AO3Saved");
@@ -5487,24 +5512,93 @@ test("first tap: Check again answered by Trace's own word draws not in the Libra
   const { h, shown, click, sheet } = await openFirstTapPopup();
   h.firstTap.show({ state: "failed", workKey: "ao3:123", reason: "unavailable", dispatch: "sent_unconfirmed", story: FIRST_TAP_STORY });
   await click("popup-earned-primary");
-  h.firstTap.show({ state: "presence_unknown", workKey: "ao3:123" });
+  h.firstTap.answer({ view: { state: "presence_unknown", workKey: "ao3:123" } });
   assert.equal(shown(), "still-unknown", "a request that could not be made or read is never drawn as absent");
-  assert.doesNotMatch(`${sheet().heading} ${sheet().body}`, /added nothing|wasn.t sent|isn.t in/i);
+  assert.doesNotMatch(`${sheet().heading} ${sheet().body}`, /added nothing|wasn.t sent|isn.t in|didn.t find/i);
 
   await click("popup-earned-primary");
-  h.firstTap.show({ state: "account_reconnect_required", workKey: "ao3:123" });
+  h.firstTap.answer({ view: { state: "account_reconnect_required", workKey: "ao3:123" } });
   assert.equal(shown(), "account-reconnect");
   assert.equal(sheet().heading, "Open the Trace app to reconnect");
 
   h.firstTap.show({ state: "presence_unknown", workKey: "ao3:123" });
   await click("popup-earned-primary");
-  h.firstTap.show({ state: "failed", workKey: "ao3:123", reason: "unavailable", dispatch: "not_in_library", story: FIRST_TAP_STORY });
+  h.firstTap.answer({ view: { state: "failed", workKey: "ao3:123", reason: "unavailable", dispatch: "not_in_library", story: FIRST_TAP_STORY } });
   assert.deepEqual(sheet(), {
-    state: "save-not-sent", kicker: null, heading: "The save wasn’t sent",
-    body: "This tap added nothing to your Library.", record: null, second: null, rule: null,
-    primary: "Try again", secondary: "Not now",
+    state: "save-not-in-library", kicker: null, heading: "This story isn’t in your Library",
+    body: "Trace checked and didn’t find it.", record: null, second: null, rule: null,
+    primary: "Try again", secondary: null,
   });
   assert.deepEqual(h.firstTap.commands, ["open", "check", "check", "check"], "one request for each tap, and no save among them");
+});
+
+// --- A save that fails after the ask was answered ---------------------------------------
+
+test("first tap: a save that fails after the ask was answered is shown; what came of the ask does not stand over it", async () => {
+  const saving = { state: "saving", workKey: "ao3:123", startedAt: 0, story: FIRST_TAP_STORY };
+  const failures = [
+    [{ state: "failed", workKey: "ao3:123", reason: "unavailable", dispatch: "sent_unconfirmed", story: FIRST_TAP_STORY }, "save-unconfirmed", "Trace couldn’t confirm this save"],
+    [{ state: "failed", workKey: "ao3:123", reason: "page_unreachable", dispatch: "never_sent", story: FIRST_TAP_STORY }, "save-not-sent", "The save wasn’t sent"],
+    [{ state: "failed", workKey: "ao3:123", reason: "rate_limited", dispatch: "refused", story: FIRST_TAP_STORY }, "save-refused", "Trace couldn’t save this story"],
+  ];
+  for (const outcome of [
+    { state: "not_allowed", automaticSaving: "on" }, { state: "could_not_ask", automaticSaving: "off" },
+    { state: "partial", granted: 2, total: 5 }, { state: "not_known" },
+  ]) {
+    for (const [failure, state, heading] of failures) {
+      const { h, shown, click, announced, sheet } = await openFirstTapPopup({ deferredHostRequest: true });
+      h.firstTap.show(saving);
+      h.advance(20_000);
+      // The reader asks from the still-confirming state; the ask comes to nothing.
+      await click("popup-earned-primary");
+      h.firstTap.showAccess({ state: "waiting" });
+      h.firstTap.showAccess(outcome);
+      assert.match(shown(), /^access-/, outcome.state);
+      await announced();
+
+      // Then the save fails.
+      h.firstTap.show(failure);
+      assert.equal(shown(), state, `${outcome.state}: the save's own state`);
+      assert.equal(sheet().heading, heading, outcome.state);
+      assert.match(await announced(), new RegExp(`^${heading}`), `${outcome.state}: and it is said aloud`);
+
+      // What came of the ask is let go: a new save is drawn as itself.
+      h.firstTap.show({ ...saving, startedAt: 50_000 });
+      assert.equal(shown(), "saving", outcome.state);
+    }
+  }
+
+  // The other order: the save fails while Safari's question is still up, then the ask comes to nothing.
+  const { h, shown, click } = await openFirstTapPopup({ deferredHostRequest: true });
+  h.firstTap.show(saving);
+  h.advance(20_000);
+  await click("popup-earned-primary");
+  h.firstTap.showAccess({ state: "waiting" });
+  h.firstTap.show(failures[0][0]);
+  assert.equal(shown(), "save-unconfirmed");
+  h.firstTap.showAccess({ state: "not_allowed", automaticSaving: "on" });
+  assert.equal(shown(), "save-unconfirmed", "the ask's outcome does not replace it");
+});
+
+test("first tap: the story sites being allowed still stands over a save that failed, and a save that lands is shown with the ask's outcome", async () => {
+  const saving = { state: "saving", workKey: "ao3:123", startedAt: 0, story: FIRST_TAP_STORY };
+  const allowed = await openFirstTapPopup({ deferredHostRequest: true });
+  allowed.h.firstTap.show(saving);
+  allowed.h.advance(20_000);
+  await allowed.click("popup-earned-primary");
+  allowed.h.firstTap.showAccess({ state: "allowed", account: "connected", automaticSaving: "on", handOver: "in_place" });
+  allowed.h.firstTap.show({ state: "failed", workKey: "ao3:123", reason: "unavailable", dispatch: "sent_unconfirmed", story: FIRST_TAP_STORY });
+  assert.equal(allowed.shown(), "access-allowed", "from here the page saves the story by itself");
+
+  const landed = await openFirstTapPopup({ deferredHostRequest: true });
+  landed.h.firstTap.show(saving);
+  landed.h.advance(20_000);
+  await landed.click("popup-earned-primary");
+  landed.h.firstTap.showAccess({ state: "not_allowed", automaticSaving: "on" });
+  assert.equal(landed.sheet().kicker, null);
+  landed.h.firstTap.show(FIRST_TAP_CONFIRMED);
+  assert.equal(landed.shown(), "access-not-allowed");
+  assert.equal(landed.sheet().kicker, "Saved to your Library", "the save is said to have landed, over what came of the ask");
 });
 
 // --- Automatic saving, turned on from the sheet -----------------------------------------
@@ -5525,7 +5619,8 @@ test("first tap: Turn automatic saving on is one change and one request however 
   assert.equal(h.document.getElementById("pref-auto-track").checked, true);
   assert.deepEqual(h.firstTap.commands, ["open", "open"], "one open: the background then saves this story, once");
 
-  h.firstTap.show({ state: "saving", workKey: "ao3:123", startedAt: 5, story: null });
+  assert.equal(Number.isSafeInteger(h.firstTap.messages.at(-1).look), true);
+  h.firstTap.answer({ view: { state: "saving", workKey: "ao3:123", startedAt: 5, story: null } });
   assert.equal(shown(), "saving");
 
   // From the allowed state it is the same: one read of what holds.

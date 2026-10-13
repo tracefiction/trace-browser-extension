@@ -233,9 +233,11 @@ What a record says:
   as its only parameter, under the same sign-in as the extension's other
   Library reads. Trace answers for that one story, so unlike the whole-Library
   read its "absent" is an answer. Found improves the record. Absent is
-  reported as a tap that added nothing, with the way to save again, and only
-  when no save of the story is still out; the write that went unanswered
-  stays in doubt, so a story found later is still not called already there. A
+  reported as not in the Library, with the way to save again, and only when
+  no save of the story is still out; the write that went unanswered stays in
+  doubt, so a story found later is still not called already there. A look
+  asked for while one is still out joins it, and the popup's button waits
+  until its own answer comes back, so one check is one request. A
   sign-in Trace turns down is reported as an account to reconnect. A request
   that fails, is turned away as too many, meets a server error or comes back
   unreadable or about another story leaves the story's place not known, never
@@ -245,6 +247,10 @@ What a record says:
 - **One save for one story.** Opens of the same account and story are worked
   out one at a time, so two that arrive together (a double tap on a button
   that opens, or two popups) start one save and are both shown it.
+- **A save that fails after the ask.** The ask can be made while a save is
+  still being confirmed. If the save then fails, the popup shows the save's
+  own state, not what came of the ask; only the story sites being allowed
+  stands in its place, since from then the page saves the story by itself.
 - **Manual or automatic.** Stamped by the background when it admits a save:
   manual when it injected that page itself and the story sites were not
   allowed, automatic when they were allowed and the page scripts registered.

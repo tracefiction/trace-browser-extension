@@ -992,6 +992,38 @@ test("after Trace said the story was not there, a save that finds it is found, n
   assert.equal(world.net.writes, 1, "the story was found before anything more was written");
 });
 
+test("a second Check again while the first is still asking joins it: one request, one answer for both", async () => {
+  const world = install();
+  world.net.track = () => ({ kind: "success", value: { kind: "uncertain" } });
+  const worker = world.worker();
+  const popup = worker.popup();
+  await popup.open();
+  await turns();
+  const answer = deferred();
+  world.net.membership = async () => { await answer.promise; return null; };
+
+  const first = popup.check();
+  await turns();
+  const second = popup.check();
+  // Another popup on the same story asks too.
+  const other = worker.popup();
+  await other.open();
+  const third = other.check();
+  await turns();
+  assert.equal(world.net.memberships, 1, "one request while the first is still out");
+
+  answer.resolve();
+  const answers = await Promise.all([first, second, third]);
+  assert.deepEqual(answers.map((view) => view.dispatch), ["not_in_library", "not_in_library", "not_in_library"]);
+  assert.equal(world.net.memberships, 1);
+
+  // Once it has answered, the next tap is a request of its own.
+  world.net.membership = null;
+  await popup.check();
+  assert.equal(world.net.memberships, 2);
+  assert.equal(world.net.writes, 1);
+});
+
 test("Check again when Trace turns the account down says the account needs reconnecting, and keeps the doubt", async () => {
   const world = install();
   world.net.track = () => ({ kind: "success", value: { kind: "uncertain" } });
