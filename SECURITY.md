@@ -247,6 +247,26 @@ snapshot cannot replace a newer change. A preference is not proof of Safari
 access, activation or a successful save. Old app/extension versions can ignore
 the additive messages; absence leaves existing behavior intact.
 
+### Local Safari readiness report
+
+On iPhone and iPad the Safari background worker tells the bundled app whether
+Trace in Safari is ready to save by itself: four answers (website access, the
+page scripts, the account, the automatic-saving preference), each positive, a
+known blocker or unknown, with a reason token and the time it was read. It is
+stored in the app/extension shared container, bound to the provider the app
+issued and to the cycle the app opened, and is never sent to a server. It
+is sent when the popup opens, on the changes it describes, and about once a
+day. It
+contains no credential, address, story or page data, and says nothing about
+how long website access lasts, whether a save happened or will work, or
+Private Browsing. It adds no permission, looks up no tab and runs nothing on
+a page. The contract is in
+[`docs/safari-readiness-report.md`](docs/safari-readiness-report.md).
+
+A reader who allowed the story sites under a build that kept no access ledger
+is recognised from that build's setup record, so that access lost since is
+reported as ended. Where the access is still there nothing changes.
+
 ### Local Safari story-site access reading
 
 On iPhone and iPad the Safari background worker tells the bundled app which

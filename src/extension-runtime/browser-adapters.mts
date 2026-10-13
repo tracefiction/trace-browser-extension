@@ -409,8 +409,9 @@ export class NativeStorySaveReceiptPort implements StorySaveReceiptPort {
     entryID: string;
     workKey: string;
     source: "preflight" | "mutation" | "reconciliation";
-    // Held by the extension for now. The app's messages keep their agreed
-    // shape until its side can read a mode, so it is not sent.
+    // How the save came about, as the background established it. Sent beside
+    // the confirmation's other fields; an app that does not read it is
+    // unaffected, and a save with no mode established carries none.
     mode?: "bounded_manual" | "normal_automatic";
     context?: Readonly<Record<string, unknown>>;
   }>): Promise<boolean> {
@@ -421,6 +422,7 @@ export class NativeStorySaveReceiptPort implements StorySaveReceiptPort {
         type: "TRACE_IOS_SAVE_CONFIRMED", apiOrigin: this.#apiOrigin,
         accountID: receipt.accountID, entryID: receipt.entryID, workKey: receipt.workKey,
         source: receipt.source, context: receipt.context,
+        ...(receipt.mode === undefined ? {} : { mode: receipt.mode }),
       }, 1000).catch(() => undefined);
       recorded = isRecord(saved) && saved.ok === true;
     }

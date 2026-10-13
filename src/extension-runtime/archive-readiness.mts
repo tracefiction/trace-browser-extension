@@ -20,6 +20,7 @@ import {
   type RuntimePort,
 } from "./browser-platform.mjs";
 import { archiveHostKindFromSender } from "./archive-sender.mjs";
+import { EARNED_PERMISSION_STATE_KEY } from "./earned-permission-registration.mjs";
 import type { BrowserArchiveReadinessStatus } from "./archive-readiness-status.mjs";
 import { isPopupSender } from "./first-story-initiation.mjs";
 
@@ -50,6 +51,8 @@ interface ArchiveReadinessEnvironment {
   readonly requiredOrigins?: readonly string[];
   readonly accessConfirmWait?: (ms: number) => Promise<void>;
   readonly accessLedger?: ArchiveAccessLedgerPort;
+  /** See `ArchiveReadinessService`: access is not reported missing before this resolves true. */
+  readonly accessSettled?: () => Promise<boolean>;
 }
 
 interface ArchiveAccessReportEnvironment {
@@ -63,7 +66,16 @@ interface ArchiveAccessReportEnvironment {
   readonly platform?: { readonly userAgent?: string };
 }
 
-/** The access ledger in extension storage. It holds no origins and no account. */
+/**
+ * The access ledger in extension storage. It holds no origins and no account.
+ *
+ * A reader who allowed the story sites under a build that kept no ledger has
+ * that fact only in the setup record of the time. It is read here as a grant
+ * seen, so that access lost since (in an update, say) is reported as ended
+ * instead of passing for a reader who never allowed anything. Where the
+ * access is still there this changes nothing: a complete reading was always
+ * reported, and marks the grant as seen by itself.
+ */
 export class BrowserArchiveAccessLedger implements ArchiveAccessLedgerPort {
   readonly #storage: BrowserStorage;
 
@@ -75,15 +87,21 @@ export class BrowserArchiveAccessLedger implements ArchiveAccessLedgerPort {
     const stored = await this.#storage.get([
       ARCHIVE_ACCESS_REPORTED_AT_KEY,
       ARCHIVE_ACCESS_STATE_KEY,
+      EARNED_PERMISSION_STATE_KEY,
     ]);
     const deliveredAt = stored[ARCHIVE_ACCESS_REPORTED_AT_KEY];
     const state = isRecord(stored[ARCHIVE_ACCESS_STATE_KEY])
       ? stored[ARCHIVE_ACCESS_STATE_KEY]
       : {};
+    const setup = isRecord(stored[EARNED_PERMISSION_STATE_KEY])
+      ? stored[EARNED_PERMISSION_STATE_KEY]
+      : {};
+    const grantedBefore = setup.promptResult === "granted" ||
+      (typeof setup.completedAt === "number" && setup.completedAt > 0);
     const time = (value: unknown): value is number =>
       typeof value === "number" && Number.isFinite(value) && value > 0;
     return Object.freeze({
-      grantSeen: state.grantSeen === true,
+      grantSeen: state.grantSeen === true || grantedBefore,
       ...(time(deliveredAt) ? { deliveredAt } : {}),
       ...(typeof state.delivered === "string" ? { delivered: state.delivered.slice(0, 64) } : {}),
       ...(Number.isInteger(state.failures) && (state.failures as number) > 0
@@ -151,6 +169,9 @@ export class ArchiveReadinessRuntimeController {
       ...(environment.accessLedger === undefined
         ? {}
         : { accessLedger: environment.accessLedger }),
+      ...(environment.accessSettled === undefined
+        ? {}
+        : { settled: environment.accessSettled }),
     });
   }
 
@@ -213,7 +234,7 @@ export function installArchiveReadinessRuntime(
  * `true` or `false` when the user agent settles it, otherwise a promise,
  * because an iPad can present itself as a Mac.
  */
-function runsBesideTraceApp(
+export function runsBesideTraceApp(
   runtime: RuntimePort,
   mode: "callback" | "promise",
   userAgent: string,
