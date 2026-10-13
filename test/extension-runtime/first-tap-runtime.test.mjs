@@ -48,6 +48,10 @@ function install({ granted = false, registered = [], crypto = steadyCrypto } = {
     listed: null,
     account: { state: "verified" },
     automaticSaving: "on",
+    /** How a save ends: confirmed, or handed over and never answered. */
+    saveEnds: "confirmed",
+    /** Trace's answer to the exact-story read: a status and a body. */
+    membership: { status: 200, body: { success: true, data: { work_key: WORK_KEY, membership: "absent" } } },
     // `page` is the page script in the tab: none, one in manual mode, or one
     // running as on any story page.
     tabs: {
@@ -56,7 +60,7 @@ function install({ granted = false, registered = [], crypto = steadyCrypto } = {
       11: { id: 11, url: "https://example.com/", page: null },
     },
   };
-  const calls = { injections: [], tabMessages: [], saves: [], presence: [], store: {}, queries: [], reloads: [] };
+  const calls = { injections: [], tabMessages: [], saves: [], presence: [], requests: [], store: {}, queries: [], reloads: [] };
   const worker = () => {
     let connect = null;
     let admission = null;
@@ -136,9 +140,18 @@ function install({ granted = false, registered = [], crypto = steadyCrypto } = {
         pageBinding() { return state.binding; },
         snapshot() { return { accountId: state.accountId }; },
         async automaticSaving() { return state.automaticSaving; },
+        publicationScope() { return { accountId: state.accountId, epoch: 1 }; },
+        async executeAuthenticated(effect) {
+          const result = await effect("device-credential");
+          if (result.kind === "success") return { kind: "published", value: result.value };
+          return result.kind === "auth_rejected" ? { kind: "auth_rejected", recovery: "reconnect_required" } : { kind: "unavailable" };
+        },
         async saveStoryWithEvidence(command, observer) {
           await observer.beforeWrite();
           calls.saves.push(command);
+          if (state.saveEnds !== "confirmed") {
+            return { result: { kind: "failed", reason: "confirmation_missing" }, dispatch: "sent_unconfirmed" };
+          }
           return {
             result: { kind: "confirmed", intent: "ensure_saved", confirmation: CONFIRMATION, source: "mutation", projection: "published", receipt: "published", handoff: "not_present" },
             dispatch: "confirmed",
@@ -147,6 +160,13 @@ function install({ granted = false, registered = [], crypto = steadyCrypto } = {
         async storyPresence(workKey) { calls.presence.push(workKey); return { kind: "unknown" }; },
         attachStoryAdmission(hooks) { admission = hooks; },
       },
+      // Trace's service, stood in for: no request leaves these tests.
+      async fetch(url, init) {
+        calls.requests.push({ url: String(url), method: init.method, authorization: init.headers.Authorization });
+        if (state.membership instanceof Error) throw state.membership;
+        return new Response(JSON.stringify(state.membership.body), { status: state.membership.status });
+      },
+      apiBase: "https://api.trace.test",
       now: () => 1_800_000_000_000,
       ...(crypto === null ? {} : { crypto }),
     });
@@ -200,7 +220,9 @@ test("the sheet's port saves the tapped story: manual-mode script first, one sav
   assert.deepEqual(h.calls.tabMessages[0].options, { frameId: 0 });
   assert.equal(h.calls.saves.length, 1);
   assert.equal(h.calls.saves[0].mode, "bounded_manual");
-  assert.deepEqual(port.posted.map(({ state }) => state), ["saving", "confirmed"]);
+  // Saving, saving again with the story's title once the page has named it, then the result.
+  assert.deepEqual(port.posted.map(({ state }) => state), ["saving", "saving", "confirmed"]);
+  assert.deepEqual(port.posted.map(({ story }) => story?.title ?? null), [null, "A Chance Encounter", "A Chance Encounter"]);
   assert.equal(port.posted.at(-1).provenance, "saved_now");
 
   port.close();
@@ -234,14 +256,110 @@ test("Check again over the port looks and cannot save; an unknown command does n
   port.send("open");
   await turns();
   const saves = h.calls.saves.length;
-  // The story is confirmed, so the look has nothing to add; it still only looks.
+  // The story is confirmed, so there is nothing to ask Trace about.
   port.send("check");
   port.send("mutate");
   port.send(undefined);
   await turns();
-  assert.deepEqual(h.calls.presence, [WORK_KEY]);
+  assert.deepEqual(h.calls.requests, []);
+  assert.deepEqual(h.calls.presence, []);
   assert.equal(h.calls.saves.length, saves);
   assert.equal(h.calls.injections.length, 1);
+});
+
+test("Check again after an unanswered save asks Trace about that one story, once a tap, and says only what Trace said", async () => {
+  const h = harness();
+  h.state.saveEnds = "unanswered";
+  const port = h.openPort();
+  port.send("open");
+  await turns();
+  assert.equal(port.posted.at(-1).dispatch, "sent_unconfirmed");
+  assert.deepEqual(h.calls.requests, [], "opening Trace and saving ask nothing of the exact-story read");
+
+  // Not in the Library, on Trace's own word.
+  port.send("check");
+  await turns();
+  assert.deepEqual(h.calls.requests, [{
+    url: `https://api.trace.test/api/extension/library-membership?work_key=${WORK_KEY}`,
+    method: "GET", authorization: "Bearer device-credential",
+  }], "the key the save was made under, with the account's own sign-in");
+  assert.deepEqual(port.posted.at(-1), {
+    state: "failed", workKey: WORK_KEY, reason: "unavailable", dispatch: "not_in_library",
+    story: { title: "A Chance Encounter", author: "someone", site: "FanFiction.net" },
+  });
+
+  // Turned away as too many, a server error, an unreadable answer, no network: not known.
+  for (const membership of [
+    { status: 429, body: { success: false } },
+    { status: 503, body: { success: false } },
+    { status: 200, body: { success: true, data: { work_key: "ffn:1", membership: "absent" } } },
+    new TypeError("network unavailable"),
+  ]) {
+    h.state.membership = membership;
+    port.send("check");
+    await turns();
+    assert.deepEqual(port.posted.at(-1), { state: "presence_unknown", workKey: WORK_KEY });
+  }
+
+  // The account's sign-in was turned down.
+  h.state.membership = { status: 401, body: { success: false } };
+  port.send("check");
+  await turns();
+  assert.deepEqual(port.posted.at(-1), { state: "account_reconnect_required", workKey: WORK_KEY });
+
+  // In the Library after all.
+  h.state.membership = {
+    status: 200,
+    body: { success: true, data: { work_key: WORK_KEY, membership: "present", entry_id: ENTRY_ID, entry: CONFIRMATION.entry } },
+  };
+  port.send("check");
+  await turns();
+  assert.deepEqual(port.posted.at(-1), {
+    state: "confirmed", workKey: WORK_KEY, provenance: "found", mode: null,
+    story: { title: "A Chance Encounter", author: "someone", site: "FanFiction.net" },
+    entry: { status: "PLANNING", readerStatus: "PLANNING", canonicalReaderStatus: "SAVED", chapters: null },
+  });
+  assert.equal(h.calls.requests.length, 7, "one request for each tap, and none besides");
+  assert.equal(h.calls.saves.length, 1, "no look sent a save");
+  assert.deepEqual(h.calls.presence, [], "and none read the whole Library");
+});
+
+test("the answer to what the reader's own tap asked for carries that tap's number, and nothing else does", async () => {
+  const h = harness();
+  h.state.saveEnds = "unanswered";
+  const port = h.openPort();
+  port.send("open");
+  await turns();
+  assert.equal(port.messages.some((message) => "answered" in message), false, "an open with no number is answered with none");
+
+  port.send("check", { look: 4 });
+  await turns();
+  const afterCheck = port.messages.filter((message) => "answered" in message);
+  assert.deepEqual(afterCheck.map(({ answered, view }) => [answered, view.dispatch]), [[4, "not_in_library"]]);
+
+  port.send("access_check", { look: 5 });
+  await turns();
+  assert.deepEqual(port.messages.at(-1), { access: { state: "not_asked" }, answered: 5 });
+
+  port.send("open", { look: 6 });
+  await turns();
+  assert.equal(port.messages.at(-1).answered, 6);
+  assert.equal(port.messages.at(-1).view.state, "failed");
+
+  // A number that is not one is not sent back.
+  for (const look of ["7", 1.5, null, {}]) {
+    port.send("check", { look });
+    await turns();
+    assert.equal("answered" in port.messages.at(-1), false, JSON.stringify(look));
+  }
+  // A look asked for with the story sites allowed is answered under its number too.
+  h.state.granted = true;
+  h.state.registered = REGISTERED;
+  port.send("open", { look: 9 });
+  await turns();
+  assert.equal(port.messages.at(-1).answered, 9);
+  assert.equal(port.messages.at(-1).view.state, "automatic");
+  assert.equal(port.messages.at(-1).access.state, "allowed");
 });
 
 test("the popup names the tab it was opened on, once; the background looks no tab up, and reaches no other", async () => {
@@ -421,7 +539,7 @@ test("the ask: waiting while Safari's question is up, then allowed only from a f
   assert.deepEqual(h.calls.reloads, []);
   assert.equal(h.calls.injections.length, 1, "one page script throughout");
   assert.equal(h.calls.saves.length, 1, "one save throughout");
-  assert.deepEqual(port.posted.map(({ state }) => state), ["saving", "confirmed"], "the save shown is not taken back");
+  assert.deepEqual(port.posted.map(({ state }) => state), ["saving", "saving", "confirmed"], "the save shown is not taken back");
 });
 
 test("the ask: what the request returned is never the outcome", async () => {
@@ -457,7 +575,7 @@ test("the ask: a request that came back false is not allowed, however long it to
     port.send("access_asking");
     port.send("access_answered", { returned: false, ...detail });
     await turns();
-    assert.deepEqual(port.access, [{ state: "waiting" }, { state: "not_allowed" }], JSON.stringify(detail));
+    assert.deepEqual(port.access, [{ state: "waiting" }, { state: "not_allowed", automaticSaving: "on" }], JSON.stringify(detail));
     assert.equal(h.state.tabs[7].page, "manual", "nothing changes on the page");
     assert.deepEqual(h.calls.queries, [], "and no tab is asked for");
   }
@@ -465,7 +583,20 @@ test("the ask: a request that came back false is not allowed, however long it to
   const threw = await savedSheet();
   threw.port.send("access_answered", { threw: true });
   await turns();
-  assert.deepEqual(threw.port.access.at(-1), { state: "could_not_ask" });
+  assert.deepEqual(threw.port.access.at(-1), { state: "could_not_ask", automaticSaving: "on" });
+
+  // With it, the preference as read just then: off means a later tap alone saves nothing.
+  for (const [preference, answer, expected] of [
+    ["off", { returned: false }, "not_allowed"],
+    ["unknown", { returned: false }, "not_allowed"],
+    ["off", { threw: true }, "could_not_ask"],
+  ]) {
+    const off = await savedSheet();
+    off.h.state.automaticSaving = preference;
+    off.port.send("access_answered", answer);
+    await turns();
+    assert.deepEqual(off.port.access.at(-1), { state: expected, automaticSaving: preference });
+  }
 });
 
 test("the ask: a request that came back with no answer is not known, never not allowed", async () => {
@@ -642,7 +773,7 @@ test("the ask: a second tap while one is out does nothing", async () => {
   // Once it has come back, the reader may ask again.
   port.send("access_asking");
   await turns();
-  assert.deepEqual(port.access, [{ state: "waiting" }, { state: "not_allowed" }, { state: "waiting" }]);
+  assert.deepEqual(port.access, [{ state: "waiting" }, { state: "not_allowed", automaticSaving: "on" }, { state: "waiting" }]);
 });
 
 test("the ask: a sheet closed while Safari's question is up loses nothing, and the next one looks afresh", async () => {

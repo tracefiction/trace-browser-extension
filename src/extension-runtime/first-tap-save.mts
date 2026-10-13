@@ -11,6 +11,7 @@ import {
   workKeyFromArchiveUrl,
 } from "./archive-sender.mjs";
 import { storyTrackCommandFromMessage } from "./story-command-sender.mjs";
+import type { StoryMembership } from "./story-membership.mjs";
 
 /**
  * The first save, made when the reader opens Trace on a story before Safari
@@ -82,6 +83,14 @@ export type FirstTapStory = Readonly<{
   site: "AO3" | "FanFiction.net";
 }>;
 
+/**
+ * What is known of a failed save's write. `never_sent` is the only value that
+ * supports "nothing was sent". `not_in_library` is a write that was handed
+ * over and never answered, followed by Trace's own word, asked for by the
+ * reader, that the story is not in the Library.
+ */
+export type FirstTapDispatch = "never_sent" | "refused" | "sent_unconfirmed" | "not_in_library";
+
 /** The Library entry's own status and place, as the popup's record line reads them. */
 export type FirstTapEntry = Readonly<{
   status: string | null;
@@ -101,7 +110,8 @@ export type FirstTapView =
   | Readonly<{ state: "account_changed"; workKey: string }>
   /** Automatic saving is off or unreadable: nothing is saved until asked. */
   | Readonly<{ state: "awaiting_request"; workKey: string; preference: "off" | "unknown" }>
-  | Readonly<{ state: "saving"; workKey: string; startedAt: number }>
+  /** `story` is what the page said of itself, once this attempt has read it. */
+  | Readonly<{ state: "saving"; workKey: string; startedAt: number; story: FirstTapStory | null }>
   | Readonly<{
       state: "confirmed";
       workKey: string;
@@ -114,8 +124,7 @@ export type FirstTapView =
       state: "failed";
       workKey: string;
       reason: FirstTapFailure;
-      /** `never_sent` is the only value that supports "nothing was sent". */
-      dispatch: "never_sent" | "refused" | "sent_unconfirmed";
+      dispatch: FirstTapDispatch;
       story: FirstTapStory | null;
     }>
   /** A read-only look found nothing it could rely on. Never "not saved". */
@@ -135,7 +144,7 @@ export type FirstTapTapped = Readonly<{
 
 type Settled =
   | Readonly<{ kind: "confirmed"; provenance: FirstTapProvenance; mode: StorySaveMode | null; entry: FirstTapEntry }>
-  | Readonly<{ kind: "failed"; reason: FirstTapFailure; dispatch: "never_sent" | "refused" | "sent_unconfirmed" }>;
+  | Readonly<{ kind: "failed"; reason: FirstTapFailure; dispatch: FirstTapDispatch }>;
 type Outcome = Settled | Readonly<{ kind: "saving"; startedAt: number }>;
 
 /**
@@ -169,6 +178,14 @@ type Record = {
   /** Whether what came before this attempt is known well enough to say "already". */
   priorKnown: boolean;
   running: boolean;
+  /**
+   * The opens of this record that are still being worked out, one after
+   * another: whether a save is under way is read and set with nothing let in
+   * between, so two opens that arrive together start one save.
+   */
+  deciding: Promise<void>;
+  /** The look now asking Trace about this story, if one is: a second joins it. */
+  checking: Promise<FirstTapView> | null;
   story: FirstTapStory | null;
   /** Tabs that may show the mark for this attempt. */
   tabs: Set<number>;
@@ -229,6 +246,11 @@ export interface FirstTapPorts {
     observer: { beforeWrite(): Promise<void> },
   ): Promise<StoryCommandEvidence>;
   presence(workKey: string): Promise<StoryPresence>;
+  /**
+   * Asks Trace whether this one story is in the account's Library. Made once
+   * for each time the reader asks, and never answered from a kept copy.
+   */
+  membership(workKey: string): Promise<StoryMembership>;
   /** Asks the page to show its mark for a confirmed story. Best effort. */
   mark(tabId: number, workKey: string): Promise<void>;
   readStore(): Promise<unknown>;
@@ -289,7 +311,7 @@ function settledFrom(value: unknown): Settled | null {
     return value as unknown as Settled;
   }
   if (value.kind === "failed" && typeof value.reason === "string" &&
-      ["never_sent", "refused", "sent_unconfirmed"].includes(String(value.dispatch))) {
+      ["never_sent", "refused", "sent_unconfirmed", "not_in_library"].includes(String(value.dispatch))) {
     return value as unknown as Settled;
   }
   return null;
@@ -409,6 +431,22 @@ export class FirstTapSave {
     const record = await this.#recordFor(account, page);
     // The popup may have closed while this was being worked out.
     if (this.#sheets.get(listener) === sheet) sheet.key = record.key;
+    // One open at a time for an account and story. What follows reads
+    // whether a save is under way, waits on the Library and the preference,
+    // and only then starts one; a second open let in between those would
+    // start a second save.
+    const decided = record.deciding.then(() => this.#decide(record, page, grant, options));
+    record.deciding = decided.then(() => undefined, () => undefined);
+    return decided;
+  }
+
+  /** What an open comes to, worked out with no other open of the record under way. */
+  async #decide(
+    record: Record,
+    page: StoryPage,
+    grant: boolean | null,
+    options: { readonly requested?: boolean },
+  ): Promise<FirstTapView> {
     if (record.running) return this.#view(record);
     const age = this.#ports.now() - record.at;
     const fresh = age >= 0 && age < FIRST_TAP_RESULT_FRESH_MS;
@@ -453,8 +491,12 @@ export class FirstTapSave {
   }
 
   /**
-   * "Check again": looks, and can do nothing else. It has no path to a save.
-   * A story it finds improves the record; anything else changes nothing.
+   * "Check again": asks Trace, once, whether this one story is in the
+   * account's Library. It has no path to a save. A story Trace has improves
+   * the record. One Trace says it does not have is said to be absent only
+   * when no save of it is still out. A request that could not be made or
+   * read, or that Trace turned away, leaves the story's place not known.
+   * A look asked for while one is still out joins it: one request, one answer.
    */
   async check(listener: Listener): Promise<FirstTapView> {
     const sheet = this.#sheets.get(listener);
@@ -462,10 +504,41 @@ export class FirstTapSave {
     const unknown: FirstTapView = Object.freeze({ state: "presence_unknown", workKey: sheet.workKey });
     const record = sheet.key === null ? null : this.#records.get(sheet.key) ?? null;
     if (record === null || record.binding !== this.#ports.binding()) return unknown;
-    const found = await this.#look(record);
-    if (found === "account_changed") return this.#accountChanged(record);
-    if (found === null) return unknown;
-    return this.#settle(record, { kind: "confirmed", provenance: "found", mode: null, entry: found });
+    // A confirmation is never taken back by a later look.
+    if (record.outcome?.kind === "confirmed") return this.#view(record);
+    if (record.checking !== null) return record.checking;
+    const asking = this.#askTrace(record, unknown);
+    record.checking = asking;
+    const done = (): void => {
+      if (record.checking === asking) record.checking = null;
+    };
+    void asking.then(done, done);
+    return asking;
+  }
+
+  async #askTrace(record: Record, unknown: FirstTapView): Promise<FirstTapView> {
+    // The same key the save itself was made under.
+    const membership = await this.#ports.membership(record.workKey).catch(
+      (): StoryMembership => ({ kind: "unknown" }),
+    );
+    if (membership.kind === "account_refused") {
+      return Object.freeze({ state: "account_reconnect_required", workKey: record.workKey });
+    }
+    if (this.#ports.binding() !== record.binding) return this.#accountChanged(record);
+    if (membership.kind === "present") {
+      return this.#settle(record, {
+        kind: "confirmed", provenance: "found", mode: null,
+        entry: Object.freeze({ ...membership.entry, chapters: null }),
+      });
+    }
+    if (membership.kind !== "absent") return unknown;
+    // Not in the Library, on Trace's own word. A save still out may yet put
+    // it there, so that wait goes on as it was.
+    if (record.running) return this.#view(record);
+    // The write that went unanswered stays in doubt all the same: an answer
+    // that is on its way could still land after this one, and a story found
+    // later must not then be called "already there".
+    return this.#settle(record, { kind: "failed", reason: "unavailable", dispatch: "not_in_library" });
   }
 
   /** Trace's popup closed. The page it was over may now show its mark. */
@@ -591,6 +664,8 @@ export class FirstTapSave {
       pageSave: false,
       priorKnown,
       running: false,
+      deciding: Promise.resolve(),
+      checking: null,
       story: null,
       tabs: new Set([page.tabId]),
       marked: new Set(),
@@ -614,6 +689,7 @@ export class FirstTapSave {
       return Object.freeze({
         state: "saving", workKey: record.workKey,
         startedAt: outcome?.kind === "saving" ? outcome.startedAt : record.at,
+        story: record.story,
       });
     }
     return outcome.kind === "confirmed"
@@ -646,12 +722,18 @@ export class FirstTapSave {
       await this.#doubtSettled(record);
     }
     await this.#persist(record);
+    const view = this.#show(record);
+    await this.#markIfDue(record);
+    return view;
+  }
+
+  /** Tells every popup open on a record what it now says. */
+  #show(record: Record): FirstTapView {
     const view = this.#view(record);
     for (const [listener, sheet] of this.#sheets) {
       if (sheet.key !== record.key) continue;
       try { listener(view); } catch { /* A closed popup is told nothing. */ }
     }
-    await this.#markIfDue(record);
     return view;
   }
 
@@ -824,6 +906,9 @@ export class FirstTapSave {
       // The page reached under this tap names its own story. The address the
       // popup gave is believed only when the page agrees with it.
       if (collected.workKey !== record.workKey) return await fail("page_unreachable", "never_sent");
+      // The page has named its story: a popup waiting on this save can show
+      // the title instead of a stand-in for it.
+      if (record.story.title !== null && record.outcome?.kind === "saving") this.#show(record);
       // The page's own word that it is private outranks a popup that said
       // otherwise or nothing: from here nothing about this story is kept.
       if (collected.private === true && record.persist) {

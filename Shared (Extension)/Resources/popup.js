@@ -1201,14 +1201,18 @@ function refreshEarnedLayout() {
   if (!section || section.hidden || !pin) return;
   section.classList.remove("popup-earned-fixed-pin");
   const bodySize = parseFloat(window.getComputedStyle(document.body).fontSize) || 17;
-  const pinHeight = pin.getBoundingClientRect().height;
   const textAx = bodySize >= 28;
-  const ax = textAx || pinHeight > window.innerHeight * 0.3;
+  const scroll = section.querySelector(".popup-earned-scroll");
+  // The first-tap sheet on a sheet too short for it keeps only the rule line
+  // and the main button in reach; see placeFirstTapSecondary.
+  const shortSheet = Boolean(document.body.dataset.traceFirstTapState) &&
+    placeFirstTapSecondary(scroll, pin, textAx);
+  const pinHeight = pin.getBoundingClientRect().height;
+  const ax = !shortSheet && (textAx || pinHeight > window.innerHeight * 0.3);
   section.classList.toggle("popup-earned-ax", ax);
   section.classList.toggle("popup-earned-text-ax", textAx);
-  const scroll = section.querySelector(".popup-earned-scroll");
-  const needsPin = !ax && !pin.hidden && scroll &&
-    scroll.scrollHeight + pinHeight > window.innerHeight + 1;
+  const needsPin = shortSheet || (!ax && !pin.hidden && scroll &&
+    scroll.scrollHeight + pinHeight > window.innerHeight + 1);
   section.style.setProperty("--trace-pin-height", `${Math.ceil(pinHeight)}px`);
   section.classList.toggle("popup-earned-fixed-pin", Boolean(needsPin));
 }
@@ -1262,8 +1266,10 @@ function placeEarnedRecord(afterBody) {
 /** Puts back what only some states change, so no state inherits another's. */
 function resetEarnedSheetExtras() {
   placeEarnedRecord(false);
-  const ask = document.getElementById("popup-earned-ask");
-  if (ask) ask.hidden = true;
+  for (const id of ["popup-earned-ask", "popup-earned-note"]) {
+    const box = document.getElementById(id);
+    if (box) box.hidden = true;
+  }
   document.getElementById("popup-earned-primary")?.removeAttribute("aria-describedby");
 }
 
@@ -2234,7 +2240,27 @@ const FIRST_TAP_POPUP_PORT = "trace-first-tap-popup-v1";
 let firstTapPort = null;
 let firstTapStory = null;
 let firstTapTab = null;
-let firstTapPatienceTimer = null;
+// The save being waited on, by when it began, and whether that wait has
+// outrun the popup's patience. One save has one wait, however often its
+// state is drawn again.
+let firstTapPatience = null;
+// A button the reader tapped whose answer is not in yet. It cannot be tapped
+// again until that answer comes, and the answer is said aloud even when
+// nothing has changed. Each such tap has a number, which its answer carries.
+let firstTapBusy = null;
+let firstTapLooks = 0;
+// A little longer than the slowest of those answers: a read of the Library
+// that is refused, reconnects and is made again. Past it the button is given
+// back; a look asked for then joins one that is still out.
+const FIRST_TAP_BUSY_LIMIT_MS = 30_000;
+// On a sheet too short for all of it, the rule line and the main button stay
+// pinned while they take no more than this share of the sheet's height.
+const FIRST_TAP_PIN_SHARE = 0.6;
+// The sheet's own spacing, as its styles set it: under the content, and
+// above buttons that are not pinned.
+const FIRST_TAP_SCROLL_FOOT = 8;
+const FIRST_TAP_UNPINNED_GAP = 16;
+let firstTapButtonGap = 0;
 let firstTapSetAside = false;
 // What the background last sent: the save's state, and the state of the ask
 // for lasting access. Both are drawn from these and from nothing else.
@@ -2270,9 +2296,8 @@ const FIRST_TAP_WORDS = Object.freeze({
   accountMissingBody: "Trace in Safari doesn’t have your account yet. Open the Trace app, then come back and tap Trace again.",
   accountUnreachableHeading: "Trace can’t reach your account right now",
   accountUnreachableBody: "Check your connection, then try again.",
-  // Wording pending review.
-  signInAgainHeading: "Sign in again in the Trace app",
-  signInAgainBody: "Trace in Safari needs you to sign in once more. Open the Trace app, sign in, then come back and tap Trace again.",
+  reconnectHeading: "Open the Trace app to reconnect",
+  reconnectBody: "Trace in Safari needs your account again. Open the Trace app, then come back and tap Trace again.",
   saveThisStory: "Save this story",
   automaticSavingOffHeading: "Automatic saving is off",
   turnAutomaticSavingOn: "Turn automatic saving on",
@@ -2293,6 +2318,7 @@ const FIRST_TAP_WORDS = Object.freeze({
   keepReading: "Keep reading",
   tryAgain: "Try again",
   checkAgain: "Check again",
+  checking: "Checking…",
   close: "Close",
   unconfirmedHeading: "Trace couldn’t confirm this save",
   unconfirmedBody: "It may have saved anyway. Check again to find out.",
@@ -2300,10 +2326,10 @@ const FIRST_TAP_WORDS = Object.freeze({
   stillUnknownBody: "Look for it in your Library in the Trace app, or check again later.",
   unavailableHeading: "This story isn’t available",
   unavailableBody: "It may be deleted or locked, so Trace can’t read it.",
-  // Wording pending review.
   notSentHeading: "The save wasn’t sent",
   notSentBody: "This tap added nothing to your Library.",
-  // Wording pending review.
+  notInLibraryHeading: "This story isn’t in your Library",
+  notInLibraryBody: "Trace checked and didn’t find it.",
   refusedHeading: "Trace couldn’t save this story",
   refusedBody: "It wasn’t added to your Library. Try again in a moment.",
   allowedKicker: "Allowed on AO3 and FanFiction.net",
@@ -2315,10 +2341,11 @@ const FIRST_TAP_WORDS = Object.freeze({
   registrationFailedBody: "Safari allowed AO3 and FanFiction.net, but Trace’s part didn’t start.",
   notAllowedHeading: "Trace will save when you tap it",
   notAllowedBody: "To save another story, open Trace from the Page Menu on it. You can let it save by itself any time.",
-  // Wording pending review.
+  // With automatic saving off, opening Trace on a story does not save it.
+  notAllowedOnRequestHeading: "Trace saves when you ask",
+  notAllowedOnRequestBody: "To save another story, open Trace from the Page Menu on it and tap Save this story.",
   partialHeading: "Safari allowed only some addresses",
-  partialBody: "Trace needs all {count} of AO3 and FanFiction.net’s addresses to save by itself. Safari asks again.",
-  // Wording pending review.
+  partialBody: "Trace needs all {count} of AO3 and FanFiction.net’s addresses to save by itself.",
   notKnownHeading: "Trace couldn’t check with Safari",
   notKnownBody: "AO3 and FanFiction.net may be allowed already. Check again, or ask once more.",
 });
@@ -2382,24 +2409,134 @@ function setSpokenAlternative(element, spoken) {
   element.replaceChildren(shown, said);
 }
 
+/** A headline and body under the record. `name` is "note" or "ask". */
+function firstTapTextBox(name) {
+  const box = document.createElement("div");
+  box.id = `popup-earned-${name}`;
+  box.className = `popup-earned-${name}`;
+  const heading = document.createElement("h2");
+  heading.id = `popup-earned-${name}-heading`;
+  heading.className = `popup-earned-${name}-heading`;
+  const body = document.createElement("p");
+  body.id = `popup-earned-${name}-body`;
+  body.className = `popup-earned-${name}-body`;
+  box.append(heading, body);
+  return box;
+}
+
 /** The second headline and body, under the record. Made when first needed. */
 function firstTapAskBox(create) {
   let box = document.getElementById("popup-earned-ask");
   if (box || !create) return box;
+  const before = document.getElementById("popup-earned-note") || document.getElementById("popup-earned-lead");
+  if (!before) return null;
+  box = firstTapTextBox("ask");
+  // Focus is put here when the reader comes back to the ask.
+  box.firstElementChild.tabIndex = -1;
+  before.after(box);
+  return box;
+}
+
+/**
+ * News of the save that stands between the record and the ask, with one quiet
+ * button of its own. Made when first needed.
+ */
+function firstTapNoteBox(create) {
+  let box = document.getElementById("popup-earned-note");
+  if (box || !create) return box;
   const lead = document.getElementById("popup-earned-lead");
   if (!lead) return null;
-  box = document.createElement("div");
-  box.id = "popup-earned-ask";
-  box.className = "popup-earned-ask";
-  const heading = document.createElement("h2");
-  heading.id = "popup-earned-ask-heading";
-  heading.className = "popup-earned-ask-heading";
-  const body = document.createElement("p");
-  body.id = "popup-earned-ask-body";
-  body.className = "popup-earned-ask-body";
-  box.append(heading, body);
+  box = firstTapTextBox("note");
+  const action = document.createElement("button");
+  action.id = "popup-earned-note-action";
+  action.type = "button";
+  action.addEventListener("click", () => runEarnedAction(action));
+  box.append(action);
   lead.after(box);
   return box;
+}
+
+/** Where the quieter button goes when it scrolls with the sheet's content. */
+function firstTapScrollActions(scroll, create) {
+  let holder = document.getElementById("popup-earned-scroll-actions");
+  if (holder || !create || !scroll) return holder;
+  holder = document.createElement("div");
+  holder.id = "popup-earned-scroll-actions";
+  holder.className = "popup-earned-actions";
+  scroll.append(holder);
+  return holder;
+}
+
+function moveKeepingFocus(element, parent) {
+  if (!element || !parent || element.parentNode === parent) return;
+  const focused = document.activeElement === element;
+  parent.append(element);
+  if (focused) element.focus({ preventScroll: true });
+}
+
+/** Puts the second button back beside the main one. */
+function returnFirstTapSecondary() {
+  const pin = document.getElementById("popup-earned-pin");
+  moveKeepingFocus(document.getElementById("popup-earned-secondary"), pin?.querySelector(".popup-earned-actions"));
+  const holder = document.getElementById("popup-earned-scroll-actions");
+  if (holder) holder.hidden = true;
+}
+
+/**
+ * On a sheet too short to show a state whole, the rule line and the main
+ * button stay pinned and in reach, and the quieter button joins what scrolls
+ * beneath them. Returns whether the sheet is laid out that way.
+ *
+ * Whether it is too short is worked out for the ordinary arrangement, both
+ * buttons together, wherever the second button is at the moment: the answer
+ * is then the same before and after it is moved. At the largest text sizes,
+ * and where even the main button alone would take most of the sheet, nothing
+ * is pinned and everything flows in reading order.
+ */
+function placeFirstTapSecondary(scroll, pin, textAx) {
+  const primary = document.getElementById("popup-earned-primary");
+  const secondary = document.getElementById("popup-earned-secondary");
+  const home = pin.querySelector(".popup-earned-actions");
+  if (!scroll || !primary || !secondary || !home) return false;
+  const away = secondary.parentNode !== home;
+  const shown = (element) => !element.hidden && !element.closest("[hidden]");
+  let short = false;
+  if (!textAx && !pin.hidden && !primary.hidden) {
+    // Sizes and places as laid out, so that an arrival still moving into
+    // place is measured where it will come to rest.
+    const second = shown(secondary) ? secondary.offsetHeight : 0;
+    // The space between the two buttons when they sit together, kept from
+    // when they last did.
+    if (!away && second > 0) {
+      firstTapButtonGap = Math.max(0, secondary.offsetTop - (primary.offsetTop + primary.offsetHeight));
+    }
+    const between = second > 0 ? firstTapButtonGap : 0;
+    // The pin with only the rule line and the main button in it.
+    const pinned = pin.offsetHeight - (away ? 0 : second + between);
+    const together = pinned + between + second;
+    const content = [...scroll.children].filter((child) => child.id !== "popup-earned-scroll-actions" && shown(child)).at(-1);
+    const contentHeight = content ? content.offsetTop + content.offsetHeight - scroll.offsetTop : 0;
+    // The ordinary arrangement: the content, the space the sheet leaves
+    // under it, and both buttons, set a little apart from the content when
+    // they are too tall to pin as they are.
+    const ordinary = contentHeight + FIRST_TAP_SCROLL_FOOT +
+      (together > window.innerHeight * 0.3 ? FIRST_TAP_UNPINNED_GAP : 0) + together;
+    short = ordinary > window.innerHeight + 1 && pinned <= window.innerHeight * FIRST_TAP_PIN_SHARE;
+  }
+  if (!short) {
+    if (away) returnFirstTapSecondary();
+    return false;
+  }
+  const holder = firstTapScrollActions(scroll, true);
+  if (secondary.hidden) {
+    if (holder) holder.hidden = true;
+    return true;
+  }
+  if (holder) {
+    holder.hidden = false;
+    moveKeepingFocus(secondary, holder);
+  }
+  return true;
 }
 
 const FIRST_TAP_MOTIONS = Object.freeze(["popup-first-tap-fade", "popup-first-tap-rise"]);
@@ -2454,10 +2591,10 @@ function firstTapSaveKicker(view) {
 
 /**
  * Draws one state of the sheet: a kicker, the headline, the body, the story's
- * record, a second headline and body under it, the rule line for a tap that
- * leads to Safari's question, and up to two buttons. `record.heading` makes
- * the story's title the headline. What is read aloud is `announce`, or the
- * headline and body.
+ * record, news of the save with a quiet button of its own (`note`), a second
+ * headline and body, the rule line for a tap that leads to Safari's question,
+ * and up to two buttons. `record.heading` makes the story's title the
+ * headline. What is read aloud is `announce`, or the headline and body.
  */
 function drawFirstTapSheet(name, {
   kicker = "",
@@ -2468,6 +2605,7 @@ function drawFirstTapSheet(name, {
   body = "",
   record = null,
   recordAfterBody = false,
+  note = null,
   ask = null,
   rule = false,
   primary = { hidden: true },
@@ -2498,6 +2636,13 @@ function drawFirstTapSheet(name, {
     setSpokenAlternative(document.getElementById("popup-earned-record-byline"), record.spokenByline);
     setSpokenAlternative(document.getElementById("popup-earned-record-label"), record.spokenLabel);
   }
+  const noteBox = firstTapNoteBox(Boolean(note));
+  if (noteBox) {
+    noteBox.hidden = !note;
+    document.getElementById("popup-earned-note-heading").textContent = note?.heading || "";
+    document.getElementById("popup-earned-note-body").textContent = note?.body || "";
+    setEarnedAction(document.getElementById("popup-earned-note-action"), note?.action || { hidden: true });
+  }
   const askBox = firstTapAskBox(Boolean(ask));
   if (askBox) {
     askBox.hidden = !ask;
@@ -2513,6 +2658,8 @@ function drawFirstTapSheet(name, {
   }
   setEarnedResult(result, announce ?? [heading, body].map(firstTapSpoken).filter(Boolean).join(" "), "");
   configureEarnedActions(primary, secondary);
+  // A button still waiting on its answer goes on waiting through a redraw.
+  showFirstTapBusy();
   if (!changed) return;
   clearFirstTapMotion();
   const section = document.getElementById("popup-earned-permission");
@@ -2523,7 +2670,7 @@ function drawFirstTapSheet(name, {
       section?.querySelector(".popup-earned-record-state"),
     ]);
   } else if (motion === "ask") {
-    playFirstTapMotion("popup-first-tap-rise", [askBox, pin]);
+    playFirstTapMotion("popup-first-tap-rise", [askBox, pin, document.getElementById("popup-earned-scroll-actions")]);
   } else if (motion === "settled") {
     playFirstTapMotion("popup-first-tap-fade", [section?.querySelector(".popup-earned-scroll"), pin]);
   }
@@ -2534,9 +2681,86 @@ function leaveFirstTapSheet() {
   if (firstTapAskTimer !== null) clearTimeout(firstTapAskTimer);
   firstTapAskTimer = null;
   firstTapDrawn = null;
+  endFirstTapBusy();
   clearFirstTapMotion();
   resetEarnedSheetExtras();
+  returnFirstTapSecondary();
   delete document.body.dataset.traceFirstTapState;
+}
+
+/**
+ * The reader tapped a button whose answer comes from the background. Until
+ * that answer comes the button waits and cannot be tapped again, so one tap
+ * is one request. `work` is given the tap's number to send with the request;
+ * only a message carrying it back ends the wait. `label` is what the button
+ * reads meanwhile; with none it reads as it did.
+ */
+function holdFirstTapButton(button, work, label = "") {
+  if (firstTapBusy || !button) return;
+  firstTapLooks += 1;
+  const busy = {
+    look: firstTapLooks, timer: null, button: button.id, action: button.dataset.earnedAction, label,
+  };
+  firstTapBusy = busy;
+  busy.timer = setTimeout(() => {
+    busy.timer = null;
+    // No answer came. The sheet is drawn as it stood, and its button given back.
+    if (firstTapBusy === busy && !firstTapSetAside) redrawFirstTapAloud();
+  }, FIRST_TAP_BUSY_LIMIT_MS);
+  showFirstTapBusy();
+  if (label) setEarnedResult("checking", firstTapSpoken(label), "");
+  work(busy.look);
+}
+
+/** Shows the wait on the button that is waiting, where the sheet still has that button. */
+function showFirstTapBusy() {
+  const busy = firstTapBusy;
+  const button = busy ? document.getElementById(busy.button) : null;
+  if (!button || button.hidden || button.dataset.earnedAction !== busy.action) return;
+  setEarnedAction(button, {
+    label: busy.label || button.textContent, action: "", disabled: true, emphasis: button.dataset.emphasis,
+  });
+}
+
+/** Ends a wait on a button. True when there was one. */
+function endFirstTapBusy() {
+  const busy = firstTapBusy;
+  if (!busy) return false;
+  if (busy.timer !== null) clearTimeout(busy.timer);
+  firstTapBusy = null;
+  return true;
+}
+
+/**
+ * Draws what the background last said, and says it aloud again even when it
+ * is word for word what was there: the reader asked, and silence would read
+ * as nothing having been looked at.
+ */
+function redrawFirstTapAloud() {
+  endFirstTapBusy();
+  lastEarnedAnnouncement = "";
+  drawFirstTap();
+}
+
+/** Sends a look the reader asked for, over a port opened again if it has gone. */
+function firstTapLook(command, look) {
+  if (!firstTapPort && firstTapStory && firstTapTab) {
+    // The background was restarted under the sheet. Opening on the story
+    // again is itself the look, and what it shows is its answer.
+    endFirstTapBusy();
+    startFirstTap(firstTapStory, firstTapTab);
+    return;
+  }
+  firstTapSend(command, { look });
+}
+
+/** After the reader goes back to the ask: focus on its headline, not on a button that has changed. */
+function focusFirstTapAsk() {
+  const ask = document.getElementById("popup-earned-ask");
+  const heading = ask && !ask.hidden
+    ? document.getElementById("popup-earned-ask-heading")
+    : document.getElementById("popup-earned-heading");
+  heading?.focus();
 }
 
 const firstTapButton = Object.freeze({
@@ -2604,7 +2828,7 @@ function renderFirstTapAccess(access, view) {
     case "waiting":
       // Safari's question is up. What is shown of the save stays; only the
       // ask's own button changes, and it cannot be tapped again.
-      if (view?.state === "confirmed") {
+      if (view?.state === "confirmed" || view?.state === "saving") {
         renderFirstTapView(view, { waiting: true });
         return;
       }
@@ -2629,6 +2853,23 @@ function renderFirstTapAccess(access, view) {
             .map(firstTapSpoken).join(" "),
           motion: "settled",
         });
+      } else if (access.account === "missing" || access.account === "reconnect_required") {
+        // Allowed, and known to have no account to save to. What to do about
+        // the account is said in the words that account state always has;
+        // looking again asks Safari for nothing.
+        const missing = access.account === "missing";
+        const heading = missing ? FIRST_TAP_WORDS.accountMissingHeading : FIRST_TAP_WORDS.reconnectHeading;
+        const body = missing ? FIRST_TAP_WORDS.accountMissingBody : FIRST_TAP_WORDS.reconnectBody;
+        drawFirstTapSheet(missing ? "access-allowed-account-missing" : "access-allowed-account-reconnect", {
+          ...allowedKicker,
+          heading,
+          body,
+          primary: { label: FIRST_TAP_WORDS.tryAgain, action: "first_tap_access_check", emphasis: "primary" },
+          secondary: firstTapButton.keepReading,
+          result: "failure",
+          announce: [FIRST_TAP_WORDS.allowedKicker, heading, body].map(firstTapSpoken).join(" "),
+          motion: "settled",
+        });
       } else if (access.automaticSaving === "off") {
         drawFirstTapSheet("access-allowed-automatic-saving-off", {
           ...allowedKicker,
@@ -2641,8 +2882,8 @@ function renderFirstTapAccess(access, view) {
           motion: "settled",
         });
       } else {
-        // Allowed; the account or the preference could not be vouched for,
-        // so nothing more than "allowed" is said.
+        // Allowed; the account or the preference could not be read, so
+        // nothing more than "allowed" is said.
         drawFirstTapAllowedOnly("access-allowed-unconfirmed", savedRecord, null);
       }
       return;
@@ -2677,20 +2918,24 @@ function renderFirstTapAccess(access, view) {
       });
       return;
     case "not_allowed":
-    case "could_not_ask":
+    case "could_not_ask": {
       // The request came back "no", or could not be made. Whether the reader
       // said no or Safari did without asking is not something Trace can
       // tell, so the reader is shown one thing: saving stays a tap away, and
       // the ask is there to go back to. The save, if there was one, is kept.
+      // With automatic saving read as off, that tap opens Trace and saves
+      // nothing by itself, and the words say so.
+      const onRequest = access.automaticSaving === "off";
       drawFirstTapSheet("access-not-allowed", {
         ...confirmation,
-        heading: FIRST_TAP_WORDS.notAllowedHeading,
-        body: FIRST_TAP_WORDS.notAllowedBody,
+        heading: onRequest ? FIRST_TAP_WORDS.notAllowedOnRequestHeading : FIRST_TAP_WORDS.notAllowedHeading,
+        body: onRequest ? FIRST_TAP_WORDS.notAllowedOnRequestBody : FIRST_TAP_WORDS.notAllowedBody,
         primary: firstTapButton.keepReading,
         // Back to the ask; the request is made by the reader's tap there.
         secondary: { label: FIRST_TAP_WORDS.tryAgain, action: "first_tap_show_ask", emphasis: "tertiary" },
       });
       return;
+    }
     default:
       // What came of the ask is not known: Safari's answer could not be
       // read, or never came. Never drawn as not allowed. The reader can ask
@@ -2731,10 +2976,6 @@ function drawFirstTapAllowedOnly(name, savedRecord, secondary) {
 function renderFirstTapView(view, { waiting = false } = {}) {
   const story = firstTapStory;
   if (!view || !story) return;
-  if (firstTapPatienceTimer !== null) {
-    clearTimeout(firstTapPatienceTimer);
-    firstTapPatienceTimer = null;
-  }
   if (view.state !== "confirmed") {
     // The ask follows a confirmed save, and arrives after each one afresh.
     if (firstTapAskTimer !== null) clearTimeout(firstTapAskTimer);
@@ -2774,9 +3015,9 @@ function renderFirstTapView(view, { waiting = false } = {}) {
       return;
     case "account_reconnect_required":
       // Known: Trace refused the account Safari holds.
-      drawFirstTapSheet("account-sign-in-again", {
-        heading: FIRST_TAP_WORDS.signInAgainHeading,
-        body: FIRST_TAP_WORDS.signInAgainBody,
+      drawFirstTapSheet("account-reconnect", {
+        heading: FIRST_TAP_WORDS.reconnectHeading,
+        body: FIRST_TAP_WORDS.reconnectBody,
         primary: tryAgainAccount,
         result: "failure",
       });
@@ -2803,6 +3044,31 @@ function renderFirstTapView(view, { waiting = false } = {}) {
       return;
     }
     case "saving":
+      // Once a save has outrun the popup's patience it is drawn as still
+      // being confirmed, however often its state arrives again.
+      if (waiting || firstTapPatienceFor(view.startedAt).spent) {
+        // The story, the news that it is not confirmed yet with a look to
+        // ask for, and under that the ask for lasting access: the reader
+        // need not wait on the save to be asked. The story sites are not
+        // allowed here, or the page would be saving by itself.
+        drawFirstTapSheet(waiting ? "access-waiting" : "still-confirming", {
+          heading: record.title,
+          record: { ...record, title: "", heading: true },
+          note: {
+            heading: FIRST_TAP_WORDS.stillConfirmingHeading,
+            body: FIRST_TAP_WORDS.stillConfirmingBody,
+            action: { label: FIRST_TAP_WORDS.checkAgain, action: "first_tap_check", emphasis: "tertiary" },
+          },
+          ask: { heading: FIRST_TAP_WORDS.askHeading, body: firstTapCounted(FIRST_TAP_WORDS.askBody) },
+          rule: true,
+          primary: waiting ? firstTapButton.waiting : firstTapButton.allow,
+          secondary: firstTapButton.keepReading,
+          announce: waiting
+            ? firstTapSpoken(FIRST_TAP_WORDS.waitingForSafari)
+            : `${firstTapSpoken(FIRST_TAP_WORDS.stillConfirmingHeading)} ${FIRST_TAP_WORDS.stillConfirmingBody}`,
+        });
+        return;
+      }
       drawFirstTapSheet("saving", {
         heading: record.title,
         record: {
@@ -2811,23 +3077,11 @@ function renderFirstTapView(view, { waiting = false } = {}) {
         },
         announce: firstTapSpoken(FIRST_TAP_WORDS.saving),
       });
-      // How long to wait before saying so has not been measured from real
-      // saves; until it is, this is the popup's existing patience.
-      firstTapPatienceTimer = setTimeout(() => {
-        firstTapPatienceTimer = null;
-        drawFirstTapSheet("still-confirming", {
-          heading: record.title,
-          record: { ...record, title: "", heading: true },
-          ask: { heading: FIRST_TAP_WORDS.stillConfirmingHeading, body: FIRST_TAP_WORDS.stillConfirmingBody },
-          primary: { label: FIRST_TAP_WORDS.checkAgain, action: "first_tap_check", emphasis: "tertiary" },
-          announce: `${firstTapSpoken(FIRST_TAP_WORDS.stillConfirmingHeading)} ${FIRST_TAP_WORDS.stillConfirmingBody}`,
-        });
-      }, STORY_CONFIRMATION_PATIENCE_MS);
       return;
     case "confirmed":
       drawFirstTapConfirmed(view, { waiting });
       return;
-    case "failed":
+    case "failed": {
       if (view.reason === "story_unavailable") {
         drawFirstTapSheet("story-unavailable", {
           heading: FIRST_TAP_WORDS.unavailableHeading,
@@ -2855,9 +3109,21 @@ function renderFirstTapView(view, { waiting = false } = {}) {
       if (view.reason === "not_authenticated") {
         // Trace turned the account down, so nothing was saved. Trying again
         // is a new save the reader chose.
-        drawFirstTapSheet("save-sign-in-again", {
-          heading: FIRST_TAP_WORDS.signInAgainHeading,
-          body: FIRST_TAP_WORDS.signInAgainBody,
+        drawFirstTapSheet("save-reconnect", {
+          heading: FIRST_TAP_WORDS.reconnectHeading,
+          body: FIRST_TAP_WORDS.reconnectBody,
+          primary: { label: FIRST_TAP_WORDS.tryAgain, action: "first_tap_save", emphasis: "primary" },
+          result: "failure",
+        });
+        return;
+      }
+      if (view.dispatch === "not_in_library") {
+        // The save went out unanswered, and Trace has since said, when the
+        // reader asked, that the story is not in the Library. Trying again
+        // is a new save the reader chose.
+        drawFirstTapSheet("save-not-in-library", {
+          heading: FIRST_TAP_WORDS.notInLibraryHeading,
+          body: FIRST_TAP_WORDS.notInLibraryBody,
           primary: { label: FIRST_TAP_WORDS.tryAgain, action: "first_tap_save", emphasis: "primary" },
           result: "failure",
         });
@@ -2865,14 +3131,16 @@ function renderFirstTapView(view, { waiting = false } = {}) {
       }
       // `never_sent` is the only failure that may say nothing was sent; a
       // refusal is Trace's answer.
-      drawFirstTapSheet(view.dispatch === "never_sent" ? "save-not-sent" : "save-refused", {
-        heading: view.dispatch === "never_sent" ? FIRST_TAP_WORDS.notSentHeading : FIRST_TAP_WORDS.refusedHeading,
-        body: view.dispatch === "never_sent" ? FIRST_TAP_WORDS.notSentBody : FIRST_TAP_WORDS.refusedBody,
+      const added = view.dispatch !== "never_sent";
+      drawFirstTapSheet(added ? "save-refused" : "save-not-sent", {
+        heading: added ? FIRST_TAP_WORDS.refusedHeading : FIRST_TAP_WORDS.notSentHeading,
+        body: added ? FIRST_TAP_WORDS.refusedBody : FIRST_TAP_WORDS.notSentBody,
         primary: { label: FIRST_TAP_WORDS.tryAgain, action: "first_tap_save", emphasis: "primary" },
         secondary: firstTapButton.notNow,
         result: "failure",
       });
       return;
+    }
     case "presence_unknown":
       // Looking found nothing it could rely on. The reader may look again,
       // or choose to save again; that choice is theirs, never made for them.
@@ -2887,22 +3155,65 @@ function renderFirstTapView(view, { waiting = false } = {}) {
       // The story sites are allowed, or this is not a page to save from: the
       // popup's usual flow takes over and the first-tap save stands aside.
       firstTapSetAside = true;
+      if (firstTapPatience && firstTapPatience.timer !== null) clearTimeout(firstTapPatience.timer);
+      firstTapPatience = null;
       leaveFirstTapSheet();
       void prepareEarnedPermissionFlow();
   }
 }
 
-/** Automatic saving, turned on from the sheet. What holds is then read again. */
-async function turnOnAutomaticSavingFromFirstTap() {
+/**
+ * The wait on one save. It starts when the save is first drawn and is not
+ * started again by the same save's state arriving a second time.
+ */
+function firstTapPatienceFor(startedAt) {
+  if (firstTapPatience?.startedAt === startedAt) return firstTapPatience;
+  if (firstTapPatience && firstTapPatience.timer !== null) clearTimeout(firstTapPatience.timer);
+  const patience = { startedAt, spent: false, timer: null };
+  // How long to wait before saying so has not been measured from real
+  // saves; until it is, this is the popup's existing patience.
+  patience.timer = setTimeout(() => {
+    patience.timer = null;
+    patience.spent = true;
+    const view = firstTapLastView;
+    if (
+      firstTapPatience === patience && view?.state === "saving" && view.startedAt === startedAt &&
+      !firstTapAccess && !firstTapSetAside
+    ) {
+      drawFirstTap();
+    }
+  }, STORY_CONFIRMATION_PATIENCE_MS);
+  firstTapPatience = patience;
+  return patience;
+}
+
+/**
+ * Automatic saving, turned on from the sheet. The settings control shows
+ * what storage then holds, not what was asked for. When it is on, the
+ * background reads what holds; opened on a story not yet saved, that saves
+ * the story, which is what the reader has just asked for.
+ */
+async function turnOnAutomaticSavingFromFirstTap(look) {
   try {
     await earnedStorageSet({ [PREF_AUTO_TRACK_KEY]: true, prefAutoTrackSetAt: Date.now() });
   } catch {
     // The read that follows says what the preference now is.
   }
+  let stored = null;
+  try {
+    stored = (await earnedStorageGet([PREF_AUTO_TRACK_KEY]))?.[PREF_AUTO_TRACK_KEY];
+  } catch {
+    // Not readable either: the control is left showing what it showed.
+  }
   const input = document.getElementById("pref-auto-track");
-  if (input) input.checked = true;
-  if (firstTapAccess) void observeStorySiteAccess("access_check");
-  else firstTapSend("open");
+  if (input && typeof stored === "boolean") input.checked = stored;
+  if (stored !== true) {
+    // It did not take. The sheet is as it was, with its button back.
+    if (!firstTapSetAside) redrawFirstTapAloud();
+    return;
+  }
+  if (firstTapAccess) void observeStorySiteAccess("access_check", { look });
+  else firstTapLook("open", look);
 }
 // ── end of the first-tap sheet ─────────────────────────────────────────────────
 
@@ -2917,7 +3228,25 @@ function drawFirstTap() {
     if (view) renderFirstTapView(view);
     return;
   }
+  // A save that did not land is said, whatever came of an ask made while it
+  // was still out: what came of the ask must not stand over it. Only the
+  // story sites being allowed is drawn in its place, since from then the
+  // page saves the story by itself. What came of the ask is let go; the next
+  // open reads what Safari allows afresh. A request still out is still
+  // waited on.
+  if (firstTapSaveFailed(view) && !FIRST_TAP_ALLOWED_STATES.includes(access.state)) {
+    if (access.state !== "waiting") firstTapAccess = null;
+    renderFirstTapView(view);
+    return;
+  }
   renderFirstTapAccess(access, view);
+}
+
+const FIRST_TAP_ALLOWED_STATES = Object.freeze(["allowed", "registration_failed", "registration_unknown"]);
+
+/** Whether the background's last word on the save is that it did not land, or may not have. */
+function firstTapSaveFailed(view) {
+  return view?.state === "failed" || view?.state === "presence_unknown";
 }
 
 /** The wait on a request is over. The request itself may still be out. */
@@ -3083,7 +3412,12 @@ function startFirstTap(story, tab) {
       if (!message) return;
       const accessChanged = message.access ? receiveStorySiteAccess(message.access) : false;
       if (message.view) firstTapLastView = message.view;
-      if (accessChanged || message.view) drawFirstTap();
+      // The answer to what the reader asked for, known by the tap's number,
+      // ends the wait on its button and is drawn and said aloud even when it
+      // is what the sheet already showed. Anything else is drawn as usual,
+      // and leaves a waiting button waiting.
+      if (firstTapBusy && message.answered === firstTapBusy.look) redrawFirstTapAloud();
+      else if (accessChanged || message.view) drawFirstTap();
     });
     watchStorySiteAccess();
     firstTapPort.onDisconnect?.addListener(() => {
@@ -3286,7 +3620,7 @@ async function initializeEarnedPermissionFlow() {
     // connect", asks again now and moves on by itself.
     if (changes[ACCOUNT_PROJECTION_REVISION_KEY]) {
       // A first-tap sheet that is waiting on the account asks again by itself.
-      if (firstTapPort && ["connecting", "account-missing", "account-unreachable", "account-sign-in-again"].includes(document.body.dataset.traceFirstTapState)) {
+      if (firstTapPort && ["connecting", "account-missing", "account-unreachable", "account-reconnect"].includes(document.body.dataset.traceFirstTapState)) {
         firstTapSend("open");
       }
       if (accountWait) accountMayHaveConnected();
@@ -4334,38 +4668,52 @@ function bindEarnedActionButtons() {
   ]) {
     if (!button || button.dataset.traceBound === "true") continue;
     button.dataset.traceBound = "true";
-    button.addEventListener("click", () => {
-      const action = button.dataset.earnedAction;
-      if (action === "prepare") void prepareEarnedPermissionFlow();
-      if (action === "allow_and_add") void allowAccessAndAddEarnedStory();
-      if (action === "reconnect_page") void reloadDisconnectedPage();
-      if (action === "reload_to_verify") void reloadEarnedStory();
-      if (action === "close") window.close();
-      if (action === "check_story") void checkConfirmedStory();
-      if (action === "first_tap_open") firstTapSend("open");
-      if (action === "first_tap_save") firstTapSend("save");
-      if (action === "first_tap_check") firstTapSend("check");
-      // The request has to be made in this tap itself; see askForStorySites.
-      if (action === "first_tap_allow") askForStorySites();
-      if (action === "first_tap_access_check") void observeStorySiteAccess("access_check");
-      if (action === "first_tap_show_ask") {
-        firstTapAccess = null;
-        firstTapAskArrived = true;
-        drawFirstTap();
-      }
-      if (action === "first_tap_automatic_saving_on") void turnOnAutomaticSavingFromFirstTap();
-      if (action === "save_story") void saveStoryFromPopup();
-      if (action === "enable_auto_track") void enableAutomaticSavingFromPopup();
-      if (action === "open_app") openTraceApp(isLikelyIosExtensionUi ? TRACE_IOS_APP_LIBRARY_URL : TRACE_HOME_URL);
-      if (action === "open_upgrade") void openUnlimited();
-      if (action === "open_connect") openTraceApp(TRACE_IOS_APP_CONNECT_URL);
-      if (action === "connect_account") retryAppAccount();
-      if (action === "check_link") {
-        sendKernelRuntimeMessage({ type: "TRACE_SESSION_ACTION", action: "connect" }, (response) => {
-          if (response?.snapshot) renderKernelSnapshot(response.snapshot);
-          if (response?.snapshot?.state === "connected") requestKernelPopupState();
-        });
-      }
+    button.addEventListener("click", () => runEarnedAction(button));
+  }
+}
+
+function runEarnedAction(button) {
+  const action = button.dataset.earnedAction;
+  if (action === "prepare") void prepareEarnedPermissionFlow();
+  if (action === "allow_and_add") void allowAccessAndAddEarnedStory();
+  if (action === "reconnect_page") void reloadDisconnectedPage();
+  if (action === "reload_to_verify") void reloadEarnedStory();
+  if (action === "close") window.close();
+  if (action === "check_story") void checkConfirmedStory();
+  // A look the reader asked for: the button waits on the answer.
+  if (action === "first_tap_open") {
+    holdFirstTapButton(button, (look) => firstTapLook("open", look), FIRST_TAP_WORDS.checking);
+  }
+  if (action === "first_tap_save") firstTapSend("save");
+  if (action === "first_tap_check") {
+    holdFirstTapButton(button, (look) => firstTapLook("check", look), FIRST_TAP_WORDS.checking);
+  }
+  // The request has to be made in this tap itself; see askForStorySites.
+  if (action === "first_tap_allow") askForStorySites();
+  if (action === "first_tap_access_check") {
+    holdFirstTapButton(button, (look) => void observeStorySiteAccess("access_check", { look }), FIRST_TAP_WORDS.checking);
+  }
+  if (action === "first_tap_show_ask") {
+    firstTapAccess = null;
+    firstTapAskArrived = true;
+    drawFirstTap();
+    // This button is now a different one. Focus goes to what was asked for.
+    focusFirstTapAsk();
+  }
+  // One tap, one change: the button waits, so a second tap sends nothing.
+  if (action === "first_tap_automatic_saving_on") {
+    holdFirstTapButton(button, (look) => void turnOnAutomaticSavingFromFirstTap(look));
+  }
+  if (action === "save_story") void saveStoryFromPopup();
+  if (action === "enable_auto_track") void enableAutomaticSavingFromPopup();
+  if (action === "open_app") openTraceApp(isLikelyIosExtensionUi ? TRACE_IOS_APP_LIBRARY_URL : TRACE_HOME_URL);
+  if (action === "open_upgrade") void openUnlimited();
+  if (action === "open_connect") openTraceApp(TRACE_IOS_APP_CONNECT_URL);
+  if (action === "connect_account") retryAppAccount();
+  if (action === "check_link") {
+    sendKernelRuntimeMessage({ type: "TRACE_SESSION_ACTION", action: "connect" }, (response) => {
+      if (response?.snapshot) renderKernelSnapshot(response.snapshot);
+      if (response?.snapshot?.state === "connected") requestKernelPopupState();
     });
   }
 }

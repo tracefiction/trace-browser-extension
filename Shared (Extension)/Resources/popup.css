@@ -952,27 +952,58 @@ body[data-trace-platform="ios"] .popup-privacy { display: none; }
 body[data-trace-platform="ios"] .popup-footer { padding-top: 6px; }
 /* The sheet a first tap opens: a second headline under the story's record,
    a quiet mark while Trace connects, and buttons whose labels may wrap. */
-.popup-earned-ask {
+.popup-earned-ask,
+.popup-earned-note {
     margin-top: 14px;
     padding-top: 13px;
     border-top: 1px solid var(--rule);
 }
-.popup-earned-ask[hidden] { display: none; }
-.popup-earned-ask-heading {
+.popup-earned-ask[hidden],
+.popup-earned-note[hidden] { display: none; }
+.popup-earned-ask-heading,
+.popup-earned-note-heading {
     margin: 0;
     color: var(--text);
     font: 600 1.176em/1.22 var(--trace-font);
     letter-spacing: -0.01em;
     overflow-wrap: anywhere;
 }
-.popup-earned-ask-body {
+.popup-earned-ask-heading:focus { outline: none; }
+.popup-earned-ask-body,
+.popup-earned-note-body {
     margin: 6px 0 0;
     color: var(--text-2);
     font: 400 0.882em/1.4 var(--trace-font);
     overflow-wrap: anywhere;
 }
+/* News of a save that is still out is one step quieter than the ask under
+   it, and carries its own quiet button. */
+.popup-earned-note-heading { font-size: 1em; letter-spacing: 0; }
+.popup-earned-note button {
+    display: block;
+    min-height: 44px;
+    margin: 2px 0 -8px;
+    padding: 8px 0;
+    border: 0;
+    background: transparent;
+    color: var(--action);
+    font: 500 0.882em/1.2 var(--trace-font);
+    text-align: left;
+    overflow-wrap: anywhere;
+    cursor: pointer;
+}
+.popup-earned-note button[hidden] { display: none; }
+.popup-earned-note button:disabled { opacity: 0.55; cursor: default; }
+/* On a sheet too short for a state, the quieter button scrolls with the
+   content; the rule line and the main button stay pinned beneath it. */
+.popup-earned-scroll > .popup-earned-actions { margin-top: 8px; }
+.popup-earned-scroll > .popup-earned-actions[hidden] { display: none; }
+/* A hairline marks where the content passes under the pinned buttons. */
+body[data-trace-first-tap-state] .popup-earned-fixed-pin .popup-earned-pin { border-top: 1px solid var(--rule); }
 .popup-earned-text-ax .popup-earned-ask-heading,
 .popup-earned-text-ax .popup-earned-ask-body,
+.popup-earned-text-ax .popup-earned-note-heading,
+.popup-earned-text-ax .popup-earned-note-body,
 body[data-trace-first-tap-state] .popup-earned-text-ax .popup-earned-record-title { hyphens: auto; }
 .popup-earned-heading-glyph[data-tone="progress"] { color: var(--text-2); }
 .popup-earned-heading-glyph[data-tone="progress"] svg { animation: popup-spin 0.9s linear infinite; }

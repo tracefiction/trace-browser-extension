@@ -7510,6 +7510,15 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       await this.start();
       return this.#storyCommands.presence(workKey);
     }
+    /** The account an answer from Trace belongs to, or null for none. */
+    publicationScope() {
+      return this.#service.publicationScope();
+    }
+    /** Runs one request to Trace as the account now signed in. */
+    async executeAuthenticated(effect) {
+      await this.start();
+      return this.#service.executeAuthenticated(effect);
+    }
     async #startOnce() {
       try {
         if (this.#mode === "disabled") {
@@ -9133,6 +9142,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       fallbackId += 1;
       return fallbackUuid(`${Date.now()}:${fallbackId}`);
     };
+    const apiFetch = createActivityFetch(
+      globalThis.fetch.bind(globalThis),
+      extension.runtime,
+      storageMode,
+      "https://api.tracefiction.com",
+      new BrowserStorage(extension.storage.local, extension.runtime, storageMode)
+    );
     session = installSessionRuntime({
       browserDeviceSessions: true,
       mode: "kernel",
@@ -9142,13 +9158,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       storageArea: extension.storage.local,
       databaseFactory: scope.indexedDB,
       storageMode,
-      fetch: createActivityFetch(
-        globalThis.fetch.bind(globalThis),
-        extension.runtime,
-        storageMode,
-        "https://api.tracefiction.com",
-        new BrowserStorage(extension.storage.local, extension.runtime, storageMode)
-      ),
+      fetch: apiFetch,
       apiBase: "https://api.tracefiction.com",
       nativeImportHandoff: false,
       webOrigin: "https://www.tracefiction.com",
@@ -9169,7 +9179,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         mode: storageMode,
         origins: define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.origins,
         registrationIds: define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.registrations.map(({ id }) => id),
-        session
+        session,
+        fetch: apiFetch,
+        apiBase: "https://api.tracefiction.com"
       });
     }
     extension.storage.onChanged?.addListener((changes, area) => {

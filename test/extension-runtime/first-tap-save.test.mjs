@@ -11,6 +11,7 @@ import {
   FirstTapSave,
   storySaveModeAtAdmission,
 } from "../../.trace-build/extension-runtime/first-tap-save.mjs";
+import { readStoryMembership } from "../../.trace-build/extension-runtime/story-membership.mjs";
 
 // These tests run the first-tap save over the real guarded save. Only the
 // network, the page and storage are stood in for.
@@ -52,7 +53,7 @@ function install(options = {}) {
     if (!libraries.has(accountId)) libraries.set(accountId, new Map());
     return libraries.get(accountId);
   };
-  const net = { lookups: 0, writes: 0, lookup: null, track: null };
+  const net = { lookups: 0, writes: 0, memberships: 0, lookup: null, track: null, membership: null };
   const world = {
     library, libraries, net,
     scope: { accountId: "account-a", epoch: 1 },
@@ -135,6 +136,21 @@ function install(options = {}) {
       },
       save: (command, observer) => service.executeWithEvidence(command, observer),
       presence: (workKey) => service.presence(workKey),
+      // Trace's own answer about one story, for the account that asks.
+      membership: (workKey) => readStoryMembership(session, {
+        async read(_credential, asked) {
+          net.memberships += 1;
+          const scripted = net.membership ? await net.membership(asked) : null;
+          if (scripted) return scripted;
+          const entry = libraryNow().get(asked);
+          return {
+            kind: "success",
+            value: entry === undefined
+              ? { kind: "absent" }
+              : { kind: "present", entry: { status: entry.status, readerStatus: entry.readerStatus, canonicalReaderStatus: entry.canonicalReaderStatus } },
+          };
+        },
+      }, workKey),
       async mark(tabId, workKey) { world.calls.mark.push({ tabId, workKey }); },
       async readStore() {
         if (!world.storage.readable) throw new Error("storage unavailable");
@@ -185,7 +201,7 @@ const landsUnanswered = (world) => {
 test("opening Trace on a story saves it once, through the guarded save, before any lasting access", async () => {
   const world = install();
   const popup = world.worker().popup();
-  assert.deepEqual(await popup.open(), { state: "saving", workKey: A, startedAt: world.now });
+  assert.deepEqual(await popup.open(), { state: "saving", workKey: A, startedAt: world.now, story: null });
   await turns();
 
   assert.deepEqual(world.calls.inject, [7]);
@@ -887,7 +903,7 @@ test("after a save cut off mid-write, a reopened popup looks first and never off
 
 // --- Check again ---------------------------------------------------------------
 
-test("Check again only looks: it finds or it does not know, and it has no way to save", async () => {
+test("Check again asks Trace about this one story: in the Library, not in it, or not known, and it has no way to save", async () => {
   const world = install();
   world.net.track = () => ({ kind: "success", value: { kind: "uncertain" } });
   const popup = world.worker().popup();
@@ -895,19 +911,129 @@ test("Check again only looks: it finds or it does not know, and it has no way to
   await turns();
   assert.equal(popup.last.dispatch, "sent_unconfirmed");
   assert.equal(world.net.writes, 1);
+  const lookups = world.net.lookups;
 
-  assert.deepEqual(await popup.check(), { state: "presence_unknown", workKey: A });
-  world.net.lookup = () => { throw new Error("offline"); };
-  assert.deepEqual(await popup.check(), { state: "presence_unknown", workKey: A });
+  // A request that could not be made, was turned away, or came back
+  // unreadable says nothing about the story: never "not in your Library".
+  for (const failure of [
+    () => { throw new Error("offline"); },
+    () => ({ kind: "success", value: { kind: "unavailable" } }),
+    () => ({ kind: "success", value: { kind: "invalid_response" } }),
+    () => ({ kind: "unavailable" }),
+  ]) {
+    world.net.membership = failure;
+    assert.deepEqual(await popup.check(), { state: "presence_unknown", workKey: A });
+  }
+  assert.equal(world.net.memberships, 4, "one request for each time the reader asks");
 
-  world.net.lookup = null;
+  // Trace's own word that the story is not there.
+  world.net.membership = null;
+  assert.deepEqual(await popup.check(), {
+    state: "failed", workKey: A, reason: "unavailable", dispatch: "not_in_library",
+    story: { title: "The Long Way", author: "someone", site: "AO3" },
+  });
+  assert.equal(world.net.memberships, 5);
+  assert.equal(world.storage.value.records[0].outcome.dispatch, "not_in_library");
+  assert.equal(world.storage.value.records[0].inDoubt, true, "the write that went unanswered is still in doubt");
+  // A popup reopened on the page is shown the same answer, and nothing is saved for it.
+  assert.equal((await world.worker().popup().open()).dispatch, "not_in_library");
+
   world.library.set(A, ENTRY);
   const found = await popup.check();
-  assert.equal(found.state, "confirmed");
-  assert.equal(found.provenance, "found", "found now; not claimed as this tap's save");
-  assert.equal(found.story.title, "The Long Way");
+  assert.deepEqual(found, {
+    state: "confirmed", workKey: A, provenance: "found", mode: null,
+    story: { title: "The Long Way", author: "someone", site: "AO3" },
+    entry: { status: "READING", readerStatus: "READING", canonicalReaderStatus: "READING", chapters: null },
+  }, "found now, with the entry's own status; not claimed as this tap's save");
   assert.equal(world.net.writes, 1, "no look ever sent a save");
+  assert.equal(world.net.lookups, lookups, "and none read the whole Library or a kept copy of it");
   assert.deepEqual(world.calls.receipts, [], "and a look tells the app nothing");
+  // A confirmation is never taken back, and is not asked about again.
+  world.library.delete(A);
+  assert.equal((await popup.check()).state, "confirmed");
+  assert.equal(world.net.memberships, 6);
+});
+
+test("Check again while the save is still out: a story Trace does not have yet leaves the wait as it was", async () => {
+  const world = install();
+  const answer = deferred();
+  world.net.track = () => answer.promise;
+  const popup = world.worker().popup();
+  await popup.open();
+  await turns();
+  assert.equal(popup.last.state, "saving");
+
+  const checked = await popup.check();
+  assert.equal(checked.state, "saving", "not in the Library yet is not the save's answer");
+  assert.equal(checked.startedAt, world.now);
+  assert.equal(world.net.memberships, 1);
+
+  answer.resolve(null);
+  await turns();
+  assert.equal(popup.last.provenance, "saved_now");
+  assert.equal(world.net.writes, 1);
+});
+
+test("after Trace said the story was not there, a save that finds it is found, never already there", async () => {
+  const world = install();
+  world.net.track = () => ({ kind: "success", value: { kind: "uncertain" } });
+  const popup = world.worker().popup();
+  await popup.open();
+  await turns();
+  assert.equal((await popup.check()).dispatch, "not_in_library");
+
+  // The unanswered write lands after all. The reader then tries again.
+  world.library.set(A, ENTRY);
+  world.net.track = null;
+  await popup.open({ requested: true });
+  await turns();
+  assert.equal(popup.last.state, "confirmed");
+  assert.equal(popup.last.provenance, "found");
+  assert.equal(world.net.writes, 1, "the story was found before anything more was written");
+});
+
+test("a second Check again while the first is still asking joins it: one request, one answer for both", async () => {
+  const world = install();
+  world.net.track = () => ({ kind: "success", value: { kind: "uncertain" } });
+  const worker = world.worker();
+  const popup = worker.popup();
+  await popup.open();
+  await turns();
+  const answer = deferred();
+  world.net.membership = async () => { await answer.promise; return null; };
+
+  const first = popup.check();
+  await turns();
+  const second = popup.check();
+  // Another popup on the same story asks too.
+  const other = worker.popup();
+  await other.open();
+  const third = other.check();
+  await turns();
+  assert.equal(world.net.memberships, 1, "one request while the first is still out");
+
+  answer.resolve();
+  const answers = await Promise.all([first, second, third]);
+  assert.deepEqual(answers.map((view) => view.dispatch), ["not_in_library", "not_in_library", "not_in_library"]);
+  assert.equal(world.net.memberships, 1);
+
+  // Once it has answered, the next tap is a request of its own.
+  world.net.membership = null;
+  await popup.check();
+  assert.equal(world.net.memberships, 2);
+  assert.equal(world.net.writes, 1);
+});
+
+test("Check again when Trace turns the account down says the account needs reconnecting, and keeps the doubt", async () => {
+  const world = install();
+  world.net.track = () => ({ kind: "success", value: { kind: "uncertain" } });
+  const popup = world.worker().popup();
+  await popup.open();
+  await turns();
+  world.net.membership = () => ({ kind: "auth_rejected" });
+  assert.deepEqual(await popup.check(), { state: "account_reconnect_required", workKey: A });
+  assert.equal(world.storage.value.records[0].inDoubt, true);
+  assert.equal(world.net.writes, 1);
 });
 
 test("Check again for an account that changes while it looks says the account changed", async () => {
@@ -917,13 +1043,80 @@ test("Check again for an account that changes while it looks says the account ch
   await popup.open();
   await turns();
   const look = deferred();
-  world.net.lookup = async () => { await look.promise; return null; };
+  world.net.membership = async () => { await look.promise; return null; };
   world.library.set(A, ENTRY);
   const pending = popup.check();
   await turns();
   world.scope = { accountId: "account-b", epoch: 2 };
   look.resolve();
   assert.deepEqual(await pending, { state: "account_changed", workKey: A });
+});
+
+// --- Two opens at once ------------------------------------------------------------
+
+test("two opens that arrive together start one save, whichever way each was asked for", async () => {
+  for (const [first, second] of [[undefined, undefined], [{ requested: true }, undefined], [undefined, { requested: true }]]) {
+    const world = install();
+    const worker = world.worker();
+    const popup = worker.popup();
+    const views = await Promise.all([popup.open(first), popup.open(second)]);
+    assert.deepEqual(views.map((view) => view.state), ["saving", "saving"]);
+    assert.equal(views[0].startedAt, views[1].startedAt, "both are shown the one save");
+    await turns();
+    assert.deepEqual(world.calls.inject, [7], "the page script goes in once");
+    assert.deepEqual(world.calls.collect, [7]);
+    assert.equal(world.net.writes, 1, "and one write is made");
+    assert.equal(world.calls.receipts.length, 1);
+    assert.equal(popup.last.provenance, "saved_now");
+
+    // A second popup on the same story, opened in the same moment, is the same.
+    const other = install();
+    const shared = other.worker();
+    const [one, two] = [shared.popup(), shared.popup()];
+    await Promise.all([one.open(first), two.open(second)]);
+    await turns();
+    assert.equal(other.net.writes, 1);
+    assert.equal(one.last.provenance, "saved_now");
+    assert.equal(two.last.provenance, "saved_now");
+  }
+});
+
+test("turning automatic saving on and opening twice at once still saves once", async () => {
+  const world = install();
+  world.automaticSaving = "off";
+  const popup = world.worker().popup();
+  assert.equal((await popup.open()).state, "awaiting_request");
+  world.automaticSaving = "on";
+  await Promise.all([popup.open(), popup.open()]);
+  await turns();
+  assert.deepEqual(world.calls.inject, [7], "one attempt was started");
+  assert.equal(world.net.lookups, 1);
+  assert.equal(world.net.writes, 1);
+  assert.equal(popup.last.provenance, "saved_now");
+});
+
+test("a save still out names its story as soon as the page has, and only for the story the popup named", async () => {
+  const world = install();
+  const answer = deferred();
+  world.net.track = () => answer.promise;
+  const popup = world.worker().popup();
+  assert.equal((await popup.open()).story, null, "nothing is known of the story before the page is read");
+  await turns();
+  assert.deepEqual(popup.last, {
+    state: "saving", workKey: A, startedAt: world.now,
+    story: { title: "The Long Way", author: "someone", site: "AO3" },
+  });
+  answer.resolve(null);
+  await turns();
+  assert.equal(popup.last.provenance, "saved_now");
+
+  // A page that names another story is not believed, and its title is not shown as this save's.
+  const other = install();
+  other.page.names = B;
+  const mismatched = other.worker().popup();
+  await mismatched.open();
+  await turns();
+  assert.deepEqual(mismatched.views.map((view) => view.state), ["saving", "failed"]);
 });
 
 test("Try again is a new attempt through the same guarded save; a plain reopen is not", async () => {
