@@ -59,9 +59,9 @@ required story sites, `tabs`, and manifest-declared scripts.
 ### Saving on the first tap (development switch)
 
 `TRACE_IOS_FIRST_TAP_SAVE=1` turns on a save made when the reader opens Trace
-on a story before the story sites are allowed. It is unfinished: some of its
-popup states show a placeholder where wording will go. Three rules keep it a
-development switch:
+on a story before the story sites are allowed. Every state of it has its
+wording; it has not yet been proven end to end in Safari. Three rules keep it
+a development switch:
 
 - No release build can turn it on, whatever else is set. Shipping it is a
   change to `scripts/build.mjs`, made on purpose.
@@ -122,7 +122,7 @@ the request returned is passed along as evidence and is never the answer:
 | registration failed / not known | The sites are allowed; the page scripts are not registered, or that could not be read. Trying again asks Safari for nothing. |
 | partly allowed | Fewer than five. Never drawn as allowed. |
 | not allowed | The request came back false, and the sites do not read as allowed. |
-| could not ask | The request threw. |
+| could not ask | The request threw. The popup shows this exactly as it shows not allowed. |
 | not known | What Safari allows could not be read; the request came back true and the read says no; it came back with neither; or it did not come back within a minute. Never drawn as not allowed. The reader can ask again. |
 | not asked | Not allowed, with no request made by this popup. The save is shown with the ask. |
 
@@ -139,6 +139,40 @@ the ask again; a request that comes back later is still passed to the
 background. A minute is far longer than Safari's question takes to answer, and
 since a later answer is still read, the deadline costs a slow reader nothing.
 No wait, however long, is taken as "no".
+
+#### What the sheet shows
+
+Each state is one arrangement of the same parts: a short confirmation line,
+the story's record (title, author and site, and the entry's real status), a
+headline and body, a rule line above a button that leads to Safari's question,
+and at most two buttons. All of its words are in `FIRST_TAP_WORDS` in
+`popup.js`; the ones still to be reviewed are marked there.
+
+- A confirmed save is on show by itself for a moment, then the ask arrives
+  under it. Opening Trace never raises Safari's question; only the reader's
+  tap on the ask does.
+- "Not allowed" and "could not ask" are one state for the reader. The save is
+  kept and said to be, saving stays one tap away, and "Try again" goes back to
+  the ask. Trace cannot tell a reader's "no" from Safari's, so it does not try
+  to describe either.
+- "Allowed" says that saving is automatic only when the account and the
+  preference were both read as so just now. Otherwise it says the sites are
+  allowed and no more. With the preference off it offers to turn it on.
+- Nothing sends the reader to Safari's settings to check access, and nothing
+  says what that screen shows: it is not a dependable display of what an
+  extension has been allowed. The sheet reports what the browser's permission
+  reads and confirmed saves say.
+- The number of addresses in the ask is counted from the build's own list.
+- Before iOS 26 every button in Safari's question is blue, so there the rule
+  line does not point at a colour.
+
+For a reader using VoiceOver each state's news is announced through one polite
+live region, in a spoken form with no symbols; the record and the rule line
+carry spoken alternatives; decorative marks are hidden; and the rule line is
+the description of the button it stands over. At the largest text sizes
+nothing is pinned, labels wrap, and the rule line and button come last. Both
+colour schemes use the popup's own tokens. Under Reduce Motion an arrival is a
+short cross-fade and the progress mark stands still.
 
 While the sheet is open the popup listens for Safari adding or removing
 website access, and has the background read again when it does or when the

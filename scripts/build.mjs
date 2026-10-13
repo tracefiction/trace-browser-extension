@@ -106,9 +106,9 @@ if (IOS_EARNED_PERMISSION_REQUIRED_HOSTS && !IOS_EARNED_PERMISSION_ONBOARDING) {
 }
 const IOS_OPTIONAL_STORY_SITE_ACCESS =
   IOS_EARNED_PERMISSION_ONBOARDING && !IOS_EARNED_PERMISSION_REQUIRED_HOSTS;
-// Saving the story the reader opens Trace on, before lasting access. It is
-// not finished: some of its states show placeholders where wording will go.
-// So it is a development switch, and three rules keep it one.
+// Saving the story the reader opens Trace on, before lasting access. It has
+// its wording, and has not yet been proven end to end in Safari. So it is a
+// development switch, and three rules keep it one.
 //  1. No release build can turn it on, whatever else is set. Shipping it is a
 //     change to this file, made on purpose, not a setting.
 //  2. A development build that talks to the production service can turn it on

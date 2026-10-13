@@ -1065,6 +1065,7 @@ const POPUP_GLYPHS = Object.freeze({
     "M1.5 6a9.5 9.5 0 0 1 13 0M4 8.7a6 6 0 0 1 8 0M6.4 11.2a2.5 2.5 0 0 1 3.2 0", "M2 2l12 12",
   ] },
   menuCheck: { viewBox: "0 0 16 16", width: "2", path: ["M3 8.5l3.2 3.2L13 4.8"] },
+  progress: { viewBox: "0 0 16 16", width: "1.8", path: ["M8 1.8a6.2 6.2 0 1 1-6.2 6.2"] },
 });
 
 /**
@@ -1251,6 +1252,21 @@ function setReaderImport(offered) {
   return !button.hidden || Boolean(link && !link.hidden);
 }
 
+/** The record sits under the headline, or after the body where a state asks. */
+function placeEarnedRecord(afterBody) {
+  const record = document.getElementById("popup-earned-record");
+  const anchor = document.getElementById(afterBody ? "popup-earned-lead" : "popup-earned-heading-row");
+  if (record && anchor && anchor.nextElementSibling !== record) anchor.after(record);
+}
+
+/** Puts back what only some states change, so no state inherits another's. */
+function resetEarnedSheetExtras() {
+  placeEarnedRecord(false);
+  const ask = document.getElementById("popup-earned-ask");
+  if (ask) ask.hidden = true;
+  document.getElementById("popup-earned-primary")?.removeAttribute("aria-describedby");
+}
+
 function setEarnedCopy({
   stateCode = "",
   kicker = "",
@@ -1277,6 +1293,7 @@ function setEarnedCopy({
   freePlanSlots.reader = false;
   renderFreePlanLines();
   setEarnedRecord(record);
+  resetEarnedSheetExtras();
   const section = document.getElementById("popup-earned-permission");
   const kickerEl = document.getElementById("popup-earned-kicker");
   const kickerText = document.getElementById("popup-earned-kicker-text");
@@ -2208,13 +2225,10 @@ async function readKnownInLibrary(rawUrl) {
 
 // ── First-tap save: what the popup draws ───────────────────────────────────────
 //
-// SEAM. The background owns the save and sends this popup one machine state at
-// a time. Each is drawn here as one popup state, named in
-// `data-trace-first-tap-state`. Where this popup already has the words for a
-// state, that renderer is used unchanged. Where it does not, a
-// `firstTapPlaceholder` call shows a name for the missing text, always with
-// that name written out in the call. Wording and layout for these states
-// replace what is between the two rules.
+// The background owns the save and the ask for lasting access, and sends this
+// popup one machine state of each at a time. Each is drawn here as one popup
+// state, named in `data-trace-first-tap-state`, in the words of
+// FIRST_TAP_WORDS. Nothing here decides what happened; it only says it.
 const FIRST_TAP_SAVE = EARNED_PERMISSION_ONBOARDING?.firstTapSave === true;
 const FIRST_TAP_POPUP_PORT = "trace-first-tap-popup-v1";
 let firstTapPort = null;
@@ -2237,10 +2251,77 @@ const FIRST_TAP_ASK_REREAD_MS = 2_000;
 // of it. Nothing is lost at the deadline: a request that comes back later, a
 // permission change, and the popup coming back into view are each still read.
 const FIRST_TAP_ASK_DEADLINE_MS = 60_000;
+// A confirmed save is on show by itself for this long before the ask for
+// lasting access arrives under it: one thing to read at a time.
+const FIRST_TAP_ASK_ARRIVES_MS = 1_100;
+let firstTapAskTimer = null;
+let firstTapAskArrived = false;
+// What was last drawn, so that an arrival plays once and not on every redraw.
+let firstTapDrawn = null;
+let firstTapConfirmationDelivered = false;
 
-function firstTapPlaceholder(id) {
-  return `[${id}]`;
-}
+// Every word the first-tap sheet shows. `{count}` is the number of story-site
+// addresses this build asks Safari for. Nothing here says how long access
+// lasts, and nothing sends the reader to Safari's settings to check it.
+const FIRST_TAP_WORDS = Object.freeze({
+  storyStandIn: "This story",
+  connecting: "Connecting to your account…",
+  accountMissingHeading: "Trace couldn’t connect to your account",
+  accountMissingBody: "Trace in Safari doesn’t have your account yet. Open the Trace app, then come back and tap Trace again.",
+  accountUnreachableHeading: "Trace can’t reach your account right now",
+  accountUnreachableBody: "Check your connection, then try again.",
+  // Wording pending review.
+  signInAgainHeading: "Sign in again in the Trace app",
+  signInAgainBody: "Trace in Safari needs you to sign in once more. Open the Trace app, sign in, then come back and tap Trace again.",
+  saveThisStory: "Save this story",
+  automaticSavingOffHeading: "Automatic saving is off",
+  turnAutomaticSavingOn: "Turn automatic saving on",
+  saving: "Saving to your Library…",
+  stillConfirmingHeading: "Still confirming your story",
+  stillConfirmingBody: "Trace hasn’t heard back yet. It may already be saved.",
+  savedKicker: "Saved to your Library",
+  alreadyKicker: "Already in your Library",
+  inLibraryKicker: "In your Library",
+  askHeading: "Let Trace save the next one by itself",
+  askBody: "Safari asks first. It lists AO3 and FanFiction.net’s {count} addresses.",
+  rule: "Tap <b>Always Allow</b>, not the blue <b>Allow for One Day</b>.",
+  ruleEveryButtonBlue: "Tap <b>Always Allow</b>, not <b>Allow for One Day</b>.",
+  ruleSpoken: "Tap Always Allow, not Allow for One Day.",
+  allow: "Allow AO3 and FanFiction.net",
+  notNow: "Not now",
+  waitingForSafari: "Waiting for Safari…",
+  keepReading: "Keep reading",
+  tryAgain: "Try again",
+  checkAgain: "Check again",
+  close: "Close",
+  unconfirmedHeading: "Trace couldn’t confirm this save",
+  unconfirmedBody: "It may have saved anyway. Check again to find out.",
+  stillUnknownHeading: "Trace still couldn’t check",
+  stillUnknownBody: "Look for it in your Library in the Trace app, or check again later.",
+  unavailableHeading: "This story isn’t available",
+  unavailableBody: "It may be deleted or locked, so Trace can’t read it.",
+  // Wording pending review.
+  notSentHeading: "The save wasn’t sent",
+  notSentBody: "This tap added nothing to your Library.",
+  // Wording pending review.
+  refusedHeading: "Trace couldn’t save this story",
+  refusedBody: "It wasn’t added to your Library. Try again in a moment.",
+  allowedKicker: "Allowed on AO3 and FanFiction.net",
+  allowedHeading: "That’s it. Keep reading.",
+  allowedBody: "Trace saves the stories you open there and keeps your place. Your Library is in the Trace app.",
+  allowedOffHeading: "Automatic saving is off",
+  allowedOffBody: "Trace in Safari is set to save stories only when you ask.",
+  registrationFailedHeading: "Trace couldn’t finish turning on automatic saving",
+  registrationFailedBody: "Safari allowed AO3 and FanFiction.net, but Trace’s part didn’t start.",
+  notAllowedHeading: "Trace will save when you tap it",
+  notAllowedBody: "To save another story, open Trace from the Page Menu on it. You can let it save by itself any time.",
+  // Wording pending review.
+  partialHeading: "Safari allowed only some addresses",
+  partialBody: "Trace needs all {count} of AO3 and FanFiction.net’s addresses to save by itself. Safari asks again.",
+  // Wording pending review.
+  notKnownHeading: "Trace couldn’t check with Safari",
+  notKnownBody: "AO3 and FanFiction.net may be allowed already. Check again, or ask once more.",
+});
 
 function firstTapSend(command, detail = {}) {
   try {
@@ -2264,18 +2345,249 @@ function setFirstTapState(name) {
   document.body.dataset.traceFirstTapState = name;
 }
 
-function renderFirstTapUnworded(name, { heading, lead = null, primary, secondary = null, checking = false, result = null }) {
-  setEarnedCopy({ stateCode: name, heading, lead: lead ?? "" });
-  setEarnedResult(result ?? (checking ? "checking" : "failure"), heading, "");
-  configureEarnedActions(primary, secondary);
+/** The words with the build's own count of story-site addresses in them. */
+function firstTapCounted(words) {
+  return words.replace("{count}", String(earnedOrigins().length));
 }
 
-/** After a confirmed save: the ask for lasting access is offered. */
-function configureFirstTapConfirmedActions() {
-  configureEarnedActions(
-    { label: "Keep reading", action: "close", emphasis: "secondary" },
-    { label: "Allow story sites", action: "first_tap_allow", emphasis: "tertiary" },
-  );
+/** A line as it is read aloud: a full stop, and no trailing ellipsis. */
+function firstTapSpoken(words) {
+  const said = String(words || "").replace(/…$/, "").trim();
+  return !said || /[.!?]$/.test(said) ? said : `${said}.`;
+}
+
+/**
+ * Before iOS 26 every button in Safari's question is blue, so the colour
+ * tells the reader nothing. Safari's own version says which it is; the
+ * system version in the user agent stopped changing and is trusted only
+ * where it is older than that.
+ */
+function safariQuestionButtonsAreAllBlue() {
+  const agent = navigator.userAgent || "";
+  const safari = agent.match(/\bVersion\/(\d+)/);
+  if (safari) return Number(safari[1]) < 26;
+  const system = agent.match(/\bOS (\d+)_/);
+  return Boolean(system) && Number(system[1]) < 18;
+}
+
+/** Shows an element's text as it is and has it read aloud as `spoken`. */
+function setSpokenAlternative(element, spoken) {
+  if (!element || !spoken) return;
+  const shown = document.createElement("span");
+  shown.setAttribute("aria-hidden", "true");
+  shown.append(...element.childNodes);
+  const said = document.createElement("span");
+  said.className = "popup-earned-internal";
+  said.textContent = spoken;
+  element.replaceChildren(shown, said);
+}
+
+/** The second headline and body, under the record. Made when first needed. */
+function firstTapAskBox(create) {
+  let box = document.getElementById("popup-earned-ask");
+  if (box || !create) return box;
+  const lead = document.getElementById("popup-earned-lead");
+  if (!lead) return null;
+  box = document.createElement("div");
+  box.id = "popup-earned-ask";
+  box.className = "popup-earned-ask";
+  const heading = document.createElement("h2");
+  heading.id = "popup-earned-ask-heading";
+  heading.className = "popup-earned-ask-heading";
+  const body = document.createElement("p");
+  body.id = "popup-earned-ask-body";
+  body.className = "popup-earned-ask-body";
+  box.append(heading, body);
+  lead.after(box);
+  return box;
+}
+
+const FIRST_TAP_MOTIONS = Object.freeze(["popup-first-tap-fade", "popup-first-tap-rise"]);
+
+function clearFirstTapMotion() {
+  for (const element of document.querySelectorAll(FIRST_TAP_MOTIONS.map((name) => `.${name}`).join(","))) {
+    element.classList.remove(...FIRST_TAP_MOTIONS);
+  }
+}
+
+function playFirstTapMotion(motion, elements) {
+  for (const element of elements) {
+    if (!element) continue;
+    // Reading the width makes a class put back on the same element play again.
+    void element.offsetWidth;
+    element.classList.add(motion);
+  }
+}
+
+/** The story as the sheet's record shows it and reads it aloud. */
+function firstTapRecord(view) {
+  const identity = view?.story ? { ok: true, ...view.story } : null;
+  const title = storyTitle(identity) || FIRST_TAP_WORDS.storyStandIn;
+  const author = typeof identity?.author === "string" ? identity.author.trim() : "";
+  const site = storyByline(null, { site: identity?.site || firstTapStory?.site || "" });
+  const byline = author ? `${author} · ${site}` : site;
+  const record = {
+    title,
+    byline,
+    spokenByline: site ? (author ? `by ${author}, on ${site}.` : `on ${site}.`) : "",
+    spokenName: [title, author ? `by ${author}` : "", site ? `on ${site}` : ""].filter(Boolean).join(", "),
+  };
+  if (view?.state !== "confirmed") return record;
+  const line = recordLine(view.entry);
+  const status = RECORD_STATUS_LABELS[line.key];
+  return {
+    ...record,
+    label: line.label,
+    status: line.key,
+    spokenLabel: line.place ? `${status}. ${line.place}.` : `${status}.`,
+  };
+}
+
+/** The confirmation that stands over a confirmed save, by where it came from. */
+function firstTapSaveKicker(view) {
+  if (view?.state !== "confirmed") return {};
+  if (view.provenance === "saved_now") return { kicker: FIRST_TAP_WORDS.savedKicker, kickerIcon: "check" };
+  if (view.provenance === "already") return { kicker: FIRST_TAP_WORDS.alreadyKicker };
+  // In the Library; whether this reader's tap put it there is not known.
+  return { kicker: FIRST_TAP_WORDS.inLibraryKicker, kickerIcon: "check" };
+}
+
+/**
+ * Draws one state of the sheet: a kicker, the headline, the body, the story's
+ * record, a second headline and body under it, the rule line for a tap that
+ * leads to Safari's question, and up to two buttons. `record.heading` makes
+ * the story's title the headline. What is read aloud is `announce`, or the
+ * headline and body.
+ */
+function drawFirstTapSheet(name, {
+  kicker = "",
+  kickerIcon = "",
+  heading,
+  glyph = "",
+  glyphTone = "",
+  body = "",
+  record = null,
+  recordAfterBody = false,
+  ask = null,
+  rule = false,
+  primary = { hidden: true },
+  secondary = null,
+  result = "checking",
+  announce = null,
+  motion = "",
+}) {
+  const drawn = `${name}${ask ? "+ask" : ""}`;
+  const changed = firstTapDrawn !== drawn;
+  firstTapDrawn = drawn;
+  setFirstTapState(name);
+  setEarnedCopy({
+    stateCode: `first-tap-${name}`,
+    kicker,
+    kickerIcon,
+    glyph,
+    glyphTone,
+    heading,
+    lead: body,
+    record,
+    ruleMarkup: rule
+      ? (safariQuestionButtonsAreAllBlue() ? FIRST_TAP_WORDS.ruleEveryButtonBlue : FIRST_TAP_WORDS.rule)
+      : "",
+  });
+  placeEarnedRecord(recordAfterBody);
+  if (record) {
+    setSpokenAlternative(document.getElementById("popup-earned-record-byline"), record.spokenByline);
+    setSpokenAlternative(document.getElementById("popup-earned-record-label"), record.spokenLabel);
+  }
+  const askBox = firstTapAskBox(Boolean(ask));
+  if (askBox) {
+    askBox.hidden = !ask;
+    document.getElementById("popup-earned-ask-heading").textContent = ask?.heading || "";
+    document.getElementById("popup-earned-ask-body").textContent = ask?.body || "";
+  }
+  const ruleEl = document.getElementById("popup-earned-rule");
+  const primaryButton = document.getElementById("popup-earned-primary");
+  if (rule) {
+    // The colour is no use to a reader who is not looking at it.
+    setSpokenAlternative(ruleEl, FIRST_TAP_WORDS.ruleSpoken);
+    primaryButton?.setAttribute("aria-describedby", "popup-earned-rule");
+  }
+  setEarnedResult(result, announce ?? [heading, body].map(firstTapSpoken).filter(Boolean).join(" "), "");
+  configureEarnedActions(primary, secondary);
+  if (!changed) return;
+  clearFirstTapMotion();
+  const section = document.getElementById("popup-earned-permission");
+  const pin = document.getElementById("popup-earned-pin");
+  if (motion === "landed") {
+    playFirstTapMotion("popup-first-tap-fade", [
+      document.getElementById("popup-earned-kicker"),
+      section?.querySelector(".popup-earned-record-state"),
+    ]);
+  } else if (motion === "ask") {
+    playFirstTapMotion("popup-first-tap-rise", [askBox, pin]);
+  } else if (motion === "settled") {
+    playFirstTapMotion("popup-first-tap-fade", [section?.querySelector(".popup-earned-scroll"), pin]);
+  }
+}
+
+/** Leaves nothing of the first-tap sheet on a popup that has moved on from it. */
+function leaveFirstTapSheet() {
+  if (firstTapAskTimer !== null) clearTimeout(firstTapAskTimer);
+  firstTapAskTimer = null;
+  firstTapDrawn = null;
+  clearFirstTapMotion();
+  resetEarnedSheetExtras();
+  delete document.body.dataset.traceFirstTapState;
+}
+
+const firstTapButton = Object.freeze({
+  keepReading: Object.freeze({ label: FIRST_TAP_WORDS.keepReading, action: "close", emphasis: "secondary" }),
+  notNow: Object.freeze({ label: FIRST_TAP_WORDS.notNow, action: "close", emphasis: "tertiary" }),
+  allow: Object.freeze({ label: FIRST_TAP_WORDS.allow, action: "first_tap_allow", emphasis: "primary" }),
+  waiting: Object.freeze({ label: FIRST_TAP_WORDS.waitingForSafari, action: "", disabled: true, emphasis: "secondary" }),
+});
+
+/**
+ * A confirmed save: the confirmation, the story's record with its real
+ * status, and then the ask for lasting access. The ask arrives a moment after
+ * the save is shown; while Safari's question is up it stays, with its button
+ * waiting.
+ */
+function drawFirstTapConfirmed(view, { waiting = false } = {}) {
+  const name = view.provenance === "saved_now" ? "saved"
+    : view.provenance === "already" ? "already-in-library" : "in-library";
+  if (waiting) firstTapAskArrived = true;
+  const withAsk = firstTapAskArrived;
+  const record = firstTapRecord(view);
+  const confirmation = firstTapSaveKicker(view);
+  if (!firstTapConfirmationDelivered) {
+    firstTapConfirmationDelivered = true;
+    void deliverFirstStoryConfirmation();
+  }
+  setEarnedCheck("popup-earned-save", "pass", "Saved", "Saved to Trace");
+  drawFirstTapSheet(waiting ? "access-waiting" : name, {
+    ...confirmation,
+    heading: record.title,
+    record: { ...record, title: "", heading: true },
+    ask: withAsk
+      ? { heading: FIRST_TAP_WORDS.askHeading, body: firstTapCounted(FIRST_TAP_WORDS.askBody) }
+      : null,
+    rule: withAsk,
+    primary: !withAsk ? { hidden: true } : waiting ? firstTapButton.waiting : firstTapButton.allow,
+    secondary: withAsk ? firstTapButton.notNow : null,
+    result: "success",
+    announce: waiting
+      ? firstTapSpoken(FIRST_TAP_WORDS.waitingForSafari)
+      : withAsk
+        ? `${firstTapSpoken(FIRST_TAP_WORDS.askHeading)} ${firstTapCounted(FIRST_TAP_WORDS.askBody)}`
+        : `${firstTapSpoken(confirmation.kicker)} ${firstTapSpoken(record.spokenName)} ${record.spokenLabel}`,
+    motion: !withAsk ? "landed" : firstTapDrawn === name ? "ask" : "",
+  });
+  if (withAsk || firstTapAskTimer !== null) return;
+  firstTapAskTimer = setTimeout(() => {
+    firstTapAskTimer = null;
+    firstTapAskArrived = true;
+    if (firstTapLastView?.state === "confirmed" && !firstTapAccess && !firstTapSetAside) drawFirstTap();
+  }, FIRST_TAP_ASK_ARRIVES_MS);
 }
 
 /**
@@ -2284,223 +2596,315 @@ function configureFirstTapConfirmedActions() {
  * the request itself returned. No state says how long the access lasts:
  * Safari does not tell an extension that.
  */
-function renderFirstTapAccess(access) {
-  const keepReading = { label: "Keep reading", action: "close", emphasis: "secondary" };
-  const notNow = { label: "Not now", action: "close", emphasis: "tertiary" };
-  const ask = { label: "Allow story sites", action: "first_tap_allow", emphasis: "primary" };
+function renderFirstTapAccess(access, view) {
+  const confirmation = firstTapSaveKicker(view);
+  const allowedKicker = { kicker: FIRST_TAP_WORDS.allowedKicker, kickerIcon: "check" };
+  const savedRecord = view?.state === "confirmed" ? firstTapRecord(view) : null;
   switch (access.state) {
     case "waiting":
       // Safari's question is up. What is shown of the save stays; only the
       // ask's own button changes, and it cannot be tapped again.
+      if (view?.state === "confirmed") {
+        renderFirstTapView(view, { waiting: true });
+        return;
+      }
       setFirstTapState("access-waiting");
-      configureEarnedActions({ label: "Waiting for Safari…", action: "", disabled: true, emphasis: "secondary" });
+      configureEarnedActions(firstTapButton.waiting, firstTapButton.notNow);
+      setEarnedResult("checking", firstTapSpoken(FIRST_TAP_WORDS.waitingForSafari), "");
       return;
     case "allowed":
       // Every story site is allowed and the page scripts are registered.
       // Saving by itself also needs an account and the preference on, and
       // the fullest state is drawn only when both were read as so just now.
       if (access.account === "connected" && access.automaticSaving === "on") {
-        setFirstTapState("access-allowed");
-        renderFirstTapUnworded("access-allowed", {
-          heading: firstTapPlaceholder("access-allowed-heading"),
-          lead: firstTapPlaceholder("access-allowed-body"),
-          primary: keepReading,
+        drawFirstTapSheet("access-allowed", {
+          ...allowedKicker,
+          heading: FIRST_TAP_WORDS.allowedHeading,
+          body: FIRST_TAP_WORDS.allowedBody,
+          record: savedRecord,
+          recordAfterBody: true,
+          primary: firstTapButton.keepReading,
           result: "success",
+          announce: [FIRST_TAP_WORDS.allowedKicker, FIRST_TAP_WORDS.allowedHeading, FIRST_TAP_WORDS.allowedBody]
+            .map(firstTapSpoken).join(" "),
+          motion: "settled",
         });
       } else if (access.automaticSaving === "off") {
-        setFirstTapState("access-allowed-automatic-saving-off");
-        renderFirstTapUnworded("access-allowed-automatic-saving-off", {
-          heading: firstTapPlaceholder("access-allowed-automatic-saving-off-heading"),
-          primary: keepReading,
+        drawFirstTapSheet("access-allowed-automatic-saving-off", {
+          ...allowedKicker,
+          heading: FIRST_TAP_WORDS.allowedOffHeading,
+          body: FIRST_TAP_WORDS.allowedOffBody,
+          primary: { label: FIRST_TAP_WORDS.turnAutomaticSavingOn, action: "first_tap_automatic_saving_on", emphasis: "primary" },
+          secondary: firstTapButton.keepReading,
+          announce: [FIRST_TAP_WORDS.allowedKicker, FIRST_TAP_WORDS.allowedOffHeading, FIRST_TAP_WORDS.allowedOffBody]
+            .map(firstTapSpoken).join(" "),
+          motion: "settled",
         });
       } else {
-        // Allowed; the account or the preference could not be vouched for.
-        setFirstTapState("access-allowed-unconfirmed");
-        renderFirstTapUnworded("access-allowed-unconfirmed", {
-          heading: firstTapPlaceholder("access-allowed-unconfirmed-heading"),
-          primary: keepReading,
-          checking: true,
-        });
+        // Allowed; the account or the preference could not be vouched for,
+        // so nothing more than "allowed" is said.
+        drawFirstTapAllowedOnly("access-allowed-unconfirmed", savedRecord, null);
       }
       return;
-    case "registration_failed":
     case "registration_unknown":
-      // Safari allows the story sites; Trace's page scripts are not in place,
-      // or could not be read. Trying again asks Safari for nothing.
-      setFirstTapState(access.state === "registration_failed" ? "access-registration-failed" : "access-registration-unknown");
-      renderFirstTapUnworded(access.state === "registration_failed" ? "access-registration-failed" : "access-registration-unknown", {
-        heading: access.state === "registration_failed"
-          ? firstTapPlaceholder("access-registration-failed-heading")
-          : firstTapPlaceholder("access-registration-unknown-heading"),
-        primary: { label: "Try again", action: "first_tap_access_check", emphasis: "primary" },
-        secondary: notNow,
+      // Safari allows the story sites; whether Trace's page scripts are in
+      // place could not be read. Allowed is all that is said. Looking again
+      // asks Safari for nothing.
+      drawFirstTapAllowedOnly("access-registration-unknown", savedRecord, {
+        label: FIRST_TAP_WORDS.checkAgain, action: "first_tap_access_check", emphasis: "tertiary",
+      });
+      return;
+    case "registration_failed":
+      // Safari allows the story sites; Trace's page scripts are not in place.
+      // Trying again asks Safari for nothing.
+      drawFirstTapSheet("access-registration-failed", {
+        ...allowedKicker,
+        heading: FIRST_TAP_WORDS.registrationFailedHeading,
+        body: FIRST_TAP_WORDS.registrationFailedBody,
+        primary: { label: FIRST_TAP_WORDS.tryAgain, action: "first_tap_access_check", emphasis: "primary" },
+        result: "failure",
       });
       return;
     case "partial":
       // Some of the story sites, not all: never drawn as allowed.
-      setFirstTapState("access-partial");
-      renderFirstTapUnworded("access-partial", {
-        heading: firstTapPlaceholder("access-partial-heading"),
-        primary: ask,
-        secondary: notNow,
+      drawFirstTapSheet("access-partial", {
+        ...confirmation,
+        heading: FIRST_TAP_WORDS.partialHeading,
+        body: firstTapCounted(FIRST_TAP_WORDS.partialBody),
+        rule: true,
+        primary: firstTapButton.allow,
+        secondary: firstTapButton.notNow,
       });
       return;
     case "not_allowed":
-      // The request came back "no". Whether the reader said so, or Safari
-      // did without asking, is not something Trace can tell.
-      setFirstTapState("access-not-allowed");
-      renderFirstTapUnworded("access-not-allowed", {
-        heading: firstTapPlaceholder("access-not-allowed-heading"),
-        primary: keepReading,
-        // Back to the ask; the request is made by the reader's tap there.
-        secondary: { label: "Try again", action: "first_tap_show_ask", emphasis: "tertiary" },
-      });
-      return;
     case "could_not_ask":
-      // The request itself failed.
-      setFirstTapState("access-could-not-ask");
-      renderFirstTapUnworded("access-could-not-ask", {
-        heading: firstTapPlaceholder("access-could-not-ask-heading"),
-        primary: { label: "Try again", action: "first_tap_allow", emphasis: "primary" },
-        secondary: notNow,
+      // The request came back "no", or could not be made. Whether the reader
+      // said no or Safari did without asking is not something Trace can
+      // tell, so the reader is shown one thing: saving stays a tap away, and
+      // the ask is there to go back to. The save, if there was one, is kept.
+      drawFirstTapSheet("access-not-allowed", {
+        ...confirmation,
+        heading: FIRST_TAP_WORDS.notAllowedHeading,
+        body: FIRST_TAP_WORDS.notAllowedBody,
+        primary: firstTapButton.keepReading,
+        // Back to the ask; the request is made by the reader's tap there.
+        secondary: { label: FIRST_TAP_WORDS.tryAgain, action: "first_tap_show_ask", emphasis: "tertiary" },
       });
       return;
     default:
       // What came of the ask is not known: Safari's answer could not be
       // read, or never came. Never drawn as not allowed. The reader can ask
       // again, or have Trace look again.
-      setFirstTapState("access-not-known");
-      renderFirstTapUnworded("access-not-known", {
-        heading: firstTapPlaceholder("access-not-known-heading"),
-        primary: ask,
-        secondary: { label: "Check again", action: "first_tap_access_check", emphasis: "tertiary" },
-        checking: true,
+      drawFirstTapSheet("access-not-known", {
+        ...confirmation,
+        heading: FIRST_TAP_WORDS.notKnownHeading,
+        body: FIRST_TAP_WORDS.notKnownBody,
+        rule: true,
+        primary: firstTapButton.allow,
+        secondary: { label: FIRST_TAP_WORDS.checkAgain, action: "first_tap_access_check", emphasis: "tertiary" },
       });
   }
 }
 
-function renderFirstTapView(view) {
+/** Allowed, and no more than that: the confirmation and the story's record. */
+function drawFirstTapAllowedOnly(name, savedRecord, secondary) {
+  drawFirstTapSheet(name, savedRecord
+    ? {
+        kicker: FIRST_TAP_WORDS.allowedKicker,
+        kickerIcon: "check",
+        heading: savedRecord.title,
+        record: { ...savedRecord, title: "", heading: true },
+        primary: firstTapButton.keepReading,
+        secondary,
+        announce: firstTapSpoken(FIRST_TAP_WORDS.allowedKicker),
+        motion: "settled",
+      }
+    : {
+        glyph: "check",
+        heading: FIRST_TAP_WORDS.allowedKicker,
+        primary: firstTapButton.keepReading,
+        secondary,
+        motion: "settled",
+      });
+}
+
+function renderFirstTapView(view, { waiting = false } = {}) {
   const story = firstTapStory;
   if (!view || !story) return;
   if (firstTapPatienceTimer !== null) {
     clearTimeout(firstTapPatienceTimer);
     firstTapPatienceTimer = null;
   }
+  if (view.state !== "confirmed") {
+    // The ask follows a confirmed save, and arrives after each one afresh.
+    if (firstTapAskTimer !== null) clearTimeout(firstTapAskTimer);
+    firstTapAskTimer = null;
+    firstTapAskArrived = false;
+  }
   stopStoryConfirmation();
-  const identity = view.story ? { ok: true, ...view.story } : null;
+  const record = firstTapRecord(view);
+  const tryAgainAccount = { label: FIRST_TAP_WORDS.tryAgain, action: "first_tap_open", emphasis: "primary" };
+  const checkAgain = { label: FIRST_TAP_WORDS.checkAgain, action: "first_tap_check", emphasis: "primary" };
   switch (view.state) {
     case "opening":
-      setFirstTapState("connecting");
-      renderEarnedConnectingAccount();
-      return;
     case "account_changed":
+      drawFirstTapSheet("connecting", {
+        glyph: "progress",
+        glyphTone: "progress",
+        heading: FIRST_TAP_WORDS.connecting,
+      });
       // What was shown belonged to another account. Ask again for this one.
-      setFirstTapState("connecting");
-      renderEarnedConnectingAccount();
-      firstTapSend("open");
+      if (view.state === "account_changed") firstTapSend("open");
       return;
     case "account_missing":
-      setFirstTapState("account-missing");
-      renderEarnedConnectAccount(story);
-      configureEarnedActions({ label: "Try again", action: "first_tap_open", emphasis: "primary" });
-      return;
-    case "account_reconnect_required":
-    case "account_unknown":
-      // Not known is never drawn as signed out.
-      setFirstTapState("account-unreachable");
-      renderEarnedAccountUnreachable(story);
-      configureEarnedActions({ label: "Try again", action: "first_tap_open", emphasis: "primary" });
-      return;
-    case "awaiting_request":
-      setFirstTapState(view.preference === "off" ? "automatic-saving-off" : "save-on-request");
-      renderFirstTapUnworded(view.preference === "off" ? "automatic-saving-off" : "save-on-request", {
-        heading: view.preference === "off"
-          ? firstTapPlaceholder("automatic-saving-off-heading")
-          : firstTapPlaceholder("save-on-request-heading"),
-        primary: { label: "Save this story", action: "first_tap_save", emphasis: "primary" },
-        checking: true,
+      drawFirstTapSheet("account-missing", {
+        heading: FIRST_TAP_WORDS.accountMissingHeading,
+        body: FIRST_TAP_WORDS.accountMissingBody,
+        primary: tryAgainAccount,
+        result: "failure",
       });
       return;
+    case "account_unknown":
+      // Not known is never drawn as signed out.
+      drawFirstTapSheet("account-unreachable", {
+        heading: FIRST_TAP_WORDS.accountUnreachableHeading,
+        body: FIRST_TAP_WORDS.accountUnreachableBody,
+        primary: tryAgainAccount,
+      });
+      return;
+    case "account_reconnect_required":
+      // Known: Trace refused the account Safari holds.
+      drawFirstTapSheet("account-sign-in-again", {
+        heading: FIRST_TAP_WORDS.signInAgainHeading,
+        body: FIRST_TAP_WORDS.signInAgainBody,
+        primary: tryAgainAccount,
+        result: "failure",
+      });
+      return;
+    case "awaiting_request": {
+      const save = { label: FIRST_TAP_WORDS.saveThisStory, action: "first_tap_save", emphasis: "primary" };
+      if (view.preference === "off") {
+        drawFirstTapSheet("automatic-saving-off", {
+          heading: FIRST_TAP_WORDS.automaticSavingOffHeading,
+          record,
+          primary: save,
+          secondary: { label: FIRST_TAP_WORDS.turnAutomaticSavingOn, action: "first_tap_automatic_saving_on", emphasis: "tertiary" },
+          announce: `${firstTapSpoken(FIRST_TAP_WORDS.automaticSavingOffHeading)} ${firstTapSpoken(record.spokenName)}`,
+        });
+      } else {
+        // The preference could not be read, so nothing is saved unasked.
+        drawFirstTapSheet("save-on-request", {
+          heading: record.title,
+          record: { ...record, title: "", heading: true },
+          primary: save,
+          announce: firstTapSpoken(record.spokenName),
+        });
+      }
+      return;
+    }
     case "saving":
-      setFirstTapState("saving");
-      renderEarnedAccessPending(story);
+      drawFirstTapSheet("saving", {
+        heading: record.title,
+        record: {
+          ...record, title: "", heading: true, label: FIRST_TAP_WORDS.saving, status: "CHECKING", tone: "secondary",
+          spokenLabel: firstTapSpoken(FIRST_TAP_WORDS.saving),
+        },
+        announce: firstTapSpoken(FIRST_TAP_WORDS.saving),
+      });
       // How long to wait before saying so has not been measured from real
       // saves; until it is, this is the popup's existing patience.
       firstTapPatienceTimer = setTimeout(() => {
         firstTapPatienceTimer = null;
-        setFirstTapState("still-confirming");
-        renderEarnedDelayed(story);
-        configureEarnedActions(
-          { label: "Keep reading", action: "close", emphasis: "secondary" },
-          { label: "Check again", action: "first_tap_check", emphasis: "tertiary" },
-        );
+        drawFirstTapSheet("still-confirming", {
+          heading: record.title,
+          record: { ...record, title: "", heading: true },
+          ask: { heading: FIRST_TAP_WORDS.stillConfirmingHeading, body: FIRST_TAP_WORDS.stillConfirmingBody },
+          primary: { label: FIRST_TAP_WORDS.checkAgain, action: "first_tap_check", emphasis: "tertiary" },
+          announce: `${firstTapSpoken(FIRST_TAP_WORDS.stillConfirmingHeading)} ${FIRST_TAP_WORDS.stillConfirmingBody}`,
+        });
       }, STORY_CONFIRMATION_PATIENCE_MS);
       return;
     case "confirmed":
-      if (view.provenance === "saved_now") {
-        setFirstTapState("saved");
-        renderEarnedSaved(story, { entry: view.entry }, identity, false);
-      } else if (view.provenance === "already") {
-        setFirstTapState("already-in-library");
-        renderEarnedSaved(story, { entry: view.entry }, identity, true);
-      } else {
-        // In the Library; whether this reader's tap put it there is not known.
-        setFirstTapState("in-library");
-        renderEarnedSaved(story, { entry: view.entry }, identity, true, firstTapPlaceholder("in-library-kicker"));
-      }
-      configureFirstTapConfirmedActions();
+      drawFirstTapConfirmed(view, { waiting });
       return;
     case "failed":
       if (view.reason === "story_unavailable") {
-        setFirstTapState("story-unavailable");
-        renderEarnedUnavailable(story);
+        drawFirstTapSheet("story-unavailable", {
+          heading: FIRST_TAP_WORDS.unavailableHeading,
+          body: FIRST_TAP_WORDS.unavailableBody,
+          primary: { label: FIRST_TAP_WORDS.close, action: "close", emphasis: "tertiary" },
+          result: "failure",
+        });
         return;
       }
       if (view.reason === "free_limit_reached") {
+        leaveFirstTapSheet();
         setFirstTapState("library-full");
         renderEarnedLibraryFull(true);
         return;
       }
       if (view.dispatch === "sent_unconfirmed") {
-        setFirstTapState("save-unconfirmed");
-        renderFirstTapUnworded("save-unconfirmed", {
-          heading: firstTapPlaceholder("save-unconfirmed-heading"),
-          lead: firstTapPlaceholder("save-unconfirmed-body"),
-          primary: { label: "Check again", action: "first_tap_check", emphasis: "primary" },
+        // Sent, and not heard back from: never drawn as not saved.
+        drawFirstTapSheet("save-unconfirmed", {
+          heading: FIRST_TAP_WORDS.unconfirmedHeading,
+          body: FIRST_TAP_WORDS.unconfirmedBody,
+          primary: checkAgain,
+        });
+        return;
+      }
+      if (view.reason === "not_authenticated") {
+        // Trace turned the account down, so nothing was saved. Trying again
+        // is a new save the reader chose.
+        drawFirstTapSheet("save-sign-in-again", {
+          heading: FIRST_TAP_WORDS.signInAgainHeading,
+          body: FIRST_TAP_WORDS.signInAgainBody,
+          primary: { label: FIRST_TAP_WORDS.tryAgain, action: "first_tap_save", emphasis: "primary" },
+          result: "failure",
         });
         return;
       }
       // `never_sent` is the only failure that may say nothing was sent; a
-      // refusal is Trace's answer. Neither has its own words yet.
-      setFirstTapState(view.dispatch === "never_sent" ? "save-not-sent" : "save-refused");
-      renderFirstTapUnworded(view.dispatch === "never_sent" ? "save-not-sent" : "save-refused", {
-        heading: view.dispatch === "never_sent"
-          ? firstTapPlaceholder("save-not-sent-heading")
-          : firstTapPlaceholder("save-refused-heading"),
-        primary: { label: "Try again", action: "first_tap_save", emphasis: "primary" },
-        secondary: { label: "Not now", action: "close", emphasis: "tertiary" },
+      // refusal is Trace's answer.
+      drawFirstTapSheet(view.dispatch === "never_sent" ? "save-not-sent" : "save-refused", {
+        heading: view.dispatch === "never_sent" ? FIRST_TAP_WORDS.notSentHeading : FIRST_TAP_WORDS.refusedHeading,
+        body: view.dispatch === "never_sent" ? FIRST_TAP_WORDS.notSentBody : FIRST_TAP_WORDS.refusedBody,
+        primary: { label: FIRST_TAP_WORDS.tryAgain, action: "first_tap_save", emphasis: "primary" },
+        secondary: firstTapButton.notNow,
+        result: "failure",
       });
       return;
     case "presence_unknown":
       // Looking found nothing it could rely on. The reader may look again,
       // or choose to save again; that choice is theirs, never made for them.
-      setFirstTapState("still-unknown");
-      renderFirstTapUnworded("still-unknown", {
-        heading: firstTapPlaceholder("still-unknown-heading"),
-        lead: firstTapPlaceholder("still-unknown-body"),
-        primary: { label: "Check again", action: "first_tap_check", emphasis: "primary" },
-        secondary: { label: "Try again", action: "first_tap_save", emphasis: "tertiary" },
+      drawFirstTapSheet("still-unknown", {
+        heading: FIRST_TAP_WORDS.stillUnknownHeading,
+        body: FIRST_TAP_WORDS.stillUnknownBody,
+        primary: checkAgain,
+        secondary: { label: FIRST_TAP_WORDS.tryAgain, action: "first_tap_save", emphasis: "tertiary" },
       });
       return;
     default:
       // The story sites are allowed, or this is not a page to save from: the
       // popup's usual flow takes over and the first-tap save stands aside.
       firstTapSetAside = true;
-      delete document.body.dataset.traceFirstTapState;
+      leaveFirstTapSheet();
       void prepareEarnedPermissionFlow();
   }
 }
-// ── end of the first-tap seam ──────────────────────────────────────────────────
+
+/** Automatic saving, turned on from the sheet. What holds is then read again. */
+async function turnOnAutomaticSavingFromFirstTap() {
+  try {
+    await earnedStorageSet({ [PREF_AUTO_TRACK_KEY]: true, prefAutoTrackSetAt: Date.now() });
+  } catch {
+    // The read that follows says what the preference now is.
+  }
+  const input = document.getElementById("pref-auto-track");
+  if (input) input.checked = true;
+  if (firstTapAccess) void observeStorySiteAccess("access_check");
+  else firstTapSend("open");
+}
+// ── end of the first-tap sheet ─────────────────────────────────────────────────
 
 /** Draws the save's state and, over it, the state of the ask. */
 function drawFirstTap() {
@@ -2513,9 +2917,7 @@ function drawFirstTap() {
     if (view) renderFirstTapView(view);
     return;
   }
-  // While Safari's question is up, the confirmed save stays on show under it.
-  if (access.state === "waiting" && view?.state === "confirmed") renderFirstTapView(view);
-  renderFirstTapAccess(access);
+  renderFirstTapAccess(access, view);
 }
 
 /** The wait on a request is over. The request itself may still be out. */
@@ -2884,7 +3286,7 @@ async function initializeEarnedPermissionFlow() {
     // connect", asks again now and moves on by itself.
     if (changes[ACCOUNT_PROJECTION_REVISION_KEY]) {
       // A first-tap sheet that is waiting on the account asks again by itself.
-      if (firstTapPort && ["connecting", "account-missing", "account-unreachable"].includes(document.body.dataset.traceFirstTapState)) {
+      if (firstTapPort && ["connecting", "account-missing", "account-unreachable", "account-sign-in-again"].includes(document.body.dataset.traceFirstTapState)) {
         firstTapSend("open");
       }
       if (accountWait) accountMayHaveConnected();
@@ -3948,8 +4350,10 @@ function bindEarnedActionButtons() {
       if (action === "first_tap_access_check") void observeStorySiteAccess("access_check");
       if (action === "first_tap_show_ask") {
         firstTapAccess = null;
+        firstTapAskArrived = true;
         drawFirstTap();
       }
+      if (action === "first_tap_automatic_saving_on") void turnOnAutomaticSavingFromFirstTap();
       if (action === "save_story") void saveStoryFromPopup();
       if (action === "enable_auto_track") void enableAutomaticSavingFromPopup();
       if (action === "open_app") openTraceApp(isLikelyIosExtensionUi ? TRACE_IOS_APP_LIBRARY_URL : TRACE_HOME_URL);
