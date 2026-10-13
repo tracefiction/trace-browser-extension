@@ -32,15 +32,29 @@ export const FIRST_TAP_COLLECT_MESSAGE = "TRACE_FIRST_TAP_COLLECT";
 export const FIRST_TAP_MARK_MESSAGE = "TRACE_FIRST_TAP_MARK";
 /** Background to page: the story sites are allowed; carry on as any page. */
 export const FIRST_TAP_MANUAL_MODE_END_MESSAGE = "TRACE_PAGE_MANUAL_MODE_END";
+/** Page to background, from a page in manual mode: are the story sites allowed yet? */
+export const FIRST_TAP_MANUAL_MODE_QUERY_MESSAGE = "TRACE_PAGE_MANUAL_MODE_QUERY";
 export const FIRST_TAP_STORE_KEY = "traceFirstTapSaveV2";
 /** How long a finished result is shown again to a popup reopened on the page. */
 export const FIRST_TAP_RESULT_FRESH_MS = 10 * 60 * 1_000;
 /** How long a settled record is kept, and how many records at most. */
 export const FIRST_TAP_RECORD_TTL_MS = 24 * 60 * 60 * 1_000;
 export const FIRST_TAP_RECORD_LIMIT = 20;
+/**
+ * How long a doubt that can no longer be placed on a story or an account
+ * holds. While it does, no story found on this install is "already there".
+ * It is not kept for good: one save cut off in a private tab would otherwise
+ * cost every account on the install that word for ever.
+ */
+export const FIRST_TAP_UNPLACED_DOUBT_TTL_MS = 2_592_000_000; // thirty days
 
 export type FirstTapAccount =
-  | Readonly<{ state: "verified"; binding: string }>
+  /**
+   * `binding` is the account's session and changes when it signs in again.
+   * `owner` is the account itself, the same across its sessions. It is used
+   * only inside a digest salted for this install, and is never kept or shown.
+   */
+  | Readonly<{ state: "verified"; binding: string; owner: string }>
   /** Known: Safari holds no account, or Trace refused the one it holds. */
   | Readonly<{ state: "missing" | "reconnect_required" }>
   /** Not known: the account could not be read just now. Never "signed out". */
@@ -107,11 +121,16 @@ export type FirstTapView =
   /** A read-only look found nothing it could rely on. Never "not saved". */
   | Readonly<{ state: "presence_unknown"; workKey: string }>;
 
-export type FirstTapTab = Readonly<{
-  id?: number;
-  url?: string;
-  active?: boolean;
-  incognito?: boolean;
+/**
+ * The tab the reader opened Trace on, as the popup read it in that tap. The
+ * background looks no tab up for itself: the page it then reaches under the
+ * tap's own access has to name the same story, or nothing is sent.
+ */
+export type FirstTapTapped = Readonly<{
+  tabId: number;
+  url: string;
+  /** Whether the tab is a private one; null when the browser did not say. */
+  private: boolean | null;
 }>;
 
 type Settled =
@@ -128,8 +147,15 @@ type Record = {
   readonly scope: string;
   readonly binding: string;
   readonly workKey: string;
+  /**
+   * A digest of the account itself and the story, salted for this install.
+   * Unlike `key`, it is the same when the account signs in again.
+   */
+  readonly work: string;
   /** False for a private tab: nothing about it is written to storage. */
   persist: boolean;
+  /** Counted in the store as a write out for which no record is kept. */
+  unkept: boolean;
   at: number;
   outcome: Outcome | null;
   /**
@@ -155,17 +181,38 @@ type StoredRecord = Readonly<{
   at: number;
   inDoubt: boolean;
   outcome: Settled | null;
+  /** While in doubt only: a digest of the account itself and the story. */
+  w?: string;
 }>;
 type Stored = {
   salt: string;
-  /** Accounts for which a record still in doubt had to be dropped. */
+  /** Account sessions for which a record still in doubt had to be dropped. */
   forgot: string[];
   records: StoredRecord[];
+  /**
+   * Writes still in doubt, made under an account session that has since
+   * ended: one digest each, of the account itself and the story. The same
+   * account may sign in again, and then that story found in its Library is
+   * never "already". Only that account confirming the story clears one;
+   * another account's save of the same story has a different digest.
+   */
+  doubts: string[];
+  /**
+   * Writes handed to the network for which no record is kept (a private tab)
+   * and whose answer has not come, and when the last went out. It names
+   * nothing. One left over by a background that has gone is a write of unknown
+   * fate that nothing here can place any more.
+   */
+  unkept: number;
+  unkeptAt: number | null;
+  /**
+   * When a doubt was last lost that can no longer be placed on a story or an
+   * account. It holds for `FIRST_TAP_UNPLACED_DOUBT_TTL_MS`.
+   */
+  unplacedAt: number | null;
 };
 
 export interface FirstTapPorts {
-  /** The tab the popup says it was opened on, by id. Never a search. */
-  tab(tappedTabId: number): Promise<FirstTapTab | null>;
   /** Whether all the story sites are allowed; null when it could not be read. */
   grantComplete(): Promise<boolean | null>;
   /** Read for this open, never from a kept snapshot. */
@@ -184,8 +231,6 @@ export interface FirstTapPorts {
   presence(workKey: string): Promise<StoryPresence>;
   /** Asks the page to show its mark for a confirmed story. Best effort. */
   mark(tabId: number, workKey: string): Promise<void>;
-  /** Tells a page it injected to leave manual mode. Best effort. */
-  endManualMode(tabId: number): Promise<void>;
   readStore(): Promise<unknown>;
   writeStore(value: unknown): Promise<void>;
   /** A digest of `text` that cannot be read back. */
@@ -197,6 +242,10 @@ export interface FirstTapPorts {
 type Listener = (view: FirstTapView) => void;
 type Sheet = { tabId: number; key: string | null; workKey: string | null };
 type StoryPage = { tabId: number; workKey: string; url: string; hostKind: "ao3" | "ffn"; persist: boolean };
+
+const isTapped = (value: unknown): value is FirstTapTapped =>
+  isRecord(value) && Number.isInteger(value.tabId) && typeof value.url === "string" &&
+  (value.private === null || typeof value.private === "boolean");
 
 function isRecord(value: unknown): value is { [key: string]: unknown } {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -256,15 +305,24 @@ function storedFrom(value: unknown): Stored | null {
       k: item.k, s: item.s, at: item.at,
       inDoubt: item.inDoubt === true,
       outcome: settledFrom(item.outcome),
+      ...(typeof item.w === "string" ? { w: item.w } : {}),
     });
   }
+  const strings = (list: unknown): string[] =>
+    (Array.isArray(list) ? list : []).filter((item): item is string => typeof item === "string");
   return {
     salt: value.salt,
-    forgot: (Array.isArray(value.forgot) ? value.forgot : []).filter(
-      (scope): scope is string => typeof scope === "string",
-    ),
+    forgot: strings(value.forgot),
     records,
+    doubts: strings(value.doubts),
+    unkept: Number.isInteger(value.unkept) && (value.unkept as number) > 0 ? value.unkept as number : 0,
+    unkeptAt: typeof value.unkeptAt === "number" ? value.unkeptAt : null,
+    unplacedAt: typeof value.unplacedAt === "number" ? value.unplacedAt : null,
   };
+}
+
+function emptyStore(salt: string): Stored {
+  return { salt, forgot: [], records: [], doubts: [], unkept: 0, unkeptAt: null, unplacedAt: null };
 }
 
 /**
@@ -309,16 +367,21 @@ export class FirstTapSave {
     return this.#injected.get(tabId) === workKey;
   }
 
+  /** Tabs whose page script this background injected, while it has been awake. */
+  injectedTabs(): readonly number[] {
+    return [...this.#injected.keys()];
+  }
+
   /**
-   * The reader opened Trace on `tappedTabId`. Returns what is known now; later
+   * The reader opened Trace on `tapped`. Returns what is known now; later
    * changes to the same record reach `listener` until `closed` is called.
    */
   async opened(
     listener: Listener,
-    tappedTabId: number,
+    tapped: FirstTapTapped,
     options: { readonly requested?: boolean } = {},
   ): Promise<FirstTapView> {
-    const page = this.#storyPage(await this.#ports.tab(tappedTabId).catch(() => null), tappedTabId);
+    const page = this.#storyPage(tapped);
     if (page === null) return Object.freeze({ state: "not_applicable" });
     const sheet: Sheet = this.#sheets.get(listener) ?? { tabId: page.tabId, key: null, workKey: null };
     sheet.tabId = page.tabId;
@@ -343,7 +406,7 @@ export class FirstTapSave {
       });
     }
 
-    const record = await this.#recordFor(account.binding, page);
+    const record = await this.#recordFor(account, page);
     // The popup may have closed while this was being worked out.
     if (this.#sheets.get(listener) === sheet) sheet.key = record.key;
     if (record.running) return this.#view(record);
@@ -431,60 +494,88 @@ export class FirstTapSave {
     }
   }
 
-  /**
-   * The story sites are now allowed and the page scripts registered. Pages
-   * this background put into manual mode are told to carry on as any page.
-   */
-  async leaveManualMode(): Promise<void> {
-    await Promise.all([...this.#injected.keys()].map((tabId) =>
-      this.#ports.endManualMode(tabId).catch(() => undefined)));
-  }
-
-  #storyPage(tab: FirstTapTab | null, tappedTabId: number): StoryPage | null {
-    // The tab named must be the one on show in its window, and a story page.
-    if (!tab || tab.id !== tappedTabId || tab.active === false || typeof tab.url !== "string") return null;
-    const hostKind = archiveHostKindFromSender({ url: tab.url });
-    if (hostKind === null || isBlockedArchivePath(tab.url, hostKind)) return null;
-    const workKey = workKeyFromArchiveUrl(tab.url, hostKind);
+  #storyPage(tapped: FirstTapTapped): StoryPage | null {
+    if (!isTapped(tapped)) return null;
+    const hostKind = archiveHostKindFromSender({ url: tapped.url });
+    if (hostKind === null || isBlockedArchivePath(tapped.url, hostKind)) return null;
+    const workKey = workKeyFromArchiveUrl(tapped.url, hostKind);
+    // Kept only for a tab known to be an ordinary one. Where the browser did
+    // not say, the tab is treated as private and nothing about it is written.
     return workKey === null
       ? null
-      : { tabId: tappedTabId, workKey, url: tab.url, hostKind, persist: tab.incognito !== true };
+      : { tabId: tapped.tabId, workKey, url: tapped.url, hostKind, persist: tapped.private === false };
   }
 
   // --- Records ----------------------------------------------------------------
 
   #loadStore(): Promise<{ stored: Stored; readable: boolean }> {
     this.#store ??= this.#ports.readStore().then(
-      (value) => ({
-        stored: storedFrom(value) ?? { salt: this.#ports.randomSalt(), forgot: [], records: [] },
-        readable: true,
-      }),
+      async (value) => {
+        const stored = storedFrom(value) ?? emptyStore(this.#ports.randomSalt());
+        // A write counted by a background that has gone: it went out from a
+        // tab nothing is kept for, and its answer was never recorded. Which
+        // story and which account it was for cannot be recovered, so for a
+        // while from when it went out nothing found is "already" here.
+        if (stored.unkept > 0) {
+          this.#unplaced(stored, stored.unkeptAt ?? this.#ports.now());
+          stored.unkept = 0;
+          stored.unkeptAt = null;
+          await this.#write(stored);
+        }
+        return { stored, readable: true };
+      },
       // Storage could not be read. A salt for this worker's life still keeps
       // records apart; nothing is kept, and nothing earlier is known.
-      () => ({ stored: { salt: this.#ports.randomSalt(), forgot: [], records: [] }, readable: false }),
+      () => ({ stored: emptyStore(this.#ports.randomSalt()), readable: false }),
     );
     return this.#store;
   }
 
   /** The record for this account and story, from memory, storage, or new. */
-  async #recordFor(binding: string, page: StoryPage): Promise<Record> {
+  async #recordFor(
+    { binding, owner }: Readonly<{ binding: string; owner: string }>,
+    page: StoryPage,
+  ): Promise<Record> {
     const { stored, readable } = await this.#loadStore();
     const scope = await this.#ports.digest(`${stored.salt}\u0000account\u0000${binding}`);
     const key = await this.#ports.digest(`${stored.salt}\u0000story\u0000${binding}\u0000${page.workKey}`);
+    const work = await this.#ports.digest(`${stored.salt}\u0000work\u0000${owner}\u0000${page.workKey}`);
 
     // Another account's records are discarded as soon as the change is seen.
+    // What they could say of a story is discarded with them; a doubt is not.
+    // "Another account" here is another session, and the same reader may have
+    // signed out and in again: a write of theirs whose fate is not known may
+    // be why a story is in the Library now. So a record in doubt leaves a
+    // digest of its account and story behind, which no other account's save
+    // can match or clear, and a doubt that cannot be placed that way is
+    // carried, for a while, as one about every story.
+    let changed = false;
     for (const [otherKey, other] of this.#records) {
-      if (other.binding !== binding && !other.running) this.#records.delete(otherKey);
+      if (other.binding === binding) continue;
+      if (other.inDoubt && this.#carryDoubt(stored, other)) changed = true;
+      if (!other.running) this.#records.delete(otherKey);
     }
-    if (stored.records.some((item) => item.s !== scope) || stored.forgot.some((item) => item !== scope)) {
+    for (const item of stored.records) {
+      if (item.s === scope) continue;
+      changed = true;
+      if (item.inDoubt) this.#carryDoubt(stored, { persist: true, work: item.w });
+    }
+    if (stored.forgot.some((item) => item !== scope)) {
+      changed = true;
+      this.#carryDoubt(stored, { persist: false, work: undefined });
+    }
+    if (changed) {
       stored.records = stored.records.filter((item) => item.s === scope);
       stored.forgot = stored.forgot.filter((item) => item === scope);
       if (readable) await this.#write(stored);
     }
 
     // "Already" needs the whole of what came before: records that are kept
-    // (not a private tab), that could be read, and none dropped in doubt.
-    const priorKnown = page.persist && readable && !stored.forgot.includes(scope);
+    // (not a private tab), that could be read, none dropped in doubt, and no
+    // write in doubt for this story left by a session that has ended.
+    const priorKnown = page.persist && readable &&
+      !stored.forgot.includes(scope) && !this.#unplacedHolds(stored) &&
+      !stored.doubts.includes(work);
     const existing = this.#records.get(key);
     if (existing) {
       existing.persist = existing.persist && page.persist;
@@ -493,7 +584,7 @@ export class FirstTapSave {
     }
     const kept = page.persist ? stored.records.find((item) => item.k === key) : undefined;
     const record: Record = {
-      key, scope, binding, workKey: page.workKey, persist: page.persist,
+      key, scope, binding, workKey: page.workKey, work, persist: page.persist, unkept: false,
       at: kept?.at ?? this.#ports.now(),
       outcome: kept?.outcome ?? null,
       inDoubt: kept?.inDoubt === true,
@@ -552,6 +643,7 @@ export class FirstTapSave {
     if (record.outcome?.kind === "confirmed") {
       record.inDoubt = false;
       record.pageSave = false;
+      await this.#doubtSettled(record);
     }
     await this.#persist(record);
     const view = this.#view(record);
@@ -589,21 +681,83 @@ export class FirstTapSave {
 
   #write(stored: Stored): Promise<void> {
     this.#writes = this.#writes
-      .then(() => this.#ports.writeStore({ salt: stored.salt, forgot: [...stored.forgot], records: [...stored.records] }))
+      .then(() => this.#ports.writeStore({
+        salt: stored.salt, forgot: [...stored.forgot], records: [...stored.records],
+        doubts: [...stored.doubts], unkept: stored.unkept, unkeptAt: stored.unkeptAt,
+        unplacedAt: stored.unplacedAt,
+      }))
       .catch(() => undefined);
     return this.#writes;
   }
 
+  /**
+   * This story is confirmed in the Library for the account now signed in. A
+   * doubt an ended session of this same account left about it has nothing
+   * more to say. A doubt another account left about the same story has a
+   * different digest and is not touched.
+   */
+  async #doubtSettled(record: Record): Promise<void> {
+    const { stored, readable } = await this.#loadStore();
+    if (!stored.doubts.includes(record.work)) return;
+    stored.doubts = stored.doubts.filter((item) => item !== record.work);
+    if (readable) await this.#write(stored);
+  }
+
+  /**
+   * A record that is not kept still counts its write while that write is out
+   * and unanswered. The count says nothing of the story, the tab or the
+   * account; it is what lets a later background know something went missing.
+   */
+  async #countUnkept(record: Record): Promise<void> {
+    if (record.unkept === record.inDoubt) return;
+    const { stored, readable } = await this.#loadStore();
+    if (!readable) return;
+    record.unkept = record.inDoubt;
+    stored.unkept = Math.max(0, stored.unkept + (record.inDoubt ? 1 : -1));
+    if (record.inDoubt) stored.unkeptAt = this.#ports.now();
+    await this.#write(stored);
+  }
+
+  /** Notes a doubt that can no longer be placed, as of `at` or later. */
+  #unplaced(stored: Stored, at: number): void {
+    stored.unplacedAt = Math.max(stored.unplacedAt ?? at, at);
+  }
+
+  /** Whether such a doubt still holds. A clock set back does not end it early. */
+  #unplacedHolds(stored: Stored): boolean {
+    return stored.unplacedAt !== null &&
+      this.#ports.now() - stored.unplacedAt < FIRST_TAP_UNPLACED_DOUBT_TTL_MS;
+  }
+
   async #drop(record: Record): Promise<void> {
     const { stored, readable } = await this.#loadStore();
-    if (!stored.records.some((item) => item.k === record.key)) return;
+    let changed = stored.records.some((item) => item.k === record.key);
     stored.records = stored.records.filter((item) => item.k !== record.key);
-    if (readable) await this.#write(stored);
+    // The write this record had out may still have landed.
+    if (record.inDoubt && this.#carryDoubt(stored, record)) changed = true;
+    if (changed && readable) await this.#write(stored);
+  }
+
+  /**
+   * Keeps a doubt past the account session it arose under: by the digest of
+   * its account and story where one may be kept, and otherwise, or past the
+   * limit, as a doubt about every story that holds for a while.
+   */
+  #carryDoubt(stored: Stored, from: { readonly persist: boolean; readonly work: string | undefined }): boolean {
+    // Nothing of a private tab's story is written, not even its digest.
+    if (from.persist && from.work !== undefined) {
+      if (stored.doubts.includes(from.work)) return false;
+      stored.doubts.push(from.work);
+      if (stored.doubts.length <= FIRST_TAP_RECORD_LIMIT) return true;
+      stored.doubts = stored.doubts.slice(-FIRST_TAP_RECORD_LIMIT);
+    }
+    this.#unplaced(stored, this.#ports.now());
+    return true;
   }
 
   /** Writes what a record now says. No work key, title, author or address. */
   async #persist(record: Record): Promise<void> {
-    if (!record.persist) return;
+    if (!record.persist) return this.#countUnkept(record);
     const { stored, readable } = await this.#loadStore();
     if (!readable) return;
     const now = this.#ports.now();
@@ -611,7 +765,10 @@ export class FirstTapSave {
     let records = stored.records.filter((item) => item.k !== record.key);
     // Nothing settled and nothing in doubt is nothing worth keeping.
     if (outcome !== null || record.inDoubt) {
-      records.push({ k: record.key, s: record.scope, at: record.at, inDoubt: record.inDoubt, outcome });
+      records.push({
+        k: record.key, s: record.scope, at: record.at, inDoubt: record.inDoubt, outcome,
+        ...(record.inDoubt ? { w: record.work } : {}),
+      });
     }
     // A settled record ages out. One still in doubt is kept until the limit
     // forces it out, and then the account is marked: from there on a story
@@ -663,6 +820,15 @@ export class FirstTapSave {
           collected.error === "story_unavailable" ? "story_unavailable" : "page_unreachable",
           "never_sent",
         );
+      }
+      // The page reached under this tap names its own story. The address the
+      // popup gave is believed only when the page agrees with it.
+      if (collected.workKey !== record.workKey) return await fail("page_unreachable", "never_sent");
+      // The page's own word that it is private outranks a popup that said
+      // otherwise or nothing: from here nothing about this story is kept.
+      if (collected.private === true && record.persist) {
+        record.persist = false;
+        record.priorKnown = false;
       }
       // The page's reply is checked exactly as a save it had sent itself.
       const command = storyTrackCommandFromMessage(

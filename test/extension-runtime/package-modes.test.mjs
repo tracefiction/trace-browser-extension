@@ -20,6 +20,37 @@ const RELEASE_ENV = {
   TRACE_WEB_ORIGIN: "https://www.tracefiction.com",
 };
 
+/**
+ * The background wiring of the first-tap save and of the ask and hand-over
+ * that follow it. A package built with the switch off has none of it.
+ */
+const FIRST_TAP_WIRING = [
+  "firstTapSave: true",
+  "trace-first-tap-popup-v1",
+  "TRACE_FIRST_TAP_COLLECT",
+  "TRACE_FIRST_TAP_MARK",
+  "TRACE_PAGE_MANUAL_MODE_END",
+  "TRACE_PAGE_MANUAL_MODE_QUERY",
+  "access_asking",
+  "access_answered",
+  "access_check",
+  "access_waiting",
+  "access_unanswered",
+  "could_not_ask",
+  "HAND_OVER_BY_RELOADING_THE_PAGE",
+  "traceFirstTapSaveV2",
+];
+
+function assertNoFirstTapWiring(root, what) {
+  const background = fs.readFileSync(path.join(root, "background.js"), "utf8");
+  for (const wiring of FIRST_TAP_WIRING) {
+    assert.equal(background.includes(wiring), false, `${what}: background.js carries ${wiring}`);
+  }
+  assert.equal(fs.existsSync(path.join(root, "page-manual-mode.js")), false, `${what}: carries the manual-mode page file`);
+  const config = fs.readFileSync(path.join(root, "popup-config.js"), "utf8");
+  assert.equal(config.includes("firstTapSave"), false, `${what}: popup config turns the first-tap save on`);
+}
+
 function runBuild(script) {
   const result = spawnSync("npm", ["run", script], {
     cwd: ROOT,
@@ -313,6 +344,9 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     runBuild("build:release");
     assertCollectorModeConfig(path.join(ROOT, "dist", "chrome"), "kernel");
     assertCollectorModeConfig(path.join(ROOT, "dist", "firefox"), "kernel");
+    assertNoFirstTapWiring(RESOURCES, "Mac Safari");
+    assertNoFirstTapWiring(path.join(ROOT, "dist", "chrome"), "Chrome");
+    assertNoFirstTapWiring(path.join(ROOT, "dist", "firefox"), "Firefox");
     // Mac Safari, Chrome and Firefox keep required story sites, `tabs` and
     // manifest-declared page scripts. Only the iPhone build below differs.
     assertStoreText();
@@ -382,6 +416,7 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     // The earlier iPhone shape stays buildable, unchanged to the byte.
     runBuild("build:ios-earned-permission-onboarding:required-hosts:release");
     assertStoreText();
+    assertNoFirstTapWiring(RESOURCES, "the required-hosts iPhone build");
     const earnedSafariManifest = manifest(RESOURCES);
     const earnedSafariConfig = fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8");
     assert.deepEqual(earnedSafariManifest.permissions, [
@@ -539,6 +574,7 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     assert.doesNotMatch(iphoneBackground, /firstTapSave: true/);
     assert.doesNotMatch(iphoneBackground, /trace-first-tap-popup-v1/);
     assert.doesNotMatch(iphoneBackground, /TRACE_FIRST_TAP_COLLECT/);
+    assertNoFirstTapWiring(RESOURCES, "the iPhone store build");
     assert.equal(fs.existsSync(path.join(RESOURCES, "page-manual-mode.js")), false);
     for (const browser of ["chrome", "firefox"]) {
       assert.equal(fs.existsSync(path.join(ROOT, "dist", browser, "page-manual-mode.js")), false);
@@ -595,6 +631,11 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     assert.match(proofBackground, /trace-first-tap-popup-v1/, "the popup's port is wired");
     assert.match(proofBackground, /TRACE_FIRST_TAP_COLLECT/);
     assert.match(proofBackground, /TRACE_PAGE_MANUAL_MODE_END/);
+    // The ask and the hand-over are part of the same switch.
+    assert.match(proofBackground, /TRACE_PAGE_MANUAL_MODE_QUERY/, "a page in manual mode can ask for itself");
+    assert.match(proofBackground, /access_asking/, "the ask is wired");
+    assert.match(proofBackground, /HAND_OVER_BY_RELOADING_THE_PAGE = false/, "handing over without a reload");
+    assert.doesNotMatch(proofBackground, /tabs, "get", \[tapped/, "and no tab is looked up for a tap");
     assert.match(proofBackground, /"page-manual-mode\.js"/, "and the manual-mode file is what it injects first");
     assert.match(
       fs.readFileSync(path.join(RESOURCES, "page-manual-mode.js"), "utf8"),

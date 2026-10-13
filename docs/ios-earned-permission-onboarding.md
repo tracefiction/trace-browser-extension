@@ -80,10 +80,13 @@ It asks Safari for nothing more: the manifest is the same.
 With it on, opening Trace on a story page does this:
 
 1. The popup opens a port to the background and names the tab it was opened
-   on. Only Trace's own popup can open that port. The background reads that
-   one tab by its id; it searches for no tab, and saves nothing from a tab
-   that is not the one on show in its window. Injection itself works only in
-   the tab the reader opened Trace on, because that is all `activeTab` covers.
+   on: its id, its address and whether it is private, as the popup read them
+   in the reader's tap. Only Trace's own popup can open that port. The
+   background looks no tab up for itself, by id or by search: a tab lookup
+   with no address filter can make Safari ask the reader about website
+   access. Injection itself works only in the tab the reader opened Trace
+   on, because that is all `activeTab` covers, and the page reached there has
+   to name the same story as the address the popup gave, or nothing is sent.
 2. The background reads the account for this open. An account it could not
    read is reported as not known, never as signed out. With automatic saving
    off, nothing is saved until the reader asks.
@@ -95,9 +98,75 @@ With it on, opening Trace on a story page does this:
    them exactly as a save the page had sent, and makes the save through the
    same guarded path as every other: look first, write only if absent, look
    again if the write's answer is uncertain.
-5. When the story sites are later allowed and the page scripts registered, the
-   background tells the pages it injected to leave manual mode. The same
-   script carries on as on any page; no second one is started.
+5. After a confirmed save the popup offers the ask for lasting access,
+   described below.
+6. When the story sites are allowed and the page scripts registered, a page
+   in manual mode is told to leave it. The same script carries on as on any
+   page, with no reload: no second one is started, the story is not saved
+   again, and what it sends from then on is stamped automatic.
+
+#### The ask for lasting access
+
+The request (`permissions.request` for the five story-site patterns) is made
+by the popup, in the reader's tap on the popup's own button and before
+anything is awaited: Safari raises its question only for a request made that
+way. A second tap while one is out does nothing.
+
+What came of it is said by the background, from what it reads afterwards. What
+the request returned is passed along as evidence and is never the answer:
+
+| State | When |
+| --- | --- |
+| waiting | The request is out. While it is, the popup reads what Safari allows again every 2 seconds, and when it comes back into view. |
+| allowed | All five story sites read back as allowed just now, and the page scripts are registered. It carries what was read of the account and of the automatic-saving preference, so the popup claims saving is automatic only when both were read as so. |
+| registration failed / not known | The sites are allowed; the page scripts are not registered, or that could not be read. Trying again asks Safari for nothing. |
+| partly allowed | Fewer than five. Never drawn as allowed. |
+| not allowed | The request came back false, and the sites do not read as allowed. |
+| could not ask | The request threw. |
+| not known | What Safari allows could not be read; the request came back true and the read says no; it came back with neither; or it did not come back within a minute. Never drawn as not allowed. The reader can ask again. |
+| not asked | Not allowed, with no request made by this popup. The save is shown with the ask. |
+
+No state says how long the access lasts. Safari reports a grant for one day
+and a lasting one the same way, so Trace cannot tell them apart. Nor can it
+tell a reader who answered "no" from Safari answering "no" without showing its
+question: both are a request that came back false. Nothing is read into how
+long a request took.
+
+The wait does not depend on the request ever coming back. If the sites read as
+allowed while it is out, the popup goes on as allowed. After 60 seconds with
+neither an answer nor the sites allowed it says it does not know, and offers
+the ask again; a request that comes back later is still passed to the
+background. A minute is far longer than Safari's question takes to answer, and
+since a later answer is still read, the deadline costs a slow reader nothing.
+No wait, however long, is taken as "no".
+
+While the sheet is open the popup listens for Safari adding or removing
+website access, and has the background read again when it does or when the
+popup comes back into view, so "allowed" is not left on show after the access
+it describes has gone.
+
+A popup closed while Safari's question is up loses nothing. Nothing about the
+ask is kept; the next popup reads what holds. Opened on a story with the sites
+allowed but no page yet seen running under them, the popup shows what the
+background read, and does not reload the story.
+
+#### From the first manual save to automatic saving
+
+Which pages are in manual mode is not taken from the background's memory. It
+may have slept since it injected them, and the reader may have allowed the
+sites in Safari's settings with no popup open. So, once the sites are allowed
+and the scripts registered (when the registration finishes, when a background
+starts, and when a popup reads "allowed"), the background asks for the open
+story-site tabs by address and tells each one; a page that is not in manual
+mode refuses. A page in manual mode also asks for itself when the reader comes
+back to it, which reaches a background that was asleep when the sites were
+allowed. The scripts that were never on that page (the Library overlay, saved
+filters) are put in by the same recovery that serves every open story tab
+after a grant, each behind its own guard against starting twice.
+
+`HAND_OVER_BY_RELOADING_THE_PAGE` in `story-site-access.mts` is the one switch
+for the fallback: when `true`, a page in manual mode is reloaded once instead,
+and the registered scripts start in the new document. It is `false`.
 
 There is one record for each account and story, held by the background. The
 popup draws it and the page shows its mark from it, once no popup is open over
@@ -114,7 +183,11 @@ What a record says:
   it there is not known. A write is recorded as in doubt before it goes out.
   While one is in doubt for a story, in a private tab, when storage cannot be
   read, or after a record in doubt had to be dropped, a story found is never
-  called already there.
+  called already there. A doubt outlives the account session it arose under:
+  the same reader may have signed out and in again, so a story with a write
+  in doubt from an ended session of an account is found, not already there,
+  for that account, until Trace has confirmed it for that account. Another
+  account saving the same story neither raises nor clears it.
 - **Never sent, refused, or sent and unconfirmed.** Recorded around the write
   itself. Only "never sent" supports saying nothing was sent.
 - **Check again** only looks. It can report a story found or say it does not
@@ -133,7 +206,19 @@ account's session, one of that and the story's key), a time, whether a write is
 in doubt, and the outcome with the Library entry's status and chapter numbers.
 It holds no work key, address, title or author. A settled record is dropped
 after 24 hours; one still in doubt is kept until the limit forces it out.
-Nothing is kept for a tab in Private Browsing.
+A record in doubt also holds a digest, salted the same way, of the account
+itself and the story. When its account session ends, that digest is what
+stays (at most 20), so that the doubt can still be placed on that account's
+story; the session's records go.
+
+Nothing about a story is kept for a tab in Private Browsing, or for a tab the
+browser did not report as an ordinary one. While a write from such a tab is
+out and unanswered, a count of such writes and the time of the last are kept:
+two numbers, with no story, tab or account. A background that starts and finds
+the count above zero knows a write of unknown fate went missing with the one
+before it, and calls no story on this install already there until 30 days
+after that write. The same 30 days apply to any other doubt that can no longer
+be placed on an account and a story.
 
 ## User contract
 
