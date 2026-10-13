@@ -5,6 +5,7 @@ export * from "./account-projection.mjs";
 export * from "./library-command.mjs";
 export * from "./metadata-contribution.mjs";
 export * from "./publication-policy.mjs";
+export * from "./safari-readiness.mjs";
 export * from "./saved-filter-sync.mjs";
 export * from "./session-model.mjs";
 export * from "./session-service.mjs";

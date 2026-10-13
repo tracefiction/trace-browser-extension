@@ -85,6 +85,8 @@ type Environment = Readonly<{
   alarms?: AlarmsPort;
   /** Called when page scripts were just registered, or registered late. */
   onScriptsRegistered?: () => void;
+  /** Called as each reconcile ends, with its result, or null when it could not finish. */
+  onReconcileEnded?: (result: EarnedPermissionRegistrationResult | null) => void;
 }>;
 
 const DEFAULT_RECONCILE_TIMEOUT_MS = 5_000;
@@ -144,6 +146,8 @@ function storedState(value: unknown): StoredState {
 export class EarnedPermissionRegistrationController {
   readonly #environment: Environment;
   #generation = 0;
+  #running = 0;
+  readonly #expected = new Set<Promise<unknown>>();
   #tail: Promise<EarnedPermissionRegistrationResult> = Promise.resolve({
     ok: false,
     completeGrant: false,
@@ -156,12 +160,50 @@ export class EarnedPermissionRegistrationController {
     this.#environment = environment;
   }
 
+  /**
+   * Work that will reconcile, made known the moment it is set off. An event
+   * that leads to a reconcile does other things first; without this, someone
+   * asking in between would be told nothing is under way.
+   */
+  expect<T>(work: Promise<T>): Promise<T> {
+    this.#expected.add(work);
+    const done = (): void => { this.#expected.delete(work); };
+    work.then(done, done);
+    return work;
+  }
+
+  /** Whether a reconcile is running, waiting its turn, or about to be asked for. */
+  pending(): boolean {
+    return this.#running > 0 || this.#expected.size > 0;
+  }
+
+  /** Resolves once `pending()` is false. */
+  async idle(): Promise<void> {
+    while (this.pending()) {
+      await Promise.allSettled([this.#tail, ...this.#expected]);
+    }
+  }
+
+  /** True once nothing is pending; false if that takes longer than `limitMs`. */
+  settled(limitMs: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), limitMs);
+      void this.idle().then(() => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
+  }
+
   reconcile(): Promise<EarnedPermissionRegistrationResult> {
+    this.#running += 1;
     const next = this.#tail.then(
       () => this.#bounded(),
       () => this.#bounded(),
     );
     this.#tail = next;
+    const ended = (): void => { this.#running -= 1; };
+    next.then(ended, ended);
     return next;
   }
 
@@ -570,13 +612,21 @@ export function installEarnedPermissionRegistrationRuntime(
   };
   const reconcile = (): Promise<EarnedPermissionRegistrationResult> => {
     const result = controller.reconcile();
+    const ended = (value: EarnedPermissionRegistrationResult | null): void => {
+      try { environment.onReconcileEnded?.(value); } catch { /* Telling is best effort. */ }
+    };
     void result
       .then(
-        (value) =>
-          value.ok || value.error === "permission_incomplete"
+        (value) => {
+          ended(value);
+          return value.ok || value.error === "permission_incomplete"
             ? finished(value.ok, value.changed)
-            : tryLater(),
-        () => tryLater(),
+            : tryLater();
+        },
+        () => {
+          ended(null);
+          return tryLater();
+        },
       )
       .catch(() => undefined);
     return result;
@@ -623,14 +673,14 @@ export function installEarnedPermissionRegistrationRuntime(
     return true;
   });
   environment.permissions.onAdded?.addListener(() => {
-    void reconcileAfresh(true);
+    void controller.expect(reconcileAfresh(true));
   });
   environment.permissions.onRemoved?.addListener(() => {
     void reconcile().catch(() => undefined);
   });
   runtime.onInstalled?.addListener((details) => {
     if (details.reason === "install" || details.reason === "update") {
-      void reconcileAfresh(false);
+      void controller.expect(reconcileAfresh(false));
     }
   });
   void reconcile().catch(() => undefined);

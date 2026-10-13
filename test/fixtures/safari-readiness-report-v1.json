@@ -1,0 +1,35 @@
+{
+  "type": "TRACE_IOS_SAFARI_READINESS_REPORT",
+  "version": 1,
+  "apiOrigin": "https://api.tracefiction.com",
+  "provider": {
+    "sessionID": "8a0ead75-6a99-4380-a175-bb97331f48e7",
+    "recordDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "cycleID": "0b7c5a52-7c1d-4a52-9b43-1d6f8f0a2c11",
+  "accountID": "account-a",
+  "observedAt": 1800000000000,
+  "result": "ready",
+  "components": {
+    "websiteAccess": {
+      "answer": "positive",
+      "reason": "allowed",
+      "observedAt": 1800000000000
+    },
+    "scriptRegistration": {
+      "answer": "positive",
+      "reason": "registered",
+      "observedAt": 1800000000000
+    },
+    "account": {
+      "answer": "positive",
+      "reason": "connected",
+      "observedAt": 1800000000000
+    },
+    "automaticSaving": {
+      "answer": "positive",
+      "reason": "on",
+      "observedAt": 1800000000000
+    }
+  }
+}

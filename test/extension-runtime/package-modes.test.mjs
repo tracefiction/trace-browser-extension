@@ -20,6 +20,37 @@ const RELEASE_ENV = {
   TRACE_WEB_ORIGIN: "https://www.tracefiction.com",
 };
 
+/**
+ * The background wiring of the first-tap save and of the ask and hand-over
+ * that follow it. A package built with the switch off has none of it.
+ */
+const FIRST_TAP_WIRING = [
+  "firstTapSave: true",
+  "trace-first-tap-popup-v1",
+  "TRACE_FIRST_TAP_COLLECT",
+  "TRACE_FIRST_TAP_MARK",
+  "TRACE_PAGE_MANUAL_MODE_END",
+  "TRACE_PAGE_MANUAL_MODE_QUERY",
+  "access_asking",
+  "access_answered",
+  "access_check",
+  "access_waiting",
+  "access_unanswered",
+  "could_not_ask",
+  "HAND_OVER_BY_RELOADING_THE_PAGE",
+  "traceFirstTapSaveV2",
+];
+
+function assertNoFirstTapWiring(root, what) {
+  const background = fs.readFileSync(path.join(root, "background.js"), "utf8");
+  for (const wiring of FIRST_TAP_WIRING) {
+    assert.equal(background.includes(wiring), false, `${what}: background.js carries ${wiring}`);
+  }
+  assert.equal(fs.existsSync(path.join(root, "page-manual-mode.js")), false, `${what}: carries the manual-mode page file`);
+  const config = fs.readFileSync(path.join(root, "popup-config.js"), "utf8");
+  assert.equal(config.includes("firstTapSave"), false, `${what}: popup config turns the first-tap save on`);
+}
+
 function runBuild(script) {
   const result = spawnSync("npm", ["run", script], {
     cwd: ROOT,
@@ -265,6 +296,92 @@ async function assertIphoneBundleFollowsTheGrant(bundle, builtManifest) {
   }], "and the story tab that was already open gets the registered scripts");
 }
 
+/**
+ * The built iPhone background, beside a Trace app: opening the popup makes it
+ * ask the app's side which provider and cycle there are, and answer with one
+ * report. It looks up no tab, runs nothing on a page and asks Safari nothing.
+ */
+async function assertIphoneBundleReportsReadiness(bundle, builtManifest) {
+  const native = [];
+  const stored = {};
+  let registrations = [];
+  const event = (listeners = []) => ({ listeners, addListener(listener) { listeners.push(listener); } });
+  const provider = { sessionID: "8a0ead75-6a99-4380-a175-bb97331f48e7", recordDigest: "a".repeat(64) };
+  const context = {
+    URL, Date, Promise, console, setTimeout, clearTimeout,
+    navigator: { userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148" },
+    crypto: { randomUUID: () => "package-proof-id" },
+    browser: {
+      runtime: {
+        id: "trace-iphone-proof",
+        onInstalled: event(), onStartup: event(), onMessage: event(),
+        getManifest: () => builtManifest,
+        getURL: (resource) => `safari-web-extension://trace-iphone-proof/${resource}`,
+        async getPlatformInfo() { return { os: "ios" }; },
+        async sendNativeMessage(...args) {
+          const message = args.find((value) => value && typeof value === "object");
+          native.push(JSON.parse(JSON.stringify(message)));
+          if (message.type === "TRACE_IOS_SAFARI_READINESS_PREPARE") {
+            return { ok: true, provider, cycle: { id: "0b7c5a52-7c1d-4a52-9b43-1d6f8f0a2c11", accountID: "account-a" } };
+          }
+          return { ok: true };
+        },
+      },
+      alarms: { async clear() { return true; }, async create() {}, async get() {}, onAlarm: event() },
+      storage: { local: {
+        async get(keys) {
+          const list = Array.isArray(keys) ? keys : [keys];
+          return Object.fromEntries(list.filter((key) => Object.hasOwn(stored, key)).map((key) => [key, stored[key]]));
+        },
+        async set(patch) { Object.assign(stored, patch); },
+        async remove(key) { delete stored[key]; },
+      } },
+      permissions: {
+        async contains() { return true; },
+        async getAll() { return { origins: [...builtManifest.optional_host_permissions] }; },
+        request() { assert.fail("the background never asks for website access"); },
+        onAdded: event(), onRemoved: event(),
+      },
+      scripting: {
+        async getRegisteredContentScripts() { return registrations; },
+        async registerContentScripts(next) { registrations = [...registrations, ...next]; },
+        async unregisterContentScripts() { registrations = []; },
+        async executeScript() {},
+      },
+      tabs: {
+        async query() { return []; },
+        async create() { assert.fail("it opens no page of its own"); },
+        async sendMessage() { return null; },
+      },
+    },
+  };
+  const turns = async () => { for (let turn = 0; turn < 60; turn += 1) await new Promise((resolve) => setImmediate(resolve)); };
+  vm.runInNewContext(bundle, context);
+  await turns();
+  const reports = () => native.filter(({ type }) => type === "TRACE_IOS_SAFARI_READINESS_REPORT");
+  assert.equal(reports().length, 1, "this background's start registered the page scripts, which is reported, once");
+  const sent = native.length;
+  const popup = { id: "trace-iphone-proof", url: "safari-web-extension://trace-iphone-proof/popup.html" };
+  for (const listener of context.browser.runtime.onMessage.listeners) {
+    listener({ type: "TRACE_ARCHIVE_ACCESS_REPORT" }, popup, () => {});
+  }
+  await turns();
+  const since = native.slice(sent).map(({ type }) => type);
+  assert.equal(since.includes("TRACE_IOS_SAFARI_READINESS_PREPARE"), true, "the popup opening asks which provider and cycle");
+  const report = reports().at(-1);
+  assert.ok(report, "and one report follows");
+  assert.equal(report.version, 1);
+  assert.deepEqual(report.provider, provider);
+  assert.equal(report.cycleID, "0b7c5a52-7c1d-4a52-9b43-1d6f8f0a2c11");
+  assert.equal(report.components.websiteAccess.reason, "allowed");
+  assert.equal(report.components.scriptRegistration.reason, "registered");
+  assert.equal(report.components.automaticSaving.answer !== "blocker", true);
+  // This stand-in has no private database, so no account can be confirmed.
+  assert.equal(report.components.account.answer, "unknown");
+  assert.equal(report.result, "unknown", "one part not known and none a blocker");
+  assert.equal(Object.hasOwn(report, "accountID"), false);
+}
+
 test("legacy, kernel, and disabled packages have one deterministic classic owner", async () => {
   try {
     runBuild("build:legacy:release");
@@ -313,6 +430,17 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     runBuild("build:release");
     assertCollectorModeConfig(path.join(ROOT, "dist", "chrome"), "kernel");
     assertCollectorModeConfig(path.join(ROOT, "dist", "firefox"), "kernel");
+    assertNoFirstTapWiring(RESOURCES, "Mac Safari");
+    assertNoFirstTapWiring(path.join(ROOT, "dist", "chrome"), "Chrome");
+    assertNoFirstTapWiring(path.join(ROOT, "dist", "firefox"), "Firefox");
+    // The readiness report is for the Trace app on iPhone and iPad. A build
+    // with no story-site grant to report on carries none of its working code.
+    for (const root of [RESOURCES, path.join(ROOT, "dist", "chrome"), path.join(ROOT, "dist", "firefox")]) {
+      const desktopBackground = fs.readFileSync(path.join(root, "background.js"), "utf8");
+      assert.doesNotMatch(desktopBackground, /function installSafariReadinessReport\b/);
+      assert.doesNotMatch(desktopBackground, /class SafariReadinessService\b/);
+      assert.doesNotMatch(desktopBackground, /traceSafariReadinessSessionV1/);
+    }
     // Mac Safari, Chrome and Firefox keep required story sites, `tabs` and
     // manifest-declared page scripts. Only the iPhone build below differs.
     assertStoreText();
@@ -382,6 +510,7 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     // The earlier iPhone shape stays buildable, unchanged to the byte.
     runBuild("build:ios-earned-permission-onboarding:required-hosts:release");
     assertStoreText();
+    assertNoFirstTapWiring(RESOURCES, "the required-hosts iPhone build");
     const earnedSafariManifest = manifest(RESOURCES);
     const earnedSafariConfig = fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8");
     assert.deepEqual(earnedSafariManifest.permissions, [
@@ -520,6 +649,7 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     assert.match(iphoneBackground, /registrationMode: "dynamic"/);
     assert.doesNotMatch(iphoneBackground, /registrationMode: "static"/);
     await assertIphoneBundleFollowsTheGrant(iphoneBackground, iphoneManifest);
+    await assertIphoneBundleReportsReadiness(iphoneBackground, iphoneManifest);
     // The Chrome and Firefox packages built beside it do not follow it.
     assert.deepEqual(
       ["chrome", "firefox"].map((browser) =>
@@ -539,6 +669,12 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     assert.doesNotMatch(iphoneBackground, /firstTapSave: true/);
     assert.doesNotMatch(iphoneBackground, /trace-first-tap-popup-v1/);
     assert.doesNotMatch(iphoneBackground, /TRACE_FIRST_TAP_COLLECT/);
+    assertNoFirstTapWiring(RESOURCES, "the iPhone store build");
+    // The readiness report is live in the iPhone build, switch or no switch.
+    assert.match(iphoneBackground, /function installSafariReadinessReport\b/);
+    assert.match(iphoneBackground, /TRACE_IOS_SAFARI_READINESS_PREPARE/);
+    assert.match(iphoneBackground, /TRACE_IOS_SAFARI_READINESS_REPORT/);
+    assert.match(iphoneBackground, /readiness = installSafariReadinessReport\(/);
     assert.equal(fs.existsSync(path.join(RESOURCES, "page-manual-mode.js")), false);
     for (const browser of ["chrome", "firefox"]) {
       assert.equal(fs.existsSync(path.join(ROOT, "dist", browser, "page-manual-mode.js")), false);
@@ -595,6 +731,11 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     assert.match(proofBackground, /trace-first-tap-popup-v1/, "the popup's port is wired");
     assert.match(proofBackground, /TRACE_FIRST_TAP_COLLECT/);
     assert.match(proofBackground, /TRACE_PAGE_MANUAL_MODE_END/);
+    // The ask and the hand-over are part of the same switch.
+    assert.match(proofBackground, /TRACE_PAGE_MANUAL_MODE_QUERY/, "a page in manual mode can ask for itself");
+    assert.match(proofBackground, /access_asking/, "the ask is wired");
+    assert.match(proofBackground, /HAND_OVER_BY_RELOADING_THE_PAGE = false/, "handing over without a reload");
+    assert.doesNotMatch(proofBackground, /tabs, "get", \[tapped/, "and no tab is looked up for a tap");
     assert.match(proofBackground, /"page-manual-mode\.js"/, "and the manual-mode file is what it injects first");
     assert.match(
       fs.readFileSync(path.join(RESOURCES, "page-manual-mode.js"), "utf8"),

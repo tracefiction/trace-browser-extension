@@ -109,7 +109,8 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 responseBody = Self.importResponse(payload, profileID: profile)
 
             case "TRACE_IOS_SAVE_PREPARE", "TRACE_IOS_SAVE_CONFIRMED",
-                 "TRACE_IOS_TRACKING_PREFERENCE_PREPARE", "TRACE_IOS_TRACKING_PREFERENCE":
+                 "TRACE_IOS_TRACKING_PREFERENCE_PREPARE", "TRACE_IOS_TRACKING_PREFERENCE",
+                 TraceSafariReadinessReport.prepareMessage, TraceSafariReadinessReport.reportMessage:
                 if let defaults = Self.pendingDefaults(),
                    case let .ready(credential, kind, sessionID?, expiry?) = Self.readSharedTraceCredential(),
                    kind == "device_session",
@@ -128,15 +129,11 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                         receiptOrigin = origin
                     }
 #endif
-                    if messageType.hasPrefix("TRACE_IOS_TRACKING_PREFERENCE") {
-                        responseBody = TraceSafariTrackingPreference.handle(payload, defaults: defaults,
-                            provider: TraceSafariProviderCodec.importBinding(session: session, now: now),
-                            now: now.timeIntervalSince1970 * 1000, configuredAPIOrigin: receiptOrigin)
-                    } else {
-                        responseBody = TraceSafariOnboardingReceipt.handle(payload, defaults: defaults,
-                            provider: TraceSafariProviderCodec.importBinding(session: session, now: now),
-                            now: now.timeIntervalSince1970 * 1000, configuredAPIOrigin: receiptOrigin)
-                    }
+                    // Each is bound to the provider the app issued, as read
+                    // just above. Which of them answers is decided in the
+                    // shared codec, where it is tested.
+                    responseBody = TraceSafariProviderBoundMessages.respond(to: payload, type: messageType,
+                        defaults: defaults, session: session, now: now, configuredAPIOrigin: receiptOrigin)
                 } else { responseBody = ["ok": false] }
             case Self.traceIosAuthTokenRequest:
                 let credential = Self.readSharedTraceCredential()

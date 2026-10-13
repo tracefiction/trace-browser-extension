@@ -113,6 +113,7 @@ export class ArchiveReadinessService {
   readonly #requiredOrigins: readonly string[];
   readonly #wait: (ms: number) => Promise<void>;
   readonly #ledger: ArchiveAccessLedgerPort;
+  readonly #settled: (() => Promise<boolean>) | undefined;
   #accessReport: Promise<ArchiveAccessReportResult> | null = null;
   #accessReportRequestedAgain = false;
   #accessReportReaderPresent = false;
@@ -126,11 +127,18 @@ export class ArchiveReadinessService {
     wait?: (ms: number) => Promise<void>;
     /** Where the access ledger is kept; in memory when absent. */
     accessLedger?: ArchiveAccessLedgerPort;
+    /**
+     * Resolves true once whatever may still be changing access after a start
+     * or an update has finished, false when it has not in the time allowed.
+     * Access is not reported missing before it resolves true.
+     */
+    settled?: () => Promise<boolean>;
   }) {
     this.#receipts = options.receipts;
     this.#permissions = options.permissions;
     this.#clock = options.clock ?? SYSTEM_CLOCK;
     this.#requiredOrigins = Object.freeze([...(options.requiredOrigins ?? [])]);
+    this.#settled = options.settled;
     this.#wait = options.wait ??
       ((ms) => new Promise((resolve) => { setTimeout(resolve, ms); }));
     let remembered: ArchiveAccessLedger = Object.freeze({ grantSeen: false });
@@ -247,6 +255,13 @@ export class ArchiveReadinessService {
       // This reading exists to catch access that ended. Before the grant has
       // ever been seen, "incomplete" is only setup not being finished yet.
       if (!ledger.grantSeen) return { kind: "withheld" };
+      // Just after an update, access can read as missing for longer than the
+      // pause between two readings. The second reading is taken only once the
+      // update's own work has finished; if that does not happen in time,
+      // nothing is concluded and nothing is sent.
+      if (this.#settled !== undefined && !(await this.#settled().catch(() => false))) {
+        return { kind: "unknown" };
+      }
       await this.#wait(ARCHIVE_ACCESS_CONFIRM_DELAY_MS);
       reading = await this.#readAccess();
       if (reading === null) return { kind: "unknown" };
