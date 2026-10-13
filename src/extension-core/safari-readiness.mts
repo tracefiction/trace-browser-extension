@@ -40,9 +40,17 @@ export type ScriptRegistrationReason =
   | "not_registered"
   /** The story sites are allowed and an attempt to register the scripts failed. */
   | "registration_failed"
-  | "unreadable";
+  | "unreadable"
+  /** A registration is under way, or has not finished in the time allowed. */
+  | "pending"
+  /** Read as absent, without a finished registration or a second reading to confirm it. */
+  | "unconfirmed";
 
 export type AccountReason =
+  /**
+   * The account in use here is the one the app issued, and was accepted when
+   * it was taken up. It is not checked again for each report.
+   */
   | "connected"
   /** The app holds no account for Safari. */
   | "no_account"

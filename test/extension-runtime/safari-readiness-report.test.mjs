@@ -141,7 +141,7 @@ function install(options = {}) {
     now: () => state.now,
     wait: async (ms) => { calls.waits.push(ms); state.now += ms; await state.duringWait?.(); },
     platform: { userAgent: state.userAgent ?? IPHONE_UA },
-    ...(state.registrationIdle ? { registrationIdle: state.registrationIdle } : {}),
+    ...(state.registration ? { registration: state.registration } : {}),
   });
   const reports = () => calls.native.filter(({ type }) => type === SAFARI_READINESS_MESSAGES.report);
   const answers = (report) => Object.fromEntries(
@@ -291,12 +291,14 @@ test("a reader who finished setup and whose scripts keep failing to register is 
 
 test("the report lets a registration under way finish before it reads the scripts", async () => {
   let release;
+  let pending = true;
   const gate = new Promise((resolve) => { release = resolve; });
-  const h = install({ registered: [], registrationIdle: () => gate });
+  const h = install({ registered: [], registration: { idle: () => gate, pending: () => pending } });
   const reporting = h.reporter.report();
   await settle();
   assert.deepEqual(h.reports(), [], "nothing is reported while the scripts are being put in");
   h.state.registered = [...IDS];
+  pending = false;
   release();
   await reporting;
   assert.equal(h.reports()[0].result, "ready");
@@ -482,6 +484,270 @@ test("off iPhone and iPad nothing is installed and nothing is sent", async () =>
   // An iPad that calls itself a Mac is still beside the app.
   const ipad = install({ userAgent: MAC_UA, os: "ios" });
   assert.equal((await ipad.reporter.report()).kind, "delivered");
+});
+
+/**
+ * The report and the real registration runtime over one stand-in browser, as
+ * the background wires them. `slow` holds each browser call the registration
+ * makes for that long, as a busy phone does.
+ */
+function installWithRegistration(options = {}) {
+  const state = {
+    now: 1_800_000_000_000, granted: [], registered: [], stored: {}, failRegistration: false,
+    holdRegistration: null, ...options,
+  };
+  const native = [];
+  const listeners = { message: [], added: [], removed: [], installed: [], alarm: [] };
+  const event = (list) => ({ addListener: (listener) => list.push(listener) });
+  const runtime = {
+    id: "trace-extension",
+    onMessage: event(listeners.message),
+    onInstalled: event(listeners.installed),
+    getManifest: () => ({}),
+    async getPlatformInfo() { return { os: "ios" }; },
+    async sendNativeMessage(...args) {
+      const message = args.find((value) => value && typeof value === "object");
+      native.push(JSON.parse(JSON.stringify(message)));
+      return message.type === SAFARI_READINESS_MESSAGES.prepare
+        ? { ok: true, provider: PROVIDER, cycle: { id: "0b7c5a52-7c1d-4a52-9b43-1d6f8f0a2c11", accountID: "account-a" } }
+        : { ok: true };
+    },
+  };
+  const permissions = {
+    async getAll() { return { origins: [...state.granted] }; },
+    async contains({ origins }) { return origins.every((origin) => state.granted.includes(origin)); },
+    onAdded: event(listeners.added),
+    onRemoved: event(listeners.removed),
+  };
+  const scripting = {
+    async getRegisteredContentScripts() { return state.registered.map((id) => ({ id })); },
+    async registerContentScripts(scripts) {
+      if (state.holdRegistration) await state.holdRegistration;
+      if (state.failRegistration) throw new Error("registration refused");
+      state.registered.push(...scripts.map(({ id }) => id));
+    },
+    async unregisterContentScripts({ ids }) {
+      state.registered = state.registered.filter((id) => !ids.includes(id));
+    },
+  };
+  const area = {
+    async get(keys) {
+      const list = Array.isArray(keys) ? keys : [keys];
+      return Object.fromEntries(list.filter((key) => key in state.stored).map((key) => [key, state.stored[key]]));
+    },
+    async set(patch) { Object.assign(state.stored, patch); },
+    async remove(key) { delete state.stored[key]; },
+  };
+  const storage = () => new BrowserStorage(area, runtime, "promise");
+  const session = {
+    async accountForThisOpen() { return { state: "verified", binding: "1.aaa" }; },
+    snapshot: () => ({ state: "connected", accountId: "account-a" }),
+    pageBinding: () => "1.aaa",
+    async automaticSaving() { return "on"; },
+  };
+  let reporter = null;
+  // The report is wired first here, so that its listeners hear each event
+  // before the registration's do: the order must not matter.
+  const waits = [];
+  const wire = () => {
+    reporter = installSafariReadinessReport({
+      runtime, permissions, scripting, storage: storage(), storageMode: "promise", apiOrigin: API, config: CONFIG,
+      alarms: { onAlarm: event(listeners.alarm) },
+      registration: {
+        idle: () => registration.idle(),
+        pending: () => registration.pending(),
+      },
+      session: () => session,
+      now: () => state.now,
+      wait: async (ms) => { waits.push(ms); state.now += ms; await state.duringWait?.(); },
+      settleLimitMs: state.settleLimitMs ?? 6_000,
+      platform: { userAgent: IPHONE_UA },
+    });
+  };
+  if (state.reportFirst !== false) wire();
+  const registration = installEarnedPermissionRegistrationRuntime({
+    runtime, permissions, scripting, storage: storage(), storageMode: "promise", config: CONFIG,
+    endedGrantConfirmDelayMs: 0,
+    alarms: {
+      async clear() {}, async create() {},
+      async getAll() { if (state.holdAlarms) await state.holdAlarms; return []; },
+      onAlarm: event([]),
+    },
+    onReconcileEnded: (result) => reporter?.registrationEnded(result),
+  });
+  if (state.reportFirst === false) wire();
+  const reports = () => native.filter(({ type }) => type === SAFARI_READINESS_MESSAGES.report);
+  const summary = () => reports().map(({ result, components }) =>
+    `${result} [scripts ${components.scriptRegistration.answer}:${components.scriptRegistration.reason}]`);
+  return { state, native, listeners, reporter: () => reporter, registration, reports, summary, waits };
+}
+
+test("the moment the reader allows the story sites is never reported as not ready: the report waits for the registration the grant sets off", async () => {
+  for (const reportFirst of [true, false]) {
+    const h = installWithRegistration({ reportFirst });
+    await settle();
+    assert.deepEqual(h.summary(), [], "nothing allowed and nothing changed: nothing reported");
+
+    // The reader taps Always Allow. Safari tells every listener at once.
+    h.state.granted = [...FIVE];
+    for (const listener of h.listeners.added) listener();
+    await settle();
+    await settle();
+    assert.deepEqual(h.state.registered, IDS);
+    assert.equal(h.summary().length >= 1, true, "a grant is answered");
+    for (const line of h.summary()) {
+      assert.equal(line, "ready [scripts positive:registered]", `${reportFirst ? "report" : "registration"} wired first`);
+    }
+  }
+});
+
+test("while the page scripts are still being put in, the report does not know; it never calls them missing", async () => {
+  let release;
+  const h = installWithRegistration({ settleLimitMs: 30 });
+  await settle();
+  h.state.holdRegistration = new Promise((resolve) => { release = resolve; });
+  h.state.granted = [...FIVE];
+  for (const listener of h.listeners.added) listener();
+  // The registration outlasts the time the report is willing to wait.
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  await settle();
+  assert.deepEqual(h.summary(), ["unknown [scripts unknown:pending]"], "not known, and not a blocker");
+
+  // It finishes. The report that said "pending" is followed by the answer.
+  release();
+  await settle();
+  await settle();
+  assert.equal(h.summary().at(-1), "ready [scripts positive:registered]");
+  assert.equal(h.summary().some((line) => line.includes("blocker")), false);
+});
+
+test("a report that could only say pending is followed by the answer when the registration ends, even if it changed nothing", async () => {
+  const h = installWithRegistration({ granted: [...FIVE], settleLimitMs: 30 });
+  await settle();
+  await settle();
+  assert.equal(h.summary().at(-1), "ready [scripts positive:registered]");
+  const before = h.reports().length;
+
+  // An update sets a registration off, and the phone is slow to begin it.
+  let release;
+  h.state.holdAlarms = new Promise((resolve) => { release = resolve; });
+  for (const listener of h.listeners.installed) listener({ reason: "update" });
+  await h.reporter().report();
+  assert.equal(h.summary().at(-1), "unknown [scripts unknown:pending]", "the scripts are there; with a registration under way it still does not say so");
+  assert.equal(h.reports().length, before + 1);
+
+  // The registration runs and finds everything as it was.
+  h.state.holdAlarms = null;
+  release();
+  await settle();
+  await settle();
+  assert.equal(h.summary().at(-1), "ready [scripts positive:registered]", "and the answer follows by itself");
+});
+
+test("the page scripts are a blocker only when a finished registration says so, or two readings agree with none under way", async () => {
+  // A registration that finished and failed, with the sites allowed.
+  const failed = installWithRegistration({ granted: [...FIVE], failRegistration: true });
+  await settle();
+  await settle();
+  assert.equal(failed.summary().at(-1), "not_ready [scripts blocker:registration_failed]");
+
+  // A registration that finished and found the sites not allowed: the
+  // scripts are confirmed absent.
+  const absent = installWithRegistration();
+  await settle();
+  await absent.reporter().report();
+  assert.equal(absent.summary().at(-1).endsWith("[scripts blocker:not_registered]"), true);
+
+  // No registration has said anything (its last try could not finish), and
+  // the scripts read as absent: two readings a moment apart, both absent.
+  const unfinished = installWithRegistration({ granted: [...FIVE], registered: [...IDS],
+    stored: { [EARNED_PERMISSION_STATE_KEY]: { registrationVersion: 4, promptResult: "granted" } } });
+  await settle();
+  unfinished.reporter().registrationEnded(null);
+  unfinished.state.registered = [];
+  await unfinished.reporter().report();
+  assert.equal(unfinished.summary().at(-1), "not_ready [scripts blocker:not_registered]");
+  assert.deepEqual(unfinished.waits, [2_000], "read twice, two seconds apart");
+
+  // The second reading finds them: one absent reading was not an answer.
+  const flicker = installWithRegistration({ granted: [...FIVE], registered: [...IDS],
+    stored: { [EARNED_PERMISSION_STATE_KEY]: { registrationVersion: 4, promptResult: "granted" } } });
+  await settle();
+  flicker.reporter().registrationEnded(null);
+  flicker.state.registered = [];
+  flicker.state.duringWait = () => { flicker.state.registered = [...IDS]; };
+  await flicker.reporter().report();
+  assert.equal(flicker.summary().at(-1), "ready [scripts positive:registered]");
+
+  // A registration starts between the two readings: not known.
+  const racing = installWithRegistration({ granted: [...FIVE], registered: [...IDS],
+    stored: { [EARNED_PERMISSION_STATE_KEY]: { registrationVersion: 4, promptResult: "granted" } } });
+  await settle();
+  racing.reporter().registrationEnded(null);
+  racing.state.registered = [];
+  let hold;
+  racing.state.duringWait = () => {
+    racing.state.holdRegistration = new Promise((resolve) => { hold = resolve; });
+    racing.state.settleLimitMs = 0;
+    void racing.registration.reconcile();
+  };
+  const reporting = racing.reporter().report();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await settle();
+  hold();
+  await reporting;
+  assert.equal(racing.summary().some((line) => line.includes("blocker")), false, "never a blocker with a registration under way");
+});
+
+test("a report said to be ready is read again about once a day, since access can end with no event to say so", async () => {
+  const h = installWithRegistration({ granted: [...FIVE] });
+  await settle();
+  await settle();
+  const before = h.reports().length;
+  assert.equal(h.summary().at(-1), "ready [scripts positive:registered]");
+
+  // A one-day grant runs out. Safari tells no one.
+  h.state.granted = [];
+  await settle();
+  assert.equal(h.reports().length, before, "nothing prompts a report");
+
+  // The daily alarm the background already keeps.
+  for (const listener of h.listeners.alarm) listener({ name: "traceArchiveAccessReport" });
+  await settle();
+  await settle();
+  assert.equal(h.reports().length > before, true);
+  assert.equal(h.reports().at(-1).result, "not_ready");
+  assert.equal(h.reports().at(-1).components.websiteAccess.reason, "not_allowed");
+
+  // Another alarm is none of its business.
+  const after = h.reports().length;
+  for (const listener of h.listeners.alarm) listener({ name: "traceAccountDataRefresh" });
+  await settle();
+  assert.equal(h.reports().length, after);
+});
+
+test("an update or a grant is known to be settling from the moment Safari says so, before its reconcile has begun", async () => {
+  for (const [name, fire] of [
+    ["an update", (h) => { for (const listener of h.listeners.installed) listener({ reason: "update" }); }],
+    ["a grant", (h) => { for (const listener of h.listeners.added) listener(); }],
+  ]) {
+    const h = installWithRegistration({ granted: [...FIVE] });
+    await settle();
+    await settle();
+    assert.equal(h.registration.pending(), false);
+    assert.equal(await h.registration.settled(1_000), true);
+
+    let release;
+    h.state.registered = [];
+    h.state.holdRegistration = new Promise((resolve) => { release = resolve; });
+    fire(h);
+    assert.equal(h.registration.pending(), true, `${name}: pending at once, with no reconcile yet begun`);
+    assert.equal(await h.registration.settled(20), false, "not settled while it runs past the time allowed");
+    release();
+    assert.equal(await h.registration.settled(1_000), true);
+    assert.equal(h.registration.pending(), false);
+    assert.deepEqual(h.state.registered, IDS);
+  }
 });
 
 test("the registration runtime says when each reconcile ends, and when none is under way", async () => {

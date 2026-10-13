@@ -415,6 +415,7 @@ function createAccessReportHarness(options = {}) {
     requiredOrigins: REQUIRED_ORIGINS,
     accessConfirmWait: async () => {},
     accessLedger,
+    ...(options.accessSettled ? { accessSettled: options.accessSettled } : {}),
   });
   const access = installArchiveAccessReport(controller, {
     runtime,
@@ -578,6 +579,43 @@ test("a reader who allowed the sites under a build that kept no ledger: access l
   });
   await settleAccess();
   assert.deepEqual(partly.snapshots().map(({ grantedOrigins }) => grantedOrigins), [[REQUIRED_ORIGINS[0]]]);
+});
+
+test("access that reads as missing while an update is still settling is not called ended until the update's own work has finished", async () => {
+  const setup = { [SETUP_KEY]: { promptResult: "granted", grantAt: 1_000, completedAt: 2_000 } };
+
+  // Just after the update Safari reads as allowing nothing. By the time the
+  // update's registration has settled, the access is there as it always was.
+  let finish;
+  const settling = new Promise((resolve) => { finish = resolve; });
+  const h = createAccessReportHarness({ granted: [], stored: { ...setup }, accessSettled: () => settling });
+  await settleAccess();
+  assert.deepEqual(h.snapshots(), [], "nothing is concluded while the update is settling, however long that takes");
+  h.setGranted([...REQUIRED_ORIGINS]);
+  finish(true);
+  await settleAccess();
+  assert.equal(h.snapshots().length, 1);
+  assert.deepEqual(h.snapshots()[0].grantedOrigins, REQUIRED_ORIGINS, "the reader is reported as having access, never as having lost it");
+
+  // It does not settle in the time allowed: nothing is concluded, nothing sent.
+  const stuck = createAccessReportHarness({ granted: [], stored: { ...setup }, accessSettled: async () => false });
+  await settleAccess();
+  assert.deepEqual(stuck.snapshots(), []);
+  assert.deepEqual(await stuck.sendFromPopup(OPEN_POPUP), { ok: true, report: "unknown" });
+  assert.deepEqual(stuck.snapshots(), []);
+  const failing = createAccessReportHarness({ granted: [], stored: { ...setup }, accessSettled: async () => { throw new Error("unavailable"); } });
+  await settleAccess();
+  assert.deepEqual(failing.snapshots(), []);
+
+  // Settled, and still nothing allowed on the reading after it: ended.
+  const ended = createAccessReportHarness({ granted: [], stored: { ...setup }, accessSettled: async () => true });
+  await settleAccess();
+  assert.deepEqual(ended.snapshots().map(({ grantedOrigins }) => grantedOrigins), [[]]);
+
+  // Access that is there is reported without waiting on anything.
+  const fine = createAccessReportHarness({ stored: { ...setup }, accessSettled: () => new Promise(() => {}) });
+  await settleAccess();
+  assert.equal(fine.snapshots().length, 1);
 });
 
 test("a reader whose access survived is told apart from nothing: the same single reading as any install with access", async () => {

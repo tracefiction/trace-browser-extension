@@ -51,6 +51,8 @@ interface ArchiveReadinessEnvironment {
   readonly requiredOrigins?: readonly string[];
   readonly accessConfirmWait?: (ms: number) => Promise<void>;
   readonly accessLedger?: ArchiveAccessLedgerPort;
+  /** See `ArchiveReadinessService`: access is not reported missing before this resolves true. */
+  readonly accessSettled?: () => Promise<boolean>;
 }
 
 interface ArchiveAccessReportEnvironment {
@@ -167,6 +169,9 @@ export class ArchiveReadinessRuntimeController {
       ...(environment.accessLedger === undefined
         ? {}
         : { accessLedger: environment.accessLedger }),
+      ...(environment.accessSettled === undefined
+        ? {}
+        : { settled: environment.accessSettled }),
     });
   }
 

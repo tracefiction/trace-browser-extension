@@ -61,6 +61,8 @@ struct TraceSafariProviderCodecContract {
         trackingPreference()
         saveMode()
         readinessReport()
+        readinessCycleEnds()
+        providerBoundRouting()
         print("TraceSafariProviderCodec contract passed")
     }
 
@@ -425,6 +427,173 @@ struct TraceSafariProviderCodecContract {
         require((send(prepare, as: other))["cycle"] == nil, "and is not named to another")
         require(Q.startCycle(defaults: defaults, accountID: "", apiOrigin: origin, provider: provider, now: now) == nil, "A cycle needs an account")
         require(Q.startCycle(defaults: defaults, accountID: "reader-a", apiOrigin: "https://wrong.example", provider: provider, now: now) == nil, "and an approved environment")
+    }
+
+    /// A cycle the app opened, as the app sees it: waiting, answered, or ended.
+    static func readinessCycleEnds() {
+        typealias Q = TraceSafariReadinessReport
+        let suite = "trace.readiness.cycle." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let session = UUID().uuidString.lowercased()
+        let provider = TraceSafariProviderCodec.ImportBinding(sessionID: session, recordDigest: String(repeating: "a", count: 64))
+        // The same device session with a refreshed credential: a new digest.
+        let refreshed = TraceSafariProviderCodec.ImportBinding(sessionID: session, recordDigest: String(repeating: "c", count: 64))
+        let origin = TraceSafariOnboardingReceipt.productionAPIOrigin
+        let start = 1_800_000_000_000.0
+        var now = start + 1_000
+        func message(_ type: String, cycle: String?, by binding: TraceSafariProviderCodec.ImportBinding) -> [String: Any] {
+            func part(_ reason: String) -> [String: Any] { ["answer": "positive", "reason": reason, "observedAt": now - 10] }
+            var payload: [String: Any] = ["type": type, "version": 1, "apiOrigin": origin,
+                "provider": ["sessionID": binding.sessionID, "recordDigest": binding.recordDigest],
+                "accountID": "reader-a", "observedAt": now, "result": "ready",
+                "components": ["websiteAccess": part("allowed"), "scriptRegistration": part("registered"),
+                    "account": part("connected"), "automaticSaving": part("on")]]
+            if let cycle { payload["cycleID"] = cycle }
+            return payload
+        }
+        func send(_ payload: [String: Any], as current: TraceSafariProviderCodec.ImportBinding) -> [String: Any] {
+            Q.handle(payload, defaults: defaults, provider: current, now: now, configuredAPIOrigin: origin)
+        }
+
+        let cycle = Q.startCycle(defaults: defaults, accountID: "reader-a", apiOrigin: origin, provider: provider, now: start)!
+        require(Q.state(defaults: defaults, cycle: cycle, provider: provider, now: now) == .waiting, "A cycle just opened is waiting, which is not known")
+        require(send(message(Q.reportMessage, cycle: cycle.id, by: provider), as: provider)["ok"] as? Bool == true, "It is answered")
+        guard case .answered(let answer) = Q.state(defaults: defaults, cycle: cycle, provider: provider, now: now) else {
+            return require(false, "An answered cycle reads as answered")
+        }
+        require(answer.result == .ready, "with its report")
+
+        // The app refreshes the provider. The cycle was opened under the old one.
+        now += 1_000
+        require(Q.state(defaults: defaults, cycle: cycle, provider: refreshed, now: now) == .ended(.providerChanged),
+            "The app is told the cycle ended, not left waiting or shown the old answer")
+        require(Q.state(defaults: defaults, cycle: cycle, provider: nil, now: now) == .ended(.providerChanged), "No provider ends it too")
+        require(Q.read(defaults: defaults, cycle: cycle, provider: refreshed, now: now) == nil, "and no report answers it")
+        // The handler, asked under the new provider, names no cycle and leaves word that the old one ended.
+        let prepared = send(["type": Q.prepareMessage, "apiOrigin": origin], as: refreshed)
+        require(prepared["ok"] as? Bool == true && prepared["cycle"] == nil, "Prepare names no cycle under a provider it was not opened under")
+        let word = try? JSONDecoder().decode(Q.Ended.self, from: defaults.data(forKey: Q.endedKey) ?? Data())
+        require(word?.id == cycle.id && word?.reason == .providerChanged && word?.at == now, "The handler records that the cycle ended, and why")
+        require(send(message(Q.reportMessage, cycle: cycle.id, by: refreshed), as: refreshed)["error"] as? String == "stale_cycle",
+            "An answer naming the ended cycle is not stored as its answer")
+        require(send(message(Q.reportMessage, cycle: nil, by: refreshed), as: refreshed)["ok"] as? Bool == true, "Reports go on, as history")
+        require(Q.state(defaults: defaults, cycle: cycle, provider: refreshed, now: now) == .ended(.providerChanged), "History does not reopen the cycle")
+        require(Q.latest(defaults: defaults, apiOrigin: origin, provider: refreshed, now: now)?.cycleID == nil, "and history names no cycle")
+
+        // The app opens a new cycle under the provider it now holds.
+        now += 1_000
+        let next = Q.startCycle(defaults: defaults, accountID: "reader-a", apiOrigin: origin, provider: refreshed, now: now)!
+        require(Q.state(defaults: defaults, cycle: next, provider: refreshed, now: now) == .waiting, "A new cycle is waiting, whatever history holds")
+        require(Q.state(defaults: defaults, cycle: cycle, provider: provider, now: now) == .ended(.providerChanged),
+            "The old one stays ended, for the reason the handler recorded")
+        let third = Q.startCycle(defaults: defaults, accountID: "reader-a", apiOrigin: origin, provider: refreshed, now: now)!
+        require(Q.state(defaults: defaults, cycle: next, provider: refreshed, now: now) == .ended(.replaced),
+            "A cycle the app has opened another over is replaced")
+        _ = third
+        let reopened = Q.startCycle(defaults: defaults, accountID: "reader-a", apiOrigin: origin, provider: refreshed, now: now)!
+        require(reopened.id != next.id, "Each cycle is its own")
+        now += 1_000
+        require(send(message(Q.reportMessage, cycle: reopened.id, by: refreshed), as: refreshed)["ok"] as? Bool == true, "and the newest one is answered")
+        guard case .answered = Q.state(defaults: defaults, cycle: reopened, provider: refreshed, now: now) else {
+            return require(false, "The newest cycle reads as answered")
+        }
+        defaults.removeObject(forKey: Q.cycleKey)
+        require(Q.state(defaults: defaults, cycle: reopened, provider: refreshed, now: now) == .ended(.missing), "A cycle that is no longer stored has ended")
+    }
+
+    /// The handler's routing of the messages bound to the provider, driven as
+    /// the handler drives it: a device session, the shared defaults, a clock.
+    static func providerBoundRouting() {
+        typealias M = TraceSafariProviderBoundMessages
+        typealias Q = TraceSafariReadinessReport
+        let suite = "trace.provider-bound." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let origin = TraceSafariOnboardingReceipt.productionAPIOrigin
+        var now = Date(timeIntervalSince1970: 1_800_000_000)
+        var ms: Double { now.timeIntervalSince1970 * 1000 }
+        let session = TraceSafariProviderCodec.deviceSession(sessionId: UUID().uuidString,
+            credential: "trd_v1_" + String(repeating: "A", count: 43), expiresAt: "2099-01-01T00:00:00.000Z")!
+        let issued = TraceSafariProviderCodec.importBinding(session: session, now: now)!
+        func route(_ payload: [String: Any], session current: TraceSafariProviderCodec.DeviceSession? = nil) -> [String: Any] {
+            M.respond(to: payload, type: payload["type"] as? String ?? "", defaults: defaults,
+                session: current ?? session, now: now, configuredAPIOrigin: origin)
+        }
+        func report(cycle: String?, provider: TraceSafariProviderCodec.ImportBinding? = nil, at: Double? = nil) -> [String: Any] {
+            let observed = at ?? ms
+            func part(_ reason: String) -> [String: Any] { ["answer": "positive", "reason": reason, "observedAt": observed - 10] }
+            let binding = provider ?? issued
+            var payload: [String: Any] = ["type": Q.reportMessage, "version": 1, "apiOrigin": origin,
+                "provider": ["sessionID": binding.sessionID, "recordDigest": binding.recordDigest],
+                "accountID": "reader-a", "observedAt": observed, "result": "ready",
+                "components": ["websiteAccess": part("allowed"), "scriptRegistration": part("registered"),
+                    "account": part("connected"), "automaticSaving": part("on")]]
+            if let cycle { payload["cycleID"] = cycle }
+            return payload
+        }
+        func stored() -> Q.Report? { Q.latest(defaults: defaults, apiOrigin: origin, provider: issued, now: ms) }
+
+        // Prepare: the provider is the one read by the handler, never one a message names.
+        var prepare: [String: Any] = ["type": Q.prepareMessage, "apiOrigin": origin,
+            "provider": ["sessionID": UUID().uuidString, "recordDigest": String(repeating: "f", count: 64)]]
+        var prepared = route(prepare)
+        require(prepared["ok"] as? Bool == true, "Prepare is routed to the readiness report")
+        require((prepared["provider"] as? [String: String])?["recordDigest"] == issued.recordDigest, "and answers with the issued provider")
+        require(prepared["cycle"] == nil, "naming no cycle before the app opens one")
+        prepare["apiOrigin"] = "https://wrong.example"
+        require(route(prepare)["ok"] as? Bool == false, "Another environment is refused at the route")
+        prepare["apiOrigin"] = origin
+
+        let cycle = Q.startCycle(defaults: defaults, accountID: "reader-a", apiOrigin: origin, provider: issued, now: ms)!
+        prepared = route(prepare)
+        require((prepared["cycle"] as? [String: String])?["id"] == cycle.id, "Prepare names the cycle the app opened")
+
+        // Report: stored for the issued provider and the open cycle.
+        now += 2
+        let first = report(cycle: cycle.id)
+        require(route(first)["ok"] as? Bool == true && stored()?.cycleID == cycle.id, "A report for the issued provider and open cycle is stored")
+        let kept = defaults.data(forKey: Q.reportKey)
+
+        // A provider the app never issued.
+        let never = TraceSafariProviderCodec.ImportBinding(sessionID: UUID().uuidString, recordDigest: String(repeating: "e", count: 64))
+        now += 2
+        require(route(report(cycle: cycle.id, provider: never))["ok"] as? Bool == false, "A report naming a provider the app never issued is refused")
+        // A cycle the app never issued.
+        require(route(report(cycle: UUID().uuidString.lowercased()))["error"] as? String == "stale_cycle", "A report naming a cycle the app never opened is refused")
+        require(route(report(cycle: "not-a-cycle"))["ok"] as? Bool == false, "as is one naming no cycle at all")
+        require(defaults.data(forKey: Q.reportKey) == kept, "and none of them changes what is stored")
+
+        // A newer report, then a replay of the first one.
+        require(route(report(cycle: cycle.id))["ok"] as? Bool == true, "A later report replaces the earlier")
+        let newer = defaults.data(forKey: Q.reportKey)
+        require(route(first)["ok"] as? Bool == false && defaults.data(forKey: Q.reportKey) == newer, "A replay of the earlier report does not")
+
+        // The app opens another cycle. The old report is replayed with the new cycle's id.
+        now += 2
+        let next = Q.startCycle(defaults: defaults, accountID: "reader-a", apiOrigin: origin, provider: issued, now: ms)!
+        var replay = first
+        replay["cycleID"] = next.id
+        require(route(replay)["ok"] as? Bool == false, "An old report replayed under the current cycle's id is refused: it was read before the cycle began")
+        require(route(first)["error"] as? String == "stale_cycle", "and under its own id it is for a cycle since replaced")
+        require(Q.state(defaults: defaults, cycle: next, provider: issued, now: ms) == .waiting, "The new cycle is still unanswered")
+        now += 2
+        require(route(report(cycle: next.id))["ok"] as? Bool == true, "until its own answer arrives")
+
+        // A session that has expired issues nothing.
+        let expired = TraceSafariProviderCodec.deviceSession(sessionId: session.sessionId,
+            credential: session.credential, expiresAt: "2020-01-01T00:00:00.000Z")!
+        require(route(prepare, session: expired)["ok"] as? Bool == false, "An expired provider prepares nothing")
+        require(route(report(cycle: next.id), session: expired)["ok"] as? Bool == false, "and stores nothing")
+
+        // The other provider-bound messages are routed as before.
+        let preference = route(["type": "TRACE_IOS_TRACKING_PREFERENCE_PREPARE", "apiOrigin": origin])
+        require(preference["ok"] as? Bool == true && preference["cycle"] == nil &&
+            (preference["provider"] as? [String: String])?["sessionID"] == issued.sessionID, "The preference's prepare still answers as the preference")
+        require(route(["type": "TRACE_IOS_SAVE_PREPARE", "accountID": "reader-a", "apiOrigin": origin])["ok"] as? Bool == false,
+            "The save receipt still answers as the save receipt: no attempt, no context")
+        require(route(["type": "TRACE_IOS_EXTENSION_HEARTBEAT"])["ok"] as? Bool == false, "A message that is not provider-bound is not routed here")
+        require(M.types.count == 6, "Six messages are bound to the provider")
     }
 
     private static func require(

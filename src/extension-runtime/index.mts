@@ -113,6 +113,8 @@ try {
   let session: SessionRuntimeController | undefined;
   let afterScriptsRegistered: (() => Promise<void>) | null = null;
   let readiness: SafariReadinessReporter | null = null;
+  // Set once the registration of the page scripts is installed, below.
+  let registrationSettled: (() => Promise<boolean>) | null = null;
   if (__TRACE_SESSION_MODE__ === "kernel") {
     const recover = installArchiveRecovery({
       runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, scripting: extension.scripting, mode: storageMode,
@@ -152,6 +154,9 @@ try {
         ? {}
         : { requiredOrigins: __TRACE_IOS_EARNED_PERMISSION_CONFIG__.origins }),
       accessLedger,
+      // Access is not reported as ended while an update's or a start's own
+      // registration is still settling.
+      accessSettled: () => registrationSettled?.() ?? Promise.resolve(true),
     });
     if (
       __TRACE_IOS_EARNED_PERMISSION_CONFIG__ !== null &&
@@ -194,6 +199,7 @@ try {
         },
         onReconcileEnded: (result) => readiness?.registrationEnded(result),
       });
+      registrationSettled = () => registration.settled(8_000);
       // Whether Trace in Safari is ready to save by itself, for the Trace
       // app beside it on iPhone and iPad. It reads and reports; it changes
       // nothing, runs nothing on a page and asks Safari for nothing.
@@ -205,7 +211,8 @@ try {
         storageMode,
         apiOrigin: __TRACE_API_BASE__,
         config: __TRACE_IOS_EARNED_PERMISSION_CONFIG__,
-        registrationIdle: () => registration.idle(),
+        registration,
+        alarms: extension.alarms,
         session: () => session,
       });
     }

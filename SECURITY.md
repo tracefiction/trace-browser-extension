@@ -255,6 +255,8 @@ page scripts, the account, the automatic-saving preference), each positive, a
 known blocker or unknown, with a reason token and the time it was read. It is
 stored in the app/extension shared container, bound to the provider the app
 issued and to the cycle the app opened, and is never sent to a server. It
+is sent when the popup opens, on the changes it describes, and about once a
+day. It
 contains no credential, address, story or page data, and says nothing about
 how long website access lasts, whether a save happened or will work, or
 Private Browsing. It adds no permission, looks up no tab and runs nothing on

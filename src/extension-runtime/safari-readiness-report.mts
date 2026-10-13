@@ -7,10 +7,12 @@ import {
   type SafariWebsiteAccessReading,
   type ScriptRegistrationReason,
 } from "../extension-core/index.mjs";
+import { ARCHIVE_ACCESS_CONFIRM_DELAY_MS } from "../extension-core/index.mjs";
 import { ARCHIVE_READINESS_MESSAGE_TYPES, runsBesideTraceApp } from "./archive-readiness.mjs";
-import { sendNativeMessageWithFallback } from "./browser-adapters.mjs";
+import { ARCHIVE_ACCESS_REPORT_ALARM, sendNativeMessageWithFallback } from "./browser-adapters.mjs";
 import {
   extensionCall,
+  type AlarmsPort,
   type BrowserStorage,
   type PermissionsPort,
   type RuntimePort,
@@ -69,8 +71,12 @@ type Environment = Readonly<{
     origins: readonly string[];
     registrations: readonly Readonly<{ id: string }>[];
   }>;
-  /** Resolves once no registration of the page scripts is under way. */
-  registrationIdle?: () => Promise<void>;
+  /** The registration of the page scripts: whether one is under way, and when none is. */
+  registration?: Readonly<{ idle(): Promise<void>; pending(): boolean }>;
+  /** How long a report waits for a registration under way before saying it does not know. */
+  settleLimitMs?: number;
+  /** The daily alarm the access reading keeps is heard here too. */
+  alarms?: AlarmsPort;
   /** Read when a report is made; the session is created after this is installed. */
   session: () => SafariReadinessSession | undefined;
   now?: () => number;
@@ -137,8 +143,14 @@ export function installSafariReadinessReport(environment: Environment): SafariRe
   }
   const supported = Promise.resolve(beside);
 
-  /** The last attempt to register the page scripts failed with the sites allowed. */
-  let registrationFailed = false;
+  /**
+   * How the last registration to end in this background's life ended: its
+   * result, null when it could not finish, undefined when none has ended.
+   */
+  let lastRegistration: EarnedPermissionRegistrationResult | null | undefined;
+  /** What the last report said of the page scripts. */
+  let lastScriptReason: ScriptRegistrationReason | null = null;
+  const wait = environment.wait ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }));
 
   const websiteAccess = async (): Promise<SafariWebsiteAccessReading> => {
     if (config.origins.length === 0) return { complete: null, granted: null };
@@ -160,15 +172,9 @@ export function installSafariReadinessReport(environment: Environment): SafariRe
     };
   };
 
-  const scriptRegistration = async (): Promise<ScriptRegistrationReason> => {
-    if (config.registrationMode === "static") {
-      const declared = runtime.getManifest?.().content_scripts;
-      return Array.isArray(declared) && declared.length > 0 ? "declared" : "not_registered";
-    }
-    if (scripting === undefined) return "registration_failed";
-    // A registration under way is let finish, so that a grant just made is
-    // not reported as having no scripts in the moment before they are in.
-    await bounded(environment.registrationIdle?.() ?? Promise.resolve(), 6_000);
+  /** One reading of the registered page scripts and the generation that put them there. */
+  const readScripts = async (): Promise<"registered" | "absent" | "unreadable"> => {
+    if (scripting === undefined) return "absent";
     const [current, stored] = await Promise.all([
       bounded(call<unknown>(scripting, "getRegisteredContentScripts", []), BROWSER_READ_TIMEOUT_MS),
       bounded(storage.get(EARNED_PERMISSION_STATE_KEY), BROWSER_READ_TIMEOUT_MS),
@@ -177,10 +183,49 @@ export function installSafariReadinessReport(environment: Environment): SafariRe
     const ids = new Set(current.map((script) => (isRecord(script) ? script.id : undefined)));
     const state = stored[EARNED_PERMISSION_STATE_KEY];
     const generation = isRecord(state) ? state.registrationVersion : undefined;
-    if (config.registrations.every(({ id }) => ids.has(id)) && generation === config.version) {
-      return "registered";
+    return config.registrations.every(({ id }) => ids.has(id)) && generation === config.version
+      ? "registered"
+      : "absent";
+  };
+
+  /**
+   * Registered on one reading. A blocker only when confirmed: a registration
+   * that has finished says the scripts are not in, or two readings a moment
+   * apart both find them absent with no registration under way. While one is
+   * under way, or has outlasted the wait, the answer is not known: the moment
+   * after the reader allows the sites must never read as "no scripts".
+   */
+  const readScriptRegistration = async (): Promise<ScriptRegistrationReason> => {
+    if (config.registrationMode === "static") {
+      const declared = runtime.getManifest?.().content_scripts;
+      return Array.isArray(declared) && declared.length > 0 ? "declared" : "not_registered";
     }
-    return registrationFailed ? "registration_failed" : "not_registered";
+    if (scripting === undefined) return "registration_failed";
+    const registration = environment.registration;
+    const underWay = (): boolean => registration?.pending() === true;
+    if (registration !== undefined) {
+      const settled = await bounded(registration.idle().then(() => true), environment.settleLimitMs ?? 6_000);
+      if (settled !== true || underWay()) return "pending";
+    }
+    const first = await readScripts();
+    if (first !== "absent") return first;
+    if (underWay()) return "pending";
+    // The registration that last finished says so itself.
+    if (lastRegistration != null && !lastRegistration.registered) {
+      return lastRegistration.error === "registration_failed" ? "registration_failed" : "not_registered";
+    }
+    // None has said: a second reading has to agree.
+    await wait(ARCHIVE_ACCESS_CONFIRM_DELAY_MS);
+    if (underWay()) return "pending";
+    const second = await readScripts();
+    if (second === "registered") return "registered";
+    if (underWay()) return "pending";
+    return second === "absent" ? "not_registered" : "unconfirmed";
+  };
+  const scriptRegistration = async (): Promise<ScriptRegistrationReason> => {
+    const reason = await readScriptRegistration();
+    lastScriptReason = reason;
+    return reason;
   };
 
   const account = async (): Promise<SafariReadinessAccount> => {
@@ -244,7 +289,7 @@ export function installSafariReadinessReport(environment: Environment): SafariRe
     account,
     session: () => environment.session()?.pageBinding() ?? null,
     automaticSaving: async () => (await environment.session()?.automaticSaving()) ?? "unknown",
-    wait: environment.wait ?? ((ms) => new Promise((resolve) => { setTimeout(resolve, ms); })),
+    wait,
     now,
   });
 
@@ -267,8 +312,17 @@ export function installSafariReadinessReport(environment: Environment): SafariRe
     void report().then(() => sendResponse({ ok: true }), () => sendResponse({ ok: true }));
     return true;
   });
+  // After a grant the report itself waits for the registration the grant
+  // sets off, however the two listeners happen to be ordered.
   permissions.onAdded?.addListener(reportQuietly);
   permissions.onRemoved?.addListener(reportQuietly);
+  // Access can end with nothing to say so: a grant for one day runs out and
+  // Safari tells no one. The alarm the access reading already keeps, about
+  // once a day, reads the report again as well, so that a "ready" does not
+  // stand for good on the strength of what was once true.
+  environment.alarms?.onAlarm?.addListener((alarm) => {
+    if (alarm?.name === ARCHIVE_ACCESS_REPORT_ALARM) reportQuietly();
+  });
 
   /** The account session the last look found in this background's life. */
   let lastSession: string | null | undefined;
@@ -276,11 +330,14 @@ export function installSafariReadinessReport(environment: Environment): SafariRe
     report,
     registrationEnded(result) {
       const failed = result !== null && result.error === "registration_failed";
-      const changed = failed !== registrationFailed || (result !== null && result.changed);
-      registrationFailed = failed;
-      // Scripts registered or removed, or an attempt that failed. A reconcile
+      const failedBefore = lastRegistration != null && lastRegistration.error === "registration_failed";
+      lastRegistration = result;
+      // Scripts registered or removed, an attempt that failed, or the end of
+      // a registration the last report could only call pending. A reconcile
       // that found everything as it was says nothing new.
-      if (changed || failed) reportQuietly();
+      if ((result !== null && result.changed) || failed || failed !== failedBefore || lastScriptReason === "pending") {
+        reportQuietly();
+      }
     },
     preferenceChanged: reportQuietly,
     accountMayHaveChanged() {

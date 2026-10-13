@@ -753,6 +753,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #requiredOrigins;
     #wait;
     #ledger;
+    #settled;
     #accessReport = null;
     #accessReportRequestedAgain = false;
     #accessReportReaderPresent = false;
@@ -761,6 +762,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#permissions = options.permissions;
       this.#clock = options.clock ?? SYSTEM_CLOCK;
       this.#requiredOrigins = Object.freeze([...options.requiredOrigins ?? []]);
+      this.#settled = options.settled;
       this.#wait = options.wait ?? ((ms) => new Promise((resolve) => {
         setTimeout(resolve, ms);
       }));
@@ -851,6 +853,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (reading === null) return { kind: "unknown" };
       if (!reading.complete) {
         if (!ledger.grantSeen) return { kind: "withheld" };
+        if (this.#settled !== void 0 && !await this.#settled().catch(() => false)) {
+          return { kind: "unknown" };
+        }
         await this.#wait(ARCHIVE_ACCESS_CONFIRM_DELAY_MS);
         reading = await this.#readAccess();
         if (reading === null) return { kind: "unknown" };
@@ -8158,6 +8163,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var EarnedPermissionRegistrationController = class {
     #environment;
     #generation = 0;
+    #running = 0;
+    #expected = /* @__PURE__ */ new Set();
     #tail = Promise.resolve({
       ok: false,
       completeGrant: false,
@@ -8168,20 +8175,50 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     constructor(environment) {
       this.#environment = environment;
     }
-    /** Resolves once no reconcile is under way or waiting its turn. */
-    idle() {
-      const tail = this.#tail;
-      return tail.then(
-        () => this.#tail === tail ? void 0 : this.idle(),
-        () => this.#tail === tail ? void 0 : this.idle()
-      );
+    /**
+     * Work that will reconcile, made known the moment it is set off. An event
+     * that leads to a reconcile does other things first; without this, someone
+     * asking in between would be told nothing is under way.
+     */
+    expect(work) {
+      this.#expected.add(work);
+      const done = () => {
+        this.#expected.delete(work);
+      };
+      work.then(done, done);
+      return work;
+    }
+    /** Whether a reconcile is running, waiting its turn, or about to be asked for. */
+    pending() {
+      return this.#running > 0 || this.#expected.size > 0;
+    }
+    /** Resolves once `pending()` is false. */
+    async idle() {
+      while (this.pending()) {
+        await Promise.allSettled([this.#tail, ...this.#expected]);
+      }
+    }
+    /** True once nothing is pending; false if that takes longer than `limitMs`. */
+    settled(limitMs) {
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(false), limitMs);
+        void this.idle().then(() => {
+          clearTimeout(timer);
+          resolve(true);
+        });
+      });
     }
     reconcile() {
+      this.#running += 1;
       const next = this.#tail.then(
         () => this.#bounded(),
         () => this.#bounded()
       );
       this.#tail = next;
+      const ended = () => {
+        this.#running -= 1;
+      };
+      next.then(ended, ended);
       return next;
     }
     // Safari can leave an extension API call unanswered after it suspends and
@@ -8542,14 +8579,14 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return true;
     });
     environment.permissions.onAdded?.addListener(() => {
-      void reconcileAfresh(true);
+      void controller.expect(reconcileAfresh(true));
     });
     environment.permissions.onRemoved?.addListener(() => {
       void reconcile().catch(() => void 0);
     });
     runtime.onInstalled?.addListener((details) => {
       if (details.reason === "install" || details.reason === "update") {
-        void reconcileAfresh(false);
+        void controller.expect(reconcileAfresh(false));
       }
     });
     void reconcile().catch(() => void 0);
@@ -8629,7 +8666,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         ...environment.clock === void 0 ? {} : { clock: environment.clock },
         ...environment.requiredOrigins === void 0 ? {} : { requiredOrigins: environment.requiredOrigins },
         ...environment.accessConfirmWait === void 0 ? {} : { wait: environment.accessConfirmWait },
-        ...environment.accessLedger === void 0 ? {} : { accessLedger: environment.accessLedger }
+        ...environment.accessLedger === void 0 ? {} : { accessLedger: environment.accessLedger },
+        ...environment.accessSettled === void 0 ? {} : { settled: environment.accessSettled }
       });
     }
     /** See `ArchiveReadinessService.reportAccess`. */
@@ -8809,7 +8847,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       });
     }
     const supported = Promise.resolve(beside);
-    let registrationFailed = false;
+    let lastRegistration;
+    let lastScriptReason = null;
+    const wait = environment.wait ?? ((ms) => new Promise((resolve) => {
+      setTimeout(resolve, ms);
+    }));
     const websiteAccess = async () => {
       if (config.origins.length === 0) return { complete: null, granted: null };
       const [complete, listed] = await Promise.all([
@@ -8825,13 +8867,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         granted
       };
     };
-    const scriptRegistration = async () => {
-      if (config.registrationMode === "static") {
-        const declared = runtime.getManifest?.().content_scripts;
-        return Array.isArray(declared) && declared.length > 0 ? "declared" : "not_registered";
-      }
-      if (scripting === void 0) return "registration_failed";
-      await bounded(environment.registrationIdle?.() ?? Promise.resolve(), 6e3);
+    const readScripts = async () => {
+      if (scripting === void 0) return "absent";
       const [current, stored] = await Promise.all([
         bounded(call(scripting, "getRegisteredContentScripts", []), BROWSER_READ_TIMEOUT_MS),
         bounded(storage.get(EARNED_PERMISSION_STATE_KEY), BROWSER_READ_TIMEOUT_MS)
@@ -8840,10 +8877,37 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       const ids = new Set(current.map((script) => isRecord21(script) ? script.id : void 0));
       const state = stored[EARNED_PERMISSION_STATE_KEY];
       const generation = isRecord21(state) ? state.registrationVersion : void 0;
-      if (config.registrations.every(({ id }) => ids.has(id)) && generation === config.version) {
-        return "registered";
+      return config.registrations.every(({ id }) => ids.has(id)) && generation === config.version ? "registered" : "absent";
+    };
+    const readScriptRegistration = async () => {
+      if (config.registrationMode === "static") {
+        const declared = runtime.getManifest?.().content_scripts;
+        return Array.isArray(declared) && declared.length > 0 ? "declared" : "not_registered";
       }
-      return registrationFailed ? "registration_failed" : "not_registered";
+      if (scripting === void 0) return "registration_failed";
+      const registration = environment.registration;
+      const underWay = () => registration?.pending() === true;
+      if (registration !== void 0) {
+        const settled = await bounded(registration.idle().then(() => true), environment.settleLimitMs ?? 6e3);
+        if (settled !== true || underWay()) return "pending";
+      }
+      const first = await readScripts();
+      if (first !== "absent") return first;
+      if (underWay()) return "pending";
+      if (lastRegistration != null && !lastRegistration.registered) {
+        return lastRegistration.error === "registration_failed" ? "registration_failed" : "not_registered";
+      }
+      await wait(ARCHIVE_ACCESS_CONFIRM_DELAY_MS);
+      if (underWay()) return "pending";
+      const second = await readScripts();
+      if (second === "registered") return "registered";
+      if (underWay()) return "pending";
+      return second === "absent" ? "not_registered" : "unconfirmed";
+    };
+    const scriptRegistration = async () => {
+      const reason = await readScriptRegistration();
+      lastScriptReason = reason;
+      return reason;
     };
     const account = async () => {
       const session = environment.session();
@@ -8897,9 +8961,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       account,
       session: () => environment.session()?.pageBinding() ?? null,
       automaticSaving: async () => await environment.session()?.automaticSaving() ?? "unknown",
-      wait: environment.wait ?? ((ms) => new Promise((resolve) => {
-        setTimeout(resolve, ms);
-      })),
+      wait,
       now
     });
     const report = async () => await supported ? service.report() : { kind: "no_provider" };
@@ -8915,14 +8977,19 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     });
     permissions.onAdded?.addListener(reportQuietly);
     permissions.onRemoved?.addListener(reportQuietly);
+    environment.alarms?.onAlarm?.addListener((alarm) => {
+      if (alarm?.name === ARCHIVE_ACCESS_REPORT_ALARM) reportQuietly();
+    });
     let lastSession;
     return Object.freeze({
       report,
       registrationEnded(result) {
         const failed2 = result !== null && result.error === "registration_failed";
-        const changed = failed2 !== registrationFailed || result !== null && result.changed;
-        registrationFailed = failed2;
-        if (changed || failed2) reportQuietly();
+        const failedBefore = lastRegistration != null && lastRegistration.error === "registration_failed";
+        lastRegistration = result;
+        if (result !== null && result.changed || failed2 || failed2 !== failedBefore || lastScriptReason === "pending") {
+          reportQuietly();
+        }
       },
       preferenceChanged: reportQuietly,
       accountMayHaveChanged() {
@@ -8973,6 +9040,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     let session;
     let afterScriptsRegistered = null;
     let readiness = null;
+    let registrationSettled = null;
     if (true) {
       const recover = installArchiveRecovery({
         runtime: extension.runtime,
@@ -9006,7 +9074,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         status: archiveReadinessStatus,
         publishTrackingPreference: () => session?.publishTrackingPreference() ?? Promise.resolve(),
         ...define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default === null ? {} : { requiredOrigins: define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.origins },
-        accessLedger
+        accessLedger,
+        // Access is not reported as ended while an update's or a start's own
+        // registration is still settling.
+        accessSettled: () => registrationSettled?.() ?? Promise.resolve(true)
       });
       if (define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default !== null && extension.permissions !== void 0) {
         installArchiveAccessReport(archiveReadiness, {
@@ -9039,6 +9110,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           },
           onReconcileEnded: (result) => readiness?.registrationEnded(result)
         });
+        registrationSettled = () => registration.settled(8e3);
         readiness = installSafariReadinessReport({
           runtime: extension.runtime,
           permissions: extension.permissions,
@@ -9047,7 +9119,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           storageMode,
           apiOrigin: "https://api.tracefiction.com",
           config: define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default,
-          registrationIdle: () => registration.idle(),
+          registration,
+          alarms: extension.alarms,
           session: () => session
         });
       }

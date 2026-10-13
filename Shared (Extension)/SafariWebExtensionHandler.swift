@@ -129,21 +129,11 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                         receiptOrigin = origin
                     }
 #endif
-                    if messageType.hasPrefix("TRACE_IOS_SAFARI_READINESS") {
-                        // Bound, like the two below, to the provider the app
-                        // issued as it is read now.
-                        responseBody = TraceSafariReadinessReport.handle(payload, defaults: defaults,
-                            provider: TraceSafariProviderCodec.importBinding(session: session, now: now),
-                            now: now.timeIntervalSince1970 * 1000, configuredAPIOrigin: receiptOrigin)
-                    } else if messageType.hasPrefix("TRACE_IOS_TRACKING_PREFERENCE") {
-                        responseBody = TraceSafariTrackingPreference.handle(payload, defaults: defaults,
-                            provider: TraceSafariProviderCodec.importBinding(session: session, now: now),
-                            now: now.timeIntervalSince1970 * 1000, configuredAPIOrigin: receiptOrigin)
-                    } else {
-                        responseBody = TraceSafariOnboardingReceipt.handle(payload, defaults: defaults,
-                            provider: TraceSafariProviderCodec.importBinding(session: session, now: now),
-                            now: now.timeIntervalSince1970 * 1000, configuredAPIOrigin: receiptOrigin)
-                    }
+                    // Each is bound to the provider the app issued, as read
+                    // just above. Which of them answers is decided in the
+                    // shared codec, where it is tested.
+                    responseBody = TraceSafariProviderBoundMessages.respond(to: payload, type: messageType,
+                        defaults: defaults, session: session, now: now, configuredAPIOrigin: receiptOrigin)
                 } else { responseBody = ["ok": false] }
             case Self.traceIosAuthTokenRequest:
                 let credential = Self.readSharedTraceCredential()
