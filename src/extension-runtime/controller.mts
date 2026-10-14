@@ -1,3 +1,5 @@
+import type { PermissionsPort, ScriptingPort } from "./browser-platform.mjs";
+import { collectOpenStoryTabs, encodeOpenStoryTabs } from "./open-story-tabs.mjs";
 import { BrowserDeviceSessionProvider } from "./browser-device-session.mjs";
 import {
   AccountProjectionService,
@@ -159,6 +161,8 @@ interface RuntimeEnvironment {
   readonly mode: SessionMode;
   readonly runtime: RuntimePort;
   readonly tabs: TabsPort;
+  readonly scripting?: ScriptingPort;
+  readonly permissions?: PermissionsPort;
   readonly alarms: AlarmsPort;
   readonly storageArea: StorageArea;
   readonly databaseFactory: IDBFactory;
@@ -268,6 +272,7 @@ export class SessionRuntimeController {
   readonly #nativeImportEnabled: boolean;
   readonly #nativeImport: NativeLibraryImportProducer;
   readonly #firstStoryInitiator: BrowserFirstStoryInitiator;
+  readonly #openTabs: () => Promise<ReturnType<typeof encodeOpenStoryTabs>>;
   readonly #traceWebNavigation: BrowserTraceWebNavigation;
   readonly #traceWebStatus: TraceWebStatusNotification;
   readonly #archiveReadinessStatus: BrowserArchiveReadinessStatus;
@@ -411,6 +416,12 @@ export class SessionRuntimeController {
     };
     this.#libraryMutations = new LibraryMutationService(libraryCommandPorts);
     this.#finishQualification = new FinishQualificationService(libraryCommandPorts);
+    this.#openTabs = async () => {
+      const payload = await collectOpenStoryTabs({ runtime: environment.runtime, tabs: environment.tabs,
+        ...(environment.scripting ? { scripting: environment.scripting } : {}),
+        ...(environment.permissions ? { permissions: environment.permissions } : {}), mode: environment.storageMode });
+      return payload ? encodeOpenStoryTabs(payload) : null;
+    };
     this.#firstStoryInitiator = new BrowserFirstStoryInitiator({
       runtime: environment.runtime,
       tabs: environment.tabs,
@@ -557,6 +568,7 @@ export class SessionRuntimeController {
       case SESSION_MESSAGE_TYPES.savedFilterSync:
         return this.#handleSavedFilterMessage(message, sender);
       case SESSION_MESSAGE_TYPES.importTrigger:
+      case SESSION_MESSAGE_TYPES.importOpenTabs:
       case SESSION_MESSAGE_TYPES.firstStoryAdd:
         return this.#handleFirstStoryMessage(message, sender);
       case SESSION_MESSAGE_TYPES.metadataBroadcast:
@@ -865,9 +877,9 @@ export class SessionRuntimeController {
         error: initiation.error,
       }, undefined, initiation);
     }
-    const importPlatform = initiation.kind === "popup_import" && this.#nativeImportEnabled
+    const importPlatform = (initiation.kind === "popup_import" || initiation.kind === "popup_open_tabs") && this.#nativeImportEnabled
       ? await this.#nativePlatform() : null;
-    if (importPlatform === "unknown") {
+    if (importPlatform === "unknown" || (initiation.kind === "popup_open_tabs" && importPlatform !== "ios")) {
       return this.#firstStoryResponse({ ok: false, error: "native_import_unavailable" }, undefined, initiation);
     }
     const nativeImport = importPlatform === "ios";
@@ -888,7 +900,11 @@ export class SessionRuntimeController {
         const result = await this.#nativeImport.run(scope, async () => {
           const current = await this.#prepareNativeAuthority();
           return current.ready && await isCurrent();
-        }, (stage) => this.#firstStoryInitiator.importActivePage(stage));
+        }, async (stage) => {
+          if (initiation.kind !== "popup_open_tabs") return this.#firstStoryInitiator.importActivePage(stage);
+          const payload = await this.#openTabs();
+          return payload ? stage(payload) : { ok: false as const, error: "no_readable_tabs" as const };
+        });
         if (result.ok && result.state === "ready_to_open") preparedHandoff = result.handoffID;
         return result;
       });
@@ -898,7 +914,7 @@ export class SessionRuntimeController {
       return this.#firstStoryResponse(fenced.kind === "published" ? fenced.value
         : { ok: false, error: "native_import_unavailable" }, action, initiation);
     }
-    const result = initiation.kind === "popup_import"
+    const result = initiation.kind !== "web_save"
       ? await this.#firstStoryInitiator.importActivePage()
       : await this.#firstStoryInitiator.saveFromTrace(initiation.url);
     return this.#firstStoryResponse(result, action, initiation);

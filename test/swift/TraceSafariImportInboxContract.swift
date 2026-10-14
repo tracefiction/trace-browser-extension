@@ -200,6 +200,23 @@ struct TraceSafariImportInboxContract {
                 "a later departure can capture its own replacement")
             _ = try inbox.purge(handoffID: freshCapture!.handoffID, now: now.addingTimeInterval(30))
         }
+        // Mixed-site open-tab payloads use the same one-use account binding.
+        let tabsRequest = prepare(); let tabsReady = handle(tabsRequest)
+        let tabItems: [[String: Any]] = [
+            ["src": "ao3", "u": "https://archiveofourown.org/works/123", "ctx": "tab", "t": "Synthetic AO3"],
+            ["src": "ffn", "u": "https://www.fanfiction.net/s/456/", "ctx": "tab", "t": "Synthetic FFN"]]
+        let tabs: [String: Any] = ["s": "tabs", "at": "synthetic", "items": tabItems,
+            "scan": ["considered": 4, "unreadable": 1, "duplicates": 1, "limited": 0]]
+        var badTabs = tabs; badTabs["scan"] = ["considered": true, "unreadable": 1, "duplicates": 1, "limited": 0]
+        check(handle(stage(tabsRequest, tabsReady, try JSONSerialization.data(withJSONObject: badTabs)))["error"] as? String == "invalid_request", "tab scan counts reject booleans")
+        badTabs = tabs; badTabs["scan"] = ["considered": 2, "unreadable": 1, "duplicates": 1, "limited": 0]
+        check(handle(stage(tabsRequest, tabsReady, try JSONSerialization.data(withJSONObject: badTabs)))["error"] as? String == "invalid_request", "tab scan counts must account for every tab")
+        badTabs = tabs; badTabs["items"] = [["src": "ffn", "u": "https://archiveofourown.org/works/123", "ctx": "tab", "t": "Wrong archive"]]
+        check(handle(stage(tabsRequest, tabsReady, try JSONSerialization.data(withJSONObject: badTabs)))["error"] as? String == "invalid_request", "mixed import still checks each item's source")
+        let tabBytes = try JSONSerialization.data(withJSONObject: tabs)
+        check(handle(stage(tabsRequest, tabsReady, tabBytes))["state"] as? String == "ready_to_open", "mixed-site tab metadata stages")
+        check(try inbox.claim(handoffID: tabsReady["handoffID"] as! String, expecting: expected, now: now, currentProviderBinding: { _ in binding }) == tabBytes,
+              "mixed import is consumed with the exact private binding")
         // Fill the bounded tombstone ledger. IDs are not forgotten early to
         // make space for retries that could otherwise revive a consumed import.
         try? FileManager.default.removeItem(at: directory.appendingPathComponent("TraceNativeImportInboxV1.json"))

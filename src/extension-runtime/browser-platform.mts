@@ -88,6 +88,8 @@ export interface StorageArea {
 }
 
 export interface BrowserTab {
+  readonly incognito?: boolean;
+  readonly discarded?: boolean;
   readonly id?: number;
   readonly url?: string;
   readonly active?: boolean;

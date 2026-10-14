@@ -307,11 +307,26 @@ final class TraceSafariImportInbox {
               let bytes = Data(base64Encoded: encoded), bytes.count <= maximumPayloadBytes,
               bytes.base64EncodedString() == encoded, String(data: bytes, encoding: .utf8) != nil,
               let json = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
-              Set(json.keys) == Set(["s", "at", "items"]),
-              let site = source(json["s"]), let at = json["at"] as? String,
+              Set(json.keys).isSubset(of: Set(["s", "at", "items", "scan"])),
+              let sourceText = json["s"] as? String,
+              sourceText == "tabs" || source(sourceText) != nil, let at = json["at"] as? String,
               !at.isEmpty, at.utf16.count <= 128,
               let items = json["items"] as? [[String: Any]], (1...maximumItems).contains(items.count),
-              items.allSatisfy({ source($0["src"]) == site && workURL($0["u"], site: site) }) else { return nil }
+              items.allSatisfy({ item in
+                  guard let site = source(item["src"]), workURL(item["u"], site: site) else { return false }
+                  if sourceText != "tabs" { return site == source(sourceText) }
+                  return item["ctx"] as? String == "tab" && (item["t"] as? String)?.isEmpty == false
+              }) else { return nil }
+        if sourceText == "tabs" {
+            guard let scan = json["scan"] as? [String: Any],
+                  Set(scan.keys) == Set(["considered", "unreadable", "duplicates", "limited"]),
+                  scan.values.allSatisfy({ value in
+                      guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return false }
+                      return number.doubleValue >= 0 && number.doubleValue <= 100_000 && number.doubleValue.rounded(.down) == number.doubleValue
+                  }), let considered = scan["considered"] as? Int, let unreadable = scan["unreadable"] as? Int,
+                  let duplicates = scan["duplicates"] as? Int, considered <= maximumItems,
+                  considered == items.count + unreadable + duplicates else { return nil }
+        } else if json["scan"] != nil { return nil }
         return bytes
     }
     private static func source(_ value: Any?) -> String? {
