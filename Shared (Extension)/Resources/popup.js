@@ -226,6 +226,7 @@ let earnedCurrentPage = null;
 let earnedSetupFinishedOnStory = false;
 let kernelPopupInitialized = false;
 let nativeImportContinuation = null;
+let openTabsBusy = false;
 let nativeImportGeneration = 0;
 // Reader view only: whether the state on screen offers Import. Null in the
 // ordinary popup, where the kind of page alone decides.
@@ -1221,7 +1222,7 @@ function placeImportInReaderView() {
   const extras = document.getElementById("popup-earned-extras");
   const settings = document.getElementById("popup-earned-settings-row");
   if (!extras || !settings || settings.parentNode !== extras) return;
-  for (const id of ["popup-import", "popup-import-recovery-help", "popup-import-open-native"]) {
+  for (const id of ["popup-import", "popup-import-recovery-help", "popup-import-open-tabs", "popup-open-tabs-help", "popup-import-open-native"]) {
     const element = document.getElementById(id);
     if (element && element.parentNode !== extras) extras.insertBefore(element, settings);
   }
@@ -1249,7 +1250,7 @@ function setReaderImport(offered) {
     restoreImportButton(button);
   }
   renderNativeImportContinuation(popupModel.authState);
-  return !button.hidden || Boolean(link && !link.hidden);
+  return !button.hidden || Boolean(link && !link.hidden) || !document.getElementById("popup-import-open-tabs")?.hidden;
 }
 
 /** The record sits under the headline, or after the body where a state asks. */
@@ -3852,7 +3853,50 @@ if (typeof ResizeObserver !== "undefined") {
   }
 }
 
+function renderOpenTabsImport(snapshot) {
+  const button = document.getElementById("popup-import-open-tabs");
+  const help = document.getElementById("popup-open-tabs-help");
+  if (!button || !help) return;
+  const available = (!ACTIVE_TAB_PROBE || Boolean(EARNED_PERMISSION_ONBOARDING)) && popupModel.nativeImport === true && snapshot?.state === "connected";
+  button.hidden = !available;
+  help.hidden = !available;
+  button.disabled = openTabsBusy;
+  if (!available) {
+    help.textContent = "Read accessible AO3 and FanFiction.net tabs, then choose what to keep in Trace. Your tabs stay open.";
+  }
+}
+
+function runOpenTabsImport() {
+  if (openTabsBusy || popupModel.nativeImport !== true || popupModel.authState?.state !== "connected") return;
+  const button = document.getElementById("popup-import-open-tabs");
+  const help = document.getElementById("popup-open-tabs-help");
+  const generation = nativeImportGeneration;
+  openTabsBusy = true;
+  nativeImportContinuation = null;
+  renderNativeImportContinuation(popupModel.authState);
+  button.textContent = "Reading open story tabs…";
+  help.textContent = "Keep this sheet open while Trace reads the available tabs. Nothing is imported until you review it.";
+  renderOpenTabsImport(popupModel.authState);
+  sendKernelRuntimeMessage({ type: "TRACE_IMPORT_OPEN_TABS" }, (response) => {
+    openTabsBusy = false;
+    button.textContent = "Import open stories";
+    renderOpenTabsImport(popupModel.authState);
+    if (generation !== nativeImportGeneration) return;
+    if (response?.ok && showNativeImportContinuation(response, generation)) {
+      help.textContent = "Your stories are ready to review. Choose a status for each one in Trace.";
+      document.getElementById("popup-import-open-native").textContent = "Review stories in Trace";
+    } else {
+      help.textContent = response?.error === "no_readable_tabs"
+        ? "No story pages could be read. Allow Trace on your story sites, open any sleeping story tabs, then try again."
+        : "Trace couldn’t prepare these stories. Return to Trace to check your connection, then try again.";
+    }
+  });
+}
+
+document.getElementById("popup-import-open-tabs")?.addEventListener("click", runOpenTabsImport);
+
 function renderNativeImportContinuation(snapshot) {
+  renderOpenTabsImport(snapshot);
   const link = document.getElementById("popup-import-open-native");
   const button = document.getElementById("popup-import");
   if (!link) return;
@@ -3986,6 +4030,7 @@ function setImportInitial(button) {
 }
 
 function runImport(button) {
+  if (openTabsBusy) return;
   if (!isImportCurrentlyAvailable()) {
     setImportUnavailable(button);
     return;

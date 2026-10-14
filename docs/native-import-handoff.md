@@ -159,3 +159,38 @@ Installed iOS proof is still required for near-limit Safari native-message
 transport, file protection in the real app-group container, the fresh direct
 link, cold/warm review presentation and account/draft/replay rejection. Local
 Swift/JavaScript contracts and source typechecks do not prove those behaviors.
+
+
+## Open story tabs (paired iOS MVP)
+
+`TRACE_IMPORT_OPEN_TABS` is a popup-only opt-in command. It uses the same native
+preparation, account/provider fence, cancellation and one-use inbox. It fails
+closed on desktop, unpaired packages and unknown platform detection. It never
+opens a web import page.
+
+The worker queries only granted supported archive origins (or just the active
+tab when no archive origins are granted) and
+reads at most 250 non-private story tabs, four at a time, with a two-second
+per-tab and fifteen-second scan bound. A serialized, read-only DOM extractor
+reads rendered title, author and source counts; URLs identify a work but never
+supply its metadata. It neither installs the normal collector nor activates,
+reloads or closes tabs. Unknown credential forms are excluded. No input values,
+story text, full page HTML or unrelated tab URLs leave the page.
+
+The additive payload is `{s:"tabs",at,items,scan}`. Each item has its own `src`
+(`ao3` or `ffn`), canonical `u`, `ctx:"tab"`, rendered `t` and optional metadata.
+`chu` is the open chapter reference for review only. `scan` contains integer
+`considered`, `unreadable`, `duplicates` and `limited` counts. Considered equals
+items plus unreadable plus duplicates and is at most 250. Duplicate works yield
+one review row; the first readable tab supplies its metadata and reference.
+An empty scan has no handoff and explains permissions and sleeping tabs.
+
+The native consumer defaults new tab rows to Saved, supports individual and
+bulk status choices, and omits progress from every tab-import request. Existing
+Library records therefore retain private status and progress under the current
+insert-only API contract. The server does not store the captured chapter link
+through this API; the MVP does not offer tab closure or claim a saved resume
+position. The user must explicitly review and confirm before any library write.
+
+Synthetic DOM/native contracts do not establish real iPhone Safari's suspended
+page access. Device verification remains required before release.

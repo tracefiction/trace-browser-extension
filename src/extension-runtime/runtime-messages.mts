@@ -53,6 +53,7 @@ export const SESSION_MESSAGE_TYPES = Object.freeze({
   popupState: "TRACE_POPUP_GET_STATE",
   capacityRecovery: "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE",
   importTrigger: "TRACE_IMPORT_TRIGGER",
+  importOpenTabs: "TRACE_IMPORT_OPEN_TABS",
   firstStoryAdd: "TRACE_FIRST_STORY_ADD",
   setHiddenWork: "TRACE_SET_HIDDEN_WORK",
   setReaderStatus: "TRACE_SET_READER_STATUS",
