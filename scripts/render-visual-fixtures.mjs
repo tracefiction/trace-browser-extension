@@ -857,7 +857,7 @@ async function renderRestylePopup(browser, assets, output, device, appearance, s
     " renderEarnedLibraryFull: typeof renderEarnedLibraryFull === 'function' ? renderEarnedLibraryFull : null," +
     " renderPopupSaveStory: typeof renderPopupSaveStory === 'function' ? renderPopupSaveStory : null," +
     " setPopupStatusError: typeof setPopupStatusError === 'function' ? setPopupStatusError : null," +
-    " renderEarnedRegistrationFailure, renderEarnedUnsupportedStory, renderPageReconnect };";
+    " renderEarnedRegistrationFailure, renderEarnedUnsupportedStory, renderPageReconnect, renderEarnedAskWaiting };";
   await installPopupRoutes(page, assets.popupHtml, assets.popupCss, assets.popupJs + previewApi, assets.markSvg);
   await page.goto("https://trace-extension.local/popup.html", { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => Boolean(window.__traceVisualRender));
@@ -884,14 +884,12 @@ async function renderRestylePopup(browser, assets, output, device, appearance, s
     document.getElementById("popup-earned-permission").hidden = false;
     if (code === "P1") renderEarnedAccessPending(story);
     if (code === "P2") renderEarnedSaved(story, saved, identity);
-    if (code === "P3") renderEarnedPermissionInvitation(story, false, { granted: 1, required: 5 });
-    if (code === "P3-lapse") renderEarnedPermissionInvitation(story, false, { granted: 1, required: 5 }, true);
+    // The ask outside the first-tap sheet: on a list, on a story, and waiting on Safari.
+    if (code === "P3") renderEarnedPermissionInvitation({ ok: true, kind: "archive", site: "AO3" });
+    if (code === "P3-lapse") renderEarnedPermissionInvitation(story);
     if (code === "P4") {
-      configureEarnedActions({ label: "Waiting for Safari…", action: "", disabled: true, emphasis: "secondary" });
-      setEarnedCopy({ stateCode: "P4", headingMarkup: "Tap <b>Always Allow</b>, not the blue button.",
-        lead: "It lists 5 addresses. They’re all AO3 or FanFiction.net.",
-        ruleMarkup: "Tap <b>Always Allow</b>, not the blue button.", duplicateRule: true });
-      setEarnedResult("checking", "", "");
+      renderEarnedPermissionInvitation(story);
+      window.__traceVisualRender.renderEarnedAskWaiting();
     }
     if (code === "P5") renderEarnedDelayed(story);
     if (code === "P6") renderEarnedConnectAccount(story);

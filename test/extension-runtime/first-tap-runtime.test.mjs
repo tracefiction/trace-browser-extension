@@ -41,7 +41,7 @@ const REGISTERED = ["trace-archive-automation-v1", "trace-ao3-saved-filters-v1"]
  * Safari does each time it wakes the extension; what a background holds only
  * in memory starts empty.
  */
-function install({ granted = false, registered = [], crypto = steadyCrypto } = {}) {
+function install({ granted = false, registered = [], crypto = steadyCrypto, saveOnOpen = true } = {}) {
   const state = {
     granted, registered, binding: "1.aaa", accountId: "account-a",
     /** What `permissions.getAll` lists; null to list exactly what `granted` says. */
@@ -72,6 +72,7 @@ function install({ granted = false, registered = [], crypto = steadyCrypto } = {
     };
     const afterScriptsRegistered = installFirstTapSave({
       runtime,
+      saveOnOpen,
       mode: "promise",
       origins: FIVE,
       registrationIds: REGISTERED,
@@ -231,6 +232,24 @@ test("the sheet's port saves the tapped story: manual-mode script first, one sav
     h.calls.tabMessages.at(-1),
     { tabId: 7, message: { type: "TRACE_FIRST_TAP_MARK", workKey: WORK_KEY }, options: { frameId: 0 } },
   );
+});
+
+test("without saving on opening, the port offers the save and makes it only on the reader's Save this story", async () => {
+  const h = harness({ saveOnOpen: false });
+  const port = h.openPort();
+  port.send("open");
+  await turns();
+  assert.deepEqual(port.posted.map(({ state }) => state), ["awaiting_request"]);
+  assert.equal(port.posted[0].preference, "on");
+  assert.deepEqual(h.calls.injections, [], "nothing is put into the page for an open");
+  assert.deepEqual(h.calls.saves, [], "and nothing is saved");
+
+  port.send("save");
+  await turns();
+  assert.equal(h.calls.injections.length, 1);
+  assert.equal(h.calls.saves.length, 1, "one save, made by the reader's tap");
+  assert.equal(h.calls.saves[0].mode, "bounded_manual");
+  assert.equal(port.posted.at(-1).state, "confirmed");
 });
 
 test("only Trace's own sheet can open that port", async () => {

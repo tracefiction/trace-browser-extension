@@ -670,21 +670,23 @@ for (const promiseRuntime of [false, true]) {
     assert.equal(h.document.getElementById("popup-earned-story").dataset.state, "pass");
     assert.equal(h.document.getElementById("popup-earned-access").dataset.state, "waiting");
     assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "waiting");
-    assert.equal(
-      h.document.getElementById("popup-earned-kicker").textContent,
-      "AO3 story",
-    );
+    // A build without the first-tap sheet asks with the sheet's own words.
+    assert.equal(h.document.getElementById("popup-earned-kicker").hidden, true);
     assert.equal(
       h.document.getElementById("popup-earned-heading").textContent,
-      "Let Trace work on AO3 and FanFiction.net",
+      "Let Trace save stories as you read",
     );
     assert.equal(
       h.document.getElementById("popup-earned-lead").textContent,
-      "Nothing has been saved yet.",
+      "Safari asks first. It lists AO3 and FanFiction.net’s 5 addresses.",
+    );
+    assert.equal(
+      shownText(h.document.getElementById("popup-earned-rule")),
+      "Tap Always Allow, not the blue Allow for One Day.",
     );
     assert.equal(
       h.document.getElementById("popup-earned-primary").textContent,
-      "Continue",
+      "Allow AO3 and FanFiction.net",
     );
     assert.equal(h.document.getElementById("popup-earned-help").hidden, true);
     assert.ok(
@@ -768,11 +770,15 @@ test("earned-permission denial saves nothing and offers concise retry and Settin
   assert.equal(h.reloads.length, 0);
   assert.equal(
     h.document.getElementById("popup-earned-heading").textContent,
-    "Nothing was saved",
+    "Trace saves when you ask",
   );
   assert.equal(h.document.getElementById("popup-earned-help").hidden, true);
-  assert.match(h.document.getElementById("popup-earned-lead").textContent, /Always Allow/);
-  assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Try again");
+  assert.equal(
+    h.document.getElementById("popup-earned-lead").textContent,
+    "To save another story, open Trace from the Page Menu on it and tap Save this story.",
+  );
+  assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Keep reading");
+  assert.equal(h.document.getElementById("popup-earned-secondary").textContent, "Try again");
   assert.equal(h.permissionRequests.length, 1);
   assert.equal(h.reconcileRequests.length, 0);
 });
@@ -794,7 +800,7 @@ test("earned-permission request errors do not claim access or save the story", a
   assert.equal(h.document.getElementById("popup-earned-access").dataset.state, "fail");
   assert.equal(
     h.document.getElementById("popup-earned-heading").textContent,
-    "Nothing was saved",
+    "Trace saves when you ask",
   );
   assert.equal(h.registrationRequests.length, 0);
   assert.equal(h.reconcileRequests.length, 0);
@@ -845,9 +851,12 @@ test("a supported site page can grant all five story sites before opening a stor
     });
     for (let attempt = 0; attempt < 8; attempt += 1) await flush();
     assert.equal(h.document.getElementById("popup-earned-heading").textContent,
-      "Next, tap Always Allow.", url);
+      "Let Trace save stories as you read", url);
+    assert.equal(h.document.getElementById("popup-earned-lead").textContent,
+      "This page isn’t a story. Allow AO3 and FanFiction.net, then open any story and Trace saves it.", url);
     assert.equal(h.document.getElementById("popup-earned-primary").textContent,
-      "Allow story sites", url);
+      "Allow AO3 and FanFiction.net", url);
+    assert.equal(h.document.getElementById("popup-earned-secondary").textContent, "Not now", url);
     assert.equal(h.permissionRequests.length, 0, url);
 
     h.document.getElementById("popup-earned-primary").click();
@@ -856,10 +865,12 @@ test("a supported site page can grant all five story sites before opening a stor
     assert.equal(h.permissionRequests[0].origins.length, 5, url);
     assert.equal(h.reconcileRequests.length, 1, url);
     // The site's home page has no story titles, so the prompt names none.
+    assert.equal(h.document.getElementById("popup-earned-kicker").textContent,
+      "Allowed on AO3 and FanFiction.net", url);
     assert.equal(h.document.getElementById("popup-earned-heading").textContent,
-      "Open any story", url);
+      "Open any story to save it", url);
     assert.equal(h.document.getElementById("popup-earned-lead").textContent,
-      "Trace saves it when it opens.", url);
+      "Trace saves it as it opens.", url);
     assert.doesNotMatch(h.document.getElementById("popup-earned-permission").textContent,
       /Tap a title/, url);
     assert.equal(h.document.getElementById("popup-earned-record").hidden, true, url);
@@ -887,7 +898,7 @@ test("a complete Safari grant on a supported site page gives the first-story nex
   });
   for (let attempt = 0; attempt < 8; attempt += 1) await flush();
   assert.equal(h.document.getElementById("popup-earned-heading").textContent,
-    "Open any story");
+    "Open any story to save it");
   assert.equal(h.store.traceEarnedPermissionOnboardingV1.completedAt > 0, true);
   assert.equal(h.permissionRequests.length, 0);
   assert.deepEqual(h.reloads, []);
@@ -912,9 +923,9 @@ test("a later popup on a supported listing still points to the first story", asy
   });
   for (let attempt = 0; attempt < 8; attempt += 1) await flush();
   assert.equal(h.document.getElementById("popup-earned-heading").textContent,
-    "Open any story");
+    "Open any story to save it");
   assert.equal(h.document.getElementById("popup-earned-lead").textContent,
-    "Trace saves it when it opens.");
+    "Trace saves it as it opens.");
   assert.equal(h.document.getElementById("popup-earned-record").hidden, true);
   assert.equal(h.document.getElementById("popup-earned-primary").hidden, true);
   assert.equal(h.permissionRequests.length, 0);
@@ -980,7 +991,7 @@ test("earned-permission previously declined state still requires access and neve
   );
   assert.equal(
     h.document.getElementById("popup-earned-heading").textContent,
-    "Let Trace work on AO3 and FanFiction.net",
+    "Let Trace save stories as you read",
   );
   assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "waiting");
 });
@@ -1005,7 +1016,7 @@ for (const promiseRuntime of [false, true]) {
     assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "waiting");
     assert.equal(
       h.document.getElementById("popup-earned-heading").textContent,
-      "Let Trace work on AO3 and FanFiction.net",
+      "Let Trace save stories as you read",
     );
   });
 }
@@ -1024,11 +1035,11 @@ test("earned-permission onboarding does not touch the save path before permissio
   assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "waiting");
   assert.equal(
     h.document.getElementById("popup-earned-heading").textContent,
-    "Let Trace work on AO3 and FanFiction.net",
+    "Let Trace save stories as you read",
   );
   assert.equal(
     h.document.getElementById("popup-earned-primary").textContent,
-    "Continue",
+    "Allow AO3 and FanFiction.net",
   );
   assert.equal(h.tabMessages.length, 0);
 });
@@ -1470,13 +1481,13 @@ test("earned-permission onboarding gives a bounded retry when background registr
   );
   assert.equal(
     h.document.getElementById("popup-earned-heading").textContent,
-    "Trace couldn’t finish setting up",
+    "Trace couldn’t finish turning on automatic saving",
   );
-  assert.equal(h.document.getElementById("popup-earned-help").hidden, false);
   assert.equal(
-    h.document.getElementById("popup-earned-help-summary").textContent,
-    "Still not working?",
+    h.document.getElementById("popup-earned-lead").textContent,
+    "Safari allowed AO3 and FanFiction.net, but Trace’s part didn’t start.",
   );
+  assert.equal(h.document.getElementById("popup-earned-kicker").textContent, "Allowed on AO3 and FanFiction.net");
 });
 
 test("kernel popup is read-only on open and exposes only explicit session actions", async () => {
@@ -2351,8 +2362,8 @@ test("setup: access that lapses during the wait hands the popup to the access pr
   granted.splice(0, granted.length);
   pageRan();
   await settle(h, 12);
-  assert.equal(h.document.body.dataset.tracePopupStateCode, "P3-lapse");
-  assert.equal(earnedHeading(h), "Next, tap Always Allow.");
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "ask-on-story");
+  assert.equal(earnedHeading(h), "Let Trace save stories as you read");
 
   // The account wait is over: neither its timers nor an account connecting
   // may write over the prompt.
@@ -2360,9 +2371,9 @@ test("setup: access that lapses during the wait hands the popup to the access pr
   h.emitStorageChange(ACCOUNT_CONNECTED);
   await settle(h, 12);
   assert.equal(snapshotRequests(h), 1);
-  assert.equal(h.document.body.dataset.tracePopupStateCode, "P3-lapse");
-  assert.equal(earnedHeading(h), "Next, tap Always Allow.");
-  assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Allow story sites");
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "ask-on-story");
+  assert.equal(earnedHeading(h), "Let Trace save stories as you read");
+  assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Allow AO3 and FanFiction.net");
 });
 
 test("setup: an account that connects on the first re-ask is not lost to page reports", async () => {
@@ -3158,9 +3169,9 @@ test("an expired earned grant shows P3 lapse before a saved story can appear", a
     sessionSnapshot: { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" },
   });
   for (let attempt = 0; attempt < 8; attempt += 1) await flush();
-  assert.equal(h.document.body.dataset.tracePopupStateCode, "P3-lapse");
-  assert.equal(h.document.getElementById("popup-earned-heading").textContent, "Next, tap Always Allow.");
-  assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Allow story sites");
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "ask-on-story");
+  assert.equal(h.document.getElementById("popup-earned-heading").textContent, "Let Trace save stories as you read");
+  assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Allow AO3 and FanFiction.net");
   assert.equal(h.document.getElementById("popup-earned-record").hidden, true);
   assert.equal(h.messages.some(({ type }) => type === "TRACE_SESSION_GET_SNAPSHOT"), false);
   assert.ok(h.store.traceEarnedPermissionOnboardingV1.completedAt > 0);
@@ -4090,7 +4101,7 @@ test("the iPhone popup reports story-site access once each time it opens", async
   // Also when access has ended, which is when the reading matters most.
   const lapsed = iosLinkedPopupHarness([CONNECTED_REPLY], { permissionContainsResult: false });
   await settle(lapsed);
-  assert.equal(lapsed.document.body.dataset.tracePopupStateCode, "P3-lapse");
+  assert.equal(lapsed.document.body.dataset.tracePopupStateCode, "ask-on-story");
   assert.equal(lapsed.messages.filter(({ type }) => type === "TRACE_ARCHIVE_ACCESS_REPORT").length, 1);
 
   const desktop = createPopupHarness({ sessionMode: "kernel" });
@@ -4118,7 +4129,7 @@ test("a site's home page keeps the open-any-story prompt after access is allowed
   await settle(h);
   h.document.getElementById("popup-earned-primary").click();
   await settle(h, 12);
-  assert.equal(h.document.getElementById("popup-earned-heading").textContent, "Open any story");
+  assert.equal(h.document.getElementById("popup-earned-heading").textContent, "Open any story to save it");
 
   // Safari puts Trace on the open page, which reports in. There is no story
   // here to wait for, however long the popup stays open.
@@ -4128,8 +4139,8 @@ test("a site's home page keeps the open-any-story prompt after access is allowed
     h.runTimeouts();
     await settle(h, 12);
   }
-  assert.equal(h.document.getElementById("popup-earned-heading").textContent, "Open any story");
-  assert.equal(h.document.getElementById("popup-earned-lead").textContent, "Trace saves it when it opens.");
+  assert.equal(h.document.getElementById("popup-earned-heading").textContent, "Open any story to save it");
+  assert.equal(h.document.getElementById("popup-earned-lead").textContent, "Trace saves it as it opens.");
   assert.doesNotMatch(earnedText(h), /Still confirming your story|Saving your story/);
 });
 
@@ -4235,7 +4246,7 @@ async function openFirstTapPopup(options = {}) {
   const h = createPopupHarness({
     sessionMode: "kernel",
     promiseRuntime: true,
-    earnedPermissionOnboarding: { firstTapSave: true },
+    earnedPermissionOnboarding: { registrationMode: "dynamic", firstTapSave: true },
     sessionSnapshot: { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" },
     ...options,
   });
@@ -4573,11 +4584,12 @@ test("first tap: once the story sites are allowed, or on a build without it, the
   allowed.h.firstTap.show({ state: "automatic" });
   for (let attempt = 0; attempt < 8; attempt += 1) await flush();
   assert.equal(allowed.shown(), undefined);
-  assert.equal(allowed.text("popup-earned-primary"), "Continue", "the existing ask is shown");
+  assert.equal(allowed.text("popup-earned-primary"), ALLOW_BUTTON, "the existing ask is shown");
   assert.deepEqual(allowed.h.firstTap.commands, ["open"], "and the first-tap save is not asked for again");
   // Nothing of the first-tap sheet is left on the popup that took over.
   assert.equal(allowed.text("popup-earned-ask"), null);
-  assert.equal(allowed.element("popup-earned-primary").hasAttribute("aria-describedby"), false);
+  // The ask that took over has its own rule line, which describes its button.
+  assert.equal(allowed.element("popup-earned-primary").getAttribute("aria-describedby"), "popup-earned-rule");
   assert.equal(allowed.h.document.querySelector(".popup-first-tap-fade, .popup-first-tap-rise"), null);
   assert.equal(allowed.element("popup-earned-heading-row").nextElementSibling, allowed.element("popup-earned-record"));
   allowed.h.advance(120_000);
@@ -4591,13 +4603,13 @@ test("first tap: once the story sites are allowed, or on a build without it, the
   assert.deepEqual(without.firstTap.commands, []);
   assert.equal(without.hostLifecycle.includes("trace-first-tap-popup-v1"), false);
   assert.equal(without.document.body.dataset.traceFirstTapState, undefined);
-  assert.equal(without.document.getElementById("popup-earned-primary").textContent, "Continue");
-  assert.equal(without.document.getElementById("popup-earned-heading").textContent, "Let Trace work on AO3 and FanFiction.net");
-  assert.equal(without.document.getElementById("popup-earned-lead").textContent, "Nothing has been saved yet.");
+  assert.equal(without.document.getElementById("popup-earned-primary").textContent, ALLOW_BUTTON);
+  assert.equal(without.document.getElementById("popup-earned-heading").textContent, "Let Trace save stories as you read");
+  assert.equal(without.document.getElementById("popup-earned-lead").textContent, "Safari asks first. It lists AO3 and FanFiction.net’s 5 addresses.");
   // With the switch off the sheet's own markup is never made.
   assert.equal(without.document.getElementById("popup-earned-ask"), null);
   assert.equal(without.document.querySelector(".popup-earned-record .popup-earned-internal"), null);
-  assert.equal(without.document.getElementById("popup-earned-primary").hasAttribute("aria-describedby"), false);
+  assert.equal(without.document.getElementById("popup-earned-primary").getAttribute("aria-describedby"), "popup-earned-rule");
   assert.equal(
     without.document.getElementById("popup-earned-heading-row").nextElementSibling,
     without.document.getElementById("popup-earned-record"),
@@ -4605,6 +4617,11 @@ test("first tap: once the story sites are allowed, or on a build without it, the
 
   const onList = await openFirstTapPopup({ activeTab: { id: 7, url: "https://archiveofourown.org/works" } });
   assert.deepEqual(onList.h.firstTap.commands, [], "a list or home page saves nothing and keeps the existing ask");
+  assert.deepEqual(onList.sheet(), {
+    state: undefined, kicker: null, heading: "Let Trace save stories as you read",
+    body: "This page isn’t a story. Allow AO3 and FanFiction.net, then open any story and Trace saves it.",
+    record: null, second: null, rule: RULE_LINE, primary: ALLOW_BUTTON, secondary: "Not now",
+  });
 });
 
 test("first tap: an account that changed under the popup is asked about again, never drawn as unreachable", async () => {
@@ -5231,6 +5248,102 @@ test("first tap: every state is reachable, has one headline, says its news aloud
     assert.deepEqual(h.reloads, [], name);
   }
   assert.equal(reached.size, FIRST_TAP_STATES.length - 2, "every state, a request that came to nothing being one state however it did");
+});
+
+// --- The same sheet in a release build ----------------------------------------
+//
+// A release build has the sheet, with saving on opening switched off: its
+// popup setup names the optional story sites and nothing more.
+
+const RELEASE_SHEET = Object.freeze({ earnedPermissionOnboarding: Object.freeze({ registrationMode: "dynamic" }) });
+const RETIRED_SHEET_WORDS = /Allow story sites|Always Allow on Every Website|The blue one stops Trace tomorrow|Next, tap|not the blue button/;
+
+test("release build: the sheet opens on Save this story, saves only on that tap, then goes on as the sheet does", async () => {
+  const { h, click, sheet, announced } = await openFirstTapPopup(RELEASE_SHEET);
+  assert.equal(h.evaluate("FIRST_TAP_SHEET"), true);
+  assert.equal(h.evaluate("FIRST_TAP_SAVES_ON_OPEN"), false);
+  // Opening asks the background what holds. In this build that saves nothing:
+  // the background answers with the offer.
+  assert.deepEqual(h.firstTap.commands, ["open"]);
+  h.firstTap.show({ state: "awaiting_request", workKey: "ao3:123", preference: "on" });
+  assert.deepEqual(sheet(), {
+    state: "save-on-request", kicker: null, heading: "This story", body: null, record: "AO3", second: null,
+    rule: null, primary: "Save this story", secondary: null,
+  });
+  assert.equal(h.document.getElementById("popup-earned-primary").dataset.emphasis, "primary");
+  assert.deepEqual(h.permissionRequests, [], "nothing is asked of Safari by opening Trace");
+
+  // The reader's tap is the save.
+  await click("popup-earned-primary");
+  assert.deepEqual(h.firstTap.commands, ["open", "save"]);
+  h.firstTap.show({ state: "saving", workKey: "ao3:123", startedAt: 0, story: FIRST_TAP_STORY });
+  assert.equal(sheet().state, "saving");
+  h.firstTap.show(FIRST_TAP_CONFIRMED);
+  h.advance(1_100);
+  assert.deepEqual(sheet(), {
+    state: "saved", kicker: "Saved to your Library", heading: "The Long Way", body: null,
+    record: "someone · AO3Reading · Chapter 3 of 40",
+    second: "Let Trace save the next one by itselfSafari asks first. It lists AO3 and FanFiction.net’s 5 addresses.",
+    rule: RULE_LINE, primary: ALLOW_BUTTON, secondary: "Not now",
+  });
+
+  // The ask, as the sheet always makes it.
+  await click("popup-earned-primary");
+  assert.equal(h.permissionRequests.length, 1);
+  assert.ok(h.firstTap.commands.includes("access_asking"));
+  h.firstTap.showAccess({ state: "waiting" });
+  assert.equal(sheet().primary, "Waiting for Safari…");
+  assert.equal(sheet().rule, RULE_LINE, "the rule line stays while Safari's question is up");
+
+  // Not allowed: in this build opening Trace saves nothing by itself, and the words say so.
+  h.firstTap.showAccess({ state: "not_allowed", automaticSaving: "on" });
+  assert.deepEqual(sheet(), {
+    state: "access-not-allowed", kicker: "Saved to your Library", heading: "Trace saves when you ask",
+    body: "To save another story, open Trace from the Page Menu on it and tap Save this story.",
+    record: null, second: null, rule: null, primary: "Keep reading", secondary: "Try again",
+  });
+  assert.doesNotMatch(await announced(), RETIRED_SHEET_WORDS);
+
+  // Allowed after all: the sheet's own allowed state.
+  h.firstTap.showAccess({ state: "allowed", account: "connected", automaticSaving: "on", handOver: "in_place" });
+  assert.equal(sheet().heading, "That’s it. Keep reading.");
+  assert.equal(sheet().kicker, "Allowed on AO3 and FanFiction.net");
+});
+
+test("release build: no state of the sheet, nor the ask on a list, shows the earlier flow's words", async () => {
+  const shown = new Set();
+  for (const [name, steps] of FIRST_TAP_STATES) {
+    const opened = await firstTapPopupIn(steps, RELEASE_SHEET);
+    assert.equal(opened.shown(), name);
+    shown.add(name);
+    const words = opened.element("popup-earned-permission").textContent;
+    assert.doesNotMatch(words, RETIRED_SHEET_WORDS, name);
+    assert.doesNotMatch(await opened.announced(), RETIRED_SHEET_WORDS, name);
+    if (name === "access-not-allowed") assert.match(words, /Trace saves when you ask/, name);
+  }
+  assert.equal(shown.size, FIRST_TAP_STATES.length - 2);
+
+  // A list or a site's home page, before the story sites are allowed, and
+  // each thing the ask there can come to.
+  for (const [what, options, heading] of [
+    ["the ask", {}, "Let Trace save stories as you read"],
+    ["not allowed", { permissionRequestResult: false }, "Trace saves when you ask"],
+    ["the request failing", { permissionRequestError: "Safari request unavailable" }, "Trace saves when you ask"],
+    ["allowed", {}, "Open any story to save it"],
+  ]) {
+    const onList = await openFirstTapPopup({ ...RELEASE_SHEET, activeTab: { id: 7, url: "https://archiveofourown.org/works" }, ...options });
+    if (what !== "the ask") {
+      await onList.click("popup-earned-primary");
+      for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+    }
+    assert.deepEqual(onList.h.firstTap.commands, [], `${what}: nothing is saved from a list`);
+    assert.equal(onList.text("popup-earned-heading"), heading, what);
+    assert.doesNotMatch(onList.element("popup-earned-permission").textContent, RETIRED_SHEET_WORDS, what);
+    assert.doesNotMatch(await onList.announced(), RETIRED_SHEET_WORDS, what);
+  }
+  const popup = fs.readFileSync(POPUP_JS_PATH, "utf8");
+  const html = fs.readFileSync(path.join(path.dirname(POPUP_JS_PATH), "popup.html"), "utf8");
+  for (const source of [popup, html]) assert.doesNotMatch(source, RETIRED_SHEET_WORDS);
 });
 
 test("first tap: the wording keeps to the rules for Trace's copy", async () => {

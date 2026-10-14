@@ -108,8 +108,11 @@ export type FirstTapView =
   | Readonly<{ state: "account_missing" | "account_reconnect_required" | "account_unknown"; workKey: string }>
   /** The account changed under this popup. What it showed is gone; ask again. */
   | Readonly<{ state: "account_changed"; workKey: string }>
-  /** Automatic saving is off or unreadable: nothing is saved until asked. */
-  | Readonly<{ state: "awaiting_request"; workKey: string; preference: "off" | "unknown" }>
+  /**
+   * Nothing is saved until the reader asks: automatic saving is off or
+   * unreadable, or it is on and this build saves only when asked.
+   */
+  | Readonly<{ state: "awaiting_request"; workKey: string; preference: "on" | "off" | "unknown" }>
   /** `story` is what the page said of itself, once this attempt has read it. */
   | Readonly<{ state: "saving"; workKey: string; startedAt: number; story: FirstTapStory | null }>
   | Readonly<{
@@ -230,6 +233,11 @@ type Stored = {
 };
 
 export interface FirstTapPorts {
+  /**
+   * Whether opening Trace on a story saves it without a further tap. When
+   * false, an open only offers the save and the reader's own tap makes it.
+   */
+  readonly saveOnOpen: boolean;
   /** Whether all the story sites are allowed; null when it could not be read. */
   grantComplete(): Promise<boolean | null>;
   /** Read for this open, never from a kept snapshot. */
@@ -471,7 +479,7 @@ export class FirstTapSave {
     }
     if (options.requested !== true) {
       const preference = await this.#ports.automaticSaving().catch((): "unknown" => "unknown");
-      if (preference !== "on") {
+      if (preference !== "on" || this.#ports.saveOnOpen !== true) {
         // With an earlier write in doubt, "save this story" is not offered:
         // it may have landed. The reader can look again, or choose to retry.
         return record.inDoubt

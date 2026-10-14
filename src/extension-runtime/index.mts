@@ -45,6 +45,7 @@ declare const __TRACE_WEB_ORIGIN__: string;
 declare const __TRACE_NATIVE_IMPORT_HANDOFF__: boolean;
 declare const __TRACE_IOS_EARNED_PERMISSION_CONFIG__: EarnedPermissionRegistrationConfig | null;
 declare const __TRACE_IOS_FIRST_TAP_SAVE__: boolean;
+declare const __TRACE_IOS_FIRST_TAP_SHEET__: boolean;
 
 type EarnedPermissionRegistrationConfig = Readonly<{
   version: number;
@@ -246,13 +247,12 @@ try {
     archiveReadinessStatus,
   });
   if (
-    // A build-time constant: with the first-tap save off, this block and the
-    // modules only it uses are left out of the bundle altogether.
-    __TRACE_IOS_FIRST_TAP_SAVE__ &&
+    // A build-time constant: a build without optional story sites leaves this
+    // block and the modules only it uses out of the bundle altogether.
+    __TRACE_IOS_FIRST_TAP_SHEET__ &&
     __TRACE_SESSION_MODE__ === "kernel" &&
     __TRACE_IOS_EARNED_PERMISSION_CONFIG__ !== null &&
-    __TRACE_IOS_EARNED_PERMISSION_CONFIG__.firstTapSave === true &&
-    __TRACE_IOS_EARNED_PERMISSION_CONFIG__.registrationMode !== "static" &&
+    __TRACE_IOS_EARNED_PERMISSION_CONFIG__.registrationMode === "dynamic" &&
     extension.permissions !== undefined &&
     extension.scripting !== undefined
   ) {
@@ -265,6 +265,9 @@ try {
       mode: storageMode,
       origins: __TRACE_IOS_EARNED_PERMISSION_CONFIG__.origins,
       registrationIds: __TRACE_IOS_EARNED_PERMISSION_CONFIG__.registrations.map(({ id }) => id),
+      // Saving on opening is a development switch, never on in a release
+      // build. Without it the sheet is the same and the reader's tap saves.
+      saveOnOpen: __TRACE_IOS_FIRST_TAP_SAVE__ && __TRACE_IOS_EARNED_PERMISSION_CONFIG__.firstTapSave === true,
       session,
       fetch: apiFetch,
       apiBase: __TRACE_API_BASE__,

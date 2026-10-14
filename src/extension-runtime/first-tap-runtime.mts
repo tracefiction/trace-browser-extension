@@ -81,6 +81,8 @@ type Environment = Readonly<{
   origins: readonly string[];
   /** The ids of the page scripts registered under that grant. */
   registrationIds: readonly string[];
+  /** Whether opening Trace on a story saves it; otherwise the reader's tap does. */
+  saveOnOpen: boolean;
   session: FirstTapSession;
   /** How a request reaches Trace, and where Trace is: as for every other request. */
   fetch: typeof fetch;
@@ -94,9 +96,11 @@ const hex = (bytes: Uint8Array): string =>
   Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 
 /**
- * Installs the first-tap save: the popup's port, the page messages, the ask
+ * Installs the first-tap sheet: the popup's port, the page messages, the ask
  * for lasting access, and the stamp put on every page save as it is admitted.
- * Only a build that turns the first-tap save on calls this. The returned
+ * Every build with optional story sites calls this; only one built with
+ * `saveOnOpen` saves a story on opening, and every other waits for the
+ * reader's "Save this story". The returned
  * function is to be called when the page scripts have been registered under
  * the complete grant; it hands the pages saved on a first tap over to
  * automatic saving.
@@ -164,6 +168,7 @@ export function installFirstTapSave(environment: Environment): () => Promise<voi
   const membershipApi = new StoryMembershipApi(environment.fetch, environment.apiBase);
 
   const firstTap = new FirstTapSave({
+    saveOnOpen: environment.saveOnOpen === true,
     grantComplete,
     account,
     binding: () => session.pageBinding(),

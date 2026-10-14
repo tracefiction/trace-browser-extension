@@ -114,6 +114,7 @@ function install(options = {}) {
       clock: { now: () => world.now },
     });
     const firstTap = new FirstTapSave({
+      saveOnOpen: options.saveOnOpen ?? true,
       async grantComplete() { return world.grant; },
       async account() { return world.account ?? { state: "verified", binding: binding(), owner: world.scope.accountId }; },
       binding,
@@ -268,6 +269,31 @@ test("with automatic saving off, or unreadable, opening Trace saves nothing unti
     assert.equal(world.net.writes, 1);
     assert.equal(popup.last.state, "confirmed");
   }
+});
+
+test("a build that saves only on the reader's tap offers the save on opening, and saves only when asked", async () => {
+  const world = install({ saveOnOpen: false });
+  const popup = world.worker().popup();
+  assert.deepEqual(await popup.open(), { state: "awaiting_request", workKey: A, preference: "on" });
+  assert.deepEqual(await popup.open(), { state: "awaiting_request", workKey: A, preference: "on" }, "however often it is opened");
+  await turns();
+  assert.deepEqual(world.calls.inject, [], "nothing is injected for an open");
+  assert.equal(world.net.lookups + world.net.writes, 0, "and nothing is looked up or written");
+  assert.equal(world.storage.writes, 0);
+
+  // The reader's "Save this story": the same guarded save as a first tap.
+  assert.equal((await popup.open({ requested: true })).state, "saving");
+  await turns();
+  assert.equal(world.net.writes, 1);
+  assert.equal(popup.last.state, "confirmed");
+  assert.equal(popup.last.mode, "bounded_manual");
+
+  // With automatic saving off it is offered the same way, under that name.
+  const off = install({ saveOnOpen: false });
+  off.automaticSaving = "off";
+  assert.deepEqual(await off.worker().popup().open(), { state: "awaiting_request", workKey: A, preference: "off" });
+  await turns();
+  assert.equal(off.net.writes, 0);
 });
 
 // --- Saved, already there, or found --------------------------------------------
