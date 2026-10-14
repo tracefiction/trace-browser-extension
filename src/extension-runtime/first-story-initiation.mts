@@ -31,7 +31,7 @@ export type ActiveTabContext =
     }>;
 
 export type FirstStoryInitiation =
-  | Readonly<{ kind: "popup_import" }>
+  | Readonly<{ kind: "popup_import" | "popup_open_tabs" }>
   | Readonly<{ kind: "invalid"; error: "invalid_url" }>
   | Readonly<{
       kind: "web_save";
@@ -42,6 +42,7 @@ export type FirstStoryInitiation =
 export type FirstStoryInitiationError =
   | "not_authenticated"
   | "invalid_url"
+  | "no_readable_tabs"
   | "no_active_tab"
   | "unsupported_page"
   | "permission_required"
@@ -218,6 +219,10 @@ export function firstStoryInitiationFromMessage(
   webOrigin: string,
 ): FirstStoryInitiation | null {
   if (!isRecord(message) || typeof message.type !== "string") return null;
+  if (message.type === "TRACE_IMPORT_OPEN_TABS") {
+    return isPopupSender(sender, runtimeId)
+      ? Object.freeze({ kind: "popup_open_tabs" }) : null;
+  }
   if (message.type === "TRACE_IMPORT_TRIGGER") {
     return isPopupSender(sender, runtimeId)
       ? Object.freeze({ kind: "popup_import" })
