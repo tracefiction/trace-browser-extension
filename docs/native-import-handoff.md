@@ -191,13 +191,20 @@ content, scripts and inputs are excluded. Abbreviated source word counts such
 as `226k+` retain the source's precision, converted to the numeric lower bound
 `226000`; the extractor does not infer completion from being on the last chapter.
 
-The additive payload is `{s:"tabs",at,items,scan}`. Each item has its own `src`
+The additive payload is `{s:"tabs",at,items,scan,unreadableTabs}`. Each item has its own `src`
 (`ao3` or `ffn`), canonical `u`, `ctx:"tab"`, rendered `t` and optional metadata.
 `chu` is the open chapter reference for review only. `scan` contains integer
 `considered`, `unreadable`, `duplicates` and `limited` counts. Considered equals
 items plus unreadable plus duplicates and is at most 250. Duplicate works yield
 one review row; the first readable tab supplies its metadata and reference.
-An empty scan has no handoff and explains permissions and sleeping tabs.
+`unreadableTabs` contains one `{u,t}` reference per unreadable tab, in scan order.
+These are browser tab titles (up to 512 UTF-16 units) and supported story URLs
+(up to 2048 units), with query strings and fragments removed. They identify
+failed reads, never substitute for DOM metadata or become import items. The
+native review can open each reference in Safari. Older count-only payloads
+remain accepted; when the array is supplied its count must equal `unreadable`.
+A scan with no readable stories can still hand off these recovery references.
+A scan with neither readable stories nor references has no handoff.
 
 The native consumer defaults new tab rows to Saved, supports individual and
 bulk status choices, and omits progress from every tab-import request. Existing

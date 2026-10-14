@@ -3748,11 +3748,11 @@ function runOpenTabsImport() {
   renderOpenTabsImport(popupModel.authState);
   sendKernelRuntimeMessage({ type: "TRACE_IMPORT_OPEN_TABS" }, (response) => {
     openTabsBusy = false;
-    button.textContent = "Import open stories";
+    button.textContent = "Import open tabs";
     renderOpenTabsImport(popupModel.authState);
     if (generation !== nativeImportGeneration) return;
     if (response?.ok && showNativeImportContinuation(response, generation)) {
-      help.textContent = "Your stories are ready to review. Choose a status for each one in Trace.";
+      help.textContent = "Your tab scan is ready. Review the stories and any tabs that couldn’t be read in Trace.";
       document.getElementById("popup-import-open-native").textContent = "Review stories in Trace";
     } else {
       const pageImport = document.getElementById("popup-import");

@@ -217,6 +217,19 @@ struct TraceSafariImportInboxContract {
         check(handle(stage(tabsRequest, tabsReady, tabBytes))["state"] as? String == "ready_to_open", "mixed-site tab metadata stages")
         check(try inbox.claim(handoffID: tabsReady["handoffID"] as! String, expecting: expected, now: now, currentProviderBinding: { _ in binding }) == tabBytes,
               "mixed import is consumed with the exact private binding")
+        let failedRequest = prepare(); let failedReady = handle(failedRequest)
+        let failed: [String: Any] = ["s": "tabs", "at": "synthetic", "items": [],
+            "scan": ["considered": 1, "unreadable": 1, "duplicates": 0, "limited": 0],
+            "unreadableTabs": [["u": "https://archiveofourown.org/collections/example/works/123/chapters/456", "t": "Sleeping story"]]]
+        for reference in ["https://evil.test/works/123", "https://archiveofourown.org/works/123?token=secret", "javascript:alert(1)"] {
+            var unsafe = failed; unsafe["unreadableTabs"] = [["u": reference, "t": "Unsafe"]]
+            check(handle(stage(failedRequest, failedReady, try JSONSerialization.data(withJSONObject: unsafe)))["error"] as? String == "invalid_request", "unsafe failed-tab references cannot stage")
+        }
+        var mismatch = failed; mismatch["unreadableTabs"] = []
+        check(handle(stage(failedRequest, failedReady, try JSONSerialization.data(withJSONObject: mismatch)))["error"] as? String == "invalid_request", "failed references must account for failed tabs")
+        let failedBytes = try JSONSerialization.data(withJSONObject: failed)
+        check(handle(stage(failedRequest, failedReady, failedBytes))["state"] as? String == "ready_to_open", "zero readable stories still allow recovery")
+        check(try inbox.claim(handoffID: failedReady["handoffID"] as! String, expecting: expected, now: now, currentProviderBinding: { _ in binding }) == failedBytes, "failure-only recovery preserves the one-use binding")
         // Fill the bounded tombstone ledger. IDs are not forgotten early to
         // make space for retries that could otherwise revive a consumed import.
         try? FileManager.default.removeItem(at: directory.appendingPathComponent("TraceNativeImportInboxV1.json"))

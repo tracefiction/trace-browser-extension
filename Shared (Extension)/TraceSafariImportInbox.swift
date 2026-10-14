@@ -307,11 +307,11 @@ final class TraceSafariImportInbox {
               let bytes = Data(base64Encoded: encoded), bytes.count <= maximumPayloadBytes,
               bytes.base64EncodedString() == encoded, String(data: bytes, encoding: .utf8) != nil,
               let json = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
-              Set(json.keys).isSubset(of: Set(["s", "at", "items", "scan"])),
+              Set(json.keys).isSubset(of: Set(["s", "at", "items", "scan", "unreadableTabs"])),
               let sourceText = json["s"] as? String,
               sourceText == "tabs" || source(sourceText) != nil, let at = json["at"] as? String,
               !at.isEmpty, at.utf16.count <= 128,
-              let items = json["items"] as? [[String: Any]], (1...maximumItems).contains(items.count),
+              let items = json["items"] as? [[String: Any]], (0...maximumItems).contains(items.count),
               items.allSatisfy({ item in
                   guard let site = source(item["src"]), workURL(item["u"], site: site) else { return false }
                   if sourceText != "tabs" { return site == source(sourceText) }
@@ -326,8 +326,22 @@ final class TraceSafariImportInbox {
                   }), let considered = scan["considered"] as? Int, let unreadable = scan["unreadable"] as? Int,
                   let duplicates = scan["duplicates"] as? Int, considered <= maximumItems,
                   considered == items.count + unreadable + duplicates else { return nil }
-        } else if json["scan"] != nil { return nil }
+            if let rawTabs = json["unreadableTabs"] {
+                guard let tabs = rawTabs as? [[String: Any]], tabs.count == unreadable,
+                      tabs.allSatisfy(Self.unreadableTab) else { return nil }
+            }
+            if items.isEmpty && (unreadable == 0 || json["unreadableTabs"] == nil) { return nil }
+        } else if items.isEmpty || json["scan"] != nil || json["unreadableTabs"] != nil { return nil }
         return bytes
+    }
+    private static func unreadableTab(_ tab: [String: Any]) -> Bool {
+        guard Set(tab.keys) == ["u", "t"], let title = tab["t"] as? String, title.utf16.count <= 512,
+              let text = tab["u"] as? String, text.utf16.count <= 2048,
+              var url = URLComponents(string: text), url.query == nil, url.fragment == nil else { return false }
+        // Match a story reference, including an AO3 collection chapter.
+        url.path = url.path.replacingOccurrences(of: "^/collections/[^/]+(?=/works/)", with: "", options: .regularExpression)
+        guard let normalized = url.string else { return false }
+        return workURL(normalized, site: "ao3") || workURL(normalized, site: "ffn")
     }
     private static func source(_ value: Any?) -> String? {
         guard let source = (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else { return nil }
