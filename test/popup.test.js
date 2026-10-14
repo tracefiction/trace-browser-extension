@@ -5816,14 +5816,18 @@ test("first tap: the sheet's styles pin the action area on a short sheet and mar
 test("open stories is an explicit native action even when the current page is not importable", async () => {
   const h = await iosReaderImportHarness({ activeTab: { kind: "unsupported" } }, {
     importResponse: { ok: true, state: "ready_to_open", handoffID: HANDOFF_ID,
-      expiresAtMs: Date.now() + 600000, snapshot: { state: "connected" } },
+      expiresAtMs: Date.now() + 600000, snapshot: { state: "connected" }, found: { stories: 28, tabs: 30 } },
   });
   const button = h.document.getElementById("popup-import-open-tabs");
   assert.equal(isDisplayed(h, button), true);
+  assert.equal(button.textContent, "Import open tabs");
+  assert.equal(h.document.getElementById("popup-open-tabs-help").textContent,
+    "Trace reads your open AO3 and FanFiction.net tabs. Nothing is added until you choose in Trace. Your tabs stay open.");
   assert.equal(h.messages.filter(m => m.type === "TRACE_IMPORT_OPEN_TABS").length, 0);
   button.click(); await flush(); await flush();
   assert.equal(h.messages.filter(m => m.type === "TRACE_IMPORT_OPEN_TABS").length, 1);
-  assert.equal(h.document.getElementById("popup-import-open-native").textContent, "Review stories in Trace");
+  assert.equal(h.document.getElementById("popup-import-open-native").textContent, "Review in Trace");
+  assert.equal(h.document.getElementById("popup-open-tabs-help").textContent, "Found 28 stories in 30 tabs.");
   assert.equal(h.document.getElementById("popup-import-open-native").hidden, false);
 });
 
@@ -5864,3 +5868,17 @@ test(`failed replacement scan restores only eligible page import (${error}, impo
 });
 }
 }
+
+test("open tabs: while reading, the button and help say so; one story and one tab are singular", async () => {
+  const h = await iosReaderImportHarness({}, { importResponse: { ok: true, state: "ready_to_open", handoffID: HANDOFF_ID,
+    expiresAtMs: Date.now() + 600000, snapshot: { state: "connected" }, found: { stories: 1, tabs: 1 } } });
+  const button = h.document.getElementById("popup-import-open-tabs");
+  const help = h.document.getElementById("popup-open-tabs-help");
+  button.click();
+  assert.equal(button.textContent, "Reading your tabs…");
+  assert.equal(help.textContent, "Keep this open while Trace reads your tabs.");
+  assert.equal(button.disabled, true);
+  await flush(); await flush();
+  assert.equal(button.textContent, "Import open tabs");
+  assert.equal(help.textContent, "Found 1 story in 1 tab.");
+});

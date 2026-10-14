@@ -556,6 +556,8 @@ for (const candidate of [false, true]) {
       assert.equal(native[0].apiOrigin, "https://development.example.test");
       assert.equal(response.handoffID, handoffID);
     }
+    // The popup's ready line ("Found 1 story in 1 tab.") counts the scan; a page import has none.
+    assert.deepEqual(response.found, command === "TRACE_IMPORT_OPEN_TABS" && selected ? { stories: 1, tabs: 1 } : undefined);
     const denied = await controller.handle({ type: command }, {
       id: runtimeId, frameId: 0, tab: { url: storyUrl }, url: storyUrl });
     assert.equal(denied, null);

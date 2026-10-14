@@ -3722,6 +3722,15 @@ if (typeof ResizeObserver !== "undefined") {
   }
 }
 
+const OPEN_TABS_HELP = "Trace reads your open AO3 and FanFiction.net tabs. Nothing is added until you choose in Trace. Your tabs stay open.";
+
+/** "Found 28 stories in 30 tabs." */
+function openTabsFoundLine(found) {
+  if (!Number.isSafeInteger(found?.stories) || !Number.isSafeInteger(found?.tabs)) return null;
+  const count = (value, one, many) => `${value} ${value === 1 ? one : many}`;
+  return `Found ${count(found.stories, "story", "stories")} in ${count(found.tabs, "tab", "tabs")}.`;
+}
+
 function renderOpenTabsImport(snapshot) {
   const button = document.getElementById("popup-import-open-tabs");
   const help = document.getElementById("popup-open-tabs-help");
@@ -3731,7 +3740,7 @@ function renderOpenTabsImport(snapshot) {
   help.hidden = !available;
   button.disabled = openTabsBusy;
   if (!available) {
-    help.textContent = "Read your open AO3 and FanFiction.net tabs, then choose what to keep in Trace. Your tabs stay open.";
+    help.textContent = OPEN_TABS_HELP;
   }
 }
 
@@ -3743,8 +3752,8 @@ function runOpenTabsImport() {
   openTabsBusy = true;
   nativeImportContinuation = null;
   renderNativeImportContinuation(popupModel.authState);
-  button.textContent = "Reading open story tabs…";
-  help.textContent = "Keep this sheet open while Trace reads the available tabs. Nothing is imported until you review it.";
+  button.textContent = "Reading your tabs…";
+  help.textContent = "Keep this open while Trace reads your tabs.";
   renderOpenTabsImport(popupModel.authState);
   sendKernelRuntimeMessage({ type: "TRACE_IMPORT_OPEN_TABS" }, (response) => {
     openTabsBusy = false;
@@ -3752,8 +3761,8 @@ function runOpenTabsImport() {
     renderOpenTabsImport(popupModel.authState);
     if (generation !== nativeImportGeneration) return;
     if (response?.ok && showNativeImportContinuation(response, generation)) {
-      help.textContent = "Your tab scan is ready. Review the stories and any tabs that couldn’t be read in Trace.";
-      document.getElementById("popup-import-open-native").textContent = "Review stories in Trace";
+      help.textContent = openTabsFoundLine(response.found) ?? OPEN_TABS_HELP;
+      document.getElementById("popup-import-open-native").textContent = "Review in Trace";
     } else {
       const pageImport = document.getElementById("popup-import");
       if (pageImport) restoreImportButton(pageImport);
