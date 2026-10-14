@@ -5838,16 +5838,29 @@ test("empty open-story scan explains site access and sleeping tabs without claim
 });
 
 
-test("starting a fresh scan retires the previous continuation even when the fresh scan finds nothing", async () => {
+for (const error of ["no_readable_tabs", "collect_failed"]) {
+for (const importable of [true, false]) {
+test(`failed replacement scan restores only eligible page import (${error}, importable=${importable})`, async () => {
   const response = { ok: true, state: "ready_to_open", handoffID: HANDOFF_ID,
     expiresAtMs: Date.now() + 600000, snapshot: { state: "connected" } };
-  const h = await iosReaderImportHarness({}, { importResponse: response });
+  const h = await iosReaderImportHarness(importable ? {} : { activeTab: { kind: "unsupported" } }, { importResponse: response });
   const button = h.document.getElementById("popup-import-open-tabs");
+  const pageImport = h.document.getElementById("popup-import");
+  assert.equal(isDisplayed(h, pageImport), importable);
   button.click(); await flush(); await flush();
   assert.equal(h.document.getElementById("popup-import-open-native").hidden, false);
-  Object.assign(response, { ok: false, error: "no_readable_tabs" });
+  assert.equal(pageImport.hidden, true);
+  Object.assign(response, { ok: false, error });
   button.click();
   assert.equal(h.document.getElementById("popup-import-open-native").hidden, true);
   await flush(); await flush();
   assert.equal(h.document.getElementById("popup-import-open-native").hidden, true);
+  assert.equal(isDisplayed(h, pageImport), importable);
+  if (importable) {
+    assert.equal(pageImport.disabled, false);
+    pageImport.click(); await flush(); await flush();
+    assert.deepEqual(importTriggers(h), ONE_IMPORT, "Page import remains usable after a failed replacement scan");
+  }
 });
+}
+}
