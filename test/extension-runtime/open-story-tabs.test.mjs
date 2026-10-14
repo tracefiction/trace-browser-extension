@@ -43,7 +43,7 @@ test('excludes changed pages, expired injections and credential forms; permits t
 test('partial scan deduplicates works, skips private/discarded tabs and never activates, reloads or runs normal collectors', async () => {
   const scripts = []; const queries = [];
   const tabs = [{ id: 1, url: ao3 }, { id: 2, url: ao3 }, { id: 3, url: ffn },
-    { id: 4, url: 'https://archiveofourown.org/works/888', discarded: true },
+    { id: 4, url: 'https://archiveofourown.org/works/888?secret=value#private', title: 'Sleeping story', discarded: true },
     { id: 5, url: 'https://archiveofourown.org/works/999' },
     { id: 6, url: ao3, incognito: true }, { id: 7, url: 'https://unrelated.example.test/private' }];
   const result = await collectOpenStoryTabs({ runtime: {}, mode: 'promise',
@@ -58,6 +58,11 @@ test('partial scan deduplicates works, skips private/discarded tabs and never ac
   assert.deepEqual(queries[1], { active: true, currentWindow: true });
   assert.deepEqual(result.items.map(item => item.key), ['ao3:123', 'ffn:789']);
   assert.deepEqual(result.scan, { considered: 5, unreadable: 2, duplicates: 1, limited: 0 });
+  assert.deepEqual(result.unreadableTabs, [
+    { u: 'https://archiveofourown.org/works/888', t: 'Sleeping story' },
+    { u: 'https://archiveofourown.org/works/999', t: '' },
+  ]);
+  assert.doesNotMatch(JSON.stringify(result), /secret=value|#private|unrelated/);
   assert.deepEqual(scripts.map(script => script.target.tabId).sort(), [1, 2, 3, 5]);
   assert.ok(scripts.every(script => script.func === readOpenStory && !script.files && !script.target.allFrames));
   assert.equal(JSON.parse(Buffer.from(encodeOpenStoryTabs(result), 'base64').toString()).items[0].t, 'Snow & Stars 雪');
@@ -70,7 +75,7 @@ test('bounds scan and payload, reports partial failures, rejects subframe-only a
       : [{ frameId: 1, result: domRead(ao3HTML, ao3) }] },
   });
   assert.deepEqual(result.scan, { considered: 250, unreadable: 249, duplicates: 0, limited: 1 });
-  assert.equal(encodeOpenStoryTabs({ ...result, items: [] }), null);
+  assert.equal(encodeOpenStoryTabs({ ...result, items: [], unreadableTabs: [] }), null);
   assert.equal(encodeOpenStoryTabs({ ...result, items: [{ ...result.items[0], t: 'x'.repeat(524288) }] }), null);
   assert.equal(await collectOpenStoryTabs({ runtime: {}, tabs: {}, mode: 'promise' }), null);
 });
@@ -238,4 +243,15 @@ test('mobile header capture excludes nested story text, scripts and inputs', () 
   assert.equal(result.w, 1200); assert.equal(result.chPub, 2); assert.equal(result.chn, 1);
   assert.equal(result.s, undefined);
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE STORY TEXT|SECRET|999999/);
+});
+
+test('all unreadable tabs still produce a bounded review handoff with safe references', async () => {
+  const result = await collectOpenStoryTabs({ runtime: {}, mode: 'promise',
+    tabs: { query: async () => [{ id: 1, url: ao3 + '?private=value#secret', title: '  A   sleeping story  ', discarded: true }] },
+    scripting: { executeScript: async () => { throw new Error('must not run'); } },
+  });
+  assert.equal(result.items.length, 0);
+  assert.deepEqual(result.unreadableTabs, [{ u: ao3, t: 'A sleeping story' }]);
+  assert.ok(encodeOpenStoryTabs(result));
+  assert.deepEqual(JSON.parse(Buffer.from(encodeOpenStoryTabs(result), 'base64')), result);
 });

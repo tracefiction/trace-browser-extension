@@ -647,11 +647,20 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
     }));
     const items = [];
+    const unreadableTabs = [];
     const seen = /* @__PURE__ */ new Set();
     let unreadable = 0, duplicates = 0;
-    for (const item of captured) {
-      if (!item) unreadable++;
-      else if (seen.has(item.key)) duplicates++;
+    for (const [index, item] of captured.entries()) {
+      if (!item) {
+        unreadable++;
+        const tab = selected[index];
+        const url = new URL(tab.url);
+        const [site, work] = openStoryIdentity(tab.url).split(":");
+        const path = url.origin + url.pathname;
+        const u = path.length <= 2048 ? path : site === "ao3" ? `https://archiveofourown.org/works/${work}` : `https://www.fanfiction.net/s/${work}/`;
+        const t = typeof tab.title === "string" ? tab.title.replace(/\s+/g, " ").trim().slice(0, 512) : "";
+        unreadableTabs.push({ u, t });
+      } else if (seen.has(item.key)) duplicates++;
       else {
         seen.add(item.key);
         items.push(item);
@@ -661,11 +670,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       s: "tabs",
       at: (/* @__PURE__ */ new Date()).toISOString(),
       items,
+      unreadableTabs,
       scan: { considered: selected.length, unreadable, duplicates, limited: Math.max(0, candidates.length - LIMIT) }
     };
   }
   function encodeOpenStoryTabs(payload) {
-    if (payload.items.length === 0) return null;
+    if (payload.items.length === 0 && !payload.unreadableTabs?.length) return null;
     const bytes = new TextEncoder().encode(JSON.stringify(payload));
     if (bytes.length > 512 * 1024) return null;
     let binary = "";

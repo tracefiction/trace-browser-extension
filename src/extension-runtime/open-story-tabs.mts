@@ -114,6 +114,7 @@ export function readOpenStory(expectedKey: string, deadline: number) {
 
 type Ports = { runtime: RuntimePort; tabs: TabsPort; scripting?: ScriptingPort; permissions?: PermissionsPort; mode: "promise" | "callback" };
 export type OpenStoryTabsPayload = { s: "tabs"; at: string; items: NonNullable<ReturnType<typeof readOpenStory>>[];
+  unreadableTabs?: { u: string; t: string }[];
   scan: { considered: number; unreadable: number; duplicates: number; limited: number } };
 
 async function bounded<T>(operation: Promise<T>, milliseconds: number): Promise<T | null> {
@@ -171,19 +172,32 @@ export async function collectOpenStoryTabs(ports: Ports): Promise<OpenStoryTabsP
     }
   }));
   const items: OpenStoryTabsPayload["items"] = [];
+  const unreadableTabs: NonNullable<OpenStoryTabsPayload["unreadableTabs"]> = [];
   const seen = new Set<string>();
   let unreadable = 0, duplicates = 0;
-  for (const item of captured) {
-    if (!item) unreadable++;
+  for (const [index, item] of captured.entries()) {
+    if (!item) {
+      unreadable++;
+      const tab = selected[index]!;
+      const url = new URL(tab.url!);
+      const [site, work] = openStoryIdentity(tab.url)!.split(":");
+      // References identify failed reads only; never synthesize an import item
+      // from a URL or retain query strings, fragments, browser IDs or page text.
+      const path = url.origin + url.pathname;
+      const u = path.length <= 2048 ? path : site === "ao3"
+        ? `https://archiveofourown.org/works/${work}` : `https://www.fanfiction.net/s/${work}/`;
+      const t = typeof tab.title === "string" ? tab.title.replace(/\s+/g, " ").trim().slice(0, 512) : "";
+      unreadableTabs.push({ u, t });
+    }
     else if (seen.has(item.key)) duplicates++;
     else { seen.add(item.key); items.push(item); }
   }
-  return { s: "tabs", at: new Date().toISOString(), items,
+  return { s: "tabs", at: new Date().toISOString(), items, unreadableTabs,
     scan: { considered: selected.length, unreadable, duplicates, limited: Math.max(0, candidates.length - LIMIT) } };
 }
 
 export function encodeOpenStoryTabs(payload: OpenStoryTabsPayload): string | null {
-  if (payload.items.length === 0) return null;
+  if (payload.items.length === 0 && !payload.unreadableTabs?.length) return null;
   const bytes = new TextEncoder().encode(JSON.stringify(payload));
   if (bytes.length > 512 * 1024) return null;
   let binary = "";
