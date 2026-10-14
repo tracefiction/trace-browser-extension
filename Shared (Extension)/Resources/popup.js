@@ -3862,7 +3862,7 @@ function renderOpenTabsImport(snapshot) {
   help.hidden = !available;
   button.disabled = openTabsBusy;
   if (!available) {
-    help.textContent = "Read accessible AO3 and FanFiction.net tabs, then choose what to keep in Trace. Your tabs stay open.";
+    help.textContent = "Read your open AO3 and FanFiction.net tabs, then choose what to keep in Trace. Your tabs stay open.";
   }
 }
 
@@ -3886,6 +3886,8 @@ function runOpenTabsImport() {
       help.textContent = "Your stories are ready to review. Choose a status for each one in Trace.";
       document.getElementById("popup-import-open-native").textContent = "Review stories in Trace";
     } else {
+      const pageImport = document.getElementById("popup-import");
+      if (pageImport) restoreImportButton(pageImport);
       help.textContent = response?.error === "no_readable_tabs"
         ? "No story pages could be read. Allow Trace on your story sites, open any sleeping story tabs, then try again."
         : "Trace couldn’t prepare these stories. Return to Trace to check your connection, then try again.";
