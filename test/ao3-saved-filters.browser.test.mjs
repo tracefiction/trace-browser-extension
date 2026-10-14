@@ -28,7 +28,7 @@ function pageHtml(dark) {
     form.filters fieldset { background: ${fieldset}; border: 1px solid #bbb; margin: 0.643em 0; min-width: 0; padding: 0.643em; }
     form.filters dt { border-top: 1px solid #bbb; padding: 0.5em 0 0.25em; font-weight: bold; }
     form.filters dd { margin: 0 0 0.5em; }
-    form.filters input[type="text"], form.filters select { box-sizing: border-box; max-width: 100%; }
+    form.filters input[type="text"], form.filters select { box-sizing: border-box; max-width: 100%; border: 2px solid red; padding: 1px; }
     .drawer { margin-left: auto; width: 85vw; padding: 0 12px; box-sizing: border-box; }
   </style></head><body><div class="drawer">${FORM}</div></body></html>`;
 }
@@ -114,6 +114,11 @@ test("saved filters never clip or scroll inside a narrow AO3 side bar", async ()
               const name = String(el.className || el.tagName);
               if (el.clientHeight > 0 && el.scrollHeight > el.clientHeight + 1) out.push(`${name} clips vertically`);
               if (el.clientWidth > 0 && el.scrollWidth > el.clientWidth + 1) out.push(`${name} clips horizontally`);
+            }
+            const input = root.querySelector(".trace-sf-input");
+            if (input) {
+              const style = getComputedStyle(input);
+              if (style.paddingLeft !== "12px" || style.borderTopWidth !== "0px") out.push("AO3's text input styles reach the name field");
             }
             if (document.documentElement.scrollWidth > window.innerWidth) out.push("the page scrolls sideways");
             return out;

@@ -505,9 +505,18 @@
     return null;
   }
 
+  // A select's option text for a value, whatever the select currently shows.
   function selectOptionLabel(form, key, value) {
-    var control = findControlForPair(form, key, value);
-    if (!control || !control.options) return "";
+    if (!form || !form.elements) return "";
+    var control = null;
+    for (var e = 0; e < form.elements.length; e++) {
+      var el = form.elements[e];
+      if (el && el.options && String(el.name || "") === key) {
+        control = el;
+        break;
+      }
+    }
+    if (!control) return "";
     for (var i = 0; i < control.options.length; i++) {
       var option = control.options[i];
       if (String(option.value || "") === String(value || "")) {
@@ -606,7 +615,8 @@
       if (value === "T") return { values: ["Crossovers only"], labelled: true };
     }
     if (field === "language_id") {
-      return { values: [selectOptionLabel(form, key, value) || value], labelled: true };
+      var language = selectOptionLabel(form, key, value);
+      return language ? { values: [language], labelled: true } : { values: [value], labelled: false };
     }
     if (field === "sort_column") {
       return { values: [selectOptionLabel(form, key, value) || SORT_LABELS[value] || value.replace(/_/g, " ")], labelled: true };
@@ -644,11 +654,12 @@
     var words = {};
     var dates = {};
     var labelled = true;
-    function add(groupKey, label, values) {
+    function add(groupKey, label, values, valuesLabelled) {
       if (!buckets[groupKey]) {
-        buckets[groupKey] = { key: groupKey.indexOf("other:") === 0 ? "other" : groupKey, label: label, values: [] };
+        buckets[groupKey] = { key: groupKey.indexOf("other:") === 0 ? "other" : groupKey, label: label, values: [], labelled: true };
         if (groupKey.indexOf("other:") === 0) others.push(buckets[groupKey]);
       }
+      if (valuesLabelled === false) buckets[groupKey].labelled = false;
       for (var v = 0; v < values.length; v++) {
         if (values[v] && buckets[groupKey].values.indexOf(values[v]) < 0) buckets[groupKey].values.push(values[v]);
       }
@@ -670,9 +681,9 @@
       if (!result.labelled) labelled = false;
       if (group === "other") {
         var bucket = "other:" + field;
-        add(bucket, otherFieldLabel(field), result.values);
+        add(bucket, otherFieldLabel(field), result.values, result.labelled);
       } else {
-        add(group, "", result.values);
+        add(group, "", result.values, result.labelled);
       }
     }
     if (words.words_from || words.words_to) add("words", "", [wordsText(words.words_from, words.words_to)]);
@@ -681,7 +692,7 @@
     for (var g = 0; g < FILTER_GROUPS.length; g++) {
       var entry = buckets[FILTER_GROUPS[g].key];
       if (entry && entry.values.length) {
-        groups.push({ key: FILTER_GROUPS[g].key, label: FILTER_GROUPS[g].label, values: entry.values });
+        groups.push({ key: FILTER_GROUPS[g].key, label: FILTER_GROUPS[g].label, values: entry.values, labelled: entry.labelled });
       }
     }
     for (var o = 0; o < others.length; o++) {
@@ -707,12 +718,29 @@
     return describePairs(pairs).groups.map(compactPartForGroup);
   }
 
+  // Every part the page can name comes from the filter's own values. A part
+  // it can't name (a tag id from another fandom, say) takes the matching part
+  // of the summary stored at save time; parts past the stored cap are counted
+  // as "+N more".
   function presetContentsText(preset) {
     var description = describePairs(preset.params);
-    if (!description.labelled && preset.summary && preset.summary.length) {
-      return preset.summary.join(" · ");
+    var groups = description.groups;
+    var stored = Array.isArray(preset.summary) ? preset.summary : [];
+    if (!description.labelled && stored.length) {
+      // The stored parts line up with the groups only when they were saved
+      // in the same grammar; an older save's summary is shown whole.
+      if (stored.length !== Math.min(groups.length, STORED_SUMMARY_PARTS)) return stored.join(" · ");
+      var parts = [];
+      var dropped = 0;
+      for (var i = 0; i < groups.length; i++) {
+        if (groups[i].labelled) parts.push(compactPartForGroup(groups[i]));
+        else if (i < stored.length) parts.push(stored[i]);
+        else dropped += 1;
+      }
+      if (dropped) parts.push("+" + dropped + " more");
+      return parts.join(" · ");
     }
-    return description.groups.map(compactPartForGroup).join(" · ") || "AO3 filter";
+    return groups.map(compactPartForGroup).join(" · ") || "AO3 filter";
   }
 
   function boundedPart(text) {
@@ -856,7 +884,9 @@
     if (document.getElementById(STYLE_ID)) return;
     var style = document.createElement("style");
     style.id = STYLE_ID;
-    var R = "." + ROOT_ATTR;
+    // The root's class and attribute together outrank AO3's form rules such as
+    // form.filters input[type="text"], so none of them reach the panel.
+    var R = "." + ROOT_ATTR + "[" + ROOT_ATTR + "]";
     style.textContent = [
       R + ", " + R + " * { box-sizing: border-box; }",
       R + " { margin: 0 0 14px; color: var(--trace-page-ink); font-family: -apple-system, BlinkMacSystemFont, system-ui, \"Segoe UI\", Roboto, sans-serif; font-size: 14px; line-height: 1.4; -webkit-font-smoothing: antialiased; }",
@@ -1414,6 +1444,11 @@
         closeMenu(true);
         return;
       }
+      if (state.mode === "save") {
+        stopTraceEvent(event);
+        cancelSaveForm();
+        return;
+      }
     }
     var target = event.target;
     if (target && target.matches && target.matches("[role='radio']") && /^Arrow(?:Up|Down|Left|Right)$/.test(event.key)) {
@@ -1468,10 +1503,10 @@
     if (action === "menu") return toggleMenu(id);
     if (action === "rename-open") return openRename(id);
     if (action === "rename-save") return renamePreset(id);
-    if (action === "rename-cancel") return cancelInlineModes();
+    if (action === "rename-cancel") return cancelRowMode();
     if (action === "delete-confirm") return confirmDelete(id);
     if (action === "delete") return deletePreset(id);
-    if (action === "delete-cancel") return cancelInlineModes();
+    if (action === "delete-cancel") return cancelRowMode();
     if (action === "update-current") return updatePresetToCurrent(id);
   }
 
@@ -1549,6 +1584,13 @@
     state.error = "";
     state.retry = null;
     render();
+  }
+
+  // Leaving Rename or Delete puts focus back on the row's menu button.
+  function cancelRowMode() {
+    var id = state.renameId || state.confirmDeleteId;
+    cancelInlineModes();
+    if (id) focusSoon("[data-trace-sf-action='menu'][data-id='" + cssEscape(id) + "']");
   }
 
   function toggleMenu(id) {

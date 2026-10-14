@@ -854,7 +854,7 @@ test("AO3 saved filters shows eight rows, then Show all, with no inner scroll bo
 test("AO3 saved filters resets AO3's button styles so nothing inside the panel clips", async () => {
   const { window } = await renderSavedFilters({ storage: { [STORAGE_KEY]: [makePreset()] } });
   const css = window.document.getElementById("trace-ao3-saved-filters-style").textContent;
-  const reset = css.match(/\.data-trace-ao3-saved-filters button \{([^}]*)\}/);
+  const reset = css.match(/\.data-trace-ao3-saved-filters\[data-trace-ao3-saved-filters\] button \{([^}]*)\}/);
   assert.ok(reset, "expected the panel's button reset");
   for (const declaration of [
     "height: auto",
@@ -941,6 +941,78 @@ test("AO3 saved filters falls back to the stored summary only for values the pag
     root(window).querySelector(".trace-sf-summary").textContent,
     "Include Bakugou Katsuki/Midoriya Izuku · Complete only",
   );
+});
+
+test("AO3 saved filters names a saved language whatever the page's language dropdown shows", async () => {
+  const { window } = await renderSavedFilters({
+    storage: {
+      [STORAGE_KEY]: [makePreset({
+        params: [["work_search[complete]", "T"], ["work_search[language_id]", "afr"]],
+        summary: ["Complete only", "In afr"],
+      })],
+    },
+  });
+  assert.notEqual(window.document.getElementById("work_search_language_id").value, "afr");
+  assert.equal(root(window).querySelector(".trace-sf-summary").textContent, "Complete only · In Afrikaans");
+});
+
+test("AO3 saved filters uses the stored summary only for the parts the page can't name", async () => {
+  const unknownTag = ["include_work_search[freeform_ids][]", "999999999"];
+  const { window } = await renderSavedFilters({
+    url: "https://archiveofourown.org/works?tag_id=Naruto",
+    storage: {
+      [STORAGE_KEY]: [
+        makePreset({
+          id: "partial",
+          name: "Partly named",
+          scope: "global",
+          params: [unknownTag, ["work_search[complete]", "T"], ["work_search[words_from]", "50000"], ["work_search[language_id]", "afr"], ["work_search[sort_column]", "kudos_count"]],
+          summary: ["Include Bakugou Katsuki/Midoriya Izuku", "stale", "stale", "stale", "stale"],
+        }),
+        makePreset({
+          id: "capped",
+          name: "Past the stored cap",
+          scope: "global",
+          params: [unknownTag, ["include_work_search[rating_ids][]", "11"], ["work_search[complete]", "T"], ["work_search[crossover]", "F"], ["work_search[words_from]", "50000"], ["work_search[language_id]", "zzz"], ["work_search[sort_column]", "kudos_count"]],
+          summary: ["Include Bakugou Katsuki/Midoriya Izuku", "stale", "stale", "stale", "stale"],
+        }),
+      ],
+    },
+  });
+  const rows = Array.from(root(window).querySelectorAll(".trace-sf-summary")).map((el) => el.textContent);
+  assert.deepEqual(rows, [
+    "Include Bakugou Katsuki/Midoriya Izuku · Complete only · At least 50,000 words · In Afrikaans · Sorted by kudos",
+    "Include Bakugou Katsuki/Midoriya Izuku · Teen And Up Audiences · Complete only · No crossovers · At least 50,000 words · Sorted by kudos · +1 more",
+  ]);
+});
+
+test("AO3 saved filters returns focus from Escape and Cancel", async () => {
+  const { window } = await renderSavedFilters({ storage: { [STORAGE_KEY]: [makePreset()] } });
+  const mount = root(window);
+  const menuButton = () => mount.querySelector("[data-trace-sf-action='menu']");
+
+  mount.querySelector("[data-trace-sf-action='save-open']").click();
+  await sleep(0);
+  mount.querySelector("[data-trace-sf-name]").dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  await sleep(0);
+  assert.equal(mount.querySelector("[data-trace-sf-name]"), null, "Escape closes the save form");
+  assert.equal(window.document.activeElement, mount.querySelector("[data-trace-sf-action='save-open']"));
+
+  menuButton().click();
+  mount.querySelector("[data-trace-sf-action='rename-open']").click();
+  await sleep(0);
+  mount.querySelector("[data-trace-sf-action='rename-cancel']").click();
+  await sleep(0);
+  assert.equal(mount.querySelector("[data-trace-sf-rename-input]"), null);
+  assert.equal(window.document.activeElement, menuButton(), "Cancel in Rename returns to the menu button");
+
+  menuButton().click();
+  mount.querySelector("[data-trace-sf-action='delete-confirm']").click();
+  await sleep(0);
+  mount.querySelector("[data-trace-sf-action='delete-cancel']").click();
+  await sleep(0);
+  assert.equal(mount.querySelector(".trace-sf-confirm-title"), null);
+  assert.equal(window.document.activeElement, menuButton(), "Cancel in Delete returns to the menu button");
 });
 
 test("AO3 saved filters save form lists everything it keeps, grouped", async () => {
