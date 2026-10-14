@@ -138,6 +138,7 @@ import {
   toPublicSessionSnapshot,
   type ExtensionStatusResponse,
   type FirstStoryResponse,
+  type OpenStoryTabsFound,
   type PopupStateResponse,
   type ProjectionResponse,
   type PublicSessionSnapshot,
@@ -272,7 +273,7 @@ export class SessionRuntimeController {
   readonly #nativeImportEnabled: boolean;
   readonly #nativeImport: NativeLibraryImportProducer;
   readonly #firstStoryInitiator: BrowserFirstStoryInitiator;
-  readonly #openTabs: () => Promise<ReturnType<typeof encodeOpenStoryTabs>>;
+  readonly #openTabs: () => Promise<{ readonly encoded: string; readonly found: OpenStoryTabsFound } | null>;
   readonly #traceWebNavigation: BrowserTraceWebNavigation;
   readonly #traceWebStatus: TraceWebStatusNotification;
   readonly #archiveReadinessStatus: BrowserArchiveReadinessStatus;
@@ -420,7 +421,9 @@ export class SessionRuntimeController {
       const payload = await collectOpenStoryTabs({ runtime: environment.runtime, tabs: environment.tabs,
         ...(environment.scripting ? { scripting: environment.scripting } : {}),
         ...(environment.permissions ? { permissions: environment.permissions } : {}), mode: environment.storageMode });
-      return payload ? encodeOpenStoryTabs(payload) : null;
+      const encoded = payload ? encodeOpenStoryTabs(payload) : null;
+      return payload && encoded
+        ? { encoded, found: { stories: payload.items.length, tabs: payload.scan.considered } } : null;
     };
     this.#firstStoryInitiator = new BrowserFirstStoryInitiator({
       runtime: environment.runtime,
@@ -896,14 +899,17 @@ export class SessionRuntimeController {
     }
     if (nativeImport) {
       let preparedHandoff: string | null = null;
+      let found: OpenStoryTabsFound | undefined;
       const fenced = await this.#service.executeCurrentScope(async (scope, isCurrent) => {
         const result = await this.#nativeImport.run(scope, async () => {
           const current = await this.#prepareNativeAuthority();
           return current.ready && await isCurrent();
         }, async (stage) => {
           if (initiation.kind !== "popup_open_tabs") return this.#firstStoryInitiator.importActivePage(stage);
-          const payload = await this.#openTabs();
-          return payload ? stage(payload) : { ok: false as const, error: "no_readable_tabs" as const };
+          const scan = await this.#openTabs();
+          if (!scan) return { ok: false as const, error: "no_readable_tabs" as const };
+          found = scan.found;
+          return stage(scan.encoded);
         });
         if (result.ok && result.state === "ready_to_open") preparedHandoff = result.handoffID;
         return result;
@@ -911,8 +917,11 @@ export class SessionRuntimeController {
       if (fenced.kind !== "published" && preparedHandoff !== null) {
         await this.#nativeImport.discardUnpublished(preparedHandoff);
       }
-      return this.#firstStoryResponse(fenced.kind === "published" ? fenced.value
+      const response = await this.#firstStoryResponse(fenced.kind === "published" ? fenced.value
         : { ok: false, error: "native_import_unavailable" }, action, initiation);
+      // The popup's ready line counts what the scan read ("Found 28 stories in 30 tabs.").
+      return found && response.ok && response.state === "ready_to_open"
+        ? Object.freeze({ ...response, found: Object.freeze({ ...found }) }) : response;
     }
     const result = initiation.kind !== "web_save"
       ? await this.#firstStoryInitiator.importActivePage()

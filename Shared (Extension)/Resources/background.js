@@ -7145,7 +7145,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           ...environment.permissions ? { permissions: environment.permissions } : {},
           mode: environment.storageMode
         });
-        return payload ? encodeOpenStoryTabs(payload) : null;
+        const encoded = payload ? encodeOpenStoryTabs(payload) : null;
+        return payload && encoded ? { encoded, found: { stories: payload.items.length, tabs: payload.scan.considered } } : null;
       };
       this.#firstStoryInitiator = new BrowserFirstStoryInitiator({
         runtime: environment.runtime,
@@ -7507,14 +7508,17 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
       if (nativeImport) {
         let preparedHandoff = null;
+        let found;
         const fenced = await this.#service.executeCurrentScope(async (scope2, isCurrent) => {
           const result2 = await this.#nativeImport.run(scope2, async () => {
             const current = await this.#prepareNativeAuthority();
             return current.ready && await isCurrent();
           }, async (stage) => {
             if (initiation.kind !== "popup_open_tabs") return this.#firstStoryInitiator.importActivePage(stage);
-            const payload = await this.#openTabs();
-            return payload ? stage(payload) : { ok: false, error: "no_readable_tabs" };
+            const scan = await this.#openTabs();
+            if (!scan) return { ok: false, error: "no_readable_tabs" };
+            found = scan.found;
+            return stage(scan.encoded);
           });
           if (result2.ok && result2.state === "ready_to_open") preparedHandoff = result2.handoffID;
           return result2;
@@ -7522,7 +7526,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         if (fenced.kind !== "published" && preparedHandoff !== null) {
           await this.#nativeImport.discardUnpublished(preparedHandoff);
         }
-        return this.#firstStoryResponse(fenced.kind === "published" ? fenced.value : { ok: false, error: "native_import_unavailable" }, action, initiation);
+        const response = await this.#firstStoryResponse(fenced.kind === "published" ? fenced.value : { ok: false, error: "native_import_unavailable" }, action, initiation);
+        return found && response.ok && response.state === "ready_to_open" ? Object.freeze({ ...response, found: Object.freeze({ ...found }) }) : response;
       }
       const result = initiation.kind !== "web_save" ? await this.#firstStoryInitiator.importActivePage() : await this.#firstStoryInitiator.saveFromTrace(initiation.url);
       return this.#firstStoryResponse(result, action, initiation);

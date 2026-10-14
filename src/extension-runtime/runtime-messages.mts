@@ -158,7 +158,14 @@ export interface FirstStoryResponse {
   readonly state?: "opened" | "saved" | "already_saved" | "ready_to_open";
   readonly handoffID?: string;
   readonly expiresAtMs?: number;
+  /** An open-tabs scan that is ready to review: readable stories and tabs read. */
+  readonly found?: OpenStoryTabsFound;
   readonly error?: FirstStoryInitiationError;
+}
+
+export interface OpenStoryTabsFound {
+  readonly stories: number;
+  readonly tabs: number;
 }
 
 export interface PopupStateResponse {
