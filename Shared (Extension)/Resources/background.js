@@ -489,6 +489,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 
   // src/extension-runtime/open-story-tabs.mts
   var LIMIT = 250;
+  var pendingReads = /* @__PURE__ */ new WeakMap();
   function openStoryIdentity(raw) {
     if (typeof raw !== "string" || raw.length > 4096) return null;
     try {
@@ -504,7 +505,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
   }
   function readOpenStory(expectedKey, deadline) {
-    if (Date.now() > deadline) return null;
+    if (Date.now() >= deadline) return null;
     const host = location.hostname;
     const ao3 = /^(?:[^.]+\.)*(?:archiveofourown\.(?:org|gay)|ao3\.org)$/.test(host) || host === "archive.transformativeworks.org";
     const ffn = ["www.fanfiction.net", "m.fanfiction.net"].includes(host);
@@ -532,16 +533,32 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       const number = Number(value.replace(/,/g, ""));
       return Number.isSafeInteger(number) && number >= 0 && number <= 1e7 ? number : null;
     };
+    let mobileStats = "", mobileChapter = "";
+    if (host === "m.fanfiction.net") {
+      let rules = 0, visited = 0;
+      for (const node of document.querySelector("#content")?.childNodes ?? []) {
+        if (++visited > 80) break;
+        if (rules === 2 && node.nodeType === 1 && node.tagName === "BR") break;
+        if (node.nodeType === 1 && node.tagName === "HR") {
+          if (++rules > 2) break;
+        } else if (node.nodeType === 3) {
+          if (rules === 1) mobileStats += (node.textContent ?? "").slice(0, 2048 - mobileStats.length);
+          if (rules === 2) mobileChapter += (node.textContent ?? "").slice(0, 512 - mobileChapter.length);
+        }
+      }
+    }
     const author = ao3 ? text('#workskin a[rel="author"], .byline a[rel="author"]') : text('#profile_top a[href*="/u/"], #content a[href*="/u/"]');
     const mobileTitle = host === "m.fanfiction.net" && author ? document.title.replace(/\s*[-|]\s*FanFiction(?:\.net)?\s*$/i, "").replace(/^Fanfic:\s*/i, "").replace(/\s+Ch\s+\d+,.*$/i, "").trim().slice(0, 512) : "";
-    const title = ao3 ? text("#workskin h2.title, h2.title.heading") : text("#profile_top b.xcontrast_txt, #content b.xcontrast_txt") || mobileTitle;
-    const stats = ao3 ? text("dl.work.meta.group dd.words, dl.meta.group dd.words") : text("#profile_top .xgray, #content .gray, #content .xgray", 2048);
-    const words = integer(ao3 ? stats : stats.match(/Words:\s*([\d,]+)/i)?.[1] ?? "NaN");
+    const title = ao3 ? text("#workskin h2.title, h2.title.heading") : text("#profile_top b.xcontrast_txt, #content b.xcontrast_txt") || (host === "m.fanfiction.net" ? text('#content > div[align="center"] > b') : "") || mobileTitle;
+    const stats = ao3 ? text("dl.work.meta.group dd.words, dl.meta.group dd.words") : text("#profile_top .xgray, #content .gray, #content .xgray", 2048) || mobileStats;
+    const wordCount = stats.match(/Words:\s*([\d,]+(?:\.\d+)?)\s*([km])?\+?(?=\s|,|$)/i);
+    const wordUnit = wordCount?.[2]?.toLowerCase();
+    const words = ao3 ? integer(stats) : wordCount ? integer(String(Number(wordCount[1].replace(/,/g, "")) * (wordUnit === "k" ? 1e3 : wordUnit === "m" ? 1e6 : 1))) : null;
     const chapterText = ao3 ? text("dl.work.meta.group dd.chapters, dl.meta.group dd.chapters") : "";
     const published = integer(ao3 ? chapterText.match(/^([\d,]+)\s*\//)?.[1] ?? "NaN" : stats.match(/Chapters:\s*([\d,]+)/i)?.[1] ?? "NaN");
     const planned = ao3 ? chapterText.match(/\/\s*([\d,]+|\?)/)?.[1] : void 0;
     const complete = ao3 ? published !== null && planned !== void 0 && planned !== "?" && published === integer(planned) : /Status:\s*Complete\b/i.test(stats);
-    const chapter = integer(ao3 ? text("#selected_id option:checked, #chapter_index option:checked, .chapter h3.title").match(/(?:Chapter\s+)?(\d+)/i)?.[1] ?? "NaN" : text("#chap_select option:checked, select[name=chapter] option:checked").match(/^(\d+)/)?.[1] ?? "NaN");
+    const chapter = integer(ao3 ? text("#selected_id option:checked, #chapter_index option:checked, .chapter h3.title").match(/(?:Chapter\s+)?(\d+)/i)?.[1] ?? "NaN" : text("#chap_select option:checked, select[name=chapter] option:checked").match(/^(\d+)/)?.[1] ?? mobileChapter.match(/^\s*Chapter\s+(\d+)\s*:/i)?.[1] ?? "NaN");
     if (!title || !author && words === null && published === null) return null;
     return {
       src: ao3 ? "ao3" : "ffn",
@@ -572,6 +589,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   }
   async function collectOpenStoryTabs(ports) {
     if (!ports.scripting?.executeScript) return null;
+    const deadline = Date.now() + 15e3;
     const call = (target, method, args) => extensionCall(
       target,
       method,
@@ -581,25 +599,47 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     );
     const grants = ports.permissions ? await bounded(call(ports.permissions, "getAll", []), 2e3) : null;
     const storySites = (grants?.origins ?? []).filter(isStorySitePattern);
-    const tabs = await bounded(storySites.length ? call(ports.tabs, "query", [{ url: storySites }]) : call(ports.tabs, "query", [{ active: true, currentWindow: true }]), 2e3);
-    if (!Array.isArray(tabs)) return null;
-    const candidates = tabs.filter((tab) => tab.incognito !== true && typeof tab.id === "number" && openStoryIdentity(tab.url));
+    const [granted, active] = await Promise.all([
+      storySites.length ? bounded(call(ports.tabs, "query", [{ url: storySites }]), 2e3) : null,
+      bounded(call(ports.tabs, "query", [{ active: true, currentWindow: true }]), 2e3)
+    ]);
+    if (!Array.isArray(granted) && !Array.isArray(active)) return null;
+    const seenTabs = /* @__PURE__ */ new Set();
+    const candidates = [...Array.isArray(active) ? active : [], ...Array.isArray(granted) ? granted : []].filter((tab) => {
+      if (tab.incognito === true || typeof tab.id !== "number" || !openStoryIdentity(tab.url) || seenTabs.has(tab.id)) return false;
+      seenTabs.add(tab.id);
+      return true;
+    });
     const selected = candidates.slice(0, LIMIT);
-    const deadline = Date.now() + 15e3;
+    let pending = pendingReads.get(ports.scripting);
+    if (!pending) {
+      pending = /* @__PURE__ */ new Set();
+      pendingReads.set(ports.scripting, pending);
+    }
+    const reads = pending;
     const captured = Array(selected.length).fill(null);
     let next = 0;
     await Promise.all(Array.from({ length: Math.min(4, selected.length) }, async () => {
       while (next < selected.length && Date.now() < deadline) {
+        if (reads.size >= 4) {
+          await bounded(Promise.race(reads), deadline - Date.now());
+          continue;
+        }
         const index = next++, tab = selected[index];
         if (tab.discarded === true) continue;
         const key = openStoryIdentity(tab.url);
-        const results = await bounded(extensionCall(
+        const readDeadline = Math.min(deadline, Date.now() + 2e3);
+        const operation = extensionCall(
           ports.scripting,
           "executeScript",
-          [{ target: { tabId: tab.id }, func: readOpenStory, args: [key, deadline] }],
+          [{ target: { tabId: tab.id }, func: readOpenStory, args: [key, readDeadline] }],
           ports.runtime,
           ports.mode
-        ), Math.min(2e3, deadline - Date.now()));
+        ).catch(() => null);
+        reads.add(operation);
+        void operation.then(() => reads.delete(operation));
+        const results = await bounded(operation, readDeadline - Date.now());
+        if (Date.now() >= readDeadline) continue;
         const result = Array.isArray(results) ? results.find((frame) => frame.frameId === 0)?.result : null;
         if (result && result.key === key && openStoryIdentity(result.u) === key && typeof result.t === "string" && result.t.trim()) {
           captured[index] = result;

@@ -168,14 +168,28 @@ preparation, account/provider fence, cancellation and one-use inbox. It fails
 closed on desktop, unpaired packages and unknown platform detection. It never
 opens a web import page.
 
-The worker queries only granted supported archive origins (or just the active
-tab when no archive origins are granted) and
-reads at most 250 non-private story tabs, four at a time, with a two-second
-per-tab and fifteen-second scan bound. A serialized, read-only DOM extractor
+The worker combines tabs from granted supported archive origins with the active
+tab, which may have temporary access to another archive. The active tab comes
+first; repeated tab IDs are removed before applying the 250 non-private story
+tab cap. Either query can fail without losing results from the other.
+
+At most four browser reads can remain outstanding, including timed-out calls
+from a previous scan. Timing out does not cancel a browser injection or release
+its slot. Each injected reader receives its own two-second deadline, bounded by
+the fifteen-second overall deadline that starts before permission and tab
+lookups. A late result is ignored; only actual browser completion releases
+capacity. Partial results include unreadable counts for tabs not reached before
+the deadline. A serialized, read-only DOM extractor
 reads rendered title, author and source counts; URLs identify a work but never
 supply its metadata. It neither installs the normal collector nor activates,
 reloads or closes tabs. Unknown credential forms are excluded. No input values,
 story text, full page HTML or unrelated tab URLs leave the page.
+
+Mobile FanFiction.net metadata is read from the direct header text between its
+first two rules, with the rendered chapter caption following. Nested story
+content, scripts and inputs are excluded. Abbreviated source word counts such
+as `226k+` retain the source's precision, converted to the numeric lower bound
+`226000`; the extractor does not infer completion from being on the last chapter.
 
 The additive payload is `{s:"tabs",at,items,scan}`. Each item has its own `src`
 (`ao3` or `ffn`), canonical `u`, `ctx:"tab"`, rendered `t` and optional metadata.
