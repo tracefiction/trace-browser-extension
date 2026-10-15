@@ -45,12 +45,24 @@
     --forest-deep: var(--action);
     --rust: var(--warning);
     --honey: var(--text-2);
+    /* Safari's own question, as the sheet's small picture of it draws it. */
+    --prompt-sheet: #f2f2f7;
+    --prompt-bar: rgba(60, 60, 67, 0.18);
+    --prompt-button: rgba(120, 120, 128, 0.14);
+    --prompt-label: #1c1c1e;
+    --prompt-blue: #0a7aff;
+    --prompt-blue-ink: #ffffff;
     --trace-font: -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", Roboto, sans-serif;
     --trace-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 @media (prefers-color-scheme: dark) {
     :root {
+        --prompt-sheet: #2c2c2e;
+        --prompt-bar: rgba(235, 235, 245, 0.22);
+        --prompt-button: rgba(120, 120, 128, 0.32);
+        --prompt-label: #f2f2f7;
+        --prompt-blue: #0a84ff;
         --ground: #07090c;
         --surface: #121418;
         --raised: #1d1f23;
@@ -1003,6 +1015,51 @@ body[data-trace-platform="ios"] .popup-footer { padding-top: 6px; }
 .popup-earned-scroll > .popup-earned-actions[hidden] { display: none; }
 /* A hairline marks where the content passes under the pinned buttons. */
 body[data-trace-first-tap-state] .popup-earned-fixed-pin .popup-earned-pin { border-top: 1px solid var(--rule); }
+/* A still picture of Safari's question beside the ask, with Always Allow
+   marked: small, quiet and never moving. Safari's own sheet colours, light
+   and dark; the mark on Always Allow is Trace's action colour. It is sized
+   in the sheet's own type, and left out at the largest text sizes, where the
+   words carry it. */
+.popup-earned-prompt { margin: 12px 0 2px; }
+.popup-earned-prompt[hidden],
+.popup-earned-text-ax .popup-earned-prompt { display: none; }
+.popup-earned-prompt-sheet {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4em;
+    box-sizing: border-box;
+    width: 17.6em;
+    padding: 1.2em 1em 1em;
+    border: 1px solid var(--rule);
+    border-radius: 2.2em;
+    background: var(--prompt-sheet);
+    font: 500 0.588em/1.2 var(--trace-font);
+    letter-spacing: 0;
+}
+.popup-earned-prompt-bar {
+    display: block;
+    align-self: center;
+    width: 82%;
+    height: 0.5em;
+    border-radius: 0.25em;
+    background: var(--prompt-bar);
+}
+.popup-earned-prompt-bar.title { width: 64%; height: 0.6em; margin-bottom: 0.1em; background: var(--prompt-label); opacity: 0.55; }
+.popup-earned-prompt-bar.short { width: 56%; margin-bottom: 0.5em; }
+.popup-earned-prompt-button {
+    display: block;
+    padding: 0.6em 0.4em;
+    border-radius: 999px;
+    background: var(--prompt-button);
+    color: var(--prompt-label);
+    text-align: center;
+    white-space: nowrap;
+}
+.popup-earned-prompt-button.blue { background: var(--prompt-blue); color: var(--prompt-blue-ink); }
+.popup-earned-prompt-button.chosen {
+    box-shadow: 0 0 0 0.2em var(--prompt-sheet), 0 0 0 0.4em var(--action);
+    font-weight: 700;
+}
 .popup-earned-text-ax .popup-earned-ask-heading,
 .popup-earned-text-ax .popup-earned-ask-body,
 .popup-earned-text-ax .popup-earned-note-heading,

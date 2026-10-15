@@ -1263,7 +1263,7 @@ function placeEarnedRecord(afterBody) {
 /** Puts back what only some states change, so no state inherits another's. */
 function resetEarnedSheetExtras() {
   placeEarnedRecord(false);
-  for (const id of ["popup-earned-ask", "popup-earned-note"]) {
+  for (const id of ["popup-earned-ask", "popup-earned-note", "popup-earned-prompt"]) {
     const box = document.getElementById(id);
     if (box) box.hidden = true;
   }
@@ -1539,13 +1539,48 @@ async function reloadEarnedStory() {
 }
 
 /**
+ * A small still picture of Safari's question with Always Allow marked, so the
+ * reader knows what comes after Allow. Safari's own button words; its title
+ * and message are drawn as lines, not words. Hidden from VoiceOver: the ask's
+ * body says the same. Made once, and moved to sit under the words of the ask
+ * that is on show.
+ */
+function showSafariPrompt(after) {
+  let picture = document.getElementById("popup-earned-prompt");
+  if (!picture) {
+    picture = document.createElement("div");
+    picture.id = "popup-earned-prompt";
+    picture.className = "popup-earned-prompt";
+    picture.setAttribute("aria-hidden", "true");
+    const sheet = document.createElement("div");
+    sheet.className = "popup-earned-prompt-sheet";
+    for (const kind of ["title", "line", "line short"]) {
+      const bar = document.createElement("span");
+      bar.className = `popup-earned-prompt-bar ${kind}`;
+      sheet.append(bar);
+    }
+    for (const [label, kind] of [["Allow for One Day", "blue"], ["Always Allow", "chosen"], ["Don’t Allow", "plain"]]) {
+      const button = document.createElement("span");
+      button.className = `popup-earned-prompt-button ${kind}`;
+      button.textContent = label;
+      sheet.append(button);
+    }
+    picture.append(sheet);
+  }
+  if (!after) return;
+  if (after.nextElementSibling !== picture) after.after(picture);
+  picture.hidden = false;
+}
+
+/**
  * The ask for lasting access where the first-tap sheet does not draw it: a
  * list or a site's home page, a page the sheet stood aside on, or a build
  * without the sheet. It has the sheet's words, rule line and buttons, and its
  * tap asks Safari directly.
  */
 function drawEarnedAsk(stateCode, {
-  kicker = "", kickerIcon = "", heading, body = "", rule = false, primary, secondary = null, result = "checking",
+  kicker = "", kickerIcon = "", heading, body = "", bodyMarkup = "", spokenBody = "", rule = false, prompt = false,
+  primary, secondary = null, result = "checking",
 }) {
   leaveFirstTapSheet();
   setEarnedCopy({
@@ -1554,6 +1589,7 @@ function drawEarnedAsk(stateCode, {
     kickerIcon,
     heading,
     lead: body,
+    leadMarkup: bodyMarkup,
     ruleMarkup: rule
       ? (safariQuestionButtonsAreAllBlue() ? FIRST_TAP_WORDS.ruleEveryButtonBlue : FIRST_TAP_WORDS.rule)
       : "",
@@ -1563,7 +1599,11 @@ function drawEarnedAsk(stateCode, {
     setSpokenAlternative(document.getElementById("popup-earned-rule"), FIRST_TAP_WORDS.ruleSpoken);
     document.getElementById("popup-earned-primary")?.setAttribute("aria-describedby", "popup-earned-rule");
   }
-  setEarnedResult(result, [kicker, heading, body].map(firstTapSpoken).filter(Boolean).join(" "), "");
+  if (prompt) {
+    showSafariPrompt(document.getElementById("popup-earned-lead"));
+    document.getElementById("popup-earned-primary")?.setAttribute("aria-describedby", "popup-earned-lead");
+  }
+  setEarnedResult(result, [kicker, heading, spokenBody || body].map(firstTapSpoken).filter(Boolean).join(" "), "");
   configureEarnedActions(primary, secondary);
 }
 
@@ -1581,10 +1621,13 @@ function setEarnedAskLedger(story, access) {
 function renderEarnedPermissionInvitation(story) {
   setEarnedAskLedger(story, "waiting");
   const onStory = story.kind === "story";
+  // On a story the body says what to tap and the picture shows it; on a list
+  // the rule line says it.
   drawEarnedAsk(onStory ? "ask-on-story" : "ask-on-list", {
     heading: FIRST_TAP_WORDS.listAskHeading,
-    body: onStory ? firstTapCounted(FIRST_TAP_WORDS.askBody) : FIRST_TAP_WORDS.listAskBody,
-    rule: true,
+    ...(onStory
+      ? { bodyMarkup: FIRST_TAP_WORDS.askBody, spokenBody: FIRST_TAP_WORDS.askBodySpoken, prompt: true }
+      : { body: FIRST_TAP_WORDS.listAskBody, rule: true }),
     primary: earnedAllow(),
     secondary: firstTapButton.notNow,
   });
@@ -2351,8 +2394,10 @@ const FIRST_TAP_WORDS = Object.freeze({
   savedKicker: "Saved to your Library",
   alreadyKicker: "Already in your Library",
   inLibraryKicker: "In your Library",
-  askHeading: "Let Trace save the next one by itself",
-  askBody: "Safari asks first. It lists AO3 and FanFiction.net’s {count} addresses.",
+  askHeading: "Let Trace save stories automatically",
+  // The ask's body carries the instruction itself, so no rule line goes with it.
+  askBody: "Tap Allow below, then <b>Always Allow</b>. Safari needs your permission before Trace can save as you read.",
+  askBodySpoken: "Tap Allow below, then Always Allow. Safari needs your permission before Trace can save as you read.",
   rule: "Tap <b>Always Allow</b>, not the blue <b>Allow for One Day</b>.",
   ruleEveryButtonBlue: "Tap <b>Always Allow</b>, not <b>Allow for One Day</b>.",
   ruleSpoken: "Tap Always Allow, not Allow for One Day.",
@@ -2700,7 +2745,14 @@ function drawFirstTapSheet(name, {
   if (askBox) {
     askBox.hidden = !ask;
     document.getElementById("popup-earned-ask-heading").textContent = ask?.heading || "";
-    document.getElementById("popup-earned-ask-body").textContent = ask?.body || "";
+    const askBody = document.getElementById("popup-earned-ask-body");
+    setEarnedEmphasizedCopy(askBody, ask?.body || "");
+    // The ask's body says what to tap, under it the picture shows it, and
+    // the main button is described by it.
+    if (ask) {
+      showSafariPrompt(askBody);
+      document.getElementById("popup-earned-primary")?.setAttribute("aria-describedby", "popup-earned-ask-body");
+    }
   }
   const ruleEl = document.getElementById("popup-earned-rule");
   const primaryButton = document.getElementById("popup-earned-primary");
@@ -2870,17 +2922,14 @@ function drawFirstTapConfirmed(view, { waiting = false } = {}) {
     ...confirmation,
     heading: record.title,
     record: { ...record, title: "", heading: true },
-    ask: withAsk
-      ? { heading: FIRST_TAP_WORDS.askHeading, body: firstTapCounted(FIRST_TAP_WORDS.askBody) }
-      : null,
-    rule: withAsk,
+    ask: withAsk ? { heading: FIRST_TAP_WORDS.askHeading, body: FIRST_TAP_WORDS.askBody } : null,
     primary: !withAsk ? { hidden: true } : waiting ? firstTapButton.waiting : firstTapButton.allow,
     secondary: withAsk ? firstTapButton.notNow : null,
     result: "success",
     announce: waiting
       ? firstTapSpoken(FIRST_TAP_WORDS.waitingForSafari)
       : withAsk
-        ? `${firstTapSpoken(FIRST_TAP_WORDS.askHeading)} ${firstTapCounted(FIRST_TAP_WORDS.askBody)}`
+        ? `${firstTapSpoken(FIRST_TAP_WORDS.askHeading)} ${FIRST_TAP_WORDS.askBodySpoken}`
         : `${firstTapSpoken(confirmation.kicker)} ${firstTapSpoken(record.spokenName)} ${record.spokenLabel}`,
     motion: !withAsk ? "landed" : firstTapDrawn === name ? "ask" : "",
   });
@@ -3138,8 +3187,7 @@ function renderFirstTapView(view, { waiting = false } = {}) {
             body: FIRST_TAP_WORDS.stillConfirmingBody,
             action: { label: FIRST_TAP_WORDS.checkAgain, action: "first_tap_check", emphasis: "tertiary" },
           },
-          ask: { heading: FIRST_TAP_WORDS.askHeading, body: firstTapCounted(FIRST_TAP_WORDS.askBody) },
-          rule: true,
+          ask: { heading: FIRST_TAP_WORDS.askHeading, body: FIRST_TAP_WORDS.askBody },
           primary: waiting ? firstTapButton.waiting : firstTapButton.allow,
           secondary: firstTapButton.keepReading,
           announce: waiting
