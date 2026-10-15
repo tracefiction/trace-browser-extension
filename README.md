@@ -34,7 +34,7 @@ On supported AO3 and FanFiction.net story/listing pages, Trace reads visible sto
 
 Trace uses this to import a story, update reading progress, show whether stories are already in your Trace library, let you change reading status from supported overlay surfaces, and hide works from Trace's browsing overlay when you explicitly choose to. Trace can also detect when the last lines of the last posted chapter have stayed on screen for a moment, so it can mark your library entry finished or caught up (with Undo), or ask whether the work is complete, ongoing, on hiatus, or abandoned when the site does not say. This uses only the page's layout and your scrolling on that page; it does not read or send story text.
 
-FanFiction.net's story page, as iPhone shows it, has no summary. When you
+FanFiction.net's mobile story page has no summary. When you
 save a story from such a page, the page tells the extension the story's
 author (this stays in the extension and is not sent to Trace). Trace then
 reads that author's story list (`https://m.fanfiction.net/u/<author>/?a=s`)
@@ -45,10 +45,13 @@ its author when that is not yet known. This uses only the website access you
 already gave Trace and follows the **Improve story details** preference. It
 makes one request at a time, reads page text only as far as it needs, keeps
 no page text or cache, opens no tab, reads only the first page of an author's
-stories, and, apart from the save that started it, waits minutes between
-requests, makes only a few per browsing session, and runs only while you are
-on FanFiction.net. A check page, an unexpected address, a refusal or an error
-stops it until the browser next starts. The story and author ids still to
+stories, keeps requests for saves at least 30 seconds apart, and otherwise
+waits minutes between requests, makes only a few per browsing session, and
+runs only while you are on FanFiction.net. A story FanFiction.net says is gone
+is skipped, and the ids of up to 200 stories already tried are kept (and
+removed when you sign out) so each session tries others first. A check
+page, an unexpected address, a refusal or an error stops it until the browser
+next starts. The story and author ids still to
 read are kept in session-only storage and removed when you sign out.
 
 When you explicitly save an AO3 saved filter, Trace stores that AO3 filter query state in extension storage so it can reapply the filter later. If you are signed in to Trace, saved filters sync to your Trace account so they can appear on your other devices. Signed-out or offline saved filters remain local until a later signed-in sync.

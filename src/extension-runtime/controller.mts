@@ -155,6 +155,7 @@ import {
   FFN_SUMMARY_HOST_PATTERN,
   FfnSummaryFill,
   SessionFillState,
+  StoredAttempted,
   type ContributionOutcome,
 } from "./ffn-summary-fill.mjs";
 import { PopupPageRelay, POPUP_PAGE_RELAY } from "./popup-page-relay.mjs";
@@ -515,6 +516,12 @@ export class SessionRuntimeController {
             set: (items) => call(options.sessionArea, "set", [items]),
             remove: (key) => call(options.sessionArea, "remove", [key]),
           }),
+      // Ids only, capped, removed on sign-out (ffn-summary-fill.mts).
+      attempted: new StoredAttempted({
+        get: (key) => storage.get(key),
+        set: (items) => storage.set(items),
+        remove: (key) => storage.remove(key),
+      }),
       account: () => {
         const scope = this.#service.publicationScope();
         return scope === null ? null : `${scope.accountId}:${scope.epoch}`;

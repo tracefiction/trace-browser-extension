@@ -6808,6 +6808,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var BACKFILL_GAP_MS = 3 * 6e4;
   var BACKFILL_MAX_PER_SESSION = 10;
   var ON_SAVE_MAX_PER_SESSION = 30;
+  var ON_SAVE_GAP_MS = 3e4;
+  var LOOKUP_TO_LIST_MS = 2e4;
+  var ATTEMPTED_MAX = 200;
+  var FFN_SUMMARY_ATTEMPTED_KEY = "traceFfnSummaryAttemptedV1";
   var QUEUE_MAX = 50;
   var FETCH_TIMEOUT_MS = 1e4;
   var MAX_READ_BYTES = 256 * 1024;
@@ -6880,6 +6884,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (summary && !summaries.has(storyId)) summaries.set(storyId, summary);
     });
     return { rows, summaries };
+  }
+  function isFfnStoryNotFoundPage(html) {
+    if (typeof html !== "string") return false;
+    return /Story\s+Not\s+Found/i.test(html) || /Unable\s+to\s+locate\s+story/i.test(html);
   }
   function isChallengePage(html, headers) {
     if (headers?.get("cf-mitigated")?.toLowerCase() === "challenge") return true;
@@ -6956,11 +6964,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       url: `https://m.fanfiction.net/s/${storyId}/1/`,
       expectedPath: (pathname) => pathname === `/s/${storyId}` || pathname.startsWith(`/s/${storyId}/`),
       maxBytes: STORY_PAGE_MAX_READ_BYTES,
-      enough: (text2) => ffnAuthorIdFromStoryHtml(text2) !== null
+      enough: (text2) => ffnAuthorIdFromStoryHtml(text2) !== null || isFfnStoryNotFoundPage(text2)
     });
     if (page.kind === "stop") return page;
     const authorId = ffnAuthorIdFromStoryHtml(page.html);
-    return authorId === null ? { kind: "stop", reason: "missing" } : { kind: "found", authorId };
+    if (authorId !== null) return { kind: "found", authorId };
+    return isFfnStoryNotFoundPage(page.html) ? { kind: "gone" } : { kind: "stop", reason: "missing" };
   }
   async function readFfnAuthorSummaries(fetchImpl, authorId, wanted, clock) {
     if (!ID_PATTERN.test(authorId)) return { kind: "stop", reason: "error" };
@@ -6983,6 +6992,49 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     return { kind: "found", summaries: found };
   }
+  var StoredAttempted = class {
+    #area;
+    #memory = null;
+    constructor(area) {
+      this.#area = area && typeof area.get === "function" ? area : null;
+    }
+    async #load() {
+      if (this.#area === null) return this.#memory;
+      try {
+        const values = await this.#area.get(FFN_SUMMARY_ATTEMPTED_KEY);
+        const value = values?.[FFN_SUMMARY_ATTEMPTED_KEY];
+        if (!value || typeof value.account !== "string" || !Array.isArray(value.ids) || !value.ids.every((id) => typeof id === "string" && ID_PATTERN.test(id))) {
+          return null;
+        }
+        return { account: value.account, ids: value.ids.slice(-ATTEMPTED_MAX) };
+      } catch {
+        return this.#memory;
+      }
+    }
+    async read(account) {
+      const stored = await this.#load();
+      return stored !== null && stored.account === account ? stored.ids : [];
+    }
+    async add(account, storyIds) {
+      const previous = await this.read(account);
+      const ids = [...previous.filter((id) => !storyIds.includes(id)), ...storyIds].filter((id) => ID_PATTERN.test(id)).slice(-ATTEMPTED_MAX);
+      const next = { account, ids };
+      this.#memory = next;
+      if (this.#area === null) return;
+      try {
+        await this.#area.set({ [FFN_SUMMARY_ATTEMPTED_KEY]: next });
+      } catch {
+      }
+    }
+    async clear() {
+      this.#memory = null;
+      if (this.#area === null) return;
+      try {
+        await this.#area.remove(FFN_SUMMARY_ATTEMPTED_KEY);
+      } catch {
+      }
+    }
+  };
   function validQueuedStory(value) {
     if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
     const record3 = value;
@@ -7064,6 +7116,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #generation = 0;
     /** The generation the running step started in. */
     #runGeneration = 0;
+    /** When the last request for a save was made. */
+    #lastOnSaveRequestAt = Number.NEGATIVE_INFINITY;
+    /** A wait between two requests, and how to end it early on sign-out. */
+    #sleepTimer = null;
+    #wake = null;
     /** Stories read on save in this worker's lifetime, so a later chapter does not read again. */
     #recent = [];
     constructor(ports) {
@@ -7136,9 +7193,45 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         this.#ports.clock.clearTimeout(this.#settleTimer);
         this.#settleTimer = null;
       }
+      this.#endSleep();
       this.#recent.length = 0;
       this.#finished = false;
       await this.#ports.state.clear();
+      await this.#ports.attempted.clear();
+    }
+    /** Waits `ms`; ends early (and the step is then stale) on sign-out. */
+    #sleep(ms) {
+      if (ms <= 0) return Promise.resolve();
+      return new Promise((resolve) => {
+        this.#wake = resolve;
+        this.#sleepTimer = this.#ports.clock.setTimeout(() => this.#endSleep(), ms);
+      });
+    }
+    #endSleep() {
+      if (this.#sleepTimer !== null) {
+        this.#ports.clock.clearTimeout(this.#sleepTimer);
+        this.#sleepTimer = null;
+      }
+      const wake = this.#wake;
+      this.#wake = null;
+      wake?.();
+    }
+    /** Remembers stories tried, for the signed-in account only. */
+    async #attempt(state, storyIds) {
+      if (!this.#current() || storyIds.length === 0) return;
+      try {
+        await this.#ports.attempted.add(state.account, storyIds);
+      } catch {
+      }
+    }
+    #shuffled(items) {
+      const random = this.#ports.random ?? Math.random;
+      const out = [...items];
+      for (let index = out.length - 1; index > 0; index -= 1) {
+        const other = Math.floor(random() * (index + 1));
+        [out[index], out[other]] = [out[other], out[index]];
+      }
+      return out;
     }
     #serial(work) {
       const run = this.#tail.then(async () => {
@@ -7198,6 +7291,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
      * story on it. Returns the state after it, or null when the session stopped.
      */
     async #readAuthor(state, authorId, storyIds) {
+      await this.#attempt(state, storyIds);
       const read = await readFfnAuthorSummaries(this.#ports.fetch, authorId, storyIds, this.#ports.clock);
       if (read.kind !== "found") {
         await this.#stop(state);
@@ -7229,21 +7323,37 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #byAuthor(state, storyId, authorId) {
       return [storyId, ...state.queue.filter(({ s, a }) => a === authorId && s !== storyId).map(({ s }) => s)];
     }
+    /** Spaces requests made for saves at least `ON_SAVE_GAP_MS` apart. */
+    async #onSaveTurn() {
+      await this.#sleep(this.#lastOnSaveRequestAt + ON_SAVE_GAP_MS - this.#ports.clock.now());
+      if (!this.#current()) return false;
+      this.#lastOnSaveRequestAt = this.#ports.clock.now();
+      return true;
+    }
     async #readOnSave(storyId, knownAuthorId) {
       let state = await this.#state();
       if (state === null || state.stopped || state.saves >= ON_SAVE_MAX_PER_SESSION) return;
+      if (!await this.#onSaveTurn()) return;
+      state = await this.#state();
+      if (state === null || state.stopped) return;
       state = Object.freeze({ ...state, saves: state.saves + 1, lastStepAt: this.#ports.clock.now() });
       if (!await this.#write(state)) return;
       if (!await this.#mayRequest(state)) return;
       let authorId = knownAuthorId;
       if (authorId === void 0) {
+        await this.#attempt(state, [storyId]);
         const lookup = await lookUpFfnAuthorId(this.#ports.fetch, storyId, this.#ports.clock);
+        if (lookup.kind === "gone") return;
         if (lookup.kind !== "found") {
           await this.#stop(state);
           return;
         }
         authorId = lookup.authorId;
+        await this.#sleep(LOOKUP_TO_LIST_MS);
         if (!this.#current()) return;
+        state = await this.#state();
+        if (state === null || state.stopped) return;
+        this.#lastOnSaveRequestAt = this.#ports.clock.now();
       }
       await this.#readAuthor(state, authorId, this.#byAuthor(state, storyId, authorId));
     }
@@ -7276,7 +7386,17 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           await this.#stop(state);
           return;
         }
-        const queue = gaps.filter((id) => typeof id === "string" && ID_PATTERN.test(id)).filter((id, index, all) => all.indexOf(id) === index && !this.#recent.includes(id)).slice(0, QUEUE_MAX).map((s) => Object.freeze({ s }));
+        let attempted = [];
+        try {
+          attempted = await this.#ports.attempted.read(state.account);
+        } catch {
+          attempted = [];
+        }
+        const fresh = gaps.filter((id) => typeof id === "string" && ID_PATTERN.test(id)).filter((id, index, all) => all.indexOf(id) === index && !this.#recent.includes(id));
+        const queue = [
+          ...this.#shuffled(fresh.filter((id) => !attempted.includes(id))),
+          ...fresh.filter((id) => attempted.includes(id)).sort((a, b) => attempted.indexOf(a) - attempted.indexOf(b))
+        ].slice(0, QUEUE_MAX).map((s) => Object.freeze({ s }));
         await this.#write(Object.freeze({
           ...state,
           listed: true,
@@ -7295,7 +7415,14 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (!await this.#write(counted)) return;
       if (!await this.#mayRequest(counted)) return;
       if (head.a === void 0) {
+        await this.#attempt(counted, [head.s]);
         const lookup = await lookUpFfnAuthorId(this.#ports.fetch, head.s, this.#ports.clock);
+        if (lookup.kind === "gone") {
+          const next = Object.freeze({ ...counted, queue: Object.freeze(counted.queue.slice(1)) });
+          if (await this.#write(next) && next.queue.length === 0) this.#finish();
+          if (counted.backfills >= BACKFILL_MAX_PER_SESSION) this.#finish();
+          return;
+        }
         if (lookup.kind !== "found") {
           await this.#stop(counted);
           return;
@@ -7723,6 +7850,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           get: (key) => call(options.sessionArea, "get", [key]),
           set: (items) => call(options.sessionArea, "set", [items]),
           remove: (key) => call(options.sessionArea, "remove", [key])
+        }),
+        // Ids only, capped, removed on sign-out (ffn-summary-fill.mts).
+        attempted: new StoredAttempted({
+          get: (key) => storage.get(key),
+          set: (items) => storage.set(items),
+          remove: (key) => storage.remove(key)
         }),
         account: () => {
           const scope2 = this.#service.publicationScope();

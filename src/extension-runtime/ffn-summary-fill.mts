@@ -22,11 +22,15 @@
  * a time limit; page text is read only as far as needed and then dropped; no
  * tab, frame or page is opened; nothing is cached. The only state is the
  * story (and author) ids still to fill and a few counters, kept in
- * session-only storage when the browser has it (memory otherwise), and
- * removed on sign-out or when the account changes. Any refusal, challenge
+ * session-only storage (without it the backfill does not run), plus the ids
+ * of up to 200 stories already tried, so each session tries others first.
+ * Both are removed on sign-out or when the account changes. Any refusal, challenge
  * page, unexpected address, unreadable page or error stops it for the rest of
- * the session; it never retries in a loop. A story missing from its author's
- * first page of stories is dropped; no further pages are read.
+ * the session; it never retries in a loop. A story FanFiction.net says is
+ * gone, or that is missing from its author's first page of stories, is
+ * skipped; no further pages are read. Requests made for saves are at least
+ * 30 s apart, and a story page read for its author is followed by the
+ * author's list only 20 s later.
  */
 
 export const FFN_SUMMARY_HOST_PATTERN = "https://m.fanfiction.net/*";
@@ -42,6 +46,13 @@ export const BACKFILL_GAP_MS = 3 * 60_000;
 export const BACKFILL_MAX_PER_SESSION = 10;
 /** Saves read straight away, per browsing session. */
 export const ON_SAVE_MAX_PER_SESSION = 30;
+/** Least time between two requests made for saves. */
+export const ON_SAVE_GAP_MS = 30_000;
+/** Wait between a story page read for its author and the author's list. */
+export const LOOKUP_TO_LIST_MS = 20_000;
+/** Stories already tried, remembered across sessions so each tries others. */
+export const ATTEMPTED_MAX = 200;
+export const FFN_SUMMARY_ATTEMPTED_KEY = "traceFfnSummaryAttemptedV1";
 /** Stories kept to fill, at most. */
 export const QUEUE_MAX = 50;
 export const FETCH_TIMEOUT_MS = 10_000;
@@ -148,6 +159,16 @@ export function ffnSummariesFromStoryListHtml(html: string): {
     if (summary && !summaries.has(storyId)) summaries.set(storyId, summary);
   });
   return { rows, summaries };
+}
+
+/**
+ * FanFiction.net's answer for a story that is gone (deleted, or never
+ * existed): a normal page saying so. Such a story is skipped, not a reason
+ * to stop.
+ */
+export function isFfnStoryNotFoundPage(html: string): boolean {
+  if (typeof html !== "string") return false;
+  return /Story\s+Not\s+Found/i.test(html) || /Unable\s+to\s+locate\s+story/i.test(html);
 }
 
 /** Whether a page is a Cloudflare (or similar) check instead of the page asked for. */
@@ -270,6 +291,7 @@ async function readFfnPage(
 
 export type AuthorLookup =
   | { readonly kind: "found"; readonly authorId: string }
+  | { readonly kind: "gone" }
   | { readonly kind: "stop"; readonly reason: StopReason };
 
 /** The author of one story, from the top of its own page. */
@@ -283,13 +305,14 @@ export async function lookUpFfnAuthorId(
     url: `https://m.fanfiction.net/s/${storyId}/1/`,
     expectedPath: (pathname) => pathname === `/s/${storyId}` || pathname.startsWith(`/s/${storyId}/`),
     maxBytes: STORY_PAGE_MAX_READ_BYTES,
-    enough: (text) => ffnAuthorIdFromStoryHtml(text) !== null,
+    enough: (text) => ffnAuthorIdFromStoryHtml(text) !== null || isFfnStoryNotFoundPage(text),
   });
   if (page.kind === "stop") return page;
   const authorId = ffnAuthorIdFromStoryHtml(page.html);
-  return authorId === null
-    ? { kind: "stop", reason: "missing" }
-    : { kind: "found", authorId };
+  if (authorId !== null) return { kind: "found", authorId };
+  return isFfnStoryNotFoundPage(page.html)
+    ? { kind: "gone" }
+    : { kind: "stop", reason: "missing" };
 }
 
 export type AuthorStoriesRead =
@@ -356,6 +379,76 @@ export interface FillStatePort {
   read(): Promise<FillState | null>;
   write(state: FillState): Promise<void>;
   clear(): Promise<void>;
+}
+
+/**
+ * Story ids already tried for an account, newest last, at most
+ * `ATTEMPTED_MAX`: ids only, kept across sessions so a story that cannot be
+ * filled does not come first every time. Removed on sign-out.
+ */
+export interface AttemptedPort {
+  read(account: string): Promise<readonly string[]>;
+  add(account: string, storyIds: readonly string[]): Promise<void>;
+  clear(): Promise<void>;
+}
+
+/** The attempted ids in one storage area (the extension's local storage). */
+export class StoredAttempted implements AttemptedPort {
+  readonly #area: SessionArea | null;
+  #memory: { account: string; ids: string[] } | null = null;
+
+  constructor(area: SessionArea | null | undefined) {
+    this.#area = area && typeof area.get === "function" ? area : null;
+  }
+
+  async #load(): Promise<{ account: string; ids: string[] } | null> {
+    if (this.#area === null) return this.#memory;
+    try {
+      const values = await this.#area.get(FFN_SUMMARY_ATTEMPTED_KEY) as Record<string, unknown> | undefined;
+      const value = values?.[FFN_SUMMARY_ATTEMPTED_KEY] as Record<string, unknown> | undefined;
+      if (
+        !value ||
+        typeof value.account !== "string" ||
+        !Array.isArray(value.ids) ||
+        !value.ids.every((id) => typeof id === "string" && ID_PATTERN.test(id))
+      ) {
+        return null;
+      }
+      return { account: value.account, ids: (value.ids as string[]).slice(-ATTEMPTED_MAX) };
+    } catch {
+      return this.#memory;
+    }
+  }
+
+  async read(account: string): Promise<readonly string[]> {
+    const stored = await this.#load();
+    return stored !== null && stored.account === account ? stored.ids : [];
+  }
+
+  async add(account: string, storyIds: readonly string[]): Promise<void> {
+    const previous = await this.read(account);
+    const ids = [...previous.filter((id) => !storyIds.includes(id)), ...storyIds]
+      .filter((id) => ID_PATTERN.test(id))
+      .slice(-ATTEMPTED_MAX);
+    const next = { account, ids };
+    this.#memory = next;
+    if (this.#area === null) return;
+    try {
+      await this.#area.set({ [FFN_SUMMARY_ATTEMPTED_KEY]: next });
+    } catch {
+      // Memory keeps it for this worker.
+    }
+  }
+
+  async clear(): Promise<void> {
+    this.#memory = null;
+    if (this.#area === null) return;
+    try {
+      await this.#area.remove(FFN_SUMMARY_ATTEMPTED_KEY);
+    } catch {
+      // Nothing else to remove.
+    }
+  }
 }
 
 function validQueuedStory(value: unknown): boolean {
@@ -456,6 +549,9 @@ export interface FfnSummaryFillPorts {
   readonly fetch: typeof fetch;
   readonly clock: FillClock;
   readonly state: FillStatePort;
+  readonly attempted: AttemptedPort;
+  /** A number in [0, 1) for shuffling the stories to fill. */
+  readonly random?: () => number;
   /** The signed-in account, or null when no one is signed in. */
   account(): string | null;
   /** The metadata-contribution preference (`prefMetadataImproveEnabled`). */
@@ -511,6 +607,11 @@ export class FfnSummaryFill {
   #generation = 0;
   /** The generation the running step started in. */
   #runGeneration = 0;
+  /** When the last request for a save was made. */
+  #lastOnSaveRequestAt = Number.NEGATIVE_INFINITY;
+  /** A wait between two requests, and how to end it early on sign-out. */
+  #sleepTimer: unknown | null = null;
+  #wake: (() => void) | null = null;
   /** Stories read on save in this worker's lifetime, so a later chapter does not read again. */
   readonly #recent: string[] = [];
 
@@ -594,9 +695,50 @@ export class FfnSummaryFill {
       this.#ports.clock.clearTimeout(this.#settleTimer);
       this.#settleTimer = null;
     }
+    this.#endSleep();
     this.#recent.length = 0;
     this.#finished = false;
     await this.#ports.state.clear();
+    await this.#ports.attempted.clear();
+  }
+
+  /** Waits `ms`; ends early (and the step is then stale) on sign-out. */
+  #sleep(ms: number): Promise<void> {
+    if (ms <= 0) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.#wake = resolve;
+      this.#sleepTimer = this.#ports.clock.setTimeout(() => this.#endSleep(), ms);
+    });
+  }
+
+  #endSleep(): void {
+    if (this.#sleepTimer !== null) {
+      this.#ports.clock.clearTimeout(this.#sleepTimer);
+      this.#sleepTimer = null;
+    }
+    const wake = this.#wake;
+    this.#wake = null;
+    wake?.();
+  }
+
+  /** Remembers stories tried, for the signed-in account only. */
+  async #attempt(state: FillState, storyIds: readonly string[]): Promise<void> {
+    if (!this.#current() || storyIds.length === 0) return;
+    try {
+      await this.#ports.attempted.add(state.account, storyIds);
+    } catch {
+      // Only ordering depends on it.
+    }
+  }
+
+  #shuffled<T>(items: readonly T[]): T[] {
+    const random = this.#ports.random ?? Math.random;
+    const out = [...items];
+    for (let index = out.length - 1; index > 0; index -= 1) {
+      const other = Math.floor(random() * (index + 1));
+      [out[index], out[other]] = [out[other]!, out[index]!];
+    }
+    return out;
   }
 
   #serial(work: () => Promise<void>): Promise<void> {
@@ -667,6 +809,8 @@ export class FfnSummaryFill {
    * story on it. Returns the state after it, or null when the session stopped.
    */
   async #readAuthor(state: FillState, authorId: string, storyIds: readonly string[]): Promise<FillState | null> {
+    // Every story asked for counts as tried, found on the page or not.
+    await this.#attempt(state, storyIds);
     const read = await readFfnAuthorSummaries(this.#ports.fetch, authorId, storyIds, this.#ports.clock);
     if (read.kind !== "found") {
       await this.#stop(state);
@@ -701,22 +845,40 @@ export class FfnSummaryFill {
     return [storyId, ...state.queue.filter(({ s, a }) => a === authorId && s !== storyId).map(({ s }) => s)];
   }
 
+  /** Spaces requests made for saves at least `ON_SAVE_GAP_MS` apart. */
+  async #onSaveTurn(): Promise<boolean> {
+    await this.#sleep(this.#lastOnSaveRequestAt + ON_SAVE_GAP_MS - this.#ports.clock.now());
+    if (!this.#current()) return false;
+    this.#lastOnSaveRequestAt = this.#ports.clock.now();
+    return true;
+  }
+
   async #readOnSave(storyId: string, knownAuthorId: string | undefined): Promise<void> {
     let state = await this.#state();
     if (state === null || state.stopped || state.saves >= ON_SAVE_MAX_PER_SESSION) return;
+    if (!(await this.#onSaveTurn())) return;
+    state = await this.#state();
+    if (state === null || state.stopped) return;
     state = Object.freeze({ ...state, saves: state.saves + 1, lastStepAt: this.#ports.clock.now() });
     if (!(await this.#write(state))) return;
     if (!(await this.#mayRequest(state))) return;
     let authorId = knownAuthorId;
     if (authorId === undefined) {
       // A save that did not name the author: its own page names it.
+      await this.#attempt(state, [storyId]);
       const lookup = await lookUpFfnAuthorId(this.#ports.fetch, storyId, this.#ports.clock);
+      if (lookup.kind === "gone") return;
       if (lookup.kind !== "found") {
         await this.#stop(state);
         return;
       }
       authorId = lookup.authorId;
+      // Paced: the author's list is read a while after the story's page.
+      await this.#sleep(LOOKUP_TO_LIST_MS);
       if (!this.#current()) return;
+      state = await this.#state();
+      if (state === null || state.stopped) return;
+      this.#lastOnSaveRequestAt = this.#ports.clock.now();
     }
     await this.#readAuthor(state, authorId, this.#byAuthor(state, storyId, authorId));
   }
@@ -757,9 +919,22 @@ export class FfnSummaryFill {
         await this.#stop(state);
         return;
       }
-      const queue = gaps
+      let attempted: readonly string[] = [];
+      try {
+        attempted = await this.#ports.attempted.read(state.account);
+      } catch {
+        attempted = [];
+      }
+      // Stories not tried before come first, in a random order, so a story
+      // that cannot be filled never holds up the others session after session.
+      const fresh = gaps
         .filter((id) => typeof id === "string" && ID_PATTERN.test(id))
-        .filter((id, index, all) => all.indexOf(id) === index && !this.#recent.includes(id))
+        .filter((id, index, all) => all.indexOf(id) === index && !this.#recent.includes(id));
+      const queue = [
+        ...this.#shuffled(fresh.filter((id) => !attempted.includes(id))),
+        ...fresh.filter((id) => attempted.includes(id))
+          .sort((a, b) => attempted.indexOf(a) - attempted.indexOf(b)),
+      ]
         .slice(0, QUEUE_MAX)
         .map((s) => Object.freeze({ s }));
       // The list itself is this step's request; the first page read waits a gap.
@@ -784,7 +959,15 @@ export class FfnSummaryFill {
 
     if (head.a === undefined) {
       // This step's one request: the story's own page, for its author.
+      await this.#attempt(counted, [head.s]);
       const lookup = await lookUpFfnAuthorId(this.#ports.fetch, head.s, this.#ports.clock);
+      if (lookup.kind === "gone") {
+        // The story is gone from FanFiction.net: skip it, carry on.
+        const next = Object.freeze({ ...counted, queue: Object.freeze(counted.queue.slice(1)) });
+        if (await this.#write(next) && next.queue.length === 0) this.#finish();
+        if (counted.backfills >= BACKFILL_MAX_PER_SESSION) this.#finish();
+        return;
+      }
       if (lookup.kind !== "found") {
         await this.#stop(counted);
         return;
