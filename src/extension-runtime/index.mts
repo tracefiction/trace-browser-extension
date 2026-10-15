@@ -242,6 +242,8 @@ try {
     fetch: apiFetch,
     apiBase: __TRACE_API_BASE__,
     nativeImportHandoff: __TRACE_NATIVE_IMPORT_HANDOFF__,
+    ...(extension.scripting ? { scripting: extension.scripting } : {}),
+    ...(extension.permissions ? { permissions: extension.permissions } : {}),
     webOrigin: __TRACE_WEB_ORIGIN__,
     randomId,
     archiveReadinessStatus,

@@ -159,3 +159,59 @@ Installed iOS proof is still required for near-limit Safari native-message
 transport, file protection in the real app-group container, the fresh direct
 link, cold/warm review presentation and account/draft/replay rejection. Local
 Swift/JavaScript contracts and source typechecks do not prove those behaviors.
+
+
+## Open story tabs (paired iOS MVP)
+
+`TRACE_IMPORT_OPEN_TABS` is a popup-only opt-in command. It uses the same native
+preparation, account/provider fence, cancellation and one-use inbox. It fails
+closed on desktop, unpaired packages and unknown platform detection. It never
+opens a web import page.
+
+The worker combines tabs from granted supported archive origins with the active
+tab, which may have temporary access to another archive. The active tab comes
+first; repeated tab IDs are removed before applying the 250 non-private story
+tab cap. Either query can fail without losing results from the other.
+
+At most four browser reads can remain outstanding, including timed-out calls
+from a previous scan. Timing out does not cancel a browser injection or release
+its slot. Each injected reader receives its own two-second deadline, bounded by
+the fifteen-second overall deadline that starts before permission and tab
+lookups. A late result is ignored; only actual browser completion releases
+capacity. Partial results include unreadable counts for tabs not reached before
+the deadline. A serialized, read-only DOM extractor
+reads rendered title, author and source counts; URLs identify a work but never
+supply its metadata. It neither installs the normal collector nor activates,
+reloads or closes tabs. Unknown credential forms are excluded. No input values,
+story text, full page HTML or unrelated tab URLs leave the page.
+
+Mobile FanFiction.net metadata is read from the direct header text between its
+first two rules, with the rendered chapter caption following. Nested story
+content, scripts and inputs are excluded. Abbreviated source word counts such
+as `226k+` retain the source's precision, converted to the numeric lower bound
+`226000`; the extractor does not infer completion from being on the last chapter.
+
+The additive payload is `{s:"tabs",at,items,scan,unreadableTabs}`. Each item has its own `src`
+(`ao3` or `ffn`), canonical `u`, `ctx:"tab"`, rendered `t` and optional metadata.
+`chu` is the open chapter reference for review only. `scan` contains integer
+`considered`, `unreadable`, `duplicates` and `limited` counts. Considered equals
+items plus unreadable plus duplicates and is at most 250. Duplicate works yield
+one review row; the first readable tab supplies its metadata and reference.
+`unreadableTabs` contains one `{u,t}` reference per unreadable tab, in scan order.
+These are browser tab titles (up to 512 UTF-16 units) and supported story URLs
+(up to 2048 units), with query strings and fragments removed. They identify
+failed reads, never substitute for DOM metadata or become import items. The
+native review can open each reference in Safari. Older count-only payloads
+remain accepted; when the array is supplied its count must equal `unreadable`.
+A scan with no readable stories can still hand off these recovery references.
+A scan with neither readable stories nor references has no handoff.
+
+The native consumer defaults new tab rows to Saved, supports individual and
+bulk status choices, and omits progress from every tab-import request. Existing
+Library records therefore retain private status and progress under the current
+insert-only API contract. The server does not store the captured chapter link
+through this API; the MVP does not offer tab closure or claim a saved resume
+position. The user must explicitly review and confirm before any library write.
+
+Synthetic DOM/native contracts do not establish real iPhone Safari's suspended
+page access. Device verification remains required before release.
