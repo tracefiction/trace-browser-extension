@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 /**
  * Rasterizes Shared (Extension)/Resources/images/trace-icon.svg into PNGs for manifest.icons.
- * trace-icon.svg is Trace's accepted fingerprint app icon (forest #173B30, ivory
- * #EDEFE5) on a rounded tile, so Safari's Page Menu and the toolbar match the
- * Home Screen icon. Browsers draw extension icons without a platform mask.
+ * trace-icon.svg is Trace's app icon in its light appearance: the fingerprint
+ * mark (#FBF3EA, 60% of the tile's height) on the vermilion field (#C24C22 to
+ * #963314, top to bottom) on a rounded tile, so Safari's Page Menu and the
+ * toolbar match the Home Screen icon. Browsers draw extension icons without a
+ * platform mask. Safari greys the icon itself on sites Trace may not run on.
  */
 import fs from "node:fs";
 import path from "node:path";
