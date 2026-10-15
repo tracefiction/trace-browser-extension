@@ -6347,6 +6347,35 @@ test("handover: a session reply that comes after its deadline still lands where 
   assert.equal(snapshotRequests(h), asked, "and nothing more is asked");
 });
 
+test("handover: a late reply never stands over the answer to Try again", async () => {
+  const h = handoverPopup([{ held: true }, { held: true }, { held: true }, { ok: true, snapshot: CONNECTED_AUTH }]);
+  for (let round = 0; round < 4; round += 1) await settleHandover(h, 4_700);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+  const tryAgain = [...h.document.querySelectorAll("#popup-earned-permission button")]
+    .find((button) => !button.hidden && /Try again/.test(button.textContent));
+  tryAgain.click();
+  await settleHandover(h);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P11", "Try again's read is answered");
+
+  // The first request's reply turns up long after, saying something else.
+  h.answerSnapshot({ ok: true, snapshot: { state: "signed_out", reason: "credential_absent" } });
+  await settleHandover(h);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P11", "it is older than the answer shown");
+});
+
+test("handover: a late reply taken does not shut out the reply to the request sent after it", async () => {
+  const h = handoverPopup([{ held: true }, { held: true }]);
+  await settleHandover(h, 4_500);
+  assert.equal(snapshotRequests(h), 2, "asked again once the first was past its deadline");
+  h.answerSnapshot({ ok: true, snapshot: CONNECTED_AUTH });
+  await settleHandover(h);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P11", "the first, late, is taken");
+  // The second answers in time, and says something newer.
+  h.answerSnapshot({ ok: true, snapshot: { state: "signed_out", reason: "credential_absent" } });
+  await settleHandover(h);
+  assert.notEqual(h.document.body.dataset.tracePopupStateCode, "P11", "the newer reply is taken");
+});
+
 test("handover: a late reply never stands over a reply to a newer request already taken", async () => {
   const h = handoverPopup([{ held: true }, { ok: true, snapshot: CONNECTED_AUTH }]);
   await settleHandover(h, 4_200);
@@ -6496,17 +6525,54 @@ test("after Always Allow: a background that says it has the answer and is still 
   assert.equal(firstTapPorts(h), 1);
 });
 
+test("after Always Allow: word that it is checking, come just as the answer was to go again, still keeps the port", async () => {
+  const { h, shown, click } = await openSavedFirstTapPopup();
+  await click("popup-earned-primary");
+  await flushed(h);
+  const answered = h.firstTap.messages.at(-1);
+  // The few seconds run out, and the word arrives before the new port is opened.
+  h.advance(4_000);
+  replyTo(h, undefined, { checking: answered.order });
+  await flushed(h);
+  assert.equal(firstTapPorts(h), 1, "the answer is not sent again over a new port");
+  replyTo(h, answered.order, { access: ALLOWED_ON });
+  assert.equal(shown(), "access-allowed");
+  await flushed(h, 30_000);
+  assert.equal(firstTapPorts(h), 1);
+});
+
+test("after Always Allow: a look that finds the sites allowed is the newest word, over an earlier answer", async () => {
+  const granted = [];
+  const { h, shown, click } = await openSavedFirstTapPopup({ deferredHostRequest: true, grantedOrigins: granted });
+  await click("popup-earned-primary");
+  await flushed(h);
+  replyTo(h, h.firstTap.messages.at(-1).order, { access: { state: "waiting" } });
+  granted.push(...FIVE_STORY_SITES);
+  h.finishHostRequest(true);
+  await flushed(h);
+  const answered = h.firstTap.messages.at(-1);
+  await flushed(h, 2_000);
+  const look = h.firstTap.messages.at(-1);
+  assert.equal(look.command, "access_waiting");
+  replyTo(h, look.order, { access: ALLOWED_ON });
+  assert.equal(shown(), "access-allowed");
+  replyTo(h, answered.order, { access: { state: "not_known" } });
+  assert.equal(shown(), "access-allowed", "nothing is fuller than allowed");
+});
+
 test("after Always Allow: a background that said it was checking and then went quiet is sent the answer once more, once", async () => {
   const { h, shown, click } = await openSavedFirstTapPopup();
   await click("popup-earned-primary");
   await flushed(h);
   const answered = h.firstTap.messages.at(-1);
+  // The word comes a second in: the longer wait runs from it.
+  await flushed(h, 1_000);
   replyTo(h, undefined, { checking: answered.order });
-  await flushed(h, 4_000 + 11_999);
+  await flushed(h, 11_999);
   assert.equal(firstTapPorts(h), 1);
   const before = h.firstTap.messages.length;
   await flushed(h, 1);
-  assert.equal(firstTapPorts(h), 2, "then a new port");
+  assert.equal(firstTapPorts(h), 2, "then a new port, twelve seconds after the word");
   const after = h.firstTap.messages.slice(before).filter(({ command }) => command !== "access_waiting");
   assert.deepEqual(after.map(({ command }) => command), ["open", "access_answered"]);
   await flushed(h, 60_000);
