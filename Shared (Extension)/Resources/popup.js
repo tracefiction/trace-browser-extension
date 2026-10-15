@@ -1559,7 +1559,13 @@ function showSafariPrompt(after) {
       bar.className = `popup-earned-prompt-bar ${kind}`;
       sheet.append(bar);
     }
-    for (const [label, kind] of [["Allow for One Day", "blue"], ["Always Allow", "chosen"], ["Don’t Allow", "plain"]]) {
+    // Drawn as this Safari draws it: where every button is blue, so are these.
+    const allBlue = safariQuestionButtonsAreAllBlue();
+    for (const [label, kind] of [
+      ["Allow for One Day", "blue"],
+      ["Always Allow", allBlue ? "chosen blue" : "chosen"],
+      ["Don’t Allow", allBlue ? "blue" : "plain"],
+    ]) {
       const button = document.createElement("span");
       button.className = `popup-earned-prompt-button ${kind}`;
       button.textContent = label;
@@ -2359,6 +2365,23 @@ const FIRST_TAP_YES_LOOKS_MS = Object.freeze([1_000, 2_000, 4_000]);
 // Messages from the background about the ask, counted, so that a word sent
 // with no word back can be told from one that was answered.
 let firstTapAccessHeard = 0;
+// Every request on the port goes out under a number, one higher each time,
+// and the background's word on the ask comes back under the number of the
+// request it answers. Word older than the newest already taken is let go, so
+// a slow answer to an earlier request never stands over a later one.
+let firstTapOrder = 0;
+let firstTapAccessTaken = 0;
+// Looks made while a request is out do not wait for the page scripts to go
+// in, so their word is taken without holding back an earlier, fuller answer.
+const firstTapPassingLooks = new Set();
+// The newest request the background has said it has and is still checking.
+let firstTapAccessChecking = 0;
+// After that word, how much longer the answer to Safari's question is waited
+// on before it goes once more over a new port: past the background's slowest
+// check, which reads again for about a second, waits up to two for the page
+// scripts, reads again, then reads the account.
+const FIRST_TAP_ACCESS_CHECKING_MS = 12_000;
+let firstTapAnswerAgain = null;
 // How long the popup waits on a request before saying it does not know. A
 // reader answers Safari's question in seconds; a minute is past any reading
 // of it. Nothing is lost at the deadline: a request that comes back later, a
@@ -2450,7 +2473,10 @@ function firstTapSend(command, detail = {}) {
   try {
     // The tab this popup was opened on goes with every request: its id, its
     // address and whether it is private, as read when the reader opened Trace.
-    firstTapPort.postMessage({ command, ...firstTapTab, ...detail });
+    const order = firstTapOrder + 1;
+    firstTapPort.postMessage({ command, ...firstTapTab, ...detail, order });
+    firstTapOrder = order;
+    if (command === "access_waiting") firstTapPassingLooks.add(order);
     return true;
   } catch {
     firstTapPort = null;
@@ -3284,6 +3310,8 @@ function renderFirstTapView(view, { waiting = false } = {}) {
       firstTapSetAside = true;
       if (firstTapPatience && firstTapPatience.timer !== null) clearTimeout(firstTapPatience.timer);
       firstTapPatience = null;
+      if (firstTapAnswerAgain !== null) clearTimeout(firstTapAnswerAgain);
+      firstTapAnswerAgain = null;
       leaveFirstTapSheet();
       void prepareEarnedPermissionFlow();
   }
@@ -3450,15 +3478,30 @@ function askForStorySites() {
       // Passed on even when it comes after this wait ran out: it is still
       // evidence, and the background still reads before it says anything.
       // The wait itself ends when the background answers, or at the deadline.
-      return observeStorySiteAccess("access_answered", answer).then(() => {
+      return observeStorySiteAccess("access_answered", answer).then((order) => {
         // The background may have been stopped while Safari's question was
         // up, and the port to it carry nothing. With no word back in a few
         // seconds the answer goes once more over a new port.
         const heard = firstTapAccessHeard;
         const port = firstTapPort;
-        setTimeout(() => {
-          if (firstTapAccessHeard !== heard || firstTapPort !== port || firstTapSetAside) return;
-          void observeStorySiteAccess("access_answered", answer, { freshPort: true });
+        const unheard = () => firstTapAccessHeard === heard && firstTapPort === port && !firstTapSetAside;
+        const sendAgain = () => {
+          firstTapAnswerAgain = null;
+          if (unheard()) void observeStorySiteAccess("access_answered", answer, { freshPort: true });
+        };
+        if (firstTapAnswerAgain !== null) clearTimeout(firstTapAnswerAgain);
+        firstTapAnswerAgain = setTimeout(() => {
+          firstTapAnswerAgain = null;
+          if (!unheard()) return;
+          // The background said it has the answer and is still checking: it
+          // is awake, only slow, and a new port would lose what it finds. It
+          // is given longer, and the answer goes once more only if that
+          // passes with no word either.
+          if (order !== null && firstTapAccessChecking >= order) {
+            firstTapAnswerAgain = setTimeout(sendAgain, FIRST_TAP_ACCESS_CHECKING_MS);
+            return;
+          }
+          sendAgain();
         }, FIRST_TAP_SAVE_ANSWER_MS);
       });
     })
@@ -3490,7 +3533,7 @@ async function observeStorySiteAccess(command, answer = {}, { onlyIfAllowed = fa
   if (await readCompleteEarnedGrant().catch(() => false)) {
     await reconcileEarnedRegistration().catch(() => null);
   } else if (onlyIfAllowed) {
-    return;
+    return null;
   }
   // Sent again because nothing came back: over a new port, which wakes a
   // background, opened on the story first as any new port is.
@@ -3500,7 +3543,8 @@ async function observeStorySiteAccess(command, answer = {}, { onlyIfAllowed = fa
   }
   // The background may have been restarted while Safari's question was up.
   if (!firstTapPort && firstTapStory && firstTapTab) startFirstTap(firstTapStory, firstTapTab);
-  firstTapSend(command, answer);
+  // The number it went under, or null when it could not go.
+  return firstTapSend(command, answer) ? firstTapOrder : null;
 }
 
 /**
@@ -3542,7 +3586,17 @@ function watchStorySiteAccess() {
 }
 
 /** The background's word on the ask. Any word but "waiting" ends the wait. */
-function receiveStorySiteAccess(access) {
+function receiveStorySiteAccess(access, order) {
+  // Word under a number older than the newest taken came late: what it says
+  // has been overtaken. Word with no number is taken as it comes.
+  if (Number.isSafeInteger(order)) {
+    const passing = firstTapPassingLooks.delete(order);
+    if (order < firstTapAccessTaken) return false;
+    if (!passing) {
+      firstTapAccessTaken = order;
+      for (const look of firstTapPassingLooks) if (look < order) firstTapPassingLooks.delete(look);
+    }
+  }
   const asked = firstTapAsk;
   // "Waiting" is only ever true of a request this popup still has out.
   if (!asked && access.state === "waiting") return false;
@@ -3600,6 +3654,12 @@ function dropFirstTapPort() {
 }
 
 function receiveFirstTapMessage(message) {
+  // The background has the answer to Safari's question and is still checking.
+  // That only keeps the answer from being sent again; nothing is drawn from it.
+  if (Number.isSafeInteger(message.checking)) {
+    firstTapAccessChecking = Math.max(firstTapAccessChecking, message.checking);
+    return;
+  }
   const delivery = firstTapSaveDelivery;
   // A save this sheet has seen confirmed is never taken back to the offer to
   // save it by a later open.
@@ -3613,7 +3673,7 @@ function receiveFirstTapMessage(message) {
     if (firstTapBusy?.look === delivery.look && message.answered !== delivery.look) endFirstTapBusy();
   }
   if (message.access) firstTapAccessHeard += 1;
-  const accessChanged = message.access ? receiveStorySiteAccess(message.access) : false;
+  const accessChanged = message.access ? receiveStorySiteAccess(message.access, message.order) : false;
   if (view) firstTapLastView = view;
   // The answer to what the reader asked for, known by the tap's number,
   // ends the wait on its button and is drawn and said aloud even when it
@@ -4445,6 +4505,8 @@ let kernelSnapshotTransientAttempt = 0;
 let kernelSnapshotProviderAttempt = 0;
 let kernelSnapshotTimer = null;
 let kernelSnapshotRequest = 0;
+// The newest request whose own reply has been taken.
+let kernelSnapshotTaken = 0;
 
 /**
  * On iPhone and iPad the story's handover state is drawn while the session is
@@ -4488,15 +4550,42 @@ function requestKernelSnapshot() {
   kernelSnapshotRequest += 1;
   const request = kernelSnapshotRequest;
   let answered = false;
-  const take = (response) => {
-    // One answer per request, and none for a request a newer one replaced.
-    if (answered || request !== kernelSnapshotRequest) return;
+  let late = false;
+  const deadline = setTimeout(() => {
+    late = true;
+    // No reply in time is taken as none, for the request now out only.
+    if (!answered && request === kernelSnapshotRequest) takeKernelSnapshot(null);
+  }, KERNEL_SNAPSHOT_REPLY_MS);
+  sendKernelRuntimeMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" }, (response) => {
+    // One answer per request, and none in time for a request a newer one replaced.
+    if (answered || (!late && request !== kernelSnapshotRequest)) return;
+    if (!late) {
+      answered = true;
+      clearTimeout(deadline);
+      kernelSnapshotTaken = request;
+      takeKernelSnapshot(response);
+      return;
+    }
+    // Past its deadline: the background was slow, not gone. Its reply is
+    // still taken where it settles what is shown, as a late read of the
+    // account is, and never over a reply to a newer request already taken.
+    if (request <= kernelSnapshotTaken || !kernelSnapshotSettles(response)) return;
     answered = true;
     clearTimeout(deadline);
-    takeKernelSnapshot(response);
-  };
-  const deadline = setTimeout(() => take(null), KERNEL_SNAPSHOT_REPLY_MS);
-  sendKernelRuntimeMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" }, take);
+    kernelSnapshotTaken = request;
+    // It decides what follows: an ask made because it seemed lost is let go.
+    if (kernelSnapshotTimer !== null) clearTimeout(kernelSnapshotTimer);
+    kernelSnapshotTimer = null;
+    kernelSnapshotRequest += 1;
+    kernelSnapshotAttempt = 0;
+    if (accountWait) takeAccountAnswer(accountWait, response);
+    else takeKernelSnapshot(response);
+  });
+}
+
+/** A reply that says where the session stands, not that it is still being worked out. */
+function kernelSnapshotSettles(response) {
+  return Boolean(response) && !["unknown", "pending"].includes(appAccountAnswer(response.snapshot));
 }
 
 function takeKernelSnapshot(response) {

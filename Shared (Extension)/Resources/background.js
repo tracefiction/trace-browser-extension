@@ -10020,7 +10020,6 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         }
       };
       const show = (view2) => post({ view: view2 });
-      const showAccess = (view2) => post({ access: view2 });
       port.onDisconnect.addListener(() => {
         open = false;
         siteAccess.closed(show);
@@ -10029,6 +10028,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       port.onMessage.addListener((message) => {
         const request = typeof message === "object" && message !== null ? message : {};
         const answered = Number.isSafeInteger(request.look) ? { answered: request.look } : {};
+        const order = Number.isSafeInteger(request.order) ? { order: request.order } : {};
         if (tapped === null && Number.isInteger(request.tabId) && typeof request.url === "string") {
           tapped = Object.freeze({
             tabId: request.tabId,
@@ -10039,7 +10039,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         if (tapped === null) return;
         if (request.command === "access_asking") {
           const waiting = siteAccess.asking(show);
-          if (waiting !== null) showAccess(waiting);
+          if (waiting !== null) post({ access: waiting, ...order });
           return;
         }
         const ask = (
@@ -10047,9 +10047,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           request.command === "access_check" ? { kind: "none" } : request.command === "access_waiting" ? { kind: "waiting" } : request.command === "access_unanswered" ? { kind: "unanswered" } : request.command !== "access_answered" ? null : request.threw === true ? { kind: "threw" } : { kind: "returned", value: request.returned }
         );
         if (ask !== null) {
+          if (request.command === "access_answered" && order.order !== void 0) post({ checking: order.order });
           void siteAccess.answered(show, ask).then(
-            (access2) => post({ access: access2, ...answered }),
-            () => post({ access: Object.freeze({ state: "not_known" }), ...answered })
+            (access2) => post({ access: access2, ...answered, ...order }),
+            () => post({ access: Object.freeze({ state: "not_known" }), ...answered, ...order })
           );
           return;
         }
@@ -10061,7 +10062,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
             const allowed = await siteAccess.observe().catch(
               () => Object.freeze({ state: "not_known" })
             );
-            post({ view: view2, access: allowed, ...answered });
+            post({ view: view2, access: allowed, ...answered, ...order });
           },
           () => post({ view: Object.freeze({ state: "not_applicable" }), ...answered })
         ).then(() => {

@@ -4679,7 +4679,7 @@ test("first tap: the popup tells the background which tab it was opened on, read
   ]) {
     const { h } = await openFirstTapPopup({ activeTab });
     assert.deepEqual(plain(h.firstTap.messages), [
-      { command: "open", tabId: 7, url: "https://archiveofourown.org/works/123", private: expected },
+      { command: "open", tabId: 7, url: "https://archiveofourown.org/works/123", private: expected, order: 1 },
     ]);
   }
 });
@@ -4711,6 +4711,8 @@ test("first tap: the ask is made by the tap itself, for the five story sites, an
   for (let attempt = 0; attempt < 6; attempt += 1) await flush();
   assert.deepEqual(plain(h.firstTap.messages.at(-1)), {
     command: "access_answered", tabId: 7, url: "https://archiveofourown.org/works/123", private: null, returned: true,
+    // Every request goes out under the next number.
+    order: h.firstTap.messages.length,
   }, "what it returned, and nothing about how long it took");
   assert.equal(shown(), "access-waiting", "still waiting on the background's word");
   assert.deepEqual(h.reloads, [], "the page is not reloaded");
@@ -4753,6 +4755,8 @@ test("first tap: a request that throws is reported as thrown, and one that says 
   for (let attempt = 0; attempt < 6; attempt += 1) await flush();
   assert.deepEqual(plain(threw.h.firstTap.messages.at(-1)), {
     command: "access_answered", tabId: 7, url: "https://archiveofourown.org/works/123", private: null, threw: true,
+    // Every request goes out under the next number.
+    order: threw.h.firstTap.messages.length,
   });
 
   const refused = await openSavedFirstTapPopup({ permissionRequestResult: false });
@@ -5443,6 +5447,10 @@ test("first tap: where every button in Safari's question is blue, the rule line 
     assert.equal(shownText(element("popup-earned-rule")), expected, userAgent);
     assert.equal(spokenText(element("popup-earned-rule")), "Tap Always Allow, not Allow for One Day.", userAgent);
     assert.equal(h.document.body.dataset.tracePlatform, "ios");
+    // The picture of Safari's question is drawn as this Safari draws it.
+    const blue = [...element("popup-earned-prompt").querySelectorAll(".popup-earned-prompt-button")]
+      .filter((node) => node.classList.contains("blue")).map((node) => node.textContent);
+    assert.deepEqual(blue, expected === RULE_LINE ? ["Allow for One Day"] : ["Allow for One Day", "Always Allow", "Don’t Allow"], userAgent);
   }
 });
 
@@ -6318,6 +6326,37 @@ test("handover: a session reply Safari never delivers is asked for again, so a s
   assert.equal(h.document.body.dataset.tracePopupStateCode, "P11");
 });
 
+test("handover: a session reply that comes after its deadline still lands where it settles what is shown", async () => {
+  // The background is slow, not gone: every request outlives its deadline.
+  const h = handoverPopup(Array(3).fill({ held: true }));
+  for (let round = 0; round < 4; round += 1) await settleHandover(h, 4_700);
+  assert.equal(snapshotRequests(h), 3);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+
+  h.answerSnapshot({ ok: true, snapshot: CONNECTED_AUTH });
+  await settleHandover(h);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P11", "the first reply, late, is taken");
+  assert.equal(isDisplayed(h, h.document.getElementById("popup-import-open-tabs")), true);
+  const asked = snapshotRequests(h);
+
+  // The later requests' replies, later still, are older than nothing taken
+  // and change nothing they do not settle.
+  h.answerSnapshot({ ok: true, snapshot: { state: "verifying", reason: "none" } });
+  await settleHandover(h, 20_000);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P11");
+  assert.equal(snapshotRequests(h), asked, "and nothing more is asked");
+});
+
+test("handover: a late reply never stands over a reply to a newer request already taken", async () => {
+  const h = handoverPopup([{ held: true }, { ok: true, snapshot: CONNECTED_AUTH }]);
+  await settleHandover(h, 4_200);
+  await settleHandover(h);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P11");
+  h.answerSnapshot({ ok: true, snapshot: { state: "signed_out", reason: "credential_absent" } });
+  await settleHandover(h);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P11");
+});
+
 test("handover: Saving your story never holds the sheet: past the session's bounded wait the reader can try again", async () => {
   const verifying = { ok: true, snapshot: { state: "verifying", reason: "none" } };
   const h = handoverPopup([...Array(40).fill(verifying), { ok: true, snapshot: CONNECTED_AUTH }]);
@@ -6391,6 +6430,89 @@ test("after Always Allow: a yes the background cannot see yet is looked at again
   const count = h.firstTap.commands.length;
   await flushed(h, 30_000);
   assert.equal(h.firstTap.commands.length, count);
+});
+
+/** The background's word, under the number of the request it answers. */
+const replyTo = (h, order, message) => { for (const listener of h.firstTap.listeners) listener({ ...message, order }); };
+
+test("after Always Allow: a slow answer to an earlier look never stands over a later one", async () => {
+  const { h, shown, click } = await openSavedFirstTapPopup();
+  await click("popup-earned-primary");
+  await flushed(h);
+  const answered = h.firstTap.messages.at(-1);
+  assert.equal(answered.command, "access_answered");
+  replyTo(h, answered.order, { access: { state: "not_known" } });
+  assert.equal(shown(), "access-not-known");
+
+  // A yes is looked at again, twice; the second look comes back first.
+  await flushed(h, 1_000);
+  const earlier = h.firstTap.messages.at(-1);
+  await flushed(h, 2_000);
+  const later = h.firstTap.messages.at(-1);
+  assert.deepEqual([earlier.command, later.command], ["access_unanswered", "access_unanswered"]);
+  replyTo(h, later.order, { access: ALLOWED_ON });
+  assert.equal(shown(), "access-allowed");
+  replyTo(h, earlier.order, { access: { state: "not_known" } });
+  assert.equal(shown(), "access-allowed", "the slow earlier word is let go");
+  assert.ok(later.order > earlier.order, "each request goes out under a higher number");
+});
+
+test("after Always Allow: a look made while the request is out does not hold back the fuller answer sent before it", async () => {
+  const granted = [];
+  const { h, shown, click } = await openSavedFirstTapPopup({ deferredHostRequest: true, grantedOrigins: granted });
+  await click("popup-earned-primary");
+  await flushed(h);
+  replyTo(h, h.firstTap.messages.at(-1).order, { access: { state: "waiting" } });
+  granted.push(...FIVE_STORY_SITES);
+  h.finishHostRequest(true);
+  await flushed(h);
+  const answered = h.firstTap.messages.at(-1);
+  assert.equal(answered.command, "access_answered");
+  await flushed(h, 2_000);
+  const look = h.firstTap.messages.at(-1);
+  assert.equal(look.command, "access_waiting");
+  // The look does not wait for the page scripts; the answer does.
+  replyTo(h, look.order, { access: { state: "registration_unknown" } });
+  replyTo(h, answered.order, { access: ALLOWED_ON });
+  assert.equal(shown(), "access-allowed");
+});
+
+test("after Always Allow: a background that says it has the answer and is still checking is waited on, not sent it again", async () => {
+  const { h, shown, sheet, click } = await openSavedFirstTapPopup();
+  await click("popup-earned-primary");
+  await flushed(h);
+  const answered = h.firstTap.messages.at(-1);
+  assert.equal(answered.command, "access_answered");
+  const drawn = sheet();
+  replyTo(h, undefined, { checking: answered.order });
+  assert.deepEqual(sheet(), drawn, "the word draws nothing");
+
+  // Slow, past the few seconds after which a silent background is sent the answer again.
+  await flushed(h, 6_000);
+  assert.equal(firstTapPorts(h), 1, "the port it is checking on is kept");
+  replyTo(h, answered.order, { access: ALLOWED_ON });
+  assert.equal(shown(), "access-allowed");
+  await flushed(h, 30_000);
+  assert.equal(firstTapPorts(h), 1);
+});
+
+test("after Always Allow: a background that said it was checking and then went quiet is sent the answer once more, once", async () => {
+  const { h, shown, click } = await openSavedFirstTapPopup();
+  await click("popup-earned-primary");
+  await flushed(h);
+  const answered = h.firstTap.messages.at(-1);
+  replyTo(h, undefined, { checking: answered.order });
+  await flushed(h, 4_000 + 11_999);
+  assert.equal(firstTapPorts(h), 1);
+  const before = h.firstTap.messages.length;
+  await flushed(h, 1);
+  assert.equal(firstTapPorts(h), 2, "then a new port");
+  const after = h.firstTap.messages.slice(before).filter(({ command }) => command !== "access_waiting");
+  assert.deepEqual(after.map(({ command }) => command), ["open", "access_answered"]);
+  await flushed(h, 60_000);
+  assert.equal(firstTapPorts(h), 2, "and only once");
+  replyTo(h, h.firstTap.messages.at(-1).order, { access: ALLOWED_ON });
+  assert.equal(shown(), "access-allowed");
 });
 
 test("after Always Allow: the answer sent to a background that went to sleep under Safari's question is sent once more over a new port", async () => {

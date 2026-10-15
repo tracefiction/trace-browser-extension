@@ -301,12 +301,13 @@ export function installFirstTapSave(environment: Environment): () => Promise<voi
     // tap. Every later command on this port is about that tab and no other.
     // The background looks no tab up for itself.
     let tapped: FirstTapTapped | null = null;
-    const post = (message: { view?: FirstTapView; access?: StorySiteAccessView; answered?: number }): void => {
+    const post = (message: {
+      view?: FirstTapView; access?: StorySiteAccessView; answered?: number; order?: number; checking?: number;
+    }): void => {
       if (!open) return;
       try { port.postMessage(message); } catch { /* The popup has gone. */ }
     };
     const show = (view: FirstTapView): void => post({ view });
-    const showAccess = (view: StorySiteAccessView): void => post({ access: view });
     port.onDisconnect.addListener(() => {
       open = false;
       siteAccess.closed(show);
@@ -317,13 +318,17 @@ export function installFirstTapSave(environment: Environment): () => Promise<voi
         ? message as {
             readonly command?: unknown; readonly tabId?: unknown; readonly url?: unknown;
             readonly private?: unknown; readonly returned?: unknown; readonly threw?: unknown;
-            readonly look?: unknown;
+            readonly look?: unknown; readonly order?: unknown;
           }
         : {};
       // A request the reader's own tap made carries a number. Its answer goes
       // back under the same number, so the popup can tell that answer from
       // anything else this port sends it meanwhile.
       const answered = Number.isSafeInteger(request.look) ? { answered: request.look as number } : {};
+      // Every request carries the popup's running number, and what is said of
+      // the ask in reply goes back under it: a slow answer to an earlier
+      // request can then be told from a later one that came back first.
+      const order = Number.isSafeInteger(request.order) ? { order: request.order as number } : {};
       if (tapped === null && Number.isInteger(request.tabId) && typeof request.url === "string") {
         tapped = Object.freeze({
           tabId: request.tabId as number,
@@ -337,7 +342,7 @@ export function installFirstTapSave(environment: Environment): () => Promise<voi
       // what came of it is read here.
       if (request.command === "access_asking") {
         const waiting = siteAccess.asking(show);
-        if (waiting !== null) showAccess(waiting);
+        if (waiting !== null) post({ access: waiting, ...order });
         return;
       }
       const ask: StorySiteAsk | null =
@@ -351,9 +356,13 @@ export function installFirstTapSave(environment: Environment): () => Promise<voi
         : request.threw === true ? { kind: "threw" }
         : { kind: "returned", value: request.returned };
       if (ask !== null) {
+        // Word of the reader's answer to the browser's question is
+        // acknowledged at once: the check that follows can take some seconds,
+        // and the popup must not take a slow background for one that is gone.
+        if (request.command === "access_answered" && order.order !== undefined) post({ checking: order.order });
         void siteAccess.answered(show, ask).then(
-          (access) => post({ access, ...answered }),
-          () => post({ access: Object.freeze({ state: "not_known" }), ...answered }),
+          (access) => post({ access, ...answered, ...order }),
+          () => post({ access: Object.freeze({ state: "not_known" }), ...answered, ...order }),
         );
         return;
       }
@@ -374,7 +383,7 @@ export function installFirstTapSave(environment: Environment): () => Promise<voi
           const allowed = await siteAccess.observe().catch(
             (): StorySiteAccessView => Object.freeze({ state: "not_known" }),
           );
-          post({ view, access: allowed, ...answered });
+          post({ view, access: allowed, ...answered, ...order });
         },
         () => post({ view: Object.freeze({ state: "not_applicable" }), ...answered }),
       ).then(() => {
