@@ -770,6 +770,39 @@ test("a sign-out during a paced wait ends it and nothing more is read or written
   assert.equal(FFN_SUMMARY_STATE_KEY in h.area.values, false);
 });
 
+test("the preference and website access are checked again after the 20 s wait", async () => {
+  for (const change of ["enabled", "allowed"]) {
+    const h = harness();
+    const run = h.fill.storySaved(savedStory("102"), false);
+    await settle();
+    assert.equal(h.site.requests.length, 1);
+    h.ports[change] = false;
+    await h.clock.advance(LOOKUP_TO_LIST_MS);
+    await run;
+    assert.equal(h.site.requests.length, 1, `${change}: no author list read`);
+    assert.equal(state(h).stopped, true);
+  }
+});
+
+test("another account's tried list is removed when a new account's session starts", async () => {
+  const h = harness({ gaps: ["11"] });
+  await h.local.set({ [FFN_SUMMARY_ATTEMPTED_KEY]: { account: "reader-0:1", ids: ["11", "12"] } });
+  await quietStep(h);
+  assert.equal(FFN_SUMMARY_ATTEMPTED_KEY in h.local.values, false);
+
+  // The same account's list is kept.
+  const same = harness({ gaps: ["11"] });
+  await same.local.set({ [FFN_SUMMARY_ATTEMPTED_KEY]: { account: "reader-1:1", ids: ["12"] } });
+  await quietStep(same);
+  assert.deepEqual(same.local.values[FFN_SUMMARY_ATTEMPTED_KEY].ids, ["12"]);
+});
+
+test("only FanFiction.net's warning box marks a story as gone", () => {
+  const prose = '<div id="content"><p>Story Not Found is the title of chapter three.</p></div>';
+  assert.equal(isFfnStoryNotFoundPage(prose), false);
+  assert.equal(isFfnStoryNotFoundPage("<span class='gui_warning'>Story Not Found<hr>Unable to locate story. Code 1.</span>"), true);
+});
+
 // --- Wired into the session runtime ------------------------------------------
 
 async function wiredSave({ summaryKnown } = {}) {

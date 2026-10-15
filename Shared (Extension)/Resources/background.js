@@ -6887,7 +6887,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   }
   function isFfnStoryNotFoundPage(html) {
     if (typeof html !== "string") return false;
-    return /Story\s+Not\s+Found/i.test(html) || /Unable\s+to\s+locate\s+story/i.test(html);
+    const warning = /<[^>]*\bclass\s*=\s*["'][^"']*\bgui_warning\b[^"']*["'][^>]*>([\s\S]{0,400})/i.exec(html);
+    const text2 = warning?.[1] ?? "";
+    return /Story\s+Not\s+Found/i.test(text2) || /Unable\s+to\s+locate\s+story/i.test(text2);
   }
   function isChallengePage(html, headers) {
     if (headers?.get("cf-mitigated")?.toLowerCase() === "challenge") return true;
@@ -7025,6 +7027,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         await this.#area.set({ [FFN_SUMMARY_ATTEMPTED_KEY]: next });
       } catch {
       }
+    }
+    async keepOnly(account) {
+      const stored = await this.#load();
+      if (stored !== null && stored.account !== account) await this.clear();
     }
     async clear() {
       this.#memory = null;
@@ -7268,6 +7274,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (!this.#current()) return null;
       if (stored !== null && stored.account === account) return stored;
       this.#finished = false;
+      await this.#ports.attempted.keepOnly(account).catch(() => void 0);
       const fresh = freshState(account);
       return await this.#write(fresh) ? fresh : null;
     }
@@ -7353,6 +7360,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         if (!this.#current()) return;
         state = await this.#state();
         if (state === null || state.stopped) return;
+        if (!await this.#mayRequest(state)) return;
         this.#lastOnSaveRequestAt = this.#ports.clock.now();
       }
       await this.#readAuthor(state, authorId, this.#byAuthor(state, storyId, authorId));

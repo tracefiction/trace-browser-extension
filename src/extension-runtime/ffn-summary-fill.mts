@@ -168,7 +168,10 @@ export function ffnSummariesFromStoryListHtml(html: string): {
  */
 export function isFfnStoryNotFoundPage(html: string): boolean {
   if (typeof html !== "string") return false;
-  return /Story\s+Not\s+Found/i.test(html) || /Unable\s+to\s+locate\s+story/i.test(html);
+  // Only FanFiction.net's own warning box counts, never the words elsewhere.
+  const warning = /<[^>]*\bclass\s*=\s*["'][^"']*\bgui_warning\b[^"']*["'][^>]*>([\s\S]{0,400})/i.exec(html);
+  const text = warning?.[1] ?? "";
+  return /Story\s+Not\s+Found/i.test(text) || /Unable\s+to\s+locate\s+story/i.test(text);
 }
 
 /** Whether a page is a Cloudflare (or similar) check instead of the page asked for. */
@@ -389,6 +392,8 @@ export interface FillStatePort {
 export interface AttemptedPort {
   read(account: string): Promise<readonly string[]>;
   add(account: string, storyIds: readonly string[]): Promise<void>;
+  /** Removes the list when it belongs to another account. */
+  keepOnly(account: string): Promise<void>;
   clear(): Promise<void>;
 }
 
@@ -438,6 +443,11 @@ export class StoredAttempted implements AttemptedPort {
     } catch {
       // Memory keeps it for this worker.
     }
+  }
+
+  async keepOnly(account: string): Promise<void> {
+    const stored = await this.#load();
+    if (stored !== null && stored.account !== account) await this.clear();
   }
 
   async clear(): Promise<void> {
@@ -782,6 +792,7 @@ export class FfnSummaryFill {
     if (stored !== null && stored.account === account) return stored;
     // Another account (or none yet): nothing of the previous one is kept.
     this.#finished = false;
+    await this.#ports.attempted.keepOnly(account).catch(() => undefined);
     const fresh = freshState(account);
     return await this.#write(fresh) ? fresh : null;
   }
@@ -878,6 +889,8 @@ export class FfnSummaryFill {
       if (!this.#current()) return;
       state = await this.#state();
       if (state === null || state.stopped) return;
+      // The preference or the website access may have changed during the wait.
+      if (!(await this.#mayRequest(state))) return;
       this.#lastOnSaveRequestAt = this.#ports.clock.now();
     }
     await this.#readAuthor(state, authorId, this.#byAuthor(state, storyId, authorId));
