@@ -6796,6 +6796,415 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
   };
 
+  // src/extension-runtime/ffn-summary-fill.mts
+  var FFN_SUMMARY_HOST_PATTERN = "https://www.fanfiction.net/*";
+  var FFN_SUMMARY_STATE_KEY = "traceFfnSummaryFillV1";
+  var BACKFILL_SETTLE_MS = 2e4;
+  var FFN_PRESENCE_GRACE_MS = 1e4;
+  var BACKFILL_GAP_MS = 3 * 6e4;
+  var BACKFILL_MAX_PER_SESSION = 10;
+  var ON_SAVE_MAX_PER_SESSION = 30;
+  var QUEUE_MAX = 50;
+  var FETCH_TIMEOUT_MS = 1e4;
+  var MAX_READ_BYTES = 256 * 1024;
+  var SUMMARY_WINDOW_CHARS = 16384;
+  var SUMMARY_MAX_CHARS = 4e3;
+  var STORY_ID_PATTERN = /^[1-9][0-9]{0,19}$/;
+  var ON_SAVE_PENDING_MAX = 5;
+  var RECENT_MAX = 50;
+  var PROFILE_TOP_PATTERN = /<div\b[^>]*\bid\s*=\s*["']?profile_top\b[^>]*>/i;
+  var SUMMARY_DIV_PATTERN = /<div\b[^>]*\bclass\s*=\s*["'][^"']*\bxcontrast_txt\b[^"']*["'][^>]*>([\s\S]*?)<\/div\s*>/gi;
+  var NAMED_ENTITIES = Object.freeze({
+    amp: "&",
+    lt: "<",
+    gt: ">",
+    quot: '"',
+    apos: "'",
+    nbsp: " ",
+    hellip: "\u2026",
+    mdash: "\u2014",
+    ndash: "\u2013",
+    lsquo: "\u2018",
+    rsquo: "\u2019",
+    ldquo: "\u201C",
+    rdquo: "\u201D"
+  });
+  function decodeEntities(text2) {
+    return text2.replace(/&(#x[0-9a-f]{1,6}|#[0-9]{1,7}|[a-z]{2,8});/gi, (whole, body) => {
+      if (body[0] === "#") {
+        const code = body[1] === "x" || body[1] === "X" ? Number.parseInt(body.slice(2), 16) : Number.parseInt(body.slice(1), 10);
+        return Number.isSafeInteger(code) && code > 0 && code <= 1114111 ? String.fromCodePoint(code) : whole;
+      }
+      return NAMED_ENTITIES[body.toLowerCase()] ?? whole;
+    });
+  }
+  function plainText(markup) {
+    return decodeEntities(markup.replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
+  }
+  function ffnSummaryFromStoryHtml(html) {
+    if (typeof html !== "string") return null;
+    const top = PROFILE_TOP_PATTERN.exec(html);
+    if (top === null) return null;
+    const start = top.index + top[0].length;
+    const window = html.slice(start, start + SUMMARY_WINDOW_CHARS);
+    SUMMARY_DIV_PATTERN.lastIndex = 0;
+    for (let match = SUMMARY_DIV_PATTERN.exec(window); match !== null; match = SUMMARY_DIV_PATTERN.exec(window)) {
+      const text2 = plainText(match[1] ?? "");
+      if (!text2 || /^Rated:/i.test(text2)) continue;
+      return text2.slice(0, SUMMARY_MAX_CHARS);
+    }
+    return null;
+  }
+  function summaryBlockComplete(html) {
+    const top = PROFILE_TOP_PATTERN.exec(html);
+    if (top === null) return false;
+    const after = html.slice(top.index + top[0].length, top.index + top[0].length + SUMMARY_WINDOW_CHARS);
+    return /class\s*=\s*["'][^"']*\bxcontrast_txt\b[^"']*["'][^>]*>[\s\S]*?<\/div\s*>/i.test(after) || html.length - top.index >= SUMMARY_WINDOW_CHARS;
+  }
+  function isChallengePage(html, headers) {
+    if (headers?.get("cf-mitigated")?.toLowerCase() === "challenge") return true;
+    const head = html.slice(0, 8192);
+    return /<title>\s*(?:just a moment|attention required|please wait)/i.test(head) || /\/cdn-cgi\/challenge-platform\//i.test(head) || /\bcf[-_]chl[-_]/i.test(head) || /\bchallenge-form\b/i.test(head);
+  }
+  async function readBounded(response) {
+    const body = response.body;
+    if (!body || typeof body.getReader !== "function") {
+      return (await response.text()).slice(0, MAX_READ_BYTES);
+    }
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let text2 = "";
+    let bytes = 0;
+    try {
+      for (; ; ) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytes += value.byteLength;
+        text2 += decoder.decode(value, { stream: true });
+        if (bytes >= MAX_READ_BYTES || summaryBlockComplete(text2)) break;
+      }
+    } finally {
+      void reader.cancel().catch(() => void 0);
+    }
+    return text2;
+  }
+  function expectedStoryAddress(rawUrl, storyId) {
+    try {
+      const url = new URL(rawUrl);
+      return url.protocol === "https:" && url.hostname === "www.fanfiction.net" && (url.pathname === `/s/${storyId}` || url.pathname.startsWith(`/s/${storyId}/`));
+    } catch {
+      return false;
+    }
+  }
+  async function readFfnStorySummary(fetchImpl, storyId, clock) {
+    if (!STORY_ID_PATTERN.test(storyId)) return { kind: "stop", reason: "error" };
+    const abort = new AbortController();
+    const timer = clock.setTimeout(() => abort.abort(), FETCH_TIMEOUT_MS);
+    try {
+      const response = await fetchImpl(`https://www.fanfiction.net/s/${storyId}/1/`, {
+        method: "GET",
+        credentials: "include",
+        redirect: "follow",
+        cache: "no-store",
+        referrerPolicy: "no-referrer",
+        headers: { Accept: "text/html" },
+        signal: abort.signal
+      });
+      if (!expectedStoryAddress(response.url, storyId)) {
+        void response.body?.cancel().catch(() => void 0);
+        return { kind: "stop", reason: "redirect" };
+      }
+      if (response.status !== 200) {
+        void response.body?.cancel().catch(() => void 0);
+        return { kind: "stop", reason: isChallengeHeader(response) ? "challenge" : "status" };
+      }
+      if (!/text\/html/i.test(response.headers.get("content-type") ?? "")) {
+        void response.body?.cancel().catch(() => void 0);
+        return { kind: "stop", reason: "not_html" };
+      }
+      if (isChallengeHeader(response)) {
+        void response.body?.cancel().catch(() => void 0);
+        return { kind: "stop", reason: "challenge" };
+      }
+      const html = await readBounded(response);
+      if (isChallengePage(html)) return { kind: "stop", reason: "challenge" };
+      const summary = ffnSummaryFromStoryHtml(html);
+      return summary === null ? { kind: "stop", reason: "missing" } : { kind: "found", summary };
+    } catch {
+      return { kind: "stop", reason: "error" };
+    } finally {
+      clock.clearTimeout(timer);
+    }
+  }
+  function isChallengeHeader(response) {
+    return response.headers.get("cf-mitigated")?.toLowerCase() === "challenge";
+  }
+  function validState(value) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+    const record3 = value;
+    if (record3.v !== 1 || typeof record3.account !== "string" || !Array.isArray(record3.queue) || record3.queue.length > QUEUE_MAX || !record3.queue.every((id) => typeof id === "string" && STORY_ID_PATTERN.test(id)) || typeof record3.listed !== "boolean" || typeof record3.stopped !== "boolean" || !Number.isSafeInteger(record3.backfills) || !Number.isSafeInteger(record3.saves) || typeof record3.lastStepAt !== "number" || !Number.isFinite(record3.lastStepAt)) {
+      return null;
+    }
+    return record3;
+  }
+  var SessionFillState = class {
+    #area;
+    #memory = null;
+    constructor(area) {
+      this.#area = area && typeof area.get === "function" ? area : null;
+    }
+    async read() {
+      if (this.#area === null) return this.#memory;
+      try {
+        const values = await this.#area.get(FFN_SUMMARY_STATE_KEY);
+        return validState(values?.[FFN_SUMMARY_STATE_KEY]);
+      } catch {
+        return this.#memory;
+      }
+    }
+    async write(state) {
+      this.#memory = state;
+      if (this.#area === null) return;
+      try {
+        await this.#area.set({ [FFN_SUMMARY_STATE_KEY]: state });
+      } catch {
+      }
+    }
+    async clear() {
+      this.#memory = null;
+      if (this.#area === null) return;
+      try {
+        await this.#area.remove(FFN_SUMMARY_STATE_KEY);
+      } catch {
+      }
+    }
+  };
+  function freshState(account) {
+    return Object.freeze({
+      v: 1,
+      account,
+      queue: Object.freeze([]),
+      listed: false,
+      stopped: false,
+      backfills: 0,
+      saves: 0,
+      lastStepAt: 0
+    });
+  }
+  function storyIdFromWorkKey(workKey) {
+    const match = /^ffn:([1-9][0-9]{0,19})$/.exec(workKey);
+    return match?.[1] ?? null;
+  }
+  var FfnSummaryFill = class {
+    #ports;
+    #tail = Promise.resolve();
+    /** The backfill has nothing more to do this session (stopped, done or capped). */
+    #finished = false;
+    #pendingSaves = 0;
+    #savesInFlight = 0;
+    #lastSaveAt = 0;
+    #settleTimer = null;
+    /** When a FanFiction.net page last spoke to Trace. */
+    #lastFfnAt = Number.NEGATIVE_INFINITY;
+    /** Stories read on save in this worker's lifetime, so a later chapter does not read again. */
+    #recent = [];
+    constructor(ports) {
+      this.#ports = ports;
+    }
+    /** Whether a backfill read is waiting to run. */
+    hasPendingTimer() {
+      return this.#settleTimer !== null;
+    }
+    /** A save to Trace is starting. */
+    saveStarted() {
+      this.#savesInFlight += 1;
+      this.#lastSaveAt = this.#ports.clock.now();
+    }
+    /** A save to Trace has ended. */
+    saveEnded() {
+      this.#savesInFlight = Math.max(0, this.#savesInFlight - 1);
+      this.#lastSaveAt = this.#ports.clock.now();
+    }
+    /**
+     * A save to Trace was confirmed. When it was a new FFN story saved from a
+     * story page that showed no summary, the summary is read now.
+     */
+    storySaved(story, alreadyInLibrary) {
+      if (story.hostKind !== "ffn" || alreadyInLibrary) return Promise.resolve();
+      const item = story.payload.item;
+      if (item === void 0 || item === null || typeof item !== "object" || item.ctx !== "story") {
+        return Promise.resolve();
+      }
+      if (typeof item.sm === "string" && item.sm.trim().length > 0) return Promise.resolve();
+      const storyId = storyIdFromWorkKey(story.workKey);
+      if (storyId === null || this.#recent.includes(storyId)) return Promise.resolve();
+      if (this.#pendingSaves >= ON_SAVE_PENDING_MAX) return Promise.resolve();
+      this.#recent.push(storyId);
+      if (this.#recent.length > RECENT_MAX) this.#recent.shift();
+      this.#pendingSaves += 1;
+      return this.#serial(async () => {
+        try {
+          await this.#readOnSave(storyId);
+        } finally {
+          this.#pendingSaves -= 1;
+        }
+      });
+    }
+    /**
+     * A FanFiction.net page spoke to Trace (it loaded, or the reader moved on
+     * it). The backfill waits until the pages have been quiet for a while.
+     */
+    ffnPageActivity() {
+      this.#lastFfnAt = this.#ports.clock.now();
+      if (this.#finished) return;
+      if (this.#settleTimer !== null) this.#ports.clock.clearTimeout(this.#settleTimer);
+      this.#settleTimer = this.#ports.clock.setTimeout(() => {
+        this.#settleTimer = null;
+        void this.#serial(() => this.#backfillStep());
+      }, BACKFILL_SETTLE_MS);
+    }
+    /** Sign-out or another account: forget everything and stop. */
+    async clear() {
+      if (this.#settleTimer !== null) {
+        this.#ports.clock.clearTimeout(this.#settleTimer);
+        this.#settleTimer = null;
+      }
+      this.#recent.length = 0;
+      this.#finished = false;
+      await this.#ports.state.clear();
+    }
+    #serial(work) {
+      const run = this.#tail.then(async () => {
+        try {
+          await work();
+        } catch {
+        }
+      });
+      this.#tail = run;
+      return run;
+    }
+    /** The session's state for the signed-in account, or null when signed out. */
+    async #state() {
+      const account = this.#ports.account();
+      if (account === null) {
+        await this.clear();
+        return null;
+      }
+      const stored = await this.#ports.state.read();
+      if (stored !== null && stored.account === account) return stored;
+      this.#finished = false;
+      const fresh = freshState(account);
+      await this.#ports.state.write(fresh);
+      return fresh;
+    }
+    async #stop(state) {
+      this.#finished = true;
+      await this.#ports.state.write(Object.freeze({ ...state, stopped: true, queue: Object.freeze([]) }));
+    }
+    /** Reads one story and sends its summary. Returns false when the session stops. */
+    async #fill(state, storyId) {
+      let enabled = false;
+      try {
+        enabled = await this.#ports.contributionsEnabled();
+      } catch {
+        enabled = false;
+      }
+      if (!enabled) {
+        await this.#stop(state);
+        return false;
+      }
+      let allowed = false;
+      try {
+        allowed = await this.#ports.hostAllowed();
+      } catch {
+        allowed = false;
+      }
+      if (!allowed) {
+        await this.#stop(state);
+        return false;
+      }
+      const read = await readFfnStorySummary(this.#ports.fetch, storyId, this.#ports.clock);
+      if (read.kind !== "found") {
+        await this.#stop(state);
+        return false;
+      }
+      if (this.#ports.account() !== state.account) return false;
+      let outcome = "failed";
+      try {
+        outcome = await this.#ports.contribute(storyId, read.summary);
+      } catch {
+        outcome = "failed";
+      }
+      if (outcome !== "accepted") {
+        await this.#stop(state);
+        return false;
+      }
+      return true;
+    }
+    async #readOnSave(storyId) {
+      const state = await this.#state();
+      if (state === null || state.stopped || state.saves >= ON_SAVE_MAX_PER_SESSION) return;
+      const counted = Object.freeze({
+        ...state,
+        saves: state.saves + 1,
+        lastStepAt: this.#ports.clock.now(),
+        queue: Object.freeze(state.queue.filter((id) => id !== storyId))
+      });
+      await this.#ports.state.write(counted);
+      await this.#fill(counted, storyId);
+    }
+    async #backfillStep() {
+      const now = this.#ports.clock.now();
+      if (this.#savesInFlight > 0 || now - this.#lastSaveAt < BACKFILL_SETTLE_MS) return;
+      const state = await this.#state();
+      if (state === null) return;
+      if (state.stopped || state.listed && state.queue.length === 0 || state.backfills >= BACKFILL_MAX_PER_SESSION) {
+        this.#finished = true;
+        return;
+      }
+      if (now - state.lastStepAt < BACKFILL_GAP_MS) return;
+      if (now - this.#lastFfnAt > BACKFILL_SETTLE_MS + FFN_PRESENCE_GRACE_MS) return;
+      if (!state.listed) {
+        let enabled = false;
+        try {
+          enabled = await this.#ports.contributionsEnabled();
+        } catch {
+          enabled = false;
+        }
+        if (!enabled) {
+          await this.#stop(state);
+          return;
+        }
+        const gaps = await this.#ports.listGaps().catch(() => null);
+        if (gaps === null) {
+          await this.#stop(state);
+          return;
+        }
+        const queue = gaps.filter((id) => typeof id === "string" && STORY_ID_PATTERN.test(id)).filter((id, index, all) => all.indexOf(id) === index && !this.#recent.includes(id)).slice(0, QUEUE_MAX);
+        await this.#ports.state.write(Object.freeze({
+          ...state,
+          listed: true,
+          queue: Object.freeze(queue),
+          lastStepAt: now
+        }));
+        return;
+      }
+      const [storyId, ...rest] = state.queue;
+      if (storyId === void 0) return;
+      const next = Object.freeze({
+        ...state,
+        queue: Object.freeze(rest),
+        backfills: state.backfills + 1,
+        lastStepAt: now
+      });
+      await this.#ports.state.write(next);
+      const carryOn = await this.#fill(next, storyId);
+      if (!carryOn || rest.length === 0 || next.backfills >= BACKFILL_MAX_PER_SESSION) {
+        this.#finished = true;
+      }
+    }
+  };
+
   // src/extension-runtime/popup-page-relay.mts
   var POPUP_PAGE_PORT = "trace-popup-page-v1";
   var POPUP_PAGE_RELAY = "TRACE_POPUP_PAGE_RELAY";
@@ -6979,6 +7388,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #libraryMutations;
     #finishQualification;
     #metadataContributions;
+    #ffnSummaries;
     #savedFilters;
     #savedFilterApi;
     #nativeImportEnabled;
@@ -7167,6 +7577,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         mode: environment.storageMode,
         webOrigin: environment.webOrigin
       });
+      this.#ffnSummaries = environment.ffnSummaryFill === void 0 || environment.mode !== "kernel" ? null : this.#createFfnSummaryFill(environment, environment.ffnSummaryFill, storage);
       this.#storyCommands = new StoryCommandService({
         session: this.#service,
         api: new StoryCommandApi(environment.fetch, environment.apiBase),
@@ -7182,6 +7593,87 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           environment.storageMode
         ),
         clock: { now: () => Date.now() }
+      });
+    }
+    #createFfnSummaryFill(environment, options, storage) {
+      const preference = new BrowserMetadataPreferencePort(storage);
+      const apiBase = environment.apiBase.replace(/\/$/, "");
+      const call = (target, method, args) => extensionCall(
+        target,
+        method,
+        args,
+        environment.runtime,
+        environment.storageMode
+      );
+      return new FfnSummaryFill({
+        fetch: options.storySiteFetch,
+        clock: {
+          now: () => Date.now(),
+          setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+          clearTimeout: (handle) => globalThis.clearTimeout(handle)
+        },
+        state: new SessionFillState(options.sessionArea === void 0 || options.sessionArea === null ? null : {
+          get: (key) => call(options.sessionArea, "get", [key]),
+          set: (items) => call(options.sessionArea, "set", [items]),
+          remove: (key) => call(options.sessionArea, "remove", [key])
+        }),
+        account: () => {
+          const scope2 = this.#service.publicationScope();
+          return scope2 === null ? null : `${scope2.accountId}:${scope2.epoch}`;
+        },
+        contributionsEnabled: () => preference.enabled(),
+        hostAllowed: async () => {
+          if (environment.permissions?.contains === void 0) return false;
+          return await call(environment.permissions, "contains", [
+            { origins: [FFN_SUMMARY_HOST_PATTERN] }
+          ]) === true;
+        },
+        listGaps: async () => {
+          const result = await this.#service.executeAuthenticated(async (credential) => {
+            let response;
+            try {
+              response = await environment.fetch(`${apiBase}/api/extension/library/summary-gaps`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${credential}`
+                },
+                body: JSON.stringify({ source: "ffn" })
+              });
+            } catch {
+              return { kind: "success", value: null };
+            }
+            if (response.status === 401 || response.status === 403) {
+              return { kind: "auth_rejected" };
+            }
+            if (response.status !== 200) return { kind: "success", value: null };
+            const body = await response.json().catch(() => null);
+            const ids = isRecord18(body) && body.success === true && isRecord18(body.data) ? body.data.sourceStoryIds : null;
+            return {
+              kind: "success",
+              value: Array.isArray(ids) && ids.every((id) => typeof id === "string") ? ids : null
+            };
+          });
+          return result.kind === "published" ? result.value : null;
+        },
+        contribute: async (storyId, summary) => {
+          const result = await this.#metadataContributions.execute(Object.freeze({
+            kind: "library_metadata_refresh",
+            hostKind: "ffn",
+            workKeys: Object.freeze([`ffn:${storyId}`]),
+            // Identity and the summary only. The address is the form every
+            // FanFiction.net save already records.
+            payload: Object.freeze({
+              items: Object.freeze([Object.freeze({
+                source: "ffn",
+                sourceStoryId: storyId,
+                url: `https://www.fanfiction.net/s/${storyId}/`,
+                summary
+              })])
+            })
+          }));
+          return result.kind === "accepted" ? "accepted" : result.kind === "skipped" ? "skipped" : "failed";
+        }
       });
     }
     start() {
@@ -7232,6 +7724,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return this.#service.snapshot();
     }
     async handle(message, sender) {
+      if (this.#ffnSummaries !== null && archiveHostKindFromSender(sender) === "ffn") {
+        this.#ffnSummaries.ffnPageActivity();
+      }
       const response = await this.#dispatch(message, sender);
       if (this.#mode !== "kernel" || !isRecord18(response) || !isRecord18(response.snapshot) || !isSupportedArchiveSender(sender)) {
         return response;
@@ -7686,7 +8181,20 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           dispatch: "never_sent"
         });
       }
-      return this.#storyCommands.executeWithEvidence(command, observer);
+      const summaries = this.#ffnSummaries;
+      if (summaries === null) return this.#storyCommands.executeWithEvidence(command, observer);
+      const alreadyInLibrary = accountData?.overlay?.entries[command.workKey] !== void 0;
+      summaries.saveStarted();
+      let evidence;
+      try {
+        evidence = await this.#storyCommands.executeWithEvidence(command, observer);
+      } finally {
+        summaries.saveEnded();
+      }
+      if (evidence.result.kind === "confirmed") {
+        void summaries.storySaved(command, alreadyInLibrary);
+      }
+      return evidence;
     }
     // --- What the first-tap save needs from the session -------------------------
     /** Hooks called as a page's own save is admitted. Absent on builds without the first-tap save. */
@@ -7888,6 +8396,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     async #clearLegacyAfterDisconnect(result) {
       if (result.kind !== "completed" || result.state !== "signed_out") return;
+      try {
+        await this.#ffnSummaries?.clear();
+      } catch {
+      }
       try {
         await this.#accountData.clear();
       } catch {
@@ -10433,7 +10945,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       ...extension.permissions ? { permissions: extension.permissions } : {},
       webOrigin: "https://www.tracefiction.com",
       randomId,
-      archiveReadinessStatus
+      archiveReadinessStatus,
+      // Missing FanFiction.net summaries are read from the story site in the
+      // reader's own browser, slowly (ffn-summary-fill.mts).
+      ffnSummaryFill: {
+        storySiteFetch: globalThis.fetch.bind(globalThis),
+        sessionArea: extension.storage.session ?? null
+      }
     });
     if (
       // A build-time constant: a build without optional story sites leaves this

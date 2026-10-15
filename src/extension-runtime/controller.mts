@@ -151,6 +151,12 @@ import {
 } from "./runtime-messages.mjs";
 
 import { NativeLibraryImportProducer } from "./native-import.mjs";
+import {
+  FFN_SUMMARY_HOST_PATTERN,
+  FfnSummaryFill,
+  SessionFillState,
+  type ContributionOutcome,
+} from "./ffn-summary-fill.mjs";
 import { PopupPageRelay, POPUP_PAGE_RELAY } from "./popup-page-relay.mjs";
 
 export {
@@ -178,6 +184,16 @@ interface RuntimeEnvironment {
   readonly nativeImportHandoff?: boolean;
   readonly firstStoryDelay?: (milliseconds: number) => Promise<void>;
   readonly archiveReadinessStatus?: BrowserArchiveReadinessStatus;
+  /**
+   * Reading missing FanFiction.net summaries from the reader's browser
+   * (ffn-summary-fill.mts). Absent: the feature is off.
+   */
+  readonly ffnSummaryFill?: {
+    /** Requests to the story site itself, never to Trace. */
+    readonly storySiteFetch: typeof fetch;
+    /** `storage.session` when the browser has it. */
+    readonly sessionArea?: StorageArea | null;
+  };
 }
 
 interface RetryClock {
@@ -268,6 +284,7 @@ export class SessionRuntimeController {
   readonly #libraryMutations: LibraryMutationService;
   readonly #finishQualification: FinishQualificationService;
   readonly #metadataContributions: MetadataContributionService;
+  readonly #ffnSummaries: FfnSummaryFill | null;
   readonly #savedFilters: SavedFilterSyncService;
   readonly #savedFilterApi: SavedFilterSyncApi;
   readonly #nativeImportEnabled: boolean;
@@ -448,6 +465,9 @@ export class SessionRuntimeController {
       mode: environment.storageMode,
       webOrigin: environment.webOrigin,
     });
+    this.#ffnSummaries = environment.ffnSummaryFill === undefined || environment.mode !== "kernel"
+      ? null
+      : this.#createFfnSummaryFill(environment, environment.ffnSummaryFill, storage);
     this.#storyCommands = new StoryCommandService({
       session: this.#service,
       api: new StoryCommandApi(environment.fetch, environment.apiBase),
@@ -463,6 +483,101 @@ export class SessionRuntimeController {
         environment.storageMode,
       ),
       clock: { now: () => Date.now() },
+    });
+  }
+
+  #createFfnSummaryFill(
+    environment: RuntimeEnvironment,
+    options: NonNullable<RuntimeEnvironment["ffnSummaryFill"]>,
+    storage: BrowserStorage,
+  ): FfnSummaryFill {
+    const preference = new BrowserMetadataPreferencePort(storage);
+    const apiBase = environment.apiBase.replace(/\/$/, "");
+    const call = <T,>(target: unknown, method: string, args: readonly unknown[]) =>
+      extensionCall<T>(
+        target as Record<string, (...args: unknown[]) => unknown>,
+        method,
+        args,
+        environment.runtime,
+        environment.storageMode,
+      );
+    return new FfnSummaryFill({
+      fetch: options.storySiteFetch,
+      clock: {
+        now: () => Date.now(),
+        setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+        clearTimeout: (handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
+      },
+      state: new SessionFillState(options.sessionArea === undefined || options.sessionArea === null
+        ? null
+        : {
+            get: (key) => call(options.sessionArea, "get", [key]),
+            set: (items) => call(options.sessionArea, "set", [items]),
+            remove: (key) => call(options.sessionArea, "remove", [key]),
+          }),
+      account: () => {
+        const scope = this.#service.publicationScope();
+        return scope === null ? null : `${scope.accountId}:${scope.epoch}`;
+      },
+      contributionsEnabled: () => preference.enabled(),
+      hostAllowed: async () => {
+        if (environment.permissions?.contains === undefined) return false;
+        return await call<boolean>(environment.permissions, "contains", [
+          { origins: [FFN_SUMMARY_HOST_PATTERN] },
+        ]) === true;
+      },
+      listGaps: async () => {
+        const result = await this.#service.executeAuthenticated(async (credential) => {
+          let response: Response;
+          try {
+            response = await environment.fetch(`${apiBase}/api/extension/library/summary-gaps`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${credential}`,
+              },
+              body: JSON.stringify({ source: "ffn" }),
+            });
+          } catch {
+            return { kind: "success" as const, value: null };
+          }
+          if (response.status === 401 || response.status === 403) {
+            return { kind: "auth_rejected" as const };
+          }
+          if (response.status !== 200) return { kind: "success" as const, value: null };
+          const body: unknown = await response.json().catch(() => null);
+          const ids = isRecord(body) && body.success === true && isRecord(body.data)
+            ? body.data.sourceStoryIds
+            : null;
+          return {
+            kind: "success" as const,
+            value: Array.isArray(ids) && ids.every((id) => typeof id === "string")
+              ? ids as readonly string[]
+              : null,
+          };
+        });
+        return result.kind === "published" ? result.value : null;
+      },
+      contribute: async (storyId, summary): Promise<ContributionOutcome> => {
+        const result = await this.#metadataContributions.execute(Object.freeze({
+          kind: "library_metadata_refresh",
+          hostKind: "ffn",
+          workKeys: Object.freeze([`ffn:${storyId}`]),
+          // Identity and the summary only. The address is the form every
+          // FanFiction.net save already records.
+          payload: Object.freeze({
+            items: Object.freeze([Object.freeze({
+              source: "ffn",
+              sourceStoryId: storyId,
+              url: `https://www.fanfiction.net/s/${storyId}/`,
+              summary,
+            })]),
+          }),
+        }));
+        return result.kind === "accepted"
+          ? "accepted"
+          : result.kind === "skipped" ? "skipped" : "failed";
+      },
     });
   }
 
@@ -516,6 +631,11 @@ export class SessionRuntimeController {
     message: unknown,
     sender?: RuntimeSender,
   ): Promise<RuntimeHandleResponse> {
+    // A FanFiction.net page spoke: the reader is there. Any summary backfill
+    // waits until its pages have been quiet for a while.
+    if (this.#ffnSummaries !== null && archiveHostKindFromSender(sender) === "ffn") {
+      this.#ffnSummaries.ffnPageActivity();
+    }
     const response = await this.#dispatch(message, sender);
     // An AO3 or FanFiction.net page keeps reading evidence and unconfirmed
     // state between replies. Every reply tells it which account session
@@ -1143,7 +1263,22 @@ export class SessionRuntimeController {
         dispatch: "never_sent",
       });
     }
-    return this.#storyCommands.executeWithEvidence(command, observer);
+    const summaries = this.#ffnSummaries;
+    if (summaries === null) return this.#storyCommands.executeWithEvidence(command, observer);
+    const alreadyInLibrary =
+      accountData?.overlay?.entries[command.workKey] !== undefined;
+    summaries.saveStarted();
+    let evidence: StoryCommandEvidence;
+    try {
+      evidence = await this.#storyCommands.executeWithEvidence(command, observer);
+    } finally {
+      summaries.saveEnded();
+    }
+    if (evidence.result.kind === "confirmed") {
+      // Never delays the save's own answer.
+      void summaries.storySaved(command, alreadyInLibrary);
+    }
+    return evidence;
   }
 
   // --- What the first-tap save needs from the session -------------------------
@@ -1400,6 +1535,11 @@ export class SessionRuntimeController {
 
   async #clearLegacyAfterDisconnect(result: SessionActionResult): Promise<void> {
     if (result.kind !== "completed" || result.state !== "signed_out") return;
+    try {
+      await this.#ffnSummaries?.clear();
+    } catch {
+      // Session-only state; it also resets whenever the account differs.
+    }
     try {
       await this.#accountData.clear();
     } catch {
