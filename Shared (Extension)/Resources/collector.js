@@ -821,7 +821,6 @@ function resetStoryAccountState() {
   try {
     if (window.sessionStorage) {
       window.sessionStorage.removeItem(AUTO_TRACK_DEDUPE_KEY);
-      window.sessionStorage.removeItem("trace:confirmed-chapter:v1");
     }
   } catch (_) {
     /* ignore */
@@ -3859,13 +3858,9 @@ function handleCollectorMessage(msg, sender, sendResponse, relayCommand) {
   }
 
   if (msg?.type === "TRACE_SAVED_NOTE_DISMISS") {
-    // The popup confirmed this story itself; the page note would repeat it.
+    // The popup confirmed this story itself. The page shows no saved note, so
+    // there is nothing to dismiss; the reply keeps older popups answered.
     if (sender && sender.id && sender.id === ext.runtime.id && !sender.tab) {
-      if (activeStorySavedNote) {
-        var dismissedWorkKey = activeStorySavedNote.getAttribute(TRACE_SAVED_NOTE_ATTR);
-        writeSavedNoteMarker({ workKey: dismissedWorkKey, until: 0, dismissed: true });
-        removeStorySavedNote(true);
-      }
       sendResponse({ ok: true });
     } else {
       sendResponse({ ok: false });
@@ -8208,503 +8203,40 @@ function scheduleKernelProjectionRetry(workKey, attempt) {
 }
 
 // -------------------------------------------------------
-// Saved note: a one-time, page-level confirmation that a story which was not
-// in the reader's confirmed Library when this page loaded is now confirmed by
-// the account projection. It floats above the page (no layout shift), never
-// takes focus, and is announced politely. Progress updates never show it.
+// New-save emphasis. Routine saves and chapter progress stay quiet: the story
+// handle already shows the story's state on every page, so nothing else
+// appears for them. When a story that was not in the reader's confirmed
+// Library when this page loaded becomes confirmed here, the handle itself
+// fades and settles in once. No new element, no text over the page, no focus
+// change; Reduce Motion shows nothing. Failures are shown by the handle.
 // -------------------------------------------------------
-var TRACE_SAVED_NOTE_ATTR = "data-trace-saved-note";
-var TRACE_SAVED_NOTE_VISIBLE_MS = 5000;
-// Nothing makes a page note leave sooner than this.
-var TRACE_SAVED_NOTE_MIN_VISIBLE_MS = 3000;
-// Once the reader scrolls, the note leaves about a second later.
-var TRACE_SAVED_NOTE_SCROLL_DISMISS_MS = 1000;
-// A scroll in progress when a note appears has ended once the page has been
-// still this long (or the browser reports scrollend).
-var TRACE_SAVED_NOTE_SCROLL_SETTLE_MS = 200;
-var traceLastPageScrollAt = 0;
-try {
-  window.addEventListener("scroll", function () {
-    traceLastPageScrollAt = Date.now();
-  }, { capture: true, passive: true });
-} catch (_) {
-  /* notes then treat every scroll as the reader's */
-}
-var TRACE_SAVED_NOTE_FIRST_KEY = "traceSavedNoteFirstStoryShownV1";
-var TRACE_CHAPTER_KEPT_COUNT_KEY = "traceChapterKeptNotesShownV1";
-var chapterKeptState = { workKey: null, lastChapter: null, shown: false, pending: false, n2Shown: false };
-var storySavedNoteState = { workKey: null, knownAtLoad: null, shown: false };
-
-// The page can be replaced right after its first load (a redirect or reload),
-// which would discard the note. A tab-scoped marker lets the replacement page
-// finish the same note. It holds only the work key and times, never a title.
-var TRACE_SAVED_NOTE_SESSION_KEY = "trace:saved-note:v1";
-
-function readSavedNoteMarker() {
-  try {
-    var raw = window.sessionStorage && window.sessionStorage.getItem(TRACE_SAVED_NOTE_SESSION_KEY);
-    var value = raw ? JSON.parse(raw) : null;
-    return value && typeof value.workKey === "string" && typeof value.until === "number" ? value : null;
-  } catch (_) {
-    return null;
-  }
-}
-
-function writeSavedNoteMarker(value) {
-  try {
-    if (!window.sessionStorage) return;
-    if (value) window.sessionStorage.setItem(TRACE_SAVED_NOTE_SESSION_KEY, JSON.stringify(value));
-    else window.sessionStorage.removeItem(TRACE_SAVED_NOTE_SESSION_KEY);
-  } catch (_) {
-    /* ignore */
-  }
-}
-
-function showChapterKeptNote(workKey, chapter) {
-  traceRefreshPageTokens();
-  if (shouldDisableTraceContentScript() || getWorkKeyFromUrl() !== workKey || finishBandVisible() || activeStorySavedNote) return false;
-  var story = null;
-  try { story = collectStoryForAutoTrack(); } catch (_) { story = null; }
-  var title = story && story.t ? String(story.t) : "";
-  var reduced = storySavedNoteReducedMotion();
-  var note = createStoryPageNote("kept", title, chapter, reduced).note;
-  note.setAttribute(TRACE_SAVED_NOTE_ATTR, workKey);
-  storySavedNoteMount(note);
-  activeStorySavedNote = note;
-  announceStorySheet("Chapter " + chapter + " kept. " + title + ".");
-  note.__traceKeepTimer = setInterval(function () {
-    if (activeStorySavedNote !== note) { clearInterval(note.__traceKeepTimer); return; }
-    if (finishBandVisible()) { removeStorySavedNote(false); return; }
-    if (!note.isConnected || !storySavedNoteHost || !storySavedNoteHost.isConnected) storySavedNoteMount(note);
-  }, 400);
-  revealStoryPageNote(note);
-  scheduleStoryNoteAutoDismiss(note, TRACE_SAVED_NOTE_VISIBLE_MS);
-  return true;
-}
-
-function observeConfirmedChapter(workKey, entry, projection) {
-  var current = storyEntryChapterCurrent(entry);
-  if (chapterKeptState.workKey !== workKey) {
-    var previous = null;
-    try { previous = JSON.parse(window.sessionStorage.getItem("trace:confirmed-chapter:v1")); } catch (_) { /* no baseline */ }
-    chapterKeptState = { workKey: workKey,
-      lastChapter: previous && previous.workKey === workKey ? previous.chapter : current,
-      shown: false, pending: false, n2Shown: false };
-  }
-  if (Number.isInteger(current) && current >= 0) {
-    try { window.sessionStorage.setItem("trace:confirmed-chapter:v1", JSON.stringify({ workKey: workKey, chapter: current })); } catch (_) { /* optional feedback */ }
-  }
-  if (!Number.isInteger(current) || current < 1) return;
-  if (!Number.isInteger(chapterKeptState.lastChapter)) { chapterKeptState.lastChapter = current; return; }
-  var advanced = current > chapterKeptState.lastChapter;
-  chapterKeptState.lastChapter = current;
-  var pref = projection && projection.workPreferences && projection.workPreferences[workKey];
-  if (!advanced || chapterKeptState.shown || chapterKeptState.pending || chapterKeptState.n2Shown ||
-      (entry && entry.hidden) || (pref && pref.hidden) || finishBandVisible() || activeStorySavedNote) return;
-  chapterKeptState.pending = true;
-  try {
-    ext.storage.local.get([TRACE_SAVED_NOTE_FIRST_KEY, TRACE_CHAPTER_KEPT_COUNT_KEY, "prefAutoTrackEnabled"], function (res) {
-      chapterKeptState.pending = false;
-      if (ext.runtime.lastError || chapterKeptState.workKey !== workKey || chapterKeptState.shown ||
-          chapterKeptState.n2Shown || !res || res[TRACE_SAVED_NOTE_FIRST_KEY] !== true ||
-          res.prefAutoTrackEnabled === false || finishBandVisible() || activeStorySavedNote) return;
-      var count = res[TRACE_CHAPTER_KEPT_COUNT_KEY];
-      count = Number.isInteger(count) && count >= 0 ? count : 0;
-      if (count >= 3) return;
-      chapterKeptState.pending = true;
-      ext.storage.local.set({ [TRACE_CHAPTER_KEPT_COUNT_KEY]: count + 1 }, function () {
-        chapterKeptState.pending = false;
-        if (ext.runtime.lastError || chapterKeptState.workKey !== workKey || chapterKeptState.shown) return;
-        chapterKeptState.shown = showChapterKeptNote(workKey, current);
-      });
-    });
-  } catch (_) { chapterKeptState.pending = false; }
-}
+var storyArrivalState = { workKey: null, knownAtLoad: null, emphasized: false };
 
 function noteStoryProjection(workKey, projection) {
   var entries = projection && projection.entries ? projection.entries : {};
-  var entry = entries[workKey];
-  observeConfirmedChapter(workKey, entry, projection);
-  var known = !!entry;
-  if (storySavedNoteState.workKey !== workKey) {
-    storySavedNoteState = { workKey: workKey, knownAtLoad: known, shown: false };
-    var marker = readSavedNoteMarker();
-    if (known && marker && marker.workKey === workKey && !marker.dismissed && marker.until > Date.now()) {
-      storySavedNoteState.shown = true;
-      showStorySavedNote(workKey, entry, marker.until - Date.now());
-    }
+  var known = !!entries[workKey];
+  if (storyArrivalState.workKey !== workKey) {
+    storyArrivalState = { workKey: workKey, knownAtLoad: known, emphasized: false };
     return;
   }
-  if (storySavedNoteState.knownAtLoad !== false || !known || storySavedNoteState.shown) return;
-  storySavedNoteState.shown = true;
-  // Only the reader's first saved story gets the note: it teaches what Trace
-  // does once, then Trace stays quiet. The flag holds no story information.
+  if (storyArrivalState.knownAtLoad !== false || !known || storyArrivalState.emphasized) return;
+  storyArrivalState.emphasized = true;
+  emphasizeStoryHandle(workKey);
+}
+
+function emphasizeStoryHandle(workKey) {
+  if (storySheetPrefersReducedMotion()) return;
+  var handle = document.querySelector("[" + TRACE_STORY_HANDLE_ATTR + "]");
+  if (!handle || handle.getAttribute(TRACE_STORY_HANDLE_ATTR) !== workKey) return;
+  if (typeof handle.animate !== "function") return;
   try {
-    ext.storage.local.get([TRACE_SAVED_NOTE_FIRST_KEY], function (res) {
-      if (ext.runtime.lastError || (res && res[TRACE_SAVED_NOTE_FIRST_KEY] === true)) return;
-      ext.storage.local.set({ [TRACE_SAVED_NOTE_FIRST_KEY]: true });
-      showStorySavedNote(workKey, entry);
-    });
-  } catch (_) {
-    /* ignore */
-  }
-}
-
-// The end-of-story band asks the reader to decide; it takes precedence over
-// this informational note when both would share the bottom of the screen.
-function finishBandVisible() {
-  var band = document.querySelector(
-    "[data-trace-finish-qualify],[data-trace-finish-done],[data-trace-finish-recovery]",
-  );
-  if (!band || typeof band.getBoundingClientRect !== "function") return false;
-  var rect = band.getBoundingClientRect();
-  var height = window.innerHeight || document.documentElement.clientHeight || 0;
-  return rect.height > 0 && rect.bottom > 0 && rect.top < height;
-}
-
-function storySavedNoteReducedMotion() {
-  try {
-    return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
-  } catch (_) {
-    return false;
-  }
-}
-
-var activeStorySavedNote = null;
-var storySavedNoteHost = null;
-
-// The note lives in a closed shadow root on <html>, outside <body>, so host
-// scripts that manage body children or fixed elements cannot reach it.
-function storySavedNoteMount(note) {
-  var root = document.documentElement;
-  if (!storySavedNoteHost || !storySavedNoteHost.isConnected) {
-    storySavedNoteHost = document.createElement("trace-saved-note");
-    storySavedNoteHost.setAttribute(TRACE_SAVED_NOTE_ATTR, "");
-    storySavedNoteHost.style.cssText = "all:initial;position:fixed;inset:auto 0 0 0;z-index:2147483646;pointer-events:none;display:block";
-    storySavedNoteHost.__traceShadow = storySavedNoteHost.attachShadow
-      ? storySavedNoteHost.attachShadow({ mode: "closed" })
-      : storySavedNoteHost;
-    root.appendChild(storySavedNoteHost);
-  }
-  var tokens = traceHostPageTokens();
-  Object.keys(tokens).forEach(function (name) {
-    storySavedNoteHost.style.setProperty("--trace-page-" + name, tokens[name]);
-  });
-  note.style.pointerEvents = "auto";
-  storySavedNoteHost.__traceShadow.appendChild(note);
-}
-
-function removeStorySavedNote(immediate) {
-  var note = activeStorySavedNote;
-  activeStorySavedNote = null;
-  if (!note) {
-    var stale = document.querySelector("trace-saved-note");
-    if (stale) stale.remove();
-    return;
-  }
-  if (note.__traceHideTimer) clearTimeout(note.__traceHideTimer);
-  if (note.__traceKeepTimer) clearInterval(note.__traceKeepTimer);
-  if (typeof note.__traceDetach === "function") note.__traceDetach();
-  // Reduce Motion hides the note at once, without a fade.
-  if (immediate || storySavedNoteReducedMotion()) {
-    note.remove();
-    return;
-  }
-  note.style.opacity = "0";
-  note.style.transform = "translateY(8px)";
-  setTimeout(function () { note.remove(); }, 350);
-
-}
-
-function storyNoteCheckSvg(size) {
-  var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 20 20");
-  svg.setAttribute("fill", "none");
-  svg.setAttribute("stroke", "currentColor");
-  svg.setAttribute("stroke-width", "1.8");
-  svg.setAttribute("stroke-linecap", "round");
-  svg.setAttribute("stroke-linejoin", "round");
-  svg.setAttribute("aria-hidden", "true");
-  svg.style.cssText = "display:block;flex:0 0 auto;width:" + size + "px;height:" + size + "px";
-  var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  path.setAttribute("d", "M3.5 10.5l4.2 4.2L16.5 5.8");
-  svg.appendChild(path);
-  return svg;
-}
-
-function storyNoteDismissSvg() {
-  var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 12 12");
-  svg.setAttribute("fill", "none");
-  svg.setAttribute("stroke", "currentColor");
-  svg.setAttribute("stroke-width", "1.5");
-  svg.setAttribute("stroke-linecap", "round");
-  svg.setAttribute("aria-hidden", "true");
-  svg.style.cssText = "display:block;width:12px;height:12px";
-  var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  path.setAttribute("d", "M1.5 1.5l9 9m0-9l-9 9");
-  svg.appendChild(path);
-  return svg;
-}
-
-function createStoryPageNote(kind, title, chapter, reduced) {
-  var compact = kind === "kept";
-  // Resolve Dynamic Type on Trace's own node; archive body sizes are fixed.
-  function noteFont(px) { return "clamp(" + px + "px," + (px / 17) + "em," + (px * 2) + "px)"; }
-  var note = document.createElement("div");
-  note.setAttribute(TRACE_SAVED_NOTE_ATTR, kind);
-  note.style.cssText = [
-    "position:fixed", "left:12px", "right:12px",
-    "bottom:max(66px,calc(50px + env(safe-area-inset-bottom)))",
-    "z-index:2147483646", "box-sizing:border-box",
-    compact ? "width:max-content" : "max-width:440px",
-    compact ? "max-width:calc(100vw - 24px)" : "",
-    "margin:0 auto",
-    compact ? "display:flex" : "display:grid",
-    compact ? "align-items:center" : "grid-template-columns:auto minmax(0,1fr) auto",
-    compact ? "" : "align-items:center",
-    "gap:" + (compact ? "8px" : "4px 12px"),
-    "padding:" + (compact ? "8px 14px" : "12px 6px 12px 16px"),
-    "background:var(--trace-page-surface)", "color:var(--trace-page-ink)",
-    "border:0", "border-radius:14px",
-    "box-shadow:" + TRACE_PAGE_SHEET_SHADOW,
-    "font:17px/1.3 -apple-system,system-ui,sans-serif",
-    "font: -apple-system-body",
-    "text-align:left",
-    // Visible without waiting for a frame; the entry animation is layered on.
-    "opacity:1",
-    "transform:none",
-    reduced ? "" : "transition:opacity .35s ease,transform .35s ease",
-  ].filter(Boolean).join(";");
-  var mark = document.createElement("span");
-  mark.setAttribute("aria-hidden", "true");
-  mark.setAttribute("data-trace-note-mark", "1");
-  mark.style.cssText = "align-self:start;padding-top:" + (compact ? "2px" : "1px") + ";color:var(--trace-page-ink)";
-  mark.appendChild(storyNoteCheckSvg(compact ? 16 : 20));
-  note.appendChild(mark);
-
-  var copy = document.createElement("span");
-  copy.setAttribute("data-trace-note-copy", "1");
-  copy.style.cssText = "flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px";
-  var heading = document.createElement("strong");
-  heading.textContent = compact ? "Chapter " + chapter + " kept" : "Saved to your Library";
-  heading.style.cssText = "font-weight:600;font-size:" + noteFont(compact ? 14 : 15) + ";line-height:1.3;color:var(--trace-page-ink)";
-  copy.appendChild(heading);
-  if (title) {
-    var titleLine = document.createElement("span");
-    titleLine.textContent = title;
-    titleLine.style.cssText = "font-weight:400;font-size:" + noteFont(compact ? 12.5 : 13) + ";line-height:1.35;color:var(--trace-page-secondary);overflow-wrap:anywhere";
-    copy.appendChild(titleLine);
-  }
-  if (!compact) {
-    var detail = document.createElement("span");
-    detail.textContent = "Trace keeps your place as you read.";
-    detail.style.cssText = "font-weight:400;font-size:" + noteFont(13) + ";line-height:1.35;color:var(--trace-page-secondary)";
-    copy.appendChild(detail);
-  }
-  note.appendChild(copy);
-  if (compact) return { note: note };
-
-  var actions = document.createElement("span");
-  actions.setAttribute("data-trace-note-actions", "1");
-  actions.style.cssText = "display:flex;align-items:center;justify-content:flex-end";
-  var details = document.createElement("button");
-  details.type = "button";
-  details.textContent = "Details";
-  details.setAttribute("aria-label", "Details: " + title + " in Trace");
-  details.style.cssText = "flex:0 0 auto;min-height:44px;padding:0 8px;border:0;background:transparent;color:var(--trace-page-teal);font-family:inherit;font-weight:500;font-size:" + noteFont(15) + ";line-height:1;cursor:pointer";
-  actions.appendChild(details);
-
-  var dismiss = document.createElement("button");
-  dismiss.type = "button";
-  dismiss.setAttribute("aria-label", "Dismiss");
-  dismiss.style.cssText = "flex:0 0 44px;width:44px;height:44px;display:flex;align-items:center;justify-content:center;border:0;background:transparent;color:var(--trace-page-tertiary);cursor:pointer";
-  dismiss.appendChild(storyNoteDismissSvg());
-  actions.appendChild(dismiss);
-  note.appendChild(actions);
-  return { note: note, details: details, dismiss: dismiss };
-}
-
-// From 1.75x text the saved note stacks its actions under the text so the
-// title keeps the full width. Measured after mounting,
-// because the note resolves Dynamic Type on its own node.
-var TRACE_NOTE_STACK_SCALE = 1.75;
-
-function applyStoryNoteLayout(note) {
-  var actions = note && note.querySelector ? note.querySelector("[data-trace-note-actions]") : null;
-  if (!actions || typeof window.getComputedStyle !== "function") return false;
-  var size = parseFloat(window.getComputedStyle(note).fontSize) || 17;
-  var stacked = size / 17 >= TRACE_NOTE_STACK_SCALE;
-  note.setAttribute("data-trace-note-layout", stacked ? "stacked" : "inline");
-  note.style.gridTemplateColumns = stacked ? "auto minmax(0,1fr)" : "auto minmax(0,1fr) auto";
-  note.style.padding = stacked ? "14px 16px 6px" : "12px 6px 12px 16px";
-  actions.style.gridColumn = stacked ? "1 / -1" : "";
-  actions.style.justifyContent = stacked ? "space-between" : "flex-end";
-  actions.style.margin = stacked ? "0 -10px 0 -8px" : "";
-  return stacked;
-}
-
-// Enter: rise 14 px and fade over 0.4 s; Reduce Motion shows it at once. The
-// Web Animations API runs without a JS frame callback, and the note's resting
-// style is already visible if animation is unavailable.
-function revealStoryPageNote(note) {
-  if (!note || typeof note.animate !== "function") return;
-  if (storySavedNoteReducedMotion()) return;
-  try {
-    note.animate(
-      [{ opacity: 0, transform: "translateY(14px)" }, { opacity: 1, transform: "none" }],
-      { duration: 400, easing: "ease-out" },
+    handle.animate(
+      [{ opacity: 0.35, transform: "scale(0.96)" }, { opacity: 1, transform: "none" }],
+      { duration: 420, easing: "ease-out" },
     );
   } catch (_) {
-    /* visible either way */
+    /* the handle is visible either way */
   }
-}
-
-function showStorySavedNote(workKey, entry, remainingMs) {
-  traceRefreshPageTokens();
-  if (shouldDisableTraceContentScript() || getWorkKeyFromUrl() !== workKey) return;
-  if (finishBandVisible()) return;
-  removeStorySavedNote(true);
-  var continued = typeof remainingMs === "number";
-  var visibleMs = continued
-    ? Math.min(TRACE_SAVED_NOTE_VISIBLE_MS, Math.max(TRACE_SAVED_NOTE_MIN_VISIBLE_MS, remainingMs))
-    : TRACE_SAVED_NOTE_VISIBLE_MS;
-  if (!continued) {
-    writeSavedNoteMarker({ workKey: workKey, until: Date.now() + visibleMs, dismissed: false });
-  }
-  var story = null;
-  try { story = collectStoryForAutoTrack(); } catch (_) { story = null; }
-  var title = story && story.t ? String(story.t) : "";
-  var reduced = storySavedNoteReducedMotion();
-
-  chapterKeptState.n2Shown = true;
-  var parts = createStoryPageNote("saved", title, 0, reduced);
-  var note = parts.note;
-  note.setAttribute(TRACE_SAVED_NOTE_ATTR, workKey);
-  parts.details.addEventListener("click", function (event) {
-    event.preventDefault();
-    event.stopPropagation();
-    writeSavedNoteMarker({ workKey: workKey, until: 0, dismissed: true });
-    removeStorySavedNote(true);
-    var handle = document.querySelector("[" + TRACE_STORY_HANDLE_ATTR + "]");
-    if (handle && typeof handle.__traceStoryHandleAction === "function") handle.__traceStoryHandleAction();
-  });
-  parts.dismiss.addEventListener("click", function (event) {
-    event.preventDefault();
-    event.stopPropagation();
-    writeSavedNoteMarker({ workKey: workKey, until: 0, dismissed: true });
-    removeStorySavedNote(false);
-  });
-  storySavedNoteMount(note);
-  applyStoryNoteLayout(note);
-  activeStorySavedNote = note;
-  if (!continued) announceStorySheet("Saved to your Library. " + title + ". Trace keeps your place as you read.");
-  // Some archive pages rebuild or prune fixed elements (for example mobile ad
-  // layers). Keep the note attached for its visible window unless the reader
-  // dismissed it; it never moves or re-announces.
-  note.__traceKeepTimer = setInterval(function () {
-    if (activeStorySavedNote !== note) {
-      clearInterval(note.__traceKeepTimer);
-      return;
-    }
-    if (finishBandVisible()) {
-      removeStorySavedNote(false);
-      return;
-    }
-    if (!note.isConnected || !storySavedNoteHost || !storySavedNoteHost.isConnected) {
-      storySavedNoteMount(note);
-    }
-  }, 400);
-  revealStoryPageNote(note);
-  scheduleStoryNoteAutoDismiss(note, visibleMs);
-}
-
-// A page note leaves on its own. It stays at least three seconds, whatever
-// happens. After that, scrolling makes it leave about a second later;
-// without scrolling it leaves at five seconds. A scroll still moving when it
-// appears (a flick's momentum, or the page restoring its position) does not
-// count; only a scroll that starts after that does. Hovering or focusing it
-// pauses the countdown so its buttons stay usable. A prerendered page starts
-// counting only once the reader opens it.
-function scheduleStoryNoteAutoDismiss(note, visibleMs) {
-  var total = Math.max(0, visibleMs);
-  var minimum = Math.min(TRACE_SAVED_NOTE_MIN_VISIBLE_MS, total);
-  var elapsed = 0;
-  var runningSince = 0;
-  var hovered = false;
-  var focused = false;
-  var scrolledAt = null;
-  var settling = Date.now() - traceLastPageScrollAt < TRACE_SAVED_NOTE_SCROLL_SETTLE_MS;
-  var settleTimer = null;
-  function shownFor() {
-    return elapsed + (runningSince ? Date.now() - runningSince : 0);
-  }
-  function hideAt() {
-    if (scrolledAt === null) return total;
-    return Math.min(total, Math.max(minimum, scrolledAt) + TRACE_SAVED_NOTE_SCROLL_DISMISS_MS);
-  }
-  function stop() {
-    if (note.__traceHideTimer) clearTimeout(note.__traceHideTimer);
-    note.__traceHideTimer = null;
-    if (runningSince) elapsed += Date.now() - runningSince;
-    runningSince = 0;
-  }
-  function run(atLeastMs) {
-    stop();
-    if (hovered || focused || tracePageIsPrerendering()) return;
-    runningSince = Date.now();
-    note.__traceHideTimer = setTimeout(function () {
-      note.__traceHideTimer = null;
-      if (activeStorySavedNote === note) removeStorySavedNote(false);
-    }, Math.max(hideAt() - elapsed, atLeastMs || 0));
-  }
-  function stillSettling() {
-    clearTimeout(settleTimer);
-    settleTimer = setTimeout(settled, TRACE_SAVED_NOTE_SCROLL_SETTLE_MS);
-  }
-  function settled() {
-    clearTimeout(settleTimer);
-    settleTimer = null;
-    settling = false;
-  }
-  function onScroll() {
-    if (activeStorySavedNote !== note) {
-      detach();
-      return;
-    }
-    if (settling) {
-      stillSettling();
-      return;
-    }
-    if (scrolledAt !== null) return;
-    scrolledAt = shownFor();
-    window.removeEventListener("scroll", onScroll, true);
-    window.removeEventListener("scrollend", settled, true);
-    if (runningSince) run();
-  }
-  function detach() {
-    clearTimeout(settleTimer);
-    settleTimer = null;
-    window.removeEventListener("scroll", onScroll, true);
-    window.removeEventListener("scrollend", settled, true);
-  }
-  note.addEventListener("mouseenter", function () { hovered = true; stop(); });
-  note.addEventListener("mouseleave", function () {
-    hovered = false;
-    run(TRACE_SAVED_NOTE_SCROLL_DISMISS_MS);
-  });
-  note.addEventListener("focusin", function () { focused = true; stop(); });
-  note.addEventListener("focusout", function (event) {
-    if (note.contains(event.relatedTarget)) return;
-    focused = false;
-    run(TRACE_SAVED_NOTE_SCROLL_DISMISS_MS);
-  });
-  if (settling) stillSettling();
-  window.addEventListener("scroll", onScroll, { capture: true, passive: true });
-  window.addEventListener("scrollend", settled, { capture: true, passive: true });
-  note.__traceDetach = detach;
-  whenTracePageActivates(function () { run(); });
-  run();
 }
 
 function renderQuickAddButton(workKey, projectionAttempt) {
@@ -8746,10 +8278,10 @@ function renderQuickAddButton(workKey, projectionAttempt) {
         }
         clearKernelProjectionRetry(workKey);
         var snapshot = response.snapshot || { state: "signed_out" };
-        if (snapshot.state !== "connected" && storySavedNoteState.workKey !== workKey) {
+        if (snapshot.state !== "connected" && storyArrivalState.workKey !== workKey) {
           // Not linked when the page loaded: Trace could not know this story
           // was in the Library, so a save after linking counts as new here.
-          storySavedNoteState = { workKey: workKey, knownAtLoad: false, shown: false };
+          storyArrivalState = { workKey: workKey, knownAtLoad: false, emphasized: false };
         }
         showCapacityRecoveryNotice(
           response.projection && response.projection.capacity,
@@ -8813,9 +8345,6 @@ function initQuickAdd() {
   try {
     ext.storage.onChanged.addListener(function (changes, area) {
       if (area !== "local") return;
-      if (changes.authToken || changes.traceAuthState || changes[TRACE_ACCOUNT_ID_KEY]) {
-        try { window.sessionStorage.removeItem("trace:confirmed-chapter:v1"); } catch (_) { /* optional feedback */ }
-      }
       if (changes.prefAutoTrackEnabled) {
         if (changes.prefAutoTrackEnabled.newValue !== false) scheduleAutoTrackForCurrentPage();
         renderQuickAddButton(workKey);
