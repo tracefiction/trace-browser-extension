@@ -289,7 +289,11 @@ export interface FirstTapPorts {
 }
 
 type Listener = (view: FirstTapView) => void;
-type Sheet = { tabId: number; key: string | null; workKey: string | null };
+/**
+ * `opening` settles once the open in progress has found its record (or found
+ * there is none), so that a look sent right behind an open is about it.
+ */
+type Sheet = { tabId: number; key: string | null; workKey: string | null; opening: Promise<void> };
 type StoryPage = { tabId: number; workKey: string; url: string; hostKind: "ao3" | "ffn"; persist: boolean };
 
 const isTapped = (value: unknown): value is FirstTapTapped =>
@@ -432,32 +436,41 @@ export class FirstTapSave {
   ): Promise<FirstTapView> {
     const page = this.#storyPage(tapped);
     if (page === null) return Object.freeze({ state: "not_applicable" });
-    const sheet: Sheet = this.#sheets.get(listener) ?? { tabId: page.tabId, key: null, workKey: null };
+    let opened = (): void => undefined;
+    const opening = new Promise<void>((resolve) => { opened = resolve; });
+    const sheet: Sheet = this.#sheets.get(listener) ?? { tabId: page.tabId, key: null, workKey: null, opening };
     sheet.tabId = page.tabId;
     sheet.key = null;
     sheet.workKey = page.workKey;
+    sheet.opening = opening;
     this.#sheets.set(listener, sheet);
 
-    const grant = await this.#ports.grantComplete().catch(() => null);
-    if (grant === true) return Object.freeze({ state: "automatic" });
+    let record: Record;
+    let grant: boolean | null;
+    try {
+      grant = await this.#ports.grantComplete().catch(() => null);
+      if (grant === true) return Object.freeze({ state: "automatic" });
 
-    const account = await this.#ports.account().catch(
-      (): FirstTapAccount => Object.freeze({ state: "unknown" }),
-    );
-    if (account.state !== "verified") {
-      return Object.freeze({
-        state: account.state === "missing"
-          ? "account_missing"
-          : account.state === "reconnect_required"
-            ? "account_reconnect_required"
-            : "account_unknown",
-        workKey: page.workKey,
-      });
+      const account = await this.#ports.account().catch(
+        (): FirstTapAccount => Object.freeze({ state: "unknown" }),
+      );
+      if (account.state !== "verified") {
+        return Object.freeze({
+          state: account.state === "missing"
+            ? "account_missing"
+            : account.state === "reconnect_required"
+              ? "account_reconnect_required"
+              : "account_unknown",
+          workKey: page.workKey,
+        });
+      }
+
+      record = await this.#recordFor(account, page);
+      // The popup may have closed while this was being worked out.
+      if (this.#sheets.get(listener) === sheet) sheet.key = record.key;
+    } finally {
+      opened();
     }
-
-    const record = await this.#recordFor(account, page);
-    // The popup may have closed while this was being worked out.
-    if (this.#sheets.get(listener) === sheet) sheet.key = record.key;
     // One open at a time for an account and story. What follows reads
     // whether a save is under way, waits on the Library and the preference,
     // and only then starts one; a second open let in between those would
@@ -547,6 +560,10 @@ export class FirstTapSave {
   async check(listener: Listener): Promise<FirstTapView> {
     const sheet = this.#sheets.get(listener);
     if (!sheet || sheet.workKey === null) return Object.freeze({ state: "not_applicable" });
+    // A look sent over a new port right behind its open is about the story
+    // that open finds.
+    await sheet.opening;
+    if (sheet.workKey === null) return Object.freeze({ state: "not_applicable" });
     const unknown: FirstTapView = Object.freeze({ state: "presence_unknown", workKey: sheet.workKey });
     const record = sheet.key === null ? null : this.#records.get(sheet.key) ?? null;
     if (record === null || record.binding !== this.#ports.binding()) return unknown;

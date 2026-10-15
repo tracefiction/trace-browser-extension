@@ -94,9 +94,30 @@ export interface StorySiteAccessPorts {
   automaticSaving(): Promise<"on" | "off" | "unknown">;
   /** Pages saved on a first tap go on to save by themselves. Best effort. */
   handOver(): Promise<void>;
+  /**
+   * Resolves once a registration of the page scripts that is under way, or
+   * about to start, has ended; true when it ended within its bound. Absent
+   * where nothing registers them.
+   */
+  registrationSettled?(): Promise<boolean>;
+  /**
+   * The pauses before each further read where a fresh read may lag what the
+   * browser has just done. Read once, never more than these.
+   */
+  readonly settleDelaysMs?: readonly number[];
 }
 
+/**
+ * Safari can answer the request "yes" a moment before what it allows reads
+ * that way, and registers the page scripts only once it has told the
+ * background of the new access. A read that lags is read again after these
+ * pauses, about a second in all, before anything less than allowed is said.
+ */
+export const STORY_SITE_SETTLE_DELAYS_MS: readonly number[] = Object.freeze([300, 700]);
+
 const view = <V extends StorySiteAccessView>(value: V): V => Object.freeze(value);
+
+const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class StorySiteAccess {
   readonly #ports: StorySiteAccessPorts;
@@ -139,9 +160,33 @@ export class StorySiteAccess {
 
   /** What holds now. With no request made, pass nothing. */
   async observe(ask: StorySiteAsk = { kind: "none" }): Promise<StorySiteAccessView> {
-    const reading = await this.#ports.access().catch(() => null);
+    const delays = this.#ports.settleDelaysMs ?? STORY_SITE_SETTLE_DELAYS_MS;
+    let reading = await this.#ports.access().catch(() => null);
+    // A yes is read again before it is called anything else: it can only
+    // turn out allowed, never be taken for a no.
+    if (ask.kind === "returned" && ask.value === true) {
+      for (const delay of delays) {
+        if (reading?.complete === true) break;
+        await pause(delay);
+        reading = await this.#ports.access().catch(() => null);
+      }
+    }
     if (reading?.complete === true) {
-      const registered = await this.#ports.registered().catch(() => null);
+      let registered = await this.#ports.registered().catch(() => null);
+      // The sites have just been allowed and the scripts may still be going
+      // in. A look while the request is out does not wait: the popup looks
+      // again soon anyway.
+      if (registered !== true && ask.kind !== "waiting") {
+        if (this.#ports.registrationSettled) {
+          await this.#ports.registrationSettled().catch(() => false);
+          registered = await this.#ports.registered().catch(() => null);
+        }
+        for (const delay of delays) {
+          if (registered === true) break;
+          await pause(delay);
+          registered = await this.#ports.registered().catch(() => null);
+        }
+      }
       if (registered === false) return view({ state: "registration_failed" });
       if (registered !== true) return view({ state: "registration_unknown" });
       const [account, automaticSaving] = await Promise.all([

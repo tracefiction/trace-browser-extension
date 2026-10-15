@@ -116,6 +116,9 @@ try {
   let readiness: SafariReadinessReporter | null = null;
   // Set once the registration of the page scripts is installed, below.
   let registrationSettled: (() => Promise<boolean>) | null = null;
+  // The sheet's shorter wait on the same registration: it answers the reader
+  // within a few seconds, and looks again later if it has to.
+  let sheetRegistrationSettled: (() => Promise<boolean>) | null = null;
   if (__TRACE_SESSION_MODE__ === "kernel") {
     const recover = installArchiveRecovery({
       runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, scripting: extension.scripting, mode: storageMode,
@@ -201,6 +204,7 @@ try {
         onReconcileEnded: (result) => readiness?.registrationEnded(result),
       });
       registrationSettled = () => registration.settled(8_000);
+      sheetRegistrationSettled = () => registration.settled(2_000);
       // Whether Trace in Safari is ready to save by itself, for the Trace
       // app beside it on iPhone and iPad. It reads and reports; it changes
       // nothing, runs nothing on a page and asks Safari for nothing.
@@ -273,6 +277,9 @@ try {
       session,
       fetch: apiFetch,
       apiBase: __TRACE_API_BASE__,
+      // After Always Allow the registration runs on Safari's word of the new
+      // access; what the sheet reads waits for it rather than racing it.
+      ...(sheetRegistrationSettled ? { registrationSettled: sheetRegistrationSettled } : {}),
     });
   }
   extension.storage.onChanged?.addListener((changes, area) => {

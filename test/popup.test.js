@@ -5577,8 +5577,11 @@ test("first tap: a look that is never answered gives its button back, and one as
   h.firstTap.show(unconfirmed);
   const drawn = sheet();
   await click("popup-earned-primary");
-  // Longer than the slowest answer: a read refused, reconnected and made again.
-  h.advance(29_999);
+  // With no word back it is sent once more over a new port, then waited on
+  // for longer than the slowest answer: a read refused, reconnected and made again.
+  h.advance(4_000);
+  assert.equal(h.hostLifecycle.filter((name) => name === "trace-first-tap-popup-v1").length, 2, "sent once more");
+  h.advance(25_999);
   assert.equal(text("popup-earned-primary"), "Checking…");
   assert.equal(element("popup-earned-primary").disabled, true);
   h.advance(1);
@@ -5590,7 +5593,7 @@ test("first tap: a look that is never answered gives its button back, and one as
   h.disconnectPopup();
   const before = h.firstTap.commands.length;
   await click("popup-earned-primary");
-  assert.equal(h.hostLifecycle.filter((name) => name === "trace-first-tap-popup-v1").length, 2, "the port is opened again");
+  assert.equal(h.hostLifecycle.filter((name) => name === "trace-first-tap-popup-v1").length, 3, "the port is opened again");
   assert.deepEqual(h.firstTap.commands.slice(before), ["open"], "and the story is opened on afresh, which looks before it saves");
 });
 
@@ -6020,7 +6023,11 @@ async function releaseBackground({ tabAccess = true } = {}) {
     pathToFileURL(path.join(__dirname, "..", ".trace-build", "extension-runtime", "first-tap-runtime.mjs")).href
   );
   const STORY_URL = "https://archiveofourown.org/works/123";
-  const world = { saves: [], injected: [], page: null, store: {}, workers: 0, links: [], tabAccess: new Set(tabAccess ? [7] : []) };
+  const world = {
+    saves: [], injected: [], page: null, store: {}, workers: 0, links: [], tabAccess: new Set(tabAccess ? [7] : []),
+    // What Safari allows of the story sites, and the page scripts registered.
+    granted: false, registered: [],
+  };
   let worker = null;
   const wake = () => {
     world.workers += 1;
@@ -6032,17 +6039,18 @@ async function releaseBackground({ tabAccess = true } = {}) {
       origins: FULL_EARNED_ORIGINS,
       registrationIds: ["trace-archive-automation-v1", "trace-ao3-saved-filters-v1"],
       permissions: {
-        async contains() { return false; },
-        async getAll() { return { origins: [] }; },
+        async contains() { return world.granted; },
+        async getAll() { return { origins: world.granted ? [...FULL_EARNED_ORIGINS] : [] }; },
         request() { throw new Error("the background never asks for website access"); },
       },
+      accessSettleDelaysMs: [],
       scripting: {
         async executeScript({ target }) {
           if (!world.tabAccess.has(target.tabId)) throw new Error("Trace has no access to this page");
           world.injected.push(target.tabId);
           world.page = "manual";
         },
-        async getRegisteredContentScripts() { return []; },
+        async getRegisteredContentScripts() { return world.registered.map((id) => ({ id })); },
         async registerContentScripts() { throw new Error("a first tap registers nothing"); },
         async unregisterContentScripts() { throw new Error("a first tap unregisters nothing"); },
       },
@@ -6241,4 +6249,213 @@ test("open tabs: while reading, the button and help say so; one story and one ta
   await flush(); await flush();
   assert.equal(button.textContent, "Import open tabs");
   assert.equal(help.textContent, "Found 1 story in 1 tab.");
+});
+
+// ── Opening Trace on a story while the session is still handing over ─────────
+
+function handoverPopup(sessionSnapshotResponses) {
+  return createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: true,
+    userAgent: IPHONE_USER_AGENT,
+    popupUrl: "safari-web-extension://trace/popup.html",
+    activeTab: { id: 7, url: "https://archiveofourown.org/works/123" },
+    grantedOrigins: [...FULL_EARNED_ORIGINS],
+    storageState: { traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 5_000 } },
+    sessionSnapshotResponses,
+    popupState: {
+      ok: true, authState: { state: "connected" }, firstSaveSeen: true, libraryCount: 12, libraryLimit: 100,
+      pro: false, capacity: null, activeTab: STORY, activeWork: SAVED_STORY, autoTrackEnabled: true, nativeImport: true,
+    },
+  });
+}
+
+async function settleHandover(h, ms) {
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  if (ms) h.advance(ms);
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+}
+
+
+test("handover: a session reply Safari never delivers is asked for again, so a saved story and Import open tabs come up", async () => {
+  const h = handoverPopup([{ held: true }, { ok: true, snapshot: CONNECTED_AUTH }]);
+  await settleHandover(h);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P1", "the handover, as it is drawn");
+  assert.equal(snapshotRequests(h), 1);
+
+  await settleHandover(h, 4_200);
+  assert.equal(snapshotRequests(h), 2, "a reply that never came is asked for again, which wakes the background");
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P11", "the story is shown as it is in the Library");
+  assert.doesNotMatch(earnedText(h), /Saving your story/);
+  assert.equal(isDisplayed(h, h.document.getElementById("popup-import-open-tabs")), true, "and Import open tabs is in reach");
+
+  // The first reply turning up late changes nothing.
+  h.answerSnapshot({ ok: true, snapshot: { state: "verifying", reason: "none" } });
+  await settleHandover(h);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P11");
+});
+
+test("handover: Saving your story never holds the sheet: past the session's bounded wait the reader can try again", async () => {
+  const verifying = { ok: true, snapshot: { state: "verifying", reason: "none" } };
+  const h = handoverPopup([...Array(40).fill(verifying), { ok: true, snapshot: CONNECTED_AUTH }]);
+  await settleHandover(h);
+  for (let round = 0; round < 40; round += 1) await settleHandover(h, 1_000);
+  assert.notEqual(h.document.body.dataset.tracePopupStateCode, "P1", "the wait is bounded");
+  assert.doesNotMatch(earnedText(h), /Saving your story/);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT, "and says what is known, in words it already has");
+  const asked = snapshotRequests(h);
+  const primary = [...h.document.querySelectorAll("#popup-earned-permission button")]
+    .find((button) => !button.hidden && /Try again/.test(button.textContent));
+  assert.ok(primary, "with a way to ask again");
+  primary.click();
+  await settleHandover(h, 1_000);
+  assert.ok(snapshotRequests(h) > asked, "Try again asks the session again");
+});
+
+test("handover: with every reply lost, the popup does not stay on Saving your story", async () => {
+  const h = handoverPopup(Array(12).fill({ held: true }));
+  for (let round = 0; round < 20; round += 1) await settleHandover(h, 4_000);
+  assert.notEqual(h.document.body.dataset.tracePopupStateCode, "P1");
+  assert.doesNotMatch(earnedText(h), /Saving your story/);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+});
+
+test("setup: a story page that never reports in after the reload is not left on Saving your story", async () => {
+  const { h, popupState } = setupPopupOnStory({ sessionSnapshot: CONNECTED_AUTH });
+  popupState.authState = CONNECTED_AUTH;
+  await settle(h);
+  assert.equal(earnedHeading(h), "Saving your story…");
+  assert.deepEqual(h.reloads, [7], "the page was reloaded to start Trace on it");
+  await pass(h, 19_999);
+  assert.equal(earnedHeading(h), "Saving your story…");
+  await pass(h, 1);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P5", "the wait is bounded and says it is still confirming");
+  assert.equal(h.document.getElementById("popup-earned-secondary").textContent, "Check again");
+
+  // Check again looks, and the story the page has saved meanwhile is shown.
+  popupState.activeWork = { workKey: "ao3:123", status: "saved", entry: { canonicalReaderStatus: "SAVED" }, syncVersion: "v1" };
+  h.document.getElementById("popup-earned-secondary").click();
+  await settle(h, 12);
+  assert.equal(h.document.body.dataset.tracePopupStateCode, "P2");
+});
+
+// ── After Always Allow ─────────────────────────────────────────────────────────
+
+const ALLOWED_ON = { state: "allowed", account: "connected", automaticSaving: "on", handOver: "in_place" };
+const firstTapPorts = (h) => h.hostLifecycle.filter((name) => name === "trace-first-tap-popup-v1").length;
+async function flushed(h, ms = 0) {
+  if (ms) h.advance(ms);
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+}
+
+test("after Always Allow: a yes the background cannot see yet is looked at again by itself, and lands on allowed", async () => {
+  const { h, shown, text, click } = await openSavedFirstTapPopup();
+  await click("popup-earned-primary");
+  await flushed(h);
+  assert.equal(h.firstTap.messages.at(-1).command, "access_answered");
+  assert.equal(h.firstTap.messages.at(-1).returned, true);
+  // The background's read lagged Safari's yes.
+  h.firstTap.showAccess({ state: "not_known" });
+  assert.equal(shown(), "access-not-known");
+
+  await flushed(h, 1_000);
+  assert.equal(h.firstTap.commands.at(-1), "access_unanswered", "a yes is looked at again without a tap");
+  h.firstTap.showAccess(ALLOWED_ON);
+  assert.equal(shown(), "access-allowed");
+  assert.equal(text("popup-earned-heading"), "That’s it. Keep reading.");
+
+  // Once allowed, nothing more is asked.
+  const count = h.firstTap.commands.length;
+  await flushed(h, 30_000);
+  assert.equal(h.firstTap.commands.length, count);
+});
+
+test("after Always Allow: the answer sent to a background that went to sleep under Safari's question is sent once more over a new port", async () => {
+  const { h, shown, click } = await openSavedFirstTapPopup();
+  await click("popup-earned-primary");
+  await flushed(h);
+  assert.equal(h.firstTap.commands.at(-1), "access_answered");
+  assert.equal(firstTapPorts(h), 1);
+  const before = h.firstTap.messages.length;
+
+  // Nothing comes back over the port the popup holds.
+  await flushed(h, 4_000);
+  assert.equal(firstTapPorts(h), 2, "a new port wakes a background");
+  const after = h.firstTap.messages.slice(before).filter(({ command }) => command !== "access_waiting");
+  assert.deepEqual(after.map(({ command }) => command), ["open", "access_answered"], "opened on the story, then the answer");
+  assert.equal(after.at(-1).returned, true, "with Safari's answer as it was");
+  await flushed(h, 20_000);
+  assert.equal(firstTapPorts(h), 2, "and only once");
+  h.firstTap.showAccess(ALLOWED_ON);
+  assert.equal(shown(), "access-allowed");
+});
+
+test("after Always Allow: Check again on not known, asked of a background that went to sleep, is sent once more and answered", async () => {
+  const { h, element, click, shown, announced } = await openSavedFirstTapPopup({ grantedOrigins: [...FIVE_STORY_SITES] });
+  h.firstTap.showAccess({ state: "not_known" });
+  assert.equal(shown(), "access-not-known");
+  await click("popup-earned-secondary");
+  await flushed(h);
+  assert.equal(shownText(element("popup-earned-secondary")), "Checking…", "the tap shows at once");
+  const look = h.firstTap.messages.at(-1).look;
+  const ports = firstTapPorts(h);
+
+  await flushed(h, 4_000);
+  assert.equal(firstTapPorts(h), ports + 1, "with no word back, a new port");
+  assert.deepEqual(h.firstTap.commands.slice(-2), ["open", "access_check"]);
+  assert.equal(h.firstTap.messages.at(-1).look, look, "the same tap, sent again");
+  assert.equal(shownText(element("popup-earned-secondary")), "Checking…");
+
+  h.firstTap.answer({ access: ALLOWED_ON });
+  assert.equal(shown(), "access-allowed");
+  assert.match(await announced(), /That’s it\. Keep reading\./);
+});
+
+test("after Always Allow: Check again on an unconfirmed save, asked of a background that went to sleep, opens on the story again and asks", async () => {
+  const unconfirmed = { state: "failed", workKey: "ao3:123", reason: "unavailable", dispatch: "sent_unconfirmed", story: FIRST_TAP_STORY };
+  const { h, element, click, shown } = await openFirstTapPopup();
+  h.firstTap.show(unconfirmed);
+  const before = h.firstTap.commands.length;
+  await click("popup-earned-primary");
+  const look = h.firstTap.messages.at(-1).look;
+  await flushed(h, 3_999);
+  assert.deepEqual(h.firstTap.commands.slice(before), ["check"], "a look has a few seconds to be answered");
+  await flushed(h, 1);
+  assert.equal(firstTapPorts(h), 2, "then a new port");
+  assert.deepEqual(h.firstTap.commands.slice(before), ["check", "open", "check"], "opens on the story, then the same look");
+  assert.equal(h.firstTap.messages.at(-1).look, look);
+  assert.equal(shownText(element("popup-earned-primary")), "Checking…");
+  h.firstTap.answer({ view: { state: "failed", workKey: "ao3:123", reason: "unavailable", dispatch: "not_in_library", story: FIRST_TAP_STORY } });
+  assert.equal(shown(), "save-not-in-library");
+});
+
+test("release build, end to end: after Always Allow, with the background stopped under Safari's question, the sheet lands on allowed", async () => {
+  for (const saysSo of [true, false]) {
+    const background = await releaseBackground();
+    const granted = [];
+    const { h, click, sheet, text } = await openFirstTapPopup({
+      ...RELEASE_SHEET, firstTapConnect: background.connect, deferredHostRequest: true, grantedOrigins: granted,
+    });
+    await until(() => sheet().state === "save-on-request", h);
+    await click("popup-earned-primary");
+    await until(() => sheet().state === "saved", h);
+    h.advance(1_100);
+    await until(() => text("popup-earned-primary") === ALLOW_BUTTON, h);
+    await click("popup-earned-primary");
+    await until(() => sheet().state === "access-waiting", h);
+
+    // The reader reads Safari's question; Safari stops the background meanwhile.
+    background.sleep({ saysSo });
+    // Always Allow: the sites are allowed and the registration puts the scripts in.
+    granted.push(...FIVE_STORY_SITES);
+    background.world.granted = true;
+    background.world.registered = ["trace-archive-automation-v1", "trace-ao3-saved-filters-v1"];
+    h.finishHostRequest(true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    if (!saysSo) h.advance(4_000);
+    await until(() => sheet().state === "access-allowed", h);
+    assert.equal(text("popup-earned-heading"), "That’s it. Keep reading.", saysSo ? "Safari said the port closed" : "it did not");
+    assert.equal(background.world.saves.length, 1, "one save throughout");
+  }
 });
