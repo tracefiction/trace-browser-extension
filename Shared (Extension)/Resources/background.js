@@ -524,7 +524,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
       if (!knownHeader) return null;
     }
-    const text = (selector, maximum = 512) => {
+    const text2 = (selector, maximum = 512) => {
       const node = Array.from(document.querySelectorAll(selector)).find((node2) => !node2.closest("#storytext, .storytext, #storycontent, .storycontent, .chapter .userstuff"));
       return (node?.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, maximum);
     };
@@ -547,18 +547,18 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         }
       }
     }
-    const author = ao3 ? text('#workskin a[rel="author"], .byline a[rel="author"]') : text('#profile_top a[href*="/u/"], #content a[href*="/u/"]');
+    const author = ao3 ? text2('#workskin a[rel="author"], .byline a[rel="author"]') : text2('#profile_top a[href*="/u/"], #content a[href*="/u/"]');
     const mobileTitle = host === "m.fanfiction.net" && author ? document.title.replace(/\s*[-|]\s*FanFiction(?:\.net)?\s*$/i, "").replace(/^Fanfic:\s*/i, "").replace(/\s+Ch\s+\d+,.*$/i, "").trim().slice(0, 512) : "";
-    const title = ao3 ? text("#workskin h2.title, h2.title.heading") : text("#profile_top b.xcontrast_txt, #content b.xcontrast_txt") || (host === "m.fanfiction.net" ? text('#content > div[align="center"] > b') : "") || mobileTitle;
-    const stats = ao3 ? text("dl.work.meta.group dd.words, dl.meta.group dd.words") : text("#profile_top .xgray, #content .gray, #content .xgray", 2048) || mobileStats;
+    const title = ao3 ? text2("#workskin h2.title, h2.title.heading") : text2("#profile_top b.xcontrast_txt, #content b.xcontrast_txt") || (host === "m.fanfiction.net" ? text2('#content > div[align="center"] > b') : "") || mobileTitle;
+    const stats = ao3 ? text2("dl.work.meta.group dd.words, dl.meta.group dd.words") : text2("#profile_top .xgray, #content .gray, #content .xgray", 2048) || mobileStats;
     const wordCount = stats.match(/Words:\s*([\d,]+(?:\.\d+)?)\s*([km])?\+?(?=\s|,|$)/i);
     const wordUnit = wordCount?.[2]?.toLowerCase();
     const words = ao3 ? integer(stats) : wordCount ? integer(String(Number(wordCount[1].replace(/,/g, "")) * (wordUnit === "k" ? 1e3 : wordUnit === "m" ? 1e6 : 1))) : null;
-    const chapterText = ao3 ? text("dl.work.meta.group dd.chapters, dl.meta.group dd.chapters") : "";
+    const chapterText = ao3 ? text2("dl.work.meta.group dd.chapters, dl.meta.group dd.chapters") : "";
     const published = integer(ao3 ? chapterText.match(/^([\d,]+)\s*\//)?.[1] ?? "NaN" : stats.match(/Chapters:\s*([\d,]+)/i)?.[1] ?? "NaN");
     const planned = ao3 ? chapterText.match(/\/\s*([\d,]+|\?)/)?.[1] : void 0;
     const complete = ao3 ? published !== null && planned !== void 0 && planned !== "?" && published === integer(planned) : /Status:\s*Complete\b/i.test(stats);
-    const chapter = integer(ao3 ? text("#selected_id option:checked, #chapter_index option:checked, .chapter h3.title").match(/(?:Chapter\s+)?(\d+)/i)?.[1] ?? "NaN" : text("#chap_select option:checked, select[name=chapter] option:checked").match(/^(\d+)/)?.[1] ?? mobileChapter.match(/^\s*Chapter\s+(\d+)\s*:/i)?.[1] ?? "NaN");
+    const chapter = integer(ao3 ? text2("#selected_id option:checked, #chapter_index option:checked, .chapter h3.title").match(/(?:Chapter\s+)?(\d+)/i)?.[1] ?? "NaN" : text2("#chap_select option:checked, select[name=chapter] option:checked").match(/^(\d+)/)?.[1] ?? mobileChapter.match(/^\s*Chapter\s+(\d+)\s*:/i)?.[1] ?? "NaN");
     if (!title || !author && words === null && published === null) return null;
     return {
       src: ao3 ? "ao3" : "ffn",
