@@ -257,30 +257,20 @@ Dotted underlines and “Private context” are retired.
 | End-of-story notes: finish band, automatic finish note, resolved, recovery (`trace-finish-qualify.js`) | Inline, right after the final chapter's text and before end notes, kudos and comments; never fixed over the page. Radius 14, `surface`, rule ring, no drop shadow, at most 520 wide in the text column. Page tokens and host tone. The automatic note is an ink check, “You’ve reached the end” (or “You’re caught up · More chapters may follow” for an ongoing work) and the status dot, with teal Undo and Open in Trace; it stays until the reader leaves so Undo is never timed. The band asks “Is this story complete on ‹site›?” with text-only work-status choices and a tertiary × (“Decide later”). Warning glyph only on failure. Never takes focus; announced through the one body live region. The fixed toast remains only as a fallback when no story anchor exists. |
 | Saved filters (`ao3-saved-filters.js`) | Trace's page register, not AO3's look: Story Ink groups, sentence-case labels, an ink check for the active filter, teal text actions, and an inline confirmation for Delete whose confirm word is warning ink. |
 
-N2 appears once when the first newly saved story is confirmed. N2 and N3 are
-radius 14. From 1.75× text, N2 stacks Details and × in a row under the text,
-so the title keeps the full width. It says
-“Saved to your Library”, names the story and explains that Trace keeps the
-reader's place. Details opens the story sheet; Dismiss ends the note. It is
-fixed above Safari's toolbar in a closed shadow root, without moving page
-content, and lasts 15 seconds. A tab-scoped marker lets a replaced page finish
-the same note without a second announcement. The end-of-story band takes
-precedence. The first-note flag stores only a boolean.
-
-N3 says “Chapter ‹n› kept” and names the story. After N2 was shown or
-delivered, the next three confirmed chapter rises may show it, once per page
-load and never on the page that showed N2. The per-install local counter
-`traceChapterKeptNotesShownV1` stops at three. No note appears for an
-optimistic update, hidden work, disabled automatic progress, or while N2 or
-an end-of-story note is visible. N3 lasts four seconds. N2 and N3 pause their
-timers while focused. They enter with a 14 px rise and fade over 0.4 s and
-leave with a fade; under Reduce Motion they fade only.
+Story pages show no saved or chapter note. Automatic saves and chapter
+progress are confirmed by the story handle alone, which already shows the
+story's state on every page. When a story that was not in the reader's
+confirmed Library when the page loaded is confirmed there, the handle fades
+and settles in once (0.42 s, from 35% opacity and 96% scale); it adds no
+element, no text and no focus change, and Reduce Motion shows nothing. A
+failed automatic save is shown by the handle as **Not saved**; a full Library
+keeps its capacity notice.
 
 ## Accessibility and boundaries
 
 The popup has one live region, present empty from load. State announcements
-are deduplicated. Page N2 and N3 speak through one empty-at-load body live
-region; the visual note has no second `role=status`. Decorative glyphs are
+are deduplicated. Page announcements speak through one empty-at-load body
+live region; no visual note has a second `role=status`. Decorative glyphs are
 hidden from assistive technology. Buttons keep their visible action phrase
 first in the accessible name. Every Trace control on a page uses a visible
 3 px teal focus outline with a 2 px offset; popup controls use the system

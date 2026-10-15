@@ -812,7 +812,7 @@ const RESTYLE_STATES = ["P1", "P2", "P3", "P3-lapse", "P4", "P5", "P6", "P7", "P
 // Recovery and truth states drawn by the design pass after the prototype.
 const RESTYLE_RECOVERY_STATES = ["P1-known-saved", "P10-saving", "P10-failed", "P11-settings", "P11-status-error",
   "other-account", "registration-failure", "reload-page", "library-full", "no-story", "on-list"];
-const RESTYLE_PAGE_STATES = ["N1-saved", "N1-reading", "N2", "N3", "N4-lens", "N4-add-hide"];
+const RESTYLE_PAGE_STATES = ["N1-saved", "N1-reading", "N4-lens", "N4-add-hide"];
 const RESTYLE_DEVICES = [
   { name: "17", width: 384, height: 386 },
   { name: "se", width: 359, height: 283 },
@@ -982,20 +982,6 @@ async function renderRestylePopup(browser, assets, output, device, appearance, s
 
 // collector.js runs inside one IIFE, so its note helpers are not page globals.
 // Preview renders append a hook inside that scope; shipped code is unchanged.
-function collectorWithNotePreview(collector) {
-  const end = collector.source.lastIndexOf("})();");
-  if (end < 0) throw new Error("collector.js no longer ends with its IIFE; update the note preview hook");
-  // Chromium has no -apple-system-body, so the hook sets the note's own font
-  // size to the text-size proxy (capped at the note's 2x) before layout.
-  const hook = "\nglobalThis.__traceVisualNote = function (kind, title, chapter, textPx) {\n" +
-    "  var card = createStoryPageNote(kind, title, chapter, false).note;\n" +
-    "  if (textPx) card.style.fontSize = Math.min(textPx, 34) + 'px';\n" +
-    "  storySavedNoteMount(card);\n" +
-    "  if (typeof applyStoryNoteLayout === 'function') applyStoryNoteLayout(card);\n" +
-    "  activeStorySavedNote = card;\n  return card;\n};\n";
-  return { name: collector.name, source: collector.source.slice(0, end) + hook + collector.source.slice(end) };
-}
-
 async function renderRestylePage(browser, scripts, output, device, size, host, state, phoneAppearance, supplement = false) {
   const listing = state.startsWith("N4");
   const fixture = listing ? "ao3_listing.html" : "ao3_story.html";
@@ -1008,7 +994,7 @@ async function renderRestylePage(browser, scripts, output, device, size, host, s
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.emulateMedia({ colorScheme: phoneAppearance });
-  const savedHandle = state === "N1-saved" || state === "N2";
+  const savedHandle = state === "N1-saved";
   const cache = makeOverlayCache(savedHandle ? "planning-zero" : "default");
   cache.entries["ao3:28534965"] = {
     status: savedHandle ? "PLANNING" : "READING",
@@ -1028,20 +1014,8 @@ async function renderRestylePage(browser, scripts, output, device, size, host, s
     document.body.style.color = host === "dark" ? "#f2f6fa" : "#18232d";
     document.body.style.fontSize = `${px}px`;
   }, { host, px: size.px });
-  const pageNote = state === "N2" || state === "N3";
-  await injectScripts(page, listing ? [scripts.keys, scripts.overlay]
-    : [pageNote ? collectorWithNotePreview(scripts.collector) : scripts.collector]);
+  await injectScripts(page, listing ? [scripts.keys, scripts.overlay] : [scripts.collector]);
   await page.waitForTimeout(250);
-  if (pageNote) {
-    await page.evaluate(({ kind, px }) => {
-      window.__traceVisualNote(kind === "N2" ? "saved" : "kept", "Synthetic Archive Work", 5, px);
-      const note = document.querySelector("trace-saved-note");
-      if (note) {
-        const card = note.__traceShadow.querySelector("[data-trace-saved-note]");
-        if (card) { card.style.opacity = "1"; card.style.transform = "none"; }
-      }
-    }, { kind: state, px: size.px });
-  }
   if (listing) {
     const selector = state === "N4-lens" ? "#work_10404927" : "#work_25010857";
     await page.locator(selector).scrollIntoViewIfNeeded();
@@ -1083,7 +1057,7 @@ async function renderRestyleMatrix(browser, assets, scripts, manifest) {
   const states = only ? only.filter((state) => !state.startsWith("N"))
     : sample ? ["P2", "P3", "P11-menu"] : [...RESTYLE_STATES, ...RESTYLE_RECOVERY_STATES];
   const pageStates = only ? only.filter((state) => state.startsWith("N"))
-    : sample ? ["N2", "N4-add-hide"] : RESTYLE_PAGE_STATES;
+    : sample ? ["N1-saved", "N4-add-hide"] : RESTYLE_PAGE_STATES;
   const devices = RESTYLE_DEVICES;
   const sizes = RESTYLE_SIZES;
   const appearances = sample ? ["light"] : ["light", "dark"];
@@ -1133,8 +1107,8 @@ async function renderRestyleQa1(browser, assets, scripts, manifest) {
   }
   for (const device of RESTYLE_DEVICES) for (const size of RESTYLE_SIZES) {
     for (const host of ["light", "dark"]) {
-      const states = ["N2"];
-      if (size.name !== "xxxl") states.push("N1-saved", "N1-reading", "N4-lens", "N4-add-hide");
+      const states = ["N1-saved"];
+      if (size.name !== "xxxl") states.push("N1-reading", "N4-lens", "N4-add-hide");
       for (const state of states) {
         console.error(`QA1 page ${device.name} ${host} ${size.name} ${state}`);
         entries.push(await renderRestylePage(browser, scripts, outputRoot, device, size, host, state,
@@ -1176,8 +1150,8 @@ async function renderRestyleQa1(browser, assets, scripts, manifest) {
         failures.push(`${entry.file}: chapter work mark is missing or uses warning styling`);
       }
     }
-    if (entry.state === "N2" && (!m.noteVisible || m.handleStatus !== "SAVED" || !m.handleText?.includes("Saved"))) {
-      failures.push(`${entry.file}: first-save note must accompany a Saved handle`);
+    if (m.noteVisible) {
+      failures.push(`${entry.file}: story pages show no saved or chapter note`);
     }
   }
   manifest.qa1 = {
@@ -1190,13 +1164,12 @@ async function renderRestyleQa1(browser, assets, scripts, manifest) {
   await fs.writeFile(path.join(outputRoot, "index.json"), JSON.stringify(manifest, null, 2) + "\n");
   const examples = ["se-light-large__P3.png", "se-dark-xxxl__P3-lapse.png", "se-light-ax5__P3.png",
     "se-dark-large__P11-settings.png", "se-light-large__P11-menu.png", "se-light-large__P11-menu-keyboard.png",
-    "se-light-large__N1-saved.png", "se-dark-large__N4-lens.png", "17-light-large__N2.png"];
+    "se-light-large__N1-saved.png", "se-dark-large__N4-lens.png", "17-light-large__N1-saved.png"];
   const index = [
     "# Popup and page design QA 1",
     "",
     `Extension render source: ${manifest.generatedAt}. Targeted preview: ${manifest.qa1.counts.popup} popup and ${manifest.qa1.counts.page} page captures.`,
     "Text sizes use 17/26/36 px proxies, not iOS Dynamic Type. The [JSON index](index.json) lists every capture and measured result.",
-    "N2 fixtures pair the first-save note with a confirmed Saved handle.",
     "",
     ...examples.map((file) => `- [${file}](${file})`),
     "",

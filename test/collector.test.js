@@ -1914,7 +1914,7 @@ test("a save that failed before linking retries when the reader returns to the p
   assert.equal(autoTracks(), before + 1);
 });
 
-test("saved note appears when linking happens after the page loaded", async () => {
+test("a story saved by the time linking happens mid-visit counts as new: one handle emphasis, no note", async () => {
   const entryId = "00000000-0000-4000-8000-000000000123";
   let linked = false;
   const h = createStoryAutoTrackPendingHarness({
@@ -1944,7 +1944,8 @@ test("saved note appears when linking happens after the page loaded", async () =
   linked = true;
   h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
   await new Promise((resolve) => setImmediate(resolve));
-  assert.ok(h.dom.window.document.querySelector("trace-saved-note"), "linking mid-visit still shows the note");
+  assert.equal(h.dom.window.document.querySelector("trace-saved-note"), null, "no page note");
+  assert.equal(h.handleAnimations().length, 1, "linking mid-visit still counts the save as new to this page");
 });
 
 test("an unavailable FanFiction.net story page is never saved automatically", async () => {
@@ -1982,6 +1983,11 @@ function createStoryAutoTrackPendingHarness(options = {}) {
     options.url || "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter",
   );
   if (typeof options.mutateDom === "function") options.mutateDom(dom);
+  const handleAnimations = [];
+  dom.window.HTMLElement.prototype.animate = function (keyframes, timing) {
+    if (this.hasAttribute("data-trace-story-handle")) handleAnimations.push({ keyframes, timing });
+    return { cancel() {}, finished: Promise.resolve() };
+  };
   Object.defineProperty(dom.window.document, "visibilityState", {
     value: "visible",
     configurable: true,
@@ -2208,6 +2214,9 @@ function createStoryAutoTrackPendingHarness(options = {}) {
     sent,
     scrolledTargets,
     store,
+    handleAnimations() {
+      return handleAnimations.slice();
+    },
     dispatchStorageChange(key, value) {
       const oldValue = store[key];
       store[key] = value;
@@ -3026,231 +3035,94 @@ function savedNoteHarness(initiallyConfirmed, extraStore = {}) {
   return { h, state };
 }
 
-test("saved note appears once with separate text and no duplicate live region when a story is confirmed", async () => {
-  const { h, state } = savedNoteHarness(false);
-  await new Promise((resolve) => setTimeout(resolve, 180));
-  const doc = h.dom.window.document;
-  assert.equal(doc.querySelector("[data-trace-saved-note]"), null);
-
-  state.confirmed = true;
-  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
-  await new Promise((resolve) => setImmediate(resolve));
-
-  const host = doc.querySelector("trace-saved-note");
-  assert.ok(host, "a newly confirmed story shows the note");
-  assert.equal(host.parentElement, doc.documentElement, "mounted outside <body>");
-  const note = host.__traceShadow.querySelector("[data-trace-saved-note]");
-  assert.ok(note);
-  assert.equal(note.hasAttribute("role"), false);
-  assert.equal(note.hasAttribute("aria-live"), false);
-  assert.match(note.style.cssText, /position:\s*fixed/);
-  assert.match(note.textContent, /Saved to your Library/);
-  const live = doc.querySelector("[data-trace-page-live-region]");
-  assert.ok(live);
-  assert.equal(live.parentElement, doc.body);
-  assert.equal(live.getAttribute("role"), "status");
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.match(live.textContent, /Saved to your Library\. .*Trace keeps your place as you read\./);
-  assert.equal(doc.activeElement === note || note.contains(doc.activeElement), false, "the note never takes focus");
-
-  // A later revision for the same story does not repeat it.
-  note.querySelector("button[aria-label='Dismiss']").click();
-  await new Promise((resolve) => setTimeout(resolve, 400));
-  assert.equal(host.__traceShadow.querySelector("[data-trace-saved-note]"), null);
-  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 2);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(host.__traceShadow.querySelector("[data-trace-saved-note]"), null);
-});
-
-test("saved note continues on a replaced page for its window unless dismissed", async () => {
-  const first = savedNoteHarness(false);
-  await new Promise((resolve) => setTimeout(resolve, 180));
-  first.state.confirmed = true;
-  first.h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.ok(first.h.dom.window.document.querySelector("trace-saved-note"));
-  const marker = first.h.dom.window.sessionStorage.getItem("trace:saved-note:v1");
-  assert.ok(marker);
-  assert.equal(JSON.parse(marker).workKey, "ffn:7038840");
-  assert.equal(marker.includes("Chance"), false, "the marker never holds a title");
-});
-
-test("saved note is still shown three seconds after it appears", async () => {
-  const { h, state } = savedNoteHarness(false);
-  await new Promise((resolve) => setTimeout(resolve, 180));
-  state.confirmed = true;
-  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
-  await new Promise((resolve) => setImmediate(resolve));
-  const host = h.dom.window.document.querySelector("trace-saved-note");
-  assert.ok(host);
-  await new Promise((resolve) => setTimeout(resolve, 3000));
-  const note = host.__traceShadow.querySelector("[data-trace-saved-note]");
-  assert.ok(note, "the note must survive its first seconds");
-  assert.notEqual(note.style.opacity, "0");
-});
-
-async function showSavedNote(options = {}) {
-  const { h, state } = savedNoteHarness(false);
-  if (options.reducedMotion) {
-    h.dom.window.matchMedia = (query) => ({
-      matches: String(query).includes("prefers-reduced-motion"),
-      media: String(query),
-      addListener() {},
-      removeListener() {},
-      addEventListener() {},
-      removeEventListener() {},
-    });
-  }
-  await new Promise((resolve) => setTimeout(resolve, 180));
-  if (typeof options.beforeShow === "function") options.beforeShow(h);
-  state.confirmed = true;
-  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
-  await new Promise((resolve) => setImmediate(resolve));
-  const host = h.dom.window.document.querySelector("trace-saved-note");
-  assert.ok(host);
-  const note = host.__traceShadow.querySelector("[data-trace-saved-note]");
-  assert.ok(note);
-  return { h, host, note };
+function useReducedMotion(h) {
+  h.dom.window.matchMedia = (query) => ({
+    matches: String(query).includes("prefers-reduced-motion"),
+    media: String(query),
+    addListener() {},
+    removeListener() {},
+    addEventListener() {},
+    removeEventListener() {},
+  });
 }
 
-const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+test("a story newly saved on this page gets no notice; the handle settles in once", async () => {
+  const { h, state } = savedNoteHarness(false);
+  await delay(180);
+  const doc = h.dom.window.document;
+  assert.equal(h.handleAnimations().length, 0);
 
-test("saved note leaves on its own five seconds after it appears", async () => {
-  const { h, host, note } = await showSavedNote({ reducedMotion: true });
-  assert.equal(note.style.transition, "", "reduced motion has no fade");
-  await wait(4600);
-  assert.ok(host.__traceShadow.querySelector("[data-trace-saved-note]"));
-  await wait(600);
-  assert.equal(host.__traceShadow.querySelector("[data-trace-saved-note]"), null, "reduced motion hides it at once");
+  state.confirmed = true;
+  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
+  await delay(20);
+
+  assert.equal(doc.querySelector("trace-saved-note"), null, "no page note");
+  assert.equal(doc.querySelector("[data-trace-saved-note]"), null);
+  const live = doc.querySelector("[data-trace-page-live-region]");
+  assert.doesNotMatch(live ? live.textContent : "", /Saved to your Library/);
+  assert.equal(h.dom.window.sessionStorage.getItem("trace:saved-note:v1"), null, "no marker carries a note to the next page");
+  const handle = doc.querySelector("[data-trace-story-handle]");
+  assert.match(handle.textContent, /Saved/);
+  const animations = h.handleAnimations();
+  assert.equal(animations.length, 1, "one brief emphasis on the handle itself");
+  assert.equal(animations[0].keyframes.at(-1).opacity, 1, "it ends fully visible");
+  assert.ok(animations[0].timing.duration <= 500, "it is brief");
+  assert.equal(doc.activeElement === handle, false, "it never takes focus");
+
+  // A later revision for the same story does not repeat it.
+  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 2);
+  await delay(20);
+  assert.equal(h.handleAnimations().length, 1);
   h.dom.window.close();
 });
 
-test("saved note stays three seconds even when the reader scrolls at once, then leaves a second later", async () => {
-  const { h, host } = await showSavedNote({ reducedMotion: true });
-  const present = () => host.__traceShadow.querySelector("[data-trace-saved-note]") !== null;
-  await wait(250);
-  h.dom.window.dispatchEvent(new h.dom.window.Event("scroll"));
-  await wait(2600);
-  assert.ok(present(), "nothing shortens the first three seconds");
-  await wait(850);
-  assert.ok(present(), "it leaves a second after the minimum, not at it");
-  await wait(400);
-  assert.equal(present(), false, "scrolling made it leave before five seconds");
+test("Reduce Motion: a newly saved story gets no emphasis and no notice", async () => {
+  const { h, state } = savedNoteHarness(false);
+  useReducedMotion(h);
+  await delay(180);
+  state.confirmed = true;
+  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
+  await delay(20);
+  assert.equal(h.handleAnimations().length, 0);
+  assert.equal(h.dom.window.document.querySelector("trace-saved-note"), null);
   h.dom.window.close();
 });
 
-test("saved note ignores a scroll already moving when it appears and counts the reader's next one", async () => {
-  let momentum = null;
-  const { h, host } = await showSavedNote({
-    reducedMotion: true,
-    beforeShow(harness) {
-      const fire = () => harness.dom.window.dispatchEvent(new harness.dom.window.Event("scroll"));
-      fire();
-      momentum = setInterval(fire, 50);
+test("a story already in the Library when the page loaded gets no emphasis and no notice", async () => {
+  const { h } = savedNoteHarness(true);
+  await delay(180);
+  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
+  await delay(20);
+  assert.equal(h.handleAnimations().length, 0);
+  assert.equal(h.dom.window.document.querySelector("trace-saved-note"), null);
+  h.dom.window.close();
+});
+
+test("the popup's saved-note dismiss is still answered for the popup only", async () => {
+  const { h } = savedNoteHarness(false);
+  await delay(180);
+  assert.equal((await h.sendRuntimeMessage({ type: "TRACE_SAVED_NOTE_DISMISS" }, { id: "trace-extension" })).ok, true);
+  assert.equal((await h.sendRuntimeMessage({ type: "TRACE_SAVED_NOTE_DISMISS" }, {})).ok, false);
+  h.dom.window.close();
+});
+
+test("a failed automatic save is still shown on the page", async () => {
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: true },
+    pendingFirstStoryResponse: { ok: true, url: "" },
+    autoTrackResponse: { ok: false, error: "http_503" },
+    projectionResponse: {
+      ok: true,
+      snapshot: { state: "connected", reason: "none", canExecuteAuthenticated: true },
+      projection: { entries: {}, workPreferences: {}, syncVersion: null },
     },
   });
-  const present = () => host.__traceShadow.querySelector("[data-trace-saved-note]") !== null;
-  await wait(1200);
-  clearInterval(momentum);
-  await wait(2300);
-  assert.ok(present(), "momentum in progress at appearance does not count");
-  h.dom.window.dispatchEvent(new h.dom.window.Event("scroll"));
-  await wait(800);
-  assert.ok(present());
-  await wait(400);
-  assert.equal(present(), false, "a scroll after it appeared makes it leave a second later");
+  await delay(300);
+  assert.ok(h.sent.some((message) => message.type === "TRACE_AUTO_TRACK"));
+  const handle = h.dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.match(handle.textContent, /Not saved/, "the handle says the save failed");
   h.dom.window.close();
-});
-
-test("saved note waits while hovered or focused, then leaves about a second later", async () => {
-  const { h, host, note } = await showSavedNote();
-  const present = () => host.__traceShadow.querySelector("[data-trace-saved-note]") !== null;
-  await wait(350);
-  note.dispatchEvent(new h.dom.window.MouseEvent("mouseenter"));
-  h.dom.window.dispatchEvent(new h.dom.window.Event("scroll"));
-  await wait(3000);
-  assert.ok(present(), "hovering keeps the note");
-  note.dispatchEvent(new h.dom.window.MouseEvent("mouseleave"));
-  const details = note.querySelector("button");
-  details.dispatchEvent(new h.dom.window.FocusEvent("focusin", { bubbles: true }));
-  await wait(2500);
-  assert.ok(present(), "focus keeps the note");
-  details.dispatchEvent(new h.dom.window.FocusEvent("focusout", { bubbles: true, relatedTarget: null }));
-  await wait(600);
-  assert.notEqual(note.style.opacity, "0", "it stays a moment after focus leaves");
-  await wait(3200);
-  assert.equal(note.style.opacity, "0", "it then fades");
-  assert.ok(note.querySelector("button[aria-label='Dismiss']"), "the close button stays");
-  await wait(500);
-  assert.equal(present(), false);
-  h.dom.window.close();
-});
-
-test("saved note is shown for the first saved story only", async () => {
-  const first = savedNoteHarness(false);
-  await new Promise((resolve) => setTimeout(resolve, 180));
-  first.state.confirmed = true;
-  first.h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.ok(first.h.dom.window.document.querySelector("trace-saved-note"));
-  assert.equal(first.h.store.traceSavedNoteFirstStoryShownV1, true);
-  assert.equal(JSON.stringify(first.h.store.traceSavedNoteFirstStoryShownV1), "true", "the flag holds no story data");
-
-  // A later newly saved story on this device stays quiet.
-  const second = savedNoteHarness(false, { traceSavedNoteFirstStoryShownV1: true });
-  await new Promise((resolve) => setTimeout(resolve, 180));
-  second.state.confirmed = true;
-  second.h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(second.h.dom.window.document.querySelector("trace-saved-note"), null);
-});
-
-test("saved note yields to a visible end-of-story band", async () => {
-  const { h, state } = savedNoteHarness(false);
-  await new Promise((resolve) => setTimeout(resolve, 180));
-  const doc = h.dom.window.document;
-  const band = doc.createElement("div");
-  band.setAttribute("data-trace-finish-qualify", "");
-  band.getBoundingClientRect = () => ({ top: 400, bottom: 600, height: 200 });
-  doc.body.appendChild(band);
-  state.confirmed = true;
-  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
-  await new Promise((resolve) => setImmediate(resolve));
-  const host = doc.querySelector("trace-saved-note");
-  assert.equal(host ? host.__traceShadow.querySelector("[data-trace-saved-note]") : null, null);
-});
-
-test("saved note leaves when the popup has already confirmed the story", async () => {
-  const { h, state } = savedNoteHarness(false);
-  await new Promise((resolve) => setTimeout(resolve, 180));
-  state.confirmed = true;
-  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
-  await new Promise((resolve) => setImmediate(resolve));
-  const host = h.dom.window.document.querySelector("trace-saved-note");
-  assert.ok(host.__traceShadow.querySelector("[data-trace-saved-note]"));
-  const reply = await h.sendRuntimeMessage({ type: "TRACE_SAVED_NOTE_DISMISS" }, { id: "trace-extension" });
-  assert.equal(reply.ok, true);
-  assert.equal(host.__traceShadow.querySelector("[data-trace-saved-note]"), null);
-});
-
-test("saved note ignores a dismiss that does not come from the extension popup", async () => {
-  const { h, state } = savedNoteHarness(false);
-  await new Promise((resolve) => setTimeout(resolve, 180));
-  state.confirmed = true;
-  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
-  await new Promise((resolve) => setImmediate(resolve));
-  const host = h.dom.window.document.querySelector("trace-saved-note");
-  const reply = await h.sendRuntimeMessage({ type: "TRACE_SAVED_NOTE_DISMISS" }, {});
-  assert.equal(reply.ok, false);
-  assert.ok(host.__traceShadow.querySelector("[data-trace-saved-note]"));
-});
-
-test("saved note never appears for a story already in the Library when the page loaded", async () => {
-  const { h } = savedNoteHarness(true);
-  await new Promise((resolve) => setTimeout(resolve, 180));
-  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(h.dom.window.document.querySelector("trace-saved-note"), null);
 });
 
 test("kernel story projection retries a transient cold-worker read without retrying mutations", async () => {
@@ -8062,42 +7934,23 @@ function chapterKeptHarness(count, { firstNote = true, autoTrack = true, hidden 
   return { h, state };
 }
 
-test("chapter-kept note shows only for the first three confirmed advances", async () => {
-  for (let prior = 0; prior < 4; prior += 1) {
+test("chapter progress shows no notice: the handle carries the new chapter", async () => {
+  for (const prior of [0, 1, 2]) {
     const { h, state } = chapterKeptHarness(prior);
     await delay(180);
     state.chapter = 2;
     h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
     await delay(20);
-    const host = h.dom.window.document.querySelector("trace-saved-note");
-    const note = host?.__traceShadow.querySelector("[data-trace-saved-note]");
-    if (prior < 3) {
-      assert.ok(note, `advance ${prior + 1} shows N3`);
-      assert.match(note.textContent, /Chapter 2 kept/);
-      assert.equal(h.store.traceChapterKeptNotesShownV1, prior + 1);
-      const live = h.dom.window.document.querySelector("[data-trace-page-live-region]");
-      assert.match(live.textContent, /Chapter 2 kept\./);
-    } else {
-      assert.equal(note, undefined);
-      assert.equal(h.store.traceChapterKeptNotesShownV1, 3);
-    }
+    const doc = h.dom.window.document;
+    assert.equal(doc.querySelector("trace-saved-note"), null, "no page note");
+    const live = doc.querySelector("[data-trace-page-live-region]");
+    assert.doesNotMatch(live ? live.textContent : "", /kept/);
+    assert.equal(h.handleAnimations().length, 0, "progress is not emphasized");
+    assert.equal(h.store.traceChapterKeptNotesShownV1, prior, "nothing is counted");
+    assert.match(doc.querySelector("[data-trace-story-handle]").textContent, /2/);
     h.dom.window.close();
   }
 });
-
-test("chapter-kept note waits for first note and skips hidden or disabled works", async () => {
-  for (const options of [{ firstNote: false }, { autoTrack: false }, { hidden: true }]) {
-    const { h, state } = chapterKeptHarness(0, options);
-    await delay(180);
-    state.chapter = 2;
-    h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
-    await delay(20);
-    assert.equal(h.dom.window.document.querySelector("trace-saved-note"), null);
-    assert.equal(h.store.traceChapterKeptNotesShownV1, 0);
-    h.dom.window.close();
-  }
-});
-
 
 test("popup quick-add and status messages use the page's existing commands", async () => {
   const h = createStoryAutoTrackPendingHarness({ sessionMode: "kernel",
@@ -8160,32 +8013,18 @@ test("enabling automatic saving collects the already open page", async () => {
 });
 
 
-test("chapter-kept feedback is visible without waiting for an animation frame", async () => {
- const { h, state } = chapterKeptHarness(0);
- await delay(180);
- h.dom.window.requestAnimationFrame = () => 1; // Safari may defer frames while its popup is foreground
- state.chapter = 2;
- h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
- await delay(20);
- const note = h.dom.window.document.querySelector("trace-saved-note").__traceShadow.firstChild;
- assert.equal(note.style.opacity, "1");
- h.dom.window.close();
-});
-
-test("chapter-kept detects an advance already confirmed when the next page opens", async () => {
- for (const previous of [0, 2]) {
- const h = createStoryAutoTrackPendingHarness({ sessionMode: "kernel",
-  store: { traceSavedNoteFirstStoryShownV1: true, traceChapterKeptNotesShownV1: 1 },
-  mutateDom(dom) { dom.window.sessionStorage.setItem("trace:confirmed-chapter:v1", JSON.stringify({ workKey: "ffn:7038840", chapter: previous })); },
-  projectionResponse: { ok: true, snapshot: { state: "connected" }, projection: { entries: {
-   "ffn:7038840": { entryId: "00000000-0000-4000-8000-000000000123", canonicalReaderStatus: "READING", chapters: { current: 3, total: 12 } }
-  } } }
- });
- await delay(180);
- const note = h.dom.window.document.querySelector("trace-saved-note")?.__traceShadow.firstChild;
- assert.match(note?.textContent || "", /Chapter 3 kept/);
- h.dom.window.close();
- }
+test("a chapter advance confirmed before the next page opens shows no notice there", async () => {
+  const h = createStoryAutoTrackPendingHarness({ sessionMode: "kernel",
+    store: { traceSavedNoteFirstStoryShownV1: true, traceChapterKeptNotesShownV1: 1 },
+    mutateDom(dom) { dom.window.sessionStorage.setItem("trace:confirmed-chapter:v1", JSON.stringify({ workKey: "ffn:7038840", chapter: 2 })); },
+    projectionResponse: { ok: true, snapshot: { state: "connected" }, projection: { entries: {
+      "ffn:7038840": { entryId: "00000000-0000-4000-8000-000000000123", canonicalReaderStatus: "READING", chapters: { current: 3, total: 12 } }
+    } } }
+  });
+  await delay(180);
+  assert.equal(h.dom.window.document.querySelector("trace-saved-note"), null);
+  assert.equal(h.handleAnimations().length, 0);
+  h.dom.window.close();
 });
 
 
