@@ -290,7 +290,7 @@ function createPopupHarness({
         if (message.type === "TRACE_POPUP_GET_STATE") {
           response = popupState;
         }
-        if (message.type === "TRACE_IMPORT_TRIGGER") {
+        if (message.type === "TRACE_IMPORT_TRIGGER" || message.type === "TRACE_IMPORT_OPEN_TABS") {
           response = importResponse;
         }
         if (message.type === "TRACE_SESSION_GET_SNAPSHOT") {
@@ -6171,4 +6171,74 @@ test("release build, end to end: a tap Safari gives no access to the page for sa
   assert.equal(sheet().heading, "The save wasn’t sent");
   assert.equal(sheet().primary, "Try again");
   assert.deepEqual(background.world.saves, []);
+});
+
+test("open stories is an explicit native action even when the current page is not importable", async () => {
+  const h = await iosReaderImportHarness({ activeTab: { kind: "unsupported" } }, {
+    importResponse: { ok: true, state: "ready_to_open", handoffID: HANDOFF_ID,
+      expiresAtMs: Date.now() + 600000, snapshot: { state: "connected" }, found: { stories: 28, tabs: 30 } },
+  });
+  const button = h.document.getElementById("popup-import-open-tabs");
+  assert.equal(isDisplayed(h, button), true);
+  assert.equal(button.textContent, "Import open tabs");
+  assert.equal(h.document.getElementById("popup-open-tabs-help").textContent,
+    "Trace reads your open AO3 and FanFiction.net tabs. Nothing is added until you choose in Trace. Your tabs stay open.");
+  assert.equal(h.messages.filter(m => m.type === "TRACE_IMPORT_OPEN_TABS").length, 0);
+  button.click(); await flush(); await flush();
+  assert.equal(h.messages.filter(m => m.type === "TRACE_IMPORT_OPEN_TABS").length, 1);
+  assert.equal(h.document.getElementById("popup-import-open-native").textContent, "Review in Trace");
+  assert.equal(h.document.getElementById("popup-open-tabs-help").textContent, "Found 28 stories in 30 tabs.");
+  assert.equal(h.document.getElementById("popup-import-open-native").hidden, false);
+});
+
+test("empty open-story scan explains site access and sleeping tabs without claiming Safari is empty", async () => {
+  const h = await iosReaderImportHarness({}, { importResponse: { ok: false, error: "no_readable_tabs" } });
+  h.document.getElementById("popup-import-open-tabs").click(); await flush(); await flush();
+  assert.match(h.document.getElementById("popup-open-tabs-help").textContent, /Allow Trace.*sleeping story tabs/);
+  assert.equal(h.document.getElementById("popup-import-open-tabs").disabled, false);
+  assert.equal(h.document.getElementById("popup-import-open-native").hidden, true);
+  const off = await iosReaderImportHarness({ nativeImport: false });
+  assert.equal(isDisplayed(off, off.document.getElementById("popup-import-open-tabs")), false);
+});
+
+
+for (const error of ["no_readable_tabs", "collect_failed"]) {
+for (const importable of [true, false]) {
+test(`failed replacement scan restores only eligible page import (${error}, importable=${importable})`, async () => {
+  const response = { ok: true, state: "ready_to_open", handoffID: HANDOFF_ID,
+    expiresAtMs: Date.now() + 600000, snapshot: { state: "connected" } };
+  const h = await iosReaderImportHarness(importable ? {} : { activeTab: { kind: "unsupported" } }, { importResponse: response });
+  const button = h.document.getElementById("popup-import-open-tabs");
+  const pageImport = h.document.getElementById("popup-import");
+  assert.equal(isDisplayed(h, pageImport), importable);
+  button.click(); await flush(); await flush();
+  assert.equal(h.document.getElementById("popup-import-open-native").hidden, false);
+  assert.equal(pageImport.hidden, true);
+  Object.assign(response, { ok: false, error });
+  button.click();
+  assert.equal(h.document.getElementById("popup-import-open-native").hidden, true);
+  await flush(); await flush();
+  assert.equal(h.document.getElementById("popup-import-open-native").hidden, true);
+  assert.equal(isDisplayed(h, pageImport), importable);
+  if (importable) {
+    assert.equal(pageImport.disabled, false);
+    pageImport.click(); await flush(); await flush();
+    assert.deepEqual(importTriggers(h), ONE_IMPORT, "Page import remains usable after a failed replacement scan");
+  }
+});
+}
+}
+
+test("open tabs: while reading, the button and help say so; one story and one tab are singular", async () => {
+  const h = await iosReaderImportHarness({}, { importResponse: { ok: true, state: "ready_to_open", handoffID: HANDOFF_ID,
+    expiresAtMs: Date.now() + 600000, snapshot: { state: "connected" }, found: { stories: 1, tabs: 1 } } });
+  const button = h.document.getElementById("popup-import-open-tabs");
+  const help = h.document.getElementById("popup-open-tabs-help");
+  button.click();
+  assert.equal(button.textContent, "Reading your tabs…");
+  assert.equal(help.textContent, "Keep this open while Trace reads your tabs.");
+  assert.equal(button.disabled, true);
+  await flush(); await flush();
+  assert.equal(button.textContent, "Import open tabs");
+  assert.equal(help.textContent, "Found 1 story in 1 tab.");
 });

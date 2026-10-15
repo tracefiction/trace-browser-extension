@@ -53,6 +53,7 @@ export const SESSION_MESSAGE_TYPES = Object.freeze({
   popupState: "TRACE_POPUP_GET_STATE",
   capacityRecovery: "TRACE_CAPACITY_RECOVERY_ACKNOWLEDGE",
   importTrigger: "TRACE_IMPORT_TRIGGER",
+  importOpenTabs: "TRACE_IMPORT_OPEN_TABS",
   firstStoryAdd: "TRACE_FIRST_STORY_ADD",
   setHiddenWork: "TRACE_SET_HIDDEN_WORK",
   setReaderStatus: "TRACE_SET_READER_STATUS",
@@ -157,7 +158,14 @@ export interface FirstStoryResponse {
   readonly state?: "opened" | "saved" | "already_saved" | "ready_to_open";
   readonly handoffID?: string;
   readonly expiresAtMs?: number;
+  /** An open-tabs scan that is ready to review: readable stories and tabs read. */
+  readonly found?: OpenStoryTabsFound;
   readonly error?: FirstStoryInitiationError;
+}
+
+export interface OpenStoryTabsFound {
+  readonly stories: number;
+  readonly tabs: number;
 }
 
 export interface PopupStateResponse {

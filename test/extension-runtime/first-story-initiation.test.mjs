@@ -487,7 +487,8 @@ const importPlatforms = [
 ];
 for (const candidate of [false, true]) {
   for (const platform of importPlatforms) {
-  test(`${platform.name}, native candidate=${candidate} selects only its configured Import transport`, async (t) => {
+  for (const command of ["TRACE_IMPORT_TRIGGER", "TRACE_IMPORT_OPEN_TABS"]) {
+  test(`${platform.name}, native candidate=${candidate}, ${command} selects only its configured Import transport`, async (t) => {
     const navigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
     Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {
       userAgent: platform.userAgent ?? 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15',
@@ -495,7 +496,7 @@ for (const candidate of [false, true]) {
     t.after(() => { if (navigator) Object.defineProperty(globalThis, 'navigator', navigator); else delete globalThis.navigator; });
     const { factory, database } = await seededDatabase();
     const native = []; const created = [];
-    let collected = 0;
+    let collected = 0; let scanned = 0;
     const handoffID = "00000000-0000-4000-8000-000000000099";
     let expiry = 0;
     let ids = 0;
@@ -528,6 +529,8 @@ for (const candidate of [false, true]) {
         async sendMessage() { collected += 1; return { ok: true, payload: { s: "ffn", at: "synthetic",
           items: [{ src: "ffn", u: storyUrl }] } }; },
       },
+      scripting: { async executeScript() { scanned += 1; return [{ frameId: 0, result: {
+        src: "ffn", ctx: "tab", key: "ffn:7038840", u: storyUrl, t: "Synthetic tab" } }]; } },
       alarms: { async clear() { return true; } }, storageArea: new StorageArea(),
       databaseFactory: factory, privateDatabase: database, storageMode: "promise",
       fetch: async (url) => new Response(JSON.stringify(new URL(url).pathname === "/api/extension/account"
@@ -537,14 +540,15 @@ for (const candidate of [false, true]) {
       randomId: () => `00000000-0000-4000-8000-${String(++ids).padStart(12, "0")}`,
     });
     await controller.start();
-    const response = await controller.handle({ type: "TRACE_IMPORT_TRIGGER", accountID: "untrusted" }, popupSender);
+    const response = await controller.handle({ type: command, accountID: "untrusted" }, popupSender);
     const selected = candidate && platform.native;
-    const blocked = candidate && platform.unknown;
+    const blocked = command === "TRACE_IMPORT_OPEN_TABS" ? !selected : candidate && platform.unknown;
     assert.equal(response.ok, !blocked);
     assert.equal(response.state, blocked ? undefined : selected ? "ready_to_open" : "opened");
     assert.equal(response.error, blocked ? 'native_import_unavailable' : undefined);
     assert.equal(created.length, selected || blocked ? 0 : 1);
-    assert.equal(collected, blocked ? 0 : 1);
+    assert.equal(collected, blocked || command === "TRACE_IMPORT_OPEN_TABS" ? 0 : 1);
+    assert.equal(scanned, command === "TRACE_IMPORT_OPEN_TABS" && selected ? 1 : 0);
     assert.equal(native.length, selected ? 2 : 0);
     assert.equal(Object.hasOwn(response.snapshot, "accountId"), false);
     if (selected) {
@@ -552,16 +556,19 @@ for (const candidate of [false, true]) {
       assert.equal(native[0].apiOrigin, "https://development.example.test");
       assert.equal(response.handoffID, handoffID);
     }
-    const denied = await controller.handle({ type: "TRACE_IMPORT_TRIGGER" }, {
+    // The popup's ready line ("Found 1 story in 1 tab.") counts the scan; a page import has none.
+    assert.deepEqual(response.found, command === "TRACE_IMPORT_OPEN_TABS" && selected ? { stories: 1, tabs: 1 } : undefined);
+    const denied = await controller.handle({ type: command }, {
       id: runtimeId, frameId: 0, tab: { url: storyUrl }, url: storyUrl });
     assert.equal(denied, null);
-    if (blocked) {
+    if (blocked && candidate && platform.unknown) {
       runtime.getPlatformInfo = async () => ({ os: 'ios' });
-      const recovered = await controller.handle({ type: 'TRACE_IMPORT_TRIGGER' }, popupSender);
+      const recovered = await controller.handle({ type: command }, popupSender);
       assert.equal(recovered.state, 'ready_to_open', 'unknown detection is not cached as a permanent routing decision');
       assert.equal(created.length, 0);
-      assert.equal(collected, 1);
+      assert.equal(collected, command === "TRACE_IMPORT_OPEN_TABS" ? 0 : 1);
     }
   });
+  }
   }
 }
