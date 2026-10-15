@@ -12,21 +12,19 @@ import {
   FfnSummaryFill,
   QUEUE_MAX,
   SessionFillState,
-  ffnSummaryFromStoryHtml,
+  ffnAuthorIdFromStoryHtml,
+  ffnSummariesFromStoryListHtml,
   isChallengePage,
-  readFfnStorySummary,
+  lookUpFfnAuthorId,
+  readFfnAuthorSummaries,
 } from "../../.trace-build/extension-runtime/ffn-summary-fill.mjs";
+import { storyTrackCommandFromMessage } from "../../.trace-build/extension-runtime/story-command-sender.mjs";
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
-const desktopStory = fs.readFileSync(path.join(FIXTURES, "ffn_story.html"), "utf8");
-const mobileStory = fs.readFileSync(path.join(FIXTURES, "ffn_story_mobile.html"), "utf8");
-
-const FIXTURE_SUMMARY =
-  "What if Harry didn't bump into the Weasleys at Kings Cross on his first day? " +
-  "What if he met another family? A family that knew his parents. This simple " +
-  "encounter will set him on a different path including new friends and new " +
-  "ambitions. Includes: Slytherin!Harry, Good!Dumbledore, Conflicted!Snape, & " +
-  "Supportive!Remus. Future HP/DG & HG/TN. Years 1-2. Complete! The Sequel is posted.";
+const fixture = (name) => fs.readFileSync(path.join(FIXTURES, name), "utf8");
+const desktopStory = fixture("ffn_story.html");
+const mobileStory = fixture("ffn_story_mobile.html");
+const mobileList = fixture("ffn_listing_mobile.html");
 
 const CHALLENGE_PAGE =
   "<!DOCTYPE html><html><head><title>Just a moment...</title></head>" +
@@ -77,14 +75,20 @@ function pageResponse(html, { status = 200, url, headers = {} } = {}) {
   return response;
 }
 
-function storyPage(storyId, summary = "A ferryman keeps a ledger of every soul he refuses.") {
-  return (
-    "<html><body><div id=content_wrapper><div id='profile_top' style='min-height:112px;'>" +
-    "<b class='xcontrast_txt'>The Ferryman's Ledger</b> By: <a class='xcontrast_txt' href='/u/1/'>Oar</a>" +
-    `<div style='margin-top:2px' class='xcontrast_txt'>${summary}</div>` +
-    "<span class='xgray xcontrast_txt'>Rated: Fiction T - English</span></div>" +
-    `<div id='storytext'>${"Chapter text. ".repeat(2000)}</div></body></html>`
-  );
+/** An author's story list in FanFiction.net's mobile rows (no "by" link on an author's own page). */
+function authorPage(authorId, storyIds) {
+  const rows = storyIds.map((id) =>
+    `<div class="bs brb"><a class="pull-right" href="/r/${id}/">12</a>` +
+    `<a href="/s/${id}/1/Story-${id}">Story ${id}</a> <a href="/s/${id}/3/Story-${id}">»</a> ` +
+    `\n Summary for ${id} &amp; more, long enough to be a real one.` +
+    `<div class="gray">T, English, chapters: 3, words: 9k+, updated: <span data-xutime="1">Jan 1</span></div></div>`);
+  return `<html><body><div id="content"><b>Author ${authorId}</b> <a href="/u/${authorId}/?a=s">Stories</a>` +
+    `${rows.join("\n")}</div>${"<p>filler</p>".repeat(500)}</body></html>`;
+}
+
+function storyPage(storyId, authorId) {
+  return `<html><body><a href="/u/999/">My profile</a><div id="content"><div align="center"><b>Story ${storyId}</b> by ` +
+    `<a href="https://m.fanfiction.net/u/${authorId}/">Author</a></div>${"Chapter text. ".repeat(4000)}</div></body></html>`;
 }
 
 /** A story-site fetch that records each request and answers from `answer`. */
@@ -97,11 +101,17 @@ function siteFetch(answer) {
   return { fetchImpl, requests };
 }
 
-function storyAnswer(url) {
-  const id = /\/s\/(\d+)\//.exec(url)[1];
-  return pageResponse(storyPage(id, `Summary for ${id}, long enough to be a real one.`), {
-    url: `https://www.fanfiction.net/s/${id}/1/`,
-  });
+/** Every story is by author 7, whose list holds 101-103, 11-13 and 5000-5079. */
+function siteAnswer(url) {
+  const author = /\/u\/(\d+)\//.exec(url);
+  if (author) {
+    const ids = author[1] === "7"
+      ? ["101", "102", "103", "11", "12", "13", ...Array.from({ length: 80 }, (_, index) => String(5_000 + index))]
+      : [];
+    return pageResponse(authorPage(author[1], ids), { url: `https://m.fanfiction.net/u/${author[1]}/?a=s` });
+  }
+  const story = /\/s\/(\d+)\//.exec(url)[1];
+  return pageResponse(storyPage(story, "7"), { url: `https://m.fanfiction.net/s/${story}/1/` });
 }
 
 // --- The filler with fake ports ----------------------------------------------
@@ -126,7 +136,7 @@ function memoryArea() {
 }
 
 function harness({
-  answer = storyAnswer,
+  answer = siteAnswer,
   gaps = [],
   enabled = true,
   allowed = true,
@@ -137,11 +147,7 @@ function harness({
   const site = siteFetch(answer);
   const contributions = [];
   const gapReads = [];
-  const ports = {
-    account: "reader-1:1",
-    enabled,
-    allowed,
-  };
+  const ports = { account: "reader-1:1", enabled, allowed };
   const fill = new FfnSummaryFill({
     fetch: site.fetchImpl,
     clock,
@@ -153,15 +159,15 @@ function harness({
       gapReads.push(ports.account);
       return typeof gaps === "function" ? gaps(ports.account) : gaps;
     },
-    contribute: async (storyId, summary) => {
-      contributions.push({ storyId, summary });
+    contribute: async (summaries) => {
+      contributions.push(summaries.map(({ storyId, summary }) => ({ storyId, summary })));
       return contribution;
     },
   });
   return { fill, clock, area, site, contributions, gapReads, ports };
 }
 
-function savedStory(storyId, sm = null, ctx = "story") {
+function savedStory(storyId, { sm = null, ctx = "story", ffnAuthorId } = {}) {
   return {
     hostKind: "ffn",
     workKey: `ffn:${storyId}`,
@@ -170,8 +176,12 @@ function savedStory(storyId, sm = null, ctx = "story") {
       at: "2026-10-15T00:00:00.000Z",
       item: { src: "ffn", ctx, u: `https://www.fanfiction.net/s/${storyId}/`, t: "A story", sm },
     },
+    ...(ffnAuthorId === undefined ? {} : { ffnAuthorId }),
   };
 }
+
+const filledIds = (h) => h.contributions.flat().map(({ storyId }) => storyId);
+const state = (h) => h.area.values[FFN_SUMMARY_STATE_KEY];
 
 /** Lets the backfill take one step: pages go quiet, then the settle wait ends. */
 async function quietStep(h, gap = BACKFILL_GAP_MS) {
@@ -180,41 +190,57 @@ async function quietStep(h, gap = BACKFILL_GAP_MS) {
   await h.clock.advance(BACKFILL_SETTLE_MS);
 }
 
-// --- Parser ------------------------------------------------------------------
+// --- Parsers -------------------------------------------------------------------
 
-test("reads the summary from the desktop story page fixture", () => {
-  assert.equal(ffnSummaryFromStoryHtml(desktopStory), FIXTURE_SUMMARY);
+test("reads the author from the story's own block on the mobile and desktop story pages", () => {
+  assert.equal(ffnAuthorIdFromStoryHtml(mobileStory), "2329859");
+  assert.equal(ffnAuthorIdFromStoryHtml(desktopStory), "2329859");
+  // The signed-in reader's own profile link before the story is never taken.
+  assert.equal(ffnAuthorIdFromStoryHtml(storyPage("5", "42")), "42");
+  assert.equal(ffnAuthorIdFromStoryHtml("<a href='/u/9/'>x</a>"), null);
+  assert.equal(ffnAuthorIdFromStoryHtml(CHALLENGE_PAGE), null);
 });
 
-test("reads FanFiction.net's own single-quoted markup and decodes entities", () => {
-  const html =
-    "<div id=profile_top><b class='xcontrast_txt'>T</b>" +
-    "<div style='margin-top:2px' class='xcontrast_txt'>Harry &amp; Draco&#39;s <i>long</i>   year &#x2014; again.</div>" +
-    "<span class='xgray xcontrast_txt'>Rated: K</span></div>";
-  assert.equal(ffnSummaryFromStoryHtml(html), "Harry & Draco's long year — again.");
+test("reads every summary from FanFiction.net's mobile story-list rows", () => {
+  const { rows, summaries } = ffnSummariesFromStoryListHtml(mobileList);
+  assert.ok(rows >= 20, `rows read: ${rows}`);
+  assert.equal(
+    summaries.get("3659524"),
+    "He was abandoned at a young age, the world believing him dead. They were wrong. " +
+      "Death Eaters believed untouchable are dying. Who is this assassin? Will he join " +
+      "Dumbledore or take the war into his own hands? Not typical powerful!politic!Harry.",
+  );
+  assert.equal(
+    summaries.get("4240771"),
+    "Summer before third year Harry has a life changing experience, and a close encounter " +
+      "with a dementor ends with him absorbing the horcrux within him. Features Harry with a backbone.",
+  );
 });
 
-test("finds nothing on the mobile story page, a challenge page, or a page without the block", () => {
-  assert.equal(ffnSummaryFromStoryHtml(mobileStory), null);
-  assert.equal(ffnSummaryFromStoryHtml(CHALLENGE_PAGE), null);
-  assert.equal(ffnSummaryFromStoryHtml("<div id='profile_top'><span class='xgray xcontrast_txt'>Rated: T</span></div>"), null);
-  assert.equal(ffnSummaryFromStoryHtml(""), null);
+test("reads an author's own list, where rows have no author link", () => {
+  const { rows, summaries } = ffnSummariesFromStoryListHtml(authorPage("7", ["101", "102"]));
+  assert.equal(rows, 2);
+  assert.equal(summaries.get("101"), "Summary for 101 & more, long enough to be a real one.");
+  assert.equal(ffnSummariesFromStoryListHtml(mobileStory).rows, 0);
+  assert.equal(ffnSummariesFromStoryListHtml(CHALLENGE_PAGE).rows, 0);
 });
 
 test("recognises a challenge page", () => {
   assert.equal(isChallengePage(CHALLENGE_PAGE), true);
-  assert.equal(isChallengePage(desktopStory), false);
+  assert.equal(isChallengePage(mobileList), false);
   assert.equal(isChallengePage("", new Headers({ "cf-mitigated": "challenge" })), true);
 });
 
 // --- Reading one page ----------------------------------------------------------
 
-test("reads one page with the reader's session, no cache, and stops reading at the summary", async () => {
+test("reads the author list with the reader's session, no cache, and stops once the wanted rows are in", async () => {
   const clock = fakeClock();
   let pulled = 0;
   let cancelled = false;
   const encoder = new TextEncoder();
-  const chunks = [storyPage("77").slice(0, 600), storyPage("77").slice(600, 2_000), "x".repeat(50_000)];
+  const html = authorPage("7", ["101", "102"]);
+  const cut = html.indexOf("</div></div>", html.indexOf("Summary for 101")) + 12;
+  const chunks = [html.slice(0, cut), html.slice(cut), "x".repeat(50_000)];
   const body = new ReadableStream({
     pull(controller) {
       if (pulled < chunks.length) controller.enqueue(encoder.encode(chunks[pulled++]));
@@ -224,14 +250,15 @@ test("reads one page with the reader's session, no cache, and stops reading at t
       cancelled = true;
     },
   });
-  const site = siteFetch(() => pageResponse(body, { url: "https://www.fanfiction.net/s/77/1/" }));
+  const site = siteFetch(() => pageResponse(body, { url: "https://m.fanfiction.net/u/7/?a=s" }));
 
-  const read = await readFfnStorySummary(site.fetchImpl, "77", clock);
+  const read = await readFfnAuthorSummaries(site.fetchImpl, "7", ["101"], clock);
   await settle();
 
-  assert.deepEqual(read, { kind: "found", summary: "A ferryman keeps a ledger of every soul he refuses." });
+  assert.equal(read.kind, "found");
+  assert.deepEqual([...read.summaries.keys()], ["101"]);
   assert.equal(site.requests.length, 1);
-  assert.equal(site.requests[0].url, "https://www.fanfiction.net/s/77/1/");
+  assert.equal(site.requests[0].url, "https://m.fanfiction.net/u/7/?a=s");
   assert.equal(site.requests[0].init.credentials, "include");
   assert.equal(site.requests[0].init.cache, "no-store");
   assert.equal(site.requests[0].init.method, "GET");
@@ -240,70 +267,108 @@ test("reads one page with the reader's session, no cache, and stops reading at t
   assert.equal(clock.pending(), 0, "the time limit is cleared");
 });
 
-test("stops on a redirect elsewhere, a refusal, a challenge, a missing summary or an error", async () => {
+test("a story missing from the author's first page is left out, and no other page is read", async () => {
+  const clock = fakeClock();
+  const site = siteFetch(siteAnswer);
+  const read = await readFfnAuthorSummaries(site.fetchImpl, "7", ["101", "555"], clock);
+  assert.deepEqual([...read.summaries.keys()], ["101"]);
+  assert.equal(site.requests.length, 1);
+});
+
+test("stops on another address, a refusal, a challenge, an unreadable page or an error", async () => {
+  const listAt = "https://m.fanfiction.net/u/7/?a=s";
   const cases = [
-    [() => pageResponse(storyPage("5"), { url: "https://m.fanfiction.net/s/5/1/" }), "redirect"],
-    [() => pageResponse(storyPage("5"), { url: "https://www.fanfiction.net/" }), "redirect"],
-    [() => pageResponse("gone", { status: 404, url: "https://www.fanfiction.net/s/5/1/" }), "status"],
-    [() => pageResponse(CHALLENGE_PAGE, { status: 403, url: "https://www.fanfiction.net/s/5/1/", headers: { "cf-mitigated": "challenge" } }), "challenge"],
-    [() => pageResponse(CHALLENGE_PAGE, { url: "https://www.fanfiction.net/s/5/1/" }), "challenge"],
-    [() => pageResponse(mobileStory, { url: "https://www.fanfiction.net/s/5/1/" }), "missing"],
+    [() => pageResponse(authorPage("7", ["1"]), { url: "https://www.fanfiction.net/u/7/?a=s" }), "redirect"],
+    [() => pageResponse(authorPage("7", ["1"]), { url: "https://m.fanfiction.net/u/8/" }), "redirect"],
+    [() => pageResponse(authorPage("7", ["1"]), { url: "https://m.fanfiction.net/login.php" }), "redirect"],
+    [() => pageResponse("gone", { status: 404, url: listAt }), "status"],
+    [() => pageResponse(CHALLENGE_PAGE, { status: 403, url: listAt, headers: { "cf-mitigated": "challenge" } }), "challenge"],
+    [() => pageResponse(CHALLENGE_PAGE, { url: listAt }), "challenge"],
+    [() => pageResponse(mobileStory, { url: listAt }), "missing"],
     [() => { throw new TypeError("Load failed"); }, "error"],
   ];
   for (const [answer, reason] of cases) {
     const clock = fakeClock();
     const site = siteFetch(answer);
-    assert.deepEqual(await readFfnStorySummary(site.fetchImpl, "5", clock), { kind: "stop", reason });
+    assert.deepEqual(await readFfnAuthorSummaries(site.fetchImpl, "7", ["1"], clock), { kind: "stop", reason });
     assert.equal(clock.pending(), 0);
   }
+
+  const clock = fakeClock();
+  const elsewhere = siteFetch(() => pageResponse(mobileStory, { url: "https://www.fanfiction.net/s/5/1/" }));
+  assert.deepEqual(await lookUpFfnAuthorId(elsewhere.fetchImpl, "5", clock), { kind: "stop", reason: "redirect" });
+  const found = siteFetch(() => pageResponse(mobileStory, { url: "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter" }));
+  assert.deepEqual(await lookUpFfnAuthorId(found.fetchImpl, "7038840", clock), { kind: "found", authorId: "2329859" });
+  assert.equal(found.requests[0].url, "https://m.fanfiction.net/s/7038840/1/");
 });
 
 // --- On save -------------------------------------------------------------------
 
-test("a new story saved with no summary is read once, straight away, and only its summary is sent", async () => {
+test("a page save naming its author reads the author's list once and sends only the summary", async () => {
   const h = harness();
 
-  await h.fill.storySaved(savedStory("101"), false);
-  await h.fill.storySaved(savedStory("101"), false);
+  await h.fill.storySaved(savedStory("101", { ffnAuthorId: "7" }), false);
+  await h.fill.storySaved(savedStory("101", { ffnAuthorId: "7" }), false);
 
-  assert.equal(h.site.requests.length, 1);
-  assert.deepEqual(h.contributions, [
-    { storyId: "101", summary: "Summary for 101, long enough to be a real one." },
-  ]);
+  assert.deepEqual(h.site.requests.map(({ url }) => url), ["https://m.fanfiction.net/u/7/?a=s"]);
+  assert.deepEqual(h.contributions, [[
+    { storyId: "101", summary: "Summary for 101 & more, long enough to be a real one." },
+  ]]);
   assert.equal(h.clock.pending(), 0);
+});
+
+test("a save that did not name the author reads the story's page for it first", async () => {
+  const h = harness();
+
+  await h.fill.storySaved(savedStory("102"), false);
+
+  assert.deepEqual(h.site.requests.map(({ url }) => url), [
+    "https://m.fanfiction.net/s/102/1/",
+    "https://m.fanfiction.net/u/7/?a=s",
+  ]);
+  assert.deepEqual(filledIds(h), ["102"]);
 });
 
 test("no read when the save carried a summary, the story was already saved, or it is not an FFN story page", async () => {
   const h = harness();
 
-  await h.fill.storySaved(savedStory("201", "The page showed this summary."), false);
-  await h.fill.storySaved(savedStory("202"), true);
-  await h.fill.storySaved(savedStory("203", null, "listing"), false);
+  await h.fill.storySaved(savedStory("201", { sm: "The page showed this summary.", ffnAuthorId: "7" }), false);
+  await h.fill.storySaved(savedStory("202", { ffnAuthorId: "7" }), true);
+  await h.fill.storySaved(savedStory("203", { ctx: "listing" }), false);
   await h.fill.storySaved({ ...savedStory("204"), hostKind: "ao3", workKey: "ao3:204" }, false);
 
   assert.equal(h.site.requests.length, 0);
   assert.equal(h.contributions.length, 0);
 });
 
-test("no read when contributions are turned off or the site is not allowed", async () => {
+test("no read when contributions are turned off or m.fanfiction.net is not allowed", async () => {
   const off = harness({ enabled: false });
-  await off.fill.storySaved(savedStory("301"), false);
-  await off.fill.storySaved(savedStory("302"), false);
+  await off.fill.storySaved(savedStory("301", { ffnAuthorId: "7" }), false);
+  await off.fill.storySaved(savedStory("302", { ffnAuthorId: "7" }), false);
   assert.equal(off.site.requests.length, 0);
 
   const blocked = harness({ allowed: false });
-  await blocked.fill.storySaved(savedStory("303"), false);
+  await blocked.fill.storySaved(savedStory("303", { ffnAuthorId: "7" }), false);
   assert.equal(blocked.site.requests.length, 0);
+});
+
+test("a story not on its author's first page is dropped without stopping", async () => {
+  const h = harness();
+  await h.fill.storySaved(savedStory("555", { ffnAuthorId: "7" }), false);
+  await h.fill.storySaved(savedStory("101", { ffnAuthorId: "7" }), false);
+  assert.equal(h.site.requests.length, 2);
+  assert.deepEqual(filledIds(h), ["101"]);
+  assert.equal(state(h).stopped, false);
 });
 
 test("a challenge stops it for the session: no retry and no later reads", async () => {
   const h = harness({
-    answer: () => pageResponse(CHALLENGE_PAGE, { status: 403, url: "https://www.fanfiction.net/s/401/1/" }),
+    answer: () => pageResponse(CHALLENGE_PAGE, { status: 403, url: "https://m.fanfiction.net/u/7/?a=s" }),
     gaps: ["900", "901"],
   });
 
-  await h.fill.storySaved(savedStory("401"), false);
-  await h.fill.storySaved(savedStory("402"), false);
+  await h.fill.storySaved(savedStory("401", { ffnAuthorId: "7" }), false);
+  await h.fill.storySaved(savedStory("402", { ffnAuthorId: "7" }), false);
   h.fill.ffnPageActivity();
   await quietStep(h);
   await quietStep(h);
@@ -311,28 +376,28 @@ test("a challenge stops it for the session: no retry and no later reads", async 
   assert.equal(h.site.requests.length, 1);
   assert.equal(h.contributions.length, 0);
   assert.equal(h.gapReads.length, 0);
-  assert.equal(h.area.values[FFN_SUMMARY_STATE_KEY].stopped, true);
+  assert.equal(state(h).stopped, true);
   assert.equal(h.clock.pending(), 0);
 });
 
 test("an error, a redirect or a refused contribution stops it too", async () => {
   for (const options of [
     { answer: () => { throw new TypeError("offline"); } },
-    { answer: () => pageResponse(storyPage("1"), { url: "https://m.fanfiction.net/s/501/1/" }) },
+    { answer: () => pageResponse(authorPage("7", ["101"]), { url: "https://www.fanfiction.net/u/7/" }) },
     { contribution: "failed" },
   ]) {
     const h = harness(options);
-    await h.fill.storySaved(savedStory("501"), false);
-    await h.fill.storySaved(savedStory("502"), false);
+    await h.fill.storySaved(savedStory("101", { ffnAuthorId: "7" }), false);
+    await h.fill.storySaved(savedStory("102", { ffnAuthorId: "7" }), false);
     assert.equal(h.site.requests.length, 1);
-    assert.equal(h.area.values[FFN_SUMMARY_STATE_KEY].stopped, true);
+    assert.equal(state(h).stopped, true);
   }
 });
 
 // --- Backfill ------------------------------------------------------------------
 
-test("the backfill lists gaps once, then reads one story per gap, only after the pages go quiet", async () => {
-  const h = harness({ gaps: ["11", "12", "13"] });
+test("the backfill lists gaps once, then makes one request per quiet gap", async () => {
+  const h = harness({ gaps: ["11", "12"] });
 
   h.fill.ffnPageActivity();
   await h.clock.advance(BACKFILL_SETTLE_MS - 1);
@@ -346,19 +411,37 @@ test("the backfill lists gaps once, then reads one story per gap, only after the
   await h.clock.advance(BACKFILL_SETTLE_MS);
   assert.equal(h.site.requests.length, 0);
 
+  await quietStep(h); // story 11's page, for its author
+  assert.deepEqual(h.site.requests.map(({ url }) => url), ["https://m.fanfiction.net/s/11/1/"]);
+  assert.deepEqual(state(h).queue[0], { s: "11", a: "7" });
+  await quietStep(h); // author 7's list
+  assert.equal(h.site.requests[1].url, "https://m.fanfiction.net/u/7/?a=s");
+  assert.deepEqual(filledIds(h), ["11"]);
+
   await quietStep(h);
-  assert.deepEqual(h.contributions.map(({ storyId }) => storyId), ["11"]);
   await quietStep(h);
-  await quietStep(h);
-  assert.deepEqual(h.contributions.map(({ storyId }) => storyId), ["11", "12", "13"]);
+  assert.deepEqual(filledIds(h), ["11", "12"]);
   assert.equal(h.gapReads.length, 1);
 
   // Done: later page activity sets no timer and makes no request.
   h.fill.ffnPageActivity();
   assert.equal(h.clock.pending(), 0);
   await quietStep(h);
-  assert.equal(h.site.requests.length, 3);
+  assert.equal(h.site.requests.length, 4);
   assert.equal(h.clock.pending(), 0);
+});
+
+test("waiting stories whose author is known are filled from the same list", async () => {
+  const h = harness({ gaps: ["11", "12"] });
+  await quietStep(h);
+  h.area.values[FFN_SUMMARY_STATE_KEY] = { ...state(h), queue: [{ s: "11", a: "7" }, { s: "12", a: "7" }] };
+  await quietStep(h);
+  assert.equal(h.site.requests.length, 1);
+  assert.deepEqual(h.contributions, [[
+    { storyId: "11", summary: "Summary for 11 & more, long enough to be a real one." },
+    { storyId: "12", summary: "Summary for 12 & more, long enough to be a real one." },
+  ]]);
+  assert.deepEqual(state(h).queue, []);
 });
 
 test("the backfill waits while a save is under way and while the reader is elsewhere", async () => {
@@ -379,11 +462,11 @@ test("the backfill waits while a save is under way and while the reader is elsew
   assert.equal(h.site.requests.length, 1);
 });
 
-test("the queue is capped, reads per session are capped, and nothing runs with no timer left", async () => {
-  const many = Array.from({ length: 80 }, (_, index) => String(1_000 + index));
+test("the queue is capped, requests per session are capped, and nothing runs with no timer left", async () => {
+  const many = Array.from({ length: 80 }, (_, index) => String(8_000 + index));
   const h = harness({ gaps: many });
   await quietStep(h);
-  assert.equal(h.area.values[FFN_SUMMARY_STATE_KEY].queue.length, QUEUE_MAX);
+  assert.equal(state(h).queue.length, QUEUE_MAX);
 
   for (let index = 0; index < BACKFILL_MAX_PER_SESSION + 5; index += 1) await quietStep(h);
 
@@ -394,7 +477,7 @@ test("the queue is capped, reads per session are capped, and nothing runs with n
 test("sign-out clears the queue and stops waiting; another account starts fresh", async () => {
   const h = harness({ gaps: (account) => (account === "reader-1:1" ? ["31", "32"] : ["51"]) });
   await quietStep(h);
-  assert.deepEqual(h.area.values[FFN_SUMMARY_STATE_KEY].queue, ["31", "32"]);
+  assert.deepEqual(state(h).queue, [{ s: "31" }, { s: "32" }]);
 
   h.fill.ffnPageActivity();
   await h.fill.clear();
@@ -404,13 +487,13 @@ test("sign-out clears the queue and stops waiting; another account starts fresh"
   // Another account: the previous account's list is never used, even when
   // it is still in session storage.
   h.area.values[FFN_SUMMARY_STATE_KEY] = {
-    v: 1, account: "reader-1:1", queue: ["31", "32"], listed: true,
+    v: 2, account: "reader-1:1", queue: [{ s: "31" }, { s: "32" }], listed: true,
     stopped: false, backfills: 0, saves: 0, lastStepAt: 0,
   };
   h.ports.account = "reader-2:1";
   await quietStep(h);
-  assert.equal(h.area.values[FFN_SUMMARY_STATE_KEY].account, "reader-2:1");
-  assert.deepEqual(h.area.values[FFN_SUMMARY_STATE_KEY].queue, ["51"]);
+  assert.equal(state(h).account, "reader-2:1");
+  assert.deepEqual(state(h).queue, [{ s: "51" }]);
   assert.deepEqual(h.gapReads, ["reader-1:1", "reader-2:1"]);
 
   // Signed out: the state is removed and nothing is read.
@@ -420,9 +503,10 @@ test("sign-out clears the queue and stops waiting; another account starts fresh"
   assert.equal(h.site.requests.length, 0);
 });
 
-test("only story ids and counters are stored, never page text", async () => {
-  const h = harness({ gaps: ["41", "42"] });
-  await h.fill.storySaved(savedStory("40"), false);
+test("only story and author ids and counters are stored, never page text", async () => {
+  const h = harness({ gaps: ["11", "12"] });
+  await h.fill.storySaved(savedStory("101"), false);
+  await quietStep(h);
   await quietStep(h);
   await quietStep(h);
 
@@ -430,16 +514,135 @@ test("only story ids and counters are stored, never page text", async () => {
   for (const write of h.area.writes) {
     assert.doesNotMatch(write, /[<>]/);
     assert.doesNotMatch(write, /Summary for/);
-    const state = JSON.parse(write)[FFN_SUMMARY_STATE_KEY];
-    assert.deepEqual(Object.keys(state).sort(), [
+    const stored = JSON.parse(write)[FFN_SUMMARY_STATE_KEY];
+    assert.deepEqual(Object.keys(stored).sort(), [
       "account", "backfills", "lastStepAt", "listed", "queue", "saves", "stopped", "v",
     ]);
+    for (const entry of stored.queue) {
+      assert.deepEqual(Object.keys(entry).filter((key) => key !== "s" && key !== "a"), []);
+    }
+  }
+});
+
+test("the author named beside a save is kept off the payload sent to Trace", () => {
+  const sender = { frameId: 0, tab: { url: "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter" } };
+  const payload = {
+    s: "ffn",
+    at: "2026-10-15T00:00:00.000Z",
+    item: { src: "ffn", ctx: "story", u: "https://www.fanfiction.net/s/7038840/", t: "A Chance Encounter", chn: 1, sm: null },
+  };
+  const command = storyTrackCommandFromMessage({ type: "TRACE_AUTO_TRACK", payload, ffnAuthorId: "2329859" }, sender);
+  assert.equal(command.ffnAuthorId, "2329859");
+  assert.deepEqual(command.payload, payload);
+  const bad = storyTrackCommandFromMessage({ type: "TRACE_AUTO_TRACK", payload, ffnAuthorId: "../u/1" }, sender);
+  assert.equal("ffnAuthorId" in bad, false);
+});
+
+// --- Review fixes ------------------------------------------------------------
+
+test("a page on another site since the last FanFiction.net page stops the backfill step", async () => {
+  const h = harness({ gaps: ["11"] });
+  await quietStep(h); // list
+  await h.clock.advance(BACKFILL_GAP_MS);
+  h.fill.ffnPageActivity();
+  await h.clock.advance(5_000);
+  h.fill.elsewherePageActivity();
+  assert.equal(h.clock.pending(), 0, "the waiting step is called off");
+  await h.clock.advance(BACKFILL_SETTLE_MS);
+  assert.equal(h.site.requests.length, 0);
+
+  // Back on FanFiction.net: it carries on.
+  h.fill.ffnPageActivity();
+  await h.clock.advance(BACKFILL_SETTLE_MS);
+  assert.equal(h.site.requests.length, 1);
+});
+
+test("a sign-out during a step writes nothing back and sends nothing", async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const h = harness({ answer: async (url) => { await gate; return siteAnswer(url); } });
+  const saving = h.fill.storySaved(savedStory("101", { ffnAuthorId: "7" }), false);
+  await settle();
+  assert.equal(h.site.requests.length, 1);
+
+  await h.fill.clear();
+  release();
+  await saving;
+  await settle();
+
+  assert.equal(FFN_SUMMARY_STATE_KEY in h.area.values, false);
+  assert.equal(h.contributions.length, 0);
+  // Not marked finished: the next sign-in's backfill can still run.
+  h.fill.ffnPageActivity();
+  assert.equal(h.clock.pending(), 1);
+});
+
+test("without session storage the backfill never runs, and a save is still read", async () => {
+  const clock = fakeClock();
+  const site = siteFetch(siteAnswer);
+  const contributions = [];
+  const gapReads = [];
+  const fill = new FfnSummaryFill({
+    fetch: site.fetchImpl,
+    clock,
+    state: new SessionFillState(null),
+    account: () => "reader-1:1",
+    contributionsEnabled: async () => true,
+    hostAllowed: async () => true,
+    listGaps: async () => { gapReads.push(1); return ["11"]; },
+    contribute: async (summaries) => { contributions.push(summaries); return "accepted"; },
+  });
+  fill.ffnPageActivity();
+  assert.equal(clock.pending(), 0);
+  await clock.advance(BACKFILL_GAP_MS);
+  assert.equal(gapReads.length, 0);
+
+  await fill.storySaved(savedStory("101", { ffnAuthorId: "7" }), false);
+  assert.equal(site.requests.length, 1);
+  assert.equal(contributions.length, 1);
+});
+
+test("a page with no readable stream is not read at all", async () => {
+  const clock = fakeClock();
+  let texted = false;
+  const response = {
+    url: "https://m.fanfiction.net/u/7/?a=s",
+    status: 200,
+    headers: new Headers({ "content-type": "text/html" }),
+    body: null,
+    async text() { texted = true; return authorPage("7", ["101"]); },
+  };
+  const read = await readFfnAuthorSummaries(async () => response, "7", ["101"], clock);
+  assert.deepEqual(read, { kind: "stop", reason: "missing" });
+  assert.equal(texted, false);
+});
+
+test("the save reply says whether Trace already knows the summary", async () => {
+  const { StoryCommandApi } = await import("../../.trace-build/extension-runtime/story-command.mjs");
+  const entry = {
+    status: "PLANNING", readerStatus: "PLANNING", canonicalReaderStatus: "SAVED",
+    entryId: "00000000-0000-4000-8000-000000000456", rating: 0,
+    privateContext: { hasNotes: false, tagCount: 0 }, chapters: { current: 0, total: 12 },
+  };
+  const reply = (extra) => async () => new Response(JSON.stringify({ success: true, data: {
+    entry_id: entry.entryId, type: "created", work_key: "ffn:7038840", entry,
+    syncVersion: "2026-10-15T00:00:01.000Z", ...extra,
+  } }), { status: 200 });
+  const command = {
+    intent: "ensure_saved", hostKind: "ffn", workKey: "ffn:7038840",
+    payload: { s: "ffn", at: "2026-10-15T00:00:00.000Z", item: { src: "ffn", ctx: "story", u: "https://www.fanfiction.net/s/7038840/" } },
+  };
+  for (const [extra, expected] of [[{ summary_known: true }, true], [{ summary_known: false }, false], [{}, undefined]]) {
+    const api = new StoryCommandApi(reply(extra), "https://api.tracefiction.com");
+    const result = await api.track("token", command);
+    assert.equal(result.value.kind, "confirmed");
+    assert.equal(result.value.confirmation.summaryKnown, expected);
   }
 });
 
 // --- Wired into the session runtime ------------------------------------------
 
-test("a save from the mobile story page reads the summary once and sends only identity and summary", async () => {
+async function wiredSave({ summaryKnown } = {}) {
   const { IDBFactory } = await import("fake-indexeddb");
   const { installSessionRuntime } = await import("../../.trace-build/extension-runtime/controller.mjs");
   const { BrowserPrivateRecordDatabase, PRIVATE_RECORD_KEYS } = await import(
@@ -471,6 +674,7 @@ test("a save from the mobile story page reads the summary once and sends only id
       return json({ success: true, data: {
         entry_id: entry.entryId, type: "created", work_key: "ffn:7038840", entry,
         syncVersion: "2026-10-15T00:00:01.000Z",
+        ...(summaryKnown === undefined ? {} : { summary_known: summaryKnown }),
       } });
     }
     if (route === "/api/extension/library/metadata-refresh") {
@@ -478,7 +682,7 @@ test("a save from the mobile story page reads the summary once and sends only id
     }
     return assert.fail(`unexpected ${route}`);
   };
-  const site = siteFetch(storyAnswer);
+  const site = siteFetch((url) => pageResponse(authorPage("2329859", ["7038840"]), { url }));
   const session = memoryArea();
   const contains = [];
   const controller = installSessionRuntime({
@@ -501,6 +705,7 @@ test("a save from the mobile story page reads the summary once and sends only id
   const mobileSender = { frameId: 0, tab: { id: 3, url: "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter" } };
   const save = () => controller.handle({
     type: "TRACE_QUICK_ADD",
+    ffnAuthorId: "2329859",
     payload: {
       s: "ffn",
       at: "2026-10-15T00:00:00.000Z",
@@ -513,17 +718,28 @@ test("a save from the mobile story page reads the summary once and sends only id
   await settle();
   await save();
   await settle();
+  return { site, apiCalls, contains, session };
+}
 
-  assert.deepEqual(site.requests.map(({ url }) => url), ["https://www.fanfiction.net/s/7038840/1/"]);
-  assert.deepEqual(contains, [{ origins: ["https://www.fanfiction.net/*"] }]);
+test("a save from the mobile story page reads the summary once and sends only identity and summary", async () => {
+  const { site, apiCalls, contains, session } = await wiredSave({ summaryKnown: false });
+
+  assert.deepEqual(site.requests.map(({ url }) => url), ["https://m.fanfiction.net/u/2329859/?a=s"]);
+  assert.deepEqual(contains, [{ origins: ["https://m.fanfiction.net/*"] }]);
   const refreshes = apiCalls.filter(({ route }) => route === "/api/extension/library/metadata-refresh");
   assert.deepEqual(refreshes.map(({ body }) => body), [{
     items: [{
       source: "ffn",
       sourceStoryId: "7038840",
       url: "https://www.fanfiction.net/s/7038840/",
-      summary: "Summary for 7038840, long enough to be a real one.",
+      summary: "Summary for 7038840 & more, long enough to be a real one.",
     }],
   }]);
   assert.equal(JSON.stringify(session.values).includes("<"), false);
+});
+
+test("no read when Trace says the saved story already has its summary", async () => {
+  const { site, apiCalls } = await wiredSave({ summaryKnown: true });
+  assert.equal(site.requests.length, 0);
+  assert.equal(apiCalls.some(({ route }) => route === "/api/extension/library/metadata-refresh"), false);
 });

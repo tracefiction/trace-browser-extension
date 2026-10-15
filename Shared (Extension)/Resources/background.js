@@ -4588,7 +4588,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       workKey,
       entryId,
       entry,
-      syncVersion: value.syncVersion
+      syncVersion: value.syncVersion,
+      ...typeof value.summary_known === "boolean" ? { summaryKnown: value.summary_known } : {}
     });
   }
   var StoryCommandApi = class {
@@ -6042,6 +6043,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   // src/extension-runtime/story-command-sender.mts
   var MAX_TRACK_PAYLOAD_BYTES = 64 * 1024;
   var HANDOFF_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+  var FFN_AUTHOR_ID_PATTERN = /^[1-9][0-9]{0,19}$/;
   var COMMAND_TYPES = Object.freeze({
     connectAndSave: "TRACE_CONNECT_AND_SAVE",
     quickAdd: "TRACE_QUICK_ADD",
@@ -6122,13 +6124,15 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     if (claimedWorkKey && claimedWorkKey !== payloadWorkKey) return null;
     const rawHandoffId = typeof message.handoffId === "string" ? message.handoffId.trim() : "";
     const handoffId = messageType === COMMAND_TYPES.connectAndSave && HANDOFF_ID_PATTERN.test(rawHandoffId) ? rawHandoffId : void 0;
+    const ffnAuthorId = hostKind2 === "ffn" && context === "story" && typeof message.ffnAuthorId === "string" && FFN_AUTHOR_ID_PATTERN.test(message.ffnAuthorId) ? message.ffnAuthorId : void 0;
     return Object.freeze({
       intent,
       hostKind: hostKind2,
       workKey: payloadWorkKey,
       payload,
       ...progress === void 0 ? {} : { progress },
-      ...handoffId === void 0 ? {} : { handoffId }
+      ...handoffId === void 0 ? {} : { handoffId },
+      ...ffnAuthorId === void 0 ? {} : { ffnAuthorId }
     });
   }
 
@@ -6797,7 +6801,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   };
 
   // src/extension-runtime/ffn-summary-fill.mts
-  var FFN_SUMMARY_HOST_PATTERN = "https://www.fanfiction.net/*";
+  var FFN_SUMMARY_HOST_PATTERN = "https://m.fanfiction.net/*";
   var FFN_SUMMARY_STATE_KEY = "traceFfnSummaryFillV1";
   var BACKFILL_SETTLE_MS = 2e4;
   var FFN_PRESENCE_GRACE_MS = 1e4;
@@ -6807,13 +6811,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var QUEUE_MAX = 50;
   var FETCH_TIMEOUT_MS = 1e4;
   var MAX_READ_BYTES = 256 * 1024;
-  var SUMMARY_WINDOW_CHARS = 16384;
+  var STORY_PAGE_MAX_READ_BYTES = 64 * 1024;
+  var ROW_MAX_CHARS = 8192;
   var SUMMARY_MAX_CHARS = 4e3;
-  var STORY_ID_PATTERN = /^[1-9][0-9]{0,19}$/;
+  var ID_PATTERN = /^[1-9][0-9]{0,19}$/;
   var ON_SAVE_PENDING_MAX = 5;
   var RECENT_MAX = 50;
-  var PROFILE_TOP_PATTERN = /<div\b[^>]*\bid\s*=\s*["']?profile_top\b[^>]*>/i;
-  var SUMMARY_DIV_PATTERN = /<div\b[^>]*\bclass\s*=\s*["'][^"']*\bxcontrast_txt\b[^"']*["'][^>]*>([\s\S]*?)<\/div\s*>/gi;
   var NAMED_ENTITIES = Object.freeze({
     amp: "&",
     lt: "<",
@@ -6841,36 +6844,51 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   function plainText(markup) {
     return decodeEntities(markup.replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
   }
-  function ffnSummaryFromStoryHtml(html) {
+  var STORY_CONTENT_PATTERN = /<div\b[^>]*\bid\s*=\s*["']?(?:content|profile_top)\b[^>]*>/i;
+  var AUTHOR_LINK_PATTERN = /<a\b[^>]*\bhref\s*=\s*["'][^"']*\/u\/([1-9][0-9]{0,19})(?:[/?#"'])/i;
+  function ffnAuthorIdFromStoryHtml(html) {
     if (typeof html !== "string") return null;
-    const top = PROFILE_TOP_PATTERN.exec(html);
-    if (top === null) return null;
-    const start = top.index + top[0].length;
-    const window = html.slice(start, start + SUMMARY_WINDOW_CHARS);
-    SUMMARY_DIV_PATTERN.lastIndex = 0;
-    for (let match = SUMMARY_DIV_PATTERN.exec(window); match !== null; match = SUMMARY_DIV_PATTERN.exec(window)) {
-      const text2 = plainText(match[1] ?? "");
-      if (!text2 || /^Rated:/i.test(text2)) continue;
-      return text2.slice(0, SUMMARY_MAX_CHARS);
-    }
-    return null;
+    const content = STORY_CONTENT_PATTERN.exec(html);
+    if (content === null) return null;
+    const block = html.slice(content.index, content.index + ROW_MAX_CHARS);
+    return AUTHOR_LINK_PATTERN.exec(block)?.[1] ?? null;
   }
-  function summaryBlockComplete(html) {
-    const top = PROFILE_TOP_PATTERN.exec(html);
-    if (top === null) return false;
-    const after = html.slice(top.index + top[0].length, top.index + top[0].length + SUMMARY_WINDOW_CHARS);
-    return /class\s*=\s*["'][^"']*\bxcontrast_txt\b[^"']*["'][^>]*>[\s\S]*?<\/div\s*>/i.test(after) || html.length - top.index >= SUMMARY_WINDOW_CHARS;
+  var ROW_START_PATTERN = /<div\b[^>]*\bclass\s*=\s*["'](?:[^"']*\s)?bs(?:\s[^"']*)?["'][^>]*>/gi;
+  var ROW_STORY_LINK_PATTERN = /<a\b[^>]*\bhref\s*=\s*["'][^"']*\/s\/([1-9][0-9]{0,19})\/[^>]*>/i;
+  var ROW_GRAY_PATTERN = /<div\b[^>]*\bclass\s*=\s*["'](?:[^"']*\s)?gray(?:\s[^"']*)?["'][^>]*>/i;
+  function ffnSummariesFromStoryListHtml(html) {
+    const summaries = /* @__PURE__ */ new Map();
+    if (typeof html !== "string") return { rows: 0, summaries };
+    const starts = [];
+    ROW_START_PATTERN.lastIndex = 0;
+    for (let match = ROW_START_PATTERN.exec(html); match !== null; match = ROW_START_PATTERN.exec(html)) {
+      starts.push(match.index);
+    }
+    let rows = 0;
+    starts.forEach((start, index) => {
+      const end = Math.min(starts[index + 1] ?? html.length, start + ROW_MAX_CHARS);
+      const row = html.slice(start, end);
+      const story = ROW_STORY_LINK_PATTERN.exec(row);
+      const gray = ROW_GRAY_PATTERN.exec(row);
+      if (story === null || gray === null) return;
+      rows += 1;
+      const beforeGray = row.slice(0, gray.index);
+      const lastLinkEnd = beforeGray.toLowerCase().lastIndexOf("</a>");
+      if (lastLinkEnd === -1) return;
+      const summary = plainText(beforeGray.slice(lastLinkEnd + 4)).slice(0, SUMMARY_MAX_CHARS);
+      const storyId = story[1];
+      if (summary && !summaries.has(storyId)) summaries.set(storyId, summary);
+    });
+    return { rows, summaries };
   }
   function isChallengePage(html, headers) {
     if (headers?.get("cf-mitigated")?.toLowerCase() === "challenge") return true;
     const head = html.slice(0, 8192);
     return /<title>\s*(?:just a moment|attention required|please wait)/i.test(head) || /\/cdn-cgi\/challenge-platform\//i.test(head) || /\bcf[-_]chl[-_]/i.test(head) || /\bchallenge-form\b/i.test(head);
   }
-  async function readBounded(response) {
+  async function readBounded(response, maxBytes, enough) {
     const body = response.body;
-    if (!body || typeof body.getReader !== "function") {
-      return (await response.text()).slice(0, MAX_READ_BYTES);
-    }
+    if (!body || typeof body.getReader !== "function") return "";
     const reader = body.getReader();
     const decoder = new TextDecoder();
     let text2 = "";
@@ -6881,27 +6899,21 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         if (done) break;
         bytes += value.byteLength;
         text2 += decoder.decode(value, { stream: true });
-        if (bytes >= MAX_READ_BYTES || summaryBlockComplete(text2)) break;
+        if (bytes >= maxBytes || enough(text2)) break;
       }
     } finally {
       void reader.cancel().catch(() => void 0);
     }
     return text2;
   }
-  function expectedStoryAddress(rawUrl, storyId) {
-    try {
-      const url = new URL(rawUrl);
-      return url.protocol === "https:" && url.hostname === "www.fanfiction.net" && (url.pathname === `/s/${storyId}` || url.pathname.startsWith(`/s/${storyId}/`));
-    } catch {
-      return false;
-    }
+  function discard(response) {
+    void response.body?.cancel().catch(() => void 0);
   }
-  async function readFfnStorySummary(fetchImpl, storyId, clock) {
-    if (!STORY_ID_PATTERN.test(storyId)) return { kind: "stop", reason: "error" };
+  async function readFfnPage(fetchImpl, clock, request) {
     const abort = new AbortController();
     const timer = clock.setTimeout(() => abort.abort(), FETCH_TIMEOUT_MS);
     try {
-      const response = await fetchImpl(`https://www.fanfiction.net/s/${storyId}/1/`, {
+      const response = await fetchImpl(request.url, {
         method: "GET",
         credentials: "include",
         redirect: "follow",
@@ -6910,39 +6922,76 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         headers: { Accept: "text/html" },
         signal: abort.signal
       });
-      if (!expectedStoryAddress(response.url, storyId)) {
-        void response.body?.cancel().catch(() => void 0);
+      let landed = null;
+      try {
+        landed = new URL(response.url);
+      } catch {
+        landed = null;
+      }
+      if (landed === null || landed.protocol !== "https:" || landed.hostname !== "m.fanfiction.net" || !request.expectedPath(landed.pathname)) {
+        discard(response);
         return { kind: "stop", reason: "redirect" };
       }
-      if (response.status !== 200) {
-        void response.body?.cancel().catch(() => void 0);
-        return { kind: "stop", reason: isChallengeHeader(response) ? "challenge" : "status" };
+      const challenged = response.headers.get("cf-mitigated")?.toLowerCase() === "challenge";
+      if (response.status !== 200 || challenged) {
+        discard(response);
+        return { kind: "stop", reason: challenged ? "challenge" : "status" };
       }
       if (!/text\/html/i.test(response.headers.get("content-type") ?? "")) {
-        void response.body?.cancel().catch(() => void 0);
+        discard(response);
         return { kind: "stop", reason: "not_html" };
       }
-      if (isChallengeHeader(response)) {
-        void response.body?.cancel().catch(() => void 0);
-        return { kind: "stop", reason: "challenge" };
-      }
-      const html = await readBounded(response);
+      const html = await readBounded(response, request.maxBytes, request.enough);
       if (isChallengePage(html)) return { kind: "stop", reason: "challenge" };
-      const summary = ffnSummaryFromStoryHtml(html);
-      return summary === null ? { kind: "stop", reason: "missing" } : { kind: "found", summary };
+      return { kind: "page", html };
     } catch {
       return { kind: "stop", reason: "error" };
     } finally {
       clock.clearTimeout(timer);
     }
   }
-  function isChallengeHeader(response) {
-    return response.headers.get("cf-mitigated")?.toLowerCase() === "challenge";
+  async function lookUpFfnAuthorId(fetchImpl, storyId, clock) {
+    if (!ID_PATTERN.test(storyId)) return { kind: "stop", reason: "error" };
+    const page = await readFfnPage(fetchImpl, clock, {
+      url: `https://m.fanfiction.net/s/${storyId}/1/`,
+      expectedPath: (pathname) => pathname === `/s/${storyId}` || pathname.startsWith(`/s/${storyId}/`),
+      maxBytes: STORY_PAGE_MAX_READ_BYTES,
+      enough: (text2) => ffnAuthorIdFromStoryHtml(text2) !== null
+    });
+    if (page.kind === "stop") return page;
+    const authorId = ffnAuthorIdFromStoryHtml(page.html);
+    return authorId === null ? { kind: "stop", reason: "missing" } : { kind: "found", authorId };
+  }
+  async function readFfnAuthorSummaries(fetchImpl, authorId, wanted, clock) {
+    if (!ID_PATTERN.test(authorId)) return { kind: "stop", reason: "error" };
+    const page = await readFfnPage(fetchImpl, clock, {
+      url: `https://m.fanfiction.net/u/${authorId}/?a=s`,
+      expectedPath: (pathname) => pathname === `/u/${authorId}` || pathname.startsWith(`/u/${authorId}/`),
+      maxBytes: MAX_READ_BYTES,
+      enough: (text2) => {
+        const { summaries: summaries2 } = ffnSummariesFromStoryListHtml(text2);
+        return wanted.every((id) => summaries2.has(id));
+      }
+    });
+    if (page.kind === "stop") return page;
+    const { rows, summaries } = ffnSummariesFromStoryListHtml(page.html);
+    if (rows === 0) return { kind: "stop", reason: "missing" };
+    const found = /* @__PURE__ */ new Map();
+    for (const id of wanted) {
+      const summary = summaries.get(id);
+      if (summary !== void 0) found.set(id, summary);
+    }
+    return { kind: "found", summaries: found };
+  }
+  function validQueuedStory(value) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+    const record3 = value;
+    return Object.keys(record3).every((key) => key === "s" || key === "a") && typeof record3.s === "string" && ID_PATTERN.test(record3.s) && (record3.a === void 0 || typeof record3.a === "string" && ID_PATTERN.test(record3.a));
   }
   function validState(value) {
     if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
     const record3 = value;
-    if (record3.v !== 1 || typeof record3.account !== "string" || !Array.isArray(record3.queue) || record3.queue.length > QUEUE_MAX || !record3.queue.every((id) => typeof id === "string" && STORY_ID_PATTERN.test(id)) || typeof record3.listed !== "boolean" || typeof record3.stopped !== "boolean" || !Number.isSafeInteger(record3.backfills) || !Number.isSafeInteger(record3.saves) || typeof record3.lastStepAt !== "number" || !Number.isFinite(record3.lastStepAt)) {
+    if (record3.v !== 2 || typeof record3.account !== "string" || !Array.isArray(record3.queue) || record3.queue.length > QUEUE_MAX || !record3.queue.every(validQueuedStory) || typeof record3.listed !== "boolean" || typeof record3.stopped !== "boolean" || !Number.isSafeInteger(record3.backfills) || !Number.isSafeInteger(record3.saves) || typeof record3.lastStepAt !== "number" || !Number.isFinite(record3.lastStepAt)) {
       return null;
     }
     return record3;
@@ -6952,6 +7001,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #memory = null;
     constructor(area) {
       this.#area = area && typeof area.get === "function" ? area : null;
+    }
+    get sessionBacked() {
+      return this.#area !== null;
     }
     async read() {
       if (this.#area === null) return this.#memory;
@@ -6981,7 +7033,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   };
   function freshState(account) {
     return Object.freeze({
-      v: 1,
+      v: 2,
       account,
       queue: Object.freeze([]),
       listed: false,
@@ -7002,18 +7054,20 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #finished = false;
     #pendingSaves = 0;
     #savesInFlight = 0;
-    #lastSaveAt = 0;
+    #lastSaveAt = Number.NEGATIVE_INFINITY;
     #settleTimer = null;
     /** When a FanFiction.net page last spoke to Trace. */
     #lastFfnAt = Number.NEGATIVE_INFINITY;
+    /** When a page on another site last spoke to Trace. */
+    #lastElsewhereAt = Number.NEGATIVE_INFINITY;
+    /** Raised by every sign-out or account change; a step from before writes nothing. */
+    #generation = 0;
+    /** The generation the running step started in. */
+    #runGeneration = 0;
     /** Stories read on save in this worker's lifetime, so a later chapter does not read again. */
     #recent = [];
     constructor(ports) {
       this.#ports = ports;
-    }
-    /** Whether a backfill read is waiting to run. */
-    hasPendingTimer() {
-      return this.#settleTimer !== null;
     }
     /** A save to Trace is starting. */
     saveStarted() {
@@ -7039,12 +7093,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       const storyId = storyIdFromWorkKey(story.workKey);
       if (storyId === null || this.#recent.includes(storyId)) return Promise.resolve();
       if (this.#pendingSaves >= ON_SAVE_PENDING_MAX) return Promise.resolve();
+      const authorId = typeof story.ffnAuthorId === "string" && ID_PATTERN.test(story.ffnAuthorId) ? story.ffnAuthorId : void 0;
       this.#recent.push(storyId);
       if (this.#recent.length > RECENT_MAX) this.#recent.shift();
       this.#pendingSaves += 1;
       return this.#serial(async () => {
         try {
-          await this.#readOnSave(storyId);
+          await this.#readOnSave(storyId, authorId);
         } finally {
           this.#pendingSaves -= 1;
         }
@@ -7056,15 +7111,27 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
      */
     ffnPageActivity() {
       this.#lastFfnAt = this.#ports.clock.now();
-      if (this.#finished) return;
+      if (this.#finished || !this.#ports.state.sessionBacked) return;
       if (this.#settleTimer !== null) this.#ports.clock.clearTimeout(this.#settleTimer);
       this.#settleTimer = this.#ports.clock.setTimeout(() => {
         this.#settleTimer = null;
         void this.#serial(() => this.#backfillStep());
       }, BACKFILL_SETTLE_MS);
     }
+    /**
+     * A page on another site (AO3, Trace) spoke to Trace: the reader has moved
+     * on, so no backfill runs until a FanFiction.net page speaks again.
+     */
+    elsewherePageActivity() {
+      this.#lastElsewhereAt = this.#ports.clock.now();
+      if (this.#settleTimer !== null) {
+        this.#ports.clock.clearTimeout(this.#settleTimer);
+        this.#settleTimer = null;
+      }
+    }
     /** Sign-out or another account: forget everything and stop. */
     async clear() {
+      this.#generation += 1;
       if (this.#settleTimer !== null) {
         this.#ports.clock.clearTimeout(this.#settleTimer);
         this.#settleTimer = null;
@@ -7075,6 +7142,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     #serial(work) {
       const run = this.#tail.then(async () => {
+        this.#runGeneration = this.#generation;
         try {
           await work();
         } catch {
@@ -7082,6 +7150,19 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       });
       this.#tail = run;
       return run;
+    }
+    /** Whether the running step still belongs to the current sign-in. */
+    #current() {
+      return this.#runGeneration === this.#generation;
+    }
+    /** Writes state only for the current sign-in; false when the step is stale. */
+    async #write(state) {
+      if (!this.#current()) return false;
+      await this.#ports.state.write(state);
+      return this.#current();
+    }
+    #finish() {
+      if (this.#current()) this.#finished = true;
     }
     /** The session's state for the signed-in account, or null when signed out. */
     async #state() {
@@ -7091,79 +7172,94 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         return null;
       }
       const stored = await this.#ports.state.read();
+      if (!this.#current()) return null;
       if (stored !== null && stored.account === account) return stored;
       this.#finished = false;
       const fresh = freshState(account);
-      await this.#ports.state.write(fresh);
-      return fresh;
+      return await this.#write(fresh) ? fresh : null;
     }
     async #stop(state) {
-      this.#finished = true;
-      await this.#ports.state.write(Object.freeze({ ...state, stopped: true, queue: Object.freeze([]) }));
+      this.#finish();
+      await this.#write(Object.freeze({ ...state, stopped: true, queue: Object.freeze([]) }));
     }
-    /** Reads one story and sends its summary. Returns false when the session stops. */
-    async #fill(state, storyId) {
-      let enabled = false;
-      try {
-        enabled = await this.#ports.contributionsEnabled();
-      } catch {
-        enabled = false;
-      }
-      if (!enabled) {
-        await this.#stop(state);
-        return false;
-      }
+    /** Whether a request may be made now; stops the session when it may not. */
+    async #mayRequest(state) {
       let allowed = false;
       try {
-        allowed = await this.#ports.hostAllowed();
+        allowed = await this.#ports.contributionsEnabled() && await this.#ports.hostAllowed();
       } catch {
         allowed = false;
       }
-      if (!allowed) {
-        await this.#stop(state);
-        return false;
-      }
-      const read = await readFfnStorySummary(this.#ports.fetch, storyId, this.#ports.clock);
+      if (!allowed) await this.#stop(state);
+      return allowed;
+    }
+    /**
+     * Reads one author's story list and sends the summaries of every waiting
+     * story on it. Returns the state after it, or null when the session stopped.
+     */
+    async #readAuthor(state, authorId, storyIds) {
+      const read = await readFfnAuthorSummaries(this.#ports.fetch, authorId, storyIds, this.#ports.clock);
       if (read.kind !== "found") {
         await this.#stop(state);
-        return false;
+        return null;
       }
-      if (this.#ports.account() !== state.account) return false;
+      const done = new Set(storyIds);
+      const next = Object.freeze({
+        ...state,
+        queue: Object.freeze(state.queue.filter(({ s }) => !done.has(s)))
+      });
+      if (!await this.#write(next)) return null;
+      if (read.summaries.size === 0) return next;
+      if (this.#ports.account() !== state.account || !this.#current()) return null;
       let outcome = "failed";
       try {
-        outcome = await this.#ports.contribute(storyId, read.summary);
+        outcome = await this.#ports.contribute(
+          [...read.summaries].map(([storyId, summary]) => Object.freeze({ storyId, summary }))
+        );
       } catch {
         outcome = "failed";
       }
       if (outcome !== "accepted") {
-        await this.#stop(state);
-        return false;
+        await this.#stop(next);
+        return null;
       }
-      return true;
+      return next;
     }
-    async #readOnSave(storyId) {
-      const state = await this.#state();
+    /** The waiting stories by one author, this one first. */
+    #byAuthor(state, storyId, authorId) {
+      return [storyId, ...state.queue.filter(({ s, a }) => a === authorId && s !== storyId).map(({ s }) => s)];
+    }
+    async #readOnSave(storyId, knownAuthorId) {
+      let state = await this.#state();
       if (state === null || state.stopped || state.saves >= ON_SAVE_MAX_PER_SESSION) return;
-      const counted = Object.freeze({
-        ...state,
-        saves: state.saves + 1,
-        lastStepAt: this.#ports.clock.now(),
-        queue: Object.freeze(state.queue.filter((id) => id !== storyId))
-      });
-      await this.#ports.state.write(counted);
-      await this.#fill(counted, storyId);
+      state = Object.freeze({ ...state, saves: state.saves + 1, lastStepAt: this.#ports.clock.now() });
+      if (!await this.#write(state)) return;
+      if (!await this.#mayRequest(state)) return;
+      let authorId = knownAuthorId;
+      if (authorId === void 0) {
+        const lookup = await lookUpFfnAuthorId(this.#ports.fetch, storyId, this.#ports.clock);
+        if (lookup.kind !== "found") {
+          await this.#stop(state);
+          return;
+        }
+        authorId = lookup.authorId;
+        if (!this.#current()) return;
+      }
+      await this.#readAuthor(state, authorId, this.#byAuthor(state, storyId, authorId));
     }
     async #backfillStep() {
+      if (!this.#ports.state.sessionBacked) return;
       const now = this.#ports.clock.now();
       if (this.#savesInFlight > 0 || now - this.#lastSaveAt < BACKFILL_SETTLE_MS) return;
       const state = await this.#state();
       if (state === null) return;
       if (state.stopped || state.listed && state.queue.length === 0 || state.backfills >= BACKFILL_MAX_PER_SESSION) {
-        this.#finished = true;
+        this.#finish();
         return;
       }
       if (now - state.lastStepAt < BACKFILL_GAP_MS) return;
       if (now - this.#lastFfnAt > BACKFILL_SETTLE_MS + FFN_PRESENCE_GRACE_MS) return;
+      if (this.#lastElsewhereAt >= this.#lastFfnAt) return;
       if (!state.listed) {
         let enabled = false;
         try {
@@ -7180,8 +7276,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           await this.#stop(state);
           return;
         }
-        const queue = gaps.filter((id) => typeof id === "string" && STORY_ID_PATTERN.test(id)).filter((id, index, all) => all.indexOf(id) === index && !this.#recent.includes(id)).slice(0, QUEUE_MAX);
-        await this.#ports.state.write(Object.freeze({
+        const queue = gaps.filter((id) => typeof id === "string" && ID_PATTERN.test(id)).filter((id, index, all) => all.indexOf(id) === index && !this.#recent.includes(id)).slice(0, QUEUE_MAX).map((s) => Object.freeze({ s }));
+        await this.#write(Object.freeze({
           ...state,
           listed: true,
           queue: Object.freeze(queue),
@@ -7189,19 +7285,30 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         }));
         return;
       }
-      const [storyId, ...rest] = state.queue;
-      if (storyId === void 0) return;
-      const next = Object.freeze({
+      const head = state.queue[0];
+      if (head === void 0) return;
+      const counted = Object.freeze({
         ...state,
-        queue: Object.freeze(rest),
         backfills: state.backfills + 1,
         lastStepAt: now
       });
-      await this.#ports.state.write(next);
-      const carryOn = await this.#fill(next, storyId);
-      if (!carryOn || rest.length === 0 || next.backfills >= BACKFILL_MAX_PER_SESSION) {
-        this.#finished = true;
+      if (!await this.#write(counted)) return;
+      if (!await this.#mayRequest(counted)) return;
+      if (head.a === void 0) {
+        const lookup = await lookUpFfnAuthorId(this.#ports.fetch, head.s, this.#ports.clock);
+        if (lookup.kind !== "found") {
+          await this.#stop(counted);
+          return;
+        }
+        await this.#write(Object.freeze({
+          ...counted,
+          queue: Object.freeze([Object.freeze({ s: head.s, a: lookup.authorId }), ...counted.queue.slice(1)])
+        }));
+      } else {
+        const next = await this.#readAuthor(counted, head.a, this.#byAuthor(counted, head.s, head.a));
+        if (next !== null && next.queue.length === 0) this.#finish();
       }
+      if (counted.backfills >= BACKFILL_MAX_PER_SESSION) this.#finish();
     }
   };
 
@@ -7656,20 +7763,20 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           });
           return result.kind === "published" ? result.value : null;
         },
-        contribute: async (storyId, summary) => {
+        contribute: async (summaries) => {
           const result = await this.#metadataContributions.execute(Object.freeze({
             kind: "library_metadata_refresh",
             hostKind: "ffn",
-            workKeys: Object.freeze([`ffn:${storyId}`]),
+            workKeys: Object.freeze(summaries.map(({ storyId }) => `ffn:${storyId}`)),
             // Identity and the summary only. The address is the form every
             // FanFiction.net save already records.
             payload: Object.freeze({
-              items: Object.freeze([Object.freeze({
+              items: Object.freeze(summaries.map(({ storyId, summary }) => Object.freeze({
                 source: "ffn",
                 sourceStoryId: storyId,
                 url: `https://www.fanfiction.net/s/${storyId}/`,
                 summary
-              })])
+              })))
             })
           }));
           return result.kind === "accepted" ? "accepted" : result.kind === "skipped" ? "skipped" : "failed";
@@ -7724,8 +7831,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return this.#service.snapshot();
     }
     async handle(message, sender) {
-      if (this.#ffnSummaries !== null && archiveHostKindFromSender(sender) === "ffn") {
-        this.#ffnSummaries.ffnPageActivity();
+      if (this.#ffnSummaries !== null && typeof sender?.tab?.id === "number") {
+        if (archiveHostKindFromSender(sender) === "ffn") this.#ffnSummaries.ffnPageActivity();
+        else this.#ffnSummaries.elsewherePageActivity();
       }
       const response = await this.#dispatch(message, sender);
       if (this.#mode !== "kernel" || !isRecord18(response) || !isRecord18(response.snapshot) || !isSupportedArchiveSender(sender)) {
@@ -8191,7 +8299,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       } finally {
         summaries.saveEnded();
       }
-      if (evidence.result.kind === "confirmed") {
+      if (evidence.result.kind === "confirmed" && // Trace already has this story's summary: nothing to read.
+      evidence.result.confirmation.summaryKnown !== true) {
         void summaries.storySaved(command, alreadyInLibrary);
       }
       return evidence;

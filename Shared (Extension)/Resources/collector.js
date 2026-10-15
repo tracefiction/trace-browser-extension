@@ -111,7 +111,49 @@ var TRACE_MANUAL_MODE_HELD_MESSAGES = [
   "TRACE_FINISH_QUALIFICATION_SIGNAL",
 ];
 
+// FanFiction.net's story page as iPhone shows it has no summary. A save from
+// such a page names the story's author beside it (never inside the payload,
+// which goes to Trace), so the background can read the summary from the
+// author's story list.
+var FFN_AUTHOR_HINT_MESSAGES = ["TRACE_AUTO_TRACK", "TRACE_QUICK_ADD", "TRACE_CONNECT_AND_SAVE"];
+
+function ffnAuthorIdOnStoryPage() {
+  try {
+    if (!/^(?:www|m)\.fanfiction\.net$/i.test(location.hostname)) return null;
+    if (!/^\/s\/\d+(?:\/|$)/.test(location.pathname || "")) return null;
+    var block = one(document, "#profile_top") || one(document, "#content");
+    var link = block ? one(block, 'a[href*="/u/"]') : null;
+    var match = link ? String(link.getAttribute("href") || "").match(/\/u\/([1-9]\d{0,19})(?:[/?#]|$)/) : null;
+    return match ? match[1] : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function withFfnAuthorHint(message) {
+  if (
+    !message ||
+    FFN_AUTHOR_HINT_MESSAGES.indexOf(message.type) === -1 ||
+    message.ffnAuthorId !== undefined
+  ) {
+    return message;
+  }
+  var item = message.payload && message.payload.item;
+  if (!item || item.src !== "ffn" || item.ctx !== "story" || (item.sm && String(item.sm).trim())) {
+    return message;
+  }
+  var authorId = ffnAuthorIdOnStoryPage();
+  if (!authorId) return message;
+  var out = {};
+  for (var key in message) {
+    if (Object.prototype.hasOwnProperty.call(message, key)) out[key] = message[key];
+  }
+  out.ffnAuthorId = authorId;
+  return out;
+}
+
 function sendCollectorMessage(message, onResponse, timeoutMs) {
+  message = withFfnAuthorHint(message);
   var expectsResponse = typeof onResponse === "function";
   var respond = expectsResponse ? onResponse : function () {};
   if (
@@ -3922,7 +3964,7 @@ function handleCollectorMessage(msg, sender, sendResponse, relayCommand) {
     try { popupPayload = quickAddPayloadForCurrentPage(); }
     catch (error) { sendResponse({ ok: false, error: String(error && error.message || error) }); return false; }
     popupQuickAddPending = true;
-    (relayCommand || sendCollectorMessage)({ type: "TRACE_QUICK_ADD", payload: popupPayload }, function (response) {
+    (relayCommand || sendCollectorMessage)(withFfnAuthorHint({ type: "TRACE_QUICK_ADD", payload: popupPayload }), function (response) {
       popupQuickAddPending = false;
       if (response && response.ok) renderQuickAddButton(popupWorkKey);
       sendResponse(response || { ok: false, error: "runtime_error" });

@@ -53,6 +53,7 @@ function confirmedStorySave(
     entryId,
     entry,
     syncVersion: value.syncVersion,
+    ...(typeof value.summary_known === "boolean" ? { summaryKnown: value.summary_known } : {}),
   });
 }
 

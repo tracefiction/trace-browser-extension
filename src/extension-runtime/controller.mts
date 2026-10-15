@@ -558,20 +558,20 @@ export class SessionRuntimeController {
         });
         return result.kind === "published" ? result.value : null;
       },
-      contribute: async (storyId, summary): Promise<ContributionOutcome> => {
+      contribute: async (summaries): Promise<ContributionOutcome> => {
         const result = await this.#metadataContributions.execute(Object.freeze({
           kind: "library_metadata_refresh",
           hostKind: "ffn",
-          workKeys: Object.freeze([`ffn:${storyId}`]),
+          workKeys: Object.freeze(summaries.map(({ storyId }) => `ffn:${storyId}`)),
           // Identity and the summary only. The address is the form every
           // FanFiction.net save already records.
           payload: Object.freeze({
-            items: Object.freeze([Object.freeze({
+            items: Object.freeze(summaries.map(({ storyId, summary }) => Object.freeze({
               source: "ffn",
               sourceStoryId: storyId,
               url: `https://www.fanfiction.net/s/${storyId}/`,
               summary,
-            })]),
+            }))),
           }),
         }));
         return result.kind === "accepted"
@@ -633,8 +633,9 @@ export class SessionRuntimeController {
   ): Promise<RuntimeHandleResponse> {
     // A FanFiction.net page spoke: the reader is there. Any summary backfill
     // waits until its pages have been quiet for a while.
-    if (this.#ffnSummaries !== null && archiveHostKindFromSender(sender) === "ffn") {
-      this.#ffnSummaries.ffnPageActivity();
+    if (this.#ffnSummaries !== null && typeof sender?.tab?.id === "number") {
+      if (archiveHostKindFromSender(sender) === "ffn") this.#ffnSummaries.ffnPageActivity();
+      else this.#ffnSummaries.elsewherePageActivity();
     }
     const response = await this.#dispatch(message, sender);
     // An AO3 or FanFiction.net page keeps reading evidence and unconfirmed
@@ -1274,7 +1275,11 @@ export class SessionRuntimeController {
     } finally {
       summaries.saveEnded();
     }
-    if (evidence.result.kind === "confirmed") {
+    if (
+      evidence.result.kind === "confirmed" &&
+      // Trace already has this story's summary: nothing to read.
+      evidence.result.confirmation.summaryKnown !== true
+    ) {
       // Never delays the save's own answer.
       void summaries.storySaved(command, alreadyInLibrary);
     }

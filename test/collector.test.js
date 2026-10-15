@@ -9257,3 +9257,27 @@ test("a story page drops what it showed for the previous account when the accoun
     "the first reader's status is not shown to the second reader");
   h.dom.window.close();
 });
+
+test("an FFN story save with no summary names the story's author beside the payload", () => {
+  const save = (item) => ({ type: "TRACE_AUTO_TRACK", payload: { s: "ffn", at: "2026-10-15T00:00:00.000Z", item } });
+  const mobileItem = { src: "ffn", ctx: "story", u: "https://www.fanfiction.net/s/7038840/", sm: null };
+
+  const mobile = createCollectorBindings(domFromFixture(
+    "ffn_story_mobile.html",
+    "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter",
+  ));
+  const hinted = mobile.withFfnAuthorHint(save(mobileItem));
+  assert.equal(hinted.ffnAuthorId, "2329859");
+  assert.deepEqual(plainJson(hinted.payload), plainJson(save(mobileItem).payload));
+  assert.equal("ffnAuthorId" in hinted.payload.item, false);
+
+  const desktop = createCollectorBindings(domFromFixture(
+    "ffn_story.html",
+    "https://www.fanfiction.net/s/7038840/1/A-Chance-Encounter",
+  ));
+  assert.equal(desktop.withFfnAuthorHint(save(mobileItem)).ffnAuthorId, "2329859");
+  // A save that carries its summary, a listing row or another message is left alone.
+  assert.equal(desktop.withFfnAuthorHint(save({ ...mobileItem, sm: "A summary." })).ffnAuthorId, undefined);
+  assert.equal(desktop.withFfnAuthorHint(save({ ...mobileItem, ctx: "listing" })).ffnAuthorId, undefined);
+  assert.equal(desktop.withFfnAuthorHint({ type: "TRACE_METADATA_BROADCAST", payload: save(mobileItem).payload }).ffnAuthorId, undefined);
+});
