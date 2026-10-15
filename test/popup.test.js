@@ -677,7 +677,7 @@ for (const promiseRuntime of [false, true]) {
     assert.equal(h.document.getElementById("popup-earned-kicker").hidden, true);
     assert.equal(
       h.document.getElementById("popup-earned-heading").textContent,
-      "Let Trace save stories as you read",
+      "Let Trace save stories automatically",
     );
     assert.equal(
       h.document.getElementById("popup-earned-lead").textContent,
@@ -994,7 +994,7 @@ test("earned-permission previously declined state still requires access and neve
   );
   assert.equal(
     h.document.getElementById("popup-earned-heading").textContent,
-    "Let Trace save stories as you read",
+    "Let Trace save stories automatically",
   );
   assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "waiting");
 });
@@ -1019,7 +1019,7 @@ for (const promiseRuntime of [false, true]) {
     assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "waiting");
     assert.equal(
       h.document.getElementById("popup-earned-heading").textContent,
-      "Let Trace save stories as you read",
+      "Let Trace save stories automatically",
     );
   });
 }
@@ -1038,7 +1038,7 @@ test("earned-permission onboarding does not touch the save path before permissio
   assert.equal(h.document.getElementById("popup-earned-save").dataset.state, "waiting");
   assert.equal(
     h.document.getElementById("popup-earned-heading").textContent,
-    "Let Trace save stories as you read",
+    "Let Trace save stories automatically",
   );
   assert.equal(
     h.document.getElementById("popup-earned-primary").textContent,
@@ -2366,7 +2366,7 @@ test("setup: access that lapses during the wait hands the popup to the access pr
   pageRan();
   await settle(h, 12);
   assert.equal(h.document.body.dataset.tracePopupStateCode, "ask-on-story");
-  assert.equal(earnedHeading(h), "Let Trace save stories as you read");
+  assert.equal(earnedHeading(h), "Let Trace save stories automatically");
 
   // The account wait is over: neither its timers nor an account connecting
   // may write over the prompt.
@@ -2375,7 +2375,7 @@ test("setup: access that lapses during the wait hands the popup to the access pr
   await settle(h, 12);
   assert.equal(snapshotRequests(h), 1);
   assert.equal(h.document.body.dataset.tracePopupStateCode, "ask-on-story");
-  assert.equal(earnedHeading(h), "Let Trace save stories as you read");
+  assert.equal(earnedHeading(h), "Let Trace save stories automatically");
   assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Allow AO3 and FanFiction.net");
 });
 
@@ -3173,7 +3173,7 @@ test("an expired earned grant shows P3 lapse before a saved story can appear", a
   });
   for (let attempt = 0; attempt < 8; attempt += 1) await flush();
   assert.equal(h.document.body.dataset.tracePopupStateCode, "ask-on-story");
-  assert.equal(h.document.getElementById("popup-earned-heading").textContent, "Let Trace save stories as you read");
+  assert.equal(h.document.getElementById("popup-earned-heading").textContent, "Let Trace save stories automatically");
   assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Allow AO3 and FanFiction.net");
   assert.equal(h.document.getElementById("popup-earned-record").hidden, true);
   assert.equal(h.messages.some(({ type }) => type === "TRACE_SESSION_GET_SNAPSHOT"), false);
@@ -4613,7 +4613,7 @@ test("first tap: once the story sites are allowed, or on a build without it, the
   assert.equal(without.hostLifecycle.includes("trace-first-tap-popup-v1"), false);
   assert.equal(without.document.body.dataset.traceFirstTapState, undefined);
   assert.equal(without.document.getElementById("popup-earned-primary").textContent, ALLOW_BUTTON);
-  assert.equal(without.document.getElementById("popup-earned-heading").textContent, "Let Trace save stories as you read");
+  assert.equal(without.document.getElementById("popup-earned-heading").textContent, "Let Trace save stories automatically");
   assert.equal(without.document.getElementById("popup-earned-lead").textContent, "Tap Allow below, then Always Allow. Safari needs your permission before Trace can save as you read.");
   // With the switch off the sheet's own markup is never made.
   assert.equal(without.document.getElementById("popup-earned-ask"), null);
@@ -6671,7 +6671,7 @@ test("the ask on a story page, before the sheet, carries the same words and pict
     sessionSnapshot: { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" },
   });
   for (let attempt = 0; attempt < 10; attempt += 1) await flush();
-  assert.equal(story.document.getElementById("popup-earned-heading").textContent, "Let Trace save stories as you read");
+  assert.equal(story.document.getElementById("popup-earned-heading").textContent, "Let Trace save stories automatically");
   assert.equal(story.document.getElementById("popup-earned-lead").querySelector("b").textContent, "Always Allow");
   assert.equal(isDisplayed(story, story.document.getElementById("popup-earned-prompt")), true);
   assert.equal(shownText(story.document.getElementById("popup-earned-rule")), null);

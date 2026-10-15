@@ -1630,7 +1630,8 @@ function renderEarnedPermissionInvitation(story) {
   // On a story the body says what to tap and the picture shows it; on a list
   // the rule line says it.
   drawEarnedAsk(onStory ? "ask-on-story" : "ask-on-list", {
-    heading: FIRST_TAP_WORDS.listAskHeading,
+    // On a story, the sheet's own heading for the ask.
+    heading: onStory ? FIRST_TAP_WORDS.askHeading : FIRST_TAP_WORDS.listAskHeading,
     ...(onStory
       ? { bodyMarkup: FIRST_TAP_WORDS.askBody, spokenBody: FIRST_TAP_WORDS.askBodySpoken, prompt: true }
       : { body: FIRST_TAP_WORDS.listAskBody, rule: true }),
