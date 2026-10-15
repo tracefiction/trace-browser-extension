@@ -17,9 +17,12 @@
   const TEST_NAVIGATE_KEY = "__traceAo3SavedFiltersNavigate";
   const MAX_NAME_LENGTH = 96;
   const MAX_CONTEXT_LABEL_LENGTH = 120;
-  const MAX_SUMMARY_PARTS = 4;
-  const MAX_SUMMARY_PART_LENGTH = 48;
-  const MAX_SUMMARY_TEXT_LENGTH = 240;
+  // The stored summary is only a fallback for values the page's form can't
+  // label; what a filter keeps is otherwise read from its params at render
+  // time and shown in full. These bounds match what the sync service accepts.
+  const STORED_SUMMARY_PARTS = 5;
+  const STORED_SUMMARY_PART_LENGTH = 64;
+  const LIST_PREVIEW_COUNT = 8;
   const SAVED_FILTER_ACTIVE_LIMIT = 250;
   const SAVED_FILTER_LIMIT_WARNING_THRESHOLD = 200;
   const TRACE_EARNED_PERMISSION_GATE_ACTIVE =
@@ -38,11 +41,13 @@
     mode: "list",
     menuId: null,
     renameId: null,
+    renameDraft: "",
     confirmDeleteId: null,
     draftName: "",
     draftScope: "context",
-    collapsedGroups: {},
-    panelCollapsed: true,
+    showAll: false,
+    panelCollapsed: false,
+    retry: null,
     error: "",
     notice: "",
     presets: [],
@@ -180,6 +185,31 @@
     }
   }
 
+  // AO3 writes "." "/" "&" "?" "#" in tag URLs as *d* *s* *a* *q* *h*.
+  function decodeAo3TagName(value) {
+    var map = { d: ".", s: "/", a: "&", q: "?", h: "#" };
+    return cleanDisplayText(String(value || "").replace(/\*([dsaqh])\*/g, function (_, code) {
+      return map[code];
+    }));
+  }
+
+  // The tag as a reader would write it, for "{tag} only" and list labels.
+  function displayContextLabel() {
+    var ctx = getPageContext();
+    if (ctx && ctx.type === "tagPath") {
+      var match = ctx.path.match(/^\/tags\/([^/]+)\/works$/);
+      var raw = match ? match[1] : "";
+      try {
+        raw = decodeURIComponent(raw);
+      } catch (_) {
+        /* Keep the encoded name. */
+      }
+      return decodeAo3TagName(raw) || contextLabel();
+    }
+    if (ctx && ctx.type === "tagId") return decodeAo3TagName(ctx.tagId) || contextLabel();
+    return contextLabel();
+  }
+
   function contextLabel() {
     var ctx = getPageContext();
     if (ctx && ctx.label) return cleanDisplayText(ctx.label);
@@ -313,9 +343,7 @@
     var scope = raw.scope === "global" ? "global" : "context";
     var contextKey = String(raw.contextKey || "").trim();
     var contextLabel = cleanDisplayText(raw.contextLabel || "").slice(0, MAX_CONTEXT_LABEL_LENGTH);
-    var summary = Array.isArray(raw.summary)
-      ? compactSummaryParts(raw.summary)
-      : [];
+    var summary = storedSummaryParts(raw.summary);
     var updatedAt = typeof raw.updatedAt === "string" ? raw.updatedAt : new Date().toISOString();
     return {
       id: id,
@@ -395,7 +423,7 @@
     return {
       presets: sanitizePresets(res[STORAGE_KEY]),
       activeMeta: sanitizeActiveMeta(res[ACTIVE_KEY]),
-      panelCollapsed: res[PANEL_COLLAPSED_KEY] === false ? false : true,
+      panelCollapsed: res[PANEL_COLLAPSED_KEY] === true,
     };
   }
 
@@ -430,17 +458,12 @@
   }
 
   function cleanDisplayText(text) {
+    // AO3 labels end with a work count, "Fluff (12,636)", often followed by
+    // markup whitespace; trim first so the count is always dropped.
     return String(text || "")
       .replace(/\s+/g, " ")
-      .replace(/\s+\([\d,]+\)$/g, "")
-      .trim();
-  }
-
-  function truncateText(text, maxLength) {
-    var value = cleanDisplayText(text);
-    if (!maxLength || value.length <= maxLength) return value;
-    if (maxLength <= 3) return value.slice(0, maxLength);
-    return value.slice(0, maxLength - 1).replace(/\s+$/, "") + "…";
+      .trim()
+      .replace(/\s+\([\d,]+\)$/, "");
   }
 
   function escapeHtml(value) {
@@ -482,9 +505,18 @@
     return null;
   }
 
+  // A select's option text for a value, whatever the select currently shows.
   function selectOptionLabel(form, key, value) {
-    var control = findControlForPair(form, key, value);
-    if (!control || !control.options) return "";
+    if (!form || !form.elements) return "";
+    var control = null;
+    for (var e = 0; e < form.elements.length; e++) {
+      var el = form.elements[e];
+      if (el && el.options && String(el.name || "") === key) {
+        control = el;
+        break;
+      }
+    }
+    if (!control) return "";
     for (var i = 0; i < control.options.length; i++) {
       var option = control.options[i];
       if (String(option.value || "") === String(value || "")) {
@@ -494,79 +526,247 @@
     return "";
   }
 
-  function keyLabel(key) {
-    var labels = {
-      "work_search[sort_column]": "Sort",
-      "work_search[words_from]": "Words from",
-      "work_search[words_to]": "Words to",
-      "work_search[date_from]": "Updated from",
-      "work_search[date_to]": "Updated to",
-      "work_search[query]": "Search",
-      "work_search[language_id]": "Language",
-      "work_search[other_tag_names]": "Include",
-      "work_search[excluded_tag_names]": "Exclude",
-      "work_search[crossover]": "Crossovers",
-      "work_search[complete]": "Status",
-    };
-    if (labels[key]) return labels[key];
-    if (key.indexOf("include_work_search[") === 0) return "Include";
-    if (key.indexOf("exclude_work_search[") === 0) return "Exclude";
-    return "Filter";
+  // What a filter keeps, grouped in a fixed reading order. Every value is
+  // kept; nothing here shortens or drops a part.
+  var FILTER_GROUPS = [
+    { key: "include", label: "Include" },
+    { key: "exclude", label: "Exclude" },
+    { key: "rating", label: "Rating" },
+    { key: "warnings", label: "Warnings" },
+    { key: "category", label: "Category" },
+    { key: "status", label: "Status" },
+    { key: "crossovers", label: "Crossovers" },
+    { key: "words", label: "Words" },
+    { key: "updated", label: "Updated" },
+    { key: "language", label: "Language" },
+    { key: "search", label: "Search" },
+    { key: "sort", label: "Sort" },
+  ];
+
+  var SORT_LABELS = {
+    _score: "Best Match",
+    authors_to_sort_on: "Creator",
+    title_to_sort_on: "Title",
+    created_at: "Date Posted",
+    revised_at: "Date Updated",
+    word_count: "Word Count",
+    hits: "Hits",
+    kudos_count: "Kudos",
+    comments_count: "Comments",
+    bookmarks_count: "Bookmarks",
+  };
+
+  function fieldName(key) {
+    var match = String(key || "").match(/\[([^\]]+)\]/);
+    return match ? match[1] : "";
   }
 
-  function readableValueForPair(form, key, value) {
-    if (key === "work_search[sort_column]" || key === "work_search[language_id]") {
-      return selectOptionLabel(form, key, value) || value;
+  function groupForKey(key) {
+    var field = fieldName(key);
+    if (key.indexOf("exclude_work_search[") === 0 || field === "excluded_tag_names") return "exclude";
+    if (field === "rating_ids") return "rating";
+    if (field === "archive_warning_ids") return "warnings";
+    if (field === "category_ids") return "category";
+    if (key.indexOf("include_work_search[") === 0) return "include";
+    if (/^(?:other_tag_names|fandom_names|character_names|relationship_names|freeform_names)$/.test(field)) return "include";
+    if (field === "complete") return "status";
+    if (field === "crossover") return "crossovers";
+    if (field === "words_from" || field === "words_to" || field === "word_count") return "words";
+    if (field === "date_from" || field === "date_to" || field === "revised_at") return "updated";
+    if (field === "language_id") return "language";
+    if (field === "query") return "search";
+    if (field === "sort_column" || field === "sort_direction") return "sort";
+    return "other";
+  }
+
+  function otherFieldLabel(field) {
+    var text = String(field || "filter").replace(/_ids?$/, "").replace(/_/g, " ").trim() || "filter";
+    return text.charAt(0).toUpperCase() + text.slice(1);
+  }
+
+  function formatCount(value) {
+    var text = String(value || "").trim();
+    if (!/^\d+$/.test(text)) return text;
+    return Number(text).toLocaleString("en-US");
+  }
+
+  function lowerFirst(text) {
+    var value = String(text || "");
+    return value.charAt(0).toLowerCase() + value.slice(1);
+  }
+
+  // Returns the readable values for one pair and whether the page could
+  // label it. Tag ids the page's form doesn't list stay unlabelled.
+  function valuesForPair(form, key, field, group, value) {
+    if (/_ids$/.test(field)) {
+      var label = elementLabel(findControlForPair(form, key, value));
+      return label ? { values: [label], labelled: true } : { values: [value], labelled: false };
     }
-    var control = findControlForPair(form, key, value);
-    var label = elementLabel(control);
-    if (label) return label;
-    if (key === "work_search[complete]") {
-      if (value === "T") return "Complete works only";
-      if (value === "F") return "Works in progress only";
+    if (group === "include" || group === "exclude") {
+      var names = String(value).split(",").map(cleanDisplayText).filter(Boolean);
+      return { values: names.length ? names : [value], labelled: true };
     }
-    if (key === "work_search[crossover]") {
-      if (value === "F") return "Exclude crossovers";
-      if (value === "T") return "Show only crossovers";
+    if (group === "status") {
+      if (value === "T") return { values: ["Complete only"], labelled: true };
+      if (value === "F") return { values: ["In progress only"], labelled: true };
     }
-    return value;
+    if (group === "crossovers") {
+      if (value === "F") return { values: ["No crossovers"], labelled: true };
+      if (value === "T") return { values: ["Crossovers only"], labelled: true };
+    }
+    if (field === "language_id") {
+      var language = selectOptionLabel(form, key, value);
+      return language ? { values: [language], labelled: true } : { values: [value], labelled: false };
+    }
+    if (field === "sort_column") {
+      return { values: [selectOptionLabel(form, key, value) || SORT_LABELS[value] || value.replace(/_/g, " ")], labelled: true };
+    }
+    if (field === "sort_direction") {
+      if (value === "asc") return { values: ["ascending"], labelled: true };
+      if (value === "desc") return { values: ["descending"], labelled: true };
+    }
+    if (group === "other") {
+      var control = findControlForPair(form, key, value);
+      var type = String(control && control.type ? control.type : "").toLowerCase();
+      var controlLabel = type === "checkbox" || type === "radio" ? elementLabel(control) : "";
+      return { values: [controlLabel || cleanDisplayText(value)], labelled: true };
+    }
+    return { values: [cleanDisplayText(value)], labelled: true };
+  }
+
+  function wordsText(from, to) {
+    if (from && to) return formatCount(from) + "–" + formatCount(to) + " words";
+    if (from) return "At least " + formatCount(from) + " words";
+    return "Up to " + formatCount(to) + " words";
+  }
+
+  function datesText(from, to) {
+    if (from && to) return from + " to " + to;
+    if (from) return "Since " + from;
+    return "Until " + to;
+  }
+
+  // { groups: [{ key, label, values }], labelled } for a set of params.
+  function describePairs(pairs) {
+    var form = findFilterForm();
+    var buckets = {};
+    var others = [];
+    var words = {};
+    var dates = {};
+    var labelled = true;
+    function add(groupKey, label, values, valuesLabelled) {
+      if (!buckets[groupKey]) {
+        buckets[groupKey] = { key: groupKey.indexOf("other:") === 0 ? "other" : groupKey, label: label, values: [], labelled: true };
+        if (groupKey.indexOf("other:") === 0) others.push(buckets[groupKey]);
+      }
+      if (valuesLabelled === false) buckets[groupKey].labelled = false;
+      for (var v = 0; v < values.length; v++) {
+        if (values[v] && buckets[groupKey].values.indexOf(values[v]) < 0) buckets[groupKey].values.push(values[v]);
+      }
+    }
+    for (var i = 0; i < (pairs || []).length; i++) {
+      var key = String(pairs[i][0] || "");
+      var value = String(pairs[i][1] || "");
+      var field = fieldName(key);
+      var group = groupForKey(key);
+      if (field === "words_from" || field === "words_to") {
+        words[field] = value;
+        continue;
+      }
+      if (field === "date_from" || field === "date_to") {
+        dates[field] = value;
+        continue;
+      }
+      var result = valuesForPair(form, key, field, group, value);
+      if (!result.labelled) labelled = false;
+      if (group === "other") {
+        var bucket = "other:" + field;
+        add(bucket, otherFieldLabel(field), result.values, result.labelled);
+      } else {
+        add(group, "", result.values, result.labelled);
+      }
+    }
+    if (words.words_from || words.words_to) add("words", "", [wordsText(words.words_from, words.words_to)]);
+    if (dates.date_from || dates.date_to) add("updated", "", [datesText(dates.date_from, dates.date_to)]);
+    var groups = [];
+    for (var g = 0; g < FILTER_GROUPS.length; g++) {
+      var entry = buckets[FILTER_GROUPS[g].key];
+      if (entry && entry.values.length) {
+        groups.push({ key: FILTER_GROUPS[g].key, label: FILTER_GROUPS[g].label, values: entry.values, labelled: entry.labelled });
+      }
+    }
+    for (var o = 0; o < others.length; o++) {
+      if (others[o].values.length) groups.push(others[o]);
+    }
+    return { groups: groups, labelled: labelled };
+  }
+
+  // The compact row grammar: "Include Fluff, Hurt/Comfort · Complete only".
+  function compactPartForGroup(group) {
+    var joined = group.values.join(", ");
+    if (group.key === "include") return "Include " + joined;
+    if (group.key === "exclude") return "Exclude " + joined;
+    if (group.key === "updated") return "Updated " + lowerFirst(joined);
+    if (group.key === "language") return "In " + joined;
+    if (group.key === "search") return "Search: " + joined;
+    if (group.key === "sort") return "Sorted by " + joined.toLowerCase();
+    if (group.key === "other") return group.label + ": " + joined;
+    return joined;
   }
 
   function summaryForPairs(pairs) {
-    var form = findFilterForm();
+    return describePairs(pairs).groups.map(compactPartForGroup);
+  }
+
+  // Every part the page can name comes from the filter's own values. A part
+  // it can't name (a tag id from another fandom, say) takes the matching part
+  // of the summary stored at save time; parts past the stored cap are counted
+  // as "+N more".
+  function presetContentsText(preset) {
+    var description = describePairs(preset.params);
+    var groups = description.groups;
+    var stored = Array.isArray(preset.summary) ? preset.summary : [];
+    if (!description.labelled && stored.length) {
+      // The stored parts line up with the groups only when they were saved
+      // in the same grammar; an older save's summary is shown whole.
+      if (stored.length !== Math.min(groups.length, STORED_SUMMARY_PARTS)) return stored.join(" · ");
+      var parts = [];
+      var dropped = 0;
+      for (var i = 0; i < groups.length; i++) {
+        if (groups[i].labelled) parts.push(compactPartForGroup(groups[i]));
+        else if (i < stored.length) parts.push(stored[i]);
+        else dropped += 1;
+      }
+      if (dropped) parts.push("+" + dropped + " more");
+      return parts.join(" · ");
+    }
+    return groups.map(compactPartForGroup).join(" · ") || "AO3 filter";
+  }
+
+  function boundedPart(text) {
+    var value = cleanDisplayText(text);
+    if (value.length <= STORED_SUMMARY_PART_LENGTH) return value;
+    return value.slice(0, STORED_SUMMARY_PART_LENGTH - 1).replace(/\s+$/, "") + "…";
+  }
+
+  function storedSummaryParts(parts) {
+    if (!Array.isArray(parts)) return [];
+    return parts.map(boundedPart).filter(Boolean).slice(0, STORED_SUMMARY_PARTS);
+  }
+
+  // A short starting name from the first few things the filter keeps.
+  function suggestedNameForPairs(pairs) {
     var parts = [];
-    for (var i = 0; i < pairs.length; i++) {
-      var key = pairs[i][0];
-      var value = pairs[i][1];
-      var label = keyLabel(key);
-      var readable = readableValueForPair(form, key, value);
-      if (!readable) continue;
-      if (label === "Filter") parts.push(readable);
-      else parts.push(label + ": " + readable);
-    }
-    return compactSummaryParts(parts);
-  }
-
-  function compactSummaryParts(parts) {
-    var cleaned = (parts || []).map(function (part) {
-      return truncateText(part, MAX_SUMMARY_PART_LENGTH);
-    }).filter(Boolean);
-    var visible = cleaned.slice(0, MAX_SUMMARY_PARTS);
-    if (cleaned.length > MAX_SUMMARY_PARTS) {
-      visible.push("+" + (cleaned.length - MAX_SUMMARY_PARTS) + " more");
-    }
-    return visible;
-  }
-
-  function summaryTextFromParts(parts, fallback) {
-    return truncateText((parts || []).join(" | ") || fallback || "AO3 filter", MAX_SUMMARY_TEXT_LENGTH);
-  }
-
-  function suggestedNameForSummary(summary) {
-    var parts = (summary || []).map(function (part) {
-      return String(part || "").replace(/^[^:]+:\s*/, "");
-    }).filter(Boolean).slice(0, 3);
-    return (parts.join(" - ") || "AO3 filter").slice(0, MAX_NAME_LENGTH);
+    describePairs(pairs).groups.forEach(function (group) {
+      if (group.key === "include" || group.key === "rating" || group.key === "warnings" || group.key === "category") {
+        parts = parts.concat(group.values);
+      } else if (group.key === "exclude") {
+        parts = parts.concat(group.values.map(function (value) { return "Exclude " + value; }));
+      } else {
+        parts.push(compactPartForGroup(group));
+      }
+    });
+    return (parts.slice(0, 3).join(" · ") || "AO3 filter").slice(0, MAX_NAME_LENGTH).replace(/[\s·]+$/, "");
   }
 
   function buildApplyUrl(preset) {
@@ -684,97 +884,95 @@
     if (document.getElementById(STYLE_ID)) return;
     var style = document.createElement("style");
     style.id = STYLE_ID;
+    // The root's class and attribute together outrank AO3's form rules such as
+    // form.filters input[type="text"], so none of them reach the panel.
+    var R = "." + ROOT_ATTR + "[" + ROOT_ATTR + "]";
     style.textContent = [
-      "." + ROOT_ATTR + ", ." + ROOT_ATTR + " * { box-sizing: border-box; }",
-      "." + ROOT_ATTR + " { container-type: inline-size; margin: 0 0 14px; color: var(--trace-page-ink); font-family: -apple-system, BlinkMacSystemFont, system-ui, \"Segoe UI\", Roboto, sans-serif; font-size: 14px; line-height: 1.4; -webkit-font-smoothing: antialiased; }",
-      "." + ROOT_ATTR + " button, ." + ROOT_ATTR + " input { font: inherit; letter-spacing: 0; text-transform: none; text-shadow: none; }",
-      "." + ROOT_ATTR + " button { -webkit-appearance: none; appearance: none; background: transparent; background-image: none; border: 0; border-radius: 8px; box-shadow: none; color: inherit; cursor: pointer; margin: 0; min-height: 0; }",
-      "." + ROOT_ATTR + " :focus { outline: none; }",
-      "." + ROOT_ATTR + " :focus-visible { outline: 3px solid var(--trace-page-teal) !important; outline-offset: 2px; }",
-      "." + ROOT_ATTR + " .trace-sf-card { background: transparent; border: 0; border-bottom: 1px solid var(--trace-page-rule); border-radius: 0; box-shadow: none; overflow: visible; padding-bottom: 8px; }",
-      "." + ROOT_ATTR + " .trace-sf-head { display: flex; align-items: center; gap: 8px; height: auto; min-height: 44px; padding: 4px 0; text-align: left; width: 100%; }",
-      "." + ROOT_ATTR + " .trace-sf-head-text { display: flex; align-items: baseline; gap: 8px; min-width: 0; }",
-      "." + ROOT_ATTR + " .trace-sf-title-line { display: inline-flex; align-items: baseline; gap: 8px; min-width: 0; }",
-      "." + ROOT_ATTR + " .trace-sf-title { color: var(--trace-page-ink); font-size: 15px; font-weight: 600; line-height: 1.25; }",
-      "." + ROOT_ATTR + " .trace-sf-head-actions { align-items: center; display: inline-flex; flex: 0 0 auto; gap: 6px; margin-left: auto; white-space: nowrap; }",
-      "." + ROOT_ATTR + " .trace-sf-count { color: var(--trace-page-secondary); font-size: 12.5px; font-weight: 400; }",
-      "." + ROOT_ATTR + " .trace-sf-head-meta { color: var(--trace-page-secondary); display: none; font-size: 13px; line-height: 1.3; min-width: 0; overflow-wrap: anywhere; }",
-      "." + ROOT_ATTR + " .trace-sf-head-meta b { color: var(--trace-page-ink); font-weight: 500; }",
-      "." + ROOT_ATTR + " .trace-sf-panel-caret { align-items: center; color: var(--trace-page-tertiary); display: none; flex: 0 0 auto; justify-content: center; width: 12px; }",
-      "." + ROOT_ATTR + " .trace-sf-panel-caret svg { display: block; height: 12px; width: 12px; transition: transform 0.16s ease; }",
-      "." + ROOT_ATTR + " .trace-sf-panel-caret[data-collapsed='false'] svg { transform: rotate(180deg); }",
-      "." + ROOT_ATTR + " .trace-sf-spacer { flex: 1; }",
-      "." + ROOT_ATTR + " .trace-sf-panel { min-width: 0; }",
-      "." + ROOT_ATTR + " .trace-sf-status { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 8px; padding: 2px 0 6px; color: var(--trace-page-secondary); font-size: 13px; line-height: 1.35; }",
-      "." + ROOT_ATTR + " .trace-sf-check { color: var(--trace-page-ink); display: inline-flex; flex: 0 0 auto; height: 14px; width: 14px; }",
-      "." + ROOT_ATTR + " .trace-sf-check svg { display: block; height: 14px; width: 14px; }",
-      "." + ROOT_ATTR + " .trace-sf-status-main { flex: 1; min-width: 0; overflow-wrap: anywhere; }",
-      "." + ROOT_ATTR + " .trace-sf-status-main b { color: var(--trace-page-ink); font-weight: 500; }",
-      "." + ROOT_ATTR + " .trace-sf-status-actions { display: inline-flex; flex: 0 0 auto; gap: 0 12px; }",
-      "." + ROOT_ATTR + " .trace-sf-btn { align-items: center; color: var(--trace-page-teal); display: inline-flex; font-size: 14px; font-weight: 500; gap: 4px; justify-content: center; line-height: 1.2; min-height: 44px; padding: 0 8px; text-decoration: none; }",
-      "." + ROOT_ATTR + " .trace-sf-status-actions .trace-sf-btn { margin: 0 -8px; }",
-      "." + ROOT_ATTR + " .trace-sf-btn-ghost { color: var(--trace-page-secondary); }",
-      "." + ROOT_ATTR + " .trace-sf-btn-danger { color: var(--trace-page-warning); font-weight: 600; }",
-      "." + ROOT_ATTR + " .trace-sf-btn:disabled { cursor: default; opacity: 0.55; }",
-      "." + ROOT_ATTR + " .trace-sf-link { color: var(--trace-page-secondary); font-size: 14px; font-weight: 500; min-height: 44px; padding: 0 8px; }",
-      "." + ROOT_ATTR + " .trace-sf-list { max-height: 22rem; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }",
-      "." + ROOT_ATTR + " .trace-sf-group + .trace-sf-group { margin-top: 4px; }",
-      "." + ROOT_ATTR + " .trace-sf-group-head { align-items: center; color: var(--trace-page-secondary); display: flex; gap: 6px; justify-content: flex-start; min-height: 44px; padding: 0; text-align: left; width: 100%; }",
-      "." + ROOT_ATTR + " .trace-sf-group-caret { align-items: center; color: var(--trace-page-tertiary); display: inline-flex; flex: 0 0 auto; justify-content: center; width: 12px; }",
-      "." + ROOT_ATTR + " .trace-sf-group-caret svg { display: block; height: 12px; width: 12px; transition: transform 0.14s ease; }",
-      "." + ROOT_ATTR + " .trace-sf-group-caret[data-collapsed='false'] svg { transform: rotate(90deg); }",
-      "." + ROOT_ATTR + " .trace-sf-group-title { color: var(--trace-page-secondary); flex: 1; font-size: 12px; font-weight: 600; min-width: 0; }",
-      "." + ROOT_ATTR + " .trace-sf-group-count { color: var(--trace-page-secondary); flex: 0 0 auto; font-size: 12px; font-weight: 400; }",
-      "." + ROOT_ATTR + " .trace-sf-group-body { background: var(--trace-page-surface); border-radius: 14px; box-shadow: inset 0 0 0 1px var(--trace-page-rule); padding: 0 4px 0 12px; }",
-      "." + ROOT_ATTR + " .trace-sf-row { background: transparent; border-top: 1px solid var(--trace-page-rule); position: relative; }",
-      "." + ROOT_ATTR + " .trace-sf-group-body .trace-sf-row:first-child { border-top: 0; }",
-      "." + ROOT_ATTR + " .trace-sf-row-inner { display: grid; grid-template-columns: 22px minmax(0, 1fr) 44px; align-items: center; min-height: 52px; min-width: 0; }",
-      "." + ROOT_ATTR + " .trace-sf-edge { align-self: center; color: var(--trace-page-ink); display: inline-flex; height: 14px; width: 14px; }",
-      "." + ROOT_ATTR + " .trace-sf-edge svg { display: block; height: 14px; width: 14px; }",
-      "." + ROOT_ATTR + " .trace-sf-main { display: block; min-width: 0; overflow: hidden; padding: 8px 6px 8px 0; text-align: left; white-space: normal; width: 100%; }",
-      "." + ROOT_ATTR + " .trace-sf-row-title { display: block; min-width: 0; }",
-      "." + ROOT_ATTR + " .trace-sf-name { color: var(--trace-page-ink); display: block; font-size: 14px; font-weight: 500; line-height: 1.3; overflow-wrap: anywhere; }",
-      "." + ROOT_ATTR + " .trace-sf-summary { color: var(--trace-page-secondary); display: block; font-size: 12.5px; line-height: 1.35; margin-top: 2px; overflow-wrap: anywhere; }",
-      "." + ROOT_ATTR + " .trace-sf-menu-btn { align-items: center; color: var(--trace-page-tertiary); display: inline-flex; height: 44px; justify-content: center; padding: 0; width: 44px; }",
-      "." + ROOT_ATTR + " .trace-sf-menu-btn svg { display: block; height: 16px; width: 16px; }",
-      "." + ROOT_ATTR + " .trace-sf-manage { align-items: center; border-top: 1px solid var(--trace-page-rule); display: flex; flex-wrap: wrap; gap: 0 14px; margin: 0 0 0 22px; animation: trace-sf-reveal 0.14s ease-out both; }",
-      "." + ROOT_ATTR + " .trace-sf-manage button { color: var(--trace-page-teal); font-size: 13px; font-weight: 500; line-height: 1.2; margin: 0 -8px; min-height: 44px; padding: 0 8px; text-align: left; white-space: nowrap; }",
-      "." + ROOT_ATTR + " .trace-sf-manage button:disabled { color: var(--trace-page-secondary); cursor: default; opacity: 0.55; }",
+      R + ", " + R + " * { box-sizing: border-box; }",
+      R + " { margin: 0 0 14px; color: var(--trace-page-ink); font-family: -apple-system, BlinkMacSystemFont, system-ui, \"Segoe UI\", Roboto, sans-serif; font-size: 14px; line-height: 1.4; -webkit-font-smoothing: antialiased; }",
+      R + " button, " + R + " input { font: inherit; letter-spacing: 0; text-transform: none; text-shadow: none; }",
+      // AO3's skin gives buttons a fixed em height, nowrap and padding; none of
+      // it may clip or squeeze what the panel shows.
+      R + " button { -webkit-appearance: none; appearance: none; background: transparent; background-image: none; border: 0; border-radius: 8px; box-shadow: none; color: inherit; cursor: pointer; float: none; height: auto; line-height: inherit; margin: 0; max-height: none; min-height: 0; overflow: visible; padding: 0; text-align: left; text-overflow: clip; vertical-align: baseline; white-space: normal; width: auto; }",
+      R + " :focus { outline: none; }",
+      R + " :focus-visible { outline: 3px solid var(--trace-page-teal) !important; outline-offset: 2px; }",
+      R + " p { margin: 0; }",
+      R + " .trace-sf-card { background: transparent; border: 0; border-bottom: 1px solid var(--trace-page-rule); border-radius: 0; box-shadow: none; overflow: visible; padding-bottom: 8px; }",
+      R + " .trace-sf-head { display: block; min-height: 44px; padding: 8px 0; width: 100%; }",
+      R + " .trace-sf-head-line { align-items: center; display: flex; gap: 8px; min-height: 28px; }",
+      R + " .trace-sf-title { color: var(--trace-page-ink); flex: 1 1 auto; font-size: 15px; font-weight: 600; line-height: 1.25; min-width: 0; }",
+      R + " .trace-sf-count { color: var(--trace-page-secondary); flex: 0 0 auto; font-size: 13px; font-weight: 400; }",
+      R + " .trace-sf-caret { align-items: center; color: var(--trace-page-tertiary); display: inline-flex; flex: 0 0 auto; justify-content: center; width: 16px; }",
+      R + " .trace-sf-caret svg { display: block; height: 12px; width: 12px; transition: transform 0.16s ease; }",
+      R + " .trace-sf-caret[data-collapsed='false'] svg { transform: rotate(180deg); }",
+      R + " .trace-sf-head-meta { color: var(--trace-page-secondary); display: block; font-size: 13px; line-height: 1.35; margin-top: 2px; overflow-wrap: anywhere; }",
+      R + " .trace-sf-head-meta b, " + R + " .trace-sf-status-main b { color: var(--trace-page-ink); font-weight: 500; }",
+      R + " .trace-sf-panel { min-width: 0; }",
+      R + " .trace-sf-status { align-items: center; color: var(--trace-page-secondary); display: flex; flex-wrap: wrap; font-size: 13px; gap: 0 16px; line-height: 1.35; min-height: 44px; padding: 0 0 4px; }",
+      R + " .trace-sf-status-main { align-items: flex-start; display: flex; flex: 1 1 10rem; gap: 6px; min-width: 0; overflow-wrap: anywhere; padding: 6px 0; }",
+      R + " .trace-sf-check { color: var(--trace-page-ink); display: inline-flex; flex: 0 0 auto; height: 14px; margin-top: 2px; width: 14px; }",
+      R + " .trace-sf-check svg, " + R + " .trace-sf-edge svg { display: block; height: 14px; width: 14px; }",
+      R + " .trace-sf-status-actions { display: flex; flex-wrap: wrap; gap: 0 16px; }",
+      // Trailing actions keep their text flush with the panel's edge.
+      R + " .trace-sf-status-actions .trace-sf-btn { margin: 0 0 0 -8px; min-width: 44px; padding: 0 0 0 8px; }",
+      R + " .trace-sf-status-actions .trace-sf-btn:last-child { justify-content: flex-end; }",
+      R + " .trace-sf-btn { align-items: center; color: var(--trace-page-teal); display: inline-flex; font-size: 14px; font-weight: 500; gap: 4px; line-height: 1.25; margin: 0 -8px; min-height: 44px; padding: 0 8px; text-decoration: none; }",
+      R + " .trace-sf-btn-primary { font-weight: 600; }",
+      R + " .trace-sf-btn-ghost { color: var(--trace-page-secondary); }",
+      R + " .trace-sf-btn-danger { color: var(--trace-page-warning); font-weight: 600; }",
+      R + " .trace-sf-btn:disabled { cursor: default; opacity: 0.55; }",
+      R + " .trace-sf-list { margin-top: 2px; }",
+      R + " .trace-sf-section-label { color: var(--trace-page-secondary); font-size: 12.5px; font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; padding: 10px 0 6px; }",
+      R + " .trace-sf-rows { background: var(--trace-page-surface); border-radius: 14px; box-shadow: inset 0 0 0 1px var(--trace-page-rule); padding: 0 4px 0 12px; }",
+      R + " .trace-sf-row { background: transparent; position: relative; }",
+      R + " .trace-sf-row + .trace-sf-row { border-top: 1px solid var(--trace-page-rule); }",
+      R + " .trace-sf-row-inner { align-items: center; display: grid; grid-template-columns: minmax(0, 1fr) 44px; min-height: 52px; min-width: 0; }",
+      R + " .trace-sf-main { align-items: start; display: grid; grid-template-columns: 22px minmax(0, 1fr); min-width: 0; padding: 9px 6px 9px 0; width: 100%; }",
+      R + " .trace-sf-edge { color: var(--trace-page-ink); display: inline-flex; height: 14px; margin-top: 2px; width: 14px; }",
+      R + " .trace-sf-row-text { display: block; min-width: 0; }",
+      R + " .trace-sf-name { color: var(--trace-page-ink); display: block; font-size: 14px; font-weight: 500; line-height: 1.3; overflow-wrap: anywhere; }",
+      R + " .trace-sf-summary { color: var(--trace-page-secondary); display: block; font-size: 12.5px; line-height: 1.35; margin-top: 2px; overflow-wrap: anywhere; }",
+      R + " .trace-sf-menu-btn { align-items: center; color: var(--trace-page-tertiary); display: inline-flex; height: 44px; justify-content: center; width: 44px; }",
+      R + " .trace-sf-menu-btn svg { display: block; height: 16px; width: 16px; }",
+      R + " .trace-sf-more { color: var(--trace-page-teal); display: inline-flex; align-items: center; font-size: 14px; font-weight: 500; margin: 2px -8px 0; min-height: 44px; padding: 0 8px; }",
+      R + " .trace-sf-manage { align-items: center; animation: trace-sf-reveal 0.14s ease-out both; border-top: 1px solid var(--trace-page-rule); display: flex; flex-wrap: wrap; gap: 0 14px; margin: 0 0 0 22px; }",
+      R + " .trace-sf-manage button { color: var(--trace-page-teal); font-size: 13px; font-weight: 500; line-height: 1.25; margin: 0 -8px; min-height: 44px; padding: 0 8px; }",
+      R + " .trace-sf-manage button[data-danger='true'] { color: var(--trace-page-warning); }",
+      R + " .trace-sf-manage button:disabled { color: var(--trace-page-secondary); cursor: default; opacity: 0.55; }",
       "@keyframes trace-sf-reveal { from { opacity: 0; } to { opacity: 1; } }",
-      "@media (prefers-reduced-motion: reduce) { ." + ROOT_ATTR + " .trace-sf-manage { animation: none; } ." + ROOT_ATTR + " .trace-sf-panel-caret svg, ." + ROOT_ATTR + " .trace-sf-group-caret svg { transition: none; } }",
-      "." + ROOT_ATTR + " .trace-sf-form, ." + ROOT_ATTR + " .trace-sf-empty, ." + ROOT_ATTR + " .trace-sf-note, ." + ROOT_ATTR + " .trace-sf-error { padding: 8px 0; }",
-      "." + ROOT_ATTR + " .trace-sf-label { color: var(--trace-page-secondary); font-size: 12px; font-weight: 600; margin-bottom: 6px; }",
-      "." + ROOT_ATTR + " .trace-sf-input-row { display: block; position: relative; }",
-      "." + ROOT_ATTR + " .trace-sf-input { background: var(--trace-page-surface); border: 0; border-radius: 12px; box-shadow: inset 0 0 0 1px var(--trace-page-control); color: var(--trace-page-ink); font-size: 14px; min-height: 44px; padding: 10px 12px; width: 100%; }",
-      "." + ROOT_ATTR + " .trace-sf-input-row .trace-sf-input { padding-right: 44px; }",
-      "." + ROOT_ATTR + " .trace-sf-input::placeholder { color: var(--trace-page-secondary); }",
-      "." + ROOT_ATTR + " .trace-sf-clear-name { align-items: center; color: var(--trace-page-tertiary); display: inline-flex; font-size: 18px; font-weight: 500; height: 44px; justify-content: center; line-height: 1; padding: 0; position: absolute; right: 0; top: 50%; transform: translateY(-50%); width: 44px; }",
-      "." + ROOT_ATTR + " .trace-sf-input:placeholder-shown + .trace-sf-clear-name { display: none; }",
-      "." + ROOT_ATTR + " .trace-sf-preview { color: var(--trace-page-secondary); font-size: 12.5px; line-height: 1.4; margin-top: 6px; }",
-      "." + ROOT_ATTR + " .trace-sf-capacity { color: var(--trace-page-secondary); font-size: 12.5px; line-height: 1.35; margin-top: 6px; }",
-      "." + ROOT_ATTR + " .trace-sf-scope { display: grid; gap: 6px; grid-template-columns: 1fr; margin-top: 10px; }",
-      "." + ROOT_ATTR + " .trace-sf-scope button { background: var(--trace-page-surface); border-radius: 12px; box-shadow: inset 0 0 0 1px var(--trace-page-control); color: var(--trace-page-ink); min-height: 44px; min-width: 0; overflow: visible; padding: 8px 12px; text-align: left; white-space: normal; }",
-      "." + ROOT_ATTR + " .trace-sf-scope button[data-active='true'] { background: var(--trace-page-raised); box-shadow: inset 0 0 0 2px var(--trace-page-ink); }",
-      "." + ROOT_ATTR + " .trace-sf-scope button:disabled { cursor: default; opacity: 0.55; }",
-      "." + ROOT_ATTR + " .trace-sf-scope-title { display: block; font-size: 14px; font-weight: 500; }",
-      "." + ROOT_ATTR + " .trace-sf-scope-desc { color: var(--trace-page-secondary); display: block; font-size: 12.5px; line-height: 1.35; margin-top: 2px; }",
-      "." + ROOT_ATTR + " .trace-sf-actions { display: flex; flex-wrap: wrap; gap: 0 16px; margin-top: 4px; }",
-      "." + ROOT_ATTR + " .trace-sf-actions .trace-sf-btn { margin: 0 -8px; }",
-      "." + ROOT_ATTR + " .trace-sf-empty h4 { color: var(--trace-page-ink); font-size: 14px; font-weight: 600; margin: 0 0 2px; }",
-      "." + ROOT_ATTR + " .trace-sf-empty p, ." + ROOT_ATTR + " .trace-sf-note { color: var(--trace-page-secondary); font-size: 13px; margin: 0; }",
-      "." + ROOT_ATTR + " .trace-sf-error { align-items: flex-start; color: var(--trace-page-ink); display: flex; font-size: 13px; gap: 6px; margin: 0; }",
-      "." + ROOT_ATTR + " .trace-sf-error-glyph { color: var(--trace-page-warning); display: inline-flex; flex: 0 0 auto; height: 14px; margin-top: 2px; width: 14px; }",
-      "." + ROOT_ATTR + " .trace-sf-error-glyph svg { display: block; height: 14px; width: 14px; }",
-      "." + ROOT_ATTR + " .trace-sf-error b { font-weight: 600; }",
-      "." + ROOT_ATTR + " .trace-sf-confirm { border-top: 1px solid var(--trace-page-rule); margin-left: 22px; padding: 10px 0 0; }",
-      "." + ROOT_ATTR + " .trace-sf-confirm-title { color: var(--trace-page-ink); display: block; font-size: 13px; font-weight: 500; }",
-      "." + ROOT_ATTR + " .trace-sf-confirm-detail { color: var(--trace-page-secondary); display: block; font-size: 12.5px; margin-top: 2px; }",
-      "." + ROOT_ATTR + " .trace-sf-confirm-actions { display: flex; gap: 0 16px; }",
-      "." + ROOT_ATTR + " .trace-sf-confirm-actions button { margin: 0 -8px; }",
-      "." + ROOT_ATTR + " .trace-sf-rename { padding: 10px 0; }",
-      "@media (min-width: 520px) { ." + ROOT_ATTR + " .trace-sf-scope { grid-template-columns: 1fr 1fr; } }",
-      "@container (max-width: 480px) { ." + ROOT_ATTR + " .trace-sf-panel-caret { display: inline-flex; justify-content: center; } ." + ROOT_ATTR + " .trace-sf-card[data-panel-collapsed='true'] .trace-sf-panel { display: none; } ." + ROOT_ATTR + " .trace-sf-head-meta { display: block; } ." + ROOT_ATTR + " .trace-sf-scope { grid-template-columns: 1fr; } }",
-      "@media (max-width: 720px) { ." + ROOT_ATTR + " .trace-sf-head, ." + ROOT_ATTR + " .trace-sf-head[data-collapsible='false'] { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; grid-template-rows: auto auto; column-gap: 8px; } ." + ROOT_ATTR + " .trace-sf-head[data-collapsible='false'] { grid-template-columns: minmax(0, 1fr) auto; } ." + ROOT_ATTR + " .trace-sf-panel-caret { display: inline-flex; grid-column: 1; grid-row: 1 / span 2; } ." + ROOT_ATTR + " .trace-sf-card[data-panel-collapsed='true'] .trace-sf-panel { display: none; } ." + ROOT_ATTR + " .trace-sf-head-text { display: block; grid-column: 2; grid-row: 1; } ." + ROOT_ATTR + " .trace-sf-head[data-collapsible='false'] .trace-sf-head-text { grid-column: 1; } ." + ROOT_ATTR + " .trace-sf-spacer { display: none; } ." + ROOT_ATTR + " .trace-sf-head-meta { display: block; grid-column: 2 / 4; grid-row: 2; } ." + ROOT_ATTR + " .trace-sf-head[data-collapsible='false'] .trace-sf-head-meta { grid-column: 1 / 3; } ." + ROOT_ATTR + " .trace-sf-head-actions { display: none; } ." + ROOT_ATTR + " .trace-sf-status-actions { flex-wrap: wrap; } }",
+      "@media (prefers-reduced-motion: reduce) { " + R + " .trace-sf-manage { animation: none; } " + R + " .trace-sf-caret svg { transition: none; } }",
+      R + " .trace-sf-form { padding: 4px 0 8px; }",
+      R + " .trace-sf-label { color: var(--trace-page-secondary); display: block; font-size: 12.5px; font-weight: 600; line-height: 1.35; margin: 10px 0 6px; }",
+      R + " .trace-sf-form > .trace-sf-label:first-child { margin-top: 4px; }",
+      R + " .trace-sf-input-row { display: block; position: relative; }",
+      R + " .trace-sf-input { background: var(--trace-page-surface); border: 0; border-radius: 12px; box-shadow: inset 0 0 0 1px var(--trace-page-control); color: var(--trace-page-ink); font-size: 14px; height: auto; margin: 0; min-height: 44px; padding: 10px 12px; width: 100%; }",
+      R + " .trace-sf-input-row .trace-sf-input { padding-right: 44px; }",
+      R + " .trace-sf-input::placeholder { color: var(--trace-page-secondary); }",
+      R + " .trace-sf-clear-name { align-items: center; color: var(--trace-page-tertiary); display: inline-flex; font-size: 18px; font-weight: 500; height: 44px; justify-content: center; line-height: 1; position: absolute; right: 0; top: 50%; transform: translateY(-50%); width: 44px; }",
+      R + " .trace-sf-input:placeholder-shown + .trace-sf-clear-name { display: none; }",
+      // AO3 styles the filter form's own dl/dt/dd; reset them for this list.
+      R + " .trace-sf-keeps, " + R + " .trace-sf-keeps > dt, " + R + " .trace-sf-keeps > dd { background: none; border: 0; box-shadow: none; clear: none; color: inherit; float: none; font: inherit; height: auto; margin: 0; max-height: none; overflow: visible; padding: 0; text-align: left; width: auto; }",
+      R + " .trace-sf-keeps { display: grid; gap: 6px 12px; grid-template-columns: minmax(0, 30%) minmax(0, 1fr); }",
+      R + " .trace-sf-keeps > dt { color: var(--trace-page-secondary); display: block; font-size: 12.5px; line-height: 1.4; overflow-wrap: anywhere; padding-top: 1px; }",
+      R + " .trace-sf-keeps > dd { color: var(--trace-page-ink); display: block; font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }",
+      R + " .trace-sf-capacity, " + R + " .trace-sf-scope-note { color: var(--trace-page-secondary); font-size: 12.5px; line-height: 1.35; margin-top: 10px; }",
+      R + " .trace-sf-scope { display: block; }",
+      R + " .trace-sf-radio { align-items: center; color: var(--trace-page-ink); display: flex; font-size: 14px; gap: 10px; min-height: 44px; overflow-wrap: anywhere; padding: 6px 0; width: 100%; }",
+      R + " .trace-sf-radio-mark { align-items: center; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--trace-page-secondary); display: inline-flex; flex: 0 0 auto; height: 18px; justify-content: center; width: 18px; }",
+      R + " .trace-sf-radio[aria-checked='true'] .trace-sf-radio-mark { box-shadow: inset 0 0 0 1.5px var(--trace-page-ink); }",
+      R + " .trace-sf-radio[aria-checked='true'] .trace-sf-radio-mark::after { background: var(--trace-page-ink); border-radius: 50%; content: ''; height: 8px; width: 8px; }",
+      R + " .trace-sf-actions { display: flex; flex-wrap: wrap; gap: 0 16px; margin-top: 6px; }",
+      R + " .trace-sf-empty, " + R + " .trace-sf-note { color: var(--trace-page-secondary); font-size: 13px; line-height: 1.4; padding: 2px 0 8px; }",
+      R + " .trace-sf-error { align-items: center; color: var(--trace-page-ink); display: flex; flex-wrap: wrap; font-size: 13px; gap: 0 16px; line-height: 1.4; min-height: 44px; }",
+      R + " .trace-sf-error-text { align-items: center; display: flex; flex: 1 1 10rem; gap: 6px; min-width: 0; }",
+      R + " .trace-sf-error-glyph { color: var(--trace-page-warning); display: inline-flex; flex: 0 0 auto; height: 14px; width: 14px; }",
+      R + " .trace-sf-error-glyph svg { display: block; height: 14px; width: 14px; }",
+      R + " .trace-sf-error b { font-weight: 600; }",
+      R + " .trace-sf-confirm { border-top: 1px solid var(--trace-page-rule); margin-left: 22px; padding: 10px 0 0; }",
+      R + " .trace-sf-confirm-title { color: var(--trace-page-ink); display: block; font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }",
+      R + " .trace-sf-confirm-detail { color: var(--trace-page-secondary); display: block; font-size: 12.5px; margin-top: 2px; }",
+      R + " .trace-sf-confirm-actions { display: flex; flex-wrap: wrap; gap: 0 16px; }",
+      R + " .trace-sf-rename { padding: 4px 0 10px; }",
     ].join("\n");
     (document.head || document.documentElement).appendChild(style);
   }
@@ -871,18 +1069,20 @@
     if (!state.root) return;
     var visiblePresets = visiblePresetsForCurrent(state.presets, state.current);
     var relation = relationForCurrent(visiblePresets, state.activeMeta, state.current);
-    var collapsible = canCollapsePanel(relation, visiblePresets);
-    var collapsed = collapsible && state.panelCollapsed;
+    var collapsed = Boolean(state.panelCollapsed);
     var html = "";
-    html += "<div class='trace-sf-card' data-panel-collapsible='" + (collapsible ? "true" : "false") + "' data-panel-collapsed='" + (collapsed ? "true" : "false") + "'>";
-    html += renderHeader(visiblePresets.length, relation, collapsible, collapsed);
-    html += "<div class='trace-sf-panel'>";
-    if (state.error) html += renderError(state.error);
-    if (state.notice) html += renderNote(state.notice);
-    html += renderStatus(relation);
-    if (state.mode === "save") html += renderSaveForm();
-    if (state.mode !== "save" || visiblePresets.length > 0) html += renderList(relation, visiblePresets);
-    html += "</div>";
+    html += "<div class='trace-sf-card' data-panel-collapsed='" + (collapsed ? "true" : "false") + "'>";
+    html += renderHeader(visiblePresets.length, relation, collapsed);
+    if (!collapsed) {
+      html += "<div class='trace-sf-panel'>";
+      if (state.error) html += renderError(state.error);
+      if (state.notice) html += renderNote(state.notice);
+      if (state.mode === "save") html += renderSaveForm();
+      else html += renderStatus(relation);
+      if (visiblePresets.length > 0) html += renderList(relation, visiblePresets);
+      else if (state.mode !== "save" && !(state.current && state.current.hasFilters)) html += renderEmpty();
+      html += "</div>";
+    }
     html += "</div>";
     replaceRootWithUiMarkup(state.root, html);
   }
@@ -927,35 +1127,19 @@
     }
   }
 
-  function canCollapsePanel(relation, presets) {
-    if (state.mode !== "list") return false;
-    if (state.error || state.notice) return false;
-    if (state.menuId || state.renameId || state.confirmDeleteId) return false;
-    if (!presets || !presets.length) return false;
-    return relation.type === "active" || relation.type === "none";
-  }
-
-  function renderHeader(count, relation, collapsible, collapsed) {
-    var tag = collapsible ? "button" : "div";
-    var collapsibleAttr = " data-collapsible='" + (collapsible ? "true" : "false") + "'";
-    var action = collapsible
-      ? " type='button' data-trace-sf-action='toggle-panel' aria-expanded='" + (collapsed ? "false" : "true") + "'"
-      : "";
-    var meta = collapsed ? headerSummaryText(relation, count) : savedFilterCountText(count);
+  // One full-width header button: the title, a count and one caret. When the
+  // panel is collapsed a second line says where the current filters stand.
+  function renderHeader(count, relation, collapsed) {
+    var meta = collapsed ? headerStateText(relation) : "";
     return (
-      "<" + tag + " class='trace-sf-head'" + collapsibleAttr + action + ">" +
-      (collapsible ? renderChevron("trace-sf-panel-caret", collapsed) : "") +
-      "<span class='trace-sf-head-text'>" +
-      "<span class='trace-sf-title-line'>" +
+      "<button type='button' class='trace-sf-head' data-trace-sf-action='toggle-panel' aria-expanded='" + (collapsed ? "false" : "true") + "'>" +
+      "<span class='trace-sf-head-line'>" +
       "<span class='trace-sf-title'>Saved filters</span>" +
+      (count > 0 ? "<span class='trace-sf-count'>" + count + "</span>" : "") +
+      renderChevron("trace-sf-caret", collapsed) +
       "</span>" +
-      "</span>" +
-      "<span class='trace-sf-spacer'></span>" +
-      "<span class='trace-sf-head-actions'>" +
-      "<span class='trace-sf-count'>" + count + " saved</span>" +
-      "</span>" +
-      "<span class='trace-sf-head-meta'>" + meta + "</span>" +
-      "</" + tag + ">"
+      (meta ? "<span class='trace-sf-head-meta'>" + meta + "</span>" : "") +
+      "</button>"
     );
   }
 
@@ -986,16 +1170,6 @@
     );
   }
 
-  function renderGroupChevron(collapsed) {
-    return (
-      "<span class='trace-sf-group-caret' data-collapsed='" + (collapsed ? "true" : "false") + "' aria-hidden='true'>" +
-      "<svg viewBox='0 0 16 16' fill='none' stroke='currentColor' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round' focusable='false'>" +
-      "<path d='M6 4l4 4-4 4'/>" +
-      "</svg>" +
-      "</span>"
-    );
-  }
-
   function renderKebabIcon() {
     return (
       "<svg viewBox='0 0 16 16' fill='currentColor' focusable='false' aria-hidden='true'>" +
@@ -1006,179 +1180,165 @@
     );
   }
 
-  function headerSummaryText(relation, count) {
+  function headerStateText(relation) {
     if (relation && relation.type === "active" && relation.preset) {
       return "Showing <b>" + escapeHtml(relation.preset.name) + "</b>";
     }
     if (relation && relation.type === "edited" && relation.preset) {
-      return "<b>" + escapeHtml(relation.preset.name) + "</b> edited";
+      return "<b>" + escapeHtml(relation.preset.name) + "</b>, changed";
     }
     if (relation && relation.type === "unsaved") return "Current filters aren't saved";
-    if (count > 0) return "Choose a saved AO3 filter";
-    return "Save reusable AO3 filters";
-  }
-
-  function savedFilterCountText(count) {
-    return count === 1 ? "1 saved filter" : count + " saved filters";
+    return "";
   }
 
   function renderStatus(relation) {
+    if (!state.current || !state.current.hasFilters || !relation || relation.type === "none") return "";
     var canSaveNew = !isAtSavedFilterLimit();
-    if (!state.current || !state.current.hasFilters) {
-      return (
-        "<div class='trace-sf-status' data-kind='none'>" +
-        "<span class='trace-sf-status-main'>No active AO3 filters to save</span>" +
-        "</div>"
-      );
-    }
     if (relation.type === "active") {
       return (
         "<div class='trace-sf-status' data-kind='active'>" +
+        "<span class='trace-sf-status-main'>" +
         "<span class='trace-sf-check'>" + renderCheckIcon() + "</span>" +
-        "<span class='trace-sf-status-main'>Showing <b>" + escapeHtml(relation.preset.name) + "</b></span>" +
+        "<span>Showing <b>" + escapeHtml(relation.preset.name) + "</b></span>" +
+        "</span>" +
         "</div>"
       );
     }
     if (relation.type === "edited") {
       return (
         "<div class='trace-sf-status' data-kind='edited'>" +
-        "<span class='trace-sf-status-main'><b>" + escapeHtml(relation.preset.name) + "</b> edited</span>" +
-        (state.mode === "save" ? "" : "<span class='trace-sf-status-actions'>" +
-        "<button type='button' class='trace-sf-btn trace-sf-btn-primary' data-trace-sf-action='update-current' data-id='" + escapeAttr(relation.preset.id) + "'>Update</button>" +
-        (canSaveNew ? "<button type='button' class='trace-sf-btn' data-trace-sf-action='save-open'>Save new</button>" : "") +
-        "</span>") +
-        "</div>"
+        "<span class='trace-sf-status-main'><span><b>" + escapeHtml(relation.preset.name) + "</b>, changed</span></span>" +
+        "<span class='trace-sf-status-actions'>" +
+        "<button type='button' class='trace-sf-btn trace-sf-btn-primary' data-trace-sf-action='update-current' data-id='" + escapeAttr(relation.preset.id) + "'>Update " + escapeHtml(relation.preset.name) + "</button>" +
+        (canSaveNew ? "<button type='button' class='trace-sf-btn' data-trace-sf-action='save-open'>Save as new</button>" : "") +
+        "</span>" +
+        "</div>" +
+        (canSaveNew ? "" : renderNote(savedFilterLimitMessage()))
       );
     }
     return (
       "<div class='trace-sf-status' data-kind='unsaved'>" +
-      "<span class='trace-sf-status-main'>" + escapeHtml(canSaveNew ? "These filters aren't saved" : "Saved filter limit reached") + "</span>" +
-      (state.mode === "save" || !canSaveNew ? "" : "<span class='trace-sf-status-actions'>" +
-      "<button type='button' class='trace-sf-btn trace-sf-btn-primary' data-trace-sf-action='save-open'>Save</button>" +
-      "</span>") +
-      "</div>"
+      "<span class='trace-sf-status-main'><span>These filters aren't saved</span></span>" +
+      (canSaveNew
+        ? "<span class='trace-sf-status-actions'><button type='button' class='trace-sf-btn trace-sf-btn-primary' data-trace-sf-action='save-open'>Save</button></span>"
+        : "") +
+      "</div>" +
+      (canSaveNew ? "" : renderNote(savedFilterLimitMessage()))
     );
   }
 
   function renderError(message) {
-    return "<div class='trace-sf-error'><span class='trace-sf-error-glyph'>" + renderAlertIcon() + "</span><span><b>Couldn’t save.</b> " + escapeHtml(message) + "</span></div>";
+    return (
+      "<div class='trace-sf-error' role='alert'>" +
+      "<span class='trace-sf-error-text'><span class='trace-sf-error-glyph'>" + renderAlertIcon() + "</span><span>" + escapeHtml(message) + "</span></span>" +
+      (state.retry ? "<button type='button' class='trace-sf-btn' data-trace-sf-action='retry'>Try again</button>" : "") +
+      "</div>"
+    );
   }
 
   function renderNote(message) {
-    return "<div class='trace-sf-note'>" + escapeHtml(message) + "</div>";
+    return "<p class='trace-sf-note'>" + escapeHtml(message) + "</p>";
+  }
+
+  function renderEmpty() {
+    return "<p class='trace-sf-empty'>Choose filters below, then save them here to reuse in one tap.</p>";
+  }
+
+  // Every current filter, grouped, every value shown and wrapping.
+  function renderKeepsList(pairs) {
+    var groups = describePairs(pairs).groups;
+    if (!groups.length) return "";
+    return (
+      "<div class='trace-sf-label' id='trace-sf-keeps-label'>What it keeps</div>" +
+      "<dl class='trace-sf-keeps' aria-labelledby='trace-sf-keeps-label'>" +
+      groups.map(function (group) {
+        return "<dt>" + escapeHtml(group.label) + "</dt><dd>" + escapeHtml(group.values.join(", ")) + "</dd>";
+      }).join("") +
+      "</dl>"
+    );
+  }
+
+  function renderScopeChoice() {
+    if (!hasReusableContext()) {
+      return "<p class='trace-sf-scope-note'>Shows on every AO3 search.</p>";
+    }
+    var scope = state.draftScope === "global" ? "global" : "context";
+    function radio(value, action, label) {
+      var checked = scope === value;
+      return (
+        "<button type='button' class='trace-sf-radio' role='radio' data-trace-sf-action='" + action + "' aria-checked='" + (checked ? "true" : "false") + "' tabindex='" + (checked ? "0" : "-1") + "'>" +
+        "<span class='trace-sf-radio-mark' aria-hidden='true'></span>" +
+        "<span>" + escapeHtml(label) + "</span>" +
+        "</button>"
+      );
+    }
+    return (
+      "<div class='trace-sf-label' id='trace-sf-scope-label'>Show it on</div>" +
+      "<div class='trace-sf-scope' role='radiogroup' aria-labelledby='trace-sf-scope-label'>" +
+      radio("context", "scope-context", displayContextLabel() + " only") +
+      radio("global", "scope-global", "Every AO3 search") +
+      "</div>"
+    );
   }
 
   function renderSaveForm() {
-    var currentSummary = summaryForPairs(state.current ? state.current.pairs : []);
-    var suggested = suggestedNameForSummary(currentSummary);
-    var draftName = state.draftName || "";
-    var contextAvailable = hasReusableContext();
-    var scope = state.draftScope === "global" || !contextAvailable ? "global" : "context";
-    var contextText = "Only show on this AO3 tag page";
-    if (state.current && state.current.contextLabel) {
-      contextText = "Only show on " + state.current.contextLabel;
-    }
+    var pairs = state.current ? state.current.pairs : [];
+    var suggested = suggestedNameForPairs(pairs);
     return (
       "<div class='trace-sf-form' data-trace-sf-save-form>" +
-      "<div class='trace-sf-label'>Name this filter</div>" +
+      "<label class='trace-sf-label' for='trace-sf-name-input'>Name</label>" +
       "<span class='trace-sf-input-row'>" +
-      "<input class='trace-sf-input' data-trace-sf-name maxlength='" + MAX_NAME_LENGTH + "' autocomplete='off' autocapitalize='sentences' placeholder='" + escapeAttr(suggested) + "' value='" + escapeAttr(draftName) + "'>" +
-      "<button type='button' class='trace-sf-clear-name' data-trace-sf-action='name-clear' aria-label='Clear filter name' title='Clear filter name'>&times;</button>" +
+      "<input id='trace-sf-name-input' class='trace-sf-input' type='text' data-trace-sf-name maxlength='" + MAX_NAME_LENGTH + "' autocomplete='off' autocapitalize='sentences' placeholder='" + escapeAttr(suggested) + "' value='" + escapeAttr(state.draftName || "") + "'>" +
+      "<button type='button' class='trace-sf-clear-name' data-trace-sf-action='name-clear' aria-label='Clear name' title='Clear name'>&times;</button>" +
       "</span>" +
-      "<div class='trace-sf-preview'>" + escapeHtml(summaryTextFromParts(currentSummary, "No active filters detected.")) + "</div>" +
+      renderKeepsList(pairs) +
       renderCapacityWarning() +
-      "<div class='trace-sf-scope'>" +
-      "<button type='button' data-trace-sf-action='scope-context' data-active='" + (scope === "context" ? "true" : "false") + "'" + (contextAvailable ? "" : " disabled") + ">" +
-      "<span class='trace-sf-scope-title'>This tag</span>" +
-      "<span class='trace-sf-scope-desc'>" + escapeHtml(contextAvailable ? contextText : "Open an AO3 tag page to use this option") + "</span>" +
-      "</button>" +
-      "<button type='button' data-trace-sf-action='scope-global' data-active='" + (scope === "global" ? "true" : "false") + "'>" +
-      "<span class='trace-sf-scope-title'>All tags</span>" +
-      "<span class='trace-sf-scope-desc'>Show on all AO3 filter pages; apply to the page you're on</span>" +
-      "</button>" +
-      "</div>" +
+      renderScopeChoice() +
       "<div class='trace-sf-actions'>" +
-      "<button type='button' class='trace-sf-btn trace-sf-btn-ghost' data-trace-sf-action='save-cancel'>Cancel</button>" +
       "<button type='button' class='trace-sf-btn trace-sf-btn-primary' data-trace-sf-action='save-confirm'" + (state.current && state.current.canSave ? "" : " disabled") + ">Save filter</button>" +
+      "<button type='button' class='trace-sf-btn trace-sf-btn-ghost' data-trace-sf-action='save-cancel'>Cancel</button>" +
       "</div>" +
       "</div>"
     );
   }
 
+  // One list: filters for this tag first, then those for every search, with
+  // plain labels only when both kinds are present. Past eight rows the rest
+  // wait behind "Show all n"; nothing scrolls inside the panel.
   function renderList(relation, presets) {
-    if (!presets.length) {
-      var hasOtherPresets = state.presets.length > 0;
-      return (
-        "<div class='trace-sf-empty'>" +
-        "<h4>" + (hasOtherPresets ? "No saved filters for this page" : "Save a filter to reuse it") + "</h4>" +
-        "<p>" + (hasOtherPresets ? "Save one here or use Global when a preset should appear across fandoms and tags." : "Save the current AO3 filter URL and Trace will reapply it in one click.") + "</p>" +
-        "</div>"
-      );
-    }
     var groups = groupedPresetsForCurrent(presets);
-    return (
-      "<div class='trace-sf-list'>" +
-      renderPresetGroup("context", "This tag", groups.context, relation, groups) +
-      renderPresetGroup("global", "All tags", groups.global, relation, groups) +
-      "</div>"
-    );
-  }
-
-  function renderPresetGroup(groupKey, label, presets, relation, groups) {
-    if (!presets.length) return "";
-    var collapsed = isGroupCollapsed(groupKey, presets, relation, groups);
-    var html = (
-      "<div class='trace-sf-group' data-group='" + escapeAttr(groupKey) + "' data-collapsed='" + (collapsed ? "true" : "false") + "'>" +
-      "<button type='button' class='trace-sf-group-head' data-trace-sf-action='toggle-group' data-group='" + escapeAttr(groupKey) + "' aria-expanded='" + (collapsed ? "false" : "true") + "'>" +
-      renderGroupChevron(collapsed) +
-      "<span class='trace-sf-group-title'>" + escapeHtml(label) + "</span>" +
-      "<span class='trace-sf-group-count'>" + presets.length + "</span>" +
-      "</button>"
-    );
-    if (!collapsed) {
-      html += (
-        "<div class='trace-sf-group-body'>" +
-        presets.map(function (preset) {
-          return renderPresetRow(preset, relation);
-        }).join("") +
-        "</div>"
-      );
+    var both = groups.context.length > 0 && groups.global.length > 0;
+    var limit = state.showAll || presets.length <= LIST_PREVIEW_COUNT ? Infinity : LIST_PREVIEW_COUNT;
+    var shown = 0;
+    var html = "<div class='trace-sf-list'>";
+    function section(list, label, scope) {
+      if (!list.length || shown >= limit) return;
+      var visible = list.slice(0, limit - shown);
+      shown += visible.length;
+      if (both) html += "<div class='trace-sf-section-label' data-scope='" + scope + "'>" + escapeHtml(label) + "</div>";
+      html += "<div class='trace-sf-rows'>" + visible.map(function (preset) {
+        return renderPresetRow(preset, relation);
+      }).join("") + "</div>";
+    }
+    section(groups.context, displayContextLabel(), "context");
+    section(groups.global, "Every search", "global");
+    if (shown < presets.length) {
+      html += "<button type='button' class='trace-sf-more' data-trace-sf-action='show-all'>Show all " + presets.length + "</button>";
     }
     html += "</div>";
     return html;
   }
 
-  function isGroupCollapsed(groupKey, presets, relation, groups) {
-    if (Object.prototype.hasOwnProperty.call(state.collapsedGroups, groupKey)) {
-      return Boolean(state.collapsedGroups[groupKey]);
-    }
-    if (groupHasRelationPreset(presets, relation)) return false;
-    if (groupKey === "global" && groups.context.length > 0) return true;
-    return false;
-  }
-
-  function groupHasRelationPreset(presets, relation) {
-    if (!relation || !relation.preset || !relation.preset.id) return false;
-    for (var i = 0; i < presets.length; i++) {
-      if (presets[i].id === relation.preset.id) return true;
-    }
-    return false;
-  }
-
   function renderPresetRow(preset, relation) {
     var isActive = relation.type === "active" && relation.preset && relation.preset.id === preset.id;
     var isRenaming = state.renameId === preset.id;
-    var summaryParts = preset.summary && preset.summary.length
-      ? preset.summary
-      : summaryForPairs(preset.params);
-    var summaryText = summaryTextFromParts(summaryParts, "AO3 filter");
-    var summaryTitle = summaryText;
+    var contents = presetContentsText(preset);
     var html = "<div class='trace-sf-row' data-id='" + escapeAttr(preset.id) + "' data-scope='" + escapeAttr(preset.scope === "global" ? "global" : "context") + "' data-active='" + (isActive ? "true" : "false") + "' data-menu-open='" + (state.menuId === preset.id ? "true" : "false") + "'>";
     if (isRenaming) {
       html += (
         "<div class='trace-sf-rename'>" +
-        "<div class='trace-sf-label'>Rename</div>" +
-        "<input class='trace-sf-input' data-trace-sf-rename-input maxlength='" + MAX_NAME_LENGTH + "' value='" + escapeAttr(preset.name) + "'>" +
+        "<label class='trace-sf-label' for='trace-sf-rename-input'>Rename</label>" +
+        "<input id='trace-sf-rename-input' class='trace-sf-input' type='text' data-trace-sf-rename-input maxlength='" + MAX_NAME_LENGTH + "' value='" + escapeAttr(state.renameDraft || preset.name) + "'>" +
         "<div class='trace-sf-actions'>" +
         "<button type='button' class='trace-sf-btn trace-sf-btn-primary' data-trace-sf-action='rename-save' data-id='" + escapeAttr(preset.id) + "'>Save name</button>" +
         "<button type='button' class='trace-sf-btn trace-sf-btn-ghost' data-trace-sf-action='rename-cancel'>Cancel</button>" +
@@ -1188,13 +1348,11 @@
     } else {
       html += (
         "<div class='trace-sf-row-inner'>" +
+        "<button type='button' class='trace-sf-main' data-trace-sf-action='apply' data-id='" + escapeAttr(preset.id) + "' aria-label='" + escapeAttr(preset.name + ". " + contents + ". Apply.") + "'" + (isActive ? " aria-current='true'" : "") + ">" +
         "<span class='trace-sf-edge'>" + (isActive ? renderCheckIcon() : "") + "</span>" +
-        "<button type='button' class='trace-sf-main' data-trace-sf-action='apply' data-id='" + escapeAttr(preset.id) + "' title='Apply " + escapeAttr(preset.name) + "'>" +
-        "<span class='trace-sf-row-title'>" +
+        "<span class='trace-sf-row-text'>" +
         "<span class='trace-sf-name'>" + escapeHtml(preset.name) + "</span>" +
-        "</span>" +
-        "<span class='trace-sf-summary' title='" + escapeAttr(summaryTitle) + "'>" +
-        escapeHtml(summaryText) +
+        "<span class='trace-sf-summary'>" + escapeHtml(contents) + "</span>" +
         "</span>" +
         "</button>" +
         "<button type='button' class='trace-sf-menu-btn' data-trace-sf-action='menu' data-id='" + escapeAttr(preset.id) + "' aria-expanded='" + (state.menuId === preset.id ? "true" : "false") + "' aria-controls='trace-sf-manage-" + escapeAttr(preset.id) + "' aria-label='Manage " + escapeAttr(preset.name) + "'>" + renderKebabIcon() + "</button>" +
@@ -1216,7 +1374,7 @@
     return (
       "<div class='trace-sf-manage' id='trace-sf-manage-" + escapeAttr(preset.id) + "' role='group' aria-label='Manage " + escapeAttr(preset.name) + "'>" +
       "<button type='button' data-trace-sf-action='rename-open' data-id='" + escapeAttr(preset.id) + "'>Rename</button>" +
-      "<button type='button' data-trace-sf-action='update-current' data-id='" + escapeAttr(preset.id) + "'" + (canUpdate ? "" : " disabled title='Choose filters on this page before replacing this preset'") + ">Replace with current filters</button>" +
+      "<button type='button' data-trace-sf-action='update-current' data-id='" + escapeAttr(preset.id) + "'" + (canUpdate ? "" : " disabled title='Choose filters on this page first'") + ">Update with current filters</button>" +
       "<button type='button' data-danger='true' data-trace-sf-action='delete-confirm' data-id='" + escapeAttr(preset.id) + "'>Delete</button>" +
       "</div>"
     );
@@ -1226,10 +1384,10 @@
     return (
       "<div class='trace-sf-confirm'>" +
       "<span class='trace-sf-confirm-title'>Delete “" + escapeHtml(preset.name) + "”?</span>" +
-      "<span class='trace-sf-confirm-detail'>It goes from every device. AO3 isn’t changed.</span>" +
+      "<span class='trace-sf-confirm-detail'>It's deleted on every device. Nothing on AO3 changes.</span>" +
       "<span class='trace-sf-confirm-actions'>" +
       "<button type='button' class='trace-sf-btn trace-sf-btn-danger' data-trace-sf-action='delete' data-id='" + escapeAttr(preset.id) + "'>Delete</button>" +
-      "<button type='button' class='trace-sf-link' data-trace-sf-action='delete-cancel'>Cancel</button>" +
+      "<button type='button' class='trace-sf-btn trace-sf-btn-ghost' data-trace-sf-action='delete-cancel'>Cancel</button>" +
       "</span>" +
       "</div>"
     );
@@ -1286,18 +1444,29 @@
         closeMenu(true);
         return;
       }
+      if (state.mode === "save") {
+        stopTraceEvent(event);
+        cancelSaveForm();
+        return;
+      }
+    }
+    var target = event.target;
+    if (target && target.matches && target.matches("[role='radio']") && /^Arrow(?:Up|Down|Left|Right)$/.test(event.key)) {
+      stopTraceEvent(event);
+      setDraftScope(state.draftScope === "global" ? "context" : "global");
+      focusSoon("[role='radio'][aria-checked='true']");
+      return;
     }
     if (event.key !== "Enter") {
       stopTracePropagation(event);
       return;
     }
-    var saveForm = event.target && event.target.closest ? event.target.closest("[data-trace-sf-save-form]") : null;
-    if (saveForm) {
+    if (target && target.matches && target.matches("[data-trace-sf-name]")) {
       stopTraceEvent(event);
       saveCurrentPreset();
       return;
     }
-    var renameInput = event.target && event.target.matches && event.target.matches("[data-trace-sf-rename-input]");
+    var renameInput = target && target.matches && target.matches("[data-trace-sf-rename-input]");
     if (renameInput && state.renameId) {
       stopTraceEvent(event);
       renamePreset(state.renameId);
@@ -1313,60 +1482,70 @@
     if (target && target.matches && target.matches("[data-trace-sf-name]")) {
       state.draftName = String(target.value || "").slice(0, MAX_NAME_LENGTH);
     }
+    if (target && target.matches && target.matches("[data-trace-sf-rename-input]")) {
+      state.renameDraft = String(target.value || "").slice(0, MAX_NAME_LENGTH);
+    }
   }
 
   function dispatchAction(el) {
     var action = el.getAttribute("data-trace-sf-action");
     var id = el.getAttribute("data-id") || "";
-    var group = el.getAttribute("data-group") || "";
     if (action === "save-open") return openSaveForm();
-    if (action === "save-cancel") return cancelInlineModes();
+    if (action === "save-cancel") return cancelSaveForm();
     if (action === "save-confirm") return saveCurrentPreset();
     if (action === "name-clear") return clearDraftName();
-    if (action === "scope-context") return setDraftScope("context");
-    if (action === "scope-global") return setDraftScope("global");
+    if (action === "scope-context") return setDraftScope("context", true);
+    if (action === "scope-global") return setDraftScope("global", true);
     if (action === "toggle-panel") return togglePanel();
-    if (action === "toggle-group") return toggleGroup(group, el);
+    if (action === "show-all") return showAllPresets();
+    if (action === "retry") return retryLastChange();
     if (action === "apply") return applyPreset(id);
     if (action === "menu") return toggleMenu(id);
     if (action === "rename-open") return openRename(id);
     if (action === "rename-save") return renamePreset(id);
-    if (action === "rename-cancel") return cancelInlineModes();
+    if (action === "rename-cancel") return cancelRowMode();
     if (action === "delete-confirm") return confirmDelete(id);
     if (action === "delete") return deletePreset(id);
-    if (action === "delete-cancel") return cancelInlineModes();
+    if (action === "delete-cancel") return cancelRowMode();
     if (action === "update-current") return updatePresetToCurrent(id);
+  }
+
+  function clearMessages() {
+    state.error = "";
+    state.notice = "";
+    state.retry = null;
   }
 
   function openSaveForm() {
     state.current = getCurrentFilterState();
+    state.menuId = null;
+    state.renameId = null;
+    state.confirmDeleteId = null;
+    clearMessages();
     if (isAtSavedFilterLimit()) {
       state.mode = "list";
-      state.menuId = null;
-      state.renameId = null;
-      state.confirmDeleteId = null;
-      state.error = savedFilterLimitMessage();
-      state.notice = "";
       render();
       return;
     }
     state.mode = "save";
     state.panelCollapsed = false;
-    state.menuId = null;
-    state.renameId = null;
-    state.confirmDeleteId = null;
-    state.draftName = "";
+    // The suggested name is filled in and selected, so typing replaces it.
+    state.draftName = suggestedNameForPairs(state.current.pairs);
     state.draftScope = hasReusableContext() ? "context" : "global";
-    state.error = "";
-    state.notice = "";
     render();
-    focusSoon("[data-trace-sf-name]");
+    focusSoon("[data-trace-sf-name]", true);
   }
 
-  function setDraftScope(scope) {
+  function cancelSaveForm() {
+    cancelInlineModes();
+    focusSoon("[data-trace-sf-action='save-open']");
+  }
+
+  function setDraftScope(scope, keepFocus) {
     if (scope === "context" && !hasReusableContext()) return;
     state.draftScope = scope === "global" ? "global" : "context";
     render();
+    if (keepFocus) focusSoon("[role='radio'][aria-checked='true']");
   }
 
   function clearDraftName() {
@@ -1375,16 +1554,17 @@
     focusSoon("[data-trace-sf-name]");
   }
 
-  function toggleGroup(group, el) {
-    if (group !== "context" && group !== "global") return;
-    state.collapsedGroups[group] = el.getAttribute("aria-expanded") === "true";
-    render();
-  }
-
   function togglePanel() {
     state.panelCollapsed = !state.panelCollapsed;
     persistPanelCollapsed(state.panelCollapsed);
     render();
+    focusSoon("[data-trace-sf-action='toggle-panel']");
+  }
+
+  function showAllPresets() {
+    state.showAll = true;
+    render();
+    focusSoon(".trace-sf-main", false, LIST_PREVIEW_COUNT);
   }
 
   function persistPanelCollapsed(collapsed) {
@@ -1399,9 +1579,18 @@
     state.mode = "list";
     state.menuId = null;
     state.renameId = null;
+    state.renameDraft = "";
     state.confirmDeleteId = null;
     state.error = "";
+    state.retry = null;
     render();
+  }
+
+  // Leaving Rename or Delete puts focus back on the row's menu button.
+  function cancelRowMode() {
+    var id = state.renameId || state.confirmDeleteId;
+    cancelInlineModes();
+    if (id) focusSoon("[data-trace-sf-action='menu'][data-id='" + cssEscape(id) + "']");
   }
 
   function toggleMenu(id) {
@@ -1410,6 +1599,7 @@
     state.renameId = null;
     state.confirmDeleteId = null;
     render();
+    focusSoon("[data-trace-sf-action='menu'][data-id='" + cssEscape(id) + "']");
     if (state.menuId) revealManagementSoon(id);
   }
 
@@ -1437,13 +1627,16 @@
   }
 
   function openRename(id) {
+    var preset = findPreset(id);
     state.menuId = null;
     state.renameId = id;
+    state.renameDraft = preset ? preset.name : "";
     state.panelCollapsed = false;
     state.confirmDeleteId = null;
     state.error = "";
+    state.retry = null;
     render();
-    focusSoon("[data-trace-sf-rename-input]");
+    focusSoon("[data-trace-sf-rename-input]", true);
   }
 
   function confirmDelete(id) {
@@ -1452,14 +1645,18 @@
     state.confirmDeleteId = id;
     state.panelCollapsed = false;
     state.error = "";
+    state.retry = null;
     render();
   }
 
-  function focusSoon(selector) {
+  function focusSoon(selector, select, index) {
     setTimeout(function () {
       try {
-        var input = state.root && state.root.querySelector(selector);
-        if (input) input.focus();
+        var matches = state.root ? state.root.querySelectorAll(selector) : [];
+        var el = matches[index || 0] || matches[0];
+        if (!el) return;
+        el.focus();
+        if (select && typeof el.select === "function") el.select();
       } catch (_) {
         /* ignore */
       }
@@ -1484,16 +1681,25 @@
     return String(input && input.value ? input.value : "").trim().slice(0, MAX_NAME_LENGTH);
   }
 
+  function retryLastChange() {
+    var retry = state.retry;
+    if (!retry) return;
+    if (retry.kind === "save") return saveCurrentPreset();
+    if (retry.kind === "rename") return renamePreset(retry.id);
+    if (retry.kind === "update") return updatePresetToCurrent(retry.id);
+    if (retry.kind === "delete") return deletePreset(retry.id);
+  }
+
   async function saveCurrentPreset() {
     state.current = getCurrentFilterState();
     if (!state.current.canSave) return;
     if (isAtSavedFilterLimit()) {
       state.mode = "list";
-      state.error = savedFilterLimitMessage();
       render();
       return;
     }
-    var name = currentNameInputValue("[data-trace-sf-name]") || suggestedNameForSummary(summaryForPairs(state.current.pairs));
+    var name = currentNameInputValue("[data-trace-sf-name]") || suggestedNameForPairs(state.current.pairs);
+    state.draftName = name;
     var scope = state.draftScope === "global" || !hasReusableContext() ? "global" : "context";
     var now = new Date().toISOString();
     var id = makeId();
@@ -1506,7 +1712,7 @@
       scope: scope,
       contextKey: scope === "context" ? state.current.contextKey : "",
       contextLabel: scope === "context" ? state.current.contextLabel : "",
-      summary: summaryForPairs(state.current.pairs),
+      summary: storedSummaryParts(summaryForPairs(state.current.pairs)),
       createdAt: now,
       updatedAt: now,
       clientUpdatedAt: now,
@@ -1521,14 +1727,15 @@
     };
     await commitStorage(presets, activeMeta, function () {
       state.mode = "list";
+      state.draftName = "";
       state.notice = "";
-      state.error = "";
-    });
+    }, null, { kind: "save" });
   }
 
   async function renamePreset(id) {
     var name = currentNameInputValue("[data-trace-sf-rename-input]");
     if (!name) return;
+    state.renameDraft = name;
     var now = new Date().toISOString();
     var presets = state.presets.map(function (preset) {
       if (preset.id !== id) return preset;
@@ -1541,8 +1748,9 @@
     });
     await commitStorage(presets, state.activeMeta, function () {
       state.renameId = null;
+      state.renameDraft = "";
       state.menuId = null;
-    });
+    }, null, { kind: "rename", id: id });
   }
 
   async function updatePresetToCurrent(id) {
@@ -1555,7 +1763,7 @@
         params: state.current.pairs,
         contextKey: preset.scope === "context" ? state.current.contextKey : "",
         contextLabel: preset.scope === "context" ? state.current.contextLabel : "",
-        summary: summaryForPairs(state.current.pairs),
+        summary: storedSummaryParts(summaryForPairs(state.current.pairs)),
         updatedAt: now,
         clientUpdatedAt: now,
         dirty: true,
@@ -1572,7 +1780,7 @@
       state.menuId = null;
       state.renameId = null;
       state.confirmDeleteId = null;
-    });
+    }, null, { kind: "update", id: id });
   }
 
   async function deletePreset(id) {
@@ -1597,10 +1805,10 @@
       state.menuId = null;
       state.renameId = null;
       state.confirmDeleteId = null;
-    }, deleted);
+    }, deleted, { kind: "delete", id: id });
   }
 
-  async function commitStorage(presets, activeMeta, onSuccess, deleted) {
+  async function commitStorage(presets, activeMeta, onSuccess, deleted, retry) {
     try {
       var patch = {};
       patch[STORAGE_KEY] = presets;
@@ -1611,11 +1819,14 @@
       state.activeMeta = sanitizeActiveMeta(activeMeta);
       state.current = getCurrentFilterState();
       state.error = "";
+      state.retry = null;
       if (typeof onSuccess === "function") onSuccess();
       render();
       requestSavedFiltersSync();
-    } catch (err) {
-      state.error = err && err.message ? err.message : "Local storage is unavailable. Try again.";
+    } catch (_) {
+      // Nothing was written; keep any open form or draft as it was.
+      state.error = "Couldn't save. Nothing changed.";
+      state.retry = retry || null;
       render();
     }
   }
@@ -1625,15 +1836,15 @@
   }
 
   function savedFilterLimitMessage() {
-    return "You can keep up to " + SAVED_FILTER_ACTIVE_LIMIT + " AO3 saved filters. Delete one before saving another.";
+    return "You've saved " + SAVED_FILTER_ACTIVE_LIMIT + " filters, the most Trace keeps. Delete one to save another.";
   }
 
   function renderCapacityWarning() {
     if (state.presets.length < SAVED_FILTER_LIMIT_WARNING_THRESHOLD) return "";
     return (
-      "<div class='trace-sf-capacity'>" +
+      "<p class='trace-sf-capacity'>" +
       state.presets.length + " of " + SAVED_FILTER_ACTIVE_LIMIT + " saved filters used" +
-      "</div>"
+      "</p>"
     );
   }
 
@@ -1655,7 +1866,7 @@
       /* Apply should still work if only the active marker fails. */
     }
     if (preset.scope === "context" && !getPageContext()) {
-      state.notice = "No current fandom or tag context was detected. Applying on global works search.";
+      state.notice = "This page isn't a tag page, so the filter is applied across all of AO3.";
       render();
     }
     navigateTo(href);

@@ -48,7 +48,8 @@
     "agent:check": "npm run agent:lint && npm run test:swift-provider-codec && npm run test:swift-import-inbox && npm test && npm run build:release && npm run agent:lint",
     "test:swift-import-inbox": "node scripts/test-swift-import-inbox.mjs",
     "test:native-import-package": "node --test test/native-import-package.test.mjs",
-    "test:activity-cors": "node --test test/extension-runtime/activity-cors.browser.test.mjs"
+    "test:activity-cors": "node --test test/extension-runtime/activity-cors.browser.test.mjs",
+    "test:saved-filters:browser": "node --test test/ao3-saved-filters.browser.test.mjs"
   },
   "engines": {
     "node": ">=18"

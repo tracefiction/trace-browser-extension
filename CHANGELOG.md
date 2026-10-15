@@ -14,6 +14,7 @@ its notes go with each app release.
 ### On the page
 
 - **No more bare “Error”.** When a story can't be saved automatically, the page now says **Not saved**. A story you tried to add says **Couldn’t add**, and a connection problem says **Try again**.
+- **AO3 saved filters show everything they keep.** In AO3's Filters side bar, the **Saved filters** panel no longer cuts filters off, which happened most on a phone. Every saved filter is listed (past eight, **Show all** shows the rest), and each one shows all of its filters in full. Before you save, **What it keeps** lists every filter you've chosen, and **Show it on** is a plain choice between the tag you're on and every AO3 search.
 - **A save that didn't go through gets a second chance.** If Trace couldn't check your Library at that moment, it quietly tries the save once more before saying anything. If the page does show **Not saved** and the story turns out to be saved after all, the page corrects itself.
 
 - **A story is only marked Finished for the reader who read it.** If a different Trace account is connected while a story page is open, the page forgets the previous account's reading: its end-of-story note and **Undo** go away, nothing unconfirmed is carried over, and the page shows the new account's Library. The story is marked Finished only once the connected reader reaches the end themselves. Lists that were already open show the new account's marks too.
