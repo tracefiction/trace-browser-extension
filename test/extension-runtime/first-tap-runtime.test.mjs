@@ -41,7 +41,11 @@ const REGISTERED = ["trace-archive-automation-v1", "trace-ao3-saved-filters-v1"]
  * Safari does each time it wakes the extension; what a background holds only
  * in memory starts empty.
  */
-function install({ granted = false, registered = [], crypto = steadyCrypto, saveOnOpen = true } = {}) {
+function install({
+  granted = false, registered = [], crypto = steadyCrypto, saveOnOpen = true,
+  // Pauses before a read that may lag is made again; none unless a test asks.
+  settleDelays = [], registrationSettled = null,
+} = {}) {
   const state = {
     granted, registered, binding: "1.aaa", accountId: "account-a",
     /** What `permissions.getAll` lists; null to list exactly what `granted` says. */
@@ -170,6 +174,8 @@ function install({ granted = false, registered = [], crypto = steadyCrypto, save
       apiBase: "https://api.trace.test",
       now: () => 1_800_000_000_000,
       ...(crypto === null ? {} : { crypto }),
+      accessSettleDelaysMs: settleDelays,
+      ...(registrationSettled === null ? {} : { registrationSettled: () => registrationSettled(state) }),
     });
     const openPort = (sender = { id: "trace-test", url: "safari-web-extension://trace-test/popup.html" }, name = "trace-first-tap-popup-v1") => {
       const messages = [];
@@ -916,3 +922,79 @@ test("with the browser's own digest, the same story is found again under the sam
   assert.equal(h.calls.saves.length, 1);
 });
 
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("the ask: a yes that the first read does not show yet is read again before anything less than allowed is said", async () => {
+  // Safari answers the request a moment before what it allows reads that way.
+  const { h, port } = await savedSheet({ settleDelays: [5, 10] });
+  port.send("access_asking");
+  port.send("access_answered", { returned: true });
+  setTimeout(() => { h.state.granted = true; h.state.registered = REGISTERED; }, 2);
+  await wait(40);
+  await turns();
+  assert.deepEqual(port.access, [{ state: "waiting" }, ALLOWED], "allowed, never not known first");
+  assert.equal(h.state.tabs[7].page, "normal");
+
+  // A yes that never reads as allowed is still not known after those pauses, never a no.
+  const still = await savedSheet({ settleDelays: [5, 10] });
+  still.port.send("access_answered", { returned: true });
+  await wait(40);
+  await turns();
+  assert.deepEqual(still.port.access, [{ state: "not_known" }]);
+
+  // A no is not read again: nothing is ever waited into a different answer.
+  const no = await savedSheet({ settleDelays: [5_000] });
+  no.port.send("access_answered", { returned: false });
+  await turns();
+  assert.deepEqual(no.port.access, [{ state: "not_allowed", automaticSaving: "on" }]);
+});
+
+test("the ask: sites just allowed while their scripts are still going in are allowed once the registration ends, not failed", async () => {
+  let settles = 0;
+  const { h, port } = await savedSheet({
+    registrationSettled: async (state) => {
+      settles += 1;
+      await wait(2);
+      state.registered = REGISTERED;
+      return true;
+    },
+  });
+  h.state.granted = true;
+  port.send("access_answered", { returned: true });
+  await wait(20);
+  await turns();
+  assert.deepEqual(port.access.at(-1), ALLOWED);
+  assert.equal(settles, 1);
+
+  // A registration that ended without the scripts is still failed, and said so.
+  const failed = await savedSheet({ registrationSettled: async () => true, settleDelays: [1] });
+  failed.h.state.granted = true;
+  failed.port.send("access_check");
+  await wait(20);
+  await turns();
+  assert.deepEqual(failed.port.access.at(-1), { state: "registration_failed" });
+});
+
+test("Check again sent over a new port right behind its open asks Trace about that story", async () => {
+  const h = harness({ saveOnOpen: false });
+  h.state.saveEnds = "unanswered";
+  const first = h.openPort();
+  first.send("open");
+  await turns();
+  first.send("save", { look: 1 });
+  await turns();
+  assert.equal(first.posted.at(-1).dispatch, "sent_unconfirmed");
+
+  // Safari stopped the background under the sheet; the popup opens a new port
+  // and sends the open and the look together.
+  const next = h.world.worker().openPort();
+  h.state.membership = { status: 200, body: { success: true, data: { work_key: WORK_KEY, membership: "absent" } } };
+  next.send("open");
+  next.send("check", { look: 2 });
+  await turns();
+  const answer = next.messages.find(({ answered }) => answered === 2);
+  assert.ok(answer, "the look is answered under its number");
+  assert.notEqual(answer.view.state, "presence_unknown", "and is about the story the open found");
+  assert.equal(h.calls.requests.length, 1, "Trace was asked");
+});

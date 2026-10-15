@@ -9139,24 +9139,35 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     async opened(listener, tapped, options = {}) {
       const page = this.#storyPage(tapped);
       if (page === null) return Object.freeze({ state: "not_applicable" });
-      const sheet = this.#sheets.get(listener) ?? { tabId: page.tabId, key: null, workKey: null };
+      let opened = () => void 0;
+      const opening = new Promise((resolve) => {
+        opened = resolve;
+      });
+      const sheet = this.#sheets.get(listener) ?? { tabId: page.tabId, key: null, workKey: null, opening };
       sheet.tabId = page.tabId;
       sheet.key = null;
       sheet.workKey = page.workKey;
+      sheet.opening = opening;
       this.#sheets.set(listener, sheet);
-      const grant = await this.#ports.grantComplete().catch(() => null);
-      if (grant === true) return Object.freeze({ state: "automatic" });
-      const account = await this.#ports.account().catch(
-        () => Object.freeze({ state: "unknown" })
-      );
-      if (account.state !== "verified") {
-        return Object.freeze({
-          state: account.state === "missing" ? "account_missing" : account.state === "reconnect_required" ? "account_reconnect_required" : "account_unknown",
-          workKey: page.workKey
-        });
+      let record3;
+      let grant;
+      try {
+        grant = await this.#ports.grantComplete().catch(() => null);
+        if (grant === true) return Object.freeze({ state: "automatic" });
+        const account = await this.#ports.account().catch(
+          () => Object.freeze({ state: "unknown" })
+        );
+        if (account.state !== "verified") {
+          return Object.freeze({
+            state: account.state === "missing" ? "account_missing" : account.state === "reconnect_required" ? "account_reconnect_required" : "account_unknown",
+            workKey: page.workKey
+          });
+        }
+        record3 = await this.#recordFor(account, page);
+        if (this.#sheets.get(listener) === sheet) sheet.key = record3.key;
+      } finally {
+        opened();
       }
-      const record3 = await this.#recordFor(account, page);
-      if (this.#sheets.get(listener) === sheet) sheet.key = record3.key;
       const decided = record3.deciding.then(() => this.#decide(record3, page, grant, options));
       record3.deciding = decided.then(() => void 0, () => void 0);
       return decided;
@@ -9227,6 +9238,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     async check(listener) {
       const sheet = this.#sheets.get(listener);
       if (!sheet || sheet.workKey === null) return Object.freeze({ state: "not_applicable" });
+      await sheet.opening;
+      if (sheet.workKey === null) return Object.freeze({ state: "not_applicable" });
       const unknown = Object.freeze({ state: "presence_unknown", workKey: sheet.workKey });
       const record3 = sheet.key === null ? null : this.#records.get(sheet.key) ?? null;
       if (record3 === null || record3.binding !== this.#ports.binding()) return unknown;
@@ -9756,7 +9769,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 
   // src/extension-runtime/story-site-access.mts
   var HAND_OVER_BY_RELOADING_THE_PAGE = false;
+  var STORY_SITE_SETTLE_DELAYS_MS = Object.freeze([300, 700]);
   var view = (value) => Object.freeze(value);
+  var pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   var StorySiteAccess = class {
     #ports;
     /** Popups with a request out. */
@@ -9793,9 +9808,28 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     /** What holds now. With no request made, pass nothing. */
     async observe(ask = { kind: "none" }) {
-      const reading = await this.#ports.access().catch(() => null);
+      const delays = this.#ports.settleDelaysMs ?? STORY_SITE_SETTLE_DELAYS_MS;
+      let reading = await this.#ports.access().catch(() => null);
+      if (ask.kind === "returned" && ask.value === true) {
+        for (const delay of delays) {
+          if (reading?.complete === true) break;
+          await pause(delay);
+          reading = await this.#ports.access().catch(() => null);
+        }
+      }
       if (reading?.complete === true) {
-        const registered = await this.#ports.registered().catch(() => null);
+        let registered = await this.#ports.registered().catch(() => null);
+        if (registered !== true && ask.kind !== "waiting") {
+          if (this.#ports.registrationSettled) {
+            await this.#ports.registrationSettled().catch(() => false);
+            registered = await this.#ports.registered().catch(() => null);
+          }
+          for (const delay of delays) {
+            if (registered === true) break;
+            await pause(delay);
+            registered = await this.#ports.registered().catch(() => null);
+          }
+        }
         if (registered === false) return view({ state: "registration_failed" });
         if (registered !== true) return view({ state: "registration_unknown" });
         const [account, automaticSaving] = await Promise.all([
@@ -9968,7 +10002,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       registered,
       account,
       automaticSaving: () => session.automaticSaving(),
-      handOver
+      handOver,
+      ...environment.registrationSettled ? { registrationSettled: environment.registrationSettled } : {},
+      ...environment.accessSettleDelaysMs ? { settleDelaysMs: environment.accessSettleDelaysMs } : {}
     });
     runtime.onConnect?.addListener((port) => {
       if (port.name !== FIRST_TAP_POPUP_PORT || !port.sender || port.sender.id !== runtime.id || port.sender.tab !== void 0 && port.sender.tab !== null || !isPopupSender(port.sender, runtime.id) || port.sender.frameId !== void 0 && port.sender.frameId !== 0) {
@@ -10280,6 +10316,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     let afterScriptsRegistered = null;
     let readiness = null;
     let registrationSettled = null;
+    let sheetRegistrationSettled = null;
     if (true) {
       const recover = installArchiveRecovery({
         runtime: extension.runtime,
@@ -10350,6 +10387,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           onReconcileEnded: (result) => readiness?.registrationEnded(result)
         });
         registrationSettled = () => registration.settled(8e3);
+        sheetRegistrationSettled = () => registration.settled(2e3);
         readiness = installSafariReadinessReport({
           runtime: extension.runtime,
           permissions: extension.permissions,
@@ -10416,7 +10454,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         saveOnOpen: false,
         session,
         fetch: apiFetch,
-        apiBase: "https://api.tracefiction.com"
+        apiBase: "https://api.tracefiction.com",
+        // After Always Allow the registration runs on Safari's word of the new
+        // access; what the sheet reads waits for it rather than racing it.
+        ...sheetRegistrationSettled ? { registrationSettled: sheetRegistrationSettled } : {}
       });
     }
     extension.storage.onChanged?.addListener((changes, area) => {

@@ -90,6 +90,10 @@ type Environment = Readonly<{
   now?: () => number;
   /** Random bytes for this install's salt, and a one-way digest. */
   crypto?: Pick<Crypto, "getRandomValues" | "subtle">;
+  /** Resolves once a registration of the page scripts under way has ended. */
+  registrationSettled?: () => Promise<boolean>;
+  /** The pauses before reading the story sites again where a read may lag. */
+  accessSettleDelaysMs?: readonly number[];
 }>;
 
 const hex = (bytes: Uint8Array): string =>
@@ -275,6 +279,8 @@ export function installFirstTapSave(environment: Environment): () => Promise<voi
     account,
     automaticSaving: () => session.automaticSaving(),
     handOver,
+    ...(environment.registrationSettled ? { registrationSettled: environment.registrationSettled } : {}),
+    ...(environment.accessSettleDelaysMs ? { settleDelaysMs: environment.accessSettleDelaysMs } : {}),
   });
 
   runtime.onConnect?.addListener((port: ContentPort) => {

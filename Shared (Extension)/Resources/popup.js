@@ -1761,7 +1761,8 @@ function renderEarnedSaved(story, work, identity, alreadyInLibrary = false, conf
     setEarnedCopy({
       stateCode: "P2",
       kicker: confirmation,
-      kickerIcon: "check",
+      // "Already in your Library" carries no tick: nothing was added just now.
+      kickerIcon: alreadyInLibrary ? "" : "check",
       heading: title,
       record: { heading: true, byline: storyByline(identity, story), label: line.label, status: line.key },
       lead,
@@ -2011,13 +2012,23 @@ function waitForAppAccount(story, { connected, other = null, generalView = false
   else askForAppAccount(wait);
 }
 
-function askForAppAccount(wait) {
-  if (accountWait !== wait || wait.asking) return;
+/**
+ * One read of the account. While one is out no other is sent, unless the
+ * reader taps Try again: Safari may have stopped the background under the
+ * read and never answer it, and a new read wakes a background. An earlier
+ * read that answers late is still taken where its answer settles the wait.
+ */
+function askForAppAccount(wait, { again = false } = {}) {
+  if (accountWait !== wait || (wait.asking && !again)) return;
   if (wait.timer !== null) clearTimeout(wait.timer);
   wait.timer = null;
   wait.asking = true;
+  wait.reads = (wait.reads ?? 0) + 1;
+  const read = wait.reads;
   sendKernelRuntimeMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" }, (response) => {
     if (accountWait !== wait) return;
+    const latest = read === wait.reads;
+    if (!latest && ["unknown", "pending"].includes(appAccountAnswer(response?.snapshot))) return;
     wait.asking = false;
     takeAccountAnswer(wait, response);
   });
@@ -2116,7 +2127,7 @@ function retryAppAccount() {
   wait.recheckedNone = false;
   showAccountWaitView(wait, "connecting");
   armAccountWaitLimit(wait);
-  askForAppAccount(wait);
+  askForAppAccount(wait, { again: true });
 }
 
 let storyConfirmation = null;
@@ -2298,6 +2309,13 @@ let firstTapAsk = null;
 let firstTapAccessWatched = false;
 // While a request is out, what Safari allows is read again this often.
 const FIRST_TAP_ASK_REREAD_MS = 2_000;
+// Safari said yes, and the background could not yet see it: it is looked at
+// again after each of these, while it is still not known. A yes can only turn
+// out allowed, so looking never risks a no.
+const FIRST_TAP_YES_LOOKS_MS = Object.freeze([1_000, 2_000, 4_000]);
+// Messages from the background about the ask, counted, so that a word sent
+// with no word back can be told from one that was answered.
+let firstTapAccessHeard = 0;
 // How long the popup waits on a request before saying it does not know. A
 // reader answers Safari's question in seconds; a minute is past any reading
 // of it. Nothing is lost at the deadline: a request that comes back later, a
@@ -2730,11 +2748,11 @@ function leaveFirstTapSheet() {
  * only a message carrying it back ends the wait. `label` is what the button
  * reads meanwhile; with none it reads as it did.
  */
-function holdFirstTapButton(button, work, label = "") {
+function holdFirstTapButton(button, work, label = "", resend = null) {
   if (firstTapBusy || !button) return;
   firstTapLooks += 1;
   const busy = {
-    look: firstTapLooks, timer: null, button: button.id, action: button.dataset.earnedAction, label,
+    look: firstTapLooks, timer: null, resendTimer: null, button: button.id, action: button.dataset.earnedAction, label,
   };
   firstTapBusy = busy;
   busy.timer = setTimeout(() => {
@@ -2742,6 +2760,17 @@ function holdFirstTapButton(button, work, label = "") {
     // No answer came. The sheet is drawn as it stood, and its button given back.
     if (firstTapBusy === busy && !firstTapSetAside) redrawFirstTapAloud();
   }, FIRST_TAP_BUSY_LIMIT_MS);
+  // Safari may have stopped the background under the sheet, and the port to
+  // it then carries nothing, with or without word that it closed. A look with
+  // no word back in a few seconds is sent once more over a new port, which
+  // wakes a background. A look is read only, so sending it twice asks nothing
+  // twice that matters, and its answer still carries the tap's number.
+  if (resend) {
+    busy.resendTimer = setTimeout(() => {
+      busy.resendTimer = null;
+      if (firstTapBusy === busy && !firstTapSetAside) resend(busy.look);
+    }, FIRST_TAP_SAVE_ANSWER_MS);
+  }
   showFirstTapBusy();
   if (label) setEarnedResult("checking", firstTapSpoken(label), "");
   work(busy.look);
@@ -2762,6 +2791,7 @@ function endFirstTapBusy() {
   const busy = firstTapBusy;
   if (!busy) return false;
   if (busy.timer !== null) clearTimeout(busy.timer);
+  if (busy.resendTimer) clearTimeout(busy.resendTimer);
   firstTapBusy = null;
   return true;
 }
@@ -2786,6 +2816,19 @@ function firstTapLook(command, look) {
     startFirstTap(firstTapStory, firstTapTab);
     return;
   }
+  firstTapSend(command, { look });
+}
+
+/**
+ * A look the reader asked for, sent again over a new port. The story is
+ * opened on first, so that a background woken by it knows which story the
+ * look is about; an "open" is itself the look and goes once.
+ */
+function resendFirstTapLook(command, look) {
+  if (!firstTapStory || !firstTapTab) return;
+  dropFirstTapPort();
+  if (!connectFirstTapPort()) return;
+  if (command !== "open") firstTapSend("open");
   firstTapSend(command, { look });
 }
 
@@ -3353,12 +3396,41 @@ function askForStorySites() {
           }
         }, FIRST_TAP_ASK_REREAD_MS);
       }
+      // Safari said yes. Should the background not see it yet, the popup
+      // looks again by itself while it is still not known.
+      if (answer.returned === true) lookAgainAfterYes();
       // Passed on even when it comes after this wait ran out: it is still
       // evidence, and the background still reads before it says anything.
       // The wait itself ends when the background answers, or at the deadline.
-      return observeStorySiteAccess("access_answered", answer);
+      return observeStorySiteAccess("access_answered", answer).then(() => {
+        // The background may have been stopped while Safari's question was
+        // up, and the port to it carry nothing. With no word back in a few
+        // seconds the answer goes once more over a new port.
+        const heard = firstTapAccessHeard;
+        const port = firstTapPort;
+        setTimeout(() => {
+          if (firstTapAccessHeard !== heard || firstTapPort !== port || firstTapSetAside) return;
+          void observeStorySiteAccess("access_answered", answer, { freshPort: true });
+        }, FIRST_TAP_SAVE_ANSWER_MS);
+      });
     })
     .catch(() => undefined);
+}
+
+/** After Safari's yes: a few looks, each only while the ask is still not known. */
+function lookAgainAfterYes() {
+  let at = 0;
+  const look = () => {
+    if (firstTapSetAside) return;
+    const state = firstTapAccess?.state ?? null;
+    // Anything but not known (or no word yet) is an answer: nothing to look into.
+    if (state !== null && state !== "not_known" && state !== "waiting") return;
+    // A request asked again since is waited on as any other.
+    if (!firstTapAsk && state === "not_known") void observeStorySiteAccess("access_unanswered");
+    at += 1;
+    if (at < FIRST_TAP_YES_LOOKS_MS.length) setTimeout(look, FIRST_TAP_YES_LOOKS_MS[at]);
+  };
+  setTimeout(look, FIRST_TAP_YES_LOOKS_MS[0]);
 }
 
 /**
@@ -3366,11 +3438,17 @@ function askForStorySites() {
  * allowed, Trace's page scripts are registered first, so that the background
  * reads them in place. Nothing here asks Safari for anything.
  */
-async function observeStorySiteAccess(command, answer = {}, { onlyIfAllowed = false } = {}) {
+async function observeStorySiteAccess(command, answer = {}, { onlyIfAllowed = false, freshPort = false } = {}) {
   if (await readCompleteEarnedGrant().catch(() => false)) {
     await reconcileEarnedRegistration().catch(() => null);
   } else if (onlyIfAllowed) {
     return;
+  }
+  // Sent again because nothing came back: over a new port, which wakes a
+  // background, opened on the story first as any new port is.
+  if (freshPort && firstTapStory && firstTapTab) {
+    dropFirstTapPort();
+    if (connectFirstTapPort()) firstTapSend("open");
   }
   // The background may have been restarted while Safari's question was up.
   if (!firstTapPort && firstTapStory && firstTapTab) startFirstTap(firstTapStory, firstTapTab);
@@ -3486,6 +3564,7 @@ function receiveFirstTapMessage(message) {
     endFirstTapSaveDelivery(delivery);
     if (firstTapBusy?.look === delivery.look && message.answered !== delivery.look) endFirstTapBusy();
   }
+  if (message.access) firstTapAccessHeard += 1;
   const accessChanged = message.access ? receiveStorySiteAccess(message.access) : false;
   if (view) firstTapLastView = view;
   // The answer to what the reader asked for, known by the tap's number,
@@ -3572,6 +3651,22 @@ function sendFirstTapSave(look) {
     }, FIRST_TAP_SAVE_ANSWER_MS);
   };
   wait();
+}
+
+/**
+ * After the reload, "Saving your story…" waits for the page to report in.
+ * A page that never does (Safari did not run Trace on it, or the background
+ * missed it) does not hold the sheet: after the popup's usual patience it
+ * says the story is still being confirmed, and Check again looks.
+ */
+function boundEarnedRunWait(story) {
+  setTimeout(() => {
+    if (earnedAwaitingStory !== story || storyConfirmation || accountWait) return;
+    if (document.body.dataset.tracePopupStateCode !== "P1") return;
+    // A save found now may have been made by the reload, so it is never "already".
+    watchForConfirmedStory(story, earnedStoryRender(story), { firstCheck: false });
+    renderEarnedDelayed(story);
+  }, STORY_CONFIRMATION_PATIENCE_MS);
 }
 
 async function prepareEarnedPermissionFlow() {
@@ -3667,6 +3762,7 @@ async function prepareEarnedPermissionFlow() {
     // is no permission decision left, so continue without an extra tap.
     earnedAwaitingStory = story;
     renderEarnedAccessPending(story);
+    boundEarnedRunWait(story);
     await reloadEarnedStory();
     return;
   }
@@ -3725,6 +3821,7 @@ async function allowAccessAndAddEarnedStory() {
       return;
     }
     renderEarnedAccessPending(story);
+    boundEarnedRunWait(story);
     await reloadEarnedStory();
   } catch {
     void recordEarnedEvent("website_access_setup_failed");
@@ -4291,10 +4388,31 @@ function sendKernelRuntimeMessage(message, onResponse) {
 
 const KERNEL_SNAPSHOT_RETRY_DELAYS_MS = Object.freeze([180, 650]);
 const KERNEL_SNAPSHOT_TRANSIENT_RETRY_LIMIT = 31;
+// Safari can stop the background while the popup opens and then never
+// deliver its reply. A reply not in by then is taken as none, so the popup
+// asks again (which wakes the background) instead of waiting for ever.
+const KERNEL_SNAPSHOT_REPLY_MS = 4_000;
 let kernelSnapshotAttempt = 0;
 let kernelSnapshotTransientAttempt = 0;
 let kernelSnapshotProviderAttempt = 0;
 let kernelSnapshotTimer = null;
+let kernelSnapshotRequest = 0;
+
+/**
+ * On iPhone and iPad the story's handover state is drawn while the session is
+ * read. Where that read gives no settled answer within its bounds, the popup
+ * says it could not connect and offers Try again; it never stays on the
+ * handover state.
+ */
+function settleKernelHandover() {
+  if (!(EARNED_PERMISSION_ONBOARDING && isLikelyIosExtensionUi && earnedCurrentPage?.ok)) return false;
+  kernelSnapshotTransientAttempt = 0;
+  kernelSnapshotAttempt = 0;
+  const story = { kind: earnedCurrentPage.kind === "story" ? "story" : "archive" };
+  waitForAppAccount(story,
+    { connected: kernelAccountConnected, other: kernelAccountOther, generalView: true, settled: "unreachable" });
+  return true;
+}
 
 function requestKernelSnapshotAfter(delayMs) {
   if (kernelSnapshotTimer !== null) clearTimeout(kernelSnapshotTimer);
@@ -4319,56 +4437,74 @@ function kernelAccountOther(response) {
 function requestKernelSnapshot() {
   if (kernelSnapshotTimer !== null) clearTimeout(kernelSnapshotTimer);
   kernelSnapshotTimer = null;
-  sendKernelRuntimeMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" }, (response) => {
-    if (!response) {
-      const retryDelay = KERNEL_SNAPSHOT_RETRY_DELAYS_MS[kernelSnapshotAttempt];
-      kernelSnapshotAttempt += 1;
-      if (retryDelay !== undefined) {
-        requestKernelSnapshotAfter(retryDelay);
-        return;
-      }
-      renderKernelSnapshot({ state: "degraded", reason: "runtime_unavailable" });
+  kernelSnapshotRequest += 1;
+  const request = kernelSnapshotRequest;
+  let answered = false;
+  const take = (response) => {
+    // One answer per request, and none for a request a newer one replaced.
+    if (answered || request !== kernelSnapshotRequest) return;
+    answered = true;
+    clearTimeout(deadline);
+    takeKernelSnapshot(response);
+  };
+  const deadline = setTimeout(() => take(null), KERNEL_SNAPSHOT_REPLY_MS);
+  sendKernelRuntimeMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" }, take);
+}
+
+function takeKernelSnapshot(response) {
+  if (!response) {
+    const retryDelay = KERNEL_SNAPSHOT_RETRY_DELAYS_MS[kernelSnapshotAttempt];
+    kernelSnapshotAttempt += 1;
+    if (retryDelay !== undefined) {
+      requestKernelSnapshotAfter(retryDelay);
       return;
     }
-    kernelSnapshotAttempt = 0;
-    const state = response?.snapshot?.state;
-    // On iPhone and iPad this reply follows a read of the Trace app's
-    // account. A read that failed (Safari can still be starting the
-    // extension) leaves it unknown whether the reader has an account, so
-    // say only that Trace is connecting and ask again a few times, further
-    // apart each time. Signed out is shown only once the app says so.
-    const accountRead = isLikelyIosExtensionUi || response?.action !== undefined;
-    const answer = accountRead && !SESSION_DISABLED ? appAccountAnswer(response?.snapshot) : "other";
-    if (EARNED_PERMISSION_ONBOARDING && isLikelyIosExtensionUi &&
-        ["unknown", "none", "refused", "other_account"].includes(answer)) {
-      // The same wait the setup flow uses, started from this reply.
-      const story = { kind: earnedCurrentPage?.kind === "story" ? "story" : "archive" };
-      waitForAppAccount(story,
-        { connected: kernelAccountConnected, other: kernelAccountOther, generalView: true }, response);
+    if (settleKernelHandover()) return;
+    renderKernelSnapshot({ state: "degraded", reason: "runtime_unavailable" });
+    return;
+  }
+  kernelSnapshotAttempt = 0;
+  const state = response?.snapshot?.state;
+  // On iPhone and iPad this reply follows a read of the Trace app's
+  // account. A read that failed (Safari can still be starting the
+  // extension) leaves it unknown whether the reader has an account, so
+  // say only that Trace is connecting and ask again a few times, further
+  // apart each time. Signed out is shown only once the app says so.
+  const accountRead = isLikelyIosExtensionUi || response?.action !== undefined;
+  const answer = accountRead && !SESSION_DISABLED ? appAccountAnswer(response?.snapshot) : "other";
+  if (EARNED_PERMISSION_ONBOARDING && isLikelyIosExtensionUi &&
+      ["unknown", "none", "refused", "other_account"].includes(answer)) {
+    // The same wait the setup flow uses, started from this reply.
+    const story = { kind: earnedCurrentPage?.kind === "story" ? "story" : "archive" };
+    waitForAppAccount(story,
+      { connected: kernelAccountConnected, other: kernelAccountOther, generalView: true }, response);
+    return;
+  }
+  if (answer === "unknown") {
+    // A build without the one-step account view keeps its own copy.
+    const retryDelay = APP_ACCOUNT_RETRY_DELAYS_MS[kernelSnapshotProviderAttempt];
+    if (retryDelay !== undefined) {
+      kernelSnapshotProviderAttempt += 1;
+      renderKernelSnapshot({ state: "initializing", reason: "none" });
+      requestKernelSnapshotAfter(retryDelay);
       return;
     }
-    if (answer === "unknown") {
-      // A build without the one-step account view keeps its own copy.
-      const retryDelay = APP_ACCOUNT_RETRY_DELAYS_MS[kernelSnapshotProviderAttempt];
-      if (retryDelay !== undefined) {
-        kernelSnapshotProviderAttempt += 1;
-        renderKernelSnapshot({ state: "initializing", reason: "none" });
-        requestKernelSnapshotAfter(retryDelay);
-        return;
-      }
-    }
-    kernelSnapshotProviderAttempt = 0;
-    renderKernelSnapshot(response?.snapshot);
-    if (state === "initializing" || state === "connecting" || state === "verifying") {
-      if (kernelSnapshotTransientAttempt < KERNEL_SNAPSHOT_TRANSIENT_RETRY_LIMIT) {
-        kernelSnapshotTransientAttempt += 1;
-        requestKernelSnapshotAfter(kernelSnapshotTransientAttempt === 1 ? 250 : 1000);
-      }
+  }
+  kernelSnapshotProviderAttempt = 0;
+  renderKernelSnapshot(response?.snapshot);
+  if (state === "initializing" || state === "connecting" || state === "verifying") {
+    if (kernelSnapshotTransientAttempt < KERNEL_SNAPSHOT_TRANSIENT_RETRY_LIMIT) {
+      kernelSnapshotTransientAttempt += 1;
+      requestKernelSnapshotAfter(kernelSnapshotTransientAttempt === 1 ? 250 : 1000);
       return;
     }
-    kernelSnapshotTransientAttempt = 0;
-    if (state === "connected") requestKernelPopupState();
-  });
+    // Still handing over after every bounded ask: the handover state is not
+    // left standing as if it were still under way.
+    settleKernelHandover();
+    return;
+  }
+  kernelSnapshotTransientAttempt = 0;
+  if (state === "connected") requestKernelPopupState();
 }
 
 function requestKernelPopupState() {
@@ -4642,11 +4778,12 @@ async function renderReaderView(state) {
   }
   if (activeTab.kind === "supported_story") {
     if (state.activeWork?.status === "saved" && earnedSetupFinishedOnStory) {
-      // Setup finished in this popup and the page saved the story before the
-      // popup first looked. Confirm it the way a save seen happening is
-      // confirmed, on either site, instead of opening on the everyday view.
+      // Setup finished in this popup and the story was saved before the
+      // popup first looked: it was already in the Library, whether the page
+      // saved it just now or a save on an earlier tap did. It is confirmed as
+      // such, on either site, instead of opening on the everyday view.
       stopStoryConfirmation();
-      renderEarnedSaved(story, state.activeWork, identity, false);
+      renderEarnedSaved(story, state.activeWork, identity, true);
       return;
     }
     if (state.activeWork?.status === "saved") {
@@ -4869,18 +5006,21 @@ function runEarnedAction(button) {
   if (action === "check_story") void checkConfirmedStory();
   // A look the reader asked for: the button waits on the answer.
   if (action === "first_tap_open") {
-    holdFirstTapButton(button, (look) => firstTapLook("open", look), FIRST_TAP_WORDS.checking);
+    holdFirstTapButton(button, (look) => firstTapLook("open", look), FIRST_TAP_WORDS.checking,
+      (look) => resendFirstTapLook("open", look));
   }
   // The save waits on the background's answer, and reaches a background
   // that has gone to sleep under the sheet; see sendFirstTapSave.
   if (action === "first_tap_save") holdFirstTapButton(button, (look) => sendFirstTapSave(look));
   if (action === "first_tap_check") {
-    holdFirstTapButton(button, (look) => firstTapLook("check", look), FIRST_TAP_WORDS.checking);
+    holdFirstTapButton(button, (look) => firstTapLook("check", look), FIRST_TAP_WORDS.checking,
+      (look) => resendFirstTapLook("check", look));
   }
   // The request has to be made in this tap itself; see askForStorySites.
   if (action === "first_tap_allow") askForStorySites();
   if (action === "first_tap_access_check") {
-    holdFirstTapButton(button, (look) => void observeStorySiteAccess("access_check", { look }), FIRST_TAP_WORDS.checking);
+    holdFirstTapButton(button, (look) => void observeStorySiteAccess("access_check", { look }), FIRST_TAP_WORDS.checking,
+      (look) => void observeStorySiteAccess("access_check", { look }, { freshPort: true }));
   }
   if (action === "first_tap_show_ask") {
     firstTapAccess = null;
