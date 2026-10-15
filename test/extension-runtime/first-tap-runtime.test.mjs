@@ -592,6 +592,28 @@ test("the ask: waiting while Safari's question is up, then allowed only from a f
   assert.deepEqual(port.posted.map(({ state }) => state), ["saving", "saving", "confirmed"], "the save shown is not taken back");
 });
 
+test("the ask: what is said of it goes back under the request's own number, and word of Safari's answer is acknowledged at once", async () => {
+  const { h, port } = await savedSheet();
+  port.send("access_asking", { order: 4 });
+  await turns();
+  assert.deepEqual(port.messages.at(-1), { access: { state: "waiting" }, order: 4 });
+
+  h.state.granted = true;
+  h.state.registered = REGISTERED;
+  port.send("access_answered", { returned: true, order: 5 });
+  assert.deepEqual(port.messages.at(-1), { checking: 5 }, "before anything is read");
+  await turns();
+  assert.deepEqual(port.messages.at(-1), { access: ALLOWED, order: 5 });
+  assert.equal(port.messages.filter(({ checking }) => checking !== undefined).length, 1, "acknowledged once");
+
+  // A look the reader's tap asked for carries both numbers back.
+  port.send("access_check", { look: 2, order: 6 });
+  await turns();
+  assert.deepEqual(port.messages.at(-1), { access: ALLOWED, answered: 2, order: 6 });
+  // Only the answer to Safari's question is acknowledged: the other looks are quick.
+  assert.equal(port.messages.filter(({ checking }) => checking !== undefined).length, 1);
+});
+
 test("the ask: what the request returned is never the outcome", async () => {
   // It returned false, and the sites read as allowed.
   const yes = await savedSheet();
