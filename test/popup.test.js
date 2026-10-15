@@ -3952,9 +3952,9 @@ for (const page of [
   { name: "FanFiction.net", url: "https://m.fanfiction.net/s/4821/1/The-Long-Way-Round", site: "ffn", byline: "quillfeather · FanFiction.net" },
   { name: "AO3", url: "https://archiveofourown.org/works/123", site: "ao3", byline: "quillfeather · AO3" },
 ]) {
-  test(`the popup that finishes setup confirms a first save that already landed on ${page.name}`, async () => {
-    // Safari put Trace on the open story when access was allowed, and the page
-    // saved it before the popup first looked.
+  test(`the popup that finishes setup says a story saved before it looked is already in the Library, on ${page.name}`, async () => {
+    // The story was saved before the popup first looked: by the page when
+    // access was allowed, or by an earlier tap. Either way it was already there.
     const h = createPopupHarness({
       sessionMode: "kernel",
       promiseRuntime: true,
@@ -3983,7 +3983,11 @@ for (const page of [
 
     assert.ok(h.store.traceEarnedPermissionOnboardingV1.completedAt > 0, "setup finished in this popup");
     assert.equal(h.document.body.dataset.tracePopupStateCode, "P2");
-    assert.equal(h.document.getElementById("popup-earned-kicker-text").textContent, "Saved to your Library");
+    assert.equal(h.document.getElementById("popup-earned-kicker-text").textContent, "Already in your Library");
+    assert.equal(h.document.getElementById("popup-earned-kicker-icon").childElementCount, 0, "with no tick");
+    h.advance(0);
+    await flush();
+    assert.match(h.document.getElementById("popup-earned-result").textContent, /^Already in your Library/, "and says so aloud");
     assert.equal(h.document.getElementById("popup-earned-heading").textContent, "The Long Way Round");
     assert.equal(h.document.getElementById("popup-earned-record-byline").textContent, page.byline);
     assert.match(h.document.getElementById("popup-earned-lead").textContent, /Your chapter fills in as you read\./);
@@ -6457,5 +6461,37 @@ test("release build, end to end: after Always Allow, with the background stopped
     await until(() => sheet().state === "access-allowed", h);
     assert.equal(text("popup-earned-heading"), "That’s it. Keep reading.", saysSo ? "Safari said the port closed" : "it did not");
     assert.equal(background.world.saves.length, 1, "one save throughout");
+  }
+});
+
+test("iOS: Try again while an earlier read is still unanswered asks again, and lands on the answer", async () => {
+  // The second read never comes back: Safari stopped the background under it.
+  const h = iosLinkedPopupHarness([UNREADABLE_REPLY, SLOW_REPLY, CONNECTED_REPLY]);
+  await settle(h);
+  await pass(h, 1000);
+  assert.equal(snapshotRequests(h), 2);
+  await pass(h, 9000);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+
+  h.document.getElementById("popup-earned-secondary").click();
+  await settle(h);
+  assert.equal(snapshotRequests(h), 3, "the tap asks afresh, which wakes the background");
+  assert.equal(h.document.body.dataset.tracePopupState, "connected", "and the answer is shown");
+});
+
+test("iOS: Try again whose own read is lost too ends in the same stop again, never in a dead button", async () => {
+  const h = iosLinkedPopupHarness([UNREADABLE_REPLY, SLOW_REPLY, SLOW_REPLY, SLOW_REPLY]);
+  await settle(h);
+  await pass(h, 10_000);
+  assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+  for (let tap = 1; tap <= 2; tap += 1) {
+    const asked = snapshotRequests(h);
+    h.document.getElementById("popup-earned-secondary").click();
+    await settle(h);
+    assert.equal(earnedHeading(h), CONNECTING, "the tap shows at once");
+    assert.equal(snapshotRequests(h), asked + 1, "and asks every time");
+    await pass(h, 10_000);
+    assert.equal(earnedHeading(h), COULD_NOT_CONNECT);
+    assert.equal(h.document.getElementById("popup-earned-secondary").textContent, "Try again");
   }
 });

@@ -1761,7 +1761,8 @@ function renderEarnedSaved(story, work, identity, alreadyInLibrary = false, conf
     setEarnedCopy({
       stateCode: "P2",
       kicker: confirmation,
-      kickerIcon: "check",
+      // "Already in your Library" carries no tick: nothing was added just now.
+      kickerIcon: alreadyInLibrary ? "" : "check",
       heading: title,
       record: { heading: true, byline: storyByline(identity, story), label: line.label, status: line.key },
       lead,
@@ -2011,13 +2012,23 @@ function waitForAppAccount(story, { connected, other = null, generalView = false
   else askForAppAccount(wait);
 }
 
-function askForAppAccount(wait) {
-  if (accountWait !== wait || wait.asking) return;
+/**
+ * One read of the account. While one is out no other is sent, unless the
+ * reader taps Try again: Safari may have stopped the background under the
+ * read and never answer it, and a new read wakes a background. An earlier
+ * read that answers late is still taken where its answer settles the wait.
+ */
+function askForAppAccount(wait, { again = false } = {}) {
+  if (accountWait !== wait || (wait.asking && !again)) return;
   if (wait.timer !== null) clearTimeout(wait.timer);
   wait.timer = null;
   wait.asking = true;
+  wait.reads = (wait.reads ?? 0) + 1;
+  const read = wait.reads;
   sendKernelRuntimeMessage({ type: "TRACE_SESSION_GET_SNAPSHOT" }, (response) => {
     if (accountWait !== wait) return;
+    const latest = read === wait.reads;
+    if (!latest && ["unknown", "pending"].includes(appAccountAnswer(response?.snapshot))) return;
     wait.asking = false;
     takeAccountAnswer(wait, response);
   });
@@ -2116,7 +2127,7 @@ function retryAppAccount() {
   wait.recheckedNone = false;
   showAccountWaitView(wait, "connecting");
   armAccountWaitLimit(wait);
-  askForAppAccount(wait);
+  askForAppAccount(wait, { again: true });
 }
 
 let storyConfirmation = null;
@@ -4767,11 +4778,12 @@ async function renderReaderView(state) {
   }
   if (activeTab.kind === "supported_story") {
     if (state.activeWork?.status === "saved" && earnedSetupFinishedOnStory) {
-      // Setup finished in this popup and the page saved the story before the
-      // popup first looked. Confirm it the way a save seen happening is
-      // confirmed, on either site, instead of opening on the everyday view.
+      // Setup finished in this popup and the story was saved before the
+      // popup first looked: it was already in the Library, whether the page
+      // saved it just now or a save on an earlier tap did. It is confirmed as
+      // such, on either site, instead of opening on the everyday view.
       stopStoryConfirmation();
-      renderEarnedSaved(story, state.activeWork, identity, false);
+      renderEarnedSaved(story, state.activeWork, identity, true);
       return;
     }
     if (state.activeWork?.status === "saved") {
