@@ -260,7 +260,7 @@ test("with automatic saving off, or unreadable, opening Trace saves nothing unti
     const world = install();
     world.automaticSaving = preference;
     const popup = world.worker().popup();
-    assert.deepEqual(await popup.open(), { state: "awaiting_request", workKey: A, preference });
+    assert.deepEqual(await popup.open(), { state: "awaiting_request", workKey: A, preference, story: STORY });
     await turns();
     assert.equal(world.net.writes, 0);
 
@@ -271,15 +271,19 @@ test("with automatic saving off, or unreadable, opening Trace saves nothing unti
   }
 });
 
+const STORY = Object.freeze({ title: "The Long Way", author: "someone", site: "AO3" });
+
 test("a build that saves only on the reader's tap offers the save on opening, and saves only when asked", async () => {
   const world = install({ saveOnOpen: false });
   const popup = world.worker().popup();
-  assert.deepEqual(await popup.open(), { state: "awaiting_request", workKey: A, preference: "on" });
-  assert.deepEqual(await popup.open(), { state: "awaiting_request", workKey: A, preference: "on" }, "however often it is opened");
+  const offer = { state: "awaiting_request", workKey: A, preference: "on", story: STORY };
+  assert.deepEqual(await popup.open(), offer, "the offer names the story, as its page says");
+  assert.deepEqual(await popup.open(), offer, "however often it is opened");
   await turns();
-  assert.deepEqual(world.calls.inject, [], "nothing is injected for an open");
-  assert.equal(world.net.lookups + world.net.writes, 0, "and nothing is looked up or written");
-  assert.equal(world.storage.writes, 0);
+  assert.deepEqual(world.calls.collect, [7, 7], "the page is read for the sheet");
+  assert.equal(world.net.writes, 0, "and nothing is written");
+  assert.equal(world.net.lookups, 2, "Trace is only asked, read only, whether the story is there");
+  assert.equal(world.storage.writes, 0, "and nothing is kept");
 
   // The reader's "Save this story": the same guarded save as a first tap.
   assert.equal((await popup.open({ requested: true })).state, "saving");
@@ -288,12 +292,56 @@ test("a build that saves only on the reader's tap offers the save on opening, an
   assert.equal(popup.last.state, "confirmed");
   assert.equal(popup.last.mode, "bounded_manual");
 
-  // With automatic saving off it is offered the same way, under that name.
+  // With automatic saving off it is offered the same way, under that name,
+  // and Trace is not asked about the story.
   const off = install({ saveOnOpen: false });
   off.automaticSaving = "off";
-  assert.deepEqual(await off.worker().popup().open(), { state: "awaiting_request", workKey: A, preference: "off" });
+  assert.deepEqual(await off.worker().popup().open(), { state: "awaiting_request", workKey: A, preference: "off", story: STORY });
   await turns();
-  assert.equal(off.net.writes, 0);
+  assert.equal(off.net.writes + off.net.lookups, 0);
+});
+
+test("a build that saves only on the tap names the story only from its own page, and offers the save when it cannot", async () => {
+  for (const [change, why] of [
+    [(world) => { world.page.injects = false; }, "the page could not be reached"],
+    [(world) => { world.page.collected = { ok: false, error: "story_unavailable" }; }, "the page could not read its story"],
+    [(world) => { world.page.names = B; }, "the page names another story"],
+  ]) {
+    const world = install({ saveOnOpen: false });
+    change(world);
+    assert.deepEqual(
+      await world.worker().popup().open(),
+      { state: "awaiting_request", workKey: A, preference: "on", story: null },
+      why,
+    );
+    assert.equal(world.net.writes, 0);
+  }
+});
+
+test("a build that saves only on the tap shows a story already in the Library as there, never the offer to save it", async () => {
+  const world = install({ saveOnOpen: false, library: [[A, ENTRY]] });
+  const worker = world.worker();
+  const popup = worker.popup();
+  assert.deepEqual(await popup.open(), {
+    state: "confirmed", workKey: A, provenance: "already", mode: null, story: STORY,
+    entry: { status: "READING", readerStatus: "READING", canonicalReaderStatus: "READING", chapters: { current: 3, total: 40 } },
+  });
+  assert.equal(world.net.writes, 0, "found by a read, not a save");
+  popup.close();
+  await turns();
+  assert.deepEqual(world.calls.mark, [{ tabId: 7, workKey: A }], "the page shows its mark once the sheet closes");
+
+  // Saved by the reader's tap, then opened again long after: still there.
+  const saved = install({ saveOnOpen: false });
+  const again = saved.worker();
+  assert.equal((await again.popup().open({ requested: true })).state, "saving");
+  await turns();
+  assert.equal(saved.net.writes, 1);
+  saved.now += FIRST_TAP_RESULT_FRESH_MS + 1;
+  const later = await saved.worker().popup().open();
+  assert.equal(later.state, "confirmed");
+  assert.equal(later.provenance, "already");
+  assert.equal(saved.net.writes, 1, "opening again saves nothing");
 });
 
 // --- Saved, already there, or found --------------------------------------------
@@ -1112,10 +1160,11 @@ test("turning automatic saving on and opening twice at once still saves once", a
   world.automaticSaving = "off";
   const popup = world.worker().popup();
   assert.equal((await popup.open()).state, "awaiting_request");
+  assert.deepEqual(world.calls.inject, [7], "the page was read for the sheet");
   world.automaticSaving = "on";
   await Promise.all([popup.open(), popup.open()]);
   await turns();
-  assert.deepEqual(world.calls.inject, [7], "one attempt was started");
+  assert.deepEqual(world.calls.inject, [7, 7], "one attempt was started");
   assert.equal(world.net.lookups, 1);
   assert.equal(world.net.writes, 1);
   assert.equal(popup.last.provenance, "saved_now");

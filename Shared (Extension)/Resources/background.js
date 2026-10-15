@@ -8806,6 +8806,14 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var FIRST_TAP_RECORD_TTL_MS = 24 * 60 * 60 * 1e3;
   var FIRST_TAP_RECORD_LIMIT = 20;
   var FIRST_TAP_UNPLACED_DOUBT_TTL_MS = 2592e6;
+  var FIRST_TAP_OPEN_READ_MS = 2500;
+  function within(work, ms, fallback) {
+    let timer;
+    const late = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(fallback), ms);
+    });
+    return Promise.race([work.catch(() => fallback), late]).finally(() => clearTimeout(timer));
+  }
   var isTapped = (value) => isRecord21(value) && Number.isInteger(value.tabId) && typeof value.url === "string" && (value.private === null || typeof value.private === "boolean");
   function isRecord21(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -8955,13 +8963,30 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (options.requested !== true) {
         const preference = await this.#ports.automaticSaving().catch(() => "unknown");
         if (preference !== "on" || this.#ports.saveOnOpen !== true) {
-          return record3.inDoubt ? Object.freeze({
-            state: "failed",
-            workKey: page.workKey,
-            reason: "unavailable",
-            dispatch: "sent_unconfirmed",
-            story: record3.story
-          }) : Object.freeze({ state: "awaiting_request", workKey: page.workKey, preference });
+          if (record3.inDoubt) {
+            return Object.freeze({
+              state: "failed",
+              workKey: page.workKey,
+              reason: "unavailable",
+              dispatch: "sent_unconfirmed",
+              story: record3.story
+            });
+          }
+          const [found] = await Promise.all([
+            preference === "off" ? Promise.resolve(null) : within(this.#look(record3), FIRST_TAP_OPEN_READ_MS, null),
+            within(this.#readForSheet(record3, page), FIRST_TAP_OPEN_READ_MS, void 0)
+          ]);
+          if (found === "account_changed") return this.#accountChanged(record3);
+          if (found !== null) {
+            this.#begin(record3, page);
+            return this.#settle(record3, {
+              kind: "confirmed",
+              provenance: record3.priorKnown && !record3.pageSave ? "already" : "found",
+              mode: null,
+              entry: found
+            });
+          }
+          return Object.freeze({ state: "awaiting_request", workKey: page.workKey, preference, story: record3.story });
         }
       }
       this.#begin(record3, page);
@@ -9188,6 +9213,22 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         }
       }
       return view2;
+    }
+    /**
+     * Reads the story's page for the sheet to name it, under the access the
+     * reader's tap gave the tab. Nothing is sent to Trace and nothing is kept:
+     * the page's own word is believed only for the story the popup named.
+     */
+    async #readForSheet(record3, page) {
+      if (!await this.#ports.inject(page.tabId).catch(() => false)) return;
+      this.#injected.set(page.tabId, page.workKey);
+      const collected = await this.#ports.collect(page.tabId).catch(() => null);
+      if (!isRecord21(collected) || collected.ok !== true || collected.workKey !== record3.workKey) return;
+      if (collected.private === true && record3.persist) {
+        record3.persist = false;
+        record3.priorKnown = false;
+      }
+      record3.story = storyFrom(collected, page.hostKind);
     }
     /** A read-only look: the entry, nothing, or word that the account changed. */
     async #look(record3) {

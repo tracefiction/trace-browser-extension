@@ -2269,6 +2269,11 @@ let firstTapPatience = null;
 // nothing has changed. Each such tap has a number, which its answer carries.
 let firstTapBusy = null;
 let firstTapLooks = 0;
+// The reader's save on its way to the background, and how long it waits for
+// word that the background has it before it is sent again over a new port.
+// The background answers as soon as it starts the save, well inside this.
+let firstTapSaveDelivery = null;
+const FIRST_TAP_SAVE_ANSWER_MS = 4_000;
 // A little longer than the slowest of those answers: a read of the Library
 // that is refused, reconnects and is made again. Past it the button is given
 // back; a look asked for then joins one that is still out.
@@ -2375,13 +2380,17 @@ const FIRST_TAP_WORDS = Object.freeze({
   notKnownBody: "AO3 and FanFiction.net may be allowed already. Check again, or ask once more.",
 });
 
+/** Sends a request over the port. False when there is no port, or it would not take it. */
 function firstTapSend(command, detail = {}) {
+  if (!firstTapPort) return false;
   try {
     // The tab this popup was opened on goes with every request: its id, its
     // address and whether it is private, as read when the reader opened Trace.
-    firstTapPort?.postMessage({ command, ...firstTapTab, ...detail });
+    firstTapPort.postMessage({ command, ...firstTapTab, ...detail });
+    return true;
   } catch {
     firstTapPort = null;
+    return false;
   }
 }
 
@@ -3425,34 +3434,143 @@ function startFirstTap(story, tab) {
     ? tab
     : { tabId: tab.id, url: tab.url, private: firstTapTabIsPrivate(tab) };
   if (!firstTapPort) {
-    try {
-      firstTapPort = ext.runtime.connect({ name: FIRST_TAP_POPUP_PORT });
-    } catch {
-      firstTapPort = null;
-    }
-    if (!firstTapPort?.postMessage || !firstTapPort.onMessage) {
-      firstTapPort = null;
-      return false;
-    }
-    firstTapPort.onMessage.addListener((message) => {
-      if (!message) return;
-      const accessChanged = message.access ? receiveStorySiteAccess(message.access) : false;
-      if (message.view) firstTapLastView = message.view;
-      // The answer to what the reader asked for, known by the tap's number,
-      // ends the wait on its button and is drawn and said aloud even when it
-      // is what the sheet already showed. Anything else is drawn as usual,
-      // and leaves a waiting button waiting.
-      if (firstTapBusy && message.answered === firstTapBusy.look) redrawFirstTapAloud();
-      else if (accessChanged || message.view) drawFirstTap();
-    });
+    if (!connectFirstTapPort()) return false;
     watchStorySiteAccess();
-    firstTapPort.onDisconnect?.addListener(() => {
-      firstTapPort = null;
-    });
     renderFirstTapView({ state: "opening" });
   }
   firstTapSend("open");
   return true;
+}
+
+/** Opens the port to the background. Only the port now open is listened to. */
+function connectFirstTapPort() {
+  let port = null;
+  try {
+    port = ext.runtime.connect({ name: FIRST_TAP_POPUP_PORT });
+  } catch {
+    port = null;
+  }
+  if (!port?.postMessage || !port.onMessage) return false;
+  firstTapPort = port;
+  port.onMessage.addListener((message) => {
+    if (message && port === firstTapPort) receiveFirstTapMessage(message);
+  });
+  port.onDisconnect?.addListener(() => {
+    if (firstTapPort === port) firstTapPort = null;
+  });
+  return true;
+}
+
+/** Lets go of the port, so that the next request opens a new one. */
+function dropFirstTapPort() {
+  const port = firstTapPort;
+  firstTapPort = null;
+  try {
+    port?.disconnect?.();
+  } catch {
+    // Already gone.
+  }
+}
+
+function receiveFirstTapMessage(message) {
+  const delivery = firstTapSaveDelivery;
+  // A save this sheet has seen confirmed is never taken back to the offer to
+  // save it by a later open.
+  const view = message.view?.state === "awaiting_request" && firstTapLastView?.state === "confirmed" &&
+    firstTapLastView.workKey === message.view.workKey
+    ? undefined
+    : message.view;
+  // The background has the reader's save: its answer, or the save's own state.
+  if (delivery && (message.answered === delivery.look || (view && view.state !== "awaiting_request"))) {
+    endFirstTapSaveDelivery(delivery);
+    if (firstTapBusy?.look === delivery.look && message.answered !== delivery.look) endFirstTapBusy();
+  }
+  const accessChanged = message.access ? receiveStorySiteAccess(message.access) : false;
+  if (view) firstTapLastView = view;
+  // The answer to what the reader asked for, known by the tap's number,
+  // ends the wait on its button and is drawn and said aloud even when it
+  // is what the sheet already showed. Anything else is drawn as usual,
+  // and leaves a waiting button waiting.
+  if (firstTapBusy && message.answered === firstTapBusy.look) redrawFirstTapAloud();
+  else if (accessChanged || view) drawFirstTap();
+}
+
+function endFirstTapSaveDelivery(delivery) {
+  if (delivery.timer !== null) clearTimeout(delivery.timer);
+  delivery.timer = null;
+  if (firstTapSaveDelivery === delivery) firstTapSaveDelivery = null;
+}
+
+/**
+ * The reader's "Save this story", sent to the background under the tap's
+ * number. Safari may have put the background to sleep while the sheet sat
+ * open, and a port to it then carries nothing, with or without word that it
+ * closed. So a port known to be closed is opened again before the save goes,
+ * and a save with no word back in FIRST_TAP_SAVE_ANSWER_MS goes once more
+ * over a new port, which wakes the background. That is still one save: the
+ * background starts one at a time for a story and answers a second request
+ * with the one under way. With still no word the sheet says the save could
+ * not be confirmed, and offers to check; it is never left as it was.
+ */
+function sendFirstTapSave(look) {
+  if (firstTapSaveDelivery) endFirstTapSaveDelivery(firstTapSaveDelivery);
+  const delivery = { look, timer: null, sends: 0 };
+  firstTapSaveDelivery = delivery;
+  const send = () => {
+    if (!firstTapPort) connectFirstTapPort();
+    if (firstTapPort && firstTapSend("save", { look })) {
+      delivery.sends += 1;
+      return true;
+    }
+    // The port would not take it: a new one, once.
+    dropFirstTapPort();
+    if (connectFirstTapPort() && firstTapSend("save", { look })) {
+      delivery.sends += 1;
+      return true;
+    }
+    return false;
+  };
+  const unanswered = () => {
+    endFirstTapSaveDelivery(delivery);
+    if (firstTapBusy?.look !== look) return;
+    endFirstTapBusy();
+    dropFirstTapPort();
+    const last = firstTapLastView;
+    // Nothing reached a background: nothing was sent. Otherwise a save may
+    // have gone out, so it is never said not to have.
+    firstTapLastView = Object.freeze({
+      state: "failed",
+      workKey: last?.workKey ?? "",
+      reason: "unavailable",
+      dispatch: delivery.sends === 0 ? "never_sent" : "sent_unconfirmed",
+      story: last?.story ?? null,
+    });
+    lastEarnedAnnouncement = "";
+    if (!firstTapSetAside) drawFirstTap();
+  };
+  if (!send()) {
+    unanswered();
+    return;
+  }
+  const wait = () => {
+    delivery.timer = setTimeout(() => {
+      delivery.timer = null;
+      if (firstTapSaveDelivery !== delivery) return;
+      if (firstTapBusy?.look !== look) {
+        endFirstTapSaveDelivery(delivery);
+        return;
+      }
+      if (delivery.sends < 2) {
+        dropFirstTapPort();
+        if (send()) {
+          wait();
+          return;
+        }
+      }
+      unanswered();
+    }, FIRST_TAP_SAVE_ANSWER_MS);
+  };
+  wait();
 }
 
 async function prepareEarnedPermissionFlow() {
@@ -4697,7 +4815,9 @@ function runEarnedAction(button) {
   if (action === "first_tap_open") {
     holdFirstTapButton(button, (look) => firstTapLook("open", look), FIRST_TAP_WORDS.checking);
   }
-  if (action === "first_tap_save") firstTapSend("save");
+  // The save waits on the background's answer, and reaches a background
+  // that has gone to sleep under the sheet; see sendFirstTapSave.
+  if (action === "first_tap_save") holdFirstTapButton(button, (look) => sendFirstTapSave(look));
   if (action === "first_tap_check") {
     holdFirstTapButton(button, (look) => firstTapLook("check", look), FIRST_TAP_WORDS.checking);
   }

@@ -188,6 +188,8 @@ function createPopupHarness({
   maxTouchPoints = 0,
   tabResponse = null,
   storageWritesFail = false,
+  // A real background's side of the first-tap port, in place of the stand-in.
+  firstTapConnect = null,
 } = {}) {
   const html = fs.readFileSync(POPUP_HTML_PATH, "utf8");
   const js = fs.readFileSync(POPUP_JS_PATH, "utf8");
@@ -253,6 +255,7 @@ function createPopupHarness({
       getURL: resource => `${popupUrl.startsWith("safari-web-extension:") ? "safari-web-extension" : promiseRuntime ? "moz-extension" : "chrome-extension"}://trace-test/${resource}`,
       connect({ name }) {
         hostLifecycle.push(name);
+        if (name === "trace-first-tap-popup-v1" && firstTapConnect) return firstTapConnect();
         if (name === "trace-first-tap-popup-v1") {
           return {
             postMessage(message) { firstTap.commands.push(message.command); firstTap.tabIds.push(message.tabId); firstTap.messages.push(message); },
@@ -4561,10 +4564,12 @@ test("first tap: with automatic saving off the popup saves only when asked", asy
   assert.deepEqual(off.h.firstTap.commands, ["open", "save"]);
 
   // Turning it on is the reader's choice; the background then reads it for itself.
-  await off.click("popup-earned-secondary");
-  assert.equal(off.h.store.prefAutoTrackEnabled, true);
-  assert.equal(typeof off.h.store.prefAutoTrackSetAt, "number");
-  assert.deepEqual(off.h.firstTap.commands, ["open", "save", "open"]);
+  const turnOn = await openFirstTapPopup();
+  turnOn.h.firstTap.show({ state: "awaiting_request", workKey: "ao3:123", preference: "off" });
+  await turnOn.click("popup-earned-secondary");
+  assert.equal(turnOn.h.store.prefAutoTrackEnabled, true);
+  assert.equal(typeof turnOn.h.store.prefAutoTrackSetAt, "number");
+  assert.deepEqual(turnOn.h.firstTap.commands, ["open", "open"]);
 
   // A preference that could not be read saves nothing unasked either.
   const unread = await openFirstTapPopup();
@@ -5752,7 +5757,8 @@ test("first tap: a preference that could not be stored leaves the settings contr
     { state: "awaiting_request", workKey: "ao3:123", preference: "off" },
     null,
   ]) {
-    const opened = await openSavedFirstTapPopup({
+    // The offer is drawn on a sheet that has not saved this story.
+    const opened = await (view ? openFirstTapPopup : openSavedFirstTapPopup)({
       grantedOrigins: view ? [] : [...FIVE_STORY_SITES],
       storageState: { prefAutoTrackEnabled: false },
       storageWritesFail: (patch) => "prefAutoTrackEnabled" in patch,
@@ -5923,4 +5929,246 @@ test("first tap: the sheet's styles pin the action area on a short sheet and mar
   // The news of a save still out has a button big enough to tap, and its own disabled look.
   assert.match(css, /\.popup-earned-note button \{[^}]*min-height: 44px;/);
   assert.match(css, /\.popup-earned-note button:disabled \{ opacity: 0\.55;/);
+});
+
+// --- The release build's tap, as Safari runs it ------------------------------------
+
+test("release build: the actions are a column, not a grid, so a button keeps its own height when the sheet widens", () => {
+  // WebKit keeps a grid row's height from the first layout; Safari lays the
+  // popup out before it has sized the sheet. scripts/test-first-tap-sheet-layout.mjs
+  // measures this in WebKit itself.
+  const css = fs.readFileSync(POPUP_CSS_PATH, "utf8");
+  assert.match(css, /\.popup-earned-actions \{ display: flex; flex-direction: column; gap: 2px; \}/);
+  assert.doesNotMatch(css, /\.popup-earned-actions \{[^}]*display: grid/);
+});
+
+test("release build: the offer names the story its page named, and a confirmed save is never taken back to it", async () => {
+  const { h, sheet } = await openFirstTapPopup(RELEASE_SHEET);
+  const offer = { state: "awaiting_request", workKey: "ao3:123", preference: "on", story: FIRST_TAP_STORY };
+  h.firstTap.show(offer);
+  assert.deepEqual(sheet(), {
+    state: "save-on-request", kicker: null, heading: "The Long Way", body: null, record: "someone · AO3", second: null,
+    rule: null, primary: "Save this story", secondary: null,
+  });
+  h.firstTap.show(FIRST_TAP_CONFIRMED);
+  h.firstTap.show(offer);
+  assert.equal(sheet().state, "saved", "an offer for the story just saved is not drawn over it");
+  assert.equal(sheet().kicker, "Saved to your Library");
+});
+
+test("release build: Save this story waits on its answer, a second tap sends nothing, and the answer moves the sheet on", async () => {
+  const { h, click, sheet, element } = await openFirstTapPopup(RELEASE_SHEET);
+  h.firstTap.show({ state: "awaiting_request", workKey: "ao3:123", preference: "on", story: FIRST_TAP_STORY });
+  await click("popup-earned-primary");
+  assert.deepEqual(h.firstTap.commands, ["open", "save"]);
+  assert.equal(typeof h.firstTap.messages.at(-1).look, "number", "the save carries the tap's number");
+  assert.equal(element("popup-earned-primary").disabled, true, "the button shows it is waiting");
+  await click("popup-earned-primary");
+  assert.deepEqual(h.firstTap.commands, ["open", "save"], "a second tap sends nothing more");
+
+  h.firstTap.answer({ view: { state: "saving", workKey: "ao3:123", startedAt: 0, story: FIRST_TAP_STORY } });
+  assert.equal(sheet().state, "saving");
+  h.advance(20_000);
+  assert.deepEqual(h.firstTap.commands, ["open", "save"], "a save the background has is never sent again");
+  h.firstTap.show(FIRST_TAP_CONFIRMED);
+  h.advance(1_100);
+  assert.equal(sheet().state, "saved");
+  assert.equal(sheet().primary, ALLOW_BUTTON, "then the ask");
+});
+
+test("release build: a save with no word back goes once more over a new port, then the sheet says it could not confirm it", async () => {
+  const { h, click, sheet, announced } = await openFirstTapPopup(RELEASE_SHEET);
+  const ports = () => h.hostLifecycle.filter((name) => name === "trace-first-tap-popup-v1").length;
+  h.firstTap.show({ state: "awaiting_request", workKey: "ao3:123", preference: "on", story: FIRST_TAP_STORY });
+  await click("popup-earned-primary");
+  const look = h.firstTap.messages.at(-1).look;
+  assert.equal(ports(), 1);
+
+  h.advance(4_000);
+  assert.equal(ports(), 2, "a new port wakes a background that went to sleep under the sheet");
+  assert.deepEqual(h.firstTap.commands, ["open", "save", "save"]);
+  assert.equal(h.firstTap.messages.at(-1).look, look, "the same tap, sent again");
+  assert.equal(h.firstTap.messages.at(-1).tabId, 7, "naming its tab, as a new port's first word must");
+  assert.equal(sheet().state, "save-on-request", "still waiting on its answer");
+
+  h.advance(4_000);
+  assert.deepEqual(sheet(), {
+    state: "save-unconfirmed", kicker: null, heading: "Trace couldn’t confirm this save",
+    body: "It may have saved anyway. Check again to find out.", record: null, second: null, rule: null,
+    primary: "Check again", secondary: null,
+  });
+  assert.match(await announced(), /Trace couldn’t confirm this save/);
+  assert.deepEqual(h.firstTap.commands, ["open", "save", "save"], "and it is never sent a third time");
+
+  // Check again asks a background afresh, over a new port.
+  await click("popup-earned-primary");
+  assert.equal(ports(), 3);
+  assert.equal(h.firstTap.commands.at(-1), "open");
+});
+
+/**
+ * The real background's first-tap save behind the popup, as a release build
+ * on an iPhone has it: no lasting access to any story site, and access to the
+ * one tab only because the reader opened Trace on it. `sleep()` is Safari
+ * stopping the background while the sheet is open: the port then carries
+ * nothing, and Safari may or may not say it closed. Connecting again wakes a
+ * new background over the same storage.
+ */
+async function releaseBackground({ tabAccess = true } = {}) {
+  const { pathToFileURL } = require("node:url");
+  const { installFirstTapSave } = await import(
+    pathToFileURL(path.join(__dirname, "..", ".trace-build", "extension-runtime", "first-tap-runtime.mjs")).href
+  );
+  const STORY_URL = "https://archiveofourown.org/works/123";
+  const world = { saves: [], injected: [], page: null, store: {}, workers: 0, links: [], tabAccess: new Set(tabAccess ? [7] : []) };
+  let worker = null;
+  const wake = () => {
+    world.workers += 1;
+    let connect = null;
+    installFirstTapSave({
+      runtime: { id: "trace-test", onConnect: { addListener(fn) { connect = fn; } }, onMessage: { addListener() {} } },
+      saveOnOpen: false,
+      mode: "promise",
+      origins: FULL_EARNED_ORIGINS,
+      registrationIds: ["trace-archive-automation-v1", "trace-ao3-saved-filters-v1"],
+      permissions: {
+        async contains() { return false; },
+        async getAll() { return { origins: [] }; },
+        request() { throw new Error("the background never asks for website access"); },
+      },
+      scripting: {
+        async executeScript({ target }) {
+          if (!world.tabAccess.has(target.tabId)) throw new Error("Trace has no access to this page");
+          world.injected.push(target.tabId);
+          world.page = "manual";
+        },
+        async getRegisteredContentScripts() { return []; },
+        async registerContentScripts() { throw new Error("a first tap registers nothing"); },
+        async unregisterContentScripts() { throw new Error("a first tap unregisters nothing"); },
+      },
+      tabs: {
+        async query() { throw new Error("no tab is listed"); },
+        async reload() { throw new Error("no page is reloaded"); },
+        async sendMessage(_tabId, message) {
+          if (world.page === null) throw new Error("no page script in that tab");
+          if (message.type !== "TRACE_FIRST_TAP_COLLECT") return { ok: true };
+          return {
+            ok: true, workKey: "ao3:123", title: "The Long Way", author: "someone",
+            payload: { s: "ao3", at: "2026-10-12T12:00:00.000Z", item: { src: "ao3", ctx: "story", u: STORY_URL, t: "The Long Way" } },
+          };
+        },
+      },
+      storage: {
+        async get(key) { return Object.hasOwn(world.store, key) ? { [key]: world.store[key] } : {}; },
+        async set(patch) { Object.assign(world.store, JSON.parse(JSON.stringify(patch))); },
+        async remove(key) { delete world.store[key]; },
+      },
+      session: {
+        async accountForThisOpen() { return { state: "verified", binding: "1.account-a" }; },
+        pageBinding() { return "1.account-a"; },
+        snapshot() { return { accountId: "account-a" }; },
+        async automaticSaving() { return "on"; },
+        publicationScope() { return { accountId: "account-a", epoch: 1 }; },
+        async executeAuthenticated() { return { kind: "unavailable" }; },
+        async saveStoryWithEvidence(command, observer) {
+          await observer.beforeWrite();
+          world.saves.push(command);
+          return {
+            result: {
+              kind: "confirmed", intent: "ensure_saved", source: "mutation", projection: "published", receipt: "published", handoff: "not_present",
+              confirmation: { workKey: "ao3:123", entryId: "00000000-0000-4000-8000-000000000123", entry: FIRST_TAP_ENTRY, syncVersion: "2026-10-12T12:00:00.000Z" },
+            },
+            dispatch: "confirmed",
+          };
+        },
+        async storyPresence() { return { kind: "unknown" }; },
+        attachStoryAdmission() {},
+      },
+      async fetch() { throw new Error("no request leaves this test"); },
+      apiBase: "https://api.trace.test",
+      now: () => 1_800_000_000_000,
+    });
+    return { connect: (port) => connect(port) };
+  };
+  const clone = (message) => JSON.parse(JSON.stringify(message));
+  const connect = () => {
+    if (!worker) worker = wake();
+    const link = { dead: false, toPopup: [], toBackground: [], popupClosed: [], backgroundClosed: [] };
+    world.links.push(link);
+    worker.connect({
+      name: "trace-first-tap-popup-v1",
+      sender: { id: "trace-test", url: "safari-web-extension://trace-test/popup.html" },
+      postMessage(message) { if (!link.dead) setImmediate(() => link.toPopup.forEach((fn) => fn(clone(message)))); },
+      onMessage: { addListener(fn) { link.toBackground.push(fn); } },
+      onDisconnect: { addListener(fn) { link.backgroundClosed.push(fn); } },
+    });
+    return {
+      postMessage(message) { if (!link.dead) setImmediate(() => link.toBackground.forEach((fn) => fn(clone(message)))); },
+      onMessage: { addListener(fn) { link.toPopup.push(fn); } },
+      onDisconnect: { addListener(fn) { link.popupClosed.push(fn); } },
+      disconnect() { link.dead = true; link.backgroundClosed.forEach((fn) => fn()); },
+    };
+  };
+  return {
+    world,
+    connect,
+    sleep({ saysSo }) {
+      worker = null;
+      for (const link of world.links) {
+        if (link.dead) continue;
+        link.dead = true;
+        if (saysSo) link.popupClosed.forEach((fn) => fn());
+      }
+    },
+  };
+}
+
+async function until(condition, h) {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    await flush();
+  }
+  assert.fail(`timed out; the sheet shows ${h?.document.body.dataset.traceFirstTapState}`);
+}
+
+test("release build, end to end: with no lasting access and a background that slept under the sheet, the reader's tap saves once", async () => {
+  for (const saysSo of [true, false]) {
+    const background = await releaseBackground();
+    const { h, click, sheet } = await openFirstTapPopup({ ...RELEASE_SHEET, firstTapConnect: background.connect });
+    await until(() => sheet().state === "save-on-request", h);
+    assert.equal(sheet().heading, "The Long Way", "the offer names the story, read from its page");
+    assert.equal(sheet().record, "someone · AO3");
+    assert.deepEqual(background.world.saves, [], "opening Trace saved nothing");
+
+    // Safari stops the background while the reader reads the offer.
+    background.sleep({ saysSo });
+    await click("popup-earned-primary");
+    if (!saysSo) {
+      // Nothing comes back over the port the popup still holds.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(sheet().state, "save-on-request");
+      h.advance(4_000);
+    }
+    await until(() => sheet().state === "saved" || sheet().state === "saving", h);
+    await until(() => sheet().state === "saved", h);
+    assert.equal(background.world.saves.length, 1, `one save (${saysSo ? "Safari said the port closed" : "it did not"})`);
+    assert.equal(background.world.saves[0].workKey, "ao3:123");
+    assert.equal(background.world.workers, 2, "made by a background the tap woke");
+    assert.equal(sheet().kicker, "Saved to your Library");
+    h.advance(20_000);
+    assert.equal(background.world.saves.length, 1, "and never sent again");
+  }
+});
+
+test("release build, end to end: a tap Safari gives no access to the page for says the save was not sent", async () => {
+  const background = await releaseBackground({ tabAccess: false });
+  const { h, click, sheet } = await openFirstTapPopup({ ...RELEASE_SHEET, firstTapConnect: background.connect });
+  await until(() => sheet().state === "save-on-request", h);
+  assert.equal(sheet().heading, "This story", "a page that cannot be read is not named");
+  await click("popup-earned-primary");
+  await until(() => sheet().state === "save-not-sent", h);
+  assert.equal(sheet().heading, "The save wasn’t sent");
+  assert.equal(sheet().primary, "Try again");
+  assert.deepEqual(background.world.saves, []);
 });

@@ -241,15 +241,40 @@ test("without saving on opening, the port offers the save and makes it only on t
   await turns();
   assert.deepEqual(port.posted.map(({ state }) => state), ["awaiting_request"]);
   assert.equal(port.posted[0].preference, "on");
-  assert.deepEqual(h.calls.injections, [], "nothing is put into the page for an open");
+  assert.deepEqual(port.posted[0].story, { title: "A Chance Encounter", author: "someone", site: "FanFiction.net" }, "the offer names the story");
+  assert.deepEqual(told(h.calls, "TRACE_FIRST_TAP_COLLECT"), [7], "read from its page, in manual mode");
   assert.deepEqual(h.calls.saves, [], "and nothing is saved");
 
   port.send("save");
   await turns();
-  assert.equal(h.calls.injections.length, 1);
+  assert.equal(h.calls.injections.length, 2);
   assert.equal(h.calls.saves.length, 1, "one save, made by the reader's tap");
   assert.equal(h.calls.saves[0].mode, "bounded_manual");
   assert.equal(port.posted.at(-1).state, "confirmed");
+});
+
+test("without saving on opening, a background woken by the tap itself still makes the reader's one save", async () => {
+  // Safari stopped the background while the sheet sat on "Save this story".
+  // The popup's new port carries the save as its first word.
+  const world = install({ saveOnOpen: false });
+  const first = world.worker().openPort();
+  first.send("open");
+  await turns();
+  assert.equal(first.posted.at(-1).state, "awaiting_request");
+  assert.deepEqual(world.calls.saves, []);
+
+  const woken = world.worker().openPort();
+  woken.send("save", { look: 1 });
+  await turns();
+  assert.equal(world.calls.saves.length, 1);
+  assert.equal(woken.messages.find(({ answered }) => answered === 1)?.view.state, "saving", "the tap's answer carries its number");
+  assert.equal(woken.posted.at(-1).state, "confirmed");
+
+  // The same tap sent again, as a popup with no word back does: still one save.
+  woken.send("save", { look: 1 });
+  await turns();
+  assert.equal(world.calls.saves.length, 1);
+  assert.equal(woken.posted.at(-1).state, "confirmed");
 });
 
 test("only Trace's own sheet can open that port", async () => {

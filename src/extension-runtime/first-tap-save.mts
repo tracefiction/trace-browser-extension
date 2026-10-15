@@ -48,6 +48,19 @@ export const FIRST_TAP_RECORD_LIMIT = 20;
  * cost every account on the install that word for ever.
  */
 export const FIRST_TAP_UNPLACED_DOUBT_TTL_MS = 2_592_000_000; // thirty days
+/**
+ * How long an open that saves nothing waits on reading the page and asking
+ * Trace whether the story is in the Library, before it offers the save
+ * without them.
+ */
+export const FIRST_TAP_OPEN_READ_MS = 2_500;
+
+/** What `work` comes to, or `fallback` if it fails or takes longer than `ms`. */
+function within<T, F>(work: Promise<T>, ms: number, fallback: F): Promise<T | F> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<F>((resolve) => { timer = setTimeout(() => resolve(fallback), ms); });
+  return Promise.race([work.catch(() => fallback), late]).finally(() => clearTimeout(timer));
+}
 
 export type FirstTapAccount =
   /**
@@ -110,9 +123,15 @@ export type FirstTapView =
   | Readonly<{ state: "account_changed"; workKey: string }>
   /**
    * Nothing is saved until the reader asks: automatic saving is off or
-   * unreadable, or it is on and this build saves only when asked.
+   * unreadable, or it is on and this build saves only when asked. `story` is
+   * what the page said of itself when read for the sheet to name it.
    */
-  | Readonly<{ state: "awaiting_request"; workKey: string; preference: "on" | "off" | "unknown" }>
+  | Readonly<{
+      state: "awaiting_request";
+      workKey: string;
+      preference: "on" | "off" | "unknown";
+      story: FirstTapStory | null;
+    }>
   /** `story` is what the page said of itself, once this attempt has read it. */
   | Readonly<{ state: "saving"; workKey: string; startedAt: number; story: FirstTapStory | null }>
   | Readonly<{
@@ -482,12 +501,31 @@ export class FirstTapSave {
       if (preference !== "on" || this.#ports.saveOnOpen !== true) {
         // With an earlier write in doubt, "save this story" is not offered:
         // it may have landed. The reader can look again, or choose to retry.
-        return record.inDoubt
-          ? Object.freeze({
-              state: "failed", workKey: page.workKey, reason: "unavailable",
-              dispatch: "sent_unconfirmed", story: record.story,
-            })
-          : Object.freeze({ state: "awaiting_request", workKey: page.workKey, preference });
+        if (record.inDoubt) {
+          return Object.freeze({
+            state: "failed", workKey: page.workKey, reason: "unavailable",
+            dispatch: "sent_unconfirmed", story: record.story,
+          });
+        }
+        // Nothing is saved on this open. The page is read so that the sheet
+        // can name its story, and, unless automatic saving is off, Trace is
+        // asked, read only, whether the story is in the Library already: a
+        // story that is is shown as it is, never offered to be saved again.
+        const [found] = await Promise.all([
+          preference === "off" ? Promise.resolve(null) : within(this.#look(record), FIRST_TAP_OPEN_READ_MS, null),
+          within(this.#readForSheet(record, page), FIRST_TAP_OPEN_READ_MS, undefined),
+        ]);
+        if (found === "account_changed") return this.#accountChanged(record);
+        if (found !== null) {
+          this.#begin(record, page);
+          // Found before anything was sent: there before this open, where
+          // what came before is known well enough to say so.
+          return this.#settle(record, {
+            kind: "confirmed", provenance: record.priorKnown && !record.pageSave ? "already" : "found",
+            mode: null, entry: found,
+          });
+        }
+        return Object.freeze({ state: "awaiting_request", workKey: page.workKey, preference, story: record.story });
       }
     }
 
@@ -743,6 +781,23 @@ export class FirstTapSave {
       try { listener(view); } catch { /* A closed popup is told nothing. */ }
     }
     return view;
+  }
+
+  /**
+   * Reads the story's page for the sheet to name it, under the access the
+   * reader's tap gave the tab. Nothing is sent to Trace and nothing is kept:
+   * the page's own word is believed only for the story the popup named.
+   */
+  async #readForSheet(record: Record, page: StoryPage): Promise<void> {
+    if (!(await this.#ports.inject(page.tabId).catch(() => false))) return;
+    this.#injected.set(page.tabId, page.workKey);
+    const collected = await this.#ports.collect(page.tabId).catch(() => null);
+    if (!isRecord(collected) || collected.ok !== true || collected.workKey !== record.workKey) return;
+    if (collected.private === true && record.persist) {
+      record.persist = false;
+      record.priorKnown = false;
+    }
+    record.story = storyFrom(collected, page.hostKind);
   }
 
   /** A read-only look: the entry, nothing, or word that the account changed. */
