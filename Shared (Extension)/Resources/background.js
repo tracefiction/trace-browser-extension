@@ -1199,9 +1199,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   }
   function copyEntry(value) {
     if (!isRecord2(value)) return null;
-    const status = enumValue(LEGACY_STATUSES, value.status);
-    if (status === null) return null;
-    const result = { status };
+    const status2 = enumValue(LEGACY_STATUSES, value.status);
+    if (status2 === null) return null;
+    const result = { status: status2 };
     if (Object.hasOwn(value, "chapters")) {
       const chapters = copyChapters(value.chapters);
       if (chapters === null) return null;
@@ -1209,7 +1209,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     if (Object.hasOwn(value, "readerStatus")) {
       const readerStatus = enumValue(LEGACY_STATUSES, value.readerStatus);
-      if (readerStatus === null || readerStatus !== status) return null;
+      if (readerStatus === null || readerStatus !== status2) return null;
       result.readerStatus = readerStatus;
     }
     if (Object.hasOwn(value, "canonicalReaderStatus")) {
@@ -1929,9 +1929,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     if (!Array.isArray(value) || value.length > 5) return null;
     const summary = [];
     for (const item of value) {
-      const text = cleanText(item, 64);
-      if (!text || text !== item) return null;
-      summary.push(text);
+      const text2 = cleanText(item, 64);
+      if (!text2 || text2 !== item) return null;
+      summary.push(text2);
     }
     return Object.freeze(summary);
   }
@@ -4903,9 +4903,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     if (!isRecord9(value)) return null;
     const patch = {};
     if (Object.hasOwn(value, "status")) {
-      const status = canonicalStatus(value.status);
-      if (status === null) return null;
-      patch.status = status;
+      const status2 = canonicalStatus(value.status);
+      if (status2 === null) return null;
+      patch.status = status2;
     }
     if (Object.hasOwn(value, "progress")) {
       const progress = chapterProgress(value.progress);
@@ -4961,8 +4961,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     const entryId = typeof payload.entryId === "string" ? payload.entryId.trim() : "";
     if (!UUID_PATTERN6.test(entryId)) return null;
     if (message.type === "TRACE_SET_READER_STATUS") {
-      const status = canonicalStatus(payload.status);
-      if (status === null) return null;
+      const status2 = canonicalStatus(payload.status);
+      if (status2 === null) return null;
       let progress;
       if (Object.hasOwn(payload, "progress")) {
         const parsed = chapterProgress(payload.progress);
@@ -4974,7 +4974,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         ...scope2,
         entryId,
         patch: Object.freeze({
-          status,
+          status: status2,
           ...progress === void 0 ? {} : { progress }
         })
       });
@@ -7961,11 +7961,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     #publishStatus() {
       this.#statusPublicationTail = this.#statusPublicationTail.then(async () => {
-        const status = await this.#extensionStatus();
-        const statusKey = JSON.stringify(status);
+        const status2 = await this.#extensionStatus();
+        const statusKey = JSON.stringify(status2);
         if (statusKey === this.#lastPublishedStatusKey) return;
         this.#lastPublishedStatusKey = statusKey;
-        await this.#traceWebStatus.publish(status);
+        await this.#traceWebStatus.publish(status2);
       }).catch(() => {
       });
     }
@@ -8796,8 +8796,819 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   }
 
   // src/extension-runtime/first-tap-save.mts
+  var FIRST_TAP_POPUP_PORT = "trace-first-tap-popup-v1";
+  var FIRST_TAP_COLLECT_MESSAGE = "TRACE_FIRST_TAP_COLLECT";
+  var FIRST_TAP_MARK_MESSAGE = "TRACE_FIRST_TAP_MARK";
+  var FIRST_TAP_MANUAL_MODE_END_MESSAGE = "TRACE_PAGE_MANUAL_MODE_END";
+  var FIRST_TAP_MANUAL_MODE_QUERY_MESSAGE = "TRACE_PAGE_MANUAL_MODE_QUERY";
+  var FIRST_TAP_STORE_KEY = "traceFirstTapSaveV2";
   var FIRST_TAP_RESULT_FRESH_MS = 10 * 60 * 1e3;
   var FIRST_TAP_RECORD_TTL_MS = 24 * 60 * 60 * 1e3;
+  var FIRST_TAP_RECORD_LIMIT = 20;
+  var FIRST_TAP_UNPLACED_DOUBT_TTL_MS = 2592e6;
+  var FIRST_TAP_OPEN_READ_MS = 2500;
+  function within(work, ms, fallback) {
+    let timer;
+    const late = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(fallback), ms);
+    });
+    return Promise.race([work.catch(() => fallback), late]).finally(() => clearTimeout(timer));
+  }
+  var isTapped = (value) => isRecord21(value) && Number.isInteger(value.tabId) && typeof value.url === "string" && (value.private === null || typeof value.private === "boolean");
+  function isRecord21(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function text(value, limit) {
+    return typeof value === "string" && value.trim() ? value.trim().slice(0, limit) : null;
+  }
+  function storyFrom(collected, hostKind2) {
+    return Object.freeze({
+      title: text(collected.title, 300),
+      author: text(collected.author, 200),
+      site: hostKind2 === "ffn" ? "FanFiction.net" : "AO3"
+    });
+  }
+  function entryFrom(confirmation) {
+    const entry = confirmation.entry;
+    return Object.freeze({
+      status: text(entry.status, 40),
+      readerStatus: text(entry.readerStatus, 40),
+      canonicalReaderStatus: text(entry.canonicalReaderStatus, 40),
+      chapters: entry.chapters === void 0 ? null : Object.freeze({ current: entry.chapters.current, total: entry.chapters.total })
+    });
+  }
+  function weight(outcome) {
+    if (outcome === null || outcome.kind === "saving") return 0;
+    if (outcome.kind === "failed") return 1;
+    return outcome.provenance === "found" ? 2 : 3;
+  }
+  function settledFrom(value) {
+    if (!isRecord21(value)) return null;
+    if (value.kind === "confirmed" && isRecord21(value.entry) && ["saved_now", "already", "found"].includes(String(value.provenance))) {
+      return value;
+    }
+    if (value.kind === "failed" && typeof value.reason === "string" && ["never_sent", "refused", "sent_unconfirmed", "not_in_library"].includes(String(value.dispatch))) {
+      return value;
+    }
+    return null;
+  }
+  function storedFrom(value) {
+    if (!isRecord21(value) || typeof value.salt !== "string" || value.salt.length < 16) return null;
+    const records = [];
+    for (const item of Array.isArray(value.records) ? value.records : []) {
+      if (!isRecord21(item) || typeof item.k !== "string" || typeof item.s !== "string" || typeof item.at !== "number") continue;
+      records.push({
+        k: item.k,
+        s: item.s,
+        at: item.at,
+        inDoubt: item.inDoubt === true,
+        outcome: settledFrom(item.outcome),
+        ...typeof item.w === "string" ? { w: item.w } : {}
+      });
+    }
+    const strings = (list) => (Array.isArray(list) ? list : []).filter((item) => typeof item === "string");
+    return {
+      salt: value.salt,
+      forgot: strings(value.forgot),
+      records,
+      doubts: strings(value.doubts),
+      unkept: Number.isInteger(value.unkept) && value.unkept > 0 ? value.unkept : 0,
+      unkeptAt: typeof value.unkeptAt === "number" ? value.unkeptAt : null,
+      unplacedAt: typeof value.unplacedAt === "number" ? value.unplacedAt : null
+    };
+  }
+  function emptyStore(salt) {
+    return { salt, forgot: [], records: [], doubts: [], unkept: 0, unkeptAt: null, unplacedAt: null };
+  }
+  function storySaveModeAtAdmission(evidence) {
+    if (evidence.grantComplete === true && evidence.registered === true) {
+      return "normal_automatic";
+    }
+    if (evidence.injectedForFirstTap && evidence.grantComplete === false) {
+      return "bounded_manual";
+    }
+    return null;
+  }
+  var FirstTapSave = class {
+    #ports;
+    /** Records by key. Each belongs to one account and one story. */
+    #records = /* @__PURE__ */ new Map();
+    /** Open popups, and the record each is showing. */
+    #sheets = /* @__PURE__ */ new Map();
+    /** Tabs whose page script this background injected, and for which story. */
+    #injected = /* @__PURE__ */ new Map();
+    /** The kept records; `readable` is false when storage could not be read. */
+    #store = null;
+    #writes = Promise.resolve();
+    constructor(ports) {
+      this.#ports = ports;
+    }
+    /** Whether the background injected this tab's page script for this story. */
+    injectedFor(tabId, workKey) {
+      return this.#injected.get(tabId) === workKey;
+    }
+    /** Tabs whose page script this background injected, while it has been awake. */
+    injectedTabs() {
+      return [...this.#injected.keys()];
+    }
+    /**
+     * The reader opened Trace on `tapped`. Returns what is known now; later
+     * changes to the same record reach `listener` until `closed` is called.
+     */
+    async opened(listener, tapped, options = {}) {
+      const page = this.#storyPage(tapped);
+      if (page === null) return Object.freeze({ state: "not_applicable" });
+      const sheet = this.#sheets.get(listener) ?? { tabId: page.tabId, key: null, workKey: null };
+      sheet.tabId = page.tabId;
+      sheet.key = null;
+      sheet.workKey = page.workKey;
+      this.#sheets.set(listener, sheet);
+      const grant = await this.#ports.grantComplete().catch(() => null);
+      if (grant === true) return Object.freeze({ state: "automatic" });
+      const account = await this.#ports.account().catch(
+        () => Object.freeze({ state: "unknown" })
+      );
+      if (account.state !== "verified") {
+        return Object.freeze({
+          state: account.state === "missing" ? "account_missing" : account.state === "reconnect_required" ? "account_reconnect_required" : "account_unknown",
+          workKey: page.workKey
+        });
+      }
+      const record3 = await this.#recordFor(account, page);
+      if (this.#sheets.get(listener) === sheet) sheet.key = record3.key;
+      const decided = record3.deciding.then(() => this.#decide(record3, page, grant, options));
+      record3.deciding = decided.then(() => void 0, () => void 0);
+      return decided;
+    }
+    /** What an open comes to, worked out with no other open of the record under way. */
+    async #decide(record3, page, grant, options) {
+      if (record3.running) return this.#view(record3);
+      const age = this.#ports.now() - record3.at;
+      const fresh = age >= 0 && age < FIRST_TAP_RESULT_FRESH_MS;
+      if (fresh && record3.outcome?.kind === "confirmed") return this.#view(record3);
+      if (fresh && record3.outcome?.kind === "failed" && options.requested !== true) {
+        return this.#view(record3);
+      }
+      if (record3.inDoubt) {
+        const found = await this.#look(record3);
+        if (found === "account_changed") return this.#accountChanged(record3);
+        if (found !== null) {
+          this.#begin(record3, page);
+          if (await this.#ports.inject(page.tabId).catch(() => false)) {
+            this.#injected.set(page.tabId, page.workKey);
+          }
+          return this.#settle(record3, { kind: "confirmed", provenance: "found", mode: null, entry: found });
+        }
+      }
+      if (options.requested !== true) {
+        const preference = await this.#ports.automaticSaving().catch(() => "unknown");
+        if (preference !== "on" || this.#ports.saveOnOpen !== true) {
+          if (record3.inDoubt) {
+            return Object.freeze({
+              state: "failed",
+              workKey: page.workKey,
+              reason: "unavailable",
+              dispatch: "sent_unconfirmed",
+              story: record3.story
+            });
+          }
+          const [found] = await Promise.all([
+            preference === "off" ? Promise.resolve(null) : within(this.#look(record3), FIRST_TAP_OPEN_READ_MS, null),
+            within(this.#readForSheet(record3, page), FIRST_TAP_OPEN_READ_MS, void 0)
+          ]);
+          if (found === "account_changed") return this.#accountChanged(record3);
+          if (found !== null) {
+            this.#begin(record3, page);
+            return this.#settle(record3, {
+              kind: "confirmed",
+              provenance: record3.priorKnown && !record3.pageSave ? "already" : "found",
+              mode: null,
+              entry: found
+            });
+          }
+          return Object.freeze({ state: "awaiting_request", workKey: page.workKey, preference, story: record3.story });
+        }
+      }
+      this.#begin(record3, page);
+      record3.running = true;
+      record3.outcome = Object.freeze({ kind: "saving", startedAt: this.#ports.now() });
+      void this.#run(record3, page, grant);
+      return this.#view(record3);
+    }
+    /**
+     * "Check again": asks Trace, once, whether this one story is in the
+     * account's Library. It has no path to a save. A story Trace has improves
+     * the record. One Trace says it does not have is said to be absent only
+     * when no save of it is still out. A request that could not be made or
+     * read, or that Trace turned away, leaves the story's place not known.
+     * A look asked for while one is still out joins it: one request, one answer.
+     */
+    async check(listener) {
+      const sheet = this.#sheets.get(listener);
+      if (!sheet || sheet.workKey === null) return Object.freeze({ state: "not_applicable" });
+      const unknown = Object.freeze({ state: "presence_unknown", workKey: sheet.workKey });
+      const record3 = sheet.key === null ? null : this.#records.get(sheet.key) ?? null;
+      if (record3 === null || record3.binding !== this.#ports.binding()) return unknown;
+      if (record3.outcome?.kind === "confirmed") return this.#view(record3);
+      if (record3.checking !== null) return record3.checking;
+      const asking = this.#askTrace(record3, unknown);
+      record3.checking = asking;
+      const done = () => {
+        if (record3.checking === asking) record3.checking = null;
+      };
+      void asking.then(done, done);
+      return asking;
+    }
+    async #askTrace(record3, unknown) {
+      const membership = await this.#ports.membership(record3.workKey).catch(
+        () => ({ kind: "unknown" })
+      );
+      if (membership.kind === "account_refused") {
+        return Object.freeze({ state: "account_reconnect_required", workKey: record3.workKey });
+      }
+      if (this.#ports.binding() !== record3.binding) return this.#accountChanged(record3);
+      if (membership.kind === "present") {
+        return this.#settle(record3, {
+          kind: "confirmed",
+          provenance: "found",
+          mode: null,
+          entry: Object.freeze({ ...membership.entry, chapters: null })
+        });
+      }
+      if (membership.kind !== "absent") return unknown;
+      if (record3.running) return this.#view(record3);
+      return this.#settle(record3, { kind: "failed", reason: "unavailable", dispatch: "not_in_library" });
+    }
+    /** Trace's popup closed. The page it was over may now show its mark. */
+    closed(listener) {
+      const sheet = this.#sheets.get(listener);
+      if (!sheet) return;
+      this.#sheets.delete(listener);
+      const record3 = sheet.key === null ? null : this.#records.get(sheet.key);
+      if (record3) void this.#markIfDue(record3);
+    }
+    /**
+     * A page script's own save for this story was admitted for the current
+     * account. It may add the story, so the record can no longer say "already",
+     * and a failure it showed is no longer the last word.
+     */
+    pageSaveAdmitted(workKey) {
+      const binding = this.#ports.binding();
+      for (const record3 of this.#records.values()) {
+        if (record3.workKey !== workKey || record3.binding !== binding) continue;
+        if (record3.outcome?.kind === "confirmed") continue;
+        record3.inDoubt = true;
+        record3.pageSave = true;
+        if (!record3.running && record3.outcome?.kind === "failed") record3.outcome = null;
+        void this.#persist(record3);
+      }
+    }
+    #storyPage(tapped) {
+      if (!isTapped(tapped)) return null;
+      const hostKind2 = archiveHostKindFromSender({ url: tapped.url });
+      if (hostKind2 === null || isBlockedArchivePath(tapped.url, hostKind2)) return null;
+      const workKey = workKeyFromArchiveUrl(tapped.url, hostKind2);
+      return workKey === null ? null : { tabId: tapped.tabId, workKey, url: tapped.url, hostKind: hostKind2, persist: tapped.private === false };
+    }
+    // --- Records ----------------------------------------------------------------
+    #loadStore() {
+      this.#store ??= this.#ports.readStore().then(
+        async (value) => {
+          const stored = storedFrom(value) ?? emptyStore(this.#ports.randomSalt());
+          if (stored.unkept > 0) {
+            this.#unplaced(stored, stored.unkeptAt ?? this.#ports.now());
+            stored.unkept = 0;
+            stored.unkeptAt = null;
+            await this.#write(stored);
+          }
+          return { stored, readable: true };
+        },
+        // Storage could not be read. A salt for this worker's life still keeps
+        // records apart; nothing is kept, and nothing earlier is known.
+        () => ({ stored: emptyStore(this.#ports.randomSalt()), readable: false })
+      );
+      return this.#store;
+    }
+    /** The record for this account and story, from memory, storage, or new. */
+    async #recordFor({ binding, owner }, page) {
+      const { stored, readable } = await this.#loadStore();
+      const scope2 = await this.#ports.digest(`${stored.salt}\0account\0${binding}`);
+      const key = await this.#ports.digest(`${stored.salt}\0story\0${binding}\0${page.workKey}`);
+      const work = await this.#ports.digest(`${stored.salt}\0work\0${owner}\0${page.workKey}`);
+      let changed = false;
+      for (const [otherKey, other] of this.#records) {
+        if (other.binding === binding) continue;
+        if (other.inDoubt && this.#carryDoubt(stored, other)) changed = true;
+        if (!other.running) this.#records.delete(otherKey);
+      }
+      for (const item of stored.records) {
+        if (item.s === scope2) continue;
+        changed = true;
+        if (item.inDoubt) this.#carryDoubt(stored, { persist: true, work: item.w });
+      }
+      if (stored.forgot.some((item) => item !== scope2)) {
+        changed = true;
+        this.#carryDoubt(stored, { persist: false, work: void 0 });
+      }
+      if (changed) {
+        stored.records = stored.records.filter((item) => item.s === scope2);
+        stored.forgot = stored.forgot.filter((item) => item === scope2);
+        if (readable) await this.#write(stored);
+      }
+      const priorKnown = page.persist && readable && !stored.forgot.includes(scope2) && !this.#unplacedHolds(stored) && !stored.doubts.includes(work);
+      const existing = this.#records.get(key);
+      if (existing) {
+        existing.persist = existing.persist && page.persist;
+        existing.priorKnown = existing.priorKnown && priorKnown;
+        return existing;
+      }
+      const kept = page.persist ? stored.records.find((item) => item.k === key) : void 0;
+      const record3 = {
+        key,
+        scope: scope2,
+        binding,
+        workKey: page.workKey,
+        work,
+        persist: page.persist,
+        unkept: false,
+        at: kept?.at ?? this.#ports.now(),
+        outcome: kept?.outcome ?? null,
+        inDoubt: kept?.inDoubt === true,
+        pageSave: false,
+        priorKnown,
+        running: false,
+        deciding: Promise.resolve(),
+        checking: null,
+        story: null,
+        tabs: /* @__PURE__ */ new Set([page.tabId]),
+        marked: /* @__PURE__ */ new Set()
+      };
+      this.#records.set(key, record3);
+      return record3;
+    }
+    /** Starts a new attempt on a record. Only what is still in doubt carries over. */
+    #begin(record3, page) {
+      record3.outcome = null;
+      record3.at = this.#ports.now();
+      record3.pageSave = false;
+      record3.tabs = /* @__PURE__ */ new Set([page.tabId]);
+      record3.marked = /* @__PURE__ */ new Set();
+    }
+    #view(record3) {
+      const outcome = record3.outcome;
+      if (outcome === null || outcome.kind === "saving") {
+        return Object.freeze({
+          state: "saving",
+          workKey: record3.workKey,
+          startedAt: outcome?.kind === "saving" ? outcome.startedAt : record3.at,
+          story: record3.story
+        });
+      }
+      return outcome.kind === "confirmed" ? Object.freeze({
+        state: "confirmed",
+        workKey: record3.workKey,
+        provenance: outcome.provenance,
+        mode: outcome.mode,
+        story: record3.story,
+        entry: outcome.entry
+      }) : Object.freeze({
+        state: "failed",
+        workKey: record3.workKey,
+        reason: outcome.reason,
+        dispatch: outcome.dispatch,
+        story: record3.story
+      });
+    }
+    /**
+     * Records an answer. Within an attempt the record only moves up: a
+     * confirmation is never replaced by a failure, and a known origin is never
+     * replaced by an unknown one. Returns what the record now says.
+     */
+    async #settle(record3, answer) {
+      if (this.#ports.binding() !== record3.binding) return this.#accountChanged(record3);
+      const before = weight(record3.outcome);
+      const after = weight(answer);
+      if (after > before || after === before && answer.kind === "failed") {
+        record3.outcome = Object.freeze(answer);
+        record3.at = this.#ports.now();
+      }
+      if (record3.outcome?.kind === "confirmed") {
+        record3.inDoubt = false;
+        record3.pageSave = false;
+        await this.#doubtSettled(record3);
+      }
+      await this.#persist(record3);
+      const view2 = this.#show(record3);
+      await this.#markIfDue(record3);
+      return view2;
+    }
+    /** Tells every popup open on a record what it now says. */
+    #show(record3) {
+      const view2 = this.#view(record3);
+      for (const [listener, sheet] of this.#sheets) {
+        if (sheet.key !== record3.key) continue;
+        try {
+          listener(view2);
+        } catch {
+        }
+      }
+      return view2;
+    }
+    /**
+     * Reads the story's page for the sheet to name it, under the access the
+     * reader's tap gave the tab. Nothing is sent to Trace and nothing is kept:
+     * the page's own word is believed only for the story the popup named.
+     */
+    async #readForSheet(record3, page) {
+      if (!await this.#ports.inject(page.tabId).catch(() => false)) return;
+      this.#injected.set(page.tabId, page.workKey);
+      const collected = await this.#ports.collect(page.tabId).catch(() => null);
+      if (!isRecord21(collected) || collected.ok !== true || collected.workKey !== record3.workKey) return;
+      if (collected.private === true && record3.persist) {
+        record3.persist = false;
+        record3.priorKnown = false;
+      }
+      record3.story = storyFrom(collected, page.hostKind);
+    }
+    /** A read-only look: the entry, nothing, or word that the account changed. */
+    async #look(record3) {
+      const presence = await this.#ports.presence(record3.workKey).catch(
+        () => ({ kind: "unknown" })
+      );
+      if (this.#ports.binding() !== record3.binding) return "account_changed";
+      return presence.kind === "found" ? entryFrom(presence.confirmation) : null;
+    }
+    /** The account changed: nothing held for the old one is shown or kept. */
+    #accountChanged(record3) {
+      const view2 = Object.freeze({ state: "account_changed", workKey: record3.workKey });
+      this.#records.delete(record3.key);
+      for (const [listener, sheet] of this.#sheets) {
+        if (sheet.key !== record3.key) continue;
+        sheet.key = null;
+        try {
+          listener(view2);
+        } catch {
+        }
+      }
+      void this.#drop(record3);
+      return view2;
+    }
+    // --- Storage ----------------------------------------------------------------
+    #write(stored) {
+      this.#writes = this.#writes.then(() => this.#ports.writeStore({
+        salt: stored.salt,
+        forgot: [...stored.forgot],
+        records: [...stored.records],
+        doubts: [...stored.doubts],
+        unkept: stored.unkept,
+        unkeptAt: stored.unkeptAt,
+        unplacedAt: stored.unplacedAt
+      })).catch(() => void 0);
+      return this.#writes;
+    }
+    /**
+     * This story is confirmed in the Library for the account now signed in. A
+     * doubt an ended session of this same account left about it has nothing
+     * more to say. A doubt another account left about the same story has a
+     * different digest and is not touched.
+     */
+    async #doubtSettled(record3) {
+      const { stored, readable } = await this.#loadStore();
+      if (!stored.doubts.includes(record3.work)) return;
+      stored.doubts = stored.doubts.filter((item) => item !== record3.work);
+      if (readable) await this.#write(stored);
+    }
+    /**
+     * A record that is not kept still counts its write while that write is out
+     * and unanswered. The count says nothing of the story, the tab or the
+     * account; it is what lets a later background know something went missing.
+     */
+    async #countUnkept(record3) {
+      if (record3.unkept === record3.inDoubt) return;
+      const { stored, readable } = await this.#loadStore();
+      if (!readable) return;
+      record3.unkept = record3.inDoubt;
+      stored.unkept = Math.max(0, stored.unkept + (record3.inDoubt ? 1 : -1));
+      if (record3.inDoubt) stored.unkeptAt = this.#ports.now();
+      await this.#write(stored);
+    }
+    /** Notes a doubt that can no longer be placed, as of `at` or later. */
+    #unplaced(stored, at) {
+      stored.unplacedAt = Math.max(stored.unplacedAt ?? at, at);
+    }
+    /** Whether such a doubt still holds. A clock set back does not end it early. */
+    #unplacedHolds(stored) {
+      return stored.unplacedAt !== null && this.#ports.now() - stored.unplacedAt < FIRST_TAP_UNPLACED_DOUBT_TTL_MS;
+    }
+    async #drop(record3) {
+      const { stored, readable } = await this.#loadStore();
+      let changed = stored.records.some((item) => item.k === record3.key);
+      stored.records = stored.records.filter((item) => item.k !== record3.key);
+      if (record3.inDoubt && this.#carryDoubt(stored, record3)) changed = true;
+      if (changed && readable) await this.#write(stored);
+    }
+    /**
+     * Keeps a doubt past the account session it arose under: by the digest of
+     * its account and story where one may be kept, and otherwise, or past the
+     * limit, as a doubt about every story that holds for a while.
+     */
+    #carryDoubt(stored, from) {
+      if (from.persist && from.work !== void 0) {
+        if (stored.doubts.includes(from.work)) return false;
+        stored.doubts.push(from.work);
+        if (stored.doubts.length <= FIRST_TAP_RECORD_LIMIT) return true;
+        stored.doubts = stored.doubts.slice(-FIRST_TAP_RECORD_LIMIT);
+      }
+      this.#unplaced(stored, this.#ports.now());
+      return true;
+    }
+    /** Writes what a record now says. No work key, title, author or address. */
+    async #persist(record3) {
+      if (!record3.persist) return this.#countUnkept(record3);
+      const { stored, readable } = await this.#loadStore();
+      if (!readable) return;
+      const now = this.#ports.now();
+      const outcome = record3.outcome === null || record3.outcome.kind === "saving" ? null : record3.outcome;
+      let records = stored.records.filter((item) => item.k !== record3.key);
+      if (outcome !== null || record3.inDoubt) {
+        records.push({
+          k: record3.key,
+          s: record3.scope,
+          at: record3.at,
+          inDoubt: record3.inDoubt,
+          outcome,
+          ...record3.inDoubt ? { w: record3.work } : {}
+        });
+      }
+      records = records.filter((item) => item.inDoubt || now - item.at >= 0 && now - item.at < FIRST_TAP_RECORD_TTL_MS);
+      while (records.length > FIRST_TAP_RECORD_LIMIT) {
+        const settled = records.findIndex((item) => !item.inDoubt);
+        const [dropped] = records.splice(settled === -1 ? 0 : settled, 1);
+        if (dropped?.inDoubt && !stored.forgot.includes(dropped.s)) stored.forgot.push(dropped.s);
+      }
+      stored.records = records;
+      await this.#write(stored);
+    }
+    // --- One attempt ------------------------------------------------------------
+    async #run(record3, page, grantAtStart) {
+      const earlierInDoubt = record3.inDoubt;
+      const fail = async (reason, dispatch) => {
+        record3.running = false;
+        record3.inDoubt = earlierInDoubt || record3.pageSave || dispatch === "sent_unconfirmed";
+        if (record3.pageSave) {
+          const found = await this.#look(record3);
+          if (found === "account_changed") {
+            this.#accountChanged(record3);
+            return;
+          }
+          if (found !== null) {
+            await this.#settle(record3, { kind: "confirmed", provenance: "found", mode: null, entry: found });
+            return;
+          }
+        }
+        await this.#settle(record3, { kind: "failed", reason, dispatch });
+      };
+      try {
+        if (!await this.#ports.inject(page.tabId).catch(() => false)) {
+          return await fail("page_unreachable", "never_sent");
+        }
+        this.#injected.set(page.tabId, page.workKey);
+        const collected = await this.#ports.collect(page.tabId).catch(() => null);
+        if (!isRecord21(collected)) return await fail("page_unreachable", "never_sent");
+        record3.story = storyFrom(collected, page.hostKind);
+        if (collected.ok !== true) {
+          return await fail(
+            collected.error === "story_unavailable" ? "story_unavailable" : "page_unreachable",
+            "never_sent"
+          );
+        }
+        if (collected.workKey !== record3.workKey) return await fail("page_unreachable", "never_sent");
+        if (record3.story.title !== null && record3.outcome?.kind === "saving") this.#show(record3);
+        if (collected.private === true && record3.persist) {
+          record3.persist = false;
+          record3.priorKnown = false;
+        }
+        const command = storyTrackCommandFromMessage(
+          { type: "TRACE_CONNECT_AND_SAVE", workKey: record3.workKey, payload: collected.payload },
+          { tab: { url: page.url }, url: page.url, frameId: 0 }
+        );
+        if (command === null || command.workKey !== record3.workKey) {
+          return await fail("page_unreachable", "never_sent");
+        }
+        if (this.#ports.binding() !== record3.binding) {
+          record3.running = false;
+          this.#accountChanged(record3);
+          return;
+        }
+        const mode = storySaveModeAtAdmission({
+          injectedForFirstTap: true,
+          grantComplete: grantAtStart,
+          registered: null
+        });
+        const { result, dispatch } = await this.#ports.save(
+          mode === null ? command : { ...command, mode },
+          {
+            // Written down before the write goes out, so that a background put
+            // to sleep mid-save is known afterwards to have a write in doubt.
+            beforeWrite: async () => {
+              record3.inDoubt = true;
+              await this.#persist(record3);
+            }
+          }
+        );
+        if (result.kind === "confirmed") {
+          record3.running = false;
+          const provenance = result.source === "mutation" ? "saved_now" : result.source === "preflight" && record3.priorKnown && !earlierInDoubt && !record3.pageSave ? "already" : "found";
+          await this.#settle(record3, {
+            kind: "confirmed",
+            provenance,
+            mode,
+            entry: entryFrom(result.confirmation)
+          });
+          return;
+        }
+        const reason = result.reason === "free_limit_reached" || result.reason === "rate_limited" ? result.reason : result.reason === "not_authenticated" || result.reason === "auth_expired" ? "not_authenticated" : "unavailable";
+        await fail(reason, dispatch === "confirmed" ? "sent_unconfirmed" : dispatch);
+      } catch {
+        await fail("unavailable", "sent_unconfirmed").catch(() => void 0);
+      }
+    }
+    // The page shows its mark only for a confirmed story, and only once no
+    // popup is open over it. Both read the same record.
+    async #markIfDue(record3) {
+      if (record3.outcome?.kind !== "confirmed" || this.#ports.binding() !== record3.binding) return;
+      for (const tabId of record3.tabs) {
+        if (record3.marked.has(tabId)) continue;
+        if ([...this.#sheets.values()].some((sheet) => sheet.tabId === tabId)) continue;
+        record3.marked.add(tabId);
+        await this.#ports.mark(tabId, record3.workKey).catch(() => void 0);
+      }
+    }
+  };
+
+  // src/extension-runtime/story-membership.mts
+  var UUID_PATTERN7 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  var WORK_KEY_PATTERN6 = /^(ao3|ffn):[1-9][0-9]{0,19}$/;
+  var REQUEST_TIMEOUT_MS7 = 12e3;
+  var STATUS_LIMIT = 40;
+  function isRecord22(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function status(value) {
+    return typeof value === "string" && value.trim() && value.trim().length <= STATUS_LIMIT ? value.trim() : null;
+  }
+  function membershipFrom(value, expectedWorkKey) {
+    const invalid = { kind: "invalid_response" };
+    if (!isRecord22(value) || value.work_key !== expectedWorkKey) return invalid;
+    if (value.membership === "absent") return { kind: "absent" };
+    if (value.membership !== "present" || !isRecord22(value.entry)) return invalid;
+    const entryId = typeof value.entry_id === "string" ? value.entry_id.trim() : "";
+    if (!UUID_PATTERN7.test(entryId) || value.entry.entryId !== entryId) return invalid;
+    const entry = Object.freeze({
+      status: status(value.entry.status),
+      readerStatus: status(value.entry.readerStatus),
+      canonicalReaderStatus: status(value.entry.canonicalReaderStatus)
+    });
+    return entry.status === null && entry.readerStatus === null && entry.canonicalReaderStatus === null ? invalid : { kind: "present", entry };
+  }
+  var StoryMembershipApi = class {
+    #fetch;
+    #endpoint;
+    constructor(fetchImpl, apiBase) {
+      this.#fetch = fetchImpl;
+      this.#endpoint = `${apiBase.replace(/\/$/, "")}/api/extension/library-membership`;
+    }
+    async read(credential, workKey) {
+      if (!WORK_KEY_PATTERN6.test(workKey)) return { kind: "success", value: { kind: "unavailable" } };
+      const abort = new AbortController();
+      const timer = globalThis.setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS7);
+      let response;
+      try {
+        response = await this.#fetch(`${this.#endpoint}?work_key=${workKey}`, {
+          method: "GET",
+          cache: "no-store",
+          signal: abort.signal,
+          headers: { Authorization: `Bearer ${credential}` }
+        });
+      } catch {
+        return { kind: "success", value: { kind: "unavailable" } };
+      } finally {
+        globalThis.clearTimeout(timer);
+      }
+      if (response.status === 401 || response.status === 403) return { kind: "auth_rejected" };
+      if (!response.ok) return { kind: "success", value: { kind: "unavailable" } };
+      let body;
+      try {
+        body = await response.json();
+      } catch {
+        body = null;
+      }
+      return {
+        kind: "success",
+        value: membershipFrom(isRecord22(body) && body.success === true ? body.data : null, workKey)
+      };
+    }
+  };
+  async function readStoryMembership(session, api, workKey) {
+    const unknown = Object.freeze({ kind: "unknown" });
+    const scope2 = session.publicationScope();
+    if (scope2 === null) return unknown;
+    const ask = () => session.executeAuthenticated((credential) => api.read(credential, workKey));
+    let result;
+    try {
+      result = await ask();
+      if (result.kind === "auth_rejected" && result.recovery === "connected") result = await ask();
+    } catch {
+      return unknown;
+    }
+    if (result.kind === "auth_rejected") {
+      return result.recovery === "reconnect_required" ? Object.freeze({ kind: "account_refused" }) : unknown;
+    }
+    if (result.kind !== "published" || !sameAccountScope(session.publicationScope(), scope2)) {
+      return unknown;
+    }
+    if (result.value.kind === "present") {
+      return Object.freeze({ kind: "present", entry: result.value.entry });
+    }
+    return result.value.kind === "absent" ? Object.freeze({ kind: "absent" }) : unknown;
+  }
+
+  // src/extension-runtime/story-site-access.mts
+  var HAND_OVER_BY_RELOADING_THE_PAGE = false;
+  var view = (value) => Object.freeze(value);
+  var StorySiteAccess = class {
+    #ports;
+    /** Popups with a request out. */
+    #asking = /* @__PURE__ */ new Set();
+    constructor(ports) {
+      this.#ports = ports;
+    }
+    /**
+     * The popup made its request. Returns the waiting state, or null when this
+     * popup already has one out: a second tap changes nothing.
+     */
+    asking(popup) {
+      if (this.#asking.has(popup)) return null;
+      this.#asking.add(popup);
+      return view({ state: "waiting" });
+    }
+    /**
+     * The popup has word of its request, or looks while it waits. The outcome
+     * is read, not taken from that word. A look that finds the request still
+     * out and the sites not yet allowed leaves the popup waiting.
+     */
+    async answered(popup, ask) {
+      let outcome = null;
+      try {
+        outcome = await this.observe(ask);
+        return outcome;
+      } finally {
+        if (outcome?.state !== "waiting") this.#asking.delete(popup);
+      }
+    }
+    /** A popup that closes mid-ask leaves nothing behind; the next one looks afresh. */
+    closed(popup) {
+      this.#asking.delete(popup);
+    }
+    /** What holds now. With no request made, pass nothing. */
+    async observe(ask = { kind: "none" }) {
+      const reading = await this.#ports.access().catch(() => null);
+      if (reading?.complete === true) {
+        const registered = await this.#ports.registered().catch(() => null);
+        if (registered === false) return view({ state: "registration_failed" });
+        if (registered !== true) return view({ state: "registration_unknown" });
+        const [account, automaticSaving] = await Promise.all([
+          this.#ports.account().then(
+            ({ state }) => state === "verified" ? "connected" : state,
+            () => "unknown"
+          ),
+          this.#ports.automaticSaving().catch(() => "unknown"),
+          this.#ports.handOver().catch(() => void 0)
+        ]);
+        return view({
+          state: "allowed",
+          account,
+          automaticSaving,
+          handOver: HAND_OVER_BY_RELOADING_THE_PAGE ? "reload" : "in_place"
+        });
+      }
+      if (reading !== null && reading.granted > 0) {
+        return view({ state: "partial", granted: reading.granted, total: reading.total });
+      }
+      if (ask.kind === "waiting") return view({ state: "waiting" });
+      if (ask.kind === "threw") {
+        return view({ state: "could_not_ask", automaticSaving: await this.#automaticSaving() });
+      }
+      if (reading === null) return view({ state: "not_known" });
+      if (ask.kind === "none") return view({ state: "not_asked" });
+      if (ask.kind === "unanswered") return view({ state: "not_known" });
+      if (ask.value !== false) return view({ state: "not_known" });
+      return view({ state: "not_allowed", automaticSaving: await this.#automaticSaving() });
+    }
+    #automaticSaving() {
+      return this.#ports.automaticSaving().catch(() => "unknown");
+    }
+  };
 
   // src/extension-runtime/first-tap-runtime.mts
   var FIRST_TAP_PAGE_FILES = Object.freeze([
@@ -8806,6 +9617,204 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     "trace-finish-qualify.js",
     "collector.js"
   ]);
+  var hex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  function installFirstTapSave(environment) {
+    const { runtime, tabs, permissions, scripting, storage, mode, origins, session } = environment;
+    const cryptography = environment.crypto ?? globalThis.crypto;
+    const call = (target, method, args) => extensionCall(target, method, args, runtime, mode);
+    const grantComplete = async () => {
+      if (origins.length === 0 || typeof permissions.contains !== "function") return null;
+      try {
+        const answer = await call(permissions, "contains", [{ origins: [...origins] }]);
+        return typeof answer === "boolean" ? answer : null;
+      } catch {
+        return null;
+      }
+    };
+    const registered = async () => {
+      try {
+        const current = await call(scripting, "getRegisteredContentScripts", []);
+        const ids = new Set(current.map(({ id }) => id));
+        return environment.registrationIds.every((id) => ids.has(id));
+      } catch {
+        return null;
+      }
+    };
+    const access = async () => {
+      const [complete, listed] = await Promise.all([
+        grantComplete(),
+        typeof permissions.getAll !== "function" ? Promise.resolve(null) : call(permissions, "getAll", []).then(
+          (all) => Array.isArray(all?.origins) ? new Set(all.origins) : null,
+          () => null
+        )
+      ]);
+      if (complete === null && listed === null) return null;
+      const granted = listed === null ? 0 : origins.filter((origin) => listed.has(origin)).length;
+      return Object.freeze({
+        complete: origins.length > 0 && (complete ?? granted === origins.length),
+        granted,
+        total: origins.length
+      });
+    };
+    const account = async () => {
+      const read = await session.accountForThisOpen();
+      if (read.state !== "verified") return read;
+      const owner = session.snapshot().accountId;
+      return typeof owner === "string" && owner.length > 0 && session.pageBinding() === read.binding ? Object.freeze({ state: "verified", binding: read.binding, owner }) : Object.freeze({ state: "unknown" });
+    };
+    const membershipApi = new StoryMembershipApi(environment.fetch, environment.apiBase);
+    const firstTap = new FirstTapSave({
+      saveOnOpen: environment.saveOnOpen === true,
+      grantComplete,
+      account,
+      binding: () => session.pageBinding(),
+      automaticSaving: () => session.automaticSaving(),
+      async inject(tabId) {
+        if (typeof scripting.executeScript !== "function") return false;
+        await call(scripting, "executeScript", [{
+          target: { tabId, frameIds: [0] },
+          files: [...FIRST_TAP_PAGE_FILES]
+        }]);
+        return true;
+      },
+      collect: (tabId) => call(tabs, "sendMessage", [tabId, { type: FIRST_TAP_COLLECT_MESSAGE }, { frameId: 0 }]),
+      save: (command, observer) => session.saveStoryWithEvidence(command, observer),
+      presence: (workKey) => session.storyPresence(workKey),
+      membership: (workKey) => readStoryMembership(session, membershipApi, workKey),
+      async mark(tabId, workKey) {
+        await call(tabs, "sendMessage", [tabId, { type: FIRST_TAP_MARK_MESSAGE, workKey }, { frameId: 0 }]);
+      },
+      async readStore() {
+        return (await storage.get(FIRST_TAP_STORE_KEY))[FIRST_TAP_STORE_KEY];
+      },
+      async writeStore(value) {
+        await storage.set({ [FIRST_TAP_STORE_KEY]: value });
+      },
+      async digest(text2) {
+        const bytes = await cryptography.subtle.digest("SHA-256", new TextEncoder().encode(text2));
+        return hex(new Uint8Array(bytes)).slice(0, 32);
+      },
+      randomSalt: () => hex(cryptography.getRandomValues(new Uint8Array(16))),
+      now: environment.now ?? (() => Date.now())
+    });
+    session.attachStoryAdmission({
+      async modeFor(tabId, workKey) {
+        const [grant, scripts] = await Promise.all([grantComplete(), registered()]);
+        return storySaveModeAtAdmission({
+          injectedForFirstTap: firstTap.injectedFor(tabId, workKey),
+          grantComplete: grant,
+          registered: scripts
+        });
+      },
+      pageSaveAdmitted: (_tabId, workKey) => firstTap.pageSaveAdmitted(workKey)
+    });
+    const savesByItself = async () => {
+      const [grant, scripts] = await Promise.all([grantComplete(), registered()]);
+      return grant === true && scripts === true;
+    };
+    const handOver = async () => {
+      if (!await savesByItself()) return;
+      const ids = new Set(firstTap.injectedTabs());
+      const storySites = origins.filter(isStorySitePattern);
+      if (storySites.length > 0) {
+        const open = await call(tabs, "query", [{ url: storySites }]).catch(
+          () => []
+        );
+        for (const tab of open) {
+          if (typeof tab.id === "number" && Number.isInteger(tab.id)) ids.add(tab.id);
+        }
+      }
+      await Promise.all([...ids].map((tabId) => call(tabs, "sendMessage", [
+        tabId,
+        { type: FIRST_TAP_MANUAL_MODE_END_MESSAGE, reload: HAND_OVER_BY_RELOADING_THE_PAGE },
+        { frameId: 0 }
+      ]).catch(() => void 0)));
+    };
+    runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (message?.type !== FIRST_TAP_MANUAL_MODE_QUERY_MESSAGE) return false;
+      if (sender?.id !== runtime.id || !Number.isInteger(sender.tab?.id) || sender.frameId !== void 0 && sender.frameId !== 0) {
+        sendResponse({ ok: false });
+        return false;
+      }
+      void savesByItself().then(
+        (ready) => sendResponse({ ok: true, manual: !ready, reload: ready && HAND_OVER_BY_RELOADING_THE_PAGE }),
+        () => sendResponse({ ok: true, manual: true, reload: false })
+      );
+      return true;
+    });
+    const siteAccess = new StorySiteAccess({
+      access,
+      registered,
+      account,
+      automaticSaving: () => session.automaticSaving(),
+      handOver
+    });
+    runtime.onConnect?.addListener((port) => {
+      if (port.name !== FIRST_TAP_POPUP_PORT || !port.sender || port.sender.id !== runtime.id || port.sender.tab !== void 0 && port.sender.tab !== null || !isPopupSender(port.sender, runtime.id) || port.sender.frameId !== void 0 && port.sender.frameId !== 0) {
+        return;
+      }
+      let open = true;
+      let tapped = null;
+      const post = (message) => {
+        if (!open) return;
+        try {
+          port.postMessage(message);
+        } catch {
+        }
+      };
+      const show = (view2) => post({ view: view2 });
+      const showAccess = (view2) => post({ access: view2 });
+      port.onDisconnect.addListener(() => {
+        open = false;
+        siteAccess.closed(show);
+        firstTap.closed(show);
+      });
+      port.onMessage.addListener((message) => {
+        const request = typeof message === "object" && message !== null ? message : {};
+        const answered = Number.isSafeInteger(request.look) ? { answered: request.look } : {};
+        if (tapped === null && Number.isInteger(request.tabId) && typeof request.url === "string") {
+          tapped = Object.freeze({
+            tabId: request.tabId,
+            url: request.url,
+            private: typeof request.private === "boolean" ? request.private : null
+          });
+        }
+        if (tapped === null) return;
+        if (request.command === "access_asking") {
+          const waiting = siteAccess.asking(show);
+          if (waiting !== null) showAccess(waiting);
+          return;
+        }
+        const ask = (
+          // A look with no request made, for a popup that shows a state of the ask.
+          request.command === "access_check" ? { kind: "none" } : request.command === "access_waiting" ? { kind: "waiting" } : request.command === "access_unanswered" ? { kind: "unanswered" } : request.command !== "access_answered" ? null : request.threw === true ? { kind: "threw" } : { kind: "returned", value: request.returned }
+        );
+        if (ask !== null) {
+          void siteAccess.answered(show, ask).then(
+            (access2) => post({ access: access2, ...answered }),
+            () => post({ access: Object.freeze({ state: "not_known" }), ...answered })
+          );
+          return;
+        }
+        const work = request.command === "open" ? firstTap.opened(show, tapped) : request.command === "save" ? firstTap.opened(show, tapped, { requested: true }) : request.command === "check" ? firstTap.check(show) : null;
+        if (work === null) return;
+        void work.then(
+          async (view2) => {
+            if (view2.state !== "automatic") return post({ view: view2, ...answered });
+            const allowed = await siteAccess.observe().catch(
+              () => Object.freeze({ state: "not_known" })
+            );
+            post({ view: view2, access: allowed, ...answered });
+          },
+          () => post({ view: Object.freeze({ state: "not_applicable" }), ...answered })
+        ).then(() => {
+          if (!open) firstTap.closed(show);
+        });
+      });
+    });
+    void handOver().catch(() => void 0);
+    return handOver;
+  }
 
   // src/extension-runtime/safari-readiness-report.mts
   var SAFARI_READINESS_MESSAGES = Object.freeze({
@@ -8817,7 +9826,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var SAFARI_READINESS_SESSION_KEY = "traceSafariReadinessSessionV1";
   var NATIVE_TIMEOUT_MS = 2e3;
   var BROWSER_READ_TIMEOUT_MS = 2e3;
-  function isRecord21(value) {
+  function isRecord23(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
   function bounded(work, ms) {
@@ -8867,7 +9876,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         typeof permissions.contains !== "function" ? Promise.resolve(null) : bounded(call(permissions, "contains", [{ origins: [...config.origins] }]), BROWSER_READ_TIMEOUT_MS),
         bounded(call(permissions, "getAll", []), BROWSER_READ_TIMEOUT_MS)
       ]);
-      const origins = isRecord21(listed) && Array.isArray(listed.origins) ? new Set(listed.origins) : null;
+      const origins = isRecord23(listed) && Array.isArray(listed.origins) ? new Set(listed.origins) : null;
       const granted = origins === null ? null : config.origins.filter((origin) => origins.has(origin)).length;
       return {
         // The browser's own answer where it gives one: a broader grant need not
@@ -8883,9 +9892,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         bounded(storage.get(EARNED_PERMISSION_STATE_KEY), BROWSER_READ_TIMEOUT_MS)
       ]);
       if (!Array.isArray(current) || stored === null) return "unreadable";
-      const ids = new Set(current.map((script) => isRecord21(script) ? script.id : void 0));
+      const ids = new Set(current.map((script) => isRecord23(script) ? script.id : void 0));
       const state = stored[EARNED_PERMISSION_STATE_KEY];
-      const generation = isRecord21(state) ? state.registrationVersion : void 0;
+      const generation = isRecord23(state) ? state.registrationVersion : void 0;
       return config.registrations.every(({ id }) => ids.has(id)) && generation === config.version ? "registered" : "absent";
     };
     const readScriptRegistration = async () => {
@@ -8940,8 +9949,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         { type: SAFARI_READINESS_MESSAGES.prepare, apiOrigin },
         NATIVE_TIMEOUT_MS
       );
-      if (!isRecord21(response) || response.ok !== true || !isRecord21(response.provider)) return null;
-      const cycle = isRecord21(response.cycle) && typeof response.cycle.id === "string" ? {
+      if (!isRecord23(response) || response.ok !== true || !isRecord23(response.provider)) return null;
+      const cycle = isRecord23(response.cycle) && typeof response.cycle.id === "string" ? {
         id: response.cycle.id,
         accountId: typeof response.cycle.accountID === "string" ? response.cycle.accountID : null
       } : null;
@@ -8959,8 +9968,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         result: report2.result,
         components: report2.components
       }, NATIVE_TIMEOUT_MS);
-      if (isRecord21(response) && response.ok === true) return "stored";
-      return isRecord21(response) && response.error === "stale_cycle" ? "stale_cycle" : "refused";
+      if (isRecord23(response) && response.ok === true) return "stored";
+      return isRecord23(response) && response.error === "stale_cycle" ? "stale_cycle" : "refused";
     };
     const service = new SafariReadinessService({
       prepare,
@@ -8978,7 +9987,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       void report().catch(() => void 0);
     };
     runtime.onMessage.addListener((message, sender, sendResponse) => {
-      if (!isRecord21(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport || Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
+      if (!isRecord23(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport || Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
         return false;
       }
       void report().then(() => sendResponse({ ok: true }), () => sendResponse({ ok: true }));
@@ -9021,7 +10030,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   }
 
   // src/extension-runtime/index.mts
-  var UUID_PATTERN7 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  var UUID_PATTERN8 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   function fallbackUuid(seed) {
     let hash = 2166136261;
     const bytes = [];
@@ -9034,8 +10043,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     bytes[6] = bytes[6] & 15 | 64;
     bytes[8] = bytes[8] & 63 | 128;
-    const hex = bytes.map((value) => value.toString(16).padStart(2, "0")).join("");
-    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    const hex2 = bytes.map((value) => value.toString(16).padStart(2, "0")).join("");
+    return `${hex2.slice(0, 8)}-${hex2.slice(8, 12)}-${hex2.slice(12, 16)}-${hex2.slice(16, 20)}-${hex2.slice(20)}`;
   }
   var scope = globalThis;
   scope.TRACE_SESSION_MODE = "kernel";
@@ -9138,7 +10147,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     let fallbackId = 0;
     const randomId = () => {
       const uuid = scope.crypto?.randomUUID?.();
-      if (typeof uuid === "string" && UUID_PATTERN7.test(uuid)) return uuid;
+      if (typeof uuid === "string" && UUID_PATTERN8.test(uuid)) return uuid;
       fallbackId += 1;
       return fallbackUuid(`${Date.now()}:${fallbackId}`);
     };
@@ -9166,9 +10175,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       archiveReadinessStatus
     });
     if (
-      // A build-time constant: with the first-tap save off, this block and the
-      // modules only it uses are left out of the bundle altogether.
-      false
+      // A build-time constant: a build without optional story sites leaves this
+      // block and the modules only it uses out of the bundle altogether.
+      define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default !== null && define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.registrationMode === "dynamic" && extension.permissions !== void 0 && extension.scripting !== void 0
     ) {
       afterScriptsRegistered = installFirstTapSave({
         runtime: extension.runtime,
@@ -9179,6 +10188,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         mode: storageMode,
         origins: define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.origins,
         registrationIds: define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default.registrations.map(({ id }) => id),
+        // Saving on opening is a development switch, never on in a release
+        // build. Without it the sheet is the same and the reader's tap saves.
+        saveOnOpen: false,
         session,
         fetch: apiFetch,
         apiBase: "https://api.tracefiction.com"

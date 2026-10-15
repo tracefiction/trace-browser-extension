@@ -41,7 +41,7 @@ const REGISTERED = ["trace-archive-automation-v1", "trace-ao3-saved-filters-v1"]
  * Safari does each time it wakes the extension; what a background holds only
  * in memory starts empty.
  */
-function install({ granted = false, registered = [], crypto = steadyCrypto } = {}) {
+function install({ granted = false, registered = [], crypto = steadyCrypto, saveOnOpen = true } = {}) {
   const state = {
     granted, registered, binding: "1.aaa", accountId: "account-a",
     /** What `permissions.getAll` lists; null to list exactly what `granted` says. */
@@ -72,6 +72,7 @@ function install({ granted = false, registered = [], crypto = steadyCrypto } = {
     };
     const afterScriptsRegistered = installFirstTapSave({
       runtime,
+      saveOnOpen,
       mode: "promise",
       origins: FIVE,
       registrationIds: REGISTERED,
@@ -231,6 +232,49 @@ test("the sheet's port saves the tapped story: manual-mode script first, one sav
     h.calls.tabMessages.at(-1),
     { tabId: 7, message: { type: "TRACE_FIRST_TAP_MARK", workKey: WORK_KEY }, options: { frameId: 0 } },
   );
+});
+
+test("without saving on opening, the port offers the save and makes it only on the reader's Save this story", async () => {
+  const h = harness({ saveOnOpen: false });
+  const port = h.openPort();
+  port.send("open");
+  await turns();
+  assert.deepEqual(port.posted.map(({ state }) => state), ["awaiting_request"]);
+  assert.equal(port.posted[0].preference, "on");
+  assert.deepEqual(port.posted[0].story, { title: "A Chance Encounter", author: "someone", site: "FanFiction.net" }, "the offer names the story");
+  assert.deepEqual(told(h.calls, "TRACE_FIRST_TAP_COLLECT"), [7], "read from its page, in manual mode");
+  assert.deepEqual(h.calls.saves, [], "and nothing is saved");
+
+  port.send("save");
+  await turns();
+  assert.equal(h.calls.injections.length, 2);
+  assert.equal(h.calls.saves.length, 1, "one save, made by the reader's tap");
+  assert.equal(h.calls.saves[0].mode, "bounded_manual");
+  assert.equal(port.posted.at(-1).state, "confirmed");
+});
+
+test("without saving on opening, a background woken by the tap itself still makes the reader's one save", async () => {
+  // Safari stopped the background while the sheet sat on "Save this story".
+  // The popup's new port carries the save as its first word.
+  const world = install({ saveOnOpen: false });
+  const first = world.worker().openPort();
+  first.send("open");
+  await turns();
+  assert.equal(first.posted.at(-1).state, "awaiting_request");
+  assert.deepEqual(world.calls.saves, []);
+
+  const woken = world.worker().openPort();
+  woken.send("save", { look: 1 });
+  await turns();
+  assert.equal(world.calls.saves.length, 1);
+  assert.equal(woken.messages.find(({ answered }) => answered === 1)?.view.state, "saving", "the tap's answer carries its number");
+  assert.equal(woken.posted.at(-1).state, "confirmed");
+
+  // The same tap sent again, as a popup with no word back does: still one save.
+  woken.send("save", { look: 1 });
+  await turns();
+  assert.equal(world.calls.saves.length, 1);
+  assert.equal(woken.posted.at(-1).state, "confirmed");
 });
 
 test("only Trace's own sheet can open that port", async () => {

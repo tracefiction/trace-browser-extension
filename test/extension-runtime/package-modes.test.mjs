@@ -21,8 +21,9 @@ const RELEASE_ENV = {
 };
 
 /**
- * The background wiring of the first-tap save and of the ask and hand-over
- * that follow it. A package built with the switch off has none of it.
+ * The background wiring of the first-tap sheet: its save, and the ask and
+ * hand-over that follow it. Only the iPhone build with optional story sites
+ * has it, release or not; every other package has none of it.
  */
 const FIRST_TAP_WIRING = [
   "firstTapSave: true",
@@ -666,19 +667,26 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     });
     assert.notEqual(misuse.status, 0, "the required-hosts switch belongs to the iPhone build only");
 
-    // The first-tap save is a development switch. With it off, its wiring
-    // and its page file are not in the package at all.
-    assert.equal(Object.hasOwn(iphoneOnboarding, "firstTapSave"), false);
+    // The store build has the same sheet as every other iPhone build: its
+    // port, its page file, the ask and the hand-over. Saving on opening is a
+    // development switch, and it is off: the sheet opens on "Save this story"
+    // and the reader's tap saves.
+    assert.equal(iphoneOnboarding.registrationMode, "dynamic", "the popup draws the sheet");
+    assert.equal(Object.hasOwn(iphoneOnboarding, "firstTapSave"), false, "and does not save on opening");
     assert.doesNotMatch(iphoneBackground, /firstTapSave: true/);
-    assert.doesNotMatch(iphoneBackground, /trace-first-tap-popup-v1/);
-    assert.doesNotMatch(iphoneBackground, /TRACE_FIRST_TAP_COLLECT/);
-    assertNoFirstTapWiring(RESOURCES, "the iPhone store build");
+    for (const wiring of FIRST_TAP_WIRING.filter((wiring) => wiring !== "firstTapSave: true")) {
+      assert.ok(iphoneBackground.includes(wiring), `the iPhone store build carries ${wiring}`);
+    }
+    assert.match(iphoneBackground, /saveOnOpen: false/, "saving on opening is compiled off");
+    assert.match(
+      fs.readFileSync(path.join(RESOURCES, "page-manual-mode.js"), "utf8"),
+      /TRACE_PAGE_MANUAL_MODE = true/,
+    );
     // The readiness report is live in the iPhone build, switch or no switch.
     assert.match(iphoneBackground, /function installSafariReadinessReport\b/);
     assert.match(iphoneBackground, /TRACE_IOS_SAFARI_READINESS_PREPARE/);
     assert.match(iphoneBackground, /TRACE_IOS_SAFARI_READINESS_REPORT/);
     assert.match(iphoneBackground, /readiness = installSafariReadinessReport\(/);
-    assert.equal(fs.existsSync(path.join(RESOURCES, "page-manual-mode.js")), false);
     for (const browser of ["chrome", "firefox"]) {
       assert.equal(fs.existsSync(path.join(ROOT, "dist", browser, "page-manual-mode.js")), false);
     }
@@ -753,8 +761,10 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     // A development build with local origins needs no proof switch.
     const local = firstTapBuild({ TRACE_API_BASE: "http://localhost:3001", TRACE_WEB_ORIGIN: "http://localhost:5173" });
     assert.equal(local.status, 0, local.stderr);
+    assert.doesNotMatch(proofBackground, /saveOnOpen: false/, "and only here may opening save");
+    assert.match(proofBackground, /saveOnOpen: [\w.]+\.firstTapSave === true/);
     runBuild("build:ios-earned-permission-onboarding:release");
-    assert.equal(fs.existsSync(path.join(RESOURCES, "page-manual-mode.js")), false, "a later store build removes the file again");
+    assert.match(fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8"), /saveOnOpen: false/, "a later store build does not save on opening");
     assert.equal(manifest(RESOURCES).name, "Trace", "and the name is the shipping one again");
     const previewResult = spawnSync(
       "npm",

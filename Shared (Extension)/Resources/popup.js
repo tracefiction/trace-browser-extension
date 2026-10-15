@@ -1154,15 +1154,11 @@ function earnedAnnouncementForState(code, heading, detail) {
       const said = `${already ? "Already in your Library" : "Saved to your Library"}${name ? `: ${name}` : ""}.`;
       return already ? said : `${said} Your chapter fills in as you read.`;
     }
-    case "P3": return "Allowed on this site only. Next, tap Always Allow, not the blue button. Safari will list all 5 story-site addresses.";
-    case "P3-lapse": return "Trace can’t save here right now. Next, tap Always Allow, not the blue button.";
-    case "P4": return "Waiting for Safari. Tap Always Allow, not the blue button.";
     case "P5": return "Still confirming your story. Keep reading; it’ll appear in Trace. If it hasn’t after a minute, reload this page.";
     case "P6": return "Finish setup in the Trace app. Create an account or sign in, then come back.";
     case "connecting-account": return "Connecting to your account.";
     case "account-unreachable": return "Trace couldn’t connect to your account. Open Trace, then come back.";
-    case "P7": return "Nothing was saved. When Safari asks again, tap Always Allow.";
-    case "P8": return "Open any story. Trace saves it when it opens.";
+    case "P8": return [heading, detail].filter(Boolean).join(" ");
     case "P9": return "This story isn’t available. Nothing was saved.";
     case "P10": return `Automatic saving is off. ${document.getElementById("popup-earned-record-title")?.textContent?.trim() || "This story"} is not in your Library.`;
     case "P11": return "";
@@ -1541,53 +1537,76 @@ async function reloadEarnedStory() {
   }
 }
 
-function renderEarnedPermissionInvitation(story, hasGrant, coverage = null, lapse = false) {
-  const onStory = story.kind === "story";
-  const partial = !hasGrant && ((coverage && coverage.granted > 0) || isLikelyIosExtensionUi);
-  if (partial) {
-    setEarnedCopy({
-      stateCode: lapse ? "P3-lapse" : "P3",
-      kicker: lapse ? "Trace can’t save here right now" : "Allowed on this site only",
-      kickerIcon: lapse ? "alert" : "globe",
-      headingMarkup: "Next, tap <b>Always Allow</b>.",
-      lead: lapse
-        ? "Trace needs its story sites again. Safari will list AO3 and FanFiction.net’s 5 addresses."
-        : "Trace needs AO3 and FanFiction.net’s other addresses too. Safari will list all 5.",
-      ruleMarkup: "Then tap <b>Always Allow</b>, not the blue button. The blue one stops Trace tomorrow.",
-    });
-  } else {
-    setEarnedCopy({
-      kicker: story.site + (onStory ? " story" : " site"),
-      heading: hasGrant ? (onStory ? "Save this story" : "Open any story to save it")
-        : "Let Trace work on AO3 and FanFiction.net",
-      lead: hasGrant ? "Website access is already allowed." : "Nothing has been saved yet.",
-    });
-  }
-  setEarnedCheck("popup-earned-story", onStory ? "pass" : "waiting", onStory ? story.site : "Open a story", "Story page");
-  setEarnedCheck("popup-earned-access", hasGrant ? "pass" : "waiting", hasGrant ? "Allowed" : "Needed", "Website access");
-  setEarnedCheck("popup-earned-save", "waiting", "After access", "Saved to Trace");
-  setEarnedResult(hasGrant ? "checking" : "failure", hasGrant ? "Website access found." : "One permission remains.", "");
-  configureEarnedActions({
-    label: hasGrant ? (onStory ? "Save this story" : "Finish setup") : partial ? "Allow story sites" : "Continue",
-    action: "allow_and_add", emphasis: "primary",
+/**
+ * The ask for lasting access where the first-tap sheet does not draw it: a
+ * list or a site's home page, a page the sheet stood aside on, or a build
+ * without the sheet. It has the sheet's words, rule line and buttons, and its
+ * tap asks Safari directly.
+ */
+function drawEarnedAsk(stateCode, {
+  kicker = "", kickerIcon = "", heading, body = "", rule = false, primary, secondary = null, result = "checking",
+}) {
+  leaveFirstTapSheet();
+  setEarnedCopy({
+    stateCode,
+    kicker,
+    kickerIcon,
+    heading,
+    lead: body,
+    ruleMarkup: rule
+      ? (safariQuestionButtonsAreAllBlue() ? FIRST_TAP_WORDS.ruleEveryButtonBlue : FIRST_TAP_WORDS.rule)
+      : "",
   });
-  if (partial) void recordEarnedEvent("website_access_partial_seen");
+  if (rule) {
+    // The colour is no use to a reader who is not looking at it.
+    setSpokenAlternative(document.getElementById("popup-earned-rule"), FIRST_TAP_WORDS.ruleSpoken);
+    document.getElementById("popup-earned-primary")?.setAttribute("aria-describedby", "popup-earned-rule");
+  }
+  setEarnedResult(result, [kicker, heading, body].map(firstTapSpoken).filter(Boolean).join(" "), "");
+  configureEarnedActions(primary, secondary);
 }
 
-function renderEarnedSiteReady() {
+function earnedAllow() {
+  return { label: FIRST_TAP_WORDS.allow, action: "allow_and_add", emphasis: "primary" };
+}
+
+function setEarnedAskLedger(story, access) {
+  const onStory = story?.kind === "story";
+  setEarnedCheck("popup-earned-story", onStory ? "pass" : "waiting", onStory ? story.site : "Open a story", "Story page");
+  setEarnedCheck("popup-earned-access", access === "fail" ? "fail" : "waiting", access === "fail" ? "Not allowed" : "Needed", "Website access");
+  setEarnedCheck("popup-earned-save", "waiting", access === "fail" ? "Not added" : "After access", "Saved to Trace");
+}
+
+function renderEarnedPermissionInvitation(story) {
+  setEarnedAskLedger(story, "waiting");
+  const onStory = story.kind === "story";
+  drawEarnedAsk(onStory ? "ask-on-story" : "ask-on-list", {
+    heading: FIRST_TAP_WORDS.listAskHeading,
+    body: onStory ? firstTapCounted(FIRST_TAP_WORDS.askBody) : FIRST_TAP_WORDS.listAskBody,
+    rule: true,
+    primary: earnedAllow(),
+    secondary: firstTapButton.notNow,
+  });
+}
+
+/** The story sites are allowed from a list or a site's home page. */
+function renderEarnedSiteReady({ allowed = false } = {}) {
+  leaveFirstTapSheet();
   setEarnedCopy({
     stateCode: "P8",
-    heading: "Open any story",
-    lead: "Trace saves it when it opens.",
+    ...(allowed ? { kicker: FIRST_TAP_WORDS.allowedKicker, kickerIcon: "check" } : {}),
+    heading: FIRST_TAP_WORDS.listReadyHeading,
+    lead: FIRST_TAP_WORDS.listReadyBody,
   });
   setEarnedCheck("popup-earned-story", "waiting", "Open a story", "Story page");
   setEarnedCheck("popup-earned-access", "pass", "Allowed", "Website access");
   setEarnedCheck("popup-earned-save", "waiting", "Not saved", "Saved to Trace");
-  setEarnedResult("success", "Open any story.", "Trace saves it when it opens.");
+  setEarnedResult("success", FIRST_TAP_WORDS.listReadyHeading, FIRST_TAP_WORDS.listReadyBody);
   configureEarnedActions({ hidden: true });
 }
 
 function renderEarnedAccessPending(story) {
+  leaveFirstTapSheet();
   setEarnedCopy({
     stateCode: "P1",
     kicker: "Trace is on this story",
@@ -1602,54 +1621,50 @@ function renderEarnedAccessPending(story) {
   configureEarnedActions({ label: "Keep reading", action: "close", emphasis: "secondary" });
 }
 
-function renderEarnedPermissionDeclined(story) {
-  const onStory = story.kind === "story";
-  setEarnedCopy({
-    stateCode: "P7",
-    heading: "Nothing was saved",
-    leadMarkup: "Trace needs AO3 and FanFiction.net’s addresses to save stories. When Safari asks again, tap <b>Always Allow</b>, not the blue button.",
-  });
-  setEarnedCheck("popup-earned-story", onStory ? "pass" : "waiting", onStory ? story.site : "Open a story", "Story page");
-  setEarnedCheck("popup-earned-access", "fail", "Not allowed", "Website access");
-  setEarnedCheck("popup-earned-save", "waiting", "Not added", "Saved to Trace");
-  setEarnedResult("failure", "Nothing was saved.", "When Safari asks again, tap Always Allow.");
-  configureEarnedActions(
-    { label: "Try again", action: "allow_and_add", emphasis: "primary" },
-    { label: "Not now", action: "close", emphasis: "tertiary" },
-  );
+/** Safari's question is up: what is shown stays, and its button waits. */
+function renderEarnedAskWaiting() {
+  configureEarnedActions(firstTapButton.waiting, firstTapButton.notNow);
+  setEarnedResult("checking", firstTapSpoken(FIRST_TAP_WORDS.waitingForSafari), "");
 }
 
-function renderEarnedRegistrationFailure(story) {
-  const onStory = story.kind === "story";
-  setEarnedCopy({
-    stateCode: "registration-failure",
-    glyph: "alert",
-    glyphTone: "warning",
-    heading: "Trace couldn’t finish setting up",
-    lead: "Website access is allowed. Trying again won’t ask for it again.",
-    helpLabel: "Still not working?",
-    disclosure:
-      onStory ? "Restart Safari, reopen this story, and open Trace again." : "Restart Safari, reopen this site, and open Trace again.",
+/** Some of the story sites, not all: never drawn as allowed. */
+function renderEarnedPartialAccess() {
+  drawEarnedAsk("access-partial", {
+    heading: FIRST_TAP_WORDS.partialHeading,
+    body: firstTapCounted(FIRST_TAP_WORDS.partialBody),
+    rule: true,
+    primary: earnedAllow(),
+    secondary: firstTapButton.notNow,
   });
-  setEarnedCheck("popup-earned-story", onStory ? "pass" : "waiting", onStory ? story.site : "Open a story", "Story page");
-  setEarnedCheck(
-    "popup-earned-access",
-    "pass",
-    "Allowed",
-    "Website access",
-  );
-  setEarnedCheck(
-    "popup-earned-save",
-    "fail",
-    "Not added",
-    "Saved to Trace",
-  );
-  setEarnedResult(
-    "failure",
-    "Nothing was saved.",
-    "Retrying will not ask for website access again.",
-  );
-  configureEarnedActions({ label: "Try again", action: "allow_and_add" });
+}
+
+/**
+ * Not allowed, or Safari could not ask. Nothing was saved by this ask; the
+ * reader is told how saving goes from here, and can go back to the ask.
+ */
+function renderEarnedPermissionDeclined(story) {
+  setEarnedAskLedger(story, "fail");
+  const onRequest = !FIRST_TAP_SAVES_ON_OPEN;
+  drawEarnedAsk("access-not-allowed", {
+    heading: onRequest ? FIRST_TAP_WORDS.notAllowedOnRequestHeading : FIRST_TAP_WORDS.notAllowedHeading,
+    body: onRequest ? FIRST_TAP_WORDS.notAllowedOnRequestBody : FIRST_TAP_WORDS.notAllowedBody,
+    primary: firstTapButton.keepReading,
+    // Back to the ask; the request is made by the reader's tap there.
+    secondary: { label: FIRST_TAP_WORDS.tryAgain, action: "prepare", emphasis: "tertiary" },
+  });
+}
+
+/** Safari allows the story sites; Trace's page scripts are not in place. */
+function renderEarnedRegistrationFailure() {
+  drawEarnedAsk("access-registration-failed", {
+    kicker: FIRST_TAP_WORDS.allowedKicker,
+    kickerIcon: "check",
+    heading: FIRST_TAP_WORDS.registrationFailedHeading,
+    body: FIRST_TAP_WORDS.registrationFailedBody,
+    // Trying again asks Safari for nothing: access is already allowed.
+    primary: { label: FIRST_TAP_WORDS.tryAgain, action: "allow_and_add", emphasis: "primary" },
+    result: "failure",
+  });
 }
 
 function renderEarnedUnsupportedStory() {
@@ -2235,7 +2250,12 @@ async function readKnownInLibrary(rawUrl) {
 // popup one machine state of each at a time. Each is drawn here as one popup
 // state, named in `data-trace-first-tap-state`, in the words of
 // FIRST_TAP_WORDS. Nothing here decides what happened; it only says it.
-const FIRST_TAP_SAVE = EARNED_PERMISSION_ONBOARDING?.firstTapSave === true;
+// Every build with optional story sites draws this sheet, release builds
+// included. Only whether opening it saves the story differs: a development
+// build may save on opening, and every other build opens on "Save this story"
+// and saves on the reader's tap.
+const FIRST_TAP_SHEET = EARNED_PERMISSION_ONBOARDING?.registrationMode === "dynamic";
+const FIRST_TAP_SAVES_ON_OPEN = FIRST_TAP_SHEET && EARNED_PERMISSION_ONBOARDING?.firstTapSave === true;
 const FIRST_TAP_POPUP_PORT = "trace-first-tap-popup-v1";
 let firstTapPort = null;
 let firstTapStory = null;
@@ -2249,6 +2269,11 @@ let firstTapPatience = null;
 // nothing has changed. Each such tap has a number, which its answer carries.
 let firstTapBusy = null;
 let firstTapLooks = 0;
+// The reader's save on its way to the background, and how long it waits for
+// word that the background has it before it is sent again over a new port.
+// The background answers as soon as it starts the save, well inside this.
+let firstTapSaveDelivery = null;
+const FIRST_TAP_SAVE_ANSWER_MS = 4_000;
 // A little longer than the slowest of those answers: a read of the Library
 // that is refused, reconnects and is made again. Past it the button is given
 // back; a look asked for then joins one that is still out.
@@ -2344,19 +2369,28 @@ const FIRST_TAP_WORDS = Object.freeze({
   // With automatic saving off, opening Trace on a story does not save it.
   notAllowedOnRequestHeading: "Trace saves when you ask",
   notAllowedOnRequestBody: "To save another story, open Trace from the Page Menu on it and tap Save this story.",
+  // Opened on a list or a site's home page, before the story sites are allowed.
+  listAskHeading: "Let Trace save stories as you read",
+  listAskBody: "This page isn’t a story. Allow AO3 and FanFiction.net, then open any story and Trace saves it.",
+  listReadyHeading: "Open any story to save it",
+  listReadyBody: "Trace saves it as it opens.",
   partialHeading: "Safari allowed only some addresses",
   partialBody: "Trace needs all {count} of AO3 and FanFiction.net’s addresses to save by itself.",
   notKnownHeading: "Trace couldn’t check with Safari",
   notKnownBody: "AO3 and FanFiction.net may be allowed already. Check again, or ask once more.",
 });
 
+/** Sends a request over the port. False when there is no port, or it would not take it. */
 function firstTapSend(command, detail = {}) {
+  if (!firstTapPort) return false;
   try {
     // The tab this popup was opened on goes with every request: its id, its
     // address and whether it is private, as read when the reader opened Trace.
-    firstTapPort?.postMessage({ command, ...firstTapTab, ...detail });
+    firstTapPort.postMessage({ command, ...firstTapTab, ...detail });
+    return true;
   } catch {
     firstTapPort = null;
+    return false;
   }
 }
 
@@ -2923,9 +2957,10 @@ function renderFirstTapAccess(access, view) {
       // said no or Safari did without asking is not something Trace can
       // tell, so the reader is shown one thing: saving stays a tap away, and
       // the ask is there to go back to. The save, if there was one, is kept.
-      // With automatic saving read as off, that tap opens Trace and saves
-      // nothing by itself, and the words say so.
-      const onRequest = access.automaticSaving === "off";
+      // With automatic saving read as off, or in a build that saves only on
+      // the reader's tap, that tap opens Trace and saves nothing by itself,
+      // and the words say so.
+      const onRequest = access.automaticSaving === "off" || !FIRST_TAP_SAVES_ON_OPEN;
       drawFirstTapSheet("access-not-allowed", {
         ...confirmation,
         heading: onRequest ? FIRST_TAP_WORDS.notAllowedOnRequestHeading : FIRST_TAP_WORDS.notAllowedHeading,
@@ -3399,34 +3434,143 @@ function startFirstTap(story, tab) {
     ? tab
     : { tabId: tab.id, url: tab.url, private: firstTapTabIsPrivate(tab) };
   if (!firstTapPort) {
-    try {
-      firstTapPort = ext.runtime.connect({ name: FIRST_TAP_POPUP_PORT });
-    } catch {
-      firstTapPort = null;
-    }
-    if (!firstTapPort?.postMessage || !firstTapPort.onMessage) {
-      firstTapPort = null;
-      return false;
-    }
-    firstTapPort.onMessage.addListener((message) => {
-      if (!message) return;
-      const accessChanged = message.access ? receiveStorySiteAccess(message.access) : false;
-      if (message.view) firstTapLastView = message.view;
-      // The answer to what the reader asked for, known by the tap's number,
-      // ends the wait on its button and is drawn and said aloud even when it
-      // is what the sheet already showed. Anything else is drawn as usual,
-      // and leaves a waiting button waiting.
-      if (firstTapBusy && message.answered === firstTapBusy.look) redrawFirstTapAloud();
-      else if (accessChanged || message.view) drawFirstTap();
-    });
+    if (!connectFirstTapPort()) return false;
     watchStorySiteAccess();
-    firstTapPort.onDisconnect?.addListener(() => {
-      firstTapPort = null;
-    });
     renderFirstTapView({ state: "opening" });
   }
   firstTapSend("open");
   return true;
+}
+
+/** Opens the port to the background. Only the port now open is listened to. */
+function connectFirstTapPort() {
+  let port = null;
+  try {
+    port = ext.runtime.connect({ name: FIRST_TAP_POPUP_PORT });
+  } catch {
+    port = null;
+  }
+  if (!port?.postMessage || !port.onMessage) return false;
+  firstTapPort = port;
+  port.onMessage.addListener((message) => {
+    if (message && port === firstTapPort) receiveFirstTapMessage(message);
+  });
+  port.onDisconnect?.addListener(() => {
+    if (firstTapPort === port) firstTapPort = null;
+  });
+  return true;
+}
+
+/** Lets go of the port, so that the next request opens a new one. */
+function dropFirstTapPort() {
+  const port = firstTapPort;
+  firstTapPort = null;
+  try {
+    port?.disconnect?.();
+  } catch {
+    // Already gone.
+  }
+}
+
+function receiveFirstTapMessage(message) {
+  const delivery = firstTapSaveDelivery;
+  // A save this sheet has seen confirmed is never taken back to the offer to
+  // save it by a later open.
+  const view = message.view?.state === "awaiting_request" && firstTapLastView?.state === "confirmed" &&
+    firstTapLastView.workKey === message.view.workKey
+    ? undefined
+    : message.view;
+  // The background has the reader's save: its answer, or the save's own state.
+  if (delivery && (message.answered === delivery.look || (view && view.state !== "awaiting_request"))) {
+    endFirstTapSaveDelivery(delivery);
+    if (firstTapBusy?.look === delivery.look && message.answered !== delivery.look) endFirstTapBusy();
+  }
+  const accessChanged = message.access ? receiveStorySiteAccess(message.access) : false;
+  if (view) firstTapLastView = view;
+  // The answer to what the reader asked for, known by the tap's number,
+  // ends the wait on its button and is drawn and said aloud even when it
+  // is what the sheet already showed. Anything else is drawn as usual,
+  // and leaves a waiting button waiting.
+  if (firstTapBusy && message.answered === firstTapBusy.look) redrawFirstTapAloud();
+  else if (accessChanged || view) drawFirstTap();
+}
+
+function endFirstTapSaveDelivery(delivery) {
+  if (delivery.timer !== null) clearTimeout(delivery.timer);
+  delivery.timer = null;
+  if (firstTapSaveDelivery === delivery) firstTapSaveDelivery = null;
+}
+
+/**
+ * The reader's "Save this story", sent to the background under the tap's
+ * number. Safari may have put the background to sleep while the sheet sat
+ * open, and a port to it then carries nothing, with or without word that it
+ * closed. So a port known to be closed is opened again before the save goes,
+ * and a save with no word back in FIRST_TAP_SAVE_ANSWER_MS goes once more
+ * over a new port, which wakes the background. That is still one save: the
+ * background starts one at a time for a story and answers a second request
+ * with the one under way. With still no word the sheet says the save could
+ * not be confirmed, and offers to check; it is never left as it was.
+ */
+function sendFirstTapSave(look) {
+  if (firstTapSaveDelivery) endFirstTapSaveDelivery(firstTapSaveDelivery);
+  const delivery = { look, timer: null, sends: 0 };
+  firstTapSaveDelivery = delivery;
+  const send = () => {
+    if (!firstTapPort) connectFirstTapPort();
+    if (firstTapPort && firstTapSend("save", { look })) {
+      delivery.sends += 1;
+      return true;
+    }
+    // The port would not take it: a new one, once.
+    dropFirstTapPort();
+    if (connectFirstTapPort() && firstTapSend("save", { look })) {
+      delivery.sends += 1;
+      return true;
+    }
+    return false;
+  };
+  const unanswered = () => {
+    endFirstTapSaveDelivery(delivery);
+    if (firstTapBusy?.look !== look) return;
+    endFirstTapBusy();
+    dropFirstTapPort();
+    const last = firstTapLastView;
+    // Nothing reached a background: nothing was sent. Otherwise a save may
+    // have gone out, so it is never said not to have.
+    firstTapLastView = Object.freeze({
+      state: "failed",
+      workKey: last?.workKey ?? "",
+      reason: "unavailable",
+      dispatch: delivery.sends === 0 ? "never_sent" : "sent_unconfirmed",
+      story: last?.story ?? null,
+    });
+    lastEarnedAnnouncement = "";
+    if (!firstTapSetAside) drawFirstTap();
+  };
+  if (!send()) {
+    unanswered();
+    return;
+  }
+  const wait = () => {
+    delivery.timer = setTimeout(() => {
+      delivery.timer = null;
+      if (firstTapSaveDelivery !== delivery) return;
+      if (firstTapBusy?.look !== look) {
+        endFirstTapSaveDelivery(delivery);
+        return;
+      }
+      if (delivery.sends < 2) {
+        dropFirstTapPort();
+        if (send()) {
+          wait();
+          return;
+        }
+      }
+      unanswered();
+    }, FIRST_TAP_SAVE_ANSWER_MS);
+  };
+  wait();
 }
 
 async function prepareEarnedPermissionFlow() {
@@ -3448,7 +3592,7 @@ async function prepareEarnedPermissionFlow() {
   // in Safari's settings, or from a sheet that closed before it heard): the
   // background says what holds. Neither reloads the page.
   if (
-    FIRST_TAP_SAVE && !firstTapSetAside && story.ok && story.kind === "story" &&
+    FIRST_TAP_SHEET && !firstTapSetAside && story.ok && story.kind === "story" &&
     (!hasGrant || (!onboarding.completedAt && !earnedRunVerified(onboarding, readiness)))
   ) {
     earnedPreparedContext = Object.freeze({ story, hasGrant });
@@ -3460,7 +3604,7 @@ async function prepareEarnedPermissionFlow() {
     earnedPreparedContext = Object.freeze({ story, hasGrant: false });
     stopStoryConfirmation();
     endAccountWait();
-    renderEarnedPermissionInvitation(story, false, earnedGrantCoverage(grantedOrigins), true);
+    renderEarnedPermissionInvitation(story);
     return;
   }
 
@@ -3509,13 +3653,13 @@ async function prepareEarnedPermissionFlow() {
     }
     const registration = await reconcileEarnedRegistration().catch(() => null);
     if (registration?.ok !== true || registration?.registered !== true) {
-      renderEarnedRegistrationFailure(story);
+      renderEarnedRegistrationFailure();
       return;
     }
     void recordEarnedEvent("website_access_registration_ready");
     if (story.kind === "archive") {
       await writeEarnedState({ completedAt: Date.now() });
-      renderEarnedSiteReady();
+      renderEarnedSiteReady({ allowed: true });
       return;
     }
     // Access is complete (for example, Safari's Every Website choice). There
@@ -3525,7 +3669,7 @@ async function prepareEarnedPermissionFlow() {
     await reloadEarnedStory();
     return;
   }
-  renderEarnedPermissionInvitation(story, hasGrant, earnedGrantCoverage(grantedOrigins));
+  renderEarnedPermissionInvitation(story);
 }
 
 async function allowAccessAndAddEarnedStory() {
@@ -3541,20 +3685,7 @@ async function allowAccessAndAddEarnedStory() {
     : extensionPromiseCall(ext.permissions, "request", [
         { origins: earnedOrigins() },
       ]);
-  configureEarnedActions({
-    label: "Waiting for Safari…",
-    action: "",
-    disabled: true,
-    emphasis: "secondary",
-  });
-  setEarnedCopy({
-    stateCode: "P4",
-    headingMarkup: "Tap <b>Always Allow</b>, not the blue button.",
-    lead: "It lists 5 addresses. They’re all AO3 or FanFiction.net.",
-    ruleMarkup: "Tap <b>Always Allow</b>, not the blue button.",
-    duplicateRule: true,
-  });
-  setEarnedResult("checking", "", "");
+  if (permissionRequest) renderEarnedAskWaiting();
   const story = prepared.story;
   void recordEarnedEvent("website_access_action_started");
   try {
@@ -3571,7 +3702,7 @@ async function allowAccessAndAddEarnedStory() {
       const coverage = earnedGrantCoverage(grantedOrigins);
       if (coverage.granted > 0 && granted === true) {
         void recordEarnedEvent("website_access_partial");
-        renderEarnedPermissionInvitation(story, false, coverage);
+        renderEarnedPartialAccess();
       } else {
         void recordEarnedEvent("website_access_not_allowed");
         renderEarnedPermissionDeclined(story);
@@ -3589,7 +3720,7 @@ async function allowAccessAndAddEarnedStory() {
     void recordEarnedEvent("website_access_registered");
     if (story.kind === "archive") {
       await writeEarnedState({ completedAt: Date.now() });
-      renderEarnedSiteReady();
+      renderEarnedSiteReady({ allowed: true });
       return;
     }
     renderEarnedAccessPending(story);
@@ -3598,7 +3729,7 @@ async function allowAccessAndAddEarnedStory() {
     void recordEarnedEvent("website_access_setup_failed");
     const grantedOrigins = await readGrantedOrigins();
     if (await readCompleteEarnedGrant(grantedOrigins)) {
-      renderEarnedRegistrationFailure(story);
+      renderEarnedRegistrationFailure();
     } else {
       renderEarnedPermissionDeclined(story);
     }
@@ -4532,10 +4663,10 @@ async function renderReaderView(state) {
   // The page may be a list of stories or the site's home page, which has
   // no titles to tap, so the first-story prompt names neither.
   const heading = awaitingFirstStory
-    ? "Open any story"
+    ? FIRST_TAP_WORDS.listReadyHeading
     : onArchive ? "Trace is on here" : "Trace works on AO3 and FanFiction.net";
   const lead = awaitingFirstStory
-    ? "Trace saves it when it opens."
+    ? FIRST_TAP_WORDS.listReadyBody
     : onArchive
       ? "Stories you open join your Library. Lists show what you’ve read."
       : "Open a story there and Trace keeps your place as you read.";
@@ -4684,7 +4815,9 @@ function runEarnedAction(button) {
   if (action === "first_tap_open") {
     holdFirstTapButton(button, (look) => firstTapLook("open", look), FIRST_TAP_WORDS.checking);
   }
-  if (action === "first_tap_save") firstTapSend("save");
+  // The save waits on the background's answer, and reaches a background
+  // that has gone to sleep under the sheet; see sendFirstTapSave.
+  if (action === "first_tap_save") holdFirstTapButton(button, (look) => sendFirstTapSave(look));
   if (action === "first_tap_check") {
     holdFirstTapButton(button, (look) => firstTapLook("check", look), FIRST_TAP_WORDS.checking);
   }

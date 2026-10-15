@@ -106,16 +106,18 @@ if (IOS_EARNED_PERMISSION_REQUIRED_HOSTS && !IOS_EARNED_PERMISSION_ONBOARDING) {
 }
 const IOS_OPTIONAL_STORY_SITE_ACCESS =
   IOS_EARNED_PERMISSION_ONBOARDING && !IOS_EARNED_PERMISSION_REQUIRED_HOSTS;
-// Saving the story the reader opens Trace on, before lasting access. It has
-// its wording, and has not yet been proven end to end in Safari. So it is a
+// Saving the story the reader opens Trace on, before lasting access, without
+// a further tap. It has not yet been proven end to end in Safari. So it is a
 // development switch, and three rules keep it one.
 //  1. No release build can turn it on, whatever else is set. Shipping it is a
 //     change to this file, made on purpose, not a setting.
 //  2. A development build that talks to the production service can turn it on
 //     only with a second switch, named for what it is, given on the command
 //     line. A line in `.env` is never enough.
-//  3. With it off, its background wiring and its page file are left out of
-//     the package.
+//  3. It changes only when a save is made, never what the sheet shows: every
+//     build with optional story sites carries the same sheet, its background
+//     wiring and its page file. With the switch off the sheet opens on "Save
+//     this story" and the reader's tap saves.
 const IOS_FIRST_TAP_SAVE = /^(?:1|true)$/i.test(
   String(env.TRACE_IOS_FIRST_TAP_SAVE ?? ""),
 );
@@ -160,6 +162,9 @@ if (NATIVE_IMPORT_HANDOFF && SESSION_MODE !== "kernel") {
   throw new Error("Native Import requires the kernel paired package.");
 }
 const HAS_SESSION_RUNTIME = SESSION_MODE !== "legacy";
+// The sheet that saves a story by the reader's tap and then asks for lasting
+// access. Rule 3 above: the same in every build with optional story sites.
+const IOS_FIRST_TAP_SHEET = IOS_OPTIONAL_STORY_SITE_ACCESS && SESSION_MODE === "kernel";
 if (IOS_ACTIVE_TAB_PROBE && SESSION_MODE !== "kernel") {
   throw new Error("TRACE_IOS_ACTIVE_TAB_PROBE requires TRACE_SESSION_MODE=kernel.");
 }
@@ -464,6 +469,7 @@ if (HAS_SESSION_RUNTIME) {
       __TRACE_WEB_ORIGIN__: JSON.stringify(TRACE_WEB_ORIGIN),
       __TRACE_NATIVE_IMPORT_HANDOFF__: JSON.stringify(NATIVE_IMPORT_HANDOFF),
       __TRACE_IOS_FIRST_TAP_SAVE__: JSON.stringify(IOS_FIRST_TAP_SAVE),
+      __TRACE_IOS_FIRST_TAP_SHEET__: JSON.stringify(IOS_FIRST_TAP_SHEET),
       __TRACE_IOS_EARNED_PERMISSION_CONFIG__: JSON.stringify(
         IOS_EARNED_PERMISSION_ONBOARDING
           ? earnedPermissionRuntimeConfig
@@ -485,9 +491,9 @@ const contentConfigPath = path.join(RES, "content-config.js");
 // Firefox execute the same ordered artifact.
 fs.rmSync(path.join(RES, "extension-session-runtime.js"), { force: true });
 fs.rmSync(path.join(RES, "legacy-background.js"), { force: true });
-// The first-tap save's page file is part of the package only with it on.
+// The first-tap sheet's page file is part of every package that has the sheet.
 const pageManualModePath = path.join(RES, "page-manual-mode.js");
-if (IOS_FIRST_TAP_SAVE) {
+if (IOS_FIRST_TAP_SHEET) {
   fs.copyFileSync(path.join(ROOT, "src", "page-manual-mode.js"), pageManualModePath);
 } else {
   fs.rmSync(pageManualModePath, { force: true });
@@ -757,8 +763,9 @@ const packagedManifest = browserStoreManifest(
   browserHostPermissions,
 );
 
+// The first-tap sheet's page file belongs to the iPhone build alone.
 const skipResources = (full, name) =>
-  name === ".DS_Store" || full.endsWith("manifest.json");
+  name === ".DS_Store" || name === "page-manual-mode.js" || full.endsWith("manifest.json");
 
 // dist/chrome: extension root for Chrome / Edge (load unpacked)
 const distChrome = path.join(ROOT, "dist", "chrome");
