@@ -10632,6 +10632,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         const report = setupMilestoneReport(step);
         await this.#locked(async () => {
           const stored = await this.#read();
+          if (this.#ports.account() !== account) return;
           const current = stored !== null && stored.account === account ? stored.attempt === attempt ? stored : { account, attempt, reported: [], pending: stored.pending } : { account, attempt, reported: [], pending: [] };
           const key = step.kind === "sheet_opened" ? report.milestone : `${report.milestone}:${report.evidence_source}`;
           if (current.reported.includes(key)) return;
@@ -10665,6 +10666,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         await this.#write({ ...stored, pending: due });
         const left = [];
         for (const item of due) {
+          if (this.#ports.account() !== account) break;
           const outcome = await this.#ports.send(Object.freeze({
             attempt_id: item.attempt,
             milestone: item.milestone,
@@ -10677,9 +10679,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         else await this.#write({ ...stored, pending: left });
       }).catch(() => void 0);
     }
-    /** Forgets every report and what was reported: on sign-out or a change of account. */
+    /**
+     * Forgets every report and what was reported: on sign-out or a change of
+     * account. It does not wait for a report on its way; that pass finds the
+     * account gone and writes nothing back.
+     */
     clear() {
-      return this.#locked(() => this.#ports.storage.remove(SETUP_MILESTONES_KEY)).catch(() => void 0);
+      return this.#ports.storage.remove(SETUP_MILESTONES_KEY).catch(() => void 0);
     }
     #liveAttempt(context) {
       const id = context?.setupAttemptID;

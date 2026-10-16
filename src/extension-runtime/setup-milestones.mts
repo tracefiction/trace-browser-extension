@@ -167,6 +167,8 @@ export class SetupMilestoneReporter {
       const report = setupMilestoneReport(step);
       await this.#locked(async () => {
         const stored = await this.#read();
+        // The account may have left while an earlier pass held the turn.
+        if (this.#ports.account() !== account) return;
         const current: Stored = stored !== null && stored.account === account
           ? (stored.attempt === attempt ? stored : { account, attempt, reported: [], pending: stored.pending })
           : { account, attempt, reported: [], pending: [] };
@@ -214,6 +216,8 @@ export class SetupMilestoneReporter {
       await this.#write({ ...stored, pending: due });
       const left: Pending[] = [];
       for (const item of due) {
+        // Each report goes as the account it was kept for, or not at all.
+        if (this.#ports.account() !== account) break;
         const outcome = await this.#ports.send(Object.freeze({
           attempt_id: item.attempt,
           milestone: item.milestone,
@@ -223,15 +227,20 @@ export class SetupMilestoneReporter {
         // Any answer from Trace is final, a refusal included.
         if (outcome === "unreached" && item.sends < MAX_SENDS) left.push(item);
       }
-      // Nothing else writes meanwhile: every write takes the same turn.
+      // A clear does not wait for this pass, so the account is read again
+      // here: once it has left, nothing kept for it is written back.
       if (this.#ports.account() !== account) await this.#ports.storage.remove(SETUP_MILESTONES_KEY);
       else await this.#write({ ...stored, pending: left });
     }).catch(() => undefined);
   }
 
-  /** Forgets every report and what was reported: on sign-out or a change of account. */
+  /**
+   * Forgets every report and what was reported: on sign-out or a change of
+   * account. It does not wait for a report on its way; that pass finds the
+   * account gone and writes nothing back.
+   */
   clear(): Promise<void> {
-    return this.#locked(() => this.#ports.storage.remove(SETUP_MILESTONES_KEY)).catch(() => undefined);
+    return this.#ports.storage.remove(SETUP_MILESTONES_KEY).catch(() => undefined);
   }
 
   #liveAttempt(context: Readonly<Record<string, unknown>> | undefined): string | null {

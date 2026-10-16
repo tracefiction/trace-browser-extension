@@ -38,6 +38,7 @@ function install() {
   const writes = [];
   const fetch = async (url, init) => {
     requests.push({ url: String(url), method: init.method, authorization: init.headers.Authorization, body: JSON.parse(init.body) });
+    if (state.hold) await state.hold;
     if (state.answer instanceof Error) throw state.answer;
     return new Response(JSON.stringify(state.answer === 200 ? { accepted: true, duplicate: false } : { error: "no" }), { status: state.answer });
   };
@@ -240,4 +241,62 @@ test("sign-out clears what is kept, and another account never sends the last one
   starting.state.account = null;
   await starting.background().flush();
   assert.equal(starting.store[SETUP_MILESTONES_KEY].pending.length, 1);
+});
+
+test("sign-out never waits on a report on its way, and the account that left has nothing more sent or kept", async () => {
+  for (const [label, leave] of [
+    ["signed out", (state) => { state.account = null; }],
+    ["another account", (state) => { state.account = "account-b"; }],
+  ]) {
+    const world = install();
+    world.store[SETUP_MILESTONES_KEY] = {
+      account: "account-a", attempt: ATTEMPT.toLowerCase(),
+      reported: ["safari_sheet_opened", "safari_access_answered:extension_permission_granted"],
+      pending: [
+        { attempt: ATTEMPT.toLowerCase(), milestone: "safari_sheet_opened", outcome: "confirmed", evidence_source: "extension_sheet_story_page", at: NOW - 1_000, sends: 0 },
+        { attempt: ATTEMPT.toLowerCase(), milestone: "safari_access_answered", outcome: "confirmed", evidence_source: "extension_permission_granted", at: NOW - 500, sends: 0 },
+      ],
+    };
+    // Trace does not answer the first report until let.
+    let answer;
+    world.state.hold = new Promise((resolve) => { answer = resolve; });
+    const reporter = world.background();
+    const flushing = reporter.flush();
+    while (world.requests.length === 0) await new Promise((resolve) => setImmediate(resolve));
+
+    leave(world.state);
+    const clearing = reporter.clear();
+    let first;
+    try {
+      first = await Promise.race([
+        clearing.then(() => "cleared"),
+        flushing.then(() => "sent"),
+        new Promise((resolve) => setTimeout(() => resolve("waiting"), 50)),
+      ]);
+    } finally {
+      answer();
+    }
+    assert.equal(first, "cleared", `${label}: the clear does not wait on the report`);
+    await flushing;
+    assert.equal(world.requests.length, 1, `${label}: the next report does not go once the account has left`);
+    assert.equal(Object.hasOwn(world.store, SETUP_MILESTONES_KEY), false, `${label}: nothing is written back`);
+  }
+});
+
+test("a step kept while an earlier report holds the turn is dropped if the account leaves meanwhile", async () => {
+  const world = install();
+  let answer;
+  world.state.hold = new Promise((resolve) => { answer = resolve; });
+  const reporter = world.background();
+  const first = reporter.record(opened("story"));
+  while (world.requests.length === 0) await new Promise((resolve) => setImmediate(resolve));
+  // The answer is read now, then waits for the turn behind the opening's report.
+  const second = reporter.record(answered("granted"));
+  await new Promise((resolve) => setImmediate(resolve));
+  world.state.account = null;
+  const clearing = reporter.clear();
+  answer();
+  await Promise.all([clearing, first, second]);
+  assert.equal(world.requests.length, 1);
+  assert.equal(Object.hasOwn(world.store, SETUP_MILESTONES_KEY), false);
 });
