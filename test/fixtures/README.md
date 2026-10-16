@@ -26,3 +26,7 @@ extension's background sends it to the Trace app's side, for a reader with
 everything in place. The runtime test asserts the real module produces exactly
 it, and the Swift contract test asserts the native codec accepts and reads it,
 so the two sides cannot drift apart. Its identifiers are invented.
+
+`ffn_story_not_found_mobile.html` is a synthetic FanFiction.net-shaped mobile
+page for a story that no longer exists ("Story Not Found"), for the summary
+reader's skip rule. It is not a snapshot of a live page.

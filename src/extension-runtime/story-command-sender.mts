@@ -9,6 +9,7 @@ import {
 
 const MAX_TRACK_PAYLOAD_BYTES = 64 * 1_024;
 const HANDOFF_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const FFN_AUTHOR_ID_PATTERN = /^[1-9][0-9]{0,19}$/;
 const COMMAND_TYPES = Object.freeze({
   connectAndSave: "TRACE_CONNECT_AND_SAVE",
   quickAdd: "TRACE_QUICK_ADD",
@@ -111,6 +112,16 @@ export function storyTrackCommandFromMessage(
       ? rawHandoffId
       : undefined;
 
+  // A FanFiction.net story page names its author beside the save, outside
+  // the payload, so it never reaches Trace's API.
+  const ffnAuthorId =
+    hostKind === "ffn" &&
+    context === "story" &&
+    typeof message.ffnAuthorId === "string" &&
+    FFN_AUTHOR_ID_PATTERN.test(message.ffnAuthorId)
+      ? message.ffnAuthorId
+      : undefined;
+
   return Object.freeze({
     intent,
     hostKind,
@@ -118,5 +129,6 @@ export function storyTrackCommandFromMessage(
     payload,
     ...(progress === undefined ? {} : { progress }),
     ...(handoffId === undefined ? {} : { handoffId }),
+    ...(ffnAuthorId === undefined ? {} : { ffnAuthorId }),
   });
 }

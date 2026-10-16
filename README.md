@@ -17,7 +17,7 @@ repository rather than carrying a second copy of the extension.
 - Content scripts run only on supported AO3/FFN pages and Trace pages listed in the manifest.
 - Obvious AO3/FFN login/signup/auth pages are excluded in the manifest.
 - Collection and overlay scripts also disable themselves at runtime on login/signup/password pages and pages with unknown password forms. AO3's known header login form can appear on normal story/listing pages; Trace ignores only that header form so supported reading pages still work.
-- Network requests go through the extension background worker to Trace API endpoints.
+- Network requests go through the extension background worker to Trace API endpoints. The only other request it makes is the FanFiction.net summary read described under "What Trace Reads".
 
 If anything claiming to be Trace asks for your AO3 or FanFiction.net password, it is not legitimate.
 
@@ -33,6 +33,26 @@ On supported AO3 and FanFiction.net story/listing pages, Trace reads visible sto
 - on your own AO3 History page only: each work's "Last visited" date and visit count, so an import can keep when you last read it (works marked for later are left out)
 
 Trace uses this to import a story, update reading progress, show whether stories are already in your Trace library, let you change reading status from supported overlay surfaces, and hide works from Trace's browsing overlay when you explicitly choose to. Trace can also detect when the last lines of the last posted chapter have stayed on screen for a moment, so it can mark your library entry finished or caught up (with Undo), or ask whether the work is complete, ongoing, on hiatus, or abandoned when the site does not say. This uses only the page's layout and your scrolling on that page; it does not read or send story text.
+
+FanFiction.net's mobile story page has no summary. When you
+save a story from such a page, the page tells the extension the story's
+author (this stays in the extension and is not sent to Trace). Trace then
+reads that author's story list (`https://m.fanfiction.net/u/<author>/?a=s`)
+in your own browser and sends only the summary for that story. For your other
+saved FanFiction.net stories that Trace has no summary for, it does the same
+slowly while you browse FanFiction.net, first reading a story's own page for
+its author when that is not yet known. This uses only the website access you
+already gave Trace and follows the **Improve story details** preference. It
+makes one request at a time, reads page text only as far as it needs, keeps
+no page text or cache, opens no tab, reads only the first page of an author's
+stories, keeps requests for saves at least 30 seconds apart, and otherwise
+waits minutes between requests, makes only a few per browsing session, and
+runs only while you are on FanFiction.net. A story FanFiction.net says is gone
+is skipped, and the ids of up to 200 stories already tried are kept (and
+removed when you sign out) so each session tries others first. A check
+page, an unexpected address, a refusal or an error stops it until the browser
+next starts. The story and author ids still to
+read are kept in session-only storage and removed when you sign out.
 
 When you explicitly save an AO3 saved filter, Trace stores that AO3 filter query state in extension storage so it can reapply the filter later. If you are signed in to Trace, saved filters sync to your Trace account so they can appear on your other devices. Signed-out or offline saved filters remain local until a later signed-in sync.
 You can hide the saved filters surface from AO3 filter pages in the extension popup; this local preference does not delete saved presets.

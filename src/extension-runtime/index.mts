@@ -67,7 +67,7 @@ interface ExtensionApi {
   readonly action?: ActionPort;
   readonly runtime: RuntimePort;
   readonly alarms: AlarmsPort;
-  readonly storage: { readonly local: StorageArea; readonly onChanged?: { addListener(listener: (changes: Record<string, unknown>, area: string) => void): void } };
+  readonly storage: { readonly local: StorageArea; readonly session?: StorageArea; readonly onChanged?: { addListener(listener: (changes: Record<string, unknown>, area: string) => void): void } };
   readonly tabs: TabsPort;
   readonly permissions?: PermissionsPort;
   readonly scripting?: ScriptingPort;
@@ -251,6 +251,12 @@ try {
     webOrigin: __TRACE_WEB_ORIGIN__,
     randomId,
     archiveReadinessStatus,
+    // Missing FanFiction.net summaries are read from the story site in the
+    // reader's own browser, slowly (ffn-summary-fill.mts).
+    ffnSummaryFill: {
+      storySiteFetch: globalThis.fetch.bind(globalThis),
+      sessionArea: extension.storage.session ?? null,
+    },
   });
   if (
     // A build-time constant: a build without optional story sites leaves this

@@ -100,6 +100,7 @@ function createCollectorBindings(dom, options = {}) {
     traceRefreshPageTokens: globalScope.traceRefreshPageTokens,
     collect: globalScope.collect,
     sendCollectorMessage: globalScope.sendCollectorMessage,
+    withFfnAuthorHint: globalScope.withFfnAuthorHint,
     shouldDisableTraceContentScript: globalScope.shouldDisableTraceContentScript,
     collectAO3Work: globalScope.collectAO3Work,
     workSummaryBackfillWorkId: globalScope.workSummaryBackfillWorkId,

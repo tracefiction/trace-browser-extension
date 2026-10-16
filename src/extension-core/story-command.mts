@@ -54,6 +54,11 @@ export interface StoryTrackCommand {
     readonly total: number | null;
   }>;
   readonly handoffId?: string;
+  /**
+   * The story's author on FanFiction.net, as the story page linked it. Kept
+   * in the extension for reading a missing summary; never sent to Trace.
+   */
+  readonly ffnAuthorId?: string;
 }
 
 export interface ConfirmedStorySave {
@@ -61,6 +66,11 @@ export interface ConfirmedStorySave {
   readonly entryId: string;
   readonly entry: LibraryOverlayEntry;
   readonly syncVersion: string;
+  /**
+   * Whether the entry has a summary after a save whose page reported none,
+   * when Trace said so. Absent when not reported.
+   */
+  readonly summaryKnown?: boolean;
 }
 
 export type StoryCommandFailure =
