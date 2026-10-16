@@ -7764,6 +7764,25 @@ test("the manual-mode messages are answered only to the extension's own backgrou
   assert.deepEqual(plainJson(await normal.ask({ type: "TRACE_FIRST_TAP_COLLECT" })), { ok: false, error: "refused" });
 });
 
+test("the sheet's read of an FFN phone story page names the author beside the payload, so its summary is one request", async () => {
+  const h = createManualModeCollectorHarness(
+    "ffn_story_mobile.html",
+    "https://www.fanfiction.net/s/7038840/1/A-Chance-Encounter",
+  );
+  const collected = plainJson(await h.ask({ type: "TRACE_FIRST_TAP_COLLECT" }));
+  assert.equal(collected.ok, true);
+  assert.equal(collected.payload.item.src, "ffn");
+  assert.equal(collected.ffnAuthorId, "2329859");
+  assert.equal("ffnAuthorId" in collected.payload.item, false, "never inside what goes to Trace");
+
+  // A page that shows its summary needs no author.
+  const desktop = createManualModeCollectorHarness(
+    "ffn_story.html",
+    "https://www.fanfiction.net/s/7038840/1/A-Chance-Encounter",
+  );
+  assert.equal("ffnAuthorId" in plainJson(await desktop.ask({ type: "TRACE_FIRST_TAP_COLLECT" })), false);
+});
+
 test("a page with no readable story says so instead of handing over something else", async () => {
   for (const [url, html] of [
     ["https://archiveofourown.org/works/28534965", "<!doctype html><html><body><h2>Error 404</h2><p>The page you were looking for doesn't exist.</p></body></html>"],

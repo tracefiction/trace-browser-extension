@@ -267,10 +267,14 @@ export interface FirstTapPorts {
   /** Puts the page script into the tab, in manual mode. */
   inject(tabId: number): Promise<boolean>;
   collect(tabId: number): Promise<unknown>;
-  /** `beforeWrite` runs just before the write is handed to the network. */
+  /**
+   * `beforeWrite` runs just before the write is handed to the network.
+   * `tabId` is the story's tab, for anything read there after the save.
+   */
   save(
     command: StoryTrackCommand,
     observer: { beforeWrite(): Promise<void> },
+    tabId: number,
   ): Promise<StoryCommandEvidence>;
   presence(workKey: string): Promise<StoryPresence>;
   /**
@@ -995,9 +999,15 @@ export class FirstTapSave {
         record.persist = false;
         record.priorKnown = false;
       }
-      // The page's reply is checked exactly as a save it had sent itself.
+      // The page's reply is checked exactly as a save it had sent itself,
+      // with the FanFiction.net author it named beside the payload.
       const command = storyTrackCommandFromMessage(
-        { type: "TRACE_CONNECT_AND_SAVE", workKey: record.workKey, payload: collected.payload },
+        {
+          type: "TRACE_CONNECT_AND_SAVE",
+          workKey: record.workKey,
+          payload: collected.payload,
+          ...(typeof collected.ffnAuthorId === "string" ? { ffnAuthorId: collected.ffnAuthorId } : {}),
+        },
         { tab: { url: page.url }, url: page.url, frameId: 0 },
       );
       if (command === null || command.workKey !== record.workKey) {
@@ -1025,6 +1035,7 @@ export class FirstTapSave {
             await this.#persist(record);
           },
         },
+        page.tabId,
       );
       if (result.kind === "confirmed") {
         record.running = false;
