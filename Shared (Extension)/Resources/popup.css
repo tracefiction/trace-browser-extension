@@ -1021,6 +1021,17 @@ body[data-trace-first-tap-state] .popup-earned-fixed-pin .popup-earned-pin { bor
    in the sheet's own type, and left out at the largest text sizes, where the
    words carry it. */
 .popup-earned-prompt { margin: 12px 0 2px; }
+/* The ask's body with the picture beside it, so the ask and its button fit a
+   medium-height sheet whole. Where the words would be squeezed, the picture
+   goes under them instead. */
+.popup-earned-lead-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    column-gap: 16px;
+}
+.popup-earned-lead-row > .popup-probe-lead { flex: 1 1 8.5em; min-width: 0; }
+.popup-earned-lead-row > .popup-earned-prompt { flex: none; }
 .popup-earned-prompt[hidden],
 .popup-earned-text-ax .popup-earned-prompt { display: none; }
 .popup-earned-prompt-sheet {

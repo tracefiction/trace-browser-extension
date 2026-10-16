@@ -151,9 +151,14 @@ headline and body, a rule line above a button that leads to Safari's question,
 and at most two buttons. All of its words are in `FIRST_TAP_WORDS` in
 `popup.js`; the ones still to be reviewed are marked there.
 
-- A confirmed save is on show by itself for a moment, then the ask arrives
-  under it. Opening Trace never raises Safari's question; only the reader's
-  tap on the ask does.
+- A confirmed save, while the story sites are not allowed, is one line that
+  says so ("Saved to your Library"), and under it the ask is the sheet's
+  headline and body, with the picture of Safari's question beside the body.
+  Both arrive together in one cross-fade, so nothing moves when the ask comes.
+  On an iPhone-sized sheet at its first height and the default text size, the
+  line, the ask, the whole picture and both buttons fit without scrolling.
+  Opening Trace never raises Safari's question; only the reader's tap on the
+  ask does.
 - "Not allowed" and "could not ask" are one state for the reader. The save is
   kept and said to be, saving stays one tap away, and "Try again" goes back to
   the ask. Trace cannot tell a reader's "no" from Safari's, so it does not try

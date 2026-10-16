@@ -1253,10 +1253,19 @@ function setReaderImport(offered) {
   return !button.hidden || Boolean(link && !link.hidden) || !document.getElementById("popup-import-open-tabs")?.hidden;
 }
 
+/**
+ * What holds the body: the body itself, and beside it, where the ask shows
+ * it, the picture of Safari's question. Whatever comes after the body goes
+ * after this.
+ */
+function earnedLeadRow() {
+  return document.getElementById("popup-earned-lead-row") || document.getElementById("popup-earned-lead");
+}
+
 /** The record sits under the headline, or after the body where a state asks. */
 function placeEarnedRecord(afterBody) {
   const record = document.getElementById("popup-earned-record");
-  const anchor = document.getElementById(afterBody ? "popup-earned-lead" : "popup-earned-heading-row");
+  const anchor = afterBody ? earnedLeadRow() : document.getElementById("popup-earned-heading-row");
   if (record && anchor && anchor.nextElementSibling !== record) anchor.after(record);
 }
 
@@ -1419,7 +1428,7 @@ function setEarnedFailure(failure) {
     box = document.createElement("p");
     box.id = "popup-earned-failure";
     box.className = "popup-earned-failure";
-    const lead = document.getElementById("popup-earned-lead");
+    const lead = earnedLeadRow();
     scroll.insertBefore(box, lead ? lead.nextSibling : null);
   }
   if (!box) return;
@@ -2390,11 +2399,9 @@ let firstTapAnswerWait = null;
 // of it. Nothing is lost at the deadline: a request that comes back later, a
 // permission change, and the popup coming back into view are each still read.
 const FIRST_TAP_ASK_DEADLINE_MS = 60_000;
-// A confirmed save is on show by itself for this long before the ask for
-// lasting access arrives under it: one thing to read at a time.
-const FIRST_TAP_ASK_ARRIVES_MS = 1_100;
-let firstTapAskTimer = null;
-let firstTapAskArrived = false;
+// Whether this confirmed save has been drawn yet, so that its arrival plays
+// once: not again when Safari's question goes up, nor on coming back to it.
+let firstTapSavedDrawn = false;
 // What was last drawn, so that an arrival plays once and not on every redraw.
 let firstTapDrawn = null;
 let firstTapConfirmationDelivered = false;
@@ -2555,7 +2562,7 @@ function firstTapTextBox(name) {
 function firstTapAskBox(create) {
   let box = document.getElementById("popup-earned-ask");
   if (box || !create) return box;
-  const before = document.getElementById("popup-earned-note") || document.getElementById("popup-earned-lead");
+  const before = document.getElementById("popup-earned-note") || earnedLeadRow();
   if (!before) return null;
   box = firstTapTextBox("ask");
   // Focus is put here when the reader comes back to the ask.
@@ -2571,7 +2578,7 @@ function firstTapAskBox(create) {
 function firstTapNoteBox(create) {
   let box = document.getElementById("popup-earned-note");
   if (box || !create) return box;
-  const lead = document.getElementById("popup-earned-lead");
+  const lead = earnedLeadRow();
   if (!lead) return null;
   box = firstTapTextBox("note");
   const action = document.createElement("button");
@@ -2721,7 +2728,9 @@ function firstTapSaveKicker(view) {
  * record, news of the save with a quiet button of its own (`note`), a second
  * headline and body, the rule line for a tap that leads to Safari's question,
  * and up to two buttons. `record.heading` makes the story's title the
- * headline. What is read aloud is `announce`, or the headline and body.
+ * headline. `bodyMarkup` is a body with words in bold, and `prompt` puts the
+ * picture of Safari's question beside it, or under it on a narrow sheet. What is read aloud is `announce`,
+ * or the headline and body.
  */
 function drawFirstTapSheet(name, {
   kicker = "",
@@ -2730,6 +2739,8 @@ function drawFirstTapSheet(name, {
   glyph = "",
   glyphTone = "",
   body = "",
+  bodyMarkup = "",
+  prompt = false,
   record = null,
   recordAfterBody = false,
   note = null,
@@ -2753,6 +2764,7 @@ function drawFirstTapSheet(name, {
     glyphTone,
     heading,
     lead: body,
+    leadMarkup: bodyMarkup,
     record,
     ruleMarkup: rule
       ? (safariQuestionButtonsAreAllBlue() ? FIRST_TAP_WORDS.ruleEveryButtonBlue : FIRST_TAP_WORDS.rule)
@@ -2783,6 +2795,12 @@ function drawFirstTapSheet(name, {
       document.getElementById("popup-earned-primary")?.setAttribute("aria-describedby", "popup-earned-ask-body");
     }
   }
+  if (prompt) {
+    // The body says what to tap, the picture beside it shows it, and the main
+    // button is described by it.
+    showSafariPrompt(document.getElementById("popup-earned-lead"));
+    document.getElementById("popup-earned-primary")?.setAttribute("aria-describedby", "popup-earned-lead");
+  }
   const ruleEl = document.getElementById("popup-earned-rule");
   const primaryButton = document.getElementById("popup-earned-primary");
   if (rule) {
@@ -2798,22 +2816,13 @@ function drawFirstTapSheet(name, {
   clearFirstTapMotion();
   const section = document.getElementById("popup-earned-permission");
   const pin = document.getElementById("popup-earned-pin");
-  if (motion === "landed") {
-    playFirstTapMotion("popup-first-tap-fade", [
-      document.getElementById("popup-earned-kicker"),
-      section?.querySelector(".popup-earned-record-state"),
-    ]);
-  } else if (motion === "ask") {
-    playFirstTapMotion("popup-first-tap-rise", [askBox, pin, document.getElementById("popup-earned-scroll-actions")]);
-  } else if (motion === "settled") {
+  if (motion === "settled") {
     playFirstTapMotion("popup-first-tap-fade", [section?.querySelector(".popup-earned-scroll"), pin]);
   }
 }
 
 /** Leaves nothing of the first-tap sheet on a popup that has moved on from it. */
 function leaveFirstTapSheet() {
-  if (firstTapAskTimer !== null) clearTimeout(firstTapAskTimer);
-  firstTapAskTimer = null;
   firstTapDrawn = null;
   endFirstTapBusy();
   clearFirstTapMotion();
@@ -2930,18 +2939,17 @@ const firstTapButton = Object.freeze({
 });
 
 /**
- * A confirmed save: the confirmation, the story's record with its real
- * status, and then the ask for lasting access. The ask arrives a moment after
- * the save is shown; while Safari's question is up it stays, with its button
- * waiting.
+ * A confirmed save: one line that says so, and under it the ask for lasting
+ * access, which is the sheet's headline. Both arrive together, so nothing
+ * moves when the ask comes. While Safari's question is up it stays, with its
+ * button waiting.
  */
 function drawFirstTapConfirmed(view, { waiting = false } = {}) {
   const name = view.provenance === "saved_now" ? "saved"
     : view.provenance === "already" ? "already-in-library" : "in-library";
-  if (waiting) firstTapAskArrived = true;
-  const withAsk = firstTapAskArrived;
-  const record = firstTapRecord(view);
   const confirmation = firstTapSaveKicker(view);
+  const arriving = !firstTapSavedDrawn && !waiting;
+  firstTapSavedDrawn = true;
   if (!firstTapConfirmationDelivered) {
     firstTapConfirmationDelivered = true;
     void deliverFirstStoryConfirmation();
@@ -2949,25 +2957,19 @@ function drawFirstTapConfirmed(view, { waiting = false } = {}) {
   setEarnedCheck("popup-earned-save", "pass", "Saved", "Saved to Trace");
   drawFirstTapSheet(waiting ? "access-waiting" : name, {
     ...confirmation,
-    heading: record.title,
-    record: { ...record, title: "", heading: true },
-    ask: withAsk ? { heading: FIRST_TAP_WORDS.askHeading, body: FIRST_TAP_WORDS.askBody } : null,
-    primary: !withAsk ? { hidden: true } : waiting ? firstTapButton.waiting : firstTapButton.allow,
-    secondary: withAsk ? firstTapButton.notNow : null,
+    heading: FIRST_TAP_WORDS.askHeading,
+    bodyMarkup: FIRST_TAP_WORDS.askBody,
+    prompt: true,
+    primary: waiting ? firstTapButton.waiting : firstTapButton.allow,
+    secondary: firstTapButton.notNow,
     result: "success",
     announce: waiting
       ? firstTapSpoken(FIRST_TAP_WORDS.waitingForSafari)
-      : withAsk
-        ? `${firstTapSpoken(FIRST_TAP_WORDS.askHeading)} ${FIRST_TAP_WORDS.askBodySpoken}`
-        : `${firstTapSpoken(confirmation.kicker)} ${firstTapSpoken(record.spokenName)} ${record.spokenLabel}`,
-    motion: !withAsk ? "landed" : firstTapDrawn === name ? "ask" : "",
+      : `${firstTapSpoken(confirmation.kicker)} ${firstTapSpoken(FIRST_TAP_WORDS.askHeading)} ${FIRST_TAP_WORDS.askBodySpoken}`,
+    // The save lands and the ask comes with it in one cross-fade, in place:
+    // nothing slides, so nothing reaches past the sheet's foot as it comes.
+    motion: arriving ? "settled" : "",
   });
-  if (withAsk || firstTapAskTimer !== null) return;
-  firstTapAskTimer = setTimeout(() => {
-    firstTapAskTimer = null;
-    firstTapAskArrived = true;
-    if (firstTapLastView?.state === "confirmed" && !firstTapAccess && !firstTapSetAside) drawFirstTap();
-  }, FIRST_TAP_ASK_ARRIVES_MS);
 }
 
 /**
@@ -3134,10 +3136,8 @@ function renderFirstTapView(view, { waiting = false } = {}) {
   const story = firstTapStory;
   if (!view || !story) return;
   if (view.state !== "confirmed") {
-    // The ask follows a confirmed save, and arrives after each one afresh.
-    if (firstTapAskTimer !== null) clearTimeout(firstTapAskTimer);
-    firstTapAskTimer = null;
-    firstTapAskArrived = false;
+    // The ask comes with a confirmed save, and arrives with each one afresh.
+    firstTapSavedDrawn = false;
   }
   stopStoryConfirmation();
   const record = firstTapRecord(view);
@@ -5214,7 +5214,6 @@ function runEarnedAction(button) {
   }
   if (action === "first_tap_show_ask") {
     firstTapAccess = null;
-    firstTapAskArrived = true;
     drawFirstTap();
     // This button is now a different one. Focus goes to what was asked for.
     focusFirstTapAsk();

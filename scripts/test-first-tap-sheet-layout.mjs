@@ -9,6 +9,10 @@
 // drawn, "Save this story" must be the height it is on a sheet drawn at full
 // width from the start.
 //
+// After the save, on a sheet an iPhone 15's size at its first (medium) height,
+// the line that says it saved, the ask, the whole picture of Safari's
+// question and both buttons are on show without scrolling.
+//
 // TRACE_SHEET_LAYOUT_SHOTS=<directory> also saves a picture of each state.
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -181,10 +185,11 @@ async function run(engine) {
     assert.equal((await fresh.measure()).state, "saving", engine);
     await fresh.shot(`${engine}-4-SH1-saving`);
     await fresh.emit({ view: { state: "confirmed", workKey: WORK_KEY, provenance: "saved_now", mode: "bounded_manual", story: STORY, entry: ENTRY } });
-    await fresh.page.waitForTimeout(1_800);
+    await fresh.page.waitForTimeout(800);
     const saved = await fresh.measure();
     assert.equal(saved.state, "saved", engine);
-    assert.equal(saved.button.label, "Allow AO3 and FanFiction.net", `${engine}: then the ask`);
+    assert.equal(saved.heading, "Let Trace save stories automatically", `${engine}: the ask comes with the save`);
+    assert.equal(saved.button.label, "Allow AO3 and FanFiction.net", engine);
     await fresh.shot(`${engine}-5-SH2-saved-then-ask`);
     // Opened again on the same story by the same sheet: never the offer again.
     await fresh.emit({ view: OFFER });
@@ -208,10 +213,40 @@ async function run(engine) {
     await unanswered.shot(`${engine}-7-SH13b-tap-unanswered`);
     await unanswered.page.close();
 
+    // The save and its ask on an iPhone 15's sheet at its first height: no scrolling.
+    for (const width of [393, 375]) {
+      const small = await openSheet(browser, { width, height: 376 });
+      await small.emit({ view: OFFER });
+      await settle(small.page);
+      await small.page.locator("#popup-earned-primary").tap();
+      await settle(small.page);
+      const asked = await small.page.evaluate(() => window.__sent.at(-1).look);
+      await small.emit({ view: { state: "saving", workKey: WORK_KEY, startedAt: 0, story: STORY }, answered: asked });
+      await small.emit({ view: { state: "confirmed", workKey: WORK_KEY, provenance: "saved_now", mode: "bounded_manual", story: STORY, entry: ENTRY } });
+      // Measured at rest, once the arrival has faded in.
+      await small.page.waitForFunction(() => document.getAnimations().every((motion) => motion.playState !== "running"));
+      const fit = await small.page.evaluate(() => {
+        const box = (id) => document.getElementById(id).getBoundingClientRect();
+        return {
+          overflow: document.scrollingElement.scrollHeight - window.innerHeight,
+          height: window.innerHeight,
+          kicker: box("popup-earned-kicker"), picture: box("popup-earned-prompt"),
+          primary: box("popup-earned-primary"), secondary: box("popup-earned-secondary"),
+        };
+      });
+      assert.ok(fit.overflow <= 0, `${engine} ${width}: nothing to scroll (${fit.overflow}px over)`);
+      assert.ok(fit.kicker.top >= 0 && fit.picture.height > 100, `${engine} ${width}: the save's line and the whole picture`);
+      assert.ok(fit.picture.bottom <= fit.primary.top, `${engine} ${width}: the picture ends above the button`);
+      assert.ok(fit.primary.bottom <= fit.secondary.top && fit.secondary.bottom <= fit.height, `${engine} ${width}: Allow, then Not now, on the sheet`);
+      if (width === 393) await small.shot(`${engine}-5b-SH2-saved-and-ask-iphone-15-medium`);
+      assert.deepEqual(small.errors, [], engine);
+      await small.page.close();
+    }
+
     // Opened on a story already in the Library.
     const already = await openSheet(browser);
     await already.emit({ view: { state: "confirmed", workKey: WORK_KEY, provenance: "already", mode: null, story: STORY, entry: ENTRY } });
-    await already.page.waitForTimeout(1_800);
+    await already.page.waitForTimeout(800);
     const there = await already.measure();
     assert.equal(there.state, "already-in-library", engine);
     assert.equal(await already.page.evaluate(() => document.getElementById("popup-earned-kicker").textContent.trim()), "Already in your Library");
