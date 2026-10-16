@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 const read = (path) => fs.readFileSync(path, 'utf8');
+const IMPORT_CONTRACT = 'trace-native-library-import-v1';
 function build(extra = {}) {
   return spawnSync(process.execPath, ['scripts/build.mjs'], { encoding: 'utf8', env: {
     ...process.env, TRACE_BUILD_MODE: 'release', TRACE_SESSION_MODE: 'kernel',
@@ -53,7 +54,18 @@ test('native Import needs the exact paired package opt-in; ordinary generated pa
     assert.match(route, /#else\s+return failure\("unsupported"\)/);
     assert.doesNotMatch(route, /UserDefaults|os_log|print\(/);
   } finally {
-    const restored = build();
+    // Restore the committed iPhone release package, which opts in.
+    const restored = build({ TRACE_NATIVE_IMPORT_CONTRACT: IMPORT_CONTRACT });
     assert.equal(restored.status, 0, restored.stderr);
   }
+});
+
+test('the committed iOS release package opts in to native Import', () => {
+  const pkg = JSON.parse(read('package.json'));
+  assert.match(pkg.scripts['build:ios-earned-permission-onboarding:release'],
+    new RegExp(`(^|\\s)TRACE_NATIVE_IMPORT_CONTRACT=${IMPORT_CONTRACT}(\\s|$)`));
+  const committed = execFileSync('git', ['show', 'HEAD:Shared (Extension)/Resources/background.js'],
+    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  assert.match(committed, /nativeImportHandoff: true/);
+  assert.doesNotMatch(committed, /nativeImportHandoff: false/);
 });
