@@ -16,6 +16,12 @@ chapter 2+ page with a chapter summary, the Entire Work view and a one-shot)
 for the work-summary selector tests. They use a public-domain fandom, invented
 titles and original prose; they are not snapshots of live pages.
 
+`ao3-author/` holds synthetic AO3-shaped pages for the author selector tests:
+an anonymous work page with comments and a translation link open, a
+co-authored work page (one creator shown as a pseud), and a bookmarks page with
+an anonymous and a co-authored gift work. Invented titles and names; not
+snapshots of live pages.
+
 `ao3_adult_content_notice.html` is a synthetic AO3-shaped page for the notice
 AO3 shows before a work that may have adult content: the caution, its
 choices, and a summary of the work where the story will be. Invented title and

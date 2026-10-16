@@ -410,6 +410,40 @@ test("work summary backfill fails silently when the request throws", async () =>
   assert.equal(h.sent.filter((m) => m && m.type === "TRACE_METADATA_BROADCAST").length, 0);
 });
 
+function authorFixtureDom(name, url) {
+  return domFromFixture(path.join("ao3-author", name), url);
+}
+
+test("collectAO3Work gives an anonymous work no author, never a commenter or translator", () => {
+  const dom = authorFixtureDom("anonymous-work-comments.html", "https://archiveofourown.org/works/41000010");
+  const item = createCollectorBindings(dom).collectAO3Work();
+  assert.equal(item.t, "The Lamplighter's Ledger");
+  assert.equal(item.a, null, "the plain-text Anonymous byline has no author link");
+});
+
+test("collectAO3Work reads the first creator of a co-authored work, including a pseud", () => {
+  const dom = authorFixtureDom("co-authored-work.html", "https://archiveofourown.org/works/41000012");
+  assert.equal(createCollectorBindings(dom).collectAO3Work().a, "Quill Fennimore");
+});
+
+test("AO3 bookmark blurbs never report the bookmarker or a gift recipient as the author", () => {
+  const dom = authorFixtureDom("anonymous-bookmarks.html", "https://archiveofourown.org/users/Ink_Reader_Test/bookmarks");
+  const items = plainJson(createCollectorBindings(dom).collect().items);
+  const anonymous = items.find((i) => i.u.includes("/works/41000011"));
+  const coAuthored = items.find((i) => i.u.includes("/works/41000012"));
+  assert.equal(anonymous.ctx, "bookmark");
+  assert.equal(anonymous.a, null);
+  assert.equal(coAuthored.a, "Quill Fennimore");
+  assert.ok(items.every((i) => i.a !== "Ink_Reader_Test" && i.a !== "Hollis_Wren"));
+});
+
+test("existing AO3 bookmark fixture keeps blurb authors, not the bookmarker", () => {
+  const dom = domFromFixture("ao3_bookmarks.html", "https://archiveofourown.org/users/Ink_Reader_Test/bookmarks");
+  const items = plainJson(createCollectorBindings(dom).collect().items);
+  assert.ok(items.length > 0);
+  assert.ok(items.every((i) => i.a !== "Whimsy_FF"));
+});
+
 test("collectAO3Work emits current chapter URL without query or hash", () => {
   const dom = domFromFixture(
     "ao3_story.html",
