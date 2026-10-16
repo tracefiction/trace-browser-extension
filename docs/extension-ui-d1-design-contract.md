@@ -109,16 +109,16 @@ and Settings row.
 
 | State | Heading or record | Actions |
 | --- | --- | --- |
-| P1 Saving | Saving your story… | Raised Keep reading |
+| P1 Saving | Saving this story… | Raised Keep reading |
 | P2 Saved | Story title, byline, Saved record | Raised Keep reading |
 | P2 Saved, title not read yet | Saved to your Library, with an ink check; site and Saved record | Raised Keep reading |
 | P3 More access | Next, tap **Always Allow**. | Filled Allow story sites |
 | P3 lapse | Next, tap **Always Allow**. | Filled Allow story sites |
 | P4 Safari prompt | Tap **Always Allow**, not the blue button. | Disabled Waiting for Safari… |
-| P5 Delayed | Still confirming your story | Raised Keep reading; text Check again |
+| P5 Delayed | Still saving… | Raised Keep reading; text Check again |
 | P6 No account | Finish setup in the Trace app | Filled Open Trace |
 | P7 Denied | Nothing was saved | Filled Try again; text Not now |
-| P8 No story open | Open any story | None |
+| P8 No story open | Open a story to save it | None |
 | P9 Unavailable | This story isn’t available | Text Close |
 | P10 Tracking off | Automatic saving is off; unsaved story record | Filled Save this story; text Turn automatic saving on |
 | P10 saving | As P10 | Disabled Saving…; text Turn automatic saving on |
@@ -179,7 +179,7 @@ The other-account state never names either account and never claims a save.
 A failed P10 save states what didn't happen; the button never quietly
 re-enables. While the session hands over, a story the last page sync already
 listed in the Library shows its record with “Checking your Library…”, not
-“Saving your story…”.
+“Saving this story…”.
 
 P2 has no Open Trace app action. P11 has no Open Trace app or Import action.
 The status menu is Saved, Reading, Caught up, Paused, Finished, Dropped. It

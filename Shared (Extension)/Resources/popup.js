@@ -1148,14 +1148,14 @@ function storyNameForAnnouncement() {
 
 function earnedAnnouncementForState(code, heading, detail) {
   switch (code) {
-    case "P1": return "Trace is on this story. Saving your story. Keep reading; a note appears on the page when it’s saved.";
+    case "P1": return "Saving this story. Keep reading. You’ll see a note on the page once it’s saved.";
     case "P2": {
       const already = heading.startsWith("Already");
       const name = storyNameForAnnouncement();
       const said = `${already ? "Already in your Library" : "Saved to your Library"}${name ? `: ${name}` : ""}.`;
-      return already ? said : `${said} Your chapter fills in as you read.`;
+      return already ? said : `${said} Trace keeps your place as you read.`;
     }
-    case "P5": return "Still confirming your story. Keep reading; it’ll appear in Trace. If it hasn’t after a minute, reload this page.";
+    case "P5": return "Still saving. Keep reading. If it’s not in your Library in a minute, reload this page.";
     case "P6": return "Finish setup in the Trace app. Create an account or sign in, then come back.";
     case "connecting-account": return "Connecting to your account.";
     case "account-unreachable": return "Trace couldn’t connect to your account. Open Trace, then come back.";
@@ -1532,13 +1532,13 @@ async function reloadEarnedStory() {
       stateCode: "reload",
       glyph: "alert",
       glyphTone: "warning",
-      heading: "Reload this page to keep going",
-      lead: "Trace couldn’t reload this tab. Reload the page, then return to the Trace app. Nothing was saved yet.",
+      heading: "Reload this page",
+      lead: "Trace couldn’t reload it for you. Reload the page to save this story. Nothing is saved yet.",
     });
     setEarnedResult(
       "failure",
-      "Reload this page to keep going.",
-      "Nothing was saved yet.",
+      "Reload this page.",
+      "Trace couldn’t reload it for you. Reload the page to save this story. Nothing is saved yet.",
     );
     configureEarnedActions({
       label: "Try again",
@@ -1669,15 +1669,15 @@ function renderEarnedAccessPending(story) {
   leaveFirstTapSheet();
   setEarnedCopy({
     stateCode: "P1",
-    kicker: "Trace is on this story",
+    kicker: FIRST_TAP_WORDS.allowedKicker,
     kickerIcon: "check",
-    heading: "Saving your story…",
-    lead: "Keep reading. A note appears on the page when it’s saved.",
+    heading: "Saving this story…",
+    lead: "Keep reading. You’ll see a note on the page once it’s saved.",
   });
   setEarnedCheck("popup-earned-story", "pass", story.site, "Story page");
   setEarnedCheck("popup-earned-access", "pass", "Allowed", "Website access");
   setEarnedCheck("popup-earned-save", "checking", "Reloading", "Saved to Trace");
-  setEarnedResult("checking", "Saving your story.", "Keep reading; a note appears on the page when it’s saved.");
+  setEarnedResult("checking", "Saving this story.", "Keep reading. You’ll see a note on the page once it’s saved.");
   configureEarnedActions({ label: "Keep reading", action: "close", emphasis: "secondary" });
 }
 
@@ -1691,7 +1691,7 @@ function renderEarnedAskWaiting() {
 function renderEarnedPartialAccess() {
   drawEarnedAsk("access-partial", {
     heading: FIRST_TAP_WORDS.partialHeading,
-    body: firstTapCounted(FIRST_TAP_WORDS.partialBody),
+    body: FIRST_TAP_WORDS.partialBody,
     rule: true,
     primary: earnedAllow(),
     secondary: firstTapButton.notNow,
@@ -1815,7 +1815,7 @@ function renderEarnedSaved(story, work, identity, alreadyInLibrary = false, conf
   const confirmation = confirmationText ??
     (alreadyInLibrary ? "Already in your Library" : "Saved to your Library");
   const title = storyTitle(identity);
-  const lead = "Your chapter fills in as you read. Your story is waiting in Trace whenever you open it.";
+  const lead = "Trace keeps your place as you read. Find it in your Library in the Trace app.";
   if (title) {
     setEarnedCopy({
       stateCode: "P2",
@@ -1839,18 +1839,18 @@ function renderEarnedSaved(story, work, identity, alreadyInLibrary = false, conf
     lookUpSavedTitle(story, work, alreadyInLibrary);
   }
   setEarnedCheck("popup-earned-save", "pass", "Saved", "Saved to Trace");
-  setEarnedResult("success", `${confirmation}.`, "Your chapter fills in as you read.");
+  setEarnedResult("success", `${confirmation}.`, "Trace keeps your place as you read.");
   configureEarnedActions({ label: "Keep reading", action: "close", emphasis: "secondary" });
 }
 
 function renderEarnedDelayed(story) {
   setEarnedCopy({
     stateCode: "P5",
-    heading: "Still confirming your story",
-    lead: "Keep reading; it’ll appear in Trace. If it hasn’t after a minute, reload this page.",
+    heading: "Still saving…",
+    lead: "Keep reading. If it’s not in your Library in a minute, reload this page.",
   });
-  setEarnedResult("checking", "Still confirming your story.",
-    "Keep reading; it’ll appear in Trace. If it hasn’t after a minute, reload this page.");
+  setEarnedResult("checking", "Still saving.",
+    "Keep reading. If it’s not in your Library in a minute, reload this page.");
   configureEarnedActions(
     { label: "Keep reading", action: "close", emphasis: "secondary" },
     { label: "Check again", action: "check_story", emphasis: "tertiary" },
@@ -2302,7 +2302,7 @@ function earnedWorkKey(rawUrl) {
 
 /**
  * Whether the last page sync already listed this story in the Library. It
- * only chooses between "Saving your story…" and a neutral "Checking your
+ * only chooses between "Saving this story…" and a neutral "Checking your
  * Library…" during session handover; it is never described as a save.
  */
 async function readKnownInLibrary(rawUrl) {
@@ -2406,18 +2406,17 @@ let firstTapSavedDrawn = false;
 let firstTapDrawn = null;
 let firstTapConfirmationDelivered = false;
 
-// Every word the first-tap sheet shows. `{count}` is the number of story-site
-// addresses this build asks Safari for. Nothing here says how long access
+// Every word the first-tap sheet shows. Nothing here says how long access
 // lasts, and nothing sends the reader to Safari's settings to check it.
 const FIRST_TAP_WORDS = Object.freeze({
   storyStandIn: "This story",
   connecting: "Connecting to your account…",
-  accountMissingHeading: "Trace couldn’t connect to your account",
-  accountMissingBody: "Trace in Safari doesn’t have your account yet. Open the Trace app, then come back and tap Trace again.",
+  accountMissingHeading: "Open the Trace app first",
+  accountMissingBody: "Safari doesn’t have your Trace sign-in yet. Open the Trace app, then come back and tap Trace again.",
   accountUnreachableHeading: "Trace can’t reach your account right now",
   accountUnreachableBody: "Check your connection, then try again.",
-  reconnectHeading: "Open the Trace app to reconnect",
-  reconnectBody: "Trace in Safari needs your account again. Open the Trace app, then come back and tap Trace again.",
+  reconnectHeading: "Sign in again in the Trace app",
+  reconnectBody: "Your Trace sign-in in Safari has expired. Open the Trace app, then come back and tap Trace again.",
   saveThisStory: "Save this story",
   automaticSavingOffHeading: "Automatic saving is off",
   turnAutomaticSavingOn: "Turn automatic saving on",
@@ -2454,13 +2453,13 @@ const FIRST_TAP_WORDS = Object.freeze({
   notInLibraryBody: "Trace checked and didn’t find it.",
   refusedHeading: "Trace couldn’t save this story",
   refusedBody: "It wasn’t added to your Library. Try again in a moment.",
-  allowedKicker: "Allowed on AO3 and FanFiction.net",
-  allowedHeading: "That’s it. Keep reading.",
-  allowedBody: "Trace saves the stories you open there and keeps your place. Your Library is in the Trace app.",
+  allowedKicker: "AO3 and FanFiction.net allowed",
+  allowedHeading: "Trace now saves as you read",
+  allowedBody: "Any story you open on AO3 or FanFiction.net is saved, with the chapter you’re on. Find them in the Trace app.",
   allowedOffHeading: "Automatic saving is off",
-  allowedOffBody: "Trace in Safari is set to save stories only when you ask.",
-  registrationFailedHeading: "Trace couldn’t finish turning on automatic saving",
-  registrationFailedBody: "Safari allowed AO3 and FanFiction.net, but Trace’s part didn’t start.",
+  allowedOffBody: "Right now Trace only saves a story when you tap Save this story.",
+  registrationFailedHeading: "Automatic saving didn’t start",
+  registrationFailedBody: "Safari said yes, but Trace couldn’t start saving. Try again.",
   notAllowedHeading: "Trace will save when you tap it",
   notAllowedBody: "To save another story, open Trace from the Page Menu on it. You can let it save by itself any time.",
   // With automatic saving off, opening Trace on a story does not save it.
@@ -2469,12 +2468,12 @@ const FIRST_TAP_WORDS = Object.freeze({
   // Opened on a list or a site's home page, before the story sites are allowed.
   listAskHeading: "Let Trace save stories as you read",
   listAskBody: "This page isn’t a story. Allow AO3 and FanFiction.net, then open any story and Trace saves it.",
-  listReadyHeading: "Open any story to save it",
-  listReadyBody: "Trace saves it as it opens.",
-  partialHeading: "Safari allowed only some addresses",
-  partialBody: "Trace needs all {count} of AO3 and FanFiction.net’s addresses to save by itself.",
-  notKnownHeading: "Trace couldn’t check with Safari",
-  notKnownBody: "AO3 and FanFiction.net may be allowed already. Check again, or ask once more.",
+  listReadyHeading: "Open a story to save it",
+  listReadyBody: "Trace saves any story you open on AO3 or FanFiction.net.",
+  partialHeading: "Safari didn’t allow every page",
+  partialBody: "Tap Allow again and choose Always Allow, so Trace can save on every AO3 and FanFiction.net page.",
+  notKnownHeading: "Trace couldn’t tell what you chose",
+  notKnownBody: "You may have allowed AO3 and FanFiction.net already. Tap Check again, or Allow to ask again.",
 });
 
 /** Sends a request over the port. False when there is no port, or it would not take it. */
@@ -2504,11 +2503,6 @@ function firstTapTabIsPrivate(tab) {
 
 function setFirstTapState(name) {
   document.body.dataset.traceFirstTapState = name;
-}
-
-/** The words with the build's own count of story-site addresses in them. */
-function firstTapCounted(words) {
-  return words.replace("{count}", String(earnedOrigins().length));
 }
 
 /** A line as it is read aloud: a full stop, and no trailing ellipsis. */
@@ -3069,7 +3063,7 @@ function renderFirstTapAccess(access, view) {
       drawFirstTapSheet("access-partial", {
         ...confirmation,
         heading: FIRST_TAP_WORDS.partialHeading,
-        body: firstTapCounted(FIRST_TAP_WORDS.partialBody),
+        body: FIRST_TAP_WORDS.partialBody,
         rule: true,
         primary: firstTapButton.allow,
         secondary: firstTapButton.notNow,
@@ -3794,7 +3788,7 @@ function sendFirstTapSave(look) {
 }
 
 /**
- * After the reload, "Saving your story…" waits for the page to report in.
+ * After the reload, "Saving this story…" waits for the page to report in.
  * A page that never does (Safari did not run Trace on it, or the background
  * missed it) does not hold the sheet: after the popup's usual patience it
  * says the story is still being confirmed, and Check again looks.
