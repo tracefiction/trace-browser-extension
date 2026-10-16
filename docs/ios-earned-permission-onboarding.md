@@ -344,8 +344,10 @@ the earlier shape instead: the story sites and Trace's website required,
 `tabs`, and three manifest-declared scripts that stay inert until the five
 patterns are allowed.
 
-The script pins both production origins and writes the public extension
-resources consumed by Safari. The private Apple client separately verifies
+The script pins both production origins, opts in to the native Library Import
+handoff (`TRACE_NATIVE_IMPORT_CONTRACT=trace-native-library-import-v1`, so the
+background carries `nativeImportHandoff: true`), and writes the public extension
+resources consumed by Safari. The committed resources are this build's output. The private Apple client separately verifies
 that its Xcode target and native Settings bridge use
 `com.tracefiction.trace.extension`, and verifies the archived app against this
 exact public source revision.
