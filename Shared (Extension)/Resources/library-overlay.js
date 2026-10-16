@@ -1211,7 +1211,7 @@ function traceRefreshPageTokens() {
     var row = anchor.closest('li.work.blurb, li.work[id^="work_"], .work.blurb');
     if (!row) return null;
     var title = (anchor.textContent || "").trim();
-    var authorEl = row.querySelector('a[rel="author"]');
+    var authorEl = row.querySelector('h4.heading a[rel="author"]');
     var author = authorEl ? (authorEl.textContent || "").trim() : null;
     var ratingEl = row.querySelector(".required-tags .rating");
     var rating = ratingEl

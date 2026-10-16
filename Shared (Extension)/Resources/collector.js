@@ -2708,7 +2708,10 @@ function collectAO3Work() {
   const ddTags = (sel) => dedup(qsa(meta, sel + " a.tag").map(txt).filter(Boolean));
 
   let title = txt(one(document, "h2.title.heading")) || txt(one(document, "#workskin h2.title")) || txt(one(document, "h2.title")) || "";
-  const author = txt(one(document, 'a[rel="author"], .byline a'));
+  // Only the work's own byline (h3) names its creators. Comment headings,
+  // translation/inspiration links and bookmarkers name other people, and an
+  // anonymous work's byline is plain text, so it yields no author.
+  const author = txt(one(document, 'h3.byline a[rel="author"]'));
   const ratingEl = one(document, ".required-tags .rating");
   const rating =
     (ratingEl && ratingEl.getAttribute("title")) ||
@@ -2806,7 +2809,9 @@ function collectAO3Work() {
 function extractAO3BlurbData(row, id, ctx) {
   const titleA = one(row, 'h4.heading a[href*="/works/"]');
   const title = txt(titleA) || "";
-  const author = txt(one(row, 'a[rel="author"], .byline a'));
+  // The blurb heading names the work's creators; "Bookmarked by" and gift
+  // recipients are other people. An anonymous work has no author link.
+  const author = txt(one(row, 'h4.heading a[rel="author"]'));
   const rating = (one(row, ".required-tags .rating")?.getAttribute("title")) || txt(one(row, ".required-tags .rating .text")) || null;
 
   const status = (() => {
