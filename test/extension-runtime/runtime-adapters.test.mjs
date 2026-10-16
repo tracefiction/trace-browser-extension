@@ -2681,3 +2681,38 @@ test("a page's save is stamped with the mode the background established, and one
   assert.equal(plain.writes().length, 1);
 });
 
+
+test("what is kept for an account is cleared when it signs out or the app's account changes, not when it is first read", async () => {
+  const area = new PromiseStorageArea();
+  let accountID = "account-a";
+  const controller = installTestRuntime({
+    mode: "kernel", storageArea: area, storageMode: "promise",
+    apiBase: "https://api.tracefiction.com", webOrigin: "https://www.tracefiction.com",
+    randomId: () => "account-leaves-test-credential",
+    runtime: {
+      onMessage: { addListener() {} },
+      async getPlatformInfo() { return { os: "ios" }; },
+      async sendNativeMessage(message) {
+        if (message.type === "TRACE_IOS_AUTH_TOKEN_REQUEST") return nativeCredentialResponse(`${accountID}-token`);
+        return { ok: true };
+      },
+    },
+    tabs: { async query() { return []; }, async sendMessage() {} },
+    fetch: async (url) => new Response(JSON.stringify(url.endsWith("/account")
+      ? { account_id: accountID } : { success: true, data: {} }), { status: 200 }),
+  });
+  let left = 0;
+  controller.whenAccountLeaves(async () => { left += 1; });
+  assert.equal((await controller.accountForThisOpen()).state, "verified");
+  assert.equal(left, 0, "signing in from nothing clears nothing");
+
+  accountID = "account-b";
+  await controller.handle({ type: "TRACE_SESSION_SNAPSHOT" }, popupSender);
+  await controller.accountForThisOpen();
+  assert.equal(controller.publicationScope()?.accountId, "account-b");
+  assert.equal(left, 1, "another account in the app");
+
+  await controller.handle({ type: "TRACE_SESSION_ACTION", action: "disconnect" }, popupSender);
+  assert.equal(controller.snapshot().state, "signed_out");
+  assert.ok(left >= 2, "and sign-out");
+});

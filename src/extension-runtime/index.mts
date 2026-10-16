@@ -38,6 +38,7 @@ import type {
 } from "./browser-platform.mjs";
 import { BrowserStorage } from "./browser-platform.mjs";
 import { BrowserArchiveReadinessStatus } from "./archive-readiness-status.mjs";
+import { NativeStorySaveReceiptPort } from "./browser-adapters.mjs";
 
 declare const __TRACE_SESSION_MODE__: SessionMode;
 declare const __TRACE_API_BASE__: string;
@@ -286,6 +287,9 @@ try {
       // After Always Allow the registration runs on Safari's word of the new
       // access; what the sheet reads waits for it rather than racing it.
       ...(sheetRegistrationSettled ? { registrationSettled: sheetRegistrationSettled } : {}),
+      // The setup the Trace app has under way, as a save reads it.
+      setupAttempt: (accountId) =>
+        new NativeStorySaveReceiptPort(extension.runtime, storageMode, __TRACE_API_BASE__).prepareSaveReceipt(accountId),
     });
   }
   extension.storage.onChanged?.addListener((changes, area) => {

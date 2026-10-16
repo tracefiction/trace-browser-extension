@@ -56,6 +56,9 @@ function install({
     saveEnds: "confirmed",
     /** Trace's answer to the exact-story read: a status and a body. */
     membership: { status: 200, body: { success: true, data: { work_key: WORK_KEY, membership: "absent" } } },
+    /** The app's PREPARE context for the setup under way, and Trace's status for a setup step. */
+    setupAttempt: null,
+    setupStatus: 200,
     // `page` is the page script in the tab: none, one in manual mode, or one
     // running as on any story page.
     tabs: {
@@ -64,15 +67,15 @@ function install({
       11: { id: 11, url: "https://example.com/", page: null },
     },
   };
-  const calls = { injections: [], tabMessages: [], saves: [], presence: [], requests: [], store: {}, queries: [], reloads: [] };
+  const calls = { injections: [], tabMessages: [], saves: [], presence: [], requests: [], store: {}, queries: [], reloads: [], setupRequests: [], accountCleanups: [] };
   const worker = () => {
     let connect = null;
     let admission = null;
-    let pageMessage = null;
+    const messageListeners = [];
     const runtime = {
       id: "trace-test",
       onConnect: { addListener(fn) { connect = fn; } },
-      onMessage: { addListener(fn) { pageMessage = fn; } },
+      onMessage: { addListener(fn) { messageListeners.push(fn); } },
     };
     const afterScriptsRegistered = installFirstTapSave({
       runtime,
@@ -164,9 +167,14 @@ function install({
         },
         async storyPresence(workKey) { calls.presence.push(workKey); return { kind: "unknown" }; },
         attachStoryAdmission(hooks) { admission = hooks; },
+        whenAccountLeaves(cleanup) { calls.accountCleanups.push(cleanup); },
       },
       // Trace's service, stood in for: no request leaves these tests.
       async fetch(url, init) {
+        if (String(url).endsWith("/api/extension/setup-milestones")) {
+          calls.setupRequests.push({ authorization: init.headers.Authorization, body: JSON.parse(init.body) });
+          return new Response(JSON.stringify({ accepted: true, duplicate: false }), { status: state.setupStatus });
+        }
         calls.requests.push({ url: String(url), method: init.method, authorization: init.headers.Authorization });
         if (state.membership instanceof Error) throw state.membership;
         return new Response(JSON.stringify(state.membership.body), { status: state.membership.status });
@@ -176,6 +184,11 @@ function install({
       ...(crypto === null ? {} : { crypto }),
       accessSettleDelaysMs: settleDelays,
       ...(registrationSettled === null ? {} : { registrationSettled: () => registrationSettled(state) }),
+      // The Trace app's setup under way: none unless a test gives one.
+      async setupAttempt(accountId) {
+        calls.setupPrepares = (calls.setupPrepares ?? 0) + 1;
+        return accountId === state.accountId ? state.setupAttempt ?? undefined : undefined;
+      },
     });
     const openPort = (sender = { id: "trace-test", url: "safari-web-extension://trace-test/popup.html" }, name = "trace-first-tap-popup-v1") => {
       const messages = [];
@@ -199,7 +212,10 @@ function install({
     };
     /** A page script's own message to the background, and its answer. */
     const fromPage = (message, sender) => new Promise((resolve) => {
-      if (pageMessage(message, sender, resolve) !== true) resolve(undefined);
+      let answered = false;
+      const respond = (value) => { if (!answered) { answered = true; resolve(value); } };
+      const pending = messageListeners.map((listener) => listener(message, sender, respond));
+      if (!pending.includes(true)) respond(undefined);
     });
     return { openPort, fromPage, admission: () => admission, afterScriptsRegistered };
   };
@@ -1019,4 +1035,105 @@ test("Check again sent over a new port right behind its open asks Trace about th
   assert.ok(answer, "the look is answered under its number");
   assert.notEqual(answer.view.state, "presence_unknown", "and is about the story the open found");
   assert.equal(h.calls.requests.length, 1, "Trace was asked");
+});
+
+// --- Setup steps for the Trace app's setup under way --------------------------
+
+const SETUP_ATTEMPT = "b7c2328b-0738-4389-8ec7-31f51783210e";
+const NOW = 1_800_000_000_000;
+const setupUnderWay = (h) => {
+  h.state.setupAttempt = { setupAttemptID: SETUP_ATTEMPT, setupAttemptExpiresAt: NOW + 3_600_000 };
+};
+const reported = (h) => h.calls.setupRequests.map(({ body }) => `${body.milestone}/${body.outcome}/${body.evidence_source}`);
+
+test("setup steps: what came of the ask is reported as the reader's answer, and a look with nothing asked is not", async () => {
+  const cases = [
+    [{ granted: true, registered: REGISTERED }, "access_answered", { returned: true }, "confirmed/extension_permission_granted"],
+    [{}, "access_answered", { returned: false }, "failed/extension_permission_declined"],
+    [{ listed: FIVE.slice(0, 2) }, "access_answered", { returned: true }, "failed/extension_permission_partial"],
+    [{}, "access_answered", { returned: undefined }, "unknown/extension_permission_unanswered"],
+    [{}, "access_answered", { threw: true }, "unknown/extension_permission_unanswered"],
+    [{}, "access_unanswered", {}, "unknown/extension_permission_unanswered"],
+    [{ granted: true, registered: REGISTERED }, "access_waiting", {}, "confirmed/extension_permission_granted"],
+  ];
+  for (const [given, command, detail, expected] of cases) {
+    const { h, port } = await savedSheet();
+    setupUnderWay(h);
+    Object.assign(h.state, given);
+    port.send(command, detail);
+    await turns();
+    assert.deepEqual(reported(h), [`safari_access_answered/${expected}`], `${command} ${JSON.stringify(detail)}`);
+    assert.deepEqual(h.calls.setupRequests[0].body.attempt_id, SETUP_ATTEMPT);
+    assert.equal(h.calls.setupRequests[0].authorization, "Bearer device-credential");
+  }
+
+  for (const command of ["access_check", "access_waiting", "access_asking"]) {
+    const { h, port } = await savedSheet();
+    setupUnderWay(h);
+    port.send(command);
+    await turns();
+    assert.deepEqual(h.calls.setupRequests, [], `${command} is no answer`);
+  }
+});
+
+test("setup steps: with no setup under way, or no account, the ask reports nothing", async () => {
+  const none = await savedSheet();
+  none.port.send("access_answered", { returned: false });
+  await turns();
+  assert.deepEqual(none.h.calls.setupRequests, []);
+  assert.equal(Object.hasOwn(none.h.calls.store, "traceSetupMilestonesV1"), false, "and nothing is kept");
+
+  const h = harness({ saveOnOpen: false });
+  setupUnderWay(h);
+  h.state.account = { state: "missing" };
+  const popup = { id: "trace-test", url: "safari-web-extension://trace-test/popup.html" };
+  await h.fromPage({ type: "TRACE_SETUP_STEP", step: "sheet_opened", page: "story" }, popup);
+  await turns();
+  assert.deepEqual(h.calls.setupRequests, []);
+});
+
+test("setup steps: Trace's popup says it was opened, and on what kind of page, once; nothing else may", async () => {
+  const h = harness({ saveOnOpen: false });
+  setupUnderWay(h);
+  const popup = { id: "trace-test", url: "safari-web-extension://trace-test/popup.html" };
+  assert.deepEqual(await h.fromPage({ type: "TRACE_SETUP_STEP", step: "sheet_opened", page: "other" }, popup), { ok: true });
+  await turns();
+  // A later sheet, by a new background: the opening was told already.
+  assert.deepEqual(await h.world.worker().fromPage({ type: "TRACE_SETUP_STEP", step: "sheet_opened", page: "story" }, popup), { ok: true });
+  await turns();
+  assert.deepEqual(await h.fromPage({ type: "TRACE_SETUP_STEP", step: "access_answered", answer: "declined" }, popup), { ok: true });
+  await turns();
+  assert.deepEqual(reported(h), [
+    "safari_sheet_opened/confirmed/extension_sheet_other_page",
+    "safari_access_answered/failed/extension_permission_declined",
+  ]);
+  for (const { body } of h.calls.setupRequests) {
+    assert.deepEqual(Object.keys(body).sort(), ["attempt_id", "evidence_source", "milestone", "outcome"], "no address, title or story");
+  }
+
+  for (const [message, sender] of [
+    [{ type: "TRACE_SETUP_STEP", step: "access_answered", answer: "granted" }, { id: "trace-test", tab: { id: 7, url: STORY_URL }, frameId: 0, url: STORY_URL }],
+    [{ type: "TRACE_SETUP_STEP", step: "access_answered", answer: "granted" }, { id: "another-extension", url: "safari-web-extension://another-extension/popup.html" }],
+    [{ type: "TRACE_SETUP_STEP", step: "sheet_opened", page: STORY_URL }, popup],
+  ]) {
+    assert.deepEqual(await h.fromPage(message, sender), { ok: false });
+  }
+  await turns();
+  assert.equal(h.calls.setupRequests.length, 2, "a page, another extension or a malformed step reports nothing");
+  assert.deepEqual(h.calls.requests, [], "and the sheet's own requests are untouched");
+});
+
+test("setup steps: a refusal from Trace is final, and the account leaving clears what is kept", async () => {
+  const h = harness({ saveOnOpen: false });
+  setupUnderWay(h);
+  h.state.setupStatus = 409;
+  const popup = { id: "trace-test", url: "safari-web-extension://trace-test/popup.html" };
+  await h.fromPage({ type: "TRACE_SETUP_STEP", step: "sheet_opened", page: "story" }, popup);
+  await turns();
+  assert.equal(h.calls.setupRequests.length, 1);
+  assert.deepEqual(h.calls.store.traceSetupMilestonesV1.pending, [], "dropped, never retried");
+
+  assert.equal(h.calls.accountCleanups.length, 1, "the session is asked to clear on sign-out");
+  await h.calls.accountCleanups[0]();
+  assert.equal(Object.hasOwn(h.calls.store, "traceSetupMilestonesV1"), false);
 });

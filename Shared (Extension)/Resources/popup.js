@@ -2330,6 +2330,12 @@ async function readKnownInLibrary(rawUrl) {
 const FIRST_TAP_SHEET = EARNED_PERMISSION_ONBOARDING?.registrationMode === "dynamic";
 const FIRST_TAP_SAVES_ON_OPEN = FIRST_TAP_SHEET && EARNED_PERMISSION_ONBOARDING?.firstTapSave === true;
 const FIRST_TAP_POPUP_PORT = "trace-first-tap-popup-v1";
+// Two steps of setting up Trace in Safari, told to the background, which
+// reports them only while the Trace app has a setup under way: the sheet was
+// opened (on a story or not; never which page), and the answer to Safari's
+// question asked from this popup without the first-tap port.
+const SETUP_STEP_MESSAGE = "TRACE_SETUP_STEP";
+let setupSheetOpenedSent = false;
 let firstTapPort = null;
 let firstTapStory = null;
 let firstTapTab = null;
@@ -3812,6 +3818,7 @@ async function prepareEarnedPermissionFlow() {
   const hasGrant = await readCompleteEarnedGrant(grantedOrigins);
   const tab = await probeQueryActiveTab().catch(() => null);
   const story = classifyEarnedPage(tab?.url);
+  sendSetupSheetOpened(story);
   earnedCurrentPage = story.ok ? story : null;
   if (earnedCurrentPage?.kind === "story") {
     earnedCurrentPage = { ...earnedCurrentPage, knownInLibrary: await readKnownInLibrary(tab?.url) };
@@ -3903,6 +3910,30 @@ async function prepareEarnedPermissionFlow() {
   renderEarnedPermissionInvitation(story);
 }
 
+function sendSetupStep(detail) {
+  if (!FIRST_TAP_SHEET) return;
+  sendKernelRuntimeMessage({ type: SETUP_STEP_MESSAGE, ...detail }, () => {});
+}
+
+/** Once for each popup, on the kind of page it was opened on. */
+function sendSetupSheetOpened(page) {
+  if (setupSheetOpenedSent) return;
+  setupSheetOpenedSent = true;
+  sendSetupStep({ step: "sheet_opened", page: page?.ok && page.kind === "story" ? "story" : "other" });
+}
+
+/**
+ * The answer to Safari's question, read as the background reads it: every
+ * story site allowed is allowed, whatever the request returned; some of them
+ * is partial; only a request that came back false, with none allowed, is no.
+ */
+function earnedSetupAnswer(returned, complete, coverage) {
+  if (complete) return "granted";
+  if (coverage.granted > 0) return "partial";
+  if (returned === false) return "declined";
+  return "unanswered";
+}
+
 async function allowAccessAndAddEarnedStory() {
   const prepared = earnedPreparedContext;
   if (!prepared?.story?.ok) {
@@ -3919,16 +3950,22 @@ async function allowAccessAndAddEarnedStory() {
   if (permissionRequest) renderEarnedAskWaiting();
   const story = prepared.story;
   void recordEarnedEvent("website_access_action_started");
+  let answered = false;
   try {
     if (permissionRequest) {
       void recordEarnedEvent("website_access_requested");
     }
     const granted = permissionRequest ? await permissionRequest : true;
     const grantedOrigins = await readGrantedOrigins();
-    if (
-      granted !== true ||
-      !(await readCompleteEarnedGrant(grantedOrigins))
-    ) {
+    const complete = await readCompleteEarnedGrant(grantedOrigins);
+    if (permissionRequest) {
+      answered = true;
+      sendSetupStep({
+        step: "access_answered",
+        answer: earnedSetupAnswer(granted, complete, earnedGrantCoverage(grantedOrigins)),
+      });
+    }
+    if (granted !== true || !complete) {
       await writeEarnedState({ promptResult: "declined" });
       const coverage = earnedGrantCoverage(grantedOrigins);
       if (coverage.granted > 0 && granted === true) {
@@ -3960,6 +3997,8 @@ async function allowAccessAndAddEarnedStory() {
   } catch {
     void recordEarnedEvent("website_access_setup_failed");
     const grantedOrigins = await readGrantedOrigins();
+    // The request itself failed, so Safari asked nothing: no answer.
+    if (permissionRequest && !answered) sendSetupStep({ step: "access_answered", answer: "unanswered" });
     if (await readCompleteEarnedGrant(grantedOrigins)) {
       renderEarnedRegistrationFailure();
     } else {
