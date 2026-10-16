@@ -547,7 +547,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         }
       }
     }
-    const author = ao3 ? text2('#workskin a[rel="author"], .byline a[rel="author"]') : text2('#profile_top a[href*="/u/"], #content a[href*="/u/"]');
+    const author = ao3 ? text2('h3.byline a[rel="author"]') : text2('#profile_top a[href*="/u/"], #content a[href*="/u/"]');
     const mobileTitle = host === "m.fanfiction.net" && author ? document.title.replace(/\s*[-|]\s*FanFiction(?:\.net)?\s*$/i, "").replace(/^Fanfic:\s*/i, "").replace(/\s+Ch\s+\d+,.*$/i, "").trim().slice(0, 512) : "";
     const title = ao3 ? text2("#workskin h2.title, h2.title.heading") : text2("#profile_top b.xcontrast_txt, #content b.xcontrast_txt") || (host === "m.fanfiction.net" ? text2('#content > div[align="center"] > b') : "") || mobileTitle;
     const stats = ao3 ? text2("dl.work.meta.group dd.words, dl.meta.group dd.words") : text2("#profile_top .xgray, #content .gray, #content .xgray", 2048) || mobileStats;

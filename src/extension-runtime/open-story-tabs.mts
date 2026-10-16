@@ -75,7 +75,7 @@ export function readOpenStory(expectedKey: string, deadline: number) {
       }
     }
   }
-  const author = ao3 ? text('#workskin a[rel="author"], .byline a[rel="author"]')
+  const author = ao3 ? text('h3.byline a[rel="author"]')
     : text('#profile_top a[href*="/u/"], #content a[href*="/u/"]');
   const mobileTitle = host === "m.fanfiction.net" && author
     ? document.title.replace(/\s*[-|]\s*FanFiction(?:\.net)?\s*$/i, "")

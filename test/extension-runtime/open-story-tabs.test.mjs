@@ -29,6 +29,15 @@ test('reads metadata from hidden loaded AO3 and FFN DOMs without story text or U
   assert.doesNotMatch(JSON.stringify([a, f]), /PRIVATE STORY TEXT|password|cookie|token/);
   assert.equal(domRead('<title>A URL alone is not enough</title>', ao3), null);
 });
+test('reads only the work byline author: anonymous works stay authorless, co-authors keep the first', () => {
+  const fixture = name => fs.readFileSync(new URL(`../fixtures/ao3-author/${name}`, import.meta.url), 'utf8');
+  const anonymous = domRead(fixture('anonymous-work-comments.html'), 'https://archiveofourown.org/works/41000010');
+  assert.equal(anonymous.t, "The Lamplighter's Ledger");
+  assert.equal(anonymous.a, undefined);
+  const coAuthored = domRead(fixture('co-authored-work.html'), 'https://archiveofourown.org/works/41000012');
+  assert.equal(coAuthored.a, 'Quill Fennimore');
+});
+
 test('excludes changed pages, expired injections and credential forms; permits the known AO3 sign-in header', () => {
   assert.equal(domRead(ao3HTML, ao3, 'ao3:124'), null);
   assert.equal(domRead(ao3HTML, ao3, 'ao3:123', 1), null);
