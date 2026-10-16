@@ -7631,6 +7631,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #finishQualification;
     #metadataContributions;
     #ffnSummaries;
+    /** State kept for one account, cleared when that account signs out or another replaces it. */
+    #accountCleanups = [];
     #savedFilters;
     #savedFilterApi;
     #nativeImportEnabled;
@@ -8471,6 +8473,17 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
       return Object.freeze({ state: "unknown" });
     }
+    /**
+     * Called when the account signed in signs out, or another account takes its
+     * place: whatever was kept for it is to be dropped. Never awaited for long:
+     * a cleanup that fails is let go.
+     */
+    whenAccountLeaves(cleanup) {
+      this.#accountCleanups.push(cleanup);
+    }
+    async #accountLeft() {
+      await Promise.all(this.#accountCleanups.map((cleanup) => cleanup().catch(() => void 0)));
+    }
     /** The automatic-saving preference: a failed read is unknown, never "on". */
     async automaticSaving() {
       try {
@@ -8646,6 +8659,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     async #clearLegacyAfterDisconnect(result) {
       if (result.kind !== "completed" || result.state !== "signed_out") return;
+      await this.#accountLeft();
       try {
         await this.#ffnSummaries?.clear();
       } catch {
@@ -8878,6 +8892,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       const after = this.#service.publicationScope();
       const scopeChanged = before?.accountId !== after?.accountId || before?.epoch !== after?.epoch;
       if (scopeChanged) {
+        if (before !== null && before.accountId !== after?.accountId) await this.#accountLeft();
         try {
           await this.#accountData.clear();
         } catch {
@@ -10529,6 +10544,212 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     return result.value.kind === "absent" ? Object.freeze({ kind: "absent" }) : unknown;
   }
 
+  // src/extension-runtime/setup-milestones.mts
+  var SETUP_STEP_MESSAGE = "TRACE_SETUP_STEP";
+  var SETUP_MILESTONES_KEY = "traceSetupMilestonesV1";
+  var PENDING_MAX_AGE_MS = 864e5;
+  var MAX_PENDING = 8;
+  var MAX_SENDS = 2;
+  var REQUEST_TIMEOUT_MS8 = 1e4;
+  var ATTEMPT_MAX_AHEAD_MS = 864e5;
+  var UUID_PATTERN8 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  function setupMilestoneReport(step) {
+    if (step.kind === "sheet_opened") {
+      return Object.freeze({
+        milestone: "safari_sheet_opened",
+        outcome: "confirmed",
+        evidence_source: step.page === "story" ? "extension_sheet_story_page" : "extension_sheet_other_page"
+      });
+    }
+    switch (step.answer) {
+      case "granted":
+        return Object.freeze({
+          milestone: "safari_access_answered",
+          outcome: "confirmed",
+          evidence_source: "extension_permission_granted"
+        });
+      case "declined":
+        return Object.freeze({
+          milestone: "safari_access_answered",
+          outcome: "failed",
+          evidence_source: "extension_permission_declined"
+        });
+      case "partial":
+        return Object.freeze({
+          milestone: "safari_access_answered",
+          outcome: "failed",
+          evidence_source: "extension_permission_partial"
+        });
+      default:
+        return Object.freeze({
+          milestone: "safari_access_answered",
+          outcome: "unknown",
+          evidence_source: "extension_permission_unanswered"
+        });
+    }
+  }
+  function setupStepFromMessage(message) {
+    if (!isRecord23(message) || message.type !== SETUP_STEP_MESSAGE) return null;
+    if (message.step === "sheet_opened" && (message.page === "story" || message.page === "other")) {
+      return Object.freeze({ kind: "sheet_opened", page: message.page });
+    }
+    if (message.step === "access_answered" && (message.answer === "granted" || message.answer === "declined" || message.answer === "partial" || message.answer === "unanswered")) {
+      return Object.freeze({ kind: "access_answered", answer: message.answer });
+    }
+    return null;
+  }
+  function safariAccessAnswer(view2) {
+    switch (view2.state) {
+      case "allowed":
+      case "registration_failed":
+      case "registration_unknown":
+        return "granted";
+      case "partial":
+        return "partial";
+      case "not_allowed":
+        return "declined";
+      case "not_known":
+      case "could_not_ask":
+        return "unanswered";
+      default:
+        return null;
+    }
+  }
+  var SetupMilestoneReporter = class {
+    #ports;
+    #tail = Promise.resolve();
+    constructor(ports) {
+      this.#ports = ports;
+    }
+    /** Keeps the step for the setup under way, if any, then sends what is kept. Never throws. */
+    async record(step) {
+      try {
+        const account = this.#ports.account();
+        if (account === null) return;
+        const context = await this.#ports.attempt(account).catch(() => void 0);
+        const attempt = this.#liveAttempt(context);
+        if (attempt === null || this.#ports.account() !== account) return;
+        const report = setupMilestoneReport(step);
+        await this.#locked(async () => {
+          const stored = await this.#read();
+          const current = stored !== null && stored.account === account ? stored.attempt === attempt ? stored : { account, attempt, reported: [], pending: stored.pending } : { account, attempt, reported: [], pending: [] };
+          const key = step.kind === "sheet_opened" ? report.milestone : `${report.milestone}:${report.evidence_source}`;
+          if (current.reported.includes(key)) return;
+          if (step.kind === "access_answered" && step.answer === "unanswered" && current.reported.some((done) => done.startsWith("safari_access_answered:"))) {
+            return;
+          }
+          await this.#write({
+            ...current,
+            reported: [...current.reported, key],
+            pending: [...current.pending, { attempt, ...report, at: this.#ports.now(), sends: 0 }].slice(-MAX_PENDING)
+          });
+        });
+      } catch {
+      }
+      await this.flush();
+    }
+    /** One pass over what is kept: each report goes once now. Never throws. */
+    flush() {
+      return this.#locked(async () => {
+        const stored = await this.#read();
+        if (stored === null || stored.pending.length === 0) return;
+        const account = this.#ports.account();
+        if (account === null) return;
+        if (account !== stored.account) {
+          await this.#ports.storage.remove(SETUP_MILESTONES_KEY);
+          return;
+        }
+        const now = this.#ports.now();
+        const due = stored.pending.filter((item) => item.sends < MAX_SENDS && now - item.at >= 0 && now - item.at <= PENDING_MAX_AGE_MS);
+        for (const item of due) item.sends += 1;
+        await this.#write({ ...stored, pending: due });
+        const left = [];
+        for (const item of due) {
+          const outcome = await this.#ports.send(Object.freeze({
+            attempt_id: item.attempt,
+            milestone: item.milestone,
+            outcome: item.outcome,
+            evidence_source: item.evidence_source
+          })).catch(() => "unreached");
+          if (outcome === "unreached" && item.sends < MAX_SENDS) left.push(item);
+        }
+        if (this.#ports.account() !== account) await this.#ports.storage.remove(SETUP_MILESTONES_KEY);
+        else await this.#write({ ...stored, pending: left });
+      }).catch(() => void 0);
+    }
+    /** Forgets every report and what was reported: on sign-out or a change of account. */
+    clear() {
+      return this.#locked(() => this.#ports.storage.remove(SETUP_MILESTONES_KEY)).catch(() => void 0);
+    }
+    #liveAttempt(context) {
+      const id = context?.setupAttemptID;
+      const expiresAt = context?.setupAttemptExpiresAt;
+      const now = this.#ports.now();
+      return typeof id === "string" && UUID_PATTERN8.test(id) && typeof expiresAt === "number" && Number.isFinite(expiresAt) && expiresAt > now && expiresAt - now <= ATTEMPT_MAX_AHEAD_MS ? id.toLowerCase() : null;
+    }
+    #locked(work) {
+      const run = this.#tail.then(work, work);
+      this.#tail = run.then(() => void 0, () => void 0);
+      return run;
+    }
+    async #read() {
+      const raw = (await this.#ports.storage.get(SETUP_MILESTONES_KEY))[SETUP_MILESTONES_KEY];
+      if (!isRecord23(raw) || typeof raw.account !== "string" || typeof raw.attempt !== "string" || !Array.isArray(raw.reported) || !Array.isArray(raw.pending)) {
+        return null;
+      }
+      return {
+        account: raw.account,
+        attempt: raw.attempt,
+        reported: raw.reported.filter((key) => typeof key === "string"),
+        pending: raw.pending.filter(isPending).map((item) => ({ ...item }))
+      };
+    }
+    #write(stored) {
+      return this.#ports.storage.set({ [SETUP_MILESTONES_KEY]: stored });
+    }
+  };
+  var SetupMilestoneApi = class {
+    #fetch;
+    #endpoint;
+    constructor(fetchImpl, apiBase) {
+      this.#fetch = fetchImpl;
+      this.#endpoint = `${apiBase.replace(/\/$/, "")}/api/extension/setup-milestones`;
+    }
+    /**
+     * Any answer is final and reported as such, a refused credential included:
+     * a report never makes the session look at its sign-in again.
+     */
+    async send(credential, body) {
+      const abort = new AbortController();
+      const timer = globalThis.setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS8);
+      try {
+        await this.#fetch(this.#endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${credential}` },
+          body: JSON.stringify(body),
+          signal: abort.signal
+        });
+        return { kind: "success", value: "answered" };
+      } catch {
+        return { kind: "success", value: "unreached" };
+      } finally {
+        globalThis.clearTimeout(timer);
+      }
+    }
+  };
+  function sendAsSignedIn(execute, api) {
+    return async (body) => {
+      const result = await execute((credential) => api.send(credential, body));
+      return result.kind === "published" ? result.value : "unreached";
+    };
+  }
+  function isPending(value) {
+    return isRecord23(value) && typeof value.attempt === "string" && UUID_PATTERN8.test(value.attempt) && (value.milestone === "safari_sheet_opened" || value.milestone === "safari_access_answered") && (value.outcome === "confirmed" || value.outcome === "failed" || value.outcome === "unknown") && typeof value.evidence_source === "string" && value.evidence_source.startsWith("extension_") && typeof value.at === "number" && Number.isFinite(value.at) && typeof value.sends === "number" && Number.isInteger(value.sends) && value.sends >= 0;
+  }
+  function isRecord23(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+
   // src/extension-runtime/story-site-access.mts
   var HAND_OVER_BY_RELOADING_THE_PAGE = false;
   var STORY_SITE_SETTLE_DELAYS_MS = Object.freeze([300, 700]);
@@ -10747,6 +10968,34 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         { frameId: 0 }
       ]).catch(() => void 0)));
     };
+    const setupMilestones = environment.setupAttempt === void 0 ? null : new SetupMilestoneReporter({
+      account: () => session.publicationScope()?.accountId ?? null,
+      attempt: environment.setupAttempt,
+      send: sendAsSignedIn(
+        (effect) => session.executeAuthenticated(effect),
+        new SetupMilestoneApi(environment.fetch, environment.apiBase)
+      ),
+      storage: {
+        get: (key) => storage.get(key),
+        set: (patch) => storage.set(patch),
+        remove: (key) => storage.remove(key)
+      },
+      now: environment.now ?? (() => Date.now())
+    });
+    if (setupMilestones !== null) session.whenAccountLeaves?.(() => setupMilestones.clear());
+    const setupStep = (step) => {
+      if (setupMilestones === null) return;
+      void account().then(
+        (read) => read.state === "verified" ? setupMilestones.record(step) : void 0
+      ).catch(() => void 0);
+    };
+    runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (message?.type !== SETUP_STEP_MESSAGE) return false;
+      const step = sender?.id === runtime.id && isPopupSender(sender, runtime.id) ? setupStepFromMessage(message) : null;
+      if (step !== null) setupStep(step);
+      sendResponse({ ok: step !== null });
+      return false;
+    });
     runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message?.type !== FIRST_TAP_MANUAL_MODE_QUERY_MESSAGE) return false;
       if (sender?.id !== runtime.id || !Number.isInteger(sender.tab?.id) || sender.frameId !== void 0 && sender.frameId !== 0) {
@@ -10810,8 +11059,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         );
         if (ask !== null) {
           if (request.command === "access_answered" && order.order !== void 0) post({ checking: order.order });
+          const resolves = request.command === "access_answered" || request.command === "access_unanswered";
           void siteAccess.answered(show, ask).then(
-            (access2) => post({ access: access2, ...answered, ...order }),
+            (access2) => {
+              post({ access: access2, ...answered, ...order });
+              const answer = resolves || request.command === "access_waiting" && access2.state === "allowed" ? safariAccessAnswer(access2) : null;
+              if (answer !== null) setupStep({ kind: "access_answered", answer });
+            },
             () => post({ access: Object.freeze({ state: "not_known" }), ...answered, ...order })
           );
           return;
@@ -10846,7 +11100,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var SAFARI_READINESS_SESSION_KEY = "traceSafariReadinessSessionV1";
   var NATIVE_TIMEOUT_MS = 2e3;
   var BROWSER_READ_TIMEOUT_MS = 2e3;
-  function isRecord23(value) {
+  function isRecord24(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
   function bounded2(work, ms) {
@@ -10896,7 +11150,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         typeof permissions.contains !== "function" ? Promise.resolve(null) : bounded2(call(permissions, "contains", [{ origins: [...config.origins] }]), BROWSER_READ_TIMEOUT_MS),
         bounded2(call(permissions, "getAll", []), BROWSER_READ_TIMEOUT_MS)
       ]);
-      const origins = isRecord23(listed) && Array.isArray(listed.origins) ? new Set(listed.origins) : null;
+      const origins = isRecord24(listed) && Array.isArray(listed.origins) ? new Set(listed.origins) : null;
       const granted = origins === null ? null : config.origins.filter((origin) => origins.has(origin)).length;
       return {
         // The browser's own answer where it gives one: a broader grant need not
@@ -10912,9 +11166,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         bounded2(storage.get(EARNED_PERMISSION_STATE_KEY), BROWSER_READ_TIMEOUT_MS)
       ]);
       if (!Array.isArray(current) || stored === null) return "unreadable";
-      const ids = new Set(current.map((script) => isRecord23(script) ? script.id : void 0));
+      const ids = new Set(current.map((script) => isRecord24(script) ? script.id : void 0));
       const state = stored[EARNED_PERMISSION_STATE_KEY];
-      const generation = isRecord23(state) ? state.registrationVersion : void 0;
+      const generation = isRecord24(state) ? state.registrationVersion : void 0;
       return config.registrations.every(({ id }) => ids.has(id)) && generation === config.version ? "registered" : "absent";
     };
     const readScriptRegistration = async () => {
@@ -10969,8 +11223,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         { type: SAFARI_READINESS_MESSAGES.prepare, apiOrigin },
         NATIVE_TIMEOUT_MS
       );
-      if (!isRecord23(response) || response.ok !== true || !isRecord23(response.provider)) return null;
-      const cycle = isRecord23(response.cycle) && typeof response.cycle.id === "string" ? {
+      if (!isRecord24(response) || response.ok !== true || !isRecord24(response.provider)) return null;
+      const cycle = isRecord24(response.cycle) && typeof response.cycle.id === "string" ? {
         id: response.cycle.id,
         accountId: typeof response.cycle.accountID === "string" ? response.cycle.accountID : null
       } : null;
@@ -10988,8 +11242,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         result: report2.result,
         components: report2.components
       }, NATIVE_TIMEOUT_MS);
-      if (isRecord23(response) && response.ok === true) return "stored";
-      return isRecord23(response) && response.error === "stale_cycle" ? "stale_cycle" : "refused";
+      if (isRecord24(response) && response.ok === true) return "stored";
+      return isRecord24(response) && response.error === "stale_cycle" ? "stale_cycle" : "refused";
     };
     const service = new SafariReadinessService({
       prepare,
@@ -11007,7 +11261,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       void report().catch(() => void 0);
     };
     runtime.onMessage.addListener((message, sender, sendResponse) => {
-      if (!isRecord23(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport || Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
+      if (!isRecord24(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport || Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
         return false;
       }
       void report().then(() => sendResponse({ ok: true }), () => sendResponse({ ok: true }));
@@ -11050,7 +11304,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   }
 
   // src/extension-runtime/index.mts
-  var UUID_PATTERN8 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  var UUID_PATTERN9 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   function fallbackUuid(seed) {
     let hash = 2166136261;
     const bytes = [];
@@ -11169,7 +11423,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     let fallbackId = 0;
     const randomId = () => {
       const uuid = scope.crypto?.randomUUID?.();
-      if (typeof uuid === "string" && UUID_PATTERN8.test(uuid)) return uuid;
+      if (typeof uuid === "string" && UUID_PATTERN9.test(uuid)) return uuid;
       fallbackId += 1;
       return fallbackUuid(`${Date.now()}:${fallbackId}`);
     };
@@ -11226,7 +11480,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         apiBase: "https://api.tracefiction.com",
         // After Always Allow the registration runs on Safari's word of the new
         // access; what the sheet reads waits for it rather than racing it.
-        ...sheetRegistrationSettled ? { registrationSettled: sheetRegistrationSettled } : {}
+        ...sheetRegistrationSettled ? { registrationSettled: sheetRegistrationSettled } : {},
+        // The setup the Trace app has under way, as a save reads it.
+        setupAttempt: (accountId) => new NativeStorySaveReceiptPort(extension.runtime, storageMode, "https://api.tracefiction.com").prepareSaveReceipt(accountId)
       });
     }
     extension.storage.onChanged?.addListener((changes, area) => {

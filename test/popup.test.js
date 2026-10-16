@@ -6748,3 +6748,49 @@ test("the ask on a story page, before the sheet, carries the same words and pict
   assert.equal(shownText(list.document.getElementById("popup-earned-rule")), RULE_LINE);
   assert.equal(list.document.getElementById("popup-earned-prompt"), null, "no picture on a list");
 });
+
+test("setup steps: the sheet says once that it opened, and on what kind of page, and the earned ask says what Safari answered", async () => {
+  const setupSteps = (h) => h.messages.filter(({ type }) => type === "TRACE_SETUP_STEP")
+    .map(({ type, ...detail }) => detail);
+  const sheet = (url, options = {}) => createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: { registrationMode: "dynamic" },
+    userAgent: IPHONE_UA,
+    activeTab: { id: 7, url },
+    sessionSnapshot: { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" },
+    ...options,
+  });
+
+  const story = sheet("https://www.fanfiction.net/s/7038840/1/A-Chance-Encounter");
+  await settle(story);
+  story.emitStorageChange({ traceArchiveReadiness: { newValue: { lastArchiveSeenAt: Date.now() } } });
+  await settle(story);
+  assert.deepEqual(setupSteps(story), [{ step: "sheet_opened", page: "story" }], "once, however often the sheet is drawn again");
+  assert.doesNotMatch(JSON.stringify(setupSteps(story)), /fanfiction|7038840|Encounter/, "never the page itself");
+
+  for (const [result, answer] of [[true, "granted"], [false, "declined"]]) {
+    const home = sheet("https://archiveofourown.org/", { permissionRequestResult: result });
+    await settle(home);
+    home.document.getElementById("popup-earned-primary").click();
+    await settle(home, 12);
+    assert.deepEqual(setupSteps(home), [
+      { step: "sheet_opened", page: "other" },
+      { step: "access_answered", answer },
+    ], String(result));
+  }
+
+  const threw = sheet("https://archiveofourown.org/", { permissionRequestError: "no" });
+  await settle(threw);
+  threw.document.getElementById("popup-earned-primary").click();
+  await settle(threw, 12);
+  assert.deepEqual(setupSteps(threw).slice(1), [{ step: "access_answered", answer: "unanswered" }]);
+
+  // A build without the sheet says nothing of setup.
+  const older = createPopupHarness({
+    sessionMode: "kernel", promiseRuntime: true, earnedPermissionOnboarding: true, userAgent: IPHONE_UA,
+    activeTab: { id: 7, url: "https://archiveofourown.org/" },
+  });
+  await settle(older);
+  assert.deepEqual(setupSteps(older), []);
+});

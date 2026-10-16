@@ -286,6 +286,8 @@ export class SessionRuntimeController {
   readonly #finishQualification: FinishQualificationService;
   readonly #metadataContributions: MetadataContributionService;
   readonly #ffnSummaries: FfnSummaryFill | null;
+  /** State kept for one account, cleared when that account signs out or another replaces it. */
+  readonly #accountCleanups: (() => Promise<void>)[] = [];
   readonly #savedFilters: SavedFilterSyncService;
   readonly #savedFilterApi: SavedFilterSyncApi;
   readonly #nativeImportEnabled: boolean;
@@ -1329,6 +1331,19 @@ export class SessionRuntimeController {
     return Object.freeze({ state: "unknown" });
   }
 
+  /**
+   * Called when the account signed in signs out, or another account takes its
+   * place: whatever was kept for it is to be dropped. Never awaited for long:
+   * a cleanup that fails is let go.
+   */
+  whenAccountLeaves(cleanup: () => Promise<void>): void {
+    this.#accountCleanups.push(cleanup);
+  }
+
+  async #accountLeft(): Promise<void> {
+    await Promise.all(this.#accountCleanups.map((cleanup) => cleanup().catch(() => undefined)));
+  }
+
   /** The automatic-saving preference: a failed read is unknown, never "on". */
   async automaticSaving(): Promise<"on" | "off" | "unknown"> {
     try {
@@ -1547,6 +1562,7 @@ export class SessionRuntimeController {
 
   async #clearLegacyAfterDisconnect(result: SessionActionResult): Promise<void> {
     if (result.kind !== "completed" || result.state !== "signed_out") return;
+    await this.#accountLeft();
     try {
       await this.#ffnSummaries?.clear();
     } catch {
@@ -1872,6 +1888,8 @@ export class SessionRuntimeController {
       before?.epoch !== after?.epoch;
 
     if (scopeChanged) {
+      // Signed out in the app, or into another account there.
+      if (before !== null && before.accountId !== after?.accountId) await this.#accountLeft();
       try {
         await this.#accountData.clear();
       } catch {
