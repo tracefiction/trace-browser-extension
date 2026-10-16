@@ -10,7 +10,7 @@
 
   var STATUS_TEXT = {
     idle: "Not started. Open AO3 in this tab, signed in, then tap Start.",
-    running: "Running. Keep Safari open on AO3.",
+    running: "Running while this AO3 tab is open and on screen.",
     finished: "Finished: it reached the last page of your History.",
   };
   var REASON_TEXT = {
@@ -52,6 +52,7 @@
   var noteLine;
   var buttons = {};
   var results;
+  var fillLine;
   var lastView = null;
   var poll = null;
 
@@ -99,7 +100,7 @@
   function copyResults() {
     var text = lastView && lastView.report ? lastView.report : "";
     if (!text) return;
-    var done = function () { noteLine.textContent = "Results copied: counts, times and error codes only."; };
+    var done = function () { noteLine.textContent = "Results copied: counts, times, answer details and error codes only."; };
     try {
       navigator.clipboard.writeText(text).then(done, function () { fallbackCopy(text, done); });
     } catch (_) {
@@ -135,12 +136,14 @@
       text += " Reading page " + view.nextPage + ".";
     }
     statusLine.textContent = text;
+    fillLine.textContent = "Summary fill: " + (view && view.fill ? view.fill : "—");
     buttons.start.hidden = status !== "idle";
     buttons.pause.hidden = status !== "running";
     buttons.resume.hidden = status !== "paused";
     buttons.cancel.hidden = status !== "running" && status !== "paused";
     buttons.copy.hidden = status === "idle";
     buttons.clear.hidden = status !== "finished";
+    buttons.resetFill.hidden = false;
     Object.keys(buttons).forEach(function (key) { buttons[key].disabled = false; });
     while (results.firstChild) results.removeChild(results.firstChild);
     (view && view.lines ? view.lines : []).forEach(function (line) {
@@ -171,6 +174,7 @@
       ".trace-ao3x dl{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;margin:8px 0;font-variant-numeric:tabular-nums}" +
       ".trace-ao3x dt{color:var(--text-2,#4b5965)}" +
       ".trace-ao3x dd{margin:0;overflow-wrap:anywhere}" +
+      ".trace-ao3x-fill{font-variant-numeric:tabular-nums;overflow-wrap:anywhere}" +
       ".trace-ao3x-copy{width:100%;height:120px;font:12px var(--trace-mono,monospace)}" +
       "body.trace-ao3x-scroll{overflow-y:auto!important}";
     document.head.appendChild(css);
@@ -205,13 +209,18 @@
     buttons.copy.textContent = "Copy results";
     buttons.copy.addEventListener("click", copyResults);
     buttons.clear = button("Clear experiment data", "clear");
-    [buttons.start, buttons.pause, buttons.resume, buttons.cancel, buttons.copy, buttons.clear].forEach(function (element) {
+    buttons.resetFill = button("Reset summary fill", "reset_fill");
+    [buttons.start, buttons.pause, buttons.resume, buttons.cancel, buttons.copy, buttons.clear, buttons.resetFill].forEach(function (element) {
       actions.appendChild(element);
     });
     root.appendChild(actions);
     noteLine = document.createElement("p");
     noteLine.setAttribute("aria-live", "polite");
     root.appendChild(noteLine);
+    // The FanFiction.net summary fill's own record (test build only).
+    fillLine = document.createElement("p");
+    fillLine.className = "trace-ao3x-fill";
+    root.appendChild(fillLine);
     var warning = document.createElement("p");
     warning.textContent = "Cancel and Clear delete everything this experiment found. Copy the results first.";
     root.appendChild(warning);

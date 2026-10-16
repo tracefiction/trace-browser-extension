@@ -21,12 +21,20 @@
  *
  * A run is a checkpoint in storage: each page's works and the next page are
  * written together, so a run continues after the background is unloaded, the
- * sheet is closed or Safari restarts. A timer, a one-minute alarm, opening the
- * sheet and the background starting up all continue a running run.
+ * sheet is closed or Safari restarts.
+ *
+ * On iPhone Safari unloads the background within about a minute, with its
+ * timers, so the run is paced from the AO3 tab instead: a small loop put into
+ * the visible AO3 tab asks the background, on its own page timer, whether a
+ * page is due, makes the request when told (or the background makes its own),
+ * and hands the answer back. The background only checks answers and stores
+ * the checkpoint and results. A hidden tab waits until it is shown. The
+ * alarm, the sheet, any AO3 page and the background starting only put the
+ * loop back and are logged, so the alarm's real cadence can be measured.
  */
 
 import { extensionCall, type AlarmsPort, type PermissionsPort, type RuntimePort, type ScriptingPort, type StorageArea, type TabsPort } from "./browser-platform.mjs";
-import { isChallengePage } from "./ffn-summary-fill.mjs";
+import { FFN_SUMMARY_STATE_KEY, isChallengePage } from "./ffn-summary-fill.mjs";
 import { isPopupSender } from "./first-story-initiation.mjs";
 
 export const AO3_HISTORY_EXPERIMENT_MESSAGE = "TRACE_AO3_HISTORY_EXPERIMENT";
@@ -286,6 +294,10 @@ export type LoadedPage =
       readonly retryAfter: string | null;
       readonly cfMitigated: string | null;
       readonly contentType: string | null;
+      readonly server?: string | null;
+      readonly cfRay?: string | null;
+      /** The page's own `<title>`, as it came. */
+      readonly title?: string | null;
       /** Whether the tab was hidden when it read the page (tab path only). */
       readonly hidden?: boolean;
     }
@@ -342,14 +354,87 @@ export function classifyHistoryAnswer(answer: LoadedPage, user: string, page: nu
   return read.kind === "page" ? { kind: "page", read } : { kind: "stop", code: read.code };
 }
 
+// --- What is kept about an answer that was not a page ----------------------------
+
+/**
+ * The facts of an answer that was not a readable History page: never the
+ * page itself, the reader's AO3 name, or a work's title.
+ */
+export interface AnswerNote {
+  readonly code: string;
+  readonly status: number | null;
+  readonly host: string | null;
+  readonly path: "readings" | "login" | "other" | null;
+  readonly type: string | null;
+  readonly length: number | null;
+  readonly cf: string | null;
+  readonly server: string | null;
+  readonly ray: string | null;
+  readonly title: string | null;
+  readonly at: number;
+}
+
+const tidy = (value: string | null | undefined, max: number): string | null => {
+  if (typeof value !== "string") return null;
+  const text = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+  return text ? text.slice(0, max) : null;
+};
+
+export function answerNote(answer: LoadedPage, code: string, user: string, now: number): AnswerNote {
+  if (answer.kind === "failed") {
+    return { code, status: null, host: null, path: null, type: null, length: null, cf: null, server: null, ray: null, title: null, at: now };
+  }
+  let landed: URL | null = null;
+  try {
+    landed = new URL(answer.url);
+  } catch {
+    landed = null;
+  }
+  const pathname = landed?.pathname ?? "";
+  const path = landed === null
+    ? null
+    : /^\/users\/[^/]+\/readings\/?$/i.test(pathname)
+      ? "readings"
+      : /^\/users\/(?:login|sign_in)\b|^\/login\b/i.test(pathname) ? "login" : "other";
+  // A work page's title names the work: it is not kept.
+  let title = /^\/(?:works|chapters|series)\//i.test(pathname) ? null : tidy(answer.title, 200);
+  if (title !== null && user) title = title.split(new RegExp(user.replace(/[^A-Za-z0-9_]/g, ""), "gi")).join("‹you›");
+  return {
+    code,
+    status: Number.isSafeInteger(answer.status) ? answer.status : null,
+    host: landed !== null && /^[a-z0-9.-]{1,80}$/i.test(landed.hostname) ? landed.hostname.toLowerCase() : null,
+    path,
+    type: tidy(answer.contentType?.split(";")[0], 40),
+    length: Number.isSafeInteger(answer.chars) ? answer.chars : null,
+    cf: tidy(answer.cfMitigated, 20),
+    server: tidy(answer.server, 40),
+    ray: tidy(answer.cfRay, 40),
+    title: title === null ? null : title.slice(0, 60),
+    at: now,
+  };
+}
+
 // --- The run ---------------------------------------------------------------------
 
 export type RunStatus = "running" | "paused" | "finished";
 export type RunPath = "probe_background" | "probe_tab" | "background" | "tab";
-export type WakeSource = "start" | "timer" | "alarm" | "sheet" | "boot";
+/**
+ * What woke the background: the page loop's tick, the alarm, the sheet, an
+ * AO3 page speaking to Trace, the background starting, or Start/Resume.
+ */
+export type WakeSource = "start" | "tick" | "alarm" | "sheet" | "page" | "boot";
+const WAKE_SOURCES: readonly WakeSource[] = ["tick", "alarm", "page", "sheet", "boot", "start"];
+/** Wake times kept per source, newest last. */
+const WAKE_TIMES_MAX = 60;
+
+/** What the page loop does next. */
+export type Instruction =
+  | { readonly wait: number }
+  | { readonly fetch: string; readonly token: string }
+  | { readonly stop: true };
 
 export interface ExperimentState {
-  v: 1;
+  v: 2;
   runId: string;
   status: RunStatus;
   reason: string | null;
@@ -362,6 +447,8 @@ export interface ExperimentState {
   pages: number[];
   lastPageDigest: string | null;
   ids: string[];
+  /** The request made and not yet answered. */
+  inFlight: { token: string; at: number; boot: string; path: "background" | "tab"; page: number } | null;
   counts: {
     pagesRead: number; rows: number; distinct: number; duplicates: number;
     markedForLater: number; deleted: number; unreadable: number;
@@ -369,7 +456,8 @@ export interface ExperimentState {
   timing: {
     startedAt: number; finishedAt: number | null; pausedAt: number | null; pausedMs: number;
     lastRequestAt: number | null; countNextGap: boolean; dueAt: number; gapMs: number;
-    requests: number; requestMsTotal: number; requestMsMax: number;
+    requests: number; answers: number; responses: number; lost: number;
+    requestMsTotal: number; requestMsMax: number;
     pageCharsTotal: number; pageCharsMax: number;
     gapTotalMs: number; gapCount: number; maxGapMs: number; stalls: number; stalledMs: number;
   };
@@ -381,7 +469,10 @@ export interface ExperimentState {
     boots: string[];
     revivedBy: Record<WakeSource, number>;
     pauses: number; resumes: number; hiddenTabPages: number;
+    loopStarts: number; loopFailures: number;
   };
+  wakes: Record<WakeSource, { n: number; t: number[] }>;
+  lastAnswer: AnswerNote | null;
   storage: { pageBytes: number; writeFailures: number };
   errors: Record<string, number>;
 }
@@ -396,8 +487,6 @@ export interface ExperimentStore {
 
 export interface ExperimentClock {
   now(): number;
-  setTimeout(callback: () => void, delayMs: number): unknown;
-  clearTimeout(handle: unknown): void;
 }
 
 export interface ExperimentPorts {
@@ -409,7 +498,10 @@ export interface ExperimentPorts {
   readonly bootId: string;
   /** Story saves to Trace under way, and when the last one ended. */
   readonly saveActivity: () => { readonly inFlight: number; readonly lastEndedAt: number };
-  readonly loadPage: (path: "background" | "tab", url: string, tabId: number | null, signal: AbortSignal) => Promise<LoadedPage>;
+  /** The background's own request, made while a page tick holds it awake. */
+  readonly loadInBackground: (url: string, signal: AbortSignal) => Promise<LoadedPage>;
+  /** Puts the page loop into an AO3 tab (it runs only while the tab is visible). */
+  readonly ensureLoop?: (tabId: number) => Promise<"started" | "running" | "failed">;
   readonly alarm?: { start(): Promise<void> | void; stop(): Promise<void> | void };
 }
 
@@ -429,28 +521,37 @@ const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 function isState(value: unknown): value is ExperimentState {
   if (!value || typeof value !== "object") return false;
   const state = value as Partial<ExperimentState>;
-  return state.v === 1 && typeof state.runId === "string" && typeof state.user === "string" &&
+  return state.v === 2 && typeof state.runId === "string" && typeof state.user === "string" &&
     USERNAME_PATTERN.test(state.user) && ["running", "paused", "finished"].includes(state.status as string) &&
     Number.isSafeInteger(state.nextPage) && Array.isArray(state.ids) && Array.isArray(state.pages) &&
     typeof state.counts === "object" && typeof state.timing === "object" && typeof state.pace === "object" &&
-    typeof state.lifetime === "object" && typeof state.storage === "object" && typeof state.errors === "object";
+    typeof state.lifetime === "object" && typeof state.wakes === "object" && typeof state.storage === "object" &&
+    typeof state.errors === "object";
 }
+
+const perSource = <T,>(make: () => T): Record<WakeSource, T> =>
+  Object.fromEntries(WAKE_SOURCES.map((source) => [source, make()])) as Record<WakeSource, T>;
 
 function newState(runId: string, user: string, tabId: number | null, now: number, bootId: string): ExperimentState {
   return {
-    v: 1, runId, status: "running", reason: null, user, tabId, path: "probe_background",
-    probes: { background: null, tab: null }, nextPage: 1, pages: [], lastPageDigest: null, ids: [],
+    v: 2, runId, status: "running", reason: null, user, tabId, path: "probe_background",
+    probes: { background: null, tab: null }, nextPage: 1, pages: [], lastPageDigest: null, ids: [], inFlight: null,
     counts: { pagesRead: 0, rows: 0, distinct: 0, duplicates: 0, markedForLater: 0, deleted: 0, unreadable: 0 },
     timing: {
       startedAt: now, finishedAt: null, pausedAt: null, pausedMs: 0, lastRequestAt: null, countNextGap: false,
-      dueAt: now, gapMs: PAGE_GAP_MS, requests: 0, requestMsTotal: 0, requestMsMax: 0,
+      dueAt: now, gapMs: PAGE_GAP_MS, requests: 0, answers: 0, responses: 0, lost: 0, requestMsTotal: 0, requestMsMax: 0,
       pageCharsTotal: 0, pageCharsMax: 0, gapTotalMs: 0, gapCount: 0, maxGapMs: 0, stalls: 0, stalledMs: 0,
     },
     pace: {
       rateLimited: 0, unavailable: 0, serverErrors: 0, networkErrors: 0,
       retryAfterMaxMs: 0, consecutiveRetries: 0, waitsForSave: 0, backoffs: 0,
     },
-    lifetime: { boots: [bootId], revivedBy: { start: 0, timer: 0, alarm: 0, sheet: 0, boot: 0 }, pauses: 0, resumes: 0, hiddenTabPages: 0 },
+    lifetime: {
+      boots: [bootId], revivedBy: perSource(() => 0), pauses: 0, resumes: 0, hiddenTabPages: 0,
+      loopStarts: 0, loopFailures: 0,
+    },
+    wakes: perSource(() => ({ n: 0, t: [] })),
+    lastAnswer: null,
     storage: { pageBytes: 0, writeFailures: 0 },
     errors: {},
   };
@@ -458,13 +559,15 @@ function newState(runId: string, user: string, tabId: number | null, now: number
 
 /** Codes a background probe may fail with before the AO3 tab is tried. */
 const TRY_THE_TAB = new Set(["signed_out", "redirected", "unrecognized_page", "forbidden", "http_error"]);
+/** A 5xx from the background probe also tries the tab, rather than waiting. */
+const TRY_THE_TAB_ON_RETRY = new Set(["server_error", "unavailable"]);
+/** An unanswered request counts as lost this long after it was made. */
+export const LOST_AFTER_MS = REQUEST_TIMEOUT_MS + 10_000;
 
 export class Ao3HistoryExperiment {
   readonly #ports: ExperimentPorts;
   #state: ExperimentState | null = null;
   #loaded = false;
-  #busy = false;
-  #timer: unknown = null;
   #abort: AbortController | null = null;
   #tail: Promise<unknown> = Promise.resolve();
 
@@ -499,42 +602,67 @@ export class Ao3HistoryExperiment {
     }
   }
 
-  #clearTimer(): void {
-    if (this.#timer !== null) this.#ports.clock.clearTimeout(this.#timer);
-    this.#timer = null;
-  }
-
-  #schedule(delayMs: number): void {
-    this.#clearTimer();
-    this.#timer = this.#ports.clock.setTimeout(() => {
-      this.#timer = null;
-      void this.#step("timer");
-    }, Math.max(0, delayMs));
-  }
-
   async #alarm(on: boolean): Promise<void> {
     try {
       await (on ? this.#ports.alarm?.start() : this.#ports.alarm?.stop());
     } catch {
-      // The timer and the sheet still continue the run.
+      // The page loop and the sheet still continue the run.
     }
+  }
+
+  /** Puts the page loop into `tabId`, and counts how that went. */
+  async #ensureLoop(tabId: number | null): Promise<void> {
+    if (tabId === null || this.#ports.ensureLoop === undefined) return;
+    let result: "started" | "running" | "failed" = "failed";
+    try {
+      result = await this.#ports.ensureLoop(tabId);
+    } catch {
+      result = "failed";
+    }
+    if (result === "running") return;
+    await this.#serial(async () => {
+      const state = this.#state;
+      if (state === null || state.status !== "running") return;
+      const next = clone(state);
+      if (result === "started") next.lifetime.loopStarts += 1;
+      else next.lifetime.loopFailures += 1;
+      await this.#write(next);
+    });
+  }
+
+  /** Records a wake: by what, when, and whether this background is new since. */
+  #noteWake(next: ExperimentState, source: WakeSource, now: number): void {
+    if (!next.lifetime.boots.includes(this.#ports.bootId)) {
+      // This background was started again since the run last heard from one.
+      next.lifetime.boots = [...next.lifetime.boots, this.#ports.bootId].slice(-MAX_BOOTS);
+      next.lifetime.revivedBy[source] = (next.lifetime.revivedBy[source] ?? 0) + 1;
+    }
+    const log = next.wakes[source] ?? { n: 0, t: [] };
+    next.wakes[source] = { n: log.n + 1, t: [...log.t, now].slice(-WAKE_TIMES_MAX) };
+  }
+
+  #instruction(state: ExperimentState | null): Instruction {
+    if (state === null || state.status !== "running") return { stop: true };
+    return { wait: Math.max(0, state.timing.dueAt - this.#ports.clock.now()) };
   }
 
   async view(): Promise<ExperimentView> {
     return describe(await this.#serial(() => this.#load()), this.#ports.clock.now());
   }
 
-  /** Starts a new run for `user`, read first from the background, then from the tab. */
+  /** Starts a new run for `user`; the page loop in `tabId` carries it. */
   async start(user: string, tabId: number | null): Promise<ExperimentView | { readonly error: string }> {
     if (!USERNAME_PATTERN.test(user)) return { error: "username_unclear" };
     const started = await this.#serial(async () => {
       if ((await this.#load()) !== null) return false;
       const now = this.#ports.clock.now();
-      return await this.#write(newState(this.#ports.newId(), user, tabId, now, this.#ports.bootId));
+      const state = newState(this.#ports.newId(), user, tabId, now, this.#ports.bootId);
+      this.#noteWake(state, "start", now);
+      return await this.#write(state);
     });
     if (!started) return { error: this.#state === null ? "storage_write_failed" : "already_started" };
     await this.#alarm(true);
-    await this.#step("start");
+    await this.#ensureLoop(tabId);
     return this.view();
   }
 
@@ -548,7 +676,6 @@ export class Ao3HistoryExperiment {
       next.reason = "paused_by_you";
       next.timing.pausedAt = now;
       next.lifetime.pauses += 1;
-      this.#clearTimer();
       await this.#write(next);
     });
     await this.#alarm(false);
@@ -575,11 +702,12 @@ export class Ao3HistoryExperiment {
       next.timing.dueAt = Math.max(next.timing.dueAt, now);
       next.pace.consecutiveRetries = 0;
       if (tabId !== null) next.tabId = tabId;
+      this.#noteWake(next, "start", now);
       return await this.#write(next);
     });
     if (resumed) {
       await this.#alarm(true);
-      await this.#step("start");
+      await this.#ensureLoop(this.#state?.tabId ?? null);
     }
     return this.view();
   }
@@ -587,7 +715,6 @@ export class Ao3HistoryExperiment {
   /** Cancel and Clear: stops any request and removes everything stored. */
   async clear(): Promise<ExperimentView> {
     this.#abort?.abort();
-    this.#clearTimer();
     await this.#serial(async () => {
       const state = await this.#load();
       const keys = new Set<string>([AO3_HISTORY_EXPERIMENT_STATE_KEY]);
@@ -607,44 +734,67 @@ export class Ao3HistoryExperiment {
     return this.view();
   }
 
-  /** Continues a running run when nothing in this background is already doing so. */
-  async wake(source: WakeSource): Promise<void> {
-    if (this.#busy || this.#timer !== null) return;
-    await this.#step(source);
-  }
-
-  async #step(source: WakeSource): Promise<void> {
-    if (this.#busy) return;
-    this.#busy = true;
-    this.#clearTimer();
-    try {
-      await this.#stepOnce(source);
-    } finally {
-      this.#busy = false;
-    }
-  }
-
-  async #stepOnce(source: WakeSource): Promise<void> {
-    const prepared = await this.#serial(async (): Promise<{ request: ExperimentState | null; wait: number } | null> => {
+  /**
+   * Something other than the page loop woke the background (the alarm, the
+   * sheet, an AO3 page, the background starting). It is logged, and a
+   * running run's page loop is put (back) into the AO3 tab. It never reads.
+   */
+  async wake(source: Exclude<WakeSource, "tick" | "start">, tabId: number | null = null): Promise<void> {
+    const loopTab = await this.#serial(async () => {
       const state = await this.#load();
       if (state === null || state.status !== "running") return null;
       const next = clone(state);
+      this.#noteWake(next, source, this.#ports.clock.now());
+      if (source === "page" && tabId !== null) next.tabId = tabId;
+      await this.#write(next);
+      return tabId ?? next.tabId;
+    });
+    if (loopTab === null) {
+      if (this.#state?.status !== "running") await this.#alarm(false);
+      return;
+    }
+    await this.#ensureLoop(loopTab);
+  }
+
+  /**
+   * The page loop's tick from the visible AO3 tab `tabId`: makes the next
+   * request when it is due (the background's own, or tells the page to make
+   * it), else says how long to wait.
+   */
+  async tick(tabId: number | null): Promise<Instruction> {
+    const prepared = await this.#serial(async (): Promise<Instruction | { request: ExperimentState; token: string }> => {
+      const state = await this.#load();
+      if (state === null || state.status !== "running") return { stop: true };
+      const next = clone(state);
       const now = this.#ports.clock.now();
-      if (!next.lifetime.boots.includes(this.#ports.bootId)) {
-        // This background was started again since the run last made a request.
-        next.lifetime.boots = [...next.lifetime.boots, this.#ports.bootId].slice(-MAX_BOOTS);
-        next.lifetime.revivedBy[source] += 1;
+      this.#noteWake(next, "tick", now);
+      if (tabId !== null) next.tabId = tabId;
+      if (next.inFlight !== null) {
+        const lost = (next.inFlight.path === "background" && next.inFlight.boot !== this.#ports.bootId) ||
+          now - next.inFlight.at > LOST_AFTER_MS;
+        if (!lost) {
+          await this.#write(next);
+          return { wait: Math.max(1_000, next.inFlight.at + LOST_AFTER_MS - now) };
+        }
+        // Its answer never came: the background was unloaded under it, or
+        // the tab moved on.
+        next.timing.lost += 1;
+        next.errors.lost_request = (next.errors.lost_request ?? 0) + 1;
+        next.inFlight = null;
       }
-      if (next.nextPage > MAX_PAGES) return await this.#pauseWith(next, "page_limit", now);
+      if (next.nextPage > MAX_PAGES) {
+        await this.#pauseWith(next, "page_limit", now);
+        return { stop: true };
+      }
       const saves = this.#ports.saveActivity();
       if (saves.inFlight > 0 || now - saves.lastEndedAt < SAVE_SETTLE_MS) {
         next.pace.waitsForSave += 1;
         await this.#write(next);
-        return { request: null, wait: SAVE_RECHECK_MS };
+        return { wait: SAVE_RECHECK_MS };
       }
       if (now < next.timing.dueAt) {
-        if (JSON.stringify(next.lifetime) !== JSON.stringify(state.lifetime)) await this.#write(next);
-        return { request: null, wait: next.timing.dueAt - now };
+        await this.#write(next);
+        return { wait: next.timing.dueAt - now };
       }
       if (next.timing.countNextGap && next.timing.lastRequestAt !== null) {
         const gap = now - next.timing.lastRequestAt;
@@ -658,80 +808,102 @@ export class Ao3HistoryExperiment {
         }
       }
       // The request is on record before it is made, so a restarted
-      // background keeps the pace.
+      // background keeps the pace and knows it was lost.
+      const token = this.#ports.newId();
+      const path = next.path === "probe_background" || next.path === "background" ? "background" : "tab";
       next.timing.lastRequestAt = now;
-      // Until this answer is in, a background started again waits out the
-      // request's own time limit too, so two requests never overlap.
-      next.timing.dueAt = now + REQUEST_TIMEOUT_MS + 5_000 + this.#gap(next);
+      next.timing.dueAt = now + LOST_AFTER_MS + this.#gap(next);
       next.timing.countNextGap = true;
       next.timing.requests += 1;
+      next.inFlight = { token, at: now, boot: this.#ports.bootId, path, page: next.nextPage };
       if (!(await this.#write(next))) {
         next.storage.writeFailures += 1;
-        return await this.#pauseWith(next, "storage_write_failed", now);
+        await this.#pauseWith(next, "storage_write_failed", now);
+        return { stop: true };
       }
-      return { request: next, wait: 0 };
+      return { request: next, token };
     });
-    if (prepared === null) {
+    if (!("request" in prepared)) {
       if (this.#state?.status !== "running") await this.#alarm(false);
-      return;
+      return prepared;
     }
-    if (prepared.request === null) {
-      if (this.#state?.status === "running") this.#schedule(prepared.wait);
-      return;
-    }
-    const state = prepared.request;
-    const page = state.nextPage;
-    const path = state.path === "probe_background" || state.path === "background" ? "background" : "tab";
+    const { request, token } = prepared;
+    const url = historyPageURL(request.user, request.nextPage);
+    if (request.inFlight?.path === "tab") return { fetch: url, token };
     const abort = new AbortController();
     this.#abort = abort;
-    const sentAt = this.#ports.clock.now();
     let answer: LoadedPage;
     try {
-      answer = await this.#ports.loadPage(path, historyPageURL(state.user, page), state.tabId, abort.signal);
+      answer = await this.#ports.loadInBackground(url, abort.signal);
     } catch {
       answer = { kind: "failed", code: "network" };
     } finally {
       if (this.#abort === abort) this.#abort = null;
     }
-    const answeredAt = this.#ports.clock.now();
-    const keepGoing = await this.#serial(async () => {
-      const current = this.#state;
-      // Cancelled meanwhile: nothing is kept.
-      if (abort.signal.aborted || current === null || current.runId !== state.runId) return false;
+    return this.answer(token, answer);
+  }
+
+  /** The answer to the request `token`, from the background or the tab. */
+  async answer(token: string, answer: LoadedPage): Promise<Instruction> {
+    const instruction = await this.#serial(async (): Promise<Instruction> => {
+      const current = await this.#load();
+      // Cancelled, or given up as lost meanwhile: nothing is kept.
+      if (current === null || current.inFlight === null || current.inFlight.token !== token) {
+        return this.#instruction(current);
+      }
       const next = clone(current);
-      const ms = Math.max(0, answeredAt - sentAt);
+      const sent = current.inFlight!;
+      const { page, path } = sent;
+      next.inFlight = null;
+      const answeredAt = this.#ports.clock.now();
+      const ms = Math.max(0, answeredAt - sent.at);
+      next.timing.answers += 1;
       next.timing.requestMsTotal += ms;
       next.timing.requestMsMax = Math.max(next.timing.requestMsMax, ms);
       if (answer.kind === "response") {
+        next.timing.responses += 1;
         next.timing.pageCharsTotal += answer.chars;
         next.timing.pageCharsMax = Math.max(next.timing.pageCharsMax, answer.chars);
         if (answer.hidden === true) next.lifetime.hiddenTabPages += 1;
       }
+      // An answer can come after the run was paused: it is counted, no more.
+      if (next.status !== "running") {
+        await this.#write(next);
+        return this.#instruction(next);
+      }
       const result = classifyHistoryAnswer(answer, next.user, page, answeredAt);
-      if (result.kind === "page") return await this.#admit(next, page, result.read, path, answeredAt);
+      if (result.kind === "page") {
+        await this.#admit(next, page, result.read, path, answeredAt);
+        return this.#instruction(this.#state);
+      }
+      next.lastAnswer = answerNote(answer, result.code, next.user, answeredAt);
       next.errors[result.code] = (next.errors[result.code] ?? 0) + 1;
-      if (result.kind === "retry") return await this.#retry(next, result, answeredAt);
-      if (next.path === "probe_background" && TRY_THE_TAB.has(result.code)) {
+      if (
+        next.path === "probe_background" &&
+        (TRY_THE_TAB.has(result.code) || (result.kind === "retry" && TRY_THE_TAB_ON_RETRY.has(result.code)))
+      ) {
         next.probes.background = result.code;
         next.path = "probe_tab";
         next.timing.dueAt = answeredAt + this.#gap(next);
-        return await this.#write(next);
+        await this.#write(next);
+        return this.#instruction(next);
+      }
+      if (result.kind === "retry") {
+        await this.#retry(next, result, answeredAt);
+        return this.#instruction(this.#state);
       }
       if (next.path === "probe_tab") {
         next.probes.tab = result.code;
         if (TRY_THE_TAB.has(result.code)) {
           await this.#pauseWith(next, "no_working_path", answeredAt);
-          return false;
+          return { stop: true };
         }
       }
       await this.#pauseWith(next, result.code, answeredAt);
-      return false;
+      return { stop: true };
     });
-    if (keepGoing && this.#state?.status === "running") {
-      this.#schedule(Math.max(0, this.#state.timing.dueAt - this.#ports.clock.now()));
-    } else if (this.#state?.status !== "running") {
-      await this.#alarm(false);
-    }
+    if ("stop" in instruction) await this.#alarm(false);
+    return instruction;
   }
 
   #gap(state: ExperimentState): number {
@@ -831,6 +1003,7 @@ export class Ao3HistoryExperiment {
     if (await this.#write(next, extra)) return next.status === "running";
     // Nothing of this page was kept, and the cursor stays where it was.
     const failed = clone(this.#state ?? next);
+    failed.inFlight = null;
     failed.storage.writeFailures += 1;
     failed.errors.storage_write_failed = (failed.errors.storage_write_failed ?? 0) + 1;
     await this.#pauseWith(failed, "storage_write_failed", now);
@@ -850,6 +1023,47 @@ function duration(ms: number): string {
 }
 const kb = (bytes: number) => `${(bytes / 1_024).toFixed(1)} KB`;
 const average = (total: number, count: number) => (count > 0 ? total / count : 0);
+/** A time of day, in the iPhone's own time zone. */
+function clockTime(ms: number): string {
+  const date = new Date(ms);
+  return [date.getHours(), date.getMinutes(), date.getSeconds()].map((part) => String(part).padStart(2, "0")).join(":");
+}
+
+/** The median gap between consecutive times, or null with fewer than two. */
+export function medianInterval(times: readonly number[]): number | null {
+  if (times.length < 2) return null;
+  const gaps = times.slice(1).map((time, index) => time - times[index]!).sort((a, b) => a - b);
+  const middle = Math.floor(gaps.length / 2);
+  return gaps.length % 2 ? gaps[middle]! : (gaps[middle - 1]! + gaps[middle]!) / 2;
+}
+
+function describeWakes(wakes: ExperimentState["wakes"]): string {
+  return WAKE_SOURCES
+    .filter((source) => (wakes[source]?.n ?? 0) > 0)
+    .map((source) => {
+      const log = wakes[source]!;
+      const median = medianInterval(log.t);
+      return `${source} ${log.n}${median === null ? "" : ` (median ${duration(median)})`}`;
+    })
+    .join(", ") || "none";
+}
+
+function describeAnswer(note: AnswerNote | null): string {
+  if (note === null) return "—";
+  const parts = [
+    note.code,
+    note.status === null ? "no answer" : String(note.status),
+    note.host === null ? null : `${note.host} ${note.path ?? "other"}`,
+    note.type,
+    note.length === null ? null : kb(note.length),
+    `cf-mitigated ${note.cf ?? "none"}`,
+    note.server === null ? null : `server ${note.server}`,
+    note.ray === null ? null : `cf-ray ${note.ray}`,
+    note.title === null ? null : `“${note.title}”`,
+    clockTime(note.at),
+  ];
+  return parts.filter((part): part is string => part !== null).join(" · ");
+}
 
 /**
  * Counts, timings and error codes only. The reader's AO3 name, titles,
@@ -869,6 +1083,7 @@ export function describe(state: ExperimentState | null, now: number): Experiment
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([code, count]) => `${code}×${count}`)
     .join(", ");
+  const revived = WAKE_SOURCES.map((source) => `${source} ${state.lifetime.revivedBy[source] ?? 0}`).join(", ");
   const lines: [string, string][] = [
     ["Status", state.reason ? `${state.status} (${state.reason})` : state.status],
     ["Read from", state.path],
@@ -884,16 +1099,21 @@ export function describe(state: ExperimentState | null, now: number): Experiment
     ["Time since start", duration(wall)],
     ["Time running", duration(active)],
     ["Requests", String(t.requests)],
-    ["Average answer", seconds(average(t.requestMsTotal, t.requests))],
+    ["Answers", String(t.answers)],
+    ["Lost requests", String(t.lost)],
+    ["Average answer", seconds(average(t.requestMsTotal, t.answers))],
     ["Slowest answer", seconds(t.requestMsMax)],
-    ["Average page size", kb(average(t.pageCharsTotal, t.requests))],
+    ["Average page size", kb(average(t.pageCharsTotal, t.responses))],
     ["Largest page", kb(t.pageCharsMax)],
+    ["Last answer", describeAnswer(state.lastAnswer)],
     ["Planned gap", seconds(t.gapMs)],
     ["Average gap", seconds(average(t.gapTotalMs, t.gapCount))],
     ["Longest gap", seconds(t.maxGapMs)],
     ["Stalls over 30 s", `${t.stalls} (${duration(t.stalledMs)})`],
+    ["Wake-ups", describeWakes(state.wakes)],
     ["Background restarts", String(Math.max(0, state.lifetime.boots.length - 1))],
-    ["Restarted by", `alarm ${state.lifetime.revivedBy.alarm}, sheet ${state.lifetime.revivedBy.sheet}, timer ${state.lifetime.revivedBy.timer}, start ${state.lifetime.revivedBy.start}, other ${state.lifetime.revivedBy.boot}`],
+    ["Restarted by", revived],
+    ["Page loop starts / failures", `${state.lifetime.loopStarts} / ${state.lifetime.loopFailures}`],
     ["Pages read with tab hidden", String(state.lifetime.hiddenTabPages)],
     ["Pauses / resumes", `${state.lifetime.pauses} / ${state.lifetime.resumes}`],
     ["429 answers", String(state.pace.rateLimited)],
@@ -908,7 +1128,7 @@ export function describe(state: ExperimentState | null, now: number): Experiment
     ["Errors", errors || "none"],
   ];
   const report = [
-    "Trace AO3 History experiment v1",
+    "Trace AO3 History experiment v2",
     ...lines.map(([label, value]) => `${label}: ${value}`),
   ].join("\n");
   return {
@@ -921,35 +1141,148 @@ export function describe(state: ExperimentState | null, now: number): Experiment
   };
 }
 
+/**
+ * The FanFiction.net summary fill's own record (ffn-summary-fill.mts), as
+ * one line for the test build: what the last step did, or what stopped it.
+ */
+export function describeSummaryFill(value: unknown, now: number): string {
+  if (!isRecord(value) || typeof value.v !== "number") return "nothing yet";
+  const note = (record: Record<string, unknown>) => [
+    typeof record.status === "number" ? String(record.status) : null,
+    typeof record.host === "string" ? `${record.host} ${typeof record.path === "string" ? record.path : ""}`.trim() : null,
+    typeof record.cf === "string" ? `cf-mitigated ${record.cf}` : null,
+  ];
+  const count = (key: string) => (Array.isArray(value[key]) ? (value[key] as unknown[]).length : 0);
+  const waiting = `waiting: ${count("pending")} saved, ${count("queue")} backfill`;
+  const parts: (string | null)[] = [];
+  const last = isRecord(value.last) ? value.last : null;
+  if (last !== null) {
+    parts.push(
+      String(last.trigger ?? "?"),
+      String(last.stage ?? "?"),
+      String(last.outcome ?? "?"),
+      ...note(last),
+      typeof last.rows === "number" ? `rows ${last.rows}` : null,
+      typeof last.found === "number" ? `found ${last.found}` : null,
+      typeof last.send === "string" ? `sent ${last.send}` : null,
+      typeof last.at === "number" ? clockTime(last.at) : null,
+    );
+  }
+  const stop = isRecord(value.stop) ? value.stop : null;
+  if (stop !== null && typeof stop.until === "number" && stop.until > now) {
+    parts.push(
+      `stopped: ${String(stop.reason ?? "?")}`,
+      ...note(stop),
+      typeof stop.at === "number" ? clockTime(stop.at) : null,
+      `tries again ${clockTime(stop.until)}`,
+    );
+  }
+  parts.push(waiting);
+  return parts.filter((part): part is string => part !== null && part !== "").join(" · ");
+}
+
 // --- Safari wiring -----------------------------------------------------------------
 
 /**
- * Reads one History page inside the reader's AO3 tab: a same-site request
- * with the tab's own sign-in. Runs in the page, so it must use nothing from
- * outside this function.
+ * The page loop, put into the reader's AO3 tab. Runs in the page, so it must
+ * use nothing from outside this function. While the tab is visible it asks
+ * the background what to do, makes a same-site request when told (with the
+ * tab's own sign-in), hands the answer back, and waits as long as it is told;
+ * the timer lives in the page, so it outlasts the background. Hidden, it
+ * waits for the tab to be shown again.
  */
-async function readHistoryPageInTab(url: string, maxChars: number): Promise<unknown> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20_000);
-  try {
-    const response = await fetch(url, { credentials: "same-origin", cache: "no-store", redirect: "follow", signal: controller.signal });
-    const text = await response.text();
-    return {
-      ok: true,
-      status: response.status,
-      url: response.url,
-      html: text.length > maxChars ? text.slice(0, maxChars) : text,
-      chars: text.length,
-      retryAfter: response.headers.get("retry-after"),
-      cfMitigated: response.headers.get("cf-mitigated"),
-      contentType: response.headers.get("content-type"),
-      hidden: document.visibilityState === "hidden",
-    };
-  } catch (error) {
-    return { ok: false, error: controller.signal.aborted ? "timeout" : "network" };
-  } finally {
-    clearTimeout(timer);
+function ao3HistoryLoopInTab(message: string, maxChars: number): unknown {
+  const scope = globalThis as unknown as Record<string, unknown>;
+  const key = "__traceAo3HistoryLoopV2";
+  const existing = scope[key] as { poke(): void } | undefined;
+  if (existing) {
+    existing.poke();
+    return "running";
   }
+  const api = (scope.browser ?? scope.chrome) as { runtime: { sendMessage(message: unknown): unknown } } | undefined;
+  if (!api?.runtime) return "no_runtime";
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let busy = false;
+  let stopped = false;
+  const send = (body: Record<string, unknown>): Promise<Record<string, unknown> | null> => {
+    try {
+      return Promise.resolve(api.runtime.sendMessage({ type: message, ...body }))
+        .then((reply) => (reply && typeof reply === "object" ? reply as Record<string, unknown> : null), () => null);
+    } catch (_) {
+      return Promise.resolve(null);
+    }
+  };
+  const read = async (url: string): Promise<Record<string, unknown>> => {
+    const controller = new AbortController();
+    const limit = setTimeout(() => controller.abort(), 20_000);
+    try {
+      const response = await fetch(url, { credentials: "same-origin", cache: "no-store", redirect: "follow", signal: controller.signal });
+      const text = await response.text();
+      const title = /<title[^>]*>([\s\S]{0,400}?)<\/title>/i.exec(text.slice(0, 16_384));
+      return {
+        kind: "response",
+        status: response.status,
+        url: response.url,
+        html: text.length > maxChars ? text.slice(0, maxChars) : text,
+        chars: text.length,
+        retryAfter: response.headers.get("retry-after"),
+        cfMitigated: response.headers.get("cf-mitigated"),
+        contentType: response.headers.get("content-type"),
+        server: response.headers.get("server"),
+        cfRay: response.headers.get("cf-ray"),
+        title: title ? title[1] : null,
+        hidden: document.visibilityState === "hidden",
+      };
+    } catch (_) {
+      return { kind: "failed", code: controller.signal.aborted ? "timeout" : "network" };
+    } finally {
+      clearTimeout(limit);
+    }
+  };
+  const schedule = (ms: number) => {
+    if (timer !== null) clearTimeout(timer);
+    timer = setTimeout(run, ms);
+  };
+  const stop = () => {
+    stopped = true;
+    if (timer !== null) clearTimeout(timer);
+    document.removeEventListener("visibilitychange", shown);
+    delete scope[key];
+  };
+  async function run(): Promise<void> {
+    timer = null;
+    if (stopped || busy || document.visibilityState !== "visible") return;
+    busy = true;
+    let next: Record<string, unknown> | null = null;
+    try {
+      next = await send({ action: "tab_tick" });
+      // One request per tick: the background says when the next is due.
+      if (next && typeof next.fetch === "string" && typeof next.token === "string") {
+        const answer = await read(next.fetch);
+        next = await send({ action: "tab_answer", token: next.token, answer });
+      }
+    } finally {
+      busy = false;
+    }
+    if (next === null) {
+      // The background did not answer: try again shortly.
+      schedule(10_000);
+      return;
+    }
+    if (next.stop === true) {
+      stop();
+      return;
+    }
+    const wait = typeof next.wait === "number" && Number.isFinite(next.wait) ? next.wait : 10_000;
+    schedule(Math.min(Math.max(wait, 500), 16 * 60_000));
+  }
+  function shown(): void {
+    if (document.visibilityState === "visible" && !busy) schedule(500);
+  }
+  document.addEventListener("visibilitychange", shown);
+  scope[key] = { poke: () => { if (!busy) schedule(500); } };
+  schedule(0);
+  return "started";
 }
 
 /** The signed-in AO3 name a page shows: its own "My History" link. Runs in the page. */
@@ -973,6 +1306,35 @@ function stringOrNull(value: unknown): string | null {
   return typeof value === "string" ? value.slice(0, 200) : null;
 }
 
+/** An answer handed over by the page loop, checked field by field. */
+export function loadedPageFromTab(value: unknown): LoadedPage {
+  if (!isRecord(value)) return { kind: "failed", code: "tab_no_result" };
+  if (value.kind === "failed") return { kind: "failed", code: value.code === "timeout" ? "timeout" : "network" };
+  if (
+    value.kind !== "response" ||
+    typeof value.status !== "number" ||
+    typeof value.url !== "string" ||
+    typeof value.html !== "string"
+  ) {
+    return { kind: "failed", code: "tab_no_result" };
+  }
+  const html = value.html.length > MAX_PAGE_CHARS ? value.html.slice(0, MAX_PAGE_CHARS) : value.html;
+  return {
+    kind: "response",
+    status: value.status,
+    url: value.url,
+    html,
+    chars: typeof value.chars === "number" && Number.isSafeInteger(value.chars) ? value.chars : html.length,
+    retryAfter: stringOrNull(value.retryAfter),
+    cfMitigated: stringOrNull(value.cfMitigated),
+    contentType: stringOrNull(value.contentType),
+    server: stringOrNull(value.server),
+    cfRay: stringOrNull(value.cfRay),
+    title: stringOrNull(value.title),
+    hidden: value.hidden === true,
+  };
+}
+
 /** The background's own request, with Safari's own AO3 cookies if it sends them. */
 export async function loadInBackground(fetchImpl: typeof fetch, url: string, signal: AbortSignal): Promise<LoadedPage> {
   const controller = new AbortController();
@@ -982,6 +1344,7 @@ export async function loadInBackground(fetchImpl: typeof fetch, url: string, sig
   try {
     const response = await fetchImpl(url, { method: "GET", credentials: "include", cache: "no-store", redirect: "follow", signal: controller.signal });
     const text = await response.text();
+    const title = /<title[^>]*>([\s\S]{0,400}?)<\/title>/i.exec(text.slice(0, 16_384));
     return {
       kind: "response",
       status: response.status,
@@ -991,6 +1354,9 @@ export async function loadInBackground(fetchImpl: typeof fetch, url: string, sig
       retryAfter: response.headers.get("retry-after"),
       cfMitigated: response.headers.get("cf-mitigated"),
       contentType: response.headers.get("content-type"),
+      server: response.headers.get("server"),
+      cfRay: response.headers.get("cf-ray"),
+      title: title ? title[1]! : null,
     };
   } catch {
     return { kind: "failed", code: signal.aborted ? "cancelled" : controller.signal.aborted ? "timeout" : "network" };
@@ -1007,6 +1373,8 @@ interface InstallEnvironment {
   readonly permissions?: PermissionsPort;
   readonly alarms: AlarmsPort;
   readonly storageArea: StorageArea;
+  /** `storage.session`, where the summary fill keeps its state. */
+  readonly sessionArea?: StorageArea | null;
   readonly storageMode: "callback" | "promise";
   readonly fetch: typeof fetch;
   readonly saveActivity: () => { readonly inFlight: number; readonly lastEndedAt: number };
@@ -1025,13 +1393,27 @@ function randomToken(): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+/** Whether a message came from a page on AO3 itself, in a tab. */
+function ao3TabSender(sender: unknown, extensionId: string | undefined): number | null {
+  if (!isRecord(sender) || !isRecord(sender.tab) || typeof sender.tab.id !== "number") return null;
+  if (typeof extensionId === "string" && sender.id !== extensionId) return null;
+  const raw = typeof sender.url === "string" ? sender.url : sender.tab.url;
+  try {
+    const url = new URL(String(raw));
+    return url.protocol === "https:" && url.hostname === "archiveofourown.org" ? sender.tab.id : null;
+  } catch {
+    return null;
+  }
+}
+
 export function installAo3HistoryExperiment(environment: InstallEnvironment): Ao3HistoryExperiment {
   const { runtime, tabs, scripting, permissions, alarms, storageMode } = environment;
   const call = <T,>(target: unknown, method: string, args: readonly unknown[]) =>
     extensionCall<T>(target as Record<string, (...args: unknown[]) => unknown>, method, args, runtime, storageMode);
   const area = environment.storageArea;
+  const sessionArea = environment.sessionArea ?? null;
 
-  /** One tab, by the id the sheet handed over with its message; never a search. */
+  /** One tab, by the id a message handed over; never a search. */
   async function ao3Tab(sourceTabId: number | null): Promise<{ readonly id: number; readonly url: URL } | FailCode> {
     if (sourceTabId === null || tabs.get === undefined) return "tab_gone";
     let tab: unknown;
@@ -1053,37 +1435,13 @@ export function installAo3HistoryExperiment(environment: InstallEnvironment): Ao
   async function inTab<T>(tabId: number, func: (...args: never[]) => unknown, args: readonly unknown[]): Promise<T | FailCode> {
     if (scripting?.executeScript === undefined) return "tab_no_result";
     try {
-      const results = await withTimeout(call<unknown>(scripting, "executeScript", [{ target: { tabId }, func, args }]), REQUEST_TIMEOUT_MS + 5_000);
+      const results = await withTimeout(call<unknown>(scripting, "executeScript", [{ target: { tabId, frameIds: [0] }, func, args }]), REQUEST_TIMEOUT_MS + 5_000);
       if (results === "timeout") return "timeout";
       const first: unknown = Array.isArray(results) ? results[0] : undefined;
       return isRecord(first) && "result" in first ? first.result as T : "tab_no_result";
     } catch {
       return "tab_no_result";
     }
-  }
-
-  async function loadInTab(url: string, tabId: number | null, signal: AbortSignal): Promise<LoadedPage> {
-    const tab = await ao3Tab(tabId);
-    if (typeof tab === "string") return { kind: "failed", code: tab };
-    const result = await inTab<unknown>(tab.id, readHistoryPageInTab as (...args: never[]) => unknown, [url, MAX_PAGE_CHARS]);
-    if (signal.aborted) return { kind: "failed", code: "cancelled" };
-    if (typeof result === "string") return { kind: "failed", code: result as FailCode };
-    if (!isRecord(result)) return { kind: "failed", code: "tab_no_result" };
-    if (result.ok !== true) return { kind: "failed", code: result.error === "timeout" ? "timeout" : "network" };
-    if (typeof result.status !== "number" || typeof result.url !== "string" || typeof result.html !== "string") {
-      return { kind: "failed", code: "tab_no_result" };
-    }
-    return {
-      kind: "response",
-      status: result.status,
-      url: result.url,
-      html: result.html,
-      chars: typeof result.chars === "number" ? result.chars : result.html.length,
-      retryAfter: stringOrNull(result.retryAfter),
-      cfMitigated: stringOrNull(result.cfMitigated),
-      contentType: stringOrNull(result.contentType),
-      hidden: result.hidden === true,
-    };
   }
 
   const experiment = new Ao3HistoryExperiment({
@@ -1093,17 +1451,18 @@ export function installAo3HistoryExperiment(environment: InstallEnvironment): Ao
       remove: (keys) => call<void>(area, "remove", [keys]),
       keys: async () => Object.keys((await call<Record<string, unknown>>(area, "get", [null])) ?? {}),
     },
-    clock: {
-      now: () => Date.now(),
-      setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
-      clearTimeout: (handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
-    },
+    clock: { now: () => Date.now() },
     random: () => Math.random(),
     newId: randomToken,
     bootId: randomToken(),
     saveActivity: environment.saveActivity,
-    loadPage: (path, url, tabId, signal) =>
-      path === "background" ? loadInBackground(environment.fetch, url, signal) : loadInTab(url, tabId, signal),
+    loadInBackground: (url, signal) => loadInBackground(environment.fetch, url, signal),
+    async ensureLoop(sourceTabId) {
+      const tab = await ao3Tab(sourceTabId);
+      if (typeof tab === "string") return "failed";
+      const result = await inTab<unknown>(tab.id, ao3HistoryLoopInTab as (...args: never[]) => unknown, [AO3_HISTORY_EXPERIMENT_MESSAGE, MAX_PAGE_CHARS]);
+      return result === "started" || result === "running" ? result : "failed";
+    },
     ...(alarms.create === undefined
       ? {}
       : {
@@ -1134,31 +1493,88 @@ export function installAo3HistoryExperiment(environment: InstallEnvironment): Ao
     return valid[0]!;
   }
 
+  /** The summary fill's record, from wherever the fill keeps it. */
+  async function summaryFill(): Promise<string> {
+    const read = async (from: unknown) => {
+      if (from === null) return undefined;
+      const values = await call<Record<string, unknown>>(from, "get", [FFN_SUMMARY_STATE_KEY]).catch(() => null);
+      return values?.[FFN_SUMMARY_STATE_KEY];
+    };
+    const value = (await read(sessionArea)) ?? (await read(area));
+    return describeSummaryFill(value, Date.now());
+  }
+
+  /** Reset summary fill: removes the fill's session state (test build only). */
+  async function resetSummaryFill(): Promise<void> {
+    for (const from of [sessionArea, area]) {
+      if (from === null) continue;
+      await call<void>(from, "remove", [FFN_SUMMARY_STATE_KEY]).catch(() => undefined);
+    }
+  }
+
+  async function withFill(view: ExperimentView): Promise<ExperimentView & { readonly fill: string }> {
+    const fill = await summaryFill();
+    return { ...view, fill, report: view.report ? `${view.report}\nSummary fill: ${fill}` : "" };
+  }
+
   async function handle(message: Record<string, unknown>): Promise<unknown> {
     const tabId = typeof message.tabId === "number" && Number.isSafeInteger(message.tabId) ? message.tabId : null;
     switch (message.action) {
       case "status":
-        void experiment.wake("sheet");
-        return { ok: true, view: await experiment.view() };
+        void experiment.wake("sheet", tabId);
+        return { ok: true, view: await withFill(await experiment.view()) };
       case "start": {
         const user = await signedInUser(tabId);
-        if (typeof user !== "string") return { ok: false, error: user.error, view: await experiment.view() };
+        if (typeof user !== "string") return { ok: false, error: user.error, view: await withFill(await experiment.view()) };
         const started = await experiment.start(user, tabId);
-        return "error" in started ? { ok: false, error: started.error, view: await experiment.view() } : { ok: true, view: started };
+        return "error" in started
+          ? { ok: false, error: started.error, view: await withFill(await experiment.view()) }
+          : { ok: true, view: await withFill(started) };
       }
       case "pause":
-        return { ok: true, view: await experiment.pause() };
+        return { ok: true, view: await withFill(await experiment.pause()) };
       case "resume":
-        return { ok: true, view: await experiment.resume(tabId) };
+        return { ok: true, view: await withFill(await experiment.resume(tabId)) };
       case "clear":
-        return { ok: true, view: await experiment.clear() };
+        return { ok: true, view: await withFill(await experiment.clear()) };
+      case "reset_fill":
+        await resetSummaryFill();
+        return { ok: true, view: await withFill(await experiment.view()) };
       default:
         return { ok: false, error: "unknown_action" };
     }
   }
 
+  /** The last time each AO3 tab was given the page loop, so a busy page is not asked again and again. */
+  const loopOffered = new Map<number, number>();
+
   runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (!isRecord(message) || message.type !== AO3_HISTORY_EXPERIMENT_MESSAGE) return false;
+    if (!isRecord(message)) return false;
+    const pageTab = ao3TabSender(sender, runtime.id);
+    if (message.type === AO3_HISTORY_EXPERIMENT_MESSAGE && pageTab !== null) {
+      // The page loop, from the AO3 tab it runs in.
+      if (message.action === "tab_tick") {
+        void experiment.tick(pageTab).then(sendResponse, () => sendResponse({ wait: 10_000 }));
+        return true;
+      }
+      if (message.action === "tab_answer" && typeof message.token === "string") {
+        void experiment.answer(message.token, loadedPageFromTab(message.answer))
+          .then(sendResponse, () => sendResponse({ wait: 10_000 }));
+        return true;
+      }
+      return false;
+    }
+    if (pageTab !== null) {
+      // Any other AO3 page speaking to Trace: the reader is on AO3, so a
+      // running run's loop is put into that tab. Never answered here.
+      const now = Date.now();
+      if (now - (loopOffered.get(pageTab) ?? 0) >= 5_000) {
+        loopOffered.set(pageTab, now);
+        void experiment.wake("page", pageTab);
+      }
+      return false;
+    }
+    if (message.type !== AO3_HISTORY_EXPERIMENT_MESSAGE) return false;
     if (!isPopupSender(sender, runtime.id)) return false;
     void handle(message).then(sendResponse, () => sendResponse({ ok: false, error: "experiment_unavailable" }));
     return true;
@@ -1166,9 +1582,9 @@ export function installAo3HistoryExperiment(environment: InstallEnvironment): Ao
   alarms.onAlarm?.addListener((alarm) => {
     if (alarm.name === AO3_HISTORY_EXPERIMENT_ALARM) void experiment.wake("alarm");
   });
-  // A background started for any reason carries on a running run. The event
-  // that started it (the alarm, the sheet) answers first, so the report can
-  // say what brought the background back.
+  // A background started for any reason puts a running run's loop back. The
+  // event that started it (the alarm, the sheet, a page) is logged first, so
+  // the report can say what brought the background back.
   globalThis.setTimeout(() => void experiment.wake("boot"), 1_500);
   return experiment;
 }
