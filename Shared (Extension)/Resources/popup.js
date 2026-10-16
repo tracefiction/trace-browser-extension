@@ -1652,7 +1652,7 @@ function renderEarnedPermissionInvitation(story) {
   setEarnedAskLedger(story, "waiting");
   const onStory = story.kind === "story";
   if (earnedAllowedBeforeUpdate) {
-    // SH-R2, on a story or a list alike.
+    // The 'allow again' ask after an update, on a story or a list alike.
     drawEarnedAsk(onStory ? "ask-again-on-story" : "ask-again-on-list", {
       kicker: FIRST_TAP_WORDS.againKicker,
       kickerIcon: "alert",
@@ -2436,8 +2436,9 @@ const FIRST_TAP_ASK_DEADLINE_MS = 60_000;
 // Whether this confirmed save has been drawn yet, so that its arrival plays
 // once: not again when Safari's question goes up, nor on coming back to it.
 let firstTapSavedDrawn = false;
-// The story sites were allowed to an earlier version of Trace and are not
-// allowed to this one: the ask is SH-R2's. Read each time the sheet opens.
+// The story sites were allowed to an earlier version of Trace and none is
+// allowed to this one: the ask is the 'allow again' ask after an update. A
+// partial grant gets the everyday ask. Read each time the sheet opens.
 let earnedAllowedBeforeUpdate = false;
 // What was last drawn, so that an arrival plays once and not on every redraw.
 let firstTapDrawn = null;
@@ -2509,9 +2510,9 @@ const FIRST_TAP_WORDS = Object.freeze({
   listReadyBody: "Trace saves any story you open on AO3 or FanFiction.net.",
   partialHeading: "Safari didn’t allow every page",
   partialBody: "Tap Allow again and choose Always Allow, so Trace can save on every AO3 and FanFiction.net page.",
-  // SH-R2: the ask for a reader who allowed the story sites to an earlier
-  // version of Trace and has not allowed them to this one. Nothing here says
-  // why, or what they chose before.
+  // The 'allow again' ask after an update: for a reader who allowed the story
+  // sites to an earlier version of Trace and has allowed none to this one.
+  // Nothing here says why, or what they chose before.
   againKicker: "Safari needs your OK again",
   againHeading: "Let Trace save by itself again",
   againBody: "After the update, Safari asks once more. It lists AO3 and FanFiction.net’s 5 addresses.",
@@ -2994,8 +2995,8 @@ function drawFirstTapConfirmed(view, { waiting = false } = {}) {
   }
   setEarnedCheck("popup-earned-save", "pass", "Saved", "Saved to Trace");
   if (earnedAllowedBeforeUpdate) {
-    // SH-R2: the record says where the story stands; the ask is to allow
-    // again, with the rule line above the button.
+    // The 'allow again' ask after an update: the record says where the story
+    // stands; the ask is to allow again, with the rule line above the button.
     drawFirstTapSheet(waiting ? "access-waiting" : `${name}-again`, {
       kicker: FIRST_TAP_WORDS.againKicker,
       kickerIcon: "alert",
@@ -3878,7 +3879,8 @@ async function prepareEarnedPermissionFlow() {
     readGrantedOrigins(),
   ]);
   const hasGrant = await readCompleteEarnedGrant(grantedOrigins);
-  earnedAllowedBeforeUpdate = !hasGrant && earnedGrantPredatesThisVersion(onboarding);
+  earnedAllowedBeforeUpdate = !hasGrant && earnedGrantCoverage(grantedOrigins).granted === 0 &&
+    earnedGrantPredatesThisVersion(onboarding);
   const tab = await probeQueryActiveTab().catch(() => null);
   const story = classifyEarnedPage(tab?.url);
   sendSetupSheetOpened(story);

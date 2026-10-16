@@ -4335,7 +4335,7 @@ test("first tap: saved, already there and found are drawn from the background's 
   }
 });
 
-test("first tap: a reader who allowed the story sites to an earlier version is asked again as SH-R2, with the story's record", async () => {
+test("first tap: a reader who allowed the story sites to an earlier version is asked to allow again after an update, with the story's record", async () => {
   // The harness's build registers generation 3; the grant was recorded by 2.
   const earlier = { grantAt: 1, registrationVersion: 2, promptResult: "granted", completedAt: 1 };
   const onboarding = { registrationMode: "dynamic", firstTapSave: true };
@@ -4367,6 +4367,15 @@ test("first tap: a reader who allowed the story sites to an earlier version is a
   });
   own.h.firstTap.show({ state: "confirmed", workKey: "ao3:123", provenance: "already", mode: "bounded_manual", story: FIRST_TAP_STORY, entry: FIRST_TAP_ENTRY });
   assert.deepEqual(own.sheet(), savedWithAsk("already-in-library", "Already in your Library"));
+  // Some of the story sites are still allowed: the everyday ask, as the
+  // readiness report says partly allowed.
+  const partial = await openFirstTapPopup({
+    earnedPermissionOnboarding: onboarding,
+    grantedOrigins: [FULL_EARNED_ORIGINS[0]],
+    storageState: { traceEarnedPermissionOnboardingV1: earlier },
+  });
+  partial.h.firstTap.show({ state: "confirmed", workKey: "ao3:123", provenance: "already", mode: "bounded_manual", story: FIRST_TAP_STORY, entry: FIRST_TAP_ENTRY });
+  assert.deepEqual(partial.sheet(), savedWithAsk("already-in-library", "Already in your Library"));
   // No grant was ever recorded: the first-time ask.
   const none = await openFirstTapPopup({ earnedPermissionOnboarding: onboarding });
   none.h.firstTap.show({ state: "confirmed", workKey: "ao3:123", provenance: "saved_now", mode: "bounded_manual", story: FIRST_TAP_STORY, entry: FIRST_TAP_ENTRY });
@@ -5420,7 +5429,7 @@ test("first tap: the wording keeps to the rules for Trace's copy", async () => {
   assert.equal(words.askBody, "Tap Allow below, then <b>Always Allow</b>. Safari needs your permission before Trace can save as you read.");
   assert.equal(words.askBodySpoken, words.askBody.replace(/<\/?b>/g, ""), "read aloud, the same words");
   assert.equal(words.tryAgain, "Try again");
-  // SH-R2, word for word.
+  // The 'allow again' ask after an update, word for word.
   assert.equal(words.againKicker, "Safari needs your OK again");
   assert.equal(words.againHeading, "Let Trace save by itself again");
   assert.equal(words.againBody, "After the update, Safari asks once more. It lists AO3 and FanFiction.net’s 5 addresses.");
@@ -5435,8 +5444,8 @@ test("first tap: the wording keeps to the rules for Trace's copy", async () => {
   assert.equal(words.notAllowedOnRequestHeading, "Trace saves when you ask");
   assert.equal(words.notAllowedOnRequestBody, "To save another story, open Trace from the Page Menu on it and tap Save this story.");
   // Whether Safari shows its question again is not something Trace can know.
-  // The ask's body and SH-R2's body say it only where the next tap is the one
-  // that raises it: drawn while the story sites are read as not allowed.
+  // The ask's body and the 'allow again' body may say it: each describes
+  // Safari's own question, not its settings screen.
   for (const [key, line] of lines) {
     if (key !== "askBody" && key !== "againBody") assert.doesNotMatch(line, /Safari asks/i, key);
     // Only an expired sign-in asks for a new one, and only in the Trace app.

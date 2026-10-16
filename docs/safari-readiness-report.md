@@ -125,6 +125,9 @@ that is worth.
 earlier version is not there now. It does not say why, or what the reader
 chose then. It ends when the reader allows the story sites to this version,
 which records this version's generation.
+The record can't tell when access was lost, so a reader whose access ended
+before the update (an expired one-day grant, or access they removed) is also
+reported as `not_allowed_since_update`.
 
 The extension answers when Trace's popup opens, when Safari reports website
 access added or removed, when an update installs for a reader whose grant was
