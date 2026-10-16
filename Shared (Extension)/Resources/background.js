@@ -11451,7 +11451,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       storageMode,
       fetch: apiFetch,
       apiBase: "https://api.tracefiction.com",
-      nativeImportHandoff: false,
+      nativeImportHandoff: true,
       ...extension.scripting ? { scripting: extension.scripting } : {},
       ...extension.permissions ? { permissions: extension.permissions } : {},
       webOrigin: "https://www.tracefiction.com",
