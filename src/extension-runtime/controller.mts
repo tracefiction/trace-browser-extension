@@ -152,10 +152,11 @@ import {
 
 import { NativeLibraryImportProducer } from "./native-import.mjs";
 import {
-  FFN_SUMMARY_HOST_PATTERN,
   FfnSummaryFill,
-  SessionFillState,
+  LOCAL_STATE_TTL_MS,
   StoredAttempted,
+  StoredFillState,
+  createFfnTabReader,
   type ContributionOutcome,
 } from "./ffn-summary-fill.mjs";
 import { PopupPageRelay, POPUP_PAGE_RELAY } from "./popup-page-relay.mjs";
@@ -186,13 +187,11 @@ interface RuntimeEnvironment {
   readonly firstStoryDelay?: (milliseconds: number) => Promise<void>;
   readonly archiveReadinessStatus?: BrowserArchiveReadinessStatus;
   /**
-   * Reading missing FanFiction.net summaries from the reader's browser
-   * (ffn-summary-fill.mts). Absent: the feature is off.
+   * Reading missing FanFiction.net summaries in the reader's own
+   * FanFiction.net tab (ffn-summary-fill.mts). Absent: the feature is off.
    */
   readonly ffnSummaryFill?: {
-    /** Requests to the story site itself, never to Trace. */
-    readonly storySiteFetch: typeof fetch;
-    /** `storage.session` when the browser has it. */
+    /** `storage.session` when the browser has it; else local storage, expiring. */
     readonly sessionArea?: StorageArea | null;
   };
 }
@@ -502,20 +501,31 @@ export class SessionRuntimeController {
         environment.runtime,
         environment.storageMode,
       );
+    const { tabs, scripting, permissions } = environment;
+    const sessionArea = options.sessionArea ?? null;
     return new FfnSummaryFill({
-      fetch: options.storySiteFetch,
-      clock: {
-        now: () => Date.now(),
-        setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
-        clearTimeout: (handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
-      },
-      state: new SessionFillState(options.sessionArea === undefined || options.sessionArea === null
-        ? null
-        : {
-            get: (key) => call(options.sessionArea, "get", [key]),
-            set: (items) => call(options.sessionArea, "set", [items]),
-            remove: (key) => call(options.sessionArea, "remove", [key]),
-          }),
+      clock: { now: () => Date.now() },
+      // Session-only where the browser has it; otherwise local storage that
+      // expires, and is removed on sign-out like the rest.
+      state: sessionArea !== null
+        ? new StoredFillState({
+            get: (key) => call(sessionArea, "get", [key]),
+            set: (items) => call(sessionArea, "set", [items]),
+            remove: (key) => call(sessionArea, "remove", [key]),
+          })
+        : new StoredFillState({
+            get: (key) => storage.get(key),
+            set: (items) => storage.set(items),
+            remove: (key) => storage.remove(key),
+          }, { ttlMs: LOCAL_STATE_TTL_MS }),
+      tabs: createFfnTabReader({
+        hasScripting: typeof scripting?.executeScript === "function" && typeof tabs.get === "function",
+        // Only the tab a FanFiction.net page spoke from, or the sheet's own.
+        getTab: (sourceTabId) => call(tabs, "get", [sourceTabId]),
+        executeScript: (details) => call(scripting, "executeScript", [details]),
+        containsOrigin: async (origin) => typeof permissions?.contains === "function" &&
+          await call<boolean>(permissions, "contains", [{ origins: [origin] }]) === true,
+      }),
       // Ids only, capped, removed on sign-out (ffn-summary-fill.mts).
       attempted: new StoredAttempted({
         get: (key) => storage.get(key),
@@ -527,12 +537,6 @@ export class SessionRuntimeController {
         return scope === null ? null : `${scope.accountId}:${scope.epoch}`;
       },
       contributionsEnabled: () => preference.enabled(),
-      hostAllowed: async () => {
-        if (environment.permissions?.contains === undefined) return false;
-        return await call<boolean>(environment.permissions, "contains", [
-          { origins: [FFN_SUMMARY_HOST_PATTERN] },
-        ]) === true;
-      },
       listGaps: async () => {
         const result = await this.#service.executeAuthenticated(async (credential) => {
           let response: Response;
@@ -638,13 +642,17 @@ export class SessionRuntimeController {
     message: unknown,
     sender?: RuntimeSender,
   ): Promise<RuntimeHandleResponse> {
-    // A FanFiction.net page spoke: the reader is there. Any summary backfill
-    // waits until its pages have been quiet for a while.
-    if (this.#ffnSummaries !== null && typeof sender?.tab?.id === "number") {
-      if (archiveHostKindFromSender(sender) === "ffn") this.#ffnSummaries.ffnPageActivity();
-      else this.#ffnSummaries.elsewherePageActivity();
-    }
     const response = await this.#dispatch(message, sender);
+    // A FanFiction.net page spoke: the reader is there, so any summary work
+    // due is done now, in that tab. After the message's own work, so a save
+    // it carried is known first; never waited on.
+    if (
+      this.#ffnSummaries !== null &&
+      typeof sender?.tab?.id === "number" &&
+      archiveHostKindFromSender(sender) === "ffn"
+    ) {
+      void this.#ffnSummaries.ffnPageActivity(sender.tab.id);
+    }
     // An AO3 or FanFiction.net page keeps reading evidence and unconfirmed
     // state between replies. Every reply tells it which account session
     // answered, so it can drop that state as soon as the account changes.
@@ -1250,6 +1258,7 @@ export class SessionRuntimeController {
   async #executeStoryCommandWithEvidence(
     command: StoryTrackCommand,
     observer?: { beforeWrite?(): Promise<void> | void },
+    tabId?: number,
   ): Promise<StoryCommandEvidence> {
     let accountData = await this.#accountData.read().catch(() => null);
     if (
@@ -1288,7 +1297,7 @@ export class SessionRuntimeController {
       evidence.result.confirmation.summaryKnown !== true
     ) {
       // Never delays the save's own answer.
-      void summaries.storySaved(command, alreadyInLibrary);
+      void summaries.storySaved(command, alreadyInLibrary, tabId);
     }
     return evidence;
   }
@@ -1342,9 +1351,10 @@ export class SessionRuntimeController {
   async saveStoryWithEvidence(
     command: StoryTrackCommand,
     observer?: { beforeWrite?(): Promise<void> | void },
+    tabId?: number,
   ): Promise<StoryCommandEvidence> {
     await this.start();
-    return this.#executeStoryCommandWithEvidence(command, observer);
+    return this.#executeStoryCommandWithEvidence(command, observer, tabId);
   }
 
   /** Looks for one story in the Library. It cannot save. */

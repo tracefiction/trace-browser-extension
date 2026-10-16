@@ -64,7 +64,7 @@ function install(options = {}) {
     page: { injects: true, collected: null, private: undefined, story: null, names: null },
     storage: { value: undefined, readable: true, writes: 0 },
     now: 1_800_000_000_000,
-    calls: { inject: [], collect: [], mark: [], receipts: [] },
+    calls: { inject: [], collect: [], mark: [], receipts: [], saves: [] },
   };
   const binding = () => world.scope === null ? null : `${world.scope.epoch}.${world.scope.accountId}`;
   const confirmationFor = (workKey) => ({
@@ -135,7 +135,10 @@ function install(options = {}) {
           },
         };
       },
-      save: (command, observer) => service.executeWithEvidence(command, observer),
+      save: (command, observer, tabId) => {
+        world.calls.saves.push({ command, tabId });
+        return service.executeWithEvidence(command, observer);
+      },
       presence: (workKey) => service.presence(workKey),
       // Trace's own answer about one story, for the account that asks.
       membership: (workKey) => readStoryMembership(session, {
@@ -215,6 +218,24 @@ test("opening Trace on a story saves it once, through the guarded save, before a
     entry: { status: "READING", readerStatus: "READING", canonicalReaderStatus: "READING", chapters: { current: 3, total: 40 } },
   });
   assert.equal(world.calls.receipts[0].mode, "bounded_manual");
+});
+
+test("a FanFiction.net story saved from the sheet carries the author its page named, and its tab, to the save", async () => {
+  const world = install();
+  world.tabs.set(7, { id: 7, url: "https://www.fanfiction.net/s/9900000101/1/A-Story", active: true, incognito: false });
+  const payload = {
+    s: "ffn", at: "2026-10-12T12:00:00.000Z",
+    item: { src: "ffn", ctx: "story", u: "https://www.fanfiction.net/s/9900000101/", t: "A Story", sm: null },
+  };
+  world.page.collected = { ok: true, workKey: "ffn:9900000101", title: "A Story", ffnAuthorId: "9900000042", payload };
+  await world.worker().popup().open();
+  await turns();
+
+  assert.equal(world.calls.saves.length, 1);
+  const [{ command, tabId }] = world.calls.saves;
+  assert.equal(command.ffnAuthorId, "9900000042");
+  assert.deepEqual(command.payload, payload, "the author stays beside the payload");
+  assert.equal(tabId, 7);
 });
 
 test("nothing is injected or saved off a story page, for a tab the popup could not read, or once the sites are allowed", async () => {

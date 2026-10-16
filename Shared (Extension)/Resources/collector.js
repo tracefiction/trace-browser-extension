@@ -3786,7 +3786,7 @@ function handleCollectorMessage(msg, sender, sendResponse, relayCommand) {
     } catch (_) {
       firstTapPrivate = null;
     }
-    sendResponse({
+    var firstTapReply = {
       ok: true,
       workKey: firstTapWorkKey,
       private: firstTapPrivate,
@@ -3797,7 +3797,15 @@ function handleCollectorMessage(msg, sender, sendResponse, relayCommand) {
         at: new Date().toISOString(),
         item: firstTapItem,
       },
+    };
+    // As with a save the page sends itself, a FanFiction.net story with no
+    // summary names its author beside the payload, never inside it.
+    var firstTapHinted = withFfnAuthorHint({
+      type: "TRACE_CONNECT_AND_SAVE",
+      payload: firstTapReply.payload,
     });
+    if (firstTapHinted.ffnAuthorId) firstTapReply.ffnAuthorId = firstTapHinted.ffnAuthorId;
+    sendResponse(firstTapReply);
     return false;
   }
 

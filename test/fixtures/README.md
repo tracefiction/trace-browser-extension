@@ -36,3 +36,11 @@ so the two sides cannot drift apart. Its identifiers are invented.
 `ffn_story_not_found_mobile.html` is a synthetic FanFiction.net-shaped mobile
 page for a story that no longer exists ("Story Not Found"), for the summary
 reader's skip rule. It is not a snapshot of a live page.
+
+`ffn-author/` holds synthetic FanFiction.net-shaped author story lists for the
+summary reader: `mobile_author_stories.html` is the mobile layout of an
+author's "My Stories" (`/u/<id>/?a=s`, as m. serves it and www serves it on a
+phone), written as the site writes it, with single-quoted and unquoted
+attributes (`<div class=gray>`); `desktop_author_stories.html` is the desktop
+profile, which lists the author's favourites before their own stories.
+Invented names, ids, titles and summaries; not snapshots of live pages.
