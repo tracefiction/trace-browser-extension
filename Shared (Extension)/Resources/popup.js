@@ -1148,14 +1148,14 @@ function storyNameForAnnouncement() {
 
 function earnedAnnouncementForState(code, heading, detail) {
   switch (code) {
-    case "P1": return "Trace is on this story. Saving your story. Keep reading; a note appears on the page when it’s saved.";
+    case "P1": return "Saving this story. Keep reading. You’ll see a note on the page once it’s saved.";
     case "P2": {
       const already = heading.startsWith("Already");
       const name = storyNameForAnnouncement();
       const said = `${already ? "Already in your Library" : "Saved to your Library"}${name ? `: ${name}` : ""}.`;
-      return already ? said : `${said} Your chapter fills in as you read.`;
+      return already ? said : `${said} Trace keeps your place as you read.`;
     }
-    case "P5": return "Still confirming your story. Keep reading; it’ll appear in Trace. If it hasn’t after a minute, reload this page.";
+    case "P5": return "Still saving. Keep reading. If it’s not in your Library in a minute, reload this page.";
     case "P6": return "Finish setup in the Trace app. Create an account or sign in, then come back.";
     case "connecting-account": return "Connecting to your account.";
     case "account-unreachable": return "Trace couldn’t connect to your account. Open Trace, then come back.";
@@ -1253,10 +1253,19 @@ function setReaderImport(offered) {
   return !button.hidden || Boolean(link && !link.hidden) || !document.getElementById("popup-import-open-tabs")?.hidden;
 }
 
+/**
+ * What holds the body: the body itself, and beside it, where the ask shows
+ * it, the picture of Safari's question. Whatever comes after the body goes
+ * after this.
+ */
+function earnedLeadRow() {
+  return document.getElementById("popup-earned-lead-row") || document.getElementById("popup-earned-lead");
+}
+
 /** The record sits under the headline, or after the body where a state asks. */
 function placeEarnedRecord(afterBody) {
   const record = document.getElementById("popup-earned-record");
-  const anchor = document.getElementById(afterBody ? "popup-earned-lead" : "popup-earned-heading-row");
+  const anchor = afterBody ? earnedLeadRow() : document.getElementById("popup-earned-heading-row");
   if (record && anchor && anchor.nextElementSibling !== record) anchor.after(record);
 }
 
@@ -1419,7 +1428,7 @@ function setEarnedFailure(failure) {
     box = document.createElement("p");
     box.id = "popup-earned-failure";
     box.className = "popup-earned-failure";
-    const lead = document.getElementById("popup-earned-lead");
+    const lead = earnedLeadRow();
     scroll.insertBefore(box, lead ? lead.nextSibling : null);
   }
   if (!box) return;
@@ -1523,13 +1532,13 @@ async function reloadEarnedStory() {
       stateCode: "reload",
       glyph: "alert",
       glyphTone: "warning",
-      heading: "Reload this page to keep going",
-      lead: "Trace couldn’t reload this tab. Reload the page, then return to the Trace app. Nothing was saved yet.",
+      heading: "Reload this page",
+      lead: "Trace couldn’t reload it for you. Reload the page to save this story. Nothing is saved yet.",
     });
     setEarnedResult(
       "failure",
-      "Reload this page to keep going.",
-      "Nothing was saved yet.",
+      "Reload this page.",
+      "Trace couldn’t reload it for you. Reload the page to save this story. Nothing is saved yet.",
     );
     configureEarnedActions({
       label: "Try again",
@@ -1660,15 +1669,15 @@ function renderEarnedAccessPending(story) {
   leaveFirstTapSheet();
   setEarnedCopy({
     stateCode: "P1",
-    kicker: "Trace is on this story",
+    kicker: FIRST_TAP_WORDS.allowedKicker,
     kickerIcon: "check",
-    heading: "Saving your story…",
-    lead: "Keep reading. A note appears on the page when it’s saved.",
+    heading: "Saving this story…",
+    lead: "Keep reading. You’ll see a note on the page once it’s saved.",
   });
   setEarnedCheck("popup-earned-story", "pass", story.site, "Story page");
   setEarnedCheck("popup-earned-access", "pass", "Allowed", "Website access");
   setEarnedCheck("popup-earned-save", "checking", "Reloading", "Saved to Trace");
-  setEarnedResult("checking", "Saving your story.", "Keep reading; a note appears on the page when it’s saved.");
+  setEarnedResult("checking", "Saving this story.", "Keep reading. You’ll see a note on the page once it’s saved.");
   configureEarnedActions({ label: "Keep reading", action: "close", emphasis: "secondary" });
 }
 
@@ -1682,7 +1691,7 @@ function renderEarnedAskWaiting() {
 function renderEarnedPartialAccess() {
   drawEarnedAsk("access-partial", {
     heading: FIRST_TAP_WORDS.partialHeading,
-    body: firstTapCounted(FIRST_TAP_WORDS.partialBody),
+    body: FIRST_TAP_WORDS.partialBody,
     rule: true,
     primary: earnedAllow(),
     secondary: firstTapButton.notNow,
@@ -1806,7 +1815,7 @@ function renderEarnedSaved(story, work, identity, alreadyInLibrary = false, conf
   const confirmation = confirmationText ??
     (alreadyInLibrary ? "Already in your Library" : "Saved to your Library");
   const title = storyTitle(identity);
-  const lead = "Your chapter fills in as you read. Your story is waiting in Trace whenever you open it.";
+  const lead = "Trace keeps your place as you read. Find it in your Library in the Trace app.";
   if (title) {
     setEarnedCopy({
       stateCode: "P2",
@@ -1830,18 +1839,18 @@ function renderEarnedSaved(story, work, identity, alreadyInLibrary = false, conf
     lookUpSavedTitle(story, work, alreadyInLibrary);
   }
   setEarnedCheck("popup-earned-save", "pass", "Saved", "Saved to Trace");
-  setEarnedResult("success", `${confirmation}.`, "Your chapter fills in as you read.");
+  setEarnedResult("success", `${confirmation}.`, "Trace keeps your place as you read.");
   configureEarnedActions({ label: "Keep reading", action: "close", emphasis: "secondary" });
 }
 
 function renderEarnedDelayed(story) {
   setEarnedCopy({
     stateCode: "P5",
-    heading: "Still confirming your story",
-    lead: "Keep reading; it’ll appear in Trace. If it hasn’t after a minute, reload this page.",
+    heading: "Still saving…",
+    lead: "Keep reading. If it’s not in your Library in a minute, reload this page.",
   });
-  setEarnedResult("checking", "Still confirming your story.",
-    "Keep reading; it’ll appear in Trace. If it hasn’t after a minute, reload this page.");
+  setEarnedResult("checking", "Still saving.",
+    "Keep reading. If it’s not in your Library in a minute, reload this page.");
   configureEarnedActions(
     { label: "Keep reading", action: "close", emphasis: "secondary" },
     { label: "Check again", action: "check_story", emphasis: "tertiary" },
@@ -2293,7 +2302,7 @@ function earnedWorkKey(rawUrl) {
 
 /**
  * Whether the last page sync already listed this story in the Library. It
- * only chooses between "Saving your story…" and a neutral "Checking your
+ * only chooses between "Saving this story…" and a neutral "Checking your
  * Library…" during session handover; it is never described as a save.
  */
 async function readKnownInLibrary(rawUrl) {
@@ -2390,27 +2399,24 @@ let firstTapAnswerWait = null;
 // of it. Nothing is lost at the deadline: a request that comes back later, a
 // permission change, and the popup coming back into view are each still read.
 const FIRST_TAP_ASK_DEADLINE_MS = 60_000;
-// A confirmed save is on show by itself for this long before the ask for
-// lasting access arrives under it: one thing to read at a time.
-const FIRST_TAP_ASK_ARRIVES_MS = 1_100;
-let firstTapAskTimer = null;
-let firstTapAskArrived = false;
+// Whether this confirmed save has been drawn yet, so that its arrival plays
+// once: not again when Safari's question goes up, nor on coming back to it.
+let firstTapSavedDrawn = false;
 // What was last drawn, so that an arrival plays once and not on every redraw.
 let firstTapDrawn = null;
 let firstTapConfirmationDelivered = false;
 
-// Every word the first-tap sheet shows. `{count}` is the number of story-site
-// addresses this build asks Safari for. Nothing here says how long access
+// Every word the first-tap sheet shows. Nothing here says how long access
 // lasts, and nothing sends the reader to Safari's settings to check it.
 const FIRST_TAP_WORDS = Object.freeze({
   storyStandIn: "This story",
   connecting: "Connecting to your account…",
-  accountMissingHeading: "Trace couldn’t connect to your account",
-  accountMissingBody: "Trace in Safari doesn’t have your account yet. Open the Trace app, then come back and tap Trace again.",
+  accountMissingHeading: "Open the Trace app first",
+  accountMissingBody: "Safari doesn’t have your Trace sign-in yet. Open the Trace app, then come back and tap Trace again.",
   accountUnreachableHeading: "Trace can’t reach your account right now",
   accountUnreachableBody: "Check your connection, then try again.",
-  reconnectHeading: "Open the Trace app to reconnect",
-  reconnectBody: "Trace in Safari needs your account again. Open the Trace app, then come back and tap Trace again.",
+  reconnectHeading: "Sign in again in the Trace app",
+  reconnectBody: "Your Trace sign-in in Safari has expired. Open the Trace app, then come back and tap Trace again.",
   saveThisStory: "Save this story",
   automaticSavingOffHeading: "Automatic saving is off",
   turnAutomaticSavingOn: "Turn automatic saving on",
@@ -2447,13 +2453,13 @@ const FIRST_TAP_WORDS = Object.freeze({
   notInLibraryBody: "Trace checked and didn’t find it.",
   refusedHeading: "Trace couldn’t save this story",
   refusedBody: "It wasn’t added to your Library. Try again in a moment.",
-  allowedKicker: "Allowed on AO3 and FanFiction.net",
-  allowedHeading: "That’s it. Keep reading.",
-  allowedBody: "Trace saves the stories you open there and keeps your place. Your Library is in the Trace app.",
+  allowedKicker: "AO3 and FanFiction.net allowed",
+  allowedHeading: "Trace now saves as you read",
+  allowedBody: "Any story you open on AO3 or FanFiction.net is saved, with the chapter you’re on. Find them in the Trace app.",
   allowedOffHeading: "Automatic saving is off",
-  allowedOffBody: "Trace in Safari is set to save stories only when you ask.",
-  registrationFailedHeading: "Trace couldn’t finish turning on automatic saving",
-  registrationFailedBody: "Safari allowed AO3 and FanFiction.net, but Trace’s part didn’t start.",
+  allowedOffBody: "Right now Trace only saves a story when you tap Save this story.",
+  registrationFailedHeading: "Automatic saving didn’t start",
+  registrationFailedBody: "Safari said yes, but Trace couldn’t start saving. Try again.",
   notAllowedHeading: "Trace will save when you tap it",
   notAllowedBody: "To save another story, open Trace from the Page Menu on it. You can let it save by itself any time.",
   // With automatic saving off, opening Trace on a story does not save it.
@@ -2462,12 +2468,12 @@ const FIRST_TAP_WORDS = Object.freeze({
   // Opened on a list or a site's home page, before the story sites are allowed.
   listAskHeading: "Let Trace save stories as you read",
   listAskBody: "This page isn’t a story. Allow AO3 and FanFiction.net, then open any story and Trace saves it.",
-  listReadyHeading: "Open any story to save it",
-  listReadyBody: "Trace saves it as it opens.",
-  partialHeading: "Safari allowed only some addresses",
-  partialBody: "Trace needs all {count} of AO3 and FanFiction.net’s addresses to save by itself.",
-  notKnownHeading: "Trace couldn’t check with Safari",
-  notKnownBody: "AO3 and FanFiction.net may be allowed already. Check again, or ask once more.",
+  listReadyHeading: "Open a story to save it",
+  listReadyBody: "Trace saves any story you open on AO3 or FanFiction.net.",
+  partialHeading: "Safari didn’t allow every page",
+  partialBody: "Tap Allow again and choose Always Allow, so Trace can save on every AO3 and FanFiction.net page.",
+  notKnownHeading: "Trace couldn’t tell what you chose",
+  notKnownBody: "You may have allowed AO3 and FanFiction.net already. Tap Check again, or Allow to ask again.",
 });
 
 /** Sends a request over the port. False when there is no port, or it would not take it. */
@@ -2497,11 +2503,6 @@ function firstTapTabIsPrivate(tab) {
 
 function setFirstTapState(name) {
   document.body.dataset.traceFirstTapState = name;
-}
-
-/** The words with the build's own count of story-site addresses in them. */
-function firstTapCounted(words) {
-  return words.replace("{count}", String(earnedOrigins().length));
 }
 
 /** A line as it is read aloud: a full stop, and no trailing ellipsis. */
@@ -2555,7 +2556,7 @@ function firstTapTextBox(name) {
 function firstTapAskBox(create) {
   let box = document.getElementById("popup-earned-ask");
   if (box || !create) return box;
-  const before = document.getElementById("popup-earned-note") || document.getElementById("popup-earned-lead");
+  const before = document.getElementById("popup-earned-note") || earnedLeadRow();
   if (!before) return null;
   box = firstTapTextBox("ask");
   // Focus is put here when the reader comes back to the ask.
@@ -2571,7 +2572,7 @@ function firstTapAskBox(create) {
 function firstTapNoteBox(create) {
   let box = document.getElementById("popup-earned-note");
   if (box || !create) return box;
-  const lead = document.getElementById("popup-earned-lead");
+  const lead = earnedLeadRow();
   if (!lead) return null;
   box = firstTapTextBox("note");
   const action = document.createElement("button");
@@ -2721,7 +2722,9 @@ function firstTapSaveKicker(view) {
  * record, news of the save with a quiet button of its own (`note`), a second
  * headline and body, the rule line for a tap that leads to Safari's question,
  * and up to two buttons. `record.heading` makes the story's title the
- * headline. What is read aloud is `announce`, or the headline and body.
+ * headline. `bodyMarkup` is a body with words in bold, and `prompt` puts the
+ * picture of Safari's question beside it, or under it on a narrow sheet. What is read aloud is `announce`,
+ * or the headline and body.
  */
 function drawFirstTapSheet(name, {
   kicker = "",
@@ -2730,6 +2733,8 @@ function drawFirstTapSheet(name, {
   glyph = "",
   glyphTone = "",
   body = "",
+  bodyMarkup = "",
+  prompt = false,
   record = null,
   recordAfterBody = false,
   note = null,
@@ -2753,6 +2758,7 @@ function drawFirstTapSheet(name, {
     glyphTone,
     heading,
     lead: body,
+    leadMarkup: bodyMarkup,
     record,
     ruleMarkup: rule
       ? (safariQuestionButtonsAreAllBlue() ? FIRST_TAP_WORDS.ruleEveryButtonBlue : FIRST_TAP_WORDS.rule)
@@ -2783,6 +2789,12 @@ function drawFirstTapSheet(name, {
       document.getElementById("popup-earned-primary")?.setAttribute("aria-describedby", "popup-earned-ask-body");
     }
   }
+  if (prompt) {
+    // The body says what to tap, the picture beside it shows it, and the main
+    // button is described by it.
+    showSafariPrompt(document.getElementById("popup-earned-lead"));
+    document.getElementById("popup-earned-primary")?.setAttribute("aria-describedby", "popup-earned-lead");
+  }
   const ruleEl = document.getElementById("popup-earned-rule");
   const primaryButton = document.getElementById("popup-earned-primary");
   if (rule) {
@@ -2798,22 +2810,13 @@ function drawFirstTapSheet(name, {
   clearFirstTapMotion();
   const section = document.getElementById("popup-earned-permission");
   const pin = document.getElementById("popup-earned-pin");
-  if (motion === "landed") {
-    playFirstTapMotion("popup-first-tap-fade", [
-      document.getElementById("popup-earned-kicker"),
-      section?.querySelector(".popup-earned-record-state"),
-    ]);
-  } else if (motion === "ask") {
-    playFirstTapMotion("popup-first-tap-rise", [askBox, pin, document.getElementById("popup-earned-scroll-actions")]);
-  } else if (motion === "settled") {
+  if (motion === "settled") {
     playFirstTapMotion("popup-first-tap-fade", [section?.querySelector(".popup-earned-scroll"), pin]);
   }
 }
 
 /** Leaves nothing of the first-tap sheet on a popup that has moved on from it. */
 function leaveFirstTapSheet() {
-  if (firstTapAskTimer !== null) clearTimeout(firstTapAskTimer);
-  firstTapAskTimer = null;
   firstTapDrawn = null;
   endFirstTapBusy();
   clearFirstTapMotion();
@@ -2930,18 +2933,17 @@ const firstTapButton = Object.freeze({
 });
 
 /**
- * A confirmed save: the confirmation, the story's record with its real
- * status, and then the ask for lasting access. The ask arrives a moment after
- * the save is shown; while Safari's question is up it stays, with its button
- * waiting.
+ * A confirmed save: one line that says so, and under it the ask for lasting
+ * access, which is the sheet's headline. Both arrive together, so nothing
+ * moves when the ask comes. While Safari's question is up it stays, with its
+ * button waiting.
  */
 function drawFirstTapConfirmed(view, { waiting = false } = {}) {
   const name = view.provenance === "saved_now" ? "saved"
     : view.provenance === "already" ? "already-in-library" : "in-library";
-  if (waiting) firstTapAskArrived = true;
-  const withAsk = firstTapAskArrived;
-  const record = firstTapRecord(view);
   const confirmation = firstTapSaveKicker(view);
+  const arriving = !firstTapSavedDrawn && !waiting;
+  firstTapSavedDrawn = true;
   if (!firstTapConfirmationDelivered) {
     firstTapConfirmationDelivered = true;
     void deliverFirstStoryConfirmation();
@@ -2949,25 +2951,19 @@ function drawFirstTapConfirmed(view, { waiting = false } = {}) {
   setEarnedCheck("popup-earned-save", "pass", "Saved", "Saved to Trace");
   drawFirstTapSheet(waiting ? "access-waiting" : name, {
     ...confirmation,
-    heading: record.title,
-    record: { ...record, title: "", heading: true },
-    ask: withAsk ? { heading: FIRST_TAP_WORDS.askHeading, body: FIRST_TAP_WORDS.askBody } : null,
-    primary: !withAsk ? { hidden: true } : waiting ? firstTapButton.waiting : firstTapButton.allow,
-    secondary: withAsk ? firstTapButton.notNow : null,
+    heading: FIRST_TAP_WORDS.askHeading,
+    bodyMarkup: FIRST_TAP_WORDS.askBody,
+    prompt: true,
+    primary: waiting ? firstTapButton.waiting : firstTapButton.allow,
+    secondary: firstTapButton.notNow,
     result: "success",
     announce: waiting
       ? firstTapSpoken(FIRST_TAP_WORDS.waitingForSafari)
-      : withAsk
-        ? `${firstTapSpoken(FIRST_TAP_WORDS.askHeading)} ${FIRST_TAP_WORDS.askBodySpoken}`
-        : `${firstTapSpoken(confirmation.kicker)} ${firstTapSpoken(record.spokenName)} ${record.spokenLabel}`,
-    motion: !withAsk ? "landed" : firstTapDrawn === name ? "ask" : "",
+      : `${firstTapSpoken(confirmation.kicker)} ${firstTapSpoken(FIRST_TAP_WORDS.askHeading)} ${FIRST_TAP_WORDS.askBodySpoken}`,
+    // The save lands and the ask comes with it in one cross-fade, in place:
+    // nothing slides, so nothing reaches past the sheet's foot as it comes.
+    motion: arriving ? "settled" : "",
   });
-  if (withAsk || firstTapAskTimer !== null) return;
-  firstTapAskTimer = setTimeout(() => {
-    firstTapAskTimer = null;
-    firstTapAskArrived = true;
-    if (firstTapLastView?.state === "confirmed" && !firstTapAccess && !firstTapSetAside) drawFirstTap();
-  }, FIRST_TAP_ASK_ARRIVES_MS);
 }
 
 /**
@@ -3067,7 +3063,7 @@ function renderFirstTapAccess(access, view) {
       drawFirstTapSheet("access-partial", {
         ...confirmation,
         heading: FIRST_TAP_WORDS.partialHeading,
-        body: firstTapCounted(FIRST_TAP_WORDS.partialBody),
+        body: FIRST_TAP_WORDS.partialBody,
         rule: true,
         primary: firstTapButton.allow,
         secondary: firstTapButton.notNow,
@@ -3134,10 +3130,8 @@ function renderFirstTapView(view, { waiting = false } = {}) {
   const story = firstTapStory;
   if (!view || !story) return;
   if (view.state !== "confirmed") {
-    // The ask follows a confirmed save, and arrives after each one afresh.
-    if (firstTapAskTimer !== null) clearTimeout(firstTapAskTimer);
-    firstTapAskTimer = null;
-    firstTapAskArrived = false;
+    // The ask comes with a confirmed save, and arrives with each one afresh.
+    firstTapSavedDrawn = false;
   }
   stopStoryConfirmation();
   const record = firstTapRecord(view);
@@ -3794,7 +3788,7 @@ function sendFirstTapSave(look) {
 }
 
 /**
- * After the reload, "Saving your story…" waits for the page to report in.
+ * After the reload, "Saving this story…" waits for the page to report in.
  * A page that never does (Safari did not run Trace on it, or the background
  * missed it) does not hold the sheet: after the popup's usual patience it
  * says the story is still being confirmed, and Check again looks.
@@ -5214,7 +5208,6 @@ function runEarnedAction(button) {
   }
   if (action === "first_tap_show_ask") {
     firstTapAccess = null;
-    firstTapAskArrived = true;
     drawFirstTap();
     // This button is now a different one. Focus goes to what was asked for.
     focusFirstTapAsk();
