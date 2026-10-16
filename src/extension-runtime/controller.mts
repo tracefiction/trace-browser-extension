@@ -159,6 +159,7 @@ import {
   type ContributionOutcome,
 } from "./ffn-summary-fill.mjs";
 import { PopupPageRelay, POPUP_PAGE_RELAY } from "./popup-page-relay.mjs";
+import { storySaveEnded, storySaveStarted } from "./story-save-activity.mjs";
 
 export {
   SESSION_MESSAGE_TYPES,
@@ -1248,6 +1249,19 @@ export class SessionRuntimeController {
   }
 
   async #executeStoryCommandWithEvidence(
+    command: StoryTrackCommand,
+    observer?: { beforeWrite?(): Promise<void> | void },
+  ): Promise<StoryCommandEvidence> {
+    // Work that reads a story site in the background waits for saves.
+    storySaveStarted();
+    try {
+      return await this.#runStoryCommandWithEvidence(command, observer);
+    } finally {
+      storySaveEnded();
+    }
+  }
+
+  async #runStoryCommandWithEvidence(
     command: StoryTrackCommand,
     observer?: { beforeWrite?(): Promise<void> | void },
   ): Promise<StoryCommandEvidence> {
