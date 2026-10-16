@@ -48,6 +48,13 @@ function world(overrides = {}) {
       if (reading instanceof Error) throw reading;
       return reading;
     },
+    ...(state.before === undefined ? {} : {
+      async allowedBeforeUpdate() {
+        calls.beforeReads = (calls.beforeReads ?? 0) + 1;
+        if (state.before instanceof Error) throw state.before;
+        return state.before;
+      },
+    }),
     async scriptRegistration() {
       if (state.registration instanceof Error) throw state.registration;
       return state.registration;
@@ -119,6 +126,30 @@ test("website access: allowed on one fresh reading; a blocker only on two agreei
     assert.equal(w.calls.accessReads, reads);
     assert.deepEqual(w.calls.waits, reads === 2 ? [2_000] : [], "the two readings are a moment apart");
   }
+});
+
+test("website access: none allowed by a reader who allowed the story sites to an earlier version is said so; nothing else changes", async () => {
+  const none = [{ complete: false, granted: 0 }, { complete: false, granted: 0 }];
+  for (const [readings, before, expected, asked] of [
+    [none, true, "blocker:not_allowed_since_update", 1],
+    [none, false, "blocker:not_allowed", 1],
+    // Not known is no.
+    [none, new Error("unavailable"), "blocker:not_allowed", 1],
+    // Some allowed is partly allowed, whatever came before.
+    [[{ complete: false, granted: 2 }, { complete: false, granted: 2 }], true, "blocker:partly_allowed", 0],
+    [[{ complete: true, granted: 5 }], true, "positive:allowed", 0],
+    // A single reading is still not an answer.
+    [[{ complete: false, granted: null }], true, "unknown:unconfirmed", 0],
+  ]) {
+    const w = world({ access: [...readings], before });
+    const { report } = await w.service.report();
+    assert.equal(parts(report).websiteAccess, expected, `${String(before)} ${expected}`);
+    assert.equal(w.calls.beforeReads ?? 0, asked, "asked only once none is allowed");
+    assert.equal(report.result, expected.startsWith("blocker") ? "not_ready" : report.result);
+  }
+  // A port that does not say is no.
+  const w = world({ access: [...none] });
+  assert.equal(parts((await w.service.report()).report).websiteAccess, "blocker:not_allowed");
 });
 
 test("script registration, the account and the automatic-saving preference each answer three ways", async () => {
