@@ -40,6 +40,8 @@ export class BrowserPrivateRecordDatabase implements PrivateRecordDatabase {
   readonly #openTimeoutMs: number;
   readonly #transactionTimeoutMs: number;
   #openPromise: Promise<IDBDatabase> | null = null;
+  /** The connection the cache holds once its open has answered. */
+  #connection: IDBDatabase | null = null;
 
   constructor(
     factory: IDBFactory,
@@ -67,6 +69,7 @@ export class BrowserPrivateRecordDatabase implements PrivateRecordDatabase {
   async deleteDatabase(): Promise<void> {
     const pending = this.#openPromise;
     this.#openPromise = null;
+    this.#connection = null;
     if (pending !== null) {
       try {
         (await pending).close();
@@ -113,28 +116,31 @@ export class BrowserPrivateRecordDatabase implements PrivateRecordDatabase {
     } catch (error) {
       if (!(error instanceof ConnectionLost)) throw error;
       this.#dropConnection(database);
-      return await this.#runTransactionOn(await this.#open(), mode, start, readResult).catch(
-        (retryError: unknown) => {
-          if (retryError instanceof ConnectionLost) this.#dropConnection(null);
-          throw retryError;
-        },
-      );
+      const fresh = await this.#open();
+      try {
+        return await this.#runTransactionOn(fresh, mode, start, readResult);
+      } catch (retryError) {
+        if (retryError instanceof ConnectionLost) this.#dropConnection(fresh);
+        throw retryError;
+      }
     }
   }
 
-  /** Forgets the cached connection, so the next request opens a new one. */
-  #dropConnection(database: IDBDatabase | null): void {
-    const pending = this.#openPromise;
-    this.#openPromise = null;
-    const close = (connection: IDBDatabase | null | undefined): void => {
-      try {
-        connection?.close();
-      } catch {
-        // A connection that is already gone has nothing to close.
-      }
-    };
-    close(database);
-    if (pending !== null) void pending.then(close, () => undefined);
+  /**
+   * Closes a connection that failed. The cache is cleared only when it still
+   * holds that connection, so requests that failed together open one new
+   * connection between them, not one each.
+   */
+  #dropConnection(failed: IDBDatabase): void {
+    if (this.#connection === failed) {
+      this.#connection = null;
+      this.#openPromise = null;
+    }
+    try {
+      failed.close();
+    } catch {
+      // A connection that is already gone has nothing to close.
+    }
   }
 
   #runTransactionOn<T>(
@@ -295,14 +301,17 @@ export class BrowserPrivateRecordDatabase implements PrivateRecordDatabase {
         }
         settled = true;
         if (timer !== null) globalThis.clearTimeout(timer);
+        const forget = (): void => {
+          if (this.#openPromise === cached) this.#openPromise = null;
+          if (this.#connection === database) this.#connection = null;
+        };
         database.onversionchange = () => {
           database.close();
-          if (this.#openPromise === cached) this.#openPromise = null;
+          forget();
         };
         // Closed by the browser (its storage went away): open anew next time.
-        database.onclose = () => {
-          if (this.#openPromise === cached) this.#openPromise = null;
-        };
+        database.onclose = forget;
+        if (this.#openPromise === cached) this.#connection = database;
         resolve(database);
       };
     });

@@ -2853,6 +2853,32 @@ test("kernel story control leaves Checking when Trace never answers, and a tap l
   assert.notEqual(handle.getAttribute("data-trace-story-handle-state"), "checking");
 });
 
+test("kernel story control replaces the hidden placeholder when the last look-up fails", async () => {
+  let document = null;
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    mutateDom(dom) {
+      document = dom.window.document;
+      const quick = dom.window.setTimeout.bind(dom.window);
+      dom.window.setTimeout = (callback, _ms, ...args) => quick(callback, 0, ...args);
+    },
+    // The slot still holds its hidden placeholder each time the look-up fails.
+    projectionResponse: () => {
+      const handle = document.querySelector("[data-trace-story-handle]");
+      handle.setAttribute("data-trace-story-handle-state", "loading");
+      handle.style.visibility = "hidden";
+      return { ok: false, error: "runtime_unavailable" };
+    },
+  });
+  const handle = h.dom.window.document.querySelector("[data-trace-story-handle]");
+  for (let i = 0; i < 50 && handle.getAttribute("data-trace-story-handle-state") !== "unavailable"; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "unavailable");
+  assert.notEqual(handle.style.visibility, "hidden");
+});
+
 test("kernel story control keeps a shown state when a later look-up fails", async () => {
   let fail = false;
   const h = createStoryAutoTrackPendingHarness({

@@ -8263,7 +8263,9 @@ function renderKernelProjectionUnavailable(workKey, anchor) {
   var els = ensureQuickAddElements(workKey, anchor);
   var handle = els.handle;
   var shown = handle.getAttribute("data-trace-story-handle-state");
-  if (shown && shown !== "checking" && shown !== "unavailable") return;
+  // Only a handle that has shown nothing yet: the hidden placeholder the
+  // slot is reserved with ("loading"), "Checking…", or this state itself.
+  if (shown && shown !== "loading" && shown !== "checking" && shown !== "unavailable") return;
   applyStoryInlineHandleState(handle, {
     kind: "unavailable",
     label: "Try again",

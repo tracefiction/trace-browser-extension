@@ -112,3 +112,87 @@ test("an open that never answers times out and the next request opens again", as
   await assert.rejects(database.get(PRIVATE_RECORD_KEYS.accountData), /open timed out/);
   assert.equal(await database.get(PRIVATE_RECORD_KEYS.accountData), null);
 });
+
+// A connection as Safari can leave it after ending its storage process: it
+// opens, but its transactions never answer, or abort with "UnknownError".
+function brokenConnection(behaviour) {
+  const connection = {
+    version: 1,
+    objectStoreNames: { length: 1, contains: (name) => name === "records" },
+    closed: 0,
+    close() { connection.closed += 1; },
+    transaction() {
+      const transaction = {
+        error: null,
+        abort() {},
+        objectStore: () => ({
+          get: () => {
+            if (behaviour === "unknown-error") {
+              setTimeout(() => {
+                transaction.error = new DOMException("Connection lost", "UnknownError");
+                transaction.onabort?.();
+              }, 0);
+            }
+            return {};
+          },
+        }),
+      };
+      return transaction;
+    },
+  };
+  return connection;
+}
+
+// The first open answers with `broken`; every later one is a real database.
+function factoryOpeningFirst(broken) {
+  const real = new IDBFactory();
+  const counts = { opens: 0 };
+  return {
+    counts,
+    open(name, version) {
+      counts.opens += 1;
+      if (counts.opens > 1) return real.open(name, version);
+      const request = {};
+      setTimeout(() => {
+        request.result = broken;
+        request.onsuccess?.();
+      }, 0);
+      return request;
+    },
+    deleteDatabase: (name) => real.deleteDatabase(name),
+  };
+}
+
+test("a transaction that never answers times out, and the request is made again on a new connection", async () => {
+  const broken = brokenConnection("silent");
+  const factory = factoryOpeningFirst(broken);
+  const database = new BrowserPrivateRecordDatabase(factory, { transactionTimeoutMs: 20 });
+
+  assert.equal(await database.get(PRIVATE_RECORD_KEYS.accountData), null);
+  assert.equal(broken.closed, 1);
+  assert.equal(factory.counts.opens, 2);
+});
+
+test("a transaction aborted with UnknownError is made again on a new connection", async () => {
+  const broken = brokenConnection("unknown-error");
+  const factory = factoryOpeningFirst(broken);
+  const database = new BrowserPrivateRecordDatabase(factory, { transactionTimeoutMs: 1_000 });
+
+  assert.equal(await database.get(PRIVATE_RECORD_KEYS.accountData), null);
+  assert.equal(broken.closed, 1);
+  assert.equal(factory.counts.opens, 2);
+});
+
+test("requests that fail together on one connection open one new connection between them", async () => {
+  const broken = brokenConnection("silent");
+  const factory = factoryOpeningFirst(broken);
+  const database = new BrowserPrivateRecordDatabase(factory, { transactionTimeoutMs: 20 });
+
+  const answers = await Promise.all([
+    database.get(PRIVATE_RECORD_KEYS.accountData),
+    database.get(PRIVATE_RECORD_KEYS.sessionEnvelope),
+    database.get(PRIVATE_RECORD_KEYS.sessionCredentials),
+  ]);
+  assert.deepEqual(answers, [null, null, null]);
+  assert.equal(factory.counts.opens, 2);
+});

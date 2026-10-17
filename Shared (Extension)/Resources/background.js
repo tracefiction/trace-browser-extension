@@ -706,6 +706,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #openTimeoutMs;
     #transactionTimeoutMs;
     #openPromise = null;
+    /** The connection the cache holds once its open has answered. */
+    #connection = null;
     constructor(factory, options = {}) {
       this.#factory = factory;
       this.#openTimeoutMs = options.openTimeoutMs ?? PRIVATE_DATABASE_OPEN_TIMEOUT_MS;
@@ -723,6 +725,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     async deleteDatabase() {
       const pending = this.#openPromise;
       this.#openPromise = null;
+      this.#connection = null;
       if (pending !== null) {
         try {
           (await pending).close();
@@ -762,26 +765,29 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       } catch (error) {
         if (!(error instanceof ConnectionLost)) throw error;
         this.#dropConnection(database);
-        return await this.#runTransactionOn(await this.#open(), mode, start, readResult).catch(
-          (retryError) => {
-            if (retryError instanceof ConnectionLost) this.#dropConnection(null);
-            throw retryError;
-          }
-        );
+        const fresh = await this.#open();
+        try {
+          return await this.#runTransactionOn(fresh, mode, start, readResult);
+        } catch (retryError) {
+          if (retryError instanceof ConnectionLost) this.#dropConnection(fresh);
+          throw retryError;
+        }
       }
     }
-    /** Forgets the cached connection, so the next request opens a new one. */
-    #dropConnection(database) {
-      const pending = this.#openPromise;
-      this.#openPromise = null;
-      const close = (connection) => {
-        try {
-          connection?.close();
-        } catch {
-        }
-      };
-      close(database);
-      if (pending !== null) void pending.then(close, () => void 0);
+    /**
+     * Closes a connection that failed. The cache is cleared only when it still
+     * holds that connection, so requests that failed together open one new
+     * connection between them, not one each.
+     */
+    #dropConnection(failed2) {
+      if (this.#connection === failed2) {
+        this.#connection = null;
+        this.#openPromise = null;
+      }
+      try {
+        failed2.close();
+      } catch {
+      }
     }
     #runTransactionOn(database, mode, start, readResult) {
       return new Promise((resolve, reject) => {
@@ -916,13 +922,16 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           }
           settled = true;
           if (timer !== null) globalThis.clearTimeout(timer);
+          const forget = () => {
+            if (this.#openPromise === cached) this.#openPromise = null;
+            if (this.#connection === database) this.#connection = null;
+          };
           database.onversionchange = () => {
             database.close();
-            if (this.#openPromise === cached) this.#openPromise = null;
+            forget();
           };
-          database.onclose = () => {
-            if (this.#openPromise === cached) this.#openPromise = null;
-          };
+          database.onclose = forget;
+          if (this.#openPromise === cached) this.#connection = database;
           resolve(database);
         };
       });
