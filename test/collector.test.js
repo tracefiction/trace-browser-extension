@@ -2812,6 +2812,99 @@ test("kernel pending first story automatically sends one bounded command and foc
   );
 });
 
+test("kernel story control leaves Checking when Trace never answers, and a tap looks again", async () => {
+  let answering = false;
+  let unanswered = 0;
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    // Every wait in the page passes at once, so the retries run out quickly.
+    mutateDom(dom) {
+      const quick = dom.window.setTimeout.bind(dom.window);
+      dom.window.setTimeout = (callback, _ms, ...args) => quick(callback, 0, ...args);
+    },
+    onSendMessage(message, cb) {
+      if (message.type !== "TRACE_ACCOUNT_PROJECTION_GET" || answering) return false;
+      // A background that took the message and never replied.
+      unanswered += 1;
+      void cb;
+      return true;
+    },
+  });
+
+  const handle = h.dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle);
+  for (let i = 0; i < 50 && handle.getAttribute("data-trace-story-handle-state") !== "unavailable"; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "unavailable");
+  assert.match(handle.textContent || "", /Try again/);
+  assert.doesNotMatch(handle.textContent || "", /Checking/);
+  assert.equal(handle.disabled, false);
+  assert.ok(unanswered >= 1);
+
+  answering = true;
+  handle.click();
+  for (let i = 0; i < 50 && handle.getAttribute("data-trace-story-handle-state") === "unavailable"; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.notEqual(handle.getAttribute("data-trace-story-handle-state"), "unavailable");
+  assert.notEqual(handle.getAttribute("data-trace-story-handle-state"), "checking");
+});
+
+test("kernel story control replaces the hidden placeholder when the last look-up fails", async () => {
+  let document = null;
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    mutateDom(dom) {
+      document = dom.window.document;
+      const quick = dom.window.setTimeout.bind(dom.window);
+      dom.window.setTimeout = (callback, _ms, ...args) => quick(callback, 0, ...args);
+    },
+    // The slot still holds its hidden placeholder each time the look-up fails.
+    projectionResponse: () => {
+      const handle = document.querySelector("[data-trace-story-handle]");
+      handle.setAttribute("data-trace-story-handle-state", "loading");
+      handle.style.visibility = "hidden";
+      return { ok: false, error: "runtime_unavailable" };
+    },
+  });
+  const handle = h.dom.window.document.querySelector("[data-trace-story-handle]");
+  for (let i = 0; i < 50 && handle.getAttribute("data-trace-story-handle-state") !== "unavailable"; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "unavailable");
+  assert.notEqual(handle.style.visibility, "hidden");
+});
+
+test("kernel story control keeps a shown state when a later look-up fails", async () => {
+  let fail = false;
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    projectionResponse: () => (fail ? { ok: false, error: "runtime_unavailable" } : {
+      ok: true,
+      snapshot: { state: "connected", reason: "none", canExecuteAuthenticated: true },
+      projection: {
+        entries: { "ffn:7038840": { status: "PLANNING", readerStatus: "PLANNING", canonicalReaderStatus: "SAVED" } },
+        workPreferences: {},
+        syncVersion: null,
+      },
+    }),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const handle = h.dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "status");
+
+  fail = true;
+  h.dom.window.renderQuickAddButton("ffn:7038840", 4);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "status");
+  assert.match(handle.textContent || "", /Saved/);
+});
+
 test("kernel story control never offers Add before the onboarding handoff lookup settles", async () => {
   const h = createStoryAutoTrackPendingHarness({
     sessionMode: "kernel",

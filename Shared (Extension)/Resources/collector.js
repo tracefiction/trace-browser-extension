@@ -8109,15 +8109,7 @@ function renderQuickAddFromSnapshot(workKey, anchor, res) {
     }
 
     if (KERNEL_SESSION_ACTIVE && kernelFirstStoryLookupPending) {
-      applyStoryInlineHandleState(handle, {
-        kind: "checking",
-        label: "Checking…",
-        theme: TRACE_INLINE_THEMES.saving,
-        dot: false,
-        spinner: true,
-        status: null,
-        progress: null,
-      });
+      applyStoryInlineHandleState(handle, kernelCheckingPresentation());
       handle.title = "Checking this story in Trace";
       handle.disabled = true;
       applySheetVisibility(sheet, false);
@@ -8239,13 +8231,14 @@ function clearKernelProjectionRetry(workKey) {
   kernelProjectionRetryWorkKey = null;
 }
 
+// True when another look is coming: scheduled now or already waiting.
 function scheduleKernelProjectionRetry(workKey, attempt) {
+  if (kernelProjectionRetryTimer !== null) return true;
   if (
     attempt >= KERNEL_PROJECTION_RETRY_DELAYS_MS.length ||
-    kernelProjectionRetryTimer !== null ||
     getWorkKeyFromUrl() !== workKey
   ) {
-    return;
+    return false;
   }
   kernelProjectionRetryWorkKey = workKey;
   kernelProjectionRetryTimer = setTimeout(function () {
@@ -8255,6 +8248,63 @@ function scheduleKernelProjectionRetry(workKey, attempt) {
       renderQuickAddButton(workKey, attempt + 1);
     }
   }, KERNEL_PROJECTION_RETRY_DELAYS_MS[attempt]);
+  return true;
+}
+
+function kernelCheckingPresentation() {
+  return {
+    kind: "checking",
+    label: "Checking…",
+    theme: TRACE_INLINE_THEMES.saving,
+    dot: false,
+    spinner: true,
+    status: null,
+    progress: null,
+  };
+}
+
+// Trace did not answer this page's look-up. Only a handle that is still
+// checking changes; a state already shown is kept. A tap looks again, and so
+// does the reader coming back to the page (see initQuickAdd).
+function renderKernelProjectionUnavailable(workKey, anchor) {
+  if (getWorkKeyFromUrl() !== workKey) return;
+  var els = ensureQuickAddElements(workKey, anchor);
+  var handle = els.handle;
+  var shown = handle.getAttribute("data-trace-story-handle-state");
+  // Only a handle that has shown nothing yet: the hidden placeholder the
+  // slot is reserved with ("loading"), "Checking…", or this state itself.
+  if (shown && shown !== "loading" && shown !== "checking" && shown !== "unavailable") return;
+  applyStoryInlineHandleState(handle, {
+    kind: "unavailable",
+    label: "Try again",
+    theme: TRACE_INLINE_THEMES.error,
+    dot: false,
+    spinner: false,
+    status: null,
+    progress: null,
+  });
+  handle.title = "Trace did not answer. Tap to check this story again.";
+  handle.disabled = false;
+  applySheetVisibility(els.sheet, false);
+  setStoryHandleDialogTrigger(handle, els.sheet, false);
+  if (!handle.__traceStoryHandleBound) {
+    handle.__traceStoryHandleBound = true;
+    handle.addEventListener("click", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (handle.disabled) return;
+      if (typeof handle.__traceStoryHandleAction === "function") {
+        handle.__traceStoryHandleAction();
+      }
+    });
+  }
+  handle.__traceStoryHandleAction = function () {
+    clearKernelProjectionRetry(workKey);
+    applyStoryInlineHandleState(handle, kernelCheckingPresentation());
+    handle.title = "Checking this story in Trace";
+    handle.disabled = true;
+    renderQuickAddButton(workKey, 0);
+  };
 }
 
 // -------------------------------------------------------
@@ -8326,9 +8376,14 @@ function renderQuickAddButton(workKey, projectionAttempt) {
       : 0;
     sendCollectorMessage(
       { type: ACCOUNT_PROJECTION_GET_MESSAGE, workKeys: [workKey] },
-      function (response) {
+      function (response, delivery) {
         if (!response || response.ok !== true) {
-          scheduleKernelProjectionRetry(workKey, attempt);
+          var retrying = scheduleKernelProjectionRetry(workKey, attempt);
+          // A background that does not answer, or no retry left: the handle
+          // says so and offers another look, never "Checking…" for good.
+          if (!retrying || (delivery && delivery.timedOut === true)) {
+            renderKernelProjectionUnavailable(workKey, anchor);
+          }
           return;
         }
         clearKernelProjectionRetry(workKey);

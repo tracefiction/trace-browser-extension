@@ -103,3 +103,20 @@ test("any projection 401 rejects the private capability", async () => {
 
   assert.deepEqual(await api.load("token"), { kind: "auth_rejected" });
 });
+
+test("projection API gives up on a reply whose body never finishes", async () => {
+  const api = new AccountProjectionApi(async (_url, options) => {
+    // Headers arrive; the body then stalls until the request is aborted.
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("{\"success\":true,"));
+        options.signal.addEventListener("abort", () => controller.error(new Error("aborted")));
+      },
+    });
+    return new Response(body, { status: 200 });
+  }, "https://api.tracefiction.com", 20);
+
+  const result = await api.load("private-token");
+
+  assert.equal(result.kind, "unavailable");
+});
