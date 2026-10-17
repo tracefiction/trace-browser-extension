@@ -203,6 +203,40 @@ test("a History page with no works is never the last page, and rows it cannot re
   assert.deepEqual(readHistoryPage(strange, USER, 1), { kind: "stop", code: "rows_unreadable" });
 });
 
+test("the last page is only one with no page links, or with AO3's disabled Next", () => {
+  // Page links whose Next is neither a link nor AO3's disabled Next.
+  const odd = page([work(1)]).replace('<li class="next"><span class="disabled">Next →</span></li>', '<li class="next">Next →</li>');
+  assert.deepEqual(readHistoryPage(odd, USER, 1), { kind: "stop", code: "pagination_unexpected" });
+  // Page links with no Next item at all.
+  const none = page([work(1)]).replaceAll('<li class="next"><span class="disabled">Next →</span></li>', "");
+  assert.deepEqual(readHistoryPage(none, USER, 1), { kind: "stop", code: "pagination_unexpected" });
+  // A Next link in one copy and a disabled Next in the other disagree.
+  const both = page([work(1)], { next: 2 }).replace(
+    `<li class="next"><a href="/users/${USER}/readings?page=2">Next →</a></li>`,
+    '<li class="next"><span class="disabled">Next →</span></li>',
+  );
+  assert.deepEqual(readHistoryPage(both, USER, 1), { kind: "stop", code: "pagination_unexpected" });
+  assert.equal(readHistoryPage(page([work(1)], { pages: false }), USER, 1).nextPage, null);
+  assert.equal(readHistoryPage(page([work(1)]), USER, 2).nextPage, null);
+});
+
+test("a page cut short before AO3's footer is read again later, never taken for the last", () => {
+  const now = Date.parse("2026-10-16T12:00:00Z");
+  const full = page([work(1), work(2)]);
+  const cut = full.slice(0, full.indexOf('<div id="footer"'));
+  assert.deepEqual(readHistoryPage(cut, USER, 1), { kind: "incomplete" });
+  assert.deepEqual(classifyHistoryAnswer(answer(cut, { url: pageURL(1) }), USER, 1, now),
+    { kind: "retry", code: "incomplete_page", retryAfterMs: null });
+});
+
+test("a page where most rows cannot be read stops the run", () => {
+  const strange = '<li class="reading work blurb group" role="article"><p>No id here</p></li>';
+  assert.deepEqual(readHistoryPage(page([work(1), strange, strange]), USER, 1), { kind: "stop", code: "rows_unreadable" });
+  const read = readHistoryPage(page([work(1), work(2), strange]), USER, 1);
+  assert.equal(read.kind, "page");
+  assert.equal(read.unreadable, 1);
+});
+
 test("an empty History page is tried again later, then pauses saying so, and is never finished", async () => {
   const empty = ({ url }) => answer(page([]), { url });
   const h = harness({ answers: [ok([work(1)], 2), empty, ok([work(2)], 3), empty, empty, empty] });
