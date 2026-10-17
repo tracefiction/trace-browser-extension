@@ -5379,6 +5379,10 @@ for (const id of ["popup-cta", "popup-session-help"]) {
 }
 
 function openTraceApp(url) {
+  if (isTraceAppLink(url)) {
+    void openTraceAppLink(url);
+    return;
+  }
   try {
     if (ext.tabs?.create) {
       void extensionPromiseCall(ext.tabs, "create", [{ url }]).catch(() => {
@@ -5387,6 +5391,34 @@ function openTraceApp(url) {
     } else {
       window.location.href = url;
     }
+  } catch {
+    // The app link is optional; the reader can always switch apps themselves.
+  }
+}
+
+function isTraceAppLink(url) {
+  return typeof url === "string" && url.startsWith("traceauth:");
+}
+
+/**
+ * Hands a Trace app link to the app through the tab the reader is on. Safari
+ * gives the link to the app and leaves that page where it was. A new tab for
+ * the link would be left behind with nothing in it and no page to go back
+ * to once the app comes forward.
+ */
+async function openTraceAppLink(url) {
+  try {
+    const tabs = await extensionPromiseCall(ext.tabs, "query", [{ active: true, currentWindow: true }]);
+    const tab = Array.isArray(tabs) ? tabs[0] : null;
+    if (Number.isInteger(tab?.id)) {
+      await extensionPromiseCall(ext.tabs, "update", [tab.id, { url }]);
+      return;
+    }
+  } catch {
+    // No tab to hand it through: the popup follows the link itself.
+  }
+  try {
+    window.location.href = url;
   } catch {
     // The app link is optional; the reader can always switch apps themselves.
   }

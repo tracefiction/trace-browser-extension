@@ -230,6 +230,7 @@ function createPopupHarness({
   const popupDisconnects = [];
   const heldSnapshotReplies = [];
   const createdTabs = [];
+  const updatedTabs = [];
   const permissionListeners = { added: [], removed: [] };
   // The background's side of the first-tap port: what the popup asked for,
   // and a way to send it a state.
@@ -365,6 +366,11 @@ function createPopupHarness({
         createdTabs.push(properties.url);
         if (promiseRuntime) return Promise.resolve({ id: 99 });
         callback?.({ id: 99 });
+      },
+      update(tabId, properties, callback) {
+        updatedTabs.push({ tabId, url: properties.url });
+        if (promiseRuntime) return Promise.resolve({ id: tabId });
+        callback?.({ id: tabId });
       },
       query(_query, callback) {
         if (promiseRuntime) return Promise.resolve([activeTab]);
@@ -538,6 +544,7 @@ function createPopupHarness({
     messages,
     tabMessages,
     createdTabs,
+    updatedTabs,
     injections,
     permissionRequests,
     hostLifecycle,
@@ -1794,6 +1801,45 @@ test("iOS: enabled but not yet linked points to one step in the Trace app", asyn
   assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Open Trace");
   assert.equal(h.document.getElementById("popup-earned-primary").dataset.earnedAction, "open_connect");
   assert.equal(h.document.getElementById("popup-import").hidden, true);
+});
+
+function iosNotLinkedHarness(options = {}) {
+  return createPopupHarness({
+    grantedOrigins: [...FULL_EARNED_ORIGINS],
+    sessionMode: "kernel",
+    earnedPermissionOnboarding: true,
+    promiseRuntime: true,
+    userAgent:
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+    storageState: { traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 5000 } },
+    sessionSnapshot: {
+      state: "signed_out",
+      accountId: null,
+      canExecuteAuthenticated: false,
+      reason: "credential_absent",
+    },
+    ...options,
+  });
+}
+
+test("iOS: Open Trace hands the app link through the reader's tab and opens no new tab", async () => {
+  const h = iosNotLinkedHarness();
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  const primary = h.document.getElementById("popup-earned-primary");
+  assert.equal(primary.dataset.earnedAction, "open_connect");
+  primary.click();
+  for (let attempt = 0; attempt < 4; attempt += 1) await flush();
+  assert.deepEqual(h.createdTabs, [], "a new tab would be left blank once the app comes forward");
+  assert.deepEqual(h.updatedTabs, [{ tabId: 7, url: "traceauth://open?destination=extension-connect" }]);
+});
+
+test("iOS: with no tab to hand it through, Open Trace still opens no new tab", async () => {
+  const h = iosNotLinkedHarness({ activeTab: null });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  h.document.getElementById("popup-earned-primary").click();
+  for (let attempt = 0; attempt < 4; attempt += 1) await flush();
+  assert.deepEqual(h.createdTabs, []);
+  assert.deepEqual(h.updatedTabs, []);
 });
 
 for (const reason of [
@@ -3546,7 +3592,8 @@ for (const device of [
     assert.equal(primary.textContent, "See Trace Unlimited");
     primary.click();
     for (let attempt = 0; attempt < 4; attempt += 1) await flush();
-    assert.deepEqual(h.createdTabs, [IOS_APP_UNLIMITED_URL]);
+    assert.deepEqual(h.createdTabs, [], "an app link never leaves a new tab behind");
+    assert.deepEqual(h.updatedTabs, [{ tabId: 7, url: IOS_APP_UNLIMITED_URL }]);
   });
 }
 
@@ -3604,7 +3651,13 @@ for (const [name, options, expected] of [
     cta.click();
     for (let attempt = 0; attempt < 4; attempt += 1) await flush();
     assert.equal(cta.textContent, "See Trace Unlimited");
-    assert.deepEqual(h.createdTabs, [expected]);
+    if (expected === IOS_APP_UNLIMITED_URL) {
+      assert.deepEqual(h.createdTabs, []);
+      assert.deepEqual(h.updatedTabs, [{ tabId: 7, url: expected }]);
+    } else {
+      assert.deepEqual(h.createdTabs, [expected]);
+      assert.deepEqual(h.updatedTabs, [], "a web page never replaces the reader's page");
+    }
   });
 }
 
@@ -3811,9 +3864,11 @@ test("the iPhone reader view shows Import from this page on a listing and starts
   assert.equal(isDisplayed(h, link), true);
   assert.equal(link.getAttribute("href"), `traceauth://open?destination=library-import&handoff=${HANDOFF_ID}`);
   assert.deepEqual(h.createdTabs, [], "nothing opens without the reader's own tap");
+  assert.deepEqual(h.updatedTabs, [], "nothing opens without the reader's own tap");
   link.click();
   for (let attempt = 0; attempt < 4; attempt += 1) await flush();
-  assert.deepEqual(h.createdTabs, [`traceauth://open?destination=library-import&handoff=${HANDOFF_ID}`]);
+  assert.deepEqual(h.createdTabs, []);
+  assert.deepEqual(h.updatedTabs, [{ tabId: 7, url: `traceauth://open?destination=library-import&handoff=${HANDOFF_ID}` }]);
   assert.equal(h.closeCalled, false);
 });
 
