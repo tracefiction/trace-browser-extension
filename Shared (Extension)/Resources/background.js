@@ -10880,7 +10880,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
   }
   function setupStepFromMessage(message) {
-    if (!isRecord23(message) || message.type !== SETUP_STEP_MESSAGE) return null;
+    if (!isRecord24(message) || message.type !== SETUP_STEP_MESSAGE) return null;
     if (message.step === "sheet_opened" && (message.page === "story" || message.page === "other")) {
       return Object.freeze({ kind: "sheet_opened", page: message.page });
     }
@@ -10991,7 +10991,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     async #read() {
       const raw = (await this.#ports.storage.get(SETUP_MILESTONES_KEY))[SETUP_MILESTONES_KEY];
-      if (!isRecord23(raw) || typeof raw.account !== "string" || typeof raw.attempt !== "string" || !Array.isArray(raw.reported) || !Array.isArray(raw.pending)) {
+      if (!isRecord24(raw) || typeof raw.account !== "string" || typeof raw.attempt !== "string" || !Array.isArray(raw.reported) || !Array.isArray(raw.pending)) {
         return null;
       }
       return {
@@ -11041,9 +11041,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     };
   }
   function isPending(value) {
-    return isRecord23(value) && typeof value.attempt === "string" && UUID_PATTERN8.test(value.attempt) && (value.milestone === "safari_sheet_opened" || value.milestone === "safari_access_answered") && (value.outcome === "confirmed" || value.outcome === "failed" || value.outcome === "unknown") && typeof value.evidence_source === "string" && value.evidence_source.startsWith("extension_") && typeof value.at === "number" && Number.isFinite(value.at) && typeof value.sends === "number" && Number.isInteger(value.sends) && value.sends >= 0;
+    return isRecord24(value) && typeof value.attempt === "string" && UUID_PATTERN8.test(value.attempt) && (value.milestone === "safari_sheet_opened" || value.milestone === "safari_access_answered") && (value.outcome === "confirmed" || value.outcome === "failed" || value.outcome === "unknown") && typeof value.evidence_source === "string" && value.evidence_source.startsWith("extension_") && typeof value.at === "number" && Number.isFinite(value.at) && typeof value.sends === "number" && Number.isInteger(value.sends) && value.sends >= 0;
   }
-  function isRecord23(value) {
+  function isRecord24(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
 
@@ -11397,7 +11397,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var SAFARI_READINESS_SESSION_KEY = "traceSafariReadinessSessionV1";
   var NATIVE_TIMEOUT_MS = 2e3;
   var BROWSER_READ_TIMEOUT_MS = 2e3;
-  function isRecord24(value) {
+  function isRecord25(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
   function bounded2(work, ms) {
@@ -11447,7 +11447,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         typeof permissions.contains !== "function" ? Promise.resolve(null) : bounded2(call(permissions, "contains", [{ origins: [...config.origins] }]), BROWSER_READ_TIMEOUT_MS),
         bounded2(call(permissions, "getAll", []), BROWSER_READ_TIMEOUT_MS)
       ]);
-      const origins = isRecord24(listed) && Array.isArray(listed.origins) ? new Set(listed.origins) : null;
+      const origins = isRecord25(listed) && Array.isArray(listed.origins) ? new Set(listed.origins) : null;
       const granted = origins === null ? null : config.origins.filter((origin) => origins.has(origin)).length;
       return {
         // The browser's own answer where it gives one: a broader grant need not
@@ -11463,9 +11463,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         bounded2(storage.get(EARNED_PERMISSION_STATE_KEY), BROWSER_READ_TIMEOUT_MS)
       ]);
       if (!Array.isArray(current) || stored === null) return "unreadable";
-      const ids = new Set(current.map((script) => isRecord24(script) ? script.id : void 0));
+      const ids = new Set(current.map((script) => isRecord25(script) ? script.id : void 0));
       const state = stored[EARNED_PERMISSION_STATE_KEY];
-      const generation = isRecord24(state) ? state.registrationVersion : void 0;
+      const generation = isRecord25(state) ? state.registrationVersion : void 0;
       return config.registrations.every(({ id }) => ids.has(id)) && generation === config.version ? "registered" : "absent";
     };
     const readScriptRegistration = async () => {
@@ -11502,7 +11502,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (config.registrationMode !== "dynamic") return false;
       const stored = await bounded2(storage.get(EARNED_PERMISSION_STATE_KEY), BROWSER_READ_TIMEOUT_MS);
       const state = stored?.[EARNED_PERMISSION_STATE_KEY];
-      if (!isRecord24(state) || state.promptResult !== "granted") return false;
+      if (!isRecord25(state) || state.promptResult !== "granted") return false;
       const generation = state.registrationVersion;
       return Number.isInteger(generation) && Number(generation) > 0 && Number(generation) < config.version;
     };
@@ -11528,8 +11528,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         { type: SAFARI_READINESS_MESSAGES.prepare, apiOrigin },
         NATIVE_TIMEOUT_MS
       );
-      if (!isRecord24(response) || response.ok !== true || !isRecord24(response.provider)) return null;
-      const cycle = isRecord24(response.cycle) && typeof response.cycle.id === "string" ? {
+      if (!isRecord25(response) || response.ok !== true || !isRecord25(response.provider)) return null;
+      const cycle = isRecord25(response.cycle) && typeof response.cycle.id === "string" ? {
         id: response.cycle.id,
         accountId: typeof response.cycle.accountID === "string" ? response.cycle.accountID : null
       } : null;
@@ -11547,8 +11547,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         result: report2.result,
         components: report2.components
       }, NATIVE_TIMEOUT_MS);
-      if (isRecord24(response) && response.ok === true) return "stored";
-      return isRecord24(response) && response.error === "stale_cycle" ? "stale_cycle" : "refused";
+      if (isRecord25(response) && response.ok === true) return "stored";
+      return isRecord25(response) && response.error === "stale_cycle" ? "stale_cycle" : "refused";
     };
     const service = new SafariReadinessService({
       prepare,
@@ -11567,7 +11567,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       void report().catch(() => void 0);
     };
     runtime.onMessage.addListener((message, sender, sendResponse) => {
-      if (!isRecord24(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport || Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
+      if (!isRecord25(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport || Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
         return false;
       }
       void report().then(() => sendResponse({ ok: true }), () => sendResponse({ ok: true }));

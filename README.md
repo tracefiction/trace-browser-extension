@@ -217,6 +217,13 @@ and `Shared (Extension)/Resources/content-config.js` are committed for the same
 reason: Safari consumes those generated extension constants directly. Native
 app configuration is generated and validated in the private Apple client.
 
+The committed resources must be the exact output of
+`npm run build:ios-earned-permission-onboarding:release`: the Apple app
+rebuilds them and refuses to archive if any file differs. Never edit them by
+hand or resolve a merge conflict inside them; rerun that build and commit the
+result. `npm run check:safari-resources` (the first step of `npm test`) builds
+a temporary copy and fails if the checked-in files differ from it.
+
 ## Build And Test
 
 Use Node 18 or newer.
