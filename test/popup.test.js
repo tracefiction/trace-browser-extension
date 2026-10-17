@@ -3547,6 +3547,8 @@ for (const device of [
     primary.click();
     for (let attempt = 0; attempt < 4; attempt += 1) await flush();
     assert.deepEqual(h.createdTabs, [IOS_APP_UNLIMITED_URL]);
+    // The note the background uses to close the app-link tab afterwards.
+    assert.equal(typeof h.store.traceAppLinkPendingAt, "number");
   });
 }
 

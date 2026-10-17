@@ -487,6 +487,99 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     return recover;
   }
 
+  // src/extension-runtime/app-link-tabs.mts
+  var APP_LINK_PENDING_KEY = "traceAppLinkPendingAt";
+  var APP_LINK_TABS_KEY = "traceAppLinkTabs";
+  var APP_LINK_PENDING_WINDOW_MS = 1e4;
+  var APP_LINK_FRONT_GRACE_MS = 6e4;
+  var APP_LINK_SETTLE_MS = 5e3;
+  var MAX_TRACKED = 20;
+  function tracked(value) {
+    if (!Array.isArray(value)) return [];
+    return value.filter(
+      (item) => typeof item === "object" && item !== null && Number.isSafeInteger(item.id) && Number.isFinite(item.at)
+    ).slice(-MAX_TRACKED);
+  }
+  function installAppLinkTabCleanup(environment) {
+    const { runtime, tabs, storage, mode } = environment;
+    const now = environment.now ?? (() => Date.now());
+    const call = (target, method, args) => extensionCall(target, method, args, runtime, mode);
+    let tail = Promise.resolve();
+    const serial = (work) => {
+      tail = tail.then(work).catch(() => void 0);
+      return tail;
+    };
+    const read = async () => {
+      const values = await call(storage, "get", [[APP_LINK_TABS_KEY, APP_LINK_PENDING_KEY]]);
+      const pending = values?.[APP_LINK_PENDING_KEY];
+      return {
+        list: tracked(values?.[APP_LINK_TABS_KEY]),
+        pendingAt: typeof pending === "number" && Number.isFinite(pending) ? pending : null
+      };
+    };
+    const write = async (list) => {
+      if (list.length) await call(storage, "set", [{ [APP_LINK_TABS_KEY]: list }]);
+      else await call(storage, "remove", [APP_LINK_TABS_KEY]);
+    };
+    const sweep = (front) => serial(async () => {
+      const { list } = await read();
+      if (!list.length || typeof tabs.remove !== "function") return;
+      const keep = [];
+      for (const item of list) {
+        let active;
+        try {
+          if (front !== void 0) active = item.id === front;
+          else if (typeof tabs.get === "function") {
+            const createdTabId = item.id;
+            active = (await call(tabs, "get", [createdTabId]))?.active === true;
+          } else active = false;
+        } catch {
+          continue;
+        }
+        if (active && now() - item.at < APP_LINK_FRONT_GRACE_MS) {
+          keep.push(item);
+          continue;
+        }
+        try {
+          await call(tabs, "remove", [item.id]);
+        } catch {
+        }
+      }
+      await write(keep);
+    });
+    tabs.onCreated?.addListener((tab) => {
+      const id = tab?.id;
+      if (!Number.isSafeInteger(id)) return;
+      void serial(async () => {
+        const { list, pendingAt } = await read();
+        const at = now();
+        if (pendingAt === null || at - pendingAt < 0 || at - pendingAt > APP_LINK_PENDING_WINDOW_MS) return;
+        await call(storage, "remove", [APP_LINK_PENDING_KEY]);
+        await write([...list.filter((item) => item.id !== id), { id, at }].slice(-MAX_TRACKED));
+      });
+    });
+    tabs.onActivated?.addListener((info) => {
+      void sweep(Number.isSafeInteger(info?.tabId) ? info.tabId : void 0);
+    });
+    tabs.onUpdated?.addListener((tabId, change) => {
+      if (change?.status !== "loading" && change?.url === void 0) return;
+      void serial(async () => {
+        const { list } = await read();
+        const item = list.find((entry) => entry.id === tabId);
+        if (item === void 0 || now() - item.at < APP_LINK_SETTLE_MS) return;
+        await write(list.filter((entry) => entry.id !== tabId));
+      });
+    });
+    tabs.onRemoved?.addListener((tabId) => {
+      void serial(async () => {
+        const { list } = await read();
+        if (list.some((entry) => entry.id === tabId)) await write(list.filter((entry) => entry.id !== tabId));
+      });
+    });
+    void sweep();
+    return { sweep: () => sweep() };
+  }
+
   // src/extension-runtime/open-story-tabs.mts
   var LIMIT = 250;
   var pendingReads = /* @__PURE__ */ new WeakMap();
@@ -11363,6 +11456,15 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           new BrowserStorage(extension.storage.local, extension.runtime, storageMode)
         )
       });
+      try {
+        installAppLinkTabCleanup({
+          runtime: extension.runtime,
+          tabs: extension.tabs,
+          storage: extension.storage.local,
+          mode: storageMode
+        });
+      } catch {
+      }
       const accessLedger = new BrowserArchiveAccessLedger(
         new BrowserStorage(extension.storage.local, extension.runtime, storageMode)
       );

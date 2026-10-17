@@ -114,8 +114,10 @@ test("every tab lookup in the background is for the tab just used, for sites it 
     if (kind === "get") {
       // One tab, by an id a message or the browser handed over; never a search.
       // The save made when the reader opens Trace is not among them: it is
-      // told which tab by the popup, and looks none up.
-      assert.match(argument, /^(?:source|connect)TabId$/, where);
+      // told which tab by the popup, and looks none up. `createdTabId` is a
+      // tab the browser reported creating for the sheet's app link.
+      assert.match(argument, /^(?:source|connect|created)TabId$/, where);
+      if (argument === "createdTabId") assert.equal(file, "app-link-tabs.mts", where);
       assert.doesNotMatch(file, /^(?:first-tap|story-site)/, where);
       continue;
     }
