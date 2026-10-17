@@ -8053,6 +8053,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           const preparation = await this.#prepareNativeAuthority();
           return this.#response(preparation.action);
         }
+        if (isPopupSender(sender, this.#runtime.id) && state === "degraded" && await this.#usesNativeAccountAuthority()) {
+          return this.#response(await this.#connectForCurrentState() ?? void 0);
+        }
         return this.#response();
       }
       if (!isSessionAction(message.action)) return this.#response({ kind: "ignored" });

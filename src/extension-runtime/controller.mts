@@ -754,6 +754,17 @@ export class SessionRuntimeController {
         const preparation = await this.#prepareNativeAuthority();
         return this.#response(preparation.action);
       }
+      // A session left degraded (a request or storage that failed) is never
+      // tried again by itself, and the iPhone sheet has no Retry of its own:
+      // its "Try again" and every open of it read here. Try it again now, or
+      // the reader stays disconnected until Safari restarts the extension.
+      if (
+        isPopupSender(sender, this.#runtime.id) &&
+        state === "degraded" &&
+        (await this.#usesNativeAccountAuthority())
+      ) {
+        return this.#response((await this.#connectForCurrentState()) ?? undefined);
+      }
       return this.#response();
     }
     if (!isSessionAction(message.action)) return this.#response({ kind: "ignored" });
