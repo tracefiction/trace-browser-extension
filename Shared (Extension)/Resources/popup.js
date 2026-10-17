@@ -5313,9 +5313,19 @@ for (const id of ["popup-cta", "popup-session-help"]) {
   });
 }
 
+// The background closes the tab an app link leaves behind, once it is done
+// (src/extension-runtime/app-link-tabs.mts): left open, Safari can load it
+// again later and ask to open the Trace app with no tap. It knows the tab by
+// this note, written just before the tab is asked for.
+const APP_LINK_PENDING_KEY = "traceAppLinkPendingAt";
+
 function openTraceApp(url) {
   try {
     if (ext.tabs?.create) {
+      if (/^traceauth:/i.test(String(url)) && ext.storage?.local) {
+        void extensionPromiseCall(ext.storage.local, "set", [{ [APP_LINK_PENDING_KEY]: Date.now() }])
+          .catch(() => {});
+      }
       void extensionPromiseCall(ext.tabs, "create", [{ url }]).catch(() => {
         window.location.href = url;
       });

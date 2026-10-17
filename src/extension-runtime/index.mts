@@ -1,6 +1,7 @@
 import { createActivityFetch } from "./activity-fetch.mjs";
 import { installArchiveHostAccess } from "./archive-host-access.mjs";
 import { installArchiveRecovery } from "./archive-recovery.mjs";
+import { installAppLinkTabCleanup, type AppLinkTabsPort } from "./app-link-tabs.mjs";
 import { installSessionRuntime, type SessionMode, type SessionRuntimeController } from "./controller.mjs";
 import {
   BrowserArchiveAccessLedger,
@@ -142,6 +143,18 @@ try {
         new BrowserStorage(extension.storage.local, extension.runtime, storageMode),
       ),
     });
+    // A tab the sheet made only to open the Trace app is closed once done, so
+    // Safari never loads it again and asks to open the app untapped.
+    try {
+      installAppLinkTabCleanup({
+        runtime: extension.runtime,
+        tabs: extension.tabs as unknown as AppLinkTabsPort,
+        storage: extension.storage.local,
+        mode: storageMode,
+      });
+    } catch {
+      // Cleanup is hygiene; the rest of the background starts regardless.
+    }
     // Install positive archive-run evidence before any IndexedDB, credential,
     // account-projection, or session-restoration work can stall the worker.
     const accessLedger = new BrowserArchiveAccessLedger(
