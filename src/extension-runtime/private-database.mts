@@ -24,12 +24,30 @@ function databaseError(message: string, error: DOMException | null = null): Erro
   return new Error(detail ? `${message}: ${detail}` : message, { cause: error ?? undefined });
 }
 
+/**
+ * How long an open or a transaction may go without an answer. Safari can lose
+ * a background's database connection while it is in the background (the
+ * storage process is ended), after which requests on it may never answer.
+ */
+export const PRIVATE_DATABASE_OPEN_TIMEOUT_MS = 5_000;
+export const PRIVATE_DATABASE_TRANSACTION_TIMEOUT_MS = 5_000;
+
+/** Raised when the connection itself failed, not the request on it. */
+class ConnectionLost extends Error {}
+
 export class BrowserPrivateRecordDatabase implements PrivateRecordDatabase {
   readonly #factory: IDBFactory;
+  readonly #openTimeoutMs: number;
+  readonly #transactionTimeoutMs: number;
   #openPromise: Promise<IDBDatabase> | null = null;
 
-  constructor(factory: IDBFactory) {
+  constructor(
+    factory: IDBFactory,
+    options: Readonly<{ openTimeoutMs?: number; transactionTimeoutMs?: number }> = {},
+  ) {
     this.#factory = factory;
+    this.#openTimeoutMs = options.openTimeoutMs ?? PRIVATE_DATABASE_OPEN_TIMEOUT_MS;
+    this.#transactionTimeoutMs = options.transactionTimeoutMs ?? PRIVATE_DATABASE_TRANSACTION_TIMEOUT_MS;
   }
 
   get(key: PrivateRecordKey): Promise<unknown | null> {
@@ -78,21 +96,82 @@ export class BrowserPrivateRecordDatabase implements PrivateRecordDatabase {
     });
   }
 
+  /**
+   * One transaction. A connection that has stopped working is dropped and the
+   * transaction is tried once more on a fresh one, so a lost connection never
+   * fails every later read and write of this background. Each record is
+   * written whole under its own key, so trying a write again is harmless.
+   */
   async #runTransaction<T>(
     mode: IDBTransactionMode,
     start: (store: IDBObjectStore) => IDBRequest,
     readResult: (request: IDBRequest) => T,
   ): Promise<T> {
     const database = await this.#open();
+    try {
+      return await this.#runTransactionOn(database, mode, start, readResult);
+    } catch (error) {
+      if (!(error instanceof ConnectionLost)) throw error;
+      this.#dropConnection(database);
+      return await this.#runTransactionOn(await this.#open(), mode, start, readResult).catch(
+        (retryError: unknown) => {
+          if (retryError instanceof ConnectionLost) this.#dropConnection(null);
+          throw retryError;
+        },
+      );
+    }
+  }
+
+  /** Forgets the cached connection, so the next request opens a new one. */
+  #dropConnection(database: IDBDatabase | null): void {
+    const pending = this.#openPromise;
+    this.#openPromise = null;
+    const close = (connection: IDBDatabase | null | undefined): void => {
+      try {
+        connection?.close();
+      } catch {
+        // A connection that is already gone has nothing to close.
+      }
+    };
+    close(database);
+    if (pending !== null) void pending.then(close, () => undefined);
+  }
+
+  #runTransactionOn<T>(
+    database: IDBDatabase,
+    mode: IDBTransactionMode,
+    start: (store: IDBObjectStore) => IDBRequest,
+    readResult: (request: IDBRequest) => T,
+  ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       let request: IDBRequest;
       let result: T;
       let requestSucceeded = false;
       let settled = false;
-      const transaction = database.transaction(PRIVATE_RECORD_STORE, mode);
+      let transaction: IDBTransaction;
+      try {
+        transaction = database.transaction(PRIVATE_RECORD_STORE, mode);
+      } catch (error) {
+        // A closed or lost connection cannot start a transaction at all.
+        reject(new ConnectionLost(
+          databaseError("private database connection lost", error instanceof DOMException ? error : null).message,
+        ));
+        return;
+      }
+      const timer = globalThis.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try {
+          transaction.abort();
+        } catch {
+          // The transaction may already be finishing.
+        }
+        reject(new ConnectionLost("private database transaction timed out"));
+      }, this.#transactionTimeoutMs);
       const finishReject = (message: string, error: DOMException | null = null): void => {
         if (settled) return;
         settled = true;
+        globalThis.clearTimeout(timer);
         reject(databaseError(message, error));
       };
 
@@ -127,14 +206,25 @@ export class BrowserPrivateRecordDatabase implements PrivateRecordDatabase {
           );
         }
       };
-      request.onerror = () => finishReject(
-        "private database request failed",
-        request.error,
-      );
-      transaction.onabort = () => finishReject(
-        "private database transaction aborted",
-        transaction.error,
-      );
+      request.onerror = () => {
+        const name = request.error?.name;
+        // The transaction failing under the request is decided by its abort.
+        if (name === "AbortError" || name === "UnknownError") return;
+        finishReject("private database request failed", request.error);
+      };
+      transaction.onabort = () => {
+        // An abort with no request error of its own, or WebKit's "UnknownError",
+        // is the connection failing under the transaction.
+        if (!settled && (transaction.error === null || transaction.error.name === "UnknownError")) {
+          settled = true;
+          globalThis.clearTimeout(timer);
+          reject(new ConnectionLost(
+            databaseError("private database connection lost", transaction.error).message,
+          ));
+          return;
+        }
+        finishReject("private database transaction aborted", transaction.error);
+      };
       transaction.onerror = () => {
         // `abort` is the terminal transaction event and carries the same error.
       };
@@ -145,6 +235,7 @@ export class BrowserPrivateRecordDatabase implements PrivateRecordDatabase {
           return;
         }
         settled = true;
+        globalThis.clearTimeout(timer);
         resolve(result!);
       };
     });
@@ -154,12 +245,25 @@ export class BrowserPrivateRecordDatabase implements PrivateRecordDatabase {
     if (this.#openPromise !== null) return this.#openPromise;
     const opening = new Promise<IDBDatabase>((resolve, reject) => {
       let settled = false;
-      const request = this.#factory.open(PRIVATE_DATABASE_NAME, PRIVATE_DATABASE_VERSION);
+      let timer: ReturnType<typeof setTimeout> | null = null;
       const finishReject = (message: string, error: DOMException | null = null): void => {
         if (settled) return;
         settled = true;
+        if (timer !== null) globalThis.clearTimeout(timer);
         reject(databaseError(message, error));
       };
+      let request: IDBOpenDBRequest;
+      try {
+        request = this.#factory.open(PRIVATE_DATABASE_NAME, PRIVATE_DATABASE_VERSION);
+      } catch (error) {
+        finishReject("private database open failed", error instanceof DOMException ? error : null);
+        return;
+      }
+      // An open that never answers must not hold every later request.
+      timer = globalThis.setTimeout(
+        () => finishReject("private database open timed out"),
+        this.#openTimeoutMs,
+      );
 
       request.onupgradeneeded = (event) => {
         const database = request.result;
@@ -190,8 +294,13 @@ export class BrowserPrivateRecordDatabase implements PrivateRecordDatabase {
           return;
         }
         settled = true;
+        if (timer !== null) globalThis.clearTimeout(timer);
         database.onversionchange = () => {
           database.close();
+          if (this.#openPromise === cached) this.#openPromise = null;
+        };
+        // Closed by the browser (its storage went away): open anew next time.
+        database.onclose = () => {
           if (this.#openPromise === cached) this.#openPromise = null;
         };
         resolve(database);

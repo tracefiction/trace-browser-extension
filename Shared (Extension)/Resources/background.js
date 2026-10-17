@@ -697,11 +697,19 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     const detail = error?.message?.trim();
     return new Error(detail ? `${message}: ${detail}` : message, { cause: error ?? void 0 });
   }
+  var PRIVATE_DATABASE_OPEN_TIMEOUT_MS = 5e3;
+  var PRIVATE_DATABASE_TRANSACTION_TIMEOUT_MS = 5e3;
+  var ConnectionLost = class extends Error {
+  };
   var BrowserPrivateRecordDatabase = class {
     #factory;
+    #openTimeoutMs;
+    #transactionTimeoutMs;
     #openPromise = null;
-    constructor(factory) {
+    constructor(factory, options = {}) {
       this.#factory = factory;
+      this.#openTimeoutMs = options.openTimeoutMs ?? PRIVATE_DATABASE_OPEN_TIMEOUT_MS;
+      this.#transactionTimeoutMs = options.transactionTimeoutMs ?? PRIVATE_DATABASE_TRANSACTION_TIMEOUT_MS;
     }
     get(key) {
       return this.#runTransaction("readonly", (store) => store.get(key), (request) => request.result === void 0 ? null : request.result);
@@ -741,17 +749,68 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         );
       });
     }
+    /**
+     * One transaction. A connection that has stopped working is dropped and the
+     * transaction is tried once more on a fresh one, so a lost connection never
+     * fails every later read and write of this background. Each record is
+     * written whole under its own key, so trying a write again is harmless.
+     */
     async #runTransaction(mode, start, readResult) {
       const database = await this.#open();
+      try {
+        return await this.#runTransactionOn(database, mode, start, readResult);
+      } catch (error) {
+        if (!(error instanceof ConnectionLost)) throw error;
+        this.#dropConnection(database);
+        return await this.#runTransactionOn(await this.#open(), mode, start, readResult).catch(
+          (retryError) => {
+            if (retryError instanceof ConnectionLost) this.#dropConnection(null);
+            throw retryError;
+          }
+        );
+      }
+    }
+    /** Forgets the cached connection, so the next request opens a new one. */
+    #dropConnection(database) {
+      const pending = this.#openPromise;
+      this.#openPromise = null;
+      const close = (connection) => {
+        try {
+          connection?.close();
+        } catch {
+        }
+      };
+      close(database);
+      if (pending !== null) void pending.then(close, () => void 0);
+    }
+    #runTransactionOn(database, mode, start, readResult) {
       return new Promise((resolve, reject) => {
         let request;
         let result;
         let requestSucceeded = false;
         let settled = false;
-        const transaction = database.transaction(PRIVATE_RECORD_STORE, mode);
+        let transaction;
+        try {
+          transaction = database.transaction(PRIVATE_RECORD_STORE, mode);
+        } catch (error) {
+          reject(new ConnectionLost(
+            databaseError("private database connection lost", error instanceof DOMException ? error : null).message
+          ));
+          return;
+        }
+        const timer = globalThis.setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          try {
+            transaction.abort();
+          } catch {
+          }
+          reject(new ConnectionLost("private database transaction timed out"));
+        }, this.#transactionTimeoutMs);
         const finishReject = (message, error = null) => {
           if (settled) return;
           settled = true;
+          globalThis.clearTimeout(timer);
           reject(databaseError(message, error));
         };
         try {
@@ -782,14 +841,22 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
             );
           }
         };
-        request.onerror = () => finishReject(
-          "private database request failed",
-          request.error
-        );
-        transaction.onabort = () => finishReject(
-          "private database transaction aborted",
-          transaction.error
-        );
+        request.onerror = () => {
+          const name = request.error?.name;
+          if (name === "AbortError" || name === "UnknownError") return;
+          finishReject("private database request failed", request.error);
+        };
+        transaction.onabort = () => {
+          if (!settled && (transaction.error === null || transaction.error.name === "UnknownError")) {
+            settled = true;
+            globalThis.clearTimeout(timer);
+            reject(new ConnectionLost(
+              databaseError("private database connection lost", transaction.error).message
+            ));
+            return;
+          }
+          finishReject("private database transaction aborted", transaction.error);
+        };
         transaction.onerror = () => {
         };
         transaction.oncomplete = () => {
@@ -799,6 +866,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
             return;
           }
           settled = true;
+          globalThis.clearTimeout(timer);
           resolve(result);
         };
       });
@@ -807,12 +875,24 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (this.#openPromise !== null) return this.#openPromise;
       const opening = new Promise((resolve, reject) => {
         let settled = false;
-        const request = this.#factory.open(PRIVATE_DATABASE_NAME, PRIVATE_DATABASE_VERSION);
+        let timer = null;
         const finishReject = (message, error = null) => {
           if (settled) return;
           settled = true;
+          if (timer !== null) globalThis.clearTimeout(timer);
           reject(databaseError(message, error));
         };
+        let request;
+        try {
+          request = this.#factory.open(PRIVATE_DATABASE_NAME, PRIVATE_DATABASE_VERSION);
+        } catch (error) {
+          finishReject("private database open failed", error instanceof DOMException ? error : null);
+          return;
+        }
+        timer = globalThis.setTimeout(
+          () => finishReject("private database open timed out"),
+          this.#openTimeoutMs
+        );
         request.onupgradeneeded = (event) => {
           const database = request.result;
           if (event.oldVersion !== 0 || database.objectStoreNames.length !== 0) {
@@ -835,8 +915,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
             return;
           }
           settled = true;
+          if (timer !== null) globalThis.clearTimeout(timer);
           database.onversionchange = () => {
             database.close();
+            if (this.#openPromise === cached) this.#openPromise = null;
+          };
+          database.onclose = () => {
             if (this.#openPromise === cached) this.#openPromise = null;
           };
           resolve(database);
@@ -4721,8 +4805,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #fetch;
     #overlayEndpoint;
     #accountEndpoint;
-    constructor(fetchImpl, apiBase) {
+    #timeoutMs;
+    constructor(fetchImpl, apiBase, timeoutMs = REQUEST_TIMEOUT_MS2) {
       this.#fetch = fetchImpl;
+      this.#timeoutMs = timeoutMs;
       const base = apiBase.replace(/\/$/, "");
       this.#overlayEndpoint = `${base}/api/extension/library-overlay`;
       this.#accountEndpoint = `${base}/api/extension/account`;
@@ -4753,7 +4839,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (!result.response.ok) {
         return result.response.status === 429 || result.response.status >= 500 ? { kind: "unavailable" } : { kind: "invalid_response" };
       }
-      const body = await responseJson(result.response);
+      const body = result.body;
       const data = isRecord7(body) && isRecord7(body.data) ? body.data : null;
       const overlay = copyAccountOverlay(
         data === null || Object.hasOwn(data, "workPreferences") ? data : { ...data, workPreferences: {} }
@@ -4765,7 +4851,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (!result.response.ok) {
         return result.response.status === 429 || result.response.status >= 500 ? { kind: "unavailable" } : { kind: "invalid_response" };
       }
-      const body = await responseJson(result.response);
+      const body = result.body;
       if (!isRecord7(body) || typeof body.account_id !== "string" || !body.account_id.trim()) {
         return { kind: "invalid_response" };
       }
@@ -4787,7 +4873,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     async #request(url, credential) {
       const abort = new AbortController();
-      const timer = globalThis.setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS2);
+      const timer = globalThis.setTimeout(() => abort.abort(), this.#timeoutMs);
       try {
         const response = await this.#fetch(url, {
           method: "GET",
@@ -4795,7 +4881,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           headers: { Authorization: `Bearer ${credential}` },
           signal: abort.signal
         });
-        return { kind: "response", response };
+        const body = response.ok ? await responseJson(response) : null;
+        if (abort.signal.aborted) return { kind: "unavailable" };
+        return { kind: "response", response, body };
       } catch {
         return { kind: "unavailable" };
       } finally {

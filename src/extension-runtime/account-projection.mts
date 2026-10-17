@@ -16,7 +16,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 type ResponseResult =
-  | { readonly kind: "response"; readonly response: Response }
+  | { readonly kind: "response"; readonly response: Response; readonly body: unknown }
   | { readonly kind: "unavailable" };
 
 async function responseJson(response: Response): Promise<unknown> {
@@ -32,8 +32,11 @@ export class AccountProjectionApi implements AccountProjectionApiPort {
   readonly #overlayEndpoint: string;
   readonly #accountEndpoint: string;
 
-  constructor(fetchImpl: typeof fetch, apiBase: string) {
+  readonly #timeoutMs: number;
+
+  constructor(fetchImpl: typeof fetch, apiBase: string, timeoutMs = REQUEST_TIMEOUT_MS) {
     this.#fetch = fetchImpl;
+    this.#timeoutMs = timeoutMs;
     const base = apiBase.replace(/\/$/, "");
     this.#overlayEndpoint = `${base}/api/extension/library-overlay`;
     this.#accountEndpoint = `${base}/api/extension/account`;
@@ -75,7 +78,7 @@ export class AccountProjectionApi implements AccountProjectionApiPort {
         ? { kind: "unavailable" }
         : { kind: "invalid_response" };
     }
-    const body = await responseJson(result.response);
+    const body = result.body;
     const data = isRecord(body) && isRecord(body.data) ? body.data : null;
     // The released API omits `workPreferences` when the account has no hidden
     // works (LibraryOverlayResponseSchema marks it optional). Absent means none;
@@ -99,7 +102,7 @@ export class AccountProjectionApi implements AccountProjectionApiPort {
         ? { kind: "unavailable" }
         : { kind: "invalid_response" };
     }
-    const body = await responseJson(result.response);
+    const body = result.body;
     if (
       !isRecord(body) ||
       typeof body.account_id !== "string" ||
@@ -135,7 +138,7 @@ export class AccountProjectionApi implements AccountProjectionApiPort {
 
   async #request(url: string, credential: string): Promise<ResponseResult> {
     const abort = new AbortController();
-    const timer = globalThis.setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS);
+    const timer = globalThis.setTimeout(() => abort.abort(), this.#timeoutMs);
     try {
       const response = await this.#fetch(url, {
         method: "GET",
@@ -143,7 +146,11 @@ export class AccountProjectionApi implements AccountProjectionApiPort {
         headers: { Authorization: `Bearer ${credential}` },
         signal: abort.signal,
       });
-      return { kind: "response", response };
+      // The body is read under the same deadline: a reply whose body never
+      // finishes must not hold every later Library read behind it.
+      const body = response.ok ? await responseJson(response) : null;
+      if (abort.signal.aborted) return { kind: "unavailable" };
+      return { kind: "response", response, body };
     } catch {
       return { kind: "unavailable" };
     } finally {

@@ -72,3 +72,43 @@ test("database deletion reports a blocking connection and succeeds after it clos
   await database.deleteDatabase();
   assert.equal(await database.get(PRIVATE_RECORD_KEYS.accountData), null);
 });
+
+// A factory that hands out real connections and keeps them, so a test can
+// close one under the database as Safari does when its storage goes away.
+function keepingFactory(factory, { hangFirstOpen = false } = {}) {
+  const opened = [];
+  let opens = 0;
+  return {
+    opened,
+    open(name, version) {
+      opens += 1;
+      if (hangFirstOpen && opens === 1) return {};
+      const request = factory.open(name, version);
+      request.addEventListener("success", () => opened.push(request.result));
+      return request;
+    },
+    deleteDatabase: (name) => factory.deleteDatabase(name),
+  };
+}
+
+test("a lost connection is dropped and the request is made again on a new one", async () => {
+  const factory = keepingFactory(new IDBFactory());
+  const database = new BrowserPrivateRecordDatabase(factory);
+  await database.put(PRIVATE_RECORD_KEYS.accountData, { kept: true });
+  assert.equal(factory.opened.length, 1);
+
+  factory.opened[0].close();
+
+  assert.deepEqual(await database.get(PRIVATE_RECORD_KEYS.accountData), { kept: true });
+  await database.put(PRIVATE_RECORD_KEYS.accountData, { kept: "again" });
+  assert.deepEqual(await database.get(PRIVATE_RECORD_KEYS.accountData), { kept: "again" });
+  assert.equal(factory.opened.length, 2);
+});
+
+test("an open that never answers times out and the next request opens again", async () => {
+  const factory = keepingFactory(new IDBFactory(), { hangFirstOpen: true });
+  const database = new BrowserPrivateRecordDatabase(factory, { openTimeoutMs: 20 });
+
+  await assert.rejects(database.get(PRIVATE_RECORD_KEYS.accountData), /open timed out/);
+  assert.equal(await database.get(PRIVATE_RECORD_KEYS.accountData), null);
+});
