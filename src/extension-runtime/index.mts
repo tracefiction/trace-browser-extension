@@ -252,10 +252,9 @@ try {
     webOrigin: __TRACE_WEB_ORIGIN__,
     randomId,
     archiveReadinessStatus,
-    // Missing FanFiction.net summaries are read from the story site in the
-    // reader's own browser, slowly (ffn-summary-fill.mts).
+    // Missing FanFiction.net summaries are read in the reader's own
+    // FanFiction.net tab, slowly (ffn-summary-fill.mts).
     ffnSummaryFill: {
-      storySiteFetch: globalThis.fetch.bind(globalThis),
       sessionArea: extension.storage.session ?? null,
     },
   });

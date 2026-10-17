@@ -71,6 +71,7 @@ export interface FirstTapSession extends AuthenticatedStoryCommandPort {
   saveStoryWithEvidence(
     command: StoryTrackCommand,
     observer?: { beforeWrite?(): Promise<void> | void },
+    tabId?: number,
   ): Promise<StoryCommandEvidence>;
   storyPresence(workKey: string): Promise<StoryPresence>;
   attachStoryAdmission(hooks: {
@@ -203,7 +204,7 @@ export function installFirstTapSave(environment: Environment): () => Promise<voi
       return true;
     },
     collect: (tabId) => call(tabs, "sendMessage", [tabId, { type: FIRST_TAP_COLLECT_MESSAGE }, { frameId: 0 }]),
-    save: (command, observer) => session.saveStoryWithEvidence(command, observer),
+    save: (command, observer, tabId) => session.saveStoryWithEvidence(command, observer, tabId),
     presence: (workKey) => session.storyPresence(workKey),
     membership: (workKey) => readStoryMembership(session, membershipApi, workKey),
     async mark(tabId, workKey) {
