@@ -95,6 +95,12 @@ export type HistoryPageRead =
       /** The next page number, or null on the last page. */
       readonly nextPage: number | null;
     }
+  /**
+   * A History page with no works listed at all. Never taken for the last
+   * page: AO3 may have sent it while unwell, or the History may be empty or
+   * turned off. Tried again later, and reported as such.
+   */
+  | { readonly kind: "empty" }
   | { readonly kind: "stop"; readonly code: StopCode };
 
 export type StopCode =
@@ -105,6 +111,7 @@ export type StopCode =
   | "redirected"
   | "unrecognized_page"
   | "pagination_unexpected"
+  | "rows_unreadable"
   | "http_error";
 
 const ENTITIES: Readonly<Record<string, string>> = {
@@ -245,10 +252,22 @@ export function readHistoryPage(html: string, user: string, page: number): Histo
   if (main === null || !classTokens(main[0]).includes("readings-index")) {
     return { kind: "stop", code: LOGIN_MARKERS.test(html) ? "signed_out" : "unrecognized_page" };
   }
-  const after = html.slice(main.index);
-  const ends = [after.search(/<ol\b[^>]*\bclass\s*=\s*["'][^"']*\bpagination\b/i), after.search(/<div\b[^>]*\bid\s*=\s*["']footer["']/i)]
-    .filter((index) => index > 0);
-  const list = ends.length ? after.slice(0, Math.min(...ends)) : after;
+  const whole = html.slice(main.index);
+  const footer = whole.search(/<div\b[^>]*\bid\s*=\s*["']footer["']/i);
+  const after = footer > 0 ? whole.slice(0, footer) : whole;
+  // AO3 shows the page links both above and below the listing, so the rows
+  // are read from the listing itself (`ol.reading.work.index`) to the page
+  // links after it. A page with no listing has no rows.
+  let list = "";
+  const listTag = /<ol\b[^>]*>/gi;
+  for (let match = listTag.exec(after); match !== null; match = listTag.exec(after)) {
+    const classes = classTokens(match[0]);
+    if (!classes.includes("reading") || !classes.includes("index")) continue;
+    const rest = after.slice(match.index + match[0].length);
+    const end = rest.search(/<ol\b[^>]*\bclass\s*=\s*["'][^"']*\bpagination\b/i);
+    list = end >= 0 ? rest.slice(0, end) : rest;
+    break;
+  }
   const rowStart = /<li\b[^>]*>/gi;
   const starts: { index: number; tag: string }[] = [];
   for (let match = rowStart.exec(list); match !== null; match = rowStart.exec(list)) {
@@ -267,17 +286,32 @@ export function readHistoryPage(html: string, user: string, page: number): Histo
     else if (read === "unreadable") unreadable += 1;
     else records.push(read);
   });
-  // Every Next link on the page (AO3 may show the pagination twice) must name
-  // the following page of the same History.
+  // Every Next link on the page (AO3 shows the page links twice) must name
+  // the following page of the same History. AO3's page links mark Next by
+  // its list item (`li.next`), with no `rel`; a last page has a plain
+  // "Next" there and no link. A `rel="next"` link is read too.
   const nexts = new Set<number | null>();
   const anchor = /<a\b[^>]*>/gi;
   for (let match = anchor.exec(after); match !== null; match = anchor.exec(after)) {
     if (attribute(match[0], "rel") !== "next") continue;
     nexts.add(historyPageNumber(attribute(match[0], "href") ?? "", user));
   }
+  const nextItem = /<li\b[^>]*>/gi;
+  for (let match = nextItem.exec(after); match !== null; match = nextItem.exec(after)) {
+    if (!classTokens(match[0]).includes("next")) continue;
+    const item = after.slice(match.index + match[0].length);
+    const close = item.search(/<\/li\s*>/i);
+    const link = /<a\b[^>]*>/i.exec(close >= 0 ? item.slice(0, close) : item);
+    const href = link === null ? null : attribute(link[0], "href");
+    if (href !== null) nexts.add(historyPageNumber(href, user));
+  }
   if (nexts.size > 1 || nexts.has(null) || (nexts.size === 1 && !nexts.has(page + 1))) {
     return { kind: "stop", code: "pagination_unexpected" };
   }
+  if (starts.length === 0) return { kind: "empty" };
+  // Rows were there and none could be read: the page's markup is not what
+  // this reader knows, which is never the end of the History.
+  if (unreadable === starts.length) return { kind: "stop", code: "rows_unreadable" };
   return { kind: "page", records, markedForLater, deleted, unreadable, nextPage: nexts.size ? page + 1 : null };
 }
 
@@ -307,7 +341,7 @@ export type FailCode = "timeout" | "network" | "cancelled" | "tab_gone" | "tab_n
 
 export type Classified =
   | { readonly kind: "page"; readonly read: Extract<HistoryPageRead, { kind: "page" }> }
-  | { readonly kind: "retry"; readonly code: "rate_limited" | "unavailable" | "server_error" | "network" | "timeout"; readonly retryAfterMs: number | null }
+  | { readonly kind: "retry"; readonly code: "rate_limited" | "unavailable" | "server_error" | "empty_page" | "network" | "timeout"; readonly retryAfterMs: number | null }
   | { readonly kind: "stop"; readonly code: StopCode | Exclude<FailCode, "timeout" | "network"> };
 
 export function retryAfterMs(value: string | null, now: number): number | null {
@@ -351,6 +385,7 @@ export function classifyHistoryAnswer(answer: LoadedPage, user: string, page: nu
   }
   if (answer.contentType !== null && !/text\/html/i.test(answer.contentType)) return { kind: "stop", code: "unrecognized_page" };
   const read = readHistoryPage(answer.html, user, page);
+  if (read.kind === "empty") return { kind: "retry", code: "empty_page", retryAfterMs: null };
   return read.kind === "page" ? { kind: "page", read } : { kind: "stop", code: read.code };
 }
 
@@ -560,7 +595,7 @@ function newState(runId: string, user: string, tabId: number | null, now: number
 /** Codes a background probe may fail with before the AO3 tab is tried. */
 const TRY_THE_TAB = new Set(["signed_out", "redirected", "unrecognized_page", "forbidden", "http_error"]);
 /** A 5xx from the background probe also tries the tab, rather than waiting. */
-const TRY_THE_TAB_ON_RETRY = new Set(["server_error", "unavailable"]);
+const TRY_THE_TAB_ON_RETRY = new Set(["server_error", "unavailable", "empty_page"]);
 /** An unanswered request counts as lost this long after it was made. */
 export const LOST_AFTER_MS = REQUEST_TIMEOUT_MS + 10_000;
 
@@ -926,7 +961,7 @@ export class Ao3HistoryExperiment {
     if (result.code === "rate_limited") next.pace.rateLimited += 1;
     else if (result.code === "unavailable") next.pace.unavailable += 1;
     else if (result.code === "server_error") next.pace.serverErrors += 1;
-    else next.pace.networkErrors += 1;
+    else if (result.code === "network" || result.code === "timeout") next.pace.networkErrors += 1;
     if (result.retryAfterMs !== null) next.pace.retryAfterMaxMs = Math.max(next.pace.retryAfterMaxMs, result.retryAfterMs);
     const network = result.code === "network" || result.code === "timeout";
     const base = network ? NETWORK_RETRY_MS : RETRY_BASE_MS * 2 ** (next.pace.consecutiveRetries - 1);
@@ -942,7 +977,7 @@ export class Ao3HistoryExperiment {
       await this.#pauseWith(next, "retry_later", now);
       return false;
     }
-    if (!network) {
+    if (!network && result.code !== "empty_page") {
       // AO3 asked for less: every later page waits longer too.
       next.timing.gapMs = Math.min(MAX_PAGE_GAP_MS, next.timing.gapMs * 2);
       next.pace.backoffs += 1;

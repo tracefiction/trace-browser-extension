@@ -44,12 +44,22 @@ function work(id, { title = `Invented work ${id}`, author = "Synthetic_Quill", l
     `<div class="user module group"><h4 class="viewed heading">${escapeHTML(visit)}</h4></div></li>`;
 }
 
-function page(rows, { next = null, user = USER } = {}) {
-  const nextLink = next === null ? '<li class="next disabled">Next →</li>' : `<li class="next"><a rel="next" href="/users/${user}/readings?page=${next}">Next →</a></li>`;
+// The shape AO3's History page has: the page links above the listing and
+// again below it, Next marked by its list item with no `rel`, and a plain
+// "Next" on the last page. `rel: true` writes the older `rel="next"` link.
+function page(rows, { next = null, user = USER, rel = false, pages = true } = {}) {
+  const nextLink = next === null
+    ? '<li class="next"><span class="disabled">Next →</span></li>'
+    : `<li class="next"><a ${rel ? 'rel="next" ' : ""}href="/users/${user}/readings?page=${next}">Next →</a></li>`;
+  const links = pages
+    ? `<h4 class="landmark heading">Navigation</h4><ol class="pagination actions pagy" role="navigation" aria-label="Pagination">` +
+      `<li class="previous"><span class="disabled">← Previous</span></li><li><a role="link" aria-disabled="true" aria-current="page" class="current">1</a></li>${nextLink}</ol>`
+    : "";
+  const listing = rows.length ? `<ol class="reading work index group">${rows.join("\n")}</ol>` : "";
   return `<!doctype html><html><head><title>History | Synthetic</title></head><body class="logged-in">` +
     `<div id="header"><a href="/users/${user}/readings">My History</a></div>` +
-    `<div id="main" class="readings-index dashboard region"><ol class="reading work index group">${rows.join("\n")}</ol>` +
-    `<ol class="pagination actions">${nextLink}</ol></div><div id="footer"></div></body></html>`;
+    `<div id="main" class="readings-index dashboard region"><h2 class="heading">History</h2>${links}` +
+    `<h3 class="landmark heading">List of History Items</h3>${listing}${links}</div><div id="footer"></div></body></html>`;
 }
 
 function answer(html, { url, status = 200, retryAfter = null, cfMitigated = null, server = null, cfRay = null, title = null, contentType = "text/html; charset=utf-8" } = {}) {
@@ -168,6 +178,45 @@ test("follows only the next page of the same History", () => {
   assert.deepEqual(readHistoryPage(page([work(1)], { next: 2, user: "Someone_Else" }), USER, 1), { kind: "stop", code: "pagination_unexpected" });
   assert.deepEqual(readHistoryPage("<html><body><form action=\"/users/login\"></form></body></html>", USER, 1), { kind: "stop", code: "signed_out" });
   assert.deepEqual(readHistoryPage("<html><body><div id=\"main\" class=\"works-show\"></div></body></html>", USER, 1), { kind: "stop", code: "unrecognized_page" });
+});
+
+test("reads rows below AO3's top page links, and Next from its list item", () => {
+  const read = readHistoryPage(page([work(1), work(2)], { next: 2 }), USER, 1);
+  assert.equal(read.kind, "page");
+  assert.deepEqual(read.records.map((record) => record.id), ["1", "2"]);
+  assert.equal(read.nextPage, 2);
+  const last = readHistoryPage(page([work(3)]), USER, 2);
+  assert.equal(last.kind, "page");
+  assert.deepEqual(last.records.map((record) => record.id), ["3"]);
+  assert.equal(last.nextPage, null);
+  assert.equal(readHistoryPage(page([work(1)], { next: 2, rel: true }), USER, 1).nextPage, 2);
+  assert.equal(readHistoryPage(page([work(1)], { pages: false }), USER, 1).nextPage, null);
+});
+
+test("a History page with no works is never the last page, and rows it cannot read stop the run", () => {
+  const now = Date.parse("2026-10-16T12:00:00Z");
+  assert.deepEqual(readHistoryPage(page([]), USER, 1), { kind: "empty" });
+  assert.deepEqual(readHistoryPage(page([], { pages: false }), USER, 1), { kind: "empty" });
+  assert.deepEqual(classifyHistoryAnswer(answer(page([]), { url: pageURL(1) }), USER, 1, now),
+    { kind: "retry", code: "empty_page", retryAfterMs: null });
+  const strange = page(['<li class="reading work blurb group" role="article"><p>No id here</p></li>']);
+  assert.deepEqual(readHistoryPage(strange, USER, 1), { kind: "stop", code: "rows_unreadable" });
+});
+
+test("an empty History page is tried again later, then pauses saying so, and is never finished", async () => {
+  const empty = ({ url }) => answer(page([]), { url });
+  const h = harness({ answers: [ok([work(1)], 2), empty, ok([work(2)], 3), empty, empty, empty] });
+  await h.experiment.start(USER, TAB);
+  await h.drive();
+  const [, first, after] = h.requests;
+  assert.ok(after.at - first.at >= 60_000, "it waits before asking again");
+  const state = stateOf(h.store);
+  assert.equal(state.status, "paused");
+  assert.equal(state.reason, "empty_page");
+  assert.equal(state.errors.empty_page, 1 + MAX_CONSECUTIVE_RETRIES);
+  assert.equal(state.counts.pagesRead, 2);
+  assert.equal(state.lastAnswer.code, "empty_page");
+  assert.equal(state.lastAnswer.path, "readings");
 });
 
 test("classifies AO3's answers: slow down, challenge, signed out, wrong host, redirect", () => {

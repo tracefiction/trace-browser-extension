@@ -28,6 +28,8 @@
     http_error: "Stopped: AO3 answered with an error.",
     unrecognized_page: "Stopped: the page did not look like your History.",
     pagination_unexpected: "Stopped: the page links did not lead to the next page.",
+    empty_page: "Stopped: AO3 sent a History page with no works three times in a row. Your History may be empty or turned off, or AO3 may be unwell. Try Resume later.",
+    rows_unreadable: "Stopped: the History page listed works this build could not read.",
     pagination_repeat: "Stopped: AO3 showed the same page twice.",
     page_limit: "Stopped at the page limit.",
     storage_write_failed: "Stopped: Trace could not store more on this iPhone.",
