@@ -2716,3 +2716,97 @@ test("what is kept for an account is cleared when it signs out or the app's acco
   assert.equal(controller.snapshot().state, "signed_out");
   assert.ok(left >= 2, "and sign-out");
 });
+
+test("on iPhone, a session a failed Library read left degraded connects again when the sheet asks", async () => {
+  let online = true;
+  let accountReads = 0;
+  const controller = installTestRuntime({
+    mode: "kernel", storageArea: new PromiseStorageArea(), storageMode: "promise",
+    apiBase: "https://api.tracefiction.com", webOrigin: "https://www.tracefiction.com",
+    randomId: () => "degraded-recovery-credential",
+    runtime: {
+      onMessage: { addListener() {} },
+      async getPlatformInfo() { return { os: "ios" }; },
+      async sendNativeMessage(message) {
+        if (message.type === "TRACE_IOS_AUTH_TOKEN_REQUEST") return nativeCredentialResponse();
+        return { ok: true };
+      },
+    },
+    tabs: { async query() { return []; }, async sendMessage() {} },
+    fetch: async (url) => {
+      if (!online) throw new TypeError("Load failed");
+      if (url.endsWith("/api/extension/account")) {
+        accountReads += 1;
+        return new Response(JSON.stringify({ account_id: "account-a" }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ success: true, data: {} }), { status: 200 });
+    },
+  });
+  assert.equal((await controller.accountForThisOpen()).state, "verified");
+  assert.equal(controller.snapshot().state, "connected");
+
+  // Safari drops the background's requests while the reader is elsewhere.
+  online = false;
+  await controller.handle(
+    { type: "TRACE_ACCOUNT_PROJECTION_GET", workKeys: ["ffn:7038840"] },
+    archiveSender,
+  );
+  assert.equal(controller.snapshot().state, "degraded");
+  assert.equal(controller.snapshot().reason, "verification_unavailable");
+
+  // Still offline: the read is tried, and the sheet is told it failed.
+  const offline = await controller.handle({ type: "TRACE_SESSION_GET_SNAPSHOT" }, popupSender);
+  assert.equal(offline.snapshot.state, "degraded");
+
+  // Back online, the sheet's next read (opening it, or Try again) connects.
+  online = true;
+  const readsBefore = accountReads;
+  const recovered = await controller.handle({ type: "TRACE_SESSION_GET_SNAPSHOT" }, popupSender);
+  assert.equal(recovered.snapshot.state, "connected");
+  assert.equal(controller.snapshot().state, "connected");
+  assert.ok(accountReads > readsBefore, "the account was verified again");
+  const page = await controller.handle(
+    { type: "TRACE_ACCOUNT_PROJECTION_GET", workKeys: ["ffn:7038840"] },
+    archiveSender,
+  );
+  assert.equal(page.snapshot.state, "connected");
+});
+
+test("off iPhone, reading the session never retries a degraded one by itself", async () => {
+  let online = true;
+  const controller = installTestRuntime({
+    mode: "kernel", storageArea: new PromiseStorageArea(), storageMode: "promise",
+    apiBase: "https://api.tracefiction.com", webOrigin: "https://www.tracefiction.com",
+    randomId: () => "desktop-degraded-credential",
+    runtime: {
+      onMessage: { addListener() {} },
+      async getPlatformInfo() { return { os: "mac" }; },
+    },
+    tabs: {
+      async query() { return [{ id: 7, url: "https://www.tracefiction.com/", active: true }]; },
+      async sendMessage(_tabId, message) {
+        return message.type === "TRACE_CREDENTIAL_GRANT_REQUEST"
+          ? { ok: true, requestId: message.requestId, token: "explicit-token" }
+          : undefined;
+      },
+    },
+    fetch: async (url) => {
+      if (!online) throw new TypeError("Load failed");
+      return new Response(JSON.stringify(url.endsWith("/api/extension/account")
+        ? { account_id: "account-a" } : { success: true, data: {} }), { status: 200 });
+    },
+  });
+  await controller.handle({ type: "TRACE_SESSION_ACTION", action: "connect" }, popupSender);
+  assert.equal(controller.snapshot().state, "connected");
+  online = false;
+  await controller.handle(
+    { type: "TRACE_ACCOUNT_PROJECTION_GET", workKeys: ["ffn:7038840"] },
+    archiveSender,
+  );
+  assert.equal(controller.snapshot().state, "degraded");
+  online = true;
+  const read = await controller.handle({ type: "TRACE_SESSION_GET_SNAPSHOT" }, popupSender);
+  assert.equal(read.snapshot.state, "degraded", "the desktop popup keeps its own Retry");
+  await controller.handle({ type: "TRACE_SESSION_ACTION", action: "retry" }, popupSender);
+  assert.equal(controller.snapshot().state, "connected");
+});
