@@ -1965,6 +1965,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     allowed: "positive",
     not_allowed: "blocker",
     partly_allowed: "blocker",
+    not_allowed_since_update: "blocker",
     registered: "positive",
     declared: "positive",
     not_registered: "blocker",
@@ -2083,7 +2084,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       const second = await read();
       if (second.complete === true) return done("allowed");
       if (second.complete === null || second.granted === null) return done("unconfirmed");
-      return done(second.granted > 0 ? "partly_allowed" : "not_allowed");
+      if (second.granted > 0) return done("partly_allowed");
+      const before = await (this.#ports.allowedBeforeUpdate?.() ?? Promise.resolve(false)).catch(() => false);
+      return done(before === true ? "not_allowed_since_update" : "not_allowed");
     }
   };
 
@@ -11398,6 +11401,14 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       lastScriptReason = reason;
       return reason;
     };
+    const allowedBeforeUpdate = async () => {
+      if (config.registrationMode !== "dynamic") return false;
+      const stored = await bounded2(storage.get(EARNED_PERMISSION_STATE_KEY), BROWSER_READ_TIMEOUT_MS);
+      const state = stored?.[EARNED_PERMISSION_STATE_KEY];
+      if (!isRecord24(state) || state.promptResult !== "granted") return false;
+      const generation = state.registrationVersion;
+      return Number.isInteger(generation) && Number(generation) > 0 && Number(generation) < config.version;
+    };
     const account = async () => {
       const session = environment.session();
       if (session === void 0) return { state: "pending" };
@@ -11446,6 +11457,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       prepare,
       deliver,
       websiteAccess,
+      allowedBeforeUpdate,
       scriptRegistration,
       account,
       session: () => environment.session()?.pageBinding() ?? null,
@@ -11463,6 +11475,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
       void report().then(() => sendResponse({ ok: true }), () => sendResponse({ ok: true }));
       return true;
+    });
+    runtime.onInstalled?.addListener((details) => {
+      if (details?.reason !== "update") return;
+      void allowedBeforeUpdate().then((before) => {
+        if (before) reportQuietly();
+      }, () => void 0);
     });
     permissions.onAdded?.addListener(reportQuietly);
     permissions.onRemoved?.addListener(reportQuietly);
