@@ -3597,8 +3597,27 @@ function storyInlineStatusDisplay(info) {
         : null;
   var label = quickAddStatusLabel(status);
   if (!label) label = "Saved";
+  if (canonicalReaderStatus(status) === "SAVED") return storySavedRecordLabel(info);
   var progress = storyInlineProgressDisplay(info);
   return progress ? label + " " + progress : label;
+}
+
+// The place the popup's story sheet gives a saved record: "Chapter 31", or
+// "Chapter 31 of 40" when the total is known. Empty when no chapter is known.
+function storySavedRecordPlace(info) {
+  var chapters = info && info.chapters;
+  var current = chapters && chapters.current;
+  var total = chapters && chapters.total;
+  if (!Number.isInteger(current) || current <= 0) return "";
+  return Number.isInteger(total) && total > 0
+    ? "Chapter " + current + " of " + total
+    : "Chapter " + current;
+}
+
+// A saved record reads as the popup's sheet labels it: "Saved · Chapter 31".
+function storySavedRecordLabel(info) {
+  var place = storySavedRecordPlace(info);
+  return place ? "Saved · " + place : "Saved";
 }
 
 function storyInlineDisplayChapters(info, status) {
@@ -4814,9 +4833,11 @@ function storyHandlePresentation(view) {
   }
   var status = entryStatus(entry);
   if (status) {
+    var savedPlace = status === "SAVED" ? storySavedRecordPlace(entry) : "";
     return {
       kind: "status",
-      label: quickAddStatusLabel(status) || "Saved",
+      label: status === "SAVED" ? storySavedRecordLabel(entry) : quickAddStatusLabel(status) || "Saved",
+      place: savedPlace || null,
       theme: TRACE_INLINE_THEMES[status] || TRACE_INLINE_THEMES.muted,
       dot: true,
       spinner: false,
@@ -4841,8 +4862,12 @@ function applyStoryInlineHandleState(handle, presentation) {
   clearElement(handle);
   handle.style.cssText = traceInlineHandleCss(theme);
   var accessible = "Trace: " + ((presentation && presentation.label) || "Story");
-  if (presentation && presentation.status === "SAVED") accessible = "Trace: Saved to your Library";
-  else if (presentation && presentation.status && presentation.progress) {
+  if (presentation && presentation.status === "SAVED") {
+    accessible = "Trace: Saved to your Library";
+    if (presentation.place) {
+      accessible += ", " + presentation.place.charAt(0).toLowerCase() + presentation.place.slice(1);
+    }
+  } else if (presentation && presentation.status && presentation.progress) {
     var chapters = String(presentation.progress).match(/^(\d+)\/(\d+|\?)$/);
     if (chapters) accessible += ", chapter " + chapters[1] + (chapters[2] === "?" ? "" : " of " + chapters[2]);
   }

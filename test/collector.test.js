@@ -17,7 +17,7 @@ function collectorTestSource(source) {
 window.finishQualifyIsLastPostedChapter = finishQualifyIsLastPostedChapter;
 window.removeQuickAddElements = removeQuickAddElements;
 window.renderQuickAddButton = renderQuickAddButton;
-window.__traceTestHooks = { sendAutoTrackForStory, storyHandlePresentation, handleDisplay, storyHeadline, storyCaption };
+window.__traceTestHooks = { sendAutoTrackForStory, storyHandlePresentation, applyStoryInlineHandleState, handleDisplay, storyHeadline, storyCaption };
 })();`);
 }
 
@@ -1277,6 +1277,58 @@ test("the story handle never shows a bare Error", () => {
     const source = fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", file), "utf8");
     assert.doesNotMatch(source, /(?:textContent = |label: |return )"Error"/, file);
   }
+  dom.window.close();
+});
+
+test("a saved story's handle names its chapter as the popup's sheet does", () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://archiveofourown.org/works/28534965",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  installCollectorChrome(dom, createChromeMockForHooks());
+  dom.window.eval(collectorTestSource(fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"), "utf8")));
+  const hooks = dom.window.__traceTestHooks;
+  const saved = (chapters) => ({
+    hasAuth: true,
+    entry: { status: "PLANNING", readerStatus: "PLANNING", canonicalReaderStatus: "SAVED", chapters },
+  });
+  const drawn = (view) => {
+    const handle = dom.window.document.createElement("button");
+    hooks.applyStoryInlineHandleState(handle, hooks.storyHandlePresentation(view));
+    return handle;
+  };
+
+  // Chapter known: the same words and middle dot as the popup's record label.
+  for (const [chapters, label, spoken] of [
+    [{ current: 31, total: null }, "Saved · Chapter 31", "Trace: Saved to your Library, chapter 31"],
+    [{ current: 31, total: 40 }, "Saved · Chapter 31 of 40", "Trace: Saved to your Library, chapter 31 of 40"],
+  ]) {
+    const view = saved(chapters);
+    assert.equal(hooks.storyHandlePresentation(view).label, label);
+    assert.equal(hooks.handleDisplay(view), label);
+    const handle = drawn(view);
+    assert.equal(handle.textContent, label);
+    assert.equal(handle.getAttribute("aria-label"), spoken);
+    assert.equal(handle.getAttribute("data-trace-story-handle-state"), "status");
+    assert.equal(handle.getAttribute("data-trace-story-status"), "SAVED");
+    assert.ok(handle.querySelector("svg"), "the chevron still follows the label");
+  }
+
+  // Chapter unknown: plain Saved, as before.
+  for (const chapters of [undefined, null, { current: null, total: 12 }, { current: 0, total: 12 }]) {
+    const view = saved(chapters);
+    assert.equal(hooks.storyHandlePresentation(view).label, "Saved");
+    assert.equal(hooks.handleDisplay(view), "Saved");
+    const handle = drawn(view);
+    assert.equal(handle.textContent, "Saved");
+    assert.equal(handle.getAttribute("aria-label"), "Trace: Saved to your Library");
+  }
+
+  // Other statuses keep their compact progress.
+  const reading = { hasAuth: true, entry: { canonicalReaderStatus: "READING", chapters: { current: 2, total: 28 } } };
+  assert.equal(hooks.storyHandlePresentation(reading).label, "Reading");
+  assert.equal(hooks.storyHandlePresentation(reading).progress, "2/28");
   dom.window.close();
 });
 
