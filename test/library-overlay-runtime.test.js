@@ -1049,6 +1049,30 @@ test("library-overlay keeps legacy fallback when optional work fields are missin
   assert.equal(surface.querySelector("[data-trace-action-row='Catch-up']"), null);
 });
 
+test("library-overlay Open in Trace opens the story in the Trace app on iPhone", async () => {
+  const entryId = "00000000-0000-4000-8000-000000012345";
+  const window = await renderOverlayListing({
+    html:
+      "<!doctype html><html><body><ol><li class='work blurb group'><h4 class='heading'><a href='/works/12345'>Editable Work</a></h4></li></ol></body></html>",
+    cache: {
+      entries: {
+        "ao3:12345": {
+          status: "READING",
+          readerStatus: "READING",
+          entryId,
+          chapters: { current: 3, total: 17 },
+        },
+      },
+      syncVersion: "v-entryid-app-link",
+    },
+    userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+  });
+
+  const openInTrace = openTraceLens(window).surface.querySelector("a");
+  assert.equal(openInTrace.getAttribute("href"), `traceauth://open?destination=story&entryId=${entryId}`);
+  assert.equal(openInTrace.getAttribute("target"), null);
+});
+
 test("library-overlay opened surface shows status editing only when entryId exists", async () => {
   const entryId = "00000000-0000-4000-8000-000000012345";
   const messages = [];

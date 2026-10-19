@@ -4620,6 +4620,47 @@ function openTraceUrlInBrowserTab(url) {
   });
 }
 
+// On iPhone and iPad "Open in Trace" opens the story in the Trace app. A
+// website link would open the website: Safari does not hand it to the app.
+// A story that is not in the Library yet opens the app at the Library.
+var TRACE_ENTRY_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function storyTraceAppUrl(entry) {
+  var entryId = entry && typeof entry.entryId === "string" ? entry.entryId.trim() : "";
+  if (!TRACE_ENTRY_ID_PATTERN.test(entryId)) return TRACE_IOS_APP_LIBRARY_URL;
+  return "traceauth://open?destination=story&entryId=" + entryId.toLowerCase();
+}
+
+function configureStoryTraceOpenLink(link, authState, entry) {
+  if (traceIsIosSafari()) {
+    link.href = storyTraceAppUrl(entry);
+    link.removeAttribute("target");
+    link.removeAttribute("rel");
+    return;
+  }
+  link.href = storyTraceOpenUrl(authState, entry);
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+}
+
+// Follows a Trace app link from the reader's own tap. Safari asks to open
+// the app and the page stays where it was.
+function followTraceAppLink(url) {
+  try {
+    window.location.href = url;
+  } catch (_) {
+    // The app link is optional; the reader can always switch apps themselves.
+  }
+}
+
+function openStoryInTrace(authState, entry) {
+  if (traceIsIosSafari()) {
+    followTraceAppLink(storyTraceAppUrl(entry));
+    return;
+  }
+  openTraceUrlInBrowserTab(storyTraceOpenUrl(authState, entry));
+}
+
 // The story page's Connect runs the popup's Connect: it uses a signed-in
 // Trace tab when one is open, otherwise the background opens Trace and
 // signing in there finishes the connection. Never used on iPhone or iPad,
@@ -6936,7 +6977,9 @@ function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
         });
         return;
       }
-      openTraceUrlInBrowserTab(storyTraceOpenUrl(null, entry));
+      // On iPhone and iPad the Trace app connects the extension.
+      if (traceIsIosSafari()) followTraceAppLink(TRACE_IOS_APP_SETUP_URL);
+      else openTraceUrlInBrowserTab(storyTraceOpenUrl(null, entry));
       setTimeout(function () {
         if (btn.getAttribute("data-trace-connect-checking") === "1") {
           setStoryHiddenPreferenceAuthAction(btn, btn.getAttribute("data-trace-connect-error") || "not_authenticated");
@@ -7158,13 +7201,13 @@ function renderStorySheet(sheet, view, workKey) {
         event.stopPropagation();
         requestStoryArchiveConnect(workKey);
       });
-    } else if (awaitingAppLink(view)) {
+    } else if (awaitingAppLink(view) ||
+        (traceIsIosSafari() && view.authState && view.authState.state === "reconnect_required")) {
+      // A reader reconnecting on iPhone or iPad does it in the Trace app too.
       connectOpen.href = TRACE_IOS_APP_SETUP_URL;
       connectOpen.textContent = "Open Trace app";
     } else {
-      connectOpen.href = storyTraceOpenUrl(view.authState, view.entry);
-      connectOpen.target = "_blank";
-      connectOpen.rel = "noopener noreferrer";
+      configureStoryTraceOpenLink(connectOpen, view.authState, view.entry);
       connectOpen.textContent = "Open Trace";
     }
     connectOpen.style.cssText = storySheetPrimaryButtonCss() + ";align-self:flex-start;margin-left:-8px";
@@ -7330,9 +7373,7 @@ function renderStorySheet(sheet, view, workKey) {
   var open = document.createElement("a");
   open.className = "x-pbtn x-pbtn-primary";
   open.setAttribute("data-trace-open-trace", "1");
-  open.href = storyTraceOpenUrl(view.authState, view.entry);
-  open.target = "_blank";
-  open.rel = "noopener noreferrer";
+  configureStoryTraceOpenLink(open, view.authState, view.entry);
   open.appendChild(document.createTextNode("Open in Trace"));
   open.appendChild(storySheetSvgIcon("open"));
   open.style.cssText = storySheetPrimaryButtonCss() + ";margin-right:auto";
@@ -7869,7 +7910,7 @@ function showFinishQualifyDone(decision, view, workKey, result) {
   var kind = authoritativeStatus === "FINISHED" ? "finished" : "caughtup";
   var previousStatus = finishQualifyPreviousStatus(decision);
   var openInTrace = function () {
-    openTraceUrlInBrowserTab(storyTraceOpenUrl(view.authState, decision.entry));
+    openStoryInTrace(view.authState, decision.entry);
   };
   traceRefreshPageTokens();
   if (typeof window.TraceFinishQualify.done !== "function") {
@@ -7941,7 +7982,7 @@ function mountFinishQualifyBand(decision, view, workKey, flowState) {
       finishQualifyBandState[workKey] = null;
     },
     onOpenInTrace: function () {
-      openTraceUrlInBrowserTab(storyTraceOpenUrl(view.authState, decision.entry));
+      openStoryInTrace(view.authState, decision.entry);
     },
   });
 }
@@ -7983,7 +8024,7 @@ function mountFinishQualifyRecovery(decision, view, workKey, flowState, message)
       );
     },
     onOpenInTrace: function () {
-      openTraceUrlInBrowserTab(storyTraceOpenUrl(view.authState, decision.entry));
+      openStoryInTrace(view.authState, decision.entry);
     },
   });
 }

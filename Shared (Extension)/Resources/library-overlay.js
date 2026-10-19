@@ -31,6 +31,7 @@
   // fixed links carry no account, story or page data.
   const TRACE_IOS_APP_UNLIMITED_URL = "traceauth://open?destination=unlimited";
   const TRACE_IOS_APP_LIBRARY_URL = "traceauth://open?destination=library";
+  const TRACE_IOS_APP_SETUP_URL = "traceauth://open?destination=extension-connect";
   const ACCOUNT_PROJECTION_GET_MESSAGE = "TRACE_ACCOUNT_PROJECTION_GET";
   const ACCOUNT_PROJECTION_REVISION_KEY = "traceAccountProjectionRevisionV1";
   const MAX_PROJECTION_WORK_KEYS = 250;
@@ -148,6 +149,39 @@
       return url.href;
     } catch (_) {
       return base;
+    }
+  }
+
+  // On iPhone and iPad "Open in Trace" opens the story in the Trace app. A
+  // website link would open the website: Safari does not hand it to the app.
+  // A story that is not in the Library yet opens the app at the Library.
+  var TRACE_ENTRY_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  function traceEntryAppUrl(entry) {
+    var entryId = entry && typeof entry.entryId === "string" ? entry.entryId.trim() : "";
+    if (!TRACE_ENTRY_ID_PATTERN.test(entryId)) return TRACE_IOS_APP_LIBRARY_URL;
+    return "traceauth://open?destination=story&entryId=" + entryId.toLowerCase();
+  }
+
+  function configureTraceEntryOpenLink(link, entry) {
+    if (isIosSafari()) {
+      link.href = traceEntryAppUrl(entry);
+      link.removeAttribute("target");
+      link.removeAttribute("rel");
+      return;
+    }
+    link.href = traceEntryOpenUrl(entry);
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+  }
+
+  // Follows a Trace app link from the reader's own tap. Safari asks to open
+  // the app and the page stays where it was.
+  function followTraceAppLink(url) {
+    try {
+      window.location.href = url;
+    } catch (_) {
+      // The app link is optional; the reader can always switch apps themselves.
     }
   }
 
@@ -3247,10 +3281,8 @@ function traceRefreshPageTokens() {
     actions.className = "x-sheet-foot";
     actions.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;background:" + TRACE_D1.card + ";border-top:1px solid " + TRACE_D1.line;
     var open = document.createElement("a");
-    open.href = traceEntryOpenUrl(entry);
+    configureTraceEntryOpenLink(open, entry);
     open.className = "x-pbtn x-pbtn-primary";
-    open.target = "_blank";
-    open.rel = "noopener noreferrer";
     open.appendChild(document.createTextNode("Open in Trace"));
     open.appendChild(traceIconEl("open"));
     open.style.cssText = surfacePrimaryButtonStyle();
@@ -3453,7 +3485,9 @@ function traceRefreshPageTokens() {
           });
           return;
         }
-        openTraceUrlInBrowserTab(traceOpenUrl());
+        // On iPhone and iPad the Trace app connects the extension.
+        if (isIosSafari()) followTraceAppLink(TRACE_IOS_APP_SETUP_URL);
+        else openTraceUrlInBrowserTab(traceOpenUrl());
         scheduleRun(350);
         setTimeout(function () {
           if (btn.getAttribute("data-trace-connect-checking") === "1") {
@@ -3799,7 +3833,8 @@ function traceRefreshPageTokens() {
           });
           return;
         }
-        window.open(traceOpenUrl(), "_blank", "noopener,noreferrer");
+        if (isIosSafari()) followTraceAppLink(TRACE_IOS_APP_SETUP_URL);
+        else window.open(traceOpenUrl(), "_blank", "noopener,noreferrer");
         scheduleRun(350);
         setTimeout(function () {
           if (btn.getAttribute("data-trace-connect-checking") === "1") {
