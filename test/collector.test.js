@@ -292,6 +292,19 @@ test("collectAO3Work keeps the work summary on the Entire Work view", () => {
   assert.equal(item.sm, WORK_SUMMARY, "chapter summaries further down are ignored");
 });
 
+test("collectAO3Work keeps a summary's paragraphs and line breaks apart", () => {
+  const html = loadFixture(path.join("ao3-work-summary", "one-shot.html")).replace(
+    "<p>One evening, one lamp, one detective.</p>",
+    "<p>Set after the finale, canon-compliant.</p><p>1971 - 1995</p><p>This IS a <em>slow</em>\n   burn.<br>Mostly.</p>",
+  );
+  const dom = new JSDOM(html, { url: "https://archiveofourown.org/works/7700202", runScripts: "outside-only" });
+  const { collectAO3Work } = createCollectorBindings(dom);
+  assert.equal(
+    collectAO3Work().sm,
+    "Set after the finale, canon-compliant.\n\n1971 - 1995\n\nThis IS a slow burn.\nMostly.",
+  );
+});
+
 test("collectAO3Work reads a one-shot's summary", () => {
   const item = collectSummaryFixture(
     "one-shot.html",
@@ -1357,6 +1370,23 @@ test("detectAo3CurrentChapterNumber prefers the visible chapter heading text", (
   });
   const { detectAo3CurrentChapterNumber } = createCollectorBindings(dom);
   assert.equal(detectAo3CurrentChapterNumber(), 42);
+});
+
+test("collectAO3Listings keeps a blurb summary's paragraphs apart", () => {
+  const html = `<!doctype html><html><body>
+  <li id="work_999992" class="work blurb group" role="article">
+    <div class="header module">
+      <h4 class="heading"><a href="/works/999992">Two paragraphs</a></h4>
+    </div>
+    <blockquote class="userstuff summary"><p>canon-compliant.</p><p>1971 - 1995</p></blockquote>
+  </li></body></html>`;
+  const dom = new JSDOM(html, {
+    url: "https://archiveofourown.org/tags/Example/works",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  const { collectAO3Listings } = createCollectorBindings(dom);
+  assert.equal(collectAO3Listings()[0].sm, "canon-compliant.\n\n1971 - 1995");
 });
 
 test("collectAO3Listings: warnings from required-tags symbol titles when tag ul absent", () => {
