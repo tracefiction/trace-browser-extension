@@ -467,6 +467,39 @@ function showCapacityRecoveryNotice(capacity, force) {
 function txt(el) {
   return el ? (el.textContent || "").trim() : null;
 }
+
+// AO3 summaries are paragraphs, and textContent runs them together
+// ("canon-compliant.1971 - 1995This IS"). This keeps a blank line between
+// blocks and a line break for each <br>; other whitespace is collapsed.
+var TRACE_TEXT_BLOCK_TAGS = /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|CENTER|DD|DETAILS|DIV|DL|DT|FIGCAPTION|FIGURE|FOOTER|H[1-6]|HEADER|HR|LI|OL|P|PRE|SECTION|TABLE|TR|UL)$/;
+
+function blockText(el) {
+  if (!el) return null;
+  var out = "";
+  (function walk(node) {
+    for (var child = node.firstChild; child; child = child.nextSibling) {
+      if (child.nodeType === 3) {
+        out += String(child.nodeValue || "").replace(/\s+/g, " ");
+      } else if (child.nodeType === 1) {
+        var tag = String(child.tagName || "").toUpperCase();
+        if (tag === "BR") {
+          out += "\n";
+        } else if (tag !== "SCRIPT" && tag !== "STYLE") {
+          var block = TRACE_TEXT_BLOCK_TAGS.test(tag);
+          if (block) out += "\n\n";
+          walk(child);
+          if (block) out += "\n\n";
+        }
+      }
+    }
+  })(el);
+  return out
+    .split("\n")
+    .map(function (line) { return line.replace(/[ \t\u00a0]+/g, " ").trim(); })
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
 function stripTraceUiFromClone(el) {
   if (!el || !el.cloneNode) return null;
   const clone = el.cloneNode(true);
@@ -1310,7 +1343,7 @@ function parseAo3WorkSummaryFromHtml(html) {
   try {
     if (typeof DOMParser !== "function") return null;
     var doc = new DOMParser().parseFromString(String(html || ""), "text/html");
-    return txt(one(doc, WORK_SUMMARY_SELECTOR)) || null;
+    return blockText(one(doc, WORK_SUMMARY_SELECTOR)) || null;
   } catch (_) {
     return null;
   }
@@ -2767,7 +2800,7 @@ function collectAO3Work() {
   // absent and the first `.summary` is the chapter's own summary, which must
   // never be reported as the work's.
   const summary =
-    txt(one(document, "#workskin > .preface.group:not(.chapter) > .summary blockquote.userstuff")) ||
+    blockText(one(document, "#workskin > .preface.group:not(.chapter) > .summary blockquote.userstuff")) ||
     null;
   const relParts = relPartsFromAO3(relationships);
   const charsUnion = dedup((characters || []).concat(relParts || []));
@@ -2845,7 +2878,7 @@ function extractAO3BlurbData(row, id, ctx) {
   const warnings = ao3ListingWarnings(row);
   const categories = ao3ListingCategories(row);
   const series = parseAO3Series(row);
-  const summary = txt(one(row, "blockquote.userstuff.summary, .userstuff.summary")) || null;
+  const summary = blockText(one(row, "blockquote.userstuff.summary, .userstuff.summary")) || null;
 
   const relParts = relPartsFromAO3(relationships);
   const extra = characters.filter((c) => !relParts.includes(c));

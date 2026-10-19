@@ -116,6 +116,39 @@
     return overlayCacheMatchesRuntimeContext(cache, storage) ? cache : null;
   }
 
+  // AO3 summaries are paragraphs, and textContent runs them together
+  // ("canon-compliant.1971 - 1995This IS"). As collector.js: a blank line
+  // between blocks, a line break for each <br>, other whitespace collapsed.
+  var TRACE_TEXT_BLOCK_TAGS = /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|CENTER|DD|DETAILS|DIV|DL|DT|FIGCAPTION|FIGURE|FOOTER|H[1-6]|HEADER|HR|LI|OL|P|PRE|SECTION|TABLE|TR|UL)$/;
+
+  function blockText(el) {
+    if (!el) return null;
+    var out = "";
+    (function walk(node) {
+      for (var child = node.firstChild; child; child = child.nextSibling) {
+        if (child.nodeType === 3) {
+          out += String(child.nodeValue || "").replace(/\s+/g, " ");
+        } else if (child.nodeType === 1) {
+          var tag = String(child.tagName || "").toUpperCase();
+          if (tag === "BR") {
+            out += "\n";
+          } else if (tag !== "SCRIPT" && tag !== "STYLE") {
+            var block = TRACE_TEXT_BLOCK_TAGS.test(tag);
+            if (block) out += "\n\n";
+            walk(child);
+            if (block) out += "\n\n";
+          }
+        }
+      }
+    })(el);
+    return out
+      .split("\n")
+      .map(function (line) { return line.replace(/[ \t\u00a0]+/g, " ").trim(); })
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
   function usefulTraceUrl(rawUrl) {
     var fallback = TRACE_WEB_HOME_URL;
     if (!rawUrl) return fallback;
@@ -1337,8 +1370,7 @@ function traceRefreshPageTokens() {
       }
     }
     categories = Array.from(new Set(categories)).slice(0, 10);
-    var summaryEl = row.querySelector("blockquote.userstuff.summary, .userstuff.summary");
-    var summary = summaryEl ? (summaryEl.textContent || "").trim() : null;
+    var summary = blockText(row.querySelector("blockquote.userstuff.summary, .userstuff.summary")) || null;
     return {
       src: "ao3",
       ctx: "listing",
