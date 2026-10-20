@@ -19,6 +19,7 @@ import {
 } from "./browser-adapters.mjs";
 import {
   BrowserStorage,
+  extensionCall,
   type RuntimePort,
 } from "./browser-platform.mjs";
 
@@ -165,6 +166,11 @@ implements SavedFilterSyncRepositoryPort {
     });
   }
 
+  /** When this device last pulled its saved filters, or null for never. */
+  async lastSyncedAt(): Promise<string | null> {
+    return (await this.#readUnlocked()).lastSyncedAt;
+  }
+
   merge(
     requestedScope: AccountScope,
     data: SavedFilterSyncData,
@@ -256,23 +262,49 @@ export class SavedFilterSyncAlarm {
   static install(
     alarms: {
       readonly create?: (...args: unknown[]) => unknown;
+      readonly get?: (...args: unknown[]) => unknown;
       readonly onAlarm?: {
         addListener(listener: (alarm: { readonly name?: string }) => void): void;
       };
     },
     runtime: RuntimePort,
     onAlarm: () => void,
-  ): void {
+    mode: "callback" | "promise" = "promise",
+  ): Promise<void> {
     alarms.onAlarm?.addListener((alarm) => {
       if (alarm?.name === SavedFilterSyncAlarm.name) onAlarm();
     });
+    return SavedFilterSyncAlarm.#ensure(alarms, runtime, mode).catch(() => undefined);
+  }
+
+  // An existing alarm keeps its schedule. Safari restarts the background
+  // often, and creating the alarm again on each start would push the next
+  // pull a full period away every time, so it would never fire.
+  static async #ensure(
+    alarms: {
+      readonly create?: (...args: unknown[]) => unknown;
+      readonly get?: (...args: unknown[]) => unknown;
+    },
+    runtime: RuntimePort,
+    mode: "callback" | "promise",
+  ): Promise<void> {
+    const existing = typeof alarms.get === "function"
+      ? await extensionCall<unknown>(
+          alarms as unknown as Record<string, (...args: unknown[]) => unknown>,
+          "get",
+          [SavedFilterSyncAlarm.name],
+          runtime,
+          mode,
+        ).catch(() => undefined)
+      : undefined;
+    if (isRecord(existing)) return;
     try {
       const result = alarms.create?.(
         SavedFilterSyncAlarm.name,
         { periodInMinutes: 30 },
       );
       if (result && typeof (result as PromiseLike<unknown>).then === "function") {
-        void Promise.resolve(result).catch(() => undefined);
+        await Promise.resolve(result).catch(() => undefined);
       }
     } catch {
       void runtime.lastError;

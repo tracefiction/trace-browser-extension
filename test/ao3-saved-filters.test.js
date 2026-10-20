@@ -26,6 +26,7 @@ const STORAGE_KEY = "traceAo3SavedFiltersV1";
 const ACTIVE_KEY = "traceAo3SavedFiltersActiveV1";
 const DELETED_KEY = "traceAo3SavedFiltersDeletedV1";
 const PANEL_COLLAPSED_KEY = "traceAo3SavedFiltersPanelCollapsedV1";
+const SYNC_META_KEY = "traceAo3SavedFiltersSyncV1";
 const PREF_AO3_SAVED_FILTERS_KEY = "prefAo3SavedFiltersEnabled";
 
 function sleep(ms) {
@@ -541,6 +542,100 @@ test("AO3 saved filters shows global presets plus matching current-tag presets",
   assert.equal(mount.querySelector("[data-trace-sf-action='toggle-group']"), null);
   assert.equal(mount.querySelector(".trace-sf-group"), null);
   assert.doesNotMatch(mount.textContent, /This tag|All tags|Global|preset/);
+});
+
+test("AO3 saved filters shows a filter saved on a tag's filtered results back on that tag's listing", async () => {
+  // AO3's filter form submits to /works?tag_id=..., so a filter is saved on
+  // that URL; the tag's own listing is /tags/<tag>/works.
+  const saved = await renderSavedFilters();
+  const mount = root(saved.window);
+  mount.querySelector("[data-trace-sf-action='save-open']").click();
+  await sleep(10);
+  assert.equal(
+    mount.querySelector("[role='radio'][aria-checked='true']").textContent,
+    "Harry Potter - J. K. Rowling only",
+    "the default choice is this tag only",
+  );
+  mount.querySelector("[data-trace-sf-action='save-confirm']").click();
+  await sleep(80);
+  assert.equal(saved.storageState[STORAGE_KEY].length, 1);
+
+  const listing = await renderSavedFilters({
+    url: "https://archiveofourown.org/tags/Harry%20Potter%20-%20J*d*%20K*d*%20Rowling/works",
+    storage: plain(saved.storageState),
+  });
+  assert.deepEqual(
+    Array.from(root(listing.window).querySelectorAll(".trace-sf-row .trace-sf-name")).map((el) => el.textContent),
+    ["Complete only · At least 50,000 words · Sorted by kudos"],
+  );
+
+  const otherTag = await renderSavedFilters({
+    url: "https://archiveofourown.org/tags/Naruto/works",
+    storage: plain(saved.storageState),
+  });
+  assert.equal(otherTag.window.document.querySelectorAll(".trace-sf-row").length, 0);
+});
+
+test("AO3 saved filters asks for one pull on a filter page this device hasn't synced lately", async () => {
+  const syncRequest = { type: "TRACE_AO3_SAVED_FILTERS_SYNC_REQUEST" };
+  const listing = "https://archiveofourown.org/tags/Naruto/works";
+
+  const missing = await renderSavedFilters({ url: listing });
+  assert.deepEqual(plain(missing.runtimeMessages), [syncRequest], "no sync record");
+
+  const stale = await renderSavedFilters({
+    url: listing,
+    storage: {
+      [SYNC_META_KEY]: {
+        syncVersion: "v1",
+        lastSyncedAt: new Date(Date.now() - 31 * 60 * 1000).toISOString(),
+      },
+    },
+  });
+  assert.deepEqual(plain(stale.runtimeMessages), [syncRequest], "last pull over 30 minutes ago");
+
+  const fresh = await renderSavedFilters({
+    url: listing,
+    storage: {
+      [SYNC_META_KEY]: {
+        syncVersion: "v1",
+        lastSyncedAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+      },
+    },
+  });
+  assert.deepEqual(plain(fresh.runtimeMessages), [], "a recent pull is enough");
+
+  const story = await renderSavedFilters({
+    html: loadStoryFixture(),
+    url: "https://archiveofourown.org/works/123",
+  });
+  assert.deepEqual(plain(story.runtimeMessages), [], "only filter pages ask");
+
+  const hidden = await renderSavedFilters({
+    url: listing,
+    storage: { [PREF_AO3_SAVED_FILTERS_KEY]: false },
+  });
+  assert.deepEqual(plain(hidden.runtimeMessages), [], "nor when saved filters are turned off");
+});
+
+test("AO3 saved filters shows filters a pull brings in without a reload", async () => {
+  const harness = await renderSavedFilters({
+    url: "https://archiveofourown.org/tags/Naruto/works",
+  });
+  assert.equal(root(harness.window).querySelectorAll(".trace-sf-row").length, 0);
+  harness.emitStorageChange({
+    [STORAGE_KEY]: {
+      newValue: [makePreset({ id: "pulled", name: "From the account", scope: "global" })],
+    },
+    [SYNC_META_KEY]: {
+      newValue: { syncVersion: "v2", lastSyncedAt: new Date().toISOString() },
+    },
+  });
+  await sleep(80);
+  assert.deepEqual(
+    Array.from(root(harness.window).querySelectorAll(".trace-sf-row .trace-sf-name")).map((el) => el.textContent),
+    ["From the account"],
+  );
 });
 
 test("AO3 saved filters labels the list only when both kinds are present", async () => {

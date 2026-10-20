@@ -6039,6 +6039,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         return Object.freeze({ ...snapshot, clientId });
       });
     }
+    /** When this device last pulled its saved filters, or null for never. */
+    async lastSyncedAt() {
+      return (await this.#readUnlocked()).lastSyncedAt;
+    }
     merge(requestedScope, data, sentDeleteClientIds, syncedAt) {
       return this.#withLock(async () => {
         if (!canSyncSavedFilters(this.#session.publicationScope(), requestedScope)) {
@@ -6109,17 +6113,31 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   };
   var SavedFilterSyncAlarm = class _SavedFilterSyncAlarm {
     static name = SAVED_FILTER_SYNC_ALARM;
-    static install(alarms, runtime, onAlarm) {
+    static install(alarms, runtime, onAlarm, mode = "promise") {
       alarms.onAlarm?.addListener((alarm) => {
         if (alarm?.name === _SavedFilterSyncAlarm.name) onAlarm();
       });
+      return _SavedFilterSyncAlarm.#ensure(alarms, runtime, mode).catch(() => void 0);
+    }
+    // An existing alarm keeps its schedule. Safari restarts the background
+    // often, and creating the alarm again on each start would push the next
+    // pull a full period away every time, so it would never fire.
+    static async #ensure(alarms, runtime, mode) {
+      const existing = typeof alarms.get === "function" ? await extensionCall(
+        alarms,
+        "get",
+        [_SavedFilterSyncAlarm.name],
+        runtime,
+        mode
+      ).catch(() => void 0) : void 0;
+      if (isRecord13(existing)) return;
       try {
         const result = alarms.create?.(
           _SavedFilterSyncAlarm.name,
           { periodInMinutes: 30 }
         );
         if (result && typeof result.then === "function") {
-          void Promise.resolve(result).catch(() => void 0);
+          await Promise.resolve(result).catch(() => void 0);
         }
       } catch {
         void runtime.lastError;
@@ -7914,6 +7932,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #accountCleanups = [];
     #savedFilters;
     #savedFilterApi;
+    #savedFilterRepository;
     #nativeImportEnabled;
     #nativeImport;
     #firstStoryInitiator;
@@ -7943,6 +7962,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #savedFilterSyncInFlight = null;
     #savedFilterSyncQueued = false;
     #savedFilterSyncQueuedWithCurrentAuthority = false;
+    #savedFilterAdoptedScope = null;
     #lastPublishedStatusKey = null;
     #statusPublicationTail = Promise.resolve();
     constructor(environment) {
@@ -8020,14 +8040,15 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         environment.fetch,
         environment.apiBase
       );
+      this.#savedFilterRepository = new BrowserSavedFilterRepository({
+        storage,
+        session: this.#service,
+        randomId: environment.randomId
+      });
       this.#savedFilters = new SavedFilterSyncService({
         session: this.#service,
         api: this.#savedFilterApi,
-        repository: new BrowserSavedFilterRepository({
-          storage,
-          session: this.#service,
-          randomId: environment.randomId
-        }),
+        repository: this.#savedFilterRepository,
         clock: { now: () => (/* @__PURE__ */ new Date()).toISOString() }
       });
       this.#accountData = new AccountDataRepository(this.#database, this.#service);
@@ -9185,10 +9206,27 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         this.#projection.invalidate();
         await this.#publishAccountProjectionRevision();
       }
-      return Object.freeze({
-        ready: action.kind === "completed" && action.state === "connected" && after !== null,
-        action
-      });
+      const ready = action.kind === "completed" && action.state === "connected" && after !== null;
+      if (ready) await this.#pullSavedFiltersForAdoptedScope(after, scopeChanged);
+      return Object.freeze({ ready, action });
+    }
+    // Adopting the app's account is the iPhone's sign-in, so it pulls the
+    // account's saved filters as a desktop sign-in does: when the account
+    // changed, or when this device has never synced them. Once per account in
+    // each background life, so a failing pull is not retried on every message.
+    async #pullSavedFiltersForAdoptedScope(scope2, scopeChanged) {
+      if (this.#mode !== "kernel") return;
+      const key = `${scope2.accountId}:${scope2.epoch}`;
+      if (this.#savedFilterAdoptedScope === key) return;
+      if (!scopeChanged) {
+        const lastSyncedAt = await this.#savedFilterRepository.lastSyncedAt().catch(() => null);
+        if (lastSyncedAt !== null) {
+          this.#savedFilterAdoptedScope = key;
+          return;
+        }
+      }
+      this.#savedFilterAdoptedScope = key;
+      this.#queueSavedFilterSync(true);
     }
     requestSavedFilterSync() {
       if (this.#mode === "kernel") this.#queueSavedFilterSync();
@@ -9385,10 +9423,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   function installSessionRuntime(environment) {
     const controller = new SessionRuntimeController(environment);
     if (environment.mode === "kernel") {
-      SavedFilterSyncAlarm.install(
+      void SavedFilterSyncAlarm.install(
         environment.alarms,
         environment.runtime,
-        () => controller.requestSavedFilterSync()
+        () => controller.requestSavedFilterSync(),
+        environment.storageMode
       );
     }
     environment.runtime.onMessage.addListener((message, sender, sendResponse) => {
