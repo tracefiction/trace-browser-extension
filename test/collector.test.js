@@ -17,6 +17,8 @@ function collectorTestSource(source) {
 window.finishQualifyIsLastPostedChapter = finishQualifyIsLastPostedChapter;
 window.removeQuickAddElements = removeQuickAddElements;
 window.renderQuickAddButton = renderQuickAddButton;
+window.renderKernelProjectionUnavailable = renderKernelProjectionUnavailable;
+window.placeStorySheet = placeStorySheet;
 window.__traceTestHooks = { sendAutoTrackForStory, storyHandlePresentation, applyStoryInlineHandleState, handleDisplay, storyHeadline, storyCaption };
 })();`);
 }
@@ -6859,6 +6861,60 @@ test("the story sheet's Open in Trace opens the story in the Trace app on iPhone
     assert.equal(openInTrace.getAttribute("target"), target, userAgent);
     assert.equal(sent.some((message) => message.type === "TRACE_OPEN_TRACE_URL"), false);
   }
+});
+
+test("a redraw while reading never shows the closed story sheet", () => {
+  const dom = domFromFixture(
+    "ffn_story_mobile.html",
+    "https://m.fanfiction.net/s/7038840/3/A-Chance-Encounter"
+  );
+  const collectorSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  installCollectorChrome(dom, {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(_msg, cb) { if (typeof cb === "function") cb({ ok: true }); },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb({
+            authToken: "test-token",
+            libraryOverlayCache: {
+              entries: {
+                "ffn:7038840": {
+                  entryId: "00000000-0000-4000-8000-000000703884",
+                  status: "READING",
+                  readerStatus: "READING",
+                  chapters: { current: 3, total: 28 },
+                },
+              },
+            },
+          });
+        },
+        set(_value, cb) { if (typeof cb === "function") cb(); },
+      },
+      onChanged: { addListener() {} },
+    },
+  });
+  dom.window.eval(collectorTestSource(collectorSrc));
+  dom.window.document.dispatchEvent(new dom.window.Event("DOMContentLoaded", { bubbles: true }));
+  const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.equal(sheet.getAttribute("data-trace-open"), "0");
+  assert.equal(sheet.style.display, "none");
+  // The look-up Trace didn't answer: its redraw re-places the sheet and
+  // returns early, because the handle already shows the story's state.
+  dom.window.renderKernelProjectionUnavailable("ffn:7038840", handle.parentElement);
+  dom.window.placeStorySheet(sheet, handle.parentElement, handle);
+  assert.equal(sheet.style.display, "none", "a closed sheet stays closed");
+  handle.click();
+  assert.equal(sheet.getAttribute("data-trace-open"), "1");
+  dom.window.placeStorySheet(sheet, handle.parentElement, handle);
+  assert.equal(sheet.style.display, "block", "an open sheet stays open");
 });
 
 test("FFN mobile story sheet hidden preference auth failures become connect actions", () => {

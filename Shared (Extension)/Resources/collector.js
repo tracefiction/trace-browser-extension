@@ -5577,6 +5577,11 @@ function placeStorySheet(sheet, wrap, handle) {
     parent.appendChild(sheet);
   }
   sheet.style.cssText = storySheetCss(mobile);
+  // Re-placing the sheet rewrites its style, which would drop the closed
+  // sheet's display:none. A redraw that ends before the sheet's visibility
+  // is applied again (a look-up Trace didn't answer while the reader was
+  // mid-chapter) then showed the sheet unprompted. It keeps its own state.
+  sheet.style.display = sheet.getAttribute("data-trace-open") === "1" ? "block" : "none";
   if (!mobile) {
     positionDesktopStorySheet(sheet, handle);
   } else {
