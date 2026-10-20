@@ -11654,6 +11654,99 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     });
   }
 
+  // src/extension-runtime/story-tab-reuse.mts
+  var STORY_TAB_REUSE_MESSAGE = "TRACE_STORY_TAB_REUSE";
+  var STEP_TIMEOUT_MS = 2e3;
+  var ACT_WITHIN_MS = 5e3;
+  var RECENT_ASKER_MS = 3e4;
+  function storyTabKey(raw) {
+    if (typeof raw !== "string" || raw.length > 4096) return null;
+    try {
+      const url = new URL(raw);
+      if (url.protocol !== "https:" || url.port || url.username || url.password) return null;
+      const site = archiveHostKindFromSender({ url: url.href });
+      if (site === "ao3") {
+        const match = ao3WorkPath(url.pathname).match(/^\/works\/([1-9]\d{0,19})(?:\/chapters\/([1-9]\d{0,19}))?\/?$/);
+        if (!match) return null;
+        const place = url.searchParams.get("view_full_work") === "true" ? "full" : match[2] ?? "work";
+        return `ao3:${match[1]}:${place}`;
+      }
+      if (site === "ffn") {
+        const match = url.pathname.match(/^\/s\/([1-9]\d{0,19})(?:\/([1-9]\d{0,9})(?:\/[^/]*)?)?\/?$/);
+        return match ? `ffn:${match[1]}:${match[2] ?? "1"}` : null;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+  function isRecord26(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  async function bounded3(operation, milliseconds) {
+    let timer;
+    try {
+      return await Promise.race([operation, new Promise((resolve) => {
+        timer = setTimeout(() => resolve(null), milliseconds);
+      })]);
+    } catch {
+      return null;
+    } finally {
+      if (timer !== void 0) clearTimeout(timer);
+    }
+  }
+  var NOTHING = Object.freeze({ ok: true, reused: false, closed: false });
+  var REFUSED = Object.freeze({ ok: false, reused: false, closed: false });
+  function installStoryTabReuse(environment) {
+    const { runtime, tabs, permissions, mode } = environment;
+    const now = environment.now ?? (() => Date.now());
+    const call = (target, method, args) => extensionCall(
+      target,
+      method,
+      args,
+      runtime,
+      mode
+    );
+    const recent = /* @__PURE__ */ new Map();
+    let queue = Promise.resolve();
+    const reuse = async (senderTabId, key, deadline) => {
+      if (!permissions) return NOTHING;
+      const grants = await bounded3(call(permissions, "getAll", []), STEP_TIMEOUT_MS);
+      const storySites = (grants?.origins ?? []).filter(isStorySitePattern);
+      if (!storySites.length) return NOTHING;
+      const open = await bounded3(call(tabs, "query", [{ url: storySites }]), STEP_TIMEOUT_MS);
+      if (!Array.isArray(open)) return NOTHING;
+      const existing = open.filter((tab) => Number.isInteger(tab.id) && tab.id !== senderTabId && tab.incognito !== true && !recent.has(tab.id) && storyTabKey(tab.url) === key).sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))[0];
+      if (!existing || !tabs.update || now() > deadline) return NOTHING;
+      const shown = await bounded3(call(tabs, "update", [existing.id, { active: true }]).then(() => true), STEP_TIMEOUT_MS);
+      if (shown !== true) return NOTHING;
+      const closed = tabs.remove && now() <= deadline ? await bounded3(call(tabs, "remove", [senderTabId]).then(() => true), STEP_TIMEOUT_MS) === true : false;
+      return Object.freeze({ ok: true, reused: true, closed });
+    };
+    const handle = async (message, sender) => {
+      if (!isRecord26(message) || Object.keys(message).length !== 2 || message.type !== STORY_TAB_REUSE_MESSAGE || !isRecord26(message.payload) || Object.keys(message.payload).length !== 1) return REFUSED;
+      if (!sender) return REFUSED;
+      const tabId = sender.tab?.id;
+      if (sender.id !== runtime.id || !Number.isInteger(tabId) || sender.frameId !== void 0 && sender.frameId !== 0 || archiveHostKindFromSender(sender) === null) return REFUSED;
+      const key = storyTabKey(sender.tab?.url ?? sender.url);
+      if (key === null || storyTabKey(message.payload.url) !== key) return REFUSED;
+      const at = now();
+      for (const [id, asked] of recent) if (at - asked > RECENT_ASKER_MS) recent.delete(id);
+      if (recent.has(tabId)) return NOTHING;
+      recent.set(tabId, at);
+      const deadline = at + ACT_WITHIN_MS;
+      const turn = queue.then(() => reuse(tabId, key, deadline)).catch(() => NOTHING);
+      queue = turn;
+      return turn;
+    };
+    runtime.onMessage.addListener((message, sender, respond) => {
+      if (!isRecord26(message) || message.type !== STORY_TAB_REUSE_MESSAGE) return;
+      void handle(message, sender).then(respond, () => respond(NOTHING));
+      return true;
+    });
+    return handle;
+  }
+
   // src/extension-runtime/index.mts
   var UUID_PATTERN9 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   function fallbackUuid(seed) {
@@ -11771,6 +11864,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
     }
     if (!scope.indexedDB) throw new Error("private database unavailable");
+    installStoryTabReuse({ runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, mode: storageMode });
     let fallbackId = 0;
     const randomId = () => {
       const uuid = scope.crypto?.randomUUID?.();

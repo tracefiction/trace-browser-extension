@@ -63,6 +63,7 @@ export interface TabsPort {
   readonly sendMessage: (...args: unknown[]) => unknown;
   readonly create: (...args: unknown[]) => unknown;
   readonly update?: (...args: unknown[]) => unknown;
+  readonly remove?: (...args: unknown[]) => unknown;
 }
 
 export interface AlarmsPort {

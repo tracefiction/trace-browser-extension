@@ -3764,6 +3764,59 @@ function traceRefreshPageTokens() {
   });
 }
 
+// The Trace app marks the story links it opens in Safari with this fragment.
+// No element has this id, so the page shows as it would without it. The mark
+// is taken off at once; then, for a tab Safari has just opened for that link,
+// the background brings forward a tab already on the same story and chapter
+// and closes this one (story-tab-reuse.mts). A page without the mark, or one
+// the reader reached from another page, never asks.
+var TRACE_OPEN_MARK = "#trace-open";
+var TRACE_STORY_TAB_REUSE_MESSAGE = "TRACE_STORY_TAB_REUSE";
+var TRACE_STORY_TAB_REUSE_WITHIN_MS = 10000;
+var TRACE_STORY_TAB_REUSE_TIMEOUT_MS = 8000;
+
+function takeTraceOpenMark() {
+  try {
+    if (window.top !== window || location.hash !== TRACE_OPEN_MARK) return false;
+    history.replaceState(history.state, "", location.pathname + location.search);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function traceTabJustOpenedForLink() {
+  try {
+    if (history.length > 1 || document.referrer) return false;
+    var since = typeof performance !== "undefined" && performance && typeof performance.now === "function"
+      ? performance.now()
+      : NaN;
+    return Number.isFinite(since) && since <= TRACE_STORY_TAB_REUSE_WITHIN_MS;
+  } catch (_) {
+    return false;
+  }
+}
+
+function reuseOpenStoryTabForTraceLink() {
+  if (!takeTraceOpenMark()) return;
+  if (
+    !traceTabJustOpenedForLink() ||
+    tracePageManualMode() ||
+    TRACE_ACTIVE_TAB_PROBE_MODE ||
+    tracePageIsPrerendering() ||
+    shouldDisableTraceContentScript()
+  ) {
+    return;
+  }
+  sendCollectorMessage(
+    { type: TRACE_STORY_TAB_REUSE_MESSAGE, payload: { url: location.href } },
+    function () {},
+    TRACE_STORY_TAB_REUSE_TIMEOUT_MS,
+  );
+}
+
+reuseOpenStoryTabForTraceLink();
+
 // Listen for background requests
 function handleCollectorMessage(msg, sender, sendResponse, relayCommand) {
   if (
