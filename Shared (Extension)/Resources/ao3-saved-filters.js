@@ -1716,7 +1716,7 @@
       R + " .trace-sf-col { border-bottom: 1px solid var(--trace-page-rule); padding: 0 0 6px; }",
       R + " .trace-sf-col-title { color: var(--trace-page-ink); font-size: 15px; font-weight: 600; line-height: 1.25; padding: 6px 0 8px; }",
       R + " .trace-sf-col-rows { background: var(--trace-page-surface); border-radius: 12px; box-shadow: inset 0 0 0 1px var(--trace-page-rule); overflow: hidden; }",
-      R + " .trace-sf-col-row { align-items: center; display: grid; gap: 6px; grid-template-columns: 14px minmax(0, 1fr); min-height: 44px; padding: 0 10px 0 8px; width: 100%; }",
+      R + " .trace-sf-col-row { align-items: center; display: grid; gap: 6px; grid-template-columns: 14px minmax(0, 1fr); min-height: 44px; padding: 0 10px 0 8px; width: 100%; border-radius: 0; }",
       R + " .trace-sf-col-row + .trace-sf-col-row { border-top: 1px solid var(--trace-page-rule); }",
       R + " .trace-sf-col-name { color: var(--trace-page-ink); font-size: 14px; font-weight: 500; line-height: 1.3; " + ellipsis + " }",
       R + " .trace-sf-col-row[aria-current='true'] .trace-sf-col-name { font-weight: 600; }",
@@ -1746,6 +1746,8 @@
       S + " svg { display: block; }",
       S + " :focus { outline: none; }",
       S + " :focus-visible { outline: 3px solid var(--trace-page-teal) !important; outline-offset: 2px; }",
+      // Headings and the delete question take focus only to be read out.
+      S + " [tabindex='-1']:focus-visible { outline: none !important; }",
       S + " .trace-sf-scrim { background: var(--trace-page-scrim); inset: 0; position: absolute; }",
       S + " .trace-sf-sheet { background: var(--trace-page-surface); border-radius: 20px 20px 0 0; bottom: 0; box-shadow: 0 0 0 1px var(--trace-page-rule), 0 14px 30px -12px rgba(0, 0, 0, 0.35); display: flex; flex-direction: column; left: 0; margin: 0 auto; max-height: calc(100% - 8px); max-width: 430px; position: absolute; right: 0; width: 100%; }",
       S + " .trace-sf-grabber { align-items: center; cursor: grab; display: flex; flex: 0 0 auto; height: 24px; justify-content: center; touch-action: none; user-select: none; }",
@@ -1804,8 +1806,8 @@
       S + " .trace-sf-sheet-confirm { padding: 12px 12px 4px; }",
       S + " .trace-sf-sheet-confirm-title { color: var(--trace-page-ink); display: block; font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }",
       S + " .trace-sf-sheet-confirm-detail { color: var(--trace-page-secondary); display: block; font-size: 13px; line-height: 1.4; margin-top: 2px; }",
-      S + " .trace-sf-sheet-confirm-actions { display: flex; flex-wrap: wrap; gap: 0 20px; }",
-      S + " .trace-sf-sheet-confirm-actions button { align-items: center; color: var(--trace-page-secondary); display: inline-flex; font-size: 15px; font-weight: 500; min-height: 44px; }",
+      S + " .trace-sf-sheet-confirm-actions { display: flex; flex-wrap: wrap; gap: 0 16px; margin-top: 4px; }",
+      S + " .trace-sf-sheet-confirm-actions button { align-items: center; color: var(--trace-page-secondary); display: inline-flex; font-size: 15px; font-weight: 500; min-height: 44px; min-width: 44px; padding: 0 4px; }",
       S + " .trace-sf-sheet-confirm-actions button[data-danger='true'] { color: var(--trace-page-warning); font-weight: 600; }",
       S + " .trace-sf-sheet-error { align-items: center; color: var(--trace-page-ink); display: flex; flex-wrap: wrap; font-size: 14px; gap: 0 16px; line-height: 1.4; min-height: 44px; padding: 4px 4px 0; }",
       S + " .trace-sf-sheet-error-text { align-items: center; display: flex; flex: 1 1 10rem; gap: 6px; min-width: 0; }",
@@ -2258,7 +2260,7 @@
     html += "<div class='trace-sf-sheet-label' aria-hidden='true'>&nbsp;</div><div class='trace-sf-sheet-group'>";
     if (state.confirmDeleteId === preset.id) {
       html += (
-        "<div class='trace-sf-sheet-confirm' role='group' aria-labelledby='trace-sf-delete-title'>" +
+        "<div class='trace-sf-sheet-confirm' role='group' tabindex='-1' aria-labelledby='trace-sf-delete-title'>" +
         "<span class='trace-sf-sheet-confirm-title' id='trace-sf-delete-title'>Delete “" + escapeHtml(preset.name) + "”?</span>" +
         "<span class='trace-sf-sheet-confirm-detail'>It's deleted on every device. Nothing on AO3 changes.</span>" +
         "<span class='trace-sf-sheet-confirm-actions'>" +
@@ -2784,7 +2786,7 @@
     state.error = "";
     state.retry = null;
     render();
-    if (state.sheet) focusSoon("[data-trace-sf-action='delete-cancel']");
+    if (state.sheet) focusSoon(".trace-sf-sheet-confirm");
   }
 
   function focusSoon(selector, select, index) {

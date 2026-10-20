@@ -1678,7 +1678,7 @@ test("on a phone Edit filter renames, changes scope, offers Update only when it 
   await sleep(10);
   assert.equal(sheet(window).querySelector(".trace-sf-sheet-confirm-title").textContent, "Delete “New this week”?");
   assert.equal(sheet(window).querySelector(".trace-sf-sheet-confirm-detail").textContent, "It's deleted on every device. Nothing on AO3 changes.");
-  assert.equal(window.document.activeElement, sheet(window).querySelector("[data-trace-sf-action='delete-cancel']"));
+  assert.equal(window.document.activeElement, sheet(window).querySelector(".trace-sf-sheet-confirm"), "focus moves to the question");
   sheet(window).querySelector("[data-trace-sf-action='delete-cancel']").click();
   await sleep(10);
   assert.equal(sheet(window).querySelector(".trace-sf-sheet-confirm"), null);
