@@ -4,6 +4,10 @@ This file lists the changes that matter to people using the Chrome, Edge and
 Firefox extension. The Safari extension ships inside the Trace iPhone app, and
 its notes go with each app release.
 
+## 1.0.1
+
+- **Story summaries keep their paragraphs.** An AO3 summary with several paragraphs was saved as one run of text. Trace now keeps the paragraphs and line breaks, and stories you saved before get theirs back the next time Trace reads the summary.
+
 ## 1.0
 
 ### Your Library
