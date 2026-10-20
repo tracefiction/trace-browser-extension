@@ -1479,6 +1479,26 @@ test("on a phone the column shows every saved filter as Trace's lines on AO3's g
   assert.match(css, /\.trace-sf-col-link \{[^}]*min-height: 44px;/);
 });
 
+test("focus rings show for the keyboard only, so AO3 focusing Edit as Filters opens draws nothing", async () => {
+  const { window } = await renderSavedFilters({ narrow: true, url: TAG_PAGE, storage: { [STORAGE_KEY]: phonePresets() } });
+  const html = window.document.documentElement;
+  const css = Array.from(window.document.querySelectorAll("style")).map((style) => style.textContent).join("\n");
+  const rings = css.split("\n").filter((rule) => /:focus-visible \{[^}]*outline: 3px/.test(rule));
+  assert.ok(rings.length >= 3, "the column, the line and the sheet each have a ring");
+  for (const rule of rings) assert.match(rule, /^html\[data-trace-sf-keyboard\] /, "rings need keyboard use");
+
+  // AO3's filters.js focuses the form's first control when Filters opens.
+  window.document.dispatchEvent(new window.Event("touchstart", { bubbles: true }));
+  root(window).querySelector("[data-trace-sf-action='sheet-open']").focus();
+  assert.equal(html.hasAttribute("data-trace-sf-keyboard"), false);
+  window.document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+  assert.equal(html.hasAttribute("data-trace-sf-keyboard"), true);
+  window.document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "a", bubbles: true }));
+  assert.equal(html.hasAttribute("data-trace-sf-keyboard"), true, "typing doesn't change it");
+  window.document.dispatchEvent(new window.Event("pointerdown", { bubbles: true }));
+  assert.equal(html.hasAttribute("data-trace-sf-keyboard"), false);
+});
+
 test("on a phone five or more saved filters show three, then Show all", async () => {
   const { window } = await renderSavedFilters({
     narrow: true,

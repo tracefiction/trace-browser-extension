@@ -25,6 +25,10 @@
   const PHONE_STYLE_ID = "trace-ao3-saved-filters-phone-style";
   const LINE_ATTR = "data-trace-ao3-saved-filters-line";
   const SHEET_ATTR = "data-trace-ao3-saved-filters-sheet";
+  // Set on <html> while the reader moves with Tab or the arrow keys, so focus
+  // rings show for the keyboard only. AO3's Filters moves focus to the first
+  // control in its form when it opens, which on a phone is Trace's Edit.
+  const KEYBOARD_ATTR = "data-trace-sf-keyboard";
   // AO3's own narrow breakpoint: below it, Filters is a 16em column that
   // slides in beside the listing.
   const NARROW_QUERY = "(max-width: 42em)";
@@ -977,7 +981,7 @@
       // it may clip or squeeze what the panel shows.
       R + " button { -webkit-appearance: none; appearance: none; background: transparent; background-image: none; border: 0; border-radius: 8px; box-shadow: none; color: inherit; cursor: pointer; float: none; height: auto; line-height: inherit; margin: 0; max-height: none; min-height: 0; overflow: visible; padding: 0; text-align: left; text-overflow: clip; vertical-align: baseline; white-space: normal; width: auto; }",
       R + " :focus { outline: none; }",
-      R + " :focus-visible { outline: 3px solid var(--trace-page-teal) !important; outline-offset: 2px; }",
+      "html[" + KEYBOARD_ATTR + "] " + R + " :focus-visible { outline: 3px solid var(--trace-page-teal) !important; outline-offset: 2px; }",
       R + " p { margin: 0; }",
       R + " .trace-sf-card { background: transparent; border: 0; border-bottom: 1px solid var(--trace-page-rule); border-radius: 0; box-shadow: none; overflow: visible; padding-bottom: 8px; }",
       R + " .trace-sf-head { display: block; min-height: 44px; padding: 8px 0; width: 100%; }",
@@ -1766,7 +1770,7 @@
       L + " .trace-sf-line-row { align-items: center; border-bottom: 1px solid var(--trace-page-rule); border-top: 1px solid var(--trace-page-rule); display: flex; gap: 12px; min-height: 44px; }",
       L + " button { " + buttonReset + " align-items: center; display: flex; min-height: 44px; }",
       L + " :focus { outline: none; }",
-      L + " :focus-visible { outline: 3px solid var(--trace-page-teal) !important; outline-offset: 2px; }",
+      "html[" + KEYBOARD_ATTR + "] " + L + " :focus-visible { outline: 3px solid var(--trace-page-teal) !important; outline-offset: 2px; }",
       L + " .trace-sf-line-main { flex: 1 1 auto; gap: 8px; min-width: 0; }",
       L + " .trace-sf-line-text { flex: 1 1 auto; " + ellipsis + " }",
       L + " b { color: var(--trace-page-ink); font-weight: 600; }",
@@ -1782,7 +1786,7 @@
       S + " h2, " + S + " p, " + S + " dl, " + S + " dt, " + S + " dd, " + S + " label { background: none; border: 0; color: inherit; float: none; font: inherit; margin: 0; padding: 0; text-align: left; text-transform: none; }",
       S + " svg { display: block; }",
       S + " :focus { outline: none; }",
-      S + " :focus-visible { outline: 3px solid var(--trace-page-teal) !important; outline-offset: 2px; }",
+      "html[" + KEYBOARD_ATTR + "] " + S + " :focus-visible { outline: 3px solid var(--trace-page-teal) !important; outline-offset: 2px; }",
       // Headings and the delete question take focus only to be read out.
       S + " [tabindex='-1']:focus-visible { outline: none !important; }",
       S + " .trace-sf-scrim { background: var(--trace-page-scrim); inset: 0; position: absolute; }",
@@ -3420,7 +3424,26 @@
     location.assign(href);
   }
 
+  function setKeyboardModality(keyboard) {
+    var html = document.documentElement;
+    if (!html) return;
+    if (keyboard) html.setAttribute(KEYBOARD_ATTR, "");
+    else html.removeAttribute(KEYBOARD_ATTR);
+  }
+
+  function watchInputModality() {
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Tab" || /^Arrow(?:Up|Down|Left|Right)$/.test(event.key)) setKeyboardModality(true);
+    }, true);
+    ["pointerdown", "mousedown", "touchstart"].forEach(function (type) {
+      document.addEventListener(type, function () {
+        setKeyboardModality(false);
+      }, { capture: true, passive: true });
+    });
+  }
+
   function startObservers() {
+    watchInputModality();
     if (ext.storage && ext.storage.onChanged) {
       try {
         ext.storage.onChanged.addListener(function (changes, area) {
