@@ -843,6 +843,50 @@
     return target.href;
   }
 
+  // A saved filter's own tag, as a reader would write it.
+  function labelForContextKey(key, fallback) {
+    var value = String(key || "");
+    var raw = "";
+    if (value.indexOf("tagPath:") === 0) {
+      var match = value.slice("tagPath:".length).match(/^\/tags\/([^/]+)\/works$/);
+      raw = match ? match[1] : "";
+      try {
+        raw = decodeURIComponent(raw);
+      } catch (_) {
+        /* Keep the encoded name. */
+      }
+    } else if (value.indexOf("tagId:") === 0) {
+      raw = value.slice("tagId:".length);
+    }
+    return decodeAo3TagName(raw) || cleanDisplayText(fallback || "") || "Another tag";
+  }
+
+  // The listing a tag filter belongs to: its own tag's works, with its filters.
+  function ownTagApplyUrl(preset) {
+    var key = String(preset.contextKey || "");
+    var target = new URL(location.origin + "/works");
+    if (key.indexOf("tagPath:") === 0) {
+      target.pathname = key.slice("tagPath:".length);
+    } else if (key.indexOf("tagId:") === 0) {
+      target.searchParams.set("tag_id", key.slice("tagId:".length));
+    } else {
+      return buildApplyUrl(preset);
+    }
+    sanitizePairs(preset.params).forEach(function (pair) {
+      target.searchParams.append(pair[0], pair[1]);
+    });
+    return target.href;
+  }
+
+  // Filters saved for a tag other than this page's.
+  function isOnOtherTag(preset) {
+    return preset.scope === "context" && Boolean(preset.contextKey) && !contextMatchesPreset(preset, state.current);
+  }
+
+  function presetsOnOtherTags() {
+    return state.presets.filter(isOnOtherTag);
+  }
+
   function contextKeyFromHref(href) {
     try {
       var url = new URL(href);
@@ -1760,6 +1804,7 @@
       R + " .trace-sf-col-link { align-items: center; border-top: 1px solid var(--trace-col-rule); color: var(--trace-col-teal); display: flex; font-size: 14px; font-weight: 500; gap: 6px; line-height: 1.25; min-height: 44px; width: 100%; }",
       R + " .trace-sf-col-link[data-kind='secondary'] { color: var(--trace-col-secondary); font-weight: 400; }",
       R + " .trace-sf-col-link svg { display: block; flex: 0 0 auto; height: 12px; width: 12px; }",
+      R + " .trace-sf-col-link[data-trace-sf-action='sheet-open-others'] svg { height: 10px; width: 10px; }",
       R + " .trace-sf-col-note { color: var(--trace-col-secondary); font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; padding: 0 0 10px; }",
       R + " .trace-sf-col-note b { color: var(--trace-page-ink); font-weight: 600; }",
       R + " .trace-sf-col .trace-sf-note { color: var(--trace-col-secondary); padding: 0 0 8px; }",
@@ -1821,6 +1866,10 @@
       S + " .trace-sf-sheet-name { color: var(--trace-page-ink); display: -webkit-box; font-size: 15px; font-weight: 600; line-height: 1.3; overflow: hidden; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }",
       S + " .trace-sf-tokens { color: var(--trace-page-secondary); display: block; font-size: 13px; line-height: 1.4; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
       S + " .trace-sf-sheet-chev { color: var(--trace-page-tertiary); height: 13px; width: 8px; }",
+      S + " .trace-sf-sheet-item { align-items: center; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto; }",
+      S + " .trace-sf-sheet-item + .trace-sf-sheet-item { border-top: 1px solid var(--trace-page-rule); }",
+      S + " .trace-sf-sheet-item .trace-sf-sheet-row { border-top: 0; }",
+      S + " .trace-sf-sheet-open { align-items: center; color: var(--trace-page-teal); display: inline-flex; font-size: 15px; font-weight: 600; justify-content: flex-end; min-height: 44px; min-width: 44px; }",
       S + " .trace-sf-sheet-cells { display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }",
       S + " .trace-sf-sheet-cell { align-content: center; background: var(--trace-page-surface); border-radius: 12px; box-shadow: inset 0 0 0 1px var(--trace-page-control); display: grid; gap: 1px; min-height: 56px; min-width: 0; padding: 8px 12px; width: 100%; }",
       S + " .trace-sf-sheet-cell[aria-checked='true'] { background: var(--trace-page-raised); box-shadow: inset 0 0 0 2px var(--trace-page-ink); }",
@@ -1993,9 +2042,10 @@
     var ordered = orderedPresets(presets, relation);
     var editing = editingPreset();
     var unsaved = (relation.type === "unsaved" || relation.type === "edited") && hasMeaningfulFilters(state.current);
+    var elsewhere = presetsOnOtherTags().length;
     var html = "<section class='trace-sf-col' aria-labelledby='trace-sf-col-title'>";
     html += "<div class='trace-sf-col-head'><span class='trace-sf-col-title' id='trace-sf-col-title'>" + renderLockIcon() + "<span>Saved filters</span></span>";
-    if (presets.length && !editing) {
+    if (state.presets.length && !editing) {
       html += "<button type='button' class='trace-sf-col-edit' data-trace-sf-action='sheet-open' aria-haspopup='dialog' aria-label='Edit saved filters'>Edit</button>";
     }
     html += "</div>";
@@ -2008,11 +2058,13 @@
       return html + "</section>";
     }
     if (!presets.length) {
+      if (elsewhere) html += "<p class='trace-sf-col-note'>None for this tag yet.</p>";
       if (unsaved && !isAtSavedFilterLimit()) {
         html += "<button type='button' class='trace-sf-col-link' data-trace-sf-action='sheet-save' aria-haspopup='dialog'>" + renderPlusIcon() + "<span>Save these filters</span></button>";
-      } else {
+      } else if (!elsewhere) {
         html += "<p class='trace-sf-col-note'>Filter below, then save it here to use again in one tap.</p>";
       }
+      if (elsewhere) html += renderOtherTagsLink(elsewhere, false);
       return html + "</section>";
     }
     var shown = ordered.length > COLUMN_SHOW_ALL_UP_TO && !state.colShowAll ? ordered.slice(0, COLUMN_QUICK_COUNT) : ordered;
@@ -2025,10 +2077,20 @@
     if (ordered.length > shown.length) {
       html += "<button type='button' class='trace-sf-col-link' data-kind='secondary' data-trace-sf-action='col-show-all'>Show all " + ordered.length + "</button>";
     }
+    // Never hide filters without saying so: the rest are one tap away.
+    if (elsewhere) html += renderOtherTagsLink(elsewhere, true);
     if (unsaved && !isAtSavedFilterLimit()) {
       html += "<button type='button' class='trace-sf-col-link' data-trace-sf-action='sheet-save' aria-haspopup='dialog'>" + renderPlusIcon() + "<span>Save these filters</span></button>";
     }
     return html + "</section>";
+  }
+
+  function renderOtherTagsLink(count, more) {
+    return (
+      "<button type='button' class='trace-sf-col-link' data-kind='secondary' data-trace-sf-action='sheet-open-others' aria-haspopup='dialog'>" +
+      "<span>" + count + (more ? " more" : "") + " on other tags</span>" + renderChevronRight() +
+      "</button>"
+    );
   }
 
   function renderPlusIcon() {
@@ -2196,7 +2258,7 @@
   function editInAo3(id) {
     var preset = findPreset(id);
     if (!preset) return;
-    var href = buildApplyUrl(preset);
+    var href = isOnOtherTag(preset) ? ownTagApplyUrl(preset) : buildApplyUrl(preset);
     var marker = { id: preset.id, at: Date.now(), contextKey: contextKeyFromHref(href), opened: false };
     writeEditingMarker(marker);
     closeSheet(false);
@@ -2466,37 +2528,59 @@
 
   // Edit: every saved filter, this tag's first. A row opens its edit page;
   // applying stays in the column, where the reader filters.
+  // Every saved filter, grouped by where it shows: this tag (or page), any
+  // tag, then each other tag, whose filters also have Open.
   function renderSheetList() {
     var presets = visiblePresetsForCurrent(state.presets, state.current);
     var relation = relationForCurrent(presets, state.activeMeta, state.current);
     var ordered = orderedPresets(presets, relation);
     var body = renderSheetError();
-    function section(list, label, scope) {
+    function section(list, label, id, away) {
       if (!list.length) return;
-      body += "<div class='trace-sf-sheet-group-label' id='trace-sf-section-" + scope + "'>" + escapeHtml(label) + "</div>";
-      body += "<div role='list' aria-labelledby='trace-sf-section-" + scope + "'>" + list.map(renderSheetRow).join("") + "</div>";
+      body += "<div class='trace-sf-sheet-group-label' id='" + id + "'>" + escapeHtml(label) + "</div>";
+      body += "<div role='list' aria-labelledby='" + id + "'>" + list.map(function (preset) {
+        return renderSheetRow(preset, away);
+      }).join("") + "</div>";
     }
-    section(ordered.filter(function (preset) { return preset.scope !== "global"; }), hasReusableContext() ? displayContextLabel() : "This page", "context");
-    section(ordered.filter(function (preset) { return preset.scope === "global"; }), "Any tag", "global");
-    if (!ordered.length) body += "<p class='trace-sf-sheet-note'>No saved filters show here yet.</p>";
-    return sheetHeader("Saved filters", "Only you see these. They sync to your other devices.") + "<div class='trace-sf-sheet-body'>" + body + "</div>";
+    section(ordered.filter(function (preset) { return preset.scope !== "global"; }), hasReusableContext() ? "This tag · " + displayContextLabel() : "This page", "trace-sf-section-context", false);
+    section(ordered.filter(function (preset) { return preset.scope === "global"; }), "Any tag", "trace-sf-section-global", false);
+    var groups = [];
+    presetsOnOtherTags().forEach(function (preset) {
+      var key = tagNameFromContextKey(preset.contextKey) || preset.contextKey;
+      var group = groups.find(function (entry) { return entry.key === key; });
+      if (!group) {
+        group = { key: key, label: labelForContextKey(preset.contextKey, preset.contextLabel), list: [] };
+        groups.push(group);
+      }
+      group.list.push(preset);
+    });
+    groups.sort(function (a, b) { return a.label.toLowerCase() < b.label.toLowerCase() ? -1 : a.label.toLowerCase() > b.label.toLowerCase() ? 1 : 0; });
+    groups.forEach(function (group, index) {
+      section(group.list, group.label, "trace-sf-section-other-" + index, true);
+    });
+    if (!state.presets.length) body += "<p class='trace-sf-sheet-note'>No saved filters yet.</p>";
+    var count = state.presets.length;
+    return sheetHeader("Saved filters", (count === 1 ? "1 saved filter" : "All " + count) + ". Only you see these, on every device.") +
+      "<div class='trace-sf-sheet-body'>" + body + "</div>";
   }
 
-  function renderSheetRow(preset) {
+  function renderSheetRow(preset, away) {
     var short = tokensForPairs(preset.params, preset.summary);
     var full = tokenText(short.tokens, short.tokens.length, short.hidden);
     var own = hasOwnName(preset);
     var label = "Edit " + (own ? preset.name + ". " + full : full) + ".";
+    var tag = away ? labelForContextKey(preset.contextKey, preset.contextLabel) : "";
     return (
-      "<div role='listitem'>" +
+      "<div role='listitem' class='trace-sf-sheet-item'>" +
       "<button type='button' class='trace-sf-sheet-row' data-trace-sf-action='sheet-edit' data-id='" + escapeAttr(preset.id) + "' aria-label='" + escapeAttr(label) + "'>" +
       "<span class='trace-sf-sheet-text'>" +
       (own
         ? "<span class='trace-sf-sheet-name'>" + escapeHtml(preset.name) + "</span><span class='trace-sf-tokens' data-trace-sf-tokens='" + escapeAttr(JSON.stringify(short.tokens)) + "' data-trace-sf-hidden='" + short.hidden + "'>" + escapeHtml(full) + "</span>"
         : "<span class='trace-sf-sheet-name' data-trace-sf-lines='2' data-trace-sf-tokens='" + escapeAttr(JSON.stringify(short.tokens)) + "' data-trace-sf-hidden='" + short.hidden + "'>" + escapeHtml(full) + "</span>") +
       "</span>" +
-      "<span class='trace-sf-sheet-chev' aria-hidden='true'>" + renderChevronRight() + "</span>" +
+      (away ? "" : "<span class='trace-sf-sheet-chev' aria-hidden='true'>" + renderChevronRight() + "</span>") +
       "</button>" +
+      (away ? "<button type='button' class='trace-sf-sheet-open' data-trace-sf-action='open-other' data-id='" + escapeAttr(preset.id) + "' aria-label='" + escapeAttr("Open " + shortLabel(preset) + " on " + tag) + "'>Open</button>" : "") +
       "</div>"
     );
   }
@@ -2529,7 +2613,13 @@
     );
   }
 
-  function renderSheetScope(value, prefix) {
+  function renderSheetScope(value, prefix, preset) {
+    if (preset && isOnOtherTag(preset)) {
+      return renderSheetCells("trace-sf-scope-label", "Show it on", value, [
+        { value: "context", action: prefix + "context", title: "Its tag", caption: labelForContextKey(preset.contextKey, preset.contextLabel) },
+        { value: "global", action: prefix + "global", title: "Any tag", caption: "Every AO3 search" },
+      ]);
+    }
     if (!hasReusableContext()) {
       return "<div class='trace-sf-sheet-label'>Show it on</div><p class='trace-sf-sheet-note' style='padding-top: 0'>Any tag. This page has no tag.</p>";
     }
@@ -2611,11 +2701,21 @@
     }
     var body = renderSheetError();
     var own = hasOwnName(preset);
+    var away = isOnOtherTag(preset);
+    var tag = away ? labelForContextKey(preset.contextKey, preset.contextLabel) : "";
+    if (away) {
+      // A filter saved for another tag: go there with it, or run it here once.
+      body += "<div class='trace-sf-sheet-actions' style='margin-top: 0'>";
+      body += "<button type='button' class='trace-sf-sheet-link' data-trace-sf-action='open-other' data-id='" + escapeAttr(preset.id) + "'>Open on " + escapeHtml(tag) + "</button>";
+      body += "<button type='button' class='trace-sf-sheet-link' data-trace-sf-action='use-here' data-id='" + escapeAttr(preset.id) + "'>" +
+        escapeHtml(hasReusableContext() ? "Use these filters on " + displayContextLabel() : "Use these filters on this page") + "</button>";
+      body += "</div>";
+    }
     body += renderSheetName("trace-sf-edit-name-input", state.editName, own ? preset.name : shortLabel(preset), "data-trace-sf-edit-name", "edit-name-clear");
-    body += renderSheetScope(state.editScope, "edit-scope-");
+    body += renderSheetScope(state.editScope, "edit-scope-", preset);
     body += renderSheetKeeps(preset.params, preset.summary);
     body += "<div class='trace-sf-sheet-actions'>";
-    body += "<button type='button' class='trace-sf-sheet-link' data-trace-sf-action='edit-in-ao3' data-id='" + escapeAttr(preset.id) + "'>Change what it keeps in AO3's Filters</button>";
+    body += "<button type='button' class='trace-sf-sheet-link' data-trace-sf-action='edit-in-ao3' data-id='" + escapeAttr(preset.id) + "'>Change what it keeps in AO3's Filters" + (away ? " on " + escapeHtml(tag) : "") + "</button>";
     if (state.confirmDeleteId === preset.id) {
       body += (
         "<div class='trace-sf-sheet-confirm' role='group' tabindex='-1' aria-labelledby='trace-sf-delete-title'>" +
@@ -2632,7 +2732,7 @@
     }
     body += "</div>";
     return (
-      sheetHeader(own ? preset.name : shortLabel(preset), preset.scope === "global" ? "Any tag" : (preset.contextLabel ? decodeAo3TagName(preset.contextLabel) : displayContextLabel()), true) +
+      sheetHeader(own ? preset.name : shortLabel(preset), preset.scope === "global" ? "Any tag" : labelForContextKey(preset.contextKey, preset.contextLabel || displayContextLabel()), true) +
       "<div class='trace-sf-sheet-body' data-foot='true'>" + body + "</div>" +
       sheetFooter("Save changes", "edit-done", "Cancel", "sheet-back", false)
     );
@@ -3011,6 +3111,9 @@
     if (action === "edit-scope-context") return setEditScope("context", true);
     if (action === "edit-scope-global") return setEditScope("global", true);
     if (action === "col-show-all") return showAllInColumn();
+    if (action === "sheet-open-others") return openOtherTagsList(el);
+    if (action === "open-other") return applyPreset(id);
+    if (action === "use-here") return useHere(id);
     if (action === "open-filters") return openAo3Filters();
     if (action === "clear-filters") return clearFilters();
     if (action === "save-as-new") return setSaveAs("new");
@@ -3018,6 +3121,22 @@
     if (action === "edit-in-ao3") return editInAo3(id);
     if (action === "editing-save") return saveEditing();
     if (action === "editing-cancel") return cancelEditing();
+  }
+
+  function openOtherTagsList(opener) {
+    openSheet("list", opener);
+    setTimeout(function () {
+      var group = state.sheetPanel && state.sheetPanel.querySelector("#trace-sf-section-other-0");
+      if (group && typeof group.scrollIntoView === "function") group.scrollIntoView({ block: "start" });
+    }, 0);
+  }
+
+  // Runs another tag's filter on this page once; the filter stays where it is.
+  function useHere(id) {
+    var preset = findPreset(id);
+    if (!preset) return;
+    closeSheet(false);
+    navigateTo(buildApplyUrl(preset));
   }
 
   function showAllInColumn() {
@@ -3391,7 +3510,7 @@
   async function applyPreset(id) {
     var preset = findPreset(id);
     if (!preset) return;
-    var href = buildApplyUrl(preset);
+    var href = isOnOtherTag(preset) ? ownTagApplyUrl(preset) : buildApplyUrl(preset);
     var activeMeta = {
       id: preset.id,
       signature: signatureForPairs(preset.params),

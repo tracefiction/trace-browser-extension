@@ -1690,7 +1690,8 @@ test("on a phone Edit lists every filter; one filter's page renames, moves and d
   assert.equal(host.querySelector(".trace-sf-sheet-title").textContent, "Saved filters");
   assert.equal(window.document.activeElement, host.querySelector(".trace-sf-sheet-title"), "focus moves into the sheet");
   assert.match(host.getAttribute("style"), /--trace-page-teal:\s*#176E72/i, "light AO3 pages get light tokens");
-  assert.deepEqual(Array.from(host.querySelectorAll(".trace-sf-sheet-group-label")).map((el) => el.textContent), ["Harry Potter - J. K. Rowling", "Any tag"]);
+  assert.deepEqual(Array.from(host.querySelectorAll(".trace-sf-sheet-group-label")).map((el) => el.textContent), ["This tag · Harry Potter - J. K. Rowling", "Any tag"]);
+  assert.equal(host.querySelector(".trace-sf-sheet-sub").textContent, "All 5. Only you see these, on every device.");
   assert.deepEqual(Array.from(host.querySelectorAll(".trace-sf-sheet-row")).map((row) => row.getAttribute("data-id")), ["p1", "p2", "p5", "p3", "p4"]);
   assert.equal(host.querySelector(".trace-sf-sheet-row[data-id='p1'] .trace-sf-tokens").textContent, "Complete · 50k+ words · By kudos");
   const open = (id) => sheet(window).querySelector(`[data-trace-sf-action='sheet-edit'][data-id='${id}']`).click();
@@ -1757,6 +1758,104 @@ test("on a phone Edit lists every filter; one filter's page renames, moves and d
   assert.equal(storageState[STORAGE_KEY].some((preset) => preset.id === "p4"), false);
   assert.equal(storageState[DELETED_KEY].at(-1).clientId, "p4");
   assert.equal(sheet(window).querySelector(".trace-sf-sheet-title").textContent, "Saved filters");
+});
+
+const MARVEL_KEY = "tagPath:/tags/Marvel%20Cinematic%20Universe/works";
+
+function otherTagPresets() {
+  const ws = (field) => `work_search[${field}]`;
+  const marvel = { scope: "context", contextKey: MARVEL_KEY, contextLabel: "Marvel Cinematic Universe", summary: [] };
+  return [
+    phonePresets().find((preset) => preset.id === "p1"),
+    makePreset(Object.assign({}, marvel, { id: "m1", name: "Stucky, finished", params: [[ws("complete"), "T"], [ws("other_tag_names"), "Steve Rogers/Bucky Barnes"], [ws("sort_column"), "kudos_count"]] })),
+    makePreset(Object.assign({}, marvel, { id: "m2", name: "Complete · English · 20k+ words", params: [[ws("complete"), "T"], [ws("language_id"), "en"], [ws("words_from"), "20000"]] })),
+  ];
+}
+
+test("on a phone filters saved for other tags are never hidden without saying so", async () => {
+  const { window, storageState, navigations } = await renderSavedFilters({ narrow: true, url: TAG_PAGE, storage: { [STORAGE_KEY]: otherTagPresets() } });
+  assert.deepEqual(columnIds(window), ["p1"], "the column stays about this tag");
+  const others = root(window).querySelector("[data-trace-sf-action='sheet-open-others']");
+  assert.equal(others.textContent, "2 more on other tags");
+  others.click();
+  await sleep(20);
+  const host = sheet(window);
+  assert.equal(host.querySelector(".trace-sf-sheet-sub").textContent, "All 3. Only you see these, on every device.");
+  assert.deepEqual(Array.from(host.querySelectorAll(".trace-sf-sheet-group-label")).map((el) => el.textContent), ["This tag · Harry Potter - J. K. Rowling", "Marvel Cinematic Universe"]);
+  assert.equal(host.querySelector("[data-trace-sf-action='open-other'][data-id='p1']"), null, "this tag's filters have no Open");
+  const open = host.querySelector("[data-trace-sf-action='open-other'][data-id='m1']");
+  assert.equal(open.textContent, "Open");
+  assert.equal(open.getAttribute("aria-label"), "Open Stucky, finished on Marvel Cinematic Universe");
+  assert.equal(host.querySelector(".trace-sf-sheet-row[data-id='m2'] .trace-sf-sheet-name").textContent, "Complete · English · 20k+ words", "a suggested name shows once");
+  open.click();
+  await sleep(40);
+  const target = new URL(navigations.at(-1));
+  assert.equal(target.pathname, "/tags/Marvel%20Cinematic%20Universe/works", "Open goes to the filter's own tag");
+  assert.equal(target.searchParams.get("work_search[other_tag_names]"), "Steve Rogers/Bucky Barnes");
+  assert.equal(storageState[ACTIVE_KEY].id, "m1");
+  assert.equal(storageState[ACTIVE_KEY].contextKey, MARVEL_KEY);
+  assert.equal(sheet(window), null);
+});
+
+test("on a phone another tag's filter can open there, run here once, or move to any tag", async () => {
+  const { window, storageState, navigations } = await renderSavedFilters({ narrow: true, url: TAG_PAGE, storage: { [STORAGE_KEY]: otherTagPresets() } });
+  root(window).querySelector("[data-trace-sf-action='sheet-open']").click();
+  await sleep(10);
+  sheet(window).querySelector("[data-trace-sf-action='sheet-edit'][data-id='m2']").click();
+  await sleep(10);
+  let host = sheet(window);
+  assert.equal(host.querySelector(".trace-sf-sheet-sub").textContent, "Marvel Cinematic Universe");
+  assert.deepEqual(Array.from(host.querySelectorAll(".trace-sf-sheet-link")).map((el) => el.textContent), [
+    "Open on Marvel Cinematic Universe",
+    "Use these filters on Harry Potter - J. K. Rowling",
+    "Change what it keeps in AO3's Filters on Marvel Cinematic Universe",
+    "Delete filter",
+  ]);
+  assert.deepEqual(Array.from(host.querySelectorAll(".trace-sf-sheet-cell")).map((cell) => cell.textContent), ["Its tagMarvel Cinematic Universe", "Any tagEvery AO3 search"]);
+  assert.equal(host.querySelector("[data-trace-sf-action='edit-scope-context']").getAttribute("aria-checked"), "true");
+
+  host.querySelector("[data-trace-sf-action='use-here']").click();
+  await sleep(20);
+  const here = new URL(navigations.at(-1));
+  assert.equal(here.pathname, "/tags/Harry%20Potter%20-%20J*d*%20K*d*%20Rowling/works", "Use runs it on this tag");
+  assert.equal(here.searchParams.get("work_search[words_from]"), "20000");
+  assert.equal(storageState[STORAGE_KEY].find((preset) => preset.id === "m2").contextKey, MARVEL_KEY, "the filter stays on its tag");
+  assert.equal(storageState[ACTIVE_KEY], undefined);
+
+  root(window).querySelector("[data-trace-sf-action='sheet-open']").click();
+  await sleep(10);
+  sheet(window).querySelector("[data-trace-sf-action='sheet-edit'][data-id='m2']").click();
+  await sleep(10);
+  sheet(window).querySelector("[data-trace-sf-action='edit-scope-global']").click();
+  await sleep(10);
+  sheet(window).querySelector("[data-trace-sf-action='edit-done']").click();
+  await sleep(80);
+  const moved = storageState[STORAGE_KEY].find((preset) => preset.id === "m2");
+  assert.equal(moved.scope, "global");
+  assert.equal(moved.contextKey, "");
+  sheet(window).querySelector(".trace-sf-sheet-close").click();
+  await sleep(10);
+  assert.deepEqual(columnIds(window), ["p1", "m2"], "an any-tag filter shows here");
+  assert.equal(root(window).querySelector("[data-trace-sf-action='sheet-open-others']").textContent, "1 more on other tags");
+
+  root(window).querySelector("[data-trace-sf-action='sheet-open']").click();
+  await sleep(10);
+  sheet(window).querySelector("[data-trace-sf-action='sheet-edit'][data-id='m1']").click();
+  await sleep(10);
+  sheet(window).querySelector("[data-trace-sf-action='edit-in-ao3']").click();
+  await sleep(40);
+  assert.equal(new URL(navigations.at(-1)).pathname, "/tags/Marvel%20Cinematic%20Universe/works", "it's changed on its own tag's Filters");
+  assert.equal(JSON.parse(window.sessionStorage.getItem("traceAo3SavedFilterEditing")).contextKey, MARVEL_KEY);
+});
+
+test("on a phone a tag with none of its own still points to the others", async () => {
+  const marvelOnly = otherTagPresets().filter((preset) => preset.id !== "p1");
+  const { window } = await renderSavedFilters({ narrow: true, url: TAG_PAGE, storage: { [STORAGE_KEY]: marvelOnly } });
+  const mount = root(window);
+  assert.equal(mount.querySelector(".trace-sf-col-row"), null);
+  assert.equal(mount.querySelector(".trace-sf-col-note").textContent, "None for this tag yet.");
+  assert.equal(mount.querySelector("[data-trace-sf-action='sheet-open-others']").textContent, "2 on other tags");
+  assert.ok(mount.querySelector("[data-trace-sf-action='sheet-open']"), "Edit reaches every filter");
 });
 
 test("on a phone the sheet closes on Escape and returns focus to what opened it", async () => {
