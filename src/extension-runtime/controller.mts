@@ -289,6 +289,7 @@ export class SessionRuntimeController {
   readonly #accountCleanups: (() => Promise<void>)[] = [];
   readonly #savedFilters: SavedFilterSyncService;
   readonly #savedFilterApi: SavedFilterSyncApi;
+  readonly #savedFilterRepository: BrowserSavedFilterRepository;
   readonly #nativeImportEnabled: boolean;
   readonly #nativeImport: NativeLibraryImportProducer;
   readonly #firstStoryInitiator: BrowserFirstStoryInitiator;
@@ -318,6 +319,7 @@ export class SessionRuntimeController {
   #savedFilterSyncInFlight: Promise<SavedFilterSyncResult> | null = null;
   #savedFilterSyncQueued = false;
   #savedFilterSyncQueuedWithCurrentAuthority = false;
+  #savedFilterAdoptedScope: string | null = null;
   #lastPublishedStatusKey: string | null = null;
   #statusPublicationTail: Promise<void> = Promise.resolve();
 
@@ -386,14 +388,15 @@ export class SessionRuntimeController {
       environment.fetch,
       environment.apiBase,
     );
+    this.#savedFilterRepository = new BrowserSavedFilterRepository({
+      storage,
+      session: this.#service,
+      randomId: environment.randomId,
+    });
     this.#savedFilters = new SavedFilterSyncService({
       session: this.#service,
       api: this.#savedFilterApi,
-      repository: new BrowserSavedFilterRepository({
-        storage,
-        session: this.#service,
-        randomId: environment.randomId,
-      }),
+      repository: this.#savedFilterRepository,
       clock: { now: () => new Date().toISOString() },
     });
     this.#accountData = new AccountDataRepository(this.#database, this.#service);
@@ -1924,13 +1927,36 @@ export class SessionRuntimeController {
       await this.#publishAccountProjectionRevision();
     }
 
-    return Object.freeze({
-      ready:
-        action.kind === "completed" &&
-        action.state === "connected" &&
-        after !== null,
-      action,
-    });
+    const ready =
+      action.kind === "completed" &&
+      action.state === "connected" &&
+      after !== null;
+    if (ready) await this.#pullSavedFiltersForAdoptedScope(after, scopeChanged);
+    return Object.freeze({ ready, action });
+  }
+
+  // Adopting the app's account is the iPhone's sign-in, so it pulls the
+  // account's saved filters as a desktop sign-in does: when the account
+  // changed, or when this device has never synced them. Once per account in
+  // each background life, so a failing pull is not retried on every message.
+  async #pullSavedFiltersForAdoptedScope(
+    scope: AccountScope,
+    scopeChanged: boolean,
+  ): Promise<void> {
+    if (this.#mode !== "kernel") return;
+    const key = `${scope.accountId}:${scope.epoch}`;
+    if (this.#savedFilterAdoptedScope === key) return;
+    if (!scopeChanged) {
+      const lastSyncedAt = await this.#savedFilterRepository
+        .lastSyncedAt()
+        .catch(() => null);
+      if (lastSyncedAt !== null) {
+        this.#savedFilterAdoptedScope = key;
+        return;
+      }
+    }
+    this.#savedFilterAdoptedScope = key;
+    this.#queueSavedFilterSync(true);
   }
 
   requestSavedFilterSync(): void {
@@ -2173,10 +2199,11 @@ export interface StoryAdmissionHooks {
 export function installSessionRuntime(environment: RuntimeEnvironment): SessionRuntimeController {
   const controller = new SessionRuntimeController(environment);
   if (environment.mode === "kernel") {
-    SavedFilterSyncAlarm.install(
+    void SavedFilterSyncAlarm.install(
       environment.alarms,
       environment.runtime,
       () => controller.requestSavedFilterSync(),
+      environment.storageMode,
     );
   }
   environment.runtime.onMessage.addListener((message, sender, sendResponse) => {

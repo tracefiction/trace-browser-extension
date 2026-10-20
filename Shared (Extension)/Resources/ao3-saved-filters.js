@@ -9,6 +9,10 @@
   const STORAGE_KEY = "traceAo3SavedFiltersV1";
   const ACTIVE_KEY = "traceAo3SavedFiltersActiveV1";
   const DELETED_KEY = "traceAo3SavedFiltersDeletedV1";
+  const SYNC_META_KEY = "traceAo3SavedFiltersSyncV1";
+  // A filter page asks for a pull when this device hasn't had one this long,
+  // the same period as the background's alarm, which Safari may not wake for.
+  const SYNC_STALE_MS = 30 * 60 * 1000;
   const PANEL_COLLAPSED_KEY = "traceAo3SavedFiltersPanelCollapsedV1";
   const PREF_AO3_SAVED_FILTERS_KEY = "prefAo3SavedFiltersEnabled";
   const SYNC_REQUEST_MESSAGE = "TRACE_AO3_SAVED_FILTERS_SYNC_REQUEST";
@@ -457,6 +461,20 @@
     }
   }
 
+  async function requestSyncIfStale() {
+    if (!isSupportedFilterPage()) return;
+    if (!(await readUiEnabled())) return;
+    var res = await storageGet([SYNC_META_KEY]);
+    var meta = res[SYNC_META_KEY];
+    var lastSyncedAt = meta && typeof meta.lastSyncedAt === "string"
+      ? Date.parse(meta.lastSyncedAt)
+      : NaN;
+    var age = Date.now() - lastSyncedAt;
+    if (Number.isFinite(age) && age >= 0 && age < SYNC_STALE_MS) return;
+    // The pull lands in storage, and the storage listener re-renders the panel.
+    requestSavedFiltersSync();
+  }
+
   function cleanDisplayText(text) {
     // AO3 labels end with a work count, "Fluff (12,636)", often followed by
     // markup whitespace; trim first so the count is always dropped.
@@ -798,11 +816,40 @@
     }
   }
 
+  // AO3's filter form submits to /works?tag_id=<tag>, while the tag's own
+  // listing is /tags/<tag>/works. Both name the tag in AO3's URL form, so a
+  // filter saved on one shows on the other.
+  function tagNameFromContextKey(key) {
+    var value = String(key || "");
+    var raw = "";
+    if (value.indexOf("tagId:") === 0) {
+      raw = value.slice("tagId:".length);
+    } else if (value.indexOf("tagPath:") === 0) {
+      var match = value.slice("tagPath:".length).match(/^\/tags\/([^/]+)\/works$/);
+      if (!match) return "";
+      try {
+        raw = decodeURIComponent(match[1]);
+      } catch (_) {
+        raw = match[1];
+      }
+    } else {
+      return "";
+    }
+    return decodeAo3TagName(raw).toLowerCase();
+  }
+
+  function sameContextKey(left, right) {
+    if (!left || !right) return false;
+    if (left === right) return true;
+    var tag = tagNameFromContextKey(left);
+    return tag !== "" && tag === tagNameFromContextKey(right);
+  }
+
   function contextMatchesPreset(preset, current) {
     if (preset.scope === "global") return true;
     if (!preset.contextKey) return true;
     if (!current || !current.contextKey) return false;
-    if (preset.contextKey === current.contextKey) return true;
+    if (sameContextKey(preset.contextKey, current.contextKey)) return true;
     if (!preset.contextLabel || !current.contextLabel) return false;
     return cleanDisplayText(preset.contextLabel).toLowerCase() === cleanDisplayText(current.contextLabel).toLowerCase();
   }
@@ -833,7 +880,7 @@
         return { type: "active", preset: presets[i] };
       }
     }
-    if (activeMeta && activeMeta.contextKey === current.contextKey) {
+    if (activeMeta && sameContextKey(activeMeta.contextKey, current.contextKey)) {
       var applied = presets.find(function (preset) {
         return preset.id === activeMeta.id;
       });
@@ -1943,6 +1990,9 @@
     if (pageHasPasswordField()) return;
     renderFromStorage();
     startObservers();
+    requestSyncIfStale().catch(function () {
+      /* Best-effort pull; the panel already shows what this device has. */
+    });
   }
 
   if (

@@ -733,6 +733,10 @@ test("iOS auto-track adopts the app account, records progress, and hands its exa
           },
         }), { status: 200 });
       }
+      // Adopting the app's account also pulls its saved filters.
+      if (url.endsWith("/api/extension/ao3-saved-filters/sync")) {
+        return new Response("", { status: 503 });
+      }
       writes.push({ authorization, body: JSON.parse(options.body) });
       return new Response(JSON.stringify({
         success: true,
@@ -2562,7 +2566,9 @@ function firstTapSessionController(nativeReplies, { overlayEntries = {}, trackSt
     webOrigin: "https://www.tracefiction.com",
     randomId: () => "first-tap-id",
   });
-  const writes = () => requests.filter(({ method }) => method !== "GET");
+  // Adopting the app's account also pulls its saved filters; that is no save.
+  const writes = () => requests.filter(({ url, method }) =>
+    method !== "GET" && !url.endsWith("/api/extension/ao3-saved-filters/sync"));
   return { controller, requests, writes };
 }
 
