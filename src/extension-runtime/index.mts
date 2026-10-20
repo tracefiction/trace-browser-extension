@@ -13,6 +13,7 @@ import { installSafariReadinessReport, type SafariReadinessReporter } from "./sa
 import { ACCOUNT_PROJECTION_REVISION_KEY } from "./runtime-messages.mjs";
 import { installTraceFirstInstallActivation } from "./trace-web-navigation.mjs";
 import { rememberConnectIntent } from "./connect-intent.mjs";
+import { installStoryTabReuse } from "./story-tab-reuse.mjs";
 export * from "./account-projection.mjs";
 export * from "./billing-conversion.mjs";
 export * from "./archive-readiness-status.mjs";
@@ -224,6 +225,9 @@ try {
     }
   }
   if (!scope.indexedDB) throw new Error("private database unavailable");
+  // A story link the Trace app opened switches to the reader's tab already on
+  // that chapter (story-tab-reuse.mts).
+  installStoryTabReuse({ runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, mode: storageMode });
   let fallbackId = 0;
   const randomId = (): string => {
     const uuid = scope.crypto?.randomUUID?.();
