@@ -28,6 +28,9 @@
   // AO3's own narrow breakpoint: below it, Filters is a 16em column that
   // slides in beside the listing.
   const NARROW_QUERY = "(max-width: 42em)";
+  // Every saved filter shows in the column up to this many; past it, three
+  // and "Show all".
+  const COLUMN_SHOW_ALL_UP_TO = 4;
   const COLUMN_QUICK_COUNT = 3;
   const TEST_NAVIGATE_KEY = "__traceAo3SavedFiltersNavigate";
   const MAX_NAME_LENGTH = 96;
@@ -68,8 +71,13 @@
     presets: [],
     activeMeta: null,
     current: null,
-    // Phone layout: the column, the Showing line and the sheet.
+    // Phone layout: the column, the line and the sheet.
     narrow: false,
+    colShowAll: false,
+    saveTargetId: null,
+    saveAs: "new",
+    draftScopeChosen: false,
+    editing: null,
     lastUsed: { byId: {}, byContext: {} },
     line: null,
     sheet: null,
@@ -1686,9 +1694,25 @@
         tokens = [];
       }
       var hidden = Number(el.getAttribute("data-trace-sf-hidden") || 0);
+      var lineCount = Number(el.getAttribute("data-trace-sf-lines") || 1);
+      var lineHeight = lineCount > 1 ? parseFloat(window.getComputedStyle(el).lineHeight) : NaN;
+      // Measure without the two-line clamp, which hides the overflow.
+      var clamp = lineCount > 1 ? [el.style.display, el.style.webkitLineClamp] : null;
+      if (clamp) {
+        el.style.display = "block";
+        el.style.webkitLineClamp = "unset";
+      }
       for (var shown = tokens.length; shown >= 1; shown--) {
         el.textContent = tokenText(tokens, shown, hidden);
-        if (el.scrollWidth <= el.clientWidth + 1) break;
+        if (lineCount > 1) {
+          if (!(lineHeight > 0) || el.scrollHeight <= Math.ceil(lineHeight * lineCount) + 1) break;
+        } else if (el.scrollWidth <= el.clientWidth + 1) {
+          break;
+        }
+      }
+      if (clamp) {
+        el.style.display = clamp[0];
+        el.style.webkitLineClamp = clamp[1];
       }
     }
   }
@@ -1696,7 +1720,7 @@
   function suggestedNameForCurrent() {
     var pairs = state.current ? state.current.pairs : [];
     if (!state.narrow) return suggestedNameForPairs(pairs);
-    var tokens = tokensForPairs(pairs, []).tokens.slice(0, 2);
+    var tokens = tokensForPairs(pairs, []).tokens.slice(0, 3);
     return (tokens.join(" · ") || "AO3 filter").slice(0, MAX_NAME_LENGTH);
   }
 
@@ -1709,36 +1733,49 @@
     var L = ".trace-sf-line[" + LINE_ATTR + "]";
     var S = ".trace-sf-sheet-host[" + SHEET_ATTR + "]";
     var font = "-apple-system, BlinkMacSystemFont, system-ui, \"Segoe UI\", Roboto, sans-serif";
-    var buttonReset = "-webkit-appearance: none; appearance: none; background: transparent; background-image: none; border: 0; border-radius: 0; box-shadow: none; color: inherit; cursor: pointer; float: none; font: inherit; height: auto; letter-spacing: 0; line-height: inherit; margin: 0; max-height: none; min-height: 0; padding: 0; text-align: left; text-shadow: none; text-transform: none; vertical-align: baseline; width: auto;";
+    var buttonReset = "-webkit-appearance: none; appearance: none; background: transparent; background-image: none; border: 0; border-radius: 0; box-shadow: none; color: inherit; cursor: pointer; float: none; font: inherit; height: auto; letter-spacing: 0; line-height: inherit; margin: 0; max-height: none; min-height: 0; padding: 0; text-align: left; text-shadow: none; text-transform: none; vertical-align: baseline; white-space: normal; width: auto;";
     var ellipsis = "display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;";
     style.textContent = [
-      // The column: quick access at the top of AO3's filter form.
-      R + " .trace-sf-col { border-bottom: 1px solid var(--trace-page-rule); padding: 0 0 6px; }",
-      R + " .trace-sf-col-title { color: var(--trace-page-ink); font-size: 15px; font-weight: 600; line-height: 1.25; padding: 6px 0 8px; }",
-      R + " .trace-sf-col-rows { background: var(--trace-page-surface); border-radius: 12px; box-shadow: inset 0 0 0 1px var(--trace-page-rule); overflow: hidden; }",
-      R + " .trace-sf-col-row { align-items: center; display: grid; gap: 6px; grid-template-columns: 14px minmax(0, 1fr); min-height: 44px; padding: 0 10px 0 8px; width: 100%; border-radius: 0; }",
-      R + " .trace-sf-col-row + .trace-sf-col-row { border-top: 1px solid var(--trace-page-rule); }",
-      R + " .trace-sf-col-name { color: var(--trace-page-ink); font-size: 14px; font-weight: 500; line-height: 1.3; " + ellipsis + " }",
-      R + " .trace-sf-col-row[aria-current='true'] .trace-sf-col-name { font-weight: 600; }",
-      R + " .trace-sf-col-link { align-items: center; color: var(--trace-page-teal); display: flex; font-size: 14px; font-weight: 500; gap: 6px; line-height: 1.25; min-height: 44px; width: 100%; }",
-      R + " .trace-sf-col-link[data-kind='save'] { font-weight: 600; }",
+      // The column: Trace's lines written straight onto AO3's grey form, from
+      // the left to the right edge of AO3's own controls. No box: the lock and
+      // the heading start the section, a hairline ends it.
+      R + " { margin: 0 0 12px; }",
+      R + " .trace-sf-col { border-bottom: 1px solid var(--trace-col-rule); margin: 0 3px; padding: 0 0 2px; }",
+      R + " .trace-sf-col-head { align-items: center; display: flex; gap: 8px; justify-content: space-between; min-height: 40px; }",
+      R + " .trace-sf-col-title { align-items: center; color: var(--trace-page-ink); display: flex; font-size: 14px; font-weight: 600; gap: 6px; line-height: 1.25; min-width: 0; }",
+      R + " .trace-sf-col-title svg { color: var(--trace-col-private); display: block; flex: 0 0 auto; height: 12px; width: 11px; }",
+      R + " .trace-sf-col-edit { align-items: center; color: var(--trace-col-teal); display: inline-flex; flex: 0 0 auto; font-size: 14px; font-weight: 500; justify-content: flex-end; min-height: 44px; min-width: 44px; }",
+      R + " .trace-sf-col-row { align-items: center; border-top: 1px solid var(--trace-col-rule); display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) 15px; min-height: 46px; padding: 8px 0; width: 100%; }",
+      R + " .trace-sf-col-text { display: grid; gap: 2px; min-width: 0; }",
+      R + " .trace-sf-col-name { color: var(--trace-page-ink); display: -webkit-box; font-size: 14px; font-weight: 600; line-height: 1.3; overflow: hidden; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }",
+      // One token longer than the line ends in "…".
+      R + " .trace-sf-col-tokens { color: var(--trace-col-secondary); display: block; font-size: 13px; line-height: 1.35; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+      R + " .trace-sf-col-check { color: var(--trace-page-ink); display: block; height: 15px; width: 15px; }",
+      R + " .trace-sf-col-check svg { display: block; height: 15px; width: 15px; }",
+      R + " .trace-sf-col-changed { color: var(--trace-col-secondary); font-size: 13px; line-height: 1.35; margin: -4px 0 0; padding: 0 0 8px; }",
+      R + " .trace-sf-col-link { align-items: center; border-top: 1px solid var(--trace-col-rule); color: var(--trace-col-teal); display: flex; font-size: 14px; font-weight: 500; gap: 6px; line-height: 1.25; min-height: 44px; width: 100%; }",
+      R + " .trace-sf-col-link[data-kind='secondary'] { color: var(--trace-col-secondary); font-weight: 400; }",
       R + " .trace-sf-col-link svg { display: block; flex: 0 0 auto; height: 12px; width: 12px; }",
-      R + " .trace-sf-col-link-text { " + ellipsis + " }",
-      R + " .trace-sf-col .trace-sf-note { padding: 0 0 6px; }",
+      R + " .trace-sf-col-note { color: var(--trace-col-secondary); font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; padding: 0 0 10px; }",
+      R + " .trace-sf-col-note b { color: var(--trace-page-ink); font-weight: 600; }",
+      R + " .trace-sf-col .trace-sf-note { color: var(--trace-col-secondary); padding: 0 0 8px; }",
 
-      // The Showing line, outside AO3's button row.
+      // The line under Works · Bookmarks · Filters, only while filters are on.
       L + ", " + L + " * { box-sizing: border-box; }",
       L + " { clear: both; color: var(--trace-page-secondary); display: block; font-family: " + font + "; font-size: 15px; line-height: 1.35; margin: 8px 0 12px; -webkit-font-smoothing: antialiased; }",
-      L + " button { " + buttonReset + " align-items: center; border-bottom: 1px solid var(--trace-page-rule); border-top: 1px solid var(--trace-page-rule); display: flex; gap: 8px; min-height: 44px; width: 100%; }",
+      L + " .trace-sf-line-row { align-items: center; border-bottom: 1px solid var(--trace-page-rule); border-top: 1px solid var(--trace-page-rule); display: flex; gap: 12px; min-height: 44px; }",
+      L + " button { " + buttonReset + " align-items: center; display: flex; min-height: 44px; }",
       L + " :focus { outline: none; }",
       L + " :focus-visible { outline: 3px solid var(--trace-page-teal) !important; outline-offset: 2px; }",
+      L + " .trace-sf-line-main { flex: 1 1 auto; gap: 8px; min-width: 0; }",
       L + " .trace-sf-line-text { flex: 1 1 auto; " + ellipsis + " }",
       L + " b { color: var(--trace-page-ink); font-weight: 600; }",
       L + " .trace-sf-check { color: var(--trace-page-ink); display: inline-flex; flex: 0 0 auto; height: 16px; width: 16px; }",
-      L + " .trace-sf-line-more { color: var(--trace-page-tertiary); display: inline-flex; flex: 0 0 auto; height: 12px; width: 12px; }",
       L + " svg { display: block; height: 100%; width: 100%; }",
+      L + " .trace-sf-line-side { color: var(--trace-page-secondary); flex: 0 0 auto; justify-content: flex-end; min-width: 44px; }",
+      L + " .trace-sf-line-side[data-kind='primary'] { color: var(--trace-page-teal); font-weight: 600; }",
 
-      // The sheet: the listing sheet's anatomy on Trace's page tokens.
+      // The sheet: the story sheet's anatomy on Trace's page tokens.
       S + ", " + S + " * { box-sizing: border-box; }",
       S + " { color: var(--trace-page-ink); font-family: " + font + "; font-size: 15px; font-weight: 400; inset: 0; letter-spacing: 0; line-height: 1.35; position: fixed; text-align: left; -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%; z-index: 2147483646; }",
       S + " button { " + buttonReset + " }",
@@ -1750,41 +1787,42 @@
       S + " [tabindex='-1']:focus-visible { outline: none !important; }",
       S + " .trace-sf-scrim { background: var(--trace-page-scrim); inset: 0; position: absolute; }",
       S + " .trace-sf-sheet { background: var(--trace-page-surface); border-radius: 20px 20px 0 0; bottom: 0; box-shadow: 0 0 0 1px var(--trace-page-rule), 0 14px 30px -12px rgba(0, 0, 0, 0.35); display: flex; flex-direction: column; left: 0; margin: 0 auto; max-height: calc(100% - 8px); max-width: 430px; position: absolute; right: 0; width: 100%; }",
-      S + " .trace-sf-grabber { align-items: center; cursor: grab; display: flex; flex: 0 0 auto; height: 24px; justify-content: center; touch-action: none; user-select: none; }",
+      S + " .trace-sf-grabber { align-items: center; cursor: grab; display: flex; flex: 0 0 auto; height: 20px; justify-content: center; touch-action: none; user-select: none; }",
       S + " .trace-sf-grabber span { background: var(--trace-page-secondary); border-radius: 999px; display: block; height: 4px; opacity: 0.6; width: 38px; }",
       S + " .trace-sf-sheet-content { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }",
-      S + " .trace-sf-sheet-head { align-items: center; display: grid; flex: 0 0 auto; gap: 8px; grid-template-columns: minmax(0, 1fr) auto; min-height: 52px; padding: 0 9px 4px 16px; }",
-      S + " .trace-sf-sheet-head[data-kind='editor'] { grid-template-columns: minmax(64px, 1fr) auto minmax(64px, 1fr); padding: 0 8px 4px; }",
-      S + " .trace-sf-sheet-title { color: var(--trace-page-ink); font-size: 17px; font-weight: 600; line-height: 1.25; " + ellipsis + " }",
+      S + " .trace-sf-sheet-head { align-items: start; display: grid; flex: 0 0 auto; gap: 8px; grid-template-columns: minmax(0, 1fr) 44px; padding: 2px 6px 8px 16px; }",
+      S + " .trace-sf-sheet-titles { min-width: 0; padding-top: 8px; }",
+      S + " .trace-sf-sheet-back { align-items: center; color: var(--trace-page-teal); display: inline-flex; font-size: 15px; gap: 2px; margin: -10px 0 0 -4px; min-height: 44px; padding: 0 4px; }",
+      S + " .trace-sf-sheet-back svg { height: 12px; transform: scaleX(-1); width: 12px; }",
+      S + " .trace-sf-sheet-title { color: var(--trace-page-ink); display: block; font-size: 17px; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }",
+      S + " .trace-sf-sheet-sub { color: var(--trace-page-secondary); font-size: 13px; line-height: 1.35; margin-top: 2px; overflow-wrap: anywhere; }",
       S + " .trace-sf-sheet-close { align-items: center; color: var(--trace-page-secondary); display: inline-flex; height: 44px; justify-content: center; width: 44px; }",
       S + " .trace-sf-sheet-close span { align-items: center; background: var(--trace-page-raised); border-radius: 15px; display: inline-flex; height: 30px; justify-content: center; width: 30px; }",
       S + " .trace-sf-sheet-close svg { height: 10px; width: 10px; }",
-      S + " .trace-sf-sheet-hbtn { align-items: center; color: var(--trace-page-teal); display: inline-flex; font-size: 16px; min-height: 44px; padding: 0 8px; }",
-      S + " .trace-sf-sheet-hbtn[data-side='start'] { color: var(--trace-page-secondary); justify-self: start; }",
-      S + " .trace-sf-sheet-hbtn[data-side='end'] { font-weight: 600; justify-self: end; }",
-      S + " .trace-sf-sheet-hbtn:disabled { cursor: default; opacity: 0.45; }",
       // Safari's floating toolbar covers the page's bottom edge.
       S + " .trace-sf-sheet-body { flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain; padding: 0 16px calc(80px + env(safe-area-inset-bottom, 0px)); -webkit-overflow-scrolling: touch; }",
-      S + " .trace-sf-sheet-label { color: var(--trace-page-secondary); display: block; font-size: 13px; font-weight: 500; line-height: 1.35; padding: 14px 4px 6px; }",
+      S + " .trace-sf-sheet-body[data-foot='true'] { padding-bottom: 16px; }",
+      S + " .trace-sf-sheet-foot { align-items: center; border-top: 1px solid var(--trace-page-rule); display: flex; flex: 0 0 auto; gap: 16px; justify-content: space-between; padding: 0 16px calc(64px + env(safe-area-inset-bottom, 0px)); }",
+      S + " .trace-sf-sheet-foot button { align-items: center; display: inline-flex; font-size: 16px; min-height: 48px; }",
+      S + " .trace-sf-sheet-foot button[data-kind='primary'] { color: var(--trace-page-teal); font-weight: 600; }",
+      S + " .trace-sf-sheet-foot button[data-kind='secondary'] { color: var(--trace-page-secondary); }",
+      S + " .trace-sf-sheet-foot button:disabled { cursor: default; opacity: 0.45; }",
+      S + " .trace-sf-sheet-label { color: var(--trace-page-ink); display: block; font-size: 13px; font-weight: 600; line-height: 1.35; padding: 14px 0 7px; }",
+      S + " .trace-sf-sheet-label span { color: var(--trace-page-secondary); font-weight: 400; margin-left: 6px; }",
       S + " .trace-sf-sheet-body > .trace-sf-sheet-label:first-child { padding-top: 4px; }",
-      S + " .trace-sf-sheet-group { border-radius: 14px; box-shadow: inset 0 0 0 1px var(--trace-page-rule); }",
-      S + " .trace-sf-sheet-row { align-items: center; display: grid; grid-template-columns: minmax(0, 1fr) 44px; min-height: 56px; position: relative; }",
-      S + " .trace-sf-sheet-row + .trace-sf-sheet-row::before, " + S + " .trace-sf-sheet-opt + .trace-sf-sheet-opt::before, " + S + " .trace-sf-sheet-keep + .trace-sf-sheet-keep::before { border-top: 1px solid var(--trace-page-rule); content: ''; left: 12px; position: absolute; right: 0; top: 0; }",
-      S + " .trace-sf-sheet-main { align-items: start; display: grid; grid-template-columns: 26px minmax(0, 1fr); min-height: 56px; min-width: 0; padding: 10px 0 10px 10px; width: 100%; }",
-      S + " .trace-sf-sheet-check { color: var(--trace-page-ink); height: 16px; margin-top: 2px; width: 16px; }",
-      S + " .trace-sf-sheet-check svg { height: 16px; width: 16px; }",
-      S + " .trace-sf-sheet-text { min-width: 0; }",
-      S + " .trace-sf-sheet-name { color: var(--trace-page-ink); font-size: 16px; font-weight: 500; line-height: 1.3; " + ellipsis + " }",
-      S + " .trace-sf-sheet-main[aria-current='true'] .trace-sf-sheet-name { font-weight: 600; }",
-      S + " .trace-sf-tokens { color: var(--trace-page-secondary); font-size: 13px; line-height: 1.4; margin-top: 2px; " + ellipsis + " }",
-      S + " .trace-sf-sheet-more { align-items: center; color: var(--trace-page-tertiary); display: inline-flex; height: 44px; justify-content: center; width: 44px; }",
-      S + " .trace-sf-sheet-more svg { height: 18px; width: 18px; }",
-      S + " .trace-sf-sheet-action { align-items: center; color: var(--trace-page-teal); display: flex; font-size: 15px; font-weight: 600; gap: 8px; min-height: 48px; padding: 0 12px; width: 100%; }",
-      S + " .trace-sf-sheet-action + .trace-sf-sheet-action { border-top: 1px solid var(--trace-page-rule); }",
-      S + " .trace-sf-sheet-action svg { flex: 0 0 auto; height: 14px; width: 14px; }",
-      S + " .trace-sf-sheet-action[data-danger='true'] { color: var(--trace-page-warning); }",
-      S + " .trace-sf-sheet-changed { color: var(--trace-page-secondary); font-size: 14px; line-height: 1.4; padding: 12px 12px 0; overflow-wrap: anywhere; }",
-      S + " .trace-sf-sheet-changed b { color: var(--trace-page-ink); font-weight: 600; }",
+      S + " .trace-sf-sheet-group-label { color: var(--trace-page-secondary); display: block; font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; padding: 12px 0 2px; }",
+      S + " .trace-sf-sheet-row { align-items: center; border-top: 1px solid var(--trace-page-rule); display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr) 10px; min-height: 56px; padding: 10px 0; width: 100%; }",
+      S + " .trace-sf-sheet-group-label + .trace-sf-sheet-row { border-top: 0; }",
+      S + " .trace-sf-sheet-text { display: grid; gap: 2px; min-width: 0; }",
+      S + " .trace-sf-sheet-name { color: var(--trace-page-ink); display: -webkit-box; font-size: 15px; font-weight: 600; line-height: 1.3; overflow: hidden; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }",
+      S + " .trace-sf-tokens { color: var(--trace-page-secondary); display: block; font-size: 13px; line-height: 1.4; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+      S + " .trace-sf-sheet-chev { color: var(--trace-page-tertiary); height: 13px; width: 8px; }",
+      S + " .trace-sf-sheet-cells { display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }",
+      S + " .trace-sf-sheet-cell { align-content: center; background: var(--trace-page-surface); border-radius: 12px; box-shadow: inset 0 0 0 1px var(--trace-page-control); display: grid; gap: 1px; min-height: 56px; min-width: 0; padding: 8px 12px; width: 100%; }",
+      S + " .trace-sf-sheet-cell[aria-checked='true'] { background: var(--trace-page-raised); box-shadow: inset 0 0 0 2px var(--trace-page-ink); }",
+      S + " .trace-sf-sheet-cell-title { color: var(--trace-page-ink); font-size: 15px; font-weight: 600; line-height: 1.3; }",
+      S + " .trace-sf-sheet-cell-cap { color: var(--trace-page-secondary); font-size: 13px; line-height: 1.35; " + ellipsis + " }",
+      S + " .trace-sf-sheet-why { color: var(--trace-page-secondary); font-size: 13px; line-height: 1.4; padding: 8px 0 0; }",
       S + " .trace-sf-sheet-input-row { display: block; position: relative; }",
       S + " .trace-sf-sheet-input { -webkit-appearance: none; appearance: none; background: var(--trace-page-surface); border: 0; border-radius: 12px; box-shadow: inset 0 0 0 1px var(--trace-page-control); color: var(--trace-page-ink); font: 16px/1.3 " + font + "; height: auto; margin: 0; min-height: 48px; padding: 12px 44px 12px 14px; width: 100%; }",
       S + " .trace-sf-sheet-input::placeholder { color: var(--trace-page-secondary); }",
@@ -1792,30 +1830,43 @@
       S + " .trace-sf-sheet-clear span { align-items: center; background: var(--trace-page-raised); border-radius: 9px; display: inline-flex; height: 18px; justify-content: center; width: 18px; }",
       S + " .trace-sf-sheet-clear svg { height: 8px; width: 8px; }",
       S + " .trace-sf-sheet-input:placeholder-shown + .trace-sf-sheet-clear { display: none; }",
-      S + " .trace-sf-sheet-opt { align-items: center; display: grid; gap: 12px; grid-template-columns: 22px minmax(0, 1fr); min-height: 56px; padding: 9px 12px; position: relative; width: 100%; }",
-      S + " .trace-sf-sheet-radio { border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--trace-page-tertiary); height: 22px; position: relative; width: 22px; }",
-      S + " .trace-sf-sheet-opt[aria-checked='true'] .trace-sf-sheet-radio { box-shadow: inset 0 0 0 1.5px var(--trace-page-teal); }",
-      S + " .trace-sf-sheet-opt[aria-checked='true'] .trace-sf-sheet-radio::after { background: var(--trace-page-teal); border-radius: 50%; content: ''; inset: 6px; position: absolute; }",
-      S + " .trace-sf-sheet-opt-text { min-width: 0; }",
-      S + " .trace-sf-sheet-opt-title { display: block; font-size: 16px; line-height: 1.3; overflow-wrap: anywhere; }",
-      S + " .trace-sf-sheet-opt-cap { color: var(--trace-page-secondary); display: block; font-size: 13px; line-height: 1.35; }",
-      S + " .trace-sf-sheet-keep { display: grid; gap: 12px; grid-template-columns: 84px minmax(0, 1fr); padding: 10px 12px; position: relative; }",
+      S + " .trace-sf-sheet-keeps { border-radius: 14px; box-shadow: inset 0 0 0 1px var(--trace-page-rule); padding: 2px 12px; }",
+      S + " .trace-sf-sheet-keep { display: grid; gap: 12px; grid-template-columns: 84px minmax(0, 1fr); padding: 9px 0; }",
+      S + " .trace-sf-sheet-keep + .trace-sf-sheet-keep { border-top: 1px solid var(--trace-page-rule); }",
       S + " .trace-sf-sheet-keep dt { color: var(--trace-page-secondary); font-size: 13px; line-height: 1.4; padding-top: 1px; }",
       S + " .trace-sf-sheet-keep dd { color: var(--trace-page-ink); font-size: 15px; line-height: 1.4; overflow-wrap: anywhere; }",
-      S + " .trace-sf-sheet-note { color: var(--trace-page-secondary); font-size: 14px; line-height: 1.4; padding: 10px 4px 0; }",
-      S + " .trace-sf-sheet-confirm { padding: 12px 12px 4px; }",
+      S + " .trace-sf-sheet-link { align-items: center; color: var(--trace-page-teal); display: flex; font-size: 15px; font-weight: 500; gap: 8px; min-height: 48px; width: 100%; }",
+      S + " .trace-sf-sheet-link + .trace-sf-sheet-link { border-top: 1px solid var(--trace-page-rule); }",
+      S + " .trace-sf-sheet-link svg { flex: 0 0 auto; height: 14px; width: 14px; }",
+      S + " .trace-sf-sheet-link[data-danger='true'] { color: var(--trace-page-warning); }",
+      S + " .trace-sf-sheet-actions { margin-top: 8px; }",
+      S + " .trace-sf-sheet-note { color: var(--trace-page-secondary); font-size: 14px; line-height: 1.4; padding: 10px 0 0; }",
+      S + " .trace-sf-sheet-confirm { border-radius: 14px; box-shadow: inset 0 0 0 1px var(--trace-page-rule); margin-top: 12px; padding: 12px 12px 4px; }",
       S + " .trace-sf-sheet-confirm-title { color: var(--trace-page-ink); display: block; font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }",
       S + " .trace-sf-sheet-confirm-detail { color: var(--trace-page-secondary); display: block; font-size: 13px; line-height: 1.4; margin-top: 2px; }",
-      S + " .trace-sf-sheet-confirm-actions { display: flex; flex-wrap: wrap; gap: 0 16px; margin-top: 4px; }",
-      S + " .trace-sf-sheet-confirm-actions button { align-items: center; color: var(--trace-page-secondary); display: inline-flex; font-size: 15px; font-weight: 500; min-height: 44px; min-width: 44px; padding: 0 4px; }",
+      S + " .trace-sf-sheet-confirm-actions { display: flex; flex-wrap: wrap; gap: 0 24px; margin-top: 4px; }",
+      S + " .trace-sf-sheet-confirm-actions button { align-items: center; color: var(--trace-page-secondary); display: inline-flex; font-size: 15px; font-weight: 500; min-height: 44px; min-width: 44px; }",
       S + " .trace-sf-sheet-confirm-actions button[data-danger='true'] { color: var(--trace-page-warning); font-weight: 600; }",
-      S + " .trace-sf-sheet-error { align-items: center; color: var(--trace-page-ink); display: flex; flex-wrap: wrap; font-size: 14px; gap: 0 16px; line-height: 1.4; min-height: 44px; padding: 4px 4px 0; }",
+      S + " .trace-sf-sheet-error { align-items: center; color: var(--trace-page-ink); display: flex; flex-wrap: wrap; font-size: 14px; gap: 0 16px; line-height: 1.4; min-height: 44px; padding: 4px 0 0; }",
       S + " .trace-sf-sheet-error-text { align-items: center; display: flex; flex: 1 1 10rem; gap: 6px; min-width: 0; }",
       S + " .trace-sf-sheet-error svg { color: var(--trace-page-warning); flex: 0 0 auto; height: 14px; width: 14px; }",
       S + " .trace-sf-sheet-error button { color: var(--trace-page-teal); font-weight: 500; min-height: 44px; }",
       "@media (prefers-reduced-motion: reduce) { " + S + " .trace-sf-sheet { transition: none !important; } }",
     ].join("\n");
     (document.head || document.documentElement).appendChild(style);
+  }
+
+  // AO3's narrow Filters column is #ddd. On it, Trace's secondary text and
+  // teal are one step darker so they keep 4.5:1 (5.7:1 and 5.5:1).
+  function applyColumnTokens(root) {
+    if (!root || !root.style) return;
+    var light = pageTokens().ink === "#18232D";
+    var tokens = light
+      ? { teal: "#125E62", secondary: "#4A545E", rule: "rgba(42, 42, 42, 0.18)", private: "#4F534C" }
+      : { teal: "var(--trace-page-teal)", secondary: "var(--trace-page-secondary)", rule: "var(--trace-page-rule)", private: "var(--trace-page-secondary)" };
+    Object.keys(tokens).forEach(function (name) {
+      root.style.setProperty("--trace-col-" + name, tokens[name]);
+    });
   }
 
   // ---------------------------------------------------------------- render
@@ -1846,39 +1897,134 @@
   }
 
   function renderPhone(presets, relation) {
+    applyColumnTokens(state.root);
     replaceKeepingFocus(state.root, renderColumn(presets, relation));
+    fitTokenLines(state.root);
+    watchColumnWidth(state.root);
     renderLine(relation);
     renderSheet();
+    openFiltersForEditingOnce();
+  }
+
+  // AO3's column is hidden until Filters opens, so lines are fitted again
+  // once it has a width.
+  var columnWidthObserver = null;
+  var observedColumn = null;
+  function watchColumnWidth(root) {
+    if (!root || observedColumn === root || typeof ResizeObserver !== "function") return;
+    if (columnWidthObserver) columnWidthObserver.disconnect();
+    var lastWidth = -1;
+    columnWidthObserver = new ResizeObserver(function (entries) {
+      var width = entries && entries[0] ? Math.round(entries[0].contentRect.width) : 0;
+      if (width === lastWidth || !width) return;
+      lastWidth = width;
+      fitTokenLines(root);
+    });
+    columnWidthObserver.observe(root);
+    observedColumn = root;
+  }
+
+  // A sheet opens over the listing, never over AO3's open Filters column.
+  function closeAo3Filters() {
+    var outer = document.getElementById("outer");
+    var leave = document.getElementById("leave_filters");
+    if (outer && outer.classList && outer.classList.contains("filtering") && leave && typeof leave.click === "function") {
+      leave.click();
+    }
+  }
+
+  // A reader-chosen name, or none: a name Trace suggested reads as what the
+  // filter keeps, so the row shows the tokens instead of repeating them.
+  function hasOwnName(preset) {
+    var name = cleanDisplayText(preset.name || "");
+    if (!name || name === "AO3 filter") return false;
+    var tokens = tokensForPairs(preset.params, preset.summary).tokens;
+    return name !== tokens.slice(0, 3).join(" · ") &&
+      name !== tokens.slice(0, 2).join(" · ") &&
+      name !== suggestedNameForPairs(preset.params);
+  }
+
+  function shortLabel(preset) {
+    if (hasOwnName(preset)) return preset.name;
+    var tokens = tokensForPairs(preset.params, preset.summary).tokens;
+    return tokens.slice(0, 2).join(" · ") || preset.name;
+  }
+
+  // Filters that do something: AO3 sends its default sort with every search.
+  function meaningfulPairs(pairs) {
+    return (pairs || []).filter(function (pair) {
+      return !(pair[0] === "work_search[sort_column]" && pair[1] === "revised_at");
+    });
+  }
+
+  function hasMeaningfulFilters(current) {
+    return Boolean(current && current.hasFilters && meaningfulPairs(current.pairs).length);
+  }
+
+  function renderColumnRow(preset, relation) {
+    var isActive = relation.type === "active" && relation.preset && relation.preset.id === preset.id;
+    var short = tokensForPairs(preset.params, preset.summary);
+    var full = tokenText(short.tokens, short.tokens.length, short.hidden);
+    var global = preset.scope === "global";
+    var text;
+    if (hasOwnName(preset)) {
+      var line = global ? ["Any tag"].concat(short.tokens) : short.tokens;
+      text = "<span class='trace-sf-col-name'>" + escapeHtml(preset.name) + "</span>" +
+        "<span class='trace-sf-col-tokens' data-trace-sf-tokens='" + escapeAttr(JSON.stringify(line)) + "' data-trace-sf-hidden='" + short.hidden + "'>" + escapeHtml(tokenText(line, line.length, short.hidden)) + "</span>";
+    } else {
+      text = "<span class='trace-sf-col-name' data-trace-sf-lines='2' data-trace-sf-tokens='" + escapeAttr(JSON.stringify(short.tokens)) + "' data-trace-sf-hidden='" + short.hidden + "'>" + escapeHtml(full) + "</span>" +
+        (global ? "<span class='trace-sf-col-tokens'>Any tag</span>" : "");
+    }
+    var label = (hasOwnName(preset) ? preset.name + ". " : "") + full + (global ? ". Any tag" : "") + (isActive ? ". Showing now" : "") + ".";
+    return (
+      "<button type='button' class='trace-sf-col-row' data-trace-sf-action='apply' data-id='" + escapeAttr(preset.id) + "' aria-label='" + escapeAttr(label) + "'" +
+      (isActive ? " aria-current='true'" : "") + ">" +
+      "<span class='trace-sf-col-text'>" + text + "</span>" +
+      "<span class='trace-sf-col-check'>" + (isActive ? renderCheckIcon() : "") + "</span>" +
+      "</button>"
+    );
   }
 
   function renderColumn(presets, relation) {
-    var quick = orderedPresets(presets, relation).slice(0, COLUMN_QUICK_COUNT);
-    var activeId = relation.type === "active" && relation.preset ? relation.preset.id : "";
-    var unsaved = relation.type === "unsaved" || relation.type === "edited";
-    var html = "<div class='trace-sf-col' role='group' aria-labelledby='trace-sf-col-title'>";
-    html += "<div class='trace-sf-col-title' id='trace-sf-col-title'>Saved filters</div>";
+    var ordered = orderedPresets(presets, relation);
+    var editing = editingPreset();
+    var unsaved = (relation.type === "unsaved" || relation.type === "edited") && hasMeaningfulFilters(state.current);
+    var html = "<section class='trace-sf-col' aria-labelledby='trace-sf-col-title'>";
+    html += "<div class='trace-sf-col-head'><span class='trace-sf-col-title' id='trace-sf-col-title'>" + renderLockIcon() + "<span>Saved filters</span></span>";
+    if (presets.length && !editing) {
+      html += "<button type='button' class='trace-sf-col-edit' data-trace-sf-action='sheet-open' aria-haspopup='dialog' aria-label='Edit saved filters'>Edit</button>";
+    }
+    html += "</div>";
     if (state.notice) html += renderNote(state.notice);
-    if (quick.length) {
-      html += "<div class='trace-sf-col-rows'>" + quick.map(function (preset) {
-        var isActive = preset.id === activeId;
-        return (
-          "<button type='button' class='trace-sf-col-row' data-trace-sf-action='apply' data-id='" + escapeAttr(preset.id) + "'" +
-          (isActive ? " aria-current='true' aria-label='" + escapeAttr(preset.name + ". Showing now.") + "'" : "") + ">" +
-          "<span class='trace-sf-edge'>" + (isActive ? renderCheckIcon() : "") + "</span>" +
-          "<span class='trace-sf-col-name'>" + escapeHtml(preset.name) + "</span>" +
-          "</button>"
-        );
-      }).join("") + "</div>";
+    if (editing) {
+      html += "<p class='trace-sf-col-note'>Editing <b>" + escapeHtml(shortLabel(editing)) + "</b>. Change anything below, then save.</p>";
+      if (state.error) html += "<p class='trace-sf-col-note'>" + escapeHtml(state.error) + "</p>";
+      html += "<button type='button' class='trace-sf-col-link' data-trace-sf-action='editing-save'>Save changes</button>";
+      html += "<button type='button' class='trace-sf-col-link' data-kind='secondary' data-trace-sf-action='editing-cancel'>Cancel</button>";
+      return html + "</section>";
+    }
+    if (!presets.length) {
+      if (unsaved && !isAtSavedFilterLimit()) {
+        html += "<button type='button' class='trace-sf-col-link' data-trace-sf-action='sheet-save' aria-haspopup='dialog'>" + renderPlusIcon() + "<span>Save these filters</span></button>";
+      } else {
+        html += "<p class='trace-sf-col-note'>Filter below, then save it here to use again in one tap.</p>";
+      }
+      return html + "</section>";
+    }
+    var shown = ordered.length > COLUMN_SHOW_ALL_UP_TO && !state.colShowAll ? ordered.slice(0, COLUMN_QUICK_COUNT) : ordered;
+    shown.forEach(function (preset) {
+      html += renderColumnRow(preset, relation);
+      if (relation.type === "edited" && relation.preset && relation.preset.id === preset.id) {
+        html += "<p class='trace-sf-col-changed'>Changed on this page</p>";
+      }
+    });
+    if (ordered.length > shown.length) {
+      html += "<button type='button' class='trace-sf-col-link' data-kind='secondary' data-trace-sf-action='col-show-all'>Show all " + ordered.length + "</button>";
     }
     if (unsaved && !isAtSavedFilterLimit()) {
-      html += "<button type='button' class='trace-sf-col-link' data-kind='save' data-trace-sf-action='sheet-save' aria-haspopup='dialog'>" + renderPlusIcon() + "<span class='trace-sf-col-link-text'>Save these filters</span></button>";
+      html += "<button type='button' class='trace-sf-col-link' data-trace-sf-action='sheet-save' aria-haspopup='dialog'>" + renderPlusIcon() + "<span>Save these filters</span></button>";
     }
-    if (presets.length) {
-      html += "<button type='button' class='trace-sf-col-link' data-trace-sf-action='sheet-open' aria-haspopup='dialog'><span class='trace-sf-col-link-text'>All saved filters (" + presets.length + ")</span>" + renderChevronRight() + "</button>";
-    } else if (!unsaved) {
-      html += renderNote("Choose filters below, then save them here after Sort and Filter.");
-    }
-    return html + "</div>";
+    return html + "</section>";
   }
 
   function renderPlusIcon() {
@@ -1893,11 +2039,13 @@
     return "<svg viewBox='0 0 12 12' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' focusable='false' aria-hidden='true'><path d='M1.5 1.5l9 9M10.5 1.5l-9 9'/></svg>";
   }
 
-  function renderMoreIcon() {
-    return "<svg viewBox='0 0 18 18' fill='currentColor' focusable='false' aria-hidden='true'><circle cx='3.5' cy='9' r='1.5'/><circle cx='9' cy='9' r='1.5'/><circle cx='14.5' cy='9' r='1.5'/></svg>";
+  // The lock from Your record: saved filters are the reader's, not AO3's.
+  function renderLockIcon() {
+    return "<svg viewBox='0 0 11 12' fill='currentColor' focusable='false' aria-hidden='true'><path d='M3 5V3.6a2.5 2.5 0 015 0V5h.6c.5 0 .9.4.9.9v4.7c0 .5-.4.9-.9.9H2.4c-.5 0-.9-.4-.9-.9V5.9c0-.5.4-.9.9-.9H3zm1.2 0h2.6V3.6a1.3 1.3 0 00-2.6 0V5z'/></svg>";
   }
 
-  // "✓ Showing {name}" above the works, only while a saved filter is applied.
+  // One line above the works, only while filters are on: what's showing and
+  // the next step (Clear, or Save).
   function lineMountPoint() {
     var go = document.getElementById("go_to_filters");
     if (!go || !go.closest) return null;
@@ -1906,8 +2054,36 @@
   }
 
   function renderLine(relation) {
-    var row = relation.type === "active" && relation.preset ? lineMountPoint() : null;
-    if (!row) {
+    var row = lineMountPoint();
+    var html = "";
+    if (row && relation.type === "active" && relation.preset) {
+      var name = shortLabel(relation.preset);
+      html =
+        "<div class='trace-sf-line-row'>" +
+        "<button type='button' class='trace-sf-line-main' data-trace-sf-action='open-filters' aria-label='" + escapeAttr("Showing " + name + ". Open Filters") + "'>" +
+        "<span class='trace-sf-check'>" + renderCheckIcon() + "</span>" +
+        "<span class='trace-sf-line-text'>Showing <b>" + escapeHtml(name) + "</b></span></button>" +
+        "<button type='button' class='trace-sf-line-side' data-trace-sf-action='clear-filters' aria-label='" + escapeAttr("Clear " + name) + "'>Clear</button>" +
+        "</div>";
+    } else if (row && relation.type === "edited" && relation.preset && hasMeaningfulFilters(state.current) && !isAtSavedFilterLimit()) {
+      var from = shortLabel(relation.preset);
+      html =
+        "<div class='trace-sf-line-row'>" +
+        "<button type='button' class='trace-sf-line-main' data-trace-sf-action='open-filters' aria-label='" + escapeAttr("Changed from " + from + ". Open Filters") + "'>" +
+        "<span class='trace-sf-line-text'>Changed from <b>" + escapeHtml(from) + "</b></span></button>" +
+        "<button type='button' class='trace-sf-line-side' data-kind='primary' data-trace-sf-action='sheet-save' aria-haspopup='dialog' aria-label='Save these filters'>Save</button>" +
+        "</div>";
+    } else if (row && relation.type === "unsaved" && hasMeaningfulFilters(state.current) && !isAtSavedFilterLimit()) {
+      var short = tokensForPairs(meaningfulPairs(state.current.pairs), []);
+      var full = tokenText(short.tokens, short.tokens.length, short.hidden);
+      html =
+        "<div class='trace-sf-line-row'>" +
+        "<button type='button' class='trace-sf-line-main' data-trace-sf-action='open-filters' aria-label='" + escapeAttr("Filtered: " + full + ". Open Filters") + "'>" +
+        "<span class='trace-sf-line-text'>Filtered: <span data-trace-sf-tokens='" + escapeAttr(JSON.stringify(short.tokens)) + "' data-trace-sf-hidden='" + short.hidden + "'>" + escapeHtml(full) + "</span></span></button>" +
+        "<button type='button' class='trace-sf-line-side' data-kind='primary' data-trace-sf-action='sheet-save' aria-haspopup='dialog' aria-label='Save these filters'>Save</button>" +
+        "</div>";
+    }
+    if (!html) {
       removeLine();
       return;
     }
@@ -1922,18 +2098,166 @@
       row.parentNode.insertBefore(state.line, row.nextSibling);
     }
     applyPageTokens(state.line);
-    var name = relation.preset.name;
-    replaceKeepingFocus(state.line,
-      "<button type='button' data-trace-sf-action='sheet-open' aria-haspopup='dialog' aria-label='" + escapeAttr("Showing " + name + ". Saved filters") + "'>" +
-      "<span class='trace-sf-check'>" + renderCheckIcon() + "</span>" +
-      "<span class='trace-sf-line-text'>Showing <b>" + escapeHtml(name) + "</b></span>" +
-      "<span class='trace-sf-line-more'>" + renderChevronRight() + "</span>" +
-      "</button>");
+    replaceKeepingFocus(state.line, html);
+    fitTokenLines(state.line);
   }
 
   function removeLine() {
     if (state.line && state.line.parentNode) state.line.parentNode.removeChild(state.line);
     state.line = null;
+  }
+
+  // The line opens AO3's own Filters: saved filters live there.
+  function openAo3Filters() {
+    var go = document.getElementById("go_to_filters");
+    if (go && typeof go.click === "function") {
+      go.click();
+    } else {
+      var form = findFilterForm();
+      if (form && typeof form.scrollIntoView === "function") form.scrollIntoView();
+    }
+  }
+
+  // AO3's own Clear Filters link when the form has one; otherwise this tag's
+  // (or this page's) listing with no filters.
+  function clearFiltersHref() {
+    var form = findFilterForm();
+    var links = form ? form.querySelectorAll("a[href]") : [];
+    for (var i = 0; i < links.length; i++) {
+      if (/^\s*clear filters\s*$/i.test(links[i].textContent || "")) return links[i].href;
+    }
+    var ctx = getPageContext();
+    if (ctx && ctx.type === "tagPath") return location.origin + ctx.path;
+    if (ctx && ctx.type === "tagId") return location.origin + "/tags/" + encodeURIComponent(ctx.tagId) + "/works";
+    return location.origin + normalizePath(location.pathname);
+  }
+
+  function clearFilters() {
+    navigateTo(clearFiltersHref());
+  }
+
+  // ------------------------------------------- editing in AO3's own Filters
+  // "Change what it keeps" loads the filter into AO3's form and opens Filters;
+  // the column then offers Save changes or Cancel. The marker lives in this
+  // tab's session only and lapses after a while.
+  var EDITING_SESSION_KEY = "traceAo3SavedFilterEditing";
+  var EDITING_LIFETIME_MS = 20 * 60 * 1000;
+
+  function readEditingMarker() {
+    try {
+      var raw = JSON.parse(window.sessionStorage.getItem(EDITING_SESSION_KEY) || "null");
+      if (!raw || typeof raw.id !== "string" || typeof raw.at !== "number") return null;
+      if (Date.now() - raw.at > EDITING_LIFETIME_MS) return null;
+      return raw;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function writeEditingMarker(marker) {
+    try {
+      if (marker) window.sessionStorage.setItem(EDITING_SESSION_KEY, JSON.stringify(marker));
+      else window.sessionStorage.removeItem(EDITING_SESSION_KEY);
+    } catch (_) {
+      /* Without session storage, editing still works on this page. */
+    }
+  }
+
+  // Set while this page loads the filter into a new one; the edit belongs
+  // to that page.
+  var leavingToEdit = false;
+
+  function editingPreset() {
+    if (!state.narrow || leavingToEdit) return null;
+    var marker = state.editing || readEditingMarker();
+    if (!marker) return null;
+    var preset = findPreset(marker.id);
+    if (!preset || !sameContextKey(marker.contextKey, currentContextKey())) {
+      if (!state.editing) writeEditingMarker(null);
+      return null;
+    }
+    state.editing = marker;
+    return preset;
+  }
+
+  function openFiltersForEditingOnce() {
+    var marker = state.editing;
+    if (!marker || marker.opened) return;
+    marker.opened = true;
+    writeEditingMarker(marker);
+    // After AO3's own filters.js has wired the Filters button.
+    setTimeout(openAo3Filters, 250);
+  }
+
+  function editInAo3(id) {
+    var preset = findPreset(id);
+    if (!preset) return;
+    var href = buildApplyUrl(preset);
+    var marker = { id: preset.id, at: Date.now(), contextKey: contextKeyFromHref(href), opened: false };
+    writeEditingMarker(marker);
+    closeSheet(false);
+    if (state.current && samePairSet(preset.params, state.current.pairs)) {
+      state.editing = marker;
+      render();
+      return;
+    }
+    leavingToEdit = true;
+    applyPreset(id);
+  }
+
+  function formPairs() {
+    var form = findFilterForm();
+    if (!form || typeof FormData !== "function") return [];
+    var params = new URLSearchParams();
+    new FormData(form).forEach(function (value, key) {
+      if (typeof value === "string") params.append(key, value);
+    });
+    return normalizePairsFromSearch("?" + params.toString());
+  }
+
+  async function saveEditing() {
+    var preset = editingPreset();
+    if (!preset) return;
+    var pairs = formPairs();
+    if (!meaningfulPairs(pairs).length) {
+      state.error = "Choose at least one filter first.";
+      render();
+      return;
+    }
+    var now = new Date().toISOString();
+    var updated = Object.assign({}, preset, {
+      params: pairs,
+      summary: storedSummaryParts(summaryForPairs(pairs)),
+      updatedAt: now,
+      clientUpdatedAt: now,
+      dirty: true,
+    });
+    var presets = state.presets.map(function (item) {
+      return item.id === preset.id ? updated : item;
+    });
+    var href = buildApplyUrl(updated);
+    var activeMeta = {
+      id: preset.id,
+      signature: signatureForPairs(pairs),
+      contextKey: contextKeyFromHref(href),
+      appliedAt: now,
+    };
+    await commitStorage(presets, activeMeta, function () {
+      state.editing = null;
+      writeEditingMarker(null);
+      persistLastUsed(preset.id);
+      navigateTo(href);
+    }, null, { kind: "editing" });
+  }
+
+  function cancelEditing() {
+    state.editing = null;
+    state.error = "";
+    writeEditingMarker(null);
+    var form = findFilterForm();
+    if (form && typeof form.reset === "function") form.reset();
+    render();
+    focusSoon("[data-trace-sf-action='sheet-open']");
   }
 
   function bindTraceEvents(element, capture) {
@@ -1955,6 +2279,7 @@
         ? ".trace-sf-line [data-trace-sf-action='" + action + "']"
         : "[data-trace-sf-action='" + action + "']";
     }
+    closeAo3Filters();
     state.sheet = kind;
     state.sheetFrom = null;
     state.confirmDeleteId = null;
@@ -1973,10 +2298,16 @@
       render();
       return;
     }
+    var visible = visiblePresetsForCurrent(state.presets, state.current);
+    var relation = relationForCurrent(visible, state.activeMeta, state.current);
     state.sheet = "save";
     state.sheetFrom = fromList ? "list" : null;
-    state.draftName = suggestedNameForCurrent();
-    state.draftScope = hasReusableContext() ? "context" : "global";
+    // The name is optional: left blank, the filter is known by what it keeps.
+    state.draftName = "";
+    state.draftScope = hasReusableContext() && namesTags(state.current.pairs) ? "context" : "global";
+    state.draftScopeChosen = false;
+    state.saveTargetId = relation.type === "edited" && relation.preset ? relation.preset.id : null;
+    state.saveAs = "new";
     render();
     focusSheetTitle();
   }
@@ -1987,7 +2318,7 @@
     state.sheet = "edit";
     state.sheetFrom = "list";
     state.editId = id;
-    state.editName = preset.name;
+    state.editName = hasOwnName(preset) ? preset.name : "";
     state.editScope = preset.scope === "global" ? "global" : "context";
     state.confirmDeleteId = null;
     clearMessages();
@@ -2076,6 +2407,8 @@
     state.sheetFrom = null;
     state.editId = null;
     state.confirmDeleteId = null;
+    state.saveTargetId = null;
+    state.saveAs = "new";
     if (state.sheetHost && state.sheetHost.parentNode) state.sheetHost.parentNode.removeChild(state.sheetHost);
     state.sheetHost = null;
     state.sheetPanel = null;
@@ -2086,7 +2419,7 @@
     if (!restoreFocus) return;
     // After a save the page redraws first, so choose the target once it has.
     setTimeout(function () {
-      var lineButton = ".trace-sf-line [data-trace-sf-action='sheet-open']";
+      var lineButton = ".trace-sf-line .trace-sf-line-main";
       var target = (preferLine && queryTrace(lineButton)) ||
         (opener && queryTrace(opener)) ||
         queryTrace(lineButton) ||
@@ -2095,22 +2428,25 @@
     }, 0);
   }
 
-  function sheetHeader(title) {
+  function sheetHeader(title, sub, back) {
     return (
       "<header class='trace-sf-sheet-head'>" +
+      "<div class='trace-sf-sheet-titles'>" +
+      (back ? "<button type='button' class='trace-sf-sheet-back' data-trace-sf-action='sheet-back'>" + renderChevronRight() + "<span>Saved filters</span></button>" : "") +
       "<h2 class='trace-sf-sheet-title' id='trace-sf-sheet-title' tabindex='-1'>" + escapeHtml(title) + "</h2>" +
+      (sub ? "<p class='trace-sf-sheet-sub'>" + escapeHtml(sub) + "</p>" : "") +
+      "</div>" +
       "<button type='button' class='trace-sf-sheet-close' data-trace-sf-action='sheet-close' aria-label='Close saved filters'><span>" + renderCloseIcon() + "</span></button>" +
       "</header>"
     );
   }
 
-  function editorHeader(title, endLabel, endAction, endDisabled) {
+  function sheetFooter(primaryLabel, primaryAction, secondaryLabel, secondaryAction, primaryDisabled) {
     return (
-      "<header class='trace-sf-sheet-head' data-kind='editor'>" +
-      "<button type='button' class='trace-sf-sheet-hbtn' data-side='start' data-trace-sf-action='sheet-back'>Cancel</button>" +
-      "<h2 class='trace-sf-sheet-title' id='trace-sf-sheet-title' tabindex='-1'>" + escapeHtml(title) + "</h2>" +
-      "<button type='button' class='trace-sf-sheet-hbtn' data-side='end' data-trace-sf-action='" + endAction + "'" + (endDisabled ? " disabled" : "") + ">" + escapeHtml(endLabel) + "</button>" +
-      "</header>"
+      "<footer class='trace-sf-sheet-foot'>" +
+      "<button type='button' data-kind='primary' data-trace-sf-action='" + primaryAction + "'" + (primaryDisabled ? " disabled" : "") + ">" + escapeHtml(primaryLabel) + "</button>" +
+      (secondaryLabel ? "<button type='button' data-kind='secondary' data-trace-sf-action='" + secondaryAction + "'>" + escapeHtml(secondaryLabel) + "</button>" : "<span></span>") +
+      "</footer>"
     );
   }
 
@@ -2124,61 +2460,46 @@
     );
   }
 
+  // Edit: every saved filter, this tag's first. A row opens its edit page;
+  // applying stays in the column, where the reader filters.
   function renderSheetList() {
     var presets = visiblePresetsForCurrent(state.presets, state.current);
     var relation = relationForCurrent(presets, state.activeMeta, state.current);
     var ordered = orderedPresets(presets, relation);
-    var atLimit = isAtSavedFilterLimit();
     var body = renderSheetError();
-    if (relation.type === "edited" && relation.preset) {
-      body += (
-        "<div class='trace-sf-sheet-group' style='margin-top: 4px'>" +
-        "<p class='trace-sf-sheet-changed'><b>" + escapeHtml(relation.preset.name) + "</b>, changed</p>" +
-        "<button type='button' class='trace-sf-sheet-action' data-trace-sf-action='update-current' data-id='" + escapeAttr(relation.preset.id) + "'>Update filter</button>" +
-        (atLimit ? "" : "<button type='button' class='trace-sf-sheet-action' data-trace-sf-action='sheet-save'>Save as new</button>") +
-        "</div>"
-      );
-    } else if (relation.type === "unsaved" && !atLimit) {
-      body += "<div class='trace-sf-sheet-group' style='margin-top: 4px'><button type='button' class='trace-sf-sheet-action' data-trace-sf-action='sheet-save'>" + renderPlusIcon() + "Save the filters on this page</button></div>";
-    }
-    if (atLimit && (relation.type === "unsaved" || relation.type === "edited")) {
-      body += "<p class='trace-sf-sheet-note'>" + escapeHtml(savedFilterLimitMessage()) + "</p>";
-    }
     function section(list, label, scope) {
       if (!list.length) return;
-      body += "<div class='trace-sf-sheet-label' id='trace-sf-section-" + scope + "'>" + escapeHtml(label) + "</div>";
-      body += "<div class='trace-sf-sheet-group' role='list' aria-labelledby='trace-sf-section-" + scope + "'>" + list.map(function (preset) {
-        return renderSheetRow(preset, relation);
-      }).join("") + "</div>";
+      body += "<div class='trace-sf-sheet-group-label' id='trace-sf-section-" + scope + "'>" + escapeHtml(label) + "</div>";
+      body += "<div role='list' aria-labelledby='trace-sf-section-" + scope + "'>" + list.map(renderSheetRow).join("") + "</div>";
     }
-    section(ordered.filter(function (preset) { return preset.scope !== "global"; }), hasReusableContext() ? "This tag" : "This page", "context");
-    section(ordered.filter(function (preset) { return preset.scope === "global"; }), "Every AO3 search", "global");
+    section(ordered.filter(function (preset) { return preset.scope !== "global"; }), hasReusableContext() ? displayContextLabel() : "This page", "context");
+    section(ordered.filter(function (preset) { return preset.scope === "global"; }), "Any tag", "global");
     if (!ordered.length) body += "<p class='trace-sf-sheet-note'>No saved filters show here yet.</p>";
-    return sheetHeader("Saved filters") + "<div class='trace-sf-sheet-body'>" + body + "</div>";
+    return sheetHeader("Saved filters", "Only you see these. They sync to your other devices.") + "<div class='trace-sf-sheet-body'>" + body + "</div>";
   }
 
-  function renderSheetRow(preset, relation) {
-    var isActive = relation.type === "active" && relation.preset && relation.preset.id === preset.id;
+  function renderSheetRow(preset) {
     var short = tokensForPairs(preset.params, preset.summary);
     var full = tokenText(short.tokens, short.tokens.length, short.hidden);
-    var label = preset.name + (isActive ? ". Showing now" : "") + ". " + full + ". Apply.";
+    var own = hasOwnName(preset);
+    var label = "Edit " + (own ? preset.name + ". " + full : full) + ".";
     return (
-      "<div class='trace-sf-sheet-row' role='listitem' data-id='" + escapeAttr(preset.id) + "' data-scope='" + (preset.scope === "global" ? "global" : "context") + "'>" +
-      "<button type='button' class='trace-sf-sheet-main' data-trace-sf-action='apply' data-id='" + escapeAttr(preset.id) + "' aria-label='" + escapeAttr(label) + "'" + (isActive ? " aria-current='true'" : "") + ">" +
-      "<span class='trace-sf-sheet-check'>" + (isActive ? renderCheckIcon() : "") + "</span>" +
+      "<div role='listitem'>" +
+      "<button type='button' class='trace-sf-sheet-row' data-trace-sf-action='sheet-edit' data-id='" + escapeAttr(preset.id) + "' aria-label='" + escapeAttr(label) + "'>" +
       "<span class='trace-sf-sheet-text'>" +
-      "<span class='trace-sf-sheet-name'>" + escapeHtml(preset.name) + "</span>" +
-      "<span class='trace-sf-tokens' data-trace-sf-tokens='" + escapeAttr(JSON.stringify(short.tokens)) + "' data-trace-sf-hidden='" + short.hidden + "'>" + escapeHtml(full) + "</span>" +
+      (own
+        ? "<span class='trace-sf-sheet-name'>" + escapeHtml(preset.name) + "</span><span class='trace-sf-tokens' data-trace-sf-tokens='" + escapeAttr(JSON.stringify(short.tokens)) + "' data-trace-sf-hidden='" + short.hidden + "'>" + escapeHtml(full) + "</span>"
+        : "<span class='trace-sf-sheet-name' data-trace-sf-lines='2' data-trace-sf-tokens='" + escapeAttr(JSON.stringify(short.tokens)) + "' data-trace-sf-hidden='" + short.hidden + "'>" + escapeHtml(full) + "</span>") +
       "</span>" +
+      "<span class='trace-sf-sheet-chev' aria-hidden='true'>" + renderChevronRight() + "</span>" +
       "</button>" +
-      "<button type='button' class='trace-sf-sheet-more' data-trace-sf-action='sheet-edit' data-id='" + escapeAttr(preset.id) + "' aria-label='" + escapeAttr("Edit " + preset.name) + "'>" + renderMoreIcon() + "</button>" +
       "</div>"
     );
   }
 
   function renderSheetName(id, value, placeholder, dataAttr, clearAction) {
     return (
-      "<label class='trace-sf-sheet-label' for='" + id + "'>Name</label>" +
+      "<label class='trace-sf-sheet-label' for='" + id + "'>Name<span>Optional</span></label>" +
       "<span class='trace-sf-sheet-input-row'>" +
       "<input id='" + id + "' class='trace-sf-sheet-input' type='text' " + dataAttr + " maxlength='" + MAX_NAME_LENGTH + "' autocomplete='off' autocapitalize='sentences' enterkeyhint='done' placeholder='" + escapeAttr(placeholder) + "' value='" + escapeAttr(value) + "'>" +
       "<button type='button' class='trace-sf-sheet-clear' data-trace-sf-action='" + clearAction + "' aria-label='Clear name'><span>" + renderCloseIcon() + "</span></button>" +
@@ -2186,26 +2507,32 @@
     );
   }
 
-  function renderSheetScope(value, prefix) {
-    if (!hasReusableContext()) {
-      return "<div class='trace-sf-sheet-label'>Use it on</div><p class='trace-sf-sheet-note' style='padding-top: 0'>Every AO3 search. This page has no tag.</p>";
-    }
-    function option(scope, title, caption) {
-      var checked = value === scope;
-      return (
-        "<button type='button' class='trace-sf-sheet-opt' role='radio' data-trace-sf-action='" + prefix + scope + "' aria-checked='" + (checked ? "true" : "false") + "' tabindex='" + (checked ? "0" : "-1") + "'>" +
-        "<span class='trace-sf-sheet-radio' aria-hidden='true'></span>" +
-        "<span class='trace-sf-sheet-opt-text'><span class='trace-sf-sheet-opt-title'>" + escapeHtml(title) + "</span><span class='trace-sf-sheet-opt-cap'>" + escapeHtml(caption) + "</span></span>" +
-        "</button>"
-      );
-    }
+  // Two cells, the story sheet's status-grid look, with radio semantics.
+  function renderSheetCells(labelId, label, value, options) {
     return (
-      "<div class='trace-sf-sheet-label' id='trace-sf-scope-label'>Use it on</div>" +
-      "<div class='trace-sf-sheet-group' role='radiogroup' aria-labelledby='trace-sf-scope-label'>" +
-      option("context", displayContextLabel(), "Only this tag") +
-      option("global", "Every AO3 search", "Any tag or search") +
+      "<div class='trace-sf-sheet-label' id='" + labelId + "'>" + escapeHtml(label) + "</div>" +
+      "<div class='trace-sf-sheet-cells' role='radiogroup' aria-labelledby='" + labelId + "'>" +
+      options.map(function (option) {
+        var checked = value === option.value;
+        return (
+          "<button type='button' class='trace-sf-sheet-cell' role='radio' data-trace-sf-action='" + option.action + "' aria-checked='" + (checked ? "true" : "false") + "' tabindex='" + (checked ? "0" : "-1") + "'>" +
+          "<span class='trace-sf-sheet-cell-title'>" + escapeHtml(option.title) + "</span>" +
+          "<span class='trace-sf-sheet-cell-cap'>" + escapeHtml(option.caption) + "</span>" +
+          "</button>"
+        );
+      }).join("") +
       "</div>"
     );
+  }
+
+  function renderSheetScope(value, prefix) {
+    if (!hasReusableContext()) {
+      return "<div class='trace-sf-sheet-label'>Show it on</div><p class='trace-sf-sheet-note' style='padding-top: 0'>Any tag. This page has no tag.</p>";
+    }
+    return renderSheetCells("trace-sf-scope-label", "Show it on", value, [
+      { value: "context", action: prefix + "context", title: "This tag", caption: displayContextLabel() },
+      { value: "global", action: prefix + "global", title: "Any tag", caption: "Every AO3 search" },
+    ]);
   }
 
   function renderSheetKeeps(pairs, summary) {
@@ -2213,7 +2540,7 @@
     if (!groups.length) return "";
     return (
       "<div class='trace-sf-sheet-label' id='trace-sf-keeps-label'>What it keeps</div>" +
-      "<dl class='trace-sf-sheet-group' aria-labelledby='trace-sf-keeps-label'>" +
+      "<dl class='trace-sf-sheet-keeps' aria-labelledby='trace-sf-keeps-label'>" +
       groups.map(function (group) {
         var value = group.stored ? group.stored.replace(/^(?:Include|Exclude) /, "") : group.values.join(", ");
         return "<div class='trace-sf-sheet-keep'><dt>" + escapeHtml(group.label) + "</dt><dd>" + escapeHtml(value) + "</dd></div>";
@@ -2222,57 +2549,89 @@
     );
   }
 
+  // Characters, relationships and other tags belong to a tag; everything else
+  // is a reading preference that follows the reader to any tag.
+  function namesTags(pairs) {
+    return (pairs || []).some(function (pair) {
+      var key = String(pair[0] || "");
+      var field = fieldName(key);
+      if (key.indexOf("include_work_search[") === 0) return /^(?:fandom|character|relationship|freeform)_ids$/.test(field);
+      return key.indexOf("work_search[") === 0 && /^(?:other_tag|fandom|character|relationship|freeform)_names$/.test(field);
+    });
+  }
+
+  function saveTargetPreset() {
+    return state.saveTargetId ? findPreset(state.saveTargetId) : null;
+  }
+
   function renderSheetSave() {
     var pairs = state.current ? state.current.pairs : [];
     var canSave = Boolean(state.current && state.current.canSave);
+    var target = saveTargetPreset();
+    var updating = Boolean(target && state.saveAs === "update");
+    var body = renderSheetError();
+    if (target) {
+      body += renderSheetCells("trace-sf-save-as-label", "Save as", updating ? "update" : "new", [
+        { value: "new", action: "save-as-new", title: "New filter", caption: "Keeps the original" },
+        { value: "update", action: "save-as-update", title: "Update", caption: "Changes “" + shortLabel(target) + "”" },
+      ]);
+    }
+    if (!updating) {
+      body += renderSheetName("trace-sf-name-input", state.draftName || "", suggestedNameForCurrent(), "data-trace-sf-name", "name-clear");
+      body += renderSheetScope(state.draftScope === "global" ? "global" : "context", "scope-");
+      if (hasReusableContext() && state.draftScopeChosen === false) {
+        body += "<p class='trace-sf-sheet-why'>" + (namesTags(pairs)
+          ? "It names tags to include, so it starts on this tag."
+          : "Nothing in it is about this tag, so it starts on any tag.") + "</p>";
+      }
+    }
+    body += renderSheetKeeps(pairs, []);
+    if (state.presets.length >= SAVED_FILTER_LIMIT_WARNING_THRESHOLD) {
+      body += "<p class='trace-sf-sheet-note'>" + state.presets.length + " of " + SAVED_FILTER_ACTIVE_LIMIT + " saved filters used</p>";
+    }
+    var title = updating ? "Update “" + shortLabel(target) + "”" : "Save these filters";
     return (
-      editorHeader("Save filters", "Save", "save-confirm", !canSave) +
-      "<div class='trace-sf-sheet-body' data-trace-sf-save-form>" +
-      renderSheetError() +
-      renderSheetName("trace-sf-name-input", state.draftName || "", suggestedNameForCurrent(), "data-trace-sf-name", "name-clear") +
-      renderSheetScope(state.draftScope === "global" ? "global" : "context", "scope-") +
-      renderSheetKeeps(pairs, []) +
-      (state.presets.length >= SAVED_FILTER_LIMIT_WARNING_THRESHOLD
-        ? "<p class='trace-sf-sheet-note'>" + state.presets.length + " of " + SAVED_FILTER_ACTIVE_LIMIT + " saved filters used</p>"
-        : "") +
-      "</div>"
+      sheetHeader(title, "Only you see saved filters") +
+      "<div class='trace-sf-sheet-body' data-foot='true' data-trace-sf-save-form>" + body + "</div>" +
+      sheetFooter(updating ? "Update filter" : "Save filter", "save-confirm", "Cancel", "sheet-close", !canSave)
     );
   }
 
-  // Update is offered only when this page's filters would change the filter.
-  function canUpdateWithCurrent(preset) {
-    return Boolean(state.current && state.current.canSave && preset && !samePairSet(preset.params, state.current.pairs));
-  }
-
+  // Edit one filter: its name and where it shows here; what it keeps changes
+  // in AO3's own Filters, which has every option.
   function renderSheetEdit() {
     var preset = findPreset(state.editId);
     if (!preset) {
       state.sheet = "list";
       return renderSheetList();
     }
-    var html = editorHeader("Edit filter", "Done", "edit-done", false) + "<div class='trace-sf-sheet-body'>" + renderSheetError();
-    html += renderSheetName("trace-sf-edit-name-input", state.editName, preset.name, "data-trace-sf-edit-name", "edit-name-clear");
-    html += renderSheetKeeps(preset.params, preset.summary);
-    html += renderSheetScope(state.editScope, "edit-scope-");
-    if (canUpdateWithCurrent(preset)) {
-      html += "<div class='trace-sf-sheet-label'>This page</div><div class='trace-sf-sheet-group'><button type='button' class='trace-sf-sheet-action' data-trace-sf-action='update-current' data-id='" + escapeAttr(preset.id) + "'>Update with this page's filters</button></div>";
-    }
-    html += "<div class='trace-sf-sheet-label' aria-hidden='true'>&nbsp;</div><div class='trace-sf-sheet-group'>";
+    var body = renderSheetError();
+    var own = hasOwnName(preset);
+    body += renderSheetName("trace-sf-edit-name-input", state.editName, own ? preset.name : shortLabel(preset), "data-trace-sf-edit-name", "edit-name-clear");
+    body += renderSheetScope(state.editScope, "edit-scope-");
+    body += renderSheetKeeps(preset.params, preset.summary);
+    body += "<div class='trace-sf-sheet-actions'>";
+    body += "<button type='button' class='trace-sf-sheet-link' data-trace-sf-action='edit-in-ao3' data-id='" + escapeAttr(preset.id) + "'>Change what it keeps in AO3's Filters</button>";
     if (state.confirmDeleteId === preset.id) {
-      html += (
+      body += (
         "<div class='trace-sf-sheet-confirm' role='group' tabindex='-1' aria-labelledby='trace-sf-delete-title'>" +
-        "<span class='trace-sf-sheet-confirm-title' id='trace-sf-delete-title'>Delete “" + escapeHtml(preset.name) + "”?</span>" +
+        "<span class='trace-sf-sheet-confirm-title' id='trace-sf-delete-title'>Delete “" + escapeHtml(shortLabel(preset)) + "”?</span>" +
         "<span class='trace-sf-sheet-confirm-detail'>It's deleted on every device. Nothing on AO3 changes.</span>" +
         "<span class='trace-sf-sheet-confirm-actions'>" +
         "<button type='button' data-danger='true' data-trace-sf-action='delete' data-id='" + escapeAttr(preset.id) + "'>Delete</button>" +
-        "<button type='button' data-trace-sf-action='delete-cancel'>Cancel</button>" +
+        "<button type='button' data-trace-sf-action='delete-cancel'>Keep</button>" +
         "</span>" +
         "</div>"
       );
     } else {
-      html += "<button type='button' class='trace-sf-sheet-action' data-danger='true' data-trace-sf-action='delete-confirm' data-id='" + escapeAttr(preset.id) + "'>Delete filter</button>";
+      body += "<button type='button' class='trace-sf-sheet-link' data-danger='true' data-trace-sf-action='delete-confirm' data-id='" + escapeAttr(preset.id) + "'>Delete filter</button>";
     }
-    return html + "</div></div>";
+    body += "</div>";
+    return (
+      sheetHeader(own ? preset.name : shortLabel(preset), preset.scope === "global" ? "Any tag" : (preset.contextLabel ? decodeAo3TagName(preset.contextLabel) : displayContextLabel()), true) +
+      "<div class='trace-sf-sheet-body' data-foot='true'>" + body + "</div>" +
+      sheetFooter("Save changes", "edit-done", "Cancel", "sheet-back", false)
+    );
   }
 
   function setEditScope(scope, keepFocus) {
@@ -2292,7 +2651,9 @@
   async function finishEdit() {
     var preset = findPreset(state.editId);
     if (!preset) return showSheetList();
-    var name = currentNameInputValue("[data-trace-sf-edit-name]") || preset.name;
+    // A cleared name falls back to what the filter keeps.
+    var name = currentNameInputValue("[data-trace-sf-edit-name]") ||
+      (tokensForPairs(preset.params, preset.summary).tokens.slice(0, 3).join(" · ") || preset.name).slice(0, MAX_NAME_LENGTH);
     state.editName = name;
     var scope = hasReusableContext() ? (state.editScope === "global" ? "global" : "context") : preset.scope;
     if (name === preset.name && scope === preset.scope) {
@@ -2569,6 +2930,10 @@
         setEditScope(state.editScope === "global" ? "context" : "global");
         return;
       }
+      if (String(target.getAttribute("data-trace-sf-action") || "").indexOf("save-as") === 0) {
+        setSaveAs(state.saveAs === "update" ? "new" : "update");
+        return;
+      }
       setDraftScope(state.draftScope === "global" ? "context" : "global");
       focusSoon("[role='radio'][aria-checked='true']");
       return;
@@ -2641,6 +3006,26 @@
     if (action === "edit-name-clear") return clearEditName();
     if (action === "edit-scope-context") return setEditScope("context", true);
     if (action === "edit-scope-global") return setEditScope("global", true);
+    if (action === "col-show-all") return showAllInColumn();
+    if (action === "open-filters") return openAo3Filters();
+    if (action === "clear-filters") return clearFilters();
+    if (action === "save-as-new") return setSaveAs("new");
+    if (action === "save-as-update") return setSaveAs("update");
+    if (action === "edit-in-ao3") return editInAo3(id);
+    if (action === "editing-save") return saveEditing();
+    if (action === "editing-cancel") return cancelEditing();
+  }
+
+  function showAllInColumn() {
+    state.colShowAll = true;
+    render();
+    focusSoon(".trace-sf-col-row", false, COLUMN_QUICK_COUNT);
+  }
+
+  function setSaveAs(value) {
+    state.saveAs = value === "update" ? "update" : "new";
+    render();
+    focusSoon("[role='radio'][aria-checked='true']");
   }
 
   function clearMessages() {
@@ -2677,6 +3062,7 @@
   function setDraftScope(scope, keepFocus) {
     if (scope === "context" && !hasReusableContext()) return;
     state.draftScope = scope === "global" ? "global" : "context";
+    state.draftScopeChosen = true;
     render();
     if (keepFocus) focusSoon("[role='radio'][aria-checked='true']");
   }
@@ -2829,11 +3215,14 @@
     if (retry.kind === "update") return updatePresetToCurrent(retry.id);
     if (retry.kind === "delete") return deletePreset(retry.id);
     if (retry.kind === "edit") return finishEdit();
+    if (retry.kind === "editing") return saveEditing();
   }
 
   async function saveCurrentPreset() {
     state.current = getCurrentFilterState();
     if (!state.current.canSave) return;
+    var target = state.sheet === "save" ? saveTargetPreset() : null;
+    if (target && state.saveAs === "update") return updatePresetToCurrent(target.id);
     if (isAtSavedFilterLimit()) {
       state.mode = "list";
       render();
@@ -2924,7 +3313,8 @@
       state.renameId = null;
       state.confirmDeleteId = null;
       persistLastUsed(id);
-      if (state.sheet) showSheetList("[data-trace-sf-action='sheet-edit'][data-id='" + cssEscape(id) + "']");
+      if (state.sheet === "save") closeSheet(true, true);
+      else if (state.sheet) showSheetList("[data-trace-sf-action='sheet-edit'][data-id='" + cssEscape(id) + "']");
     }, null, { kind: "update", id: id });
   }
 

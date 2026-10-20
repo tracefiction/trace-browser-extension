@@ -155,23 +155,37 @@ test("on a phone the column and the sheet fit the screen with 44 px targets", as
           for (const button of root.querySelectorAll("button")) {
             const box = button.getBoundingClientRect();
             if (box.height < 44) out.push(`${button.textContent} is ${box.height}px tall`);
-            if (box.height > 60) out.push(`${button.textContent} wraps`);
           }
-          if (root.querySelectorAll(".trace-sf-col-row").length > 3) out.push("more than three names");
+          for (const name of root.querySelectorAll(".trace-sf-col-name")) {
+            const lineHeight = parseFloat(getComputedStyle(name).lineHeight);
+            if (name.getBoundingClientRect().height > lineHeight * 2 + 1) out.push(`${name.textContent} runs past two lines`);
+          }
+          for (const tokens of root.querySelectorAll(".trace-sf-col-tokens")) {
+            if (tokens.getBoundingClientRect().height > 20) out.push(`${tokens.textContent} wraps`);
+            // Only a single token too long for the line may end in "…".
+            const single = !tokens.textContent.includes(" · ") && getComputedStyle(tokens).textOverflow === "ellipsis";
+            if (tokens.scrollWidth > tokens.clientWidth + 1 && !single) out.push(`${tokens.textContent} is cut off`);
+          }
+          if (root.querySelectorAll(".trace-sf-col-row").length !== 3) out.push("not three names before Show all");
+          if (!root.querySelector("[data-trace-sf-action='col-show-all']")) out.push("no Show all");
           if (document.documentElement.scrollWidth > window.innerWidth) out.push("the page scrolls sideways");
           if (!document.querySelector("[data-trace-ao3-saved-filters-line]")) out.push("no Showing line");
           return out;
         });
         await page.click("[data-trace-sf-action='sheet-open']");
-        await page.click(".trace-sf-sheet-more[data-id='long']");
+        await page.click("[data-trace-sf-action='sheet-edit'][data-id='long']");
         await page.click("[data-trace-sf-action='sheet-back']");
         const sheet = await page.evaluate(() => {
           const out = [];
           const host = document.querySelector("[data-trace-ao3-saved-filters-sheet]");
           const box = host.querySelector(".trace-sf-sheet").getBoundingClientRect();
           if (box.left < 0 || box.right > window.innerWidth + 0.5) out.push("the sheet is wider than the screen");
-          for (const line of host.querySelectorAll(".trace-sf-tokens, .trace-sf-sheet-name")) {
+          for (const line of host.querySelectorAll(".trace-sf-tokens")) {
             if (line.getBoundingClientRect().height > 24) out.push(`${line.textContent} wraps`);
+          }
+          for (const name of host.querySelectorAll(".trace-sf-sheet-name")) {
+            const lineHeight = parseFloat(getComputedStyle(name).lineHeight);
+            if (name.getBoundingClientRect().height > lineHeight * 2 + 1) out.push(`${name.textContent} runs past two lines`);
           }
           if (!/\+\d+$/.test(host.querySelector(".trace-sf-sheet-row[data-id='long'] .trace-sf-tokens").textContent)) out.push("a long token line doesn't end in +n");
           for (const button of host.querySelectorAll(".trace-sf-sheet button")) {
@@ -183,10 +197,16 @@ test("on a phone the column and the sheet fit the screen with 44 px targets", as
         await page.click("[data-trace-sf-action='sheet-close']:not(.trace-sf-scrim)");
         await page.click("[data-trace-sf-action='sheet-open']");
         const fields = await page.evaluate(async () => {
-          document.querySelector(".trace-sf-sheet-more[data-id='p0']").click();
+          document.querySelector("[data-trace-sf-action='sheet-edit'][data-id='p0']").click();
           await new Promise((resolve) => setTimeout(resolve, 20));
+          const out = [];
           const input = document.querySelector("[data-trace-sf-edit-name]");
-          return getComputedStyle(input).fontSize === "16px" ? [] : ["the name field is under 16 px"];
+          if (getComputedStyle(input).fontSize !== "16px") out.push("the name field is under 16 px");
+          for (const button of document.querySelectorAll(".trace-sf-sheet-foot button, .trace-sf-sheet-cell, .trace-sf-sheet-link")) {
+            const b = button.getBoundingClientRect();
+            if (b.height < 44) out.push(`${button.textContent} is under 44 px`);
+          }
+          return out;
         });
         for (const problem of [...column, ...sheet, ...fields]) problems.push(`${width}px ${dark ? "dark" : "light"}: ${problem}`);
         await page.close();
