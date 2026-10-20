@@ -28,6 +28,7 @@ const DELETED_KEY = "traceAo3SavedFiltersDeletedV1";
 const PANEL_COLLAPSED_KEY = "traceAo3SavedFiltersPanelCollapsedV1";
 const SYNC_META_KEY = "traceAo3SavedFiltersSyncV1";
 const PREF_AO3_SAVED_FILTERS_KEY = "prefAo3SavedFiltersEnabled";
+const LAST_USED_KEY = "traceAo3SavedFiltersLastUsedV1";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -69,6 +70,7 @@ async function renderSavedFilters({
   storage = {},
   setErrorMessage = "",
   earnedPermissionComplete,
+  narrow = false,
 } = {}) {
   const script = fs.readFileSync(SCRIPT_PATH, "utf8");
   const dom = new JSDOM(html, {
@@ -127,6 +129,15 @@ async function renderSavedFilters({
 
   window.chrome = chrome;
   window.browser = chrome;
+  if (narrow) {
+    // A phone: AO3's narrow layout (max-width: 42em) applies.
+    window.matchMedia = (query) => ({
+      matches: /max-width:\s*42em/.test(query),
+      media: query,
+      addEventListener() {},
+      removeEventListener() {},
+    });
+  }
   if (typeof earnedPermissionComplete === "boolean") {
     window.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {
       registrationMode: "static",
@@ -1391,4 +1402,312 @@ test("AO3 saved filters exits on credential or password pages", async () => {
   });
 
   assert.equal(root(window), null);
+});
+
+// ------------------------------------------------------------------ phone
+// On AO3's narrow layout the filter form is a 16em column. It keeps quick
+// access only; the list, saving and editing live in Trace's sheet, and a
+// line above the works says which saved filter is showing.
+
+const TAG_PAGE = "https://archiveofourown.org/tags/Harry%20Potter%20-%20J*d*%20K*d*%20Rowling/works";
+const TAG_ID = "Harry+Potter+-+J*d*+K*d*+Rowling";
+const FILTERED_PAGE = `https://archiveofourown.org/works?work_search%5Bsort_column%5D=kudos_count&work_search%5Bcomplete%5D=T&work_search%5Bwords_from%5D=50000&commit=Sort+and+Filter&tag_id=${TAG_ID}`;
+const HP_KEY = "tagPath:/tags/Harry%20Potter%20-%20J*d*%20K*d*%20Rowling/works";
+
+function phonePresets() {
+  const ws = (field) => `work_search[${field}]`;
+  const context = { scope: "context", contextKey: HP_KEY, contextLabel: "Harry Potter - J K Rowling", summary: [] };
+  return [
+    makePreset(Object.assign({}, context, { id: "p1", name: "Long complete works", params: [[ws("complete"), "T"], [ws("sort_column"), "kudos_count"], [ws("words_from"), "50000"]] })),
+    makePreset(Object.assign({}, context, { id: "p2", name: "Slow burn, finished", params: [[ws("complete"), "T"], [ws("other_tag_names"), "Slow Burn"], [ws("sort_column"), "revised_at"]] })),
+    makePreset(Object.assign({}, context, {
+      id: "p5",
+      name: "Marauders, no MCD",
+      params: [[ws("complete"), "T"], [ws("crossover"), "F"], [ws("excluded_tag_names"), "Major Character Death,Unhappy Ending,Infidelity"], [ws("language_id"), "en"], [ws("other_tag_names"), "Remus Lupin/Sirius Black,Marauders Era"], [ws("sort_column"), "kudos_count"], [ws("words_from"), "20000"], [ws("words_to"), "150000"]],
+    })),
+    makePreset({ id: "p3", name: "Comfort reads", scope: "global", summary: [], params: [[ws("excluded_tag_names"), "Major Character Death"], [ws("other_tag_names"), "Fluff,Hurt/Comfort"], [ws("words_to"), "40000"]] }),
+    makePreset({ id: "p4", name: "New this week", scope: "global", summary: [], params: [[ws("date_from"), "2026-10-13"], [ws("sort_column"), "revised_at"]] }),
+  ];
+}
+
+function sheet(window) {
+  return window.document.querySelector("[data-trace-ao3-saved-filters-sheet]");
+}
+
+function line(window) {
+  return window.document.querySelector("[data-trace-ao3-saved-filters-line]");
+}
+
+function columnNames(window) {
+  return Array.from(root(window).querySelectorAll(".trace-sf-col-row")).map((row) => row.textContent);
+}
+
+test("on a phone the Filters column offers three names, most relevant first, and nothing else", async () => {
+  const { window } = await renderSavedFilters({
+    narrow: true,
+    url: TAG_PAGE,
+    storage: {
+      [STORAGE_KEY]: phonePresets(),
+      [LAST_USED_KEY]: {
+        byId: { p2: "2026-10-19T10:00:00.000Z", p3: "2026-10-20T09:00:00.000Z", p5: "2026-10-18T10:00:00.000Z", p4: "2026-10-20T10:00:00.000Z" },
+        byContext: { "tag:harry potter - j. k. rowling": { id: "p2", at: "2026-10-19T10:00:00.000Z" } },
+      },
+    },
+  });
+  const mount = root(window);
+  assert.equal(mount.parentElement.tagName, "FIELDSET", "the column keeps today's place at the top of AO3's form");
+  assert.equal(mount.querySelector(".trace-sf-col-title").textContent, "Saved filters");
+  // Last used on this tag, then this tag's others (recent first), never past three.
+  assert.deepEqual(columnNames(window), ["Slow burn, finished", "Marauders, no MCD", "Long complete works"]);
+  assert.equal(mount.querySelector(".trace-sf-summary"), null, "no summaries in the column");
+  assert.equal(mount.querySelector("[data-trace-sf-tokens]"), null);
+  assert.equal(mount.querySelector("[data-trace-sf-action='sheet-save']"), null, "nothing to save without filters");
+  assert.equal(mount.querySelector("[aria-current]"), null);
+  const all = mount.querySelector("[data-trace-sf-action='sheet-open']");
+  assert.equal(all.textContent, "All saved filters (5)");
+  assert.equal(all.getAttribute("aria-haspopup"), "dialog");
+  assert.equal(line(window), null, "no Showing line while no saved filter is applied");
+
+  const css = window.document.getElementById("trace-ao3-saved-filters-phone-style").textContent;
+  assert.match(css, /\.trace-sf-col-name \{[^}]*white-space: nowrap;/, "names stay on one line");
+  assert.match(css, /\.trace-sf-col-name \{[^}]*text-overflow: ellipsis;/);
+  assert.match(css, /\.trace-sf-col-row \{[^}]*min-height: 44px;/);
+  assert.match(css, /\.trace-sf-col-link \{[^}]*min-height: 44px;/);
+});
+
+test("on a phone the filter showing now leads the column with a check, and the Showing line appears", async () => {
+  const { window } = await renderSavedFilters({
+    narrow: true,
+    url: FILTERED_PAGE,
+    storage: { [STORAGE_KEY]: phonePresets() },
+  });
+  const mount = root(window);
+  assert.deepEqual(columnNames(window), ["Long complete works", "Slow burn, finished", "Marauders, no MCD"]);
+  const current = mount.querySelector(".trace-sf-col-row[aria-current='true']");
+  assert.equal(current.getAttribute("data-id"), "p1");
+  assert.ok(current.querySelector(".trace-sf-edge svg"), "the current filter carries the check");
+  assert.equal(current.getAttribute("aria-label"), "Long complete works. Showing now.");
+  assert.equal(mount.querySelector("[data-trace-sf-action='sheet-save']"), null, "these filters are already saved");
+
+  const showing = line(window);
+  assert.ok(showing, "a saved filter is applied, so the line shows");
+  const navigation = window.document.getElementById("go_to_filters").closest("div.navigation");
+  assert.equal(showing.previousElementSibling, navigation, "the line sits right after AO3's button row");
+  assert.equal(showing.closest(".actions"), null, "outside AO3's .actions wrapper");
+  assert.equal(showing.textContent, "Showing Long complete works");
+  const button = showing.querySelector("button");
+  assert.equal(button.getAttribute("aria-label"), "Showing Long complete works. Saved filters");
+  button.click();
+  await sleep(10);
+  assert.ok(sheet(window), "tapping the line opens the sheet");
+});
+
+test("on a phone Save these filters shows only while the page's filters aren't saved", async () => {
+  const presets = phonePresets().filter((preset) => preset.id !== "p1");
+  const { window } = await renderSavedFilters({ narrow: true, url: FILTERED_PAGE, storage: { [STORAGE_KEY]: presets } });
+  const save = root(window).querySelector("[data-trace-sf-action='sheet-save']");
+  assert.equal(save.textContent, "Save these filters");
+  assert.equal(root(window).querySelector("[aria-current]"), null);
+  assert.equal(line(window), null, "the line is hidden while nothing saved is showing");
+});
+
+test("on a phone All saved filters opens the sheet; a row applies its filter", async () => {
+  const { window, storageState, navigations } = await renderSavedFilters({
+    narrow: true,
+    url: TAG_PAGE,
+    storage: { [STORAGE_KEY]: phonePresets() },
+  });
+  const all = root(window).querySelector("[data-trace-sf-action='sheet-open']");
+  all.click();
+  await sleep(10);
+  const host = sheet(window);
+  assert.equal(host.parentElement, window.document.documentElement, "the sheet sits outside AO3's body");
+  const dialog = host.querySelector("[role='dialog']");
+  assert.equal(dialog.getAttribute("aria-modal"), "true");
+  assert.equal(window.document.getElementById(dialog.getAttribute("aria-labelledby")).textContent, "Saved filters");
+  assert.equal(window.document.activeElement, host.querySelector(".trace-sf-sheet-title"), "focus moves into the sheet");
+  assert.ok(window.document.body.hasAttribute("inert"), "the page behind is inert");
+  assert.equal(host.querySelector(".trace-sf-sheet-close").getAttribute("aria-label"), "Close saved filters");
+  assert.ok(host.querySelector(".trace-sf-grabber"), "the listing sheet's grabber");
+  assert.match(host.getAttribute("style"), /--trace-page-teal:\s*#176E72/i, "light AO3 pages get light tokens");
+
+  assert.deepEqual(Array.from(host.querySelectorAll(".trace-sf-sheet-label")).map((el) => el.textContent), ["This tag", "Every AO3 search"]);
+  const rows = Array.from(host.querySelectorAll(".trace-sf-sheet-row")).map((row) => [
+    row.querySelector(".trace-sf-sheet-name").textContent,
+    row.querySelector(".trace-sf-tokens").textContent,
+  ]);
+  assert.deepEqual(rows, [
+    ["Long complete works", "Complete · 50k+ words · By kudos"],
+    ["Slow burn, finished", "Slow Burn · Complete · By date updated"],
+    ["Marauders, no MCD", "Remus Lupin/Sirius Black · Marauders Era · Complete · 20k–150k words · Excludes 3 tags · English · No crossovers · By kudos"],
+    ["Comfort reads", "Fluff · Hurt/Comfort · Under 40k words · Not Major Character Death"],
+    ["New this week", `Updated since 13 Oct${new Date().getFullYear() === 2026 ? "" : " 2026"} · By date updated`],
+  ]);
+  assert.equal(host.querySelector(".trace-sf-sheet-more[data-id='p5']").getAttribute("aria-label"), "Edit Marauders, no MCD");
+
+  host.querySelector(".trace-sf-sheet-main[data-id='p2']").click();
+  await sleep(40);
+  assert.equal(navigations.length, 1);
+  const target = new URL(navigations[0]);
+  assert.equal(target.pathname, "/tags/Harry%20Potter%20-%20J*d*%20K*d*%20Rowling/works");
+  assert.equal(target.searchParams.get("work_search[other_tag_names]"), "Slow Burn");
+  assert.equal(storageState[ACTIVE_KEY].id, "p2");
+  assert.equal(storageState[LAST_USED_KEY].byContext["tag:harry potter - j. k. rowling"].id, "p2", "last used on this tag, kept on this device");
+  assert.ok(storageState[LAST_USED_KEY].byId.p2);
+  assert.equal(sheet(window), null, "the sheet closes as the filter loads");
+  assert.equal(window.document.body.hasAttribute("inert"), false);
+});
+
+test("on a phone the sheet closes on Escape and returns focus to what opened it", async () => {
+  const { window } = await renderSavedFilters({ narrow: true, url: TAG_PAGE, storage: { [STORAGE_KEY]: phonePresets() } });
+  root(window).querySelector("[data-trace-sf-action='sheet-open']").click();
+  await sleep(10);
+  sheet(window).querySelector(".trace-sf-sheet-title").dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  await sleep(10);
+  assert.equal(sheet(window), null);
+  assert.equal(window.document.activeElement, root(window).querySelector("[data-trace-sf-action='sheet-open']"));
+});
+
+test("on a phone saving opens the sheet with a short suggested name, a scope choice and Save in the header", async () => {
+  const presets = phonePresets().filter((preset) => preset.id !== "p1");
+  const { window, storageState, runtimeMessages } = await renderSavedFilters({ narrow: true, url: FILTERED_PAGE, storage: { [STORAGE_KEY]: presets } });
+  root(window).querySelector("[data-trace-sf-action='sheet-save']").click();
+  await sleep(10);
+  const host = sheet(window);
+  assert.equal(host.querySelector(".trace-sf-sheet-title").textContent, "Save filters");
+  assert.deepEqual(Array.from(host.querySelectorAll(".trace-sf-sheet-head button")).map((button) => button.textContent), ["Cancel", "Save"]);
+  const input = host.querySelector("[data-trace-sf-name]");
+  assert.equal(input.value, "Complete · 50k+ words", "suggested from the first two tokens");
+  assert.notEqual(window.document.activeElement, input, "the field isn't focused, so the keyboard stays down");
+  const css = window.document.getElementById("trace-ao3-saved-filters-phone-style").textContent;
+  assert.match(css, /\.trace-sf-sheet-input \{[^}]*font: 16px/, "16 px fields so Safari doesn't zoom");
+  for (const [, size] of css.matchAll(/font-size:\s*([\d.]+)px/g)) {
+    assert.ok(Number(size) >= 13, `font-size ${size}px is below the sheet's floor`);
+  }
+
+  const options = Array.from(host.querySelectorAll("[role='radio']"));
+  assert.deepEqual(options.map((option) => option.textContent), ["Harry Potter - J. K. RowlingOnly this tag", "Every AO3 searchAny tag or search"]);
+  assert.deepEqual(options.map((option) => option.getAttribute("aria-checked")), ["true", "false"]);
+  assert.deepEqual(
+    Array.from(host.querySelectorAll(".trace-sf-sheet-keep")).map((row) => [row.querySelector("dt").textContent, row.querySelector("dd").textContent]),
+    [["Status", "Complete only"], ["Words", "At least 50,000 words"], ["Sort", "Kudos"]],
+  );
+  options[1].click();
+  await sleep(10);
+  assert.equal(sheet(window).querySelector("[data-trace-sf-action='scope-global']").getAttribute("aria-checked"), "true");
+
+  const field = sheet(window).querySelector("[data-trace-sf-name]");
+  field.value = "Long ones";
+  field.dispatchEvent(new window.Event("input", { bubbles: true }));
+  sheet(window).querySelector("[data-trace-sf-action='save-confirm']").click();
+  await sleep(80);
+
+  const saved = storageState[STORAGE_KEY].at(-1);
+  assert.equal(saved.name, "Long ones");
+  assert.equal(saved.scope, "global");
+  assert.equal(saved.contextKey, "");
+  assert.equal(saved.dirty, true);
+  assert.equal(storageState[ACTIVE_KEY].id, saved.id);
+  assert.ok(storageState[LAST_USED_KEY].byId[saved.id], "the new filter counts as used here");
+  assert.deepEqual(plain(runtimeMessages.at(-1)), { type: "TRACE_AO3_SAVED_FILTERS_SYNC_REQUEST" });
+  assert.equal(sheet(window), null, "saving closes the sheet");
+  assert.equal(line(window).textContent, "Showing Long ones");
+  assert.equal(root(window).querySelector("[data-trace-sf-action='sheet-save']"), null);
+  assert.equal(window.document.activeElement, line(window).querySelector("button"), "focus lands on the Showing line");
+});
+
+test("on a phone Edit filter renames, changes scope, offers Update only when it would change something, and deletes after a confirm", async () => {
+  const { window, storageState } = await renderSavedFilters({ narrow: true, url: FILTERED_PAGE, storage: { [STORAGE_KEY]: phonePresets() } });
+  root(window).querySelector("[data-trace-sf-action='sheet-open']").click();
+  await sleep(10);
+  const edit = (id) => sheet(window).querySelector(`[data-trace-sf-action='sheet-edit'][data-id='${id}']`).click();
+
+  edit("p1");
+  await sleep(10);
+  assert.equal(sheet(window).querySelector(".trace-sf-sheet-title").textContent, "Edit filter");
+  assert.equal(sheet(window).querySelector("[data-trace-sf-edit-name]").value, "Long complete works");
+  assert.equal(sheet(window).querySelector("[data-trace-sf-action='update-current']"), null, "the page already shows this filter");
+  sheet(window).querySelector("[data-trace-sf-action='sheet-back']").click();
+  await sleep(10);
+  assert.equal(sheet(window).querySelector(".trace-sf-sheet-title").textContent, "Saved filters", "Cancel goes back to the list");
+  assert.equal(window.document.activeElement, sheet(window).querySelector("[data-trace-sf-action='sheet-edit'][data-id='p1']"));
+
+  edit("p5");
+  await sleep(10);
+  const host = sheet(window);
+  assert.equal(host.querySelector("[data-trace-sf-action='update-current']").textContent, "Update with this page's filters");
+  assert.deepEqual(
+    Array.from(host.querySelectorAll(".trace-sf-sheet-keep")).map((row) => row.querySelector("dt").textContent),
+    ["Include", "Exclude", "Status", "Crossovers", "Words", "Language", "Sort"],
+    "What it keeps lists everything",
+  );
+  const name = host.querySelector("[data-trace-sf-edit-name]");
+  name.value = "Marauders era";
+  name.dispatchEvent(new window.Event("input", { bubbles: true }));
+  host.querySelector("[data-trace-sf-action='edit-scope-global']").click();
+  await sleep(10);
+  sheet(window).querySelector("[data-trace-sf-action='edit-done']").click();
+  await sleep(80);
+  const renamed = storageState[STORAGE_KEY].find((preset) => preset.id === "p5");
+  assert.equal(renamed.name, "Marauders era");
+  assert.equal(renamed.scope, "global");
+  assert.equal(renamed.contextKey, "");
+  assert.equal(renamed.dirty, true);
+  assert.equal(sheet(window).querySelector(".trace-sf-sheet-title").textContent, "Saved filters");
+  assert.equal(window.document.activeElement, sheet(window).querySelector("[data-trace-sf-action='sheet-edit'][data-id='p5']"));
+
+  edit("p3");
+  await sleep(10);
+  sheet(window).querySelector("[data-trace-sf-action='edit-scope-context']").click();
+  await sleep(10);
+  sheet(window).querySelector("[data-trace-sf-action='edit-done']").click();
+  await sleep(80);
+  const scoped = storageState[STORAGE_KEY].find((preset) => preset.id === "p3");
+  assert.equal(scoped.scope, "context");
+  assert.equal(scoped.contextKey, `tagId:${TAG_ID.replace(/\+/g, " ")}`, "a filter moved to this tag takes this tag");
+
+  edit("p2");
+  await sleep(10);
+  sheet(window).querySelector("[data-trace-sf-action='update-current']").click();
+  await sleep(80);
+  assert.deepEqual(plain(storageState[STORAGE_KEY].find((preset) => preset.id === "p2").params), plain(storageState[STORAGE_KEY].find((preset) => preset.id === "p1").params));
+
+  edit("p4");
+  await sleep(10);
+  sheet(window).querySelector("[data-trace-sf-action='delete-confirm']").click();
+  await sleep(10);
+  assert.equal(sheet(window).querySelector(".trace-sf-sheet-confirm-title").textContent, "Delete “New this week”?");
+  assert.equal(sheet(window).querySelector(".trace-sf-sheet-confirm-detail").textContent, "It's deleted on every device. Nothing on AO3 changes.");
+  assert.equal(window.document.activeElement, sheet(window).querySelector("[data-trace-sf-action='delete-cancel']"));
+  sheet(window).querySelector("[data-trace-sf-action='delete-cancel']").click();
+  await sleep(10);
+  assert.equal(sheet(window).querySelector(".trace-sf-sheet-confirm"), null);
+  assert.equal(window.document.activeElement, sheet(window).querySelector("[data-trace-sf-action='delete-confirm']"));
+  sheet(window).querySelector("[data-trace-sf-action='delete-confirm']").click();
+  await sleep(10);
+  sheet(window).querySelector("[data-trace-sf-action='delete']").click();
+  await sleep(80);
+  assert.equal(storageState[STORAGE_KEY].some((preset) => preset.id === "p4"), false);
+  assert.equal(storageState[DELETED_KEY].at(-1).clientId, "p4");
+  assert.equal(sheet(window).querySelector(".trace-sf-sheet-title").textContent, "Saved filters");
+});
+
+test("on a phone a long token line shows what fits, then +n", async () => {
+  const { window } = await renderSavedFilters({ narrow: true, url: TAG_PAGE, storage: { [STORAGE_KEY]: phonePresets() } });
+  // About 7 px a character in a 300 px line.
+  Object.defineProperty(window.HTMLElement.prototype, "scrollWidth", { configurable: true, get() { return this.textContent.length * 7; } });
+  Object.defineProperty(window.HTMLElement.prototype, "clientWidth", { configurable: true, get() { return 300; } });
+  root(window).querySelector("[data-trace-sf-action='sheet-open']").click();
+  await sleep(10);
+  const tokens = sheet(window).querySelector(".trace-sf-sheet-row[data-id='p5'] .trace-sf-tokens");
+  assert.equal(tokens.textContent, "Remus Lupin/Sirius Black · Marauders Era +6");
+  assert.match(sheet(window).querySelector(".trace-sf-sheet-row[data-id='p5'] .trace-sf-sheet-main").getAttribute("aria-label"), /Excludes 3 tags · English · No crossovers · By kudos\. Apply\.$/, "VoiceOver hears every token");
+});
+
+test("a wide layout keeps today's panel, with no Showing line or sheet", async () => {
+  const { window } = await renderSavedFilters({ url: FILTERED_PAGE, storage: { [STORAGE_KEY]: phonePresets() } });
+  assert.ok(root(window).querySelector(".trace-sf-card"));
+  assert.equal(root(window).querySelector(".trace-sf-col"), null);
+  assert.equal(line(window), null);
+  assert.equal(window.document.getElementById("trace-ao3-saved-filters-phone-style"), null);
 });
