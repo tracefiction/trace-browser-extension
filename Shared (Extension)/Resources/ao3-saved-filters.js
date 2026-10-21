@@ -13,7 +13,6 @@
   // A filter page asks for a pull when this device hasn't had one this long,
   // the same period as the background's alarm, which Safari may not wake for.
   const SYNC_STALE_MS = 30 * 60 * 1000;
-  const PANEL_COLLAPSED_KEY = "traceAo3SavedFiltersPanelCollapsedV1";
   // When each filter was last used, here and on which tag. This device only:
   // it is never synced.
   const LAST_USED_KEY = "traceAo3SavedFiltersLastUsedV1";
@@ -44,7 +43,6 @@
   // time and shown in full. These bounds match what the sync service accepts.
   const STORED_SUMMARY_PARTS = 5;
   const STORED_SUMMARY_PART_LENGTH = 64;
-  const LIST_PREVIEW_COUNT = 8;
   const SAVED_FILTER_ACTIVE_LIMIT = 250;
   const SAVED_FILTER_LIMIT_WARNING_THRESHOLD = 200;
   const TRACE_EARNED_PERMISSION_GATE_ACTIVE =
@@ -60,15 +58,9 @@
   const state = {
     root: null,
     renderTimer: null,
-    mode: "list",
-    menuId: null,
-    renameId: null,
-    renameDraft: "",
     confirmDeleteId: null,
     draftName: "",
     draftScope: "context",
-    showAll: false,
-    panelCollapsed: false,
     retry: null,
     error: "",
     notice: "",
@@ -459,11 +451,10 @@
   }
 
   async function readStorageState() {
-    var res = await storageGet([STORAGE_KEY, ACTIVE_KEY, PANEL_COLLAPSED_KEY, LAST_USED_KEY]);
+    var res = await storageGet([STORAGE_KEY, ACTIVE_KEY, LAST_USED_KEY]);
     return {
       presets: sanitizePresets(res[STORAGE_KEY]),
       activeMeta: sanitizeActiveMeta(res[ACTIVE_KEY]),
-      panelCollapsed: res[PANEL_COLLAPSED_KEY] === true,
       lastUsed: sanitizeLastUsed(res[LAST_USED_KEY]),
     };
   }
@@ -773,30 +764,6 @@
     return describePairs(pairs).groups.map(compactPartForGroup);
   }
 
-  // Every part the page can name comes from the filter's own values. A part
-  // it can't name (a tag id from another fandom, say) takes the matching part
-  // of the summary stored at save time; parts past the stored cap are counted
-  // as "+N more".
-  function presetContentsText(preset) {
-    var description = describePairs(preset.params);
-    var groups = description.groups;
-    var stored = Array.isArray(preset.summary) ? preset.summary : [];
-    if (!description.labelled && stored.length) {
-      // The stored parts line up with the groups only when they were saved
-      // in the same grammar; an older save's summary is shown whole.
-      if (stored.length !== Math.min(groups.length, STORED_SUMMARY_PARTS)) return stored.join(" · ");
-      var parts = [];
-      var dropped = 0;
-      for (var i = 0; i < groups.length; i++) {
-        if (groups[i].labelled) parts.push(compactPartForGroup(groups[i]));
-        else if (i < stored.length) parts.push(stored[i]);
-        else dropped += 1;
-      }
-      if (dropped) parts.push("+" + dropped + " more");
-      return parts.join(" · ");
-    }
-    return groups.map(compactPartForGroup).join(" · ") || "AO3 filter";
-  }
 
   function boundedPart(text) {
     var value = cleanDisplayText(text);
@@ -941,18 +908,6 @@
     });
   }
 
-  function groupedPresetsForCurrent(presets) {
-    var groups = {
-      context: [],
-      global: [],
-    };
-    for (var i = 0; i < presets.length; i++) {
-      var preset = presets[i];
-      if (preset.scope === "global") groups.global.push(preset);
-      else groups.context.push(preset);
-    }
-    return groups;
-  }
 
   function relationForCurrent(presets, activeMeta, current) {
     if (!current || !current.hasFilters) return { type: "none" };
@@ -1027,82 +982,7 @@
       R + " :focus { outline: none; }",
       "html[" + KEYBOARD_ATTR + "] " + R + " :focus-visible { outline: 3px solid var(--trace-page-teal) !important; outline-offset: 2px; }",
       R + " p { margin: 0; }",
-      R + " .trace-sf-card { background: transparent; border: 0; border-bottom: 1px solid var(--trace-page-rule); border-radius: 0; box-shadow: none; overflow: visible; padding-bottom: 8px; }",
-      R + " .trace-sf-head { display: block; min-height: 44px; padding: 8px 0; width: 100%; }",
-      R + " .trace-sf-head-line { align-items: center; display: flex; gap: 8px; min-height: 28px; }",
-      R + " .trace-sf-title { color: var(--trace-page-ink); flex: 1 1 auto; font-size: 15px; font-weight: 600; line-height: 1.25; min-width: 0; }",
-      R + " .trace-sf-count { color: var(--trace-page-secondary); flex: 0 0 auto; font-size: 13px; font-weight: 400; }",
-      R + " .trace-sf-caret { align-items: center; color: var(--trace-page-tertiary); display: inline-flex; flex: 0 0 auto; justify-content: center; width: 16px; }",
-      R + " .trace-sf-caret svg { display: block; height: 12px; width: 12px; transition: transform 0.16s ease; }",
-      R + " .trace-sf-caret[data-collapsed='false'] svg { transform: rotate(180deg); }",
-      R + " .trace-sf-head-meta { color: var(--trace-page-secondary); display: block; font-size: 13px; line-height: 1.35; margin-top: 2px; overflow-wrap: anywhere; }",
-      R + " .trace-sf-head-meta b, " + R + " .trace-sf-status-main b { color: var(--trace-page-ink); font-weight: 500; }",
-      R + " .trace-sf-panel { min-width: 0; }",
-      R + " .trace-sf-status { align-items: center; color: var(--trace-page-secondary); display: flex; flex-wrap: wrap; font-size: 13px; gap: 0 16px; line-height: 1.35; min-height: 44px; padding: 0 0 4px; }",
-      R + " .trace-sf-status-main { align-items: flex-start; display: flex; flex: 1 1 10rem; gap: 6px; min-width: 0; overflow-wrap: anywhere; padding: 6px 0; }",
-      R + " .trace-sf-check { color: var(--trace-page-ink); display: inline-flex; flex: 0 0 auto; height: 14px; margin-top: 2px; width: 14px; }",
-      R + " .trace-sf-check svg, " + R + " .trace-sf-edge svg { display: block; height: 14px; width: 14px; }",
-      R + " .trace-sf-status-actions { display: flex; flex-wrap: wrap; gap: 0 16px; }",
-      // Trailing actions keep their text flush with the panel's edge.
-      R + " .trace-sf-status-actions .trace-sf-btn { margin: 0 0 0 -8px; min-width: 44px; padding: 0 0 0 8px; }",
-      R + " .trace-sf-status-actions .trace-sf-btn:last-child { justify-content: flex-end; }",
-      R + " .trace-sf-btn { align-items: center; color: var(--trace-page-teal); display: inline-flex; font-size: 14px; font-weight: 500; gap: 4px; line-height: 1.25; margin: 0 -8px; min-height: 44px; padding: 0 8px; text-decoration: none; }",
-      R + " .trace-sf-btn-primary { font-weight: 600; }",
-      R + " .trace-sf-btn-ghost { color: var(--trace-page-secondary); }",
-      R + " .trace-sf-btn-danger { color: var(--trace-page-warning); font-weight: 600; }",
-      R + " .trace-sf-btn:disabled { cursor: default; opacity: 0.55; }",
-      R + " .trace-sf-list { margin-top: 2px; }",
-      R + " .trace-sf-section-label { color: var(--trace-page-secondary); font-size: 12.5px; font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; padding: 10px 0 6px; }",
-      R + " .trace-sf-rows { background: var(--trace-page-surface); border-radius: 14px; box-shadow: inset 0 0 0 1px var(--trace-page-rule); padding: 0 4px 0 12px; }",
-      R + " .trace-sf-row { background: transparent; position: relative; }",
-      R + " .trace-sf-row + .trace-sf-row { border-top: 1px solid var(--trace-page-rule); }",
-      R + " .trace-sf-row-inner { align-items: center; display: grid; grid-template-columns: minmax(0, 1fr) 44px; min-height: 52px; min-width: 0; }",
-      R + " .trace-sf-main { align-items: start; display: grid; grid-template-columns: 22px minmax(0, 1fr); min-width: 0; padding: 9px 6px 9px 0; width: 100%; }",
-      R + " .trace-sf-edge { color: var(--trace-page-ink); display: inline-flex; height: 14px; margin-top: 2px; width: 14px; }",
-      R + " .trace-sf-row-text { display: block; min-width: 0; }",
-      R + " .trace-sf-name { color: var(--trace-page-ink); display: block; font-size: 14px; font-weight: 500; line-height: 1.3; overflow-wrap: anywhere; }",
-      R + " .trace-sf-summary { color: var(--trace-page-secondary); display: block; font-size: 12.5px; line-height: 1.35; margin-top: 2px; overflow-wrap: anywhere; }",
-      R + " .trace-sf-menu-btn { align-items: center; color: var(--trace-page-tertiary); display: inline-flex; height: 44px; justify-content: center; width: 44px; }",
-      R + " .trace-sf-menu-btn svg { display: block; height: 16px; width: 16px; }",
-      R + " .trace-sf-more { color: var(--trace-page-teal); display: inline-flex; align-items: center; font-size: 14px; font-weight: 500; margin: 2px -8px 0; min-height: 44px; padding: 0 8px; }",
-      R + " .trace-sf-manage { align-items: center; animation: trace-sf-reveal 0.14s ease-out both; border-top: 1px solid var(--trace-page-rule); display: flex; flex-wrap: wrap; gap: 0 14px; margin: 0 0 0 22px; }",
-      R + " .trace-sf-manage button { color: var(--trace-page-teal); font-size: 13px; font-weight: 500; line-height: 1.25; margin: 0 -8px; min-height: 44px; padding: 0 8px; }",
-      R + " .trace-sf-manage button[data-danger='true'] { color: var(--trace-page-warning); }",
-      R + " .trace-sf-manage button:disabled { color: var(--trace-page-secondary); cursor: default; opacity: 0.55; }",
-      "@keyframes trace-sf-reveal { from { opacity: 0; } to { opacity: 1; } }",
-      "@media (prefers-reduced-motion: reduce) { " + R + " .trace-sf-manage { animation: none; } " + R + " .trace-sf-caret svg { transition: none; } }",
-      R + " .trace-sf-form { padding: 4px 0 8px; }",
-      R + " .trace-sf-label { color: var(--trace-page-secondary); display: block; font-size: 12.5px; font-weight: 600; line-height: 1.35; margin: 10px 0 6px; }",
-      R + " .trace-sf-form > .trace-sf-label:first-child { margin-top: 4px; }",
-      R + " .trace-sf-input-row { display: block; position: relative; }",
-      R + " .trace-sf-input { background: var(--trace-page-surface); border: 0; border-radius: 12px; box-shadow: inset 0 0 0 1px var(--trace-page-control); color: var(--trace-page-ink); font-size: 14px; height: auto; margin: 0; min-height: 44px; padding: 10px 12px; width: 100%; }",
-      R + " .trace-sf-input-row .trace-sf-input { padding-right: 44px; }",
-      R + " .trace-sf-input::placeholder { color: var(--trace-page-secondary); }",
-      R + " .trace-sf-clear-name { align-items: center; color: var(--trace-page-tertiary); display: inline-flex; font-size: 18px; font-weight: 500; height: 44px; justify-content: center; line-height: 1; position: absolute; right: 0; top: 50%; transform: translateY(-50%); width: 44px; }",
-      R + " .trace-sf-input:placeholder-shown + .trace-sf-clear-name { display: none; }",
-      // AO3 styles the filter form's own dl/dt/dd; reset them for this list.
-      R + " .trace-sf-keeps, " + R + " .trace-sf-keeps > dt, " + R + " .trace-sf-keeps > dd { background: none; border: 0; box-shadow: none; clear: none; color: inherit; float: none; font: inherit; height: auto; margin: 0; max-height: none; overflow: visible; padding: 0; text-align: left; width: auto; }",
-      R + " .trace-sf-keeps { display: grid; gap: 6px 12px; grid-template-columns: minmax(0, 30%) minmax(0, 1fr); }",
-      R + " .trace-sf-keeps > dt { color: var(--trace-page-secondary); display: block; font-size: 12.5px; line-height: 1.4; overflow-wrap: anywhere; padding-top: 1px; }",
-      R + " .trace-sf-keeps > dd { color: var(--trace-page-ink); display: block; font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }",
-      R + " .trace-sf-capacity, " + R + " .trace-sf-scope-note { color: var(--trace-page-secondary); font-size: 12.5px; line-height: 1.35; margin-top: 10px; }",
-      R + " .trace-sf-scope { display: block; }",
-      R + " .trace-sf-radio { align-items: center; color: var(--trace-page-ink); display: flex; font-size: 14px; gap: 10px; min-height: 44px; overflow-wrap: anywhere; padding: 6px 0; width: 100%; }",
-      R + " .trace-sf-radio-mark { align-items: center; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--trace-page-secondary); display: inline-flex; flex: 0 0 auto; height: 18px; justify-content: center; width: 18px; }",
-      R + " .trace-sf-radio[aria-checked='true'] .trace-sf-radio-mark { box-shadow: inset 0 0 0 1.5px var(--trace-page-ink); }",
-      R + " .trace-sf-radio[aria-checked='true'] .trace-sf-radio-mark::after { background: var(--trace-page-ink); border-radius: 50%; content: ''; height: 8px; width: 8px; }",
-      R + " .trace-sf-actions { display: flex; flex-wrap: wrap; gap: 0 16px; margin-top: 6px; }",
-      R + " .trace-sf-empty, " + R + " .trace-sf-note { color: var(--trace-page-secondary); font-size: 13px; line-height: 1.4; padding: 2px 0 8px; }",
-      R + " .trace-sf-error { align-items: center; color: var(--trace-page-ink); display: flex; flex-wrap: wrap; font-size: 13px; gap: 0 16px; line-height: 1.4; min-height: 44px; }",
-      R + " .trace-sf-error-text { align-items: center; display: flex; flex: 1 1 10rem; gap: 6px; min-width: 0; }",
-      R + " .trace-sf-error-glyph { color: var(--trace-page-warning); display: inline-flex; flex: 0 0 auto; height: 14px; width: 14px; }",
-      R + " .trace-sf-error-glyph svg { display: block; height: 14px; width: 14px; }",
-      R + " .trace-sf-error b { font-weight: 600; }",
-      R + " .trace-sf-confirm { border-top: 1px solid var(--trace-page-rule); margin-left: 22px; padding: 10px 0 0; }",
-      R + " .trace-sf-confirm-title { color: var(--trace-page-ink); display: block; font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }",
-      R + " .trace-sf-confirm-detail { color: var(--trace-page-secondary); display: block; font-size: 12.5px; margin-top: 2px; }",
-      R + " .trace-sf-confirm-actions { display: flex; flex-wrap: wrap; gap: 0 16px; }",
-      R + " .trace-sf-rename { padding: 4px 0 10px; }",
+      R + " .trace-sf-note { color: var(--trace-page-secondary); font-size: 13px; line-height: 1.4; padding: 2px 0 8px; }",
     ].join("\n");
     (document.head || document.documentElement).appendChild(style);
   }
@@ -1185,8 +1065,10 @@
       return;
     }
     insertStyle();
+    // One design at every width; "narrow" means AO3's Filters is a slide-over
+    // column rather than a sidebar that's always on screen.
     state.narrow = isNarrowLayout();
-    if (state.narrow) insertPhoneStyle();
+    insertPhoneStyle();
     var root = ensureRoot();
     if (!root) return;
     applyPageTokens(root);
@@ -1194,7 +1076,6 @@
     var stored = await readStorageState();
     state.presets = stored.presets;
     state.activeMeta = stored.activeMeta;
-    state.panelCollapsed = stored.panelCollapsed;
     state.lastUsed = stored.lastUsed;
     state.current = getCurrentFilterState();
     state.fromStorage = true;
@@ -1209,28 +1090,7 @@
     if (!state.root) return;
     var visiblePresets = visiblePresetsForCurrent(state.presets, state.current);
     var relation = relationForCurrent(visiblePresets, state.activeMeta, state.current);
-    if (state.narrow) {
-      renderPhone(visiblePresets, relation);
-      return;
-    }
-    closeSheet(false);
-    removeLine();
-    var collapsed = Boolean(state.panelCollapsed);
-    var html = "";
-    html += "<div class='trace-sf-card' data-panel-collapsed='" + (collapsed ? "true" : "false") + "'>";
-    html += renderHeader(visiblePresets.length, relation, collapsed);
-    if (!collapsed) {
-      html += "<div class='trace-sf-panel'>";
-      if (state.error) html += renderError(state.error);
-      if (state.notice) html += renderNote(state.notice);
-      if (state.mode === "save") html += renderSaveForm();
-      else html += renderStatus(relation);
-      if (visiblePresets.length > 0) html += renderList(relation, visiblePresets);
-      else if (state.mode !== "save" && !(state.current && state.current.hasFilters)) html += renderEmpty();
-      html += "</div>";
-    }
-    html += "</div>";
-    replaceRootWithUiMarkup(state.root, html);
+    renderPhone(visiblePresets, relation);
   }
 
   function replaceRootWithUiMarkup(root, html) {
@@ -1273,22 +1133,6 @@
     }
   }
 
-  // One full-width header button: the title, a count and one caret. When the
-  // panel is collapsed a second line says where the current filters stand.
-  function renderHeader(count, relation, collapsed) {
-    var meta = collapsed ? headerStateText(relation) : "";
-    return (
-      "<button type='button' class='trace-sf-head' data-trace-sf-action='toggle-panel' aria-expanded='" + (collapsed ? "false" : "true") + "'>" +
-      "<span class='trace-sf-head-line'>" +
-      "<span class='trace-sf-title'>Saved filters</span>" +
-      (count > 0 ? "<span class='trace-sf-count'>" + count + "</span>" : "") +
-      renderChevron("trace-sf-caret", collapsed) +
-      "</span>" +
-      (meta ? "<span class='trace-sf-head-meta'>" + meta + "</span>" : "") +
-      "</button>"
-    );
-  }
-
   // The active filter is marked with an ink check, never a coloured bar.
   function renderCheckIcon() {
     return (
@@ -1306,244 +1150,16 @@
     );
   }
 
-  function renderChevron(className, collapsed) {
-    return (
-      "<span class='" + className + "' data-collapsed='" + (collapsed ? "true" : "false") + "' aria-hidden='true'>" +
-      "<svg viewBox='0 0 16 16' fill='none' stroke='currentColor' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round' focusable='false'>" +
-      "<path d='M4 6l4 4 4-4'/>" +
-      "</svg>" +
-      "</span>"
-    );
-  }
-
-  function renderKebabIcon() {
-    return (
-      "<svg viewBox='0 0 16 16' fill='currentColor' focusable='false' aria-hidden='true'>" +
-      "<circle cx='8' cy='3.25' r='1.35'/>" +
-      "<circle cx='8' cy='8' r='1.35'/>" +
-      "<circle cx='8' cy='12.75' r='1.35'/>" +
-      "</svg>"
-    );
-  }
-
-  function headerStateText(relation) {
-    if (relation && relation.type === "active" && relation.preset) {
-      return "Showing <b>" + escapeHtml(relation.preset.name) + "</b>";
-    }
-    if (relation && relation.type === "edited" && relation.preset) {
-      return "<b>" + escapeHtml(relation.preset.name) + "</b>, changed";
-    }
-    if (relation && relation.type === "unsaved") return "Current filters aren't saved";
-    return "";
-  }
-
-  function renderStatus(relation) {
-    if (!state.current || !state.current.hasFilters || !relation || relation.type === "none") return "";
-    var canSaveNew = !isAtSavedFilterLimit();
-    if (relation.type === "active") {
-      return (
-        "<div class='trace-sf-status' data-kind='active'>" +
-        "<span class='trace-sf-status-main'>" +
-        "<span class='trace-sf-check'>" + renderCheckIcon() + "</span>" +
-        "<span>Showing <b>" + escapeHtml(relation.preset.name) + "</b></span>" +
-        "</span>" +
-        "</div>"
-      );
-    }
-    if (relation.type === "edited") {
-      return (
-        "<div class='trace-sf-status' data-kind='edited'>" +
-        "<span class='trace-sf-status-main'><span><b>" + escapeHtml(relation.preset.name) + "</b>, changed</span></span>" +
-        "<span class='trace-sf-status-actions'>" +
-        "<button type='button' class='trace-sf-btn trace-sf-btn-primary' data-trace-sf-action='update-current' data-id='" + escapeAttr(relation.preset.id) + "'>Update " + escapeHtml(relation.preset.name) + "</button>" +
-        (canSaveNew ? "<button type='button' class='trace-sf-btn' data-trace-sf-action='save-open'>Save as new</button>" : "") +
-        "</span>" +
-        "</div>" +
-        (canSaveNew ? "" : renderNote(savedFilterLimitMessage()))
-      );
-    }
-    return (
-      "<div class='trace-sf-status' data-kind='unsaved'>" +
-      "<span class='trace-sf-status-main'><span>These filters aren't saved</span></span>" +
-      (canSaveNew
-        ? "<span class='trace-sf-status-actions'><button type='button' class='trace-sf-btn trace-sf-btn-primary' data-trace-sf-action='save-open'>Save</button></span>"
-        : "") +
-      "</div>" +
-      (canSaveNew ? "" : renderNote(savedFilterLimitMessage()))
-    );
-  }
-
-  function renderError(message) {
-    return (
-      "<div class='trace-sf-error' role='alert'>" +
-      "<span class='trace-sf-error-text'><span class='trace-sf-error-glyph'>" + renderAlertIcon() + "</span><span>" + escapeHtml(message) + "</span></span>" +
-      (state.retry ? "<button type='button' class='trace-sf-btn' data-trace-sf-action='retry'>Try again</button>" : "") +
-      "</div>"
-    );
-  }
-
   function renderNote(message) {
     return "<p class='trace-sf-note'>" + escapeHtml(message) + "</p>";
   }
 
-  function renderEmpty() {
-    return "<p class='trace-sf-empty'>Choose filters below, then save them here to reuse in one tap.</p>";
-  }
-
-  // Every current filter, grouped, every value shown and wrapping.
-  function renderKeepsList(pairs) {
-    var groups = describePairs(pairs).groups;
-    if (!groups.length) return "";
-    return (
-      "<div class='trace-sf-label' id='trace-sf-keeps-label'>What it keeps</div>" +
-      "<dl class='trace-sf-keeps' aria-labelledby='trace-sf-keeps-label'>" +
-      groups.map(function (group) {
-        return "<dt>" + escapeHtml(group.label) + "</dt><dd>" + escapeHtml(group.values.join(", ")) + "</dd>";
-      }).join("") +
-      "</dl>"
-    );
-  }
-
-  function renderScopeChoice() {
-    if (!hasReusableContext()) {
-      return "<p class='trace-sf-scope-note'>Shows on every AO3 search.</p>";
-    }
-    var scope = state.draftScope === "global" ? "global" : "context";
-    function radio(value, action, label) {
-      var checked = scope === value;
-      return (
-        "<button type='button' class='trace-sf-radio' role='radio' data-trace-sf-action='" + action + "' aria-checked='" + (checked ? "true" : "false") + "' tabindex='" + (checked ? "0" : "-1") + "'>" +
-        "<span class='trace-sf-radio-mark' aria-hidden='true'></span>" +
-        "<span>" + escapeHtml(label) + "</span>" +
-        "</button>"
-      );
-    }
-    return (
-      "<div class='trace-sf-label' id='trace-sf-scope-label'>Show it on</div>" +
-      "<div class='trace-sf-scope' role='radiogroup' aria-labelledby='trace-sf-scope-label'>" +
-      radio("context", "scope-context", displayContextLabel() + " only") +
-      radio("global", "scope-global", "Every AO3 search") +
-      "</div>"
-    );
-  }
-
-  function renderSaveForm() {
-    var pairs = state.current ? state.current.pairs : [];
-    var suggested = suggestedNameForPairs(pairs);
-    return (
-      "<div class='trace-sf-form' data-trace-sf-save-form>" +
-      "<label class='trace-sf-label' for='trace-sf-name-input'>Name</label>" +
-      "<span class='trace-sf-input-row'>" +
-      "<input id='trace-sf-name-input' class='trace-sf-input' type='text' data-trace-sf-name maxlength='" + MAX_NAME_LENGTH + "' autocomplete='off' autocapitalize='sentences' placeholder='" + escapeAttr(suggested) + "' value='" + escapeAttr(state.draftName || "") + "'>" +
-      "<button type='button' class='trace-sf-clear-name' data-trace-sf-action='name-clear' aria-label='Clear name' title='Clear name'>&times;</button>" +
-      "</span>" +
-      renderKeepsList(pairs) +
-      renderCapacityWarning() +
-      renderScopeChoice() +
-      "<div class='trace-sf-actions'>" +
-      "<button type='button' class='trace-sf-btn trace-sf-btn-primary' data-trace-sf-action='save-confirm'" + (state.current && state.current.canSave ? "" : " disabled") + ">Save filter</button>" +
-      "<button type='button' class='trace-sf-btn trace-sf-btn-ghost' data-trace-sf-action='save-cancel'>Cancel</button>" +
-      "</div>" +
-      "</div>"
-    );
-  }
-
-  // One list: filters for this tag first, then those for every search, with
-  // plain labels only when both kinds are present. Past eight rows the rest
-  // wait behind "Show all n"; nothing scrolls inside the panel.
-  function renderList(relation, presets) {
-    var groups = groupedPresetsForCurrent(presets);
-    var both = groups.context.length > 0 && groups.global.length > 0;
-    var limit = state.showAll || presets.length <= LIST_PREVIEW_COUNT ? Infinity : LIST_PREVIEW_COUNT;
-    var shown = 0;
-    var html = "<div class='trace-sf-list'>";
-    function section(list, label, scope) {
-      if (!list.length || shown >= limit) return;
-      var visible = list.slice(0, limit - shown);
-      shown += visible.length;
-      if (both) html += "<div class='trace-sf-section-label' data-scope='" + scope + "'>" + escapeHtml(label) + "</div>";
-      html += "<div class='trace-sf-rows'>" + visible.map(function (preset) {
-        return renderPresetRow(preset, relation);
-      }).join("") + "</div>";
-    }
-    section(groups.context, displayContextLabel(), "context");
-    section(groups.global, "Every search", "global");
-    if (shown < presets.length) {
-      html += "<button type='button' class='trace-sf-more' data-trace-sf-action='show-all'>Show all " + presets.length + "</button>";
-    }
-    html += "</div>";
-    return html;
-  }
-
-  function renderPresetRow(preset, relation) {
-    var isActive = relation.type === "active" && relation.preset && relation.preset.id === preset.id;
-    var isRenaming = state.renameId === preset.id;
-    var contents = presetContentsText(preset);
-    var html = "<div class='trace-sf-row' data-id='" + escapeAttr(preset.id) + "' data-scope='" + escapeAttr(preset.scope === "global" ? "global" : "context") + "' data-active='" + (isActive ? "true" : "false") + "' data-menu-open='" + (state.menuId === preset.id ? "true" : "false") + "'>";
-    if (isRenaming) {
-      html += (
-        "<div class='trace-sf-rename'>" +
-        "<label class='trace-sf-label' for='trace-sf-rename-input'>Rename</label>" +
-        "<input id='trace-sf-rename-input' class='trace-sf-input' type='text' data-trace-sf-rename-input maxlength='" + MAX_NAME_LENGTH + "' value='" + escapeAttr(state.renameDraft || preset.name) + "'>" +
-        "<div class='trace-sf-actions'>" +
-        "<button type='button' class='trace-sf-btn trace-sf-btn-primary' data-trace-sf-action='rename-save' data-id='" + escapeAttr(preset.id) + "'>Save name</button>" +
-        "<button type='button' class='trace-sf-btn trace-sf-btn-ghost' data-trace-sf-action='rename-cancel'>Cancel</button>" +
-        "</div>" +
-        "</div>"
-      );
-    } else {
-      html += (
-        "<div class='trace-sf-row-inner'>" +
-        "<button type='button' class='trace-sf-main' data-trace-sf-action='apply' data-id='" + escapeAttr(preset.id) + "' aria-label='" + escapeAttr(preset.name + ". " + contents + ". Apply.") + "'" + (isActive ? " aria-current='true'" : "") + ">" +
-        "<span class='trace-sf-edge'>" + (isActive ? renderCheckIcon() : "") + "</span>" +
-        "<span class='trace-sf-row-text'>" +
-        "<span class='trace-sf-name'>" + escapeHtml(preset.name) + "</span>" +
-        "<span class='trace-sf-summary'>" + escapeHtml(contents) + "</span>" +
-        "</span>" +
-        "</button>" +
-        "<button type='button' class='trace-sf-menu-btn' data-trace-sf-action='menu' data-id='" + escapeAttr(preset.id) + "' aria-expanded='" + (state.menuId === preset.id ? "true" : "false") + "' aria-controls='trace-sf-manage-" + escapeAttr(preset.id) + "' aria-label='Manage " + escapeAttr(preset.name) + "'>" + renderKebabIcon() + "</button>" +
-        "</div>"
-      );
-      if (state.menuId === preset.id) {
-        html += renderManagementActions(preset);
-      }
-      if (state.confirmDeleteId === preset.id) {
-        html += renderDeleteConfirm(preset);
-      }
-    }
-    html += "</div>";
-    return html;
-  }
-
-  function renderManagementActions(preset) {
-    var canUpdate = state.current && state.current.canSave;
-    return (
-      "<div class='trace-sf-manage' id='trace-sf-manage-" + escapeAttr(preset.id) + "' role='group' aria-label='Manage " + escapeAttr(preset.name) + "'>" +
-      "<button type='button' data-trace-sf-action='rename-open' data-id='" + escapeAttr(preset.id) + "'>Rename</button>" +
-      "<button type='button' data-trace-sf-action='update-current' data-id='" + escapeAttr(preset.id) + "'" + (canUpdate ? "" : " disabled title='Choose filters on this page first'") + ">Update with current filters</button>" +
-      "<button type='button' data-danger='true' data-trace-sf-action='delete-confirm' data-id='" + escapeAttr(preset.id) + "'>Delete</button>" +
-      "</div>"
-    );
-  }
-
-  function renderDeleteConfirm(preset) {
-    return (
-      "<div class='trace-sf-confirm'>" +
-      "<span class='trace-sf-confirm-title'>Delete “" + escapeHtml(preset.name) + "”?</span>" +
-      "<span class='trace-sf-confirm-detail'>It's deleted on every device. Nothing on AO3 changes.</span>" +
-      "<span class='trace-sf-confirm-actions'>" +
-      "<button type='button' class='trace-sf-btn trace-sf-btn-danger' data-trace-sf-action='delete' data-id='" + escapeAttr(preset.id) + "'>Delete</button>" +
-      "<button type='button' class='trace-sf-btn trace-sf-btn-ghost' data-trace-sf-action='delete-cancel'>Cancel</button>" +
-      "</span>" +
-      "</div>"
-    );
-  }
-
-  // ---------------------------------------------------------------- phone
-  // On AO3's narrow layout the filter form is a 16em column beside the
-  // listing. The column keeps quick access only: three names, Save these
-  // filters and All saved filters. Everything else lives in Trace's sheet,
-  // and a line above the works says which saved filter is showing.
+  // ------------------------------------------------------------- the layout
+  // One design at every width. Saved filters sit at the top of AO3's filter
+  // form (a 16em slide-over column on a phone, a sidebar on a computer or
+  // iPad) as Trace's lines; a line above the works speaks only while filters
+  // are on; Trace's sheet (a centred card on wide layouts) holds saving and
+  // the full list; what a filter keeps is changed in AO3's own form.
 
   function isNarrowLayout() {
     try {
@@ -1767,7 +1383,6 @@
 
   function suggestedNameForCurrent() {
     var pairs = state.current ? state.current.pairs : [];
-    if (!state.narrow) return suggestedNameForPairs(pairs);
     var tokens = tokensForPairs(pairs, []).tokens.slice(0, 3);
     return (tokens.join(" · ") || "AO3 filter").slice(0, MAX_NAME_LENGTH);
   }
@@ -1905,6 +1520,20 @@
       S + " .trace-sf-sheet-error svg { color: var(--trace-page-warning); flex: 0 0 auto; height: 14px; width: 14px; }",
       S + " .trace-sf-sheet-error button { color: var(--trace-page-teal); font-weight: 500; min-height: 44px; }",
       "@media (prefers-reduced-motion: reduce) { " + S + " .trace-sf-sheet { transition: none !important; } }",
+
+      // Computer and iPad (AO3's sidebar layout): the sheet is a centred card,
+      // the line keeps its action beside the text, and names underline on
+      // hover like AO3's links.
+      "@media (min-width: 42.01em) {",
+      "  " + S + " .trace-sf-sheet { border-radius: 20px; bottom: auto; left: 50%; max-height: min(640px, calc(100% - 64px)); right: auto; top: 50%; transform: translate(-50%, -50%); width: min(440px, calc(100% - 48px)); }",
+      "  " + S + " .trace-sf-grabber { display: none; }",
+      "  " + S + " .trace-sf-sheet-head { padding-top: 14px; }",
+      "  " + S + " .trace-sf-sheet-body { padding-bottom: 20px; }",
+      "  " + S + " .trace-sf-sheet-foot { padding-bottom: 12px; }",
+      "  " + L + " .trace-sf-line-main { flex: 0 1 auto; }",
+      "  " + R + " .trace-sf-col-row:hover .trace-sf-col-name, " + S + " .trace-sf-sheet-row:hover .trace-sf-sheet-name { text-decoration: underline; text-underline-offset: 2px; }",
+      "  " + R + " .trace-sf-col-link:hover span, " + R + " .trace-sf-col-edit:hover, " + L + " .trace-sf-line-side:hover, " + S + " .trace-sf-sheet-link:hover, " + S + " .trace-sf-sheet-open:hover { text-decoration: underline; text-underline-offset: 2px; }",
+      "}",
     ].join("\n");
     (document.head || document.documentElement).appendChild(style);
   }
@@ -2081,6 +1710,8 @@
     if (elsewhere) html += renderOtherTagsLink(elsewhere, true);
     if (unsaved && !isAtSavedFilterLimit()) {
       html += "<button type='button' class='trace-sf-col-link' data-trace-sf-action='sheet-save' aria-haspopup='dialog'>" + renderPlusIcon() + "<span>Save these filters</span></button>";
+    } else if (unsaved) {
+      html += "<p class='trace-sf-col-note'>" + escapeHtml(savedFilterLimitMessage()) + "</p>";
     }
     return html + "</section>";
   }
@@ -2174,13 +1805,29 @@
   }
 
   // The line opens AO3's own Filters: saved filters live there.
+  // On a computer or iPad the filters are a sidebar that's always there: the
+  // line brings Trace's section into view instead.
   function openAo3Filters() {
+    state.narrow = isNarrowLayout();
     var go = document.getElementById("go_to_filters");
-    if (go && typeof go.click === "function") {
+    if (state.narrow && go && typeof go.click === "function") {
       go.click();
-    } else {
-      var form = findFilterForm();
-      if (form && typeof form.scrollIntoView === "function") form.scrollIntoView();
+      return;
+    }
+    if (state.root && typeof state.root.scrollIntoView === "function") {
+      try {
+        state.root.scrollIntoView({ block: "center", behavior: prefersReducedMotion() ? "auto" : "smooth" });
+      } catch (_) {
+        state.root.scrollIntoView();
+      }
+    }
+    var first = state.root && state.root.querySelector("button");
+    if (first) {
+      try {
+        first.focus({ preventScroll: true });
+      } catch (_) {
+        first.focus();
+      }
     }
   }
 
@@ -2234,7 +1881,7 @@
   var leavingToEdit = false;
 
   function editingPreset() {
-    if (!state.narrow || leavingToEdit) return null;
+    if (leavingToEdit) return null;
     var marker = state.editing || readEditingMarker();
     if (!marker) return null;
     var preset = findPreset(marker.id);
@@ -2338,7 +1985,6 @@
 
   // ----------------------------------------------------------------- sheet
   function openSheet(kind, opener) {
-    if (!state.narrow) return;
     if (opener && opener.getAttribute) {
       var action = opener.getAttribute("data-trace-sf-action");
       state.sheetOpener = state.line && state.line.contains(opener)
@@ -2450,7 +2096,7 @@
   }
 
   function renderSheet() {
-    if (!state.sheet || !state.narrow) {
+    if (!state.sheet) {
       closeSheet(false);
       return;
     }
@@ -2924,6 +2570,12 @@
     var sheet = state.sheetHost && state.sheetHost.querySelector(".trace-sf-sheet");
     var viewport = window.visualViewport;
     if (!sheet || !viewport) return;
+    // Wide layouts centre the card; the keyboard rule is for phones.
+    if (!isNarrowLayout()) {
+      sheet.style.bottom = "";
+      sheet.style.maxHeight = "";
+      return;
+    }
     var covered = Math.max(0, (window.innerHeight || 0) - viewport.height - viewport.offsetTop);
     sheet.style.bottom = covered + "px";
     sheet.style.maxHeight = Math.max(160, viewport.height - 8) + "px";
@@ -3015,18 +2667,6 @@
   function handleKeyDown(event) {
     if (!isTraceEvent(event)) return;
     if (state.sheet && handleSheetKeyDown(event)) return;
-    if (event.key === "Escape" || event.key === "Esc") {
-      if (state.menuId) {
-        stopTraceEvent(event);
-        closeMenu(true);
-        return;
-      }
-      if (state.mode === "save") {
-        stopTraceEvent(event);
-        cancelSaveForm();
-        return;
-      }
-    }
     var target = event.target;
     if (target && target.matches && target.matches("[role='radio']") && /^Arrow(?:Up|Down|Left|Right)$/.test(event.key)) {
       stopTraceEvent(event);
@@ -3056,12 +2696,6 @@
       finishEdit();
       return;
     }
-    var renameInput = target && target.matches && target.matches("[data-trace-sf-rename-input]");
-    if (renameInput && state.renameId) {
-      stopTraceEvent(event);
-      renamePreset(state.renameId);
-      return;
-    }
     stopTracePropagation(event);
   }
 
@@ -3072,9 +2706,6 @@
     if (target && target.matches && target.matches("[data-trace-sf-name]")) {
       state.draftName = String(target.value || "").slice(0, MAX_NAME_LENGTH);
     }
-    if (target && target.matches && target.matches("[data-trace-sf-rename-input]")) {
-      state.renameDraft = String(target.value || "").slice(0, MAX_NAME_LENGTH);
-    }
     if (target && target.matches && target.matches("[data-trace-sf-edit-name]")) {
       state.editName = String(target.value || "").slice(0, MAX_NAME_LENGTH);
     }
@@ -3083,24 +2714,15 @@
   function dispatchAction(el) {
     var action = el.getAttribute("data-trace-sf-action");
     var id = el.getAttribute("data-id") || "";
-    if (action === "save-open") return openSaveForm();
-    if (action === "save-cancel") return cancelSaveForm();
     if (action === "save-confirm") return saveCurrentPreset();
     if (action === "name-clear") return clearDraftName();
     if (action === "scope-context") return setDraftScope("context", true);
     if (action === "scope-global") return setDraftScope("global", true);
-    if (action === "toggle-panel") return togglePanel();
-    if (action === "show-all") return showAllPresets();
     if (action === "retry") return retryLastChange();
     if (action === "apply") return applyPreset(id);
-    if (action === "menu") return toggleMenu(id);
-    if (action === "rename-open") return openRename(id);
-    if (action === "rename-save") return renamePreset(id);
-    if (action === "rename-cancel") return cancelRowMode();
     if (action === "delete-confirm") return confirmDelete(id);
     if (action === "delete") return deletePreset(id);
     if (action === "delete-cancel") return cancelRowMode();
-    if (action === "update-current") return updatePresetToCurrent(id);
     if (action === "sheet-open") return openSheet("list", el);
     if (action === "sheet-save") return openSheetSave(el);
     if (action === "sheet-close") return closeSheet(true);
@@ -3157,30 +2779,7 @@
     state.retry = null;
   }
 
-  function openSaveForm() {
-    state.current = getCurrentFilterState();
-    state.menuId = null;
-    state.renameId = null;
-    state.confirmDeleteId = null;
-    clearMessages();
-    if (isAtSavedFilterLimit()) {
-      state.mode = "list";
-      render();
-      return;
-    }
-    state.mode = "save";
-    state.panelCollapsed = false;
-    // The suggested name is filled in and selected, so typing replaces it.
-    state.draftName = suggestedNameForPairs(state.current.pairs);
-    state.draftScope = hasReusableContext() ? "context" : "global";
-    render();
-    focusSoon("[data-trace-sf-name]", true);
-  }
 
-  function cancelSaveForm() {
-    cancelInlineModes();
-    focusSoon("[data-trace-sf-action='save-open']");
-  }
 
   function setDraftScope(scope, keepFocus) {
     if (scope === "context" && !hasReusableContext()) return;
@@ -3196,102 +2795,23 @@
     focusSoon("[data-trace-sf-name]");
   }
 
-  function togglePanel() {
-    state.panelCollapsed = !state.panelCollapsed;
-    persistPanelCollapsed(state.panelCollapsed);
-    render();
-    focusSoon("[data-trace-sf-action='toggle-panel']");
-  }
 
-  function showAllPresets() {
-    state.showAll = true;
-    render();
-    focusSoon(".trace-sf-main", false, LIST_PREVIEW_COUNT);
-  }
 
-  function persistPanelCollapsed(collapsed) {
-    var patch = {};
-    patch[PANEL_COLLAPSED_KEY] = Boolean(collapsed);
-    storageSet(patch).catch(function () {
-      /* The panel still updates for this page if local preference storage fails. */
-    });
-  }
 
-  function cancelInlineModes() {
-    state.mode = "list";
-    state.menuId = null;
-    state.renameId = null;
-    state.renameDraft = "";
-    state.confirmDeleteId = null;
-    state.error = "";
-    state.retry = null;
-    render();
-  }
 
-  // Leaving Rename or Delete puts focus back on the row's menu button.
+  // Keep, after Delete asked: focus goes back to Delete filter.
   function cancelRowMode() {
-    if (state.sheet === "edit") {
-      state.confirmDeleteId = null;
-      render();
-      focusSoon("[data-trace-sf-action='delete-confirm']");
-      return;
-    }
-    var id = state.renameId || state.confirmDeleteId;
-    cancelInlineModes();
-    if (id) focusSoon("[data-trace-sf-action='menu'][data-id='" + cssEscape(id) + "']");
-  }
-
-  function toggleMenu(id) {
-    state.menuId = state.menuId === id ? null : id;
-    if (state.menuId) state.panelCollapsed = false;
-    state.renameId = null;
     state.confirmDeleteId = null;
     render();
-    focusSoon("[data-trace-sf-action='menu'][data-id='" + cssEscape(id) + "']");
-    if (state.menuId) revealManagementSoon(id);
+    focusSoon("[data-trace-sf-action='delete-confirm']");
   }
 
-  function revealManagementSoon(id) {
-    setTimeout(function () {
-      try {
-        var row = state.root && state.root.querySelector(".trace-sf-row[data-id='" + cssEscape(id) + "']");
-        if (row && typeof row.scrollIntoView === "function") {
-          row.scrollIntoView({ block: "nearest", inline: "nearest" });
-        }
-      } catch (_) {
-        /* The action tray remains in flow even when scrollIntoView is unavailable. */
-      }
-    }, 0);
-  }
 
-  function closeMenu(restoreFocus) {
-    if (!state.menuId) return;
-    var previousId = state.menuId;
-    state.menuId = null;
-    render();
-    if (restoreFocus) {
-      focusSoon("[data-trace-sf-action='menu'][data-id='" + cssEscape(previousId) + "']");
-    }
-  }
 
-  function openRename(id) {
-    var preset = findPreset(id);
-    state.menuId = null;
-    state.renameId = id;
-    state.renameDraft = preset ? preset.name : "";
-    state.panelCollapsed = false;
-    state.confirmDeleteId = null;
-    state.error = "";
-    state.retry = null;
-    render();
-    focusSoon("[data-trace-sf-rename-input]", true);
-  }
+
 
   function confirmDelete(id) {
-    state.menuId = null;
-    state.renameId = null;
     state.confirmDeleteId = id;
-    state.panelCollapsed = false;
     state.error = "";
     state.retry = null;
     render();
@@ -3334,7 +2854,6 @@
     var retry = state.retry;
     if (!retry) return;
     if (retry.kind === "save") return saveCurrentPreset();
-    if (retry.kind === "rename") return renamePreset(retry.id);
     if (retry.kind === "update") return updatePresetToCurrent(retry.id);
     if (retry.kind === "delete") return deletePreset(retry.id);
     if (retry.kind === "edit") return finishEdit();
@@ -3347,7 +2866,6 @@
     var target = state.sheet === "save" ? saveTargetPreset() : null;
     if (target && state.saveAs === "update") return updatePresetToCurrent(target.id);
     if (isAtSavedFilterLimit()) {
-      state.mode = "list";
       render();
       return;
     }
@@ -3379,7 +2897,6 @@
       appliedAt: now,
     };
     await commitStorage(presets, activeMeta, function () {
-      state.mode = "list";
       state.draftName = "";
       state.notice = "";
       persistLastUsed(id);
@@ -3387,26 +2904,6 @@
     }, null, { kind: "save" });
   }
 
-  async function renamePreset(id) {
-    var name = currentNameInputValue("[data-trace-sf-rename-input]");
-    if (!name) return;
-    state.renameDraft = name;
-    var now = new Date().toISOString();
-    var presets = state.presets.map(function (preset) {
-      if (preset.id !== id) return preset;
-      return Object.assign({}, preset, {
-        name: name,
-        updatedAt: now,
-        clientUpdatedAt: now,
-        dirty: true,
-      });
-    });
-    await commitStorage(presets, state.activeMeta, function () {
-      state.renameId = null;
-      state.renameDraft = "";
-      state.menuId = null;
-    }, null, { kind: "rename", id: id });
-  }
 
   async function updatePresetToCurrent(id) {
     state.current = getCurrentFilterState();
@@ -3431,9 +2928,6 @@
       appliedAt: now,
     };
     await commitStorage(presets, activeMeta, function () {
-      state.mode = "list";
-      state.menuId = null;
-      state.renameId = null;
       state.confirmDeleteId = null;
       persistLastUsed(id);
       if (state.sheet === "save") closeSheet(true, true);
@@ -3460,8 +2954,6 @@
       });
     }
     await commitStorage(presets, activeMeta, function () {
-      state.menuId = null;
-      state.renameId = null;
       state.confirmDeleteId = null;
       if (state.sheet) showSheetList();
     }, deleted, { kind: "delete", id: id });
@@ -3498,14 +2990,6 @@
     return "You've saved " + SAVED_FILTER_ACTIVE_LIMIT + " filters, the most Trace keeps. Delete one to save another.";
   }
 
-  function renderCapacityWarning() {
-    if (state.presets.length < SAVED_FILTER_LIMIT_WARNING_THRESHOLD) return "";
-    return (
-      "<p class='trace-sf-capacity'>" +
-      state.presets.length + " of " + SAVED_FILTER_ACTIVE_LIMIT + " saved filters used" +
-      "</p>"
-    );
-  }
 
   async function applyPreset(id) {
     var preset = findPreset(id);
@@ -3597,15 +3081,6 @@
       });
       window.addEventListener("popstate", function () {
         renderSoon(60);
-      });
-      document.addEventListener("pointerdown", function (event) {
-        if (!state.menuId || !state.root) return;
-        var target = event.target;
-        if (target && target.closest) {
-          if (target.closest("." + ROOT_ATTR + " .trace-sf-manage")) return;
-          if (target.closest("." + ROOT_ATTR + " .trace-sf-menu-btn")) return;
-        }
-        closeMenu(false);
       });
     } catch (_) {
       /* ignore */
