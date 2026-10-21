@@ -863,3 +863,33 @@ test("explicit development JSON pairs output and rejects invalid or production u
     }
   }
 });
+
+test("the whole-History import is in a package only when its switch is on, and only with the kernel session", () => {
+  const HISTORY_WIRING = ["TRACE_AO3_HISTORY_IMPORT", "traceAo3HistoryImportV1", "__traceAo3HistoryImportLoopV1"];
+  const build = (extra) => spawnSync("npm", ["run", "build:ios-earned-permission-onboarding:release"], {
+    cwd: ROOT, env: { ...RELEASE_ENV, ...extra }, encoding: "utf8",
+  });
+  try {
+    const off = build({});
+    assert.equal(off.status, 0, off.stderr || off.stdout);
+    const store = fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8");
+    for (const wiring of HISTORY_WIRING) {
+      assert.equal(store.includes(wiring), false, `the store package carries ${wiring}`);
+    }
+    const on = build({ TRACE_AO3_HISTORY_IMPORT: "1" });
+    assert.equal(on.status, 0, on.stderr || on.stdout);
+    const withImport = fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8");
+    for (const wiring of HISTORY_WIRING) {
+      assert.equal(withImport.includes(wiring), true, `the switched-on package lacks ${wiring}`);
+    }
+    // Nothing more is asked of Safari for it.
+    assert.deepEqual(manifest(RESOURCES).permissions, ["alarms", "storage", "nativeMessaging", "activeTab", "scripting"]);
+    const legacy = spawnSync("node", ["scripts/build.mjs"], {
+      cwd: ROOT, env: { ...RELEASE_ENV, TRACE_SESSION_MODE: "legacy", TRACE_AO3_HISTORY_IMPORT: "1" }, encoding: "utf8",
+    });
+    assert.notEqual(legacy.status, 0);
+    assert.match(legacy.stderr, /TRACE_AO3_HISTORY_IMPORT requires TRACE_SESSION_MODE=kernel/);
+  } finally {
+    runBuild("build:ios-earned-permission-onboarding:release");
+  }
+});

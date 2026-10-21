@@ -162,6 +162,13 @@ if (NATIVE_IMPORT_HANDOFF && SESSION_MODE !== "kernel") {
   throw new Error("Native Import requires the kernel paired package.");
 }
 const HAS_SESSION_RUNTIME = SESSION_MODE !== "legacy";
+// Import your whole AO3 History: read page by page in the reader's AO3 tab and
+// kept on the device for review (src/extension-runtime/ao3-history-import.mts).
+// Off until the review that imports it is built; nothing reaches Trace from it.
+const AO3_HISTORY_IMPORT = /^(?:1|true)$/i.test(String(env.TRACE_AO3_HISTORY_IMPORT ?? ""));
+if (AO3_HISTORY_IMPORT && SESSION_MODE !== "kernel") {
+  throw new Error("TRACE_AO3_HISTORY_IMPORT requires TRACE_SESSION_MODE=kernel.");
+}
 // The sheet that saves a story by the reader's tap and then asks for lasting
 // access. Rule 3 above: the same in every build with optional story sites.
 const IOS_FIRST_TAP_SHEET = IOS_OPTIONAL_STORY_SITE_ACCESS && SESSION_MODE === "kernel";
@@ -468,6 +475,7 @@ if (HAS_SESSION_RUNTIME) {
       __TRACE_API_BASE__: JSON.stringify(TRACE_API_BASE),
       __TRACE_WEB_ORIGIN__: JSON.stringify(TRACE_WEB_ORIGIN),
       __TRACE_NATIVE_IMPORT_HANDOFF__: JSON.stringify(NATIVE_IMPORT_HANDOFF),
+      __TRACE_AO3_HISTORY_IMPORT__: JSON.stringify(AO3_HISTORY_IMPORT),
       __TRACE_IOS_FIRST_TAP_SAVE__: JSON.stringify(IOS_FIRST_TAP_SAVE),
       __TRACE_IOS_FIRST_TAP_SHEET__: JSON.stringify(IOS_FIRST_TAP_SHEET),
       __TRACE_IOS_EARNED_PERMISSION_CONFIG__: JSON.stringify(
@@ -847,6 +855,7 @@ console.log(
     IOS_EARNED_PERMISSION_REQUIRED_HOSTS,
 );
 console.log("TRACE_IOS_FIRST_TAP_SAVE=" + IOS_FIRST_TAP_SAVE);
+console.log("TRACE_AO3_HISTORY_IMPORT=" + AO3_HISTORY_IMPORT);
 if (IOS_FIRST_TAP_SAVE) {
   console.warn(
     IOS_FIRST_TAP_PRODUCTION_PROOF

@@ -7871,6 +7871,17 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
   };
 
+  // src/extension-runtime/story-save-activity.mts
+  var inFlight = 0;
+  var lastEndedAt = 0;
+  function storySaveStarted() {
+    inFlight += 1;
+  }
+  function storySaveEnded() {
+    inFlight = Math.max(0, inFlight - 1);
+    lastEndedAt = Date.now();
+  }
+
   // src/extension-runtime/controller.mts
   var DEGRADED_STORAGE_SNAPSHOT = Object.freeze({
     state: "degraded",
@@ -8728,6 +8739,14 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return (await this.#executeStoryCommandWithEvidence(command)).result;
     }
     async #executeStoryCommandWithEvidence(command, observer, tabId) {
+      storySaveStarted();
+      try {
+        return await this.#runStoryCommandWithEvidence(command, observer, tabId);
+      } finally {
+        storySaveEnded();
+      }
+    }
+    async #runStoryCommandWithEvidence(command, observer, tabId) {
       let accountData = await this.#accountData.read().catch(() => null);
       if (accountData?.capacityRecovery !== null && accountData?.capacityRecovery !== void 0 && accountData.overlay === null) {
         accountData = await this.#projection.read().catch(() => accountData);
@@ -11914,6 +11933,28 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         sessionArea: extension.storage.session ?? null
       }
     });
+    if (
+      // A build-time constant: a build without it leaves this block and the
+      // modules only it uses out of the bundle altogether.
+      false
+    ) {
+      const historySession = session;
+      installAo3HistoryImport({
+        runtime: extension.runtime,
+        tabs: extension.tabs,
+        scripting: extension.scripting,
+        ...extension.permissions ? { permissions: extension.permissions } : {},
+        alarms: extension.alarms,
+        storageMode,
+        databaseFactory: scope.indexedDB,
+        account: async () => {
+          await historySession.start();
+          return historySession.publicationScope()?.accountId ?? null;
+        },
+        whenAccountLeaves: (cleanup) => historySession.whenAccountLeaves(cleanup),
+        saveActivity: storySaveActivity
+      });
+    }
     if (
       // A build-time constant: a build without optional story sites leaves this
       // block and the modules only it uses out of the bundle altogether.
