@@ -181,6 +181,7 @@ function createPopupHarness({
   permissionContainsResult = null,
   registrationReconcileResult = null,
   sessionSnapshotResponses = null,
+  sessionActionResponse = null,
   directTabUnavailable = false,
   archiveAccess = null,
   deferredHostRequest = false,
@@ -229,6 +230,7 @@ function createPopupHarness({
   const hostLifecycle = [];
   const popupDisconnects = [];
   const heldSnapshotReplies = [];
+  const heldActionReplies = [];
   const createdTabs = [];
   const updatedTabs = [];
   const permissionListeners = { added: [], removed: [] };
@@ -306,7 +308,13 @@ function createPopupHarness({
           }
         }
         if (message.type === "TRACE_SESSION_ACTION") {
-          response = { ok: true, snapshot: sessionSnapshot, action: { kind: "ignored" } };
+          response = sessionActionResponse ?? { ok: true, snapshot: sessionSnapshot, action: { kind: "ignored" } };
+          if (response.held === true) {
+            // A slow action: the test answers it later with answerAction().
+            if (promiseRuntime) return new Promise((resolve) => heldActionReplies.push(resolve));
+            heldActionReplies.push(callback);
+            return;
+          }
         }
         if (message.type === "TRACE_EARNED_PERMISSION_RECONCILE") {
           reconcileRequests.push(message);
@@ -553,6 +561,7 @@ function createPopupHarness({
     /** Safari reports that website access was added or removed. */
     emitPermissionChange(kind) { for (const fn of permissionListeners[kind]) fn({ origins: [] }); },
     answerSnapshot: (reply) => heldSnapshotReplies.shift()?.(reply),
+    answerAction: (reply) => heldActionReplies.shift()?.(reply),
     finishHostRequest: result => finishHostRequest(result),
     registrationRequests,
     reconcileRequests,
@@ -1888,6 +1897,91 @@ test("a reader who was connected before is still asked to reconnect", async () =
   assert.equal(h.document.getElementById("popup-status").textContent, "Reconnect Trace");
   assert.equal(h.document.getElementById("popup-cta").textContent, "Reconnect");
   assert.match(h.document.getElementById("popup-lead").textContent, /then press Reconnect\./);
+});
+
+for (const promiseRuntime of [false, true]) {
+  test(`Connect with no one signed in on the Trace website opens it and says why (${promiseRuntime ? "promise" : "callback"})`, async () => {
+    const h = createPopupHarness({
+      sessionMode: "kernel",
+      promiseRuntime,
+      sessionActionResponse: {
+        ok: true,
+        snapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "credential_absent" },
+        action: { kind: "unavailable" },
+      },
+    });
+    await flush();
+    assert.deepEqual(h.createdTabs, [], "nothing opens before the press");
+    h.document.getElementById("popup-cta").dispatchEvent(
+      new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+    );
+    await flush();
+    assert.deepEqual(h.createdTabs, ["https://tracefiction.com/"]);
+    assert.match(h.document.getElementById("popup-lead").textContent, /couldn't find you signed in on the Trace website/);
+    assert.equal(h.document.getElementById("popup-cta").textContent, "Connect");
+  });
+}
+
+test("Connect shows Checking Trace at once while the Trace tab is asked, then lands on the answer", async () => {
+  const h = createPopupHarness({ sessionMode: "kernel", sessionActionResponse: { held: true } });
+  await flush();
+  const cta = h.document.getElementById("popup-cta");
+  cta.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  await flush();
+  assert.equal(h.document.getElementById("popup-status").textContent, "Checking Trace…");
+  assert.equal(cta.hidden, true, "no Cancel where Connect was clicked");
+  h.answerAction({
+    ok: true,
+    snapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "credential_absent" },
+    action: { kind: "unavailable" },
+  });
+  await flush();
+  assert.equal(h.document.getElementById("popup-status").textContent, "Connect Trace");
+  assert.equal(cta.hidden, false);
+  assert.equal(cta.hasAttribute("aria-disabled"), false);
+  assert.deepEqual(h.createdTabs, ["https://tracefiction.com/"]);
+});
+
+test("Connect whose reply is lost reads the session again instead of staying on Checking", async () => {
+  const h = createPopupHarness({ sessionMode: "kernel", sessionActionResponse: { held: true } });
+  await flush();
+  const asked = h.messages.filter(({ type }) => type === "TRACE_SESSION_GET_SNAPSHOT").length;
+  h.document.getElementById("popup-cta").dispatchEvent(
+    new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+  );
+  await flush();
+  h.answerAction(undefined);
+  await flush();
+  assert.equal(h.messages.filter(({ type }) => type === "TRACE_SESSION_GET_SNAPSHOT").length, asked + 1);
+  assert.equal(h.document.getElementById("popup-status").textContent, "Connect Trace");
+});
+
+test("Connect that could not read the website's sign-in says so and opens nothing", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    sessionActionResponse: {
+      ok: true,
+      snapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "provider_unavailable" },
+      action: { kind: "unavailable" },
+    },
+  });
+  await flush();
+  h.document.getElementById("popup-cta").dispatchEvent(
+    new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+  );
+  await flush();
+  assert.deepEqual(h.createdTabs, []);
+  assert.match(h.document.getElementById("popup-lead").textContent, /couldn't read your sign-in/);
+});
+
+test("a popup opened after Connect found no website sign-in still says why", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    sessionSnapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "credential_absent" },
+  });
+  await flush();
+  assert.match(h.document.getElementById("popup-lead").textContent, /Sign in there, then press Connect again\./);
+  assert.deepEqual(h.createdTabs, [], "opening the popup opens nothing");
 });
 
 const IPHONE_UA =

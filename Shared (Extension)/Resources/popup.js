@@ -4488,6 +4488,14 @@ function renderKernelSnapshot(snapshot) {
   } else if (state === "reconnect_required" && isLikelyIosExtensionUi && credentialRecovery) {
     lead =
       `Open the Trace app and sign in there. Signing in on tracefiction.com in Safari does not connect this extension. Return to Safari and press ${connectVerb}.`;
+  } else if (state === "signed_out" && reason === "credential_absent") {
+    // Connect found no signed-in Trace website in this browser; say so
+    // rather than leave the press looking like it did nothing.
+    lead =
+      "Trace couldn't find you signed in on the Trace website in this browser. Sign in there, then press Connect again.";
+  } else if (state === "signed_out" && reason === "provider_unavailable") {
+    lead =
+      "Trace couldn't read your sign-in from the Trace website. Reload it, then press Connect again.";
   } else if (state === "signed_out") {
     lead =
       "Open Trace in this browser and sign in, then return here and press Connect.";
@@ -5336,6 +5344,25 @@ function runEarnedAction(button) {
   }
 }
 
+// On a computer the credential comes from the Trace website in this
+// browser. When Connect finds no one signed in there, the website opens so
+// the reader can sign in; the popup says why when it is opened again.
+function connectFoundNoWebsiteSignIn(action, snapshot) {
+  return (action === "connect" || action === "reconnect") &&
+    !isLikelyIosExtensionUi &&
+    snapshot?.state === "signed_out" &&
+    snapshot?.reason === "credential_absent";
+}
+
+function showCheckingWhileConnecting(action) {
+  if ((action !== "connect" && action !== "reconnect") || isLikelyIosExtensionUi) return false;
+  renderKernelSnapshot({ state: "connecting", reason: "none" });
+  // Cancel stands where Connect was; a second click must not land on it.
+  const ctaEl = document.getElementById("popup-cta");
+  if (ctaEl) ctaEl.hidden = true;
+  return true;
+}
+
 function initializeKernelPopup() {
   if (kernelPopupInitialized) return;
   kernelPopupInitialized = true;
@@ -5352,14 +5379,21 @@ function initializeKernelPopup() {
       if (actionControl.getAttribute("aria-disabled") === "true") return;
       actionControl.setAttribute("aria-disabled", "true");
       const sequence = nextSessionSequence();
+      // Reading the sign-in from a Trace tab can take a while (a signed-out
+      // tab is given time to finish signing in), so the press shows at once.
+      const showsChecking = showCheckingWhileConnecting(action);
       sendKernelRuntimeMessage(
         { type: "TRACE_SESSION_ACTION", action },
         (response) => {
           actionControl.removeAttribute("aria-disabled");
-          if (!response) return;
+          if (!response) {
+            if (showsChecking) requestKernelSnapshot();
+            return;
+          }
           sessionReplyTaken(sequence, response);
           renderKernelSnapshot(response?.snapshot);
           if (response?.snapshot?.state === "connected") requestKernelPopupState();
+          else if (connectFoundNoWebsiteSignIn(action, response?.snapshot)) openTraceApp(TRACE_HOME_URL);
         },
       );
     });
