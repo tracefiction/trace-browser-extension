@@ -41,6 +41,14 @@
  * when the account changes.
  */
 
+import {
+  StoredAttemptedIds,
+  StoredSessionState,
+  type AttemptedPort,
+  type SessionStatePort,
+  type StorageAreaLike,
+} from "./summary-fill-storage.mjs";
+
 export const FFN_SUMMARY_STATE_KEY = "traceFfnSummaryFillV1";
 export const FFN_SUMMARY_ATTEMPTED_KEY = "traceFfnSummaryAttemptedV1";
 
@@ -560,94 +568,14 @@ export interface FillState {
   readonly exp?: number;
 }
 
-export interface FillStatePort {
-  /** Whether the state outlives this background, so the caps and the work hold. */
-  readonly durable: boolean;
-  read(): Promise<FillState | null>;
-  write(state: FillState): Promise<void>;
-  clear(): Promise<void>;
-}
+export type FillStatePort = SessionStatePort<FillState>;
 
-/**
- * Story ids already tried for an account, newest last, at most
- * `ATTEMPTED_MAX`: ids only, kept across sessions so a story that cannot be
- * filled does not come first every time. Removed on sign-out.
- */
-export interface AttemptedPort {
-  read(account: string): Promise<readonly string[]>;
-  add(account: string, storyIds: readonly string[]): Promise<void>;
-  /** Removes the list when it belongs to another account. */
-  keepOnly(account: string): Promise<void>;
-  clear(): Promise<void>;
-}
+export type { AttemptedPort };
 
-interface StorageAreaLike {
-  get(keys: string): Promise<Record<string, unknown>> | unknown;
-  set(items: Record<string, unknown>): Promise<void> | unknown;
-  remove(keys: string): Promise<void> | unknown;
-}
-
-/** The attempted ids in one storage area (the extension's local storage). */
-export class StoredAttempted implements AttemptedPort {
-  readonly #area: StorageAreaLike | null;
-  #memory: { account: string; ids: string[] } | null = null;
-
+/** The attempted FanFiction.net story ids, in the extension's local storage. */
+export class StoredAttempted extends StoredAttemptedIds {
   constructor(area: StorageAreaLike | null | undefined) {
-    this.#area = area && typeof area.get === "function" ? area : null;
-  }
-
-  async #load(): Promise<{ account: string; ids: string[] } | null> {
-    if (this.#area === null) return this.#memory;
-    try {
-      const values = await this.#area.get(FFN_SUMMARY_ATTEMPTED_KEY) as Record<string, unknown> | undefined;
-      const value = values?.[FFN_SUMMARY_ATTEMPTED_KEY] as Record<string, unknown> | undefined;
-      if (
-        !value ||
-        typeof value.account !== "string" ||
-        !Array.isArray(value.ids) ||
-        !value.ids.every((id) => typeof id === "string" && ID_PATTERN.test(id))
-      ) {
-        return null;
-      }
-      return { account: value.account, ids: (value.ids as string[]).slice(-ATTEMPTED_MAX) };
-    } catch {
-      return this.#memory;
-    }
-  }
-
-  async read(account: string): Promise<readonly string[]> {
-    const stored = await this.#load();
-    return stored !== null && stored.account === account ? stored.ids : [];
-  }
-
-  async add(account: string, storyIds: readonly string[]): Promise<void> {
-    const previous = await this.read(account);
-    const ids = [...previous.filter((id) => !storyIds.includes(id)), ...storyIds]
-      .filter((id) => ID_PATTERN.test(id))
-      .slice(-ATTEMPTED_MAX);
-    const next = { account, ids };
-    this.#memory = next;
-    if (this.#area === null) return;
-    try {
-      await this.#area.set({ [FFN_SUMMARY_ATTEMPTED_KEY]: next });
-    } catch {
-      // Memory keeps it for this background.
-    }
-  }
-
-  async keepOnly(account: string): Promise<void> {
-    const stored = await this.#load();
-    if (stored !== null && stored.account !== account) await this.clear();
-  }
-
-  async clear(): Promise<void> {
-    this.#memory = null;
-    if (this.#area === null) return;
-    try {
-      await this.#area.remove(FFN_SUMMARY_ATTEMPTED_KEY);
-    } catch {
-      // Nothing else to remove.
-    }
+    super(area, { key: FFN_SUMMARY_ATTEMPTED_KEY, idPattern: ID_PATTERN, max: ATTEMPTED_MAX });
   }
 }
 
@@ -719,70 +647,16 @@ function validState(value: unknown): FillState | null {
 }
 
 /**
- * The fill's state in one storage area: session-only storage
- * (`storage.session`, kept in memory by the browser and gone when it quits),
- * or, where a browser has none, local storage with an expiry. With no area
- * at all it lives in this background's memory and is not durable.
+ * The FanFiction.net fill's state in one storage area (see
+ * `StoredSessionState`): session-only storage where the browser has it,
+ * otherwise local storage that expires.
  */
-export class StoredFillState implements FillStatePort {
-  readonly #area: StorageAreaLike | null;
-  readonly #ttlMs: number | null;
-  readonly #now: () => number;
-  #memory: FillState | null = null;
-
+export class StoredFillState extends StoredSessionState<FillState> {
   constructor(
     area: StorageAreaLike | null | undefined,
     options: { readonly ttlMs?: number; readonly now?: () => number } = {},
   ) {
-    this.#area = area && typeof area.get === "function" ? area : null;
-    this.#ttlMs = options.ttlMs ?? null;
-    this.#now = options.now ?? (() => Date.now());
-  }
-
-  get durable(): boolean {
-    return this.#area !== null;
-  }
-
-  async read(): Promise<FillState | null> {
-    let state: FillState | null;
-    if (this.#area === null) {
-      state = this.#memory;
-    } else {
-      try {
-        const values = await this.#area.get(FFN_SUMMARY_STATE_KEY) as Record<string, unknown> | undefined;
-        state = validState(values?.[FFN_SUMMARY_STATE_KEY]);
-      } catch {
-        state = this.#memory;
-      }
-    }
-    if (state !== null && state.exp !== undefined && state.exp <= this.#now()) {
-      await this.clear();
-      return null;
-    }
-    return state;
-  }
-
-  async write(state: FillState): Promise<void> {
-    const stored: FillState = this.#ttlMs === null
-      ? state
-      : Object.freeze({ ...state, exp: state.exp ?? this.#now() + this.#ttlMs });
-    this.#memory = stored;
-    if (this.#area === null) return;
-    try {
-      await this.#area.set({ [FFN_SUMMARY_STATE_KEY]: stored });
-    } catch {
-      // Memory keeps the pacing while storage is unavailable.
-    }
-  }
-
-  async clear(): Promise<void> {
-    this.#memory = null;
-    if (this.#area === null) return;
-    try {
-      await this.#area.remove(FFN_SUMMARY_STATE_KEY);
-    } catch {
-      // Nothing else to remove.
-    }
+    super(area, FFN_SUMMARY_STATE_KEY, validState, options);
   }
 }
 
