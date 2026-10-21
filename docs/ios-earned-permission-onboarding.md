@@ -18,14 +18,18 @@ website question. `activeTab` covers only the tab Trace was opened on, and is
 used to read that tab's address. Nothing is injected and nothing is saved
 before the five story sites are allowed.
 
-The background worker registers the three page scripts
-(`trace-archive-automation-v1`, `trace-ao3-saved-filters-v1`,
-`trace-story-open-veil-v1`) when
+The background worker registers the two page scripts
+(`trace-archive-automation-v1`, `trace-ao3-saved-filters-v1`) when
 `permissions.contains` confirms all five patterns. It checks on worker start,
 on install and update, when website access is added or removed, and each time
 the popup opens. Story tabs that are already open get the same scripts, under
 the same complete grant: after an update, and when the reader allows the sites
 from the popup or in Safari's settings.
+Once they are confirmed, it registers the optional
+`trace-story-open-veil-v1` (at `document_start`) in a call of its own. A
+refusal is logged and changes nothing else: not the result, the stored setup
+state, or the check that the page scripts are registered. A refused attempt
+is not repeated until the next update or full registration.
 
 A check that cannot finish (Safari did not answer, the registration was
 refused, or a reader who had the grant read once as not having it) is tried

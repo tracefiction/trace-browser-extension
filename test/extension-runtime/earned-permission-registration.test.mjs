@@ -755,34 +755,142 @@ test("update: scripts registered by an earlier generation are replaced once and 
   assert.equal(h.store[EARNED_PERMISSION_STATE_KEY].completedAt, STORE_BUILD_STATE.completedAt);
 });
 
-test("update: a page script added at the same generation, at document_start, is registered beside the others", async () => {
-  const veil = Object.freeze({
-    id: "trace-story-open-veil-v1",
-    matches: ORIGINS,
-    js: Object.freeze(["trace-open-veil.js"]),
-    runAt: "document_start",
-    persistAcrossSessions: true,
+// --- An optional page script, registered on its own ---------------------
+
+const VEIL = Object.freeze({
+  id: "trace-story-open-veil-v1",
+  matches: ORIGINS,
+  js: Object.freeze(["trace-open-veil.js"]),
+  runAt: "document_start",
+  persistAcrossSessions: true,
+});
+const VEIL_CONFIG = Object.freeze({ ...CURRENT_CONFIG, optionalRegistrations: Object.freeze([VEIL]) });
+const ids = (h) => h.registrations.map(({ id }) => id);
+
+function refusingDocumentStart(h) {
+  const register = h.environment.scripting.registerContentScripts;
+  const asked = [];
+  h.environment.scripting.registerContentScripts = async (scripts) => {
+    asked.push(scripts.map(({ id }) => id));
+    if (scripts.some(({ runAt }) => runAt === "document_start")) throw new Error("Invalid runAt");
+    return register(scripts);
+  };
+  return asked;
+}
+
+async function quietly(work) {
+  const warn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args.join(" "));
+  try { await work(); } finally { console.warn = warn; }
+  return warnings;
+}
+
+test("a new grant registers the optional script in its own call, after the others", async () => {
+  const h = createHarness({ origins: [...ORIGINS], config: VEIL_CONFIG });
+  const controller = new EarnedPermissionRegistrationController(h.environment);
+  const result = await controller.reconcile();
+  await controller.optionalSettled();
+
+  assert.equal(result.ok, true);
+  assert.equal(result.registered, true);
+  assert.deepEqual(h.registered.map((scripts) => scripts.map(({ id }) => id)), [
+    REGISTRATIONS.map(({ id }) => id),
+    [VEIL.id],
+  ]);
+  assert.deepEqual(ids(h), [...REGISTRATIONS.map(({ id }) => id), VEIL.id]);
+  assert.equal(h.registered[1][0].runAt, "document_start");
+});
+
+test("the veil registration fails, the other two stay registered, setup stays finished", async () => {
+  const h = upgradeHarness({ origins: [...ORIGINS], config: VEIL_CONFIG });
+  const asked = refusingDocumentStart(h);
+  const controller = new EarnedPermissionRegistrationController(h.environment);
+  let first;
+  const warnings = await quietly(async () => {
+    first = await controller.reconcile();
+    await controller.optionalSettled();
   });
-  const config = Object.freeze({ ...CURRENT_CONFIG, registrations: Object.freeze([...REGISTRATIONS, veil]) });
+
+  assert.equal(first.ok, true);
+  assert.equal(first.registered, true);
+  assert.equal(first.error, undefined);
+  assert.deepEqual(asked, [REGISTRATIONS.map(({ id }) => id), [VEIL.id]]);
+  assert.deepEqual(ids(h), REGISTRATIONS.map(({ id }) => id), "the collector and the saved filters stay");
+  assert.equal(warnings.length, 1, "the refusal is logged");
+  assert.match(warnings[0], /trace-story-open-veil-v1/);
+  const setup = { ...STORE_BUILD_STATE, registrationVersion: 4 };
+  assert.deepEqual(h.store[EARNED_PERMISSION_STATE_KEY], setup,
+    "the finished setup, the grant time and the generation are as without the veil");
+
+  // Later starts find the two scripts registered and do not try again.
+  for (let start = 0; start < 3; start += 1) {
+    const again = new EarnedPermissionRegistrationController(h.environment);
+    assert.deepEqual(await again.reconcile(), {
+      ok: true, completeGrant: true, registered: true, changed: false, grantAt: STORE_BUILD_STATE.grantAt,
+    });
+    await again.optionalSettled();
+  }
+  assert.deepEqual(asked, [REGISTRATIONS.map(({ id }) => id), [VEIL.id]], "no re-register on every start");
+  assert.deepEqual(h.unregistered, []);
+  assert.deepEqual(h.store[EARNED_PERMISSION_STATE_KEY], setup);
+});
+
+test("a reader whose scripts are already registered is offered the optional one once per version", async () => {
+  let version = "1.0.2";
   const h = upgradeHarness({
     origins: [...ORIGINS],
     registrations: REGISTRATIONS,
-    config,
+    config: VEIL_CONFIG,
     state: { ...STORE_BUILD_STATE, registrationVersion: 4 },
   });
+  h.environment.runtime.getManifest = () => ({ version });
+  const asked = refusingDocumentStart(h);
+  const start = async () => {
+    const controller = new EarnedPermissionRegistrationController(h.environment);
+    const result = await controller.reconcile();
+    await controller.optionalSettled();
+    return result;
+  };
+
+  await quietly(async () => {
+    assert.equal((await start()).changed, false);
+    assert.equal((await start()).changed, false);
+  });
+  assert.deepEqual(asked, [[VEIL.id]], "tried once, without touching the other two");
+  assert.deepEqual(ids(h), REGISTRATIONS.map(({ id }) => id));
+
+  version = "1.0.3";
+  await quietly(start);
+  assert.deepEqual(asked, [[VEIL.id], [VEIL.id]], "an update tries once more");
+  assert.deepEqual(ids(h), REGISTRATIONS.map(({ id }) => id));
+  assert.deepEqual(h.unregistered, []);
+  assert.deepEqual(h.store[EARNED_PERMISSION_STATE_KEY], { ...STORE_BUILD_STATE, registrationVersion: 4 });
+});
+
+test("an optional script that never answers does not hold back the others", async () => {
+  const h = createHarness({ origins: [...ORIGINS], config: VEIL_CONFIG });
+  h.environment.optionalRegistrationTimeoutMs = 20;
+  const register = h.environment.scripting.registerContentScripts;
+  h.environment.scripting.registerContentScripts = (scripts) =>
+    scripts.some(({ runAt }) => runAt === "document_start") ? new Promise(() => {}) : register(scripts);
   const controller = new EarnedPermissionRegistrationController(h.environment);
+  const result = await controller.reconcile();
 
-  const first = await controller.reconcile();
-  const second = await controller.reconcile();
+  assert.equal(result.ok, true);
+  assert.equal(result.registered, true);
+  assert.deepEqual(ids(h), REGISTRATIONS.map(({ id }) => id));
+  const warnings = await quietly(() => controller.optionalSettled());
+  assert.equal(warnings.length, 1);
+});
 
-  assert.equal(first.changed, true);
-  assert.equal(second.changed, false);
-  assert.equal(h.registered.length, 1);
-  assert.deepEqual(
-    h.registrations.map(({ id, js, runAt }) => ({ id, js: [...js], runAt })),
-    [...REGISTRATIONS, veil].map(({ id, js, runAt }) => ({ id, js: [...js], runAt })),
-  );
-  assert.equal(h.store[EARNED_PERMISSION_STATE_KEY].completedAt, STORE_BUILD_STATE.completedAt);
+test("an ended grant removes the optional script with the others", async () => {
+  const h = createHarness({ registrations: [...REGISTRATIONS, VEIL], config: VEIL_CONFIG });
+  const result = await new EarnedPermissionRegistrationController(h.environment).reconcile();
+
+  assert.equal(result.completeGrant, false);
+  assert.deepEqual(h.unregistered, [[...REGISTRATIONS.map(({ id }) => id), VEIL.id]]);
+  assert.deepEqual(ids(h), []);
 });
 
 test("a reader who never finished setup still gets a fresh grant time when scripts are registered", async () => {

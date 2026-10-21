@@ -379,9 +379,9 @@ const archiveContentScript = {
 };
 // Hides a story page the Trace app has just opened while collector.js asks
 // whether a tab is already on that story (trace-open-veil.js). It has to run
-// before the page draws, so it is declared on its own at document_start. It
-// comes last in every list: recovery injects the listed files into open tabs
-// in this order, and collector.js has by then taken the mark off. The
+// before the page draws, so it is declared on its own at document_start, last
+// in the manifest. In the iPhone build it is an optional registration: tabs
+// already open are not given it, since it has nothing to do there. The
 // required-hosts compatibility shape below keeps its 0.6.5 scripts unchanged.
 const storyOpenVeilContentScript = {
   matches: SITE_HOST_MATCHES,
@@ -414,6 +414,10 @@ const earnedPermissionRegistrations = [
     persistAcrossSessions: true,
     excludeMatches: AO3_AUTH_EXCLUDE_MATCHES,
   },
+];
+// Registered in a call of its own once the others are in place. If Safari
+// refuses it, the page scripts above are unaffected and the veil is left out.
+const earnedPermissionOptionalRegistrations = [
   {
     id: "trace-story-open-veil-v1",
     matches: MINIMIZED_SITE_HOST_MATCHES,
@@ -431,6 +435,7 @@ const earnedPermissionRuntimeConfig = {
   ...(IOS_FIRST_TAP_SAVE ? { firstTapSave: true } : {}),
   origins: MINIMIZED_SITE_HOST_MATCHES,
   registrations: earnedPermissionRegistrations,
+  optionalRegistrations: earnedPermissionOptionalRegistrations,
 };
 
 // Rule 2 above. The proof build is for trying the first-tap save against the

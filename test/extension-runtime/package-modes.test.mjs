@@ -284,11 +284,13 @@ async function assertIphoneBundleFollowsTheGrant(bundle, builtManifest) {
   allowed = true;
   for (const listener of added) listener({ origins: builtManifest.optional_host_permissions });
   await turns();
+  // The veil comes in a call of its own, after the others.
   assert.deepEqual(registrations.map(({ id }) => id), [
     "trace-archive-automation-v1",
     "trace-ao3-saved-filters-v1",
     "trace-story-open-veil-v1",
   ]);
+  assert.equal(registrations[2].runAt, "document_start");
   assert.deepEqual(
     JSON.parse(JSON.stringify(queries)),
     [{ url: builtManifest.optional_host_permissions }],
@@ -303,7 +305,6 @@ async function assertIphoneBundleFollowsTheGrant(bundle, builtManifest) {
       "library-overlay-keys.js",
       "library-overlay.js",
       "ao3-saved-filters.js",
-      "trace-open-veil.js",
     ],
   }], "and the story tab that was already open gets the registered scripts");
 }
@@ -649,10 +650,14 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     assert.equal(iphoneOnboarding.version, 4);
     assert.equal(iphoneOnboarding.registrationMode, "dynamic");
     assert.deepEqual(Array.from(iphoneOnboarding.origins), MINIMIZED_SITE_HOST_MATCHES);
-    assert.equal(iphoneOnboarding.registrations.length, 3);
+    assert.equal(iphoneOnboarding.registrations.length, 2);
+    // The veil is optional: registered on its own, and nothing depends on it.
+    assert.equal(iphoneOnboarding.optionalRegistrations.length, 1);
     const iphoneArchiveRegistration = iphoneOnboarding.registrations[0];
-    const iphoneVeilRegistration = iphoneOnboarding.registrations[2];
+    const iphoneVeilRegistration = iphoneOnboarding.optionalRegistrations[0];
     assert.equal(iphoneVeilRegistration.id, "trace-story-open-veil-v1");
+    assert.equal(iphoneVeilRegistration.runAt, "document_start");
+    assert.equal(iphoneVeilRegistration.persistAcrossSessions, true);
     assert.deepEqual(Array.from(iphoneVeilRegistration.js), ["trace-open-veil.js"]);
     assert.deepEqual(Array.from(iphoneVeilRegistration.matches), Array.from(iphoneArchiveRegistration.matches));
     assert.deepEqual(
@@ -661,11 +666,7 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     );
     for (const registration of iphoneOnboarding.registrations) {
       assert.equal(registration.persistAcrossSessions, true);
-      // Only the veil runs before the page draws.
-      assert.equal(
-        registration.runAt,
-        registration.id === "trace-story-open-veil-v1" ? "document_start" : "document_end",
-      );
+      assert.equal(registration.runAt, "document_end");
       for (const match of registration.matches) {
         assert.ok(
           MINIMIZED_SITE_HOST_MATCHES.includes(match),
