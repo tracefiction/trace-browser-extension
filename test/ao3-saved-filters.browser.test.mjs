@@ -70,8 +70,8 @@ function presets(withActive) {
 
 const STATES = [
   { name: "unsaved", storage: { traceAo3SavedFiltersV1: presets(false) } },
-  { name: "save form", storage: { traceAo3SavedFiltersV1: presets(false) }, click: "[data-trace-sf-action='save-open']" },
-  { name: "long saved filter", storage: { traceAo3SavedFiltersV1: presets(true) }, click: "[data-trace-sf-action='show-all']" },
+  { name: "save sheet", storage: { traceAo3SavedFiltersV1: presets(false) }, click: "[data-trace-ao3-saved-filters] [data-trace-sf-action='sheet-save']" },
+  { name: "long saved filter", storage: { traceAo3SavedFiltersV1: presets(true) }, click: "[data-trace-sf-action='col-show-all']" },
 ];
 
 function storageStub(storage) {
@@ -103,7 +103,7 @@ test("saved filters never clip or scroll inside a narrow AO3 side bar", async ()
           await page.goto(URL_WITH_FILTERS);
           await page.evaluate(storageStub(state.storage));
           await page.evaluate(SCRIPT);
-          await page.waitForSelector("[data-trace-ao3-saved-filters] .trace-sf-card");
+          await page.waitForSelector("[data-trace-ao3-saved-filters] .trace-sf-col");
           if (state.click) {
             await page.click(state.click);
             await page.waitForTimeout(50);
@@ -111,16 +111,27 @@ test("saved filters never clip or scroll inside a narrow AO3 side bar", async ()
           const found = await page.evaluate(() => {
             const out = [];
             const root = document.querySelector("[data-trace-ao3-saved-filters]");
-            for (const el of [root, ...root.querySelectorAll("*")]) {
-              if (el instanceof SVGElement || el.tagName === "INPUT") continue;
+            const host = document.querySelector("[data-trace-ao3-saved-filters-sheet]");
+            // Names clamp at two lines and token lines end in "+n" by design.
+            const fitted = ".trace-sf-col-name, .trace-sf-col-tokens, .trace-sf-sheet-name, .trace-sf-tokens, .trace-sf-sheet-cell-cap, .trace-sf-sheet-body";
+            for (const el of [root, ...root.querySelectorAll("*"), ...(host ? host.querySelectorAll(".trace-sf-sheet *") : [])]) {
+              if (el instanceof SVGElement || el.tagName === "INPUT" || el.matches(fitted)) continue;
               const name = String(el.className || el.tagName);
               if (el.clientHeight > 0 && el.scrollHeight > el.clientHeight + 1) out.push(`${name} clips vertically`);
               if (el.clientWidth > 0 && el.scrollWidth > el.clientWidth + 1) out.push(`${name} clips horizontally`);
             }
-            const input = root.querySelector(".trace-sf-input");
+            for (const name of root.querySelectorAll(".trace-sf-col-name")) {
+              if (name.getBoundingClientRect().height > parseFloat(getComputedStyle(name).lineHeight) * 2 + 1) out.push(`${name.textContent} runs past two lines`);
+            }
+            const input = host && host.querySelector(".trace-sf-sheet-input");
             if (input) {
               const style = getComputedStyle(input);
-              if (style.paddingLeft !== "12px" || style.borderTopWidth !== "0px") out.push("AO3's text input styles reach the name field");
+              if (style.paddingLeft !== "14px" || style.borderTopWidth !== "0px") out.push("AO3's text input styles reach the name field");
+            }
+            if (host) {
+              const box = host.querySelector(".trace-sf-sheet").getBoundingClientRect();
+              if (box.left < 0 || box.right > window.innerWidth || box.top < 0 || box.bottom > window.innerHeight) out.push("the card leaves the window");
+              if (window.innerWidth > 672 && Math.abs((box.left + box.right) / 2 - window.innerWidth / 2) > 1) out.push("the card isn't centred");
             }
             if (document.documentElement.scrollWidth > window.innerWidth) out.push("the page scrolls sideways");
             return out;
