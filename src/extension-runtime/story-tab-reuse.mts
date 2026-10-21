@@ -5,9 +5,10 @@ import { extensionCall, type BrowserTab, type PermissionsPort, type RuntimeMessa
  * The Trace app marks the story links it opens in Safari (`#trace-open`).
  * A page that arrives with the mark asks, once, whether another tab already
  * shows the same story and chapter. If one does, that tab comes forward and
- * the new tab, which the app opened, closes. Nothing else is ever closed: a
- * tab the reader opened carries no mark, and the only tab that may close is
- * the one asking.
+ * the new tab, which the app opened, closes. A link to the story itself, with
+ * no chapter, is satisfied by a tab anywhere in that story. Nothing else is
+ * ever closed: a tab the reader opened carries no mark, and the only tab that
+ * may close is the one asking.
  */
 export const STORY_TAB_REUSE_MESSAGE = "TRACE_STORY_TAB_REUSE" as const;
 
@@ -45,6 +46,22 @@ export function storyTabKey(raw: unknown): string | null {
   } catch { return null; }
 }
 
+/**
+ * True for a link to the story itself rather than a place in it: AO3's work
+ * page without a chapter (not the whole-work view), or FanFiction.net's story
+ * page without a chapter.
+ */
+export function isWholeStoryLink(raw: unknown): boolean {
+  const key = storyTabKey(raw);
+  if (key === null) return false;
+  if (key.startsWith("ao3:")) return key.endsWith(":work");
+  return /^\/s\/[1-9]\d{0,19}\/?$/.test(new URL(raw as string).pathname);
+}
+
+function storyOf(key: string): string {
+  return key.slice(0, key.lastIndexOf(":"));
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -68,7 +85,7 @@ export function installStoryTabReuse(environment: Environment): (message: unknow
   const recent = new Map<number, number>();
   let queue: Promise<unknown> = Promise.resolve();
 
-  const reuse = async (senderTabId: number, key: string, deadline: number): Promise<StoryTabReuseResult> => {
+  const reuse = async (senderTabId: number, key: string, anyPlace: boolean, deadline: number): Promise<StoryTabReuseResult> => {
     if (!permissions) return NOTHING;
     // Only the story sites the reader has allowed are looked at: a query with
     // no address filter reads as a wish to see every open tab.
@@ -77,9 +94,12 @@ export function installStoryTabReuse(environment: Environment): (message: unknow
     if (!storySites.length) return NOTHING;
     const open = await bounded(call<readonly BrowserTab[]>(tabs, "query", [{ url: storySites }]), STEP_TIMEOUT_MS);
     if (!Array.isArray(open)) return NOTHING;
+    // A link to the whole story takes any tab in it; a chapter takes only itself.
+    const story = storyOf(key);
+    const matches = (tabKey: string | null) => tabKey !== null && (anyPlace ? storyOf(tabKey) === story : tabKey === key);
     const existing = open
       .filter(tab => Number.isInteger(tab.id) && tab.id !== senderTabId && tab.incognito !== true
-        && !recent.has(tab.id!) && storyTabKey(tab.url) === key)
+        && !recent.has(tab.id!) && matches(storyTabKey(tab.url)))
       .sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))[0];
     if (!existing || !tabs.update || now() > deadline) return NOTHING;
     const shown = await bounded(call(tabs, "update", [existing.id, { active: true }]).then(() => true), STEP_TIMEOUT_MS);
@@ -106,7 +126,8 @@ export function installStoryTabReuse(environment: Environment): (message: unknow
     recent.set(tabId!, at);
     // One question at a time, so two new tabs never settle on each other.
     const deadline = at + ACT_WITHIN_MS;
-    const turn = queue.then(() => reuse(tabId!, key, deadline)).catch(() => NOTHING);
+    const anyPlace = isWholeStoryLink(message.payload.url);
+    const turn = queue.then(() => reuse(tabId!, key, anyPlace, deadline)).catch(() => NOTHING);
     queue = turn;
     return turn;
   };
