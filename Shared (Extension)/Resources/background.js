@@ -11699,6 +11699,15 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return null;
     }
   }
+  function isWholeStoryLink(raw) {
+    const key = storyTabKey(raw);
+    if (key === null) return false;
+    if (key.startsWith("ao3:")) return key.endsWith(":work");
+    return /^\/s\/[1-9]\d{0,19}\/?$/.test(new URL(raw).pathname);
+  }
+  function storyOf(key) {
+    return key.slice(0, key.lastIndexOf(":"));
+  }
   function isRecord26(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
@@ -11728,14 +11737,16 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     );
     const recent = /* @__PURE__ */ new Map();
     let queue = Promise.resolve();
-    const reuse = async (senderTabId, key, deadline) => {
+    const reuse = async (senderTabId, key, anyPlace, deadline) => {
       if (!permissions) return NOTHING;
       const grants = await bounded3(call(permissions, "getAll", []), STEP_TIMEOUT_MS);
       const storySites = (grants?.origins ?? []).filter(isStorySitePattern);
       if (!storySites.length) return NOTHING;
       const open = await bounded3(call(tabs, "query", [{ url: storySites }]), STEP_TIMEOUT_MS);
       if (!Array.isArray(open)) return NOTHING;
-      const existing = open.filter((tab) => Number.isInteger(tab.id) && tab.id !== senderTabId && tab.incognito !== true && !recent.has(tab.id) && storyTabKey(tab.url) === key).sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))[0];
+      const story = storyOf(key);
+      const matches2 = (tabKey) => tabKey !== null && (anyPlace ? storyOf(tabKey) === story : tabKey === key);
+      const existing = open.filter((tab) => Number.isInteger(tab.id) && tab.id !== senderTabId && tab.incognito !== true && !recent.has(tab.id) && matches2(storyTabKey(tab.url))).sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))[0];
       if (!existing || !tabs.update || now() > deadline) return NOTHING;
       const shown = await bounded3(call(tabs, "update", [existing.id, { active: true }]).then(() => true), STEP_TIMEOUT_MS);
       if (shown !== true) return NOTHING;
@@ -11754,7 +11765,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (recent.has(tabId)) return NOTHING;
       recent.set(tabId, at);
       const deadline = at + ACT_WITHIN_MS;
-      const turn = queue.then(() => reuse(tabId, key, deadline)).catch(() => NOTHING);
+      const anyPlace = isWholeStoryLink(message.payload.url);
+      const turn = queue.then(() => reuse(tabId, key, anyPlace, deadline)).catch(() => NOTHING);
       queue = turn;
       return turn;
     };

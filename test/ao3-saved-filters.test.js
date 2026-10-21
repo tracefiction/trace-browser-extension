@@ -30,6 +30,11 @@ const SYNC_META_KEY = "traceAo3SavedFiltersSyncV1";
 const PREF_AO3_SAVED_FILTERS_KEY = "prefAo3SavedFiltersEnabled";
 const LAST_USED_KEY = "traceAo3SavedFiltersLastUsedV1";
 
+async function until(check, ms = 2000) {
+  const end = Date.now() + ms;
+  while (!check() && Date.now() < end) await sleep(10);
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1688,6 +1693,7 @@ test("on a phone Edit lists every filter; one filter's page renames, moves and d
   await sleep(10);
   let host = sheet(window);
   assert.equal(host.querySelector(".trace-sf-sheet-title").textContent, "Saved filters");
+  await until(() => window.document.activeElement === host.querySelector(".trace-sf-sheet-title"));
   assert.equal(window.document.activeElement, host.querySelector(".trace-sf-sheet-title"), "focus moves into the sheet");
   assert.match(host.getAttribute("style"), /--trace-page-teal:\s*#176E72/i, "light AO3 pages get light tokens");
   assert.deepEqual(Array.from(host.querySelectorAll(".trace-sf-sheet-group-label")).map((el) => el.textContent), ["This tag · Harry Potter - J. K. Rowling", "Any tag"]);
@@ -1715,12 +1721,13 @@ test("on a phone Edit lists every filter; one filter's page renames, moves and d
   host.querySelector("[data-trace-sf-action='edit-scope-global']").click();
   await sleep(10);
   sheet(window).querySelector("[data-trace-sf-action='edit-done']").click();
-  await sleep(80);
+  await until(() => storageState[STORAGE_KEY].find((preset) => preset.id === "p5")?.name === "Marauders era");
   const renamed = storageState[STORAGE_KEY].find((preset) => preset.id === "p5");
   assert.equal(renamed.name, "Marauders era");
   assert.equal(renamed.scope, "global");
   assert.equal(renamed.contextKey, "");
   assert.equal(sheet(window).querySelector(".trace-sf-sheet-title").textContent, "Saved filters");
+  await until(() => window.document.activeElement === sheet(window).querySelector("[data-trace-sf-action='sheet-edit'][data-id='p5']"));
   assert.equal(window.document.activeElement, sheet(window).querySelector("[data-trace-sf-action='sheet-edit'][data-id='p5']"));
 
   open("p1");
@@ -1728,6 +1735,7 @@ test("on a phone Edit lists every filter; one filter's page renames, moves and d
   sheet(window).querySelector("[data-trace-sf-action='sheet-back']").click();
   await sleep(10);
   assert.equal(sheet(window).querySelector(".trace-sf-sheet-title").textContent, "Saved filters", "Cancel goes back to the list");
+  await until(() => window.document.activeElement === sheet(window).querySelector("[data-trace-sf-action='sheet-edit'][data-id='p1']"));
   assert.equal(window.document.activeElement, sheet(window).querySelector("[data-trace-sf-action='sheet-edit'][data-id='p1']"));
 
   open("p3");
@@ -1735,7 +1743,7 @@ test("on a phone Edit lists every filter; one filter's page renames, moves and d
   sheet(window).querySelector("[data-trace-sf-action='edit-scope-context']").click();
   await sleep(10);
   sheet(window).querySelector("[data-trace-sf-action='edit-done']").click();
-  await sleep(80);
+  await until(() => storageState[STORAGE_KEY].find((preset) => preset.id === "p3")?.scope === "context");
   const scoped = storageState[STORAGE_KEY].find((preset) => preset.id === "p3");
   assert.equal(scoped.scope, "context");
   assert.equal(scoped.contextKey, `tagId:${TAG_ID.replace(/\+/g, " ")}`, "a filter moved to this tag takes this tag");
@@ -1746,15 +1754,17 @@ test("on a phone Edit lists every filter; one filter's page renames, moves and d
   await sleep(10);
   assert.equal(sheet(window).querySelector(".trace-sf-sheet-confirm-title").textContent, "Delete “New this week”?");
   assert.equal(sheet(window).querySelector(".trace-sf-sheet-confirm-detail").textContent, "It's deleted on every device. Nothing on AO3 changes.");
+  await until(() => window.document.activeElement === sheet(window).querySelector(".trace-sf-sheet-confirm"));
   assert.equal(window.document.activeElement, sheet(window).querySelector(".trace-sf-sheet-confirm"), "focus moves to the question");
   sheet(window).querySelector("[data-trace-sf-action='delete-cancel']").click();
   await sleep(10);
   assert.equal(sheet(window).querySelector(".trace-sf-sheet-confirm"), null);
+  await until(() => window.document.activeElement === sheet(window).querySelector("[data-trace-sf-action='delete-confirm']"));
   assert.equal(window.document.activeElement, sheet(window).querySelector("[data-trace-sf-action='delete-confirm']"));
   sheet(window).querySelector("[data-trace-sf-action='delete-confirm']").click();
   await sleep(10);
   sheet(window).querySelector("[data-trace-sf-action='delete']").click();
-  await sleep(80);
+  await until(() => !storageState[STORAGE_KEY].some((preset) => preset.id === "p4"));
   assert.equal(storageState[STORAGE_KEY].some((preset) => preset.id === "p4"), false);
   assert.equal(storageState[DELETED_KEY].at(-1).clientId, "p4");
   assert.equal(sheet(window).querySelector(".trace-sf-sheet-title").textContent, "Saved filters");
