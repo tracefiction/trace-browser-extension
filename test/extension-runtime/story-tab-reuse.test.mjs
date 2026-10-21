@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { installStoryTabReuse, storyTabKey, STORY_TAB_REUSE_MESSAGE } from '../../.trace-build/extension-runtime/story-tab-reuse.mjs';
+import { installStoryTabReuse, isWholeStoryLink, storyTabKey, STORY_TAB_REUSE_MESSAGE } from '../../.trace-build/extension-runtime/story-tab-reuse.mjs';
 
 const chapter = 'https://archiveofourown.org/works/123/chapters/456';
 const SITES = ['https://*.archiveofourown.org/*', 'https://www.fanfiction.net/*', 'https://m.fanfiction.net/*', 'https://trace.example.test/*'];
@@ -39,6 +39,48 @@ test('story keys name the site, the story and the chapter', () => {
   }
 });
 
+test('a link to the story itself is the work page or the chapterless story page', () => {
+  for (const raw of ['https://archiveofourown.org/works/123', 'https://archiveofourown.org/works/123/',
+    'https://archiveofourown.org/works/123?view_adult=true', 'https://archiveofourown.org/collections/fest/works/123',
+    'https://www.fanfiction.net/s/789', 'https://m.fanfiction.net/s/789/']) {
+    assert.equal(isWholeStoryLink(raw), true, raw);
+  }
+  for (const raw of [chapter, 'https://archiveofourown.org/works/123?view_full_work=true',
+    'https://www.fanfiction.net/s/789/1/Title', 'https://www.fanfiction.net/s/789/4/', 'https://archiveofourown.org/works/123/comments', 'not a url', 7]) {
+    assert.equal(isWholeStoryLink(raw), false, String(raw));
+  }
+});
+
+test('a link to the story itself brings forward the most recent tab anywhere in that story', async () => {
+  const work = 'https://archiveofourown.org/works/123';
+  const { calls, ask } = harness({ open: [
+    { id: 9, url: work },
+    { id: 3, url: 'https://archiveofourown.org/works/123/chapters/455', lastAccessed: 20 },
+    { id: 4, url: `${chapter}#workskin`, lastAccessed: 50 },
+    { id: 5, url: 'https://archiveofourown.org/works/123?view_full_work=true', lastAccessed: 30 },
+    { id: 6, url: chapter, incognito: true, lastAccessed: 99 },
+    { id: 7, url: 'https://archiveofourown.org/works/124/chapters/456', lastAccessed: 98 },
+  ] });
+  assert.deepEqual(await ask(work), { ok: true, reused: true, closed: true });
+  assert.deepEqual(calls.slice(1), [['update', 4, { active: true }], ['remove', 9]]);
+
+  const unknown = harness({ open: [{ id: 9, url: work },
+    { id: 3, url: 'https://archiveofourown.org/works/123/chapters/455' }, { id: 4, url: chapter }] });
+  assert.equal((await unknown.ask(work)).reused, true);
+  assert.deepEqual(unknown.calls.slice(1), [['update', 3, { active: true }], ['remove', 9]]);
+
+  const elsewhere = harness({ open: [{ id: 9, url: work }, { id: 7, url: 'https://archiveofourown.org/works/124/chapters/456' }] });
+  assert.equal((await elsewhere.ask(work)).reused, false);
+  assert.deepEqual(elsewhere.calls.slice(1), []);
+});
+
+test('a chapterless FanFiction.net link brings forward any chapter of that story', async () => {
+  const { calls, ask } = harness({ open: [{ id: 9, url: 'https://www.fanfiction.net/s/789' },
+    { id: 2, url: 'https://m.fanfiction.net/s/789/5/Title' }, { id: 3, url: 'https://www.fanfiction.net/s/790/5/Title', lastAccessed: 9 }] });
+  assert.deepEqual(await ask('https://www.fanfiction.net/s/789'), { ok: true, reused: true, closed: true });
+  assert.deepEqual(calls.slice(1), [['update', 2, { active: true }], ['remove', 9]]);
+});
+
 test('a marked new tab brings forward the open tab on the same chapter and closes itself', async () => {
   const { calls, ask } = harness({ open: [
     { id: 9, url: chapter },
@@ -64,6 +106,9 @@ test('a different chapter, story or view leaves every tab alone', async () => {
   }
   const ffn = harness({ open: [{ id: 9, url: 'https://www.fanfiction.net/s/789/4/Title' }, { id: 3, url: 'https://www.fanfiction.net/s/789/5/Title' }] });
   assert.equal((await ffn.ask('https://www.fanfiction.net/s/789/4/Title')).reused, false);
+  const whole = 'https://archiveofourown.org/works/123?view_full_work=true';
+  const full = harness({ open: [{ id: 9, url: whole }, { id: 3, url: chapter }, { id: 4, url: 'https://archiveofourown.org/works/123' }] });
+  assert.equal((await full.ask(whole)).reused, false);
 });
 
 test('FanFiction.net reuses the same chapter on either site', async () => {
