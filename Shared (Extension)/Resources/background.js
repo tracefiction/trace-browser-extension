@@ -3,7 +3,7 @@ const TRACE_API_BASE = "https://api.tracefiction.com";
 const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 (() => {
   // <define:__TRACE_IOS_EARNED_PERMISSION_CONFIG__>
-  var define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default = { version: 4, registrationMode: "dynamic", origins: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*", "https://www.fanfiction.net/*", "https://m.fanfiction.net/*"], registrations: [{ id: "trace-archive-automation-v1", matches: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*", "https://www.fanfiction.net/*", "https://m.fanfiction.net/*"], js: ["content-config.js", "trace-finish-qualify.js", "collector.js", "library-overlay-keys.js", "library-overlay.js"], runAt: "document_end", persistAcrossSessions: true, excludeMatches: ["https://archiveofourown.org/users/login*", "https://*.archiveofourown.org/users/login*", "https://archiveofourown.org/users/sign_up*", "https://*.archiveofourown.org/users/sign_up*", "https://archiveofourown.org/users/password*", "https://*.archiveofourown.org/users/password*", "https://archiveofourown.org/users/auth/*", "https://*.archiveofourown.org/users/auth/*", "https://archiveofourown.org/users/logout*", "https://*.archiveofourown.org/users/logout*", "https://archiveofourown.gay/users/login*", "https://*.archiveofourown.gay/users/login*", "https://archiveofourown.gay/users/sign_up*", "https://*.archiveofourown.gay/users/sign_up*", "https://archiveofourown.gay/users/password*", "https://*.archiveofourown.gay/users/password*", "https://archiveofourown.gay/users/auth/*", "https://*.archiveofourown.gay/users/auth/*", "https://archiveofourown.gay/users/logout*", "https://*.archiveofourown.gay/users/logout*", "https://archive.transformativeworks.org/users/login*", "https://archive.transformativeworks.org/users/sign_up*", "https://archive.transformativeworks.org/users/password*", "https://archive.transformativeworks.org/users/auth/*", "https://archive.transformativeworks.org/users/logout*", "https://ao3.org/users/login*", "https://*.ao3.org/users/login*", "https://ao3.org/users/sign_up*", "https://*.ao3.org/users/sign_up*", "https://ao3.org/users/password*", "https://*.ao3.org/users/password*", "https://ao3.org/users/auth/*", "https://*.ao3.org/users/auth/*", "https://ao3.org/users/logout*", "https://*.ao3.org/users/logout*", "https://www.fanfiction.net/login.php*", "https://www.fanfiction.net/signup.php*", "https://www.fanfiction.net/account/login*", "https://www.fanfiction.net/account/signup*", "https://www.fanfiction.net/auth/*", "https://m.fanfiction.net/login.php*", "https://m.fanfiction.net/signup.php*", "https://m.fanfiction.net/account/login*", "https://m.fanfiction.net/account/signup*", "https://m.fanfiction.net/auth/*"] }, { id: "trace-ao3-saved-filters-v1", matches: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*"], js: ["ao3-saved-filters.js"], runAt: "document_end", persistAcrossSessions: true, excludeMatches: ["https://archiveofourown.org/users/login*", "https://*.archiveofourown.org/users/login*", "https://archiveofourown.org/users/sign_up*", "https://*.archiveofourown.org/users/sign_up*", "https://archiveofourown.org/users/password*", "https://*.archiveofourown.org/users/password*", "https://archiveofourown.org/users/auth/*", "https://*.archiveofourown.org/users/auth/*", "https://archiveofourown.org/users/logout*", "https://*.archiveofourown.org/users/logout*", "https://archiveofourown.gay/users/login*", "https://*.archiveofourown.gay/users/login*", "https://archiveofourown.gay/users/sign_up*", "https://*.archiveofourown.gay/users/sign_up*", "https://archiveofourown.gay/users/password*", "https://*.archiveofourown.gay/users/password*", "https://archiveofourown.gay/users/auth/*", "https://*.archiveofourown.gay/users/auth/*", "https://archiveofourown.gay/users/logout*", "https://*.archiveofourown.gay/users/logout*", "https://archive.transformativeworks.org/users/login*", "https://archive.transformativeworks.org/users/sign_up*", "https://archive.transformativeworks.org/users/password*", "https://archive.transformativeworks.org/users/auth/*", "https://archive.transformativeworks.org/users/logout*", "https://ao3.org/users/login*", "https://*.ao3.org/users/login*", "https://ao3.org/users/sign_up*", "https://*.ao3.org/users/sign_up*", "https://ao3.org/users/password*", "https://*.ao3.org/users/password*", "https://ao3.org/users/auth/*", "https://*.ao3.org/users/auth/*", "https://ao3.org/users/logout*", "https://*.ao3.org/users/logout*"] }] };
+  var define_TRACE_IOS_EARNED_PERMISSION_CONFIG_default = { version: 4, registrationMode: "dynamic", origins: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*", "https://www.fanfiction.net/*", "https://m.fanfiction.net/*"], registrations: [{ id: "trace-archive-automation-v1", matches: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*", "https://www.fanfiction.net/*", "https://m.fanfiction.net/*"], js: ["content-config.js", "trace-finish-qualify.js", "collector.js", "library-overlay-keys.js", "library-overlay.js"], runAt: "document_end", persistAcrossSessions: true, excludeMatches: ["https://archiveofourown.org/users/login*", "https://*.archiveofourown.org/users/login*", "https://archiveofourown.org/users/sign_up*", "https://*.archiveofourown.org/users/sign_up*", "https://archiveofourown.org/users/password*", "https://*.archiveofourown.org/users/password*", "https://archiveofourown.org/users/auth/*", "https://*.archiveofourown.org/users/auth/*", "https://archiveofourown.org/users/logout*", "https://*.archiveofourown.org/users/logout*", "https://archiveofourown.gay/users/login*", "https://*.archiveofourown.gay/users/login*", "https://archiveofourown.gay/users/sign_up*", "https://*.archiveofourown.gay/users/sign_up*", "https://archiveofourown.gay/users/password*", "https://*.archiveofourown.gay/users/password*", "https://archiveofourown.gay/users/auth/*", "https://*.archiveofourown.gay/users/auth/*", "https://archiveofourown.gay/users/logout*", "https://*.archiveofourown.gay/users/logout*", "https://archive.transformativeworks.org/users/login*", "https://archive.transformativeworks.org/users/sign_up*", "https://archive.transformativeworks.org/users/password*", "https://archive.transformativeworks.org/users/auth/*", "https://archive.transformativeworks.org/users/logout*", "https://ao3.org/users/login*", "https://*.ao3.org/users/login*", "https://ao3.org/users/sign_up*", "https://*.ao3.org/users/sign_up*", "https://ao3.org/users/password*", "https://*.ao3.org/users/password*", "https://ao3.org/users/auth/*", "https://*.ao3.org/users/auth/*", "https://ao3.org/users/logout*", "https://*.ao3.org/users/logout*", "https://www.fanfiction.net/login.php*", "https://www.fanfiction.net/signup.php*", "https://www.fanfiction.net/account/login*", "https://www.fanfiction.net/account/signup*", "https://www.fanfiction.net/auth/*", "https://m.fanfiction.net/login.php*", "https://m.fanfiction.net/signup.php*", "https://m.fanfiction.net/account/login*", "https://m.fanfiction.net/account/signup*", "https://m.fanfiction.net/auth/*"] }, { id: "trace-ao3-saved-filters-v1", matches: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*"], js: ["ao3-saved-filters.js"], runAt: "document_end", persistAcrossSessions: true, excludeMatches: ["https://archiveofourown.org/users/login*", "https://*.archiveofourown.org/users/login*", "https://archiveofourown.org/users/sign_up*", "https://*.archiveofourown.org/users/sign_up*", "https://archiveofourown.org/users/password*", "https://*.archiveofourown.org/users/password*", "https://archiveofourown.org/users/auth/*", "https://*.archiveofourown.org/users/auth/*", "https://archiveofourown.org/users/logout*", "https://*.archiveofourown.org/users/logout*", "https://archiveofourown.gay/users/login*", "https://*.archiveofourown.gay/users/login*", "https://archiveofourown.gay/users/sign_up*", "https://*.archiveofourown.gay/users/sign_up*", "https://archiveofourown.gay/users/password*", "https://*.archiveofourown.gay/users/password*", "https://archiveofourown.gay/users/auth/*", "https://*.archiveofourown.gay/users/auth/*", "https://archiveofourown.gay/users/logout*", "https://*.archiveofourown.gay/users/logout*", "https://archive.transformativeworks.org/users/login*", "https://archive.transformativeworks.org/users/sign_up*", "https://archive.transformativeworks.org/users/password*", "https://archive.transformativeworks.org/users/auth/*", "https://archive.transformativeworks.org/users/logout*", "https://ao3.org/users/login*", "https://*.ao3.org/users/login*", "https://ao3.org/users/sign_up*", "https://*.ao3.org/users/sign_up*", "https://ao3.org/users/password*", "https://*.ao3.org/users/password*", "https://ao3.org/users/auth/*", "https://*.ao3.org/users/auth/*", "https://ao3.org/users/logout*", "https://*.ao3.org/users/logout*"] }], optionalRegistrations: [{ id: "trace-story-open-veil-v1", matches: ["https://*.archiveofourown.org/*", "https://*.archiveofourown.gay/*", "https://archive.transformativeworks.org/*", "https://www.fanfiction.net/*", "https://m.fanfiction.net/*"], js: ["trace-open-veil.js"], runAt: "document_start", persistAcrossSessions: true, excludeMatches: ["https://archiveofourown.org/users/login*", "https://*.archiveofourown.org/users/login*", "https://archiveofourown.org/users/sign_up*", "https://*.archiveofourown.org/users/sign_up*", "https://archiveofourown.org/users/password*", "https://*.archiveofourown.org/users/password*", "https://archiveofourown.org/users/auth/*", "https://*.archiveofourown.org/users/auth/*", "https://archiveofourown.org/users/logout*", "https://*.archiveofourown.org/users/logout*", "https://archiveofourown.gay/users/login*", "https://*.archiveofourown.gay/users/login*", "https://archiveofourown.gay/users/sign_up*", "https://*.archiveofourown.gay/users/sign_up*", "https://archiveofourown.gay/users/password*", "https://*.archiveofourown.gay/users/password*", "https://archiveofourown.gay/users/auth/*", "https://*.archiveofourown.gay/users/auth/*", "https://archiveofourown.gay/users/logout*", "https://*.archiveofourown.gay/users/logout*", "https://archive.transformativeworks.org/users/login*", "https://archive.transformativeworks.org/users/sign_up*", "https://archive.transformativeworks.org/users/password*", "https://archive.transformativeworks.org/users/auth/*", "https://archive.transformativeworks.org/users/logout*", "https://ao3.org/users/login*", "https://*.ao3.org/users/login*", "https://ao3.org/users/sign_up*", "https://*.ao3.org/users/sign_up*", "https://ao3.org/users/password*", "https://*.ao3.org/users/password*", "https://ao3.org/users/auth/*", "https://*.ao3.org/users/auth/*", "https://ao3.org/users/logout*", "https://*.ao3.org/users/logout*", "https://www.fanfiction.net/login.php*", "https://www.fanfiction.net/signup.php*", "https://www.fanfiction.net/account/login*", "https://www.fanfiction.net/account/signup*", "https://www.fanfiction.net/auth/*", "https://m.fanfiction.net/login.php*", "https://m.fanfiction.net/signup.php*", "https://m.fanfiction.net/account/login*", "https://m.fanfiction.net/account/signup*", "https://m.fanfiction.net/auth/*"] }] };
 
   // src/extension-runtime/browser-platform.mts
   var BrowserStorage = class {
@@ -9456,6 +9456,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var EARNED_PERMISSION_RETRY_DELAYS_MINUTES = Object.freeze([1, 5, 30, 180]);
   var EARNED_PERMISSION_RETRY_REST_MINUTES = 24 * 60;
   var EARNED_PERMISSION_ENDED_KEY = "traceEarnedPermissionEndedV1";
+  var EARNED_PERMISSION_OPTIONAL_ATTEMPT_KEY = "traceEarnedPermissionOptionalAttemptV1";
+  var OPTIONAL_REGISTRATION_TIMEOUT_MS = 5e3;
   var DEFAULT_RECONCILE_TIMEOUT_MS = 5e3;
   var DEFAULT_ENDED_GRANT_CONFIRM_DELAY_MS = 2e3;
   var UNKNOWN_PERMISSION_STATE = Symbol("unknown permission state");
@@ -9496,6 +9498,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #generation = 0;
     #running = 0;
     #expected = /* @__PURE__ */ new Set();
+    #optional = Promise.resolve();
     #tail = Promise.resolve({
       ok: false,
       completeGrant: false,
@@ -9538,6 +9541,64 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           resolve(true);
         });
       });
+    }
+    /** Resolves once the latest attempt at the optional page scripts has ended. */
+    optionalSettled() {
+      return this.#optional;
+    }
+    // Never awaited by a reconcile, so an optional script that the browser
+    // refuses, or a call that never answers, cannot hold back or fail the
+    // registration of the others.
+    #addOptional(currentIds, afterFullRegistration, generation) {
+      const missing = (this.#environment.config.optionalRegistrations ?? []).filter(
+        ({ id }) => !currentIds.has(id)
+      );
+      if (missing.length === 0) return;
+      const attempt = this.#attemptOptional(missing, afterFullRegistration, generation).catch(() => void 0);
+      this.#optional = this.#optional.then(() => attempt);
+    }
+    async #attemptOptional(missing, afterFullRegistration, generation) {
+      const { runtime, scripting, storage, storageMode } = this.#environment;
+      if (!scripting) return;
+      let extensionVersion = "";
+      try {
+        extensionVersion = runtime.getManifest?.().version ?? "";
+      } catch {
+        extensionVersion = "";
+      }
+      const stamp = `${extensionVersion}|${missing.map(({ id }) => id).join(",")}`;
+      if (!afterFullRegistration) {
+        const tried = await storage.get(EARNED_PERMISSION_OPTIONAL_ATTEMPT_KEY).then((value) => value[EARNED_PERMISSION_OPTIONAL_ATTEMPT_KEY]).catch(() => null);
+        if (tried === stamp) return;
+      }
+      if (this.#generation !== generation) return;
+      await storage.set({ [EARNED_PERMISSION_OPTIONAL_ATTEMPT_KEY]: stamp }).catch(() => void 0);
+      let timer;
+      try {
+        await Promise.race([
+          callExtensionApi(
+            scripting,
+            "registerContentScripts",
+            [missing],
+            runtime,
+            storageMode
+          ),
+          new Promise((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error("optional_registration_timeout")),
+              this.#environment.optionalRegistrationTimeoutMs ?? OPTIONAL_REGISTRATION_TIMEOUT_MS
+            );
+          })
+        ]);
+      } catch (error) {
+        console.warn(
+          "[Trace] An optional page script was not registered; the others are unaffected:",
+          missing.map(({ id }) => id).join(", "),
+          error instanceof Error ? error.message : String(error)
+        );
+      } finally {
+        clearTimeout(timer);
+      }
     }
     reconcile() {
       this.#running += 1;
@@ -9689,6 +9750,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       const registered = configuredIds.every((id) => currentIds.has(id));
       if (!completeGrant) {
         const staleIds = configuredIds.filter((id) => currentIds.has(id));
+        const staleOptionalIds = (config.optionalRegistrations ?? []).map(({ id }) => id).filter((id) => currentIds.has(id));
         const hadGrant = staleIds.length > 0 || stored.promptResult === "granted" || typeof stored.completedAt === "number";
         const alreadyConfirmed = endedConfirmed && staleIds.length === 0;
         if (hadGrant && !alreadyConfirmed) {
@@ -9698,12 +9760,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           this.#assertCurrent(generation);
           await storage.set({ [EARNED_PERMISSION_ENDED_KEY]: this.#environment.clock?.() ?? Date.now() }).catch(() => void 0);
         }
-        if (staleIds.length > 0) {
+        const removable = [...staleIds, ...staleOptionalIds];
+        if (removable.length > 0) {
           this.#assertCurrent(generation);
           await callExtensionApi(
             scripting,
             "unregisterContentScripts",
-            [{ ids: staleIds }],
+            [{ ids: removable }],
             runtime,
             storageMode
           ).catch(() => void 0);
@@ -9712,7 +9775,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           ok: false,
           completeGrant: false,
           registered: false,
-          changed: staleIds.length > 0,
+          changed: removable.length > 0,
           error: "permission_incomplete"
         });
       }
@@ -9730,6 +9793,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
             }
           });
         }
+        this.#addOptional(currentIds, false, generation);
         return Object.freeze({
           ok: true,
           completeGrant: true,
@@ -9783,6 +9847,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
             completedAt
           }
         });
+        this.#addOptional(currentIds, true, generation);
         return Object.freeze({
           ok: true,
           completeGrant: true,
