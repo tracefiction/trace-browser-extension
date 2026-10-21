@@ -26,6 +26,13 @@ export type WebsiteAccessReason =
   | "not_allowed"
   /** Some allowed and not all, read twice the same way. */
   | "partly_allowed"
+  /**
+   * As `not_allowed`, for a reader who allowed the story sites to an earlier
+   * version of Trace and has not allowed them to this one: the access they
+   * had before an update is gone. It says nothing of why, or of what they
+   * chose then.
+   */
+  | "not_allowed_since_update"
   /** Safari did not answer. */
   | "unreadable"
   /** Read as incomplete, without the two agreeing readings a blocker needs. */
@@ -124,6 +131,12 @@ export interface SafariReadinessPorts {
     preparation: SafariReadinessPreparation,
   ): Promise<"stored" | "stale_cycle" | "refused">;
   websiteAccess(): Promise<SafariWebsiteAccessReading>;
+  /**
+   * Whether the story sites were allowed to an earlier version of Trace and
+   * have not been allowed to this one since. Asked only once none is allowed;
+   * absent, or failing, is no.
+   */
+  allowedBeforeUpdate?(): Promise<boolean>;
   scriptRegistration(): Promise<ScriptRegistrationReason>;
   account(): Promise<SafariReadinessAccount>;
   /** The account session right now, or null for none. Compared for equality only. */
@@ -141,7 +154,7 @@ export type SafariReadinessOutcome =
   | { readonly kind: "refused"; readonly report: SafariReadinessReport };
 
 const ANSWERS: Readonly<Record<string, SafariReadinessAnswer>> = Object.freeze({
-  allowed: "positive", not_allowed: "blocker", partly_allowed: "blocker",
+  allowed: "positive", not_allowed: "blocker", partly_allowed: "blocker", not_allowed_since_update: "blocker",
   registered: "positive", declared: "positive", not_registered: "blocker", registration_failed: "blocker",
   connected: "positive", no_account: "blocker", reconnect_required: "blocker",
   on: "positive", off: "blocker",
@@ -281,6 +294,8 @@ export class SafariReadinessService {
     const second = await read();
     if (second.complete === true) return done("allowed");
     if (second.complete === null || second.granted === null) return done("unconfirmed");
-    return done(second.granted > 0 ? "partly_allowed" : "not_allowed");
+    if (second.granted > 0) return done("partly_allowed");
+    const before = await (this.#ports.allowedBeforeUpdate?.() ?? Promise.resolve(false)).catch(() => false);
+    return done(before === true ? "not_allowed_since_update" : "not_allowed");
   }
 }

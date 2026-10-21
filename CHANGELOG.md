@@ -4,6 +4,15 @@ This file lists the changes that matter to people using the Chrome, Edge and
 Firefox extension. The Safari extension ships inside the Trace iPhone app, and
 its notes go with each app release.
 
+## 1.0.2
+
+- **Saved filters on a phone.** In AO3's Filters, your saved filters for the tag sit at the top, with every other saved filter one tap away. Applying one shows a line above the works with Clear, and saving asks whether it's a new filter or an update.
+- **Saved filters come back.** A filter saved for a tag now shows on that tag's page whichever way you reached it, and your saved filters are fetched again when Trace connects.
+
+## 1.0.1
+
+- **Story summaries keep their paragraphs.** An AO3 summary with several paragraphs was saved as one run of text. Trace now keeps the paragraphs and line breaks, and stories you saved before get theirs back the next time Trace reads the summary.
+
 ## 1.0
 
 ### Your Library

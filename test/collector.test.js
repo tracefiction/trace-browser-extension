@@ -17,7 +17,9 @@ function collectorTestSource(source) {
 window.finishQualifyIsLastPostedChapter = finishQualifyIsLastPostedChapter;
 window.removeQuickAddElements = removeQuickAddElements;
 window.renderQuickAddButton = renderQuickAddButton;
-window.__traceTestHooks = { sendAutoTrackForStory, storyHandlePresentation, handleDisplay, storyHeadline, storyCaption };
+window.renderKernelProjectionUnavailable = renderKernelProjectionUnavailable;
+window.placeStorySheet = placeStorySheet;
+window.__traceTestHooks = { sendAutoTrackForStory, storyHandlePresentation, applyStoryInlineHandleState, handleDisplay, storyHeadline, storyCaption };
 })();`);
 }
 
@@ -290,6 +292,19 @@ test("collectAO3Work keeps the work summary on the Entire Work view", () => {
     "https://archiveofourown.org/works/7700201?view_full_work=true",
   );
   assert.equal(item.sm, WORK_SUMMARY, "chapter summaries further down are ignored");
+});
+
+test("collectAO3Work keeps a summary's paragraphs and line breaks apart", () => {
+  const html = loadFixture(path.join("ao3-work-summary", "one-shot.html")).replace(
+    "<p>One evening, one lamp, one detective.</p>",
+    "<p>Set after the finale, canon-compliant.</p><p>1971 - 1995</p><p>This IS a <em>slow</em>\n   burn.<br>Mostly.</p>",
+  );
+  const dom = new JSDOM(html, { url: "https://archiveofourown.org/works/7700202", runScripts: "outside-only" });
+  const { collectAO3Work } = createCollectorBindings(dom);
+  assert.equal(
+    collectAO3Work().sm,
+    "Set after the finale, canon-compliant.\n\n1971 - 1995\n\nThis IS a slow burn.\nMostly.",
+  );
 });
 
 test("collectAO3Work reads a one-shot's summary", () => {
@@ -1280,6 +1295,58 @@ test("the story handle never shows a bare Error", () => {
   dom.window.close();
 });
 
+test("a saved story's handle names its chapter as the popup's sheet does", () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://archiveofourown.org/works/28534965",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  installCollectorChrome(dom, createChromeMockForHooks());
+  dom.window.eval(collectorTestSource(fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"), "utf8")));
+  const hooks = dom.window.__traceTestHooks;
+  const saved = (chapters) => ({
+    hasAuth: true,
+    entry: { status: "PLANNING", readerStatus: "PLANNING", canonicalReaderStatus: "SAVED", chapters },
+  });
+  const drawn = (view) => {
+    const handle = dom.window.document.createElement("button");
+    hooks.applyStoryInlineHandleState(handle, hooks.storyHandlePresentation(view));
+    return handle;
+  };
+
+  // Chapter known: the same words and middle dot as the popup's record label.
+  for (const [chapters, label, spoken] of [
+    [{ current: 31, total: null }, "Saved · Chapter 31", "Trace: Saved to your Library, chapter 31"],
+    [{ current: 31, total: 40 }, "Saved · Chapter 31 of 40", "Trace: Saved to your Library, chapter 31 of 40"],
+  ]) {
+    const view = saved(chapters);
+    assert.equal(hooks.storyHandlePresentation(view).label, label);
+    assert.equal(hooks.handleDisplay(view), label);
+    const handle = drawn(view);
+    assert.equal(handle.textContent, label);
+    assert.equal(handle.getAttribute("aria-label"), spoken);
+    assert.equal(handle.getAttribute("data-trace-story-handle-state"), "status");
+    assert.equal(handle.getAttribute("data-trace-story-status"), "SAVED");
+    assert.ok(handle.querySelector("svg"), "the chevron still follows the label");
+  }
+
+  // Chapter unknown: plain Saved, as before.
+  for (const chapters of [undefined, null, { current: null, total: 12 }, { current: 0, total: 12 }]) {
+    const view = saved(chapters);
+    assert.equal(hooks.storyHandlePresentation(view).label, "Saved");
+    assert.equal(hooks.handleDisplay(view), "Saved");
+    const handle = drawn(view);
+    assert.equal(handle.textContent, "Saved");
+    assert.equal(handle.getAttribute("aria-label"), "Trace: Saved to your Library");
+  }
+
+  // Other statuses keep their compact progress.
+  const reading = { hasAuth: true, entry: { canonicalReaderStatus: "READING", chapters: { current: 2, total: 28 } } };
+  assert.equal(hooks.storyHandlePresentation(reading).label, "Reading");
+  assert.equal(hooks.storyHandlePresentation(reading).progress, "2/28");
+  dom.window.close();
+});
+
 function createChromeMockForHooks() {
   return {
     runtime: { onMessage: { addListener() {} }, lastError: null, sendMessage() {} },
@@ -1305,6 +1372,23 @@ test("detectAo3CurrentChapterNumber prefers the visible chapter heading text", (
   });
   const { detectAo3CurrentChapterNumber } = createCollectorBindings(dom);
   assert.equal(detectAo3CurrentChapterNumber(), 42);
+});
+
+test("collectAO3Listings keeps a blurb summary's paragraphs apart", () => {
+  const html = `<!doctype html><html><body>
+  <li id="work_999992" class="work blurb group" role="article">
+    <div class="header module">
+      <h4 class="heading"><a href="/works/999992">Two paragraphs</a></h4>
+    </div>
+    <blockquote class="userstuff summary"><p>canon-compliant.</p><p>1971 - 1995</p></blockquote>
+  </li></body></html>`;
+  const dom = new JSDOM(html, {
+    url: "https://archiveofourown.org/tags/Example/works",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  const { collectAO3Listings } = createCollectorBindings(dom);
+  assert.equal(collectAO3Listings()[0].sm, "canon-compliant.\n\n1971 - 1995");
 });
 
 test("collectAO3Listings: warnings from required-tags symbol titles when tag ul absent", () => {
@@ -2013,7 +2097,7 @@ test("an unavailable FanFiction.net story page is never saved automatically", as
 
 function createStoryAutoTrackPendingHarness(options = {}) {
   const dom = domFromFixture(
-    "ffn_story_mobile.html",
+    options.fixture || "ffn_story_mobile.html",
     options.url || "https://m.fanfiction.net/s/7038840/1/A-Chance-Encounter",
   );
   if (typeof options.mutateDom === "function") options.mutateDom(dom);
@@ -2810,6 +2894,99 @@ test("kernel pending first story automatically sends one bounded command and foc
     h.sent.filter((message) => message.type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR").length,
     0,
   );
+});
+
+test("kernel story control leaves Checking when Trace never answers, and a tap looks again", async () => {
+  let answering = false;
+  let unanswered = 0;
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    // Every wait in the page passes at once, so the retries run out quickly.
+    mutateDom(dom) {
+      const quick = dom.window.setTimeout.bind(dom.window);
+      dom.window.setTimeout = (callback, _ms, ...args) => quick(callback, 0, ...args);
+    },
+    onSendMessage(message, cb) {
+      if (message.type !== "TRACE_ACCOUNT_PROJECTION_GET" || answering) return false;
+      // A background that took the message and never replied.
+      unanswered += 1;
+      void cb;
+      return true;
+    },
+  });
+
+  const handle = h.dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.ok(handle);
+  for (let i = 0; i < 50 && handle.getAttribute("data-trace-story-handle-state") !== "unavailable"; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "unavailable");
+  assert.match(handle.textContent || "", /Try again/);
+  assert.doesNotMatch(handle.textContent || "", /Checking/);
+  assert.equal(handle.disabled, false);
+  assert.ok(unanswered >= 1);
+
+  answering = true;
+  handle.click();
+  for (let i = 0; i < 50 && handle.getAttribute("data-trace-story-handle-state") === "unavailable"; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.notEqual(handle.getAttribute("data-trace-story-handle-state"), "unavailable");
+  assert.notEqual(handle.getAttribute("data-trace-story-handle-state"), "checking");
+});
+
+test("kernel story control replaces the hidden placeholder when the last look-up fails", async () => {
+  let document = null;
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    mutateDom(dom) {
+      document = dom.window.document;
+      const quick = dom.window.setTimeout.bind(dom.window);
+      dom.window.setTimeout = (callback, _ms, ...args) => quick(callback, 0, ...args);
+    },
+    // The slot still holds its hidden placeholder each time the look-up fails.
+    projectionResponse: () => {
+      const handle = document.querySelector("[data-trace-story-handle]");
+      handle.setAttribute("data-trace-story-handle-state", "loading");
+      handle.style.visibility = "hidden";
+      return { ok: false, error: "runtime_unavailable" };
+    },
+  });
+  const handle = h.dom.window.document.querySelector("[data-trace-story-handle]");
+  for (let i = 0; i < 50 && handle.getAttribute("data-trace-story-handle-state") !== "unavailable"; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "unavailable");
+  assert.notEqual(handle.style.visibility, "hidden");
+});
+
+test("kernel story control keeps a shown state when a later look-up fails", async () => {
+  let fail = false;
+  const h = createStoryAutoTrackPendingHarness({
+    sessionMode: "kernel",
+    store: { prefAutoTrackEnabled: false },
+    projectionResponse: () => (fail ? { ok: false, error: "runtime_unavailable" } : {
+      ok: true,
+      snapshot: { state: "connected", reason: "none", canExecuteAuthenticated: true },
+      projection: {
+        entries: { "ffn:7038840": { status: "PLANNING", readerStatus: "PLANNING", canonicalReaderStatus: "SAVED" } },
+        workPreferences: {},
+        syncVersion: null,
+      },
+    }),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const handle = h.dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "status");
+
+  fail = true;
+  h.dom.window.renderQuickAddButton("ffn:7038840", 4);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(handle.getAttribute("data-trace-story-handle-state"), "status");
+  assert.match(handle.textContent || "", /Saved/);
 });
 
 test("kernel story control never offers Add before the onboarding handoff lookup settles", async () => {
@@ -6605,6 +6782,418 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
     sent.some((message) => message.type === "TRACE_OPEN_TRACE_URL"),
     false,
   );
+});
+
+test("the story sheet's Open in Trace opens the story in the Trace app on iPhone and iPad", () => {
+  const entryId = "00000000-0000-4000-8000-000000703884";
+  for (const [userAgent, maxTouchPoints, href, target] of [
+    [
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+      5,
+      `traceauth://open?destination=story&entryId=${entryId}`,
+      null,
+    ],
+    [
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15",
+      5,
+      `traceauth://open?destination=story&entryId=${entryId}`,
+      null,
+    ],
+    [
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15",
+      0,
+      `https://tracefiction.com/?panel=details&entryId=${entryId}`,
+      "_blank",
+    ],
+  ]) {
+    const dom = domFromFixture(
+      "ffn_story_mobile.html",
+      "https://m.fanfiction.net/s/7038840/3/A-Chance-Encounter"
+    );
+    Object.defineProperty(dom.window.navigator, "userAgent", { value: userAgent, configurable: true });
+    Object.defineProperty(dom.window.navigator, "maxTouchPoints", { value: maxTouchPoints, configurable: true });
+    const collectorSrc = fs.readFileSync(
+      path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+      "utf8",
+    );
+    const sent = [];
+    installCollectorChrome(dom, {
+      runtime: {
+        onMessage: { addListener() {} },
+        sendMessage(msg, cb) {
+          sent.push(msg);
+          if (typeof cb === "function") cb({ ok: true });
+        },
+        lastError: null,
+      },
+      storage: {
+        local: {
+          get(_keys, cb) {
+            cb({
+              authToken: "test-token",
+              libraryOverlayCache: {
+                entries: {
+                  "ffn:7038840": {
+                    entryId: entryId.toUpperCase(),
+                    status: "READING",
+                    readerStatus: "READING",
+                    chapters: { current: 3, total: 28 },
+                  },
+                },
+              },
+            });
+          },
+          set(_value, cb) {
+            if (typeof cb === "function") cb();
+          },
+        },
+        onChanged: { addListener() {} },
+      },
+    });
+    dom.window.eval(collectorTestSource(collectorSrc));
+    dom.window.document.dispatchEvent(
+      new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+    );
+    dom.window.document.querySelector("[data-trace-story-handle]").click();
+    const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+    const openInTrace = sheet.querySelector(".x-sheet-foot [data-trace-open-trace]");
+    assert.equal(openInTrace.getAttribute("href"), href, userAgent);
+    assert.equal(openInTrace.getAttribute("target"), target, userAgent);
+    assert.equal(sent.some((message) => message.type === "TRACE_OPEN_TRACE_URL"), false);
+  }
+});
+
+test("a redraw while reading never shows the closed story sheet", () => {
+  const dom = domFromFixture(
+    "ffn_story_mobile.html",
+    "https://m.fanfiction.net/s/7038840/3/A-Chance-Encounter"
+  );
+  const collectorSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  installCollectorChrome(dom, {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(_msg, cb) { if (typeof cb === "function") cb({ ok: true }); },
+      lastError: null,
+    },
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb({
+            authToken: "test-token",
+            libraryOverlayCache: {
+              entries: {
+                "ffn:7038840": {
+                  entryId: "00000000-0000-4000-8000-000000703884",
+                  status: "READING",
+                  readerStatus: "READING",
+                  chapters: { current: 3, total: 28 },
+                },
+              },
+            },
+          });
+        },
+        set(_value, cb) { if (typeof cb === "function") cb(); },
+      },
+      onChanged: { addListener() {} },
+    },
+  });
+  dom.window.eval(collectorTestSource(collectorSrc));
+  dom.window.document.dispatchEvent(new dom.window.Event("DOMContentLoaded", { bubbles: true }));
+  const sheet = dom.window.document.querySelector("[data-trace-story-sheet]");
+  const handle = dom.window.document.querySelector("[data-trace-story-handle]");
+  assert.equal(sheet.getAttribute("data-trace-open"), "0");
+  assert.equal(sheet.style.display, "none");
+  // The look-up Trace didn't answer: its redraw re-places the sheet and
+  // returns early, because the handle already shows the story's state.
+  dom.window.renderKernelProjectionUnavailable("ffn:7038840", handle.parentElement);
+  dom.window.placeStorySheet(sheet, handle.parentElement, handle);
+  assert.equal(sheet.style.display, "none", "a closed sheet stays closed");
+  handle.click();
+  assert.equal(sheet.getAttribute("data-trace-open"), "1");
+  dom.window.placeStorySheet(sheet, handle.parentElement, handle);
+  assert.equal(sheet.style.display, "block", "an open sheet stays open");
+});
+
+// A reader mid-chapter leaves Safari and comes back. Everything a return runs
+// (pageshow from the back-forward cache, visibility, focus, storage changes,
+// look-ups answered late, timed out or refused, the scripts injected again
+// when the background wakes, an automatic save) redraws the story control,
+// and none of it may show the story sheet. Only the reader's tap opens it.
+const RETURN_WORK_KEY = "ao3:28534965";
+const RETURN_ENTRY = {
+  entryId: "00000000-0000-4000-8000-000000285349",
+  status: "READING",
+  readerStatus: "READING",
+  canonicalReaderStatus: "READING",
+  chapters: { current: 3, total: 28 },
+};
+
+function connectedProjection(entries) {
+  return {
+    ok: true,
+    snapshot: { state: "connected", reason: "none", canExecuteAuthenticated: true },
+    projection: { entries: entries || {}, workPreferences: {}, syncVersion: null },
+  };
+}
+
+function createStoryReturnHarness(options = {}) {
+  const held = [];
+  let projection = "answer";
+  const h = createStoryAutoTrackPendingHarness(Object.assign({
+    sessionMode: "kernel",
+    fixture: "ao3_story.html",
+    url: "https://archiveofourown.org/works/28534965/chapters/69925506",
+    store: { prefAutoTrackEnabled: false },
+    mutateDom(dom) {
+      // A phone-width page: the sheet is the modal bottom sheet.
+      dom.window.matchMedia = (query) => ({
+        matches: /max-width:\s*640px/.test(query),
+        media: query,
+        addListener() {},
+        removeListener() {},
+        addEventListener() {},
+        removeEventListener() {},
+      });
+      // Waits keep their order but pass in milliseconds.
+      const quick = dom.window.setTimeout.bind(dom.window);
+      dom.window.setTimeout = (callback, ms, ...args) =>
+        quick(callback, Math.min(Number(ms) || 0, 4), ...args);
+    },
+    onSendMessage(message, cb) {
+      if (message.type !== "TRACE_ACCOUNT_PROJECTION_GET") return false;
+      if (projection === "hold") {
+        held.push(cb);
+        return true;
+      }
+      if (projection === "refuse") {
+        cb({ ok: false, error: "runtime_unavailable" });
+        return true;
+      }
+      cb(connectedProjection(options.entries || { [RETURN_WORK_KEY]: RETURN_ENTRY }));
+      return true;
+    },
+  }, options.harness || {}));
+
+  const { window } = h.dom;
+  const document = window.document;
+  // Every state the page can paint: a mutation observer runs once the task
+  // that changed the sheet has finished, so a closed sheet momentarily
+  // restyled inside one redraw is not a state the reader could see.
+  const shown = [];
+  const observer = new window.MutationObserver(() => {
+    const sheet = document.querySelector("[data-trace-story-sheet]");
+    if (!sheet || !sheet.isConnected) return;
+    if (sheet.getAttribute("data-trace-open") === "1" || sheet.style.display !== "none") {
+      shown.push({
+        step: h.step,
+        open: sheet.getAttribute("data-trace-open"),
+        display: sheet.style.display,
+      });
+    }
+  });
+  observer.observe(document.documentElement, {
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["style", "data-trace-open"],
+  });
+
+  function setVisible(visible) {
+    Object.defineProperty(document, "visibilityState", {
+      value: visible ? "visible" : "hidden",
+      configurable: true,
+    });
+    Object.defineProperty(document, "hidden", { value: !visible, configurable: true });
+  }
+
+  return Object.assign(h, {
+    step: "load",
+    shown,
+    held,
+    setProjection(next) {
+      projection = next;
+    },
+    answerHeld(response) {
+      while (held.length) held.shift()(response);
+    },
+    leave() {
+      h.step = "leave";
+      const pagehide = new window.Event("pagehide");
+      pagehide.persisted = true;
+      window.dispatchEvent(pagehide);
+      setVisible(false);
+      document.dispatchEvent(new window.Event("visibilitychange"));
+      window.dispatchEvent(new window.Event("blur"));
+    },
+    arrive() {
+      h.step = "arrive";
+      const pageshow = new window.Event("pageshow");
+      pageshow.persisted = true;
+      window.dispatchEvent(pageshow);
+      setVisible(true);
+      document.dispatchEvent(new window.Event("visibilitychange"));
+      window.dispatchEvent(new window.Event("focus"));
+    },
+    sheet() {
+      return document.querySelector("[data-trace-story-sheet]");
+    },
+    handle() {
+      return document.querySelector("[data-trace-story-handle]");
+    },
+    assertClosed(message) {
+      const sheet = document.querySelector("[data-trace-story-sheet]");
+      assert.ok(sheet, "the story sheet exists");
+      assert.notEqual(sheet.getAttribute("data-trace-open"), "1", message);
+      assert.equal(sheet.style.display, "none", message);
+      assert.deepEqual(shown, [], message);
+    },
+  });
+}
+
+function settle(ms = 30) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForHandleState(h, state) {
+  for (let i = 0; i < 100 && h.handle().getAttribute("data-trace-story-handle-state") !== state; i += 1) {
+    await settle(5);
+  }
+  assert.equal(h.handle().getAttribute("data-trace-story-handle-state"), state);
+}
+
+test("returning to a story mid-chapter never shows the closed story sheet", async () => {
+  const h = createStoryReturnHarness();
+  await waitForHandleState(h, "status");
+  assert.match(h.handle().textContent || "", /3\/28/);
+  h.assertClosed("loaded mid-chapter");
+
+  // Safari keeps the page while the reader is away. A look-up sent as they
+  // left never gets its answer; it times out once the page runs again.
+  h.setProjection("hold");
+  h.leave();
+  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 1);
+  await settle();
+  h.assertClosed("after leaving");
+
+  // Back in Safari, the background is still asleep: look-ups go unanswered
+  // and time out, so the control says Trace didn't answer.
+  h.arrive();
+  await settle(60);
+  h.assertClosed("look-ups unanswered on arrival");
+
+  // A look-up refused outright, retried, then answered seconds later.
+  h.setProjection("refuse");
+  h.arrive();
+  await settle(60);
+  h.assertClosed("look-ups refused and retried");
+
+  h.setProjection("answer");
+  h.answerHeld(connectedProjection({ [RETURN_WORK_KEY]: RETURN_ENTRY }));
+  h.arrive();
+  await waitForHandleState(h, "status");
+  await settle(60);
+  h.assertClosed("answered after the retries");
+
+  // The Library and the session change while the reader is back.
+  h.step = "storage";
+  h.dispatchStorageChange("traceAccountProjectionRevisionV1", 2);
+  h.dispatchStorageChange("libraryOverlayCache", { entries: {} });
+  h.dispatchStorageChange("traceAuthState", { state: "connected" });
+  h.dispatchStorageChange("traceWorkStatesV1", {});
+  await settle(60);
+  h.assertClosed("storage changes");
+
+  // The background wakes and injects the story scripts into the open tab
+  // again; the page keeps its one collector.
+  h.step = "reinject";
+  const collectorSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  h.dom.window.eval(collectorTestSource(collectorSrc));
+  await settle(60);
+  h.assertClosed("scripts injected again");
+
+  // The reader's tap still opens it.
+  h.step = "tap";
+  h.handle().click();
+  await settle();
+  assert.equal(h.sheet().getAttribute("data-trace-open"), "1");
+  assert.equal(h.sheet().style.display, "block");
+  assert.ok(h.shown.length > 0, "the observer sees an open sheet");
+});
+
+test("a look-up answered after the reader returns, while others time out, keeps the sheet closed", async () => {
+  // Arrival sends several look-ups. An answer redraws the control between
+  // look-ups that time out, and later retries are refused until none are
+  // left. The sheet stays shut through each redraw.
+  const h = createStoryReturnHarness();
+  await waitForHandleState(h, "status");
+  h.leave();
+  h.setProjection("hold");
+  h.arrive();
+  await settle(2);
+  h.answerHeld(connectedProjection({ [RETURN_WORK_KEY]: RETURN_ENTRY }));
+  await settle(60);
+  h.assertClosed("an answer between timeouts");
+  h.dom.window.renderQuickAddButton(RETURN_WORK_KEY);
+  await settle(60);
+  h.setProjection("refuse");
+  h.dom.window.renderQuickAddButton(RETURN_WORK_KEY);
+  await settle(80);
+  h.assertClosed("retries run out");
+  assert.equal(h.handle().getAttribute("data-trace-story-handle-state"), "status");
+});
+
+test("an automatic save at the Free limit never opens the story sheet", async () => {
+  // Automatic saves report a full Library on the control and in the notice;
+  // only the reader's own add opens the sheet to explain it. An account
+  // that is Unlimited gets no prompt from the background, and still the
+  // sheet stays shut.
+  for (const capacity of [
+    { blocked: true, prompt: true },
+    { blocked: false, prompt: false },
+    undefined,
+  ]) {
+    const h = createStoryReturnHarness({
+      entries: {},
+      harness: {
+        store: { prefAutoTrackEnabled: true },
+        autoTrackResponse: { ok: false, error: "free_limit_reached", capacity },
+      },
+    });
+    await waitForHandleState(h, "full");
+    assert.ok(h.sent.some((message) => message.type === "TRACE_AUTO_TRACK"));
+    h.assertClosed(`automatic save at the limit (${JSON.stringify(capacity)})`);
+    h.leave();
+
+    h.arrive();
+    await settle(60);
+    h.assertClosed("return after an automatic save at the limit");
+
+    h.step = "tap";
+    h.handle().click();
+    await settle();
+    assert.equal(h.sheet().getAttribute("data-trace-open"), "1", "a tap opens it");
+  }
+});
+
+test("the reader's own add at the Free limit opens the sheet to explain it", async () => {
+  const h = createStoryReturnHarness({
+    entries: {},
+    harness: {
+      quickAddResponse: { ok: false, error: "free_limit_reached", capacity: { blocked: true, prompt: true } },
+    },
+  });
+  await waitForHandleState(h, "add");
+  h.assertClosed("before the add");
+  h.step = "tap";
+  h.handle().click();
+  await settle(40);
+  assert.equal(h.sheet().getAttribute("data-trace-open"), "1");
+  assert.match(h.sheet().textContent || "", /wasn’t added/i);
 });
 
 test("FFN mobile story sheet hidden preference auth failures become connect actions", () => {

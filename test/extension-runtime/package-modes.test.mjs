@@ -43,6 +43,9 @@ const FIRST_TAP_WIRING = [
   // The exact-story read that "Check again" makes: no other build asks it.
   "library-membership",
   "not_in_library",
+  // The setup-step reporter: no other build tells Trace of a setup.
+  "TRACE_SETUP_STEP",
+  "/api/extension/setup-milestones",
 ];
 
 function assertNoFirstTapWiring(root, what) {

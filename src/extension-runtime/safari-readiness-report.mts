@@ -228,6 +228,22 @@ export function installSafariReadinessReport(environment: Environment): SafariRe
     return reason;
   };
 
+  /**
+   * The story sites were allowed to an earlier version of Trace: setup
+   * recorded a grant under an earlier generation of page scripts (the
+   * versions before this one declared them in their manifest), and none has
+   * been registered under this one since. A grant to this version records
+   * this version, so the answer goes once the reader allows them again.
+   */
+  const allowedBeforeUpdate = async (): Promise<boolean> => {
+    if (config.registrationMode !== "dynamic") return false;
+    const stored = await bounded(storage.get(EARNED_PERMISSION_STATE_KEY), BROWSER_READ_TIMEOUT_MS);
+    const state = stored?.[EARNED_PERMISSION_STATE_KEY];
+    if (!isRecord(state) || state.promptResult !== "granted") return false;
+    const generation = state.registrationVersion;
+    return Number.isInteger(generation) && Number(generation) > 0 && Number(generation) < config.version;
+  };
+
   const account = async (): Promise<SafariReadinessAccount> => {
     const session = environment.session();
     if (session === undefined) return { state: "pending" };
@@ -285,6 +301,7 @@ export function installSafariReadinessReport(environment: Environment): SafariRe
     prepare,
     deliver,
     websiteAccess,
+    allowedBeforeUpdate,
     scriptRegistration,
     account,
     session: () => environment.session()?.pageBinding() ?? null,
@@ -314,6 +331,13 @@ export function installSafariReadinessReport(environment: Environment): SafariRe
   });
   // After a grant the report itself waits for the registration the grant
   // sets off, however the two listeners happen to be ordered.
+  // An update can take away the access an earlier version had, with nothing
+  // on a page to say so. For a reader whose grant was to an earlier version,
+  // the update itself is reported, so the app need not wait for the popup.
+  runtime.onInstalled?.addListener((details) => {
+    if (details?.reason !== "update") return;
+    void allowedBeforeUpdate().then((before) => { if (before) reportQuietly(); }, () => undefined);
+  });
   permissions.onAdded?.addListener(reportQuietly);
   permissions.onRemoved?.addListener(reportQuietly);
   // Access can end with nothing to say so: a grant for one day runs out and

@@ -17,7 +17,7 @@ be in the way) or `unknown`, with a reason and the time it was read.
 
 | Component | `positive` | `blocker` | `unknown` |
 | --- | --- | --- | --- |
-| `websiteAccess` | `allowed`: every story site read as allowed just now | `not_allowed`, `partly_allowed`: read as incomplete twice, two seconds apart, with Safari listing what is allowed both times | `unreadable`: Safari did not answer. `unconfirmed`: read as incomplete without those two agreeing readings |
+| `websiteAccess` | `allowed`: every story site read as allowed just now | `not_allowed`, `partly_allowed`: read as incomplete twice, two seconds apart, with Safari listing what is allowed both times. `not_allowed_since_update`: as `not_allowed`, for a reader whose setup record holds a grant made to an earlier version of Trace (an earlier generation of page scripts) and none made to this one since | `unreadable`: Safari did not answer. `unconfirmed`: read as incomplete without those two agreeing readings |
 | `scriptRegistration` | `registered`: every page script present, registered by this build's generation. `declared`: a build that declares its page scripts in its manifest | `not_registered`: a registration that has finished found them not in, or two readings two seconds apart both found them absent with no registration under way. `registration_failed`: the story sites are allowed and a registration that has finished failed | `pending`: a registration is under way, or has not finished in six seconds. `unconfirmed`: read as absent without that confirmation. `unreadable` |
 | `account` | `connected`: the extension is using the provider the app issued, and Trace's service accepted it when the extension took it up. It is not checked with the service again for each report | `no_account`, `reconnect_required` (the service has since refused it) | `pending`, `unreachable`, `changed` (the account changed while the report was read), `mismatch` (the account in use is not the one the app's cycle is for) |
 | `automaticSaving` | `on`: read as on, or absent after a successful read | `off` | `unreadable` |
@@ -121,8 +121,17 @@ that is worth.
   it answered, or none. It is what was observed then. An app must never treat
   it as the answer to a cycle, or show it as the present state.
 
+`not_allowed_since_update` says only that the access the reader gave an
+earlier version is not there now. It does not say why, or what the reader
+chose then. It ends when the reader allows the story sites to this version,
+which records this version's generation.
+The record can't tell when access was lost, so a reader whose access ended
+before the update (an expired one-day grant, or access they removed) is also
+reported as `not_allowed_since_update`.
+
 The extension answers when Trace's popup opens, when Safari reports website
-access added or removed, when the page scripts are registered, removed or
+access added or removed, when an update installs for a reader whose grant was
+to an earlier version, when the page scripts are registered, removed or
 fail to register, when the automatic-saving preference changes, when the
 account session changes, and about once a day. A background that merely
 starts sends nothing.

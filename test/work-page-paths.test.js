@@ -422,6 +422,10 @@ function backgroundWith({ activeTabUrl }) {
           },
         }), { status: 200 });
       }
+      // Adopting the app's account also pulls its saved filters.
+      if (url.endsWith("/api/extension/ao3-saved-filters/sync")) {
+        return new Response("", { status: 503 });
+      }
       writes.push(url.replace("https://api.tracefiction.com", ""));
       return new Response(JSON.stringify({
         success: true,

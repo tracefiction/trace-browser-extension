@@ -286,8 +286,11 @@ export class SessionRuntimeController {
   readonly #finishQualification: FinishQualificationService;
   readonly #metadataContributions: MetadataContributionService;
   readonly #ffnSummaries: FfnSummaryFill | null;
+  /** State kept for one account, cleared when that account signs out or another replaces it. */
+  readonly #accountCleanups: (() => Promise<void>)[] = [];
   readonly #savedFilters: SavedFilterSyncService;
   readonly #savedFilterApi: SavedFilterSyncApi;
+  readonly #savedFilterRepository: BrowserSavedFilterRepository;
   readonly #nativeImportEnabled: boolean;
   readonly #nativeImport: NativeLibraryImportProducer;
   readonly #firstStoryInitiator: BrowserFirstStoryInitiator;
@@ -317,6 +320,7 @@ export class SessionRuntimeController {
   #savedFilterSyncInFlight: Promise<SavedFilterSyncResult> | null = null;
   #savedFilterSyncQueued = false;
   #savedFilterSyncQueuedWithCurrentAuthority = false;
+  #savedFilterAdoptedScope: string | null = null;
   #lastPublishedStatusKey: string | null = null;
   #statusPublicationTail: Promise<void> = Promise.resolve();
 
@@ -385,14 +389,15 @@ export class SessionRuntimeController {
       environment.fetch,
       environment.apiBase,
     );
+    this.#savedFilterRepository = new BrowserSavedFilterRepository({
+      storage,
+      session: this.#service,
+      randomId: environment.randomId,
+    });
     this.#savedFilters = new SavedFilterSyncService({
       session: this.#service,
       api: this.#savedFilterApi,
-      repository: new BrowserSavedFilterRepository({
-        storage,
-        session: this.#service,
-        randomId: environment.randomId,
-      }),
+      repository: this.#savedFilterRepository,
       clock: { now: () => new Date().toISOString() },
     });
     this.#accountData = new AccountDataRepository(this.#database, this.#service);
@@ -760,6 +765,17 @@ export class SessionRuntimeController {
       ) {
         const preparation = await this.#prepareNativeAuthority();
         return this.#response(preparation.action);
+      }
+      // A session left degraded (a request or storage that failed) is never
+      // tried again by itself, and the iPhone sheet has no Retry of its own:
+      // its "Try again" and every open of it read here. Try it again now, or
+      // the reader stays disconnected until Safari restarts the extension.
+      if (
+        isPopupSender(sender, this.#runtime.id) &&
+        state === "degraded" &&
+        (await this.#usesNativeAccountAuthority())
+      ) {
+        return this.#response((await this.#connectForCurrentState()) ?? undefined);
       }
       return this.#response();
     }
@@ -1353,6 +1369,19 @@ export class SessionRuntimeController {
     return Object.freeze({ state: "unknown" });
   }
 
+  /**
+   * Called when the account signed in signs out, or another account takes its
+   * place: whatever was kept for it is to be dropped. Never awaited for long:
+   * a cleanup that fails is let go.
+   */
+  whenAccountLeaves(cleanup: () => Promise<void>): void {
+    this.#accountCleanups.push(cleanup);
+  }
+
+  async #accountLeft(): Promise<void> {
+    await Promise.all(this.#accountCleanups.map((cleanup) => cleanup().catch(() => undefined)));
+  }
+
   /** The automatic-saving preference: a failed read is unknown, never "on". */
   async automaticSaving(): Promise<"on" | "off" | "unknown"> {
     try {
@@ -1572,6 +1601,7 @@ export class SessionRuntimeController {
 
   async #clearLegacyAfterDisconnect(result: SessionActionResult): Promise<void> {
     if (result.kind !== "completed" || result.state !== "signed_out") return;
+    await this.#accountLeft();
     try {
       await this.#ffnSummaries?.clear();
     } catch {
@@ -1897,6 +1927,8 @@ export class SessionRuntimeController {
       before?.epoch !== after?.epoch;
 
     if (scopeChanged) {
+      // Signed out in the app, or into another account there.
+      if (before !== null && before.accountId !== after?.accountId) await this.#accountLeft();
       try {
         await this.#accountData.clear();
       } catch {
@@ -1910,13 +1942,36 @@ export class SessionRuntimeController {
       await this.#publishAccountProjectionRevision();
     }
 
-    return Object.freeze({
-      ready:
-        action.kind === "completed" &&
-        action.state === "connected" &&
-        after !== null,
-      action,
-    });
+    const ready =
+      action.kind === "completed" &&
+      action.state === "connected" &&
+      after !== null;
+    if (ready) await this.#pullSavedFiltersForAdoptedScope(after, scopeChanged);
+    return Object.freeze({ ready, action });
+  }
+
+  // Adopting the app's account is the iPhone's sign-in, so it pulls the
+  // account's saved filters as a desktop sign-in does: when the account
+  // changed, or when this device has never synced them. Once per account in
+  // each background life, so a failing pull is not retried on every message.
+  async #pullSavedFiltersForAdoptedScope(
+    scope: AccountScope,
+    scopeChanged: boolean,
+  ): Promise<void> {
+    if (this.#mode !== "kernel") return;
+    const key = `${scope.accountId}:${scope.epoch}`;
+    if (this.#savedFilterAdoptedScope === key) return;
+    if (!scopeChanged) {
+      const lastSyncedAt = await this.#savedFilterRepository
+        .lastSyncedAt()
+        .catch(() => null);
+      if (lastSyncedAt !== null) {
+        this.#savedFilterAdoptedScope = key;
+        return;
+      }
+    }
+    this.#savedFilterAdoptedScope = key;
+    this.#queueSavedFilterSync(true);
   }
 
   requestSavedFilterSync(): void {
@@ -2159,10 +2214,11 @@ export interface StoryAdmissionHooks {
 export function installSessionRuntime(environment: RuntimeEnvironment): SessionRuntimeController {
   const controller = new SessionRuntimeController(environment);
   if (environment.mode === "kernel") {
-    SavedFilterSyncAlarm.install(
+    void SavedFilterSyncAlarm.install(
       environment.alarms,
       environment.runtime,
       () => controller.requestSavedFilterSync(),
+      environment.storageMode,
     );
   }
   environment.runtime.onMessage.addListener((message, sender, sendResponse) => {

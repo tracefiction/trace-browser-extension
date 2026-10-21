@@ -13,6 +13,7 @@ import { installSafariReadinessReport, type SafariReadinessReporter } from "./sa
 import { ACCOUNT_PROJECTION_REVISION_KEY } from "./runtime-messages.mjs";
 import { installTraceFirstInstallActivation } from "./trace-web-navigation.mjs";
 import { rememberConnectIntent } from "./connect-intent.mjs";
+import { installStoryTabReuse } from "./story-tab-reuse.mjs";
 export * from "./account-projection.mjs";
 export * from "./billing-conversion.mjs";
 export * from "./archive-readiness-status.mjs";
@@ -38,6 +39,7 @@ import type {
 } from "./browser-platform.mjs";
 import { BrowserStorage } from "./browser-platform.mjs";
 import { BrowserArchiveReadinessStatus } from "./archive-readiness-status.mjs";
+import { NativeStorySaveReceiptPort } from "./browser-adapters.mjs";
 
 declare const __TRACE_SESSION_MODE__: SessionMode;
 declare const __TRACE_API_BASE__: string;
@@ -223,6 +225,9 @@ try {
     }
   }
   if (!scope.indexedDB) throw new Error("private database unavailable");
+  // A story link the Trace app opened switches to the reader's tab already on
+  // that chapter (story-tab-reuse.mts).
+  installStoryTabReuse({ runtime: extension.runtime, tabs: extension.tabs, permissions: extension.permissions, mode: storageMode });
   let fallbackId = 0;
   const randomId = (): string => {
     const uuid = scope.crypto?.randomUUID?.();
@@ -285,6 +290,9 @@ try {
       // After Always Allow the registration runs on Safari's word of the new
       // access; what the sheet reads waits for it rather than racing it.
       ...(sheetRegistrationSettled ? { registrationSettled: sheetRegistrationSettled } : {}),
+      // The setup the Trace app has under way, as a save reads it.
+      setupAttempt: (accountId) =>
+        new NativeStorySaveReceiptPort(extension.runtime, storageMode, __TRACE_API_BASE__).prepareSaveReceipt(accountId),
     });
   }
   extension.storage.onChanged?.addListener((changes, area) => {

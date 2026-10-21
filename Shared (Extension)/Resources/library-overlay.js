@@ -31,6 +31,7 @@
   // fixed links carry no account, story or page data.
   const TRACE_IOS_APP_UNLIMITED_URL = "traceauth://open?destination=unlimited";
   const TRACE_IOS_APP_LIBRARY_URL = "traceauth://open?destination=library";
+  const TRACE_IOS_APP_SETUP_URL = "traceauth://open?destination=extension-connect";
   const ACCOUNT_PROJECTION_GET_MESSAGE = "TRACE_ACCOUNT_PROJECTION_GET";
   const ACCOUNT_PROJECTION_REVISION_KEY = "traceAccountProjectionRevisionV1";
   const MAX_PROJECTION_WORK_KEYS = 250;
@@ -116,6 +117,39 @@
     return overlayCacheMatchesRuntimeContext(cache, storage) ? cache : null;
   }
 
+  // AO3 summaries are paragraphs, and textContent runs them together
+  // ("canon-compliant.1971 - 1995This IS"). As collector.js: a blank line
+  // between blocks, a line break for each <br>, other whitespace collapsed.
+  var TRACE_TEXT_BLOCK_TAGS = /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|CENTER|DD|DETAILS|DIV|DL|DT|FIGCAPTION|FIGURE|FOOTER|H[1-6]|HEADER|HR|LI|OL|P|PRE|SECTION|TABLE|TR|UL)$/;
+
+  function blockText(el) {
+    if (!el) return null;
+    var out = "";
+    (function walk(node) {
+      for (var child = node.firstChild; child; child = child.nextSibling) {
+        if (child.nodeType === 3) {
+          out += String(child.nodeValue || "").replace(/\s+/g, " ");
+        } else if (child.nodeType === 1) {
+          var tag = String(child.tagName || "").toUpperCase();
+          if (tag === "BR") {
+            out += "\n";
+          } else if (tag !== "SCRIPT" && tag !== "STYLE") {
+            var block = TRACE_TEXT_BLOCK_TAGS.test(tag);
+            if (block) out += "\n\n";
+            walk(child);
+            if (block) out += "\n\n";
+          }
+        }
+      }
+    })(el);
+    return out
+      .split("\n")
+      .map(function (line) { return line.replace(/[ \t\u00a0]+/g, " ").trim(); })
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
   function usefulTraceUrl(rawUrl) {
     var fallback = TRACE_WEB_HOME_URL;
     if (!rawUrl) return fallback;
@@ -148,6 +182,39 @@
       return url.href;
     } catch (_) {
       return base;
+    }
+  }
+
+  // On iPhone and iPad "Open in Trace" opens the story in the Trace app. A
+  // website link would open the website: Safari does not hand it to the app.
+  // A story that is not in the Library yet opens the app at the Library.
+  var TRACE_ENTRY_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  function traceEntryAppUrl(entry) {
+    var entryId = entry && typeof entry.entryId === "string" ? entry.entryId.trim() : "";
+    if (!TRACE_ENTRY_ID_PATTERN.test(entryId)) return TRACE_IOS_APP_LIBRARY_URL;
+    return "traceauth://open?destination=story&entryId=" + entryId.toLowerCase();
+  }
+
+  function configureTraceEntryOpenLink(link, entry) {
+    if (isIosSafari()) {
+      link.href = traceEntryAppUrl(entry);
+      link.removeAttribute("target");
+      link.removeAttribute("rel");
+      return;
+    }
+    link.href = traceEntryOpenUrl(entry);
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+  }
+
+  // Follows a Trace app link from the reader's own tap. Safari asks to open
+  // the app and the page stays where it was.
+  function followTraceAppLink(url) {
+    try {
+      window.location.href = url;
+    } catch (_) {
+      // The app link is optional; the reader can always switch apps themselves.
     }
   }
 
@@ -1337,8 +1404,7 @@ function traceRefreshPageTokens() {
       }
     }
     categories = Array.from(new Set(categories)).slice(0, 10);
-    var summaryEl = row.querySelector("blockquote.userstuff.summary, .userstuff.summary");
-    var summary = summaryEl ? (summaryEl.textContent || "").trim() : null;
+    var summary = blockText(row.querySelector("blockquote.userstuff.summary, .userstuff.summary")) || null;
     return {
       src: "ao3",
       ctx: "listing",
@@ -3247,10 +3313,8 @@ function traceRefreshPageTokens() {
     actions.className = "x-sheet-foot";
     actions.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;background:" + TRACE_D1.card + ";border-top:1px solid " + TRACE_D1.line;
     var open = document.createElement("a");
-    open.href = traceEntryOpenUrl(entry);
+    configureTraceEntryOpenLink(open, entry);
     open.className = "x-pbtn x-pbtn-primary";
-    open.target = "_blank";
-    open.rel = "noopener noreferrer";
     open.appendChild(document.createTextNode("Open in Trace"));
     open.appendChild(traceIconEl("open"));
     open.style.cssText = surfacePrimaryButtonStyle();
@@ -3453,7 +3517,9 @@ function traceRefreshPageTokens() {
           });
           return;
         }
-        openTraceUrlInBrowserTab(traceOpenUrl());
+        // On iPhone and iPad the Trace app connects the extension.
+        if (isIosSafari()) followTraceAppLink(TRACE_IOS_APP_SETUP_URL);
+        else openTraceUrlInBrowserTab(traceOpenUrl());
         scheduleRun(350);
         setTimeout(function () {
           if (btn.getAttribute("data-trace-connect-checking") === "1") {
@@ -3799,7 +3865,8 @@ function traceRefreshPageTokens() {
           });
           return;
         }
-        window.open(traceOpenUrl(), "_blank", "noopener,noreferrer");
+        if (isIosSafari()) followTraceAppLink(TRACE_IOS_APP_SETUP_URL);
+        else window.open(traceOpenUrl(), "_blank", "noopener,noreferrer");
         scheduleRun(350);
         setTimeout(function () {
           if (btn.getAttribute("data-trace-connect-checking") === "1") {

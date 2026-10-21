@@ -321,3 +321,121 @@ test("controller syncs a local preset without exposing credentials to the AO3 pa
   assert.equal(Object.hasOwn(result, "credential"), false);
   assert.equal(calls.length, 2);
 });
+
+test("kernel alarm keeps an existing schedule across background starts", async () => {
+  const creates = [];
+  const alarms = {
+    async get(name) {
+      return name === "traceAo3SavedFiltersSync"
+        ? { name, periodInMinutes: 30, scheduledTime: 1 }
+        : undefined;
+    },
+    async create(name, options) {
+      creates.push({ name, options });
+    },
+    onAlarm: { addListener() {} },
+  };
+  await SavedFilterSyncAlarm.install(alarms, { onMessage: { addListener() {} } }, () => {}, "promise");
+  assert.deepEqual(creates, [], "an alarm already scheduled is never recreated");
+
+  alarms.get = async () => undefined;
+  await SavedFilterSyncAlarm.install(alarms, { onMessage: { addListener() {} } }, () => {}, "promise");
+  assert.deepEqual(creates, [{
+    name: "traceAo3SavedFiltersSync",
+    options: { periodInMinutes: 30 },
+  }]);
+});
+
+function iosAdoptionHarness({ storage = {}, accountId = "account-a" } = {}) {
+  const databaseFactory = new IDBFactory();
+  const database = new BrowserPrivateRecordDatabase(databaseFactory);
+  const area = new PromiseStorageArea(storage);
+  const syncRequests = [];
+  const controller = new SessionRuntimeController({
+    mode: "kernel",
+    runtime: {
+      id: "trace-extension",
+      onMessage: { addListener() {} },
+      async getPlatformInfo() { return { os: "ios" }; },
+      async sendNativeMessage(message) {
+        if (message?.type === "TRACE_IOS_AUTH_TOKEN_REQUEST") {
+          return {
+            ok: true,
+            protocolVersion: 3,
+            credential: "app-token",
+            credentialKind: "access_token",
+          };
+        }
+        return { ok: false, error: "unsupported" };
+      },
+    },
+    tabs: {
+      async query() { return []; },
+      async sendMessage() { return null; },
+      async create() { return null; },
+    },
+    alarms: { async clear() { return true; } },
+    databaseFactory,
+    privateDatabase: database,
+    storageArea: area,
+    storageMode: "promise",
+    fetch: async (url, options) => {
+      if (url.endsWith("/api/extension/account")) {
+        return new Response(JSON.stringify({ account_id: accountId }), { status: 200 });
+      }
+      if (url.endsWith("/api/extension/ao3-saved-filters/sync")) {
+        syncRequests.push(JSON.parse(options.body));
+        return new Response(JSON.stringify({
+          success: true,
+          data: responseData(),
+        }), { status: 200 });
+      }
+      return new Response("{}", { status: 404 });
+    },
+    apiBase: "https://api.tracefiction.com",
+    webOrigin: "https://www.tracefiction.com",
+    randomId: () => "runtime-id",
+  });
+  return {
+    controller,
+    area,
+    syncRequests,
+    async openPopup() {
+      await controller.start();
+      return controller.handle(
+        { type: "TRACE_SESSION_GET_SNAPSHOT" },
+        { id: "trace-extension" },
+      );
+    },
+  };
+}
+
+async function settle() {
+  for (let i = 0; i < 20; i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+test("adopting the iPhone app's account pulls that account's saved filters", async () => {
+  const harness = iosAdoptionHarness();
+  const response = await harness.openPopup();
+  assert.equal(response.snapshot.state, "connected");
+  await settle();
+  assert.equal(harness.syncRequests.length, 1, "adoption queues one pull");
+  assert.equal(harness.syncRequests[0].since, null);
+  assert.equal(harness.area.values.traceAo3SavedFiltersV1[0].name, "Kudos");
+  assert.equal(
+    harness.area.values.traceAo3SavedFiltersSyncV1.lastSyncedAt !== null,
+    true,
+  );
+
+  // A later page request re-reads the app's account; the same account is
+  // not queued a second pull on top of the one the page asked for.
+  const page = await harness.controller.handle(
+    { type: "TRACE_AO3_SAVED_FILTERS_SYNC_REQUEST" },
+    ao3Sender,
+  );
+  assert.equal(page.sync.kind, "completed");
+  await settle();
+  assert.equal(harness.syncRequests.length, 2);
+});

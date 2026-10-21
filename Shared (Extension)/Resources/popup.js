@@ -973,6 +973,19 @@ function normalizedEarnedState(value) {
   };
 }
 
+/**
+ * Whether setup recorded a grant under an earlier generation of page scripts
+ * (the versions before this one declared them in their manifest) and none has
+ * been recorded under this one since. A grant to this version records this
+ * version, so it is true only until the reader allows the story sites again.
+ */
+function earnedGrantPredatesThisVersion(onboarding) {
+  const version = EARNED_PERMISSION_ONBOARDING?.version;
+  return EARNED_PERMISSION_ONBOARDING?.registrationMode === "dynamic" && Number.isInteger(version) &&
+    onboarding?.promptResult === "granted" && Number.isInteger(onboarding.registrationVersion) &&
+    onboarding.registrationVersion < version;
+}
+
 async function readEarnedState() {
   const values = await earnedStorageGet([
     EARNED_PERMISSION_STATE_KEY,
@@ -1263,9 +1276,11 @@ function earnedLeadRow() {
 }
 
 /** The record sits under the headline, or after the body where a state asks. */
-function placeEarnedRecord(afterBody) {
+function placeEarnedRecord(afterBody, afterKicker = false) {
   const record = document.getElementById("popup-earned-record");
-  const anchor = afterBody ? earnedLeadRow() : document.getElementById("popup-earned-heading-row");
+  const anchor = afterKicker
+    ? document.getElementById("popup-earned-kicker")
+    : afterBody ? earnedLeadRow() : document.getElementById("popup-earned-heading-row");
   if (record && anchor && anchor.nextElementSibling !== record) anchor.after(record);
 }
 
@@ -1636,6 +1651,19 @@ function setEarnedAskLedger(story, access) {
 function renderEarnedPermissionInvitation(story) {
   setEarnedAskLedger(story, "waiting");
   const onStory = story.kind === "story";
+  if (earnedAllowedBeforeUpdate) {
+    // The 'allow again' ask after an update, on a story or a list alike.
+    drawEarnedAsk(onStory ? "ask-again-on-story" : "ask-again-on-list", {
+      kicker: FIRST_TAP_WORDS.againKicker,
+      kickerIcon: "alert",
+      heading: FIRST_TAP_WORDS.againHeading,
+      body: FIRST_TAP_WORDS.againBody,
+      rule: true,
+      primary: earnedAllow(),
+      secondary: firstTapButton.notNow,
+    });
+    return;
+  }
   // On a story the body says what to tap and the picture shows it; on a list
   // the rule line says it.
   drawEarnedAsk(onStory ? "ask-on-story" : "ask-on-list", {
@@ -2330,6 +2358,12 @@ async function readKnownInLibrary(rawUrl) {
 const FIRST_TAP_SHEET = EARNED_PERMISSION_ONBOARDING?.registrationMode === "dynamic";
 const FIRST_TAP_SAVES_ON_OPEN = FIRST_TAP_SHEET && EARNED_PERMISSION_ONBOARDING?.firstTapSave === true;
 const FIRST_TAP_POPUP_PORT = "trace-first-tap-popup-v1";
+// Two steps of setting up Trace in Safari, told to the background, which
+// reports them only while the Trace app has a setup under way: the sheet was
+// opened (on a story or not; never which page), and the answer to Safari's
+// question asked from this popup without the first-tap port.
+const SETUP_STEP_MESSAGE = "TRACE_SETUP_STEP";
+let setupSheetOpenedSent = false;
 let firstTapPort = null;
 let firstTapStory = null;
 let firstTapTab = null;
@@ -2402,6 +2436,10 @@ const FIRST_TAP_ASK_DEADLINE_MS = 60_000;
 // Whether this confirmed save has been drawn yet, so that its arrival plays
 // once: not again when Safari's question goes up, nor on coming back to it.
 let firstTapSavedDrawn = false;
+// The story sites were allowed to an earlier version of Trace and none is
+// allowed to this one: the ask is the 'allow again' ask after an update. A
+// partial grant gets the everyday ask. Read each time the sheet opens.
+let earnedAllowedBeforeUpdate = false;
 // What was last drawn, so that an arrival plays once and not on every redraw.
 let firstTapDrawn = null;
 let firstTapConfirmationDelivered = false;
@@ -2472,6 +2510,12 @@ const FIRST_TAP_WORDS = Object.freeze({
   listReadyBody: "Trace saves any story you open on AO3 or FanFiction.net.",
   partialHeading: "Safari didn’t allow every page",
   partialBody: "Tap Allow again and choose Always Allow, so Trace can save on every AO3 and FanFiction.net page.",
+  // The 'allow again' ask after an update: for a reader who allowed the story
+  // sites to an earlier version of Trace and has allowed none to this one.
+  // Nothing here says why, or what they chose before.
+  againKicker: "Safari needs your OK again",
+  againHeading: "Let Trace save by itself again",
+  againBody: "After the update, Safari asks once more. It lists AO3 and FanFiction.net’s 5 addresses.",
   notKnownHeading: "Trace couldn’t tell what you chose",
   notKnownBody: "You may have allowed AO3 and FanFiction.net already. Tap Check again, or Allow to ask again.",
 });
@@ -2737,6 +2781,7 @@ function drawFirstTapSheet(name, {
   prompt = false,
   record = null,
   recordAfterBody = false,
+  recordAfterKicker = false,
   note = null,
   ask = null,
   rule = false,
@@ -2764,7 +2809,7 @@ function drawFirstTapSheet(name, {
       ? (safariQuestionButtonsAreAllBlue() ? FIRST_TAP_WORDS.ruleEveryButtonBlue : FIRST_TAP_WORDS.rule)
       : "",
   });
-  placeEarnedRecord(recordAfterBody);
+  placeEarnedRecord(recordAfterBody, recordAfterKicker);
   if (record) {
     setSpokenAlternative(document.getElementById("popup-earned-record-byline"), record.spokenByline);
     setSpokenAlternative(document.getElementById("popup-earned-record-label"), record.spokenLabel);
@@ -2949,6 +2994,27 @@ function drawFirstTapConfirmed(view, { waiting = false } = {}) {
     void deliverFirstStoryConfirmation();
   }
   setEarnedCheck("popup-earned-save", "pass", "Saved", "Saved to Trace");
+  if (earnedAllowedBeforeUpdate) {
+    // The 'allow again' ask after an update: the record says where the story
+    // stands; the ask is to allow again, with the rule line above the button.
+    drawFirstTapSheet(waiting ? "access-waiting" : `${name}-again`, {
+      kicker: FIRST_TAP_WORDS.againKicker,
+      kickerIcon: "alert",
+      record: firstTapRecord(view),
+      recordAfterKicker: true,
+      heading: FIRST_TAP_WORDS.againHeading,
+      body: FIRST_TAP_WORDS.againBody,
+      rule: true,
+      primary: waiting ? firstTapButton.waiting : firstTapButton.allow,
+      secondary: firstTapButton.notNow,
+      result: "success",
+      announce: waiting
+        ? firstTapSpoken(FIRST_TAP_WORDS.waitingForSafari)
+        : [FIRST_TAP_WORDS.againKicker, FIRST_TAP_WORDS.againHeading, FIRST_TAP_WORDS.againBody].map(firstTapSpoken).join(" "),
+      motion: arriving ? "settled" : "",
+    });
+    return;
+  }
   drawFirstTapSheet(waiting ? "access-waiting" : name, {
     ...confirmation,
     heading: FIRST_TAP_WORDS.askHeading,
@@ -3210,7 +3276,10 @@ function renderFirstTapView(view, { waiting = false } = {}) {
             body: FIRST_TAP_WORDS.stillConfirmingBody,
             action: { label: FIRST_TAP_WORDS.checkAgain, action: "first_tap_check", emphasis: "tertiary" },
           },
-          ask: { heading: FIRST_TAP_WORDS.askHeading, body: FIRST_TAP_WORDS.askBody },
+          ask: earnedAllowedBeforeUpdate
+            ? { heading: FIRST_TAP_WORDS.againHeading, body: FIRST_TAP_WORDS.againBody }
+            : { heading: FIRST_TAP_WORDS.askHeading, body: FIRST_TAP_WORDS.askBody },
+          rule: earnedAllowedBeforeUpdate,
           primary: waiting ? firstTapButton.waiting : firstTapButton.allow,
           secondary: firstTapButton.keepReading,
           announce: waiting
@@ -3810,8 +3879,11 @@ async function prepareEarnedPermissionFlow() {
     readGrantedOrigins(),
   ]);
   const hasGrant = await readCompleteEarnedGrant(grantedOrigins);
+  earnedAllowedBeforeUpdate = !hasGrant && earnedGrantCoverage(grantedOrigins).granted === 0 &&
+    earnedGrantPredatesThisVersion(onboarding);
   const tab = await probeQueryActiveTab().catch(() => null);
   const story = classifyEarnedPage(tab?.url);
+  sendSetupSheetOpened(story);
   earnedCurrentPage = story.ok ? story : null;
   if (earnedCurrentPage?.kind === "story") {
     earnedCurrentPage = { ...earnedCurrentPage, knownInLibrary: await readKnownInLibrary(tab?.url) };
@@ -3903,6 +3975,30 @@ async function prepareEarnedPermissionFlow() {
   renderEarnedPermissionInvitation(story);
 }
 
+function sendSetupStep(detail) {
+  if (!FIRST_TAP_SHEET) return;
+  sendKernelRuntimeMessage({ type: SETUP_STEP_MESSAGE, ...detail }, () => {});
+}
+
+/** Once for each popup, on the kind of page it was opened on. */
+function sendSetupSheetOpened(page) {
+  if (setupSheetOpenedSent) return;
+  setupSheetOpenedSent = true;
+  sendSetupStep({ step: "sheet_opened", page: page?.ok && page.kind === "story" ? "story" : "other" });
+}
+
+/**
+ * The answer to Safari's question, read as the background reads it: every
+ * story site allowed is allowed, whatever the request returned; some of them
+ * is partial; only a request that came back false, with none allowed, is no.
+ */
+function earnedSetupAnswer(returned, complete, coverage) {
+  if (complete) return "granted";
+  if (coverage.granted > 0) return "partial";
+  if (returned === false) return "declined";
+  return "unanswered";
+}
+
 async function allowAccessAndAddEarnedStory() {
   const prepared = earnedPreparedContext;
   if (!prepared?.story?.ok) {
@@ -3919,16 +4015,22 @@ async function allowAccessAndAddEarnedStory() {
   if (permissionRequest) renderEarnedAskWaiting();
   const story = prepared.story;
   void recordEarnedEvent("website_access_action_started");
+  let answered = false;
   try {
     if (permissionRequest) {
       void recordEarnedEvent("website_access_requested");
     }
     const granted = permissionRequest ? await permissionRequest : true;
     const grantedOrigins = await readGrantedOrigins();
-    if (
-      granted !== true ||
-      !(await readCompleteEarnedGrant(grantedOrigins))
-    ) {
+    const complete = await readCompleteEarnedGrant(grantedOrigins);
+    if (permissionRequest) {
+      answered = true;
+      sendSetupStep({
+        step: "access_answered",
+        answer: earnedSetupAnswer(granted, complete, earnedGrantCoverage(grantedOrigins)),
+      });
+    }
+    if (granted !== true || !complete) {
       await writeEarnedState({ promptResult: "declined" });
       const coverage = earnedGrantCoverage(grantedOrigins);
       if (coverage.granted > 0 && granted === true) {
@@ -3960,6 +4062,8 @@ async function allowAccessAndAddEarnedStory() {
   } catch {
     void recordEarnedEvent("website_access_setup_failed");
     const grantedOrigins = await readGrantedOrigins();
+    // The request itself failed, so Safari asked nothing: no answer.
+    if (permissionRequest && !answered) sendSetupStep({ step: "access_answered", answer: "unanswered" });
     if (await readCompleteEarnedGrant(grantedOrigins)) {
       renderEarnedRegistrationFailure();
     } else {
@@ -5275,6 +5379,10 @@ for (const id of ["popup-cta", "popup-session-help"]) {
 }
 
 function openTraceApp(url) {
+  if (isTraceAppLink(url)) {
+    void openTraceAppLink(url);
+    return;
+  }
   try {
     if (ext.tabs?.create) {
       void extensionPromiseCall(ext.tabs, "create", [{ url }]).catch(() => {
@@ -5283,6 +5391,34 @@ function openTraceApp(url) {
     } else {
       window.location.href = url;
     }
+  } catch {
+    // The app link is optional; the reader can always switch apps themselves.
+  }
+}
+
+function isTraceAppLink(url) {
+  return typeof url === "string" && url.startsWith("traceauth:");
+}
+
+/**
+ * Hands a Trace app link to the app through the tab the reader is on. Safari
+ * gives the link to the app and leaves that page where it was. A new tab for
+ * the link would be left behind with nothing in it and no page to go back
+ * to once the app comes forward.
+ */
+async function openTraceAppLink(url) {
+  try {
+    const tabs = await extensionPromiseCall(ext.tabs, "query", [{ active: true, currentWindow: true }]);
+    const tab = Array.isArray(tabs) ? tabs[0] : null;
+    if (Number.isInteger(tab?.id)) {
+      await extensionPromiseCall(ext.tabs, "update", [tab.id, { url }]);
+      return;
+    }
+  } catch {
+    // No tab to hand it through: the popup follows the link itself.
+  }
+  try {
+    window.location.href = url;
   } catch {
     // The app link is optional; the reader can always switch apps themselves.
   }

@@ -6,8 +6,10 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
 // Real layout for the saved-filters panel inside a narrow AO3 Filters side
-// bar: nothing inside the panel may clip or scroll, and the page must not
-// scroll sideways, with long and many filters, on a light and a dark host.
+// bar on a wide screen: nothing inside the panel may clip or scroll, and the
+// page must not scroll sideways, with long and many filters, on a light and a
+// dark host. On a phone (AO3's 42em breakpoint) the column and the sheet must
+// fit the screen, keep 44 px targets and keep names on one line.
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = fs.readFileSync(path.join(ROOT, "Shared (Extension)", "Resources", "ao3-saved-filters.js"), "utf8");
 const LISTING = fs.readFileSync(path.join(ROOT, "test", "fixtures", "ao3_listing.html"), "utf8");
@@ -17,7 +19,7 @@ const FORM = LISTING.match(/<form class="narrow-hidden filters" id="work-filters
 
 // The parts of AO3's skin that reach the panel: buttons with a fixed em
 // height and nowrap, and the grey filter fieldset.
-function pageHtml(dark) {
+function pageHtml(dark, drawerWidth = "240px") {
   const bg = dark ? "#2a2a2a" : "#fff";
   const fieldset = dark ? "#333" : "#ddd";
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>
@@ -29,8 +31,8 @@ function pageHtml(dark) {
     form.filters dt { border-top: 1px solid #bbb; padding: 0.5em 0 0.25em; font-weight: bold; }
     form.filters dd { margin: 0 0 0.5em; }
     form.filters input[type="text"], form.filters select { box-sizing: border-box; max-width: 100%; border: 2px solid red; padding: 1px; }
-    .drawer { margin-left: auto; width: 85vw; padding: 0 12px; box-sizing: border-box; }
-  </style></head><body><div class="drawer">${FORM}</div></body></html>`;
+    .drawer { margin-left: auto; width: ${drawerWidth}; padding: 0 12px; box-sizing: border-box; }
+  </style></head><body><div class="navigation actions"><a id="go_to_filters" href="#work-filters">Filters</a></div><div class="drawer">${FORM}</div></body></html>`;
 }
 
 const TAG = "Harry+Potter+-+J*d*+K*d*+Rowling";
@@ -92,7 +94,7 @@ test("saved filters never clip or scroll inside a narrow AO3 side bar", async ()
   const browser = await chromium.launch({ headless: true });
   const problems = [];
   try {
-    for (const width of [320, 390]) {
+    for (const width of [700, 1024]) {
       for (const dark of [false, true]) {
         for (const state of STATES) {
           const page = await browser.newPage({ viewport: { width, height: 800 } });
@@ -126,6 +128,88 @@ test("saved filters never clip or scroll inside a narrow AO3 side bar", async ()
           for (const problem of found) problems.push(`${width}px ${dark ? "dark" : "light"} ${state.name}: ${problem}`);
           await page.close();
         }
+      }
+    }
+  } finally {
+    await browser.close();
+  }
+  assert.deepEqual(problems, []);
+});
+
+test("on a phone the column and the sheet fit the screen with 44 px targets", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const problems = [];
+  try {
+    for (const width of [320, 402]) {
+      for (const dark of [false, true]) {
+        const page = await browser.newPage({ viewport: { width, height: 800 } });
+        await page.route("https://archiveofourown.org/**", (route) =>
+          route.fulfill({ status: 200, contentType: "text/html", body: pageHtml(dark, "16em") }));
+        await page.goto(URL_WITH_FILTERS);
+        await page.evaluate(storageStub({ traceAo3SavedFiltersV1: presets(true) }));
+        await page.evaluate(SCRIPT);
+        await page.waitForSelector("[data-trace-ao3-saved-filters] .trace-sf-col");
+        const column = await page.evaluate(() => {
+          const out = [];
+          const root = document.querySelector("[data-trace-ao3-saved-filters]");
+          for (const button of root.querySelectorAll("button")) {
+            const box = button.getBoundingClientRect();
+            if (box.height < 44) out.push(`${button.textContent} is ${box.height}px tall`);
+          }
+          for (const name of root.querySelectorAll(".trace-sf-col-name")) {
+            const lineHeight = parseFloat(getComputedStyle(name).lineHeight);
+            if (name.getBoundingClientRect().height > lineHeight * 2 + 1) out.push(`${name.textContent} runs past two lines`);
+          }
+          for (const tokens of root.querySelectorAll(".trace-sf-col-tokens")) {
+            if (tokens.getBoundingClientRect().height > 20) out.push(`${tokens.textContent} wraps`);
+            // Only a single token too long for the line may end in "…".
+            const single = !tokens.textContent.includes(" · ") && getComputedStyle(tokens).textOverflow === "ellipsis";
+            if (tokens.scrollWidth > tokens.clientWidth + 1 && !single) out.push(`${tokens.textContent} is cut off`);
+          }
+          if (root.querySelectorAll(".trace-sf-col-row").length !== 3) out.push("not three names before Show all");
+          if (!root.querySelector("[data-trace-sf-action='col-show-all']")) out.push("no Show all");
+          if (document.documentElement.scrollWidth > window.innerWidth) out.push("the page scrolls sideways");
+          if (!document.querySelector("[data-trace-ao3-saved-filters-line]")) out.push("no Showing line");
+          return out;
+        });
+        await page.click("[data-trace-sf-action='sheet-open']");
+        await page.click("[data-trace-sf-action='sheet-edit'][data-id='long']");
+        await page.click("[data-trace-sf-action='sheet-back']");
+        const sheet = await page.evaluate(() => {
+          const out = [];
+          const host = document.querySelector("[data-trace-ao3-saved-filters-sheet]");
+          const box = host.querySelector(".trace-sf-sheet").getBoundingClientRect();
+          if (box.left < 0 || box.right > window.innerWidth + 0.5) out.push("the sheet is wider than the screen");
+          for (const line of host.querySelectorAll(".trace-sf-tokens")) {
+            if (line.getBoundingClientRect().height > 24) out.push(`${line.textContent} wraps`);
+          }
+          for (const name of host.querySelectorAll(".trace-sf-sheet-name")) {
+            const lineHeight = parseFloat(getComputedStyle(name).lineHeight);
+            if (name.getBoundingClientRect().height > lineHeight * 2 + 1) out.push(`${name.textContent} runs past two lines`);
+          }
+          if (!/\+\d+$/.test(host.querySelector(".trace-sf-sheet-row[data-id='long'] .trace-sf-tokens").textContent)) out.push("a long token line doesn't end in +n");
+          for (const button of host.querySelectorAll(".trace-sf-sheet button")) {
+            const b = button.getBoundingClientRect();
+            if (b.height < 44 || b.width < 44) out.push(`${button.getAttribute("aria-label") || button.textContent} is under 44 px`);
+          }
+          return out;
+        });
+        await page.click("[data-trace-sf-action='sheet-close']:not(.trace-sf-scrim)");
+        await page.click("[data-trace-sf-action='sheet-open']");
+        const fields = await page.evaluate(async () => {
+          document.querySelector("[data-trace-sf-action='sheet-edit'][data-id='p0']").click();
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          const out = [];
+          const input = document.querySelector("[data-trace-sf-edit-name]");
+          if (getComputedStyle(input).fontSize !== "16px") out.push("the name field is under 16 px");
+          for (const button of document.querySelectorAll(".trace-sf-sheet-foot button, .trace-sf-sheet-cell, .trace-sf-sheet-link")) {
+            const b = button.getBoundingClientRect();
+            if (b.height < 44) out.push(`${button.textContent} is under 44 px`);
+          }
+          return out;
+        });
+        for (const problem of [...column, ...sheet, ...fields]) problems.push(`${width}px ${dark ? "dark" : "light"}: ${problem}`);
+        await page.close();
       }
     }
   } finally {

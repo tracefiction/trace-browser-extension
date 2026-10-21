@@ -32,6 +32,15 @@ import {
 } from "./first-tap-save.mjs";
 import { readStoryMembership, StoryMembershipApi } from "./story-membership.mjs";
 import {
+  safariAccessAnswer,
+  sendAsSignedIn,
+  SetupMilestoneApi,
+  SetupMilestoneReporter,
+  setupStepFromMessage,
+  SETUP_STEP_MESSAGE,
+  type SetupStep,
+} from "./setup-milestones.mjs";
+import {
   HAND_OVER_BY_RELOADING_THE_PAGE,
   StorySiteAccess,
   type StorySiteAccessReading,
@@ -69,6 +78,8 @@ export interface FirstTapSession extends AuthenticatedStoryCommandPort {
     modeFor(tabId: number, workKey: string): Promise<StorySaveMode | null>;
     pageSaveAdmitted(tabId: number, workKey: string): void;
   }): void;
+  /** Calls `cleanup` when the account signs out or another takes its place. */
+  whenAccountLeaves?(cleanup: () => Promise<void>): void;
 }
 
 type Environment = Readonly<{
@@ -95,6 +106,12 @@ type Environment = Readonly<{
   registrationSettled?: () => Promise<boolean>;
   /** The pauses before reading the story sites again where a read may lag. */
   accessSettleDelaysMs?: readonly number[];
+  /**
+   * The Trace app's word on the setup it has under way for an account, read
+   * as a save prepares its receipt; it writes nothing. Absent where there is
+   * no app beside the extension: then no setup step is ever reported.
+   */
+  setupAttempt?: (accountId: string) => Promise<Readonly<Record<string, unknown>> | undefined>;
 }>;
 
 const hex = (bytes: Uint8Array): string =>
@@ -256,6 +273,42 @@ export function installFirstTapSave(environment: Environment): () => Promise<voi
         { frameId: 0 },
       ]).catch(() => undefined)));
   };
+  // Two steps of setting up Trace in Safari, for the setup the Trace app has
+  // under way (setup-milestones.mts). Kept in storage, cleared with the account.
+  const setupMilestones = environment.setupAttempt === undefined ? null : new SetupMilestoneReporter({
+    account: () => session.publicationScope()?.accountId ?? null,
+    attempt: environment.setupAttempt,
+    send: sendAsSignedIn(
+      (effect) => session.executeAuthenticated(effect),
+      new SetupMilestoneApi(environment.fetch, environment.apiBase),
+    ),
+    storage: {
+      get: (key) => storage.get(key),
+      set: (patch) => storage.set(patch),
+      remove: (key) => storage.remove(key),
+    },
+    now: environment.now ?? (() => Date.now()),
+  });
+  if (setupMilestones !== null) session.whenAccountLeaves?.(() => setupMilestones.clear());
+  /** Reported beside whatever is under way; nothing waits on it. */
+  const setupStep = (step: SetupStep): void => {
+    if (setupMilestones === null) return;
+    void account().then(
+      (read) => read.state === "verified" ? setupMilestones.record(step) : undefined,
+    ).catch(() => undefined);
+  };
+  // Trace's popup says it was opened, and on what kind of page, and what came
+  // of Safari's question where the popup asked it without this port.
+  runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if ((message as { readonly type?: unknown } | null)?.type !== SETUP_STEP_MESSAGE) return false;
+    const step = sender?.id === runtime.id && isPopupSender(sender, runtime.id)
+      ? setupStepFromMessage(message)
+      : null;
+    if (step !== null) setupStep(step);
+    sendResponse({ ok: step !== null });
+    return false;
+  });
+
   // A page in manual mode asks for itself when the reader comes back to it.
   // That reaches a background that was asleep when the sites were allowed.
   runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -361,8 +414,19 @@ export function installFirstTapSave(environment: Environment): () => Promise<voi
         // acknowledged at once: the check that follows can take some seconds,
         // and the popup must not take a slow background for one that is gone.
         if (request.command === "access_answered" && order.order !== undefined) post({ checking: order.order });
+        const resolves = request.command === "access_answered" || request.command === "access_unanswered";
         void siteAccess.answered(show, ask).then(
-          (access) => post({ access, ...answered, ...order }),
+          (access) => {
+            post({ access, ...answered, ...order });
+            // The ask came back, or the popup stopped waiting on it: what
+            // was read is the reader's answer, for the setup under way. A
+            // look while the request is out answers only once it finds the
+            // sites allowed; a look with nothing asked never does.
+            const answer = resolves || (request.command === "access_waiting" && access.state === "allowed")
+              ? safariAccessAnswer(access)
+              : null;
+            if (answer !== null) setupStep({ kind: "access_answered", answer });
+          },
           () => post({ access: Object.freeze({ state: "not_known" }), ...answered, ...order }),
         );
         return;

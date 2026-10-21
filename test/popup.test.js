@@ -230,6 +230,7 @@ function createPopupHarness({
   const popupDisconnects = [];
   const heldSnapshotReplies = [];
   const createdTabs = [];
+  const updatedTabs = [];
   const permissionListeners = { added: [], removed: [] };
   // The background's side of the first-tap port: what the popup asked for,
   // and a way to send it a state.
@@ -365,6 +366,11 @@ function createPopupHarness({
         createdTabs.push(properties.url);
         if (promiseRuntime) return Promise.resolve({ id: 99 });
         callback?.({ id: 99 });
+      },
+      update(tabId, properties, callback) {
+        updatedTabs.push({ tabId, url: properties.url });
+        if (promiseRuntime) return Promise.resolve({ id: tabId });
+        callback?.({ id: tabId });
       },
       query(_query, callback) {
         if (promiseRuntime) return Promise.resolve([activeTab]);
@@ -538,6 +544,7 @@ function createPopupHarness({
     messages,
     tabMessages,
     createdTabs,
+    updatedTabs,
     injections,
     permissionRequests,
     hostLifecycle,
@@ -1794,6 +1801,45 @@ test("iOS: enabled but not yet linked points to one step in the Trace app", asyn
   assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Open Trace");
   assert.equal(h.document.getElementById("popup-earned-primary").dataset.earnedAction, "open_connect");
   assert.equal(h.document.getElementById("popup-import").hidden, true);
+});
+
+function iosNotLinkedHarness(options = {}) {
+  return createPopupHarness({
+    grantedOrigins: [...FULL_EARNED_ORIGINS],
+    sessionMode: "kernel",
+    earnedPermissionOnboarding: true,
+    promiseRuntime: true,
+    userAgent:
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+    storageState: { traceEarnedPermissionOnboardingV1: { completedAt: Date.now() - 5000 } },
+    sessionSnapshot: {
+      state: "signed_out",
+      accountId: null,
+      canExecuteAuthenticated: false,
+      reason: "credential_absent",
+    },
+    ...options,
+  });
+}
+
+test("iOS: Open Trace hands the app link through the reader's tab and opens no new tab", async () => {
+  const h = iosNotLinkedHarness();
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  const primary = h.document.getElementById("popup-earned-primary");
+  assert.equal(primary.dataset.earnedAction, "open_connect");
+  primary.click();
+  for (let attempt = 0; attempt < 4; attempt += 1) await flush();
+  assert.deepEqual(h.createdTabs, [], "a new tab would be left blank once the app comes forward");
+  assert.deepEqual(h.updatedTabs, [{ tabId: 7, url: "traceauth://open?destination=extension-connect" }]);
+});
+
+test("iOS: with no tab to hand it through, Open Trace still opens no new tab", async () => {
+  const h = iosNotLinkedHarness({ activeTab: null });
+  for (let attempt = 0; attempt < 8; attempt += 1) await flush();
+  h.document.getElementById("popup-earned-primary").click();
+  for (let attempt = 0; attempt < 4; attempt += 1) await flush();
+  assert.deepEqual(h.createdTabs, []);
+  assert.deepEqual(h.updatedTabs, []);
 });
 
 for (const reason of [
@@ -3546,7 +3592,8 @@ for (const device of [
     assert.equal(primary.textContent, "See Trace Unlimited");
     primary.click();
     for (let attempt = 0; attempt < 4; attempt += 1) await flush();
-    assert.deepEqual(h.createdTabs, [IOS_APP_UNLIMITED_URL]);
+    assert.deepEqual(h.createdTabs, [], "an app link never leaves a new tab behind");
+    assert.deepEqual(h.updatedTabs, [{ tabId: 7, url: IOS_APP_UNLIMITED_URL }]);
   });
 }
 
@@ -3604,7 +3651,13 @@ for (const [name, options, expected] of [
     cta.click();
     for (let attempt = 0; attempt < 4; attempt += 1) await flush();
     assert.equal(cta.textContent, "See Trace Unlimited");
-    assert.deepEqual(h.createdTabs, [expected]);
+    if (expected === IOS_APP_UNLIMITED_URL) {
+      assert.deepEqual(h.createdTabs, []);
+      assert.deepEqual(h.updatedTabs, [{ tabId: 7, url: expected }]);
+    } else {
+      assert.deepEqual(h.createdTabs, [expected]);
+      assert.deepEqual(h.updatedTabs, [], "a web page never replaces the reader's page");
+    }
   });
 }
 
@@ -3811,9 +3864,11 @@ test("the iPhone reader view shows Import from this page on a listing and starts
   assert.equal(isDisplayed(h, link), true);
   assert.equal(link.getAttribute("href"), `traceauth://open?destination=library-import&handoff=${HANDOFF_ID}`);
   assert.deepEqual(h.createdTabs, [], "nothing opens without the reader's own tap");
+  assert.deepEqual(h.updatedTabs, [], "nothing opens without the reader's own tap");
   link.click();
   for (let attempt = 0; attempt < 4; attempt += 1) await flush();
-  assert.deepEqual(h.createdTabs, [`traceauth://open?destination=library-import&handoff=${HANDOFF_ID}`]);
+  assert.deepEqual(h.createdTabs, []);
+  assert.deepEqual(h.updatedTabs, [{ tabId: 7, url: `traceauth://open?destination=library-import&handoff=${HANDOFF_ID}` }]);
   assert.equal(h.closeCalled, false);
 });
 
@@ -4333,6 +4388,53 @@ test("first tap: saved, already there and found are drawn from the background's 
     assert.equal(element("popup-earned-primary").dataset.emphasis, "primary");
     assert.deepEqual(h.permissionRequests, [], "the ask asks Safari nothing by itself");
   }
+});
+
+test("first tap: a reader who allowed the story sites to an earlier version is asked to allow again after an update, with the story's record", async () => {
+  // The harness's build registers generation 3; the grant was recorded by 2.
+  const earlier = { grantAt: 1, registrationVersion: 2, promptResult: "granted", completedAt: 1 };
+  const onboarding = { registrationMode: "dynamic", firstTapSave: true };
+  const { h, element, announced, sheet } = await openFirstTapPopup({
+    earnedPermissionOnboarding: onboarding,
+    storageState: { traceEarnedPermissionOnboardingV1: earlier },
+  });
+  h.firstTap.show({ state: "confirmed", workKey: "ao3:123", provenance: "already", mode: "bounded_manual", story: FIRST_TAP_STORY, entry: FIRST_TAP_ENTRY });
+  const drawn = sheet();
+  assert.equal(drawn.state, "already-in-library-again");
+  assert.equal(drawn.kicker, "Safari needs your OK again");
+  assert.equal(drawn.heading, "Let Trace save by itself again");
+  assert.equal(drawn.body, "After the update, Safari asks once more. It lists AO3 and FanFiction.net’s 5 addresses.");
+  assert.match(drawn.record, /Reading/, "the record shows the story's real status");
+  assert.equal(drawn.rule, RULE_LINE, "the rule line, directly above the main button");
+  assert.equal(drawn.primary, ALLOW_BUTTON);
+  assert.equal(drawn.secondary, "Not now");
+  assert.equal(drawn.second, null);
+  assert.equal(element("popup-earned-kicker-icon").childElementCount, 1, "an alert, not a check");
+  assert.equal(element("popup-earned-kicker").nextElementSibling, element("popup-earned-record"), "the record comes under the kicker");
+  assert.equal(await announced(),
+    "Safari needs your OK again. Let Trace save by itself again. After the update, Safari asks once more. It lists AO3 and FanFiction.net’s 5 addresses.");
+  assert.deepEqual(h.permissionRequests, [], "the ask asks Safari nothing by itself");
+
+  // The grant is this version's: the ask is the everyday one.
+  const own = await openFirstTapPopup({
+    earnedPermissionOnboarding: onboarding,
+    storageState: { traceEarnedPermissionOnboardingV1: { ...earlier, registrationVersion: 3 } },
+  });
+  own.h.firstTap.show({ state: "confirmed", workKey: "ao3:123", provenance: "already", mode: "bounded_manual", story: FIRST_TAP_STORY, entry: FIRST_TAP_ENTRY });
+  assert.deepEqual(own.sheet(), savedWithAsk("already-in-library", "Already in your Library"));
+  // Some of the story sites are still allowed: the everyday ask, as the
+  // readiness report says partly allowed.
+  const partial = await openFirstTapPopup({
+    earnedPermissionOnboarding: onboarding,
+    grantedOrigins: [FULL_EARNED_ORIGINS[0]],
+    storageState: { traceEarnedPermissionOnboardingV1: earlier },
+  });
+  partial.h.firstTap.show({ state: "confirmed", workKey: "ao3:123", provenance: "already", mode: "bounded_manual", story: FIRST_TAP_STORY, entry: FIRST_TAP_ENTRY });
+  assert.deepEqual(partial.sheet(), savedWithAsk("already-in-library", "Already in your Library"));
+  // No grant was ever recorded: the first-time ask.
+  const none = await openFirstTapPopup({ earnedPermissionOnboarding: onboarding });
+  none.h.firstTap.show({ state: "confirmed", workKey: "ao3:123", provenance: "saved_now", mode: "bounded_manual", story: FIRST_TAP_STORY, entry: FIRST_TAP_ENTRY });
+  assert.deepEqual(none.sheet(), savedWithAsk("saved", "Saved to your Library"));
 });
 
 test("first tap: a saved story the page did not name is shown without a made-up title, and FanFiction.net reads the same", async () => {
@@ -5382,6 +5484,10 @@ test("first tap: the wording keeps to the rules for Trace's copy", async () => {
   assert.equal(words.askBody, "Tap Allow below, then <b>Always Allow</b>. Safari needs your permission before Trace can save as you read.");
   assert.equal(words.askBodySpoken, words.askBody.replace(/<\/?b>/g, ""), "read aloud, the same words");
   assert.equal(words.tryAgain, "Try again");
+  // The 'allow again' ask after an update, word for word.
+  assert.equal(words.againKicker, "Safari needs your OK again");
+  assert.equal(words.againHeading, "Let Trace save by itself again");
+  assert.equal(words.againBody, "After the update, Safari asks once more. It lists AO3 and FanFiction.net’s 5 addresses.");
 
   assert.equal(words.checking, "Checking…");
   assert.equal(words.notSentHeading, "The save wasn’t sent");
@@ -5393,8 +5499,10 @@ test("first tap: the wording keeps to the rules for Trace's copy", async () => {
   assert.equal(words.notAllowedOnRequestHeading, "Trace saves when you ask");
   assert.equal(words.notAllowedOnRequestBody, "To save another story, open Trace from the Page Menu on it and tap Save this story.");
   // Whether Safari shows its question again is not something Trace can know.
+  // The ask's body and the 'allow again' body may say it: each describes
+  // Safari's own question, not its settings screen.
   for (const [key, line] of lines) {
-    if (key !== "askBody") assert.doesNotMatch(line, /Safari asks/i, key);
+    if (key !== "askBody" && key !== "againBody") assert.doesNotMatch(line, /Safari asks/i, key);
     // Only an expired sign-in asks for a new one, and only in the Trace app.
     if (key !== "reconnectHeading") assert.doesNotMatch(line, /sign in/i, `${key}: the app may be signed in already`);
   }
@@ -6747,4 +6855,50 @@ test("the ask on a story page, before the sheet, carries the same words and pict
     "This page isn’t a story. Allow AO3 and FanFiction.net, then open any story and Trace saves it.");
   assert.equal(shownText(list.document.getElementById("popup-earned-rule")), RULE_LINE);
   assert.equal(list.document.getElementById("popup-earned-prompt"), null, "no picture on a list");
+});
+
+test("setup steps: the sheet says once that it opened, and on what kind of page, and the earned ask says what Safari answered", async () => {
+  const setupSteps = (h) => h.messages.filter(({ type }) => type === "TRACE_SETUP_STEP")
+    .map(({ type, ...detail }) => detail);
+  const sheet = (url, options = {}) => createPopupHarness({
+    sessionMode: "kernel",
+    promiseRuntime: true,
+    earnedPermissionOnboarding: { registrationMode: "dynamic" },
+    userAgent: IPHONE_UA,
+    activeTab: { id: 7, url },
+    sessionSnapshot: { state: "connected", accountId: "account-a", canExecuteAuthenticated: true, reason: "none" },
+    ...options,
+  });
+
+  const story = sheet("https://www.fanfiction.net/s/7038840/1/A-Chance-Encounter");
+  await settle(story);
+  story.emitStorageChange({ traceArchiveReadiness: { newValue: { lastArchiveSeenAt: Date.now() } } });
+  await settle(story);
+  assert.deepEqual(setupSteps(story), [{ step: "sheet_opened", page: "story" }], "once, however often the sheet is drawn again");
+  assert.doesNotMatch(JSON.stringify(setupSteps(story)), /fanfiction|7038840|Encounter/, "never the page itself");
+
+  for (const [result, answer] of [[true, "granted"], [false, "declined"]]) {
+    const home = sheet("https://archiveofourown.org/", { permissionRequestResult: result });
+    await settle(home);
+    home.document.getElementById("popup-earned-primary").click();
+    await settle(home, 12);
+    assert.deepEqual(setupSteps(home), [
+      { step: "sheet_opened", page: "other" },
+      { step: "access_answered", answer },
+    ], String(result));
+  }
+
+  const threw = sheet("https://archiveofourown.org/", { permissionRequestError: "no" });
+  await settle(threw);
+  threw.document.getElementById("popup-earned-primary").click();
+  await settle(threw, 12);
+  assert.deepEqual(setupSteps(threw).slice(1), [{ step: "access_answered", answer: "unanswered" }]);
+
+  // A build without the sheet says nothing of setup.
+  const older = createPopupHarness({
+    sessionMode: "kernel", promiseRuntime: true, earnedPermissionOnboarding: true, userAgent: IPHONE_UA,
+    activeTab: { id: 7, url: "https://archiveofourown.org/" },
+  });
+  await settle(older);
+  assert.deepEqual(setupSteps(older), []);
 });

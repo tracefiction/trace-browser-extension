@@ -230,6 +230,38 @@ test("website access is read twice before it is called a blocker, and unknown wh
   }
 });
 
+test("website access gone after an update: said only for a grant recorded by an earlier generation and not yet by this one", async () => {
+  for (const [record, mode, expected] of [
+    // 0.6.6 recorded its grant under the generation that declared its scripts.
+    [{ grantAt: 1, registrationVersion: 3, promptResult: "granted" }, "dynamic", "blocker:not_allowed_since_update"],
+    [{ grantAt: 1, registrationVersion: 3, promptResult: "granted", completedAt: 1 }, "dynamic", "blocker:not_allowed_since_update"],
+    // This version's own grant: an ending is not an update's.
+    [{ grantAt: 1, registrationVersion: 4, promptResult: "granted" }, "dynamic", "blocker:not_allowed"],
+    // No grant was recorded, or it was declined.
+    [{ registrationVersion: 3, promptResult: "declined" }, "dynamic", "blocker:not_allowed"],
+    [{ registrationVersion: 3 }, "dynamic", "blocker:not_allowed"],
+    [undefined, "dynamic", "blocker:not_allowed"],
+    // A build that declares its scripts has no earlier generation to compare.
+    [{ grantAt: 1, registrationVersion: 3, promptResult: "granted" }, "static", "blocker:not_allowed"],
+  ]) {
+    const h = install((state) => {
+      state.granted = [];
+      if (record === undefined) delete state.stored[EARNED_PERMISSION_STATE_KEY];
+      else state.stored[EARNED_PERMISSION_STATE_KEY] = record;
+      if (mode === "static") state.config = { ...CONFIG, version: 3, registrationMode: "static" };
+    });
+    await h.reporter.report();
+    assert.equal(h.answers(h.reports()[0]).websiteAccess, expected, JSON.stringify([record, mode]));
+  }
+  // Some of the sites allowed stays partly allowed.
+  const partly = install((state) => {
+    state.granted = FIVE.slice(0, 2);
+    state.stored[EARNED_PERMISSION_STATE_KEY] = { grantAt: 1, registrationVersion: 3, promptResult: "granted" };
+  });
+  await partly.reporter.report();
+  assert.equal(partly.answers(partly.reports()[0]).websiteAccess, "blocker:partly_allowed");
+});
+
 test("script registration: both scripts at this build's generation, or a blocker with its reason, or unknown", async () => {
   for (const [arrange, expected] of [
     [() => {}, "positive:registered"],
@@ -599,6 +631,37 @@ test("the moment the reader allows the story sites is never reported as not read
       assert.equal(line, "ready [scripts positive:registered]", `${reportFirst ? "report" : "registration"} wired first`);
     }
   }
+});
+
+test("the update itself is reported for a reader whose grant was to an earlier version, and the access it had is said to be gone", async () => {
+  const h = installWithRegistration({
+    granted: [], stored: { [EARNED_PERMISSION_STATE_KEY]: { grantAt: 1, registrationVersion: 3, promptResult: "granted" } },
+  });
+  await settle();
+  const before = h.reports().length;
+  for (const listener of h.listeners.installed) listener({ reason: "update" });
+  await settle();
+  await settle();
+  const after = h.reports().slice(before);
+  assert.equal(after.length >= 1, true, "the update is reported without waiting for the popup");
+  assert.equal(after.at(-1).components.websiteAccess.reason, "not_allowed_since_update");
+
+  // A first install has no earlier grant to lose.
+  const fresh = installWithRegistration({ granted: [], stored: {} });
+  await settle();
+  const count = fresh.reports().length;
+  for (const listener of fresh.listeners.installed) listener({ reason: "update" });
+  await settle();
+  await settle();
+  assert.equal(fresh.reports().slice(count).some((report) => report.components.websiteAccess.reason === "not_allowed_since_update"), false);
+
+  // Allowed again, under this version: the reason goes with the grant.
+  h.state.granted = [...FIVE];
+  for (const listener of h.listeners.added) listener();
+  await settle();
+  await settle();
+  assert.equal(h.reports().at(-1).components.websiteAccess.reason, "allowed");
+  assert.equal(h.state.stored[EARNED_PERMISSION_STATE_KEY].registrationVersion, 4, "the grant is this version's now");
 });
 
 test("while the page scripts are still being put in, the report does not know; it never calls them missing", async () => {

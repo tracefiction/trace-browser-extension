@@ -467,6 +467,39 @@ function showCapacityRecoveryNotice(capacity, force) {
 function txt(el) {
   return el ? (el.textContent || "").trim() : null;
 }
+
+// AO3 summaries are paragraphs, and textContent runs them together
+// ("canon-compliant.1971 - 1995This IS"). This keeps a blank line between
+// blocks and a line break for each <br>; other whitespace is collapsed.
+var TRACE_TEXT_BLOCK_TAGS = /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|CENTER|DD|DETAILS|DIV|DL|DT|FIGCAPTION|FIGURE|FOOTER|H[1-6]|HEADER|HR|LI|OL|P|PRE|SECTION|TABLE|TR|UL)$/;
+
+function blockText(el) {
+  if (!el) return null;
+  var out = "";
+  (function walk(node) {
+    for (var child = node.firstChild; child; child = child.nextSibling) {
+      if (child.nodeType === 3) {
+        out += String(child.nodeValue || "").replace(/\s+/g, " ");
+      } else if (child.nodeType === 1) {
+        var tag = String(child.tagName || "").toUpperCase();
+        if (tag === "BR") {
+          out += "\n";
+        } else if (tag !== "SCRIPT" && tag !== "STYLE") {
+          var block = TRACE_TEXT_BLOCK_TAGS.test(tag);
+          if (block) out += "\n\n";
+          walk(child);
+          if (block) out += "\n\n";
+        }
+      }
+    }
+  })(el);
+  return out
+    .split("\n")
+    .map(function (line) { return line.replace(/[ \t\u00a0]+/g, " ").trim(); })
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
 function stripTraceUiFromClone(el) {
   if (!el || !el.cloneNode) return null;
   const clone = el.cloneNode(true);
@@ -1310,7 +1343,7 @@ function parseAo3WorkSummaryFromHtml(html) {
   try {
     if (typeof DOMParser !== "function") return null;
     var doc = new DOMParser().parseFromString(String(html || ""), "text/html");
-    return txt(one(doc, WORK_SUMMARY_SELECTOR)) || null;
+    return blockText(one(doc, WORK_SUMMARY_SELECTOR)) || null;
   } catch (_) {
     return null;
   }
@@ -2767,7 +2800,7 @@ function collectAO3Work() {
   // absent and the first `.summary` is the chapter's own summary, which must
   // never be reported as the work's.
   const summary =
-    txt(one(document, "#workskin > .preface.group:not(.chapter) > .summary blockquote.userstuff")) ||
+    blockText(one(document, "#workskin > .preface.group:not(.chapter) > .summary blockquote.userstuff")) ||
     null;
   const relParts = relPartsFromAO3(relationships);
   const charsUnion = dedup((characters || []).concat(relParts || []));
@@ -2845,7 +2878,7 @@ function extractAO3BlurbData(row, id, ctx) {
   const warnings = ao3ListingWarnings(row);
   const categories = ao3ListingCategories(row);
   const series = parseAO3Series(row);
-  const summary = txt(one(row, "blockquote.userstuff.summary, .userstuff.summary")) || null;
+  const summary = blockText(one(row, "blockquote.userstuff.summary, .userstuff.summary")) || null;
 
   const relParts = relPartsFromAO3(relationships);
   const extra = characters.filter((c) => !relParts.includes(c));
@@ -3597,8 +3630,27 @@ function storyInlineStatusDisplay(info) {
         : null;
   var label = quickAddStatusLabel(status);
   if (!label) label = "Saved";
+  if (canonicalReaderStatus(status) === "SAVED") return storySavedRecordLabel(info);
   var progress = storyInlineProgressDisplay(info);
   return progress ? label + " " + progress : label;
+}
+
+// The place the popup's story sheet gives a saved record: "Chapter 31", or
+// "Chapter 31 of 40" when the total is known. Empty when no chapter is known.
+function storySavedRecordPlace(info) {
+  var chapters = info && info.chapters;
+  var current = chapters && chapters.current;
+  var total = chapters && chapters.total;
+  if (!Number.isInteger(current) || current <= 0) return "";
+  return Number.isInteger(total) && total > 0
+    ? "Chapter " + current + " of " + total
+    : "Chapter " + current;
+}
+
+// A saved record reads as the popup's sheet labels it: "Saved · Chapter 31".
+function storySavedRecordLabel(info) {
+  var place = storySavedRecordPlace(info);
+  return place ? "Saved · " + place : "Saved";
 }
 
 function storyInlineDisplayChapters(info, status) {
@@ -3711,6 +3763,59 @@ function traceRefreshPageTokens() {
     document.body.style.setProperty("--trace-page-" + name, tokens[name]);
   });
 }
+
+// The Trace app marks the story links it opens in Safari with this fragment.
+// No element has this id, so the page shows as it would without it. The mark
+// is taken off at once; then, for a tab Safari has just opened for that link,
+// the background brings forward a tab already on the same story and chapter
+// and closes this one (story-tab-reuse.mts). A page without the mark, or one
+// the reader reached from another page, never asks.
+var TRACE_OPEN_MARK = "#trace-open";
+var TRACE_STORY_TAB_REUSE_MESSAGE = "TRACE_STORY_TAB_REUSE";
+var TRACE_STORY_TAB_REUSE_WITHIN_MS = 10000;
+var TRACE_STORY_TAB_REUSE_TIMEOUT_MS = 8000;
+
+function takeTraceOpenMark() {
+  try {
+    if (window.top !== window || location.hash !== TRACE_OPEN_MARK) return false;
+    history.replaceState(history.state, "", location.pathname + location.search);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function traceTabJustOpenedForLink() {
+  try {
+    if (history.length > 1 || document.referrer) return false;
+    var since = typeof performance !== "undefined" && performance && typeof performance.now === "function"
+      ? performance.now()
+      : NaN;
+    return Number.isFinite(since) && since <= TRACE_STORY_TAB_REUSE_WITHIN_MS;
+  } catch (_) {
+    return false;
+  }
+}
+
+function reuseOpenStoryTabForTraceLink() {
+  if (!takeTraceOpenMark()) return;
+  if (
+    !traceTabJustOpenedForLink() ||
+    tracePageManualMode() ||
+    TRACE_ACTIVE_TAB_PROBE_MODE ||
+    tracePageIsPrerendering() ||
+    shouldDisableTraceContentScript()
+  ) {
+    return;
+  }
+  sendCollectorMessage(
+    { type: TRACE_STORY_TAB_REUSE_MESSAGE, payload: { url: location.href } },
+    function () {},
+    TRACE_STORY_TAB_REUSE_TIMEOUT_MS,
+  );
+}
+
+reuseOpenStoryTabForTraceLink();
 
 // Listen for background requests
 function handleCollectorMessage(msg, sender, sendResponse, relayCommand) {
@@ -4601,6 +4706,47 @@ function openTraceUrlInBrowserTab(url) {
   });
 }
 
+// On iPhone and iPad "Open in Trace" opens the story in the Trace app. A
+// website link would open the website: Safari does not hand it to the app.
+// A story that is not in the Library yet opens the app at the Library.
+var TRACE_ENTRY_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function storyTraceAppUrl(entry) {
+  var entryId = entry && typeof entry.entryId === "string" ? entry.entryId.trim() : "";
+  if (!TRACE_ENTRY_ID_PATTERN.test(entryId)) return TRACE_IOS_APP_LIBRARY_URL;
+  return "traceauth://open?destination=story&entryId=" + entryId.toLowerCase();
+}
+
+function configureStoryTraceOpenLink(link, authState, entry) {
+  if (traceIsIosSafari()) {
+    link.href = storyTraceAppUrl(entry);
+    link.removeAttribute("target");
+    link.removeAttribute("rel");
+    return;
+  }
+  link.href = storyTraceOpenUrl(authState, entry);
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+}
+
+// Follows a Trace app link from the reader's own tap. Safari asks to open
+// the app and the page stays where it was.
+function followTraceAppLink(url) {
+  try {
+    window.location.href = url;
+  } catch (_) {
+    // The app link is optional; the reader can always switch apps themselves.
+  }
+}
+
+function openStoryInTrace(authState, entry) {
+  if (traceIsIosSafari()) {
+    followTraceAppLink(storyTraceAppUrl(entry));
+    return;
+  }
+  openTraceUrlInBrowserTab(storyTraceOpenUrl(authState, entry));
+}
+
 // The story page's Connect runs the popup's Connect: it uses a signed-in
 // Trace tab when one is open, otherwise the background opens Trace and
 // signing in there finishes the connection. Never used on iPhone or iPad,
@@ -4814,9 +4960,11 @@ function storyHandlePresentation(view) {
   }
   var status = entryStatus(entry);
   if (status) {
+    var savedPlace = status === "SAVED" ? storySavedRecordPlace(entry) : "";
     return {
       kind: "status",
-      label: quickAddStatusLabel(status) || "Saved",
+      label: status === "SAVED" ? storySavedRecordLabel(entry) : quickAddStatusLabel(status) || "Saved",
+      place: savedPlace || null,
       theme: TRACE_INLINE_THEMES[status] || TRACE_INLINE_THEMES.muted,
       dot: true,
       spinner: false,
@@ -4841,8 +4989,12 @@ function applyStoryInlineHandleState(handle, presentation) {
   clearElement(handle);
   handle.style.cssText = traceInlineHandleCss(theme);
   var accessible = "Trace: " + ((presentation && presentation.label) || "Story");
-  if (presentation && presentation.status === "SAVED") accessible = "Trace: Saved to your Library";
-  else if (presentation && presentation.status && presentation.progress) {
+  if (presentation && presentation.status === "SAVED") {
+    accessible = "Trace: Saved to your Library";
+    if (presentation.place) {
+      accessible += ", " + presentation.place.charAt(0).toLowerCase() + presentation.place.slice(1);
+    }
+  } else if (presentation && presentation.status && presentation.progress) {
     var chapters = String(presentation.progress).match(/^(\d+)\/(\d+|\?)$/);
     if (chapters) accessible += ", chapter " + chapters[1] + (chapters[2] === "?" ? "" : " of " + chapters[2]);
   }
@@ -5478,6 +5630,11 @@ function placeStorySheet(sheet, wrap, handle) {
     parent.appendChild(sheet);
   }
   sheet.style.cssText = storySheetCss(mobile);
+  // Re-placing the sheet rewrites its style, which would drop the closed
+  // sheet's display:none. A redraw that ends before the sheet's visibility
+  // is applied again (a look-up Trace didn't answer while the reader was
+  // mid-chapter) then showed the sheet unprompted. It keeps its own state.
+  sheet.style.display = sheet.getAttribute("data-trace-open") === "1" ? "block" : "none";
   if (!mobile) {
     positionDesktopStorySheet(sheet, handle);
   } else {
@@ -6911,7 +7068,9 @@ function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
         });
         return;
       }
-      openTraceUrlInBrowserTab(storyTraceOpenUrl(null, entry));
+      // On iPhone and iPad the Trace app connects the extension.
+      if (traceIsIosSafari()) followTraceAppLink(TRACE_IOS_APP_SETUP_URL);
+      else openTraceUrlInBrowserTab(storyTraceOpenUrl(null, entry));
       setTimeout(function () {
         if (btn.getAttribute("data-trace-connect-checking") === "1") {
           setStoryHiddenPreferenceAuthAction(btn, btn.getAttribute("data-trace-connect-error") || "not_authenticated");
@@ -7133,13 +7292,13 @@ function renderStorySheet(sheet, view, workKey) {
         event.stopPropagation();
         requestStoryArchiveConnect(workKey);
       });
-    } else if (awaitingAppLink(view)) {
+    } else if (awaitingAppLink(view) ||
+        (traceIsIosSafari() && view.authState && view.authState.state === "reconnect_required")) {
+      // A reader reconnecting on iPhone or iPad does it in the Trace app too.
       connectOpen.href = TRACE_IOS_APP_SETUP_URL;
       connectOpen.textContent = "Open Trace app";
     } else {
-      connectOpen.href = storyTraceOpenUrl(view.authState, view.entry);
-      connectOpen.target = "_blank";
-      connectOpen.rel = "noopener noreferrer";
+      configureStoryTraceOpenLink(connectOpen, view.authState, view.entry);
       connectOpen.textContent = "Open Trace";
     }
     connectOpen.style.cssText = storySheetPrimaryButtonCss() + ";align-self:flex-start;margin-left:-8px";
@@ -7305,9 +7464,7 @@ function renderStorySheet(sheet, view, workKey) {
   var open = document.createElement("a");
   open.className = "x-pbtn x-pbtn-primary";
   open.setAttribute("data-trace-open-trace", "1");
-  open.href = storyTraceOpenUrl(view.authState, view.entry);
-  open.target = "_blank";
-  open.rel = "noopener noreferrer";
+  configureStoryTraceOpenLink(open, view.authState, view.entry);
   open.appendChild(document.createTextNode("Open in Trace"));
   open.appendChild(storySheetSvgIcon("open"));
   open.style.cssText = storySheetPrimaryButtonCss() + ";margin-right:auto";
@@ -7844,7 +8001,7 @@ function showFinishQualifyDone(decision, view, workKey, result) {
   var kind = authoritativeStatus === "FINISHED" ? "finished" : "caughtup";
   var previousStatus = finishQualifyPreviousStatus(decision);
   var openInTrace = function () {
-    openTraceUrlInBrowserTab(storyTraceOpenUrl(view.authState, decision.entry));
+    openStoryInTrace(view.authState, decision.entry);
   };
   traceRefreshPageTokens();
   if (typeof window.TraceFinishQualify.done !== "function") {
@@ -7916,7 +8073,7 @@ function mountFinishQualifyBand(decision, view, workKey, flowState) {
       finishQualifyBandState[workKey] = null;
     },
     onOpenInTrace: function () {
-      openTraceUrlInBrowserTab(storyTraceOpenUrl(view.authState, decision.entry));
+      openStoryInTrace(view.authState, decision.entry);
     },
   });
 }
@@ -7958,7 +8115,7 @@ function mountFinishQualifyRecovery(decision, view, workKey, flowState, message)
       );
     },
     onOpenInTrace: function () {
-      openTraceUrlInBrowserTab(storyTraceOpenUrl(view.authState, decision.entry));
+      openStoryInTrace(view.authState, decision.entry);
     },
   });
 }
@@ -8109,15 +8266,7 @@ function renderQuickAddFromSnapshot(workKey, anchor, res) {
     }
 
     if (KERNEL_SESSION_ACTIVE && kernelFirstStoryLookupPending) {
-      applyStoryInlineHandleState(handle, {
-        kind: "checking",
-        label: "Checking…",
-        theme: TRACE_INLINE_THEMES.saving,
-        dot: false,
-        spinner: true,
-        status: null,
-        progress: null,
-      });
+      applyStoryInlineHandleState(handle, kernelCheckingPresentation());
       handle.title = "Checking this story in Trace";
       handle.disabled = true;
       applySheetVisibility(sheet, false);
@@ -8239,13 +8388,14 @@ function clearKernelProjectionRetry(workKey) {
   kernelProjectionRetryWorkKey = null;
 }
 
+// True when another look is coming: scheduled now or already waiting.
 function scheduleKernelProjectionRetry(workKey, attempt) {
+  if (kernelProjectionRetryTimer !== null) return true;
   if (
     attempt >= KERNEL_PROJECTION_RETRY_DELAYS_MS.length ||
-    kernelProjectionRetryTimer !== null ||
     getWorkKeyFromUrl() !== workKey
   ) {
-    return;
+    return false;
   }
   kernelProjectionRetryWorkKey = workKey;
   kernelProjectionRetryTimer = setTimeout(function () {
@@ -8255,6 +8405,63 @@ function scheduleKernelProjectionRetry(workKey, attempt) {
       renderQuickAddButton(workKey, attempt + 1);
     }
   }, KERNEL_PROJECTION_RETRY_DELAYS_MS[attempt]);
+  return true;
+}
+
+function kernelCheckingPresentation() {
+  return {
+    kind: "checking",
+    label: "Checking…",
+    theme: TRACE_INLINE_THEMES.saving,
+    dot: false,
+    spinner: true,
+    status: null,
+    progress: null,
+  };
+}
+
+// Trace did not answer this page's look-up. Only a handle that is still
+// checking changes; a state already shown is kept. A tap looks again, and so
+// does the reader coming back to the page (see initQuickAdd).
+function renderKernelProjectionUnavailable(workKey, anchor) {
+  if (getWorkKeyFromUrl() !== workKey) return;
+  var els = ensureQuickAddElements(workKey, anchor);
+  var handle = els.handle;
+  var shown = handle.getAttribute("data-trace-story-handle-state");
+  // Only a handle that has shown nothing yet: the hidden placeholder the
+  // slot is reserved with ("loading"), "Checking…", or this state itself.
+  if (shown && shown !== "loading" && shown !== "checking" && shown !== "unavailable") return;
+  applyStoryInlineHandleState(handle, {
+    kind: "unavailable",
+    label: "Try again",
+    theme: TRACE_INLINE_THEMES.error,
+    dot: false,
+    spinner: false,
+    status: null,
+    progress: null,
+  });
+  handle.title = "Trace did not answer. Tap to check this story again.";
+  handle.disabled = false;
+  applySheetVisibility(els.sheet, false);
+  setStoryHandleDialogTrigger(handle, els.sheet, false);
+  if (!handle.__traceStoryHandleBound) {
+    handle.__traceStoryHandleBound = true;
+    handle.addEventListener("click", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (handle.disabled) return;
+      if (typeof handle.__traceStoryHandleAction === "function") {
+        handle.__traceStoryHandleAction();
+      }
+    });
+  }
+  handle.__traceStoryHandleAction = function () {
+    clearKernelProjectionRetry(workKey);
+    applyStoryInlineHandleState(handle, kernelCheckingPresentation());
+    handle.title = "Checking this story in Trace";
+    handle.disabled = true;
+    renderQuickAddButton(workKey, 0);
+  };
 }
 
 // -------------------------------------------------------
@@ -8326,9 +8533,14 @@ function renderQuickAddButton(workKey, projectionAttempt) {
       : 0;
     sendCollectorMessage(
       { type: ACCOUNT_PROJECTION_GET_MESSAGE, workKeys: [workKey] },
-      function (response) {
+      function (response, delivery) {
         if (!response || response.ok !== true) {
-          scheduleKernelProjectionRetry(workKey, attempt);
+          var retrying = scheduleKernelProjectionRetry(workKey, attempt);
+          // A background that does not answer, or no retry left: the handle
+          // says so and offers another look, never "Checking…" for good.
+          if (!retrying || (delivery && delivery.timedOut === true)) {
+            renderKernelProjectionUnavailable(workKey, anchor);
+          }
           return;
         }
         clearKernelProjectionRetry(workKey);
