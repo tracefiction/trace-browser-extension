@@ -7871,6 +7871,17 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
   };
 
+  // src/extension-runtime/story-save-activity.mts
+  var inFlight = 0;
+  var lastEndedAt = 0;
+  function storySaveStarted() {
+    inFlight += 1;
+  }
+  function storySaveEnded() {
+    inFlight = Math.max(0, inFlight - 1);
+    lastEndedAt = Date.now();
+  }
+
   // src/extension-runtime/controller.mts
   var DEGRADED_STORAGE_SNAPSHOT = Object.freeze({
     state: "degraded",
@@ -8728,6 +8739,14 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return (await this.#executeStoryCommandWithEvidence(command)).result;
     }
     async #executeStoryCommandWithEvidence(command, observer, tabId) {
+      storySaveStarted();
+      try {
+        return await this.#runStoryCommandWithEvidence(command, observer, tabId);
+      } finally {
+        storySaveEnded();
+      }
+    }
+    async #runStoryCommandWithEvidence(command, observer, tabId) {
       let accountData = await this.#accountData.read().catch(() => null);
       if (accountData?.capacityRecovery !== null && accountData?.capacityRecovery !== void 0 && accountData.overlay === null) {
         accountData = await this.#projection.read().catch(() => accountData);

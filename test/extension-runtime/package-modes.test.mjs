@@ -863,3 +863,96 @@ test("explicit development JSON pairs output and rejects invalid or production u
     }
   }
 });
+
+/** What only the AO3 History experiment build carries. */
+const AO3_HISTORY_EXPERIMENT_MARKERS = [
+  "TRACE_AO3_HISTORY_EXPERIMENT",
+  "traceAo3HistoryExperimentV1",
+  "trace-ao3-history-experiment",
+  "ao3-history-experiment-panel",
+  "installAo3HistoryExperiment",
+];
+
+function filesUnder(root) {
+  return fs.readdirSync(root, { withFileTypes: true }).flatMap((entry) =>
+    entry.isDirectory() ? filesUnder(path.join(root, entry.name)) : [path.join(root, entry.name)]);
+}
+
+function assertNoAo3HistoryExperiment(what) {
+  for (const root of [RESOURCES, path.join(ROOT, "dist", "chrome"), path.join(ROOT, "dist", "firefox")]) {
+    for (const file of filesUnder(root).filter((file) => /\.(?:js|json|html|css)$/.test(file))) {
+      const text = fs.readFileSync(file, "utf8");
+      for (const marker of AO3_HISTORY_EXPERIMENT_MARKERS) {
+        assert.equal(text.includes(marker), false, `${what}: ${path.relative(ROOT, file)} carries ${marker}`);
+      }
+    }
+  }
+}
+
+test("the AO3 History experiment is in its own build only, never a release build", () => {
+  const experimentBuild = (extra) => {
+    const env = {
+      ...RELEASE_ENV, TRACE_SESSION_MODE: "kernel", TRACE_IOS_EARNED_PERMISSION_ONBOARDING: "1",
+      TRACE_AO3_HISTORY_EXPERIMENT: "1", ...extra,
+    };
+    for (const [key, value] of Object.entries(env)) if (value === undefined) delete env[key];
+    return spawnSync(process.execPath, ["scripts/build.mjs"], { cwd: ROOT, env, encoding: "utf8" });
+  };
+  try {
+    // Every release build, and the iPhone store build in particular, has none of it.
+    for (const script of ["build:release", "build:legacy:release", "build:ios-earned-permission-onboarding:release"]) {
+      runBuild(script);
+      assertNoAo3HistoryExperiment(script);
+    }
+    const storeManifest = manifest(RESOURCES);
+    // No release build can turn it on, whatever else is set.
+    for (const extra of [
+      { TRACE_BUILD_MODE: "release" },
+      { TRACE_BUILD_MODE: "release", TRACE_IOS_EARNED_PERMISSION_PREVIEW_RELEASE: "1" },
+    ]) {
+      const refused = experimentBuild(extra);
+      assert.notEqual(refused.status, 0, JSON.stringify(extra));
+      assert.match(refused.stderr, /TRACE_AO3_HISTORY_EXPERIMENT cannot be turned on in a release build/);
+    }
+    // It exists only in the kernel iPhone build with optional story sites.
+    for (const extra of [
+      { TRACE_IOS_EARNED_PERMISSION_ONBOARDING: undefined },
+      { TRACE_IOS_EARNED_PERMISSION_REQUIRED_HOSTS: "1" },
+      { TRACE_SESSION_MODE: "legacy" },
+    ]) {
+      const elsewhere = experimentBuild(extra);
+      assert.notEqual(elsewhere.status, 0, JSON.stringify(extra));
+      assert.match(elsewhere.stderr, /requires the kernel iPhone build with optional story sites/);
+    }
+    // The switch is read from the command line only, never from `.env`.
+    const buildSource = fs.readFileSync(path.join(ROOT, "scripts", "build.mjs"), "utf8");
+    assert.match(buildSource, /process\.env\.TRACE_AO3_HISTORY_EXPERIMENT/);
+    assert.doesNotMatch(buildSource, /(?<!process\.)env\.TRACE_AO3_HISTORY_EXPERIMENT/);
+    assert.doesNotMatch(buildSource, /fileEnv\.TRACE_AO3_HISTORY_EXPERIMENT/);
+
+    // The experiment build: its background, its sheet section and loader.
+    runBuild("build:ios-ao3-history-experiment");
+    const background = fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8");
+    assert.match(background, /TRACE_AO3_HISTORY_EXPERIMENT/);
+    assert.match(background, /traceAo3HistoryExperimentV1/);
+    assert.match(background, /installAo3HistoryExperiment\(/);
+    assert.match(background, /"https:\/\/api\.tracefiction\.com"/, "it talks to the production service like the device build");
+    assert.ok(fs.existsSync(path.join(RESOURCES, "ao3-history-experiment-panel.js")));
+    assert.match(fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8"), /ao3-history-experiment-panel\.js/);
+    // Turning it on asks Safari for nothing more than the store build.
+    assert.deepEqual(manifest(RESOURCES).permissions, storeManifest.permissions);
+    assert.deepEqual(manifest(RESOURCES).optional_host_permissions, storeManifest.optional_host_permissions);
+    assert.deepEqual(manifest(RESOURCES).host_permissions, storeManifest.host_permissions);
+    assert.equal(Object.hasOwn(manifest(RESOURCES), "content_scripts"), false);
+    // The Chrome and Firefox packages built beside it carry no sheet section.
+    for (const browser of ["chrome", "firefox"]) {
+      assert.equal(fs.existsSync(path.join(ROOT, "dist", browser, "ao3-history-experiment-panel.js")), false);
+      assert.doesNotMatch(fs.readFileSync(path.join(ROOT, "dist", browser, "popup-config.js"), "utf8"), /ao3-history-experiment/);
+    }
+    // A later store build is clean again.
+    runBuild("build:ios-earned-permission-onboarding:release");
+    assertNoAo3HistoryExperiment("store build after the experiment build");
+  } finally {
+    runBuild("build:release");
+  }
+});
