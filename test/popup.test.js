@@ -181,6 +181,7 @@ function createPopupHarness({
   permissionContainsResult = null,
   registrationReconcileResult = null,
   sessionSnapshotResponses = null,
+  sessionActionResponse = null,
   directTabUnavailable = false,
   archiveAccess = null,
   deferredHostRequest = false,
@@ -306,7 +307,7 @@ function createPopupHarness({
           }
         }
         if (message.type === "TRACE_SESSION_ACTION") {
-          response = { ok: true, snapshot: sessionSnapshot, action: { kind: "ignored" } };
+          response = sessionActionResponse ?? { ok: true, snapshot: sessionSnapshot, action: { kind: "ignored" } };
         }
         if (message.type === "TRACE_EARNED_PERMISSION_RECONCILE") {
           reconcileRequests.push(message);
@@ -1888,6 +1889,57 @@ test("a reader who was connected before is still asked to reconnect", async () =
   assert.equal(h.document.getElementById("popup-status").textContent, "Reconnect Trace");
   assert.equal(h.document.getElementById("popup-cta").textContent, "Reconnect");
   assert.match(h.document.getElementById("popup-lead").textContent, /then press Reconnect\./);
+});
+
+for (const promiseRuntime of [false, true]) {
+  test(`Connect with no one signed in on the Trace website opens it and says why (${promiseRuntime ? "promise" : "callback"})`, async () => {
+    const h = createPopupHarness({
+      sessionMode: "kernel",
+      promiseRuntime,
+      sessionActionResponse: {
+        ok: true,
+        snapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "credential_absent" },
+        action: { kind: "unavailable" },
+      },
+    });
+    await flush();
+    assert.deepEqual(h.createdTabs, [], "nothing opens before the press");
+    h.document.getElementById("popup-cta").dispatchEvent(
+      new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+    );
+    await flush();
+    assert.deepEqual(h.createdTabs, ["https://tracefiction.com/"]);
+    assert.match(h.document.getElementById("popup-lead").textContent, /couldn't find you signed in on the Trace website/);
+    assert.equal(h.document.getElementById("popup-cta").textContent, "Connect");
+  });
+}
+
+test("Connect that could not read the website's sign-in says so and opens nothing", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    sessionActionResponse: {
+      ok: true,
+      snapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "provider_unavailable" },
+      action: { kind: "unavailable" },
+    },
+  });
+  await flush();
+  h.document.getElementById("popup-cta").dispatchEvent(
+    new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+  );
+  await flush();
+  assert.deepEqual(h.createdTabs, []);
+  assert.match(h.document.getElementById("popup-lead").textContent, /couldn't read your sign-in/);
+});
+
+test("a popup opened after Connect found no website sign-in still says why", async () => {
+  const h = createPopupHarness({
+    sessionMode: "kernel",
+    sessionSnapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "credential_absent" },
+  });
+  await flush();
+  assert.match(h.document.getElementById("popup-lead").textContent, /Sign in there, then press Connect again\./);
+  assert.deepEqual(h.createdTabs, [], "opening the popup opens nothing");
 });
 
 const IPHONE_UA =
