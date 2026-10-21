@@ -6,8 +6,9 @@ its notes go with each app release.
 
 ## 1.0.2
 
-- **Saved filters on a phone.** In AO3's Filters, your saved filters for the tag sit at the top, with every other saved filter one tap away. Applying one shows a line above the works with Clear, and saving asks whether it's a new filter or an update.
+- **Saved filters, redesigned.** At the top of AO3's Filters (the sidebar on a computer, the Filters panel on a phone), your saved filters for the tag sit as plain lines, and every other saved filter is one click away. Applying one shows a line above the works with **Clear**. Saving asks whether it's a new filter or an update, and saving, editing and the full list open in a card instead of inside the sidebar.
 - **Saved filters come back.** A filter saved for a tag now shows on that tag's page whichever way you reached it, and your saved filters are fetched again when Trace connects.
+- **FanFiction.net stories get their description.** FanFiction.net's phone pages don't show a story's summary, so a story saved there could reach your Library without one. Trace now reads the summary from the story's full page in your own browser, one story at a time and slowly, and adds it to the story. It does this only while **Improve story details** is on.
 
 ## 1.0.1
 
