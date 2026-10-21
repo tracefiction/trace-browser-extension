@@ -24,6 +24,8 @@ import {
 } from "./browser-platform.mjs";
 
 const REQUEST_TIMEOUT_MS = 12_000;
+// The page script's record of which filter was last used where. Local only.
+const SAVED_FILTER_LAST_USED_KEY = "traceAo3SavedFiltersLastUsedV1";
 
 export const SAVED_FILTER_STORAGE_KEYS = SAVED_FILTER_LOCAL_KEYS;
 
@@ -166,6 +168,21 @@ implements SavedFilterSyncRepositoryPort {
     });
   }
 
+  /**
+   * The account left (signed out, or another took its place): its saved
+   * filters, where they were, which one was on and its sync point go. The
+   * device's own id stays.
+   */
+  clearAccountData(): Promise<void> {
+    return this.#withLock(() => this.#storage.remove([
+      SAVED_FILTER_STORAGE_KEYS.presets,
+      SAVED_FILTER_STORAGE_KEYS.deleted,
+      SAVED_FILTER_STORAGE_KEYS.syncMeta,
+      SAVED_FILTER_STORAGE_KEYS.activeMeta,
+      SAVED_FILTER_LAST_USED_KEY,
+    ]));
+  }
+
   /** When this device last pulled its saved filters, or null for never. */
   async lastSyncedAt(): Promise<string | null> {
     return (await this.#readUnlocked()).lastSyncedAt;
@@ -201,6 +218,7 @@ implements SavedFilterSyncRepositoryPort {
         data,
         sentDeleteClientIds,
         syncedAt,
+        requestedScope.accountId,
       );
       if (!canSyncSavedFilters(this.#session.publicationScope(), requestedScope)) {
         return { kind: "stale" };
@@ -213,6 +231,7 @@ implements SavedFilterSyncRepositoryPort {
           [SAVED_FILTER_STORAGE_KEYS.syncMeta]: {
             syncVersion: next.syncVersion,
             lastSyncedAt: next.lastSyncedAt,
+            accountId: next.syncAccountId,
           },
           [SAVED_FILTER_STORAGE_KEYS.clientId]: next.clientId,
         });
@@ -237,6 +256,7 @@ implements SavedFilterSyncRepositoryPort {
       activeMeta: raw[SAVED_FILTER_STORAGE_KEYS.activeMeta],
       syncVersion: syncMeta.syncVersion,
       lastSyncedAt: syncMeta.lastSyncedAt,
+      syncAccountId: syncMeta.accountId,
       clientId: raw[SAVED_FILTER_STORAGE_KEYS.clientId],
     }, new Date().toISOString());
   }

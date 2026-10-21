@@ -2315,6 +2315,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       activeMeta: copyActiveMeta(root.activeMeta),
       syncVersion: isIso(root.syncVersion) ? root.syncVersion : null,
       lastSyncedAt: isIso(root.lastSyncedAt) ? root.lastSyncedAt : null,
+      syncAccountId: typeof root.syncAccountId === "string" && root.syncAccountId ? root.syncAccountId.slice(0, 200) : null,
       clientId: validClientId(root.clientId) ? root.clientId : null
     });
   }
@@ -2427,11 +2428,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       clientUpdatedAt: item.clientUpdatedAt
     });
   }
-  function savedFilterSyncRequest(snapshot) {
+  function savedFilterSyncRequest(snapshot, accountId) {
     if (snapshot.clientId === null) return null;
+    const since = accountId === void 0 || snapshot.syncAccountId === accountId ? snapshot.syncVersion : null;
     return Object.freeze({
       clientId: snapshot.clientId,
-      since: snapshot.syncVersion,
+      since,
       upserts: Object.freeze(
         snapshot.presets.filter(needsSync).slice(0, SAVED_FILTER_SYNC_BATCH_LIMIT).map(upsertFromPreset)
       ),
@@ -2444,7 +2446,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     if (local?.dirty !== true) return false;
     return Date.parse(local.clientUpdatedAt) > Date.parse(remoteClientUpdatedAt);
   }
-  function mergeSavedFilterSyncData(snapshot, data, sentDeleteClientIds, syncedAt) {
+  function mergeSavedFilterSyncData(snapshot, data, sentDeleteClientIds, syncedAt, accountId = snapshot.syncAccountId) {
     const byClientId = new Map(snapshot.presets.map((item) => [item.clientId, item]));
     const localIdByClientId = new Map(
       snapshot.presets.map((item) => [item.clientId, item.id])
@@ -2494,6 +2496,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       activeMeta,
       syncVersion: data.syncVersion,
       lastSyncedAt: syncedAt,
+      syncAccountId: accountId,
       clientId: snapshot.clientId
     });
   }
@@ -2540,7 +2543,18 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         if (snapshot === null || snapshot.clientId === null) {
           return failure2("storage_unavailable");
         }
-        const request = savedFilterSyncRequest(snapshot);
+        if (snapshot.syncAccountId !== null && snapshot.syncAccountId !== scope2.accountId && this.#ports.repository.clearAccountData) {
+          try {
+            await this.#ports.repository.clearAccountData();
+            snapshot = await this.#ports.repository.read();
+          } catch {
+            return failure2("storage_unavailable");
+          }
+          if (snapshot === null || snapshot.clientId === null) {
+            return failure2("storage_unavailable");
+          }
+        }
+        const request = savedFilterSyncRequest(snapshot, scope2.accountId);
         if (request === null) return failure2("storage_unavailable");
         let execution = await this.#execute(request);
         if (generation !== this.#generation) return failure2("stale");
@@ -5932,6 +5946,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
 
   // src/extension-runtime/saved-filter-sync.mts
   var REQUEST_TIMEOUT_MS6 = 12e3;
+  var SAVED_FILTER_LAST_USED_KEY = "traceAo3SavedFiltersLastUsedV1";
   var SAVED_FILTER_STORAGE_KEYS = SAVED_FILTER_LOCAL_KEYS;
   function isRecord13(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -6039,6 +6054,20 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         return Object.freeze({ ...snapshot, clientId });
       });
     }
+    /**
+     * The account left (signed out, or another took its place): its saved
+     * filters, where they were, which one was on and its sync point go. The
+     * device's own id stays.
+     */
+    clearAccountData() {
+      return this.#withLock(() => this.#storage.remove([
+        SAVED_FILTER_STORAGE_KEYS.presets,
+        SAVED_FILTER_STORAGE_KEYS.deleted,
+        SAVED_FILTER_STORAGE_KEYS.syncMeta,
+        SAVED_FILTER_STORAGE_KEYS.activeMeta,
+        SAVED_FILTER_LAST_USED_KEY
+      ]));
+    }
     /** When this device last pulled its saved filters, or null for never. */
     async lastSyncedAt() {
       return (await this.#readUnlocked()).lastSyncedAt;
@@ -6061,7 +6090,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           current,
           data,
           sentDeleteClientIds,
-          syncedAt
+          syncedAt,
+          requestedScope.accountId
         );
         if (!canSyncSavedFilters(this.#session.publicationScope(), requestedScope)) {
           return { kind: "stale" };
@@ -6073,7 +6103,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
             [SAVED_FILTER_STORAGE_KEYS.activeMeta]: next.activeMeta,
             [SAVED_FILTER_STORAGE_KEYS.syncMeta]: {
               syncVersion: next.syncVersion,
-              lastSyncedAt: next.lastSyncedAt
+              lastSyncedAt: next.lastSyncedAt,
+              accountId: next.syncAccountId
             },
             [SAVED_FILTER_STORAGE_KEYS.clientId]: next.clientId
           });
@@ -6093,6 +6124,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         activeMeta: raw[SAVED_FILTER_STORAGE_KEYS.activeMeta],
         syncVersion: syncMeta.syncVersion,
         lastSyncedAt: syncMeta.lastSyncedAt,
+        syncAccountId: syncMeta.accountId,
         clientId: raw[SAVED_FILTER_STORAGE_KEYS.clientId]
       }, (/* @__PURE__ */ new Date()).toISOString());
     }
@@ -8045,6 +8077,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         session: this.#service,
         randomId: environment.randomId
       });
+      this.whenAccountLeaves(() => this.#savedFilterRepository.clearAccountData());
       this.#savedFilters = new SavedFilterSyncService({
         session: this.#service,
         api: this.#savedFilterApi,

@@ -393,6 +393,9 @@ export class SessionRuntimeController {
       session: this.#service,
       randomId: environment.randomId,
     });
+    // Saved filters belong to the account: they go when it leaves, so the
+    // next account starts from its own (and a full pull).
+    this.whenAccountLeaves(() => this.#savedFilterRepository.clearAccountData());
     this.#savedFilters = new SavedFilterSyncService({
       session: this.#service,
       api: this.#savedFilterApi,
