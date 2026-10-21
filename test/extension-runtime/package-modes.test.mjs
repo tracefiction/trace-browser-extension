@@ -284,7 +284,11 @@ async function assertIphoneBundleFollowsTheGrant(bundle, builtManifest) {
   allowed = true;
   for (const listener of added) listener({ origins: builtManifest.optional_host_permissions });
   await turns();
-  assert.deepEqual(registrations.map(({ id }) => id), ["trace-archive-automation-v1", "trace-ao3-saved-filters-v1"]);
+  assert.deepEqual(registrations.map(({ id }) => id), [
+    "trace-archive-automation-v1",
+    "trace-ao3-saved-filters-v1",
+    "trace-story-open-veil-v1",
+  ]);
   assert.deepEqual(
     JSON.parse(JSON.stringify(queries)),
     [{ url: builtManifest.optional_host_permissions }],
@@ -299,6 +303,7 @@ async function assertIphoneBundleFollowsTheGrant(bundle, builtManifest) {
       "library-overlay-keys.js",
       "library-overlay.js",
       "ao3-saved-filters.js",
+      "trace-open-veil.js",
     ],
   }], "and the story tab that was already open gets the registered scripts");
 }
@@ -464,7 +469,15 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
       [...SITE_HOST_MATCHES, "https://www.tracefiction.com/*"],
     );
     assert.equal(Object.hasOwn(desktopSafariManifest, "optional_host_permissions"), false);
-    assert.equal(desktopSafariManifest.content_scripts.length, 3);
+    assert.equal(desktopSafariManifest.content_scripts.length, 4);
+    // The veil runs before the page draws, on the same pages as collector.js.
+    const desktopArchiveScripts = desktopSafariManifest.content_scripts[0];
+    assert.deepEqual(desktopSafariManifest.content_scripts[3], {
+      matches: desktopArchiveScripts.matches,
+      js: ["trace-open-veil.js"],
+      run_at: "document_start",
+      exclude_matches: desktopArchiveScripts.exclude_matches,
+    });
     for (const browser of ["chrome", "firefox"]) {
       const packaged = manifest(path.join(ROOT, "dist", browser));
       assert.deepEqual(packaged.permissions, ["alarms", "tabs", "storage", "scripting"]);
@@ -474,7 +487,11 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
         "https://www.tracefiction.com/*",
       ]);
       assert.equal(Object.hasOwn(packaged, "optional_host_permissions"), false);
-      assert.equal(packaged.content_scripts.length, 3);
+      assert.equal(packaged.content_scripts.length, 4);
+      assert.deepEqual(packaged.content_scripts[3].js, ["trace-open-veil.js"]);
+      assert.equal(packaged.content_scripts[3].run_at, "document_start");
+      assert.deepEqual(packaged.content_scripts[3].matches, packaged.content_scripts[0].matches);
+      assert.deepEqual(packaged.content_scripts[3].exclude_matches, packaged.content_scripts[0].exclude_matches);
     }
 
     runBuild("build");
@@ -632,10 +649,23 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     assert.equal(iphoneOnboarding.version, 4);
     assert.equal(iphoneOnboarding.registrationMode, "dynamic");
     assert.deepEqual(Array.from(iphoneOnboarding.origins), MINIMIZED_SITE_HOST_MATCHES);
-    assert.equal(iphoneOnboarding.registrations.length, 2);
+    assert.equal(iphoneOnboarding.registrations.length, 3);
+    const iphoneArchiveRegistration = iphoneOnboarding.registrations[0];
+    const iphoneVeilRegistration = iphoneOnboarding.registrations[2];
+    assert.equal(iphoneVeilRegistration.id, "trace-story-open-veil-v1");
+    assert.deepEqual(Array.from(iphoneVeilRegistration.js), ["trace-open-veil.js"]);
+    assert.deepEqual(Array.from(iphoneVeilRegistration.matches), Array.from(iphoneArchiveRegistration.matches));
+    assert.deepEqual(
+      Array.from(iphoneVeilRegistration.excludeMatches),
+      Array.from(iphoneArchiveRegistration.excludeMatches),
+    );
     for (const registration of iphoneOnboarding.registrations) {
       assert.equal(registration.persistAcrossSessions, true);
-      assert.equal(registration.runAt, "document_end");
+      // Only the veil runs before the page draws.
+      assert.equal(
+        registration.runAt,
+        registration.id === "trace-story-open-veil-v1" ? "document_start" : "document_end",
+      );
       for (const match of registration.matches) {
         assert.ok(
           MINIMIZED_SITE_HOST_MATCHES.includes(match),

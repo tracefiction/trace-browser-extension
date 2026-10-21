@@ -377,6 +377,18 @@ const archiveContentScript = {
   run_at: "document_end",
   exclude_matches: SITE_AUTH_EXCLUDE_MATCHES,
 };
+// Hides a story page the Trace app has just opened while collector.js asks
+// whether a tab is already on that story (trace-open-veil.js). It has to run
+// before the page draws, so it is declared on its own at document_start. It
+// comes last in every list: recovery injects the listed files into open tabs
+// in this order, and collector.js has by then taken the mark off. The
+// required-hosts compatibility shape below keeps its 0.6.5 scripts unchanged.
+const storyOpenVeilContentScript = {
+  matches: SITE_HOST_MATCHES,
+  js: ["trace-open-veil.js"],
+  run_at: "document_start",
+  exclude_matches: SITE_AUTH_EXCLUDE_MATCHES,
+};
 const savedFiltersContentScript = {
   matches: AO3_HOST_MATCHES,
   js: [savedFiltersScript],
@@ -401,6 +413,14 @@ const earnedPermissionRegistrations = [
     runAt: "document_end",
     persistAcrossSessions: true,
     excludeMatches: AO3_AUTH_EXCLUDE_MATCHES,
+  },
+  {
+    id: "trace-story-open-veil-v1",
+    matches: MINIMIZED_SITE_HOST_MATCHES,
+    js: storyOpenVeilContentScript.js,
+    runAt: "document_start",
+    persistAcrossSessions: true,
+    excludeMatches: SITE_AUTH_EXCLUDE_MATCHES,
   },
 ];
 const earnedPermissionRuntimeConfig = {
@@ -574,6 +594,7 @@ const normalContentScripts = [
   archiveContentScript,
   traceContentScript,
   savedFiltersContentScript,
+  storyOpenVeilContentScript,
 ];
 const earnedCompatibilityContentScripts = [
   {

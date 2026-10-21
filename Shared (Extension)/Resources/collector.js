@@ -3774,6 +3774,20 @@ var TRACE_OPEN_MARK = "#trace-open";
 var TRACE_STORY_TAB_REUSE_MESSAGE = "TRACE_STORY_TAB_REUSE";
 var TRACE_STORY_TAB_REUSE_WITHIN_MS = 10000;
 var TRACE_STORY_TAB_REUSE_TIMEOUT_MS = 8000;
+// trace-open-veil.js hides such a page from document_start while the question
+// is open, and shows it again by itself after a short while whatever happens.
+var TRACE_OPEN_VEIL_ID = "trace-open-veil";
+
+function liftTraceOpenVeil() {
+  try {
+    var veils = document.querySelectorAll("style#" + TRACE_OPEN_VEIL_ID);
+    for (var index = 0; index < veils.length; index += 1) {
+      if (veils[index].parentNode) veils[index].parentNode.removeChild(veils[index]);
+    }
+  } catch (_) {
+    /* trace-open-veil.js shows the page again by itself. */
+  }
+}
 
 function takeTraceOpenMark() {
   try {
@@ -3798,19 +3812,25 @@ function traceTabJustOpenedForLink() {
 }
 
 function reuseOpenStoryTabForTraceLink() {
-  if (!takeTraceOpenMark()) return;
   if (
+    !takeTraceOpenMark() ||
     !traceTabJustOpenedForLink() ||
     tracePageManualMode() ||
     TRACE_ACTIVE_TAB_PROBE_MODE ||
     tracePageIsPrerendering() ||
     shouldDisableTraceContentScript()
   ) {
+    liftTraceOpenVeil();
     return;
   }
   sendCollectorMessage(
     { type: TRACE_STORY_TAB_REUSE_MESSAGE, payload: { url: location.href } },
-    function () {},
+    function (response) {
+      // A tab the background closed is on its way out and stays hidden.
+      // Any other answer, no answer, or an error shows the page.
+      if (response && response.reused === true && response.closed === true) return;
+      liftTraceOpenVeil();
+    },
     TRACE_STORY_TAB_REUSE_TIMEOUT_MS,
   );
 }

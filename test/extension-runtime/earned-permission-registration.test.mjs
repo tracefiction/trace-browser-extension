@@ -755,6 +755,36 @@ test("update: scripts registered by an earlier generation are replaced once and 
   assert.equal(h.store[EARNED_PERMISSION_STATE_KEY].completedAt, STORE_BUILD_STATE.completedAt);
 });
 
+test("update: a page script added at the same generation, at document_start, is registered beside the others", async () => {
+  const veil = Object.freeze({
+    id: "trace-story-open-veil-v1",
+    matches: ORIGINS,
+    js: Object.freeze(["trace-open-veil.js"]),
+    runAt: "document_start",
+    persistAcrossSessions: true,
+  });
+  const config = Object.freeze({ ...CURRENT_CONFIG, registrations: Object.freeze([...REGISTRATIONS, veil]) });
+  const h = upgradeHarness({
+    origins: [...ORIGINS],
+    registrations: REGISTRATIONS,
+    config,
+    state: { ...STORE_BUILD_STATE, registrationVersion: 4 },
+  });
+  const controller = new EarnedPermissionRegistrationController(h.environment);
+
+  const first = await controller.reconcile();
+  const second = await controller.reconcile();
+
+  assert.equal(first.changed, true);
+  assert.equal(second.changed, false);
+  assert.equal(h.registered.length, 1);
+  assert.deepEqual(
+    h.registrations.map(({ id, js, runAt }) => ({ id, js: [...js], runAt })),
+    [...REGISTRATIONS, veil].map(({ id, js, runAt }) => ({ id, js: [...js], runAt })),
+  );
+  assert.equal(h.store[EARNED_PERMISSION_STATE_KEY].completedAt, STORE_BUILD_STATE.completedAt);
+});
+
 test("a reader who never finished setup still gets a fresh grant time when scripts are registered", async () => {
   const h = createHarness({
     origins: [...ORIGINS],

@@ -18,8 +18,9 @@ website question. `activeTab` covers only the tab Trace was opened on, and is
 used to read that tab's address. Nothing is injected and nothing is saved
 before the five story sites are allowed.
 
-The background worker registers the two page scripts
-(`trace-archive-automation-v1`, `trace-ao3-saved-filters-v1`) when
+The background worker registers the three page scripts
+(`trace-archive-automation-v1`, `trace-ao3-saved-filters-v1`,
+`trace-story-open-veil-v1`) when
 `permissions.contains` confirms all five patterns. It checks on worker start,
 on install and update, when website access is added or removed, and each time
 the popup opens. Story tabs that are already open get the same scripts, under
