@@ -230,6 +230,7 @@ function createPopupHarness({
   const hostLifecycle = [];
   const popupDisconnects = [];
   const heldSnapshotReplies = [];
+  const heldActionReplies = [];
   const createdTabs = [];
   const updatedTabs = [];
   const permissionListeners = { added: [], removed: [] };
@@ -308,6 +309,12 @@ function createPopupHarness({
         }
         if (message.type === "TRACE_SESSION_ACTION") {
           response = sessionActionResponse ?? { ok: true, snapshot: sessionSnapshot, action: { kind: "ignored" } };
+          if (response.held === true) {
+            // A slow action: the test answers it later with answerAction().
+            if (promiseRuntime) return new Promise((resolve) => heldActionReplies.push(resolve));
+            heldActionReplies.push(callback);
+            return;
+          }
         }
         if (message.type === "TRACE_EARNED_PERMISSION_RECONCILE") {
           reconcileRequests.push(message);
@@ -554,6 +561,7 @@ function createPopupHarness({
     /** Safari reports that website access was added or removed. */
     emitPermissionChange(kind) { for (const fn of permissionListeners[kind]) fn({ origins: [] }); },
     answerSnapshot: (reply) => heldSnapshotReplies.shift()?.(reply),
+    answerAction: (reply) => heldActionReplies.shift()?.(reply),
     finishHostRequest: result => finishHostRequest(result),
     registrationRequests,
     reconcileRequests,
@@ -1913,6 +1921,40 @@ for (const promiseRuntime of [false, true]) {
     assert.equal(h.document.getElementById("popup-cta").textContent, "Connect");
   });
 }
+
+test("Connect shows Checking Trace at once while the Trace tab is asked, then lands on the answer", async () => {
+  const h = createPopupHarness({ sessionMode: "kernel", sessionActionResponse: { held: true } });
+  await flush();
+  const cta = h.document.getElementById("popup-cta");
+  cta.dispatchEvent(new h.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  await flush();
+  assert.equal(h.document.getElementById("popup-status").textContent, "Checking Trace…");
+  assert.equal(cta.hidden, true, "no Cancel where Connect was clicked");
+  h.answerAction({
+    ok: true,
+    snapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "credential_absent" },
+    action: { kind: "unavailable" },
+  });
+  await flush();
+  assert.equal(h.document.getElementById("popup-status").textContent, "Connect Trace");
+  assert.equal(cta.hidden, false);
+  assert.equal(cta.hasAttribute("aria-disabled"), false);
+  assert.deepEqual(h.createdTabs, ["https://tracefiction.com/"]);
+});
+
+test("Connect whose reply is lost reads the session again instead of staying on Checking", async () => {
+  const h = createPopupHarness({ sessionMode: "kernel", sessionActionResponse: { held: true } });
+  await flush();
+  const asked = h.messages.filter(({ type }) => type === "TRACE_SESSION_GET_SNAPSHOT").length;
+  h.document.getElementById("popup-cta").dispatchEvent(
+    new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+  );
+  await flush();
+  h.answerAction(undefined);
+  await flush();
+  assert.equal(h.messages.filter(({ type }) => type === "TRACE_SESSION_GET_SNAPSHOT").length, asked + 1);
+  assert.equal(h.document.getElementById("popup-status").textContent, "Connect Trace");
+});
 
 test("Connect that could not read the website's sign-in says so and opens nothing", async () => {
   const h = createPopupHarness({

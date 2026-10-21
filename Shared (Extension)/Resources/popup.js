@@ -5354,6 +5354,15 @@ function connectFoundNoWebsiteSignIn(action, snapshot) {
     snapshot?.reason === "credential_absent";
 }
 
+function showCheckingWhileConnecting(action) {
+  if ((action !== "connect" && action !== "reconnect") || isLikelyIosExtensionUi) return false;
+  renderKernelSnapshot({ state: "connecting", reason: "none" });
+  // Cancel stands where Connect was; a second click must not land on it.
+  const ctaEl = document.getElementById("popup-cta");
+  if (ctaEl) ctaEl.hidden = true;
+  return true;
+}
+
 function initializeKernelPopup() {
   if (kernelPopupInitialized) return;
   kernelPopupInitialized = true;
@@ -5370,11 +5379,17 @@ function initializeKernelPopup() {
       if (actionControl.getAttribute("aria-disabled") === "true") return;
       actionControl.setAttribute("aria-disabled", "true");
       const sequence = nextSessionSequence();
+      // Reading the sign-in from a Trace tab can take a while (a signed-out
+      // tab is given time to finish signing in), so the press shows at once.
+      const showsChecking = showCheckingWhileConnecting(action);
       sendKernelRuntimeMessage(
         { type: "TRACE_SESSION_ACTION", action },
         (response) => {
           actionControl.removeAttribute("aria-disabled");
-          if (!response) return;
+          if (!response) {
+            if (showsChecking) requestKernelSnapshot();
+            return;
+          }
           sessionReplyTaken(sequence, response);
           renderKernelSnapshot(response?.snapshot);
           if (response?.snapshot?.state === "connected") requestKernelPopupState();
