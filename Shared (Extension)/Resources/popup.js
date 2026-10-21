@@ -4489,10 +4489,11 @@ function renderKernelSnapshot(snapshot) {
     lead =
       `Open the Trace app and sign in there. Signing in on tracefiction.com in Safari does not connect this extension. Return to Safari and press ${connectVerb}.`;
   } else if (state === "signed_out" && reason === "credential_absent") {
-    // Connect found no signed-in Trace website in this browser; say so
-    // rather than leave the press looking like it did nothing.
+    // Connect got no sign-in from a Trace tab: none open, signed out, or a
+    // tab left over from before the extension reloaded. The press opened a
+    // fresh one; say so rather than leave it looking like it did nothing.
     lead =
-      "Trace couldn't find you signed in on the Trace website in this browser. Sign in there, then press Connect again.";
+      "Trace couldn't get your sign-in from the Trace website. It's open in a new tab: sign in there if you need to, then press Connect again.";
   } else if (state === "signed_out" && reason === "provider_unavailable") {
     lead =
       "Trace couldn't read your sign-in from the Trace website. Reload it, then press Connect again.";

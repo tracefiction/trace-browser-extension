@@ -1917,7 +1917,7 @@ for (const promiseRuntime of [false, true]) {
     );
     await flush();
     assert.deepEqual(h.createdTabs, ["https://tracefiction.com/"]);
-    assert.match(h.document.getElementById("popup-lead").textContent, /couldn't find you signed in on the Trace website/);
+    assert.match(h.document.getElementById("popup-lead").textContent, /couldn't get your sign-in from the Trace website/);
     assert.equal(h.document.getElementById("popup-cta").textContent, "Connect");
   });
 }
@@ -1980,7 +1980,7 @@ test("a popup opened after Connect found no website sign-in still says why", asy
     sessionSnapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "credential_absent" },
   });
   await flush();
-  assert.match(h.document.getElementById("popup-lead").textContent, /Sign in there, then press Connect again\./);
+  assert.match(h.document.getElementById("popup-lead").textContent, /sign in there if you need to, then press Connect again\./);
   assert.deepEqual(h.createdTabs, [], "opening the popup opens nothing");
 });
 
