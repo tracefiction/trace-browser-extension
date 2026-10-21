@@ -31,6 +31,11 @@ const AO3_SITE_PATTERN = "https://*.archiveofourown.org/*";
  * tab's own sign-in and Safari's own headers), hands the answer back, and
  * waits as long as it is told; the timer lives in the page, so it outlasts
  * the background. Hidden, it waits for the tab to be shown again.
+ *
+ * It also draws the reading bar at the foot of the page from the run's view
+ * that comes with each reply: how far the run has got, with Pause, and what
+ * happened when it stops. The bar lives in its own shadow root, so AO3's
+ * styles and Trace's never meet. It shows only counts, never a work.
  */
 export function ao3HistoryLoopInTab(message: string, maxChars: number, timeoutMs: number): unknown {
   const scope = globalThis as unknown as Record<string, unknown>;
@@ -53,6 +58,115 @@ export function ao3HistoryLoopInTab(message: string, maxChars: number, timeoutMs
       return Promise.resolve(null);
     }
   };
+
+  // --- The reading bar ---
+  const barKey = "__traceAo3HistoryImportBarV1";
+  let bar: { host: HTMLElement; title: HTMLElement; line: HTMLElement; button: HTMLButtonElement; fill: HTMLElement } | null = null;
+  let hidden = false;
+  let buttonAction: "pause" | "hide" = "pause";
+  const plural = (count: number, one: string, many: string) => `${count.toLocaleString("en")} ${count === 1 ? one : many}`;
+  const removeBar = () => {
+    bar?.host.remove();
+    bar = null;
+  };
+  const makeBar = () => {
+    const old = document.getElementById(barKey);
+    if (old) old.remove();
+    const host = document.createElement("div");
+    host.id = barKey;
+    // Open, so assistive tech and tests can read it; it holds only counts.
+    const root = host.attachShadow({ mode: "open" });
+    const style = document.createElement("style");
+    style.textContent = [
+      ":host{all:initial}",
+      ".bar{--surface:#ffffff;--text:#18232d;--text-2:#5f6b76;--track:#d8e0e7;--action:#c24c22;" +
+        "position:fixed;left:12px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom,0px));z-index:2147483646;" +
+        "max-width:560px;margin:0 auto;box-sizing:border-box;padding:12px 14px 14px;border-radius:14px;" +
+        "background:var(--surface);color:var(--text);box-shadow:0 1px 0 rgba(24,35,45,.04),0 12px 28px -12px rgba(24,35,45,.42);" +
+        "font:15px/1.3 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;display:grid;grid-template-columns:1fr auto;gap:2px 12px;align-items:center}",
+      "@media (prefers-color-scheme:dark){.bar{--surface:#121418;--text:#f2f5f8;--text-2:#b4bcc6;--track:#2b2f35;--action:#ff8458}}",
+      ".title{font-weight:600;margin:0}",
+      ".line{grid-column:1;color:var(--text-2);font-size:13px;margin:0}",
+      "button{grid-row:1/3;grid-column:2;min-height:44px;padding:0 14px;border:0;border-radius:10px;" +
+        "font:600 15px/1 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:var(--text);background:var(--track);cursor:pointer}",
+      ".track{grid-column:1/3;height:3px;margin-top:8px;border-radius:2px;background:var(--track);overflow:hidden}",
+      ".fill{height:100%;width:0;background:var(--action);border-radius:2px;transition:width .3s}",
+      "@media (prefers-reduced-motion:reduce){.fill{transition:none}}",
+    ].join("");
+    const box = document.createElement("div");
+    box.className = "bar";
+    box.setAttribute("role", "status");
+    box.setAttribute("aria-live", "polite");
+    const title = document.createElement("p");
+    title.className = "title";
+    const line = document.createElement("p");
+    line.className = "line";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.addEventListener("click", () => {
+      if (buttonAction === "hide") {
+        hidden = true;
+        removeBar();
+        return;
+      }
+      button.disabled = true;
+      void send({ action: "tab_pause" }).then((reply) => {
+        stop();
+        if (reply && reply.view) render(reply.view);
+        button.disabled = false;
+      });
+    });
+    const track = document.createElement("div");
+    track.className = "track";
+    const fill = document.createElement("div");
+    fill.className = "fill";
+    track.appendChild(fill);
+    box.append(title, line, button, track);
+    root.append(style, box);
+    (document.body ?? document.documentElement).appendChild(host);
+    return { host, title, line, button, fill };
+  };
+  function render(view: unknown): void {
+    if (hidden || !view || typeof view !== "object") return;
+    const v = view as Record<string, unknown>;
+    const number = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : null);
+    const works = number(v.works) ?? 0;
+    const read = number(v.pagesRead) ?? 0;
+    const total = number(v.totalPages);
+    if (v.status !== "running" && v.status !== "paused" && v.status !== "finished") {
+      removeBar();
+      return;
+    }
+    bar ??= makeBar();
+    let title = "Reading your History";
+    let line = "";
+    if (v.status === "running") {
+      const page = total === null ? read + 1 : Math.min(read + 1, total);
+      const waiting = v.waitingFor;
+      line = waiting === "slow_down"
+        ? "AO3 asked Trace to slow down. Trying again soon."
+        : waiting === "ao3_unwell"
+          ? "AO3 isn't answering. Trace will try again shortly."
+          : waiting === "network"
+            ? "No connection. Trace will try again shortly."
+            : `Page ${page}${total === null ? "" : ` of ${total}`} · ${plural(works, "story", "stories")}`;
+      buttonAction = "pause";
+    } else if (v.status === "paused") {
+      title = "Paused";
+      line = `${plural(works, "story", "stories")} kept. Open Trace to carry on.`;
+      buttonAction = "hide";
+    } else {
+      title = "Your History is ready";
+      line = `${plural(works, "story", "stories")}. Open Trace to review them.`;
+      buttonAction = "hide";
+    }
+    bar.title.textContent = title;
+    bar.line.textContent = line;
+    bar.button.textContent = buttonAction === "pause" ? "Pause" : "Hide";
+    const share = v.status === "finished" ? 1 : total === null || total === 0 ? 0 : Math.min(1, read / total);
+    bar.fill.style.width = `${Math.round(share * 1_000) / 10}%`;
+  }
+
   const read = async (url: string): Promise<Record<string, unknown>> => {
     const controller = new AbortController();
     const limit = setTimeout(() => controller.abort(), timeoutMs);
@@ -79,12 +193,12 @@ export function ao3HistoryLoopInTab(message: string, maxChars: number, timeoutMs
     if (timer !== null) clearTimeout(timer);
     timer = setTimeout(run, ms);
   };
-  const stop = () => {
+  function stop(): void {
     stopped = true;
     if (timer !== null) clearTimeout(timer);
     document.removeEventListener("visibilitychange", shown);
     delete scope[key];
-  };
+  }
   async function run(): Promise<void> {
     timer = null;
     if (stopped || busy || document.visibilityState !== "visible") return;
@@ -92,14 +206,17 @@ export function ao3HistoryLoopInTab(message: string, maxChars: number, timeoutMs
     let next: Record<string, unknown> | null = null;
     try {
       next = await send({ action: "tab_tick" });
+      if (next?.view) render(next.view);
       // One request per tick: the background says when the next is due.
       if (next && typeof next.fetch === "string" && typeof next.token === "string") {
         const answer = await read(next.fetch);
         next = await send({ action: "tab_answer", token: next.token, answer });
+        if (next?.view) render(next.view);
       }
     } finally {
       busy = false;
     }
+    if (stopped) return;
     if (next === null) {
       // The background did not answer: try again shortly.
       schedule(10_000);
@@ -223,7 +340,7 @@ export type SheetError =
   | "unknown_action";
 
 export type SheetReply =
-  | { readonly ok: true; readonly view: HistoryRunView }
+  | { readonly ok: true; readonly view: HistoryRunView; readonly startable?: boolean }
   | { readonly ok: false; readonly error: SheetError; readonly view?: HistoryRunView };
 
 export function installAo3HistoryImport(environment: HistoryImportEnvironment): Ao3HistoryImport {
@@ -317,9 +434,12 @@ export function installAo3HistoryImport(environment: HistoryImportEnvironment): 
   async function handle(message: Record<string, unknown>): Promise<SheetReply> {
     const tabId = typeof message.tabId === "number" && Number.isSafeInteger(message.tabId) ? message.tabId : null;
     switch (message.action) {
-      case "status":
+      case "status": {
         void history.wake(tabId);
-        return { ok: true, view: await history.view() };
+        // Whether this sheet can start a run: a connected Trace account, on AO3.
+        const [account, tab] = await Promise.all([environment.account().catch(() => null), ao3Tab(tabId)]);
+        return { ok: true, view: await history.view(), startable: account !== null && typeof tab !== "string" };
+      }
       case "start": {
         const user = await signedInUser(tabId);
         if (typeof user !== "string") return { ok: false, error: user.error, view: await history.view() };
@@ -347,13 +467,21 @@ export function installAo3HistoryImport(environment: HistoryImportEnvironment): 
     const pageTab = ao3TabSender(sender, runtime.id);
     if (message.type === AO3_HISTORY_IMPORT_MESSAGE && pageTab !== null) {
       // The page loop, from the AO3 tab it runs in.
+      // Each reply carries the run's view, for the reading bar on the page.
+      const withView = (instruction: unknown) => history.view()
+        .then((view) => ({ ...(instruction as object), view }), () => instruction);
       if (message.action === "tab_tick") {
-        void history.tick(pageTab).then(sendResponse, () => sendResponse({ wait: 10_000 }));
+        void history.tick(pageTab).then(withView).then(sendResponse, () => sendResponse({ wait: 10_000 }));
         return true;
       }
       if (message.action === "tab_answer" && typeof message.token === "string") {
         void history.answer(message.token, loadedPageFromTab(message.answer))
-          .then(sendResponse, () => sendResponse({ wait: 10_000 }));
+          .then(withView).then(sendResponse, () => sendResponse({ wait: 10_000 }));
+        return true;
+      }
+      if (message.action === "tab_pause") {
+        // The reading bar's Pause, in the reader's own AO3 tab.
+        void history.pause().then((view) => sendResponse({ stop: true, view }), () => sendResponse({ stop: true }));
         return true;
       }
       return false;

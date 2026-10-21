@@ -564,7 +564,9 @@ test("the sheet starts a run for the AO3 name the tab shows, and is told plainly
 
 test("the page loop's ticks are answered only for a page on AO3; with no run it is told to stop", async () => {
   const w = wiring();
-  assert.deepEqual(await w.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "tab_tick" }, AO3_TAB), { stop: true });
+  const reply = await w.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "tab_tick" }, AO3_TAB);
+  assert.equal(reply.stop, true);
+  assert.equal(reply.view.status, "idle", "each reply carries the run's view, for the reading bar");
   const elsewhere = { ...AO3_TAB, url: "https://example.org/", tab: { id: 9, url: "https://example.org/" } };
   assert.equal(await w.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "tab_tick" }, elsewhere), undefined);
 });

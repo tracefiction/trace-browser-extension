@@ -876,11 +876,18 @@ test("the whole-History import is in a package only when its switch is on, and o
     for (const wiring of HISTORY_WIRING) {
       assert.equal(store.includes(wiring), false, `the store package carries ${wiring}`);
     }
+    assert.equal(fs.existsSync(path.join(RESOURCES, "ao3-history-import-panel.js")), false, "the store package carries the sheet section");
+    assert.equal(fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8").includes("ao3-history-import-panel.js"), false);
     const on = build({ TRACE_AO3_HISTORY_IMPORT: "1" });
     assert.equal(on.status, 0, on.stderr || on.stdout);
     const withImport = fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8");
     for (const wiring of HISTORY_WIRING) {
       assert.equal(withImport.includes(wiring), true, `the switched-on package lacks ${wiring}`);
+    }
+    assert.equal(fs.existsSync(path.join(RESOURCES, "ao3-history-import-panel.js")), true, "the switched-on package lacks the sheet section");
+    assert.match(fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8"), /ao3-history-import-panel\.js/);
+    for (const browser of ["chrome", "firefox"]) {
+      assert.equal(fs.existsSync(path.join(ROOT, "dist", browser, "ao3-history-import-panel.js")), true, `${browser} lacks the sheet section`);
     }
     // Nothing more is asked of Safari for it.
     assert.deepEqual(manifest(RESOURCES).permissions, ["alarms", "storage", "nativeMessaging", "activeTab", "scripting"]);
