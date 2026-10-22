@@ -29,6 +29,14 @@ export const EARNED_PERMISSION_RETRY_DELAYS_MINUTES: readonly number[] =
 export const EARNED_PERMISSION_RETRY_REST_MINUTES = 24 * 60;
 /** Set once an ended grant has been confirmed; cleared when access returns. */
 export const EARNED_PERMISSION_ENDED_KEY = "traceEarnedPermissionEndedV1";
+/**
+ * Which optional page scripts were last tried, and under which extension
+ * version. One that the browser refuses is not tried again on every start,
+ * only after the next update or the next full registration.
+ */
+export const EARNED_PERMISSION_OPTIONAL_ATTEMPT_KEY =
+  "traceEarnedPermissionOptionalAttemptV1";
+const OPTIONAL_REGISTRATION_TIMEOUT_MS = 5_000;
 
 export type EarnedPermissionRegistration = Readonly<{
   id: string;
@@ -44,6 +52,13 @@ export type EarnedPermissionRegistrationConfig = Readonly<{
   registrationMode?: "dynamic" | "static";
   origins: readonly string[];
   registrations: readonly EarnedPermissionRegistration[];
+  /**
+   * Page scripts that add to the others but that nothing depends on. They are
+   * registered in a call of their own, after the others have been confirmed,
+   * and a refusal is logged and left at that: it changes no result, no stored
+   * setup state and no check of whether the page scripts are registered.
+   */
+  optionalRegistrations?: readonly EarnedPermissionRegistration[];
 }>;
 
 type StoredState = Readonly<{
@@ -79,6 +94,8 @@ type Environment = Readonly<{
   clock?: () => number;
   /** Upper bound for one reconcile; a hung browser call must not wedge the queue. */
   reconcileTimeoutMs?: number;
+  /** Upper bound for registering the optional page scripts. */
+  optionalRegistrationTimeoutMs?: number;
   /** How far apart the two readings are that end a grant and remove its scripts. */
   endedGrantConfirmDelayMs?: number;
   /** Wakes a sleeping worker to try again after a reconcile that could not finish. */
@@ -148,6 +165,7 @@ export class EarnedPermissionRegistrationController {
   #generation = 0;
   #running = 0;
   readonly #expected = new Set<Promise<unknown>>();
+  #optional: Promise<void> = Promise.resolve();
   #tail: Promise<EarnedPermissionRegistrationResult> = Promise.resolve({
     ok: false,
     completeGrant: false,
@@ -193,6 +211,84 @@ export class EarnedPermissionRegistrationController {
         resolve(true);
       });
     });
+  }
+
+  /** Resolves once the latest attempt at the optional page scripts has ended. */
+  optionalSettled(): Promise<void> {
+    return this.#optional;
+  }
+
+  // Never awaited by a reconcile, so an optional script that the browser
+  // refuses, or a call that never answers, cannot hold back or fail the
+  // registration of the others.
+  #addOptional(
+    currentIds: ReadonlySet<string>,
+    afterFullRegistration: boolean,
+    generation: number,
+  ): void {
+    const missing = (this.#environment.config.optionalRegistrations ?? []).filter(
+      ({ id }) => !currentIds.has(id),
+    );
+    if (missing.length === 0) return;
+    const attempt = this.#attemptOptional(missing, afterFullRegistration, generation)
+      .catch(() => undefined);
+    this.#optional = this.#optional.then(() => attempt);
+  }
+
+  async #attemptOptional(
+    missing: readonly EarnedPermissionRegistration[],
+    afterFullRegistration: boolean,
+    generation: number,
+  ): Promise<void> {
+    const { runtime, scripting, storage, storageMode } = this.#environment;
+    if (!scripting) return;
+    let extensionVersion = "";
+    try {
+      extensionVersion = runtime.getManifest?.().version ?? "";
+    } catch {
+      extensionVersion = "";
+    }
+    const stamp = `${extensionVersion}|${missing.map(({ id }) => id).join(",")}`;
+    if (!afterFullRegistration) {
+      const tried = await storage
+        .get(EARNED_PERMISSION_OPTIONAL_ATTEMPT_KEY)
+        .then((value) => value[EARNED_PERMISSION_OPTIONAL_ATTEMPT_KEY])
+        .catch(() => null);
+      if (tried === stamp) return;
+    }
+    // A newer reconcile makes its own attempt.
+    if (this.#generation !== generation) return;
+    // Noted before trying, so a call that never returns is not repeated.
+    await storage
+      .set({ [EARNED_PERMISSION_OPTIONAL_ATTEMPT_KEY]: stamp })
+      .catch(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        callExtensionApi<void>(
+          scripting as unknown as Record<string, (...args: unknown[]) => unknown>,
+          "registerContentScripts",
+          [missing],
+          runtime,
+          storageMode,
+        ),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("optional_registration_timeout")),
+            this.#environment.optionalRegistrationTimeoutMs ??
+              OPTIONAL_REGISTRATION_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } catch (error) {
+      console.warn(
+        "[Trace] An optional page script was not registered; the others are unaffected:",
+        missing.map(({ id }) => id).join(", "),
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   reconcile(): Promise<EarnedPermissionRegistrationResult> {
@@ -389,6 +485,11 @@ export class EarnedPermissionRegistrationController {
 
     if (!completeGrant) {
       const staleIds = configuredIds.filter((id) => currentIds.has(id));
+      // Optional scripts go with the others, but do not by themselves say
+      // that the reader had the grant.
+      const staleOptionalIds = (config.optionalRegistrations ?? [])
+        .map(({ id }) => id)
+        .filter((id) => currentIds.has(id));
       // For a reader who had the grant, one incomplete reading is not yet an
       // answer: their scripts stay, and the caller is told to ask again.
       const hadGrant =
@@ -409,12 +510,13 @@ export class EarnedPermissionRegistrationController {
           .set({ [EARNED_PERMISSION_ENDED_KEY]: this.#environment.clock?.() ?? Date.now() })
           .catch(() => undefined);
       }
-      if (staleIds.length > 0) {
+      const removable = [...staleIds, ...staleOptionalIds];
+      if (removable.length > 0) {
         this.#assertCurrent(generation);
         await callExtensionApi<void>(
           scripting as unknown as Record<string, (...args: unknown[]) => unknown>,
           "unregisterContentScripts",
-          [{ ids: staleIds }],
+          [{ ids: removable }],
           runtime,
           storageMode,
         ).catch(() => undefined);
@@ -423,7 +525,7 @@ export class EarnedPermissionRegistrationController {
         ok: false,
         completeGrant: false,
         registered: false,
-        changed: staleIds.length > 0,
+        changed: removable.length > 0,
         error: "permission_incomplete",
       });
     }
@@ -445,6 +547,7 @@ export class EarnedPermissionRegistrationController {
           },
         });
       }
+      this.#addOptional(currentIds, false, generation);
       return Object.freeze({
         ok: true,
         completeGrant: true,
@@ -511,6 +614,7 @@ export class EarnedPermissionRegistrationController {
           completedAt,
         },
       });
+      this.#addOptional(currentIds, true, generation);
       return Object.freeze({
         ok: true,
         completeGrant: true,

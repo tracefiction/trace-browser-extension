@@ -298,6 +298,14 @@ test("AO3 saved filters never mounts into the Recent Works header search", async
   );
 });
 
+function rowTokens(window) {
+  return Array.from(root(window).querySelectorAll(".trace-sf-col-row")).map((row) => {
+    const tokens = row.querySelector(".trace-sf-col-tokens");
+    const name = row.querySelector(".trace-sf-col-name");
+    return tokens && tokens.textContent !== "Any tag" ? tokens.textContent.replace(/^Any tag · /, "") : name.textContent;
+  });
+}
+
 test("AO3 saved filters saves normalized current URL params locally", async () => {
   const { window, storageState, runtimeMessages } = await renderSavedFilters();
   const form = window.document.getElementById("work-filters");
@@ -305,64 +313,24 @@ test("AO3 saved filters saves normalized current URL params locally", async () =
   const mount = root(window);
 
   assert.ok(mount, "expected saved filters module");
-  assert.equal(mount.parentElement, fieldset, "module should sit inside AO3's raised filter fieldset");
+  assert.equal(mount.parentElement, fieldset, "module should sit inside AO3's filter fieldset");
   assert.equal(mount.previousElementSibling.tagName, "LEGEND", "module should preserve the fieldset legend");
   assert.equal(mount.nextElementSibling.tagName, "DL", "module should stay above the AO3 filter controls");
-  assert.match(mount.textContent, /These filters aren't saved/);
-  assert.equal(
-    mount.querySelectorAll("[data-trace-sf-action='save-open']").length,
-    1,
-    "unsaved filters should expose one save action",
-  );
-  assert.doesNotMatch(
-    mount.textContent,
-    /Save current filters/,
-    "unsaved filters should not duplicate the primary save action in the footer",
-  );
+  assert.equal(mount.querySelectorAll("[data-trace-sf-action='sheet-save']").length, 1, "one Save in the column");
+  assert.equal(line(window).querySelector(".trace-sf-line-text").textContent, "Filtered: Complete · 50k+ words · By kudos");
 
-  mount.querySelector("[data-trace-sf-action='save-open']").click();
+  line(window).querySelector("[data-trace-sf-action='sheet-save']").click();
   await sleep(10);
-  const nameInput = mount.querySelector("[data-trace-sf-name]");
-  assert.ok(nameInput, "expected inline save form");
-  assert.equal(
-    nameInput.value,
-    "Complete only · At least 50,000 words · Sorted by kudos",
-    "the name starts filled with a suggestion",
-  );
-  assert.equal(window.document.activeElement, nameInput, "focus moves to the name field");
-  assert.equal(nameInput.selectionStart, 0, "the suggestion is fully selected so typing replaces it");
-  assert.equal(nameInput.selectionEnd, nameInput.value.length);
-  assert.equal(
-    mount.querySelector("label[for='trace-sf-name-input']").textContent,
-    "Name",
-  );
-  assert.equal(
-    mount.querySelectorAll("[data-trace-sf-action='save-open']").length,
-    0,
-    "save mode should not keep duplicate save-open buttons",
-  );
-  assert.equal(
-    mount.querySelector(".trace-sf-status"),
-    null,
-    "the save form replaces the status line in place",
-  );
-  assert.equal(
-    mount.querySelector(".trace-sf-empty"),
-    null,
-    "save mode should not render the empty state below the form",
-  );
-  nameInput.value = "Temporary custom name";
-  nameInput.dispatchEvent(new window.Event("input", { bubbles: true, cancelable: true }));
-  mount.querySelector("[data-trace-sf-action='name-clear']").click();
-  await sleep(0);
-  assert.equal(
-    mount.querySelector("[data-trace-sf-name]").value,
-    "",
-    "clear control should reset back to the placeholder fallback",
-  );
-  const refreshedNameInput = mount.querySelector("[data-trace-sf-name]");
-  refreshedNameInput.value = "Long complete Bakudeku";
-  mount.querySelector("[data-trace-sf-action='save-confirm']").click();
+  const host = sheet(window);
+  const nameInput = host.querySelector("[data-trace-sf-name]");
+  assert.equal(nameInput.value, "", "the name is optional");
+  assert.equal(nameInput.getAttribute("placeholder"), "Complete · 50k+ words · By kudos");
+  host.querySelector("[data-trace-sf-action='scope-context']").click();
+  await sleep(10);
+  const field = sheet(window).querySelector("[data-trace-sf-name]");
+  field.value = "Long complete Bakudeku";
+  field.dispatchEvent(new window.Event("input", { bubbles: true, cancelable: true }));
+  sheet(window).querySelector("[data-trace-sf-action='save-confirm']").click();
   await sleep(80);
 
   assert.equal(storageState[STORAGE_KEY].length, 1);
@@ -380,41 +348,388 @@ test("AO3 saved filters saves normalized current URL params locally", async () =
   ]);
   assert.ok(!preset.params.some(([key]) => key === "tag_id" || key === "page" || key === "commit"));
   assert.equal(storageState[ACTIVE_KEY].id, preset.id);
-  assert.deepEqual(plain(runtimeMessages.at(-1)), {
-    type: "TRACE_AO3_SAVED_FILTERS_SYNC_REQUEST",
-  });
-  assert.match(mount.textContent, /Showing\s+Long complete Bakudeku/);
-  assert.equal(
-    mount.querySelectorAll(".trace-sf-badge").length,
-    0,
-    "row status should not render title-squeezing badge pills",
-  );
-  assert.doesNotMatch(
-    mount.textContent,
-    /Save current filters/,
-    "active filters should not show the lower save-current affordance",
-  );
+  assert.deepEqual(plain(runtimeMessages.at(-1)), { type: "TRACE_AO3_SAVED_FILTERS_SYNC_REQUEST" });
+  assert.equal(line(window).querySelector(".trace-sf-line-text").textContent, "Showing Long complete Bakudeku");
+  assert.equal(mount.querySelector("[data-trace-sf-action='sheet-save']"), null, "nothing left to save");
 });
 
-test("AO3 saved filters falls back to the suggested name when the name is cleared", async () => {
-  const { window, storageState } = await renderSavedFilters();
-  const mount = root(window);
+test("AO3 saved filters applies context presets to the current tag context", async () => {
+  const preset = makePreset();
+  const { window, storageState, navigations } = await renderSavedFilters({
+    url: "https://archiveofourown.org/works?tag_id=Naruto",
+    storage: { [STORAGE_KEY]: [preset] },
+  });
 
-  mount.querySelector("[data-trace-sf-action='save-open']").click();
-  await sleep(0);
-  const suggestedName = mount.querySelector("[data-trace-sf-name]").value;
-  assert.ok(suggestedName, "expected a suggested name");
-  assert.equal(mount.querySelector("[data-trace-sf-name]").getAttribute("placeholder"), suggestedName);
-  mount.querySelector("[data-trace-sf-action='name-clear']").click();
-  await sleep(0);
-  assert.equal(mount.querySelector("[data-trace-sf-name]").value, "");
-
-  mount.querySelector("[data-trace-sf-action='save-confirm']").click();
+  root(window).querySelector(".trace-sf-col-row").click();
   await sleep(80);
 
-  assert.equal(storageState[STORAGE_KEY].length, 1);
-  assert.equal(storageState[STORAGE_KEY][0].name, suggestedName);
+  assert.equal(navigations.length, 1);
+  const target = new URL(navigations[0]);
+  assert.equal(target.pathname, "/works");
+  assert.equal(target.searchParams.get("tag_id"), "Naruto");
+  assert.equal(target.searchParams.get("work_search[complete]"), "T");
+  assert.equal(target.searchParams.get("work_search[sort_column]"), "kudos_count");
+  assert.equal(storageState[ACTIVE_KEY].id, "preset-a");
+  assert.equal(storageState[ACTIVE_KEY].contextKey, "tagId:Naruto");
 });
+
+test("AO3 saved filters applies global presets to the current tag context", async () => {
+  const preset = makePreset({
+    id: "anywhere-a",
+    name: "Global relationship filters",
+    scope: "global",
+    params: [
+      ["exclude_work_search[archive_warning_ids][]", "16"],
+      ["exclude_work_search[freeform_ids][]", "110"],
+      ["include_work_search[archive_warning_ids][]", "14"],
+      ["include_work_search[category_ids][]", "22"],
+      ["include_work_search[rating_ids][]", "10"],
+      ["include_work_search[relationship_ids][]", "3741107"],
+      ["work_search[sort_column]", "kudos_count"],
+    ],
+  });
+  const { storageState, navigations, window } = await renderSavedFilters({
+    url: "https://archiveofourown.org/works?tag_id=Avatar%3A+The+Last+Airbender&work_search%5Bsort_column%5D=updated_at",
+    storage: { [STORAGE_KEY]: [preset] },
+  });
+
+  root(window).querySelector(".trace-sf-col-row").click();
+  await sleep(80);
+
+  assert.equal(navigations.length, 1);
+  const target = new URL(navigations[0]);
+  assert.equal(target.pathname, "/works");
+  assert.equal(target.searchParams.get("tag_id"), "Avatar: The Last Airbender");
+  assert.equal(target.searchParams.get("exclude_work_search[archive_warning_ids][]"), "16");
+  assert.equal(target.searchParams.get("exclude_work_search[freeform_ids][]"), "110");
+  assert.equal(target.searchParams.get("include_work_search[relationship_ids][]"), "3741107");
+  assert.equal(target.searchParams.get("work_search[sort_column]"), "kudos_count");
+  assert.equal(storageState[ACTIVE_KEY].id, "anywhere-a");
+  assert.equal(storageState[ACTIVE_KEY].contextKey, "tagId:Avatar: The Last Airbender");
+});
+
+test("AO3 saved filters shows this tag's and any-tag presets, and says how many are on other tags", async () => {
+  const { window } = await renderSavedFilters({
+    url: "https://archiveofourown.org/works?tag_id=Naruto&work_search%5Bsort_column%5D=kudos_count",
+    storage: {
+      [STORAGE_KEY]: [
+        makePreset({ id: "context-naruto", name: "Naruto context filter", scope: "context", contextKey: "tagId:Naruto", contextLabel: "Naruto" }),
+        makePreset({ id: "context-avatar", name: "Avatar context filter", scope: "context", contextKey: "tagId:Avatar: The Last Airbender", contextLabel: "Avatar: The Last Airbender" }),
+        makePreset({ id: "global-a", name: "Reusable anywhere filter", scope: "global" }),
+      ],
+    },
+  });
+  const mount = root(window);
+  assert.deepEqual(columnIds(window), ["context-naruto", "global-a"]);
+  assert.doesNotMatch(mount.textContent, /Avatar context filter/);
+  assert.equal(mount.querySelector("[data-trace-sf-action='sheet-open-others']").textContent, "1 more on other tags");
+});
+
+test("AO3 saved filters shows a filter saved on a tag's filtered results back on that tag's listing", async () => {
+  // AO3's filter form submits to /works?tag_id=..., so a filter is saved on
+  // that URL; the tag's own listing is /tags/<tag>/works.
+  const saved = await renderSavedFilters();
+  root(saved.window).querySelector("[data-trace-sf-action='sheet-save']").click();
+  await sleep(10);
+  sheet(saved.window).querySelector("[data-trace-sf-action='scope-context']").click();
+  await sleep(10);
+  sheet(saved.window).querySelector("[data-trace-sf-action='save-confirm']").click();
+  await sleep(80);
+  assert.equal(saved.storageState[STORAGE_KEY].length, 1);
+
+  const listing = await renderSavedFilters({
+    url: "https://archiveofourown.org/tags/Harry%20Potter%20-%20J*d*%20K*d*%20Rowling/works",
+    storage: plain(saved.storageState),
+  });
+  assert.deepEqual(rowTokens(listing.window), ["Complete · 50k+ words · By kudos"]);
+
+  const otherTag = await renderSavedFilters({
+    url: "https://archiveofourown.org/tags/Naruto/works",
+    storage: plain(saved.storageState),
+  });
+  assert.equal(root(otherTag.window).querySelectorAll(".trace-sf-col-row").length, 0);
+  assert.equal(root(otherTag.window).querySelector("[data-trace-sf-action='sheet-open-others']").textContent, "1 on other tags");
+});
+
+test("AO3 saved filters shows filters a pull brings in without a reload", async () => {
+  const harness = await renderSavedFilters({ url: "https://archiveofourown.org/tags/Naruto/works" });
+  assert.equal(root(harness.window).querySelectorAll(".trace-sf-col-row").length, 0);
+  harness.emitStorageChange({
+    [STORAGE_KEY]: { newValue: [makePreset({ id: "pulled", name: "From the account", scope: "global" })] },
+    [SYNC_META_KEY]: { newValue: { syncVersion: "v2", lastSyncedAt: new Date().toISOString() } },
+  });
+  await sleep(80);
+  assert.deepEqual(columnIds(harness.window), ["pulled"]);
+  assert.equal(root(harness.window).querySelector(".trace-sf-col-name").textContent, "From the account");
+});
+
+test("AO3 saved filters keeps Trace control events away from AO3 filter handlers", async () => {
+  const { window, emitStorageChange } = await renderSavedFilters();
+  const mount = root(window);
+  const form = window.document.getElementById("work-filters");
+  const saveButton = mount.querySelector("[data-trace-sf-action='sheet-save']");
+  const counts = { form: 0, click: 0, pointerdown: 0, pointerup: 0, mousedown: 0, mouseup: 0, touchend: 0, keydown: 0 };
+  form.addEventListener("click", () => { counts.form += 1; });
+  for (const type of ["click", "pointerdown", "pointerup", "mousedown", "mouseup", "touchend", "keydown"]) {
+    window.document.addEventListener(type, () => { counts[type] += 1; });
+  }
+  for (const type of ["pointerdown", "pointerup", "mousedown", "mouseup", "touchstart", "touchend"]) {
+    saveButton.dispatchEvent(new window.Event(type, { bubbles: true, cancelable: true }));
+  }
+  saveButton.click();
+  await sleep(10);
+  assert.deepEqual(counts, { form: 0, click: 0, pointerdown: 0, pointerup: 0, mousedown: 0, mouseup: 0, touchend: 0, keydown: 0 });
+  const nameInput = sheet(window).querySelector("[data-trace-sf-name]");
+  assert.ok(nameInput, "Trace action should still run");
+
+  nameInput.value = "Draft should stay";
+  nameInput.dispatchEvent(new window.Event("input", { bubbles: true, cancelable: true }));
+  for (const type of ["pointerdown", "pointerup", "mousedown", "mouseup", "touchstart", "touchend"]) {
+    nameInput.dispatchEvent(new window.Event(type, { bubbles: true, cancelable: true }));
+  }
+  nameInput.click();
+  nameInput.dispatchEvent(new window.KeyboardEvent("keydown", { key: "M", bubbles: true, cancelable: true }));
+  await sleep(0);
+  assert.deepEqual(counts, { form: 0, click: 0, pointerdown: 0, pointerup: 0, mousedown: 0, mouseup: 0, touchend: 0, keydown: 0 });
+
+  emitStorageChange({ [ACTIVE_KEY]: { oldValue: null, newValue: null } });
+  await sleep(80);
+  assert.equal(sheet(window).querySelector("[data-trace-sf-name]").value, "Draft should stay", "a pull doesn't lose the draft");
+});
+
+test("AO3 saved filters names every token from the page's own labels", async () => {
+  const longTags = "Found Family,Emotional Hurt/Comfort with a Very Long Happy Ending That Keeps Going";
+  const params = [
+    ["include_work_search[rating_ids][]", "11"],
+    ["include_work_search[archive_warning_ids][]", "16"],
+    ["include_work_search[category_ids][]", "23"],
+    ["include_work_search[relationship_ids][]", "1110"],
+    ["include_work_search[freeform_ids][]", "143795"],
+    ["include_work_search[freeform_ids][]", "2379"],
+    ["exclude_work_search[archive_warning_ids][]", "18"],
+    ["work_search[other_tag_names]", longTags],
+    ["work_search[complete]", "T"],
+    ["work_search[words_from]", "10000"],
+    ["work_search[words_to]", "50000"],
+    ["work_search[sort_column]", "kudos_count"],
+  ];
+  const { window } = await renderSavedFilters({
+    url: "https://archiveofourown.org/works?tag_id=Harry+Potter+-+J*d*+K*d*+Rowling",
+    storage: {
+      [STORAGE_KEY]: [makePreset({
+        id: "long",
+        name: "A long saved filter",
+        params,
+        // An older save's truncated summary is ignored when the page can label every value.
+        summary: ["Include: Teen And Up Audiences", "+11 more"],
+      })],
+    },
+  });
+  const row = root(window).querySelector(".trace-sf-col-row");
+  const tokens = row.querySelector(".trace-sf-col-tokens").textContent;
+  assert.equal(tokens, "Alternate Universe - Canon Divergence · Hurt/Comfort · Sirius Black/Remus Lupin · Found Family · Emotional Hurt/Comfort with a Very Long Happy Ending That Keeps Going · " +
+    "Teen And Up Audiences · No Archive Warnings Apply · M/M · Complete · 10k–50k words · Not Major Character Death · By kudos");
+  assert.doesNotMatch(tokens, /more|\.\.\./);
+  assert.equal(row.getAttribute("aria-label"), `A long saved filter. ${tokens}.`);
+});
+
+test("AO3 saved filters falls back to the stored summary only for values the page can't label", async () => {
+  const { window } = await renderSavedFilters({
+    url: "https://archiveofourown.org/works?tag_id=Naruto",
+    storage: {
+      [STORAGE_KEY]: [makePreset({
+        id: "elsewhere",
+        name: "Saved on another fandom",
+        scope: "global",
+        params: [["include_work_search[freeform_ids][]", "999999999"], ["work_search[complete]", "T"]],
+        summary: ["Include Bakugou Katsuki/Midoriya Izuku", "Complete only"],
+      })],
+    },
+  });
+  assert.deepEqual(rowTokens(window), ["Include Bakugou Katsuki/Midoriya Izuku · Complete"]);
+});
+
+test("AO3 saved filters names a saved language whatever the page's language dropdown shows", async () => {
+  const { window } = await renderSavedFilters({
+    storage: {
+      [STORAGE_KEY]: [makePreset({
+        params: [["work_search[complete]", "T"], ["work_search[language_id]", "afr"]],
+        summary: ["Complete only", "In afr"],
+      })],
+    },
+  });
+  assert.notEqual(window.document.getElementById("work_search_language_id").value, "afr");
+  assert.deepEqual(rowTokens(window), ["Complete · Afrikaans"]);
+});
+
+test("AO3 saved filters uses the stored summary only for the parts the page can't name", async () => {
+  const unknownTag = ["include_work_search[freeform_ids][]", "999999999"];
+  const { window } = await renderSavedFilters({
+    url: "https://archiveofourown.org/works?tag_id=Naruto",
+    storage: {
+      [STORAGE_KEY]: [
+        makePreset({
+          id: "partial",
+          name: "Partly named",
+          scope: "global",
+          params: [unknownTag, ["work_search[complete]", "T"], ["work_search[words_from]", "50000"], ["work_search[language_id]", "afr"], ["work_search[sort_column]", "kudos_count"]],
+          summary: ["Include Bakugou Katsuki/Midoriya Izuku", "stale", "stale", "stale", "stale"],
+        }),
+        makePreset({
+          id: "capped",
+          name: "Past the stored cap",
+          scope: "global",
+          params: [unknownTag, ["include_work_search[rating_ids][]", "11"], ["work_search[complete]", "T"], ["work_search[crossover]", "F"], ["work_search[words_from]", "50000"], ["work_search[language_id]", "zzz"], ["work_search[sort_column]", "kudos_count"]],
+          summary: ["Include Bakugou Katsuki/Midoriya Izuku", "stale", "stale", "stale", "stale"],
+        }),
+      ],
+    },
+  });
+  assert.deepEqual(rowTokens(window), [
+    "Include Bakugou Katsuki/Midoriya Izuku · Complete · 50k+ words · Afrikaans · By kudos",
+    "Include Bakugou Katsuki/Midoriya Izuku · Teen And Up Audiences · Complete · 50k+ words · No crossovers · By kudos +1",
+  ]);
+});
+
+test("AO3 saved filters save sheet lists everything it keeps, grouped", async () => {
+  const query = [
+    ["work_search[sort_column]", "kudos_count"],
+    ["include_work_search[freeform_ids][]", "2379"],
+    ["include_work_search[rating_ids][]", "11"],
+    ["exclude_work_search[archive_warning_ids][]", "18"],
+    ["exclude_work_search[freeform_ids][]", "110"],
+    ["work_search[other_tag_names]", "Found Family,Emotional Hurt/Comfort with a Very Long Happy Ending"],
+    ["work_search[crossover]", "F"],
+    ["work_search[complete]", "T"],
+    ["work_search[words_from]", "10000"],
+    ["work_search[query]", "slow burn"],
+  ].map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join("&");
+  const { window, storageState } = await renderSavedFilters({
+    url: `https://archiveofourown.org/works?${query}&tag_id=Harry+Potter+-+J*d*+K*d*+Rowling`,
+  });
+  root(window).querySelector("[data-trace-sf-action='sheet-save']").click();
+  await sleep(10);
+  const host = sheet(window);
+  const keeps = host.querySelector("dl.trace-sf-sheet-keeps");
+  assert.equal(host.querySelector("#" + keeps.getAttribute("aria-labelledby")).textContent, "What it keeps");
+  const rows = Array.from(keeps.querySelectorAll("dt")).map((dt) => [dt.textContent, dt.nextElementSibling.textContent]);
+  assert.deepEqual(rows, [
+    ["Include", "Hurt/Comfort, Found Family, Emotional Hurt/Comfort with a Very Long Happy Ending"],
+    ["Exclude", "Major Character Death, Fluff"],
+    ["Rating", "Teen And Up Audiences"],
+    ["Status", "Complete only"],
+    ["Crossovers", "No crossovers"],
+    ["Words", "At least 10,000 words"],
+    ["Search", "slow burn"],
+    ["Sort", "Kudos"],
+  ]);
+
+  const group = host.querySelector("[role='radiogroup'][aria-labelledby='trace-sf-scope-label']");
+  assert.equal(host.querySelector("#trace-sf-scope-label").textContent, "Show it on");
+  const radios = Array.from(group.querySelectorAll("[role='radio']"));
+  assert.deepEqual(radios.map((radio) => radio.textContent), ["This tagHarry Potter - J. K. Rowling", "Any tagEvery AO3 search"]);
+  assert.deepEqual(radios.map((radio) => radio.getAttribute("aria-checked")), ["true", "false"], "it names tags to include");
+  radios[1].click();
+  await sleep(10);
+  const updated = Array.from(sheet(window).querySelectorAll("#trace-sf-scope-label + [role='radiogroup'] [role='radio']"));
+  assert.deepEqual(updated.map((radio) => radio.getAttribute("aria-checked")), ["false", "true"]);
+  assert.equal(window.document.activeElement, updated[1]);
+
+  sheet(window).querySelector("[data-trace-sf-name]").dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  await sleep(80);
+  const saved = storageState[STORAGE_KEY][0];
+  assert.equal(saved.scope, "global");
+  assert.ok(saved.summary.length <= 5, "the stored fallback stays within what sync accepts");
+  assert.ok(saved.summary.every((part) => part.length <= 64));
+});
+
+test("AO3 saved filters says where a filter shows when the page has no tag", async () => {
+  const { window } = await renderSavedFilters({ url: "https://archiveofourown.org/works?work_search%5Bcomplete%5D=T" });
+  const opener = root(window).querySelector("[data-trace-sf-action='sheet-save']");
+  opener.click();
+  await sleep(10);
+  assert.equal(sheet(window).querySelector("#trace-sf-scope-label"), null);
+  assert.match(sheet(window).querySelector(".trace-sf-sheet-body").textContent, /Any tag\. This page has no tag\./);
+  sheet(window).querySelector(".trace-sf-sheet-foot [data-trace-sf-action='sheet-close']").click();
+  await sleep(10);
+  assert.equal(sheet(window), null);
+  assert.equal(window.document.activeElement, root(window).querySelector("[data-trace-sf-action='sheet-save']"), "focus returns to Save on Cancel");
+});
+
+test("AO3 saved filters blocks new saves at the active preset cap", async () => {
+  const presets = Array.from({ length: 250 }, (_, index) => makePreset({ id: `preset-cap-${index}`, name: `Saved filter ${index + 1}`, scope: "context" }));
+  const { window } = await renderSavedFilters({ storage: { [STORAGE_KEY]: presets } });
+  assert.match(root(window).textContent, /You've saved 250 filters, the most Trace keeps\. Delete one to save another\./);
+  assert.equal(root(window).querySelector("[data-trace-sf-action='sheet-save']"), null);
+  assert.equal(line(window), null, "no Save on the line either");
+});
+
+test("AO3 saved filters warns before the active preset cap", async () => {
+  const presets = Array.from({ length: 200 }, (_, index) => makePreset({ id: `preset-warning-${index}`, name: `Saved filter ${index + 1}`, scope: "context" }));
+  const { window } = await renderSavedFilters({ storage: { [STORAGE_KEY]: presets } });
+  root(window).querySelector("[data-trace-sf-action='sheet-save']").click();
+  await sleep(10);
+  assert.match(sheet(window).textContent, /200 of 250 saved filters used/);
+  assert.ok(sheet(window).querySelector("[data-trace-sf-action='save-confirm']"));
+});
+
+test("AO3 saved filters marks the active row", async () => {
+  const { window } = await renderSavedFilters({
+    url: "https://archiveofourown.org/works?tag_id=Naruto&work_search%5Bsort_column%5D=kudos_count",
+    storage: {
+      [STORAGE_KEY]: [
+        makePreset({ id: "context-other", name: "Current tag unread", contextKey: "tagId:Naruto", contextLabel: "Naruto", params: [["work_search[complete]", "T"]] }),
+        makePreset({ id: "global-active", name: "Global kudos", scope: "global", params: [["work_search[sort_column]", "kudos_count"]] }),
+      ],
+    },
+  });
+  const mount = root(window);
+  const active = mount.querySelector(".trace-sf-col-row[data-id='global-active']");
+  assert.equal(active.getAttribute("aria-current"), "true");
+  assert.ok(active.querySelector(".trace-sf-col-check svg"), "the active row carries the ink check");
+  assert.equal(mount.querySelector(".trace-sf-col-row[data-id='context-other']").getAttribute("aria-current"), null);
+  assert.equal(line(window).querySelector(".trace-sf-line-text").textContent, "Showing Global kudos");
+});
+
+test("AO3 saved filters surfaces local storage failures in the sheet and keeps the draft", async () => {
+  const harness = await renderSavedFilters({ setErrorMessage: "Local storage is full." });
+  const { window, storageState } = harness;
+  root(window).querySelector("[data-trace-sf-action='sheet-save']").click();
+  await sleep(10);
+  const nameInput = sheet(window).querySelector("[data-trace-sf-name]");
+  nameInput.value = "My draft name";
+  nameInput.dispatchEvent(new window.Event("input", { bubbles: true, cancelable: true }));
+  sheet(window).querySelector("[data-trace-sf-action='save-confirm']").click();
+  await sleep(80);
+
+  assert.equal(storageState[STORAGE_KEY], undefined);
+  const error = sheet(window).querySelector(".trace-sf-sheet-error");
+  assert.equal(error.getAttribute("role"), "alert");
+  assert.equal(error.textContent, "Couldn't save. Nothing changed.Try again");
+  assert.ok(error.querySelector("svg"));
+  assert.equal(sheet(window).querySelector("[data-trace-sf-name]").value, "My draft name", "the sheet keeps its draft");
+
+  harness.setStorageError("");
+  sheet(window).querySelector("[data-trace-sf-action='retry']").click();
+  await sleep(80);
+  assert.equal(storageState[STORAGE_KEY].length, 1);
+  assert.equal(storageState[STORAGE_KEY][0].name, "My draft name");
+  assert.equal(sheet(window), null, "a saved filter closes the sheet");
+});
+
+test("AO3 saved filters explains applying a tag filter off a tag page", async () => {
+  const { window, navigations } = await renderSavedFilters({
+    url: "https://archiveofourown.org/works",
+    html: loadFixture(),
+    storage: { [STORAGE_KEY]: [makePreset({ contextKey: "" })] },
+  });
+  root(window).querySelector(".trace-sf-col-row").click();
+  await sleep(80);
+  assert.equal(navigations.length, 1);
+  assert.match(root(window).textContent, /This page isn't a tag page, so the filter is applied across all of AO3\./);
+});
+
+
 
 test("AO3 saved filters does not mount on AO3 story pages", async () => {
   const { window } = await renderSavedFilters({
@@ -458,141 +773,9 @@ test("AO3 saved filters respects the local visibility preference", async () => {
   assert.equal(storageState[STORAGE_KEY].length, 1);
 });
 
-test("AO3 saved filters applies context presets to the current tag context", async () => {
-  const preset = makePreset();
-  const { window, storageState, navigations } = await renderSavedFilters({
-    url: "https://archiveofourown.org/works?tag_id=Naruto",
-    storage: {
-      [STORAGE_KEY]: [preset],
-    },
-  });
 
-  root(window).querySelector(".trace-sf-main").click();
-  await sleep(80);
 
-  assert.equal(navigations.length, 1);
-  const target = new URL(navigations[0]);
-  assert.equal(target.pathname, "/works");
-  assert.equal(target.searchParams.get("tag_id"), "Naruto");
-  assert.equal(target.searchParams.get("work_search[complete]"), "T");
-  assert.equal(target.searchParams.get("work_search[sort_column]"), "kudos_count");
-  assert.equal(storageState[ACTIVE_KEY].id, "preset-a");
-  assert.equal(storageState[ACTIVE_KEY].contextKey, "tagId:Naruto");
-});
 
-test("AO3 saved filters applies global presets to the current tag context", async () => {
-  const preset = makePreset({
-    id: "anywhere-a",
-    name: "Global relationship filters",
-    scope: "global",
-    params: [
-      ["exclude_work_search[archive_warning_ids][]", "16"],
-      ["exclude_work_search[freeform_ids][]", "110"],
-      ["include_work_search[archive_warning_ids][]", "14"],
-      ["include_work_search[category_ids][]", "22"],
-      ["include_work_search[rating_ids][]", "10"],
-      ["include_work_search[relationship_ids][]", "3741107"],
-      ["work_search[sort_column]", "kudos_count"],
-    ],
-  });
-  const { storageState, navigations, window } = await renderSavedFilters({
-    url: "https://archiveofourown.org/works?tag_id=Avatar%3A+The+Last+Airbender&work_search%5Bsort_column%5D=updated_at",
-    storage: {
-      [STORAGE_KEY]: [preset],
-    },
-  });
-
-  root(window).querySelector(".trace-sf-main").click();
-  await sleep(80);
-
-  assert.equal(navigations.length, 1);
-  const target = new URL(navigations[0]);
-  assert.equal(target.pathname, "/works");
-  assert.equal(target.searchParams.get("tag_id"), "Avatar: The Last Airbender");
-  assert.equal(target.searchParams.get("exclude_work_search[archive_warning_ids][]"), "16");
-  assert.equal(target.searchParams.get("exclude_work_search[freeform_ids][]"), "110");
-  assert.equal(target.searchParams.get("include_work_search[relationship_ids][]"), "3741107");
-  assert.equal(target.searchParams.get("work_search[sort_column]"), "kudos_count");
-  assert.equal(storageState[ACTIVE_KEY].id, "anywhere-a");
-  assert.equal(storageState[ACTIVE_KEY].contextKey, "tagId:Avatar: The Last Airbender");
-});
-
-test("AO3 saved filters shows global presets plus matching current-tag presets", async () => {
-  const { window } = await renderSavedFilters({
-    url: "https://archiveofourown.org/works?tag_id=Naruto&work_search%5Bsort_column%5D=kudos_count",
-    storage: {
-      [STORAGE_KEY]: [
-        makePreset({
-          id: "context-naruto",
-          name: "Naruto context filter",
-          scope: "context",
-          contextKey: "tagId:Naruto",
-          contextLabel: "Naruto",
-        }),
-        makePreset({
-          id: "context-avatar",
-          name: "Avatar context filter",
-          scope: "context",
-          contextKey: "tagId:Avatar: The Last Airbender",
-          contextLabel: "Avatar: The Last Airbender",
-        }),
-        makePreset({
-          id: "global-a",
-          name: "Reusable anywhere filter",
-          scope: "global",
-        }),
-      ],
-    },
-  });
-  const mount = root(window);
-
-  // One list: this tag's filters first, then every-search filters, each
-  // under a plain label because both kinds are present. No collapsing.
-  assert.deepEqual(
-    Array.from(mount.querySelectorAll(".trace-sf-row .trace-sf-name")).map((el) => el.textContent),
-    ["Naruto context filter", "Reusable anywhere filter"],
-  );
-  assert.deepEqual(
-    Array.from(mount.querySelectorAll(".trace-sf-section-label")).map((el) => el.textContent),
-    ["Naruto", "Every search"],
-  );
-  assert.doesNotMatch(mount.textContent, /Avatar context filter/);
-  assert.equal(mount.querySelector("[data-trace-sf-action='toggle-group']"), null);
-  assert.equal(mount.querySelector(".trace-sf-group"), null);
-  assert.doesNotMatch(mount.textContent, /This tag|All tags|Global|preset/);
-});
-
-test("AO3 saved filters shows a filter saved on a tag's filtered results back on that tag's listing", async () => {
-  // AO3's filter form submits to /works?tag_id=..., so a filter is saved on
-  // that URL; the tag's own listing is /tags/<tag>/works.
-  const saved = await renderSavedFilters();
-  const mount = root(saved.window);
-  mount.querySelector("[data-trace-sf-action='save-open']").click();
-  await sleep(10);
-  assert.equal(
-    mount.querySelector("[role='radio'][aria-checked='true']").textContent,
-    "Harry Potter - J. K. Rowling only",
-    "the default choice is this tag only",
-  );
-  mount.querySelector("[data-trace-sf-action='save-confirm']").click();
-  await sleep(80);
-  assert.equal(saved.storageState[STORAGE_KEY].length, 1);
-
-  const listing = await renderSavedFilters({
-    url: "https://archiveofourown.org/tags/Harry%20Potter%20-%20J*d*%20K*d*%20Rowling/works",
-    storage: plain(saved.storageState),
-  });
-  assert.deepEqual(
-    Array.from(root(listing.window).querySelectorAll(".trace-sf-row .trace-sf-name")).map((el) => el.textContent),
-    ["Complete only · At least 50,000 words · Sorted by kudos"],
-  );
-
-  const otherTag = await renderSavedFilters({
-    url: "https://archiveofourown.org/tags/Naruto/works",
-    storage: plain(saved.storageState),
-  });
-  assert.equal(otherTag.window.document.querySelectorAll(".trace-sf-row").length, 0);
-});
 
 test("AO3 saved filters asks for one pull on a filter page this device hasn't synced lately", async () => {
   const syncRequest = { type: "TRACE_AO3_SAVED_FILTERS_SYNC_REQUEST" };
@@ -636,333 +819,14 @@ test("AO3 saved filters asks for one pull on a filter page this device hasn't sy
   assert.deepEqual(plain(hidden.runtimeMessages), [], "nor when saved filters are turned off");
 });
 
-test("AO3 saved filters shows filters a pull brings in without a reload", async () => {
-  const harness = await renderSavedFilters({
-    url: "https://archiveofourown.org/tags/Naruto/works",
-  });
-  assert.equal(root(harness.window).querySelectorAll(".trace-sf-row").length, 0);
-  harness.emitStorageChange({
-    [STORAGE_KEY]: {
-      newValue: [makePreset({ id: "pulled", name: "From the account", scope: "global" })],
-    },
-    [SYNC_META_KEY]: {
-      newValue: { syncVersion: "v2", lastSyncedAt: new Date().toISOString() },
-    },
-  });
-  await sleep(80);
-  assert.deepEqual(
-    Array.from(root(harness.window).querySelectorAll(".trace-sf-row .trace-sf-name")).map((el) => el.textContent),
-    ["From the account"],
-  );
-});
 
-test("AO3 saved filters labels the list only when both kinds are present", async () => {
-  const { window } = await renderSavedFilters({
-    url: "https://archiveofourown.org/works?tag_id=Naruto",
-    storage: {
-      [STORAGE_KEY]: [makePreset({ id: "only-context", contextKey: "tagId:Naruto", contextLabel: "Naruto" })],
-    },
-  });
-  assert.equal(root(window).querySelectorAll(".trace-sf-section-label").length, 0);
-  assert.equal(root(window).querySelectorAll(".trace-sf-row").length, 1);
-});
 
-test("AO3 saved filters keeps Trace control events away from AO3 filter handlers", async () => {
-  const { window, emitStorageChange } = await renderSavedFilters();
-  const mount = root(window);
-  const form = window.document.getElementById("work-filters");
-  const saveButton = mount.querySelector("[data-trace-sf-action='save-open']");
-  let formClicks = 0;
-  let documentClicks = 0;
-  let documentMouseDowns = 0;
-  let documentMouseUps = 0;
-  let documentPointerDowns = 0;
-  let documentPointerUps = 0;
-  let documentTouchEnds = 0;
-  let documentKeydowns = 0;
 
-  form.addEventListener("click", () => {
-    formClicks += 1;
-  });
-  window.document.addEventListener("click", () => {
-    documentClicks += 1;
-  });
-  window.document.addEventListener("pointerdown", () => {
-    documentPointerDowns += 1;
-  });
-  window.document.addEventListener("pointerup", () => {
-    documentPointerUps += 1;
-  });
-  window.document.addEventListener("mousedown", () => {
-    documentMouseDowns += 1;
-  });
-  window.document.addEventListener("mouseup", () => {
-    documentMouseUps += 1;
-  });
-  window.document.addEventListener("touchend", () => {
-    documentTouchEnds += 1;
-  });
-  window.document.addEventListener("keydown", () => {
-    documentKeydowns += 1;
-  });
 
-  saveButton.dispatchEvent(new window.Event("pointerdown", {
-    bubbles: true,
-    cancelable: true,
-  }));
-  saveButton.dispatchEvent(new window.Event("pointerup", {
-    bubbles: true,
-    cancelable: true,
-  }));
-  saveButton.dispatchEvent(new window.Event("mousedown", {
-    bubbles: true,
-    cancelable: true,
-  }));
-  saveButton.dispatchEvent(new window.Event("mouseup", {
-    bubbles: true,
-    cancelable: true,
-  }));
-  saveButton.dispatchEvent(new window.Event("touchstart", {
-    bubbles: true,
-    cancelable: true,
-  }));
-  saveButton.dispatchEvent(new window.Event("touchend", {
-    bubbles: true,
-    cancelable: true,
-  }));
-  saveButton.click();
-  await sleep(0);
 
-  assert.equal(formClicks, 0);
-  assert.equal(documentClicks, 0);
-  assert.equal(documentMouseDowns, 0);
-  assert.equal(documentMouseUps, 0);
-  assert.equal(documentPointerDowns, 0);
-  assert.equal(documentPointerUps, 0);
-  assert.equal(documentTouchEnds, 0);
-  assert.ok(mount.querySelector("[data-trace-sf-name]"), "Trace action should still run");
 
-  const nameInput = mount.querySelector("[data-trace-sf-name]");
-  nameInput.value = "Mobile drawer should stay open";
-  nameInput.dispatchEvent(new window.Event("input", { bubbles: true, cancelable: true }));
-  nameInput.dispatchEvent(new window.Event("pointerdown", { bubbles: true, cancelable: true }));
-  nameInput.dispatchEvent(new window.Event("pointerup", { bubbles: true, cancelable: true }));
-  nameInput.dispatchEvent(new window.Event("mousedown", { bubbles: true, cancelable: true }));
-  nameInput.dispatchEvent(new window.Event("mouseup", { bubbles: true, cancelable: true }));
-  nameInput.dispatchEvent(new window.Event("touchstart", { bubbles: true, cancelable: true }));
-  nameInput.dispatchEvent(new window.Event("touchend", { bubbles: true, cancelable: true }));
-  nameInput.click();
-  nameInput.dispatchEvent(new window.KeyboardEvent("keydown", {
-    key: "M",
-    bubbles: true,
-    cancelable: true,
-  }));
-  await sleep(0);
 
-  assert.equal(formClicks, 0);
-  assert.equal(documentClicks, 0);
-  assert.equal(documentMouseDowns, 0);
-  assert.equal(documentMouseUps, 0);
-  assert.equal(documentPointerDowns, 0);
-  assert.equal(documentPointerUps, 0);
-  assert.equal(documentTouchEnds, 0);
-  assert.equal(documentKeydowns, 0);
 
-  emitStorageChange({
-    [ACTIVE_KEY]: {
-      oldValue: null,
-      newValue: null,
-    },
-  });
-  await sleep(80);
-  assert.equal(
-    mount.querySelector("[data-trace-sf-name]").value,
-    "Mobile drawer should stay open",
-    "draft name should survive storage-triggered rerenders while editing",
-  );
-});
-
-test("AO3 saved filters uses a compact AO3-native drawer section", async () => {
-  const { window, storageState } = await renderSavedFilters({
-    url: "https://archiveofourown.org/works?work_search%5Bsort_column%5D=kudos_count&work_search%5Bcomplete%5D=T&tag_id=Harry+Potter+-+J*d*+K*d*+Rowling",
-    storage: {
-      [STORAGE_KEY]: [makePreset()],
-    },
-  });
-  const mount = root(window);
-  const style = window.document.getElementById("trace-ao3-saved-filters-style");
-  assert.ok(style);
-  const head = mount.querySelector(".trace-sf-head");
-  assert.equal(head.tagName, "BUTTON", "the whole header row is one button");
-  assert.equal(head.getAttribute("data-trace-sf-action"), "toggle-panel");
-  assert.equal(
-    mount.querySelector(".trace-sf-card").getAttribute("data-panel-collapsed"),
-    "false",
-    "the panel starts expanded when filters are saved, so reuse is one tap",
-  );
-  assert.equal(head.getAttribute("aria-expanded"), "true");
-  // Trace's page register, not AO3 mimicry.
-  assert.doesNotMatch(style.textContent, /Georgia|Lucida|(?<!sans-)serif\b/i);
-  assert.doesNotMatch(style.textContent, /#900\b|#990000|#700\b|#9a3412/i, "no AO3-red or rust fills");
-  assert.doesNotMatch(style.textContent, /#1f5c45|#2f7d5b|#b07d2a|#8a6e2a|#e9f2ec|#f8efe8|#fffdf8/i, "no forest, honey or paper literals");
-  assert.doesNotMatch(style.textContent, /linear-gradient/i, "no AO3 gradient buttons");
-  assert.doesNotMatch(style.textContent, /text-transform:\s*uppercase/i);
-  assert.doesNotMatch(style.textContent, /border-left:/i, "no coloured bars");
-  assert.doesNotMatch(style.textContent, /\boutline:\s*0\b/, "focus is never suppressed");
-  assert.match(style.textContent, /:focus-visible \{[^}]*outline:\s*3px solid var\(--trace-page-teal\)/);
-  assert.match(style.textContent, /\.trace-sf-rows \{[^}]*border-radius:\s*14px;[^}]*box-shadow:\s*inset 0 0 0 1px var\(--trace-page-rule\)/);
-  assert.match(style.textContent, /\.trace-sf-btn \{[^}]*color:\s*var\(--trace-page-teal\);[^}]*min-height:\s*44px;/);
-  assert.match(style.textContent, /\.trace-sf-head \{[^}]*min-height:\s*44px;/);
-  assert.match(style.textContent, /\.trace-sf-title \{[^}]*font-size:\s*15px;[^}]*font-weight:\s*600;/);
-  for (const [, size] of style.textContent.matchAll(/font-size:\s*([\d.]+)px/g)) {
-    assert.ok(Number(size) >= 12, `font-size ${size}px is below the 12 px page floor`);
-  }
-  assert.match(mount.getAttribute("style") || "", /--trace-page-teal:\s*#176E72/i, "light AO3 hosts get the light page tokens");
-  assert.equal(mount.querySelector(".trace-sf-title").textContent, "Saved filters");
-  assert.equal(mount.querySelector(".trace-sf-count").textContent, "1", "the count is a bare number");
-  assert.equal(mount.querySelectorAll(".trace-sf-caret svg path").length, 1, "one caret");
-  assert.equal(mount.querySelector(".trace-sf-head-meta"), null, "no second line while expanded");
-  assert.match(mount.querySelector(".trace-sf-status").textContent, /Showing\s+Long complete/);
-  assert.equal(mount.querySelector(".trace-sf-mark"), null);
-  assert.equal(mount.querySelector(".trace-sf-by"), null, "no Trace eyebrow in page UI");
-
-  head.click();
-  await sleep(10);
-  assert.equal(mount.querySelector(".trace-sf-card").getAttribute("data-panel-collapsed"), "true");
-  assert.equal(mount.querySelector(".trace-sf-panel"), null, "a collapsed panel renders nothing below the header");
-  assert.equal(mount.querySelector(".trace-sf-caret").getAttribute("data-collapsed"), "true");
-  assert.equal(
-    mount.querySelector(".trace-sf-head-meta").textContent,
-    "Showing Long complete",
-    "the collapsed header gives the state on a second line",
-  );
-  assert.equal(mount.querySelector(".trace-sf-head").getAttribute("aria-expanded"), "false");
-  assert.equal(window.document.activeElement, mount.querySelector(".trace-sf-head"), "focus stays on the header");
-  assert.equal(storageState[PANEL_COLLAPSED_KEY], true);
-
-  const nextRender = await renderSavedFilters({
-    url: "https://archiveofourown.org/works?work_search%5Bsort_column%5D=kudos_count&work_search%5Bcomplete%5D=T&tag_id=Harry+Potter+-+J*d*+K*d*+Rowling",
-    storage: storageState,
-  });
-  assert.equal(
-    root(nextRender.window).querySelector(".trace-sf-card").getAttribute("data-panel-collapsed"),
-    "true",
-    "the reader's choice is remembered across pages",
-  );
-});
-
-test("AO3 saved filters says where unsaved filters stand when collapsed", async () => {
-  const { window } = await renderSavedFilters({
-    storage: {
-      [STORAGE_KEY]: [makePreset()],
-      [PANEL_COLLAPSED_KEY]: true,
-    },
-  });
-  assert.equal(
-    root(window).querySelector(".trace-sf-head-meta").textContent,
-    "Current filters aren't saved",
-  );
-});
-
-test("AO3 saved filters shows a single empty line when nothing is saved or selected", async () => {
-  const { window } = await renderSavedFilters({
-    url: "https://archiveofourown.org/works?tag_id=Naruto",
-  });
-  const mount = root(window);
-  assert.equal(
-    mount.querySelector(".trace-sf-empty").textContent,
-    "Choose filters below, then save them here to reuse in one tap.",
-  );
-  assert.equal(mount.querySelector(".trace-sf-status"), null, "no status line without selected filters");
-  assert.equal(mount.querySelector(".trace-sf-count"), null);
-  assert.doesNotMatch(mount.textContent, /Global|preset|No active AO3 filters/);
-});
-
-test("AO3 saved filters has no collapsible groups", async () => {
-  const { window } = await renderSavedFilters({
-    url: "https://archiveofourown.org/works?work_search%5Bsort_column%5D=kudos_count&work_search%5Bcomplete%5D=T&tag_id=Harry+Potter+-+J*d*+K*d*+Rowling",
-    storage: {
-      [STORAGE_KEY]: [makePreset(), makePreset({ id: "global-b", name: "Anywhere", scope: "global" })],
-    },
-  });
-  const mount = root(window);
-  assert.equal(mount.querySelectorAll("[aria-expanded]").length, 3, "only the header and the two ⋯ buttons expand");
-  assert.equal(mount.querySelectorAll(".trace-sf-row").length, 2);
-});
-
-test("AO3 saved filters shows edited state and can update the applied preset", async () => {
-  const preset = makePreset({
-    params: [["work_search[complete]", "T"]],
-    summary: ["Status: Complete works only"],
-  });
-  const activeMeta = {
-    id: preset.id,
-    signature: JSON.stringify(preset.params),
-    contextKey: "tagId:Naruto",
-    appliedAt: "2026-06-18T00:00:00.000Z",
-  };
-  const { window, storageState } = await renderSavedFilters({
-    url: "https://archiveofourown.org/works?tag_id=Naruto&work_search%5Bcomplete%5D=T&work_search%5Bwords_to%5D=5000",
-    storage: {
-      [STORAGE_KEY]: [preset],
-      [ACTIVE_KEY]: activeMeta,
-    },
-  });
-  const mount = root(window);
-
-  assert.match(mount.querySelector(".trace-sf-status").textContent, /^Long complete, changed/);
-  assert.equal(mount.querySelector(".trace-sf-status [data-trace-sf-action='update-current']").textContent, "Update Long complete");
-  assert.equal(mount.querySelector(".trace-sf-status [data-trace-sf-action='save-open']").textContent, "Save as new");
-  assert.equal(mount.querySelector(".trace-sf-row .trace-sf-edge svg"), null, "the check is removed from a changed filter");
-  mount.querySelector("[data-trace-sf-action='update-current']").click();
-  await sleep(80);
-
-  assert.deepEqual(plain(storageState[STORAGE_KEY][0].params), [
-    ["work_search[complete]", "T"],
-    ["work_search[words_to]", "5000"],
-  ]);
-  assert.deepEqual(plain(storageState[STORAGE_KEY][0].summary), ["Complete only", "Up to 5,000 words"]);
-  assert.equal(storageState[ACTIVE_KEY].id, "preset-a");
-  assert.match(mount.textContent, /Showing\s+Long complete/);
-});
-
-test("AO3 saved filters shows eight rows, then Show all, with no inner scroll box", async () => {
-  const presets = Array.from({ length: 14 }, (_, index) => makePreset({
-    id: `preset-${index}`,
-    name: `Saved filter ${index + 1}`,
-    scope: index % 2 === 0 ? "context" : "global",
-  }));
-  const { window } = await renderSavedFilters({
-    storage: {
-      [STORAGE_KEY]: presets,
-    },
-  });
-  const mount = root(window);
-  const list = mount.querySelector(".trace-sf-list");
-  const style = window.document.getElementById("trace-ao3-saved-filters-style");
-
-  assert.ok(list, "expected saved preset list");
-  assert.equal(list.querySelectorAll(".trace-sf-row").length, 8);
-  assert.equal(list.querySelectorAll(".trace-sf-row[data-scope='context']").length, 7, "this tag's filters come first");
-  const more = list.querySelector("[data-trace-sf-action='show-all']");
-  assert.equal(more.textContent, "Show all 14");
-  assert.equal(mount.querySelectorAll(".trace-sf-badge").length, 0);
-  assert.doesNotMatch(style.textContent, /\.trace-sf-list \{[^}]*max-height/s);
-  assert.doesNotMatch(style.textContent, /\.trace-sf-list \{[^}]*overflow-y/s);
-  // The active filter is marked with an ink check, not a coloured edge.
-  assert.doesNotMatch(style.textContent, /\.trace-sf-edge \{[^}]*background/s);
-
-  more.click();
-  await sleep(10);
-  const rows = mount.querySelectorAll(".trace-sf-row");
-  assert.equal(rows.length, 14);
-  assert.equal(mount.querySelector("[data-trace-sf-action='show-all']"), null);
-  assert.equal(
-    window.document.activeElement,
-    rows[8].querySelector(".trace-sf-main"),
-    "focus moves to the first row that was revealed",
-  );
-});
 
 test("AO3 saved filters resets AO3's button styles so nothing inside the panel clips", async () => {
   const { window } = await renderSavedFilters({ storage: { [STORAGE_KEY]: [makePreset()] } });
@@ -994,404 +858,18 @@ test("AO3 saved filters resets AO3's button styles so nothing inside the panel c
   }
 });
 
-test("AO3 saved filters shows every saved filter's contents in full", async () => {
-  const longTags = "Found Family,Emotional Hurt/Comfort with a Very Long Happy Ending That Keeps Going";
-  const params = [
-    ["include_work_search[rating_ids][]", "11"],
-    ["include_work_search[archive_warning_ids][]", "16"],
-    ["include_work_search[category_ids][]", "23"],
-    ["include_work_search[relationship_ids][]", "1110"],
-    ["include_work_search[freeform_ids][]", "143795"],
-    ["include_work_search[freeform_ids][]", "2379"],
-    ["exclude_work_search[archive_warning_ids][]", "18"],
-    ["work_search[other_tag_names]", longTags],
-    ["work_search[complete]", "T"],
-    ["work_search[words_from]", "10000"],
-    ["work_search[words_to]", "50000"],
-    ["work_search[sort_column]", "kudos_count"],
-  ];
-  const { window } = await renderSavedFilters({
-    url: "https://archiveofourown.org/works?tag_id=Harry+Potter+-+J*d*+K*d*+Rowling",
-    storage: {
-      [STORAGE_KEY]: [makePreset({
-        id: "long",
-        name: "A long saved filter",
-        params,
-        // An older save's truncated summary is ignored when the page can label every value.
-        summary: ["Include: Teen And Up Audiences", "+11 more"],
-      })],
-    },
-  });
-  const row = root(window).querySelector(".trace-sf-row");
-  const contents = row.querySelector(".trace-sf-summary");
-  assert.equal(
-    contents.textContent,
-    "Include Alternate Universe - Canon Divergence, Hurt/Comfort, Sirius Black/Remus Lupin, Found Family, " +
-      "Emotional Hurt/Comfort with a Very Long Happy Ending That Keeps Going · Exclude Major Character Death · " +
-      "Teen And Up Audiences · No Archive Warnings Apply · M/M · Complete only · 10,000–50,000 words · Sorted by kudos",
-  );
-  assert.doesNotMatch(contents.textContent, /more|…/);
-  assert.equal(contents.getAttribute("title"), null, "nothing is hidden behind a tooltip");
-  const apply = row.querySelector(".trace-sf-main");
-  assert.equal(apply.getAttribute("aria-label"), `A long saved filter. ${contents.textContent}. Apply.`);
-  assert.equal(apply.getAttribute("aria-current"), null);
-});
 
-test("AO3 saved filters falls back to the stored summary only for values the page can't label", async () => {
-  const { window } = await renderSavedFilters({
-    url: "https://archiveofourown.org/works?tag_id=Naruto",
-    storage: {
-      [STORAGE_KEY]: [makePreset({
-        id: "elsewhere",
-        name: "Saved on another fandom",
-        scope: "global",
-        params: [["include_work_search[freeform_ids][]", "999999999"], ["work_search[complete]", "T"]],
-        summary: ["Include Bakugou Katsuki/Midoriya Izuku", "Complete only"],
-      })],
-    },
-  });
-  assert.equal(
-    root(window).querySelector(".trace-sf-summary").textContent,
-    "Include Bakugou Katsuki/Midoriya Izuku · Complete only",
-  );
-});
 
-test("AO3 saved filters names a saved language whatever the page's language dropdown shows", async () => {
-  const { window } = await renderSavedFilters({
-    storage: {
-      [STORAGE_KEY]: [makePreset({
-        params: [["work_search[complete]", "T"], ["work_search[language_id]", "afr"]],
-        summary: ["Complete only", "In afr"],
-      })],
-    },
-  });
-  assert.notEqual(window.document.getElementById("work_search_language_id").value, "afr");
-  assert.equal(root(window).querySelector(".trace-sf-summary").textContent, "Complete only · In Afrikaans");
-});
 
-test("AO3 saved filters uses the stored summary only for the parts the page can't name", async () => {
-  const unknownTag = ["include_work_search[freeform_ids][]", "999999999"];
-  const { window } = await renderSavedFilters({
-    url: "https://archiveofourown.org/works?tag_id=Naruto",
-    storage: {
-      [STORAGE_KEY]: [
-        makePreset({
-          id: "partial",
-          name: "Partly named",
-          scope: "global",
-          params: [unknownTag, ["work_search[complete]", "T"], ["work_search[words_from]", "50000"], ["work_search[language_id]", "afr"], ["work_search[sort_column]", "kudos_count"]],
-          summary: ["Include Bakugou Katsuki/Midoriya Izuku", "stale", "stale", "stale", "stale"],
-        }),
-        makePreset({
-          id: "capped",
-          name: "Past the stored cap",
-          scope: "global",
-          params: [unknownTag, ["include_work_search[rating_ids][]", "11"], ["work_search[complete]", "T"], ["work_search[crossover]", "F"], ["work_search[words_from]", "50000"], ["work_search[language_id]", "zzz"], ["work_search[sort_column]", "kudos_count"]],
-          summary: ["Include Bakugou Katsuki/Midoriya Izuku", "stale", "stale", "stale", "stale"],
-        }),
-      ],
-    },
-  });
-  const rows = Array.from(root(window).querySelectorAll(".trace-sf-summary")).map((el) => el.textContent);
-  assert.deepEqual(rows, [
-    "Include Bakugou Katsuki/Midoriya Izuku · Complete only · At least 50,000 words · In Afrikaans · Sorted by kudos",
-    "Include Bakugou Katsuki/Midoriya Izuku · Teen And Up Audiences · Complete only · No crossovers · At least 50,000 words · Sorted by kudos · +1 more",
-  ]);
-});
 
-test("AO3 saved filters returns focus from Escape and Cancel", async () => {
-  const { window } = await renderSavedFilters({ storage: { [STORAGE_KEY]: [makePreset()] } });
-  const mount = root(window);
-  const menuButton = () => mount.querySelector("[data-trace-sf-action='menu']");
 
-  mount.querySelector("[data-trace-sf-action='save-open']").click();
-  await sleep(0);
-  mount.querySelector("[data-trace-sf-name]").dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
-  await sleep(0);
-  assert.equal(mount.querySelector("[data-trace-sf-name]"), null, "Escape closes the save form");
-  assert.equal(window.document.activeElement, mount.querySelector("[data-trace-sf-action='save-open']"));
 
-  menuButton().click();
-  mount.querySelector("[data-trace-sf-action='rename-open']").click();
-  await sleep(0);
-  mount.querySelector("[data-trace-sf-action='rename-cancel']").click();
-  await sleep(0);
-  assert.equal(mount.querySelector("[data-trace-sf-rename-input]"), null);
-  assert.equal(window.document.activeElement, menuButton(), "Cancel in Rename returns to the menu button");
 
-  menuButton().click();
-  mount.querySelector("[data-trace-sf-action='delete-confirm']").click();
-  await sleep(0);
-  mount.querySelector("[data-trace-sf-action='delete-cancel']").click();
-  await sleep(0);
-  assert.equal(mount.querySelector(".trace-sf-confirm-title"), null);
-  assert.equal(window.document.activeElement, menuButton(), "Cancel in Delete returns to the menu button");
-});
 
-test("AO3 saved filters save form lists everything it keeps, grouped", async () => {
-  const query = [
-    ["work_search[sort_column]", "kudos_count"],
-    ["include_work_search[freeform_ids][]", "2379"],
-    ["include_work_search[rating_ids][]", "11"],
-    ["exclude_work_search[archive_warning_ids][]", "18"],
-    ["exclude_work_search[freeform_ids][]", "110"],
-    ["work_search[other_tag_names]", "Found Family,Emotional Hurt/Comfort with a Very Long Happy Ending"],
-    ["work_search[crossover]", "F"],
-    ["work_search[complete]", "T"],
-    ["work_search[words_from]", "10000"],
-    ["work_search[query]", "slow burn"],
-  ].map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join("&");
-  const { window, storageState } = await renderSavedFilters({
-    url: `https://archiveofourown.org/works?${query}&tag_id=Harry+Potter+-+J*d*+K*d*+Rowling`,
-  });
-  const mount = root(window);
-  assert.equal(mount.querySelector(".trace-sf-status").textContent, "These filters aren't savedSave");
-  mount.querySelector("[data-trace-sf-action='save-open']").click();
-  await sleep(10);
 
-  const keeps = mount.querySelector("dl.trace-sf-keeps");
-  assert.ok(keeps, "expected a definition list of what the filter keeps");
-  assert.equal(
-    mount.querySelector("#" + keeps.getAttribute("aria-labelledby")).textContent,
-    "What it keeps",
-  );
-  const rows = Array.from(keeps.querySelectorAll("dt")).map((dt) => [dt.textContent, dt.nextElementSibling.textContent]);
-  assert.deepEqual(rows, [
-    ["Include", "Hurt/Comfort, Found Family, Emotional Hurt/Comfort with a Very Long Happy Ending"],
-    ["Exclude", "Major Character Death, Fluff"],
-    ["Rating", "Teen And Up Audiences"],
-    ["Status", "Complete only"],
-    ["Crossovers", "No crossovers"],
-    ["Words", "At least 10,000 words"],
-    ["Search", "slow burn"],
-    ["Sort", "Kudos"],
-  ]);
-  assert.doesNotMatch(keeps.textContent, /\|/);
-  assert.equal(mount.querySelector(".trace-sf-chip"), null);
 
-  const group = mount.querySelector("[role='radiogroup']");
-  assert.ok(group, "Show it on is a radio group on a tag page");
-  assert.equal(mount.querySelector("#" + group.getAttribute("aria-labelledby")).textContent, "Show it on");
-  const radios = Array.from(group.querySelectorAll("[role='radio']"));
-  assert.deepEqual(radios.map((radio) => radio.textContent), ["Harry Potter - J. K. Rowling only", "Every AO3 search"]);
-  assert.deepEqual(radios.map((radio) => radio.getAttribute("aria-checked")), ["true", "false"]);
-  radios[1].click();
-  await sleep(10);
-  const updated = Array.from(mount.querySelectorAll("[role='radio']"));
-  assert.deepEqual(updated.map((radio) => radio.getAttribute("aria-checked")), ["false", "true"]);
-  assert.equal(window.document.activeElement, updated[1]);
-  assert.deepEqual(
-    Array.from(mount.querySelectorAll(".trace-sf-actions .trace-sf-btn")).map((button) => button.textContent),
-    ["Save filter", "Cancel"],
-  );
 
-  mount.querySelector("[data-trace-sf-name]").dispatchEvent(new window.KeyboardEvent("keydown", {
-    key: "Enter",
-    bubbles: true,
-    cancelable: true,
-  }));
-  await sleep(80);
-  const saved = storageState[STORAGE_KEY][0];
-  assert.equal(saved.scope, "global");
-  assert.ok(saved.summary.length <= 5, "the stored fallback stays within what sync accepts");
-  assert.ok(saved.summary.every((part) => part.length <= 64));
-});
 
-test("AO3 saved filters says where a filter shows when the page has no tag", async () => {
-  const { window } = await renderSavedFilters({
-    url: "https://archiveofourown.org/works?work_search%5Bcomplete%5D=T",
-  });
-  const mount = root(window);
-  mount.querySelector("[data-trace-sf-action='save-open']").click();
-  await sleep(10);
-  assert.equal(mount.querySelector("[role='radiogroup']"), null);
-  assert.equal(mount.querySelector(".trace-sf-scope-note").textContent, "Shows on every AO3 search.");
-
-  mount.querySelector("[data-trace-sf-action='save-cancel']").click();
-  await sleep(10);
-  assert.equal(
-    window.document.activeElement,
-    mount.querySelector("[data-trace-sf-action='save-open']"),
-    "focus returns to Save on Cancel",
-  );
-});
-
-test("AO3 saved filters blocks new saves at the active preset cap", async () => {
-  const presets = Array.from({ length: 250 }, (_, index) => makePreset({
-    id: `preset-cap-${index}`,
-    name: `Saved filter ${index + 1}`,
-    scope: "context",
-  }));
-  const { window } = await renderSavedFilters({
-    storage: {
-      [STORAGE_KEY]: presets,
-    },
-  });
-  const mount = root(window);
-
-  assert.match(mount.textContent, /These filters aren't saved/);
-  assert.match(mount.textContent, /You've saved 250 filters, the most Trace keeps\. Delete one to save another\./);
-  assert.equal(
-    mount.querySelector("[data-trace-sf-action='save-open']"),
-    null,
-  );
-});
-
-test("AO3 saved filters warns before the active preset cap", async () => {
-  const presets = Array.from({ length: 200 }, (_, index) => makePreset({
-    id: `preset-warning-${index}`,
-    name: `Saved filter ${index + 1}`,
-    scope: "context",
-  }));
-  const { window } = await renderSavedFilters({
-    storage: {
-      [STORAGE_KEY]: presets,
-    },
-  });
-  const mount = root(window);
-
-  mount.querySelector("[data-trace-sf-action='save-open']").click();
-  await sleep(0);
-
-  assert.match(mount.textContent, /200 of 250 saved filters used/);
-  assert.ok(mount.querySelector("[data-trace-sf-action='save-confirm']"));
-});
-
-test("AO3 saved filters marks the active row", async () => {
-  const { window } = await renderSavedFilters({
-    url: "https://archiveofourown.org/works?tag_id=Naruto&work_search%5Bsort_column%5D=kudos_count",
-    storage: {
-      [STORAGE_KEY]: [
-        makePreset({ id: "context-other", name: "Current tag unread", contextKey: "tagId:Naruto", contextLabel: "Naruto", params: [["work_search[complete]", "T"]] }),
-        makePreset({ id: "global-active", name: "Global kudos", scope: "global", params: [["work_search[sort_column]", "kudos_count"]] }),
-      ],
-    },
-  });
-  const mount = root(window);
-  const active = mount.querySelector(".trace-sf-row[data-id='global-active'] .trace-sf-main");
-  assert.equal(active.getAttribute("aria-current"), "true");
-  assert.ok(active.querySelector(".trace-sf-edge svg"), "the active row carries the ink check");
-  assert.equal(mount.querySelector(".trace-sf-row[data-id='context-other'] .trace-sf-main").getAttribute("aria-current"), null);
-  assert.match(mount.querySelector(".trace-sf-status").textContent, /Showing\s+Global kudos/);
-});
-
-test("AO3 saved filters supports inline rename and delete", async () => {
-  const { window, storageState } = await renderSavedFilters({
-    url: "https://archiveofourown.org/works?tag_id=Naruto",
-    storage: {
-      [STORAGE_KEY]: [makePreset()],
-    },
-  });
-  const mount = root(window);
-  const revealed = [];
-  window.Element.prototype.scrollIntoView = function (options) {
-    revealed.push({ element: this, options });
-  };
-
-  mount.querySelector("[data-trace-sf-action='menu']").click();
-  await sleep(0);
-  assert.equal(mount.querySelector(".trace-sf-row").getAttribute("data-menu-open"), "true");
-  assert.equal(mount.querySelector(".trace-sf-menu-btn").getAttribute("aria-expanded"), "true");
-  assert.match(window.document.getElementById("trace-ao3-saved-filters-style").textContent, /\.trace-sf-manage \{[^}]*display: flex/s);
-  assert.doesNotMatch(window.document.getElementById("trace-ao3-saved-filters-style").textContent, /\.trace-sf-manage \{[^}]*position: absolute/s);
-  // The kebab keeps the page's visible teal focus ring.
-  assert.doesNotMatch(window.document.getElementById("trace-ao3-saved-filters-style").textContent, /\.trace-sf-menu-btn:focus[^}]*outline: 0/s);
-  assert.equal(mount.querySelector(".trace-sf-menu-btn").textContent, "");
-  assert.equal(mount.querySelectorAll(".trace-sf-menu-btn svg circle").length, 3);
-  assert.equal(mount.querySelector(".trace-sf-manage").getAttribute("role"), "group");
-  assert.match(mount.querySelector(".trace-sf-manage").getAttribute("aria-label"), /^Manage /);
-  assert.deepEqual(
-    Array.from(mount.querySelectorAll(".trace-sf-manage button")).map((button) => button.textContent),
-    ["Rename", "Update with current filters", "Delete"],
-  );
-  const update = mount.querySelector(".trace-sf-manage [data-trace-sf-action='update-current']");
-  assert.equal(update.disabled, true, "nothing to update with when no filters are chosen");
-  assert.ok(update.getAttribute("title"));
-  assert.equal(mount.querySelector(".trace-sf-row > .trace-sf-manage") !== null, true);
-  assert.equal(revealed.at(-1).element.classList.contains("trace-sf-row"), true);
-  assert.equal(revealed.at(-1).options.block, "nearest");
-  window.document.body.dispatchEvent(new window.Event("pointerdown", { bubbles: true }));
-  await sleep(0);
-  assert.equal(mount.querySelector(".trace-sf-manage"), null);
-  assert.equal(mount.querySelector(".trace-sf-menu-btn").getAttribute("aria-expanded"), "false");
-
-  mount.querySelector("[data-trace-sf-action='menu']").click();
-  await sleep(0);
-  mount.querySelector(".trace-sf-menu-btn").dispatchEvent(new window.KeyboardEvent("keydown", {
-    key: "Escape",
-    bubbles: true,
-    cancelable: true,
-  }));
-  await sleep(0);
-  assert.equal(mount.querySelector(".trace-sf-manage"), null);
-  assert.equal(mount.querySelector(".trace-sf-menu-btn").getAttribute("aria-expanded"), "false");
-
-  mount.querySelector("[data-trace-sf-action='menu']").click();
-  await sleep(0);
-  mount.querySelector("[data-trace-sf-action='rename-open']").click();
-  await sleep(0);
-  mount.querySelector("[data-trace-sf-rename-input]").value = "Comfort reads";
-  mount.querySelector("[data-trace-sf-action='rename-save']").click();
-  await sleep(80);
-  assert.equal(storageState[STORAGE_KEY][0].name, "Comfort reads");
-  assert.equal(storageState[STORAGE_KEY][0].dirty, true);
-
-  mount.querySelector("[data-trace-sf-action='menu']").click();
-  mount.querySelector("[data-trace-sf-action='delete-confirm']").click();
-  await sleep(0);
-  assert.equal(mount.querySelector(".trace-sf-confirm-title").textContent, "Delete “Comfort reads”?");
-  assert.equal(
-    mount.querySelector(".trace-sf-confirm-detail").textContent,
-    "It's deleted on every device. Nothing on AO3 changes.",
-  );
-  mount.querySelector("[data-trace-sf-action='delete']").click();
-  await sleep(80);
-  assert.deepEqual(plain(storageState[STORAGE_KEY]), []);
-  assert.equal(storageState[DELETED_KEY].length, 1);
-  assert.equal(storageState[DELETED_KEY][0].clientId, "preset-a");
-  assert.match(storageState[DELETED_KEY][0].clientUpdatedAt, /^\d{4}-\d{2}-\d{2}T/);
-});
-
-test("AO3 saved filters surfaces local storage failures inline and keeps the draft", async () => {
-  const harness = await renderSavedFilters({
-    setErrorMessage: "Local storage is full.",
-  });
-  const { window, storageState } = harness;
-  const mount = root(window);
-
-  mount.querySelector("[data-trace-sf-action='save-open']").click();
-  await sleep(0);
-  const nameInput = mount.querySelector("[data-trace-sf-name]");
-  nameInput.value = "My draft name";
-  nameInput.dispatchEvent(new window.Event("input", { bubbles: true, cancelable: true }));
-  mount.querySelector("[data-trace-sf-action='save-confirm']").click();
-  await sleep(80);
-
-  assert.equal(storageState[STORAGE_KEY], undefined);
-  assert.equal(mount.querySelector(".trace-sf-error").getAttribute("role"), "alert");
-  assert.match(mount.querySelector(".trace-sf-error").textContent, /^Couldn't save\. Nothing changed\.Try again$/);
-  assert.ok(mount.querySelector(".trace-sf-error .trace-sf-error-glyph svg"));
-  assert.equal(mount.querySelector("[data-trace-sf-name]").value, "My draft name", "the form keeps its draft");
-
-  harness.setStorageError("");
-  mount.querySelector("[data-trace-sf-action='retry']").click();
-  await sleep(80);
-  assert.equal(storageState[STORAGE_KEY].length, 1);
-  assert.equal(storageState[STORAGE_KEY][0].name, "My draft name");
-  assert.equal(mount.querySelector(".trace-sf-error"), null);
-});
-
-test("AO3 saved filters explains applying a tag filter off a tag page", async () => {
-  const { window, navigations } = await renderSavedFilters({
-    url: "https://archiveofourown.org/works",
-    html: loadFixture(),
-    storage: { [STORAGE_KEY]: [makePreset({ contextKey: "" })] },
-  });
-  root(window).querySelector(".trace-sf-main").click();
-  await sleep(80);
-  assert.equal(navigations.length, 1);
-  assert.match(root(window).textContent, /This page isn't a tag page, so the filter is applied across all of AO3\./);
-});
 
 test("AO3 saved filters exits on credential or password pages", async () => {
   const html = [
@@ -1957,10 +1435,30 @@ test("on a phone a long token line shows what fits, then +n", async () => {
   assert.match(row.getAttribute("aria-label"), /Excludes 3 tags · English · No crossovers · By kudos\.$/, "VoiceOver hears every token");
 });
 
-test("a wide layout keeps today's panel, with no Showing line or sheet", async () => {
+test("on a computer or iPad the same design shows in AO3's sidebar, and forms open in a centred card", async () => {
   const { window } = await renderSavedFilters({ url: FILTERED_PAGE, storage: { [STORAGE_KEY]: phonePresets() } });
-  assert.ok(root(window).querySelector(".trace-sf-card"));
-  assert.equal(root(window).querySelector(".trace-sf-col"), null);
-  assert.equal(line(window), null);
-  assert.equal(window.document.getElementById("trace-ao3-saved-filters-phone-style"), null);
+  const mount = root(window);
+  assert.ok(mount.querySelector(".trace-sf-col"), "the same section as on a phone");
+  assert.equal(mount.querySelector(".trace-sf-card"), null, "the 1.0 panel is gone");
+  assert.equal(mount.querySelector(".trace-sf-col-row[aria-current='true']").getAttribute("data-id"), "p1");
+  const css = window.document.getElementById("trace-ao3-saved-filters-phone-style").textContent;
+  assert.match(css, /@media \(min-width: 42\.01em\) \{[\s\S]*\.trace-sf-sheet \{[^}]*top: 50%;[^}]*transform: translate\(-50%, -50%\);/, "the sheet is a centred card");
+  assert.match(css, /\.trace-sf-grabber \{ display: none; \}/, "no grabber on a card");
+  assert.match(css, /\.trace-sf-col-row:hover \.trace-sf-col-name[^{]*\{ text-decoration: underline;/, "names underline on hover like AO3's links");
+
+  // The sidebar is always there: the line brings Trace's section into focus
+  // instead of AO3's phone-only Filters button.
+  let opened = 0;
+  window.document.getElementById("go_to_filters").addEventListener("click", (event) => {
+    event.preventDefault();
+    opened += 1;
+  });
+  line(window).querySelector("[data-trace-sf-action='open-filters']").click();
+  await sleep(10);
+  assert.equal(opened, 0);
+  assert.equal(window.document.activeElement, mount.querySelector("button"), "focus moves to the saved filters");
+
+  mount.querySelector("[data-trace-sf-action='sheet-open']").click();
+  await sleep(10);
+  assert.ok(sheet(window).querySelector("[role='dialog'][aria-modal='true']"), "Edit opens the same list");
 });
