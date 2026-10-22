@@ -92,7 +92,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
 
         // Import messages contain private reader choices. Do not log request
         // identifiers, profile IDs, payloads or untrusted message values.
-        if !reportedType.hasPrefix("TRACE_IOS_IMPORT_") {
+        if !reportedType.hasPrefix("TRACE_IOS_IMPORT_") && !reportedType.hasPrefix("TRACE_IOS_HISTORY_") {
             os_log(
                 "Incoming native message type=%{public}@ profile=%{public}@",
                 log: Self.log,
@@ -107,6 +107,10 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             switch messageType {
             case "TRACE_IOS_IMPORT_PREPARE", "TRACE_IOS_IMPORT_STAGE", "TRACE_IOS_IMPORT_CANCEL":
                 responseBody = Self.importResponse(payload, profileID: profile)
+
+            case "TRACE_IOS_HISTORY_PREPARE", "TRACE_IOS_HISTORY_STAGE", "TRACE_IOS_HISTORY_CANCEL":
+                // A whole AO3 History for review in the app (TraceSafariHistoryInbox.swift).
+                responseBody = Self.historyResponse(payload, profileID: profile)
 
             case "TRACE_IOS_SAVE_PREPARE", "TRACE_IOS_SAVE_CONFIRMED",
                  "TRACE_IOS_TRACKING_PREFERENCE_PREPARE", "TRACE_IOS_TRACKING_PREFERENCE",
@@ -239,6 +243,10 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 responseBody = ["type": "TRACE_IOS_IMPORT_ERROR", "protocolVersion": 1,
                     "ok": false, "error": "invalid_request"]
 
+            case let historyType where historyType.hasPrefix("TRACE_IOS_HISTORY_"):
+                responseBody = ["type": "TRACE_IOS_HISTORY_ERROR", "protocolVersion": 1,
+                    "ok": false, "error": "invalid_request"]
+
             default:
                 os_log(
                     "Unknown native message type: %{public}@",
@@ -290,6 +298,32 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         guard let container = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: traceSharedAppGroup) else { return failure("storage_unavailable") }
         return TraceSafariImportInbox(containerURL: container).handle(message: payload,
+            profileID: profileID, currentProviderBinding: { now in
+                guard case let .ready(credential, kind, sessionID?, expiry?) = readSharedTraceCredential(),
+                      kind == "device_session",
+                      let session = TraceSafariProviderCodec.deviceSession(sessionId: sessionID,
+                        credential: credential, expiresAt: expiry) else { return nil }
+                return TraceSafariProviderCodec.importBinding(session: session, now: now)
+            }, configuredAPIOrigin: origin, now: Date())
+#else
+        return failure("unsupported")
+#endif
+    }
+
+    /// The same paired-package gate and provider fence as `importResponse`.
+    private static func historyResponse(_ payload: [String: Any], profileID: UUID?) -> [String: Any] {
+        let type = payload["type"] as? String ?? "TRACE_IOS_HISTORY_PREPARE"
+        func failure(_ reason: String) -> [String: Any] {
+            ["type": type, "protocolVersion": 1, "ok": false, "error": reason]
+        }
+#if TRACE_NATIVE_IMPORT_HANDOFF && os(iOS)
+        guard Bundle.main.object(forInfoDictionaryKey: "TraceNativeImportContract") as? String
+                == TraceSafariImportInbox.contract,
+              let origin = Bundle.main.object(forInfoDictionaryKey: "TraceNativeImportAPIOrigin") as? String,
+              TraceSafariImportInbox.validOrigin(origin) else { return failure("unsupported") }
+        guard let container = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: traceSharedAppGroup) else { return failure("storage_unavailable") }
+        return TraceSafariHistoryInbox(containerURL: container).handle(message: payload,
             profileID: profileID, currentProviderBinding: { now in
                 guard case let .ready(credential, kind, sessionID?, expiry?) = readSharedTraceCredential(),
                       kind == "device_session",

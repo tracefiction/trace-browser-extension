@@ -865,7 +865,7 @@ test("explicit development JSON pairs output and rejects invalid or production u
 });
 
 test("the whole-History import is in a package only when its switch is on, and only with the kernel session", () => {
-  const HISTORY_WIRING = ["TRACE_AO3_HISTORY_IMPORT", "traceAo3HistoryImportV1", "__traceAo3HistoryImportLoopV1"];
+  const HISTORY_WIRING = ["TRACE_AO3_HISTORY_IMPORT", "traceAo3HistoryImportV1", "__traceAo3HistoryImportLoopV1", "TRACE_IOS_HISTORY_PREPARE"];
   const build = (extra) => spawnSync("npm", ["run", "build:ios-earned-permission-onboarding:release"], {
     cwd: ROOT, env: { ...RELEASE_ENV, ...extra }, encoding: "utf8",
   });

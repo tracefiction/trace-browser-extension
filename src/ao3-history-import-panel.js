@@ -53,6 +53,9 @@
     already_started: "Trace is already reading your History.",
     storage_full: "This device has no room to keep your History.",
     storage_write_failed: "Trace couldn’t keep your History on this device. Try again.",
+    review_not_ready: "Trace hasn’t found any stories to review yet.",
+    history_handoff_unavailable: "Trace couldn’t pass your History to the app. Open Trace to check you’re connected, then try again.",
+    not_authenticated: "Connect Trace first, then try again.",
   };
 
   var WAITING = {
@@ -68,6 +71,8 @@
   var busy = false;
   var note = "";
   var poll = null;
+  /** After Review in Trace: the History waiting in the app's inbox, until it expires. */
+  var handoff = null;
 
   function element(tag, className, text) {
     var node = document.createElement(tag);
@@ -169,6 +174,10 @@
       render();
       return;
     }
+    if (action === "open") {
+      openInTrace();
+      return;
+    }
     busy = true;
     note = "";
     render();
@@ -177,6 +186,13 @@
       // A start that could not happen stays on the start screen, saying why.
       if (reply && reply.ok === false && reply.error) note = START_ERROR[reply.error] || "That didn’t work. Try again.";
       else mode = "auto";
+      if (action === "review" && reply && reply.ok === true && reply.handoff &&
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(reply.handoff.handoffID) &&
+          reply.handoff.expiresAtMs > Date.now()) {
+        handoff = { handoffID: reply.handoff.handoffID, expiresAtMs: reply.handoff.expiresAtMs };
+        setTimeout(function () { handoff = null; render(); }, handoff.expiresAtMs - Date.now());
+      }
+      if (action === "delete") handoff = null;
       if (reply && reply.view) lastView = reply.view;
       if (reply && typeof reply.startable === "boolean") startable = reply.startable;
       render();
@@ -185,6 +201,18 @@
       note = "Trace didn’t answer. Close and reopen this sheet.";
       render();
     });
+  }
+
+  /** Opens the app the way the sheet's other Trace links do: a fresh tap on Open in Trace. */
+  function openInTrace() {
+    if (handoff === null || handoff.expiresAtMs <= Date.now()) {
+      handoff = null;
+      render();
+      return;
+    }
+    var url = "traceauth://open?destination=history-import&handoff=" + handoff.handoffID;
+    if (typeof globalThis.openTraceApp === "function") globalThis.openTraceApp(url);
+    else globalThis.location.href = url;
   }
 
   function setButton(node, label, action) {
@@ -269,7 +297,8 @@
       lineTwo.textContent = plural(view.works || 0, "story", "stories") + " found so far.";
       lineTwo.hidden = !view.works;
       setButton(primary, reason === null || reason[1] ? (busy ? "Carrying on…" : "Carry on") : "", "resume");
-      setButton(secondary, "", "");
+      // What it found so far can be reviewed now; the rest can follow later.
+      setButton(secondary, view.works ? (handoff ? "Open in Trace" : "Review what it found") : "", handoff ? "open" : "review");
       setButton(tertiary, "Stop and delete", "ask_delete");
       return;
     }
@@ -279,9 +308,11 @@
     if (view.deleted) skipped.push(plural(view.deleted, "deleted work left out", "deleted works left out"));
     if (view.unreadable) skipped.push(plural(view.unreadable, "row Trace couldn’t read", "rows Trace couldn’t read"));
     lineOne.textContent = plural(view.works || 0, "story", "stories") + " found." + (skipped.length ? " " + skipped.join(" · ") + "." : "");
-    lineTwo.textContent = "Reviewing them in Trace comes in the next update. They stay on this device until then.";
+    lineTwo.textContent = handoff
+      ? "Ready in Trace. Tap Open in Trace to choose what to add."
+      : busy ? "Getting your History ready for Trace…" : "Nothing is added to your Library until you choose in Trace.";
     lineTwo.hidden = false;
-    setButton(primary, "", "");
+    setButton(primary, handoff ? "Open in Trace" : busy ? "Preparing…" : "Review in Trace", handoff ? "open" : "review");
     setButton(secondary, "", "");
     setButton(tertiary, "Delete", "ask_delete");
   }

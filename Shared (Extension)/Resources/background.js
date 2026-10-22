@@ -7946,6 +7946,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #savedFilterRepository;
     #nativeImportEnabled;
     #nativeImport;
+    /** Only a build with the whole-History import has one (index.mts). */
+    #nativeHistory;
     #firstStoryInitiator;
     #openTabs;
     #traceWebNavigation;
@@ -7986,6 +7988,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         apiOrigin: environment.apiBase,
         randomID: environment.randomId
       });
+      this.#nativeHistory = environment.nativeHistoryHandoff ?? null;
       const storage = new BrowserStorage(
         environment.storageArea,
         environment.runtime,
@@ -8821,6 +8824,33 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     async saveStoryWithEvidence(command, observer, tabId) {
       await this.start();
       return this.#executeStoryCommandWithEvidence(command, observer, tabId);
+    }
+    /**
+     * Hands the reader's whole AO3 History to the Trace app for review: on
+     * iPhone, through the paired History inbox, fenced to the account as the
+     * import handoff is. `build` makes the parts only once the account is
+     * known to be connected.
+     */
+    async handOffHistory(build) {
+      await this.start();
+      const unavailable = Object.freeze({ ok: false, error: "history_handoff_unavailable" });
+      const producer = this.#nativeHistory;
+      if (producer === null || !this.#nativeImportEnabled || await this.#nativePlatform() !== "ios") return unavailable;
+      const preparation = await this.#prepareNativeAuthority();
+      if (!preparation.ready || this.snapshot().state !== "connected") {
+        return Object.freeze({ ok: false, error: "not_authenticated" });
+      }
+      const history = await build().catch(() => null);
+      if (history === null) return unavailable;
+      const fenced = await this.#service.executeCurrentScope((scope2, isCurrent) => producer.run(scope2, async () => {
+        const current = await this.#prepareNativeAuthority();
+        return current.ready && await isCurrent();
+      }, history));
+      if (fenced.kind !== "published") {
+        if (fenced.kind === "stale") await producer.discardUnpublished();
+        return unavailable;
+      }
+      return fenced.value;
     }
     /** Looks for one story in the Library. It cannot save. */
     async storyPresence(workKey) {
@@ -11922,6 +11952,15 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       fetch: apiFetch,
       apiBase: "https://api.tracefiction.com",
       nativeImportHandoff: true,
+      // A build-time constant: only a build with the whole-History import carries it.
+      ...false ? {
+        nativeHistoryHandoff: new NativeHistoryHandoffProducer({
+          runtime: extension.runtime,
+          mode: storageMode,
+          apiOrigin: "https://api.tracefiction.com",
+          randomID: randomId
+        })
+      } : {},
       ...extension.scripting ? { scripting: extension.scripting } : {},
       ...extension.permissions ? { permissions: extension.permissions } : {},
       webOrigin: "https://www.tracefiction.com",
@@ -11952,7 +11991,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           return historySession.publicationScope()?.accountId ?? null;
         },
         whenAccountLeaves: (cleanup) => historySession.whenAccountLeaves(cleanup),
-        saveActivity: storySaveActivity
+        saveActivity: storySaveActivity,
+        handOffHistory: (build) => historySession.handOffHistory(build)
       });
     }
     if (

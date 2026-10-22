@@ -15,6 +15,7 @@ import { installTraceFirstInstallActivation } from "./trace-web-navigation.mjs";
 import { rememberConnectIntent } from "./connect-intent.mjs";
 import { installStoryTabReuse } from "./story-tab-reuse.mjs";
 import { installAo3HistoryImport } from "./ao3-history-import-runtime.mjs";
+import { NativeHistoryHandoffProducer } from "./native-history-handoff.mjs";
 import { storySaveActivity } from "./story-save-activity.mjs";
 export * from "./account-projection.mjs";
 export * from "./billing-conversion.mjs";
@@ -254,6 +255,13 @@ try {
     fetch: apiFetch,
     apiBase: __TRACE_API_BASE__,
     nativeImportHandoff: __TRACE_NATIVE_IMPORT_HANDOFF__,
+    // A build-time constant: only a build with the whole-History import carries it.
+    ...(__TRACE_AO3_HISTORY_IMPORT__
+      ? {
+          nativeHistoryHandoff: new NativeHistoryHandoffProducer({ runtime: extension.runtime,
+            mode: storageMode, apiOrigin: __TRACE_API_BASE__, randomID: randomId }),
+        }
+      : {}),
     ...(extension.scripting ? { scripting: extension.scripting } : {}),
     ...(extension.permissions ? { permissions: extension.permissions } : {}),
     webOrigin: __TRACE_WEB_ORIGIN__,
@@ -289,6 +297,7 @@ try {
       },
       whenAccountLeaves: (cleanup) => historySession.whenAccountLeaves(cleanup),
       saveActivity: storySaveActivity,
+      handOffHistory: (build) => historySession.handOffHistory(build),
     });
   }
   if (
