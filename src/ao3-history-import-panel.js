@@ -191,6 +191,9 @@
           reply.handoff.expiresAtMs > Date.now()) {
         handoff = { handoffID: reply.handoff.handoffID, expiresAtMs: reply.handoff.expiresAtMs };
         setTimeout(function () { handoff = null; render(); }, handoff.expiresAtMs - Date.now());
+        // One tap: Trace opens as soon as the History is ready. Open in Trace
+        // stays on the sheet in case Safari didn't hand the link over.
+        openInTrace();
       }
       if (action === "delete") handoff = null;
       if (reply && reply.view) lastView = reply.view;
@@ -309,7 +312,7 @@
     if (view.unreadable) skipped.push(plural(view.unreadable, "row Trace couldn’t read", "rows Trace couldn’t read"));
     lineOne.textContent = plural(view.works || 0, "story", "stories") + " found." + (skipped.length ? " " + skipped.join(" · ") + "." : "");
     lineTwo.textContent = handoff
-      ? "Ready in Trace. Tap Open in Trace to choose what to add."
+      ? "Ready in Trace. If Trace didn’t open, tap Open in Trace."
       : busy ? "Getting your History ready for Trace…" : "Nothing is added to your Library until you choose in Trace.";
     lineTwo.hidden = false;
     setButton(primary, handoff ? "Open in Trace" : busy ? "Preparing…" : "Review in Trace", handoff ? "open" : "review");

@@ -168,7 +168,7 @@ test("a finished run says what it found and what it left out", async () => {
   assert.deepEqual(s.buttons(), ["Review in Trace", "Delete"]);
 });
 
-test("Review in Trace prepares the History, then a fresh tap opens it in the app", async () => {
+test("Review in Trace prepares the History and opens it in the app, with Open in Trace kept for a second try", async () => {
   const handoffID = "00000000-0000-4000-8000-000000000002";
   const finished = view({ status: "finished", reason: "reached_last_page", pagesRead: 31, works: 588, remainingMs: null });
   const s = sheet({
@@ -183,10 +183,11 @@ test("Review in Trace prepares the History, then a fresh tap opens it in the app
   assert.deepEqual(s.buttons(), ["Review in Trace", "Delete"]);
   assert.equal(s.text()[2], "Nothing is added to your Library until you choose in Trace.");
   await s.click("Review in Trace");
-  assert.deepEqual(opened, [], "staging is not a tap on the app link");
-  assert.deepEqual(s.buttons(), ["Open in Trace", "Delete"]);
+  const link = `traceauth://open?destination=history-import&handoff=${handoffID}`;
+  assert.deepEqual(opened, [link], "Trace opens as soon as the History is ready");
+  assert.deepEqual(s.buttons(), ["Open in Trace", "Delete"], "and Open in Trace stays, in case it didn't");
   await s.click("Open in Trace");
-  assert.deepEqual(opened, [`traceauth://open?destination=history-import&handoff=${handoffID}`]);
+  assert.deepEqual(opened, [link, link]);
 });
 
 test("a paused run can review what it found so far", async () => {
