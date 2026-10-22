@@ -40,6 +40,8 @@
     no_site_access: ["Trace isn’t allowed on AO3. Allow it, then tap Carry on.", true],
     page_limit: ["Trace stopped at its limit of pages. Your stories so far are kept.", false],
   };
+  // Safari reads only from the tab on screen: say so, and that nothing is lost.
+  var STAY = "Stay on this AO3 tab. If you switch tabs or apps, Trace waits and carries on when you’re back.";
   var CANT_READ = "Trace can’t read AO3’s History right now. Nothing was added to your Library.";
 
   var START_ERROR = {
@@ -227,7 +229,7 @@
     }
     if (status === "idle") {
       heading.textContent = "Import your AO3 History";
-      lineOne.textContent = "Trace reads your History page by page from this tab, about one page every 10 seconds.";
+      lineOne.textContent = "Trace reads your History page by page from this tab, about 10 pages a minute.";
       lineTwo.textContent = "Nothing is added to your Library until you choose. You can keep reading AO3 while it runs.";
       lineTwo.hidden = false;
       setButton(primary, busy ? "Starting…" : "Start reading", "start");
@@ -248,9 +250,9 @@
           ? waiting + about(Math.max(0, (view.waitingUntil || 0) - Date.now())) + "."
           : waiting;
       } else if (typeof view.remainingMs === "number" && (view.pagesRead || 0) > 0) {
-        lineTwo.textContent = "About " + about(view.remainingMs) + " left. Keep this AO3 tab open; reading pauses while it’s hidden.";
+        lineTwo.textContent = "About " + about(view.remainingMs) + " left. " + STAY;
       } else {
-        lineTwo.textContent = "Keep this AO3 tab open; reading pauses while it’s hidden.";
+        lineTwo.textContent = STAY;
       }
       lineTwo.hidden = false;
       setButton(primary, "", "");

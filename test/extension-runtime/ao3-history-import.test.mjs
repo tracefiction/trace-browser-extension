@@ -284,7 +284,7 @@ test("the IndexedDB store keeps a page's works and the run together, and they ou
 
 // --- The run, paced by the page loop ------------------------------------------
 
-test("start puts the loop into the AO3 tab, which reads every page once, 8 to 10 seconds apart", async () => {
+test("start puts the loop into the AO3 tab, which reads every page once, 6 to 7 seconds apart", async () => {
   const h = harness({ answers: [ok([work(1), work(2)], 2, { last: 3 }), ok([work(3)], 3), ok([work(4)])] });
   const started = await h.history.start(USER, TAB);
   assert.equal(started.status, "running");
@@ -356,8 +356,8 @@ test("a 429 waits at least Retry-After, doubles the gap, says so, and three in a
   const run = runOf(h.store);
   assert.equal(run.status, "paused");
   assert.equal(run.reason, "rate_limited");
-  // Doubled for each slow-down AO3 asked for, never past the longest gap.
-  assert.equal(run.timing.gapMs, MAX_PAGE_GAP_MS);
+  // Doubled for each slow-down AO3 asked for before the pause, never past the longest gap.
+  assert.equal(run.timing.gapMs, Math.min(MAX_PAGE_GAP_MS, PAGE_GAP_MS * 2 ** MAX_CONSECUTIVE_RETRIES));
   assert.equal(run.counts.pages, 2);
 });
 

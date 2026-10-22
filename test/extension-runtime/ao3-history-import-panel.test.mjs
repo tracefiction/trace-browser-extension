@@ -79,7 +79,7 @@ test("the sheet offers the import only where it can start, and asks once before 
   assert.equal(s.sent.filter((m) => m.action === "start").length, 0);
   await s.click("Import your whole History");
   assert.deepEqual(s.buttons(), ["Start reading", "Not now"]);
-  assert.match(s.text().join(" "), /about one page every 10 seconds/);
+  assert.match(s.text().join(" "), /about 10 pages a minute/);
   await s.click("Not now");
   assert.deepEqual(s.buttons(), ["Import your whole History"]);
   await s.click("Import your whole History");
@@ -99,7 +99,7 @@ test("while reading it shows the page, the stories so far and the time left, wit
   await flush(s.window);
   assert.deepEqual(s.text().slice(1, 3), [
     "Page 12 of 31 · 214 stories so far",
-    "About 3 minutes left. Keep this AO3 tab open; reading pauses while it’s hidden.",
+    "About 3 minutes left. Stay on this AO3 tab. If you switch tabs or apps, Trace waits and carries on when you’re back.",
   ]);
   assert.equal(s.$(".popup-history-fill").style.width, "35.5%");
   assert.deepEqual(s.buttons(), ["Pause", "Stop and delete"]);
