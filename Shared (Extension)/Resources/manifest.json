@@ -3,7 +3,7 @@
   "default_locale": "en",
   "name": "Trace",
   "description": "Save stories from AO3 and FanFiction.net, keep your place as you read, and see your Library while you browse.",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "action": {
     "default_title": "Trace",
     "default_popup": "popup.html",
