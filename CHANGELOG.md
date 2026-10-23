@@ -4,6 +4,10 @@ This file lists the changes that matter to people using the Chrome, Edge and
 Firefox extension. The Safari extension ships inside the Trace iPhone app, and
 its notes go with each app release.
 
+## 1.0.3
+
+- **Saved filters follow your account.** Signing in with a different account now brings back all of that account's saved filters, and none of the last account's.
+
 ## 1.0.2
 
 - **Saved filters, redesigned.** At the top of AO3's Filters (the sidebar on a computer, the Filters panel on a phone), your saved filters for the tag sit as plain lines, and every other saved filter is one click away. Applying one shows a line above the works with **Clear**. Saving asks whether it's a new filter or an update, and saving, editing and the full list open in a card instead of inside the sidebar.
