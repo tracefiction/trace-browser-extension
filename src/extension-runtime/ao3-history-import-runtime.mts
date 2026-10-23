@@ -20,6 +20,7 @@ import {
   type LoadedPage,
 } from "./ao3-history-page.mjs";
 import { IndexedDbHistoryStore, MemoryHistoryStore, type HistoryStore } from "./ao3-history-store.mjs";
+import { historyParts, type HistoryHandoffResult, type HistoryParts } from "./native-history-handoff.mjs";
 
 export const AO3_HISTORY_IMPORT_ALARM = "trace-ao3-history-import";
 const AO3_SITE_PATTERN = "https://*.archiveofourown.org/*";
@@ -324,6 +325,13 @@ export interface HistoryImportEnvironment {
   /** Called when that account signs out or another takes its place. */
   readonly whenAccountLeaves: (cleanup: () => Promise<void>) => void;
   readonly saveActivity: () => { readonly inFlight: number; readonly lastEndedAt: number };
+  /**
+   * Hands the History to the Trace app for review (the controller's
+   * `handOffHistory`): `build` makes its parts once the account is confirmed.
+   */
+  readonly handOffHistory?: (
+    build: () => Promise<HistoryParts | null>,
+  ) => Promise<HistoryHandoffResult | { readonly ok: false; readonly error: "not_authenticated" }>;
   /** For tests: the store to keep the run in. */
   readonly store?: HistoryStore;
 }
@@ -337,10 +345,19 @@ export type SheetError =
   | "already_started"
   | "storage_full"
   | "storage_write_failed"
+  | "review_not_ready"
+  | "history_handoff_unavailable"
+  | "not_authenticated"
   | "unknown_action";
 
 export type SheetReply =
-  | { readonly ok: true; readonly view: HistoryRunView; readonly startable?: boolean }
+  | {
+      readonly ok: true;
+      readonly view: HistoryRunView;
+      readonly startable?: boolean;
+      /** After Review in Trace: the History waits in the app's inbox under this ID. */
+      readonly handoff?: { readonly handoffID: string; readonly expiresAtMs: number };
+    }
   | { readonly ok: false; readonly error: SheetError; readonly view?: HistoryRunView };
 
 export function installAo3HistoryImport(environment: HistoryImportEnvironment): Ao3HistoryImport {
@@ -454,6 +471,19 @@ export function installAo3HistoryImport(environment: HistoryImportEnvironment): 
         return { ok: true, view: await history.resume(tabId) };
       case "delete":
         return { ok: true, view: await history.delete() };
+      case "review": {
+        // What the run has found, finished or paused part way, for review in Trace.
+        const view = await history.view();
+        if ((view.status !== "finished" && view.status !== "paused") || view.works === 0) {
+          return { ok: false, error: "review_not_ready", view };
+        }
+        if (environment.handOffHistory === undefined) return { ok: false, error: "history_handoff_unavailable", view };
+        const result = await environment.handOffHistory(async () =>
+          historyParts(await history.works(), new Date().toISOString()));
+        return result.ok
+          ? { ok: true, view, handoff: { handoffID: result.handoffID, expiresAtMs: result.expiresAtMs } }
+          : { ok: false, error: result.error, view };
+      }
       default:
         return { ok: false, error: "unknown_action" };
     }

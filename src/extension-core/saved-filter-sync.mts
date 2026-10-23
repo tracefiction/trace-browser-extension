@@ -55,6 +55,8 @@ export interface SavedFilterSnapshot {
   readonly activeMeta: SavedFilterActiveMeta | null;
   readonly syncVersion: string | null;
   readonly lastSyncedAt: string | null;
+  /** The account syncVersion belongs to; null for a pull from before this was kept. */
+  readonly syncAccountId: string | null;
   readonly clientId: string | null;
 }
 
@@ -162,6 +164,8 @@ export interface SavedFilterSyncSessionPort {
 
 export interface SavedFilterSyncRepositoryPort {
   read(): Promise<SavedFilterSnapshot | null>;
+  /** Drops what was kept for the account that left (not this device's id). */
+  clearAccountData?(): Promise<void>;
   merge(
     requestedScope: AccountScope,
     data: SavedFilterSyncData,
@@ -331,6 +335,9 @@ export function normalizeSavedFilterSnapshot(
     activeMeta: copyActiveMeta(root.activeMeta),
     syncVersion: isIso(root.syncVersion) ? root.syncVersion : null,
     lastSyncedAt: isIso(root.lastSyncedAt) ? root.lastSyncedAt : null,
+    syncAccountId: typeof root.syncAccountId === "string" && root.syncAccountId
+      ? root.syncAccountId.slice(0, 200)
+      : null,
     clientId: validClientId(root.clientId) ? root.clientId : null,
   });
 }
@@ -482,13 +489,19 @@ function deleteFromLocal(item: SavedFilterDeletion): SavedFilterDelete {
   });
 }
 
+// A sync version is only a starting point for the account that received it:
+// for any other account, or one not recorded, this device pulls everything.
 export function savedFilterSyncRequest(
   snapshot: SavedFilterSnapshot,
+  accountId?: string,
 ): SavedFilterSyncRequest | null {
   if (snapshot.clientId === null) return null;
+  const since = accountId === undefined || snapshot.syncAccountId === accountId
+    ? snapshot.syncVersion
+    : null;
   return Object.freeze({
     clientId: snapshot.clientId,
-    since: snapshot.syncVersion,
+    since,
     upserts: Object.freeze(
       snapshot.presets
         .filter(needsSync)
@@ -516,6 +529,7 @@ export function mergeSavedFilterSyncData(
   data: SavedFilterSyncData,
   sentDeleteClientIds: ReadonlySet<string>,
   syncedAt: string,
+  accountId: string | null = snapshot.syncAccountId,
 ): SavedFilterSnapshot {
   const byClientId = new Map(snapshot.presets.map((item) => [item.clientId, item]));
   const localIdByClientId = new Map(
@@ -573,6 +587,7 @@ export function mergeSavedFilterSyncData(
     activeMeta,
     syncVersion: data.syncVersion,
     lastSyncedAt: syncedAt,
+    syncAccountId: accountId,
     clientId: snapshot.clientId,
   });
 }
@@ -630,7 +645,24 @@ export class SavedFilterSyncService {
       if (snapshot === null || snapshot.clientId === null) {
         return failure("storage_unavailable");
       }
-      const request = savedFilterSyncRequest(snapshot);
+      // Kept for another account (a sign-out that couldn't clean up): drop it
+      // so none of it is sent to, or shown for, this account.
+      if (
+        snapshot.syncAccountId !== null &&
+        snapshot.syncAccountId !== scope.accountId &&
+        this.#ports.repository.clearAccountData
+      ) {
+        try {
+          await this.#ports.repository.clearAccountData();
+          snapshot = await this.#ports.repository.read();
+        } catch {
+          return failure("storage_unavailable");
+        }
+        if (snapshot === null || snapshot.clientId === null) {
+          return failure("storage_unavailable");
+        }
+      }
+      const request = savedFilterSyncRequest(snapshot, scope.accountId);
       if (request === null) return failure("storage_unavailable");
 
       let execution = await this.#execute(request);

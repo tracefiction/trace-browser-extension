@@ -36,7 +36,7 @@ try {
   // provider-bound messages cannot drift from what the contract above drives.
   const handler = spawnSync("xcrun", ["swiftc", "-typecheck", "-parse-as-library",
     "Shared (Extension)/SafariWebExtensionHandler.swift", "Shared (Extension)/TraceSafariProviderCodec.swift",
-    "Shared (Extension)/TraceSafariImportInbox.swift", "-module-cache-path", path.join(temporary, "cache")],
+    "Shared (Extension)/TraceSafariImportInbox.swift", "Shared (Extension)/TraceSafariHistoryInbox.swift", "-module-cache-path", path.join(temporary, "cache")],
     { encoding: "utf8" });
   if (handler.status !== 0) throw new Error(`handler: ${handler.stderr || handler.stdout}`);
   console.log("handler: SafariWebExtensionHandler compiles against the codec");

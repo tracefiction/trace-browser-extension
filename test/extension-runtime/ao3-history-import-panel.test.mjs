@@ -106,7 +106,7 @@ test("while reading it shows the page, the stories so far and the time left, wit
   await s.click("Pause");
   assert.equal(s.$("#popup-history-heading").textContent, "Paused");
   assert.equal(s.text()[1], "Paused on page 12. Your stories so far are kept.");
-  assert.deepEqual(s.buttons(), ["Carry on", "Stop and delete"]);
+  assert.deepEqual(s.buttons(), ["Carry on", "Review what it found", "Stop and delete"]);
 });
 
 test("waiting on AO3 says why, and when", async () => {
@@ -139,7 +139,7 @@ test("a paused run says what to do in the reader's words, and offers Carry on on
   const signedOut = sheet({ replies: { status: { ok: true, view: view({ status: "paused", reason: "signed_out" }), startable: true } } });
   await flush(signedOut.window);
   assert.equal(signedOut.text()[1], "Sign in to AO3 in this tab, then tap Carry on.");
-  assert.deepEqual(signedOut.buttons(), ["Carry on", "Stop and delete"]);
+  assert.deepEqual(signedOut.buttons(), ["Carry on", "Review what it found", "Stop and delete"]);
 
   const empty = sheet({ replies: { status: { ok: true, view: view({ status: "paused", reason: "history_empty", pagesRead: 0, works: 0 }), startable: true } } });
   await flush(empty.window);
@@ -165,7 +165,44 @@ test("a finished run says what it found and what it left out", async () => {
   assert.equal(s.$("#popup-history-heading").textContent, "Your History is ready");
   assert.equal(s.text()[1], "588 stories found. 2 marked for later · 11 deleted works left out · 2 rows Trace couldn’t read.");
   assert.equal(s.$(".popup-history-fill").style.width, "100%");
-  assert.deepEqual(s.buttons(), ["Delete"]);
+  assert.deepEqual(s.buttons(), ["Review in Trace", "Delete"]);
+});
+
+test("Review in Trace prepares the History and opens it in the app, with Open in Trace kept for a second try", async () => {
+  const handoffID = "00000000-0000-4000-8000-000000000002";
+  const finished = view({ status: "finished", reason: "reached_last_page", pagesRead: 31, works: 588, remainingMs: null });
+  const s = sheet({
+    replies: {
+      status: { ok: true, view: finished, startable: true },
+      review: { ok: true, view: finished, handoff: { handoffID, expiresAtMs: Date.now() + 60_000 } },
+    },
+  });
+  const opened = [];
+  s.window.openTraceApp = (url) => opened.push(url);
+  await flush(s.window);
+  assert.deepEqual(s.buttons(), ["Review in Trace", "Delete"]);
+  assert.equal(s.text()[2], "Nothing is added to your Library until you choose in Trace.");
+  await s.click("Review in Trace");
+  const link = `traceauth://open?destination=history-import&handoff=${handoffID}`;
+  assert.deepEqual(opened, [link], "Trace opens as soon as the History is ready");
+  assert.deepEqual(s.buttons(), ["Open in Trace", "Delete"], "and Open in Trace stays, in case it didn't");
+  await s.click("Open in Trace");
+  assert.deepEqual(opened, [link, link]);
+});
+
+test("a paused run can review what it found so far", async () => {
+  const s = sheet({ replies: { status: { ok: true, view: view({ status: "paused", reason: "paused_by_you" }), startable: true } } });
+  await flush(s.window);
+  assert.deepEqual(s.buttons(), ["Carry on", "Review what it found", "Stop and delete"]);
+  const failing = sheet({
+    replies: {
+      status: { ok: true, view: view({ status: "paused", reason: "paused_by_you" }), startable: true },
+      review: { ok: false, error: "history_handoff_unavailable", view: view({ status: "paused", reason: "paused_by_you" }) },
+    },
+  });
+  await flush(failing.window);
+  await failing.click("Review what it found");
+  assert.ok(failing.text().includes("Trace couldn’t pass your History to the app. Open Trace to check you’re connected, then try again."));
 });
 
 test("a start that cannot happen says why", async () => {
