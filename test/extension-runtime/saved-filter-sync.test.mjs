@@ -322,6 +322,138 @@ test("controller syncs a local preset without exposing credentials to the AO3 pa
   assert.equal(calls.length, 2);
 });
 
+function localPreset(overrides = {}) {
+  return {
+    id: "old-1",
+    clientId: "old-1",
+    serverId: "",
+    name: "Another account's filter",
+    params: [["work_search[complete]", "T"]],
+    scope: "global",
+    contextKey: "",
+    contextLabel: "",
+    summary: ["Complete only"],
+    createdAt: "2026-07-20T10:00:00.000Z",
+    updatedAt: "2026-07-20T10:00:00.000Z",
+    clientUpdatedAt: "2026-07-20T10:00:00.000Z",
+    dirty: true,
+    ...overrides,
+  };
+}
+
+async function syncingController(area, onSync) {
+  const databaseFactory = new IDBFactory();
+  const database = new BrowserPrivateRecordDatabase(databaseFactory);
+  await database.put(PRIVATE_RECORD_KEYS.sessionEnvelope, {
+    version: 1,
+    epoch: 1,
+    desired: "connected",
+    accountId: "account-a",
+    credentialRef: "session:1:seed",
+  });
+  await database.put(PRIVATE_RECORD_KEYS.sessionCredentials, {
+    version: 1,
+    entries: { "session:1:seed": "private-token" },
+  });
+  const controller = new SessionRuntimeController({
+    mode: "kernel",
+    runtime: { onMessage: { addListener() {} } },
+    tabs: {
+      async query() { return []; },
+      async sendMessage() { return null; },
+      async create() { return null; },
+    },
+    alarms: { async clear() { return true; } },
+    databaseFactory,
+    privateDatabase: database,
+    storageArea: area,
+    storageMode: "promise",
+    fetch: async (url, options) => {
+      if (url.endsWith("/api/extension/account")) {
+        return new Response(JSON.stringify({ account_id: "account-a" }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        success: true,
+        data: onSync(JSON.parse(options.body)),
+      }), { status: 200 });
+    },
+    apiBase: "https://api.tracefiction.com",
+    webOrigin: "https://www.tracefiction.com",
+    randomId: () => "runtime-id",
+  });
+  await controller.start();
+  return controller;
+}
+
+test("a sync point kept for another account is never used: this account pulls everything, and none of the old account's filters are sent", async () => {
+  // Signed in to account B, then to account A: the sync point is B's, so a
+  // "changed since" pull would miss everything A saved before it.
+  const area = new PromiseStorageArea({
+    traceAo3SavedFiltersClientIdV1: "device:one",
+    traceAo3SavedFiltersV1: [localPreset()],
+    traceAo3SavedFiltersSyncV1: {
+      syncVersion: "2026-10-21T19:27:10.000Z",
+      lastSyncedAt: "2026-10-21T19:27:10.000Z",
+      accountId: "account-b",
+    },
+    traceAo3SavedFiltersLastUsedV1: { byId: { "old-1": "2026-10-21T19:28:00.000Z" }, byContext: {} },
+  });
+  const bodies = [];
+  const controller = await syncingController(area, (body) => {
+    bodies.push(body);
+    return responseData();
+  });
+  const result = await controller.handle({ type: "TRACE_AO3_SAVED_FILTERS_SYNC_REQUEST" }, ao3Sender);
+  assert.equal(result.sync.kind, "completed");
+  assert.equal(bodies[0].since, null, "a full pull for this account");
+  assert.deepEqual(bodies[0].upserts, [], "the other account's filter is not sent here");
+  assert.deepEqual(area.values.traceAo3SavedFiltersV1.map((preset) => preset.clientId), ["preset-1"]);
+  assert.equal(area.values.traceAo3SavedFiltersSyncV1.accountId, "account-a");
+  assert.equal(area.values.traceAo3SavedFiltersClientIdV1, "device:one", "the device keeps its id");
+  assert.equal(Object.hasOwn(area.values, "traceAo3SavedFiltersLastUsedV1"), false);
+});
+
+test("a sync point kept before accounts were recorded pulls everything once, then resumes from this account's point", async () => {
+  const area = new PromiseStorageArea({
+    traceAo3SavedFiltersClientIdV1: "device:one",
+    traceAo3SavedFiltersV1: [localPreset({ id: "mine", clientId: "mine", name: "Mine" })],
+    traceAo3SavedFiltersSyncV1: {
+      syncVersion: "2026-10-21T19:27:10.000Z",
+      lastSyncedAt: "2026-10-21T19:27:10.000Z",
+    },
+  });
+  const bodies = [];
+  const controller = await syncingController(area, (body) => {
+    bodies.push(body);
+    return responseData();
+  });
+  await controller.handle({ type: "TRACE_AO3_SAVED_FILTERS_SYNC_REQUEST" }, ao3Sender);
+  assert.equal(bodies[0].since, null);
+  assert.deepEqual(bodies[0].upserts.map((preset) => preset.clientId), ["mine"], "this device's own unsent filter still goes up");
+  assert.equal(area.values.traceAo3SavedFiltersSyncV1.accountId, "account-a");
+  await controller.handle({ type: "TRACE_AO3_SAVED_FILTERS_SYNC_REQUEST" }, ao3Sender);
+  assert.equal(bodies.at(-1).since, "2026-07-20T10:01:00.000Z", "later pulls start from this account's point");
+});
+
+test("an account leaving takes its saved filters with it, but not the device's id", async () => {
+  const area = new PromiseStorageArea({
+    traceAo3SavedFiltersClientIdV1: "device:one",
+    traceAo3SavedFiltersV1: [localPreset()],
+    traceAo3SavedFiltersDeletedV1: [{ id: "x", clientId: "x", serverId: "", clientUpdatedAt: "2026-07-20T10:00:00.000Z" }],
+    traceAo3SavedFiltersActiveV1: { id: "old-1", signature: "s", contextKey: "global:/works", appliedAt: "" },
+    traceAo3SavedFiltersSyncV1: { syncVersion: "2026-07-20T10:01:00.000Z", lastSyncedAt: "2026-07-20T10:01:00.000Z", accountId: "account-b" },
+    traceAo3SavedFiltersLastUsedV1: { byId: {}, byContext: {} },
+    prefAo3SavedFiltersEnabled: true,
+  });
+  const repository = new BrowserSavedFilterRepository({
+    storage: new BrowserStorage(area, { onMessage: { addListener() {} } }, "promise"),
+    session: { publicationScope: () => null },
+    randomId: () => "unused",
+  });
+  await repository.clearAccountData();
+  assert.deepEqual(Object.keys(area.values).sort(), ["prefAo3SavedFiltersEnabled", "traceAo3SavedFiltersClientIdV1"]);
+});
+
 test("kernel alarm keeps an existing schedule across background starts", async () => {
   const creates = [];
   const alarms = {

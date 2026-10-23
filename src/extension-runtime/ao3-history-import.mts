@@ -5,7 +5,7 @@
  * the Library here; the review does that, with the reader's choices.
  *
  * Courtesy to AO3, and the reader's trust, come first:
- * - Only `/users/<name>/readings` pages, one request at a time, 8 to 10
+ * - Only `/users/<name>/readings` pages, one request at a time, 6 to 7
  *   seconds apart, from the reader's tab with Safari's own headers.
  * - A 429 or 503 waits at least a minute, or as long as AO3 says, and doubles
  *   the gap; three in a row pause the run. A wait over 15 minutes is the
@@ -43,9 +43,11 @@ import { HistoryStoreFull, type HistoryStore } from "./ao3-history-store.mjs";
 export const AO3_HISTORY_IMPORT_MESSAGE = "TRACE_AO3_HISTORY_IMPORT";
 
 /** Least time between two History pages, before the jitter. */
-export const PAGE_GAP_MS = 8_000;
-/** Up to this much is added to each gap, so pages are 8 to 10 s apart. */
-export const PAGE_GAP_JITTER_MS = 2_000;
+// Under the 12 a minute that AO3 tools hold themselves to: the 21 October
+// run read 31 pages at 9 to 10 s apart with no slow-down from AO3.
+export const PAGE_GAP_MS = 6_000;
+/** Up to this much is added to each gap, so pages are 6 to 7 s apart. */
+export const PAGE_GAP_JITTER_MS = 1_000;
 /** The gap after backing off never grows past this. */
 export const MAX_PAGE_GAP_MS = 60_000;
 /** Least wait after a 429 or 503; doubles for each one in a row. */

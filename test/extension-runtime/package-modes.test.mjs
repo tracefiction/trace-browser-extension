@@ -284,7 +284,13 @@ async function assertIphoneBundleFollowsTheGrant(bundle, builtManifest) {
   allowed = true;
   for (const listener of added) listener({ origins: builtManifest.optional_host_permissions });
   await turns();
-  assert.deepEqual(registrations.map(({ id }) => id), ["trace-archive-automation-v1", "trace-ao3-saved-filters-v1"]);
+  // The veil comes in a call of its own, after the others.
+  assert.deepEqual(registrations.map(({ id }) => id), [
+    "trace-archive-automation-v1",
+    "trace-ao3-saved-filters-v1",
+    "trace-story-open-veil-v1",
+  ]);
+  assert.equal(registrations[2].runAt, "document_start");
   assert.deepEqual(
     JSON.parse(JSON.stringify(queries)),
     [{ url: builtManifest.optional_host_permissions }],
@@ -464,7 +470,15 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
       [...SITE_HOST_MATCHES, "https://www.tracefiction.com/*"],
     );
     assert.equal(Object.hasOwn(desktopSafariManifest, "optional_host_permissions"), false);
-    assert.equal(desktopSafariManifest.content_scripts.length, 3);
+    assert.equal(desktopSafariManifest.content_scripts.length, 4);
+    // The veil runs before the page draws, on the same pages as collector.js.
+    const desktopArchiveScripts = desktopSafariManifest.content_scripts[0];
+    assert.deepEqual(desktopSafariManifest.content_scripts[3], {
+      matches: desktopArchiveScripts.matches,
+      js: ["trace-open-veil.js"],
+      run_at: "document_start",
+      exclude_matches: desktopArchiveScripts.exclude_matches,
+    });
     for (const browser of ["chrome", "firefox"]) {
       const packaged = manifest(path.join(ROOT, "dist", browser));
       assert.deepEqual(packaged.permissions, ["alarms", "tabs", "storage", "scripting"]);
@@ -474,7 +488,11 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
         "https://www.tracefiction.com/*",
       ]);
       assert.equal(Object.hasOwn(packaged, "optional_host_permissions"), false);
-      assert.equal(packaged.content_scripts.length, 3);
+      assert.equal(packaged.content_scripts.length, 4);
+      assert.deepEqual(packaged.content_scripts[3].js, ["trace-open-veil.js"]);
+      assert.equal(packaged.content_scripts[3].run_at, "document_start");
+      assert.deepEqual(packaged.content_scripts[3].matches, packaged.content_scripts[0].matches);
+      assert.deepEqual(packaged.content_scripts[3].exclude_matches, packaged.content_scripts[0].exclude_matches);
     }
 
     runBuild("build");
@@ -633,6 +651,19 @@ test("legacy, kernel, and disabled packages have one deterministic classic owner
     assert.equal(iphoneOnboarding.registrationMode, "dynamic");
     assert.deepEqual(Array.from(iphoneOnboarding.origins), MINIMIZED_SITE_HOST_MATCHES);
     assert.equal(iphoneOnboarding.registrations.length, 2);
+    // The veil is optional: registered on its own, and nothing depends on it.
+    assert.equal(iphoneOnboarding.optionalRegistrations.length, 1);
+    const iphoneArchiveRegistration = iphoneOnboarding.registrations[0];
+    const iphoneVeilRegistration = iphoneOnboarding.optionalRegistrations[0];
+    assert.equal(iphoneVeilRegistration.id, "trace-story-open-veil-v1");
+    assert.equal(iphoneVeilRegistration.runAt, "document_start");
+    assert.equal(iphoneVeilRegistration.persistAcrossSessions, true);
+    assert.deepEqual(Array.from(iphoneVeilRegistration.js), ["trace-open-veil.js"]);
+    assert.deepEqual(Array.from(iphoneVeilRegistration.matches), Array.from(iphoneArchiveRegistration.matches));
+    assert.deepEqual(
+      Array.from(iphoneVeilRegistration.excludeMatches),
+      Array.from(iphoneArchiveRegistration.excludeMatches),
+    );
     for (const registration of iphoneOnboarding.registrations) {
       assert.equal(registration.persistAcrossSessions, true);
       assert.equal(registration.runAt, "document_end");
@@ -865,7 +896,7 @@ test("explicit development JSON pairs output and rejects invalid or production u
 });
 
 test("the whole-History import is in a package only when its switch is on, and only with the kernel session", () => {
-  const HISTORY_WIRING = ["TRACE_AO3_HISTORY_IMPORT", "traceAo3HistoryImportV1", "__traceAo3HistoryImportLoopV1"];
+  const HISTORY_WIRING = ["TRACE_AO3_HISTORY_IMPORT", "traceAo3HistoryImportV1", "__traceAo3HistoryImportLoopV1", "TRACE_IOS_HISTORY_PREPARE"];
   const build = (extra) => spawnSync("npm", ["run", "build:ios-earned-permission-onboarding:release"], {
     cwd: ROOT, env: { ...RELEASE_ENV, ...extra }, encoding: "utf8",
   });
@@ -876,11 +907,18 @@ test("the whole-History import is in a package only when its switch is on, and o
     for (const wiring of HISTORY_WIRING) {
       assert.equal(store.includes(wiring), false, `the store package carries ${wiring}`);
     }
+    assert.equal(fs.existsSync(path.join(RESOURCES, "ao3-history-import-panel.js")), false, "the store package carries the sheet section");
+    assert.equal(fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8").includes("ao3-history-import-panel.js"), false);
     const on = build({ TRACE_AO3_HISTORY_IMPORT: "1" });
     assert.equal(on.status, 0, on.stderr || on.stdout);
     const withImport = fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8");
     for (const wiring of HISTORY_WIRING) {
       assert.equal(withImport.includes(wiring), true, `the switched-on package lacks ${wiring}`);
+    }
+    assert.equal(fs.existsSync(path.join(RESOURCES, "ao3-history-import-panel.js")), true, "the switched-on package lacks the sheet section");
+    assert.match(fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8"), /ao3-history-import-panel\.js/);
+    for (const browser of ["chrome", "firefox"]) {
+      assert.equal(fs.existsSync(path.join(ROOT, "dist", browser, "ao3-history-import-panel.js")), true, `${browser} lacks the sheet section`);
     }
     // Nothing more is asked of Safari for it.
     assert.deepEqual(manifest(RESOURCES).permissions, ["alarms", "storage", "nativeMessaging", "activeTab", "scripting"]);

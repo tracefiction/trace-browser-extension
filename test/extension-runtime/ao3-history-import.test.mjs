@@ -284,7 +284,7 @@ test("the IndexedDB store keeps a page's works and the run together, and they ou
 
 // --- The run, paced by the page loop ------------------------------------------
 
-test("start puts the loop into the AO3 tab, which reads every page once, 8 to 10 seconds apart", async () => {
+test("start puts the loop into the AO3 tab, which reads every page once, 6 to 7 seconds apart", async () => {
   const h = harness({ answers: [ok([work(1), work(2)], 2, { last: 3 }), ok([work(3)], 3), ok([work(4)])] });
   const started = await h.history.start(USER, TAB);
   assert.equal(started.status, "running");
@@ -356,8 +356,8 @@ test("a 429 waits at least Retry-After, doubles the gap, says so, and three in a
   const run = runOf(h.store);
   assert.equal(run.status, "paused");
   assert.equal(run.reason, "rate_limited");
-  // Doubled for each slow-down AO3 asked for, never past the longest gap.
-  assert.equal(run.timing.gapMs, MAX_PAGE_GAP_MS);
+  // Doubled for each slow-down AO3 asked for before the pause, never past the longest gap.
+  assert.equal(run.timing.gapMs, Math.min(MAX_PAGE_GAP_MS, PAGE_GAP_MS * 2 ** MAX_CONSECUTIVE_RETRIES));
   assert.equal(run.counts.pages, 2);
 });
 
@@ -512,7 +512,7 @@ test("an unknown account (a background still starting) keeps the run", async () 
 
 // --- Safari wiring -------------------------------------------------------------------
 
-function wiring({ tabUrl = "https://archiveofourown.org/works/1", scriptResult = () => "started", permitted = true } = {}) {
+function wiring({ tabUrl = "https://archiveofourown.org/works/1", scriptResult = () => "started", permitted = true, handOff } = {}) {
   const listeners = [];
   const scripts = [];
   const cleanups = [];
@@ -529,6 +529,7 @@ function wiring({ tabUrl = "https://archiveofourown.org/works/1", scriptResult =
     account: async () => ACCOUNT,
     whenAccountLeaves: (cleanup) => cleanups.push(cleanup),
     saveActivity: () => ({ inFlight: 0, lastEndedAt: 0 }),
+    ...(handOff ? { handOffHistory: handOff } : {}),
   });
   const send = (message, sender) => new Promise((resolve) => {
     for (const listener of listeners) {
@@ -564,7 +565,9 @@ test("the sheet starts a run for the AO3 name the tab shows, and is told plainly
 
 test("the page loop's ticks are answered only for a page on AO3; with no run it is told to stop", async () => {
   const w = wiring();
-  assert.deepEqual(await w.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "tab_tick" }, AO3_TAB), { stop: true });
+  const reply = await w.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "tab_tick" }, AO3_TAB);
+  assert.equal(reply.stop, true);
+  assert.equal(reply.view.status, "idle", "each reply carries the run's view, for the reading bar");
   const elsewhere = { ...AO3_TAB, url: "https://example.org/", tab: { id: 9, url: "https://example.org/" } };
   assert.equal(await w.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "tab_tick" }, elsewhere), undefined);
 });
@@ -655,4 +658,35 @@ test("a History of 10,000 works is read and kept in IndexedDB, far past the old 
   const kept = await store.readWorks();
   assert.equal(kept.length, 10_000);
   assert.ok(new TextEncoder().encode(JSON.stringify(kept)).byteLength > 5 * 1_024 * 1_024);
+});
+
+test("Review in Trace hands over what the run found, finished or paused, and nothing before", async () => {
+  const handed = [];
+  const handoff = { ok: true, state: "ready_to_open", handoffID: "00000000-0000-4000-8000-000000000002", expiresAtMs: Date.now() + 60_000 };
+  const w = wiring({ handOff: async (build) => { handed.push(await build()); return handoff; } });
+  const review = () => w.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "review", tabId: TAB }, POPUP);
+  const empty = wiring({ handOff: async () => handoff });
+  assert.equal((await empty.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "review", tabId: TAB }, POPUP)).error, "review_not_ready", "no run yet");
+  w.store.run = {
+    v: 1, runId: "r", account: ACCOUNT, user: USER, status: "running", reason: null, tabId: TAB, nextPage: 2, totalPages: 2,
+    lastPageDigest: null, inFlight: null, counts: { pages: 1, works: 2, later: 0, deleted: 0, unreadable: 0, repeats: 0 },
+    timing: { startedAt: 0, finishedAt: null, pausedAt: null, pausedMs: 0, dueAt: 0, gapMs: 6_000, lastKeptAt: null, keptGapMsTotal: 0, keptGapCount: 0 },
+    retry: { consecutive: 0, code: null },
+  };
+  for (const kept of readHistoryPage(page([work(1), work(2)]), USER, 1).works) w.store.works.set(kept.id, kept);
+  assert.equal((await review()).error, "review_not_ready", "not while it reads");
+  await w.history.pause();
+  const reply = await review();
+  assert.equal(reply.ok, true, JSON.stringify(reply));
+  assert.deepEqual(reply.handoff, { handoffID: handoff.handoffID, expiresAtMs: handoff.expiresAtMs });
+  assert.equal(handed[0].itemCount, 2, "the works it found so far");
+  const refused = wiring({ handOff: async () => ({ ok: false, error: "not_authenticated" }) });
+  refused.store.run = { ...w.store.run, status: "finished", reason: "reached_last_page" };
+  refused.store.works.set("1", w.store.works.get("1"));
+  assert.equal((await refused.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "review", tabId: TAB }, POPUP)).error, "not_authenticated");
+  const none = wiring();
+  none.store.run = { ...w.store.run, status: "finished", reason: "reached_last_page" };
+  none.store.works.set("1", w.store.works.get("1"));
+  assert.equal((await none.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "review", tabId: TAB }, POPUP)).error, "history_handoff_unavailable",
+    "a package without the app's inbox cannot review");
 });
