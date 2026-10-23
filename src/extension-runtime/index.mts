@@ -14,6 +14,9 @@ import { ACCOUNT_PROJECTION_REVISION_KEY } from "./runtime-messages.mjs";
 import { installTraceFirstInstallActivation } from "./trace-web-navigation.mjs";
 import { rememberConnectIntent } from "./connect-intent.mjs";
 import { installStoryTabReuse } from "./story-tab-reuse.mjs";
+import { installAo3HistoryImport } from "./ao3-history-import-runtime.mjs";
+import { NativeHistoryHandoffProducer } from "./native-history-handoff.mjs";
+import { storySaveActivity } from "./story-save-activity.mjs";
 export * from "./account-projection.mjs";
 export * from "./billing-conversion.mjs";
 export * from "./archive-readiness-status.mjs";
@@ -48,6 +51,7 @@ declare const __TRACE_NATIVE_IMPORT_HANDOFF__: boolean;
 declare const __TRACE_IOS_EARNED_PERMISSION_CONFIG__: EarnedPermissionRegistrationConfig | null;
 declare const __TRACE_IOS_FIRST_TAP_SAVE__: boolean;
 declare const __TRACE_IOS_FIRST_TAP_SHEET__: boolean;
+declare const __TRACE_AO3_HISTORY_IMPORT__: boolean;
 
 type EarnedPermissionRegistrationConfig = Readonly<{
   version: number;
@@ -251,6 +255,13 @@ try {
     fetch: apiFetch,
     apiBase: __TRACE_API_BASE__,
     nativeImportHandoff: __TRACE_NATIVE_IMPORT_HANDOFF__,
+    // A build-time constant: only a build with the whole-History import carries it.
+    ...(__TRACE_AO3_HISTORY_IMPORT__
+      ? {
+          nativeHistoryHandoff: new NativeHistoryHandoffProducer({ runtime: extension.runtime,
+            mode: storageMode, apiOrigin: __TRACE_API_BASE__, randomID: randomId }),
+        }
+      : {}),
     ...(extension.scripting ? { scripting: extension.scripting } : {}),
     ...(extension.permissions ? { permissions: extension.permissions } : {}),
     webOrigin: __TRACE_WEB_ORIGIN__,
@@ -262,6 +273,33 @@ try {
       sessionArea: extension.storage.session ?? null,
     },
   });
+  if (
+    // A build-time constant: a build without it leaves this block and the
+    // modules only it uses out of the bundle altogether.
+    __TRACE_AO3_HISTORY_IMPORT__ &&
+    __TRACE_SESSION_MODE__ === "kernel" &&
+    extension.scripting !== undefined
+  ) {
+    // Import your whole AO3 History, read in the reader's AO3 tab and kept on
+    // this device until they review it (ao3-history-import.mts).
+    const historySession = session;
+    installAo3HistoryImport({
+      runtime: extension.runtime,
+      tabs: extension.tabs,
+      scripting: extension.scripting,
+      ...(extension.permissions ? { permissions: extension.permissions } : {}),
+      alarms: extension.alarms,
+      storageMode,
+      databaseFactory: scope.indexedDB,
+      account: async () => {
+        await historySession.start();
+        return historySession.publicationScope()?.accountId ?? null;
+      },
+      whenAccountLeaves: (cleanup) => historySession.whenAccountLeaves(cleanup),
+      saveActivity: storySaveActivity,
+      handOffHistory: (build) => historySession.handOffHistory(build),
+    });
+  }
   if (
     // A build-time constant: a build without optional story sites leaves this
     // block and the modules only it uses out of the bundle altogether.

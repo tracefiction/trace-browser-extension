@@ -22,6 +22,8 @@ const visualMode = process.argv.includes("--restyle-qa1")
   ? "capacity"
   : process.argv.includes("--corrective-only")
     ? "corrective"
+  : process.argv.includes("--history-import")
+  ? "history"
   : process.argv.includes("--popup-only")
     ? "popup"
     : "all";
@@ -312,6 +314,9 @@ function extensionMockSource(storageData, sessionSnapshot = null) {
           response = { ok: true, snapshot: sessionSnapshot, action: { kind: "ignored" } };
         }
         if (msg && msg.type === "TRACE_POPUP_GET_STATE") response = popupState;
+        if (msg && msg.type === "TRACE_AO3_HISTORY_IMPORT") {
+          response = storageData.traceHistoryImportReply || { ok: true, view: { status: "idle" }, startable: true };
+        }
         if (msg && msg.type === "TRACE_EARNED_PERMISSION_RECONCILE") {
           response = storageData.traceEarnedPermissionReconcileResult || {
             ok: true,
@@ -715,6 +720,15 @@ async function renderPopupScreenshot(browser, definition, assets, manifest) {
         !document.querySelector("#popup-earned-permission")?.hidden,
       { timeout: 10000 },
     );
+  }
+  if (definition.historyPanel) {
+    // The History import's sheet section, as a switched-on build loads it.
+    await page.addScriptTag({ content: definition.historyPanel });
+    await page.waitForFunction(() => {
+      const section = document.querySelector("#popup-history");
+      return Boolean(section && !section.hidden && section.parentNode);
+    }, null, { timeout: 10000 });
+    await page.waitForTimeout(150);
   }
   if (definition.clickSelector) {
     await page.click(definition.clickSelector);
@@ -1180,6 +1194,81 @@ async function renderRestyleQa1(browser, assets, scripts, manifest) {
 }
 
 
+const IPHONE_USER_AGENT =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
+
+/** The run's view as the background reports it, for one History import state. */
+function historyView(overrides = {}) {
+  return {
+    status: "running", reason: null, pagesRead: 11, totalPages: 31, works: 214, later: 0, deleted: 3,
+    unreadable: 0, waitingFor: null, waitingUntil: null, remainingMs: 186_000, startedAt: 0, finishedAt: null,
+    ...overrides,
+  };
+}
+
+const HISTORY_STATES = [
+  ["entry", { ok: true, view: { status: "idle" }, startable: true }],
+  ["start", { ok: true, view: { status: "idle" }, startable: true }, "#popup-history-entry"],
+  ["reading", { ok: true, view: historyView(), startable: true }],
+  ["slow-down", { ok: true, view: historyView({ waitingFor: "slow_down", waitingUntil: Date.now() + 120_000 }), startable: true }],
+  ["paused", { ok: true, view: historyView({ status: "paused", reason: "paused_by_you" }), startable: true }],
+  ["signed-out", { ok: true, view: historyView({ status: "paused", reason: "signed_out" }), startable: true }],
+  ["empty", { ok: true, view: historyView({ status: "paused", reason: "history_empty", pagesRead: 0, works: 0, totalPages: null }), startable: true }],
+  ["ready", { ok: true, view: historyView({ status: "finished", reason: "reached_last_page", pagesRead: 31, works: 588, later: 2, deleted: 11, unreadable: 2, remainingMs: null }), startable: true }],
+  ["delete", { ok: true, view: historyView(), startable: true }, "#popup-history [data-action='ask_delete']"],
+];
+
+/**
+ * Import your whole AO3 History: every state of the sheet's section in the
+ * iPhone reader view, light and dark, and the reading bar on an AO3 History
+ * page. `npm run visual:history-import` (TRACE_VISUAL_OUTPUT_DIR to choose
+ * where they go).
+ */
+async function renderHistoryImport(browser, assets, manifest) {
+  const historyPanel = await readText(repoRoot, "src", "ao3-history-import-panel.js");
+  for (const colorScheme of ["light", "dark"]) {
+    for (const [state, reply, clickSelector] of HISTORY_STATES) {
+      await renderPopupScreenshot(browser, {
+        name: `History import sheet: ${state} (${colorScheme})`,
+        file: `history-import-sheet-${state}-${colorScheme}.png`,
+        authState: connectedAuthState(),
+        sessionSnapshot: { state: "connected", accountId: "visual-account", canExecuteAuthenticated: true, reason: "none" },
+        storageData: { ...postOnboardingPopupStorageData(), traceHistoryImportReply: reply },
+        historyPanel,
+        ...(clickSelector ? { clickSelector } : {}),
+        viewport: { width: 375, height: 760 },
+        userAgent: IPHONE_USER_AGENT,
+        colorScheme,
+      }, assets, manifest);
+    }
+  }
+  const { ao3HistoryLoopInTab } = await import(path.join(repoRoot, ".trace-build", "extension-runtime", "ao3-history-import-runtime.mjs"));
+  const historyPage = await readText(repoRoot, "test", "fixtures", "ao3_history.html");
+  const bars = [
+    ["reading", historyView()],
+    ["paused", historyView({ status: "paused", reason: "paused_by_you" })],
+    ["ready", historyView({ status: "finished", reason: "reached_last_page", pagesRead: 31, works: 588, remainingMs: null })],
+  ];
+  for (const colorScheme of ["light", "dark"]) {
+    for (const [state, view] of bars) {
+      const page = await browser.newPage({ viewport: { width: 390, height: 760 }, deviceScaleFactor: 2, userAgent: IPHONE_USER_AGENT });
+      await page.emulateMedia({ colorScheme });
+      await page.route("**/*", (route) => route.request().isNavigationRequest()
+        ? route.fulfill({ status: 200, contentType: "text/html", body: historyPage })
+        : route.fulfill({ status: 204, body: "" }));
+      await page.addInitScript(`globalThis.browser = { runtime: { sendMessage: async () => (${JSON.stringify({ wait: 600_000, view })}) } };`);
+      await page.goto("https://archiveofourown.org/users/Ink_Reader_Test/readings", { waitUntil: "domcontentloaded" });
+      await page.evaluate(`(${ao3HistoryLoopInTab.toString()})("TRACE_AO3_HISTORY_IMPORT", 2097152, 20000)`);
+      await page.waitForFunction(() => Boolean(document.getElementById("__traceAo3HistoryImportBarV1")), null, { timeout: 10000 });
+      await page.waitForTimeout(400);
+      const file = `history-import-bar-${state}-${colorScheme}.png`;
+      await page.screenshot({ path: path.join(outputRoot, file), timeout: 120000 });
+      await page.close();
+      manifest.screenshots.push({ name: `History import bar: ${state} (${colorScheme})`, file, renderSource });
+    }
+  }
+}
+
 async function main() {
   await fs.mkdir(outputRoot, { recursive: true });
   const { chromium } = await loadPlaywright();
@@ -1215,6 +1304,13 @@ async function main() {
   };
 
   const browser = await launchChromium(chromium);
+  if (visualMode === "history") {
+    try { await renderHistoryImport(browser, assets, manifest); }
+    finally { await browser.close(); }
+    await fs.writeFile(path.join(outputRoot, "visual-fixture-screenshots.json"), JSON.stringify(manifest, null, 2) + "\n");
+    for (const item of manifest.screenshots) console.log(`${item.name}: ${item.file}`);
+    return;
+  }
   if (visualMode === "qa1") {
     try { await renderRestyleQa1(browser, assets, scripts, manifest); }
     finally { await browser.close(); }
