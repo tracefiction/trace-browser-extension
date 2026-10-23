@@ -895,27 +895,30 @@ test("explicit development JSON pairs output and rejects invalid or production u
   }
 });
 
-test("the whole-History import is in a package only when its switch is on, and only with the kernel session", () => {
+test("the store package carries the whole-History import; switched off, nothing of it, and only with the kernel session", () => {
   const HISTORY_WIRING = ["TRACE_AO3_HISTORY_IMPORT", "traceAo3HistoryImportV1", "__traceAo3HistoryImportLoopV1", "TRACE_IOS_HISTORY_PREPARE"];
-  const build = (extra) => spawnSync("npm", ["run", "build:ios-earned-permission-onboarding:release"], {
-    cwd: ROOT, env: { ...RELEASE_ENV, ...extra }, encoding: "utf8",
-  });
+  const build = (extra) => {
+    const env = { ...RELEASE_ENV, ...extra };
+    if (extra.TRACE_AO3_HISTORY_IMPORT === undefined) delete env.TRACE_AO3_HISTORY_IMPORT;
+    return spawnSync("npm", ["run", "build:ios-earned-permission-onboarding:release"], { cwd: ROOT, env, encoding: "utf8" });
+  };
   try {
-    const off = build({});
+    const off = build({ TRACE_AO3_HISTORY_IMPORT: "0" });
     assert.equal(off.status, 0, off.stderr || off.stdout);
-    const store = fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8");
+    const without = fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8");
     for (const wiring of HISTORY_WIRING) {
-      assert.equal(store.includes(wiring), false, `the store package carries ${wiring}`);
+      assert.equal(without.includes(wiring), false, `the switched-off package carries ${wiring}`);
     }
-    assert.equal(fs.existsSync(path.join(RESOURCES, "ao3-history-import-panel.js")), false, "the store package carries the sheet section");
+    assert.equal(fs.existsSync(path.join(RESOURCES, "ao3-history-import-panel.js")), false, "the switched-off package carries the sheet section");
     assert.equal(fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8").includes("ao3-history-import-panel.js"), false);
-    const on = build({ TRACE_AO3_HISTORY_IMPORT: "1" });
+    // The store package (1.0.3, owner 23 Oct 2026): on unless switched off.
+    const on = build({});
     assert.equal(on.status, 0, on.stderr || on.stdout);
     const withImport = fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8");
     for (const wiring of HISTORY_WIRING) {
-      assert.equal(withImport.includes(wiring), true, `the switched-on package lacks ${wiring}`);
+      assert.equal(withImport.includes(wiring), true, `the store package lacks ${wiring}`);
     }
-    assert.equal(fs.existsSync(path.join(RESOURCES, "ao3-history-import-panel.js")), true, "the switched-on package lacks the sheet section");
+    assert.equal(fs.existsSync(path.join(RESOURCES, "ao3-history-import-panel.js")), true, "the store package lacks the sheet section");
     assert.match(fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8"), /ao3-history-import-panel\.js/);
     for (const browser of ["chrome", "firefox"]) {
       assert.equal(fs.existsSync(path.join(ROOT, "dist", browser, "ao3-history-import-panel.js")), true, `${browser} lacks the sheet section`);
