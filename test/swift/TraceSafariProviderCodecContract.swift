@@ -703,6 +703,22 @@ struct TraceSafariProviderCodecContract {
         require(route(message(["at": ms - 200]))["error"] as? String == "stale" && defaults.data(forKey: R.key) == later,
             "An earlier write arriving late is refused")
 
+        // Equal times: the one that arrives last is kept.
+        now += 1
+        let same = ms - 50
+        require(route(message(["at": same, "chapter": 6, "chapterTotal": nil]))["ok"] as? Bool == true, "A write is stored")
+        require(route(message(["at": same, "chapter": 7, "chapterTotal": nil]))["ok"] as? Bool == true && stored()?.chapter == 7,
+            "Another with the same time, arriving after it, replaces it")
+
+        // Concurrent writes in one process: the latest time is what remains.
+        now += 1
+        let base = ms - 1_000
+        DispatchQueue.concurrentPerform(iterations: 64) { index in
+            _ = R.handle(message(["at": base + Double(index), "chapter": 1 + index, "chapterTotal": nil]),
+                defaults: defaults, provider: issued, now: ms)
+        }
+        require(stored()?.at == base + 63 && stored()?.chapter == 64, "Of writes handled at once, the latest is kept")
+
         // Provider: another provider never reads it, and an expired session stores nothing.
         let other = TraceSafariProviderCodec.ImportBinding(sessionID: UUID().uuidString, recordDigest: String(repeating: "c", count: 64))
         require(R.read(defaults: defaults, provider: other, now: ms) == nil, "Another provider's app reads nothing")

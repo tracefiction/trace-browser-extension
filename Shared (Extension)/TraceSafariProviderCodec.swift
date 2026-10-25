@@ -615,16 +615,28 @@ enum TraceSafariReadingNow {
         return record
     }
 
+    /// Serialises the read-then-write below within one process, so of two
+    /// messages handled at once an earlier write never lands over a later one.
+    private static let writing = NSLock()
+
     /// The handler: stores the latest record for the issued provider. An
-    /// earlier write arriving after a later one is refused.
+    /// earlier write (smaller `at`) arriving after a later one is refused; of
+    /// two with the same `at`, the one that arrives last is kept. Across
+    /// processes the read and write are not one step, so a lost race can
+    /// leave an earlier reading stored until the next write: the record is a
+    /// hint to read again, so that costs at most one refresh. The value is
+    /// synchronised before returning, so a notification posted after a
+    /// successful answer finds it.
     static func handle(_ payload: [String: Any], defaults: UserDefaults,
                        provider: TraceSafariProviderCodec.ImportBinding?, now: Double) -> [String: Any] {
         guard let provider, let record = decode(payload, provider: provider, now: now) else { return ["ok": false] }
+        writing.lock(); defer { writing.unlock() }
         if let previous = read(defaults: defaults, provider: provider, now: now), previous.at > record.at {
             return ["ok": false, "error": "stale"]
         }
         guard let encoded = try? JSONEncoder().encode(record) else { return ["ok": false] }
         defaults.set(encoded, forKey: key)
+        defaults.synchronize()
         return ["ok": defaults.data(forKey: key) == encoded]
     }
 
