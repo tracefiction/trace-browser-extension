@@ -791,9 +791,15 @@ test("iOS auto-track adopts the app account, records progress, and hands its exa
     "TRACE_IOS_AUTH_TOKEN_REQUEST",
     "TRACE_IOS_SAVE_PREPARE",
     "TRACE_IOS_SAVE_CONFIRMED",
+    "TRACE_IOS_READING_NOW",
   ]);
   assert.equal(nativeMessages.findLast(({ type }) => type === "TRACE_IOS_SAVE_CONFIRMED").accountID, "account-b");
   assert.equal(nativeMessages.findLast(({ type }) => type === "TRACE_IOS_SAVE_CONFIRMED").entryID, "00000000-0000-4000-8000-000000000123");
+  // The app hears which story and chapter, and nothing of the page.
+  const { at: readAt, ...readingNow } = nativeMessages.findLast(({ type }) => type === "TRACE_IOS_READING_NOW");
+  assert.deepEqual(readingNow, { type: "TRACE_IOS_READING_NOW", entryId: "00000000-0000-4000-8000-000000000123",
+    workKey: "ffn:7038840", chapter: 2, chapterTotal: 12 });
+  assert.equal(typeof readAt, "number");
   assert.equal(
     (await privateDatabase.get(PRIVATE_RECORD_KEYS.accountData)).scope.accountId,
     "account-b",
@@ -1238,6 +1244,7 @@ test("concurrent iOS page mutations share same-account authority without clearin
   assert.deepEqual(nativeMessages.filter(({ type }) => !type.startsWith("TRACE_IOS_TRACKING_PREFERENCE")).map(({ type }) => type), [
     "TRACE_IOS_AUTH_TOKEN_REQUEST",
     "TRACE_IOS_SAVE_PREPARE",
+    "TRACE_IOS_READING_NOW",
   ]);
   assert.equal(controller.snapshot().accountId, "account-a");
   const accountData = await privateDatabase.get(PRIVATE_RECORD_KEYS.accountData);

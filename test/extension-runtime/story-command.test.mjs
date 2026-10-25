@@ -324,3 +324,66 @@ test("confirmed automatic reading reaches native without becoming a quick-add he
     workKey: "ffn:5782108", source: "mutation", hostKind: "ffn", action: "read", at: 200 }), false);
   assert.equal(messages.length, 2, "Without native context, ordinary reading does not gain an action heartbeat");
 });
+
+test("on iPhone a confirmed reading write tells the app which story and chapter, and nothing more", async () => {
+  const { NativeStorySaveReceiptPort } = await import("../../.trace-build/extension-runtime/browser-adapters.mjs");
+  const context = { attemptID: "attempt", operationID: "operation", initiatedAt: 100 };
+  const messages = [];
+  const runtime = { async sendNativeMessage(message) { messages.push(message); return { ok: true }; } };
+  const port = new NativeStorySaveReceiptPort(runtime, "promise", "https://api.tracefiction.com",
+    undefined, async () => true);
+  const receipt = { accountID: "account-a", entryID: entryId, workKey: "ao3:123456", source: "mutation",
+    hostKind: "ao3", action: "read", at: 1_800_000_000_000, progress: { current: 4, total: 12 } };
+
+  assert.equal(await port.publishSaveReceipt(receipt), false,
+    "without onboarding context the receipt answers exactly as before");
+  assert.deepEqual(messages, [{ type: "TRACE_IOS_READING_NOW", entryId, workKey: "ao3:123456",
+    chapter: 4, chapterTotal: 12, at: 1_800_000_000_000 }]);
+
+  messages.length = 0;
+  assert.equal(await port.publishSaveReceipt({ ...receipt, context }), true);
+  assert.deepEqual(messages.map(message => message.type), ["TRACE_IOS_SAVE_CONFIRMED", "TRACE_IOS_READING_NOW"]);
+  assert.equal("progress" in messages[0], false, "the save confirmation is unchanged");
+
+  messages.length = 0;
+  await port.publishSaveReceipt({ ...receipt, progress: { current: 4, total: null } });
+  assert.deepEqual(messages, [{ type: "TRACE_IOS_READING_NOW", entryId, workKey: "ao3:123456",
+    chapter: 4, at: 1_800_000_000_000 }], "an unknown chapter count is left out");
+
+  messages.length = 0;
+  await port.publishSaveReceipt({ ...receipt, progress: { current: 4, total: 3 } });
+  assert.equal("chapterTotal" in messages[0], false, "a count below the chapter is left out");
+
+  messages.length = 0;
+  for (const progress of [undefined, { current: 0, total: 12 }, { current: 2.5, total: 12 },
+    { current: 100_001, total: null }, { current: "4", total: 12 }]) {
+    await port.publishSaveReceipt({ ...receipt, progress });
+  }
+  assert.deepEqual(messages, [], "nothing goes without a whole chapter number");
+});
+
+test("a quick-add save, another browser, or a failed delivery sends no reading message", async () => {
+  const { NativeStorySaveReceiptPort } = await import("../../.trace-build/extension-runtime/browser-adapters.mjs");
+  const receipt = { accountID: "account-a", entryID: entryId, workKey: "ao3:123456", source: "mutation",
+    hostKind: "ao3", action: "read", at: 200, progress: { current: 4, total: 12 } };
+
+  const quickAdd = [];
+  const iPhone = new NativeStorySaveReceiptPort({ async sendNativeMessage(message) {
+    quickAdd.push(message); return { ok: true };
+  } }, "promise", "https://api.tracefiction.com", undefined, async () => true);
+  await iPhone.publishSaveReceipt({ ...receipt, action: "quick_add" });
+  assert.deepEqual(quickAdd.map(message => message.type), ["TRACE_IOS_EXTENSION_HEARTBEAT"]);
+
+  for (const sendsReadingNow of [undefined, async () => false, async () => { throw new Error("unknown"); }]) {
+    const sent = [];
+    const port = new NativeStorySaveReceiptPort({ async sendNativeMessage(message) {
+      sent.push(message); return { ok: true };
+    } }, "promise", "https://api.tracefiction.com", undefined, sendsReadingNow);
+    assert.equal(await port.publishSaveReceipt(receipt), false);
+    assert.deepEqual(sent, []);
+  }
+
+  const failing = new NativeStorySaveReceiptPort({ async sendNativeMessage() { throw new Error("no host"); } },
+    "promise", "https://api.tracefiction.com", undefined, async () => true);
+  assert.equal(await failing.publishSaveReceipt(receipt), false, "a failed delivery never fails the save");
+});

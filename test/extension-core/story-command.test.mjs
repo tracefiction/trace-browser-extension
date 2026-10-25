@@ -322,6 +322,8 @@ test("progress starts with its authoritative monotonic mutation", async () => {
   assert.equal(h.calls.receipt.length, 1);
   assert.equal(h.calls.receipt[0].action, "read");
   assert.equal(h.calls.receipt[0].entryID, current.entryId);
+  assert.deepEqual(h.calls.receipt[0].progress, { current: 4, total: 12 },
+    "the receipt names the chapter the page reported");
   assert.deepEqual(h.calls.clear, []);
 });
 

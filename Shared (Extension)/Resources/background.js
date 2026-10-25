@@ -3736,6 +3736,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           ...context === void 0 ? {} : { context },
           hostKind: command.hostKind,
           action: command.intent === "ensure_saved" ? "quick_add" : "read",
+          ...command.intent === "record_progress" && command.progress !== void 0 ? { progress: { current: command.progress.current, total: command.progress.total } } : {},
           at: this.#ports.clock.now(),
           ...command.handoffId === void 0 ? {} : { handoffId: command.handoffId }
         }) ? "published" : "unavailable";
@@ -4056,8 +4057,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
   };
   var NativeStorySaveReceiptPort = class {
-    constructor(runtime, mode, apiOrigin = "", publishTrackingPreference) {
+    constructor(runtime, mode, apiOrigin = "", publishTrackingPreference, sendsReadingNow) {
       this.publishTrackingPreference = publishTrackingPreference;
+      this.sendsReadingNow = sendsReadingNow;
       this.#runtime = runtime;
       this.#mode = mode;
       this.#apiOrigin = apiOrigin;
@@ -4092,7 +4094,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       const preference = this.publishTrackingPreference?.().catch(() => {
       });
       if (receipt.action === "read") {
-        await preference;
+        await Promise.all([preference, this.#publishReadingNow(receipt)]);
         return recorded;
       }
       const response = await sendNativeMessageWithFallback(
@@ -4109,7 +4111,32 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       await preference;
       return recorded || isRecord5(response) && (response.ok === true || response.ok === "true");
     }
+    /**
+     * Which story and chapter a confirmed reading write was for, so the app can
+     * bring that story up to date at once. Identifiers and chapter numbers
+     * only: no title, address or text. Best effort; never changes the receipt.
+     */
+    async #publishReadingNow(receipt) {
+      const progress = receipt.progress;
+      if (progress === void 0 || !isChapterNumber(progress.current)) return;
+      try {
+        if (!await this.sendsReadingNow?.()) return;
+        const total = progress.total;
+        await sendNativeMessageWithFallback(this.#runtime, this.#mode, {
+          type: "TRACE_IOS_READING_NOW",
+          entryId: receipt.entryID,
+          workKey: receipt.workKey,
+          chapter: progress.current,
+          ...total !== null && isChapterNumber(total) && total >= progress.current ? { chapterTotal: total } : {},
+          at: receipt.at
+        }, 1e3);
+      } catch {
+      }
+    }
   };
+  function isChapterNumber(value) {
+    return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= 1e5;
+  }
   var NativePendingStoryHandoffPort = class {
     #runtime;
     #mode;
@@ -8180,7 +8207,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           environment.runtime,
           environment.storageMode,
           environment.apiBase,
-          () => this.publishTrackingPreference()
+          () => this.publishTrackingPreference(),
+          () => this.#usesNativeAccountAuthority()
         ),
         handoff: new NativePendingStoryHandoffPort(
           environment.runtime,

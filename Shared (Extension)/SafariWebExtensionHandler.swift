@@ -114,7 +114,8 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
 
             case "TRACE_IOS_SAVE_PREPARE", "TRACE_IOS_SAVE_CONFIRMED",
                  "TRACE_IOS_TRACKING_PREFERENCE_PREPARE", "TRACE_IOS_TRACKING_PREFERENCE",
-                 TraceSafariReadinessReport.prepareMessage, TraceSafariReadinessReport.reportMessage:
+                 TraceSafariReadinessReport.prepareMessage, TraceSafariReadinessReport.reportMessage,
+                 TraceSafariReadingNow.message:
                 if let defaults = Self.pendingDefaults(),
                    case let .ready(credential, kind, sessionID?, expiry?) = Self.readSharedTraceCredential(),
                    kind == "device_session",
@@ -138,6 +139,10 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                     // shared codec, where it is tested.
                     responseBody = TraceSafariProviderBoundMessages.respond(to: payload, type: messageType,
                         defaults: defaults, session: session, now: now, configuredAPIOrigin: receiptOrigin)
+                    // A running app hears of what is being read at once.
+                    if messageType == TraceSafariReadingNow.message, responseBody["ok"] as? Bool == true {
+                        TraceSafariReadingNow.post()
+                    }
                 } else { responseBody = ["ok": false] }
             case Self.traceIosAuthTokenRequest:
                 let credential = Self.readSharedTraceCredential()

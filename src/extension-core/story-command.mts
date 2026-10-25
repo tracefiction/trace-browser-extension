@@ -159,6 +159,11 @@ export interface StorySaveReceiptPort {
     source: "preflight" | "mutation" | "reconciliation";
     mode?: StorySaveMode;
     context?: Readonly<Record<string, unknown>>;
+    /**
+     * The chapter the page reported for a confirmed reading write. Present
+     * only with `action: "read"`; a quick-add save carries none.
+     */
+    progress?: Readonly<{ current: number; total: number | null }>;
   }>): Promise<boolean>;
 }
 
@@ -452,6 +457,9 @@ export class StoryCommandService {
         ...(context === undefined ? {} : { context }),
         hostKind: command.hostKind,
         action: command.intent === "ensure_saved" ? "quick_add" : "read",
+        ...(command.intent === "record_progress" && command.progress !== undefined
+          ? { progress: { current: command.progress.current, total: command.progress.total } }
+          : {}),
         at: this.#ports.clock.now(),
         ...(command.handoffId === undefined ? {} : { handoffId: command.handoffId }),
       })
