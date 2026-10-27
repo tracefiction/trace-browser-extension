@@ -25,6 +25,12 @@ const SESSION_ACTION_MESSAGE = "TRACE_SESSION_ACTION";
 // it only to finish a connect the reader already asked for.
 const TRACE_WEB_READY_MESSAGE = "TRACE_WEB_READY";
 const FIRST_INSTALL_READY_MESSAGE = "TRACE_EXTENSION_FIRST_INSTALL_READY";
+// Trace's AO3 History review asks for the History a part at a time; the
+// background answers only a Trace page, for the account that read it
+// (src/extension-runtime/web-history-handoff.mts).
+const WEB_HISTORY_REQUEST_MESSAGE = "TRACE_WEB_HISTORY_REQUEST";
+const WEB_HISTORY_RECEIVED_MESSAGE = "TRACE_WEB_HISTORY_RECEIVED";
+const WEB_HISTORY_RESPONSE_MESSAGE = "TRACE_WEB_HISTORY_RESPONSE";
 const FIRST_INSTALL_ACTIVATION = "extension-installed";
 const SESSION_MODE = globalThis.TRACE_SESSION_MODE || "legacy";
 const KERNEL_SESSION_ACTIVE = SESSION_MODE === "kernel";
@@ -328,6 +334,24 @@ async function handleStatusRequest(data) {
   void ensureFirstInstallSession(state);
 }
 
+async function handleWebHistoryRequest(data) {
+  const requestId = typeof data.requestId === "string" && data.requestId.length <= 64 ? data.requestId : "";
+  const handoffID = typeof data.handoffID === "string" ? data.handoffID : "";
+  if (!requestId || !handoffID) return;
+  const message = data.type === WEB_HISTORY_REQUEST_MESSAGE
+    ? { type: WEB_HISTORY_REQUEST_MESSAGE, handoffID, part: data.part }
+    : { type: WEB_HISTORY_RECEIVED_MESSAGE, handoffID };
+  const response = await requestRuntimeMessage(message, "[Trace Sync] Failed to pass the AO3 History");
+  window.postMessage(
+    {
+      type: WEB_HISTORY_RESPONSE_MESSAGE,
+      requestId,
+      answer: response && typeof response === "object" ? response : { ok: false, error: "history_handoff_unavailable" },
+    },
+    window.location.origin,
+  );
+}
+
 async function handleFirstStoryAddRequest(data) {
   const nonce = typeof data.nonce === "string" ? data.nonce : "";
   const url = typeof data.url === "string" ? data.url : "";
@@ -362,6 +386,10 @@ window.addEventListener("message", (event) => {
   }
   if (event.data?.type === FIRST_STORY_ADD_REQUEST_MESSAGE) {
     void handleFirstStoryAddRequest(event.data);
+    return;
+  }
+  if (event.data?.type === WEB_HISTORY_REQUEST_MESSAGE || event.data?.type === WEB_HISTORY_RECEIVED_MESSAGE) {
+    void handleWebHistoryRequest(event.data);
     return;
   }
   if (event.data?.type === FIRST_INSTALL_READY_MESSAGE) {

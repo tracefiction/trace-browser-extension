@@ -189,10 +189,12 @@
       if (action === "review" && reply && reply.ok === true && reply.handoff &&
           /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(reply.handoff.handoffID) &&
           reply.handoff.expiresAtMs > Date.now()) {
-        handoff = { handoffID: reply.handoff.handoffID, expiresAtMs: reply.handoff.expiresAtMs };
+        handoff = { handoffID: reply.handoff.handoffID, expiresAtMs: reply.handoff.expiresAtMs,
+          url: reviewUrl(reply.handoff.url, reply.handoff.handoffID) };
         setTimeout(function () { handoff = null; render(); }, handoff.expiresAtMs - Date.now());
-        // One tap: Trace opens as soon as the History is ready. Open in Trace
-        // stays on the sheet in case Safari didn't hand the link over.
+        // One tap: Trace opens as soon as the History is ready (the app on
+        // iPhone, Trace's review page on a computer). Open in Trace stays on
+        // the sheet in case it didn't open.
         openInTrace();
       }
       if (action === "delete") handoff = null;
@@ -213,9 +215,23 @@
       render();
       return;
     }
+    if (handoff.url) {
+      try {
+        if (extension.tabs && typeof extension.tabs.create === "function") extension.tabs.create({ url: handoff.url });
+        else globalThis.open(handoff.url, "_blank", "noopener");
+      } catch (_) {}
+      return;
+    }
     var url = "traceauth://open?destination=history-import&handoff=" + handoff.handoffID;
     if (typeof globalThis.openTraceApp === "function") globalThis.openTraceApp(url);
     else globalThis.location.href = url;
+  }
+
+  /** Trace's review page for this handoff, only on Trace's own site; null on iPhone. */
+  function reviewUrl(raw, handoffID) {
+    var origin = String(globalThis.TRACE_EXTENSION_WEB_ORIGIN || "").replace(/\/$/, "");
+    if (typeof raw !== "string" || !origin) return null;
+    return raw === origin + "/import/history#handoff=" + handoffID ? raw : null;
   }
 
   function setButton(node, label, action) {

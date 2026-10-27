@@ -190,6 +190,30 @@ test("Review in Trace prepares the History and opens it in the app, with Open in
   assert.deepEqual(opened, [link, link]);
 });
 
+test("on a computer, Review in Trace opens Trace's review page in a new tab, and only that page", async () => {
+  const handoffID = "00000000-0000-4000-8000-0000000000aa";
+  const finished = view({ status: "finished", reason: "reached_last_page", pagesRead: 31, works: 588, remainingMs: null });
+  const page = `https://www.tracefiction.test/import/history#handoff=${handoffID}`;
+  const run = async (url) => {
+    const s = sheet({ replies: { status: { ok: true, view: finished, startable: true },
+      review: { ok: true, view: finished, handoff: { handoffID, expiresAtMs: Date.now() + 60_000, url } } } });
+    s.window.TRACE_EXTENSION_WEB_ORIGIN = "https://www.tracefiction.test";
+    const tabs = [], apps = [];
+    s.window.browser.tabs.create = async (details) => { tabs.push(details.url); };
+    s.window.openTraceApp = (link) => apps.push(link);
+    await flush(s.window);
+    await s.click("Review in Trace");
+    return { s, tabs, apps };
+  };
+  const desk = await run(page);
+  assert.deepEqual(desk.tabs, [page], "Trace's review page opens");
+  assert.deepEqual(desk.apps, [], "no app link on a computer");
+  await desk.s.click("Open in Trace");
+  assert.deepEqual(desk.tabs, [page, page], "and opens again from Open in Trace");
+  const elsewhere = await run(`https://evil.example/import/history#handoff=${handoffID}`);
+  assert.deepEqual(elsewhere.tabs, [], "a page off Trace's site is never opened");
+});
+
 test("a paused run can review what it found so far", async () => {
   const s = sheet({ replies: { status: { ok: true, view: view({ status: "paused", reason: "paused_by_you" }), startable: true } } });
   await flush(s.window);

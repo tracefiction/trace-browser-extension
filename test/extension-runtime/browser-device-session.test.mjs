@@ -99,3 +99,31 @@ test('credential storage failure revokes the issued browser credential', async (
   assert.equal(requests.at(-1).method, 'DELETE');
   assert.equal(await database.get(PRIVATE_RECORD_KEYS.sessionCredentials), null);
 });
+
+test('on a computer the whole AO3 History goes to Trace\'s review page, and only for the account signed in', async () => {
+  const { WebHistoryHandoff } = await import('../../.trace-build/extension-runtime/web-history-handoff.mjs');
+  const { historyParts } = await import('../../.trace-build/extension-runtime/native-history-handoff.mjs');
+  const handoffID = '00000000-0000-4000-8000-0000000000aa';
+  const databaseFactory = new IDBFactory(), db = new BrowserPrivateRecordDatabase(databaseFactory);
+  await db.put(PRIVATE_RECORD_KEYS.sessionEnvelope, { version: 1, epoch: 1, desired: 'connected', accountId: 'a', credentialRef: 'current' });
+  await db.put(PRIVATE_RECORD_KEYS.sessionCredentials, { version: 1, entries: { current: token } });
+  const web = new WebHistoryHandoff({ webOrigin: 'https://www.tracefiction.com', randomID: () => handoffID });
+  const controller = installSessionRuntime({ mode: 'kernel', browserDeviceSessions: true, databaseFactory, privateDatabase: db,
+    runtime: { onMessage: { addListener() {} }, getPlatformInfo: async () => ({ os: 'mac' }) },
+    tabs: { query: async () => [], sendMessage: async () => null, create: async () => ({}) },
+    storageArea: { get: async () => ({}), set: async () => {}, remove: async () => {} }, storageMode: 'promise',
+    alarms: { clear: async () => true }, apiBase: 'https://api.tracefiction.com', webOrigin: 'https://www.tracefiction.com', randomId: () => 'id',
+    webHistoryHandoff: web,
+    fetch: async (url, init) => init.headers.Authorization === `Bearer ${token}` ? new Response(JSON.stringify({ account_id: 'a' })) : new Response('', { status: 401 }) });
+  await controller.start();
+  const works = [{ id: '1', title: 'Synthetic work', authors: [], fandoms: [], tags: [], summary: '', words: 10, chapters: '1/1',
+    lastVisited: '2026-10-01', visits: 1, later: false }];
+  const offer = await controller.handOffHistory(() => historyParts(works, '2026-10-27T12:00:00.000Z'));
+  assert.equal(offer.ok, true, JSON.stringify(offer));
+  assert.equal(offer.url, `https://www.tracefiction.com/import/history#handoff=${handoffID}`);
+  const declaration = await controller.answerWebHistory({ type: 'TRACE_WEB_HISTORY_REQUEST', handoffID, part: 'declaration' });
+  assert.equal(declaration.accountId, 'a');
+  assert.equal(declaration.itemCount, 1);
+  const part = await controller.answerWebHistory({ type: 'TRACE_WEB_HISTORY_REQUEST', handoffID, part: 0 });
+  assert.equal(JSON.parse(part.text).items[0].u, 'https://archiveofourown.org/works/1');
+});

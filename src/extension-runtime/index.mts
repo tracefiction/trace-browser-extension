@@ -14,8 +14,9 @@ import { ACCOUNT_PROJECTION_REVISION_KEY } from "./runtime-messages.mjs";
 import { installTraceFirstInstallActivation } from "./trace-web-navigation.mjs";
 import { rememberConnectIntent } from "./connect-intent.mjs";
 import { installStoryTabReuse } from "./story-tab-reuse.mjs";
+import { sessionKeep, WebHistoryHandoff } from "./web-history-handoff.mjs";
 import { installAo3HistoryImport } from "./ao3-history-import-runtime.mjs";
-import { NativeHistoryHandoffProducer } from "./native-history-handoff.mjs";
+import { historyParts, NativeHistoryHandoffProducer } from "./native-history-handoff.mjs";
 import { storySaveActivity } from "./story-save-activity.mjs";
 export * from "./account-projection.mjs";
 export * from "./billing-conversion.mjs";
@@ -243,6 +244,14 @@ try {
     globalThis.fetch.bind(globalThis), extension.runtime, storageMode, __TRACE_API_BASE__,
     new BrowserStorage(extension.storage.local, extension.runtime, storageMode),
   );
+  // On a computer, Review in Trace offers the History to Trace's review page
+  // (web-history-handoff.mts); the offer outlives this background in session storage.
+  const webHistoryHandoff = __TRACE_AO3_HISTORY_IMPORT__
+    ? new WebHistoryHandoff({ webOrigin: __TRACE_WEB_ORIGIN__, randomID: randomId,
+      ...(extension.storage.session
+        ? { keep: sessionKeep(new BrowserStorage(extension.storage.session, extension.runtime, storageMode)) }
+        : {}) })
+    : null;
   session = installSessionRuntime({
     browserDeviceSessions: true,
     mode: __TRACE_SESSION_MODE__,
@@ -260,6 +269,7 @@ try {
       ? {
           nativeHistoryHandoff: new NativeHistoryHandoffProducer({ runtime: extension.runtime,
             mode: storageMode, apiOrigin: __TRACE_API_BASE__, randomID: randomId }),
+          webHistoryHandoff: webHistoryHandoff!,
         }
       : {}),
     ...(extension.scripting ? { scripting: extension.scripting } : {}),
@@ -283,7 +293,7 @@ try {
     // Import your whole AO3 History, read in the reader's AO3 tab and kept on
     // this device until they review it (ao3-history-import.mts).
     const historySession = session;
-    installAo3HistoryImport({
+    const historyImport = installAo3HistoryImport({
       runtime: extension.runtime,
       tabs: extension.tabs,
       scripting: extension.scripting,
@@ -298,7 +308,12 @@ try {
       whenAccountLeaves: (cleanup) => historySession.whenAccountLeaves(cleanup),
       saveActivity: storySaveActivity,
       handOffHistory: (build) => historySession.handOffHistory(build),
+      ...(webHistoryHandoff ? { webHistory: { origin: __TRACE_WEB_ORIGIN__,
+        answer: (message: unknown) => historySession.answerWebHistory(message),
+        discard: () => webHistoryHandoff.discard() } } : {}),
     });
+    // After a restart the parts on offer are made again from what the run kept.
+    webHistoryHandoff?.useSource(async (capturedAt) => historyParts(await historyImport.works(), capturedAt));
   }
   if (
     // A build-time constant: a build without optional story sites leaves this
