@@ -907,3 +907,28 @@ test("sync forwards malformed status pushes as a safe disconnected state", async
     authState: "unknown",
   });
 });
+
+test("sync relays the AO3 History review's part requests to the background and its answers back", async () => {
+  const handoffID = "00000000-0000-4000-8000-0000000000aa";
+  const h = createSyncHarness("https://tracefiction.com", {
+    sessionMode: "kernel",
+    sendMessageImpl(message, callback) {
+      callback?.(message.part === 0 ? { ok: true, kind: "part", handoffID, partIndex: 0, text: "{\"items\":[]}" } : undefined);
+    },
+  });
+  dispatchPageMessage(h, { type: "TRACE_WEB_HISTORY_REQUEST", requestId: "r1", handoffID, part: 0, extra: "dropped" });
+  dispatchPageMessage(h, { type: "TRACE_WEB_HISTORY_RECEIVED", requestId: "r2", handoffID });
+  dispatchPageMessage(h, { type: "TRACE_WEB_HISTORY_REQUEST", requestId: "r3", handoffID, part: 0 }, "https://evil.example");
+  dispatchPageMessage(h, { type: "TRACE_WEB_HISTORY_REQUEST", handoffID, part: 0 });
+  await flush();
+  const relayed = plainJson(h.messages).filter((m) => m.type.startsWith("TRACE_WEB_HISTORY"));
+  assert.deepEqual(relayed, [
+    { type: "TRACE_WEB_HISTORY_REQUEST", handoffID, part: 0 },
+    { type: "TRACE_WEB_HISTORY_RECEIVED", handoffID },
+  ], "only same-origin requests with an id, and only their own fields");
+  const answers = plainJson(h.postedMessages).map((m) => m.data).filter((d) => d.type === "TRACE_WEB_HISTORY_RESPONSE");
+  assert.deepEqual(answers, [
+    { type: "TRACE_WEB_HISTORY_RESPONSE", requestId: "r1", answer: { ok: true, kind: "part", handoffID, partIndex: 0, text: "{\"items\":[]}" } },
+    { type: "TRACE_WEB_HISTORY_RESPONSE", requestId: "r2", answer: { ok: false, error: "history_handoff_unavailable" } },
+  ]);
+});

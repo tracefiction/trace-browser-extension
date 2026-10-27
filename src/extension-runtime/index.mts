@@ -14,6 +14,7 @@ import { ACCOUNT_PROJECTION_REVISION_KEY } from "./runtime-messages.mjs";
 import { installTraceFirstInstallActivation } from "./trace-web-navigation.mjs";
 import { rememberConnectIntent } from "./connect-intent.mjs";
 import { installStoryTabReuse } from "./story-tab-reuse.mjs";
+import { WebHistoryHandoff } from "./web-history-handoff.mjs";
 import { installAo3HistoryImport } from "./ao3-history-import-runtime.mjs";
 import { NativeHistoryHandoffProducer } from "./native-history-handoff.mjs";
 import { storySaveActivity } from "./story-save-activity.mjs";
@@ -260,6 +261,7 @@ try {
       ? {
           nativeHistoryHandoff: new NativeHistoryHandoffProducer({ runtime: extension.runtime,
             mode: storageMode, apiOrigin: __TRACE_API_BASE__, randomID: randomId }),
+          webHistoryHandoff: new WebHistoryHandoff({ webOrigin: __TRACE_WEB_ORIGIN__, randomID: randomId }),
         }
       : {}),
     ...(extension.scripting ? { scripting: extension.scripting } : {}),
@@ -298,6 +300,7 @@ try {
       whenAccountLeaves: (cleanup) => historySession.whenAccountLeaves(cleanup),
       saveActivity: storySaveActivity,
       handOffHistory: (build) => historySession.handOffHistory(build),
+      webHistory: { origin: __TRACE_WEB_ORIGIN__, answer: (message) => historySession.answerWebHistory(message) },
     });
   }
   if (

@@ -1,4 +1,5 @@
 import type { PermissionsPort, ScriptingPort } from "./browser-platform.mjs";
+import { declaresHostPattern } from "./browser-platform.mjs";
 import { collectOpenStoryTabs, encodeOpenStoryTabs } from "./open-story-tabs.mjs";
 import { BrowserDeviceSessionProvider } from "./browser-device-session.mjs";
 import {
@@ -152,6 +153,7 @@ import {
 
 import { NativeLibraryImportProducer } from "./native-import.mjs";
 import type { HistoryHandoffResult, HistoryParts, NativeHistoryHandoffProducer } from "./native-history-handoff.mjs";
+import type { WebHistoryAnswer, WebHistoryHandoff, WebHistoryOffer } from "./web-history-handoff.mjs";
 import {
   FfnSummaryFill,
   LOCAL_STATE_TTL_MS,
@@ -188,6 +190,8 @@ interface RuntimeEnvironment {
   readonly nativeImportHandoff?: boolean;
   /** Hands a whole AO3 History to the app (native-history-handoff.mts). */
   readonly nativeHistoryHandoff?: NativeHistoryHandoffProducer;
+  /** On a computer, the History goes to Trace's review page instead (web-history-handoff.mts). */
+  readonly webHistoryHandoff?: WebHistoryHandoff;
   readonly firstStoryDelay?: (milliseconds: number) => Promise<void>;
   readonly archiveReadinessStatus?: BrowserArchiveReadinessStatus;
   /**
@@ -298,6 +302,7 @@ export class SessionRuntimeController {
   readonly #nativeImport: NativeLibraryImportProducer;
   /** Only a build with the whole-History import has one (index.mts). */
   readonly #nativeHistory: NativeHistoryHandoffProducer | null;
+  readonly #webHistory: WebHistoryHandoff | null;
   readonly #firstStoryInitiator: BrowserFirstStoryInitiator;
   readonly #openTabs: () => Promise<{ readonly encoded: string; readonly found: OpenStoryTabsFound } | null>;
   readonly #traceWebNavigation: BrowserTraceWebNavigation;
@@ -336,6 +341,7 @@ export class SessionRuntimeController {
     this.#nativeImport = new NativeLibraryImportProducer({ runtime: environment.runtime,
       mode: environment.storageMode, apiOrigin: environment.apiBase, randomID: environment.randomId });
     this.#nativeHistory = environment.nativeHistoryHandoff ?? null;
+    this.#webHistory = environment.webHistoryHandoff ?? null;
     const storage = new BrowserStorage(
       environment.storageArea,
       environment.runtime,
@@ -403,6 +409,9 @@ export class SessionRuntimeController {
     // Saved filters belong to the account: they go when it leaves, so the
     // next account starts from its own (and a full pull).
     this.whenAccountLeaves(() => this.#savedFilterRepository.clearAccountData());
+    // A History offered to Trace's review page is never given to the next account.
+    const webHistory = this.#webHistory;
+    if (webHistory !== null) this.whenAccountLeaves(async () => webHistory.discard());
     this.#savedFilters = new SavedFilterSyncService({
       session: this.#service,
       api: this.#savedFilterApi,
@@ -1411,18 +1420,37 @@ export class SessionRuntimeController {
   }
 
   /**
-   * Hands the reader's whole AO3 History to the Trace app for review: on
-   * iPhone, through the paired History inbox, fenced to the account as the
-   * import handoff is. `build` makes the parts only once the account is
-   * known to be connected.
+   * Hands the reader's whole AO3 History to Trace for review: on iPhone,
+   * to the app through the paired History inbox, fenced to the account as
+   * the import handoff is; on a computer, to Trace's review page, which asks
+   * for it a part at a time (`answerWebHistory`). `build` makes the parts
+   * only once the account is known to be connected.
    */
   async handOffHistory(
     build: () => Promise<HistoryParts | null>,
-  ): Promise<HistoryHandoffResult | { readonly ok: false; readonly error: "not_authenticated" }> {
+  ): Promise<HistoryHandoffResult | WebHistoryOffer | { readonly ok: false; readonly error: "not_authenticated" }> {
     await this.start();
     const unavailable = Object.freeze({ ok: false, error: "history_handoff_unavailable" } as const);
+    const platform = await this.#nativePlatform();
+    const web = this.#webHistory;
+    if (platform === "desktop" && web !== null) {
+      // The review page asks for the History through the bridge on Trace's
+      // own site; a package that doesn't run there cannot hand it over.
+      const site = new URL(this.#webOrigin);
+      if (!declaresHostPattern(this.#runtime, `${site.protocol}//${site.hostname}/*`)) return unavailable;
+      if (this.snapshot().state !== "connected") return Object.freeze({ ok: false, error: "not_authenticated" } as const);
+      const history = await build().catch(() => null);
+      if (history === null) return unavailable;
+      const fenced = await this.#service.executeCurrentScope(async (scope, isCurrent) =>
+        await isCurrent() ? web.offer(scope.accountId, history) : unavailable);
+      if (fenced.kind !== "published") {
+        web.discard();
+        return unavailable;
+      }
+      return fenced.value;
+    }
     const producer = this.#nativeHistory;
-    if (producer === null || !this.#nativeImportEnabled || await this.#nativePlatform() !== "ios") return unavailable;
+    if (producer === null || !this.#nativeImportEnabled || platform !== "ios") return unavailable;
     const preparation = await this.#prepareNativeAuthority();
     if (!preparation.ready || this.snapshot().state !== "connected") {
       return Object.freeze({ ok: false, error: "not_authenticated" } as const);
@@ -1440,6 +1468,15 @@ export class SessionRuntimeController {
       return unavailable;
     }
     return fenced.value;
+  }
+
+  /** A Trace page's request for the History on offer, answered only for the account signed in now. */
+  async answerWebHistory(message: unknown): Promise<WebHistoryAnswer | null> {
+    await this.start();
+    const web = this.#webHistory;
+    if (web === null) return null;
+    const scope = this.snapshot().state === "connected" ? this.#service.publicationScope() : null;
+    return web.answer(message, scope?.accountId ?? null);
   }
 
   /** Looks for one story in the Library. It cannot save. */

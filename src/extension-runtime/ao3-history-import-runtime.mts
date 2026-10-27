@@ -21,6 +21,7 @@ import {
 } from "./ao3-history-page.mjs";
 import { IndexedDbHistoryStore, MemoryHistoryStore, type HistoryStore } from "./ao3-history-store.mjs";
 import { historyParts, type HistoryHandoffResult, type HistoryParts } from "./native-history-handoff.mjs";
+import { WEB_HISTORY_RECEIVED, WEB_HISTORY_REQUEST, type WebHistoryAnswer, type WebHistoryOffer } from "./web-history-handoff.mjs";
 
 export const AO3_HISTORY_IMPORT_ALARM = "trace-ao3-history-import";
 const AO3_SITE_PATTERN = "https://*.archiveofourown.org/*";
@@ -286,6 +287,18 @@ export function loadedPageFromTab(value: unknown): LoadedPage {
 }
 
 /** Whether a message came from a page on AO3 itself, in a tab: that tab's id. */
+/** A content script of this extension in a tab on Trace's own site. */
+export function traceWebSender(sender: unknown, extensionId: string | undefined, webOrigin: string): boolean {
+  if (!isRecord(sender) || !isRecord(sender.tab) || typeof sender.tab.id !== "number") return false;
+  if (typeof extensionId === "string" && sender.id !== extensionId) return false;
+  const raw = typeof sender.url === "string" ? sender.url : sender.tab.url;
+  try {
+    return typeof raw === "string" && new URL(raw).origin === new URL(webOrigin).origin;
+  } catch {
+    return false;
+  }
+}
+
 export function ao3TabSender(sender: unknown, extensionId: string | undefined): number | null {
   if (!isRecord(sender) || !isRecord(sender.tab) || typeof sender.tab.id !== "number") return null;
   if (typeof extensionId === "string" && sender.id !== extensionId) return null;
@@ -331,7 +344,15 @@ export interface HistoryImportEnvironment {
    */
   readonly handOffHistory?: (
     build: () => Promise<HistoryParts | null>,
-  ) => Promise<HistoryHandoffResult | { readonly ok: false; readonly error: "not_authenticated" }>;
+  ) => Promise<HistoryHandoffResult | WebHistoryOffer | { readonly ok: false; readonly error: "not_authenticated" }>;
+  /**
+   * On a computer: Trace's own site, whose review page asks for the History
+   * a part at a time (the controller's `answerWebHistory`).
+   */
+  readonly webHistory?: {
+    readonly origin: string;
+    readonly answer: (message: unknown) => Promise<WebHistoryAnswer | null>;
+  };
   /** For tests: the store to keep the run in. */
   readonly store?: HistoryStore;
 }
@@ -356,7 +377,8 @@ export type SheetReply =
       readonly view: HistoryRunView;
       readonly startable?: boolean;
       /** After Review in Trace: the History waits in the app's inbox under this ID. */
-      readonly handoff?: { readonly handoffID: string; readonly expiresAtMs: number };
+      /** `url`: Trace's review page, on a computer; absent on iPhone, where the app opens. */
+      readonly handoff?: { readonly handoffID: string; readonly expiresAtMs: number; readonly url?: string };
     }
   | { readonly ok: false; readonly error: SheetError; readonly view?: HistoryRunView };
 
@@ -480,9 +502,11 @@ export function installAo3HistoryImport(environment: HistoryImportEnvironment): 
         if (environment.handOffHistory === undefined) return { ok: false, error: "history_handoff_unavailable", view };
         const result = await environment.handOffHistory(async () =>
           historyParts(await history.works(), new Date().toISOString()));
-        return result.ok
-          ? { ok: true, view, handoff: { handoffID: result.handoffID, expiresAtMs: result.expiresAtMs } }
-          : { ok: false, error: result.error, view };
+        if (!result.ok) return { ok: false, error: result.error, view };
+        // On a computer the sheet opens Trace's review page at `url`.
+        return result.state === "opened_on_web"
+          ? { ok: true, view, handoff: { handoffID: result.handoffID, expiresAtMs: result.expiresAtMs, url: result.url } }
+          : { ok: true, view, handoff: { handoffID: result.handoffID, expiresAtMs: result.expiresAtMs } };
       }
       default:
         return { ok: false, error: "unknown_action" };
@@ -525,6 +549,15 @@ export function installAo3HistoryImport(environment: HistoryImportEnvironment): 
         void history.wake(pageTab);
       }
       return false;
+    }
+    if ((message.type === WEB_HISTORY_REQUEST || message.type === WEB_HISTORY_RECEIVED) &&
+        environment.webHistory !== undefined) {
+      // Trace's review page, through the bridge on Trace's own site (sync.js).
+      if (!traceWebSender(sender, runtime.id, environment.webHistory.origin)) return false;
+      void environment.webHistory.answer(message)
+        .then((answer) => sendResponse(answer ?? { ok: false, error: "history_handoff_unknown" }),
+          () => sendResponse({ ok: false, error: "history_handoff_unknown" }));
+      return true;
     }
     if (message.type !== AO3_HISTORY_IMPORT_MESSAGE) return false;
     if (!isPopupSender(sender, runtime.id)) return false;
