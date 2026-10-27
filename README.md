@@ -61,10 +61,11 @@ local storage for at most 12 hours) and removed when you sign out.
 
 AO3 shows a work's summary only on its first chapter, so a work saved from a
 later chapter, or imported from your open tabs, can reach your Library
-without one. When you are on such a later chapter, the page reads that
-work's first chapter for its summary. For your other saved AO3 works that
-Trace has no summary for, Trace asks the Trace API which they are, then
-reads each work's first page (`/works/<id>?view_adult=true` on the AO3
+without one. The AO3 page itself never fetches another page for a summary.
+When you save a work and Trace answers that it has no summary for it, that
+work is read first; for your other saved AO3 works that Trace has no
+summary for, Trace asks the Trace API which they are. Trace reads each
+work's first page (`/works/<id>?view_adult=true` on the AO3
 address your tab is on) from inside your own AO3 tab, as a request from that
 page with your own AO3 session, so a work only signed-in readers can see is
 read only when you are signed in. The page is read only as far as the work's

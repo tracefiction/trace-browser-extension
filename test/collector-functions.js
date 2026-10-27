@@ -87,10 +87,6 @@ function createCollectorBindings(dom, options = {}) {
     clearTimeout: window.clearTimeout.bind(window),
     // collector `canonicalFFN` uses `new URL(...)`; Node's vm context has no URL by default
     URL: global.URL,
-    // The work-summary backfill parses AO3 pages and fetches the work's first page.
-    DOMParser: window.DOMParser,
-    AbortController: global.AbortController,
-    fetch: options.fetch,
   };
   globalScope.globalThis = globalScope;
   vm.createContext(globalScope);
@@ -103,10 +99,6 @@ function createCollectorBindings(dom, options = {}) {
     withFfnAuthorHint: globalScope.withFfnAuthorHint,
     shouldDisableTraceContentScript: globalScope.shouldDisableTraceContentScript,
     collectAO3Work: globalScope.collectAO3Work,
-    workSummaryBackfillWorkId: globalScope.workSummaryBackfillWorkId,
-    parseAo3WorkSummaryFromHtml: globalScope.parseAo3WorkSummaryFromHtml,
-    workSummaryBackfillItem: globalScope.workSummaryBackfillItem,
-    maybeBackfillWorkSummary: globalScope.maybeBackfillWorkSummary,
     collectAO3Listings: globalScope.collectAO3Listings,
     parseAO3HistoryDate: globalScope.parseAO3HistoryDate,
     detectAo3CurrentChapterNumber: globalScope.detectAo3CurrentChapterNumber,

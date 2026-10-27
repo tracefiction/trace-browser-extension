@@ -7,6 +7,7 @@ its notes go with each app release.
 ## Unreleased
 
 - **AO3 works get their description, wherever you saved them from.** AO3 shows a work's summary only on its first chapter, so a work saved from a later chapter, or imported from your open tabs, could stay in your Library without one. While you browse AO3, Trace now reads the summaries of those works from their first page in your own browser, one work at a time and slowly, and adds them to your Library. It does this only while **Improve story details** is on.
+- **Fewer requests to AO3 on later chapters.** Opening a later chapter of a work no longer makes Trace fetch the work's first page to look for its summary. Trace reads it only for a work you saved that Trace has no summary for, once, at the same slow pace as your other works.
 
 ## 1.0.3
 

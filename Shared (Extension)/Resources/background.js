@@ -7999,8 +7999,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         const host = url.hostname.toLowerCase();
         const allowed = await environment.containsOrigin(`https://${host}/*`).catch(() => false);
         if (!allowed) return { code: "not_allowed" };
-        const shown = /^(?:\/collections\/[^/]+)?\/works\/([1-9][0-9]{0,19})(?:\/|$)/.exec(url.pathname);
-        return { host, workId: shown?.[1] ?? null };
+        return { host };
       },
       async readWork(tabId, host, workId) {
         let results;
@@ -8121,18 +8120,32 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#lastSaveAt = this.#ports.clock.now();
     }
     /**
-     * A save to Trace was confirmed. A new AO3 work saved without a summary
-     * means the gaps are listed again soon. The page it was saved from reads
-     * its own work's summary itself when it can, so nothing is read for it here
-     * until the server still lists it.
+     * A save to Trace was confirmed. Only when its reply says Trace has no
+     * summary for the AO3 work (`summary_known: false`) does the work go to
+     * the front of the queue, to be read at the next step the pacing allows,
+     * in whichever AO3 tab speaks then. A work already tried, from any tab, is
+     * not put first again; a later listing still brings it back after the
+     * works not tried yet.
      */
-    storySaved(story, alreadyInLibrary) {
-      if (story.hostKind !== "ao3" || alreadyInLibrary || !/^ao3:[1-9][0-9]{0,19}$/.test(story.workKey)) {
-        return Promise.resolve();
-      }
-      const item = story.payload.item;
-      if (isRecord20(item) && typeof item.sm === "string" && item.sm.trim().length > 0) return Promise.resolve();
-      return this.libraryChanged();
+    storySaved(story, summaryKnown) {
+      if (summaryKnown !== false || story.hostKind !== "ao3") return Promise.resolve();
+      const workId = /^ao3:([1-9][0-9]{0,19})$/.exec(story.workKey)?.[1];
+      if (workId === void 0) return Promise.resolve();
+      return this.#serial(async () => {
+        const state = await this.#state();
+        if (state === null || state.queue[0] === workId) return;
+        let attempted = [];
+        try {
+          attempted = await this.#ports.attempted.read(state.account);
+        } catch {
+          attempted = [];
+        }
+        if (!this.#current() || attempted.includes(workId)) return;
+        await this.#write(Object.freeze({
+          ...state,
+          queue: Object.freeze([workId, ...state.queue.filter((id) => id !== workId)].slice(0, QUEUE_MAX2))
+        }));
+      });
     }
     /**
      * Works were added to the Library some other way (an import of open tabs):
@@ -8292,7 +8305,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         await this.#write(Object.freeze({ ...state, last: this.#last("check", tab.code) }));
         return;
       }
-      await this.#read(state, work.workId, tabId, tab.host, tab.workId, now);
+      await this.#read(state, work.workId, tabId, tab.host, now);
     }
     async #list(state, now) {
       const gaps = await this.#ports.listGaps().catch(() => null);
@@ -8309,8 +8322,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         attempted = [];
       }
       const fresh = gaps.filter((id) => typeof id === "string" && ID_PATTERN2.test(id)).filter((id, index, all) => all.indexOf(id) === index);
+      const waiting = state.queue.filter((id) => fresh.includes(id) && !attempted.includes(id));
       const queue = [
-        ...this.#shuffled(fresh.filter((id) => !attempted.includes(id))),
+        ...waiting,
+        ...this.#shuffled(fresh.filter((id) => !attempted.includes(id) && !waiting.includes(id))),
         ...fresh.filter((id) => attempted.includes(id)).sort((a, b) => attempted.indexOf(a) - attempted.indexOf(b))
       ].slice(0, QUEUE_MAX2);
       await this.#write(Object.freeze({
@@ -8322,12 +8337,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }));
     }
     /** This step's one request: the work's first page, for its summary. */
-    async #read(state, workId, tabId, host, shownWorkId, now) {
+    async #read(state, workId, tabId, host, now) {
       const rest = Object.freeze(state.queue.filter((id) => id !== workId));
-      if (workId === shownWorkId) {
-        await this.#write(Object.freeze({ ...state, queue: rest, last: this.#last("check", "on_page") }));
-        return;
-      }
       const newWindow = now - state.windowStart >= WINDOW_MS;
       const counted = Object.freeze({
         ...state,
@@ -9463,10 +9474,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         ffn?.saveEnded();
         ao3?.saveEnded();
       }
-      if (evidence.result.kind === "confirmed" && // Trace already has this story's summary: nothing to read.
-      evidence.result.confirmation.summaryKnown !== true) {
-        if (ffn !== null) void ffn.storySaved(command, alreadyInLibrary, tabId);
-        if (ao3 !== null) void ao3.storySaved(command, alreadyInLibrary);
+      if (evidence.result.kind === "confirmed") {
+        const { summaryKnown } = evidence.result.confirmation;
+        if (ffn !== null && summaryKnown !== true) void ffn.storySaved(command, alreadyInLibrary, tabId);
+        if (ao3 !== null) void ao3.storySaved(command, summaryKnown);
       }
       return evidence;
     }

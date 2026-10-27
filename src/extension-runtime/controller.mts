@@ -1407,14 +1407,13 @@ export class SessionRuntimeController {
       ffn?.saveEnded();
       ao3?.saveEnded();
     }
-    if (
-      evidence.result.kind === "confirmed" &&
-      // Trace already has this story's summary: nothing to read.
-      evidence.result.confirmation.summaryKnown !== true
-    ) {
-      // Never delays the save's own answer.
-      if (ffn !== null) void ffn.storySaved(command, alreadyInLibrary, tabId);
-      if (ao3 !== null) void ao3.storySaved(command, alreadyInLibrary);
+    if (evidence.result.kind === "confirmed") {
+      const { summaryKnown } = evidence.result.confirmation;
+      // Never delays the save's own answer. Nothing is read when Trace
+      // already has the summary; the AO3 fill reads only when the reply
+      // says it has none.
+      if (ffn !== null && summaryKnown !== true) void ffn.storySaved(command, alreadyInLibrary, tabId);
+      if (ao3 !== null) void ao3.storySaved(command, summaryKnown);
     }
     return evidence;
   }
