@@ -894,3 +894,43 @@ test("explicit development JSON pairs output and rejects invalid or production u
     }
   }
 });
+
+test("the store package carries the whole-History import; switched off, nothing of it, and only with the kernel session", () => {
+  const HISTORY_WIRING = ["TRACE_AO3_HISTORY_IMPORT", "traceAo3HistoryImportV1", "__traceAo3HistoryImportLoopV1", "TRACE_IOS_HISTORY_PREPARE"];
+  const build = (extra) => {
+    const env = { ...RELEASE_ENV, ...extra };
+    if (extra.TRACE_AO3_HISTORY_IMPORT === undefined) delete env.TRACE_AO3_HISTORY_IMPORT;
+    return spawnSync("npm", ["run", "build:ios-earned-permission-onboarding:release"], { cwd: ROOT, env, encoding: "utf8" });
+  };
+  try {
+    const off = build({ TRACE_AO3_HISTORY_IMPORT: "0" });
+    assert.equal(off.status, 0, off.stderr || off.stdout);
+    const without = fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8");
+    for (const wiring of HISTORY_WIRING) {
+      assert.equal(without.includes(wiring), false, `the switched-off package carries ${wiring}`);
+    }
+    assert.equal(fs.existsSync(path.join(RESOURCES, "ao3-history-import-panel.js")), false, "the switched-off package carries the sheet section");
+    assert.equal(fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8").includes("ao3-history-import-panel.js"), false);
+    // The store package (1.0.3, owner 23 Oct 2026): on unless switched off.
+    const on = build({});
+    assert.equal(on.status, 0, on.stderr || on.stdout);
+    const withImport = fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8");
+    for (const wiring of HISTORY_WIRING) {
+      assert.equal(withImport.includes(wiring), true, `the store package lacks ${wiring}`);
+    }
+    assert.equal(fs.existsSync(path.join(RESOURCES, "ao3-history-import-panel.js")), true, "the store package lacks the sheet section");
+    assert.match(fs.readFileSync(path.join(RESOURCES, "popup-config.js"), "utf8"), /ao3-history-import-panel\.js/);
+    for (const browser of ["chrome", "firefox"]) {
+      assert.equal(fs.existsSync(path.join(ROOT, "dist", browser, "ao3-history-import-panel.js")), true, `${browser} lacks the sheet section`);
+    }
+    // Nothing more is asked of Safari for it.
+    assert.deepEqual(manifest(RESOURCES).permissions, ["alarms", "storage", "nativeMessaging", "activeTab", "scripting"]);
+    const legacy = spawnSync("node", ["scripts/build.mjs"], {
+      cwd: ROOT, env: { ...RELEASE_ENV, TRACE_SESSION_MODE: "legacy", TRACE_AO3_HISTORY_IMPORT: "1" }, encoding: "utf8",
+    });
+    assert.notEqual(legacy.status, 0);
+    assert.match(legacy.stderr, /TRACE_AO3_HISTORY_IMPORT requires TRACE_SESSION_MODE=kernel/);
+  } finally {
+    runBuild("build:ios-earned-permission-onboarding:release");
+  }
+});

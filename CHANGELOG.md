@@ -8,6 +8,10 @@ its notes go with each app release.
 
 - **AO3 works get their description, wherever you saved them from.** AO3 shows a work's summary only on its first chapter, so a work saved from a later chapter, or imported from your open tabs, could stay in your Library without one. While you browse AO3, Trace now reads the summaries of those works from their first page in your own browser, one work at a time and slowly, and adds them to your Library. It does this only while **Improve story details** is on.
 
+## 1.0.3
+
+- **Saved filters follow your account.** Signing in with a different account now brings back all of that account's saved filters, and none of the last account's.
+
 ## 1.0.2
 
 - **Saved filters, redesigned.** At the top of AO3's Filters (the sidebar on a computer, the Filters panel on a phone), your saved filters for the tag sit as plain lines, and every other saved filter is one click away. Applying one shows a line above the works with **Clear**. Saving asks whether it's a new filter or an update, and saving, editing and the full list open in a card instead of inside the sidebar.

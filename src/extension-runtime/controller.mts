@@ -151,6 +151,7 @@ import {
 } from "./runtime-messages.mjs";
 
 import { NativeLibraryImportProducer } from "./native-import.mjs";
+import type { HistoryHandoffResult, HistoryParts, NativeHistoryHandoffProducer } from "./native-history-handoff.mjs";
 import {
   FfnSummaryFill,
   LOCAL_STATE_TTL_MS,
@@ -166,6 +167,7 @@ import {
   createAo3TabReader,
 } from "./ao3-summary-fill.mjs";
 import { PopupPageRelay, POPUP_PAGE_RELAY } from "./popup-page-relay.mjs";
+import { storySaveEnded, storySaveStarted } from "./story-save-activity.mjs";
 
 export {
   SESSION_MESSAGE_TYPES,
@@ -190,6 +192,8 @@ interface RuntimeEnvironment {
   readonly retryClock?: RetryClock;
   readonly browserDeviceSessions?: boolean;
   readonly nativeImportHandoff?: boolean;
+  /** Hands a whole AO3 History to the app (native-history-handoff.mts). */
+  readonly nativeHistoryHandoff?: NativeHistoryHandoffProducer;
   readonly firstStoryDelay?: (milliseconds: number) => Promise<void>;
   readonly archiveReadinessStatus?: BrowserArchiveReadinessStatus;
   /**
@@ -307,6 +311,8 @@ export class SessionRuntimeController {
   readonly #savedFilterRepository: BrowserSavedFilterRepository;
   readonly #nativeImportEnabled: boolean;
   readonly #nativeImport: NativeLibraryImportProducer;
+  /** Only a build with the whole-History import has one (index.mts). */
+  readonly #nativeHistory: NativeHistoryHandoffProducer | null;
   readonly #firstStoryInitiator: BrowserFirstStoryInitiator;
   readonly #openTabs: () => Promise<{ readonly encoded: string; readonly found: OpenStoryTabsFound } | null>;
   readonly #traceWebNavigation: BrowserTraceWebNavigation;
@@ -344,6 +350,7 @@ export class SessionRuntimeController {
     this.#nativeImportEnabled = environment.nativeImportHandoff === true;
     this.#nativeImport = new NativeLibraryImportProducer({ runtime: environment.runtime,
       mode: environment.storageMode, apiOrigin: environment.apiBase, randomID: environment.randomId });
+    this.#nativeHistory = environment.nativeHistoryHandoff ?? null;
     const storage = new BrowserStorage(
       environment.storageArea,
       environment.runtime,
@@ -1351,6 +1358,20 @@ export class SessionRuntimeController {
     observer?: { beforeWrite?(): Promise<void> | void },
     tabId?: number,
   ): Promise<StoryCommandEvidence> {
+    // Work that reads a story site in the reader's tab waits for saves.
+    storySaveStarted();
+    try {
+      return await this.#runStoryCommandWithEvidence(command, observer, tabId);
+    } finally {
+      storySaveEnded();
+    }
+  }
+
+  async #runStoryCommandWithEvidence(
+    command: StoryTrackCommand,
+    observer?: { beforeWrite?(): Promise<void> | void },
+    tabId?: number,
+  ): Promise<StoryCommandEvidence> {
     let accountData = await this.#accountData.read().catch(() => null);
     if (
       accountData?.capacityRecovery !== null &&
@@ -1464,6 +1485,38 @@ export class SessionRuntimeController {
   ): Promise<StoryCommandEvidence> {
     await this.start();
     return this.#executeStoryCommandWithEvidence(command, observer, tabId);
+  }
+
+  /**
+   * Hands the reader's whole AO3 History to the Trace app for review: on
+   * iPhone, through the paired History inbox, fenced to the account as the
+   * import handoff is. `build` makes the parts only once the account is
+   * known to be connected.
+   */
+  async handOffHistory(
+    build: () => Promise<HistoryParts | null>,
+  ): Promise<HistoryHandoffResult | { readonly ok: false; readonly error: "not_authenticated" }> {
+    await this.start();
+    const unavailable = Object.freeze({ ok: false, error: "history_handoff_unavailable" } as const);
+    const producer = this.#nativeHistory;
+    if (producer === null || !this.#nativeImportEnabled || await this.#nativePlatform() !== "ios") return unavailable;
+    const preparation = await this.#prepareNativeAuthority();
+    if (!preparation.ready || this.snapshot().state !== "connected") {
+      return Object.freeze({ ok: false, error: "not_authenticated" } as const);
+    }
+    const history = await build().catch(() => null);
+    if (history === null) return unavailable;
+    const fenced = await this.#service.executeCurrentScope((scope, isCurrent) =>
+      producer.run(scope, async () => {
+        const current = await this.#prepareNativeAuthority();
+        return current.ready && await isCurrent();
+      }, history));
+    if (fenced.kind !== "published") {
+      // A History staged for an account that has since left is not opened.
+      if (fenced.kind === "stale") await producer.discardUnpublished();
+      return unavailable;
+    }
+    return fenced.value;
   }
 
   /** Looks for one story in the Library. It cannot save. */
