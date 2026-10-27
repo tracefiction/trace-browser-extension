@@ -696,9 +696,11 @@ test("on a computer, Review in Trace opens Trace's review page, which only Trace
   const handoffID = "00000000-0000-4000-8000-0000000000aa";
   const url = `https://www.tracefiction.test/import/history#handoff=${handoffID}`;
   const asked = [];
+  let discarded = 0;
   const w = wiring({
     handOff: async (build) => { await build(); return { ok: true, state: "opened_on_web", handoffID, expiresAtMs: Date.now() + 60_000, url }; },
-    webHistory: { origin: "https://www.tracefiction.test", answer: async (message) => { asked.push(message); return { ok: true, kind: "received" }; } },
+    webHistory: { origin: "https://www.tracefiction.test", answer: async (message) => { asked.push(message); return { ok: true, kind: "received" }; },
+      discard: async () => { discarded += 1; } },
   });
   w.store.run = {
     v: 1, runId: "r", account: ACCOUNT, user: USER, status: "finished", reason: "reached_last_page", tabId: TAB, nextPage: 2, totalPages: 1,
@@ -721,4 +723,6 @@ test("on a computer, Review in Trace opens Trace's review page, which only Trace
     assert.equal(await w.send(request, sender), undefined);
   }
   assert.equal(asked.length, 1, "only Trace's own page was answered");
+  await w.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "delete", tabId: TAB }, POPUP);
+  assert.equal(discarded, 1, "a deleted History is no longer offered");
 });

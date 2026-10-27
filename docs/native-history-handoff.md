@@ -92,8 +92,13 @@ declaration and then each part through `sync.js`:
   inbox part.
 
 The background answers only a content script on Trace's own site, only for
-the account that started the handoff, only before it expires (30 minutes),
-and not after `RECEIVED`. Nothing is sent to Trace's server until
+the account that started the handoff (`history_handoff_not_connected` while
+the extension isn't connected, `history_handoff_account_changed` for another
+account), only before it expires (30 minutes), and not after `RECEIVED`. The
+offer is kept in `storage.session`, so it outlives a stopped background; its
+parts are made again from the History store and given out only when they
+match the digest that was offered. Deleting the History in the sheet
+withdraws the offer. Nothing is sent to Trace's server until
 the reader imports. A package that doesn't run on Trace's site offers nothing.
 
 ## Tests

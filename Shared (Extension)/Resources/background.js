@@ -8098,7 +8098,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       });
       this.whenAccountLeaves(() => this.#savedFilterRepository.clearAccountData());
       const webHistory = this.#webHistory;
-      if (webHistory !== null) this.whenAccountLeaves(async () => webHistory.discard());
+      if (webHistory !== null) this.whenAccountLeaves(() => webHistory.discard());
       this.#savedFilters = new SavedFilterSyncService({
         session: this.#service,
         api: this.#savedFilterApi,
@@ -8885,7 +8885,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         if (history2 === null) return unavailable;
         const fenced2 = await this.#service.executeCurrentScope(async (scope2, isCurrent) => await isCurrent() ? web.offer(scope2.accountId, history2) : unavailable);
         if (fenced2.kind !== "published") {
-          web.discard();
+          await web.discard();
           return unavailable;
         }
         return fenced2.value;
@@ -11942,61 +11942,111 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var WEB_HISTORY_REQUEST = "TRACE_WEB_HISTORY_REQUEST";
   var WEB_HISTORY_RECEIVED = "TRACE_WEB_HISTORY_RECEIVED";
   var UUID3 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  var KEEP_KEY = "traceWebHistoryOfferV1";
   var record3 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+  function offerRecord(value) {
+    if (!record3(value) || value.v !== 1 || typeof value.handoffID !== "string" || !UUID3.test(value.handoffID) || typeof value.accountId !== "string" || !value.accountId || typeof value.capturedAt !== "string" || typeof value.sha256 !== "string" || typeof value.expiresAtMs !== "number" || !Number.isSafeInteger(value.expiresAtMs)) return null;
+    return value;
+  }
+  function capturedAtOf(history) {
+    try {
+      const parsed = JSON.parse(new TextDecoder().decode(history.parts[0]));
+      return record3(parsed) && typeof parsed.at === "string" ? parsed.at : null;
+    } catch {
+      return null;
+    }
+  }
   var WebHistoryHandoff = class {
     #webOrigin;
     #randomID;
     #now;
+    #keep;
+    /** Makes the parts again from the History store, for when they were read. */
+    #source = null;
     #offered = null;
+    #parts = null;
+    #loaded = false;
     constructor(options) {
       this.#webOrigin = new URL(options.webOrigin).origin;
       this.#randomID = options.randomID;
       this.#now = options.now ?? Date.now;
+      this.#keep = options.keep ?? null;
+    }
+    /** The History store the parts are made from, after a restart. */
+    useSource(source) {
+      this.#source = source;
     }
     /** The review page for a handoff. The id rides in the fragment, never to a server. */
     reviewUrl(handoffID) {
       return `${this.#webOrigin}/import/history#handoff=${handoffID}`;
     }
     /** Makes `history` the one History on offer, for `accountId`, replacing any earlier one. */
-    offer(accountId, history) {
+    async offer(accountId, history) {
       const handoffID = this.#randomID();
       const now = this.#now();
-      if (!accountId || !UUID3.test(handoffID) || !Number.isSafeInteger(now) || history.parts.length === 0) {
+      const capturedAt = history.parts.length ? capturedAtOf(history) : null;
+      if (!accountId || !UUID3.test(handoffID) || !Number.isSafeInteger(now) || capturedAt === null) {
         return Object.freeze({ ok: false, error: "history_handoff_unavailable" });
       }
-      const expiresAtMs = now + WEB_HISTORY_LIFETIME_MS;
-      this.#offered = { handoffID, accountId, expiresAtMs, history };
-      return Object.freeze({ ok: true, state: "opened_on_web", handoffID, expiresAtMs, url: this.reviewUrl(handoffID) });
+      const offered = {
+        v: 1,
+        handoffID,
+        accountId,
+        expiresAtMs: now + WEB_HISTORY_LIFETIME_MS,
+        capturedAt,
+        sha256: history.sha256
+      };
+      this.#offered = offered;
+      this.#parts = history;
+      this.#loaded = true;
+      await this.#keep?.save(offered).catch(() => void 0);
+      return Object.freeze({
+        ok: true,
+        state: "opened_on_web",
+        handoffID,
+        expiresAtMs: offered.expiresAtMs,
+        url: this.reviewUrl(handoffID)
+      });
     }
     /** Forgets the History on offer (its account left, or the reader deleted it). */
-    discard() {
+    async discard() {
       this.#offered = null;
+      this.#parts = null;
+      this.#loaded = true;
+      await this.#keep?.clear().catch(() => void 0);
     }
     /**
      * Answers a Trace page's request. `currentAccountId` is the account signed
-     * in to the extension now; a History started by another is never given out.
+     * in to the extension now, or null while it isn't connected; a History
+     * started by another account is never given out.
      */
-    answer(message, currentAccountId) {
+    async answer(message, currentAccountId) {
       if (!record3(message) || typeof message.handoffID !== "string" || !UUID3.test(message.handoffID)) {
         return Object.freeze({ ok: false, error: "history_handoff_bad_request" });
+      }
+      if (!this.#loaded) {
+        this.#loaded = true;
+        this.#offered = offerRecord(await this.#keep?.load().catch(() => null));
       }
       const offered = this.#offered;
       if (offered === null || offered.handoffID !== message.handoffID) {
         return Object.freeze({ ok: false, error: "history_handoff_unknown" });
       }
       if (this.#now() >= offered.expiresAtMs) {
-        this.#offered = null;
+        await this.discard();
         return Object.freeze({ ok: false, error: "history_handoff_expired" });
       }
+      if (currentAccountId === null) return Object.freeze({ ok: false, error: "history_handoff_not_connected" });
       if (currentAccountId !== offered.accountId) {
         return Object.freeze({ ok: false, error: "history_handoff_account_changed" });
       }
       if (message.type === WEB_HISTORY_RECEIVED) {
-        this.#offered = null;
+        await this.discard();
         return Object.freeze({ ok: true, kind: "received" });
       }
       if (message.type !== WEB_HISTORY_REQUEST) return Object.freeze({ ok: false, error: "history_handoff_bad_request" });
-      const { history } = offered;
+      const history = await this.#history(offered);
+      if (history === null) return Object.freeze({ ok: false, error: "history_handoff_unknown" });
       if (message.part === "declaration") {
         return Object.freeze({
           ok: true,
@@ -12022,7 +12072,22 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         text: new TextDecoder().decode(history.parts[partIndex])
       });
     }
+    /** The parts on offer, made again after a restart; null when the works have changed since. */
+    async #history(offered) {
+      if (this.#parts !== null) return this.#parts;
+      const rebuilt = await this.#source?.(offered.capturedAt).catch(() => null) ?? null;
+      if (rebuilt === null || rebuilt.sha256 !== offered.sha256) return null;
+      this.#parts = rebuilt;
+      return rebuilt;
+    }
   };
+  function sessionKeep(area) {
+    return {
+      load: async () => (await area.get(KEEP_KEY))[KEEP_KEY] ?? null,
+      save: (value) => area.set({ [KEEP_KEY]: value }),
+      clear: () => area.remove(KEEP_KEY)
+    };
+  }
 
   // src/extension-runtime/ao3-history-page.mts
   var AO3_HISTORY_ORIGIN = "https://archiveofourown.org";
@@ -13506,8 +13571,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           return { ok: true, view: await history.pause() };
         case "resume":
           return { ok: true, view: await history.resume(tabId) };
-        case "delete":
+        case "delete": {
+          await environment.webHistory?.discard().catch(() => void 0);
           return { ok: true, view: await history.delete() };
+        }
         case "review": {
           const view2 = await history.view();
           if (view2.status !== "finished" && view2.status !== "paused" || view2.works === 0) {
@@ -13702,6 +13769,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       "https://api.tracefiction.com",
       new BrowserStorage(extension.storage.local, extension.runtime, storageMode)
     );
+    const webHistoryHandoff = true ? new WebHistoryHandoff({
+      webOrigin: "https://www.tracefiction.com",
+      randomID: randomId,
+      ...extension.storage.session ? { keep: sessionKeep(new BrowserStorage(extension.storage.session, extension.runtime, storageMode)) } : {}
+    }) : null;
     session = installSessionRuntime({
       browserDeviceSessions: true,
       mode: "kernel",
@@ -13722,7 +13794,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           apiOrigin: "https://api.tracefiction.com",
           randomID: randomId
         }),
-        webHistoryHandoff: new WebHistoryHandoff({ webOrigin: "https://www.tracefiction.com", randomID: randomId })
+        webHistoryHandoff
       } : {},
       ...extension.scripting ? { scripting: extension.scripting } : {},
       ...extension.permissions ? { permissions: extension.permissions } : {},
@@ -13737,7 +13809,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     });
     if (extension.scripting !== void 0) {
       const historySession = session;
-      installAo3HistoryImport({
+      const historyImport = installAo3HistoryImport({
         runtime: extension.runtime,
         tabs: extension.tabs,
         scripting: extension.scripting,
@@ -13752,8 +13824,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         whenAccountLeaves: (cleanup) => historySession.whenAccountLeaves(cleanup),
         saveActivity: storySaveActivity,
         handOffHistory: (build) => historySession.handOffHistory(build),
-        webHistory: { origin: "https://www.tracefiction.com", answer: (message) => historySession.answerWebHistory(message) }
+        ...webHistoryHandoff ? { webHistory: {
+          origin: "https://www.tracefiction.com",
+          answer: (message) => historySession.answerWebHistory(message),
+          discard: () => webHistoryHandoff.discard()
+        } } : {}
       });
+      webHistoryHandoff?.useSource(async (capturedAt) => historyParts(await historyImport.works(), capturedAt));
     }
     if (
       // A build-time constant: a build without optional story sites leaves this

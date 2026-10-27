@@ -352,6 +352,8 @@ export interface HistoryImportEnvironment {
   readonly webHistory?: {
     readonly origin: string;
     readonly answer: (message: unknown) => Promise<WebHistoryAnswer | null>;
+    /** Withdraws the History on offer: the reader deleted it. */
+    readonly discard: () => Promise<void>;
   };
   /** For tests: the store to keep the run in. */
   readonly store?: HistoryStore;
@@ -491,8 +493,11 @@ export function installAo3HistoryImport(environment: HistoryImportEnvironment): 
         return { ok: true, view: await history.pause() };
       case "resume":
         return { ok: true, view: await history.resume(tabId) };
-      case "delete":
+      case "delete": {
+        // A History deleted here is no longer offered to Trace's review page either.
+        await environment.webHistory?.discard().catch(() => undefined);
         return { ok: true, view: await history.delete() };
+      }
       case "review": {
         // What the run has found, finished or paused part way, for review in Trace.
         const view = await history.view();

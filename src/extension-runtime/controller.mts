@@ -411,7 +411,7 @@ export class SessionRuntimeController {
     this.whenAccountLeaves(() => this.#savedFilterRepository.clearAccountData());
     // A History offered to Trace's review page is never given to the next account.
     const webHistory = this.#webHistory;
-    if (webHistory !== null) this.whenAccountLeaves(async () => webHistory.discard());
+    if (webHistory !== null) this.whenAccountLeaves(() => webHistory.discard());
     this.#savedFilters = new SavedFilterSyncService({
       session: this.#service,
       api: this.#savedFilterApi,
@@ -1444,7 +1444,7 @@ export class SessionRuntimeController {
       const fenced = await this.#service.executeCurrentScope(async (scope, isCurrent) =>
         await isCurrent() ? web.offer(scope.accountId, history) : unavailable);
       if (fenced.kind !== "published") {
-        web.discard();
+        await web.discard();
         return unavailable;
       }
       return fenced.value;
