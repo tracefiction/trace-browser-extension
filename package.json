@@ -10,7 +10,7 @@
     "build:legacy": "npm run build:core && TRACE_SESSION_MODE=legacy node scripts/build.mjs",
     "build:legacy:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=legacy node scripts/build.mjs",
     "build:kernel": "npm run build:core && TRACE_SESSION_MODE=kernel node scripts/build.mjs",
-    "build:kernel:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel node scripts/build.mjs",
+    "build:kernel:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel TRACE_AO3_HISTORY_IMPORT=${TRACE_AO3_HISTORY_IMPORT:-1} node scripts/build.mjs",
     "build:ios-active-tab-probe": "npm run build:core && TRACE_SESSION_MODE=kernel TRACE_IOS_ACTIVE_TAB_PROBE=1 node scripts/build.mjs",
     "build:ios-active-tab-probe:release": "npm run build:core && TRACE_BUILD_MODE=release TRACE_SESSION_MODE=kernel TRACE_IOS_ACTIVE_TAB_PROBE=1 node scripts/build.mjs",
     "build:ios-active-tab-optional-hosts-probe": "npm run build:core && TRACE_SESSION_MODE=kernel TRACE_IOS_ACTIVE_TAB_OPTIONAL_HOSTS_PROBE=1 node scripts/build.mjs",
