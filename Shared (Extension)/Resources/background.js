@@ -11964,8 +11964,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     /** Makes the parts again from the History store, for when they were read. */
     #source = null;
     #offered = null;
+    /** The parts of `#offered`, by its id: never another offer's. */
     #parts = null;
-    #loaded = false;
+    /** Reading the kept offer after a restart, once; an offer or discard meanwhile wins. */
+    #loading = null;
+    #rebuilding = null;
+    /** Bumped by every offer and discard: work begun before one never lands after it. */
+    #generation = 0;
     constructor(options) {
       this.#webOrigin = new URL(options.webOrigin).origin;
       this.#randomID = options.randomID;
@@ -11996,9 +12001,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         capturedAt,
         sha256: history.sha256
       };
+      this.#generation += 1;
       this.#offered = offered;
-      this.#parts = history;
-      this.#loaded = true;
+      this.#parts = { handoffID, history };
+      this.#rebuilding = null;
       await this.#keep?.save(offered).catch(() => void 0);
       return Object.freeze({
         ok: true,
@@ -12010,9 +12016,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     /** Forgets the History on offer (its account left, or the reader deleted it). */
     async discard() {
+      this.#generation += 1;
       this.#offered = null;
       this.#parts = null;
-      this.#loaded = true;
+      this.#rebuilding = null;
       await this.#keep?.clear().catch(() => void 0);
     }
     /**
@@ -12024,10 +12031,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (!record3(message) || typeof message.handoffID !== "string" || !UUID3.test(message.handoffID)) {
         return Object.freeze({ ok: false, error: "history_handoff_bad_request" });
       }
-      if (!this.#loaded) {
-        this.#loaded = true;
-        this.#offered = offerRecord(await this.#keep?.load().catch(() => null));
-      }
+      this.#loading ??= this.#load();
+      await this.#loading;
       const offered = this.#offered;
       if (offered === null || offered.handoffID !== message.handoffID) {
         return Object.freeze({ ok: false, error: "history_handoff_unknown" });
@@ -12046,7 +12051,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
       if (message.type !== WEB_HISTORY_REQUEST) return Object.freeze({ ok: false, error: "history_handoff_bad_request" });
       const history = await this.#history(offered);
-      if (history === null) return Object.freeze({ ok: false, error: "history_handoff_unknown" });
+      if (history === null || this.#offered?.handoffID !== offered.handoffID) {
+        return Object.freeze({ ok: false, error: "history_handoff_unknown" });
+      }
       if (message.part === "declaration") {
         return Object.freeze({
           ok: true,
@@ -12072,12 +12079,29 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         text: new TextDecoder().decode(history.parts[partIndex])
       });
     }
-    /** The parts on offer, made again after a restart; null when the works have changed since. */
+    /** The offer kept before a restart, unless an offer or discard came first. */
+    async #load() {
+      const generation = this.#generation;
+      const kept = offerRecord(await this.#keep?.load().catch(() => null));
+      if (generation === this.#generation && this.#offered === null) this.#offered = kept;
+    }
+    /**
+     * The parts on offer, made again after a restart (once, shared by every
+     * request while it runs); null when the works have changed since.
+     */
     async #history(offered) {
-      if (this.#parts !== null) return this.#parts;
-      const rebuilt = await this.#source?.(offered.capturedAt).catch(() => null) ?? null;
+      if (this.#parts?.handoffID === offered.handoffID) return this.#parts.history;
+      const source = this.#source;
+      if (source === null) return null;
+      if (this.#rebuilding?.handoffID !== offered.handoffID) {
+        this.#rebuilding = { handoffID: offered.handoffID, history: source(offered.capturedAt).catch(() => null) };
+      }
+      const generation = this.#generation;
+      const rebuilt = await this.#rebuilding.history;
       if (rebuilt === null || rebuilt.sha256 !== offered.sha256) return null;
-      this.#parts = rebuilt;
+      if (generation === this.#generation && this.#offered?.handoffID === offered.handoffID) {
+        this.#parts = { handoffID: offered.handoffID, history: rebuilt };
+      }
       return rebuilt;
     }
   };

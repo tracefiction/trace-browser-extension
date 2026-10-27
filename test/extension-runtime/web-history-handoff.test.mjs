@@ -108,3 +108,31 @@ test("an offer outlives a background restart: kept in session storage, its parts
   await restarted.answer({ type: WEB_HISTORY_RECEIVED, handoffID }, account);
   assert.equal(kept.size, 0, "received: the kept offer is gone too");
 });
+
+test("after a restart one rebuild serves every request, and a newer offer is never replaced by it", async () => {
+  const kept = new Map();
+  const keep = { load: async () => kept.get("offer") ?? null, save: async (v) => { kept.set("offer", v); }, clear: async () => { kept.delete("offer"); } };
+  const older = Array.from({ length: 50 }, (_, i) => work(i + 1, "2026-03-01"));
+  const newer = [...older, work(999, "2026-10-01")];
+  const ids = ["00000000-0000-4000-8000-0000000000a1", "00000000-0000-4000-8000-0000000000a2"];
+  const first = new WebHistoryHandoff({ webOrigin: "https://www.tracefiction.test", randomID: () => ids[0], now: () => start, keep });
+  await first.offer(account, await historyParts(older, "2026-10-27T12:00:00.000Z"));
+
+  let rebuilds = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const restarted = new WebHistoryHandoff({ webOrigin: "https://www.tracefiction.test", randomID: () => ids[1], now: () => start, keep });
+  restarted.useSource(async (at) => { rebuilds += 1; await gate; return historyParts(older, at); });
+  const asking = [0, 1, 2].map(() => restarted.answer({ type: WEB_HISTORY_REQUEST, handoffID: ids[0], part: "declaration" }, account));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  // The reader carried on and chose Review again meanwhile.
+  const fresh = await historyParts(newer, "2026-10-27T13:00:00.000Z");
+  await restarted.offer(account, fresh);
+  release();
+  const answers = await Promise.all(asking);
+  assert.equal(rebuilds, 1, "one rebuild for every request");
+  assert.ok(answers.every((answer) => answer.ok === false), "the withdrawn offer answers nothing");
+  const declaration = await restarted.answer({ type: WEB_HISTORY_REQUEST, handoffID: ids[1], part: "declaration" }, account);
+  assert.equal(declaration.sha256, fresh.sha256, "the newer offer keeps its own parts");
+  assert.equal(declaration.itemCount, 51);
+});

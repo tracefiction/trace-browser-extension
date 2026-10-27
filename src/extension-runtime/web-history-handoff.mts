@@ -89,8 +89,13 @@ export class WebHistoryHandoff {
   /** Makes the parts again from the History store, for when they were read. */
   #source: ((capturedAt: string) => Promise<HistoryParts | null>) | null = null;
   #offered: OfferRecord | null = null;
-  #parts: HistoryParts | null = null;
-  #loaded = false;
+  /** The parts of `#offered`, by its id: never another offer's. */
+  #parts: { readonly handoffID: string; readonly history: HistoryParts } | null = null;
+  /** Reading the kept offer after a restart, once; an offer or discard meanwhile wins. */
+  #loading: Promise<void> | null = null;
+  #rebuilding: { readonly handoffID: string; readonly history: Promise<HistoryParts | null> } | null = null;
+  /** Bumped by every offer and discard: work begun before one never lands after it. */
+  #generation = 0;
 
   constructor(options: { webOrigin: string; randomID: () => string; now?: () => number; keep?: WebHistoryKeep }) {
     this.#webOrigin = new URL(options.webOrigin).origin;
@@ -119,9 +124,10 @@ export class WebHistoryHandoff {
     }
     const offered: OfferRecord = { v: 1, handoffID, accountId, expiresAtMs: now + WEB_HISTORY_LIFETIME_MS,
       capturedAt, sha256: history.sha256 };
+    this.#generation += 1;
     this.#offered = offered;
-    this.#parts = history;
-    this.#loaded = true;
+    this.#parts = { handoffID, history };
+    this.#rebuilding = null;
     await this.#keep?.save(offered).catch(() => undefined);
     return Object.freeze({ ok: true, state: "opened_on_web", handoffID, expiresAtMs: offered.expiresAtMs,
       url: this.reviewUrl(handoffID) });
@@ -129,9 +135,10 @@ export class WebHistoryHandoff {
 
   /** Forgets the History on offer (its account left, or the reader deleted it). */
   async discard(): Promise<void> {
+    this.#generation += 1;
     this.#offered = null;
     this.#parts = null;
-    this.#loaded = true;
+    this.#rebuilding = null;
     await this.#keep?.clear().catch(() => undefined);
   }
 
@@ -144,10 +151,8 @@ export class WebHistoryHandoff {
     if (!record(message) || typeof message.handoffID !== "string" || !UUID.test(message.handoffID)) {
       return Object.freeze({ ok: false, error: "history_handoff_bad_request" });
     }
-    if (!this.#loaded) {
-      this.#loaded = true;
-      this.#offered = offerRecord(await this.#keep?.load().catch(() => null));
-    }
+    this.#loading ??= this.#load();
+    await this.#loading;
     const offered = this.#offered;
     if (offered === null || offered.handoffID !== message.handoffID) {
       return Object.freeze({ ok: false, error: "history_handoff_unknown" });
@@ -166,7 +171,10 @@ export class WebHistoryHandoff {
     }
     if (message.type !== WEB_HISTORY_REQUEST) return Object.freeze({ ok: false, error: "history_handoff_bad_request" });
     const history = await this.#history(offered);
-    if (history === null) return Object.freeze({ ok: false, error: "history_handoff_unknown" });
+    // Withdrawn or replaced while its parts were being made: nothing of it is given out.
+    if (history === null || this.#offered?.handoffID !== offered.handoffID) {
+      return Object.freeze({ ok: false, error: "history_handoff_unknown" });
+    }
     if (message.part === "declaration") {
       return Object.freeze({
         ok: true, kind: "declaration", handoffID: offered.handoffID, accountId: offered.accountId,
@@ -185,12 +193,31 @@ export class WebHistoryHandoff {
     });
   }
 
-  /** The parts on offer, made again after a restart; null when the works have changed since. */
+  /** The offer kept before a restart, unless an offer or discard came first. */
+  async #load(): Promise<void> {
+    const generation = this.#generation;
+    const kept = offerRecord(await this.#keep?.load().catch(() => null));
+    if (generation === this.#generation && this.#offered === null) this.#offered = kept;
+  }
+
+  /**
+   * The parts on offer, made again after a restart (once, shared by every
+   * request while it runs); null when the works have changed since.
+   */
   async #history(offered: OfferRecord): Promise<HistoryParts | null> {
-    if (this.#parts !== null) return this.#parts;
-    const rebuilt = await this.#source?.(offered.capturedAt).catch(() => null) ?? null;
+    if (this.#parts?.handoffID === offered.handoffID) return this.#parts.history;
+    const source = this.#source;
+    if (source === null) return null;
+    if (this.#rebuilding?.handoffID !== offered.handoffID) {
+      this.#rebuilding = { handoffID: offered.handoffID, history: source(offered.capturedAt).catch(() => null) };
+    }
+    const generation = this.#generation;
+    const rebuilt = await this.#rebuilding.history;
     if (rebuilt === null || rebuilt.sha256 !== offered.sha256) return null;
-    this.#parts = rebuilt;
+    // Kept only for the offer it was made for, if that is still the one on offer.
+    if (generation === this.#generation && this.#offered?.handoffID === offered.handoffID) {
+      this.#parts = { handoffID: offered.handoffID, history: rebuilt };
+    }
     return rebuilt;
   }
 }
