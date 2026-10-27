@@ -1,5 +1,5 @@
 // collector.js — AO3/FFN page metadata extractor.
-// Reads story/listing metadata from the DOM the user is viewing; it does not fetch page HTML.
+// Reads story/listing metadata from the DOM the user is viewing. It fetches an AO3 page only for what a page lacks (a summary on later chapters, or a work saved from a bare link), and keeps only the metadata.
 // Sends metadata/progress to background.js via extension messages for import, quick-add, and auto-track.
 // Does not read cookies or credentials, and disables collection on pages with password fields.
 (function () {
@@ -1357,8 +1357,8 @@ function workSummaryBackfillFetch() {
   return typeof fetch === "function" ? fetch : null;
 }
 
-// Calls done(summary, ok): ok is false when AO3 refused or the request failed.
-function fetchAo3WorkSummary(workId, done) {
+// Calls done(html, ok): ok is false when AO3 refused or the request failed.
+function fetchAo3Html(url, done) {
   var fetchFn = workSummaryBackfillFetch();
   if (!fetchFn) {
     done(null, false);
@@ -1376,7 +1376,6 @@ function fetchAo3WorkSummary(workId, done) {
     if (controller) controller.abort();
     finish(null, false);
   }, WORK_SUMMARY_BACKFILL_TIMEOUT_MS);
-  var url = location.origin + "/works/" + workId + "?view_adult=true";
   Promise.resolve()
     .then(function () {
       return fetchFn(url, {
@@ -1395,12 +1394,51 @@ function fetchAo3WorkSummary(workId, done) {
     })
     .then(function (html) {
       if (html == null) return;
-      finish(parseAo3WorkSummaryFromHtml(html), true);
+      finish(html, true);
     })
     .catch(function () {
       finish(null, false);
     });
 }
+
+// Calls done(summary, ok): ok is false when AO3 refused or the request failed.
+function fetchAo3WorkSummary(workId, done) {
+  fetchAo3Html(location.origin + "/works/" + workId + "?view_adult=true", function (html, ok) {
+    done(ok ? parseAo3WorkSummaryFromHtml(html) : null, ok);
+  });
+}
+
+// A work link with no listing row around it (AO3's Subscriptions page) shows
+// only a title. Saving one asks AO3's work search for it by ID: the result is
+// the same listing row a search page shows, and unlike opening the work it is
+// not a visit in the reader's AO3 History. Calls done(item), or
+// done(null, "unavailable") when AO3 didn't answer and done(null, "not_found")
+// when it didn't list the work.
+function readAo3WorkForSave(workId, done) {
+  var id = String(workId || "");
+  if (!/^\d+$/.test(id) || typeof DOMParser !== "function") {
+    done(null, "not_found");
+    return;
+  }
+  var query = encodeURIComponent("id:" + id);
+  fetchAo3Html(location.origin + "/works/search?work_search%5Bquery%5D=" + query, function (html, ok) {
+    if (!ok) {
+      done(null, "unavailable");
+      return;
+    }
+    var item = null;
+    try {
+      var doc = new DOMParser().parseFromString(String(html || ""), "text/html");
+      var row = doc.querySelector('li.work.blurb[id="work_' + id + '"]');
+      item = row ? extractAO3BlurbData(row, id, "listing") : null;
+    } catch (_) {
+      item = null;
+    }
+    if (item && item.t) done(item);
+    else done(null, "not_found");
+  });
+}
+globalThis.__traceReadAo3WorkForSave = readAo3WorkForSave;
 
 function workSummaryBackfillItem(item, summary) {
   var out = {};

@@ -379,6 +379,59 @@ test("work summary backfill reports the summary as the work's first page", () =>
   assert.equal(item.chn, 2);
 });
 
+function subscriptionsPageBindings(fetchImpl) {
+  const fetchCalls = [];
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://archiveofourown.org/users/reader/subscriptions",
+    runScripts: "outside-only",
+  });
+  const bindings = createCollectorBindings(dom, {
+    fetch: (url, init) => {
+      fetchCalls.push({ url, init });
+      return fetchImpl(url, init);
+    },
+  });
+  return { ...bindings, fetchCalls };
+}
+
+const readForSave = (bindings, workId) =>
+  new Promise((resolve) => bindings.readAo3WorkForSave(workId, resolve));
+
+test("a work saved from a bare link is read from AO3's search by ID, as a listing save", async () => {
+  // AO3's work search lists the matching work as an ordinary listing row.
+  const h = subscriptionsPageBindings(() =>
+    Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(loadFixture("ao3_listing.html")) }));
+  assert.equal(h.exportedReadAo3WorkForSave, h.readAo3WorkForSave, "the overlay reaches it through one global");
+  const item = await readForSave(h, "10404927");
+  assert.equal(h.fetchCalls.length, 1);
+  assert.equal(h.fetchCalls[0].url, "https://archiveofourown.org/works/search?work_search%5Bquery%5D=id%3A10404927");
+  assert.equal(h.fetchCalls[0].init.credentials, "include");
+  assert.equal(item.ctx, "listing");
+  assert.equal(item.u, "https://archiveofourown.org/works/10404927");
+  assert.equal(item.t, "Harry Potter and the Shadowed Light");
+  assert.equal(item.a, "WritingbyAnnie");
+  assert.equal(item.r, "Mature");
+  assert.equal(item.w, 319220);
+  assert.equal(item.chn, 1);
+  assert.ok(item.fms.length > 0, "fandoms from the listing row");
+  assert.ok(item.sm, "summary from the listing row");
+});
+
+test("a work saved from a bare link is not saved when AO3 refuses or doesn't list it", async () => {
+  const refused = subscriptionsPageBindings(() => Promise.resolve({ ok: false, status: 429, text: () => Promise.resolve("") }));
+  const reasons = [];
+  assert.equal(await new Promise((resolve) => refused.readAo3WorkForSave("10404927", (item, reason) => {
+    reasons.push(reason);
+    resolve(item);
+  })), null);
+  assert.deepEqual(reasons, ["unavailable"]);
+  const listing = subscriptionsPageBindings(() =>
+    Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(loadFixture("ao3_listing.html")) }));
+  assert.equal(await readForSave(listing, "7700201"), null, "a result for another work is never saved as this one");
+  assert.equal(await readForSave(listing, "../login"), null);
+  assert.equal(listing.fetchCalls.length, 1, "a malformed ID never reaches AO3");
+});
+
 test("work summary backfill fetches chapter 1 once, past the adult notice, then broadcasts it", async () => {
   const h = backfillHarness({ fetchImpl: okHtml("chapter-1.html") });
   assert.equal(h.maybeBackfillWorkSummary(h.item), true);
