@@ -48,6 +48,9 @@ import {
   type StorageAreaLike,
 } from "./summary-fill-storage.mjs";
 
+/** Firefox's page-world window in a content script; absent elsewhere. */
+declare const content: { readonly fetch?: typeof fetch } | undefined;
+
 export const AO3_SUMMARY_STATE_KEY = "traceAo3SummaryFillV1";
 export const AO3_SUMMARY_ATTEMPTED_KEY = "traceAo3SummaryAttemptedV1";
 
@@ -230,7 +233,8 @@ export function classifyAo3Answer(answer: Ao3TabRead, host: string, workId: stri
  * so it must use nothing from outside this function. The request carries the
  * tab's own cookies; the page is read only as far as the work's own preface
  * (the chapters start after it), or `maxBytes`, is parsed in the page, and
- * only the summary's text comes back.
+ * only the summary's text comes back. On Firefox the script's own `fetch` is
+ * the extension's request, so the page's `content.fetch` is used.
  */
 async function readAo3WorkSummaryInTab(host: string, workId: string, maxBytes: number, maxChars: number): Promise<unknown> {
   // The tab moved on: nothing is asked of another site.
@@ -238,9 +242,13 @@ async function readAo3WorkSummaryInTab(host: string, workId: string, maxBytes: n
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15_000);
   try {
-    const response = await fetch(`https://${host}/works/${workId}?view_adult=true`, {
+    const pageFetch: typeof fetch =
+      typeof content !== "undefined" && content !== null && typeof content.fetch === "function"
+        ? content.fetch.bind(content)
+        : fetch;
+    const response = await pageFetch(`https://${host}/works/${workId}?view_adult=true`, {
       method: "GET",
-      credentials: "same-origin",
+      credentials: "include",
       cache: "no-store",
       redirect: "follow",
       headers: { Accept: "text/html" },
@@ -269,6 +277,11 @@ async function readAo3WorkSummaryInTab(host: string, workId: string, maxBytes: n
         // The rest of the page is never downloaded.
         reader.cancel().catch(() => undefined);
       }
+    } else if (/text\/html/i.test(contentType || "")) {
+      // A body that cannot be streamed is read whole, and kept only up to the limit.
+      const whole = await response.text();
+      const end = whole.search(chaptersStart);
+      text = (end < 0 ? whole : whole.slice(0, end)).slice(0, maxBytes);
     } else if (body) {
       body.cancel().catch(() => undefined);
     }
@@ -648,15 +661,18 @@ export class Ao3SummaryFill {
    * the front of the queue, to be read at the next step the pacing allows,
    * in whichever AO3 tab speaks then. A work already tried, from any tab, is
    * not put first again; a later listing still brings it back after the
-   * works not tried yet.
+   * works not tried yet. `account` is the account the save was made for;
+   * when another is signed in by the time the work's turn comes, it is
+   * dropped.
    */
-  storySaved(story: SavedStory, summaryKnown: boolean | undefined): Promise<void> {
-    if (summaryKnown !== false || story.hostKind !== "ao3") return Promise.resolve();
+  storySaved(story: SavedStory, summaryKnown: boolean | undefined, account: string | null): Promise<void> {
+    if (summaryKnown !== false || story.hostKind !== "ao3" || account === null) return Promise.resolve();
     const workId = /^ao3:([1-9][0-9]{0,19})$/.exec(story.workKey)?.[1];
     if (workId === undefined) return Promise.resolve();
     return this.#serial(async () => {
+      if (this.#ports.account() !== account) return;
       const state = await this.#state();
-      if (state === null || state.queue[0] === workId) return;
+      if (state === null || state.account !== account || state.queue[0] === workId) return;
       let attempted: readonly string[] = [];
       try {
         attempted = await this.#ports.attempted.read(state.account);

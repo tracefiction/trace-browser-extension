@@ -35,6 +35,7 @@ const fixture = (name) => fs.readFileSync(path.join(FIXTURES, name), "utf8");
 const TAB = 3;
 const HOST = "archiveofourown.org";
 const NOW = 10_000_000_000;
+const ACCOUNT = "reader-1:1";
 
 const CHALLENGE_PAGE =
   "<!DOCTYPE html><html><head><title>Just a moment...</title></head>" +
@@ -322,20 +323,32 @@ test("the read runs in the tab's top frame and hands back only the answer's fact
 });
 
 /** Runs the in-page read against `pages`, in a page at `HOST` with a real DOM parser. */
-async function inPage(pages, { at = HOST, workId = "101", maxBytes = 1024 * 1024 } = {}) {
+async function inPage(pages, { at = HOST, workId = "101", maxBytes = 1024 * 1024, contentFetch } = {}) {
   const h = tabReaderHarness({ result: () => [] });
   await h.reader.readWork(TAB, HOST, workId);
   const func = h.calls.scripts[0].func;
   const { window } = new JSDOM("");
-  const saved = { location: globalThis.location, fetch: globalThis.fetch, DOMParser: globalThis.DOMParser };
+  const saved = {
+    location: globalThis.location, fetch: globalThis.fetch, DOMParser: globalThis.DOMParser, content: globalThis.content,
+  };
   const requests = [];
   try {
     globalThis.location = { protocol: "https:", hostname: at };
     globalThis.DOMParser = window.DOMParser;
     globalThis.fetch = async (url, init) => {
-      requests.push({ url, init });
+      requests.push({ url, init, via: "fetch" });
       return pages(url);
     };
+    // Firefox gives a content script the page's own fetch as `content.fetch`.
+    if (contentFetch) {
+      globalThis.content = {
+        fetch(url, init) {
+          assert.equal(this, globalThis.content, "called on the page's window");
+          requests.push({ url, init, via: "content.fetch" });
+          return Promise.resolve(pages(url));
+        },
+      };
+    }
     const result = await func(HOST, workId, maxBytes, 4000);
     return { result, requests };
   } finally {
@@ -356,7 +369,8 @@ test("in the page, the work's first page is a same-site request with the tab's c
   const { result, requests } = await inPage((url) => htmlResponse(fixture("chapter-1.html"), { url }));
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, `https://${HOST}/works/101?view_adult=true`);
-  assert.equal(requests[0].init.credentials, "same-origin");
+  assert.equal(requests[0].init.credentials, "include");
+  assert.equal(requests[0].via, "fetch");
   assert.equal(requests[0].init.cache, "no-store");
   assert.equal(requests[0].init.method, "GET");
   assert.deepEqual(result, {
@@ -374,6 +388,24 @@ test("in the page, the work's first page is a same-site request with the tab's c
   assert.equal(oneShot.result.summary, "One evening, one lamp, one detective.");
 });
 
+
+test("in the page on Firefox, the page's own content.fetch is used, so the reader's AO3 session goes with it", async () => {
+  const { result, requests } = await inPage((url) => htmlResponse(fixture("chapter-1.html"), { url }), { contentFetch: true });
+  assert.deepEqual(requests.map(({ via }) => via), ["content.fetch"]);
+  assert.equal(requests[0].url, `https://${HOST}/works/101?view_adult=true`);
+  assert.equal(requests[0].init.credentials, "include");
+  assert.equal(result.summary, "A lamplighter keeps a ledger of every fog that crosses Baker Street.");
+});
+
+test("in the page, a body that cannot be streamed is read whole and still parsed", async () => {
+  const { result } = await inPage((url) => {
+    const response = htmlResponse(fixture("chapter-1.html"), { url });
+    Object.defineProperty(response, "body", { value: null });
+    return response;
+  });
+  assert.equal(result.page, "work");
+  assert.equal(result.summary, "A lamplighter keeps a ledger of every fog that crosses Baker Street.");
+});
 test("in the page, paragraphs and line breaks are kept, and a chapter's summary is never the work's", async () => {
   const page = `<html><body><div id="workskin">
     <div class="preface group"><h2 class="title heading">T</h2></div>
@@ -670,16 +702,16 @@ test("only a save whose reply says Trace has no summary puts the work first", as
   const h = harness();
   await h.page();
   assert.deepEqual(state(h).queue, ["101", "102", "103"]);
-  await h.fill.storySaved(savedStory("9"), true);
-  await h.fill.storySaved(savedStory("9"), undefined);
-  await h.fill.storySaved(savedStory("9", { hostKind: "ffn" }), false);
-  await h.fill.storySaved({ ...savedStory("9"), workKey: "ao3:../9" }, false);
+  await h.fill.storySaved(savedStory("9"), true, ACCOUNT);
+  await h.fill.storySaved(savedStory("9"), undefined, ACCOUNT);
+  await h.fill.storySaved(savedStory("9", { hostKind: "ffn" }), false, ACCOUNT);
+  await h.fill.storySaved({ ...savedStory("9"), workKey: "ao3:../9" }, false, ACCOUNT);
   assert.deepEqual(state(h).queue, ["101", "102", "103"], "Trace has it, or did not say");
-  await h.fill.storySaved(savedStory("9"), false);
+  await h.fill.storySaved(savedStory("9"), false, ACCOUNT);
   assert.deepEqual(state(h).queue, ["9", "101", "102", "103"]);
   assert.equal(state(h).stale, false);
   assert.deepEqual(h.site.reads, [], "a save itself reads nothing");
-  await h.fill.storySaved(savedStory("102"), false);
+  await h.fill.storySaved(savedStory("102"), false, ACCOUNT);
   assert.deepEqual(state(h).queue, ["102", "9", "101", "103"], "a listed work moves to the front");
 });
 
@@ -689,7 +721,7 @@ test("a saved work without a summary waits for the pacing like any other", async
   assert.equal(h.gapReads.length, 1);
   h.fill.saveStarted();
   h.fill.saveEnded();
-  await h.fill.storySaved(savedStory("9"), false);
+  await h.fill.storySaved(savedStory("9"), false, ACCOUNT);
   await h.page();
   assert.deepEqual(h.site.reads, [], "nothing during or just after a save");
   await h.advance(SAVE_SETTLE_MS);
@@ -704,23 +736,47 @@ test("a saved work without a summary waits for the pacing like any other", async
 test("a work already tried is not put first again, from this tab or another", async () => {
   const h = harness({ gaps: [] });
   await h.page();
-  await h.fill.storySaved(savedStory("9"), false);
+  await h.fill.storySaved(savedStory("9"), false, ACCOUNT);
   await h.step();
   assert.deepEqual(readIds(h), ["9"]);
   // The same work saved again, from any tab: the tried list is shared.
-  await h.fill.storySaved(savedStory("9"), false);
+  await h.fill.storySaved(savedStory("9"), false, ACCOUNT);
   assert.deepEqual(state(h).queue, []);
   h.restart();
-  await h.fill.storySaved(savedStory("9"), false);
+  await h.fill.storySaved(savedStory("9"), false, ACCOUNT);
   assert.deepEqual(state(h).queue, [], "a new background remembers too");
   for (let index = 0; index < 3; index += 1) await h.step();
   assert.deepEqual(readIds(h), ["9"]);
 });
 
+
+test("a save's work is dropped when another account is signed in by its turn", async () => {
+  const h = harness({ gaps: [] });
+  await h.page();
+  await h.fill.storySaved(savedStory("9"), false, null);
+  await h.fill.storySaved(savedStory("9"), false, "reader-0:1");
+  assert.deepEqual(state(h).queue, [], "made for another account, or for none");
+
+  // The account changes while the save waits its turn behind a running step.
+  let release;
+  const held = harness({ gaps: [], respond: (workId) => new Promise((resolve) => { release = () => resolve(siteAnswer(workId)); }) });
+  await held.page();
+  await held.fill.storySaved(savedStory("8"), false, ACCOUNT);
+  await held.advance(BACKFILL_GAP_MS);
+  const running = held.fill.ao3PageActivity(TAB);
+  await settle();
+  const saved = held.fill.storySaved(savedStory("9"), false, ACCOUNT);
+  held.ports.account = "reader-2:1";
+  release();
+  await running;
+  await saved;
+  await settle();
+  assert.equal(state(held).queue.includes("9"), false);
+});
 test("a listing keeps a work a save put first ahead of the others", async () => {
   const h = harness({ gaps: ["101"], random: () => 0 });
   await h.page();
-  await h.fill.storySaved(savedStory("9"), false);
+  await h.fill.storySaved(savedStory("9"), false, ACCOUNT);
   h.ports.gaps = ["101", "201", "9", "202"];
   await h.fill.libraryChanged();
   await h.advance(RELIST_MIN_MS);

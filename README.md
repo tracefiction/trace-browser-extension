@@ -61,7 +61,7 @@ local storage for at most 12 hours) and removed when you sign out.
 
 AO3 shows a work's summary only on its first chapter, so a work saved from a
 later chapter, or imported from your open tabs, can reach your Library
-without one. The AO3 page itself never fetches another page for a summary.
+without one. Opening an AO3 page no longer fetches another page by itself.
 When you save a work and Trace answers that it has no summary for it, that
 work is read first; for your other saved AO3 works that Trace has no
 summary for, Trace asks the Trace API which they are. Trace reads each
