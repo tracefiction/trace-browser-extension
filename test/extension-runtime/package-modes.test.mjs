@@ -930,6 +930,18 @@ test("the store package carries the whole-History import; switched off, nothing 
     });
     assert.notEqual(legacy.status, 0);
     assert.match(legacy.stderr, /TRACE_AO3_HISTORY_IMPORT requires TRACE_SESSION_MODE=kernel/);
+    // The computer store packages (Chrome, Firefox) carry it too: Review in Trace opens Trace's review page.
+    const desk = spawnSync("npm", ["run", "build:release"], { cwd: ROOT, env: (() => {
+      const env = { ...RELEASE_ENV };
+      delete env.TRACE_AO3_HISTORY_IMPORT;
+      return env;
+    })(), encoding: "utf8" });
+    assert.equal(desk.status, 0, desk.stderr || desk.stdout);
+    for (const browser of ["chrome", "firefox"]) {
+      const bundle = fs.readFileSync(path.join(ROOT, "dist", browser, "background.js"), "utf8");
+      assert.equal(bundle.includes("TRACE_WEB_HISTORY_REQUEST"), true, `the ${browser} store package lacks the web review handoff`);
+      assert.equal(fs.existsSync(path.join(ROOT, "dist", browser, "ao3-history-import-panel.js")), true);
+    }
   } finally {
     runBuild("build:ios-earned-permission-onboarding:release");
   }
