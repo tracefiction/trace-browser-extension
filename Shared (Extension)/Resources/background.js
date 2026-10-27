@@ -7121,9 +7121,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var DIV_START_PATTERN = /<div\b[^>]*>/gi;
   function ffnAuthorIdFromStoryHtml(html) {
     if (typeof html !== "string") return null;
-    const content = STORY_CONTENT_PATTERN.exec(html);
-    if (content === null) return null;
-    const block = html.slice(content.index, content.index + ROW_MAX_CHARS);
+    const content2 = STORY_CONTENT_PATTERN.exec(html);
+    if (content2 === null) return null;
+    const block = html.slice(content2.index, content2.index + ROW_MAX_CHARS);
     return AUTHOR_LINK_PATTERN.exec(block)?.[1] ?? null;
   }
   function divWithClasses(markup, names) {
@@ -7233,9 +7233,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15e3);
     try {
-      const response = await fetch(`https://${host}${path}`, {
+      const pageFetch = typeof content !== "undefined" && content !== null && typeof content.fetch === "function" ? content.fetch.bind(content) : fetch;
+      const response = await pageFetch(`https://${host}${path}`, {
         method: "GET",
-        credentials: "same-origin",
+        credentials: "include",
         cache: "no-store",
         redirect: "follow",
         headers: { Accept: "text/html" },
@@ -7259,6 +7260,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         } finally {
           reader.cancel().catch(() => void 0);
         }
+      } else if (/text\/html/i.test(contentType || "")) {
+        text2 = (await response.text()).slice(0, maxBytes);
       } else if (body) {
         body.cancel().catch(() => void 0);
       }
@@ -7884,9 +7887,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15e3);
     try {
-      const response = await fetch(`https://${host}/works/${workId}?view_adult=true`, {
+      const pageFetch = typeof content !== "undefined" && content !== null && typeof content.fetch === "function" ? content.fetch.bind(content) : fetch;
+      const response = await pageFetch(`https://${host}/works/${workId}?view_adult=true`, {
         method: "GET",
-        credentials: "same-origin",
+        credentials: "include",
         cache: "no-store",
         redirect: "follow",
         headers: { Accept: "text/html" },
@@ -7913,6 +7917,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         } finally {
           reader.cancel().catch(() => void 0);
         }
+      } else if (/text\/html/i.test(contentType || "")) {
+        const whole = await response.text();
+        const end = whole.search(chaptersStart);
+        text2 = (end < 0 ? whole : whole.slice(0, end)).slice(0, maxBytes);
       } else if (body) {
         body.cancel().catch(() => void 0);
       }
@@ -8125,15 +8133,18 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
      * the front of the queue, to be read at the next step the pacing allows,
      * in whichever AO3 tab speaks then. A work already tried, from any tab, is
      * not put first again; a later listing still brings it back after the
-     * works not tried yet.
+     * works not tried yet. `account` is the account the save was made for;
+     * when another is signed in by the time the work's turn comes, it is
+     * dropped.
      */
-    storySaved(story, summaryKnown) {
-      if (summaryKnown !== false || story.hostKind !== "ao3") return Promise.resolve();
+    storySaved(story, summaryKnown, account) {
+      if (summaryKnown !== false || story.hostKind !== "ao3" || account === null) return Promise.resolve();
       const workId = /^ao3:([1-9][0-9]{0,19})$/.exec(story.workKey)?.[1];
       if (workId === void 0) return Promise.resolve();
       return this.#serial(async () => {
+        if (this.#ports.account() !== account) return;
         const state = await this.#state();
-        if (state === null || state.queue[0] === workId) return;
+        if (state === null || state.account !== account || state.queue[0] === workId) return;
         let attempted = [];
         try {
           attempted = await this.#ports.attempted.read(state.account);
@@ -8858,10 +8869,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           executeScript: (details) => call(scripting, "executeScript", [details]),
           containsOrigin: async (origin) => typeof permissions?.contains === "function" && await call(permissions, "contains", [{ origins: [origin] }]) === true
         },
-        account: () => {
-          const scope2 = this.#service.publicationScope();
-          return scope2 === null ? null : `${scope2.accountId}:${scope2.epoch}`;
-        },
+        account: () => this.#fillAccount(),
         contributionsEnabled: () => preference.enabled(),
         listGaps: async () => {
           const result = await this.#service.executeAuthenticated(async (credential) => {
@@ -8910,6 +8918,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           return result.kind === "accepted" ? "accepted" : result.kind === "skipped" ? "skipped" : "failed";
         }
       };
+    }
+    /** The signed-in account as the summary fills name it (`accountId:epoch`). */
+    #fillAccount() {
+      const scope2 = this.#service.publicationScope();
+      return scope2 === null ? null : `${scope2.accountId}:${scope2.epoch}`;
     }
     #createFfnSummaryFill(environment, options, storage) {
       const shared = this.#summaryFillShared(environment, options.sessionArea ?? null, storage, "ffn");
@@ -9465,6 +9478,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       const ao3 = this.#ao3Summaries;
       if (ffn === null && ao3 === null) return this.#storyCommands.executeWithEvidence(command, observer);
       const alreadyInLibrary = accountData?.overlay?.entries[command.workKey] !== void 0;
+      const savedFor = this.#fillAccount();
       ffn?.saveStarted();
       ao3?.saveStarted();
       let evidence;
@@ -9477,7 +9491,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (evidence.result.kind === "confirmed") {
         const { summaryKnown } = evidence.result.confirmation;
         if (ffn !== null && summaryKnown !== true) void ffn.storySaved(command, alreadyInLibrary, tabId);
-        if (ao3 !== null) void ao3.storySaved(command, summaryKnown);
+        if (ao3 !== null) void ao3.storySaved(command, summaryKnown, savedFor);
       }
       return evidence;
     }
