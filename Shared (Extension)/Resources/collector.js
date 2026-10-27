@@ -3433,7 +3433,8 @@ function collectFFNStory() {
     txtWithoutTraceUi(one(document, "#profile_top div.xcontrast_txt")) ||
     null;
   const fandom = extractFFNFandom();
-  const totalChapters = p.chn ?? null;
+  // FFN leaves "Chapters:" off a one-shot's details line; its words are there.
+  const totalChapters = p.chn ?? (p.w ? 1 : null);
 
   const chapters = ffnImportChapters(currentChapter, totalChapters);
 
