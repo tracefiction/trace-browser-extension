@@ -35,6 +35,7 @@ const fixture = (name) => fs.readFileSync(path.join(FIXTURES, name), "utf8");
 const TAB = 3;
 const HOST = "archiveofourown.org";
 const NOW = 10_000_000_000;
+const ACCOUNT = "reader-1:1";
 
 const CHALLENGE_PAGE =
   "<!DOCTYPE html><html><head><title>Just a moment...</title></head>" +
@@ -63,7 +64,7 @@ const siteAnswer = (workId) => work(workId, `Summary of ${workId}.`);
 /** A tab reader whose tab and pages the test controls; records every read. */
 function fakeTabs(respond = siteAnswer) {
   const reads = [];
-  const tabs = new Map([[TAB, { host: HOST, workId: null }]]);
+  const tabs = new Map([[TAB, { host: HOST }]]);
   return {
     reads,
     tabs,
@@ -72,7 +73,7 @@ function fakeTabs(respond = siteAnswer) {
       if (!tabs.has(tabId)) return { code: "tab_gone" };
       const tab = tabs.get(tabId);
       if (!/archiveofourown\.org$/.test(tab.host)) return { code: "tab_not_ao3" };
-      return this.allowed ? { host: tab.host, workId: tab.workId } : { code: "not_allowed" };
+      return this.allowed ? { host: tab.host } : { code: "not_allowed" };
     },
     async readWork(tabId, host, workId) {
       reads.push({ tabId, host, workId });
@@ -272,14 +273,14 @@ function tabReaderHarness({ tab = { url: "https://archiveofourown.org/works/555/
   return { reader, calls };
 }
 
-test("a page is read only in an AO3 tab the reader has allowed Trace on, noting the work it shows", async () => {
+test("a page is read only in an AO3 tab the reader has allowed Trace on", async () => {
   const ok = tabReaderHarness();
-  assert.deepEqual(await ok.reader.tabHost(TAB), { host: HOST, workId: "555" });
+  assert.deepEqual(await ok.reader.tabHost(TAB), { host: HOST });
   assert.deepEqual(ok.calls.contains, ["https://archiveofourown.org/*"]);
   const listing = tabReaderHarness({ tab: { url: "https://archiveofourown.org/tags/Sherlock/works" } });
-  assert.deepEqual(await listing.reader.tabHost(TAB), { host: HOST, workId: null });
+  assert.deepEqual(await listing.reader.tabHost(TAB), { host: HOST });
   const mirror = tabReaderHarness({ tab: { url: "https://archiveofourown.gay/collections/x/works/9" } });
-  assert.deepEqual(await mirror.reader.tabHost(TAB), { host: "archiveofourown.gay", workId: "9" });
+  assert.deepEqual(await mirror.reader.tabHost(TAB), { host: "archiveofourown.gay" });
 
   assert.deepEqual(await tabReaderHarness({ tab: new Error("No tab") }).reader.tabHost(TAB), { code: "tab_gone" });
   for (const url of ["https://www.fanfiction.net/s/1/1/", "http://archiveofourown.org/works/1", "https://evil.example/works/1", "nonsense"]) {
@@ -322,20 +323,32 @@ test("the read runs in the tab's top frame and hands back only the answer's fact
 });
 
 /** Runs the in-page read against `pages`, in a page at `HOST` with a real DOM parser. */
-async function inPage(pages, { at = HOST, workId = "101", maxBytes = 1024 * 1024 } = {}) {
+async function inPage(pages, { at = HOST, workId = "101", maxBytes = 1024 * 1024, contentFetch } = {}) {
   const h = tabReaderHarness({ result: () => [] });
   await h.reader.readWork(TAB, HOST, workId);
   const func = h.calls.scripts[0].func;
   const { window } = new JSDOM("");
-  const saved = { location: globalThis.location, fetch: globalThis.fetch, DOMParser: globalThis.DOMParser };
+  const saved = {
+    location: globalThis.location, fetch: globalThis.fetch, DOMParser: globalThis.DOMParser, content: globalThis.content,
+  };
   const requests = [];
   try {
     globalThis.location = { protocol: "https:", hostname: at };
     globalThis.DOMParser = window.DOMParser;
     globalThis.fetch = async (url, init) => {
-      requests.push({ url, init });
+      requests.push({ url, init, via: "fetch" });
       return pages(url);
     };
+    // Firefox gives a content script the page's own fetch as `content.fetch`.
+    if (contentFetch) {
+      globalThis.content = {
+        fetch(url, init) {
+          assert.equal(this, globalThis.content, "called on the page's window");
+          requests.push({ url, init, via: "content.fetch" });
+          return Promise.resolve(pages(url));
+        },
+      };
+    }
     const result = await func(HOST, workId, maxBytes, 4000);
     return { result, requests };
   } finally {
@@ -356,7 +369,8 @@ test("in the page, the work's first page is a same-site request with the tab's c
   const { result, requests } = await inPage((url) => htmlResponse(fixture("chapter-1.html"), { url }));
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, `https://${HOST}/works/101?view_adult=true`);
-  assert.equal(requests[0].init.credentials, "same-origin");
+  assert.equal(requests[0].init.credentials, "include");
+  assert.equal(requests[0].via, "fetch");
   assert.equal(requests[0].init.cache, "no-store");
   assert.equal(requests[0].init.method, "GET");
   assert.deepEqual(result, {
@@ -374,6 +388,24 @@ test("in the page, the work's first page is a same-site request with the tab's c
   assert.equal(oneShot.result.summary, "One evening, one lamp, one detective.");
 });
 
+
+test("in the page on Firefox, the page's own content.fetch is used, so the reader's AO3 session goes with it", async () => {
+  const { result, requests } = await inPage((url) => htmlResponse(fixture("chapter-1.html"), { url }), { contentFetch: true });
+  assert.deepEqual(requests.map(({ via }) => via), ["content.fetch"]);
+  assert.equal(requests[0].url, `https://${HOST}/works/101?view_adult=true`);
+  assert.equal(requests[0].init.credentials, "include");
+  assert.equal(result.summary, "A lamplighter keeps a ledger of every fog that crosses Baker Street.");
+});
+
+test("in the page, a body that cannot be streamed is read whole and still parsed", async () => {
+  const { result } = await inPage((url) => {
+    const response = htmlResponse(fixture("chapter-1.html"), { url });
+    Object.defineProperty(response, "body", { value: null });
+    return response;
+  });
+  assert.equal(result.page, "work");
+  assert.equal(result.summary, "A lamplighter keeps a ledger of every fog that crosses Baker Street.");
+});
 test("in the page, paragraphs and line breaks are kept, and a chapter's summary is never the work's", async () => {
   const page = `<html><body><div id="workskin">
     <div class="preface group"><h2 class="title heading">T</h2></div>
@@ -528,15 +560,14 @@ test("a tab that cannot be read asks nothing of the site and keeps the work, wit
   assert.deepEqual(filledIds(moved), ["101"]);
 });
 
-test("the work the reader is on is left to its own page, without a read", async () => {
+test("the work the reader is on is read like any other, in its turn", async () => {
+  // The page itself never reads a summary; the tab showing a chapter of 101
+  // reads 101's first page when it is due.
   const h = harness();
-  h.site.tabs.set(TAB, { host: HOST, workId: "101" });
   await h.page();
   await h.step();
-  assert.deepEqual(h.site.reads, []);
-  assert.equal(state(h).last.outcome, "on_page");
-  await h.step();
-  assert.deepEqual(readIds(h), ["102"]);
+  assert.deepEqual(readIds(h), ["101"]);
+  assert.deepEqual(filledIds(h), ["101"]);
 });
 
 test("a work that is gone, signed-in only or has no summary is skipped and the fill carries on", async () => {
@@ -667,16 +698,98 @@ test("the gaps are listed again once the queue is empty for a while, or soon aft
   assert.ok(state(imported).queue.includes("301"));
 });
 
-test("a new AO3 work saved without a summary marks the gaps for listing again; nothing else does", async () => {
+test("only a save whose reply says Trace has no summary puts the work first", async () => {
   const h = harness();
   await h.page();
-  await h.fill.storySaved(savedStory("9", { sm: "Has one." }), false);
-  await h.fill.storySaved(savedStory("9"), true);
-  await h.fill.storySaved(savedStory("9", { hostKind: "ffn" }), false);
+  assert.deepEqual(state(h).queue, ["101", "102", "103"]);
+  await h.fill.storySaved(savedStory("9"), true, ACCOUNT);
+  await h.fill.storySaved(savedStory("9"), undefined, ACCOUNT);
+  await h.fill.storySaved(savedStory("9", { hostKind: "ffn" }), false, ACCOUNT);
+  await h.fill.storySaved({ ...savedStory("9"), workKey: "ao3:../9" }, false, ACCOUNT);
+  assert.deepEqual(state(h).queue, ["101", "102", "103"], "Trace has it, or did not say");
+  await h.fill.storySaved(savedStory("9"), false, ACCOUNT);
+  assert.deepEqual(state(h).queue, ["9", "101", "102", "103"]);
   assert.equal(state(h).stale, false);
-  await h.fill.storySaved(savedStory("9"), false);
-  assert.equal(state(h).stale, true);
   assert.deepEqual(h.site.reads, [], "a save itself reads nothing");
+  await h.fill.storySaved(savedStory("102"), false, ACCOUNT);
+  assert.deepEqual(state(h).queue, ["102", "9", "101", "103"], "a listed work moves to the front");
+});
+
+test("a saved work without a summary waits for the pacing like any other", async () => {
+  const h = harness({ gaps: [] });
+  await h.page();
+  assert.equal(h.gapReads.length, 1);
+  h.fill.saveStarted();
+  h.fill.saveEnded();
+  await h.fill.storySaved(savedStory("9"), false, ACCOUNT);
+  await h.page();
+  assert.deepEqual(h.site.reads, [], "nothing during or just after a save");
+  await h.advance(SAVE_SETTLE_MS);
+  await h.page();
+  assert.deepEqual(h.site.reads, [], "nor within a step gap of the listing");
+  await h.advance(BACKFILL_GAP_MS - SAVE_SETTLE_MS);
+  await h.page();
+  assert.deepEqual(readIds(h), ["9"]);
+  assert.deepEqual(filledIds(h), ["9"]);
+});
+
+test("a work already tried is not put first again, from this tab or another", async () => {
+  const h = harness({ gaps: [] });
+  await h.page();
+  await h.fill.storySaved(savedStory("9"), false, ACCOUNT);
+  await h.step();
+  assert.deepEqual(readIds(h), ["9"]);
+  // The same work saved again, from any tab: the tried list is shared.
+  await h.fill.storySaved(savedStory("9"), false, ACCOUNT);
+  assert.deepEqual(state(h).queue, []);
+  h.restart();
+  await h.fill.storySaved(savedStory("9"), false, ACCOUNT);
+  assert.deepEqual(state(h).queue, [], "a new background remembers too");
+  for (let index = 0; index < 3; index += 1) await h.step();
+  assert.deepEqual(readIds(h), ["9"]);
+});
+
+
+test("a save's work is dropped when another account is signed in by its turn", async () => {
+  const h = harness({ gaps: [] });
+  await h.page();
+  await h.fill.storySaved(savedStory("9"), false, null);
+  await h.fill.storySaved(savedStory("9"), false, "reader-0:1");
+  assert.deepEqual(state(h).queue, [], "made for another account, or for none");
+
+  // The account changes while the save waits its turn behind a running step.
+  let release;
+  const held = harness({ gaps: [], respond: (workId) => new Promise((resolve) => { release = () => resolve(siteAnswer(workId)); }) });
+  await held.page();
+  await held.fill.storySaved(savedStory("8"), false, ACCOUNT);
+  await held.advance(BACKFILL_GAP_MS);
+  const running = held.fill.ao3PageActivity(TAB);
+  await settle();
+  const saved = held.fill.storySaved(savedStory("9"), false, ACCOUNT);
+  held.ports.account = "reader-2:1";
+  release();
+  await running;
+  await saved;
+  await settle();
+  assert.equal(state(held).queue.includes("9"), false);
+});
+test("a listing keeps a work a save put first ahead of the others", async () => {
+  const h = harness({ gaps: ["101"], random: () => 0 });
+  await h.page();
+  await h.fill.storySaved(savedStory("9"), false, ACCOUNT);
+  h.ports.gaps = ["101", "201", "9", "202"];
+  await h.fill.libraryChanged();
+  await h.advance(RELIST_MIN_MS);
+  await h.page();
+  assert.equal(h.gapReads.length, 2);
+  assert.deepEqual(state(h).queue.slice(0, 2), ["9", "101"]);
+  assert.deepEqual([...state(h).queue].sort(), ["101", "201", "202", "9"]);
+  // A waiting work the server no longer lists is dropped.
+  h.ports.gaps = ["201"];
+  await h.fill.libraryChanged();
+  await h.advance(RELIST_MIN_MS);
+  await h.page();
+  assert.deepEqual(state(h).queue, ["201"]);
 });
 
 test("works already tried come last and fresh ones are shuffled, so each listing tries others", async () => {
@@ -780,7 +893,12 @@ test("a stored state of the wrong shape is ignored", async () => {
 
 // --- Wired into the session runtime ------------------------------------------
 
-async function wiredRuntime({ gaps = ["7038840"], summary = "A ledger of fog.", tabUrl = "https://archiveofourown.org/tags/Sherlock/works" } = {}) {
+async function wiredRuntime({
+  gaps = ["7038840"],
+  summary = "A ledger of fog.",
+  tabUrl = "https://archiveofourown.org/tags/Sherlock/works",
+  summaryKnown,
+} = {}) {
   const { IDBFactory } = await import("fake-indexeddb");
   const { installSessionRuntime } = await import("../../.trace-build/extension-runtime/controller.mjs");
   const { BrowserPrivateRecordDatabase, PRIVATE_RECORD_KEYS } = await import(
@@ -808,6 +926,14 @@ async function wiredRuntime({ gaps = ["7038840"], summary = "A ledger of fog.", 
     }
     if (route === "/api/extension/library/summary-gaps") {
       return json({ success: true, data: { filled: 0, sourceStoryIds: gaps } });
+    }
+    if (route === "/api/extension/track") {
+      const workKey = `ao3:${JSON.parse(options.body).item.u.split("/works/")[1]}`;
+      return json({ success: true, data: {
+        entry_id: TRACK_ENTRY.entryId, type: "created", work_key: workKey, entry: TRACK_ENTRY,
+        syncVersion: "2026-10-21T00:00:01.000Z",
+        ...(summaryKnown === undefined ? {} : { summary_known: summaryKnown }),
+      } });
     }
     return json({ success: false }, 404);
   };
@@ -850,8 +976,56 @@ async function wiredRuntime({ gaps = ["7038840"], summary = "A ledger of fog.", 
     await controller.handle({ type: "TRACE_SESSION_GET_SNAPSHOT" }, sender);
     await settle();
   };
-  return { controller, scripts, apiCalls, speak };
+  /** The reader saves a chapter 2+ page of `workId`, which shows no work summary. */
+  const save = (workId) => controller.handle({
+    type: "TRACE_QUICK_ADD",
+    payload: {
+      s: "ao3",
+      at: "2026-10-21T00:00:00.000Z",
+      item: {
+        src: "ao3", ctx: "story", u: `https://archiveofourown.org/works/${workId}`, t: "A work",
+        chn: 2, chu: `https://archiveofourown.org/works/${workId}/chapters/2`, sm: null,
+      },
+    },
+  }, sender);
+  return { controller, scripts, apiCalls, speak, save };
 }
+
+const TRACK_ENTRY = {
+  status: "PLANNING", readerStatus: "PLANNING", canonicalReaderStatus: "SAVED",
+  entryId: "00000000-0000-4000-8000-000000000456", rating: 0,
+  privateContext: { hasNotes: false, tagCount: 0 }, chapters: { current: 2, total: 12 },
+};
+
+test("a save Trace answers with summary_known false is read in the AO3 tab at the next step; any other answer reads nothing", async () => {
+  for (const summaryKnown of [false, true, undefined]) {
+    const realNow = Date.now;
+    let now = realNow();
+    Date.now = () => now;
+    try {
+      const { scripts, apiCalls, speak, save } = await wiredRuntime({
+        gaps: [], summaryKnown, tabUrl: "https://archiveofourown.org/works/555/chapters/2",
+      });
+      await speak();
+      const saved = await save("555");
+      assert.equal(saved.ok, true, JSON.stringify(saved));
+      await settle();
+      assert.deepEqual(scripts, [], "nothing is read during or just after the save");
+      now += BACKFILL_GAP_MS;
+      await speak();
+      const refreshes = apiCalls.filter(({ route }) => route === "/api/extension/library/metadata-refresh");
+      if (summaryKnown === false) {
+        assert.deepEqual(scripts, [{ target: { tabId: 3, frameIds: [0] }, args: ["archiveofourown.org", "555"] }]);
+        assert.deepEqual(refreshes.map(({ body }) => body.items.map(({ sourceStoryId }) => sourceStoryId)), [["555"]]);
+      } else {
+        assert.deepEqual(scripts, [], `summary_known ${summaryKnown}`);
+        assert.deepEqual(refreshes, []);
+      }
+    } finally {
+      Date.now = realNow;
+    }
+  }
+});
 
 test("an AO3 page speaking lists the AO3 gaps, reads one in that tab, and sends only identity and summary", async () => {
   const realNow = Date.now;

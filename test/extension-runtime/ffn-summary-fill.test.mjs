@@ -382,7 +382,7 @@ test("in the page, the read is a same-site request with the tab's cookies, and s
     const result = await inPage(HOST, "/u/7/?a=s", 2 * 1024 * 1024, 256 * 1024);
     assert.equal(requests.length, 1);
     assert.equal(requests[0].url, `https://${HOST}/u/7/?a=s`);
-    assert.equal(requests[0].init.credentials, "same-origin");
+    assert.equal(requests[0].init.credentials, "include");
     assert.equal(requests[0].init.cache, "no-store");
     assert.equal(requests[0].init.method, "GET");
     assert.equal(result.ok, true);
@@ -398,6 +398,42 @@ test("in the page, the read is a same-site request with the tab's cookies, and s
     if (saved.location === undefined) delete globalThis.location;
     else globalThis.location = saved.location;
     globalThis.fetch = saved.fetch;
+  }
+});
+
+test("in the page on Firefox, the page's own content.fetch is used, so the reader's session goes with it", async () => {
+  const h = tabReaderHarness({ result: () => [] });
+  await h.reader.readInTab(TAB, HOST, "/u/7/?a=s");
+  const inPage = h.calls.scripts[0].func;
+  const saved = { location: globalThis.location, fetch: globalThis.fetch, content: globalThis.content };
+  const requests = [];
+  const answer = (url) => {
+    const response = new Response(desktopAuthor, { status: 200, headers: { "content-type": "text/html; charset=UTF-8" } });
+    Object.defineProperty(response, "url", { value: url });
+    return response;
+  };
+  try {
+    globalThis.location = { protocol: "https:", hostname: HOST };
+    globalThis.fetch = async (url, init) => {
+      requests.push({ url, init, via: "fetch" });
+      return answer(url);
+    };
+    globalThis.content = {
+      fetch(url, init) {
+        assert.equal(this, globalThis.content, "called on the page's window");
+        requests.push({ url, init, via: "content.fetch" });
+        return Promise.resolve(answer(url));
+      },
+    };
+    const result = await inPage(HOST, "/u/7/?a=s", 2 * 1024 * 1024, 256 * 1024);
+    assert.deepEqual(requests.map(({ via }) => via), ["content.fetch"]);
+    assert.equal(requests[0].init.credentials, "include");
+    assert.equal(ffnSummariesFromStoryListHtml(result.html).rows, 2);
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete globalThis[key];
+      else globalThis[key] = value;
+    }
   }
 });
 

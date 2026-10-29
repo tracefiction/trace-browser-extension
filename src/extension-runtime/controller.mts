@@ -577,10 +577,7 @@ export class SessionRuntimeController {
         containsOrigin: async (origin: string) => typeof permissions?.contains === "function" &&
           await call<boolean>(permissions, "contains", [{ origins: [origin] }]) === true,
       },
-      account: (): string | null => {
-        const scope = this.#service.publicationScope();
-        return scope === null ? null : `${scope.accountId}:${scope.epoch}`;
-      },
+      account: () => this.#fillAccount(),
       contributionsEnabled: () => preference.enabled(),
       listGaps: async (): Promise<readonly string[] | null> => {
         const result = await this.#service.executeAuthenticated(async (credential) => {
@@ -639,6 +636,12 @@ export class SessionRuntimeController {
           : result.kind === "skipped" ? "skipped" : "failed";
       },
     };
+  }
+
+  /** The signed-in account as the summary fills name it (`accountId:epoch`). */
+  #fillAccount(): string | null {
+    const scope = this.#service.publicationScope();
+    return scope === null ? null : `${scope.accountId}:${scope.epoch}`;
   }
 
   #createFfnSummaryFill(
@@ -1406,6 +1409,8 @@ export class SessionRuntimeController {
     if (ffn === null && ao3 === null) return this.#storyCommands.executeWithEvidence(command, observer);
     const alreadyInLibrary =
       accountData?.overlay?.entries[command.workKey] !== undefined;
+    // The account this save is made for.
+    const savedFor = this.#fillAccount();
     // Neither fill reads a page while a save is on its way.
     ffn?.saveStarted();
     ao3?.saveStarted();
@@ -1416,14 +1421,13 @@ export class SessionRuntimeController {
       ffn?.saveEnded();
       ao3?.saveEnded();
     }
-    if (
-      evidence.result.kind === "confirmed" &&
-      // Trace already has this story's summary: nothing to read.
-      evidence.result.confirmation.summaryKnown !== true
-    ) {
-      // Never delays the save's own answer.
-      if (ffn !== null) void ffn.storySaved(command, alreadyInLibrary, tabId);
-      if (ao3 !== null) void ao3.storySaved(command, alreadyInLibrary);
+    if (evidence.result.kind === "confirmed") {
+      const { summaryKnown } = evidence.result.confirmation;
+      // Never delays the save's own answer. Nothing is read when Trace
+      // already has the summary; the AO3 fill reads only when the reply
+      // says it has none.
+      if (ffn !== null && summaryKnown !== true) void ffn.storySaved(command, alreadyInLibrary, tabId);
+      if (ao3 !== null) void ao3.storySaved(command, summaryKnown, savedFor);
     }
     return evidence;
   }

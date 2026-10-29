@@ -239,6 +239,9 @@ export function isFfnStoryNotFoundPage(html: string): boolean {
   return /Story\s+Not\s+Found/i.test(text) || /Unable\s+to\s+locate\s+story/i.test(text);
 }
 
+/** Firefox's page-world window in a content script; absent elsewhere. */
+declare const content: { readonly fetch?: typeof fetch } | undefined;
+
 /** Whether a page is a Cloudflare (or similar) check instead of the page asked for. */
 export function isChallengePage(html: string, headers?: { get(name: string): string | null }): boolean {
   if (headers?.get("cf-mitigated")?.toLowerCase() === "challenge") return true;
@@ -365,7 +368,9 @@ export function classifyFfnAnswer(
  * Reads one same-site FanFiction.net page inside the reader's tab. Runs in
  * the page, so it must use nothing from outside this function. The request
  * carries the tab's own cookies and Safari's own headers; the page is read
- * only as far as `maxBytes`, and only `maxChars` of it come back.
+ * only as far as `maxBytes`, and only `maxChars` of it come back. On Firefox
+ * the script's own `fetch` is the extension's request, so the page's
+ * `content.fetch` is used.
  */
 async function readFfnPageInTab(host: string, path: string, maxBytes: number, maxChars: number): Promise<unknown> {
   // The tab moved on: nothing is asked of another site.
@@ -373,9 +378,13 @@ async function readFfnPageInTab(host: string, path: string, maxBytes: number, ma
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15_000);
   try {
-    const response = await fetch(`https://${host}${path}`, {
+    const pageFetch: typeof fetch =
+      typeof content !== "undefined" && content !== null && typeof content.fetch === "function"
+        ? content.fetch.bind(content)
+        : fetch;
+    const response = await pageFetch(`https://${host}${path}`, {
       method: "GET",
-      credentials: "same-origin",
+      credentials: "include",
       cache: "no-store",
       redirect: "follow",
       headers: { Accept: "text/html" },
@@ -400,6 +409,9 @@ async function readFfnPageInTab(host: string, path: string, maxBytes: number, ma
         // The rest of the page is never downloaded.
         reader.cancel().catch(() => undefined);
       }
+    } else if (/text\/html/i.test(contentType || "")) {
+      // A body that cannot be streamed is read whole, and kept only up to the limit.
+      text = (await response.text()).slice(0, maxBytes);
     } else if (body) {
       body.cancel().catch(() => undefined);
     }

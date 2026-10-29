@@ -3,13 +3,14 @@
  *
  * AO3 shows a work's summary only on its first chapter (and on a one-shot or
  * the Entire Work view). A work saved from a later chapter, or imported from
- * an open tab, can reach the Library without one. The page's own script
- * reads the first chapter for the work the reader is on (collector.js); this
- * fills the rest: the reader's other saved AO3 works that no one in Trace has
- * a summary for.
+ * an open tab, can reach the Library without one. This reads the summaries
+ * of the reader's saved AO3 works that no one in Trace has a summary for.
+ * It is the only place the extension reads an AO3 page for a summary.
  *
- * Trace's server lists those works (`/api/extension/library/summary-gaps`,
- * at most 50, newest first). Each is read from its own first page,
+ * A save whose reply says Trace has no summary for the work
+ * (`summary_known: false`) puts that work first. Trace's server lists the
+ * others (`/api/extension/library/summary-gaps`, at most 50, newest first).
+ * Each is read from its own first page,
  * `/works/<id>?view_adult=true`, inside the reader's own AO3 tab, as a
  * same-site request from that page, so the reader's own AO3 session applies
  * (a work for signed-in readers only is read only when they are signed in).
@@ -46,6 +47,9 @@ import {
   type SessionStatePort,
   type StorageAreaLike,
 } from "./summary-fill-storage.mjs";
+
+/** Firefox's page-world window in a content script; absent elsewhere. */
+declare const content: { readonly fetch?: typeof fetch } | undefined;
 
 export const AO3_SUMMARY_STATE_KEY = "traceAo3SummaryFillV1";
 export const AO3_SUMMARY_ATTEMPTED_KEY = "traceAo3SummaryAttemptedV1";
@@ -229,7 +233,8 @@ export function classifyAo3Answer(answer: Ao3TabRead, host: string, workId: stri
  * so it must use nothing from outside this function. The request carries the
  * tab's own cookies; the page is read only as far as the work's own preface
  * (the chapters start after it), or `maxBytes`, is parsed in the page, and
- * only the summary's text comes back.
+ * only the summary's text comes back. On Firefox the script's own `fetch` is
+ * the extension's request, so the page's `content.fetch` is used.
  */
 async function readAo3WorkSummaryInTab(host: string, workId: string, maxBytes: number, maxChars: number): Promise<unknown> {
   // The tab moved on: nothing is asked of another site.
@@ -237,9 +242,13 @@ async function readAo3WorkSummaryInTab(host: string, workId: string, maxBytes: n
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15_000);
   try {
-    const response = await fetch(`https://${host}/works/${workId}?view_adult=true`, {
+    const pageFetch: typeof fetch =
+      typeof content !== "undefined" && content !== null && typeof content.fetch === "function"
+        ? content.fetch.bind(content)
+        : fetch;
+    const response = await pageFetch(`https://${host}/works/${workId}?view_adult=true`, {
       method: "GET",
-      credentials: "same-origin",
+      credentials: "include",
       cache: "no-store",
       redirect: "follow",
       headers: { Accept: "text/html" },
@@ -268,6 +277,11 @@ async function readAo3WorkSummaryInTab(host: string, workId: string, maxBytes: n
         // The rest of the page is never downloaded.
         reader.cancel().catch(() => undefined);
       }
+    } else if (/text\/html/i.test(contentType || "")) {
+      // A body that cannot be streamed is read whole, and kept only up to the limit.
+      const whole = await response.text();
+      const end = whole.search(chaptersStart);
+      text = (end < 0 ? whole : whole.slice(0, end)).slice(0, maxBytes);
     } else if (body) {
       body.cancel().catch(() => undefined);
     }
@@ -357,8 +371,8 @@ export interface TabReaderEnvironment {
 }
 
 export interface Ao3TabReader {
-  /** The tab's AO3 host, and the work it shows, when a page may be read in it now. */
-  tabHost(tabId: number): Promise<{ readonly host: string; readonly workId: string | null } | { readonly code: TabFailCode }>;
+  /** The tab's AO3 host, when a page may be read in it now. */
+  tabHost(tabId: number): Promise<{ readonly host: string } | { readonly code: TabFailCode }>;
   readWork(tabId: number, host: string, workId: string): Promise<Ao3TabRead>;
 }
 
@@ -388,8 +402,7 @@ export function createAo3TabReader(environment: TabReaderEnvironment): Ao3TabRea
       // Only where the reader has allowed Trace on the site itself.
       const allowed = await environment.containsOrigin(`https://${host}/*`).catch(() => false);
       if (!allowed) return { code: "not_allowed" };
-      const shown = /^(?:\/collections\/[^/]+)?\/works\/([1-9][0-9]{0,19})(?:\/|$)/.exec(url.pathname);
-      return { host, workId: shown?.[1] ?? null };
+      return { host };
     },
     async readWork(tabId, host, workId) {
       let results: unknown;
@@ -643,18 +656,35 @@ export class Ao3SummaryFill {
   }
 
   /**
-   * A save to Trace was confirmed. A new AO3 work saved without a summary
-   * means the gaps are listed again soon. The page it was saved from reads
-   * its own work's summary itself when it can, so nothing is read for it here
-   * until the server still lists it.
+   * A save to Trace was confirmed. Only when its reply says Trace has no
+   * summary for the AO3 work (`summary_known: false`) does the work go to
+   * the front of the queue, to be read at the next step the pacing allows,
+   * in whichever AO3 tab speaks then. A work already tried, from any tab, is
+   * not put first again; a later listing still brings it back after the
+   * works not tried yet. `account` is the account the save was made for;
+   * when another is signed in by the time the work's turn comes, it is
+   * dropped.
    */
-  storySaved(story: SavedStory, alreadyInLibrary: boolean): Promise<void> {
-    if (story.hostKind !== "ao3" || alreadyInLibrary || !/^ao3:[1-9][0-9]{0,19}$/.test(story.workKey)) {
-      return Promise.resolve();
-    }
-    const item = story.payload.item as Record<string, unknown> | undefined;
-    if (isRecord(item) && typeof item.sm === "string" && item.sm.trim().length > 0) return Promise.resolve();
-    return this.libraryChanged();
+  storySaved(story: SavedStory, summaryKnown: boolean | undefined, account: string | null): Promise<void> {
+    if (summaryKnown !== false || story.hostKind !== "ao3" || account === null) return Promise.resolve();
+    const workId = /^ao3:([1-9][0-9]{0,19})$/.exec(story.workKey)?.[1];
+    if (workId === undefined) return Promise.resolve();
+    return this.#serial(async () => {
+      if (this.#ports.account() !== account) return;
+      const state = await this.#state();
+      if (state === null || state.account !== account || state.queue[0] === workId) return;
+      let attempted: readonly string[] = [];
+      try {
+        attempted = await this.#ports.attempted.read(state.account);
+      } catch {
+        attempted = [];
+      }
+      if (!this.#current() || attempted.includes(workId)) return;
+      await this.#write(Object.freeze({
+        ...state,
+        queue: Object.freeze([workId, ...state.queue.filter((id) => id !== workId)].slice(0, QUEUE_MAX)),
+      }));
+    });
   }
 
   /**
@@ -845,7 +875,7 @@ export class Ao3SummaryFill {
       await this.#write(Object.freeze({ ...state, last: this.#last("check", tab.code) }));
       return;
     }
-    await this.#read(state, work.workId, tabId, tab.host, tab.workId, now);
+    await this.#read(state, work.workId, tabId, tab.host, now);
   }
 
   async #list(state: FillState, now: number): Promise<void> {
@@ -862,13 +892,17 @@ export class Ao3SummaryFill {
     } catch {
       attempted = [];
     }
-    // Works not tried before come first, in a random order, so a work that
-    // cannot be filled never holds up the others listing after listing.
+    // Works still waiting that the server still lists keep their place (a
+    // work a save put first stays first). Then works not tried before, in a
+    // random order, so a work that cannot be filled never holds up the
+    // others listing after listing.
     const fresh = gaps
       .filter((id) => typeof id === "string" && ID_PATTERN.test(id))
       .filter((id, index, all) => all.indexOf(id) === index);
+    const waiting = state.queue.filter((id) => fresh.includes(id) && !attempted.includes(id));
     const queue = [
-      ...this.#shuffled(fresh.filter((id) => !attempted.includes(id))),
+      ...waiting,
+      ...this.#shuffled(fresh.filter((id) => !attempted.includes(id) && !waiting.includes(id))),
       ...fresh.filter((id) => attempted.includes(id))
         .sort((a, b) => attempted.indexOf(a) - attempted.indexOf(b)),
     ].slice(0, QUEUE_MAX);
@@ -883,15 +917,10 @@ export class Ao3SummaryFill {
   }
 
   /** This step's one request: the work's first page, for its summary. */
-  async #read(state: FillState, workId: string, tabId: number, host: string, shownWorkId: string | null, now: number): Promise<void> {
+  async #read(state: FillState, workId: string, tabId: number, host: string, now: number): Promise<void> {
     // Whatever comes of it, the work leaves the queue; a later listing
     // brings it back, after the works not tried yet.
     const rest = Object.freeze(state.queue.filter((id) => id !== workId));
-    if (workId === shownWorkId) {
-      // The reader is on this work: its own page reads the summary.
-      await this.#write(Object.freeze({ ...state, queue: rest, last: this.#last("check", "on_page") }));
-      return;
-    }
     const newWindow = now - state.windowStart >= WINDOW_MS;
     // The request is on record before it is made, so a background started
     // again keeps the pace and the caps.
