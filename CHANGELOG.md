@@ -4,8 +4,9 @@ This file lists the changes that matter to people using the Chrome, Edge and
 Firefox extension. The Safari extension ships inside the Trace iPhone app, and
 its notes go with each app release.
 
-## Unreleased
+## 1.0.4
 
+- **Import your whole AO3 History.** On your AO3 History page, Trace reads every page of it in your own browser. You then choose what to add on Trace's review page before anything is saved.
 - **AO3 works get their description, wherever you saved them from.** AO3 shows a work's summary only on its first chapter, so a work saved from a later chapter, or imported from your open tabs, could stay in your Library without one. While you browse AO3, Trace now reads the summaries of those works from their first page in your own browser, one work at a time and slowly, and adds them to your Library. It does this only while **Improve story details** is on.
 
 ## 1.0.3
