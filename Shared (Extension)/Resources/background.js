@@ -6950,6 +6950,117 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
   };
 
+  // src/extension-runtime/summary-fill-storage.mts
+  function usableArea(area) {
+    return area && typeof area.get === "function" ? area : null;
+  }
+  var StoredSessionState = class {
+    #area;
+    #key;
+    #validate;
+    #ttlMs;
+    #now;
+    #memory = null;
+    constructor(area, key, validate, options = {}) {
+      this.#area = usableArea(area);
+      this.#key = key;
+      this.#validate = validate;
+      this.#ttlMs = options.ttlMs ?? null;
+      this.#now = options.now ?? (() => Date.now());
+    }
+    get durable() {
+      return this.#area !== null;
+    }
+    async read() {
+      let state;
+      if (this.#area === null) {
+        state = this.#memory;
+      } else {
+        try {
+          const values = await this.#area.get(this.#key);
+          state = this.#validate(values?.[this.#key]);
+        } catch {
+          state = this.#memory;
+        }
+      }
+      if (state !== null && state.exp !== void 0 && state.exp <= this.#now()) {
+        await this.clear();
+        return null;
+      }
+      return state;
+    }
+    async write(state) {
+      const stored = this.#ttlMs === null ? state : Object.freeze({ ...state, exp: state.exp ?? this.#now() + this.#ttlMs });
+      this.#memory = stored;
+      if (this.#area === null) return;
+      try {
+        await this.#area.set({ [this.#key]: stored });
+      } catch {
+      }
+    }
+    async clear() {
+      this.#memory = null;
+      if (this.#area === null) return;
+      try {
+        await this.#area.remove(this.#key);
+      } catch {
+      }
+    }
+  };
+  var StoredAttemptedIds = class {
+    #area;
+    #key;
+    #idPattern;
+    #max;
+    #memory = null;
+    constructor(area, options) {
+      this.#area = usableArea(area);
+      this.#key = options.key;
+      this.#idPattern = options.idPattern;
+      this.#max = options.max;
+    }
+    async #load() {
+      if (this.#area === null) return this.#memory;
+      try {
+        const values = await this.#area.get(this.#key);
+        const value = values?.[this.#key];
+        if (!value || typeof value.account !== "string" || !Array.isArray(value.ids) || !value.ids.every((id) => typeof id === "string" && this.#idPattern.test(id))) {
+          return null;
+        }
+        return { account: value.account, ids: value.ids.slice(-this.#max) };
+      } catch {
+        return this.#memory;
+      }
+    }
+    async read(account) {
+      const stored = await this.#load();
+      return stored !== null && stored.account === account ? stored.ids : [];
+    }
+    async add(account, storyIds) {
+      const previous = await this.read(account);
+      const ids = [...previous.filter((id) => !storyIds.includes(id)), ...storyIds].filter((id) => this.#idPattern.test(id)).slice(-this.#max);
+      const next = { account, ids };
+      this.#memory = next;
+      if (this.#area === null) return;
+      try {
+        await this.#area.set({ [this.#key]: next });
+      } catch {
+      }
+    }
+    async keepOnly(account) {
+      const stored = await this.#load();
+      if (stored !== null && stored.account !== account) await this.clear();
+    }
+    async clear() {
+      this.#memory = null;
+      if (this.#area === null) return;
+      try {
+        await this.#area.remove(this.#key);
+      } catch {
+      }
+    }
+  };
+
   // src/extension-runtime/ffn-summary-fill.mts
   var FFN_SUMMARY_STATE_KEY = "traceFfnSummaryFillV1";
   var FFN_SUMMARY_ATTEMPTED_KEY = "traceFfnSummaryAttemptedV1";
@@ -7241,51 +7352,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
     };
   }
-  var StoredAttempted = class {
-    #area;
-    #memory = null;
+  var StoredAttempted = class extends StoredAttemptedIds {
     constructor(area) {
-      this.#area = area && typeof area.get === "function" ? area : null;
-    }
-    async #load() {
-      if (this.#area === null) return this.#memory;
-      try {
-        const values = await this.#area.get(FFN_SUMMARY_ATTEMPTED_KEY);
-        const value = values?.[FFN_SUMMARY_ATTEMPTED_KEY];
-        if (!value || typeof value.account !== "string" || !Array.isArray(value.ids) || !value.ids.every((id) => typeof id === "string" && ID_PATTERN.test(id))) {
-          return null;
-        }
-        return { account: value.account, ids: value.ids.slice(-ATTEMPTED_MAX) };
-      } catch {
-        return this.#memory;
-      }
-    }
-    async read(account) {
-      const stored = await this.#load();
-      return stored !== null && stored.account === account ? stored.ids : [];
-    }
-    async add(account, storyIds) {
-      const previous = await this.read(account);
-      const ids = [...previous.filter((id) => !storyIds.includes(id)), ...storyIds].filter((id) => ID_PATTERN.test(id)).slice(-ATTEMPTED_MAX);
-      const next = { account, ids };
-      this.#memory = next;
-      if (this.#area === null) return;
-      try {
-        await this.#area.set({ [FFN_SUMMARY_ATTEMPTED_KEY]: next });
-      } catch {
-      }
-    }
-    async keepOnly(account) {
-      const stored = await this.#load();
-      if (stored !== null && stored.account !== account) await this.clear();
-    }
-    async clear() {
-      this.#memory = null;
-      if (this.#area === null) return;
-      try {
-        await this.#area.remove(FFN_SUMMARY_ATTEMPTED_KEY);
-      } catch {
-      }
+      super(area, { key: FFN_SUMMARY_ATTEMPTED_KEY, idPattern: ID_PATTERN, max: ATTEMPTED_MAX });
     }
   };
   var CODE_PATTERN = /^[a-z_]{1,32}$/;
@@ -7312,53 +7381,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     return value;
   }
-  var StoredFillState = class {
-    #area;
-    #ttlMs;
-    #now;
-    #memory = null;
+  var StoredFillState = class extends StoredSessionState {
     constructor(area, options = {}) {
-      this.#area = area && typeof area.get === "function" ? area : null;
-      this.#ttlMs = options.ttlMs ?? null;
-      this.#now = options.now ?? (() => Date.now());
-    }
-    get durable() {
-      return this.#area !== null;
-    }
-    async read() {
-      let state;
-      if (this.#area === null) {
-        state = this.#memory;
-      } else {
-        try {
-          const values = await this.#area.get(FFN_SUMMARY_STATE_KEY);
-          state = validState(values?.[FFN_SUMMARY_STATE_KEY]);
-        } catch {
-          state = this.#memory;
-        }
-      }
-      if (state !== null && state.exp !== void 0 && state.exp <= this.#now()) {
-        await this.clear();
-        return null;
-      }
-      return state;
-    }
-    async write(state) {
-      const stored = this.#ttlMs === null ? state : Object.freeze({ ...state, exp: state.exp ?? this.#now() + this.#ttlMs });
-      this.#memory = stored;
-      if (this.#area === null) return;
-      try {
-        await this.#area.set({ [FFN_SUMMARY_STATE_KEY]: stored });
-      } catch {
-      }
-    }
-    async clear() {
-      this.#memory = null;
-      if (this.#area === null) return;
-      try {
-        await this.#area.remove(FFN_SUMMARY_STATE_KEY);
-      } catch {
-      }
+      super(area, FFN_SUMMARY_STATE_KEY, validState, options);
     }
   };
   function freshState(account) {
@@ -7776,6 +7801,597 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
   };
 
+  // src/extension-runtime/ao3-summary-fill.mts
+  var AO3_SUMMARY_STATE_KEY = "traceAo3SummaryFillV1";
+  var AO3_SUMMARY_ATTEMPTED_KEY = "traceAo3SummaryAttemptedV1";
+  var REQUEST_GAP_MS2 = 3e4;
+  var BACKFILL_GAP_MS2 = 6e4;
+  var SAVE_SETTLE_MS2 = 2e4;
+  var WINDOW_MAX_READS = 30;
+  var WINDOW_MS = 6 * 60 * 6e4;
+  var RELIST_MS = 30 * 6e4;
+  var RELIST_MIN_MS = 5 * 6e4;
+  var STOP_MS2 = 60 * 6e4;
+  var STOP_MAX_MS = 24 * 60 * 6e4;
+  var MISSES_MAX = 3;
+  var QUEUE_MAX2 = 50;
+  var LOCAL_STATE_TTL_MS2 = 12 * 60 * 6e4;
+  var ATTEMPTED_MAX2 = 200;
+  var TAB_READ_TIMEOUT_MS2 = 15e3;
+  var MAX_TAB_READ_BYTES2 = 1024 * 1024;
+  var SUMMARY_MAX_CHARS2 = 4e3;
+  var ID_PATTERN2 = /^[1-9][0-9]{0,19}$/;
+  var NO_NOTE2 = Object.freeze({ status: null, host: null, path: null, cf: null });
+  function workPathPattern(workId) {
+    return new RegExp(`^(?:/collections/[^/]+)?/works/${workId}(?:/chapters/[1-9][0-9]{0,19})?/?$`);
+  }
+  function ao3PathType(pathname, workId) {
+    if (workPathPattern(workId).test(pathname)) return "work";
+    if (/^\/users\/login(?:\/|$)/.test(pathname)) return "login";
+    return "other";
+  }
+  function cfNote2(value) {
+    if (value === null || value === "") return null;
+    const lower = value.trim().toLowerCase();
+    return /^[a-z_-]{1,20}$/.test(lower) ? lower : "other";
+  }
+  function retryAfterMs(value, now) {
+    if (value === null) return null;
+    const text2 = value.trim();
+    if (/^[0-9]{1,9}$/.test(text2)) return Number(text2) * 1e3;
+    const at = Date.parse(text2);
+    return Number.isFinite(at) && at > now ? at - now : null;
+  }
+  function classifyAo3Answer(answer, host, workId, now) {
+    if (answer.kind === "failed") {
+      const note2 = { ...NO_NOTE2, host, path: "work" };
+      return answer.code === "timeout" || answer.code === "network" ? { kind: "stop", reason: "error", note: note2, waitMs: null } : { kind: "tab", code: answer.code, note: note2 };
+    }
+    let landed = null;
+    try {
+      landed = new URL(answer.url);
+    } catch {
+      landed = null;
+    }
+    const note = {
+      status: Number.isSafeInteger(answer.status) ? answer.status : null,
+      host: landed !== null && /^[a-z0-9.-]{1,80}$/i.test(landed.hostname) ? landed.hostname.toLowerCase() : host,
+      path: landed !== null ? ao3PathType(landed.pathname, workId) : null,
+      cf: cfNote2(answer.cfMitigated)
+    };
+    const stop = (reason) => ({
+      kind: "stop",
+      reason,
+      note,
+      waitMs: retryAfterMs(answer.retryAfter, now)
+    });
+    if (note.cf === "challenge") return stop("challenge");
+    if (landed === null || landed.protocol !== "https:" || landed.hostname !== host) {
+      return stop(answer.page === "challenge" ? "challenge" : "redirect");
+    }
+    if (note.path === "login") return { kind: "skip", outcome: "restricted", note };
+    if (note.path !== "work") return { kind: "skip", outcome: "unreadable", note };
+    if (answer.status === 404 || answer.status === 410) return { kind: "skip", outcome: "gone", note };
+    if (answer.status !== 200) return stop(answer.page === "challenge" ? "challenge" : "status");
+    if (!/text\/html/i.test(answer.contentType ?? "")) return stop("not_html");
+    if (answer.page === "challenge") return stop("challenge");
+    if (answer.page !== "work") return { kind: "skip", outcome: "unreadable", note };
+    const summary = (answer.summary ?? "").trim().slice(0, SUMMARY_MAX_CHARS2);
+    return summary ? { kind: "summary", summary, note } : { kind: "skip", outcome: "no_summary", note };
+  }
+  async function readAo3WorkSummaryInTab(host, workId, maxBytes, maxChars) {
+    if (location.protocol !== "https:" || location.hostname !== host) return { ok: false, error: "moved" };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15e3);
+    try {
+      const response = await fetch(`https://${host}/works/${workId}?view_adult=true`, {
+        method: "GET",
+        credentials: "same-origin",
+        cache: "no-store",
+        redirect: "follow",
+        headers: { Accept: "text/html" },
+        signal: controller.signal
+      });
+      const contentType = response.headers.get("content-type");
+      const chaptersStart = /<div\b[^>]*\bid\s*=\s*["']?chapters\b/i;
+      let text2 = "";
+      const body = response.body;
+      if (/text\/html/i.test(contentType || "") && body && typeof body.getReader === "function") {
+        const reader = body.getReader();
+        const decoder = new TextDecoder();
+        let bytes = 0;
+        try {
+          for (; ; ) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            bytes += chunk.value.byteLength;
+            const before = text2.length;
+            text2 += decoder.decode(chunk.value, { stream: true });
+            if (chaptersStart.test(text2.slice(Math.max(0, before - 64)))) break;
+            if (bytes >= maxBytes) break;
+          }
+        } finally {
+          reader.cancel().catch(() => void 0);
+        }
+      } else if (body) {
+        body.cancel().catch(() => void 0);
+      }
+      const head = text2.slice(0, 8192);
+      const challenge = /<title>\s*(?:just a moment|attention required|please wait)/i.test(head) || /\/cdn-cgi\/challenge-platform\//i.test(head) || /\bcf[-_]chl[-_]/i.test(head) || /\bchallenge-form\b/i.test(head);
+      let page = challenge ? "challenge" : "other";
+      let summary = null;
+      if (!challenge && text2) {
+        const parsed = new DOMParser().parseFromString(text2, "text/html");
+        const skin = parsed.getElementById("workskin");
+        if (skin !== null) {
+          page = "work";
+          const preface = Array.from(skin.children).find((element) => element.classList.contains("preface") && element.classList.contains("group") && !element.classList.contains("chapter"));
+          const quote = preface?.querySelector(".summary blockquote.userstuff") ?? null;
+          if (quote !== null) {
+            const blocks = /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|CENTER|DD|DETAILS|DIV|DL|DT|FIGCAPTION|FIGURE|FOOTER|H[1-6]|HEADER|HR|LI|OL|P|PRE|SECTION|TABLE|TR|UL)$/;
+            let out = "";
+            const walk = (node) => {
+              for (let child = node.firstChild; child; child = child.nextSibling) {
+                if (child.nodeType === 3) {
+                  out += String(child.nodeValue || "").replace(/\s+/g, " ");
+                } else if (child.nodeType === 1) {
+                  const tag = String(child.tagName || "").toUpperCase();
+                  if (tag === "BR") {
+                    out += "\n";
+                  } else if (tag !== "SCRIPT" && tag !== "STYLE") {
+                    const block = blocks.test(tag);
+                    if (block) out += "\n\n";
+                    walk(child);
+                    if (block) out += "\n\n";
+                  }
+                }
+              }
+            };
+            walk(quote);
+            const clean = out.split("\n").map((line) => line.replace(/[ \t ]+/g, " ").trim()).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+            summary = clean ? clean.slice(0, maxChars) : null;
+          }
+        }
+      }
+      return {
+        ok: true,
+        status: response.status,
+        url: response.url,
+        contentType,
+        cfMitigated: response.headers.get("cf-mitigated"),
+        retryAfter: response.headers.get("retry-after"),
+        page,
+        summary
+      };
+    } catch (_) {
+      return { ok: false, error: controller.signal.aborted ? "timeout" : "network" };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  function isRecord20(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function stringOrNull2(value, max = 200) {
+    return typeof value === "string" ? value.slice(0, max) : null;
+  }
+  function createAo3TabReader(environment) {
+    const timeoutMs = environment.timeoutMs ?? TAB_READ_TIMEOUT_MS2 + 5e3;
+    return {
+      async tabHost(tabId) {
+        if (!environment.hasScripting) return { code: "no_result" };
+        let tab;
+        try {
+          tab = await environment.getTab(tabId);
+        } catch {
+          return { code: "tab_gone" };
+        }
+        if (!isRecord20(tab) || typeof tab.url !== "string") return { code: "tab_not_ao3" };
+        let url;
+        try {
+          url = new URL(tab.url);
+        } catch {
+          return { code: "tab_not_ao3" };
+        }
+        if (url.protocol !== "https:" || archiveHostKindFromSender({ url: url.href }) !== "ao3") {
+          return { code: "tab_not_ao3" };
+        }
+        const host = url.hostname.toLowerCase();
+        const allowed = await environment.containsOrigin(`https://${host}/*`).catch(() => false);
+        if (!allowed) return { code: "not_allowed" };
+        const shown = /^(?:\/collections\/[^/]+)?\/works\/([1-9][0-9]{0,19})(?:\/|$)/.exec(url.pathname);
+        return { host, workId: shown?.[1] ?? null };
+      },
+      async readWork(tabId, host, workId) {
+        let results;
+        try {
+          results = await new Promise((resolve, reject) => {
+            const timer = setTimeout(() => resolve("timeout"), timeoutMs);
+            environment.executeScript({
+              target: { tabId, frameIds: [0] },
+              func: readAo3WorkSummaryInTab,
+              args: [host, workId, MAX_TAB_READ_BYTES2, SUMMARY_MAX_CHARS2]
+            }).then(
+              (value) => {
+                clearTimeout(timer);
+                resolve(value);
+              },
+              (error) => {
+                clearTimeout(timer);
+                reject(error);
+              }
+            );
+          });
+        } catch {
+          return { kind: "failed", code: "no_result" };
+        }
+        if (results === "timeout") return { kind: "failed", code: "timeout" };
+        const first = Array.isArray(results) ? results[0] : void 0;
+        const result = isRecord20(first) ? first.result : void 0;
+        if (!isRecord20(result)) return { kind: "failed", code: "no_result" };
+        if (result.ok !== true) {
+          if (result.error === "moved") return { kind: "failed", code: "tab_not_ao3" };
+          return { kind: "failed", code: result.error === "timeout" ? "timeout" : "network" };
+        }
+        if (typeof result.status !== "number" || typeof result.url !== "string" || result.page !== "work" && result.page !== "challenge" && result.page !== "other" || result.summary !== null && typeof result.summary !== "string") {
+          return { kind: "failed", code: "no_result" };
+        }
+        return {
+          kind: "response",
+          status: result.status,
+          url: result.url,
+          contentType: stringOrNull2(result.contentType),
+          cfMitigated: stringOrNull2(result.cfMitigated),
+          retryAfter: stringOrNull2(result.retryAfter, 64),
+          page: result.page,
+          summary: typeof result.summary === "string" ? result.summary.slice(0, SUMMARY_MAX_CHARS2) : null
+        };
+      }
+    };
+  }
+  var CODE_PATTERN2 = /^[a-z0-9_]{1,32}$/;
+  var finite2 = (value) => typeof value === "number" && Number.isFinite(value);
+  function validNote2(value) {
+    return (value.status === null || Number.isSafeInteger(value.status)) && (value.host === null || typeof value.host === "string" && /^[a-z0-9.-]{1,80}$/.test(value.host)) && (value.path === null || value.path === "work" || value.path === "login" || value.path === "other") && (value.cf === null || typeof value.cf === "string" && /^[a-z_-]{1,20}$/.test(value.cf));
+  }
+  function validStop2(value) {
+    if (value === null) return true;
+    return isRecord20(value) && validNote2(value) && typeof value.reason === "string" && CODE_PATTERN2.test(value.reason) && finite2(value.at) && finite2(value.until);
+  }
+  function validLast2(value) {
+    if (value === null) return true;
+    return isRecord20(value) && validNote2(value) && typeof value.stage === "string" && CODE_PATTERN2.test(value.stage) && typeof value.outcome === "string" && CODE_PATTERN2.test(value.outcome) && (value.listed === null || Number.isSafeInteger(value.listed)) && (value.send === null || value.send === "accepted" || value.send === "skipped" || value.send === "failed") && finite2(value.at);
+  }
+  function validState2(value) {
+    if (!isRecord20(value)) return null;
+    if (value.v !== 1 || typeof value.account !== "string" || !Array.isArray(value.queue) || value.queue.length > QUEUE_MAX2 || !value.queue.every((id) => typeof id === "string" && ID_PATTERN2.test(id)) || !finite2(value.listedAt) || typeof value.stale !== "boolean" || !finite2(value.windowStart) || !Number.isSafeInteger(value.reads) || !Number.isSafeInteger(value.misses) || !finite2(value.lastRequestAt) || !finite2(value.lastStepAt) || !validStop2(value.stop) || !validLast2(value.last) || value.exp !== void 0 && !finite2(value.exp)) {
+      return null;
+    }
+    return value;
+  }
+  var StoredFillState2 = class extends StoredSessionState {
+    constructor(area, options = {}) {
+      super(area, AO3_SUMMARY_STATE_KEY, validState2, options);
+    }
+  };
+  var StoredAttempted2 = class extends StoredAttemptedIds {
+    constructor(area) {
+      super(area, { key: AO3_SUMMARY_ATTEMPTED_KEY, idPattern: ID_PATTERN2, max: ATTEMPTED_MAX2 });
+    }
+  };
+  function freshState2(account) {
+    return Object.freeze({
+      v: 1,
+      account,
+      queue: Object.freeze([]),
+      listedAt: Number.MIN_SAFE_INTEGER,
+      stale: false,
+      windowStart: Number.MIN_SAFE_INTEGER,
+      reads: 0,
+      misses: 0,
+      lastRequestAt: Number.MIN_SAFE_INTEGER,
+      lastStepAt: Number.MIN_SAFE_INTEGER,
+      stop: null,
+      last: null
+    });
+  }
+  var Ao3SummaryFill = class {
+    #ports;
+    #tail = Promise.resolve();
+    /** A step waiting its turn, and the tab it should run in. */
+    #queued = null;
+    #nextTab = null;
+    #savesInFlight = 0;
+    #lastSaveAt = Number.NEGATIVE_INFINITY;
+    /** Raised by every sign-out, account change or reset; a step from before writes nothing. */
+    #generation = 0;
+    /** The generation the running step started in. */
+    #runGeneration = 0;
+    constructor(ports) {
+      this.#ports = ports;
+    }
+    /** A save to Trace is starting. */
+    saveStarted() {
+      this.#savesInFlight += 1;
+      this.#lastSaveAt = this.#ports.clock.now();
+    }
+    /** A save to Trace has ended. */
+    saveEnded() {
+      this.#savesInFlight = Math.max(0, this.#savesInFlight - 1);
+      this.#lastSaveAt = this.#ports.clock.now();
+    }
+    /**
+     * A save to Trace was confirmed. A new AO3 work saved without a summary
+     * means the gaps are listed again soon. The page it was saved from reads
+     * its own work's summary itself when it can, so nothing is read for it here
+     * until the server still lists it.
+     */
+    storySaved(story, alreadyInLibrary) {
+      if (story.hostKind !== "ao3" || alreadyInLibrary || !/^ao3:[1-9][0-9]{0,19}$/.test(story.workKey)) {
+        return Promise.resolve();
+      }
+      const item = story.payload.item;
+      if (isRecord20(item) && typeof item.sm === "string" && item.sm.trim().length > 0) return Promise.resolve();
+      return this.libraryChanged();
+    }
+    /**
+     * Works were added to the Library some other way (an import of open tabs):
+     * the gaps are listed again at the next step allowed.
+     */
+    libraryChanged() {
+      return this.#serial(async () => {
+        const state = await this.#state();
+        if (state === null || state.stale) return;
+        await this.#write(Object.freeze({ ...state, stale: true }));
+      });
+    }
+    /**
+     * An AO3 page spoke to Trace (it loaded, or the reader moved on it): any
+     * work due is done now, in that page's tab.
+     */
+    ao3PageActivity(tabId) {
+      if (!Number.isSafeInteger(tabId)) return Promise.resolve();
+      this.#nextTab = tabId;
+      this.#queued ??= this.#serial(async () => {
+        this.#queued = null;
+        const tab = this.#nextTab;
+        this.#nextTab = null;
+        if (tab !== null) await this.#step(tab);
+      });
+      return this.#queued;
+    }
+    /** The fill's stored state, for a test build's status line. */
+    async status() {
+      try {
+        return await this.#ports.state.read();
+      } catch {
+        return null;
+      }
+    }
+    /** Sign-out or another account: forget everything. */
+    async clear() {
+      await this.reset();
+      await this.#ports.attempted.clear();
+    }
+    /** Forgets the session's state (work, counters, stop and record); the tried list stays. */
+    async reset() {
+      this.#generation += 1;
+      this.#nextTab = null;
+      await this.#ports.state.clear();
+    }
+    #serial(work) {
+      const run = this.#tail.then(async () => {
+        this.#runGeneration = this.#generation;
+        try {
+          await work();
+        } catch {
+        }
+      });
+      this.#tail = run;
+      return run;
+    }
+    /** Whether the running step still belongs to the current sign-in. */
+    #current() {
+      return this.#runGeneration === this.#generation;
+    }
+    /** Writes state only for the current sign-in; false when the step is stale. */
+    async #write(state) {
+      if (!this.#current()) return false;
+      await this.#ports.state.write(state);
+      return this.#current();
+    }
+    /** The session's state for the signed-in account, or null when signed out. */
+    async #state() {
+      const account = this.#ports.account();
+      if (account === null) {
+        await this.clear();
+        return null;
+      }
+      const stored = await this.#ports.state.read();
+      if (!this.#current()) return null;
+      if (stored !== null && stored.account === account) return stored;
+      await this.#ports.attempted.keepOnly(account).catch(() => void 0);
+      const fresh = freshState2(account);
+      return await this.#write(fresh) ? fresh : null;
+    }
+    #shuffled(items) {
+      const random = this.#ports.random ?? Math.random;
+      const out = [...items];
+      for (let index = out.length - 1; index > 0; index -= 1) {
+        const other = Math.floor(random() * (index + 1));
+        [out[index], out[other]] = [out[other], out[index]];
+      }
+      return out;
+    }
+    /** What is due now, if anything. */
+    #due(state, now) {
+      if (state.stop !== null && now < state.stop.until) return null;
+      if (!this.#ports.state.durable) return null;
+      if (this.#savesInFlight > 0 || now - this.#lastSaveAt < SAVE_SETTLE_MS2) return null;
+      if (now - state.lastRequestAt < REQUEST_GAP_MS2) return null;
+      if (now - state.lastStepAt < BACKFILL_GAP_MS2) return null;
+      const sinceListed = now - state.listedAt;
+      if (state.stale && sinceListed >= RELIST_MIN_MS || state.queue.length === 0 && sinceListed >= RELIST_MS) {
+        return { kind: "list" };
+      }
+      const head = state.queue[0];
+      if (head === void 0) return null;
+      if (now - state.windowStart < WINDOW_MS && state.reads >= WINDOW_MAX_READS) return null;
+      return { kind: "read", workId: head };
+    }
+    #last(stage, outcome, note = NO_NOTE2, extra = {}) {
+      return Object.freeze({
+        stage,
+        outcome,
+        ...note,
+        listed: extra.listed ?? null,
+        send: extra.send ?? null,
+        at: this.#ports.clock.now()
+      });
+    }
+    /** Pauses the fill, with what stopped it; the rest of the work is kept. */
+    async #stop(state, reason, note, last, waitMs = null) {
+      const now = this.#ports.clock.now();
+      const pause2 = Math.min(STOP_MAX_MS, Math.max(STOP_MS2, waitMs ?? 0));
+      await this.#write(Object.freeze({
+        ...state,
+        stop: Object.freeze({ reason, ...note, at: now, until: now + pause2 }),
+        last
+      }));
+    }
+    async #step(tabId) {
+      const state = await this.#state();
+      if (state === null) return;
+      const now = this.#ports.clock.now();
+      const work = this.#due(state, now);
+      if (work === null) return;
+      let enabled = false;
+      try {
+        enabled = await this.#ports.contributionsEnabled();
+      } catch {
+        enabled = false;
+      }
+      if (!enabled) {
+        await this.#write(Object.freeze({
+          ...state,
+          queue: Object.freeze([]),
+          stale: false,
+          listedAt: now,
+          lastStepAt: now,
+          last: this.#last("check", "off")
+        }));
+        return;
+      }
+      if (work.kind === "list") {
+        await this.#list(state, now);
+        return;
+      }
+      const tab = await this.#ports.tabs.tabHost(tabId);
+      if (!this.#current()) return;
+      if ("code" in tab) {
+        await this.#write(Object.freeze({ ...state, last: this.#last("check", tab.code) }));
+        return;
+      }
+      await this.#read(state, work.workId, tabId, tab.host, tab.workId, now);
+    }
+    async #list(state, now) {
+      const gaps = await this.#ports.listGaps().catch(() => null);
+      if (!this.#current()) return;
+      const listedAt = Object.freeze({ ...state, lastStepAt: now });
+      if (gaps === null) {
+        await this.#stop(listedAt, "gaps", NO_NOTE2, this.#last("gaps", "gaps"));
+        return;
+      }
+      let attempted = [];
+      try {
+        attempted = await this.#ports.attempted.read(state.account);
+      } catch {
+        attempted = [];
+      }
+      const fresh = gaps.filter((id) => typeof id === "string" && ID_PATTERN2.test(id)).filter((id, index, all) => all.indexOf(id) === index);
+      const queue = [
+        ...this.#shuffled(fresh.filter((id) => !attempted.includes(id))),
+        ...fresh.filter((id) => attempted.includes(id)).sort((a, b) => attempted.indexOf(a) - attempted.indexOf(b))
+      ].slice(0, QUEUE_MAX2);
+      await this.#write(Object.freeze({
+        ...listedAt,
+        queue: Object.freeze(queue),
+        listedAt: now,
+        stale: false,
+        last: this.#last("gaps", "listed", NO_NOTE2, { listed: queue.length })
+      }));
+    }
+    /** This step's one request: the work's first page, for its summary. */
+    async #read(state, workId, tabId, host, shownWorkId, now) {
+      const rest = Object.freeze(state.queue.filter((id) => id !== workId));
+      if (workId === shownWorkId) {
+        await this.#write(Object.freeze({ ...state, queue: rest, last: this.#last("check", "on_page") }));
+        return;
+      }
+      const newWindow = now - state.windowStart >= WINDOW_MS;
+      const counted = Object.freeze({
+        ...state,
+        queue: rest,
+        lastRequestAt: now,
+        lastStepAt: now,
+        windowStart: newWindow ? now : state.windowStart,
+        reads: (newWindow ? 0 : state.reads) + 1
+      });
+      if (!await this.#write(counted)) return;
+      const answer = await this.#ports.tabs.readWork(tabId, host, workId);
+      if (!this.#current()) return;
+      const read = classifyAo3Answer(answer, host, workId, this.#ports.clock.now());
+      if (read.kind === "tab") {
+        await this.#write(Object.freeze({
+          ...state,
+          last: this.#last("work_page", read.code, read.note)
+        }));
+        return;
+      }
+      try {
+        await this.#ports.attempted.add(state.account, [workId]);
+      } catch {
+      }
+      if (!this.#current()) return;
+      if (read.kind === "stop") {
+        await this.#stop(counted, read.reason, read.note, this.#last("work_page", read.reason, read.note), read.waitMs);
+        return;
+      }
+      if (read.kind === "skip") {
+        const misses = read.outcome === "unreadable" ? counted.misses + 1 : 0;
+        const next = Object.freeze({ ...counted, misses });
+        if (misses >= MISSES_MAX) {
+          await this.#stop(
+            Object.freeze({ ...next, misses: 0 }),
+            "missing",
+            read.note,
+            this.#last("work_page", "missing", read.note)
+          );
+          return;
+        }
+        await this.#write(Object.freeze({ ...next, last: this.#last("work_page", read.outcome, read.note) }));
+        return;
+      }
+      const found = Object.freeze({ storyId: workId, summary: read.summary });
+      const filled = Object.freeze({ ...counted, misses: 0 });
+      if (!await this.#write(filled)) return;
+      if (this.#ports.account() !== state.account || !this.#current()) return;
+      let outcome = "failed";
+      try {
+        outcome = await this.#ports.contribute([found]);
+      } catch {
+        outcome = "failed";
+      }
+      if (!this.#current()) return;
+      const last = this.#last("send", outcome === "accepted" ? "filled" : "send", read.note, { send: outcome });
+      if (outcome !== "accepted") {
+        await this.#stop(filled, "send", read.note, last);
+        return;
+      }
+      await this.#write(Object.freeze({ ...filled, last }));
+    }
+  };
+
   // src/extension-runtime/popup-page-relay.mts
   var POPUP_PAGE_PORT = "trace-popup-page-v1";
   var POPUP_PAGE_RELAY = "TRACE_POPUP_PAGE_RELAY";
@@ -7974,6 +8590,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #finishQualification;
     #metadataContributions;
     #ffnSummaries;
+    #ao3Summaries;
     /** State kept for one account, cleared when that account signs out or another replaces it. */
     #accountCleanups = [];
     #savedFilters;
@@ -8176,6 +8793,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         webOrigin: environment.webOrigin
       });
       this.#ffnSummaries = environment.ffnSummaryFill === void 0 || environment.mode !== "kernel" ? null : this.#createFfnSummaryFill(environment, environment.ffnSummaryFill, storage);
+      this.#ao3Summaries = environment.ao3SummaryFill === void 0 || environment.mode !== "kernel" ? null : this.#createAo3SummaryFill(environment, environment.ao3SummaryFill, storage);
       this.#storyCommands = new StoryCommandService({
         session: this.#service,
         api: new StoryCommandApi(environment.fetch, environment.apiBase),
@@ -8193,7 +8811,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         clock: { now: () => Date.now() }
       });
     }
-    #createFfnSummaryFill(environment, options, storage) {
+    /**
+     * What both summary fills share: where their state and tried ids are kept,
+     * how a page is read in the reader's tab, who is signed in, the
+     * contribution preference, the server's list of gaps for one site, and
+     * sending summaries for that site, identity and summary only.
+     */
+    #summaryFillShared(environment, sessionArea, storage, source) {
       const preference = new BrowserMetadataPreferencePort(storage);
       const apiBase = environment.apiBase.replace(/\/$/, "");
       const call = (target, method, args) => extensionCall(
@@ -8204,33 +8828,29 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         environment.storageMode
       );
       const { tabs, scripting, permissions } = environment;
-      const sessionArea = options.sessionArea ?? null;
-      return new FfnSummaryFill({
-        clock: { now: () => Date.now() },
+      const localArea = {
+        get: (key) => storage.get(key),
+        set: (items) => storage.set(items),
+        remove: (key) => storage.remove(key)
+      };
+      return {
         // Session-only where the browser has it; otherwise local storage that
         // expires, and is removed on sign-out like the rest.
-        state: sessionArea !== null ? new StoredFillState({
+        stateArea: sessionArea !== null ? {
           get: (key) => call(sessionArea, "get", [key]),
           set: (items) => call(sessionArea, "set", [items]),
           remove: (key) => call(sessionArea, "remove", [key])
-        }) : new StoredFillState({
-          get: (key) => storage.get(key),
-          set: (items) => storage.set(items),
-          remove: (key) => storage.remove(key)
-        }, { ttlMs: LOCAL_STATE_TTL_MS }),
-        tabs: createFfnTabReader({
+        } : localArea,
+        stateTtl: sessionArea !== null ? null : LOCAL_STATE_TTL_MS,
+        // Ids only, capped, removed on sign-out.
+        attemptedArea: localArea,
+        tabReader: {
           hasScripting: typeof scripting?.executeScript === "function" && typeof tabs.get === "function",
-          // Only the tab a FanFiction.net page spoke from, or the sheet's own.
+          // Only the tab a story-site page spoke from, or the sheet's own.
           getTab: (sourceTabId) => call(tabs, "get", [sourceTabId]),
           executeScript: (details) => call(scripting, "executeScript", [details]),
           containsOrigin: async (origin) => typeof permissions?.contains === "function" && await call(permissions, "contains", [{ origins: [origin] }]) === true
-        }),
-        // Ids only, capped, removed on sign-out (ffn-summary-fill.mts).
-        attempted: new StoredAttempted({
-          get: (key) => storage.get(key),
-          set: (items) => storage.set(items),
-          remove: (key) => storage.remove(key)
-        }),
+        },
         account: () => {
           const scope2 = this.#service.publicationScope();
           return scope2 === null ? null : `${scope2.accountId}:${scope2.epoch}`;
@@ -8246,7 +8866,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
                   "Content-Type": "application/json",
                   Authorization: `Bearer ${credential}`
                 },
-                body: JSON.stringify({ source: "ffn" })
+                body: JSON.stringify({ source })
               });
             } catch {
               return { kind: "success", value: null };
@@ -8267,21 +8887,47 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         contribute: async (summaries) => {
           const result = await this.#metadataContributions.execute(Object.freeze({
             kind: "library_metadata_refresh",
-            hostKind: "ffn",
-            workKeys: Object.freeze(summaries.map(({ storyId }) => `ffn:${storyId}`)),
+            hostKind: source,
+            workKeys: Object.freeze(summaries.map(({ storyId }) => `${source}:${storyId}`)),
             // Identity and the summary only. The address is the form every
-            // FanFiction.net save already records.
+            // save from that site already records.
             payload: Object.freeze({
               items: Object.freeze(summaries.map(({ storyId, summary }) => Object.freeze({
-                source: "ffn",
+                source,
                 sourceStoryId: storyId,
-                url: `https://www.fanfiction.net/s/${storyId}/`,
+                url: source === "ffn" ? `https://www.fanfiction.net/s/${storyId}/` : `https://archiveofourown.org/works/${storyId}`,
                 summary
               })))
             })
           }));
           return result.kind === "accepted" ? "accepted" : result.kind === "skipped" ? "skipped" : "failed";
         }
+      };
+    }
+    #createFfnSummaryFill(environment, options, storage) {
+      const shared = this.#summaryFillShared(environment, options.sessionArea ?? null, storage, "ffn");
+      return new FfnSummaryFill({
+        clock: { now: () => Date.now() },
+        state: new StoredFillState(shared.stateArea, shared.stateTtl === null ? {} : { ttlMs: shared.stateTtl }),
+        tabs: createFfnTabReader(shared.tabReader),
+        attempted: new StoredAttempted(shared.attemptedArea),
+        account: shared.account,
+        contributionsEnabled: shared.contributionsEnabled,
+        listGaps: shared.listGaps,
+        contribute: shared.contribute
+      });
+    }
+    #createAo3SummaryFill(environment, options, storage) {
+      const shared = this.#summaryFillShared(environment, options.sessionArea ?? null, storage, "ao3");
+      return new Ao3SummaryFill({
+        clock: { now: () => Date.now() },
+        state: new StoredFillState2(shared.stateArea, shared.stateTtl === null ? {} : { ttlMs: shared.stateTtl }),
+        tabs: createAo3TabReader(shared.tabReader),
+        attempted: new StoredAttempted2(shared.attemptedArea),
+        account: shared.account,
+        contributionsEnabled: shared.contributionsEnabled,
+        listGaps: shared.listGaps,
+        contribute: shared.contribute
       });
     }
     start() {
@@ -8333,8 +8979,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     async handle(message, sender) {
       const response = await this.#dispatch(message, sender);
-      if (this.#ffnSummaries !== null && typeof sender?.tab?.id === "number" && archiveHostKindFromSender(sender) === "ffn") {
-        void this.#ffnSummaries.ffnPageActivity(sender.tab.id);
+      if (typeof sender?.tab?.id === "number") {
+        const hostKind2 = archiveHostKindFromSender(sender);
+        if (hostKind2 === "ffn" && this.#ffnSummaries !== null) {
+          void this.#ffnSummaries.ffnPageActivity(sender.tab.id);
+        } else if (hostKind2 === "ao3" && this.#ao3Summaries !== null) {
+          void this.#ao3Summaries.ao3PageActivity(sender.tab.id);
+        }
       }
       if (this.#mode !== "kernel" || !isRecord18(response) || !isRecord18(response.snapshot) || !isSupportedArchiveSender(sender)) {
         return response;
@@ -8633,6 +9284,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           await this.#nativeImport.discardUnpublished(preparedHandoff);
         }
         const response = await this.#firstStoryResponse(fenced.kind === "published" ? fenced.value : { ok: false, error: "native_import_unavailable" }, action, initiation);
+        if (initiation.kind === "popup_open_tabs" && response.ok && response.state === "ready_to_open" && this.#ao3Summaries !== null) {
+          void this.#ao3Summaries.libraryChanged();
+        }
         return found && response.ok && response.state === "ready_to_open" ? Object.freeze({ ...response, found: Object.freeze({ ...found }) }) : response;
       }
       const result = initiation.kind !== "web_save" ? await this.#firstStoryInitiator.importActivePage() : await this.#firstStoryInitiator.saveFromTrace(initiation.url);
@@ -8800,19 +9454,23 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           dispatch: "never_sent"
         });
       }
-      const summaries = this.#ffnSummaries;
-      if (summaries === null) return this.#storyCommands.executeWithEvidence(command, observer);
+      const ffn = this.#ffnSummaries;
+      const ao3 = this.#ao3Summaries;
+      if (ffn === null && ao3 === null) return this.#storyCommands.executeWithEvidence(command, observer);
       const alreadyInLibrary = accountData?.overlay?.entries[command.workKey] !== void 0;
-      summaries.saveStarted();
+      ffn?.saveStarted();
+      ao3?.saveStarted();
       let evidence;
       try {
         evidence = await this.#storyCommands.executeWithEvidence(command, observer);
       } finally {
-        summaries.saveEnded();
+        ffn?.saveEnded();
+        ao3?.saveEnded();
       }
       if (evidence.result.kind === "confirmed" && // Trace already has this story's summary: nothing to read.
       evidence.result.confirmation.summaryKnown !== true) {
-        void summaries.storySaved(command, alreadyInLibrary, tabId);
+        if (ffn !== null) void ffn.storySaved(command, alreadyInLibrary, tabId);
+        if (ao3 !== null) void ao3.storySaved(command, alreadyInLibrary);
       }
       return evidence;
     }
@@ -9081,6 +9739,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       await this.#accountLeft();
       try {
         await this.#ffnSummaries?.clear();
+      } catch {
+      }
+      try {
+        await this.#ao3Summaries?.clear();
       } catch {
       }
       try {
@@ -9574,7 +10236,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var DEFAULT_RECONCILE_TIMEOUT_MS = 5e3;
   var DEFAULT_ENDED_GRANT_CONFIRM_DELAY_MS = 2e3;
   var UNKNOWN_PERMISSION_STATE = Symbol("unknown permission state");
-  function isRecord20(value) {
+  function isRecord21(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
   function callExtensionApi(target, method, args, runtime, mode) {
@@ -9598,7 +10260,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     });
   }
   function storedState(value) {
-    if (!isRecord20(value)) return Object.freeze({});
+    if (!isRecord21(value)) return Object.freeze({});
     return Object.freeze({
       ...typeof value.grantAt === "number" && value.grantAt > 0 ? { grantAt: value.grantAt } : {},
       ...Number.isInteger(value.registrationVersion) && Number(value.registrationVersion) > 0 ? { registrationVersion: Number(value.registrationVersion) } : {},
@@ -10069,7 +10731,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       void reconcile().catch(() => void 0);
     });
     runtime.onMessage.addListener((message, sender, sendResponse) => {
-      if (!isRecord20(message)) return false;
+      if (!isRecord21(message)) return false;
       if (message.type === POPUP_OPENED_MESSAGE && isPopupSender(sender, runtime.id)) {
         void reconcile().catch(() => void 0);
         return false;
@@ -10123,8 +10785,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         EARNED_PERMISSION_STATE_KEY
       ]);
       const deliveredAt = stored[ARCHIVE_ACCESS_REPORTED_AT_KEY];
-      const state = isRecord21(stored[ARCHIVE_ACCESS_STATE_KEY]) ? stored[ARCHIVE_ACCESS_STATE_KEY] : {};
-      const setup = isRecord21(stored[EARNED_PERMISSION_STATE_KEY]) ? stored[EARNED_PERMISSION_STATE_KEY] : {};
+      const state = isRecord22(stored[ARCHIVE_ACCESS_STATE_KEY]) ? stored[ARCHIVE_ACCESS_STATE_KEY] : {};
+      const setup = isRecord22(stored[EARNED_PERMISSION_STATE_KEY]) ? stored[EARNED_PERMISSION_STATE_KEY] : {};
       const grantedBefore = setup.promptResult === "granted" || typeof setup.completedAt === "number" && setup.completedAt > 0;
       const time = (value) => typeof value === "number" && Number.isFinite(value) && value > 0;
       return Object.freeze({
@@ -10147,7 +10809,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       });
     }
   };
-  function isRecord21(value) {
+  function isRecord22(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
   function normalizeHandoffId(value) {
@@ -10184,7 +10846,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return this.#service.reportAccess(options);
     }
     async handle(message, sender) {
-      if (!isRecord21(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.archiveSeen) {
+      if (!isRecord22(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.archiveSeen) {
         return null;
       }
       const hostKind2 = archiveHostKindFromSender(sender);
@@ -10205,7 +10867,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   function installArchiveReadinessRuntime(environment) {
     const controller = new ArchiveReadinessRuntimeController(environment);
     environment.runtime.onMessage.addListener((message, sender, sendResponse) => {
-      if (!isRecord21(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.archiveSeen) {
+      if (!isRecord22(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.archiveSeen) {
         return false;
       }
       void controller.handle(message, sender).then(
@@ -10245,7 +10907,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       void report().catch(() => void 0);
     };
     runtime.onMessage.addListener((message, sender, sendResponse) => {
-      if (!isRecord21(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport) {
+      if (!isRecord22(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport) {
         return false;
       }
       if (Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
@@ -10272,7 +10934,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         runtime,
         storageMode
       ).catch(() => void 0) : void 0;
-      if (!isRecord21(existing)) {
+      if (!isRecord22(existing)) {
         try {
           const created = alarms?.create?.(ARCHIVE_ACCESS_REPORT_ALARM, {
             periodInMinutes: ARCHIVE_ACCESS_REPORT_PERIOD_MINUTES
@@ -10314,8 +10976,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     });
     return Promise.race([work.catch(() => fallback), late]).finally(() => clearTimeout(timer));
   }
-  var isTapped = (value) => isRecord22(value) && Number.isInteger(value.tabId) && typeof value.url === "string" && (value.private === null || typeof value.private === "boolean");
-  function isRecord22(value) {
+  var isTapped = (value) => isRecord23(value) && Number.isInteger(value.tabId) && typeof value.url === "string" && (value.private === null || typeof value.private === "boolean");
+  function isRecord23(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
   function text(value, limit) {
@@ -10343,8 +11005,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     return outcome.provenance === "found" ? 2 : 3;
   }
   function settledFrom(value) {
-    if (!isRecord22(value)) return null;
-    if (value.kind === "confirmed" && isRecord22(value.entry) && ["saved_now", "already", "found"].includes(String(value.provenance))) {
+    if (!isRecord23(value)) return null;
+    if (value.kind === "confirmed" && isRecord23(value.entry) && ["saved_now", "already", "found"].includes(String(value.provenance))) {
       return value;
     }
     if (value.kind === "failed" && typeof value.reason === "string" && ["never_sent", "refused", "sent_unconfirmed", "not_in_library"].includes(String(value.dispatch))) {
@@ -10353,10 +11015,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     return null;
   }
   function storedFrom(value) {
-    if (!isRecord22(value) || typeof value.salt !== "string" || value.salt.length < 16) return null;
+    if (!isRecord23(value) || typeof value.salt !== "string" || value.salt.length < 16) return null;
     const records = [];
     for (const item of Array.isArray(value.records) ? value.records : []) {
-      if (!isRecord22(item) || typeof item.k !== "string" || typeof item.s !== "string" || typeof item.at !== "number") continue;
+      if (!isRecord23(item) || typeof item.k !== "string" || typeof item.s !== "string" || typeof item.at !== "number") continue;
       records.push({
         k: item.k,
         s: item.s,
@@ -10736,7 +11398,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (!await this.#ports.inject(page.tabId).catch(() => false)) return;
       this.#injected.set(page.tabId, page.workKey);
       const collected = await this.#ports.collect(page.tabId).catch(() => null);
-      if (!isRecord22(collected) || collected.ok !== true || collected.workKey !== record5.workKey) return;
+      if (!isRecord23(collected) || collected.ok !== true || collected.workKey !== record5.workKey) return;
       if (collected.private === true && record5.persist) {
         record5.persist = false;
         record5.priorKnown = false;
@@ -10887,7 +11549,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         }
         this.#injected.set(page.tabId, page.workKey);
         const collected = await this.#ports.collect(page.tabId).catch(() => null);
-        if (!isRecord22(collected)) return await fail("page_unreachable", "never_sent");
+        if (!isRecord23(collected)) return await fail("page_unreachable", "never_sent");
         record5.story = storyFrom(collected, page.hostKind);
         if (collected.ok !== true) {
           return await fail(
@@ -10970,7 +11632,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var WORK_KEY_PATTERN6 = /^(ao3|ffn):[1-9][0-9]{0,19}$/;
   var REQUEST_TIMEOUT_MS7 = 12e3;
   var STATUS_LIMIT = 40;
-  function isRecord23(value) {
+  function isRecord24(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
   function status(value) {
@@ -10978,9 +11640,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   }
   function membershipFrom(value, expectedWorkKey) {
     const invalid = { kind: "invalid_response" };
-    if (!isRecord23(value) || value.work_key !== expectedWorkKey) return invalid;
+    if (!isRecord24(value) || value.work_key !== expectedWorkKey) return invalid;
     if (value.membership === "absent") return { kind: "absent" };
-    if (value.membership !== "present" || !isRecord23(value.entry)) return invalid;
+    if (value.membership !== "present" || !isRecord24(value.entry)) return invalid;
     const entryId = typeof value.entry_id === "string" ? value.entry_id.trim() : "";
     if (!UUID_PATTERN7.test(entryId) || value.entry.entryId !== entryId) return invalid;
     const entry = Object.freeze({
@@ -11024,7 +11686,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       }
       return {
         kind: "success",
-        value: membershipFrom(isRecord23(body) && body.success === true ? body.data : null, workKey)
+        value: membershipFrom(isRecord24(body) && body.success === true ? body.data : null, workKey)
       };
     }
   };
@@ -11097,7 +11759,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
   }
   function setupStepFromMessage(message) {
-    if (!isRecord24(message) || message.type !== SETUP_STEP_MESSAGE) return null;
+    if (!isRecord25(message) || message.type !== SETUP_STEP_MESSAGE) return null;
     if (message.step === "sheet_opened" && (message.page === "story" || message.page === "other")) {
       return Object.freeze({ kind: "sheet_opened", page: message.page });
     }
@@ -11208,7 +11870,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     async #read() {
       const raw = (await this.#ports.storage.get(SETUP_MILESTONES_KEY))[SETUP_MILESTONES_KEY];
-      if (!isRecord24(raw) || typeof raw.account !== "string" || typeof raw.attempt !== "string" || !Array.isArray(raw.reported) || !Array.isArray(raw.pending)) {
+      if (!isRecord25(raw) || typeof raw.account !== "string" || typeof raw.attempt !== "string" || !Array.isArray(raw.reported) || !Array.isArray(raw.pending)) {
         return null;
       }
       return {
@@ -11258,9 +11920,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     };
   }
   function isPending(value) {
-    return isRecord24(value) && typeof value.attempt === "string" && UUID_PATTERN8.test(value.attempt) && (value.milestone === "safari_sheet_opened" || value.milestone === "safari_access_answered") && (value.outcome === "confirmed" || value.outcome === "failed" || value.outcome === "unknown") && typeof value.evidence_source === "string" && value.evidence_source.startsWith("extension_") && typeof value.at === "number" && Number.isFinite(value.at) && typeof value.sends === "number" && Number.isInteger(value.sends) && value.sends >= 0;
+    return isRecord25(value) && typeof value.attempt === "string" && UUID_PATTERN8.test(value.attempt) && (value.milestone === "safari_sheet_opened" || value.milestone === "safari_access_answered") && (value.outcome === "confirmed" || value.outcome === "failed" || value.outcome === "unknown") && typeof value.evidence_source === "string" && value.evidence_source.startsWith("extension_") && typeof value.at === "number" && Number.isFinite(value.at) && typeof value.sends === "number" && Number.isInteger(value.sends) && value.sends >= 0;
   }
-  function isRecord24(value) {
+  function isRecord25(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
 
@@ -11614,7 +12276,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var SAFARI_READINESS_SESSION_KEY = "traceSafariReadinessSessionV1";
   var NATIVE_TIMEOUT_MS = 2e3;
   var BROWSER_READ_TIMEOUT_MS = 2e3;
-  function isRecord25(value) {
+  function isRecord26(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
   function bounded2(work, ms) {
@@ -11664,7 +12326,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         typeof permissions.contains !== "function" ? Promise.resolve(null) : bounded2(call(permissions, "contains", [{ origins: [...config.origins] }]), BROWSER_READ_TIMEOUT_MS),
         bounded2(call(permissions, "getAll", []), BROWSER_READ_TIMEOUT_MS)
       ]);
-      const origins = isRecord25(listed) && Array.isArray(listed.origins) ? new Set(listed.origins) : null;
+      const origins = isRecord26(listed) && Array.isArray(listed.origins) ? new Set(listed.origins) : null;
       const granted = origins === null ? null : config.origins.filter((origin) => origins.has(origin)).length;
       return {
         // The browser's own answer where it gives one: a broader grant need not
@@ -11680,9 +12342,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         bounded2(storage.get(EARNED_PERMISSION_STATE_KEY), BROWSER_READ_TIMEOUT_MS)
       ]);
       if (!Array.isArray(current) || stored === null) return "unreadable";
-      const ids = new Set(current.map((script) => isRecord25(script) ? script.id : void 0));
+      const ids = new Set(current.map((script) => isRecord26(script) ? script.id : void 0));
       const state = stored[EARNED_PERMISSION_STATE_KEY];
-      const generation = isRecord25(state) ? state.registrationVersion : void 0;
+      const generation = isRecord26(state) ? state.registrationVersion : void 0;
       return config.registrations.every(({ id }) => ids.has(id)) && generation === config.version ? "registered" : "absent";
     };
     const readScriptRegistration = async () => {
@@ -11719,7 +12381,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (config.registrationMode !== "dynamic") return false;
       const stored = await bounded2(storage.get(EARNED_PERMISSION_STATE_KEY), BROWSER_READ_TIMEOUT_MS);
       const state = stored?.[EARNED_PERMISSION_STATE_KEY];
-      if (!isRecord25(state) || state.promptResult !== "granted") return false;
+      if (!isRecord26(state) || state.promptResult !== "granted") return false;
       const generation = state.registrationVersion;
       return Number.isInteger(generation) && Number(generation) > 0 && Number(generation) < config.version;
     };
@@ -11745,8 +12407,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         { type: SAFARI_READINESS_MESSAGES.prepare, apiOrigin },
         NATIVE_TIMEOUT_MS
       );
-      if (!isRecord25(response) || response.ok !== true || !isRecord25(response.provider)) return null;
-      const cycle = isRecord25(response.cycle) && typeof response.cycle.id === "string" ? {
+      if (!isRecord26(response) || response.ok !== true || !isRecord26(response.provider)) return null;
+      const cycle = isRecord26(response.cycle) && typeof response.cycle.id === "string" ? {
         id: response.cycle.id,
         accountId: typeof response.cycle.accountID === "string" ? response.cycle.accountID : null
       } : null;
@@ -11764,8 +12426,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         result: report2.result,
         components: report2.components
       }, NATIVE_TIMEOUT_MS);
-      if (isRecord25(response) && response.ok === true) return "stored";
-      return isRecord25(response) && response.error === "stale_cycle" ? "stale_cycle" : "refused";
+      if (isRecord26(response) && response.ok === true) return "stored";
+      return isRecord26(response) && response.error === "stale_cycle" ? "stale_cycle" : "refused";
     };
     const service = new SafariReadinessService({
       prepare,
@@ -11784,7 +12446,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       void report().catch(() => void 0);
     };
     runtime.onMessage.addListener((message, sender, sendResponse) => {
-      if (!isRecord25(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport || Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
+      if (!isRecord26(message) || message.type !== ARCHIVE_READINESS_MESSAGE_TYPES.accessReport || Object.keys(message).length !== 1 || !isPopupSender(sender, runtime.id)) {
         return false;
       }
       void report().then(() => sendResponse({ ok: true }), () => sendResponse({ ok: true }));
@@ -11867,7 +12529,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   function storyOf(key) {
     return key.slice(0, key.lastIndexOf(":"));
   }
-  function isRecord26(value) {
+  function isRecord27(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
   async function bounded3(operation, milliseconds) {
@@ -11913,7 +12575,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return Object.freeze({ ok: true, reused: true, closed });
     };
     const handle = async (message, sender) => {
-      if (!isRecord26(message) || Object.keys(message).length !== 2 || message.type !== STORY_TAB_REUSE_MESSAGE || !isRecord26(message.payload) || Object.keys(message.payload).length !== 1) return REFUSED;
+      if (!isRecord27(message) || Object.keys(message).length !== 2 || message.type !== STORY_TAB_REUSE_MESSAGE || !isRecord27(message.payload) || Object.keys(message.payload).length !== 1) return REFUSED;
       if (!sender) return REFUSED;
       const tabId = sender.tab?.id;
       if (sender.id !== runtime.id || !Number.isInteger(tabId) || sender.frameId !== void 0 && sender.frameId !== 0 || archiveHostKindFromSender(sender) === null) return REFUSED;
@@ -11930,7 +12592,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return turn;
     };
     runtime.onMessage.addListener((message, sender, respond) => {
-      if (!isRecord26(message) || message.type !== STORY_TAB_REUSE_MESSAGE) return;
+      if (!isRecord27(message) || message.type !== STORY_TAB_REUSE_MESSAGE) return;
       void handle(message, sender).then(respond, () => respond(NOTHING));
       return true;
     });
@@ -12333,7 +12995,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     const totalPages = nextPage === null ? page : Math.max(highest, nextPage);
     return { kind: "page", works, deleted, unreadable, nextPage, totalPages };
   }
-  function retryAfterMs(value, now) {
+  function retryAfterMs2(value, now) {
     if (typeof value !== "string" || !value.trim()) return null;
     const trimmed = value.trim();
     if (/^\d{1,7}$/.test(trimmed)) return Number(trimmed) * 1e3;
@@ -12346,13 +13008,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return answer.code === "timeout" || answer.code === "network" ? { kind: "retry", code: answer.code, retryAfterMs: null } : { kind: "stop", code: answer.code };
     }
     if (answer.cfMitigated?.toLowerCase() === "challenge") return { kind: "stop", code: "challenge" };
-    if (answer.status === 429) return { kind: "retry", code: "rate_limited", retryAfterMs: retryAfterMs(answer.retryAfter, now) };
+    if (answer.status === 429) return { kind: "retry", code: "rate_limited", retryAfterMs: retryAfterMs2(answer.retryAfter, now) };
     if (answer.status === 503) {
       if (isChallengePage(answer.html)) return { kind: "stop", code: "challenge" };
-      return { kind: "retry", code: "unavailable", retryAfterMs: retryAfterMs(answer.retryAfter, now) };
+      return { kind: "retry", code: "unavailable", retryAfterMs: retryAfterMs2(answer.retryAfter, now) };
     }
     if (answer.status === 502 || answer.status === 504 || answer.status >= 520 && answer.status <= 526) {
-      return { kind: "retry", code: "server_error", retryAfterMs: retryAfterMs(answer.retryAfter, now) };
+      return { kind: "retry", code: "server_error", retryAfterMs: retryAfterMs2(answer.retryAfter, now) };
     }
     if (isChallengePage(answer.html)) return { kind: "stop", code: "challenge" };
     let landed;
@@ -12661,7 +13323,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var RETRY_MAX_MS = 9e5;
   var NETWORK_RETRY_MS = 3e4;
   var MAX_CONSECUTIVE_RETRIES = 3;
-  var SAVE_SETTLE_MS2 = 1e4;
+  var SAVE_SETTLE_MS3 = 1e4;
   var SAVE_RECHECK_MS = 5e3;
   var REQUEST_TIMEOUT_MS9 = 2e4;
   var LOST_AFTER_MS = 3e4;
@@ -12813,7 +13475,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     #saving(now) {
       const saves = this.#ports.saveActivity();
-      return saves.inFlight > 0 || now - saves.lastEndedAt < SAVE_SETTLE_MS2;
+      return saves.inFlight > 0 || now - saves.lastEndedAt < SAVE_SETTLE_MS3;
     }
     #instruction(run) {
       if (run === null || run.status !== "running") return { stop: true };
@@ -13439,14 +14101,14 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     if (own?.[1]) names.add(own[1]);
     return Array.from(names);
   }
-  function isRecord27(value) {
+  function isRecord28(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
-  function stringOrNull2(value) {
+  function stringOrNull3(value) {
     return typeof value === "string" ? value.slice(0, 200) : null;
   }
   function loadedPageFromTab(value) {
-    if (!isRecord27(value)) return { kind: "failed", code: "tab_no_result" };
+    if (!isRecord28(value)) return { kind: "failed", code: "tab_no_result" };
     if (value.kind === "failed") return { kind: "failed", code: value.code === "timeout" ? "timeout" : "network" };
     if (value.kind !== "response" || typeof value.status !== "number" || typeof value.url !== "string" || typeof value.html !== "string") {
       return { kind: "failed", code: "tab_no_result" };
@@ -13458,13 +14120,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       url: value.url,
       html,
       chars: typeof value.chars === "number" && Number.isSafeInteger(value.chars) ? value.chars : html.length,
-      retryAfter: stringOrNull2(value.retryAfter),
-      cfMitigated: stringOrNull2(value.cfMitigated),
-      contentType: stringOrNull2(value.contentType)
+      retryAfter: stringOrNull3(value.retryAfter),
+      cfMitigated: stringOrNull3(value.cfMitigated),
+      contentType: stringOrNull3(value.contentType)
     };
   }
   function traceWebSender(sender, extensionId, webOrigin) {
-    if (!isRecord27(sender) || !isRecord27(sender.tab) || typeof sender.tab.id !== "number") return false;
+    if (!isRecord28(sender) || !isRecord28(sender.tab) || typeof sender.tab.id !== "number") return false;
     if (typeof extensionId === "string" && sender.id !== extensionId) return false;
     const raw = typeof sender.url === "string" ? sender.url : sender.tab.url;
     try {
@@ -13474,7 +14136,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
   }
   function ao3TabSender(sender, extensionId) {
-    if (!isRecord27(sender) || !isRecord27(sender.tab) || typeof sender.tab.id !== "number") return null;
+    if (!isRecord28(sender) || !isRecord28(sender.tab) || typeof sender.tab.id !== "number") return null;
     if (typeof extensionId === "string" && sender.id !== extensionId) return null;
     const raw = typeof sender.url === "string" ? sender.url : sender.tab.url;
     try {
@@ -13512,7 +14174,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       } catch {
         return "tab_gone";
       }
-      if (!isRecord27(tab) || typeof tab.url !== "string") return "no_site_access";
+      if (!isRecord28(tab) || typeof tab.url !== "string") return "no_site_access";
       let url;
       try {
         url = new URL(tab.url);
@@ -13530,7 +14192,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         );
         if (results === "timeout") return "timeout";
         const first = Array.isArray(results) ? results[0] : void 0;
-        return isRecord27(first) && "result" in first ? first.result : "tab_no_result";
+        return isRecord28(first) && "result" in first ? first.result : "tab_no_result";
       } catch {
         return "tab_no_result";
       }
@@ -13615,7 +14277,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     const loopOffered = /* @__PURE__ */ new Map();
     runtime.onMessage.addListener((message, sender, sendResponse) => {
-      if (!isRecord27(message)) return false;
+      if (!isRecord28(message)) return false;
       const pageTab = ao3TabSender(sender, runtime.id);
       if (message.type === AO3_HISTORY_IMPORT_MESSAGE && pageTab !== null) {
         const withView = (instruction) => history.view().then((view2) => ({ ...instruction, view: view2 }), () => instruction);
@@ -13828,6 +14490,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       // Missing FanFiction.net summaries are read in the reader's own
       // FanFiction.net tab, slowly (ffn-summary-fill.mts).
       ffnSummaryFill: {
+        sessionArea: extension.storage.session ?? null
+      },
+      // Missing AO3 summaries of saved works are read in the reader's own AO3
+      // tab, one work at a time and slowly (ao3-summary-fill.mts).
+      ao3SummaryFill: {
         sessionArea: extension.storage.session ?? null
       }
     });
