@@ -512,7 +512,7 @@ test("an unknown account (a background still starting) keeps the run", async () 
 
 // --- Safari wiring -------------------------------------------------------------------
 
-function wiring({ tabUrl = "https://archiveofourown.org/works/1", scriptResult = () => "started", permitted = true, handOff } = {}) {
+function wiring({ tabUrl = "https://archiveofourown.org/works/1", scriptResult = () => "started", permitted = true, handOff, webHistory } = {}) {
   const listeners = [];
   const scripts = [];
   const cleanups = [];
@@ -530,6 +530,7 @@ function wiring({ tabUrl = "https://archiveofourown.org/works/1", scriptResult =
     whenAccountLeaves: (cleanup) => cleanups.push(cleanup),
     saveActivity: () => ({ inFlight: 0, lastEndedAt: 0 }),
     ...(handOff ? { handOffHistory: handOff } : {}),
+    ...(webHistory ? { webHistory } : {}),
   });
   const send = (message, sender) => new Promise((resolve) => {
     for (const listener of listeners) {
@@ -689,4 +690,39 @@ test("Review in Trace hands over what the run found, finished or paused, and not
   none.store.works.set("1", w.store.works.get("1"));
   assert.equal((await none.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "review", tabId: TAB }, POPUP)).error, "history_handoff_unavailable",
     "a package without the app's inbox cannot review");
+});
+
+test("on a computer, Review in Trace opens Trace's review page, which only Trace's site may ask for the History", async () => {
+  const handoffID = "00000000-0000-4000-8000-0000000000aa";
+  const url = `https://www.tracefiction.test/import/history#handoff=${handoffID}`;
+  const asked = [];
+  let discarded = 0;
+  const w = wiring({
+    handOff: async (build) => { await build(); return { ok: true, state: "opened_on_web", handoffID, expiresAtMs: Date.now() + 60_000, url }; },
+    webHistory: { origin: "https://www.tracefiction.test", answer: async (message) => { asked.push(message); return { ok: true, kind: "received" }; },
+      discard: async () => { discarded += 1; } },
+  });
+  w.store.run = {
+    v: 1, runId: "r", account: ACCOUNT, user: USER, status: "finished", reason: "reached_last_page", tabId: TAB, nextPage: 2, totalPages: 1,
+    lastPageDigest: null, inFlight: null, counts: { pages: 1, works: 1, later: 0, deleted: 0, unreadable: 0, repeats: 0 },
+    timing: { startedAt: 0, finishedAt: 1, pausedAt: null, pausedMs: 0, dueAt: 0, gapMs: 6_000, lastKeptAt: null, keptGapMsTotal: 0, keptGapCount: 0 },
+    retry: { consecutive: 0, code: null },
+  };
+  for (const kept of readHistoryPage(page([work(1)]), USER, 1).works) w.store.works.set(kept.id, kept);
+  const reply = await w.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "review", tabId: TAB }, POPUP);
+  assert.equal(reply.ok, true, JSON.stringify(reply));
+  assert.equal(reply.handoff.url, url, "the sheet opens Trace's review page");
+
+  const request = { type: "TRACE_WEB_HISTORY_REQUEST", handoffID, part: "declaration" };
+  const traceTab = { id: "trace-test", url: "https://www.tracefiction.test/import/history", tab: { id: 9, url: "https://www.tracefiction.test/import/history" } };
+  assert.deepEqual(await w.send(request, traceTab), { ok: true, kind: "received" });
+  assert.equal(asked.length, 1);
+  // Not from AO3, another site, another extension, or a page with no tab.
+  for (const sender of [AO3_TAB, { ...traceTab, url: "https://evil.example/import/history", tab: { id: 9, url: "https://evil.example/" } },
+    { ...traceTab, id: "another-extension" }, { id: "trace-test", url: "https://www.tracefiction.test/" }]) {
+    assert.equal(await w.send(request, sender), undefined);
+  }
+  assert.equal(asked.length, 1, "only Trace's own page was answered");
+  await w.send({ type: AO3_HISTORY_IMPORT_MESSAGE, action: "delete", tabId: TAB }, POPUP);
+  assert.equal(discarded, 1, "a deleted History is no longer offered");
 });
