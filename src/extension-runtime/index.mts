@@ -337,7 +337,7 @@ try {
         tabs: extension.tabs as unknown as NativeKeepEnvironment["tabs"],
         scripting: extension.scripting as unknown as NativeKeepEnvironment["scripting"],
         alarms: extension.alarms as unknown as NativeKeepEnvironment["alarms"],
-        storage: extension.storage.local as unknown as NativeKeepEnvironment["storage"],
+        indexedDB: scope.indexedDB,
         sendNative: (message, timeoutMs) => sendNativeMessageWithFallback(extension.runtime, storageMode, message, timeoutMs),
         newId: randomId,
       });

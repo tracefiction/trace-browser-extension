@@ -15,6 +15,9 @@ import {
   readerTab,
 } from "../../.trace-build/extension-runtime/keep-a-copy-native.mjs";
 import { keepCopyFetchInTab, keepCopyPartInTab, keepCopyReleaseInTab } from "../../.trace-build/extension-runtime/keep-a-copy-tab.mjs";
+import { IndexedDbKeepStore } from "../../.trace-build/extension-runtime/keep-a-copy-store.mjs";
+import { SETTLE_MAX_MS, WANT_MEMORY_MS } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
+import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 
 // Invented works throughout, as in keep-a-copy.test.mjs. The app is a fake that keeps to
 // the hand-off protocol.
@@ -60,12 +63,21 @@ function ao3(routes) {
 
 /** The Trace app's side, as the hand-off protocol says it behaves. */
 function fakeApp({ works = [], enabled = true, drop = () => false, refuseBegin = false } = {}) {
-  const app = { messages: [], transfers: new Map(), saved: [], skipped: [], aborted: [], works, enabled };
+  const app = { messages: [], transfers: new Map(), completed: new Set(), saved: [], skipped: [], aborted: [], works, enabled };
   app.send = async (message) => {
     app.messages.push(message);
     assert.equal(message.protocolVersion, 1);
     assert.ok(JSON.stringify(message).length < INBOX_MAX, `${message.type} is over the inbox's 512 KiB`);
-    if (drop(message, app)) return null;
+    const answer = await respond(message);
+    // The app did the work, but its answer never arrived.
+    return drop(message, app) ? null : answer;
+  };
+  const respond = async (message) => {
+    // A repeat of any message of a transfer it completed: done.
+    if (message.transferId && app.completed.has(message.transferId) && message.type !== KEEP_COPY_NATIVE.abort) {
+      return { ok: true, transferId: message.transferId, saved: true };
+    }
+    if (app.hold && message.type === KEEP_COPY_NATIVE.part) await app.hold;
     switch (message.type) {
       case KEEP_COPY_NATIVE.queue:
         return { ok: true, enabled: app.enabled, format: "epub", works: app.works };
@@ -87,6 +99,7 @@ function fakeApp({ works = [], enabled = true, drop = () => false, refuseBegin =
         if (bytes.length !== transfer.begin.byteLength || sha(bytes) !== transfer.begin.sha256) return { ok: false, error: "checksum_mismatch" };
         app.saved.push({ workId: transfer.begin.workId, updatedAt: transfer.begin.updatedAt, fileName: transfer.begin.fileName, bytes });
         app.transfers.delete(message.transferId);
+        app.completed.add(message.transferId);
         return { ok: true, transferId: message.transferId, saved: true };
       }
       case KEEP_COPY_NATIVE.abort:
@@ -103,16 +116,18 @@ function fakeApp({ works = [], enabled = true, drop = () => false, refuseBegin =
   return app;
 }
 
-function harness({ app, site, storage = new Map(), tabOpen = true }) {
-  const box = { now: NOW, storage, site, app, partReads: [] };
+const TAB = { id: 7, windowId: 1, incognito: false, workId: null };
+
+function harness({ app, site, store = new IndexedDbKeepStore(new IDBFactory(), IDBKeyRange), tab = TAB }) {
+  const box = { now: NOW, store, site, app, partReads: [], tab };
   let ids = 0;
   const realFetch = globalThis.fetch;
   box.handoff = new NativeCopyHandoff({
     native: { send: (message) => app.send(structuredClone(message)) },
     tabs: {
-      find: async () => (tabOpen ? 7 : null),
+      find: async () => box.tab,
       async run(tabId, func, args) {
-        assert.equal(tabId, 7);
+        box.ran = [...(box.ran ?? []), tabId];
         if (func === keepCopyPartInTab) box.partReads.push(args[1]);
         globalThis.fetch = site.fetchImpl;
         try {
@@ -122,10 +137,7 @@ function harness({ app, site, storage = new Map(), tabOpen = true }) {
         }
       },
     },
-    storage: {
-      get: async (key) => structuredClone(storage.get(key)),
-      set: async (key, value) => { storage.set(key, structuredClone(value)); },
-    },
+    store,
     clock: { now: () => box.now },
     random: () => 0,
     newId: () => `00000000-0000-4000-8000-${String(++ids).padStart(12, "0")}`,
@@ -165,12 +177,12 @@ test("the app's queue is read strictly: anything malformed fetches nothing", () 
 });
 
 test("the reader's AO3 tab is the one they are on, else the last they used", () => {
-  assert.equal(readerTab([
+  assert.deepEqual(readerTab([
     { id: 1, url: "https://example.invalid/" , active: true },
     { id: 2, url: "https://archiveofourown.org/works/1", lastAccessed: 5 },
-    { id: 3, url: "https://archiveofourown.org/works/2", lastAccessed: 9 },
-  ]), 3);
-  assert.equal(readerTab([{ id: 2, url: "https://archiveofourown.org/", lastAccessed: 9 }, { id: 4, url: "https://archiveofourown.org/", active: true }]), 4);
+    { id: 3, url: "https://archiveofourown.org/works/2/chapters/9", lastAccessed: 9, windowId: 4, incognito: true },
+  ]), { id: 3, windowId: 4, incognito: true, workId: "2" });
+  assert.equal(readerTab([{ id: 2, url: "https://archiveofourown.org/", lastAccessed: 9 }, { id: 4, url: "https://archiveofourown.org/", active: true }]).id, 4);
   assert.equal(readerTab([{ id: 5, url: "https://archiveofourown.org.example.invalid/" }]), null);
 });
 
@@ -197,7 +209,7 @@ test("a locked work the app asks for is read from its page in the tab, then hand
   for (const message of app.messages) assert.ok(!message.base64 || Buffer.from(message.base64, "base64").length <= PART_BYTES);
   assert.equal((await box.handoff.engine.view()).withCopy, 1);
   // The tab let the file go once it was handed over.
-  assert.equal(await keepCopyPartInTab(box.storage.get(TRANSFER_KEY).handle, 0, PART_BYTES), null);
+  assert.equal(await keepCopyPartInTab((await box.store.getMeta(TRANSFER_KEY)).handle, 0, PART_BYTES), null);
 });
 
 test("a background stopped mid-transfer resumes where the app has it, and sends no part twice", async () => {
@@ -209,16 +221,16 @@ test("a background stopped mid-transfer resumes where the app has it, and sends 
   const first = harness({ app, site });
   await first.handoff.askQueue(true);
   // Ticks until the unanswered part is recorded, then this background is gone.
-  for (let i = 0; i < 10 && first.storage.get(TRANSFER_KEY)?.failures !== 1; i += 1) {
+  for (let i = 0; i < 10 && (await first.store.getMeta(TRANSFER_KEY))?.failures !== 1; i += 1) {
     const wait = await first.handoff.engine.tick();
     first.now += wait ?? 0;
     await new Promise((resolve) => setTimeout(resolve, 30));
   }
-  const open = first.storage.get(TRANSFER_KEY);
+  const open = await first.store.getMeta(TRANSFER_KEY);
   assert.equal(open.state, "open");
   assert.equal(open.failures, 1);
 
-  const second = harness({ app, site, storage: first.storage });
+  const second = harness({ app, site, store: first.store });
   second.now = first.now;
   await second.drain();
   assert.equal(app.saved.length, 1);
@@ -243,7 +255,7 @@ test("a file the tab lost, or a transfer the app refuses, is aborted and the old
   assert.equal(app.aborted[0].reason, "not_wanted");
   // Tried MAX_ATTEMPTS times, then the app is told it was not saved.
   assert.deepEqual(app.skipped.map(({ workId, code }) => [workId, code]), [["41", "save_failed"]]);
-  assert.equal(box.storage.get(TRANSFER_KEY).state, "failed");
+  assert.equal((await box.store.getMeta(TRANSFER_KEY)).state, "failed");
 });
 
 test("a locked work whose page does not show the reader signed in fetches no file; the app is told", async () => {
@@ -300,4 +312,126 @@ test("the tab keeps a file as a blob, gives it back a part at a time, and refuse
   assert.equal(await keepCopyPartInTab("keep-copy:7:a", 0, PART_BYTES), null);
   assert.deepEqual(await keepCopyFetchInTab("https://example.invalid/x.epub", "file", 5_000, 1_000, "keep-copy:7:b"), { kind: "failed", code: "network" });
   assert.deepEqual(await keepCopyFetchInTab(fileURL("71"), "file", 5_000, 1_000, "keep-copy:7:c"), { kind: "failed", code: "too_large" });
+});
+
+test("a slow transfer that keeps moving is waited on past the 15 minutes, and AO3 is asked for the file once", async () => {
+  const file = epub(PART_BYTES * 4);
+  const site = ao3({ [workURL("81")]: workPage("81"), [fileURL("81")]: file });
+  const app = fakeApp({ works: [{ workId: "81", reason: "locked" }] });
+  const box = harness({ app, site });
+  // Each part takes the app six minutes: 24 minutes in all.
+  const send = app.send;
+  app.send = async (message) => {
+    if (message.type === KEEP_COPY_NATIVE.part) box.now += 6 * 60_000;
+    return send(message);
+  };
+  await box.handoff.askQueue(true);
+  await box.drain();
+  assert.equal(app.saved.length, 1);
+  assert.ok(box.now - NOW > SETTLE_MAX_MS);
+  assert.equal(site.requests.filter((url) => url === fileURL("81")).length, 1);
+});
+
+test("a transfer given up while a part is on its way is never written open again", async () => {
+  const file = epub(PART_BYTES * 2);
+  const site = ao3({ [workURL("82")]: workPage("82"), [fileURL("82")]: file });
+  const app = fakeApp({ works: [{ workId: "82", reason: "locked" }] });
+  let release;
+  app.hold = new Promise((resolve) => { release = resolve; });
+  const box = harness({ app, site });
+  await box.handoff.askQueue(true);
+  for (let i = 0; i < 5 && !app.messages.some((m) => m.type === KEEP_COPY_NATIVE.part); i += 1) {
+    box.now += (await box.handoff.engine.tick()) ?? 0;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  // No progress for longer than the limit: the queue gives the transfer up.
+  box.now += SETTLE_MAX_MS + 1;
+  await box.handoff.engine.tick();
+  assert.equal((await box.store.getMeta(TRANSFER_KEY)).state, "failed");
+  assert.ok(app.aborted.length >= 1);
+  app.hold = null;
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal((await box.store.getMeta(TRANSFER_KEY)).state, "failed");
+  assert.equal(app.messages.some((m) => m.type === KEEP_COPY_NATIVE.end), false);
+});
+
+test("a repeated message for a transfer the app completed counts as saved", async () => {
+  const file = epub(PART_BYTES + 3);
+  const site = ao3({ [workURL("83")]: workPage("83"), [fileURL("83")]: file });
+  // The app saves the file, but its answer to END is lost.
+  let lost = false;
+  const app = fakeApp({ works: [{ workId: "83", reason: "locked" }], drop: (message) => message.type === KEEP_COPY_NATIVE.end && !lost && (lost = true) });
+  const box = harness({ app, site });
+  await box.handoff.askQueue(true);
+  await box.drain();
+  assert.equal(app.saved.length, 1);
+  assert.equal((await box.store.getMeta(TRANSFER_KEY)).state, "saved");
+  assert.equal((await box.handoff.engine.view()).withCopy, 1);
+  assert.equal(app.aborted.length, 0);
+});
+
+test("a work skipped, or found unchanged, is not read again for the same copy within a day", async () => {
+  const site = ao3({ [workURL("84")]: workPage("84", { signedIn: false }) });
+  const app = fakeApp({ works: [{ workId: "84", reason: "locked" }] });
+  const box = harness({ app, site });
+  await box.handoff.askQueue(true);
+  await box.drain();
+  assert.equal(site.requests.length, 1);
+  box.now += 60 * 60_000;
+  await box.handoff.askQueue(true);
+  await box.drain();
+  assert.equal(site.requests.length, 1, "asked again within the day");
+  box.now += WANT_MEMORY_MS;
+  await box.handoff.askQueue(true);
+  await box.drain();
+  assert.equal(site.requests.length, 2);
+});
+
+test("only the work open in the reader's tab goes at the reader's pace; the app's other asks go slowly", async () => {
+  const site = ao3({});
+  const app = fakeApp({ works: [{ workId: "85", reason: "locked", pace: "reader" }, { workId: "86", reason: "refused", pace: "reader" }] });
+  const box = harness({ app, site, tab: { ...TAB, workId: "86" } });
+  await box.handoff.askQueue(true);
+  const { queue } = await box.store.read("");
+  assert.deepEqual(queue.map(({ workId, pace }) => [workId, pace]), [["85", "check"], ["86", "reader"]]);
+});
+
+test("a page and its file come from one tab: a reader who switched tabs ends the step, and no other tab is used", async () => {
+  const site = ao3({ [workURL("87")]: workPage("87"), [fileURL("87")]: epub(3_000) });
+  const app = fakeApp({ works: [{ workId: "87", reason: "locked" }] });
+  const box = harness({ app, site });
+  const fetchImpl = site.fetchImpl;
+  site.fetchImpl = async (url) => {
+    const answer = await fetchImpl(url);
+    // The reader moves to another AO3 tab while the page is read.
+    if (String(url) === workURL("87")) box.tab = { ...TAB, id: 8 };
+    return answer;
+  };
+  await box.handoff.askQueue(true);
+  await box.handoff.engine.tick();
+  assert.deepEqual(site.requests, [workURL("87")]);
+  assert.deepEqual(box.ran, [7]);
+  assert.equal(app.messages.some((m) => m.type === KEEP_COPY_NATIVE.begin), false);
+});
+
+test("the tab's running hash matches SHA-256 at every block boundary", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  for (const size of [1, 55, 56, 63, 64, 65, 119, 120, 128, 70_001, 5 * 1_024 * 1_024 + 17]) {
+    const bytes = epub(Math.max(size, 59)).subarray(0, size);
+    // Sent in uneven chunks, as a network would.
+    globalThis.fetch = async () => new Response(new ReadableStream({
+      start(controller) {
+        for (let at = 0, step = 1; at < bytes.length; at += step, step = (step * 7) % 100_003 + 1) controller.enqueue(bytes.slice(at, at + step));
+        controller.close();
+      },
+    }), { status: 200 });
+    const answer = await keepCopyFetchInTab(fileURL("88"), "file", 5_000, 50 * 1_024 * 1_024, `keep-copy:7:${size}`);
+    assert.equal(answer.sha256, sha(bytes), `size ${size}`);
+    assert.equal(answer.size, size);
+    const back = Buffer.from(await keepCopyPartInTab(`keep-copy:7:${size}`, 0, PART_BYTES), "base64");
+    assert.equal(back.equals(Buffer.from(bytes.subarray(0, PART_BYTES))), true);
+    assert.equal(keepCopyReleaseInTab(`keep-copy:7:${size}`), true);
+  }
 });

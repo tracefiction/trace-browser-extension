@@ -13736,6 +13736,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var SETTLE_MAX_MS = 15 * 6e4;
   var WORK_PACE_MS = 2 * (PAGE_GAP_MS + PAGE_GAP_JITTER_MS / 2);
   var PACE_GAP_MS = 5 * 6e4;
+  var WANT_MEMORY_MS = 24 * 60 * 6e4;
 
   // src/extension-runtime/keep-a-copy-native.mts
   var PART_BYTES = 256 * 1024;
@@ -13949,7 +13950,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           tabs: extension.tabs,
           scripting: extension.scripting,
           alarms: extension.alarms,
-          storage: extension.storage.local,
+          indexedDB: scope.indexedDB,
           sendNative: (message, timeoutMs) => sendNativeMessageWithFallback2(extension.runtime, storageMode, message, timeoutMs),
           newId: randomId
         });

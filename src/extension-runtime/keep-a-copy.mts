@@ -614,7 +614,12 @@ export interface KeptWork {
   updatesOff?: true;
   /** Kept because the reader's Trace Library holds it, with Trace's count of its published chapters when last seen. */
   library?: { chapters: number | null };
+  /** Asked for by another owner of the files (`want`), for the copy it holds, and when that ask was last settled. */
+  wanted?: { have: string | null; doneAt: number | null };
 }
+
+/** An ask from another owner of the files, once settled, is not looked at again for the same copy for this long. */
+export const WANT_MEMORY_MS = 24 * 60 * 60_000;
 
 /** A work the reader's Trace Library keeps. */
 export interface LibraryWork {
@@ -749,6 +754,8 @@ export type SaveState = {
   readonly filename: string | null;
   /** The save's id now, when the browser gave it another (ids are handed out again after a restart). */
   readonly downloadId?: number;
+  /** When a save under way last made progress: one that keeps moving is waited on past SETTLE_MAX_MS. */
+  readonly progressAt?: number;
 };
 
 /**
@@ -792,6 +799,8 @@ export interface KeepPorts {
   quiet?(on: boolean): void;
   /** Told when a work is skipped (the Trace app is told, in Safari, so it stops asking). */
   skipped?(workId: string, code: SkipCode): void;
+  /** Every file is fetched in the same step as its page, never from a link kept for later (Safari: from the same tab). */
+  readonly fileWithPage?: boolean;
 }
 
 /** A work another owner of the files wants copied now: the Trace app, in Safari. */
@@ -1178,11 +1187,17 @@ export class KeepACopy {
    */
   want(works: readonly WantedWork[]): Promise<void> {
     return this.#serial((state) => {
+      const now = this.ports.clock.now();
       const wanted = new Set<string>();
       for (const { workId, have, pace } of works) {
         if (!state.settings.enabled || !ID_PATTERN.test(workId) || wanted.has(workId)) continue;
         wanted.add(workId);
+        const prior = state.works[workId]?.wanted;
+        // Settled for this same copy within a day (skipped, or found unchanged):
+        // not read again, unless the reader has the work open now.
+        if (pace !== "reader" && prior?.have === have && prior.doneAt !== null && now - prior.doneAt < WANT_MEMORY_MS) continue;
         const work = this.#keep(state, workId);
+        work.wanted = { have, doneAt: null };
         delete work.updatesOff;
         if (work.copy && work.copy.updatedAt !== have) work.copy = null;
         work.skipped = null;
@@ -1226,6 +1241,10 @@ export class KeepACopy {
     // Locked stays locked.
     if (page?.restricted === true) work.restricted = true;
     return work;
+  }
+
+  #wantDone(work: KeptWork): void {
+    if (work.wanted) work.wanted.doneAt = this.ports.clock.now();
   }
 
   /** `news`: the reader acted, or a list or the Library says the work changed (not a routine look). */
@@ -1308,7 +1327,9 @@ export class KeepACopy {
     }
     if (item && (item.attempts ?? 0) >= MAX_ATTEMPTS) {
       const code = item.lastFailure === "save" ? "save_failed" : "failed";
-      this.#keep(state, item.workId).skipped = code;
+      const work = this.#keep(state, item.workId);
+      work.skipped = code;
+      this.#wantDone(work);
       this.ports.skipped?.(item.workId, code);
       this.#drop(state, item.workId);
       return 0;
@@ -1428,9 +1449,11 @@ export class KeepACopy {
       if (!page || !link) return skip("no_download");
       this.#keep(state, item.workId, page);
       if (work.copy?.updatedAt === link.updatedAt && work.copy.format === format) {
+        this.#wantDone(work);
         this.#drop(state, item.workId);
         return verdict;
       }
+      if (this.ports.fileWithPage) return this.#fileStep(state, item, work, link, "omit");
       item.link = link;
       item.linkAt = this.ports.clock.now();
       item.attempts = 0;
@@ -1443,6 +1466,7 @@ export class KeepACopy {
   #skipper(state: KeepState, item: QueueItem, work: KeptWork): (code: SkipCode) => Verdict {
     return (code) => {
       work.skipped = code;
+      this.#wantDone(work);
       this.ports.skipped?.(work.workId, code);
       this.#drop(state, item.workId);
       return code === "gone" || code === "needs_sign_in" ? { kind: "skip", code } : this.#miss(state) ?? { kind: "skip", code };
@@ -1480,6 +1504,7 @@ export class KeepACopy {
     if (work.copy?.updatedAt === version && work.copy.format === format) {
       // Unchanged: the list's or page's `updated_at` it was asked for is now the one last seen.
       if (item.listed !== undefined) work.listed = item.listed;
+      this.#wantDone(work);
       this.#drop(state, item.workId);
       return verdict;
     }
@@ -1538,7 +1563,8 @@ export class KeepACopy {
   async #settle(state: KeepState, pending: PendingSave): Promise<number> {
     const result = await this.ports.settle(pending.downloadId, pending.handle).catch((): SaveState => ({ state: "interrupted", filename: null }));
     const now = this.ports.clock.now();
-    if (result.state === "in_progress" && now - pending.startedAt < SETTLE_MAX_MS) return SETTLE_RECHECK_MS;
+    // A save that keeps making progress is waited on; one that stalls is given up.
+    if (result.state === "in_progress" && now - Math.max(pending.startedAt, result.progressAt ?? 0) < SETTLE_MAX_MS) return SETTLE_RECHECK_MS;
     state.pending = null;
     // Never finished, or cut off (a browser quit mid-save): given up and forgotten, so the browser neither
     // goes on reading a URL let go below nor keeps a part-written file.
@@ -1567,6 +1593,7 @@ export class KeepACopy {
     };
     if (pending.listed !== undefined) work.listed = pending.listed;
     work.skipped = null;
+    this.#wantDone(work);
     // A newer link came while this one was saving, or the work was asked for
     // again: it is still to be fetched, or its page read again.
     const queued = state.queue.find((each) => each.workId === pending.workId);

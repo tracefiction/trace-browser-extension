@@ -19,17 +19,18 @@
 import { REQUEST_TIMEOUT_MS } from "./ao3-history-import.mjs";
 import {
   COPY_FORMATS,
-  KEEP_A_COPY_KEY,
   KeepACopy,
   MAX_FILE_BYTES,
   MAX_PAGE_CHARS,
   type CopyFormat,
   type Fetched,
+  type KeepState,
   type Pace,
   type SaveState,
   type Settings,
   type WantedWork,
 } from "./keep-a-copy.mjs";
+import { IndexedDbKeepStore } from "./keep-a-copy-store.mjs";
 import { keepCopyFetchInTab, keepCopyPartInTab, keepCopyReleaseInTab, type TabAnswer } from "./keep-a-copy-tab.mjs";
 
 export const KEEP_COPY_PROTOCOL_VERSION = 1;
@@ -51,7 +52,8 @@ export const NATIVE_TIMEOUT_MS = 5_000;
 export const MAX_TRANSFER_FAILURES = 3;
 /** The app is asked for its queue at most this often. */
 export const QUEUE_EVERY_MS = 5 * 60_000;
-export const TRANSFER_KEY = "keepACopyNativeTransferV1";
+/** The open transfer's record, in the store's own small records. */
+export const TRANSFER_KEY = "nativeTransferV1";
 const FILE_TIMEOUT_MS = 120_000;
 /** How long a transfer is waited on before the queue looks again. */
 const SETTLE_WAIT_MS = 20_000;
@@ -112,6 +114,8 @@ export interface TransferRecord {
   readonly handle: string;
   nextIndex: number;
   failures: number;
+  /** When the app last newly acknowledged a part: a transfer is given up only when this stops moving. */
+  progressAt: number;
   state: "open" | "saved" | "failed";
 }
 
@@ -130,17 +134,36 @@ export interface NativePort {
   send(message: Readonly<Record<string, unknown>>): Promise<unknown>;
 }
 
+/** The tab a step, or a transfer, is pinned to. */
+export interface ReaderTab {
+  readonly id: number;
+  readonly windowId: number | null;
+  readonly incognito: boolean;
+  /** The AO3 work the tab is on, if it is on one. */
+  readonly workId: string | null;
+}
+
+const samePlace = (a: ReaderTab, b: ReaderTab) => a.id === b.id && a.windowId === b.windowId && a.incognito === b.incognito;
+
 export interface TabPort {
-  /** The reader's AO3 tab to work in, or null when none is open. */
-  find(): Promise<number | null>;
+  /** The reader's AO3 tab, the one they are on, or null when they are not on AO3. */
+  find(): Promise<ReaderTab | null>;
   /** Runs `func` in the tab and gives back its result, or null. */
   run<T>(tabId: number, func: (...args: never[]) => unknown, args: readonly unknown[], timeoutMs: number): Promise<T | null>;
+}
+
+/** Where the works and the open transfer are kept (IndexedDbKeepStore). */
+export interface NativeStore {
+  read(scope: string): Promise<unknown>;
+  write(state: KeepState, changed: ReadonlySet<string>, scope: string): Promise<void>;
+  getMeta(key: string): Promise<unknown>;
+  setMeta(key: string, value: unknown): Promise<void>;
 }
 
 export interface NativeHandoffDeps {
   readonly native: NativePort;
   readonly tabs: TabPort;
-  readonly storage: { get(key: string): Promise<unknown>; set(key: string, value: unknown): Promise<void> };
+  readonly store: NativeStore;
   readonly clock: { now(): number };
   readonly random: () => number;
   newId(): string;
@@ -155,30 +178,45 @@ function fromTab(answer: TabAnswer | null): Fetched {
   return { ...rest, ...(head ? { bytes: Uint8Array.from(head) } : {}) };
 }
 
+/** The app's word that it holds this transfer's file already: a repeat of a message it completed. */
+const savedAnswer = (answer: unknown, transferId: string) =>
+  isRecord(answer) && answer.ok === true && answer.transferId === transferId && answer.saved === true;
+
 /** The queue with Safari's ports: requests in the reader's tab, files to the app. */
 export class NativeCopyHandoff {
   readonly engine: KeepACopy;
   /** What the tab said of each file it holds: its size and digest. */
   readonly #files = new Map<string, { size: number; sha256: string }>();
+  /** Transfers given up in this background: a loop still sending stops, and never writes them open again. */
+  readonly #ended = new Set<string>();
   #pumping: Promise<void> | null = null;
   #lastQueueAt = -Infinity;
+  /** The tab this step's page was read in: its file comes from there, or not at all. */
+  #stepTab: ReaderTab | null = null;
 
   constructor(private readonly deps: NativeHandoffDeps) {
     this.engine = new KeepACopy({
       clock: deps.clock,
       random: deps.random,
-      read: () => deps.storage.get(KEEP_A_COPY_KEY),
-      write: (state) => deps.storage.set(KEEP_A_COPY_KEY, state),
+      read: (scope) => deps.store.read(scope),
+      write: (state, changed, scope) => deps.store.write(state, changed, scope),
+      // Page and file in one step, from one tab.
+      fileWithPage: true,
       fetchPage: async (url) => {
-        const tabId = await deps.tabs.find();
-        if (tabId === null) return { kind: "failed", code: "busy" };
-        return fromTab(await deps.tabs.run<TabAnswer>(tabId, keepCopyFetchInTab, [url, "text", REQUEST_TIMEOUT_MS, MAX_PAGE_CHARS * 2, ""], REQUEST_TIMEOUT_MS + 5_000));
+        const tab = await deps.tabs.find();
+        this.#stepTab = tab;
+        if (tab === null) return { kind: "failed", code: "busy" };
+        return fromTab(await deps.tabs.run<TabAnswer>(tab.id, keepCopyFetchInTab, [url, "text", REQUEST_TIMEOUT_MS, MAX_PAGE_CHARS * 2, ""], REQUEST_TIMEOUT_MS + 5_000));
       },
       fetchFile: async (url) => {
-        const tabId = await deps.tabs.find();
-        if (tabId === null) return { kind: "failed", code: "busy" };
-        const handle = `keep-copy:${tabId}:${deps.newId()}`;
-        const answer = await deps.tabs.run<TabAnswer>(tabId, keepCopyFetchInTab, [url, "file", FILE_TIMEOUT_MS, MAX_FILE_BYTES, handle], FILE_TIMEOUT_MS + 5_000);
+        const pinned = this.#stepTab;
+        this.#stepTab = null;
+        const tab = await deps.tabs.find();
+        // The reader left that tab, closed it, or left AO3 in it: the step
+        // ends here, and no other tab is used in its place.
+        if (pinned === null || tab === null || !samePlace(pinned, tab)) return { kind: "failed", code: "network" };
+        const handle = `keep-copy:${tab.id}:${deps.newId()}`;
+        const answer = await deps.tabs.run<TabAnswer>(tab.id, keepCopyFetchInTab, [url, "file", FILE_TIMEOUT_MS, MAX_FILE_BYTES, handle], FILE_TIMEOUT_MS + 5_000);
         if (answer?.kind === "response" && answer.handle === handle && typeof answer.sha256 === "string" && /^[0-9a-f]{64}$/.test(answer.sha256) && typeof answer.size === "number") {
           this.#files.set(handle, { size: answer.size, sha256: answer.sha256 });
         }
@@ -204,7 +242,9 @@ export class NativeCopyHandoff {
   /**
    * Asks the app which works it wants fetched here, at most every five
    * minutes unless `force`, and tells it where the queue stands. Returns
-   * whether there is anything to do.
+   * whether there is anything to do. Only the work the reader has open now
+   * goes at the reader's pace; every other one at the slow pace, under its
+   * cap of reads.
    */
   async askQueue(force = false): Promise<boolean> {
     const now = this.deps.clock.now();
@@ -219,18 +259,35 @@ export class NativeCopyHandoff {
     }).catch(() => null));
     // No answer, or not one: the queue stays as it was.
     if (answer === null) return view.waiting > 0;
+    const open = await this.deps.tabs.find().catch(() => null);
     await this.engine.updateSettings({ enabled: answer.enabled, format: answer.format });
-    await this.engine.want(answer.works);
+    await this.engine.want(answer.works.map((work) => ({
+      ...work, pace: work.pace === "reader" && open?.workId === work.workId ? "reader" : "check",
+    })));
     return answer.works.length > 0;
   }
 
   async #record(): Promise<TransferRecord | null> {
-    const stored = await this.deps.storage.get(TRANSFER_KEY).catch(() => null);
+    const stored = await this.deps.store.getMeta(TRANSFER_KEY).catch(() => null);
     return isRecord(stored) && typeof stored.transferId === "string" ? stored as unknown as TransferRecord : null;
   }
 
   #write(record: TransferRecord): Promise<void> {
-    return this.deps.storage.set(TRANSFER_KEY, { ...record });
+    return this.deps.store.setMeta(TRANSFER_KEY, { ...record });
+  }
+
+  /** Whether this transfer is still the open one: not given up here, nor replaced or ended in storage. */
+  async #open(record: TransferRecord): Promise<boolean> {
+    if (this.#ended.has(record.transferId)) return false;
+    const stored = await this.#record();
+    return stored?.transferId === record.transferId && stored.state === "open" && !this.#ended.has(record.transferId);
+  }
+
+  /** Writes the loop's progress, only while the transfer is still open. */
+  async #progress(record: TransferRecord): Promise<boolean> {
+    if (!(await this.#open(record))) return false;
+    await this.#write(record);
+    return true;
   }
 
   #send(message: Record<string, unknown>): Promise<unknown> {
@@ -238,13 +295,21 @@ export class NativeCopyHandoff {
   }
 
   async #fail(record: TransferRecord, reason: string): Promise<void> {
+    this.#ended.add(record.transferId);
     record.state = "failed";
     await this.#write(record);
     await this.#send({ type: KEEP_COPY_NATIVE.abort, transferId: record.transferId, reason });
   }
 
+  async #saved(record: TransferRecord): Promise<void> {
+    if (!(await this.#open(record))) return;
+    record.state = "saved";
+    await this.#write(record);
+  }
+
   /** The app gave no answer: tried again on the next look, and given up after a few. */
   async #missed(record: TransferRecord, answer: unknown): Promise<void> {
+    if (!(await this.#open(record))) return;
     if (isRecord(answer) && answer.ok === false) return this.#fail(record, typeof answer.error === "string" ? answer.error.slice(0, 40) : "refused");
     record.failures += 1;
     if (record.failures >= MAX_TRANSFER_FAILURES) return this.#fail(record, "no_answer");
@@ -259,12 +324,14 @@ export class NativeCopyHandoff {
     if (old?.state === "open") await this.#fail(old, "replaced");
     const transferId = this.deps.newId();
     if (!UUID_PATTERN.test(transferId)) throw new Error("bad_id");
+    const now = this.deps.clock.now();
     const record: TransferRecord = {
-      transferId, downloadId: this.deps.clock.now(), workId: request.workId, updatedAt: request.updatedAt, format: request.format,
-      fileName: request.filename, byteLength: file.size, sha256: file.sha256, handle: request.handle, nextIndex: 0, failures: 0, state: "open",
+      transferId, downloadId: now, workId: request.workId, updatedAt: request.updatedAt, format: request.format,
+      fileName: request.filename, byteLength: file.size, sha256: file.sha256, handle: request.handle, nextIndex: 0, failures: 0,
+      progressAt: now, state: "open",
     };
     await this.#write(record);
-    this.#pump(record);
+    void this.#pump(record);
     return record.downloadId;
   }
 
@@ -283,27 +350,36 @@ export class NativeCopyHandoff {
       type: KEEP_COPY_NATIVE.begin, transferId, workId: record.workId, updatedAt: record.updatedAt, format: record.format,
       byteLength: record.byteLength, sha256: record.sha256, fileName: record.fileName, partBytes: PART_BYTES, partCount: parts,
     });
+    // A repeated BEGIN for a transfer the app already completed.
+    if (savedAnswer(begin, transferId)) return this.#saved(record);
     let next = ackedIndex(begin, transferId, parts);
     if (next === null) return this.#missed(record, begin);
+    record.progressAt = this.deps.clock.now();
+    if (!(await this.#progress(record))) return;
     const tabId = tabOf(record.handle);
     while (next < parts) {
+      // Given up meanwhile (it took too long, or a newer one replaced it): stop.
+      if (!(await this.#open(record))) return;
       const base64 = Number.isSafeInteger(tabId)
         ? await this.deps.tabs.run<string | null>(tabId, keepCopyPartInTab, [record.handle, next, PART_BYTES], REQUEST_TIMEOUT_MS)
         : null;
-      // The tab was closed or reloaded: the file is gone with it.
-      if (typeof base64 !== "string") return this.#fail(record, "file_gone");
+      // The tab was closed, reloaded or left: the file is gone with it.
+      if (typeof base64 !== "string") return (await this.#open(record)) ? this.#fail(record, "file_gone") : undefined;
       const ack = await this.#send({ type: KEEP_COPY_NATIVE.part, transferId, index: next, base64 });
+      if (savedAnswer(ack, transferId)) return this.#saved(record);
       const after = ackedIndex(ack, transferId, parts);
       if (after === null) return this.#missed(record, ack);
+      // Progress is a part the app newly holds; a repeat answered again is not.
+      if (after > record.nextIndex) record.progressAt = this.deps.clock.now();
       next = after;
       record.nextIndex = next;
       record.failures = 0;
-      await this.#write(record);
+      if (!(await this.#progress(record))) return;
     }
+    if (!(await this.#open(record))) return;
     const end = await this.#send({ type: KEEP_COPY_NATIVE.end, transferId });
-    if (!isRecord(end) || end.ok !== true || end.transferId !== transferId || end.saved !== true) return this.#missed(record, end);
-    record.state = "saved";
-    await this.#write(record);
+    if (!savedAnswer(end, transferId)) return this.#missed(record, end);
+    await this.#saved(record);
   }
 
   async #settle(downloadId: number): Promise<SaveState> {
@@ -316,7 +392,9 @@ export class NativeCopyHandoff {
       record = await this.#record();
     }
     if (record?.state === "saved") return { state: "complete", filename: record.fileName };
-    return record?.state === "open" ? { state: "in_progress", filename: null } : { state: "interrupted", filename: null };
+    return record?.state === "open"
+      ? { state: "in_progress", filename: null, progressAt: record.progressAt }
+      : { state: "interrupted", filename: null };
   }
 }
 
@@ -325,6 +403,8 @@ export class NativeCopyHandoff {
 interface SafariTab {
   readonly id?: number;
   readonly url?: string;
+  readonly windowId?: number;
+  readonly incognito?: boolean;
   readonly active?: boolean;
   readonly lastAccessed?: number;
   readonly discarded?: boolean;
@@ -342,7 +422,7 @@ export interface NativeKeepEnvironment {
     clear?(name: string): unknown;
     onAlarm: { addListener(listener: (alarm: { name: string }) => void): void };
   };
-  readonly storage: { get(key: string): Promise<Record<string, unknown>>; set(items: Record<string, unknown>): Promise<void> };
+  readonly indexedDB: IDBFactory;
   /** Sends one message to the app (`sendNativeMessageWithFallback`). */
   sendNative(message: Readonly<Record<string, unknown>>, timeoutMs: number): Promise<unknown>;
   newId(): string;
@@ -353,10 +433,17 @@ const TIMER_MAX_MS = 25_000;
 const isAo3 = (url: string | undefined) => typeof url === "string" && /^https:\/\/archiveofourown\.org\//.test(url);
 
 /** The reader's AO3 tab among those found: the one they are on, or the last they used. */
-export function readerTab(tabs: readonly SafariTab[]): number | null {
+export function readerTab(tabs: readonly SafariTab[]): ReaderTab | null {
   const open = tabs.filter((tab) => typeof tab.id === "number" && isAo3(tab.url) && !tab.discarded);
   open.sort((a, b) => Number(b.active === true) - Number(a.active === true) || (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0));
-  return open[0]?.id ?? null;
+  const tab = open[0];
+  if (!tab || typeof tab.id !== "number") return null;
+  return {
+    id: tab.id,
+    windowId: typeof tab.windowId === "number" ? tab.windowId : null,
+    incognito: tab.incognito === true,
+    workId: /^https:\/\/archiveofourown\.org\/(?:collections\/[^/]+\/)?works\/([1-9][0-9]{0,19})(?:[/?#]|$)/.exec(tab.url ?? "")?.[1] ?? null,
+  };
 }
 
 const call = <T,>(target: Record<string, unknown>, method: string, args: readonly unknown[]): Promise<T> =>
@@ -389,10 +476,7 @@ export function installNativeKeepACopy(env: NativeKeepEnvironment): NativeCopyHa
   const handoff = new NativeCopyHandoff({
     native: { send: (message) => env.sendNative(message, NATIVE_TIMEOUT_MS) },
     tabs,
-    storage: {
-      get: async (key) => (await env.storage.get(key))[key],
-      set: (key, value) => env.storage.set({ [key]: value }),
-    },
+    store: new IndexedDbKeepStore(env.indexedDB),
     clock: Date,
     random: Math.random,
     newId: () => env.newId(),
@@ -431,6 +515,8 @@ export function installNativeKeepACopy(env: NativeKeepEnvironment): NativeCopyHa
   env.tabs.onUpdated?.addListener((_tabId, change, tab) => {
     if (change.status === "complete" && isAo3(tab.url ?? change.url)) void run();
   });
+  // The reader back on an AO3 tab: the queue carries on.
+  env.tabs.onActivated?.addListener(() => void run());
   void run(true);
   return handoff;
 }
