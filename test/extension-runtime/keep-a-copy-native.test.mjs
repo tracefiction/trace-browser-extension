@@ -93,8 +93,18 @@ function ao3(routes) {
 
 /** The Trace app's side, as the hand-off protocol says it behaves. */
 function fakeApp({ works = [], enabled = true, drop = () => false, refuseBegin = false, stoppedUntil = null } = {}) {
-  const app = { messages: [], transfers: new Map(), completed: new Set(), saved: [], skipped: [], aborted: [], works, enabled, stoppedUntil };
+  const app = { messages: [], transfers: new Map(), completed: new Set(), saved: [], skipped: [], aborted: [], works, enabled, stoppedUntil,
+    leases: [], leaseHeld: false, appHoldsAO3: false, disabledBegin: false };
   app.send = async (message) => {
+    // The AO3 lease, kept apart so the transfer's own messages read as before.
+    if (message.type === KEEP_COPY_NATIVE.lock) {
+      app.leases.push(message);
+      if (app.disabledBegin) return { ok: false, error: "disabled" };
+      if (app.appHoldsAO3 || app.leaseHeld) return { ok: true, granted: false, until: 0 };
+      app.leaseHeld = true;
+      return { ok: true, granted: true };
+    }
+    if (message.type === KEEP_COPY_NATIVE.unlock) { app.leaseHeld = false; return { ok: true }; }
     app.messages.push(message);
     assert.equal(message.protocolVersion, 1);
     assert.ok(JSON.stringify(message).length < INBOX_MAX, `${message.type} is over the inbox's 512 KiB`);
@@ -114,6 +124,7 @@ function fakeApp({ works = [], enabled = true, drop = () => false, refuseBegin =
           ...(app.stoppedUntil === null ? {} : { stoppedUntil: app.stoppedUntil, stopReason: "challenge" }) };
       case KEEP_COPY_NATIVE.begin: {
         if (refuseBegin) return { ok: false, error: "not_wanted" };
+        if (app.disabledBegin) return { ok: false, error: "disabled" };
         const known = app.transfers.get(message.transferId);
         if (!known) app.transfers.set(message.transferId, { begin: message, parts: [] });
         return { ok: true, transferId: message.transferId, nextIndex: known ? known.parts.length : 0 };
@@ -235,6 +246,35 @@ test("a stop the app met holds this extension too: nothing is read from AO3 unti
   box.now += 60 * 60_000 + 1;
   await box.drain();
   assert.deepEqual(site.requests, [workURL("31"), fileURL("31")]);
+});
+
+test("AO3 is asked only under the lease the app shares: while the app holds it, nothing is read, and no stop follows", async () => {
+  const file = epub(1_000);
+  const site = ao3({ [workURL("32")]: workPage("32"), [fileURL("32")]: file });
+  const app = fakeApp({ works: [{ workId: "32", reason: "locked", pace: "reader" }] });
+  const box = harness({ app, site });
+  app.appHoldsAO3 = true;
+  await box.handoff.askQueue(true);
+  for (let i = 0; i < 5; i += 1) box.now += (await box.handoff.engine.tick()) ?? 0;
+  assert.deepEqual(site.requests, []);
+  assert.equal((await box.handoff.engine.view()).stopped, null, "waiting for the app is never a stop");
+  app.appHoldsAO3 = false;
+  await box.drain();
+  assert.deepEqual(site.requests, [workURL("32"), fileURL("32")]);
+  assert.equal(app.leases.length >= 2 && app.leaseHeld, false, "each lease is given back");
+});
+
+test("the app's \"disabled\" turns Keep a Copy off here at once: nothing more fetched, the list dropped", async () => {
+  const site = ao3({ [workURL("33")]: workPage("33"), [fileURL("33")]: epub(1_000) });
+  const app = fakeApp({ works: [{ workId: "33", reason: "locked", pace: "reader" }, { workId: "34", reason: "locked" }] });
+  const box = harness({ app, site });
+  await box.handoff.askQueue(true);
+  app.disabledBegin = true;
+  await box.drain();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(await box.handoff.engine.enabled(), false);
+  assert.equal((await box.handoff.engine.view()).waiting, 0);
+  assert.equal(app.saved.length, 0);
 });
 
 test("the reader's AO3 tab is the one they are on, else the last they used", () => {

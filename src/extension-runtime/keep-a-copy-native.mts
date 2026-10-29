@@ -42,6 +42,9 @@ export const KEEP_COPY_NATIVE = {
   end: "KEEP_COPY_END",
   abort: "KEEP_COPY_ABORT",
   skipped: "KEEP_COPY_SKIPPED",
+  /** One AO3 request at a time across the app and this extension: taken around each, then given back. */
+  lock: "KEEP_COPY_AO3_LOCK",
+  unlock: "KEEP_COPY_AO3_UNLOCK",
 } as const;
 /** One part's bytes: as base64, with the message around it, well under the app's 512 KiB inbox. */
 export const PART_BYTES = 256 * 1_024;
@@ -74,6 +77,9 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+/** The app refused because Keep a Copy is off there. */
+const disabledAnswer = (answer: unknown) => isRecord(answer) && answer.ok === false && answer.error === "disabled";
 
 export interface QueueAnswer {
   readonly enabled: boolean;
@@ -207,6 +213,21 @@ export class NativeCopyHandoff {
   #stepTab: ReaderTab | null = null;
 
   constructor(private readonly deps: NativeHandoffDeps) {
+    // AO3 is asked only while the app isn't asking it (the lease the app
+    // holds around its own requests). No lease, no answer: nothing is sent,
+    // and the engine waits as for a busy fetch.
+    const leased = async (timeoutMs: number, request: () => Promise<Fetched>): Promise<Fetched> => {
+      const lease = await deps.native.send({
+        type: KEEP_COPY_NATIVE.lock, protocolVersion: KEEP_COPY_PROTOCOL_VERSION, seconds: Math.ceil(timeoutMs / 1_000) + 5,
+      }).catch(() => null);
+      if (disabledAnswer(lease)) void this.#disable();
+      if (!isRecord(lease) || lease.ok !== true || lease.granted !== true) return { kind: "failed", code: "busy" };
+      try {
+        return await request();
+      } finally {
+        void deps.native.send({ type: KEEP_COPY_NATIVE.unlock, protocolVersion: KEEP_COPY_PROTOCOL_VERSION }).catch(() => undefined);
+      }
+    };
     this.engine = new KeepACopy({
       clock: deps.clock,
       random: deps.random,
@@ -219,7 +240,8 @@ export class NativeCopyHandoff {
         const tab = await deps.tabs.find();
         this.#stepTab = tab;
         if (tab === null) return { kind: "failed", code: "busy" };
-        return fromTab(await deps.tabs.run<TabAnswer>(tab.id, keepCopyFetchInTab, [url, "text", REQUEST_TIMEOUT_MS, MAX_PAGE_CHARS * 2, "", credentials], REQUEST_TIMEOUT_MS + 5_000));
+        return leased(REQUEST_TIMEOUT_MS + 5_000, async () =>
+          fromTab(await deps.tabs.run<TabAnswer>(tab.id, keepCopyFetchInTab, [url, "text", REQUEST_TIMEOUT_MS, MAX_PAGE_CHARS * 2, "", credentials], REQUEST_TIMEOUT_MS + 5_000)));
       },
       fetchFile: async (url, credentials) => {
         const pinned = this.#stepTab;
@@ -229,11 +251,13 @@ export class NativeCopyHandoff {
         // ends here, and no other tab is used in its place.
         if (pinned === null || tab === null || !samePlace(pinned, tab)) return { kind: "failed", code: "network" };
         const handle = `keep-copy:${tab.id}:${deps.newId()}`;
-        const answer = await deps.tabs.run<TabAnswer>(tab.id, keepCopyFetchInTab, [url, "file", FILE_TIMEOUT_MS, MAX_FILE_BYTES, handle, credentials], FILE_TIMEOUT_MS + 5_000);
-        if (answer?.kind === "response" && answer.handle === handle && typeof answer.sha256 === "string" && /^[0-9a-f]{64}$/.test(answer.sha256) && typeof answer.size === "number") {
-          this.#files.set(handle, { size: answer.size, sha256: answer.sha256 });
-        }
-        return fromTab(answer);
+        return leased(FILE_TIMEOUT_MS + 5_000, async () => {
+          const answer = await deps.tabs.run<TabAnswer>(tab.id, keepCopyFetchInTab, [url, "file", FILE_TIMEOUT_MS, MAX_FILE_BYTES, handle, credentials], FILE_TIMEOUT_MS + 5_000);
+          if (answer?.kind === "response" && answer.handle === handle && typeof answer.sha256 === "string" && /^[0-9a-f]{64}$/.test(answer.sha256) && typeof answer.size === "number") {
+            this.#files.set(handle, { size: answer.size, sha256: answer.sha256 });
+          }
+          return fromTab(answer);
+        });
       },
       save: (request) => this.#begin(request),
       settle: (downloadId) => this.#settle(downloadId),
@@ -322,8 +346,18 @@ export class NativeCopyHandoff {
     await this.#write(record);
   }
 
+  /**
+   * The app has Keep a Copy off: nothing more is fetched, and its list goes.
+   * Never awaited from inside an engine step (it waits for the step to end).
+   */
+  async #disable(): Promise<void> {
+    await this.engine.updateSettings({ enabled: false });
+    await this.engine.want([]);
+  }
+
   /** The app gave no answer: tried again on the next look, and given up after a few. */
   async #missed(record: TransferRecord, answer: unknown): Promise<void> {
+    if (disabledAnswer(answer)) void this.#disable();
     if (!(await this.#open(record))) return;
     if (isRecord(answer) && answer.ok === false) return this.#fail(record, typeof answer.error === "string" ? answer.error.slice(0, 40) : "refused");
     record.failures += 1;

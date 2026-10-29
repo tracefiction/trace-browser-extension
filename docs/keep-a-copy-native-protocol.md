@@ -62,8 +62,27 @@ else in an answer makes the extension treat it as no answer.
 | `KEEP_COPY_END` | `transferId` | `{ok: true, transferId, saved: true}` |
 | `KEEP_COPY_ABORT` | `transferId`, `reason` | `{ok: true}` |
 | `KEEP_COPY_SKIPPED` | `workId`, `code` | `{ok: true}` |
+| `KEEP_COPY_AO3_LOCK` | `seconds` (the request's time limit, plus a little) | `{ok: true, granted, until?}` |
+| `KEEP_COPY_AO3_UNLOCK` | — | `{ok: true}` |
 
 Any message may be refused with `{ok: false, error: "<short code>"}`.
+
+### One request to AO3 at a time, app and extension together
+
+The app and the extension share one lease on AO3 (`AO3Lease.json`). Each
+side takes it before a request and gives it back after: the extension with
+`KEEP_COPY_AO3_LOCK` (for at most 330 s) and `KEEP_COPY_AO3_UNLOCK`. While
+the app holds it, LOCK answers `granted: false` with `until`; the extension
+sends nothing and waits its turn, as for any busy fetch, which is never a
+step toward a stop. No answer is treated as not granted. A lease ends by
+itself at its time.
+
+### Off
+
+While Keep a Copy is off in the app, BEGIN, PART and LOCK are refused with
+`error: "disabled"`, and END discards the transfer with the same error. The
+extension takes `disabled` as `enabled: false` at once: nothing more is
+fetched and its list is dropped.
 
 ### Queue
 
@@ -87,7 +106,9 @@ five minutes. The answer:
 
 - `stoppedUntil`, `stopReason`: AO3's stop on this device (ms since 1970,
   and one of the stop codes), when the app met one or the extension
-  reported one. There is one stop for both: the extension reads nothing
+  reported one. Only AO3's own answers are shared (`challenge`, `forbidden`,
+  `slow_down`, `wrong_host`), never this device's trouble (`save_failed`,
+  `unreadable`). There is one stop for both: the extension reads nothing
   from AO3 until it is over (`KeepACopy.holdUntil`, at most a day), and the
   `stopped` it sends here is kept by the app the same way. An unknown
   `stopReason` still stops. A work AO3 refused the app during a stop is
@@ -183,16 +204,21 @@ the app group `group.com.tracefiction.trace`, folder `KeepACopy/`:
 | `Transfers/<transferId>/` | handler | `transfer.json` and the file so far, appended part by part |
 | `Completed.json` | handler | transfers answered `saved: true` (a week) |
 | `Received/<workId>-<updatedAt>.epub` | handler | whole files for the app |
-| `Skipped.json` | handler | `KEEP_COPY_SKIPPED`, one per work |
+| `Skipped/` | handler | `KEEP_COPY_SKIPPED`, one file per report |
+| `AO3Lease.json` | both | who may ask AO3 now, and until when |
+
+Every change is made under one `flock` on `mailbox.lock`, so a message and
+the app's off switch never interleave.
 
 The handler never holds a file whole in memory, nor as base64. It refuses a
 message over 512 KiB (its JSON included), a part over 349,528 base64
 characters or of the wrong length, unknown fields, and a BEGIN for a work the
 app doesn't list (`not_listed`). A part is kept only at `nextIndex`, after
 the file is cut back to the parts acknowledged. A transfer with no message
-for 30 minutes is discarded; a newer BEGIN for the same work replaces an
+for 30 minutes is discarded (a folder under a minute old never is; BEGIN
+writes `transfer.json` before the file); a newer BEGIN for the same work replaces an
 unfinished one. Refusals: `invalid_request`, `unsupported`, `too_large`,
-`not_listed`, `conflict`, `unknown_transfer`, `invalid_part`, `incomplete`,
+`not_listed`, `disabled`, `conflict`, `unknown_transfer`, `invalid_part`, `incomplete`,
 `checksum_mismatch`, `storage_unavailable`.
 
 ## What only a device can confirm

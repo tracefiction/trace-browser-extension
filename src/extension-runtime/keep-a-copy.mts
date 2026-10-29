@@ -434,7 +434,7 @@ export type Verdict =
   | { readonly kind: "skip"; readonly code: SkipCode }
   /** `network` when the request itself failed, which counts against the work. */
   /** `own`: the wait is this extension's, not a time AO3 gave. */
-  /** `busy`: nothing was sent (the file fetcher was taken): it waits its turn, never a refusal. */
+  /** `busy`: nothing was sent (the file fetcher, or AO3's lease, was taken): it waits its turn, never a refusal. */
   | { readonly kind: "retry"; readonly waitMs: number | null; readonly network?: true; readonly own?: true; readonly busy?: true }
   | { readonly kind: "stop"; readonly code: StopCode; readonly waitMs: number | null };
 
