@@ -56,7 +56,7 @@ else in an answer makes the extension treat it as no answer.
 
 | Message | Fields sent | Answer |
 | --- | --- | --- |
-| `KEEP_COPY_QUEUE_GET` | `waiting` (works queued here), `stopped` (`{code, until}` or null) | `{ok: true, enabled, format?, works: [...]}` |
+| `KEEP_COPY_QUEUE_GET` | `waiting` (works queued here), `stopped` (`{code, until}` or null) | `{ok: true, enabled, format?, works: [...], stoppedUntil?, stopReason?}` |
 | `KEEP_COPY_BEGIN` | `transferId`, `workId`, `updatedAt`, `format`, `byteLength`, `sha256`, `fileName`, `partBytes`, `partCount` | `{ok: true, transferId, nextIndex}` |
 | `KEEP_COPY_PART` | `transferId`, `index`, `base64` | `{ok: true, transferId, nextIndex}` |
 | `KEEP_COPY_END` | `transferId` | `{ok: true, transferId, saved: true}` |
@@ -84,6 +84,17 @@ five minutes. The answer:
     `"check"` (the default). The extension honours `"reader"` only for the
     work open in the reader's tab; every other ask goes at the `"check"`
     pace, under its cap of 30 reads in six hours.
+
+- `stoppedUntil`, `stopReason`: AO3's stop on this device (ms since 1970,
+  and one of the stop codes), when the app met one or the extension
+  reported one. There is one stop for both: the extension reads nothing
+  from AO3 until it is over (`KeepACopy.holdUntil`, at most a day), and the
+  `stopped` it sends here is kept by the app the same way. An unknown
+  `stopReason` still stops. A work AO3 refused the app during a stop is
+  listed only once the stop is over.
+
+Before the app has written a list (Keep a Copy never on), and whenever it is
+off, the answer is `{ok: true, enabled: false, works: []}`.
 
 The list replaces the extension's queue: a work no longer listed is dropped,
 unless its file is being handed over. A malformed answer changes nothing.
@@ -117,10 +128,15 @@ layout. `transferId` is a lowercase UUID.
    `index` is the next one it needs, and answers the next index it needs (a
    repeat is answered, not stored twice). The extension goes on from whatever
    index the app answers, so the app may ask for a part again.
-3. **END.** The app checks the byte count and SHA-256, then replaces its copy
-   of `workId` with the new file in one step and answers `saved: true`. On a
-   mismatch it answers `{ok: false, error: "checksum_mismatch"}` and discards
-   the transfer. Until END succeeds, the app's old copy stays as it is.
+3. **END.** The handler checks the byte count and SHA-256 (streamed from
+   disk), moves the whole file to the app in one step, remembers the
+   `transferId` as completed, and answers `saved: true`: the file is the
+   app's. On a mismatch it answers `{ok: false, error: "checksum_mismatch"}`
+   and discards the transfer. The app takes the file into its copy when it
+   next runs, only if its `updatedAt` is strictly newer than the copy it
+   holds; until then, and if it refuses the file, the old copy stays as it
+   is. A refused file (not newer, not an EPUB, too large) takes the work off
+   the list, so the extension stops fetching it.
 4. **ABORT.** The app discards the transfer's parts. Sent when the app
    refuses a message, when the tab lost the file (closed or reloaded), when
    three messages in a row go unanswered, or when a newer transfer replaces an
@@ -153,6 +169,31 @@ or tell the reader. `code` is one of:
 | `http_error` | Any other answer from AO3. |
 | `save_failed` | The file could not be handed to the app. |
 | `failed` | The request failed three times. |
+
+### The handler
+
+`Shared (Extension)/SafariWebExtensionHandler.swift` routes the six messages
+to `TraceKeepACopyMailbox.swift`, which the app builds too. Everything is in
+the app group `group.com.tracefiction.trace`, folder `KeepACopy/`:
+
+| Path | Written by | What |
+| --- | --- | --- |
+| `ExtensionQueue.json` | app | `enabled`, `works`, the app's stop |
+| `Stop.json` | both | the one AO3 stop; the later one wins |
+| `Transfers/<transferId>/` | handler | `transfer.json` and the file so far, appended part by part |
+| `Completed.json` | handler | transfers answered `saved: true` (a week) |
+| `Received/<workId>-<updatedAt>.epub` | handler | whole files for the app |
+| `Skipped.json` | handler | `KEEP_COPY_SKIPPED`, one per work |
+
+The handler never holds a file whole in memory, nor as base64. It refuses a
+message over 512 KiB (its JSON included), a part over 349,528 base64
+characters or of the wrong length, unknown fields, and a BEGIN for a work the
+app doesn't list (`not_listed`). A part is kept only at `nextIndex`, after
+the file is cut back to the parts acknowledged. A transfer with no message
+for 30 minutes is discarded; a newer BEGIN for the same work replaces an
+unfinished one. Refusals: `invalid_request`, `unsupported`, `too_large`,
+`not_listed`, `conflict`, `unknown_transfer`, `invalid_part`, `incomplete`,
+`checksum_mismatch`, `storage_unavailable`.
 
 ## What only a device can confirm
 

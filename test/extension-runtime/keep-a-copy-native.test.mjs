@@ -92,8 +92,8 @@ function ao3(routes) {
 }
 
 /** The Trace app's side, as the hand-off protocol says it behaves. */
-function fakeApp({ works = [], enabled = true, drop = () => false, refuseBegin = false } = {}) {
-  const app = { messages: [], transfers: new Map(), completed: new Set(), saved: [], skipped: [], aborted: [], works, enabled };
+function fakeApp({ works = [], enabled = true, drop = () => false, refuseBegin = false, stoppedUntil = null } = {}) {
+  const app = { messages: [], transfers: new Map(), completed: new Set(), saved: [], skipped: [], aborted: [], works, enabled, stoppedUntil };
   app.send = async (message) => {
     app.messages.push(message);
     assert.equal(message.protocolVersion, 1);
@@ -110,7 +110,8 @@ function fakeApp({ works = [], enabled = true, drop = () => false, refuseBegin =
     if (app.hold && message.type === KEEP_COPY_NATIVE.part) await app.hold;
     switch (message.type) {
       case KEEP_COPY_NATIVE.queue:
-        return { ok: true, enabled: app.enabled, format: "epub", works: app.works };
+        return { ok: true, enabled: app.enabled, format: "epub", works: app.works,
+          ...(app.stoppedUntil === null ? {} : { stoppedUntil: app.stoppedUntil, stopReason: "challenge" }) };
       case KEEP_COPY_NATIVE.begin: {
         if (refuseBegin) return { ok: false, error: "not_wanted" };
         const known = app.transfers.get(message.transferId);
@@ -193,8 +194,12 @@ function harness({ app, site, store = new IndexedDbKeepStore(new IDBFactory(), I
 
 test("the app's queue is read strictly: anything malformed fetches nothing", () => {
   assert.deepEqual(readQueueAnswer({ ok: true, enabled: true, works: [{ workId: "11", reason: "locked" }] }), {
-    enabled: true, format: "epub", works: [{ workId: "11", have: null, pace: "check", reason: "locked" }],
+    enabled: true, format: "epub", works: [{ workId: "11", have: null, pace: "check", reason: "locked" }], stopped: null,
   });
+  assert.deepEqual(readQueueAnswer({ ok: true, enabled: true, works: [], stoppedUntil: 9_000, stopReason: "challenge" }).stopped,
+    { code: "challenge", until: 9_000 });
+  assert.deepEqual(readQueueAnswer({ ok: true, enabled: true, works: [], stoppedUntil: 9_000, stopReason: "?" }).stopped,
+    { code: "forbidden", until: 9_000 }, "an unknown reason still stops");
   assert.deepEqual(readQueueAnswer({ ok: true, enabled: false, works: [{ workId: "11", reason: "locked" }] }).works, []);
   for (const bad of [
     null,
@@ -208,12 +213,28 @@ test("the app's queue is read strictly: anything malformed fetches nothing", () 
     { ok: true, enabled: true, works: [{ workId: "11", reason: "refused", have: "yesterday" }] },
     { ok: true, enabled: true, works: [{ workId: "11", reason: "refused", url: "https://example.invalid/x.epub", pace: "now" }] },
     { ok: true, enabled: true, works: Array.from({ length: MAX_QUEUE_WORKS + 1 }, (_, i) => ({ workId: String(i + 1), reason: "locked" })) },
+    { ok: true, enabled: true, works: [], stoppedUntil: "soon" },
   ]) assert.equal(readQueueAnswer(bad), null, JSON.stringify(bad)?.slice(0, 80));
   assert.equal(ackedIndex({ ok: true, transferId: "t", nextIndex: 3 }, "t", 3), 3);
   assert.equal(ackedIndex({ ok: true, transferId: "t", nextIndex: 4 }, "t", 3), null);
   assert.equal(ackedIndex({ ok: true, transferId: "other", nextIndex: 1 }, "t", 3), null);
   assert.equal(partCount(1), 1);
   assert.equal(partCount(PART_BYTES * 2 + 1), 3);
+});
+
+test("a stop the app met holds this extension too: nothing is read from AO3 until it is over", async () => {
+  const file = epub(1_000);
+  const site = ao3({ [workURL("31")]: workPage("31"), [fileURL("31")]: file });
+  const app = fakeApp({ works: [{ workId: "31", reason: "refused", pace: "reader" }], stoppedUntil: 0 });
+  const box = harness({ app, site });
+  app.stoppedUntil = box.now + 60 * 60_000;
+  await box.handoff.askQueue(true);
+  assert.equal(await box.handoff.engine.tick() > 59 * 60_000, true);
+  assert.deepEqual(site.requests, []);
+  assert.equal((await box.handoff.engine.view()).stopped.code, "challenge");
+  box.now += 60 * 60_000 + 1;
+  await box.drain();
+  assert.deepEqual(site.requests, [workURL("31"), fileURL("31")]);
 });
 
 test("the reader's AO3 tab is the one they are on, else the last they used", () => {

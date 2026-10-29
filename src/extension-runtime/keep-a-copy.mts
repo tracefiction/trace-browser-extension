@@ -1208,6 +1208,18 @@ export class KeepACopy {
   }
 
   /**
+   * A stop met elsewhere (in Safari, the Trace app's own requests to AO3):
+   * nothing is read until it is over, at most a day from now.
+   */
+  holdUntil(until: number, code: StopCode): Promise<void> {
+    return this.#serial((state) => {
+      const now = this.ports.clock.now();
+      const capped = Math.min(until, now + STOP_MAX_MS);
+      if (capped > now && capped > (state.pacer.stopped?.until ?? 0)) state.pacer.stopped = { code, until: capped };
+    });
+  }
+
+  /**
    * Makes at most one request, if one is due. Returns how long until the
    * next one may be, or null with nothing to do.
    */

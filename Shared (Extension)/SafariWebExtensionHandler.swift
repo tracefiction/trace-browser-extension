@@ -92,7 +92,9 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
 
         // Import messages contain private reader choices. Do not log request
         // identifiers, profile IDs, payloads or untrusted message values.
-        if !reportedType.hasPrefix("TRACE_IOS_IMPORT_") && !reportedType.hasPrefix("TRACE_IOS_HISTORY_") {
+        // Keep a Copy's parts arrive by the hundred: not logged either.
+        if !reportedType.hasPrefix("TRACE_IOS_IMPORT_") && !reportedType.hasPrefix("TRACE_IOS_HISTORY_")
+            && !reportedType.hasPrefix("KEEP_COPY_") {
             os_log(
                 "Incoming native message type=%{public}@ profile=%{public}@",
                 log: Self.log,
@@ -107,6 +109,12 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             switch messageType {
             case "TRACE_IOS_IMPORT_PREPARE", "TRACE_IOS_IMPORT_STAGE", "TRACE_IOS_IMPORT_CANCEL":
                 responseBody = Self.importResponse(payload, profileID: profile)
+
+            case "KEEP_COPY_QUEUE_GET", "KEEP_COPY_BEGIN", "KEEP_COPY_PART", "KEEP_COPY_END", "KEEP_COPY_ABORT", "KEEP_COPY_SKIPPED":
+                // Keep a Copy: files for the Trace app, in parts, through the
+                // app group (TraceKeepACopyMailbox.swift). Nothing here reads
+                // credentials or makes a request.
+                responseBody = TraceKeepACopyMailbox()?.handle(payload) ?? ["ok": false, "error": "storage_unavailable"]
 
             case "TRACE_IOS_HISTORY_PREPARE", "TRACE_IOS_HISTORY_STAGE", "TRACE_IOS_HISTORY_CANCEL":
                 // A whole AO3 History for review in the app (TraceSafariHistoryInbox.swift).

@@ -48,9 +48,10 @@
     "visual:popup": "node scripts/render-visual-fixtures.mjs --popup-only",
     "visual:history-import": "npm run build:core && node scripts/render-visual-fixtures.mjs --history-import",
     "agent:lint": "node scripts/agent-checks.mjs",
-    "agent:check": "npm run agent:lint && npm run test:swift-provider-codec && npm run test:swift-import-inbox && npm run test:swift-history-inbox && npm test && npm run build:release && npm run agent:lint",
+    "agent:check": "npm run agent:lint && npm run test:swift-provider-codec && npm run test:swift-import-inbox && npm run test:swift-history-inbox && npm run test:swift-keep-a-copy-mailbox && npm test && npm run build:release && npm run agent:lint",
     "test:swift-import-inbox": "node scripts/test-swift-import-inbox.mjs",
     "test:swift-history-inbox": "node scripts/test-swift-history-inbox.mjs",
+    "test:swift-keep-a-copy-mailbox": "node scripts/test-swift-keep-a-copy-mailbox.mjs",
     "test:native-import-package": "node --test test/native-import-package.test.mjs",
     "test:activity-cors": "node --test test/extension-runtime/activity-cors.browser.test.mjs",
     "test:saved-filters:browser": "node --test test/ao3-saved-filters.browser.test.mjs"

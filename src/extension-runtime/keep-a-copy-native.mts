@@ -28,6 +28,7 @@ import {
   type Pace,
   type SaveState,
   type Settings,
+  type StopCode,
   type WantedWork,
 } from "./keep-a-copy.mjs";
 import { IndexedDbKeepStore } from "./keep-a-copy-store.mjs";
@@ -79,7 +80,11 @@ export interface QueueAnswer {
   /** The only format handed to the app. */
   readonly format: "epub";
   readonly works: readonly (WantedWork & { readonly reason: "locked" | "refused" })[];
+  /** The AO3 stop the app met (or the one this extension reported), while it lasts: ms since 1970. */
+  readonly stopped: { readonly code: StopCode; readonly until: number } | null;
 }
+
+const STOP_CODES: readonly StopCode[] = ["challenge", "forbidden", "wrong_host", "unreadable", "slow_down", "save_failed"];
 
 /** The app's queue, or null for anything that is not one: nothing is fetched on a malformed answer. */
 export function readQueueAnswer(answer: unknown): QueueAnswer | null {
@@ -97,7 +102,14 @@ export function readQueueAnswer(answer: unknown): QueueAnswer | null {
     if (pace !== "reader" && pace !== "check") return null;
     works.push({ workId: item.workId, have, pace: pace as Pace, reason: item.reason });
   }
-  return { enabled: answer.enabled, format: "epub", works: answer.enabled ? works : [] };
+  const until = answer.stoppedUntil ?? null;
+  if (until !== null && (typeof until !== "number" || !Number.isSafeInteger(until) || until < 0)) return null;
+  // An unknown reason is AO3 refusing: the stop still holds.
+  const code = STOP_CODES.includes(answer.stopReason as StopCode) ? answer.stopReason as StopCode : "forbidden";
+  return {
+    enabled: answer.enabled, format: "epub", works: answer.enabled ? works : [],
+    stopped: until === null ? null : { code, until },
+  };
 }
 
 /** One file on its way to the app, kept in storage so a restarted background resumes it or gives it up. */
@@ -262,6 +274,8 @@ export class NativeCopyHandoff {
     if (answer === null) return view.waiting > 0;
     const open = await this.deps.tabs.find().catch(() => null);
     await this.engine.updateSettings({ enabled: answer.enabled, format: answer.format });
+    // One stop for the app and this extension: AO3 refusing either is AO3 refusing this device.
+    if (answer.stopped) await this.engine.holdUntil(answer.stopped.until, answer.stopped.code);
     await this.engine.want(answer.works.map((work) => ({
       ...work, pace: work.pace === "reader" && open?.workId === work.workId ? "reader" : "check",
     })));
