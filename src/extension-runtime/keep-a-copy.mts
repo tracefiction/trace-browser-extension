@@ -27,6 +27,10 @@
  *
  * Everything lives in local storage on this device. Nothing is sent anywhere
  * but AO3.
+ *
+ * In Trace's own extension the reader's Trace Library says what is kept
+ * instead (`syncLibrary`, from keep-a-copy-library.mts): the same queue, the
+ * same pace and the same files.
  */
 
 import {
@@ -505,7 +509,7 @@ const SHELL_ENDING = /\.(local|lnk|\{[^.]*\})$/i;
 /** A file name's UTF-8 bytes, at most; well under the 255 most file systems allow. */
 export const MAX_NAME_BYTES = 200;
 const MAX_FANDOM_BYTES = 100;
-const utf8 = new TextEncoder();
+const utf8 = /* @__PURE__ */ new TextEncoder();
 
 /** The longest start of `text`, in whole characters, that fits in `max` UTF-8 bytes. */
 function fitBytes(text: string, max: number): string {
@@ -594,6 +598,25 @@ export interface KeptWork {
   /** Older, longer files left as they were when a much shorter version came. */
   setAside: string[];
   skipped: SkipCode | null;
+  /** No longer kept (moved to Dropped, or gone from the Library): its file stays as it is and is never fetched again. */
+  updatesOff?: true;
+  /** Kept because the reader's Trace Library holds it, with Trace's count of its published chapters when last seen. */
+  library?: { chapters: number | null };
+}
+
+/** A work the reader's Trace Library keeps. */
+export interface LibraryWork {
+  readonly workId: string;
+  /** Trace's count of the work's published chapters, when it knows one. A rise is a chapter landing. */
+  readonly chapters: number | null;
+}
+
+export interface LibraryList {
+  readonly keep: readonly LibraryWork[];
+  /** Works the reader moved to Dropped: their files stay, their updates stop. */
+  readonly drop: readonly string[];
+  /** The list is the whole Library, so a kept work missing from it has left it. */
+  readonly whole: boolean;
 }
 
 export interface QueueItem {
@@ -689,9 +712,9 @@ export interface KeepState {
   };
 }
 
-export function newState(now: number): KeepState {
+export function newState(now: number, defaults: Settings = DEFAULT_SETTINGS): KeepState {
   return {
-    v: 1, settings: structuredClone(DEFAULT_SETTINGS), user: null, works: {}, queue: [], run: null, pending: null,
+    v: 1, settings: structuredClone(defaults), user: null, works: {}, queue: [], run: null, pending: null,
     pacer: { dueAt: 0, window: { startedAt: now, reads: 0 }, retries: 0, misses: 0, stopped: null, lastCheckAt: now },
   };
 }
@@ -759,6 +782,8 @@ export interface KeepView {
   readonly user: string | null;
   readonly kept: number;
   readonly withCopy: number;
+  /** Kept works whose updates have stopped (Dropped in the Library). */
+  readonly updatesOff: number;
   readonly waiting: number;
   readonly skipped: Partial<Record<SkipCode, number>>;
   readonly run: { purpose: ListRun["purpose"]; status: ListRun["status"]; list: ListName | null; page: number; found: number } | null;
@@ -797,12 +822,13 @@ export class KeepACopy {
   #busy: Promise<unknown> = Promise.resolve();
   #quiet = false;
 
-  constructor(private readonly ports: KeepPorts) {}
+  /** `defaults`: the settings a new store starts with. */
+  constructor(private readonly ports: KeepPorts, private readonly defaults: Settings = DEFAULT_SETTINGS) {}
 
   async #load(): Promise<KeepState> {
     if (!this.#state) {
       const stored = await this.ports.read();
-      this.#state ??= isState(stored) ? { ...stored, pending: stored.pending ?? null } : newState(this.ports.clock.now());
+      this.#state ??= isState(stored) ? { ...stored, pending: stored.pending ?? null } : newState(this.ports.clock.now(), this.defaults);
     }
     return this.#state;
   }
@@ -838,6 +864,7 @@ export class KeepACopy {
       user: state.user,
       kept: works.length,
       withCopy: works.filter((w) => w.copy).length,
+      updatesOff: works.filter((w) => w.updatesOff).length,
       waiting: state.queue.length,
       skipped,
       run: run ? { purpose: run.purpose, status: run.status, list: run.lists[run.list] ?? null, page: run.page, found: run.found } : null,
@@ -986,6 +1013,53 @@ export class KeepACopy {
   }
 
   /**
+   * Keeps every work the reader's Trace Library holds, as `startBackup` does
+   * for their AO3 lists: a work with no copy is queued at the reader's pace,
+   * and one whose chapter count Trace saw rise is looked at again at the
+   * weekly check's. A work the Library no longer keeps keeps its file, and
+   * nothing more is fetched for it until the Library keeps it again.
+   */
+  syncLibrary(list: LibraryList): Promise<{ readonly added: number; readonly released: number }> {
+    return this.#serial((state) => {
+      let added = 0;
+      let released = 0;
+      const keep = new Set<string>();
+      for (const { workId, chapters } of list.keep) {
+        if (!ID_PATTERN.test(workId) || keep.has(workId)) continue;
+        keep.add(workId);
+        // Turned off, nothing new is kept; works already kept stay as they are.
+        if (!state.settings.enabled) continue;
+        const known = state.works[workId];
+        const work = this.#keep(state, workId);
+        const before = work.library?.chapters ?? null;
+        const resumed = work.updatesOff === true;
+        delete work.updatesOff;
+        work.library = { chapters: typeof chapters === "number" && Number.isSafeInteger(chapters) && chapters >= 0 ? chapters : null };
+        if (!known) added += 1;
+        if (!work.copy) {
+          // A work skipped before waits for its page to be opened again.
+          if (!known || resumed || !work.skipped) this.#enqueue(state, { workId, pace: "reader", batch: true });
+        } else if (resumed || (work.library.chapters !== null && before !== null && work.library.chapters > before)) {
+          this.#enqueue(state, { workId, pace: "check" });
+        }
+      }
+      const release = (work: KeptWork) => {
+        if (work.updatesOff) return;
+        work.updatesOff = true;
+        this.#drop(state, work.workId);
+        released += 1;
+      };
+      for (const workId of list.drop) {
+        const work = state.works[workId];
+        if (work && !keep.has(workId)) release(work);
+      }
+      if (list.whole) for (const work of Object.values(state.works)) if (work.library && !keep.has(work.workId)) release(work);
+      this.#setQuiet(this.#batchRunning(state));
+      return { added, released };
+    });
+  }
+
+  /**
    * Makes at most one request, if one is due. Returns how long until the
    * next one may be, or null with nothing to do.
    */
@@ -1001,7 +1075,9 @@ export class KeepACopy {
 
   #keeps(state: KeepState, workId: string, trigger: Trigger | "visit"): boolean {
     if (!state.settings.enabled || !ID_PATTERN.test(workId)) return false;
-    return Boolean(state.works[workId]) || (trigger === "visit" ? state.settings.triggers.open : state.settings.triggers[trigger]);
+    const known = state.works[workId];
+    if (known) return !known.updatesOff;
+    return trigger === "visit" ? state.settings.triggers.open : state.settings.triggers[trigger];
   }
 
   #keep(state: KeepState, workId: string, page?: Partial<WorkPageRead>): KeptWork {
@@ -1406,6 +1482,7 @@ export class KeepACopy {
     const read = readListPage(answer.text ?? "", list);
     for (const listed of read.works) {
       const known = state.works[listed.workId];
+      if (known?.updatesOff) continue;
       // A locked copy's version is not the list's: the list's own `updated_at` is compared with the one its Chapter Index was last read for.
       const stale = (work: KeptWork) => !work.copy || (listed.updatedAt !== null && listed.updatedAt !== (work.restricted ? work.listed : work.copy.updatedAt));
       const seen = listed.updatedAt === null ? {} : { listed: listed.updatedAt };

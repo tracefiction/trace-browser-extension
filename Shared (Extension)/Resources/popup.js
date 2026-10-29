@@ -5,6 +5,11 @@ const PREF_AUTO_TRACK_KEY = "prefAutoTrackEnabled";
 const PREF_LIBRARY_INLAY_KEY = "prefLibraryInlayEnabled";
 const PREF_AO3_SAVED_FILTERS_KEY = "prefAo3SavedFiltersEnabled";
 const PREF_METADATA_IMPROVE_KEY = "prefMetadataImproveEnabled";
+// Keep a Copy (keep-a-copy-library.mts): only in a package built with it,
+// and only where the browser can save files.
+const PREF_KEEP_A_COPY_KEY = "prefKeepACopyEnabled";
+const KEEP_A_COPY_AVAILABLE =
+  globalThis.TRACE_KEEP_A_COPY === true && Boolean(ext?.downloads);
 const TRACE_USER_PRO_KEY = "traceUserPro";
 const TRACE_FIRST_SAVE_SEEN_KEY = "traceFirstSaveSeen";
 const TRACE_LIBRARY_COUNT_KEY = "traceLibraryCount";
@@ -629,7 +634,7 @@ function updatePreferenceSummary() {
   if (!countEl) return;
   const inputs = Array.from(
     document.querySelectorAll("#popup-preferences input[type='checkbox']"),
-  );
+  ).filter((input) => !input.closest(".popup-switch-row")?.hidden);
   const enabled = inputs.filter((input) => input.checked).length;
   countEl.textContent = `${enabled} of ${inputs.length} on`;
 }
@@ -656,6 +661,48 @@ function applyProUi(pro, autoTrack, libraryInlay, metadataImprove) {
   inlayEl.checked = Boolean(libraryInlay);
   metadataEl.checked = metadataImprove !== false;
   updatePreferenceSummary();
+  renderKeepACopy();
+}
+
+const KEEP_A_COPY_STOPPED = {
+  challenge: "AO3 asked for a check",
+  forbidden: "AO3 refused a request",
+  wrong_host: "AO3 sent a request elsewhere",
+  unreadable: "several stories could not be read",
+  slow_down: "AO3 asked to slow down",
+  save_failed: "several files could not be saved",
+};
+
+function keepACopyLine(view) {
+  const kept = Math.max(0, Number(view.kept) - Number(view.updatesOff || 0));
+  if (view.stopped && KEEP_A_COPY_STOPPED[view.stopped.code]) {
+    return `Paused: ${KEEP_A_COPY_STOPPED[view.stopped.code]}. Trace tries again later.`;
+  }
+  if (kept === 0) return "Copies are saved in Downloads › AO3";
+  const waiting = Number(view.waiting) > 0 ? ` · ${view.waiting} waiting` : "";
+  return `${view.withCopy} of ${kept} ${kept === 1 ? "story has" : "stories have"} a copy${waiting}`;
+}
+
+function renderKeepACopy() {
+  const row = document.getElementById("popup-keep-a-copy-row");
+  const input = document.getElementById("pref-keep-a-copy");
+  const detail = document.getElementById("popup-keep-a-copy-detail");
+  if (!row || !input || !detail) return;
+  row.hidden = !KEEP_A_COPY_AVAILABLE;
+  if (!KEEP_A_COPY_AVAILABLE) return;
+  ext.storage.local.get([PREF_KEEP_A_COPY_KEY], (r) => {
+    if (ext.runtime.lastError) return;
+    input.checked = r?.[PREF_KEEP_A_COPY_KEY] === true;
+    updatePreferenceSummary();
+    if (!input.checked) {
+      detail.textContent = "Save AO3’s EPUB of your Library’s AO3 stories in Downloads";
+      return;
+    }
+    ext.runtime.sendMessage({ type: "KEEP_A_COPY_VIEW" }, (view) => {
+      if (ext.runtime.lastError || !view || typeof view !== "object") return;
+      detail.textContent = keepACopyLine(view);
+    });
+  });
 }
 
 function fetchPopupState() {
@@ -5192,6 +5239,7 @@ function bindPreferenceControls() {
     ["pref-library-inlay", PREF_LIBRARY_INLAY_KEY],
     ["pref-ao3-saved-filters", PREF_AO3_SAVED_FILTERS_KEY],
     ["pref-metadata-improve", PREF_METADATA_IMPROVE_KEY],
+    ["pref-keep-a-copy", PREF_KEEP_A_COPY_KEY],
   ];
   for (const [id, key] of controls) {
     const input = document.getElementById(id);
@@ -5200,6 +5248,7 @@ function bindPreferenceControls() {
       ext.storage.local.set({ [key]: input.checked,
         ...(key === PREF_AUTO_TRACK_KEY ? { prefAutoTrackSetAt: Date.now() } : {}) });
       updatePreferenceSummary();
+      if (key === PREF_KEEP_A_COPY_KEY) renderKeepACopy();
     });
   }
 }
@@ -5510,6 +5559,7 @@ ext.storage.onChanged.addListener((changes, area) => {
   ) {
     applyProUiFromStorage();
   }
+  if (changes[PREF_KEEP_A_COPY_KEY]) renderKeepACopy();
 });
 
 }

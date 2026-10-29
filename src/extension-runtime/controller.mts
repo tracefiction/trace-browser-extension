@@ -6,6 +6,7 @@ import {
   AccountProjectionService,
   sameAccountScope,
   SessionService,
+  type AccountOverlay,
   type AccountScope,
   type AuthenticatedEffectResult,
   type AuthenticatedExecutionResult,
@@ -1508,6 +1509,19 @@ export class SessionRuntimeController {
   async storyPresence(workKey: string): Promise<StoryPresence> {
     await this.start();
     return this.#storyCommands.presence(workKey);
+  }
+
+  /**
+   * The Library of the account connected now, as the page marks read it:
+   * for Keep a Copy, which copies its AO3 works on this device. Null when
+   * no account is connected or the Library cannot be read. `refresh` asks
+   * Trace again when the copy kept here is old.
+   */
+  async libraryOverlay(refresh: boolean): Promise<AccountOverlay | null> {
+    await this.start();
+    if (this.snapshot().state !== "connected") return null;
+    const accountData = await this.#projection.read(refresh ? {} : { refresh: false }).catch(() => null);
+    return this.snapshot().state === "connected" ? accountData?.overlay ?? null : null;
   }
 
   /** The account an answer from Trace belongs to, or null for none. */

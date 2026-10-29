@@ -171,6 +171,17 @@ if (AO3_HISTORY_IMPORT && SESSION_MODE !== "kernel") {
 }
 // The sheet's section for it, copied in only when it is on.
 const AO3_HISTORY_IMPORT_PANEL = "ao3-history-import-panel.js";
+// Keep a Copy: AO3's file of every AO3 story in the reader's Library, saved
+// on their device (src/extension-runtime/keep-a-copy-library.mts). Off until
+// it is reviewed; even then the reader turns it on. Only the Chrome and
+// Firefox packages carry the downloads permission and its page files; the
+// Safari resources are unchanged by it.
+const KEEP_A_COPY = /^(?:1|true)$/i.test(String(env.TRACE_KEEP_A_COPY ?? ""));
+if (KEEP_A_COPY && SESSION_MODE !== "kernel") {
+  throw new Error("TRACE_KEEP_A_COPY requires TRACE_SESSION_MODE=kernel.");
+}
+const KEEP_A_COPY_PAGE_SCRIPT = "keep-a-copy-page.js";
+const KEEP_A_COPY_OFFSCREEN = "keep-a-copy-offscreen";
 // The sheet that saves a story by the reader's tap and then asks for lasting
 // access. Rule 3 above: the same in every build with optional story sites.
 const IOS_FIRST_TAP_SHEET = IOS_OPTIONAL_STORY_SITE_ACCESS && SESSION_MODE === "kernel";
@@ -503,6 +514,7 @@ if (HAS_SESSION_RUNTIME) {
       __TRACE_WEB_ORIGIN__: JSON.stringify(TRACE_WEB_ORIGIN),
       __TRACE_NATIVE_IMPORT_HANDOFF__: JSON.stringify(NATIVE_IMPORT_HANDOFF),
       __TRACE_AO3_HISTORY_IMPORT__: JSON.stringify(AO3_HISTORY_IMPORT),
+      __TRACE_KEEP_A_COPY__: JSON.stringify(KEEP_A_COPY),
       __TRACE_IOS_FIRST_TAP_SAVE__: JSON.stringify(IOS_FIRST_TAP_SAVE),
       __TRACE_IOS_FIRST_TAP_SHEET__: JSON.stringify(IOS_FIRST_TAP_SHEET),
       __TRACE_IOS_EARNED_PERMISSION_CONFIG__: JSON.stringify(
@@ -778,7 +790,9 @@ const ao3HistoryImportLoader = AO3_HISTORY_IMPORT ? `(function () {
   } catch (_) {}
 })();
 ` : "";
-fs.writeFileSync(popupConfigPath, popupConfig + ao3HistoryImportLoader, "utf8");
+// The popup shows the Keep a Copy switch only where the background has it.
+const keepACopyConfig = KEEP_A_COPY ? "globalThis.TRACE_KEEP_A_COPY = true;\n" : "";
+fs.writeFileSync(popupConfigPath, popupConfig + keepACopyConfig + ao3HistoryImportLoader, "utf8");
 console.log("Wrote", popupConfigPath);
 fs.writeFileSync(contentConfigPath, contentConfig, "utf8");
 console.log("Wrote", contentConfigPath);
@@ -819,6 +833,57 @@ const packagedManifest = browserStoreManifest(
   browserHostPermissions,
 );
 
+// Keep a Copy's page script and Chrome's offscreen document, written into the
+// Chrome and Firefox packages only.
+const keepACopyPageScript = {
+  matches: ["https://archiveofourown.org/*"],
+  js: [KEEP_A_COPY_PAGE_SCRIPT],
+  run_at: "document_idle",
+  exclude_matches: AO3_AUTH_EXCLUDE_MATCHES,
+};
+// Before the story veil, which stays last.
+function withKeepACopyPageScript(contentScripts) {
+  const veil = contentScripts.findIndex((entry) => entry.js?.includes("trace-open-veil.js"));
+  const at = veil === -1 ? contentScripts.length : veil;
+  return [...contentScripts.slice(0, at), keepACopyPageScript, ...contentScripts.slice(at)];
+}
+function withKeepACopy(browserManifest, browser) {
+  if (!KEEP_A_COPY) return browserManifest;
+  return {
+    ...browserManifest,
+    // Chrome: downloads.ui hides the download bubble while the Library is
+    // first copied; offscreen holds a file as a blob while it is saved.
+    permissions: unique([
+      ...(browserManifest.permissions || []),
+      "downloads",
+      ...(browser === "chrome" ? ["downloads.ui", "offscreen"] : []),
+    ]),
+    content_scripts: withKeepACopyPageScript(browserManifest.content_scripts || []),
+  };
+}
+async function writeKeepACopyFiles(outDir, browser) {
+  if (!KEEP_A_COPY) return;
+  const runtimeDir = path.join(ROOT, "src", "extension-runtime");
+  await esbuild({
+    entryPoints: {
+      [KEEP_A_COPY_PAGE_SCRIPT.replace(/\.js$/, "")]: path.join(runtimeDir, "keep-a-copy-page.mts"),
+      ...(browser === "chrome" ? { [KEEP_A_COPY_OFFSCREEN]: path.join(runtimeDir, "keep-a-copy-offscreen.mts") } : {}),
+    },
+    outdir: outDir,
+    bundle: true,
+    format: "iife",
+    platform: "browser",
+    target: ["es2022"],
+    logLevel: "silent",
+  });
+  if (browser === "chrome") {
+    fs.writeFileSync(
+      path.join(outDir, `${KEEP_A_COPY_OFFSCREEN}.html`),
+      `<!doctype html>\n<meta charset="utf-8">\n<script src="${KEEP_A_COPY_OFFSCREEN}.js"></script>\n`,
+    );
+  }
+}
+
 // The first-tap sheet's page file belongs to the iPhone build alone.
 const skipResources = (full, name) =>
   name === ".DS_Store" || name === "page-manual-mode.js" || full.endsWith("manifest.json");
@@ -834,9 +899,10 @@ if (IOS_ACTIVE_TAB_PROBE) {
     "utf8",
   );
 }
+await writeKeepACopyFiles(distChrome, "chrome");
 fs.writeFileSync(
   path.join(distChrome, "manifest.json"),
-  JSON.stringify(packagedManifest, null, 2) + "\n",
+  JSON.stringify(withKeepACopy(packagedManifest, "chrome"), null, 2) + "\n",
 );
 
 // dist/firefox: same + browser_specific_settings for AMO
@@ -862,8 +928,9 @@ const ffBackgroundScripts =
 const ffDataCollection = {
   required: ["authenticationInfo", "websiteContent"],
 };
+await writeKeepACopyFiles(distFf, "firefox");
 const ffManifest = {
-  ...firefoxCompatibleManifest(packagedManifest),
+  ...firefoxCompatibleManifest(withKeepACopy(packagedManifest, "firefox")),
   background: {
     scripts: ffBackgroundScripts,
   },
@@ -904,6 +971,7 @@ console.log(
 );
 console.log("TRACE_IOS_FIRST_TAP_SAVE=" + IOS_FIRST_TAP_SAVE);
 console.log("TRACE_AO3_HISTORY_IMPORT=" + AO3_HISTORY_IMPORT);
+console.log("TRACE_KEEP_A_COPY=" + KEEP_A_COPY);
 if (IOS_FIRST_TAP_SAVE) {
   console.warn(
     IOS_FIRST_TAP_PRODUCTION_PROOF

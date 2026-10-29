@@ -66,7 +66,7 @@ async function buildFor(browser) {
   fs.mkdirSync(out, { recursive: true });
   await esbuild({
     entryPoints: {
-      background: path.join(RUNTIME, "keep-a-copy-runtime.mts"),
+      background: path.join(RUNTIME, "keep-a-copy-standalone.mts"),
       page: path.join(RUNTIME, "keep-a-copy-page.mts"),
       popup: path.join(RUNTIME, "keep-a-copy-popup.mts"),
       ...(browser === "chrome" ? { offscreen: path.join(RUNTIME, "keep-a-copy-offscreen.mts") } : {}),

@@ -946,3 +946,57 @@ test("the store package carries the whole-History import; switched off, nothing 
     runBuild("build:ios-earned-permission-onboarding:release");
   }
 });
+
+test("Keep a Copy is only in a package built with it; only Chrome and Firefox can save files, and Safari is asked for nothing", () => {
+  const KEEP_WIRING = ["prefKeepACopyEnabled", "trace-keep-a-copy-library", "keepACopyV1"];
+  const build = (extra) => {
+    const env = { ...RELEASE_ENV, ...extra };
+    if (extra.TRACE_KEEP_A_COPY === undefined) delete env.TRACE_KEEP_A_COPY;
+    return spawnSync("npm", ["run", "build:release"], { cwd: ROOT, env, encoding: "utf8" });
+  };
+  const dist = (browser) => path.join(ROOT, "dist", browser);
+  const pageScripts = (root) => manifest(root).content_scripts.flatMap((entry) => entry.js);
+  try {
+    const off = build({});
+    assert.equal(off.status, 0, off.stderr || off.stdout);
+    for (const browser of ["chrome", "firefox"]) {
+      const bundle = fs.readFileSync(path.join(dist(browser), "background.js"), "utf8");
+      for (const wiring of KEEP_WIRING) assert.equal(bundle.includes(wiring), false, `${browser} carries ${wiring} switched off`);
+      assert.equal(manifest(dist(browser)).permissions.includes("downloads"), false);
+      assert.equal(pageScripts(dist(browser)).includes("keep-a-copy-page.js"), false);
+      assert.equal(fs.existsSync(path.join(dist(browser), "keep-a-copy-page.js")), false);
+      assert.equal(fs.readFileSync(path.join(dist(browser), "popup-config.js"), "utf8").includes("TRACE_KEEP_A_COPY"), false);
+    }
+
+    const on = build({ TRACE_KEEP_A_COPY: "1" });
+    assert.equal(on.status, 0, on.stderr || on.stdout);
+    const chrome = manifest(dist("chrome"));
+    const firefox = manifest(dist("firefox"));
+    for (const permission of ["downloads", "downloads.ui", "offscreen"]) assert.equal(chrome.permissions.includes(permission), true, `Chrome lacks ${permission}`);
+    assert.equal(firefox.permissions.includes("downloads"), true);
+    assert.equal(firefox.permissions.includes("offscreen"), false);
+    for (const browser of ["chrome", "firefox"]) {
+      const bundle = fs.readFileSync(path.join(dist(browser), "background.js"), "utf8");
+      for (const wiring of KEEP_WIRING) assert.equal(bundle.includes(wiring), true, `${browser} lacks ${wiring}`);
+      const scripts = manifest(dist(browser)).content_scripts;
+      const page = scripts.find((entry) => entry.js.includes("keep-a-copy-page.js"));
+      assert.deepEqual(page.matches, ["https://archiveofourown.org/*"]);
+      assert.equal(scripts.at(-1).js.includes("trace-open-veil.js"), true, `${browser}: the story veil is no longer last`);
+      assert.equal(fs.existsSync(path.join(dist(browser), "keep-a-copy-page.js")), true);
+      assert.match(fs.readFileSync(path.join(dist(browser), "popup-config.js"), "utf8"), /TRACE_KEEP_A_COPY = true/);
+    }
+    assert.equal(fs.existsSync(path.join(dist("chrome"), "keep-a-copy-offscreen.html")), true);
+    assert.equal(fs.existsSync(path.join(dist("firefox"), "keep-a-copy-offscreen.html")), false);
+    // Nothing more is asked of Safari, and none of its files are written there.
+    assert.equal(manifest(RESOURCES).permissions.includes("downloads"), false);
+    assert.equal(fs.existsSync(path.join(RESOURCES, "keep-a-copy-page.js")), false);
+
+    const legacy = spawnSync("node", ["scripts/build.mjs"], {
+      cwd: ROOT, env: { ...RELEASE_ENV, TRACE_SESSION_MODE: "legacy", TRACE_KEEP_A_COPY: "1" }, encoding: "utf8",
+    });
+    assert.notEqual(legacy.status, 0);
+    assert.match(legacy.stderr, /TRACE_KEEP_A_COPY requires TRACE_SESSION_MODE=kernel/);
+  } finally {
+    runBuild("build:ios-earned-permission-onboarding:release");
+  }
+});

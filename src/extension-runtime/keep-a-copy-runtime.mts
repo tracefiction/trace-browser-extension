@@ -1,6 +1,7 @@
 /**
- * The standalone Keep a Copy extension's background (Chrome and Firefox):
- * AO3 requests, the downloads API and storage around the queue in
+ * Keep a Copy's background in Chrome and Firefox, for the standalone
+ * extension (keep-a-copy-standalone.mts) and Trace's own (index.mts): AO3
+ * requests, the downloads API and storage around the queue in
  * keep-a-copy.mts.
  *
  * A public work's page and file are requested signed out; the reader's own
@@ -27,6 +28,9 @@ import {
   type Trigger,
 } from "./keep-a-copy.mjs";
 
+type KeepMessage = (typeof KEEP_A_COPY_MESSAGE)[keyof typeof KEEP_A_COPY_MESSAGE];
+const MESSAGES: readonly string[] = /* @__PURE__ */ Object.values(KEEP_A_COPY_MESSAGE);
+
 const TRIGGERS: readonly (Trigger | "visit")[] = ["bookmark", "later", "subscribe", "kudos", "open", "visit"];
 const FILE_TIMEOUT_MS = 120_000;
 /** How long a save is waited on before the queue looks again. */
@@ -46,7 +50,7 @@ interface DownloadItem {
 
 type DownloadDelta = { id: number; state?: { current?: string } };
 
-interface Extension {
+export interface Extension {
   runtime: {
     id: string;
     sendMessage(message: unknown): Promise<unknown>;
@@ -55,7 +59,12 @@ interface Extension {
     onMessage: { addListener(listener: (message: unknown, sender: { id?: string; url?: string }, respond: (value: unknown) => void) => boolean | void): void };
   };
   storage: { local: { get(key: string): Promise<Record<string, unknown>>; set(items: Record<string, unknown>): Promise<void> } };
-  alarms: { create(name: string, info: { periodInMinutes: number }): void; onAlarm: { addListener(listener: (alarm: { name: string }) => void): void } };
+  alarms: {
+    create(name: string, info: { periodInMinutes: number }): void;
+    get?(name: string): Promise<unknown>;
+    clear?(name: string): unknown;
+    onAlarm: { addListener(listener: (alarm: { name: string }) => void): void };
+  };
   downloads: {
     download(options: { url: string; filename: string; conflictAction: "overwrite" | "uniquify"; saveAs: false }): Promise<number>;
     search(query: { id: number } | { url: string }): Promise<DownloadItem[]>;
@@ -75,14 +84,14 @@ interface OffscreenApi {
 }
 
 /** Chrome's offscreen document, opened again whenever Chrome has closed it, and closed when the queue is idle. */
-export function offscreenKeeper(api: OffscreenApi) {
+export function offscreenKeeper(api: OffscreenApi, url = "offscreen.html") {
   let creating: Promise<void> | null = null;
   const open = async () => (await api.hasDocument?.().catch(() => false)) ?? false;
   return {
     async ensure(): Promise<void> {
       if (await open()) return;
       creating ??= api.createDocument({
-        url: "offscreen.html", reasons: ["BLOBS"], justification: "Holds a downloaded AO3 file while it is saved.",
+        url, reasons: ["BLOBS"], justification: "Holds a downloaded AO3 file while it is saved.",
       }).catch((error: unknown) => {
         // Already open, from before this service worker started.
         if (!/single offscreen/i.test(String(error))) throw error;
@@ -187,11 +196,43 @@ export function downloadPorts(downloads: DownloadsApi, extensionId: string) {
   };
 }
 
-export function installKeepACopy(extension: Extension): KeepACopy {
+/**
+ * Starts a repeating alarm unless it is already set: creating it again would
+ * push its next run back, for ever if the background restarts more often.
+ */
+export async function ensureAlarm(alarms: Extension["alarms"], name: string, periodInMinutes: number): Promise<void> {
+  const existing = await alarms.get?.(name).catch(() => undefined);
+  if (!existing) alarms.create(name, { periodInMinutes });
+}
+
+export interface KeepACopyOptions {
+  /** The settings a new store starts with. */
+  readonly defaults?: Settings;
+  /** The messages answered (all, by default): Trace's build has no AO3 list backup. */
+  readonly answers?: readonly KeepMessage[];
+  /**
+   * Whether the minute alarm runs while there is nothing to do (the default,
+   * for the weekly check). Off, it runs only while the queue is busy, so the
+   * background is not woken every minute for a switch that is off.
+   */
+  readonly idleAlarm?: boolean;
+  /** Chrome's offscreen document, in the package. */
+  readonly offscreenDocument?: string;
+}
+
+export interface KeepACopyInstall {
+  readonly engine: KeepACopy;
+  /** Looks at the queue now, after something was added to it. */
+  wake(): void;
+}
+
+export function installKeepACopy(extension: Extension, options: KeepACopyOptions = {}): KeepACopyInstall {
   const { downloads, runtime } = extension;
+  const answers: readonly string[] = options.answers ?? MESSAGES;
+  const idleAlarm = options.idleAlarm ?? true;
   const blobsHere = typeof URL.createObjectURL === "function";
 
-  const offscreen = !blobsHere && extension.offscreen ? offscreenKeeper(extension.offscreen) : null;
+  const offscreen = !blobsHere && extension.offscreen ? offscreenKeeper(extension.offscreen, options.offscreenDocument) : null;
   // The offscreen document's pings while it fetches keep this service worker up.
   runtime.onConnect.addListener((port) => {
     if (port.name === KEEP_ALIVE_PORT) port.onMessage.addListener(() => undefined);
@@ -234,20 +275,32 @@ export function installKeepACopy(extension: Extension): KeepACopy {
     cancel,
     remove,
     quiet: (on) => setUi(!on),
-  });
+  }, options.defaults);
 
   const repeated = repeatedMessage();
   let running = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let alarmOn = false;
+  const alarm = (on: boolean) => {
+    if (alarmOn === on) return;
+    alarmOn = on;
+    if (on) void ensureAlarm(extension.alarms, ALARM, 1).catch(() => undefined);
+    else void Promise.resolve(extension.alarms.clear?.(ALARM)).catch(() => undefined);
+  };
   const run = async () => {
     if (running) return;
     running = true;
     if (timer) clearTimeout(timer);
     timer = null;
+    // Set before the tick, so a background stopped part-way is woken again.
+    alarm(true);
     try {
       const wait = await engine.tick();
       if (wait !== null) timer = setTimeout(() => void run(), Math.max(250, Math.min(wait, TIMER_MAX_MS)));
-      else await offscreen?.close();
+      else {
+        if (!idleAlarm) alarm(false);
+        await offscreen?.close();
+      }
     } catch {
       // The alarm tries again within a minute.
     } finally {
@@ -255,7 +308,6 @@ export function installKeepACopy(extension: Extension): KeepACopy {
     }
   };
 
-  extension.alarms.create(ALARM, { periodInMinutes: 1 });
   extension.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === ALARM) void run();
   });
@@ -265,6 +317,8 @@ export function installKeepACopy(extension: Extension): KeepACopy {
   runtime.onMessage.addListener((message, sender, respond) => {
     if (sender.id !== runtime.id || !message || typeof message !== "object") return;
     const { type } = message as { type?: unknown };
+    // Other messages are another part of the background's to answer.
+    if (typeof type !== "string" || !answers.includes(type)) return;
     const handle = async (): Promise<unknown> => {
       if (type === KEEP_A_COPY_MESSAGE.page) {
         const { trigger, user, html, workId, id } = message as { trigger?: unknown; user?: unknown; html?: unknown; workId?: unknown; id?: unknown };
@@ -301,9 +355,5 @@ export function installKeepACopy(extension: Extension): KeepACopy {
   });
 
   void run();
-  return engine;
+  return { engine, wake: () => void run() };
 }
-
-const scope = globalThis as unknown as { browser?: Extension; chrome?: Extension };
-const extension = scope.browser ?? scope.chrome;
-if (extension?.downloads) installKeepACopy(extension);

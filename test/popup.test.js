@@ -191,6 +191,8 @@ function createPopupHarness({
   storageWritesFail = false,
   // A real background's side of the first-tap port, in place of the stand-in.
   firstTapConnect = null,
+  // A package built with Keep a Copy, where the browser can save files; the background's view of it.
+  keepACopy = null,
 } = {}) {
   const html = fs.readFileSync(POPUP_HTML_PATH, "utf8");
   const js = fs.readFileSync(POPUP_JS_PATH, "utf8");
@@ -292,6 +294,9 @@ function createPopupHarness({
         }
         if (message.type === "TRACE_POPUP_GET_STATE") {
           response = popupState;
+        }
+        if (message.type === "KEEP_A_COPY_VIEW") {
+          response = keepACopy;
         }
         if (message.type === "TRACE_IMPORT_TRIGGER" || message.type === "TRACE_IMPORT_OPEN_TABS") {
           response = importResponse;
@@ -506,6 +511,10 @@ function createPopupHarness({
     context.TRACE_EXTENSION_WEB_ORIGIN = traceWebOrigin;
   }
   if (activeTabProbe) context.TRACE_IOS_ACTIVE_TAB_PROBE = true;
+  if (keepACopy) {
+    context.TRACE_KEEP_A_COPY = true;
+    ext.downloads = {};
+  }
   if (earnedPermissionOnboarding) {
     context.TRACE_IOS_ACTIVE_TAB_PROBE = true;
     context.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {
@@ -1701,6 +1710,48 @@ for (const promiseRuntime of [false, true]) {
     });
   }
 }
+
+test("Keep a Copy's switch shows only in a package built with it, starts off, and says how many stories have a copy", async () => {
+  const connected = {
+    sessionMode: "kernel",
+    sessionSnapshot: { state: "connected", accountId: "must-not-render", canExecuteAuthenticated: true, reason: "none" },
+    popupState: {
+      ok: true,
+      authState: { state: "connected", reason: "none", canExecuteAuthenticated: true },
+      firstSaveSeen: true,
+      libraryCount: 8,
+      activeTab: { kind: "unsupported" },
+      pro: true,
+      autoTrackEnabled: true,
+      libraryInlayEnabled: true,
+      ao3SavedFiltersEnabled: true,
+      metadataImproveEnabled: true,
+    },
+  };
+  const without = createPopupHarness(connected);
+  await flush();
+  assert.equal(without.document.getElementById("popup-keep-a-copy-row").hidden, true);
+  assert.equal(without.document.getElementById("popup-preferences-count").textContent, "4 of 4 on");
+
+  const h = createPopupHarness({
+    ...connected,
+    keepACopy: { kept: 5, updatesOff: 1, withCopy: 3, waiting: 1, stopped: null },
+  });
+  await flush();
+  const row = h.document.getElementById("popup-keep-a-copy-row");
+  const input = h.document.getElementById("pref-keep-a-copy");
+  assert.equal(row.hidden, false);
+  assert.equal(input.checked, false);
+  assert.equal(h.document.getElementById("popup-preferences-count").textContent, "4 of 5 on");
+  assert.equal(h.messages.some((message) => message.type === "KEEP_A_COPY_VIEW"), false);
+
+  input.checked = true;
+  input.dispatchEvent(new h.window.Event("change"));
+  await flush();
+  assert.equal(h.store.prefKeepACopyEnabled, true);
+  assert.equal(h.document.getElementById("popup-keep-a-copy-detail").textContent, "3 of 4 stories have a copy · 1 waiting");
+  assert.equal(h.document.getElementById("popup-preferences-count").textContent, "5 of 5 on");
+});
 
 test("connected kernel popup renders authoritative summary, preferences, and migrated import", async () => {
   const h = createPopupHarness({

@@ -1,0 +1,183 @@
+/**
+ * Keep a Copy in Trace's own extension, in Chrome and Firefox: the reader's
+ * Trace Library says which AO3 works are kept, through the same queue, pace
+ * and files as the standalone extension (keep-a-copy.mts).
+ *
+ * Kept: every AO3 story in the Library that is Saved, Reading, Caught up,
+ * Paused or Finished. Moving a story to Dropped stops its updates and never
+ * deletes its file. The Library is the one the extension already reads for
+ * its page marks (GET /api/extension/library-overlay): nothing new is asked
+ * of Trace, and nothing about the copies is sent to it.
+ *
+ * A copy is refreshed when the reader opens the work (its page's Download
+ * link has a new `updated_at`), or when Trace's count of the work's
+ * published chapters rises; the work's page is then read once, and the file
+ * fetched only if AO3 says it changed.
+ *
+ * Off until the reader turns it on (`prefKeepACopyEnabled`), and only in a
+ * package built with TRACE_KEEP_A_COPY=1.
+ */
+
+import type { AccountOverlay, LibraryOverlayEntry } from "../extension-core/index.mjs";
+import { ACCOUNT_PROJECTION_REVISION_KEY } from "./runtime-messages.mjs";
+import { KEEP_A_COPY_MESSAGE, type KeepACopy, type LibraryList, type Settings } from "./keep-a-copy.mjs";
+import { ensureAlarm, installKeepACopy, type Extension } from "./keep-a-copy-runtime.mjs";
+
+export const KEEP_A_COPY_PREF_KEY = "prefKeepACopyEnabled";
+export const LIBRARY_SYNC_ALARM = "trace-keep-a-copy-library";
+/** How often the Library is read again while the switch is on. */
+export const LIBRARY_SYNC_MINUTES = 15;
+/** The most entries Trace sends: a Library this long may be cut off, so no work is let go for being missing. */
+export const LIBRARY_MAX_ENTRIES = 10_000;
+/** Chrome's offscreen document in Trace's package. */
+export const KEEP_A_COPY_OFFSCREEN_DOCUMENT = "keep-a-copy-offscreen.html";
+
+/** Nothing is kept by what the reader does on AO3: the Library alone says. */
+export const LIBRARY_DEFAULTS: Settings = {
+  enabled: false,
+  triggers: { bookmark: false, later: false, subscribe: false, kudos: false, open: false },
+  weeklyCheck: false,
+  format: "epub",
+};
+
+type ReaderStatus = NonNullable<LibraryOverlayEntry["canonicalReaderStatus"]>;
+
+export const KEPT_STATUSES: readonly ReaderStatus[] = ["SAVED", "READING", "CAUGHT_UP", "PAUSED", "FINISHED"];
+
+const FROM_LEGACY: Readonly<Record<LibraryOverlayEntry["status"], ReaderStatus>> = {
+  PLANNING: "SAVED",
+  READING: "READING",
+  PAUSED: "PAUSED",
+  COMPLETED: "FINISHED",
+  DROPPED: "DROPPED",
+};
+
+export function readerStatus(entry: LibraryOverlayEntry): ReaderStatus {
+  return entry.canonicalReaderStatus ?? FROM_LEGACY[entry.status];
+}
+
+/**
+ * Trace's count of a work's published chapters: the reader's chapter plus
+ * the new ones after it, when Trace knows both. Reading moves one into the
+ * other, so only a new chapter makes the sum rise.
+ */
+export function publishedChapters(entry: LibraryOverlayEntry): number | null {
+  if (!entry.chapters || (entry.catchupState !== "UP" && entry.catchupState !== "BEHIND")) return null;
+  return entry.chapters.current + (entry.newChapterCount ?? 0);
+}
+
+/** The Library's AO3 works, as the queue keeps them. */
+export function libraryList(overlay: AccountOverlay): LibraryList {
+  const keep: { workId: string; chapters: number | null }[] = [];
+  const drop: string[] = [];
+  for (const [key, entry] of Object.entries(overlay.entries)) {
+    const workId = /^ao3:([1-9][0-9]{0,19})$/.exec(key)?.[1];
+    if (!workId) continue;
+    if (KEPT_STATUSES.includes(readerStatus(entry))) keep.push({ workId, chapters: publishedChapters(entry) });
+    else drop.push(workId);
+  }
+  return { keep, drop, whole: Object.keys(overlay.entries).length < LIBRARY_MAX_ENTRIES };
+}
+
+export interface LibraryCopiesDeps {
+  readonly engine: Pick<KeepACopy, "updateSettings" | "syncLibrary">;
+  /** Looks at the queue now. */
+  wake(): void;
+  /** The Library of the account connected now; null when none is, or it cannot be read. */
+  library(refresh: boolean): Promise<AccountOverlay | null>;
+  readPref(): Promise<boolean>;
+  /** Starts or stops the Library's own alarm. */
+  alarm(on: boolean): void;
+}
+
+/** The switch, the Library and the queue, kept in step. */
+export class TraceLibraryCopies {
+  #on = false;
+  #tail: Promise<void> = Promise.resolve();
+
+  constructor(private readonly deps: LibraryCopiesDeps) {}
+
+  /** A background starting: the Library kept here is used, and Trace is asked again on the alarm. */
+  async start(): Promise<void> {
+    await this.#apply(await this.deps.readPref().catch(() => false), false);
+  }
+
+  /** The reader turned the switch on or off. */
+  prefChanged(on: boolean): Promise<void> {
+    return this.#apply(on, true);
+  }
+
+  async #apply(on: boolean, refresh: boolean): Promise<void> {
+    this.#on = on;
+    await this.deps.engine.updateSettings({ enabled: on });
+    this.deps.alarm(on);
+    if (on) await this.sync(refresh);
+  }
+
+  /** Reads the Library and keeps its works, one read at a time. */
+  sync(refresh: boolean): Promise<void> {
+    const next = this.#tail.then(async () => {
+      if (!this.#on) return;
+      const overlay = await this.deps.library(refresh).catch(() => null);
+      // Unknown is not empty: nothing is let go without a Library read.
+      if (overlay === null || !this.#on) return;
+      await this.deps.engine.syncLibrary(libraryList(overlay));
+      this.deps.wake();
+    });
+    this.#tail = next.catch(() => undefined);
+    return next;
+  }
+
+  /** The account signed out, or another took its place: its works keep their files and stop updating. */
+  accountLeft(): Promise<void> {
+    const next = this.#tail.then(async () => {
+      await this.deps.engine.syncLibrary({ keep: [], drop: [], whole: true });
+    });
+    this.#tail = next.catch(() => undefined);
+    return next;
+  }
+}
+
+interface TraceExtension extends Extension {
+  readonly storage: Extension["storage"] & {
+    readonly onChanged: { addListener(listener: (changes: Record<string, { newValue?: unknown }>, area: string) => void): void };
+  };
+}
+
+export interface TraceLibrarySource {
+  libraryOverlay(refresh: boolean): Promise<AccountOverlay | null>;
+  whenAccountLeaves(cleanup: () => Promise<void>): void;
+}
+
+/** Installs Keep a Copy in Trace's background, where the downloads API is. */
+export function installTraceKeepACopy(extension: TraceExtension, source: TraceLibrarySource): TraceLibraryCopies {
+  const { engine, wake } = installKeepACopy(extension, {
+    defaults: LIBRARY_DEFAULTS,
+    answers: [KEEP_A_COPY_MESSAGE.page, KEEP_A_COPY_MESSAGE.view],
+    idleAlarm: false,
+    offscreenDocument: KEEP_A_COPY_OFFSCREEN_DOCUMENT,
+  });
+  const copies = new TraceLibraryCopies({
+    engine,
+    wake,
+    library: (refresh) => source.libraryOverlay(refresh),
+    readPref: async () => (await extension.storage.local.get(KEEP_A_COPY_PREF_KEY))[KEEP_A_COPY_PREF_KEY] === true,
+    alarm(on) {
+      if (on) void ensureAlarm(extension.alarms, LIBRARY_SYNC_ALARM, LIBRARY_SYNC_MINUTES).catch(() => undefined);
+      else void Promise.resolve(extension.alarms.clear?.(LIBRARY_SYNC_ALARM)).catch(() => undefined);
+    },
+  });
+  source.whenAccountLeaves(() => copies.accountLeft());
+  extension.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === LIBRARY_SYNC_ALARM) void copies.sync(true).catch(() => undefined);
+  });
+  extension.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local") return;
+    if (KEEP_A_COPY_PREF_KEY in changes) void copies.prefChanged(changes[KEEP_A_COPY_PREF_KEY]?.newValue === true).catch(() => undefined);
+    // A save, a status change or another account: the Library kept here has changed.
+    // (Trace is asked again at most every 30 s: the account view's own limit.)
+    else if (ACCOUNT_PROJECTION_REVISION_KEY in changes) void copies.sync(true).catch(() => undefined);
+  });
+  void copies.start().catch(() => undefined);
+  return copies;
+}
