@@ -13737,6 +13737,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var WORK_PACE_MS = 2 * (PAGE_GAP_MS + PAGE_GAP_JITTER_MS / 2);
   var PACE_GAP_MS = 5 * 6e4;
 
+  // src/extension-runtime/keep-a-copy-native.mts
+  var PART_BYTES = 256 * 1024;
+  var QUEUE_EVERY_MS = 5 * 6e4;
+
   // src/extension-runtime/index.mts
   var UUID_PATTERN9 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   function fallbackUuid(seed) {
@@ -13938,7 +13942,18 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       false
     ) {
       const keep = extension;
-      if (keep.downloads !== void 0 && keep.storage.onChanged !== void 0) installTraceKeepACopy(keep, session);
+      if (keep.downloads !== void 0 && keep.storage.onChanged !== void 0) {
+        installTraceKeepACopy(keep, session);
+      } else if (typeof extension.runtime.sendNativeMessage === "function" && extension.scripting?.executeScript !== void 0) {
+        installNativeKeepACopy({
+          tabs: extension.tabs,
+          scripting: extension.scripting,
+          alarms: extension.alarms,
+          storage: extension.storage.local,
+          sendNative: (message, timeoutMs) => sendNativeMessageWithFallback2(extension.runtime, storageMode, message, timeoutMs),
+          newId: randomId
+        });
+      }
     }
     if (
       // A build-time constant: a build without optional story sites leaves this

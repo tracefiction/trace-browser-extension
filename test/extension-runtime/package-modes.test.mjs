@@ -967,6 +967,8 @@ test("Keep a Copy is only in a package built with it; only Chrome and Firefox ca
       assert.equal(fs.existsSync(path.join(dist(browser), "keep-a-copy-page.js")), false);
       assert.equal(fs.readFileSync(path.join(dist(browser), "popup-config.js"), "utf8").includes("TRACE_KEEP_A_COPY"), false);
     }
+    // Nor does Safari's background hand files to the app.
+    assert.equal(fs.readFileSync(path.join(RESOURCES, "background.js"), "utf8").includes("KEEP_COPY_QUEUE_GET"), false);
 
     // A build with it never writes the committed Safari resources.
     const snapshot = () => Object.fromEntries(fs.readdirSync(RESOURCES, { recursive: true })
@@ -996,7 +998,10 @@ test("Keep a Copy is only in a package built with it; only Chrome and Firefox ca
     }
     assert.equal(fs.existsSync(path.join(dist("chrome"), "keep-a-copy-offscreen.html")), true);
     assert.equal(fs.existsSync(path.join(dist("firefox"), "keep-a-copy-offscreen.html")), false);
-    // Nothing more is asked of Safari, and none of its files are written there.
+    // Safari's background (in the staged resources) hands files to the app;
+    // nothing more is asked of Safari, and none of the Chrome and Firefox
+    // files are written there.
+    assert.equal(fs.readFileSync(path.join(staged, "background.js"), "utf8").includes("KEEP_COPY_QUEUE_GET"), true);
     assert.equal(manifest(staged).permissions.includes("downloads"), false);
     assert.equal(fs.existsSync(path.join(staged, "keep-a-copy-page.js")), false);
 

@@ -733,6 +733,9 @@ export function newState(now: number, defaults: Settings = DEFAULT_SETTINGS): Ke
 }
 
 export interface SaveRequest {
+  readonly workId: string;
+  /** The Download link's `updated_at` the file was fetched by. */
+  readonly updatedAt: string;
   readonly filename: string;
   readonly format: CopyFormat;
   /** The URL the file is saved from (`Fetched.handle`). */
@@ -787,6 +790,16 @@ export interface KeepPorts {
   remove(downloadId: number, filename: string, url?: string): Promise<void>;
   /** Told when a backup starts and ends (Chrome hides its download bubble meanwhile). */
   quiet?(on: boolean): void;
+  /** Told when a work is skipped (the Trace app is told, in Safari, so it stops asking). */
+  skipped?(workId: string, code: SkipCode): void;
+}
+
+/** A work another owner of the files wants copied now: the Trace app, in Safari. */
+export interface WantedWork {
+  readonly workId: string;
+  /** The `updated_at` of the copy the owner holds, or null for none. */
+  readonly have: string | null;
+  readonly pace: Pace;
 }
 
 export interface BackupView {
@@ -1158,6 +1171,28 @@ export class KeepACopy {
   }
 
   /**
+   * The works another owner of the files wants copied now, and only those:
+   * in Safari, the Trace app keeps the files and asks for the works it could
+   * not download itself. Each is read from its page first; a copy the owner
+   * no longer holds is fetched again.
+   */
+  want(works: readonly WantedWork[]): Promise<void> {
+    return this.#serial((state) => {
+      const wanted = new Set<string>();
+      for (const { workId, have, pace } of works) {
+        if (!state.settings.enabled || !ID_PATTERN.test(workId) || wanted.has(workId)) continue;
+        wanted.add(workId);
+        const work = this.#keep(state, workId);
+        delete work.updatesOff;
+        if (work.copy && work.copy.updatedAt !== have) work.copy = null;
+        work.skipped = null;
+        this.#enqueue(state, { workId, pace: pace === "reader" ? "reader" : "check" });
+      }
+      state.queue = state.queue.filter((queued) => wanted.has(queued.workId) || queued.workId === state.pending?.workId);
+    });
+  }
+
+  /**
    * Makes at most one request, if one is due. Returns how long until the
    * next one may be, or null with nothing to do.
    */
@@ -1272,7 +1307,9 @@ export class KeepACopy {
       else backup.pace.lastAt = now;
     }
     if (item && (item.attempts ?? 0) >= MAX_ATTEMPTS) {
-      this.#keep(state, item.workId).skipped = item.lastFailure === "save" ? "save_failed" : "failed";
+      const code = item.lastFailure === "save" ? "save_failed" : "failed";
+      this.#keep(state, item.workId).skipped = code;
+      this.ports.skipped?.(item.workId, code);
       this.#drop(state, item.workId);
       return 0;
     }
@@ -1406,6 +1443,7 @@ export class KeepACopy {
   #skipper(state: KeepState, item: QueueItem, work: KeptWork): (code: SkipCode) => Verdict {
     return (code) => {
       work.skipped = code;
+      this.ports.skipped?.(work.workId, code);
       this.#drop(state, item.workId);
       return code === "gone" || code === "needs_sign_in" ? { kind: "skip", code } : this.#miss(state) ?? { kind: "skip", code };
     };
@@ -1484,7 +1522,7 @@ export class KeepACopy {
     }
     const conflict = dated || (scoped && !own) ? "uniquify" : "overwrite";
     try {
-      const downloadId = await this.ports.save({ filename, format, handle, conflict });
+      const downloadId = await this.ports.save({ workId: item.workId, updatedAt: link.updatedAt, filename, format, handle, conflict });
       state.pending = {
         workId: item.workId, downloadId, filename, bytes: size, format, updatedAt: link.updatedAt, setAside: shrank, handle, startedAt: this.ports.clock.now(),
         ...(scoped && !dated ? { canonical } : {}),

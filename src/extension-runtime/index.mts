@@ -19,6 +19,7 @@ import { installAo3HistoryImport } from "./ao3-history-import-runtime.mjs";
 import { historyParts, NativeHistoryHandoffProducer } from "./native-history-handoff.mjs";
 import { storySaveActivity } from "./story-save-activity.mjs";
 import { installTraceKeepACopy } from "./keep-a-copy-library.mjs";
+import { installNativeKeepACopy, type NativeKeepEnvironment } from "./keep-a-copy-native.mjs";
 export * from "./account-projection.mjs";
 export * from "./billing-conversion.mjs";
 export * from "./archive-readiness-status.mjs";
@@ -44,7 +45,7 @@ import type {
 } from "./browser-platform.mjs";
 import { BrowserStorage } from "./browser-platform.mjs";
 import { BrowserArchiveReadinessStatus } from "./archive-readiness-status.mjs";
-import { NativeStorySaveReceiptPort } from "./browser-adapters.mjs";
+import { NativeStorySaveReceiptPort, sendNativeMessageWithFallback } from "./browser-adapters.mjs";
 
 declare const __TRACE_SESSION_MODE__: SessionMode;
 declare const __TRACE_API_BASE__: string;
@@ -324,10 +325,23 @@ try {
     __TRACE_SESSION_MODE__ === "kernel"
   ) {
     // Keep a Copy: AO3's file of every AO3 story in the reader's Library,
-    // saved on this device (keep-a-copy-library.mts). Chrome and Firefox
-    // only, where the downloads API is; the reader turns it on.
+    // saved on this device (keep-a-copy-library.mts). In Chrome and Firefox,
+    // where the downloads API is, the reader turns it on here.
     const keep = extension as unknown as Parameters<typeof installTraceKeepACopy>[0];
-    if (keep.downloads !== undefined && keep.storage.onChanged !== undefined) installTraceKeepACopy(keep, session);
+    if (keep.downloads !== undefined && keep.storage.onChanged !== undefined) {
+      installTraceKeepACopy(keep, session);
+    } else if (typeof extension.runtime.sendNativeMessage === "function" && extension.scripting?.executeScript !== undefined) {
+      // In Safari the Trace app keeps the files and asks this extension for
+      // the works only the reader's AO3 tab can fetch (keep-a-copy-native.mts).
+      installNativeKeepACopy({
+        tabs: extension.tabs as unknown as NativeKeepEnvironment["tabs"],
+        scripting: extension.scripting as unknown as NativeKeepEnvironment["scripting"],
+        alarms: extension.alarms as unknown as NativeKeepEnvironment["alarms"],
+        storage: extension.storage.local as unknown as NativeKeepEnvironment["storage"],
+        sendNative: (message, timeoutMs) => sendNativeMessageWithFallback(extension.runtime, storageMode, message, timeoutMs),
+        newId: randomId,
+      });
+    }
   }
   if (
     // A build-time constant: a build without optional story sites leaves this
