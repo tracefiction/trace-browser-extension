@@ -582,6 +582,18 @@ export interface Copy {
   readonly savedAt: number;
   /** The URL the copy was saved from: its own download is the one with it. A copy saved before it was kept has none. */
   readonly url?: string;
+  /** The name `copyFilename` gave, when the browser was let choose a free one instead. */
+  readonly canonical?: string;
+}
+
+/**
+ * The name under Downloads a copy really has: the one asked for, or the free
+ * one the browser chose beside it (`T – A (1) (1).epub`).
+ */
+export function ownName(copy: Pick<Copy, "filename" | "path">): string {
+  const base = copy.path?.replace(/\\/g, "/").split("/").pop();
+  if (!base) return copy.filename;
+  return `${copy.filename.slice(0, copy.filename.lastIndexOf("/") + 1)}${base}`;
 }
 
 export interface KeptWork {
@@ -648,6 +660,7 @@ export interface PendingSave {
   readonly setAside: boolean;
   readonly handle: string;
   readonly startedAt: number;
+  readonly canonical?: string;
   /** A locked work's list or page `updated_at` it was asked for: the one last seen, once this save is complete. */
   readonly listed?: string;
 }
@@ -735,11 +748,19 @@ export type SaveState = {
   readonly downloadId?: number;
 };
 
+/**
+ * Whose works these are: "" for the standalone extension, a Trace account's
+ * id in Trace's (each account its own works, never another's files), or null
+ * while no account is signed in, when nothing is kept, run or written.
+ */
+export type Scope = string | null;
+
 export interface KeepPorts {
   readonly clock: { now(): number };
   readonly random: () => number;
-  read(): Promise<unknown>;
-  write(state: KeepState): Promise<void>;
+  read(scope: string): Promise<unknown>;
+  /** `changed`: the works changed since the last write; the rest are as stored. */
+  write(state: KeepState, changed: ReadonlySet<string>, scope: string): Promise<void>;
   /** `include` only for the reader's own lists and a locked work's Chapter Index; a work page is read signed out. */
   fetchPage(url: string, credentials: "omit" | "include"): Promise<Fetched>;
   /** `include` only for a locked work's file (`#lockedStep`). */
@@ -780,9 +801,10 @@ export interface BackupView {
 export interface KeepView {
   readonly settings: Settings;
   readonly user: string | null;
+  /** Kept works whose updates are on, and how many of them have a copy. */
   readonly kept: number;
   readonly withCopy: number;
-  /** Kept works whose updates have stopped (Dropped in the Library). */
+  /** Works whose updates have stopped (Dropped in the Library); their files stay. */
   readonly updatesOff: number;
   readonly waiting: number;
   readonly skipped: Partial<Record<SkipCode, number>>;
@@ -821,16 +843,35 @@ export class KeepACopy {
   #sent = 0;
   #busy: Promise<unknown> = Promise.resolve();
   #quiet = false;
+  #scope: Scope;
+  /** Works changed since the last write. */
+  #dirty = new Set<string>();
+  #settingsChanged = false;
 
   /** `defaults`: the settings a new store starts with. */
-  constructor(private readonly ports: KeepPorts, private readonly defaults: Settings = DEFAULT_SETTINGS) {}
+  constructor(private readonly ports: KeepPorts, private readonly defaults: Settings = DEFAULT_SETTINGS, scope: Scope = "") {
+    this.#scope = scope;
+  }
 
   async #load(): Promise<KeepState> {
     if (!this.#state) {
-      const stored = await this.ports.read();
+      const scope = this.#scope;
+      const stored = scope === null ? undefined : await this.ports.read(scope);
       this.#state ??= isState(stored) ? { ...stored, pending: stored.pending ?? null } : newState(this.ports.clock.now(), this.defaults);
     }
     return this.#state;
+  }
+
+  /**
+   * Written only with an account (or the standalone's own), and only while
+   * on or when the switch itself changed: turned off, nothing is stored.
+   */
+  async #write(state: KeepState): Promise<void> {
+    if (this.#scope === null || (!state.settings.enabled && !this.#settingsChanged)) return;
+    const changed = new Set(this.#dirty);
+    await this.ports.write(state, changed, this.#scope);
+    for (const id of changed) this.#dirty.delete(id);
+    this.#settingsChanged = false;
   }
 
   /** One change at a time, each written before the next. */
@@ -838,17 +879,41 @@ export class KeepACopy {
     const next = this.#busy.then(async () => {
       const state = await this.#load();
       const result = await task(state);
-      await this.ports.write(state);
+      await this.#write(state);
       return result;
     });
     this.#busy = next.catch(() => undefined);
     return next;
   }
 
+  /**
+   * Switches to another account's works, or to none (null) while no one is
+   * signed in. Each account's are kept apart and as they were: an account
+   * that signs in again carries on where it was, with nothing checked again.
+   */
+  useScope(scope: Scope): Promise<void> {
+    const next = this.#busy.then(() => {
+      if (scope === this.#scope) return;
+      this.#scope = scope;
+      this.#state = null;
+      this.#dirty.clear();
+      this.#settingsChanged = false;
+      this.#setQuiet(false);
+    });
+    this.#busy = next.catch(() => undefined);
+    return next;
+  }
+
+  /** Whether the switch is on, for the works in use. */
+  async enabled(): Promise<boolean> {
+    return this.#scope !== null && (await this.#load()).settings.enabled;
+  }
+
   /** Reads without waiting for a request under way, and writes nothing. */
   async view(): Promise<KeepView> {
     const state = await this.#load();
-    const works = Object.values(state.works);
+    const all = Object.values(state.works);
+    const works = all.filter((work) => !work.updatesOff);
     const skipped: Partial<Record<SkipCode, number>> = {};
     for (const work of works) if (work.skipped) skipped[work.skipped] = (skipped[work.skipped] ?? 0) + 1;
     const run = state.run;
@@ -864,7 +929,7 @@ export class KeepACopy {
       user: state.user,
       kept: works.length,
       withCopy: works.filter((w) => w.copy).length,
-      updatesOff: works.filter((w) => w.updatesOff).length,
+      updatesOff: all.length - works.length,
       waiting: state.queue.length,
       skipped,
       run: run ? { purpose: run.purpose, status: run.status, list: run.lists[run.list] ?? null, page: run.page, found: run.found } : null,
@@ -892,6 +957,7 @@ export class KeepACopy {
   updateSettings(patch: Partial<Settings>): Promise<void> {
     return this.#serial((state) => {
       const format = patch.format && COPY_FORMATS.includes(patch.format) ? patch.format : state.settings.format;
+      const before = JSON.stringify(state.settings);
       state.settings = {
         enabled: typeof patch.enabled === "boolean" ? patch.enabled : state.settings.enabled,
         triggers: { ...state.settings.triggers, ...(patch.triggers ?? {}) },
@@ -905,6 +971,7 @@ export class KeepACopy {
         delete state.checkedAt;
         delete state.contradicted;
       }
+      if (JSON.stringify(state.settings) !== before) this.#settingsChanged = true;
       this.#setQuiet(this.#batchRunning(state));
     });
   }
@@ -953,8 +1020,8 @@ export class KeepACopy {
   }
 
   #requeue(state: KeepState, codes: readonly SkipCode[]): void {
-    for (const { workId, skipped } of Object.values(state.works)) {
-      if (!skipped || !codes.includes(skipped)) continue;
+    for (const { workId, skipped, updatesOff } of Object.values(state.works)) {
+      if (updatesOff || !skipped || !codes.includes(skipped)) continue;
       this.#keep(state, workId).skipped = null;
       this.#enqueue(state, { workId, pace: "reader" });
     }
@@ -1046,6 +1113,7 @@ export class KeepACopy {
       const release = (work: KeptWork) => {
         if (work.updatesOff) return;
         work.updatesOff = true;
+        this.#dirty.add(work.workId);
         this.#drop(state, work.workId);
         released += 1;
       };
@@ -1074,7 +1142,7 @@ export class KeepACopy {
   }
 
   #keeps(state: KeepState, workId: string, trigger: Trigger | "visit"): boolean {
-    if (!state.settings.enabled || !ID_PATTERN.test(workId)) return false;
+    if (this.#scope === null || !state.settings.enabled || !ID_PATTERN.test(workId)) return false;
     const known = state.works[workId];
     if (known) return !known.updatesOff;
     return trigger === "visit" ? state.settings.triggers.open : state.settings.triggers[trigger];
@@ -1084,6 +1152,8 @@ export class KeepACopy {
     const work = state.works[workId] ??= {
       workId, title: "Untitled", author: "Anonymous", fandom: "Unknown fandom", complete: false, restricted: false, copy: null, setAside: [], skipped: null,
     };
+    // Whatever is done with it now is written with the step.
+    this.#dirty.add(workId);
     if (page?.title) work.title = page.title;
     if (page?.author) work.author = page.author;
     if (page?.fandom) work.fandom = page.fandom;
@@ -1139,7 +1209,7 @@ export class KeepACopy {
   async #step(state: KeepState): Promise<number | null> {
     const now = this.ports.clock.now();
     const pacer = state.pacer;
-    if (!state.settings.enabled) return null;
+    if (this.#scope === null || !state.settings.enabled) return null;
     if (state.pending) return this.#settle(state, state.pending);
     if (pacer.stopped) {
       if (now < pacer.stopped.until) return pacer.stopped.until - now;
@@ -1185,7 +1255,7 @@ export class KeepACopy {
       item.attempts = (item.attempts ?? 0) + 1;
       item.lastFailure = "request";
     }
-    await this.ports.write(state);
+    await this.#write(state);
 
     const sentBefore = this.#sent;
     const verdict = item ? await this.#workStep(state, item) : await this.#listStep(state, running!);
@@ -1366,7 +1436,14 @@ export class KeepACopy {
     const size = answer.size ?? answer.bytes?.length ?? 0;
     const old = work.copy;
     const shrank = old !== null && old.format === format && size < old.bytes * SHRINK_KEEP_RATIO;
-    let filename = copyFilename(work, format);
+    const canonical = copyFilename(work, format);
+    let filename = canonical;
+    // In an account's works (Trace's), a file is only ever written over where
+    // this account's own copy is: a new one lets the browser pick a free name,
+    // so another account's file, or the reader's own, at that name stays.
+    const scoped = this.#scope !== "";
+    const own = scoped && old !== null && old.format === format && (old.canonical ?? old.filename) === canonical ? ownName(old) : null;
+    if (own) filename = own;
     const dated = shrank || work.setAside.includes(filename);
     if (dated) {
       const stamp = new Date(this.ports.clock.now()).toISOString();
@@ -1375,10 +1452,12 @@ export class KeepACopy {
       filename = copyFilename(work, format, label);
       for (let n = 2; taken.has(filename); n += 1) filename = copyFilename(work, format, `${label}-${n}`);
     }
+    const conflict = dated || (scoped && !own) ? "uniquify" : "overwrite";
     try {
-      const downloadId = await this.ports.save({ filename, format, handle, conflict: dated ? "uniquify" : "overwrite" });
+      const downloadId = await this.ports.save({ filename, format, handle, conflict });
       state.pending = {
         workId: item.workId, downloadId, filename, bytes: size, format, updatedAt: link.updatedAt, setAside: shrank, handle, startedAt: this.ports.clock.now(),
+        ...(scoped && !dated ? { canonical } : {}),
         ...(listed !== undefined ? { listed } : {}),
       };
     } catch {
@@ -1410,12 +1489,13 @@ export class KeepACopy {
     const downloadId = result.downloadId ?? pending.downloadId;
     if (old && pending.setAside) {
       work.setAside.push(old.filename);
-    } else if (old && old.downloadId !== downloadId && old.filename !== pending.filename) {
+    } else if (old && old.downloadId !== downloadId && old.filename !== pending.filename && ownName(old) !== pending.filename) {
       await this.ports.remove(old.downloadId, old.path ?? old.filename, old.url).catch(() => undefined);
     }
     work.copy = {
       downloadId, filename: pending.filename, path: result.filename, bytes: pending.bytes,
       format: pending.format, updatedAt: pending.updatedAt, savedAt: now, url: pending.handle,
+      ...(pending.canonical ? { canonical: pending.canonical } : {}),
     };
     if (pending.listed !== undefined) work.listed = pending.listed;
     work.skipped = null;
@@ -1493,8 +1573,12 @@ export class KeepACopy {
         const work = this.#keep(state, listed.workId, list === "subscriptions" ? {} : { complete: listed.complete, restricted: listed.restricted, ...fandom });
         if (stale(work)) this.#enqueue(state, { workId: listed.workId, pace: "reader", batch: true, ...seen });
       } else if (known?.copy && !listed.complete) {
-        if (listed.restricted) known.restricted = true;
+        if (listed.restricted && !known.restricted) {
+          known.restricted = true;
+          this.#dirty.add(known.workId);
+        }
         if (!stale(known)) continue;
+        this.#dirty.add(known.workId);
         known.complete = listed.complete;
         this.#enqueue(state, { workId: listed.workId, pace: "check", ...seen }, true);
       }

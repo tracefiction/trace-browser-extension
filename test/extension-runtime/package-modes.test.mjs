@@ -968,8 +968,16 @@ test("Keep a Copy is only in a package built with it; only Chrome and Firefox ca
       assert.equal(fs.readFileSync(path.join(dist(browser), "popup-config.js"), "utf8").includes("TRACE_KEEP_A_COPY"), false);
     }
 
+    // A build with it never writes the committed Safari resources.
+    const snapshot = () => Object.fromEntries(fs.readdirSync(RESOURCES, { recursive: true })
+      .filter((name) => fs.statSync(path.join(RESOURCES, name)).isFile())
+      .map((name) => [name, crypto.createHash("sha256").update(fs.readFileSync(path.join(RESOURCES, name))).digest("hex")]));
+    const before = snapshot();
     const on = build({ TRACE_KEEP_A_COPY: "1" });
     assert.equal(on.status, 0, on.stderr || on.stdout);
+    assert.deepEqual(snapshot(), before, "the flag-on build rewrote the committed Safari resources");
+    const staged = path.join(ROOT, "dist", "safari-resources-keep-a-copy");
+    assert.equal(fs.readFileSync(path.join(staged, "background.js"), "utf8").includes("prefKeepACopyEnabled"), true);
     const chrome = manifest(dist("chrome"));
     const firefox = manifest(dist("firefox"));
     for (const permission of ["downloads", "downloads.ui", "offscreen"]) assert.equal(chrome.permissions.includes(permission), true, `Chrome lacks ${permission}`);
@@ -988,8 +996,8 @@ test("Keep a Copy is only in a package built with it; only Chrome and Firefox ca
     assert.equal(fs.existsSync(path.join(dist("chrome"), "keep-a-copy-offscreen.html")), true);
     assert.equal(fs.existsSync(path.join(dist("firefox"), "keep-a-copy-offscreen.html")), false);
     // Nothing more is asked of Safari, and none of its files are written there.
-    assert.equal(manifest(RESOURCES).permissions.includes("downloads"), false);
-    assert.equal(fs.existsSync(path.join(RESOURCES, "keep-a-copy-page.js")), false);
+    assert.equal(manifest(staged).permissions.includes("downloads"), false);
+    assert.equal(fs.existsSync(path.join(staged, "keep-a-copy-page.js")), false);
 
     const legacy = spawnSync("node", ["scripts/build.mjs"], {
       cwd: ROOT, env: { ...RELEASE_ENV, TRACE_SESSION_MODE: "legacy", TRACE_KEEP_A_COPY: "1" }, encoding: "utf8",

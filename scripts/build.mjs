@@ -19,7 +19,8 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
-const RES = path.join(ROOT, "Shared (Extension)", "Resources");
+// The committed Safari resources: the canonical flag-off release build.
+const COMMITTED_RES = path.join(ROOT, "Shared (Extension)", "Resources");
 const SRC_BG = path.join(ROOT, "src", "background.js");
 
 function loadEnvFile(p) {
@@ -173,12 +174,20 @@ if (AO3_HISTORY_IMPORT && SESSION_MODE !== "kernel") {
 const AO3_HISTORY_IMPORT_PANEL = "ao3-history-import-panel.js";
 // Keep a Copy: AO3's file of every AO3 story in the reader's Library, saved
 // on their device (src/extension-runtime/keep-a-copy-library.mts). Off until
-// it is reviewed; even then the reader turns it on. Only the Chrome and
-// Firefox packages carry the downloads permission and its page files; the
-// Safari resources are unchanged by it.
+// it is reviewed; even then the reader turns it on. With it, the background
+// every package shares carries it; only the Chrome and Firefox packages get
+// the downloads permission and its page files. A build with it never writes
+// the committed Safari resources: its Safari resources go to
+// dist/safari-resources-keep-a-copy, so the committed ones stay the flag-off
+// release build.
 const KEEP_A_COPY = /^(?:1|true)$/i.test(String(env.TRACE_KEEP_A_COPY ?? ""));
 if (KEEP_A_COPY && SESSION_MODE !== "kernel") {
   throw new Error("TRACE_KEEP_A_COPY requires TRACE_SESSION_MODE=kernel.");
+}
+const RES = KEEP_A_COPY ? path.join(ROOT, "dist", "safari-resources-keep-a-copy") : COMMITTED_RES;
+if (KEEP_A_COPY) {
+  fs.rmSync(RES, { recursive: true, force: true });
+  fs.cpSync(COMMITTED_RES, RES, { recursive: true });
 }
 const KEEP_A_COPY_PAGE_SCRIPT = "keep-a-copy-page.js";
 const KEEP_A_COPY_OFFSCREEN = "keep-a-copy-offscreen";

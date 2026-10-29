@@ -1512,16 +1512,26 @@ export class SessionRuntimeController {
   }
 
   /**
-   * The Library of the account connected now, as the page marks read it:
-   * for Keep a Copy, which copies its AO3 works on this device. Null when
-   * no account is connected or the Library cannot be read. `refresh` asks
-   * Trace again when the copy kept here is old.
+   * The Library of the account connected now, as the page marks read it,
+   * with the account's own count of its stories: for Keep a Copy, which
+   * copies its AO3 works on this device. Null when no account is connected
+   * or the Library cannot be read. `refresh` asks Trace again when the copy
+   * kept here is old.
    */
-  async libraryOverlay(refresh: boolean): Promise<AccountOverlay | null> {
+  async librarySnapshot(refresh: boolean): Promise<{
+    readonly accountId: string;
+    readonly overlay: AccountOverlay;
+    readonly libraryCount: number | null;
+  } | null> {
     await this.start();
     if (this.snapshot().state !== "connected") return null;
     const accountData = await this.#projection.read(refresh ? {} : { refresh: false }).catch(() => null);
-    return this.snapshot().state === "connected" ? accountData?.overlay ?? null : null;
+    if (this.snapshot().state !== "connected" || !accountData?.overlay) return null;
+    return Object.freeze({
+      accountId: accountData.scope.accountId,
+      overlay: accountData.overlay,
+      libraryCount: accountData.summary?.libraryCount ?? null,
+    });
   }
 
   /** The account an answer from Trace belongs to, or null for none. */

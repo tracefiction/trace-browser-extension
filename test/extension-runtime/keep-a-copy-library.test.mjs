@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AO3_ORIGIN, KeepACopy } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
+import { AO3_ORIGIN, KeepACopy, ownName } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
 import {
   KEEP_A_COPY_PREF_KEY,
   LIBRARY_DEFAULTS,
-  LIBRARY_MAX_ENTRIES,
+  LIBRARY_WHOLE_BELOW,
   LIBRARY_SYNC_ALARM,
   TraceLibraryCopies,
   installTraceKeepACopy,
@@ -14,6 +14,8 @@ import {
   readerStatus,
 } from "../../.trace-build/extension-runtime/keep-a-copy-library.mjs";
 import { ACCOUNT_PROJECTION_REVISION_KEY } from "../../.trace-build/extension-runtime/runtime-messages.mjs";
+import { IndexedDbKeepStore } from "../../.trace-build/extension-runtime/keep-a-copy-store.mjs";
+import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 
 // Invented works throughout, as in keep-a-copy.test.mjs.
 const NOW = Date.parse("2026-10-29T10:00:00Z");
@@ -43,9 +45,9 @@ const file = (url, bytes) => ({
 const workURL = (id) => `${AO3_ORIGIN}/works/${id}?view_adult=true`;
 const fileURL = (id, updatedAt = "1761700000") => `${AO3_ORIGIN}/downloads/${id}/Invented_work.epub?updated_at=${updatedAt}`;
 
-/** A store-backed queue answering from `answers`, as in keep-a-copy.test.mjs. */
-function harness(answers = {}) {
-  const box = { now: NOW, stored: undefined, saved: [], removed: [], requests: [] };
+/** A queue over an IndexedDB store answering from `answers`, with one account's works in use, as in Trace. */
+function harness(answers = {}, { store = new IndexedDbKeepStore(new IDBFactory(), IDBKeyRange), scope = "account-1" } = {}) {
+  const box = { now: NOW, saved: [], removed: [], requests: [], writes: [], store };
   let nextId = 1;
   const answer = async (url) => {
     box.requests.push(url);
@@ -55,14 +57,18 @@ function harness(answers = {}) {
   box.engine = new KeepACopy({
     clock: { now: () => box.now },
     random: () => 0,
-    read: async () => structuredClone(box.stored),
-    write: async (state) => { box.stored = structuredClone(state); },
+    read: (scope) => store.read(scope),
+    write: async (state, changed, scope) => {
+      box.writes.push({ scope, changed: [...changed].sort() });
+      box.stored = structuredClone(state);
+      await store.write(state, changed, scope);
+    },
     fetchPage: answer,
     fetchFile: answer,
     save: async (request) => { box.saved.push(request); return nextId++; },
     settle: async (id) => ({ state: "complete", filename: `/home/reader/Downloads/${box.saved[id - 1]?.filename}` }),
     remove: async (id) => { box.removed.push(id); },
-  }, LIBRARY_DEFAULTS);
+  }, LIBRARY_DEFAULTS, scope);
   box.drain = async (max = 50) => {
     for (let i = 0; i < max; i += 1) {
       const wait = await box.engine.tick();
@@ -88,7 +94,7 @@ test("the Library's AO3 stories are kept unless Dropped; FanFiction.net and malf
       "ao3:16": entry("READING"),
       "ffn:17": entry("READING"),
     },
-  });
+  }, 7);
   assert.deepEqual(list.keep.map((work) => work.workId), ["11", "12", "13", "14", "16"]);
   assert.deepEqual(list.drop, ["15"]);
   assert.equal(list.whole, true);
@@ -105,10 +111,19 @@ test("Trace's published chapter count is the reader's chapter plus the new ones,
   assert.equal(publishedChapters(entry("READING", { catchupState: "UP" })), null);
 });
 
-test("a Library cut off at Trace's limit lets no missing work go", () => {
-  const entries = {};
-  for (let i = 1; i <= LIBRARY_MAX_ENTRIES; i += 1) entries[`ao3:${i}`] = entry("READING");
-  assert.equal(libraryList({ entries, workPreferences: {}, syncVersion: "2026-10-29T10:00:00.000Z" }).whole, false);
+test("a Library near Trace's limit, by the account's own count, lets no missing work go", () => {
+  const overlay = (count) => {
+    const entries = {};
+    for (let i = 1; i <= count; i += 1) entries[`ao3:${i}`] = entry("READING");
+    return { entries, workPreferences: {}, syncVersion: "2026-10-29T10:00:00.000Z" };
+  };
+  assert.equal(libraryList(overlay(3), 3).whole, true);
+  // Trace left rows out before sending 9,000 keys of a 10,200-story Library.
+  assert.equal(libraryList(overlay(9_000), 10_200).whole, false);
+  assert.equal(libraryList(overlay(3), LIBRARY_WHOLE_BELOW).whole, false);
+  assert.equal(libraryList(overlay(LIBRARY_WHOLE_BELOW), 100).whole, false);
+  // No count from Trace: never taken as whole.
+  assert.equal(libraryList(overlay(3), null).whole, false);
 });
 
 test("turned on, every kept Library work is copied: its page, then its file, at the reader's pace", async () => {
@@ -157,7 +172,9 @@ test("Dropped stops a work's updates and never deletes its file; back in the Lib
   assert.equal(box.requests.length, 2);
   assert.deepEqual(box.removed, []);
   const view = await box.engine.view();
-  assert.equal(view.withCopy, 1);
+  // Counted among works that update: none now, with one file kept aside.
+  assert.equal(view.kept, 0);
+  assert.equal(view.withCopy, 0);
   assert.equal(view.updatesOff, 1);
 
   // Reading again: its page is read once, and the new file is written over the old.
@@ -225,20 +242,96 @@ test("a locked Library work is copied only from its page as the signed-in reader
   assert.equal(JSON.stringify(box.stored).includes("/downloads/61/"), false);
 });
 
+test("each step writes only the works it changed, to IndexedDB, and a new background reads them back", async () => {
+  const answers = {};
+  for (const id of ["81", "82", "83"]) {
+    answers[workURL(id)] = html(workURL(id), workPage(id));
+    answers[fileURL(id)] = file(fileURL(id), epub());
+  }
+  const box = harness(answers);
+  await box.engine.updateSettings({ enabled: true });
+  await box.engine.syncLibrary({ keep: ["81", "82", "83"].map((workId) => ({ workId, chapters: 1 })), drop: [], whole: true });
+  await box.drain();
+  box.writes.length = 0;
+  answers[workURL("82")] = html(workURL("82"), workPage("82", { updatedAt: "1761900000" }));
+  answers[fileURL("82", "1761900000")] = file(fileURL("82", "1761900000"), epub());
+  await box.engine.syncLibrary({ keep: ["81", "82", "83"].map((workId) => ({ workId, chapters: workId === "82" ? 2 : 1 })), drop: [], whole: true });
+  await box.drain();
+  assert.ok(box.writes.length > 0);
+  for (const { changed } of box.writes.slice(1)) assert.deepEqual(changed.filter((id) => id !== "82"), [], `wrote ${changed}`);
+  const again = harness(answers, { store: box.store });
+  const view = await again.engine.view();
+  assert.equal(view.kept, 3);
+  assert.equal(view.withCopy, 3);
+});
+
+test("switched off, nothing is written, not even the reader's AO3 name", async () => {
+  const box = harness();
+  await box.engine.updateSettings({ enabled: false });
+  await box.engine.noteUser("Synthetic_Reader");
+  await box.engine.syncLibrary({ keep: [{ workId: "91", chapters: null }], drop: [], whole: true });
+  assert.equal(await box.engine.tick(), null);
+  assert.deepEqual(box.writes, []);
+  assert.equal(await box.store.read("account-1"), undefined);
+  assert.equal((await box.engine.view()).user, null);
+  // Turned on, then off: the switch itself is kept.
+  await box.engine.updateSettings({ enabled: true });
+  await box.engine.updateSettings({ enabled: false });
+  assert.equal((await box.store.read("account-1")).settings.enabled, false);
+});
+
+test("an account that signs out and back in carries on with nothing checked again; another account has its own works and never touches the first's files", async () => {
+  const answers = {
+    [workURL("101")]: html(workURL("101"), workPage("101")),
+    [fileURL("101")]: file(fileURL("101"), epub()),
+  };
+  const box = harness(answers);
+  const library = { keep: [{ workId: "101", chapters: 4 }], drop: [], whole: true };
+  await box.engine.updateSettings({ enabled: true });
+  await box.engine.syncLibrary(library);
+  await box.drain();
+  assert.equal(box.requests.length, 2);
+  // Signed out: nothing runs, and a visit fetches nothing.
+  await box.engine.useScope(null);
+  assert.equal(await box.engine.tick(), null);
+  // The same account back: no page is read again.
+  await box.engine.useScope("account-1");
+  await box.engine.syncLibrary(library);
+  await box.drain();
+  assert.equal(box.requests.length, 2);
+
+  // Another account keeping the same work: its own copy, at a name the browser picks free.
+  await box.engine.useScope("account-2");
+  await box.engine.updateSettings({ enabled: true });
+  await box.engine.syncLibrary(library);
+  await box.drain();
+  assert.equal(box.requests.length, 4);
+  assert.equal(box.saved[1].conflict, "uniquify");
+  assert.deepEqual(box.removed, []);
+  assert.equal((await box.store.read("account-1")).works["101"].copy.downloadId, 1);
+  assert.equal((await box.store.read("account-2")).works["101"].copy.downloadId, 2);
+});
+
+test("an update writes over the account's own file, wherever the browser put it", () => {
+  assert.equal(ownName({ filename: "AO3/F/T – A (1).epub", path: "C:\\Users\\r\\Downloads\\AO3\\F\\T – A (1) (1).epub" }), "AO3/F/T – A (1) (1).epub");
+  assert.equal(ownName({ filename: "AO3/F/T – A (1).epub", path: null }), "AO3/F/T – A (1).epub");
+});
+
 function copiesHarness({ pref = false, overlay = null } = {}) {
-  const calls = { settings: [], syncs: [], alarms: [], wakes: 0, reads: [] };
-  let library = overlay;
+  const calls = { settings: [], syncs: [], alarms: [], wakes: 0, reads: [], scopes: [] };
+  let library = overlay && { accountId: "account-1", overlay, libraryCount: 2 };
   const copies = new TraceLibraryCopies({
     engine: {
       updateSettings: async (patch) => { calls.settings.push(patch); },
       syncLibrary: async (list) => { calls.syncs.push(list); return { added: 0, released: 0 }; },
+      useScope: async (scope) => { calls.scopes.push(scope); },
     },
     wake: () => { calls.wakes += 1; },
     library: async (refresh) => { calls.reads.push(refresh); return library; },
     readPref: async () => pref,
     alarm: (on) => calls.alarms.push(on),
   });
-  return { copies, calls, setLibrary: (value) => { library = value; } };
+  return { copies, calls, setLibrary: (value) => { library = value && { accountId: "account-1", overlay: value, libraryCount: 2 }; } };
 }
 
 const OVERLAY = { syncVersion: "2026-10-29T10:00:00.000Z", workPreferences: {}, entries: { "ao3:71": entry("READING"), "ao3:72": entry("DROPPED") } };
@@ -253,11 +346,12 @@ test("the switch is off until the reader turns it on; off, Trace's Library is ne
   await copies.prefChanged(true);
   assert.deepEqual(calls.settings.at(-1), { enabled: true });
   assert.deepEqual(calls.alarms.at(-1), true);
+  assert.deepEqual(calls.scopes, ["account-1"]);
   assert.deepEqual(calls.syncs, [{ keep: [{ workId: "71", chapters: null }], drop: ["72"], whole: true }]);
   assert.equal(calls.wakes, 1);
 });
 
-test("a Library that cannot be read lets nothing go; an account that leaves stops every update", async () => {
+test("a Library that cannot be read lets nothing go; an account that leaves takes its works out of use", async () => {
   const { copies, calls, setLibrary } = copiesHarness({ pref: true, overlay: OVERLAY });
   await copies.start();
   // A background starting reads the Library kept here; only the reader's switch or the alarm asks Trace.
@@ -266,7 +360,8 @@ test("a Library that cannot be read lets nothing go; an account that leaves stop
   await copies.sync(true);
   assert.equal(calls.syncs.length, 1);
   await copies.accountLeft();
-  assert.deepEqual(calls.syncs.at(-1), { keep: [], drop: [], whole: true });
+  assert.equal(calls.syncs.length, 1, "leaving released works");
+  assert.deepEqual(calls.scopes.at(-1), null);
 });
 
 function fakeExtension() {
@@ -317,9 +412,16 @@ test("in Trace's background it answers only its own messages, and wakes nothing 
     fetched.push(String(url));
     return new Response("<h2>Error 404</h2>", { status: 404, headers: { "content-type": "text/html" } });
   };
-  t.after(() => { globalThis.fetch = realFetch; });
+  // The works are kept in IndexedDB, never in storage.local.
+  globalThis.indexedDB = new IDBFactory();
+  globalThis.IDBKeyRange = IDBKeyRange;
+  t.after(() => {
+    globalThis.fetch = realFetch;
+    delete globalThis.indexedDB;
+    delete globalThis.IDBKeyRange;
+  });
   installTraceKeepACopy(extension, {
-    libraryOverlay: async (refresh) => { reads.push(refresh); return OVERLAY; },
+    librarySnapshot: async (refresh) => { reads.push(refresh); return { accountId: "account-1", overlay: OVERLAY, libraryCount: 2 }; },
     whenAccountLeaves: () => undefined,
   });
   await settle();
@@ -347,6 +449,7 @@ test("in Trace's background it answers only its own messages, and wakes nothing 
   for (const changed of extension.listeners.changed) changed({ [ACCOUNT_PROJECTION_REVISION_KEY]: { newValue: 2 } }, "local");
   await settle();
   assert.deepEqual(reads, [true, true]);
+  assert.deepEqual(Object.keys(extension.store).filter((key) => key !== KEEP_A_COPY_PREF_KEY), [], "Keep a Copy wrote to storage.local");
   // Turned off: its alarm stops.
   for (const changed of extension.listeners.changed) changed({ [KEEP_A_COPY_PREF_KEY]: { newValue: false } }, "local");
   await settle();

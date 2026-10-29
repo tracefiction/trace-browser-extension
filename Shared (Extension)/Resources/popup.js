@@ -674,13 +674,15 @@ const KEEP_A_COPY_STOPPED = {
 };
 
 function keepACopyLine(view) {
-  const kept = Math.max(0, Number(view.kept) - Number(view.updatesOff || 0));
+  // Among the stories whose updates are on: Dropped ones keep their files but are not counted.
+  const kept = Math.max(0, Number(view.kept) || 0);
+  const withCopy = Math.min(kept, Math.max(0, Number(view.withCopy) || 0));
   if (view.stopped && KEEP_A_COPY_STOPPED[view.stopped.code]) {
     return `Paused: ${KEEP_A_COPY_STOPPED[view.stopped.code]}. Trace tries again later.`;
   }
   if (kept === 0) return "Copies are saved in Downloads › AO3";
   const waiting = Number(view.waiting) > 0 ? ` · ${view.waiting} waiting` : "";
-  return `${view.withCopy} of ${kept} ${kept === 1 ? "story has" : "stories have"} a copy${waiting}`;
+  return `${withCopy} of ${kept} ${kept === 1 ? "story has" : "stories have"} a copy${waiting}`;
 }
 
 function renderKeepACopy() {

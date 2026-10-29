@@ -27,8 +27,15 @@ export const KEEP_A_COPY_PREF_KEY = "prefKeepACopyEnabled";
 export const LIBRARY_SYNC_ALARM = "trace-keep-a-copy-library";
 /** How often the Library is read again while the switch is on. */
 export const LIBRARY_SYNC_MINUTES = 15;
-/** The most entries Trace sends: a Library this long may be cut off, so no work is let go for being missing. */
+/** The most entries Trace sends. */
 export const LIBRARY_MAX_ENTRIES = 10_000;
+/**
+ * Trace leaves out entries it cannot show before it counts what it sends, so
+ * the list is taken as the whole Library only when the account's own count
+ * of stories, and the list, are well under its limit. Otherwise a work
+ * missing from it is never let go: only Dropped stops a work's updates.
+ */
+export const LIBRARY_WHOLE_BELOW = 9_500;
 /** Chrome's offscreen document in Trace's package. */
 export const KEEP_A_COPY_OFFSCREEN_DOCUMENT = "keep-a-copy-offscreen.html";
 
@@ -66,8 +73,16 @@ export function publishedChapters(entry: LibraryOverlayEntry): number | null {
   return entry.chapters.current + (entry.newChapterCount ?? 0);
 }
 
+/** The Library of the account connected now, as Keep a Copy reads it. */
+export interface LibrarySnapshot {
+  readonly accountId: string;
+  readonly overlay: AccountOverlay;
+  /** The account's own count of its Library's stories, when Trace reported one. */
+  readonly libraryCount: number | null;
+}
+
 /** The Library's AO3 works, as the queue keeps them. */
-export function libraryList(overlay: AccountOverlay): LibraryList {
+export function libraryList(overlay: AccountOverlay, libraryCount: number | null): LibraryList {
   const keep: { workId: string; chapters: number | null }[] = [];
   const drop: string[] = [];
   for (const [key, entry] of Object.entries(overlay.entries)) {
@@ -76,15 +91,16 @@ export function libraryList(overlay: AccountOverlay): LibraryList {
     if (KEPT_STATUSES.includes(readerStatus(entry))) keep.push({ workId, chapters: publishedChapters(entry) });
     else drop.push(workId);
   }
-  return { keep, drop, whole: Object.keys(overlay.entries).length < LIBRARY_MAX_ENTRIES };
+  const whole = libraryCount !== null && libraryCount < LIBRARY_WHOLE_BELOW && Object.keys(overlay.entries).length < LIBRARY_WHOLE_BELOW;
+  return { keep, drop, whole };
 }
 
 export interface LibraryCopiesDeps {
-  readonly engine: Pick<KeepACopy, "updateSettings" | "syncLibrary">;
+  readonly engine: Pick<KeepACopy, "updateSettings" | "syncLibrary" | "useScope">;
   /** Looks at the queue now. */
   wake(): void;
   /** The Library of the account connected now; null when none is, or it cannot be read. */
-  library(refresh: boolean): Promise<AccountOverlay | null>;
+  library(refresh: boolean): Promise<LibrarySnapshot | null>;
   readPref(): Promise<boolean>;
   /** Starts or stops the Library's own alarm. */
   alarm(on: boolean): void;
@@ -118,20 +134,27 @@ export class TraceLibraryCopies {
   sync(refresh: boolean): Promise<void> {
     const next = this.#tail.then(async () => {
       if (!this.#on) return;
-      const overlay = await this.deps.library(refresh).catch(() => null);
+      const library = await this.deps.library(refresh).catch(() => null);
       // Unknown is not empty: nothing is let go without a Library read.
-      if (overlay === null || !this.#on) return;
-      await this.deps.engine.syncLibrary(libraryList(overlay));
+      if (library === null || !this.#on) return;
+      // That account's own works: another account's are left as they are.
+      await this.deps.engine.useScope(library.accountId);
+      await this.deps.engine.updateSettings({ enabled: this.#on });
+      await this.deps.engine.syncLibrary(libraryList(library.overlay, library.libraryCount));
       this.deps.wake();
     });
     this.#tail = next.catch(() => undefined);
     return next;
   }
 
-  /** The account signed out, or another took its place: its works keep their files and stop updating. */
+  /**
+   * The account signed out, or another took its place: its works are left
+   * as they are, files and all, and nothing runs until an account is read
+   * again. The same account back carries on without checking them again.
+   */
   accountLeft(): Promise<void> {
     const next = this.#tail.then(async () => {
-      await this.deps.engine.syncLibrary({ keep: [], drop: [], whole: true });
+      await this.deps.engine.useScope(null);
     });
     this.#tail = next.catch(() => undefined);
     return next;
@@ -145,7 +168,7 @@ interface TraceExtension extends Extension {
 }
 
 export interface TraceLibrarySource {
-  libraryOverlay(refresh: boolean): Promise<AccountOverlay | null>;
+  librarySnapshot(refresh: boolean): Promise<LibrarySnapshot | null>;
   whenAccountLeaves(cleanup: () => Promise<void>): void;
 }
 
@@ -156,11 +179,13 @@ export function installTraceKeepACopy(extension: TraceExtension, source: TraceLi
     answers: [KEEP_A_COPY_MESSAGE.page, KEEP_A_COPY_MESSAGE.view],
     idleAlarm: false,
     offscreenDocument: KEEP_A_COPY_OFFSCREEN_DOCUMENT,
+    // No account's works are in use until the Library is read.
+    scope: null,
   });
   const copies = new TraceLibraryCopies({
     engine,
     wake,
-    library: (refresh) => source.libraryOverlay(refresh),
+    library: (refresh) => source.librarySnapshot(refresh),
     readPref: async () => (await extension.storage.local.get(KEEP_A_COPY_PREF_KEY))[KEEP_A_COPY_PREF_KEY] === true,
     alarm(on) {
       if (on) void ensureAlarm(extension.alarms, LIBRARY_SYNC_ALARM, LIBRARY_SYNC_MINUTES).catch(() => undefined);

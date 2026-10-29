@@ -24,9 +24,11 @@ import {
   type Fetched,
   type KeepState,
   type SaveState,
+  type Scope,
   type Settings,
   type Trigger,
 } from "./keep-a-copy.mjs";
+import { IndexedDbKeepStore } from "./keep-a-copy-store.mjs";
 
 type KeepMessage = (typeof KEEP_A_COPY_MESSAGE)[keyof typeof KEEP_A_COPY_MESSAGE];
 const MESSAGES: readonly string[] = /* @__PURE__ */ Object.values(KEEP_A_COPY_MESSAGE);
@@ -216,6 +218,10 @@ export interface KeepACopyOptions {
    * background is not woken every minute for a switch that is off.
    */
   readonly idleAlarm?: boolean;
+  /** Whose works are in use at first: "" for the standalone's own, null until an account is known. */
+  readonly scope?: Scope;
+  /** Where the works are kept; IndexedDB by default. */
+  readonly store?: Pick<IndexedDbKeepStore, "read" | "write">;
   /** Chrome's offscreen document, in the package. */
   readonly offscreenDocument?: string;
 }
@@ -259,11 +265,19 @@ export function installKeepACopy(extension: Extension, options: KeepACopyOptions
   // Whatever an earlier background left: the bubble shows until a backup hides it.
   setUi(true);
 
+  const indexedDB = (globalThis as { indexedDB?: IDBFactory }).indexedDB;
+  const store: Pick<IndexedDbKeepStore, "read" | "write"> = options.store ?? (indexedDB
+    ? new IndexedDbKeepStore(indexedDB)
+    // Without IndexedDB (never in a supported browser): the whole state in one key.
+    : {
+        read: async (scope) => (await extension.storage.local.get(`${KEEP_A_COPY_KEY}:${scope}`))[`${KEEP_A_COPY_KEY}:${scope}`],
+        write: (state: KeepState, _changed, scope) => extension.storage.local.set({ [`${KEEP_A_COPY_KEY}:${scope}`]: state }),
+      });
   const engine = new KeepACopy({
     clock: Date,
     random: Math.random,
-    read: async () => (await extension.storage.local.get(KEEP_A_COPY_KEY))[KEEP_A_COPY_KEY],
-    write: (state: KeepState) => extension.storage.local.set({ [KEEP_A_COPY_KEY]: state }),
+    read: (scope) => store.read(scope),
+    write: (state, changed, scope) => store.write(state, changed, scope),
     fetchPage: (url, credentials) => requestAO3(url, "text", REQUEST_TIMEOUT_MS, MAX_PAGE_CHARS * 2, credentials),
     fetchFile,
     save: ({ filename, handle, conflict }) => downloads.download({ url: handle, filename, conflictAction: conflict, saveAs: false }),
@@ -275,7 +289,7 @@ export function installKeepACopy(extension: Extension, options: KeepACopyOptions
     cancel,
     remove,
     quiet: (on) => setUi(!on),
-  }, options.defaults);
+  }, options.defaults, options.scope ?? "");
 
   const repeated = repeatedMessage();
   let running = false;
@@ -292,9 +306,10 @@ export function installKeepACopy(extension: Extension, options: KeepACopyOptions
     running = true;
     if (timer) clearTimeout(timer);
     timer = null;
-    // Set before the tick, so a background stopped part-way is woken again.
-    alarm(true);
     try {
+      // Set before the tick, so a background stopped part-way is woken
+      // again; never for a switch that is off.
+      if (await engine.enabled()) alarm(true);
       const wait = await engine.tick();
       if (wait !== null) timer = setTimeout(() => void run(), Math.max(250, Math.min(wait, TIMER_MAX_MS)));
       else {

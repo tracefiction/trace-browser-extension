@@ -1735,7 +1735,8 @@ test("Keep a Copy's switch shows only in a package built with it, starts off, an
 
   const h = createPopupHarness({
     ...connected,
-    keepACopy: { kept: 5, updatesOff: 1, withCopy: 3, waiting: 1, stopped: null },
+    // Four stories updating, three with a copy; a Dropped one keeps its file but is not counted.
+    keepACopy: { kept: 4, updatesOff: 1, withCopy: 3, waiting: 1, stopped: null },
   });
   await flush();
   const row = h.document.getElementById("popup-keep-a-copy-row");
