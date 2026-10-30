@@ -104,7 +104,6 @@ function createCollectorBindings(dom, options = {}) {
     shouldDisableTraceContentScript: globalScope.shouldDisableTraceContentScript,
     collectAO3Work: globalScope.collectAO3Work,
     workSummaryBackfillWorkId: globalScope.workSummaryBackfillWorkId,
-    parseAo3WorkSummaryFromHtml: globalScope.parseAo3WorkSummaryFromHtml,
     workSummaryBackfillItem: globalScope.workSummaryBackfillItem,
     maybeBackfillWorkSummary: globalScope.maybeBackfillWorkSummary,
     readAo3WorkForSave: globalScope.readAo3WorkForSave,

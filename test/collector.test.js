@@ -345,6 +345,15 @@ function okHtml(name) {
   return () => Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(html) });
 }
 
+// AO3's work search, listing one work as an ordinary row.
+function okSearchResult(workId, summary) {
+  const html = `<ol class="work index group"><li id="work_${workId}" class="work blurb group" role="article">
+    <div class="header module"><h4 class="heading"><a href="/works/${workId}">Fog Ledger</a> by <a rel="author" href="/users/a">a</a></h4></div>
+    <blockquote class="userstuff summary"><p>${summary}</p></blockquote>
+  </li></ol>`;
+  return () => Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(html) });
+}
+
 test("work summary backfill only targets AO3 chapter 2+ pages without a work summary", () => {
   const { workSummaryBackfillWorkId, item } = backfillHarness({ fetchImpl: okHtml("chapter-1.html") });
   assert.equal(workSummaryBackfillWorkId(item), "7700201");
@@ -358,13 +367,6 @@ test("work summary backfill only targets AO3 chapter 2+ pages without a work sum
   );
   assert.equal(workSummaryBackfillWorkId({ ...item, src: "ffn" }), null);
   assert.equal(workSummaryBackfillWorkId({ ...item, ctx: "listing" }), null);
-});
-
-test("work summary backfill parses only the work preface of a fetched page", () => {
-  const { parseAo3WorkSummaryFromHtml } = backfillHarness({ fetchImpl: okHtml("chapter-1.html") });
-  assert.equal(parseAo3WorkSummaryFromHtml(loadFixture(path.join("ao3-work-summary", "chapter-1.html"))), WORK_SUMMARY);
-  assert.equal(parseAo3WorkSummaryFromHtml(loadFixture(path.join("ao3-work-summary", "chapter-2.html"))), null);
-  assert.equal(parseAo3WorkSummaryFromHtml("<html><body>Retry later</body></html>"), null);
 });
 
 test("work summary backfill reports the summary as the work's first page", () => {
@@ -432,13 +434,13 @@ test("a work saved from a bare link is not saved when AO3 refuses or doesn't lis
   assert.equal(listing.fetchCalls.length, 1, "a malformed ID never reaches AO3");
 });
 
-test("work summary backfill fetches chapter 1 once, past the adult notice, then broadcasts it", async () => {
-  const h = backfillHarness({ fetchImpl: okHtml("chapter-1.html") });
+test("work summary backfill looks the work up in AO3's search once, never opening it, then broadcasts it", async () => {
+  const h = backfillHarness({ fetchImpl: okSearchResult("7700201", WORK_SUMMARY) });
   assert.equal(h.maybeBackfillWorkSummary(h.item), true);
   assert.equal(h.maybeBackfillWorkSummary(h.item), false, "a second save of the same work does not fetch again");
   await delay(1_800);
   assert.equal(h.fetchCalls.length, 1);
-  assert.equal(h.fetchCalls[0].url, "https://archiveofourown.org/works/7700201?view_adult=true");
+  assert.equal(h.fetchCalls[0].url, "https://archiveofourown.org/works/search?work_search%5Bquery%5D=id%3A7700201");
   assert.equal(h.fetchCalls[0].init.credentials, "include");
   const broadcasts = h.sent.filter((m) => m && m.type === "TRACE_METADATA_BROADCAST");
   assert.equal(broadcasts.length, 1);
@@ -448,9 +450,33 @@ test("work summary backfill fetches chapter 1 once, past the adult notice, then 
   assert.equal(h.maybeBackfillWorkSummary(h.item), false, "remembered for the rest of the day");
 });
 
+test("the packaged scripts never open an AO3 work for its details", () => {
+  // Opening a work with the reader's AO3 session is a visit in their AO3 History.
+  for (const name of ["background.js", "collector.js"]) {
+    const source = fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", name), "utf8");
+    assert.doesNotMatch(source, /view_adult=true/, name);
+  }
+});
+
+test("work summary backfill keeps the paragraphs of a summary from AO3's search", async () => {
+  const h = backfillHarness({ fetchImpl: okSearchResult("7700201", "First line.</p><p>Second line.") });
+  assert.equal(h.maybeBackfillWorkSummary(h.item), true);
+  await delay(1_800);
+  const broadcast = h.sent.find((m) => m && m.type === "TRACE_METADATA_BROADCAST");
+  assert.equal(broadcast.payload.item.sm, "First line.\n\nSecond line.");
+});
+
+test("work summary backfill sends nothing when AO3's search doesn't list the work", async () => {
+  const h = backfillHarness({ fetchImpl: okSearchResult("1", WORK_SUMMARY) });
+  assert.equal(h.maybeBackfillWorkSummary(h.item), true);
+  await delay(1_800);
+  assert.equal(h.fetchCalls.length, 1);
+  assert.equal(h.sent.filter((m) => m && m.type === "TRACE_METADATA_BROADCAST").length, 0);
+});
+
 test("work summary backfill respects the reader's metadata setting", async () => {
   const h = backfillHarness({
-    fetchImpl: okHtml("chapter-1.html"),
+    fetchImpl: okSearchResult("7700201", WORK_SUMMARY),
     prefs: { prefMetadataImproveEnabled: false },
   });
   h.maybeBackfillWorkSummary(h.item);

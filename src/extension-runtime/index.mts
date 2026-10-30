@@ -282,11 +282,6 @@ try {
     ffnSummaryFill: {
       sessionArea: extension.storage.session ?? null,
     },
-    // Missing AO3 summaries of saved works are read in the reader's own AO3
-    // tab, one work at a time and slowly (ao3-summary-fill.mts).
-    ao3SummaryFill: {
-      sessionArea: extension.storage.session ?? null,
-    },
   });
   if (
     // A build-time constant: a build without it leaves this block and the

@@ -4,6 +4,11 @@ This file lists the changes that matter to people using the Chrome, Edge and
 Firefox extension. The Safari extension ships inside the Trace iPhone app, and
 its notes go with each app release.
 
+## 1.0.5
+
+- **Trace no longer adds visits to your AO3 History.** To find missing descriptions, 1.0.4 opened saved works' pages in the background while you browsed AO3, and AO3 counted those as visits: **Last visited** and the visit count changed, and **Update available** could clear, on works you hadn't opened. Trace no longer opens them. Descriptions for works you read from chapter 2 on now come from AO3's search, and other saved works without one wait until you save or open them on a page that shows it.
+- **Add to Trace works on your AO3 Subscriptions page.** The button beside a subscribed work used to do nothing. It now saves the work with its tags, description and counts.
+
 ## 1.0.4
 
 - **Import your whole AO3 History.** On your AO3 History page, Trace reads every page of it in your own browser. You then choose what to add on Trace's review page before anything is saved.
