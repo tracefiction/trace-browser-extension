@@ -450,6 +450,22 @@ test("work summary backfill looks the work up in AO3's search once, never openin
   assert.equal(h.maybeBackfillWorkSummary(h.item), false, "remembered for the rest of the day");
 });
 
+test("the packaged scripts never open an AO3 work for its details", () => {
+  // Opening a work with the reader's AO3 session is a visit in their AO3 History.
+  for (const name of ["background.js", "collector.js"]) {
+    const source = fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", name), "utf8");
+    assert.doesNotMatch(source, /view_adult=true/, name);
+  }
+});
+
+test("work summary backfill keeps the paragraphs of a summary from AO3's search", async () => {
+  const h = backfillHarness({ fetchImpl: okSearchResult("7700201", "First line.</p><p>Second line.") });
+  assert.equal(h.maybeBackfillWorkSummary(h.item), true);
+  await delay(1_800);
+  const broadcast = h.sent.find((m) => m && m.type === "TRACE_METADATA_BROADCAST");
+  assert.equal(broadcast.payload.item.sm, "First line.\n\nSecond line.");
+});
+
 test("work summary backfill sends nothing when AO3's search doesn't list the work", async () => {
   const h = backfillHarness({ fetchImpl: okSearchResult("1", WORK_SUMMARY) });
   assert.equal(h.maybeBackfillWorkSummary(h.item), true);

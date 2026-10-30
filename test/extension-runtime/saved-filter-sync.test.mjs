@@ -571,3 +571,33 @@ test("adopting the iPhone app's account pulls that account's saved filters", asy
   await settle();
   assert.equal(harness.syncRequests.length, 2);
 });
+
+test("runtime start removes what the retired AO3 summary fill kept", async () => {
+  const databaseFactory = new IDBFactory();
+  const database = new BrowserPrivateRecordDatabase(databaseFactory);
+  const area = new PromiseStorageArea({
+    traceAo3SummaryAttemptedV1: { accountId: "account-a", ids: ["123"] },
+    traceAo3SummaryFillV1: { queue: ["456"] },
+    traceAo3SavedFiltersClientIdV1: "device:one",
+  });
+  const controller = new SessionRuntimeController({
+    mode: "kernel",
+    runtime: { onMessage: { addListener() {} } },
+    tabs: {
+      async query() { return []; },
+      async sendMessage() { return null; },
+      async create() { return null; },
+    },
+    alarms: { async clear() { return true; } },
+    databaseFactory,
+    privateDatabase: database,
+    storageArea: area,
+    storageMode: "promise",
+    fetch: async () => new Response("{}", { status: 200 }),
+    apiBase: "https://api.example.test",
+    webOrigin: "https://example.test",
+  });
+  await controller.start();
+  const left = await area.get(["traceAo3SummaryAttemptedV1", "traceAo3SummaryFillV1", "traceAo3SavedFiltersClientIdV1"]);
+  assert.deepEqual(left, { traceAo3SavedFiltersClientIdV1: "device:one" });
+});

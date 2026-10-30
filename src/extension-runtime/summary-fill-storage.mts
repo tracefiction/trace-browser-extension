@@ -1,8 +1,7 @@
 /**
- * Storage shared by the summary fills (ffn-summary-fill.mts,
- * ao3-summary-fill.mts): a fill's session state in one storage area, and the
- * ids of stories it already tried. Each fill names its own keys and says
- * what a valid state is; nothing here knows either site.
+ * Storage for a summary fill (ffn-summary-fill.mts): its session state in one
+ * storage area, and the ids of stories it already tried. The fill names its own
+ * keys and says what a valid state is; nothing here knows the site.
  */
 
 export interface StorageAreaLike {

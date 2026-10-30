@@ -282,8 +282,6 @@ try {
     ffnSummaryFill: {
       sessionArea: extension.storage.session ?? null,
     },
-    // No ao3SummaryFill: opening a work with the reader's AO3 session is a visit
-    // in their AO3 History, so saved works are not read that way.
   });
   if (
     // A build-time constant: a build without it leaves this block and the

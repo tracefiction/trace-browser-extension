@@ -162,12 +162,6 @@ import {
   createFfnTabReader,
   type ContributionOutcome,
 } from "./ffn-summary-fill.mjs";
-import {
-  Ao3SummaryFill,
-  StoredAttempted as StoredAo3Attempted,
-  StoredFillState as StoredAo3FillState,
-  createAo3TabReader,
-} from "./ao3-summary-fill.mjs";
 import { PopupPageRelay, POPUP_PAGE_RELAY } from "./popup-page-relay.mjs";
 import { storySaveEnded, storySaveStarted } from "./story-save-activity.mjs";
 
@@ -205,14 +199,6 @@ interface RuntimeEnvironment {
    * FanFiction.net tab (ffn-summary-fill.mts). Absent: the feature is off.
    */
   readonly ffnSummaryFill?: {
-    /** `storage.session` when the browser has it; else local storage, expiring. */
-    readonly sessionArea?: StorageArea | null;
-  };
-  /**
-   * Reading missing AO3 summaries in the reader's own AO3 tab
-   * (ao3-summary-fill.mts). Absent: the feature is off.
-   */
-  readonly ao3SummaryFill?: {
     /** `storage.session` when the browser has it; else local storage, expiring. */
     readonly sessionArea?: StorageArea | null;
   };
@@ -307,7 +293,6 @@ export class SessionRuntimeController {
   readonly #finishQualification: FinishQualificationService;
   readonly #metadataContributions: MetadataContributionService;
   readonly #ffnSummaries: FfnSummaryFill | null;
-  readonly #ao3Summaries: Ao3SummaryFill | null;
   /** State kept for one account, cleared when that account signs out or another replaces it. */
   readonly #accountCleanups: (() => Promise<void>)[] = [];
   readonly #savedFilters: SavedFilterSyncService;
@@ -507,9 +492,6 @@ export class SessionRuntimeController {
     this.#ffnSummaries = environment.ffnSummaryFill === undefined || environment.mode !== "kernel"
       ? null
       : this.#createFfnSummaryFill(environment, environment.ffnSummaryFill, storage);
-    this.#ao3Summaries = environment.ao3SummaryFill === undefined || environment.mode !== "kernel"
-      ? null
-      : this.#createAo3SummaryFill(environment, environment.ao3SummaryFill, storage);
     this.#storyCommands = new StoryCommandService({
       session: this.#service,
       api: new StoryCommandApi(environment.fetch, environment.apiBase),
@@ -659,24 +641,6 @@ export class SessionRuntimeController {
     });
   }
 
-  #createAo3SummaryFill(
-    environment: RuntimeEnvironment,
-    options: NonNullable<RuntimeEnvironment["ao3SummaryFill"]>,
-    storage: BrowserStorage,
-  ): Ao3SummaryFill {
-    const shared = this.#summaryFillShared(environment, options.sessionArea ?? null, storage, "ao3");
-    return new Ao3SummaryFill({
-      clock: { now: () => Date.now() },
-      state: new StoredAo3FillState(shared.stateArea, shared.stateTtl === null ? {} : { ttlMs: shared.stateTtl }),
-      tabs: createAo3TabReader(shared.tabReader),
-      attempted: new StoredAo3Attempted(shared.attemptedArea),
-      account: shared.account,
-      contributionsEnabled: shared.contributionsEnabled,
-      listGaps: shared.listGaps,
-      contribute: shared.contribute,
-    });
-  }
-
   start(): Promise<void> {
     this.#initialization ??= this.#startOnce();
     return this.#initialization;
@@ -728,15 +692,13 @@ export class SessionRuntimeController {
     sender?: RuntimeSender,
   ): Promise<RuntimeHandleResponse> {
     const response = await this.#dispatch(message, sender);
-    // An AO3 or FanFiction.net page spoke: the reader is there, so any
-    // summary work due for that site is done now, in that tab. After the message's own work, so a save
-    // it carried is known first; never waited on.
+    // A FanFiction.net page spoke: the reader is there, so any summary work due
+    // is done now, in that tab. After the message's own work, so a save it
+    // carried is known first; never waited on.
     if (typeof sender?.tab?.id === "number") {
       const hostKind = archiveHostKindFromSender(sender);
       if (hostKind === "ffn" && this.#ffnSummaries !== null) {
         void this.#ffnSummaries.ffnPageActivity(sender.tab.id);
-      } else if (hostKind === "ao3" && this.#ao3Summaries !== null) {
-        void this.#ao3Summaries.ao3PageActivity(sender.tab.id);
       }
     }
     // An AO3 or FanFiction.net page keeps reading evidence and unconfirmed
@@ -1152,16 +1114,6 @@ export class SessionRuntimeController {
       }
       const response = await this.#firstStoryResponse(fenced.kind === "published" ? fenced.value
         : { ok: false, error: "native_import_unavailable" }, action, initiation);
-      if (
-        initiation.kind === "popup_open_tabs" &&
-        response.ok &&
-        response.state === "ready_to_open" &&
-        this.#ao3Summaries !== null
-      ) {
-        // Works from open tabs reach the Library without the summaries AO3
-        // shows only on a first chapter: the gaps are listed again soon.
-        void this.#ao3Summaries.libraryChanged();
-      }
       // The popup's ready line counts what the scan read ("Found 28 stories in 30 tabs.").
       return found && response.ok && response.state === "ready_to_open"
         ? Object.freeze({ ...response, found: Object.freeze({ ...found }) }) : response;
@@ -1402,19 +1354,16 @@ export class SessionRuntimeController {
       });
     }
     const ffn = this.#ffnSummaries;
-    const ao3 = this.#ao3Summaries;
-    if (ffn === null && ao3 === null) return this.#storyCommands.executeWithEvidence(command, observer);
+    if (ffn === null) return this.#storyCommands.executeWithEvidence(command, observer);
     const alreadyInLibrary =
       accountData?.overlay?.entries[command.workKey] !== undefined;
-    // Neither fill reads a page while a save is on its way.
-    ffn?.saveStarted();
-    ao3?.saveStarted();
+    // The fill reads no page while a save is on its way.
+    ffn.saveStarted();
     let evidence: StoryCommandEvidence;
     try {
       evidence = await this.#storyCommands.executeWithEvidence(command, observer);
     } finally {
-      ffn?.saveEnded();
-      ao3?.saveEnded();
+      ffn.saveEnded();
     }
     if (
       evidence.result.kind === "confirmed" &&
@@ -1422,8 +1371,7 @@ export class SessionRuntimeController {
       evidence.result.confirmation.summaryKnown !== true
     ) {
       // Never delays the save's own answer.
-      if (ffn !== null) void ffn.storySaved(command, alreadyInLibrary, tabId);
-      if (ao3 !== null) void ao3.storySaved(command, alreadyInLibrary);
+      void ffn.storySaved(command, alreadyInLibrary, tabId);
     }
     return evidence;
   }
@@ -1576,6 +1524,13 @@ export class SessionRuntimeController {
   }
 
   async #startOnce(): Promise<void> {
+    // What the AO3 summary fill kept in 1.0.4: the fill is gone, and its work
+    // ids shouldn't outlive it.
+    try {
+      await this.#storage.remove(["traceAo3SummaryAttemptedV1", "traceAo3SummaryFillV1"]);
+    } catch {
+      // Nothing reads these any more; a later start tries again.
+    }
     try {
       if (this.#mode === "disabled") {
         await this.#legacy.clearAll();
@@ -1759,11 +1714,6 @@ export class SessionRuntimeController {
     await this.#accountLeft();
     try {
       await this.#ffnSummaries?.clear();
-    } catch {
-      // Session-only state; it also resets whenever the account differs.
-    }
-    try {
-      await this.#ao3Summaries?.clear();
     } catch {
       // Session-only state; it also resets whenever the account differs.
     }
