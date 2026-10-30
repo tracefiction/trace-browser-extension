@@ -1526,6 +1526,20 @@ test("collectAO3Listings (ao3_listing.html): first blurb + Redivider row", () =>
   });
 });
 
+test("collectFFNStory desktop reads a one-shot, which has no Chapters: in its details, as one chapter", () => {
+  const html = loadFixture("ffn_story.html").replace(/Chapters:\s*28\s*-\s*/, "");
+  const dom = new JSDOM(html, {
+    url: "https://www.fanfiction.net/s/7038840/1/A-Chance-Encounter",
+    contentType: "text/html",
+    runScripts: "outside-only",
+  });
+  const { collectFFNStory } = createCollectorBindings(dom);
+  const item = collectFFNStory();
+
+  assert.equal(item.chn, 1);
+  assert.equal(item.cht, 1);
+});
+
 test("collectFFNStory desktop (ffn_story.html)", () => {
   const dom = domFromFixture(
     "ffn_story.html",
