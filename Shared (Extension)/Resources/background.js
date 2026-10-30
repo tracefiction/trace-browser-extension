@@ -3804,7 +3804,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     "traceWorkStatesV1",
     "traceUserPro",
     "traceLibraryCount",
-    "traceFirstSaveSeen"
+    "traceFirstSaveSeen",
+    // The AO3 summary fill, removed in 1.0.5: its work ids and local state.
+    "traceAo3SummaryAttemptedV1",
+    "traceAo3SummaryFillV1"
   ]);
   var DISABLED_LOCAL_KEYS = Object.freeze([
     ...LEGACY_ACCOUNT_KEYS,
@@ -8974,10 +8977,6 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return this.#service.executeAuthenticated(effect);
     }
     async #startOnce() {
-      try {
-        await this.#storage.remove(["traceAo3SummaryAttemptedV1", "traceAo3SummaryFillV1"]);
-      } catch {
-      }
       try {
         if (this.#mode === "disabled") {
           await this.#legacy.clearAll();

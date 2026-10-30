@@ -1524,13 +1524,6 @@ export class SessionRuntimeController {
   }
 
   async #startOnce(): Promise<void> {
-    // What the AO3 summary fill kept in 1.0.4: the fill is gone, and its work
-    // ids shouldn't outlive it.
-    try {
-      await this.#storage.remove(["traceAo3SummaryAttemptedV1", "traceAo3SummaryFillV1"]);
-    } catch {
-      // Nothing reads these any more; a later start tries again.
-    }
     try {
       if (this.#mode === "disabled") {
         await this.#legacy.clearAll();
