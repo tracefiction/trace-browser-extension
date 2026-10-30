@@ -10,17 +10,26 @@
 import { build as esbuild } from "esbuild";
 import fs from "node:fs";
 import path from "node:path";
+import sharp from "sharp";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RUNTIME = path.join(ROOT, "src", "extension-runtime");
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
 
-// TODO(owner): the published name, description and Firefox id are still to be chosen.
-const NAME = "Keep a Copy";
+// PLACEHOLDER: the published name, description and Firefox id are still to be
+// chosen. The name is also the popup's title and the top folder of every copy,
+// under Downloads.
+export const NAME = "NAME";
 const DESCRIPTION = "Keeps AO3's own download of every work you bookmark, mark for later or subscribe to, and updates it with each new chapter.";
 const FIREFOX_ID = "keep-a-copy@example.invalid";
+export const ICON_SIZES = [16, 32, 48, 128];
+const iconFile = (size) => `icon-${size}.png`;
+// 16 and 32 px have their own, simpler drawing.
+const iconSource = (size) => path.join(ROOT, "src", "keep-a-copy", size <= 32 ? "icon-small.svg" : "icon-large.svg");
 const AO3_HOSTS = ["https://archiveofourown.org/*", "https://*.archiveofourown.org/*"];
+
+const icons = (sizes) => Object.fromEntries(sizes.map((size) => [String(size), iconFile(size)]));
 
 export function keepACopyManifest(browser) {
   const manifest = {
@@ -32,7 +41,8 @@ export function keepACopyManifest(browser) {
     permissions: ["downloads", "storage", "alarms", ...(browser === "chrome" ? ["downloads.ui", "offscreen"] : [])],
     host_permissions: AO3_HOSTS,
     background: browser === "chrome" ? { service_worker: "background.js" } : { scripts: ["background.js"] },
-    action: { default_title: NAME, default_popup: "popup.html" },
+    icons: icons(ICON_SIZES),
+    action: { default_title: NAME, default_popup: "popup.html", default_icon: icons([16, 32]) },
     content_scripts: [{ matches: ["https://archiveofourown.org/*"], js: ["page.js"], run_at: "document_idle" }],
   };
   if (browser === "firefox") {
@@ -41,6 +51,13 @@ export function keepACopyManifest(browser) {
     };
   }
   return manifest;
+}
+
+/** Each size from its SVG, drawn large enough to stay sharp when scaled down. */
+export async function writeIcons(out) {
+  for (const size of ICON_SIZES) {
+    await sharp(iconSource(size), { density: 72 * Math.ceil(size / 16) }).resize(size, size).png().toFile(path.join(out, iconFile(size)));
+  }
 }
 
 async function buildFor(browser) {
@@ -60,7 +77,9 @@ async function buildFor(browser) {
     platform: "browser",
     target: ["es2022"],
     logLevel: "silent",
+    define: { __KEEP_A_COPY_FOLDER__: JSON.stringify(NAME) },
   });
+  await writeIcons(out);
   fs.copyFileSync(path.join(ROOT, "src", "keep-a-copy", "popup.html"), path.join(out, "popup.html"));
   if (browser === "chrome") fs.writeFileSync(path.join(out, "offscreen.html"), '<!doctype html>\n<meta charset="utf-8">\n<script src="offscreen.js"></script>\n');
   fs.copyFileSync(path.join(ROOT, "LICENSE"), path.join(out, "LICENSE"));

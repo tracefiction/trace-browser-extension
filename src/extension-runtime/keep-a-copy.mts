@@ -53,8 +53,18 @@ export const KEEP_A_COPY_MESSAGE = {
   view: "KEEP_A_COPY_VIEW",
   settings: "KEEP_A_COPY_SETTINGS",
   backup: "KEEP_A_COPY_BACKUP",
+  stopBackup: "KEEP_A_COPY_STOP_BACKUP",
+  resumeBackup: "KEEP_A_COPY_RESUME_BACKUP",
+  retrySkipped: "KEEP_A_COPY_RETRY_SKIPPED",
 } as const;
 export const AO3_ORIGIN = "https://archiveofourown.org";
+declare const __KEEP_A_COPY_FOLDER__: string | undefined;
+/**
+ * The top folder of every copy, under Downloads: one per build. Each build
+ * sets it (scripts/build-keep-a-copy.mjs); "NAME" is the standalone's
+ * placeholder until its name is chosen.
+ */
+export const COPY_FOLDER: string = typeof __KEEP_A_COPY_FOLDER__ === "string" ? __KEEP_A_COPY_FOLDER__ : "NAME";
 export const COPY_FORMATS = ["epub", "azw3", "mobi", "pdf", "html"] as const;
 export type CopyFormat = (typeof COPY_FORMATS)[number];
 /** No file larger than this is kept. */
@@ -268,12 +278,15 @@ export type Fetched =
 export type StopCode = "challenge" | "forbidden" | "wrong_host" | "unreadable" | "slow_down" | "save_failed";
 /** Why one work has no copy, while the rest go on. */
 export type SkipCode = "gone" | "needs_sign_in" | "no_download" | "not_a_file" | "too_large" | "http_error" | "save_failed" | "failed";
+/** Skips another try may cure. A locked work copies once the reader signs in; a hidden or deleted one has nothing to copy. */
+export const RETRYABLE_SKIPS: readonly SkipCode[] = ["not_a_file", "too_large", "http_error", "save_failed", "failed"];
 
 export type Verdict =
   | { readonly kind: "ok" }
   | { readonly kind: "skip"; readonly code: SkipCode }
   /** `network` when the request itself failed, which counts against the work. */
-  | { readonly kind: "retry"; readonly waitMs: number | null; readonly network?: true }
+  /** `own`: the wait is this extension's, not a time AO3 gave. */
+  | { readonly kind: "retry"; readonly waitMs: number | null; readonly network?: true; readonly own?: true }
   | { readonly kind: "stop"; readonly code: StopCode; readonly waitMs: number | null };
 
 const bytesText = (bytes: Uint8Array, from: number, to: number) => String.fromCharCode(...bytes.subarray(from, to));
@@ -298,7 +311,7 @@ export function looksLikeFormat(format: CopyFormat, bytes: Uint8Array): boolean 
 export function classifyAnswer(answer: Fetched, expect: CopyFormat | "page", now: number): Verdict {
   if (answer.kind === "failed") {
     if (answer.code === "too_large") return { kind: "skip", code: "too_large" };
-    return answer.code === "busy" ? { kind: "retry", waitMs: NETWORK_RETRY_MS } : { kind: "retry", waitMs: NETWORK_RETRY_MS, network: true };
+    return answer.code === "busy" ? { kind: "retry", waitMs: NETWORK_RETRY_MS, own: true } : { kind: "retry", waitMs: NETWORK_RETRY_MS, network: true, own: true };
   }
   const waitMs = retryAfterMs(answer.retryAfter, now);
   const text = answer.text ?? (answer.bytes ? new TextDecoder().decode(answer.bytes.subarray(0, 8_192)) : "");
@@ -363,7 +376,7 @@ export function safeSegment(text: string, maxBytes: number, fallback: string): s
 }
 
 /**
- * `AO3/<Fandom>/<Title> – <Author> (<work id>).<format>`, under Downloads.
+ * `<COPY_FOLDER>/<Fandom>/<Title> – <Author> (<work id>).<format>`, under Downloads.
  * The title and author give way to the length cap; ` (<work id>)`, any
  * `label` and the extension always stay.
  */
@@ -373,7 +386,7 @@ export function copyFilename(work: Pick<WorkPageRead, "workId" | "title" | "auth
   const room = MAX_NAME_BYTES - utf8.encode(tail).length;
   const author = safeSegment(work.author, Math.min(60, Math.floor(room / 3)), "Anonymous");
   const title = safeSegment(work.title, room - utf8.encode(` – ${author}`).length, "Untitled");
-  return `AO3/${fandom}/${title} – ${author}${tail}`;
+  return `${COPY_FOLDER}/${fandom}/${title} – ${author}${tail}`;
 }
 
 // --- The queue --------------------------------------------------------------------
@@ -386,6 +399,12 @@ export const MAX_ATTEMPTS = 3;
 export const SETTLE_RECHECK_MS = 2_000;
 /** A save still unfinished after this long has failed. */
 export const SETTLE_MAX_MS = 15 * 60_000;
+/** One work's page and file, 6 to 7 s apart: the pace assumed until the real one is measured. */
+export const WORK_PACE_MS = 2 * (PAGE_GAP_MS + PAGE_GAP_JITTER_MS / 2);
+/** Works finished before the real pace is believed. */
+export const PACE_MIN_WORKS = 3;
+/** A longer gap between steps (the browser closed, a stop, a Pause) starts the measure again. */
+export const PACE_GAP_MS = 5 * 60_000;
 
 export interface Copy {
   readonly downloadId: number;
@@ -422,6 +441,8 @@ export interface QueueItem {
   link?: DownloadLink;
   /** Queued by a backup: the browser's download alerts stay hidden for it. */
   batch?: true;
+  /** Queued by Try again, or by the reader signing in: it waits behind a Pause like the backup's own. */
+  retry?: true;
   /** Requests made for the step this work is on. */
   attempts?: number;
   lastFailure?: "save" | "request";
@@ -446,8 +467,23 @@ export interface ListRun {
   readonly lists: readonly ListName[];
   list: number;
   page: number;
+  /** Works on the lists so far, each once. */
   found: number;
+  /** "finished": the lists are read. A backup's queued works may still be going. */
   status: "running" | "finished";
+  /** The works already counted in `found`. */
+  seen?: string[];
+  /** The reader pressed Pause: nothing of this backup is asked for until Resume. */
+  held?: true;
+  /** Where the real pace is measured from: works left then, and the last step. */
+  pace?: { at: number; left: number; lastAt: number };
+}
+
+export interface StoppedState {
+  code: StopCode;
+  until: number;
+  /** Several tries in a row failed and AO3 gave no time to come back. */
+  unavailable?: true;
 }
 
 export interface KeepState {
@@ -458,6 +494,8 @@ export interface KeepState {
   queue: QueueItem[];
   run: ListRun | null;
   pending: PendingSave | null;
+  /** A page has shown the reader signed out since a locked work was last looked at. */
+  signedOutSeen?: true;
   pacer: {
     dueAt: number;
     window: { startedAt: number; reads: number };
@@ -466,7 +504,9 @@ export interface KeepState {
     misses: number;
     /** Saves in a row that failed (`save_failed`), counted apart so a stop names its own cause. */
     failedSaves?: number;
-    stopped: { code: StopCode; until: number } | null;
+    /** Tries in a row that failed with no time from AO3. Several make it "unavailable". */
+    failures?: number;
+    stopped: StoppedState | null;
     lastCheckAt: number;
   };
 }
@@ -523,6 +563,17 @@ export interface KeepPorts {
   quiet?(on: boolean): void;
 }
 
+export interface BackupView {
+  readonly state: "running" | "stopped";
+  /** Works handled so far, of those found on the lists so far. */
+  readonly done: number;
+  readonly total: number;
+  /** Still reading the lists: the total can grow, so no estimate yet. */
+  readonly readingLists: boolean;
+  /** Time left at the pace measured so far; null while it cannot be said (or AO3 has stopped the queue). */
+  readonly estimateMs: number | null;
+}
+
 export interface KeepView {
   readonly settings: Settings;
   readonly user: string | null;
@@ -531,7 +582,10 @@ export interface KeepView {
   readonly waiting: number;
   readonly skipped: Partial<Record<SkipCode, number>>;
   readonly run: { purpose: ListRun["purpose"]; status: ListRun["status"]; list: ListName | null; page: number; found: number } | null;
-  readonly stopped: { code: StopCode; until: number } | null;
+  readonly stopped: StoppedState | null;
+  readonly backup: BackupView | null;
+  /** When the last copy was saved. */
+  readonly lastCopyAt: number | null;
 }
 
 function isState(value: unknown): value is KeepState {
@@ -540,6 +594,13 @@ function isState(value: unknown): value is KeepState {
 }
 
 const backoff = (attempts: number) => Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.max(0, attempts - 1));
+const batchLeft = (state: KeepState) => state.queue.filter((queued) => queued.batch).length;
+const backupOf = (state: KeepState) => (state.run?.purpose === "backup" ? state.run : null);
+/** A backup still going, by reading its lists or copying what they found. */
+function backupBusy(state: KeepState): boolean {
+  const run = backupOf(state);
+  return run !== null && (run.status === "running" || batchLeft(state) > 0);
+}
 
 export class KeepACopy {
   #state: KeepState | null = null;
@@ -575,7 +636,12 @@ export class KeepACopy {
     const skipped: Partial<Record<SkipCode, number>> = {};
     for (const work of works) if (work.skipped) skipped[work.skipped] = (skipped[work.skipped] ?? 0) + 1;
     const run = state.run;
-    const stopped = state.pacer.stopped;
+    const now = this.ports.clock.now();
+    const pacer = state.pacer;
+    // Between its tries, still unavailable: only an answer from AO3 ends it.
+    const stopped: StoppedState | null = pacer.stopped && pacer.stopped.until > now ? { ...pacer.stopped }
+      : (pacer.failures ?? 0) >= MAX_CONSECUTIVE_RETRIES ? { code: "slow_down", until: pacer.dueAt, unavailable: true }
+      : null;
     return {
       settings: structuredClone(state.settings),
       user: state.user,
@@ -584,7 +650,24 @@ export class KeepACopy {
       waiting: state.queue.length,
       skipped,
       run: run ? { purpose: run.purpose, status: run.status, list: run.lists[run.list] ?? null, page: run.page, found: run.found } : null,
-      stopped: stopped && stopped.until > this.ports.clock.now() ? { ...stopped } : null,
+      stopped,
+      backup: this.#backupView(state, stopped !== null, now),
+      lastCopyAt: works.reduce<number | null>((last, work) => (work.copy && work.copy.savedAt > (last ?? 0) ? work.copy.savedAt : last), null),
+    };
+  }
+
+  #backupView(state: KeepState, siteStopped: boolean, now: number): BackupView | null {
+    const run = backupOf(state);
+    if (!run || !backupBusy(state)) return null;
+    const left = batchLeft(state);
+    const readingLists = run.status === "running";
+    const measured = run.pace && run.pace.left - left >= PACE_MIN_WORKS ? (now - run.pace.at) / (run.pace.left - left) : null;
+    return {
+      state: run.held ? "stopped" : "running",
+      done: Math.max(0, run.found - left),
+      total: run.found,
+      readingLists,
+      estimateMs: readingLists || siteStopped || run.held ? null : left * (measured ?? WORK_PACE_MS),
     };
   }
 
@@ -604,8 +687,32 @@ export class KeepACopy {
   /** The AO3 name the reader is signed in as, from the page they are on. */
   noteUser(user: string | null): Promise<void> {
     return this.#serial((state) => {
-      if (user && AO3_USERNAME_PATTERN.test(user)) state.user = user;
+      if (user && AO3_USERNAME_PATTERN.test(user)) {
+        state.user = user;
+        // Signed in again: the locked works copy on their own, at the queue's pace.
+        if (state.signedOutSeen && state.settings.enabled) {
+          delete state.signedOutSeen;
+          this.#requeue(state, ["needs_sign_in"]);
+        }
+      } else if (user === null) {
+        state.signedOutSeen = true;
+      }
     });
+  }
+
+  /** Try again: back in the queue, at its pace and under its stops. */
+  retrySkipped(): Promise<void> {
+    return this.#serial((state) => {
+      if (state.settings.enabled) this.#requeue(state, RETRYABLE_SKIPS);
+    });
+  }
+
+  #requeue(state: KeepState, codes: readonly SkipCode[]): void {
+    for (const { workId, skipped } of Object.values(state.works)) {
+      if (!skipped || !codes.includes(skipped)) continue;
+      this.#keep(state, workId).skipped = null;
+      this.#enqueue(state, { workId, pace: "reader", retry: true });
+    }
   }
 
   /** A work page the reader has open, with what they just did on it. */
@@ -631,9 +738,27 @@ export class KeepACopy {
   startBackup(): Promise<"started" | "running" | "no_user"> {
     return this.#serial((state) => {
       if (!state.user) return "no_user";
-      if (state.run?.status === "running" && state.run.purpose === "backup") return "running";
+      if (backupBusy(state)) return "running";
       state.run = { purpose: "backup", user: state.user, lists: BACKUP_LISTS, list: 0, page: 1, found: 0, status: "running" };
       return "started";
+    });
+  }
+
+  /** The reader's Pause: a save under way finishes, and nothing more of the backup is asked for. */
+  stopBackup(): Promise<void> {
+    return this.#serial((state) => {
+      const run = backupOf(state);
+      if (run && backupBusy(state)) run.held = true;
+      this.#setQuiet(this.#batchRunning(state));
+    });
+  }
+
+  /** Resume: picks up where it stopped, at the same pace and under the same stops. */
+  resumeBackup(): Promise<void> {
+    return this.#serial((state) => {
+      const run = backupOf(state);
+      if (run) delete run.held;
+      this.#setQuiet(this.#batchRunning(state));
     });
   }
 
@@ -682,6 +807,11 @@ export class KeepACopy {
     // A newer link, or the reader's own pace, wins over what was queued.
     if (item.link) queued.link = item.link;
     if (item.pace === "reader") queued.pace = "reader";
+    // The reader asked for this one themselves: it no longer waits with the backup.
+    if (item.pace === "reader" && !item.batch && !item.retry) {
+      delete queued.batch;
+      delete queued.retry;
+    }
   }
 
   #drop(state: KeepState, workId: string): void {
@@ -691,6 +821,7 @@ export class KeepACopy {
   #batchRunning(state: KeepState): boolean {
     const now = this.ports.clock.now();
     if (!state.settings.enabled || (state.pacer.stopped && state.pacer.stopped.until > now)) return false;
+    if (backupOf(state)?.held) return false;
     return (state.run?.purpose === "backup" && state.run.status === "running") || state.queue.some((queued) => queued.batch);
   }
 
@@ -709,17 +840,32 @@ export class KeepACopy {
       if (now < pacer.stopped.until) return pacer.stopped.until - now;
       pacer.stopped = null;
     }
-    if (state.run?.status !== "running" && state.settings.weeklyCheck && state.user && now - pacer.lastCheckAt >= CHECK_EVERY_MS) {
+    const backup = backupOf(state);
+    // Nothing of it left to hold: what was held with it goes on.
+    if (backup?.held && !backupBusy(state)) delete backup.held;
+    if (!backupBusy(state) && state.run?.status !== "running" && state.settings.weeklyCheck && state.user && now - pacer.lastCheckAt >= CHECK_EVERY_MS) {
       state.run = { purpose: "check", user: state.user, lists: CHECK_LISTS, list: 0, page: 1, found: 0, status: "running" };
     }
-    const running = state.run?.status === "running" ? state.run : null;
-    const item = state.queue.find((queued) => queued.pace === "reader") ?? (running ? null : state.queue[0] ?? null);
+    const held = backupOf(state)?.held === true;
+    const running = state.run?.status === "running" && !held ? state.run : null;
+    // A backup reads its lists first, so its total is known before its works go.
+    const listing = backupOf(state)?.status === "running";
+    const waits = (queued: QueueItem) => (queued.batch ? held || listing : held && queued.retry === true);
+    const item = state.queue.find((queued) => queued.pace === "reader" && !waits(queued)) ?? (running ? null : state.queue.find((queued) => !waits(queued)) ?? null);
     const pace: Pace | null = item ? item.pace : running ? (running.purpose === "backup" ? "reader" : "check") : null;
-    if (!pace) return null;
+    if (!pace) {
+      pacer.failures = 0;
+      return null;
+    }
     if (now - pacer.window.startedAt >= WINDOW_MS) pacer.window = { startedAt: now, reads: 0 };
     if (pace === "check" && pacer.window.reads >= WINDOW_MAX_READS) return pacer.window.startedAt + WINDOW_MS - now;
     if (now < pacer.dueAt) return pacer.dueAt - now;
 
+    if (item?.batch && backup) {
+      const left = batchLeft(state);
+      if (!backup.pace || now - backup.pace.lastAt > PACE_GAP_MS || left > backup.pace.left) backup.pace = { at: now, left, lastAt: now };
+      else backup.pace.lastAt = now;
+    }
     if (item && (item.attempts ?? 0) >= MAX_ATTEMPTS) {
       this.#keep(state, item.workId).skipped = item.lastFailure === "save" ? "save_failed" : "failed";
       this.#drop(state, item.workId);
@@ -742,10 +888,17 @@ export class KeepACopy {
     // AO3 refusing or slowing everyone down is not this work's fault.
     const siteWide = (verdict.kind === "stop" && verdict.code !== "unreadable" && verdict.code !== "save_failed") || (verdict.kind === "retry" && !verdict.network);
     if (item && siteWide) item.attempts = Math.max(0, (item.attempts ?? 1) - 1);
+    const failed = verdict.kind === "retry" || (verdict.kind === "stop" && verdict.code !== "save_failed");
+    const timeFromAO3 = failed && verdict.waitMs !== null && !(verdict.kind === "retry" && verdict.own);
+    if (!failed) {
+      if (verdict.kind !== "stop") pacer.failures = 0;
+    } else {
+      pacer.failures = timeFromAO3 ? 0 : (pacer.failures ?? 0) + 1;
+    }
     if (verdict.kind === "retry") {
       pacer.retries += 1;
       if (pacer.retries >= MAX_CONSECUTIVE_RETRIES) {
-        this.#stop(state, "slow_down", verdict.waitMs, after);
+        this.#stop(state, "slow_down", timeFromAO3 ? verdict.waitMs : null, after);
       } else {
         pacer.dueAt = after + Math.min(STOP_MAX_MS, Math.max(backoff(pacer.retries), verdict.waitMs ?? 0));
       }
@@ -762,7 +915,9 @@ export class KeepACopy {
     state.pacer.retries = 0;
     state.pacer.misses = 0;
     state.pacer.failedSaves = 0;
-    state.pacer.stopped = { code, until: now + Math.min(STOP_MAX_MS, Math.max(STOP_MS, waitMs ?? 0)) };
+    // Never on one failure: one check page or refusal with no time is a pause, at this queue's own hour.
+    const unavailable = code === "unreadable" || (waitMs === null && code !== "save_failed" && (state.pacer.failures ?? 0) >= MAX_CONSECUTIVE_RETRIES);
+    state.pacer.stopped = { code, until: now + Math.min(STOP_MAX_MS, Math.max(STOP_MS, waitMs ?? 0)), ...(unavailable ? { unavailable: true as const } : {}) };
   }
 
   /**
@@ -915,7 +1070,14 @@ export class KeepACopy {
         this.#enqueue(state, { workId: listed.workId, pace: "check" });
       }
     }
-    run.found += read.works.length;
+    if (run.purpose === "backup") {
+      const seen = new Set(run.seen ?? []);
+      for (const listed of read.works) seen.add(listed.workId);
+      run.seen = [...seen];
+      run.found = seen.size;
+    } else {
+      run.found += read.works.length;
+    }
     if (read.next && run.page < MAX_LIST_PAGES) {
       run.page += 1;
     } else {

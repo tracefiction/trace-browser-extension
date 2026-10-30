@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { PAGE_GAP_MS, RETRY_BASE_MS } from "../../.trace-build/extension-runtime/ao3-history-import.mjs";
 import {
   AO3_ORIGIN,
   CHECK_EVERY_MS,
+  COPY_FOLDER,
   KeepACopy,
   classifyAnswer,
   copyFilename,
@@ -16,6 +20,10 @@ import {
   readWorkPage,
   MAX_ATTEMPTS,
   MAX_NAME_BYTES,
+  PACE_GAP_MS,
+  PACE_MIN_WORKS,
+  RETRYABLE_SKIPS,
+  WORK_PACE_MS,
   SETTLE_MAX_MS,
   STOP_MAX_MS,
   STOP_MS,
@@ -23,7 +31,7 @@ import {
 } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
 import { CLAIM_MS, fromOffscreenAnswer, offscreenFetcher, toOffscreenAnswer } from "../../.trace-build/extension-runtime/keep-a-copy-fetch.mjs";
 import { downloadPorts, isOurFile, offscreenKeeper, ownDownload } from "../../.trace-build/extension-runtime/keep-a-copy-runtime.mjs";
-import { keepACopyManifest } from "../../scripts/build-keep-a-copy.mjs";
+import { ICON_SIZES, NAME, keepACopyManifest, writeIcons } from "../../scripts/build-keep-a-copy.mjs";
 
 // Invented works and people throughout, in the markup of AO3's pages, not a capture.
 const USER = "Synthetic_Reader";
@@ -238,7 +246,7 @@ test("waits on 429, 445 and the front ends' 5xx; skips gone works and sign-in pa
 
 test("builds file names that are safe everywhere", () => {
   assert.equal(copyFilename({ workId: "123", title: "Lanterns: A/B?", author: "Quill", fandom: "Invented <Lanterns>" }, "epub"),
-    "AO3/Invented -Lanterns-/Lanterns- A-B- – Quill (123).epub");
+    `${COPY_FOLDER}/Invented -Lanterns-/Lanterns- A-B- – Quill (123).epub`);
   assert.equal(safeSegment("CON", 10, "x"), "_CON");
   assert.equal(safeSegment("con.txt", 10, "x"), "_con.txt");
   assert.equal(safeSegment("Tide\u200b\u202eRev\u0007", 20, "x"), "TideRev");
@@ -250,7 +258,7 @@ test("builds file names that are safe everywhere", () => {
   const name = long.split("/").at(-1);
   assert.ok(new TextEncoder().encode(name).length <= MAX_NAME_BYTES);
   assert.match(name, / \(123456789\) \(updated 2026-10-29 1000\)\.epub$/);
-  assert.equal(copyFilename({ workId: "1", title: "T", author: "A", fandom: "F" }, "pdf", "updated 2026-10-29 1000"), "AO3/F/T – A (1) (updated 2026-10-29 1000).pdf");
+  assert.equal(copyFilename({ workId: "1", title: "T", author: "A", fandom: "F" }, "pdf", "updated 2026-10-29 1000"), `${COPY_FOLDER}/F/T – A (1) (updated 2026-10-29 1000).pdf`);
 });
 
 // --- The queue --------------------------------------------------------------------------
@@ -261,7 +269,7 @@ test("a bookmark keeps the work: one file, from the page's own link", async () =
   await box.drain();
   assert.deepEqual(box.requests, [epubLink("123")]);
   assert.equal(box.saved.length, 1);
-  assert.equal(box.saved[0].filename, "AO3/Invented Lanterns/Invented work 123 – Synthetic_Quill (123).epub");
+  assert.equal(box.saved[0].filename, `${COPY_FOLDER}/Invented Lanterns/Invented work 123 – Synthetic_Quill (123).epub`);
   // The same version again asks AO3 for nothing.
   await box.engine.notePage(readWorkPage(workPage("123")), "visit");
   await box.drain();
@@ -741,10 +749,13 @@ test("a locked work found on a list is copied only after its page is read, in th
   await box.engine.tick();
   assert.equal(box.stored.works["8"].restricted, true);
   assert.equal(box.stored.queue[0].link, undefined);
-  box.now = box.stored.pacer.dueAt;
-  await box.engine.tick();
+  // The lists first, then the work.
+  for (let i = 0; i < 3; i += 1) {
+    box.now = box.stored.pacer.dueAt;
+    await box.engine.tick();
+  }
   // Page and file in one step: the link is never stored.
-  assert.deepEqual(box.requests.slice(1), [workURL("8"), epubLink("8")]);
+  assert.deepEqual(box.requests.slice(3), [workURL("8"), epubLink("8")]);
   await box.drain();
   assert.equal(box.saved.length, 1);
   assert.equal(box.stored.works["8"].copy.updatedAt, "1761700000");
@@ -881,4 +892,309 @@ test("a copy keeps the URL it was saved from, and a renamed copy's old file is a
   await box.engine.notePage(readWorkPage(workPage("1", { updatedAt: "2", title: "Renamed" })), "visit");
   await box.drain();
   assert.deepEqual(removed, [[1, box.saved[0].handle]]);
+});
+
+test("the standalone's icons: every size, the two small ones its own drawing, in the manifest and the toolbar", async () => {
+  const chrome = keepACopyManifest("chrome");
+  assert.deepEqual(Object.keys(chrome.icons), ["16", "32", "48", "128"]);
+  assert.deepEqual(Object.keys(chrome.action.default_icon), ["16", "32"]);
+  assert.deepEqual(keepACopyManifest("firefox").icons, chrome.icons);
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), "keep-a-copy-icons-"));
+  try {
+    await writeIcons(out);
+    for (const size of ICON_SIZES) {
+      const png = fs.readFileSync(path.join(out, chrome.icons[size]));
+      assert.equal(png.readUInt32BE(16), size);
+      assert.equal(png.readUInt32BE(20), size);
+    }
+  } finally {
+    fs.rmSync(out, { recursive: true, force: true });
+  }
+  const svg = (name) => fs.readFileSync(new URL(`../../src/keep-a-copy/${name}`, import.meta.url), "utf8");
+  assert.match(svg("icon-small.svg"), /viewBox="0 0 16 16"/);
+  assert.match(svg("icon-large.svg"), /viewBox="0 0 128 128"/);
+});
+
+test("copies go in the one folder this build names", () => {
+  assert.equal(NAME, COPY_FOLDER);
+  const name = copyFilename({ workId: "1", title: "T", author: "A", fandom: "F" }, "epub");
+  assert.equal(name, `${COPY_FOLDER}/F/T – A (1).epub`);
+  assert.equal(name.startsWith("AO3/"), false);
+});
+
+// --- A backup in the popup -------------------------------------------------------------
+
+/** Three lists: `bookmarks` and `later` as ids, each with a page and a file. */
+function backupBox({ bookmarks = ["1", "2"], later = [], subscriptions = [], extra = {} } = {}) {
+  const answers = {
+    [listPageURL(USER, "bookmarks", 1)]: html(listPageURL(USER, "bookmarks", 1), listPage(bookmarks)),
+    [listPageURL(USER, "later", 1)]: html(listPageURL(USER, "later", 1), listPage(later, { kind: "reading" })),
+    [listPageURL(USER, "subscriptions", 1)]: html(listPageURL(USER, "subscriptions", 1), subscriptions.map((id) => `<dl><dt><a href="/works/${id}">x</a></dt></dl>`).join("")),
+  };
+  for (const id of new Set([...bookmarks, ...later, ...subscriptions])) {
+    answers[workURL(id)] = html(workURL(id), workPage(id));
+    answers[epubLink(id)] = file(epubLink(id), epub());
+  }
+  const box = harness({ ...answers, ...extra });
+  return box;
+}
+
+const step = async (box, count = 1) => {
+  for (let i = 0; i < count; i += 1) {
+    const wait = await box.engine.tick();
+    if (wait === null) return;
+    box.now += wait;
+  }
+};
+
+test("a backup reads all its lists first, so its total is known, and counts a work on two lists once", async () => {
+  const box = backupBox({ bookmarks: ["1", "2"], later: ["2", "3"], subscriptions: ["3"] });
+  await box.engine.noteUser(USER);
+  await box.engine.startBackup();
+  await step(box, 2);
+  let { backup } = await box.engine.view();
+  assert.equal(backup.readingLists, true);
+  assert.equal(backup.estimateMs, null);
+  await step(box, 1);
+  assert.deepEqual(box.requests, [listPageURL(USER, "bookmarks", 1), listPageURL(USER, "later", 1), listPageURL(USER, "subscriptions", 1)]);
+  ({ backup } = await box.engine.view());
+  assert.deepEqual({ state: backup.state, done: backup.done, total: backup.total, readingLists: backup.readingLists }, { state: "running", done: 0, total: 3, readingLists: false });
+  assert.equal(backup.estimateMs, 3 * WORK_PACE_MS);
+  await box.drain();
+  assert.equal((await box.engine.view()).backup, null);
+  assert.equal(box.saved.length, 3);
+});
+
+test("the estimate comes from the real pace, and a long gap starts the measure again", async () => {
+  const ids = Array.from({ length: 8 }, (_, i) => String(i + 1));
+  const box = backupBox({ bookmarks: ids });
+  await box.engine.noteUser(USER);
+  await box.engine.startBackup();
+  await step(box, 3);
+  const finishWork = async () => {
+    const before = box.stored.queue.length;
+    for (let i = 0; i < 12 && box.stored.queue.length === before; i += 1) await step(box);
+  };
+  for (let i = 0; i < PACE_MIN_WORKS; i += 1) {
+    await finishWork();
+    box.now += 60_000;
+  }
+  const { backup } = await box.engine.view();
+  assert.equal(backup.done, PACE_MIN_WORKS);
+  assert.ok(backup.estimateMs > (ids.length - PACE_MIN_WORKS) * 60_000, "measured, not assumed");
+  // The browser closed overnight: not counted as pace.
+  box.now += PACE_GAP_MS * 100;
+  await finishWork();
+  const after = await box.engine.view();
+  assert.equal(after.backup.estimateMs, after.backup.total === after.backup.done ? 0 : (ids.length - after.backup.done) * WORK_PACE_MS);
+});
+
+test("Pause stops the backup, a work the reader asks for still goes, and Resume picks up where it stopped", async () => {
+  const box = backupBox({ bookmarks: ["1", "2", "3"], extra: {
+    [workURL("9")]: html(workURL("9"), workPage("9")),
+    [epubLink("9")]: file(epubLink("9"), epub()),
+  } });
+  await box.engine.noteUser(USER);
+  await box.engine.startBackup();
+  await step(box, 3);
+  const before = box.requests.length;
+  await box.engine.stopBackup();
+  let view = await box.engine.view();
+  assert.equal(view.backup.state, "stopped");
+  assert.equal(view.backup.estimateMs, null);
+  box.now += 3_600_000;
+  assert.equal(await box.engine.tick(), null);
+  assert.equal(box.requests.length, before);
+  assert.equal(box.quiet.at(-1), false);
+
+  await box.engine.noteWork("9", "bookmark");
+  await box.drain();
+  assert.deepEqual(box.requests.slice(before), [workURL("9"), epubLink("9")]);
+  assert.equal((await box.engine.view()).backup.state, "stopped");
+
+  await box.engine.resumeBackup();
+  view = await box.engine.view();
+  assert.equal(view.backup.state, "running");
+  assert.equal(view.backup.done, 0);
+  await box.drain();
+  assert.equal(box.saved.length, 4);
+  assert.equal((await box.engine.view()).backup, null);
+});
+
+test("Pause while the lists are being read holds the next page too", async () => {
+  const box = backupBox();
+  await box.engine.noteUser(USER);
+  await box.engine.startBackup();
+  await step(box);
+  await box.engine.stopBackup();
+  box.now += 3_600_000;
+  assert.equal(await box.engine.tick(), null);
+  assert.equal(box.requests.length, 1);
+  await box.engine.resumeBackup();
+  await box.drain();
+  assert.equal(box.saved.length, 2);
+});
+
+// --- Skipped works ----------------------------------------------------------------------
+
+test("Try again goes back through the queue: its pace, its stops and a Pause all hold", async () => {
+  let fixed = false;
+  const box = backupBox({ bookmarks: ["1", "2"], extra: {
+    [epubLink("1")]: () => (fixed ? file(epubLink("1"), epub()) : html(epubLink("1"), "<html>nope</html>")),
+    [epubLink("2")]: () => (fixed ? file(epubLink("2"), epub()) : html(epubLink("2"), "<html>nope</html>")),
+  } });
+  await box.engine.noteUser(USER);
+  await box.engine.startBackup();
+  await box.drain();
+  assert.deepEqual((await box.engine.view()).skipped, { not_a_file: 2 });
+  fixed = true;
+
+  // The pace: nothing goes before it is due.
+  box.stored.pacer.dueAt = box.now + 5_000;
+  const engine = new KeepACopy(box.ports);
+  box.engine = engine;
+  await engine.retrySkipped();
+  assert.deepEqual((await engine.view()).skipped, {});
+  const asked = box.requests.length;
+  assert.equal(await engine.tick(), 5_000);
+  assert.equal(box.requests.length, asked);
+
+  // A stop: nothing goes until it is over.
+  box.now += 5_000;
+  const stopped = box.stored;
+  stopped.pacer.stopped = { code: "challenge", until: box.now + 1_000 };
+  box.engine = new KeepACopy(box.ports);
+  assert.equal(await box.engine.tick(), 1_000);
+  assert.equal(box.requests.length, asked);
+  box.now += 1_000;
+
+  await box.drain();
+  assert.equal(box.saved.length, 2);
+  assert.deepEqual((await box.engine.view()).skipped, {});
+});
+
+test("Try again waits behind a Pause, and a file that still fails counts toward a stop", async () => {
+  const box = backupBox({ bookmarks: ["1", "2", "3"], extra: Object.fromEntries(["1", "2", "3"].map((id) => [epubLink(id), html(epubLink(id), "<html>nope</html>")])) });
+  await box.engine.noteUser(USER);
+  await box.engine.startBackup();
+  // Lists, then both failing works: page and file each.
+  await step(box, 7);
+  assert.deepEqual((await box.engine.view()).skipped, { not_a_file: 2 });
+  await box.engine.stopBackup();
+  await box.engine.retrySkipped();
+  const asked = box.requests.length;
+  box.now += 3_600_000;
+  assert.equal(await box.engine.tick(), null);
+  assert.equal(box.requests.length, asked);
+  await box.engine.resumeBackup();
+  for (let i = 0; i < 6 && !box.stored.pacer.stopped; i += 1) box.now += await box.engine.tick();
+  assert.equal(box.stored.pacer.stopped.code, "unreadable");
+  assert.ok(RETRYABLE_SKIPS.includes("not_a_file") && !RETRYABLE_SKIPS.includes("gone") && !RETRYABLE_SKIPS.includes("needs_sign_in"));
+});
+
+test("locked works copy on their own once a page shows the reader signed in again, at the queue's pace", async () => {
+  let signedIn = false;
+  const box = harness({
+    [workURL("8")]: () => html(workURL("8"), workPage("8", { restricted: true, signedIn })),
+    [epubLink("8")]: file(epubLink("8"), epub()),
+  });
+  await box.engine.noteWork("8", "bookmark");
+  await box.drain();
+  assert.deepEqual((await box.engine.view()).skipped, { needs_sign_in: 1 });
+  // Signed in all along: nothing changed, nothing is asked again.
+  await box.engine.noteUser(USER);
+  assert.equal(await box.engine.tick(), null);
+  const asked = box.requests.length;
+  await box.engine.noteUser(null);
+  assert.equal(await box.engine.tick(), null);
+  signedIn = true;
+  await box.engine.noteUser(USER);
+  assert.deepEqual((await box.engine.view()).skipped, {});
+  assert.equal(box.requests.length, asked);
+  await box.drain();
+  assert.equal(box.saved.length, 1);
+});
+
+// --- Paused, or AO3 not available --------------------------------------------------------
+
+test("AO3 giving a time is a pause, whatever failed", async () => {
+  const box = harness({ [workURL("1")]: html(workURL("1"), "Retry later", 429, { retryAfter: "3600" }) });
+  await box.engine.noteWork("1", "bookmark");
+  for (let i = 0; i < 3; i += 1) {
+    box.now = box.stored.pacer.dueAt;
+    await box.engine.tick();
+  }
+  const { stopped } = await box.engine.view();
+  assert.equal(stopped.code, "slow_down");
+  assert.equal(stopped.unavailable, undefined);
+  assert.equal(stopped.until, box.stored.pacer.stopped.until);
+});
+
+test("one failure with no time is never unavailable", async () => {
+  const box = harness({ [workURL("1")]: html(workURL("1"), "refused", 403) });
+  await box.engine.noteWork("1", "bookmark");
+  await box.engine.tick();
+  const { stopped } = await box.engine.view();
+  assert.equal(stopped.code, "forbidden");
+  assert.equal(stopped.unavailable, undefined);
+  assert.equal(stopped.until, NOW + STOP_MS);
+});
+
+test("repeated failure with no time is unavailable, the queue keeps trying politely, and an answer ends it", async () => {
+  let down = true;
+  const box = harness({
+    [workURL("1")]: () => (down ? { kind: "failed", code: "network" } : html(workURL("1"), workPage("1"))),
+    [workURL("2")]: () => (down ? html(workURL("2"), "Bad gateway", 502) : html(workURL("2"), workPage("2"))),
+    [epubLink("2")]: file(epubLink("2"), epub()),
+  });
+  await box.engine.noteWork("2", "bookmark");
+  await step(box);
+  assert.equal((await box.engine.view()).stopped, null, "never on one");
+  await step(box);
+  assert.equal((await box.engine.view()).stopped, null);
+  await step(box);
+  let view = await box.engine.view();
+  assert.equal(view.stopped.unavailable, true);
+  assert.equal(view.backup, null);
+  assert.ok(box.stored.pacer.stopped.until >= box.now);
+  // Tries again, and between tries it still says so.
+  box.now = box.stored.pacer.stopped.until;
+  await box.engine.tick();
+  view = await box.engine.view();
+  assert.equal(view.stopped.unavailable, true);
+  down = false;
+  await box.drain();
+  view = await box.engine.view();
+  assert.equal(view.stopped, null);
+  assert.equal(box.saved.length, 1);
+  assert.equal(box.stored.pacer.failures, 0);
+});
+
+test("a run of works that cannot be read is unavailable; files that cannot be saved are not", async () => {
+  const unreadable = harness(Object.fromEntries(["1", "2", "3"].map((id) => [workURL(id), html(workURL(id), "<html></html>")])));
+  for (const id of ["1", "2", "3"]) await unreadable.engine.noteWork(id, "bookmark");
+  for (let i = 0; i < 6 && !unreadable.stored?.pacer.stopped; i += 1) {
+    unreadable.now = unreadable.stored.pacer.dueAt;
+    await unreadable.engine.tick();
+  }
+  assert.equal((await unreadable.engine.view()).stopped.unavailable, true);
+
+  const full = harness(Object.fromEntries(["1", "2", "3"].map((id) => [epubLink(id), file(epubLink(id), epub())])));
+  full.ports.save = async () => { throw new Error("disk full"); };
+  for (const id of ["1", "2", "3"]) await full.engine.notePage(readWorkPage(workPage(id)), "bookmark");
+  for (let i = 0; i < 12 && !full.stored?.pacer.stopped; i += 1) {
+    full.now = full.stored.pacer.dueAt;
+    await full.engine.tick();
+  }
+  const { stopped } = await full.engine.view();
+  assert.equal(stopped.code, "save_failed");
+  assert.equal(stopped.unavailable, undefined);
+});
+
+test("the view says when the last copy was saved", async () => {
+  const box = harness({ [workURL("1")]: html(workURL("1"), workPage("1")), [epubLink("1")]: file(epubLink("1"), epub()) });
+  assert.equal((await box.engine.view()).lastCopyAt, null);
+  await box.engine.noteWork("1", "bookmark");
+  await box.drain();
+  assert.equal((await box.engine.view()).lastCopyAt, box.stored.works["1"].copy.savedAt);
 });

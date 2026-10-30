@@ -259,6 +259,12 @@ export function installKeepACopy(extension: Extension): KeepACopy {
         const started = await engine.startBackup();
         void run();
         return started;
+      } else if (type === KEEP_A_COPY_MESSAGE.stopBackup) {
+        await engine.stopBackup();
+      } else if (type === KEEP_A_COPY_MESSAGE.resumeBackup) {
+        await engine.resumeBackup();
+      } else if (type === KEEP_A_COPY_MESSAGE.retrySkipped) {
+        await engine.retrySkipped();
       } else if (type !== KEEP_A_COPY_MESSAGE.view) {
         return null;
       }
