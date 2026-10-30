@@ -142,7 +142,7 @@ with no answer). The app must answer a repeat the same way:
 `partBytes` is 262,144 (256 KiB); `partCount` is `ceil(byteLength / partBytes)`,
 at least 1. A part's base64 is at most 349,528 characters, so every message
 stays under the app's 512 KiB inbox. `sha256` is the lowercase hex SHA-256 of
-the whole file. `fileName` is the standalone extension's name,
+the whole file. `fileName` is the name the queue gives a copy,
 `Trace/<Fandom>/<Title> – <Author> (<work id>).<format>`; the app may use its own
 layout. `transferId` is a lowercase UUID.
 
