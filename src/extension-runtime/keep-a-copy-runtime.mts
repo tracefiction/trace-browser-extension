@@ -249,7 +249,8 @@ export function installKeepACopy(extension: Extension): KeepACopy {
         const { trigger, user, html, workId } = message as { trigger?: unknown; user?: unknown; html?: unknown; workId?: unknown };
         const from = sender.url ? new URL(sender.url) : null;
         if (from?.protocol !== "https:" || from.hostname !== "archiveofourown.org" || !TRIGGERS.includes(trigger as Trigger)) return null;
-        await engine.noteUser(typeof user === "string" ? user : null);
+        // Null only when the page shows the reader signed out; absent when it does not say.
+        if (typeof user === "string" || user === null) await engine.noteUser(user);
         const page = typeof html === "string" ? readWorkPage(html) : null;
         if (page && (typeof workId !== "string" || page.workId === workId)) await engine.notePage(page, trigger as Trigger | "visit");
         else if (!page && typeof workId === "string" && trigger !== "visit") await engine.noteWork(workId, trigger as Trigger);

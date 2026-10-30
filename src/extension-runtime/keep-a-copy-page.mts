@@ -17,9 +17,15 @@ const scope = globalThis as unknown as {
 };
 const runtime = (scope.browser ?? scope.chrome)?.runtime;
 
-function signedInUser(): string | null {
-  const href = document.querySelector<HTMLAnchorElement>('#greeting a[href^="/users/"]')?.getAttribute("href") ?? "";
-  return /^\/users\/([A-Za-z0-9_]{1,40})(?:\/|$)/.exec(href)?.[1] ?? null;
+/**
+ * The name the reader is signed in as; null only when the page shows AO3's
+ * login link; undefined when it says neither, as a 429 or a check page does.
+ */
+export function signedInUser(page: Pick<Document, "querySelector">): string | null | undefined {
+  const href = page.querySelector('#greeting a[href^="/users/"]')?.getAttribute("href") ?? "";
+  const name = /^\/users\/([A-Za-z0-9_]{1,40})(?:\/|$)/.exec(href)?.[1];
+  if (name) return name;
+  return page.querySelector('#login-dropdown, #header a[href^="/users/login"]') ? null : undefined;
 }
 
 // A work's own page, in a collection or not, and the pages of its chapters and bookmarks.
@@ -34,7 +40,7 @@ function workParts(): string {
 
 function tell(trigger: PageTrigger): void {
   const workId = WORK_PATH.exec(location.pathname)?.[1];
-  void runtime?.sendMessage({ type: KEEP_A_COPY_MESSAGE.page, trigger, user: signedInUser(), html: workParts(), ...(workId ? { workId } : {}) }).catch(() => undefined);
+  void runtime?.sendMessage({ type: KEEP_A_COPY_MESSAGE.page, trigger, user: signedInUser(document), html: workParts(), ...(workId ? { workId } : {}) }).catch(() => undefined);
 }
 
 /** What a form on the work's page does, from where it posts. */

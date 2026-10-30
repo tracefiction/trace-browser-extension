@@ -119,6 +119,8 @@ function render(view: PopupView): void {
     show("noticePause", !stopped.unavailable);
     show("noticeClock", stopped.unavailable === true);
     byId("noticeText").textContent = stopped.code === "save_failed" ? "Several files in a row could not be saved (is the disk full?)."
+      : stopped.code === "signed_out" ? "Sign in to AO3 to carry on backing up your lists."
+      : stopped.code === "unreadable" ? "AO3 couldn't make the file"
       : stopped.unavailable ? "AO3 isn't available right now. Copies carry on when it's back."
       : `AO3 asked to slow down. Resuming around ${clock(stopped.until)}.`;
   }

@@ -174,6 +174,16 @@ test("AO3 pausing a backup: the resume time takes the estimate's place", async (
   box.done();
 });
 
+test("signed out mid-backup, and works that could not be read, say so and never blame AO3 being down", async () => {
+  let box = await open({ ...VIEW, backup: { ...running, estimateMs: null }, stopped: { code: "signed_out", until: at(14, 5) } });
+  assert.deepEqual(shownOf(box), ["notice", "backupBlock", "foldRow"]);
+  assert.equal(box.text("noticeText"), "Sign in to AO3 to carry on backing up your lists.");
+  box.done();
+  box = await open({ ...VIEW, stopped: { code: "unreadable", until: at(14, 5) } });
+  assert.equal(box.text("noticeText"), "AO3 couldn't make the file");
+  box.done();
+});
+
 test("what starts a copy opens from its row and back", async () => {
   const box = await open({ ...VIEW, backup: running });
   await box.click("foldRow");

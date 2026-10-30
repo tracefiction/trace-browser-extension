@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { JSDOM } from "jsdom";
+
 import { PAGE_GAP_MS, RETRY_BASE_MS } from "../../.trace-build/extension-runtime/ao3-history-import.mjs";
 import {
   AO3_ORIGIN,
@@ -30,6 +32,7 @@ import {
   safeSegment,
 } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
 import { CLAIM_MS, fromOffscreenAnswer, offscreenFetcher, toOffscreenAnswer } from "../../.trace-build/extension-runtime/keep-a-copy-fetch.mjs";
+import { signedInUser } from "../../.trace-build/extension-runtime/keep-a-copy-page.mjs";
 import { downloadPorts, isOurFile, offscreenKeeper, ownDownload } from "../../.trace-build/extension-runtime/keep-a-copy-runtime.mjs";
 import { ICON_SIZES, NAME, keepACopyManifest, writeIcons } from "../../scripts/build-keep-a-copy.mjs";
 
@@ -765,7 +768,7 @@ test("a locked work whose page does not show the reader signed in is skipped, wi
   for (const answer of [
     html(`${AO3_ORIGIN}/users/login?restricted=true`, '<body class="logged-out"><form action="/users/login"></form></body>'),
     html(workURL("8"), workPage("8", { restricted: true, signedIn: false })),
-    html(workURL("8"), workPage("8", { restricted: true }).replace(/<li class="download">[\s\S]*?<\/ul>\n    <\/li>/, "")),
+    html(workURL("8"), workPage("8", { restricted: true, signedIn: false }).replace(/<li class="download">[\s\S]*?<\/ul>\n    <\/li>/, "")),
   ]) {
     const box = harness({ [workURL("8")]: answer, [epubLink("8")]: file(epubLink("8"), epub()) });
     await box.engine.noteWork("8", "bookmark");
@@ -775,6 +778,15 @@ test("a locked work whose page does not show the reader signed in is skipped, wi
     assert.equal(box.stored.pacer.misses, 0);
     assert.deepEqual((await box.engine.view()).skipped, { needs_sign_in: 1 });
   }
+});
+
+test("a locked work with no link, for a signed-in reader, has no download: signing in would not help", async () => {
+  const box = harness({ [workURL("8")]: html(workURL("8"), workPage("8", { restricted: true }).replace(/<li class="download">[\s\S]*?<\/ul>\n    <\/li>/, "")) });
+  await box.engine.noteWork("8", "bookmark");
+  await box.drain();
+  assert.deepEqual(box.requests, [workURL("8")]);
+  assert.deepEqual((await box.engine.view()).skipped, { no_download: 1 });
+  assert.equal(box.stored.works["8"].restricted, true);
 });
 
 test("a locked work's link from the reader's open page, or from storage, is never fetched directly", async () => {
@@ -989,7 +1001,7 @@ test("the estimate comes from the real pace, and a long gap starts the measure a
   assert.equal(after.backup.estimateMs, after.backup.total === after.backup.done ? 0 : (ids.length - after.backup.done) * WORK_PACE_MS);
 });
 
-test("Pause stops the backup, a work the reader asks for still goes, and Resume picks up where it stopped", async () => {
+test("Pause holds every queued work, a new one too, and Resume picks up where it stopped", async () => {
   const box = backupBox({ bookmarks: ["1", "2", "3"], extra: {
     [workURL("9")]: html(workURL("9"), workPage("9")),
     [epubLink("9")]: file(epubLink("9"), epub()),
@@ -1008,8 +1020,8 @@ test("Pause stops the backup, a work the reader asks for still goes, and Resume 
   assert.equal(box.quiet.at(-1), false);
 
   await box.engine.noteWork("9", "bookmark");
-  await box.drain();
-  assert.deepEqual(box.requests.slice(before), [workURL("9"), epubLink("9")]);
+  assert.equal(await box.engine.tick(), null);
+  assert.equal(box.requests.length, before);
   assert.equal((await box.engine.view()).backup.state, "stopped");
 
   await box.engine.resumeBackup();
@@ -1019,6 +1031,34 @@ test("Pause stops the backup, a work the reader asks for still goes, and Resume 
   await box.drain();
   assert.equal(box.saved.length, 4);
   assert.equal((await box.engine.view()).backup, null);
+});
+
+test("Pause holds a work queued at the weekly check's pace", async () => {
+  const box = backupBox({ bookmarks: ["1"], extra: { [workURL("7")]: html(workURL("7"), workPage("7", { updatedAt: "2" })) } });
+  await box.engine.noteUser(USER);
+  await box.engine.startBackup();
+  await step(box, 3);
+  box.stored.queue.push({ workId: "7", pace: "check" });
+  box.engine = new KeepACopy(box.ports);
+  const before = box.requests.length;
+  await box.engine.stopBackup();
+  box.now += 3_600_000;
+  assert.equal(await box.engine.tick(), null);
+  assert.equal(box.requests.length, before);
+});
+
+test("a backup that lists a work already queued counts it, and it waits with the backup", async () => {
+  const box = backupBox({ bookmarks: ["1", "2"] });
+  await box.engine.noteUser(USER);
+  await box.engine.startBackup();
+  box.stored.queue.push({ workId: "2", pace: "check" });
+  box.engine = new KeepACopy(box.ports);
+  await step(box, 1);
+  assert.equal(box.stored.queue.find((queued) => queued.workId === "2").batch, true);
+  await step(box, 2);
+  const { backup } = await box.engine.view();
+  assert.deepEqual([backup.done, backup.total], [0, 2]);
+  assert.deepEqual(box.requests.slice(0, 3), [listPageURL(USER, "bookmarks", 1), listPageURL(USER, "later", 1), listPageURL(USER, "subscriptions", 1)]);
 });
 
 test("Pause while the lists are being read holds the next page too", async () => {
@@ -1170,14 +1210,84 @@ test("repeated failure with no time is unavailable, the queue keeps trying polit
   assert.equal(box.stored.pacer.failures, 0);
 });
 
-test("a run of works that cannot be read is unavailable; files that cannot be saved are not", async () => {
+test("an outage skips no work: no answer charges nothing, and the copies carry on when AO3 is back", async () => {
+  let down = true;
+  const ids = ["1", "2", "3", "4"];
+  const answers = {};
+  for (const id of ids) {
+    answers[workURL(id)] = () => (down ? { kind: "failed", code: "network" } : html(workURL(id), workPage(id)));
+    answers[epubLink(id)] = () => file(epubLink(id), epub());
+  }
+  const box = harness(answers);
+  for (const id of ids) await box.engine.noteWork(id, "bookmark");
+  // A day of it: the queue stops and tries again every hour.
+  for (let i = 0; i < 60; i += 1) box.now += await box.engine.tick();
+  const view = await box.engine.view();
+  assert.deepEqual(view.skipped, {});
+  assert.equal(box.stored.queue.length, 4);
+  assert.ok(box.stored.queue.every((queued) => (queued.attempts ?? 0) === 0));
+  down = false;
+  await box.drain();
+  assert.equal(box.saved.length, 4);
+  assert.deepEqual((await box.engine.view()).skipped, {});
+});
+
+test("one work that never answers holds up no other, and is not skipped for it", async () => {
+  const box = harness({
+    [workURL("1")]: () => ({ kind: "failed", code: "timeout" }),
+    [workURL("2")]: html(workURL("2"), workPage("2")),
+    [epubLink("2")]: file(epubLink("2"), epub()),
+  });
+  await box.engine.noteWork("1", "bookmark");
+  await box.engine.noteWork("2", "bookmark");
+  await step(box, 4);
+  assert.deepEqual(box.saved.map((saved) => saved.filename.includes("(2)")), [true]);
+  assert.equal(box.stored.works["1"].skipped, null);
+});
+
+test("signing out mid-backup says so, counts against AO3 for nothing, and the next signed-in page ends it", async () => {
+  const lists = html(listPageURL(USER, "bookmarks", 1), listPage(["1"]));
+  let signedIn = false;
+  const box = backupBox({ bookmarks: ["1"], extra: {
+    [listPageURL(USER, "bookmarks", 1)]: () => (signedIn ? lists : html(`${AO3_ORIGIN}/users/login?restricted=true`, '<body class="logged-out"><form action="/users/login"></form></body>')),
+  } });
+  await box.engine.noteUser(USER);
+  await box.engine.startBackup();
+  await box.engine.tick();
+  let view = await box.engine.view();
+  assert.equal(view.stopped.code, "signed_out");
+  assert.equal(view.stopped.unavailable, undefined);
+  assert.equal(box.stored.pacer.failures, 0);
+  assert.equal(view.backup.estimateMs, null);
+  // Nothing is asked again before the reader is back, however long they take.
+  const asked = box.requests.length;
+  box.now += STOP_MS * 5;
+  await box.engine.tick();
+  assert.equal(box.requests.length, asked);
+  assert.equal((await box.engine.view()).stopped.code, "signed_out");
+  // A page that does not say is not the reader signing in.
+  signedIn = true;
+  await box.engine.noteUser(null);
+  assert.equal((await box.engine.view()).stopped.code, "signed_out");
+  await box.engine.noteUser(USER);
+  view = await box.engine.view();
+  assert.equal(view.stopped, null);
+  await box.drain();
+  assert.equal(box.saved.length, 1);
+  assert.equal((await box.engine.view()).stopped, null);
+});
+
+test("a run of works that cannot be read is no failure of AO3's being there; nor are files that cannot be saved", async () => {
   const unreadable = harness(Object.fromEntries(["1", "2", "3"].map((id) => [workURL(id), html(workURL(id), "<html></html>")])));
   for (const id of ["1", "2", "3"]) await unreadable.engine.noteWork(id, "bookmark");
   for (let i = 0; i < 6 && !unreadable.stored?.pacer.stopped; i += 1) {
     unreadable.now = unreadable.stored.pacer.dueAt;
     await unreadable.engine.tick();
   }
-  assert.equal((await unreadable.engine.view()).stopped.unavailable, true);
+  const stoppedRead = await unreadable.engine.view();
+  assert.equal(stoppedRead.stopped.code, "unreadable");
+  assert.equal(stoppedRead.stopped.unavailable, undefined);
+  assert.equal(unreadable.stored.pacer.failures, 0);
 
   const full = harness(Object.fromEntries(["1", "2", "3"].map((id) => [epubLink(id), file(epubLink(id), epub())])));
   full.ports.save = async () => { throw new Error("disk full"); };
@@ -1189,6 +1299,17 @@ test("a run of works that cannot be read is unavailable; files that cannot be sa
   const { stopped } = await full.engine.view();
   assert.equal(stopped.code, "save_failed");
   assert.equal(stopped.unavailable, undefined);
+});
+
+test("a page says the reader is signed out only with AO3's login link", () => {
+  const page = (body) => new JSDOM(`<!doctype html><body>${body}</body>`).window.document;
+  assert.equal(signedInUser(page(`<div id="header"><ul id="greeting"><li><a href="/users/${USER}">Hi</a></li></ul></div>`)), USER);
+  assert.equal(signedInUser(page('<div id="header"><div id="login"><p><a id="login-dropdown" href="/users/login">Log In</a></p></div></div>')), null);
+  assert.equal(signedInUser(page('<div id="header"><a href="/users/login">Log In</a></div>')), null);
+  // A 429, a check page, and a link in someone's work are not the reader signing out.
+  assert.equal(signedInUser(page("Retry later")), undefined);
+  assert.equal(signedInUser(page('<div id="challenge-form">Just a moment...</div>')), undefined);
+  assert.equal(signedInUser(page('<div class="userstuff"><a href="/users/login">a link in a story</a></div>')), undefined);
 });
 
 test("the view says when the last copy was saved", async () => {
