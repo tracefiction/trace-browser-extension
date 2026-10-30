@@ -40,8 +40,26 @@ try {
     process.stderr.write(contract.stderr);
     exitStatus = contract.status ?? 1;
   }
+  if (exitStatus === 0) {
+    // Through SafariWebExtensionHandler's own dispatch.
+    const handler = spawnSync("xcrun", ["swiftc", "-parse-as-library",
+      "Shared (Extension)/SafariWebExtensionHandler.swift", "Shared (Extension)/TraceSafariProviderCodec.swift",
+      "Shared (Extension)/TraceSafariImportInbox.swift", "Shared (Extension)/TraceSafariHistoryInbox.swift",
+      "Shared (Extension)/TraceKeepACopyMailbox.swift", "test/swift/TraceKeepACopyHandlerContract.swift",
+      "-module-cache-path", moduleCache, "-o", `${output}-handler`], { cwd: process.cwd(), encoding: "utf8" });
+    if (handler.status !== 0) {
+      process.stderr.write(handler.stderr || handler.stdout);
+      exitStatus = handler.status ?? 1;
+    } else {
+      const contract = spawnSync(`${output}-handler`, [], { encoding: "utf8" });
+      process.stdout.write(contract.stdout);
+      process.stderr.write(contract.stderr);
+      exitStatus = contract.status ?? 1;
+    }
+  }
 } finally {
   rmSync(output, { force: true });
+  rmSync(`${output}-handler`, { force: true });
   rmSync(moduleCache, { force: true, recursive: true });
 }
 process.exit(exitStatus);

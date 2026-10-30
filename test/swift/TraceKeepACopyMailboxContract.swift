@@ -102,6 +102,18 @@ private func epub(_ size: Int = 4_096) -> Data {
         box.releaseAO3(holder: "app")
         require(box.takeAO3(holder: "app", seconds: 30, now: now) == nil && box.takeAO3(holder: "app", seconds: 30, now: now) == nil, "the same side again")
         box.releaseAO3(holder: "app")
+        // Two Safari profiles are two holders; each frees only its own lease.
+        require(box.handle(["type": "KEEP_COPY_AO3_LOCK", "protocolVersion": 1, "seconds": 60], now: now, holder: "extension:A")["granted"] as? Bool == true,
+                "profile A has AO3")
+        require(box.handle(["type": "KEEP_COPY_AO3_LOCK", "protocolVersion": 1, "seconds": 60], now: now, holder: "extension:B")["granted"] as? Bool == false,
+                "profile B waits")
+        _ = box.handle(["type": "KEEP_COPY_AO3_UNLOCK", "protocolVersion": 1], now: now, holder: "extension:B")
+        require(box.takeAO3(holder: "app", seconds: 30, now: now) != nil, "B's unlock never frees A's lease")
+        _ = box.handle(["type": "KEEP_COPY_AO3_UNLOCK", "protocolVersion": 1], now: now, holder: "extension:A")
+        // A lease ending further off than any could (the clock went back) has ended.
+        require(box.takeAO3(holder: "extension:C", seconds: 30, now: now.addingTimeInterval(3_600)) == nil, "a lease from the future")
+        require(box.takeAO3(holder: "app", seconds: 30, now: now) == nil, "is no lease at all")
+        box.releaseAO3(holder: "app")
         // Only AO3's own stops are shared.
         box.shareStop(.init(until: TraceKeepACopyMailbox.ms(now) + 9_999_999, reason: "save_failed"))
         require(box.sharedStop(now: now)?.reason == "forbidden", "a full disk is never AO3's stop")
@@ -127,6 +139,11 @@ private func epub(_ size: Int = 4_096) -> Data {
         require(send("KEEP_COPY_PART", ["transferId": open, "index": 1, "base64": second])["error"] as? String == "disabled", "PART while off")
         require(send("KEEP_COPY_END", ["transferId": open])["error"] as? String == "disabled", "END while off")
         require(send("KEEP_COPY_AO3_LOCK", ["seconds": 5])["error"] as? String == "disabled", "no AO3 while off")
+        require(box.takeAO3(holder: "app", seconds: 5, now: now) != nil, "not even for the app")
+        _ = send("KEEP_COPY_SKIPPED", ["workId": "9", "code": "gone"])
+        _ = send("KEEP_COPY_QUEUE_GET", ["waiting": 0, "stopped": ["code": "challenge", "until": TraceKeepACopyMailbox.ms(now) + 99_000_000]])
+        require(box.takeSkipped().isEmpty && box.sharedStop(now: now)?.until != TraceKeepACopyMailbox.ms(now) + 99_000_000,
+                "off: no skip and no stop is written")
         box.publish(.init(enabled: true, works: [.init(workId: "5", reason: "locked", have: nil, pace: "reader")]))
         require(send("KEEP_COPY_END", ["transferId": open])["error"] as? String == "unknown_transfer", "END while off discarded it")
         box.switchOff()

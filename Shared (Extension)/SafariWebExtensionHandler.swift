@@ -105,16 +105,13 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         }
 
         let responseBody: [String: Any]
-        if let payload, let messageType = payload["type"] as? String {
+        if let payload, let messageType = payload["type"] as? String,
+           let keepACopy = Self.keepACopyResponse(payload, type: messageType, profileID: profile) {
+            responseBody = keepACopy
+        } else if let payload, let messageType = payload["type"] as? String {
             switch messageType {
             case "TRACE_IOS_IMPORT_PREPARE", "TRACE_IOS_IMPORT_STAGE", "TRACE_IOS_IMPORT_CANCEL":
                 responseBody = Self.importResponse(payload, profileID: profile)
-
-            case "KEEP_COPY_QUEUE_GET", "KEEP_COPY_BEGIN", "KEEP_COPY_PART", "KEEP_COPY_END", "KEEP_COPY_ABORT", "KEEP_COPY_SKIPPED":
-                // Keep a Copy: files for the Trace app, in parts, through the
-                // app group (TraceKeepACopyMailbox.swift). Nothing here reads
-                // credentials or makes a request.
-                responseBody = TraceKeepACopyMailbox()?.handle(payload) ?? ["ok": false, "error": "storage_unavailable"]
 
             case "TRACE_IOS_HISTORY_PREPARE", "TRACE_IOS_HISTORY_STAGE", "TRACE_IOS_HISTORY_CANCEL":
                 // A whole AO3 History for review in the app (TraceSafariHistoryInbox.swift).
@@ -319,6 +316,17 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     }
 
     /// The same paired-package gate and provider fence as `importResponse`.
+    /// Keep a Copy: every `KEEP_COPY_*` message (`TraceKeepACopyMailbox.messageTypes`),
+    /// answered through the app group; nil for any other type. Nothing here
+    /// reads credentials or makes a request. Each Safari profile holds AO3's
+    /// lease as its own holder.
+    static func keepACopyResponse(_ payload: [String: Any], type: String, profileID: UUID?,
+                                  mailbox: @autoclosure () -> TraceKeepACopyMailbox? = TraceKeepACopyMailbox()) -> [String: Any]? {
+        guard TraceKeepACopyMailbox.messageTypes.contains(type) else { return nil }
+        let holder = "extension:" + (profileID?.uuidString.lowercased() ?? "default")
+        return mailbox()?.handle(payload, holder: holder) ?? ["ok": false, "error": "storage_unavailable"]
+    }
+
     private static func historyResponse(_ payload: [String: Any], profileID: UUID?) -> [String: Any] {
         let type = payload["type"] as? String ?? "TRACE_IOS_HISTORY_PREPARE"
         func failure(_ reason: String) -> [String: Any] {

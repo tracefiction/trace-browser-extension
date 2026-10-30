@@ -198,7 +198,11 @@ nonisolated struct TraceKeepACopyMailbox: Sendable {
     }
 
     private func takeAO3Unlocked(holder: String, seconds: TimeInterval, now: Date) -> Int64? {
-        if let lease = read(Lease.self, leaseFile), lease.holder != holder, lease.until > Self.ms(now) { return lease.until }
+        // Off: AO3 is nobody's. Retried once Keep a Copy is on again.
+        guard read(Queue.self, queueFile)?.enabled == true else { return Self.ms(now) + Int64(Self.maxLeaseSeconds * 1_000) }
+        // A lease ending further off than any could (the clock was set back) has ended.
+        if let lease = read(Lease.self, leaseFile), lease.holder != holder, lease.until > Self.ms(now),
+           lease.until <= Self.ms(now) + Int64(Self.maxLeaseSeconds * 1_000) { return lease.until }
         let until = Self.ms(now) + Int64(min(Self.maxLeaseSeconds, max(1, seconds)) * 1_000)
         guard (try? write(Lease(holder: holder, until: until), leaseFile)) != nil else { return Self.ms(now) + 1_000 }
         return nil
@@ -215,13 +219,43 @@ nonisolated struct TraceKeepACopyMailbox: Sendable {
 
     // MARK: The handler's side
 
+    /// The `KEEP_COPY_*` messages, all of them.
+    static let messageTypes: Set<String> = ["KEEP_COPY_QUEUE_GET", "KEEP_COPY_AO3_LOCK", "KEEP_COPY_AO3_UNLOCK", "KEEP_COPY_BEGIN",
+                                            "KEEP_COPY_PART", "KEEP_COPY_END", "KEEP_COPY_ABORT", "KEEP_COPY_SKIPPED"]
+    private static let pendingEnd = "__keepCopyPendingEnd"
+
     /// One `KEEP_COPY_*` message, answered as the protocol says. Never
-    /// throws; every refusal is `{ok: false, error}`.
-    func handle(_ message: [String: Any], now: Date = Date()) -> [String: Any] {
-        exclusively { handleUnlocked(message, now: now) }
+    /// throws; every refusal is `{ok: false, error}`. `holder`: the Safari
+    /// profile's own name for the AO3 lease (`extension:<profile>`).
+    func handle(_ message: [String: Any], now: Date = Date(), holder: String = "extension") -> [String: Any] {
+        let first = exclusively { handleUnlocked(message, now: now, holder: holder) }
+        guard let id = first[Self.pendingEnd] as? String else { return first }
+        // END's digest is read outside the lock (up to 50 MiB): the transfer
+        // is the handler's alone until the move that ends it.
+        let matched = transfer(id).map { Self.sha256(of: dataFile(id)) == $0.sha256 } ?? false
+        return exclusively { finishEnd(id, digestMatched: matched, now: now) }
     }
 
-    private func handleUnlocked(_ message: [String: Any], now: Date) -> [String: Any] {
+    private func finishEnd(_ id: String, digestMatched: Bool, now: Date) -> [String: Any] {
+        func refuse(_ error: String) -> [String: Any] { ["ok": false, "error": error] }
+        if isCompleted(id) { return saved(id) }
+        guard read(Queue.self, queueFile)?.enabled == true else { discard(id); return refuse("disabled") }
+        guard let held = transfer(id), held.nextIndex == held.partCount else { return refuse("unknown_transfer") }
+        guard digestMatched else { discard(id); return refuse("checksum_mismatch") }
+        guard listed(held.workId) else { discard(id); return refuse("not_listed") }
+        do {
+            try FileManager.default.createDirectory(at: receivedFolder, withIntermediateDirectories: true)
+            let target = receivedFolder.appendingPathComponent("\(held.workId)-\(held.updatedAt).epub")
+            let file = dataFile(id)
+            if FileManager.default.fileExists(atPath: target.path) { _ = try FileManager.default.replaceItemAt(target, withItemAt: file) }
+            else { try FileManager.default.moveItem(at: file, to: target) }
+        } catch { return refuse("storage_unavailable") }
+        complete(id, now: now)
+        discard(id)
+        return saved(id)
+    }
+
+    private func handleUnlocked(_ message: [String: Any], now: Date, holder: String) -> [String: Any] {
         func refuse(_ error: String) -> [String: Any] { ["ok": false, "error": error] }
         guard (try? JSONSerialization.data(withJSONObject: message).count).map({ $0 <= Self.maxMessageBytes }) == true else {
             return refuse("too_large")
@@ -235,7 +269,7 @@ nonisolated struct TraceKeepACopyMailbox: Sendable {
         switch type {
         case "KEEP_COPY_QUEUE_GET":
             guard keys(["waiting", "stopped"]) else { return refuse("invalid_request") }
-            if let stopped = message["stopped"] as? [String: Any], let until = (stopped["until"] as? NSNumber)?.int64Value,
+            if enabled, let stopped = message["stopped"] as? [String: Any], let until = (stopped["until"] as? NSNumber)?.int64Value,
                until > Self.ms(now), let code = stopped["code"] as? String, code.count <= 40 {
                 // AO3 stopped the extension: the app waits it out too.
                 shareStopUnlocked(.init(until: min(until, Self.ms(now) + 24 * 60 * 60 * 1_000), reason: code))
@@ -244,13 +278,13 @@ nonisolated struct TraceKeepACopyMailbox: Sendable {
         case "KEEP_COPY_AO3_LOCK":
             guard keys(["seconds"]), let seconds = (message["seconds"] as? NSNumber)?.doubleValue, seconds > 0 else { return refuse("invalid_request") }
             guard enabled else { return refuse("disabled") }
-            if let busyUntil = takeAO3Unlocked(holder: "extension", seconds: seconds, now: now) {
+            if let busyUntil = takeAO3Unlocked(holder: holder, seconds: seconds, now: now) {
                 return ["ok": true, "granted": false, "until": busyUntil]
             }
             return ["ok": true, "granted": true]
         case "KEEP_COPY_AO3_UNLOCK":
             guard keys([]) else { return refuse("invalid_request") }
-            releaseAO3Unlocked(holder: "extension")
+            releaseAO3Unlocked(holder: holder)
             return ["ok": true]
         case "KEEP_COPY_BEGIN":
             guard keys(["transferId", "workId", "updatedAt", "format", "byteLength", "sha256", "fileName", "partBytes", "partCount"]),
@@ -313,22 +347,10 @@ nonisolated struct TraceKeepACopyMailbox: Sendable {
             guard enabled else { discard(id); return refuse("disabled") }
             guard let held = transfer(id) else { return refuse("unknown_transfer") }
             guard held.nextIndex == held.partCount else { return refuse("incomplete") }
-            let file = dataFile(id)
-            let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1
-            guard size == held.byteLength, Self.sha256(of: file) == held.sha256 else {
-                discard(id)
-                return refuse("checksum_mismatch")
-            }
+            let size = (try? dataFile(id).resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1
+            guard size == held.byteLength else { discard(id); return refuse("checksum_mismatch") }
             guard listed(held.workId) else { discard(id); return refuse("not_listed") }
-            do {
-                try FileManager.default.createDirectory(at: receivedFolder, withIntermediateDirectories: true)
-                let target = receivedFolder.appendingPathComponent("\(held.workId)-\(held.updatedAt).epub")
-                if FileManager.default.fileExists(atPath: target.path) { _ = try FileManager.default.replaceItemAt(target, withItemAt: file) }
-                else { try FileManager.default.moveItem(at: file, to: target) }
-            } catch { return refuse("storage_unavailable") }
-            complete(id, now: now)
-            discard(id)
-            return saved(id)
+            return [Self.pendingEnd: id]
         case "KEEP_COPY_ABORT":
             guard keys(["transferId", "reason"]), let id = transferID(message) else { return refuse("invalid_request") }
             if isCompleted(id) { return saved(id) }
@@ -338,7 +360,8 @@ nonisolated struct TraceKeepACopyMailbox: Sendable {
             guard keys(["workId", "code"]), let workID = message["workId"] as? String, Self.validWork(workID),
                   let code = message["code"] as? String, code.range(of: #"^[a-z_]{1,20}$"#, options: .regularExpression) != nil
             else { return refuse("invalid_request") }
-            noteSkipped(workID: workID, code: code, now: now)
+            // Off: nothing is kept for the app.
+            if enabled { noteSkipped(workID: workID, code: code, now: now) }
             return ["ok": true]
         default:
             return refuse("unsupported")

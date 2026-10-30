@@ -75,7 +75,12 @@ side takes it before a request and gives it back after: the extension with
 the app holds it, LOCK answers `granted: false` with `until`; the extension
 sends nothing and waits its turn, as for any busy fetch, which is never a
 step toward a stop. No answer is treated as not granted. A lease ends by
-itself at its time.
+itself at its time (and one ending further off than 330 s from now, after
+the clock was set back, has ended). Each Safari profile holds the lease as
+itself (`extension:<profile>`), and UNLOCK frees only its own. While Keep a
+Copy is off the lease is nobody's. An app that answers LOCK as an unknown
+message (`unknown_message_type`) is older than the lease: the extension turns
+Keep a Copy off, says so once, and asks no more.
 
 ### Off
 
@@ -208,7 +213,10 @@ the app group `group.com.tracefiction.trace`, folder `KeepACopy/`:
 | `AO3Lease.json` | both | who may ask AO3 now, and until when |
 
 Every change is made under one `flock` on `mailbox.lock`, so a message and
-the app's off switch never interleave.
+the app's off switch never interleave. END reads the file's SHA-256 outside
+the lock (the transfer is the handler's alone until the move that ends it),
+then checks again under it before the move. While off, SKIPPED and
+QUEUE_GET's `stopped` write nothing.
 
 The handler never holds a file whole in memory, nor as base64. It refuses a
 message over 512 KiB (its JSON included), a part over 349,528 base64

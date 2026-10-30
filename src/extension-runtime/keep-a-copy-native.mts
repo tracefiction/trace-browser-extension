@@ -209,6 +209,8 @@ export class NativeCopyHandoff {
   readonly #ended = new Set<string>();
   #pumping: Promise<void> | null = null;
   #lastQueueAt = -Infinity;
+  /** The app answered the lease as an unknown message: said once. */
+  #leaseUnsupported = false;
   /** The tab this step's page was read in: its file comes from there, or not at all. */
   #stepTab: ReaderTab | null = null;
 
@@ -221,6 +223,13 @@ export class NativeCopyHandoff {
         type: KEEP_COPY_NATIVE.lock, protocolVersion: KEEP_COPY_PROTOCOL_VERSION, seconds: Math.ceil(timeoutMs / 1_000) + 5,
       }).catch(() => null);
       if (disabledAnswer(lease)) void this.#disable();
+      // An app that doesn't know the lease (older than this extension): off
+      // here, said once, never an endless retry.
+      if (isRecord(lease) && (lease.error === "unknown_message_type" || lease.error === "unsupported")) {
+        if (!this.#leaseUnsupported) console.warn("Keep a Copy: the Trace app does not share AO3's lease; Keep a Copy is off in Safari.");
+        this.#leaseUnsupported = true;
+        void this.#disable();
+      }
       if (!isRecord(lease) || lease.ok !== true || lease.granted !== true) return { kind: "failed", code: "busy" };
       try {
         return await request();

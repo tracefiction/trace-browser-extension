@@ -100,6 +100,7 @@ function fakeApp({ works = [], enabled = true, drop = () => false, refuseBegin =
     if (message.type === KEEP_COPY_NATIVE.lock) {
       app.leases.push(message);
       if (app.disabledBegin) return { ok: false, error: "disabled" };
+      if (app.oldHandler) return { type: "error", status: "error", error: "unknown_message_type", receivedType: message.type };
       if (app.appHoldsAO3 || app.leaseHeld) return { ok: true, granted: false, until: 0 };
       app.leaseHeld = true;
       return { ok: true, granted: true };
@@ -275,6 +276,26 @@ test("the app's \"disabled\" turns Keep a Copy off here at once: nothing more fe
   assert.equal(await box.handoff.engine.enabled(), false);
   assert.equal((await box.handoff.engine.view()).waiting, 0);
   assert.equal(app.saved.length, 0);
+});
+
+test("an app that doesn't know AO3's lease turns Keep a Copy off here, said once, never retried for ever", async () => {
+  const site = ao3({ [workURL("35")]: workPage("35"), [fileURL("35")]: epub(1_000) });
+  const app = fakeApp({ works: [{ workId: "35", reason: "locked", pace: "reader" }] });
+  const box = harness({ app, site });
+  app.oldHandler = true;
+  const warned = [];
+  const warn = console.warn;
+  console.warn = (...args) => warned.push(args.join(" "));
+  try {
+    await box.handoff.askQueue(true);
+    await box.drain();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await box.drain();
+  } finally { console.warn = warn; }
+  assert.deepEqual(site.requests, []);
+  assert.equal(await box.handoff.engine.enabled(), false);
+  assert.equal(warned.length, 1);
+  assert.equal(app.leases.length, 1, "asked once");
 });
 
 test("the reader's AO3 tab is the one they are on, else the last they used", () => {
