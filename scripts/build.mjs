@@ -524,6 +524,8 @@ if (HAS_SESSION_RUNTIME) {
       __TRACE_NATIVE_IMPORT_HANDOFF__: JSON.stringify(NATIVE_IMPORT_HANDOFF),
       __TRACE_AO3_HISTORY_IMPORT__: JSON.stringify(AO3_HISTORY_IMPORT),
       __TRACE_KEEP_A_COPY__: JSON.stringify(KEEP_A_COPY),
+      // Copies from Trace's extension go in Downloads/Trace.
+      __KEEP_A_COPY_FOLDER__: JSON.stringify("Trace"),
       __TRACE_IOS_FIRST_TAP_SAVE__: JSON.stringify(IOS_FIRST_TAP_SAVE),
       __TRACE_IOS_FIRST_TAP_SHEET__: JSON.stringify(IOS_FIRST_TAP_SHEET),
       __TRACE_IOS_EARNED_PERMISSION_CONFIG__: JSON.stringify(

@@ -986,6 +986,7 @@ test("Keep a Copy is only in a package built with it; only Chrome and Firefox ca
     for (const browser of ["chrome", "firefox"]) {
       const bundle = fs.readFileSync(path.join(dist(browser), "background.js"), "utf8");
       for (const wiring of KEEP_WIRING) assert.equal(bundle.includes(wiring), true, `${browser} lacks ${wiring}`);
+      assert.match(bundle, /COPY_FOLDER\w* = (?:true \? )?"Trace"/, `${browser}: copies are not in Downloads/Trace`);
       const scripts = manifest(dist(browser)).content_scripts;
       const page = scripts.find((entry) => entry.js.includes("keep-a-copy-page.js"));
       assert.deepEqual(page.matches, ["https://archiveofourown.org/*"]);

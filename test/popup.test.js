@@ -1736,13 +1736,15 @@ test("Keep a Copy's switch shows only in a package built with it, starts off, an
   const h = createPopupHarness({
     ...connected,
     // Four stories updating, three with a copy; a Dropped one keeps its file but is not counted.
-    keepACopy: { kept: 4, updatesOff: 1, withCopy: 3, waiting: 1, stopped: null },
+    keepACopy: { kept: 4, updatesOff: 1, withCopy: 3, waiting: 1, stopped: null, lastCopyAt: new Date().setHours(14, 2, 0, 0) },
   });
   await flush();
   const row = h.document.getElementById("popup-keep-a-copy-row");
   const input = h.document.getElementById("pref-keep-a-copy");
   assert.equal(row.hidden, false);
+  assert.equal(row.querySelector("strong").textContent, "Keep a Copy");
   assert.equal(input.checked, false);
+  assert.equal(h.document.getElementById("popup-keep-a-copy-detail").textContent, "Keep AO3’s EPUB of your Library stories, in Downloads › Trace");
   assert.equal(h.document.getElementById("popup-preferences-count").textContent, "4 of 5 on");
   assert.equal(h.messages.some((message) => message.type === "KEEP_A_COPY_VIEW"), false);
 
@@ -1750,8 +1752,46 @@ test("Keep a Copy's switch shows only in a package built with it, starts off, an
   input.dispatchEvent(new h.window.Event("change"));
   await flush();
   assert.equal(h.store.prefKeepACopyEnabled, true);
-  assert.equal(h.document.getElementById("popup-keep-a-copy-detail").textContent, "3 of 4 stories have a copy · 1 waiting");
+  assert.equal(h.document.getElementById("popup-keep-a-copy-detail").textContent, "3 of 4 stories · last copy 14:02");
   assert.equal(h.document.getElementById("popup-preferences-count").textContent, "5 of 5 on");
+});
+
+test("Keep a Copy's small line: the count, and AO3 pausing or not being available in place of it", async () => {
+  const connected = {
+    sessionMode: "kernel",
+    sessionSnapshot: { state: "connected", accountId: "must-not-render", canExecuteAuthenticated: true, reason: "none" },
+    popupState: {
+      ok: true,
+      authState: { state: "connected", reason: "none", canExecuteAuthenticated: true },
+      firstSaveSeen: true,
+      libraryCount: 8,
+      activeTab: { kind: "unsupported" },
+      pro: true,
+      autoTrackEnabled: true,
+      libraryInlayEnabled: true,
+      ao3SavedFiltersEnabled: true,
+      metadataImproveEnabled: true,
+    },
+  };
+  const until = new Date().setHours(14, 5, 0, 0);
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  yesterday.setHours(21, 40, 0, 0);
+  for (const [view, line] of [
+    [{ kept: 340, withCopy: 312, lastCopyAt: yesterday.getTime(), stopped: null }, "312 of 340 stories · last copy yesterday, 21:40"],
+    [{ kept: 1880, withCopy: 0, lastCopyAt: null, stopped: null }, "0 of 1,880 stories"],
+    [{ kept: 0, withCopy: 0, lastCopyAt: null, stopped: null }, "Keep AO3’s EPUB of your Library stories, in Downloads › Trace"],
+    [{ kept: 340, withCopy: 312, lastCopyAt: until, stopped: { code: "slow_down", until } }, "Paused by AO3 until 14:05"],
+    [{ kept: 340, withCopy: 312, lastCopyAt: until, stopped: { code: "slow_down", until, unavailable: true } }, "Waiting for AO3 · 312 of 340"],
+  ]) {
+    const h = createPopupHarness({ ...connected, keepACopy: view });
+    await flush();
+    const input = h.document.getElementById("pref-keep-a-copy");
+    input.checked = true;
+    input.dispatchEvent(new h.window.Event("change"));
+    await flush();
+    assert.equal(h.document.getElementById("popup-keep-a-copy-detail").textContent, line);
+  }
 });
 
 test("connected kernel popup renders authoritative summary, preferences, and migrated import", async () => {

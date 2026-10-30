@@ -664,25 +664,34 @@ function applyProUi(pro, autoTrack, libraryInlay, metadataImprove) {
   renderKeepACopy();
 }
 
-const KEEP_A_COPY_STOPPED = {
-  challenge: "AO3 asked for a check",
-  forbidden: "AO3 refused a request",
-  wrong_host: "AO3 sent a request elsewhere",
-  unreadable: "several stories could not be read",
-  slow_down: "AO3 asked to slow down",
-  save_failed: "several files could not be saved",
-};
+const KEEP_A_COPY_OFF_LINE = "Keep AO3’s EPUB of your Library stories, in Downloads › Trace";
+
+function keepACopyTime(at) {
+  return new Date(at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+}
+
+/** "14:02", "yesterday, 21:40" or "29 Oct, 21:40". */
+function keepACopyWhen(at) {
+  const day = (date) => date.toDateString();
+  const then = new Date(at);
+  const today = new Date();
+  if (day(then) === day(today)) return keepACopyTime(at);
+  today.setDate(today.getDate() - 1);
+  if (day(then) === day(today)) return `yesterday, ${keepACopyTime(at)}`;
+  return `${then.toLocaleDateString("en-GB", { day: "numeric", month: "short" })}, ${keepACopyTime(at)}`;
+}
 
 function keepACopyLine(view) {
   // Among the stories whose updates are on: Dropped ones keep their files but are not counted.
   const kept = Math.max(0, Number(view.kept) || 0);
   const withCopy = Math.min(kept, Math.max(0, Number(view.withCopy) || 0));
-  if (view.stopped && KEEP_A_COPY_STOPPED[view.stopped.code]) {
-    return `Paused: ${KEEP_A_COPY_STOPPED[view.stopped.code]}. Trace tries again later.`;
-  }
-  if (kept === 0) return "Copies are saved in Downloads › AO3";
-  const waiting = Number(view.waiting) > 0 ? ` · ${view.waiting} waiting` : "";
-  return `${withCopy} of ${kept} ${kept === 1 ? "story has" : "stories have"} a copy${waiting}`;
+  const count = `${withCopy.toLocaleString("en-US")} of ${kept.toLocaleString("en-US")}`;
+  if (view.stopped?.code === "save_failed") return "Paused: several files could not be saved. Trace tries again later.";
+  if (view.stopped?.unavailable) return `Waiting for AO3 · ${count}`;
+  if (view.stopped) return `Paused by AO3 until ${keepACopyTime(view.stopped.until)}`;
+  if (kept === 0) return KEEP_A_COPY_OFF_LINE;
+  const last = Number(view.lastCopyAt) > 0 ? ` · last copy ${keepACopyWhen(view.lastCopyAt)}` : "";
+  return `${count} ${kept === 1 ? "story" : "stories"}${last}`;
 }
 
 function renderKeepACopy() {
@@ -697,7 +706,7 @@ function renderKeepACopy() {
     input.checked = r?.[PREF_KEEP_A_COPY_KEY] === true;
     updatePreferenceSummary();
     if (!input.checked) {
-      detail.textContent = "Save AO3’s EPUB of your Library’s AO3 stories in Downloads";
+      detail.textContent = KEEP_A_COPY_OFF_LINE;
       return;
     }
     ext.runtime.sendMessage({ type: "KEEP_A_COPY_VIEW" }, (view) => {
