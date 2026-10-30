@@ -107,6 +107,8 @@ function createCollectorBindings(dom, options = {}) {
     parseAo3WorkSummaryFromHtml: globalScope.parseAo3WorkSummaryFromHtml,
     workSummaryBackfillItem: globalScope.workSummaryBackfillItem,
     maybeBackfillWorkSummary: globalScope.maybeBackfillWorkSummary,
+    readAo3WorkForSave: globalScope.readAo3WorkForSave,
+    exportedReadAo3WorkForSave: globalScope.__traceReadAo3WorkForSave,
     collectAO3Listings: globalScope.collectAO3Listings,
     parseAO3HistoryDate: globalScope.parseAO3HistoryDate,
     detectAo3CurrentChapterNumber: globalScope.detectAo3CurrentChapterNumber,
