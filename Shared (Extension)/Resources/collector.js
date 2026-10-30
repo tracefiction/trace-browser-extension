@@ -1283,17 +1283,16 @@ function rememberMetadataBroadcast(item) {
 }
 
 // AO3 shows a work's summary only on chapter 1, one-shots and the Entire Work
-// view. When a reader is on chapter 2 or later, Trace fetches the work's first
-// page once in the background and reports its summary, so a story first seen
-// mid-way still gets its description. The reader is already reading this work,
-// so the adult-content notice is skipped. One request at a time, at most one
-// per work per day in this tab, a back-off after any refusal, and failures stay
-// silent; the save itself never waits for it.
+// view. When a reader is on chapter 2 or later, Trace looks the work up once in
+// AO3's search and reports the summary its listing shows, so a story first seen
+// mid-way still gets its description. Opening the work's first page instead
+// would be a visit in the reader's AO3 History. One request at a time, at most
+// one per work per day in this tab, a back-off after any refusal, and failures
+// stay silent; the save itself never waits for it.
 var WORK_SUMMARY_BACKFILL_KEY = "trace:work-summary-backfill:v1";
 var WORK_SUMMARY_BACKFILL_DELAY_MS = 1_500;
 var WORK_SUMMARY_BACKFILL_TIMEOUT_MS = 8_000;
 var WORK_SUMMARY_BACKFILL_BACKOFF_MS = 10 * 60 * 1000;
-var WORK_SUMMARY_SELECTOR = "#workskin > .preface.group:not(.chapter) > .summary blockquote.userstuff";
 var workSummaryBackfillInFlight = false;
 var workSummaryBackfillBackoffUntil = 0;
 
@@ -1336,16 +1335,6 @@ function rememberWorkSummaryBackfill(workId) {
     window.sessionStorage.setItem(WORK_SUMMARY_BACKFILL_KEY, JSON.stringify(next));
   } catch (_) {
     /* optional */
-  }
-}
-
-function parseAo3WorkSummaryFromHtml(html) {
-  try {
-    if (typeof DOMParser !== "function") return null;
-    var doc = new DOMParser().parseFromString(String(html || ""), "text/html");
-    return blockText(one(doc, WORK_SUMMARY_SELECTOR)) || null;
-  } catch (_) {
-    return null;
   }
 }
 
@@ -1401,29 +1390,20 @@ function fetchAo3Html(url, done) {
     });
 }
 
-// Calls done(summary, ok): ok is false when AO3 refused or the request failed.
-function fetchAo3WorkSummary(workId, done) {
-  fetchAo3Html(location.origin + "/works/" + workId + "?view_adult=true", function (html, ok) {
-    done(ok ? parseAo3WorkSummaryFromHtml(html) : null, ok);
-  });
-}
-
-// A work link with no listing row around it (AO3's Subscriptions page) shows
-// only a title. Saving one asks AO3's work search for it by ID: the result is
-// the same listing row a search page shows, and unlike opening the work it is
-// not a visit in the reader's AO3 History. Calls done(item), or
-// done(null, "unavailable") when AO3 didn't answer and done(null, "not_found")
-// when it didn't list the work.
-function readAo3WorkForSave(workId, done) {
+// Looks a work up in AO3's search by its ID. The result is the same listing row
+// a search page shows, and unlike opening the work it is not a visit in the
+// reader's AO3 History. Calls done(item, ok): ok is false when AO3 refused or
+// the request failed; item is null when AO3 didn't list the work.
+function fetchAo3WorkListing(workId, done) {
   var id = String(workId || "");
   if (!/^\d+$/.test(id) || typeof DOMParser !== "function") {
-    done(null, "not_found");
+    done(null, true);
     return;
   }
   var query = encodeURIComponent("id:" + id);
   fetchAo3Html(location.origin + "/works/search?work_search%5Bquery%5D=" + query, function (html, ok) {
     if (!ok) {
-      done(null, "unavailable");
+      done(null, false);
       return;
     }
     var item = null;
@@ -1434,8 +1414,25 @@ function readAo3WorkForSave(workId, done) {
     } catch (_) {
       item = null;
     }
-    if (item && item.t) done(item);
-    else done(null, "not_found");
+    done(item && item.t ? item : null, true);
+  });
+}
+
+// Calls done(summary, ok): ok is false when AO3 refused or the request failed.
+function fetchAo3WorkSummary(workId, done) {
+  fetchAo3WorkListing(workId, function (item, ok) {
+    done(item ? item.sm : null, ok);
+  });
+}
+
+// A work link with no listing row around it (AO3's Subscriptions page) shows
+// only a title, so saving one looks it up. Calls done(item), or
+// done(null, "unavailable") when AO3 didn't answer and done(null, "not_found")
+// when it didn't list the work.
+function readAo3WorkForSave(workId, done) {
+  fetchAo3WorkListing(workId, function (item, ok) {
+    if (item) done(item);
+    else done(null, ok ? "not_found" : "unavailable");
   });
 }
 globalThis.__traceReadAo3WorkForSave = readAo3WorkForSave;
@@ -1445,8 +1442,8 @@ function workSummaryBackfillItem(item, summary) {
   for (var key in item) {
     if (Object.prototype.hasOwnProperty.call(item, key)) out[key] = item[key];
   }
-  // The summary comes from the work's first page, so it is reported as that
-  // page: chapter 1 and no chapter URL. Progress is never taken from metadata.
+  // The summary is the work's, not this chapter's, so it is reported as the
+  // first page: chapter 1 and no chapter URL. Progress is never taken from metadata.
   out.sm = summary;
   out.chn = 1;
   out.chu = null;

@@ -17,7 +17,7 @@ repository rather than carrying a second copy of the extension.
 - Content scripts run only on supported AO3/FFN pages and Trace pages listed in the manifest.
 - Obvious AO3/FFN login/signup/auth pages are excluded in the manifest.
 - Collection and overlay scripts also disable themselves at runtime on login/signup/password pages and pages with unknown password forms. AO3's known header login form can appear on normal story/listing pages; Trace ignores only that header form so supported reading pages still work.
-- Network requests go through the extension background worker to Trace API endpoints. The only other requests are made from your own AO3 or FanFiction.net tab and are described under "What Trace Reads": the AO3 and FanFiction.net summary reads, and the AO3 search for a story you add from a bare link.
+- Network requests go through the extension background worker to Trace API endpoints. The only other requests are made from your own AO3 or FanFiction.net tab and are described under "What Trace Reads": the FanFiction.net summary read, and the AO3 searches for a summary or for a story you add from a bare link.
 
 If anything claiming to be Trace asks for your AO3 or FanFiction.net password, it is not legitimate.
 
@@ -59,32 +59,11 @@ kind of page and time) is kept with the work. The story and author ids still
 to read are kept in session-only storage (or, in a browser without it, in
 local storage for at most 12 hours) and removed when you sign out.
 
-AO3 shows a work's summary only on its first chapter, so a work saved from a
-later chapter, or imported from your open tabs, can reach your Library
-without one. When you are on such a later chapter, the page reads that
-work's first chapter for its summary. For your other saved AO3 works that
-Trace has no summary for, Trace asks the Trace API which they are, then
-reads each work's first page (`/works/<id>?view_adult=true` on the AO3
-address your tab is on) from inside your own AO3 tab, as a request from that
-page with your own AO3 session, so a work only signed-in readers can see is
-read only when you are signed in. The page is read only as far as the work's
-own summary, inside the tab, and only the summary's text leaves the tab; it
-is sent to Trace with the work's id and nothing else. This uses only the
-website access you already gave Trace and follows the **Improve story
-details** preference. It makes one request at a time, at least 30 seconds
-apart and a minute apart between works, at most 30 works in six hours, never
-during or just after a save, keeps no page text or cache, opens no tab, and
-runs only while an AO3 page is open. It uses no timers: the work still to do
-is picked up the next time an AO3 page talks to Trace. A work AO3 says is
-gone, one only signed-in readers can see while you are signed out, or one
-with no summary is skipped. A check page, a refusal, an unexpected address,
-an error or three unreadable pages in a row pause it for about an hour (or
-as long as AO3 asks, at most a day); what stopped it (the reason, status
-code, site address, kind of address and time) is kept with the work. The ids
-of up to 200 works already tried are kept so each round tries others first.
-The work ids still to read are kept in session-only storage (or, in a
-browser without it, in local storage for at most 12 hours), and they and the
-tried ids are removed when you sign out.
+AO3 shows a work's summary only on its first chapter. When you read chapter 2
+or later of a work, Trace looks that work up once in AO3's search, from your own
+AO3 tab, and sends only the summary the search result shows. It doesn't open the
+work's first page, because AO3 counts that as a visit in your AO3 History. This
+follows the **Improve story details** preference.
 
 Some AO3 pages, such as your Subscriptions page, list a work as a bare link
 with no details. When you click **+ Add to Trace** beside one, Trace searches

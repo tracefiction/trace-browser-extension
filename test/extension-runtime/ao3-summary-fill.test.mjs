@@ -888,3 +888,8 @@ test("a FanFiction.net page never runs the AO3 fill", async () => {
   assert.equal(listings.some(({ body }) => body.source === "ao3"), false);
   assert.equal(scripts.some(({ args }) => args[0] === "archiveofourown.org"), false);
 });
+
+test('the extension does not run the AO3 summary fill: opening a work is a visit in AO3 History', () => {
+  const source = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '../../src/extension-runtime/index.mts'), 'utf8');
+  assert.doesNotMatch(source, /^\s*ao3SummaryFill\s*:/m);
+});
