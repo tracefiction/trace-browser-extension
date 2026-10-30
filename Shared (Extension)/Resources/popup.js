@@ -687,6 +687,7 @@ function keepACopyLine(view) {
   const withCopy = Math.min(kept, Math.max(0, Number(view.withCopy) || 0));
   const count = `${withCopy.toLocaleString("en-US")} of ${kept.toLocaleString("en-US")}`;
   if (view.stopped?.code === "save_failed") return "Paused: several files could not be saved. Trace tries again later.";
+  if (view.stopped?.code === "unreadable") return "AO3 couldn’t make the file";
   if (view.stopped?.unavailable) return `Waiting for AO3 · ${count}`;
   if (view.stopped) return `Paused by AO3 until ${keepACopyTime(view.stopped.until)}`;
   if (kept === 0) return KEEP_A_COPY_OFF_LINE;

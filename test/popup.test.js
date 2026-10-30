@@ -1783,6 +1783,7 @@ test("Keep a Copy's small line: the count, and AO3 pausing or not being availabl
     [{ kept: 0, withCopy: 0, lastCopyAt: null, stopped: null }, "Keep AO3’s EPUB of your Library stories, in Downloads › Trace"],
     [{ kept: 340, withCopy: 312, lastCopyAt: until, stopped: { code: "slow_down", until } }, "Paused by AO3 until 14:05"],
     [{ kept: 340, withCopy: 312, lastCopyAt: until, stopped: { code: "slow_down", until, unavailable: true } }, "Waiting for AO3 · 312 of 340"],
+    [{ kept: 340, withCopy: 312, lastCopyAt: until, stopped: { code: "unreadable", until } }, "AO3 couldn’t make the file"],
   ]) {
     const h = createPopupHarness({ ...connected, keepACopy: view });
     await flush();
