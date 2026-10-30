@@ -3579,6 +3579,27 @@ function collect() {
   return { source: "ao3", items: [] };
 }
 
+// What a save or an import sends for the page the reader is on. AO3's Entire
+// Work view renders every chapter, which is not evidence that the reader has
+// read them, so a work read that way is sent at chapter 1, as auto-track
+// does; the end-of-story detector owns the final progress transition.
+function collectForSave() {
+  var collected = collect();
+  if (
+    isAO3() &&
+    isAo3EntireWorkView() &&
+    collected.items.length === 1 &&
+    collected.items[0] &&
+    collected.items[0].ctx === "story"
+  ) {
+    return {
+      source: collected.source,
+      items: [Object.assign({}, collected.items[0], { chn: 1, chu: null })],
+    };
+  }
+  return collected;
+}
+
 function canonicalReaderStatus(status) {
   if (
     typeof status !== "string" &&
@@ -3924,7 +3945,7 @@ function handleCollectorMessage(msg, sender, sendResponse, relayCommand) {
     try {
       // The same reading of the page that decides whether it gets a mark.
       firstTapStory = collectStoryForAutoTrack();
-      firstTapCollected = firstTapStory ? collect() : null;
+      firstTapCollected = firstTapStory ? collectForSave() : null;
     } catch (_) {
       firstTapCollected = null;
     }
@@ -3989,7 +4010,7 @@ function handleCollectorMessage(msg, sender, sendResponse, relayCommand) {
     var probeCollected;
     var probeWorkKey;
     try {
-      probeCollected = collect();
+      probeCollected = collectForSave();
       probeWorkKey = getWorkKeyFromUrl();
     } catch (_) {
       probeCollected = null;
@@ -4171,7 +4192,7 @@ function handleCollectorMessage(msg, sender, sendResponse, relayCommand) {
   }
   if (msg?.type !== "TRACE_COLLECT") return false;
   try {
-    const res = collect();
+    const res = collectForSave();
     const payload = {
       s: res.source,
       at: new Date().toISOString(),
@@ -6537,7 +6558,7 @@ function applyQuickAddActionState(btn, addTheme, compact) {
 
 function quickAddPayloadForCurrentPage() {
   if (!collectStoryForAutoTrack()) throw new Error("story_unavailable");
-  var collected = collect();
+  var collected = collectForSave();
   if (!collected.items.length) throw new Error("collect_failed");
   return { s: collected.source, at: new Date().toISOString(), item: collected.items[0] };
 }
@@ -6854,7 +6875,7 @@ function runKernelConnectAndSave(handle, workKey) {
   kernelPendingFirstStory.commandInFlight = true;
   var collected;
   try {
-    collected = collect();
+    collected = collectForSave();
   } catch (_) {
     collected = null;
   }

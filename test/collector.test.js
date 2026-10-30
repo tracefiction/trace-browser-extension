@@ -559,6 +559,52 @@ test("collectAO3Work treats a fully rendered AO3 Entire Work page as the latest 
   );
 });
 
+test("a save from AO3's Entire Work view sends chapter 1, not every rendered chapter", () => {
+  const dom = new JSDOM(
+    `<!doctype html><html><body>
+      <h2 class="title heading">Entire Work</h2>
+      <h3 class="byline heading"><a rel="author">Author</a></h3>
+      <dl class="work meta group"><dd class="chapters">3/3</dd></dl>
+      <div id="chapters">
+        <div class="chapter" id="chapter-101"><div class="userstuff module" role="article">One</div></div>
+        <div class="chapter" id="chapter-205"><div class="userstuff module" role="article">Two</div></div>
+        <div class="chapter" id="chapter-999"><div class="userstuff module" role="article">Three</div></div>
+      </div>
+    </body></html>`,
+    {
+      url: "https://archiveofourown.org/works/124?view_full_work=true",
+      contentType: "text/html",
+      runScripts: "outside-only",
+    },
+  );
+  const { collect, collectForSave } = createCollectorBindings(dom);
+
+  assert.equal(collect().items[0].chn, 3, "the page reading itself is unchanged");
+  const [item] = collectForSave().items;
+  assert.equal(item.chn, 1);
+  assert.equal(item.chu, null);
+  assert.equal(item.chPub, 3, "the posted count still goes with the save");
+});
+
+test("a save from one AO3 chapter page keeps that chapter", () => {
+  const dom = new JSDOM(
+    `<!doctype html><html><body>
+      <h2 class="title heading">One Chapter</h2>
+      <h3 class="byline heading"><a rel="author">Author</a></h3>
+      <dl class="work meta group"><dd class="chapters">2/3</dd></dl>
+      <div id="chapters"><div class="chapter" id="chapter-205"><div class="userstuff module" role="article">Two</div></div></div>
+      <div id="selected_id"><select><option value="101">1. One</option><option value="205" selected>2. Two</option></select></div>
+    </body></html>`,
+    {
+      url: "https://archiveofourown.org/works/125/chapters/205",
+      contentType: "text/html",
+      runScripts: "outside-only",
+    },
+  );
+  const { collect, collectForSave } = createCollectorBindings(dom);
+  assert.deepEqual(collectForSave().items[0].chn, collect().items[0].chn);
+});
+
 test("collector disables Trace collection on pages with password fields", () => {
   const dom = new JSDOM(
     "<!doctype html><html><body><input type='password' name='password'></body></html>",
