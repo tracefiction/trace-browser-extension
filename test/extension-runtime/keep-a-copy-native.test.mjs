@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
 
-import { AO3_ORIGIN } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
+import { COPY_FOLDER, AO3_ORIGIN } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
 import {
   KEEP_COPY_NATIVE,
   MAX_QUEUE_WORKS,
@@ -197,7 +197,7 @@ test("a locked work the app asks for is read from its page in the tab, then hand
   assert.equal(app.saved.length, 1);
   assert.equal(app.saved[0].bytes.equals(Buffer.from(file)), true);
   assert.equal(app.saved[0].updatedAt, "1761700000");
-  assert.equal(app.saved[0].fileName, "AO3/Invented Lanterns/Invented work 21 – Synthetic_Quill (21).epub");
+  assert.equal(app.saved[0].fileName, `${COPY_FOLDER}/Invented Lanterns/Invented work 21 – Synthetic_Quill (21).epub`);
   const types = app.messages.map((message) => message.type);
   assert.deepEqual(types, [KEEP_COPY_NATIVE.queue, KEEP_COPY_NATIVE.begin, KEEP_COPY_NATIVE.part, KEEP_COPY_NATIVE.part, KEEP_COPY_NATIVE.part, KEEP_COPY_NATIVE.end]);
   const begin = app.messages[1];
