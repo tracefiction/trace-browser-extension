@@ -553,6 +553,8 @@ export interface PendingSave {
   readonly setAside: boolean;
   readonly handle: string;
   readonly startedAt: number;
+  /** A locked work's list or page `updated_at` it was asked for: the one last seen, once this save is complete. */
+  readonly listed?: string;
 }
 
 export interface ListRun {
@@ -571,6 +573,10 @@ export interface ListRun {
   held?: true;
   /** Where the real pace is measured from: works left then, and the last step. */
   pace?: { at: number; left: number; lastAt: number };
+  /** Answers in a row from this list page that were no page and no slow-down from AO3: three end the list. */
+  errors?: number;
+  /** A list sent elsewhere: Bookmarks page 1 is read once more first, to tell whether the reader signed out. */
+  confirm?: true;
 }
 
 export interface StoppedState {
@@ -827,7 +833,7 @@ export class KeepACopy {
         // A locked work's link is never taken, only its `updated_at` (the number alone): its
         // Chapter Index is read again only when that has moved since it was last read.
         const at = Object.values(page.downloads)[0]?.updatedAt ?? null;
-        if (!work.copy || (at !== null && at !== work.listed)) this.#enqueue(state, { workId: work.workId, pace: "reader", ...(at === null ? {} : { listed: at }) }, true);
+        if (!work.copy || work.copy.format !== state.settings.format || (at !== null && at !== work.listed)) this.#enqueue(state, { workId: work.workId, pace: "reader", ...(at === null ? {} : { listed: at }) }, true);
       } else if (link && (!work.copy || work.copy.updatedAt !== link.updatedAt || work.copy.format !== state.settings.format)) {
         this.#enqueue(state, { workId: work.workId, pace: "reader", link });
       }
@@ -1146,19 +1152,20 @@ export class KeepACopy {
     if (index?.workId === work.workId && index.signedIn === false) return skip("needs_sign_in");
     if (index?.workId !== work.workId || index.signedIn !== true) return skip("no_download");
     this.#keep(state, work.workId, { title: index.title, author: index.author });
-    // Read: the list's or page's `updated_at` it was asked for is now the one last seen.
-    if (item.listed !== undefined) work.listed = item.listed;
     const version = lockedVersion(index);
     if (work.copy?.updatedAt === version && work.copy.format === format) {
+      // Unchanged: the list's or page's `updated_at` it was asked for is now the one last seen.
+      if (item.listed !== undefined) work.listed = item.listed;
       this.#drop(state, item.workId);
       return verdict;
     }
     // A locked work's file is fetched only here, right after the signed-in
     // Chapter Index read for that work, and its URL is never kept.
-    return this.#fileStep(state, item, work, { url: lockedFileURL(work.workId, index.title, format, version), updatedAt: version }, "include");
+    return this.#fileStep(state, item, work, { url: lockedFileURL(work.workId, index.title, format, version), updatedAt: version }, "include", item.listed);
   }
 
-  async #fileStep(state: KeepState, item: QueueItem, work: KeptWork, link: DownloadLink, credentials: "omit" | "include"): Promise<Verdict> {
+  /** `listed`: a locked work's list or page `updated_at`, kept with the save and as last seen only once it is complete. */
+  async #fileStep(state: KeepState, item: QueueItem, work: KeptWork, link: DownloadLink, credentials: "omit" | "include", listed?: string): Promise<Verdict> {
     const format = state.settings.format;
     const skip = this.#skipper(state, item, work);
     const answer = await this.#fetch(link.url, "file", credentials);
@@ -1184,7 +1191,10 @@ export class KeepACopy {
     }
     try {
       const downloadId = await this.ports.save({ filename, format, handle, conflict: dated ? "uniquify" : "overwrite" });
-      state.pending = { workId: item.workId, downloadId, filename, bytes: size, format, updatedAt: link.updatedAt, setAside: shrank, handle, startedAt: this.ports.clock.now() };
+      state.pending = {
+        workId: item.workId, downloadId, filename, bytes: size, format, updatedAt: link.updatedAt, setAside: shrank, handle, startedAt: this.ports.clock.now(),
+        ...(listed !== undefined ? { listed } : {}),
+      };
     } catch {
       this.ports.release?.(handle);
       return this.#saveFailed(state, item.workId, this.ports.clock.now()) ?? verdict;
@@ -1221,6 +1231,7 @@ export class KeepACopy {
       downloadId, filename: pending.filename, path: result.filename, bytes: pending.bytes,
       format: pending.format, updatedAt: pending.updatedAt, savedAt: now, url: pending.handle,
     };
+    if (pending.listed !== undefined) work.listed = pending.listed;
     work.skipped = null;
     // A newer link came while this one was saving, or the work was asked for
     // again: it is still to be fetched, or its page read again.
@@ -1243,17 +1254,27 @@ export class KeepACopy {
       run.status = "finished";
       return { kind: "ok" };
     }
+    const signedOut: Verdict = { kind: "stop", code: "signed_out", waitMs: null };
+    if (run.confirm) return this.#confirmList(state, run);
     // The reader's own lists, with their session: Marked for Later and Subscriptions are theirs alone.
     const answer = await this.#fetch(listPageURL(run.user, list, run.page), "page", "include");
-    // Sent elsewhere (not followed): that list is over, and the run goes on with the next.
+    // Sent elsewhere (not followed): signed out, as far as is known, or else asked once more (#confirmList).
     if (answer.kind === "redirect") {
-      this.#nextList(state, run);
+      if (state.signedOutSeen || state.user !== run.user) return signedOut;
+      run.confirm = true;
       return { kind: "ok" };
     }
     const verdict = classifyAnswer(answer, "session", this.ports.clock.now());
-    // A list read with the reader's session that wants a sign-in: they signed out.
-    if (verdict.kind === "skip") return { kind: "stop", code: verdict.code === "needs_sign_in" ? "signed_out" : "forbidden", waitMs: null };
+    if (verdict.kind === "skip") {
+      // A list page shown signed out: the reader signed out.
+      if (verdict.code === "needs_sign_in") return signedOut;
+      // Gone: that list is over. Any other answer is tried again, three times in all, then that list is over too.
+      run.errors = verdict.code === "gone" ? MAX_ATTEMPTS : (run.errors ?? 0) + 1;
+      if (run.errors >= MAX_ATTEMPTS) this.#nextList(state, run);
+      return verdict;
+    }
     if (verdict.kind !== "ok" || answer.kind !== "response") return verdict;
+    delete run.errors;
     const read = readListPage(answer.text ?? "", list);
     for (const listed of read.works) {
       const known = state.works[listed.workId];
@@ -1284,8 +1305,25 @@ export class KeepACopy {
     return verdict;
   }
 
+  /**
+   * After a list sent elsewhere: Bookmarks page 1, read once more with the
+   * reader's session, tells. Shown signed out, the reader signed out; shown
+   * to them, only that list sent them elsewhere, and it is over.
+   */
+  async #confirmList(state: KeepState, run: ListRun): Promise<Verdict> {
+    const answer = await this.#fetch(listPageURL(run.user, "bookmarks", 1), "page", "include");
+    const verdict = answer.kind === "redirect" ? { kind: "ok" as const } : classifyAnswer(answer, "session", this.ports.clock.now());
+    // AO3 slowing down or refusing: asked again after it.
+    if (verdict.kind === "retry" || verdict.kind === "stop") return verdict;
+    delete run.confirm;
+    if (verdict.kind === "skip" && verdict.code === "needs_sign_in") return { kind: "stop", code: "signed_out", waitMs: null };
+    this.#nextList(state, run);
+    return { kind: "ok" };
+  }
+
   /** The run goes on with its next list, or ends with its last. */
   #nextList(state: KeepState, run: ListRun): void {
+    delete run.errors;
     run.list += 1;
     run.page = 1;
     if (run.list < run.lists.length) return;

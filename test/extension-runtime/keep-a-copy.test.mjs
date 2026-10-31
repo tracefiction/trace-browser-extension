@@ -962,7 +962,9 @@ test("a backup reads a locked work's Chapter Index again only when its list's up
   assert.equal(box.saved.length, 1);
 });
 
-test("a list sent elsewhere ends that list and the run goes on; a list page shown signed out stops it", async () => {
+const loggedOutList = (list) => html(listPageURL(USER, list, 1), '<body class="logged-out"><form action="/users/login" method="post"></form></body>');
+
+test("a list sent elsewhere: Bookmarks is read once more, and shown signed in, only that list is over", async () => {
   const answers = {
     [listPageURL(USER, "bookmarks", 1)]: html(listPageURL(USER, "bookmarks", 1), listPage(["7"])),
     // Marked for Later sends this reader elsewhere: not followed.
@@ -977,13 +979,55 @@ test("a list sent elsewhere ends that list and the run goes on; a list page show
   await box.drain();
   assert.equal(box.stored.pacer.stopped, null);
   assert.equal(box.stored.run.status, "finished");
-  assert.deepEqual(box.requests.filter((url) => url.includes("/users/")), ["bookmarks", "later", "subscriptions"].map((list) => listPageURL(USER, list, 1)));
+  assert.deepEqual(box.requests.filter((url) => url.includes("/users/")), ["bookmarks", "later", "bookmarks", "subscriptions"].map((list) => listPageURL(USER, list, 1)));
   assert.equal(box.saved.length, 1);
-  // Signed out for real: the first list shows it, and the run stops.
-  answers[listPageURL(USER, "bookmarks", 1)] = html(listPageURL(USER, "bookmarks", 1), '<body class="logged-out"><form action="/users/login" method="post"></form></body>');
-  assert.equal(await box.engine.startBackup(), "started");
-  await box.drain();
+});
+
+test("a list sent elsewhere when the reader signed out stops the run: seen signed out, or shown so by Bookmarks", async () => {
+  const answers = {
+    [listPageURL(USER, "bookmarks", 1)]: html(listPageURL(USER, "bookmarks", 1), listPage([])),
+    [listPageURL(USER, "later", 1)]: { kind: "redirect", url: listPageURL(USER, "later", 1) },
+  };
+  const box = harness(answers);
+  await box.engine.noteUser(USER);
+  await box.engine.startBackup();
+  // Bookmarks read; then Later sends elsewhere, and Bookmarks, read again, shows the reader signed out.
+  box.now += await box.engine.tick();
+  answers[listPageURL(USER, "bookmarks", 1)] = loggedOutList("bookmarks");
+  for (let i = 0; i < 3 && !box.stored.pacer.stopped; i += 1) box.now += await box.engine.tick();
   assert.equal(box.stored.pacer.stopped.code, "signed_out");
+  assert.deepEqual(box.requests, ["bookmarks", "later", "bookmarks"].map((list) => listPageURL(USER, list, 1)));
+  // Signed in again; then a page shows them signed out: Later sends elsewhere and the run stops at once.
+  answers[listPageURL(USER, "bookmarks", 1)] = html(listPageURL(USER, "bookmarks", 1), listPage([]));
+  await box.engine.noteUser(USER);
+  await box.engine.noteUser(null);
+  box.now += 1;
+  for (let i = 0; i < 3 && !box.stored.pacer.stopped; i += 1) box.now += await box.engine.tick();
+  assert.equal(box.stored.pacer.stopped.code, "signed_out");
+  assert.equal(box.requests.at(-1), listPageURL(USER, "later", 1));
+  // A list page shown signed out stops it the same way.
+  const shown = harness({ [listPageURL(USER, "bookmarks", 1)]: loggedOutList("bookmarks") });
+  await shown.engine.noteUser(USER);
+  await shown.engine.startBackup();
+  await shown.engine.tick();
+  assert.equal(shown.stored.pacer.stopped.code, "signed_out");
+});
+
+test("a list page that is gone ends that list; one that errs is tried three times, then ends it; neither stops the run", async () => {
+  const answers = {
+    [listPageURL(USER, "bookmarks", 1)]: html(listPageURL(USER, "bookmarks", 1), "", 404),
+    [listPageURL(USER, "later", 1)]: html(listPageURL(USER, "later", 1), "<h2>Error 500</h2>", 500),
+    [listPageURL(USER, "subscriptions", 1)]: html(listPageURL(USER, "subscriptions", 1), ""),
+  };
+  const box = harness(answers);
+  await box.engine.noteUser(USER);
+  await box.engine.startBackup();
+  await box.drain();
+  assert.equal(box.stored.pacer.stopped, null);
+  assert.equal(box.stored.run.status, "finished");
+  assert.deepEqual(box.requests, [
+    listPageURL(USER, "bookmarks", 1), ...Array(3).fill(listPageURL(USER, "later", 1)), listPageURL(USER, "subscriptions", 1),
+  ]);
 });
 
 test("a locked work's list value is kept only once its Chapter Index is read: one that failed is asked for again", async () => {
@@ -1029,6 +1073,52 @@ test("a locked work's list value is kept only once its Chapter Index is read: on
   await check("1761900000");
   assert.equal(indexReads(), 5);
   assert.equal(box.stored.works["8"].listed, "1761900000");
+});
+
+test("a locked work whose new file fails keeps the old list value, so the next list asks for it again", async () => {
+  const one = lockedFileURL("8", "Invented work 8", "epub", lockedVersion({ chapters: 1, latestAt: dayOf("2026-10-01") }));
+  const two = lockedFileURL("8", "Invented work 8", "epub", lockedVersion({ chapters: 2, latestAt: dayOf("2026-10-20") }));
+  const answers = {
+    [listPageURL(USER, "later", 1)]: html(listPageURL(USER, "later", 1), listPage([])),
+    [listPageURL(USER, "subscriptions", 1)]: html(listPageURL(USER, "subscriptions", 1), ""),
+    [navigateURL("8")]: html(navigateURL("8"), chapterIndex("8")),
+    [one]: file(one, epub()),
+  };
+  const backup = async (updatedAt) => {
+    answers[listPageURL(USER, "bookmarks", 1)] = html(listPageURL(USER, "bookmarks", 1), listPage([{ id: "8", restricted: true, updatedAt }]));
+    await box.engine.startBackup();
+    await box.drain();
+  };
+  const box = harness(answers);
+  await box.engine.noteUser(USER);
+  await backup("1761700000");
+  assert.equal(box.stored.works["8"].listed, "1761700000");
+  // A new chapter, but its file fails: the old copy and the old list value stay.
+  answers[navigateURL("8")] = html(navigateURL("8"), chapterIndex("8", { chapters: [["81", "2026-10-01"], ["82", "2026-10-20"]] }));
+  answers[two] = file(two, epub(), 500);
+  await backup("1761800000");
+  assert.equal(box.stored.works["8"].listed, "1761700000");
+  assert.equal(box.stored.works["8"].copy.updatedAt, lockedVersion({ chapters: 1, latestAt: dayOf("2026-10-01") }));
+  // The next list asks again, and the new file is saved.
+  answers[two] = file(two, epub());
+  await backup("1761800000");
+  assert.equal(box.stored.works["8"].copy.updatedAt, lockedVersion({ chapters: 2, latestAt: dayOf("2026-10-20") }));
+  assert.equal(box.stored.works["8"].listed, "1761800000");
+});
+
+test("a locked work's copy in another format is copied again once the format is changed, its link unmoved", async () => {
+  const epubFile = lockedFileURL("8", "Invented work 8", "epub", lockedVersion({ chapters: 1, latestAt: dayOf("2026-10-01") }));
+  const pdfFile = lockedFileURL("8", "Invented work 8", "pdf", lockedVersion({ chapters: 1, latestAt: dayOf("2026-10-01") }));
+  const pdf = new Uint8Array(2_000);
+  pdf.set(new TextEncoder().encode("%PDF-1.7"));
+  const box = harness({ [navigateURL("8")]: html(navigateURL("8"), chapterIndex("8")), [epubFile]: file(epubFile, epub()), [pdfFile]: { ...file(pdfFile, pdf), contentType: "application/pdf" } });
+  await box.engine.notePage(readWorkPage(workPage("8", { restricted: true })), "bookmark");
+  await box.drain();
+  await box.engine.updateSettings({ format: "pdf" });
+  await box.engine.notePage(readWorkPage(workPage("8", { restricted: true })), "visit");
+  await box.drain();
+  assert.deepEqual(box.fileModes.map(([url]) => url), [epubFile, pdfFile]);
+  assert.equal(box.stored.works["8"].copy.format, "pdf");
 });
 
 test("a busy file fetcher is no stop and no read; after the page was sent, it is the work's try", async () => {
