@@ -190,9 +190,9 @@ export interface NativeHandoffDeps {
 }
 
 function fromTab(answer: TabAnswer | null): Fetched {
-  // No answer from the tab (closed, reloaded, or the script could not run there):
-  // this device's trouble, which waits like a busy fetch and is never a step toward a stop.
-  if (!isRecord(answer)) return { kind: "failed", code: "busy" };
+  // No answer from the tab (closed, reloaded, or the script lost it): the
+  // request may have been sent, so it counts as the work's try, never toward a stop.
+  if (!isRecord(answer)) return { kind: "failed", code: "lost" };
   if (answer.kind !== "response") return answer;
   const { head, sha256: _sha256, ...rest } = answer;
   return { ...rest, ...(head ? { bytes: Uint8Array.from(head) } : {}) };

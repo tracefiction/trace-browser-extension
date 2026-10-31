@@ -417,8 +417,12 @@ export type Fetched =
    * somewhere else, and nothing more is asked (the browser keeps where).
    */
   | { readonly kind: "redirect"; readonly url: string }
-  /** `busy`: another file is still being fetched (Chrome's offscreen document takes one at a time). */
-  | { readonly kind: "failed"; readonly code: "network" | "timeout" | "too_large" | "busy" };
+  /**
+   * `busy`: nothing was sent (another file is still being fetched, or AO3's
+   * lease is taken). `lost`: the request was sent, but its answer never came
+   * back (the tab's script lost it).
+   */
+  | { readonly kind: "failed"; readonly code: "network" | "timeout" | "too_large" | "busy" | "lost" };
 
 /** Why the whole queue stopped: AO3 itself is refusing, checking or struggling. */
 export type StopCode = "challenge" | "forbidden" | "wrong_host" | "unreadable" | "slow_down" | "save_failed" | "signed_out";
@@ -435,7 +439,8 @@ export type Verdict =
   /** `network` when the request itself failed, which counts against the work. */
   /** `own`: the wait is this extension's, not a time AO3 gave. */
   /** `busy`: nothing was sent (the file fetcher, or AO3's lease, was taken): it waits its turn, never a refusal. */
-  | { readonly kind: "retry"; readonly waitMs: number | null; readonly network?: true; readonly own?: true; readonly busy?: true }
+  /** `lost`: sent, with no answer: it counts as the work's try and toward the window's cap, never toward a stop. */
+  | { readonly kind: "retry"; readonly waitMs: number | null; readonly network?: true; readonly own?: true; readonly busy?: true; readonly lost?: true }
   | { readonly kind: "stop"; readonly code: StopCode; readonly waitMs: number | null };
 
 const bytesText = (bytes: Uint8Array, from: number, to: number) => String.fromCharCode(...bytes.subarray(from, to));
@@ -467,7 +472,9 @@ export function classifyAnswer(answer: Fetched, expect: CopyFormat | "page" | "s
   if (answer.kind === "redirect") return expect === "session" ? { kind: "skip", code: "needs_sign_in" } : { kind: "skip", code: "no_download" };
   if (answer.kind === "failed") {
     if (answer.code === "too_large") return { kind: "skip", code: "too_large" };
-    return answer.code === "busy" ? { kind: "retry", waitMs: NETWORK_RETRY_MS, busy: true, own: true } : { kind: "retry", waitMs: NETWORK_RETRY_MS, network: true, own: true };
+    if (answer.code === "busy") return { kind: "retry", waitMs: NETWORK_RETRY_MS, busy: true, own: true };
+    if (answer.code === "lost") return { kind: "retry", waitMs: NETWORK_RETRY_MS, lost: true, own: true };
+    return { kind: "retry", waitMs: NETWORK_RETRY_MS, network: true, own: true };
   }
   const waitMs = retryAfterMs(answer.retryAfter, now);
   const text = answer.text ?? (answer.bytes ? new TextDecoder().decode(answer.bytes.subarray(0, 8_192)) : "");
@@ -1367,20 +1374,20 @@ export class KeepACopy {
     const sentNothing = this.#sent === sentBefore;
     if (sentNothing) pacer.window.reads = Math.max(0, pacer.window.reads - 1);
     // AO3 refusing or slowing everyone down, or no answer at all, is not this work's fault; nor is a busy
-    // fetcher, unless the step sent its page first.
+    // fetcher, unless the step sent its page first. A lost answer is the work's try.
     const siteWide = (verdict.kind === "stop" && verdict.code !== "unreadable" && verdict.code !== "save_failed")
-      || (verdict.kind === "retry" && (!verdict.busy || sentNothing));
+      || (verdict.kind === "retry" && !verdict.lost && (!verdict.busy || sentNothing));
     if (item && siteWide) item.attempts = Math.max(0, (item.attempts ?? 1) - 1);
     // No answer: the next work goes first, so one file that never arrives holds up no other.
     if (item && verdict.kind === "retry" && verdict.network) {
       this.#drop(state, item.workId);
       state.queue.push(item);
     }
-    const failed = (verdict.kind === "retry" && !verdict.busy) || (verdict.kind === "stop" && !NOT_AO3_FAILING.includes(verdict.code));
+    const failed = (verdict.kind === "retry" && !verdict.busy && !verdict.lost) || (verdict.kind === "stop" && !NOT_AO3_FAILING.includes(verdict.code));
     const timeFromAO3 = failed && verdict.waitMs !== null && !(verdict.kind === "retry" && verdict.own);
     if (failed) pacer.failures = timeFromAO3 ? 0 : (pacer.failures ?? 0) + 1;
     else if (verdict.kind !== "retry" && !(verdict.kind === "stop" && verdict.code === "save_failed")) pacer.failures = 0;
-    if (verdict.kind === "retry" && verdict.busy) {
+    if (verdict.kind === "retry" && (verdict.busy || verdict.lost)) {
       // AO3 refused nothing: no step toward a stop.
       pacer.dueAt = after + (verdict.waitMs ?? NETWORK_RETRY_MS);
     } else if (verdict.kind === "retry") {

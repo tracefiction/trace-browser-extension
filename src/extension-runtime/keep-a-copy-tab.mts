@@ -28,7 +28,7 @@ export type TabAnswer =
     }
   /** A request with the tab's sign-in that was sent elsewhere: not followed. */
   | { readonly kind: "redirect"; readonly url: string }
-  | { readonly kind: "failed"; readonly code: "network" | "timeout" | "too_large" | "busy" };
+  | { readonly kind: "failed"; readonly code: "network" | "timeout" | "too_large" | "busy" | "lost" };
 
 /**
  * Makes one request to AO3 from the tab. `as: "file"` keeps the file in the

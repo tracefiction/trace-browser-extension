@@ -315,7 +315,7 @@ test("the reader leaving the tab, or a script that cannot run there, is never a 
   for (let i = 0; i < 5; i += 1) box.now += (await box.handoff.engine.tick()) ?? 0;
   site.fetchImpl = fetchImpl;
   box.scriptFails = true;
-  for (let i = 0; i < 5; i += 1) box.now += (await box.handoff.engine.tick()) ?? 0;
+  for (let i = 0; i < 2; i += 1) box.now += (await box.handoff.engine.tick()) ?? 0;
   assert.deepEqual(site.requests, Array(5).fill(workURL("36")));
   assert.equal((await box.handoff.engine.view()).stopped, null);
   await box.handoff.askQueue(true);
@@ -323,6 +323,25 @@ test("the reader leaving the tab, or a script that cannot run there, is never a 
   box.scriptFails = false;
   await box.drain();
   assert.equal(app.saved.length, 1);
+});
+
+test("a step that sent nothing takes nothing from the cap; an answer lost after sending is the work's try, never a stop", async () => {
+  const site = ao3({ [workURL("38")]: workPage("38"), [fileURL("38")]: epub(1_000) });
+  const app = fakeApp({ works: [{ workId: "38", reason: "refused" }] });
+  const box = harness({ app, site });
+  await box.handoff.askQueue(true);
+  // The app holds AO3's lease: thirty steps send nothing.
+  app.appHoldsAO3 = true;
+  for (let i = 0; i < 30; i += 1) box.now += (await box.handoff.engine.tick()) ?? 0;
+  assert.equal((await box.store.read("")).pacer.window.reads, 0);
+  app.appHoldsAO3 = false;
+  // Sent, but the tab's script lost the answer, three times: skipped as failed, no stop, three reads.
+  box.scriptFails = true;
+  for (let i = 0; i < 4; i += 1) box.now += (await box.handoff.engine.tick()) ?? 0;
+  const stored = await box.store.read("");
+  assert.equal(stored.pacer.window.reads, 3);
+  assert.equal(stored.pacer.stopped, null);
+  assert.deepEqual(app.skipped.map(({ workId, code }) => [workId, code]), [["38", "failed"]]);
 });
 
 test("only a stop AO3's own answer set is shared with the app, never one from tries that got no answer", async () => {

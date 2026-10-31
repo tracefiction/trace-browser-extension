@@ -41,8 +41,12 @@ is compiled in only with `TRACE_KEEP_A_COPY=1`.
   A work's page and its file come from the same tab in the same step; if the
   reader has left that tab, the step ends and no other tab is used. A file is
   handed over only from the tab that fetched it. A tab left, closed or
-  reloaded, or a script that cannot run in it, is this device's trouble: the
-  step waits as for a busy fetch, never a step toward a stop.
+  reloaded, or a script that cannot run in it, is this device's trouble,
+  never a step toward a stop. When nothing was sent (the tab was left before
+  the request, or the lease is the app's), the step waits as for a busy
+  fetch and takes nothing from the cap of reads. When a request was sent but
+  its answer was lost, it counts as one of the work's three tries and as a
+  read.
 - The file stays a Blob in the reader's tab, built from the response as it
   arrives and hashed as it goes, so the tab never holds it twice. The
   background reads one part, encodes it as base64, sends it, and drops it. A
@@ -164,8 +168,10 @@ layout. `transferId` is a lowercase UUID.
    app's. On a mismatch it answers `{ok: false, error: "checksum_mismatch"}`
    and discards the transfer. The app takes the file into its copy when it
    next runs, only if its `updatedAt` is strictly newer than the copy it
-   holds; until then, and if it refuses the file, the old copy stays as it
-   is. A refused file (not newer, not an EPUB, too large) takes the work off
+   holds, comparing versions of the same kind only: a locked version (twelve
+   digits, from 100,000,000,000 up) with a locked version, a Download link's
+   `updated_at` with another; a file of the other kind replaces the copy.
+   Until then, and if it refuses the file, the old copy stays as it is. A refused file (not newer, not an EPUB, too large) takes the work off
    the list, so the extension stops fetching it.
 4. **ABORT.** The app discards the transfer's parts. Sent when the app
    refuses a message, when the tab lost the file (closed or reloaded), when
