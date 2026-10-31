@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
 
-import { COPY_FOLDER, AO3_ORIGIN } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
+import { COPY_FOLDER, AO3_ORIGIN, lockedFileURL } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
 import {
   KEEP_COPY_NATIVE,
   MAX_QUEUE_WORKS,
@@ -24,8 +24,8 @@ import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 const NOW = Date.parse("2026-10-29T10:00:00Z");
 const INBOX_MAX = 512 * 1_024;
 
-function workPage(id, { updatedAt = "1761700000", restricted = true, signedIn = true } = {}) {
-  return `<html><body class="${signedIn ? "logged-in" : "logged-out"}">` +
+function workPage(id, { updatedAt = "1761700000", restricted = false } = {}) {
+  return `<html><body class="logged-out">` +
     `<ul class="work navigation actions"><li class="download"><button>Download</button><ul class="expandable secondary">` +
     `<li><a href="/downloads/${id}/Invented_work.epub?updated_at=${updatedAt}">EPUB</a></li></ul></li></ul>` +
     `<dl class="work meta group"><dd class="fandom tags"><ul><li><a class="tag" href="/tags/x/works">Invented Lanterns</a></li></ul></dd>` +
@@ -47,18 +47,42 @@ const workURL = (id) => `${AO3_ORIGIN}/works/${id}?view_adult=true`;
 const fileURL = (id, updatedAt = "1761700000") => `${AO3_ORIGIN}/downloads/${id}/Invented_work.epub?updated_at=${updatedAt}`;
 const sha = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
 
-/** AO3 as the reader's tab reaches it: the real in-tab functions run against this. */
+const navigateURL = (id) => `${AO3_ORIGIN}/works/${id}/navigate`;
+/** A route answered with AO3's sign-in page. */
+const LOGIN = Symbol("login");
+
+/** A work's Chapter Index: `chapters` as [chapter id, YYYY-MM-DD]. */
+function chapterIndex(id, { chapters = [["101", "2026-10-01"]], signedIn = true } = {}) {
+  return `<html><body class="${signedIn ? "logged-in" : "logged-out"}"><h2 class="heading">Chapter Index for <a href="/works/${id}">Invented work ${id}</a>` +
+    ` by <a rel="author" href="/users/Quill/pseuds/Quill">Synthetic_Quill</a></h2><ol class="chapter index group" role="navigation">` +
+    chapters.map(([cid, date], i) => `<li><a href="/works/${id}/chapters/${cid}">${i + 1}. Chapter</a> <span class="datetime">(${date})</span></li>`).join("") + "</ol></body></html>";
+}
+
+/**
+ * AO3 as the reader's tab reaches it: the real in-tab functions run against
+ * this. `modes`: each request's credentials mode. A request that is not
+ * signed in is sent to the sign-in page for a locked work's page, and no
+ * work or chapter page is ever read signed in.
+ */
 function ao3(routes) {
   const requests = [];
-  const fetchImpl = async (url) => {
+  const modes = [];
+  const fetchImpl = async (url, init = {}) => {
     requests.push(String(url));
+    modes.push(init.credentials);
+    assert.ok(init.credentials !== "include" || !/\/works\/[0-9]+(?:[?#]|$|\/chapters\/)/.test(String(url)), `${url} read signed in`);
     const body = routes[String(url)];
     if (body === undefined) return new Response("<h2>Error 404</h2>", { status: 404, headers: { "content-type": "text/html" } });
+    if (body === LOGIN || (typeof body === "string" && init.credentials !== "include" && body.includes('alt="(Restricted)"'))) {
+      const login = new Response('<body class="logged-out"><form action="/users/login" method="post"></form></body>', { status: 200, headers: { "content-type": "text/html" } });
+      Object.defineProperty(login, "url", { value: `${AO3_ORIGIN}/users/login?restricted=true` });
+      return login;
+    }
     return typeof body === "string"
       ? new Response(body, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } })
       : new Response(body, { status: 200, headers: { "content-type": "application/epub+zip" } });
   };
-  return { requests, fetchImpl };
+  return { requests, modes, fetchImpl };
 }
 
 /** The Trace app's side, as the hand-off protocol says it behaves. */
@@ -186,14 +210,15 @@ test("the reader's AO3 tab is the one they are on, else the last they used", () 
   assert.equal(readerTab([{ id: 5, url: "https://archiveofourown.org.example.invalid/" }]), null);
 });
 
-test("a locked work the app asks for is read from its page in the tab, then handed over in parts the app checks", async () => {
+test("a work AO3 refused the app is read from its page in the tab, signed out, then handed over in parts the app checks", async () => {
   const file = epub(PART_BYTES * 2 + 1_000);
   const site = ao3({ [workURL("21")]: workPage("21"), [fileURL("21")]: file });
-  const app = fakeApp({ works: [{ workId: "21", reason: "locked", pace: "reader" }] });
+  const app = fakeApp({ works: [{ workId: "21", reason: "refused", pace: "reader" }] });
   const box = harness({ app, site });
   assert.equal(await box.handoff.askQueue(true), true);
   await box.drain();
   assert.deepEqual(site.requests, [workURL("21"), fileURL("21")]);
+  assert.deepEqual(site.modes, ["omit", "omit"]);
   assert.equal(app.saved.length, 1);
   assert.equal(app.saved[0].bytes.equals(Buffer.from(file)), true);
   assert.equal(app.saved[0].updatedAt, "1761700000");
@@ -217,7 +242,7 @@ test("a background stopped mid-transfer resumes where the app has it, and sends 
   const site = ao3({ [workURL("31")]: workPage("31"), [fileURL("31")]: file });
   let dropped = false;
   // The app's answer to part 1 never arrives, and the background stops.
-  const app = fakeApp({ works: [{ workId: "31", reason: "locked" }], drop: (message) => message.type === KEEP_COPY_NATIVE.part && message.index === 1 && !dropped && (dropped = true) });
+  const app = fakeApp({ works: [{ workId: "31", reason: "refused" }], drop: (message) => message.type === KEEP_COPY_NATIVE.part && message.index === 1 && !dropped && (dropped = true) });
   const first = harness({ app, site });
   await first.handoff.askQueue(true);
   // Ticks until the unanswered part is recorded, then this background is gone.
@@ -258,36 +283,62 @@ test("a file the tab lost, or a transfer the app refuses, is aborted and the old
   assert.equal((await box.store.getMeta(TRANSFER_KEY)).state, "failed");
 });
 
-test("a locked work whose page does not show the reader signed in fetches no file; the app is told", async () => {
-  const site = ao3({ [workURL("51")]: workPage("51", { signedIn: false }), [fileURL("51")]: epub(2_000) });
+test("a locked work is copied from its Chapter Index in the tab, signed in, then its file, and handed over", async () => {
+  const file = epub(2_000);
+  const version = String(Date.parse("2026-10-20T00:00:00Z") / 1_000 + 2);
+  const lockedFile = lockedFileURL("51", "Invented work 51", "epub", version);
+  const site = ao3({
+    [workURL("51")]: workPage("51", { restricted: true }),
+    [navigateURL("51")]: chapterIndex("51", { chapters: [["511", "2026-10-01"], ["512", "2026-10-20"]] }),
+    [lockedFile]: file,
+  });
   const app = fakeApp({ works: [{ workId: "51", reason: "locked" }] });
   const box = harness({ app, site });
   await box.handoff.askQueue(true);
   await box.drain();
-  assert.deepEqual(site.requests, [workURL("51")]);
-  assert.deepEqual(app.skipped.map(({ workId, code }) => [workId, code]), [["51", "needs_sign_in"]]);
+  assert.deepEqual(site.requests, [workURL("51"), navigateURL("51"), lockedFile]);
+  assert.deepEqual(site.modes, ["omit", "include", "include"]);
+  assert.equal(app.saved.length, 1);
+  assert.equal(app.saved[0].updatedAt, version);
+  assert.equal(app.saved[0].bytes.equals(Buffer.from(file)), true);
+});
+
+test("a locked work's Chapter Index on the sign-in page, or of another work, fetches no file", async () => {
+  const site = ao3({
+    [workURL("52")]: workPage("52", { restricted: true }),
+    [navigateURL("52")]: LOGIN,
+    [workURL("53")]: workPage("53", { restricted: true }),
+    [navigateURL("53")]: chapterIndex("54"),
+  });
+  const app = fakeApp({ works: [{ workId: "52", reason: "locked" }, { workId: "53", reason: "locked" }] });
+  const box = harness({ app, site });
+  await box.handoff.askQueue(true);
+  await box.drain();
+  assert.equal(site.requests.some((url) => url.includes("/downloads/")), false);
+  assert.deepEqual(app.skipped.map(({ workId, code }) => [workId, code]).sort(), [["52", "needs_sign_in"], ["53", "no_download"]]);
   assert.equal(app.messages.some((message) => message.type === KEEP_COPY_NATIVE.begin), false);
+  assert.equal((await box.handoff.engine.view()).stopped, null);
 });
 
 test("a work the app holds at the same updated_at is only looked at; switched off in the app, the queue empties", async () => {
   const site = ao3({ [workURL("61")]: workPage("61"), [fileURL("61")]: epub(3_000) });
-  const app = fakeApp({ works: [{ workId: "61", reason: "locked" }] });
+  const app = fakeApp({ works: [{ workId: "61", reason: "refused" }] });
   const box = harness({ app, site });
   await box.handoff.askQueue(true);
   await box.drain();
   assert.equal(app.saved.length, 1);
   // Asked again with the copy it holds: the page is read, no file is fetched.
-  app.works = [{ workId: "61", reason: "locked", have: "1761700000" }];
+  app.works = [{ workId: "61", reason: "refused", have: "1761700000" }];
   await box.handoff.askQueue(true);
   await box.drain();
   assert.deepEqual(site.requests, [workURL("61"), fileURL("61"), workURL("61")]);
   // The app lost its copy: fetched again.
-  app.works = [{ workId: "61", reason: "locked", have: null }];
+  app.works = [{ workId: "61", reason: "refused", have: null }];
   await box.handoff.askQueue(true);
   await box.drain();
   assert.equal(app.saved.length, 2);
   app.enabled = false;
-  app.works = [{ workId: "61", reason: "locked" }];
+  app.works = [{ workId: "61", reason: "refused" }];
   await box.handoff.askQueue(true);
   assert.equal((await box.handoff.engine.view()).waiting, 0);
   assert.equal(await box.handoff.engine.tick(), null);
@@ -299,7 +350,7 @@ test("the tab keeps a file as a blob, gives it back a part at a time, and refuse
   const realFetch = globalThis.fetch;
   globalThis.fetch = site.fetchImpl;
   t.after(() => { globalThis.fetch = realFetch; });
-  const answer = await keepCopyFetchInTab(fileURL("71"), "file", 5_000, 50 * 1_024 * 1_024, "keep-copy:7:a");
+  const answer = await keepCopyFetchInTab(fileURL("71"), "file", 5_000, 50 * 1_024 * 1_024, "keep-copy:7:a", "omit");
   assert.equal(answer.kind, "response");
   assert.equal(answer.size, file.length);
   assert.equal(answer.sha256, sha(file));
@@ -310,14 +361,19 @@ test("the tab keeps a file as a blob, gives it back a part at a time, and refuse
   assert.equal(await keepCopyPartInTab("keep-copy:7:a", 2, PART_BYTES), null);
   assert.equal(keepCopyReleaseInTab("keep-copy:7:a"), true);
   assert.equal(await keepCopyPartInTab("keep-copy:7:a", 0, PART_BYTES), null);
-  assert.deepEqual(await keepCopyFetchInTab("https://example.invalid/x.epub", "file", 5_000, 1_000, "keep-copy:7:b"), { kind: "failed", code: "network" });
-  assert.deepEqual(await keepCopyFetchInTab(fileURL("71"), "file", 5_000, 1_000, "keep-copy:7:c"), { kind: "failed", code: "too_large" });
+  assert.deepEqual(await keepCopyFetchInTab("https://example.invalid/x.epub", "file", 5_000, 1_000, "keep-copy:7:b", "omit"), { kind: "failed", code: "network" });
+  assert.deepEqual(await keepCopyFetchInTab(fileURL("71"), "file", 5_000, 1_000, "keep-copy:7:c", "omit"), { kind: "failed", code: "too_large" });
+  await keepCopyFetchInTab(workURL("71"), "text", 5_000, 1_000, "", "omit");
+  await keepCopyFetchInTab(navigateURL("71"), "text", 5_000, 1_000, "", "include");
+  // Each request from the tab goes with the credentials it is given, and anything else is signed out.
+  await keepCopyFetchInTab(workURL("71"), "text", 5_000, 1_000, "", "same-origin");
+  assert.deepEqual(site.modes, ["omit", "omit", "omit", "include", "omit"]);
 });
 
 test("a slow transfer that keeps moving is waited on past the 15 minutes, and AO3 is asked for the file once", async () => {
   const file = epub(PART_BYTES * 4);
   const site = ao3({ [workURL("81")]: workPage("81"), [fileURL("81")]: file });
-  const app = fakeApp({ works: [{ workId: "81", reason: "locked" }] });
+  const app = fakeApp({ works: [{ workId: "81", reason: "refused" }] });
   const box = harness({ app, site });
   // Each part takes the app six minutes: 24 minutes in all.
   const send = app.send;
@@ -335,7 +391,7 @@ test("a slow transfer that keeps moving is waited on past the 15 minutes, and AO
 test("a transfer given up while a part is on its way is never written open again", async () => {
   const file = epub(PART_BYTES * 2);
   const site = ao3({ [workURL("82")]: workPage("82"), [fileURL("82")]: file });
-  const app = fakeApp({ works: [{ workId: "82", reason: "locked" }] });
+  const app = fakeApp({ works: [{ workId: "82", reason: "refused" }] });
   let release;
   app.hold = new Promise((resolve) => { release = resolve; });
   const box = harness({ app, site });
@@ -361,7 +417,7 @@ test("a repeated message for a transfer the app completed counts as saved", asyn
   const site = ao3({ [workURL("83")]: workPage("83"), [fileURL("83")]: file });
   // The app saves the file, but its answer to END is lost.
   let lost = false;
-  const app = fakeApp({ works: [{ workId: "83", reason: "locked" }], drop: (message) => message.type === KEEP_COPY_NATIVE.end && !lost && (lost = true) });
+  const app = fakeApp({ works: [{ workId: "83", reason: "refused" }], drop: (message) => message.type === KEEP_COPY_NATIVE.end && !lost && (lost = true) });
   const box = harness({ app, site });
   await box.handoff.askQueue(true);
   await box.drain();
@@ -372,8 +428,9 @@ test("a repeated message for a transfer the app completed counts as saved", asyn
 });
 
 test("a work skipped, or found unchanged, is not read again for the same copy within a day", async () => {
-  const site = ao3({ [workURL("84")]: workPage("84", { signedIn: false }) });
-  const app = fakeApp({ works: [{ workId: "84", reason: "locked" }] });
+  // Gone from AO3: a 404.
+  const site = ao3({});
+  const app = fakeApp({ works: [{ workId: "84", reason: "refused" }] });
   const box = harness({ app, site });
   await box.handoff.askQueue(true);
   await box.drain();
@@ -399,11 +456,11 @@ test("only the work open in the reader's tab goes at the reader's pace; the app'
 
 test("a page and its file come from one tab: a reader who switched tabs ends the step, and no other tab is used", async () => {
   const site = ao3({ [workURL("87")]: workPage("87"), [fileURL("87")]: epub(3_000) });
-  const app = fakeApp({ works: [{ workId: "87", reason: "locked" }] });
+  const app = fakeApp({ works: [{ workId: "87", reason: "refused" }] });
   const box = harness({ app, site });
   const fetchImpl = site.fetchImpl;
-  site.fetchImpl = async (url) => {
-    const answer = await fetchImpl(url);
+  site.fetchImpl = async (url, init) => {
+    const answer = await fetchImpl(url, init);
     // The reader moves to another AO3 tab while the page is read.
     if (String(url) === workURL("87")) box.tab = { ...TAB, id: 8 };
     return answer;

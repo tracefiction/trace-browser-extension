@@ -1,7 +1,9 @@
 /**
  * Keep a Copy's requests in Safari, made in the reader's own AO3 tab: each
  * function here is put into that tab by `scripting.executeScript`, so it runs
- * with the tab's own sign-in and must use nothing from outside itself.
+ * there and must use nothing from outside itself. A request is made signed
+ * out (`credentials: "omit"`) unless it is a locked work's Chapter Index or
+ * file (keep-a-copy.mts, `#lockedStep`).
  *
  * A file is kept in the tab as a Blob, never as text, until the background
  * has handed it to the Trace app a part at a time (keep-a-copy-native.mts).
@@ -31,7 +33,7 @@ export type TabAnswer =
  * tab under a handle, as a Blob built straight from the response's chunks
  * (4 MiB at a time) while they are hashed: the file is never held twice.
  */
-export async function keepCopyFetchInTab(url: string, as: "text" | "file", timeoutMs: number, limit: number, handle: string): Promise<TabAnswer> {
+export async function keepCopyFetchInTab(url: string, as: "text" | "file", timeoutMs: number, limit: number, handle: string, credentials: "omit" | "include"): Promise<TabAnswer> {
   const scope = globalThis as unknown as { __traceKeepCopyFilesV1?: Map<string, { blob: Blob; timer: ReturnType<typeof setTimeout> }> };
   const files = (scope.__traceKeepCopyFilesV1 ??= new Map());
   if (!/^https:\/\/(?:download\.)?archiveofourown\.org\//.test(url)) return { kind: "failed", code: "network" };
@@ -115,7 +117,7 @@ export async function keepCopyFetchInTab(url: string, as: "text" | "file", timeo
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { credentials: "include", redirect: "follow", signal: controller.signal });
+    const response = await fetch(url, { credentials: credentials === "include" ? "include" : "omit", redirect: "follow", signal: controller.signal });
     const declared = Number(response.headers.get("content-length"));
     if (Number.isFinite(declared) && declared > limit) return { kind: "failed", code: "too_large" };
     const facts = {

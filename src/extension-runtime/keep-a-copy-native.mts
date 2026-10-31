@@ -2,14 +2,15 @@
  * Keep a Copy in Safari (iPhone, iPad and Mac): the extension side of the
  * hand-off to the Trace app. Safari has no downloads API, so the app
  * downloads public works itself and keeps every file and the queue. This
- * extension fetches only what the app asks it to (locked works, and works
- * AO3 refused the app), in the reader's own AO3 tab, and hands each file to
- * the app a part at a time over `sendNativeMessage`.
+ * extension reads only what the app asks it to (works AO3 refused the app,
+ * and locked works), in the reader's own AO3 tab, and hands each file to the
+ * app a part at a time over `sendNativeMessage`. A public work is read signed
+ * out; a locked one from its Chapter Index and file, signed in.
  *
  * The queue, its pace
- * and its rules are keep-a-copy.mts's, unchanged: one request at a time, a
- * locked work only from its page as the signed-in reader sees it, read in
- * the same step, and only a real file is handed over.
+ * and its rules are keep-a-copy.mts's, unchanged: one request at a time,
+ * each work's page (or a locked work's Chapter Index) and its file in the
+ * same step, and only a real file handed over.
  *
  * No file is ever held here whole, nor as base64: it stays a Blob in the
  * reader's tab (keep-a-copy-tab.mts), and one part of at most 256 KiB is
@@ -202,13 +203,14 @@ export class NativeCopyHandoff {
       write: (state, changed, scope) => deps.store.write(state, changed, scope),
       // Page and file in one step, from one tab.
       fileWithPage: true,
-      fetchPage: async (url) => {
+      // Each request goes with the credentials the queue gives it, in the tab.
+      fetchPage: async (url, credentials) => {
         const tab = await deps.tabs.find();
         this.#stepTab = tab;
         if (tab === null) return { kind: "failed", code: "busy" };
-        return fromTab(await deps.tabs.run<TabAnswer>(tab.id, keepCopyFetchInTab, [url, "text", REQUEST_TIMEOUT_MS, MAX_PAGE_CHARS * 2, ""], REQUEST_TIMEOUT_MS + 5_000));
+        return fromTab(await deps.tabs.run<TabAnswer>(tab.id, keepCopyFetchInTab, [url, "text", REQUEST_TIMEOUT_MS, MAX_PAGE_CHARS * 2, "", credentials], REQUEST_TIMEOUT_MS + 5_000));
       },
-      fetchFile: async (url) => {
+      fetchFile: async (url, credentials) => {
         const pinned = this.#stepTab;
         this.#stepTab = null;
         const tab = await deps.tabs.find();
@@ -216,7 +218,7 @@ export class NativeCopyHandoff {
         // ends here, and no other tab is used in its place.
         if (pinned === null || tab === null || !samePlace(pinned, tab)) return { kind: "failed", code: "network" };
         const handle = `keep-copy:${tab.id}:${deps.newId()}`;
-        const answer = await deps.tabs.run<TabAnswer>(tab.id, keepCopyFetchInTab, [url, "file", FILE_TIMEOUT_MS, MAX_FILE_BYTES, handle], FILE_TIMEOUT_MS + 5_000);
+        const answer = await deps.tabs.run<TabAnswer>(tab.id, keepCopyFetchInTab, [url, "file", FILE_TIMEOUT_MS, MAX_FILE_BYTES, handle, credentials], FILE_TIMEOUT_MS + 5_000);
         if (answer?.kind === "response" && answer.handle === handle && typeof answer.sha256 === "string" && /^[0-9a-f]{64}$/.test(answer.sha256) && typeof answer.size === "number") {
           this.#files.set(handle, { size: answer.size, sha256: answer.sha256 });
         }
