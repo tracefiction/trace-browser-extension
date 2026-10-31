@@ -20,7 +20,7 @@ const scope = globalThis as unknown as {
 };
 const runtime = (scope.browser ?? scope.chrome)?.runtime;
 
-const LOCKED: readonly SkipCode[] = ["needs_sign_in"];
+const LOCKED: readonly SkipCode[] = ["locked"];
 const GONE: readonly SkipCode[] = ["gone", "no_download"];
 
 const number = /* @__PURE__ */ new Intl.NumberFormat("en-US");

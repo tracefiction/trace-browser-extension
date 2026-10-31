@@ -36,12 +36,16 @@ async function readCapped(response: Response, limit: number): Promise<Uint8Array
   return out;
 }
 
-/** A page as text, or a file as a blob URL plus its first bytes; never more than `limit` bytes. */
-export async function requestAO3(url: string, as: "text" | "file", timeoutMs: number, limit: number): Promise<Fetched> {
+/**
+ * A page as text, or a file as a blob URL plus its first bytes; never more
+ * than `limit` bytes. Signed out unless `credentials` says otherwise: only
+ * the reader's own lists are read with their AO3 session.
+ */
+export async function requestAO3(url: string, as: "text" | "file", timeoutMs: number, limit: number, credentials: "omit" | "include" = "omit"): Promise<Fetched> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { credentials: "include", redirect: "follow", signal: controller.signal });
+    const response = await fetch(url, { credentials, redirect: "follow", signal: controller.signal });
     const bytes = await readCapped(response, limit);
     if (!bytes) return { kind: "failed", code: "too_large" };
     const facts = {

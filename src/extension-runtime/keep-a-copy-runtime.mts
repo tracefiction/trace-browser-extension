@@ -3,11 +3,12 @@
  * AO3 requests, the downloads API and storage around the queue in
  * keep-a-copy.mts.
  *
- * Requests go from the extension with the reader's own AO3 cookies, which
- * the browser sends because the extension may reach AO3. A file is held as a
- * blob and saved from its URL: Firefox's background makes it, and Chrome's
- * service worker, which cannot, has its offscreen document make it. Safari
- * is not served here: it has no downloads API.
+ * Work pages and files are requested signed out; only the reader's own
+ * lists go with their AO3 cookies, which the browser sends because the
+ * extension may reach AO3. A file is held as a blob and saved from its URL:
+ * Firefox's background makes it, and Chrome's service worker, which cannot,
+ * has its offscreen document make it. Safari is not served here: it has no
+ * downloads API.
  */
 
 import { REQUEST_TIMEOUT_MS } from "./ao3-history-import.mjs";
@@ -206,7 +207,7 @@ export function installKeepACopy(extension: Extension): KeepACopy {
     random: Math.random,
     read: async () => (await extension.storage.local.get(KEEP_A_COPY_KEY))[KEEP_A_COPY_KEY],
     write: (state: KeepState) => extension.storage.local.set({ [KEEP_A_COPY_KEY]: state }),
-    fetchPage: (url) => requestAO3(url, "text", REQUEST_TIMEOUT_MS, MAX_PAGE_CHARS * 2),
+    fetchPage: (url, credentials) => requestAO3(url, "text", REQUEST_TIMEOUT_MS, MAX_PAGE_CHARS * 2, credentials),
     fetchFile,
     save: ({ filename, handle, conflict }) => downloads.download({ url: handle, filename, conflictAction: conflict, saveAs: false }),
     settle,

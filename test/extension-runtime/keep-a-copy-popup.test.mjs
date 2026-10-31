@@ -62,7 +62,7 @@ test("off: the one line and the footer", async () => {
 });
 
 test("on: the status, what starts a copy, the format, the backup, and what was skipped", async () => {
-  const box = await open({ ...VIEW, skipped: { needs_sign_in: 4, gone: 1, not_a_file: 1 } });
+  const box = await open({ ...VIEW, skipped: { locked: 4, gone: 1, not_a_file: 1 } });
   assert.deepEqual(shownOf(box), ["status", "triggers", "formatRow", "backupStart", "skippedRow"]);
   assert.equal(box.text("kept"), "1,204 works kept");
   assert.equal(box.text("lastCopy"), "Last copy 14:02, in Downloads › NAME");
@@ -196,9 +196,9 @@ test("what starts a copy opens from its row and back", async () => {
 });
 
 test("the skipped list: each reason, its count, and Try again only for the file AO3 couldn't make", async () => {
-  const box = await open({ ...VIEW, skipped: { needs_sign_in: 4, gone: 1, not_a_file: 1 } }, {
+  const box = await open({ ...VIEW, skipped: { locked: 4, gone: 1, not_a_file: 1 } }, {
     onMessage: (message, state) => {
-      if (message.type === "KEEP_A_COPY_RETRY_SKIPPED") state.view = { ...VIEW, skipped: { needs_sign_in: 4, gone: 1 } };
+      if (message.type === "KEEP_A_COPY_RETRY_SKIPPED") state.view = { ...VIEW, skipped: { locked: 4, gone: 1 } };
     },
   });
   await box.click("skippedRow");

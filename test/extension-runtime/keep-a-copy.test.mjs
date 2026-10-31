@@ -31,7 +31,7 @@ import {
   STOP_MS,
   safeSegment,
 } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
-import { CLAIM_MS, fromOffscreenAnswer, offscreenFetcher, toOffscreenAnswer } from "../../.trace-build/extension-runtime/keep-a-copy-fetch.mjs";
+import { CLAIM_MS, fromOffscreenAnswer, offscreenFetcher, requestAO3, toOffscreenAnswer } from "../../.trace-build/extension-runtime/keep-a-copy-fetch.mjs";
 import { reliableSender, signedInUser, watchForms } from "../../.trace-build/extension-runtime/keep-a-copy-page.mjs";
 import { downloadPorts, installKeepACopy, isOurFile, offscreenKeeper, ownDownload } from "../../.trace-build/extension-runtime/keep-a-copy-runtime.mjs";
 import { ICON_SIZES, NAME, keepACopyManifest, writeIcons } from "../../scripts/build-keep-a-copy.mjs";
@@ -90,9 +90,22 @@ const file = (url, bytes, status = 200) => ({
   bytes: bytes.slice(0, 8_192), size: bytes.length, handle: handleOf(url),
 });
 const workURL = (id) => `${AO3_ORIGIN}/works/${id}?view_adult=true`;
+const LOGIN_URL = `${AO3_ORIGIN}/users/login?restricted=true`;
+const loginPage = () => html(LOGIN_URL, '<body class="logged-out"><form id="new_user" action="/users/login" method="post"></form></body>');
+
+/**
+ * A page as a request made signed out meets it in these tests: a logged-out
+ * page, and, for a locked work, the sign-in page.
+ */
+function signedOut(result) {
+  if (result?.kind !== "response" || typeof result.text !== "string") return result;
+  if (/<h2 class="title heading">\s*<img alt="\(Restricted\)"/.test(result.text)) return loginPage();
+  return { ...result, text: result.text.replace('<body class="logged-in">', '<body class="logged-out">') };
+}
 
 function harness(answers = {}) {
-  const box = { now: NOW, stored: undefined, saved: [], removed: [], released: [], requests: [], quiet: [], downloads: new Map() };
+  // `modes`: each page request's credentials mode.
+  const box = { now: NOW, stored: undefined, saved: [], removed: [], released: [], requests: [], modes: [], quiet: [], downloads: new Map() };
   let nextId = 1;
   const answer = async (url) => {
     box.requests.push(url);
@@ -105,7 +118,11 @@ function harness(answers = {}) {
     random: () => 0,
     read: async () => structuredClone(box.stored),
     write: async (state) => { box.stored = structuredClone(state); },
-    fetchPage: answer,
+    fetchPage: async (url, credentials) => {
+      box.modes.push([url, credentials]);
+      const result = await answer(url);
+      return credentials === "omit" ? signedOut(result) : result;
+    },
     fetchFile: answer,
     save: async (request) => {
       box.saved.push(request);
@@ -158,8 +175,6 @@ test("reads a work page's title, author, fandom, chapters and every format", () 
   const locked = readWorkPage(workPage("5", { title: "Locked", restricted: true }));
   assert.equal(locked.title, "Locked");
   assert.equal(locked.restricted, true);
-  assert.equal(locked.signedIn, true);
-  assert.equal(readWorkPage(workPage("5", { signedIn: false })).signedIn, false);
   assert.equal(readWorkPage(workPage("5")).restricted, false);
   // An older menu, as a January 2021 Wayback capture shows it: a plain link, spaces as %20.
   const older = '<li class="download" aria-haspopup="true">\n      <a href="#">Download</a>\n      <ul class="expandable secondary">\n' +
@@ -242,7 +257,17 @@ test("waits on 429, 445 and the front ends' 5xx; skips gone works and sign-in pa
   assert.equal(classifyAnswer(html(url, "<h2>Error 403</h2>", 403), "page", NOW).code, "forbidden");
   assert.deepEqual(classifyAnswer({ kind: "failed", code: "network" }, "page", NOW).kind, "retry");
   assert.deepEqual(classifyAnswer(html(url, "", 404), "page", NOW), { kind: "skip", code: "gone" });
-  assert.deepEqual(classifyAnswer(html(`${AO3_ORIGIN}/users/login?restricted=true`, "<form action=\"/users/login\">"), "page", NOW), { kind: "skip", code: "needs_sign_in" });
+  // Read signed out, every page has AO3's sign-in form: only its sign-in page itself is a locked work.
+  assert.deepEqual(classifyAnswer(loginPage(), "page", NOW), { kind: "skip", code: "locked" });
+  assert.deepEqual(classifyAnswer(loginPage(), "epub", NOW), { kind: "skip", code: "locked" });
+  const loggedOut = '<body class="logged-out"><form action="/users/login" method="post"></form><h2 class="title heading">A work</h2></body>';
+  assert.deepEqual(classifyAnswer(html(url, loggedOut), "page", NOW), { kind: "ok" });
+  assert.equal(classifyAnswer(html(url, loggedOut, 403), "page", NOW).code, "forbidden");
+  // A list goes with the reader's session: there, the sign-in form says they signed out.
+  const list = listPageURL(USER, "later", 1);
+  assert.deepEqual(classifyAnswer(html(list, loggedOut), "list", NOW), { kind: "skip", code: "locked" });
+  assert.deepEqual(classifyAnswer(html(list, loggedOut, 403), "list", NOW), { kind: "skip", code: "locked" });
+  assert.deepEqual(classifyAnswer(html(list, listPage([])), "list", NOW), { kind: "ok" });
 });
 
 // --- File names -----------------------------------------------------------------------
@@ -745,69 +770,110 @@ test("Windows paths match the stored path with either slash and any case", () =>
 
 // --- Locked works -----------------------------------------------------------------------
 
-test("a locked work found on a list is copied only after its page is read, in the same step", async () => {
+test("every work page is read signed out; only the reader's own lists go with their session", async () => {
+  const box = harness({
+    [listPageURL(USER, "bookmarks", 1)]: html(listPageURL(USER, "bookmarks", 1), listPage(["7"])),
+    [listPageURL(USER, "later", 1)]: html(listPageURL(USER, "later", 1), listPage([])),
+    [listPageURL(USER, "subscriptions", 1)]: html(listPageURL(USER, "subscriptions", 1), ""),
+    [workURL("7")]: html(workURL("7"), workPage("7")),
+    [epubLink("7")]: file(epubLink("7"), epub()),
+  });
+  await box.engine.noteUser(USER);
+  await box.engine.startBackup();
+  await box.drain();
+  assert.deepEqual(box.modes, [
+    ...["bookmarks", "later", "subscriptions"].map((list) => [listPageURL(USER, list, 1), "include"]),
+    [workURL("7"), "omit"],
+  ]);
+  assert.equal(box.saved.length, 1);
+});
+
+test("a locked work's signed-out read lands on AO3's sign-in page: locked, no miss and no stop, and it waits", async () => {
+  const box = harness({
+    [workURL("8")]: html(workURL("8"), workPage("8", { restricted: true })),
+    [epubLink("8")]: file(epubLink("8"), epub()),
+    [workURL("9")]: html(workURL("9"), workPage("9")),
+    // Locked between its page and its file.
+    [epubLink("9")]: loginPage(),
+  });
+  await box.engine.noteUser(USER);
+  for (const id of ["8", "9"]) await box.engine.noteWork(id, "bookmark");
+  await box.drain();
+  assert.deepEqual(box.requests, [workURL("8"), workURL("9"), epubLink("9")]);
+  for (const id of ["8", "9"]) {
+    assert.equal(box.stored.works[id].skipped, "locked");
+    assert.equal(box.stored.works[id].restricted, true);
+  }
+  assert.equal(box.stored.pacer.misses, 0);
+  assert.equal(box.stored.pacer.stopped, null);
+  assert.deepEqual((await box.engine.view()).skipped, { locked: 2 });
+  // It waits: Try again, signing in again and a new trigger ask AO3 nothing for it.
+  await box.engine.retrySkipped();
+  await box.engine.noteUser(null);
+  await box.engine.noteUser(USER);
+  await box.engine.noteWork("8", "kudos");
+  await box.drain();
+  assert.equal(box.requests.length, 3);
+  assert.equal(box.saved.length, 0);
+  assert.deepEqual((await box.engine.view()).skipped, { locked: 2 });
+});
+
+test("a locked work on the reader's open page, or locked on a list, waits with no request for it", async () => {
   const box = harness({
     [listPageURL(USER, "bookmarks", 1)]: html(listPageURL(USER, "bookmarks", 1), listPage([{ id: "8", restricted: true }])),
     [listPageURL(USER, "later", 1)]: html(listPageURL(USER, "later", 1), listPage([])),
     [listPageURL(USER, "subscriptions", 1)]: html(listPageURL(USER, "subscriptions", 1), ""),
-    [workURL("8")]: html(workURL("8"), workPage("8", { restricted: true })),
-    [epubLink("8")]: file(epubLink("8"), epub()),
+    [epubLink("9")]: file(epubLink("9"), epub()),
   });
+  await box.engine.notePage(readWorkPage(workPage("9", { restricted: true })), "bookmark");
+  assert.deepEqual(box.stored.queue, []);
+  assert.equal(box.stored.works["9"].skipped, "locked");
   await box.engine.noteUser(USER);
   await box.engine.startBackup();
-  await box.engine.tick();
-  assert.equal(box.stored.works["8"].restricted, true);
-  assert.equal(box.stored.queue[0].link, undefined);
-  // The lists first, then the work.
-  for (let i = 0; i < 3; i += 1) {
-    box.now = box.stored.pacer.dueAt;
-    await box.engine.tick();
-  }
-  // Page and file in one step: the link is never stored.
-  assert.deepEqual(box.requests.slice(3), [workURL("8"), epubLink("8")]);
+  await box.drain();
+  assert.deepEqual(box.requests, ["bookmarks", "later", "subscriptions"].map((list) => listPageURL(USER, list, 1)));
+  assert.deepEqual((await box.engine.view()).skipped, { locked: 2 });
+  // Its page, as the reader sees it, shows no lock now: copied from that page's link.
+  await box.engine.notePage(readWorkPage(workPage("9")), "visit");
   await box.drain();
   assert.equal(box.saved.length, 1);
-  assert.equal(box.stored.works["8"].copy.updatedAt, "1761700000");
+  assert.deepEqual((await box.engine.view()).skipped, { locked: 1 });
 });
 
-test("a locked work whose page does not show the reader signed in is skipped, with no file request", async () => {
-  for (const answer of [
-    html(`${AO3_ORIGIN}/users/login?restricted=true`, '<body class="logged-out"><form action="/users/login"></form></body>'),
-    html(workURL("8"), workPage("8", { restricted: true, signedIn: false })),
-    html(workURL("8"), workPage("8", { restricted: true, signedIn: false }).replace(/<li class="download">[\s\S]*?<\/ul>\n    <\/li>/, "")),
-  ]) {
-    const box = harness({ [workURL("8")]: answer, [epubLink("8")]: file(epubLink("8"), epub()) });
-    await box.engine.noteWork("8", "bookmark");
-    await box.drain();
-    assert.deepEqual(box.requests, [workURL("8")]);
-    assert.equal(box.stored.works["8"].skipped, "needs_sign_in");
-    assert.equal(box.stored.pacer.misses, 0);
-    assert.deepEqual((await box.engine.view()).skipped, { needs_sign_in: 1 });
-  }
-});
+test("the background asks AO3 for works and files signed out, and for the reader's lists with their session", async (t) => {
+  // The background's own timers never fire here, so nothing is asked after the test.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const realFetch = globalThis.fetch;
+  const asked = [];
+  globalThis.fetch = async (url, init) => {
+    asked.push([String(url), init?.credentials]);
+    if (String(url).includes("/downloads/")) return new Response(epub(), { headers: { "content-type": "application/epub+zip" } });
+    const text = String(url).includes("/users/") ? listPage([]) : workPage("5");
+    return new Response(text, { headers: { "content-type": "text/html; charset=utf-8" } });
+  };
+  t.after(() => { globalThis.fetch = realFetch; });
+  const fetched = await requestAO3(epubLink("5"), "file", 5_000, 1_000_000);
+  URL.revokeObjectURL(fetched.handle);
+  assert.deepEqual(asked.splice(0), [[epubLink("5"), "omit"]]);
 
-test("a locked work with no link, for a signed-in reader, has no download: signing in would not help", async () => {
-  const box = harness({ [workURL("8")]: html(workURL("8"), workPage("8", { restricted: true }).replace(/<li class="download">[\s\S]*?<\/ul>\n    <\/li>/, "")) });
-  await box.engine.noteWork("8", "bookmark");
-  await box.drain();
-  assert.deepEqual(box.requests, [workURL("8")]);
-  assert.deepEqual((await box.engine.view()).skipped, { no_download: 1 });
-  assert.equal(box.stored.works["8"].restricted, true);
-});
-
-test("a locked work's link from the reader's open page, or from storage, is never fetched directly", async () => {
-  const box = harness({
-    [workURL("8")]: html(workURL("8"), workPage("8", { restricted: true, updatedAt: "1761800000" })),
-    [epubLink("8", "1761800000")]: file(epubLink("8", "1761800000"), epub()),
-  });
-  await box.engine.notePage(readWorkPage(workPage("8", { restricted: true })), "bookmark");
-  assert.equal(box.stored.queue[0].link, undefined);
-  // A link left in storage (an older version, say) is dropped before the step.
-  box.stored.queue[0].link = { url: epubLink("8"), updatedAt: "1761700000" };
-  box.engine = new KeepACopy(box.ports);
-  await box.drain();
-  assert.deepEqual(box.requests, [workURL("8"), epubLink("8", "1761800000")]);
-  assert.equal(box.saved.length, 1);
+  const listener = () => ({ addListener() {} });
+  const install = () => {
+    const stored = {};
+    return installKeepACopy({
+      runtime: { id: "keep", sendMessage: async () => null, onConnect: listener(), onMessage: listener() },
+      storage: { local: { get: async (key) => structuredClone({ [key]: stored[key] }), set: async (items) => { Object.assign(stored, structuredClone(items)); } } },
+      alarms: { create() {}, get: async () => ({ name: "keep-a-copy" }), onAlarm: listener() },
+      downloads: { download: async () => 1, search: async () => [], removeFile: async () => undefined, cancel: async () => undefined, erase: async () => [], onChanged: { addListener() {}, removeListener() {} } },
+    });
+  };
+  const work = install();
+  await work.noteWork("5", "bookmark");
+  await work.tick();
+  const lists = install();
+  await lists.noteUser(USER);
+  await lists.startBackup();
+  await lists.tick();
+  assert.deepEqual(asked, [[workURL("5"), "omit"], [listPageURL(USER, "bookmarks", 1), "include"]]);
 });
 
 // --- The standalone build ---------------------------------------------------------------
@@ -1135,30 +1201,7 @@ test("Try again waits behind a Pause, and a file that still fails counts toward 
   await box.engine.resumeBackup();
   for (let i = 0; i < 6 && !box.stored.pacer.stopped; i += 1) box.now += await box.engine.tick();
   assert.equal(box.stored.pacer.stopped.code, "unreadable");
-  assert.ok(RETRYABLE_SKIPS.includes("not_a_file") && !RETRYABLE_SKIPS.includes("gone") && !RETRYABLE_SKIPS.includes("needs_sign_in"));
-});
-
-test("locked works copy on their own once a page shows the reader signed in again, at the queue's pace", async () => {
-  let signedIn = false;
-  const box = harness({
-    [workURL("8")]: () => html(workURL("8"), workPage("8", { restricted: true, signedIn })),
-    [epubLink("8")]: file(epubLink("8"), epub()),
-  });
-  await box.engine.noteWork("8", "bookmark");
-  await box.drain();
-  assert.deepEqual((await box.engine.view()).skipped, { needs_sign_in: 1 });
-  // Signed in all along: nothing changed, nothing is asked again.
-  await box.engine.noteUser(USER);
-  assert.equal(await box.engine.tick(), null);
-  const asked = box.requests.length;
-  await box.engine.noteUser(null);
-  assert.equal(await box.engine.tick(), null);
-  signedIn = true;
-  await box.engine.noteUser(USER);
-  assert.deepEqual((await box.engine.view()).skipped, {});
-  assert.equal(box.requests.length, asked);
-  await box.drain();
-  assert.equal(box.saved.length, 1);
+  assert.ok(RETRYABLE_SKIPS.includes("not_a_file") && !RETRYABLE_SKIPS.includes("gone") && !RETRYABLE_SKIPS.includes("locked"));
 });
 
 // --- Paused, or AO3 not available --------------------------------------------------------
