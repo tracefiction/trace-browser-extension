@@ -32,8 +32,8 @@ import {
   safeSegment,
 } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
 import { CLAIM_MS, fromOffscreenAnswer, offscreenFetcher, toOffscreenAnswer } from "../../.trace-build/extension-runtime/keep-a-copy-fetch.mjs";
-import { signedInUser } from "../../.trace-build/extension-runtime/keep-a-copy-page.mjs";
-import { downloadPorts, isOurFile, offscreenKeeper, ownDownload } from "../../.trace-build/extension-runtime/keep-a-copy-runtime.mjs";
+import { reliableSender, signedInUser, watchForms } from "../../.trace-build/extension-runtime/keep-a-copy-page.mjs";
+import { downloadPorts, installKeepACopy, isOurFile, offscreenKeeper, ownDownload } from "../../.trace-build/extension-runtime/keep-a-copy-runtime.mjs";
 import { ICON_SIZES, NAME, keepACopyManifest, writeIcons } from "../../scripts/build-keep-a-copy.mjs";
 
 // Invented works and people throughout, in the markup of AO3's pages, not a capture.
@@ -252,6 +252,12 @@ test("builds file names that are safe everywhere", () => {
     `${COPY_FOLDER}/Invented -Lanterns-/Lanterns- A-B- – Quill (123).epub`);
   assert.equal(safeSegment("CON", 10, "x"), "_CON");
   assert.equal(safeSegment("con.txt", 10, "x"), "_con.txt");
+  // What Chrome's downloads API refuses in any part of a path.
+  assert.equal(safeSegment("Clock$", 10, "x"), "_Clock$");
+  assert.equal(safeSegment("Thumbs.db", 20, "x"), "_Thumbs.db");
+  assert.equal(safeSegment("Hotel.local", 20, "x"), "Hotel-local");
+  assert.equal(safeSegment("Fan.LNK", 20, "x"), "Fan-LNK");
+  assert.equal(safeSegment("Odd.{clsid}", 20, "x"), "Odd-{clsid}");
   assert.equal(safeSegment("Tide\u200b\u202eRev\u0007", 20, "x"), "TideRev");
   assert.equal(safeSegment("...hidden. ", 20, "x"), "hidden");
   assert.equal(safeSegment("   ", 20, "Untitled"), "Untitled");
@@ -1170,6 +1176,19 @@ test("AO3 giving a time is a pause, whatever failed", async () => {
   assert.equal(stopped.until, box.stored.pacer.stopped.until);
 });
 
+test("one 429 with a time shows as a pause until that time, then not", async () => {
+  const box = harness({ [workURL("1")]: html(workURL("1"), "Retry later", 429, { retryAfter: "90" }) });
+  await box.engine.noteWork("1", "bookmark");
+  await box.engine.tick();
+  const { stopped } = await box.engine.view();
+  assert.equal(stopped.code, "slow_down");
+  assert.equal(stopped.unavailable, undefined);
+  assert.equal(stopped.until, NOW + 90_000);
+  assert.equal(box.stored.pacer.dueAt, NOW + 90_000);
+  box.now = NOW + 90_001;
+  assert.equal((await box.engine.view()).stopped, null);
+});
+
 test("one failure with no time is never unavailable", async () => {
   const box = harness({ [workURL("1")]: html(workURL("1"), "refused", 403) });
   await box.engine.noteWork("1", "bookmark");
@@ -1318,4 +1337,108 @@ test("the view says when the last copy was saved", async () => {
   await box.engine.noteWork("1", "bookmark");
   await box.drain();
   assert.equal((await box.engine.view()).lastCopyAt, box.stored.works["1"].copy.savedAt);
+});
+
+// A page's own script may cancel the click on a form's submit button and send the form itself.
+test("a form sent from a click the page cancels still counts, once", () => {
+  const { document } = new JSDOM(`<form id="kudos" action="/kudos"><input type="submit" id="send"></form>
+    <form id="later" action="/works/1/mark_for_later"><button type="submit" id="mark">Mark for Later</button></form>
+    <form id="plain" action="/works/1/bookmarks"><input type="text" id="note"><input type="submit" id="create"></form>
+    <button id="other">Not in a form</button>`).window;
+  const sent = [];
+  watchForms(document, (form) => sent.push(form.id));
+  document.addEventListener("submit", (event) => event.preventDefault());
+
+  document.getElementById("send").addEventListener("click", (event) => event.preventDefault());
+  document.getElementById("send").click();
+  assert.deepEqual(sent, ["kudos"], "the click is all there is");
+
+  document.getElementById("mark").click();
+  assert.deepEqual(sent, ["kudos", "later"], "a click and its submit count once");
+
+  document.getElementById("plain").requestSubmit();
+  assert.deepEqual(sent, ["kudos", "later", "plain"], "a submit with no click");
+
+  document.getElementById("note").click();
+  document.getElementById("other").click();
+  assert.equal(sent.length, 3, "other clicks are nothing");
+});
+
+test("an update that comes while a copy is saving is still fetched", async () => {
+  const box = harness({ [epubLink("1", "1")]: file(epubLink("1", "1"), epub()), [epubLink("1", "2")]: file(epubLink("1", "2"), epub()) });
+  await box.engine.notePage(readWorkPage(workPage("1", { updatedAt: "1" })), "bookmark");
+  await box.engine.tick();
+  assert.equal(box.stored.pending.updatedAt, "1", "the save is under way");
+  await box.engine.notePage(readWorkPage(workPage("1", { updatedAt: "2" })), "visit");
+  await box.drain();
+  assert.equal(box.stored.works["1"].copy.updatedAt, "2");
+  assert.deepEqual(box.requests, [epubLink("1", "1"), epubLink("1", "2")]);
+  assert.equal(box.stored.queue.length, 0);
+});
+
+test("the same page again while a copy is saving asks for nothing more", async () => {
+  const box = harness({ [epubLink("1", "1")]: file(epubLink("1", "1"), epub()) });
+  await box.engine.notePage(readWorkPage(workPage("1", { updatedAt: "1" })), "bookmark");
+  await box.engine.tick();
+  await box.engine.notePage(readWorkPage(workPage("1", { updatedAt: "1" })), "visit");
+  await box.drain();
+  assert.deepEqual(box.requests, [epubLink("1", "1")]);
+  assert.equal(box.stored.queue.length, 0);
+});
+
+test("what the reader did stays in the tab until it is answered, and the next page sends it", async () => {
+  const stored = new Map();
+  const storage = { getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value), removeItem: (key) => stored.delete(key) };
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+  const later = { type: "PAGE", trigger: "later", html: "<li>", workId: "1" };
+  const kudos = { type: "PAGE", trigger: "kudos", html: "<li>", workId: "2" };
+
+  // The page goes before the worker answers: the promise never settles.
+  const lost = [];
+  reliableSender(storage, (message) => { lost.push(message); return new Promise(() => undefined); }).send(later, { user: "Reader" });
+  assert.deepEqual(lost, [{ ...later, user: "Reader" }]);
+  await flush();
+  assert.equal(stored.size, 1, "kept");
+
+  // The next page sends it, without the old page's word on who is signed in, and an answer clears it.
+  const again = [];
+  const next = reliableSender(storage, async (message) => { again.push(message); return null; });
+  next.resend();
+  await flush();
+  assert.deepEqual(again, [later]);
+  assert.equal(stored.size, 0, "answered");
+  next.resend();
+  await flush();
+  assert.equal(again.length, 1, "only once");
+
+  // Refused (no worker to take it): kept for the next page. An answer to one leaves the other.
+  const refused = reliableSender(storage, async () => { throw new Error("no receiver"); });
+  refused.send(later, {});
+  await flush();
+  refused.send(kudos, {});
+  await flush();
+  assert.equal(JSON.parse(stored.get("keepACopyUnanswered")).length, 2);
+  const answers = [];
+  reliableSender(storage, (message) => new Promise((resolve) => answers.push({ message, resolve }))).resend();
+  answers[0].resolve(null);
+  await flush();
+  assert.deepEqual(JSON.parse(stored.get("keepACopyUnanswered")), [kudos]);
+
+  // Nothing readable in the tab is nothing to send.
+  stored.set("keepACopyUnanswered", "not json");
+  const none = [];
+  reliableSender(storage, async (message) => { none.push(message); }).resend();
+  assert.equal(none.length, 0);
+});
+
+test("the background listens for the browser opening, so a queue goes on with no page open", () => {
+  const listener = () => ({ addListener() {} });
+  const startups = [];
+  installKeepACopy({
+    runtime: { id: "keep", sendMessage: async () => null, onConnect: listener(), onMessage: listener(), onStartup: { addListener: (run) => startups.push(run) } },
+    storage: { local: { get: async () => ({}), set: async () => undefined } },
+    alarms: { create() {}, onAlarm: listener() },
+    downloads: { download: async () => 1, search: async () => [], removeFile: async () => undefined, cancel: async () => undefined, erase: async () => [], onChanged: { addListener() {}, removeListener() {} } },
+  });
+  assert.equal(startups.length, 1);
 });

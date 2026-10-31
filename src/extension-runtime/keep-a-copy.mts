@@ -348,7 +348,10 @@ export function classifyAnswer(answer: Fetched, expect: CopyFormat | "page", now
 
 // --- File names -------------------------------------------------------------------
 
-const RESERVED_NAMES = /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])$/i;
+const RESERVED_NAMES = /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9]|clock\$)$/i;
+/** Whole names, and the endings, Chrome refuses in any part of a path (net::IsSafePortablePathComponent). */
+const RESERVED_WHOLE_NAMES = /^(?:desktop\.ini|thumbs\.db)$/i;
+const SHELL_ENDING = /\.(local|lnk|\{[^.]*\})$/i;
 /** A file name's UTF-8 bytes, at most; well under the 255 most file systems allow. */
 export const MAX_NAME_BYTES = 200;
 const MAX_FANDOM_BYTES = 100;
@@ -374,10 +377,10 @@ export function safeSegment(text: string, maxBytes: number, fallback: string): s
     .replace(/[\\/:*?"<>|~]/g, "-")
     .replace(/\s+/g, " ")
     .trim();
-  out = fitBytes(out, maxBytes).replace(/^[.\s-]+|[.\s]+$/g, "");
+  out = fitBytes(out, maxBytes).replace(/^[.\s-]+|[.\s]+$/g, "").replace(SHELL_ENDING, "-$1");
   if (!out) return fallback;
   // Windows refuses a reserved stem whatever follows it: `CON`, `con.txt`.
-  return RESERVED_NAMES.test(out.split(".")[0] ?? "") ? `_${out}` : out;
+  return RESERVED_NAMES.test(out.split(".")[0] ?? "") || RESERVED_WHOLE_NAMES.test(out) ? `_${out}` : out;
 }
 
 /**
@@ -509,6 +512,8 @@ export interface KeepState {
     failedSaves?: number;
     /** Tries in a row that failed with no time from AO3. Several make it "unavailable". */
     failures?: number;
+    /** AO3 gave a time to come back, and the next try waits for it: the reader sees a pause. */
+    slowedUntil?: number;
     stopped: StoppedState | null;
     lastCheckAt: number;
   };
@@ -644,6 +649,7 @@ export class KeepACopy {
     // Between its tries, still unavailable: only an answer from AO3 ends it.
     const stopped: StoppedState | null = pacer.stopped && pacer.stopped.until > now ? { ...pacer.stopped }
       : (pacer.failures ?? 0) >= MAX_CONSECUTIVE_RETRIES ? { code: "slow_down", until: pacer.dueAt, unavailable: true }
+      : (pacer.slowedUntil ?? 0) > now ? { code: "slow_down", until: pacer.slowedUntil as number }
       : null;
     return {
       settings: structuredClone(state.settings),
@@ -904,6 +910,7 @@ export class KeepACopy {
         this.#stop(state, "slow_down", timeFromAO3 ? verdict.waitMs : null, after);
       } else {
         pacer.dueAt = after + Math.min(STOP_MAX_MS, Math.max(backoff(pacer.retries), verdict.waitMs ?? 0));
+        if (timeFromAO3) pacer.slowedUntil = pacer.dueAt;
       }
     } else {
       pacer.retries = 0;
@@ -1045,7 +1052,14 @@ export class KeepACopy {
       format: pending.format, updatedAt: pending.updatedAt, savedAt: now, url: pending.handle,
     };
     work.skipped = null;
-    this.#drop(state, pending.workId);
+    // A newer link came while this one was saving: it is still to be fetched.
+    const queued = state.queue.find((each) => each.workId === pending.workId);
+    if (queued?.link && queued.link.updatedAt !== pending.updatedAt) {
+      queued.attempts = 0;
+      delete queued.lastFailure;
+    } else {
+      this.#drop(state, pending.workId);
+    }
     return Math.max(0, state.pacer.dueAt - now);
   }
 

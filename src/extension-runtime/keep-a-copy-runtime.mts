@@ -50,6 +50,7 @@ interface Extension {
     id: string;
     sendMessage(message: unknown): Promise<unknown>;
     onConnect: { addListener(listener: (port: { name: string; onMessage: { addListener(listener: () => void): void } }) => void): void };
+    onStartup?: { addListener(listener: () => void): void };
     onMessage: { addListener(listener: (message: unknown, sender: { id?: string; url?: string }, respond: (value: unknown) => void) => boolean | void): void };
   };
   storage: { local: { get(key: string): Promise<Record<string, unknown>>; set(items: Record<string, unknown>): Promise<void> } };
@@ -240,6 +241,8 @@ export function installKeepACopy(extension: Extension): KeepACopy {
   extension.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === ALARM) void run();
   });
+  // The browser opening starts the background: a queue goes on with no page open, and Firefox keeps no alarm across sessions.
+  runtime.onStartup?.addListener(() => void run());
 
   runtime.onMessage.addListener((message, sender, respond) => {
     if (sender.id !== runtime.id || !message || typeof message !== "object") return;
