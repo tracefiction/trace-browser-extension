@@ -65,6 +65,8 @@ export interface LibraryOverlayEntry {
   readonly workStatusProvenance?: WorkStatusProvenance;
   readonly catchupState?: CatchupState;
   readonly newChapterCount?: number;
+  /** When the reader last read the story (ISO 8601), from the Library entry. */
+  readonly lastReadAt?: string;
   readonly rating?: number;
   readonly privateContext?: Readonly<{
     hasNotes: boolean;
@@ -118,6 +120,15 @@ function isSafeInteger(value: unknown, minimum = 0): value is number {
 
 function enumValue<T extends string>(values: readonly T[], value: unknown): T | null {
   return typeof value === "string" && values.includes(value as T) ? value as T : null;
+}
+
+function isIsoTimestamp(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    ISO_TIMESTAMP_PATTERN.test(value) &&
+    Number.isFinite(Date.parse(value)) &&
+    new Date(value).toISOString() === value
+  );
 }
 
 function copyScope(value: unknown): AccountScope | null {
@@ -272,6 +283,7 @@ function copyEntry(value: unknown): LibraryOverlayEntry | null {
     workStatusProvenance?: WorkStatusProvenance;
     catchupState?: CatchupState;
     newChapterCount?: number;
+    lastReadAt?: string;
     rating?: number;
     privateContext?: NonNullable<LibraryOverlayEntry["privateContext"]>;
   } = { status };
@@ -324,6 +336,10 @@ function copyEntry(value: unknown): LibraryOverlayEntry | null {
     if (!isSafeInteger(value.newChapterCount)) return null;
     result.newChapterCount = value.newChapterCount;
   }
+  // Display only: a date this parser can't read is dropped, never the entry.
+  if (Object.hasOwn(value, "lastReadAt") && isIsoTimestamp(value.lastReadAt)) {
+    result.lastReadAt = value.lastReadAt;
+  }
   if (Object.hasOwn(value, "rating")) {
     if (!isSafeInteger(value.rating) || value.rating > 5) return null;
     result.rating = value.rating;
@@ -370,14 +386,7 @@ function copyOverlay(value: unknown): AccountOverlay | null {
   const entries = copyEntryMap(value.entries);
   const workPreferences = copyPreferenceMap(value.workPreferences);
   if (entries === null || workPreferences === null) return null;
-  if (
-    typeof value.syncVersion !== "string" ||
-    !ISO_TIMESTAMP_PATTERN.test(value.syncVersion) ||
-    !Number.isFinite(Date.parse(value.syncVersion)) ||
-    new Date(value.syncVersion).toISOString() !== value.syncVersion
-  ) {
-    return null;
-  }
+  if (!isIsoTimestamp(value.syncVersion)) return null;
   return Object.freeze({ entries, workPreferences, syncVersion: value.syncVersion });
 }
 

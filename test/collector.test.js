@@ -19,7 +19,7 @@ window.removeQuickAddElements = removeQuickAddElements;
 window.renderQuickAddButton = renderQuickAddButton;
 window.renderKernelProjectionUnavailable = renderKernelProjectionUnavailable;
 window.placeStorySheet = placeStorySheet;
-window.__traceTestHooks = { sendAutoTrackForStory, storyHandlePresentation, applyStoryInlineHandleState, handleDisplay, storyHeadline, storyCaption };
+window.__traceTestHooks = { sendAutoTrackForStory, storyHandlePresentation, applyStoryInlineHandleState, handleDisplay, storyHeadline, storyCaption, storyLastReadText };
 })();`);
 }
 
@@ -6612,6 +6612,98 @@ test("story sheet position block shows unknown total without chapter stepper con
   assert.equal(position.querySelector(".bar"), null);
   assert.equal(position.querySelector(".step"), null);
   assert.doesNotMatch(sheet.textContent || "", /Set to current/i);
+});
+
+test("story sheet last-read line counts calendar days, then shows the date", () => {
+  const collectorSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  const dom = domFromFixture(
+    "ffn_story_mobile.html",
+    "https://m.fanfiction.net/s/7038840/3/A-Chance-Encounter"
+  );
+  installCollectorChrome(dom, {
+    runtime: { onMessage: { addListener() {} }, sendMessage() {}, lastError: null },
+    storage: { local: { get(_keys, cb) { cb({}); }, set() {} }, onChanged: { addListener() {} } },
+  });
+  dom.window.eval(collectorTestSource(collectorSrc));
+  const { storyLastReadText } = dom.window.__traceTestHooks;
+  const now = new Date(2026, 9, 31, 10, 0);
+  const at = (year, month, day, hour = 12) => new Date(year, month, day, hour).toISOString();
+  const text = (lastReadAt, status = "READING") => storyLastReadText({ status, lastReadAt }, now);
+  const date = (year, month, day, options) =>
+    new Date(year, month, day, 12).toLocaleDateString(undefined, options);
+
+  assert.equal(text(at(2026, 9, 31, 0)), "Last read today");
+  assert.equal(text(at(2026, 9, 30, 23)), "Last read yesterday");
+  assert.equal(text(at(2026, 9, 28)), "Last read 3 days ago");
+  assert.equal(text(at(2026, 9, 24)), "Last read a week ago");
+  assert.equal(text(at(2026, 9, 17)), "Last read 2 weeks ago");
+  assert.equal(text(at(2026, 9, 4)), "Last read 3 weeks ago");
+  assert.equal(text(at(2026, 9, 3)), "Last read " + date(2026, 9, 3, { day: "numeric", month: "short" }));
+  assert.equal(
+    text(at(2025, 6, 12)),
+    "Last read " + date(2025, 6, 12, { day: "numeric", month: "short", year: "numeric" }),
+  );
+  assert.equal(text(at(2026, 10, 2)), "Last read today", "a date ahead of the clock reads as today");
+  assert.equal(text(at(2026, 9, 28), "SAVED"), null);
+  assert.equal(text(at(2026, 9, 28), "PLANNING"), null);
+  assert.equal(text(undefined), null);
+  assert.equal(text("not a date"), null);
+});
+
+test("story sheet shows when the story was last read under the chapter", () => {
+  const collectorSrc = fs.readFileSync(
+    path.join(__dirname, "..", "Shared (Extension)", "Resources", "collector.js"),
+    "utf8",
+  );
+  const dom = domFromFixture(
+    "ffn_story_mobile.html",
+    "https://m.fanfiction.net/s/7038840/3/A-Chance-Encounter"
+  );
+  const threeDaysAgo = new Date();
+  threeDaysAgo.setHours(12, 0, 0, 0);
+  threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+  installCollectorChrome(dom, {
+    runtime: { onMessage: { addListener() {} }, sendMessage() {}, lastError: null },
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb({
+            authToken: "test-token",
+            libraryOverlayCache: {
+              entries: {
+                "ffn:7038840": {
+                  entryId: "00000000-0000-4000-8000-000000703884",
+                  status: "READING",
+                  readerStatus: "READING",
+                  chapters: { current: 3, total: 12 },
+                  lastReadAt: threeDaysAgo.toISOString(),
+                },
+              },
+            },
+          });
+        },
+        set(_value, cb) {
+          if (typeof cb === "function") cb();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  });
+  dom.window.eval(collectorTestSource(collectorSrc));
+  dom.window.document.dispatchEvent(
+    new dom.window.Event("DOMContentLoaded", { bubbles: true }),
+  );
+
+  dom.window.document.querySelector("[data-trace-story-handle]").click();
+  const position = dom.window.document.querySelector("[data-trace-story-sheet] [data-trace-story-position]");
+  assert.match(position.textContent || "", /Chapter 3\s*of\s*12/);
+  const lastRead = position.querySelector("[data-trace-story-last-read]");
+  assert.ok(lastRead);
+  assert.equal(lastRead.textContent, "Last read 3 days ago");
+  assert.equal(lastRead.previousElementSibling.className, "top", "the line sits under the chapter row");
 });
 
 test("FFN mobile story post-add status mutation failure keeps saved state", () => {
