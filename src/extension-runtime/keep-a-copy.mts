@@ -1112,7 +1112,8 @@ export class KeepACopy {
           // A work skipped before waits for its page to be opened again.
           if (!known || resumed || !work.skipped) this.#enqueue(state, { workId, pace: "reader", batch: true });
         } else if (resumed || (work.library.chapters !== null && before !== null && work.library.chapters > before)) {
-          this.#enqueue(state, { workId, pace: "check" });
+          // A chapter landing is news; the Library's other lists are routine.
+          this.#enqueue(state, { workId, pace: "check" }, true);
         }
       }
       const release = (work: KeptWork) => {

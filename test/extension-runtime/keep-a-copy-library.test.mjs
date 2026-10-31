@@ -277,6 +277,31 @@ test("a Library work is read signed out; a locked one from its Chapter Index, si
   assert.equal(JSON.stringify(box.stored).includes("/downloads/61/"), false);
 });
 
+test("while a work's file saves, a routine Library look asks nothing more; a chapter landing is looked at again after", async () => {
+  const answers = { [workURL("71")]: html(workURL("71"), workPage("71")), [fileURL("71")]: file(fileURL("71"), epub()) };
+  const box = harness(answers);
+  const step = async () => { box.now += (await box.engine.tick()) ?? 0; };
+  const sync = (chapters) => box.engine.syncLibrary({ keep: [{ workId: "71", chapters }], drop: [], whole: true });
+  await box.engine.updateSettings({ enabled: true });
+  await sync(1);
+  await step();
+  await step();
+  assert.ok(box.stored.pending, "the file is saving");
+  await sync(1);
+  await box.drain();
+  assert.deepEqual(box.requests, [workURL("71"), fileURL("71")]);
+  // A chapter lands: its new file saves, and another chapter lands meanwhile.
+  answers[workURL("71")] = html(workURL("71"), workPage("71", { updatedAt: "1761900000" }));
+  answers[fileURL("71", "1761900000")] = file(fileURL("71", "1761900000"), epub());
+  await sync(2);
+  await step();
+  await step();
+  assert.ok(box.stored.pending, "the new file is saving");
+  await sync(3);
+  await box.drain();
+  assert.deepEqual(box.requests.slice(2), [workURL("71"), fileURL("71", "1761900000"), workURL("71")]);
+});
+
 test("each step writes only the works it changed, to IndexedDB, and a new background reads them back", async () => {
   const answers = {};
   for (const id of ["81", "82", "83"]) {
