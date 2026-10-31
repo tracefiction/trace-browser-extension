@@ -541,3 +541,25 @@ test("pages that read but files that do not, three works in a row, stop the queu
   assert.equal(box.stored.pacer.stopped.code, "unreadable");
   assert.equal(box.requests.length, 6);
 });
+
+test("unreadable works and failed saves are counted apart, so each stop names its own cause", async () => {
+  const answers = {};
+  for (const id of ["1", "2", "3"]) answers[epubLink(id)] = file(epubLink(id), id === "3" ? epub() : new Uint8Array(400));
+  const box = harness(answers);
+  const save = box.ports.save;
+  let throws = 1;
+  box.ports.save = async (request) => {
+    if (throws-- > 0) throw new Error("Disk full");
+    return save(request);
+  };
+  for (const id of ["1", "2", "3"]) await box.engine.notePage(readWorkPage(workPage(id)), "bookmark");
+  // Two works AO3 made no file of, then one save that failed: three failures, but no cause three times.
+  for (let i = 0; i < 3; i += 1) box.now += await box.engine.tick();
+  assert.equal(box.stored.pacer.stopped, null);
+  assert.equal(box.stored.pacer.misses, 2);
+  assert.equal(box.stored.pacer.failedSaves, 1);
+  await box.drain();
+  assert.equal(box.stored.works["3"].copy.updatedAt, "1761700000");
+  assert.equal(box.stored.pacer.stopped, null);
+  assert.equal(box.stored.pacer.misses + box.stored.pacer.failedSaves, 0);
+});

@@ -457,7 +457,10 @@ export interface KeepState {
     dueAt: number;
     window: { startedAt: number; reads: number };
     retries: number;
+    /** Works in a row AO3 gave no copy of (`unreadable`). */
     misses: number;
+    /** Saves in a row that failed (`save_failed`), counted apart so a stop names its own cause. */
+    failedSaves?: number;
     stopped: { code: StopCode; until: number } | null;
     lastCheckAt: number;
   };
@@ -740,6 +743,7 @@ export class KeepACopy {
   #stop(state: KeepState, code: StopCode, waitMs: number | null, now: number): void {
     state.pacer.retries = 0;
     state.pacer.misses = 0;
+    state.pacer.failedSaves = 0;
     state.pacer.stopped = { code, until: now + Math.min(STOP_MAX_MS, Math.max(STOP_MS, waitMs ?? 0)) };
   }
 
@@ -751,13 +755,14 @@ export class KeepACopy {
     const item = state.queue.find((queued) => queued.workId === workId);
     if (item) item.lastFailure = "save";
     state.pacer.dueAt = Math.max(state.pacer.dueAt, now + backoff(item?.attempts ?? 1));
-    return this.#miss(state, "save_failed");
+    state.pacer.failedSaves = (state.pacer.failedSaves ?? 0) + 1;
+    return state.pacer.failedSaves >= MISSES_MAX ? { kind: "stop", code: "save_failed", waitMs: null } : null;
   }
 
   /** Per-work failures that are not the site's fault; several in a row are. Only a completed save clears them. */
-  #miss(state: KeepState, code: StopCode = "unreadable"): Verdict | null {
+  #miss(state: KeepState): Verdict | null {
     state.pacer.misses += 1;
-    return state.pacer.misses >= MISSES_MAX ? { kind: "stop", code, waitMs: null } : null;
+    return state.pacer.misses >= MISSES_MAX ? { kind: "stop", code: "unreadable", waitMs: null } : null;
   }
 
   async #workStep(state: KeepState, item: QueueItem): Promise<Verdict> {
@@ -848,6 +853,7 @@ export class KeepACopy {
       return Math.max(0, (state.pacer.stopped?.until ?? state.pacer.dueAt) - now);
     }
     state.pacer.misses = 0;
+    state.pacer.failedSaves = 0;
     const work = this.#keep(state, pending.workId);
     const old = work.copy;
     if (old && pending.setAside) {
