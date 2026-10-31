@@ -16,10 +16,14 @@ import {
   readWorkPage,
   MAX_ATTEMPTS,
   MAX_NAME_BYTES,
+  SETTLE_MAX_MS,
   STOP_MAX_MS,
   STOP_MS,
   safeSegment,
 } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
+import { CLAIM_MS, fromOffscreenAnswer, offscreenFetcher, toOffscreenAnswer } from "../../.trace-build/extension-runtime/keep-a-copy-fetch.mjs";
+import { isOurFile, offscreenKeeper } from "../../.trace-build/extension-runtime/keep-a-copy-runtime.mjs";
+import { keepACopyManifest } from "../../scripts/build-keep-a-copy.mjs";
 
 // Invented works and people throughout, in the markup of AO3's pages, not a capture.
 const USER = "Synthetic_Reader";
@@ -522,7 +526,108 @@ test("two much shorter versions in a day get two names, neither written over", a
   assert.deepEqual(box.removed, []);
 });
 
+test("the download bubble is hidden only while a backup runs, and shown again on every way out", async () => {
+  const box = harness({ [epubLink("1")]: file(epubLink("1"), epub()), [epubLink("2")]: file(epubLink("2"), epub()) });
+  await box.engine.notePage(readWorkPage(workPage("1")), "bookmark");
+  await box.engine.notePage(readWorkPage(workPage("2")), "bookmark");
+  await box.drain();
+  assert.deepEqual(box.quiet, []);
+  await box.engine.noteUser(USER);
+  box.ports.fetchPage = async (url) => html(url, listPage(["7"], { next: true }));
+  await box.engine.startBackup();
+  await box.engine.tick();
+  assert.deepEqual(box.quiet, [true]);
+  await box.engine.updateSettings({ enabled: false });
+  assert.deepEqual(box.quiet, [true, false]);
+  await box.engine.updateSettings({ enabled: true });
+  box.now += 60_000;
+  box.ports.fetchPage = async (url) => html(url, "Forbidden", 403);
+  await box.engine.tick();
+  assert.deepEqual(box.quiet, [true, false, true, false]);
+});
+
+test("the popup's view answers while a request is under way, and writes nothing", async () => {
+  const box = harness();
+  let answer;
+  box.ports.fetchFile = () => new Promise((resolve) => { answer = resolve; });
+  await box.engine.notePage(readWorkPage(workPage("1")), "bookmark");
+  const ticking = box.engine.tick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  let writes = 0;
+  const write = box.ports.write;
+  box.ports.write = async (state) => { writes += 1; return write(state); };
+  assert.equal((await box.engine.view()).waiting, 1);
+  assert.equal(writes, 0);
+  answer(file(epubLink("1"), epub()));
+  await ticking;
+});
+
+test("an old file is removed only when it is still this extension's, at its recorded name", () => {
+  const item = { id: 4, filename: "C:\\Users\\r\\Downloads\\AO3\\F\\T – A (1).epub", state: "complete", byExtensionId: "ext" };
+  assert.equal(isOurFile(item, "ext", "AO3/F/T – A (1).epub"), true);
+  assert.equal(isOurFile({ ...item, byExtensionId: "other" }, "ext", "AO3/F/T – A (1).epub"), false);
+  assert.equal(isOurFile(item, "ext", "AO3/F/Other (2).epub"), false);
+  assert.equal(isOurFile(undefined, "ext", "AO3/F/T – A (1).epub"), false);
+  const { byExtensionId, ...firefox } = item;
+  assert.equal(isOurFile(firefox, "ext", "AO3/F/T – A (1).epub"), true);
+});
+
+test("a file's first bytes cross to and from the offscreen document intact", () => {
+  const fetched = file(epubLink("1"), epub());
+  const back = fromOffscreenAnswer(JSON.parse(JSON.stringify(toOffscreenAnswer(fetched))));
+  assert.deepEqual(back, fetched);
+  assert.equal(isEpub(back.bytes), true);
+});
+
 // --- Fix round 2 ----------------------------------------------------------------------
+
+test("the offscreen document fetches one file at a time, joins a repeat, keeps the worker up and lets unclaimed blobs go", async () => {
+  const timers = [];
+  const revoked = [];
+  let alive = 0;
+  let finish;
+  const fetcher = offscreenFetcher({
+    fetchFile: () => new Promise((resolve) => { finish = resolve; }),
+    revoke: (handle) => revoked.push(handle),
+    keepAlive: () => { alive += 1; return () => { alive -= 1; }; },
+    setTimer: (run, ms) => { timers.push({ run, ms, cleared: false }); return timers.length - 1; },
+    clearTimer: (at) => { timers[at].cleared = true; },
+  });
+  const first = fetcher.fetch(epubLink("1"));
+  const again = fetcher.fetch(epubLink("1"));
+  assert.deepEqual(await fetcher.fetch(epubLink("2")), { kind: "failed", code: "busy" });
+  assert.equal(alive, 1);
+  finish(file(epubLink("1"), epub()));
+  const [a, b] = await Promise.all([first, again]);
+  assert.equal(a.handle, b.handle);
+  assert.equal(alive, 0);
+  assert.equal(timers[0].ms, CLAIM_MS);
+  timers[0].run();
+  assert.deepEqual(revoked, [a.handle]);
+
+  const claimed = fetcher.fetch(epubLink("3"));
+  finish(file(epubLink("3"), epub()));
+  fetcher.claim((await claimed).handle);
+  assert.equal(timers[1].cleared, true);
+  assert.equal(classifyAnswer({ kind: "failed", code: "busy" }, "epub", NOW).network, undefined);
+});
+
+test("the offscreen document is opened again whenever Chrome closed it, and closed only when open", async () => {
+  let open = false;
+  const calls = [];
+  const keeper = offscreenKeeper({
+    hasDocument: async () => open,
+    createDocument: async () => { calls.push("create"); open = true; },
+    closeDocument: async () => { calls.push("close"); open = false; },
+  });
+  await keeper.ensure();
+  await keeper.ensure();
+  open = false; // Chrome closed it.
+  await keeper.ensure();
+  await keeper.close();
+  await keeper.close();
+  assert.deepEqual(calls, ["create", "create", "close"]);
+});
 
 test("saves that keep failing stop the whole queue as save_failed after three, not three per work", async () => {
   const answers = {};
@@ -568,4 +673,106 @@ test("unreadable works and failed saves are counted apart, so each stop names it
   assert.equal(box.stored.works["3"].copy.updatedAt, "1761700000");
   assert.equal(box.stored.pacer.stopped, null);
   assert.equal(box.stored.pacer.misses + box.stored.pacer.failedSaves, 0);
+});
+
+test("a save the browser never finishes is cancelled before its file is let go", async () => {
+  const box = harness({ [epubLink("1")]: file(epubLink("1"), epub()) });
+  const cancelled = [];
+  box.ports.cancel = async (id) => { cancelled.push(id); box.downloads.set(id, "interrupted"); };
+  const save = box.ports.save;
+  box.ports.save = async (request) => {
+    const id = await save(request);
+    box.downloads.set(id, "in_progress");
+    return id;
+  };
+  await box.engine.notePage(readWorkPage(workPage("1")), "bookmark");
+  await box.engine.tick();
+  box.now += SETTLE_MAX_MS;
+  await box.engine.tick();
+  assert.deepEqual(cancelled, [1]);
+  assert.deepEqual(box.released, [`blob:keep-a-copy/${epubLink("1")}`]);
+  assert.equal(box.stored.pending, null);
+  assert.equal(box.stored.works["1"].copy, null);
+});
+
+test("Windows paths match the stored path with either slash and any case", () => {
+  const item = { id: 4, filename: "C:\\Users\\Reader\\Downloads\\AO3\\F\\T – A (1).epub", state: "complete" };
+  assert.equal(isOurFile(item, "ext", "C:\\Users\\Reader\\Downloads\\AO3\\F\\T – A (1).epub"), true);
+  assert.equal(isOurFile(item, "ext", "c:\\users\\reader\\downloads\\ao3\\f\\t – a (1).epub"), true);
+  assert.equal(isOurFile(item, "ext", "AO3/F/T – A (1).epub"), true);
+  assert.equal(isOurFile(item, "ext", "C:\\Users\\Reader\\Downloads\\AO3\\F\\Other (2).epub"), false);
+  // Elsewhere, case still counts.
+  assert.equal(isOurFile({ ...item, filename: "/home/r/Downloads/AO3/F/T – A (1).epub" }, "ext", "ao3/f/t – a (1).epub"), false);
+});
+
+// --- Locked works -----------------------------------------------------------------------
+
+test("a locked work found on a list is copied only after its page is read, in the same step", async () => {
+  const box = harness({
+    [listPageURL(USER, "bookmarks", 1)]: html(listPageURL(USER, "bookmarks", 1), listPage([{ id: "8", restricted: true }])),
+    [listPageURL(USER, "later", 1)]: html(listPageURL(USER, "later", 1), listPage([])),
+    [listPageURL(USER, "subscriptions", 1)]: html(listPageURL(USER, "subscriptions", 1), ""),
+    [workURL("8")]: html(workURL("8"), workPage("8", { restricted: true })),
+    [epubLink("8")]: file(epubLink("8"), epub()),
+  });
+  await box.engine.noteUser(USER);
+  await box.engine.startBackup();
+  await box.engine.tick();
+  assert.equal(box.stored.works["8"].restricted, true);
+  assert.equal(box.stored.queue[0].link, undefined);
+  box.now = box.stored.pacer.dueAt;
+  await box.engine.tick();
+  // Page and file in one step: the link is never stored.
+  assert.deepEqual(box.requests.slice(1), [workURL("8"), epubLink("8")]);
+  await box.drain();
+  assert.equal(box.saved.length, 1);
+  assert.equal(box.stored.works["8"].copy.updatedAt, "1761700000");
+});
+
+test("a locked work whose page does not show the reader signed in is skipped, with no file request", async () => {
+  for (const answer of [
+    html(`${AO3_ORIGIN}/users/login?restricted=true`, '<body class="logged-out"><form action="/users/login"></form></body>'),
+    html(workURL("8"), workPage("8", { restricted: true, signedIn: false })),
+    html(workURL("8"), workPage("8", { restricted: true }).replace(/<li class="download">[\s\S]*?<\/ul>\n    <\/li>/, "")),
+  ]) {
+    const box = harness({ [workURL("8")]: answer, [epubLink("8")]: file(epubLink("8"), epub()) });
+    await box.engine.noteWork("8", "bookmark");
+    await box.drain();
+    assert.deepEqual(box.requests, [workURL("8")]);
+    assert.equal(box.stored.works["8"].skipped, "needs_sign_in");
+    assert.equal(box.stored.pacer.misses, 0);
+    assert.deepEqual((await box.engine.view()).skipped, { needs_sign_in: 1 });
+  }
+});
+
+test("a locked work's link from the reader's open page, or from storage, is never fetched directly", async () => {
+  const box = harness({
+    [workURL("8")]: html(workURL("8"), workPage("8", { restricted: true, updatedAt: "1761800000" })),
+    [epubLink("8", "1761800000")]: file(epubLink("8", "1761800000"), epub()),
+  });
+  await box.engine.notePage(readWorkPage(workPage("8", { restricted: true })), "bookmark");
+  assert.equal(box.stored.queue[0].link, undefined);
+  // A link left in storage (an older version, say) is dropped before the step.
+  box.stored.queue[0].link = { url: epubLink("8"), updatedAt: "1761700000" };
+  box.engine = new KeepACopy(box.ports);
+  await box.drain();
+  assert.deepEqual(box.requests, [workURL("8"), epubLink("8", "1761800000")]);
+  assert.equal(box.saved.length, 1);
+});
+
+// --- The standalone build ---------------------------------------------------------------
+
+test("the standalone manifests ask for downloads and AO3, nothing more", () => {
+  const chrome = keepACopyManifest("chrome");
+  const firefox = keepACopyManifest("firefox");
+  assert.deepEqual(chrome.permissions, ["downloads", "storage", "alarms", "downloads.ui", "offscreen"]);
+  assert.deepEqual(firefox.permissions, ["downloads", "storage", "alarms"]);
+  for (const manifest of [chrome, firefox]) {
+    assert.deepEqual(manifest.host_permissions, ["https://archiveofourown.org/*", "https://*.archiveofourown.org/*"]);
+    assert.deepEqual(manifest.content_scripts.flatMap((script) => script.matches), ["https://archiveofourown.org/*"]);
+    assert.equal(manifest.optional_permissions, undefined);
+    assert.equal(manifest.externally_connectable, undefined);
+  }
+  assert.deepEqual(firefox.browser_specific_settings.gecko.data_collection_permissions, { required: ["none"] });
+  assert.equal(firefox.browser_specific_settings.gecko_android, undefined);
 });

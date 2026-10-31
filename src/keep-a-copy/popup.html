@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Keep a Copy</title>
+  <style>
+    :root { color-scheme: light dark; font: 13px/1.4 system-ui, sans-serif; }
+    body { width: 300px; margin: 12px; }
+    h1 { font-size: 15px; margin: 0 0 8px; }
+    fieldset { border: 0; margin: 10px 0; padding: 0; }
+    legend { font-weight: 600; margin-bottom: 4px; }
+    label { display: block; margin: 3px 0; }
+    p { margin: 6px 0; }
+    .quiet { opacity: 0.7; }
+    button { margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Keep a Copy</h1>
+  <label><input type="checkbox" id="enabled"> Keep copies</label>
+  <p id="count"></p>
+  <p id="status" class="quiet"></p>
+  <fieldset>
+    <legend>Keep a work when I</legend>
+    <label><input type="checkbox" data-trigger="bookmark"> Bookmark it</label>
+    <label><input type="checkbox" data-trigger="later"> Mark it for later</label>
+    <label><input type="checkbox" data-trigger="subscribe"> Subscribe to it</label>
+    <label><input type="checkbox" data-trigger="kudos"> Leave kudos</label>
+    <label><input type="checkbox" data-trigger="open"> Open it (every work)</label>
+  </fieldset>
+  <fieldset>
+    <legend>Updates</legend>
+    <label><input type="checkbox" id="weeklyCheck"> Check unfinished works weekly</label>
+    <p class="quiet">Copies also update whenever you open the work.</p>
+  </fieldset>
+  <fieldset>
+    <legend>Format</legend>
+    <select id="format">
+      <option value="epub">EPUB</option>
+      <option value="azw3">AZW3</option>
+      <option value="mobi">MOBI</option>
+      <option value="pdf">PDF</option>
+      <option value="html">HTML</option>
+    </select>
+  </fieldset>
+  <fieldset>
+    <legend>Backup</legend>
+    <p class="quiet">Saves your Bookmarks, Marked for Later and Subscriptions, slowly, so AO3 is not overloaded. A large list takes hours and carries on where it stopped.</p>
+    <p id="downloadsNote" class="quiet" hidden>Firefox lists every file in its downloads panel while a backup runs.</p>
+    <button id="backup" type="button">Back up my lists</button>
+    <p id="backupStatus"></p>
+  </fieldset>
+  <p class="quiet">Files are saved in Downloads › AO3. Nothing is sent anywhere but AO3.</p>
+  <script src="popup.js"></script>
+</body>
+</html>
