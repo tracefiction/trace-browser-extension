@@ -849,16 +849,23 @@ test("a locked work is copied from its Chapter Index read signed in, then its fi
   assert.equal(box.stored.works["8"].copy.updatedAt, version);
   assert.equal(box.stored.works["8"].restricted, true);
   assert.equal(JSON.stringify(box.stored).includes("/downloads/8/"), false, "the URL is never kept");
-  // Looked at again, unchanged: the index alone. A new chapter: copied again. Its work page is never read again.
-  await box.engine.notePage(readWorkPage(workPage("8", { restricted: true })), "visit");
-  await box.drain();
+  // Looked at again: the index alone, once; the same page's Download link again asks nothing.
+  const indexReads = () => box.modes.filter(([url]) => url === navigateURL("8")).length;
+  for (let i = 0; i < 2; i += 1) {
+    await box.engine.notePage(readWorkPage(workPage("8", { restricted: true })), "visit");
+    await box.drain();
+  }
   assert.equal(box.fileModes.length, 1);
+  assert.equal(indexReads(), 2);
+  // A new chapter moves the page's link: copied again. Its work page is never read again.
   chapters.push(["83", "2026-10-20"]);
   const newer = lockedFileURL("8", "Lanterns Locked", "epub", String(LOCKED_VERSION_BASE + dayOf("2026-10-20") + 3));
   answers[navigateURL("8")] = html(navigateURL("8"), chapterIndex("8", { chapters, title: "Lanterns Locked" }));
   answers[newer] = file(newer, epub(3_000));
-  await box.engine.notePage(readWorkPage(workPage("8", { restricted: true })), "visit");
+  await box.engine.notePage(readWorkPage(workPage("8", { restricted: true, updatedAt: "1761800000" })), "visit");
   await box.drain();
+  assert.equal(indexReads(), 3);
+  assert.equal(JSON.stringify(box.stored).includes("/downloads/8/"), false, "no link of it is kept");
   assert.deepEqual(box.fileModes.map(([url]) => url), [lockedFile, newer]);
   assert.equal(box.stored.works["8"].copy.updatedAt, String(LOCKED_VERSION_BASE + dayOf("2026-10-20") + 3));
   assert.equal(box.modes.filter(([url]) => url === workURL("8")).length, 1);
@@ -953,6 +960,97 @@ test("a backup reads a locked work's Chapter Index again only when its list's up
   assert.equal(await indexReads("1761700000"), 1, "unchanged on the list: not read again");
   assert.equal(await indexReads("1761900000"), 2);
   assert.equal(box.saved.length, 1);
+});
+
+test("a list sent elsewhere ends that list and the run goes on; a list page shown signed out stops it", async () => {
+  const answers = {
+    [listPageURL(USER, "bookmarks", 1)]: html(listPageURL(USER, "bookmarks", 1), listPage(["7"])),
+    // Marked for Later sends this reader elsewhere: not followed.
+    [listPageURL(USER, "later", 1)]: { kind: "redirect", url: listPageURL(USER, "later", 1) },
+    [listPageURL(USER, "subscriptions", 1)]: html(listPageURL(USER, "subscriptions", 1), ""),
+    [workURL("7")]: html(workURL("7"), workPage("7")),
+    [epubLink("7")]: file(epubLink("7"), epub()),
+  };
+  const box = harness(answers);
+  await box.engine.noteUser(USER);
+  await box.engine.startBackup();
+  await box.drain();
+  assert.equal(box.stored.pacer.stopped, null);
+  assert.equal(box.stored.run.status, "finished");
+  assert.deepEqual(box.requests.filter((url) => url.includes("/users/")), ["bookmarks", "later", "subscriptions"].map((list) => listPageURL(USER, list, 1)));
+  assert.equal(box.saved.length, 1);
+  // Signed out for real: the first list shows it, and the run stops.
+  answers[listPageURL(USER, "bookmarks", 1)] = html(listPageURL(USER, "bookmarks", 1), '<body class="logged-out"><form action="/users/login" method="post"></form></body>');
+  assert.equal(await box.engine.startBackup(), "started");
+  await box.drain();
+  assert.equal(box.stored.pacer.stopped.code, "signed_out");
+});
+
+test("a locked work's list value is kept only once its Chapter Index is read: one that failed is asked for again", async () => {
+  const lockedFile = lockedFileURL("8", "Invented work 8", "epub", lockedVersion({ chapters: 1, latestAt: dayOf("2026-10-01") }));
+  const answers = {
+    [listPageURL(USER, "later", 1)]: html(listPageURL(USER, "later", 1), listPage([])),
+    [listPageURL(USER, "subscriptions", 1)]: html(listPageURL(USER, "subscriptions", 1), ""),
+    [navigateURL("8")]: html(navigateURL("8"), chapterIndex("8")),
+    [lockedFile]: file(lockedFile, epub()),
+  };
+  const box = harness(answers);
+  await box.engine.noteUser(USER);
+  const index = (ok) => { answers[navigateURL("8")] = ok ? html(navigateURL("8"), chapterIndex("8")) : html(navigateURL("8"), "", 500); };
+  const listing = (updatedAt) => {
+    answers[listPageURL(USER, "bookmarks", 1)] = html(listPageURL(USER, "bookmarks", 1), listPage([{ id: "8", restricted: true, updatedAt }]));
+  };
+  const indexReads = () => box.modes.filter(([url]) => url === navigateURL("8")).length;
+  const backup = async (updatedAt) => {
+    listing(updatedAt);
+    await box.engine.startBackup();
+    await box.drain();
+  };
+  await backup("1761700000");
+  assert.equal(box.stored.works["8"].listed, "1761700000");
+  index(false);
+  await backup("1761800000");
+  assert.equal(box.stored.works["8"].listed, "1761700000", "not read: the old value stays");
+  index(true);
+  await backup("1761800000");
+  assert.equal(indexReads(), 3);
+  assert.equal(box.stored.works["8"].listed, "1761800000");
+  // The weekly check, the same way.
+  await box.engine.updateSettings({ weeklyCheck: true });
+  const check = async (updatedAt) => {
+    listing(updatedAt);
+    box.now += CHECK_EVERY_MS;
+    await box.drain();
+  };
+  index(false);
+  await check("1761900000");
+  assert.equal(box.stored.works["8"].listed, "1761800000");
+  index(true);
+  await check("1761900000");
+  assert.equal(indexReads(), 5);
+  assert.equal(box.stored.works["8"].listed, "1761900000");
+});
+
+test("a busy file fetcher is no stop and no read; after the page was sent, it is the work's try", async () => {
+  const box = harness({ [navigateURL("8")]: html(navigateURL("8"), chapterIndex("8")) });
+  box.ports.fetchFile = async (url, credentials) => {
+    box.fileModes.push([url, credentials]);
+    return { kind: "failed", code: "busy" };
+  };
+  // Nothing sent: a link from the reader's page, its file fetcher taken.
+  await box.engine.notePage(readWorkPage(workPage("1")), "bookmark");
+  for (let i = 0; i < 5; i += 1) box.now += await box.engine.tick();
+  assert.equal(box.stored.pacer.stopped, null);
+  assert.equal(box.stored.pacer.window.reads, 0);
+  assert.equal(box.stored.queue[0].attempts, 0);
+  // A locked work's Chapter Index is sent, then its file fetcher is taken: three tries, then skipped.
+  box.engine = new KeepACopy(box.ports);
+  box.stored.queue = [];
+  await box.engine.notePage(readWorkPage(workPage("8", { restricted: true })), "bookmark");
+  for (let i = 0; i < 6 && !box.stored.works["8"].skipped; i += 1) box.now += await box.engine.tick();
+  assert.equal(box.stored.works["8"].skipped, "failed");
+  assert.equal(box.stored.pacer.stopped, null);
+  assert.equal(box.modes.filter(([url]) => url === navigateURL("8")).length, 3);
 });
 
 test("a locked work's file sent elsewhere is not followed: no file, and nothing more is asked", async () => {

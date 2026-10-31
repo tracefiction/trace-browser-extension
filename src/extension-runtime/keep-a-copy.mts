@@ -358,7 +358,8 @@ export type Verdict =
   | { readonly kind: "skip"; readonly code: SkipCode }
   /** `network` when the request itself failed, which counts against the work. */
   /** `own`: the wait is this extension's, not a time AO3 gave. */
-  | { readonly kind: "retry"; readonly waitMs: number | null; readonly network?: true; readonly own?: true }
+  /** `busy`: nothing was sent (the file fetcher was taken): it waits its turn, never a refusal. */
+  | { readonly kind: "retry"; readonly waitMs: number | null; readonly network?: true; readonly own?: true; readonly busy?: true }
   | { readonly kind: "stop"; readonly code: StopCode; readonly waitMs: number | null };
 
 const bytesText = (bytes: Uint8Array, from: number, to: number) => String.fromCharCode(...bytes.subarray(from, to));
@@ -390,7 +391,7 @@ export function classifyAnswer(answer: Fetched, expect: CopyFormat | "page" | "s
   if (answer.kind === "redirect") return expect === "session" ? { kind: "skip", code: "needs_sign_in" } : { kind: "skip", code: "no_download" };
   if (answer.kind === "failed") {
     if (answer.code === "too_large") return { kind: "skip", code: "too_large" };
-    return answer.code === "busy" ? { kind: "retry", waitMs: NETWORK_RETRY_MS, own: true } : { kind: "retry", waitMs: NETWORK_RETRY_MS, network: true, own: true };
+    return answer.code === "busy" ? { kind: "retry", waitMs: NETWORK_RETRY_MS, busy: true, own: true } : { kind: "retry", waitMs: NETWORK_RETRY_MS, network: true, own: true };
   }
   const waitMs = retryAfterMs(answer.retryAfter, now);
   const text = answer.text ?? (answer.bytes ? new TextDecoder().decode(answer.bytes.subarray(0, 8_192)) : "");
@@ -537,6 +538,8 @@ export interface QueueItem {
   lastFailure?: "save" | "request";
   /** Asked for again, with no link, while its file was saving: looked at again once that save is over. */
   again?: true;
+  /** The `updated_at` a list or page showed when a locked work was asked for: kept once its Chapter Index is read. */
+  listed?: string;
 }
 
 /** A file the browser is still saving. The old copy is touched only once it is complete. */
@@ -699,6 +702,8 @@ function backupBusy(state: KeepState): boolean {
 
 export class KeepACopy {
   #state: KeepState | null = null;
+  /** Requests sent by this background: a step that sent none is no read against the window, nor a try. */
+  #sent = 0;
   #busy: Promise<unknown> = Promise.resolve();
   #quiet = false;
 
@@ -818,9 +823,12 @@ export class KeepACopy {
       if (!this.#keeps(state, page.workId, trigger)) return;
       const work = this.#keep(state, page.workId, page);
       const link = page.downloads[state.settings.format];
-      // A locked work's link is never taken: its own step reads its Chapter Index.
-      if (work.restricted) this.#enqueue(state, { workId: work.workId, pace: "reader" }, true);
-      else if (link && (!work.copy || work.copy.updatedAt !== link.updatedAt || work.copy.format !== state.settings.format)) {
+      if (work.restricted) {
+        // A locked work's link is never taken, only its `updated_at` (the number alone): its
+        // Chapter Index is read again only when that has moved since it was last read.
+        const at = Object.values(page.downloads)[0]?.updatedAt ?? null;
+        if (!work.copy || (at !== null && at !== work.listed)) this.#enqueue(state, { workId: work.workId, pace: "reader", ...(at === null ? {} : { listed: at }) }, true);
+      } else if (link && (!work.copy || work.copy.updatedAt !== link.updatedAt || work.copy.format !== state.settings.format)) {
         this.#enqueue(state, { workId: work.workId, pace: "reader", link });
       }
     });
@@ -913,6 +921,7 @@ export class KeepACopy {
     } else if (news && state.pending?.workId === item.workId) {
       queued.again = true;
     }
+    if (item.listed !== undefined) queued.listed = item.listed;
     if (item.pace === "reader") queued.pace = "reader";
     // On a backup's lists too: it counts, and waits, with the backup.
     if (item.batch) queued.batch = true;
@@ -986,22 +995,31 @@ export class KeepACopy {
     }
     await this.ports.write(state);
 
+    const sentBefore = this.#sent;
     const verdict = item ? await this.#workStep(state, item) : await this.#listStep(state, running!);
     const after = this.ports.clock.now();
     pacer.dueAt = Math.max(pacer.dueAt, after + gap);
-    // AO3 refusing or slowing everyone down, or no answer at all, is not this work's fault.
-    const siteWide = (verdict.kind === "stop" && verdict.code !== "unreadable" && verdict.code !== "save_failed") || verdict.kind === "retry";
+    // Nothing was sent in this step: it takes nothing from the window's cap.
+    const sentNothing = this.#sent === sentBefore;
+    if (sentNothing) pacer.window.reads = Math.max(0, pacer.window.reads - 1);
+    // AO3 refusing or slowing everyone down, or no answer at all, is not this work's fault; nor is a busy
+    // fetcher, unless the step sent its page first.
+    const siteWide = (verdict.kind === "stop" && verdict.code !== "unreadable" && verdict.code !== "save_failed")
+      || (verdict.kind === "retry" && (!verdict.busy || sentNothing));
     if (item && siteWide) item.attempts = Math.max(0, (item.attempts ?? 1) - 1);
     // No answer: the next work goes first, so one file that never arrives holds up no other.
     if (item && verdict.kind === "retry" && verdict.network) {
       this.#drop(state, item.workId);
       state.queue.push(item);
     }
-    const failed = verdict.kind === "retry" || (verdict.kind === "stop" && !NOT_AO3_FAILING.includes(verdict.code));
+    const failed = (verdict.kind === "retry" && !verdict.busy) || (verdict.kind === "stop" && !NOT_AO3_FAILING.includes(verdict.code));
     const timeFromAO3 = failed && verdict.waitMs !== null && !(verdict.kind === "retry" && verdict.own);
     if (failed) pacer.failures = timeFromAO3 ? 0 : (pacer.failures ?? 0) + 1;
-    else if (!(verdict.kind === "stop" && verdict.code === "save_failed")) pacer.failures = 0;
-    if (verdict.kind === "retry") {
+    else if (verdict.kind !== "retry" && !(verdict.kind === "stop" && verdict.code === "save_failed")) pacer.failures = 0;
+    if (verdict.kind === "retry" && verdict.busy) {
+      // AO3 refused nothing: no step toward a stop.
+      pacer.dueAt = after + (verdict.waitMs ?? NETWORK_RETRY_MS);
+    } else if (verdict.kind === "retry") {
       pacer.retries += 1;
       if (pacer.retries >= MAX_CONSECUTIVE_RETRIES) {
         this.#stop(state, "slow_down", timeFromAO3 ? verdict.waitMs : null, after);
@@ -1016,6 +1034,13 @@ export class KeepACopy {
     // (Read again: #stop may have set it since the check above.)
     const stopped = state.pacer.stopped as KeepState["pacer"]["stopped"];
     return Math.max(0, (stopped?.until ?? pacer.dueAt) - after);
+  }
+
+  /** One request through the ports, counted unless nothing was sent (`busy`). */
+  async #fetch(url: string, as: "page" | "file", credentials: "omit" | "include"): Promise<Fetched> {
+    const answer = as === "page" ? await this.ports.fetchPage(url, credentials) : await this.ports.fetchFile(url, credentials);
+    if (answer.kind !== "failed" || answer.code !== "busy") this.#sent += 1;
+    return answer;
   }
 
   #stop(state: KeepState, code: StopCode, waitMs: number | null, now: number): void {
@@ -1061,7 +1086,7 @@ export class KeepACopy {
       delete item.linkAt;
     }
     if (!item.link) {
-      const answer = await this.ports.fetchPage(`${AO3_ORIGIN}/works/${item.workId}?view_adult=true`, "omit");
+      const answer = await this.#fetch(`${AO3_ORIGIN}/works/${item.workId}?view_adult=true`, "page", "omit");
       const verdict = classifyAnswer(answer, "page", this.ports.clock.now());
       const page = answer.kind === "response" && verdict.kind === "ok" ? readWorkPage(answer.text ?? "") : null;
       // AO3's sign-in page, or (never, read signed out) the lock: a locked work, copied in its own next step.
@@ -1112,7 +1137,7 @@ export class KeepACopy {
   async #lockedStep(state: KeepState, item: QueueItem, work: KeptWork): Promise<Verdict> {
     const format = state.settings.format;
     const skip = this.#skipper(state, item, work);
-    const answer = await this.ports.fetchPage(`${AO3_ORIGIN}/works/${work.workId}/navigate`, "include");
+    const answer = await this.#fetch(`${AO3_ORIGIN}/works/${work.workId}/navigate`, "page", "include");
     const verdict = classifyAnswer(answer, "session", this.ports.clock.now());
     if (verdict.kind === "skip") return skip(verdict.code);
     if (verdict.kind !== "ok" || answer.kind !== "response") return verdict;
@@ -1121,6 +1146,8 @@ export class KeepACopy {
     if (index?.workId === work.workId && index.signedIn === false) return skip("needs_sign_in");
     if (index?.workId !== work.workId || index.signedIn !== true) return skip("no_download");
     this.#keep(state, work.workId, { title: index.title, author: index.author });
+    // Read: the list's or page's `updated_at` it was asked for is now the one last seen.
+    if (item.listed !== undefined) work.listed = item.listed;
     const version = lockedVersion(index);
     if (work.copy?.updatedAt === version && work.copy.format === format) {
       this.#drop(state, item.workId);
@@ -1134,7 +1161,7 @@ export class KeepACopy {
   async #fileStep(state: KeepState, item: QueueItem, work: KeptWork, link: DownloadLink, credentials: "omit" | "include"): Promise<Verdict> {
     const format = state.settings.format;
     const skip = this.#skipper(state, item, work);
-    const answer = await this.ports.fetchFile(link.url, credentials);
+    const answer = await this.#fetch(link.url, "file", credentials);
     const verdict = classifyAnswer(answer, format, this.ports.clock.now());
     const handle = answer.kind === "response" ? answer.handle : undefined;
     if (verdict.kind !== "ok" && handle) this.ports.release?.(handle);
@@ -1217,7 +1244,12 @@ export class KeepACopy {
       return { kind: "ok" };
     }
     // The reader's own lists, with their session: Marked for Later and Subscriptions are theirs alone.
-    const answer = await this.ports.fetchPage(listPageURL(run.user, list, run.page), "include");
+    const answer = await this.#fetch(listPageURL(run.user, list, run.page), "page", "include");
+    // Sent elsewhere (not followed): that list is over, and the run goes on with the next.
+    if (answer.kind === "redirect") {
+      this.#nextList(state, run);
+      return { kind: "ok" };
+    }
     const verdict = classifyAnswer(answer, "session", this.ports.clock.now());
     // A list read with the reader's session that wants a sign-in: they signed out.
     if (verdict.kind === "skip") return { kind: "stop", code: verdict.code === "needs_sign_in" ? "signed_out" : "forbidden", waitMs: null };
@@ -1225,22 +1257,18 @@ export class KeepACopy {
     const read = readListPage(answer.text ?? "", list);
     for (const listed of read.works) {
       const known = state.works[listed.workId];
-      const stale = (work: KeptWork) => {
-        if (!work.restricted) return !work.copy || (listed.updatedAt !== null && listed.updatedAt !== work.copy.updatedAt);
-        // A locked copy's version is not the list's: the list's own `updated_at` is compared with the one last seen.
-        const moved = listed.updatedAt !== null && listed.updatedAt !== work.listed;
-        if (listed.updatedAt !== null) work.listed = listed.updatedAt;
-        return !work.copy || moved;
-      };
+      // A locked copy's version is not the list's: the list's own `updated_at` is compared with the one its Chapter Index was last read for.
+      const stale = (work: KeptWork) => !work.copy || (listed.updatedAt !== null && listed.updatedAt !== (work.restricted ? work.listed : work.copy.updatedAt));
+      const seen = listed.updatedAt === null ? {} : { listed: listed.updatedAt };
       if (run.purpose === "backup") {
         // Subscriptions show no chapter count, so they leave `complete` as it was.
         const work = this.#keep(state, listed.workId, list === "subscriptions" ? {} : { complete: listed.complete, restricted: listed.restricted });
-        if (stale(work)) this.#enqueue(state, { workId: listed.workId, pace: "reader", batch: true });
+        if (stale(work)) this.#enqueue(state, { workId: listed.workId, pace: "reader", batch: true, ...seen });
       } else if (known?.copy && !listed.complete) {
         if (listed.restricted) known.restricted = true;
         if (!stale(known)) continue;
         known.complete = listed.complete;
-        this.#enqueue(state, { workId: listed.workId, pace: "check" }, true);
+        this.#enqueue(state, { workId: listed.workId, pace: "check", ...seen }, true);
       }
     }
     if (run.purpose === "backup") {
@@ -1251,17 +1279,19 @@ export class KeepACopy {
     } else {
       run.found += read.works.length;
     }
-    if (read.next && run.page < MAX_LIST_PAGES) {
-      run.page += 1;
-    } else {
-      run.list += 1;
-      run.page = 1;
-      if (run.list >= run.lists.length) {
-        run.status = "finished";
-        if (run.purpose === "check") state.pacer.lastCheckAt = this.ports.clock.now();
-      }
-    }
-    if (run.status === "finished" && run.purpose === "check") state.run = null;
+    if (read.next && run.page < MAX_LIST_PAGES) run.page += 1;
+    else this.#nextList(state, run);
     return verdict;
+  }
+
+  /** The run goes on with its next list, or ends with its last. */
+  #nextList(state: KeepState, run: ListRun): void {
+    run.list += 1;
+    run.page = 1;
+    if (run.list < run.lists.length) return;
+    run.status = "finished";
+    if (run.purpose !== "check") return;
+    state.pacer.lastCheckAt = this.ports.clock.now();
+    state.run = null;
   }
 }
