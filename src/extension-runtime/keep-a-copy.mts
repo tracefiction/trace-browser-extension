@@ -454,6 +454,8 @@ export interface QueueItem {
   /** Requests made for the step this work is on. */
   attempts?: number;
   lastFailure?: "save" | "request";
+  /** Asked for again, with no link, while its file was saving: looked at again once that save is over. */
+  again?: true;
 }
 
 /** A file the browser is still saving. The old copy is touched only once it is complete. */
@@ -807,6 +809,7 @@ export class KeepACopy {
     }
     // A newer link, or the reader's own pace, wins over what was queued.
     if (item.link) queued.link = item.link;
+    else if (state.pending?.workId === item.workId) queued.again = true;
     if (item.pace === "reader") queued.pace = "reader";
     // On a backup's lists too: it counts, and waits, with the backup.
     if (item.batch) queued.batch = true;
@@ -1059,11 +1062,15 @@ export class KeepACopy {
       format: pending.format, updatedAt: pending.updatedAt, savedAt: now, url: pending.handle,
     };
     work.skipped = null;
-    // A newer link came while this one was saving: it is still to be fetched.
+    // A newer link came while this one was saving, or the work was asked for
+    // again: it is still to be fetched, or its page read again.
     const queued = state.queue.find((each) => each.workId === pending.workId);
-    if (queued?.link && queued.link.updatedAt !== pending.updatedAt) {
+    const newer = queued?.link !== undefined && queued.link.updatedAt !== pending.updatedAt;
+    if (queued && (newer || queued.again)) {
+      if (!newer) delete queued.link;
       queued.attempts = 0;
       delete queued.lastFailure;
+      delete queued.again;
     } else {
       this.#drop(state, pending.workId);
     }

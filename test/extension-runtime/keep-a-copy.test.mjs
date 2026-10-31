@@ -1429,6 +1429,23 @@ test("the same page again while a copy is saving asks for nothing more", async (
   assert.equal(box.stored.queue.length, 0);
 });
 
+test("a work asked for again, with no link, while its copy is saving is looked at once more", async () => {
+  const box = harness({
+    [epubLink("1", "1")]: file(epubLink("1", "1"), epub()),
+    [workURL("1")]: html(workURL("1"), workPage("1", { updatedAt: "2" })),
+    [epubLink("1", "2")]: file(epubLink("1", "2"), epub()),
+  });
+  await box.engine.notePage(readWorkPage(workPage("1", { updatedAt: "1" })), "bookmark");
+  await box.engine.tick();
+  assert.equal(box.stored.pending.updatedAt, "1", "the save is under way");
+  // Asked for again with no link (as a check does): AO3 has a newer version by now.
+  await box.engine.noteWork("1", "kudos");
+  await box.drain();
+  assert.deepEqual(box.requests, [epubLink("1", "1"), workURL("1"), epubLink("1", "2")]);
+  assert.equal(box.stored.works["1"].copy.updatedAt, "2");
+  assert.equal(box.stored.queue.length, 0);
+});
+
 test("what the reader did stays in the tab until it is answered, and the next page sends it", async () => {
   const stored = new Map();
   const storage = { getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value), removeItem: (key) => stored.delete(key) };
