@@ -1607,7 +1607,7 @@ test("the background asks AO3 for works and files signed out, and for the reader
       storage: { local: { get: async (key) => structuredClone({ [key]: stored[key] }), set: async (items) => { Object.assign(stored, structuredClone(items)); } } },
       alarms: { create() {}, get: async () => ({ name: "keep-a-copy" }), onAlarm: listener() },
       downloads: { download: async () => 1, search: async () => [], removeFile: async () => undefined, cancel: async () => undefined, erase: async () => [], onChanged: { addListener() {}, removeListener() {} } },
-    });
+    }).engine;
   };
   const work = install();
   await work.noteWork("5", "bookmark");
@@ -2186,7 +2186,7 @@ test("a page's message sent again is handled once: a work just skipped is not re
   let onMessage;
   const listener = () => ({ addListener() {} });
   const stored = {};
-  const engine = installKeepACopy({
+  const { engine } = installKeepACopy({
     runtime: { id: "keep", sendMessage: async () => null, onConnect: listener(), onMessage: { addListener: (heard) => { onMessage = heard; } } },
     storage: { local: { get: async (key) => structuredClone({ [key]: stored[key] }), set: async (items) => { Object.assign(stored, structuredClone(items)); } } },
     alarms: { create() {}, get: async () => ({ name: "keep-a-copy" }), onAlarm: listener() },
@@ -2197,12 +2197,12 @@ test("a page's message sent again is handled once: a work just skipped is not re
   await send(bookmark);
   await engine.tick();
   assert.deepEqual(asked, [workURL("5")]);
-  assert.equal(stored.keepACopyV1.works["5"].skipped, "no_download");
+  assert.equal(stored["keepACopyV1:"].works["5"].skipped, "no_download");
   await send(bookmark);
   await engine.tick();
   assert.deepEqual(asked, [workURL("5")]);
   assert.equal((await engine.view()).waiting, 0);
-  assert.equal(stored.keepACopyV1.pacer.misses, 1);
+  assert.equal(stored["keepACopyV1:"].pacer.misses, 1);
 
   const repeated = repeatedMessage(2);
   assert.deepEqual(["a", "a", "b", "c", "a", undefined, undefined].map(repeated), [false, true, false, false, false, false, false]);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AO3_ORIGIN, KeepACopy, ownName } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
+import { AO3_ORIGIN, KeepACopy, lockedFileURL, ownName } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
 import {
   KEEP_A_COPY_PREF_KEY,
   LIBRARY_DEFAULTS,
@@ -43,11 +43,26 @@ const file = (url, bytes) => ({
   bytes: bytes.slice(0, 8_192), size: bytes.length, handle: `blob:keep-a-copy/${url}`,
 });
 const workURL = (id) => `${AO3_ORIGIN}/works/${id}?view_adult=true`;
+const loginURL = `${AO3_ORIGIN}/users/login?restricted=true`;
+const navigateURL = (id) => `${AO3_ORIGIN}/works/${id}/navigate`;
+
+/** A work's Chapter Index: `chapters` as [chapter id, YYYY-MM-DD]. */
+function chapterIndex(id, chapters) {
+  return `<html><body class="logged-in"><h2 class="heading">Chapter Index for <a href="/works/${id}">Invented work ${id}</a></h2>` +
+    `<ol class="chapter index group">${chapters.map(([cid, date]) => `<li><a href="/works/${id}/chapters/${cid}">Chapter</a> <span class="datetime">(${date})</span></li>`).join("")}</ol></body></html>`;
+}
+
+/** A page as a request made signed out meets it in these tests: a locked work's is the sign-in page. */
+function signedOut(result) {
+  if (result?.kind !== "response" || typeof result.text !== "string") return result;
+  if (/<img alt="\(Restricted\)"/.test(result.text)) return html(loginURL, '<body class="logged-out"><form action="/users/login"></form></body>');
+  return { ...result, text: result.text.replace('<body class="logged-in">', '<body class="logged-out">') };
+}
 const fileURL = (id, updatedAt = "1761700000") => `${AO3_ORIGIN}/downloads/${id}/Invented_work.epub?updated_at=${updatedAt}`;
 
 /** A queue over an IndexedDB store answering from `answers`, with one account's works in use, as in Trace. */
 function harness(answers = {}, { store = new IndexedDbKeepStore(new IDBFactory(), IDBKeyRange), scope = "account-1" } = {}) {
-  const box = { now: NOW, saved: [], removed: [], requests: [], writes: [], store };
+  const box = { now: NOW, saved: [], removed: [], requests: [], modes: [], writes: [], store };
   let nextId = 1;
   const answer = async (url) => {
     box.requests.push(url);
@@ -63,8 +78,14 @@ function harness(answers = {}, { store = new IndexedDbKeepStore(new IDBFactory()
       box.stored = structuredClone(state);
       await store.write(state, changed, scope);
     },
-    fetchPage: answer,
-    fetchFile: answer,
+    fetchPage: async (url, credentials) => {
+      box.modes.push([url, credentials]);
+      return credentials === "omit" ? signedOut(await answer(url)) : answer(url);
+    },
+    fetchFile: async (url, credentials) => {
+      box.modes.push([url, credentials]);
+      return answer(url);
+    },
     save: async (request) => { box.saved.push(request); return nextId++; },
     settle: async (id) => ({ state: "complete", filename: `/home/reader/Downloads/${box.saved[id - 1]?.filename}` }),
     remove: async (id) => { box.removed.push(id); },
@@ -227,18 +248,29 @@ test("a work missing from a Library that may be cut off keeps updating; from a w
   assert.equal((await box.engine.syncLibrary({ keep: [], drop: [], whole: true })).released, 1);
 });
 
-test("a locked Library work is copied only from its page as the signed-in reader sees it, in the same step", async () => {
-  const box = harness({
+test("a Library work is read signed out; a locked one from its Chapter Index, signed in, and again when a chapter lands", async () => {
+  const day = (date) => String(Date.parse(`${date}T00:00:00Z`) / 1_000 + 0);
+  const first = lockedFileURL("61", "Invented work 61", "epub", String(Number(day("2026-10-20")) + 1));
+  const second = lockedFileURL("61", "Invented work 61", "epub", String(Number(day("2026-10-28")) + 2));
+  const answers = {
     [workURL("61")]: html(workURL("61"), workPage("61", { restricted: true })),
-    [fileURL("61")]: file(fileURL("61"), epub()),
-    [workURL("62")]: html(workURL("62"), workPage("62", { restricted: true, signedIn: false })),
-  });
+    [navigateURL("61")]: html(navigateURL("61"), chapterIndex("61", [["611", "2026-10-20"]])),
+    [first]: file(first, epub()),
+    [second]: file(second, epub()),
+    [workURL("62")]: html(workURL("62"), workPage("62")),
+    [fileURL("62")]: file(fileURL("62"), epub()),
+  };
+  const box = harness(answers);
   await box.engine.updateSettings({ enabled: true });
-  await box.engine.syncLibrary({ keep: [{ workId: "61", chapters: null }, { workId: "62", chapters: null }], drop: [], whole: true });
+  await box.engine.syncLibrary({ keep: [{ workId: "61", chapters: 1 }, { workId: "62", chapters: 3 }], drop: [], whole: true });
   await box.drain();
-  assert.deepEqual(box.requests, [workURL("61"), fileURL("61"), workURL("62")]);
-  assert.deepEqual((await box.engine.view()).skipped, { needs_sign_in: 1 });
-  // No link of a locked work is ever kept.
+  assert.deepEqual(box.modes, [[workURL("61"), "omit"], [navigateURL("61"), "include"], [first, "include"], [workURL("62"), "omit"], [fileURL("62"), "omit"]]);
+  assert.equal((await box.engine.view()).withCopy, 2);
+  // A chapter landing: the Chapter Index again, and the new version's file. The work's page is never read again.
+  answers[navigateURL("61")] = html(navigateURL("61"), chapterIndex("61", [["611", "2026-10-20"], ["612", "2026-10-28"]]));
+  await box.engine.syncLibrary({ keep: [{ workId: "61", chapters: 2 }, { workId: "62", chapters: 3 }], drop: [], whole: true });
+  await box.drain();
+  assert.deepEqual(box.modes.slice(5), [[navigateURL("61"), "include"], [second, "include"]]);
   assert.equal(JSON.stringify(box.stored).includes("/downloads/61/"), false);
 });
 
