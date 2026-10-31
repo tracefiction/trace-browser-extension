@@ -20,10 +20,10 @@
  *   check page, a 403 or 418 stops the queue for an hour, or as long as AO3
  *   asks (at most a day). A 429 or 503 waits a minute or as AO3 says, doubling,
  *   up to 15 minutes; three in a row stop it the same way.
- * - Every work page and file is requested signed out (`credentials: "omit"`):
- *   work pages are never read signed in. Only the reader's own lists go with
- *   their session. A locked work, which AO3 shows to signed-in readers only,
- *   waits (`#locked`).
+ * - Work and chapter pages are never read signed in: a public work's page
+ *   and file go with `credentials: "omit"`. The reader's own lists, and a
+ *   locked work's Chapter Index (`/works/<id>/navigate`) and file, go with
+ *   their session and follow no redirect (`#lockedStep`).
  *
  * Everything lives in local storage on this device. Nothing is sent anywhere
  * but AO3.
@@ -158,6 +158,12 @@ export function isRestrictedPage(html: string): boolean {
   return RESTRICTED_LOCK.test(/<h2\b[^>]*\bclass\s*=\s*"[^"]*\btitle\b[^"]*"[^>]*>([\s\S]*?)<\/h2>/i.exec(html.slice(0, MAX_PAGE_CHARS))?.[1] ?? "");
 }
 
+/** Whether a page was served to a signed-in reader, when it says: `<body class="logged-in">` or `"logged-out"`. */
+export function pageSignedIn(html: string): boolean | null {
+  const bodyClass = /<body\b[^>]*\bclass\s*=\s*"([^"]*)"/i.exec(html.slice(0, MAX_PAGE_CHARS))?.[1] ?? "";
+  return /\blogged-in\b/.test(bodyClass) ? true : /\blogged-out\b/.test(bodyClass) ? false : null;
+}
+
 /** A work page (or its preface and Download menu) as the facts a copy needs. */
 export function readWorkPage(html: string): WorkPageRead | null {
   const head = html.slice(0, MAX_PAGE_CHARS);
@@ -188,6 +194,61 @@ function isComplete(html: string): boolean {
   const chapters = decode(/<dd\b[^>]*\bclass\s*=\s*"[^"]*\bchapters\b[^"]*"[^>]*>([\s\S]*?)<\/dd>/i.exec(html)?.[1] ?? "");
   const counts = /^([0-9,]+)\s*\/\s*([0-9,]+|\?)$/.exec(chapters);
   return Boolean(counts && counts[2] !== "?" && counts[1] === counts[2]);
+}
+
+export interface ChapterIndexRead {
+  readonly workId: string;
+  /** From the page's heading; empty when it does not say. */
+  readonly title: string;
+  readonly author: string;
+  readonly chapters: number;
+  /** The latest chapter's date, as seconds since 1970 (its day's start, UTC). */
+  readonly latestAt: number;
+  readonly signedIn: boolean | null;
+}
+
+/**
+ * A work's Chapter Index (`/works/<id>/navigate`): every
+ * chapter links to `/works/<id>/chapters/<id>` with its date beside it.
+ * Null for any other page, or one whose chapters are not all one work's.
+ */
+export function readChapterIndex(html: string): ChapterIndexRead | null {
+  const head = html.slice(0, MAX_PAGE_CHARS);
+  const list = /<ol\b[^>]*\bclass\s*=\s*"[^"]*\bchapter\b[^"]*\bindex\b[^"]*"[^>]*>([\s\S]*?)<\/ol>/i.exec(head)?.[1];
+  if (list === undefined) return null;
+  let workId: string | null = null;
+  let chapters = 0;
+  let latestAt = 0;
+  for (const item of list.matchAll(/<li\b[^>]*>([\s\S]*?)<\/li>/gi)) {
+    const link = /<a\b[^>]*\bhref\s*=\s*"\/works\/([1-9][0-9]{0,19})\/chapters\/[1-9][0-9]{0,19}"/i.exec(item[1] ?? "");
+    if (!link?.[1]) continue;
+    const date = /<span\b[^>]*\bclass\s*=\s*"[^"]*\bdatetime\b[^"]*"[^>]*>\s*\(([0-9]{4})-([0-9]{2})-([0-9]{2})\)/i.exec(item[1] ?? "");
+    if (!date || (workId !== null && link[1] !== workId)) return null;
+    workId = link[1];
+    chapters += 1;
+    latestAt = Math.max(latestAt, Date.UTC(Number(date[1]), Number(date[2]) - 1, Number(date[3])) / 1_000);
+  }
+  if (workId === null || !Number.isSafeInteger(latestAt) || latestAt <= 0) return null;
+  // "Chapter Index for <a href="/works/<id>">Title</a> by <a rel="author">Author</a>"
+  const heading = /<h2\b[^>]*\bclass\s*=\s*"[^"]*\bheading\b[^"]*"[^>]*>([\s\S]*?)<\/h2>/i.exec(head)?.[1] ?? "";
+  const title = decode(new RegExp(`<a\\b[^>]*\\bhref\\s*=\\s*"/works/${workId}"[^>]*>([\\s\\S]*?)</a>`, "i").exec(heading)?.[1] ?? "");
+  const author = decode(/<a\b[^>]*\brel\s*=\s*"author"[^>]*>([\s\S]*?)<\/a>/i.exec(heading)?.[1] ?? "");
+  return { workId, title, author, chapters, latestAt, signedIn: pageSignedIn(head) };
+}
+
+/**
+ * A locked work's version, from its Chapter Index: its latest chapter's day
+ * plus its chapter count, so it changes with every new chapter and every
+ * later date. In the Download link's `updated_at` form.
+ */
+export function lockedVersion(index: Pick<ChapterIndexRead, "chapters" | "latestAt">): string {
+  return String(index.latestAt + index.chapters);
+}
+
+/** A locked work's download URL: the title's letters and digits (or the id) as its name, and the version. */
+export function lockedFileURL(workId: string, title: string, format: CopyFormat, version: string): string {
+  const name = title.normalize("NFKD").replace(/\p{M}/gu, "").replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 24) || workId;
+  return `${AO3_ORIGIN}/downloads/${workId}/${name}.${format}?updated_at=${version}`;
 }
 
 export interface ListedWork {
@@ -278,8 +339,8 @@ export type StopCode = "challenge" | "forbidden" | "wrong_host" | "unreadable" |
 /** Stops that are no failure of AO3's: it answered, or the trouble is on this side. */
 const NOT_AO3_FAILING: readonly StopCode[] = ["unreadable", "save_failed", "signed_out"];
 /** Why one work has no copy, while the rest go on. */
-export type SkipCode = "gone" | "locked" | "no_download" | "not_a_file" | "too_large" | "http_error" | "save_failed" | "failed";
-/** Skips another try may cure. A locked work waits (`#locked`); a hidden or deleted one has nothing to copy. */
+export type SkipCode = "gone" | "needs_sign_in" | "no_download" | "not_a_file" | "too_large" | "http_error" | "save_failed" | "failed";
+/** Skips another try may cure. A locked work copies once the reader signs in; a hidden or deleted one has nothing to copy. */
 export const RETRYABLE_SKIPS: readonly SkipCode[] = ["not_a_file", "too_large", "http_error", "save_failed", "failed"];
 
 export type Verdict =
@@ -310,24 +371,25 @@ export function looksLikeFormat(format: CopyFormat, bytes: Uint8Array): boolean 
 }
 
 /**
- * `expect`: a file's format, a work's "page" (read signed out), or a "list"
- * of the reader's own (read with their session).
+ * `expect`: a file's format, a public work's "page" (read signed out), or a
+ * page read with the reader's "session" (their lists, a locked work's
+ * Chapter Index).
  */
-export function classifyAnswer(answer: Fetched, expect: CopyFormat | "page" | "list", now: number): Verdict {
+export function classifyAnswer(answer: Fetched, expect: CopyFormat | "page" | "session", now: number): Verdict {
   if (answer.kind === "failed") {
     if (answer.code === "too_large") return { kind: "skip", code: "too_large" };
     return answer.code === "busy" ? { kind: "retry", waitMs: NETWORK_RETRY_MS, own: true } : { kind: "retry", waitMs: NETWORK_RETRY_MS, network: true, own: true };
   }
   const waitMs = retryAfterMs(answer.retryAfter, now);
   const text = answer.text ?? (answer.bytes ? new TextDecoder().decode(answer.bytes.subarray(0, 8_192)) : "");
-  const html = expect === "page" || expect === "list" || /text\/html/i.test(answer.contentType ?? "");
+  const html = expect === "page" || expect === "session" || /text\/html/i.test(answer.contentType ?? "");
   if (answer.cfMitigated?.toLowerCase() === "challenge" || (html && isChallengePage(text))) return { kind: "stop", code: "challenge", waitMs };
   // 429 (body "Retry later", with Retry-After), 445 ("heavy traffic") and the
   // front ends' 5xx: wait and try again.
   if ([429, 445, 502, 503, 504].includes(answer.status) || (answer.status >= 520 && answer.status <= 526)) return { kind: "retry", waitMs };
   if (answer.status === 403 || answer.status === 418) {
-    // Every signed-out page has a sign-in form: only a list's says the reader signed out.
-    return expect === "list" && LOGIN_MARKERS.test(text) ? { kind: "skip", code: "locked" } : { kind: "stop", code: "forbidden", waitMs };
+    // Every signed-out page has a sign-in form: only one read with the reader's session says they signed out.
+    return expect === "session" && LOGIN_MARKERS.test(text) ? { kind: "skip", code: "needs_sign_in" } : { kind: "stop", code: "forbidden", waitMs };
   }
   if (answer.status === 404 || answer.status === 410) return { kind: "skip", code: "gone" };
   let landed: URL;
@@ -337,12 +399,12 @@ export function classifyAnswer(answer: Fetched, expect: CopyFormat | "page" | "l
     return { kind: "stop", code: "wrong_host", waitMs: null };
   }
   if (landed.protocol !== "https:" || !/^(?:download\.)?archiveofourown\.org$/.test(landed.hostname)) return { kind: "stop", code: "wrong_host", waitMs: null };
-  // AO3's sign-in page, where it sends a signed-out read of a locked work (`?restricted=true`).
-  if (/^\/users\/login\b/i.test(landed.pathname) || (answer.status === 200 && expect === "list" && LOGIN_MARKERS.test(text))) {
-    return { kind: "skip", code: "locked" };
+  // AO3's sign-in page, where it sends a reader who may not see the work (`?restricted=true`).
+  if (/^\/users\/login\b/i.test(landed.pathname) || (answer.status === 200 && expect === "session" && LOGIN_MARKERS.test(text))) {
+    return { kind: "skip", code: "needs_sign_in" };
   }
   if (answer.status !== 200) return { kind: "skip", code: "http_error" };
-  if (expect === "page" || expect === "list") return { kind: "ok" };
+  if (expect === "page" || expect === "session") return { kind: "ok" };
   // A download that lands on a work's page has no file to take.
   if (/^\/(?:collections\/[^/]+\/)?works\/[0-9]+/.test(landed.pathname)) return { kind: "skip", code: "no_download" };
   return answer.bytes && looksLikeFormat(expect, answer.bytes) ? { kind: "ok" } : { kind: "skip", code: "not_a_file" };
@@ -436,7 +498,7 @@ export interface KeptWork {
   author: string;
   fandom: string;
   complete: boolean;
-  /** Archive users only: nothing is asked of AO3 for it while it is (`#locked`). */
+  /** Archive users only, once seen so (never unset): copied only by `#lockedStep`, its link never kept. */
   restricted: boolean;
   copy: Copy | null;
   /** Older, longer files left as they were when a much shorter version came. */
@@ -504,6 +566,8 @@ export interface KeepState {
   queue: QueueItem[];
   run: ListRun | null;
   pending: PendingSave | null;
+  /** A page has shown the reader signed out since a locked work was last looked at. */
+  signedOutSeen?: true;
   pacer: {
     dueAt: number;
     window: { startedAt: number; reads: number };
@@ -549,10 +613,10 @@ export interface KeepPorts {
   readonly random: () => number;
   read(): Promise<unknown>;
   write(state: KeepState): Promise<void>;
-  /** `include` only for the reader's own lists; every work page is read signed out. */
+  /** `include` only for the reader's own lists and a locked work's Chapter Index; a work page is read signed out. */
   fetchPage(url: string, credentials: "omit" | "include"): Promise<Fetched>;
-  /** Always signed out. */
-  fetchFile(url: string): Promise<Fetched>;
+  /** `include` only for a locked work's file (`#lockedStep`). */
+  fetchFile(url: string, credentials: "omit" | "include"): Promise<Fetched>;
   /** Starts saving under Downloads; resolves with the download's id. */
   save(request: SaveRequest): Promise<number>;
   /**
@@ -703,6 +767,13 @@ export class KeepACopy {
       if (user && AO3_USERNAME_PATTERN.test(user)) {
         state.user = user;
         if (state.pacer.stopped?.code === "signed_out") state.pacer.stopped = null;
+        // Signed in again: the locked works copy on their own, at the queue's pace.
+        if (state.signedOutSeen && state.settings.enabled) {
+          delete state.signedOutSeen;
+          this.#requeue(state, ["needs_sign_in"]);
+        }
+      } else if (user === null) {
+        state.signedOutSeen = true;
       }
     });
   }
@@ -727,9 +798,10 @@ export class KeepACopy {
     return this.#serial((state) => {
       if (!this.#keeps(state, page.workId, trigger)) return;
       const work = this.#keep(state, page.workId, page);
-      if (work.restricted) return void this.#locked(state, work);
       const link = page.downloads[state.settings.format];
-      if (link && (!work.copy || work.copy.updatedAt !== link.updatedAt || work.copy.format !== state.settings.format)) {
+      // A locked work's link is never taken: its own step reads its Chapter Index.
+      if (work.restricted) this.#enqueue(state, { workId: work.workId, pace: "reader" });
+      else if (link && (!work.copy || work.copy.updatedAt !== link.updatedAt || work.copy.format !== state.settings.format)) {
         this.#enqueue(state, { workId: work.workId, pace: "reader", link });
       }
     });
@@ -797,11 +869,17 @@ export class KeepACopy {
     if (page?.author) work.author = page.author;
     if (page?.fandom) work.fandom = page.fandom;
     if (typeof page?.complete === "boolean") work.complete = page.complete;
-    if (typeof page?.restricted === "boolean") work.restricted = page.restricted;
+    // Locked stays locked.
+    if (page?.restricted === true) work.restricted = true;
     return work;
   }
 
   #enqueue(state: KeepState, item: QueueItem): void {
+    if (item.link && state.works[item.workId]?.restricted) {
+      // No link of a locked work is ever kept or used.
+      const { link: _dropped, ...rest } = item;
+      item = rest;
+    }
     const queued = state.queue.find((each) => each.workId === item.workId);
     if (!queued) {
       state.queue.push(item);
@@ -866,11 +944,6 @@ export class KeepACopy {
       const left = batchLeft(state);
       if (!backup.pace || now - backup.pace.lastAt > PACE_GAP_MS || left > backup.pace.left) backup.pace = { at: now, left, lastAt: now };
       else backup.pace.lastAt = now;
-    }
-    // A locked work asks AO3 nothing.
-    if (item && state.works[item.workId]?.restricted) {
-      this.#locked(state, this.#keep(state, item.workId));
-      return 0;
     }
     if (item && (item.attempts ?? 0) >= MAX_ATTEMPTS) {
       this.#keep(state, item.workId).skipped = item.lastFailure === "save" ? "save_failed" : "failed";
@@ -943,19 +1016,6 @@ export class KeepACopy {
     return state.pacer.failedSaves >= MISSES_MAX ? { kind: "stop", code: "save_failed", waitMs: null } : null;
   }
 
-  /**
-   * A locked work: AO3 shows it to signed-in readers only, and Keep a Copy
-   * reads AO3 signed out. The one place a locked work would be copied; for
-   * now it is recorded as locked and waits. No miss and no stop: asking AO3
-   * again would change nothing.
-   */
-  #locked(state: KeepState, work: KeptWork): Verdict {
-    work.restricted = true;
-    work.skipped = "locked";
-    this.#drop(state, work.workId);
-    return { kind: "skip", code: "locked" };
-  }
-
   /** Per-work failures that are not the site's fault; several in a row are. Only a completed save clears them. */
   #miss(state: KeepState): Verdict | null {
     state.pacer.misses += 1;
@@ -965,23 +1025,24 @@ export class KeepACopy {
   async #workStep(state: KeepState, item: QueueItem): Promise<Verdict> {
     const work = this.#keep(state, item.workId);
     const format = state.settings.format;
+    const skip = this.#skipper(state, item, work);
+    if (work.restricted) {
+      delete item.link;
+      return this.#lockedStep(state, item, work);
+    }
     // A link for another format was queued before the setting changed: read the page.
     if (item.link && readDownloadLink(item.link.url)?.format !== format) delete item.link;
-    const skip = (code: SkipCode): Verdict => {
-      if (code === "locked") return this.#locked(state, work);
-      work.skipped = code;
-      this.#drop(state, item.workId);
-      return code === "gone" ? { kind: "skip", code } : this.#miss(state) ?? { kind: "skip", code };
-    };
     if (!item.link) {
       const answer = await this.ports.fetchPage(`${AO3_ORIGIN}/works/${item.workId}?view_adult=true`, "omit");
       const verdict = classifyAnswer(answer, "page", this.ports.clock.now());
+      const page = answer.kind === "response" && verdict.kind === "ok" ? readWorkPage(answer.text ?? "") : null;
+      // AO3's sign-in page, or (never, read signed out) the lock: a locked work, copied in its own next step.
+      if ((verdict.kind === "skip" && verdict.code === "needs_sign_in") || (verdict.kind === "ok" && (page ? page.restricted : isRestrictedPage(answer.kind === "response" ? answer.text ?? "" : "")))) {
+        return this.#nowLocked(item, work, verdict);
+      }
       if (verdict.kind === "skip") return skip(verdict.code);
       if (verdict.kind !== "ok") return verdict;
-      const page = answer.kind === "response" ? readWorkPage(answer.text ?? "") : null;
       const link = page?.workId === item.workId ? page.downloads[format] : undefined;
-      // Served signed out, yet with the lock: locked all the same.
-      if (page ? page.restricted : isRestrictedPage(answer.kind === "response" ? answer.text ?? "" : "")) return this.#locked(state, work);
       if (!page || !link) return skip("no_download");
       this.#keep(state, item.workId, page);
       if (work.copy?.updatedAt === link.updatedAt && work.copy.format === format) {
@@ -992,21 +1053,64 @@ export class KeepACopy {
       item.attempts = 0;
       return verdict;
     }
-    return this.#fileStep(state, item, work, item.link);
+    return this.#fileStep(state, item, work, item.link, "omit");
   }
 
-  async #fileStep(state: KeepState, item: QueueItem, work: KeptWork, link: DownloadLink): Promise<Verdict> {
-    const format = state.settings.format;
-    const skip = (code: SkipCode): Verdict => {
-      if (code === "locked") return this.#locked(state, work);
+  /** Skips a work: gone or locked is no miss; anything else is one. */
+  #skipper(state: KeepState, item: QueueItem, work: KeptWork): (code: SkipCode) => Verdict {
+    return (code) => {
       work.skipped = code;
       this.#drop(state, item.workId);
-      return code === "gone" ? { kind: "skip", code } : this.#miss(state) ?? { kind: "skip", code };
+      return code === "gone" || code === "needs_sign_in" ? { kind: "skip", code } : this.#miss(state) ?? { kind: "skip", code };
     };
-    const answer = await this.ports.fetchFile(link.url);
+  }
+
+  /** A public work found locked: it stays queued, and its next step is `#lockedStep`. */
+  #nowLocked(item: QueueItem, work: KeptWork, verdict: Verdict): Verdict {
+    work.restricted = true;
+    delete item.link;
+    item.attempts = 0;
+    return verdict;
+  }
+
+  /**
+   * A locked work (AO3 shows it to signed-in readers only), and the one place
+   * one is copied. Its work and chapter pages are never read signed in; its
+   * Chapter Index is. A login page, or the index shown signed out, is
+   * `needs_sign_in` (no miss, no stop, copied once a page shows the reader
+   * signed in again); anything else is classified as any page is.
+   */
+  async #lockedStep(state: KeepState, item: QueueItem, work: KeptWork): Promise<Verdict> {
+    const format = state.settings.format;
+    const skip = this.#skipper(state, item, work);
+    const answer = await this.ports.fetchPage(`${AO3_ORIGIN}/works/${work.workId}/navigate`, "include");
+    const verdict = classifyAnswer(answer, "session", this.ports.clock.now());
+    if (verdict.kind === "skip") return skip(verdict.code);
+    if (verdict.kind !== "ok" || answer.kind !== "response") return verdict;
+    const index = readChapterIndex(answer.text ?? "");
+    // Only this same work's Chapter Index, shown just now to the signed-in reader.
+    if (index?.workId === work.workId && index.signedIn === false) return skip("needs_sign_in");
+    if (index?.workId !== work.workId || index.signedIn !== true) return skip("no_download");
+    this.#keep(state, work.workId, { title: index.title, author: index.author });
+    const version = lockedVersion(index);
+    if (work.copy?.updatedAt === version && work.copy.format === format) {
+      this.#drop(state, item.workId);
+      return verdict;
+    }
+    // A locked work's file is fetched only here, right after the signed-in
+    // Chapter Index read for that work, and its URL is never kept.
+    return this.#fileStep(state, item, work, { url: lockedFileURL(work.workId, index.title, format, version), updatedAt: version }, "include");
+  }
+
+  async #fileStep(state: KeepState, item: QueueItem, work: KeptWork, link: DownloadLink, credentials: "omit" | "include"): Promise<Verdict> {
+    const format = state.settings.format;
+    const skip = this.#skipper(state, item, work);
+    const answer = await this.ports.fetchFile(link.url, credentials);
     const verdict = classifyAnswer(answer, format, this.ports.clock.now());
     const handle = answer.kind === "response" ? answer.handle : undefined;
     if (verdict.kind !== "ok" && handle) this.ports.release?.(handle);
+    // A public work's file sent to the sign-in page: it is locked now.
+    if (verdict.kind === "skip" && verdict.code === "needs_sign_in" && credentials === "omit") return this.#nowLocked(item, work, verdict);
     if (verdict.kind === "skip") return skip(verdict.code);
     if (verdict.kind !== "ok" || answer.kind !== "response") return verdict;
     if (!handle) return this.#saveFailed(state, item.workId, this.ports.clock.now()) ?? verdict;
@@ -1085,9 +1189,9 @@ export class KeepACopy {
     }
     // The reader's own lists, with their session: Marked for Later and Subscriptions are theirs alone.
     const answer = await this.ports.fetchPage(listPageURL(run.user, list, run.page), "include");
-    const verdict = classifyAnswer(answer, "list", this.ports.clock.now());
+    const verdict = classifyAnswer(answer, "session", this.ports.clock.now());
     // A list read with the reader's session that wants a sign-in: they signed out.
-    if (verdict.kind === "skip") return { kind: "stop", code: verdict.code === "locked" ? "signed_out" : "forbidden", waitMs: null };
+    if (verdict.kind === "skip") return { kind: "stop", code: verdict.code === "needs_sign_in" ? "signed_out" : "forbidden", waitMs: null };
     if (verdict.kind !== "ok" || answer.kind !== "response") return verdict;
     const read = readListPage(answer.text ?? "", list);
     for (const listed of read.works) {
@@ -1099,7 +1203,7 @@ export class KeepACopy {
         if (stale(work)) this.#enqueue(state, { workId: listed.workId, pace: "reader", batch: true });
       } else if (known?.copy && !listed.complete && stale(known)) {
         known.complete = listed.complete;
-        known.restricted = listed.restricted;
+        if (listed.restricted) known.restricted = true;
         this.#enqueue(state, { workId: listed.workId, pace: "check" });
       }
     }

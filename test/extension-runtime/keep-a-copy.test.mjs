@@ -28,6 +28,9 @@ import {
   WORK_PACE_MS,
   SETTLE_MAX_MS,
   STOP_MAX_MS,
+  lockedFileURL,
+  lockedVersion,
+  readChapterIndex,
   STOP_MS,
   safeSegment,
 } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
@@ -91,6 +94,17 @@ const file = (url, bytes, status = 200) => ({
 });
 const workURL = (id) => `${AO3_ORIGIN}/works/${id}?view_adult=true`;
 const LOGIN_URL = `${AO3_ORIGIN}/users/login?restricted=true`;
+const navigateURL = (id) => `${AO3_ORIGIN}/works/${id}/navigate`;
+
+/** A work's Chapter Index: `chapters` as [chapter id, YYYY-MM-DD]. */
+function chapterIndex(id, { chapters = [["101", "2026-10-01"]], title = `Invented work ${id}`, signedIn = true } = {}) {
+  return `<html><body class="${signedIn ? "logged-in" : "logged-out"}"><div id="main" class="works-navigate region">` +
+    `<h2 class="heading">Chapter Index for <a href="/works/${id}">${title}</a> by <a rel="author" href="/users/Quill/pseuds/Quill">Synthetic_Quill</a></h2>` +
+    `<ol class="chapter index group" role="navigation">` +
+    chapters.map(([cid, date], i) => `<li><a href="/works/${id}/chapters/${cid}">${i + 1}. Chapter ${i + 1}</a> <span class="datetime">(${date})</span></li>`).join("") +
+    `</ol></div></body></html>`;
+}
+const dayOf = (date) => Date.parse(`${date}T00:00:00Z`) / 1_000;
 const loginPage = () => html(LOGIN_URL, '<body class="logged-out"><form id="new_user" action="/users/login" method="post"></form></body>');
 
 /**
@@ -104,8 +118,8 @@ function signedOut(result) {
 }
 
 function harness(answers = {}) {
-  // `modes`: each page request's credentials mode.
-  const box = { now: NOW, stored: undefined, saved: [], removed: [], released: [], requests: [], modes: [], quiet: [], downloads: new Map() };
+  // `modes`, `fileModes`: each page and file request's credentials mode.
+  const box = { now: NOW, stored: undefined, saved: [], removed: [], released: [], requests: [], modes: [], fileModes: [], quiet: [], downloads: new Map() };
   let nextId = 1;
   const answer = async (url) => {
     box.requests.push(url);
@@ -119,11 +133,16 @@ function harness(answers = {}) {
     read: async () => structuredClone(box.stored),
     write: async (state) => { box.stored = structuredClone(state); },
     fetchPage: async (url, credentials) => {
+      // No Keep a Copy request reads a work's page or a chapter signed in.
+      assert.ok(credentials === "omit" || !/\/works\/[0-9]+(?:[?#]|$|\/chapters\/)/.test(url), `${url} read signed in`);
       box.modes.push([url, credentials]);
       const result = await answer(url);
       return credentials === "omit" ? signedOut(result) : result;
     },
-    fetchFile: answer,
+    fetchFile: async (url, credentials) => {
+      box.fileModes.push([url, credentials]);
+      return answer(url);
+    },
     save: async (request) => {
       box.saved.push(request);
       const id = nextId++;
@@ -258,16 +277,16 @@ test("waits on 429, 445 and the front ends' 5xx; skips gone works and sign-in pa
   assert.deepEqual(classifyAnswer({ kind: "failed", code: "network" }, "page", NOW).kind, "retry");
   assert.deepEqual(classifyAnswer(html(url, "", 404), "page", NOW), { kind: "skip", code: "gone" });
   // Read signed out, every page has AO3's sign-in form: only its sign-in page itself is a locked work.
-  assert.deepEqual(classifyAnswer(loginPage(), "page", NOW), { kind: "skip", code: "locked" });
-  assert.deepEqual(classifyAnswer(loginPage(), "epub", NOW), { kind: "skip", code: "locked" });
+  assert.deepEqual(classifyAnswer(loginPage(), "page", NOW), { kind: "skip", code: "needs_sign_in" });
+  assert.deepEqual(classifyAnswer(loginPage(), "epub", NOW), { kind: "skip", code: "needs_sign_in" });
   const loggedOut = '<body class="logged-out"><form action="/users/login" method="post"></form><h2 class="title heading">A work</h2></body>';
   assert.deepEqual(classifyAnswer(html(url, loggedOut), "page", NOW), { kind: "ok" });
   assert.equal(classifyAnswer(html(url, loggedOut, 403), "page", NOW).code, "forbidden");
-  // A list goes with the reader's session: there, the sign-in form says they signed out.
+  // A page read with the reader's session: there, the sign-in form says they signed out.
   const list = listPageURL(USER, "later", 1);
-  assert.deepEqual(classifyAnswer(html(list, loggedOut), "list", NOW), { kind: "skip", code: "locked" });
-  assert.deepEqual(classifyAnswer(html(list, loggedOut, 403), "list", NOW), { kind: "skip", code: "locked" });
-  assert.deepEqual(classifyAnswer(html(list, listPage([])), "list", NOW), { kind: "ok" });
+  assert.deepEqual(classifyAnswer(html(list, loggedOut), "session", NOW), { kind: "skip", code: "needs_sign_in" });
+  assert.deepEqual(classifyAnswer(html(list, loggedOut, 403), "session", NOW), { kind: "skip", code: "needs_sign_in" });
+  assert.deepEqual(classifyAnswer(html(list, listPage([])), "session", NOW), { kind: "ok" });
 });
 
 // --- File names -----------------------------------------------------------------------
@@ -371,7 +390,7 @@ test("a backup reads the reader's lists, then each work's page, then its file, 6
   assert.equal(await box.engine.startBackup(), "started");
   const times = [];
   const fetchPage = box.ports.fetchPage;
-  box.ports.fetchPage = box.ports.fetchFile = async (url) => { times.push(box.now); return fetchPage(url); };
+  box.ports.fetchPage = box.ports.fetchFile = async (url, credentials) => { times.push(box.now); return fetchPage(url, credentials); };
   await box.drain();
   assert.equal(box.saved.length, 2);
   assert.equal(box.requests.length, 8);
@@ -788,56 +807,101 @@ test("every work page is read signed out; only the reader's own lists go with th
   assert.equal(box.saved.length, 1);
 });
 
-test("a locked work's signed-out read lands on AO3's sign-in page: locked, no miss and no stop, and it waits", async () => {
-  const box = harness({
-    [workURL("8")]: html(workURL("8"), workPage("8", { restricted: true })),
-    [epubLink("8")]: file(epubLink("8"), epub()),
-    [workURL("9")]: html(workURL("9"), workPage("9")),
-    // Locked between its page and its file.
-    [epubLink("9")]: loginPage(),
-  });
-  await box.engine.noteUser(USER);
-  for (const id of ["8", "9"]) await box.engine.noteWork(id, "bookmark");
-  await box.drain();
-  assert.deepEqual(box.requests, [workURL("8"), workURL("9"), epubLink("9")]);
-  for (const id of ["8", "9"]) {
-    assert.equal(box.stored.works[id].skipped, "locked");
-    assert.equal(box.stored.works[id].restricted, true);
-  }
-  assert.equal(box.stored.pacer.misses, 0);
-  assert.equal(box.stored.pacer.stopped, null);
-  assert.deepEqual((await box.engine.view()).skipped, { locked: 2 });
-  // It waits: Try again, signing in again and a new trigger ask AO3 nothing for it.
-  await box.engine.retrySkipped();
-  await box.engine.noteUser(null);
-  await box.engine.noteUser(USER);
-  await box.engine.noteWork("8", "kudos");
-  await box.drain();
-  assert.equal(box.requests.length, 3);
-  assert.equal(box.saved.length, 0);
-  assert.deepEqual((await box.engine.view()).skipped, { locked: 2 });
+test("a Chapter Index gives its work, title, chapters and latest date; the version moves with each new chapter", () => {
+  const index = readChapterIndex(chapterIndex("8", { chapters: [["81", "2026-10-01"], ["82", "2026-10-20"]], title: "Lanterns &amp; Tide" }));
+  assert.deepEqual(index, { workId: "8", title: "Lanterns & Tide", author: "Synthetic_Quill", chapters: 2, latestAt: dayOf("2026-10-20"), signedIn: true });
+  const sameDay = readChapterIndex(chapterIndex("8", { chapters: [["81", "2026-10-01"], ["82", "2026-10-20"], ["83", "2026-10-20"]] }));
+  const later = readChapterIndex(chapterIndex("8", { chapters: [["81", "2026-10-01"], ["82", "2026-10-21"]] }));
+  assert.equal(new Set([index, sameDay, later].map(lockedVersion)).size, 3);
+  assert.equal(readChapterIndex(chapterIndex("8", { signedIn: false })).signedIn, false);
+  // Another work's chapter in the list, a chapter with no date, or no index at all.
+  assert.equal(readChapterIndex(chapterIndex("8").replace("/works/8/chapters/101", "/works/9/chapters/101").replace("</ol>", '<li><a href="/works/8/chapters/102">2.</a> <span class="datetime">(2026-10-02)</span></li></ol>')), null);
+  assert.equal(readChapterIndex(chapterIndex("8").replace(/<span class="datetime">[^<]*<\/span>/, "")), null);
+  assert.equal(readChapterIndex(workPage("8")), null);
+  assert.equal(lockedFileURL("8", "Lanterns: Tide / Über", "epub", "1792540802"), `${AO3_ORIGIN}/downloads/8/Lanterns_Tide_Uber.epub?updated_at=1792540802`);
+  assert.equal(lockedFileURL("8", "", "epub", "1"), `${AO3_ORIGIN}/downloads/8/8.epub?updated_at=1`);
 });
 
-test("a locked work on the reader's open page, or locked on a list, waits with no request for it", async () => {
+test("a locked work is copied from its Chapter Index read signed in, then its file, from a URL built only after that read", async () => {
+  const chapters = [["81", "2026-10-01"], ["82", "2026-10-20"]];
+  const version = String(dayOf("2026-10-20") + 2);
+  const lockedFile = lockedFileURL("8", "Lanterns Locked", "epub", version);
+  const answers = {
+    [workURL("8")]: html(workURL("8"), workPage("8", { restricted: true })),
+    [navigateURL("8")]: html(navigateURL("8"), chapterIndex("8", { chapters, title: "Lanterns Locked" })),
+    [lockedFile]: file(lockedFile, epub()),
+  };
+  const box = harness(answers);
+  await box.engine.noteUser(USER);
+  await box.engine.noteWork("8", "bookmark");
+  await box.drain();
+  // Its page signed out lands on the sign-in page; then its Chapter Index and file, signed in, in one step.
+  assert.deepEqual(box.modes, [[workURL("8"), "omit"], [navigateURL("8"), "include"]]);
+  assert.deepEqual(box.fileModes, [[lockedFile, "include"]]);
+  assert.equal(box.saved.length, 1);
+  assert.equal(box.stored.works["8"].copy.updatedAt, version);
+  assert.equal(box.stored.works["8"].restricted, true);
+  assert.equal(JSON.stringify(box.stored).includes("/downloads/8/"), false, "the URL is never kept");
+  // Looked at again, unchanged: the index alone. A new chapter: copied again. Its work page is never read again.
+  await box.engine.notePage(readWorkPage(workPage("8", { restricted: true })), "visit");
+  await box.drain();
+  assert.equal(box.fileModes.length, 1);
+  chapters.push(["83", "2026-10-20"]);
+  const newer = lockedFileURL("8", "Lanterns Locked", "epub", String(dayOf("2026-10-20") + 3));
+  answers[navigateURL("8")] = html(navigateURL("8"), chapterIndex("8", { chapters, title: "Lanterns Locked" }));
+  answers[newer] = file(newer, epub(3_000));
+  await box.engine.notePage(readWorkPage(workPage("8", { restricted: true })), "visit");
+  await box.drain();
+  assert.deepEqual(box.fileModes.map(([url]) => url), [lockedFile, newer]);
+  assert.equal(box.stored.works["8"].copy.updatedAt, String(dayOf("2026-10-20") + 3));
+  assert.equal(box.modes.filter(([url]) => url === workURL("8")).length, 1);
+});
+
+test("a locked work's Chapter Index on the sign-in page, or shown signed out, is needs_sign_in: no file, no miss, no stop", async () => {
+  const answers = {
+    [navigateURL("8")]: loginPage(),
+    [navigateURL("9")]: html(navigateURL("9"), chapterIndex("9", { signedIn: false })),
+  };
+  const box = harness(answers);
+  await box.engine.noteUser(USER);
+  for (const id of ["8", "9"]) await box.engine.notePage(readWorkPage(workPage(id, { restricted: true })), "bookmark");
+  await box.drain();
+  assert.deepEqual(box.modes, [[navigateURL("8"), "include"], [navigateURL("9"), "include"]]);
+  assert.deepEqual(box.fileModes, []);
+  assert.deepEqual((await box.engine.view()).skipped, { needs_sign_in: 2 });
+  assert.equal(box.stored.pacer.misses, 0);
+  assert.equal(box.stored.pacer.stopped, null);
+  // A page shows the reader signed out, then signed in again: copied on their own.
+  const lockedFile = lockedFileURL("8", "Invented work 8", "epub", String(dayOf("2026-10-01") + 1));
+  answers[navigateURL("8")] = html(navigateURL("8"), chapterIndex("8"));
+  answers[lockedFile] = file(lockedFile, epub());
+  await box.engine.noteUser(null);
+  await box.engine.noteUser(USER);
+  answers[navigateURL("9")] = loginPage();
+  await box.drain();
+  assert.deepEqual(box.fileModes, [[lockedFile, "include"]]);
+  assert.deepEqual((await box.engine.view()).skipped, { needs_sign_in: 1 });
+});
+
+test("a Chapter Index of another work, or any other page, fetches no file; a locked work's kept link is never used", async () => {
   const box = harness({
-    [listPageURL(USER, "bookmarks", 1)]: html(listPageURL(USER, "bookmarks", 1), listPage([{ id: "8", restricted: true }])),
+    [navigateURL("8")]: html(navigateURL("8"), chapterIndex("9")),
+    [navigateURL("7")]: html(navigateURL("7"), workPage("7")),
+    [listPageURL(USER, "bookmarks", 1)]: html(listPageURL(USER, "bookmarks", 1), listPage([{ id: "7", restricted: true }])),
     [listPageURL(USER, "later", 1)]: html(listPageURL(USER, "later", 1), listPage([])),
     [listPageURL(USER, "subscriptions", 1)]: html(listPageURL(USER, "subscriptions", 1), ""),
-    [epubLink("9")]: file(epubLink("9"), epub()),
   });
-  await box.engine.notePage(readWorkPage(workPage("9", { restricted: true })), "bookmark");
-  assert.deepEqual(box.stored.queue, []);
-  assert.equal(box.stored.works["9"].skipped, "locked");
+  await box.engine.notePage(readWorkPage(workPage("8", { restricted: true })), "bookmark");
+  assert.equal(box.stored.queue[0].link, undefined, "the reader's page's link is not taken");
+  // A link left in storage is dropped before the step.
+  box.stored.queue[0].link = { url: epubLink("8"), updatedAt: "1761700000" };
+  box.engine = new KeepACopy(box.ports);
   await box.engine.noteUser(USER);
   await box.engine.startBackup();
   await box.drain();
-  assert.deepEqual(box.requests, ["bookmarks", "later", "subscriptions"].map((list) => listPageURL(USER, list, 1)));
-  assert.deepEqual((await box.engine.view()).skipped, { locked: 2 });
-  // Its page, as the reader sees it, shows no lock now: copied from that page's link.
-  await box.engine.notePage(readWorkPage(workPage("9")), "visit");
-  await box.drain();
-  assert.equal(box.saved.length, 1);
-  assert.deepEqual((await box.engine.view()).skipped, { locked: 1 });
+  assert.deepEqual(box.fileModes, []);
+  assert.deepEqual((await box.engine.view()).skipped, { no_download: 2 });
+  assert.deepEqual(box.modes.filter(([url]) => url.includes("/works/")), [[navigateURL("8"), "include"], [navigateURL("7"), "include"]]);
 });
 
 test("the background asks AO3 for works and files signed out, and for the reader's lists with their session", async (t) => {
@@ -854,7 +918,9 @@ test("the background asks AO3 for works and files signed out, and for the reader
   t.after(() => { globalThis.fetch = realFetch; });
   const fetched = await requestAO3(epubLink("5"), "file", 5_000, 1_000_000);
   URL.revokeObjectURL(fetched.handle);
-  assert.deepEqual(asked.splice(0), [[epubLink("5"), "omit"]]);
+  const locked = await requestAO3(epubLink("6"), "file", 5_000, 1_000_000, "include");
+  URL.revokeObjectURL(locked.handle);
+  assert.deepEqual(asked.splice(0), [[epubLink("5"), "omit"], [epubLink("6"), "include"]]);
 
   const listener = () => ({ addListener() {} });
   const install = () => {
@@ -1201,7 +1267,7 @@ test("Try again waits behind a Pause, and a file that still fails counts toward 
   await box.engine.resumeBackup();
   for (let i = 0; i < 6 && !box.stored.pacer.stopped; i += 1) box.now += await box.engine.tick();
   assert.equal(box.stored.pacer.stopped.code, "unreadable");
-  assert.ok(RETRYABLE_SKIPS.includes("not_a_file") && !RETRYABLE_SKIPS.includes("gone") && !RETRYABLE_SKIPS.includes("locked"));
+  assert.ok(RETRYABLE_SKIPS.includes("not_a_file") && !RETRYABLE_SKIPS.includes("gone") && !RETRYABLE_SKIPS.includes("needs_sign_in"));
 });
 
 // --- Paused, or AO3 not available --------------------------------------------------------

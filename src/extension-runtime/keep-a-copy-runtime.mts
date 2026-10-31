@@ -3,9 +3,9 @@
  * AO3 requests, the downloads API and storage around the queue in
  * keep-a-copy.mts.
  *
- * Work pages and files are requested signed out; only the reader's own
- * lists go with their AO3 cookies, which the browser sends because the
- * extension may reach AO3. A file is held as a blob and saved from its URL:
+ * A public work's page and file are requested signed out; the reader's own
+ * lists, and a locked work's Chapter Index and file, go with their AO3
+ * cookies, which the browser sends because the extension may reach AO3. A file is held as a blob and saved from its URL:
  * Firefox's background makes it, and Chrome's service worker, which cannot,
  * has its offscreen document make it. Safari is not served here: it has no
  * downloads API.
@@ -197,11 +197,11 @@ export function installKeepACopy(extension: Extension): KeepACopy {
     if (port.name === KEEP_ALIVE_PORT) port.onMessage.addListener(() => undefined);
   });
 
-  const fetchFile = async (url: string): Promise<Fetched> => {
-    if (!offscreen) return requestAO3(url, "file", FILE_TIMEOUT_MS, MAX_FILE_BYTES);
+  const fetchFile = async (url: string, credentials: "omit" | "include"): Promise<Fetched> => {
+    if (!offscreen) return requestAO3(url, "file", FILE_TIMEOUT_MS, MAX_FILE_BYTES, credentials);
     try {
       await offscreen.ensure();
-      const answer = await runtime.sendMessage({ target: OFFSCREEN_TARGET, type: "fetch", url, timeoutMs: FILE_TIMEOUT_MS, limit: MAX_FILE_BYTES });
+      const answer = await runtime.sendMessage({ target: OFFSCREEN_TARGET, type: "fetch", url, timeoutMs: FILE_TIMEOUT_MS, limit: MAX_FILE_BYTES, credentials });
       if (!answer || typeof answer !== "object") return { kind: "failed", code: "network" };
       const fetched = fromOffscreenAnswer(answer as OffscreenAnswer);
       // Claimed at once, so the document keeps it until the save is over.

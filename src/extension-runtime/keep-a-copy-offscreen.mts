@@ -12,6 +12,7 @@ interface OffscreenMessage {
   handle?: unknown;
   timeoutMs?: unknown;
   limit?: unknown;
+  credentials?: unknown;
 }
 
 interface Port {
@@ -28,9 +29,9 @@ const runtime = (globalThis as unknown as {
   };
 }).chrome.runtime;
 
-let limits = { timeoutMs: 120_000, limit: 50 * 1_024 * 1_024 };
+let limits: { timeoutMs: number; limit: number; credentials: "omit" | "include" } = { timeoutMs: 120_000, limit: 50 * 1_024 * 1_024, credentials: "omit" };
 const fetcher = offscreenFetcher({
-  fetchFile: (url) => requestAO3(url, "file", limits.timeoutMs, limits.limit),
+  fetchFile: (url) => requestAO3(url, "file", limits.timeoutMs, limits.limit, limits.credentials),
   revoke: (handle) => URL.revokeObjectURL(handle),
   keepAlive() {
     const port = runtime.connect({ name: KEEP_ALIVE_PORT });
@@ -55,7 +56,8 @@ runtime.onMessage.addListener((message, _sender, respond) => {
   if (request.type !== "fetch" || typeof request.url !== "string" || typeof request.timeoutMs !== "number" || typeof request.limit !== "number") return;
   // Only AO3's own hosts, whatever asks.
   if (!/^https:\/\/(?:download\.)?archiveofourown\.org\//.test(request.url)) return;
-  limits = { timeoutMs: request.timeoutMs, limit: request.limit };
+  // Signed out unless asked otherwise (a locked work's file).
+  limits = { timeoutMs: request.timeoutMs, limit: request.limit, credentials: request.credentials === "include" ? "include" : "omit" };
   fetcher.fetch(request.url).then(respond);
   return true;
 });

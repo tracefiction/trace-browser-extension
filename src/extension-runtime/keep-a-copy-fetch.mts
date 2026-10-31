@@ -39,7 +39,8 @@ async function readCapped(response: Response, limit: number): Promise<Uint8Array
 /**
  * A page as text, or a file as a blob URL plus its first bytes; never more
  * than `limit` bytes. Signed out unless `credentials` says otherwise: only
- * the reader's own lists are read with their AO3 session.
+ * the reader's own lists and a locked work's Chapter Index and file go with
+ * their AO3 session.
  */
 export async function requestAO3(url: string, as: "text" | "file", timeoutMs: number, limit: number, credentials: "omit" | "include" = "omit"): Promise<Fetched> {
   const controller = new AbortController();
