@@ -2202,7 +2202,7 @@ test("a page's message sent again is handled once: a work just skipped is not re
   await engine.tick();
   assert.deepEqual(asked, [workURL("5")]);
   assert.equal((await engine.view()).waiting, 0);
-  assert.equal(stored["keepACopyV1:"].pacer.misses, 1);
+  assert.equal(stored["keepACopyV1.pacerV1"].misses, 1);
 
   const repeated = repeatedMessage(2);
   assert.deepEqual(["a", "a", "b", "c", "a", undefined, undefined].map(repeated), [false, true, false, false, false, false, false]);

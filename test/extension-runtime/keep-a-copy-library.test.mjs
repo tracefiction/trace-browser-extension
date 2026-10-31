@@ -14,7 +14,7 @@ import {
   readerStatus,
 } from "../../.trace-build/extension-runtime/keep-a-copy-library.mjs";
 import { ACCOUNT_PROJECTION_REVISION_KEY } from "../../.trace-build/extension-runtime/runtime-messages.mjs";
-import { IndexedDbKeepStore } from "../../.trace-build/extension-runtime/keep-a-copy-store.mjs";
+import { IndexedDbKeepStore, PACER_KEY } from "../../.trace-build/extension-runtime/keep-a-copy-store.mjs";
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 
 // Invented works throughout, as in keep-a-copy.test.mjs.
@@ -345,6 +345,53 @@ test("an account that signs out and back in carries on with nothing checked agai
   assert.deepEqual(box.removed, []);
   assert.equal((await box.store.read("account-1")).works["101"].copy.downloadId, 1);
   assert.equal((await box.store.read("account-2")).works["101"].copy.downloadId, 2);
+});
+
+test("AO3's pacer is the browser's: another account, after a stop, asks AO3 nothing until it is over, under the same cap", async () => {
+  const box = harness({
+    [workURL("111")]: html(workURL("111"), "<h2>Error 403</h2>", 403),
+    [workURL("112")]: html(workURL("112"), workPage("112")),
+    [fileURL("112")]: file(fileURL("112"), epub()),
+  });
+  await box.engine.updateSettings({ enabled: true });
+  await box.engine.syncLibrary({ keep: [{ workId: "111", chapters: 1 }], drop: [], whole: true });
+  await box.engine.tick();
+  const stopped = (await box.engine.view()).stopped;
+  assert.equal(stopped.code, "forbidden");
+  await box.engine.useScope("account-2");
+  await box.engine.updateSettings({ enabled: true });
+  await box.engine.syncLibrary({ keep: [{ workId: "112", chapters: 1 }], drop: [], whole: true });
+  assert.equal(await box.engine.tick(), stopped.until - box.now);
+  assert.deepEqual(box.requests, [workURL("111")]);
+  assert.equal((await box.engine.view()).stopped.until, stopped.until);
+  // Over: the reads of six hours count on from the first account's.
+  box.now = stopped.until;
+  await box.drain();
+  assert.deepEqual(box.requests, [workURL("111"), workURL("112"), fileURL("112")]);
+  assert.equal((await box.store.read("account-2")).pacer.window.reads, 3);
+  assert.equal((await box.store.read("account-1")).pacer.window.reads, 3);
+});
+
+test("an account's pacer kept the earlier way, with its works, becomes the device's", async () => {
+  const factory = new IDBFactory();
+  const store = new IndexedDbKeepStore(factory, IDBKeyRange);
+  const until = NOW + 30 * 60_000;
+  const earlier = { v: 1, settings: { ...LIBRARY_DEFAULTS, enabled: true }, user: null, queue: [], run: null, pending: null,
+    pacer: { dueAt: 0, window: { startedAt: NOW, reads: 4 }, retries: 0, misses: 0, stopped: { code: "challenge", until }, lastCheckAt: NOW } };
+  assert.equal(await store.read("account-1"), undefined);
+  const db = await new Promise((resolve) => { factory.open("traceKeepACopyV1", 1).onsuccess = (event) => resolve(event.target.result); });
+  await new Promise((resolve) => {
+    const tx = db.transaction("cores", "readwrite");
+    tx.objectStore("cores").put(earlier, "account-1");
+    tx.oncomplete = resolve;
+  });
+  const box = harness({}, { store });
+  assert.equal((await box.engine.view()).stopped.until, until);
+  await box.engine.noteUser("Synthetic_Reader");
+  const moved = await new Promise((resolve) => { db.transaction("meta").objectStore("meta").get(PACER_KEY).onsuccess = (event) => resolve(event.target.result); });
+  assert.equal(moved.stopped.until, until);
+  await box.engine.useScope("account-2");
+  assert.equal((await box.engine.view()).stopped.until, until);
 });
 
 test("an update writes over the account's own file, wherever the browser put it", () => {

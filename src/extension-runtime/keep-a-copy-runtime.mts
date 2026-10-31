@@ -28,7 +28,7 @@ import {
   type Settings,
   type Trigger,
 } from "./keep-a-copy.mjs";
-import { IndexedDbKeepStore } from "./keep-a-copy-store.mjs";
+import { IndexedDbKeepStore, PACER_KEY, withDevicePacer } from "./keep-a-copy-store.mjs";
 
 type KeepMessage = (typeof KEEP_A_COPY_MESSAGE)[keyof typeof KEEP_A_COPY_MESSAGE];
 const MESSAGES: readonly string[] = /* @__PURE__ */ Object.values(KEEP_A_COPY_MESSAGE);
@@ -268,10 +268,14 @@ export function installKeepACopy(extension: Extension, options: KeepACopyOptions
   const indexedDB = (globalThis as { indexedDB?: IDBFactory }).indexedDB;
   const store: Pick<IndexedDbKeepStore, "read" | "write"> = options.store ?? (indexedDB
     ? new IndexedDbKeepStore(indexedDB)
-    // Without IndexedDB (never in a supported browser): the whole state in one key.
+    // Without IndexedDB (never in a supported browser): an account's whole state in one key, the device's pacer in another.
     : {
-        read: async (scope) => (await extension.storage.local.get(`${KEEP_A_COPY_KEY}:${scope}`))[`${KEEP_A_COPY_KEY}:${scope}`],
-        write: (state: KeepState, _changed, scope) => extension.storage.local.set({ [`${KEEP_A_COPY_KEY}:${scope}`]: state }),
+        read: async (scope) => withDevicePacer(
+          (await extension.storage.local.get(`${KEEP_A_COPY_KEY}:${scope}`))[`${KEEP_A_COPY_KEY}:${scope}`],
+          (await extension.storage.local.get(`${KEEP_A_COPY_KEY}.${PACER_KEY}`))[`${KEEP_A_COPY_KEY}.${PACER_KEY}`],
+        ),
+        write: ({ pacer, ...state }: KeepState, _changed, scope) =>
+          extension.storage.local.set({ [`${KEEP_A_COPY_KEY}:${scope}`]: state, [`${KEEP_A_COPY_KEY}.${PACER_KEY}`]: pacer }),
       });
   const engine = new KeepACopy({
     clock: Date,

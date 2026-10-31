@@ -857,7 +857,10 @@ export class KeepACopy {
     if (!this.#state) {
       const scope = this.#scope;
       const stored = scope === null ? undefined : await this.ports.read(scope);
-      this.#state ??= isState(stored) ? { ...stored, pending: stored.pending ?? null } : newState(this.ports.clock.now(), this.defaults);
+      // An account with nothing stored yet starts under the device's pacer, when the store keeps one.
+      const pacer = (stored as Partial<KeepState> | undefined)?.pacer;
+      this.#state ??= isState(stored) ? { ...stored, pending: stored.pending ?? null }
+        : { ...newState(this.ports.clock.now(), this.defaults), ...(typeof pacer?.dueAt === "number" ? { pacer } : {}) };
     }
     return this.#state;
   }
@@ -890,6 +893,8 @@ export class KeepACopy {
    * Switches to another account's works, or to none (null) while no one is
    * signed in. Each account's are kept apart and as they were: an account
    * that signs in again carries on where it was, with nothing checked again.
+   * The pacer is the device's, the same whichever account is in use: AO3's
+   * limits and stops are the browser's (keep-a-copy-store.mts).
    */
   useScope(scope: Scope): Promise<void> {
     const next = this.#busy.then(() => {
