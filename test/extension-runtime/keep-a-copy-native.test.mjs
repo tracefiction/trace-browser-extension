@@ -179,6 +179,8 @@ function harness({ app, site, store = new IndexedDbKeepStore(new IDBFactory(), I
       find: async () => box.tab,
       async run(tabId, func, args) {
         box.ran = [...(box.ran ?? []), tabId];
+        // The script could not run in the tab.
+        if (box.scriptFails) return null;
         if (func === keepCopyPartInTab) box.partReads.push(args[1]);
         globalThis.fetch = site.fetchImpl;
         try {
@@ -296,6 +298,59 @@ test("an app that doesn't know AO3's lease turns Keep a Copy off here, said once
   assert.equal(await box.handoff.engine.enabled(), false);
   assert.equal(warned.length, 1);
   assert.equal(app.leases.length, 1, "asked once");
+});
+
+test("the reader leaving the tab, or a script that cannot run there, is never a stop, nor shared with the app", async () => {
+  const site = ao3({ [workURL("36")]: workPage("36"), [fileURL("36")]: epub(1_000) });
+  const app = fakeApp({ works: [{ workId: "36", reason: "refused", pace: "reader" }] });
+  const box = harness({ app, site });
+  const fetchImpl = site.fetchImpl;
+  // Each time the page is read, the reader moves to their other AO3 tab.
+  site.fetchImpl = async (url, init) => {
+    const answer = await fetchImpl(url, init);
+    if (String(url) === workURL("36")) box.tab = { ...TAB, id: box.tab.id === 7 ? 8 : 7 };
+    return answer;
+  };
+  await box.handoff.askQueue(true);
+  for (let i = 0; i < 5; i += 1) box.now += (await box.handoff.engine.tick()) ?? 0;
+  site.fetchImpl = fetchImpl;
+  box.scriptFails = true;
+  for (let i = 0; i < 5; i += 1) box.now += (await box.handoff.engine.tick()) ?? 0;
+  assert.deepEqual(site.requests, Array(5).fill(workURL("36")));
+  assert.equal((await box.handoff.engine.view()).stopped, null);
+  await box.handoff.askQueue(true);
+  assert.equal(app.messages.filter((m) => m.type === KEEP_COPY_NATIVE.queue).at(-1).stopped, null);
+  box.scriptFails = false;
+  await box.drain();
+  assert.equal(app.saved.length, 1);
+});
+
+test("only a stop AO3's own answer set is shared with the app, never one from tries that got no answer", async () => {
+  const site = ao3({ [fileURL("37")]: epub(1_000) });
+  const app = fakeApp({ works: [{ workId: "37", reason: "refused", pace: "reader" }] });
+  const box = harness({ app, site });
+  const fetchImpl = site.fetchImpl;
+  site.fetchImpl = async () => { throw new TypeError("Load failed"); };
+  await box.handoff.askQueue(true);
+  for (let i = 0; i < 3; i += 1) {
+    const wait = await box.handoff.engine.tick();
+    if (i < 2) box.now += wait ?? 0;
+  }
+  const unanswered = (await box.handoff.engine.view()).stopped;
+  assert.equal(unanswered.code, "slow_down");
+  assert.equal(unanswered.fromAO3, undefined);
+  await box.handoff.askQueue(true);
+  assert.equal(app.messages.filter((m) => m.type === KEEP_COPY_NATIVE.queue).at(-1).stopped, null);
+  // AO3 refuses: that stop is AO3's own, and the app is told.
+  box.now = unanswered.until;
+  site.fetchImpl = async (url, init) => (String(url) === workURL("37")
+    ? new Response("<h2>Error 403</h2>", { status: 403, headers: { "content-type": "text/html" } })
+    : fetchImpl(url, init));
+  await box.handoff.engine.tick();
+  const refused = (await box.handoff.engine.view()).stopped;
+  assert.equal(refused.code, "forbidden");
+  await box.handoff.askQueue(true);
+  assert.deepEqual(app.messages.filter((m) => m.type === KEEP_COPY_NATIVE.queue).at(-1).stopped, { code: "forbidden", until: refused.until });
 });
 
 test("the reader's AO3 tab is the one they are on, else the last they used", () => {

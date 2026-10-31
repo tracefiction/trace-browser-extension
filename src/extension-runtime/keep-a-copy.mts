@@ -697,6 +697,8 @@ export interface StoppedState {
   until: number;
   /** Several tries in a row failed and AO3 gave no time to come back. */
   unavailable?: true;
+  /** AO3's own answer set it (a refusal, a check page, asking to slow down): the one kind shared with another owner of the files. */
+  fromAO3?: true;
 }
 
 export interface KeepState {
@@ -951,7 +953,7 @@ export class KeepACopy {
     // Between its tries, still unavailable: only an answer from AO3 ends it.
     const stopped: StoppedState | null = pacer.stopped && pacer.stopped.until > now ? { ...pacer.stopped }
       : (pacer.failures ?? 0) >= MAX_CONSECUTIVE_RETRIES ? { code: "slow_down", until: pacer.dueAt, unavailable: true }
-      : (pacer.slowedUntil ?? 0) > now ? { code: "slow_down", until: pacer.slowedUntil as number }
+      : (pacer.slowedUntil ?? 0) > now ? { code: "slow_down", until: pacer.slowedUntil as number, fromAO3: true }
       : null;
     return {
       settings: structuredClone(state.settings),
@@ -1384,14 +1386,15 @@ export class KeepACopy {
     } else if (verdict.kind === "retry") {
       pacer.retries += 1;
       if (pacer.retries >= MAX_CONSECUTIVE_RETRIES) {
-        this.#stop(state, "slow_down", timeFromAO3 ? verdict.waitMs : null, after);
+        // The last try's answer, if it had one, was AO3's own.
+        this.#stop(state, "slow_down", timeFromAO3 ? verdict.waitMs : null, after, verdict.network !== true);
       } else {
         pacer.dueAt = after + Math.min(STOP_MAX_MS, Math.max(backoff(pacer.retries), verdict.waitMs ?? 0));
         if (timeFromAO3) pacer.slowedUntil = pacer.dueAt;
       }
     } else {
       pacer.retries = 0;
-      if (verdict.kind === "stop") this.#stop(state, verdict.code, verdict.waitMs, after);
+      if (verdict.kind === "stop") this.#stop(state, verdict.code, verdict.waitMs, after, true);
     }
     // (Read again: #stop may have set it since the check above.)
     const stopped = state.pacer.stopped as KeepState["pacer"]["stopped"];
@@ -1405,7 +1408,8 @@ export class KeepACopy {
     return answer;
   }
 
-  #stop(state: KeepState, code: StopCode, waitMs: number | null, now: number): void {
+  /** `answered`: an answer from AO3 set the stop, not tries that got none. */
+  #stop(state: KeepState, code: StopCode, waitMs: number | null, now: number, answered = false): void {
     state.pacer.retries = 0;
     state.pacer.misses = 0;
     state.pacer.failedSaves = 0;
@@ -1413,7 +1417,8 @@ export class KeepACopy {
     const unavailable = waitMs === null && !NOT_AO3_FAILING.includes(code) && (state.pacer.failures ?? 0) >= MAX_CONSECUTIVE_RETRIES;
     // Signed out: nothing to gain by asking soon. The next signed-in page ends it.
     const wait = code === "signed_out" ? STOP_MAX_MS : Math.min(STOP_MAX_MS, Math.max(STOP_MS, waitMs ?? 0));
-    state.pacer.stopped = { code, until: now + wait, ...(unavailable ? { unavailable: true as const } : {}) };
+    const fromAO3 = answered && !NOT_AO3_FAILING.includes(code);
+    state.pacer.stopped = { code, until: now + wait, ...(unavailable ? { unavailable: true as const } : {}), ...(fromAO3 ? { fromAO3: true as const } : {}) };
   }
 
   /**

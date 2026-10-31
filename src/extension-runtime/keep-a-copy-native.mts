@@ -190,7 +190,9 @@ export interface NativeHandoffDeps {
 }
 
 function fromTab(answer: TabAnswer | null): Fetched {
-  if (!isRecord(answer)) return { kind: "failed", code: "network" };
+  // No answer from the tab (closed, reloaded, or the script could not run there):
+  // this device's trouble, which waits like a busy fetch and is never a step toward a stop.
+  if (!isRecord(answer)) return { kind: "failed", code: "busy" };
   if (answer.kind !== "response") return answer;
   const { head, sha256: _sha256, ...rest } = answer;
   return { ...rest, ...(head ? { bytes: Uint8Array.from(head) } : {}) };
@@ -257,8 +259,9 @@ export class NativeCopyHandoff {
         this.#stepTab = null;
         const tab = await deps.tabs.find();
         // The reader left that tab, closed it, or left AO3 in it: the step
-        // ends here, and no other tab is used in its place.
-        if (pinned === null || tab === null || !samePlace(pinned, tab)) return { kind: "failed", code: "network" };
+        // ends here, and no other tab is used in its place. Nothing was asked
+        // of AO3, so it waits as for a busy fetch.
+        if (pinned === null || tab === null || !samePlace(pinned, tab)) return { kind: "failed", code: "busy" };
         const handle = `keep-copy:${tab.id}:${deps.newId()}`;
         return leased(FILE_TIMEOUT_MS + 5_000, async () => {
           const answer = await deps.tabs.run<TabAnswer>(tab.id, keepCopyFetchInTab, [url, "file", FILE_TIMEOUT_MS, MAX_FILE_BYTES, handle, credentials], FILE_TIMEOUT_MS + 5_000);
@@ -301,7 +304,8 @@ export class NativeCopyHandoff {
       type: KEEP_COPY_NATIVE.queue,
       protocolVersion: KEEP_COPY_PROTOCOL_VERSION,
       waiting: view.waiting,
-      stopped: view.stopped,
+      // Only a stop AO3's own answer set: never this device's trouble, nor tries that got no answer.
+      stopped: view.stopped?.fromAO3 ? { code: view.stopped.code, until: view.stopped.until } : null,
     }).catch(() => null));
     // No answer, or not one: the queue stays as it was.
     if (answer === null) return view.waiting > 0;

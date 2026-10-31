@@ -40,7 +40,9 @@ is compiled in only with `TRACE_KEEP_A_COPY=1`.
   other tab is looked up. Nothing runs, and the app is not asked, otherwise.
   A work's page and its file come from the same tab in the same step; if the
   reader has left that tab, the step ends and no other tab is used. A file is
-  handed over only from the tab that fetched it.
+  handed over only from the tab that fetched it. A tab left, closed or
+  reloaded, or a script that cannot run in it, is this device's trouble: the
+  step waits as for a busy fetch, never a step toward a stop.
 - The file stays a Blob in the reader's tab, built from the response as it
   arrives and hashed as it goes, so the tab never holds it twice. The
   background reads one part, encodes it as base64, sends it, and drops it. A
@@ -111,9 +113,11 @@ five minutes. The answer:
 
 - `stoppedUntil`, `stopReason`: AO3's stop on this device (ms since 1970,
   and one of the stop codes), when the app met one or the extension
-  reported one. Only AO3's own answers are shared (`challenge`, `forbidden`,
-  `slow_down`, `wrong_host`), never this device's trouble (`save_failed`,
-  `unreadable`). There is one stop for both: the extension reads nothing
+  reported one. Only a stop AO3's own answer set is shared (`challenge`,
+  `forbidden`, `slow_down`, `wrong_host`), never this device's trouble
+  (`save_failed`, `unreadable`, the reader's tab lost) nor tries that got no
+  answer at all; the extension sends `stopped: null` for those. There is one
+  stop for both: the extension reads nothing
   from AO3 until it is over (`KeepACopy.holdUntil`, at most a day), and the
   `stopped` it sends here is kept by the app the same way. An unknown
   `stopReason` still stops. A work AO3 refused the app during a stop is
