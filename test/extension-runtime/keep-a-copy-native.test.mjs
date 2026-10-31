@@ -187,6 +187,8 @@ test("the app's queue is read strictly: anything malformed fetches nothing", () 
     { ok: false },
     { ok: true },
     { ok: true, enabled: true, format: "docx", works: [] },
+    // Only EPUB is handed over.
+    ...["azw3", "mobi", "pdf", "html"].map((format) => ({ ok: true, enabled: true, format, works: [] })),
     { ok: true, enabled: true, works: [{ workId: "0", reason: "locked" }] },
     { ok: true, enabled: true, works: [{ workId: "11", reason: "public" }] },
     { ok: true, enabled: true, works: [{ workId: "11", reason: "refused", have: "yesterday" }] },

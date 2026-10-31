@@ -19,7 +19,6 @@
 
 import { REQUEST_TIMEOUT_MS } from "./ao3-history-import.mjs";
 import {
-  COPY_FORMATS,
   KeepACopy,
   MAX_FILE_BYTES,
   MAX_PAGE_CHARS,
@@ -77,15 +76,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export interface QueueAnswer {
   readonly enabled: boolean;
-  readonly format: CopyFormat;
+  /** The only format handed to the app. */
+  readonly format: "epub";
   readonly works: readonly (WantedWork & { readonly reason: "locked" | "refused" })[];
 }
 
 /** The app's queue, or null for anything that is not one: nothing is fetched on a malformed answer. */
 export function readQueueAnswer(answer: unknown): QueueAnswer | null {
   if (!isRecord(answer) || answer.ok !== true || typeof answer.enabled !== "boolean") return null;
-  const format = answer.format === undefined ? "epub" : answer.format;
-  if (!COPY_FORMATS.includes(format as CopyFormat)) return null;
+  if (answer.format !== undefined && answer.format !== "epub") return null;
   const raw = answer.works ?? [];
   if (!Array.isArray(raw) || raw.length > MAX_QUEUE_WORKS) return null;
   const works: (WantedWork & { reason: "locked" | "refused" })[] = [];
@@ -98,7 +97,7 @@ export function readQueueAnswer(answer: unknown): QueueAnswer | null {
     if (pace !== "reader" && pace !== "check") return null;
     works.push({ workId: item.workId, have, pace: pace as Pace, reason: item.reason });
   }
-  return { enabled: answer.enabled, format: format as CopyFormat, works: answer.enabled ? works : [] };
+  return { enabled: answer.enabled, format: "epub", works: answer.enabled ? works : [] };
 }
 
 /** One file on its way to the app, kept in storage so a restarted background resumes it or gives it up. */
