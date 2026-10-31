@@ -5,10 +5,10 @@
  *
  * A public work's page and file are requested signed out; the reader's own
  * lists, and a locked work's Chapter Index and file, go with their AO3
- * cookies, which the browser sends because the extension may reach AO3. A file is held as a blob and saved from its URL:
- * Firefox's background makes it, and Chrome's service worker, which cannot,
- * has its offscreen document make it. Safari is not served here: it has no
- * downloads API.
+ * cookies, which the browser sends because the extension may reach AO3. A
+ * file is held as a blob and saved from its URL: Firefox's background makes
+ * it, and Chrome's service worker, which cannot, has its offscreen document
+ * make it. Safari is not served here: it has no downloads API.
  */
 
 import { REQUEST_TIMEOUT_MS } from "./ao3-history-import.mjs";

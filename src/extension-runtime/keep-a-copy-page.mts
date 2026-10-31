@@ -4,8 +4,9 @@
  * Download menu offers and what the reader just did: bookmarked it, marked
  * it for later, subscribed or left kudos. Each is a form on AO3's pages, so
  * its submit button is what is watched: a click on kudos or subscribe may be
- * cancelled by the page's own script, so no submit event comes for those. Only the work's
- * preface and its Download menu leave the page, never its text.
+ * cancelled by the page's own script, so no submit event comes for those.
+ * Only the work's preface and its Download menu leave the page, never its
+ * text.
  *
  * A bookmark or Mark for Later navigates at once, and a stopped service worker
  * takes a moment to start: the message can go with the page. So what the reader
