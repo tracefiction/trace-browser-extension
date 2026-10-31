@@ -167,7 +167,12 @@ export interface TabPort {
   /** The reader's AO3 tab, the one they are on, or null when they are not on AO3. */
   find(): Promise<ReaderTab | null>;
   /** Runs `func` in the tab and gives back its result, or null. */
-  run<T>(tabId: number, func: (...args: never[]) => unknown, args: readonly unknown[], timeoutMs: number): Promise<T | null>;
+  /**
+   * Runs `func` in the tab and gives back its result: null when it ran (so
+   * may have sent its request) but gave nothing back; undefined when it
+   * could not be put into the tab at all, so nothing was sent.
+   */
+  run<T>(tabId: number, func: (...args: never[]) => unknown, args: readonly unknown[], timeoutMs: number): Promise<T | null | undefined>;
 }
 
 /** Where the works and the open transfer are kept (IndexedDbKeepStore). */
@@ -189,9 +194,11 @@ export interface NativeHandoffDeps {
   sleep(ms: number): Promise<void>;
 }
 
-function fromTab(answer: TabAnswer | null): Fetched {
-  // No answer from the tab (closed, reloaded, or the script lost it): the
-  // request may have been sent, so it counts as the work's try, never toward a stop.
+function fromTab(answer: TabAnswer | null | undefined): Fetched {
+  // The script could not be put into the tab: nothing was sent.
+  if (answer === undefined) return { kind: "failed", code: "busy" };
+  // It ran, but its answer was lost (the tab closed or navigated): the request
+  // may have been sent, so it counts as the work's try, never toward a stop.
   if (!isRecord(answer)) return { kind: "failed", code: "lost" };
   if (answer.kind !== "response") return answer;
   const { head, sha256: _sha256, ...rest } = answer;
@@ -519,17 +526,19 @@ const call = <T,>(target: Record<string, unknown>, method: string, args: readonl
 export function installNativeKeepACopy(env: NativeKeepEnvironment): NativeCopyHandoff {
   const tabs: TabPort = {
     find: async () => readerTab(await call<SafariTab[]>(env.tabs, "query", [{ active: true, currentWindow: true }]).catch(() => [])),
-    async run<T>(tabId: number, func: (...args: never[]) => unknown, args: readonly unknown[], timeoutMs: number): Promise<T | null> {
+    async run<T>(tabId: number, func: (...args: never[]) => unknown, args: readonly unknown[], timeoutMs: number): Promise<T | null | undefined> {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         const results = await Promise.race([
           env.scripting.executeScript({ target: { tabId, frameIds: [0] }, func, args }),
+          // Running past its time: it may have sent its request.
           new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); }),
         ]);
         const first: unknown = Array.isArray(results) ? results[0] : undefined;
         return isRecord(first) && "result" in first ? first.result as T : null;
       } catch {
-        return null;
+        // Refused: the script was never put into the tab.
+        return undefined;
       } finally {
         clearTimeout(timer);
       }

@@ -42,10 +42,10 @@ is compiled in only with `TRACE_KEEP_A_COPY=1`.
   reader has left that tab, the step ends and no other tab is used. A file is
   handed over only from the tab that fetched it. A tab left, closed or
   reloaded, or a script that cannot run in it, is this device's trouble,
-  never a step toward a stop. When nothing was sent (the tab was left before
-  the request, or the lease is the app's), the step waits as for a busy
-  fetch and takes nothing from the cap of reads. When a request was sent but
-  its answer was lost, it counts as one of the work's three tries and as a
+  never a step toward a stop. A step that sent nothing (its script could not
+  be put into the tab, or the lease is the app's) waits as for a busy fetch:
+  no try and no read. Once a step has sent a request (its page, or an answer
+  lost after sending), it counts as one of the work's three tries and as a
   read.
 - The file stays a Blob in the reader's tab, built from the response as it
   arrives and hashed as it goes, so the tab never holds it twice. The

@@ -179,12 +179,14 @@ function harness({ app, site, store = new IndexedDbKeepStore(new IDBFactory(), I
       find: async () => box.tab,
       async run(tabId, func, args) {
         box.ran = [...(box.ran ?? []), tabId];
-        // The script could not run in the tab.
-        if (box.scriptFails) return null;
+        // The script could not be put into the tab: nothing runs.
+        if (box.scriptFails) return undefined;
         if (func === keepCopyPartInTab) box.partReads.push(args[1]);
         globalThis.fetch = site.fetchImpl;
         try {
-          return structuredClone(await func(...args));
+          const result = structuredClone(await func(...args));
+          // It ran, and sent its request, but its answer never came back.
+          return box.answerLost ? null : result;
         } finally {
           globalThis.fetch = realFetch;
         }
@@ -312,11 +314,12 @@ test("the reader leaving the tab, or a script that cannot run there, is never a 
     return answer;
   };
   await box.handoff.askQueue(true);
-  for (let i = 0; i < 5; i += 1) box.now += (await box.handoff.engine.tick()) ?? 0;
+  // Its page was sent each time: two of the work's tries, and no stop.
+  for (let i = 0; i < 2; i += 1) box.now += (await box.handoff.engine.tick()) ?? 0;
   site.fetchImpl = fetchImpl;
   box.scriptFails = true;
-  for (let i = 0; i < 2; i += 1) box.now += (await box.handoff.engine.tick()) ?? 0;
-  assert.deepEqual(site.requests, Array(5).fill(workURL("36")));
+  for (let i = 0; i < 5; i += 1) box.now += (await box.handoff.engine.tick()) ?? 0;
+  assert.deepEqual(site.requests, Array(2).fill(workURL("36")));
   assert.equal((await box.handoff.engine.view()).stopped, null);
   await box.handoff.askQueue(true);
   assert.equal(app.messages.filter((m) => m.type === KEEP_COPY_NATIVE.queue).at(-1).stopped, null);
@@ -336,12 +339,30 @@ test("a step that sent nothing takes nothing from the cap; an answer lost after 
   assert.equal((await box.store.read("")).pacer.window.reads, 0);
   app.appHoldsAO3 = false;
   // Sent, but the tab's script lost the answer, three times: skipped as failed, no stop, three reads.
-  box.scriptFails = true;
+  box.answerLost = true;
   for (let i = 0; i < 4; i += 1) box.now += (await box.handoff.engine.tick()) ?? 0;
+  assert.deepEqual(site.requests, Array(3).fill(workURL("38")));
   const stored = await box.store.read("");
   assert.equal(stored.pacer.window.reads, 3);
   assert.equal(stored.pacer.stopped, null);
   assert.deepEqual(app.skipped.map(({ workId, code }) => [workId, code]), [["38", "failed"]]);
+});
+
+test("a script that cannot be put into the tab sends nothing: no try, no read, no stop", async () => {
+  const site = ao3({ [workURL("39")]: workPage("39"), [fileURL("39")]: epub(1_000) });
+  const app = fakeApp({ works: [{ workId: "39", reason: "refused" }] });
+  const box = harness({ app, site });
+  await box.handoff.askQueue(true);
+  box.scriptFails = true;
+  for (let i = 0; i < 6; i += 1) box.now += (await box.handoff.engine.tick()) ?? 0;
+  assert.deepEqual(site.requests, []);
+  const stored = await box.store.read("");
+  assert.equal(stored.pacer.window.reads, 0);
+  assert.equal(stored.pacer.stopped, null);
+  assert.equal(stored.queue[0].attempts, 0);
+  box.scriptFails = false;
+  await box.drain();
+  assert.equal(app.saved.length, 1);
 });
 
 test("only a stop AO3's own answer set is shared with the app, never one from tries that got no answer", async () => {
