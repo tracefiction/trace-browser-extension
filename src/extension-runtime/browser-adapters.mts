@@ -390,7 +390,10 @@ export class NativeStorySaveReceiptPort implements StorySaveReceiptPort {
   readonly #apiOrigin: string;
 
   constructor(runtime: RuntimePort, mode: "callback" | "promise", apiOrigin = "",
-    private readonly publishTrackingPreference?: () => Promise<void>) {
+    private readonly publishTrackingPreference?: () => Promise<void>,
+    // Whether this is Safari on iPhone or iPad, where the app shows what is
+    // being read. Absent elsewhere, so no other browser sends it.
+    private readonly sendsReadingNow?: () => Promise<boolean>) {
     this.#runtime = runtime;
     this.#mode = mode;
     this.#apiOrigin = apiOrigin;
@@ -417,6 +420,7 @@ export class NativeStorySaveReceiptPort implements StorySaveReceiptPort {
     // unaffected, and a save with no mode established carries none.
     mode?: "bounded_manual" | "normal_automatic";
     context?: Readonly<Record<string, unknown>>;
+    progress?: Readonly<{ current: number; total: number | null }>;
   }>): Promise<boolean> {
     let recorded = false;
     if (receipt.context !== undefined) {
@@ -432,7 +436,10 @@ export class NativeStorySaveReceiptPort implements StorySaveReceiptPort {
     const preference = this.publishTrackingPreference?.().catch(() => {});
     // A confirmed reading write can add a Library entry. It is not a manual
     // quick-add action and must not change the existing heartbeat semantics.
-    if (receipt.action === "read") { await preference; return recorded; }
+    if (receipt.action === "read") {
+      await Promise.all([preference, this.#publishReadingNow(receipt)]);
+      return recorded;
+    }
     const response = await sendNativeMessageWithFallback(
       this.#runtime,
       this.#mode,
@@ -447,6 +454,38 @@ export class NativeStorySaveReceiptPort implements StorySaveReceiptPort {
     await preference;
     return recorded || (isRecord(response) && (response.ok === true || response.ok === "true"));
   }
+
+  /**
+   * Which story and chapter a confirmed reading write was for, so the app can
+   * bring that story up to date at once. Identifiers and chapter numbers
+   * only: no title, address or text. Best effort; never changes the receipt.
+   */
+  async #publishReadingNow(receipt: Readonly<{
+    entryID: string;
+    workKey: string;
+    at: number;
+    progress?: Readonly<{ current: number; total: number | null }>;
+  }>): Promise<void> {
+    const progress = receipt.progress;
+    if (progress === undefined || !isChapterNumber(progress.current)) return;
+    try {
+      if (!(await this.sendsReadingNow?.())) return;
+      const total = progress.total;
+      await sendNativeMessageWithFallback(this.#runtime, this.#mode, {
+        type: "TRACE_IOS_READING_NOW",
+        entryId: receipt.entryID,
+        workKey: receipt.workKey,
+        chapter: progress.current,
+        ...(total !== null && isChapterNumber(total) && total >= progress.current
+          ? { chapterTotal: total } : {}),
+        at: receipt.at,
+      }, 1000);
+    } catch { /* The app catches up when it next opens. */ }
+  }
+}
+
+function isChapterNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= 100_000;
 }
 
 export class NativePendingStoryHandoffPort implements PendingStoryHandoffPort {

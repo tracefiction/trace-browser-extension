@@ -501,6 +501,7 @@ export class SessionRuntimeController {
         environment.storageMode,
         environment.apiBase,
         () => this.publishTrackingPreference(),
+        () => this.#usesNativeAccountAuthority(),
       ),
       handoff: new NativePendingStoryHandoffPort(
         environment.runtime,

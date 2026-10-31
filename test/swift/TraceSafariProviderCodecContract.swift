@@ -63,6 +63,7 @@ struct TraceSafariProviderCodecContract {
         readinessReport()
         readinessCycleEnds()
         providerBoundRouting()
+        readingNow()
         print("TraceSafariProviderCodec contract passed")
     }
 
@@ -593,7 +594,154 @@ struct TraceSafariProviderCodecContract {
         require(route(["type": "TRACE_IOS_SAVE_PREPARE", "accountID": "reader-a", "apiOrigin": origin])["ok"] as? Bool == false,
             "The save receipt still answers as the save receipt: no attempt, no context")
         require(route(["type": "TRACE_IOS_EXTENSION_HEARTBEAT"])["ok"] as? Bool == false, "A message that is not provider-bound is not routed here")
-        require(M.types.count == 6, "Six messages are bound to the provider")
+        require(M.types.count == 7, "Seven messages are bound to the provider")
+    }
+
+    /// What is being read: the extension's message, exactly, stored for the
+    /// provider the app issued and read back only under it.
+    static func readingNow() {
+        typealias M = TraceSafariProviderBoundMessages
+        typealias R = TraceSafariReadingNow
+        let suite = "trace.reading-now." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let origin = TraceSafariOnboardingReceipt.productionAPIOrigin
+        var now = Date(timeIntervalSince1970: 1_800_000_000)
+        var ms: Double { now.timeIntervalSince1970 * 1000 }
+        let session = TraceSafariProviderCodec.deviceSession(sessionId: UUID().uuidString,
+            credential: "trd_v1_" + String(repeating: "B", count: 43), expiresAt: "2099-01-01T00:00:00.000Z")!
+        let issued = TraceSafariProviderCodec.importBinding(session: session, now: now)!
+        func route(_ payload: [String: Any], session current: TraceSafariProviderCodec.DeviceSession? = nil) -> [String: Any] {
+            M.respond(to: payload, type: payload["type"] as? String ?? "", defaults: defaults,
+                session: current ?? session, now: now, configuredAPIOrigin: origin)
+        }
+        let entry = "9F1C2B3A-4D5E-4F60-8A7B-1C2D3E4F5A6B"
+        func message(_ changes: [String: Any?] = [:]) -> [String: Any] {
+            var payload: [String: Any] = ["type": R.message, "entryId": entry, "workKey": "ao3:123456",
+                "chapter": 4, "chapterTotal": 12, "at": ms - 500]
+            for (key, value) in changes { payload[key] = value }
+            return payload
+        }
+        func stored() -> R.Record? { R.read(defaults: defaults, provider: issued, now: ms) }
+
+        // Valid: stored for the issued provider, identifiers normalised.
+        require(M.types.contains(R.message), "What is being read is bound to the provider")
+        require(route(message())["ok"] as? Bool == true, "A well-formed reading message is stored")
+        let first = stored()
+        require(first?.entryID == entry.lowercased() && first?.workKey == "ao3:123456" &&
+            first?.chapter == 4 && first?.chapterTotal == 12 && first?.at == ms - 500 && first?.receivedAt == ms,
+            "It reads back exactly, the entry lowercased, with the time it arrived")
+        now += 1
+        require(route(message(["chapterTotal": nil]))["ok"] as? Bool == true && stored()?.chapterTotal == nil,
+            "An unknown chapter count is left out, not refused")
+        require(route(message(["chapter": 5.0, "chapterTotal": 12.0]))["ok"] as? Bool == true && stored()?.chapter == 5,
+            "A whole number sent as a double is a whole number")
+        now += 1
+        require(route(message(["workKey": "ffn:7038840", "chapter": R.maximumChapter, "chapterTotal": R.maximumChapter]))["ok"] as? Bool == true,
+            "A FanFiction.net story at the largest chapter is stored")
+
+        // Invalid: each refused, and none changes what is stored.
+        now += 1
+        let kept = defaults.data(forKey: R.key)
+        let invalid: [(String, [String: Any?])] = [
+            ("a missing entry", ["entryId": nil]),
+            ("a missing story", ["workKey": nil]),
+            ("a missing chapter", ["chapter": nil]),
+            ("a missing time", ["at": nil]),
+            ("an entry that is not a UUID", ["entryId": "not-an-entry-id-but-thirty-six-chars"]),
+            ("an entry UUID without hyphens", ["entryId": "9F1C2B3A4D5E4F608A7B1C2D3E4F5A6B"]),
+            ("an entry of another type", ["entryId": 12]),
+            ("another archive", ["workKey": "wattpad:123"]),
+            ("a story with a leading zero", ["workKey": "ao3:0123"]),
+            ("a story address", ["workKey": "https://archiveofourown.org/works/123456"]),
+            ("chapter zero", ["chapter": 0]),
+            ("a negative chapter", ["chapter": -1]),
+            ("a fractional chapter", ["chapter": 2.5]),
+            ("a chapter as text", ["chapter": "4"]),
+            ("a chapter as a boolean", ["chapter": true]),
+            ("a count below the chapter", ["chapterTotal": 3]),
+            ("a count as a boolean", ["chapterTotal": false]),
+            ("a null count", ["chapterTotal": NSNull()]),
+            ("a time as text", ["at": "1800000000000"]),
+            ("a time as a boolean", ["at": true]),
+            ("a time that is not finite", ["at": Double.infinity]),
+            ("a time far in the future", ["at": ms + R.allowedSkew + 1_000]),
+            ("a time too old to be news", ["at": ms - R.maximumArrivalAge - 1]),
+            ("another message type", ["type": "TRACE_IOS_SAVE_CONFIRMED"]),
+        ]
+        for (name, changes) in invalid {
+            var payload = message(changes)
+            if name == "another message type" {
+                require(TraceSafariReadingNow.handle(payload, defaults: defaults, provider: issued, now: ms)["ok"] as? Bool == false,
+                    "Refused: \(name)")
+                continue
+            }
+            payload["type"] = R.message
+            require(route(payload)["ok"] as? Bool == false, "Refused: \(name)")
+        }
+        // Oversized: bounded strings and ints.
+        require(route(message(["entryId": entry + "0"]))["ok"] as? Bool == false, "Refused: an entry one character too long")
+        require(route(message(["workKey": "ao3:" + String(repeating: "9", count: 21)]))["ok"] as? Bool == false,
+            "Refused: a story number over twenty digits")
+        require(route(message(["workKey": "ao3:1" + String(repeating: " ", count: 4096)]))["ok"] as? Bool == false,
+            "Refused: a padded story")
+        require(route(message(["chapter": R.maximumChapter + 1, "chapterTotal": nil]))["ok"] as? Bool == false,
+            "Refused: a chapter over the largest")
+        require(route(message(["chapterTotal": R.maximumChapter + 1]))["ok"] as? Bool == false,
+            "Refused: a count over the largest")
+        require(route(message(["chapter": Double(Int.max)]))["ok"] as? Bool == false, "Refused: an enormous chapter")
+        // Extra fields: nothing beyond the message's own.
+        for extra in ["title", "url", "text", "selection", "accountID", "apiOrigin", "provider", "progress"] {
+            require(route(message([extra: "x"]))["ok"] as? Bool == false, "Refused: an extra field (\(extra))")
+        }
+        require(defaults.data(forKey: R.key) == kept, "No refused message changes what is stored")
+
+        // Order: a later write is never replaced by an earlier one.
+        now += 1
+        require(route(message(["at": ms - 100]))["ok"] as? Bool == true, "A later write replaces the record")
+        let later = defaults.data(forKey: R.key)
+        require(route(message(["at": ms - 200]))["error"] as? String == "stale" && defaults.data(forKey: R.key) == later,
+            "An earlier write arriving late is refused")
+
+        // Equal times: the one that arrives last is kept.
+        now += 1
+        let same = ms - 50
+        require(route(message(["at": same, "chapter": 6, "chapterTotal": nil]))["ok"] as? Bool == true, "A write is stored")
+        require(route(message(["at": same, "chapter": 7, "chapterTotal": nil]))["ok"] as? Bool == true && stored()?.chapter == 7,
+            "Another with the same time, arriving after it, replaces it")
+
+        // Concurrent writes in one process: the latest time is what remains.
+        now += 1
+        let base = ms - 1_000
+        DispatchQueue.concurrentPerform(iterations: 64) { index in
+            _ = R.handle(message(["at": base + Double(index), "chapter": 1 + index, "chapterTotal": nil]),
+                defaults: defaults, provider: issued, now: ms)
+        }
+        require(stored()?.at == base + 63 && stored()?.chapter == 64, "Of writes handled at once, the latest is kept")
+
+        // Provider: another provider never reads it, and an expired session stores nothing.
+        let other = TraceSafariProviderCodec.ImportBinding(sessionID: UUID().uuidString, recordDigest: String(repeating: "c", count: 64))
+        require(R.read(defaults: defaults, provider: other, now: ms) == nil, "Another provider's app reads nothing")
+        require(R.read(defaults: defaults, provider: nil, now: ms) == nil, "No provider, nothing read")
+        let expired = TraceSafariProviderCodec.deviceSession(sessionId: session.sessionId,
+            credential: session.credential, expiresAt: "2020-01-01T00:00:00.000Z")!
+        require(route(message(), session: expired)["ok"] as? Bool == false, "An expired provider stores nothing")
+        let replaced = TraceSafariProviderCodec.deviceSession(sessionId: UUID().uuidString,
+            credential: "trd_v1_" + String(repeating: "C", count: 43), expiresAt: "2099-01-01T00:00:00.000Z")!
+        let replacement = TraceSafariProviderCodec.importBinding(session: replaced, now: now)!
+        now += 1
+        require(route(message(["at": ms - 300]), session: replaced)["ok"] as? Bool == true,
+            "A replaced provider's first record is stored, whatever the old one held")
+        require(stored() == nil && R.read(defaults: defaults, provider: replacement, now: ms)?.at == ms - 300,
+            "and only the replacement reads it")
+
+        // Stored bytes: a tampered record is not read; clear removes it.
+        defaults.set(Data(#"{"version":1}"#.utf8), forKey: R.key)
+        require(R.read(defaults: defaults, provider: replacement, now: ms) == nil, "A malformed record is not read")
+        require(route(message(), session: replaced)["ok"] as? Bool == true, "and is replaced by the next message")
+        R.clear(defaults: defaults)
+        require(defaults.data(forKey: R.key) == nil && R.read(defaults: defaults, provider: replacement, now: ms) == nil,
+            "Clear leaves nothing of the reading")
     }
 
     private static func require(

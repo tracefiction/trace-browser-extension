@@ -532,9 +532,139 @@ enum TraceSafariReadinessReport {
     }
 }
 
+/// Which story and chapter the reader's latest confirmed reading write was
+/// for, so a running app can bring that story up to date at once (beside
+/// Safari both apps stay active, so no return to the app would). Identifiers
+/// and chapter numbers only: no title, address, page text or selection.
+///
+/// One record, the latest, bound to the provider the app issued when it
+/// arrived; under any other provider it is not current. It is a hint to read
+/// again, never evidence that a save happened or of what Trace holds. After
+/// each stored record the handler posts `notification` (a Darwin
+/// notification, which carries nothing).
+enum TraceSafariReadingNow {
+    static let message = "TRACE_IOS_READING_NOW"
+    static let key = "traceSafariReadingNowV1"
+    static let notification = "com.tracefiction.trace.reading-now"
+    static let maximumChapter = 100_000
+    /// A write time may be this far ahead of the handler's clock (ms)...
+    static let allowedSkew: Double = 60_000
+    /// ...and at most this old when it arrives (ms).
+    static let maximumArrivalAge: Double = 300_000
+    private static let required: Set<String> = ["type", "entryId", "workKey", "chapter", "at"]
+    private static let optional: Set<String> = ["chapterTotal"]
+
+    struct Record: Codable, Equatable {
+        let version: Int
+        let provider: TraceSafariProviderCodec.ImportBinding
+        /// The Library entry's ID, lowercased.
+        let entryID: String
+        let workKey: String
+        let chapter: Int
+        /// Absent when the story's chapter count is not known.
+        let chapterTotal: Int?
+        /// When the extension had the write confirmed (epoch ms).
+        let at: Double
+        /// When the handler stored it (epoch ms).
+        let receivedAt: Double
+
+        func valid(now: Double) -> Bool {
+            version == 1 && UUID(uuidString: provider.sessionID) != nil &&
+            provider.recordDigest.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil &&
+            entryID.utf8.count == 36 && UUID(uuidString: entryID)?.uuidString.lowercased() == entryID &&
+            workKey.utf8.count <= 24 &&
+            workKey.range(of: "^(ao3|ffn):[1-9][0-9]{0,19}$", options: .regularExpression) != nil &&
+            (1...maximumChapter).contains(chapter) &&
+            (chapterTotal.map { (chapter...maximumChapter).contains($0) } ?? true) &&
+            at.isFinite && receivedAt.isFinite && at > 0 && receivedAt > 0 &&
+            at <= receivedAt + allowedSkew && receivedAt <= now + allowedSkew
+        }
+    }
+
+    /// A whole number in range, never a boolean or a fraction.
+    private static func whole(_ value: Any?, in range: ClosedRange<Int>) -> Int? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        let double = number.doubleValue
+        guard double.isFinite, double.rounded() == double,
+              double >= Double(range.lowerBound), double <= Double(range.upperBound) else { return nil }
+        return Int(double)
+    }
+
+    /// The extension's message, exactly: the five fields and an optional
+    /// chapter count, nothing else; the identifiers bounded and well formed.
+    static func decode(_ payload: [String: Any], provider: TraceSafariProviderCodec.ImportBinding,
+                       now: Double) -> Record? {
+        let keys = Set(payload.keys)
+        guard keys.isSuperset(of: required), keys.isSubset(of: required.union(optional)),
+              payload["type"] as? String == message,
+              let rawEntry = payload["entryId"] as? String, rawEntry.utf8.count == 36,
+              let entry = UUID(uuidString: rawEntry)?.uuidString.lowercased(),
+              let workKey = payload["workKey"] as? String,
+              let chapter = whole(payload["chapter"], in: 1...maximumChapter),
+              let atNumber = payload["at"] as? NSNumber, CFGetTypeID(atNumber) != CFBooleanGetTypeID()
+        else { return nil }
+        var total: Int?
+        if keys.contains("chapterTotal") {
+            guard let value = whole(payload["chapterTotal"], in: chapter...maximumChapter) else { return nil }
+            total = value
+        }
+        let at = atNumber.doubleValue
+        let record = Record(version: 1, provider: provider, entryID: entry, workKey: workKey,
+            chapter: chapter, chapterTotal: total, at: at, receivedAt: now)
+        guard record.valid(now: now), now - at <= maximumArrivalAge else { return nil }
+        return record
+    }
+
+    /// Serialises the read-then-write below within one process, so of two
+    /// messages handled at once an earlier write never lands over a later one.
+    private static let writing = NSLock()
+
+    /// The handler: stores the latest record for the issued provider. An
+    /// earlier write (smaller `at`) arriving after a later one is refused; of
+    /// two with the same `at`, the one that arrives last is kept. Across
+    /// processes the read and write are not one step, so a lost race can
+    /// leave an earlier reading stored until the next write: the record is a
+    /// hint to read again, so that costs at most one refresh. The value is
+    /// synchronised before returning, so a notification posted after a
+    /// successful answer finds it.
+    static func handle(_ payload: [String: Any], defaults: UserDefaults,
+                       provider: TraceSafariProviderCodec.ImportBinding?, now: Double) -> [String: Any] {
+        guard let provider, let record = decode(payload, provider: provider, now: now) else { return ["ok": false] }
+        writing.lock(); defer { writing.unlock() }
+        if let previous = read(defaults: defaults, provider: provider, now: now), previous.at > record.at {
+            return ["ok": false, "error": "stale"]
+        }
+        guard let encoded = try? JSONEncoder().encode(record) else { return ["ok": false] }
+        defaults.set(encoded, forKey: key)
+        defaults.synchronize()
+        return ["ok": defaults.data(forKey: key) == encoded]
+    }
+
+    /// The app: the latest record, when it was stored under `provider`, the
+    /// one the app issued, read now. Nil is not known. Age is the app's call.
+    static func read(defaults: UserDefaults, provider: TraceSafariProviderCodec.ImportBinding?,
+                     now: Double) -> Record? {
+        guard let provider, let data = defaults.data(forKey: key), data.count <= 2048,
+              let record = try? JSONDecoder().decode(Record.self, from: data),
+              record.provider == provider, record.valid(now: now) else { return nil }
+        return record
+    }
+
+    /// The app, at sign-out: nothing of the account's reading is left.
+    static func clear(defaults: UserDefaults) {
+        defaults.removeObject(forKey: key)
+    }
+
+    /// Tells a running app that a record was stored. Carries nothing.
+    static func post() {
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+            CFNotificationName(notification as CFString), nil, nil, true)
+    }
+}
+
 /// The native messages answered only for the provider the app issued, as it
-/// is read at that moment: the save receipt, the automatic-saving preference
-/// and the readiness report. The handler reads the provider and the paired
+/// is read at that moment: the save receipt, the automatic-saving preference,
+/// the readiness report and what is being read. The handler reads the provider and the paired
 /// environment; which of the three answers is decided here, where it can be
 /// tested without the extension's host.
 enum TraceSafariProviderBoundMessages {
@@ -542,6 +672,7 @@ enum TraceSafariProviderBoundMessages {
         "TRACE_IOS_SAVE_PREPARE", "TRACE_IOS_SAVE_CONFIRMED",
         "TRACE_IOS_TRACKING_PREFERENCE_PREPARE", "TRACE_IOS_TRACKING_PREFERENCE",
         TraceSafariReadinessReport.prepareMessage, TraceSafariReadinessReport.reportMessage,
+        TraceSafariReadingNow.message,
     ]
 
     static func respond(to payload: [String: Any], type: String, defaults: UserDefaults,
@@ -551,6 +682,9 @@ enum TraceSafariProviderBoundMessages {
         // A message can never select the provider it is answered for.
         let provider = TraceSafariProviderCodec.importBinding(session: session, now: now)
         let milliseconds = now.timeIntervalSince1970 * 1000
+        if type == TraceSafariReadingNow.message {
+            return TraceSafariReadingNow.handle(payload, defaults: defaults, provider: provider, now: milliseconds)
+        }
         if type.hasPrefix("TRACE_IOS_SAFARI_READINESS") {
             return TraceSafariReadinessReport.handle(payload, defaults: defaults, provider: provider,
                 now: milliseconds, configuredAPIOrigin: configuredAPIOrigin)
