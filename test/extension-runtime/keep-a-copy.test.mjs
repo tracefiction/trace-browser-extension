@@ -28,6 +28,7 @@ import {
   WORK_PACE_MS,
   SETTLE_MAX_MS,
   STOP_MAX_MS,
+  LINK_MAX_AGE_MS,
   LOCKED_VERSION_BASE,
   lockedFileURL,
   lockedVersion,
@@ -280,6 +281,8 @@ test("waits on 429, 445 and the front ends' 5xx; skips gone works and sign-in pa
   // Read signed out, every page has AO3's sign-in form: only its sign-in page itself is a locked work.
   assert.deepEqual(classifyAnswer(loginPage(), "page", NOW), { kind: "skip", code: "needs_sign_in" });
   assert.deepEqual(classifyAnswer(loginPage(), "epub", NOW), { kind: "skip", code: "needs_sign_in" });
+  // Any other sign-in page, read signed out, has nothing to copy.
+  assert.deepEqual(classifyAnswer(html(`${AO3_ORIGIN}/users/login?return_to=%2Fworks%2F1`, "<form action=\"/users/login\"></form>"), "page", NOW), { kind: "skip", code: "no_download" });
   const loggedOut = '<body class="logged-out"><form action="/users/login" method="post"></form><h2 class="title heading">A work</h2></body>';
   assert.deepEqual(classifyAnswer(html(url, loggedOut), "page", NOW), { kind: "ok" });
   assert.equal(classifyAnswer(html(url, loggedOut, 403), "page", NOW).code, "forbidden");
@@ -1585,6 +1588,15 @@ test("a page's message sent again is handled once: a work just skipped is not re
 
   const repeated = repeatedMessage(2);
   assert.deepEqual(["a", "a", "b", "c", "a", undefined, undefined].map(repeated), [false, true, false, false, false, false, false]);
+});
+
+test("a link from the reader's page that waited longer than a few minutes is not used: the page is read again first", async () => {
+  const box = harness({ [workURL("1")]: html(workURL("1"), workPage("1")), [epubLink("1")]: file(epubLink("1"), epub()) });
+  await box.engine.notePage(readWorkPage(workPage("1")), "bookmark");
+  box.now += LINK_MAX_AGE_MS + 1;
+  await box.drain();
+  assert.deepEqual(box.requests, [workURL("1"), epubLink("1")]);
+  assert.equal(box.saved.length, 1);
 });
 
 test("a work asked for again, with no link, while its copy is saving is looked at once more", async () => {

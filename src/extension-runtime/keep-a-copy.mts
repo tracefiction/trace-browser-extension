@@ -411,10 +411,11 @@ export function classifyAnswer(answer: Fetched, expect: CopyFormat | "page" | "s
     return { kind: "stop", code: "wrong_host", waitMs: null };
   }
   if (landed.protocol !== "https:" || !/^(?:download\.)?archiveofourown\.org$/.test(landed.hostname)) return { kind: "stop", code: "wrong_host", waitMs: null };
-  // AO3's sign-in page, where it sends a reader who may not see the work (`?restricted=true`).
-  if (/^\/users\/login\b/i.test(landed.pathname) || (answer.status === 200 && expect === "session" && LOGIN_MARKERS.test(text))) {
-    return { kind: "skip", code: "needs_sign_in" };
+  // The sign-in page. Read signed out, only one with `restricted=true` is a locked work's; any other has nothing to copy.
+  if (/^\/users\/login\b/i.test(landed.pathname)) {
+    return expect === "session" || landed.searchParams.get("restricted") === "true" ? { kind: "skip", code: "needs_sign_in" } : { kind: "skip", code: "no_download" };
   }
+  if (answer.status === 200 && expect === "session" && LOGIN_MARKERS.test(text)) return { kind: "skip", code: "needs_sign_in" };
   if (answer.status !== 200) return { kind: "skip", code: "http_error" };
   if (expect === "page" || expect === "session") return { kind: "ok" };
   // A download that lands on a work's page has no file to take.
@@ -481,6 +482,8 @@ export type Pace = "reader" | "check";
 export const MAX_ATTEMPTS = 3;
 /** A save the browser has not finished is looked at again after this long. */
 export const SETTLE_RECHECK_MS = 2_000;
+/** A link from a page is used this long at most; after, the page is read again first. */
+export const LINK_MAX_AGE_MS = 5 * 60_000;
 /** A save still unfinished after this long has failed. */
 export const SETTLE_MAX_MS = 15 * 60_000;
 /** One work's page and file, 6 to 7 s apart: the pace assumed until the real one is measured. */
@@ -525,6 +528,8 @@ export interface QueueItem {
   pace: Pace;
   /** Known from a page the reader has open: the file is fetched straight away. */
   link?: DownloadLink;
+  /** When `link` was read. */
+  linkAt?: number;
   /** Queued by a backup: the browser's download alerts stay hidden for it. */
   batch?: true;
   /** Requests made for the step this work is on. */
@@ -814,7 +819,7 @@ export class KeepACopy {
       const work = this.#keep(state, page.workId, page);
       const link = page.downloads[state.settings.format];
       // A locked work's link is never taken: its own step reads its Chapter Index.
-      if (work.restricted) this.#enqueue(state, { workId: work.workId, pace: "reader" });
+      if (work.restricted) this.#enqueue(state, { workId: work.workId, pace: "reader" }, true);
       else if (link && (!work.copy || work.copy.updatedAt !== link.updatedAt || work.copy.format !== state.settings.format)) {
         this.#enqueue(state, { workId: work.workId, pace: "reader", link });
       }
@@ -825,7 +830,7 @@ export class KeepACopy {
   noteWork(workId: string, trigger: Trigger): Promise<void> {
     return this.#serial((state) => {
       if (!this.#keeps(state, workId, trigger)) return;
-      if (!this.#keep(state, workId).copy) this.#enqueue(state, { workId, pace: "reader" });
+      if (!this.#keep(state, workId).copy) this.#enqueue(state, { workId, pace: "reader" }, true);
     });
   }
 
@@ -888,20 +893,26 @@ export class KeepACopy {
     return work;
   }
 
-  #enqueue(state: KeepState, item: QueueItem): void {
+  /** `news`: the reader acted, or a list or the Library says the work changed (not a routine look). */
+  #enqueue(state: KeepState, item: QueueItem, news = false): void {
     if (item.link && state.works[item.workId]?.restricted) {
       // No link of a locked work is ever kept or used.
       const { link: _dropped, ...rest } = item;
       item = rest;
     }
+    if (item.link) item = { ...item, linkAt: this.ports.clock.now() };
     const queued = state.queue.find((each) => each.workId === item.workId);
     if (!queued) {
       state.queue.push(item);
       return;
     }
     // A newer link, or the reader's own pace, wins over what was queued.
-    if (item.link) queued.link = item.link;
-    else if (state.pending?.workId === item.workId) queued.again = true;
+    if (item.link) {
+      queued.link = item.link;
+      if (item.linkAt !== undefined) queued.linkAt = item.linkAt;
+    } else if (news && state.pending?.workId === item.workId) {
+      queued.again = true;
+    }
     if (item.pace === "reader") queued.pace = "reader";
     // On a backup's lists too: it counts, and waits, with the backup.
     if (item.batch) queued.batch = true;
@@ -1044,8 +1055,11 @@ export class KeepACopy {
       delete item.link;
       return this.#lockedStep(state, item, work);
     }
-    // A link for another format was queued before the setting changed: read the page.
-    if (item.link && readDownloadLink(item.link.url)?.format !== format) delete item.link;
+    // A link for another format was queued before the setting changed, or one read a while ago: read the page.
+    if (item.link && (readDownloadLink(item.link.url)?.format !== format || this.ports.clock.now() - (item.linkAt ?? 0) > LINK_MAX_AGE_MS)) {
+      delete item.link;
+      delete item.linkAt;
+    }
     if (!item.link) {
       const answer = await this.ports.fetchPage(`${AO3_ORIGIN}/works/${item.workId}?view_adult=true`, "omit");
       const verdict = classifyAnswer(answer, "page", this.ports.clock.now());
@@ -1064,6 +1078,7 @@ export class KeepACopy {
         return verdict;
       }
       item.link = link;
+      item.linkAt = this.ports.clock.now();
       item.attempts = 0;
       return verdict;
     }
@@ -1225,7 +1240,7 @@ export class KeepACopy {
         if (listed.restricted) known.restricted = true;
         if (!stale(known)) continue;
         known.complete = listed.complete;
-        this.#enqueue(state, { workId: listed.workId, pace: "check" });
+        this.#enqueue(state, { workId: listed.workId, pace: "check" }, true);
       }
     }
     if (run.purpose === "backup") {
