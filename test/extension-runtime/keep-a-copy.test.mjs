@@ -28,6 +28,7 @@ import {
   WORK_PACE_MS,
   SETTLE_MAX_MS,
   STOP_MAX_MS,
+  LOCKED_VERSION_BASE,
   lockedFileURL,
   lockedVersion,
   readChapterIndex,
@@ -814,6 +815,9 @@ test("a Chapter Index gives its work, title, chapters and latest date; the versi
   const later = readChapterIndex(chapterIndex("8", { chapters: [["81", "2026-10-01"], ["82", "2026-10-21"]] }));
   assert.equal(new Set([index, sameDay, later].map(lockedVersion)).size, 3);
   assert.equal(readChapterIndex(chapterIndex("8", { signedIn: false })).signedIn, false);
+  // Twelve digits, above any Download link's updated_at: a locked version is compared only with another.
+  assert.equal(lockedVersion(index).length, 12);
+  assert.ok(Number(lockedVersion({ chapters: 1, latestAt: 0 })) > 99_999_999_999);
   // Another work's chapter in the list, a chapter with no date, or no index at all.
   assert.equal(readChapterIndex(chapterIndex("8").replace("/works/8/chapters/101", "/works/9/chapters/101").replace("</ol>", '<li><a href="/works/8/chapters/102">2.</a> <span class="datetime">(2026-10-02)</span></li></ol>')), null);
   assert.equal(readChapterIndex(chapterIndex("8").replace(/<span class="datetime">[^<]*<\/span>/, "")), null);
@@ -824,7 +828,7 @@ test("a Chapter Index gives its work, title, chapters and latest date; the versi
 
 test("a locked work is copied from its Chapter Index read signed in, then its file, from a URL built only after that read", async () => {
   const chapters = [["81", "2026-10-01"], ["82", "2026-10-20"]];
-  const version = String(dayOf("2026-10-20") + 2);
+  const version = String(LOCKED_VERSION_BASE + dayOf("2026-10-20") + 2);
   const lockedFile = lockedFileURL("8", "Lanterns Locked", "epub", version);
   const answers = {
     [workURL("8")]: html(workURL("8"), workPage("8", { restricted: true })),
@@ -847,13 +851,13 @@ test("a locked work is copied from its Chapter Index read signed in, then its fi
   await box.drain();
   assert.equal(box.fileModes.length, 1);
   chapters.push(["83", "2026-10-20"]);
-  const newer = lockedFileURL("8", "Lanterns Locked", "epub", String(dayOf("2026-10-20") + 3));
+  const newer = lockedFileURL("8", "Lanterns Locked", "epub", String(LOCKED_VERSION_BASE + dayOf("2026-10-20") + 3));
   answers[navigateURL("8")] = html(navigateURL("8"), chapterIndex("8", { chapters, title: "Lanterns Locked" }));
   answers[newer] = file(newer, epub(3_000));
   await box.engine.notePage(readWorkPage(workPage("8", { restricted: true })), "visit");
   await box.drain();
   assert.deepEqual(box.fileModes.map(([url]) => url), [lockedFile, newer]);
-  assert.equal(box.stored.works["8"].copy.updatedAt, String(dayOf("2026-10-20") + 3));
+  assert.equal(box.stored.works["8"].copy.updatedAt, String(LOCKED_VERSION_BASE + dayOf("2026-10-20") + 3));
   assert.equal(box.modes.filter(([url]) => url === workURL("8")).length, 1);
 });
 
@@ -872,7 +876,7 @@ test("a locked work's Chapter Index on the sign-in page, or shown signed out, is
   assert.equal(box.stored.pacer.misses, 0);
   assert.equal(box.stored.pacer.stopped, null);
   // A page shows the reader signed out, then signed in again: copied on their own.
-  const lockedFile = lockedFileURL("8", "Invented work 8", "epub", String(dayOf("2026-10-01") + 1));
+  const lockedFile = lockedFileURL("8", "Invented work 8", "epub", String(LOCKED_VERSION_BASE + dayOf("2026-10-01") + 1));
   answers[navigateURL("8")] = html(navigateURL("8"), chapterIndex("8"));
   answers[lockedFile] = file(lockedFile, epub());
   await box.engine.noteUser(null);
@@ -921,6 +925,31 @@ test("a request with the reader's session follows no redirect: one request, and 
   // Not followed: a Chapter Index sent elsewhere wants a sign-in, a file sent elsewhere has none to take.
   assert.deepEqual(classifyAnswer({ kind: "redirect", url: navigateURL("5") }, "session", NOW), { kind: "skip", code: "needs_sign_in" });
   assert.deepEqual(classifyAnswer({ kind: "redirect", url: epubLink("5") }, "epub", NOW), { kind: "skip", code: "no_download" });
+});
+
+test("a backup reads a locked work's Chapter Index again only when its list's updated_at moves", async () => {
+  const lockedFile = lockedFileURL("8", "Invented work 8", "epub", lockedVersion({ chapters: 1, latestAt: dayOf("2026-10-01") }));
+  const answers = {
+    [listPageURL(USER, "later", 1)]: html(listPageURL(USER, "later", 1), listPage([])),
+    [listPageURL(USER, "subscriptions", 1)]: html(listPageURL(USER, "subscriptions", 1), ""),
+    [navigateURL("8")]: html(navigateURL("8"), chapterIndex("8")),
+    [lockedFile]: file(lockedFile, epub()),
+  };
+  const listing = (updatedAt) => {
+    answers[listPageURL(USER, "bookmarks", 1)] = html(listPageURL(USER, "bookmarks", 1), listPage([{ id: "8", restricted: true, updatedAt }]));
+  };
+  const box = harness(answers);
+  await box.engine.noteUser(USER);
+  const indexReads = async (updatedAt) => {
+    listing(updatedAt);
+    assert.equal(await box.engine.startBackup(), "started");
+    await box.drain();
+    return box.modes.filter(([url]) => url === navigateURL("8")).length;
+  };
+  assert.equal(await indexReads("1761700000"), 1);
+  assert.equal(await indexReads("1761700000"), 1, "unchanged on the list: not read again");
+  assert.equal(await indexReads("1761900000"), 2);
+  assert.equal(box.saved.length, 1);
 });
 
 test("a locked work's file sent elsewhere is not followed: no file, and nothing more is asked", async () => {

@@ -236,13 +236,18 @@ export function readChapterIndex(html: string): ChapterIndexRead | null {
   return { workId, title, author, chapters, latestAt, signedIn: pageSignedIn(head) };
 }
 
+/** Every locked version is at least this: twelve digits, above any `updated_at` of a Download link. */
+export const LOCKED_VERSION_BASE = 100_000_000_000;
+
 /**
  * A locked work's version, from its Chapter Index: its latest chapter's day
  * plus its chapter count, so it changes with every new chapter and every
- * later date. In the Download link's `updated_at` form.
+ * later date. Digits, as a Download link's `updated_at` is, but from
+ * LOCKED_VERSION_BASE up, so it is told apart from one and compared only
+ * with another locked version.
  */
 export function lockedVersion(index: Pick<ChapterIndexRead, "chapters" | "latestAt">): string {
-  return String(index.latestAt + index.chapters);
+  return String(LOCKED_VERSION_BASE + index.latestAt + index.chapters);
 }
 
 /** A locked work's download URL: the title's letters and digits (or the id) as its name, and the version. */
@@ -507,6 +512,8 @@ export interface KeptWork {
   complete: boolean;
   /** Archive users only, once seen so (never unset): copied only by `#lockedStep`, its link never kept. */
   restricted: boolean;
+  /** A locked work's `updated_at` on the reader's list when last looked at: its copy's version is its Chapter Index's. */
+  listed?: string;
   copy: Copy | null;
   /** Older, longer files left as they were when a much shorter version came. */
   setAside: string[];
@@ -1203,14 +1210,21 @@ export class KeepACopy {
     const read = readListPage(answer.text ?? "", list);
     for (const listed of read.works) {
       const known = state.works[listed.workId];
-      const stale = (work: KeptWork) => !work.copy || (listed.updatedAt !== null && listed.updatedAt !== work.copy.updatedAt);
+      const stale = (work: KeptWork) => {
+        if (!work.restricted) return !work.copy || (listed.updatedAt !== null && listed.updatedAt !== work.copy.updatedAt);
+        // A locked copy's version is not the list's: the list's own `updated_at` is compared with the one last seen.
+        const moved = listed.updatedAt !== null && listed.updatedAt !== work.listed;
+        if (listed.updatedAt !== null) work.listed = listed.updatedAt;
+        return !work.copy || moved;
+      };
       if (run.purpose === "backup") {
         // Subscriptions show no chapter count, so they leave `complete` as it was.
         const work = this.#keep(state, listed.workId, list === "subscriptions" ? {} : { complete: listed.complete, restricted: listed.restricted });
         if (stale(work)) this.#enqueue(state, { workId: listed.workId, pace: "reader", batch: true });
-      } else if (known?.copy && !listed.complete && stale(known)) {
-        known.complete = listed.complete;
+      } else if (known?.copy && !listed.complete) {
         if (listed.restricted) known.restricted = true;
+        if (!stale(known)) continue;
+        known.complete = listed.complete;
         this.#enqueue(state, { workId: listed.workId, pace: "check" });
       }
     }
