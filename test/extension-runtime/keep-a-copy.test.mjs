@@ -904,6 +904,34 @@ test("a Chapter Index of another work, or any other page, fetches no file; a loc
   assert.deepEqual(box.modes.filter(([url]) => url.includes("/works/")), [[navigateURL("8"), "include"], [navigateURL("7"), "include"]]);
 });
 
+test("a request with the reader's session follows no redirect: one request, and nothing asked of where it went", async (t) => {
+  const realFetch = globalThis.fetch;
+  const asked = [];
+  // A redirect to the work's page, as the browser hands back one it does not follow.
+  globalThis.fetch = async (url, init) => {
+    asked.push([String(url), init?.credentials, init?.redirect]);
+    if (init?.redirect === "manual") return { type: "opaqueredirect", status: 0, url: String(url), headers: new Headers(), body: null };
+    return new Response(workPage("5"), { headers: { "content-type": "text/html" } });
+  };
+  t.after(() => { globalThis.fetch = realFetch; });
+  assert.deepEqual(await requestAO3(navigateURL("5"), "text", 5_000, 1_000_000, "include"), { kind: "redirect", url: navigateURL("5") });
+  assert.deepEqual(await requestAO3(epubLink("5"), "file", 5_000, 1_000_000, "include"), { kind: "redirect", url: epubLink("5") });
+  assert.equal((await requestAO3(workURL("5"), "text", 5_000, 1_000_000)).kind, "response");
+  assert.deepEqual(asked, [[navigateURL("5"), "include", "manual"], [epubLink("5"), "include", "manual"], [workURL("5"), "omit", "follow"]]);
+  // Not followed: a Chapter Index sent elsewhere wants a sign-in, a file sent elsewhere has none to take.
+  assert.deepEqual(classifyAnswer({ kind: "redirect", url: navigateURL("5") }, "session", NOW), { kind: "skip", code: "needs_sign_in" });
+  assert.deepEqual(classifyAnswer({ kind: "redirect", url: epubLink("5") }, "epub", NOW), { kind: "skip", code: "no_download" });
+});
+
+test("a locked work's file sent elsewhere is not followed: no file, and nothing more is asked", async () => {
+  const lockedFile = lockedFileURL("8", "Invented work 8", "epub", lockedVersion({ chapters: 1, latestAt: dayOf("2026-10-01") }));
+  const box = harness({ [navigateURL("8")]: html(navigateURL("8"), chapterIndex("8")), [lockedFile]: { kind: "redirect", url: lockedFile } });
+  await box.engine.notePage(readWorkPage(workPage("8", { restricted: true })), "bookmark");
+  await box.drain();
+  assert.deepEqual(box.requests, [navigateURL("8"), lockedFile]);
+  assert.deepEqual((await box.engine.view()).skipped, { no_download: 1 });
+});
+
 test("the background asks AO3 for works and files signed out, and for the reader's lists with their session", async (t) => {
   // The background's own timers never fire here, so nothing is asked after the test.
   t.mock.timers.enable({ apis: ["setTimeout"] });

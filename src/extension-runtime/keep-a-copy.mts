@@ -331,6 +331,11 @@ export type Fetched =
       readonly size?: number;
       readonly handle?: string;
     }
+  /**
+   * A request with the reader's session follows no redirect: it was sent
+   * somewhere else, and nothing more is asked (the browser keeps where).
+   */
+  | { readonly kind: "redirect"; readonly url: string }
   /** `busy`: another file is still being fetched (Chrome's offscreen document takes one at a time). */
   | { readonly kind: "failed"; readonly code: "network" | "timeout" | "too_large" | "busy" };
 
@@ -376,6 +381,8 @@ export function looksLikeFormat(format: CopyFormat, bytes: Uint8Array): boolean 
  * Chapter Index).
  */
 export function classifyAnswer(answer: Fetched, expect: CopyFormat | "page" | "session", now: number): Verdict {
+  // Not followed: a page read with the reader's session wants a sign-in; a file has none to take.
+  if (answer.kind === "redirect") return expect === "session" ? { kind: "skip", code: "needs_sign_in" } : { kind: "skip", code: "no_download" };
   if (answer.kind === "failed") {
     if (answer.code === "too_large") return { kind: "skip", code: "too_large" };
     return answer.code === "busy" ? { kind: "retry", waitMs: NETWORK_RETRY_MS, own: true } : { kind: "retry", waitMs: NETWORK_RETRY_MS, network: true, own: true };
