@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
 
-import { COPY_FOLDER, AO3_ORIGIN, lockedFileURL } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
+import { COPY_FOLDER, AO3_ORIGIN, lockedFileURL, lockedVersion } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
 import {
   KEEP_COPY_NATIVE,
   MAX_QUEUE_WORKS,
@@ -48,8 +48,10 @@ const fileURL = (id, updatedAt = "1761700000") => `${AO3_ORIGIN}/downloads/${id}
 const sha = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
 
 const navigateURL = (id) => `${AO3_ORIGIN}/works/${id}/navigate`;
-/** A route answered with AO3's sign-in page. */
+/** A route answered with the sign-in page. */
 const LOGIN = Symbol("login");
+/** A route that sends the request to the work's page: followed only by a request that may follow it. */
+const REDIRECT = Symbol("redirect");
 
 /** A work's Chapter Index: `chapters` as [chapter id, YYYY-MM-DD]. */
 function chapterIndex(id, { chapters = [["101", "2026-10-01"]], signedIn = true } = {}) {
@@ -73,6 +75,10 @@ function ao3(routes) {
     assert.ok(init.credentials !== "include" || !/\/works\/[0-9]+(?:[?#]|$|\/chapters\/)/.test(String(url)), `${url} read signed in`);
     const body = routes[String(url)];
     if (body === undefined) return new Response("<h2>Error 404</h2>", { status: 404, headers: { "content-type": "text/html" } });
+    if (body === REDIRECT) {
+      if (init.redirect === "manual") return { type: "opaqueredirect", status: 0, url: String(url), headers: new Headers(), body: null };
+      return fetchImpl(String(url).replace(/\/(?:navigate|chapters\/.*)$|\/downloads\/([0-9]+)\/.*$/, "").replace(/\/downloads\/([0-9]+)$/, "/works/$1"), init);
+    }
     if (body === LOGIN || (typeof body === "string" && init.credentials !== "include" && body.includes('alt="(Restricted)"'))) {
       const login = new Response('<body class="logged-out"><form action="/users/login" method="post"></form></body>', { status: 200, headers: { "content-type": "text/html" } });
       Object.defineProperty(login, "url", { value: `${AO3_ORIGIN}/users/login?restricted=true` });
@@ -287,7 +293,7 @@ test("a file the tab lost, or a transfer the app refuses, is aborted and the old
 
 test("a locked work is copied from its Chapter Index in the tab, signed in, then its file, and handed over", async () => {
   const file = epub(2_000);
-  const version = String(Date.parse("2026-10-20T00:00:00Z") / 1_000 + 2);
+  const version = lockedVersion({ latestAt: Date.parse("2026-10-20T00:00:00Z") / 1_000, chapters: 2 });
   const lockedFile = lockedFileURL("51", "Invented work 51", "epub", version);
   const site = ao3({
     [workURL("51")]: workPage("51", { restricted: true }),
@@ -305,19 +311,23 @@ test("a locked work is copied from its Chapter Index in the tab, signed in, then
   assert.equal(app.saved[0].bytes.equals(Buffer.from(file)), true);
 });
 
-test("a locked work's Chapter Index on the sign-in page, or of another work, fetches no file", async () => {
+test("a locked work's Chapter Index on the sign-in page, sent elsewhere, or of another work, fetches no file", async () => {
   const site = ao3({
     [workURL("52")]: workPage("52", { restricted: true }),
     [navigateURL("52")]: LOGIN,
     [workURL("53")]: workPage("53", { restricted: true }),
     [navigateURL("53")]: chapterIndex("54"),
+    [workURL("55")]: workPage("55", { restricted: true }),
+    [navigateURL("55")]: REDIRECT,
   });
-  const app = fakeApp({ works: [{ workId: "52", reason: "locked" }, { workId: "53", reason: "locked" }] });
+  const app = fakeApp({ works: [{ workId: "52", reason: "locked" }, { workId: "53", reason: "locked" }, { workId: "55", reason: "locked" }] });
   const box = harness({ app, site });
   await box.handoff.askQueue(true);
   await box.drain();
   assert.equal(site.requests.some((url) => url.includes("/downloads/")), false);
-  assert.deepEqual(app.skipped.map(({ workId, code }) => [workId, code]).sort(), [["52", "needs_sign_in"], ["53", "no_download"]]);
+  assert.deepEqual(app.skipped.map(({ workId, code }) => [workId, code]).sort(), [["52", "needs_sign_in"], ["53", "no_download"], ["55", "needs_sign_in"]]);
+  // The index sent elsewhere is not followed: one request for it.
+  assert.equal(site.requests.filter((url) => url.startsWith(`${AO3_ORIGIN}/works/55`)).length, 2);
   assert.equal(app.messages.some((message) => message.type === KEEP_COPY_NATIVE.begin), false);
   assert.equal((await box.handoff.engine.view()).stopped, null);
 });

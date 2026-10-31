@@ -3,7 +3,7 @@
  * function here is put into that tab by `scripting.executeScript`, so it runs
  * there and must use nothing from outside itself. A request is made signed
  * out (`credentials: "omit"`) unless it is a locked work's Chapter Index or
- * file (keep-a-copy.mts, `#lockedStep`).
+ * file (keep-a-copy.mts, `#lockedStep`), and then it follows no redirect.
  *
  * A file is kept in the tab as a Blob, never as text, until the background
  * has handed it to the Trace app a part at a time (keep-a-copy-native.mts).
@@ -26,6 +26,8 @@ export type TabAnswer =
       /** The whole file's SHA-256, lowercase hex. */
       readonly sha256?: string;
     }
+  /** A request with the tab's sign-in that was sent elsewhere: not followed. */
+  | { readonly kind: "redirect"; readonly url: string }
   | { readonly kind: "failed"; readonly code: "network" | "timeout" | "too_large" | "busy" };
 
 /**
@@ -117,7 +119,10 @@ export async function keepCopyFetchInTab(url: string, as: "text" | "file", timeo
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { credentials: credentials === "include" ? "include" : "omit", redirect: "follow", signal: controller.signal });
+    // With the tab's sign-in, no redirect is followed, so it never reaches another page signed in.
+    const signedIn = credentials === "include";
+    const response = await fetch(url, { credentials: signedIn ? "include" : "omit", redirect: signedIn ? "manual" : "follow", signal: controller.signal });
+    if (response.type === "opaqueredirect") return { kind: "redirect", url };
     const declared = Number(response.headers.get("content-length"));
     if (Number.isFinite(declared) && declared > limit) return { kind: "failed", code: "too_large" };
     const facts = {
