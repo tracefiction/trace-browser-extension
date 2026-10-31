@@ -166,7 +166,6 @@ const samePlace = (a: ReaderTab, b: ReaderTab) => a.id === b.id && a.windowId ==
 export interface TabPort {
   /** The reader's AO3 tab, the one they are on, or null when they are not on AO3. */
   find(): Promise<ReaderTab | null>;
-  /** Runs `func` in the tab and gives back its result, or null. */
   /**
    * Runs `func` in the tab and gives back its result: null when it ran (so
    * may have sent its request) but gave nothing back; undefined when it
@@ -523,26 +522,45 @@ const call = <T,>(target: Record<string, unknown>, method: string, args: readonl
  * reader is on an AO3 page: the tab they are on is the one asked, and no
  * other tab is looked up.
  */
+/** How long the trivial script that goes in first is waited on. */
+const PROBE_TIMEOUT_MS = 5_000;
+
+/**
+ * TabPort.run over `scripting.executeScript`. A trivial script goes into the
+ * tab first: refused (or not run in time), nothing was sent, and the answer
+ * is undefined. Once it ran, any failure of the real one (refused, running
+ * past its time, or no result) may come after its request was sent: null.
+ */
+export function tabRunner(scripting: NativeKeepEnvironment["scripting"]): TabPort["run"] {
+  const within = async <R,>(work: Promise<R>, ms: number): Promise<R | "late"> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([work, new Promise<"late">((resolve) => { timer = setTimeout(() => resolve("late"), ms); })]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  return async function run<T>(tabId: number, func: (...args: never[]) => unknown, args: readonly unknown[], timeoutMs: number): Promise<T | null | undefined> {
+    const target = { tabId, frameIds: [0] };
+    try {
+      if ((await within(scripting.executeScript({ target, func: () => true, args: [] }), PROBE_TIMEOUT_MS)) === "late") return undefined;
+    } catch {
+      return undefined;
+    }
+    try {
+      const results = await within(scripting.executeScript({ target, func, args }), timeoutMs);
+      const first: unknown = Array.isArray(results) ? results[0] : undefined;
+      return isRecord(first) && "result" in first ? (first.result ?? null) as T | null : null;
+    } catch {
+      return null;
+    }
+  };
+}
+
 export function installNativeKeepACopy(env: NativeKeepEnvironment): NativeCopyHandoff {
   const tabs: TabPort = {
     find: async () => readerTab(await call<SafariTab[]>(env.tabs, "query", [{ active: true, currentWindow: true }]).catch(() => [])),
-    async run<T>(tabId: number, func: (...args: never[]) => unknown, args: readonly unknown[], timeoutMs: number): Promise<T | null | undefined> {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        const results = await Promise.race([
-          env.scripting.executeScript({ target: { tabId, frameIds: [0] }, func, args }),
-          // Running past its time: it may have sent its request.
-          new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); }),
-        ]);
-        const first: unknown = Array.isArray(results) ? results[0] : undefined;
-        return isRecord(first) && "result" in first ? first.result as T : null;
-      } catch {
-        // Refused: the script was never put into the tab.
-        return undefined;
-      } finally {
-        clearTimeout(timer);
-      }
-    },
+    run: tabRunner(env.scripting),
   };
   const handoff = new NativeCopyHandoff({
     native: { send: (message) => env.sendNative(message, NATIVE_TIMEOUT_MS) },
