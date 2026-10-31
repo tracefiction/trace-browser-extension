@@ -97,6 +97,22 @@ export function offscreenKeeper(api: OffscreenApi) {
   };
 }
 
+/**
+ * Whether a page's message was handled already: a page sends what it could
+ * not get answered again (keep-a-copy-page.mts), and the background may
+ * have handled it all the same. Each message's id is remembered a while.
+ */
+export function repeatedMessage(max = 100): (id: unknown) => boolean {
+  const seen: string[] = [];
+  return (id) => {
+    if (typeof id !== "string" || id.length === 0 || id.length > 64) return false;
+    if (seen.includes(id)) return true;
+    seen.push(id);
+    if (seen.length > max) seen.shift();
+    return false;
+  };
+}
+
 const normalPath = (path: string) => path.replace(/\\/g, "/");
 
 /** Whether a download is this extension's own, still at the name recorded for it. */
@@ -220,6 +236,7 @@ export function installKeepACopy(extension: Extension): KeepACopy {
     quiet: (on) => setUi(!on),
   });
 
+  const repeated = repeatedMessage();
   let running = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   const run = async () => {
@@ -250,14 +267,17 @@ export function installKeepACopy(extension: Extension): KeepACopy {
     const { type } = message as { type?: unknown };
     const handle = async (): Promise<unknown> => {
       if (type === KEEP_A_COPY_MESSAGE.page) {
-        const { trigger, user, html, workId } = message as { trigger?: unknown; user?: unknown; html?: unknown; workId?: unknown };
+        const { trigger, user, html, workId, id } = message as { trigger?: unknown; user?: unknown; html?: unknown; workId?: unknown; id?: unknown };
         const from = sender.url ? new URL(sender.url) : null;
         if (from?.protocol !== "https:" || from.hostname !== "archiveofourown.org" || !TRIGGERS.includes(trigger as Trigger)) return null;
         // Null only when the page shows the reader signed out; absent when it does not say.
         if (typeof user === "string" || user === null) await engine.noteUser(user);
         const page = typeof html === "string" ? readWorkPage(html) : null;
-        if (page && (typeof workId !== "string" || page.workId === workId)) await engine.notePage(page, trigger as Trigger | "visit");
-        else if (!page && typeof workId === "string" && trigger !== "visit") await engine.noteWork(workId, trigger as Trigger);
+        // Sent again but handled already: a work just skipped is not read again.
+        if (!repeated(id)) {
+          if (page && (typeof workId !== "string" || page.workId === workId)) await engine.notePage(page, trigger as Trigger | "visit");
+          else if (!page && typeof workId === "string" && trigger !== "visit") await engine.noteWork(workId, trigger as Trigger);
+        }
       } else if (type === KEEP_A_COPY_MESSAGE.settings) {
         await engine.updateSettings((message as { patch?: Partial<Settings> }).patch ?? {});
       } else if (type === KEEP_A_COPY_MESSAGE.backup) {

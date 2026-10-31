@@ -9,7 +9,8 @@
  *
  * A bookmark or Mark for Later navigates at once, and a stopped service worker
  * takes a moment to start: the message can go with the page. So what the reader
- * did is kept in the tab until it is answered, and the next page sends it again.
+ * did is kept in the tab until it is answered, and the next page sends it again,
+ * with the same id, so the background handles it once.
  */
 
 import { KEEP_A_COPY_MESSAGE, formTriggerFor } from "./keep-a-copy.mjs";
@@ -43,7 +44,8 @@ function workParts(): string {
     .join("\n");
 }
 
-type Unanswered = { readonly type: string; readonly trigger: PageTrigger; readonly html: string; readonly workId?: string };
+/** `id`: the same when sent again, so the background handles it once. */
+type Unanswered = { readonly type: string; readonly trigger: PageTrigger; readonly html: string; readonly workId?: string; readonly id?: string };
 const UNANSWERED_KEY = "keepACopyUnanswered";
 
 /** Sends what the reader did, keeping it in `storage` until it is answered. A repeat changes nothing in the queue. */
@@ -96,7 +98,7 @@ function tell(trigger: PageTrigger, formWork?: string): void {
   const message = { type: KEEP_A_COPY_MESSAGE.page, trigger, html: workParts(), ...(workId ? { workId } : {}) };
   // Who is signed in goes only with this page's own message.
   const user = { user: signedInUser(document) };
-  if (trigger !== "visit") sender?.send(message, user);
+  if (trigger !== "visit") sender?.send({ ...message, id: crypto.randomUUID() }, user);
   else void runtime?.sendMessage({ ...message, ...user }).catch(() => undefined);
 }
 

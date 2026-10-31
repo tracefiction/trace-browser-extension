@@ -33,7 +33,7 @@ import {
 } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
 import { CLAIM_MS, fromOffscreenAnswer, offscreenFetcher, requestAO3, toOffscreenAnswer } from "../../.trace-build/extension-runtime/keep-a-copy-fetch.mjs";
 import { reliableSender, signedInUser, watchForms } from "../../.trace-build/extension-runtime/keep-a-copy-page.mjs";
-import { downloadPorts, installKeepACopy, isOurFile, offscreenKeeper, ownDownload } from "../../.trace-build/extension-runtime/keep-a-copy-runtime.mjs";
+import { downloadPorts, installKeepACopy, isOurFile, offscreenKeeper, ownDownload, repeatedMessage } from "../../.trace-build/extension-runtime/keep-a-copy-runtime.mjs";
 import { ICON_SIZES, NAME, keepACopyManifest, writeIcons } from "../../scripts/build-keep-a-copy.mjs";
 
 // Invented works and people throughout, in the markup of AO3's pages, not a capture.
@@ -1427,6 +1427,41 @@ test("the same page again while a copy is saving asks for nothing more", async (
   await box.drain();
   assert.deepEqual(box.requests, [epubLink("1", "1")]);
   assert.equal(box.stored.queue.length, 0);
+});
+
+test("a page's message sent again is handled once: a work just skipped is not read again", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const realFetch = globalThis.fetch;
+  const asked = [];
+  // A page with no Download menu: the work is skipped, a miss.
+  globalThis.fetch = async (url) => {
+    asked.push(String(url));
+    return new Response(workPage("5").replace(/<li class="download">[\s\S]*?<\/ul>\n    <\/li>/, ""), { headers: { "content-type": "text/html" } });
+  };
+  t.after(() => { globalThis.fetch = realFetch; });
+  let onMessage;
+  const listener = () => ({ addListener() {} });
+  const stored = {};
+  const engine = installKeepACopy({
+    runtime: { id: "keep", sendMessage: async () => null, onConnect: listener(), onMessage: { addListener: (heard) => { onMessage = heard; } } },
+    storage: { local: { get: async (key) => structuredClone({ [key]: stored[key] }), set: async (items) => { Object.assign(stored, structuredClone(items)); } } },
+    alarms: { create() {}, get: async () => ({ name: "keep-a-copy" }), onAlarm: listener() },
+    downloads: { download: async () => 1, search: async () => [], removeFile: async () => undefined, cancel: async () => undefined, erase: async () => [], onChanged: { addListener() {}, removeListener() {} } },
+  });
+  const send = (message) => new Promise((respond) => onMessage(message, { id: "keep", url: `${AO3_ORIGIN}/works/5/bookmarks` }, respond));
+  const bookmark = { type: "KEEP_A_COPY_PAGE", trigger: "bookmark", html: "", workId: "5", id: "0b9f1c52-5a1e-4f37-9d55-41c4b0a7e8d2" };
+  await send(bookmark);
+  await engine.tick();
+  assert.deepEqual(asked, [workURL("5")]);
+  assert.equal(stored.keepACopyV1.works["5"].skipped, "no_download");
+  await send(bookmark);
+  await engine.tick();
+  assert.deepEqual(asked, [workURL("5")]);
+  assert.equal((await engine.view()).waiting, 0);
+  assert.equal(stored.keepACopyV1.pacer.misses, 1);
+
+  const repeated = repeatedMessage(2);
+  assert.deepEqual(["a", "a", "b", "c", "a", undefined, undefined].map(repeated), [false, true, false, false, false, false, false]);
 });
 
 test("a work asked for again, with no link, while its copy is saving is looked at once more", async () => {
