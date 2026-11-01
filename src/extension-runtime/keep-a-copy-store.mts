@@ -83,6 +83,14 @@ export class IndexedDbKeepStore {
     return withDevicePacer({ ...(core as object), works: byId }, pacer);
   }
 
+  /** One account's small record under the device's pacer, with none of its works read. */
+  async readCore(scope: string): Promise<unknown> {
+    const db = await this.#open();
+    const tx = db.transaction([CORES, META], "readonly");
+    const [core, pacer] = await Promise.all([request(tx.objectStore(CORES).get(scope)), request(tx.objectStore(META).get(PACER_KEY))]);
+    return withDevicePacer(core && typeof core === "object" ? { ...(core as object), works: {} } : undefined, pacer);
+  }
+
   /** Writes the state's small record, the device's pacer, and only the works in `changed`. */
   async write(state: KeepState, changed: ReadonlySet<string>, scope: string): Promise<void> {
     const db = await this.#open();
@@ -97,6 +105,13 @@ export class IndexedDbKeepStore {
       else store.delete([scope, workId]);
     }
     await done(tx);
+  }
+
+  /** The accounts with works kept here. */
+  async scopes(): Promise<string[]> {
+    const db = await this.#open();
+    const keys = await request(db.transaction(CORES, "readonly").objectStore(CORES).getAllKeys());
+    return keys.filter((key): key is string => typeof key === "string");
   }
 
   async getMeta(key: string): Promise<unknown> {

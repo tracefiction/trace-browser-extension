@@ -448,7 +448,9 @@ function copiesHarness({ pref = false, overlay = null } = {}) {
       updateSettings: async (patch) => { calls.settings.push(patch); },
       syncLibrary: async (list) => { calls.syncs.push(list); return { added: 0, released: 0 }; },
       useScope: async (scope) => { calls.scopes.push(scope); },
+      switchOff: async () => undefined,
     },
+    scopes: async () => [],
     wake: () => { calls.wakes += 1; },
     library: async (refresh) => { calls.reads.push(refresh); return library; },
     readPref: async () => pref,
@@ -485,6 +487,205 @@ test("a Library that cannot be read lets nothing go; an account that leaves take
   await copies.accountLeft();
   assert.equal(calls.syncs.length, 1, "leaving released works");
   assert.deepEqual(calls.scopes.at(-1), null);
+});
+
+/** A Trace background over `stored`, its accounts' works kept in a map, with the Library's account and its read held as asked. */
+function traceBackground(stored, { pref = true } = {}) {
+  const engine = new KeepACopy({
+    clock: { now: () => NOW }, random: () => 0,
+    read: async (scope) => structuredClone(stored.get(scope)),
+    write: async (state, _changed, scope) => { stored.set(scope, structuredClone(state)); },
+    fetchPage: async () => ({ kind: "failed", code: "network" }), fetchFile: async () => ({ kind: "failed", code: "network" }),
+    save: async () => 1, settle: async () => ({ state: "complete", filename: "x" }), remove: async () => undefined,
+  }, LIBRARY_DEFAULTS, null);
+  const ctl = { account: "account-1", pref, gate: null, reached: null, prefGate: null };
+  /** Holds the next Library read until `release()`; `reached` settles once it has begun. */
+  ctl.hold = () => {
+    let release;
+    ctl.gate = new Promise((resolve) => { release = resolve; });
+    ctl.reached = new Promise((resolve) => { ctl.reach = resolve; });
+    return () => { ctl.gate = null; release(); };
+  };
+  const copies = new TraceLibraryCopies({
+    engine, wake() {}, alarm() {},
+    scopes: async () => [...stored.keys()],
+    readPref: async () => { const value = ctl.pref; await ctl.prefGate; return value; },
+    library: async () => {
+      const account = ctl.account;
+      ctl.reach?.();
+      await ctl.gate;
+      return account === null ? null : { accountId: account, overlay: { entries: {} }, libraryCount: 0 };
+    },
+  });
+  return { engine, copies, ctl };
+}
+
+const keptIn = (stored, scope) => ({ enabled: stored.get(scope)?.settings.enabled, user: stored.get(scope)?.user });
+const OFF = { enabled: false, user: null };
+
+test("switched off, every account's works kept here are switched off: not even an AO3 name stays", async () => {
+  const stored = new Map();
+  // One account in use, then another: the first's works are no longer in use.
+  const { engine, copies, ctl } = traceBackground(stored);
+  await copies.start();
+  await engine.noteUser("Synthetic_Reader");
+  ctl.account = "account-2";
+  await copies.sync(true);
+  await engine.noteUser("Other_Reader");
+  assert.deepEqual(keptIn(stored, "account-1"), { enabled: true, user: "Synthetic_Reader" });
+  await copies.prefChanged(false);
+  assert.deepEqual(keptIn(stored, "account-1"), OFF);
+  assert.deepEqual(keptIn(stored, "account-2"), OFF);
+
+  // A new background, its Library read for the second account still under way when the switch goes off.
+  await copies.prefChanged(true);
+  await engine.noteUser("Other_Reader");
+  ctl.account = "account-1";
+  await copies.sync(true);
+  await engine.noteUser("Synthetic_Reader");
+  const fresh = traceBackground(stored);
+  fresh.ctl.account = "account-2";
+  const release = fresh.ctl.hold();
+  const starting = fresh.copies.start();
+  await fresh.ctl.reached;
+  const off = fresh.copies.prefChanged(false);
+  release();
+  await Promise.all([starting, off]);
+  assert.deepEqual(keptIn(stored, "account-1"), OFF);
+  assert.deepEqual(keptIn(stored, "account-2"), OFF);
+
+  // A background starting with the switch off reaches them too, as after a browser restart.
+  await fresh.copies.prefChanged(true);
+  await fresh.engine.noteUser("Other_Reader");
+  await fresh.copies.accountLeft();
+  const restarted = traceBackground(stored, { pref: false });
+  await restarted.copies.start();
+  assert.deepEqual(keptIn(stored, "account-2"), OFF);
+  assert.equal(await restarted.engine.enabled(), false);
+});
+
+test("switching off an account not in use reads and writes only its small record: its works stay as stored", async () => {
+  const store = new IndexedDbKeepStore(new IDBFactory(), IDBKeyRange);
+  const other = harness({ [workURL("91")]: html(workURL("91"), workPage("91")), [fileURL("91")]: file(fileURL("91"), epub()) }, { store, scope: "account-2" });
+  await other.engine.updateSettings({ enabled: true });
+  await other.engine.noteUser("Other_Reader");
+  await other.engine.syncLibrary({ keep: [{ workId: "91", chapters: null }], drop: [], whole: true });
+  await other.drain();
+  const before = (await store.read("account-2")).works;
+  assert.ok(before["91"]);
+  const reads = [];
+  const engine = new KeepACopy({
+    clock: { now: () => NOW }, random: () => 0,
+    read: async (scope) => { reads.push(`whole ${scope}`); return store.read(scope); },
+    readCore: async (scope) => { reads.push(`small ${scope}`); return store.readCore(scope); },
+    write: (state, changed, scope) => store.write(state, changed, scope),
+    fetchPage: async () => ({ kind: "failed", code: "network" }), fetchFile: async () => ({ kind: "failed", code: "network" }),
+    save: async () => 1, settle: async () => ({ state: "complete", filename: "x" }), remove: async () => undefined,
+  }, LIBRARY_DEFAULTS, "account-1");
+  await engine.switchOff("account-2");
+  // Already off: read, and not written again.
+  await engine.switchOff("account-2");
+  assert.deepEqual(reads, ["small account-2", "small account-2"], "no work read");
+  const after = await store.read("account-2");
+  assert.deepEqual({ enabled: after.settings.enabled, user: after.user }, OFF);
+  assert.deepEqual(after.works, before, "the works stay as stored");
+});
+
+test("a switch that cannot be read leaves every account's works as they are, and nothing runs", async () => {
+  const stored = new Map();
+  const first = traceBackground(stored);
+  await first.copies.start();
+  await first.engine.noteUser("Synthetic_Reader");
+  const { engine, copies, ctl } = traceBackground(stored);
+  ctl.prefGate = Promise.reject(new Error("storage unreadable"));
+  ctl.prefGate.catch(() => undefined);
+  await copies.start();
+  assert.deepEqual(keptIn(stored, "account-1"), { enabled: true, user: "Synthetic_Reader" });
+  assert.equal(await engine.enabled(), false);
+});
+
+test("an account that cannot be switched off does not keep the others on", async () => {
+  const stored = new Map();
+  const { engine, copies, ctl } = traceBackground(stored);
+  await copies.start();
+  await engine.noteUser("Synthetic_Reader");
+  ctl.account = "account-2";
+  await copies.sync(true);
+  await engine.noteUser("Other_Reader");
+  ctl.account = "account-3";
+  await copies.sync(true);
+  const switchOff = engine.switchOff.bind(engine);
+  engine.switchOff = (scope) => (scope === "account-1" ? Promise.reject(new Error("unreadable")) : switchOff(scope));
+  await copies.prefChanged(false);
+  assert.deepEqual(keptIn(stored, "account-2"), OFF);
+  assert.deepEqual(keptIn(stored, "account-1"), { enabled: true, user: "Synthetic_Reader" });
+});
+
+test("an off goes on when the works in use cannot be written: the other accounts go off, and the alarm stops", async () => {
+  const stored = new Map();
+  let failFor = null;
+  const engine = new KeepACopy({
+    clock: { now: () => NOW }, random: () => 0,
+    read: async (scope) => structuredClone(stored.get(scope)),
+    write: async (state, _changed, scope) => {
+      if (scope === failFor) throw new Error("write failed");
+      stored.set(scope, structuredClone(state));
+    },
+    fetchPage: async () => ({ kind: "failed", code: "network" }), fetchFile: async () => ({ kind: "failed", code: "network" }),
+    save: async () => 1, settle: async () => ({ state: "complete", filename: "x" }), remove: async () => undefined,
+  }, LIBRARY_DEFAULTS, null);
+  let account = "account-1";
+  const alarms = [];
+  const copies = new TraceLibraryCopies({
+    engine, wake() {}, alarm: (on) => alarms.push(on),
+    scopes: async () => [...stored.keys()],
+    readPref: async () => true,
+    library: async () => ({ accountId: account, overlay: { entries: {} }, libraryCount: 0 }),
+  });
+  await copies.start();
+  await engine.noteUser("Synthetic_Reader");
+  account = "account-2";
+  await copies.sync(true);
+  await engine.noteUser("Other_Reader");
+  // The works in use cannot be written.
+  failFor = "account-2";
+  await copies.prefChanged(false);
+  assert.deepEqual(keptIn(stored, "account-1"), OFF);
+  assert.equal(alarms.at(-1), false, "the alarm stops");
+  assert.equal(await engine.enabled(), false);
+});
+
+test("off, then at once on again, with the Trace account gone: no AO3 name is kept, and the account back is on", async () => {
+  const stored = new Map();
+  const { engine, copies, ctl } = traceBackground(stored);
+  await copies.start();
+  await engine.noteUser("Synthetic_Reader");
+  await copies.accountLeft();
+  ctl.account = null;
+  await Promise.all([copies.prefChanged(false), copies.prefChanged(true)]);
+  assert.deepEqual(keptIn(stored, "account-1"), OFF);
+  assert.equal(await engine.enabled(), false, "no account's works in use");
+  ctl.account = "account-1";
+  await copies.sync(true);
+  assert.deepEqual(keptIn(stored, "account-1"), { enabled: true, user: null });
+  assert.equal(await engine.enabled(), true);
+});
+
+test("a background's first read of the switch, landing after the reader changed it, is not used", async () => {
+  const stored = new Map();
+  const first = traceBackground(stored);
+  await first.copies.start();
+  await first.engine.noteUser("Synthetic_Reader");
+  const { engine, copies, ctl } = traceBackground(stored);
+  let release;
+  ctl.prefGate = new Promise((resolve) => { release = resolve; });
+  // The read sees the switch on; before it lands, the reader turns it off.
+  const starting = copies.start();
+  await copies.prefChanged(false);
+  release();
+  await starting;
+  assert.equal(await engine.enabled(), false);
+  assert.deepEqual(keptIn(stored, "account-1"), OFF);
 });
 
 function fakeExtension() {

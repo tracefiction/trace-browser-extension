@@ -96,7 +96,9 @@ export function libraryList(overlay: AccountOverlay, libraryCount: number | null
 }
 
 export interface LibraryCopiesDeps {
-  readonly engine: Pick<KeepACopy, "updateSettings" | "syncLibrary" | "useScope">;
+  readonly engine: Pick<KeepACopy, "updateSettings" | "syncLibrary" | "useScope" | "switchOff">;
+  /** The accounts with works kept here. */
+  scopes(): Promise<readonly string[]>;
   /** Looks at the queue now. */
   wake(): void;
   /** The Library of the account connected now; null when none is, or it cannot be read. */
@@ -110,41 +112,54 @@ export interface LibraryCopiesDeps {
 export class TraceLibraryCopies {
   #on = false;
   #tail: Promise<void> = Promise.resolve();
+  /** Changes of the switch the reader made: a read of it begun before one is older. */
+  #changes = 0;
 
   constructor(private readonly deps: LibraryCopiesDeps) {}
 
   /** A background starting: the Library kept here is used, and Trace is asked again on the alarm. */
   async start(): Promise<void> {
-    await this.#apply(await this.deps.readPref().catch(() => false), false);
+    const changes = this.#changes;
+    // The switch cannot be read: off for this wake, with what is stored left as it is.
+    const on = await this.deps.readPref().catch(() => null);
+    // The reader changed the switch while it was read: their change stands.
+    if (on === null || changes !== this.#changes) return;
+    await this.#apply(on, false);
   }
 
   /** The reader turned the switch on or off. */
   prefChanged(on: boolean): Promise<void> {
+    this.#changes += 1;
     return this.#apply(on, true);
   }
 
   async #apply(on: boolean, refresh: boolean): Promise<void> {
     this.#on = on;
-    await this.deps.engine.updateSettings({ enabled: on });
+    // An off goes on even if the works in use cannot be written: the alarm stops, and the other accounts are reached.
+    await this.deps.engine.updateSettings({ enabled: on }).catch((error: unknown) => {
+      if (on) throw error;
+    });
     this.deps.alarm(on);
     if (on) await this.sync(refresh);
+    // Off: every account's works kept here are switched off, not only those in use, so not even an AO3 name stays.
+    else for (const scope of await this.deps.scopes().catch(() => [])) await this.deps.engine.switchOff(scope).catch(() => undefined);
   }
 
   /** Reads the Library and keeps its works, one read at a time. */
   sync(refresh: boolean): Promise<void> {
-    const next = this.#tail.then(async () => {
+    return this.#queue(async () => {
       if (!this.#on) return;
       const library = await this.deps.library(refresh).catch(() => null);
       // Unknown is not empty: nothing is let go without a Library read.
-      if (library === null || !this.#on) return;
+      if (library === null) return;
       // That account's own works: another account's are left as they are.
       await this.deps.engine.useScope(library.accountId);
+      // Turned off while the Library was read: that account's works are switched off too.
       await this.deps.engine.updateSettings({ enabled: this.#on });
+      if (!this.#on) return;
       await this.deps.engine.syncLibrary(libraryList(library.overlay, library.libraryCount));
       this.deps.wake();
     });
-    this.#tail = next.catch(() => undefined);
-    return next;
   }
 
   /**
@@ -153,9 +168,12 @@ export class TraceLibraryCopies {
    * again. The same account back carries on without checking them again.
    */
   accountLeft(): Promise<void> {
-    const next = this.#tail.then(async () => {
-      await this.deps.engine.useScope(null);
-    });
+    return this.#queue(() => this.deps.engine.useScope(null));
+  }
+
+  /** One change of works in use at a time. */
+  #queue(task: () => Promise<void>): Promise<void> {
+    const next = this.#tail.then(task);
     this.#tail = next.catch(() => undefined);
     return next;
   }
@@ -174,7 +192,7 @@ export interface TraceLibrarySource {
 
 /** Installs Keep a Copy in Trace's background, where the downloads API is. */
 export function installTraceKeepACopy(extension: TraceExtension, source: TraceLibrarySource): TraceLibraryCopies {
-  const { engine, wake } = installKeepACopy(extension, {
+  const { engine, scopes, wake } = installKeepACopy(extension, {
     defaults: LIBRARY_DEFAULTS,
     answers: [KEEP_A_COPY_MESSAGE.page, KEEP_A_COPY_MESSAGE.view],
     idleAlarm: false,
@@ -184,6 +202,7 @@ export function installTraceKeepACopy(extension: TraceExtension, source: TraceLi
   });
   const copies = new TraceLibraryCopies({
     engine,
+    scopes,
     wake,
     library: (refresh) => source.librarySnapshot(refresh),
     readPref: async () => (await extension.storage.local.get(KEEP_A_COPY_PREF_KEY))[KEEP_A_COPY_PREF_KEY] === true,

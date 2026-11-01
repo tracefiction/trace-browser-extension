@@ -759,6 +759,8 @@ export interface KeepPorts {
   readonly clock: { now(): number };
   readonly random: () => number;
   read(scope: string): Promise<unknown>;
+  /** An account's state with none of its works read (`works` empty), where the store can: written back with no works changed, they stay as stored. */
+  readCore?(scope: string): Promise<unknown>;
   /** `changed`: the works changed since the last write; the rest are as stored. */
   write(state: KeepState, changed: ReadonlySet<string>, scope: string): Promise<void>;
   /** `include` only for the reader's own lists and a locked work's Chapter Index; a work page is read signed out. */
@@ -969,16 +971,38 @@ export class KeepACopy {
         weeklyCheck: typeof patch.weeklyCheck === "boolean" ? patch.weeklyCheck : state.settings.weeklyCheck,
         format,
       };
-      if (!state.settings.enabled) {
-        // Turned off: not even the AO3 name is kept, and a run ends, not done.
-        state.user = null;
-        if (state.run?.status === "running") this.#endRun(state, state.run, false);
-        delete state.checkedAt;
-        delete state.contradicted;
-      }
+      if (!state.settings.enabled) this.#switchedOff(state);
       if (JSON.stringify(state.settings) !== before) this.#settingsChanged = true;
       this.#setQuiet(this.#batchRunning(state));
     });
+  }
+
+  /** Turned off: not even the AO3 name is kept, and a run ends, not done. */
+  #switchedOff(state: KeepState): void {
+    state.user = null;
+    if (state.run?.status === "running") this.#endRun(state, state.run, false);
+    delete state.checkedAt;
+    delete state.contradicted;
+  }
+
+  /**
+   * Switches off an account's works that are not in use, as turning the
+   * switch off does for those in use: not even their AO3 name stays.
+   * Written only when that changes something.
+   */
+  switchOff(scope: string): Promise<void> {
+    const next = this.#busy.then(async () => {
+      if (scope === this.#scope) return;
+      // Only the account's small record: its works are neither needed nor written.
+      const stored = this.ports.readCore ? await this.ports.readCore(scope) : await this.ports.read(scope);
+      if (!isState(stored)) return;
+      if (!stored.settings.enabled && stored.user === null && stored.run?.status !== "running" && !stored.checkedAt && !stored.contradicted) return;
+      const state: KeepState = { ...stored, pending: stored.pending ?? null, settings: { ...stored.settings, enabled: false } };
+      this.#switchedOff(state);
+      await this.ports.write(state, new Set(), scope);
+    });
+    this.#busy = next.catch(() => undefined);
+    return next;
   }
 
   /** The AO3 name the reader is signed in as, from the page they are on. */

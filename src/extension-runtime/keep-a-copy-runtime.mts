@@ -221,13 +221,15 @@ export interface KeepACopyOptions {
   /** Whose works are in use at first: "" for the standalone's own, null until an account is known. */
   readonly scope?: Scope;
   /** Where the works are kept; IndexedDB by default. */
-  readonly store?: Pick<IndexedDbKeepStore, "read" | "write">;
+  readonly store?: Pick<IndexedDbKeepStore, "read" | "write"> & Partial<Pick<IndexedDbKeepStore, "readCore" | "scopes">>;
   /** Chrome's offscreen document, in the package. */
   readonly offscreenDocument?: string;
 }
 
 export interface KeepACopyInstall {
   readonly engine: KeepACopy;
+  /** The accounts with works kept (none known without IndexedDB). */
+  scopes(): Promise<readonly string[]>;
   /** Looks at the queue now, after something was added to it. */
   wake(): void;
 }
@@ -266,7 +268,7 @@ export function installKeepACopy(extension: Extension, options: KeepACopyOptions
   setUi(true);
 
   const indexedDB = (globalThis as { indexedDB?: IDBFactory }).indexedDB;
-  const store: Pick<IndexedDbKeepStore, "read" | "write"> = options.store ?? (indexedDB
+  const store: Pick<IndexedDbKeepStore, "read" | "write"> & Partial<Pick<IndexedDbKeepStore, "readCore" | "scopes">> = options.store ?? (indexedDB
     ? new IndexedDbKeepStore(indexedDB)
     // Without IndexedDB (never in a supported browser): an account's whole state in one key, the device's pacer in another.
     : {
@@ -281,6 +283,8 @@ export function installKeepACopy(extension: Extension, options: KeepACopyOptions
     clock: Date,
     random: Math.random,
     read: (scope) => store.read(scope),
+    // Only a store that writes works apart reads an account without them.
+    ...(store.readCore ? { readCore: (scope: string) => store.readCore?.(scope) ?? store.read(scope) } : {}),
     write: (state, changed, scope) => store.write(state, changed, scope),
     fetchPage: (url, credentials) => requestAO3(url, "text", REQUEST_TIMEOUT_MS, MAX_PAGE_CHARS * 2, credentials),
     fetchFile,
@@ -375,5 +379,5 @@ export function installKeepACopy(extension: Extension, options: KeepACopyOptions
   });
 
   void run();
-  return { engine, wake: () => void run() };
+  return { engine, scopes: async () => (await store.scopes?.()) ?? [], wake: () => void run() };
 }
