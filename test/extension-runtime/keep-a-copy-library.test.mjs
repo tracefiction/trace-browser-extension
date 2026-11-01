@@ -38,9 +38,12 @@ function epub(size = 2_000) {
 }
 
 const html = (url, text, status = 200) => ({ kind: "response", status, url, contentType: "text/html", retryAfter: null, cfMitigated: null, text });
+/** A file's blob URL, one per file URL, holding no part of it, as a real one holds none. */
+const handles = new Map();
+const handleOf = (url) => `blob:keep-a-copy/${handles.get(url) ?? handles.set(url, handles.size + 1).get(url)}`;
 const file = (url, bytes) => ({
   kind: "response", status: 200, url, contentType: "application/epub+zip", retryAfter: null, cfMitigated: null,
-  bytes: bytes.slice(0, 8_192), size: bytes.length, handle: `blob:keep-a-copy/${url}`,
+  bytes: bytes.slice(0, 8_192), size: bytes.length, handle: handleOf(url),
 });
 const workURL = (id) => `${AO3_ORIGIN}/works/${id}?view_adult=true`;
 const loginURL = `${AO3_ORIGIN}/users/login?restricted=true`;
