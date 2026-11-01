@@ -221,6 +221,17 @@ test("reads the reader's lists and their next page", () => {
   const later = readListPage(listPage([{ id: "21", chapters: "1/1" }], { kind: "reading" }), "later");
   assert.deepEqual(later, { works: [{ workId: "21", updatedAt: "1761700000", complete: true, restricted: false, fandom: "Invented Lanterns" }], next: false });
   assert.equal(readListPage(listPage([{ id: "22", restricted: true }]), "bookmarks").works[0].restricted, true);
+  // A row with no fandom has none; a list item in a summary is no row, and sets no other work's folder.
+  const bare = listRow("41").replace(/<h5[\s\S]*?<\/h5>/, "");
+  assert.equal("fandom" in readListPage(bare, "bookmarks").works[0], false);
+  const injected = listRow("42").replace("<dl class=\"stats\">", '<blockquote class="userstuff summary"><ul><li class="blurb"><h4 class="heading"><a href="/works/43">x</a></h4>' +
+    '<h5 class="fandoms"><a class="tag">../../Evil</a></h5></li></ul></blockquote><dl class="stats">') + listRow("43").replace("Invented Lanterns", "Six real");
+  assert.deepEqual(readListPage(injected, "bookmarks").works.map((work) => [work.workId, work.fandom]), [["42", "Invented Lanterns"], ["43", "Six real"]]);
+  // A hand-made page whose first row has no id: each row keeps its own fandom, and the list item in its summary is no row.
+  const handMade = '<li class="bookmark blurb group"><div class="header module"><h4 class="heading"><a href="/works/5">T</a></h4><h5 class="fandoms heading"><a class="tag">Real</a></h5></div>' +
+    '<blockquote class="userstuff summary"><ul><li class="blurb"><h4 class="heading"><a href="/works/6">x</a></h4><h5 class="fandoms"><a class="tag">../../Evil</a></h5></li></ul></blockquote></li>' +
+    '<li id="bookmark_1" class="bookmark blurb group"><div class="header module"><h4 class="heading"><a href="/works/6">T</a></h4><h5 class="fandoms heading"><a class="tag">Six real</a></h5></div></li>';
+  assert.deepEqual(readListPage(handMade, "bookmarks").works.map((work) => [work.workId, work.fandom]), [["5", "Real"], ["6", "Six real"]]);
   // An "Anonymous:" status before the title, for the work's own author.
   const own = listRow("31").replace('<h4 class="heading">', '<h4 class="heading"><span class="status">Anonymous:</span>');
   assert.equal(readListPage(own, "bookmarks").works[0].workId, "31");
@@ -965,6 +976,27 @@ test("a backup reads a locked work's Chapter Index again only when its list's up
   assert.equal(box.saved.length, 1);
   // Its Chapter Index names no fandom: the folder is the list's.
   assert.ok(box.saved[0].filename.startsWith(`${COPY_FOLDER}/Invented Lanterns/`), box.saved[0].filename);
+});
+
+test("a list's fandom is taken only while a work's fandom is unknown: a later pass leaves a known one alone", async () => {
+  const answers = {
+    [listPageURL(USER, "later", 1)]: html(listPageURL(USER, "later", 1), listPage([])),
+    [listPageURL(USER, "subscriptions", 1)]: html(listPageURL(USER, "subscriptions", 1), ""),
+    [listPageURL(USER, "bookmarks", 1)]: html(listPageURL(USER, "bookmarks", 1), listPage([{ id: "8", restricted: true }])),
+  };
+  const box = harness(answers);
+  await box.engine.noteUser(USER);
+  await box.engine.startBackup();
+  for (let i = 0; i < 4; i += 1) box.now += (await box.engine.tick()) ?? 0;
+  assert.equal(box.stored.works["8"].fandom, "Invented Lanterns", "unknown before: the list's");
+  // Known from its page by now: the next pass leaves it.
+  box.stored.works["8"].fandom = "From Its Page";
+  box.stored.run = null;
+  box.stored.queue = [];
+  box.engine = new KeepACopy(box.ports);
+  await box.engine.startBackup();
+  for (let i = 0; i < 4; i += 1) box.now += (await box.engine.tick()) ?? 0;
+  assert.equal(box.stored.works["8"].fandom, "From Its Page");
 });
 
 const loggedOutList = (list) => html(listPageURL(USER, list, 1), '<body class="logged-out"><form action="/users/login" method="post"></form></body>');

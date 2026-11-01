@@ -336,14 +336,17 @@ export function readListPage(html: string, list: ListName): { works: ListedWork[
       add({ workId: match[1] ?? "", updatedAt: null, complete: false, restricted: false });
     }
   } else {
-    // A listing row: a bookmark of a work, or a Marked for Later reading.
-    for (const block of head.split(/(?=<li\b[^>]*\bclass\s*=\s*"[^"]*\bblurb\b)/i).filter((part) => /^<li\b/i.test(part))) {
+    // A listing row: a bookmark of a work, or a Marked for Later reading, each opened by its own id, so a
+    // list item in a reader's own words (a summary, a note) never passes for a row.
+    for (const block of head.split(/(?=<li\b[^>]*\bid\s*=\s*"(?:bookmark|work)_[0-9]+")/i).filter((part) => /^<li\b/i.test(part))) {
       // The heading's first work link is the title (an "Anonymous:" status can come before it).
       const heading = /<h4\b[^>]*\bclass\s*=\s*"[^"]*\bheading\b[^"]*"[^>]*>([\s\S]*?)<\/h4>/i.exec(block)?.[1] ?? "";
       const id = /<a\b[^>]*\bhref\s*=\s*"\/works\/([1-9][0-9]{0,19})"/i.exec(heading)?.[1];
       if (!id) continue;
       const updatedAt = /<!--\s*updated_at=([0-9]{1,12})\s*-->/.exec(block)?.[1] ?? null;
-      const fandoms = /<h5\b[^>]*\bclass\s*=\s*"[^"]*\bfandoms\b[^"]*"[^>]*>([\s\S]*?)<\/h5>/i.exec(block)?.[1] ?? "";
+      // The fandoms in the row's own header, before any of its summary or notes.
+      const header = /<div\b[^>]*\bclass\s*=\s*"[^"]*\bheader\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i.exec(block)?.[1] ?? "";
+      const fandoms = /<h5\b[^>]*\bclass\s*=\s*"[^"]*\bfandoms\b[^"]*"[^>]*>([\s\S]*?)<\/h5>/i.exec(header)?.[1] ?? "";
       const fandom = decode(/<a\b[^>]*\bclass\s*=\s*"[^"]*\btag\b[^"]*"[^>]*>([\s\S]*?)<\/a>/i.exec(fandoms)?.[1] ?? "");
       add({ workId: id, updatedAt, complete: isComplete(block), restricted: RESTRICTED_LOCK.test(heading), ...(fandom ? { fandom } : {}) });
     }
@@ -1386,7 +1389,9 @@ export class KeepACopy {
       const seen = listed.updatedAt === null ? {} : { listed: listed.updatedAt };
       if (run.purpose === "backup") {
         // Subscriptions show no chapter count, so they leave `complete` as it was.
-        const work = this.#keep(state, listed.workId, list === "subscriptions" ? {} : { complete: listed.complete, restricted: listed.restricted, ...(listed.fandom ? { fandom: listed.fandom } : {}) });
+        // The list's fandom only for a work whose fandom is not yet known: a work page's stands.
+        const fandom = listed.fandom && (known?.fandom ?? "Unknown fandom") === "Unknown fandom" ? { fandom: listed.fandom } : {};
+        const work = this.#keep(state, listed.workId, list === "subscriptions" ? {} : { complete: listed.complete, restricted: listed.restricted, ...fandom });
         if (stale(work)) this.#enqueue(state, { workId: listed.workId, pace: "reader", batch: true, ...seen });
       } else if (known?.copy && !listed.complete) {
         if (listed.restricted) known.restricted = true;
