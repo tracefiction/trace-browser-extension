@@ -4852,6 +4852,29 @@ function entryStatus(entry) {
   );
 }
 
+// "Last read today", "Last read 3 days ago", then the date after four weeks
+// ("Last read 12 Jul"), counted in calendar days where the reader is. A Saved
+// story hasn't been read, so it says nothing.
+function storyLastReadText(entry, now) {
+  if (!entry || entryStatus(entry) === "SAVED") return null;
+  var time = storyEntrySyncTime(entry.lastReadAt);
+  if (time == null) return null;
+  var read = new Date(time);
+  var today = now || new Date();
+  var days = Math.round(
+    (Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()) -
+      Date.UTC(read.getFullYear(), read.getMonth(), read.getDate())) / 86400000,
+  );
+  if (days <= 0) return "Last read today";
+  if (days === 1) return "Last read yesterday";
+  if (days < 7) return "Last read " + days + " days ago";
+  if (days < 14) return "Last read a week ago";
+  if (days < 28) return "Last read " + Math.floor(days / 7) + " weeks ago";
+  var options = { day: "numeric", month: "short" };
+  if (read.getFullYear() !== today.getFullYear()) options.year = "numeric";
+  return "Last read " + read.toLocaleDateString(undefined, options);
+}
+
 function progressDisplay(entry) {
   var status = entryStatus(entry);
   var chapters = displayChaptersForStatus(status, entry && entry.chapters);
@@ -7469,6 +7492,15 @@ function renderStorySheet(sheet, view, workKey) {
   positionTop.appendChild(positionValue);
   if (positionStatus.textContent) positionTop.appendChild(positionStatus);
   position.appendChild(positionTop);
+  var lastRead = storyLastReadText(view.entry);
+  if (lastRead) {
+    var positionWhen = document.createElement("div");
+    positionWhen.className = "when";
+    positionWhen.setAttribute("data-trace-story-last-read", "1");
+    positionWhen.textContent = lastRead;
+    positionWhen.style.cssText = "font:400 13px/1.35 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
+    position.appendChild(positionWhen);
+  }
   body.appendChild(position);
   appendStoryWorkMark(body, view.entry);
   appendStoryCatchupAction(body, view, workKey);

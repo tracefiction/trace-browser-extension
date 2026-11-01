@@ -1395,6 +1395,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   function enumValue(values, value) {
     return typeof value === "string" && values.includes(value) ? value : null;
   }
+  function isIsoTimestamp(value) {
+    return typeof value === "string" && ISO_TIMESTAMP_PATTERN.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+  }
   function copyScope(value) {
     if (!isRecord2(value) || !hasOnlyKeys(value, ["accountId", "epoch"])) return null;
     if (typeof value.accountId !== "string" || value.accountId.trim() !== value.accountId) return null;
@@ -1539,6 +1542,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (!isSafeInteger(value.newChapterCount)) return null;
       result.newChapterCount = value.newChapterCount;
     }
+    if (Object.hasOwn(value, "lastReadAt") && isIsoTimestamp(value.lastReadAt)) {
+      result.lastReadAt = value.lastReadAt;
+    }
     if (Object.hasOwn(value, "rating")) {
       if (!isSafeInteger(value.rating) || value.rating > 5) return null;
       result.rating = value.rating;
@@ -1580,9 +1586,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     const entries = copyEntryMap(value.entries);
     const workPreferences = copyPreferenceMap(value.workPreferences);
     if (entries === null || workPreferences === null) return null;
-    if (typeof value.syncVersion !== "string" || !ISO_TIMESTAMP_PATTERN.test(value.syncVersion) || !Number.isFinite(Date.parse(value.syncVersion)) || new Date(value.syncVersion).toISOString() !== value.syncVersion) {
-      return null;
-    }
+    if (!isIsoTimestamp(value.syncVersion)) return null;
     return Object.freeze({ entries, workPreferences, syncVersion: value.syncVersion });
   }
   function parseAccountData(value) {
@@ -4686,7 +4690,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   function isRecord6(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
-  function isIsoTimestamp(value) {
+  function isIsoTimestamp2(value) {
     return typeof value === "string" && value.length <= 64 && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
   }
   function confirmedStorySave(value, expectedWorkKey) {
@@ -4694,7 +4698,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     const workKey = typeof value.work_key === "string" ? value.work_key.trim() : "";
     const entryId = typeof value.entry_id === "string" ? value.entry_id.trim() : "";
     const entry = copyLibraryOverlayEntry(value.entry);
-    if (workKey !== expectedWorkKey || !WORK_KEY_PATTERN2.test(workKey) || !UUID_PATTERN4.test(entryId) || entry === null || entry.entryId !== entryId || !isIsoTimestamp(value.syncVersion)) {
+    if (workKey !== expectedWorkKey || !WORK_KEY_PATTERN2.test(workKey) || !UUID_PATTERN4.test(entryId) || entry === null || entry.entryId !== entryId || !isIsoTimestamp2(value.syncVersion)) {
       return null;
     }
     return Object.freeze({
@@ -4726,7 +4730,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (!response.ok) return { kind: "success", value: { kind: "unavailable" } };
       const body = await this.#json(response);
       const data = isRecord6(body) && isRecord6(body.data) ? body.data : null;
-      if (data === null || !isRecord6(data.entries) || !isIsoTimestamp(data.syncVersion)) {
+      if (data === null || !isRecord6(data.entries) || !isIsoTimestamp2(data.syncVersion)) {
         return { kind: "success", value: { kind: "invalid_response" } };
       }
       const rawEntry = data.entries[workKey];
@@ -4963,7 +4967,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   function isRecord8(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
-  function isIsoTimestamp2(value) {
+  function isIsoTimestamp3(value) {
     return typeof value === "string" && value.length <= 64 && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
   }
   var LibraryCommandApi = class {
@@ -5068,7 +5072,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       const terminalWithoutProjection = (data?.state === "resolved" || data?.state === "ignored") && workKey === null && data.entry === null && syncVersion === null;
       const expectedOperationId = command.state === "resolved" ? command.operationId : null;
       const responseOperationId = data !== null && Object.hasOwn(data, "operationId") ? data.operationId : null;
-      if (data === null || data.state !== "ignored" && data.state !== command.state || responseOperationId !== expectedOperationId || data.eventId !== null && (typeof data.eventId !== "string" || !UUID_PATTERN5.test(data.eventId)) || !terminalWithoutProjection && (typeof workKey !== "string" || workKey !== command.workKey || !WORK_KEY_PATTERN3.test(workKey) || entry === null || entry.entryId !== command.entryId || syncVersion !== void 0 && !isIsoTimestamp2(syncVersion))) {
+      if (data === null || data.state !== "ignored" && data.state !== command.state || responseOperationId !== expectedOperationId || data.eventId !== null && (typeof data.eventId !== "string" || !UUID_PATTERN5.test(data.eventId)) || !terminalWithoutProjection && (typeof workKey !== "string" || workKey !== command.workKey || !WORK_KEY_PATTERN3.test(workKey) || entry === null || entry.entryId !== command.entryId || syncVersion !== void 0 && !isIsoTimestamp3(syncVersion))) {
         return { kind: "success", value: { kind: "invalid_response" } };
       }
       if (terminalWithoutProjection) {
