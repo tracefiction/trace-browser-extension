@@ -78,8 +78,9 @@ export const MAX_PAGE_CHARS = 2_097_152;
 /** A new file under this share of the old one's size keeps the old one too. */
 export const SHRINK_KEEP_RATIO = 0.8;
 export const CHECK_EVERY_MS = 7 * 24 * 60 * 60_000;
-/** A reader not signed in now is remembered with their check date for this long. */
-export const CHECKED_KEEP_MS = 8 * 24 * 60 * 60_000;
+/** A reader not signed in now keeps their check date this long, and at most this many readers keep one. */
+export const CHECKED_KEEP_MS = 90 * 24 * 60 * 60_000;
+export const CHECKED_KEEP_COUNT = 20;
 /** A list longer than this is cut off; far past any seen. */
 export const MAX_LIST_PAGES = 1_000;
 
@@ -171,8 +172,10 @@ export function pageSignedIn(html: string): boolean | null {
  * in when AO3 answered. Undefined when the page has no greeting.
  */
 export function greetedUser(html: string): string | undefined {
-  const greeting = /<[a-z]+\b[^>]*\bid\s*=\s*"greeting"[^>]*>([\s\S]*?)<\/ul>/i.exec(html.slice(0, MAX_PAGE_CHARS))?.[1];
-  return greeting === undefined ? undefined : /<a\b[^>]*\bhref\s*=\s*"\/users\/([A-Za-z0-9_]{1,40})(?:[/?"])/i.exec(greeting)?.[1];
+  const greeting = /<[a-z]+\b[^>]*(?<![\w-])id\s*=\s*"greeting"[^>]*>([\s\S]*?)<\/(?:ul|nav)>/i.exec(html.slice(0, MAX_PAGE_CHARS))?.[1];
+  if (greeting === undefined) return undefined;
+  const name = /<a\b[^>]*\bhref\s*=\s*"\/users\/([A-Za-z0-9_]{1,40})(?:\/|")/i.exec(greeting)?.[1];
+  return name === undefined || /^log(?:in|out)$/i.test(name) ? undefined : name;
 }
 
 /** A work page (or its preface and Download menu) as the facts a copy needs. */
@@ -609,6 +612,8 @@ export interface KeepState {
   signedOutSeen?: true;
   /** When each AO3 reader's lists were last checked through (the weekly check). */
   checkedAt?: Record<string, number>;
+  /** When AO3's answer to a read of a reader's lists last greeted someone else: their weekly check waits a week from then. */
+  contradicted?: Record<string, number>;
   pacer: {
     dueAt: number;
     window: { startedAt: number; reads: number };
@@ -713,6 +718,12 @@ function isState(value: unknown): value is KeepState {
 const backoff = (attempts: number) => Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.max(0, attempts - 1));
 const batchLeft = (state: KeepState) => state.queue.filter((queued) => queued.batch).length;
 const backupOf = (state: KeepState) => (state.run?.purpose === "backup" ? state.run : null);
+/** Whether `user`'s weekly check is due: a week after their last, and a week after AO3 last greeted another reader on it. */
+function checkDue(state: KeepState, user: string, now: number): boolean {
+  const contradicted = state.contradicted?.[user];
+  return now - (state.checkedAt?.[user] ?? state.pacer.lastCheckAt) >= CHECK_EVERY_MS && (contradicted === undefined || now - contradicted >= CHECK_EVERY_MS);
+}
+
 /** A backup still going, by reading its lists or copying what they found. */
 function backupBusy(state: KeepState): boolean {
   const run = backupOf(state);
@@ -805,6 +816,7 @@ export class KeepACopy {
         state.user = null;
         if (state.run?.status === "running") this.#endRun(state, state.run, false);
         delete state.checkedAt;
+        delete state.contradicted;
       }
       this.#setQuiet(this.#batchRunning(state));
     });
@@ -813,6 +825,8 @@ export class KeepACopy {
   /** The AO3 name the reader is signed in as, from the page they are on. */
   noteUser(user: string | null): Promise<void> {
     return this.#serial((state) => {
+      // Turned off, not even the AO3 name is kept.
+      if (!state.settings.enabled) return;
       if (user && AO3_USERNAME_PATTERN.test(user)) this.#signedIn(state, user);
       else if (user === null) state.signedOutSeen = true;
     });
@@ -826,7 +840,14 @@ export class KeepACopy {
     // A reader seen for the first time has their first weekly check a week on, the gentler
     // choice for AO3; Back up reads their lists at once whenever they ask.
     checkedAt[user] ??= now;
-    for (const [name, at] of Object.entries(checkedAt)) if (name !== user && now - at >= CHECKED_KEEP_MS) delete checkedAt[name];
+    // A reader whose check is due keeps their date while they are away, so it runs when they are back; only one
+    // away longer than CHECKED_KEEP_MS, or the oldest past CHECKED_KEEP_COUNT readers, starts again as new.
+    const away = Object.entries(checkedAt).filter(([name]) => name !== user).sort((a, b) => a[1] - b[1]);
+    away.forEach(([name, at], i) => {
+      if (now - at >= CHECKED_KEEP_MS || i < away.length - (CHECKED_KEEP_COUNT - 1)) delete checkedAt[name];
+    });
+    const contradicted = state.contradicted ?? {};
+    for (const [name, at] of Object.entries(contradicted)) if (now - at >= CHECK_EVERY_MS) delete contradicted[name];
     // Another reader signed in: a run of the reader before ends here, not done, with nothing more asked of their lists.
     if (state.run?.status === "running" && state.run.user !== user) this.#endRun(state, state.run, false);
     if (state.pacer.stopped?.code === "signed_out") state.pacer.stopped = null;
@@ -991,7 +1012,7 @@ export class KeepACopy {
     const backup = backupOf(state);
     // Nothing of it left to hold: what was held with it goes on.
     if (backup?.held && !backupBusy(state)) delete backup.held;
-    if (!backupBusy(state) && state.run?.status !== "running" && state.settings.weeklyCheck && state.user && now - (state.checkedAt?.[state.user] ?? pacer.lastCheckAt) >= CHECK_EVERY_MS) {
+    if (!backupBusy(state) && state.run?.status !== "running" && state.settings.weeklyCheck && state.user && checkDue(state, state.user, now)) {
       state.run = { purpose: "check", user: state.user, lists: CHECK_LISTS, list: 0, page: 1, found: 0, status: "running" };
     }
     const held = backupOf(state)?.held === true;
@@ -1316,12 +1337,11 @@ export class KeepACopy {
       return verdict;
     }
     if (verdict.kind !== "ok" || answer.kind !== "response") return verdict;
-    // AO3's own answer says who is signed in: another reader's session ends the run, not done, with nothing counted.
+    // AO3's own answer says who is signed in. A signed-in page with no greeting to read goes on as the run's reader's:
+    // a change to AO3's header stopping every check would cost more than the read with another session it might spare.
     const greeted = greetedUser(answer.text ?? "");
-    if (greeted !== undefined && greeted !== run.user) {
-      this.#signedIn(state, greeted);
-      return verdict;
-    }
+    if (greeted !== undefined && greeted !== run.user) return this.#contradicted(state, run, greeted, verdict);
+    if (greeted === run.user) delete state.contradicted?.[run.user];
     delete run.errors;
     const read = readListPage(answer.text ?? "", list);
     for (const listed of read.works) {
@@ -1371,12 +1391,10 @@ export class KeepACopy {
     const text = answer.kind === "response" ? answer.text ?? "" : "";
     const greeted = greetedUser(text);
     // Another reader's session: they are the one signed in, and the run ends, not done.
-    if (verdict.kind === "ok" && greeted !== undefined && greeted !== run.user) {
-      this.#signedIn(state, greeted);
-      return verdict;
-    }
+    if (verdict.kind === "ok" && greeted !== undefined && greeted !== run.user) return this.#contradicted(state, run, greeted, verdict);
     // Shown to the run's own reader, by name: only that list sent them elsewhere, and it is over.
     if (verdict.kind === "ok" && pageSignedIn(text) === true && greeted === run.user) {
+      delete state.contradicted?.[run.user];
       delete run.confirm;
       this.#nextList(state, run);
       return verdict;
@@ -1388,6 +1406,21 @@ export class KeepACopy {
       this.#nextList(state, run);
     }
     return verdict.kind === "skip" ? verdict : { kind: "skip", code: "http_error" };
+  }
+
+  /**
+   * AO3's answer greets another reader: they are the one signed in, and the
+   * run ends, not done. A change of reader only AO3 shows costs up to two
+   * reads with the other's session (a list that sends elsewhere, not
+   * followed, and the Bookmarks read after it). A page and the background
+   * can see different sessions for as long as the reader likes (a private
+   * window, a container), so this reader's weekly check waits a week before
+   * it tries again, unless a read of their lists greets them before then.
+   */
+  #contradicted(state: KeepState, run: ListRun, greeted: string, verdict: Verdict): Verdict {
+    (state.contradicted ??= {})[run.user] = this.ports.clock.now();
+    this.#signedIn(state, greeted);
+    return verdict;
   }
 
   /** The run goes on with its next list, or ends with its last. */

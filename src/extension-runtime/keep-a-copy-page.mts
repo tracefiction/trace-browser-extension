@@ -31,7 +31,7 @@ const runtime = (scope.browser ?? scope.chrome)?.runtime;
 export function signedInUser(page: Pick<Document, "querySelector">): string | null | undefined {
   const href = page.querySelector('#greeting a[href^="/users/"]')?.getAttribute("href") ?? "";
   const name = /^\/users\/([A-Za-z0-9_]{1,40})(?:\/|$)/.exec(href)?.[1];
-  if (name) return name;
+  if (name && !/^log(?:in|out)$/i.test(name)) return name;
   return page.querySelector('#login-dropdown, #header a[href^="/users/login"]') ? null : undefined;
 }
 
