@@ -1044,7 +1044,9 @@ test("Bookmarks read once more that tells nothing is read again, three times in 
   }
 });
 
-test("another reader signed in: a list sent elsewhere ends the run with nothing more asked, and a check not done comes again", async () => {
+const OTHER = "Other_Reader";
+
+test("another reader signing in ends the run, not done, with nothing more asked of the first reader's lists", async () => {
   const answers = {
     [listPageURL(USER, "bookmarks", 1)]: signedInList("bookmarks"),
     [listPageURL(USER, "later", 1)]: { kind: "redirect", url: listPageURL(USER, "later", 1) },
@@ -1054,48 +1056,95 @@ test("another reader signed in: a list sent elsewhere ends the run with nothing 
   await box.engine.noteUser(USER);
   await box.engine.startBackup();
   box.now += await box.engine.tick();
-  await box.engine.noteUser("Other_Reader");
-  await box.drain();
-  assert.deepEqual(box.requests, [listPageURL(USER, "bookmarks", 1), listPageURL(USER, "later", 1)]);
+  await box.engine.noteUser(OTHER);
   assert.equal(box.stored.run.status, "finished");
-  assert.equal(box.stored.pacer.stopped, null);
-  // The other reader's pages ask nothing more.
   for (let i = 0; i < 5; i += 1) {
-    await box.engine.noteUser("Other_Reader");
+    await box.engine.noteUser(OTHER);
     box.now += 60_000;
     await box.drain();
   }
-  assert.equal(box.requests.length, 2);
-
-  // A weekly check ended so is not done: it comes again for the first reader.
-  const check = harness(answers);
-  await check.engine.noteUser(USER);
-  await check.engine.updateSettings({ weeklyCheck: true });
-  const lastCheckAt = check.stored.pacer.lastCheckAt;
-  check.now += CHECK_EVERY_MS;
-  check.now += await check.engine.tick();
-  await check.engine.noteUser("Other_Reader");
-  check.now += await check.engine.tick();
-  assert.equal(check.stored.run, null);
-  assert.equal(check.stored.pacer.lastCheckAt, lastCheckAt);
-  const asked = check.requests.length;
-  await check.engine.noteUser(USER);
-  answers[listPageURL(USER, "later", 1)] = signedInList("later");
-  await check.drain();
-  assert.ok(check.requests.length > asked);
-  assert.ok(check.stored.pacer.lastCheckAt > lastCheckAt);
+  assert.deepEqual(box.requests, [listPageURL(USER, "bookmarks", 1)]);
+  assert.equal(box.stored.pacer.stopped, null);
 });
 
-test("a sign-out stop of one reader's run is ended only by that reader", async () => {
-  const box = harness({ [listPageURL(USER, "bookmarks", 1)]: loggedOutList("bookmarks") });
+test("a sign-out stop holds no other reader: another reader signing in ends it, and their copies go on", async () => {
+  const answers = {
+    [listPageURL(USER, "bookmarks", 1)]: loggedOutList("bookmarks"),
+    [epubLink("5")]: file(epubLink("5"), epub()),
+  };
+  const box = harness(answers);
   await box.engine.noteUser(USER);
   await box.engine.startBackup();
   await box.engine.tick();
   assert.equal(box.stored.pacer.stopped.code, "signed_out");
-  await box.engine.noteUser("Other_Reader");
-  assert.equal(box.stored.pacer.stopped.code, "signed_out");
-  await box.engine.noteUser(USER);
+  await box.engine.noteUser(OTHER);
   assert.equal(box.stored.pacer.stopped, null);
+  assert.equal(box.stored.run.status, "finished");
+  await box.engine.notePage(readWorkPage(workPage("5")), "bookmark");
+  await box.drain();
+  assert.equal(box.saved.length, 1);
+});
+
+test("a run whose reader is no longer the one signed in asks nothing with the other's session", async () => {
+  const box = harness({ [listPageURL(USER, "bookmarks", 1)]: signedInList("bookmarks") });
+  await box.engine.noteUser(USER);
+  await box.engine.startBackup();
+  // A stored run of one reader, while another is signed in (as a background stopped part-way leaves it).
+  box.stored.user = OTHER;
+  box.stored.run.confirm = true;
+  box.engine = new KeepACopy(box.ports);
+  await box.drain();
+  assert.deepEqual(box.requests, []);
+  assert.equal(box.stored.run.status, "finished");
+});
+
+test("each reader has their own weekly check date: one's check never moves another's, and a check cut short comes again", async () => {
+  const signedIn = (user, list) => html(listPageURL(user, list, 1), `<body class="logged-in">${listPage([])}</body>`);
+  const answers = {};
+  for (const user of [USER, OTHER]) for (const list of ["bookmarks", "later"]) answers[listPageURL(user, list, 1)] = signedIn(user, list);
+  const box = harness(answers);
+  await box.engine.noteUser(USER);
+  await box.engine.updateSettings({ weeklyCheck: true });
+  const first = box.stored.checkedAt[USER];
+  box.now += CHECK_EVERY_MS;
+  // The first reader's check reads Bookmarks; then the other reader signs in, and it ends, not done.
+  box.now += await box.engine.tick();
+  await box.engine.noteUser(OTHER);
+  assert.equal(box.stored.run, null);
+  await box.drain();
+  // The other reader's own check ran, and moved only their date.
+  assert.ok(box.requests.includes(listPageURL(OTHER, "later", 1)));
+  assert.ok(box.stored.checkedAt[OTHER] > first);
+  assert.equal(box.stored.checkedAt[USER], first);
+  // Back, the first reader's check runs again, whole.
+  await box.engine.noteUser(USER);
+  await box.drain();
+  assert.ok(box.requests.includes(listPageURL(USER, "later", 1)));
+  assert.ok(box.stored.checkedAt[USER] > first);
+});
+
+test("the extra Bookmarks read counts its own errors, not those of the list before it", async () => {
+  const answers = {
+    [listPageURL(USER, "bookmarks", 1)]: signedInList("bookmarks"),
+    [listPageURL(USER, "later", 1)]: html(listPageURL(USER, "later", 1), "<h2>Error 500</h2>", 500),
+    [listPageURL(USER, "subscriptions", 1)]: signedInList("subscriptions"),
+  };
+  const box = harness(answers);
+  await box.engine.noteUser(USER);
+  await box.engine.startBackup();
+  box.now += await box.engine.tick();
+  // Later errs once, then sends elsewhere.
+  box.now += await box.engine.tick();
+  assert.equal(box.stored.run.errors, 1);
+  answers[listPageURL(USER, "later", 1)] = { kind: "redirect", url: listPageURL(USER, "later", 1) };
+  box.now += await box.engine.tick();
+  assert.equal(box.stored.run.errors, undefined);
+  // Bookmarks, read again, errs twice: Later is not over yet; a third ends it.
+  answers[listPageURL(USER, "bookmarks", 1)] = html(listPageURL(USER, "bookmarks", 1), "<h2>Error 500</h2>", 500);
+  for (let i = 0; i < 2; i += 1) box.now += await box.engine.tick();
+  assert.equal(box.stored.run.list, 1);
+  box.now += await box.engine.tick();
+  assert.equal(box.stored.run.list, 2);
 });
 
 test("a list page that is gone ends that list; one that errs is tried three times, then ends it; neither stops the run", async () => {

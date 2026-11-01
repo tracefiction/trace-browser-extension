@@ -596,6 +596,8 @@ export interface KeepState {
   pending: PendingSave | null;
   /** A page has shown the reader signed out since a locked work was last looked at. */
   signedOutSeen?: true;
+  /** When each AO3 reader's lists were last checked through (the weekly check). */
+  checkedAt?: Record<string, number>;
   pacer: {
     dueAt: number;
     window: { startedAt: number; reads: number };
@@ -796,8 +798,10 @@ export class KeepACopy {
     return this.#serial((state) => {
       if (user && AO3_USERNAME_PATTERN.test(user)) {
         state.user = user;
-        // Only the reader whose lists the run reads ends its sign-out stop.
-        if (state.pacer.stopped?.code === "signed_out" && (!state.run || state.run.user === user)) state.pacer.stopped = null;
+        (state.checkedAt ??= {})[user] ??= state.pacer.lastCheckAt;
+        // Another reader signed in: a run of the reader before ends here, not done, with nothing more asked of their lists.
+        if (state.run?.status === "running" && state.run.user !== user) this.#endRun(state, state.run, false);
+        if (state.pacer.stopped?.code === "signed_out") state.pacer.stopped = null;
         // Signed in again: the locked works copy on their own, at the queue's pace.
         if (state.signedOutSeen && state.settings.enabled) {
           delete state.signedOutSeen;
@@ -963,7 +967,7 @@ export class KeepACopy {
     const backup = backupOf(state);
     // Nothing of it left to hold: what was held with it goes on.
     if (backup?.held && !backupBusy(state)) delete backup.held;
-    if (!backupBusy(state) && state.run?.status !== "running" && state.settings.weeklyCheck && state.user && now - pacer.lastCheckAt >= CHECK_EVERY_MS) {
+    if (!backupBusy(state) && state.run?.status !== "running" && state.settings.weeklyCheck && state.user && now - (state.checkedAt?.[state.user] ?? pacer.lastCheckAt) >= CHECK_EVERY_MS) {
       state.run = { purpose: "check", user: state.user, lists: CHECK_LISTS, list: 0, page: 1, found: 0, status: "running" };
     }
     const held = backupOf(state)?.held === true;
@@ -1256,17 +1260,19 @@ export class KeepACopy {
       return { kind: "ok" };
     }
     const signedOut: Verdict = { kind: "stop", code: "signed_out", waitMs: null };
+    // Another reader is signed in now: the run ends, not done, and nothing is asked with their session.
+    if (state.user !== run.user) {
+      this.#endRun(state, run, false);
+      return { kind: "ok" };
+    }
     if (run.confirm) return this.#confirmList(state, run);
     // The reader's own lists, with their session: Marked for Later and Subscriptions are theirs alone.
     const answer = await this.#fetch(listPageURL(run.user, list, run.page), "page", "include");
     // Sent elsewhere (not followed): signed out, as far as is known, or else asked once more (#confirmList).
     if (answer.kind === "redirect") {
-      // Another reader is signed in now: the run ends, with nothing more asked (a check, not done, comes again).
-      if (state.user !== run.user) {
-        this.#endRun(state, run, false);
-        return { kind: "ok" };
-      }
       if (state.signedOutSeen) return signedOut;
+      // Its own count: the list's errors are not the extra read's.
+      delete run.errors;
       run.confirm = true;
       return { kind: "ok" };
     }
@@ -1323,6 +1329,7 @@ export class KeepACopy {
     if (verdict.kind === "retry" || verdict.kind === "stop") return verdict;
     if (verdict.kind === "skip" && verdict.code === "needs_sign_in") {
       delete run.confirm;
+      delete run.errors;
       return { kind: "stop", code: "signed_out", waitMs: null };
     }
     if (verdict.kind === "ok" && answer.kind === "response" && pageSignedIn(answer.text ?? "") === true) {
@@ -1353,7 +1360,7 @@ export class KeepACopy {
     delete run.confirm;
     run.status = "finished";
     if (run.purpose !== "check") return;
-    if (done) state.pacer.lastCheckAt = this.ports.clock.now();
+    if (done) (state.checkedAt ??= {})[run.user] = state.pacer.lastCheckAt = this.ports.clock.now();
     state.run = null;
   }
 }
