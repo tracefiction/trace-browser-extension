@@ -214,12 +214,12 @@ test("reads a work page's title, author, fandom, chapters and every format", () 
 test("reads the reader's lists and their next page", () => {
   const read = readListPage(listPage(["11", { id: "12", updatedAt: "1761800000", chapters: "10/10" }, "11"], { next: true }), "bookmarks");
   assert.deepEqual(read.works, [
-    { workId: "11", updatedAt: "1761700000", complete: false, restricted: false },
-    { workId: "12", updatedAt: "1761800000", complete: true, restricted: false },
+    { workId: "11", updatedAt: "1761700000", complete: false, restricted: false, fandom: "Invented Lanterns" },
+    { workId: "12", updatedAt: "1761800000", complete: true, restricted: false, fandom: "Invented Lanterns" },
   ]);
   assert.equal(read.next, true);
   const later = readListPage(listPage([{ id: "21", chapters: "1/1" }], { kind: "reading" }), "later");
-  assert.deepEqual(later, { works: [{ workId: "21", updatedAt: "1761700000", complete: true, restricted: false }], next: false });
+  assert.deepEqual(later, { works: [{ workId: "21", updatedAt: "1761700000", complete: true, restricted: false, fandom: "Invented Lanterns" }], next: false });
   assert.equal(readListPage(listPage([{ id: "22", restricted: true }]), "bookmarks").works[0].restricted, true);
   // An "Anonymous:" status before the title, for the work's own author.
   const own = listRow("31").replace('<h4 class="heading">', '<h4 class="heading"><span class="status">Anonymous:</span>');
@@ -963,6 +963,8 @@ test("a backup reads a locked work's Chapter Index again only when its list's up
   assert.equal(await indexReads("1761700000"), 1, "unchanged on the list: not read again");
   assert.equal(await indexReads("1761900000"), 2);
   assert.equal(box.saved.length, 1);
+  // Its Chapter Index names no fandom: the folder is the list's.
+  assert.ok(box.saved[0].filename.startsWith(`${COPY_FOLDER}/Invented Lanterns/`), box.saved[0].filename);
 });
 
 const loggedOutList = (list) => html(listPageURL(USER, list, 1), '<body class="logged-out"><form action="/users/login" method="post"></form></body>');

@@ -309,6 +309,8 @@ export interface ListedWork {
   readonly updatedAt: string | null;
   readonly complete: boolean;
   readonly restricted: boolean;
+  /** The blurb's first fandom: a locked work is read from its Chapter Index, which names none, so its folder comes from here. */
+  readonly fandom?: string;
 }
 
 export function listPageURL(user: string, list: ListName, page: number): string {
@@ -341,7 +343,9 @@ export function readListPage(html: string, list: ListName): { works: ListedWork[
       const id = /<a\b[^>]*\bhref\s*=\s*"\/works\/([1-9][0-9]{0,19})"/i.exec(heading)?.[1];
       if (!id) continue;
       const updatedAt = /<!--\s*updated_at=([0-9]{1,12})\s*-->/.exec(block)?.[1] ?? null;
-      add({ workId: id, updatedAt, complete: isComplete(block), restricted: RESTRICTED_LOCK.test(heading) });
+      const fandoms = /<h5\b[^>]*\bclass\s*=\s*"[^"]*\bfandoms\b[^"]*"[^>]*>([\s\S]*?)<\/h5>/i.exec(block)?.[1] ?? "";
+      const fandom = decode(/<a\b[^>]*\bclass\s*=\s*"[^"]*\btag\b[^"]*"[^>]*>([\s\S]*?)<\/a>/i.exec(fandoms)?.[1] ?? "");
+      add({ workId: id, updatedAt, complete: isComplete(block), restricted: RESTRICTED_LOCK.test(heading), ...(fandom ? { fandom } : {}) });
     }
   }
   return { works, next: /<li\b[^>]*\bclass\s*=\s*"next"[^>]*>\s*<a\b/i.test(head) };
@@ -1382,7 +1386,7 @@ export class KeepACopy {
       const seen = listed.updatedAt === null ? {} : { listed: listed.updatedAt };
       if (run.purpose === "backup") {
         // Subscriptions show no chapter count, so they leave `complete` as it was.
-        const work = this.#keep(state, listed.workId, list === "subscriptions" ? {} : { complete: listed.complete, restricted: listed.restricted });
+        const work = this.#keep(state, listed.workId, list === "subscriptions" ? {} : { complete: listed.complete, restricted: listed.restricted, ...(listed.fandom ? { fandom: listed.fandom } : {}) });
         if (stale(work)) this.#enqueue(state, { workId: listed.workId, pace: "reader", batch: true, ...seen });
       } else if (known?.copy && !listed.complete) {
         if (listed.restricted) known.restricted = true;
