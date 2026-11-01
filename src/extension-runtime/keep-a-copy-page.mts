@@ -94,11 +94,27 @@ function tabStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
 
 const sender = runtime ? reliableSender(tabStorage(), (message) => runtime.sendMessage(message)) : null;
 
+/**
+ * Whether a message says who is signed in: only a fresh page load's own
+ * visit does. A form sent from a page, or a page come back from the history,
+ * may show a reader who has since signed out or changed.
+ */
+export function tellsUser(trigger: PageTrigger, navigation: string | undefined): boolean {
+  return trigger === "visit" && navigation !== "back_forward";
+}
+
+function navigationType(): string | undefined {
+  try {
+    return (performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined)?.type;
+  } catch {
+    return undefined;
+  }
+}
+
 function tell(trigger: PageTrigger, formWork?: string): void {
   const workId = WORK_PATH.exec(location.pathname)?.[1] ?? formWork;
   const message = { type: KEEP_A_COPY_MESSAGE.page, trigger, html: workParts(), ...(workId ? { workId } : {}) };
-  // Who is signed in goes only with this page's own message.
-  const user = { user: signedInUser(document) };
+  const user = tellsUser(trigger, navigationType()) ? { user: signedInUser(document) } : {};
   if (trigger !== "visit") sender?.send({ ...message, id: crypto.randomUUID() }, user);
   else void runtime?.sendMessage({ ...message, ...user }).catch(() => undefined);
 }

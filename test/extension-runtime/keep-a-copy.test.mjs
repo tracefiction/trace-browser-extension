@@ -37,7 +37,7 @@ import {
   safeSegment,
 } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
 import { CLAIM_MS, fromOffscreenAnswer, offscreenFetcher, requestAO3, toOffscreenAnswer } from "../../.trace-build/extension-runtime/keep-a-copy-fetch.mjs";
-import { reliableSender, signedInUser, watchForms } from "../../.trace-build/extension-runtime/keep-a-copy-page.mjs";
+import { reliableSender, signedInUser, tellsUser, watchForms } from "../../.trace-build/extension-runtime/keep-a-copy-page.mjs";
 import { downloadPorts, installKeepACopy, isOurFile, offscreenKeeper, ownDownload, repeatedMessage } from "../../.trace-build/extension-runtime/keep-a-copy-runtime.mjs";
 import { ICON_SIZES, NAME, keepACopyManifest, writeIcons } from "../../scripts/build-keep-a-copy.mjs";
 
@@ -964,7 +964,9 @@ test("a backup reads a locked work's Chapter Index again only when its list's up
 
 const loggedOutList = (list) => html(listPageURL(USER, list, 1), '<body class="logged-out"><form action="/users/login" method="post"></form></body>');
 
-const signedInList = (list, rows = []) => html(listPageURL(USER, list, 1), `<body class="logged-in">${listPage(rows)}</body>`);
+/** A list page as AO3 answers the reader signed in, greeting them by name. */
+const greeting = (user) => `<ul id="greeting"><li class="dropdown"><a href="/users/${user}">Hi, ${user}!</a></li></ul>`;
+const signedInList = (list, rows = [], user = USER) => html(listPageURL(user, list, 1), `<body class="logged-in">${greeting(user)}${listPage(rows)}</body>`);
 
 test("a list sent elsewhere: Bookmarks is read once more, and shown signed in, only that list is over", async () => {
   const answers = {
@@ -1098,21 +1100,25 @@ test("a run whose reader is no longer the one signed in asks nothing with the ot
   assert.equal(box.stored.run.status, "finished");
 });
 
-test("each reader has their own weekly check date: one's check never moves another's, and a check cut short comes again", async () => {
-  const signedIn = (user, list) => html(listPageURL(user, list, 1), `<body class="logged-in">${listPage([])}</body>`);
+test("each reader has their own weekly check date: a new one's comes a week on, one's never moves another's, one cut short comes again", async () => {
   const answers = {};
-  for (const user of [USER, OTHER]) for (const list of ["bookmarks", "later"]) answers[listPageURL(user, list, 1)] = signedIn(user, list);
+  for (const user of [USER, OTHER]) for (const list of ["bookmarks", "later"]) answers[listPageURL(user, list, 1)] = signedInList(list, [], user);
   const box = harness(answers);
   await box.engine.noteUser(USER);
   await box.engine.updateSettings({ weeklyCheck: true });
   const first = box.stored.checkedAt[USER];
+  assert.equal(first, box.now, "seen for the first time: a week on");
   box.now += CHECK_EVERY_MS;
   // The first reader's check reads Bookmarks; then the other reader signs in, and it ends, not done.
   box.now += await box.engine.tick();
   await box.engine.noteUser(OTHER);
   assert.equal(box.stored.run, null);
+  // The other reader is new: no check of theirs yet.
   await box.drain();
-  // The other reader's own check ran, and moved only their date.
+  assert.equal(box.requests.some((url) => url.includes(OTHER)), false);
+  // A week on, the other reader's check runs and moves only their date.
+  box.now += CHECK_EVERY_MS;
+  await box.drain();
   assert.ok(box.requests.includes(listPageURL(OTHER, "later", 1)));
   assert.ok(box.stored.checkedAt[OTHER] > first);
   assert.equal(box.stored.checkedAt[USER], first);
@@ -1121,6 +1127,133 @@ test("each reader has their own weekly check date: one's check never moves anoth
   await box.drain();
   assert.ok(box.requests.includes(listPageURL(USER, "later", 1)));
   assert.ok(box.stored.checkedAt[USER] > first);
+});
+
+test("only the reader signed in, and those checked within eight days, keep a check date; switched off, none", async () => {
+  const box = harness({});
+  await box.engine.noteUser(USER);
+  box.now += 9 * 24 * 60 * 60_000;
+  await box.engine.noteUser(OTHER);
+  assert.deepEqual(Object.keys(box.stored.checkedAt), [OTHER]);
+  box.now += 60_000;
+  await box.engine.noteUser("Third_Reader");
+  assert.deepEqual(Object.keys(box.stored.checkedAt).sort(), [OTHER, "Third_Reader"]);
+  await box.engine.updateSettings({ enabled: false });
+  assert.equal(box.stored.checkedAt, undefined);
+  assert.equal(box.stored.user, null);
+});
+
+test("AO3's own greeting decides who is signed in: a list answered for another reader ends the run, not done", async () => {
+  const answers = {
+    [listPageURL(USER, "bookmarks", 1)]: signedInList("bookmarks", [], OTHER),
+    [listPageURL(USER, "later", 1)]: signedInList("later"),
+  };
+  const box = harness(answers);
+  // A page told of the first reader, but the session is the other's now.
+  await box.engine.noteUser(USER);
+  await box.engine.updateSettings({ weeklyCheck: true });
+  const checkedAt = box.stored.checkedAt[USER];
+  box.now += CHECK_EVERY_MS;
+  await box.drain();
+  assert.deepEqual(box.requests, [listPageURL(USER, "bookmarks", 1)]);
+  assert.equal(box.stored.run, null);
+  assert.equal(box.stored.checkedAt[USER], checkedAt, "nothing counted as checked");
+  // The greeted reader is the one signed in, new here, so their first check is a week on.
+  assert.equal(box.stored.user, OTHER);
+  assert.ok(box.stored.checkedAt[OTHER] >= checkedAt + CHECK_EVERY_MS);
+  // A message from a form or an old page carries no reader: it changes nothing.
+  await box.engine.notePage(readWorkPage(workPage("5")), "visit");
+  assert.equal(box.stored.user, OTHER);
+  box.now += 60_000;
+  await box.drain();
+  assert.equal(box.requests.length, 1, "nothing more is asked");
+});
+
+test("a stale page of the reader before leaves the new reader's run alone, and that reader's check reads nothing on with the new session", async () => {
+  const answers = { [listPageURL(USER, "bookmarks", 1)]: signedInList("bookmarks", [], OTHER) };
+  for (const list of ["bookmarks", "later", "subscriptions"]) answers[listPageURL(OTHER, list, 1)] = signedInList(list, [], OTHER);
+  const box = harness(answers);
+  await box.engine.noteUser(USER);
+  await box.engine.updateSettings({ weeklyCheck: true });
+  const checkedAt = box.stored.checkedAt[USER];
+  box.now += CHECK_EVERY_MS;
+  // The other reader signs in and backs up; the first reader's old tab, come back from the history or sending a form, says no reader.
+  await box.engine.noteUser(OTHER);
+  await box.engine.startBackup();
+  box.now += await box.engine.tick();
+  await box.engine.notePage(readWorkPage(workPage("5")), "visit");
+  await box.drain();
+  assert.equal(box.stored.user, OTHER);
+  assert.equal(box.stored.run.status, "finished");
+  assert.deepEqual(box.requests, ["bookmarks", "later", "subscriptions"].map((list) => listPageURL(OTHER, list, 1)));
+  // Told of the first reader all the same: their check is due, and AO3's answer to its first read greets the other reader.
+  await box.engine.noteUser(USER);
+  box.now += 60_000;
+  await box.drain();
+  assert.deepEqual(box.requests.filter((url) => url.includes(`/users/${USER}/`)), [listPageURL(USER, "bookmarks", 1)]);
+  assert.equal(box.stored.user, OTHER);
+  assert.equal(box.stored.run, null);
+  assert.equal(box.stored.checkedAt[USER], checkedAt, "nothing counted as checked");
+});
+
+test("the extra Bookmarks read ends the list only when it greets the run's own reader", async () => {
+  for (const [kind, bookmarks, after] of [
+    ["the run's reader", signedInList("bookmarks"), { list: 2 }],
+    ["another reader", signedInList("bookmarks", [], OTHER), { run: "finished" }],
+    ["signed in, no greeting", html(listPageURL(USER, "bookmarks", 1), `<body class="logged-in">${listPage([])}</body>`), { list: 1 }],
+  ]) {
+    const answers = {
+      [listPageURL(USER, "bookmarks", 1)]: signedInList("bookmarks"),
+      [listPageURL(USER, "later", 1)]: { kind: "redirect", url: listPageURL(USER, "later", 1) },
+      [listPageURL(USER, "subscriptions", 1)]: signedInList("subscriptions"),
+    };
+    const box = harness(answers);
+    await box.engine.noteUser(USER);
+    await box.engine.startBackup();
+    box.now += await box.engine.tick();
+    answers[listPageURL(USER, "bookmarks", 1)] = bookmarks;
+    for (let i = 0; i < 2; i += 1) box.now += await box.engine.tick();
+    if (after.list !== undefined) assert.equal(box.stored.run.list, after.list, kind);
+    if (after.run) assert.equal(box.stored.run.status, after.run, kind);
+  }
+});
+
+test("a sign-out stop leaves no error count of the list behind it", async () => {
+  const answers = {
+    [listPageURL(USER, "bookmarks", 1)]: html(listPageURL(USER, "bookmarks", 1), "<h2>Error 500</h2>", 500),
+  };
+  const box = harness(answers);
+  await box.engine.noteUser(USER);
+  await box.engine.startBackup();
+  box.now += await box.engine.tick();
+  assert.equal(box.stored.run.errors, 1);
+  answers[listPageURL(USER, "bookmarks", 1)] = loggedOutList("bookmarks");
+  await box.engine.tick();
+  assert.equal(box.stored.pacer.stopped.code, "signed_out");
+  assert.equal(box.stored.run.errors, undefined);
+});
+
+test("switched off, the AO3 name goes and a run ends; on again, nothing of the reader before is read", async () => {
+  const answers = { [listPageURL(USER, "bookmarks", 1)]: signedInList("bookmarks"), [listPageURL(USER, "later", 1)]: signedInList("later") };
+  const box = harness(answers);
+  await box.engine.noteUser(USER);
+  await box.engine.startBackup();
+  box.now += await box.engine.tick();
+  await box.engine.updateSettings({ enabled: false });
+  assert.equal(box.stored.user, null);
+  assert.equal(box.stored.run.status, "finished");
+  await box.engine.updateSettings({ enabled: true });
+  await box.drain();
+  assert.deepEqual(box.requests, [listPageURL(USER, "bookmarks", 1)]);
+  assert.equal(await box.engine.startBackup(), "no_user");
+});
+
+test("only a fresh page load's own visit says who is signed in", () => {
+  assert.equal(tellsUser("visit", "navigate"), true);
+  assert.equal(tellsUser("visit", "reload"), true);
+  assert.equal(tellsUser("visit", undefined), true);
+  assert.equal(tellsUser("visit", "back_forward"), false);
+  for (const trigger of ["bookmark", "later", "subscribe", "kudos"]) assert.equal(tellsUser(trigger, "navigate"), false);
 });
 
 test("the extra Bookmarks read counts its own errors, not those of the list before it", async () => {

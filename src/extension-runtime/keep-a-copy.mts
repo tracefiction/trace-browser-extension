@@ -78,6 +78,8 @@ export const MAX_PAGE_CHARS = 2_097_152;
 /** A new file under this share of the old one's size keeps the old one too. */
 export const SHRINK_KEEP_RATIO = 0.8;
 export const CHECK_EVERY_MS = 7 * 24 * 60 * 60_000;
+/** A reader not signed in now is remembered with their check date for this long. */
+export const CHECKED_KEEP_MS = 8 * 24 * 60 * 60_000;
 /** A list longer than this is cut off; far past any seen. */
 export const MAX_LIST_PAGES = 1_000;
 
@@ -162,6 +164,15 @@ export function isRestrictedPage(html: string): boolean {
 export function pageSignedIn(html: string): boolean | null {
   const bodyClass = /<body\b[^>]*\bclass\s*=\s*"([^"]*)"/i.exec(html.slice(0, MAX_PAGE_CHARS))?.[1] ?? "";
   return /\blogged-in\b/.test(bodyClass) ? true : /\blogged-out\b/.test(bodyClass) ? false : null;
+}
+
+/**
+ * The AO3 name a page's own greeting (`#greeting`) names: the reader signed
+ * in when AO3 answered. Undefined when the page has no greeting.
+ */
+export function greetedUser(html: string): string | undefined {
+  const greeting = /<[a-z]+\b[^>]*\bid\s*=\s*"greeting"[^>]*>([\s\S]*?)<\/ul>/i.exec(html.slice(0, MAX_PAGE_CHARS))?.[1];
+  return greeting === undefined ? undefined : /<a\b[^>]*\bhref\s*=\s*"\/users\/([A-Za-z0-9_]{1,40})(?:[/?"])/i.exec(greeting)?.[1];
 }
 
 /** A work page (or its preface and Download menu) as the facts a copy needs. */
@@ -789,6 +800,12 @@ export class KeepACopy {
         weeklyCheck: typeof patch.weeklyCheck === "boolean" ? patch.weeklyCheck : state.settings.weeklyCheck,
         format,
       };
+      if (!state.settings.enabled) {
+        // Turned off: not even the AO3 name is kept, and a run ends, not done.
+        state.user = null;
+        if (state.run?.status === "running") this.#endRun(state, state.run, false);
+        delete state.checkedAt;
+      }
       this.#setQuiet(this.#batchRunning(state));
     });
   }
@@ -796,21 +813,28 @@ export class KeepACopy {
   /** The AO3 name the reader is signed in as, from the page they are on. */
   noteUser(user: string | null): Promise<void> {
     return this.#serial((state) => {
-      if (user && AO3_USERNAME_PATTERN.test(user)) {
-        state.user = user;
-        (state.checkedAt ??= {})[user] ??= state.pacer.lastCheckAt;
-        // Another reader signed in: a run of the reader before ends here, not done, with nothing more asked of their lists.
-        if (state.run?.status === "running" && state.run.user !== user) this.#endRun(state, state.run, false);
-        if (state.pacer.stopped?.code === "signed_out") state.pacer.stopped = null;
-        // Signed in again: the locked works copy on their own, at the queue's pace.
-        if (state.signedOutSeen && state.settings.enabled) {
-          delete state.signedOutSeen;
-          this.#requeue(state, ["needs_sign_in"]);
-        }
-      } else if (user === null) {
-        state.signedOutSeen = true;
-      }
+      if (user && AO3_USERNAME_PATTERN.test(user)) this.#signedIn(state, user);
+      else if (user === null) state.signedOutSeen = true;
     });
+  }
+
+  /** `user` is signed in, as a page or AO3's own answer says. */
+  #signedIn(state: KeepState, user: string): void {
+    state.user = user;
+    const now = this.ports.clock.now();
+    const checkedAt = (state.checkedAt ??= {});
+    // A reader seen for the first time has their first weekly check a week on, the gentler
+    // choice for AO3; Back up reads their lists at once whenever they ask.
+    checkedAt[user] ??= now;
+    for (const [name, at] of Object.entries(checkedAt)) if (name !== user && now - at >= CHECKED_KEEP_MS) delete checkedAt[name];
+    // Another reader signed in: a run of the reader before ends here, not done, with nothing more asked of their lists.
+    if (state.run?.status === "running" && state.run.user !== user) this.#endRun(state, state.run, false);
+    if (state.pacer.stopped?.code === "signed_out") state.pacer.stopped = null;
+    // Signed in again: the locked works copy on their own, at the queue's pace.
+    if (state.signedOutSeen && state.settings.enabled) {
+      delete state.signedOutSeen;
+      this.#requeue(state, ["needs_sign_in"]);
+    }
   }
 
   /** Try again: back in the queue, at its pace and under its stops. */
@@ -1270,7 +1294,10 @@ export class KeepACopy {
     const answer = await this.#fetch(listPageURL(run.user, list, run.page), "page", "include");
     // Sent elsewhere (not followed): signed out, as far as is known, or else asked once more (#confirmList).
     if (answer.kind === "redirect") {
-      if (state.signedOutSeen) return signedOut;
+      if (state.signedOutSeen) {
+        delete run.errors;
+        return signedOut;
+      }
       // Its own count: the list's errors are not the extra read's.
       delete run.errors;
       run.confirm = true;
@@ -1279,13 +1306,22 @@ export class KeepACopy {
     const verdict = classifyAnswer(answer, "session", this.ports.clock.now());
     if (verdict.kind === "skip") {
       // A list page shown signed out: the reader signed out.
-      if (verdict.code === "needs_sign_in") return signedOut;
+      if (verdict.code === "needs_sign_in") {
+        delete run.errors;
+        return signedOut;
+      }
       // Gone: that list is over. Any other answer is tried again, three times in all, then that list is over too.
       run.errors = verdict.code === "gone" ? MAX_ATTEMPTS : (run.errors ?? 0) + 1;
       if (run.errors >= MAX_ATTEMPTS) this.#nextList(state, run);
       return verdict;
     }
     if (verdict.kind !== "ok" || answer.kind !== "response") return verdict;
+    // AO3's own answer says who is signed in: another reader's session ends the run, not done, with nothing counted.
+    const greeted = greetedUser(answer.text ?? "");
+    if (greeted !== undefined && greeted !== run.user) {
+      this.#signedIn(state, greeted);
+      return verdict;
+    }
     delete run.errors;
     const read = readListPage(answer.text ?? "", list);
     for (const listed of read.works) {
@@ -1332,7 +1368,15 @@ export class KeepACopy {
       delete run.errors;
       return { kind: "stop", code: "signed_out", waitMs: null };
     }
-    if (verdict.kind === "ok" && answer.kind === "response" && pageSignedIn(answer.text ?? "") === true) {
+    const text = answer.kind === "response" ? answer.text ?? "" : "";
+    const greeted = greetedUser(text);
+    // Another reader's session: they are the one signed in, and the run ends, not done.
+    if (verdict.kind === "ok" && greeted !== undefined && greeted !== run.user) {
+      this.#signedIn(state, greeted);
+      return verdict;
+    }
+    // Shown to the run's own reader, by name: only that list sent them elsewhere, and it is over.
+    if (verdict.kind === "ok" && pageSignedIn(text) === true && greeted === run.user) {
       delete run.confirm;
       this.#nextList(state, run);
       return verdict;
