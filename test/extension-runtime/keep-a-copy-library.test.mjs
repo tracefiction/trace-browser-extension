@@ -340,6 +340,22 @@ test("switched off, nothing is written, not even the reader's AO3 name", async (
   assert.equal((await box.store.read("account-1")).settings.enabled, false);
 });
 
+test("switched off, the reader's AO3 name goes: another reader signing in meanwhile, and on again, nothing of the reader before is read", async () => {
+  const box = harness();
+  await box.engine.updateSettings({ enabled: true, weeklyCheck: true });
+  await box.engine.noteUser("Synthetic_Reader");
+  assert.equal((await box.engine.view()).user, "Synthetic_Reader");
+  await box.engine.updateSettings({ enabled: false });
+  // Off, a page saying another reader is signed in is not heard.
+  await box.engine.noteUser("Other_Reader");
+  await box.engine.updateSettings({ enabled: true });
+  assert.equal((await box.engine.view()).user, null);
+  assert.equal(await box.engine.startBackup(), "no_user");
+  box.now += 8 * 24 * 60 * 60_000;
+  await box.drain();
+  assert.deepEqual(box.requests, []);
+});
+
 test("an account that signs out and back in carries on with nothing checked again; another account has its own works and never touches the first's files", async () => {
   const answers = {
     [workURL("101")]: html(workURL("101"), workPage("101")),
