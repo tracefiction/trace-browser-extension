@@ -366,30 +366,39 @@ test("a script that cannot be put into the tab sends nothing: no try, no read, n
   assert.equal(app.saved.length, 1);
 });
 
-test("the tab runner: refused before anything ran is nothing sent; refused, late or empty after is a lost answer", async () => {
+test("the tab runner: the fetch goes in only after a trivial script ran; a part read or release runs on its own", async () => {
   const calls = [];
-  const scripting = (real) => ({
-    async executeScript({ func, args }) {
-      calls.push(func === fetchInTab ? "fetch" : "probe");
-      if (calls.length % 2 === 1) {
-        if (real === "probe refused") throw new Error("Cannot access contents of the page");
-        return [{ result: func(...args) }];
-      }
-      if (real === "refused") throw new Error("The frame was removed");
-      if (real === "late") return new Promise(() => {});
-      if (real === "empty") return [{}];
-      if (real === "undefined") return [{ result: undefined }];
-      return [{ result: await func(...args) }];
+  const label = (func) => (func === keepCopyFetchInTab ? "fetch" : func === keepCopyPartInTab ? "part" : "probe");
+  const scripting = (probe, real) => ({
+    async executeScript({ func }) {
+      const which = label(func);
+      calls.push(which);
+      const answer = which === "probe" ? probe : real;
+      if (answer === "refused") throw new Error("Cannot access contents of the page");
+      if (answer === "late") return new Promise(() => {});
+      if (answer === "empty") return [{}];
+      if (answer === "undefined") return [{ result: undefined }];
+      return [{ result: which === "probe" ? true : { kind: "response", url: "u" } }];
     },
   });
-  const fetchInTab = async (url) => ({ kind: "response", url });
-  assert.equal(await tabRunner(scripting("probe refused"))(7, fetchInTab, ["u"], 50), undefined);
-  assert.deepEqual(calls.splice(0), ["probe"], "the real script never went in");
-  for (const real of ["refused", "late", "empty", "undefined"]) {
-    assert.equal(await tabRunner(scripting(real))(7, fetchInTab, ["u"], 50), null, real);
+  const fetchArgs = ["u", "text", 50, 1_000, "", "omit"];
+  // Not run: refused, late, or no `true` back. The fetch never goes in.
+  for (const probe of ["refused", "late", "empty", "undefined"]) {
     calls.length = 0;
+    assert.equal(await tabRunner(scripting(probe, "ok"))(7, keepCopyFetchInTab, fetchArgs, 50), undefined, probe);
+    assert.deepEqual(calls, ["probe"], probe);
   }
-  assert.deepEqual(await tabRunner(scripting("ok"))(7, fetchInTab, ["u"], 50), { kind: "response", url: "u" });
+  // Ran, then the fetch failed: a lost answer.
+  for (const real of ["refused", "late", "empty", "undefined"]) {
+    assert.equal(await tabRunner(scripting("ok", real))(7, keepCopyFetchInTab, fetchArgs, 50), null, real);
+  }
+  assert.deepEqual(await tabRunner(scripting("ok", "ok"))(7, keepCopyFetchInTab, fetchArgs, 50), { kind: "response", url: "u" });
+  // A part read: no trivial script first.
+  calls.length = 0;
+  assert.deepEqual(await tabRunner(scripting("refused", "ok"))(7, keepCopyPartInTab, ["h", 0, 1], 50), { kind: "response", url: "u" });
+  assert.deepEqual(calls, ["part"]);
+  assert.equal(await tabRunner(scripting("ok", "refused"))(7, keepCopyPartInTab, ["h", 0, 1], 50), undefined);
+  assert.equal(await tabRunner(scripting("ok", "empty"))(7, keepCopyPartInTab, ["h", 0, 1], 50), null);
 });
 
 test("only a stop AO3's own answer set is shared with the app, never one from tries that got no answer", async () => {

@@ -526,10 +526,13 @@ const call = <T,>(target: Record<string, unknown>, method: string, args: readonl
 const PROBE_TIMEOUT_MS = 5_000;
 
 /**
- * TabPort.run over `scripting.executeScript`. A trivial script goes into the
- * tab first: refused (or not run in time), nothing was sent, and the answer
- * is undefined. Once it ran, any failure of the real one (refused, running
- * past its time, or no result) may come after its request was sent: null.
+ * TabPort.run over `scripting.executeScript`. Before the one script that
+ * sends a request to AO3 (keepCopyFetchInTab), a trivial script goes into
+ * the tab: not run (refused, not in time, or no `true` back), nothing was
+ * sent, and the answer is undefined. Once it ran, any failure of the real
+ * one (refused, running past its time, or no result) may come after its
+ * request was sent: null. Every other script runs on its own: null when it
+ * gives nothing back, undefined when refused.
  */
 export function tabRunner(scripting: NativeKeepEnvironment["scripting"]): TabPort["run"] {
   const within = async <R,>(work: Promise<R>, ms: number): Promise<R | "late"> => {
@@ -540,19 +543,23 @@ export function tabRunner(scripting: NativeKeepEnvironment["scripting"]): TabPor
       clearTimeout(timer);
     }
   };
+  const resultOf = (results: unknown): unknown => {
+    const first: unknown = Array.isArray(results) ? results[0] : undefined;
+    return isRecord(first) && "result" in first ? first.result ?? null : null;
+  };
   return async function run<T>(tabId: number, func: (...args: never[]) => unknown, args: readonly unknown[], timeoutMs: number): Promise<T | null | undefined> {
     const target = { tabId, frameIds: [0] };
-    try {
-      if ((await within(scripting.executeScript({ target, func: () => true, args: [] }), PROBE_TIMEOUT_MS)) === "late") return undefined;
-    } catch {
-      return undefined;
+    if (func === keepCopyFetchInTab) {
+      try {
+        if (resultOf(await within(scripting.executeScript({ target, func: () => true, args: [] }), PROBE_TIMEOUT_MS)) !== true) return undefined;
+      } catch {
+        return undefined;
+      }
     }
     try {
-      const results = await within(scripting.executeScript({ target, func, args }), timeoutMs);
-      const first: unknown = Array.isArray(results) ? results[0] : undefined;
-      return isRecord(first) && "result" in first ? (first.result ?? null) as T | null : null;
+      return resultOf(await within(scripting.executeScript({ target, func, args }), timeoutMs)) as T | null;
     } catch {
-      return null;
+      return func === keepCopyFetchInTab ? null : undefined;
     }
   };
 }
