@@ -233,6 +233,26 @@ export function readWorkPage(html: string): WorkPageRead | null {
   };
 }
 
+/** A list row without its `blockquote.userstuff` (a summary, a bookmark's notes), quotes inside them and all. */
+function withoutUserstuff(html: string): string {
+  let out = "";
+  let from = 0;
+  let depth = 0;
+  for (const tag of html.matchAll(/<(\/?)blockquote\b[^>]*>/gi)) {
+    const at = tag.index ?? 0;
+    if (depth === 0) {
+      if (tag[1] === "/" || !/\buserstuff\b/i.test(tag[0])) continue;
+      out += html.slice(from, at);
+      depth = 1;
+    } else {
+      depth += tag[1] === "/" ? -1 : 1;
+      if (depth === 0) from = at + tag[0].length;
+    }
+  }
+  // One left open runs to the row's end.
+  return depth > 0 ? out : out + html.slice(from);
+}
+
 function isComplete(html: string): boolean {
   const chapters = decode(/<dd\b[^>]*\bclass\s*=\s*"[^"]*\bchapters\b[^"]*"[^>]*>([\s\S]*?)<\/dd>/i.exec(html)?.[1] ?? "");
   const counts = /^([0-9,]+)\s*\/\s*([0-9,]+|\?)$/.exec(chapters);
@@ -338,7 +358,9 @@ export function readListPage(html: string, list: ListName): { works: ListedWork[
   } else {
     // A listing row: a bookmark of a work, or a Marked for Later reading, each opened by its own id, so a
     // list item in a reader's own words (a summary, a note) never passes for a row.
-    for (const block of head.split(/(?=<li\b[^>]*\bid\s*=\s*"(?:bookmark|work)_[0-9]+")/i).filter((part) => /^<li\b/i.test(part))) {
+    for (const part of head.split(/(?=<li\b[^>]*\bid\s*=\s*"(?:bookmark|work)_[0-9]+")/i).filter((each) => /^<li\b/i.test(each))) {
+      // Read without the words of the work's author or the reader (its summary, notes): no markup in them counts.
+      const block = withoutUserstuff(part);
       // The heading's first work link is the title (an "Anonymous:" status can come before it).
       const heading = /<h4\b[^>]*\bclass\s*=\s*"[^"]*\bheading\b[^"]*"[^>]*>([\s\S]*?)<\/h4>/i.exec(block)?.[1] ?? "";
       const id = /<a\b[^>]*\bhref\s*=\s*"\/works\/([1-9][0-9]{0,19})"/i.exec(heading)?.[1];

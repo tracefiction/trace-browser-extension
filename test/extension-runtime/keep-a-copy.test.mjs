@@ -232,6 +232,11 @@ test("reads the reader's lists and their next page", () => {
     '<blockquote class="userstuff summary"><ul><li class="blurb"><h4 class="heading"><a href="/works/6">x</a></h4><h5 class="fandoms"><a class="tag">../../Evil</a></h5></li></ul></blockquote></li>' +
     '<li id="bookmark_1" class="bookmark blurb group"><div class="header module"><h4 class="heading"><a href="/works/6">T</a></h4><h5 class="fandoms heading"><a class="tag">Six real</a></h5></div></li>';
   assert.deepEqual(readListPage(handMade, "bookmarks").works.map((work) => [work.workId, work.fandom]), [["5", "Real"], ["6", "Six real"]]);
+  // A summary carrying a row's own markup (a finished chapter count, a quote inside it) does not make the row complete.
+  const summary = listRow({ id: "44", chapters: "3/10" }).replace("<dl class=\"stats\">", '<blockquote class="userstuff summary"><blockquote><p>q</p></blockquote>' +
+    '<dl class="stats"><dd class="chapters">1/1</dd></dl></blockquote><dl class="stats">');
+  assert.equal(readListPage(summary, "bookmarks").works[0].complete, false);
+  assert.equal(readListPage(listRow({ id: "45", chapters: "10/10" }).replace("<dl class=\"stats\">", '<blockquote class="userstuff summary"><p>s</p></blockquote><dl class="stats">'), "bookmarks").works[0].complete, true);
   // An "Anonymous:" status before the title, for the work's own author.
   const own = listRow("31").replace('<h4 class="heading">', '<h4 class="heading"><span class="status">Anonymous:</span>');
   assert.equal(readListPage(own, "bookmarks").works[0].workId, "31");
