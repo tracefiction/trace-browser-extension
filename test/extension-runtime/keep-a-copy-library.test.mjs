@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AO3_ORIGIN, KeepACopy, lockedFileURL, ownName } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
+import { AO3_ORIGIN, COPY_FOLDER, KeepACopy, lockedFileURL, lockedVersion, ownName } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
 import {
   KEEP_A_COPY_PREF_KEY,
   LIBRARY_DEFAULTS,
@@ -163,8 +163,8 @@ test("turned on, every kept Library work is copied: its page, then its file, at 
   await box.drain();
   assert.deepEqual(box.requests, [workURL("21"), fileURL("21"), workURL("22"), fileURL("22")]);
   assert.deepEqual(box.saved.map((save) => save.filename), [
-    "AO3/Invented Lanterns/Invented work 21 – Synthetic_Quill (21).epub",
-    "AO3/Invented Lanterns/Invented work 22 – Synthetic_Quill (22).epub",
+    `${COPY_FOLDER}/Invented Lanterns/Invented work 21 – Synthetic_Quill (21).epub`,
+    `${COPY_FOLDER}/Invented Lanterns/Invented work 22 – Synthetic_Quill (22).epub`,
   ]);
   // A second read of the same Library asks AO3 for nothing.
   await box.engine.syncLibrary({ keep: [{ workId: "21", chapters: 3 }, { workId: "22", chapters: null }], drop: [], whole: true });
@@ -250,8 +250,8 @@ test("a work missing from a Library that may be cut off keeps updating; from a w
 
 test("a Library work is read signed out; a locked one from its Chapter Index, signed in, and again when a chapter lands", async () => {
   const day = (date) => String(Date.parse(`${date}T00:00:00Z`) / 1_000 + 0);
-  const first = lockedFileURL("61", "Invented work 61", "epub", String(Number(day("2026-10-20")) + 1));
-  const second = lockedFileURL("61", "Invented work 61", "epub", String(Number(day("2026-10-28")) + 2));
+  const first = lockedFileURL("61", "Invented work 61", "epub", lockedVersion({ latestAt: Number(day("2026-10-20")), chapters: 1 }));
+  const second = lockedFileURL("61", "Invented work 61", "epub", lockedVersion({ latestAt: Number(day("2026-10-28")), chapters: 2 }));
   const answers = {
     [workURL("61")]: html(workURL("61"), workPage("61", { restricted: true })),
     [navigateURL("61")]: html(navigateURL("61"), chapterIndex("61", [["611", "2026-10-20"]])),
