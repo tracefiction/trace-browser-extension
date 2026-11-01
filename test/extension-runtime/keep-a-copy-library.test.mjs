@@ -434,6 +434,36 @@ function fakeExtension() {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
 
+test("in Trace's background, with no Trace account, the switch on keeps nothing and copies nothing: not even an AO3 page's reader", async (t) => {
+  const extension = fakeExtension();
+  extension.store[KEEP_A_COPY_PREF_KEY] = true;
+  const realFetch = globalThis.fetch;
+  const fetched = [];
+  globalThis.fetch = async (url) => {
+    fetched.push(String(url));
+    return new Response("<h2>Error 404</h2>", { status: 404, headers: { "content-type": "text/html" } });
+  };
+  globalThis.indexedDB = new IDBFactory();
+  globalThis.IDBKeyRange = IDBKeyRange;
+  t.after(() => {
+    globalThis.fetch = realFetch;
+    delete globalThis.indexedDB;
+    delete globalThis.IDBKeyRange;
+  });
+  // Trace signed out: its Library cannot be read.
+  const copies = installTraceKeepACopy(extension, { librarySnapshot: async () => null, whenAccountLeaves: () => undefined });
+  await settle();
+  const [listener] = extension.listeners.message;
+  const send = (message) => new Promise((respond) => listener(message, { id: "trace-test", url: `${AO3_ORIGIN}/works/1` }, respond));
+  await send({ type: "KEEP_A_COPY_PAGE", trigger: "visit", user: "Synthetic_Reader" });
+  await send({ type: "KEEP_A_COPY_PAGE", trigger: "bookmark", html: "", workId: "1", id: "6f1c1d1e-0d7a-4a8e-9f31-2b6a1c0e5d42" });
+  await copies.sync(true);
+  await settle();
+  assert.deepEqual(fetched, [], "no account's works in use: nothing is copied");
+  const store = new IndexedDbKeepStore(globalThis.indexedDB, IDBKeyRange);
+  assert.equal(await store.read(""), undefined, "nothing written");
+});
+
 test("in Trace's background it answers only its own messages, and wakes nothing while the switch is off", async (t) => {
   const extension = fakeExtension();
   const reads = [];

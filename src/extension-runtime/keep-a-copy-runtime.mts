@@ -289,7 +289,8 @@ export function installKeepACopy(extension: Extension, options: KeepACopyOptions
     cancel,
     remove,
     quiet: (on) => setUi(!on),
-  }, options.defaults, options.scope ?? "");
+  // Trace's null (no account's works until its Library is read) stays null: only no scope given is the standalone's own.
+  }, options.defaults, options.scope === undefined ? "" : options.scope);
 
   const repeated = repeatedMessage();
   let running = false;
