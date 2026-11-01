@@ -112,11 +112,14 @@ const ID_PATTERN = /^[1-9][0-9]{0,19}$/;
 /** The lock beside a restricted work's title: lockblue.png, "(Restricted)". */
 const RESTRICTED_LOCK = /<img\b[^>]*(?:\bsrc\s*=\s*"[^"]*\/lockblue\.png"|\balt\s*=\s*"\(Restricted\)")/i;
 
+/** A character reference past the last code point reads as the replacement character, as a browser shows it. */
+const codePoint = (value: number) => String.fromCodePoint(value <= 0x10ffff ? value : 0xfffd);
+
 function decode(text: string): string {
   return text
     .replace(/<[^>]*>/g, "")
-    .replace(/&#x([0-9a-f]{1,6});/gi, (_, hex: string) => String.fromCodePoint(parseInt(hex, 16)))
-    .replace(/&#([0-9]{1,7});/g, (_, dec: string) => String.fromCodePoint(Number(dec)))
+    .replace(/&#x([0-9a-f]{1,6});/gi, (_, hex: string) => codePoint(parseInt(hex, 16)))
+    .replace(/&#([0-9]{1,7});/g, (_, dec: string) => codePoint(Number(dec)))
     .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
     .replace(/\s+/g, " ")
     .trim();

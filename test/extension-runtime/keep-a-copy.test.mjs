@@ -477,6 +477,11 @@ test("a save is asked after by its own URL, and one the browser finds under anot
   assert.equal(box.stored.works["1"].copy.downloadId, 9);
 });
 
+test("a character reference past the last code point reads as the replacement character", () => {
+  const page = workPage("1").replace("Invented work 1", "A&#x110000;B&#1114112;C");
+  assert.match(readWorkPage(page).title, /^A\uFFFDB\uFFFDC/);
+});
+
 test("the old file goes only once the new one is complete; an interrupted save keeps it, and is given up", async () => {
   const box = harness({
     [epubLink("1")]: file(epubLink("1"), epub()),
