@@ -796,7 +796,8 @@ export class KeepACopy {
     return this.#serial((state) => {
       if (user && AO3_USERNAME_PATTERN.test(user)) {
         state.user = user;
-        if (state.pacer.stopped?.code === "signed_out") state.pacer.stopped = null;
+        // Only the reader whose lists the run reads ends its sign-out stop.
+        if (state.pacer.stopped?.code === "signed_out" && (!state.run || state.run.user === user)) state.pacer.stopped = null;
         // Signed in again: the locked works copy on their own, at the queue's pace.
         if (state.signedOutSeen && state.settings.enabled) {
           delete state.signedOutSeen;
@@ -1260,7 +1261,12 @@ export class KeepACopy {
     const answer = await this.#fetch(listPageURL(run.user, list, run.page), "page", "include");
     // Sent elsewhere (not followed): signed out, as far as is known, or else asked once more (#confirmList).
     if (answer.kind === "redirect") {
-      if (state.signedOutSeen || state.user !== run.user) return signedOut;
+      // Another reader is signed in now: the run ends, with nothing more asked (a check, not done, comes again).
+      if (state.user !== run.user) {
+        this.#endRun(state, run, false);
+        return { kind: "ok" };
+      }
+      if (state.signedOutSeen) return signedOut;
       run.confirm = true;
       return { kind: "ok" };
     }
@@ -1312,13 +1318,25 @@ export class KeepACopy {
    */
   async #confirmList(state: KeepState, run: ListRun): Promise<Verdict> {
     const answer = await this.#fetch(listPageURL(run.user, "bookmarks", 1), "page", "include");
-    const verdict = answer.kind === "redirect" ? { kind: "ok" as const } : classifyAnswer(answer, "session", this.ports.clock.now());
+    const verdict: Verdict = answer.kind === "redirect" ? { kind: "skip", code: "no_download" } : classifyAnswer(answer, "session", this.ports.clock.now());
     // AO3 slowing down or refusing: asked again after it.
     if (verdict.kind === "retry" || verdict.kind === "stop") return verdict;
-    delete run.confirm;
-    if (verdict.kind === "skip" && verdict.code === "needs_sign_in") return { kind: "stop", code: "signed_out", waitMs: null };
-    this.#nextList(state, run);
-    return { kind: "ok" };
+    if (verdict.kind === "skip" && verdict.code === "needs_sign_in") {
+      delete run.confirm;
+      return { kind: "stop", code: "signed_out", waitMs: null };
+    }
+    if (verdict.kind === "ok" && answer.kind === "response" && pageSignedIn(answer.text ?? "") === true) {
+      delete run.confirm;
+      this.#nextList(state, run);
+      return verdict;
+    }
+    // Anything else tells nothing: read again, three times in all, then that list is over.
+    run.errors = (run.errors ?? 0) + 1;
+    if (run.errors >= MAX_ATTEMPTS) {
+      delete run.confirm;
+      this.#nextList(state, run);
+    }
+    return verdict.kind === "skip" ? verdict : { kind: "skip", code: "http_error" };
   }
 
   /** The run goes on with its next list, or ends with its last. */
@@ -1326,10 +1344,16 @@ export class KeepACopy {
     delete run.errors;
     run.list += 1;
     run.page = 1;
-    if (run.list < run.lists.length) return;
+    if (run.list >= run.lists.length) this.#endRun(state, run, true);
+  }
+
+  /** `done`: every list was read; a check ended early is not done, and comes again. */
+  #endRun(state: KeepState, run: ListRun, done: boolean): void {
+    delete run.errors;
+    delete run.confirm;
     run.status = "finished";
     if (run.purpose !== "check") return;
-    state.pacer.lastCheckAt = this.ports.clock.now();
+    if (done) state.pacer.lastCheckAt = this.ports.clock.now();
     state.run = null;
   }
 }
