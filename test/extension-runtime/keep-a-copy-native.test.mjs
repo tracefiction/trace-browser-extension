@@ -408,8 +408,8 @@ test("a slow transfer that keeps moving is waited on past the 15 minutes, and AO
 
 test("a transfer given up while a part is on its way is never written open again", async () => {
   const file = epub(PART_BYTES * 2);
-  const site = ao3({ [workURL("82")]: workPage("82"), [fileURL("82")]: file });
-  const app = fakeApp({ works: [{ workId: "82", reason: "refused" }] });
+  const site = ao3({ [workURL("82")]: workPage("82"), [fileURL("82")]: file, [workURL("84")]: workPage("84"), [fileURL("84")]: epub(PART_BYTES + 5) });
+  const app = fakeApp({ works: [{ workId: "82", reason: "refused" }, { workId: "84", reason: "refused" }] });
   let release;
   app.hold = new Promise((resolve) => { release = resolve; });
   // Every answer the app gives back, as it reaches the extension.
@@ -425,6 +425,7 @@ test("a transfer given up while a part is on its way is never written open again
   await until(() => app.messages.some((m) => m.type === KEEP_COPY_NATIVE.part), "a part on its way", async () => {
     box.now += (await box.handoff.engine.tick()) ?? 0;
   });
+  const given = app.messages.find((m) => m.type === KEEP_COPY_NATIVE.begin).transferId;
   // No progress for longer than the limit: the queue gives the transfer up.
   box.now += SETTLE_MAX_MS + 1;
   await box.handoff.engine.tick();
@@ -432,13 +433,20 @@ test("a transfer given up while a part is on its way is never written open again
   assert.ok(app.aborted.length >= 1);
   app.hold = null;
   const sent = app.messages.length;
-  // The held part's answer reaches the extension: then nothing more may follow.
+  // The held part's answer reaches the extension. Files go to the app one at a time, so the next
+  // work's BEGIN is the sign that the given-up transfer's sending has ended.
   release();
   await until(() => answered.includes(KEEP_COPY_NATIVE.part), "the held part's answer");
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(app.messages.length, sent);
-  assert.equal((await box.store.getMeta(TRANSFER_KEY)).state, "failed");
-  assert.equal(app.messages.some((m) => m.type === KEEP_COPY_NATIVE.end), false);
+  await until(() => app.messages.some((m) => m.type === KEEP_COPY_NATIVE.begin && m.transferId !== given), "the next work's BEGIN", async () => {
+    box.now += (await box.handoff.engine.tick()) ?? 0;
+  });
+  // Nothing more of the given-up transfer followed, and it was never written open again.
+  assert.deepEqual(app.messages.slice(sent).filter((m) => m.transferId === given), []);
+  assert.notEqual((await box.store.getMeta(TRANSFER_KEY)).transferId, given);
+  // Both copies are made in the end: the work given up, in a transfer of its own.
+  await box.drain();
+  assert.deepEqual(app.messages.slice(sent).filter((m) => m.transferId === given), []);
+  assert.deepEqual(app.saved.map((copy) => copy.workId).sort(), ["82", "84"]);
 });
 
 test("a repeated message for a transfer the app completed counts as saved", async () => {
