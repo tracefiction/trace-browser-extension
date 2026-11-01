@@ -277,7 +277,7 @@ test("the app's \"disabled\" turns Keep a Copy off here at once: nothing more fe
   await box.handoff.askQueue(true);
   app.disabledBegin = true;
   await box.drain();
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await until(async () => !(await box.handoff.engine.enabled()) && (await box.handoff.engine.view()).waiting === 0, "Keep a Copy off, the list dropped");
   assert.equal(await box.handoff.engine.enabled(), false);
   assert.equal((await box.handoff.engine.view()).waiting, 0);
   assert.equal(app.saved.length, 0);
@@ -294,7 +294,7 @@ test("an app that doesn't know AO3's lease turns Keep a Copy off here, said once
   try {
     await box.handoff.askQueue(true);
     await box.drain();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await until(async () => !(await box.handoff.engine.enabled()) && (await box.handoff.engine.view()).waiting === 0, "Keep a Copy off, the list dropped");
     await box.drain();
   } finally { console.warn = warn; }
   assert.deepEqual(site.requests, []);
