@@ -21,7 +21,7 @@ const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"))
 // chosen. The name is also the popup's title and the top folder of every copy,
 // under Downloads.
 export const NAME = "NAME";
-const DESCRIPTION = "Keeps AO3's own download of every work you bookmark, mark for later or subscribe to, and updates it with each new chapter.";
+const DESCRIPTION = "Keeps local copies of AO3 downloads when you bookmark, mark for later, subscribe or leave kudos. No Trace account needed.";
 const FIREFOX_ID = "keep-a-copy@example.invalid";
 export const ICON_SIZES = [16, 32, 48, 128];
 const iconFile = (size) => `icon-${size}.png`;
