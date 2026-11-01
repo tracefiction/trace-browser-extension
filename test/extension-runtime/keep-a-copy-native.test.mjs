@@ -20,7 +20,7 @@ import { SETTLE_MAX_MS, WANT_MEMORY_MS } from "../../.trace-build/extension-runt
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 
 // Invented works throughout, as in keep-a-copy.test.mjs. The app is a fake that keeps to
-// the hand-off protocol.
+// docs/keep-a-copy-native-protocol.md.
 const NOW = Date.parse("2026-10-29T10:00:00Z");
 const INBOX_MAX = 512 * 1_024;
 

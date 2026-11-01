@@ -7,7 +7,7 @@
  * app a part at a time over `sendNativeMessage`. A public work is read signed
  * out; a locked one from its Chapter Index and file, signed in.
  *
- * The queue, its pace
+ * The protocol is docs/keep-a-copy-native-protocol.md. The queue, its pace
  * and its rules are keep-a-copy.mts's, unchanged: one request at a time,
  * each work's page (or a locked work's Chapter Index) and its file in the
  * same step, and only a real file handed over.
