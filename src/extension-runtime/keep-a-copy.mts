@@ -397,6 +397,8 @@ export interface Copy {
   readonly format: CopyFormat;
   readonly updatedAt: string;
   readonly savedAt: number;
+  /** The URL the copy was saved from: its own download is the one with it. A copy saved before it was kept has none. */
+  readonly url?: string;
 }
 
 export interface KeptWork {
@@ -512,7 +514,11 @@ export interface KeepPorts {
   /** Gives up a save that never finished, and forgets it, with any part-written file: only the save with this URL. */
   cancel?(downloadId: number, handle: string): Promise<void>;
   /** Deletes a file, only if it is still this extension's file at that name. */
-  remove(downloadId: number, filename: string): Promise<void>;
+  /**
+   * Deletes a copy's file, only while its download is still the copy's own (the one with its URL)
+   * and at its name. With no URL known, the copy is only forgotten: its file is never deleted.
+   */
+  remove(downloadId: number, filename: string, url?: string): Promise<void>;
   /** Told when a backup starts and ends (Chrome hides its download bubble meanwhile). */
   quiet?(on: boolean): void;
 }
@@ -873,11 +879,11 @@ export class KeepACopy {
     if (old && pending.setAside) {
       work.setAside.push(old.filename);
     } else if (old && old.downloadId !== downloadId && old.filename !== pending.filename) {
-      await this.ports.remove(old.downloadId, old.path ?? old.filename).catch(() => undefined);
+      await this.ports.remove(old.downloadId, old.path ?? old.filename, old.url).catch(() => undefined);
     }
     work.copy = {
       downloadId, filename: pending.filename, path: result.filename, bytes: pending.bytes,
-      format: pending.format, updatedAt: pending.updatedAt, savedAt: now,
+      format: pending.format, updatedAt: pending.updatedAt, savedAt: now, url: pending.handle,
     };
     work.skipped = null;
     this.#drop(state, pending.workId);

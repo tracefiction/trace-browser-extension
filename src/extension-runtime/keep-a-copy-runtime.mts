@@ -156,11 +156,15 @@ export function downloadPorts(downloads: DownloadsApi, extensionId: string) {
       await downloads.cancel(item.id).catch(() => undefined);
       await downloads.erase({ id: item.id }).catch(() => undefined);
     },
-    async remove(id: number, filename: string): Promise<void> {
-      // A file the reader moved, renamed or replaced is theirs: it is only forgotten.
-      if (!isOurFile((await downloads.search({ id }))[0], extensionId, filename)) return;
-      await downloads.removeFile(id).catch(() => undefined);
-      await downloads.erase({ id });
+    async remove(id: number, filename: string, url?: string): Promise<void> {
+      // Only the copy's own download, found by its URL, still at the copy's name: a file the reader moved,
+      // renamed, replaced, or saved there by hand under the copy's old id, is theirs, and is only forgotten.
+      // So is a copy saved before its URL was kept.
+      if (url === undefined) return;
+      const item = await own(id, url);
+      if (!item || !isOurFile(item, extensionId, filename)) return;
+      await downloads.removeFile(item.id).catch(() => undefined);
+      await downloads.erase({ id: item.id });
     },
   };
 }

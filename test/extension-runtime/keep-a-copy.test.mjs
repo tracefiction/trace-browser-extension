@@ -71,9 +71,12 @@ function epub(size = 2_000) {
 const html = (url, text, status = 200, headers = {}) => ({
   kind: "response", status, url, contentType: "text/html; charset=utf-8", retryAfter: null, cfMitigated: null, text, ...headers,
 });
+/** A file's blob URL, one per file URL, holding no part of it, as a real one holds none. */
+const handles = new Map();
+const handleOf = (url) => `blob:keep-a-copy/${handles.get(url) ?? handles.set(url, handles.size + 1).get(url)}`;
 const file = (url, bytes, status = 200) => ({
   kind: "response", status, url, contentType: "application/epub+zip", retryAfter: null, cfMitigated: null,
-  bytes: bytes.slice(0, 8_192), size: bytes.length, handle: `blob:keep-a-copy/${url}`,
+  bytes: bytes.slice(0, 8_192), size: bytes.length, handle: handleOf(url),
 });
 const workURL = (id) => `${AO3_ORIGIN}/works/${id}?view_adult=true`;
 
@@ -708,7 +711,7 @@ test("a save the browser never finishes is cancelled before its file is let go",
   box.now += SETTLE_MAX_MS;
   await box.engine.tick();
   assert.deepEqual(cancelled, [1]);
-  assert.deepEqual(box.released, [`blob:keep-a-copy/${epubLink("1")}`]);
+  assert.deepEqual(box.released, [handleOf(epubLink("1"))]);
   assert.equal(box.stored.pending, null);
   assert.equal(box.stored.works["1"].copy, null);
 });
@@ -849,4 +852,33 @@ test("after a restart, a save whose id is another download's is lost and tried a
   assert.equal(downloads.touched.some(([, id]) => id === 1), false, "the reader's download is left alone");
   assert.equal(box.saved.length, 2, "the save is tried again");
   assert.equal(box.stored.works["1"].copy.downloadId, 2);
+});
+
+test("an old file is deleted only while its download is the copy's own: one the reader saved there by hand is left", async () => {
+  const path = "/home/reader/Downloads/AO3/F/T – A (1).epub";
+  const url = "blob:keep-a-copy/1";
+  // A later session: the reader saved a file by hand at the copy's path, and it has the copy's old id.
+  const byHand = fakeDownloads([{ id: 1, url: "https://example.org/T.epub", filename: path, state: "complete" }]);
+  await downloadPorts(byHand, "ext").remove(1, path, url);
+  assert.deepEqual(byHand.touched, [], "the reader's file is left");
+  // The copy's own download, found by its URL under another id: deleted.
+  const own = fakeDownloads([{ id: 1, url: "https://example.org/T.epub", filename: path, state: "complete" }, { id: 4, url, filename: path, state: "complete" }]);
+  await downloadPorts(own, "ext").remove(1, path, url);
+  assert.deepEqual(own.touched, [["removeFile", 4], ["erase", 4]]);
+  // A copy with no URL kept is only forgotten.
+  const old = fakeDownloads([{ id: 1, url, filename: path, state: "complete" }]);
+  await downloadPorts(old, "ext").remove(1, path);
+  assert.deepEqual(old.touched, []);
+});
+
+test("a copy keeps the URL it was saved from, and a renamed copy's old file is asked to go by it", async () => {
+  const box = harness({ [epubLink("1")]: file(epubLink("1"), epub()), [epubLink("1", "2")]: file(epubLink("1", "2"), epub()) });
+  const removed = [];
+  box.ports.remove = async (id, filename, url) => { removed.push([id, url]); };
+  await box.engine.notePage(readWorkPage(workPage("1")), "bookmark");
+  await box.drain();
+  assert.equal(box.stored.works["1"].copy.url, box.saved[0].handle);
+  await box.engine.notePage(readWorkPage(workPage("1", { updatedAt: "2", title: "Renamed" })), "visit");
+  await box.drain();
+  assert.deepEqual(removed, [[1, box.saved[0].handle]]);
 });
