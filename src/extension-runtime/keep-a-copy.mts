@@ -482,7 +482,12 @@ export interface SaveRequest {
   readonly conflict: "overwrite" | "uniquify";
 }
 
-export type SaveState = { readonly state: "complete" | "interrupted" | "in_progress"; readonly filename: string | null };
+export type SaveState = {
+  readonly state: "complete" | "interrupted" | "in_progress";
+  readonly filename: string | null;
+  /** The save's id now, when the browser gave it another (ids are handed out again after a restart). */
+  readonly downloadId?: number;
+};
 
 export interface KeepPorts {
   readonly clock: { now(): number };
@@ -861,13 +866,14 @@ export class KeepACopy {
     state.pacer.failedSaves = 0;
     const work = this.#keep(state, pending.workId);
     const old = work.copy;
+    const downloadId = result.downloadId ?? pending.downloadId;
     if (old && pending.setAside) {
       work.setAside.push(old.filename);
-    } else if (old && old.downloadId !== pending.downloadId && old.filename !== pending.filename) {
+    } else if (old && old.downloadId !== downloadId && old.filename !== pending.filename) {
       await this.ports.remove(old.downloadId, old.path ?? old.filename).catch(() => undefined);
     }
     work.copy = {
-      downloadId: pending.downloadId, filename: pending.filename, path: result.filename, bytes: pending.bytes,
+      downloadId, filename: pending.filename, path: result.filename, bytes: pending.bytes,
       format: pending.format, updatedAt: pending.updatedAt, savedAt: now,
     };
     work.skipped = null;

@@ -36,6 +36,8 @@ const TIMER_MAX_MS = 25_000;
 
 interface DownloadItem {
   id: number;
+  /** The URL the save was made from: a save's own blob URL, which no other download has. */
+  url: string;
   filename: string;
   state: "in_progress" | "interrupted" | "complete";
   byExtensionId?: string;
@@ -54,7 +56,7 @@ interface Extension {
   alarms: { create(name: string, info: { periodInMinutes: number }): void; onAlarm: { addListener(listener: (alarm: { name: string }) => void): void } };
   downloads: {
     download(options: { url: string; filename: string; conflictAction: "overwrite" | "uniquify"; saveAs: false }): Promise<number>;
-    search(query: { id: number }): Promise<DownloadItem[]>;
+    search(query: { id: number } | { url: string }): Promise<DownloadItem[]>;
     removeFile(id: number): Promise<void>;
     cancel(id: number): Promise<void>;
     erase(query: { id: number }): Promise<unknown>;
@@ -108,6 +110,61 @@ export function isOurFile(item: DownloadItem | undefined, extensionId: string, f
   return path === expected || path.endsWith(`/${expected}`);
 }
 
+type DownloadsApi = Pick<Extension["downloads"], "search" | "cancel" | "erase" | "removeFile" | "onChanged">;
+
+/**
+ * A save's own download: the one at its id while that still has the save's URL, or else the one
+ * with that URL (a browser can hand an id to another download after a restart, and Firefox does).
+ * Never another extension's, where the browser says whose a download is.
+ */
+export async function ownDownload(downloads: Pick<DownloadsApi, "search">, extensionId: string, id: number, handle: string): Promise<DownloadItem | undefined> {
+  const ours = (item: DownloadItem | undefined): item is DownloadItem =>
+    item !== undefined && item.url === handle && (item.byExtensionId === undefined || item.byExtensionId === extensionId);
+  const atId = (await downloads.search({ id }).catch((): DownloadItem[] => []))[0];
+  if (ours(atId)) return atId;
+  return (await downloads.search({ url: handle }).catch((): DownloadItem[] => [])).find(ours);
+}
+
+/** Where saves stand, and giving them up, each known by its own URL (`ownDownload`): no one else's download is touched. */
+export function downloadPorts(downloads: DownloadsApi, extensionId: string) {
+  const own = (id: number, handle: string) => ownDownload(downloads, extensionId, id, handle);
+  const state = (item: DownloadItem, id: number): SaveState => ({ state: item.state, filename: item.filename, ...(item.id !== id ? { downloadId: item.id } : {}) });
+  return {
+    async settle(id: number, handle: string): Promise<SaveState> {
+      const item = await own(id, handle);
+      // Found by neither its id nor its URL: lost.
+      if (!item) return { state: "interrupted", filename: null };
+      if (item.state !== "in_progress") return state(item, id);
+      await new Promise<void>((resolve) => {
+        const listener = (delta: DownloadDelta) => {
+          if (delta.id === item.id && delta.state?.current && delta.state.current !== "in_progress") done();
+        };
+        const done = () => {
+          clearTimeout(timer);
+          downloads.onChanged.removeListener(listener);
+          resolve();
+        };
+        const timer = setTimeout(done, SETTLE_WAIT_MS);
+        downloads.onChanged.addListener(listener);
+      });
+      const after = await own(item.id, handle);
+      return after ? state(after, id) : { state: "interrupted", filename: null };
+    },
+    async cancel(id: number, handle: string): Promise<void> {
+      const item = await own(id, handle);
+      if (!item) return;
+      await downloads.cancel(item.id).catch(() => undefined);
+      await downloads.erase({ id: item.id }).catch(() => undefined);
+    },
+    async remove(id: number, filename: string): Promise<void> {
+      // A file the reader moved, renamed or replaced is theirs: it is only forgotten.
+      if (!isOurFile((await downloads.search({ id }))[0], extensionId, filename)) return;
+      await downloads.removeFile(id).catch(() => undefined);
+      await downloads.erase({ id });
+    },
+  };
+}
+
 export function installKeepACopy(extension: Extension): KeepACopy {
   const { downloads, runtime } = extension;
   const blobsHere = typeof URL.createObjectURL === "function";
@@ -133,26 +190,7 @@ export function installKeepACopy(extension: Extension): KeepACopy {
     }
   };
 
-  const settle = async (id: number): Promise<SaveState> => {
-    const find = async () => (await downloads.search({ id }))[0];
-    const item = await find();
-    if (!item) return { state: "interrupted", filename: null };
-    if (item.state !== "in_progress") return { state: item.state, filename: item.filename };
-    await new Promise<void>((resolve) => {
-      const listener = (delta: DownloadDelta) => {
-        if (delta.id === id && delta.state?.current && delta.state.current !== "in_progress") done();
-      };
-      const done = () => {
-        clearTimeout(timer);
-        downloads.onChanged.removeListener(listener);
-        resolve();
-      };
-      const timer = setTimeout(done, SETTLE_WAIT_MS);
-      downloads.onChanged.addListener(listener);
-    });
-    const after = await find();
-    return after ? { state: after.state, filename: after.filename } : { state: "interrupted", filename: null };
-  };
+  const { settle, cancel, remove } = downloadPorts(downloads, runtime.id);
 
   const setUi = (enabled: boolean) => void downloads.setUiOptions?.({ enabled }).catch(() => undefined);
   // Whatever an earlier background left: the bubble shows until a backup hides it.
@@ -171,16 +209,8 @@ export function installKeepACopy(extension: Extension): KeepACopy {
       if (!offscreen) URL.revokeObjectURL(handle);
       else void runtime.sendMessage({ target: OFFSCREEN_TARGET, type: "release", handle }).catch(() => undefined);
     },
-    async cancel(id) {
-      await downloads.cancel(id).catch(() => undefined);
-      await downloads.erase({ id }).catch(() => undefined);
-    },
-    async remove(id, filename) {
-      // A file the reader moved, renamed or replaced is theirs: it is only forgotten.
-      if (!isOurFile((await downloads.search({ id }))[0], runtime.id, filename)) return;
-      await downloads.removeFile(id).catch(() => undefined);
-      await downloads.erase({ id });
-    },
+    cancel,
+    remove,
     quiet: (on) => setUi(!on),
   });
 

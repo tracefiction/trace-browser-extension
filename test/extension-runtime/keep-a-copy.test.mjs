@@ -22,7 +22,7 @@ import {
   safeSegment,
 } from "../../.trace-build/extension-runtime/keep-a-copy.mjs";
 import { CLAIM_MS, fromOffscreenAnswer, offscreenFetcher, toOffscreenAnswer } from "../../.trace-build/extension-runtime/keep-a-copy-fetch.mjs";
-import { isOurFile, offscreenKeeper } from "../../.trace-build/extension-runtime/keep-a-copy-runtime.mjs";
+import { downloadPorts, isOurFile, offscreenKeeper, ownDownload } from "../../.trace-build/extension-runtime/keep-a-copy-runtime.mjs";
 import { keepACopyManifest } from "../../scripts/build-keep-a-copy.mjs";
 
 // Invented works and people throughout, in the markup of AO3's pages, not a capture.
@@ -464,6 +464,19 @@ test("one work's wrong file is skipped and the queue goes on; a changed format r
   assert.equal(switched.saved[0].format, "pdf");
 });
 
+test("a save is asked after by its own URL, and one the browser finds under another id keeps that id", async () => {
+  const box = harness({ [epubLink("1")]: file(epubLink("1"), epub()) });
+  const asked = [];
+  box.ports.settle = async (id, handle) => {
+    asked.push([id, handle]);
+    return { state: "complete", filename: "/home/reader/Downloads/x.epub", downloadId: 9 };
+  };
+  await box.engine.notePage(readWorkPage(workPage("1")), "bookmark");
+  await box.drain();
+  assert.deepEqual(asked, [[1, box.saved[0].handle]]);
+  assert.equal(box.stored.works["1"].copy.downloadId, 9);
+});
+
 test("the old file goes only once the new one is complete; an interrupted save keeps it, and is given up", async () => {
   const box = harness({
     [epubLink("1")]: file(epubLink("1"), epub()),
@@ -775,4 +788,60 @@ test("the standalone manifests ask for downloads and AO3, nothing more", () => {
   }
   assert.deepEqual(firefox.browser_specific_settings.gecko.data_collection_permissions, { required: ["none"] });
   assert.equal(firefox.browser_specific_settings.gecko_android, undefined);
+});
+
+/** The downloads API over `items`, recording what is cancelled and erased. */
+function fakeDownloads(items) {
+  const touched = [];
+  return {
+    touched,
+    items,
+    search: async (query) => items.filter((item) => ("id" in query ? item.id === query.id : item.url === query.url)),
+    cancel: async (id) => { touched.push(["cancel", id]); },
+    erase: async ({ id }) => { touched.push(["erase", id]); return [id]; },
+    removeFile: async (id) => { touched.push(["removeFile", id]); },
+    onChanged: { addListener() {}, removeListener() {} },
+  };
+}
+
+test("a save is its own download by its URL: after a restart, another download at its id is left alone", async () => {
+  const handle = "blob:keep-a-copy/1";
+  // The reader's own paused download now has the save's old id; the save is nowhere.
+  const theirs = { id: 1, url: "https://example.org/big.iso", filename: "/home/reader/Downloads/big.iso", state: "interrupted" };
+  const restarted = fakeDownloads([theirs]);
+  const ports = downloadPorts(restarted, "ext");
+  assert.deepEqual(await ports.settle(1, handle), { state: "interrupted", filename: null });
+  await ports.cancel(1, handle);
+  assert.deepEqual(restarted.touched, [], "the reader's download is not touched");
+  // The save found again under another id: that one is the save's, and its id is told.
+  const found = fakeDownloads([theirs, { id: 7, url: handle, filename: "/home/reader/Downloads/AO3/F/T – A (1).epub", state: "complete" }]);
+  assert.deepEqual(await downloadPorts(found, "ext").settle(1, handle), { state: "complete", filename: "/home/reader/Downloads/AO3/F/T – A (1).epub", downloadId: 7 });
+  const cut = fakeDownloads([theirs, { id: 7, url: handle, filename: "/x.epub", state: "interrupted" }]);
+  await downloadPorts(cut, "ext").cancel(1, handle);
+  assert.deepEqual(cut.touched, [["cancel", 7], ["erase", 7]]);
+  // Another extension's download with the same URL is not ours.
+  assert.equal(await ownDownload(fakeDownloads([{ id: 1, url: handle, filename: "/x", state: "complete", byExtensionId: "other" }]), "ext", 1, handle), undefined);
+});
+
+test("after a restart, a save whose id is another download's is lost and tried again, the other left alone", async () => {
+  const box = harness({ [epubLink("1")]: file(epubLink("1"), epub()) });
+  const downloads = fakeDownloads([]);
+  const ports = downloadPorts(downloads, "ext");
+  Object.assign(box.ports, { settle: ports.settle, cancel: ports.cancel });
+  box.ports.save = async (request) => {
+    box.saved.push(request);
+    // The first save is cut off by a restart; the second completes.
+    if (box.saved.length === 2) downloads.items.push({ id: 2, url: request.handle, filename: `/home/reader/Downloads/${request.filename}`, state: "complete" });
+    return box.saved.length;
+  };
+  await box.engine.notePage(readWorkPage(workPage("1")), "bookmark");
+  await box.engine.tick();
+  assert.equal(box.stored.pending.downloadId, 1);
+  // After the restart, id 1 is the reader's own paused download.
+  downloads.items.push({ id: 1, url: "https://example.org/big.iso", filename: "/home/reader/Downloads/big.iso", state: "interrupted" });
+  box.engine = new KeepACopy(box.ports);
+  await box.drain();
+  assert.equal(downloads.touched.some(([, id]) => id === 1), false, "the reader's download is left alone");
+  assert.equal(box.saved.length, 2, "the save is tried again");
+  assert.equal(box.stored.works["1"].copy.downloadId, 2);
 });
