@@ -13726,9 +13726,16 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   }
 
   // src/extension-runtime/keep-a-copy.mts
+  var WINDOW_MS = 6 * 60 * 6e4;
+  var STOP_MS2 = 60 * 6e4;
+  var STOP_MAX_MS = 24 * 60 * 6e4;
   var MAX_FILE_BYTES = 50 * 1024 * 1024;
   var CHECK_EVERY_MS = 7 * 24 * 60 * 6e4;
+  var CHECKED_KEEP_MS = 90 * 24 * 60 * 6e4;
+  var LINK_MAX_AGE_MS = 5 * 6e4;
   var SETTLE_MAX_MS = 15 * 6e4;
+  var WORK_PACE_MS = 2 * (PAGE_GAP_MS + PAGE_GAP_JITTER_MS / 2);
+  var PACE_GAP_MS = 5 * 6e4;
 
   // src/extension-runtime/index.mts
   var UUID_PATTERN9 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
