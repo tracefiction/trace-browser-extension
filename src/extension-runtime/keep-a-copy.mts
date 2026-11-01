@@ -493,12 +493,16 @@ export interface KeepPorts {
   fetchFile(url: string): Promise<Fetched>;
   /** Starts saving under Downloads; resolves with the download's id. */
   save(request: SaveRequest): Promise<number>;
-  /** Where a save stands, waiting a little for it to finish. */
-  settle(downloadId: number): Promise<SaveState>;
+  /**
+   * Where a save stands, waiting a little for it to finish. The save is known by its own URL
+   * (`handle`), not only its id, which the browser can give another download after a restart:
+   * found by neither, it is lost (`interrupted`), and no one else's download is taken for it.
+   */
+  settle(downloadId: number, handle: string): Promise<SaveState>;
   /** Lets a file's URL go once its save is over. */
   release?(handle: string): void;
-  /** Gives up a save that never finished, and forgets it, with any part-written file. */
-  cancel?(downloadId: number): Promise<void>;
+  /** Gives up a save that never finished, and forgets it, with any part-written file: only the save with this URL. */
+  cancel?(downloadId: number, handle: string): Promise<void>;
   /** Deletes a file, only if it is still this extension's file at that name. */
   remove(downloadId: number, filename: string): Promise<void>;
   /** Told when a backup starts and ends (Chrome hides its download bubble meanwhile). */
@@ -839,13 +843,13 @@ export class KeepACopy {
   }
 
   async #settle(state: KeepState, pending: PendingSave): Promise<number> {
-    const result = await this.ports.settle(pending.downloadId).catch((): SaveState => ({ state: "interrupted", filename: null }));
+    const result = await this.ports.settle(pending.downloadId, pending.handle).catch((): SaveState => ({ state: "interrupted", filename: null }));
     const now = this.ports.clock.now();
     if (result.state === "in_progress" && now - pending.startedAt < SETTLE_MAX_MS) return SETTLE_RECHECK_MS;
     state.pending = null;
     // Never finished, or cut off (a browser quit mid-save): given up and forgotten, so the browser neither
     // goes on reading a URL let go below nor keeps a part-written file.
-    if (result.state !== "complete") await this.ports.cancel?.(pending.downloadId).catch(() => undefined);
+    if (result.state !== "complete") await this.ports.cancel?.(pending.downloadId, pending.handle).catch(() => undefined);
     this.ports.release?.(pending.handle);
     // Interrupted, or never finished: the old copy stays as it was.
     if (result.state !== "complete") {

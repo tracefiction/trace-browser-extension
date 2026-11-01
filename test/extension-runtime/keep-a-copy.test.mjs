@@ -466,6 +466,9 @@ test("the old file goes only once the new one is complete; an interrupted save k
     [epubLink("1", "2")]: file(epubLink("1", "2"), epub()),
     [epubLink("1", "3")]: file(epubLink("1", "3"), epub()),
   });
+  // Every save given up, from the start: never one that completed.
+  const cancelled = [];
+  box.ports.cancel = async (id, handle) => { cancelled.push([id, handle]); };
   await box.engine.notePage(readWorkPage(workPage("1")), "bookmark");
   await box.drain();
   const first = box.stored.works["1"].copy;
@@ -495,11 +498,10 @@ test("the old file goes only once the new one is complete; an interrupted save k
     box.downloads.set(id, "interrupted");
     return id;
   };
-  // Cut off (a browser quit mid-save): given up and forgotten, with its part-written file.
-  const cancelled = [];
-  box.ports.cancel = async (id) => { cancelled.push(id); };
+  // Cut off (a browser quit mid-save): given up and forgotten, with its part-written file, by its own URL.
   await box.drain(4);
-  assert.ok(cancelled.includes(3), `given up: ${cancelled}`);
+  assert.ok(cancelled.some(([id, handle]) => id === 3 && handle === box.saved[2].handle), `given up: ${JSON.stringify(cancelled)}`);
+  assert.equal(cancelled.some(([id]) => id === 1 || id === 2), false, "a save that completed is never given up");
   assert.deepEqual(box.removed, [1]);
   assert.equal(box.stored.works["1"].copy.updatedAt, "2");
   assert.notEqual(first.downloadId, box.stored.works["1"].copy.downloadId);
