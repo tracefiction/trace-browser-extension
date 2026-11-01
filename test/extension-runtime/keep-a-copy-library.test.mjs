@@ -508,6 +508,12 @@ function fakeExtension() {
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+/** Waits until `ready()` holds, however slow the machine; fails after ten seconds. */
+async function until(ready, what) {
+  for (const started = Date.now(); !ready(); await settle()) {
+    if (Date.now() - started > 10_000) assert.fail(`still waiting: ${what}`);
+  }
+}
 
 test("in Trace's background, with no Trace account, the switch on keeps nothing and copies nothing: not even an AO3 page's reader", async (t) => {
   const extension = fakeExtension();
@@ -552,7 +558,11 @@ test("in Trace's background it answers only its own messages, and wakes nothing 
   // The works are kept in IndexedDB, never in storage.local.
   globalThis.indexedDB = new IDBFactory();
   globalThis.IDBKeyRange = IDBKeyRange;
-  t.after(() => {
+  t.after(async () => {
+    // Off, whatever the test reached: the background asks nothing more, and no timer of its stays.
+    for (const changed of extension.listeners.changed) changed({ [KEEP_A_COPY_PREF_KEY]: { newValue: false } }, "local");
+    await until(() => !extension.alarmSet.has(LIBRARY_SYNC_ALARM), "the alarm to stop");
+    await settle();
     globalThis.fetch = realFetch;
     delete globalThis.indexedDB;
     delete globalThis.IDBKeyRange;
@@ -569,7 +579,7 @@ test("in Trace's background it answers only its own messages, and wakes nothing 
   assert.equal(listener({ type: "KEEP_A_COPY_BACKUP" }, { id: "trace-test" }, () => assert.fail("answered")), undefined);
   let view = null;
   assert.equal(listener({ type: "KEEP_A_COPY_VIEW" }, { id: "trace-test" }, (value) => { view = value; }), true);
-  await settle();
+  await until(() => view !== null, "the view");
   assert.equal(view.settings.enabled, false);
   assert.equal(view.settings.triggers.bookmark, false);
   assert.deepEqual(reads, []);
@@ -578,17 +588,17 @@ test("in Trace's background it answers only its own messages, and wakes nothing 
   // Turned on: the Library is read and its work queued; the alarms run.
   extension.store[KEEP_A_COPY_PREF_KEY] = true;
   for (const changed of extension.listeners.changed) changed({ [KEEP_A_COPY_PREF_KEY]: { newValue: true } }, "local");
-  await settle();
+  await until(() => fetched.length > 0, "the work's page");
   assert.deepEqual(reads, [true]);
   assert.equal(extension.alarmSet.has(LIBRARY_SYNC_ALARM), true);
   assert.deepEqual(fetched, [`${AO3_ORIGIN}/works/71?view_adult=true`]);
   // A save in Trace reads the Library again.
   for (const changed of extension.listeners.changed) changed({ [ACCOUNT_PROJECTION_REVISION_KEY]: { newValue: 2 } }, "local");
-  await settle();
+  await until(() => reads.length === 2, "the Library read again");
   assert.deepEqual(reads, [true, true]);
   assert.deepEqual(Object.keys(extension.store).filter((key) => key !== KEEP_A_COPY_PREF_KEY), [], "Keep a Copy wrote to storage.local");
   // Turned off: its alarm stops.
   for (const changed of extension.listeners.changed) changed({ [KEEP_A_COPY_PREF_KEY]: { newValue: false } }, "local");
-  await settle();
+  await until(() => !extension.alarmSet.has(LIBRARY_SYNC_ALARM), "the alarm to stop");
   assert.equal(extension.alarmSet.has(LIBRARY_SYNC_ALARM), false);
 });
