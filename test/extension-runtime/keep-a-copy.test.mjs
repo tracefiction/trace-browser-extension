@@ -1268,6 +1268,7 @@ test("a read of the reader's lists that greets them lets their weekly check run 
 
 test("AO3's greeting names the reader from their own link, never a sign-in or sign-out link", () => {
   const fixture = fs.readFileSync("test/fixtures/ao3_bookmarks.html", "utf8");
+  const userContent = '<blockquote class="userstuff summary"><p id="greeting"><a href="/users/Mallory">x</a></p></blockquote>';
   assert.equal(greetedUser(fixture), "Whimsy_FF");
   for (const [kind, page, user] of [
     ["sign-out link first", '<nav id="greeting"><ul><li><a rel="nofollow" href="/users/logout?return_to=%2F">Log Out</a></li></ul></nav>', undefined],
@@ -1277,7 +1278,42 @@ test("AO3's greeting names the reader from their own link, never a sign-in or si
     ["no list in the greeting, then the site menu", '<nav id="greeting"><a href="/works/new">Post</a></nav><nav><ul><li><a href="/users/Gamma/works">x</a></li></ul></nav>', undefined],
     ["a name too long", `<nav id="greeting"><ul><li><a href="/users/${"a".repeat(41)}">Hi</a></li></ul></nav>`, undefined],
     ["no greeting", "<h1>The Archive is down for maintenance</h1>", undefined],
+    // Only the page's own header, comments aside, is read: never the main content, nor text inside a value.
+    ["the header's greeting, then one in content before the main content", fixture.replace('<div id="main"', `${userContent}<div id="main"`), "Whimsy_FF"],
+    ["no greeting in the header, one in the main content", fixture.replace('<nav id="greeting"', '<nav id="greeting-x"').replace(/<div id="main"[^>]*>/, `$&${userContent}`), undefined],
+    ["a greeting in a comment", fixture.replace("</head>", '<!-- <nav id="greeting"><ul><li><a href="/users/Mallory">x</a></li></ul></nav> --></head>'), "Whimsy_FF"],
+    ["the id inside another attribute's value", `<span title='a id="greeting"'><a href="/users/Mallory">x</a></ul>${greeting(USER)}`, USER],
+    ["a greeting left open", '<nav id="greeting"><a href="/works/new">Post</a><p>x</p></div><div id="main"><a href="/users/Mallory">x</a></ul>', undefined],
+    ["a greeting left open, no main content", '<nav id="greeting"><a href="/works/new">Post</a></div><p><a href="/users/Mallory">x</a></p></ul>', undefined],
   ]) assert.equal(greetedUser(page), user, kind);
+});
+
+test("a hold on a reader's check is over a week on, or when it was set ahead of the clock; AO3 greeting a reader lifts theirs", async () => {
+  const DAY = 24 * 60 * 60_000;
+  const box = harness({ [listPageURL(USER, "bookmarks", 1)]: signedInList("bookmarks", [], OTHER), [listPageURL(OTHER, "bookmarks", 1)]: signedInList("bookmarks", [], OTHER) });
+  await box.engine.noteUser(USER);
+  await box.engine.updateSettings({ weeklyCheck: true });
+  const start = box.now;
+  // The clock a month ahead when AO3 greets the other reader; then put right.
+  box.now += 30 * DAY;
+  await box.drain();
+  assert.equal(box.stored.contradicted[USER], start + 30 * DAY);
+  box.now = start + 8 * DAY;
+  await box.engine.noteUser(USER);
+  assert.equal(box.stored.contradicted[USER], undefined, "set ahead of the clock: over");
+  await box.engine.tick();
+  assert.equal(box.stored.run?.purpose, "check", "the check runs");
+  await box.drain();
+  // The other reader had a hold of their own: AO3 greeting them lifts it.
+  box.stored.contradicted = { [OTHER]: box.now };
+  box.stored.run = null;
+  box.stored.checkedAt[USER] = box.now - CHECK_EVERY_MS;
+  box.stored.user = USER;
+  box.engine = new KeepACopy(box.ports);
+  await box.drain();
+  assert.equal(box.stored.user, OTHER);
+  assert.equal(box.stored.contradicted[OTHER], undefined);
+  assert.ok(box.stored.contradicted[USER]);
 });
 
 test("the extra Bookmarks read ends the list only when it greets the run's own reader", async () => {

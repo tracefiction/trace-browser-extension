@@ -167,15 +167,44 @@ export function pageSignedIn(html: string): boolean | null {
   return /\blogged-in\b/.test(bodyClass) ? true : /\blogged-out\b/.test(bodyClass) ? false : null;
 }
 
+/** A tag and its attributes, quoted values kept whole, so text in a value never passes for an attribute. */
+const TAG_PATTERN = /<([a-z][a-z0-9-]*)((?:[^>"']|"[^"]{0,4096}"|'[^']{0,4096}'){0,4096})>/gi;
+
+/** An attribute's value in a tag's attributes, as the browser reads it: undefined when the tag has none. */
+function attributeOf(attributes: string, name: string): string | undefined {
+  for (const [, key, double, single, bare] of attributes.matchAll(/([^\s"'=<>/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g)) {
+    if (key?.toLowerCase() === name) return double ?? single ?? bare ?? "";
+  }
+  return undefined;
+}
+
 /**
  * The AO3 name a page's own greeting (`#greeting`) names: the reader signed
  * in when AO3 answered. Undefined when the page has no greeting.
  */
 export function greetedUser(html: string): string | undefined {
-  const greeting = /<[a-z]+\b[^>]*(?<![\w-])id\s*=\s*"greeting"[^>]*>([\s\S]*?)<\/(?:ul|nav)>/i.exec(html.slice(0, MAX_PAGE_CHARS))?.[1];
-  if (greeting === undefined) return undefined;
-  const name = /<a\b[^>]*\bhref\s*=\s*"\/users\/([A-Za-z0-9_]{1,40})(?:\/|")/i.exec(greeting)?.[1];
-  return name === undefined || /^log(?:in|out)$/i.test(name) ? undefined : name;
+  // Only the page's own header is read: comments go, and so does the main content, where readers' own words are.
+  const page = html.slice(0, MAX_PAGE_CHARS).replace(/<!--[\s\S]*?-->/g, "");
+  let header = page;
+  for (const tag of page.matchAll(TAG_PATTERN)) {
+    if (attributeOf(tag[2] ?? "", "id") !== "main") continue;
+    header = page.slice(0, tag.index ?? 0);
+    break;
+  }
+  for (const tag of header.matchAll(TAG_PATTERN)) {
+    if (attributeOf(tag[2] ?? "", "id") !== "greeting") continue;
+    const rest = header.slice((tag.index ?? 0) + tag[0].length);
+    // The greeting's first list, up to where it ends: a greeting left open reads nothing past it.
+    const end = /<\/(?:ul|nav|div|header)\s*>|<(?:div|main|header)\b/i.exec(rest);
+    if (!end) return undefined;
+    for (const link of rest.slice(0, end.index).matchAll(TAG_PATTERN)) {
+      if (link[1]?.toLowerCase() !== "a") continue;
+      const name = /^\/users\/([A-Za-z0-9_]{1,40})(?:\/|$)/.exec(attributeOf(link[2] ?? "", "href") ?? "")?.[1];
+      if (name !== undefined) return /^log(?:in|out)$/i.test(name) ? undefined : name;
+    }
+    return undefined;
+  }
+  return undefined;
 }
 
 /** A work page (or its preface and Download menu) as the facts a copy needs. */
@@ -718,10 +747,12 @@ function isState(value: unknown): value is KeepState {
 const backoff = (attempts: number) => Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.max(0, attempts - 1));
 const batchLeft = (state: KeepState) => state.queue.filter((queued) => queued.batch).length;
 const backupOf = (state: KeepState) => (state.run?.purpose === "backup" ? state.run : null);
+/** Whether a hold set `at` is over: a week on, or set ahead of the clock (a clock put back). */
+const holdOver = (at: number | undefined, now: number) => at === undefined || at > now || now - at >= CHECK_EVERY_MS;
+
 /** Whether `user`'s weekly check is due: a week after their last, and a week after AO3 last greeted another reader on it. */
 function checkDue(state: KeepState, user: string, now: number): boolean {
-  const contradicted = state.contradicted?.[user];
-  return now - (state.checkedAt?.[user] ?? state.pacer.lastCheckAt) >= CHECK_EVERY_MS && (contradicted === undefined || now - contradicted >= CHECK_EVERY_MS);
+  return now - (state.checkedAt?.[user] ?? state.pacer.lastCheckAt) >= CHECK_EVERY_MS && holdOver(state.contradicted?.[user], now);
 }
 
 /** A backup still going, by reading its lists or copying what they found. */
@@ -847,7 +878,7 @@ export class KeepACopy {
       if (now - at >= CHECKED_KEEP_MS || i < away.length - (CHECKED_KEEP_COUNT - 1)) delete checkedAt[name];
     });
     const contradicted = state.contradicted ?? {};
-    for (const [name, at] of Object.entries(contradicted)) if (now - at >= CHECK_EVERY_MS) delete contradicted[name];
+    for (const [name, at] of Object.entries(contradicted)) if (holdOver(at, now)) delete contradicted[name];
     // Another reader signed in: a run of the reader before ends here, not done, with nothing more asked of their lists.
     if (state.run?.status === "running" && state.run.user !== user) this.#endRun(state, state.run, false);
     if (state.pacer.stopped?.code === "signed_out") state.pacer.stopped = null;
@@ -1418,7 +1449,10 @@ export class KeepACopy {
    * it tries again, unless a read of their lists greets them before then.
    */
   #contradicted(state: KeepState, run: ListRun, greeted: string, verdict: Verdict): Verdict {
-    (state.contradicted ??= {})[run.user] = this.ports.clock.now();
+    const contradicted = (state.contradicted ??= {});
+    contradicted[run.user] = this.ports.clock.now();
+    // AO3 has just greeted them: no hold of theirs stands.
+    delete contradicted[greeted];
     this.#signedIn(state, greeted);
     return verdict;
   }
