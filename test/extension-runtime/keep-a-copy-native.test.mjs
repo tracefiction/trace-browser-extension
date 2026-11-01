@@ -148,6 +148,14 @@ function fakeApp({ works = [], enabled = true, drop = () => false, refuseBegin =
 
 const TAB = { id: 7, windowId: 1, incognito: false, workId: null };
 
+/** Runs `step` until `ready()` holds, however slow the machine; fails after ten seconds. */
+async function until(ready, what, step = async () => undefined) {
+  for (const started = Date.now(); !(await ready()); await new Promise((resolve) => setTimeout(resolve, 10))) {
+    if (Date.now() - started > 10_000) assert.fail(`still waiting: ${what}`);
+    await step();
+  }
+}
+
 function harness({ app, site, store = new IndexedDbKeepStore(new IDBFactory(), IDBKeyRange), tab = TAB }) {
   const box = { now: NOW, store, site, app, partReads: [], tab };
   let ids = 0;
@@ -254,11 +262,9 @@ test("a background stopped mid-transfer resumes where the app has it, and sends 
   const first = harness({ app, site });
   await first.handoff.askQueue(true);
   // Ticks until the unanswered part is recorded, then this background is gone.
-  for (let i = 0; i < 10 && (await first.store.getMeta(TRANSFER_KEY))?.failures !== 1; i += 1) {
-    const wait = await first.handoff.engine.tick();
-    first.now += wait ?? 0;
-    await new Promise((resolve) => setTimeout(resolve, 30));
-  }
+  await until(async () => (await first.store.getMeta(TRANSFER_KEY))?.failures === 1, "the unanswered part", async () => {
+    first.now += (await first.handoff.engine.tick()) ?? 0;
+  });
   const open = await first.store.getMeta(TRANSFER_KEY);
   assert.equal(open.state, "open");
   assert.equal(open.failures, 1);
@@ -406,20 +412,31 @@ test("a transfer given up while a part is on its way is never written open again
   const app = fakeApp({ works: [{ workId: "82", reason: "refused" }] });
   let release;
   app.hold = new Promise((resolve) => { release = resolve; });
+  // Every answer the app gives back, as it reaches the extension.
+  const answered = [];
+  const send = app.send;
+  app.send = async (message) => {
+    const answer = await send(message);
+    answered.push(message.type);
+    return answer;
+  };
   const box = harness({ app, site });
   await box.handoff.askQueue(true);
-  for (let i = 0; i < 5 && !app.messages.some((m) => m.type === KEEP_COPY_NATIVE.part); i += 1) {
+  await until(() => app.messages.some((m) => m.type === KEEP_COPY_NATIVE.part), "a part on its way", async () => {
     box.now += (await box.handoff.engine.tick()) ?? 0;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+  });
   // No progress for longer than the limit: the queue gives the transfer up.
   box.now += SETTLE_MAX_MS + 1;
   await box.handoff.engine.tick();
   assert.equal((await box.store.getMeta(TRANSFER_KEY)).state, "failed");
   assert.ok(app.aborted.length >= 1);
   app.hold = null;
+  const sent = app.messages.length;
+  // The held part's answer reaches the extension: then nothing more may follow.
   release();
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await until(() => answered.includes(KEEP_COPY_NATIVE.part), "the held part's answer");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(app.messages.length, sent);
   assert.equal((await box.store.getMeta(TRANSFER_KEY)).state, "failed");
   assert.equal(app.messages.some((m) => m.type === KEEP_COPY_NATIVE.end), false);
 });
