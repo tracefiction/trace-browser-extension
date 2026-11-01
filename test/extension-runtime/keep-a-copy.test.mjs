@@ -460,7 +460,7 @@ test("one work's wrong file is skipped and the queue goes on; a changed format r
   assert.equal(switched.saved[0].format, "pdf");
 });
 
-test("the old file goes only once the new one is complete; an interrupted save keeps it", async () => {
+test("the old file goes only once the new one is complete; an interrupted save keeps it, and is given up", async () => {
   const box = harness({
     [epubLink("1")]: file(epubLink("1"), epub()),
     [epubLink("1", "2")]: file(epubLink("1", "2"), epub()),
@@ -495,7 +495,11 @@ test("the old file goes only once the new one is complete; an interrupted save k
     box.downloads.set(id, "interrupted");
     return id;
   };
+  // Cut off (a browser quit mid-save): given up and forgotten, with its part-written file.
+  const cancelled = [];
+  box.ports.cancel = async (id) => { cancelled.push(id); };
   await box.drain(4);
+  assert.ok(cancelled.includes(3), `given up: ${cancelled}`);
   assert.deepEqual(box.removed, [1]);
   assert.equal(box.stored.works["1"].copy.updatedAt, "2");
   assert.notEqual(first.downloadId, box.stored.works["1"].copy.downloadId);

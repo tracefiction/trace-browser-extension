@@ -497,7 +497,7 @@ export interface KeepPorts {
   settle(downloadId: number): Promise<SaveState>;
   /** Lets a file's URL go once its save is over. */
   release?(handle: string): void;
-  /** Gives up a save that never finished, and forgets it. */
+  /** Gives up a save that never finished, and forgets it, with any part-written file. */
   cancel?(downloadId: number): Promise<void>;
   /** Deletes a file, only if it is still this extension's file at that name. */
   remove(downloadId: number, filename: string): Promise<void>;
@@ -843,8 +843,9 @@ export class KeepACopy {
     const now = this.ports.clock.now();
     if (result.state === "in_progress" && now - pending.startedAt < SETTLE_MAX_MS) return SETTLE_RECHECK_MS;
     state.pending = null;
-    // Never finished: stopped, so the browser does not go on reading a URL let go below.
-    if (result.state === "in_progress") await this.ports.cancel?.(pending.downloadId).catch(() => undefined);
+    // Never finished, or cut off (a browser quit mid-save): given up and forgotten, so the browser neither
+    // goes on reading a URL let go below nor keeps a part-written file.
+    if (result.state !== "complete") await this.ports.cancel?.(pending.downloadId).catch(() => undefined);
     this.ports.release?.(pending.handle);
     // Interrupted, or never finished: the old copy stays as it was.
     if (result.state !== "complete") {
