@@ -8971,6 +8971,24 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       await this.start();
       return this.#storyCommands.presence(workKey);
     }
+    /**
+     * The Library of the account connected now, as the page marks read it,
+     * with the account's own count of its stories: for Keep a Copy, which
+     * copies its AO3 works on this device. Null when no account is connected
+     * or the Library cannot be read. `refresh` asks Trace again when the copy
+     * kept here is old.
+     */
+    async librarySnapshot(refresh) {
+      await this.start();
+      if (this.snapshot().state !== "connected") return null;
+      const accountData = await this.#projection.read(refresh ? {} : { refresh: false }).catch(() => null);
+      if (this.snapshot().state !== "connected" || !accountData?.overlay) return null;
+      return Object.freeze({
+        accountId: accountData.scope.accountId,
+        overlay: accountData.overlay,
+        libraryCount: accountData.summary?.libraryCount ?? null
+      });
+    }
     /** The account an answer from Trace belongs to, or null for none. */
     publicationScope() {
       return this.#service.publicationScope();
@@ -13711,6 +13729,23 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     return history;
   }
 
+  // src/extension-runtime/keep-a-copy.mts
+  var WINDOW_MS = 6 * 60 * 6e4;
+  var STOP_MS2 = 60 * 6e4;
+  var STOP_MAX_MS = 24 * 60 * 6e4;
+  var MAX_FILE_BYTES = 50 * 1024 * 1024;
+  var CHECK_EVERY_MS = 7 * 24 * 60 * 6e4;
+  var CHECKED_KEEP_MS = 90 * 24 * 60 * 6e4;
+  var LINK_MAX_AGE_MS = 5 * 6e4;
+  var SETTLE_MAX_MS = 15 * 6e4;
+  var WORK_PACE_MS = 2 * (PAGE_GAP_MS + PAGE_GAP_JITTER_MS / 2);
+  var PACE_GAP_MS = 5 * 6e4;
+  var WANT_MEMORY_MS = 24 * 60 * 6e4;
+
+  // src/extension-runtime/keep-a-copy-native.mts
+  var PART_BYTES = 256 * 1024;
+  var QUEUE_EVERY_MS = 5 * 6e4;
+
   // src/extension-runtime/index.mts
   var UUID_PATTERN9 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   function fallbackUuid(seed) {
@@ -13905,6 +13940,25 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         } } : {}
       });
       webHistoryHandoff?.useSource(async (capturedAt) => historyParts(await historyImport.works(), capturedAt));
+    }
+    if (
+      // A build-time constant: a build without it leaves this block and the
+      // modules only it uses out of the bundle altogether.
+      false
+    ) {
+      const keep = extension;
+      if (keep.downloads !== void 0 && keep.storage.onChanged !== void 0) {
+        installTraceKeepACopy(keep, session);
+      } else if (typeof extension.runtime.sendNativeMessage === "function" && extension.scripting?.executeScript !== void 0) {
+        installNativeKeepACopy({
+          tabs: extension.tabs,
+          scripting: extension.scripting,
+          alarms: extension.alarms,
+          indexedDB: scope.indexedDB,
+          sendNative: (message, timeoutMs) => sendNativeMessageWithFallback2(extension.runtime, storageMode, message, timeoutMs),
+          newId: randomId
+        });
+      }
     }
     if (
       // A build-time constant: a build without optional story sites leaves this
