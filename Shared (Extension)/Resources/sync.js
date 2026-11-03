@@ -101,6 +101,17 @@ function isTransientRuntimeMessageError(error) {
   );
 }
 
+// Chrome clears runtime.id (and with it the runtime's methods) for a script
+// whose extension was turned off, removed or updated.
+function extensionRuntimeGone() {
+  if (extensionContextGone) return true;
+  try {
+    return !(ext && ext.runtime && ext.runtime.id);
+  } catch {
+    return true;
+  }
+}
+
 function isExtensionContextGone(error) {
   const message = [
     typeof error === "string" ? error : "",
@@ -340,6 +351,10 @@ function requestRuntimeMessage(message, errorLabel) {
 async function handleStatusRequest(data) {
   const nonce = typeof data.nonce === "string" ? data.nonce : "";
   if (!nonce.trim()) return;
+  if (extensionRuntimeGone()) {
+    postExtensionGone(nonce);
+    return;
+  }
 
   const response = await requestRuntimeMessage(
     {
@@ -348,15 +363,8 @@ async function handleStatusRequest(data) {
     },
     "[Trace Sync] Failed to query extension status",
   );
-  if (extensionContextGone) {
-    window.postMessage(
-      {
-        type: STATUS_RESPONSE_MESSAGE,
-        nonce,
-        state: { installed: false, connected: false, authState: "unknown" },
-      },
-      window.location.origin,
-    );
+  if (extensionRuntimeGone()) {
+    postExtensionGone(nonce);
     return;
   }
   const state = sanitizeStatusState(response);
@@ -369,6 +377,17 @@ async function handleStatusRequest(data) {
     window.location.origin,
   );
   void ensureFirstInstallSession(state);
+}
+
+function postExtensionGone(nonce) {
+  window.postMessage(
+    {
+      type: STATUS_RESPONSE_MESSAGE,
+      nonce,
+      state: { installed: false, connected: false, authState: "unknown" },
+    },
+    window.location.origin,
+  );
 }
 
 // Runs the popup's Connect (or Reconnect, or Retry) for the signed-in Trace
@@ -387,7 +406,7 @@ function reconnectSession() {
         "[Trace Sync] Failed to query status before reconnecting",
       ),
     );
-    if (extensionContextGone) return false;
+    if (extensionRuntimeGone()) return false;
     if (status.connected) return true;
     const action =
       status.authState === "signed_out"

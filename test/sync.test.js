@@ -49,7 +49,7 @@ function statusReadyMessages(h) {
 
 function createSyncHarness(
   origin = "https://tracefiction.com",
-  { sendMessageImpl, sessionMode = "legacy" } = {},
+  { sendMessageImpl, sessionMode = "legacy", runtimeId = "trace-test-extension" } = {},
 ) {
   const js = fs.readFileSync(SYNC_JS_PATH, "utf8");
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -78,6 +78,7 @@ function createSyncHarness(
     self: dom.window,
     chrome: {
       runtime: {
+        id: runtimeId,
         sendMessage(message, callback) {
           messages.push(message);
           if (sendMessageImpl) return sendMessageImpl(message, callback);
@@ -1000,4 +1001,18 @@ test("sync tells the Trace page the extension is gone once its context is invali
     ],
   );
   assert.deepEqual(h.consoleErrors, []);
+});
+
+test("sync tells the Trace page the extension is gone once its runtime has no id", async () => {
+  const h = createSyncHarness("https://tracefiction.com/setup", {
+    sessionMode: "kernel",
+    runtimeId: null,
+  });
+  dispatchPageMessage(h, { type: "TRACE_EXTENSION_STATUS_REQUEST", nonce: "gone-2" });
+  await flush();
+  assert.deepEqual(plainJson(h.messages).filter((m) => m.type === "TRACE_EXTENSION_STATUS_QUERY"), []);
+  assert.deepEqual(
+    postedOfType(h, "TRACE_EXTENSION_STATUS_RESPONSE").map((item) => item.data.state),
+    [{ installed: false, connected: false, authState: "unknown" }],
+  );
 });
