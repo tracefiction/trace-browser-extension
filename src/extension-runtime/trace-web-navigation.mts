@@ -70,15 +70,18 @@ export class BrowserTraceWebNavigation {
   readonly #runtime: RuntimePort;
   readonly #tabs: TabsPort;
   readonly #mode: "callback" | "promise";
+  readonly #webOrigin: string | null;
 
   constructor(options: {
     runtime: RuntimePort;
     tabs: TabsPort;
     mode: "callback" | "promise";
+    webOrigin?: string;
   }) {
     this.#runtime = options.runtime;
     this.#tabs = options.tabs;
     this.#mode = options.mode;
+    this.#webOrigin = activationTarget(options.webOrigin ?? "")?.origin ?? null;
   }
 
   async open(url: string): Promise<boolean> { return (await this.openTab(url)) !== null; }
@@ -105,7 +108,27 @@ export class BrowserTraceWebNavigation {
       const host = archiveHostKindFromSender({ tab: source });
       if (connect?.active !== true || host === null || isBlockedArchivePath(source?.url, host)) return;
       await extensionCall(tabs, "update", [sourceTabId, { active: true }], this.#runtime, this.#mode);
+      // The Trace tab was opened only to sign in. Left behind, it is one
+      // more tab to hunt through, so it closes once the reader is back, but
+      // only while it is still on Trace's own site.
+      if (this.#tabs.remove && this.#webOrigin !== null && tabUsesOrigin(connect, this.#webOrigin)) {
+        await extensionCall(tabs, "remove", [connectTabId], this.#runtime, this.#mode);
+      }
     } catch { /* A closed tab does not invalidate a successful connection. */ }
+  }
+
+  /** The AO3 or FanFiction.net tab the reader is on, if that is where they are. */
+  async activeArchiveTabId(): Promise<number | null> {
+    try {
+      const found = await extensionCall<readonly BrowserTab[]>(
+        this.#tabs as unknown as Record<string, (...args: unknown[]) => unknown>,
+        "query", [{ active: true, currentWindow: true }], this.#runtime, this.#mode,
+      );
+      const tab = Array.isArray(found) ? found[0] : undefined;
+      const host = archiveHostKindFromSender({ tab });
+      if (typeof tab?.id !== "number" || host === null || isBlockedArchivePath(tab.url, host)) return null;
+      return tab.id;
+    } catch { return null; }
   }
 
 }

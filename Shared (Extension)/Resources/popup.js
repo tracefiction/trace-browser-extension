@@ -4552,7 +4552,7 @@ function renderKernelSnapshot(snapshot) {
     // tab left over from before the extension reloaded. The press opened a
     // fresh one; say so rather than leave it looking like it did nothing.
     lead =
-      "Trace couldn't get your sign-in from the Trace website. It's open in a new tab: sign in there if you need to, then press Connect again.";
+      "Trace couldn't get your sign-in from the Trace website. It's open in a new tab: sign in there if you need to, and Trace connects and takes you back to your story.";
   } else if (state === "signed_out" && reason === "provider_unavailable") {
     lead =
       "Trace couldn't read your sign-in from the Trace website. Reload it, then press Connect again.";
@@ -5455,7 +5455,11 @@ function initializeKernelPopup() {
           sessionReplyTaken(sequence, response);
           renderKernelSnapshot(response?.snapshot);
           if (response?.snapshot?.state === "connected") requestKernelPopupState();
-          else if (connectFoundNoWebsiteSignIn(action, response?.snapshot)) openTraceApp(TRACE_HOME_URL);
+          // A background that opened Trace itself brings the reader back to their
+          // story once they sign in; otherwise the popup opens it.
+          else if (response?.traceOpened !== true && connectFoundNoWebsiteSignIn(action, response?.snapshot)) {
+            openTraceApp(TRACE_HOME_URL);
+          }
         },
       );
     });

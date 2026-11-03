@@ -483,6 +483,7 @@ export class SessionRuntimeController {
       runtime: environment.runtime,
       tabs: environment.tabs,
       mode: environment.storageMode,
+      webOrigin: environment.webOrigin,
     });
     this.#traceWebStatus = new TraceWebStatusNotification({
       runtime: environment.runtime,
@@ -826,7 +827,48 @@ export class SessionRuntimeController {
     if (message.action === "disconnect" || message.action === "cancel") {
       await clearConnectIntent(this.#storage);
     }
-    return this.#response(await this.#runManualAction(message.action, true));
+    const result = await this.#runManualAction(message.action, true);
+    if (
+      isPopupSender(sender, this.#runtime.id) &&
+      (message.action === "connect" || message.action === "reconnect")
+    ) {
+      const traceOpened = await this.#openTraceForPopupConnect();
+      if (traceOpened !== null) return Object.freeze({ ...this.#response(result), traceOpened });
+    }
+    return this.#response(result);
+  }
+
+  // The popup's Connect found no signed-in Trace website. As with Connect on
+  // an AO3 or FanFiction.net page, open Trace, remember the request so signing
+  // in there finishes it, and remember the story tab so the reader is taken
+  // back to it. Returns null when nothing was to be opened.
+  async #openTraceForPopupConnect(): Promise<boolean | null> {
+    const snapshot = this.snapshot();
+    if (
+      this.#mode !== "kernel" ||
+      snapshot.state !== "signed_out" ||
+      snapshot.reason !== "credential_absent" ||
+      (await this.#usesNativeAccountAuthority())
+    ) {
+      return null;
+    }
+    if (this.#openingConnectTab) {
+      await this.#openingConnectTab;
+      return true;
+    }
+    await rememberConnectIntent(this.#storage);
+    let traceOpened = false;
+    const opening = (async () => {
+      const sourceTabId = await this.#traceWebNavigation.activeArchiveTabId();
+      const tab = await this.#traceWebNavigation.openTab(`${this.#webOrigin}/`);
+      traceOpened = tab !== null;
+      if (sourceTabId !== null && typeof tab?.id === "number" && await hasConnectIntent(this.#storage)) {
+        await rememberConnectReturn(this.#storage, sourceTabId, tab.id);
+      }
+    })();
+    this.#openingConnectTab = opening;
+    try { await opening; } finally { if (this.#openingConnectTab === opening) this.#openingConnectTab = null; }
+    return traceOpened;
   }
 
   // An AO3/FFN page's Connect runs the popup's Connect. When no signed-in
