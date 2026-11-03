@@ -6,6 +6,7 @@ its notes go with each app release.
 
 ## Unreleased
 
+- **Connecting from the popup takes you back to your story.** When **Connect** in the toolbar popup finds you signed out of the Trace website, Trace opens it in a new tab as before. Signing in there now finishes connecting without pressing **Connect** again, and Trace takes you back to the AO3 or FanFiction.net tab you were reading, at the same place. The Trace tab it opened for signing in then closes, whether you connected from the popup or from Trace's notice on the page.
 - **Trace's setup page knows when the extension has dropped out.** If the extension is turned off, removed or updated while a Trace tab is open, it now tells the page so, and the page asks you to bring it back instead of staying green. When the extension is signed out, **Reconnect** on that page connects it again in one press.
 
 ## 1.0.5

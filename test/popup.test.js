@@ -2035,6 +2035,24 @@ test("Connect shows Checking Trace at once while the Trace tab is asked, then la
   assert.deepEqual(h.createdTabs, ["https://tracefiction.com/"]);
 });
 
+test("Connect leaves opening Trace to a background that already opened it", async () => {
+  const h = createPopupHarness({ sessionMode: "kernel", sessionActionResponse: { held: true } });
+  await flush();
+  h.document.getElementById("popup-cta").dispatchEvent(
+    new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+  );
+  await flush();
+  h.answerAction({
+    ok: true,
+    snapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "credential_absent" },
+    action: { kind: "unavailable" },
+    traceOpened: true,
+  });
+  await flush();
+  assert.deepEqual(h.createdTabs, [], "the background's Trace tab is the only one");
+  assert.match(h.document.getElementById("popup-lead").textContent, /Trace connects and takes you back to your story/);
+});
+
 test("Connect whose reply is lost reads the session again instead of staying on Checking", async () => {
   const h = createPopupHarness({ sessionMode: "kernel", sessionActionResponse: { held: true } });
   await flush();
@@ -2073,7 +2091,7 @@ test("a popup opened after Connect found no website sign-in still says why", asy
     sessionSnapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "credential_absent" },
   });
   await flush();
-  assert.match(h.document.getElementById("popup-lead").textContent, /sign in there if you need to, then press Connect again\./);
+  assert.match(h.document.getElementById("popup-lead").textContent, /sign in there if you need to, and Trace connects and takes you back to your story\./);
   assert.deepEqual(h.createdTabs, [], "opening the popup opens nothing");
 });
 

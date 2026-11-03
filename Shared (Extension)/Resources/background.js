@@ -6326,10 +6326,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #runtime;
     #tabs;
     #mode;
+    #webOrigin;
     constructor(options) {
       this.#runtime = options.runtime;
       this.#tabs = options.tabs;
       this.#mode = options.mode;
+      this.#webOrigin = activationTarget(options.webOrigin ?? "")?.origin ?? null;
     }
     async open(url) {
       return await this.openTab(url) !== null;
@@ -6358,7 +6360,28 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         const host = archiveHostKindFromSender({ tab: source });
         if (connect?.active !== true || host === null || isBlockedArchivePath(source?.url, host)) return;
         await extensionCall(tabs, "update", [sourceTabId, { active: true }], this.#runtime, this.#mode);
+        if (this.#tabs.remove && this.#webOrigin !== null && tabUsesOrigin(connect, this.#webOrigin)) {
+          await extensionCall(tabs, "remove", [connectTabId], this.#runtime, this.#mode);
+        }
       } catch {
+      }
+    }
+    /** The AO3 or FanFiction.net tab the reader is on, if that is where they are. */
+    async activeArchiveTabId() {
+      try {
+        const found = await extensionCall(
+          this.#tabs,
+          "query",
+          [{ active: true, currentWindow: true }],
+          this.#runtime,
+          this.#mode
+        );
+        const tab = Array.isArray(found) ? found[0] : void 0;
+        const host = archiveHostKindFromSender({ tab });
+        if (typeof tab?.id !== "number" || host === null || isBlockedArchivePath(tab.url, host)) return null;
+        return tab.id;
+      } catch {
+        return null;
       }
     }
   };
@@ -8199,7 +8222,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       this.#traceWebNavigation = new BrowserTraceWebNavigation({
         runtime: environment.runtime,
         tabs: environment.tabs,
-        mode: environment.storageMode
+        mode: environment.storageMode,
+        webOrigin: environment.webOrigin
       });
       this.#traceWebStatus = new TraceWebStatusNotification({
         runtime: environment.runtime,
@@ -8469,7 +8493,43 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       if (message.action === "disconnect" || message.action === "cancel") {
         await clearConnectIntent(this.#storage);
       }
-      return this.#response(await this.#runManualAction(message.action, true));
+      const result = await this.#runManualAction(message.action, true);
+      if (isPopupSender(sender, this.#runtime.id) && (message.action === "connect" || message.action === "reconnect")) {
+        const traceOpened = await this.#openTraceForPopupConnect();
+        if (traceOpened !== null) return Object.freeze({ ...this.#response(result), traceOpened });
+      }
+      return this.#response(result);
+    }
+    // The popup's Connect found no signed-in Trace website. As with Connect on
+    // an AO3 or FanFiction.net page, open Trace, remember the request so signing
+    // in there finishes it, and remember the story tab so the reader is taken
+    // back to it. Returns null when nothing was to be opened.
+    async #openTraceForPopupConnect() {
+      const snapshot = this.snapshot();
+      if (this.#mode !== "kernel" || snapshot.state !== "signed_out" || snapshot.reason !== "credential_absent" || await this.#usesNativeAccountAuthority()) {
+        return null;
+      }
+      if (this.#openingConnectTab) {
+        await this.#openingConnectTab;
+        return true;
+      }
+      await rememberConnectIntent(this.#storage);
+      let traceOpened = false;
+      const opening = (async () => {
+        const sourceTabId = await this.#traceWebNavigation.activeArchiveTabId();
+        const tab = await this.#traceWebNavigation.openTab(`${this.#webOrigin}/`);
+        traceOpened = tab !== null;
+        if (sourceTabId !== null && typeof tab?.id === "number" && await hasConnectIntent(this.#storage)) {
+          await rememberConnectReturn(this.#storage, sourceTabId, tab.id);
+        }
+      })();
+      this.#openingConnectTab = opening;
+      try {
+        await opening;
+      } finally {
+        if (this.#openingConnectTab === opening) this.#openingConnectTab = null;
+      }
+      return traceOpened;
     }
     // An AO3/FFN page's Connect runs the popup's Connect. When no signed-in
     // Trace page answered, it opens Trace and remembers the request, so signing
