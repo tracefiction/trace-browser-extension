@@ -14,6 +14,11 @@ const STATUS_READY_MESSAGE = "TRACE_EXTENSION_STATUS_READY";
 const STATUS_PUSH_MESSAGE = "TRACE_EXTENSION_STATUS_PUSH";
 // Content script -> page forward of a pushed status.
 const STATUS_UPDATE_MESSAGE = "TRACE_EXTENSION_STATUS_UPDATE";
+// Page -> content script: the reader pressed Reconnect on Trace's setup page.
+// Answered once the session settles, with whether it is connected.
+const RECONNECT_REQUEST_MESSAGE = "TRACE_EXTENSION_RECONNECT_REQUEST";
+const RECONNECT_RESPONSE_MESSAGE = "TRACE_EXTENSION_RECONNECT_RESPONSE";
+const PAGE_NONCE_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const TOKEN_MESSAGE = "TRACE_FICTION_TOKEN";
 const TOKEN_REQUEST_MESSAGE = "TRACE_FICTION_TOKEN_REQUEST";
 const FIRST_STORY_ADD_REQUEST_MESSAGE = "TRACE_FIRST_STORY_ADD_REQUEST";
@@ -38,6 +43,11 @@ const pendingCredentialGrants = new Map();
 let activationSessionRequest = null;
 let activationSessionConnected = false;
 let activationNonceSequence = 0;
+let reconnectFlight = null;
+// Set once the extension behind this script is gone (turned off, removed or
+// updated since the page loaded): the script stays on the page, but nothing
+// answers it. The page is told so instead of being told Trace is here.
+let extensionContextGone = false;
 const STATUS_AUTH_STATES = new Set([
   "connected",
   "signed_out",
@@ -91,7 +101,27 @@ function isTransientRuntimeMessageError(error) {
   );
 }
 
+// Chrome clears runtime.id (and with it the runtime's methods) for a script
+// whose extension was turned off, removed or updated.
+function extensionRuntimeGone() {
+  if (extensionContextGone) return true;
+  try {
+    return !(ext && ext.runtime && ext.runtime.id);
+  } catch {
+    return true;
+  }
+}
+
+function isExtensionContextGone(error) {
+  const message = [
+    typeof error === "string" ? error : "",
+    error && error.message,
+  ].filter(Boolean).join("\n");
+  return /extension context invalidated/i.test(message);
+}
+
 function reportRuntimeMessageError(label, error) {
+  if (isExtensionContextGone(error)) extensionContextGone = true;
   if (isTransientRuntimeMessageError(error)) return;
   console.error(label, error);
 }
@@ -222,12 +252,19 @@ function sanitizeStatusState(raw) {
   if (BROWSER_KINDS.has(input.browserKind)) {
     state.browserKind = input.browserKind;
   }
+  const capabilities = {};
   if (
     input.capabilities &&
     typeof input.capabilities === "object" &&
     input.capabilities.firstStoryAdd === true
   ) {
-    state.capabilities = { firstStoryAdd: true };
+    capabilities.firstStoryAdd = true;
+  }
+  if (KERNEL_SESSION_ACTIVE && !isAppleMobileBrowser()) {
+    capabilities.sessionReconnect = true;
+  }
+  if (Object.keys(capabilities).length > 0) {
+    state.capabilities = capabilities;
   }
   if (
     typeof input.lastArchiveSeenAt === "number" &&
@@ -314,6 +351,10 @@ function requestRuntimeMessage(message, errorLabel) {
 async function handleStatusRequest(data) {
   const nonce = typeof data.nonce === "string" ? data.nonce : "";
   if (!nonce.trim()) return;
+  if (extensionRuntimeGone()) {
+    postExtensionGone(nonce);
+    return;
+  }
 
   const response = await requestRuntimeMessage(
     {
@@ -322,6 +363,10 @@ async function handleStatusRequest(data) {
     },
     "[Trace Sync] Failed to query extension status",
   );
+  if (extensionRuntimeGone()) {
+    postExtensionGone(nonce);
+    return;
+  }
   const state = sanitizeStatusState(response);
   window.postMessage(
     {
@@ -332,6 +377,63 @@ async function handleStatusRequest(data) {
     window.location.origin,
   );
   void ensureFirstInstallSession(state);
+}
+
+function postExtensionGone(nonce) {
+  window.postMessage(
+    {
+      type: STATUS_RESPONSE_MESSAGE,
+      nonce,
+      state: { installed: false, connected: false, authState: "unknown" },
+    },
+    window.location.origin,
+  );
+}
+
+// Runs the popup's Connect (or Reconnect, or Retry) for the signed-in Trace
+// page, as the first-install page does, then says whether it connected. A
+// second press while one is running shares its result.
+function reconnectSession() {
+  if (reconnectFlight) return reconnectFlight;
+  reconnectFlight = (async () => {
+    activationNonceSequence += 1;
+    const status = sanitizeStatusState(
+      await requestRuntimeMessage(
+        {
+          type: STATUS_QUERY_MESSAGE,
+          nonce: `reconnect-${Date.now().toString(36)}-${activationNonceSequence.toString(36)}`,
+        },
+        "[Trace Sync] Failed to query status before reconnecting",
+      ),
+    );
+    if (extensionRuntimeGone()) return false;
+    if (status.connected) return true;
+    const action =
+      status.authState === "signed_out"
+        ? "connect"
+        : status.authState === "reconnect_required"
+          ? "reconnect"
+          : "retry";
+    const response = await requestRuntimeMessage(
+      { type: SESSION_ACTION_MESSAGE, action },
+      "[Trace Sync] Failed to reconnect the session",
+    );
+    return response?.snapshot?.state === "connected";
+  })().finally(() => {
+    reconnectFlight = null;
+  });
+  return reconnectFlight;
+}
+
+async function handleReconnectRequest(data) {
+  if (!KERNEL_SESSION_ACTIVE || isAppleMobileBrowser()) return;
+  const nonce = typeof data.nonce === "string" ? data.nonce : "";
+  if (!PAGE_NONCE_PATTERN.test(nonce)) return;
+  const ok = await reconnectSession();
+  window.postMessage(
+    { type: RECONNECT_RESPONSE_MESSAGE, nonce, ok },
+    window.location.origin,
+  );
 }
 
 async function handleWebHistoryRequest(data) {
@@ -394,6 +496,10 @@ window.addEventListener("message", (event) => {
   }
   if (event.data?.type === FIRST_INSTALL_READY_MESSAGE) {
     void handleFirstInstallReady(event.data);
+    return;
+  }
+  if (event.data?.type === RECONNECT_REQUEST_MESSAGE) {
+    void handleReconnectRequest(event.data);
     return;
   }
   if (event.data?.type !== TOKEN_MESSAGE) return;

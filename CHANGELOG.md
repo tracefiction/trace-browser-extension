@@ -4,6 +4,10 @@ This file lists the changes that matter to people using the Chrome, Edge and
 Firefox extension. The Safari extension ships inside the Trace iPhone app, and
 its notes go with each app release.
 
+## Unreleased
+
+- **Trace's setup page knows when the extension has dropped out.** If the extension is turned off, removed or updated while a Trace tab is open, it now tells the page so, and the page asks you to bring it back instead of staying green. When the extension is signed out, **Reconnect** on that page connects it again in one press.
+
 ## 1.0.5
 
 - **Trace no longer adds visits to your AO3 History.** To find missing descriptions, 1.0.4 opened saved works' pages in the background while you browsed AO3, and AO3 counted those as visits: **Last visited** and the visit count changed, and **Update available** could clear, on works you hadn't opened. Trace no longer opens them. Descriptions for works you read from chapter 2 on now come from AO3's search, and other saved works without one wait until you save or open them on a page that shows it.
