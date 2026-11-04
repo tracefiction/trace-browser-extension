@@ -69,10 +69,10 @@ export const AO3_ORIGIN = "https://archiveofourown.org";
 declare const __KEEP_A_COPY_FOLDER__: string | undefined;
 /**
  * The top folder of every copy, under Downloads: one per build. Each build
- * sets it (scripts/build-keep-a-copy.mjs); "NAME" is the standalone's
- * placeholder until its name is chosen.
+ * sets it (scripts/build-keep-a-copy.mjs); "Archive Bunker" is the
+ * standalone's name, and the fallback where nothing sets it (the tests).
  */
-export const COPY_FOLDER: string = typeof __KEEP_A_COPY_FOLDER__ === "string" ? __KEEP_A_COPY_FOLDER__ : "NAME";
+export const COPY_FOLDER: string = typeof __KEEP_A_COPY_FOLDER__ === "string" ? __KEEP_A_COPY_FOLDER__ : "Archive Bunker";
 export const COPY_FORMATS = ["epub", "azw3", "mobi", "pdf", "html"] as const;
 export type CopyFormat = (typeof COPY_FORMATS)[number];
 /** No file larger than this is kept. */

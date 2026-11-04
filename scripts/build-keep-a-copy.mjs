@@ -17,12 +17,15 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RUNTIME = path.join(ROOT, "src", "extension-runtime");
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
 
-// PLACEHOLDER: the published name, description and Firefox id are still to be
-// chosen. The name is also the popup's title and the top folder of every copy,
-// under Downloads.
-export const NAME = "NAME";
+// Archive Bunker (owner, 2 Nov 2026): the published name, also the popup's
+// title and the top folder of every copy, under Downloads. It is published
+// from the same Chrome Web Store and AMO accounts as Trace's extension.
+export const NAME = "Archive Bunker";
 const DESCRIPTION = "Keeps local copies of AO3 downloads when you bookmark, mark for later, subscribe or leave kudos. No Trace account needed.";
-const FIREFOX_ID = "keep-a-copy@example.invalid";
+export const FIREFOX_ID = "archive-bunker@tracefiction.com";
+// The listing's home: the privacy policy and support (support@tracefiction.com)
+// live on this page, which has to be up before either store submission.
+export const HOMEPAGE_URL = "https://www.tracefiction.com/archive-bunker";
 export const ICON_SIZES = [16, 32, 48, 128];
 const iconFile = (size) => `icon-${size}.png`;
 // 16 and 32 px have their own, simpler drawing.
@@ -37,6 +40,7 @@ export function keepACopyManifest(browser) {
     name: NAME,
     version: pkg.version,
     description: DESCRIPTION,
+    homepage_url: HOMEPAGE_URL,
     // Chrome: downloads.ui hides the bubble during a backup; offscreen holds files as blobs.
     permissions: ["downloads", "storage", "alarms", ...(browser === "chrome" ? ["downloads.ui", "offscreen"] : [])],
     host_permissions: AO3_HOSTS,

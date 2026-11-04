@@ -42,7 +42,7 @@ import {
 import { CLAIM_MS, fromOffscreenAnswer, offscreenFetcher, requestAO3, toOffscreenAnswer } from "../../.trace-build/extension-runtime/keep-a-copy-fetch.mjs";
 import { reliableSender, signedInUser, tellsUser, watchForms } from "../../.trace-build/extension-runtime/keep-a-copy-page.mjs";
 import { downloadPorts, installKeepACopy, isOurFile, offscreenKeeper, ownDownload, repeatedMessage } from "../../.trace-build/extension-runtime/keep-a-copy-runtime.mjs";
-import { ICON_SIZES, NAME, keepACopyManifest, writeIcons } from "../../scripts/build-keep-a-copy.mjs";
+import { FIREFOX_ID, HOMEPAGE_URL, ICON_SIZES, NAME, keepACopyManifest, writeIcons } from "../../scripts/build-keep-a-copy.mjs";
 
 // Invented works and people throughout, in the markup of AO3's pages, not a capture.
 const USER = "Synthetic_Reader";
@@ -1634,6 +1634,20 @@ test("the standalone manifests ask for downloads and AO3, nothing more", () => {
   }
   assert.deepEqual(firefox.browser_specific_settings.gecko.data_collection_permissions, { required: ["none"] });
   assert.equal(firefox.browser_specific_settings.gecko_android, undefined);
+});
+
+test("the standalone is Archive Bunker, with its own Firefox id and home page", () => {
+  assert.equal(NAME, "Archive Bunker");
+  assert.equal(FIREFOX_ID, "archive-bunker@tracefiction.com");
+  for (const browser of ["chrome", "firefox"]) {
+    const manifest = keepACopyManifest(browser);
+    assert.equal(manifest.name, "Archive Bunker");
+    assert.equal(manifest.action.default_title, "Archive Bunker");
+    assert.equal(manifest.homepage_url, HOMEPAGE_URL);
+    assert.match(manifest.homepage_url, /^https:\/\/www\.tracefiction\.com\//);
+  }
+  assert.equal(keepACopyManifest("firefox").browser_specific_settings.gecko.id, FIREFOX_ID);
+  assert.equal(keepACopyManifest("chrome").browser_specific_settings, undefined);
 });
 
 /** The downloads API over `items`, recording what is cancelled and erased. */

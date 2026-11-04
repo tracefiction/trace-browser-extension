@@ -56,7 +56,7 @@ test("off: the one line and the footer", async () => {
   assert.equal(box.text("off"), "Keeps AO3's own file of the works you keep, on this computer.");
   assert.equal(box.document.getElementById("enabled").getAttribute("aria-pressed"), "false");
   assert.equal(box.document.getElementById("enabled").getAttribute("aria-label"), "Keep copies");
-  assert.equal(box.text("name"), "NAME");
+  assert.equal(box.text("name"), "Archive Bunker");
   assert.match(box.document.querySelector(".foot").textContent, /Open source on GitHub.*From the maker of Trace/);
   box.done();
 });
@@ -65,7 +65,7 @@ test("on: the status, what starts a copy, the format, the backup, and what was s
   const box = await open({ ...VIEW, skipped: { needs_sign_in: 4, gone: 1, not_a_file: 1 } });
   assert.deepEqual(shownOf(box), ["status", "triggers", "formatRow", "backupStart", "skippedRow"]);
   assert.equal(box.text("kept"), "1,204 works kept");
-  assert.equal(box.text("lastCopy"), "Last copy 14:02, in Downloads › NAME");
+  assert.equal(box.text("lastCopy"), "Last copy 14:02, in Downloads › Archive Bunker");
   assert.equal(box.text("skippedRowText"), "6 skipped");
   assert.equal(box.text("backupCaption"), "Bookmarks, Marked for Later and Subscriptions.");
   assert.deepEqual([...box.document.querySelectorAll("#triggers label")].map((label) => label.textContent), ["Bookmark it", "Mark it for Later", "Subscribe", "Leave kudos", "Every work I open"]);
@@ -84,10 +84,10 @@ test("no copies yet: no last-copy line, and no skipped row with nothing skipped"
 
 test("the last copy says yesterday, or its date", async () => {
   let box = await open({ ...VIEW, lastCopyAt: at(21, 40, -1) });
-  assert.equal(box.text("lastCopy"), "Last copy yesterday, 21:40, in Downloads › NAME");
+  assert.equal(box.text("lastCopy"), "Last copy yesterday, 21:40, in Downloads › Archive Bunker");
   box.done();
   box = await open({ ...VIEW, lastCopyAt: at(9, 5, -5) });
-  assert.equal(box.text("lastCopy"), "Last copy 25 Oct, 09:05, in Downloads › NAME");
+  assert.equal(box.text("lastCopy"), "Last copy 25 Oct, 09:05, in Downloads › Archive Bunker");
   box.done();
 });
 
@@ -151,7 +151,7 @@ test("paused by AO3: the time to resume, with the pause mark", async () => {
   assert.equal(box.text("noticeText"), "AO3 asked to slow down. Resuming around 14:05.");
   assert.equal(box.shown("noticePause"), true);
   assert.equal(box.shown("noticeClock"), false);
-  assert.equal(box.text("lastCopy"), "Last copy 13:48, in Downloads › NAME");
+  assert.equal(box.text("lastCopy"), "Last copy 13:48, in Downloads › Archive Bunker");
   box.done();
 });
 
