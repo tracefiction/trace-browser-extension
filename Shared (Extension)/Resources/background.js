@@ -5166,8 +5166,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     async refreshAndRead() {
       const refreshed = await this.#projection.refreshIfNeeded(true);
-      const failure5 = refreshFailure(refreshed);
-      if (failure5 !== null) return failure5;
+      const failure6 = refreshFailure(refreshed);
+      if (failure6 !== null) return failure6;
       const value = await this.#projection.read({ refresh: false });
       return value === null ? { kind: "unavailable" } : { kind: "value", value };
     }
@@ -7968,6 +7968,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     inFlight = Math.max(0, inFlight - 1);
     lastEndedAt = Date.now();
   }
+  function storySaveActivity() {
+    return { inFlight, lastEndedAt };
+  }
 
   // src/extension-runtime/controller.mts
   var DEGRADED_STORAGE_SNAPSHOT = Object.freeze({
@@ -10553,7 +10556,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       sheet.workKey = page.workKey;
       sheet.opening = opening;
       this.#sheets.set(listener, sheet);
-      let record3;
+      let record5;
       let grant;
       try {
         grant = await this.#ports.grantComplete().catch(() => null);
@@ -10567,69 +10570,69 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
             workKey: page.workKey
           });
         }
-        record3 = await this.#recordFor(account, page);
-        if (this.#sheets.get(listener) === sheet) sheet.key = record3.key;
+        record5 = await this.#recordFor(account, page);
+        if (this.#sheets.get(listener) === sheet) sheet.key = record5.key;
       } finally {
         opened();
       }
-      const decided = record3.deciding.then(() => this.#decide(record3, page, grant, options));
-      record3.deciding = decided.then(() => void 0, () => void 0);
+      const decided = record5.deciding.then(() => this.#decide(record5, page, grant, options));
+      record5.deciding = decided.then(() => void 0, () => void 0);
       return decided;
     }
     /** What an open comes to, worked out with no other open of the record under way. */
-    async #decide(record3, page, grant, options) {
-      if (record3.running) return this.#view(record3);
-      const age = this.#ports.now() - record3.at;
+    async #decide(record5, page, grant, options) {
+      if (record5.running) return this.#view(record5);
+      const age = this.#ports.now() - record5.at;
       const fresh = age >= 0 && age < FIRST_TAP_RESULT_FRESH_MS;
-      if (fresh && record3.outcome?.kind === "confirmed") return this.#view(record3);
-      if (fresh && record3.outcome?.kind === "failed" && options.requested !== true) {
-        return this.#view(record3);
+      if (fresh && record5.outcome?.kind === "confirmed") return this.#view(record5);
+      if (fresh && record5.outcome?.kind === "failed" && options.requested !== true) {
+        return this.#view(record5);
       }
-      if (record3.inDoubt) {
-        const found = await this.#look(record3);
-        if (found === "account_changed") return this.#accountChanged(record3);
+      if (record5.inDoubt) {
+        const found = await this.#look(record5);
+        if (found === "account_changed") return this.#accountChanged(record5);
         if (found !== null) {
-          this.#begin(record3, page);
+          this.#begin(record5, page);
           if (await this.#ports.inject(page.tabId).catch(() => false)) {
             this.#injected.set(page.tabId, page.workKey);
           }
-          return this.#settle(record3, { kind: "confirmed", provenance: "found", mode: null, entry: found });
+          return this.#settle(record5, { kind: "confirmed", provenance: "found", mode: null, entry: found });
         }
       }
       if (options.requested !== true) {
         const preference = await this.#ports.automaticSaving().catch(() => "unknown");
         if (preference !== "on" || this.#ports.saveOnOpen !== true) {
-          if (record3.inDoubt) {
+          if (record5.inDoubt) {
             return Object.freeze({
               state: "failed",
               workKey: page.workKey,
               reason: "unavailable",
               dispatch: "sent_unconfirmed",
-              story: record3.story
+              story: record5.story
             });
           }
           const [found] = await Promise.all([
-            preference === "off" ? Promise.resolve(null) : within(this.#look(record3), FIRST_TAP_OPEN_READ_MS, null),
-            within(this.#readForSheet(record3, page), FIRST_TAP_OPEN_READ_MS, void 0)
+            preference === "off" ? Promise.resolve(null) : within(this.#look(record5), FIRST_TAP_OPEN_READ_MS, null),
+            within(this.#readForSheet(record5, page), FIRST_TAP_OPEN_READ_MS, void 0)
           ]);
-          if (found === "account_changed") return this.#accountChanged(record3);
+          if (found === "account_changed") return this.#accountChanged(record5);
           if (found !== null) {
-            this.#begin(record3, page);
-            return this.#settle(record3, {
+            this.#begin(record5, page);
+            return this.#settle(record5, {
               kind: "confirmed",
-              provenance: record3.priorKnown && !record3.pageSave ? "already" : "found",
+              provenance: record5.priorKnown && !record5.pageSave ? "already" : "found",
               mode: null,
               entry: found
             });
           }
-          return Object.freeze({ state: "awaiting_request", workKey: page.workKey, preference, story: record3.story });
+          return Object.freeze({ state: "awaiting_request", workKey: page.workKey, preference, story: record5.story });
         }
       }
-      this.#begin(record3, page);
-      record3.running = true;
-      record3.outcome = Object.freeze({ kind: "saving", startedAt: this.#ports.now() });
-      void this.#run(record3, page, grant);
-      return this.#view(record3);
+      this.#begin(record5, page);
+      record5.running = true;
+      record5.outcome = Object.freeze({ kind: "saving", startedAt: this.#ports.now() });
+      void this.#run(record5, page, grant);
+      return this.#view(record5);
     }
     /**
      * "Check again": asks Trace, once, whether this one story is in the
@@ -10645,28 +10648,28 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       await sheet.opening;
       if (sheet.workKey === null) return Object.freeze({ state: "not_applicable" });
       const unknown = Object.freeze({ state: "presence_unknown", workKey: sheet.workKey });
-      const record3 = sheet.key === null ? null : this.#records.get(sheet.key) ?? null;
-      if (record3 === null || record3.binding !== this.#ports.binding()) return unknown;
-      if (record3.outcome?.kind === "confirmed") return this.#view(record3);
-      if (record3.checking !== null) return record3.checking;
-      const asking = this.#askTrace(record3, unknown);
-      record3.checking = asking;
+      const record5 = sheet.key === null ? null : this.#records.get(sheet.key) ?? null;
+      if (record5 === null || record5.binding !== this.#ports.binding()) return unknown;
+      if (record5.outcome?.kind === "confirmed") return this.#view(record5);
+      if (record5.checking !== null) return record5.checking;
+      const asking = this.#askTrace(record5, unknown);
+      record5.checking = asking;
       const done = () => {
-        if (record3.checking === asking) record3.checking = null;
+        if (record5.checking === asking) record5.checking = null;
       };
       void asking.then(done, done);
       return asking;
     }
-    async #askTrace(record3, unknown) {
-      const membership = await this.#ports.membership(record3.workKey).catch(
+    async #askTrace(record5, unknown) {
+      const membership = await this.#ports.membership(record5.workKey).catch(
         () => ({ kind: "unknown" })
       );
       if (membership.kind === "account_refused") {
-        return Object.freeze({ state: "account_reconnect_required", workKey: record3.workKey });
+        return Object.freeze({ state: "account_reconnect_required", workKey: record5.workKey });
       }
-      if (this.#ports.binding() !== record3.binding) return this.#accountChanged(record3);
+      if (this.#ports.binding() !== record5.binding) return this.#accountChanged(record5);
       if (membership.kind === "present") {
-        return this.#settle(record3, {
+        return this.#settle(record5, {
           kind: "confirmed",
           provenance: "found",
           mode: null,
@@ -10674,16 +10677,16 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         });
       }
       if (membership.kind !== "absent") return unknown;
-      if (record3.running) return this.#view(record3);
-      return this.#settle(record3, { kind: "failed", reason: "unavailable", dispatch: "not_in_library" });
+      if (record5.running) return this.#view(record5);
+      return this.#settle(record5, { kind: "failed", reason: "unavailable", dispatch: "not_in_library" });
     }
     /** Trace's popup closed. The page it was over may now show its mark. */
     closed(listener) {
       const sheet = this.#sheets.get(listener);
       if (!sheet) return;
       this.#sheets.delete(listener);
-      const record3 = sheet.key === null ? null : this.#records.get(sheet.key);
-      if (record3) void this.#markIfDue(record3);
+      const record5 = sheet.key === null ? null : this.#records.get(sheet.key);
+      if (record5) void this.#markIfDue(record5);
     }
     /**
      * A page script's own save for this story was admitted for the current
@@ -10692,13 +10695,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
      */
     pageSaveAdmitted(workKey) {
       const binding = this.#ports.binding();
-      for (const record3 of this.#records.values()) {
-        if (record3.workKey !== workKey || record3.binding !== binding) continue;
-        if (record3.outcome?.kind === "confirmed") continue;
-        record3.inDoubt = true;
-        record3.pageSave = true;
-        if (!record3.running && record3.outcome?.kind === "failed") record3.outcome = null;
-        void this.#persist(record3);
+      for (const record5 of this.#records.values()) {
+        if (record5.workKey !== workKey || record5.binding !== binding) continue;
+        if (record5.outcome?.kind === "confirmed") continue;
+        record5.inDoubt = true;
+        record5.pageSave = true;
+        if (!record5.running && record5.outcome?.kind === "failed") record5.outcome = null;
+        void this.#persist(record5);
       }
     }
     #storyPage(tapped) {
@@ -10761,7 +10764,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         return existing;
       }
       const kept = page.persist ? stored.records.find((item) => item.k === key) : void 0;
-      const record3 = {
+      const record5 = {
         key,
         scope: scope2,
         binding,
@@ -10781,40 +10784,40 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         tabs: /* @__PURE__ */ new Set([page.tabId]),
         marked: /* @__PURE__ */ new Set()
       };
-      this.#records.set(key, record3);
-      return record3;
+      this.#records.set(key, record5);
+      return record5;
     }
     /** Starts a new attempt on a record. Only what is still in doubt carries over. */
-    #begin(record3, page) {
-      record3.outcome = null;
-      record3.at = this.#ports.now();
-      record3.pageSave = false;
-      record3.tabs = /* @__PURE__ */ new Set([page.tabId]);
-      record3.marked = /* @__PURE__ */ new Set();
+    #begin(record5, page) {
+      record5.outcome = null;
+      record5.at = this.#ports.now();
+      record5.pageSave = false;
+      record5.tabs = /* @__PURE__ */ new Set([page.tabId]);
+      record5.marked = /* @__PURE__ */ new Set();
     }
-    #view(record3) {
-      const outcome = record3.outcome;
+    #view(record5) {
+      const outcome = record5.outcome;
       if (outcome === null || outcome.kind === "saving") {
         return Object.freeze({
           state: "saving",
-          workKey: record3.workKey,
-          startedAt: outcome?.kind === "saving" ? outcome.startedAt : record3.at,
-          story: record3.story
+          workKey: record5.workKey,
+          startedAt: outcome?.kind === "saving" ? outcome.startedAt : record5.at,
+          story: record5.story
         });
       }
       return outcome.kind === "confirmed" ? Object.freeze({
         state: "confirmed",
-        workKey: record3.workKey,
+        workKey: record5.workKey,
         provenance: outcome.provenance,
         mode: outcome.mode,
-        story: record3.story,
+        story: record5.story,
         entry: outcome.entry
       }) : Object.freeze({
         state: "failed",
-        workKey: record3.workKey,
+        workKey: record5.workKey,
         reason: outcome.reason,
         dispatch: outcome.dispatch,
-        story: record3.story
+        story: record5.story
       });
     }
     /**
@@ -10822,29 +10825,29 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
      * confirmation is never replaced by a failure, and a known origin is never
      * replaced by an unknown one. Returns what the record now says.
      */
-    async #settle(record3, answer) {
-      if (this.#ports.binding() !== record3.binding) return this.#accountChanged(record3);
-      const before = weight(record3.outcome);
+    async #settle(record5, answer) {
+      if (this.#ports.binding() !== record5.binding) return this.#accountChanged(record5);
+      const before = weight(record5.outcome);
       const after = weight(answer);
       if (after > before || after === before && answer.kind === "failed") {
-        record3.outcome = Object.freeze(answer);
-        record3.at = this.#ports.now();
+        record5.outcome = Object.freeze(answer);
+        record5.at = this.#ports.now();
       }
-      if (record3.outcome?.kind === "confirmed") {
-        record3.inDoubt = false;
-        record3.pageSave = false;
-        await this.#doubtSettled(record3);
+      if (record5.outcome?.kind === "confirmed") {
+        record5.inDoubt = false;
+        record5.pageSave = false;
+        await this.#doubtSettled(record5);
       }
-      await this.#persist(record3);
-      const view2 = this.#show(record3);
-      await this.#markIfDue(record3);
+      await this.#persist(record5);
+      const view2 = this.#show(record5);
+      await this.#markIfDue(record5);
       return view2;
     }
     /** Tells every popup open on a record what it now says. */
-    #show(record3) {
-      const view2 = this.#view(record3);
+    #show(record5) {
+      const view2 = this.#view(record5);
       for (const [listener, sheet] of this.#sheets) {
-        if (sheet.key !== record3.key) continue;
+        if (sheet.key !== record5.key) continue;
         try {
           listener(view2);
         } catch {
@@ -10857,38 +10860,38 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
      * reader's tap gave the tab. Nothing is sent to Trace and nothing is kept:
      * the page's own word is believed only for the story the popup named.
      */
-    async #readForSheet(record3, page) {
+    async #readForSheet(record5, page) {
       if (!await this.#ports.inject(page.tabId).catch(() => false)) return;
       this.#injected.set(page.tabId, page.workKey);
       const collected = await this.#ports.collect(page.tabId).catch(() => null);
-      if (!isRecord22(collected) || collected.ok !== true || collected.workKey !== record3.workKey) return;
-      if (collected.private === true && record3.persist) {
-        record3.persist = false;
-        record3.priorKnown = false;
+      if (!isRecord22(collected) || collected.ok !== true || collected.workKey !== record5.workKey) return;
+      if (collected.private === true && record5.persist) {
+        record5.persist = false;
+        record5.priorKnown = false;
       }
-      record3.story = storyFrom(collected, page.hostKind);
+      record5.story = storyFrom(collected, page.hostKind);
     }
     /** A read-only look: the entry, nothing, or word that the account changed. */
-    async #look(record3) {
-      const presence = await this.#ports.presence(record3.workKey).catch(
+    async #look(record5) {
+      const presence = await this.#ports.presence(record5.workKey).catch(
         () => ({ kind: "unknown" })
       );
-      if (this.#ports.binding() !== record3.binding) return "account_changed";
+      if (this.#ports.binding() !== record5.binding) return "account_changed";
       return presence.kind === "found" ? entryFrom(presence.confirmation) : null;
     }
     /** The account changed: nothing held for the old one is shown or kept. */
-    #accountChanged(record3) {
-      const view2 = Object.freeze({ state: "account_changed", workKey: record3.workKey });
-      this.#records.delete(record3.key);
+    #accountChanged(record5) {
+      const view2 = Object.freeze({ state: "account_changed", workKey: record5.workKey });
+      this.#records.delete(record5.key);
       for (const [listener, sheet] of this.#sheets) {
-        if (sheet.key !== record3.key) continue;
+        if (sheet.key !== record5.key) continue;
         sheet.key = null;
         try {
           listener(view2);
         } catch {
         }
       }
-      void this.#drop(record3);
+      void this.#drop(record5);
       return view2;
     }
     // --- Storage ----------------------------------------------------------------
@@ -10910,10 +10913,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
      * more to say. A doubt another account left about the same story has a
      * different digest and is not touched.
      */
-    async #doubtSettled(record3) {
+    async #doubtSettled(record5) {
       const { stored, readable } = await this.#loadStore();
-      if (!stored.doubts.includes(record3.work)) return;
-      stored.doubts = stored.doubts.filter((item) => item !== record3.work);
+      if (!stored.doubts.includes(record5.work)) return;
+      stored.doubts = stored.doubts.filter((item) => item !== record5.work);
       if (readable) await this.#write(stored);
     }
     /**
@@ -10921,13 +10924,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
      * and unanswered. The count says nothing of the story, the tab or the
      * account; it is what lets a later background know something went missing.
      */
-    async #countUnkept(record3) {
-      if (record3.unkept === record3.inDoubt) return;
+    async #countUnkept(record5) {
+      if (record5.unkept === record5.inDoubt) return;
       const { stored, readable } = await this.#loadStore();
       if (!readable) return;
-      record3.unkept = record3.inDoubt;
-      stored.unkept = Math.max(0, stored.unkept + (record3.inDoubt ? 1 : -1));
-      if (record3.inDoubt) stored.unkeptAt = this.#ports.now();
+      record5.unkept = record5.inDoubt;
+      stored.unkept = Math.max(0, stored.unkept + (record5.inDoubt ? 1 : -1));
+      if (record5.inDoubt) stored.unkeptAt = this.#ports.now();
       await this.#write(stored);
     }
     /** Notes a doubt that can no longer be placed, as of `at` or later. */
@@ -10938,11 +10941,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #unplacedHolds(stored) {
       return stored.unplacedAt !== null && this.#ports.now() - stored.unplacedAt < FIRST_TAP_UNPLACED_DOUBT_TTL_MS;
     }
-    async #drop(record3) {
+    async #drop(record5) {
       const { stored, readable } = await this.#loadStore();
-      let changed = stored.records.some((item) => item.k === record3.key);
-      stored.records = stored.records.filter((item) => item.k !== record3.key);
-      if (record3.inDoubt && this.#carryDoubt(stored, record3)) changed = true;
+      let changed = stored.records.some((item) => item.k === record5.key);
+      stored.records = stored.records.filter((item) => item.k !== record5.key);
+      if (record5.inDoubt && this.#carryDoubt(stored, record5)) changed = true;
       if (changed && readable) await this.#write(stored);
     }
     /**
@@ -10961,21 +10964,21 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return true;
     }
     /** Writes what a record now says. No work key, title, author or address. */
-    async #persist(record3) {
-      if (!record3.persist) return this.#countUnkept(record3);
+    async #persist(record5) {
+      if (!record5.persist) return this.#countUnkept(record5);
       const { stored, readable } = await this.#loadStore();
       if (!readable) return;
       const now = this.#ports.now();
-      const outcome = record3.outcome === null || record3.outcome.kind === "saving" ? null : record3.outcome;
-      let records = stored.records.filter((item) => item.k !== record3.key);
-      if (outcome !== null || record3.inDoubt) {
+      const outcome = record5.outcome === null || record5.outcome.kind === "saving" ? null : record5.outcome;
+      let records = stored.records.filter((item) => item.k !== record5.key);
+      if (outcome !== null || record5.inDoubt) {
         records.push({
-          k: record3.key,
-          s: record3.scope,
-          at: record3.at,
-          inDoubt: record3.inDoubt,
+          k: record5.key,
+          s: record5.scope,
+          at: record5.at,
+          inDoubt: record5.inDoubt,
           outcome,
-          ...record3.inDoubt ? { w: record3.work } : {}
+          ...record5.inDoubt ? { w: record5.work } : {}
         });
       }
       records = records.filter((item) => item.inDoubt || now - item.at >= 0 && now - item.at < FIRST_TAP_RECORD_TTL_MS);
@@ -10988,23 +10991,23 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       await this.#write(stored);
     }
     // --- One attempt ------------------------------------------------------------
-    async #run(record3, page, grantAtStart) {
-      const earlierInDoubt = record3.inDoubt;
+    async #run(record5, page, grantAtStart) {
+      const earlierInDoubt = record5.inDoubt;
       const fail = async (reason, dispatch) => {
-        record3.running = false;
-        record3.inDoubt = earlierInDoubt || record3.pageSave || dispatch === "sent_unconfirmed";
-        if (record3.pageSave) {
-          const found = await this.#look(record3);
+        record5.running = false;
+        record5.inDoubt = earlierInDoubt || record5.pageSave || dispatch === "sent_unconfirmed";
+        if (record5.pageSave) {
+          const found = await this.#look(record5);
           if (found === "account_changed") {
-            this.#accountChanged(record3);
+            this.#accountChanged(record5);
             return;
           }
           if (found !== null) {
-            await this.#settle(record3, { kind: "confirmed", provenance: "found", mode: null, entry: found });
+            await this.#settle(record5, { kind: "confirmed", provenance: "found", mode: null, entry: found });
             return;
           }
         }
-        await this.#settle(record3, { kind: "failed", reason, dispatch });
+        await this.#settle(record5, { kind: "failed", reason, dispatch });
       };
       try {
         if (!await this.#ports.inject(page.tabId).catch(() => false)) {
@@ -11013,34 +11016,34 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         this.#injected.set(page.tabId, page.workKey);
         const collected = await this.#ports.collect(page.tabId).catch(() => null);
         if (!isRecord22(collected)) return await fail("page_unreachable", "never_sent");
-        record3.story = storyFrom(collected, page.hostKind);
+        record5.story = storyFrom(collected, page.hostKind);
         if (collected.ok !== true) {
           return await fail(
             collected.error === "story_unavailable" ? "story_unavailable" : "page_unreachable",
             "never_sent"
           );
         }
-        if (collected.workKey !== record3.workKey) return await fail("page_unreachable", "never_sent");
-        if (record3.story.title !== null && record3.outcome?.kind === "saving") this.#show(record3);
-        if (collected.private === true && record3.persist) {
-          record3.persist = false;
-          record3.priorKnown = false;
+        if (collected.workKey !== record5.workKey) return await fail("page_unreachable", "never_sent");
+        if (record5.story.title !== null && record5.outcome?.kind === "saving") this.#show(record5);
+        if (collected.private === true && record5.persist) {
+          record5.persist = false;
+          record5.priorKnown = false;
         }
         const command = storyTrackCommandFromMessage(
           {
             type: "TRACE_CONNECT_AND_SAVE",
-            workKey: record3.workKey,
+            workKey: record5.workKey,
             payload: collected.payload,
             ...typeof collected.ffnAuthorId === "string" ? { ffnAuthorId: collected.ffnAuthorId } : {}
           },
           { tab: { url: page.url }, url: page.url, frameId: 0 }
         );
-        if (command === null || command.workKey !== record3.workKey) {
+        if (command === null || command.workKey !== record5.workKey) {
           return await fail("page_unreachable", "never_sent");
         }
-        if (this.#ports.binding() !== record3.binding) {
-          record3.running = false;
-          this.#accountChanged(record3);
+        if (this.#ports.binding() !== record5.binding) {
+          record5.running = false;
+          this.#accountChanged(record5);
           return;
         }
         const mode = storySaveModeAtAdmission({
@@ -11054,16 +11057,16 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
             // Written down before the write goes out, so that a background put
             // to sleep mid-save is known afterwards to have a write in doubt.
             beforeWrite: async () => {
-              record3.inDoubt = true;
-              await this.#persist(record3);
+              record5.inDoubt = true;
+              await this.#persist(record5);
             }
           },
           page.tabId
         );
         if (result.kind === "confirmed") {
-          record3.running = false;
-          const provenance = result.source === "mutation" ? "saved_now" : result.source === "preflight" && record3.priorKnown && !earlierInDoubt && !record3.pageSave ? "already" : "found";
-          await this.#settle(record3, {
+          record5.running = false;
+          const provenance = result.source === "mutation" ? "saved_now" : result.source === "preflight" && record5.priorKnown && !earlierInDoubt && !record5.pageSave ? "already" : "found";
+          await this.#settle(record5, {
             kind: "confirmed",
             provenance,
             mode,
@@ -11079,13 +11082,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     }
     // The page shows its mark only for a confirmed story, and only once no
     // popup is open over it. Both read the same record.
-    async #markIfDue(record3) {
-      if (record3.outcome?.kind !== "confirmed" || this.#ports.binding() !== record3.binding) return;
-      for (const tabId of record3.tabs) {
-        if (record3.marked.has(tabId)) continue;
+    async #markIfDue(record5) {
+      if (record5.outcome?.kind !== "confirmed" || this.#ports.binding() !== record5.binding) return;
+      for (const tabId of record5.tabs) {
+        if (record5.marked.has(tabId)) continue;
         if ([...this.#sheets.values()].some((sheet) => sheet.tabId === tabId)) continue;
-        record3.marked.add(tabId);
-        await this.#ports.mark(tabId, record3.workKey).catch(() => void 0);
+        record5.marked.add(tabId);
+        await this.#ports.mark(tabId, record5.workKey).catch(() => void 0);
       }
     }
   };
@@ -12062,9 +12065,1729 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     return handle;
   }
 
+  // src/extension-runtime/web-history-handoff.mts
+  var WEB_HISTORY_LIFETIME_MS = 18e5;
+  var WEB_HISTORY_REQUEST = "TRACE_WEB_HISTORY_REQUEST";
+  var WEB_HISTORY_RECEIVED = "TRACE_WEB_HISTORY_RECEIVED";
+  var UUID3 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  var KEEP_KEY = "traceWebHistoryOfferV1";
+  var record3 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+  function offerRecord(value) {
+    if (!record3(value) || value.v !== 1 || typeof value.handoffID !== "string" || !UUID3.test(value.handoffID) || typeof value.accountId !== "string" || !value.accountId || typeof value.capturedAt !== "string" || typeof value.sha256 !== "string" || typeof value.expiresAtMs !== "number" || !Number.isSafeInteger(value.expiresAtMs)) return null;
+    return value;
+  }
+  function capturedAtOf(history) {
+    try {
+      const parsed = JSON.parse(new TextDecoder().decode(history.parts[0]));
+      return record3(parsed) && typeof parsed.at === "string" ? parsed.at : null;
+    } catch {
+      return null;
+    }
+  }
+  var WebHistoryHandoff = class {
+    #webOrigin;
+    #randomID;
+    #now;
+    #keep;
+    /** Makes the parts again from the History store, for when they were read. */
+    #source = null;
+    #offered = null;
+    /** The parts of `#offered`, by its id: never another offer's. */
+    #parts = null;
+    /** Reading the kept offer after a restart, once; an offer or discard meanwhile wins. */
+    #loading = null;
+    #rebuilding = null;
+    /** Bumped by every offer and discard: work begun before one never lands after it. */
+    #generation = 0;
+    constructor(options) {
+      this.#webOrigin = new URL(options.webOrigin).origin;
+      this.#randomID = options.randomID;
+      this.#now = options.now ?? Date.now;
+      this.#keep = options.keep ?? null;
+    }
+    /** The History store the parts are made from, after a restart. */
+    useSource(source) {
+      this.#source = source;
+    }
+    /** The review page for a handoff. The id rides in the fragment, never to a server. */
+    reviewUrl(handoffID) {
+      return `${this.#webOrigin}/import/history#handoff=${handoffID}`;
+    }
+    /** Makes `history` the one History on offer, for `accountId`, replacing any earlier one. */
+    async offer(accountId, history) {
+      const handoffID = this.#randomID();
+      const now = this.#now();
+      const capturedAt = history.parts.length ? capturedAtOf(history) : null;
+      if (!accountId || !UUID3.test(handoffID) || !Number.isSafeInteger(now) || capturedAt === null) {
+        return Object.freeze({ ok: false, error: "history_handoff_unavailable" });
+      }
+      const offered = {
+        v: 1,
+        handoffID,
+        accountId,
+        expiresAtMs: now + WEB_HISTORY_LIFETIME_MS,
+        capturedAt,
+        sha256: history.sha256
+      };
+      this.#generation += 1;
+      this.#offered = offered;
+      this.#parts = { handoffID, history };
+      this.#rebuilding = null;
+      await this.#keep?.save(offered).catch(() => void 0);
+      return Object.freeze({
+        ok: true,
+        state: "opened_on_web",
+        handoffID,
+        expiresAtMs: offered.expiresAtMs,
+        url: this.reviewUrl(handoffID)
+      });
+    }
+    /** Forgets the History on offer (its account left, or the reader deleted it). */
+    async discard() {
+      this.#generation += 1;
+      this.#offered = null;
+      this.#parts = null;
+      this.#rebuilding = null;
+      await this.#keep?.clear().catch(() => void 0);
+    }
+    /**
+     * Answers a Trace page's request. `currentAccountId` is the account signed
+     * in to the extension now, or null while it isn't connected; a History
+     * started by another account is never given out.
+     */
+    async answer(message, currentAccountId) {
+      if (!record3(message) || typeof message.handoffID !== "string" || !UUID3.test(message.handoffID)) {
+        return Object.freeze({ ok: false, error: "history_handoff_bad_request" });
+      }
+      this.#loading ??= this.#load();
+      await this.#loading;
+      const offered = this.#offered;
+      if (offered === null || offered.handoffID !== message.handoffID) {
+        return Object.freeze({ ok: false, error: "history_handoff_unknown" });
+      }
+      if (this.#now() >= offered.expiresAtMs) {
+        await this.discard();
+        return Object.freeze({ ok: false, error: "history_handoff_expired" });
+      }
+      if (currentAccountId === null) return Object.freeze({ ok: false, error: "history_handoff_not_connected" });
+      if (currentAccountId !== offered.accountId) {
+        return Object.freeze({ ok: false, error: "history_handoff_account_changed" });
+      }
+      if (message.type === WEB_HISTORY_RECEIVED) {
+        await this.discard();
+        return Object.freeze({ ok: true, kind: "received" });
+      }
+      if (message.type !== WEB_HISTORY_REQUEST) return Object.freeze({ ok: false, error: "history_handoff_bad_request" });
+      const history = await this.#history(offered);
+      if (history === null || this.#offered?.handoffID !== offered.handoffID) {
+        return Object.freeze({ ok: false, error: "history_handoff_unknown" });
+      }
+      if (message.part === "declaration") {
+        return Object.freeze({
+          ok: true,
+          kind: "declaration",
+          handoffID: offered.handoffID,
+          accountId: offered.accountId,
+          partCount: history.parts.length,
+          byteCount: history.byteCount,
+          itemCount: history.itemCount,
+          sha256: history.sha256,
+          expiresAtMs: offered.expiresAtMs
+        });
+      }
+      const partIndex = message.part;
+      if (typeof partIndex !== "number" || !Number.isSafeInteger(partIndex) || partIndex < 0 || partIndex >= history.parts.length) {
+        return Object.freeze({ ok: false, error: "history_handoff_bad_request" });
+      }
+      return Object.freeze({
+        ok: true,
+        kind: "part",
+        handoffID: offered.handoffID,
+        partIndex,
+        text: new TextDecoder().decode(history.parts[partIndex])
+      });
+    }
+    /** The offer kept before a restart, unless an offer or discard came first. */
+    async #load() {
+      const generation = this.#generation;
+      const kept = offerRecord(await this.#keep?.load().catch(() => null));
+      if (generation === this.#generation && this.#offered === null) this.#offered = kept;
+    }
+    /**
+     * The parts on offer, made again after a restart (once, shared by every
+     * request while it runs); null when the works have changed since.
+     */
+    async #history(offered) {
+      if (this.#parts?.handoffID === offered.handoffID) return this.#parts.history;
+      const source = this.#source;
+      if (source === null) return null;
+      if (this.#rebuilding?.handoffID !== offered.handoffID) {
+        this.#rebuilding = { handoffID: offered.handoffID, history: source(offered.capturedAt).catch(() => null) };
+      }
+      const generation = this.#generation;
+      const rebuilt = await this.#rebuilding.history;
+      if (rebuilt === null || rebuilt.sha256 !== offered.sha256) return null;
+      if (generation === this.#generation && this.#offered?.handoffID === offered.handoffID) {
+        this.#parts = { handoffID: offered.handoffID, history: rebuilt };
+      }
+      return rebuilt;
+    }
+  };
+  function sessionKeep(area) {
+    return {
+      load: async () => (await area.get(KEEP_KEY))[KEEP_KEY] ?? null,
+      save: (value) => area.set({ [KEEP_KEY]: value }),
+      clear: () => area.remove(KEEP_KEY)
+    };
+  }
+
+  // src/extension-runtime/ao3-history-page.mts
+  var AO3_HISTORY_ORIGIN = "https://archiveofourown.org";
+  var MAX_HISTORY_PAGE_CHARS = 2097152;
+  var AO3_USERNAME_PATTERN = /^[A-Za-z0-9_]{1,40}$/;
+  var ENTITIES = {
+    amp: "&",
+    lt: "<",
+    gt: ">",
+    quot: '"',
+    apos: "'",
+    nbsp: " ",
+    hellip: "\u2026",
+    mdash: "\u2014",
+    ndash: "\u2013",
+    lsquo: "\u2018",
+    rsquo: "\u2019",
+    ldquo: "\u201C",
+    rdquo: "\u201D"
+  };
+  function decodeEntities2(text2) {
+    return text2.replace(/&(#x[0-9a-f]{1,6}|#[0-9]{1,7}|[a-z]{2,8});/gi, (whole, body) => {
+      if (body[0] === "#") {
+        const code = body[1] === "x" || body[1] === "X" ? Number.parseInt(body.slice(2), 16) : Number.parseInt(body.slice(1), 10);
+        return Number.isSafeInteger(code) && code > 0 && code <= 1114111 ? String.fromCodePoint(code) : whole;
+      }
+      return ENTITIES[body.toLowerCase()] ?? whole;
+    });
+  }
+  function plainText2(markup, max = 4e3) {
+    return decodeEntities2(markup.replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim().slice(0, max);
+  }
+  function classTokens2(startTag) {
+    const value = /\bclass\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(startTag);
+    return (value?.[1] ?? value?.[2] ?? "").split(/\s+/).filter(Boolean);
+  }
+  function elements(html, tag, tokens, limit = 50) {
+    const out = [];
+    const start = new RegExp(`<${tag}\\b[^>]*>`, "gi");
+    const end = new RegExp(`</${tag}\\s*>`, "i");
+    for (let match = start.exec(html); match !== null && out.length < limit; match = start.exec(html)) {
+      const classes = classTokens2(match[0]);
+      if (!tokens.every((token) => classes.includes(token))) continue;
+      const from = match.index + match[0].length;
+      const close = end.exec(html.slice(from));
+      if (close === null) break;
+      out.push(html.slice(from, from + close.index));
+    }
+    return out;
+  }
+  function anchorTexts(html, test, limit) {
+    const out = [];
+    const anchor = /<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi;
+    for (let match = anchor.exec(html); match !== null && out.length < limit; match = anchor.exec(html)) {
+      if (!test(`<a ${match[1] ?? ""}>`)) continue;
+      const text2 = plainText2(match[2] ?? "", 300);
+      if (text2 && !out.includes(text2)) out.push(text2);
+    }
+    return out;
+  }
+  function attribute(startTag, name) {
+    const value = new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, "i").exec(startTag);
+    return value === null ? null : decodeEntities2(value[1] ?? value[2] ?? "");
+  }
+  function wholeNumber(text2) {
+    const trimmed = text2.trim();
+    if (!/^(?:[1-9]\d{0,2}(?:,\d{3})+|\d{1,12})$/.test(trimmed)) return null;
+    const value = Number(trimmed.replaceAll(",", ""));
+    return Number.isSafeInteger(value) ? value : null;
+  }
+  var MONTHS = {
+    jan: 1,
+    feb: 2,
+    mar: 3,
+    apr: 4,
+    may: 5,
+    jun: 6,
+    jul: 7,
+    aug: 8,
+    sep: 9,
+    oct: 10,
+    nov: 11,
+    dec: 12
+  };
+  function historyDay(text2) {
+    const match = /^(\d{1,2}) ([A-Z][a-z]{2}) (\d{4})$/.exec(text2.trim());
+    if (match === null) return null;
+    const day = Number(match[1]);
+    const month = MONTHS[match[2].toLowerCase()];
+    const year = Number(match[3]);
+    if (month === void 0 || year < 2e3) return null;
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+    return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+  function readRow(row, startTag) {
+    const classes = classTokens2(startTag);
+    if (classes.includes("deleted")) return "deleted";
+    const id = /\bid\s*=\s*["']work_([1-9]\d{0,11})["']/i.exec(startTag)?.[1];
+    if (id === void 0) return "unreadable";
+    const heading = elements(row, "h4", ["heading"], 1)[0];
+    if (heading === void 0) return "unreadable";
+    const titleLink = /<a\b([^>]*)>([\s\S]*?)<\/a\s*>/i.exec(heading);
+    const href = titleLink ? attribute(`<a ${titleLink[1] ?? ""}>`, "href") : null;
+    const title = titleLink ? plainText2(titleLink[2] ?? "", 500) : "";
+    if (href === null || !new RegExp(`^(?:https://archiveofourown\\.org)?/works/${id}(?:[/?#]|$)`).test(href) || !title) {
+      return "unreadable";
+    }
+    const viewed = plainText2(elements(row, "h4", ["viewed"], 1)[0] ?? "", 500);
+    const later = /\(Marked for Later\.\)/i.test(viewed);
+    const visited = later ? null : /Last visited:\s*(\d{1,2} [A-Z][a-z]{2} \d{4})/.exec(viewed)?.[1] ?? null;
+    const visits = later ? null : /\bVisited once\b/i.test(viewed) ? 1 : wholeNumber(/\bVisited\s+([\d,]+)\s+times?\b/i.exec(viewed)?.[1] ?? "");
+    const words = wholeNumber(plainText2(elements(row, "dd", ["words"], 1)[0] ?? "", 40));
+    const chapters = plainText2(elements(row, "dd", ["chapters"], 1)[0] ?? "", 40).replace(/\s+/g, "");
+    return {
+      id,
+      title,
+      authors: anchorTexts(heading, (tag) => attribute(tag, "rel") === "author", 20),
+      fandoms: anchorTexts(elements(row, "h5", ["fandoms"], 1)[0] ?? "", (tag) => classTokens2(tag).includes("tag"), 20),
+      tags: anchorTexts(elements(row, "ul", ["tags", "commas"], 1)[0] ?? "", (tag) => classTokens2(tag).includes("tag"), 75),
+      summary: plainText2(elements(row, "blockquote", ["summary"], 1)[0] ?? "", 4e3),
+      words,
+      chapters: /^\d+\/(?:\d+|\?)$/.test(chapters) ? chapters : null,
+      lastVisited: visited === null ? null : historyDay(visited),
+      visits: visits !== null && visits > 0 ? visits : null,
+      later
+    };
+  }
+  function historyPageURL(user, page) {
+    if (!AO3_USERNAME_PATTERN.test(user) || !Number.isSafeInteger(page) || page < 1) throw new Error("invalid history page");
+    return `${AO3_HISTORY_ORIGIN}/users/${user}/readings${page === 1 ? "" : `?page=${page}`}`;
+  }
+  function historyPageNumber(href, user) {
+    let url;
+    try {
+      url = new URL(href, AO3_HISTORY_ORIGIN);
+    } catch {
+      return null;
+    }
+    if (url.origin !== AO3_HISTORY_ORIGIN || url.username || url.password || url.hash) return null;
+    if (url.pathname.replace(/\/$/, "").toLowerCase() !== `/users/${user}/readings`.toLowerCase()) return null;
+    const keys = [...url.searchParams.keys()];
+    if (keys.some((key) => key !== "page") || url.searchParams.getAll("page").length > 1) return null;
+    const raw = url.searchParams.get("page");
+    if (raw === null) return 1;
+    return /^[1-9]\d{0,5}$/.test(raw) ? Number(raw) : null;
+  }
+  var LOGIN_MARKERS = /<form\b[^>]*\baction\s*=\s*["'][^"']*\/users\/login\b|<body\b[^>]*\bclass\s*=\s*["'][^"']*\blogged-out\b/i;
+  function readHistoryPage(html, user, page) {
+    if (typeof html !== "string") return { kind: "stop", code: "unrecognized_page" };
+    if (isChallengePage(html)) return { kind: "stop", code: "challenge" };
+    const main = /<div\b[^>]*\bid\s*=\s*["']main["'][^>]*>/i.exec(html);
+    if (main === null || !classTokens2(main[0]).includes("readings-index")) {
+      return { kind: "stop", code: LOGIN_MARKERS.test(html) ? "signed_out" : "unrecognized_page" };
+    }
+    const whole = html.slice(main.index);
+    const footer = whole.search(/<div\b[^>]*\bid\s*=\s*["']footer["']/i);
+    if (footer <= 0) return { kind: "incomplete" };
+    const after = whole.slice(0, footer);
+    let list = "";
+    const listTag = /<ol\b[^>]*>/gi;
+    for (let match = listTag.exec(after); match !== null; match = listTag.exec(after)) {
+      const classes = classTokens2(match[0]);
+      if (!classes.includes("reading") || !classes.includes("index")) continue;
+      const rest = after.slice(match.index + match[0].length);
+      const end = rest.search(/<ol\b[^>]*\bclass\s*=\s*["'][^"']*\bpagination\b/i);
+      list = end >= 0 ? rest.slice(0, end) : rest;
+      break;
+    }
+    const rowStart = /<li\b[^>]*>/gi;
+    const starts = [];
+    for (let match = rowStart.exec(list); match !== null; match = rowStart.exec(list)) {
+      const classes = classTokens2(match[0]);
+      if (classes.includes("reading") && classes.includes("work")) starts.push({ index: match.index, tag: match[0] });
+    }
+    const works = [];
+    let deleted = 0;
+    let unreadable = 0;
+    starts.forEach((start, index) => {
+      const row = list.slice(start.index + start.tag.length, starts[index + 1]?.index ?? list.length);
+      const read = readRow(row, start.tag);
+      if (read === "deleted") deleted += 1;
+      else if (read === "unreadable") unreadable += 1;
+      else works.push(read);
+    });
+    const nexts = /* @__PURE__ */ new Set();
+    let highest = page;
+    const anchor = /<a\b[^>]*>/gi;
+    for (let match = anchor.exec(after); match !== null; match = anchor.exec(after)) {
+      const href = attribute(match[0], "href");
+      const number = href === null ? null : historyPageNumber(href, user);
+      if (number !== null) highest = Math.max(highest, number);
+      if (attribute(match[0], "rel") === "next") nexts.add(number);
+    }
+    let disabledNexts = 0;
+    let otherNexts = 0;
+    const nextItem = /<li\b[^>]*>/gi;
+    for (let match = nextItem.exec(after); match !== null; match = nextItem.exec(after)) {
+      if (!classTokens2(match[0]).includes("next")) continue;
+      const item = after.slice(match.index + match[0].length);
+      const close = item.search(/<\/li\s*>/i);
+      const body = close >= 0 ? item.slice(0, close) : item;
+      const link = /<a\b[^>]*>/i.exec(body);
+      const href = link === null ? null : attribute(link[0], "href");
+      if (href !== null) nexts.add(historyPageNumber(href, user));
+      else if (link === null && elements(body, "span", ["disabled"], 1).length === 1) disabledNexts += 1;
+      else otherNexts += 1;
+    }
+    if (nexts.size > 1 || nexts.has(null) || nexts.size === 1 && !nexts.has(page + 1) || nexts.size === 1 && disabledNexts > 0 || otherNexts > 0) {
+      return { kind: "stop", code: "pagination_unexpected" };
+    }
+    const pageLinks = /<ol\b[^>]*\bclass\s*=\s*["'][^"']*\bpagination\b/i.test(after);
+    if (nexts.size === 0 && pageLinks && disabledNexts === 0) {
+      return { kind: "stop", code: "pagination_unexpected" };
+    }
+    if (starts.length === 0) return { kind: "empty" };
+    if (unreadable * 2 > starts.length) return { kind: "stop", code: "rows_unreadable" };
+    const nextPage = nexts.size ? page + 1 : null;
+    const totalPages = nextPage === null ? page : Math.max(highest, nextPage);
+    return { kind: "page", works, deleted, unreadable, nextPage, totalPages };
+  }
+  function retryAfterMs(value, now) {
+    if (typeof value !== "string" || !value.trim()) return null;
+    const trimmed = value.trim();
+    if (/^\d{1,7}$/.test(trimmed)) return Number(trimmed) * 1e3;
+    if (!/^[A-Za-z]{3},\s/.test(trimmed)) return null;
+    const date = Date.parse(trimmed);
+    return Number.isFinite(date) ? Math.max(0, date - now) : null;
+  }
+  function classifyHistoryAnswer(answer, user, page, now) {
+    if (answer.kind === "failed") {
+      return answer.code === "timeout" || answer.code === "network" ? { kind: "retry", code: answer.code, retryAfterMs: null } : { kind: "stop", code: answer.code };
+    }
+    if (answer.cfMitigated?.toLowerCase() === "challenge") return { kind: "stop", code: "challenge" };
+    if (answer.status === 429) return { kind: "retry", code: "rate_limited", retryAfterMs: retryAfterMs(answer.retryAfter, now) };
+    if (answer.status === 503) {
+      if (isChallengePage(answer.html)) return { kind: "stop", code: "challenge" };
+      return { kind: "retry", code: "unavailable", retryAfterMs: retryAfterMs(answer.retryAfter, now) };
+    }
+    if (answer.status === 502 || answer.status === 504 || answer.status >= 520 && answer.status <= 526) {
+      return { kind: "retry", code: "server_error", retryAfterMs: retryAfterMs(answer.retryAfter, now) };
+    }
+    if (isChallengePage(answer.html)) return { kind: "stop", code: "challenge" };
+    let landed;
+    try {
+      landed = new URL(answer.url);
+    } catch {
+      return { kind: "stop", code: "redirected" };
+    }
+    if (landed.protocol !== "https:" || landed.hostname !== "archiveofourown.org") return { kind: "stop", code: "wrong_host" };
+    if (/^\/users\/(?:login|sign_in)\b|^\/login\b/i.test(landed.pathname)) return { kind: "stop", code: "signed_out" };
+    if (answer.status === 401) return { kind: "stop", code: "signed_out" };
+    if (answer.status === 403) return { kind: "stop", code: LOGIN_MARKERS.test(answer.html) ? "signed_out" : "forbidden" };
+    if (answer.status !== 200) return { kind: "stop", code: "http_error" };
+    if (historyPageNumber(answer.url, user) !== page) {
+      return { kind: "stop", code: LOGIN_MARKERS.test(answer.html) ? "signed_out" : "redirected" };
+    }
+    if (answer.contentType !== null && !/text\/html/i.test(answer.contentType)) return { kind: "stop", code: "unrecognized_page" };
+    const read = readHistoryPage(answer.html, user, page);
+    if (read.kind === "empty") return { kind: "retry", code: "empty_page", retryAfterMs: null };
+    if (read.kind === "incomplete") return { kind: "retry", code: "incomplete_page", retryAfterMs: null };
+    return read.kind === "page" ? { kind: "page", read } : { kind: "stop", code: read.code };
+  }
+
+  // src/extension-runtime/ao3-history-store.mts
+  var HISTORY_DATABASE_NAME = "traceAo3HistoryImportV1";
+  var HISTORY_DATABASE_VERSION = 1;
+  var RUN_STORE = "run";
+  var WORK_STORE = "works";
+  var RUN_KEY = "current";
+  var HISTORY_DATABASE_TIMEOUT_MS = 5e3;
+  var HistoryStoreFull = class extends Error {
+  };
+  function mergeHistoryWork(kept, seen) {
+    const later = (a, b) => a === null ? b : b === null ? a : a >= b ? a : b;
+    const most = (a, b) => a === null ? b : b === null ? a : Math.max(a, b);
+    return {
+      id: kept.id,
+      title: kept.title || seen.title,
+      authors: kept.authors.length ? kept.authors : seen.authors,
+      fandoms: kept.fandoms.length ? kept.fandoms : seen.fandoms,
+      tags: kept.tags.length ? kept.tags : seen.tags,
+      summary: kept.summary || seen.summary,
+      words: kept.words ?? seen.words,
+      chapters: kept.chapters ?? seen.chapters,
+      lastVisited: later(kept.lastVisited, seen.lastVisited),
+      visits: most(kept.visits, seen.visits),
+      later: kept.later && seen.later
+    };
+  }
+  var clone = (value) => structuredClone(value);
+  var MemoryHistoryStore = class {
+    run = null;
+    works = /* @__PURE__ */ new Map();
+    /** Makes the next writes fail, as a full device would. */
+    failWrites = null;
+    async readRun() {
+      return this.run === null ? null : clone(this.run);
+    }
+    async writeRun(run) {
+      this.#check();
+      this.run = clone(run);
+    }
+    async admit(works, runFor) {
+      this.#check();
+      let fresh = 0;
+      let repeats = 0;
+      const next = new Map(this.works);
+      for (const work of works) {
+        const kept = next.get(work.id);
+        if (kept === void 0) {
+          fresh += 1;
+          next.set(work.id, clone(work));
+        } else {
+          repeats += 1;
+          next.set(work.id, mergeHistoryWork(kept, work));
+        }
+      }
+      const run = clone(runFor({ fresh, repeats }));
+      this.works.clear();
+      for (const [id, work] of next) this.works.set(id, work);
+      this.run = run;
+      return { fresh, repeats };
+    }
+    async readWorks() {
+      return [...this.works.values()].map(clone);
+    }
+    async clear() {
+      this.run = null;
+      this.works.clear();
+    }
+    #check() {
+      if (this.failWrites === "full") throw new HistoryStoreFull("history storage full");
+      if (this.failWrites === "error") throw new Error("history storage failed");
+    }
+  };
+  var ConnectionLost2 = class extends Error {
+  };
+  var IndexedDbHistoryStore = class {
+    #factory;
+    #timeoutMs;
+    #openPromise = null;
+    constructor(factory, options = {}) {
+      this.#factory = factory;
+      this.#timeoutMs = options.timeoutMs ?? HISTORY_DATABASE_TIMEOUT_MS;
+    }
+    readRun() {
+      return this.#transaction("readonly", ({ run }) => {
+        const request = run.get(RUN_KEY);
+        return () => request.result === void 0 ? null : request.result;
+      });
+    }
+    writeRun(value) {
+      return this.#transaction("readwrite", ({ run }) => {
+        run.put(value, RUN_KEY);
+        return () => void 0;
+      });
+    }
+    admit(works, runFor) {
+      return this.#transaction("readwrite", ({ run, works: store }) => {
+        let fresh = 0;
+        let repeats = 0;
+        const unique = /* @__PURE__ */ new Map();
+        for (const work of works) {
+          const before = unique.get(work.id);
+          if (before === void 0) unique.set(work.id, work);
+          else {
+            repeats += 1;
+            unique.set(work.id, mergeHistoryWork(before, work));
+          }
+        }
+        let waiting = unique.size;
+        const putRun = () => run.put(runFor({ fresh, repeats }), RUN_KEY);
+        for (const work of unique.values()) {
+          const request = store.get(work.id);
+          request.onsuccess = () => {
+            const kept = request.result;
+            if (kept === void 0) {
+              fresh += 1;
+              store.put(work);
+            } else {
+              repeats += 1;
+              store.put(mergeHistoryWork(kept, work));
+            }
+            waiting -= 1;
+            if (waiting === 0) putRun();
+          };
+        }
+        if (waiting === 0) putRun();
+        return () => ({ fresh, repeats });
+      });
+    }
+    readWorks() {
+      return this.#transaction("readonly", ({ works }) => {
+        const request = works.getAll();
+        return () => Array.isArray(request.result) ? request.result : [];
+      });
+    }
+    clear() {
+      return this.#transaction("readwrite", ({ run, works }) => {
+        run.clear();
+        works.clear();
+        return () => void 0;
+      });
+    }
+    async #transaction(mode, work) {
+      const database = await this.#open();
+      try {
+        return await this.#transactionOn(database, mode, work);
+      } catch (error) {
+        if (!(error instanceof ConnectionLost2)) throw error;
+        this.#drop(database);
+        const fresh = await this.#open();
+        try {
+          return await this.#transactionOn(fresh, mode, work);
+        } catch (retryError) {
+          if (retryError instanceof ConnectionLost2) this.#drop(fresh);
+          throw retryError;
+        }
+      }
+    }
+    #drop(failed2) {
+      this.#openPromise = null;
+      try {
+        failed2.close();
+      } catch {
+      }
+    }
+    #transactionOn(database, mode, work) {
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        let transaction;
+        try {
+          transaction = database.transaction([RUN_STORE, WORK_STORE], mode);
+        } catch {
+          reject(new ConnectionLost2("history database connection lost"));
+          return;
+        }
+        const finish = (error, value) => {
+          if (settled) return;
+          settled = true;
+          globalThis.clearTimeout(timer);
+          if (error === null) resolve(value);
+          else reject(error);
+        };
+        const timer = globalThis.setTimeout(() => {
+          try {
+            transaction.abort();
+          } catch {
+          }
+          finish(new ConnectionLost2("history database transaction timed out"));
+        }, this.#timeoutMs);
+        let result;
+        try {
+          result = work({ run: transaction.objectStore(RUN_STORE), works: transaction.objectStore(WORK_STORE) });
+        } catch (error) {
+          try {
+            transaction.abort();
+          } catch {
+          }
+          finish(error instanceof DOMException && error.name === "QuotaExceededError" ? new HistoryStoreFull("history storage full") : new Error("history database request failed", { cause: error }));
+          return;
+        }
+        transaction.oncomplete = () => {
+          try {
+            finish(null, result());
+          } catch (error) {
+            finish(new Error("history database result invalid", { cause: error }));
+          }
+        };
+        transaction.onabort = () => {
+          const error = transaction.error;
+          if (error?.name === "QuotaExceededError") finish(new HistoryStoreFull("history storage full"));
+          else if (error === null || error.name === "UnknownError") finish(new ConnectionLost2("history database connection lost"));
+          else finish(new Error(`history database transaction aborted: ${error.message}`, { cause: error }));
+        };
+      });
+    }
+    #open() {
+      if (this.#openPromise !== null) return this.#openPromise;
+      const opening = new Promise((resolve, reject) => {
+        let settled = false;
+        const fail = (message) => {
+          if (settled) return;
+          settled = true;
+          globalThis.clearTimeout(timer);
+          reject(new Error(message));
+        };
+        let request;
+        try {
+          request = this.#factory.open(HISTORY_DATABASE_NAME, HISTORY_DATABASE_VERSION);
+        } catch {
+          reject(new Error("history database open failed"));
+          return;
+        }
+        const timer = globalThis.setTimeout(() => fail("history database open timed out"), this.#timeoutMs);
+        request.onupgradeneeded = (event) => {
+          const database = request.result;
+          if (event.oldVersion !== 0 || database.objectStoreNames.length !== 0) {
+            request.transaction?.abort();
+            return;
+          }
+          database.createObjectStore(RUN_STORE);
+          database.createObjectStore(WORK_STORE, { keyPath: "id" });
+        };
+        request.onerror = () => fail("history database open failed");
+        request.onblocked = () => fail("history database open blocked");
+        request.onsuccess = () => {
+          const database = request.result;
+          if (settled) {
+            database.close();
+            return;
+          }
+          if (database.version !== HISTORY_DATABASE_VERSION || !database.objectStoreNames.contains(RUN_STORE) || !database.objectStoreNames.contains(WORK_STORE)) {
+            database.close();
+            fail("history database schema invalid");
+            return;
+          }
+          settled = true;
+          globalThis.clearTimeout(timer);
+          const forget = () => {
+            if (this.#openPromise === cached) this.#openPromise = null;
+          };
+          database.onversionchange = () => {
+            database.close();
+            forget();
+          };
+          database.onclose = forget;
+          resolve(database);
+        };
+      });
+      const cached = opening.catch((error) => {
+        if (this.#openPromise === cached) this.#openPromise = null;
+        throw error;
+      });
+      this.#openPromise = cached;
+      return cached;
+    }
+  };
+
   // src/extension-runtime/ao3-history-import.mts
+  var AO3_HISTORY_IMPORT_MESSAGE = "TRACE_AO3_HISTORY_IMPORT";
   var PAGE_GAP_MS = 6e3;
   var PAGE_GAP_JITTER_MS = 1e3;
+  var MAX_PAGE_GAP_MS = 6e4;
+  var RETRY_BASE_MS = 6e4;
+  var RETRY_MAX_MS = 9e5;
+  var NETWORK_RETRY_MS = 3e4;
+  var MAX_CONSECUTIVE_RETRIES = 3;
+  var SAVE_SETTLE_MS2 = 1e4;
+  var SAVE_RECHECK_MS = 5e3;
+  var REQUEST_TIMEOUT_MS9 = 2e4;
+  var LOST_AFTER_MS = 3e4;
+  var MAX_PAGES = 5e3;
+  var clone2 = (value) => structuredClone(value);
+  function isRun(value) {
+    if (!value || typeof value !== "object") return false;
+    const run = value;
+    return run.v === 1 && typeof run.runId === "string" && typeof run.account === "string" && typeof run.user === "string" && AO3_USERNAME_PATTERN.test(run.user) && ["running", "paused", "finished"].includes(run.status) && Number.isSafeInteger(run.nextPage) && typeof run.counts === "object" && run.counts !== null && typeof run.timing === "object" && run.timing !== null && typeof run.retry === "object" && run.retry !== null;
+  }
+  function newRun(runId, account, user, tabId, now) {
+    return {
+      v: 1,
+      runId,
+      account,
+      user,
+      status: "running",
+      reason: null,
+      tabId,
+      nextPage: 1,
+      totalPages: null,
+      lastPageDigest: null,
+      inFlight: null,
+      counts: { pages: 0, works: 0, later: 0, deleted: 0, unreadable: 0, repeats: 0 },
+      timing: {
+        startedAt: now,
+        finishedAt: null,
+        pausedAt: null,
+        pausedMs: 0,
+        dueAt: now,
+        gapMs: PAGE_GAP_MS,
+        lastKeptAt: null,
+        keptGapMsTotal: 0,
+        keptGapCount: 0
+      },
+      retry: { consecutive: 0, code: null }
+    };
+  }
+  var WAIT_OF = {
+    rate_limited: "slow_down",
+    unavailable: "slow_down",
+    server_error: "ao3_unwell",
+    empty_page: "ao3_unwell",
+    incomplete_page: "ao3_unwell",
+    network: "network",
+    timeout: "network"
+  };
+  function describeRun(run, now, saving = false) {
+    if (run === null) {
+      return {
+        status: "idle",
+        reason: null,
+        pagesRead: 0,
+        totalPages: null,
+        works: 0,
+        later: 0,
+        deleted: 0,
+        unreadable: 0,
+        waitingFor: null,
+        waitingUntil: null,
+        remainingMs: null,
+        startedAt: null,
+        finishedAt: null
+      };
+    }
+    const running = run.status === "running";
+    const waitingUntil = running && run.inFlight === null && run.timing.dueAt > now ? run.timing.dueAt : null;
+    const waitingFor = !running ? null : saving ? "save" : run.retry.code !== null && waitingUntil !== null ? WAIT_OF[run.retry.code] : null;
+    let remainingMs = null;
+    if (run.status !== "finished" && run.totalPages !== null) {
+      const left = Math.max(0, run.totalPages - run.counts.pages);
+      const perPage = run.timing.keptGapCount >= 2 ? run.timing.keptGapMsTotal / run.timing.keptGapCount : run.timing.gapMs + PAGE_GAP_JITTER_MS / 2 + 1500;
+      remainingMs = Math.round(left * perPage);
+    }
+    return {
+      status: run.status,
+      reason: run.reason,
+      pagesRead: run.counts.pages,
+      totalPages: run.totalPages,
+      works: run.counts.works,
+      later: run.counts.later,
+      deleted: run.counts.deleted,
+      unreadable: run.counts.unreadable,
+      waitingFor,
+      waitingUntil,
+      remainingMs,
+      startedAt: run.timing.startedAt,
+      finishedAt: run.timing.finishedAt
+    };
+  }
+  var Ao3HistoryImport = class {
+    #ports;
+    #run = null;
+    #loaded = false;
+    #tail = Promise.resolve();
+    constructor(ports) {
+      this.#ports = ports;
+    }
+    /** Runs changes to the run one after another. */
+    #serial(work) {
+      const next = this.#tail.then(work, work);
+      this.#tail = next.catch(() => void 0);
+      return next;
+    }
+    /** The stored run, if it is the signed-in account's. Another account's is deleted. */
+    async #load() {
+      if (!this.#loaded) {
+        const value = await this.#ports.store.readRun().catch(() => null);
+        this.#run = isRun(value) ? clone2(value) : null;
+        this.#loaded = true;
+      }
+      if (this.#run !== null) {
+        const account = await this.#ports.account().catch(() => null);
+        if (account !== null && account !== this.#run.account) await this.#forget();
+      }
+      return this.#run;
+    }
+    async #forget() {
+      await this.#ports.store.clear().catch(() => void 0);
+      this.#run = null;
+      this.#loaded = true;
+    }
+    /** Writes `next`; on failure the stored run stays as it was. */
+    async #write(next) {
+      return await this.#writeFailure(next) === null;
+    }
+    /** Writes `next`, and says why it could not be kept, if it could not. */
+    async #writeFailure(next) {
+      try {
+        await this.#ports.store.writeRun(next);
+        this.#run = next;
+        return null;
+      } catch (error) {
+        return error instanceof HistoryStoreFull ? "storage_full" : "storage_write_failed";
+      }
+    }
+    async #alarm(on) {
+      try {
+        await (on ? this.#ports.alarm?.start() : this.#ports.alarm?.stop());
+      } catch {
+      }
+    }
+    async #ensureLoop(tabId) {
+      if (tabId === null || this.#ports.ensureLoop === void 0) return;
+      try {
+        await this.#ports.ensureLoop(tabId);
+      } catch {
+      }
+    }
+    #saving(now) {
+      const saves = this.#ports.saveActivity();
+      return saves.inFlight > 0 || now - saves.lastEndedAt < SAVE_SETTLE_MS2;
+    }
+    #instruction(run) {
+      if (run === null || run.status !== "running") return { stop: true };
+      return { wait: Math.max(0, run.timing.dueAt - this.#ports.clock.now()) };
+    }
+    #gap(run) {
+      return run.timing.gapMs + Math.floor(Math.max(0, Math.min(1, this.#ports.random())) * PAGE_GAP_JITTER_MS);
+    }
+    async view() {
+      const run = await this.#serial(() => this.#load());
+      const now = this.#ports.clock.now();
+      return describeRun(run, now, run?.status === "running" && this.#saving(now));
+    }
+    /** Every work the run has kept, for the review. Another account gets none. */
+    async works() {
+      const run = await this.#serial(() => this.#load());
+      return run === null ? [] : this.#ports.store.readWorks();
+    }
+    /** Starts a run for `user`; the page loop in `tabId` carries it. */
+    async start(user, tabId) {
+      if (!AO3_USERNAME_PATTERN.test(user)) return { error: "username_unclear" };
+      const started = await this.#serial(async () => {
+        const account = await this.#ports.account().catch(() => null);
+        if (account === null) return "not_connected";
+        const current = await this.#load();
+        if (current !== null) return "already_started";
+        const run = newRun(this.#ports.newId(), account, user, tabId, this.#ports.clock.now());
+        try {
+          await this.#ports.store.clear();
+          await this.#ports.store.writeRun(run);
+        } catch (error) {
+          return error instanceof HistoryStoreFull ? "storage_full" : "storage_write_failed";
+        }
+        this.#run = run;
+        return true;
+      });
+      if (started !== true) return { error: started };
+      await this.#alarm(true);
+      await this.#ensureLoop(tabId);
+      return this.view();
+    }
+    async pause() {
+      await this.#serial(async () => {
+        const run = await this.#load();
+        if (run === null || run.status !== "running") return;
+        const next = clone2(run);
+        next.status = "paused";
+        next.reason = "paused_by_you";
+        next.timing.pausedAt = this.#ports.clock.now();
+        await this.#write(next);
+      });
+      await this.#alarm(false);
+      return this.view();
+    }
+    async resume(tabId) {
+      const resumed = await this.#serial(async () => {
+        const run = await this.#load();
+        if (run === null || run.status !== "paused") return false;
+        const next = clone2(run);
+        const now = this.#ports.clock.now();
+        next.status = "running";
+        next.reason = null;
+        if (next.timing.pausedAt !== null) next.timing.pausedMs += Math.max(0, now - next.timing.pausedAt);
+        next.timing.pausedAt = null;
+        next.timing.lastKeptAt = null;
+        next.timing.dueAt = Math.max(next.timing.dueAt, now);
+        next.retry.consecutive = 0;
+        if (tabId !== null) next.tabId = tabId;
+        return await this.#write(next);
+      });
+      if (resumed) {
+        await this.#alarm(true);
+        await this.#ensureLoop(this.#run?.tabId ?? null);
+      }
+      return this.view();
+    }
+    /** Stop and delete: the run and everything it found are gone. */
+    async delete() {
+      await this.#serial(() => this.#forget());
+      await this.#alarm(false);
+      return this.view();
+    }
+    /** The signed-in account left: whatever was kept for it goes too. */
+    async accountLeft() {
+      await this.#serial(() => this.#forget());
+      await this.#alarm(false);
+    }
+    /**
+     * Something other than the page loop woke the background: the alarm, the
+     * sheet, an AO3 page, the background starting. A running run's page loop
+     * is put (back) into the AO3 tab. It never reads.
+     */
+    async wake(tabId = null) {
+      const loopTab = await this.#serial(async () => {
+        const run = await this.#load();
+        if (run === null || run.status !== "running") return null;
+        if (tabId !== null && tabId !== run.tabId) {
+          const next = clone2(run);
+          next.tabId = tabId;
+          await this.#write(next);
+        }
+        return tabId ?? run.tabId;
+      });
+      if (loopTab === null) {
+        if (this.#run?.status !== "running") await this.#alarm(false);
+        return;
+      }
+      await this.#ensureLoop(loopTab);
+    }
+    /** The page loop's tick from the visible AO3 tab `tabId`. */
+    async tick(tabId) {
+      const instruction = await this.#serial(async () => {
+        const run = await this.#load();
+        if (run === null || run.status !== "running") return { stop: true };
+        const now = this.#ports.clock.now();
+        const next = clone2(run);
+        if (tabId !== null) next.tabId = tabId;
+        if (next.inFlight !== null) {
+          if (now - next.inFlight.at <= LOST_AFTER_MS) {
+            return { wait: Math.max(1e3, next.inFlight.at + LOST_AFTER_MS - now) };
+          }
+          next.inFlight = null;
+        }
+        if (next.nextPage > MAX_PAGES) return this.#pauseWith(next, "page_limit", now);
+        if (this.#saving(now)) {
+          if (tabId !== null && tabId !== run.tabId) await this.#write(next);
+          return { wait: SAVE_RECHECK_MS };
+        }
+        if (now < next.timing.dueAt) {
+          if (tabId !== null && tabId !== run.tabId) await this.#write(next);
+          return { wait: next.timing.dueAt - now };
+        }
+        const token = this.#ports.newId();
+        next.inFlight = { token, at: now, page: next.nextPage };
+        next.timing.dueAt = now + LOST_AFTER_MS;
+        const failure6 = await this.#writeFailure(next);
+        if (failure6 !== null) return this.#pauseWith(next, failure6, now);
+        return { fetch: historyPageURL(next.user, next.nextPage), token };
+      });
+      if ("stop" in instruction) await this.#alarm(false);
+      return instruction;
+    }
+    /** The answer to the request `token`, from the page loop. */
+    async answer(token, answer) {
+      const instruction = await this.#serial(async () => {
+        const current = await this.#load();
+        if (current === null || current.inFlight === null || current.inFlight.token !== token) {
+          return this.#instruction(current);
+        }
+        const next = clone2(current);
+        const { page } = current.inFlight;
+        next.inFlight = null;
+        const now = this.#ports.clock.now();
+        if (next.status !== "running") {
+          await this.#write(next);
+          return this.#instruction(next);
+        }
+        const result = classifyHistoryAnswer(answer, next.user, page, now);
+        if (result.kind === "page") return this.#keep(next, page, result.read, now);
+        if (result.kind === "retry") return this.#retry(next, page, result, now);
+        return this.#pauseWith(next, result.code, now);
+      });
+      if ("stop" in instruction) await this.#alarm(false);
+      return instruction;
+    }
+    async #pauseWith(next, reason, now) {
+      next.status = "paused";
+      next.reason = reason;
+      next.inFlight = null;
+      next.timing.pausedAt ??= now;
+      if (!await this.#write(next)) {
+        this.#run = next;
+      }
+      return { stop: true };
+    }
+    async #retry(next, page, result, now) {
+      next.retry.consecutive += 1;
+      next.retry.code = result.code;
+      const network = result.code === "network" || result.code === "timeout";
+      const base = network ? NETWORK_RETRY_MS : RETRY_BASE_MS * 2 ** (next.retry.consecutive - 1);
+      const retryAfter = result.retryAfterMs ?? 0;
+      next.timing.dueAt = now + Math.max(Math.min(RETRY_MAX_MS, base), retryAfter);
+      if (next.retry.consecutive >= MAX_CONSECUTIVE_RETRIES) {
+        const reason = result.code === "timeout" ? "network" : result.code === "empty_page" && page === 1 ? "history_empty" : result.code;
+        return this.#pauseWith(next, reason, now);
+      }
+      if (retryAfter > RETRY_MAX_MS) return this.#pauseWith(next, "retry_later", now);
+      if (result.code === "rate_limited" || result.code === "unavailable" || result.code === "server_error") {
+        next.timing.gapMs = Math.min(MAX_PAGE_GAP_MS, next.timing.gapMs * 2);
+      }
+      const failure6 = await this.#writeFailure(next);
+      if (failure6 !== null) return this.#pauseWith(next, failure6, now);
+      return this.#instruction(next);
+    }
+    async #keep(next, page, read, now) {
+      const digest = read.works.length ? `${read.works[0].id}|${read.works.at(-1).id}|${read.works.length}` : null;
+      if (digest !== null && digest === next.lastPageDigest) return this.#pauseWith(next, "pagination_repeat", now);
+      next.lastPageDigest = digest;
+      next.counts.pages += 1;
+      next.counts.later += read.works.filter((work) => work.later).length;
+      next.counts.deleted += read.deleted;
+      next.counts.unreadable += read.unreadable;
+      next.totalPages = Math.max(next.totalPages ?? 0, read.totalPages);
+      next.retry = { consecutive: 0, code: null };
+      if (next.timing.lastKeptAt !== null) {
+        next.timing.keptGapMsTotal += now - next.timing.lastKeptAt;
+        next.timing.keptGapCount += 1;
+      }
+      next.timing.lastKeptAt = now;
+      if (read.nextPage === null) {
+        next.status = "finished";
+        next.reason = "reached_last_page";
+        next.timing.finishedAt = now;
+        next.totalPages = page;
+      } else {
+        next.nextPage = read.nextPage;
+        next.timing.dueAt = now + this.#gap(next);
+      }
+      let kept = next;
+      try {
+        await this.#ports.store.admit(read.works, ({ fresh, repeats }) => {
+          kept = {
+            ...next,
+            counts: { ...next.counts, works: next.counts.works + fresh, repeats: next.counts.repeats + repeats }
+          };
+          return kept;
+        });
+      } catch (error) {
+        const failed2 = clone2(this.#run ?? next);
+        failed2.inFlight = null;
+        return this.#pauseWith(failed2, error instanceof HistoryStoreFull ? "storage_full" : "storage_write_failed", now);
+      }
+      this.#run = clone2(kept);
+      return this.#instruction(this.#run);
+    }
+  };
+
+  // src/extension-runtime/native-history-handoff.mts
+  var HISTORY_SOURCE = "ao3-history";
+  var HISTORY_MAXIMUM_PART_BYTES = 393216;
+  var HISTORY_MAXIMUM_PARTS = 128;
+  var HISTORY_MAXIMUM_ITEMS = 25e3;
+  var HISTORY_MAXIMUM_PART_ITEMS = 1e3;
+  var HISTORY_LIFETIME_MS = 18e5;
+  var REQUEST_ADMISSION_MS = 6e5;
+  var MESSAGE_ATTEMPT_MS2 = 2500;
+  var UUID4 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  var record4 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+  function historyImportItem(work) {
+    const item = {
+      src: "ao3",
+      ctx: "listing",
+      u: `https://archiveofourown.org/works/${work.id}`,
+      t: work.title
+    };
+    if (work.authors[0]) item.a = work.authors[0];
+    if (work.fandoms.length) item.fms = [...work.fandoms];
+    if (work.tags.length) item.tags = [...work.tags];
+    if (work.summary) item.sm = work.summary;
+    if (work.words !== null) item.w = work.words;
+    const chapters = /^(\d+)\/(\d+|\?)$/.exec(work.chapters ?? "");
+    if (chapters) {
+      const published = Number(chapters[1]);
+      item.chPub = published;
+      item.cht = chapters[2] === "?" ? "?" : Number(chapters[2]);
+      item.s = chapters[2] !== "?" && Number(chapters[2]) === published ? "complete" : "wip";
+    }
+    if (work.later) item.ml = true;
+    else {
+      if (work.lastVisited !== null) item.lv = work.lastVisited;
+      if (work.visits !== null) item.vc = work.visits;
+    }
+    return item;
+  }
+  async function historyParts(works, capturedAt, digest = sha256Hex) {
+    if (works.length === 0 || works.length > HISTORY_MAXIMUM_ITEMS) return null;
+    const ordered = [...works].sort((a, b) => (b.lastVisited ?? "").localeCompare(a.lastVisited ?? "") || Number(b.id) - Number(a.id));
+    const encoder = new TextEncoder();
+    const encode = (items) => encoder.encode(`{"s":${JSON.stringify(HISTORY_SOURCE)},"at":${JSON.stringify(capturedAt)},"items":[${items.join(",")}]}`);
+    const envelope = encode([]).byteLength;
+    const parts = [];
+    let current = [];
+    let currentBytes = envelope;
+    for (const work of ordered) {
+      const item = JSON.stringify(historyImportItem(work));
+      const itemBytes = encoder.encode(item).byteLength;
+      if (envelope + itemBytes > HISTORY_MAXIMUM_PART_BYTES) return null;
+      const withItem = currentBytes + itemBytes + (current.length > 0 ? 1 : 0);
+      if (current.length > 0 && (withItem > HISTORY_MAXIMUM_PART_BYTES || current.length >= HISTORY_MAXIMUM_PART_ITEMS)) {
+        parts.push(encode(current));
+        current = [item];
+        currentBytes = envelope + itemBytes;
+      } else {
+        current.push(item);
+        currentBytes = withItem;
+      }
+    }
+    if (current.length > 0) parts.push(encode(current));
+    if (parts.length > HISTORY_MAXIMUM_PARTS) return null;
+    const byteCount = parts.reduce((total, part) => total + part.byteLength, 0);
+    const whole = new Uint8Array(byteCount);
+    let offset = 0;
+    for (const part of parts) {
+      whole.set(part, offset);
+      offset += part.byteLength;
+    }
+    return { parts, byteCount, itemCount: ordered.length, sha256: await digest(whole) };
+  }
+  async function sha256Hex(bytes) {
+    const hash = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+  function base64(bytes) {
+    let binary = "";
+    for (let index = 0; index < bytes.length; index += 32768) {
+      binary += String.fromCharCode(...bytes.subarray(index, index + 32768));
+    }
+    return btoa(binary);
+  }
+  var failure5 = () => Object.freeze({ ok: false, error: "history_handoff_unavailable" });
+  var NativeHistoryHandoffProducer = class {
+    #runtime;
+    #mode;
+    #apiOrigin;
+    #randomID;
+    #now;
+    #active = false;
+    /** The last History staged, until another run or its discard. */
+    #staged = null;
+    constructor(options) {
+      this.#runtime = options.runtime;
+      this.#mode = options.mode;
+      this.#apiOrigin = new URL(options.apiOrigin).origin;
+      this.#randomID = options.randomID;
+      this.#now = options.now ?? Date.now;
+    }
+    /** Cancels the History last staged, when its account left before it was published. */
+    async discardUnpublished() {
+      const staged = this.#staged;
+      this.#staged = null;
+      if (staged?.handoffID) {
+        await this.#send({
+          type: "TRACE_IOS_HISTORY_CANCEL",
+          protocolVersion: 1,
+          requestID: staged.requestID,
+          handoffID: staged.handoffID
+        }).catch(() => null);
+      }
+    }
+    async run(scope2, isCurrent, history) {
+      if (this.#active) return failure5();
+      this.#active = true;
+      let reservation = null;
+      let staged = false;
+      try {
+        if (!scope2.accountId || new TextEncoder().encode(scope2.accountId).length > 256 || !Number.isSafeInteger(scope2.epoch) || scope2.epoch < 0 || !await isCurrent()) return failure5();
+        const requestID = this.#randomID();
+        const issued = this.#now();
+        if (!UUID4.test(requestID) || !Number.isSafeInteger(issued)) return failure5();
+        const pending = { requestID, issued, handoffID: null, expiresAtMs: issued + REQUEST_ADMISSION_MS + HISTORY_LIFETIME_MS };
+        reservation = pending;
+        const prepared = await this.#send({
+          type: "TRACE_IOS_HISTORY_PREPARE",
+          protocolVersion: 1,
+          requestID,
+          requestIssuedAtMs: issued,
+          accountID: scope2.accountId,
+          accountEpoch: scope2.epoch,
+          apiOrigin: this.#apiOrigin,
+          partCount: history.parts.length,
+          byteCount: history.byteCount,
+          itemCount: history.itemCount,
+          sha256: history.sha256
+        }, async () => await isCurrent() && this.#now() < issued + REQUEST_ADMISSION_MS);
+        if (!record4(prepared) || prepared.type !== "TRACE_IOS_HISTORY_PREPARE" || prepared.protocolVersion !== 1 || prepared.ok !== true || prepared.state !== "prepared" || typeof prepared.handoffID !== "string" || !UUID4.test(prepared.handoffID) || typeof prepared.expiresAtMs !== "number" || !Number.isSafeInteger(prepared.expiresAtMs) || prepared.expiresAtMs > pending.expiresAtMs || prepared.maximumPartBytes !== HISTORY_MAXIMUM_PART_BYTES || prepared.maximumParts !== HISTORY_MAXIMUM_PARTS || prepared.maximumItems !== HISTORY_MAXIMUM_ITEMS) return failure5();
+        pending.handoffID = prepared.handoffID;
+        pending.expiresAtMs = prepared.expiresAtMs;
+        const handoffID = prepared.handoffID;
+        const current = async () => await isCurrent() && this.#now() < pending.expiresAtMs;
+        let ready = null;
+        for (const [partIndex, part] of history.parts.entries()) {
+          if (!await current()) return failure5();
+          ready = await this.#send({
+            type: "TRACE_IOS_HISTORY_STAGE",
+            protocolVersion: 1,
+            requestID,
+            handoffID,
+            partIndex,
+            partBase64: base64(part)
+          }, current);
+          const last = partIndex === history.parts.length - 1;
+          if (!record4(ready) || ready.type !== "TRACE_IOS_HISTORY_STAGE" || ready.protocolVersion !== 1 || ready.ok !== true || ready.handoffID !== handoffID || ready.expiresAtMs !== pending.expiresAtMs || ready.state !== (last ? "ready_to_open" : "staging")) return failure5();
+        }
+        if (!await current()) return failure5();
+        staged = true;
+        this.#staged = pending;
+        return Object.freeze({ ok: true, state: "ready_to_open", handoffID, expiresAtMs: pending.expiresAtMs });
+      } catch {
+        return failure5();
+      } finally {
+        if (!staged && reservation?.handoffID) {
+          await this.#send({
+            type: "TRACE_IOS_HISTORY_CANCEL",
+            protocolVersion: 1,
+            requestID: reservation.requestID,
+            handoffID: reservation.handoffID
+          }).catch(() => null);
+        }
+        this.#active = false;
+      }
+    }
+    async #send(message, isCurrent = async () => true) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (!await isCurrent()) return null;
+        const response = await sendNativeMessageWithFallback(
+          this.#runtime,
+          this.#mode,
+          message,
+          MESSAGE_ATTEMPT_MS2,
+          { mayFallback: isCurrent }
+        );
+        if (response !== null) return response;
+      }
+      return null;
+    }
+  };
+
+  // src/extension-runtime/ao3-history-import-runtime.mts
+  var AO3_HISTORY_IMPORT_ALARM = "trace-ao3-history-import";
+  var AO3_SITE_PATTERN = "https://*.archiveofourown.org/*";
+  function ao3HistoryLoopInTab(message, maxChars, timeoutMs) {
+    const scope2 = globalThis;
+    const key = "__traceAo3HistoryImportLoopV1";
+    const existing = scope2[key];
+    if (existing) {
+      existing.poke();
+      return "running";
+    }
+    const api = scope2.browser ?? scope2.chrome;
+    if (!api?.runtime) return "no_runtime";
+    let timer = null;
+    let busy = false;
+    let stopped = false;
+    const send = (body) => {
+      try {
+        return Promise.resolve(api.runtime.sendMessage({ type: message, ...body })).then((reply) => reply && typeof reply === "object" ? reply : null, () => null);
+      } catch (_) {
+        return Promise.resolve(null);
+      }
+    };
+    const barKey = "__traceAo3HistoryImportBarV1";
+    let bar = null;
+    let hidden = false;
+    let buttonAction = "pause";
+    const plural = (count, one, many) => `${count.toLocaleString("en")} ${count === 1 ? one : many}`;
+    const removeBar = () => {
+      bar?.host.remove();
+      bar = null;
+    };
+    const makeBar = () => {
+      const old = document.getElementById(barKey);
+      if (old) old.remove();
+      const host = document.createElement("div");
+      host.id = barKey;
+      const root = host.attachShadow({ mode: "open" });
+      const style = document.createElement("style");
+      style.textContent = [
+        ":host{all:initial}",
+        ".bar{--surface:#ffffff;--text:#18232d;--text-2:#5f6b76;--track:#d8e0e7;--action:#c24c22;position:fixed;left:12px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom,0px));z-index:2147483646;max-width:560px;margin:0 auto;box-sizing:border-box;padding:12px 14px 14px;border-radius:14px;background:var(--surface);color:var(--text);box-shadow:0 1px 0 rgba(24,35,45,.04),0 12px 28px -12px rgba(24,35,45,.42);font:15px/1.3 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;display:grid;grid-template-columns:1fr auto;gap:2px 12px;align-items:center}",
+        "@media (prefers-color-scheme:dark){.bar{--surface:#121418;--text:#f2f5f8;--text-2:#b4bcc6;--track:#2b2f35;--action:#ff8458}}",
+        ".title{font-weight:600;margin:0}",
+        ".line{grid-column:1;color:var(--text-2);font-size:13px;margin:0}",
+        "button{grid-row:1/3;grid-column:2;min-height:44px;padding:0 14px;border:0;border-radius:10px;font:600 15px/1 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:var(--text);background:var(--track);cursor:pointer}",
+        ".track{grid-column:1/3;height:3px;margin-top:8px;border-radius:2px;background:var(--track);overflow:hidden}",
+        ".fill{height:100%;width:0;background:var(--action);border-radius:2px;transition:width .3s}",
+        "@media (prefers-reduced-motion:reduce){.fill{transition:none}}"
+      ].join("");
+      const box = document.createElement("div");
+      box.className = "bar";
+      box.setAttribute("role", "status");
+      box.setAttribute("aria-live", "polite");
+      const title = document.createElement("p");
+      title.className = "title";
+      const line = document.createElement("p");
+      line.className = "line";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.addEventListener("click", () => {
+        if (buttonAction === "hide") {
+          hidden = true;
+          removeBar();
+          return;
+        }
+        button.disabled = true;
+        void send({ action: "tab_pause" }).then((reply) => {
+          stop();
+          if (reply && reply.view) render(reply.view);
+          button.disabled = false;
+        });
+      });
+      const track = document.createElement("div");
+      track.className = "track";
+      const fill = document.createElement("div");
+      fill.className = "fill";
+      track.appendChild(fill);
+      box.append(title, line, button, track);
+      root.append(style, box);
+      (document.body ?? document.documentElement).appendChild(host);
+      return { host, title, line, button, fill };
+    };
+    function render(view2) {
+      if (hidden || !view2 || typeof view2 !== "object") return;
+      const v = view2;
+      const number = (value) => typeof value === "number" && Number.isFinite(value) ? value : null;
+      const works = number(v.works) ?? 0;
+      const read2 = number(v.pagesRead) ?? 0;
+      const total = number(v.totalPages);
+      if (v.status !== "running" && v.status !== "paused" && v.status !== "finished") {
+        removeBar();
+        return;
+      }
+      bar ??= makeBar();
+      let title = "Reading your History";
+      let line = "";
+      if (v.status === "running") {
+        const page = total === null ? read2 + 1 : Math.min(read2 + 1, total);
+        const waiting = v.waitingFor;
+        line = waiting === "slow_down" ? "AO3 asked Trace to slow down. Trying again soon." : waiting === "ao3_unwell" ? "AO3 isn't answering. Trace will try again shortly." : waiting === "network" ? "No connection. Trace will try again shortly." : `Page ${page}${total === null ? "" : ` of ${total}`} \xB7 ${plural(works, "story", "stories")}`;
+        buttonAction = "pause";
+      } else if (v.status === "paused") {
+        title = "Paused";
+        line = `${plural(works, "story", "stories")} kept. Open Trace to carry on.`;
+        buttonAction = "hide";
+      } else {
+        title = "Your History is ready";
+        line = `${plural(works, "story", "stories")}. Open Trace to review them.`;
+        buttonAction = "hide";
+      }
+      bar.title.textContent = title;
+      bar.line.textContent = line;
+      bar.button.textContent = buttonAction === "pause" ? "Pause" : "Hide";
+      const share = v.status === "finished" ? 1 : total === null || total === 0 ? 0 : Math.min(1, read2 / total);
+      bar.fill.style.width = `${Math.round(share * 1e3) / 10}%`;
+    }
+    const read = async (url) => {
+      const controller = new AbortController();
+      const limit = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(url, { credentials: "same-origin", cache: "no-store", redirect: "follow", signal: controller.signal });
+        const text2 = await response.text();
+        return {
+          kind: "response",
+          status: response.status,
+          url: response.url,
+          html: text2.length > maxChars ? text2.slice(0, maxChars) : text2,
+          chars: text2.length,
+          retryAfter: response.headers.get("retry-after"),
+          cfMitigated: response.headers.get("cf-mitigated"),
+          contentType: response.headers.get("content-type")
+        };
+      } catch (_) {
+        return { kind: "failed", code: controller.signal.aborted ? "timeout" : "network" };
+      } finally {
+        clearTimeout(limit);
+      }
+    };
+    const schedule = (ms) => {
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(run, ms);
+    };
+    function stop() {
+      stopped = true;
+      if (timer !== null) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", shown);
+      delete scope2[key];
+    }
+    async function run() {
+      timer = null;
+      if (stopped || busy || document.visibilityState !== "visible") return;
+      busy = true;
+      let next = null;
+      try {
+        next = await send({ action: "tab_tick" });
+        if (next?.view) render(next.view);
+        if (next && typeof next.fetch === "string" && typeof next.token === "string") {
+          const answer = await read(next.fetch);
+          next = await send({ action: "tab_answer", token: next.token, answer });
+          if (next?.view) render(next.view);
+        }
+      } finally {
+        busy = false;
+      }
+      if (stopped) return;
+      if (next === null) {
+        schedule(1e4);
+        return;
+      }
+      if (next.stop === true) {
+        stop();
+        return;
+      }
+      const wait = typeof next.wait === "number" && Number.isFinite(next.wait) ? next.wait : 1e4;
+      schedule(Math.min(Math.max(wait, 500), 16 * 6e4));
+    }
+    function shown() {
+      if (document.visibilityState === "visible" && !busy) schedule(500);
+    }
+    document.addEventListener("visibilitychange", shown);
+    scope2[key] = { poke: () => {
+      if (!busy) schedule(500);
+    } };
+    schedule(0);
+    return "started";
+  }
+  function signedInNamesInTab() {
+    const names = /* @__PURE__ */ new Set();
+    for (const link of Array.from(document.querySelectorAll("a[href]"))) {
+      const match = /^\/users\/([A-Za-z0-9_]{1,40})\/readings\/?$/.exec(link.getAttribute("href") ?? "");
+      if (match?.[1]) names.add(match[1]);
+    }
+    const toggle = document.querySelector("#greeting a.dropdown-toggle[href^='/users/']");
+    const own = /^\/users\/([A-Za-z0-9_]{1,40})\/?$/.exec(toggle?.getAttribute("href") ?? "");
+    if (own?.[1]) names.add(own[1]);
+    return Array.from(names);
+  }
+  function isRecord27(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function stringOrNull2(value) {
+    return typeof value === "string" ? value.slice(0, 200) : null;
+  }
+  function loadedPageFromTab(value) {
+    if (!isRecord27(value)) return { kind: "failed", code: "tab_no_result" };
+    if (value.kind === "failed") return { kind: "failed", code: value.code === "timeout" ? "timeout" : "network" };
+    if (value.kind !== "response" || typeof value.status !== "number" || typeof value.url !== "string" || typeof value.html !== "string") {
+      return { kind: "failed", code: "tab_no_result" };
+    }
+    const html = value.html.length > MAX_HISTORY_PAGE_CHARS ? value.html.slice(0, MAX_HISTORY_PAGE_CHARS) : value.html;
+    return {
+      kind: "response",
+      status: value.status,
+      url: value.url,
+      html,
+      chars: typeof value.chars === "number" && Number.isSafeInteger(value.chars) ? value.chars : html.length,
+      retryAfter: stringOrNull2(value.retryAfter),
+      cfMitigated: stringOrNull2(value.cfMitigated),
+      contentType: stringOrNull2(value.contentType)
+    };
+  }
+  function traceWebSender(sender, extensionId, webOrigin) {
+    if (!isRecord27(sender) || !isRecord27(sender.tab) || typeof sender.tab.id !== "number") return false;
+    if (typeof extensionId === "string" && sender.id !== extensionId) return false;
+    const raw = typeof sender.url === "string" ? sender.url : sender.tab.url;
+    try {
+      return typeof raw === "string" && new URL(raw).origin === new URL(webOrigin).origin;
+    } catch {
+      return false;
+    }
+  }
+  function ao3TabSender(sender, extensionId) {
+    if (!isRecord27(sender) || !isRecord27(sender.tab) || typeof sender.tab.id !== "number") return null;
+    if (typeof extensionId === "string" && sender.id !== extensionId) return null;
+    const raw = typeof sender.url === "string" ? sender.url : sender.tab.url;
+    try {
+      const url = new URL(String(raw));
+      return url.protocol === "https:" && url.hostname === "archiveofourown.org" ? sender.tab.id : null;
+    } catch {
+      return null;
+    }
+  }
+  function withTimeout2(promise, ms) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => resolve("timeout"), ms);
+      promise.then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      }, (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+    });
+  }
+  function randomToken() {
+    const bytes = new Uint8Array(12);
+    globalThis.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+  function installAo3HistoryImport(environment) {
+    const { runtime, tabs, scripting, permissions, alarms, storageMode } = environment;
+    const call = (target, method, args) => extensionCall(target, method, args, runtime, storageMode);
+    async function ao3Tab(sourceTabId) {
+      if (sourceTabId === null || tabs.get === void 0) return "tab_gone";
+      let tab;
+      try {
+        tab = await call(tabs, "get", [sourceTabId]);
+      } catch {
+        return "tab_gone";
+      }
+      if (!isRecord27(tab) || typeof tab.url !== "string") return "no_site_access";
+      let url;
+      try {
+        url = new URL(tab.url);
+      } catch {
+        return "tab_not_ao3";
+      }
+      return url.protocol === "https:" && url.hostname === "archiveofourown.org" ? { id: sourceTabId, url } : "tab_not_ao3";
+    }
+    async function inTab(tabId, func, args) {
+      if (scripting?.executeScript === void 0) return "tab_no_result";
+      try {
+        const results = await withTimeout2(
+          call(scripting, "executeScript", [{ target: { tabId, frameIds: [0] }, func, args }]),
+          REQUEST_TIMEOUT_MS9 + 5e3
+        );
+        if (results === "timeout") return "timeout";
+        const first = Array.isArray(results) ? results[0] : void 0;
+        return isRecord27(first) && "result" in first ? first.result : "tab_no_result";
+      } catch {
+        return "tab_no_result";
+      }
+    }
+    const store = environment.store ?? (environment.databaseFactory === null ? new MemoryHistoryStore() : new IndexedDbHistoryStore(environment.databaseFactory));
+    const history = new Ao3HistoryImport({
+      store,
+      clock: { now: () => Date.now() },
+      random: () => Math.random(),
+      newId: randomToken,
+      account: environment.account,
+      saveActivity: environment.saveActivity,
+      async ensureLoop(sourceTabId) {
+        const tab = await ao3Tab(sourceTabId);
+        if (typeof tab === "string") return "failed";
+        const result = await inTab(
+          tab.id,
+          ao3HistoryLoopInTab,
+          [AO3_HISTORY_IMPORT_MESSAGE, MAX_HISTORY_PAGE_CHARS, REQUEST_TIMEOUT_MS9]
+        );
+        return result === "started" || result === "running" ? result : "failed";
+      },
+      ...alarms.create === void 0 ? {} : {
+        alarm: {
+          start: () => call(alarms, "create", [AO3_HISTORY_IMPORT_ALARM, { periodInMinutes: 1 }]),
+          stop: () => call(alarms, "clear", [AO3_HISTORY_IMPORT_ALARM]).then(() => void 0)
+        }
+      }
+    });
+    environment.whenAccountLeaves(() => history.accountLeft());
+    async function signedInUser(tabId) {
+      if (permissions?.contains !== void 0) {
+        const allowed = await call(permissions, "contains", [{ origins: [AO3_SITE_PATTERN] }]).catch(() => false);
+        if (allowed !== true) return { error: "no_site_access" };
+      }
+      const tab = await ao3Tab(tabId);
+      if (tab === "no_site_access") return { error: "no_site_access" };
+      if (typeof tab === "string") return { error: "open_ao3_first" };
+      const names = await inTab(tab.id, signedInNamesInTab, []);
+      if (!Array.isArray(names)) return { error: names === "timeout" ? "open_ao3_first" : "no_site_access" };
+      const valid = names.filter((name) => typeof name === "string" && AO3_USERNAME_PATTERN.test(name));
+      const unique = [...new Set(valid.map((name) => name.toLowerCase()))];
+      if (unique.length === 0) return { error: "signed_out" };
+      if (unique.length > 1) return { error: "username_unclear" };
+      return valid[0];
+    }
+    async function handle(message) {
+      const tabId = typeof message.tabId === "number" && Number.isSafeInteger(message.tabId) ? message.tabId : null;
+      switch (message.action) {
+        case "status": {
+          void history.wake(tabId);
+          const [account, tab] = await Promise.all([environment.account().catch(() => null), ao3Tab(tabId)]);
+          return { ok: true, view: await history.view(), startable: account !== null && typeof tab !== "string" };
+        }
+        case "start": {
+          const user = await signedInUser(tabId);
+          if (typeof user !== "string") return { ok: false, error: user.error, view: await history.view() };
+          const started = await history.start(user, tabId);
+          return "error" in started ? { ok: false, error: started.error, view: await history.view() } : { ok: true, view: started };
+        }
+        case "pause":
+          return { ok: true, view: await history.pause() };
+        case "resume":
+          return { ok: true, view: await history.resume(tabId) };
+        case "delete": {
+          await environment.webHistory?.discard().catch(() => void 0);
+          return { ok: true, view: await history.delete() };
+        }
+        case "review": {
+          const view2 = await history.view();
+          if (view2.status !== "finished" && view2.status !== "paused" || view2.works === 0) {
+            return { ok: false, error: "review_not_ready", view: view2 };
+          }
+          if (environment.handOffHistory === void 0) return { ok: false, error: "history_handoff_unavailable", view: view2 };
+          const result = await environment.handOffHistory(async () => historyParts(await history.works(), (/* @__PURE__ */ new Date()).toISOString()));
+          if (!result.ok) return { ok: false, error: result.error, view: view2 };
+          return result.state === "opened_on_web" ? { ok: true, view: view2, handoff: { handoffID: result.handoffID, expiresAtMs: result.expiresAtMs, url: result.url } } : { ok: true, view: view2, handoff: { handoffID: result.handoffID, expiresAtMs: result.expiresAtMs } };
+        }
+        default:
+          return { ok: false, error: "unknown_action" };
+      }
+    }
+    const loopOffered = /* @__PURE__ */ new Map();
+    runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (!isRecord27(message)) return false;
+      const pageTab = ao3TabSender(sender, runtime.id);
+      if (message.type === AO3_HISTORY_IMPORT_MESSAGE && pageTab !== null) {
+        const withView = (instruction) => history.view().then((view2) => ({ ...instruction, view: view2 }), () => instruction);
+        if (message.action === "tab_tick") {
+          void history.tick(pageTab).then(withView).then(sendResponse, () => sendResponse({ wait: 1e4 }));
+          return true;
+        }
+        if (message.action === "tab_answer" && typeof message.token === "string") {
+          void history.answer(message.token, loadedPageFromTab(message.answer)).then(withView).then(sendResponse, () => sendResponse({ wait: 1e4 }));
+          return true;
+        }
+        if (message.action === "tab_pause") {
+          void history.pause().then((view2) => sendResponse({ stop: true, view: view2 }), () => sendResponse({ stop: true }));
+          return true;
+        }
+        return false;
+      }
+      if (pageTab !== null) {
+        const now = Date.now();
+        if (now - (loopOffered.get(pageTab) ?? 0) >= 5e3) {
+          loopOffered.set(pageTab, now);
+          void history.wake(pageTab);
+        }
+        return false;
+      }
+      if ((message.type === WEB_HISTORY_REQUEST || message.type === WEB_HISTORY_RECEIVED) && environment.webHistory !== void 0) {
+        if (!traceWebSender(sender, runtime.id, environment.webHistory.origin)) return false;
+        void environment.webHistory.answer(message).then(
+          (answer) => sendResponse(answer ?? { ok: false, error: "history_handoff_unknown" }),
+          () => sendResponse({ ok: false, error: "history_handoff_unknown" })
+        );
+        return true;
+      }
+      if (message.type !== AO3_HISTORY_IMPORT_MESSAGE) return false;
+      if (!isPopupSender(sender, runtime.id)) return false;
+      void handle(message).then(sendResponse, () => sendResponse({ ok: false, error: "unknown_action" }));
+      return true;
+    });
+    alarms.onAlarm?.addListener((alarm) => {
+      if (alarm.name === AO3_HISTORY_IMPORT_ALARM) void history.wake();
+    });
+    globalThis.setTimeout(() => void history.wake(), 1500);
+    return history;
+  }
 
   // src/extension-runtime/keep-a-copy.mts
   var WINDOW_MS = 6 * 60 * 6e4;
@@ -12215,7 +13938,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       "https://api.tracefiction.com",
       new BrowserStorage(extension.storage.local, extension.runtime, storageMode)
     );
-    const webHistoryHandoff = false ? new WebHistoryHandoff({
+    const webHistoryHandoff = true ? new WebHistoryHandoff({
       webOrigin: "https://www.tracefiction.com",
       randomID: randomId,
       ...extension.storage.session ? { keep: sessionKeep(new BrowserStorage(extension.storage.session, extension.runtime, storageMode)) } : {}
@@ -12233,7 +13956,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       apiBase: "https://api.tracefiction.com",
       nativeImportHandoff: true,
       // A build-time constant: only a build with the whole-History import carries it.
-      ...false ? {
+      ...true ? {
         nativeHistoryHandoff: new NativeHistoryHandoffProducer({
           runtime: extension.runtime,
           mode: storageMode,
@@ -12253,11 +13976,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         sessionArea: extension.storage.session ?? null
       }
     });
-    if (
-      // A build-time constant: a build without it leaves this block and the
-      // modules only it uses out of the bundle altogether.
-      false
-    ) {
+    if (extension.scripting !== void 0) {
       const historySession = session;
       const historyImport = installAo3HistoryImport({
         runtime: extension.runtime,
@@ -12280,7 +13999,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           discard: () => webHistoryHandoff.discard()
         } } : {}
       });
-      webHistoryHandoff?.useSource(async (capturedAt) => historyParts2(await historyImport.works(), capturedAt));
+      webHistoryHandoff?.useSource(async (capturedAt) => historyParts(await historyImport.works(), capturedAt));
     }
     if (
       // A build-time constant: a build without it leaves this block and the

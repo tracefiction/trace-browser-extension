@@ -123,3 +123,14 @@ globalThis.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {"version":4,"registrationMo
   } catch (_) {}
   reconcile();
 })();
+(function () {
+  try {
+    var extension = globalThis.browser || globalThis.chrome;
+    if (!extension || !extension.runtime || typeof extension.runtime.getURL !== "function") return;
+    if (String(globalThis.location && globalThis.location.href || "").indexOf(extension.runtime.getURL("popup.html")) !== 0) return;
+    var script = document.createElement("script");
+    script.src = "ao3-history-import-panel.js";
+    script.defer = true;
+    document.head.appendChild(script);
+  } catch (_) {}
+})();
