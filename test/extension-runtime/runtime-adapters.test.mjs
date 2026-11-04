@@ -2286,7 +2286,7 @@ test("native tracking snapshot follows the current account and preserves change 
 
 const CONNECT_INTENT_KEY = "traceConnectIntentV1";
 
-function connectFlowRuntime({ area, traceTabs, creates, grants = [], platform = "mac", updates = [], beforeCreate = async () => {}, sourceAvailable = () => true, connectActive = () => true }) {
+function connectFlowRuntime({ area, traceTabs, creates, grants = [], platform = "mac", updates = [], removes = [], beforeCreate = async () => {}, sourceAvailable = () => true, connectActive = () => true, activeTab = () => undefined, connectUrl = () => "https://www.tracefiction.com/" }) {
   return installTestRuntime({
     mode: "kernel",
     runtime: {
@@ -2297,6 +2297,11 @@ function connectFlowRuntime({ area, traceTabs, creates, grants = [], platform = 
     },
     tabs: {
       async query(filter) {
+        if (filter.active === true) {
+          assert.deepEqual(filter, { active: true, currentWindow: true });
+          const tab = activeTab();
+          return tab ? [tab] : [];
+        }
         assert.deepEqual(filter, { url: ["https://www.tracefiction.com/*"] });
         return traceTabs();
       },
@@ -2314,11 +2319,12 @@ function connectFlowRuntime({ area, traceTabs, creates, grants = [], platform = 
         return { id: 99, url: options.url };
       },
       async get(id) {
-        if (id === 99) return { id, url: "https://www.tracefiction.com/", active: connectActive() };
+        if (id === 99) return { id, url: connectUrl(), active: connectActive() };
         if (!sourceAvailable()) throw new Error("tab closed");
         return { id, url: "https://www.fanfiction.net/s/7038840/1/A-Chance-Encounter" };
       },
       async update(id, options) { updates.push({ id, ...options }); },
+      async remove(id) { removes.push(id); },
     },
     storageArea: area,
     storageMode: "promise",
@@ -2470,16 +2476,79 @@ test("on iPhone and iPad, archive Connect never opens the Trace website", async 
 
 
 test("Android reconnect returns to the existing reading tab without reloading", async () => {
-  const area = new PromiseStorageArea(), creates = [], updates = [];
+  const area = new PromiseStorageArea(), creates = [], updates = [], removes = [];
   let tabs = [];
-  const controller = connectFlowRuntime({ area, creates, updates, platform: "android", traceTabs: () => tabs });
+  const controller = connectFlowRuntime({ area, creates, updates, removes, platform: "android", traceTabs: () => tabs });
   await controller.handle({ type: "TRACE_ARCHIVE_CONNECT" }, { ...archiveSender, tab: { ...archiveSender.tab, id: 42 } });
   assert.deepEqual(creates, [{ url: "https://www.tracefiction.com/" }]);
   tabs = [{ id: 99, url: "https://www.tracefiction.com/", signedIn: true }];
   await controller.handle({ type: "TRACE_WEB_READY" }, { ...traceWebSender, tab: { ...traceWebSender.tab, id: 99 } });
   assert.equal(controller.snapshot().state, "connected");
   assert.deepEqual(updates, [{ id: 42, active: true }]);
+  assert.deepEqual(removes, [99], "the Trace tab opened to sign in closes");
   assert.equal(area.values.traceConnectReturnV1, undefined);
+});
+
+test("Android popup Connect opens Trace, and signing in there connects and returns to the story", async () => {
+  const area = new PromiseStorageArea(), creates = [], updates = [], removes = [];
+  let tabs = [];
+  const controller = connectFlowRuntime({
+    area, creates, updates, removes, platform: "android", traceTabs: () => tabs,
+    activeTab: () => ({ id: 42, url: "https://www.fanfiction.net/s/7038840/1/A-Chance-Encounter", active: true }),
+  });
+  const response = await controller.handle({ type: "TRACE_SESSION_ACTION", action: "connect" }, popupSender);
+  assert.equal(response.snapshot.state, "signed_out");
+  assert.equal(response.traceOpened, true);
+  assert.deepEqual(creates, [{ url: "https://www.tracefiction.com/" }]);
+  assert.equal(typeof area.values[CONNECT_INTENT_KEY], "number", "signing in finishes it without another press");
+  assert.deepEqual(area.values.traceConnectReturnV1?.sourceTabId, 42);
+
+  tabs = [{ id: 99, url: "https://www.tracefiction.com/", signedIn: true }];
+  await controller.handle({ type: "TRACE_WEB_READY" }, { ...traceWebSender, tab: { ...traceWebSender.tab, id: 99 } });
+  assert.equal(controller.snapshot().state, "connected");
+  assert.deepEqual(updates, [{ id: 42, active: true }]);
+  assert.deepEqual(removes, [99]);
+});
+
+test("popup Connect away from a story still opens Trace and connects, with no tab to return to", async () => {
+  const area = new PromiseStorageArea(), creates = [], updates = [], removes = [];
+  let tabs = [];
+  const controller = connectFlowRuntime({
+    area, creates, updates, removes, traceTabs: () => tabs,
+    activeTab: () => ({ id: 42, url: "https://example.com/", active: true }),
+  });
+  const response = await controller.handle({ type: "TRACE_SESSION_ACTION", action: "connect" }, popupSender);
+  assert.equal(response.traceOpened, true);
+  assert.equal(area.values.traceConnectReturnV1, undefined);
+  tabs = [{ id: 99, url: "https://www.tracefiction.com/", signedIn: true }];
+  await controller.handle({ type: "TRACE_WEB_READY" }, { ...traceWebSender, tab: { ...traceWebSender.tab, id: 99 } });
+  assert.equal(controller.snapshot().state, "connected");
+  assert.deepEqual(updates, []);
+  assert.deepEqual(removes, [], "the Trace tab stays when there is no story to go back to");
+});
+
+test("popup Connect that uses a signed-in Trace tab opens nothing", async () => {
+  const area = new PromiseStorageArea(), creates = [];
+  const controller = connectFlowRuntime({
+    area, creates, traceTabs: () => [{ id: 7, url: "https://www.tracefiction.com/", signedIn: true }],
+  });
+  const response = await controller.handle({ type: "TRACE_SESSION_ACTION", action: "connect" }, popupSender);
+  assert.equal(response.snapshot.state, "connected");
+  assert.equal(response.traceOpened, undefined);
+  assert.deepEqual(creates, []);
+});
+
+test("the sign-in tab stays open once it has left Trace's site", async () => {
+  const area = new PromiseStorageArea(), creates = [], updates = [], removes = [];
+  let tabs = [];
+  const controller = connectFlowRuntime({
+    area, creates, updates, removes, traceTabs: () => tabs, connectUrl: () => "https://example.com/elsewhere",
+  });
+  await controller.handle({ type: "TRACE_ARCHIVE_CONNECT" }, { ...archiveSender, tab: { ...archiveSender.tab, id: 42 } });
+  tabs = [{ id: 99, url: "https://www.tracefiction.com/", signedIn: true }];
+  await controller.handle({ type: "TRACE_WEB_READY" }, { ...traceWebSender, tab: { ...traceWebSender.tab, id: 99 } });
+  assert.deepEqual(updates, [{ id: 42, active: true }]);
+  assert.deepEqual(removes, []);
 });
 
 for (const condition of ["closed", "left-auth-tab"]) test(`reconnect remains successful when source is ${condition}`, async () => {

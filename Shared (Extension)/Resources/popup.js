@@ -5,6 +5,11 @@ const PREF_AUTO_TRACK_KEY = "prefAutoTrackEnabled";
 const PREF_LIBRARY_INLAY_KEY = "prefLibraryInlayEnabled";
 const PREF_AO3_SAVED_FILTERS_KEY = "prefAo3SavedFiltersEnabled";
 const PREF_METADATA_IMPROVE_KEY = "prefMetadataImproveEnabled";
+// Keep a Copy (keep-a-copy-library.mts): only in a package built with it,
+// and only where the browser can save files.
+const PREF_KEEP_A_COPY_KEY = "prefKeepACopyEnabled";
+const KEEP_A_COPY_AVAILABLE =
+  globalThis.TRACE_KEEP_A_COPY === true && Boolean(ext?.downloads);
 const TRACE_USER_PRO_KEY = "traceUserPro";
 const TRACE_FIRST_SAVE_SEEN_KEY = "traceFirstSaveSeen";
 const TRACE_LIBRARY_COUNT_KEY = "traceLibraryCount";
@@ -629,7 +634,7 @@ function updatePreferenceSummary() {
   if (!countEl) return;
   const inputs = Array.from(
     document.querySelectorAll("#popup-preferences input[type='checkbox']"),
-  );
+  ).filter((input) => !input.closest(".popup-switch-row")?.hidden);
   const enabled = inputs.filter((input) => input.checked).length;
   countEl.textContent = `${enabled} of ${inputs.length} on`;
 }
@@ -656,6 +661,60 @@ function applyProUi(pro, autoTrack, libraryInlay, metadataImprove) {
   inlayEl.checked = Boolean(libraryInlay);
   metadataEl.checked = metadataImprove !== false;
   updatePreferenceSummary();
+  renderKeepACopy();
+}
+
+const KEEP_A_COPY_OFF_LINE = "Keep AO3’s EPUB of your Library stories, in Downloads › Trace";
+
+function keepACopyTime(at) {
+  return new Date(at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+}
+
+/** "14:02", "yesterday, 21:40" or "29 Oct, 21:40". */
+function keepACopyWhen(at) {
+  const day = (date) => date.toDateString();
+  const then = new Date(at);
+  const today = new Date();
+  if (day(then) === day(today)) return keepACopyTime(at);
+  today.setDate(today.getDate() - 1);
+  if (day(then) === day(today)) return `yesterday, ${keepACopyTime(at)}`;
+  return `${then.toLocaleDateString("en-GB", { day: "numeric", month: "short" })}, ${keepACopyTime(at)}`;
+}
+
+function keepACopyLine(view) {
+  // Among the stories whose updates are on: Dropped ones keep their files but are not counted.
+  const kept = Math.max(0, Number(view.kept) || 0);
+  const withCopy = Math.min(kept, Math.max(0, Number(view.withCopy) || 0));
+  const count = `${withCopy.toLocaleString("en-US")} of ${kept.toLocaleString("en-US")}`;
+  if (view.stopped?.code === "save_failed") return "Paused: several files could not be saved. Trace tries again later.";
+  if (view.stopped?.code === "unreadable") return "AO3 couldn’t make the file";
+  if (view.stopped?.unavailable) return `Waiting for AO3 · ${count}`;
+  if (view.stopped) return `Paused by AO3 until ${keepACopyTime(view.stopped.until)}`;
+  if (kept === 0) return KEEP_A_COPY_OFF_LINE;
+  const last = Number(view.lastCopyAt) > 0 ? ` · last copy ${keepACopyWhen(view.lastCopyAt)}` : "";
+  return `${count} ${kept === 1 ? "story" : "stories"}${last}`;
+}
+
+function renderKeepACopy() {
+  const row = document.getElementById("popup-keep-a-copy-row");
+  const input = document.getElementById("pref-keep-a-copy");
+  const detail = document.getElementById("popup-keep-a-copy-detail");
+  if (!row || !input || !detail) return;
+  row.hidden = !KEEP_A_COPY_AVAILABLE;
+  if (!KEEP_A_COPY_AVAILABLE) return;
+  ext.storage.local.get([PREF_KEEP_A_COPY_KEY], (r) => {
+    if (ext.runtime.lastError) return;
+    input.checked = r?.[PREF_KEEP_A_COPY_KEY] === true;
+    updatePreferenceSummary();
+    if (!input.checked) {
+      detail.textContent = KEEP_A_COPY_OFF_LINE;
+      return;
+    }
+    ext.runtime.sendMessage({ type: "KEEP_A_COPY_VIEW" }, (view) => {
+      if (ext.runtime.lastError || !view || typeof view !== "object") return;
+      detail.textContent = keepACopyLine(view);
+    });
+  });
 }
 
 function fetchPopupState() {
@@ -4493,7 +4552,7 @@ function renderKernelSnapshot(snapshot) {
     // tab left over from before the extension reloaded. The press opened a
     // fresh one; say so rather than leave it looking like it did nothing.
     lead =
-      "Trace couldn't get your sign-in from the Trace website. It's open in a new tab: sign in there if you need to, then press Connect again.";
+      "Trace couldn't get your sign-in from the Trace website. It's open in a new tab: sign in there if you need to, and Trace connects and takes you back to your story.";
   } else if (state === "signed_out" && reason === "provider_unavailable") {
     lead =
       "Trace couldn't read your sign-in from the Trace website. Reload it, then press Connect again.";
@@ -5192,6 +5251,7 @@ function bindPreferenceControls() {
     ["pref-library-inlay", PREF_LIBRARY_INLAY_KEY],
     ["pref-ao3-saved-filters", PREF_AO3_SAVED_FILTERS_KEY],
     ["pref-metadata-improve", PREF_METADATA_IMPROVE_KEY],
+    ["pref-keep-a-copy", PREF_KEEP_A_COPY_KEY],
   ];
   for (const [id, key] of controls) {
     const input = document.getElementById(id);
@@ -5200,6 +5260,7 @@ function bindPreferenceControls() {
       ext.storage.local.set({ [key]: input.checked,
         ...(key === PREF_AUTO_TRACK_KEY ? { prefAutoTrackSetAt: Date.now() } : {}) });
       updatePreferenceSummary();
+      if (key === PREF_KEEP_A_COPY_KEY) renderKeepACopy();
     });
   }
 }
@@ -5394,7 +5455,11 @@ function initializeKernelPopup() {
           sessionReplyTaken(sequence, response);
           renderKernelSnapshot(response?.snapshot);
           if (response?.snapshot?.state === "connected") requestKernelPopupState();
-          else if (connectFoundNoWebsiteSignIn(action, response?.snapshot)) openTraceApp(TRACE_HOME_URL);
+          // A background that opened Trace itself brings the reader back to their
+          // story once they sign in; otherwise the popup opens it.
+          else if (response?.traceOpened !== true && connectFoundNoWebsiteSignIn(action, response?.snapshot)) {
+            openTraceApp(TRACE_HOME_URL);
+          }
         },
       );
     });
@@ -5510,6 +5575,7 @@ ext.storage.onChanged.addListener((changes, area) => {
   ) {
     applyProUiFromStorage();
   }
+  if (changes[PREF_KEEP_A_COPY_KEY]) renderKeepACopy();
 });
 
 }

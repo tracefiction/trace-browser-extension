@@ -3877,12 +3877,40 @@ function traceRefreshPageTokens() {
       }
 
       var item = scrapeListingItem(platform, anchor);
-      if (!item) return;
+      var readWork = globalThis.__traceReadAo3WorkForSave;
+      var workId = platform === "ao3" && workKey ? workKey.split(":")[1] : null;
+      if (!item && !(workId && typeof readWork === "function")) return;
 
       btn.style.cssText = d1QuickAddStyle("busy") + ";cursor:wait";
       setButtonInlineContent(btn, "spin", "Adding…");
       btn.disabled = true;
 
+      if (item) {
+        sendQuickAdd(item);
+        return;
+      }
+      // No listing row to read (AO3's Subscriptions page): ask AO3's search for it.
+      readWork(workId, function (read, reason) {
+        if (read) {
+          sendQuickAdd(read);
+          return;
+        }
+        btn.style.cssText = d1QuickAddStyle("error");
+        btn.textContent = "Couldn’t add";
+        btn.title = reason === "unavailable"
+          ? "AO3 didn’t answer. Try again in a moment."
+          : "Trace couldn’t find this story on AO3. Open the story to add it.";
+        // Stays disabled until it resets, so a retry can't be overwritten.
+        setTimeout(function () {
+          btn.style.cssText = d1QuickAddStyle("add") + ";cursor:pointer";
+          btn.textContent = "+ Add to Trace";
+          btn.title = "Add to your Trace library";
+          btn.disabled = false;
+        }, 2500);
+      });
+    });
+
+    function sendQuickAdd(item) {
       var payload = { s: item.src, at: new Date().toISOString(), item: item };
       ext.runtime.sendMessage(
         { type: "TRACE_QUICK_ADD", payload: payload },
@@ -3955,7 +3983,7 @@ function traceRefreshPageTokens() {
           }
         },
       );
-    });
+    }
 
     return btn;
   }

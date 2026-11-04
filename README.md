@@ -17,7 +17,7 @@ repository rather than carrying a second copy of the extension.
 - Content scripts run only on supported AO3/FFN pages and Trace pages listed in the manifest.
 - Obvious AO3/FFN login/signup/auth pages are excluded in the manifest.
 - Collection and overlay scripts also disable themselves at runtime on login/signup/password pages and pages with unknown password forms. AO3's known header login form can appear on normal story/listing pages; Trace ignores only that header form so supported reading pages still work.
-- Network requests go through the extension background worker to Trace API endpoints. The only other request is the FanFiction.net summary read described under "What Trace Reads", which is made from your own FanFiction.net tab.
+- Network requests go through the extension background worker to Trace API endpoints. The only other requests are made from your own AO3 or FanFiction.net tab and are described under "What Trace Reads": the FanFiction.net summary read, the AO3 searches for a summary or for a story you add from a bare link, and the pages of your AO3 History when you import it.
 
 If anything claiming to be Trace asks for your AO3 or FanFiction.net password, it is not legitimate.
 
@@ -58,6 +58,19 @@ it tries once more; what stopped it (the reason, status code, site address,
 kind of page and time) is kept with the work. The story and author ids still
 to read are kept in session-only storage (or, in a browser without it, in
 local storage for at most 12 hours) and removed when you sign out.
+
+AO3 shows a work's summary only on its first chapter. When you read chapter 2
+or later of a work, Trace looks that work up in AO3's search, from your own AO3
+tab, at most once a day per work in that tab, and sends only the summary the
+search result shows. It doesn't open the
+work's first page, because AO3 counts that as a visit in your AO3 History. This
+follows the **Improve story details** preference.
+
+Some AO3 pages, such as your Subscriptions page, list a work as a bare link
+with no details. When you click **+ Add to Trace** beside one, Trace searches
+AO3 for that work by its ID, from your own AO3 tab, and saves the details the
+search result shows. It doesn't open the work, so this isn't a visit in your
+AO3 History. Only the story details are kept; the page itself is not.
 
 When you explicitly save an AO3 saved filter, Trace stores that AO3 filter query state in extension storage so it can reapply the filter later. If you are signed in to Trace, saved filters sync to your Trace account so they can appear on your other devices. Signed-out or offline saved filters remain local until a later signed-in sync.
 You can hide the saved filters surface from AO3 filter pages in the extension popup; this local preference does not delete saved presets.

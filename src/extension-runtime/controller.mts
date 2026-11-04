@@ -1,10 +1,12 @@
 import type { PermissionsPort, ScriptingPort } from "./browser-platform.mjs";
+import { declaresHostPattern } from "./browser-platform.mjs";
 import { collectOpenStoryTabs, encodeOpenStoryTabs } from "./open-story-tabs.mjs";
 import { BrowserDeviceSessionProvider } from "./browser-device-session.mjs";
 import {
   AccountProjectionService,
   sameAccountScope,
   SessionService,
+  type AccountOverlay,
   type AccountScope,
   type AuthenticatedEffectResult,
   type AuthenticatedExecutionResult,
@@ -152,6 +154,7 @@ import {
 
 import { NativeLibraryImportProducer } from "./native-import.mjs";
 import type { HistoryHandoffResult, HistoryParts, NativeHistoryHandoffProducer } from "./native-history-handoff.mjs";
+import type { WebHistoryAnswer, WebHistoryHandoff, WebHistoryOffer } from "./web-history-handoff.mjs";
 import {
   FfnSummaryFill,
   LOCAL_STATE_TTL_MS,
@@ -188,6 +191,8 @@ interface RuntimeEnvironment {
   readonly nativeImportHandoff?: boolean;
   /** Hands a whole AO3 History to the app (native-history-handoff.mts). */
   readonly nativeHistoryHandoff?: NativeHistoryHandoffProducer;
+  /** On a computer, the History goes to Trace's review page instead (web-history-handoff.mts). */
+  readonly webHistoryHandoff?: WebHistoryHandoff;
   readonly firstStoryDelay?: (milliseconds: number) => Promise<void>;
   readonly archiveReadinessStatus?: BrowserArchiveReadinessStatus;
   /**
@@ -298,6 +303,7 @@ export class SessionRuntimeController {
   readonly #nativeImport: NativeLibraryImportProducer;
   /** Only a build with the whole-History import has one (index.mts). */
   readonly #nativeHistory: NativeHistoryHandoffProducer | null;
+  readonly #webHistory: WebHistoryHandoff | null;
   readonly #firstStoryInitiator: BrowserFirstStoryInitiator;
   readonly #openTabs: () => Promise<{ readonly encoded: string; readonly found: OpenStoryTabsFound } | null>;
   readonly #traceWebNavigation: BrowserTraceWebNavigation;
@@ -336,6 +342,7 @@ export class SessionRuntimeController {
     this.#nativeImport = new NativeLibraryImportProducer({ runtime: environment.runtime,
       mode: environment.storageMode, apiOrigin: environment.apiBase, randomID: environment.randomId });
     this.#nativeHistory = environment.nativeHistoryHandoff ?? null;
+    this.#webHistory = environment.webHistoryHandoff ?? null;
     const storage = new BrowserStorage(
       environment.storageArea,
       environment.runtime,
@@ -403,6 +410,9 @@ export class SessionRuntimeController {
     // Saved filters belong to the account: they go when it leaves, so the
     // next account starts from its own (and a full pull).
     this.whenAccountLeaves(() => this.#savedFilterRepository.clearAccountData());
+    // A History offered to Trace's review page is never given to the next account.
+    const webHistory = this.#webHistory;
+    if (webHistory !== null) this.whenAccountLeaves(() => webHistory.discard());
     this.#savedFilters = new SavedFilterSyncService({
       session: this.#service,
       api: this.#savedFilterApi,
@@ -473,6 +483,7 @@ export class SessionRuntimeController {
       runtime: environment.runtime,
       tabs: environment.tabs,
       mode: environment.storageMode,
+      webOrigin: environment.webOrigin,
     });
     this.#traceWebStatus = new TraceWebStatusNotification({
       runtime: environment.runtime,
@@ -501,11 +512,18 @@ export class SessionRuntimeController {
     });
   }
 
-  #createFfnSummaryFill(
+  /**
+   * What both summary fills share: where their state and tried ids are kept,
+   * how a page is read in the reader's tab, who is signed in, the
+   * contribution preference, the server's list of gaps for one site, and
+   * sending summaries for that site, identity and summary only.
+   */
+  #summaryFillShared(
     environment: RuntimeEnvironment,
-    options: NonNullable<RuntimeEnvironment["ffnSummaryFill"]>,
+    sessionArea: StorageArea | null,
     storage: BrowserStorage,
-  ): FfnSummaryFill {
+    source: "ao3" | "ffn",
+  ) {
     const preference = new BrowserMetadataPreferencePort(storage);
     const apiBase = environment.apiBase.replace(/\/$/, "");
     const call = <T,>(target: unknown, method: string, args: readonly unknown[]) =>
@@ -517,42 +535,38 @@ export class SessionRuntimeController {
         environment.storageMode,
       );
     const { tabs, scripting, permissions } = environment;
-    const sessionArea = options.sessionArea ?? null;
-    return new FfnSummaryFill({
-      clock: { now: () => Date.now() },
+    const localArea = {
+      get: (key: string) => storage.get(key),
+      set: (items: Record<string, unknown>) => storage.set(items),
+      remove: (key: string) => storage.remove(key),
+    };
+    return {
       // Session-only where the browser has it; otherwise local storage that
       // expires, and is removed on sign-out like the rest.
-      state: sessionArea !== null
-        ? new StoredFillState({
-            get: (key) => call(sessionArea, "get", [key]),
-            set: (items) => call(sessionArea, "set", [items]),
-            remove: (key) => call(sessionArea, "remove", [key]),
-          })
-        : new StoredFillState({
-            get: (key) => storage.get(key),
-            set: (items) => storage.set(items),
-            remove: (key) => storage.remove(key),
-          }, { ttlMs: LOCAL_STATE_TTL_MS }),
-      tabs: createFfnTabReader({
+      stateArea: sessionArea !== null
+        ? {
+            get: (key: string) => call(sessionArea, "get", [key]),
+            set: (items: Record<string, unknown>) => call(sessionArea, "set", [items]),
+            remove: (key: string) => call(sessionArea, "remove", [key]),
+          }
+        : localArea,
+      stateTtl: sessionArea !== null ? null : LOCAL_STATE_TTL_MS,
+      // Ids only, capped, removed on sign-out.
+      attemptedArea: localArea,
+      tabReader: {
         hasScripting: typeof scripting?.executeScript === "function" && typeof tabs.get === "function",
-        // Only the tab a FanFiction.net page spoke from, or the sheet's own.
-        getTab: (sourceTabId) => call(tabs, "get", [sourceTabId]),
-        executeScript: (details) => call(scripting, "executeScript", [details]),
-        containsOrigin: async (origin) => typeof permissions?.contains === "function" &&
+        // Only the tab a story-site page spoke from, or the sheet's own.
+        getTab: (sourceTabId: number) => call(tabs, "get", [sourceTabId]),
+        executeScript: (details: Record<string, unknown>) => call(scripting, "executeScript", [details]),
+        containsOrigin: async (origin: string) => typeof permissions?.contains === "function" &&
           await call<boolean>(permissions, "contains", [{ origins: [origin] }]) === true,
-      }),
-      // Ids only, capped, removed on sign-out (ffn-summary-fill.mts).
-      attempted: new StoredAttempted({
-        get: (key) => storage.get(key),
-        set: (items) => storage.set(items),
-        remove: (key) => storage.remove(key),
-      }),
-      account: () => {
+      },
+      account: (): string | null => {
         const scope = this.#service.publicationScope();
         return scope === null ? null : `${scope.accountId}:${scope.epoch}`;
       },
       contributionsEnabled: () => preference.enabled(),
-      listGaps: async () => {
+      listGaps: async (): Promise<readonly string[] | null> => {
         const result = await this.#service.executeAuthenticated(async (credential) => {
           let response: Response;
           try {
@@ -562,7 +576,7 @@ export class SessionRuntimeController {
                 "Content-Type": "application/json",
                 Authorization: `Bearer ${credential}`,
               },
-              body: JSON.stringify({ source: "ffn" }),
+              body: JSON.stringify({ source }),
             });
           } catch {
             return { kind: "success" as const, value: null };
@@ -584,18 +598,22 @@ export class SessionRuntimeController {
         });
         return result.kind === "published" ? result.value : null;
       },
-      contribute: async (summaries): Promise<ContributionOutcome> => {
+      contribute: async (
+        summaries: readonly { readonly storyId: string; readonly summary: string }[],
+      ): Promise<ContributionOutcome> => {
         const result = await this.#metadataContributions.execute(Object.freeze({
           kind: "library_metadata_refresh",
-          hostKind: "ffn",
-          workKeys: Object.freeze(summaries.map(({ storyId }) => `ffn:${storyId}`)),
+          hostKind: source,
+          workKeys: Object.freeze(summaries.map(({ storyId }) => `${source}:${storyId}`)),
           // Identity and the summary only. The address is the form every
-          // FanFiction.net save already records.
+          // save from that site already records.
           payload: Object.freeze({
             items: Object.freeze(summaries.map(({ storyId, summary }) => Object.freeze({
-              source: "ffn",
+              source,
               sourceStoryId: storyId,
-              url: `https://www.fanfiction.net/s/${storyId}/`,
+              url: source === "ffn"
+                ? `https://www.fanfiction.net/s/${storyId}/`
+                : `https://archiveofourown.org/works/${storyId}`,
               summary,
             }))),
           }),
@@ -604,6 +622,24 @@ export class SessionRuntimeController {
           ? "accepted"
           : result.kind === "skipped" ? "skipped" : "failed";
       },
+    };
+  }
+
+  #createFfnSummaryFill(
+    environment: RuntimeEnvironment,
+    options: NonNullable<RuntimeEnvironment["ffnSummaryFill"]>,
+    storage: BrowserStorage,
+  ): FfnSummaryFill {
+    const shared = this.#summaryFillShared(environment, options.sessionArea ?? null, storage, "ffn");
+    return new FfnSummaryFill({
+      clock: { now: () => Date.now() },
+      state: new StoredFillState(shared.stateArea, shared.stateTtl === null ? {} : { ttlMs: shared.stateTtl }),
+      tabs: createFfnTabReader(shared.tabReader),
+      attempted: new StoredAttempted(shared.attemptedArea),
+      account: shared.account,
+      contributionsEnabled: shared.contributionsEnabled,
+      listGaps: shared.listGaps,
+      contribute: shared.contribute,
     });
   }
 
@@ -658,15 +694,14 @@ export class SessionRuntimeController {
     sender?: RuntimeSender,
   ): Promise<RuntimeHandleResponse> {
     const response = await this.#dispatch(message, sender);
-    // A FanFiction.net page spoke: the reader is there, so any summary work
-    // due is done now, in that tab. After the message's own work, so a save
-    // it carried is known first; never waited on.
-    if (
-      this.#ffnSummaries !== null &&
-      typeof sender?.tab?.id === "number" &&
-      archiveHostKindFromSender(sender) === "ffn"
-    ) {
-      void this.#ffnSummaries.ffnPageActivity(sender.tab.id);
+    // A FanFiction.net page spoke: the reader is there, so any summary work due
+    // is done now, in that tab. After the message's own work, so a save it
+    // carried is known first; never waited on.
+    if (typeof sender?.tab?.id === "number") {
+      const hostKind = archiveHostKindFromSender(sender);
+      if (hostKind === "ffn" && this.#ffnSummaries !== null) {
+        void this.#ffnSummaries.ffnPageActivity(sender.tab.id);
+      }
     }
     // An AO3 or FanFiction.net page keeps reading evidence and unconfirmed
     // state between replies. Every reply tells it which account session
@@ -792,7 +827,48 @@ export class SessionRuntimeController {
     if (message.action === "disconnect" || message.action === "cancel") {
       await clearConnectIntent(this.#storage);
     }
-    return this.#response(await this.#runManualAction(message.action, true));
+    const result = await this.#runManualAction(message.action, true);
+    if (
+      isPopupSender(sender, this.#runtime.id) &&
+      (message.action === "connect" || message.action === "reconnect")
+    ) {
+      const traceOpened = await this.#openTraceForPopupConnect();
+      if (traceOpened !== null) return Object.freeze({ ...this.#response(result), traceOpened });
+    }
+    return this.#response(result);
+  }
+
+  // The popup's Connect found no signed-in Trace website. As with Connect on
+  // an AO3 or FanFiction.net page, open Trace, remember the request so signing
+  // in there finishes it, and remember the story tab so the reader is taken
+  // back to it. Returns null when nothing was to be opened.
+  async #openTraceForPopupConnect(): Promise<boolean | null> {
+    const snapshot = this.snapshot();
+    if (
+      this.#mode !== "kernel" ||
+      snapshot.state !== "signed_out" ||
+      snapshot.reason !== "credential_absent" ||
+      (await this.#usesNativeAccountAuthority())
+    ) {
+      return null;
+    }
+    if (this.#openingConnectTab) {
+      await this.#openingConnectTab;
+      return true;
+    }
+    await rememberConnectIntent(this.#storage);
+    let traceOpened = false;
+    const opening = (async () => {
+      const sourceTabId = await this.#traceWebNavigation.activeArchiveTabId();
+      const tab = await this.#traceWebNavigation.openTab(`${this.#webOrigin}/`);
+      traceOpened = tab !== null;
+      if (sourceTabId !== null && typeof tab?.id === "number" && await hasConnectIntent(this.#storage)) {
+        await rememberConnectReturn(this.#storage, sourceTabId, tab.id);
+      }
+    })();
+    this.#openingConnectTab = opening;
+    try { await opening; } finally { if (this.#openingConnectTab === opening) this.#openingConnectTab = null; }
+    return traceOpened;
   }
 
   // An AO3/FFN page's Connect runs the popup's Connect. When no signed-in
@@ -1320,16 +1396,17 @@ export class SessionRuntimeController {
         dispatch: "never_sent",
       });
     }
-    const summaries = this.#ffnSummaries;
-    if (summaries === null) return this.#storyCommands.executeWithEvidence(command, observer);
+    const ffn = this.#ffnSummaries;
+    if (ffn === null) return this.#storyCommands.executeWithEvidence(command, observer);
     const alreadyInLibrary =
       accountData?.overlay?.entries[command.workKey] !== undefined;
-    summaries.saveStarted();
+    // The fill reads no page while a save is on its way.
+    ffn.saveStarted();
     let evidence: StoryCommandEvidence;
     try {
       evidence = await this.#storyCommands.executeWithEvidence(command, observer);
     } finally {
-      summaries.saveEnded();
+      ffn.saveEnded();
     }
     if (
       evidence.result.kind === "confirmed" &&
@@ -1337,7 +1414,7 @@ export class SessionRuntimeController {
       evidence.result.confirmation.summaryKnown !== true
     ) {
       // Never delays the save's own answer.
-      void summaries.storySaved(command, alreadyInLibrary, tabId);
+      void ffn.storySaved(command, alreadyInLibrary, tabId);
     }
     return evidence;
   }
@@ -1411,18 +1488,37 @@ export class SessionRuntimeController {
   }
 
   /**
-   * Hands the reader's whole AO3 History to the Trace app for review: on
-   * iPhone, through the paired History inbox, fenced to the account as the
-   * import handoff is. `build` makes the parts only once the account is
-   * known to be connected.
+   * Hands the reader's whole AO3 History to Trace for review: on iPhone,
+   * to the app through the paired History inbox, fenced to the account as
+   * the import handoff is; on a computer, to Trace's review page, which asks
+   * for it a part at a time (`answerWebHistory`). `build` makes the parts
+   * only once the account is known to be connected.
    */
   async handOffHistory(
     build: () => Promise<HistoryParts | null>,
-  ): Promise<HistoryHandoffResult | { readonly ok: false; readonly error: "not_authenticated" }> {
+  ): Promise<HistoryHandoffResult | WebHistoryOffer | { readonly ok: false; readonly error: "not_authenticated" }> {
     await this.start();
     const unavailable = Object.freeze({ ok: false, error: "history_handoff_unavailable" } as const);
+    const platform = await this.#nativePlatform();
+    const web = this.#webHistory;
+    if (platform === "desktop" && web !== null) {
+      // The review page asks for the History through the bridge on Trace's
+      // own site; a package that doesn't run there cannot hand it over.
+      const site = new URL(this.#webOrigin);
+      if (!declaresHostPattern(this.#runtime, `${site.protocol}//${site.hostname}/*`)) return unavailable;
+      if (this.snapshot().state !== "connected") return Object.freeze({ ok: false, error: "not_authenticated" } as const);
+      const history = await build().catch(() => null);
+      if (history === null) return unavailable;
+      const fenced = await this.#service.executeCurrentScope(async (scope, isCurrent) =>
+        await isCurrent() ? web.offer(scope.accountId, history) : unavailable);
+      if (fenced.kind !== "published") {
+        await web.discard();
+        return unavailable;
+      }
+      return fenced.value;
+    }
     const producer = this.#nativeHistory;
-    if (producer === null || !this.#nativeImportEnabled || await this.#nativePlatform() !== "ios") return unavailable;
+    if (producer === null || !this.#nativeImportEnabled || platform !== "ios") return unavailable;
     const preparation = await this.#prepareNativeAuthority();
     if (!preparation.ready || this.snapshot().state !== "connected") {
       return Object.freeze({ ok: false, error: "not_authenticated" } as const);
@@ -1442,10 +1538,42 @@ export class SessionRuntimeController {
     return fenced.value;
   }
 
+  /** A Trace page's request for the History on offer, answered only for the account signed in now. */
+  async answerWebHistory(message: unknown): Promise<WebHistoryAnswer | null> {
+    await this.start();
+    const web = this.#webHistory;
+    if (web === null) return null;
+    const scope = this.snapshot().state === "connected" ? this.#service.publicationScope() : null;
+    return web.answer(message, scope?.accountId ?? null);
+  }
+
   /** Looks for one story in the Library. It cannot save. */
   async storyPresence(workKey: string): Promise<StoryPresence> {
     await this.start();
     return this.#storyCommands.presence(workKey);
+  }
+
+  /**
+   * The Library of the account connected now, as the page marks read it,
+   * with the account's own count of its stories: for Keep a Copy, which
+   * copies its AO3 works on this device. Null when no account is connected
+   * or the Library cannot be read. `refresh` asks Trace again when the copy
+   * kept here is old.
+   */
+  async librarySnapshot(refresh: boolean): Promise<{
+    readonly accountId: string;
+    readonly overlay: AccountOverlay;
+    readonly libraryCount: number | null;
+  } | null> {
+    await this.start();
+    if (this.snapshot().state !== "connected") return null;
+    const accountData = await this.#projection.read(refresh ? {} : { refresh: false }).catch(() => null);
+    if (this.snapshot().state !== "connected" || !accountData?.overlay) return null;
+    return Object.freeze({
+      accountId: accountData.scope.accountId,
+      overlay: accountData.overlay,
+      libraryCount: accountData.summary?.libraryCount ?? null,
+    });
   }
 
   /** The account an answer from Trace belongs to, or null for none. */

@@ -14,9 +14,12 @@ import { ACCOUNT_PROJECTION_REVISION_KEY } from "./runtime-messages.mjs";
 import { installTraceFirstInstallActivation } from "./trace-web-navigation.mjs";
 import { rememberConnectIntent } from "./connect-intent.mjs";
 import { installStoryTabReuse } from "./story-tab-reuse.mjs";
+import { sessionKeep, WebHistoryHandoff } from "./web-history-handoff.mjs";
 import { installAo3HistoryImport } from "./ao3-history-import-runtime.mjs";
-import { NativeHistoryHandoffProducer } from "./native-history-handoff.mjs";
+import { historyParts, NativeHistoryHandoffProducer } from "./native-history-handoff.mjs";
 import { storySaveActivity } from "./story-save-activity.mjs";
+import { installTraceKeepACopy } from "./keep-a-copy-library.mjs";
+import { installNativeKeepACopy, type NativeKeepEnvironment } from "./keep-a-copy-native.mjs";
 export * from "./account-projection.mjs";
 export * from "./billing-conversion.mjs";
 export * from "./archive-readiness-status.mjs";
@@ -42,7 +45,7 @@ import type {
 } from "./browser-platform.mjs";
 import { BrowserStorage } from "./browser-platform.mjs";
 import { BrowserArchiveReadinessStatus } from "./archive-readiness-status.mjs";
-import { NativeStorySaveReceiptPort } from "./browser-adapters.mjs";
+import { NativeStorySaveReceiptPort, sendNativeMessageWithFallback } from "./browser-adapters.mjs";
 
 declare const __TRACE_SESSION_MODE__: SessionMode;
 declare const __TRACE_API_BASE__: string;
@@ -52,6 +55,7 @@ declare const __TRACE_IOS_EARNED_PERMISSION_CONFIG__: EarnedPermissionRegistrati
 declare const __TRACE_IOS_FIRST_TAP_SAVE__: boolean;
 declare const __TRACE_IOS_FIRST_TAP_SHEET__: boolean;
 declare const __TRACE_AO3_HISTORY_IMPORT__: boolean;
+declare const __TRACE_KEEP_A_COPY__: boolean;
 
 type EarnedPermissionRegistrationConfig = Readonly<{
   version: number;
@@ -243,6 +247,14 @@ try {
     globalThis.fetch.bind(globalThis), extension.runtime, storageMode, __TRACE_API_BASE__,
     new BrowserStorage(extension.storage.local, extension.runtime, storageMode),
   );
+  // On a computer, Review in Trace offers the History to Trace's review page
+  // (web-history-handoff.mts); the offer outlives this background in session storage.
+  const webHistoryHandoff = __TRACE_AO3_HISTORY_IMPORT__
+    ? new WebHistoryHandoff({ webOrigin: __TRACE_WEB_ORIGIN__, randomID: randomId,
+      ...(extension.storage.session
+        ? { keep: sessionKeep(new BrowserStorage(extension.storage.session, extension.runtime, storageMode)) }
+        : {}) })
+    : null;
   session = installSessionRuntime({
     browserDeviceSessions: true,
     mode: __TRACE_SESSION_MODE__,
@@ -260,6 +272,7 @@ try {
       ? {
           nativeHistoryHandoff: new NativeHistoryHandoffProducer({ runtime: extension.runtime,
             mode: storageMode, apiOrigin: __TRACE_API_BASE__, randomID: randomId }),
+          webHistoryHandoff: webHistoryHandoff!,
         }
       : {}),
     ...(extension.scripting ? { scripting: extension.scripting } : {}),
@@ -283,7 +296,7 @@ try {
     // Import your whole AO3 History, read in the reader's AO3 tab and kept on
     // this device until they review it (ao3-history-import.mts).
     const historySession = session;
-    installAo3HistoryImport({
+    const historyImport = installAo3HistoryImport({
       runtime: extension.runtime,
       tabs: extension.tabs,
       scripting: extension.scripting,
@@ -298,7 +311,37 @@ try {
       whenAccountLeaves: (cleanup) => historySession.whenAccountLeaves(cleanup),
       saveActivity: storySaveActivity,
       handOffHistory: (build) => historySession.handOffHistory(build),
+      ...(webHistoryHandoff ? { webHistory: { origin: __TRACE_WEB_ORIGIN__,
+        answer: (message: unknown) => historySession.answerWebHistory(message),
+        discard: () => webHistoryHandoff.discard() } } : {}),
     });
+    // After a restart the parts on offer are made again from what the run kept.
+    webHistoryHandoff?.useSource(async (capturedAt) => historyParts(await historyImport.works(), capturedAt));
+  }
+  if (
+    // A build-time constant: a build without it leaves this block and the
+    // modules only it uses out of the bundle altogether.
+    __TRACE_KEEP_A_COPY__ &&
+    __TRACE_SESSION_MODE__ === "kernel"
+  ) {
+    // Keep a Copy: AO3's file of every AO3 story in the reader's Library,
+    // saved on this device (keep-a-copy-library.mts). In Chrome and Firefox,
+    // where the downloads API is, the reader turns it on here.
+    const keep = extension as unknown as Parameters<typeof installTraceKeepACopy>[0];
+    if (keep.downloads !== undefined && keep.storage.onChanged !== undefined) {
+      installTraceKeepACopy(keep, session);
+    } else if (typeof extension.runtime.sendNativeMessage === "function" && extension.scripting?.executeScript !== undefined) {
+      // In Safari the Trace app keeps the files and asks this extension for
+      // the works only the reader's AO3 tab can fetch (keep-a-copy-native.mts).
+      installNativeKeepACopy({
+        tabs: extension.tabs as unknown as NativeKeepEnvironment["tabs"],
+        scripting: extension.scripting as unknown as NativeKeepEnvironment["scripting"],
+        alarms: extension.alarms as unknown as NativeKeepEnvironment["alarms"],
+        indexedDB: scope.indexedDB,
+        sendNative: (message, timeoutMs) => sendNativeMessageWithFallback(extension.runtime, storageMode, message, timeoutMs),
+        newId: randomId,
+      });
+    }
   }
   if (
     // A build-time constant: a build without optional story sites leaves this
