@@ -99,6 +99,7 @@ function createCollectorBindings(dom, options = {}) {
     traceHostPageTokens: globalScope.traceHostPageTokens,
     traceRefreshPageTokens: globalScope.traceRefreshPageTokens,
     collect: globalScope.collect,
+    collectForSave: globalScope.collectForSave,
     sendCollectorMessage: globalScope.sendCollectorMessage,
     withFfnAuthorHint: globalScope.withFfnAuthorHint,
     shouldDisableTraceContentScript: globalScope.shouldDisableTraceContentScript,
