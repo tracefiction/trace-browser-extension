@@ -6851,8 +6851,12 @@ function pendingFirstStoryMatchesCurrentPage(pendingUrl) {
     return current.chapterNumber === pending.chapterNumber;
   }
 
+  // A pending URL with no chapter is the work's first page. AO3's Entire Work
+  // view of that work renders every chapter, but it is still the page the
+  // handoff opened, so read it the way a save does (chapter 1) rather than
+  // by the number of chapters on screen.
   try {
-    var collected = collect();
+    var collected = collectForSave();
     var item = collected && collected.items && collected.items[0];
     if (
       item &&

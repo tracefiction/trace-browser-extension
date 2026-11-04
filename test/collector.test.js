@@ -2955,6 +2955,105 @@ test("matching iOS pending first-story URL triggers quick-add and clears pending
   assert.equal(pendingClears.length, 1);
 });
 
+test("iOS pending AO3 handoff opened in Entire Work view triggers quick-add at chapter 1 and clears pending state", async () => {
+  const { sent } = createStoryAutoTrackPendingHarness({
+    fixture: "ao3_story.html",
+    url: "https://archiveofourown.org/works/28534965?view_full_work=true",
+    store: { prefAutoTrackEnabled: false },
+    mutateDom(dom) {
+      const doc = dom.window.document;
+      const article = doc.querySelector("#chapters .userstuff.module[role='article']");
+      for (let i = 0; i < 2; i += 1) {
+        article.parentNode.appendChild(article.cloneNode(true));
+      }
+    },
+    pendingFirstStoryResponse: {
+      ok: true,
+      mode: "story",
+      hostKind: "ao3",
+      handoffId: "handoff_entire_work",
+      url: "https://archiveofourown.org/works/28534965",
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 180));
+
+  assert.equal(
+    sent.filter(
+      (message) =>
+        message.type === "TRACE_ARCHIVE_SEEN" &&
+        message.handoffId === "handoff_entire_work",
+    ).length,
+    1,
+  );
+  const quickAdds = sent.filter((msg) => msg.type === "TRACE_QUICK_ADD");
+  assert.equal(quickAdds.length, 1);
+  assert.equal(quickAdds[0].payload.item.src, "ao3");
+  assert.equal(quickAdds[0].payload.item.chn, 1);
+  assert.equal(
+    sent.filter((msg) => msg.type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR").length,
+    1,
+  );
+});
+
+test("iOS pending AO3 handoff to a work's first page does not match a later chapter page", async () => {
+  const { sent } = createStoryAutoTrackPendingHarness({
+    fixture: "ao3_story.html",
+    url: "https://archiveofourown.org/works/28534965/chapters/71063826",
+    store: { prefAutoTrackEnabled: false },
+    mutateDom(dom) {
+      // Make the fixture read as chapter 2 of the work.
+      for (const option of dom.window.document.querySelectorAll("#selected_id option")) {
+        option.selected = option.value === "71063826";
+        if (option.selected) option.setAttribute("selected", "selected");
+        else option.removeAttribute("selected");
+      }
+    },
+    pendingFirstStoryResponse: {
+      ok: true,
+      mode: "story",
+      hostKind: "ao3",
+      handoffId: "handoff_later_chapter",
+      url: "https://archiveofourown.org/works/28534965",
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 180));
+
+  assert.equal(sent.filter((msg) => msg.type === "TRACE_QUICK_ADD").length, 0);
+  assert.equal(
+    sent.filter((message) => message.handoffId === "handoff_later_chapter").length,
+    0,
+  );
+  assert.equal(
+    sent.filter((msg) => msg.type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR").length,
+    1,
+  );
+});
+
+test("iOS pending AO3 handoff for another work does not match an Entire Work page", async () => {
+  const { sent } = createStoryAutoTrackPendingHarness({
+    fixture: "ao3_story.html",
+    url: "https://archiveofourown.org/works/28534965?view_full_work=true",
+    store: { prefAutoTrackEnabled: false },
+    pendingFirstStoryResponse: {
+      ok: true,
+      mode: "story",
+      hostKind: "ao3",
+      handoffId: "handoff_other_work",
+      url: "https://archiveofourown.org/works/1",
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 180));
+
+  assert.equal(sent.filter((msg) => msg.type === "TRACE_QUICK_ADD").length, 0);
+  assert.equal(
+    sent.filter((msg) => msg.type === "TRACE_IOS_PENDING_FIRST_STORY_CLEAR").length,
+    1,
+  );
+});
+
 test("kernel pending first story automatically sends one bounded command and focuses the confirmed story control", async () => {
   const h = createStoryAutoTrackPendingHarness({
     sessionMode: "kernel",
