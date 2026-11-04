@@ -191,6 +191,8 @@ function createPopupHarness({
   storageWritesFail = false,
   // A real background's side of the first-tap port, in place of the stand-in.
   firstTapConnect = null,
+  // A package built with Keep a Copy, where the browser can save files; the background's view of it.
+  keepACopy = null,
 } = {}) {
   const html = fs.readFileSync(POPUP_HTML_PATH, "utf8");
   const js = fs.readFileSync(POPUP_JS_PATH, "utf8");
@@ -292,6 +294,9 @@ function createPopupHarness({
         }
         if (message.type === "TRACE_POPUP_GET_STATE") {
           response = popupState;
+        }
+        if (message.type === "KEEP_A_COPY_VIEW") {
+          response = keepACopy;
         }
         if (message.type === "TRACE_IMPORT_TRIGGER" || message.type === "TRACE_IMPORT_OPEN_TABS") {
           response = importResponse;
@@ -506,6 +511,10 @@ function createPopupHarness({
     context.TRACE_EXTENSION_WEB_ORIGIN = traceWebOrigin;
   }
   if (activeTabProbe) context.TRACE_IOS_ACTIVE_TAB_PROBE = true;
+  if (keepACopy) {
+    context.TRACE_KEEP_A_COPY = true;
+    ext.downloads = {};
+  }
   if (earnedPermissionOnboarding) {
     context.TRACE_IOS_ACTIVE_TAB_PROBE = true;
     context.TRACE_IOS_EARNED_PERMISSION_ONBOARDING = {
@@ -1702,6 +1711,90 @@ for (const promiseRuntime of [false, true]) {
   }
 }
 
+test("Keep a Copy's switch shows only in a package built with it, starts off, and says how many stories have a copy", async () => {
+  const connected = {
+    sessionMode: "kernel",
+    sessionSnapshot: { state: "connected", accountId: "must-not-render", canExecuteAuthenticated: true, reason: "none" },
+    popupState: {
+      ok: true,
+      authState: { state: "connected", reason: "none", canExecuteAuthenticated: true },
+      firstSaveSeen: true,
+      libraryCount: 8,
+      activeTab: { kind: "unsupported" },
+      pro: true,
+      autoTrackEnabled: true,
+      libraryInlayEnabled: true,
+      ao3SavedFiltersEnabled: true,
+      metadataImproveEnabled: true,
+    },
+  };
+  const without = createPopupHarness(connected);
+  await flush();
+  assert.equal(without.document.getElementById("popup-keep-a-copy-row").hidden, true);
+  assert.equal(without.document.getElementById("popup-preferences-count").textContent, "4 of 4 on");
+
+  const h = createPopupHarness({
+    ...connected,
+    // Four stories updating, three with a copy; a Dropped one keeps its file but is not counted.
+    keepACopy: { kept: 4, updatesOff: 1, withCopy: 3, waiting: 1, stopped: null, lastCopyAt: new Date().setHours(14, 2, 0, 0) },
+  });
+  await flush();
+  const row = h.document.getElementById("popup-keep-a-copy-row");
+  const input = h.document.getElementById("pref-keep-a-copy");
+  assert.equal(row.hidden, false);
+  assert.equal(row.querySelector("strong").textContent, "Keep a Copy");
+  assert.equal(input.checked, false);
+  assert.equal(h.document.getElementById("popup-keep-a-copy-detail").textContent, "Keep AO3’s EPUB of your Library stories, in Downloads › Trace");
+  assert.equal(h.document.getElementById("popup-preferences-count").textContent, "4 of 5 on");
+  assert.equal(h.messages.some((message) => message.type === "KEEP_A_COPY_VIEW"), false);
+
+  input.checked = true;
+  input.dispatchEvent(new h.window.Event("change"));
+  await flush();
+  assert.equal(h.store.prefKeepACopyEnabled, true);
+  assert.equal(h.document.getElementById("popup-keep-a-copy-detail").textContent, "3 of 4 stories · last copy 14:02");
+  assert.equal(h.document.getElementById("popup-preferences-count").textContent, "5 of 5 on");
+});
+
+test("Keep a Copy's small line: the count, and AO3 pausing or not being available in place of it", async () => {
+  const connected = {
+    sessionMode: "kernel",
+    sessionSnapshot: { state: "connected", accountId: "must-not-render", canExecuteAuthenticated: true, reason: "none" },
+    popupState: {
+      ok: true,
+      authState: { state: "connected", reason: "none", canExecuteAuthenticated: true },
+      firstSaveSeen: true,
+      libraryCount: 8,
+      activeTab: { kind: "unsupported" },
+      pro: true,
+      autoTrackEnabled: true,
+      libraryInlayEnabled: true,
+      ao3SavedFiltersEnabled: true,
+      metadataImproveEnabled: true,
+    },
+  };
+  const until = new Date().setHours(14, 5, 0, 0);
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  yesterday.setHours(21, 40, 0, 0);
+  for (const [view, line] of [
+    [{ kept: 340, withCopy: 312, lastCopyAt: yesterday.getTime(), stopped: null }, "312 of 340 stories · last copy yesterday, 21:40"],
+    [{ kept: 1880, withCopy: 0, lastCopyAt: null, stopped: null }, "0 of 1,880 stories"],
+    [{ kept: 0, withCopy: 0, lastCopyAt: null, stopped: null }, "Keep AO3’s EPUB of your Library stories, in Downloads › Trace"],
+    [{ kept: 340, withCopy: 312, lastCopyAt: until, stopped: { code: "slow_down", until } }, "Paused by AO3 until 14:05"],
+    [{ kept: 340, withCopy: 312, lastCopyAt: until, stopped: { code: "slow_down", until, unavailable: true } }, "Waiting for AO3 · 312 of 340"],
+    [{ kept: 340, withCopy: 312, lastCopyAt: until, stopped: { code: "unreadable", until } }, "AO3 couldn’t make the file"],
+  ]) {
+    const h = createPopupHarness({ ...connected, keepACopy: view });
+    await flush();
+    const input = h.document.getElementById("pref-keep-a-copy");
+    input.checked = true;
+    input.dispatchEvent(new h.window.Event("change"));
+    await flush();
+    assert.equal(h.document.getElementById("popup-keep-a-copy-detail").textContent, line);
+  }
+});
+
 test("connected kernel popup renders authoritative summary, preferences, and migrated import", async () => {
   const h = createPopupHarness({
     sessionMode: "kernel",
@@ -1942,6 +2035,24 @@ test("Connect shows Checking Trace at once while the Trace tab is asked, then la
   assert.deepEqual(h.createdTabs, ["https://tracefiction.com/"]);
 });
 
+test("Connect leaves opening Trace to a background that already opened it", async () => {
+  const h = createPopupHarness({ sessionMode: "kernel", sessionActionResponse: { held: true } });
+  await flush();
+  h.document.getElementById("popup-cta").dispatchEvent(
+    new h.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+  );
+  await flush();
+  h.answerAction({
+    ok: true,
+    snapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "credential_absent" },
+    action: { kind: "unavailable" },
+    traceOpened: true,
+  });
+  await flush();
+  assert.deepEqual(h.createdTabs, [], "the background's Trace tab is the only one");
+  assert.match(h.document.getElementById("popup-lead").textContent, /Trace connects and takes you back to your story/);
+});
+
 test("Connect whose reply is lost reads the session again instead of staying on Checking", async () => {
   const h = createPopupHarness({ sessionMode: "kernel", sessionActionResponse: { held: true } });
   await flush();
@@ -1980,7 +2091,7 @@ test("a popup opened after Connect found no website sign-in still says why", asy
     sessionSnapshot: { state: "signed_out", accountId: null, canExecuteAuthenticated: false, reason: "credential_absent" },
   });
   await flush();
-  assert.match(h.document.getElementById("popup-lead").textContent, /sign in there if you need to, then press Connect again\./);
+  assert.match(h.document.getElementById("popup-lead").textContent, /sign in there if you need to, and Trace connects and takes you back to your story\./);
   assert.deepEqual(h.createdTabs, [], "opening the popup opens nothing");
 });
 

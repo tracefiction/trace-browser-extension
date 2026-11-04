@@ -3118,3 +3118,80 @@ test("the persistent access line keeps capacity notice controls above it", async
   assert.ok(win.document.querySelector("[data-trace-page-only-access]"));
   win.close();
 });
+
+function ao3SubscriptionsOverlay(readWork) {
+  const keysSrc = fs.readFileSync(KEYS_PATH, "utf8");
+  const overlaySrc = fs.readFileSync(OVERLAY_PATH, "utf8");
+  const dom = new JSDOM(
+    "<!doctype html><html><body><main id='root'></main></body></html>",
+    {
+      url: "https://archiveofourown.org/users/reader/subscriptions",
+      runScripts: "outside-only",
+      contentType: "text/html",
+    },
+  );
+  const { window } = dom;
+  const sent = [];
+  const chrome = {
+    storage: {
+      local: {
+        get(_keys, cb) {
+          cb({
+            authToken: "test-token",
+            prefLibraryInlayEnabled: true,
+            traceAuthState: { state: "connected" },
+            libraryOverlayCache: { entries: {} },
+          });
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+    runtime: {
+      lastError: null,
+      sendMessage(msg, cb) {
+        sent.push(msg);
+        if (typeof cb === "function") cb({ ok: false, error: "test" });
+      },
+    },
+  };
+  window.chrome = chrome;
+  window.browser = chrome;
+  window.__traceReadAo3WorkForSave = readWork;
+  window.eval(keysSrc);
+  window.eval(overlaySrc);
+  window.document.dispatchEvent(new window.Event("DOMContentLoaded", { bubbles: true }));
+  window.document.getElementById("root").innerHTML =
+    '<dl class="subscription index group"><dt><a href="/works/7700201">The Long Way Home</a> (Work) by <a rel="author" href="/users/someone">someone</a></dt><dd>Unsubscribe</dd></dl>';
+  return { window, sent };
+}
+
+test("library-overlay quick-add on a bare AO3 work link asks the collector for the work's listing details", async () => {
+  const reads = [];
+  const read = { src: "ao3", ctx: "listing", u: "https://archiveofourown.org/works/7700201", t: "The Long Way Home", tags: ["Slow Burn"], sm: "A summary.", chn: 1 };
+  const { window, sent } = ao3SubscriptionsOverlay((workId, done) => {
+    reads.push(workId);
+    done(read);
+  });
+  await sleep(220);
+  const button = window.document.querySelector("[data-trace-library-overlay-wrap] button[data-trace-quick-add]");
+  assert.ok(button, "expected quick-add button beside the subscription link");
+  button.click();
+  assert.deepEqual(reads, ["7700201"]);
+  const quickAdd = sent.find((m) => m && m.type === "TRACE_QUICK_ADD");
+  assert.ok(quickAdd, "expected TRACE_QUICK_ADD");
+  assert.deepEqual(quickAdd.payload.item, read);
+});
+
+test("library-overlay quick-add on a bare AO3 work link says why it couldn't add, then resets", async () => {
+  const { window, sent } = ao3SubscriptionsOverlay((_workId, done) => done(null, "unavailable"));
+  await sleep(220);
+  const button = window.document.querySelector("[data-trace-library-overlay-wrap] button[data-trace-quick-add]");
+  button.click();
+  assert.equal(sent.filter((m) => m && m.type === "TRACE_QUICK_ADD").length, 0);
+  assert.equal(button.textContent, "Couldn’t add");
+  assert.match(button.title, /AO3 didn’t answer/);
+  assert.equal(button.disabled, true, "no retry until it resets");
+  await sleep(2_600);
+  assert.equal(button.textContent, "+ Add to Trace");
+  assert.equal(button.disabled, false);
+});

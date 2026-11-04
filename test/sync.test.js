@@ -49,7 +49,7 @@ function statusReadyMessages(h) {
 
 function createSyncHarness(
   origin = "https://tracefiction.com",
-  { sendMessageImpl, sessionMode = "legacy" } = {},
+  { sendMessageImpl, sessionMode = "legacy", runtimeId = "trace-test-extension" } = {},
 ) {
   const js = fs.readFileSync(SYNC_JS_PATH, "utf8");
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -78,6 +78,7 @@ function createSyncHarness(
     self: dom.window,
     chrome: {
       runtime: {
+        id: runtimeId,
         sendMessage(message, callback) {
           messages.push(message);
           if (sendMessageImpl) return sendMessageImpl(message, callback);
@@ -906,4 +907,112 @@ test("sync forwards malformed status pushes as a safe disconnected state", async
     connected: false,
     authState: "unknown",
   });
+});
+
+test("sync relays the AO3 History review's part requests to the background and its answers back", async () => {
+  const handoffID = "00000000-0000-4000-8000-0000000000aa";
+  const h = createSyncHarness("https://tracefiction.com", {
+    sessionMode: "kernel",
+    sendMessageImpl(message, callback) {
+      callback?.(message.part === 0 ? { ok: true, kind: "part", handoffID, partIndex: 0, text: "{\"items\":[]}" } : undefined);
+    },
+  });
+  dispatchPageMessage(h, { type: "TRACE_WEB_HISTORY_REQUEST", requestId: "r1", handoffID, part: 0, extra: "dropped" });
+  dispatchPageMessage(h, { type: "TRACE_WEB_HISTORY_RECEIVED", requestId: "r2", handoffID });
+  dispatchPageMessage(h, { type: "TRACE_WEB_HISTORY_REQUEST", requestId: "r3", handoffID, part: 0 }, "https://evil.example");
+  dispatchPageMessage(h, { type: "TRACE_WEB_HISTORY_REQUEST", handoffID, part: 0 });
+  await flush();
+  const relayed = plainJson(h.messages).filter((m) => m.type.startsWith("TRACE_WEB_HISTORY"));
+  assert.deepEqual(relayed, [
+    { type: "TRACE_WEB_HISTORY_REQUEST", handoffID, part: 0 },
+    { type: "TRACE_WEB_HISTORY_RECEIVED", handoffID },
+  ], "only same-origin requests with an id, and only their own fields");
+  const answers = plainJson(h.postedMessages).map((m) => m.data).filter((d) => d.type === "TRACE_WEB_HISTORY_RESPONSE");
+  assert.deepEqual(answers, [
+    { type: "TRACE_WEB_HISTORY_RESPONSE", requestId: "r1", answer: { ok: true, kind: "part", handoffID, partIndex: 0, text: "{\"items\":[]}" } },
+    { type: "TRACE_WEB_HISTORY_RESPONSE", requestId: "r2", answer: { ok: false, error: "history_handoff_unavailable" } },
+  ]);
+});
+
+function postedOfType(h, type) {
+  return plainJson(h.postedMessages.filter((item) => item?.data?.type === type));
+}
+
+test("kernel status tells the Trace page it can ask for a reconnect", async () => {
+  const h = createFirstInstallHarness({ url: "https://tracefiction.com/setup", authState: "connected" });
+  dispatchPageMessage(h, { type: "TRACE_EXTENSION_STATUS_REQUEST", nonce: "cap-1" });
+  await flush();
+  const [response] = postedOfType(h, "TRACE_EXTENSION_STATUS_RESPONSE");
+  assert.deepEqual(response.data.state.capabilities, { sessionReconnect: true });
+});
+
+test("a Reconnect from the Trace page runs Connect for a signed-out session and says it connected", async () => {
+  const h = createFirstInstallHarness({ url: "https://tracefiction.com/setup", authState: "signed_out" });
+  dispatchPageMessage(h, { type: "TRACE_EXTENSION_RECONNECT_REQUEST", nonce: "8d1f0c2e-1b2a-4c3d-9e8f-0a1b2c3d4e5f" });
+  await flush();
+  await flush();
+  assert.equal(h.messages[0].type, "TRACE_EXTENSION_STATUS_QUERY");
+  assert.deepEqual(plainJson(h.messages[1]), { type: "TRACE_SESSION_ACTION", action: "connect" });
+  assert.deepEqual(
+    postedOfType(h, "TRACE_EXTENSION_RECONNECT_RESPONSE").map((item) => item.data),
+    [{ type: "TRACE_EXTENSION_RECONNECT_RESPONSE", nonce: "8d1f0c2e-1b2a-4c3d-9e8f-0a1b2c3d4e5f", ok: true }],
+  );
+});
+
+test("a Reconnect runs Reconnect for a session that needs one", async () => {
+  const h = createFirstInstallHarness({ url: "https://tracefiction.com/setup", authState: "reconnect_required" });
+  dispatchPageMessage(h, { type: "TRACE_EXTENSION_RECONNECT_REQUEST", nonce: "r-2" });
+  await flush();
+  await flush();
+  assert.deepEqual(plainJson(h.messages[1]), { type: "TRACE_SESSION_ACTION", action: "reconnect" });
+});
+
+test("a Reconnect is ignored outside kernel sessions, from other origins, or without a nonce", async () => {
+  const legacy = createFirstInstallHarness({ url: "https://tracefiction.com/setup", sessionMode: "legacy" });
+  dispatchPageMessage(legacy, { type: "TRACE_EXTENSION_RECONNECT_REQUEST", nonce: "r-3" });
+  const kernel = createFirstInstallHarness({ url: "https://tracefiction.com/setup" });
+  dispatchPageMessage(kernel, { type: "TRACE_EXTENSION_RECONNECT_REQUEST", nonce: "r-4" }, "https://evil.example");
+  dispatchPageMessage(kernel, { type: "TRACE_EXTENSION_RECONNECT_REQUEST", nonce: "bad nonce!" });
+  await flush();
+  await flush();
+  assert.deepEqual(plainJson(legacy.messages).filter((m) => m.type !== "TRACE_AUTH_UPDATE"), []);
+  assert.deepEqual(plainJson(kernel.messages), []);
+  assert.deepEqual(postedOfType(legacy, "TRACE_EXTENSION_RECONNECT_RESPONSE"), []);
+  assert.deepEqual(postedOfType(kernel, "TRACE_EXTENSION_RECONNECT_RESPONSE"), []);
+});
+
+test("sync tells the Trace page the extension is gone once its context is invalidated", async () => {
+  const h = createSyncHarness("https://tracefiction.com/setup", {
+    sessionMode: "kernel",
+    sendMessageImpl() {
+      throw new Error("Extension context invalidated.");
+    },
+  });
+  dispatchPageMessage(h, { type: "TRACE_EXTENSION_STATUS_REQUEST", nonce: "gone-1" });
+  await flush();
+  assert.deepEqual(
+    postedOfType(h, "TRACE_EXTENSION_STATUS_RESPONSE").map((item) => item.data),
+    [
+      {
+        type: "TRACE_EXTENSION_STATUS_RESPONSE",
+        nonce: "gone-1",
+        state: { installed: false, connected: false, authState: "unknown" },
+      },
+    ],
+  );
+  assert.deepEqual(h.consoleErrors, []);
+});
+
+test("sync tells the Trace page the extension is gone once its runtime has no id", async () => {
+  const h = createSyncHarness("https://tracefiction.com/setup", {
+    sessionMode: "kernel",
+    runtimeId: null,
+  });
+  dispatchPageMessage(h, { type: "TRACE_EXTENSION_STATUS_REQUEST", nonce: "gone-2" });
+  await flush();
+  assert.deepEqual(plainJson(h.messages).filter((m) => m.type === "TRACE_EXTENSION_STATUS_QUERY"), []);
+  assert.deepEqual(
+    postedOfType(h, "TRACE_EXTENSION_STATUS_RESPONSE").map((item) => item.data.state),
+    [{ installed: false, connected: false, authState: "unknown" }],
+  );
 });

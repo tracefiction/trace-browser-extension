@@ -76,6 +76,31 @@ opens:
 traceauth://open?destination=history-import&handoff=<canonical-lowercase-UUID>
 ```
 
+## On a computer
+
+There is no app, so Review in Trace offers the History to Trace's review page
+instead (`src/extension-runtime/web-history-handoff.mts`) and the sheet opens
+`<web origin>/import/history#handoff=<uuid>`. The page asks for the
+declaration and then each part through `sync.js`:
+
+- page → `sync.js`: `TRACE_WEB_HISTORY_REQUEST {requestId, handoffID, part}`,
+  where `part` is `"declaration"` or a part index; `TRACE_WEB_HISTORY_RECEIVED
+  {requestId, handoffID}` once every part is kept.
+- `sync.js` → page: `TRACE_WEB_HISTORY_RESPONSE {requestId, answer}`.
+- The declaration carries the account id, part count, bytes, items, the
+  SHA-256 of the whole and the expiry; a part is the same JSON text as an
+  inbox part.
+
+The background answers only a content script on Trace's own site, only for
+the account that started the handoff (`history_handoff_not_connected` while
+the extension isn't connected, `history_handoff_account_changed` for another
+account), only before it expires (30 minutes), and not after `RECEIVED`. The
+offer is kept in `storage.session`, so it outlives a stopped background; its
+parts are made again from the History store and given out only when they
+match the digest that was offered. Deleting the History in the sheet
+withdraws the offer. Nothing is sent to Trace's server until
+the reader imports. A package that doesn't run on Trace's site offers nothing.
+
 ## Tests
 
 - `npm run test:swift-history-inbox`: the inbox contract (declarations,
@@ -85,4 +110,6 @@ traceauth://open?destination=history-import&handoff=<canonical-lowercase-UUID>
 - `test/extension-runtime/native-history-handoff.test.mjs`: items, parts and
   digest, the producer's order, checks and cancellation.
 - `test/extension-runtime/ao3-history-import*.test.mjs`: Review in Trace in the
-  runtime and the sheet.
+  runtime and the sheet, on iPhone and on a computer.
+- `test/extension-runtime/web-history-handoff.test.mjs` and `test/sync.test.js`:
+  the computer handoff and its relay.

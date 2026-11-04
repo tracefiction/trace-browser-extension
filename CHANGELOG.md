@@ -4,6 +4,22 @@ This file lists the changes that matter to people using the Chrome, Edge and
 Firefox extension. The Safari extension ships inside the Trace iPhone app, and
 its notes go with each app release.
 
+## 1.0.6
+
+- **The story sheet shows when you last read a story.** Under the chapter you're on, the story sheet now says when you last read it: **Last read today**, **yesterday**, **3 days ago** and so on up to three weeks, then the date. A saved story you haven't started shows no line.
+- **Connecting from the popup takes you back to your story.** When **Connect** in the toolbar popup finds you signed out of the Trace website, Trace opens it in a new tab as before. Signing in there now finishes connecting without pressing **Connect** again, and Trace takes you back to the AO3 or FanFiction.net tab you were reading, at the same place. The Trace tab it opened for signing in then closes, whether you connected from the popup or from Trace's notice on the page.
+- **Trace's setup page knows when the extension has dropped out.** If the extension is turned off, removed or updated while a Trace tab is open, it now tells the page so, and the page asks you to bring it back instead of staying green. When the extension is signed out, **Reconnect** on that page connects it again in one press.
+
+## 1.0.5
+
+- **Trace no longer adds visits to your AO3 History.** To find missing descriptions, 1.0.4 opened saved works' pages in the background while you browsed AO3, and AO3 counted those as visits: **Last visited** and the visit count changed, and **Update available** could clear, on works you hadn't opened. Trace no longer opens them. Descriptions for works you read from chapter 2 on now come from AO3's search, and other saved works without one wait until you save or open them on a page that shows it.
+- **Add to Trace works on your AO3 Subscriptions page.** The button beside a subscribed work used to do nothing. It now saves the work with its tags, description and counts.
+
+## 1.0.4
+
+- **Import your whole AO3 History.** On your AO3 History page, Trace reads every page of it in your own browser. You then choose what to add on Trace's review page before anything is saved.
+- **AO3 works get their description, wherever you saved them from.** AO3 shows a work's summary only on its first chapter, so a work saved from a later chapter, or imported from your open tabs, could stay in your Library without one. While you browse AO3, Trace now reads the summaries of those works from their first page in your own browser, one work at a time and slowly, and adds them to your Library. It does this only while **Improve story details** is on.
+
 ## 1.0.3
 
 - **Saved filters follow your account.** Signing in with a different account now brings back all of that account's saved filters, and none of the last account's.

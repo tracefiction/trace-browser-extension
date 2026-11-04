@@ -416,6 +416,10 @@ body[data-trace-popup-state="connected_saved"] .popup-sheet {
     cursor: pointer;
 }
 
+.popup-switch-row[hidden] {
+    display: none;
+}
+
 .popup-switch-row:first-of-type {
     border-top: 0;
 }

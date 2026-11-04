@@ -55,6 +55,26 @@ test("account record parser copies a bounded, immutable V1 model", () => {
   assert.equal(parsed.value.capacityRecovery, null);
 });
 
+test("an entry keeps its last-read date, and a date it can't read costs only the date", () => {
+  const entryWith = (lastReadAt) => validRoot({
+    overlay: {
+      ...validRoot().overlay,
+      entries: { "ao3:123": { status: "READING", lastReadAt } },
+    },
+  });
+
+  const dated = parseAccountData(entryWith("2026-10-28T09:12:00.000Z"));
+  assert.equal(dated.kind, "valid");
+  assert.equal(dated.value.overlay.entries["ao3:123"].lastReadAt, "2026-10-28T09:12:00.000Z");
+
+  for (const unreadable of [null, "", "yesterday", "2026-10-28", 1761642720000]) {
+    const parsed = parseAccountData(entryWith(unreadable));
+    assert.equal(parsed.kind, "valid");
+    assert.equal(parsed.value.overlay.entries["ao3:123"].status, "READING");
+    assert.equal(Object.hasOwn(parsed.value.overlay.entries["ao3:123"], "lastReadAt"), false);
+  }
+});
+
 test("account summary keeps the Free Library size once the account has reported it", () => {
   const without = parseAccountData(validRoot());
   assert.equal(without.kind, "valid");

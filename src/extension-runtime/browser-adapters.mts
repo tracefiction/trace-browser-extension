@@ -72,6 +72,9 @@ export const LEGACY_ACCOUNT_KEYS = Object.freeze([
   "traceUserPro",
   "traceLibraryCount",
   "traceFirstSaveSeen",
+  // The AO3 summary fill, removed in 1.0.5: its work ids and local state.
+  "traceAo3SummaryAttemptedV1",
+  "traceAo3SummaryFillV1",
 ] as const);
 
 export const DISABLED_LOCAL_KEYS = Object.freeze([

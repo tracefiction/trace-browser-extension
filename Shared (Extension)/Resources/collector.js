@@ -1,5 +1,5 @@
 // collector.js — AO3/FFN page metadata extractor.
-// Reads story/listing metadata from the DOM the user is viewing; it does not fetch page HTML.
+// Reads story/listing metadata from the DOM the user is viewing. It fetches an AO3 page only for what a page lacks (a summary on later chapters, or a work saved from a bare link), and keeps only the metadata.
 // Sends metadata/progress to background.js via extension messages for import, quick-add, and auto-track.
 // Does not read cookies or credentials, and disables collection on pages with password fields.
 (function () {
@@ -1283,17 +1283,16 @@ function rememberMetadataBroadcast(item) {
 }
 
 // AO3 shows a work's summary only on chapter 1, one-shots and the Entire Work
-// view. When a reader is on chapter 2 or later, Trace fetches the work's first
-// page once in the background and reports its summary, so a story first seen
-// mid-way still gets its description. The reader is already reading this work,
-// so the adult-content notice is skipped. One request at a time, at most one
-// per work per day in this tab, a back-off after any refusal, and failures stay
-// silent; the save itself never waits for it.
+// view. When a reader is on chapter 2 or later, Trace looks the work up once in
+// AO3's search and reports the summary its listing shows, so a story first seen
+// mid-way still gets its description. Opening the work's first page instead
+// would be a visit in the reader's AO3 History. One request at a time, at most
+// one per work per day in this tab, a back-off after any refusal, and failures
+// stay silent; the save itself never waits for it.
 var WORK_SUMMARY_BACKFILL_KEY = "trace:work-summary-backfill:v1";
 var WORK_SUMMARY_BACKFILL_DELAY_MS = 1_500;
 var WORK_SUMMARY_BACKFILL_TIMEOUT_MS = 8_000;
 var WORK_SUMMARY_BACKFILL_BACKOFF_MS = 10 * 60 * 1000;
-var WORK_SUMMARY_SELECTOR = "#workskin > .preface.group:not(.chapter) > .summary blockquote.userstuff";
 var workSummaryBackfillInFlight = false;
 var workSummaryBackfillBackoffUntil = 0;
 
@@ -1339,16 +1338,6 @@ function rememberWorkSummaryBackfill(workId) {
   }
 }
 
-function parseAo3WorkSummaryFromHtml(html) {
-  try {
-    if (typeof DOMParser !== "function") return null;
-    var doc = new DOMParser().parseFromString(String(html || ""), "text/html");
-    return blockText(one(doc, WORK_SUMMARY_SELECTOR)) || null;
-  } catch (_) {
-    return null;
-  }
-}
-
 function workSummaryBackfillFetch() {
   // Firefox content scripts make page-origin requests through content.fetch.
   if (typeof content !== "undefined" && content && typeof content.fetch === "function") {
@@ -1357,8 +1346,8 @@ function workSummaryBackfillFetch() {
   return typeof fetch === "function" ? fetch : null;
 }
 
-// Calls done(summary, ok): ok is false when AO3 refused or the request failed.
-function fetchAo3WorkSummary(workId, done) {
+// Calls done(html, ok): ok is false when AO3 refused or the request failed.
+function fetchAo3Html(url, done) {
   var fetchFn = workSummaryBackfillFetch();
   if (!fetchFn) {
     done(null, false);
@@ -1376,7 +1365,6 @@ function fetchAo3WorkSummary(workId, done) {
     if (controller) controller.abort();
     finish(null, false);
   }, WORK_SUMMARY_BACKFILL_TIMEOUT_MS);
-  var url = location.origin + "/works/" + workId + "?view_adult=true";
   Promise.resolve()
     .then(function () {
       return fetchFn(url, {
@@ -1395,20 +1383,67 @@ function fetchAo3WorkSummary(workId, done) {
     })
     .then(function (html) {
       if (html == null) return;
-      finish(parseAo3WorkSummaryFromHtml(html), true);
+      finish(html, true);
     })
     .catch(function () {
       finish(null, false);
     });
 }
 
+// Looks a work up in AO3's search by its ID. The result is the same listing row
+// a search page shows, and unlike opening the work it is not a visit in the
+// reader's AO3 History. Calls done(item, ok): ok is false when AO3 refused or
+// the request failed; item is null when AO3 didn't list the work.
+function fetchAo3WorkListing(workId, done) {
+  var id = String(workId || "");
+  if (!/^\d+$/.test(id) || typeof DOMParser !== "function") {
+    done(null, true);
+    return;
+  }
+  var query = encodeURIComponent("id:" + id);
+  fetchAo3Html(location.origin + "/works/search?work_search%5Bquery%5D=" + query, function (html, ok) {
+    if (!ok) {
+      done(null, false);
+      return;
+    }
+    var item = null;
+    try {
+      var doc = new DOMParser().parseFromString(String(html || ""), "text/html");
+      var row = doc.querySelector('li.work.blurb[id="work_' + id + '"]');
+      item = row ? extractAO3BlurbData(row, id, "listing") : null;
+    } catch (_) {
+      item = null;
+    }
+    done(item && item.t ? item : null, true);
+  });
+}
+
+// Calls done(summary, ok): ok is false when AO3 refused or the request failed.
+function fetchAo3WorkSummary(workId, done) {
+  fetchAo3WorkListing(workId, function (item, ok) {
+    done(item ? item.sm : null, ok);
+  });
+}
+
+// A work link with no listing row around it (AO3's Subscriptions page) shows
+// only a title, so saving one looks it up. Calls done(item), or
+// done(null, "unavailable") when AO3 didn't answer and done(null, "not_found")
+// when it didn't list the work.
+function readAo3WorkForSave(workId, done) {
+  fetchAo3WorkListing(workId, function (item, ok) {
+    if (item) done(item);
+    else done(null, ok ? "not_found" : "unavailable");
+  });
+}
+globalThis.__traceReadAo3WorkForSave = readAo3WorkForSave;
+
 function workSummaryBackfillItem(item, summary) {
   var out = {};
   for (var key in item) {
     if (Object.prototype.hasOwnProperty.call(item, key)) out[key] = item[key];
   }
-  // The summary comes from the work's first page, so it is reported as that
-  // page: chapter 1 and no chapter URL. Progress is never taken from metadata.
+  // The summary is the work's, not this chapter's, so it is reported as the
+  // first page: chapter 1 and no chapter URL. Progress is never taken from metadata.
   out.sm = summary;
   out.chn = 1;
   out.chu = null;
@@ -3542,6 +3577,27 @@ function collect() {
   return { source: "ao3", items: [] };
 }
 
+// What a save or an import sends for the page the reader is on. AO3's Entire
+// Work view renders every chapter, which is not evidence that the reader has
+// read them, so a work read that way is sent at chapter 1, as auto-track
+// does; the end-of-story detector owns the final progress transition.
+function collectForSave() {
+  var collected = collect();
+  if (
+    isAO3() &&
+    isAo3EntireWorkView() &&
+    collected.items.length === 1 &&
+    collected.items[0] &&
+    collected.items[0].ctx === "story"
+  ) {
+    return {
+      source: collected.source,
+      items: [Object.assign({}, collected.items[0], { chn: 1, chu: null })],
+    };
+  }
+  return collected;
+}
+
 function canonicalReaderStatus(status) {
   if (
     typeof status !== "string" &&
@@ -3887,7 +3943,7 @@ function handleCollectorMessage(msg, sender, sendResponse, relayCommand) {
     try {
       // The same reading of the page that decides whether it gets a mark.
       firstTapStory = collectStoryForAutoTrack();
-      firstTapCollected = firstTapStory ? collect() : null;
+      firstTapCollected = firstTapStory ? collectForSave() : null;
     } catch (_) {
       firstTapCollected = null;
     }
@@ -3952,7 +4008,7 @@ function handleCollectorMessage(msg, sender, sendResponse, relayCommand) {
     var probeCollected;
     var probeWorkKey;
     try {
-      probeCollected = collect();
+      probeCollected = collectForSave();
       probeWorkKey = getWorkKeyFromUrl();
     } catch (_) {
       probeCollected = null;
@@ -4134,7 +4190,7 @@ function handleCollectorMessage(msg, sender, sendResponse, relayCommand) {
   }
   if (msg?.type !== "TRACE_COLLECT") return false;
   try {
-    const res = collect();
+    const res = collectForSave();
     const payload = {
       s: res.source,
       at: new Date().toISOString(),
@@ -4816,6 +4872,29 @@ function entryStatus(entry) {
     canonicalReaderStatus(entry.readerStatus) ||
     canonicalReaderStatus(entry.status)
   );
+}
+
+// "Last read today", "Last read 3 days ago", then the date after four weeks
+// ("Last read 12 Jul"), counted in calendar days where the reader is. A Saved
+// story hasn't been read, so it says nothing.
+function storyLastReadText(entry, now) {
+  if (!entry || entryStatus(entry) === "SAVED") return null;
+  var time = storyEntrySyncTime(entry.lastReadAt);
+  if (time == null) return null;
+  var read = new Date(time);
+  var today = now || new Date();
+  var days = Math.round(
+    (Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()) -
+      Date.UTC(read.getFullYear(), read.getMonth(), read.getDate())) / 86400000,
+  );
+  if (days <= 0) return "Last read today";
+  if (days === 1) return "Last read yesterday";
+  if (days < 7) return "Last read " + days + " days ago";
+  if (days < 14) return "Last read a week ago";
+  if (days < 28) return "Last read " + Math.floor(days / 7) + " weeks ago";
+  var options = { day: "numeric", month: "short" };
+  if (read.getFullYear() !== today.getFullYear()) options.year = "numeric";
+  return "Last read " + read.toLocaleDateString(undefined, options);
 }
 
 function progressDisplay(entry) {
@@ -6500,7 +6579,7 @@ function applyQuickAddActionState(btn, addTheme, compact) {
 
 function quickAddPayloadForCurrentPage() {
   if (!collectStoryForAutoTrack()) throw new Error("story_unavailable");
-  var collected = collect();
+  var collected = collectForSave();
   if (!collected.items.length) throw new Error("collect_failed");
   return { s: collected.source, at: new Date().toISOString(), item: collected.items[0] };
 }
@@ -6817,7 +6896,7 @@ function runKernelConnectAndSave(handle, workKey) {
   kernelPendingFirstStory.commandInFlight = true;
   var collected;
   try {
-    collected = collect();
+    collected = collectForSave();
   } catch (_) {
     collected = null;
   }
@@ -7435,6 +7514,15 @@ function renderStorySheet(sheet, view, workKey) {
   positionTop.appendChild(positionValue);
   if (positionStatus.textContent) positionTop.appendChild(positionStatus);
   position.appendChild(positionTop);
+  var lastRead = storyLastReadText(view.entry);
+  if (lastRead) {
+    var positionWhen = document.createElement("div");
+    positionWhen.className = "when";
+    positionWhen.setAttribute("data-trace-story-last-read", "1");
+    positionWhen.textContent = lastRead;
+    positionWhen.style.cssText = "font:400 13px/1.35 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
+    position.appendChild(positionWhen);
+  }
   body.appendChild(position);
   appendStoryWorkMark(body, view.entry);
   appendStoryCatchupAction(body, view, workKey);
