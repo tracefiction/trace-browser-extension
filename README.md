@@ -63,14 +63,14 @@ AO3 shows a work's summary only on its first chapter. When you read chapter 2
 or later of a work, Trace looks that work up in AO3's search, from your own AO3
 tab, at most once a day per work in that tab, and sends only the summary the
 search result shows. It doesn't open the
-work's first page, because AO3 counts that as a visit in your AO3 History. This
-follows the **Improve story details** preference.
+work's first page, so your AO3 History is left alone. This follows the
+**Improve story details** preference.
 
 Some AO3 pages, such as your Subscriptions page, list a work as a bare link
 with no details. When you click **+ Add to Trace** beside one, Trace searches
 AO3 for that work by its ID, from your own AO3 tab, and saves the details the
-search result shows. It doesn't open the work, so this isn't a visit in your
-AO3 History. Only the story details are kept; the page itself is not.
+search result shows. It doesn't open the work, so your AO3 History is left alone.
+Only the story details are kept; the page itself is not.
 
 When you explicitly save an AO3 saved filter, Trace stores that AO3 filter query state in extension storage so it can reapply the filter later. If you are signed in to Trace, saved filters sync to your Trace account so they can appear on your other devices. Signed-out or offline saved filters remain local until a later signed-in sync.
 You can hide the saved filters surface from AO3 filter pages in the extension popup; this local preference does not delete saved presets.
@@ -84,7 +84,7 @@ Trace may send this data to the Trace API when you import, quick-add, auto-track
 - fandoms/tags and related story metadata
 - chapter and word counts
 - reading-progress metadata
-- when you import from your AO3 History page: each work's last-visited date, which Trace uses as its last-read date unless it has seen you read the story later and, if you choose, as an approximate ("around") finish date for finished stories that have none (the visit count stays in the import and is not stored)
+- when you import from your AO3 History page: each work's last-visited date, which Trace uses as its last-read date unless it has seen you read the story later and, if you choose, as an approximate ("around") finish date for finished stories that have none (the visit count is passed along with the import but not kept)
 - reading-status updates you explicitly choose in the Trace overlay: Saved, Reading, Caught up, Paused, Finished, or Dropped
 - finish/caught-up decisions you explicitly choose at the end of a supported story, including whether you identify the work as complete, ongoing, on hiatus, or abandoned
 - last-posted-chapter finish-qualification signals for stories already in your Trace library, so Trace can recover or improve work-status metadata
@@ -270,10 +270,6 @@ The default development build uses the kernel session owner. The explicit
 `build:legacy` command exists only for bounded rollback diagnostics; do not use
 it for normal development or installed-extension QA.
 
-The developer-only iOS active-tab first-value experiment is documented in
-[`docs/ios-active-tab-first-value-probe.md`](docs/ios-active-tab-first-value-probe.md).
-It declares no website origins and is not part of normal builds.
-
 For a release-style build, use HTTPS Trace origins:
 
 ```bash
@@ -351,7 +347,6 @@ Safari keeps its existing Website Access flow.
 
 - Security and reporting: `SECURITY.md`
 - Firefox source package notes: `README.mozilla.md`
-- Store listing and release copy: `docs/store-listings.md`
 
 ## Reporting issues
 
