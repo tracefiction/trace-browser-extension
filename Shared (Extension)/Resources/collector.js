@@ -6339,10 +6339,12 @@ function appendStoryCatchupAction(body, view, workKey) {
   text.style.cssText = "min-width:0;font:400 13px/1.35 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
   var count = Number(entry.newChapterCount);
   var title = document.createElement("span");
-  title.textContent = count === 1 ? "1 new chapter" : count + " new chapters";
+  // The count is the posted chapters after the reader's saved place, not
+  // chapters posted since they last read, so it never says "new" or "since".
+  title.textContent = count === 1 ? "1 more chapter" : count + " more chapters";
   title.style.cssText = "font-weight:500;color:var(--trace-page-ink)";
   text.appendChild(title);
-  text.appendChild(document.createTextNode(" since you last read"));
+  text.appendChild(document.createTextNode(" after your place"));
 
   var button = document.createElement("button");
   button.type = "button";
