@@ -313,7 +313,7 @@ function isLocalLike(value) {
 }
 
 const RELEASE_ORIGINS_HINT =
-  "Release builds (including npm run agent:check) need the production origins, as CI sets them: " +
+  "Release builds (including npm run check:release) need the production origins, as CI sets them: " +
   "TRACE_API_BASE=https://api.tracefiction.com TRACE_WEB_ORIGIN=https://www.tracefiction.com";
 
 function assertReleaseUrl(name, value, expected) {

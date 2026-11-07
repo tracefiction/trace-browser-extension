@@ -298,7 +298,7 @@ Only confirmed account state may be described as saved.
 
 ## Verification and captures
 
-Run `npm test`, `npm run agent:check` with the HTTPS release origins, and
+Run `npm test`, `npm run check:release` with the HTTPS release origins, and
 `git diff --check`. Use the repository fixture harness:
 
 ```bash

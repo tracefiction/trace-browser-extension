@@ -6,7 +6,6 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-const PRIVATE_HARNESS_PATHS = ["AGENTS.md", "CLAUDE.md", "docs/agents"];
 const DEPENDENCY_DIRS = new Set(["node_modules"]);
 
 const SOURCE_SCAN_DIRS = [
@@ -81,8 +80,8 @@ function gitListFiles(args) {
   return result.stdout.split("\0").filter(Boolean);
 }
 
-function gitTrackedFiles(paths) {
-  return gitListFiles(["ls-files", "--", ...paths]);
+function gitTrackedIgnoredFiles() {
+  return gitListFiles(["ls-files", "--cached", "--ignored", "--exclude-standard"]);
 }
 
 function publicWorkingFiles() {
@@ -123,9 +122,9 @@ function printIssues() {
   }
 
   if (errors.length || warnings.length) {
-    console.log(`agent-checks: ${errors.length} error(s), ${warnings.length} warning(s)`);
+    console.log(`repo-checks: ${errors.length} error(s), ${warnings.length} warning(s)`);
   } else {
-    console.log("agent-checks: ok");
+    console.log("repo-checks: ok");
   }
 }
 
@@ -144,9 +143,10 @@ function checkPackageManagerFiles(files) {
   }
 }
 
-function checkPrivateHarnessIsUntracked() {
-  for (const repoPath of gitTrackedFiles(PRIVATE_HARNESS_PATHS)) {
-    addError(repoPath, 1, "local agent guidance files must remain untracked in this public repo.");
+function checkIgnoredFilesAreUntracked() {
+  // Covers .gitignore and each clone's .git/info/exclude, where local-only notes are listed.
+  for (const repoPath of gitTrackedIgnoredFiles()) {
+    addError(repoPath, 1, "this file is ignored but tracked; local-only files must stay out of the public repo.");
   }
 }
 
@@ -347,7 +347,7 @@ function checkSurfacesCannotBypassPrivateDatabase() {
 function main() {
   const files = publicWorkingFiles();
   checkPackageManagerFiles(files);
-  checkPrivateHarnessIsUntracked();
+  checkIgnoredFilesAreUntracked();
   checkForbiddenPrivacyPatterns(files);
   checkReleaseArtifactsDoNotUseLocalOrigins(files);
   checkGeneratedBackgroundParity();
