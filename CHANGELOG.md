@@ -4,6 +4,10 @@ This file lists the changes that matter to people using the Chrome, Edge and
 Firefox extension. The Safari extension ships inside the Trace iPhone app, and
 its notes go with each app release.
 
+## Unreleased
+
+- **The story sheet no longer says chapters are new when they aren't.** When you're behind on a story, the sheet used to say **3 new chapters since you last read**, even if you read it today and nothing had been posted since. That number is the chapters after the one you're on, so it now says **3 more chapters after your place**, beside **Catch up**.
+
 ## 1.0.6
 
 - **The story sheet shows when you last read a story.** Under the chapter you're on, the story sheet now says when you last read it: **Last read today**, **yesterday**, **3 days ago** and so on up to three weeks, then the date. A saved story you haven't started shows no line.

@@ -7022,6 +7022,9 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
   assert.match(sheet.textContent || "", /Chapter 3\s*of\s*28/);
   assert.match(sheet.textContent || "", /11%/);
   assert.match(sheet.textContent || "", /Catch up to 5/i);
+  // Two chapters after chapter 3, not "new since you last read".
+  assert.match(sheet.textContent || "", /2 more chapters after your place/);
+  assert.doesNotMatch(sheet.textContent || "", /since you last read/i);
   assert.equal(sheet.querySelector(".x-pos .bar"), null);
   assert.equal(sheet.querySelector(".x-pos .step"), null);
   assert.match(sheet.textContent || "", /Reading/i);
