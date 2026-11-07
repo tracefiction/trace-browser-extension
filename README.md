@@ -1,521 +1,138 @@
-# Trace Browser Extension Source
+# Trace browser extension
 
-This repository is public for transparency. Trace reads fanfiction story metadata so readers can import stories, sync reading progress, and see their Trace library status while browsing. Users should be able to verify the boundary themselves: metadata, reading-status choices, progress, and explicit browsing preferences — not AO3/FanFiction.net logins, cookies, private account pages, or full page HTML.
+This is the source code for the Trace extension on Chrome, Edge, Firefox and Safari. I've made it public so you can check for yourself what it does on AO3 and FanFiction.net.
 
-The code here is the canonical source for the Trace extension on Chrome,
-Firefox, iOS Safari, and macOS Safari. The production Apple containing app,
-Xcode project, signing configuration, and native Trace app features live in a
-separate private repository. That app pins an exact commit from this public
-repository rather than carrying a second copy of the extension.
+In short, it reads the details of the stories you open (title, author, tags, chapters, word count) and where you are in them, and it sends those to your Trace library. It never asks for your AO3 or FanFiction.net password, it doesn't ask for permission to read your cookies, and it doesn't send story text or whole pages to Trace. If anything claiming to be Trace ever asks for your AO3 or FanFiction.net password, it isn't me.
 
-## What This Repository Helps You Verify
+The Safari extension ships inside the Trace iPhone app. The app itself lives in a separate private repo, but it builds the extension from a pinned commit of this one, so what runs in Safari is this repo at whatever commit the app has pinned.
 
-- Trace never asks for your AO3 or FanFiction.net password.
-- The extension does not request browser cookie permission.
-- The Safari build uses native messaging only to talk to the bundled Trace app
-  for app-led setup, auth-token sharing, and first-story handoff.
-- Content scripts run only on supported AO3/FFN pages and Trace pages listed in the manifest.
-- Obvious AO3/FFN login/signup/auth pages are excluded in the manifest.
-- Collection and overlay scripts also disable themselves at runtime on login/signup/password pages and pages with unknown password forms. AO3's known header login form can appear on normal story/listing pages; Trace ignores only that header form so supported reading pages still work.
-- Network requests go through the extension background worker to Trace API endpoints. The only other requests are made from your own AO3 or FanFiction.net tab and are described under "What Trace Reads": the FanFiction.net summary read, the AO3 searches for a summary or for a story you add from a bare link, and the pages of your AO3 History when you import it.
+## What it reads
 
-If anything claiming to be Trace asks for your AO3 or FanFiction.net password, it is not legitimate.
+On AO3 and FanFiction.net story and listing pages, the extension reads what's already shown on the page:
 
-## What Trace Reads
-
-On supported AO3 and FanFiction.net story/listing pages, Trace reads visible story metadata from the page DOM:
-
-- story URL
-- title and author
-- fandoms, tags, warnings, ratings, characters, and relationships when present
+- the story's address, title and author
+- fandoms, tags, warnings, rating, characters and relationships, where the site lists them
 - chapter and word counts
-- current chapter / reading-progress metadata
-- on your own AO3 History page only: each work's "Last visited" date and visit count, so an import can keep when you last read it (works marked for later are left out)
+- which chapter you're on
+- on your own AO3 History page, and only when you import it: each work's "Last visited" date and visit count (works marked for later are left out)
 
-Trace uses this to import a story, update reading progress, show whether stories are already in your Trace library, let you change reading status from supported overlay surfaces, and hide works from Trace's browsing overlay when you explicitly choose to. Trace can also detect when the last lines of the last posted chapter have stayed on screen for a moment, so it can mark your library entry finished or caught up (with Undo), or ask whether the work is complete, ongoing, on hiatus, or abandoned when the site does not say. This uses only the page's layout and your scrolling on that page; it does not read or send story text.
+That's how Trace saves a story, keeps your place, and shows on AO3 whether a story's already in your library. When you reach the end of the last posted chapter, it notices from the page layout and how you've scrolled, and marks the story finished or caught up, with Undo. If the site doesn't say whether the work is complete, it asks you instead. It doesn't read the story text to do this.
 
-FanFiction.net's mobile story page has no summary. When you
-save a story from such a page, the page tells the extension the story's
-author (this stays in the extension and is not sent to Trace). Trace then
-reads that author's story list (`/u/<author>/?a=s` on the FanFiction.net
-address your tab is on) from inside your own FanFiction.net tab, as a request
-from that page with your own FanFiction.net session, and sends only the
-summary for that story. For your other saved FanFiction.net stories that
-Trace has no summary for, it does the same slowly while you browse
-FanFiction.net, first reading a story's own page for its author when that is
-not yet known. This uses only the website access you already gave Trace and
-follows the **Improve story details** preference. It makes one request at a
-time, at least 30 seconds apart, reads page text only as far as it needs,
-keeps no page text or cache, opens no tab, reads only the first page of an
-author's stories, otherwise waits minutes between requests, makes only a few
-per browsing session, and runs only while a FanFiction.net page is open. It
-uses no timers: the work still to do is picked up the next time a
-FanFiction.net page talks to Trace. A story FanFiction.net says is gone is
-skipped, and the ids of up to 200 stories already tried are kept (and removed
-when you sign out) so each session tries others first. A check page, an
-unexpected address, a refusal or an error pauses it for about an hour, then
-it tries once more; what stopped it (the reason, status code, site address,
-kind of page and time) is kept with the work. The story and author ids still
-to read are kept in session-only storage (or, in a browser without it, in
-local storage for at most 12 hours) and removed when you sign out.
+If you save an AO3 search filter, the filter is kept in the extension so you can use it again. When you're signed in, it's also synced to your account so it shows up on your other devices.
 
-AO3 shows a work's summary only on its first chapter. When you read chapter 2
-or later of a work, Trace looks that work up in AO3's search, from your own AO3
-tab, at most once a day per work in that tab, and sends only the summary the
-search result shows. It doesn't open the
-work's first page, so your AO3 History is left alone. This follows the
-**Improve story details** preference.
+## The pages it fetches, and why
 
-Some AO3 pages, such as your Subscriptions page, list a work as a bare link
-with no details. When you click **+ Add to Trace** beside one, Trace searches
-AO3 for that work by its ID, from your own AO3 tab, and saves the details the
-search result shows. It doesn't open the work, so your AO3 History is left alone.
-Only the story details are kept; the page itself is not.
+Most of the time the extension only looks at the page you have open. There are four cases where it fetches another page itself, all from your own AO3 or FanFiction.net tab, as if you'd opened the page. The two summary lookups can be turned off with **Improve story details** in the popup. The other two only happen when you press something.
 
-When you explicitly save an AO3 saved filter, Trace stores that AO3 filter query state in extension storage so it can reapply the filter later. If you are signed in to Trace, saved filters sync to your Trace account so they can appear on your other devices. Signed-out or offline saved filters remain local until a later signed-in sync.
-You can hide the saved filters surface from AO3 filter pages in the extension popup; this local preference does not delete saved presets.
+### FanFiction.net summaries
 
-## What Trace Sends
+FanFiction.net's phone pages don't show a story's summary, but the author's page does. So when you save a story from a phone page, Trace fetches that author's story list (`/u/<author>/?a=s`) from your tab, finds the story and keeps only its summary. It does the same, slowly, for other saved FanFiction.net stories that are missing one (sometimes reading the story's own page first to find the author), but only while you have FanFiction.net open: one request at a time, at least 30 seconds apart and usually minutes, and only a few per visit. It never opens a new tab. If FanFiction.net shows a check page or an error, it stops for about an hour.
 
-Trace may send this data to the Trace API when you import, quick-add, auto-track, or help improve shared metadata:
+### AO3 summaries
 
-- story URL
-- title and author
-- fandoms/tags and related story metadata
-- chapter and word counts
-- reading-progress metadata
-- when you import from your AO3 History page: each work's last-visited date, which Trace uses as its last-read date unless it has seen you read the story later and, if you choose, as an approximate ("around") finish date for finished stories that have none (the visit count is passed along with the import but not kept)
-- reading-status updates you explicitly choose in the Trace overlay: Saved, Reading, Caught up, Paused, Finished, or Dropped
-- finish/caught-up decisions you explicitly choose at the end of a supported story, including whether you identify the work as complete, ongoing, on hiatus, or abandoned
-- last-posted-chapter finish-qualification signals for stories already in your Trace library, so Trace can recover or improve work-status metadata
-- hidden-work browsing preferences you explicitly choose in the Trace overlay, keyed by the supported AO3/FFN work id
-- AO3 saved filter presets you explicitly create, stored as normalized AO3 filter query parameters plus the preset name/scope
-- your Trace auth token for authenticated Trace API requests, or on iOS Safari
-  an extension-scoped device credential instead
+AO3 only shows a work's summary on chapter 1. If you start reading at chapter 2 or later, Trace looks the work up in AO3's search, at most once a day per work, and keeps the summary from the search result. It doesn't open the work, so nothing gets added to your AO3 History.
 
-On iOS Safari, the app stores an opaque device credential in the shared
-Keychain after you sign in to Trace in the app. That credential can call only
-Trace extension API routes; the bundled Safari extension does not receive the
-app's Auth0 access token.
-The private containing app also exposes its app version, build number, and
-release channel to the Trace web app. That app-owned diagnostic does not
-include story URLs, archive browsing history, or account email.
+### Bare links on AO3
 
-The iOS earned-permission build declares its five story-site patterns as
-optional, declares no required website, and has no `tabs` permission, so
-opening Trace from Safari raises no website question; `activeTab` covers only
-the tab it was opened on. Its page scripts are registered when all five
-patterns are allowed and removed when that access ends. It asks for Website
-Access before any first-story write. If access was missed in Settings, an explicit Safari toolbar tap lets the
-popup identify the current supported story, request exactly five optional
-AO3/FanFiction.net origin patterns, register the production scripts, and reload
-the story. The normal content-script handoff then supplies the fresh run and
-server-confirmed save. Denial or partial coverage saves nothing; there is no
-toolbar-only completion mode. Its diagnostic funnel stays in extension-local
-storage and contains only bounded event names and timestamps; it is not network
-telemetry and contains no URLs, story or account identity, page content, or
-browsing history. See
-[`docs/ios-earned-permission-onboarding.md`](docs/ios-earned-permission-onboarding.md).
+Some AO3 pages, like Subscriptions, list a work as just a link. When you press **+ Add to Trace** beside one, Trace searches AO3 for that work and saves the details from the search result. Again, it doesn't open the work itself.
 
-The **Improve story details** preference is separate from automatic progress tracking and can be turned off in the extension popup.
-Hidden-work preferences affect Trace browsing overlays only; they are separate from reading status and do not hide or change the source site itself.
-Saved AO3 filters sync only when you are signed in. They do not include AO3 credentials, cookies, page HTML, or story text.
+### Your AO3 History
 
-## What Trace Does Not Send
+When you import your AO3 History, Trace reads each page of it from your AO3 tab. You then choose what to add on Trace's review page before anything is saved.
 
-Trace does not send:
+There's more detail on the limits and timings in [docs/technical-notes.md](docs/technical-notes.md).
 
-- AO3 or FanFiction.net passwords
+## What it sends to Trace
+
+When you save a story, read one, or change something with Trace's buttons on AO3 and FanFiction.net, the extension sends:
+
+- the story details listed above
+- your reading progress
+- the status you pick: Saved, Reading, Caught up, Paused, Finished or Dropped
+- what you tell it at the end of a story, including whether the work is complete, ongoing, on hiatus or abandoned
+- that you reached the end of the last posted chapter, for stories already in your library
+- works you've chosen to hide from Trace's lists (this only hides them in Trace, not on AO3 or FanFiction.net)
+- AO3 filters you've saved
+- from an AO3 History import, each work's last-visited date, which Trace uses as the last-read date (the visit count is sent with the import but not kept)
+- a key from your Trace sign-in, so the server knows it's you. It only works for the extension's own requests
+- on Chrome, Edge and Safari, the extension's version and roughly what browser you're on (phone or computer), so I can see when a release breaks something. Firefox sends none of this
+
+On iPhone and iPad the Trace app hands the extension that key, so the extension never sees your Trace sign-in itself.
+
+## What it never sends
+
+- your AO3 or FanFiction.net password
 - browser cookies
-- AO3/FFN private messages
-- drafts
-- comments
-- account settings
-- full page HTML
-- unrelated browsing history
+- private messages, drafts, comments or account settings
+- the story text or the full page
+- anything about sites other than AO3, FanFiction.net and Trace
 
-## Where To Inspect
+## Where to look in the code
 
-Start with these files:
+- `Shared (Extension)/Resources/manifest.json`: which sites the extension can run on and which permissions it asks for. The Chrome and Firefox manifests are generated by `scripts/build.mjs`, which is also where AO3 and FanFiction.net login and sign-up pages are excluded (`SITE_AUTH_EXCLUDE_MATCHES`). The page scripts also switch themselves off on any page with a password box (apart from AO3's usual header login form).
+- `Shared (Extension)/Resources/collector.js`: what it reads from AO3 and FanFiction.net pages.
+- `Shared (Extension)/Resources/library-overlay.js`: the Trace buttons and story sheet you see on those pages.
+- `Shared (Extension)/Resources/sync.js`: how it picks up your sign-in from the Trace website.
+- `src/extension-runtime/` and `src/extension-core/`: everything that talks to Trace's servers. Only the background script does that; the page scripts ask it for what they need.
+- `src/background.js`: the older background script, kept only for a rollback build.
 
-- `Shared (Extension)/Resources/manifest.json` - permissions, host permissions, content-script matches, and excluded login/auth pages.
-- `Shared (Extension)/Resources/collector.js` - AO3/FFN metadata extraction and auto-track messages.
-- `Shared (Extension)/Resources/library-overlay.js` - on-page library status and quick-add UI.
-- `Shared (Extension)/Resources/sync.js` - Trace-site auth token bridge.
-- `src/background.js` - network requests to the Trace API.
-- `src/extension-core/` and `src/extension-runtime/` - the modular session,
-  archive-readiness, account-projection, and authenticated story-command
-  boundaries used by the normal kernel release. `src/background.js` remains
-  only as the explicit legacy rollback owner.
+`Shared (Extension)/Resources/background.js`, `popup-config.js` and `content-config.js` are generated, but committed because Safari uses them as they are. Don't edit them by hand. Run `npm run build:ios-earned-permission-onboarding:release` and commit what it writes. `npm test` fails if they're out of date.
 
-Kernel builds distinguish save-if-absent commands from automatic progress
-commands and use the account projection as the sole library read owner.
-Story/listing content scripts request only validated work keys visible on the
-current supported archive page. Existing-entry status, rating, chapter
-progress, finish qualification, and visibility actions use typed kernel
-commands bound to the sender host, work key, authoritative entry id, and
-current account epoch. Popup import is owned by the same controller: it accepts
-only the extension popup, collects a bounded payload from the active supported
-archive tab, and opens the configured Trace import page. Desktop first-story
-handoff accepts only the configured Trace origin and routes the resulting
-story-page save through the existing story-command owner. A missing archive
-content script is reported as a site-permission problem instead of a generic
-import failure.
+## Building it
 
-Replies to AO3 and FanFiction.net pages carry an opaque account-session token:
-the session epoch and a short non-cryptographic hash, compared only for
-equality. It names no account and is never stored or sent to a server. A page
-that sees it change drops its end-of-story evidence, any pending finish and
-its unconfirmed state, then reads the current account before it writes. A
-finish signal names the token it was gathered under, and the background
-refuses it once another account session is current. When the account changes,
-open pages are told to read it again.
-
-Kernel metadata contribution keeps page extraction in the AO3/FFN collector
-but moves preference enforcement, authenticated API access, account fencing,
-and projection invalidation into one background owner. Story metadata must
-match the browser-provided top-frame story sender. Batched listing enrichment
-is item-count and byte bounded, and every item must match the sender's archive
-host. FFN listing pages select tracked rows through a bounded account-projection
-read rather than reading legacy token or overlay-cache keys. The normal release
-uses the kernel owner after the parity and installed-browser audit; the legacy
-owner is available only through the explicit rollback build.
-
-Kernel builds also retain the existing local-first AO3 saved-filter surface.
-Local creates, edits, and deletes remain usable while signed out or offline;
-the kernel owns only authenticated synchronization. It validates the AO3
-top-frame request, drains upserts and tombstones in bounded batches, applies the
-server's last-write-wins timestamps without overwriting a newer dirty local
-edit, and serializes remote merges against account transitions. A periodic
-pull preserves cross-device updates. The content script receives no Trace
-credential or account identifier, and disabled builds omit the surface and
-remove its local data.
-
-The kernel Trace-page bridge accepts status and first-story requests only from
-the exact configured Trace origin and opens only same-origin Trace URLs
-requested by supported archive content scripts. Status responses and pushes
-contain coarse session and onboarding evidence only: booleans, enums, epoch
-timestamps, and a browser kind. They do not expose credentials, account ids,
-story ids, URLs, titles, private library fields, or raw errors. Archive
-readiness records are serialized in local storage, and a successful action
-clears an older coarse issue. Disabled builds inject no content scripts and
-delete both private kernel state and extension-local feature/readiness state.
-On desktop first install, the activation page's authenticated status handshake
-and token-free activation-readiness signal cause one explicit kernel Connect or
-Reconnect action; they do not restore the legacy ambient-token path.
-
-On desktop browsers, Connect in an archive page's notice, story sheet, or
-listing controls runs the same kernel action as the popup's Connect. If no
-signed-in Trace page answers, the extension opens the Trace website and stores
-a content-free connect request (an expiry time only, at most 30 minutes) in
-extension storage; first install stores the same request. While it is pending,
-a Trace page that shows it is signed in triggers one Connect through the
-normal request-ID credential grant. `sync.js` learns this by asking the page
-once on load for its token and sending the background a token-free hint when
-the page posts it; the posted token itself is never forwarded or accepted.
-Disconnect withdraws the request. After a connection change the background
-bumps the content-free projection revision, so open archive pages update
-without a reload. iPhone and iPad keep linking the extension through the Trace
-app.
-
-For a tagged release, confirm `package.json` version matches the generated manifest version. Safari consumes checked-in files under `Shared (Extension)/Resources`; Chromium and Firefox packages are generated into `dist/`, which is intentionally not committed.
-
-`Shared (Extension)/Resources/background.js` is a committed build artifact.
-Kernel builds bundle `src/extension-runtime/index.mts` and its core/runtime
-dependency graph; the generated header records the configured API and web
-origins for release auditing. Only `build:legacy:release` generates that file
-from `src/background.js` by literal substitution. Safari requires the selected
-release artifact to be checked in. `Shared (Extension)/Resources/popup-config.js`
-and `Shared (Extension)/Resources/content-config.js` are committed for the same
-reason: Safari consumes those generated extension constants directly. Native
-app configuration is generated and validated in the private Apple client.
-
-The committed resources must be the exact output of
-`npm run build:ios-earned-permission-onboarding:release`: the Apple app
-rebuilds them and refuses to archive if any file differs. Never edit them by
-hand or resolve a merge conflict inside them; rerun that build and commit the
-result. `npm run check:safari-resources` (the first step of `npm test`) builds
-a temporary copy and fails if the checked-in files differ from it.
-
-## Build And Test
-
-Use Node 18 or newer.
+You'll need Node 18 or newer.
 
 ```bash
 npm install
 npm test
 ```
 
-Visual fixture screenshots use Playwright Chromium. After a fresh install, run:
-
-```bash
-npm run visual:install-browsers
-npm run visual:screenshots
-```
-
-For a local extension build, copy `.env.example` to `.env` and set:
+For a local build pointed at a local Trace server, copy `.env.example` to `.env`, set
 
 ```bash
 TRACE_API_BASE=http://localhost:3001
 TRACE_WEB_ORIGIN=http://localhost:5173
 ```
 
-Then run:
+and run `npm run build`.
 
-```bash
-npm run build
-```
-
-The default development build uses the kernel session owner. The explicit
-`build:legacy` command exists only for bounded rollback diagnostics; do not use
-it for normal development or installed-extension QA.
-
-For a release-style build, use HTTPS Trace origins:
+A release build only accepts the real Trace addresses:
 
 ```bash
 TRACE_API_BASE=https://api.tracefiction.com TRACE_WEB_ORIGIN=https://www.tracefiction.com npm run build:release
 ```
 
-`build:release` packages the kernel session owner and rejects missing,
-localhost, non-HTTPS, and non-production Trace origins. `npm run agent:check` runs
-`build:release`, so run it with the same two variables, as CI does:
+`npm run check:release` runs every test and then the release build, the same as CI. It needs the same two addresses. Without them the build stops at the localhost default, which is on purpose.
 
-```bash
-TRACE_API_BASE=https://api.tracefiction.com TRACE_WEB_ORIGIN=https://www.tracefiction.com npm run agent:check
-```
+The screenshot tests use Playwright's Chromium. After a fresh install, run `npm run visual:install-browsers` once, then `npm run visual:screenshots`.
 
-Without them the release step stops at the localhost default from `.env`
-or the build script. That is the guard working, not a test failure. The explicit
-`build:legacy:release` command remains available as the bounded rollback path;
-it is not used by the store packaging commands.
+## Trying it in your browser
 
-## Load Locally
+**Chrome or Edge:** go to `chrome://extensions`, turn on Developer mode, choose **Load unpacked** and pick `dist/chrome`.
 
-Chrome / Edge: open `chrome://extensions`, enable Developer Mode, choose `Load unpacked`, and select `dist/chrome`.
+**Firefox:** go to `about:debugging#/runtime/this-firefox`, choose **Load Temporary Add-on** and pick `dist/firefox/manifest.json`.
 
-Firefox: open `about:debugging#/runtime/this-firefox`, choose `Load Temporary Add-on`, and select `dist/firefox/manifest.json`.
+**Safari:** Apple only allows Safari extensions inside an app, and the Trace app's Xcode project isn't public. The files under `Shared (Extension)/`, `iOS (Extension)/` and `macOS (Extension)/` are what the app builds from.
 
-Safari: Apple requires a Safari Web Extension to be embedded in a containing
-app. This repository intentionally does not publish Trace's production Xcode
-app project. The extension sources under `Shared (Extension)/`, plus the iOS
-and macOS extension property lists and entitlements, are consumed at a pinned
-revision by the private Apple client.
+If Chrome, Edge or Firefox loses access to AO3 or FanFiction.net, the Trace icon shows a **!**. Click it, then **Allow Trace on AO3 and FanFiction.net**.
 
-### Restoring site access
+## What's where
 
-Trace checks all declared host permissions with `permissions.contains` on
-install/update, startup, permission changes, and popup opening. This includes
-all AO3 origins and mirrors, both FanFiction.net origins, and the configured
-Trace web/API origins needed to connect. Firefox, Chrome and Edge show a **!**
-toolbar badge and **Site access is off — click to allow** tooltip while any
-of those hosts is missing access.
+- `Shared (Extension)/Resources/`: the extension itself, used by Safari as is and copied into the Chrome and Firefox builds in `dist/`
+- `Shared (Extension)/*.swift`: the Safari side of talking to the Trace app
+- `iOS (Extension)/` and `macOS (Extension)/`: Safari extension settings used by the app
+- `src/`: the background script source
+- `scripts/`: build and packaging
+- `test/`: tests
+- `docs/`: longer notes, starting with [technical-notes.md](docs/technical-notes.md)
+- `README.mozilla.md`: notes for Firefox's source review
 
-Click the icon, then **Allow Trace on AO3 and FanFiction.net** in the popup.
-That direct click requests every declared host together and closes the popup
-immediately, leaving Firefox's single permission prompt unobstructed.
-Approval restores Trace on supported open archive pages;
-the badge clears only when the full host set is granted. Declining leaves
-Allow available to try again.
+## Reporting problems
 
-A toolbar click may activate Trace on the current archive page without granting
-persistent access. While the popup is closed, that page keeps a non-dismissable
-line: **Trace is only on
-for this page. Allow it on AO3 to keep it on — click the Trace icon.**
-FanFiction.net pages name FanFiction.net instead. The line remains through
-Connect-notice dismissal and account-state changes, and disappears when the
-full permission grant arrives, without reloading the page. Opening the toolbar
-popup hides the line; closing it without granting access shows the line again.
-The background handles approval even after the popup closes.
+If AO3 or FanFiction.net changed something and Trace stopped working on a page, or you've found a bug, please open an [issue](https://github.com/tracefiction/trace-browser-extension/issues). There's a template for each. For anything about security or privacy, email me instead, as described in [SECURITY.md](SECURITY.md).
 
-Without even one-page access, content scripts cannot run to show a notice. The
-popup requests directly from its own click handler: Firefox's restricted API
-set in a web-accessible extension iframe on an HTTP(S) page does not expose
-`browser.permissions`, and a background message hop does not preserve the
-required user gesture. No additional hosts or collected data are introduced.
-Safari keeps its existing Website Access flow.
+I'm not taking feature pull requests, mostly because of the licence. If you've got a small bug fix, open an issue first and we can talk about it.
 
-## Repo Layout
+## Licence
 
-- `src/background.js` - source for the extension service worker. The build injects configured Trace origins and writes `Shared (Extension)/Resources/background.js`.
-- `Shared (Extension)/Resources/` - browser extension assets used by Safari and copied into Chromium/Firefox `dist/` builds.
-- `Shared (Extension)/*.swift` - the public Safari native-message handler and credential codec.
-- `iOS (Extension)/` and `macOS (Extension)/` - public Safari extension target metadata consumed by the private containing app.
-- `scripts/` - build and packaging scripts.
-- `test/` - Node test suite for collector, popup, background, sync, and overlay behavior.
-
-## More
-
-- Security and reporting: `SECURITY.md`
-- Firefox source package notes: `README.mozilla.md`
-
-## Reporting issues
-
-This repository is published for transparency. The following are welcome via [GitHub Issues](https://github.com/tracefiction/trace-browser-extension/issues):
-
-- **AO3 or FanFiction.net page changes** that broke import, library overlay, or progress tracking. Use the "AO3/FFN page broke" issue template — it asks for the site, page URL pattern, and what failed.
-- **Bug reports** for the extension's behavior in any supported browser. Use the "Bug report" template.
-- **Security or privacy concerns**: please follow `SECURITY.md` rather than filing a public issue.
-
-Feature pull requests are **not** currently accepted. The PolyForm Noncommercial License is intended for inspection and personal use; accepting outside contributions complicates the licensing terms. Bug-fix PRs that come with a clear issue and a small surface area may be considered case by case — please open an issue first to discuss.
-
-## License
-
-This repository is source-available under the PolyForm Noncommercial License 1.0.0.
-
-It is published for transparency so users can inspect how the Trace extension handles page data, browser permissions, and network requests. Commercial reuse is not permitted.
-
-For native first-story setup, an opt-in local save record carries only the
-confirmed Library entry ID, canonical AO3/FFN work key, account ID, operation and
-attempt IDs, timestamps, API origin and a non-secret provider equality digest.
-It is stored in the app/extension shared container, never sent as telemetry.
-The containing app must verify the current account/provider and read that exact
-entry before displaying it. A bounded batch retains the first and most recent confirmed stories (up to 32),
-deduplicated by entry ID; it is not a total-save count. Records expire as current
-evidence after 24 hours; no heartbeat or permission-scope claim is implied.
-No additional page permission, cookie access, story text or private-site data
-is introduced. Receipt failure does not replay or block a confirmed save. This local record
-also covers confirmed automatic reading writes, which can create the first
-Library entry; it does not label them as manual quick-add actions or establish
-later independent use.
-Production packages accept only the production API origin. An explicitly paired
-native development package uses its immutable Import API-origin metadata for
-receipt validation; page messages cannot choose the environment. Production and
-development attempts and receipts never mix.
-
-On iOS, the popup may ask the open story page for its visible title, author
-and site so it can name the story it is confirming. That reply goes only to
-the extension's own popup, is shown locally, and is never stored or sent. The
-one-time saved note keeps a tab-scoped `sessionStorage` marker holding only
-the work key and times, so a replaced page can finish the same note. Popup
-state includes the current account's confirmed record for the active tab's
-story from the local projection; no URL leaves the runtime.
-
-Popup story commands use a content-script-opened runtime port through the
-background worker, so an existing Safari tab can reconnect after the extension
-reloads. The worker selects the active tab and accepts only its own supported
-top-frame page port. Connections and request identifiers remain in memory;
-title replies are bounded and are neither stored nor sent to a server. A tab
-change, navigation, disconnect, or account transition invalidates a pending
-reply. Relayed saves and status changes retain the existing page validation,
-current-account scope, and authoritative library-entry checks. Missing ports
-keep the popup's existing unavailable/fallback state.
-
-## Reconnecting after an extension update
-
-On background start and installation/update, Trace attempts to reinject its
-archive scripts (manifest-declared, or on iPhone and iPad the ones it
-registered) into already-open, granted story-site tabs. It asks the browser
-for story-site tabs by address, never for every open tab.
-The scripting API permission enables this recovery; host permissions are
-unchanged and recovery never requests website access. Each tab is checked
-individually, credential paths remain excluded, and scripts guard against
-duplicate initialization. Failed or denied injections do not reload tabs.
-
-If the popup cannot reach the page, it shows “Trace needs to reconnect to this
-page” with “Reload page”. That action reloads the active archive tab and checks
-again. A cached library entry alone is not evidence that the page is connected.
-[Safari supports the scripting API](https://developer.apple.com/videos/play/wwdc2023/10119/), but recovery after app replacement must be
-verified separately on installed iOS Safari; API availability does not prove
-that an orphaned script context can be replaced.
-
-
-### Local Safari automatic-saving preference
-
-The Safari background worker publishes the installation's automatic-saving
-setting to the bundled app on preference changes and story-site heartbeats.
-This app-group snapshot contains a version, verified account ID, paired API
-origin, non-secret provider equality binding, boolean `enabled`, `setAt` and
-`observedAt` (epoch milliseconds). It contains no URLs or story data and is
-never sent to a server. Existing installations without a change timestamp use
-the first observation as `setAt`; later heartbeats preserve it. The preference
-remains installation-local; the snapshot is evidence scoped to the currently
-verified account, not account preference synchronization.
-
-The existing native provider boundary prepares the equality binding before
-account adoption and checks it again when storing. The app accepts only its
-current account, API origin and provider. Missing, malformed, future, replaced-
-provider or more-than-24-hour-old observations are unknown, never off. A late
-snapshot cannot replace a newer change. A preference is not proof of Safari
-access, activation or a successful save. Old app/extension versions can ignore
-the additive messages; absence leaves existing behavior intact.
-
-### Local Safari story-site access reading
-
-On iPhone and iPad the Safari background worker tells the bundled app which
-story-site addresses Safari currently lets Trace run on. A page run already
-publishes this beside its run receipt. The same message is also sent on its
-own when the popup opens, when Safari reports that the grant changed, and
-about once a day, because once access ends (for example, when an Allow for One
-Day grant runs out) no page script runs to say so. It reuses the existing
-`TRACE_IOS_EXTENSION_HEARTBEAT` permission snapshot: a timestamp and a list of
-granted origin patterns, stored in the app/extension shared container. It
-contains no URLs, story or account data, is never sent to a server, and adds
-no permission.
-
-The reading is built to avoid a false alarm. It exists to catch access that
-ended, so an install that has never held the full grant sends nothing: not at
-first start, and not part-way through setup. After that, missing access is
-reported only when `permissions.contains` says so twice, two seconds apart,
-and `permissions.getAll` also answered; when Safari confirms the five required
-origins they are listed by name, since a broader grant need not spell them
-out. If Safari does not answer, nothing is sent.
-
-It is also quiet. A reading equal to the last one delivered is not sent again
-within five minutes, and a delivery the app did not take is left alone for
-one minute, then five, then thirty at most; opening the popup tries once
-straight away. To do this the extension keeps, in its own storage, when a
-reading was last delivered, whether the grant has ever been seen, a hash of
-the last reading (not the origins themselves) and the delivery back-off.
-Chrome and Firefox install none of this. Safari on Mac cannot be told from an
-iPad until Safari reports its platform, so its listeners are registered, but
-they do nothing: no reading is sent and no alarm is set.
-
-## Aggregate release and browser diagnostics
-
-Safari and Chromium-family clients may attach installed extension version and
-coarse mobile/desktop and browser categories to authenticated Trace API calls.
-The server uses these for aggregate release adoption and failure diagnostics.
-Firefox sends **none** of these optional activity headers: this release does not
-request `technicalAndInteraction` consent and does not enable that collection.
-
-Before first adding headers, the extension checks the API URL/header set with a
-bodyless, side-effect-free OPTIONS request, bounded to one second. Success is
-cached per API origin for one hour, including across worker restarts; concurrent
-calls share the probe. Steady-state saves add no compatibility round trip. Only
-expiry or an actual request failure causes a new probe on the next call. The
-local cache holds just the API-origin key and expiry timestamp, never account,
-credential or reading data. If the probe fails (including CORS rejection) or
-times out, the actual request is sent once with its original authorization/body
-and without the optional headers. Added telemetry remains disabled for that
-worker's lifetime. An HTTP error or ambiguous network failure on the actual save
-is never replayed by this adapter. Existing save reconciliation/retry ownership
-remains unchanged. Firefox sends no probe.
-
-No permission, destination, raw user agent, page content, unrelated browsing
-history or installation identifier is added. OPTIONS is additional API traffic,
-not an additional activity event. Existing clients remain unattributed.
-
-**Release dependency:** requires a Trace API version that accepts these headers.
-Deploy the compatible API BEFORE releasing or pinning any extension build
-containing this change into the Apple app. Older allow-lists reject these
-headers during preflight; they do not silently ignore them. The compatibility
-fallback is defensive, not permission to reverse deployment order. Owner privacy
-review is required before merge or release; no merge, pin update or store
-submission is authorized here.
-
-## Browser connection continuity
-
-Chrome, Firefox (including Android), and desktop Safari exchange a Trace
-website sign-in grant for a scoped installation credential in the background.
-It stays in extension-private IndexedDB and authorizes only extension API
-routes. Tracking does not require an open Trace tab after connecting. Existing
-valid website tokens migrate when next loaded. An already expired connection
-may require one reconnect after upgrading. Disconnect clears local authority
-and attempts server revocation; offline revocation is best effort. Server idle
-and absolute expiry still apply. iOS continues to use the app-owned provider.
-
-When reconnect opens Trace from a story, successful sign-in returns to the
-existing reading tab without reloading it. Only browser tab IDs and a bounded
-expiry are retained for that return; no reading URL or page content is stored.
-If the tab closed or the reader moved away from the sign-in tab, connection
-still succeeds without changing the selected tab.
+The code is source-available under the PolyForm Noncommercial License 1.0.0. You're welcome to read it, check it and run it for yourself, but not to use it commercially.

@@ -6,139 +6,135 @@ its notes go with each app release.
 
 ## Unreleased
 
-- **The story sheet no longer says chapters are new when they aren't.** When you're behind on a story, the sheet used to say **3 new chapters since you last read**, even if you read it today and nothing had been posted since. That number is the chapters after the one you're on, so it now says **3 more chapters after your place**, beside **Catch up**.
+- The story sheet no longer says chapters are new when they aren't. When you're behind on a story, the sheet used to say **3 new chapters since you last read**, even if you read it today and nothing had been posted since. That number is the chapters after the one you're on, so it now says **3 more chapters after your place**, beside **Catch up**.
 
 ## 1.0.6
 
-- **The story sheet shows when you last read a story.** Under the chapter you're on, the story sheet now says when you last read it: **Last read today**, **yesterday**, **3 days ago** and so on up to three weeks, then the date. A saved story you haven't started shows no line.
-- **Connecting from the popup takes you back to your story.** When **Connect** in the toolbar popup finds you signed out of the Trace website, Trace opens it in a new tab as before. Signing in there now finishes connecting without pressing **Connect** again, and Trace takes you back to the AO3 or FanFiction.net tab you were reading, at the same place. The Trace tab it opened for signing in then closes, whether you connected from the popup or from Trace's notice on the page.
-- **Trace's setup page knows when the extension has dropped out.** If the extension is turned off, removed or updated while a Trace tab is open, it now tells the page so, and the page asks you to bring it back instead of staying green. When the extension is signed out, **Reconnect** on that page connects it again in one press.
+- Under the chapter you're on, the story sheet now says when you last read it: **Last read today**, **yesterday**, **3 days ago** and so on up to three weeks, then the date. A saved story you haven't started shows no line.
+- Connecting from the popup takes you back to your story. When **Connect** in the toolbar popup finds you signed out of the Trace website, Trace opens it in a new tab as before. Signing in there now finishes connecting without pressing **Connect** again, and Trace takes you back to the AO3 or FanFiction.net tab you were reading, at the same place. The Trace tab it opened for signing in then closes, whether you connected from the popup or from Trace's notice on the page.
+- If the extension is turned off, removed or updated while a Trace tab is open, it now tells the page so, and the page asks you to bring it back instead of staying green. When the extension is signed out, **Reconnect** on that page connects it again in one press.
 
 ## 1.0.5
 
-- **Trace no longer opens works in the background.** To find missing descriptions, 1.0.4 opened saved works' pages in the background while you browsed AO3, and they showed up in your AO3 History as if you had opened them. Trace no longer opens them. Descriptions for works you read from chapter 2 on now come from AO3's search, and other saved works without one wait until you save or open them on a page that shows it.
-- **Add to Trace works on your AO3 Subscriptions page.** The button beside a subscribed work used to do nothing. It now saves the work with its tags, description and counts.
+- Trace no longer opens works in the background. To find missing descriptions, 1.0.4 opened saved works' pages in the background while you browsed AO3, and they showed up in your AO3 History as if you had opened them. Trace no longer opens them. Descriptions for works you read from chapter 2 on now come from AO3's search, and other saved works without one wait until you save or open them on a page that shows it.
+- Add to Trace works on your AO3 Subscriptions page. The button beside a subscribed work used to do nothing. It now saves the work with its tags, description and counts.
 
 ## 1.0.4
 
-- **Import your whole AO3 History.** On your AO3 History page, Trace reads every page of it in your own browser. You then choose what to add on Trace's review page before anything is saved.
-- **AO3 works get their description, wherever you saved them from.** AO3 shows a work's summary only on its first chapter, so a work saved from a later chapter, or imported from your open tabs, could stay in your Library without one. While you browse AO3, Trace now reads the summaries of those works from their first page in your own browser, one work at a time and slowly, and adds them to your Library. It does this only while **Improve story details** is on.
+- Import your whole AO3 History. On your AO3 History page, Trace reads every page of it in your own browser. You then choose what to add on Trace's review page before anything is saved.
+- AO3 works get their description, wherever you saved them from. AO3 shows a work's summary only on its first chapter, so a work saved from a later chapter, or imported from your open tabs, could stay in your Library without one. While you browse AO3, Trace now reads the summaries of those works from their first page in your own browser, one work at a time and slowly, and adds them to your Library. It does this only while **Improve story details** is on.
 
 ## 1.0.3
 
-- **Saved filters follow your account.** Signing in with a different account now brings back all of that account's saved filters, and none of the last account's.
+- Signing in with a different account now brings back all of that account's saved filters, and none of the last account's.
 
 ## 1.0.2
 
-- **Saved filters, redesigned.** At the top of AO3's Filters (the sidebar on a computer, the Filters panel on a phone), your saved filters for the tag sit as plain lines, and every other saved filter is one click away. Applying one shows a line above the works with **Clear**. Saving asks whether it's a new filter or an update, and saving, editing and the full list open in a card instead of inside the sidebar.
-- **Saved filters come back.** A filter saved for a tag now shows on that tag's page whichever way you reached it, and your saved filters are fetched again when Trace connects.
-- **Connect says what's wrong.** **Connect** shows **Checking Trace…** straight away, and if it can't get your sign-in from the Trace website it opens the website in a new tab and says why, instead of doing nothing.
-- **FanFiction.net stories get their description.** FanFiction.net's phone pages don't show a story's summary, so a story saved there could reach your Library without one. Trace now reads the summary from the story's full page in your own browser, one story at a time and slowly, and adds it to the story. It does this only while **Improve story details** is on.
+- At the top of AO3's Filters (the sidebar on a computer, the Filters panel on a phone), your saved filters for the tag sit as plain lines, and every other saved filter is one click away. Applying one shows a line above the works with **Clear**. Saving asks whether it's a new filter or an update, and saving, editing and the full list open in a card instead of inside the sidebar.
+- A filter saved for a tag now shows on that tag's page whichever way you reached it, and your saved filters are fetched again when Trace connects.
+- **Connect** shows **Checking Trace…** straight away, and if it can't get your sign-in from the Trace website it opens the website in a new tab and says why, instead of doing nothing.
+- FanFiction.net stories get their description. FanFiction.net's phone pages don't show a story's summary, so a story saved there could reach your Library without one. Trace now reads the summary from the story's full page in your own browser, one story at a time and slowly, and adds it to the story. It does this only while **Improve story details** is on.
 
 ## 1.0.1
 
-- **Story summaries keep their paragraphs.** An AO3 summary with several paragraphs was saved as one run of text. Trace now keeps the paragraphs and line breaks, and stories you saved before get theirs back the next time Trace reads the summary.
+- Story summaries keep their paragraphs. An AO3 summary with several paragraphs was saved as one run of text. Trace now keeps the paragraphs and line breaks, and stories you saved before get theirs back the next time Trace reads the summary.
 
 ## 1.0
 
 ### Your Library
 
-- **Stories you start part-way through get their description.** AO3 shows a story's summary only on its first chapter. If you're on a later chapter when Trace first sees a story, Trace now quietly reads the summary from the first chapter in the background, so the story's description is filled in. It never reads a chapter's own summary as the story's.
-- **Importing from your AO3 History keeps when you last read each story.** On your own AO3 History page, Trace now reads each story's **Last visited** date. When you import from that page, Trace uses it as the story's last-read date, unless it has seen you read the story more recently. If you choose, it can also stand in as an approximate finish date for finished stories that have none. Stories marked for later are left out, and the visit count isn't kept.
+- Stories you start part-way through get their description. AO3 shows a story's summary only on its first chapter. If you're on a later chapter when Trace first sees a story, Trace now reads the summary from the first chapter in the background, so the story's description is filled in. It never reads a chapter's own summary as the story's.
+- Importing from your AO3 History keeps when you last read each story. On your own AO3 History page, Trace now reads each story's **Last visited** date. When you import from that page, Trace uses it as the story's last-read date, unless it has seen you read the story more recently. If you choose, it can also stand in as an approximate finish date for finished stories that have none. Stories marked for later are left out, and the visit count isn't kept.
 
 ### On the page
 
-- **Quieter saves.** Trace no longer shows a note at the bottom of the page when it saves a story or keeps your chapter. Trace's label on the story page already shows that it's **Saved** or which chapter you're reading. A story that's new to your Library gets one brief fade-in of that label instead (none with Reduce Motion). A save that fails still says **Not saved**.
-- **No more bare “Error”.** When a story can't be saved automatically, the page now says **Not saved**. A story you tried to add says **Couldn’t add**, and a connection problem says **Try again**.
-- **AO3 saved filters show everything they keep.** In AO3's Filters side bar, the **Saved filters** panel no longer cuts filters off, which happened most on a phone. Every saved filter is listed (past eight, **Show all** shows the rest), and each one shows all of its filters in full. Before you save, **What it keeps** lists every filter you've chosen, and **Show it on** is a plain choice between the tag you're on and every AO3 search.
-- **A save that didn't go through gets a second chance.** If Trace couldn't check your Library at that moment, it quietly tries the save once more before saying anything. If the page does show **Not saved** and the story turns out to be saved after all, the page corrects itself.
+- Trace no longer shows a note at the bottom of the page when it saves a story or keeps your chapter. Trace's label on the story page already shows that it's **Saved** or which chapter you're reading. A story that's new to your Library gets one brief fade-in of that label instead (none with Reduce Motion). A save that fails still says **Not saved**.
+- When a story can't be saved automatically, the page now says **Not saved**. A story you tried to add says **Couldn’t add**, and a connection problem says **Try again**.
+- AO3 saved filters show everything they keep. In AO3's Filters side bar, the **Saved filters** panel no longer cuts filters off, which happened most on a phone. Every saved filter is listed (past eight, **Show all** shows the rest), and each one shows all of its filters in full. Before you save, **What it keeps** lists every filter you've chosen, and **Show it on** is a plain choice between the tag you're on and every AO3 search.
+- If Trace couldn't check your Library when it went to save a story, it tries the save once more before saying anything. If the page does show **Not saved** and the story turns out to be saved after all, the page corrects itself.
 
-- **A story is only marked Finished for the reader who read it.** If a different Trace account is connected while a story page is open, the page forgets the previous account's reading: its end-of-story note and **Undo** go away, nothing unconfirmed is carried over, and the page shows the new account's Library. The story is marked Finished only once the connected reader reaches the end themselves. Lists that were already open show the new account's marks too.
+- A story is only marked Finished for the reader who read it. If a different Trace account is connected while a story page is open, the page forgets the previous account's reading: its end-of-story note and **Undo** go away, nothing unconfirmed is carried over, and the page shows the new account's Library. The story is marked Finished only once the connected reader reaches the end themselves. Lists that were already open show the new account's marks too.
 
 ### The popup
 
-- **Connecting for the first time says Connect.** If a first attempt to connect doesn't go through, the popup and Trace's notes on the page read **Connect Trace**, not **Reconnect Trace**. Reconnect is only for a browser that was connected before.
-- **The Free count comes from your account.** The Library size in **64 of 100 stories kept** is read from your Trace account instead of being fixed in the extension. Until the account has reported it, the line stays hidden.
-- **One way of saying your Library is full.** The popup and the notices on AO3 and FanFiction.net now use the same words as the Trace app. Under **Your Library is full**, the popup reads **100 stories on Free. Everything saved stays. See Trace Unlimited, or remove a story to make room.** The page notices say the same without the number. They still appear at most once a day, and **Not now** still quiets them for a week.
-- **Plainer words.** **Improve story metadata** is now **Improve story details**, and the extension's description says what it does: save stories, keep your place as you read, and see your Library while you browse.
+- If a first attempt to connect doesn't go through, the popup and Trace's notes on the page read **Connect Trace**, not **Reconnect Trace**. Reconnect is only for a browser that was connected before.
+- The Free count comes from your account. The Library size in **64 of 100 stories kept** is read from your Trace account instead of being fixed in the extension. Until the account has reported it, the line stays hidden.
+- The popup and the notices on AO3 and FanFiction.net now use the same words as the Trace app. Under **Your Library is full**, the popup reads **100 stories on Free. Everything saved stays. See Trace Unlimited, or remove a story to make room.** The page notices say the same without the number. They still appear at most once a day, and **Not now** still quiets them for a week.
+- **Improve story metadata** is now **Improve story details**, and the extension's description says what it does: save stories, keep your place as you read, and see your Library while you browse.
 
 ### iPhone and iPad
 
-- **The popup checks the Trace app before asking you to sign in.** While it reads your account from the app it says **Connecting to your account…**. It asks you to create an account or sign in only when the app has none. If it still can't connect after about ten seconds it says so, with **Open Trace** and **Try again**. Whichever of these it is showing, it carries on by itself as soon as your account connects.
-- **A story that's slow to save says what to do.** **Still confirming your story** now reads **Keep reading; it’ll appear in Trace. If it hasn’t after a minute, reload this page.**
-- **Open any story.** On a page with no story open, including a site's home page, the popup reads **Open any story. Trace saves it when it opens.** and no longer points at titles that may not be there. It also stays on that message instead of changing to **Still confirming your story** after a while.
-- **A first save is confirmed on FanFiction.net too.** When the popup that finishes setup finds your story already saved, it shows **Saved to your Library** with the story, on AO3 and FanFiction.net alike, instead of opening on the everyday view.
-- **No stand-in titles.** If the page hasn't named your story yet, the popup says **Saved to your Library** on its own and adds the title when it has it.
-- **Trace tells its app when Safari stops allowing it.** If an **Allow for One Day** grant runs out, the extension lets the Trace app know when its popup next opens, when Safari reports the change, and about once a day, so the app can say so. Nothing leaves your iPhone for this.
-- **A tab left open across an app update picks Trace back up.** The next scroll or tap brings Trace back on that page, without a reload.
-- **Import from this page.** On an AO3 or FanFiction.net list, your History or Bookmarks, or a saved story, the popup shows **Import from this page** above **Settings**. Tap it, then **Open in Trace** to choose what to import. It also works in a tab that was open during an app update.
+- The popup checks the Trace app before asking you to sign in. While it reads your account from the app it says **Connecting to your account…**. It asks you to create an account or sign in only when the app has none. If it still can't connect after about ten seconds it says so, with **Open Trace** and **Try again**. Whichever of these it is showing, it carries on by itself as soon as your account connects.
+- A story that's slow to save says what to do. **Still confirming your story** now reads **Keep reading; it’ll appear in Trace. If it hasn’t after a minute, reload this page.**
+- On a page with no story open, including a site's home page, the popup reads **Open any story. Trace saves it when it opens.** and no longer points at titles that may not be there. It also stays on that message instead of changing to **Still confirming your story** after a while.
+- A first save is confirmed on FanFiction.net too. When the popup that finishes setup finds your story already saved, it shows **Saved to your Library** with the story, on AO3 and FanFiction.net alike, instead of opening on the everyday view.
+- If the page hasn't named your story yet, the popup says **Saved to your Library** on its own and adds the title when it has it.
+- Trace tells its app when Safari stops allowing it. If an **Allow for One Day** grant runs out, the extension lets the Trace app know when its popup next opens, when Safari reports the change, and about once a day, so the app can say so. Nothing leaves your iPhone for this.
+- A tab left open across an app update picks Trace back up. The next scroll or tap brings Trace back on that page, without a reload.
+- On an AO3 or FanFiction.net list, your History or Bookmarks, or a saved story, the popup shows **Import from this page** above **Settings**. Tap it, then **Open in Trace** to choose what to import. It also works in a tab that was open during an app update.
 
 ## 0.7.3
 
-- **Trace stays connected.** The extension now keeps its own sign-in instead of borrowing a short-lived one from an open Trace tab. You no longer need a Trace tab open, and Firefox on Android no longer asks you to reconnect several times a day. After updating, you may need to connect once more; after that the connection lasts until you choose **Disconnect** or stop using Trace for 90 days.
-- **Connecting takes you back to your story.** When you connect from Trace's notice on AO3 or FanFiction.net, Trace returns you to the tab you were reading, at the same place on the page, once you've signed in.
-- **The end-of-story note now sits right after the last line.** On the last posted chapter, Trace's note appears directly after the chapter text, before end notes, kudos and comments, on AO3 (chapter view, **Entire Work** and one-shots) and FanFiction.net. It appears once the last few lines have stayed on screen for about two seconds; scrolling straight past the end no longer counts. When the site says a work is complete, the note reads **You’ve reached the end · Marked Finished** with **Undo**, which returns the story to its previous status. An ongoing work reads **You’re caught up**. If the site doesn't say, Trace asks **Is this story complete?** as before. The corner toast is gone.
-- **The popup shows how full a Free Library is.** It reads, for example, **64 of 100 stories kept**. At 80% it says **You’re at 80 of 100 stories. Unlimited keeps every story.** for a day, then goes back to the count. Nothing is shown for Unlimited.
-- **The Library full notice no longer follows every new story.** After an automatic save is refused, the notice appears at most once a day, and **Not now** quiets it for a week. Adding a story yourself still explains why it wasn't added.
+- The extension now keeps its own sign-in instead of borrowing a short-lived one from an open Trace tab. You no longer need a Trace tab open, and Firefox on Android no longer asks you to reconnect several times a day. After updating, you may need to connect once more; after that the connection lasts until you choose **Disconnect** or stop using Trace for 90 days.
+- Connecting takes you back to your story. When you connect from Trace's notice on AO3 or FanFiction.net, Trace returns you to the tab you were reading, at the same place on the page, once you've signed in.
+- The end-of-story note now sits right after the last line. On the last posted chapter, Trace's note appears directly after the chapter text, before end notes, kudos and comments, on AO3 (chapter view, **Entire Work** and one-shots) and FanFiction.net. It appears once the last few lines have stayed on screen for about two seconds; scrolling straight past the end no longer counts. When the site says a work is complete, the note reads **You’ve reached the end · Marked Finished** with **Undo**, which returns the story to its previous status. An ongoing work reads **You’re caught up**. If the site doesn't say, Trace asks **Is this story complete?** as before. The corner toast is gone.
+- The popup shows how full a Free Library is. It reads, for example, **64 of 100 stories kept**. At 80% it says **You’re at 80 of 100 stories. Unlimited keeps every story.** for a day, then goes back to the count. Nothing is shown for Unlimited.
+- The Library full notice no longer follows every new story. After an automatic save is refused, the notice appears at most once a day, and **Not now** quiets it for a week. Adding a story yourself still explains why it wasn't added.
 
 ## 0.7.2
 
-- **Trace makes missing site access visible on its toolbar icon.** A **!** badge and **Site access is off — click to allow** tooltip lead to **Allow Trace on AO3 and FanFiction.net** in the popup. One click requests all declared hosts together: AO3 and its mirrors, FanFiction.net, and Trace's web/API origins needed to connect. The popup closes immediately so Firefox's permission prompt is unobstructed. The badge clears only when all are granted; declining leaves Allow available when you reopen the popup.
-- **One-page activation explains its limits.** If clicking the toolbar activates Trace on the current page while persistent access is missing, a non-dismissable line says **Trace is only on for this page. Allow it on AO3 to keep it on — click the Trace icon.** FFN pages name FanFiction.net. The line stays hidden while the toolbar popup is open, returns when it closes without a grant, and disappears as soon as the full grant arrives, without a reload.
-- **Site access is checked when Trace installs, updates, starts, and when you open its popup, and after permission changes.** Firefox, Chrome and Edge show recovery only when access is missing. Existing Safari setup is unchanged.
+- Trace makes missing site access visible on its toolbar icon. A **!** badge and **Site access is off — click to allow** tooltip lead to **Allow Trace on AO3 and FanFiction.net** in the popup. One click requests all declared hosts together: AO3 and its mirrors, FanFiction.net, and Trace's web/API origins needed to connect. The popup closes immediately so Firefox's permission prompt is unobstructed. The badge clears only when all are granted; declining leaves Allow available when you reopen the popup.
+- One-page activation explains its limits. If clicking the toolbar activates Trace on the current page while persistent access is missing, a non-dismissable line says **Trace is only on for this page. Allow it on AO3 to keep it on — click the Trace icon.** FFN pages name FanFiction.net. The line stays hidden while the toolbar popup is open, returns when it closes without a grant, and disappears as soon as the full grant arrives, without a reload.
+- Site access is checked when Trace installs, updates, starts, and when you open its popup, and after permission changes. Firefox, Chrome and Edge show recovery only when access is missing. Existing Safari setup is unchanged.
 
 ## 0.7.1
 
 ### Connecting
 
-- **Connect on AO3 and FanFiction.net now connects.** The Connect button in Trace's notice, on a story and on listing rows works like Connect in the toolbar popup. If you're signed in to Trace in an open tab, Trace connects straight away. If not, Trace opens so you can sign in, and the extension connects as soon as you do.
-- **No refresh needed.** Open AO3 and FanFiction.net tabs update as soon as the extension connects or disconnects.
-- **Signing in after installing always connects.** Before, the extension connected only if you signed in on the exact setup page it opened. Now signing in anywhere on Trace within 30 minutes of installing connects it.
+- The Connect button in Trace's notice, on a story and on listing rows works like Connect in the toolbar popup. If you're signed in to Trace in an open tab, Trace connects straight away. If not, Trace opens so you can sign in, and the extension connects as soon as you do.
+- Open AO3 and FanFiction.net tabs update as soon as the extension connects or disconnects.
+- Signing in after installing always connects. Before, the extension connected only if you signed in on the exact setup page it opened. Now signing in anywhere on Trace within 30 minutes of installing connects it.
 
 ### On the page
 
-- **The saved note gets out of the way, after you've had time to read it.** The note that confirms a save stays for at least three seconds. After that it leaves about a second after you start scrolling, or at five seconds if you don't scroll. Scrolling that was already under way when it appeared doesn't count. It waits while you point at it or use its buttons, and it still has its close button. With Reduce Motion on, it disappears without fading.
-- **Moving to the next chapter in Chrome updates your progress straight away.** AO3 asks Chrome to load the next chapter ahead of time. Trace missed that chapter until you switched tabs and came back; it now records it as soon as you open it.
-- **The page keeps scrolling with a story's Trace panel open.** The panel opens next to the story and scrolls with the page. It closes when you click elsewhere, press Escape, or scroll the story out of view. On phones, the bottom sheet is unchanged.
+- The note that confirms a save stays for at least three seconds. After that it leaves about a second after you start scrolling, or at five seconds if you don't scroll. Scrolling that was already under way when it appeared doesn't count. It waits while you point at it or use its buttons, and it still has its close button. With Reduce Motion on, it disappears without fading.
+- Moving to the next chapter in Chrome updates your progress straight away. AO3 asks Chrome to load the next chapter ahead of time. Trace missed that chapter until you switched tabs and came back; it now records it as soon as you open it.
+- The page keeps scrolling with a story's Trace panel open. The panel opens next to the story and scrolls with the page. It closes when you click elsewhere, press Escape, or scroll the story out of view. On phones, the bottom sheet is unchanged.
 
 ## 0.7.0
 
-This is the first Chrome Web Store and Firefox Add-ons release since 0.5.14, published in July 2026.
-
-- **What's live now:** both stores still list 0.5.14.
-- **Versions in between:** 0.5.15 to 0.6.6 shipped only as the Safari extension inside the Trace iPhone app. Some 0.6.x versions were never published to a store.
-- **What that means:** everything below is new for Chrome, Edge and Firefox.
+This is the first Chrome Web Store and Firefox Add-ons release since 0.5.14, published in July 2026. Versions 0.5.15 to 0.6.6 only came out as the Safari extension inside the Trace iPhone app, and some 0.6.x versions were never published at all, so everything below is new for Chrome, Edge and Firefox.
 
 ### New look
 
-- **A redesigned popup and story sheet.** They are quieter and easier to scan:
+- The popup and story sheet are redesigned. They are quieter and easier to scan:
   - plain text actions;
   - one type scale;
   - your private rating, note and tags grouped together under "Your record".
-- **The popup only says what it knows.** For example, it doesn't show "Saving" for a story that's already in your library.
-- **A new icon**, matching the Trace app's fingerprint icon.
-- **Dark mode now uses the same palette as the Trace app.** On a dark archive skin, such as AO3 Reversi, every piece of text meets WCAG AA contrast. Light mode is unchanged.
+- The popup only says what it knows. For example, it doesn't show "Saving" for a story that's already in your library.
+- A new icon, matching the Trace app's fingerprint icon.
+- Dark mode now uses the same palette as the Trace app. On a dark archive skin, such as AO3 Reversi, every piece of text meets WCAG AA contrast. Light mode is unchanged.
 
 ### Connecting and staying signed in
 
-- **After a first install, Trace opens its setup page and connects to your Trace account straight away.**
-- **The extension stays matched to the Trace account you're signed in to,** including after you reconnect or switch accounts.
-- **A save is reported only after Trace confirms it in your library.**
-- **More consistent across account and network changes.** This covers your library status, reading progress, metadata contributions and AO3 saved filters.
+- After a first install, Trace opens its setup page and connects to your Trace account straight away.
+- The extension stays matched to the Trace account you're signed in to, including after you reconnect or switch accounts.
+- A save is reported only after Trace confirms it in your library.
+- Trace behaves the same way when your account or network changes. This covers your library status, reading progress, metadata contributions and AO3 saved filters.
 
 ### More reliable
 
-- **Faster chapter tracking.** Trace no longer re-reads your whole library before it records your place.
-- **Trace controls come back on their own.** This covers pages restored with the browser's Back button and tabs that were already open when the extension updated. You no longer need to reload them.
-- **A clearer message when your library reaches the Free limit**, with a direct way to make room or upgrade.
+- Trace no longer re-reads your whole library before it records your place.
+- Trace's buttons come back by themselves on pages restored with the browser's Back button and in tabs that were already open when the extension updated. You no longer need to reload them.
+- A clearer message when your library reaches the Free limit, with a direct way to make room or upgrade.
 
 ### Reading updates
 
-- **Each reading update now carries a one-time ID, plus the local date and time zone it happened in.** A retried update is never counted twice, and each read is recorded on the right day.
+- Each reading update now carries a one-time ID, plus the local date and time zone it happened in. A retried update is never counted twice, and each read is recorded on the right day.
 
 ### Diagnostics (Chrome and Edge only)
 
-- **Signed-in requests to Trace now include three coarse fields:**
+- Signed-in requests to Trace now include three coarse fields:
   - the browser family;
   - whether it is mobile or desktop;
   - the extension version.
@@ -147,4 +143,4 @@ This is the first Chrome Web Store and Firefox Add-ons release since 0.5.14, pub
 
 ### Permissions
 
-- **Chrome, Edge and Firefox now request the `scripting` permission.** When the extension starts, installs or updates, Trace uses it only to restore its own scripts in AO3 and FanFiction.net tabs that are already open, on sites Trace already has access to. Website access is unchanged. Neither Chrome nor Firefox shows a new install or update prompt for this permission.
+- Chrome, Edge and Firefox now request the `scripting` permission. When the extension starts, installs or updates, Trace uses it only to restore its own scripts in AO3 and FanFiction.net tabs that are already open, on sites Trace already has access to. Website access is unchanged. Neither Chrome nor Firefox shows a new install or update prompt for this permission.

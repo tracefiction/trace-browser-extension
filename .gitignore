@@ -12,12 +12,6 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-.claude/
-AGENTS.md
-CLAUDE.md
-docs/agents/
-MAINTAINER_NOTES.md
-
 DerivedData/
 *.xcarchive
 *.xcuserstate
