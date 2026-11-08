@@ -863,7 +863,7 @@ test("library-overlay renders display-safe private note preview and dotted tag a
   const privateTags = Array.from(surface.querySelectorAll(".x-utag"));
   assert.equal(privateTags.length, 3);
   assert.equal(surface.querySelector(".x-utag-more")?.textContent, "+3");
-  // Your record well: ink tags with a brass # mark, no bars or dotted lines.
+  // Private box: normal-text tags with a gold # mark, no bars or dotted lines.
   const well = surface.querySelector("[data-trace-record-well]");
   assert.ok(well);
   assert.match(well.textContent || "", /Your record/);
@@ -949,7 +949,7 @@ test("library-overlay renders optional WIP new-chapter context when present", as
 
   const ratingControl = surface.querySelector("[data-trace-rating-control]");
   assert.ok(ratingControl);
-  // Editable brass stars inside the Your record well.
+  // Editable gold stars inside the Your record box.
   assert.ok(ratingControl.closest("[data-trace-record-well]"));
   const ratingChoices = Array.from(
     ratingControl.querySelectorAll("[data-trace-rating-choice]"),
@@ -1266,7 +1266,7 @@ test("library-overlay bottom sheet contains focus and restores the archive after
   assert.ok(title);
   assert.match(title.textContent || "", /Accessible Work/i);
   assert.ok(description);
-  assert.match(description.textContent || "", /reading status and private Trace actions/i);
+  assert.match(description.textContent || "", /reading status or hide this work/i);
   assert.equal(window.document.body.hasAttribute("inert"), true);
   assert.equal(window.document.body.style.position, "fixed");
   assert.equal(window.document.body.style.top, "-420px");

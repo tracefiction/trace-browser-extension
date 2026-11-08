@@ -940,7 +940,7 @@ test("on a phone the column shows every saved filter as Trace's lines on AO3's g
   const mount = root(window);
   assert.equal(mount.parentElement.tagName, "FIELDSET", "the column keeps its place at the top of AO3's form");
   assert.equal(mount.querySelector(".trace-sf-col-title").textContent, "Saved filters");
-  assert.ok(mount.querySelector(".trace-sf-col-title svg"), "the lock from Your record");
+  assert.ok(mount.querySelector(".trace-sf-col-title svg"), "the lock from the story sheet's Your record box");
   const edit = mount.querySelector("[data-trace-sf-action='sheet-open']");
   assert.equal(edit.textContent, "Edit");
   assert.equal(edit.getAttribute("aria-label"), "Edit saved filters");

@@ -1390,7 +1390,7 @@ test("the story handle asks only a reader who was connected before to reconnect"
 });
 
 test("the Library-full page notices use the Trace app's words", () => {
-  const sentence = "Your Library is full. Everything saved stays. See Trace Unlimited, or remove a story to make room.";
+  const sentence = "Your Library is full, and nothing you’ve saved is removed. To add more, remove a story or get Trace Unlimited.";
   for (const [file, count] of [["collector.js", 2], ["library-overlay.js", 1]]) {
     const source = fs.readFileSync(path.join(__dirname, "..", "Shared (Extension)", "Resources", file), "utf8");
     assert.equal(source.split(sentence).length - 1, count, file);
@@ -4188,7 +4188,7 @@ test("story bottom sheet contains focus and restores the archive after Escape or
   assert.ok(title);
   assert.match(title.textContent || "", /Accessible AO3 Work/i);
   assert.ok(description);
-  assert.match(description.textContent || "", /reading status and private Trace actions/i);
+  assert.match(description.textContent || "", /reading status or hide this work/i);
   const statusGroup = sheet.querySelector("[data-trace-status-choices] [role='radiogroup']");
   const ratingGroup = sheet.querySelector("[data-trace-rating-control] [role='group']");
   assert.equal(
@@ -7041,7 +7041,7 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
   assert.ok(privateTagRow);
   assert.equal(privateTagRow.querySelectorAll(".x-utag").length, 3);
   assert.equal(privateTagRow.querySelector(".x-utag-more")?.textContent, "+1");
-  // Private tags are ink text with a brass # inside the Your record well.
+  // Private tags are normal text with a gold # inside the Your record box.
   assert.equal(privateTagRow.getAttribute("data-trace-record-well"), "1");
   assert.match(privateTagRow.textContent || "", /Your record/);
   assert.doesNotMatch(sheet.textContent || "", /Private context/);

@@ -75,7 +75,7 @@ test("the sheet offers the import only where it can start, and asks once before 
   const s = sheet({ replies: { start: { ok: true, view: view({ pagesRead: 0, works: 0, totalPages: null, remainingMs: null }) } } });
   await flush(s.window);
   assert.deepEqual(s.buttons(), ["Import your whole History"]);
-  assert.match(s.text().join(" "), /Nothing is added until you choose in Trace/);
+  assert.match(s.text().join(" "), /then you pick what to add in Trace/);
   assert.equal(s.sent.filter((m) => m.action === "start").length, 0);
   await s.click("Import your whole History");
   assert.deepEqual(s.buttons(), ["Start reading", "Not now"]);
@@ -181,7 +181,7 @@ test("Review in Trace prepares the History and opens it in the app, with Open in
   s.window.openTraceApp = (url) => opened.push(url);
   await flush(s.window);
   assert.deepEqual(s.buttons(), ["Review in Trace", "Delete"]);
-  assert.equal(s.text()[2], "Nothing is added to your Library until you choose in Trace.");
+  assert.equal(s.text()[2], "You pick what to add when you review it in Trace.");
   await s.click("Review in Trace");
   const link = `traceauth://open?destination=history-import&handoff=${handoffID}`;
   assert.deepEqual(opened, [link], "Trace opens as soon as the History is ready");

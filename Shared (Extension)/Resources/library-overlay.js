@@ -1,4 +1,4 @@
-// library-overlay.js — Trace library lens on AO3/FFN listings.
+// library-overlay.js: shows your Trace status on AO3 and FFN listing pages.
 // Reads story links from the current page and cached library status from extension storage.
 // Sends quick-add metadata or hidden preference changes to background.js only from user clicks.
 // Does not read cookies or credentials, and exits on pages with password fields.
@@ -342,7 +342,7 @@
     title.textContent = "This story wasn’t added";
     title.style.cssText = "margin:0;font:600 17px/1.3 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif;color:var(--trace-page-ink)";
     var copy = document.createElement("p");
-    copy.textContent = "Your Library is full. Everything saved stays. See Trace Unlimited, or remove a story to make room.";
+    copy.textContent = "Your Library is full, and nothing you’ve saved is removed. To add more, remove a story or get Trace Unlimited.";
     copy.style.cssText = "margin:4px 0 2px;font:400 13px/1.4 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif;color:var(--trace-page-secondary)";
     var actions = document.createElement("div");
     actions.style.cssText = "display:flex;align-items:center;gap:4px 16px";
@@ -708,7 +708,7 @@ function traceRefreshPageTokens() {
     fg: "var(--trace-page-warning)",
     border: "rgba(220, 38, 38, 0.25)",
   };
-  // Hide is a reversible preference: secondary text, never a warning.
+  // Hide can be undone, so it uses secondary text, not the warning colour.
   var HIDE_ACTION_THEME = {
     bg: "transparent",
     fg: "var(--trace-page-secondary)",
@@ -1220,7 +1220,7 @@ function traceRefreshPageTokens() {
     }
 
     existing.querySelector("[data-trace-connect-notice-heading]").textContent = heading;
-    // The heading is ink in every state; the failure is in the words.
+    // The heading stays the normal text colour, even for errors.
     existing.querySelector("[data-trace-connect-notice-heading]").style.color = TRACE_D1.ink;
     existing.querySelector("[data-trace-connect-notice-message]").textContent = message;
     var ctaEl = existing.querySelector("[data-trace-connect-notice-cta]");
@@ -1943,7 +1943,7 @@ function traceRefreshPageTokens() {
       return parts.length ? parts.join(" \u00b7 ") : "New chapters available";
     }
     if (entry.privateContext && (entry.privateContext.hasNotes || entry.privateContext.tagCount > 0)) {
-      return "Your record saved";
+      return entry.privateContext.hasNotes ? "Your notes saved" : "Your tags saved";
     }
     return "In your library";
   }
@@ -2785,7 +2785,7 @@ function traceRefreshPageTokens() {
 
     var side = document.createElement("span");
     side.className = "pct";
-    // News is not a failure: new chapters are ink, never warning.
+    // New chapters use the normal text colour, not the warning colour.
     side.style.cssText = "font:" + (entry && entry.catchupState === "BEHIND" ? "500" : "400") + " 13px/1.2 " + TRACE_D1.font + ";color:" + (entry && entry.catchupState === "BEHIND" ? TRACE_D1.ink : TRACE_D1.ink3) + ";text-align:right;font-variant-numeric:tabular-nums";
     var catchup = catchupLabel(entry);
     side.textContent = catchup || (percent == null ? "" : percent + "%");
@@ -2808,7 +2808,7 @@ function traceRefreshPageTokens() {
     return svg;
   }
 
-  // Brass marks only what the reader wrote.
+  // Gold is used only for things the reader added: their rating, notes and tags.
   function traceStarSvg(filled) {
     var svg = traceSvgEl("0 0 24 24", {
       fill: filled ? "currentColor" : "none", stroke: "currentColor",
@@ -2844,7 +2844,7 @@ function traceRefreshPageTokens() {
     return line;
   }
 
-  // The design-language record well: lock, "Your record" and "Only you".
+  // The box for the reader's own rating, notes and tags, headed with a lock, "Your record" and "Only you".
   function traceRecordWell() {
     var well = document.createElement("div");
     well.className = "x-meta";
@@ -2874,7 +2874,7 @@ function traceRefreshPageTokens() {
     return note;
   }
 
-  // Private tags: ink text with a brass # mark.
+  // Private tags: normal text with a gold # in front.
   function surfaceTagPill(text, collectionTone) {
     var tag = document.createElement("span");
     tag.className = collectionTone ? "x-utag coll" : "x-utag";
@@ -2913,8 +2913,8 @@ function traceRefreshPageTokens() {
     return context.tags.slice(0, PRIVATE_TAG_DISPLAY_LIMIT);
   }
 
-  // Your record: the reader's own rating, note and tags in the record well
-  //. Stars are the editable control when the entry exists.
+  // The reader's own rating, note and tags, in the Your record box.
+  // The stars can be tapped to rate when the story is in the Library.
   function appendPrivateContextRows(surface, entry, workKey) {
     var context = entry && entry.privateContext;
     var canRate = !!(entry && entry.entryId);
@@ -2962,7 +2962,7 @@ function traceRefreshPageTokens() {
       if (challenge.chapterDelta) {
         detail = challenge.chapterDelta + (challenge.chapterDelta === 1 ? " new chapter" : " new chapters") + " since you marked it.";
       } else if (challenge.kind === "source-updated") {
-        detail = "The source has updated since you marked it.";
+        detail = "The story has been updated since you marked it.";
       } else {
         detail = "The chapter count has changed since you marked it.";
       }
@@ -2975,7 +2975,7 @@ function traceRefreshPageTokens() {
     if (!copy) return;
     var block = document.createElement("section");
     block.setAttribute("data-trace-work-mark", entry.workMark.kind);
-    // Work marks are one secondary line: no box, no bar, no warning ink.
+    // Work marks are one line of secondary text, with no box or warning colour.
     block.style.cssText = "display:block;font:400 13px/1.35 " + TRACE_D1.font + ";color:var(--trace-page-secondary)";
     var title = document.createElement("strong");
     title.textContent = copy.label;
@@ -3057,7 +3057,7 @@ function traceRefreshPageTokens() {
   }
 
   // Design-language B2 cells: surface with a control-edge ring (3:1); the chosen cell is
-  // raised with a 2 px ink ring. Status colour stays on the dot.
+  // raised with a 2 px dark ring. Only the dot is coloured.
   function statusChoiceStyle(status, selected) {
     return [
       "display:flex",
@@ -3341,7 +3341,7 @@ function traceRefreshPageTokens() {
 
     var description = document.createElement("p");
     description.id = "trace-listing-sheet-description";
-    description.textContent = "Change reading status and private Trace actions for this work.";
+    description.textContent = "Change your reading status or hide this work.";
     description.style.cssText = "position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0";
     surface.insertBefore(description, surface.firstChild);
 
@@ -3412,7 +3412,7 @@ function traceRefreshPageTokens() {
     }
     var label = document.createElement("span");
     label.textContent = lensLabelText(entry);
-    // The status label is always ink; the colour belongs to the dot.
+    // The status label uses the normal text colour; only the dot is coloured.
     var labelColor = entry && entry.__traceStatusError
       ? "var(--trace-page-warning)"
       : entry && (entry.__traceStatusPending || entry.hidden) ? "var(--trace-page-secondary)" : "var(--trace-page-ink)";
@@ -3489,9 +3489,10 @@ function traceRefreshPageTokens() {
       setButtonInlineContent(btn, hidden ? null : "eyeoff", hidden ? "Unhide" : "Hide");
     }
     btn.setAttribute("aria-label", (hidden ? "Unhide " : "Hide ") + (btn.dataset.traceWorkTitle || "this story") + " in Trace");
+    var siteLabel = location.hostname.indexOf("fanfiction.net") >= 0 ? "FanFiction.net" : "AO3";
     btn.title = hidden
-      ? "Show this work in Trace browsing overlays"
-      : "Hide this work in Trace browsing overlays";
+      ? "Show this work in lists on " + siteLabel + " again"
+      : "Hide this work in lists on " + siteLabel;
     btn.disabled = false;
   }
 
@@ -3554,7 +3555,7 @@ function traceRefreshPageTokens() {
         function (response) {
           if (ext.runtime.lastError || !response) {
             if (surfaceAction) {
-              setListingControlPending(btn, false, "Could not save the browsing preference. Try again.");
+              setListingControlPending(btn, false, "Couldn’t save that. Try again.");
             }
             btn.style.cssText = preferenceButtonStyle(btn, ERROR_THEME) + ";cursor:pointer";
             btn.textContent = "Not saved";
@@ -3587,8 +3588,8 @@ function traceRefreshPageTokens() {
               btn,
               false,
               response.error === "rate_limited"
-                ? "Trace is rate limited. Wait before trying again."
-                : "Could not save the browsing preference. Try again.",
+                ? "Trace is busy. Try again in a moment."
+                : "Couldn’t save that. Try again.",
             );
           }
           if (response.error === "rate_limited") {

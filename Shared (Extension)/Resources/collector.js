@@ -424,7 +424,7 @@ function showCapacityRecoveryNotice(capacity, force) {
   title.textContent = "This story wasn’t added";
   title.style.cssText = "margin:0;font:600 17px/1.3 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif;color:var(--trace-page-ink)";
   var copy = document.createElement("p");
-  copy.textContent = "Your Library is full. Everything saved stays. See Trace Unlimited, or remove a story to make room.";
+  copy.textContent = "Your Library is full, and nothing you’ve saved is removed. To add more, remove a story or get Trace Unlimited.";
   copy.style.cssText = "margin:4px 0 2px;font:400 13px/1.4 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',Roboto,sans-serif;color:var(--trace-page-secondary)";
   var actions = document.createElement("div");
   actions.style.cssText = "display:flex;align-items:center;gap:4px 16px";
@@ -4667,7 +4667,7 @@ function traceStoryHandleChevronCss() {
 }
 
 function traceStoryHandleSpinnerCss() {
-  // Spinners are state feedback in secondary ink, never a status hue.
+  // Spinners use the secondary text colour, not a status colour.
   return [
     traceStoryHandleChevronCss(),
     "color:var(--trace-page-secondary)",
@@ -4951,7 +4951,7 @@ function storyCaption(view) {
         ? "Sign in to Trace in the tab that opened. This page updates once you’re connected."
         : "Connect the extension to your Trace account to save this story.";
     }
-    return "Sign in to show your library lens here.";
+    return "Sign in to Trace to see your Library on this page.";
   }
   if (view.entry && view.entry.__traceStatusPending) {
     return view.entry.__traceStatusTarget
@@ -5867,7 +5867,7 @@ function storySheetSvgIcon(kind) {
   return svg;
 }
 
-// The note preview carries a 2 px brass rule: it is what the reader wrote.
+// The note preview has a 2 px gold line on the left because the reader wrote it.
 function storySheetNoteText(text) {
   var note = document.createElement("span");
   note.className = "note";
@@ -5876,7 +5876,7 @@ function storySheetNoteText(text) {
   return note;
 }
 
-// Private tags: ink text with a brass # mark.
+// Private tags: normal text with a gold # in front.
 function storySheetTagPill(text, collectionTone) {
   var tag = document.createElement("span");
   tag.className = collectionTone ? "x-utag coll" : "x-utag";
@@ -5909,8 +5909,8 @@ function storySheetTagMore(text) {
   return more;
 }
 
-// The design-language record well: fill, edge inset, radius 14, with a lock,
-// "Your record" and "Only you" in the private-record ink.
+// The box for the reader's own rating, notes and tags: a filled box with a
+// thin inset edge and 14 px corners, headed with a lock, "Your record" and "Only you".
 function traceRecordWell() {
   var well = document.createElement("div");
   well.className = "x-meta";
@@ -5932,7 +5932,7 @@ function traceRecordWell() {
   return well;
 }
 
-// A read-only rating is stated, with the brass star as its mark.
+// A read-only rating is shown as text with one gold star.
 function traceStatedRating(rating) {
   var line = document.createElement("div");
   line.setAttribute("data-trace-rating-stated", String(rating));
@@ -5987,10 +5987,10 @@ function readerStatusChoiceErrorCopy(error) {
   if (error === "auth_expired" || error === "not_authenticated") {
     return "Reconnect Trace, then try again.";
   }
-  if (error === "rate_limited") return "Trace is rate limiting updates. Try again soon.";
+  if (error === "rate_limited") return "Trace is busy. Try again in a moment.";
   if (error === "free_limit_reached") return "Library limit reached.";
   if (error === "finish_qualification_disabled") {
-    return "Automatic finish updates are temporarily unavailable. Open Trace to update this work.";
+    return "Trace can’t mark stories finished from here right now. Open Trace to change the status.";
   }
   return "Could not update. Try again.";
 }
@@ -6038,8 +6038,8 @@ function storyCatchupProgressPatch(entry) {
   };
 }
 
-// Brass marks only what the reader wrote: filled and outline stars both
-// take the authored ink, inside the Your record well.
+// Rating stars, filled or outline, use the gold colour kept for things the
+// reader added. They sit inside the Your record box.
 function storyRatingButtonStyle(active, disabled) {
   return [
     "appearance:none",
@@ -6109,7 +6109,7 @@ function traceAlertSvg(size) {
   return svg;
 }
 
-// One failure line: a warning-ink glyph beside ink text.
+// One failure line: a warning icon beside normal text.
 function traceFailureLine(text, attrs) {
   var line = document.createElement("div");
   if (attrs) Object.keys(attrs).forEach(function (name) { line.setAttribute(name, attrs[name]); });
@@ -6430,7 +6430,7 @@ function appendReaderStatusChoices(actions, view, workKey) {
     choice.tabIndex = selected || (!entryStatus(entry) && status === TRACE_READER_STATUS_CHOICES[0]) ? 0 : -1;
     if (selected) choice.setAttribute("data-trace-status-selected", "1");
     // Design-language B2 cells: surface with a control-edge ring (3:1); the chosen cell is
-    // raised with a 2 px ink ring. Status colour stays on the dot.
+    // raised with a 2 px dark ring. Only the dot is coloured.
     choice.style.cssText = [
       "--sc:" + storyStatusAccent(status),
       "box-sizing:border-box",
@@ -6645,7 +6645,7 @@ function sendQuickAddAction(btn, workKey, addTheme, compact, done) {
             spinner: false,
           });
         } else {
-          // Confirmation is ink, never a teal chip.
+          // The confirmation is plain text, not a coloured chip.
           btn.style.cssText = storySheetTextActionCss("var(--trace-page-ink)") + ";cursor:default";
           btn.textContent = "Saved to your Library";
         }
@@ -6983,7 +6983,7 @@ function runKernelConnectAndSave(handle, workKey) {
     );
     handle.title = connected
       ? "Trace did not confirm this save. Try again."
-      : "Connect this extension session before saving the pending story.";
+      : "Connect Trace to save this story.";
   });
 }
 
@@ -7131,8 +7131,8 @@ function resetStoryHiddenPreferenceBtn(btn, hidden) {
   btn.className = "x-pbtn x-pbtn-ghost";
   btn.style.cssText = storySheetGhostButtonCss() + ";flex:0 0 auto";
   btn.title = hidden
-    ? "Show this work in Trace browsing overlays"
-    : "Hide this work in Trace browsing overlays";
+    ? "Show this work in lists on " + (isFFN() ? "FanFiction.net" : "AO3") + " again"
+    : "Hide this work in lists on " + (isFFN() ? "FanFiction.net" : "AO3");
   if (hidden) {
     btn.textContent = "Unhide";
   } else {
@@ -7202,7 +7202,7 @@ function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
       },
       function (response) {
         if (!response) {
-          setStorySheetControlPending(btn, false, "Could not save the browsing preference. Try again.");
+          setStorySheetControlPending(btn, false, "Couldn’t save that. Try again.");
           btn.style.cssText = storySheetGhostButtonCss() + ";cursor:pointer;color:var(--trace-page-warning)";
           btn.textContent = "Not saved";
           btn.disabled = false;
@@ -7221,8 +7221,8 @@ function bindStoryHiddenPreferenceAction(btn, workKey, entry) {
             btn,
             false,
             response.error === "rate_limited"
-              ? "Trace is rate limited. Wait before trying again."
-              : "Could not save the browsing preference. Try again.",
+              ? "Trace is busy. Try again in a moment."
+              : "Couldn’t save that. Try again.",
           );
           btn.style.cssText = storySheetGhostButtonCss() + ";cursor:pointer;color:var(--trace-page-warning)";
           btn.textContent = response.error === "rate_limited" ? "Wait" : "Not saved";
@@ -7278,7 +7278,7 @@ function storyWorkMarkCopy(entry) {
     if (mark.challenge.chapterDelta) {
       detail = mark.challenge.chapterDelta + (mark.challenge.chapterDelta === 1 ? " new chapter" : " new chapters") + " since you marked it.";
     } else if (mark.challenge.kind === "source-updated") {
-      detail = "The source has updated since you marked it.";
+      detail = "The story has been updated since you marked it.";
     } else {
       detail = "The chapter count has changed since you marked it.";
     }
@@ -7321,7 +7321,7 @@ function renderStorySheet(sheet, view, workKey) {
 
   var description = document.createElement("p");
   description.id = "trace-story-sheet-description";
-  description.textContent = "Change reading status and private Trace actions for this work.";
+  description.textContent = "Change your reading status or hide this work.";
   description.style.cssText = "position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0";
   sheet.appendChild(description);
 
@@ -7426,7 +7426,7 @@ function renderStorySheet(sheet, view, workKey) {
     capacityTitle.textContent = "This story wasn’t added";
     capacityTitle.style.cssText = "margin:0;font:600 17px/1.3 " + TRACE_UI.font + ";color:var(--trace-page-ink)";
     var capacityCopy = document.createElement("p");
-    capacityCopy.textContent = "Your Library is full. Everything saved stays. See Trace Unlimited, or remove a story to make room.";
+    capacityCopy.textContent = "Your Library is full, and nothing you’ve saved is removed. To add more, remove a story or get Trace Unlimited.";
     capacityCopy.style.cssText = "margin:0;font:400 13px/1.4 " + TRACE_UI.font + ";color:var(--trace-page-secondary)";
     body.appendChild(capacityTitle);
     body.appendChild(capacityCopy);
@@ -7533,7 +7533,7 @@ function renderStorySheet(sheet, view, workKey) {
   appendStoryWorkMark(body, view.entry);
   appendStoryCatchupAction(body, view, workKey);
 
-  // Your record: the reader's own marks in the record well.
+  // The reader's own rating, notes and tags, in the Your record box.
   var meta = traceRecordWell();
   var wellHeaderCount = meta.childNodes.length;
   var privateContext = view.entry && view.entry.privateContext;
@@ -8158,7 +8158,7 @@ function mountFinishQualifyBand(decision, view, workKey, flowState) {
     onQualify: function (workState, controls) {
       if (!finishQualifyFlowIsCurrent(workKey, flowState)) {
         if (controls && typeof controls.fail === "function") {
-          controls.fail("This page state changed. Reopen the story to try again.");
+          controls.fail("This page changed. Reopen the story and try again.");
         }
         return false;
       }
@@ -8208,7 +8208,7 @@ function mountFinishQualifyRecovery(decision, view, workKey, flowState, message)
     message: message || "Your status wasn’t changed.",
     onRetry: function (controls) {
       if (!finishQualifyFlowIsCurrent(workKey, flowState)) {
-        controls.fail("This page state changed. Reopen the story to try again.");
+        controls.fail("This page changed. Reopen the story and try again.");
         return;
       }
       sendFinishQualifyResolution(
@@ -8405,7 +8405,7 @@ function renderQuickAddFromSnapshot(workKey, anchor, res) {
       );
       handle.title = pendingFirstStory.commandInFlight
         ? "Trace is connecting and saving this story."
-        : "Connect this extension session before saving the pending story.";
+        : "Connect Trace to save this story.";
       if (!handle.__traceStoryHandleBound) {
         handle.__traceStoryHandleBound = true;
         handle.addEventListener("click", function (e) {
