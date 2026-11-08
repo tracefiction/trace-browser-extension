@@ -1736,7 +1736,7 @@
     return "<svg viewBox='0 0 12 12' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' focusable='false' aria-hidden='true'><path d='M1.5 1.5l9 9M10.5 1.5l-9 9'/></svg>";
   }
 
-  // The same lock as the story sheet's private box: saved filters are kept in Trace, not on AO3.
+  // The same lock as the story sheet's Your record box: saved filters are kept in Trace, not on AO3.
   function renderLockIcon() {
     return "<svg viewBox='0 0 11 12' fill='currentColor' focusable='false' aria-hidden='true'><path d='M3 5V3.6a2.5 2.5 0 015 0V5h.6c.5 0 .9.4.9.9v4.7c0 .5-.4.9-.9.9H2.4c-.5 0-.9-.4-.9-.9V5.9c0-.5.4-.9.9-.9H3zm1.2 0h2.6V3.6a1.3 1.3 0 00-2.6 0V5z'/></svg>";
   }

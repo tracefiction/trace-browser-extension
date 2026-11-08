@@ -7041,9 +7041,9 @@ test("FFN mobile story sheet shows known status, progress, private context, and 
   assert.ok(privateTagRow);
   assert.equal(privateTagRow.querySelectorAll(".x-utag").length, 3);
   assert.equal(privateTagRow.querySelector(".x-utag-more")?.textContent, "+1");
-  // Private tags are normal text with a gold # inside the private box.
+  // Private tags are normal text with a gold # inside the Your record box.
   assert.equal(privateTagRow.getAttribute("data-trace-record-well"), "1");
-  assert.match(privateTagRow.textContent || "", /Private/);
+  assert.match(privateTagRow.textContent || "", /Your record/);
   assert.doesNotMatch(sheet.textContent || "", /Private context/);
   for (const tag of privateTagRow.querySelectorAll(".x-utag")) {
     assert.doesNotMatch(tag.getAttribute("style") || "", /border-bottom:\s*1px dotted/i);

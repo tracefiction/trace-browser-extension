@@ -2844,20 +2844,24 @@ function traceRefreshPageTokens() {
     return line;
   }
 
-  // The box for the reader's own rating, notes and tags, headed with a lock and "Private".
+  // The box for the reader's own rating, notes and tags, headed with a lock, "Your record" and "Only you".
   function traceRecordWell() {
     var well = document.createElement("div");
     well.className = "x-meta";
     well.setAttribute("data-trace-record-well", "1");
     well.setAttribute("role", "group");
-    well.setAttribute("aria-label", "Your rating, notes and tags. Only you can see them.");
+    well.setAttribute("aria-label", "Your record, only you can see it");
     well.style.cssText = "display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--trace-page-record-well);box-shadow:inset 0 0 0 1px var(--trace-page-record-well-edge)";
     var head = document.createElement("div");
     head.style.cssText = "display:flex;align-items:center;gap:5px;font:500 12px/1.3 " + TRACE_D1.font + ";color:var(--trace-page-private-record)";
     head.appendChild(traceLockSvg());
     var label = document.createElement("span");
-    label.textContent = "Private";
+    label.textContent = "Your record";
+    var only = document.createElement("span");
+    only.textContent = "Only you";
+    only.style.cssText = "margin-left:auto;font-weight:400";
     head.appendChild(label);
+    head.appendChild(only);
     well.appendChild(head);
     return well;
   }
@@ -2909,7 +2913,7 @@ function traceRefreshPageTokens() {
     return context.tags.slice(0, PRIVATE_TAG_DISPLAY_LIMIT);
   }
 
-  // The reader's own rating, note and tags, in the private box.
+  // The reader's own rating, note and tags, in the Your record box.
   // The stars can be tapped to rate when the story is in the Library.
   function appendPrivateContextRows(surface, entry, workKey) {
     var context = entry && entry.privateContext;

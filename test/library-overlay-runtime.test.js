@@ -866,7 +866,7 @@ test("library-overlay renders display-safe private note preview and dotted tag a
   // Private box: normal-text tags with a gold # mark, no bars or dotted lines.
   const well = surface.querySelector("[data-trace-record-well]");
   assert.ok(well);
-  assert.match(well.textContent || "", /Private/);
+  assert.match(well.textContent || "", /Your record/);
   assert.doesNotMatch(surface.textContent || "", /Private context/);
   assert.doesNotMatch(well.getAttribute("style") || "", /border-left/i);
   for (const tag of privateTags) {
@@ -949,7 +949,7 @@ test("library-overlay renders optional WIP new-chapter context when present", as
 
   const ratingControl = surface.querySelector("[data-trace-rating-control]");
   assert.ok(ratingControl);
-  // Editable gold stars inside the private box.
+  // Editable gold stars inside the Your record box.
   assert.ok(ratingControl.closest("[data-trace-record-well]"));
   const ratingChoices = Array.from(
     ratingControl.querySelectorAll("[data-trace-rating-choice]"),
