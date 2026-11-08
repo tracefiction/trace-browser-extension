@@ -4,8 +4,9 @@ This file lists the changes that matter to people using the Chrome, Edge and
 Firefox extension. The Safari extension ships inside the Trace iPhone app, and
 its notes go with each app release.
 
-## Unreleased
+## 1.0.7
 
+- The popup and Trace's notes on AO3 and FanFiction.net use plainer words. The settings now say what each switch does, so **Library memory on sites** is now **Show Trace in AO3 and FFN lists**. Messages about signing in or a full Library say what happened and what you can do, without words like "extension session" or "rate limited".
 - The story sheet no longer says chapters are new when they aren't. When you're behind on a story, the sheet used to say **3 new chapters since you last read**, even if you read it today and nothing had been posted since. That number is the chapters after the one you're on, so it now says **3 more chapters after your place**, beside **Catch up**.
 
 ## 1.0.6
