@@ -3089,11 +3089,11 @@ test("popup keeps a durable library-capacity recovery action", async () => {
   assert.equal(h.document.getElementById("popup-status").textContent, "Your Library is full");
   assert.equal(
     h.document.getElementById("popup-lead").textContent,
-    "50 stories on Free. Everything saved stays. See Trace Unlimited, or remove a story to make room.",
+    "Free holds 50 stories, and nothing you’ve saved is removed. To add more, remove a story or get Trace Unlimited.",
   );
   assert.equal(
     h.document.getElementById("popup-import").title,
-    "Your Library is full. 50 stories on Free. Everything saved stays. See Trace Unlimited, or remove a story to make room.",
+    "Your Library is full. Free holds 50 stories, and nothing you’ve saved is removed. To add more, remove a story or get Trace Unlimited.",
   );
   assert.equal(h.document.getElementById("popup-cta").textContent, "See Trace Unlimited");
   assert.equal(
@@ -3771,7 +3771,7 @@ test("the full-Library reader view names the account's limit without repeating i
   assert.equal(h.document.getElementById("popup-earned-heading").textContent, "Your Library is full");
   assert.equal(
     h.document.getElementById("popup-earned-lead").textContent,
-    "50 stories on Free. Everything saved stays. See Trace Unlimited, or remove a story to make room. This story wasn’t added.",
+    "Free holds 50 stories, and nothing you’ve saved is removed. To add more, remove a story or get Trace Unlimited. This story wasn’t added.",
   );
 });
 
@@ -3780,7 +3780,7 @@ test("a full Library names no size until the account has reported one", async ()
   for (let attempt = 0; attempt < 8; attempt += 1) await flush();
   assert.equal(
     h.document.getElementById("popup-earned-lead").textContent,
-    "Everything saved stays. See Trace Unlimited, or remove a story to make room. This story wasn’t added.",
+    "Nothing you’ve saved is removed. To add more, remove a story or get Trace Unlimited. This story wasn’t added.",
   );
 });
 
@@ -3875,7 +3875,7 @@ test("Free plan line: the count, a heads-up at 80% for a day, nothing for Unlimi
   assert.equal(raw({ pro: false, libraryCount: 64, now }), null);
   assert.equal(raw({ pro: false, libraryCount: 64, limit: null, now }), null);
   assert.deepEqual(raw({ pro: false, libraryCount: 40, limit: 50, now }),
-    { text: "You’re at 40 of 50 stories. Unlimited keeps every story.", headsUp: true, nearLimit: true });
+    { text: "You’ve saved 40 of 50 stories. Trace Unlimited has no story limit.", headsUp: true, nearLimit: true });
   assert.deepEqual(raw({ pro: false, libraryCount: 12, limit: 50, now }),
     { text: "12 of 50 stories kept", headsUp: false, nearLimit: false });
   assert.equal(line({ pro: true, libraryCount: 64, now }), null);
@@ -3884,7 +3884,7 @@ test("Free plan line: the count, a heads-up at 80% for a day, nothing for Unlimi
   assert.deepEqual(line({ pro: false, libraryCount: 64, now }),
     { text: "64 of 100 stories kept", headsUp: false, nearLimit: false });
   assert.deepEqual(line({ pro: false, libraryCount: 80, headsUpShownAt: null, now }),
-    { text: "You’re at 80 of 100 stories. Unlimited keeps every story.", headsUp: true, nearLimit: true });
+    { text: "You’ve saved 80 of 100 stories. Trace Unlimited has no story limit.", headsUp: true, nearLimit: true });
   assert.equal(line({ pro: false, libraryCount: 92, headsUpShownAt: now - 60_000, now }).headsUp, true);
   assert.deepEqual(line({ pro: false, libraryCount: 92, headsUpShownAt: now - 25 * 3_600_000, now }),
     { text: "92 of 100 stories kept", headsUp: false, nearLimit: true });
@@ -3944,7 +3944,7 @@ test("the 80% heads-up is recorded once, then gives way to the plain count", asy
   const first = savedStoryReaderHarness({ libraryCount: 84 });
   for (let attempt = 0; attempt < 8; attempt += 1) await flush();
   const plan = first.document.getElementById("popup-earned-plan");
-  assert.equal(plan.textContent, "You’re at 84 of 100 stories. Unlimited keeps every story.");
+  assert.equal(plan.textContent, "You’ve saved 84 of 100 stories. Trace Unlimited has no story limit.");
   assert.equal(plan.dataset.headsUp, "true");
   const shownAt = first.store.traceFreeLimitHeadsUpV1?.shownAt;
   assert.ok(Number.isSafeInteger(shownAt));
@@ -4250,7 +4250,7 @@ for (const page of [
     assert.match(h.document.getElementById("popup-earned-result").textContent, /^Already in your Library/, "and says so aloud");
     assert.equal(h.document.getElementById("popup-earned-heading").textContent, "The Long Way Round");
     assert.equal(h.document.getElementById("popup-earned-record-byline").textContent, page.byline);
-    assert.match(h.document.getElementById("popup-earned-lead").textContent, /Trace keeps your place as you read\. Find it in your Library in the Trace app\./);
+    assert.match(h.document.getElementById("popup-earned-lead").textContent, /Trace will update your chapter as you read\. Find it in your Library in the Trace app\./);
     assert.equal(h.document.getElementById("popup-earned-primary").textContent, "Keep reading");
     assert.equal(isDisplayed(h, h.document.getElementById("popup-import")), false, "the confirmation is one thing");
     assert.equal(h.store.traceSavedNoteFirstStoryShownV1, true, "the page note need not repeat it");
@@ -4314,7 +4314,7 @@ test("a saved story the page has not named yet is confirmed without a made-up ti
   h.runTimeouts();
   await settle(h, 12);
   const announced = h.document.getElementById("popup-earned-result").textContent;
-  assert.equal(announced, "Saved to your Library. Trace keeps your place as you read.");
+  assert.equal(announced, "Saved to your Library. Trace will update your chapter as you read.");
   assert.doesNotMatch(earnedText(h) + announced, /Your story by|the author/);
   assert.notEqual(heading.textContent, "Your story");
 
@@ -4328,7 +4328,7 @@ test("a saved story the page has not named yet is confirmed without a made-up ti
   h.runTimeouts();
   await settle(h);
   assert.equal(h.document.getElementById("popup-earned-result").textContent,
-    "Saved to your Library: The Long Way Round by quillfeather. Trace keeps your place as you read.");
+    "Saved to your Library: The Long Way Round by quillfeather. Trace will update your chapter as you read.");
 });
 
 test("a title that never arrives leaves the confirmation as it is and stops asking", async () => {
@@ -6526,7 +6526,7 @@ test("open stories is an explicit native action even when the current page is no
   assert.equal(isDisplayed(h, button), true);
   assert.equal(button.textContent, "Import open tabs");
   assert.equal(h.document.getElementById("popup-open-tabs-help").textContent,
-    "Trace reads your open AO3 and FanFiction.net tabs. Nothing is added until you choose in Trace. Your tabs stay open.");
+    "Trace lists the stories in your open AO3 and FanFiction.net tabs so you can pick which ones to add in Trace. It won’t close any tabs.");
   assert.equal(h.messages.filter(m => m.type === "TRACE_IMPORT_OPEN_TABS").length, 0);
   button.click(); await flush(); await flush();
   assert.equal(h.messages.filter(m => m.type === "TRACE_IMPORT_OPEN_TABS").length, 1);

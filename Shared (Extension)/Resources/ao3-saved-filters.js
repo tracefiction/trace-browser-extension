@@ -925,9 +925,9 @@
     return { type: "unsaved" };
   }
 
-  // Saved filters use Trace's page register: Story Ink
-  // groups on the host tone, sentence-case labels, an ink check for the
-  // active filter and teal text actions. No AO3 red, bars or serif.
+  // Saved filters use the same colours as Trace's other page elements:
+  // groups match the page's light or dark tone, labels are sentence case, the
+  // active filter has a dark tick and text buttons are teal. No AO3 red, bars or serif.
   function pageTokens() {
     var light = {
       surface: "#FFFFFF", raised: "#E9EEF3", rule: "#D8E0E7", control: "#D8E0E7", ink: "#18232D",
@@ -1736,7 +1736,7 @@
     return "<svg viewBox='0 0 12 12' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' focusable='false' aria-hidden='true'><path d='M1.5 1.5l9 9M10.5 1.5l-9 9'/></svg>";
   }
 
-  // The lock from Your record: saved filters are the reader's, not AO3's.
+  // The same lock as the story sheet's private box: saved filters are kept in Trace, not on AO3.
   function renderLockIcon() {
     return "<svg viewBox='0 0 11 12' fill='currentColor' focusable='false' aria-hidden='true'><path d='M3 5V3.6a2.5 2.5 0 015 0V5h.6c.5 0 .9.4.9.9v4.7c0 .5-.4.9-.9.9H2.4c-.5 0-.9-.4-.9-.9V5.9c0-.5.4-.9.9-.9H3zm1.2 0h2.6V3.6a1.3 1.3 0 00-2.6 0V5z'/></svg>";
   }

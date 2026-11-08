@@ -121,7 +121,7 @@
   var entryHelp = element(
     "p",
     "popup-import-recovery-help",
-    "Trace reads every page of your AO3 History. Nothing is added until you choose in Trace.",
+    "Trace reads every page of your AO3 History, then you pick what to add in Trace.",
   );
 
   var card = element("div", "popup-history-card");
@@ -277,7 +277,7 @@
     if (status === "idle") {
       heading.textContent = "Import your AO3 History";
       lineOne.textContent = "Trace reads your History page by page from this tab, about 10 pages a minute.";
-      lineTwo.textContent = "Nothing is added to your Library until you choose. You can keep reading AO3 while it runs.";
+      lineTwo.textContent = "You pick what to add in Trace, and you can keep reading AO3 while it runs.";
       lineTwo.hidden = false;
       setButton(primary, busy ? "Starting…" : "Start reading", "start");
       setButton(secondary, "", "");
@@ -329,7 +329,7 @@
     lineOne.textContent = plural(view.works || 0, "story", "stories") + " found." + (skipped.length ? " " + skipped.join(" · ") + "." : "");
     lineTwo.textContent = handoff
       ? "Ready in Trace. If Trace didn’t open, tap Open in Trace."
-      : busy ? "Getting your History ready for Trace…" : "Nothing is added to your Library until you choose in Trace.";
+      : busy ? "Getting your History ready for Trace…" : "You pick what to add when you review it in Trace.";
     lineTwo.hidden = false;
     setButton(primary, handoff ? "Open in Trace" : busy ? "Preparing…" : "Review in Trace", handoff ? "open" : "review");
     setButton(secondary, "", "");

@@ -131,7 +131,7 @@ function accountLibraryLimit(value) {
  */
 function libraryFullLead(limit) {
   const size = accountLibraryLimit(limit);
-  return `${size === null ? "" : `${size} stories on Free. `}Everything saved stays. See Trace Unlimited, or remove a story to make room.`;
+  return `${size === null ? "Nothing you’ve saved is removed." : `Free holds ${size} stories, and nothing you’ve saved is removed.`} To add more, remove a story or get Trace Unlimited.`;
 }
 
 /**
@@ -149,7 +149,7 @@ function freePlanLine({ pro, libraryCount, limit, headsUpShownAt = null, now = D
     (headsUpShownAt == null || (now >= headsUpShownAt && now - headsUpShownAt < FREE_LIMIT_HEADS_UP_WINDOW_MS));
   return {
     text: headsUp
-      ? `You’re at ${libraryCount} of ${limit} stories. Unlimited keeps every story.`
+      ? `You’ve saved ${libraryCount} of ${limit} stories. Trace Unlimited has no story limit.`
       : `${libraryCount} of ${limit} stories kept`,
     headsUp,
     nearLimit,
@@ -1225,7 +1225,7 @@ function earnedAnnouncementForState(code, heading, detail) {
       const already = heading.startsWith("Already");
       const name = storyNameForAnnouncement();
       const said = `${already ? "Already in your Library" : "Saved to your Library"}${name ? `: ${name}` : ""}.`;
-      return already ? said : `${said} Trace keeps your place as you read.`;
+      return already ? said : `${said} Trace will update your chapter as you read.`;
     }
     case "P5": return "Still saving. Keep reading. If it’s not in your Library in a minute, reload this page.";
     case "P6": return "Finish setup in the Trace app. Create an account or sign in, then come back.";
@@ -1902,7 +1902,7 @@ function renderEarnedSaved(story, work, identity, alreadyInLibrary = false, conf
   const confirmation = confirmationText ??
     (alreadyInLibrary ? "Already in your Library" : "Saved to your Library");
   const title = storyTitle(identity);
-  const lead = "Trace keeps your place as you read. Find it in your Library in the Trace app.";
+  const lead = "Trace will update your chapter as you read. Find it in your Library in the Trace app.";
   if (title) {
     setEarnedCopy({
       stateCode: "P2",
@@ -1926,7 +1926,7 @@ function renderEarnedSaved(story, work, identity, alreadyInLibrary = false, conf
     lookUpSavedTitle(story, work, alreadyInLibrary);
   }
   setEarnedCheck("popup-earned-save", "pass", "Saved", "Saved to Trace");
-  setEarnedResult("success", `${confirmation}.`, "Trace keeps your place as you read.");
+  setEarnedResult("success", `${confirmation}.`, "Trace will update your chapter as you read.");
   configureEarnedActions({ label: "Keep reading", action: "close", emphasis: "secondary" });
 }
 
@@ -4247,7 +4247,7 @@ if (typeof ResizeObserver !== "undefined") {
   }
 }
 
-const OPEN_TABS_HELP = "Trace reads your open AO3 and FanFiction.net tabs. Nothing is added until you choose in Trace. Your tabs stay open.";
+const OPEN_TABS_HELP = "Trace lists the stories in your open AO3 and FanFiction.net tabs so you can pick which ones to add in Trace. It won’t close any tabs.";
 
 /** "Found 28 stories in 30 tabs." */
 function openTabsFoundLine(found) {
@@ -4375,7 +4375,7 @@ function importFailureCopy(error) {
   if (error === "not_authenticated" || error === "auth_expired") {
     return {
       label: "Reconnect Trace, then try again",
-      title: "Reconnect this extension session before importing.",
+      title: "Connect Trace again, then import.",
     };
   }
   if (error === "unsupported_page" || error === "no_active_tab") {
@@ -4538,7 +4538,7 @@ function renderKernelSnapshot(snapshot) {
   };
   let lead = "";
   if (SESSION_DISABLED) {
-    lead = "Authenticated extension features are temporarily unavailable.";
+    lead = "Trace can’t sign in or save stories in this version of the extension for now.";
   } else if (state === "signed_out" && isLikelyIosExtensionUi) {
     lead =
       "Open the Trace app and sign in there. Signing in on tracefiction.com in Safari does not connect this extension. Return to Safari and press Connect.";
@@ -4561,30 +4561,30 @@ function renderKernelSnapshot(snapshot) {
       "Open Trace in this browser and sign in, then return here and press Connect.";
   } else if (state === "reconnect_required") {
     if (reason === "storage_write_failed" || reason === "storage_unavailable") {
-      lead = `Trace could not update extension storage. Press ${connectVerb} after local storage recovers.`;
+      lead = `Trace couldn’t save its sign-in in this browser. Wait a moment, then press ${connectVerb} again.`;
     } else if (reason === "account_unavailable" || reason === "invalid_account_response") {
       lead = `Trace could not safely verify this account. Press ${connectVerb} to try again.`;
     } else if (reason === "malformed_envelope" || reason === "unsupported_envelope") {
-      lead = `Trace found unsupported local session data. Pressing ${connectVerb} will safely replace it.`;
+      lead = `Trace’s saved sign-in in this browser can’t be used. Press ${connectVerb} to replace it.`;
     } else {
       lead = `Sign in to Trace in this browser if needed, then press ${connectVerb}.`;
     }
   } else if (state === "degraded") {
     if (reason === "storage_unavailable") {
-      lead = "Trace could not read extension storage. Retry after local storage recovers.";
+      lead = "Trace couldn’t read its saved settings in this browser. Try again in a moment.";
     } else if (reason === "runtime_unavailable") {
-      lead = "Trace could not reach its extension session. Retry in a moment.";
+      lead = "Trace couldn’t start properly in this browser. Try again in a moment.";
     } else {
       lead = "Your Library is safe. Check your connection and try again.";
     }
   } else if (state === "connected") {
-    lead = "Trace keeps your place on AO3 and FanFiction.net in this browser.";
+    lead = "Trace saves the chapter you’re on for stories you read on AO3 and FanFiction.net in this browser.";
   } else if (state === "connecting" || state === "verifying") {
     lead = "Keep this popup open while Trace checks your account.";
   } else {
     lead = reason === "storage_unavailable"
-      ? "Trace could not read extension storage. Retry in a moment."
-      : "Checking the extension session.";
+      ? "Trace couldn’t read its saved settings in this browser. Try again in a moment."
+      : "Checking your Trace sign-in…";
   }
 
   document.body.dataset.tracePopupState = state;
@@ -4918,7 +4918,7 @@ function popupStatusErrorCopy(error) {
   if (error === "auth_expired" || error === "not_authenticated") return "Status wasn’t changed. Reconnect Trace, then try again.";
   if (error === "rate_limited") return "Status wasn’t changed. Try again soon.";
   if (error === "free_limit_reached") return "Status wasn’t changed. Your Library is full.";
-  if (error === "finish_qualification_disabled") return "Automatic finish updates are temporarily unavailable. Open Trace to update this work.";
+  if (error === "finish_qualification_disabled") return "Trace can’t mark stories finished from here right now. Open Trace to change the status.";
   return "Status wasn’t changed. Try again.";
 }
 
@@ -5217,8 +5217,8 @@ async function renderReaderView(state) {
   const lead = awaitingFirstStory
     ? FIRST_TAP_WORDS.listReadyBody
     : onArchive
-      ? "Stories you open join your Library. Lists show what you’ve read."
-      : "Open a story there and Trace keeps your place as you read.";
+      ? "Any story you open here is saved to your Library, and story lists show which ones are already in your Library."
+      : "Open a story there and Trace will save the chapter you’re on.";
   // Nothing here is the task, so there is no primary action. A list page
   // keeps the Settings row; another site needs only Safari's Done. A list,
   // History or Bookmarks page can be imported, so it offers Import.

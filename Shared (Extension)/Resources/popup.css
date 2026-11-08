@@ -1,7 +1,7 @@
 /*
- * Trace popup. Values mirror the native signed-in Archive field ("Story Ink")
- * so the Safari popup reads as the same product as Library and Story. Legacy
- * token names are kept as aliases so every existing rule adopts the same ladder.
+ * Trace popup. The colours match the Trace iPhone app's Library and story
+ * screens, so the Safari popup looks like the same app. The older token names
+ * below are kept as aliases so existing rules still work.
  *
  * Type is one em ladder on a system base: `-apple-system-body` on iOS (Dynamic
  * Type) and 16px on desktop toolbar popups. No serif, no stylistic sets, no
@@ -791,7 +791,7 @@ body[data-trace-popup-state="connected_saved"] .popup-sheet {
     font: 400 0.765em/1.4 var(--trace-font);
 }
 .popup-earned-rule[hidden] { display: none; }
-/* An inline failure: a warning-ink glyph beside ink text. */
+/* An inline failure: a warning icon beside normal text. */
 .popup-earned-failure {
     display: flex;
     align-items: flex-start;
