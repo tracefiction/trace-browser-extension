@@ -614,9 +614,6 @@ body[data-trace-popup-state="connected_saved"] .popup-sheet {
 }
 
 .popup-preferences-panel {
-    max-height: 220px;
-    overflow-y: auto;
-    overscroll-behavior: contain;
     border-top: 1px solid var(--rule);
 }
 
