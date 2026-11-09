@@ -4,6 +4,10 @@ This file lists the changes that matter to people using the Chrome, Edge and
 Firefox extension. The Safari extension ships inside the Trace iPhone app, and
 its notes go with each app release.
 
+## Unreleased
+
+- **Site settings** in the toolbar popup show every switch. The list was capped at a fixed height, so **Improve story details** was cut off and had to be scrolled to inside the box.
+
 ## 1.0.7
 
 - The popup and Trace's notes on AO3 and FanFiction.net use plainer words. The settings now say what each switch does, so **Library memory on sites** is now **Show Trace in AO3 and FFN lists**. Messages about signing in or a full Library say what happened and what you can do, without words like "extension session" or "rate limited".
