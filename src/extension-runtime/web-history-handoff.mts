@@ -9,6 +9,11 @@
  * reviews read the same items. The History stays in this browser: nothing
  * is sent to Trace's server until the reader imports.
  *
+ * Review in Trace can come before the read has finished: once the read has
+ * passed 1 January, the year's stories can be offered while it reads on, and
+ * a paused read offers what it has. The declaration says which
+ * (`HistoryCoverage`), and the whole History, offered later, replaces it.
+ *
  * One handoff at a time. A background can stop at any moment (an idle
  * service worker), so the offer itself (its id, account, expiry, when it was
  * read and the digest of the whole) is kept in session storage, and the parts
@@ -33,11 +38,34 @@ export type WebHistoryOffer =
       readonly expiresAtMs: number; readonly url: string }
   | { readonly ok: false; readonly error: "history_handoff_unavailable" };
 
+/**
+ * How much of the History an offer holds, told to the page with the
+ * declaration: Review in Trace can come before the read has finished.
+ */
+export interface HistoryCoverage {
+  /** The read reached the last page: this is the whole History. */
+  readonly complete: boolean;
+  /**
+   * `YYYY-MM-DD`: only the stories last visited on or after this day are
+   * here, and every one the History listed when the read passed it. A story
+   * marked for later is not among them, whenever it was opened: its row's
+   * day is not kept. Null: everything the read has kept.
+   */
+  readonly since: string | null;
+  /** The oldest last-visited day on any row the read had reached, or null when not known. */
+  readonly through: string | null;
+  /** Rows of works deleted from AO3, and rows that could not be read, on the pages read. */
+  readonly deleted: number;
+  readonly unreadable: number;
+  /** When the read began: a story opened on AO3 after that may not be here. An ISO time, or null when not known. */
+  readonly started: string | null;
+}
+
 /** What the page is told. A part is its JSON text: `{s, at, items}`. */
 export type WebHistoryAnswer =
-  | { readonly ok: true; readonly kind: "declaration"; readonly handoffID: string; readonly accountId: string;
+  | ({ readonly ok: true; readonly kind: "declaration"; readonly handoffID: string; readonly accountId: string;
       readonly partCount: number; readonly byteCount: number; readonly itemCount: number;
-      readonly sha256: string; readonly expiresAtMs: number }
+      readonly sha256: string; readonly expiresAtMs: number } & Partial<HistoryCoverage>)
   | { readonly ok: true; readonly kind: "part"; readonly handoffID: string; readonly partIndex: number;
       readonly text: string }
   | { readonly ok: true; readonly kind: "received" }
@@ -58,17 +86,31 @@ type OfferRecord = {
   readonly expiresAtMs: number;
   readonly capturedAt: string;
   readonly sha256: string;
+  readonly coverage: HistoryCoverage | null;
 };
 
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+const dayOrNull = (value: unknown): value is string | null => value === null || (typeof value === "string" && DAY.test(value));
+const count = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+
+function coverageOf(value: unknown): HistoryCoverage | null {
+  if (!record(value) || typeof value.complete !== "boolean" || !dayOrNull(value.since) || !dayOrNull(value.through) ||
+      !count(value.deleted) || !count(value.unreadable)) return null;
+  const started = typeof value.started === "string" && value.started.length <= 40 ? value.started : null;
+  return { complete: value.complete, since: value.since, through: value.through, deleted: value.deleted,
+    unreadable: value.unreadable, started };
+}
 
 function offerRecord(value: unknown): OfferRecord | null {
   if (!record(value) || value.v !== 1 || typeof value.handoffID !== "string" || !UUID.test(value.handoffID) ||
       typeof value.accountId !== "string" || !value.accountId || typeof value.capturedAt !== "string" ||
       typeof value.sha256 !== "string" || typeof value.expiresAtMs !== "number" ||
       !Number.isSafeInteger(value.expiresAtMs)) return null;
-  return value as unknown as OfferRecord;
+  return { v: 1, handoffID: value.handoffID, accountId: value.accountId, expiresAtMs: value.expiresAtMs,
+    capturedAt: value.capturedAt, sha256: value.sha256, coverage: coverageOf(value.coverage) };
 }
 
 /** When the parts were read: the `at` every part carries. */
@@ -86,8 +128,8 @@ export class WebHistoryHandoff {
   readonly #randomID: () => string;
   readonly #now: () => number;
   readonly #keep: WebHistoryKeep | null;
-  /** Makes the parts again from the History store, for when they were read. */
-  #source: ((capturedAt: string) => Promise<HistoryParts | null>) | null = null;
+  /** Makes the parts again from the History store, for when they were read and the day they start at. */
+  #source: ((capturedAt: string, since: string | null) => Promise<HistoryParts | null>) | null = null;
   #offered: OfferRecord | null = null;
   /** The parts of `#offered`, by its id: never another offer's. */
   #parts: { readonly handoffID: string; readonly history: HistoryParts } | null = null;
@@ -105,7 +147,7 @@ export class WebHistoryHandoff {
   }
 
   /** The History store the parts are made from, after a restart. */
-  useSource(source: (capturedAt: string) => Promise<HistoryParts | null>): void {
+  useSource(source: (capturedAt: string, since: string | null) => Promise<HistoryParts | null>): void {
     this.#source = source;
   }
 
@@ -115,15 +157,17 @@ export class WebHistoryHandoff {
   }
 
   /** Makes `history` the one History on offer, for `accountId`, replacing any earlier one. */
-  async offer(accountId: string, history: HistoryParts): Promise<WebHistoryOffer> {
+  async offer(accountId: string, history: HistoryParts, coverage: HistoryCoverage | null = null): Promise<WebHistoryOffer> {
     const handoffID = this.#randomID();
     const now = this.#now();
     const capturedAt = history.parts.length ? capturedAtOf(history) : null;
-    if (!accountId || !UUID.test(handoffID) || !Number.isSafeInteger(now) || capturedAt === null) {
+    // A coverage that cannot be told to the page is never offered as if it were the whole History.
+    if (!accountId || !UUID.test(handoffID) || !Number.isSafeInteger(now) || capturedAt === null ||
+        (coverage !== null && coverageOf(coverage) === null)) {
       return Object.freeze({ ok: false, error: "history_handoff_unavailable" });
     }
     const offered: OfferRecord = { v: 1, handoffID, accountId, expiresAtMs: now + WEB_HISTORY_LIFETIME_MS,
-      capturedAt, sha256: history.sha256 };
+      capturedAt, sha256: history.sha256, coverage: coverageOf(coverage) };
     this.#generation += 1;
     this.#offered = offered;
     this.#parts = { handoffID, history };
@@ -179,7 +223,7 @@ export class WebHistoryHandoff {
       return Object.freeze({
         ok: true, kind: "declaration", handoffID: offered.handoffID, accountId: offered.accountId,
         partCount: history.parts.length, byteCount: history.byteCount, itemCount: history.itemCount,
-        sha256: history.sha256, expiresAtMs: offered.expiresAtMs,
+        sha256: history.sha256, expiresAtMs: offered.expiresAtMs, ...offered.coverage,
       });
     }
     const partIndex = message.part;
@@ -209,7 +253,8 @@ export class WebHistoryHandoff {
     const source = this.#source;
     if (source === null) return null;
     if (this.#rebuilding?.handoffID !== offered.handoffID) {
-      this.#rebuilding = { handoffID: offered.handoffID, history: source(offered.capturedAt).catch(() => null) };
+      this.#rebuilding = { handoffID: offered.handoffID,
+        history: source(offered.capturedAt, offered.coverage?.since ?? null).catch(() => null) };
     }
     const generation = this.#generation;
     const rebuilt = await this.#rebuilding.history;

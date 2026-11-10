@@ -1210,10 +1210,12 @@ const HISTORY_STATES = [
   ["entry", { ok: true, view: { status: "idle" }, startable: true }],
   ["start", { ok: true, view: { status: "idle" }, startable: true }, "#popup-history-entry"],
   ["reading", { ok: true, view: historyView(), startable: true }],
+  ["year-ready", { ok: true, view: historyView({ through: "2025-12-30", yearFirst: "2026-01-01" }), startable: true }],
   ["slow-down", { ok: true, view: historyView({ waitingFor: "slow_down", waitingUntil: Date.now() + 120_000 }), startable: true }],
   ["paused", { ok: true, view: historyView({ status: "paused", reason: "paused_by_you" }), startable: true }],
   ["signed-out", { ok: true, view: historyView({ status: "paused", reason: "signed_out" }), startable: true }],
   ["empty", { ok: true, view: historyView({ status: "paused", reason: "history_empty", pagesRead: 0, works: 0, totalPages: null }), startable: true }],
+  ["history-off", { ok: true, view: historyView({ status: "paused", reason: "history_off", pagesRead: 0, works: 0, totalPages: null }), startable: true }],
   ["ready", { ok: true, view: historyView({ status: "finished", reason: "reached_last_page", pagesRead: 31, works: 588, later: 2, deleted: 11, unreadable: 2, remainingMs: null }), startable: true }],
   ["delete", { ok: true, view: historyView(), startable: true }, "#popup-history [data-action='ask_delete']"],
 ];
@@ -1246,6 +1248,7 @@ async function renderHistoryImport(browser, assets, manifest) {
   const historyPage = await readText(repoRoot, "test", "fixtures", "ao3_history.html");
   const bars = [
     ["reading", historyView()],
+    ["year-ready", historyView({ through: "2025-12-30", yearFirst: "2026-01-01" })],
     ["paused", historyView({ status: "paused", reason: "paused_by_you" })],
     ["ready", historyView({ status: "finished", reason: "reached_last_page", pagesRead: 31, works: 588, remainingMs: null })],
   ];

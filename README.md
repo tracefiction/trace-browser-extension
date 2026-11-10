@@ -14,7 +14,15 @@ On AO3 and FanFiction.net story and listing pages, the extension reads what's al
 - fandoms, tags, warnings, rating, characters and relationships, where the site lists them
 - chapter and word counts
 - which chapter you're on
-- on your own AO3 History page, and only when you import it: each work's "Last visited" date and visit count (works marked for later are left out)
+- on your own AO3 History page, and only when you import it, what each row of the listing shows:
+  - the work's address, title, author, fandoms, summary, language, word and chapter counts, kudos and hits
+  - its tags, and which kind each one is: Archive Warning, relationship, character or additional tag
+  - its rating and categories, and whether AO3 marks it complete or in progress
+  - the date it was last updated
+  - your "Last visited" date and visit count, and AO3's note beside them: latest version, minor edits since, or update available
+  - whether you marked it for later. For those, the date and visit count aren't kept
+  - how many rows are works since deleted from AO3, and how many rows Trace couldn't read. A deleted work has no title or address, so it's only counted
+  - the oldest "Last visited" date on any row so far, including rows marked for later and deleted works, which is how Trace knows how far back it has read
 
 That's how Trace saves a story, keeps your place, and shows on AO3 whether a story's already in your library. When you reach the end of the last posted chapter, it notices from the page layout and how you've scrolled, and marks the story finished or caught up, with Undo. If the site doesn't say whether the work is complete, it asks you instead. It doesn't read the story text to do this.
 
@@ -38,7 +46,11 @@ Some AO3 pages, like Subscriptions, list a work as just a link. When you press *
 
 ### Your AO3 History
 
-When you import your AO3 History, Trace reads each page of it from your AO3 tab. You then choose what to add on Trace's review page before anything is saved.
+When you import your AO3 History, Trace reads each page of it from your AO3 tab, one page at a time, about 7 pages a minute, and only while that tab is in front. It reads the listing and nothing else: it never opens a work. What it reads is kept in your browser. **Review in Trace** hands it to Trace for review: to Trace's review page in the same browser on a computer, and to the Trace app on iPhone. You choose what to add there before anything is saved.
+
+On a computer you don't have to wait for the whole History. AO3 lists it newest first, so once Trace has read back past 1 January, a button that names the year, such as **Review 2026 in Trace**, hands over the stories you last opened since then, while Trace reads the rest. Stories you marked for later aren't among them. In January it goes back to 1 January of the year before. When the read finishes, **Review in Trace** hands over the whole History in its place. Each time, Trace's page is also told whether it has the whole History or only the year, when the read began, how far back it has got, and how many rows were deleted works or couldn't be read.
+
+If your History is turned off, AO3 sends you to your Preferences instead of the listing. Trace then tells you it's off, and reads nothing.
 
 There's more detail on the limits and timings in [docs/technical-notes.md](docs/technical-notes.md).
 
@@ -53,7 +65,7 @@ When you save a story, read one, or change something with Trace's buttons on AO3
 - that you reached the end of the last posted chapter, for stories already in your library
 - works you've chosen to hide from Trace's lists (this only hides them in Trace, not on AO3 or FanFiction.net)
 - AO3 filters you've saved
-- from an AO3 History import, each work's last-visited date, which Trace uses as the last-read date (the visit count is sent with the import but not kept)
+- from an AO3 History import, for the works you choose to add: the story details read from your History, as listed above, and each work's last-visited date, which Trace uses as the last-read date (the visit count is sent with the import but not kept)
 - a key from your Trace sign-in, so the server knows it's you. It only works for the extension's own requests
 - on Chrome, Edge and Safari, the extension's version and roughly what browser you're on (phone or computer), so I can see when a release breaks something. Firefox sends none of this
 

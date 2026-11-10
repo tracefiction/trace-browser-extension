@@ -8980,9 +8980,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
      * to the app through the paired History inbox, fenced to the account as
      * the import handoff is; on a computer, to Trace's review page, which asks
      * for it a part at a time (`answerWebHistory`). `build` makes the parts
-     * only once the account is known to be connected.
+     * only once the account is known to be connected; `coverage` says how
+     * much of the History they hold, and is told to the review page.
      */
-    async handOffHistory(build) {
+    async handOffHistory(build, coverage = null) {
       await this.start();
       const unavailable = Object.freeze({ ok: false, error: "history_handoff_unavailable" });
       const platform = await this.#nativePlatform();
@@ -8993,7 +8994,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         if (this.snapshot().state !== "connected") return Object.freeze({ ok: false, error: "not_authenticated" });
         const history2 = await build().catch(() => null);
         if (history2 === null) return unavailable;
-        const fenced2 = await this.#service.executeCurrentScope(async (scope2, isCurrent) => await isCurrent() ? web.offer(scope2.accountId, history2) : unavailable);
+        const fenced2 = await this.#service.executeCurrentScope(async (scope2, isCurrent) => await isCurrent() ? web.offer(scope2.accountId, history2, coverage) : unavailable);
         if (fenced2.kind !== "published") {
           await web.discard();
           return unavailable;
@@ -9001,7 +9002,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         return fenced2.value;
       }
       const producer = this.#nativeHistory;
-      if (producer === null || !this.#nativeImportEnabled || platform !== "ios") return unavailable;
+      if (producer === null || !this.#nativeImportEnabled || platform !== "ios" || coverage?.since != null) return unavailable;
       const preparation = await this.#prepareNativeAuthority();
       if (!preparation.ready || this.snapshot().state !== "connected") {
         return Object.freeze({ ok: false, error: "not_authenticated" });
@@ -9017,6 +9018,12 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         return unavailable;
       }
       return fenced.value;
+    }
+    /** Whether Review in Trace opens Trace's review page here (a computer), not the app. */
+    async historyReviewOnWeb() {
+      await this.start();
+      const site = new URL(this.#webOrigin);
+      return this.#webHistory !== null && await this.#nativePlatform() === "desktop" && declaresHostPattern(this.#runtime, `${site.protocol}//${site.hostname}/*`);
     }
     /** A Trace page's request for the History on offer, answered only for the account signed in now. */
     async answerWebHistory(message) {
@@ -12072,9 +12079,32 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var UUID3 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   var KEEP_KEY = "traceWebHistoryOfferV1";
   var record3 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+  var DAY = /^\d{4}-\d{2}-\d{2}$/;
+  var dayOrNull = (value) => value === null || typeof value === "string" && DAY.test(value);
+  var count = (value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  function coverageOf(value) {
+    if (!record3(value) || typeof value.complete !== "boolean" || !dayOrNull(value.since) || !dayOrNull(value.through) || !count(value.deleted) || !count(value.unreadable)) return null;
+    const started = typeof value.started === "string" && value.started.length <= 40 ? value.started : null;
+    return {
+      complete: value.complete,
+      since: value.since,
+      through: value.through,
+      deleted: value.deleted,
+      unreadable: value.unreadable,
+      started
+    };
+  }
   function offerRecord(value) {
     if (!record3(value) || value.v !== 1 || typeof value.handoffID !== "string" || !UUID3.test(value.handoffID) || typeof value.accountId !== "string" || !value.accountId || typeof value.capturedAt !== "string" || typeof value.sha256 !== "string" || typeof value.expiresAtMs !== "number" || !Number.isSafeInteger(value.expiresAtMs)) return null;
-    return value;
+    return {
+      v: 1,
+      handoffID: value.handoffID,
+      accountId: value.accountId,
+      expiresAtMs: value.expiresAtMs,
+      capturedAt: value.capturedAt,
+      sha256: value.sha256,
+      coverage: coverageOf(value.coverage)
+    };
   }
   function capturedAtOf(history) {
     try {
@@ -12089,7 +12119,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     #randomID;
     #now;
     #keep;
-    /** Makes the parts again from the History store, for when they were read. */
+    /** Makes the parts again from the History store, for when they were read and the day they start at. */
     #source = null;
     #offered = null;
     /** The parts of `#offered`, by its id: never another offer's. */
@@ -12114,11 +12144,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       return `${this.#webOrigin}/import/history#handoff=${handoffID}`;
     }
     /** Makes `history` the one History on offer, for `accountId`, replacing any earlier one. */
-    async offer(accountId, history) {
+    async offer(accountId, history, coverage = null) {
       const handoffID = this.#randomID();
       const now = this.#now();
       const capturedAt = history.parts.length ? capturedAtOf(history) : null;
-      if (!accountId || !UUID3.test(handoffID) || !Number.isSafeInteger(now) || capturedAt === null) {
+      if (!accountId || !UUID3.test(handoffID) || !Number.isSafeInteger(now) || capturedAt === null || coverage !== null && coverageOf(coverage) === null) {
         return Object.freeze({ ok: false, error: "history_handoff_unavailable" });
       }
       const offered = {
@@ -12127,7 +12157,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         accountId,
         expiresAtMs: now + WEB_HISTORY_LIFETIME_MS,
         capturedAt,
-        sha256: history.sha256
+        sha256: history.sha256,
+        coverage: coverageOf(coverage)
       };
       this.#generation += 1;
       this.#offered = offered;
@@ -12192,7 +12223,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           byteCount: history.byteCount,
           itemCount: history.itemCount,
           sha256: history.sha256,
-          expiresAtMs: offered.expiresAtMs
+          expiresAtMs: offered.expiresAtMs,
+          ...offered.coverage
         });
       }
       const partIndex = message.part;
@@ -12222,7 +12254,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       const source = this.#source;
       if (source === null) return null;
       if (this.#rebuilding?.handoffID !== offered.handoffID) {
-        this.#rebuilding = { handoffID: offered.handoffID, history: source(offered.capturedAt).catch(() => null) };
+        this.#rebuilding = {
+          handoffID: offered.handoffID,
+          history: source(offered.capturedAt, offered.coverage?.since ?? null).catch(() => null)
+        };
       }
       const generation = this.#generation;
       const rebuilt = await this.#rebuilding.history;
@@ -12335,7 +12370,37 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
     return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
   }
-  function readRow(row, startTag) {
+  var TAG_KINDS = { warnings: "w", relationships: "r", characters: "c", freeforms: "f" };
+  function tagKinds(list, tags) {
+    let kinds = "";
+    const item = /<li\b[^>]*>([\s\S]*?)<\/li\s*>/gi;
+    for (let match = item.exec(list); match !== null && kinds.length < tags.length; match = item.exec(list)) {
+      const kind = classTokens2(match[0].slice(0, match[0].indexOf(">") + 1)).map((token) => Object.hasOwn(TAG_KINDS, token) ? TAG_KINDS[token] : void 0).find(Boolean);
+      for (const text2 of anchorTexts(match[1] ?? "", (tag) => classTokens2(tag).includes("tag"), 75)) {
+        if (kinds.length === tags.length) break;
+        const at = tags.indexOf(text2);
+        if (at !== -1 && at < kinds.length) continue;
+        if (kind === void 0 || at !== kinds.length) return null;
+        kinds += kind;
+      }
+    }
+    return kinds.length === tags.length ? kinds : null;
+  }
+  function symbol(required, token) {
+    const span = /<span\b[^>]*>/gi;
+    for (let match = span.exec(required); match !== null; match = span.exec(required)) {
+      const classes = classTokens2(match[0]);
+      if (classes.includes(token)) return { classes, title: (attribute(match[0], "title") ?? "").replace(/\s+/g, " ").trim().slice(0, 200) };
+    }
+    return null;
+  }
+  function visitLine(row) {
+    return plainText2(elements(row, "h4", ["viewed"], 1)[0] ?? "", 500);
+  }
+  function visitDay(viewed) {
+    return historyDay(/[Ll]ast visited:?\s*(\d{1,2} [A-Z][a-z]{2} \d{4})/.exec(viewed)?.[1] ?? "");
+  }
+  function readRow(row, startTag, viewed) {
     const classes = classTokens2(startTag);
     if (classes.includes("deleted")) return "deleted";
     const id = /\bid\s*=\s*["']work_([1-9]\d{0,11})["']/i.exec(startTag)?.[1];
@@ -12348,24 +12413,36 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     if (href === null || !new RegExp(`^(?:https://archiveofourown\\.org)?/works/${id}(?:[/?#]|$)`).test(href) || !title) {
       return "unreadable";
     }
-    const viewed = plainText2(elements(row, "h4", ["viewed"], 1)[0] ?? "", 500);
     const later = /\(Marked for Later\.\)/i.test(viewed);
-    const visited = later ? null : /Last visited:\s*(\d{1,2} [A-Z][a-z]{2} \d{4})/.exec(viewed)?.[1] ?? null;
     const visits = later ? null : /\bVisited once\b/i.test(viewed) ? 1 : wholeNumber(/\bVisited\s+([\d,]+)\s+times?\b/i.exec(viewed)?.[1] ?? "");
     const words = wholeNumber(plainText2(elements(row, "dd", ["words"], 1)[0] ?? "", 40));
     const chapters = plainText2(elements(row, "dd", ["chapters"], 1)[0] ?? "", 40).replace(/\s+/g, "");
+    const tagList = elements(row, "ul", ["tags", "commas"], 1)[0] ?? "";
+    const tags = anchorTexts(tagList, (tag) => classTokens2(tag).includes("tag"), 75);
+    const required = elements(row, "ul", ["required-tags"], 1)[0] ?? "";
+    const category = symbol(required, "category");
+    const progress = symbol(required, "iswip");
     return {
       id,
       title,
       authors: anchorTexts(heading, (tag) => attribute(tag, "rel") === "author", 20),
       fandoms: anchorTexts(elements(row, "h5", ["fandoms"], 1)[0] ?? "", (tag) => classTokens2(tag).includes("tag"), 20),
-      tags: anchorTexts(elements(row, "ul", ["tags", "commas"], 1)[0] ?? "", (tag) => classTokens2(tag).includes("tag"), 75),
+      tags,
       summary: plainText2(elements(row, "blockquote", ["summary"], 1)[0] ?? "", 4e3),
       words,
       chapters: /^\d+\/(?:\d+|\?)$/.test(chapters) ? chapters : null,
-      lastVisited: visited === null ? null : historyDay(visited),
+      lastVisited: later ? null : visitDay(viewed),
       visits: visits !== null && visits > 0 ? visits : null,
-      later
+      later,
+      tagKinds: tagKinds(tagList, tags),
+      rating: symbol(required, "rating")?.title || null,
+      categories: category === null ? null : category.classes.includes("category-none") ? [] : category.title.split(/\s*,\s*/).filter(Boolean).slice(0, 10),
+      complete: progress === null ? null : progress.classes.includes("complete-yes") ? true : progress.classes.includes("complete-no") ? false : null,
+      language: plainText2(elements(row, "dd", ["language"], 1)[0] ?? "", 60) || null,
+      kudos: wholeNumber(plainText2(elements(row, "dd", ["kudos"], 1)[0] ?? "", 40)),
+      hits: wholeNumber(plainText2(elements(row, "dd", ["hits"], 1)[0] ?? "", 40)),
+      updated: historyDay(plainText2(elements(row, "p", ["datetime"], 1)[0] ?? "", 40)),
+      sinceVisit: /\(Update available\.\)/i.test(viewed) ? "update" : /\(Minor edits made since then\.\)/i.test(viewed) ? "edits" : /\(Latest version\.\)/i.test(viewed) ? "latest" : null
     };
   }
   function historyPageURL(user, page) {
@@ -12418,9 +12495,13 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     const works = [];
     let deleted = 0;
     let unreadable = 0;
+    let oldestDay = null;
     starts.forEach((start, index) => {
       const row = list.slice(start.index + start.tag.length, starts[index + 1]?.index ?? list.length);
-      const read = readRow(row, start.tag);
+      const viewed = visitLine(row);
+      const day = visitDay(viewed);
+      if (day !== null && (oldestDay === null || day < oldestDay)) oldestDay = day;
+      const read = readRow(row, start.tag, viewed);
       if (read === "deleted") deleted += 1;
       else if (read === "unreadable") unreadable += 1;
       else works.push(read);
@@ -12459,7 +12540,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     if (unreadable * 2 > starts.length) return { kind: "stop", code: "rows_unreadable" };
     const nextPage = nexts.size ? page + 1 : null;
     const totalPages = nextPage === null ? page : Math.max(highest, nextPage);
-    return { kind: "page", works, deleted, unreadable, nextPage, totalPages };
+    return { kind: "page", works, deleted, unreadable, nextPage, totalPages, oldestDay };
   }
   function retryAfterMs(value, now) {
     if (typeof value !== "string" || !value.trim()) return null;
@@ -12495,7 +12576,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     if (answer.status === 403) return { kind: "stop", code: LOGIN_MARKERS.test(answer.html) ? "signed_out" : "forbidden" };
     if (answer.status !== 200) return { kind: "stop", code: "http_error" };
     if (historyPageNumber(answer.url, user) !== page) {
-      return { kind: "stop", code: LOGIN_MARKERS.test(answer.html) ? "signed_out" : "redirected" };
+      if (LOGIN_MARKERS.test(answer.html)) return { kind: "stop", code: "signed_out" };
+      const off = landed.pathname.replace(/\/$/, "").toLowerCase() === `/users/${user}/preferences`.toLowerCase();
+      return { kind: "stop", code: off ? "history_off" : "redirected" };
     }
     if (answer.contentType !== null && !/text\/html/i.test(answer.contentType)) return { kind: "stop", code: "unrecognized_page" };
     const read = readHistoryPage(answer.html, user, page);
@@ -12527,7 +12610,17 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       chapters: kept.chapters ?? seen.chapters,
       lastVisited: later(kept.lastVisited, seen.lastVisited),
       visits: most(kept.visits, seen.visits),
-      later: kept.later && seen.later
+      later: kept.later && seen.later,
+      // The kinds belong to the tags that were kept.
+      tagKinds: (kept.tags.length ? kept.tagKinds : seen.tagKinds) ?? null,
+      rating: kept.rating ?? seen.rating ?? null,
+      categories: kept.categories ?? seen.categories ?? null,
+      complete: kept.complete ?? seen.complete ?? null,
+      language: kept.language ?? seen.language ?? null,
+      kudos: kept.kudos ?? seen.kudos ?? null,
+      hits: kept.hits ?? seen.hits ?? null,
+      updated: kept.updated ?? seen.updated ?? null,
+      sinceVisit: kept.sinceVisit ?? seen.sinceVisit ?? null
     };
   }
   var clone = (value) => structuredClone(value);
@@ -12794,6 +12887,10 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
   var REQUEST_TIMEOUT_MS9 = 2e4;
   var LOST_AFTER_MS = 3e4;
   var MAX_PAGES = 5e3;
+  function yearFirstDay(now) {
+    const today = new Date(now);
+    return `${today.getFullYear() - (today.getMonth() === 0 ? 1 : 0)}-01-01`;
+  }
   var clone2 = (value) => structuredClone(value);
   function isRun(value) {
     if (!value || typeof value !== "object") return false;
@@ -12812,6 +12909,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       nextPage: 1,
       totalPages: null,
       lastPageDigest: null,
+      through: null,
+      newest: null,
       inFlight: null,
       counts: { pages: 0, works: 0, later: 0, deleted: 0, unreadable: 0, repeats: 0 },
       timing: {
@@ -12837,7 +12936,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     network: "network",
     timeout: "network"
   };
-  function describeRun(run, now, saving = false) {
+  function describeRun(run, now, saving = false, yearFirst = false) {
     if (run === null) {
       return {
         status: "idle",
@@ -12852,7 +12951,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         waitingUntil: null,
         remainingMs: null,
         startedAt: null,
-        finishedAt: null
+        finishedAt: null,
+        through: null,
+        yearFirst: null
       };
     }
     const running = run.status === "running";
@@ -12864,6 +12965,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       const perPage = run.timing.keptGapCount >= 2 ? run.timing.keptGapMsTotal / run.timing.keptGapCount : run.timing.gapMs + PAGE_GAP_JITTER_MS / 2 + 1500;
       remainingMs = Math.round(left * perPage);
     }
+    const through = run.through ?? null;
+    const since = yearFirstDay(now);
+    const passed = through !== null && through < since && (run.newest ?? "") >= since && run.undated !== true;
     return {
       status: run.status,
       reason: run.reason,
@@ -12877,7 +12981,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       waitingUntil,
       remainingMs,
       startedAt: run.timing.startedAt,
-      finishedAt: run.timing.finishedAt
+      finishedAt: run.timing.finishedAt,
+      through,
+      yearFirst: yearFirst && running && passed ? since : null
     };
   }
   var Ao3HistoryImport = class {
@@ -12953,7 +13059,8 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     async view() {
       const run = await this.#serial(() => this.#load());
       const now = this.#ports.clock.now();
-      return describeRun(run, now, run?.status === "running" && this.#saving(now));
+      const yearFirst = run?.status === "running" && await (this.#ports.yearFirst?.() ?? Promise.resolve(false)).catch(() => false);
+      return describeRun(run, now, run?.status === "running" && this.#saving(now), yearFirst);
     }
     /** Every work the run has kept, for the review. Another account gets none. */
     async works() {
@@ -13144,6 +13251,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       next.counts.later += read.works.filter((work) => work.later).length;
       next.counts.deleted += read.deleted;
       next.counts.unreadable += read.unreadable;
+      if (read.oldestDay !== null && (next.through == null || read.oldestDay < next.through)) next.through = read.oldestDay;
+      for (const work of read.works) {
+        if (work.lastVisited !== null && (next.newest == null || work.lastVisited > next.newest)) next.newest = work.lastVisited;
+        if (work.lastVisited === null && !work.later) next.undated = true;
+      }
       next.totalPages = Math.max(next.totalPages ?? 0, read.totalPages);
       next.retry = { consecutive: 0, code: null };
       if (next.timing.lastKeptAt !== null) {
@@ -13200,7 +13312,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     if (work.authors[0]) item.a = work.authors[0];
     if (work.fandoms.length) item.fms = [...work.fandoms];
     if (work.tags.length) item.tags = [...work.tags];
+    if (work.tags.length && work.tagKinds?.length === work.tags.length) item.tk = work.tagKinds;
     if (work.summary) item.sm = work.summary;
+    if (work.rating) item.r = work.rating;
+    if (work.categories) item.cat = [...work.categories];
+    if (work.language) item.l = work.language;
     if (work.words !== null) item.w = work.words;
     const chapters = /^(\d+)\/(\d+|\?)$/.exec(work.chapters ?? "");
     if (chapters) {
@@ -13209,6 +13325,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       item.cht = chapters[2] === "?" ? "?" : Number(chapters[2]);
       item.s = chapters[2] !== "?" && Number(chapters[2]) === published ? "complete" : "wip";
     }
+    if (typeof work.complete === "boolean") item.s = work.complete ? "complete" : "wip";
+    if (typeof work.kudos === "number") item.k = work.kudos;
+    if (typeof work.hits === "number") item.h = work.hits;
+    if (work.updated) item.upd = work.updated;
+    if (work.sinceVisit) item.ver = work.sinceVisit;
     if (work.later) item.ml = true;
     else {
       if (work.lastVisited !== null) item.lv = work.lastVisited;
@@ -13396,7 +13517,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
     let bar = null;
     let hidden = false;
     let buttonAction = "pause";
-    const plural = (count, one, many) => `${count.toLocaleString("en")} ${count === 1 ? one : many}`;
+    const plural = (count2, one, many) => `${count2.toLocaleString("en")} ${count2 === 1 ? one : many}`;
     const removeBar = () => {
       bar?.host.remove();
       bar = null;
@@ -13468,8 +13589,11 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       let line = "";
       if (v.status === "running") {
         const page = total === null ? read2 + 1 : Math.min(read2 + 1, total);
+        const ofTotal = `${page}${total === null ? "" : ` of ${total}`}`;
         const waiting = v.waitingFor;
-        line = waiting === "slow_down" ? "AO3 asked Trace to slow down. Trying again soon." : waiting === "ao3_unwell" ? "AO3 isn't answering. Trace will try again shortly." : waiting === "network" ? "No connection. Trace will try again shortly." : `Page ${page}${total === null ? "" : ` of ${total}`} \xB7 ${plural(works, "story", "stories")}`;
+        const year = typeof v.yearFirst === "string" && /^\d{4}-01-01$/.test(v.yearFirst) ? v.yearFirst.slice(0, 4) : null;
+        if (year !== null) title = `Your ${year} stories are ready`;
+        line = waiting === "slow_down" ? "AO3 asked Trace to slow down. Trying again soon." : waiting === "ao3_unwell" ? "AO3 isn't answering. Trace will try again shortly." : waiting === "network" ? "No connection. Trace will try again shortly." : year !== null ? `Open Trace to review them. Still reading: page ${ofTotal}.` : `Page ${ofTotal} \xB7 ${plural(works, "story", "stories")}`;
         buttonAction = "pause";
       } else if (v.status === "paused") {
         title = "Paused";
@@ -13624,6 +13748,9 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       });
     });
   }
+  function worksSince(works, since) {
+    return since === null ? works : works.filter((work) => work.lastVisited !== null && work.lastVisited >= since);
+  }
   function randomToken() {
     const bytes = new Uint8Array(12);
     globalThis.crypto.getRandomValues(bytes);
@@ -13671,6 +13798,7 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
       newId: randomToken,
       account: environment.account,
       saveActivity: environment.saveActivity,
+      ...environment.reviewOnWeb === void 0 ? {} : { yearFirst: environment.reviewOnWeb },
       async ensureLoop(sourceTabId) {
         const tab = await ao3Tab(sourceTabId);
         if (typeof tab === "string") return "failed";
@@ -13727,14 +13855,28 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
           await environment.webHistory?.discard().catch(() => void 0);
           return { ok: true, view: await history.delete() };
         }
-        case "review": {
+        case "review":
+        case "review_year": {
           const view2 = await history.view();
-          if (view2.status !== "finished" && view2.status !== "paused" || view2.works === 0) {
-            return { ok: false, error: "review_not_ready", view: view2 };
-          }
+          const since = message.action === "review_year" ? view2.yearFirst : null;
+          const ready = message.action === "review_year" ? since !== null : view2.status === "finished" || view2.status === "paused";
+          if (!ready || view2.works === 0) return { ok: false, error: "review_not_ready", view: view2 };
           if (environment.handOffHistory === void 0) return { ok: false, error: "history_handoff_unavailable", view: view2 };
-          const result = await environment.handOffHistory(async () => historyParts(await history.works(), (/* @__PURE__ */ new Date()).toISOString()));
-          if (!result.ok) return { ok: false, error: result.error, view: view2 };
+          const result = await environment.handOffHistory(
+            async () => historyParts(worksSince(await history.works(), since), (/* @__PURE__ */ new Date()).toISOString()),
+            {
+              complete: view2.status === "finished",
+              since,
+              through: view2.through,
+              deleted: view2.deleted,
+              unreadable: view2.unreadable,
+              started: view2.startedAt === null ? null : new Date(view2.startedAt).toISOString()
+            }
+          );
+          if (!result.ok) {
+            const web = await (environment.reviewOnWeb?.() ?? Promise.resolve(false)).catch(() => false);
+            return { ok: false, error: result.error, view: view2, web };
+          }
           return result.state === "opened_on_web" ? { ok: true, view: view2, handoff: { handoffID: result.handoffID, expiresAtMs: result.expiresAtMs, url: result.url } } : { ok: true, view: view2, handoff: { handoffID: result.handoffID, expiresAtMs: result.expiresAtMs } };
         }
         default:
@@ -13992,14 +14134,15 @@ const TRACE_WEB_ORIGIN = "https://www.tracefiction.com";
         },
         whenAccountLeaves: (cleanup) => historySession.whenAccountLeaves(cleanup),
         saveActivity: storySaveActivity,
-        handOffHistory: (build) => historySession.handOffHistory(build),
+        handOffHistory: (build, coverage) => historySession.handOffHistory(build, coverage),
+        reviewOnWeb: () => historySession.historyReviewOnWeb(),
         ...webHistoryHandoff ? { webHistory: {
           origin: "https://www.tracefiction.com",
           answer: (message) => historySession.answerWebHistory(message),
           discard: () => webHistoryHandoff.discard()
         } } : {}
       });
-      webHistoryHandoff?.useSource(async (capturedAt) => historyParts(await historyImport.works(), capturedAt));
+      webHistoryHandoff?.useSource(async (capturedAt, since) => historyParts(worksSince(await historyImport.works(), since), capturedAt));
     }
     if (
       // A build-time constant: a build without it leaves this block and the

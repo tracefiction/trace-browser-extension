@@ -15,7 +15,7 @@ import { installTraceFirstInstallActivation } from "./trace-web-navigation.mjs";
 import { rememberConnectIntent } from "./connect-intent.mjs";
 import { installStoryTabReuse } from "./story-tab-reuse.mjs";
 import { sessionKeep, WebHistoryHandoff } from "./web-history-handoff.mjs";
-import { installAo3HistoryImport } from "./ao3-history-import-runtime.mjs";
+import { installAo3HistoryImport, worksSince } from "./ao3-history-import-runtime.mjs";
 import { historyParts, NativeHistoryHandoffProducer } from "./native-history-handoff.mjs";
 import { storySaveActivity } from "./story-save-activity.mjs";
 import { installTraceKeepACopy } from "./keep-a-copy-library.mjs";
@@ -310,13 +310,15 @@ try {
       },
       whenAccountLeaves: (cleanup) => historySession.whenAccountLeaves(cleanup),
       saveActivity: storySaveActivity,
-      handOffHistory: (build) => historySession.handOffHistory(build),
+      handOffHistory: (build, coverage) => historySession.handOffHistory(build, coverage),
+      reviewOnWeb: () => historySession.historyReviewOnWeb(),
       ...(webHistoryHandoff ? { webHistory: { origin: __TRACE_WEB_ORIGIN__,
         answer: (message: unknown) => historySession.answerWebHistory(message),
         discard: () => webHistoryHandoff.discard() } } : {}),
     });
     // After a restart the parts on offer are made again from what the run kept.
-    webHistoryHandoff?.useSource(async (capturedAt) => historyParts(await historyImport.works(), capturedAt));
+    webHistoryHandoff?.useSource(async (capturedAt, since) =>
+      historyParts(worksSince(await historyImport.works(), since), capturedAt));
   }
   if (
     // A build-time constant: a build without it leaves this block and the

@@ -41,7 +41,12 @@ export function historyImportItem(work: HistoryWork): Record<string, unknown> {
   if (work.authors[0]) item.a = work.authors[0];
   if (work.fandoms.length) item.fms = [...work.fandoms];
   if (work.tags.length) item.tags = [...work.tags];
+  // One letter a tag: w warning, r relationship, c character, f additional tag.
+  if (work.tags.length && work.tagKinds?.length === work.tags.length) item.tk = work.tagKinds;
   if (work.summary) item.sm = work.summary;
+  if (work.rating) item.r = work.rating;
+  if (work.categories) item.cat = [...work.categories];
+  if (work.language) item.l = work.language;
   if (work.words !== null) item.w = work.words;
   const chapters = /^(\d+)\/(\d+|\?)$/.exec(work.chapters ?? "");
   if (chapters) {
@@ -50,6 +55,13 @@ export function historyImportItem(work: HistoryWork): Record<string, unknown> {
     item.cht = chapters[2] === "?" ? "?" : Number(chapters[2]);
     item.s = chapters[2] !== "?" && Number(chapters[2]) === published ? "complete" : "wip";
   }
+  // AO3's own Complete Work or Work in Progress symbol, where the row showed it.
+  if (typeof work.complete === "boolean") item.s = work.complete ? "complete" : "wip";
+  if (typeof work.kudos === "number") item.k = work.kudos;
+  if (typeof work.hits === "number") item.h = work.hits;
+  if (work.updated) item.upd = work.updated;
+  // AO3's note after the visit day: "latest", "edits" or "update".
+  if (work.sinceVisit) item.ver = work.sinceVisit;
   if (work.later) item.ml = true;
   else {
     if (work.lastVisited !== null) item.lv = work.lastVisited;

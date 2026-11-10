@@ -67,6 +67,17 @@ export const LOST_AFTER_MS = 30_000;
 /** Far past any History seen; a run this long is paused, never ended. */
 export const MAX_PAGES = 5_000;
 
+/**
+ * The first day of the year a reader can review before the whole History is
+ * read: 1 January of this year, or of last year during January, when last
+ * year is still the one being looked back on. `YYYY-MM-DD`, by this device's
+ * calendar.
+ */
+export function yearFirstDay(now: number): string {
+  const today = new Date(now);
+  return `${today.getFullYear() - (today.getMonth() === 0 ? 1 : 0)}-01-01`;
+}
+
 export type HistoryRunStatus = "running" | "paused" | "finished";
 
 /** Why a run is paused or finished. */
@@ -108,6 +119,16 @@ export interface HistoryRun {
   /** The highest page number AO3's page links have shown. */
   totalPages: number | null;
   lastPageDigest: string | null;
+  /**
+   * The oldest last-visited day on any row the run has reached. AO3 lists
+   * the History newest visit first, so every story visited after this day
+   * is kept. Absent from a run begun by a version that did not keep it.
+   */
+  through?: string | null;
+  /** The latest last-visited day of any work kept. Absent as `through` is. */
+  newest?: string | null;
+  /** A visited work was kept whose last-visited day could not be read: no year can be told whole. */
+  undated?: boolean;
   /** The request made and not yet answered. */
   inFlight: { token: string; at: number; page: number } | null;
   counts: {
@@ -154,6 +175,14 @@ export interface HistoryRunView {
   readonly remainingMs: number | null;
   readonly startedAt: number | null;
   readonly finishedAt: number | null;
+  /** The oldest last-visited day the run has reached, or null before it is known. */
+  readonly through: string | null;
+  /**
+   * Where a year can be reviewed first, while the run reads on: every story
+   * the History listed as last visited on or after this day, when the run
+   * read it, is kept already. Null otherwise.
+   */
+  readonly yearFirst: string | null;
 }
 
 /** What the page loop does next. */
@@ -178,6 +207,8 @@ export interface HistoryImportPorts {
   readonly saveActivity: () => { readonly inFlight: number; readonly lastEndedAt: number };
   /** Puts the page loop into an AO3 tab (it runs only while the tab is visible). */
   readonly ensureLoop?: (tabId: number) => Promise<"started" | "running" | "failed">;
+  /** Whether a year can be reviewed before the whole History is read: on a computer only. */
+  readonly yearFirst?: () => Promise<boolean>;
   readonly alarm?: { start(): Promise<void> | void; stop(): Promise<void> | void };
 }
 
@@ -196,7 +227,7 @@ function isRun(value: unknown): value is HistoryRun {
 function newRun(runId: string, account: string, user: string, tabId: number | null, now: number): HistoryRun {
   return {
     v: 1, runId, account, user, status: "running", reason: null, tabId,
-    nextPage: 1, totalPages: null, lastPageDigest: null, inFlight: null,
+    nextPage: 1, totalPages: null, lastPageDigest: null, through: null, newest: null, inFlight: null,
     counts: { pages: 0, works: 0, later: 0, deleted: 0, unreadable: 0, repeats: 0 },
     timing: {
       startedAt: now, finishedAt: null, pausedAt: null, pausedMs: 0, dueAt: now, gapMs: PAGE_GAP_MS,
@@ -216,11 +247,12 @@ const WAIT_OF: Readonly<Record<RetryCode, Exclude<HistoryRunWait, null>>> = {
   timeout: "network",
 };
 
-export function describeRun(run: HistoryRun | null, now: number, saving = false): HistoryRunView {
+export function describeRun(run: HistoryRun | null, now: number, saving = false, yearFirst = false): HistoryRunView {
   if (run === null) {
     return {
       status: "idle", reason: null, pagesRead: 0, totalPages: null, works: 0, later: 0, deleted: 0,
       unreadable: 0, waitingFor: null, waitingUntil: null, remainingMs: null, startedAt: null, finishedAt: null,
+      through: null, yearFirst: null,
     };
   }
   const running = run.status === "running";
@@ -239,6 +271,11 @@ export function describeRun(run: HistoryRun | null, now: number, saving = false)
       : run.timing.gapMs + PAGE_GAP_JITTER_MS / 2 + 1_500;
     remainingMs = Math.round(left * perPage);
   }
+  const through = run.through ?? null;
+  // A row from before the year has been reached, so the year is all kept;
+  // and a work visited in the year is among them.
+  const since = yearFirstDay(now);
+  const passed = through !== null && through < since && (run.newest ?? "") >= since && run.undated !== true;
   return {
     status: run.status,
     reason: run.reason,
@@ -253,6 +290,8 @@ export function describeRun(run: HistoryRun | null, now: number, saving = false)
     remainingMs,
     startedAt: run.timing.startedAt,
     finishedAt: run.timing.finishedAt,
+    through,
+    yearFirst: yearFirst && running && passed ? since : null,
   };
 }
 
@@ -343,7 +382,8 @@ export class Ao3HistoryImport {
   async view(): Promise<HistoryRunView> {
     const run = await this.#serial(() => this.#load());
     const now = this.#ports.clock.now();
-    return describeRun(run, now, run?.status === "running" && this.#saving(now));
+    const yearFirst = run?.status === "running" && await (this.#ports.yearFirst?.() ?? Promise.resolve(false)).catch(() => false);
+    return describeRun(run, now, run?.status === "running" && this.#saving(now), yearFirst);
   }
 
   /** Every work the run has kept, for the review. Another account gets none. */
@@ -569,6 +609,11 @@ export class Ao3HistoryImport {
     next.counts.later += read.works.filter((work) => work.later).length;
     next.counts.deleted += read.deleted;
     next.counts.unreadable += read.unreadable;
+    if (read.oldestDay !== null && (next.through == null || read.oldestDay < next.through)) next.through = read.oldestDay;
+    for (const work of read.works) {
+      if (work.lastVisited !== null && (next.newest == null || work.lastVisited > next.newest)) next.newest = work.lastVisited;
+      if (work.lastVisited === null && !work.later) next.undated = true;
+    }
     next.totalPages = Math.max(next.totalPages ?? 0, read.totalPages);
     next.retry = { consecutive: 0, code: null };
     if (next.timing.lastKeptAt !== null) {

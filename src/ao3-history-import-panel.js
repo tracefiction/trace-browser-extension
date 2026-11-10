@@ -32,6 +32,7 @@
     retry_later: ["AO3 asked Trace to wait a while. Tap Carry on later; Trace waits until AO3 is ready.", true],
     network: ["Trace lost its connection. Check it, then tap Carry on.", true],
     history_empty: ["Your AO3 History is empty or turned off. You can turn it on in AO3’s Preferences.", false],
+    history_off: ["Your AO3 History is turned off. Turn it on in AO3’s Preferences, then tap Carry on.", true],
     storage_full: ["This device has no room to keep more. Free some space, then tap Carry on.", true],
     storage_write_failed: ["Trace couldn’t keep what it found. Tap Carry on to try again.", true],
     tab_gone: ["Open AO3 and tap Carry on.", true],
@@ -57,6 +58,8 @@
     history_handoff_unavailable: "Trace couldn’t pass your History to the app. Open Trace to check you’re connected, then try again.",
     not_authenticated: "Connect Trace first, then try again.",
   };
+  // On a computer the History goes to Trace's review page, not to the app.
+  var HANDOFF_FAILED_ON_WEB = "Trace couldn’t open your History in Trace. Check Trace is connected, then try again.";
 
   var WAITING = {
     slow_down: "AO3 asked Trace to slow down. Trying again in ",
@@ -69,9 +72,15 @@
   var startable = false;
   var mode = "auto"; // "auto", "confirm-start" or "confirm-delete"
   var busy = false;
+  /** The action the sheet is waiting on, while busy. */
+  var busyAction = "";
   var note = "";
   var poll = null;
-  /** After Review in Trace: the History waiting in the app's inbox, until it expires. */
+  /**
+   * After Review in Trace: the History waiting in the app's inbox, until it
+   * expires. `year` marks one made while the run reads on, which holds a
+   * year's stories and not the whole History.
+   */
   var handoff = null;
 
   function element(tag, className, text) {
@@ -133,6 +142,7 @@
   var fill = element("div", "popup-history-fill");
   track.appendChild(fill);
   track.setAttribute("aria-hidden", "true");
+  var yearLine = element("p", "popup-lead");
   var noteLine = element("p", "popup-import-recovery-help");
   noteLine.setAttribute("role", "status");
   noteLine.setAttribute("aria-live", "polite");
@@ -141,7 +151,7 @@
   var secondary = button("popup-earned-status-control", null, "", function () { act(secondary.dataset.action); });
   var tertiary = button("popup-earned-status-control", null, "", function () { act(tertiary.dataset.action); });
   actions.append(primary, secondary, tertiary);
-  card.append(heading, lineOne, lineTwo, track, noteLine, actions);
+  card.append(heading, lineOne, lineTwo, track, yearLine, noteLine, actions);
   root.append(entry, entryHelp, card);
 
   function currentTabId() {
@@ -179,19 +189,30 @@
       return;
     }
     busy = true;
+    busyAction = action;
     note = "";
     render();
     send(action).then(function (reply) {
       busy = false;
       // A start that could not happen stays on the start screen, saying why.
-      if (reply && reply.ok === false && reply.error) note = START_ERROR[reply.error] || "That didn’t work. Try again.";
-      else mode = "auto";
-      if (action === "review" && reply && reply.ok === true && reply.handoff &&
+      if (reply && reply.ok === false && reply.error) {
+        note = reply.error === "history_handoff_unavailable" && reply.web === true
+          ? HANDOFF_FAILED_ON_WEB
+          : START_ERROR[reply.error] || "That didn’t work. Try again.";
+        // The run finished or paused as the year was asked for: the sheet now offers what it found.
+        if (action === "review_year" && reply.error === "review_not_ready") note = "";
+      } else mode = "auto";
+      if ((action === "review" || action === "review_year") && reply && reply.ok === true && reply.handoff &&
           /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(reply.handoff.handoffID) &&
           reply.handoff.expiresAtMs > Date.now()) {
         handoff = { handoffID: reply.handoff.handoffID, expiresAtMs: reply.handoff.expiresAtMs,
-          url: reviewUrl(reply.handoff.url, reply.handoff.handoffID) };
-        setTimeout(function () { handoff = null; render(); }, handoff.expiresAtMs - Date.now());
+          url: reviewUrl(reply.handoff.url, reply.handoff.handoffID), year: action === "review_year" };
+        var expiring = handoff.handoffID;
+        setTimeout(function () {
+          // A later handoff has its own time.
+          if (handoff && handoff.handoffID === expiring) handoff = null;
+          render();
+        }, handoff.expiresAtMs - Date.now());
         // One tap: Trace opens as soon as the History is ready (the app on
         // iPhone, Trace's review page on a computer). Open in Trace stays on
         // the sheet in case it didn't open.
@@ -261,6 +282,7 @@
     card.hidden = !showCard;
     track.hidden = true;
     lineTwo.hidden = true;
+    yearLine.hidden = true;
     noteLine.hidden = !note;
     noteLine.textContent = note;
     if (!showCard) return;
@@ -276,7 +298,7 @@
     }
     if (status === "idle") {
       heading.textContent = "Import your AO3 History";
-      lineOne.textContent = "Trace reads your History page by page from this tab, about 10 pages a minute.";
+      lineOne.textContent = "Trace reads your History page by page from this tab, about 7 pages a minute.";
       lineTwo.textContent = "You pick what to add in Trace, and you can keep reading AO3 while it runs.";
       lineTwo.hidden = false;
       setButton(primary, busy ? "Starting…" : "Start reading", "start");
@@ -284,6 +306,8 @@
       setButton(tertiary, "Not now", "not_now");
       return;
     }
+    // A year handed over while the run read on is not the History a finished or paused run offers.
+    if (handoff && handoff.year !== (status === "running")) handoff = null;
     track.hidden = (view.pagesRead || 0) === 0 && status !== "finished";
     var total = typeof view.totalPages === "number" ? view.totalPages : 0;
     var share = status === "finished" ? 1 : total > 0 ? Math.min(1, (view.pagesRead || 0) / total) : 0;
@@ -302,7 +326,17 @@
         lineTwo.textContent = STAY;
       }
       lineTwo.hidden = false;
-      setButton(primary, "", "");
+      // On a computer, once the read has passed 1 January: the year's stories
+      // can be reviewed now, while Trace reads the rest.
+      var year = /^\d{4}-01-01$/.test(view.yearFirst || "") ? view.yearFirst.slice(0, 4) : null;
+      if (year) {
+        yearLine.textContent = handoff
+          ? "Your " + year + " stories are open in Trace. If Trace didn’t open, tap Open in Trace."
+          : "Your " + year + " stories are ready. You can review them now; Trace reads the rest of your History when you’re back on this tab.";
+        yearLine.hidden = false;
+      }
+      setButton(primary, year ? (handoff ? "Open in Trace" : busy && busyAction === "review_year" ? "Preparing…" : "Review " + year + " in Trace") : "",
+        handoff ? "open" : "review_year");
       setButton(secondary, "Pause", "pause");
       setButton(tertiary, "Stop and delete", "ask_delete");
       return;

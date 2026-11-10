@@ -79,7 +79,7 @@ test("the sheet offers the import only where it can start, and asks once before 
   assert.equal(s.sent.filter((m) => m.action === "start").length, 0);
   await s.click("Import your whole History");
   assert.deepEqual(s.buttons(), ["Start reading", "Not now"]);
-  assert.match(s.text().join(" "), /about 10 pages a minute/);
+  assert.match(s.text().join(" "), /about 7 pages a minute/);
   await s.click("Not now");
   assert.deepEqual(s.buttons(), ["Import your whole History"]);
   await s.click("Import your whole History");
@@ -145,6 +145,11 @@ test("a paused run says what to do in the reader's words, and offers Carry on on
   await flush(empty.window);
   assert.deepEqual(empty.text().slice(1), ["Your AO3 History is empty or turned off. You can turn it on in AO3’s Preferences."]);
   assert.deepEqual(empty.buttons(), ["Stop and delete"]);
+
+  const off = sheet({ replies: { status: { ok: true, view: view({ status: "paused", reason: "history_off", pagesRead: 0, works: 0 }), startable: true } } });
+  await flush(off.window);
+  assert.deepEqual(off.text().slice(1), ["Your AO3 History is turned off. Turn it on in AO3’s Preferences, then tap Carry on."]);
+  assert.deepEqual(off.buttons(), ["Carry on", "Stop and delete"]);
 
   const strange = sheet({ replies: { status: { ok: true, view: view({ status: "paused", reason: "pagination_unexpected" }), startable: true } } });
   await flush(strange.window);
@@ -227,6 +232,63 @@ test("a paused run can review what it found so far", async () => {
   await flush(failing.window);
   await failing.click("Review what it found");
   assert.ok(failing.text().includes("Trace couldn’t pass your History to the app. Open Trace to check you’re connected, then try again."));
+  const onComputer = sheet({
+    replies: {
+      status: { ok: true, view: view({ status: "paused", reason: "paused_by_you" }), startable: true },
+      review: { ok: false, error: "history_handoff_unavailable", web: true, view: view({ status: "paused", reason: "paused_by_you" }) },
+    },
+  });
+  await flush(onComputer.window);
+  await onComputer.click("Review what it found");
+  assert.ok(onComputer.text().includes("Trace couldn’t open your History in Trace. Check Trace is connected, then try again."),
+    "a computer has no app to pass it to");
+});
+
+test("on a computer, once the read has passed 1 January, the year can be reviewed while Trace reads the rest", async () => {
+  const handoffID = "00000000-0000-4000-8000-0000000000ac";
+  const page = `https://www.tracefiction.test/import/history#handoff=${handoffID}`;
+  const reading = view({ through: "2025-12-30", yearFirst: "2026-01-01" });
+  let status = reading;
+  const s = sheet({ replies: { status: () => ({ ok: true, view: status, startable: true }),
+    review_year: { ok: true, view: reading, handoff: { handoffID, expiresAtMs: Date.now() + 60_000, url: page } },
+    review: () => ({ ok: true, view: status, handoff: { handoffID: "00000000-0000-4000-8000-0000000000ad", expiresAtMs: Date.now() + 60_000,
+      url: "https://www.tracefiction.test/import/history#handoff=00000000-0000-4000-8000-0000000000ad" } }) } });
+  s.window.TRACE_EXTENSION_WEB_ORIGIN = "https://www.tracefiction.test";
+  const tabs = [];
+  s.window.browser.tabs.create = async (details) => { tabs.push(details.url); };
+  await flush(s.window);
+  assert.equal(s.$("#popup-history-heading").textContent, "Reading your History");
+  assert.equal(s.text()[3], "Your 2026 stories are ready. You can review them now; Trace reads the rest of your History when you’re back on this tab.");
+  assert.deepEqual(s.buttons(), ["Review 2026 in Trace", "Pause", "Stop and delete"]);
+  const acted = () => s.sent.map((message) => message.action).filter((action) => action !== "status");
+  await s.click("Review 2026 in Trace");
+  assert.deepEqual(acted(), ["review_year"]);
+  assert.deepEqual(tabs, [page]);
+  assert.equal(s.text()[3], "Your 2026 stories are open in Trace. If Trace didn’t open, tap Open in Trace.");
+  assert.deepEqual(s.buttons(), ["Open in Trace", "Pause", "Stop and delete"]);
+  // The read finishes: the sheet offers the whole History, never the year's handoff again.
+  status = view({ status: "finished", reason: "reached_last_page", pagesRead: 31, works: 588, remainingMs: null, through: "2019-03-17", yearFirst: null });
+  s.window.__traceAo3HistoryImportPanel.refresh();
+  await flush(s.window);
+  assert.deepEqual(s.buttons(), ["Review in Trace", "Delete"]);
+  await s.click("Review in Trace");
+  assert.deepEqual(acted(), ["review_year", "review"]);
+  assert.deepEqual(s.buttons(), ["Open in Trace", "Delete"]);
+
+  // A year handed over, then Pause: the paused run offers what it found, not the year's handoff.
+  const paused = sheet({ replies: { status: { ok: true, view: reading, startable: true },
+    review_year: { ok: true, view: reading, handoff: { handoffID, expiresAtMs: Date.now() + 60_000, url: page } },
+    pause: { ok: true, view: view({ status: "paused", reason: "paused_by_you" }) } } });
+  paused.window.TRACE_EXTENSION_WEB_ORIGIN = "https://www.tracefiction.test";
+  paused.window.browser.tabs.create = async () => {};
+  await flush(paused.window);
+  await paused.click("Review 2026 in Trace");
+  await paused.click("Pause");
+  assert.deepEqual(paused.buttons(), ["Carry on", "Review what it found", "Stop and delete"]);
+
+  const before = sheet({ replies: { status: { ok: true, view: view({ through: "2026-03-02", yearFirst: null }), startable: true } } });
+  await flush(before.window);
+  assert.deepEqual(before.buttons(), ["Pause", "Stop and delete"], "not before the year is all kept, and never on iPhone");
 });
 
 test("a start that cannot happen says why", async () => {
@@ -306,6 +368,21 @@ test("the reading bar shows the page and stories, and its Pause pauses the run a
     shown.button.click();
     assert.equal(bar(page.window), null, "Hide takes the bar away");
     assert.equal(globalThis.__traceAo3HistoryImportLoopV1, undefined, "the loop is gone");
+  } finally {
+    page.restore();
+  }
+});
+
+test("the reading bar says when the year's stories are ready, and that it is still reading", async () => {
+  const page = ao3Page([{ wait: 600_000, view: view({ through: "2025-12-30", yearFirst: "2026-01-01" }) }]);
+  try {
+    ao3HistoryLoopInTab(MESSAGE, 2_097_152, 20_000);
+    await settle();
+    const shown = bar(page.window);
+    assert.deepEqual([shown.title, shown.line, shown.button.textContent],
+      ["Your 2026 stories are ready", "Open Trace to review them. Still reading: page 12 of 31.", "Pause"]);
+    shown.button.click();
+    await settle();
   } finally {
     page.restore();
   }
