@@ -18,6 +18,8 @@ In Safari, the extension also talks to the Trace app it ships with. It does that
 
 On iPhone and iPad, AO3 and FanFiction.net access is optional. The extension asks for it before the first save and saves nothing until Safari has granted all of it.
 
+The Trace iPhone app's share sheet doesn't use the extension or its access. Safari runs the reading code on the one page you share to Trace, when you share it, and that code follows the same password-box rule.
+
 ## What gets sent to Trace
 
 The README has the full list of what's sent and what never is: [What it sends to Trace](README.md#what-it-sends-to-trace).

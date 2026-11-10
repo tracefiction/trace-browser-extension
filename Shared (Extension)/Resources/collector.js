@@ -3597,6 +3597,7 @@ function collectForSave() {
   }
   return collected;
 }
+// COLLECTOR_READ_END
 
 function canonicalReaderStatus(status) {
   if (
