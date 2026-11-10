@@ -28,7 +28,7 @@ That's how Trace saves a story, keeps your place, and shows on AO3 whether a sto
 
 If you save an AO3 search filter, the filter is kept in the extension so you can use it again. When you're signed in, it's also synced to your account so it shows up on your other devices.
 
-The same reading code is also built for the Trace iPhone app's share sheet. When you share an AO3 or FanFiction.net story page from Safari to Trace, Safari runs it once on that page and hands the story's details to the app, which saves them to your library. On any other page it hands back nothing, and the same goes for a page with a password box (apart from AO3's usual header login form). Reading a shared page doesn't fetch anything or change the page.
+The Trace iPhone app's share sheet uses the same reading code. When you share an AO3 or FanFiction.net story page from Safari to Trace, Safari runs it once on that page and gives the story's details to the app, which saves them to your library. On any other page, or a page with a password box (apart from AO3's usual header login form), it gives the app nothing. It doesn't fetch anything or change the page.
 
 ## The pages it fetches, and why
 
